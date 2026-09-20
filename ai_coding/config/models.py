@@ -53,16 +53,6 @@ class MemoryConfig(BaseModel):
     max_per_turn_injections: int = 5
 
 
-class AppConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    models: dict[str, ModelConfig] = Field(default_factory=dict)
-    default_model: str = ""
-    tools: ToolsConfig = Field(default_factory=ToolsConfig)
-    ai: AIConfig = Field(default_factory=AIConfig)
-    memory: MemoryConfig = Field(default_factory=MemoryConfig)
-
-
 class MCPServerConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -79,6 +69,17 @@ class MCPConfig(BaseModel):
     auto_discover: bool = True
     connection_timeout: int = 30
     servers: list[MCPServerConfig] = Field(default_factory=list)
+
+
+class AppConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    models: dict[str, ModelConfig] = Field(default_factory=dict)
+    default_model: str = ""
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    ai: AIConfig = Field(default_factory=AIConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
 
 
 def _coerce_model(raw: dict[str, Any]) -> ModelConfig:

@@ -34,6 +34,7 @@ class AgentsSDKChatService(AIService):
         self,
         model_config: Any,
         tools: list[Any] | None = None,
+        mcp_servers: list[Any] | None = None,
     ) -> None:
         from ai_coding.domain.model_config import ModelConfig
 
@@ -41,6 +42,7 @@ class AgentsSDKChatService(AIService):
             raise TypeError("model_config must be a ModelConfig")
         self.model_config = model_config
         self._tools = list(tools) if tools else []
+        self._mcp_servers = list(mcp_servers) if mcp_servers else []
 
     def _build_agent(self, instructions: str | None = None) -> Agent[Any]:
         """Build an SDK Agent wired to the configured model. Never touches the network."""
@@ -57,6 +59,7 @@ class AgentsSDKChatService(AIService):
             instructions=instructions or _DEFAULT_INSTRUCTIONS,
             model=sdk_model,
             tools=list(self._tools),
+            mcp_servers=list(self._mcp_servers),
             model_settings={"temperature": cfg.temperature, "max_tokens": cfg.max_tokens},
         )
 

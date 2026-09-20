@@ -12,12 +12,16 @@ from ai_coding.config.models import AppConfig
 def build_service_from_config(
     app_config: AppConfig,
     tools: list[Any] | None = None,
+    mcp_servers: list[Any] | None = None,
 ) -> AIService:
     """Resolve ``default_model`` into a concrete ``AIService`` with optional tools.
 
     ``tools`` should be SDK ``FunctionTool`` instances (from ``sdk_adapter``).
-    Raises ``ValueError`` when no default model is configured or the named model
-    is absent from ``models``. Never touches the network.
+    ``mcp_servers`` are SDK MCP servers; when omitted they are built from
+    ``app_config.mcp`` via :class:`~ai_coding.core.mcp.MCPManager` (an empty
+    ``MCPConfig`` or disabled MCP block yields no servers). Raises ``ValueError``
+    when no default model is configured or the named model is absent from
+    ``models``. Never touches the network.
     """
     default = app_config.default_model
     if not default:
@@ -25,7 +29,15 @@ def build_service_from_config(
     model = app_config.models.get(default)
     if model is None:
         raise ValueError(f"default model '{default}' not found in models")
-    return AgentsSDKChatService(model_config=model, tools=tools)
+
+    if mcp_servers is None:
+        from ai_coding.core.mcp import MCPManager
+
+        mcp_servers = MCPManager(app_config.mcp).build_servers()
+
+    return AgentsSDKChatService(
+        model_config=model, tools=tools, mcp_servers=mcp_servers
+    )
 
 
 __all__ = ["build_service_from_config"]
