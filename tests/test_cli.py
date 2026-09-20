@@ -41,3 +41,13 @@ def test_setup_logging_idempotent():
         assert setup_logging() is False
     finally:
         root.handlers = saved
+
+
+def test_ask_no_default_model_errors_nonzero(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n  m:\n    name: m\n    base_url: https://x\n    api_key: k\n",
+                   encoding="utf-8")
+    # no default_model -> factory raises -> CLI must exit non-zero with a message
+    result = runner.invoke(app, ["ask", "--prompt", "hi", "--path", str(cfg)])
+    assert result.exit_code == 1
+    assert "no default model" in (result.stderr or result.stdout)
