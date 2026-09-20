@@ -81,11 +81,13 @@ class SessionData:
                 if m.tool_call_id in declared:
                     keep.append(m)
                 continue
-            if strict and m.role == "assistant" and m.tool_calls:
+            if strict and m.role == "assistant" and m.tool_calls and not m.content:
+                # Only strip orphan calls from "carrier" messages (no text content).
+                # For messages with text, keep all tool_calls as historical record.
                 kept = [c for c in m.tool_calls if c.id in result_ids]
-                if not kept and not m.content:
+                if not kept:
                     continue  # assistant carrier message with no surviving calls
-                m.tool_calls = kept or None
+                m.tool_calls = kept
             keep.append(m)
         self.messages = keep
 
