@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from ai_coding.ai.base import AIService
-from ai_coding.domain.run import assistant_message, user_message
+from ai_coding.domain.run import assistant_message, tool_message, user_message
 from ai_coding.domain.session import SessionData
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.service.session_service import SessionService
@@ -35,6 +35,8 @@ class AgentLoop:
             session.messages, user_input, token_sink=on_delta
         )
         session.add_message(assistant_message(turn, now_utc()))
+        for out in turn.tool_outputs:
+            session.add_message(tool_message(out, now_utc()))
         session.ensure_tool_pairing()
         self.sessions.save(session)
         return turn.text or ""

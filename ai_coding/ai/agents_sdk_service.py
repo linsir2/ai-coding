@@ -18,7 +18,7 @@ from openai import AsyncOpenAI
 
 from ai_coding.ai.base import AIService
 from ai_coding.ai.mapping import history_to_inputs
-from ai_coding.domain.message import ChatMessage, ToolCallRef
+from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolOutput
 from ai_coding.domain.run import TurnResult
 
 _DEFAULT_INSTRUCTIONS = (
@@ -77,7 +77,9 @@ class AgentsSDKChatService(AIService):
 
         chunks: list[str] = []
         tool_calls: list[ToolCallRef] = []
+        tool_outputs: list[ToolOutput] = []
         seen_call_ids: set[str] = set()
+        seen_output_ids: set[str] = set()
 
         async for event in stream.stream_events():
             event_type = getattr(event, "type", None)
@@ -106,10 +108,45 @@ class AgentsSDKChatService(AIService):
                             )
                         )
                         seen_call_ids.add(str(call_id))
+                # Collect tool outputs so AgentLoop can persist strict-pairing
+                # ``role=tool`` messages for the session history.
+                if isinstance(event, RunItemStreamEvent) and event.name == "tool_output":
+                    item = event.item
+                    call_id = getattr(item, "call_id", None)
+                    tool_name = getattr(item, "name", None)
+                    if call_id and tool_name and call_id not in seen_output_ids:
+                        tool_outputs.append(
+                            ToolOutput(
+                                call_id=str(call_id),
+                                tool_name=str(tool_name),
+                                output=_extract_tool_output(item),
+                            )
+                        )
+                        seen_output_ids.add(str(call_id))
                 continue
 
         text = "".join(chunks) or None
-        return TurnResult(text=text, tool_calls=tool_calls)
+        return TurnResult(
+            text=text,
+            tool_calls=tool_calls,
+            tool_outputs=tool_outputs,
+        )
+
+
+def _extract_tool_output(item: Any) -> str:
+    """Pull the tool output text that the SDK returned for an executed tool."""
+    output = getattr(item, "output", None)
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output
+    # output may hold a structured object for message-based tools; stringify defensively.
+    import json
+
+    try:
+        return json.dumps(output, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(output)
 
 
 def _extract_arguments_json(item: Any) -> str:

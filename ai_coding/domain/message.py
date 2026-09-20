@@ -40,6 +40,19 @@ class ToolResult:
 
 
 @dataclass(frozen=True)
+class ToolOutput:
+    """A resolved tool's output paired with its originating call id.
+
+    Captured from the SDK's ``tool_output`` stream event so the session can
+    persist ``role=tool`` messages (strict-pairing contract of the Java shape).
+    """
+
+    call_id: str
+    tool_name: str
+    output: str
+
+
+@dataclass(frozen=True)
 class ToolExecution:
     """Pairing unit of a resolved tool call and its result."""
 
