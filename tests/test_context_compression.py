@@ -7,8 +7,8 @@ to disk.  The L4/LLM stage and ``ContextManager.compress`` orchestration live in
 
 from ai_coding.core.context_compression import (
     PERSISTED_MARKER,
-    placeholder_old_results,
     persist_large_outputs,
+    placeholder_old_results,
     sanitize_pairs,
     snip_middle,
 )
