@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.build/
+dist/
+build/
+
+# Virtual env
+.venv/
+
+# Tooling caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Runtime state (mirror ThoughtCoding runtime dirs)
+sessions/
+.memory/
+transcripts/
+worktrees/
+
+# Local config (never commit secrets)
+config.local.yaml
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

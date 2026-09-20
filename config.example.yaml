@@ -1,0 +1,53 @@
+# AI-Coding example configuration.
+# Copy to config.local.yaml (git-ignored) and edit.
+# Keys follow snake_case; camelCase legacy keys are also accepted at load time.
+
+models:
+  deepseek-chat:
+    name: deepseek-chat
+    base_url: https://api.deepseek.com/v1
+    api_key: YOUR_DEEPSEEK_API_KEY_HERE
+    streaming: true
+    max_tokens: 4096
+    temperature: 0.7
+
+default_model: deepseek-chat
+
+ai:
+  auto_process_tool_results: true
+  max_tool_iterations: 10
+  max_concurrent_subagents: 3
+  subagent_worktree_isolation: true
+  max_context_tokens: 48000
+  max_messages: 50
+  snip_keep_head: 3
+  snip_keep_tail: 20
+  keep_recent_tool_results: 3
+  per_result_persist_bytes: 30000
+  l4_keep_tail: 6
+
+memory:
+  enabled: true
+  auto_extract: true
+  consolidate_threshold: 10
+  max_index_entries: 200
+  max_per_turn_injections: 5
+
+tools:
+  bash:
+    enabled: true
+    timeout_seconds: 60
+  read:
+    enabled: true
+    max_file_size: 10485760
+  write:
+    enabled: true
+  edit:
+    enabled: true
+  glob:
+    enabled: true
+
+mcp:
+  enabled: false
+  auto_discover: true
+  connection_timeout: 30

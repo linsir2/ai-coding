@@ -1,0 +1,48 @@
+[project]
+name = "ai-coding"
+version = "0.1.0"
+description = "ThoughtCoding Python implementation - an AI coding assistant CLI built on OpenAI Agents SDK"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openai-agents>=0.22",
+    "pydantic>=2.0",
+    "PyYAML>=6.0",
+    "typer>=0.12",
+    "rich>=13.0",
+    "prompt-toolkit>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+ai-coding = "ai_coding.cli:app"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ai_coding*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "C4"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+check_untyped_defs = true
+exclude = ["tests/", ".venv/"]
