@@ -2,7 +2,6 @@
 
 ThoughtCoding 的 Python 化实现 —— 基于 **OpenAI Agents SDK** 的 AI 编程助手 CLI。
 
-> 功能语义沿用原 Java 项目 `zengxinyueooo/ThoughtCoding`：原生工具调用严格配对、统一工具治理管线、
 > Hook 责任链 + 权限门、四层上下文压缩、Git worktree 子代理隔离、记忆系统、MCP 集成、会话持久化。
 
 ## 技术栈
