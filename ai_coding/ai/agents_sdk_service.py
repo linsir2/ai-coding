@@ -42,7 +42,7 @@ class AgentsSDKChatService(AIService):
         self.model_config = model_config
         self._tools = list(tools) if tools else []
 
-    def _build_agent(self) -> Agent[Any]:
+    def _build_agent(self, instructions: str | None = None) -> Agent[Any]:
         """Build an SDK Agent wired to the configured model. Never touches the network."""
         cfg = self.model_config
         client = AsyncOpenAI(
@@ -54,7 +54,7 @@ class AgentsSDKChatService(AIService):
         sdk_model = OpenAIChatCompletionsModel(model=cfg.name, openai_client=client)
         return Agent(
             name=cfg.name,
-            instructions=_DEFAULT_INSTRUCTIONS,
+            instructions=instructions or _DEFAULT_INSTRUCTIONS,
             model=sdk_model,
             tools=list(self._tools),
             model_settings={"temperature": cfg.temperature, "max_tokens": cfg.max_tokens},
@@ -65,6 +65,8 @@ class AgentsSDKChatService(AIService):
         history: list[ChatMessage],
         user_input: str,
         token_sink: Callable[[str], None] | None = None,
+        *,
+        instructions: str | None = None,
     ) -> TurnResult:
         # Full session history plus the new user turn as SDK input items.
         inputs: list[TResponseInputItem] = cast(
@@ -72,7 +74,7 @@ class AgentsSDKChatService(AIService):
         )
         inputs.append({"role": "user", "content": user_input})
 
-        agent = self._build_agent()
+        agent = self._build_agent(instructions)
         stream = Runner.run_streamed(agent, input=inputs)
 
         chunks: list[str] = []

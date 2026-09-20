@@ -98,7 +98,6 @@ def ask(
         typer.echo(f"ask error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    from ai_coding.core.agent_loop import AgentLoop
     from ai_coding.domain.session import SessionData
     from ai_coding.service.session_service import SessionService
 
@@ -113,11 +112,57 @@ def ask(
     def on_delta(token: str) -> None:
         typer.echo(token, nl=False)
 
-    loop = AgentLoop(service, sessions)
+    loop = _build_loop(service, sessions, app_cfg, workspace, skills)
     answer = asyncio.run(loop.process_input(session, prompt, on_delta=on_delta))
     if not answer.endswith("\n"):
         typer.echo()
     typer.echo(answer)
+
+
+def _build_loop(
+    service: Any,
+    sessions: Any,
+    app_cfg: Any,
+    workspace: str,
+    skills_path: str | None,
+) -> Any:
+    """Assemble the M3 components (all optional; silent degradation when missing)."""
+    from ai_coding.ai.prompt import PromptAssembler
+    from ai_coding.core.agent_loop import AgentLoop
+    from ai_coding.core.context_compression import ContextManager
+    from ai_coding.core.project_instructions import ProjectInstructionsLoader
+    from ai_coding.memory.service import MemoryService
+    from ai_coding.memory.store import MemoryStore
+    from ai_coding.skills.registry import SkillRegistry
+
+    ws = Path(workspace).expanduser().resolve()
+
+    # Skills registry — falls back to a missing-dir-safe empty registry.
+    skill_root = skills_path or str(ws / "skills")
+    skills_reg = SkillRegistry(skill_root)
+
+    # Project instructions loader + memory live under the workspace.
+    project = ProjectInstructionsLoader(ws)
+    memory = MemoryService(
+        MemoryStore(ws / ".memory"), config=app_cfg.memory
+    )
+    context = ContextManager(app_cfg.ai, transcripts_root=ws, summarizer=None)
+
+    base_instructions = (
+        "You are an AI coding assistant. Respond to the user's coding questions "
+        "clearly and concisely, in the same language the user writes in."
+    )
+    prompt = PromptAssembler(base_instructions)
+
+    return AgentLoop(
+        service,
+        sessions,
+        context=context,
+        memory=memory,
+        prompt=prompt,
+        skills=skills_reg,
+        project=project,
+    )
 
 
 def _build_tool_stack(
@@ -181,8 +226,12 @@ def _build_tool_stack(
             history: list[Any],
             user_input: str,
             token_sink: Any = None,
+            *,
+            instructions: str | None = None,
         ) -> Any:
             from ai_coding.domain.run import TurnResult
+
+            del history, user_input, token_sink, instructions
 
             return TurnResult(
                 text="(sub-agent not available in M2 — M3 will enable it)"

@@ -1,7 +1,6 @@
 """TDD (M1-1 / M3-1): domain ChatMessage -> SDK input-item mapping (pure functions)."""
 
-from ai_coding.ai.mapping import chat_message_to_input, chat_message_to_inputs
-from ai_coding.ai.mapping import history_to_inputs
+from ai_coding.ai.mapping import chat_message_to_input, chat_message_to_inputs, history_to_inputs
 from ai_coding.domain.message import ChatMessage, ToolCallRef
 
 

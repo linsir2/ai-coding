@@ -22,11 +22,17 @@ class AIService(ABC):
         history: list[ChatMessage],
         user_input: str,
         token_sink: Callable[[str], None] | None = None,
+        *,
+        instructions: str | None = None,
     ) -> TurnResult:
         """Run one turn against the full session history plus the new user input.
 
         ``token_sink``, when provided, receives streamed text deltas as they arrive
         (used for live CLI output and future streaming Hooks).
+
+        ``instructions`` (M3) is the fully-assembled system prompt (base + project
+        instructions + skills/memory catalogs); when ``None`` the engine falls back
+        to its default.
         """
         raise NotImplementedError
 

@@ -2,10 +2,61 @@ import logging
 
 from typer.testing import CliRunner
 
-from ai_coding.cli import app
+from ai_coding.cli import _build_loop, app
 from ai_coding.infra.logger_setup import setup_logging
 
 runner = CliRunner()
+
+
+def test_build_loop_wires_m3_components(tmp_path):
+    """_build_loop assembles context/memory/prompt/skills/project into AgentLoop."""
+    from types import SimpleNamespace
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "skills").mkdir()
+    (ws / "CLAUDE.md").write_text("rules", encoding="utf-8")
+
+    app_cfg = SimpleNamespace(
+        memory=SimpleNamespace(enabled=True, consolidate_threshold=100,
+                               max_index_entries=100, max_per_turn_injections=3),
+        ai=SimpleNamespace(max_context_tokens=48000, max_messages=50, snip_keep_head=3,
+                           snip_keep_tail=20, keep_recent_tool_results=3,
+                           per_result_persist_bytes=30000, l4_keep_tail=6),
+    )
+
+    class _Dummy:
+        pass
+
+    loop = _build_loop(_Dummy(), _Dummy(), app_cfg, str(ws), None)
+    assert loop.context is not None
+    assert loop.memory is not None
+    assert loop.prompt is not None
+    assert loop.skills is not None
+    assert loop.project is not None
+    # project file discovered under the workspace
+    assert loop.project.load() == "rules"
+
+
+def test_build_loop_missing_workspace_degrades(tmp_path):
+    from types import SimpleNamespace
+
+    app_cfg = SimpleNamespace(
+        memory=SimpleNamespace(enabled=True, consolidate_threshold=100,
+                               max_index_entries=100, max_per_turn_injections=3),
+        ai=SimpleNamespace(max_context_tokens=48000, max_messages=50, snip_keep_head=3,
+                           snip_keep_tail=20, keep_recent_tool_results=3,
+                           per_result_persist_bytes=30000, l4_keep_tail=6),
+    )
+
+    class _Dummy:
+        pass
+
+    # workspace does not exist yet — must not raise (silent degradation)
+    loop = _build_loop(_Dummy(), _Dummy(), app_cfg, str(tmp_path / "nonexistent"), None)
+    assert loop.context is not None
+    assert loop.project.load() == ""
+    assert loop.skills.is_empty is True
 
 
 def test_version():
