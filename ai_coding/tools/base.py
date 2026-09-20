@@ -38,7 +38,6 @@ class BaseTool(ABC):
     @abstractmethod
     async def execute(self, params: dict[str, Any]) -> ToolResult:
         """Execute the tool with already-parsed parameters."""
-        raise NotImplementedError
 
 
 __all__ = ["BaseTool"]

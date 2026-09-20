@@ -34,7 +34,6 @@ class AIService(ABC):
         instructions + skills/memory catalogs); when ``None`` the engine falls back
         to its default.
         """
-        raise NotImplementedError
 
 
 __all__ = ["AIService"]
