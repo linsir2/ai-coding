@@ -51,3 +51,18 @@ def test_ask_no_default_model_errors_nonzero(tmp_path):
     result = runner.invoke(app, ["ask", "--prompt", "hi", "--path", str(cfg)])
     assert result.exit_code == 1
     assert "no default model" in (result.stderr or result.stdout)
+
+
+def test_ask_workspace_flag_accepted(tmp_path):
+    """The --workspace flag should be accepted (offline path still fails on no model)."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n  m:\n    name: m\n    base_url: https://x\n    api_key: k\n",
+                   encoding="utf-8")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    result = runner.invoke(app, [
+        "ask", "--prompt", "hi", "--path", str(cfg), "--workspace", str(ws),
+    ])
+    # Still fails on no default model, but the flag is parsed OK (not exit 2)
+    assert result.exit_code == 1
+    assert "no default model" in (result.stderr or result.stdout)
