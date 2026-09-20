@@ -143,10 +143,15 @@ def _build_loop(
 
     # Project instructions loader + memory live under the workspace.
     project = ProjectInstructionsLoader(ws)
+    # M3 integration: wire the real LLM helpers (L4 summarizer + memory
+    # extractor) when the service exposes a ModelConfig; fake services keep the
+    # offline defaults so unit tests never touch the network.
+    summarizer, extractor = _llm_helpers_for(service)
+    memory_store = MemoryStore(ws / ".memory")
     memory = MemoryService(
-        MemoryStore(ws / ".memory"), config=app_cfg.memory
+        memory_store, extractor=extractor, config=app_cfg.memory
     )
-    context = ContextManager(app_cfg.ai, transcripts_root=ws, summarizer=None)
+    context = ContextManager(app_cfg.ai, transcripts_root=ws, summarizer=summarizer)
 
     base_instructions = (
         "You are an AI coding assistant. Respond to the user's coding questions "
@@ -163,6 +168,21 @@ def _build_loop(
         skills=skills_reg,
         project=project,
     )
+
+
+def _llm_helpers_for(service: Any) -> tuple[Any, Any]:
+    """Build (summarizer, extractor) from the engine's ModelConfig when available.
+
+    Returns ``(None, None)`` for services without a ``model_config`` (e.g. unit
+    test fakes) so the offline defaults stay in place and nothing touches the
+    network outside of a real CLI run.
+    """
+    model_config = getattr(service, "model_config", None)
+    if model_config is None:
+        return None, None
+    from ai_coding.ai.llm_helpers import build_extractor, build_summarizer
+
+    return build_summarizer(model_config), build_extractor(model_config)
 
 
 def _build_tool_stack(
