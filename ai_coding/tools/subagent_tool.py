@@ -1,7 +1,10 @@
-"""subAgent tool — skeleton for delegating work to a sub-agent.
+"""subAgent tool (M4-1) — delegate a task to a real sub-agent.
 
-M2 implementation: reuses the same AI service (model) to run a sub-conversation.
-M3 will add Git Worktree isolation, background mode, and proper handoff history.
+The tool delegates to an injected :class:`SubAgentRunner` and forwards an
+optional :class:`WorktreeManager` plus an isolation flag.  The sub-agent runs
+its own conversation (isolated in a git worktree when enabled) and only the
+final conclusion is returned here as tool output — intermediate tool activity
+is discarded by the runner.
 """
 
 from __future__ import annotations
@@ -13,10 +16,17 @@ from ai_coding.tools.base import BaseTool
 
 
 class SubAgentTool(BaseTool):
-    """Delegate a task to a sub-agent (skeleton implementation)."""
+    """Delegate a task to a sub-agent through a ``SubAgentRunner``."""
 
-    def __init__(self, ai_service: Any) -> None:
-        self._ai = ai_service
+    def __init__(
+        self,
+        runner: Any,
+        worktree_manager: Any = None,
+        isolate: bool = True,
+    ) -> None:
+        self._runner = runner
+        self._worktree_manager = worktree_manager
+        self._isolate = isolate
 
     @property
     def name(self) -> str:
@@ -25,9 +35,9 @@ class SubAgentTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Delegate a task to a sub-agent. The sub-agent runs independently and "
-            "returns its final answer. Use 'task' for what to do, and optionally "
-            "'name' for a short agent label."
+            "Delegate a task to a sub-agent. The sub-agent runs independently "
+            "and returns its final answer. Use 'task' for what to do, and "
+            "optionally 'name' for a short agent label."
         )
 
     @property
@@ -53,17 +63,17 @@ class SubAgentTool(BaseTool):
             return ToolResult(success=False, output="error: 'task' is required")
         agent_name = str(params.get("name", "sub-agent")).strip() or "sub-agent"
 
-        prompt = (
-            f"You are {agent_name}, a sub-agent. "
-            f"Complete the following task and return your final answer:\n\n{task}"
-        )
-
         try:
-            turn = await self._ai.execute_turn([], prompt)
+            result = await self._runner.run(
+                task,
+                agent_name,
+                worktree_manager=self._worktree_manager,
+                isolate=self._isolate,
+            )
         except Exception as exc:  # noqa: BLE001 — broad catch for tool boundary
             return ToolResult(success=False, output=f"sub-agent failed: {exc}")
 
-        output = turn.text or "(sub-agent produced no output)"
+        output = result.text or "(sub-agent produced no output)"
         return ToolResult(
             success=True,
             output=f"[{agent_name}]\n{output}",

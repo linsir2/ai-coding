@@ -192,74 +192,13 @@ def _build_tool_stack(
 ) -> list[Any]:
     """Build the SDK tool list from config and CLI options.
 
-    Pure helper — returns a list of SDK FunctionTool instances.
+    Delegates to the shared :mod:`ai_coding.tools.builder` so the main agent and
+    each sub-agent assemble identical stacks. ``subAgent`` is wired to a real
+    :class:`SubAgentRunner` (worktree-isolated per ``ai.subagent_worktree_isolation``).
     """
-    from ai_coding.security.file_state_tracker import FileStateTracker
-    from ai_coding.security.permission_gate import PermissionGate
-    from ai_coding.security.sandbox import Sandbox
-    from ai_coding.tools.bash_tool import BashTool
-    from ai_coding.tools.edit_tool import EditTool
-    from ai_coding.tools.glob_tool import GlobTool
-    from ai_coding.tools.read_tool import ReadTool
-    from ai_coding.tools.registry import ToolRegistry
-    from ai_coding.tools.sdk_adapter import registry_to_sdk_tools
-    from ai_coding.tools.skill_tool import SkillTool
-    from ai_coding.tools.subagent_tool import SubAgentTool
-    from ai_coding.tools.todo_write_tool import TodoWriteTool
-    from ai_coding.tools.write_tool import WriteTool
+    from ai_coding.tools.builder import build_tool_stack
 
-    sandbox = Sandbox(workspace)
-    fst = FileStateTracker()
-    gate = PermissionGate()
-    registry = ToolRegistry()
-
-    tools_cfg = app_cfg.tools
-
-    if tools_cfg.bash.enabled:
-        registry.register(BashTool(timeout_seconds=tools_cfg.bash.timeout_seconds))
-    if tools_cfg.read.enabled:
-        registry.register(
-            ReadTool(sandbox, fst, max_file_size=tools_cfg.read.max_file_size)
-        )
-    if tools_cfg.write.enabled:
-        registry.register(WriteTool(sandbox, fst))
-    if tools_cfg.edit.enabled:
-        registry.register(EditTool(sandbox, fst))
-    if tools_cfg.glob.enabled:
-        registry.register(GlobTool(sandbox))
-
-    # Always-registered tools
-    registry.register(TodoWriteTool())
-
-    if skills_path and Path(skills_path).is_dir():
-        registry.register(SkillTool(skills_path))
-
-    # subAgent — needs ai service; for M2 we pass a stub that errors on real calls
-    # (the SDK handles tool invocation, but subAgent needs its own AI service)
-    # For now, register only if subagent is needed and available.
-    # M3 will wire the real AI service into SubAgentTool.
-    from ai_coding.ai.base import AIService
-
-    class _DisabledSubAgent(AIService):
-        async def execute_turn(
-            self,
-            history: list[Any],
-            user_input: str,
-            token_sink: Any = None,
-            *,
-            instructions: str | None = None,
-        ) -> Any:
-            from ai_coding.domain.run import TurnResult
-
-            del history, user_input, token_sink, instructions
-
-            return TurnResult(
-                text="(sub-agent not available in M2 — M3 will enable it)"
-            )
-
-    registry.register(SubAgentTool(ai_service=_DisabledSubAgent()))
-
-    return registry_to_sdk_tools(registry, gate, approval=None)
+    return build_tool_stack(app_cfg, workspace, skills_path, include_subagent=True)
 
 
 def run() -> None:
