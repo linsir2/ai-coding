@@ -119,6 +119,37 @@ def ask(
         typer.echo()
 
 
+@app.command("repl")
+def repl(
+    path: str | None = typer.Option(None, "--path", "-p", help="Path to a YAML config file."),
+    workspace: str = typer.Option(
+        ".", "--workspace", "-w", help="Workspace directory for file tools."
+    ),
+    skills: str | None = typer.Option(
+        None, "--skills", help="Path to skills directory (enables skill tool)."
+    ),
+) -> None:
+    """Start an interactive REPL session (slash commands: /help /status /clear /quit)."""
+    from ai_coding.service.session_service import SessionService
+    from ai_coding.ui.console import DialogueConsole
+    from ai_coding.ui.repl import run_repl
+
+    try:
+        manager = ConfigManager()
+        manager.initialize(path)
+        app_cfg = manager.app
+
+        sdk_tools = _build_tool_stack(app_cfg, workspace, skills)
+        service = build_service_from_config(app_cfg, tools=sdk_tools)
+    except (ValueError, FileNotFoundError) as exc:
+        typer.echo(f"repl error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    sessions = SessionService()
+    loop = _build_loop(service, sessions, app_cfg, workspace, skills)
+    asyncio.run(run_repl(loop, sessions, DialogueConsole()))
+
+
 def _build_loop(
     service: Any,
     sessions: Any,

@@ -117,3 +117,13 @@ def test_ask_workspace_flag_accepted(tmp_path):
     # Still fails on no default model, but the flag is parsed OK (not exit 2)
     assert result.exit_code == 1
     assert "no default model" in (result.stderr or result.stdout)
+
+
+def test_repl_no_default_model_errors_nonzero(tmp_path):
+    """`repl` registers as a command and degrades cleanly without a default model."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("models:\n  m:\n    name: m\n    base_url: https://x\n    api_key: k\n",
+                   encoding="utf-8")
+    result = runner.invoke(app, ["repl", "--path", str(cfg), "--workspace", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "no default model" in (result.stderr or result.stdout)
