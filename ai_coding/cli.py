@@ -114,9 +114,9 @@ def ask(
 
     loop = _build_loop(service, sessions, app_cfg, workspace, skills)
     answer = asyncio.run(loop.process_input(session, prompt, on_delta=on_delta))
-    if not answer.endswith("\n"):
+    # Answer text was already streamed live via on_delta; only ensure a trailing newline.
+    if answer and not answer.endswith("\n"):
         typer.echo()
-    typer.echo(answer)
 
 
 def _build_loop(

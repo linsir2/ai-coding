@@ -77,59 +77,65 @@ class AgentsSDKChatService(AIService):
         agent = self._build_agent(instructions)
         stream = Runner.run_streamed(agent, input=inputs)
 
-        chunks: list[str] = []
+        # ---- collection state -------------------------------------------
         tool_calls: list[ToolCallRef] = []
         tool_outputs: list[ToolOutput] = []
+        call_id_to_name: dict[str, str] = {}
         seen_call_ids: set[str] = set()
         seen_output_ids: set[str] = set()
+        final_message: str | None = None  # last assistant output message
 
         async for event in stream.stream_events():
             event_type = getattr(event, "type", None)
 
             if event_type == "raw_response_event":
-                delta = getattr(getattr(event, "data", None), "delta", None)
-                if isinstance(delta, str) and delta:
-                    chunks.append(delta)
-                    if token_sink:
-                        token_sink(delta)
+                # Only the assistant *text* deltas are emitted to the live sink /
+                # captured for turn.text.  Tool-call *arguments* arrive as
+                # ``response.function_call_arguments.delta`` and would pollute the
+                # natural-language answer if collected here.
+                if getattr(getattr(event, "data", None), "type", None) == (
+                    "response.output_text.delta"
+                ):
+                    delta = getattr(getattr(event, "data", None), "delta", None)
+                    if isinstance(delta, str) and delta:
+                        if token_sink:
+                            token_sink(delta)
                 continue
 
             if event_type == "run_item_stream_event":
-                # Collect tool_call entries for session history persistence.
-                if isinstance(event, RunItemStreamEvent) and event.name == "tool_called":
-                    item = event.item
-                    call_id = getattr(item, "call_id", None)
-                    tool_name = getattr(item, "name", None)
-                    if call_id and tool_name and call_id not in seen_call_ids:
-                        args_json = _extract_arguments_json(item)
-                        tool_calls.append(
-                            ToolCallRef(
-                                id=str(call_id),
-                                name=str(tool_name),
-                                arguments=args_json,
+                if isinstance(event, RunItemStreamEvent):
+                    if event.name == "message_output_created":
+                        final_message = _extract_message_text(event.item)
+                    elif event.name == "tool_called":
+                        item = event.item
+                        call_id = _item_call_id(item)
+                        tool_name = _item_tool_name(item)
+                        if call_id and tool_name and call_id not in seen_call_ids:
+                            call_id_to_name[call_id] = tool_name
+                            tool_calls.append(
+                                ToolCallRef(
+                                    id=call_id,
+                                    name=tool_name,
+                                    arguments=_extract_arguments_json(item),
+                                )
                             )
-                        )
-                        seen_call_ids.add(str(call_id))
-                # Collect tool outputs so AgentLoop can persist strict-pairing
-                # ``role=tool`` messages for the session history.
-                if isinstance(event, RunItemStreamEvent) and event.name == "tool_output":
-                    item = event.item
-                    call_id = getattr(item, "call_id", None)
-                    tool_name = getattr(item, "name", None)
-                    if call_id and tool_name and call_id not in seen_output_ids:
-                        tool_outputs.append(
-                            ToolOutput(
-                                call_id=str(call_id),
-                                tool_name=str(tool_name),
-                                output=_extract_tool_output(item),
+                            seen_call_ids.add(call_id)
+                    elif event.name == "tool_output":
+                        item = event.item
+                        call_id = _item_call_id(item)
+                        if call_id and call_id not in seen_output_ids:
+                            tool_outputs.append(
+                                ToolOutput(
+                                    call_id=call_id,
+                                    tool_name=call_id_to_name.get(call_id, "tool"),
+                                    output=_extract_tool_output(item),
+                                )
                             )
-                        )
-                        seen_output_ids.add(str(call_id))
+                            seen_output_ids.add(call_id)
                 continue
 
-        text = "".join(chunks) or None
         return TurnResult(
-            text=text,
+            text=final_message,
             tool_calls=tool_calls,
             tool_outputs=tool_outputs,
         )
@@ -149,6 +155,39 @@ def _extract_tool_output(item: Any) -> str:
         return json.dumps(output, ensure_ascii=False)
     except (TypeError, ValueError):
         return str(output)
+
+
+def _item_call_id(item: Any) -> str | None:
+    """Call id from a ToolCallItem / ToolCallOutputItem (works for dict or model raw)."""
+    raw = getattr(item, "raw_item", item)
+    if isinstance(raw, dict):
+        cid = raw.get("call_id") or raw.get("id")
+        return str(cid) if cid is not None else None
+    cid = getattr(raw, "call_id", None) or getattr(raw, "id", None)
+    return str(cid) if cid is not None else None
+
+
+def _item_tool_name(item: Any) -> str | None:
+    """Tool name from a ToolCallItem (``tool_name`` property, version-independent)."""
+    raw = getattr(item, "raw_item", item)
+    if isinstance(raw, dict):
+        return raw.get("name")
+    return getattr(raw, "name", None)
+
+
+def _extract_message_text(item: Any) -> str | None:
+    """Natural-language text of a MessageOutputItem (its last content part wins)."""
+    raw = getattr(item, "raw_item", item)
+    content = raw.get("content") if isinstance(raw, dict) else getattr(raw, "content", None)
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    if content:
+        for part in content:
+            text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+            if text:
+                parts.append(str(text))
+    return "".join(parts) if parts else None
 
 
 def _extract_arguments_json(item: Any) -> str:
