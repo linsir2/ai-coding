@@ -20,7 +20,8 @@ def build_subagent_runner(app_cfg: Any, workspace: str, skills_path: str | None)
 
     Its inner tool stacks resolve ``workdir=None`` to the main workspace and
     otherwise to the (worktree) directory actually passed in, always without a
-    nested subAgent tool.
+    nested subAgent tool.  Sub-agent stacks use the non-interactive auto-approve
+    policy (no human is present inside an isolated sub-agent to confirm WARN).
     """
     from ai_coding.core.subagent import SubAgentRunner
 
@@ -46,9 +47,17 @@ def build_tool_stack(
     skills_path: str | None = None,
     *,
     include_subagent: bool = True,
+    approval: Any | None = None,
 ) -> list[Any]:
-    """Build the SDK tool list for a configuration and directory."""
+    """Build the SDK tool list for a configuration and directory.
 
+    ``approval`` is the :class:`ApprovalCallback` used to resolve the WARN tier
+    (write/edit/bash).  When ``None`` the stack falls back to a non-interactive
+    auto-approve so the tools are usable in non-interactive entry points; the
+    DENY tier (dangerous bash patterns) is always blocked regardless.
+    """
+
+    from ai_coding.security.approval import AutoApproveCallback
     from ai_coding.security.file_state_tracker import FileStateTracker
     from ai_coding.security.permission_gate import PermissionGate
     from ai_coding.security.sandbox import Sandbox
@@ -97,7 +106,8 @@ def build_tool_stack(
             SubAgentTool(runner=runner, worktree_manager=manager, isolate=isolate)
         )
 
-    return registry_to_sdk_tools(registry, gate, approval=None)
+    effective_approval = approval if approval is not None else AutoApproveCallback()
+    return registry_to_sdk_tools(registry, gate, effective_approval)
 
 
 __all__ = ["build_tool_stack", "build_subagent_runner"]

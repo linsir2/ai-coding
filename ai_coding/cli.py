@@ -139,7 +139,13 @@ def repl(
         manager.initialize(path)
         app_cfg = manager.app
 
-        sdk_tools = _build_tool_stack(app_cfg, workspace, skills)
+        # Interactive REPL: confirm WARN-tier tools (write/edit/bash) with the
+        # user via y/N/s prompts, rather than silently blocking or auto-approving.
+        from ai_coding.security.approval import CLIApprovalCallback
+
+        sdk_tools = _build_tool_stack(
+            app_cfg, workspace, skills, approval=CLIApprovalCallback()
+        )
         service = build_service_from_config(app_cfg, tools=sdk_tools)
     except (ValueError, FileNotFoundError) as exc:
         typer.echo(f"repl error: {exc}", err=True)
@@ -220,16 +226,20 @@ def _build_tool_stack(
     app_cfg: Any,
     workspace: str,
     skills_path: str | None,
+    approval: Any | None = None,
 ) -> list[Any]:
     """Build the SDK tool list from config and CLI options.
 
     Delegates to the shared :mod:`ai_coding.tools.builder` so the main agent and
     each sub-agent assemble identical stacks. ``subAgent`` is wired to a real
     :class:`SubAgentRunner` (worktree-isolated per ``ai.subagent_worktree_isolation``).
+    ``approval`` resolves the WARN tier (write/edit/bash); ``None`` auto-approves.
     """
     from ai_coding.tools.builder import build_tool_stack
 
-    return build_tool_stack(app_cfg, workspace, skills_path, include_subagent=True)
+    return build_tool_stack(
+        app_cfg, workspace, skills_path, include_subagent=True, approval=approval
+    )
 
 
 def run() -> None:

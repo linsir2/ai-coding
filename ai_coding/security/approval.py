@@ -71,6 +71,24 @@ class CLIApprovalCallback(ApprovalCallback):
         return f"[{tool_name}] {reason}\n  params: {preview}\nAllow? [y/N/s] "
 
 
+class AutoApproveCallback(ApprovalCallback):
+    """Non-interactive approval: always permits WARN tiers.
+
+    Use for non-interactive entry points (``ask``) and for sub-agent tool
+    stacks where no human is present to confirm.  Hard-deny (``DENY``) tiers
+    are still blocked upstream by ``approve_from_gate_decision``, so this only
+    relaxes the interactive tier, never the deny tier.
+    """
+
+    async def approve(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        reason: str,
+    ) -> ApprovalResult:
+        return ApprovalResult.YES
+
+
 def _default_input(prompt: str) -> str:  # pragma: no cover - trivial wrapper
     return input(prompt)
 
@@ -117,5 +135,6 @@ __all__ = [
     "ApprovalCallback",
     "ApprovalResult",
     "CLIApprovalCallback",
+    "AutoApproveCallback",
     "approve_from_gate_decision",
 ]
