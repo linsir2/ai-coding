@@ -1,6 +1,6 @@
 # 数据契约
 
-本项目的领域数据契约集中在 `ai_coding/domain`，是各层共用的不可变边界。会话 JSON 与配置 schema 保证与 ThoughtCoding Java 原实现字节兼容，便于历史数据迁移。
+本项目的领域数据契约集中在 `ai_coding/domain`，是各层共用的不可变边界。
 
 ## 消息模型
 

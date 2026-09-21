@@ -1,6 +1,6 @@
 """Context compression pipeline stages (pure, offline-testable).
 
-Implements the money-value of the ThoughtCoding four-layer history compression
+Implements the money-value of the  four-layer history compression
 (Master plan §3.3): it reshapes a ``list[ChatMessage]`` COPY so very long tool-heavy
 histories fit within the model's context window without ever triggering a 400.
 

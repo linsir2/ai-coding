@@ -1,7 +1,4 @@
 """Core message and tool-call contracts.
-
-Mirrors the original Java ``com/thoughtcoding/model`` shape so persisted JSON
-remains interoperable with previously saved sessions.
 """
 
 from __future__ import annotations

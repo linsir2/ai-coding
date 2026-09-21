@@ -16,7 +16,7 @@ build/
 .coverage
 htmlcov/
 
-# Runtime state (mirror ThoughtCoding runtime dirs)
+# Runtime state
 sessions/
 .memory/
 transcripts/

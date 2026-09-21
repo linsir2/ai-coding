@@ -14,7 +14,7 @@ from ai_coding.infra.logger_setup import setup_logging
 
 app = typer.Typer(
     name="ai-coding",
-    help="AI coding assistant CLI (ThoughtCoding Python implementation).",
+    help="AI coding assistant CLI.",
     no_args_is_help=True,
 )
 

@@ -1,6 +1,6 @@
 # 架构设计
 
-ai-coding 是一个分层、SDK 可替换的对话式编码助手。核心思想沿袭 ThoughtCoding：领域契约（`domain`）、编排（`core`/`security`/`memory`）是自家实现且与运行时引擎解耦；OpenAI Agents SDK 只作为 `ai` 层一个可替换引擎插入。
+ai-coding 是一个分层、SDK 可替换的对话式编码助手：领域契约（`domain`）、编排（`core`/`security`/`memory`）是自家实现且与运行时引擎解耦；OpenAI Agents SDK 只作为 `ai` 层一个可替换引擎插入。
 
 ## 包结构与依赖方向
 
