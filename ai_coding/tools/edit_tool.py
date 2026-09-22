@@ -7,7 +7,7 @@ from typing import Any
 from ai_coding.domain.message import ToolResult
 from ai_coding.security.file_state_tracker import FileState, FileStateTracker
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
-from ai_coding.tools.base import BaseTool
+from ai_coding.tools.base import BaseTool, ToolContext
 
 
 class EditTool(BaseTool):
@@ -49,7 +49,9 @@ class EditTool(BaseTool):
             "required": ["path", "old_string", "new_string"],
         }
 
-    async def execute(self, params: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> ToolResult:
         path_str = str(params.get("path", ""))
         old = str(params.get("old_string", ""))
         new = str(params.get("new_string", ""))

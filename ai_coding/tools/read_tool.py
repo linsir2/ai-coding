@@ -7,7 +7,7 @@ from typing import Any
 from ai_coding.domain.message import ToolResult
 from ai_coding.security.file_state_tracker import FileStateTracker
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
-from ai_coding.tools.base import BaseTool
+from ai_coding.tools.base import BaseTool, ToolContext
 
 _DEFAULT_MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
@@ -59,7 +59,12 @@ class ReadTool(BaseTool):
             "required": ["path"],
         }
 
-    async def execute(self, params: dict[str, Any]) -> ToolResult:
+    # Read-only: safe to run alongside sibling calls in the same message.
+    parallel_safe = True
+
+    async def execute(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> ToolResult:
         path_str = str(params.get("path", ""))
         offset = int(params.get("offset", 0) or 0)
         limit = params.get("limit")

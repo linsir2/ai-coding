@@ -1,0 +1,46 @@
+"""Loop-level contracts (R1a).
+
+``StepResult`` is what one model call returns; ``TurnOutcome`` is how an entire
+user turn ended.  Splitting them is what lets the orchestration layer own the
+iteration loop (the engine only ever performs one step).
+"""
+
+from __future__ import annotations
+
+import enum
+from dataclasses import dataclass, field
+
+from .message import ToolCallRef
+
+
+class TurnStatus(enum.Enum):
+    """How a turn terminated."""
+
+    COMPLETED = "completed"  # model stopped and (if todo_aware) no open items
+    MAX_ITERATIONS = "max_iterations"  # iteration budget exhausted
+    STOPPED = "stopped"  # approval callback asked to stop
+    ABORTED = "aborted"  # user interrupted (CancelledError)
+    ERROR = "error"  # engine failed
+
+
+@dataclass(frozen=True)
+class StepResult:
+    """One model step: the text it emitted and the tools it asked for."""
+
+    text: str | None = None
+    tool_calls: list[ToolCallRef] = field(default_factory=list)
+    finish_reason: str | None = None
+    usage: dict[str, int] | None = None
+
+
+@dataclass(frozen=True)
+class TurnOutcome:
+    """Terminal state of one ``process_input`` call."""
+
+    status: TurnStatus
+    text: str | None = None
+    iterations: int = 0
+    reason: str = ""
+
+
+__all__ = ["TurnStatus", "StepResult", "TurnOutcome"]

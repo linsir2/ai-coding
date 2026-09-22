@@ -6,7 +6,7 @@ import asyncio
 from typing import Any
 
 from ai_coding.domain.message import ToolResult
-from ai_coding.tools.base import BaseTool
+from ai_coding.tools.base import BaseTool, ToolContext
 
 _DEFAULT_TIMEOUT = 60
 _DEFAULT_MAX_OUTPUT = 50_000
@@ -49,7 +49,9 @@ class BashTool(BaseTool):
             "required": ["command"],
         }
 
-    async def execute(self, params: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> ToolResult:
         command = str(params.get("command", ""))
         if not command.strip():
             return ToolResult(success=False, output="error: empty command")

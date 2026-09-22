@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -41,6 +41,17 @@ class AIConfig(BaseModel):
     keep_recent_tool_results: int = 3
     per_result_persist_bytes: int = 30_000
     l4_keep_tail: int = 6
+    # ---- R1a orchestration (docs/r1-analysis.md) --------------------------
+    # How a turn is allowed to end.  "todo_aware" gates the stop on open items.
+    stop_policy: Literal["natural", "todo_aware", "strict"] = "todo_aware"
+    max_todo_nudges: int = 2
+    # Where the task list is injected: a volatile trailing message (cache
+    # friendly) or appended to the system prompt (survives compaction).
+    task_injection: Literal["message", "system"] = "message"
+    max_concurrent_tools: int = 4
+    subagent_timeout_seconds: int = 600
+    max_result_data_bytes: int = 8_000
+    max_subagent_conclusion_chars: int = 4_000
 
 
 class MemoryConfig(BaseModel):

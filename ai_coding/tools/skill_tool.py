@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_coding.domain.message import ToolResult
-from ai_coding.tools.base import BaseTool
+from ai_coding.tools.base import BaseTool, ToolContext
 
 
 class SkillTool(BaseTool):
@@ -60,7 +60,12 @@ class SkillTool(BaseTool):
                 names.append(entry.name)
         return names
 
-    async def execute(self, params: dict[str, Any]) -> ToolResult:
+    # Read-only: safe to run alongside sibling calls in the same message.
+    parallel_safe = True
+
+    async def execute(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> ToolResult:
         action = str(params.get("action", "")).lower()
 
         if action == "list":

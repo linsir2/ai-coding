@@ -1,31 +1,27 @@
-"""todo_write tool — in-memory structured todo list.
+"""todo_write tool — maintains the session's ``TaskState`` (R1a).
 
-The list persists across tool calls within a session but is not written to disk.
-Matches the Java ``TodoWriteTool`` semantics: add / update / list with statuses.
+Unlike the M2 version this tool is **stateless**: the list lives in the session
+and travels through ``ToolContext.task``.  That fixes a real defect — the old
+in-memory list was a singleton shared across sessions (``repl`` builds the tool
+stack once and ``/clear`` reused it), so todos leaked between sessions.
+
+Every mutation returns the rendered list so the model sees the full plan at the
+point of change; the loop additionally injects the render on every iteration.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from ai_coding.domain.message import ToolResult
-from ai_coding.tools.base import BaseTool
-
-
-@dataclass
-class _TodoItem:
-    id: str
-    content: str
-    status: str = "pending"
+from ai_coding.domain.task import VALID_STATUSES, TaskState
+from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 
 class TodoWriteTool(BaseTool):
-    """A simple in-memory todo list tool."""
+    """Maintain the session task list (add / update / list / clear)."""
 
-    def __init__(self) -> None:
-        self._items: list[_TodoItem] = []
-        self._next_id: int = 1
+    parallel_safe = True
 
     @property
     def name(self) -> str:
@@ -34,11 +30,15 @@ class TodoWriteTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Manage a todo list. Actions: "
-            "add (content) → create a new item; "
-            "update (id, status) → change status (pending/in_progress/completed); "
-            "list → show all items. "
-            "The todo list is in-memory and persists across tool calls."
+            "Maintain your task list for the current goal. This list is your plan: "
+            "it is shown back to you on every step, and the run is not considered "
+            "finished while items are still open, so keep it accurate. "
+            "Actions: add (content, optional depends_on) appends a pending item; "
+            "update (id, optional status/evidence/content) patches an item, where "
+            "status is one of pending/in_progress/completed/blocked/dropped; "
+            "list shows the current list; clear drops all items. "
+            "Keep items small and actionable, and mark an item completed only with "
+            "evidence (the file, command or finding that proves it)."
         )
 
     @property
@@ -48,71 +48,112 @@ class TodoWriteTool(BaseTool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["add", "update", "list"],
+                    "enum": ["add", "update", "list", "clear"],
                     "description": "The action to perform.",
                 },
-                "content": {
-                    "type": "string",
-                    "description": "Content for 'add' action.",
-                },
-                "id": {
-                    "type": "string",
-                    "description": "Item id for 'update' action.",
-                },
+                "content": {"type": "string", "description": "Item text (for 'add')."},
+                "id": {"type": "string", "description": "Item id (for 'update')."},
                 "status": {
                     "type": "string",
-                    "enum": ["pending", "in_progress", "completed"],
-                    "description": "New status for 'update' action.",
+                    "enum": sorted(VALID_STATUSES),
+                    "description": "New status (for 'update').",
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": "What proves the item is done (for 'update').",
+                },
+                "depends_on": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ids this item waits on (for 'add').",
                 },
             },
             "required": ["action"],
         }
 
-    async def execute(self, params: dict[str, Any]) -> ToolResult:
-        action = str(params.get("action", "")).lower()
+    async def execute(
+        self,
+        params: dict[str, Any],
+        ctx: ToolContext | None = None,
+    ) -> ToolResult:
+        task = resolve_ctx(ctx).task
+        action = str(params.get("action", "")).strip().lower()
 
         if action == "add":
-            content = str(params.get("content", "")).strip()
-            if not content:
-                return ToolResult(success=False, output="error: 'content' is required for 'add'")
-            item_id = str(self._next_id)
-            self._next_id += 1
-            self._items.append(_TodoItem(id=item_id, content=content))
-            return ToolResult(
-                success=True,
-                output=f"added todo #{item_id}: {content}",
-            )
-
+            return self._add(params, task)
         if action == "update":
-            item_id = str(params.get("id", ""))
-            status = str(params.get("status", "")).lower()
-            valid_statuses = {"pending", "in_progress", "completed"}
-            if status not in valid_statuses:
-                return ToolResult(
-                    success=False,
-                    output=f"error: status must be one of {sorted(valid_statuses)}",
-                )
-            for item in self._items:
-                if item.id == item_id:
-                    item.status = status
-                    return ToolResult(
-                        success=True,
-                        output=f"updated todo #{item_id} to status '{status}'",
-                    )
-            return ToolResult(success=False, output=f"error: todo #{item_id} not found")
-
+            return self._update(params, task)
         if action == "list":
-            if not self._items:
-                return ToolResult(success=True, output="(no todos)")
-            lines = []
-            for item in self._items:
-                lines.append(f"  [{item.status}] #{item.id}  {item.content}")
-            return ToolResult(success=True, output="\n".join(lines))
-
+            return self._ok(task, "list")
+        if action == "clear":
+            task.clear()
+            return self._ok(task, "clear")
         return ToolResult(
             success=False,
-            output=f"error: unknown action '{action}' (valid: add, update, list)",
+            output=f"error: unknown action '{action}' (valid: add, update, list, clear)",
+            error="unknown_action",
         )
+
+    # ---- actions ----------------------------------------------------------
+
+    def _add(self, params: dict[str, Any], task: TaskState) -> ToolResult:
+        content = str(params.get("content", "")).strip()
+        if not content:
+            return ToolResult(
+                success=False,
+                output="error: 'content' is required for 'add'",
+                error="missing_content",
+            )
+        raw_deps = params.get("depends_on") or []
+        deps = [str(d) for d in raw_deps] if isinstance(raw_deps, list) else []
+        item = task.add(content, depends_on=deps)
+        return self._ok(task, "add", item_id=item.id)
+
+    def _update(self, params: dict[str, Any], task: TaskState) -> ToolResult:
+        item_id = str(params.get("id", "")).strip()
+        if not item_id:
+            return ToolResult(
+                success=False,
+                output="error: 'id' is required for 'update'",
+                error="missing_id",
+            )
+        status = params.get("status")
+        content = params.get("content")
+        evidence = params.get("evidence")
+        try:
+            task.update(
+                item_id,
+                status=None if status is None else str(status).strip().lower(),
+                content=None if content is None else str(content),
+                evidence=None if evidence is None else str(evidence),
+            )
+        except KeyError:
+            return ToolResult(
+                success=False,
+                output=f"error: todo #{item_id} not found",
+                error="unknown_id",
+                data={"action": "update", "id": item_id},
+            )
+        except ValueError as exc:
+            return ToolResult(
+                success=False,
+                output=f"error: {exc}",
+                error="invalid_status",
+                data={"action": "update", "id": item_id},
+            )
+        return self._ok(task, "update", item_id=item_id)
+
+    @staticmethod
+    def _ok(task: TaskState, action: str, item_id: str | None = None) -> ToolResult:
+        data: dict[str, Any] = {
+            "action": action,
+            "total": task.total,
+            "done": task.done_count,
+            "open": len(task.open_items()),
+        }
+        if item_id is not None:
+            data["id"] = item_id
+        return ToolResult(success=True, output=task.render(), data=data)
 
 
 __all__ = ["TodoWriteTool"]

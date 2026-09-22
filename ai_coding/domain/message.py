@@ -29,11 +29,50 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class ToolArtifact:
+    """A side effect produced by a tool: a created/changed file, directory or url.
+
+    Structured counterpart to the free-text ``output``; lets the runtime, UI and
+    session records describe what a tool actually did without parsing prose.
+    """
+
+    path: str
+    kind: str = "file"  # file | dir | url | ref
+    bytes: int | None = None
+    description: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"path": self.path, "kind": self.kind}
+        if self.bytes is not None:
+            data["bytes"] = self.bytes
+        if self.description:
+            data["description"] = self.description
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ToolArtifact:
+        return cls(
+            path=str(data.get("path", "")),
+            kind=str(data.get("kind", "file")),
+            bytes=data.get("bytes"),
+            description=str(data.get("description", "")),
+        )
+
+
+@dataclass(frozen=True)
 class ToolResult:
-    """The outcome produced by executing a tool, ready to be fed back."""
+    """The outcome produced by executing a tool, ready to be fed back.
+
+    ``output`` is what the model reads; ``data`` is the machine-readable result
+    (R1a/D9) so callers never have to parse prose.  ``data is None`` keeps the
+    legacy shape valid, which is what makes the R1a migration incremental.
+    """
 
     success: bool
-    output: str
+    output: str = ""
+    data: dict[str, Any] | None = None
+    artifacts: tuple[ToolArtifact, ...] = ()
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +86,9 @@ class ToolOutput:
     call_id: str
     tool_name: str
     output: str
+    success: bool = True
+    data: dict[str, Any] | None = None
+    artifacts: tuple[ToolArtifact, ...] = ()
 
 
 @dataclass(frozen=True)

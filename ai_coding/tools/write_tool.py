@@ -7,7 +7,7 @@ from typing import Any
 from ai_coding.domain.message import ToolResult
 from ai_coding.security.file_state_tracker import FileState, FileStateTracker
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
-from ai_coding.tools.base import BaseTool
+from ai_coding.tools.base import BaseTool, ToolContext
 
 _DEFAULT_MAX_CHARS = 2_000_000  # 2M chars
 
@@ -55,7 +55,9 @@ class WriteTool(BaseTool):
             "required": ["path", "content"],
         }
 
-    async def execute(self, params: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> ToolResult:
         path_str = str(params.get("path", ""))
         content = str(params.get("content", ""))
 

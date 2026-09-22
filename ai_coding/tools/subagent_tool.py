@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from ai_coding.domain.message import ToolResult
-from ai_coding.tools.base import BaseTool
+from ai_coding.tools.base import BaseTool, ToolContext
 
 
 class SubAgentTool(BaseTool):
@@ -57,7 +57,13 @@ class SubAgentTool(BaseTool):
             "required": ["task"],
         }
 
-    async def execute(self, params: dict[str, Any]) -> ToolResult:
+    # Delegated runs are isolated (own worktree when enabled); the semaphore in
+    # SubAgentRunner bounds how many actually run at once.
+    parallel_safe = True
+
+    async def execute(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> ToolResult:
         task = str(params.get("task", "")).strip()
         if not task:
             return ToolResult(success=False, output="error: 'task' is required")
