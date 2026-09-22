@@ -6,6 +6,7 @@ from typing import Any
 
 from ai_coding.ai.agents_sdk_service import AgentsSDKChatService
 from ai_coding.ai.base import AIService
+from ai_coding.ai.engine import ChatEngine
 from ai_coding.config.models import AppConfig
 
 
@@ -40,4 +41,24 @@ def build_service_from_config(
     )
 
 
-__all__ = ["build_service_from_config"]
+def build_engine_from_config(app_config: AppConfig) -> ChatEngine:
+    """Resolve ``default_model`` into a step-wise ``ChatEngine`` (R1a-2).
+
+    This is the engine the self-owned loop uses.  It deliberately reuses the
+    exact error messages of :func:`build_service_from_config` so CLI behaviour
+    and existing expectations stay identical.
+    """
+    default = app_config.default_model
+    if not default:
+        raise ValueError("no default model configured")
+    model = app_config.models.get(default)
+    if model is None:
+        raise ValueError(f"default model '{default}' not found in models")
+
+    from ai_coding.ai.openai_engine import OpenAIChatEngine
+
+    stream_usage = bool(getattr(app_config.ai, "stream_usage", True))
+    return OpenAIChatEngine(model, stream_usage=stream_usage)
+
+
+__all__ = ["build_service_from_config", "build_engine_from_config"]

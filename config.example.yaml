@@ -25,6 +25,15 @@ ai:
   keep_recent_tool_results: 3
   per_result_persist_bytes: 30000
   l4_keep_tail: 6
+  # R1a orchestration (see docs/r1-analysis.md)
+  stop_policy: todo_aware          # natural | todo_aware | strict
+  max_todo_nudges: 2
+  task_injection: message          # message | system
+  max_concurrent_tools: 4
+  subagent_timeout_seconds: 600
+  max_result_data_bytes: 8000
+  max_subagent_conclusion_chars: 4000
+  stream_usage: true               # set false if your endpoint rejects stream_options
 
 memory:
   enabled: true

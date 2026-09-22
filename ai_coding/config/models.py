@@ -52,6 +52,9 @@ class AIConfig(BaseModel):
     subagent_timeout_seconds: int = 600
     max_result_data_bytes: int = 8_000
     max_subagent_conclusion_chars: int = 4_000
+    # Ask the endpoint to emit a final usage frame (stream_options.include_usage).
+    # Off is available for OpenAI-compatible servers that reject the parameter.
+    stream_usage: bool = True
 
 
 class MemoryConfig(BaseModel):

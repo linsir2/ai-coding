@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ai_coding.domain.message import ChatMessage
+from ai_coding.domain.message import ChatMessage, ToolCallRef
 
 
 def chat_message_to_inputs(msg: ChatMessage) -> list[dict[str, Any]]:
@@ -77,4 +77,63 @@ def history_to_inputs(history: list[ChatMessage]) -> list[dict[str, Any]]:
     return [item for msg in history for item in chat_message_to_inputs(msg)]
 
 
-__all__ = ["chat_message_to_input", "chat_message_to_inputs", "history_to_inputs"]
+# --------------------------------------------------------------------------
+# R1a-2: native chat-completions mapping (used by the self-owned loop).
+#
+# The functions above are SDK Responses-shaped (``function_call`` items) and
+# remain because ``agents_sdk_service`` still uses them; they are removed in
+# R1a-6 together with the SDK path.  Everything below is the OpenAI standard
+# shape: assistant tool calls live in a ``tool_calls`` array on the assistant
+# message, tool results are ``role="tool"`` messages carrying ``tool_call_id``.
+# --------------------------------------------------------------------------
+
+
+def tool_call_to_dict(ref: ToolCallRef) -> dict[str, Any]:
+    """Map one domain tool-call reference onto OpenAI's function-call shape."""
+    return {
+        "id": ref.id,
+        "type": "function",
+        "function": {"name": ref.name, "arguments": ref.arguments or "{}"},
+    }
+
+
+def to_chat_message(msg: ChatMessage) -> dict[str, Any]:
+    """Convert one domain message into a native chat-completions message dict.
+
+    An assistant message that carries tool calls keeps ``content=None`` when it
+    has no prose: that is the standard shape for a tool-call turn, and emitting
+    an empty string instead would put a fake blank reply into the history.
+    """
+    if msg.role == "tool":
+        return {
+            "role": "tool",
+            "tool_call_id": msg.tool_call_id or "",
+            "content": msg.content or "",
+        }
+    if msg.role == "system":
+        return {"role": "system", "content": msg.content or ""}
+    if msg.role == "user":
+        return {"role": "user", "content": msg.content or ""}
+
+    if msg.tool_calls:
+        return {
+            "role": "assistant",
+            "content": msg.content,
+            "tool_calls": [tool_call_to_dict(c) for c in msg.tool_calls],
+        }
+    return {"role": "assistant", "content": msg.content or ""}
+
+
+def history_to_chat_messages(history: list[ChatMessage]) -> list[dict[str, Any]]:
+    """Convert a full history to native chat messages, preserving order."""
+    return [to_chat_message(msg) for msg in history]
+
+
+__all__ = [
+    "chat_message_to_input",
+    "chat_message_to_inputs",
+    "history_to_inputs",
+    "tool_call_to_dict",
+    "to_chat_message",
+    "history_to_chat_messages",
+]
