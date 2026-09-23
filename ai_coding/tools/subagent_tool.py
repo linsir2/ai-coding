@@ -16,6 +16,10 @@ from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 SUCCESS_STATUSES = frozenset({"completed", "max_iterations"})
 
+# Room above the runner's own budget for worktree setup, ledger write and the
+# packet itself (R2a).  The dispatcher takes min(this, remaining turn budget).
+_TIMEOUT_GRACE = 15.0
+
 
 def _render(result: SubagentResult, name: str) -> str:
     """Human/LLM-readable rendering of the packet."""
@@ -84,6 +88,14 @@ class SubAgentTool(BaseTool):
     @property
     def name(self) -> str:
         return "subAgent"
+
+    @property
+    def max_duration_seconds(self) -> float | None:
+        """Per-call ceiling for the dispatcher (R2a)."""
+        timeout = getattr(self._runner, "timeout_seconds", None)
+        if timeout is None:
+            return None
+        return float(timeout) + _TIMEOUT_GRACE
 
     @property
     def description(self) -> str:

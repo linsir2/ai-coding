@@ -58,6 +58,17 @@ class BaseTool(ABC):
     parallel_safe: bool = False
 
     @property
+    def max_duration_seconds(self) -> float | None:
+        """Per-call ceiling for the dispatcher (R2a), in seconds.
+
+        ``None`` means the tool declares no bound of its own, so only the turn
+        deadline applies.  Tools that spawn subprocesses or sub-agents override
+        this with ``timeout + grace``; the dispatcher takes the tighter of this
+        and what is left of the turn.
+        """
+        return None
+
+    @property
     @abstractmethod
     def name(self) -> str:
         ...

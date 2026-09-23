@@ -11,31 +11,128 @@ Design notes (docs/r1a-6-analysis.md §3.2):
   - tool names are prefixed with the server name, since two servers may expose
     the same tool name;
   - a server that fails to connect is skipped silently: MCP is an enhancement.
+
+R2d: a connection is bounded by ``mcp.connection_timeout`` (a server that never
+answers must not cost the CLI its startup), and ``env``/``cwd`` reach the child
+process — a real stdio server usually needs at least one of them.
+
+Bounding a connection is subtler than it looks: the MCP client is anyio-based and
+anyio cancel scopes belong to the task that entered them, so connecting inside a
+deadline task and closing from the caller fails with "Attempted to exit cancel
+scope in a different task than it was entered in" (observed in a real run, see
+docs/r2-analysis.md R2d).  Hence :class:`_MCPSessionOwner`: **one task owns a
+server's session from connect to close.**
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 from ai_coding.config.models import MCPConfig, MCPServerConfig
 from ai_coding.domain.message import ToolResult
+from ai_coding.infra.deadline import DeadlineExpired, run_with_deadline
 from ai_coding.tools.base import BaseTool, ToolContext
 
 SessionFactory = Callable[[MCPServerConfig], Any]
 
+_log = logging.getLogger(__name__)
+
+# How long a *connected* session may take to shut down before it is cancelled.
+# A session that never connected is cancelled almost immediately instead.
+_CLOSE_TIMEOUT = 5.0
+_CLOSE_TIMEOUT_NEVER_CONNECTED = 0.2
+
+
+class _MCPSessionOwner:
+    """Owns one server's session, from connect to close, inside a single task."""
+
+    def __init__(self, server: MCPServerConfig, factory: SessionFactory) -> None:
+        self.server = server
+        self.ready = asyncio.Event()
+        self.tools: list[Any] = []
+        self.session: Any = None
+        self.error: BaseException | None = None
+        self._factory = factory
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._serve(), name=f"mcp:{self.server.name}")
+
+    async def _serve(self) -> None:
+        """Connect, publish the tool list, hold the session, then close it here."""
+        try:
+            async with AsyncExitStack() as stack:
+                self.session = await stack.enter_async_context(self._factory(self.server))
+                listed = await self.session.list_tools()
+                self.tools = list(getattr(listed, "tools", None) or [])
+                self.ready.set()
+                await self._stop.wait()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:  # noqa: BLE001 — reported through .error
+            self.error = exc
+            self.ready.set()
+
+    async def wait_ready(self, timeout: float) -> bool:
+        """Wait for the connection; ``False`` means "skip this server"."""
+        try:
+            await run_with_deadline(
+                self.ready.wait(),
+                timeout=timeout,
+                label=f"mcp_connect:{self.server.name}",
+            )
+        except DeadlineExpired:
+            _log.warning("MCP server %r did not connect within %gs", self.server.name, timeout)
+            return False
+        if self.error is not None:
+            _log.debug("MCP server %r failed: %r", self.server.name, self.error)
+            return False
+        return True
+
+    async def close(self) -> None:
+        """Release the session in *its own* task (cancel it if it will not go)."""
+        self._stop.set()
+        task = self._task
+        if task is None or task.done():
+            return
+        budget = _CLOSE_TIMEOUT if self.ready.is_set() else _CLOSE_TIMEOUT_NEVER_CONNECTED
+        done, _pending = await asyncio.wait({task}, timeout=budget)
+        if not done:
+            task.cancel()
+
+
+def _server_parameters(server: MCPServerConfig) -> Any:
+    """Build ``StdioServerParameters`` (kept separate so it can be unit-tested)."""
+    from mcp import StdioServerParameters
+
+    return StdioServerParameters(
+        command=server.command,
+        args=list(server.args),
+        env=dict(server.env) or None,
+        cwd=server.cwd or None,
+    )
+
 
 def _default_session_factory(server: MCPServerConfig) -> Any:
     """Connect a stdio MCP server and yield an initialized ``ClientSession``."""
-    from mcp import ClientSession, StdioServerParameters
+    from mcp import ClientSession
     from mcp.client.stdio import stdio_client
 
     @asynccontextmanager
     async def _cm() -> AsyncIterator[Any]:
-        params = StdioServerParameters(command=server.command, args=list(server.args))
-        async with stdio_client(params) as (read, write):
+        async with stdio_client(_server_parameters(server)) as (read, write):
             async with ClientSession(read, write) as session:
+                # ``ClientSession.__aenter__`` only starts the dispatcher: the
+                # handshake is a separate (idempotent) call.  Without it a real
+                # server rejects every request with -32602 "Invalid request
+                # parameters" — the R1a-6 factory never sent it, and only the
+                # fake-session unit tests hid that (found by the R2d real run).
+                await session.initialize()
                 yield session
 
     return _cm()
@@ -123,10 +220,16 @@ class MCPManager:
         config: MCPConfig | None = None,
         *,
         session_factory: SessionFactory | None = None,
+        connection_timeout: float | None = None,
     ) -> None:
         self._config = config or MCPConfig()
         self._session_factory = session_factory or _default_session_factory
-        self._stack = AsyncExitStack()
+        self._connection_timeout = float(
+            connection_timeout
+            if connection_timeout is not None
+            else self._config.connection_timeout
+        )
+        self._owners: list[_MCPSessionOwner] = []
 
     async def open_all(self) -> list[BaseTool]:
         """Connect every enabled server; a failure skips just that server."""
@@ -143,20 +246,25 @@ class MCPManager:
                 # letting a config typo escape as a CLI traceback.
                 continue
             seen_servers.add(server.name)
-            try:
-                session = await self._stack.enter_async_context(
-                    self._session_factory(server)
-                )
-                listed = await session.list_tools()
-            except Exception:  # noqa: BLE001 — an MCP server is an enhancement
+            owner = _MCPSessionOwner(server, self._session_factory)
+            self._owners.append(owner)
+            owner.start()
+            if not await owner.wait_ready(self._connection_timeout):
                 continue
-            for tool in getattr(listed, "tools", None) or []:
-                tools.append(MCPToolAdapter(server=server.name, tool=tool, session=session))
+            for tool in owner.tools:
+                tools.append(
+                    MCPToolAdapter(server=server.name, tool=tool, session=owner.session)
+                )
         return tools
 
     async def aclose(self) -> None:
         """Tear down every session opened by :meth:`open_all` (idempotent)."""
-        await self._stack.aclose()
+        owners, self._owners = self._owners, []
+        for owner in owners:
+            try:
+                await owner.close()
+            except Exception:  # noqa: BLE001 — shutting down must not raise
+                _log.debug("MCP session %r failed to close", owner.server.name, exc_info=True)
 
 
 __all__ = ["MCPManager", "MCPToolAdapter"]

@@ -171,3 +171,14 @@ async def test_subagent_max_iterations_is_still_success():
 
     assert result.success is True
     assert "partial" in result.output
+
+
+def test_subagent_tool_declares_a_per_call_ceiling_above_the_runner_budget():
+    """R2a: the dispatcher needs a ceiling to bound a stuck delegation."""
+
+    class _BoundedRunner(_FakeRunner):
+        timeout_seconds = 600.0
+
+    assert SubAgentTool(runner=_BoundedRunner()).max_duration_seconds == pytest.approx(615.0)
+    # A runner that does not advertise a budget leaves only the turn deadline.
+    assert SubAgentTool(runner=_FakeRunner()).max_duration_seconds is None

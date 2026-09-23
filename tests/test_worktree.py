@@ -10,7 +10,9 @@ from pathlib import Path
 
 import pytest
 
+from ai_coding.core import worktree
 from ai_coding.core.worktree import WorktreeError, WorktreeManager
+from ai_coding.infra.subprocess_runner import ProcessOutcome
 
 pytestmark = pytest.mark.asyncio
 
@@ -91,3 +93,37 @@ async def test_worktrees_land_under_repo_worktrees(git_repo: Path) -> None:
     wt = await mgr.create("x")
     assert str(wt.path).startswith(str(git_repo / "worktrees"))
     await mgr.remove(str(wt.path))
+
+
+# ---- R2b: bounded git ---------------------------------------------------
+# ``_git`` used to await ``communicate()`` with no timeout at all, so one stuck
+# git call froze the whole turn (docs/r2-analysis.md 1.4-B).  An unrealistically
+# small timeout is the honest way to exercise the real code path.
+
+
+async def test_can_isolate_is_false_when_git_times_out(git_repo: Path) -> None:
+    assert await WorktreeManager(git_repo, timeout=0.001).can_isolate() is False
+
+
+async def test_list_returns_empty_when_git_times_out(git_repo: Path) -> None:
+    assert await WorktreeManager(git_repo, timeout=0.001).list() == []
+
+
+async def test_create_raises_worktree_error_when_git_times_out(git_repo: Path) -> None:
+    with pytest.raises(WorktreeError, match="timed out"):
+        await WorktreeManager(git_repo, timeout=0.001).create("slow")
+
+
+async def test_git_spawn_failure_is_mapped(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A runner-level failure must not leak as an OSError to the caller."""
+
+    async def _spawn_error(*_args: object, **_kwargs: object) -> ProcessOutcome:
+        return ProcessOutcome(returncode=None, error="FileNotFoundError: git")
+
+    monkeypatch.setattr(worktree, "run_process_async", _spawn_error)
+    mgr = WorktreeManager(git_repo)
+    assert await mgr.can_isolate() is False
+    with pytest.raises(WorktreeError, match="could not run git"):
+        await mgr.create("x")

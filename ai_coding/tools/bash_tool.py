@@ -1,15 +1,27 @@
-"""Bash tool — run shell commands with timeout and output truncation."""
+"""Bash tool — run shell commands with a hard timeout and output truncation.
+
+R2b: execution goes through :mod:`ai_coding.infra.subprocess_runner` (thread +
+process-group kill) instead of ``asyncio.create_subprocess_shell``, whose
+timeout could never fire while a child held the pipe (docs/r2-analysis.md 1.4-A).
+The command runs in ``ctx.workspace`` — the description always promised that,
+but the old implementation silently inherited the process CWD, which would send
+a sub-agent's shell writes into the parent's tree.
+"""
 
 from __future__ import annotations
 
-import asyncio
+from pathlib import Path
 from typing import Any
 
 from ai_coding.domain.message import ToolResult
-from ai_coding.tools.base import BaseTool, ToolContext
+from ai_coding.infra.subprocess_runner import run_process_async
+from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 _DEFAULT_TIMEOUT = 60
 _DEFAULT_MAX_OUTPUT = 50_000
+# The dispatcher's per-call ceiling sits above the command timeout so the runner
+# (not the budget watchdog) is what normally stops a runaway command.
+_TIMEOUT_GRACE = 15.0
 
 
 class BashTool(BaseTool):
@@ -49,6 +61,11 @@ class BashTool(BaseTool):
             "required": ["command"],
         }
 
+    @property
+    def max_duration_seconds(self) -> float:
+        """Per-call ceiling for the dispatcher (R2a): the command timeout + grace."""
+        return self._timeout + _TIMEOUT_GRACE
+
     async def execute(
         self, params: dict[str, Any], ctx: ToolContext | None = None
     ) -> ToolResult:
@@ -56,40 +73,60 @@ class BashTool(BaseTool):
         if not command.strip():
             return ToolResult(success=False, output="error: empty command")
 
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=self._timeout
-                )
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                return ToolResult(
-                    success=False,
-                    output=f"timeout: command exceeded {self._timeout}s limit",
-                )
-        except (OSError, ValueError) as exc:
-            return ToolResult(success=False, output=f"failed to start command: {exc}")
+        outcome = await run_process_async(
+            command,
+            shell=True,
+            cwd=self._workspace_dir(ctx),
+            timeout=self._timeout,
+            max_output_chars=self._max_output,
+        )
 
-        stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
-        output = (stdout + stderr) if stderr else stdout
+        if outcome.error is not None:
+            return ToolResult(
+                success=False,
+                output=f"failed to start command: {outcome.error}",
+                error="spawn_failed",
+                data={"duration_seconds": round(outcome.duration_seconds, 3)},
+            )
+
+        output = (outcome.stdout + outcome.stderr) if outcome.stderr else outcome.stdout
+        data: dict[str, Any] = {
+            "exit_code": outcome.returncode,
+            "timed_out": outcome.timed_out,
+            "duration_seconds": round(outcome.duration_seconds, 3),
+        }
+
+        if outcome.timed_out:
+            # Partial output is kept: it often says where the command got stuck.
+            note = f"timeout: command exceeded {self._timeout}s limit"
+            return ToolResult(
+                success=False,
+                output=f"{note}\n{output}" if output else note,
+                error="timeout",
+                data=data,
+            )
 
         if len(output) > self._max_output:
-            total = len(stdout + stderr)
-            output = output[: self._max_output] + f"\n... [truncated, total {total} chars]"
+            output = output[: self._max_output] + (
+                f"\n... [truncated, total {len(output)} chars]"
+            )
 
-        if proc.returncode == 0:
-            return ToolResult(success=True, output=output or "")
+        if outcome.returncode == 0:
+            return ToolResult(success=True, output=output, data=data)
         return ToolResult(
             success=False,
-            output=output or f"command exited with code {proc.returncode}",
+            output=output or f"command exited with code {outcome.returncode}",
+            error="nonzero_exit",
+            data=data,
         )
+
+    @staticmethod
+    def _workspace_dir(ctx: ToolContext | None) -> str | None:
+        """``ctx.workspace`` when it is a real directory, else inherit the CWD."""
+        workspace = resolve_ctx(ctx).workspace
+        if workspace and Path(workspace).is_dir():
+            return workspace
+        return None
 
 
 __all__ = ["BashTool"]

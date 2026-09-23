@@ -29,6 +29,7 @@ from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.worktree import WorktreeError
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.subagent import ParentContext, SubagentResult
+from ai_coding.infra.deadline import DeadlineExpired, run_with_deadline
 from ai_coding.infra.json_utils import to_json_pretty
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.tools.registry import ToolRegistry
@@ -40,10 +41,15 @@ BuildTools = Callable[[str | None], ToolRegistry]
 _STATUS_MAP: dict[str, str] = {
     "completed": "completed",
     "max_iterations": "max_iterations",
+    "timeout": "timeout",
     "stopped": "error",
     "aborted": "error",
     "error": "error",
 }
+
+# Fraction of the sub-agent's budget the *inner* turn deadline may use; the rest
+# is left for finalisation and for the outer backstop (R2a).
+_INNER_BUDGET_RATIO = 0.9
 
 
 class _NullSessions:
@@ -82,6 +88,11 @@ class SubAgentRunner:
         self._approval = approval if approval is not None else AutoApproveCallback()
         self._workspace = workspace
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrent)))
+
+    @property
+    def timeout_seconds(self) -> float:
+        """The budget the tool layer advertises as this runner's per-call ceiling."""
+        return self._timeout
 
     async def run(
         self,
@@ -136,12 +147,20 @@ class SubAgentRunner:
             registry,
             approval=self._approval,
             prompt=prompt,
-            settings=self._settings,
+            settings=self._subagent_settings(),
             workspace=workdir or self._workspace,
         )
         try:
-            await asyncio.wait_for(loop.process_input(session, task), timeout=self._timeout)
-        except TimeoutError:
+            # The inner loop has its own (slightly tighter) turn deadline, so it
+            # normally finalises itself and reports a status.  This outer call is
+            # a backstop for a loop that is stuck inside something that ignores
+            # cancellation — ``asyncio.wait_for`` could not bound that.
+            await run_with_deadline(
+                loop.process_input(session, task),
+                timeout=self._timeout,
+                label="subagent_turn",
+            )
+        except DeadlineExpired:
             return SubagentResult(
                 status="timeout",
                 error=f"exceeded {self._timeout:g}s",
@@ -153,6 +172,16 @@ class SubAgentRunner:
             except Exception:  # noqa: BLE001 — releasing resources must not mask the result
                 pass
         return self._packet(loop, session, workdir)
+
+    def _subagent_settings(self) -> AIConfig:
+        """Settings for the sub-turn: its own wall-clock ceiling (R2a)."""
+        configured = float(getattr(self._settings, "turn_timeout_seconds", 0.0) or 0.0)
+        budget = self._timeout * _INNER_BUDGET_RATIO
+        if configured > 0:
+            budget = min(budget, configured)
+        return self._settings.model_copy(
+            update={"turn_timeout_seconds": max(budget, 0.01)}
+        )
 
     def _packet(
         self, loop: AgentLoop, session: SessionData, workdir: str | None
@@ -166,7 +195,7 @@ class SubAgentRunner:
             if session.task is not None
             else ()
         )
-        is_error = status == "error"
+        is_error = status in {"error", "timeout"}
         result = SubagentResult(
             status=status,
             conclusion=conclusion,

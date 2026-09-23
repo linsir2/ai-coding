@@ -24,9 +24,11 @@ def test_step_result_carries_tool_calls():
 
 
 def test_turn_status_members():
+    # R2a added "timeout": the turn watchdog needs a terminal state of its own.
     assert {s.value for s in TurnStatus} == {
         "completed",
         "max_iterations",
+        "timeout",
         "stopped",
         "aborted",
         "error",

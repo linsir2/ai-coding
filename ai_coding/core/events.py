@@ -72,6 +72,9 @@ class ToolFinished:
     success: bool
     output_preview: str = ""
     duration_ms: int = 0
+    # Machine-readable failure code (R2a): "tool_timeout", "denied", "unknown_tool",
+    # "not_approved", "stopped", "skipped", "tool_error"… None means success.
+    error: str | None = None
 
 
 @dataclass(frozen=True)

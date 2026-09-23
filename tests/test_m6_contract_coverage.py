@@ -354,3 +354,36 @@ def test_console_delta_info_error_rule_render():
     assert "note" in text
     assert "bad" in text
     assert "H" in text
+
+
+def test_console_observer_reports_a_timed_out_turn():
+    """R2a: a turn the watchdog cut short must say so instead of looking empty."""
+    from rich.console import Console
+
+    from ai_coding.core.events import TurnFinished
+    from ai_coding.domain.loop import TurnOutcome, TurnStatus
+    from ai_coding.ui.console import ConsoleObserver, DialogueConsole
+
+    c = Console(record=True, width=80)
+    observer = ConsoleObserver(DialogueConsole(c))
+    observer.on_event(
+        TurnFinished(
+            outcome=TurnOutcome(
+                status=TurnStatus.TIMEOUT, reason="turn deadline exceeded: model_step"
+            )
+        )
+    )
+    assert "timed out" in c.export_text()
+
+
+def test_console_observer_stays_quiet_on_a_completed_turn():
+    from rich.console import Console
+
+    from ai_coding.core.events import TurnFinished
+    from ai_coding.domain.loop import TurnOutcome, TurnStatus
+    from ai_coding.ui.console import ConsoleObserver, DialogueConsole
+
+    c = Console(record=True, width=80)
+    observer = ConsoleObserver(DialogueConsole(c))
+    observer.on_event(TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED)))
+    assert c.export_text().strip() == ""

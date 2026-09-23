@@ -298,6 +298,82 @@ async def test_subagent_timeout_returns_timeout_status(tmp_path):
     assert engine.closed is True  # the engine is always released
 
 
+# ---- R2a: a sub-agent is bounded too ---------------------------------------
+# The parent used ``asyncio.wait_for`` around the sub-agent's turn, which cannot
+# bound a tool that ignores cancellation.  Now the sub-turn carries its own
+# deadline and the outer wait is only a backstop (docs/r2-analysis.md section 6.8).
+
+
+@pytest.mark.asyncio
+async def test_subagent_timeout_packet_carries_a_reason(tmp_path):
+    engine = _Engine(hang=True)
+    result = await _runner(engine, timeout=0.05).run("t")
+    assert result.status == "timeout"
+    assert result.error  # the parent must learn *why*, not just "timeout"
+
+
+@pytest.mark.asyncio
+async def test_subagent_turn_deadline_stops_it_before_the_outer_wait(tmp_path):
+    """The inner loop's own ceiling fires first and produces a clean packet."""
+    engine = _Engine(hang=True)
+    settings = AIConfig(stop_policy="natural", turn_timeout_seconds=0.1)
+    result = await _runner(engine, timeout=30, settings=settings).run("t")
+
+    assert result.status == "timeout"
+    assert result.error is not None and "deadline" in result.error
+
+
+@pytest.mark.asyncio
+async def test_stuck_tool_in_a_subagent_returns_a_structured_timeout(tmp_path):
+    """A hanging tool must not hang the sub-agent (nor the parent)."""
+
+    class _HangingTool(BaseTool):
+        # A declared ceiling (like bash/subAgent have) so the turn keeps time to
+        # recover; a tool without one legitimately consumes the whole budget.
+        max_duration_seconds = 0.1
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @property
+        def name(self) -> str:
+            return "reader"
+
+        @property
+        def description(self) -> str:
+            return "hangs"
+
+        @property
+        def params_json_schema(self) -> dict:
+            return {"type": "object", "properties": {}}
+
+        async def execute(self, params, ctx=None):  # type: ignore[override]
+            self.calls += 1
+            await asyncio.sleep(30)
+            return ToolResult(success=True, output="never")
+
+    tool = _HangingTool()
+    engine = _Engine(
+        [
+            StepResult(
+                text=None,
+                tool_calls=[ToolCallRef(id="c1", name="reader", arguments="{}")],
+                finish_reason="tool_calls",
+            ),
+            StepResult(text="recovered"),
+        ]
+    )
+    settings = AIConfig(stop_policy="natural", turn_timeout_seconds=0.4)
+    result = await _runner(
+        engine, registry=_registry(tool), timeout=30, settings=settings
+    ).run("t")
+
+    assert result.status == "completed"
+    assert result.conclusion == "recovered"
+    second_request = engine.requests[1]["messages"]
+    assert any(message.role == "tool" for message in second_request)
+
+
 @pytest.mark.asyncio
 async def test_subagent_engine_error_returns_error_status(tmp_path):
     engine = _Engine([EngineError("boom")])

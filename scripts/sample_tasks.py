@@ -19,6 +19,8 @@ The scenarios are chosen to exercise machinery the unit tests can only simulate:
   4 bash-deny   a dangerous command is refused with a structured denial the model
                 can read, and nothing is executed
   5 subagent    delegation returns a structured packet and writes a ledger
+  6 watchdog    a command that would outlive the turn budget (R2a) is cut short
+                and the turn still ends with a legal transcript
 
 This is a *sample*, not a test suite: it asserts on observable outcomes rather
 than exact wording, so it stays useful as models and prompts drift.
@@ -31,6 +33,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -57,12 +60,9 @@ def _without_bash(app_cfg):
     """Return a config with bash disabled.
 
     Used by the scenarios that are about *another* feature (writing files,
-    delegation).  Without this, a model that decides to verify its work with
-    `bash` hits this sandbox limitation — `asyncio` subprocess pipes never reach
-    EOF here, so `communicate()` never returns and its cancellation never
-    completes, which means even `asyncio.wait_for` cannot deliver its timeout.
-    That is an environment defect, not a product one, and it should not mask the
-    feature under test.
+    delegation), so a model that decides to verify its work with `bash` cannot
+    dilate the scenario.  (R2b fixed the underlying hang, but focus is still
+    cheaper than luck.)
     """
     cfg = app_cfg.model_copy(deep=True)
     cfg.tools.bash.enabled = False
@@ -165,7 +165,7 @@ async def s3_write_edit(app_cfg, root: Path) -> tuple[bool, str]:
 
 
 async def s4_bash_ok(app_cfg, root: Path) -> tuple[bool, str]:
-    """The bash tool runs a harmless command (fails in sandboxes without subprocesses)."""
+    """The bash tool runs a harmless command and reports a structured result."""
     ws = root / "bash_ok"
     ws.mkdir()
     sessions = SessionService(ws / "sessions")
@@ -178,10 +178,12 @@ async def s4_bash_ok(app_cfg, root: Path) -> tuple[bool, str]:
     finally:
         await loop.aclose()
     bash = _tool_messages(session, "bash")
+    # The feedback envelope marks *failures* with ok="false"; a success has no
+    # ``ok`` attribute at all (domain/run.py), so assert on that plus the output.
     succeeded = [
         m
         for m in bash
-        if 'ok="true"' in (m.content or "") and "hello-from-bash" in (m.content or "")
+        if 'ok="false"' not in (m.content or "") and "hello-from-bash" in (m.content or "")
     ]
     return bool(succeeded), f"bash_calls={len(bash)} succeeded={len(succeeded)}"
 
@@ -247,6 +249,41 @@ async def s5_subagent(app_cfg, root: Path) -> tuple[bool, str]:
     return ok, f"subagent_calls={len(subs)} ledgers={len(ledgers)} answer={(answer or '')[:40]!r}"
 
 
+async def s6_watchdog(app_cfg, root: Path) -> tuple[bool, str]:
+    """R2a: a command that outlives the turn budget must not hang the turn."""
+    ws = root / "watchdog"
+    ws.mkdir()
+    cfg = app_cfg.model_copy(deep=True)
+    cfg.ai.stop_policy = "natural"
+    cfg.ai.turn_timeout_seconds = 20.0  # the turn ceiling under test
+    cfg.tools.bash.enabled = True
+    cfg.tools.bash.timeout_seconds = 300  # the command itself would run 5 minutes
+    sessions = SessionService(ws / "sessions")
+    loop = _loop(cfg, ws, sessions)
+    session = sessions.create()
+    started = time.monotonic()
+    try:
+        await loop.process_input(
+            session,
+            "必须使用 bash 工具执行这一条命令，不要解释、不要做别的事：sleep 300",
+        )
+    finally:
+        await loop.aclose()
+    elapsed = time.monotonic() - started
+
+    outcome = loop.last_outcome
+    bash_messages = _tool_messages(session, "bash")
+    budgeted = any("budget" in (message.content or "") for message in bash_messages)
+    before = [message.role for message in session.messages]
+    session.ensure_tool_pairing()
+    pairing_ok = [message.role for message in session.messages] == before
+    ok = elapsed < 60.0 and bool(bash_messages) and budgeted and pairing_ok
+    return ok, (
+        f"elapsed={elapsed:.1f}s status={outcome.status.value if outcome else None} "
+        f"bash_calls={len(bash_messages)} budgeted={budgeted} pairing_ok={pairing_ok}"
+    )
+
+
 SCENARIOS = [
     ("mcp-off", s0_mcp_off),
     ("read", s1_read),
@@ -255,6 +292,7 @@ SCENARIOS = [
     ("bash-ok", s4_bash_ok),
     ("bash-deny", s4_bash_deny),
     ("subagent", s5_subagent),
+    ("watchdog", s6_watchdog),
 ]
 
 # A scenario that stalls must not swallow the whole run.  150s is generous for a

@@ -17,7 +17,9 @@ from ai_coding.core.events import (
     TaskUpdated,
     ToolFinished,
     ToolStarted,
+    TurnFinished,
 )
+from ai_coding.domain.loop import TurnStatus
 
 _ANSWER_STYLE = "cyan"
 _INFO_STYLE = "green"
@@ -73,6 +75,11 @@ class ConsoleObserver:
             self._c.info(f"  -> {mark}{': ' + preview if preview else ''}")
         elif isinstance(event, TaskUpdated):
             self._c.info(event.task.render())
+        elif isinstance(event, TurnFinished):
+            # Only the abnormal endings deserve a line: the normal ones are
+            # already visible as streamed prose (R2a).
+            if event.outcome.status is TurnStatus.TIMEOUT:
+                self._c.info(f"[turn] timed out: {event.outcome.reason}")
 
 
 __all__ = ["DialogueConsole", "ConsoleObserver"]

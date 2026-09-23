@@ -7,6 +7,7 @@ and bash with a hard-deny pattern is DENY.
 """
 
 import asyncio
+import time
 
 import pytest
 
@@ -19,6 +20,7 @@ from ai_coding.core.events import (
 )
 from ai_coding.domain.message import ToolCallRef, ToolResult
 from ai_coding.domain.task import TaskState
+from ai_coding.infra.deadline import Deadline
 from ai_coding.security.approval import ApprovalResult
 from ai_coding.security.permission_gate import PermissionGate
 from ai_coding.tools.base import BaseTool, ToolContext
@@ -459,3 +461,115 @@ def test_dispatch_outcome_defaults():
     )
     assert outcome.denied is False
     assert outcome.halted is False
+
+
+# ---- R2a: per-call budgets ---------------------------------------------
+# A call must be bounded even when the tool itself has no timeout, and a stuck
+# call must come back as a *structured* result so the transcript stays valid and
+# the model can react (docs/r2-analysis.md section 7.2).
+
+
+class _BudgetedTool(_FakeTool):
+    """Declares its own per-call ceiling, and can hang like ``communicate()``."""
+
+    def __init__(self, name: str, *, seconds: float | None, hang: bool = False, **kwargs):
+        super().__init__(name, **kwargs)
+        self._seconds = seconds
+        self._hang = hang
+
+    @property
+    def max_duration_seconds(self) -> float | None:
+        return self._seconds
+
+    async def execute(self, params, ctx=None):  # type: ignore[override]
+        if not self._hang:
+            return await super().execute(params, ctx)
+        self.params_seen.append(params)
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)
+            raise
+        return ToolResult(success=True, output="never")
+
+
+@pytest.mark.asyncio
+async def test_call_timeout_returns_structured_tool_timeout():
+    tool = _BudgetedTool("read", seconds=0.05, hang=True)
+    outcomes = await _dispatcher([tool]).dispatch_batch([_ref("t1", "read")], _ctx())
+
+    result = outcomes[0].result
+    assert outcomes[0].denied is False
+    assert result.success is False
+    assert result.error == "tool_timeout"
+    assert result.data is not None
+    assert result.data["tool"] == "read"
+    assert result.data["timeout_seconds"] == pytest.approx(0.05)
+
+
+@pytest.mark.asyncio
+async def test_expired_deadline_skips_execution():
+    tool = _FakeTool("read")
+    outcomes = await _dispatcher([tool]).dispatch_batch(
+        [_ref("t1", "read")], _ctx(), deadline=Deadline.after(-1)
+    )
+
+    assert tool.executed is False
+    assert outcomes[0].result.error == "tool_timeout"
+    assert outcomes[0].result.data is not None
+    assert outcomes[0].result.data["reason"] == "turn_budget_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_max_duration_is_capped_by_remaining_turn_budget():
+    """The tighter of (tool ceiling, turn budget) wins."""
+    tool = _BudgetedTool("read", seconds=30.0, hang=True)
+    started = time.monotonic()
+    outcomes = await _dispatcher([tool]).dispatch_batch(
+        [_ref("t1", "read")], _ctx(), deadline=Deadline.after(0.05)
+    )
+
+    assert outcomes[0].result.error == "tool_timeout"
+    assert outcomes[0].result.data is not None
+    # The budget comes from a live clock, so compare with a sane tolerance.
+    assert outcomes[0].result.data["timeout_seconds"] == pytest.approx(0.05, abs=0.01)
+    assert time.monotonic() - started < 1.0
+
+
+@pytest.mark.asyncio
+async def test_parallel_batch_each_call_gets_its_own_budget():
+    tools = [
+        _BudgetedTool("read", seconds=0.05, hang=True, parallel_safe=True),
+        _BudgetedTool("glob", seconds=0.05, hang=True, parallel_safe=True),
+    ]
+    registry = ToolRegistry()
+    for tool in tools:
+        registry.register(tool)
+    dispatcher = ToolDispatcher(registry, PermissionGate())
+
+    started = time.monotonic()
+    outcomes = await dispatcher.dispatch_batch(
+        [_ref("t1", "read"), _ref("t2", "glob")], _ctx()
+    )
+
+    assert [outcome.result.error for outcome in outcomes] == [
+        "tool_timeout",
+        "tool_timeout",
+    ]
+    assert time.monotonic() - started < 1.0
+
+
+@pytest.mark.asyncio
+async def test_tool_finished_event_carries_the_error_code():
+    tool = _BudgetedTool("read", seconds=0.05, hang=True)
+    observer = RecordingObserver()
+    registry = ToolRegistry()
+    registry.register(tool)
+    dispatcher = ToolDispatcher(registry, PermissionGate(), observer=observer)
+
+    await dispatcher.dispatch_batch([_ref("t1", "read")], _ctx())
+
+    finished = observer.of_type(ToolFinished)
+    assert len(finished) == 1
+    assert finished[0].success is False
+    assert finished[0].error == "tool_timeout"

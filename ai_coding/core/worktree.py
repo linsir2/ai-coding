@@ -7,11 +7,14 @@ wraps the ``git worktree`` plumbing behind a small async API and an
 
 Everything degrades loudly on non-repo dirs (``can_isolate()`` returns False)
 and managed errors surface as :class:`WorktreeError`.
+
+R2b: every ``git`` call is bounded (``infra.subprocess_runner``).  The old code
+awaited ``communicate()`` with no timeout at all, so one stuck git call froze the
+whole turn (docs/r2-analysis.md 1.4-B).
 """
 
 from __future__ import annotations
 
-import asyncio
 import re
 import shutil
 import uuid
@@ -20,8 +23,11 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from ai_coding.infra.subprocess_runner import run_process_async
+
 _BRANCH_PREFIX = "ai_sub_"
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
+_DEFAULT_GIT_TIMEOUT = 60.0
 
 
 class WorktreeError(Exception):
@@ -45,37 +51,48 @@ def _sanitize(name: str) -> str:
 class WorktreeManager:
     """Create/remove/list git worktrees rooted under a repository."""
 
-    def __init__(self, repo_root: str | Path, base_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        repo_root: str | Path,
+        base_dir: str | Path | None = None,
+        *,
+        timeout: float = _DEFAULT_GIT_TIMEOUT,
+    ) -> None:
         self._root = Path(repo_root).expanduser().resolve()
         self._base = (
             Path(base_dir).expanduser().resolve()
             if base_dir is not None
             else self._root / "worktrees"
         )
+        self._timeout = float(timeout)
 
     async def _git(self, *args: str) -> tuple[int, str]:
-        proc = await asyncio.create_subprocess_exec(
-            "git",
-            *args,
-            cwd=str(self._root),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        """Run one bounded git command; failures and timeouts raise WorktreeError."""
+        outcome = await run_process_async(
+            ("git", *args), cwd=str(self._root), timeout=self._timeout
         )
-        stdout, stderr = await proc.communicate()
-        text = (stdout + stderr).decode("utf-8", errors="replace").strip()
-        return (proc.returncode or 0), text
+        verb = args[0] if args else "git"
+        if outcome.error is not None:
+            raise WorktreeError(f"could not run git {verb}: {outcome.error}")
+        if outcome.timed_out:
+            raise WorktreeError(f"git {verb} timed out after {self._timeout:g}s")
+        text = (outcome.stdout + outcome.stderr).strip()
+        return (outcome.returncode or 0), text
 
     async def can_isolate(self) -> bool:
         """True when the root is inside a git work tree and git is callable."""
         try:
             code, _ = await self._git("rev-parse", "--is-inside-work-tree")
             return code == 0
-        except (OSError, ValueError):
+        except (OSError, ValueError, WorktreeError):
             return False
 
     async def list(self) -> list[str]:
         """Return the absolute paths of all linked worktrees."""
-        code, text = await self._git("worktree", "list", "--porcelain")
+        try:
+            code, text = await self._git("worktree", "list", "--porcelain")
+        except WorktreeError:
+            return []
         if code != 0:
             return []
         paths: list[str] = []

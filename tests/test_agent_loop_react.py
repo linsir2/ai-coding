@@ -8,6 +8,7 @@ one step at a time and assert the loop's own choreography.
 """
 
 import asyncio
+import time
 
 import pytest
 
@@ -719,3 +720,180 @@ async def test_open_todos_persist_across_turns(tmp_path):
     assert session.task is not None and session.task.total == 1
     second_request = _request_messages(engine2)[-1]
     assert "ship it" in (second_request.content or "")
+
+
+# ---- R2a: the turn watchdog ------------------------------------------------
+# Iteration counts cannot bound a call that never returns, so the loop needs a
+# wall-clock ceiling: any stuck step or tool must still produce a terminal
+# TurnOutcome (docs/r2-analysis.md section 2/R2a, section 7.3).
+
+
+class _HangingTool(BaseTool):
+    """Never returns, and is slow to acknowledge cancellation."""
+
+    def __init__(self, name: str = "read", *, ceiling: float | None = 0.1) -> None:
+        self._name = name
+        self._ceiling = ceiling
+        self.calls = 0
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def max_duration_seconds(self) -> float | None:
+        return self._ceiling
+
+    @property
+    def description(self) -> str:
+        return "hangs forever"
+
+    @property
+    def params_json_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, params, ctx=None):  # type: ignore[override]
+        self.calls += 1
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)  # like communicate() with a live grandchild
+            raise
+        return ToolResult(success=True, output="never")
+
+
+class _HangingEngine(ChatEngine):
+    """A model step that never returns (the deadline must abandon it)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        self.calls += 1
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)
+            raise
+        raise AssertionError("unreachable")
+
+
+class _SlowEngine(ChatEngine):
+    """Answers correctly, just not instantly."""
+
+    def __init__(self, delay: float, text: str) -> None:
+        self._delay = delay
+        self._text = text
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        await asyncio.sleep(self._delay)
+        return StepResult(text=self._text, finish_reason="stop")
+
+
+class _HangsAfterFirstStep(ChatEngine):
+    """First step asks for a tool that times out; the second never returns."""
+
+    def __init__(self, ref: ToolCallRef) -> None:
+        self._first = StepResult(text=None, tool_calls=[ref], finish_reason="tool_calls")
+        self.calls = 0
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        self.calls += 1
+        if self.calls == 1:
+            return self._first
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)
+            raise
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.asyncio
+async def test_turn_deadline_ends_turn_as_timeout(tmp_path):
+    sessions = SessionService(tmp_path / "sessions")
+    observer = RecordingObserver()
+    loop = _loop(
+        _HangingEngine(),
+        sessions,
+        observer=observer,
+        settings=_settings(turn_timeout_seconds=0.2),
+    )
+    session = sessions.create()
+
+    started = time.monotonic()
+    text = await loop.process_input(session, "go")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0, f"the watchdog let the turn run {elapsed:.1f}s"
+    assert text == ""
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.status is TurnStatus.TIMEOUT
+    assert "turn deadline" in loop.last_outcome.reason
+    assert isinstance(observer.events[-1], TurnFinished)
+    assert observer.events[-1].outcome.status is TurnStatus.TIMEOUT
+    assert sessions.load(session.session_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_turn_deadline_after_a_tool_timeout_leaves_a_valid_transcript(tmp_path):
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        _HangsAfterFirstStep(_ref("c1", "read")),
+        sessions,
+        registry=_registry(_HangingTool("read")),
+        settings=_settings(turn_timeout_seconds=0.4),
+    )
+    session = sessions.create()
+
+    await loop.process_input(session, "go")
+
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.status is TurnStatus.TIMEOUT
+    roles = [message.role for message in session.messages]
+    assert "tool" in roles  # the timed-out call still got a paired result
+    session.ensure_tool_pairing()
+    assert [message.role for message in session.messages] == roles
+
+
+@pytest.mark.asyncio
+async def test_tool_timeout_lets_the_model_recover(tmp_path):
+    tool = _HangingTool("read")
+    engine = ScriptedEngine([_calls(_ref("c1", "read")), _text("recovered")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        engine,
+        sessions,
+        registry=_registry(tool),
+        settings=_settings(turn_timeout_seconds=5),
+    )
+    session = sessions.create()
+
+    started = time.monotonic()
+    text = await loop.process_input(session, "go")
+
+    assert text == "recovered"
+    assert time.monotonic() - started < 3.0
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.status is TurnStatus.COMPLETED
+    assert loop.last_outcome.iterations == 2
+    tool_messages = [message for message in session.messages if message.role == "tool"]
+    assert len(tool_messages) == 1
+    assert "budget" in (tool_messages[0].content or "")
+    # The model saw the failure on the next step instead of waiting forever.
+    # (The last message is the volatile task-state block, so look for the tool.)
+    assert "tool" in [message.role for message in engine.requests[1]["messages"]]
+
+
+@pytest.mark.asyncio
+async def test_zero_turn_timeout_disables_the_watchdog(tmp_path):
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        _SlowEngine(0.15, "slow but fine"),
+        sessions,
+        settings=_settings(turn_timeout_seconds=0),
+    )
+
+    assert await loop.process_input(sessions.create(), "go") == "slow but fine"
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.status is TurnStatus.COMPLETED

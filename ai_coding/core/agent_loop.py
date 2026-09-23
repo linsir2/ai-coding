@@ -43,11 +43,19 @@ from ai_coding.core.events import (
     TaskUpdated,
     TurnFinished,
 )
+from ai_coding.core.turn_policy import (
+    TaskInjection,
+    TurnAction,
+    TurnPolicy,
+    TurnPolicyConfig,
+    TurnSnapshot,
+)
 from ai_coding.domain.loop import TurnOutcome, TurnStatus
 from ai_coding.domain.message import ChatMessage, ToolArtifact, ToolOutput
 from ai_coding.domain.run import assistant_message, tool_message, user_message
 from ai_coding.domain.session import SessionData
-from ai_coding.domain.task import TaskState, TodoItem
+from ai_coding.domain.task import TaskState
+from ai_coding.infra.deadline import Deadline, DeadlineExpired, run_with_deadline
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.security.approval import ApprovalCallback
 from ai_coding.security.permission_gate import PermissionGate
@@ -67,9 +75,6 @@ DeltaSink = Callable[[str], None]
 
 _log = logging.getLogger(__name__)
 
-TASK_MESSAGE_LEAD = "以下是你自己的任务清单状态（系统注入，不是用户发言）："
-TASK_GATE_LEAD = "[task-gate] 你还有未完成的任务项："
-TASK_GATE_TAIL = "请继续推进，或把不再需要的条目用 todo_write 标记为 dropped 并说明原因。"
 LONG_SESSION_STRIDE = 3
 
 
@@ -121,6 +126,8 @@ class AgentLoop:
         self.settings = settings or AIConfig()
         self.workspace = workspace
         self.observer: LoopObserver = _SafeObserver(observer or NullObserver())
+        # Task injection + stop policy live in their own pure unit (R2c).
+        self.policy = TurnPolicy(TurnPolicyConfig.from_ai_config(self.settings))
         self._tool_schemas = tool_schemas(tools)
         self.dispatcher = ToolDispatcher(
             tools,
@@ -152,8 +159,10 @@ class AgentLoop:
             session.task = TaskState(goal=user_input)
         task = session.task
 
-        settings = self.settings
-        max_iterations = max(1, int(settings.max_tool_iterations))
+        policy = self.policy
+        max_iterations = policy.config.max_iterations
+        turn_timeout = float(getattr(self.settings, "turn_timeout_seconds", 0.0) or 0.0)
+        deadline = Deadline.after(turn_timeout) if turn_timeout > 0 else None
         iterations = 0
         nudges = 0
         last_text: str | None = None
@@ -162,21 +171,51 @@ class AgentLoop:
         )
 
         try:
-            for index in range(1, max_iterations + 1):
+            index = 0
+            while True:
+                index += 1
+                budget_expired = deadline is not None and deadline.expired
+                decision = policy.decide_next_iteration(
+                    TurnSnapshot(iteration=index, nudges=nudges),
+                    budget_expired=budget_expired,
+                )
+                if decision.action is TurnAction.FINISH:
+                    outcome = TurnOutcome(
+                        status=(
+                            TurnStatus.TIMEOUT if budget_expired else TurnStatus.MAX_ITERATIONS
+                        ),
+                        text=last_text,
+                        iterations=iterations,
+                        reason=decision.reason,
+                    )
+                    break
+
                 iterations = index
                 self._emit(IterationStarted(index=index, max_iterations=max_iterations))
 
                 history = session.messages
                 if self.context is not None:
-                    history = await self.context.compress(history)
-                instructions = await self._build_instructions(history)
-                request, instructions = self._inject_task(history, instructions, task)
+                    history = await self._compress(history, deadline)
+                instructions = await self._build_instructions(history, deadline)
+                injection: TaskInjection = policy.inject_task(task, instructions)
+                instructions = injection.instructions
+                request = (
+                    list(history)
+                    if injection.message is None
+                    else [*history, injection.message]
+                )
 
-                step = await self.engine.step(
-                    request,
-                    tools=self._tool_schemas,
-                    instructions=instructions,
-                    on_delta=on_delta,
+                # The one wait that cannot degrade: a model step either answers or
+                # the turn ends (docs/r2-analysis.md §7.3).
+                step = await run_with_deadline(
+                    self.engine.step(
+                        request,
+                        tools=self._tool_schemas,
+                        instructions=instructions,
+                        on_delta=on_delta,
+                    ),
+                    timeout=self._remaining(deadline),
+                    label="model_step",
                 )
                 last_text = step.text
                 self._emit(
@@ -185,33 +224,33 @@ class AgentLoop:
                 session.add_message(assistant_message(step, now_utc()))
 
                 if not step.tool_calls:
-                    open_items = task.open_items()
-                    # "strict" never gives up early: the iteration budget is its
-                    # only bound (docs/r1-analysis.md D5).  The other two policies
-                    # stop once the nudge cap is reached.
-                    nudges_exhausted = (
-                        settings.stop_policy != "strict"
-                        and nudges >= settings.max_todo_nudges
+                    decision = policy.decide_after_step(
+                        TurnSnapshot(
+                            iteration=index,
+                            nudges=nudges,
+                            open_items=tuple(task.open_items()),
+                            final_text=step.text,
+                        )
                     )
-                    if (
-                        settings.stop_policy == "natural"
-                        or not open_items
-                        or nudges_exhausted
-                    ):
+                    if decision.action is TurnAction.FINISH:
                         outcome = TurnOutcome(
                             status=TurnStatus.COMPLETED,
                             text=step.text,
                             iterations=index,
-                            reason="model finished",
+                            reason=decision.reason,
                         )
                         break
                     nudges += 1
-                    session.add_message(user_message(self._nudge_text(open_items), now_utc()))
+                    session.add_message(
+                        user_message(decision.inject or "", now_utc())
+                    )
                     self._checkpoint(session, index)
                     continue
 
                 outcomes = await self.dispatcher.dispatch_batch(
-                    step.tool_calls, self._tool_context(session, task, history, instructions)
+                    step.tool_calls,
+                    self._tool_context(session, task, history, instructions),
+                    deadline=deadline,
                 )
                 self._write_tool_messages(session, outcomes)
                 if any(item.call.name == "todo_write" for item in outcomes):
@@ -226,13 +265,6 @@ class AgentLoop:
                         reason="user stopped the turn",
                     )
                     break
-            else:
-                outcome = TurnOutcome(
-                    status=TurnStatus.MAX_ITERATIONS,
-                    text=last_text,
-                    iterations=iterations,
-                    reason="iteration budget exhausted",
-                )
         except asyncio.CancelledError:
             # Record what happened, persist the partial transcript, then let the
             # cancellation propagate — swallowing it is an asyncio anti-pattern.
@@ -244,6 +276,16 @@ class AgentLoop:
             )
             self._finalize(session, outcome)
             raise
+        except DeadlineExpired as exc:
+            outcome = TurnOutcome(
+                status=TurnStatus.TIMEOUT,
+                text=last_text,
+                iterations=iterations,
+                reason=(
+                    f"turn deadline exceeded: {exc.label} was abandoned after "
+                    f"{exc.timeout:g}s"
+                ),
+            )
         except EngineError as exc:
             outcome = TurnOutcome(
                 status=TurnStatus.ERROR,
@@ -253,7 +295,7 @@ class AgentLoop:
             )
 
         self._finalize(session, outcome)
-        await self._remember(session.messages, outcome.text)
+        await self._remember(session.messages, outcome.text, deadline)
         return outcome.text or ""
 
     async def aclose(self) -> None:
@@ -262,13 +304,43 @@ class AgentLoop:
 
     # ---- request assembly -------------------------------------------------
 
-    async def _build_instructions(self, history: list[ChatMessage]) -> str | None:
+    @staticmethod
+    def _remaining(deadline: Deadline | None) -> float | None:
+        """Seconds left in the turn, or ``None`` when there is no ceiling."""
+        if deadline is None:
+            return None
+        return max(deadline.remaining(), 0.0)
+
+    async def _compress(
+        self, history: list[ChatMessage], deadline: Deadline | None = None
+    ) -> list[ChatMessage]:
+        """Compaction is an optimisation: on timeout the raw history is used."""
+        if self.context is None:
+            return history
+        try:
+            return await run_with_deadline(
+                self.context.compress(history),
+                timeout=self._remaining(deadline),
+                label="context_compress",
+            )
+        except DeadlineExpired:
+            _log.debug("context compression ran out of budget; using the raw history")
+            return history
+
+    async def _build_instructions(
+        self, history: list[ChatMessage], deadline: Deadline | None = None
+    ) -> str | None:
         if self.prompt is None:
             return None
         memory_catalog = ""
         if self.memory is not None:
             try:
-                memory_catalog = "\n".join(await self.memory.recall(history))
+                recalled = await run_with_deadline(
+                    self.memory.recall(history),
+                    timeout=self._remaining(deadline),
+                    label="memory_recall",
+                )
+                memory_catalog = "\n".join(recalled)
             except Exception:  # noqa: BLE001 — memory is best-effort
                 memory_catalog = ""
         project_text = self.project.load() if self.project is not None else ""
@@ -278,29 +350,6 @@ class AgentLoop:
             skills_catalog=skills_catalog,
             memory_catalog=memory_catalog,
         )
-
-    def _inject_task(
-        self,
-        messages: list[ChatMessage],
-        instructions: str | None,
-        task: TaskState,
-    ) -> tuple[list[ChatMessage], str | None]:
-        """Attach the task list to this request only (never to the session)."""
-        render = task.render()
-        if self.settings.task_injection == "system":
-            merged = f"{instructions}\n\n{render}" if instructions else render
-            return list(messages), merged
-        block = ChatMessage(
-            role="user", content=f"{TASK_MESSAGE_LEAD}\n{render}", timestamp=""
-        )
-        return [*messages, block], instructions
-
-    @staticmethod
-    def _nudge_text(open_items: list[TodoItem]) -> str:
-        lines = [TASK_GATE_LEAD]
-        lines.extend(f"- {item.id}. {item.content}" for item in open_items[:10])
-        lines.append(TASK_GATE_TAIL)
-        return "\n".join(lines)
 
     def _tool_context(
         self,
@@ -357,11 +406,20 @@ class AgentLoop:
         except OSError:
             pass  # persistence is best-effort; never break the turn
 
-    async def _remember(self, messages: list[ChatMessage], conclusion: str | None) -> None:
+    async def _remember(
+        self,
+        messages: list[ChatMessage],
+        conclusion: str | None,
+        deadline: Deadline | None = None,
+    ) -> None:
         if self.memory is None:
             return
         try:
-            await self.memory.remember(messages, conclusion)
+            await run_with_deadline(
+                self.memory.remember(messages, conclusion),
+                timeout=self._remaining(deadline),
+                label="memory_write",
+            )
         except Exception:  # noqa: BLE001 — memory is best-effort
             pass
 

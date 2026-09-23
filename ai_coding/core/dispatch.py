@@ -14,6 +14,12 @@ Design notes (docs/r1a-3-analysis.md §3.3):
   - refusals are structured (``error`` + ``data``), not just prose;
   - after a STOP the remaining calls still get a result, otherwise the declared
     tool_calls would have no matching tool messages and the next request 400s.
+
+R2a adds a per-call budget: every execution is wrapped in a hard deadline
+(``infra.deadline``), bounded by ``min(tool.max_duration_seconds, remaining turn
+budget)``.  A call that runs out of budget comes back as a *structured*
+``ToolResult`` (``error="tool_timeout"``) instead of hanging the turn, so the
+declared tool_calls still pair up and the model can react (docs/r2-analysis.md §7.2).
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from ai_coding.core.events import (
     preview,
 )
 from ai_coding.domain.message import ToolCall, ToolCallRef, ToolResult, tool_call_from_ref
+from ai_coding.infra.deadline import Deadline, DeadlineExpired, run_with_deadline
 from ai_coding.security.approval import ApprovalCallback, ApprovalResult
 from ai_coding.security.permission_gate import (
     Decision,
@@ -77,6 +84,17 @@ def _reason(decision: Any) -> str:
     return str(getattr(decision, "reason", "") or "")
 
 
+def _call_budget(tool: BaseTool, deadline: Deadline | None) -> float | None:
+    """The tighter of the tool's own ceiling and what is left of the turn."""
+    own = getattr(tool, "max_duration_seconds", None)
+    remaining = deadline.remaining() if deadline is not None else None
+    if own is None:
+        return remaining
+    if remaining is None:
+        return float(own)
+    return min(float(own), remaining)
+
+
 class ToolDispatcher:
     """Executes tool calls with permission, approval and bounded concurrency."""
 
@@ -101,6 +119,8 @@ class ToolDispatcher:
         self,
         calls: list[ToolCallRef],
         ctx: ToolContext,
+        *,
+        deadline: Deadline | None = None,
     ) -> list[DispatchOutcome]:
         """Run ``calls`` and return one outcome per call, in the given order."""
         if not calls:
@@ -113,7 +133,7 @@ class ToolDispatcher:
 
             async def run(item: _Prepared) -> DispatchOutcome:
                 async with semaphore:
-                    return await self._handle(item, ctx)
+                    return await self._handle(item, ctx, deadline)
 
             return list(await asyncio.gather(*(run(item) for item in prepared)))
 
@@ -127,7 +147,7 @@ class ToolDispatcher:
                     )
                 )
                 continue
-            outcome = await self._handle(item, ctx)
+            outcome = await self._handle(item, ctx, deadline)
             outcomes.append(outcome)
             halted = outcome.halted
         return outcomes
@@ -151,14 +171,19 @@ class ToolDispatcher:
 
     # ---- one call ---------------------------------------------------------
 
-    async def _handle(self, item: _Prepared, ctx: ToolContext) -> DispatchOutcome:
+    async def _handle(
+        self,
+        item: _Prepared,
+        ctx: ToolContext,
+        deadline: Deadline | None = None,
+    ) -> DispatchOutcome:
         call = item.call
         self.observer.on_event(
             ToolStarted(call_id=call.id, tool_name=call.name, params=dict(call.params))
         )
         started = time.monotonic()
 
-        result, denied, halted = await self._decide(item, ctx)
+        result, denied, halted = await self._decide(item, ctx, deadline)
 
         self.observer.on_event(
             ToolFinished(
@@ -167,12 +192,16 @@ class ToolDispatcher:
                 success=result.success,
                 output_preview=preview(result.output),
                 duration_ms=int((time.monotonic() - started) * 1000),
+                error=result.error,
             )
         )
         return DispatchOutcome(call=call, result=result, denied=denied, halted=halted)
 
     async def _decide(
-        self, item: _Prepared, ctx: ToolContext
+        self,
+        item: _Prepared,
+        ctx: ToolContext,
+        deadline: Deadline | None = None,
     ) -> tuple[ToolResult, bool, bool]:
         """Return ``(result, denied, halted)`` for one prepared call."""
         call = item.call
@@ -195,7 +224,7 @@ class ToolDispatcher:
             if not approved:
                 return self._not_approved(call, "user declined"), True, False
 
-        return await self._execute(item.tool, call, ctx), False, False
+        return await self._execute(item.tool, call, ctx, deadline), False, False
 
     async def _ask(self, call: ToolCall, reason: str) -> tuple[bool, bool]:
         """Prompt the user.  Returns ``(approved, stopped)``; never raises."""
@@ -217,10 +246,27 @@ class ToolDispatcher:
         return False, False
 
     async def _execute(
-        self, tool: BaseTool, call: ToolCall, ctx: ToolContext
+        self,
+        tool: BaseTool,
+        call: ToolCall,
+        ctx: ToolContext,
+        deadline: Deadline | None = None,
     ) -> ToolResult:
+        if deadline is not None and deadline.expired:
+            # Never start work we already know cannot finish.
+            return self._tool_timeout(call, 0.0, "turn_budget_exhausted")
+
+        budget = _call_budget(tool, deadline)
         try:
-            return await tool.execute(call.params, ctx)
+            return await run_with_deadline(
+                tool.execute(call.params, ctx),
+                timeout=budget,
+                label=f"tool:{call.name}",
+            )
+        except DeadlineExpired:
+            return self._tool_timeout(
+                call, budget if budget is not None else 0.0, "call_budget_exhausted"
+            )
         except Exception as exc:  # noqa: BLE001 — a tool failure is an observation
             return ToolResult(
                 success=False,
@@ -275,6 +321,23 @@ class ToolDispatcher:
             output="error: skipped (turn stopped by user)",
             error="skipped",
             data={"skipped": True, "tool": call.name},
+        )
+
+    @staticmethod
+    def _tool_timeout(call: ToolCall, seconds: float, reason: str) -> ToolResult:
+        """A budget ran out: structured, so the transcript stays valid."""
+        return ToolResult(
+            success=False,
+            output=(
+                f"error: tool '{call.name}' exceeded its {seconds:g}s budget; "
+                "it was stopped and produced no result"
+            ),
+            error="tool_timeout",
+            data={
+                "tool": call.name,
+                "timeout_seconds": seconds,
+                "reason": reason,
+            },
         )
 
 

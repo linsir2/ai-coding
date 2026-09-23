@@ -50,6 +50,10 @@ class AIConfig(BaseModel):
     task_injection: Literal["message", "system"] = "message"
     max_concurrent_tools: int = 4
     subagent_timeout_seconds: int = 600
+    # R2a: wall-clock ceiling for one user turn.  Iteration counts cannot bound a
+    # call that never returns, so any stuck step or tool must still end the turn.
+    # Includes time spent waiting for a human approval prompt; 0 disables it.
+    turn_timeout_seconds: float = 600.0
     max_result_data_bytes: int = 8_000
     max_subagent_conclusion_chars: int = 4_000
     # Ask the endpoint to emit a final usage frame (stream_options.include_usage).
@@ -78,6 +82,10 @@ class MCPServerConfig(BaseModel):
     command: str = ""
     enabled: bool = False
     args: list[str] = Field(default_factory=list)
+    # Extra environment variables for the child process (merged over a safe
+    # default set) and its working directory (R2d).
+    env: dict[str, str] = Field(default_factory=dict)
+    cwd: str = ""
 
 
 class MCPConfig(BaseModel):
