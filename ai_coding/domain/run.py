@@ -1,43 +1,33 @@
-"""Outcome of a single model turn.
+"""Message helpers and the tool-output envelope.
 
-Reserved ``tool_calls`` so M2 can attach tool requests without reshaping the contract.
-``tool_outputs`` (M3) allows the session to persist strict-pairing ``tool`` messages.
+The envelope is a structure invariant: the compression stages and the pairing
+logic both rely on a tool result arriving wrapped in ``<tool_output ...>``, and
+``<persisted-output>`` markers inside it drive the L3 stage.
+
+``TurnResult`` (M1) was removed in R1a-6 — ``StepResult`` replaced it, because the
+loop owns the turn now and the engine only ever produces one step.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from typing import Any
 
 from .loop import StepResult
-from .message import ChatMessage, ToolCallRef, ToolOutput
-
-
-@dataclass(frozen=True)
-class TurnResult:
-    """The model's response to one user input within one turn."""
-
-    text: str | None = None
-    tool_calls: list[ToolCallRef] = field(default_factory=list)
-    tool_outputs: list[ToolOutput] = field(default_factory=list)
+from .message import ChatMessage, ToolOutput
 
 
 def user_message(content: str, timestamp: str) -> ChatMessage:
     return ChatMessage(role="user", content=content, timestamp=timestamp)
 
 
-def assistant_message(turn: TurnResult | StepResult, timestamp: str) -> ChatMessage:
-    """Wrap a step/turn result as an assistant message for the session history.
-
-    Both ``TurnResult`` (legacy) and ``StepResult`` (R1a) expose ``text`` and
-    ``tool_calls``, so the same shape works for either.
-    """
+def assistant_message(step: StepResult, timestamp: str) -> ChatMessage:
+    """Wrap one completed model step as an assistant message."""
     return ChatMessage(
         role="assistant",
-        content=turn.text,
+        content=step.text,
         timestamp=timestamp,
-        tool_calls=turn.tool_calls or None,
+        tool_calls=step.tool_calls or None,
     )
 
 
@@ -50,13 +40,12 @@ def wrap_tool_output(
 ) -> str:
     """Wrap a tool output in the ``<tool_output>`` feedback envelope.
 
-    Invariants (R1a/D9):
-      - ``success=True`` and ``data is None`` produces **exactly** the M0–M6
-        envelope byte-for-byte, so existing tools, replays and tests are
-        unaffected.  This is what makes the R1a migration incremental.
-      - a failed result adds ``ok="false"``.
-      - structured results add a machine-readable ``<data>`` JSON block, which
-        the model can read and the runtime can parse back without regexes.
+    Invariants:
+      - ``success=True`` and ``data is None`` produces exactly the M0–M6
+        envelope byte-for-byte, so replays and the L2 stage are unaffected;
+      - a failed result adds ``ok="false"``;
+      - structured results add a machine-readable ``<data>`` JSON block that the
+        model can read and the runtime can parse back without regexes.
     """
     ok_attr = "" if success else ' ok="false"'
     head = f'<tool_output tool="{tool_name}"{ok_attr}>'
@@ -83,3 +72,6 @@ def tool_message(out: ToolOutput, timestamp: str) -> ChatMessage:
         tool_call_id=out.call_id,
         tool_name=out.tool_name,
     )
+
+
+__all__ = ["user_message", "assistant_message", "wrap_tool_output", "tool_message"]

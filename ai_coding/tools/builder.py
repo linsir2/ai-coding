@@ -1,9 +1,9 @@
-"""Tool stack builder (M4 refactor) — single place to assemble SDK tools.
+"""Tool stack builder — the single place tools get assembled.
 
-Centralizes the per-config/per-directory tool assembly that used to live inline
-in ``cli._build_tool_stack``.  Both the main agent and each sub-agent (via
-``SubAgentRunner``'s injected builder) create their own stack through here, with
-``include_subagent`` gating recursive sub-agent tools.
+Both the main agent and each sub-agent (through ``SubAgentRunner``'s injected
+builder) get their stack from here; ``include_subagent`` gates recursive
+delegation.  The registry holds tools only — the permission gate and the approval
+callback belong to the ``ToolDispatcher`` the loop builds.
 """
 
 from __future__ import annotations
@@ -67,29 +67,6 @@ def build_tool_registry(
     return registry
 
 
-def build_tool_stack(
-    app_cfg: Any,
-    workspace: str,
-    skills_path: str | None = None,
-    *,
-    include_subagent: bool = True,
-    approval: Any | None = None,
-) -> list[Any]:
-    """Build the SDK-shaped tool list.
-
-    Retained because ``SubAgentRunner`` still runs on the SDK engine until
-    R1a-5 reworks it; the main loop no longer uses this path.  ``approval``
-    resolves the WARN tier; ``None`` falls back to non-interactive auto-approve
-    while the DENY tier stays blocked regardless.
-    """
-    registry, gate = _assemble_registry(app_cfg, workspace, skills_path, include_subagent)
-    from ai_coding.security.approval import AutoApproveCallback
-    from ai_coding.tools.sdk_adapter import registry_to_sdk_tools
-
-    effective_approval = approval if approval is not None else AutoApproveCallback()
-    return registry_to_sdk_tools(registry, gate, effective_approval)
-
-
 def _assemble_registry(
     app_cfg: Any,
     workspace: str,
@@ -148,4 +125,4 @@ def _assemble_registry(
     return registry, gate
 
 
-__all__ = ["build_tool_stack", "build_tool_registry", "build_subagent_runner"]
+__all__ = ["build_tool_registry", "build_subagent_runner"]

@@ -111,6 +111,44 @@ async def test_build_loop_runs_a_turn_through_a_real_tool(tmp_path):
     assert "hello world" in (tool_messages[0].content or "")
 
 
+def test_build_loop_defaults_to_non_interactive_auto_approval(tmp_path):
+    """`ask` has no human to answer a WARN prompt, so the default must approve.
+
+    Regression guard: R1a-4 changed AgentLoop's constructor and the CLI stopped
+    supplying any approval callback.  The dispatcher's WARN tier is fail-closed,
+    so without this `write`/`edit`/`bash` would silently stop working in `ask`
+    (they used to auto-approve through the old builder).
+    """
+    from ai_coding.config.models import AppConfig
+    from ai_coding.security.approval import AutoApproveCallback, CLIApprovalCallback
+    from ai_coding.service.session_service import SessionService
+    from ai_coding.tools.registry import ToolRegistry
+
+    class _DummyEngine:
+        pass
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    sessions = SessionService(tmp_path / "sessions")
+
+    default_loop = _build_loop(
+        _DummyEngine(), sessions, ToolRegistry(), AppConfig(), str(ws), None
+    )
+    assert isinstance(default_loop.dispatcher.approval, AutoApproveCallback)
+
+    # the REPL still asks; the composition root decides, the dispatcher does not
+    repl_loop = _build_loop(
+        _DummyEngine(),
+        sessions,
+        ToolRegistry(),
+        AppConfig(),
+        str(ws),
+        None,
+        approval=CLIApprovalCallback(),
+    )
+    assert isinstance(repl_loop.dispatcher.approval, CLIApprovalCallback)
+
+
 def test_version():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0

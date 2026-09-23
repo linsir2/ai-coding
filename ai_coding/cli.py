@@ -10,6 +10,7 @@ import typer
 
 from ai_coding.ai.factory import build_engine_from_config
 from ai_coding.config.loader import ConfigLoader, ConfigManager
+from ai_coding.core.mcp import MCPManager
 from ai_coding.infra.logger_setup import setup_logging
 
 app = typer.Typer(
@@ -95,8 +96,6 @@ def ask(
         typer.echo(f"ask error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    _warn_if_mcp_enabled(app_cfg)
-
     from ai_coding.domain.session import SessionData
     from ai_coding.service.session_service import SessionService
     from ai_coding.ui.console import ConsoleObserver, DialogueConsole
@@ -113,16 +112,20 @@ def ask(
         typer.echo(token, nl=False)
 
     console = DialogueConsole()
-    loop = _build_loop(
-        engine,
-        sessions,
-        registry,
-        app_cfg,
-        workspace,
-        skills,
-        observer=ConsoleObserver(console),
+    answer = asyncio.run(
+        _run_turn_with_mcp(
+            engine=engine,
+            app_cfg=app_cfg,
+            registry=registry,
+            sessions=sessions,
+            session=session,
+            prompt=prompt,
+            on_delta=on_delta,
+            workspace=workspace,
+            skills_path=skills,
+            observer=ConsoleObserver(console),
+        )
     )
-    answer = asyncio.run(_run_turn(loop, session, prompt, on_delta))
     # Answer text was already streamed live via on_delta; only ensure a trailing newline.
     if answer and not answer.endswith("\n"):
         typer.echo()
@@ -154,30 +157,34 @@ def repl(
         typer.echo(f"repl error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    _warn_if_mcp_enabled(app_cfg)
-
     sessions = SessionService()
     console = DialogueConsole()
-    # Interactive REPL: confirm WARN-tier tools (write/edit/bash) with the user
-    # via y/N/s prompts, rather than silently blocking or auto-approving.
-    loop = _build_loop(
-        engine,
-        sessions,
-        registry,
-        app_cfg,
-        workspace,
-        skills,
-        approval=CLIApprovalCallback(),
-        observer=ConsoleObserver(console),
-    )
 
     async def _serve() -> None:
+        manager = MCPManager(app_cfg.mcp)
         try:
-            await run_repl(loop, sessions, console)
-        except KeyboardInterrupt:
-            console.info("[aborted]")
+            for tool in await manager.open_all():
+                registry.register(tool)
+            # Interactive REPL: confirm WARN-tier tools (write/edit/bash) with the
+            # user via y/N/s prompts, rather than silently blocking them.
+            loop = _build_loop(
+                engine,
+                sessions,
+                registry,
+                app_cfg,
+                workspace,
+                skills,
+                approval=CLIApprovalCallback(),
+                observer=ConsoleObserver(console),
+            )
+            try:
+                await run_repl(loop, sessions, console)
+            except KeyboardInterrupt:
+                console.info("[aborted]")
+            finally:
+                await loop.aclose()
         finally:
-            await loop.aclose()
+            await manager.aclose()
 
     asyncio.run(_serve())
 
@@ -194,6 +201,14 @@ def _build_loop(
     observer: Any | None = None,
 ) -> Any:
     """Assemble the loop and its optional components (silent degradation)."""
+    if approval is None:
+        # The composition root owns the policy: `ask` is non-interactive and has
+        # nobody to answer a WARN prompt, so it auto-approves (the DENY tier
+        # still blocks dangerous calls).  `repl` passes CLIApprovalCallback.
+        from ai_coding.security.approval import AutoApproveCallback
+
+        approval = AutoApproveCallback()
+
     from ai_coding.ai.prompt import PromptAssembler
     from ai_coding.core.agent_loop import AgentLoop
     from ai_coding.core.context_compression import ContextManager
@@ -242,23 +257,41 @@ def _build_loop(
     )
 
 
-async def _run_turn(loop: Any, session: Any, prompt: str, on_delta: Any) -> str:
-    """Run one turn and always release the engine's HTTP client."""
+async def _run_turn_with_mcp(
+    *,
+    engine: Any,
+    app_cfg: Any,
+    registry: Any,
+    sessions: Any,
+    session: Any,
+    prompt: str,
+    on_delta: Any,
+    workspace: str,
+    skills_path: str | None,
+    approval: Any | None = None,
+    observer: Any | None = None,
+) -> str:
+    """Run one turn with MCP tools registered, then release everything."""
+    manager = MCPManager(app_cfg.mcp)
     try:
-        return str(await loop.process_input(session, prompt, on_delta=on_delta))
-    finally:
-        await loop.aclose()
-
-
-def _warn_if_mcp_enabled(app_cfg: Any) -> None:
-    """Say so loudly when MCP is configured: this build ignores it."""
-    if getattr(getattr(app_cfg, "mcp", None), "enabled", False):
-        typer.echo(
-            "warning: MCP is enabled in your config, but this build runs the "
-            "self-owned loop which does not support MCP yet — the configured "
-            "servers are ignored.",
-            err=True,
+        for tool in await manager.open_all():
+            registry.register(tool)
+        loop = _build_loop(
+            engine,
+            sessions,
+            registry,
+            app_cfg,
+            workspace,
+            skills_path,
+            approval=approval,
+            observer=observer,
         )
+        try:
+            return str(await loop.process_input(session, prompt, on_delta=on_delta))
+        finally:
+            await loop.aclose()
+    finally:
+        await manager.aclose()
 
 
 def _llm_helpers_for(service: Any) -> tuple[Any, Any]:

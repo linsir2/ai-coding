@@ -1,52 +1,16 @@
-"""Service factory: AppConfig -> AIService instance (single engine wiring point)."""
+"""Engine factory: AppConfig -> ChatEngine (the single engine wiring point)."""
 
 from __future__ import annotations
 
-from typing import Any
-
-from ai_coding.ai.agents_sdk_service import AgentsSDKChatService
-from ai_coding.ai.base import AIService
 from ai_coding.ai.engine import ChatEngine
 from ai_coding.config.models import AppConfig
 
 
-def build_service_from_config(
-    app_config: AppConfig,
-    tools: list[Any] | None = None,
-    mcp_servers: list[Any] | None = None,
-) -> AIService:
-    """Resolve ``default_model`` into a concrete ``AIService`` with optional tools.
-
-    ``tools`` should be SDK ``FunctionTool`` instances (from ``sdk_adapter``).
-    ``mcp_servers`` are SDK MCP servers; when omitted they are built from
-    ``app_config.mcp`` via :class:`~ai_coding.core.mcp.MCPManager` (an empty
-    ``MCPConfig`` or disabled MCP block yields no servers). Raises ``ValueError``
-    when no default model is configured or the named model is absent from
-    ``models``. Never touches the network.
-    """
-    default = app_config.default_model
-    if not default:
-        raise ValueError("no default model configured")
-    model = app_config.models.get(default)
-    if model is None:
-        raise ValueError(f"default model '{default}' not found in models")
-
-    if mcp_servers is None:
-        from ai_coding.core.mcp import MCPManager
-
-        mcp_servers = MCPManager(app_config.mcp).build_servers()
-
-    return AgentsSDKChatService(
-        model_config=model, tools=tools, mcp_servers=mcp_servers
-    )
-
-
 def build_engine_from_config(app_config: AppConfig) -> ChatEngine:
-    """Resolve ``default_model`` into a step-wise ``ChatEngine`` (R1a-2).
+    """Resolve ``default_model`` into a step-wise ``ChatEngine``.
 
-    This is the engine the self-owned loop uses.  It deliberately reuses the
-    exact error messages of :func:`build_service_from_config` so CLI behaviour
-    and existing expectations stay identical.
+    Raises ``ValueError`` when no default model is configured or the named model
+    is absent from ``models``.  Never touches the network.
     """
     default = app_config.default_model
     if not default:
@@ -61,4 +25,4 @@ def build_engine_from_config(app_config: AppConfig) -> ChatEngine:
     return OpenAIChatEngine(model, stream_usage=stream_usage)
 
 
-__all__ = ["build_service_from_config", "build_engine_from_config"]
+__all__ = ["build_engine_from_config"]

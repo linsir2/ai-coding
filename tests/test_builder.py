@@ -1,20 +1,13 @@
-"""TDD (M4): builder — assemble SDK tool stacks for main and sub-agents.
+"""TDD: builder — assemble the tool registry for the main and sub agents.
 
-The main stack (``include_subagent=True``) exposes ``subAgent``; the stack each
-sub-agent builds internally (via ``build_subagent_runner``) must NOT re-expose
-``subAgent`` to avoid unbounded recursion.  All checks are offline.
+Rewritten in R1a-6: the SDK-shaped ``build_tool_stack`` is gone (nothing used it
+once sub-agents moved onto the self-owned loop), so this file now covers only the
+registry builder and the sub-agent runner wiring.
 """
 
 from types import SimpleNamespace
 
-import pytest
-
-from ai_coding.security.approval import ApprovalCallback, ApprovalResult
-from ai_coding.tools.builder import (
-    build_subagent_runner,
-    build_tool_registry,
-    build_tool_stack,
-)
+from ai_coding.tools.builder import build_subagent_runner, build_tool_registry
 
 
 def _cfg(ws: str) -> SimpleNamespace:
@@ -30,105 +23,60 @@ def _cfg(ws: str) -> SimpleNamespace:
     )
 
 
-def _names(sdk_tools) -> set[str]:
-    return {t.name for t in sdk_tools}
-
-
-def test_main_stack_exposes_subagent(tmp_path):
-    cfg = _cfg(str(tmp_path))
-
-    sdk = build_tool_stack(cfg, str(tmp_path), None, include_subagent=True)
-
-    names = _names(sdk)
-    assert "subAgent" in names
-    assert "bash" in names
-    assert "read" in names
-
-
-def test_subagent_internal_stack_excludes_nested_subagent(tmp_path):
-    cfg = _cfg(str(tmp_path))
-    runner = build_subagent_runner(cfg, str(tmp_path), None)
-
-    inner = runner._build_tools(None)  # the sub-agent's own tools (main workdir)
-    # R1a-5: the sub-agent stack is a ToolRegistry now (it runs the same loop),
-    # not an SDK tool list.
-    names = set(inner.list_names())
-
-    assert "subAgent" not in names  # no recursion
-    assert "read" in names  # file tools still available to the sub-agent
-
-
-# ---- WARN-tier approval wiring (regression for non-interactive usability) ----
-
-async def _needs(stack, name, params):
-    fn = next(t for t in stack if t.name == name)
-    return await fn.needs_approval(None, params, "c1")
-
-
-@pytest.mark.asyncio
-async def test_default_stack_autoapproves_warn_tools(tmp_path):
-    cfg = _cfg(str(tmp_path))
-    stack = build_tool_stack(cfg, str(tmp_path), None)
-
-    # WARN-tier tools (write/edit/bash) are usable by default (non-interactive).
-    assert await _needs(stack, "write", {"path": "f"}) is False
-    assert await _needs(stack, "edit", {"path": "f"}) is False
-    assert await _needs(stack, "bash", {"command": "echo hi"}) is False
-    # ALLOW-tier tools unaffected
-    assert await _needs(stack, "read", {"path": "f"}) is False
-
-
-@pytest.mark.asyncio
-async def test_default_stack_still_denies_dangerous_bash(tmp_path):
-    cfg = _cfg(str(tmp_path))
-    stack = build_tool_stack(cfg, str(tmp_path), None)
-
-    # Hard-deny bash (sudo / rm -rf /) stays blocked even under auto-approve.
-    assert await _needs(stack, "bash", {"command": "sudo ls"}) is True
-    assert await _needs(stack, "bash", {"command": "rm -rf /"}) is True
-
-
-class _AlwaysNo(ApprovalCallback):
-    async def approve(self, tool_name, params, reason):
-        return ApprovalResult.NO
-
-
-@pytest.mark.asyncio
-async def test_explicit_no_approval_blocks_warn_tools(tmp_path):
-    cfg = _cfg(str(tmp_path))
-    stack = build_tool_stack(cfg, str(tmp_path), None, approval=_AlwaysNo())
-
-    assert await _needs(stack, "write", {"path": "f"}) is True
-    assert await _needs(stack, "read", {"path": "f"}) is False  # ALLOW unaffected
-
-
-# ---- R1a-4: the registry builder the self-owned loop uses --------------------
-
-
 def test_registry_builder_returns_tool_registry(tmp_path):
-    cfg = _cfg(str(tmp_path))
+    registry = build_tool_registry(_cfg(str(tmp_path)), str(tmp_path), None)
+    names = set(registry.list_names())
+    assert {"bash", "read", "write", "edit", "glob", "todo_write"} <= names
 
-    registry = build_tool_registry(cfg, str(tmp_path), None, include_subagent=True)
 
-    assert registry.list_names()  # a registry, not an SDK tool list
+def test_registry_builder_includes_subagent_by_default(tmp_path):
+    registry = build_tool_registry(_cfg(str(tmp_path)), str(tmp_path), None)
     assert "subAgent" in registry.list_names()
-    assert "read" in registry.list_names()
-    assert "todo_write" in registry.list_names()
 
 
 def test_registry_builder_excludes_nested_subagent(tmp_path):
-    cfg = _cfg(str(tmp_path))
-
-    registry = build_tool_registry(cfg, str(tmp_path), None, include_subagent=False)
-
+    registry = build_tool_registry(
+        _cfg(str(tmp_path)), str(tmp_path), None, include_subagent=False
+    )
     assert "subAgent" not in registry.list_names()
+    assert "read" in registry.list_names()
 
 
 def test_registry_builder_skips_disabled_tools(tmp_path):
     cfg = _cfg(str(tmp_path))
     cfg.tools.read.enabled = False
-
     registry = build_tool_registry(cfg, str(tmp_path), None)
-
     assert "read" not in registry.list_names()
     assert "glob" in registry.list_names()
+
+
+def test_registry_builder_adds_skill_tool_only_for_a_real_directory(tmp_path):
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    registry = build_tool_registry(
+        _cfg(str(tmp_path)), str(tmp_path), str(skills)
+    )
+    assert "skill" in registry.list_names()
+
+
+def test_subagent_runner_inner_stack_has_no_nested_subagent(tmp_path):
+    runner = build_subagent_runner(_cfg(str(tmp_path)), str(tmp_path), None)
+    inner = runner._build_tools(None)  # the sub-agent's own tools (main workdir)
+    names = set(inner.list_names())
+    assert "subAgent" not in names  # no recursion
+    assert "read" in names
+
+
+def test_subagent_runner_wires_ledger_root_and_limits(tmp_path):
+    cfg = SimpleNamespace(
+        tools=_cfg(str(tmp_path)).tools,
+        ai=SimpleNamespace(
+            subagent_worktree_isolation=True,
+            max_concurrent_subagents=2,
+            subagent_timeout_seconds=45,
+        ),
+    )
+    runner = build_subagent_runner(cfg, str(tmp_path), None)
+    assert runner._ledger_root == tmp_path.resolve()
+    assert runner._timeout == 45.0
+    assert runner._semaphore._value == 2  # asyncio.Semaphore exposes its count

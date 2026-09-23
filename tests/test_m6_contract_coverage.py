@@ -9,10 +9,9 @@ and the latter's decision core is already covered by ``test_repl``.
 
 import pytest
 
-from ai_coding.domain.message import ToolResult
 from ai_coding.domain.subagent import SubagentResult, SubagentTurn
 from ai_coding.security.file_state_tracker import FileState
-from ai_coding.security.permission_gate import Decision, PermissionDecision, PermissionGate
+from ai_coding.security.permission_gate import Decision, PermissionDecision
 from ai_coding.security.sandbox import Sandbox
 from ai_coding.tools.base import BaseTool
 
@@ -21,14 +20,8 @@ pytestmark = pytest.mark.asyncio
 
 # ---------------------------------------------------------------- abstract bases
 
-def test_ai_service_abstract_execute_turn_raises():
-    from ai_coding.ai.base import AIService
-
-    assert "execute_turn" in AIService.__abstractmethods__
-
 
 def test_base_tool_abstract_execute_raises():
-    from ai_coding.tools.base import BaseTool
 
     assert "execute" in BaseTool.__abstractmethods__
 
@@ -135,45 +128,6 @@ def test_decision_equality_and_hash_repr():
     assert "x" in repr(a1)
 
 
-# ---------------------------------------------------------------- sdk adapter (safety)
-
-def test_sdk_adapter_non_string_arguments_parsed_empty(tmp_path):
-    from ai_coding.tools.sdk_adapter import tool_to_function_tool
-
-    class _TTool(BaseTool):
-        @property
-        def name(self):
-            return "t"
-
-        @property
-        def description(self):
-            return "t"
-
-        @property
-        def params_json_schema(self):
-            return {}
-
-        async def execute(self, params):
-            return ToolResult(success=True, output=f"got {params}")
-
-    ft = tool_to_function_tool(_TTool(), PermissionGate())
-
-    class _Ctx:
-        tool_arguments = 123  # not a str / dict -> must become {}
-
-    async def _run():
-        return await ft.on_invoke_tool(_Ctx(), "id")
-
-    import asyncio
-
-    assert asyncio.run(_run()) == "got {}"
-
-
-def test_sdk_adapter_rejects_non_registry():
-    from ai_coding.tools.sdk_adapter import registry_to_sdk_tools
-
-    with pytest.raises(TypeError):
-        registry_to_sdk_tools([], PermissionGate())
 
 
 # ---------------------------------------------------------------- skill tool
