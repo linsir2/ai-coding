@@ -65,6 +65,21 @@ hook = **用户自定义**在固定生命周期点位插入的回调，可观察
 **能力矩阵是要害**：能改**持久历史**的 hook 会打穿提示词缓存（R3 的核心教训），所以
 `inject` 默认只进**易失尾部块**（不进系统提示、不进历史）；要持久化必须显式 `persist: true` 并留下事件记录。
 
+### 0.4 外部对标：GenericAgent（已调研，见 [r4a-genericagent-research.md](r4a-genericagent-research.md)）
+
+对 `lsdefine/GenericAgent`（14.2k star，MIT，arXiv 2604.17091）做了**源码级**调研。它和我们在同一问题上走了不同路线，四条结论直接影响本方案：
+
+| 修订 | 原方案 | 修订后 | 为什么 |
+|---|---|---|---|
+| **R-1** | `ModelStepFinished.usage` 只有 prompt/completion/total | **加 cache 明细**：`cached_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens`；`prefix_shared_ratio` **降级为兜底** | GA 把 provider 报的 cache token 当一等字段；我们的前缀共享率只是估算 |
+| **R-2** | hook 只有 `kind: command`（子进程） | **加 `kind: python`**：进程内、`plugins/*.py` 自动发现、返回值可替换 ctx | GA 的 `register`/`trigger` 形态更轻、能改写上下文 |
+| **R-3** | 能力矩阵已定义 | 明确 **观察/注入类 fail-open，阻断/改写类 fail-closed**，**不采用 GA 的「永远 fail-open」** | GA 的 hook 拦不住任何东西 |
+| **R-4** | 索引块 ≤600 字符 | 升格为**设计不变量**：「索引只放指针不放内容；总量有界；L2/L3 增长不推高索引」+ 测试锁死 | GA 明写 "L1 remains bounded even as L2 and L3 expand" |
+
+GA 的验证性发现（说明我们方向没错）：它独立收敛到「别动前缀否则缓存崩」（论文：约 80% 回合缓存命中）；它的 `_sanitize_leading_user_msg` 与我们的 `ensure_tool_pairing` 是同一种配对修复；它的 `file_patch` 唯一匹配、`code_run` 每回合一次，与我们的 `edit` 唯一匹配、`bash` 串行**效果等价**。
+
+两条**记为 R5 候选**（不进 R4 范围）：GA 的 Stage-4 工作记忆锚（每轮附带「最近 N 轮一句话摘要 + key_info」）、note 的 `verified` 标记（"No Execution, No Memory"）。
+
 ---
 
 ## 1. 现状核验（先摆事实，不拍脑袋）
@@ -196,7 +211,12 @@ class ModelStepFinished:
     finish_reason: str | None = None
     text_chars: int = 0
     tool_call_count: int = 0
-    usage: dict[str, int] | None = None   # prompt_tokens / completion_tokens / total_tokens
+    usage: dict[str, int] | None = None   # prompt/completion/total
+    # R-1（GA 对标）：provider 报的 cache 明细要单独留字段，别只算前缀相似度。
+    # OpenAI 侧 prompt_tokens_details.cached_tokens → cached_tokens；
+    # Anthropic 侧 cache_read_input_tokens / cache_creation_input_tokens 原样保留。
+    cached_tokens: int | None = None
+    cache_write_tokens: int | None = None
     latency_ms: int = 0
 
 @dataclass(frozen=True)
@@ -208,6 +228,8 @@ class ContextAssembled:
     history_chars: int
     tail_blocks: tuple[tuple[str, int], ...] = ()   # (("memory", 540), ("task", 880))
     estimated_tokens: int = 0
+    # R-1（GA 对标）：前缀共享率是**兜底指标**——provider 报 cache token 时以真值为准，
+    # 只有端点不报 cache 明细时才用这一对数字说明「前缀有没有被动过」。
     prefix_shared_chars: int = 0     # 与上一次请求的最长公共前缀（字符）
     prefix_shared_ratio: float = 0.0 # 除以本次请求长度
     digest: str = ""                 # sha1(前 4KB)，只用于判断「前缀变了没」
@@ -279,6 +301,7 @@ class BudgetLedger:
 | a3 | `core/trace.py`（新） | `canonical_request()`、`prefix_shared()`、`Redactor`、`TraceStore`（路径/轮转/清理）、`TraceRecorder(LoopObserver)` |
 | a4 | `core/budget.py`（新） | `UsageTotals`、`Pricing`、`BudgetLedger` |
 | a5 | `domain/model_config.py` + `config/models.py` | `ModelConfig.price_input_per_1k/price_output_per_1k`；`TracingConfig(enabled, dir, capture, max_turn_bytes, retention_days, redact)` |
+| a5b | `ai/openai_engine.py` | **R-1**：`_usage_to_dict` 增加 cache 明细（`prompt_tokens_details.cached_tokens` → `cached_tokens`；Anthropic 的 `cache_read_input_tokens`/`cache_creation_input_tokens` 原样带出），否则 provider 报了我们也不认识 |
 | a6 | `core/agent_loop.py` | 每回合建 `ledger`；每轮 `ContextAssembled`；模型步后 `ModelStepFinished`；8 处降级点发 `Degraded`；`TurnOutcome` 带 `usage` |
 | a7 | `core/subagent.py` | `SubAgentRunner` 接受 `observer`；内层循环套 `ScopedObserver(f"subagent:{call_id}")` |
 | a8 | `tools/subagent_tool.py` | 把 `call_id` 传给 runner（父子归属） |
@@ -422,16 +445,25 @@ if self.config.max_turn_tokens and snapshot.tokens_spent >= self.config.max_turn
 hooks:
   enabled: false
   timeout_seconds: 10
+  plugin_dir: ""          # 默认 <workspace>/.ai-coding/hooks；kind=python 时自动发现 *.py
   events:
     - point: tool.before
       match: { tool: "bash" }
+      kind: command                   # 子进程：JSON in/out，跨语言、可隔离
       command: ["./scripts/deny-push.sh"]
       capability: block
     - point: tool.after
       match: { tool: "write" }
+      kind: command
       command: ["ruff", "format"]
       capability: observe
+    - point: tool.before              # R-2（GA 对标）：进程内回调，可改写 ctx
+      kind: python
+      module: hooks.my_org_rules     # <plugin_dir>/my_org_rules.py
+      entrypoint: check
+      capability: rewrite
     - point: turn.end
+      kind: command
       command: ["./scripts/notify.sh"]
       capability: observe
 ```
@@ -441,7 +473,8 @@ hooks:
 | 步骤 | 文件 | 动作 |
 |---|---|---|
 | c1 | `core/hooks.py`（新） | `HookPoint` 枚举、`HookSpec`、`HookResult`、`HookRunner` 协议、`CommandHookRunner`（JSON in/out + deadline + subprocess_runner + 环境白名单） |
-| c2 | `config/models.py` | `HooksConfig` + `HookEventConfig(point, match, command, capability, persist)` |
+| c1b | `core/hooks.py`（新，**R-2**） | `PythonHookRunner`：`plugin_dir` 下自动发现 `*.py`、按 `entrypoint` 取函数、**返回值可替换上下文**（GA 的 `register`/`trigger` 形态）；异常按能力矩阵走 fail-open/closed |
+| c2 | `config/models.py` | `HooksConfig`（`enabled/timeout_seconds/plugin_dir/events`）+ `HookEventConfig(point, match, kind, command, module, entrypoint, capability, persist)` |
 | c3 | `core/dispatch.py` | `tool.before` / `tool.after` 两点接线（与门卫链同一处，顺序固定） |
 | c4 | `core/agent_loop.py` | `turn.start/end`、`step.before`、`compact.*`、`memory.harvest`、`stop.blocked` 接线；`inject` 汇聚成尾部块 |
 | c5 | `core/subagent.py` | `subagent.start/end` |
@@ -457,16 +490,16 @@ hooks:
 |---|---|
 | `tests/test_trace_recorder.py`（新） | ① 事件 → JSONL 一行一事件，span/parent/iter 正确；② 目录不存在时自动创建；③ **写盘失败静默降级**且回合不受影响；④ 超过 `max_turn_bytes` 截断并留标记；⑤ 密钥被脱敏，轨迹里**逐字节搜不到**原 key |
 | `tests/test_observers.py`（新） | ① `Braid` 按序转发给全部观察者；② 某个观察者抛异常不影响其余；③ `ScopedObserver` 把子事件包成 `ScopedEvent` 且 `parent` 正确 |
-| `tests/test_budget_ledger.py`（新） | ① 多步用量累加；② `usage=None` 不炸且不计；③ 成本按价格计算；④ **价格未知 → `cost()` 返回 `None`**（不假装 0）；⑤ 校准比 = 真实/估算 |
+| `tests/test_budget_ledger.py`（新） | ① 多步用量累加；② `usage=None` 不炸且不计；③ 成本按价格计算；④ **价格未知 → `cost()` 返回 `None`**（不假装 0）；⑤ 校准比 = 真实/估算；⑥ **R-1：cache 命中率 = cached_tokens / prompt_tokens**，provider 不报时为 `None` |
 | `tests/test_context_assembled.py`（新） | ① 各段字符数与实际拼装一致；② 纯追加回合 `prefix_shared_ratio` 高（≥0.9）；③ 改系统提示后比率骤降；④ **系统提示逐字节静态**这条既有断言不破 |
-| `tests/test_model_step_finished.py`（新） | ① 引擎带 usage → 事件带真实数字；② 引擎无 usage → 事件仍发出、字段为空；③ `TurnOutcome.usage` 等于本回合累加 |
+| `tests/test_model_step_finished.py`（新） | ① 引擎带 usage → 事件带真实数字；② 引擎无 usage → 事件仍发出、字段为空；③ `TurnOutcome.usage` 等于本回合累加；④ **R-1：`prompt_tokens_details.cached_tokens` 透传成 `cached_tokens`**，Anthropic 的 `cache_read_input_tokens`/`cache_creation_input_tokens` 也认 |
 | `tests/test_degraded_events.py`（新） | 逐个把 8 个降级点打成故障（注入会抛的假组件），断言各发一条 `Degraded` 且回合仍正常收尾 |
 | `tests/test_guard_chain.py`（新） | ① 顺序确定；② 首个非 ALLOW 短路；③ `REWRITE` 改参数后才执行（执行器看到新参数）；④ 守卫抛异常 = 拒绝且 `error="guard_error"`；⑤ 拒绝仍写回 `role=tool` 消息（**配对不破**） |
 | `tests/test_guard_duplicate.py`（新） | ① 第 1、2 次放行；② 第 3 次拒绝且结果里含上次 result 的 call_id；③ 参数不同不误伤；④ 阈值可配 |
 | `tests/test_guard_secret.py`（新） | ① 高置信 key 被脱敏且幂等；② 良性文本不动；③ 关闭 `redact_history` 时历史不被改写 |
 | `tests/test_guard_path_escape.py`（新） | ① 默认只观察（放行 + 事件）；② `strict_paths=true` 时拒绝 |
 | `tests/test_turn_policy.py`（改，**仅追加参数行**） | 新增行：`tokens_spent >= max_turn_tokens` → FINISH，`reason="turn token budget exhausted"`；`max_turn_tokens=0` 时永不触发 |
-| `tests/test_hooks_runner.py`（新） | ① JSON 进出；② 非零退出 → block + reason；③ 超时 → 按能力走 fail-open/closed；④ **hook 环境里没有 API key**；⑤ 坏 JSON 按失败语义处理；⑥ 命令不存在不炸回合 |
+| `tests/test_hooks_runner.py`（新） | ① JSON 进出；② 非零退出 → block + reason；③ 超时 → 按能力走 fail-open/closed；④ **hook 环境里没有 API key**；⑤ 坏 JSON 按失败语义处理；⑥ 命令不存在不炸回合；⑦ **R-2：`kind: python` 能从 `plugin_dir` 自动发现、返回值可改写上下文、抛异常时按能力矩阵处理** |
 | `tests/test_hooks_loop.py`（新） | ① `tool.before` 的 `rewrite` 真实改变执行参数且被记录；② `inject` 进易失尾部块、**系统提示仍逐字节静态**；③ `persist: true` 才进历史 |
 | `tests/test_cli_trace.py`（新） | ① `ai-coding trace show <turn>` 渲染出用量/工具/耗时；② `trace budget` 汇总；③ 轨迹不存在时不报错、给友好提示 |
 | `tests/test_slash.py`（改，追加） | `/trace`、`/budget` 被识别为直命令 |
@@ -503,11 +536,12 @@ you> 把 README 里的里程碑表补上 R3
   -> ok: ...
 [turn 2/5] [tool: edit] {...}
   -> ok: ...
-[turn] completed in 6.2s · 18,420 tok (16,900 in / 1,520 out) · ¥0.041 · cache-prefix 93%
+[turn] completed in 6.2s · 18,420 tok (16,900 in / 1,520 out) · ¥0.041 · cache 91% (cached 15,380)
 
 you> /budget
 [budget] turn 18,420 tok · session 142,910 tok · est. ¥0.318
          calibration: real/estimate = 1.12 (estimate_tokens 略低估)
+         cache: 91% provider-reported (prefix-shared 93% as fallback)
 
 you> /trace
 [trace] .ai-coding/traces/6c53.../turn-3.jsonl
@@ -517,9 +551,10 @@ you> /trace
 系统级变化：
 
 - 每回合**默认**落一份可回放的轨迹（只有元数据 + 预览，密钥脱敏）；
+- **缓存命中用 provider 真值**（`cached_tokens`），不再只靠前缀相似度猜；估算器偏差同时被记录（`real/estimate`）；
 - 静默降级不再静默：`/trace` 一眼看到「本回合没记忆/没压缩/没隔离」；
 - 重复调用与越界 bash 有内置门卫兜底，且**拒绝也是结构化结果**，模型能改策略；
-- 不改 Python 也能挂 hook（写文件后自动格式化、拦 `git push`、播报成本）；
+- 不改 Python 也能挂 hook（写文件后自动格式化、拦 `git push`、播报成本）；需要跨语言/隔离时用子进程形态；
 - 子智能体不再是黑盒：父子 span 可重建。
 
 ---
@@ -536,6 +571,8 @@ you> /trace
 | 6 | **契约破坏面** | 新增 `TurnStatus.BUDGET` 与 `TurnOutcome.usage` 属**合同变更**，D-R4-5/6 单独拍板；`ToolStarted/ToolFinished` 只追加带默认值字段，向后兼容 |
 | 7 | **range 过大** | 已切三段（R4a→R4b→R4c），每段可独立提交、独立验收；不做 OTel、不做 GUI |
 | 8 | **`turn_policy` 是纯单元** | 新增判断保持无 IO、无事件；只加快照字段与决策表行 |
+| 9 | **外部对标可能被宣传误导** | GA 论文称循环 92 行、README 称 ~100 行，**实测 `agent_runner_loop` 66 行、文件 132 行**。调研报告一律引实测值，并标注差异；GA 的结论只作**参考**，不代替我们自己的案例实测 |
+| 10 | **hook 双形态带来的复杂度** | `kind: python` 省事但会共享进程（hook 崩了会波及回合）——所以 python hook 也走 `try/except` 兜底 + 失败语义按能力分；`kind: command` 保持隔离但慢。两者共用同一 `HookPoint`/判决结构，不分叉 |
 
 ---
 
@@ -555,6 +592,9 @@ you> /trace
 | **D-R4-10** | hook 注入位置 | **易失尾部块** `<hook-context>` 默认；`persist: true` 才进历史 |
 | **D-R4-11** | hook 失败语义与环境 | 按能力分（observe/inject fail-open，block/rewrite fail-closed）；**hook 环境不含模型 key** |
 | **D-R4-12** | 子智能体事件扇出 | **扇出**（`ScopedObserver` + 父子 span）；子智能体的推理仍不回传父上下文（沿用 R1a-5） |
+| **D-R4-13** | hook 的形态（GA 对标 R-2） | **两种都要**：`kind: python`（进程内、`plugins/*.py` 自动发现、可改写 ctx）作为首选；`kind: command`（子进程 JSON 协议）保留给跨语言/隔离场景 |
+| **D-R4-14** | cache 度量口径（GA 对标 R-1） | **provider 报的 cache token 为准**（新增 `cached_tokens`/`cache_write_tokens` 字段）；`prefix_shared_ratio` 仅在端点不报 cache 时作为兜底 |
+| **D-R4-15** | 记忆索引是否升格为不变量（GA 对标 R-4） | **升格**：「索引只放指针、不放内容；总量有界；L2/L3 增长不推高索引」写成不变量 + 测试锁死（改动很小，收益是防退化） |
 
 ---
 
