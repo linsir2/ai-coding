@@ -133,9 +133,16 @@ class MCPManager:
         if not self._config.enabled:
             return []
         tools: list[BaseTool] = []
+        seen_servers: set[str] = set()
         for server in self._config.servers:
             if not server.enabled or not server.name or not server.command:
                 continue
+            if server.name in seen_servers:
+                # Two servers sharing a name produce identical tool prefixes, which
+                # the registry rejects; keep the first and move on rather than
+                # letting a config typo escape as a CLI traceback.
+                continue
+            seen_servers.add(server.name)
             try:
                 session = await self._stack.enter_async_context(
                     self._session_factory(server)

@@ -1,7 +1,15 @@
 # 集成联调测试
 
-本文说明如何对本项目做**真实网络联调**（连接 DeepSeek 等兼容端点），覆盖 M1/M3 的核心链路：
-工具调用回合、多轮历史回放、L4 上下文压缩摘要、记忆提取。普通单元测试不触网，只有这里与 `scripts/integration_smoke.py` 会真正发请求。
+本文说明如何对本项目做**真实网络联调**（连接任意 OpenAI 兼容端点）。
+普通单元测试不触网；只有本文描述的两个脚本会真正发请求：
+
+| 脚本 | 覆盖 | 断言强度 |
+|---|---|---|
+| `scripts/integration_smoke.py` | 工具回合 → 多轮回放 → **子智能体委派（含 ledger）** → L4 摘要 + 记忆提取 | 四步全部硬断言，任一步失败退出码非 0 |
+| `scripts/sample_tasks.py` | 六个样例场景：MCP 关闭 / read / **todo 跨回合** / write+edit / **危险命令拒绝** / 子智能体 | 每场景一条硬断言，输出 PASS/FAIL 汇总 |
+
+`sample_tasks.py` 是 R1（自持循环）新增的样例集，专门覆盖单元测试只能模拟的能力：
+任务清单跨回合存活、非交互模式下 WARN 级工具真的能写文件、DENY 级真的被拒。
 
 ## 前置：本地配置（含密钥，git 已忽略）
 
@@ -74,12 +82,23 @@ notes   =['用户用 Python 写后端', '用户喜欢简洁代码']
 
 ## 曾暴露并已修复的集成问题（回归教训）
 
+> 说明：下表记录的是 **M1–M6 时代**的问题。其中与 OpenAI Agents SDK 内部相关的根因
+> （`raw_response_event`、`ToolCallItem`、`function_call` 输入项）在 R1 之后**已不复存在**——
+> SDK 已从项目中移除，映射改为原生 `tool_calls` 形态。保留此表是为了不重复踩同类坑。
+
 | 现象 | 根因 | 修复 |
 |---|---|---|
 | 工具参数 JSON（如 `{"path":...}`）混进最终文本 | `raw_response_event` 未区分 `output_text.delta` 与 `function_call_arguments.delta` | 只收集 `response.output_text.delta` |
 | `tool_calls`/`tool_outputs` 恒为空，工具回合不落库 | `ToolCallItem` 属性是 `tool_name` 而非 `name`；输出项无 `name` | 用 `_item_tool_name`/`_item_call_id` + `call_id→name` 映射 |
 | CLI 输出整段重复 | 边流式回显边 `typer.echo(answer)` | 去掉重复回显 |
 | 回放历史触发 400 | assistant 工具调用在历史中缺失 | 修复 `ai/mapping.py`，工具调用分流为 `function_call` 输入项 |
+
+### R1 之后新增的两条联调注意
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 非交互 `ask` 拒绝 write/edit/bash | R1a-4 换掉 `AgentLoop` 构造后 CLI 不再传审批回调，而分发器对 WARN 是 fail-closed | 已修：组合根把 `approval=None` 解释为「非交互 → 自动批准 WARN」；回归用例 `test_build_loop_defaults_to_non_interactive_auto_approval` |
+| `bash` 调用长时间不返回 | 工具超时依赖 `asyncio.wait_for(proc.communicate())`，而该协程的**取消**在子进程管道不 EOF 时无法完成（本沙箱即如此），因此超时抛不出来 | 环境问题；正常 Linux 下无此现象。健壮性改进（工具级看门狗）待排期 |
 
 ## 回归
 

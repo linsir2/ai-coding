@@ -426,6 +426,30 @@ async def test_todo_aware_gives_up_after_max_nudges(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_strict_policy_ignores_the_nudge_cap(tmp_path):
+    """`strict` means "keep going": the iteration budget is the only limit."""
+    engine = ScriptedEngine([_text("a"), _text("b"), _text("c"), _text("d")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        engine,
+        sessions,
+        settings=_settings(
+            stop_policy="strict", max_todo_nudges=1, max_tool_iterations=4
+        ),
+    )
+    session = sessions.create()
+    session.task = TaskState(goal="g")
+    session.task.add("still open")
+
+    await loop.process_input(session, "go")
+
+    # todo_aware would have stopped at 2; strict keeps nudging until the budget ends
+    assert len(engine.requests) == 4
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.status is TurnStatus.MAX_ITERATIONS
+
+
+@pytest.mark.asyncio
 async def test_todo_aware_does_not_nudge_when_all_terminal(tmp_path):
     engine = ScriptedEngine([_text("a")])
     sessions = SessionService(tmp_path / "sessions")
@@ -570,6 +594,34 @@ async def test_tool_context_carries_request_view(tmp_path):
     assert ctx.session_id == session.session_id
     assert ctx.task is session.task
     assert ctx.messages  # the request view, not empty
+
+
+@pytest.mark.asyncio
+async def test_tool_context_emit_reaches_the_observer(tmp_path):
+    """`ToolContext.emit` is the documented tool -> observer channel.
+
+    R1a-3 deferred wiring it to R1a-4, and R1a-4 did not do it, so it silently
+    discarded whatever a tool emitted.  This pins the contract.
+    """
+
+    class _EmittingTool(_Tool):
+        async def execute(self, params, ctx=None):  # type: ignore[override]
+            assert ctx is not None
+            ctx.emit(ToolStarted(call_id="inner", tool_name="inner", params={}))
+            return await super().execute(params, ctx)
+
+    tool = _EmittingTool("read")
+    engine = ScriptedEngine([_calls(_ref("c1", "read")), _text("done")])
+    sessions = SessionService(tmp_path / "sessions")
+    observer = RecordingObserver()
+    loop = _loop(engine, sessions, _registry(tool), observer=observer)
+
+    await loop.process_input(sessions.create(), "go")
+
+    assert [event.tool_name for event in observer.of_type(ToolStarted)] == [
+        "read",
+        "inner",
+    ]
 
 
 # ---- robustness and events -------------------------------------------------

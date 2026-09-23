@@ -186,10 +186,17 @@ class AgentLoop:
 
                 if not step.tool_calls:
                     open_items = task.open_items()
+                    # "strict" never gives up early: the iteration budget is its
+                    # only bound (docs/r1-analysis.md D5).  The other two policies
+                    # stop once the nudge cap is reached.
+                    nudges_exhausted = (
+                        settings.stop_policy != "strict"
+                        and nudges >= settings.max_todo_nudges
+                    )
                     if (
                         settings.stop_policy == "natural"
                         or not open_items
-                        or nudges >= settings.max_todo_nudges
+                        or nudges_exhausted
                     ):
                         outcome = TurnOutcome(
                             status=TurnStatus.COMPLETED,
@@ -308,6 +315,7 @@ class AgentLoop:
             session_id=session.session_id,
             messages=tuple(history),
             instructions=instructions,
+            emit=self._emit,
         )
 
     # ---- persistence ------------------------------------------------------

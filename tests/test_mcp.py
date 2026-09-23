@@ -242,3 +242,22 @@ async def test_aclose_closes_sessions():
     assert session.closed is True
     # closing twice (or without opening) must stay safe
     await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_server_names_are_skipped():
+    """Two servers sharing a name would produce identical tool names.
+
+    Registering both would raise from ToolRegistry and escape as a CLI
+    traceback, which contradicts 'an MCP server is an enhancement'.
+    """
+    session = _Session(tools=[_tool("read_file")])
+    manager = MCPManager(
+        _cfg(_server("dup"), _server("dup")),
+        session_factory=_factory({"dup": session}),
+    )
+
+    tools = await manager.open_all()
+
+    assert [tool.name for tool in tools] == ["dup__read_file"]
+    await manager.aclose()
