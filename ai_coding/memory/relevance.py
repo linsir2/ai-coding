@@ -43,6 +43,7 @@ __all__ = [
     "RecallScorer",
     "ScoredNote",
     "coverage",
+    "parse_time",
     "rank_notes",
     "recency",
     "score_note",
@@ -108,7 +109,8 @@ class _Stats:
     n_docs: int
 
 
-def _parse_time(value: str) -> datetime | None:
+def parse_time(value: str) -> datetime | None:
+    """Parse an ISO-8601 timestamp (``Z`` or offset), ``None`` when unusable."""
     if not value:
         return None
     try:
@@ -120,7 +122,7 @@ def _parse_time(value: str) -> datetime | None:
 
 def recency(created_time: str, *, now: datetime, half_life_days: float) -> float:
     """``0.5 ** (age / half_life)`` in ``(0, 1]``; an unknown age counts as fresh."""
-    created = _parse_time(created_time)
+    created = parse_time(created_time)
     if created is None:
         return 1.0
     age_days = max(0.0, (now - created).total_seconds() / 86_400)

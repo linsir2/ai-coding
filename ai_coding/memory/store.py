@@ -1,11 +1,25 @@
-"""Disk-backed memory index (M3).
+"""Disk-backed memory index, schema v2 (R3a).
 
-Design (m3-analysis §4.4): a small JSON-file-backed index used to persist compact
-memory entries across turns.  Writes are atomic (tmp + ``os.replace``) and every IO
-failure is swallowed — memory must never break the agent loop (invariant §5-11).
+M3 kept an append-only list of ``{id, text, created_time}``: it could store a
+sentence but not manage one, which is why the same fact landed five times (case 3),
+contradictions coexisted (case 4) and FIFO trimming deleted the *most important*
+note first (case 5) — see docs/r3-analysis.md.
 
-Persistence shape (independent, reusable):
-    {"entries": [{"id": str, "text": str, "created_time": str}]}
+v2 stores :class:`~ai_coding.memory.note.MemoryNote` values and adds what those
+cases need:
+
+  - **content identity** (``dedupe_key``): adding the same fact twice is a no-op;
+  - **similarity lookup** so a re-worded fact updates instead of duplicating;
+  - **supersede** so a contradiction retires the old note *without deleting it*;
+  - **value-based eviction** (importance, hits, recency) with pinned/decision
+    protection instead of "drop the oldest";
+  - **scored search** through :func:`ai_coding.memory.relevance.rank_notes`.
+
+Invariants kept from M3: writes are atomic (tmp + ``os.replace``), a v1 file is
+read-migrated, and **no method ever raises for an IO problem**.
+
+The M3 API (``add`` / ``search`` / ``delete`` / ``clear``) survives as a deprecated
+compatibility surface, so existing callers keep working unchanged.
 """
 
 from __future__ import annotations
@@ -14,51 +28,59 @@ import os
 import threading
 import uuid
 from collections.abc import Callable, Sequence
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from ai_coding.infra.json_utils import from_json_file, to_json_pretty
 from ai_coding.infra.time_utils import now_utc
+from ai_coding.memory.note import MemoryNote, NoteKind, new_note
+from ai_coding.memory.relevance import (
+    RecallParams,
+    ScoredNote,
+    parse_time,
+    rank_notes,
+    recency,
+)
+from ai_coding.memory.tokenize import similarity
+
+__all__ = ["MemoryEntry", "MemoryStore", "SCHEMA_VERSION"]
+
+SCHEMA_VERSION = 2
+_DEFAULT_SIMILARITY = 0.80
+_EVICTION_HALF_LIFE_DAYS = 30.0
+
+_T = TypeVar("_T")
+
+# Backwards-compatible alias: M3 exported ``MemoryEntry``.
+MemoryEntry = MemoryNote
 
 
-class MemoryEntry:
-    """A single stored memory record."""
-
-    __slots__ = ("id", "text", "created_time")
-
-    def __init__(self, id: str, text: str, created_time: str) -> None:
-        self.id = id
-        self.text = text
-        self.created_time = created_time
-
-    def to_dict(self) -> dict[str, str]:
-        return {"id": self.id, "text": self.text, "created_time": self.created_time}
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> MemoryEntry:
-        return cls(
-            id=str(data.get("id", "")),
-            text=str(data.get("text", "")),
-            created_time=str(data.get("created_time", "")),
-        )
-
-
-def _load(path: Path) -> list[MemoryEntry]:
+def _load(path: Path) -> list[MemoryNote]:
+    """Read v2 (``notes``) or migrate v1 (``entries``); never raise."""
     if not path.is_file():
         return []
     try:
         data = from_json_file(path)
     except (ValueError, OSError):
         return []
-    raw = data.get("entries", []) if isinstance(data, dict) else []
-    entries: list[MemoryEntry] = []
+    if not isinstance(data, dict):
+        return []
+    raw: Any = data.get("notes")
+    if not isinstance(raw, list):
+        raw = data.get("entries")  # v1 migration (read-only)
+    if not isinstance(raw, list):
+        return []
+    notes: list[MemoryNote] = []
     for item in raw:
-        if isinstance(item, dict):
-            try:
-                entries.append(MemoryEntry.from_dict(item))
-            except (ValueError, TypeError):
-                continue
-    return entries
+        if not isinstance(item, dict):
+            continue
+        try:
+            notes.append(MemoryNote.from_dict(item))
+        except (ValueError, TypeError):
+            continue
+    return notes
 
 
 class MemoryStore:
@@ -66,8 +88,8 @@ class MemoryStore:
 
     def __init__(self, path: str | Path = Path(".memory")) -> None:
         self._path = Path(path)
-        self._lock = threading.Lock()
-        self._entries = _load(self._path)
+        self._lock = threading.RLock()
+        self._notes: list[MemoryNote] = _load(self._path)
 
     # ---- persistence ------------------------------------------------------
 
@@ -75,7 +97,10 @@ class MemoryStore:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             payload = to_json_pretty(
-                {"entries": [e.to_dict() for e in self._entries]}
+                {
+                    "version": SCHEMA_VERSION,
+                    "notes": [note.to_dict() for note in self._notes],
+                }
             )
             tmp = self._path.with_suffix(self._path.suffix + ".tmp")
             tmp.write_text(payload, encoding="utf-8")
@@ -83,73 +108,222 @@ class MemoryStore:
         except OSError:
             pass  # memory persistence is best-effort; never raise
 
-    # ---- mutations --------------------------------------------------------
-
-    def _mutate(self, fn: Callable[[], None]) -> None:
+    def _mutate(self, fn: Callable[[], _T]) -> _T:
         """Run a mutation and swallow any persistence error (memory never raises)."""
         with self._lock:
-            fn()
-            try:
-                self._save()
-            except Exception:
-                pass
+            result = fn()
+        try:
+            self._save()
+        except Exception:  # noqa: BLE001 — persistence is best-effort
+            pass
+        return result
 
-    def add(self, text: str) -> str:
-        """Add one text entry; returns its id ('' when the text is blank)."""
-        text = (text or "").strip()
-        if not text:
-            return ""
-        entry = MemoryEntry(id=uuid.uuid4().hex, text=text, created_time=now_utc())
-        self._mutate(lambda: self._entries.append(entry))
-        return entry.id
+    # ---- creation / updates ----------------------------------------------
 
-    def delete(self, entry_id: str) -> bool:
+    def add_note(self, note: MemoryNote) -> str:
+        """Store ``note`` unless its content is already known; return the id used."""
+
+        def _do() -> str:
+            for index, existing in enumerate(self._notes):
+                if existing.dedupe_key != note.dedupe_key:
+                    continue
+                better = replace(
+                    existing,
+                    importance=max(existing.importance, note.importance),
+                    pinned=existing.pinned or note.pinned,
+                )
+                if better != existing:
+                    self._notes[index] = better
+                return existing.id
+            self._notes.append(note)
+            return note.id
+
+        return self._mutate(_do)
+
+    def update(self, note: MemoryNote) -> bool:
+        """Replace the stored note with the same id; ``False`` if it is unknown."""
+        return self._mutate(lambda: _replace_by_id(self._notes, note))
+
+    def supersede(self, old_id: str, newer: MemoryNote) -> bool:
+        """Retire ``old_id`` in favour of ``newer`` (which is stored too)."""
+
+        def _do() -> bool:
+            old = next((n for n in self._notes if n.id == old_id), None)
+            if old is None:
+                return False
+            if not any(n.dedupe_key == newer.dedupe_key for n in self._notes):
+                self._notes.append(newer)
+            _replace_by_id(self._notes, old.superseded_by_note(newer))
+            return True
+
+        return self._mutate(_do)
+
+    def pin(self, note_id: str, pinned: bool = True) -> MemoryNote | None:
+        """Mark a note as protected from eviction (or clear the flag)."""
+
+        def _do() -> MemoryNote | None:
+            for index, note in enumerate(self._notes):
+                if note.id != note_id:
+                    continue
+                updated = replace(note, pinned=pinned, updated_time=now_utc())
+                self._notes[index] = updated
+                return updated
+            return None
+
+        return self._mutate(_do)
+
+    def delete(self, note_id: str) -> bool:
         """Delete by id; returns True when removed."""
-        removed = False
-
-        def _do() -> None:
-            nonlocal removed
-            idx = [i for i, e in enumerate(self._entries) if e.id == entry_id]
-            if idx:
-                self._entries.pop(idx[0])
-                removed = True
-
-        self._mutate(_do)
-        return removed
+        return self._mutate(lambda: _drop_by_id(self._notes, note_id))
 
     def clear(self) -> None:
-        self._mutate(lambda: self._entries.clear())
+        self._mutate(lambda: self._notes.clear())
 
     # ---- reads ------------------------------------------------------------
 
-    def all(self) -> list[MemoryEntry]:
+    def all(self) -> list[MemoryNote]:
         with self._lock:
-            return list(self._entries)
+            return list(self._notes)
 
-    def search(self, keywords: Sequence[str], limit: int = 20) -> list[MemoryEntry]:
-        """Return entries whose text matches at least one keyword (substring)."""
-        if not keywords:
-            return []
-        keys = [k.casefold() for k in keywords if (k or "").strip()]
-        if not keys:
-            return []
-        hits: list[MemoryEntry] = []
+    def active(self) -> list[MemoryNote]:
+        """Notes that are not superseded (what recall and eviction consider)."""
+        return [note for note in self.all() if note.is_active]
+
+    def get(self, note_id: str) -> MemoryNote | None:
         with self._lock:
-            for e in self._entries:
-                body = e.text.casefold()
-                if any(k in body for k in keys):
-                    hits.append(e)
-                if len(hits) >= limit:
-                    break
-        return hits
+            return next((note for note in self._notes if note.id == note_id), None)
+
+    def find_by_dedupe(self, dedupe_key: str) -> MemoryNote | None:
+        with self._lock:
+            return next(
+                (note for note in self._notes if note.dedupe_key == dedupe_key), None
+            )
+
+    def find_similar(
+        self,
+        text: str,
+        *,
+        kind: NoteKind | None = None,
+        threshold: float = _DEFAULT_SIMILARITY,
+    ) -> MemoryNote | None:
+        """Most similar *active* note of the same kind, if it clears ``threshold``."""
+        best: MemoryNote | None = None
+        best_score = threshold
+        for note in self.active():
+            if kind is not None and note.kind is not kind:
+                continue
+            score = similarity(text, note.text)
+            if score >= best_score and (best is None or score > best_score):
+                best, best_score = note, score
+        return best
+
+    def search_scored(
+        self,
+        query: str,
+        *,
+        params: RecallParams | None = None,
+        now: datetime | None = None,
+        limit: int | None = None,
+    ) -> list[ScoredNote]:
+        """Rank active notes for ``query`` (the R3 retrieval path)."""
+        return rank_notes(self.active(), query, params=params, now=now, limit=limit)
 
     @property
     def count(self) -> int:
         with self._lock:
-            return len(self._entries)
+            return len(self._notes)
 
     def __len__(self) -> int:
         return self.count
 
+    # ---- eviction ---------------------------------------------------------
 
-__all__ = ["MemoryStore", "MemoryEntry"]
+    def evict(self, cap: int) -> list[str]:
+        """Trim to ``cap`` notes, dropping the least valuable ones first.
+
+        ``pinned`` notes and decisions are kept unless the cap cannot be honoured
+        otherwise (case 5: the security rule used to be the first thing deleted).
+        """
+
+        def _do() -> list[str]:
+            if cap < 0 or len(self._notes) <= cap:
+                return []
+            moment = _now()
+            excess = len(self._notes) - cap
+            removable = [n for n in self._notes if not _is_protected(n)]
+            removable.sort(key=lambda n: (_value_of(n, moment), n.created_time, n.id))
+            victims = removable[:excess]
+            if len(victims) < excess:
+                # Protected notes alone exceed the cap: fall back to pure value.
+                pool = sorted(
+                    self._notes, key=lambda n: (_value_of(n, moment), n.created_time, n.id)
+                )
+                victims = pool[:excess]
+            victim_ids = {note.id for note in victims}
+            self._notes = [n for n in self._notes if n.id not in victim_ids]
+            return list(victim_ids)
+
+        return self._mutate(_do)
+
+    # ---- deprecated M3 surface -------------------------------------------
+
+    def add(self, text: str) -> str:
+        """Deprecated (M3): append one fact note. Use :meth:`add_note` instead."""
+        body = (text or "").strip()
+        if not body:
+            return ""
+        note_id = uuid.uuid4().hex
+        self._mutate(lambda: self._notes.append(new_note(body, note_id=note_id)))
+        return note_id
+
+    def search(self, keywords: Sequence[str], limit: int = 20) -> list[MemoryNote]:
+        """Deprecated (M3): substring match in insertion order, no ranking.
+
+        Use :meth:`search_scored` (relevance + recency + importance + threshold).
+        """
+        if not keywords:
+            return []
+        keys = [key.casefold() for key in keywords if (key or "").strip()]
+        if not keys:
+            return []
+        hits: list[MemoryNote] = []
+        with self._lock:
+            for note in self._notes:
+                body = note.text.casefold()
+                if any(key in body for key in keys):
+                    hits.append(note)
+                if len(hits) >= limit:
+                    break
+        return hits
+
+
+def _replace_by_id(notes: list[MemoryNote], note: MemoryNote) -> bool:
+    for index, current in enumerate(notes):
+        if current.id == note.id:
+            notes[index] = note
+            return True
+    return False
+
+
+def _drop_by_id(notes: list[MemoryNote], note_id: str) -> bool:
+    for index, current in enumerate(notes):
+        if current.id == note_id:
+            notes.pop(index)
+            return True
+    return False
+
+
+def _is_protected(note: MemoryNote) -> bool:
+    return note.pinned or note.kind is NoteKind.DECISION
+
+
+def _value_of(note: MemoryNote, moment: datetime) -> float:
+    """Higher is more worth keeping: importance, usage, freshness."""
+    freshness = recency(
+        note.created_time, now=moment, half_life_days=_EVICTION_HALF_LIFE_DAYS
+    )
+    return note.importance + 0.5 * min(note.hits, 4) + 0.5 * freshness
+
+
+def _now() -> datetime:
+    return parse_time(now_utc()) or datetime.now(timezone.utc)
