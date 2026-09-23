@@ -806,8 +806,8 @@ sequenceDiagram
 验收命令（全部真实执行，结果写回本文与 `docs/integration_testing.md`）：
 
 ```bash
-.venv/bin/python scripts/memory_cases.py                              # 沙箱内即可
-AI_CODING_MEMORY_IT=1 .venv/bin/python scripts/memory_cases.py --real # 沙箱外 / CI
+.venv/bin/python scripts/memory_cases.py            # 11 条案例，离线，CI 每次跑
+.venv/bin/python scripts/memory_cases.py --real     # 真实 LLM 跨会话 A/B（需 config.local.yaml）
 pytest -q && ruff check . && mypy ai_coding
 ```
 

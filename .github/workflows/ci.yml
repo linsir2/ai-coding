@@ -43,3 +43,6 @@ jobs:
 
       - name: Real MCP stdio round trip
         run: AI_CODING_MCP_STDIO=1 python -m pytest tests/test_mcp_stdio.py -q
+
+      - name: Memory acceptance cases (offline, 11 cases)
+        run: python scripts/memory_cases.py
