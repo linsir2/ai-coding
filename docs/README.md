@@ -25,6 +25,20 @@
 | [M3 分析](m3-analysis.md) | 上下文压缩 + 记忆 + 技能 |
 | [集成测试](integration_testing.md) | 全链路真实网络迁移验证方法 |
 
+## 编排层重构记录（R1，开发追踪）
+
+M0–M6 之后的一次结构性重构：把循环控制权从 SDK 收回本项目，并移除 SDK 依赖。
+
+| 文档 | 范围 |
+|---|---|
+| [R1 总方案](r1-analysis.md) | 影响分析、执行范围、逐文件步骤、TDD 用例、架构图、自我核验；R1a-1 契约层也在其中 |
+| [R1a-2](r1a-2-analysis.md) | 引擎端口：`ChatEngine` + 直连 chat.completions |
+| [R1a-3](r1a-3-analysis.md) | 工具分发器：权限门 + 审批 + 有界并发 |
+| [R1a-4](r1a-4-analysis.md) | 循环本体：迭代、todo 门禁、停止策略、落盘、中断 |
+| [R1a-5](r1a-5-analysis.md) | 子智能体：共享上下文、结构化回包、ledger 回写 |
+| [R1a-6](r1a-6-analysis.md) | 收尾：MCP 直连 + 删除 SDK 路径 + 文档同步 |
+
 ## 当前状态
 
-主线里程碑 M0–M6 全部完成并分阶段提交推送至 `github.com/linsir2/ai-coding`。质量门禁：`pytest` 全绿、`ruff` 0 问题、`mypy strict` 0 问题。
+主线里程碑 M0–M6 与编排层重构 R1 全部完成，分阶段提交。
+质量门禁：`pytest` 全绿、`ruff` 0 问题、`mypy strict`（按 3.10 下限检查）0 问题。

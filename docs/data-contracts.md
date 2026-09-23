@@ -16,17 +16,21 @@
 
 `ChatMessage` 关键不变量：`role=tool` 必须携带 `tool_call_id`；`role=assistant` 必须至少带 `content` 或 `tool_calls` 其一。解析工具参数用 `tool_call_from_ref(ref)`，非法 JSON 静默退化为空字典，不抛错。
 
-## 回合结果
+## 一步与一回合
 
-`TurnResult` 表示模型对一次输入的单回合响应：
+R1 之后「一步」与「一回合」是两个契约（`domain/loop.py`）：
 
-| 字段 | 类型 | 说明 |
+| 类型 | 字段 | 说明 |
 |---|---|---|
-| `text` | `str \| None` | 最终自然语言文本（`None` 表示未产出文本） |
-| `tool_calls` | `list[ToolCallRef]` | 本回合声明的工具调用 |
-| `tool_outputs` | `list[ToolOutput]` | 与调用严格配对的工具输出 |
+| `StepResult` | `text` / `tool_calls` / `finish_reason` / `usage` | **一次模型调用**的产物；引擎只跑一步 |
+| `TurnOutcome` | `status` / `text` / `iterations` / `reason` | **一次 `process_input`** 的终态 |
+| `TurnStatus` | `COMPLETED` / `MAX_ITERATIONS` / `STOPPED` / `ABORTED` / `ERROR` | 回合如何结束 |
 
-`tool_message(out, ts)` 把输出包进反馈封套 `wrap_tool_output(name, output)`，即 `<tool_output tool="X">\n...\n</tool_output>`，这是历史消息结构不变量，压缩与配对逻辑依赖该形状。
+旧的 `TurnResult` 已删除（循环归我们之后它没有意义）。
+
+`tool_message(out, ts)` 把输出包进反馈封套 `wrap_tool_output(name, output, success=, data=)`。
+信封形状是历史结构不变量：`success=True` 且 `data=None` 时与 M0–M6 **逐字节一致**；
+失败时加 `ok="false"`；有结构化结果时内嵌 `<data>{json}</data>` 块。压缩与配对逻辑依赖该形状。
 
 ## 会话落盘格式
 
@@ -106,3 +110,68 @@ YAML 加载规则：键做 camel→snake 归一化（`baseURL`→`base_url` 视�
 - 工具输出以 `<tool_output tool="name">` 封套回喂，配对逻辑据此完成严格配对。
 - 上下文压缩只改历史副本；任意阶段后 `sanitize_pairs` 恢复严格配对。
 - 记忆、L4 摘要、MCP、worktree 等增强全部静默降级，永不向会话主链路抛错或污染状态。
+
+---
+
+## R1 编排层契约
+
+R1 新增/变更的契约集中在四处。
+
+### 任务清单（`domain/task.py`）
+
+| 类型 | 字段 |
+|---|---|
+| `TodoItem` | `id`、`content`、`status`（`pending`/`in_progress`/`completed`/`blocked`/`dropped`）、`depends_on`、`evidence`、`created_at`、`updated_at` |
+| `TaskState` | `goal`、`items`；方法 `add` / `update` / `clear` / `open_items` / `is_complete` / `focus` / `render` |
+
+`render()` 产出 `<task-state>` 块（目标、进度、逐项状态、下一步）。
+`depends_on` 目前只用于渲染与「下一步」选择，**不做硬门禁**。
+
+### 会话新增字段（`SessionData`）
+
+| 字段 | 说明 |
+|---|---|
+| `task: TaskState \| None` | **有 todo 项时才写入 JSON**（只有 goal 是可从首条 user 消息还原的噪声） |
+
+### 工具结果（`domain/message.py`）
+
+| 类型 | 字段 |
+|---|---|
+| `ToolResult` | `success`、`output`（给模型读）、`data`（给程序读）、`artifacts`、`error` |
+| `ToolArtifact` | `path`、`kind`、`bytes`、`description` |
+| `ToolOutput` | `call_id`、`tool_name`、`output`、`success`、`data`、`artifacts` |
+
+`ToolResult(success, output)` 的旧形态仍然合法——这是 R1a 各步能保持增量的原因。
+各拒绝路径有固定 `error` 码：`denied` / `not_approved` / `stopped` / `skipped` /
+`unknown_tool` / `tool_error` / `mcp_error` / `subagent_error`。
+
+### 工具上下文与子智能体
+
+| 类型 | 字段 | 说明 |
+|---|---|---|
+| `ToolContext` | `task`、`workspace`、`session_id`、`messages`、`instructions`、`emit` | 工具的**每次调用**上下文；`messages`/`instructions` 是父回合当次请求视图 |
+| `ParentContext` | `messages`、`instructions` | 传给子智能体的「相同上下文」 |
+| `SubagentResult` | `status`、`conclusion`、`todos`、`artifacts`、`iterations`、`workdir`、`ledger_path`、`error` | 子智能体的结构化信息包（`text` 是 `conclusion` 的只读别名） |
+
+`BaseTool` 增加两个契约成员：`execute(params, ctx=None)` 与 `parallel_safe: bool`（默认 `False`，
+只读工具置 `True`；一批调用只要有**一个**不安全或非 ALLOW 级，整批串行）。
+
+### 循环事件（`core/events.py`）
+
+`LoopEvent` 是以下冻结事件的联合：`IterationStarted`、`AssistantTextDelta`、`AssistantMessage`、
+`ToolApprovalRequested`、`ToolStarted`、`ToolFinished`、`TaskUpdated`、`TurnFinished`。
+`LoopObserver.on_event` 是同步入口；观测者抛异常不会中断回合（`_SafeObserver` 兜底并记日志）。
+
+### `AIConfig` 新增项
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `stop_policy` | `"todo_aware"` | `natural` / `todo_aware` / `strict` |
+| `max_todo_nudges` | `2` | todo 门禁最多提醒次数 |
+| `task_injection` | `"message"` | `message`（易失末尾消息）/ `system`（并入指令） |
+| `max_concurrent_tools` | `4` | 同批工具并发上限 |
+| `subagent_timeout_seconds` | `600` | 子智能体超时（超时是一种 `status`，不是异常） |
+| `max_result_data_bytes` | `8000` | 结构化工具结果上限 |
+| `max_subagent_conclusion_chars` | `4000` | 子智能体结论截断（全文只进 ledger） |
+| `stream_usage` | `true` | 是否请求 `stream_options.include_usage` |
+| `persist_checkpoint_messages` | `200` | 超过此条数后，回合内落盘按步长（每 3 轮）节流 |

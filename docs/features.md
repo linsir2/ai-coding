@@ -1,6 +1,9 @@
 # 功能清单
 
-ai-coding 以「单回合对话 + 工具调用」为核心模型：用户输入进入 `AgentLoop`，组装系统提示后交给 AI 引擎（OpenAI Agents SDK），模型可发起工具调用，工具结果回喂，最终产出自然语言回答并持久化到会话。下面按能力域展开。
+ai-coding 以「**自持 ReAct 循环** + 工具调用」为核心模型：用户输入进入 `AgentLoop`，
+它自己驱动迭代——每轮压缩历史副本、组装系统提示、注入任务清单、调一次模型（`ChatEngine.step`），
+必要时通过 `ToolDispatcher` 执行工具并把结构化结果回喂，直到满足停止条件。
+整个循环、分发与权限都在本项目内，不依赖任何 agent 框架。下面按能力域展开。
 
 ## CLI 入口
 
@@ -63,7 +66,18 @@ ai-coding 以「单回合对话 + 工具调用」为核心模型：用户输入�
 
 ## MCP 集成
 
-`MCPManager` 把 `MCPConfig` 翻译为 SDK 的 `MCPServerStdio`：仅保留 `enabled` 且 name/command 非空的服务器，MCP 块整体 `enabled=false` 时不连接任何服务器。构造完全离线，连接与工具发现发生在运行期 SDK 内部。MCP 是 SDK 边界，封装在单一的 config→SDK 映射点。
+`MCPManager` 用官方 `mcp` 包**直接连 stdio 服务器**：`open_all()` 逐个连接启用的 server、
+`list_tools()` 发现远端工具，并把每个工具包装成 `MCPToolAdapter`（`BaseTool` 子类）
+注册进**同一个工具注册表**——因此 MCP 工具与内置工具走**同一套权限门、审批与结构化结果**通道。
+
+- 工具名带 `{server}__{tool}` 前缀，避免两个 server 同名工具互相覆盖；
+- `MCPToolAdapter.parallel_safe = False`（远端副作用未知，保守串行）；
+- 权限上落到「未知工具」分支 → WARN：非交互入口自动批准，交互入口弹确认；
+- 单个 server 连接失败**静默跳过**，不影响其它 server 与主链路（增强组件不阻塞会话）；
+- `aclose()` 统一拆除会话，幂等且对未开启的 manager 安全；
+- 传输层可注入（`session_factory`），因此单测不需要真的 spawn 子进程。
+
+`mcp.enabled=false`（默认）时 `open_all()` 立即返回空列表，不连接任何服务器。
 
 ## 交互式 REPL 与 slash 命令
 
@@ -93,5 +107,21 @@ ai-coding 以「单回合对话 + 工具调用」为核心模型：用户输入�
 | M4 | 子代理 + worktree 隔离 | 完成 |
 | M5 | MCP 集成、REPL/富文本 UI | 完成 |
 | M6 | 收尾、全量迁移测试 | 完成 |
+| R1 | 编排层重构：自持循环 + todo 门禁 + 分发器 + 子智能体 + MCP 直连 + 移除 SDK | 完成 |
 
 已知约束：bash 工具仅面向 Linux；`ask`/`repl` 需要提供 `--path`（配置发现不做自动探测，否则报 `no default model configured`）。
+
+## R1 带来的变化（相对 M6）
+
+| 能力 | M6 | R1 |
+|---|---|---|
+| 迭代循环 | 由 OpenAI Agents SDK 内部驱动，不可见 | **自持循环**，每轮有事件与落盘点 |
+| 轮次上限 | `ai.max_tool_iterations` 是死配置 | 真正生效，耗尽即 `MAX_ITERATIONS` 并保留部分成果 |
+| 任务清单 | `todo_write` 纯内存、不注入、不落盘 | `TaskState` 一等公民：每轮注入、跨回合持久化、可门禁停止 |
+| 停止条件 | 只有「模型不再调工具」 | 显式 5 条：自然结束 / 轮次耗尽 / todo 门禁 / 用户中断 / 审批 STOP |
+| 工具结果 | 一段文本 | 结构化：`output`（给模型）+ `data`（给程序）+ `artifacts` |
+| 工具执行 | SDK 内部，看不到放行过程 | `ToolDispatcher` 统一收口：权限门 + 审批 + 有界并发 + 结构化拒绝 |
+| 子智能体 | 空历史起跑，只回一段文本 | **共享父回合上下文**，返回结构化信息包并落 ledger |
+| 回合中断 | 无 | 可取消，保留已完成的工具轨迹 |
+| 提示可见性 | 无 | `ask`/`repl` 打印 `[turn i/n]`、`[tool: x]`、结果预览、任务清单 |
+| 依赖 | openai-agents（含 numpy） | 零 agent 框架：`openai` + `mcp` |
