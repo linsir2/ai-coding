@@ -245,10 +245,12 @@ class MemoryService:
         now: datetime | None = None,
     ) -> HarvestReport:
         """Reconcile this turn's delta into the index (never raises)."""
-        if not self.enabled or not bool(self._get("auto_extract", True)):
-            return HarvestReport()
-        if self._extractor is None:
-            return HarvestReport()
+        if not self.enabled:
+            return HarvestReport()  # disabled means hands off, readers included
+        if not bool(self._get("auto_extract", True)) or self._extractor is None:
+            # Nothing to extract, but the index cap is a store invariant.
+            evicted = self._store.evict(int(self._get("max_index_entries", 200)))
+            return HarvestReport(evicted=tuple(evicted))
         batch = list(messages)[-int(self._get("harvest_max_messages", 12)) :]
         hint = self._known_memory_hint(batch)
         if hint:

@@ -8,6 +8,10 @@
 > 前置文档：`docs/r1-analysis.md`（编排层）、`docs/r2-analysis.md`（可靠性收口）、
 > `docs/m3-analysis.md`（记忆层原设计，本文是它的修订）。
 
+> **实现状态（2026-09-23）**：R3a（引擎内核 + 对账收割）、R3b（尾部注入 + 增量收割 +
+> `memory_search` 工具 + 分页压缩 + `/compact`）、R3c（consolidate + `memory` 命令 +
+> 案例脚本）**均已落地**，证据见第 12 节。
+
 ---
 
 ## 0. 结论摘要
@@ -848,3 +852,56 @@ pytest -q && ruff check . && mypy ai_coding
 
 未收到反对即按「建议」列实施；顺序 R3a → R3b → R3c，每步一个文档/代码提交，全部 TDD，
 并在沙箱内跑 `scripts/memory_cases.py`、在真实环境跑真实 LLM 案例留证。
+
+---
+
+## 12. 实测记录（2026-09-23，实现完成后）
+
+### 12.1 案例脚本：11/11
+
+```bash
+.venv/bin/python scripts/memory_cases.py
+# SUMMARY 11/11 passed
+```
+
+| 案例 | 现在的结果 |
+|---|---|
+| 1 中文召回 | 命中（旧：`[]`） |
+| 2 排序 | `epsilon → gamma → alpha`（旧：插入顺序最旧优先） |
+| 3 去重 | 同事实写 5 次 → 1 条、注入 1 条（旧：5 条） |
+| 4 取代 | uv → poetry，只剩 poetry 活跃（旧：两条并存） |
+| 5 淘汰 | 安全红线存活，裁到上限（旧：红线第一个被删） |
+| 6 enabled=false | 不读不写（旧：照样注入） |
+| 7 增量收割 | 每轮 2 条（用户+回答），不再是 2/4/6/8/10 |
+| 8 决策存活 | 13 轮后决策仍在尾部约束块；记忆 1 条（旧：100 条垃圾 + 决策丢失） |
+| 9 相关性 | k=1 选中有 `dist/`/`build.log` 的那条（旧：最旧那条） |
+| 10 误注入 | 无关查询 → 不注入（旧：共享 `the`/`file` 就注入） |
+| 11 缓存前缀 | **append-only 92%** vs **每轮压缩 11%**（同一段落、同长度） |
+
+### 12.2 真实 LLM 的 A/B（`--real`，qwen3.8-max）
+
+```text
+[with-memory]    memory_notes=3  answer='uv add <依赖名>'
+[without-memory] memory_notes=0  answer='npm install <依赖名>'
+contrast: 关掉记忆的对照组没能复现该约定 —— 差异确实来自记忆
+```
+
+会话 A 教「这个仓库统一用 uv，禁止 pip」，**新会话 B** 问「加依赖的命令」：
+开着记忆给出 `uv add`，关掉记忆给出 `npm install`（既不是 uv 也不是 pip —— 模型自己猜的）。
+**跨会话、无历史**的条件下，只有记忆能解释这个差异。
+
+### 12.3 质量门禁
+
+```text
+pytest        633 例全绿（含旧 M3 记忆测试，未改动）
+ruff check .  0 错
+mypy ai_coding 0 问题（73 文件）
+```
+
+### 12.4 实现期对文档的三处修正（都在正文里改过）
+
+1. **注入位置**：原方案把 L0/L1 放系统提示 —— 实测缓存前缀只剩 7%，改为尾部块 + 工具（1.13）；
+2. **相关性算法**：原方案用归一化 BM25 —— 短文档饱和到 1.0 反而赢（案例 9），改为 idf 覆盖度（1.17）；
+3. **唯一改动的旧测试**：`test_memory_recall_injected_and_remember_called` 断言的是被否决的契约
+   （记忆进系统提示 + 回合末调 `remember`），已按新契约改写为
+   `test_memory_is_injected_at_the_tail_and_harvested`；其余记忆/压缩测试一行未动。

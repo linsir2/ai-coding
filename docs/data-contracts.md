@@ -195,3 +195,35 @@ R2 给 `ToolFinished` 追加末尾字段 `error: str | None = None`（与 `ToolR
 ### 回合终态（`domain/loop.py`）
 
 `TurnStatus`：`completed` / `max_iterations` / **`timeout`**（R2 新增）/ `stopped` / `aborted` / `error`。
+
+### 记忆条目（`memory/note.py`，R3）
+
+| 字段 | 说明 |
+|---|---|
+| `id` / `text` | 标识与内容 |
+| `kind` | `fact` / `decision` / `preference` / `open_thread`（决定加权、常驻与淘汰保护） |
+| `scope` | 默认 `workspace`（同工作区跨会话共享） |
+| `importance` | 1–5（提取器给，整理时按命中提升） |
+| `created_time` / `updated_time` | 新近性衰减与审计 |
+| `source_session` / `source_turn` | 溯源 |
+| `supersedes` / `superseded_by` | 取代链：旧条**只标记不删除**，可回滚 |
+| `hits` / `last_used` / `pinned` | 使用统计与淘汰保护 |
+| `dedupe_key`（派生） | `sha1(normalize(text))`，同内容幂等 |
+
+`.memory` 文件：`{"version": 2, "notes": [...]}`；读到 v1（`entries`）自动迁移为 v2 字段默认值。
+
+### 收割契约（`memory/schema.py`，R3）
+
+提取器输出 JSON 数组：`[{"text", "kind", "importance", "action", "target_id"}]`，
+`action ∈ add|update|supersede|noop`。解析容错：代码块、前后散文、坏行、旧的「一行一条」格式都能吃，
+完全不可用时返回空列表（记忆永不抛错）。
+
+### 新增事件（`core/events.py`，R3）
+
+`MemoryInjected(note_ids, chars)`、`MemoryRecalled(note_ids, scores, chars)`、
+`MemoryHarvested(added, updated, superseded, skipped)`、`MemoryConsolidated(merged, promoted, expired, evicted)`。
+
+### 会话新增字段（R3b）
+
+`SessionData.harvested_messages`（JSON: `harvestedMessages`）：已收割的消息数游标。
+存在会话里而不是循环里，因为 CLI 每回合新建 loop，而会话每回合重新加载。

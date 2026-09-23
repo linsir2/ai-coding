@@ -63,4 +63,22 @@ R1 把循环拿回来之后，剩下的是「它能不能永远收尾」：任�
 
 设计文档与根因分析（含「工具为什么会卡住」的实测证据链）：[docs/r2-analysis.md](docs/r2-analysis.md)。
 
+## 记忆层重做（R3）
+
+R1/R2 之后，记忆层是最后一块「能用但不好用」的地方。10 条可复现案例（中文召回为空、
+同一事实存 5 份、矛盾共存、FIFO 删掉最关键的那条、每轮重抽全量历史、早期决策在压缩后丢失）
+决定了它的形状：
+
+- `R3a` 引擎内核：中文 bigram 分词、`MemoryNote` 契约（kind/scope/来源/取代链/保护位）、
+  idf 覆盖度 + 新近性 + 重要性打分（分数阈值 + 相关性硬门槛）、对账式写入、按价值淘汰
+- `R3b` 编排：**系统提示逐字节静态**；记忆以尾部易失块注入；细节走 `memory_search` 工具
+  （结果进历史、长期命中缓存）；收割只吃回合增量；压缩改为**按预算分页**（+ `/compact`）
+- `R3c` 整理与运维：`consolidate`（合并/提升/过期/淘汰）、`ai-coding memory list|search|forget|pin`、
+  `scripts/memory_cases.py`（11 条案例真跑）
+
+实测：案例 11/11；缓存前缀 append-only **92%** vs 每轮压缩 **11%**；
+真实 LLM 跨会话 A/B —— 会话 A 教「统一用 uv」，新会话 B 开着记忆答 `uv add`、关掉记忆答 `npm install`。
+
+设计与实测记录：[docs/r3-analysis.md](docs/r3-analysis.md)。
+
 详见 [docs/](docs/README.md)。

@@ -131,6 +131,73 @@ def ask(
         typer.echo()
 
 
+@app.command("memory")
+def memory_command(
+    action: str = typer.Argument("list", help="list | search | forget | pin"),
+    query: str = typer.Argument("", help="Search text, or a note id for pin/forget."),
+    path: str | None = typer.Option(None, "--path", "-p", help="Path to a YAML config file."),
+    workspace: str = typer.Option(
+        ".", "--workspace", "-w", help="Workspace directory (holds .memory)."
+    ),
+) -> None:
+    """Inspect and curate the durable memory index (R3c)."""
+    from ai_coding.memory.service import MemoryService
+    from ai_coding.memory.store import MemoryStore
+
+    try:
+        app_cfg = ConfigLoader.load_app(path)
+    except FileNotFoundError as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    ws = Path(workspace).expanduser().resolve()
+    store = MemoryStore(ws / ".memory")
+    service = MemoryService(store, config=app_cfg.memory)
+
+    if action == "list":
+        notes = store.all()
+        if not notes:
+            typer.echo("(empty)")
+        for note in notes:
+            flags = "pinned " if note.pinned else ""
+            state = "" if note.is_active else "superseded "
+            typer.echo(
+                f"{note.id[:8]}  [{flags}{state}{note.kind.value}] hits={note.hits} "
+                f"{note.text}"
+            )
+        return
+
+    if action == "search":
+        hits = asyncio.run(service.recall_notes(query, k=10)) if query else []
+        if not hits:
+            typer.echo("(no matches)")
+        for hit in hits:
+            typer.echo(
+                f"{hit.note.id[:8]}  [{hit.note.kind.value}] score={hit.score:.2f} "
+                f"rel={hit.relevance:.2f} {hit.note.text}"
+            )
+        return
+
+    if action in {"forget", "pin"}:
+        if not query:
+            typer.echo(f"usage: memory {action} <note-id>", err=True)
+            raise typer.Exit(code=1)
+        target = next((n for n in store.all() if n.id.startswith(query)), None)
+        if target is None:
+            typer.echo(f"no note matching '{query}'", err=True)
+            raise typer.Exit(code=1)
+        if action == "forget":
+            store.delete(target.id)
+            typer.echo(f"forgot {target.id[:8]}: {target.text}")
+        else:
+            updated = store.pin(target.id, not target.pinned)
+            state = "pinned" if updated and updated.pinned else "unpinned"
+            typer.echo(f"{state} {target.id[:8]}: {target.text}")
+        return
+
+    typer.echo(f"unknown action '{action}'", err=True)
+    raise typer.Exit(code=1)
+
+
 @app.command("repl")
 def repl(
     path: str | None = typer.Option(None, "--path", "-p", help="Path to a YAML config file."),
