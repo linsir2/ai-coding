@@ -4,7 +4,7 @@ Rules mirror the original Java ``PermissionGate``:
   - read / glob          → ALLOW
   - write / edit         → WARN
   - bash                 → WARN (hard-deny list → DENY)
-  - todo_write / skill / subAgent → ALLOW
+  - todo_write / skill / subAgent / memory_search → ALLOW
   - unknown tools        → WARN (fail-closed, conservative)
 """
 
@@ -84,7 +84,14 @@ class PermissionGate:
     """Determines whether a tool invocation is allowed, warned, or denied."""
 
     def __init__(self) -> None:
-        self._allow_tools = {"read", "glob", "todo_write", "skill", "subagent"}
+        self._allow_tools = {
+            "read",
+            "glob",
+            "todo_write",
+            "skill",
+            "subagent",
+            "memory_search",  # read-only recall (R3b)
+        }
         self._warn_tools = {"write", "edit", "bash"}
 
     def check(self, tool_name: str, params: dict[str, Any]) -> Decision:

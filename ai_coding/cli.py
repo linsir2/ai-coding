@@ -241,6 +241,14 @@ def _build_loop(
     )
     prompt = PromptAssembler(base_instructions)
 
+    # R3b: the on-demand recall tool needs the memory service, so the composition
+    # root registers it here (the registry itself stays a pure tool container).
+    if memory is not None and getattr(registry, "get", None) is not None:
+        if registry.get("memory_search") is None:
+            from ai_coding.tools.memory_search_tool import MemorySearchTool
+
+            registry.register(MemorySearchTool(memory))
+
     return AgentLoop(
         engine,
         sessions,

@@ -91,6 +91,47 @@ class TurnFinished:
     outcome: TurnOutcome
 
 
+@dataclass(frozen=True)
+class MemoryInjected:
+    """The volatile constraint block was attached to this request (R3b).
+
+    Memory never enters the system prompt: it is a tail block, so a change costs
+    only that block's cache, not the whole conversation (docs/r3-analysis.md 1.13).
+    """
+
+    note_ids: tuple[str, ...]
+    chars: int
+
+
+@dataclass(frozen=True)
+class MemoryRecalled:
+    """A ``memory_search`` tool call answered with these notes (R3b)."""
+
+    note_ids: tuple[str, ...]
+    scores: tuple[float, ...]
+    chars: int
+
+
+@dataclass(frozen=True)
+class MemoryHarvested:
+    """What the end-of-turn harvest wrote back (R3b)."""
+
+    added: tuple[str, ...] = ()
+    updated: tuple[str, ...] = ()
+    superseded: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MemoryConsolidated:
+    """What an index consolidation changed (R3c)."""
+
+    merged: tuple[str, ...] = ()
+    promoted: tuple[str, ...] = ()
+    expired: tuple[str, ...] = ()
+    evicted: tuple[str, ...] = ()
+
+
 LoopEvent = (
     IterationStarted
     | AssistantTextDelta
@@ -100,6 +141,10 @@ LoopEvent = (
     | ToolFinished
     | TaskUpdated
     | TurnFinished
+    | MemoryInjected
+    | MemoryRecalled
+    | MemoryHarvested
+    | MemoryConsolidated
 )
 
 
@@ -152,6 +197,10 @@ __all__ = [
     "ToolFinished",
     "TaskUpdated",
     "TurnFinished",
+    "MemoryInjected",
+    "MemoryRecalled",
+    "MemoryHarvested",
+    "MemoryConsolidated",
     "LoopEvent",
     "LoopObserver",
     "NullObserver",

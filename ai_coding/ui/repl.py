@@ -62,9 +62,54 @@ async def handle_input(
     if cmd.name == "status":
         n = len(getattr(session, "messages", []))
         sid = getattr(session, "session_id", "?")
-        console.info(f"[status] session={sid} messages={n}")
+        extra = ""
+        status = getattr(loop, "memory_status", None)
+        if callable(status):
+            try:
+                stats = status()
+                extra = f" memory={stats.get('total', 0)}/{stats.get('by_kind', {})}"
+            except Exception:  # noqa: BLE001 — a UI helper must not break the REPL
+                extra = ""
+        console.info(f"[status] session={sid} messages={n}{extra}")
+        return REPLAction.CONTINUE, session
+    if cmd.name == "compact":
+        compact = getattr(loop, "compact_session", None)
+        if compact is None:
+            console.info("[compact] not supported by this loop")
+            return REPLAction.CONTINUE, session
+        try:
+            report = await compact(session)
+        except Exception as exc:  # noqa: BLE001 — never break the REPL
+            console.error(f"[compact] failed: {exc}")
+            return REPLAction.CONTINUE, session
+        console.info(
+            f"[compact] messages {report.get('messages')} → {report.get('after')} "
+            f"(removed {report.get('removed')})"
+        )
+        if getattr(sessions, "save", None) is not None:
+            sessions.save(session)
+        return REPLAction.CONTINUE, session
+    if cmd.name == "memory":
+        console.info(_memory_report(loop))
         return REPLAction.CONTINUE, session
     return REPLAction.CONTINUE, session
+
+
+def _memory_report(loop: Any) -> str:
+    """Render the memory status for ``/memory`` (best-effort)."""
+    status = getattr(loop, "memory_status", None)
+    if not callable(status):
+        return "[memory] not available in this session"
+    try:
+        stats = status()
+    except Exception as exc:  # noqa: BLE001
+        return f"[memory] unavailable: {exc}"
+    kinds = ", ".join(f"{kind}={count}" for kind, count in sorted(stats.get("by_kind", {}).items()))
+    return (
+        f"[memory] total={stats.get('total', 0)} active={stats.get('active', 0)} "
+        f"pinned={stats.get('pinned', 0)} kinds: {kinds or '-'} "
+        f"enabled={stats.get('enabled')}"
+    )
 
 
 async def run_repl(

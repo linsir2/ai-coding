@@ -35,7 +35,9 @@ class AIConfig(BaseModel):
     max_concurrent_subagents: int = 3
     subagent_worktree_isolation: bool = True
     max_context_tokens: int = 48_000
-    max_messages: int = 50
+    # R3b: demoted from "trim every turn at 50 messages" to "fallback cap used
+    # when the token budget is exceeded" (docs/r3-analysis.md 1.15).
+    max_messages: int = 400
     snip_keep_head: int = 3
     snip_keep_tail: int = 20
     keep_recent_tool_results: int = 3
@@ -63,6 +65,12 @@ class AIConfig(BaseModel):
     # iteration; above it, only every LONG_SESSION_STRIDE iterations (plus the
     # mandatory final save) to avoid rewriting a large session many times.
     persist_checkpoint_messages: int = 200
+    # R3b: compaction is budget-triggered, not count-triggered.  Measured on the
+    # old defaults, the message-count rule trimmed at turn 26 while 5.2% of the
+    # token budget was used, rewriting the middle of the history every turn and
+    # destroying prompt-cache hits.  Compact at 0.8 of the budget, down to 0.5.
+    compress_soft_ratio: float = 0.8
+    compress_target_ratio: float = 0.5
 
 
 class MemoryConfig(BaseModel):
@@ -71,8 +79,20 @@ class MemoryConfig(BaseModel):
     enabled: bool = True
     auto_extract: bool = True
     consolidate_threshold: int = 10
+    consolidate_every_turns: int = 5
     max_index_entries: int = 200
-    max_per_turn_injections: int = 5
+    # R3: how many detail hits an explicit memory_search may return.
+    max_per_turn_injections: int = 3
+    recall_threshold: float = 0.25
+    recall_min_relevance: float = 0.05
+    recency_half_life_days: float = 14.0
+    # Budgets for the two injection surfaces (the tail constraint block and the
+    # on-demand tool answer), in characters.
+    index_max_chars: int = 600
+    detail_max_chars: int = 1200
+    harvest_max_messages: int = 12
+    dedupe_similarity: float = 0.80
+    pinned_kinds: list[str] = Field(default_factory=lambda: ["decision"])
 
 
 class MCPServerConfig(BaseModel):

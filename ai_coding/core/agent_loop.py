@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ai_coding.ai.engine import ChatEngine, EngineError
 from ai_coding.config.models import AIConfig
@@ -39,6 +39,8 @@ from ai_coding.core.events import (
     IterationStarted,
     LoopEvent,
     LoopObserver,
+    MemoryHarvested,
+    MemoryInjected,
     NullObserver,
     TaskUpdated,
     TurnFinished,
@@ -166,6 +168,8 @@ class AgentLoop:
         iterations = 0
         nudges = 0
         last_text: str | None = None
+        summaries: list[str] = []
+        memory_announced = False
         outcome = TurnOutcome(
             status=TurnStatus.MAX_ITERATIONS, reason="iteration budget exhausted"
         )
@@ -195,15 +199,31 @@ class AgentLoop:
 
                 history = session.messages
                 if self.context is not None:
-                    history = await self._compress(history, deadline)
+                    history = await self._compress(
+                        history, deadline, on_summary=summaries.append
+                    )
                 instructions = await self._build_instructions(history, deadline)
                 injection: TaskInjection = policy.inject_task(task, instructions)
                 instructions = injection.instructions
-                request = (
-                    list(history)
-                    if injection.message is None
-                    else [*history, injection.message]
-                )
+                # Memory and task state are *volatile tail blocks*: the system
+                # prompt stays byte-identical and the history stays append-only, so
+                # only this small region diverges between turns (docs/r2 §1.13).
+                tail: list[ChatMessage] = []
+                memory_block, memory_ids = self._memory_block()
+                if memory_block:
+                    tail.append(
+                        ChatMessage(role="user", content=memory_block, timestamp="")
+                    )
+                    if not memory_announced:
+                        self._emit(
+                            MemoryInjected(
+                                note_ids=memory_ids, chars=len(memory_block)
+                            )
+                        )
+                        memory_announced = True
+                if injection.message is not None:
+                    tail.append(injection.message)
+                request = [*history, *tail]
 
                 # The one wait that cannot degrade: a model step either answers or
                 # the turn ends (docs/r2-analysis.md §7.3).
@@ -295,12 +315,55 @@ class AgentLoop:
             )
 
         self._finalize(session, outcome)
-        await self._remember(session.messages, outcome.text, deadline)
+        await self._harvest(session, deadline, summaries, outcome)
         return outcome.text or ""
 
     async def aclose(self) -> None:
         """Release engine resources (the loop owns nothing else)."""
         await self.engine.aclose()
+
+    def memory_status(self) -> dict[str, Any]:
+        """Memory counts for the UI (``/memory`` / ``/status``); never raises."""
+        if self.memory is None:
+            return {"total": 0, "active": 0, "pinned": 0, "by_kind": {}, "enabled": False}
+        try:
+            return dict(self.memory.status())
+        except Exception:  # noqa: BLE001 — memory is best-effort
+            return {"total": 0, "active": 0, "pinned": 0, "by_kind": {}, "enabled": False}
+
+    async def compact_session(self, session: SessionData) -> dict[str, int]:
+        """Compact the persisted history now (the ``/compact`` command).
+
+        Normal turns only compact when the budget demands it (R3b); this is the
+        explicit user request, so it forces one page and **replaces** the stored
+        history with the compacted view — L3 persisted outputs, the session file
+        and memory remain as the safety nets.
+        """
+        before = len(session.messages)
+        report = {"messages": before, "after": before, "removed": 0}
+        if self.context is None or before == 0:
+            return report
+        compact = getattr(self.context, "compress_if_needed", None)
+        budget = float(getattr(self.settings, "turn_timeout_seconds", 0.0) or 60.0)
+        try:
+            if compact is not None:
+                result = await run_with_deadline(
+                    compact(list(session.messages), force=True),
+                    timeout=budget if budget > 0 else 60.0,
+                    label="compact",
+                )
+            else:
+                result = await run_with_deadline(
+                    self.context.compress(list(session.messages)),
+                    timeout=budget if budget > 0 else 60.0,
+                    label="compact",
+                )
+        except (DeadlineExpired, Exception):  # noqa: BLE001 — never break the REPL
+            return report
+        session.messages = list(result)
+        self._save(session)
+        after = len(session.messages)
+        return {"messages": before, "after": after, "removed": before - after}
 
     # ---- request assembly -------------------------------------------------
 
@@ -312,12 +375,25 @@ class AgentLoop:
         return max(deadline.remaining(), 0.0)
 
     async def _compress(
-        self, history: list[ChatMessage], deadline: Deadline | None = None
+        self,
+        history: list[ChatMessage],
+        deadline: Deadline | None = None,
+        *,
+        on_summary: Callable[[str], None] | None = None,
     ) -> list[ChatMessage]:
-        """Compaction is an optimisation: on timeout the raw history is used."""
+        """Compact only when the budget says so; degrade to the raw history."""
         if self.context is None:
             return history
+        # ``compress_if_needed`` is the R3b policy layer; older injected context
+        # objects only implement ``compress`` (duck-typed, keeps them working).
+        compact = getattr(self.context, "compress_if_needed", None)
         try:
+            if compact is not None:
+                return await run_with_deadline(
+                    compact(history, on_summary=on_summary),
+                    timeout=self._remaining(deadline),
+                    label="context_compress",
+                )
             return await run_with_deadline(
                 self.context.compress(history),
                 timeout=self._remaining(deadline),
@@ -330,26 +406,30 @@ class AgentLoop:
     async def _build_instructions(
         self, history: list[ChatMessage], deadline: Deadline | None = None
     ) -> str | None:
+        """Assemble the **static** system prompt (memory is never part of it)."""
         if self.prompt is None:
             return None
-        memory_catalog = ""
-        if self.memory is not None:
-            try:
-                recalled = await run_with_deadline(
-                    self.memory.recall(history),
-                    timeout=self._remaining(deadline),
-                    label="memory_recall",
-                )
-                memory_catalog = "\n".join(recalled)
-            except Exception:  # noqa: BLE001 — memory is best-effort
-                memory_catalog = ""
         project_text = self.project.load() if self.project is not None else ""
         skills_catalog = self.skills.catalog_text() if self.skills is not None else ""
         return self.prompt.build(
             project_instructions=project_text,
             skills_catalog=skills_catalog,
-            memory_catalog=memory_catalog,
         )
+
+    # ---- memory -----------------------------------------------------------
+
+    def _memory_block(self) -> tuple[str, tuple[str, ...]]:
+        """The volatile constraint block for this request (best-effort)."""
+        if self.memory is None:
+            return "", ()
+        try:
+            notes = self.memory.index_notes()
+            if not notes:
+                return "", ()
+            return self.memory.render_index_block(notes), tuple(n.id for n in notes)
+        except Exception:  # noqa: BLE001 — memory must never break a turn
+            _log.debug("memory index block failed", exc_info=True)
+            return "", ()
 
     def _tool_context(
         self,
@@ -406,22 +486,61 @@ class AgentLoop:
         except OSError:
             pass  # persistence is best-effort; never break the turn
 
-    async def _remember(
+    async def _harvest(
         self,
-        messages: list[ChatMessage],
-        conclusion: str | None,
-        deadline: Deadline | None = None,
+        session: SessionData,
+        deadline: Deadline | None,
+        summaries: list[str],
+        outcome: TurnOutcome,
     ) -> None:
+        """Reconcile **this turn's delta** into memory (best-effort, never raises).
+
+        The cursor lives in the session so a fresh loop (the CLI builds one per
+        turn) does not re-harvest the whole transcript — that is what produced 100
+        junk notes in case 8 of docs/r3-analysis.md.
+        """
         if self.memory is None:
             return
+        start = int(getattr(session, "harvested_messages", 0) or 0)
+        delta = session.messages[start:]
+        if not delta:
+            return
+        summary = "\n".join(text for text in summaries if text) or None
         try:
-            await run_with_deadline(
-                self.memory.remember(messages, conclusion),
+            report = await run_with_deadline(
+                self.memory.harvest(
+                    delta,
+                    turn_index=len(session.messages),
+                    session_id=session.session_id,
+                    summary=summary,
+                ),
                 timeout=self._remaining(deadline),
-                label="memory_write",
+                label="memory_harvest",
             )
         except Exception:  # noqa: BLE001 — memory is best-effort
-            pass
+            _log.debug("memory harvest failed", exc_info=True)
+            return
+        session.harvested_messages = len(session.messages)
+        self._save(session)
+        if report.added or report.updated or report.superseded or report.skipped:
+            self._emit(
+                MemoryHarvested(
+                    added=tuple(report.added),
+                    updated=tuple(report.updated),
+                    superseded=tuple(report.superseded),
+                    skipped=tuple(report.skipped),
+                )
+            )
+        if outcome.text is None:
+            return  # nothing was concluded; no reason to wake consolidation
+        try:
+            await run_with_deadline(
+                self.memory.consolidate(),
+                timeout=self._remaining(deadline),
+                label="memory_consolidate",
+            )
+        except Exception:  # noqa: BLE001 — memory is best-effort
+            _log.debug("memory consolidation failed", exc_info=True)
 
     # ---- events -----------------------------------------------------------
 

@@ -183,8 +183,15 @@ class MemoryService:
         self, *, scope: str | None = None, max_chars: int | None = None
     ) -> str:
         """Tiny block of pinned/decision notes (R3b injects it at the request tail)."""
+        notes = self.index_notes(scope=scope, max_chars=max_chars)
+        return self.render_index_block(notes)
+
+    def index_notes(
+        self, *, scope: str | None = None, max_chars: int | None = None
+    ) -> list[MemoryNote]:
+        """The notes the constraint block will carry (pinned first, then decisions)."""
         if not self.enabled:
-            return ""
+            return []
         pinned_kinds = {
             str(kind).casefold() for kind in self._get("pinned_kinds", ["decision"])
         }
@@ -192,7 +199,7 @@ class MemoryService:
             int(self._get("index_max_chars", 600)) if max_chars is None else int(max_chars)
         )
         if budget <= 0:
-            return ""
+            return []
         selected = [
             note
             for note in self._store.active()
@@ -206,18 +213,24 @@ class MemoryService:
                 _invert_time(note.created_time),
             )
         )
-        lines: list[str] = []
+        chosen: list[MemoryNote] = []
         used = 0
         for note in selected:
             line = f"- [{note.kind.value}#{note.id[:8]}] {note.text}"
-            if used + len(line) > budget and lines:
+            if used + len(line) > budget and chosen:
                 break
-            lines.append(line)
+            chosen.append(note)
             used += len(line) + 1
             if used >= budget:
                 break
-        if not lines:
+        return chosen
+
+    @staticmethod
+    def render_index_block(notes: Sequence[MemoryNote]) -> str:
+        """Render the constraint block (empty when there is nothing to say)."""
+        if not notes:
             return ""
+        lines = [f"- [{note.kind.value}#{note.id[:8]}] {note.text}" for note in notes]
         return "<memory-constraints>\n" + "\n".join(lines) + "\n</memory-constraints>"
 
     # ---- harvest ----------------------------------------------------------

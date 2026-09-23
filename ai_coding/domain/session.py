@@ -60,6 +60,10 @@ class SessionData:
     last_access_time: str
     messages: list[ChatMessage] = field(default_factory=list)
     task: TaskState | None = None
+    # R3b: how many messages have already been harvested into memory.  The cursor
+    # lives in the session (not in the loop) because the CLI builds a fresh loop
+    # for every turn, while the session is reloaded each time.
+    harvested_messages: int = 0
 
     def add_message(self, message: ChatMessage) -> None:
         self.messages.append(message)
@@ -106,6 +110,8 @@ class SessionData:
         # noise in every session file.
         if self.task is not None and self.task.items:
             data["task"] = self.task.to_dict()
+        if self.harvested_messages:
+            data["harvestedMessages"] = self.harvested_messages
         return data
 
     @classmethod
@@ -123,6 +129,7 @@ class SessionData:
             last_access_time=data.get("lastAccessTime", ""),
             messages=messages,
             task=TaskState.from_dict(raw_task) if isinstance(raw_task, dict) else None,
+            harvested_messages=int(data.get("harvestedMessages", 0) or 0),
         )
 
 

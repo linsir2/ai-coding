@@ -5,6 +5,8 @@ compression, prompt assembly, skills and memory are wired into the turn — but 
 driver is now a step-wise ``ChatEngine`` instead of the removed ``AIService``.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from ai_coding.ai.engine import ChatEngine
@@ -45,14 +47,24 @@ class _Memory:
     def __init__(self) -> None:
         self.recalled: list = []
         self.remembered: list = []
+        self.harvested: list = []
 
-    async def recall(self, history, k=None):
-        self.recalled.append(list(history))
-        return ["prior note"]
+    # R3b contract: memory is *not* part of the system prompt any more.  It reaches
+    # the request as a volatile tail block, and the write-back is a delta harvest.
+    def index_notes(self):
+        return [SimpleNamespace(id="n1", kind=SimpleNamespace(value="decision"), text="prior note")]
 
-    async def remember(self, messages, conclusion=None):
-        self.remembered.append(conclusion)
-        return []
+    def render_index_block(self, notes):
+        self.recalled.append(list(notes))
+        return "<memory-constraints>\n- [decision#n1] prior note\n</memory-constraints>"
+
+    async def harvest(self, messages, **kwargs):
+        self.harvested.append([message.content for message in messages])
+        self.remembered.append(kwargs.get("summary"))
+        return SimpleNamespace(added=(), updated=(), superseded=(), skipped=())
+
+    async def consolidate(self, **kwargs):
+        return SimpleNamespace(merged=(), promoted=(), expired=(), evicted=())
 
 
 class _Tool(BaseTool):
@@ -137,7 +149,7 @@ async def test_instructions_assembled_when_prompt_injected(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_memory_recall_injected_and_remember_called(tmp_path):
+async def test_memory_is_injected_at_the_tail_and_harvested(tmp_path):
     engine = _Engine()
     sessions = SessionService(tmp_path / "sessions")
     memory = _Memory()
@@ -152,9 +164,13 @@ async def test_memory_recall_injected_and_remember_called(tmp_path):
 
     await loop.process_input(sessions.create(), "go")
 
-    assert memory.recalled  # recall consulted before the model call
-    assert "prior note" in (engine.requests[0]["instructions"] or "")
-    assert memory.remembered == ["ok"]  # remember ran silently at turn end
+    assert memory.recalled  # the constraint block was built
+    assert "prior note" not in (engine.requests[0]["instructions"] or "")
+    tail = "\n".join(
+        message.content or "" for message in engine.requests[0]["messages"][-2:]
+    )
+    assert "prior note" in tail  # ... but it is in the tail block
+    assert memory.harvested  # the turn delta was harvested at turn end
 
 
 @pytest.mark.asyncio
