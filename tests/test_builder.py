@@ -10,7 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 from ai_coding.security.approval import ApprovalCallback, ApprovalResult
-from ai_coding.tools.builder import build_subagent_runner, build_tool_stack
+from ai_coding.tools.builder import (
+    build_subagent_runner,
+    build_tool_registry,
+    build_tool_stack,
+)
 
 
 def _cfg(ws: str) -> SimpleNamespace:
@@ -94,3 +98,35 @@ async def test_explicit_no_approval_blocks_warn_tools(tmp_path):
 
     assert await _needs(stack, "write", {"path": "f"}) is True
     assert await _needs(stack, "read", {"path": "f"}) is False  # ALLOW unaffected
+
+
+# ---- R1a-4: the registry builder the self-owned loop uses --------------------
+
+
+def test_registry_builder_returns_tool_registry(tmp_path):
+    cfg = _cfg(str(tmp_path))
+
+    registry = build_tool_registry(cfg, str(tmp_path), None, include_subagent=True)
+
+    assert registry.list_names()  # a registry, not an SDK tool list
+    assert "subAgent" in registry.list_names()
+    assert "read" in registry.list_names()
+    assert "todo_write" in registry.list_names()
+
+
+def test_registry_builder_excludes_nested_subagent(tmp_path):
+    cfg = _cfg(str(tmp_path))
+
+    registry = build_tool_registry(cfg, str(tmp_path), None, include_subagent=False)
+
+    assert "subAgent" not in registry.list_names()
+
+
+def test_registry_builder_skips_disabled_tools(tmp_path):
+    cfg = _cfg(str(tmp_path))
+    cfg.tools.read.enabled = False
+
+    registry = build_tool_registry(cfg, str(tmp_path), None)
+
+    assert "read" not in registry.list_names()
+    assert "glob" in registry.list_names()

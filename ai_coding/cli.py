@@ -8,7 +8,7 @@ from typing import Any
 
 import typer
 
-from ai_coding.ai.factory import build_service_from_config
+from ai_coding.ai.factory import build_engine_from_config
 from ai_coding.config.loader import ConfigLoader, ConfigManager
 from ai_coding.infra.logger_setup import setup_logging
 
@@ -89,17 +89,17 @@ def ask(
         manager = ConfigManager()
         manager.initialize(path)
         app_cfg = manager.app
-
-        # Build the tool stack
-        sdk_tools = _build_tool_stack(app_cfg, workspace, skills)
-
-        service = build_service_from_config(app_cfg, tools=sdk_tools)
+        engine = build_engine_from_config(app_cfg)
+        registry = _build_tool_registry(app_cfg, workspace, skills)
     except (ValueError, FileNotFoundError) as exc:
         typer.echo(f"ask error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
+    _warn_if_mcp_enabled(app_cfg)
+
     from ai_coding.domain.session import SessionData
     from ai_coding.service.session_service import SessionService
+    from ai_coding.ui.console import ConsoleObserver, DialogueConsole
 
     sessions = SessionService()
     session: SessionData
@@ -112,8 +112,17 @@ def ask(
     def on_delta(token: str) -> None:
         typer.echo(token, nl=False)
 
-    loop = _build_loop(service, sessions, app_cfg, workspace, skills)
-    answer = asyncio.run(loop.process_input(session, prompt, on_delta=on_delta))
+    console = DialogueConsole()
+    loop = _build_loop(
+        engine,
+        sessions,
+        registry,
+        app_cfg,
+        workspace,
+        skills,
+        observer=ConsoleObserver(console),
+    )
+    answer = asyncio.run(_run_turn(loop, session, prompt, on_delta))
     # Answer text was already streamed live via on_delta; only ensure a trailing newline.
     if answer and not answer.endswith("\n"):
         typer.echo()
@@ -130,40 +139,61 @@ def repl(
     ),
 ) -> None:
     """Start an interactive REPL session (slash commands: /help /status /clear /quit)."""
+    from ai_coding.security.approval import CLIApprovalCallback
     from ai_coding.service.session_service import SessionService
-    from ai_coding.ui.console import DialogueConsole
+    from ai_coding.ui.console import ConsoleObserver, DialogueConsole
     from ai_coding.ui.repl import run_repl
 
     try:
         manager = ConfigManager()
         manager.initialize(path)
         app_cfg = manager.app
-
-        # Interactive REPL: confirm WARN-tier tools (write/edit/bash) with the
-        # user via y/N/s prompts, rather than silently blocking or auto-approving.
-        from ai_coding.security.approval import CLIApprovalCallback
-
-        sdk_tools = _build_tool_stack(
-            app_cfg, workspace, skills, approval=CLIApprovalCallback()
-        )
-        service = build_service_from_config(app_cfg, tools=sdk_tools)
+        engine = build_engine_from_config(app_cfg)
+        registry = _build_tool_registry(app_cfg, workspace, skills)
     except (ValueError, FileNotFoundError) as exc:
         typer.echo(f"repl error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
+    _warn_if_mcp_enabled(app_cfg)
+
     sessions = SessionService()
-    loop = _build_loop(service, sessions, app_cfg, workspace, skills)
-    asyncio.run(run_repl(loop, sessions, DialogueConsole()))
+    console = DialogueConsole()
+    # Interactive REPL: confirm WARN-tier tools (write/edit/bash) with the user
+    # via y/N/s prompts, rather than silently blocking or auto-approving.
+    loop = _build_loop(
+        engine,
+        sessions,
+        registry,
+        app_cfg,
+        workspace,
+        skills,
+        approval=CLIApprovalCallback(),
+        observer=ConsoleObserver(console),
+    )
+
+    async def _serve() -> None:
+        try:
+            await run_repl(loop, sessions, console)
+        except KeyboardInterrupt:
+            console.info("[aborted]")
+        finally:
+            await loop.aclose()
+
+    asyncio.run(_serve())
 
 
 def _build_loop(
-    service: Any,
+    engine: Any,
     sessions: Any,
+    registry: Any,
     app_cfg: Any,
     workspace: str,
     skills_path: str | None,
+    *,
+    approval: Any | None = None,
+    observer: Any | None = None,
 ) -> Any:
-    """Assemble the M3 components (all optional; silent degradation when missing)."""
+    """Assemble the loop and its optional components (silent degradation)."""
     from ai_coding.ai.prompt import PromptAssembler
     from ai_coding.core.agent_loop import AgentLoop
     from ai_coding.core.context_compression import ContextManager
@@ -180,10 +210,10 @@ def _build_loop(
 
     # Project instructions loader + memory live under the workspace.
     project = ProjectInstructionsLoader(ws)
-    # M3 integration: wire the real LLM helpers (L4 summarizer + memory
-    # extractor) when the service exposes a ModelConfig; fake services keep the
-    # offline defaults so unit tests never touch the network.
-    summarizer, extractor = _llm_helpers_for(service)
+    # Wire the real LLM helpers (L4 summarizer + memory extractor) when the
+    # engine exposes a ModelConfig; fakes keep the offline defaults so unit tests
+    # never touch the network.
+    summarizer, extractor = _llm_helpers_for(engine)
     memory_store = MemoryStore(ws / ".memory")
     memory = MemoryService(
         memory_store, extractor=extractor, config=app_cfg.memory
@@ -197,14 +227,38 @@ def _build_loop(
     prompt = PromptAssembler(base_instructions)
 
     return AgentLoop(
-        service,
+        engine,
         sessions,
+        registry,
+        approval=approval,
         context=context,
         memory=memory,
         prompt=prompt,
         skills=skills_reg,
         project=project,
+        settings=app_cfg.ai,
+        observer=observer,
+        workspace=str(ws),
     )
+
+
+async def _run_turn(loop: Any, session: Any, prompt: str, on_delta: Any) -> str:
+    """Run one turn and always release the engine's HTTP client."""
+    try:
+        return str(await loop.process_input(session, prompt, on_delta=on_delta))
+    finally:
+        await loop.aclose()
+
+
+def _warn_if_mcp_enabled(app_cfg: Any) -> None:
+    """Say so loudly when MCP is configured: this build ignores it."""
+    if getattr(getattr(app_cfg, "mcp", None), "enabled", False):
+        typer.echo(
+            "warning: MCP is enabled in your config, but this build runs the "
+            "self-owned loop which does not support MCP yet — the configured "
+            "servers are ignored.",
+            err=True,
+        )
 
 
 def _llm_helpers_for(service: Any) -> tuple[Any, Any]:
@@ -222,23 +276,18 @@ def _llm_helpers_for(service: Any) -> tuple[Any, Any]:
     return build_summarizer(model_config), build_extractor(model_config)
 
 
-def _build_tool_stack(
-    app_cfg: Any,
-    workspace: str,
-    skills_path: str | None,
-    approval: Any | None = None,
-) -> list[Any]:
-    """Build the SDK tool list from config and CLI options.
+def _build_tool_registry(
+    app_cfg: Any, workspace: str, skills_path: str | None
+) -> Any:
+    """Build the domain tool registry the self-owned loop dispatches through.
 
-    Delegates to the shared :mod:`ai_coding.tools.builder` so the main agent and
-    each sub-agent assemble identical stacks. ``subAgent`` is wired to a real
-    :class:`SubAgentRunner` (worktree-isolated per ``ai.subagent_worktree_isolation``).
-    ``approval`` resolves the WARN tier (write/edit/bash); ``None`` auto-approves.
+    Permission and approval are *not* part of the registry: they belong to the
+    ``ToolDispatcher`` the loop creates.
     """
-    from ai_coding.tools.builder import build_tool_stack
+    from ai_coding.tools.builder import build_tool_registry
 
-    return build_tool_stack(
-        app_cfg, workspace, skills_path, include_subagent=True, approval=approval
+    return build_tool_registry(
+        app_cfg, workspace, skills_path, include_subagent=True
     )
 
 

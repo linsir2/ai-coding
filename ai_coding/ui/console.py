@@ -7,11 +7,28 @@ loop and its components can share consistent coloring without coupling to
 
 from __future__ import annotations
 
+import json
+
 from rich.console import Console
+
+from ai_coding.core.events import (
+    IterationStarted,
+    LoopEvent,
+    TaskUpdated,
+    ToolFinished,
+    ToolStarted,
+)
 
 _ANSWER_STYLE = "cyan"
 _INFO_STYLE = "green"
 _ERROR_STYLE = "bold red"
+_PARAM_PREVIEW = 100
+_OUTPUT_PREVIEW = 120
+
+
+def _short(text: str, limit: int) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
 
 
 class DialogueConsole:
@@ -34,4 +51,28 @@ class DialogueConsole:
         self._c.rule(title)
 
 
-__all__ = ["DialogueConsole"]
+class ConsoleObserver:
+    """Renders loop events as compact CLI lines (implements ``LoopObserver``).
+
+    ``AssistantTextDelta`` is deliberately not rendered: the turn's ``on_delta``
+    sink already streams the text, and printing it twice would duplicate output.
+    """
+
+    def __init__(self, console: DialogueConsole) -> None:
+        self._c = console
+
+    def on_event(self, event: LoopEvent) -> None:
+        if isinstance(event, IterationStarted):
+            self._c.info(f"[turn {event.index}/{event.max_iterations}]")
+        elif isinstance(event, ToolStarted):
+            params = _short(json.dumps(event.params, ensure_ascii=False), _PARAM_PREVIEW)
+            self._c.info(f"[tool: {event.tool_name}] {params}")
+        elif isinstance(event, ToolFinished):
+            mark = "ok" if event.success else "failed"
+            preview = _short(event.output_preview, _OUTPUT_PREVIEW)
+            self._c.info(f"  -> {mark}{': ' + preview if preview else ''}")
+        elif isinstance(event, TaskUpdated):
+            self._c.info(event.task.render())
+
+
+__all__ = ["DialogueConsole", "ConsoleObserver"]

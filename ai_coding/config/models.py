@@ -55,6 +55,10 @@ class AIConfig(BaseModel):
     # Ask the endpoint to emit a final usage frame (stream_options.include_usage).
     # Off is available for OpenAI-compatible servers that reject the parameter.
     stream_usage: bool = True
+    # Below this many messages the loop checkpoints the session after every
+    # iteration; above it, only every LONG_SESSION_STRIDE iterations (plus the
+    # mandatory final save) to avoid rewriting a large session many times.
+    persist_checkpoint_messages: int = 200
 
 
 class MemoryConfig(BaseModel):

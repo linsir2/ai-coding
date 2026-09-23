@@ -10,6 +10,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from .loop import StepResult
 from .message import ChatMessage, ToolCallRef, ToolOutput
 
 
@@ -26,8 +27,12 @@ def user_message(content: str, timestamp: str) -> ChatMessage:
     return ChatMessage(role="user", content=content, timestamp=timestamp)
 
 
-def assistant_message(turn: TurnResult, timestamp: str) -> ChatMessage:
-    """Wrap a ``TurnResult`` as an assistant message for the session history."""
+def assistant_message(turn: TurnResult | StepResult, timestamp: str) -> ChatMessage:
+    """Wrap a step/turn result as an assistant message for the session history.
+
+    Both ``TurnResult`` (legacy) and ``StepResult`` (R1a) expose ``text`` and
+    ``tool_calls``, so the same shape works for either.
+    """
     return ChatMessage(
         role="assistant",
         content=turn.text,

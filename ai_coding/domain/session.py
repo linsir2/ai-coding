@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .message import ChatMessage, ToolCallRef, tool_call_from_ref
+from .task import TaskState
 
 
 def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
@@ -58,6 +59,7 @@ class SessionData:
     created_time: str
     last_access_time: str
     messages: list[ChatMessage] = field(default_factory=list)
+    task: TaskState | None = None
 
     def add_message(self, message: ChatMessage) -> None:
         self.messages.append(message)
@@ -92,13 +94,19 @@ class SessionData:
         self.messages = keep
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "sessionId": self.session_id,
             "title": self.title,
             "createdTime": self.created_time,
             "lastAccessTime": self.last_access_time,
             "messages": [_message_to_dict(m) for m in self.messages],
         }
+        # Only persist the task list when it actually holds items: a bare goal is
+        # already recoverable from the first user message, so writing it would be
+        # noise in every session file.
+        if self.task is not None and self.task.items:
+            data["task"] = self.task.to_dict()
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SessionData:
@@ -107,12 +115,14 @@ class SessionData:
             for m in data.get("messages", [])
             if isinstance(m, dict)
         ]
+        raw_task = data.get("task")
         return cls(
             session_id=data.get("sessionId", ""),
             title=data.get("title", ""),
             created_time=data.get("createdTime", ""),
             last_access_time=data.get("lastAccessTime", ""),
             messages=messages,
+            task=TaskState.from_dict(raw_task) if isinstance(raw_task, dict) else None,
         )
 
 

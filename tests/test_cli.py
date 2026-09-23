@@ -1,5 +1,6 @@
 import logging
 
+import pytest
 from typer.testing import CliRunner
 
 from ai_coding.cli import _build_loop, app
@@ -10,25 +11,28 @@ runner = CliRunner()
 
 def test_build_loop_wires_m3_components(tmp_path):
     """_build_loop assembles context/memory/prompt/skills/project into AgentLoop."""
-    from types import SimpleNamespace
+    from ai_coding.config.models import AppConfig
+    from ai_coding.service.session_service import SessionService
+    from ai_coding.tools.registry import ToolRegistry
 
     ws = tmp_path / "ws"
     ws.mkdir()
     (ws / "skills").mkdir()
     (ws / "CLAUDE.md").write_text("rules", encoding="utf-8")
 
-    app_cfg = SimpleNamespace(
-        memory=SimpleNamespace(enabled=True, consolidate_threshold=100,
-                               max_index_entries=100, max_per_turn_injections=3),
-        ai=SimpleNamespace(max_context_tokens=48000, max_messages=50, snip_keep_head=3,
-                           snip_keep_tail=20, keep_recent_tool_results=3,
-                           per_result_persist_bytes=30000, l4_keep_tail=6),
-    )
-
-    class _Dummy:
+    class _DummyEngine:
         pass
 
-    loop = _build_loop(_Dummy(), _Dummy(), app_cfg, str(ws), None)
+    # spec changed in R1a-4: the loop needs the engine + a tool registry, and its
+    # settings come from a real AIConfig (it reads stop_policy etc.)
+    loop = _build_loop(
+        _DummyEngine(),
+        SessionService(tmp_path / "sessions"),
+        ToolRegistry(),
+        AppConfig(),
+        str(ws),
+        None,
+    )
     assert loop.context is not None
     assert loop.memory is not None
     assert loop.prompt is not None
@@ -39,24 +43,72 @@ def test_build_loop_wires_m3_components(tmp_path):
 
 
 def test_build_loop_missing_workspace_degrades(tmp_path):
-    from types import SimpleNamespace
+    from ai_coding.config.models import AppConfig
+    from ai_coding.service.session_service import SessionService
+    from ai_coding.tools.registry import ToolRegistry
 
-    app_cfg = SimpleNamespace(
-        memory=SimpleNamespace(enabled=True, consolidate_threshold=100,
-                               max_index_entries=100, max_per_turn_injections=3),
-        ai=SimpleNamespace(max_context_tokens=48000, max_messages=50, snip_keep_head=3,
-                           snip_keep_tail=20, keep_recent_tool_results=3,
-                           per_result_persist_bytes=30000, l4_keep_tail=6),
-    )
-
-    class _Dummy:
+    class _DummyEngine:
         pass
 
     # workspace does not exist yet — must not raise (silent degradation)
-    loop = _build_loop(_Dummy(), _Dummy(), app_cfg, str(tmp_path / "nonexistent"), None)
+    loop = _build_loop(
+        _DummyEngine(),
+        SessionService(tmp_path / "sessions"),
+        ToolRegistry(),
+        AppConfig(),
+        str(tmp_path / "nonexistent"),
+        None,
+    )
     assert loop.context is not None
     assert loop.project.load() == ""
     assert loop.skills.is_empty is True
+
+
+@pytest.mark.asyncio
+async def test_build_loop_runs_a_turn_through_a_real_tool(tmp_path):
+    """End-to-end through the CLI wiring: loop -> dispatcher -> real read tool."""
+    from ai_coding.ai.engine import ChatEngine
+    from ai_coding.config.models import AppConfig
+    from ai_coding.domain.loop import StepResult
+    from ai_coding.domain.message import ToolCallRef
+    from ai_coding.service.session_service import SessionService
+    from ai_coding.tools.builder import build_tool_registry
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "sample.txt").write_text("hello world\n", encoding="utf-8")
+
+    class _Engine(ChatEngine):
+        def __init__(self) -> None:
+            self.requests: list = []
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None):
+            self.requests.append(messages)
+            if len(self.requests) == 1:
+                return StepResult(
+                    tool_calls=[
+                        ToolCallRef(
+                            id="c1", name="read", arguments='{"path":"sample.txt"}'
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                )
+            return StepResult(text="read it", finish_reason="stop")
+
+    engine = _Engine()
+    app_cfg = AppConfig()
+    registry = build_tool_registry(app_cfg, str(ws), None, include_subagent=False)
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _build_loop(engine, sessions, registry, app_cfg, str(ws), None)
+
+    session = sessions.create()
+    text = await loop.process_input(session, "read sample.txt")
+    await loop.aclose()
+
+    assert text == "read it"
+    tool_messages = [m for m in session.messages if m.role == "tool"]
+    assert len(tool_messages) == 1
+    assert "hello world" in (tool_messages[0].content or "")
 
 
 def test_version():

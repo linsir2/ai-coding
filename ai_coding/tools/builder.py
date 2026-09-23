@@ -41,6 +41,22 @@ def _build_service(app_cfg: Any, tools: list[Any] | None = None) -> Any:
     return build_service_from_config(app_cfg, tools=tools)
 
 
+def build_tool_registry(
+    app_cfg: Any,
+    workspace: str,
+    skills_path: str | None = None,
+    *,
+    include_subagent: bool = True,
+) -> Any:
+    """Build the *domain* tool registry used by the self-owned loop (R1a-4).
+
+    The registry holds tools only: the permission gate and the approval callback
+    belong to the ``ToolDispatcher``, which the loop builds.
+    """
+    registry, _gate = _assemble_registry(app_cfg, workspace, skills_path, include_subagent)
+    return registry
+
+
 def build_tool_stack(
     app_cfg: Any,
     workspace: str,
@@ -49,15 +65,29 @@ def build_tool_stack(
     include_subagent: bool = True,
     approval: Any | None = None,
 ) -> list[Any]:
-    """Build the SDK tool list for a configuration and directory.
+    """Build the SDK-shaped tool list.
 
-    ``approval`` is the :class:`ApprovalCallback` used to resolve the WARN tier
-    (write/edit/bash).  When ``None`` the stack falls back to a non-interactive
-    auto-approve so the tools are usable in non-interactive entry points; the
-    DENY tier (dangerous bash patterns) is always blocked regardless.
+    Retained because ``SubAgentRunner`` still runs on the SDK engine until
+    R1a-5 reworks it; the main loop no longer uses this path.  ``approval``
+    resolves the WARN tier; ``None`` falls back to non-interactive auto-approve
+    while the DENY tier stays blocked regardless.
     """
-
+    registry, gate = _assemble_registry(app_cfg, workspace, skills_path, include_subagent)
     from ai_coding.security.approval import AutoApproveCallback
+    from ai_coding.tools.sdk_adapter import registry_to_sdk_tools
+
+    effective_approval = approval if approval is not None else AutoApproveCallback()
+    return registry_to_sdk_tools(registry, gate, effective_approval)
+
+
+def _assemble_registry(
+    app_cfg: Any,
+    workspace: str,
+    skills_path: str | None,
+    include_subagent: bool,
+) -> tuple[Any, Any]:
+    """Create the sandbox/gate/registry triple shared by both builders."""
+
     from ai_coding.security.file_state_tracker import FileStateTracker
     from ai_coding.security.permission_gate import PermissionGate
     from ai_coding.security.sandbox import Sandbox
@@ -66,7 +96,6 @@ def build_tool_stack(
     from ai_coding.tools.glob_tool import GlobTool
     from ai_coding.tools.read_tool import ReadTool
     from ai_coding.tools.registry import ToolRegistry
-    from ai_coding.tools.sdk_adapter import registry_to_sdk_tools
     from ai_coding.tools.skill_tool import SkillTool
     from ai_coding.tools.todo_write_tool import TodoWriteTool
     from ai_coding.tools.write_tool import WriteTool
@@ -106,8 +135,7 @@ def build_tool_stack(
             SubAgentTool(runner=runner, worktree_manager=manager, isolate=isolate)
         )
 
-    effective_approval = approval if approval is not None else AutoApproveCallback()
-    return registry_to_sdk_tools(registry, gate, effective_approval)
+    return registry, gate
 
 
-__all__ = ["build_tool_stack", "build_subagent_runner"]
+__all__ = ["build_tool_stack", "build_tool_registry", "build_subagent_runner"]
