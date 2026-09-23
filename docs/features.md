@@ -44,6 +44,23 @@ ai-coding 以「**自持 ReAct 循环** + 工具调用」为核心模型：用�
 
 `AgentLoop.process_input` 单回合流程：追加用户消息 → 在副本上执行上下文压缩 → 组装系统提示（基础 + 项目说明 + 技能目录 + 记忆目录）→ 调用 AI → 追加 assistant 消息与严格配对的 tool 消息 → 清理配对 → 原子落盘 → 静默记忆回填。
 
+### 回合上限与调用上限（R2）
+
+| 机制 | 配置 | 行为 |
+|---|---|---|
+| 回合墙钟上限 | `ai.turn_timeout_seconds`（默认 600，`0` 关闭） | 到期 → `TurnStatus.TIMEOUT`：保留已流式输出的文本、落盘、发 `TurnFinished` 事件；含人工审批等待时间 |
+| 单次工具调用上限 | 工具自报 `max_duration_seconds` 与「剩余回合预算」取小 | 到期 → **结构化** `ToolResult(error="tool_timeout", data={tool,timeout_seconds,reason})`，写回配对的 `role=tool` 消息，模型可以自行改策略 |
+| 子智能体上限 | `ai.subagent_timeout_seconds` | 子回合自带（略紧的）上限，先自然收尾并给出回包；父侧只做兜底 |
+| 辅助步骤降级 | 同上，但**不终止**回合 | 压缩超时 → 用未压缩历史；记忆召回超时 → 无记忆；记忆提取超时 → 跳过 |
+| MCP 连接上限 | `mcp.connection_timeout` | 超时只跳过该 server（MCP 是增强项） |
+
+原则：**核心等待（模型步、工具调用）到期就收尾；辅助等待到期就降级**。
+
+### 任务清单与停止判定（R2 拆分为纯单元）
+
+「要不要再来一轮」「模型停下来了但 todo 没做完怎么办」由 `core/turn_policy.py` 决定
+（纯函数、无 IO），`AgentLoop` 只负责编排。决策表见 [R2 分析](r2-analysis.md) §6.7。
+
 **四层上下文压缩**（`ContextManager`，调用顺序为硬约束）：
 
 | 层 | 动作 |
@@ -76,8 +93,15 @@ ai-coding 以「**自持 ReAct 循环** + 工具调用」为核心模型：用�
 - 单个 server 连接失败**静默跳过**，不影响其它 server 与主链路（增强组件不阻塞会话）；
 - `aclose()` 统一拆除会话，幂等且对未开启的 manager 安全；
 - 传输层可注入（`session_factory`），因此单测不需要真的 spawn 子进程。
+- **R2 起**：每个 server 由一个「会话属主任务」持有（连接与关闭必须在同一任务里，
+  这是 anyio cancel scope 的硬约束）；连接受 `mcp.connection_timeout` 约束，装死的 server 到点跳过；
+  server 的 `env` / `cwd` 会透传给子进程；factory 在交出 session 前显式 `initialize()` 完成握手。
 
 `mcp.enabled=false`（默认）时 `open_all()` 立即返回空列表，不连接任何服务器。
+
+真连验证：`AI_CODING_MCP_STDIO=1 pytest tests/test_mcp_stdio.py -q`
+（默认 skip 并打印原因——沙箱内子进程的 asyncio 循环醒不过来，详见
+[集成测试](integration_testing.md) 的环境矩阵）。
 
 ## 交互式 REPL 与 slash 命令
 

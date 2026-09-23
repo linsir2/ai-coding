@@ -6,7 +6,7 @@
 | 脚本 | 覆盖 | 断言强度 |
 |---|---|---|
 | `scripts/integration_smoke.py` | 工具回合 → 多轮回放 → **子智能体委派（含 ledger）** → L4 摘要 + 记忆提取 | 四步全部硬断言，任一步失败退出码非 0 |
-| `scripts/sample_tasks.py` | 六个样例场景：MCP 关闭 / read / **todo 跨回合** / write+edit / **危险命令拒绝** / 子智能体 | 每场景一条硬断言，输出 PASS/FAIL 汇总 |
+| `scripts/sample_tasks.py` | 八个样例场景：MCP 关闭 / read / **todo 跨回合** / write+edit / **bash 正常执行** / **危险命令拒绝** / 子智能体 / **回合看门狗（R2）** | 每场景一条硬断言，输出 PASS/FAIL 汇总 |
 
 `sample_tasks.py` 是 R1（自持循环）新增的样例集，专门覆盖单元测试只能模拟的能力：
 任务清单跨回合存活、非交互模式下 WARN 级工具真的能写文件、DENY 级真的被拒。
@@ -98,14 +98,79 @@ notes   =['用户用 Python 写后端', '用户喜欢简洁代码']
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | 非交互 `ask` 拒绝 write/edit/bash | R1a-4 换掉 `AgentLoop` 构造后 CLI 不再传审批回调，而分发器对 WARN 是 fail-closed | 已修：组合根把 `approval=None` 解释为「非交互 → 自动批准 WARN」；回归用例 `test_build_loop_defaults_to_non_interactive_auto_approval` |
-| `bash` 调用长时间不返回 | 工具超时依赖 `asyncio.wait_for(proc.communicate())`，而该协程的**取消**在子进程管道不 EOF 时无法完成（本沙箱即如此），因此超时抛不出来 | 环境问题；正常 Linux 下无此现象。健壮性改进（工具级看门狗）待排期 |
+| `bash` 调用长时间不返回 / worktree 测试永久挂起 | **根因见下**（沙箱 + 两个真实设计缺陷） | R2a/R2b 已修；`tests/test_tool_bash.py`、`tests/test_worktree.py` 现在沙箱内也全绿 |
+
+### 「工具卡住」的根因与修复（R2，2026-09-23）
+
+**现象**：一条 `echo err >&2` 报 `timeout: command exceeded 60s limit`；`tests/test_worktree.py` 在第 3 个用例处永久挂起；MCP 服务端连 `initialize` 都不回。
+
+**根因**：本机沙箱的 seccomp 过滤器（网络限制那条）把 asyncio 事件循环的**自管道写**一起挡掉了：
+
+```text
+$ grep -E "Seccomp|NoNewPrivs" /proc/self/status     # 沙箱内
+Seccomp: 2        Seccomp_filters: 1
+NoNewPrivs: 1
+$ grep -E "Seccomp" /proc/self/status                # 沙箱外（真实环境）
+Seccomp: 0        Seccomp_filters: 0
+
+csock: <socket.socket fd=5, family=1 (AF_UNIX), type=1 (SOCK_STREAM)>
+self-pipe send FAILED: errno=1 (EPERM) [Errno 1] Operation not permitted
+```
+
+`BaseEventLoop._write_to_self()` 写这个 socket 失败时**静默吞掉**异常，于是事件循环失去唯一的唤醒通道，
+只能在定时器到期时醒。凡是「等线程 / 等信号 / 等子进程」的等待都会一直睡到下一个定时器：
+
+| 实验 | 沙箱内 | 沙箱外 |
+|---|---|---|
+| `subprocess.run(["echo"])`（同步） | 6/6 通过 | — |
+| `asyncio.create_subprocess_exec` + `communicate()` | **8 次挂 5 次** | **12/12 通过** |
+| `asyncio.to_thread(time.sleep, 0.2)` | 3/3 超时（连线程都醒不过来） | — |
+| 同上 + 50ms 心跳定时器 | 0.21s 正常返回 | — |
+
+**它同时暴露了两个与环境无关的真实设计缺陷**：
+
+1. `asyncio.wait_for(coro, t)` 必须**等取消完成**才抛超时；`proc.communicate()` 的取消要等管道 EOF，
+   只要还有进程（含孙子进程 `sleep 30 &`）攥着管道，超时**永远抛不出来** —— 工具自己的 timeout 是纸糊的。
+2. `WorktreeManager._git()` **完全没有超时**；循环层也**没有回合上限**，所以一次卡住 = CLI 永久挂起（问题 ⑦）。
+
+**修复**：`infra/deadline.py`（硬超时 + 心跳 tick + 放弃式取消，不等待取消完成）+
+`infra/subprocess_runner.py`（线程内 `communicate(timeout)`，超时 `killpg(SIGKILL)` 杀整组）+ 回合级看门狗。
+
+### 环境矩阵：哪类验证必须在正常 OS 上做
+
+| 验证 | 本沙箱 | 沙箱外 / CI | 命令 |
+|---|---|---|---|
+| 单元 + 离线集成（521 例） | ✅ | ✅ | `pytest -q`（**不排除任何文件**） |
+| bash / git worktree 真实子进程 | ✅（R2b 之后） | ✅ | 同上 |
+| MCP stdio 真实往返 | ❌ 子进程的 asyncio 循环同样醒不过来 | ✅ 本次实测通过 | `AI_CODING_MCP_STDIO=1 pytest tests/test_mcp_stdio.py -q` |
+| 真实 LLM 联调 | ❌ **必须在正常环境跑** | ✅ 本次 8/8 通过 | `scripts/integration_smoke.py` / `scripts/sample_tasks.py` |
+
+> 为什么真实 LLM 联调在本沙箱内**不行**：`httpx`（openai 客户端）在 anyio 后端上会调用事件循环的
+> **默认线程池**（DNS/线程类操作），完成通知同样走自管道 → 丢失唤醒后，请求会一直挂在
+> `select` 上，且 `asyncio.Runner.close()` 的 `shutdown_default_executor()` 也要跨线程唤醒，
+> 于是**连进程退出都会卡死**（faulthandler 实测：主线程停在 `runners.py` 的 `run_until_complete`，
+> 另有 `concurrent.futures.thread._worker` 空闲线程）。这不是产品缺陷，但意味着
+> 「带真实 LLM 的验证」必须在正常 OS / CI 上做——本轮即如此执行（见 r2-analysis.md §12）。
+> 反过来，这也解释了为什么 R2a 的心跳 tick 是必要的：它让「等线程完成」的等待能被及时唤醒。
+
+### R2d 真连发现的两个真缺陷（只有真跑才会暴露）
+
+1. **anyio 的 cancel scope 绑定任务**：把「连接」放进一个带超时的任务、却在调用方任务里 close，会炸
+   `Attempted to exit cancel scope in a different task than it was entered in`。
+   修法：每个 server 一个**会话属主任务**（`_MCPSessionOwner`），连接与关闭都在同一个任务里。
+2. **`ClientSession.__aenter__` 不做握手**：R1a-6 的 factory 从没调用 `session.initialize()`，
+   真服务端因此对每个请求回 `-32602 Invalid request parameters`。假 session 的单测永远看不见这一点。
+   修法：factory 里显式 `await session.initialize()`，并有针对性单测 + gate 真连测试。
 
 ## 回归
 
 ```bash
-pytest          # 单元/集成(离线)全部通过
+pytest          # 单元/集成(离线)全部通过；含 bash/worktree，无排除
 ruff check .    # 0 错误
 mypy ai_coding  # 0 问题
+
+# 需要正常 OS（真实子进程）的最后一项：
+AI_CODING_MCP_STDIO=1 pytest tests/test_mcp_stdio.py -q
 ```
 
 网络相关执行（`agents_sdk_service.execute_turn`、`llm_helpers._chat`）不列入离线单测；

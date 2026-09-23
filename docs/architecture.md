@@ -89,26 +89,32 @@ ConfigManager.initialize(path) ─→ AppConfig
 sequenceDiagram
     participant U as 用户
     participant L as AgentLoop
+    participant P as TurnPolicy
     participant E as ChatEngine
     participant D as ToolDispatcher
     participant S as SessionService
 
     U->>L: process_input(session, input)
     L->>L: append user message + load/create TaskState
-    loop 1..max_tool_iterations
+    L->>L: deadline = now + ai.turn_timeout_seconds（0=关闭）
+    loop 由 TurnPolicy 决定是否继续
+        L->>P: decide_next_iteration(快照, 回合时钟是否到期)
+        P-->>L: ITERATE / FINISH
         L->>L: compress(副本) + 拼 instructions + 注入易失任务块
-        L->>E: step(messages, tools, instructions, on_delta)
+        L->>E: step(messages, tools, instructions, on_delta)  ← 受剩余回合预算约束
         E-->>L: StepResult(text, tool_calls, finish_reason, usage)
         L->>L: append assistant
         alt 无工具调用
-            L->>L: 停止判定（todo 门禁 / 自然结束）
+            L->>P: decide_after_step（todo 门禁 / 自然结束 / nudge 上限）
+            P-->>L: NUDGE（注入 [task-gate]，落盘）或 FINISH
         else 有工具调用
-            L->>D: dispatch_batch(calls, ToolContext)
-            D->>D: gate → 审批 → 执行（有界并发）
+            L->>D: dispatch_batch(calls, ToolContext, deadline)
+            D->>D: gate → 审批 → 执行（有界并发，单调用 min(工具上限, 剩余回合预算)）
             D-->>L: DispatchOutcome 列表（含结构化拒绝）
             L->>L: append tool messages + 事件 + 落盘（长会话按步长节流）
         end
     end
+    Note over L: 任一步到期 → TurnOutcome(TIMEOUT)，已完成文本与轨迹保留
     L->>S: ensure_tool_pairing + save
     L-->>U: 最终文本
 ```
@@ -123,6 +129,9 @@ sequenceDiagram
 | 观察循环 | 实现 `LoopObserver`（`on_event`），挂到 `AgentLoop` 或 `process_input` |
 | 接入外部工具集 | 用 `MCPManager` 的模式：把远端工具适配成 `BaseTool` 注册进同一个注册表 |
 | 换压缩/记忆实现 | `AgentLoop` 的 `context` / `memory` 都是可注入的可选组件 |
+| 改「什么时候继续/停止」的规则 | 改 `core/turn_policy.py`（纯单元，19 条决策表测试），不要动编排器 |
+| 给某个工具加/改调用上限 | 覆盖该工具的 `max_duration_seconds`（`None` = 只受回合预算约束） |
+| 新增一种「等外部世界」的 IO | 走 `infra/deadline.run_with_deadline`；子进程走 `infra/subprocess_runner` |
 
 ## 设计取舍
 
@@ -135,3 +144,8 @@ sequenceDiagram
 - **易失 vs 持久**：每轮注入的任务状态块是视图（不落盘），todo 门禁提醒是指令（落盘）。
 - **只改副本**：上下文压缩在历史副本上进行，绝不污染调用方状态。
 - **结构化优先**：工具结果、拒绝、子智能体回包都带机器可读的 `data`，而不是只有一段文本。
+- **任何等待都有上限（R2）**：模型步、工具调用、子智能体、MCP 连接、压缩/记忆都受
+  `infra/deadline` 约束；到期是**放弃式取消**（不等对方响应取消），因此
+  「工具卡住 ⇒ 回合永远不结束」这类故障不可能再出现。回合上限见 `ai.turn_timeout_seconds`。
+- **进程执行只有一个出口（R2）**：`infra/subprocess_runner`（线程 + `killpg`），
+  不再让业务代码各自 `create_subprocess_*`——那样会各自踩一次「取消要等管道 EOF」的坑。

@@ -145,6 +145,14 @@ R1 新增/变更的契约集中在四处。
 各拒绝路径有固定 `error` 码：`denied` / `not_approved` / `stopped` / `skipped` /
 `unknown_tool` / `tool_error` / `mcp_error` / `subagent_error`。
 
+R2 补两个码与一个字段：
+
+| 新增 | 取值 | 含义 |
+|---|---|---|
+| `ToolResult.error` | `tool_timeout` | 分发器的**调用预算**耗尽：工具没跑完（或没启动），没有结果 |
+| `ToolResult.error` | `timeout` / `nonzero_exit` / `spawn_failed` | `bash` 自身的命令超时 / 非零退出 / 起不来（此时 `data` 带 `exit_code`、`timed_out`、`duration_seconds`） |
+| `ToolResult.data`（超时） | `{tool, timeout_seconds, reason}` | `reason` = `call_budget_exhausted`（跑着被掐）或 `turn_budget_exhausted`（没预算，压根没启动） |
+
 ### 工具上下文与子智能体
 
 | 类型 | 字段 | 说明 |
@@ -156,11 +164,18 @@ R1 新增/变更的契约集中在四处。
 `BaseTool` 增加两个契约成员：`execute(params, ctx=None)` 与 `parallel_safe: bool`（默认 `False`，
 只读工具置 `True`；一批调用只要有**一个**不安全或非 ALLOW 级，整批串行）。
 
+R2 再加一个只读属性 `max_duration_seconds: float | None`：工具自报的单次调用上限
+（`bash` = 命令超时 + 15s 收割余量；`subAgent` = 子智能体超时 + 15s；`None` 表示只受回合预算约束）。
+分发器实际使用的预算是 `min(max_duration_seconds, 回合剩余)`。
+
 ### 循环事件（`core/events.py`）
 
 `LoopEvent` 是以下冻结事件的联合：`IterationStarted`、`AssistantTextDelta`、`AssistantMessage`、
 `ToolApprovalRequested`、`ToolStarted`、`ToolFinished`、`TaskUpdated`、`TurnFinished`。
 `LoopObserver.on_event` 是同步入口；观测者抛异常不会中断回合（`_SafeObserver` 兜底并记日志）。
+
+R2 给 `ToolFinished` 追加末尾字段 `error: str | None = None`（与 `ToolResult.error` 同源），
+让事件流也能区分「失败」与「超时」而不必解析文本。
 
 ### `AIConfig` 新增项
 
@@ -175,3 +190,8 @@ R1 新增/变更的契约集中在四处。
 | `max_subagent_conclusion_chars` | `4000` | 子智能体结论截断（全文只进 ledger） |
 | `stream_usage` | `true` | 是否请求 `stream_options.include_usage` |
 | `persist_checkpoint_messages` | `200` | 超过此条数后，回合内落盘按步长（每 3 轮）节流 |
+| `turn_timeout_seconds` | `600.0` | **回合墙钟上限**（R2）：到期 → `TurnStatus.TIMEOUT`，保留已产出文本与轨迹；`0` 关闭。含人工审批等待时间 |
+
+### 回合终态（`domain/loop.py`）
+
+`TurnStatus`：`completed` / `max_iterations` / **`timeout`**（R2 新增）/ `stopped` / `aborted` / `error`。

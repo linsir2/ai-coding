@@ -49,4 +49,18 @@ M0–M6 的循环由 SDK 内部驱动；R1 把控制权收回本项目，并移�
 
 设计文档：`docs/r1-analysis.md`（总方案）与 `docs/r1a-{1..6}-analysis.md`（逐子交付）。
 
+## 可靠性收口（R2）
+
+R1 把循环拿回来之后，剩下的是「它能不能永远收尾」：任意一次工具/模型/子智能体卡住，回合都必须有终态。
+
+- `R2a` 硬超时原语 + 回合级看门狗：`infra/deadline.py`（心跳 tick + **放弃式取消**）、
+  `ai.turn_timeout_seconds`（默认 600，0 关闭）、`TurnStatus.TIMEOUT`、工具级 `tool_timeout` 结构化结果
+- `R2b` 进程执行统一：`infra/subprocess_runner.py`（线程 + 进程组 kill），
+  `bash` 与 `git worktree` 都走它；顺带修了 `bash` 忽略 `ctx.workspace` 的真 bug
+- `R2c` 拆分：`core/turn_policy.py`（任务注入 + 停止判定，纯单元，19 条决策表测试）
+- `R2d` MCP 真连：会话属主任务 + 连接超时 + `env/cwd` 透传 + 真 stdio 往返测试（gate）
+- `R2e` CI：`.github/workflows/ci.yml`，**不排除任何测试文件**（含 bash/worktree 与 MCP 真连）
+
+设计文档与根因分析（含「工具为什么会卡住」的实测证据链）：[docs/r2-analysis.md](docs/r2-analysis.md)。
+
 详见 [docs/](docs/README.md)。
