@@ -50,7 +50,9 @@ def test_subagent_internal_stack_excludes_nested_subagent(tmp_path):
     runner = build_subagent_runner(cfg, str(tmp_path), None)
 
     inner = runner._build_tools(None)  # the sub-agent's own tools (main workdir)
-    names = _names(inner)
+    # R1a-5: the sub-agent stack is a ToolRegistry now (it runs the same loop),
+    # not an SDK tool list.
+    names = set(inner.list_names())
 
     assert "subAgent" not in names  # no recursion
     assert "read" in names  # file tools still available to the sub-agent

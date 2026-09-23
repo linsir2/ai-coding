@@ -1,35 +1,96 @@
-"""TDD (M4-1): SubAgentRunner — orchestrate one sub-agent execution.
+"""TDD (R1a-5): SubAgentRunner — a sub-agent that shares the parent's context.
 
-The runner bolts a worktree-managed sandbox (isolate) / main workspace (plain)
-onto the AI service and returns only the sub-agent's conclusion.
+Rewritten from the M4 spec.  The old runner fed the sub-agent an EMPTY history
+through the SDK service and got back a bare string; the new one runs the same
+AgentLoop as the parent, seeded with the parent's request view and system prompt,
+and returns a structured packet that is written back to a ledger.
 """
 
+import asyncio
+import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from ai_coding.ai.engine import ChatEngine, EngineError
+from ai_coding.config.models import AIConfig
 from ai_coding.core.subagent import SubAgentRunner
 from ai_coding.core.worktree import WorktreeError
-from ai_coding.domain.subagent import SubagentResult
+from ai_coding.domain.loop import StepResult
+from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolResult
+from ai_coding.domain.subagent import ParentContext
+from ai_coding.tools.base import BaseTool
+from ai_coding.tools.registry import ToolRegistry
+from ai_coding.tools.todo_write_tool import TodoWriteTool
 
 
-class _FakeService:
+class _Probe:
     def __init__(self) -> None:
-        self.prompt: str | None = None
-        self.tools: object | None = None
-        self.reply: str = "sub-agent conclusion"
+        self.current = 0
+        self.peak = 0
 
-    async def execute_turn(self, history, user_input, token_sink=None, *, instructions=None):
-        self.prompt = user_input
-        from ai_coding.domain.run import TurnResult
+    async def enter(self) -> None:
+        self.current += 1
+        self.peak = max(self.peak, self.current)
+        await asyncio.sleep(0.02)
+        self.current -= 1
 
-        return TurnResult(text=self.reply)
+
+class _Engine(ChatEngine):
+    def __init__(self, steps=None, probe: _Probe | None = None, hang: bool = False):
+        self._steps = list(steps or [StepResult(text="sub conclusion")])
+        self._probe = probe
+        self._hang = hang
+        self.requests: list[dict] = []
+        self.closed = False
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        if self._probe is not None:
+            await self._probe.enter()
+        self.requests.append(
+            {
+                "messages": list(messages),
+                "instructions": instructions,
+                "tools": list(tools),
+            }
+        )
+        if self._hang:
+            await asyncio.sleep(30)
+        item = self._steps.pop(0) if self._steps else StepResult(text="ok")
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
-class _FakeWT:
-    """Async-context-manager worktree fake; ``temporary`` is an asynccontextmanager."""
+class _Tool(BaseTool):
+    def __init__(self, name: str, result: ToolResult | None = None) -> None:
+        self._name = name
+        self._result = result or ToolResult(success=True, output="ok")
+        self.calls: list[dict] = []
 
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return "fake"
+
+    @property
+    def params_json_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, params, ctx=None):  # type: ignore[override]
+        self.calls.append(params)
+        return self._result
+
+
+class _Worktree:
     def __init__(self, path: str = "wt/path", fail: bool = False) -> None:
         self._path = path
         self._fail = fail
@@ -47,64 +108,269 @@ class _FakeWT:
         return _cm(name)
 
 
-def _make_runner(svc: _FakeService, seen: list) -> SubAgentRunner:
-    def build_service(cfg, tools=None):
-        svc.tools = tools
-        return svc
+def _registry(*extra: BaseTool) -> ToolRegistry:
+    registry = ToolRegistry()
+    provided = {tool.name for tool in extra}
+    if "todo_write" not in provided:
+        registry.register(TodoWriteTool())
+    for tool in extra:
+        registry.register(tool)
+    return registry
+
+
+def _runner(
+    engine: _Engine,
+    *,
+    registry: ToolRegistry | None = None,
+    seen_tools: list | None = None,
+    ledger_root=None,
+    max_concurrent: int = 3,
+    timeout: float = 600,
+    settings: AIConfig | None = None,
+) -> SubAgentRunner:
+    seen = seen_tools if seen_tools is not None else []
 
     def build_tools(workdir):
         seen.append(workdir)
-        return ["TOOLS"]
+        return registry or _registry()
 
-    return SubAgentRunner(object(), build_service=build_service, build_tools=build_tools)
-
-
-@pytest.mark.asyncio
-async def test_run_plain_builds_tools_for_main_and_returns_text():
-    svc = _FakeService()
-    seen: list = []
-    runner = _make_runner(svc, seen)
-
-    res = await runner.run("analyze the bug", "analyst", isolate=False)
-
-    assert isinstance(res, SubagentResult)
-    assert res.text == "sub-agent conclusion"
-    assert svc.tools == ["TOOLS"]
-    assert seen == [None]  # main workspace (workdir None) tool stack was built
-    assert svc.prompt is not None and "analyze the bug" in svc.prompt
+    return SubAgentRunner(
+        object(),
+        engine_factory=lambda: engine,
+        build_tools=build_tools,
+        ledger_root=ledger_root,
+        max_concurrent=max_concurrent,
+        timeout_seconds=timeout,
+        settings=settings or AIConfig(stop_policy="natural"),
+    )
 
 
-@pytest.mark.asyncio
-async def test_run_isolated_uses_worktree_path():
-    svc = _FakeService()
-    seen: list = []
-    runner = _make_runner(svc, seen)
+def _parent(messages=("parent-said-this",), instructions="PARENT INSTRUCTIONS"):
+    return ParentContext(
+        messages=tuple(
+            ChatMessage(role="user", content=m, timestamp="t") for m in messages
+        ),
+        instructions=instructions,
+    )
 
-    res = await runner.run("task", "dev", worktree_manager=_FakeWT(), isolate=True)
 
-    assert res.text == "sub-agent conclusion"
-    assert seen == ["wt/path"]  # tools were bound to the worktree
+# ---- context sharing -------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_run_isolated_falls_back_to_main_on_worktree_error():
-    svc = _FakeService()
-    seen: list = []
-    runner = _make_runner(svc, seen)
+async def test_subagent_receives_parent_messages(tmp_path):
+    engine = _Engine()
+    await _runner(engine).run("do the task", parent=_parent())
 
-    res = await runner.run("task", "dev", worktree_manager=_FakeWT(fail=True), isolate=True)
-
-    assert res.text == "sub-agent conclusion"
-    assert seen == [None]  # degraded to the main workspace
+    contents = [m.content or "" for m in engine.requests[0]["messages"]]
+    assert any("parent-said-this" in c for c in contents)
+    assert any("do the task" in c for c in contents)
+    # exactly one task block: the sub-agent's own (the parent view is injected
+    # before the parent's own task block, so it must not bring one along)
+    assert sum("<task-state>" in c for c in contents) == 1
 
 
 @pytest.mark.asyncio
-async def test_run_defaults_to_sub_agent_name_and_no_isolation_ok():
-    svc = _FakeService()
+async def test_subagent_receives_parent_instructions(tmp_path):
+    engine = _Engine()
+    await _runner(engine).run("t", parent=_parent())
+    assert engine.requests[0]["instructions"] == "PARENT INSTRUCTIONS"
+
+
+@pytest.mark.asyncio
+async def test_subagent_without_parent_uses_empty_history(tmp_path):
+    engine = _Engine()
+    await _runner(engine).run("t")
+    contents = [m.content or "" for m in engine.requests[0]["messages"]]
+    assert not any("parent-said-this" in c for c in contents)
+    assert engine.requests[0]["instructions"] is None
+
+
+# ---- structured packet -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subagent_returns_structured_packet(tmp_path):
+    engine = _Engine([StepResult(text="sub conclusion", finish_reason="stop")])
+    result = await _runner(engine).run("t", parent=_parent())
+
+    assert result.status == "completed"
+    assert result.conclusion == "sub conclusion"
+    assert result.text == "sub conclusion"  # backwards-compatible alias
+    assert result.iterations == 1
+    assert result.error is None
+
+
+@pytest.mark.asyncio
+async def test_subagent_todos_reported_in_packet(tmp_path):
+    engine = _Engine(
+        [
+            StepResult(
+                tool_calls=[
+                    ToolCallRef(
+                        id="c1",
+                        name="todo_write",
+                        arguments='{"action":"add","content":"ship it"}',
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            StepResult(text="done", finish_reason="stop"),
+        ]
+    )
+    result = await _runner(engine).run("t", parent=_parent())
+
+    assert [entry["content"] for entry in result.todos] == ["ship it"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_collects_artifacts(tmp_path):
+    from ai_coding.domain.message import ToolArtifact
+
+    writer = _Tool(
+        "write",
+        ToolResult(success=True, output="wrote", artifacts=(ToolArtifact(path="a.py"),)),
+    )
+    engine = _Engine(
+        [
+            StepResult(
+                tool_calls=[
+                    ToolCallRef(id="c1", name="write", arguments='{"path":"a.py"}')
+                ],
+                finish_reason="tool_calls",
+            ),
+            StepResult(text="done", finish_reason="stop"),
+        ]
+    )
+    result = await _runner(engine, registry=_registry(writer)).run("t", parent=_parent())
+
+    assert [a.path for a in result.artifacts] == ["a.py"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_conclusion_truncated(tmp_path):
+    settings = AIConfig(stop_policy="natural", max_subagent_conclusion_chars=10)
+    engine = _Engine([StepResult(text="x" * 500, finish_reason="stop")])
+    result = await _runner(engine, settings=settings).run("t")
+    assert result.conclusion is not None
+    assert len(result.conclusion) <= 11
+    assert result.conclusion.endswith("…")
+
+
+# ---- ledger ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subagent_ledger_written(tmp_path):
+    engine = _Engine([StepResult(text="ledgered", finish_reason="stop")])
+    result = await _runner(engine, ledger_root=tmp_path).run("t")
+
+    assert result.ledger_path is not None
+    ledger = Path(result.ledger_path)
+    assert ledger.is_file()
+    assert ledger.parent == tmp_path / "transcripts" / "subagents"
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    assert payload["status"] == "completed"
+    # the ledger holds the FULL conclusion, not the truncated one
+    assert payload["conclusion"] == "ledgered"
+
+
+@pytest.mark.asyncio
+async def test_subagent_ledger_failure_degrades(tmp_path):
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory", encoding="utf-8")
+    engine = _Engine()
+
+    result = await _runner(engine, ledger_root=blocked).run("t")
+
+    assert result.status == "completed"
+    assert result.ledger_path is None
+
+
+# ---- outcomes --------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subagent_timeout_returns_timeout_status(tmp_path):
+    engine = _Engine(hang=True)
+    result = await _runner(engine, timeout=0.05).run("t")
+    assert result.status == "timeout"
+    assert engine.closed is True  # the engine is always released
+
+
+@pytest.mark.asyncio
+async def test_subagent_engine_error_returns_error_status(tmp_path):
+    engine = _Engine([EngineError("boom")])
+    result = await _runner(engine).run("t")
+    assert result.status == "error"
+    assert result.error is not None and "boom" in result.error
+
+
+@pytest.mark.asyncio
+async def test_subagent_auto_approves_warn_tier_tools(tmp_path):
+    """No human is present in a sub-agent: WARN tier must not be fail-closed."""
+    writer = _Tool("write")
+    engine = _Engine(
+        [
+            StepResult(
+                tool_calls=[
+                    ToolCallRef(id="c1", name="write", arguments='{"path":"a.py"}')
+                ],
+                finish_reason="tool_calls",
+            ),
+            StepResult(text="wrote it", finish_reason="stop"),
+        ]
+    )
+    result = await _runner(engine, registry=_registry(writer)).run("t", parent=_parent())
+
+    assert writer.calls == [{"path": "a.py"}]  # the write actually ran
+    assert result.status == "completed"
+
+
+# ---- isolation and concurrency --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subagent_respects_worktree_isolation(tmp_path):
     seen: list = []
-    runner = _make_runner(svc, seen)
+    engine = _Engine()
+    result = await _runner(engine, seen_tools=seen).run(
+        "t", worktree_manager=_Worktree(), isolate=True
+    )
+    assert seen == ["wt/path"]
+    assert result.workdir == "wt/path"
 
-    res = await runner.run("just do it")
 
-    assert res.text == "sub-agent conclusion"
-    assert svc.prompt is not None and "sub-agent" in svc.prompt
+@pytest.mark.asyncio
+async def test_subagent_worktree_failure_degrades(tmp_path):
+    seen: list = []
+    engine = _Engine()
+    result = await _runner(engine, seen_tools=seen).run(
+        "t", worktree_manager=_Worktree(fail=True), isolate=True
+    )
+    assert seen == [None]
+    assert result.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_subagent_semaphore_bounds_concurrency(tmp_path):
+    probe = _Probe()
+    runner = _runner(_Engine(probe=probe), max_concurrent=1)
+    await asyncio.gather(runner.run("one"), runner.run("two"))
+    assert probe.peak == 1
+
+
+@pytest.mark.asyncio
+async def test_subagent_sub_loop_has_no_subagent_tool(tmp_path):
+    """The provided stack is used verbatim: no nested delegation."""
+    engine = _Engine()
+    registry = _registry()
+    await _runner(engine, registry=registry).run("t")
+    names = [s["function"]["name"] for s in _schemas(engine)]
+    assert "subAgent" not in names
+    assert "todo_write" in names
+
+
+def _schemas(engine: _Engine) -> list[dict]:
+    """Schemas the sub-loop advertised to the engine."""
+    return engine.requests[0]["tools"]

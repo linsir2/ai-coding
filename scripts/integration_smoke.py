@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Real-network integration smoke test for ai-coding (M3 wiring).
+"""Real-network integration smoke test for ai-coding.
 
-Builds the full AgentLoop exactly like the CLI (including the real L4
-summarizer + memory extractor) against a live DeepSeek endpoint, then runs:
+Builds the full AgentLoop exactly like the CLI (self-owned loop + dispatcher +
+the real L4 summarizer and memory extractor) against a live endpoint, then runs:
 
   1. a tool-calling turn  -> asserts an assistant `tool_calls` entry persisted
   2. a follow-up turn      -> asserts history replay does not 400 and recall works
-  3. direct L4 + extractor -> asserts the real LLM helpers return summaries/notes
+  3. a sub-agent turn      -> asserts delegation works and its packet is written back
+  4. direct L4 + extractor -> asserts the real LLM helpers return summaries/notes
 
 Requires a git-ignored ``config.local.yaml`` (see config.example.yaml + the API
 key).  Usage:
@@ -25,10 +26,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from ai_coding.ai.factory import build_service_from_config  # noqa: E402
-from ai_coding.cli import _build_loop, _build_tool_stack  # noqa: E402
+from ai_coding.ai.factory import build_engine_from_config  # noqa: E402
+from ai_coding.cli import _build_loop, _build_tool_registry  # noqa: E402
 from ai_coding.config.loader import ConfigLoader  # noqa: E402
 from ai_coding.infra.logger_setup import setup_logging  # noqa: E402
+from ai_coding.service.session_service import SessionService  # noqa: E402
 
 setup_logging()
 SEP = "=" * 56
@@ -45,12 +47,10 @@ async def main(config_path: str) -> int:
             "hello world from workspace\n", encoding="utf-8"
         )
 
-        sdk_tools = _build_tool_stack(app_cfg, str(ws_dir), None)
-        service = build_service_from_config(app_cfg, tools=sdk_tools)
-        sessions = __import__(
-            "ai_coding.service.session_service", fromlist=["SessionService"]
-        ).SessionService(ws_dir / "sessions")
-        loop = _build_loop(service, sessions, app_cfg, str(ws_dir), None)
+        registry = _build_tool_registry(app_cfg, str(ws_dir), None)
+        engine = build_engine_from_config(app_cfg)
+        sessions = SessionService(ws_dir / "sessions")
+        loop = _build_loop(engine, sessions, registry, app_cfg, str(ws_dir), None)
 
         session = sessions.create()
 
@@ -74,11 +74,30 @@ async def main(config_path: str) -> int:
         assert t2, "empty follow-up reply"
 
         # 3) real LLM helpers (flash)
-        print(SEP + " [3] L4 summarizer + memory extractor ")
+        print(SEP + " [3] sub-agent delegation ")
+        t3 = await loop.process_input(
+            session,
+            "必须使用 subAgent 工具：让一个子智能体读取 sample.txt 并回报它有几行。",
+        )
+        print(f"replied({len(t3)} chars): {t3[:120]!r}")
+        sub_msgs = [
+            m
+            for m in session.messages
+            if m.role == "tool" and m.tool_name == "subAgent"
+        ]
+        ledgers = sorted((ws_dir / "transcripts" / "subagents").glob("*.json"))
+        print(f"subAgent tool messages={len(sub_msgs)} ledgers={len(ledgers)}")
+        if sub_msgs:
+            print(f"packet preview: {(sub_msgs[-1].content or '')[:240]!r}")
+        assert sub_msgs, "the model did not delegate through subAgent"
+        assert ledgers, "sub-agent packet was not written back to the ledger"
+
+        # 4) real LLM helpers (shared model config)
+        print(SEP + " [4] L4 summarizer + memory extractor ")
         from ai_coding.ai.llm_helpers import build_extractor, build_summarizer
         from ai_coding.domain.message import ChatMessage
 
-        cfg = service.model_config
+        cfg = engine.model_config
         summarizer = build_summarizer(cfg)
         extractor = build_extractor(cfg)
         long_text = "[user] 我们要把配置从 deepseek-chat 迁移到 flash\n" * 40
@@ -89,6 +108,8 @@ async def main(config_path: str) -> int:
         print(f"notes   ={notes[:3]}")
         assert summary, "L4 summarizer returned empty"
         assert notes, "memory extractor returned no notes"
+
+        await loop.aclose()
 
     print(SEP + " SMOKE OK ")
     return 0

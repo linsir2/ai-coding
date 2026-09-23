@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ai_coding.config.models import AIConfig
 from ai_coding.core.worktree import WorktreeManager
 from ai_coding.tools.subagent_tool import SubAgentTool
 
@@ -18,27 +19,36 @@ from ai_coding.tools.subagent_tool import SubAgentTool
 def build_subagent_runner(app_cfg: Any, workspace: str, skills_path: str | None) -> Any:
     """Build a :class:`SubAgentRunner` bound to the given workspace.
 
-    Its inner tool stacks resolve ``workdir=None`` to the main workspace and
-    otherwise to the (worktree) directory actually passed in, always without a
-    nested subAgent tool.  Sub-agent stacks use the non-interactive auto-approve
-    policy (no human is present inside an isolated sub-agent to confirm WARN).
+    A sub-agent runs the same loop as its parent, so the runner needs an engine
+    factory plus a *registry* of tools — always without a nested ``subAgent``, or
+    delegation would recurse.  Its tool stacks resolve ``workdir=None`` to the
+    main workspace and otherwise to the worktree directory passed in.
     """
+    from ai_coding.ai.factory import build_engine_from_config
     from ai_coding.core.subagent import SubAgentRunner
+    from ai_coding.security.approval import AutoApproveCallback
 
     main_ws = str(Path(workspace).expanduser().resolve())
 
-    def build_tools(workdir: str | None) -> list[Any]:
-        return build_tool_stack(
+    def build_tools(workdir: str | None) -> Any:
+        return build_tool_registry(
             app_cfg, workdir or main_ws, skills_path, include_subagent=False
         )
 
-    return SubAgentRunner(app_cfg, build_service=_build_service, build_tools=build_tools)
-
-
-def _build_service(app_cfg: Any, tools: list[Any] | None = None) -> Any:
-    from ai_coding.ai.factory import build_service_from_config
-
-    return build_service_from_config(app_cfg, tools=tools)
+    ai_cfg = getattr(app_cfg, "ai", None)
+    return SubAgentRunner(
+        app_cfg,
+        engine_factory=lambda: build_engine_from_config(app_cfg),
+        build_tools=build_tools,
+        ledger_root=main_ws,
+        max_concurrent=int(getattr(ai_cfg, "max_concurrent_subagents", 3)),
+        timeout_seconds=float(getattr(ai_cfg, "subagent_timeout_seconds", 600)),
+        settings=ai_cfg if isinstance(ai_cfg, AIConfig) else AIConfig(),
+        # No human is present inside an isolated sub-agent to confirm WARN tier;
+        # the DENY tier (dangerous bash) still blocks regardless.
+        approval=AutoApproveCallback(),
+        workspace=main_ws,
+    )
 
 
 def build_tool_registry(

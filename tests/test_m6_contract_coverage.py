@@ -52,7 +52,9 @@ def test_base_tool_abstract_execute_raises():
 def test_subagent_turn_has_tool_calls_detection():
     assert SubagentTurn().has_tool_calls is False
     assert SubagentTurn(text="x", tool_calls=[]).has_tool_calls is False
-    assert SubagentResult(text="done").text == "done"
+    # R1a-5: SubagentResult is a structured packet; `text` stays as a read-only
+    # alias for `conclusion` so M4-era readers keep working.
+    assert SubagentResult(conclusion="done").text == "done"
 
 
 # ---------------------------------------------------------------- approval (fail-closed)

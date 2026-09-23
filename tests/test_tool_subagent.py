@@ -1,39 +1,124 @@
-"""TDD (M4-1): subAgent tool — delegate to a real SubAgentRunner.
+"""TDD (R1a-5): subAgent tool — delegate with the parent's context, return a packet.
 
-The tool no longer holds an ``ai_service``; it delegates to an injected
-:class:`SubAgentRunner` and forwards the optional worktree manager plus the
-isolation flag.  Only the runner's conclusion (``SubagentResult.text``) is
-returned to the caller as tool output.
+Rewritten from the M4 spec: the tool now hands the runner the parent turn's
+request view and system prompt (so the sub-agent sees the same context), and it
+turns the structured packet into a ToolResult with both readable text and
+machine-readable data.
 """
 
 import pytest
 
+from ai_coding.domain.message import ChatMessage, ToolArtifact
 from ai_coding.domain.subagent import SubagentResult
+from ai_coding.tools.base import ToolContext
 from ai_coding.tools.subagent_tool import SubAgentTool
 
 
 class _FakeRunner:
-    """Records how it is called and returns a canned conclusion."""
+    def __init__(self, result: SubagentResult | None = None) -> None:
+        self.result = result or SubagentResult(status="completed", conclusion="done")
+        self.calls: list[dict] = []
 
-    def __init__(self, reply: str = "subagent result") -> None:
-        self.reply = reply
-        self.calls: list[tuple] = []
+    async def run(self, task, name, *, worktree_manager=None, isolate=True, parent=None):
+        self.calls.append(
+            {
+                "task": task,
+                "name": name,
+                "worktree_manager": worktree_manager,
+                "isolate": isolate,
+                "parent": parent,
+            }
+        )
+        return self.result
 
-    async def run(self, task, name, *, worktree_manager=None, isolate=True):
-        self.calls.append((task, name, worktree_manager, isolate))
-        return SubagentResult(text=self.reply)
+
+def _ctx() -> ToolContext:
+    return ToolContext(
+        messages=(ChatMessage(role="user", content="parent view", timestamp="t"),),
+        instructions="PARENT INSTRUCTIONS",
+        workspace="/tmp/ws",
+        session_id="sid",
+    )
 
 
 @pytest.mark.asyncio
-async def test_subagent_delegates_to_runner_with_isolation_args():
-    runner = _FakeRunner("done the task")
+async def test_subagent_tool_passes_parent_context():
+    runner = _FakeRunner()
     tool = SubAgentTool(runner=runner, worktree_manager="wt/1", isolate=False)
 
-    r = await tool.execute({"task": "analyze this code", "name": "analyzer"})
+    await tool.execute({"task": "analyze this", "name": "analyst"}, _ctx())
 
-    assert r.success is True
-    assert "done the task" in r.output
-    assert runner.calls == [("analyze this code", "analyzer", "wt/1", False)]
+    call = runner.calls[0]
+    assert call["task"] == "analyze this"
+    assert call["name"] == "analyst"
+    assert call["worktree_manager"] == "wt/1"
+    assert call["isolate"] is False
+    assert call["parent"] is not None
+    assert call["parent"].instructions == "PARENT INSTRUCTIONS"
+    assert [m.content for m in call["parent"].messages] == ["parent view"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_returns_structured_data():
+    runner = _FakeRunner(
+        SubagentResult(
+            status="completed",
+            conclusion="all good",
+            todos=({"id": "1", "content": "step", "status": "pending"},),
+            iterations=3,
+            ledger_path="transcripts/subagents/abc.json",
+        )
+    )
+    tool = SubAgentTool(runner=runner)
+
+    result = await tool.execute({"task": "t"}, _ctx())
+
+    assert result.success is True
+    data = result.data
+    assert data is not None
+    assert data["status"] == "completed"
+    assert data["iterations"] == 3
+    assert data["todos"] == [{"id": "1", "content": "step", "status": "pending"}]
+    assert data["ledger_path"] == "transcripts/subagents/abc.json"
+    # the full conclusion travels as rendered text, not duplicated in data
+    assert "conclusion" not in data
+    assert data["conclusion_chars"] == len("all good")
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_renders_conclusion_and_open_items():
+    runner = _FakeRunner(
+        SubagentResult(
+            status="completed",
+            conclusion="I fixed the parser",
+            todos=({"id": "2", "content": "write tests", "status": "pending"},),
+            iterations=4,
+        )
+    )
+    tool = SubAgentTool(runner=runner)
+
+    result = await tool.execute({"task": "t", "name": "dev"}, _ctx())
+
+    assert "I fixed the parser" in result.output
+    assert "write tests" in result.output
+    assert "dev" in result.output
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_passes_artifacts():
+    runner = _FakeRunner(
+        SubagentResult(
+            status="completed",
+            conclusion="done",
+            artifacts=(ToolArtifact(path="parser.py", description="rewritten"),),
+        )
+    )
+    tool = SubAgentTool(runner=runner)
+
+    result = await tool.execute({"task": "t"}, _ctx())
+
+    assert [a.path for a in result.artifacts] == ["parser.py"]
+    assert "parser.py" in result.output
 
 
 @pytest.mark.asyncio
@@ -41,47 +126,48 @@ async def test_subagent_missing_task_fails():
     runner = _FakeRunner()
     tool = SubAgentTool(runner=runner)
 
-    r = await tool.execute({})
+    result = await tool.execute({}, _ctx())
 
-    assert r.success is False
-    assert "task" in r.output.lower()
+    assert result.success is False
+    assert "task" in result.output.lower()
     assert runner.calls == []
 
 
 @pytest.mark.asyncio
-async def test_subagent_default_name_and_isolate_defaults():
-    runner = _FakeRunner("ok")
-    tool = SubAgentTool(runner=runner)  # wt=None, isolate defaults to True
-
-    r = await tool.execute({"task": "do stuff"})
-
-    assert r.success is True
-    task, name, wt, isolate = runner.calls[0]
-    assert name == "sub-agent"
-    assert wt is None
-    assert isolate is True
-
-
-@pytest.mark.asyncio
-async def test_subagent_empty_output_becomes_marker():
-    runner = _FakeRunner("")
+async def test_subagent_timeout_is_failure():
+    runner = _FakeRunner(SubagentResult(status="timeout", error="exceeded 600s"))
     tool = SubAgentTool(runner=runner)
 
-    r = await tool.execute({"task": "t", "name": "n"})
+    result = await tool.execute({"task": "t"}, _ctx())
 
-    assert r.success is True
-    assert "(sub-agent produced no output)" in r.output
+    assert result.success is False
+    assert result.data is not None
+    assert result.data["status"] == "timeout"
+    assert "timeout" in result.output.lower()
 
 
 @pytest.mark.asyncio
 async def test_subagent_runner_error_is_tool_failure():
     class _BoomRunner:
-        async def run(self, task, name, *, worktree_manager=None, isolate=True):
+        async def run(self, task, name, *, worktree_manager=None, isolate=True, parent=None):
             raise RuntimeError("boom")
 
     tool = SubAgentTool(runner=_BoomRunner())
 
-    r = await tool.execute({"task": "t"})
+    result = await tool.execute({"task": "t"}, _ctx())
 
-    assert r.success is False
-    assert "boom" in r.output
+    assert result.success is False
+    assert result.error == "subagent_error"
+    assert "boom" in result.output
+
+
+@pytest.mark.asyncio
+async def test_subagent_max_iterations_is_still_success():
+    """A partial result beats discarding the work entirely."""
+    runner = _FakeRunner(SubagentResult(status="max_iterations", conclusion="partial"))
+    tool = SubAgentTool(runner=runner)
+
+    result = await tool.execute({"task": "t"}, _ctx())
+
+    assert result.success is True
+    assert "partial" in result.output

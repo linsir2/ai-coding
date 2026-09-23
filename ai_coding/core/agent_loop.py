@@ -44,7 +44,7 @@ from ai_coding.core.events import (
     TurnFinished,
 )
 from ai_coding.domain.loop import TurnOutcome, TurnStatus
-from ai_coding.domain.message import ChatMessage, ToolOutput
+from ai_coding.domain.message import ChatMessage, ToolArtifact, ToolOutput
 from ai_coding.domain.run import assistant_message, tool_message, user_message
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState, TodoItem
@@ -130,6 +130,7 @@ class AgentLoop:
             observer=self.observer,
         )
         self.last_outcome: TurnOutcome | None = None
+        self.last_artifacts: list[ToolArtifact] = []
 
     # ---- the turn ---------------------------------------------------------
 
@@ -146,6 +147,7 @@ class AgentLoop:
             self.dispatcher.observer = self.observer
 
         session.add_message(user_message(user_input, now_utc()))
+        self.last_artifacts = []
         if session.task is None:
             session.task = TaskState(goal=user_input)
         task = session.task
@@ -314,6 +316,7 @@ class AgentLoop:
         self, session: SessionData, outcomes: list[DispatchOutcome]
     ) -> None:
         for item in outcomes:
+            self.last_artifacts.extend(item.result.artifacts)
             session.add_message(
                 tool_message(
                     ToolOutput(
