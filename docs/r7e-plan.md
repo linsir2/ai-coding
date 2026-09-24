@@ -1727,12 +1727,16 @@ import os, pty, select, subprocess, sys, time
 
 在 `docs/r7e-plan.md` 末尾的「执行状态」里如实写：
 
-| 问题 | 结论 | 依据 |
+**实测结果（2026-09-24，本机，一次性探针 `/tmp/steering_spike.py` + `/tmp/spike_drive.py`）——四项全过**：
+
+| 问题 | 结论 | 依据（原始输出） |
 |---|---|---|
-| 可调用 message + `invalidate()` 能中途换提示词？ | 待填 | 子进程输出里 `问题>` 是否出现 |
-| `patch_stdout()` 下流式输出不打架？ | 待填 | `assistant chunk` 计数是否 30/30 |
-| 取消 reader 任务后终端恢复？ | 待填 | 是否打印 `SURVIVED` 且进程退出码 0 |
-| 一行能送给队列（而不是被提示行吃掉）？ | 待填 | `LINE '...'` 是否出现 |
+| 可调用 message + `invalidate()` 能中途换提示词？ | ✅ 过 | `mode=callable` 时先出现 `steer> `，第 10 块之后出现 `问题> `；`mode=plain`（不可调用）如预期显示 False |
+| `patch_stdout()` 下流式输出不打架？ | ✅ 过 | 两种模式都渲染出 **30/30** 条 `assistant chunk` |
+| 取消 reader 任务后终端恢复？ | ✅ 过 | 两种模式都打印 `SURVIVED` 且**退出码 0** |
+| 一行能送给队列（而不是被提示行吃掉）？ | ✅ 过 | 两种模式都出现 `LINE '改 A 而不是 B'` |
+
+**判定：继续 Task 13**（终端侧按计划实现）。退路未启用。
 
 - [ ] **Step 4: Decide**
 
