@@ -67,6 +67,27 @@ def test_env_is_honoured():
     assert outcome.stdout == "xyz"
 
 
+def _wait_for_group_teardown(pgid: int, timeout: float = 3.0) -> bool:
+    """Wait for a process group to disappear, then report whether it did.
+
+    ``os.killpg(pgid, 0)`` can keep succeeding for a moment after the last member
+    is gone — the group id itself is torn down slightly later.  Measured: in ~1 of
+    8 runs the immediate check failed while ``/proc`` showed the group had no live
+    members at all, and a probe 0.5s later raised ``ProcessLookupError``.  So the
+    meaningful assertion is "nothing is left running", not "the kernel has already
+    forgotten the group id".
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
 def test_timeout_kills_the_whole_process_group(tmp_path: pathlib.Path):
     """``sleep 30 & sleep 30`` holds the pipe; the old implementation hung here."""
     pidfile = tmp_path / "pgid"
@@ -80,8 +101,9 @@ def test_timeout_kills_the_whole_process_group(tmp_path: pathlib.Path):
     assert elapsed < 8.0, f"runner took {elapsed:.1f}s; the deadline is not hard"
 
     pgid = int(pidfile.read_text(encoding="utf-8").strip())
-    with pytest.raises(ProcessLookupError):
-        os.killpg(pgid, 0)  # the group must be gone, grandchildren included
+    # The group must end up empty (grandchildren included).  Waiting for the
+    # kernel to drop the group *id* is a different, racier claim — see the helper.
+    assert _wait_for_group_teardown(pgid), "the whole process group must be gone"
 
 
 def test_partial_output_before_timeout_is_kept():
