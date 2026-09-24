@@ -162,3 +162,28 @@ async def test_the_warning_never_changes_the_request():
     ]
     assert not quiet_events.of_type(ToolSurfaceWarning)
     assert loud_events.of_type(ToolSurfaceWarning)
+
+
+def test_the_console_renders_one_readable_line():
+    """R7e-3c: the REPL shows the number, the threshold and the top origins."""
+    from ai_coding.core.events import ToolSurfaceWarning
+    from ai_coding.ui.console import ConsoleObserver, DialogueConsole
+
+    printed: list[str] = []
+
+    class _Console(DialogueConsole):
+        def info(self, message: str) -> None:
+            printed.append(message)
+
+    ConsoleObserver(_Console()).on_event(
+        ToolSurfaceWarning(
+            tools_chars=13_301,
+            threshold=12_000,
+            origins=(("everything", 10_062), ("local", 4_280)),
+            hint="ignore me",
+        )
+    )
+    assert printed and printed[0].startswith("[tools]")
+    assert "13301" in printed[0]
+    assert "12000" in printed[0]
+    assert "everything=10062" in printed[0]

@@ -17,6 +17,7 @@ from ai_coding.core.events import (
     TaskUpdated,
     ToolFinished,
     ToolStarted,
+    ToolSurfaceWarning,
     TurnFinished,
 )
 from ai_coding.domain.loop import TurnStatus
@@ -73,6 +74,14 @@ class ConsoleObserver:
             mark = "ok" if event.success else "failed"
             preview = _short(event.output_preview, _OUTPUT_PREVIEW)
             self._c.info(f"  -> {mark}{': ' + preview if preview else ''}")
+        elif isinstance(event, ToolSurfaceWarning):
+            origins = " · ".join(
+                f"{name}={chars}" for name, chars in event.origins[:3]
+            )
+            self._c.info(
+                f"[tools] {event.tools_chars} 字符（阈值 {event.threshold}）"
+                f"{' · ' + origins if origins else ''}"
+            )
         elif isinstance(event, TaskUpdated):
             self._c.info(event.task.render())
         elif isinstance(event, TurnFinished):
