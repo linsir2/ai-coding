@@ -42,7 +42,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -293,6 +293,13 @@ class AgentLoop:
         deadline = Deadline.after(turn_timeout) if turn_timeout > 0 else None
         iterations = 0
         nudges = 0
+        # R6b: how the tool calls are going, and what to tell the user if the turn
+        # has to stop early (the handoff carries the last one).
+        attempted_calls = 0
+        successful_calls = 0
+        failed_streak = 0
+        strategy_nudges = 0
+        failures: list[tuple[str, str, str]] = []
         last_text: str | None = None
         summaries: list[str] = []
         memory_announced = False
@@ -310,7 +317,14 @@ class AgentLoop:
                 index += 1
                 budget_expired = deadline is not None and deadline.expired
                 decision = self._iteration_decision(
-                    index=index, nudges=nudges, ledger=ledger, budget_expired=budget_expired
+                    index=index,
+                    nudges=nudges,
+                    ledger=ledger,
+                    budget_expired=budget_expired,
+                    failed_streak=failed_streak,
+                    attempted_calls=attempted_calls,
+                    successful_calls=successful_calls,
+                    strategy_nudges=strategy_nudges,
                 )
                 if decision.action is TurnAction.FINISH:
                     outcome = _terminal_outcome(
@@ -320,6 +334,15 @@ class AgentLoop:
                         iterations=iterations,
                     )
                     break
+                if decision.action is TurnAction.NUDGE:
+                    # R6b tier 2.  Like the [task-gate] nudge, this is persisted: it
+                    # is a real instruction that changed the model's behaviour, so
+                    # replaying the transcript without it would break its meaning
+                    # (docs/r1a-4-analysis.md D1).
+                    strategy_nudges += 1
+                    session.add_message(user_message(decision.inject or "", now_utc()))
+                    self._checkpoint(session, index)
+                    continue
 
                 iterations = index
                 self._emit(IterationStarted(index=index, max_iterations=max_iterations))
@@ -403,7 +426,7 @@ class AgentLoop:
                     self._checkpoint(session, index)
                     continue
 
-                struck = await self._run_tools(
+                outcomes = await self._run_tools(
                     step,
                     session=session,
                     task=task,
@@ -412,7 +435,23 @@ class AgentLoop:
                     deadline=deadline,
                     index=index,
                 )
-                if struck:
+                attempted_calls += len(outcomes)
+                succeeded = [item for item in outcomes if item.result.success]
+                successful_calls += len(succeeded)
+                if outcomes:
+                    # A round with nothing at all (a plan-only step) is not a
+                    # failure streak, and the policy only counts streaks.
+                    failed_streak = 0 if succeeded else failed_streak + 1
+                failures.extend(
+                    (
+                        item.call.name,
+                        str(item.result.error or "failed"),
+                        (item.result.output or "")[:160],
+                    )
+                    for item in outcomes
+                    if not item.result.success
+                )
+                if any(item.halted for item in outcomes):
                     outcome = _stopped_outcome(step.text, index)
                     break
         except asyncio.CancelledError:
@@ -424,6 +463,7 @@ class AgentLoop:
                 task=task,
                 turn_number=turn_number,
                 outcome=_aborted_outcome(last_text, iterations),
+                failures=failures,
             )
             raise
         except (DeadlineExpired, EngineError) as exc:
@@ -435,6 +475,7 @@ class AgentLoop:
             task=task,
             turn_number=turn_number,
             outcome=outcome,
+            failures=failures,
         )
         await self.turn_memory.harvest(
             session, deadline=deadline, summaries=summaries, outcome=outcome
@@ -468,13 +509,21 @@ class AgentLoop:
         nudges: int,
         ledger: Any,
         budget_expired: bool,
+        failed_streak: int = 0,
+        attempted_calls: int = 0,
+        successful_calls: int = 0,
+        strategy_nudges: int = 0,
     ) -> TurnDecision:
-        """May this iteration start, given the round, the clock and the spend?"""
+        """May this iteration start, given the round, the clock, the spend and R6b?"""
         return self.policy.decide_next_iteration(
             TurnSnapshot(
                 iteration=index,
                 nudges=nudges,
                 tokens_spent=ledger.totals.total_tokens,
+                failed_streak=failed_streak,
+                attempted_calls=attempted_calls,
+                successful_calls=successful_calls,
+                strategy_nudges=strategy_nudges,
             ),
             budget_expired=budget_expired,
         )
@@ -489,11 +538,13 @@ class AgentLoop:
         instructions: str | None,
         deadline: Deadline | None,
         index: int,
-    ) -> bool:
-        """Run this step's tool calls; return whether the user stopped the turn.
+    ) -> list[DispatchOutcome]:
+        """Run this step's tool calls and hand back what they did.
 
-        Dispatch, write-back, the todo event and the mid-turn checkpoint all
-        happen here, so the loop body reads as the ReAct cycle it is.
+        R6b needs to see the outcomes (was anything attempted, did anything work,
+        what failed last), so the caller — not this method — keeps the counters.
+        Dispatch, write-back, the todo event and the mid-turn checkpoint all happen
+        here, so the loop body reads as the ReAct cycle it is.
         """
         outcomes = await self.dispatcher.dispatch_batch(
             step.tool_calls,
@@ -517,7 +568,7 @@ class AgentLoop:
         if any(item.call.name == "todo_write" for item in outcomes):
             self._emit(TaskUpdated(task=task))
         self._checkpoint(session, index)
-        return any(item.halted for item in outcomes)
+        return outcomes
 
     async def _model_step(
         self,
@@ -677,6 +728,7 @@ class AgentLoop:
         task: TaskState,
         turn_number: int,
         outcome: TurnOutcome,
+        failures: Sequence[tuple[str, str, str]] = (),
     ) -> TurnOutcome:
         """Record what this turn leaves behind, then persist it (R6a).
 
@@ -692,6 +744,7 @@ class AgentLoop:
             handoff = render_handoff(
                 outcome=outcome,
                 task=task,
+                failures=failures,
                 artifacts=self.last_artifacts,
                 trace_path=self._trace_path(session),
             )

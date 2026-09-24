@@ -58,6 +58,11 @@ _WHITESPACE = re.compile(r"\s+")
 
 WORKING_MEMORY_NOTE = "需要更早的细节时用 memory_search 查证，不要整读会话文件。"
 
+# The policy says "no progress" when it stops a turn that keeps trying and keeps
+# failing; tests/test_turn_policy_escalation.py pins that phrase.  The report must
+# not turn it into "the budget ran out", because it did not.
+_STALL_PREFIX = "no progress"
+
 _STATUS_LABEL: dict[TurnStatus, str] = {
     TurnStatus.MAX_ITERATIONS: "迭代预算用尽",
     TurnStatus.BUDGET: "token 预算用尽",
@@ -253,6 +258,8 @@ def render_handoff(
     if (outcome.text or "").strip() or outcome.status is TurnStatus.COMPLETED:
         return ""
     label = _STATUS_LABEL.get(outcome.status, outcome.status.value)
+    if outcome.reason.startswith(_STALL_PREFIX):
+        label = "零进展（提前收尾）"
     lines = [f"[回合未完成 · {label}（{outcome.iterations} 轮）]"]
     if outcome.reason:
         lines.append(f"原因: {one_line(outcome.reason, 160)}")
