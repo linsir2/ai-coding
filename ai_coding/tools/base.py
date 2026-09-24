@@ -43,6 +43,9 @@ class ToolContext:
     # a trace hang a sub-agent's spans under the subAgent call that spawned it
     # (docs/r4-analysis.md 4.6).
     call_id: str = ""
+    # R7e-1: the session's turn counter, so a note the model writes can record where
+    # it came from (`source_turn` means turn, R6d).
+    turn: int = 0
 
 
 def resolve_ctx(ctx: ToolContext | None) -> ToolContext:

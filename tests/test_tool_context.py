@@ -48,3 +48,26 @@ def test_parallel_safe_overrides_per_tool(tmp_path):
     assert ReadTool(sandbox, FileStateTracker()).parallel_safe is True
     assert GlobTool(sandbox).parallel_safe is True
     assert TodoWriteTool().parallel_safe is True
+
+
+# ---- R7e-1: the turn number travels with the context ------------------------
+
+
+def test_tool_context_carries_the_turn_number():
+    from ai_coding.core.request_builder import tool_context
+    from ai_coding.domain.task import TaskState
+
+    class _Session:
+        session_id = "s1"
+
+    ctx = tool_context(
+        task=TaskState(goal="g"),
+        workspace=".",
+        session=_Session(),  # type: ignore[arg-type]
+        history=[],
+        instructions=None,
+        emit=lambda _event: None,
+        turn=7,
+    )
+    assert ctx.turn == 7
+    assert ctx.session_id == "s1"

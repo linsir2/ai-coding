@@ -329,6 +329,7 @@ class AgentLoop:
                     instructions=assembled.instructions,
                     deadline=frame.deadline,
                     index=index,
+                    turn=frame.turn_number,
                 )
                 books.note_outcomes(outcomes)
                 if any(item.halted for item in outcomes):
@@ -496,6 +497,7 @@ class AgentLoop:
         instructions: str | None,
         deadline: Deadline | None,
         index: int,
+        turn: int = 0,
     ) -> list[DispatchOutcome]:
         """Run this step's tool calls and hand back what they did.
 
@@ -513,6 +515,7 @@ class AgentLoop:
                 history=history,
                 instructions=instructions,
                 emit=self._emit,
+                turn=turn,
             ),
             deadline=deadline,
             iteration=index,

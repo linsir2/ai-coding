@@ -83,8 +83,13 @@ def tool_context(
     history: Sequence[ChatMessage],
     instructions: str | None,
     emit: Callable[[Any], None],
+    turn: int = 0,
 ) -> ToolContext:
-    """The per-invocation context a tool receives (the dispatcher stamps call ids)."""
+    """The per-invocation context a tool receives (the dispatcher stamps call ids).
+
+    ``turn`` is the session's turn counter (R7e-1): a note the model writes records
+    where it came from, and ``source_turn`` has meant "turn" since R6d.
+    """
     return ToolContext(
         task=task,
         workspace=workspace,
@@ -92,4 +97,5 @@ def tool_context(
         messages=tuple(history),
         instructions=instructions,
         emit=emit,
+        turn=int(turn),
     )
