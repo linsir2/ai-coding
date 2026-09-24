@@ -87,7 +87,8 @@ class CLIUserPromptCallback:
     async def ask(self, question: str, options: Sequence[str] = ()) -> UserAnswer:
         if self._interactive is not None:
             try:
-                return await self._interactive.ask(question, options)
+                answer: UserAnswer = await self._interactive.ask(question, options)
+                return answer
             except Exception:  # noqa: BLE001 — the channel must never break a turn
                 return UserAnswer(answered=False, reason="no_user")
         prompt = _format_prompt(question, options)
