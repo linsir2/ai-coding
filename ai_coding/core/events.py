@@ -61,6 +61,9 @@ class ToolStarted:
     call_id: str
     tool_name: str
     params: dict[str, Any]
+    # R4a: which iteration asked for it.  Without this a concurrent batch cannot
+    # be reconstructed from the stream (docs/r4-analysis.md §3.3).
+    iteration: int = 0
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,83 @@ class ToolFinished:
     # Machine-readable failure code (R2a): "tool_timeout", "denied", "unknown_tool",
     # "not_approved", "stopped", "skipped", "tool_error"… None means success.
     error: str | None = None
+    # R4a: the iteration this call belonged to (see ``ToolStarted``).
+    iteration: int = 0
+
+
+# ---- R4a: the observability events ----------------------------------------
+
+
+@dataclass(frozen=True)
+class ModelStepFinished:
+    """One model step is over: what it cost and how long it took (R4a).
+
+    ``usage`` is whatever the endpoint reported, untouched.  ``cached_tokens``
+    is the provider's own prompt-cache figure — the truthful number — while
+    ``ContextAssembled.prefix_shared_ratio`` is only our estimate
+    (docs/r4-analysis.md §4.4).
+    """
+
+    index: int
+    finish_reason: str | None = None
+    text_chars: int = 0
+    tool_call_count: int = 0
+    usage: dict[str, int] | None = None
+    cached_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    latency_ms: int = 0
+
+
+@dataclass(frozen=True)
+class ContextAssembled:
+    """How this request was assembled — counts only, never content (R4a).
+
+    This is what makes "where did the tokens go" answerable: the system prompt,
+    the tool schemas, the history and each volatile tail block are measured
+    separately, and the shared prefix with the previous request is recorded so a
+    cache regression is visible without a separate experiment.
+
+    ``tools_chars`` matters: tool schemas are part of the prompt, so leaving them
+    out would make ``estimated_tokens`` systematically low (§4.3).
+    """
+
+    iteration: int
+    system_chars: int
+    tools_chars: int = 0
+    history_messages: int = 0
+    history_chars: int = 0
+    tail_blocks: tuple[tuple[str, int], ...] = ()
+    estimated_tokens: int = 0
+    prefix_shared_chars: int = 0
+    prefix_shared_ratio: float = 0.0
+    digest: str = ""
+
+
+@dataclass(frozen=True)
+class Degraded:
+    """An enhancement gave up and fell back, instead of failing the turn (R4a).
+
+    The architecture already degrades silently on purpose; this event makes each
+    of those fallbacks visible (docs/r4-analysis.md §1.1).
+    """
+
+    component: str
+    reason: str = ""
+    fallback: str = ""
+
+
+@dataclass(frozen=True)
+class ScopedEvent:
+    """An event that happened inside a nested run (a sub-agent), R4a.
+
+    The inner loop gets a :class:`~ai_coding.core.observers.ScopedObserver`, so
+    its events reach the parent's observer carrying who they belong to.  The
+    sub-agent's *reasoning* still never travels back (R1a-5); only these facts do.
+    """
+
+    scope: str
+    parent: str
+    event: LoopEvent
 
 
 @dataclass(frozen=True)
@@ -139,6 +219,10 @@ LoopEvent = (
     | ToolApprovalRequested
     | ToolStarted
     | ToolFinished
+    | ModelStepFinished
+    | ContextAssembled
+    | Degraded
+    | ScopedEvent
     | TaskUpdated
     | TurnFinished
     | MemoryInjected
@@ -189,9 +273,13 @@ def preview(text: str, limit: int = OUTPUT_PREVIEW_CHARS) -> str:
 
 __all__ = [
     "OUTPUT_PREVIEW_CHARS",
+    "ContextAssembled",
+    "Degraded",
     "IterationStarted",
     "AssistantTextDelta",
     "AssistantMessage",
+    "ModelStepFinished",
+    "ScopedEvent",
     "ToolApprovalRequested",
     "ToolStarted",
     "ToolFinished",

@@ -105,3 +105,86 @@ def test_preview_truncates_long_text():
 def test_preview_honours_custom_limit():
     assert preview("abcdef", limit=3) == "abc…"
     assert preview("abc", limit=3) == "abc"
+
+
+# ---- R4a: the observability events ----------------------------------------
+
+
+def test_r4_events_are_frozen_and_in_the_union():
+    from typing import get_args
+
+    from ai_coding.core.events import (
+        ContextAssembled,
+        Degraded,
+        LoopEvent,
+        ModelStepFinished,
+        ScopedEvent,
+    )
+
+    union = set(get_args(LoopEvent))
+    for event_type in (
+        ModelStepFinished,
+        ContextAssembled,
+        Degraded,
+        ScopedEvent,
+    ):
+        assert event_type in union
+    # frozen values: a trace recorder must never be able to mutate history
+    finished = ModelStepFinished(index=1)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        finished.index = 2  # type: ignore[misc]
+    degraded = Degraded(component="trace_write", reason="disk full")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        degraded.component = "other"  # type: ignore[misc]
+
+
+def test_r4_model_step_finished_carries_usage_and_cache():
+    from ai_coding.core.events import ModelStepFinished
+
+    event = ModelStepFinished(
+        index=2,
+        finish_reason="stop",
+        text_chars=12,
+        tool_call_count=1,
+        usage={"prompt_tokens": 100, "completion_tokens": 7, "total_tokens": 107},
+        cached_tokens=80,
+        latency_ms=1234,
+    )
+    assert event.usage == {
+        "prompt_tokens": 100,
+        "completion_tokens": 7,
+        "total_tokens": 107,
+    }
+    assert event.cached_tokens == 80
+    assert event.cache_write_tokens is None
+    assert event.latency_ms == 1234
+
+
+def test_r4_context_assembled_defaults_to_zero_counts():
+    from ai_coding.core.events import ContextAssembled
+
+    event = ContextAssembled(iteration=1, system_chars=10)
+    assert event.tools_chars == 0
+    assert event.tail_blocks == ()
+    assert event.prefix_shared_ratio == 0.0
+    assert event.digest == ""
+
+
+def test_r4_tool_events_default_to_iteration_zero():
+    started = ToolStarted(call_id="c1", tool_name="read", params={})
+    assert started.iteration == 0
+    finished = ToolFinished(
+        call_id="c1", tool_name="read", success=True, output_preview="", duration_ms=1
+    )
+    assert finished.iteration == 0
+
+
+def test_r4_scoped_event_wraps_any_loop_event():
+    from ai_coding.core.events import ScopedEvent
+
+    inner = ToolStarted(call_id="c1", tool_name="read", params={})
+    scoped = ScopedEvent(scope="subagent:c9", parent="c9", event=inner)
+    assert scoped.event is inner
+    assert scoped.parent == "c9"
+    # it is itself a LoopEvent, so a scoped stream fans out through the same seam
+    assert isinstance(scoped, ScopedEvent)
