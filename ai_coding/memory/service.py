@@ -287,6 +287,43 @@ class MemoryService:
             evidence=evidence,
         )
 
+    def write_note(
+        self,
+        text: str,
+        *,
+        kind: str = "fact",
+        importance: int = 3,
+        supersedes: str = "",
+        turn: int = 0,
+        session_id: str = "",
+    ) -> HarvestReport:
+        """Write one memory the model asked for, through the same door as harvest (R7e-1).
+
+        ``_reconcile`` is this service's only write path: dedupe, similarity merge,
+        explicit supersede, protection and eviction all live there, so a
+        model-written note cannot bypass any of them.  It carries
+        ``evidence="model"`` so ``/memory`` can tell it from a harvested one, which is
+        the R6d conclusion applied to the tool path (docs/r7e-analysis.md 3.1).
+        """
+        body = str(text or "").strip()
+        if not self.enabled or not body:
+            return HarvestReport()
+        target = str(supersedes or "").strip()
+        candidate = HarvestCandidate(
+            text=body,
+            kind=NoteKind.parse(kind),
+            importance=max(1, min(5, int(importance))),
+            action="supersede" if target else "add",
+            target_id=target or None,
+        )
+        return self._reconcile(
+            [candidate],
+            turn_index=int(turn or 0),
+            session_id=str(session_id or ""),
+            now=None,
+            evidence="model",
+        )
+
     def _known_memory_hint(self, batch: Sequence[ChatMessage], limit: int = 5) -> str:
         """Show the extractor which existing notes this turn may be replacing.
 
