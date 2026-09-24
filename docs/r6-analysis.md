@@ -194,8 +194,11 @@ preference|open_thread` 且「没有可写入的新事实时输出 `[]`」）在
 要么考古（§1.2 A 组：dump 257KB 会话文件），要么抱怨「输出从来没有返回给我」（§1.2 B 组）；
 而预算耗尽时用户拿到空回答（§1.3）。
 
-**设计**：新增一个纯单元 `core/turn_digest.py`，回答一个问题：
+**设计**：新增一个纯单元 `domain/turn_digest.py`，回答一个问题：
 **「这一回合，留给之后的一句话是什么？」**
+（放 `domain/` 而不是 `core/`：它既是**持久值对象**，又自带渲染，与同样自带
+`render()` 的 `domain/task.py` 同类；这样 `core/` 单向依赖 `domain/`，不会成环。
+执行计划里按这个位置落地，见 `docs/r6-plan.md` Task 1。）
 
 ```python
 @dataclass(frozen=True)
@@ -460,7 +463,7 @@ flowchart LR
 
 | 文件 | 动作 | 内容 |
 |---|---|---|
-| `ai_coding/core/turn_digest.py` | **新建** | `TurnDigest`（camelCase `to_dict/from_dict`，坏行忽略）、`build_digest`、`append_digest`（有界环）、`render_working_memory`、`render_handoff`。纯函数、无 IO、无 asyncio |
+| `ai_coding/domain/turn_digest.py` | **新建** | `TurnDigest`（camelCase `to_dict/from_dict`，坏行忽略）、`build_digest`、`append_digest`（有界环）、`render_working_memory`、`render_handoff`。纯函数、无 IO、无 asyncio；`append_digest` 收 `session: Any`，避免 `domain` 内成环 |
 | `ai_coding/domain/session.py` | 改 | 字段 `turn_count: int = 0`、`turn_digests: list[TurnDigest] = field(default_factory=list)`；`to_dict` 写 `turnCount`/`turnDigests`（空则不写，沿用 task 的「不写噪声」惯例）；`from_dict` 容错 |
 | `ai_coding/domain/loop.py` | 改 | `TurnOutcome.handoff: str = ""`（追加默认值，**不改 `text`**） |
 | `ai_coding/core/compaction.py` | 改 | 新增静态判定 `did_compact(source, result)`（`result is not source`），2 行 + docstring |
@@ -750,7 +753,7 @@ sequenceDiagram
 
 | 提交 | 内容 | 为什么这个顺序 |
 |---|---|---|
-| R6a-1 | `core/turn_digest.py` + 测试（纯单元，不接线） | 先有可测的数据形状，再接循环 |
+| R6a-1 | `domain/turn_digest.py` + 测试（纯单元，不接线） | 先有可测的数据形状，再接循环 |
 | R6a-2 | `SessionData` 两个字段 + 往返测试 | 持久化形状先定，之后不用返工 |
 | R6a-3 | 循环接线：`turn_count` / digest 环 / 尾部 `digest` 块 / `handoff` / 返回值 | 一次接线只做一件事：让「空回合」不再空 |
 | R6a-4 | `subagent` 用 `text or handoff` + 真实案例 R1 | 消费者侧收口 |
