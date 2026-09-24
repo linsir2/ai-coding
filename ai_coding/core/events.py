@@ -144,6 +144,22 @@ class Degraded:
 
 
 @dataclass(frozen=True)
+class ToolSurfaceWarning:
+    """The serialised tool schemas cost more than the configured ceiling (R7e-3).
+
+    Advisory and write-only: it is emitted once per loop, it is never assembled into
+    a request, and the request is byte-identical whether or not anyone listens.
+    ``origins`` is ``((origin, chars), ...)`` biggest-first, so the reader can see
+    which MCP server to trim instead of one number nobody can act on.
+    """
+
+    tools_chars: int
+    threshold: int
+    origins: tuple[tuple[str, int], ...] = ()
+    hint: str = ""
+
+
+@dataclass(frozen=True)
 class ScopedEvent:
     """An event that happened inside a nested run (a sub-agent), R4a.
 
@@ -225,6 +241,7 @@ LoopEvent = (
     | ModelStepFinished
     | ContextAssembled
     | Degraded
+    | ToolSurfaceWarning
     | ScopedEvent
     | TaskUpdated
     | TurnFinished
@@ -286,6 +303,7 @@ __all__ = [
     "ToolApprovalRequested",
     "ToolStarted",
     "ToolFinished",
+    "ToolSurfaceWarning",
     "TaskUpdated",
     "TurnFinished",
     "MemoryInjected",

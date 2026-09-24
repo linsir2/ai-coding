@@ -59,6 +59,7 @@ from ai_coding.core.events import (
     LoopObserver,
     NullObserver,
     TaskUpdated,
+    ToolSurfaceWarning,
 )
 from ai_coding.core.guard import GuardChain, TurnView
 from ai_coding.core.hooks import HookPoint
@@ -100,7 +101,7 @@ from ai_coding.security.approval import ApprovalCallback
 from ai_coding.security.permission_gate import PermissionGate
 from ai_coding.service.session_service import SessionService
 from ai_coding.tools.registry import ToolRegistry
-from ai_coding.tools.schema import tool_schemas
+from ai_coding.tools.schema import tool_schema, tool_schemas
 
 if TYPE_CHECKING:
     from ai_coding.ai.prompt import PromptAssembler
@@ -112,6 +113,18 @@ if TYPE_CHECKING:
 DeltaSink = Callable[[str], None]
 
 _log = logging.getLogger(__name__)
+
+
+def _tools_by_origin(registry: ToolRegistry) -> dict[str, int]:
+    """Serialised schema chars per origin, biggest first (R7e-3).
+
+    Per *tool* rather than per group, so the numbers add up to the same schemas the
+    request carries (the whole-array text differs only by its brackets and commas).
+    """
+    sizes: dict[str, int] = {}
+    for tool in registry.all_tools:
+        sizes[tool.origin] = sizes.get(tool.origin, 0) + len(short_json(tool_schema(tool)))
+    return dict(sorted(sizes.items(), key=lambda item: (-item[1], item[0])))
 
 
 class AgentLoop:
@@ -165,6 +178,10 @@ class AgentLoop:
         # the attribution (docs/r4-analysis.md 4.3).
         self._tools_text = short_json(self._tool_schemas)
         self._tools_chars = len(self._tools_text)
+        # R7e-3: the tool surface is static, so its breakdown is computed once and
+        # the warning costs nothing per turn.
+        self._tools_by_origin = _tools_by_origin(tools)
+        self._tools_warned = False
         self.dispatcher = ToolDispatcher(
             tools,
             gate or PermissionGate(),
@@ -368,6 +385,7 @@ class AgentLoop:
         # R4b: guard state (duplicate calls, …) is per turn, never per process.
         self.dispatcher.guards.reset()
         self.reporter.begin_turn(self.observer)
+        self._warn_tools_chars_once()
         hook_context = await self.turn_hooks.context(session)
         turn_timeout = float(getattr(self.settings, "turn_timeout_seconds", 0.0) or 0.0)
         return TurnFrame(
@@ -375,6 +393,28 @@ class AgentLoop:
             task=task,
             hook_context=hook_context,
             deadline=Deadline.after(turn_timeout) if turn_timeout > 0 else None,
+        )
+
+    def _warn_tools_chars_once(self) -> None:
+        """Say once, per loop, that the tool surface is over its ceiling (R7e-3)."""
+        if self._tools_warned:
+            return
+        threshold = int(getattr(self.settings, "tools_chars_warn", 0) or 0)
+        if threshold <= 0 or self._tools_chars <= threshold:
+            return
+        self._tools_warned = True
+        biggest = next(iter(self._tools_by_origin), "")
+        self._emit(
+            ToolSurfaceWarning(
+                tools_chars=self._tools_chars,
+                threshold=threshold,
+                origins=tuple(self._tools_by_origin.items()),
+                hint=(
+                    "工具 schema 每一步都会重发；"
+                    f"最贵的是 '{biggest}'。用 mcp.servers[].tools 只注册需要的工具，"
+                    "或关掉用不到的 server。"
+                ),
+            )
         )
 
     async def _finish_turn(
