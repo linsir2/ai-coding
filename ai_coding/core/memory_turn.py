@@ -20,7 +20,8 @@ import logging
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from ai_coding.core.events import Degraded, LoopEvent, MemoryHarvested
+from ai_coding.core.events import LoopEvent, MemoryHarvested
+from ai_coding.core.turn_report import emit_degraded
 from ai_coding.domain.loop import TurnOutcome
 from ai_coding.domain.session import SessionData
 from ai_coding.infra.deadline import Deadline, remaining_of, run_with_deadline
@@ -151,8 +152,5 @@ class TurnMemory:
     # ---- internals ---------------------------------------------------------
 
     def _degraded(self, component: str, reason: str, fallback: str) -> None:
-        """Report through the turn's own emit path (which is already safe)."""
-        try:
-            self._emit(Degraded(component=component, reason=reason, fallback=fallback))
-        except Exception:  # noqa: BLE001 — reporting must never break a turn
-            _log.debug("degraded report failed", exc_info=True)
+        """Report through the turn's own emit path (one shared construction)."""
+        emit_degraded(self._emit, component, reason, fallback)

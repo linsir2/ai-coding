@@ -373,7 +373,7 @@ async def process_input(self, session, user_input, on_delta=None, observer=None)
 
 | 指标 | 拆分前 | 目标 | **实际** |
 |---|---:|---:|---:|
-| `agent_loop.py` 行数 | 788 | ≤ 360 | **641** |
+| `agent_loop.py` 行数 | 788 | ≤ 360 | **654** |
 | `process_input` 行数 | 229 | ≤ 130 | **153** |
 | 「上报降级」实现份数 | 3 | 1 | **1**（只有 `turn_report` 构造 `Degraded`） |
 | 「压缩包 deadline」实现份数 | 2 | 1 | **1**（`Compactor`） |
@@ -435,8 +435,8 @@ async def process_input(self, session, user_input, on_delta=None, observer=None)
 
 | 指标 | 拆分前 | 拆分后 |
 |---|---:|---:|
-| 文件行数 | 788 | **641** |
-| `AgentLoop` 类行数 | 约 700 | **463** |
+| 文件行数 | 788 | **654** |
+| `AgentLoop` 类行数 | 约 700 | **467** |
 | `process_input` | 229 | **153** |
 | `__init__` | 60 | 64（多了两个单元的组装） |
 | 方法数 | 22 | 24（多了 `_bind_observer` / `_bind_trace` / `_iteration_decision` / `_model_step` / `_run_tools`） |
@@ -457,6 +457,9 @@ async def process_input(self, session, user_input, on_delta=None, observer=None)
 
 ### 11.3 已知未达成项（如实记录）
 
-1. `≤360 行` / `≤130 行` 两个目标是**拍脑袋估的**，实际是 641 / 153。剩余部分按 §2.2 的边界必须留在循环里。
+1. `≤360 行` / `≤130 行` 两个目标是**拍脑袋估的**，实际是 654 / 153。剩余部分按 §2.2 的边界必须留在循环里。
 2. `__init__` 从 60 涨到 64（多了两个单元的组装）——D-R5-3 决定不瘦身构造 API，这个数字是它的代价。
 3. 四个新单元的 docstring 与注释占了它们约一半的行数；如果只看代码行，新增逻辑其实很少（这是一次搬运）。
+4. **「降级上报只剩一处构造」这条是第二次才做对的**：第一次改完仍有 3 处（`turn_report` / `memory_turn` / `compaction` 各建一个 `Degraded`，
+   因为后两者手里是 emit 回调而不是 observer）。补了一个 sink 级共享函数 `emit_degraded(emit, ...)`、`report_degraded(observer, ...)` 委托给它之后，
+   全仓 `Degraded(...)` 才真的只剩 `turn_report.py:59` 一处。**这说明"我改完了"和"实测证明我改完了"是两回事。**

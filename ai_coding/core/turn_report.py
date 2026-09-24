@@ -37,9 +37,28 @@ from ai_coding.domain.loop import StepResult, TurnOutcome
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.usage import cache_from_usage
 
-__all__ = ["TurnReporter", "report_degraded"]
+__all__ = ["TurnReporter", "emit_degraded", "report_degraded"]
 
 _log = logging.getLogger(__name__)
+
+
+def emit_degraded(
+    emit: Callable[[LoopEvent], None],
+    component: str,
+    reason: str,
+    fallback: str = "",
+) -> None:
+    """Send one ``Degraded`` down an emit sink.  **The only place it is built.**
+
+    Callers that hold a sink (the loop's helpers) use this; callers that hold an
+    observer (the MCP manager, a sub-agent) use :func:`report_degraded`, which
+    wraps it.  Keeping the construction in one place is what stops the message
+    shape from drifting (docs/r5-analysis.md 1.3).
+    """
+    try:
+        emit(Degraded(component=component, reason=reason, fallback=fallback))
+    except Exception:  # noqa: BLE001 — reporting must never break a run
+        _log.debug("degraded report failed for %s", component, exc_info=True)
 
 
 def report_degraded(
@@ -48,20 +67,14 @@ def report_degraded(
     reason: str,
     fallback: str = "",
 ) -> None:
-    """Say that an enhancement gave up and fell back.
+    """Say that an enhancement gave up and fell back, through an observer.
 
-    Best-effort by construction: observation must never be able to break the
-    thing it observes, so a missing or exploding observer is swallowed here
-    (docs/r5-analysis.md 1.3 — one implementation instead of three).
+    Best-effort: observation must never be able to break the thing it observes,
+    so a missing or exploding observer is swallowed here.
     """
     if observer is None:
         return
-    try:
-        observer.on_event(
-            Degraded(component=component, reason=reason, fallback=fallback)
-        )
-    except Exception:  # noqa: BLE001 — reporting must never break a run
-        _log.debug("degraded report failed for %s", component, exc_info=True)
+    emit_degraded(observer.on_event, component, reason, fallback)
 
 
 class TurnReporter:
@@ -154,7 +167,7 @@ class TurnReporter:
 
     def report_degraded(self, component: str, reason: str, fallback: str = "") -> None:
         """Report a fallback through the turn's own emit path."""
-        self._emit(Degraded(component=component, reason=reason, fallback=fallback))
+        emit_degraded(self._emit, component, reason, fallback)
 
     def finish_turn(self, outcome: TurnOutcome, observer: LoopObserver) -> TurnOutcome:
         """Close the turn: attach the spend, note a broken observer, emit the end.

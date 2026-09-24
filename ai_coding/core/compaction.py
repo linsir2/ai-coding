@@ -13,7 +13,8 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from ai_coding.core.events import Degraded, LoopEvent
+from ai_coding.core.events import LoopEvent
+from ai_coding.core.turn_report import emit_degraded
 from ai_coding.domain.message import ChatMessage
 from ai_coding.infra.deadline import Deadline, DeadlineExpired, remaining_of, run_with_deadline
 
@@ -105,11 +106,5 @@ class Compactor:
     # ---- internals ---------------------------------------------------------
 
     def _degraded(self, reason: str, fallback: str) -> None:
-        try:
-            self._emit(
-                Degraded(
-                    component="context_compress", reason=reason, fallback=fallback
-                )
-            )
-        except Exception:  # noqa: BLE001 — reporting must never break a turn
-            _log.debug("degraded report failed", exc_info=True)
+        """Report through the turn's own emit path (one shared construction)."""
+        emit_degraded(self._emit, "context_compress", reason, fallback)
