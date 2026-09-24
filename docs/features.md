@@ -138,6 +138,54 @@ R3 重写。记忆层现在回答三个问题：**写什么、什么时候写、
 
 非 `slash` 输入交给模型执行单回合，输出用 wide/cyan 样式实时流式展示。
 
+## 可观测层（R4a）
+
+每回合默认落一份**轨迹**（`<workspace>/.ai-coding/traces/<session>/turn-<n>.jsonl`，一行一事件，
+写入前强制脱敏，默认只记元数据 + ≤500 字符预览），并维护会话级 `summary.json` 账本。
+
+| 能力 | 说明 |
+|---|---|
+| 用量审计 | `ModelStepFinished` 带**真实** `prompt/completion/total` 与延迟；回合终态 `TurnOutcome.usage` 是累加值 |
+| 预算归因 | `ContextAssembled` 分别记 system / **tools schema** / 历史 / 各尾部块的长度与估算 token（工具 schema 实测约 5k 字符，漏掉它估算会差一个数量级） |
+| 缓存度量 | **provider 真值优先**：OpenAI `prompt_tokens_details.cached_tokens`、Anthropic `cache_read/creation`、DeepSeek `prompt_cache_hit/miss`；不认识就不猜（`None`）。实测 DashScope 会上报 |
+| 缓存前缀兜底 | 端点不报 cache 时，用「与上一次请求的最长公共前缀」比率兜底（纯追加回合实测 0.95） |
+| 成本 | `ModelConfig.price_*` 配置后才算；未配置返回 `None`，不假装是 0 |
+| 降级可见 | 压缩超时、记忆读失败、落盘失败、worktree 隔离失败、观察者异常等都会发 `Degraded` 事件 |
+| 子智能体 | 子循环事件以 `ScopedEvent` 扇出到父轨迹（父子 span 可重建；推理仍不回传） |
+
+命令面：`ai-coding trace list｜show｜budget`，REPL 里 `/trace`、`/budget`。
+
+## 门卫（R4b）
+
+权限门是静态表（「这个动作危不危险」），门卫是**带状态**的运行时判定（「这个动作在此刻还得当吗」）。
+
+| 守卫 | 默认 | 行为 |
+|---|---|---|
+| `duplicate_call` | **开（阈值 2）** | 同一 `(工具, 参数)` 第 3 次调用起拒绝，并指出上一次结果的 call_id |
+| `bash_policy` | 空表不生效 | 配置追加 bash 红线 / 必须确认模式 |
+| `path_escape` | 只观察 | `bash` 引用工作区外绝对路径时记录；`strict_paths: true` 才拒绝 |
+| `secret` | history 默认不脱敏 | 轨迹永远脱敏；开启后才改写进入历史的工具输出 |
+
+安全规则：**改写过参数必须重新过权限门**（否则钩子/门卫就是绕过硬拒表的通道）；
+门卫抛异常 = 拒绝（失败关闭）；拒绝仍然写回配对的 `role=tool` 消息，配对永不破。
+
+回合级 token 闸门走 `core/turn_policy.py`（纯单元），超限以 `TurnStatus.BUDGET` 收尾。
+
+## 钩子（R4c）
+
+`hooks.events` 配置，默认关闭。两种形态：
+
+- `kind: command`：子进程，stdin 一行 JSON（默认**脱敏**，`raw: true` 才给原值），stdout 一行 JSON；
+- `kind: python`：进程内回调，从 `plugin_dir`（默认 `<workspace>/.ai-coding/hooks`）自动发现。
+
+点位：`turn.start`、`step.before`、`tool.before`（唯一可 block/rewrite）、`tool.after`、
+`compact.*`、`memory.harvest`、`subagent.*`、`turn.end`、`stop.blocked`。
+
+纪律：能力矩阵校验（点位不支持的能力直接报配置错误）；同一批钩子串行、按配置顺序；
+子进程走 `infra.subprocess_runner`（进程组 kill）并受超时约束；**钩子环境不含模型 API key**（白名单构造）；
+失败语义按能力分（观察/注入 fail-open，阻断/改写 fail-closed）；`inject` 只进**易失尾部块** `<hook-context>`，
+不进系统提示、不进历史（保住 R3 的缓存前缀纪律）。
+
 ## 会话持久化
 
 `SessionService` 在 `sessions/` 目录以 `{id}.json` 落盘，原子写入（临时文件 + `os.replace`）。文件结构与 Java `sessions/*.json` 字节兼容，camelCase 键，完整消息体包含角色、内容、时间戳与成对的工具调用/结果。`--session` 可续接指定会话。

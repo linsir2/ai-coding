@@ -227,3 +227,64 @@ R2 给 `ToolFinished` 追加末尾字段 `error: str | None = None`（与 `ToolR
 
 `SessionData.harvested_messages`（JSON: `harvestedMessages`）：已收割的消息数游标。
 存在会话里而不是循环里，因为 CLI 每回合新建 loop，而会话每回合重新加载。
+
+---
+
+## R4 可观测 / 门卫 / 钩子契约
+
+R4 加了三层，但只动了**两处既有对外契约**，其余全是新增或追加默认值。
+
+### 新增事件（`core/events.py`）
+
+| 类型 | 字段 | 说明 |
+|---|---|---|
+| `ModelStepFinished` | `index`、`finish_reason`、`text_chars`、`tool_call_count`、`usage`、`cached_tokens`、`cache_write_tokens`、`latency_ms` | 一次模型步的**真实**用量与延迟；`cached_tokens` 是 provider 报的缓存命中（不是估算） |
+| `ContextAssembled` | `iteration`、`system_chars`、`tools_chars`、`history_messages`、`history_chars`、`tail_blocks`、`estimated_tokens`、`prefix_shared_chars`、`prefix_shared_ratio`、`digest` | 请求由什么拼成；`tools_chars` 计入估算（工具 schema 也是 prompt 的一部分，实测约 5k 字符） |
+| `Degraded` | `component`、`reason`、`fallback` | 增强组件静默降级**可见化**（压缩/记忆/落盘/隔离/观察者） |
+| `ScopedEvent` | `scope`、`parent`、`event` | 子智能体事件带父子归属扇出到父观察者 |
+
+字段扩展：`ToolStarted.iteration`、`ToolFinished.iteration`（默认 `0`）。
+
+### 合同变更（仅两处）
+
+| 变更 | 影响面 |
+|---|---|
+| `TurnStatus` 新增 `BUDGET = "budget"` | 时间/轮次/token 三种耗尽可区分；`core/subagent.py::_STATUS_MAP` 把 `budget` 映射为 `max_iterations`（干到一半，不是错误） |
+| `TurnOutcome.usage: dict[str,int] \| None` | 回合终态自带账本（`prompt_tokens`/`completion_tokens`/`total_tokens`），调用方不必翻轨迹 |
+
+### 工具上下文扩展
+
+`ToolContext.call_id: str = ""`：分发器给**每次调用**一份独立上下文（一批调用共用一个 ctx），
+这样并发批次里的执行能自证身份，子智能体的 span 也能挂到发起它的 `subAgent` 调用之下。
+
+### 新的结构化拒绝码
+
+| `ToolResult.error` | 含义 | `data` |
+|---|---|---|
+| `guard_denied` | 门卫拒绝（重复调用、配置红线、路径逃逸） | `{decision, reason, guard, tool}` |
+| `guard_error` | 门卫自身抛异常 → 失败关闭 | 同上（`guard` 为出错守卫名） |
+| `hook_blocked` | 用户钩子拒绝 | `{decision, reason, hook, tool}` |
+
+改写（门卫或钩子）会在结果里留痕：`data.rewritten_from` + `data.rewritten_by`，
+且 output 追加一行 `note: parameters were adjusted before execution`——模型必须知道它要的和执行的不是一回事。
+
+### 轨迹文件（`core/trace.py`）
+
+路径：`<workspace>/.ai-coding/traces/<session_id>/turn-<n>.jsonl`，一行一事件：
+
+```json
+{"v":1,"ts":"2026-09-24T00:56:26.849Z","session":"<id>","turn":1,"span":"i1","parent":"turn","iter":1,"evt":"ContextAssembled","data":{...}}
+```
+
+不变式：写盘前**强制脱敏**；默认只记元数据 + ≤500 字符预览（`capture: full` 才原样保留）；
+单回合超 `max_turn_bytes` 截断并写 `truncated` 标记；`TurnFinished` 结束后到达的
+tail 事件（收割/整理）**追加到本回合文件**，不会凭空造出新回合。
+`summary.json` 记该会话的累计用量，`os.replace` 原子写。
+
+### 新增配置块
+
+`tracing`（enabled/dir/capture/max_turn_bytes/retention_days/redact）、
+`guard`（duplicate_threshold/bash_deny/bash_confirm/strict_paths/redact_history）、
+`hooks`（enabled/timeout_seconds/plugin_dir/events[]）、
+`ai.turn_token_budget`、`ModelConfig.price_input_per_1k` / `price_output_per_1k`。
+三块全部有默认值，**旧配置不改也能跑**。

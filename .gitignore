@@ -21,6 +21,8 @@ sessions/
 .memory/
 transcripts/
 worktrees/
+# R4a: traces and the hook plugin directory are per-workspace runtime state
+.ai-coding/
 
 # Local config (never commit secrets)
 config.local.yaml

@@ -17,6 +17,7 @@ ai_coding/
 ├─ tools/          工具契约 + 8 个内置工具 + 注册表 + schema 转换 + 装配
 ├─ ai/             引擎端口（ChatEngine）与直连 chat.completions 的实现、映射、提示装配
 ├─ core/           自持循环、工具分发、事件、上下文压缩、MCP、子智能体、worktree、项目说明
+│                  R4 追加：observers（扇出）、trace（轨迹+脱敏）、budget（账本）、guard（门卫）、hooks（钩子）
 ├─ service/        会话持久化
 ├─ memory/         记忆检索 / 提取 / 聚合
 ├─ skills/         技能目录注册表
@@ -127,6 +128,9 @@ sequenceDiagram
 | 新增工具 | 继承 `BaseTool`（实现 `execute(params, ctx)`），在 `build_tool_registry` 注册 |
 | 改审批策略 | 实现 `ApprovalCallback`，在组合根传入 |
 | 观察循环 | 实现 `LoopObserver`（`on_event`），挂到 `AgentLoop` 或 `process_input` |
+| **加一个运行时守卫**（R4b） | 在 `core/guard.py` 实现 `check()`（返回 `GuardDecision`），加进 `GuardChain`；在 `cli._make_guards` 装配 |
+| **挂钩子**（R4c） | 配置 `hooks.events`，写脚本（stdin/stdout JSON）或放 `<workspace>/.ai-coding/hooks/*.py`（进程内） |
+| **改可观测**（R4a） | 自己实现 `LoopObserver` 并 `Braid` 进去；或改 `core/trace.py` 的落盘与脱敏策略 |
 | 接入外部工具集 | 用 `MCPManager` 的模式：把远端工具适配成 `BaseTool` 注册进同一个注册表 |
 | 换压缩/记忆实现 | `AgentLoop` 的 `context` / `memory` 都是可注入的可选组件 |
 | 改「什么时候继续/停止」的规则 | 改 `core/turn_policy.py`（纯单元，19 条决策表测试），不要动编排器 |

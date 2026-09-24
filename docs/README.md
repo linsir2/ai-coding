@@ -70,6 +70,6 @@ R3 之后：编排层已经跑得对、收得回、记得住，但它是黑盒�
 `mypy strict`（按 3.10 下限检查）0 问题；`scripts/memory_cases.py` 11/11；
 MCP 真连与真实 LLM A/B 在正常环境另有 gate 测试 + CI 步骤。
 
-R4（可观测 / 门卫 / hook）目前**处于设计评审阶段**：完整设计见 [r4-analysis.md](r4-analysis.md)，
-外部对标见 [r4a-genericagent-research.md](r4a-genericagent-research.md)；
-待 15 个决策点拍板后按 R4a → R4b → R4c 顺序 TDD 实现。
+R4（可观测 / 门卫 / hook）**已按 R4a → R4b → R4c 顺序实现**：设计与决策点见 [r4-analysis.md](r4-analysis.md)，
+实施计划见 [r4-plan.md](r4-plan.md)，外部对标见 [r4a-genericagent-research.md](r4a-genericagent-research.md)。
+质量门禁：`pytest` **762 例通过 / 1 跳过**、`ruff` 0、`mypy strict` 0（80 文件）。
