@@ -71,6 +71,62 @@ class AIConfig(BaseModel):
     # destroying prompt-cache hits.  Compact at 0.8 of the budget, down to 0.5.
     compress_soft_ratio: float = 0.8
     compress_target_ratio: float = 0.5
+    # R4b: cumulative token ceiling for one turn (it counts every re-sent context,
+    # so it is a spend cap, not a window size).  0 disables the gate.
+    turn_token_budget: int = 0
+
+
+class TracingConfig(BaseModel):
+    """R4a observability settings; every field defaults to "on but cheap"."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    dir: str = ""  # empty = <workspace>/.ai-coding/traces
+    # previews keeps <=500-char payloads; full keeps whatever the event carries.
+    capture: Literal["previews", "full"] = "previews"
+    max_turn_bytes: int = 2_000_000
+    retention_days: int = 14
+    redact: bool = True
+
+
+class GuardConfig(BaseModel):
+    """R4b gatekeeper settings."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    duplicate_threshold: int = 2  # 0 disables the duplicate-call guard
+    bash_deny: list[str] = Field(default_factory=list)
+    bash_confirm: list[str] = Field(default_factory=list)
+    strict_paths: bool = False
+    redact_history: bool = False
+
+
+class HookEventConfig(BaseModel):
+    """One configured hook (R4c)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    point: str = ""
+    match: dict[str, str] = Field(default_factory=dict)
+    kind: Literal["python", "command"] = "command"
+    command: list[str] = Field(default_factory=list)
+    module: str = ""
+    entrypoint: str = "run"
+    capability: Literal["observe", "inject", "block", "rewrite"] = "observe"
+    persist: bool = False
+    raw: bool = False
+
+
+class HooksConfig(BaseModel):
+    """R4c hook settings; disabled by default (P8)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    timeout_seconds: float = 10.0
+    plugin_dir: str = ""
+    events: list[HookEventConfig] = Field(default_factory=list)
 
 
 class MemoryConfig(BaseModel):
@@ -126,6 +182,9 @@ class AppConfig(BaseModel):
     ai: AIConfig = Field(default_factory=AIConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
+    tracing: TracingConfig = Field(default_factory=TracingConfig)
+    guard: GuardConfig = Field(default_factory=GuardConfig)
+    hooks: HooksConfig = Field(default_factory=HooksConfig)
 
 
 def _coerce_model(raw: dict[str, Any]) -> ModelConfig:
@@ -139,4 +198,6 @@ def _coerce_model(raw: dict[str, Any]) -> ModelConfig:
         temperature=float(raw.get("temperature", 0.7)),
         top_p=float(raw.get("top_p", 0.9)),
         timeout=int(raw.get("timeout", 60)),
+        price_input_per_1k=float(raw.get("price_input_per_1k", 0.0) or 0.0),
+        price_output_per_1k=float(raw.get("price_output_per_1k", 0.0) or 0.0),
     )

@@ -123,3 +123,91 @@ def test_mcp_servers_from_yaml(tmp_path):
     assert mcp.servers[0].name == "github"
     assert mcp.servers[0].command == "npx"
     assert mcp.servers[0].enabled is False
+
+
+# ---- R4a: tracing and pricing configuration --------------------------------
+
+
+def test_tracing_block_has_working_defaults_and_can_be_configured(tmp_path):
+    default = ConfigLoader.load_app(None)
+    assert default.tracing.enabled is True
+    assert default.tracing.capture == "previews"
+    assert default.tracing.max_turn_bytes == 2_000_000
+    assert default.tracing.retention_days == 14
+    assert default.tracing.redact is True
+    assert default.tracing.dir == ""
+
+    cfg = tmp_path / "t.yaml"
+    cfg.write_text(
+        textwrap.dedent(
+            """
+            tracing:
+              enabled: false
+              capture: full
+              maxTurnBytes: 1000
+              retentionDays: 3
+            """
+        ),
+        encoding="utf-8",
+    )
+    loaded = ConfigLoader.load_app(cfg)
+    assert loaded.tracing.enabled is False
+    assert loaded.tracing.capture == "full"
+    assert loaded.tracing.max_turn_bytes == 1000
+    assert loaded.tracing.retention_days == 3
+
+
+def test_model_prices_are_optional_and_default_to_zero(tmp_path):
+    default = ConfigLoader.load_app(None)
+    assert default.models == {}
+
+    cfg = tmp_path / "p.yaml"
+    cfg.write_text(
+        textwrap.dedent(
+            """
+            default_model: qwen
+            models:
+              qwen:
+                name: qwen3.8-max
+                base_url: https://example.invalid/v1
+                api_key: k
+                price_input_per_1k: 0.002
+                price_output_per_1k: 0.006
+              plain:
+                name: plain
+                base_url: https://example.invalid/v1
+                api_key: k
+            """
+        ),
+        encoding="utf-8",
+    )
+    loaded = ConfigLoader.load_app(cfg)
+    assert loaded.models["qwen"].price_input_per_1k == 0.002
+    assert loaded.models["qwen"].price_output_per_1k == 0.006
+    assert loaded.models["plain"].price_input_per_1k == 0.0
+    assert loaded.models["plain"].price_output_per_1k == 0.0
+
+
+def test_a_config_without_the_new_blocks_still_loads(tmp_path):
+    """Every R4 block is optional, so existing configs keep working."""
+    cfg = tmp_path / "old.yaml"
+    cfg.write_text(
+        textwrap.dedent(
+            """
+            default_model: m
+            models:
+              m:
+                name: m
+                base_url: https://example.invalid/v1
+                api_key: k
+            ai:
+              max_tool_iterations: 3
+            """
+        ),
+        encoding="utf-8",
+    )
+    loaded = ConfigLoader.load_app(cfg)
+    assert loaded.ai.max_tool_iterations == 3
+    assert loaded.tracing.enabled is True
+    assert loaded.guard.duplicate_threshold == 2
+    assert loaded.hooks.enabled is False
