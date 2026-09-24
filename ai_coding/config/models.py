@@ -67,6 +67,19 @@ class AIConfig(BaseModel):
     # clock must still be able to end.
     approval_timeout_seconds: float = 0.0
     subagent_timeout_seconds: int = 600
+    # R7e-4: how much of the parent a sub-agent starts with.  "full" is the R1a-5
+    # behaviour (the parent's request view + system prompt); "task_only" gives it a
+    # clean window and the composition root's base instructions instead, which is
+    # what Anthropic's sub-agent guidance describes - and it means the parent MUST
+    # put every fact the child needs into the task text (docs/r7e-analysis.md 3.4).
+    subagent_context_mode: Literal["full", "task_only"] = "full"
+    # R7e-3: warn once per loop when the serialised tool schemas cost more than
+    # this.  0 disables.  Advisory only: the request is byte-identical either way
+    # (measured: 4,280 chars without MCP, 13,301 with a 13-tool server).
+    tools_chars_warn: int = 12_000
+    # R7e-2: what one turn may absorb from a user who keeps typing (docs §12 Q6).
+    steering_max_messages: int = 5
+    steering_max_chars: int = 2_000
     # R2a: wall-clock ceiling for one user turn.  Iteration counts cannot bound a
     # call that never returns, so any stuck step or tool must still end the turn.
     # Includes time spent waiting for a human approval prompt; 0 disables it.
@@ -209,6 +222,15 @@ class MCPConfig(BaseModel):
     servers: list[MCPServerConfig] = Field(default_factory=list)
 
 
+class UIConfig(BaseModel):
+    """Terminal-facing switches (R7e-2)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    #: Show a steering prompt while a turn is running.  Off = today's quiet REPL.
+    steering: bool = True
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -221,6 +243,7 @@ class AppConfig(BaseModel):
     tracing: TracingConfig = Field(default_factory=TracingConfig)
     guard: GuardConfig = Field(default_factory=GuardConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
+    ui: UIConfig = Field(default_factory=UIConfig)
 
 
 def _coerce_model(raw: dict[str, Any]) -> ModelConfig:

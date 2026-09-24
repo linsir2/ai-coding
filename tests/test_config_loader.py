@@ -1,6 +1,10 @@
 import textwrap
 
+import pytest
+from pydantic import ValidationError
+
 from ai_coding.config.loader import ConfigLoader, ConfigManager
+from ai_coding.config.models import AIConfig, AppConfig
 from ai_coding.domain.model_config import ModelConfig
 
 
@@ -213,3 +217,26 @@ def test_a_config_without_the_new_blocks_still_loads(tmp_path):
     assert loaded.tracing.enabled is True
     assert loaded.guard.duplicate_threshold == 2
     assert loaded.hooks.enabled is False
+
+
+# ---- R7e: the switches, and the fact that every default is today's behaviour ----
+
+
+def test_r7e_defaults_keep_every_behaviour_unchanged():
+    ai = AIConfig()
+    assert ai.subagent_context_mode == "full"  # Q8: 今天的行为
+    assert ai.tools_chars_warn == 12_000  # Q7
+    assert ai.steering_max_messages == 5  # Q6
+    assert ai.steering_max_chars == 2_000  # Q6
+    assert AppConfig().ui.steering is True  # Q6
+
+
+def test_an_unknown_subagent_context_mode_is_rejected_at_load():
+    with pytest.raises(ValidationError):
+        AIConfig(subagent_context_mode="clean")
+
+
+def test_the_ui_block_is_independent_of_the_rest():
+    cfg = AppConfig.model_validate({"ui": {"steering": False}})
+    assert cfg.ui.steering is False
+    assert cfg.ai.subagent_context_mode == "full"
