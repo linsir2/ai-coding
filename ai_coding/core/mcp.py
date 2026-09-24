@@ -221,6 +221,7 @@ class MCPManager:
         *,
         session_factory: SessionFactory | None = None,
         connection_timeout: float | None = None,
+        observer: Any | None = None,
     ) -> None:
         self._config = config or MCPConfig()
         self._session_factory = session_factory or _default_session_factory
@@ -230,6 +231,26 @@ class MCPManager:
             else self._config.connection_timeout
         )
         self._owners: list[_MCPSessionOwner] = []
+        # R4a: an optional observer, so a server that never connects is *reported*
+        # rather than only skipped (docs/r4-analysis.md 1.1, point 3).
+        self._observer = observer
+
+    def _degrade(self, server_name: str, reason: str) -> None:
+        """Say that a server was skipped, without letting the report fail."""
+        if self._observer is None:
+            return
+        from ai_coding.core.events import Degraded
+
+        try:
+            self._observer.on_event(
+                Degraded(
+                    component="mcp_server",
+                    reason=f"server '{server_name}': {reason}",
+                    fallback="its tools are not available this run",
+                )
+            )
+        except Exception:  # noqa: BLE001 — reporting must never break a run
+            _log.debug("mcp degraded report failed", exc_info=True)
 
     async def open_all(self) -> list[BaseTool]:
         """Connect every enabled server; a failure skips just that server."""
@@ -250,6 +271,10 @@ class MCPManager:
             self._owners.append(owner)
             owner.start()
             if not await owner.wait_ready(self._connection_timeout):
+                self._degrade(
+                    server.name,
+                    f"did not become ready within {self._connection_timeout:g}s",
+                )
                 continue
             for tool in owner.tools:
                 tools.append(

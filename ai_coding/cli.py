@@ -320,13 +320,14 @@ def repl(
     console = DialogueConsole()
 
     async def _serve() -> None:
-        manager = MCPManager(app_cfg.mcp)
+        # One recorder for the whole REPL: it re-binds to whichever session is
+        # current when each turn starts, and the store numbers turn files.  It is
+        # built before the MCP servers connect so their failures are recorded too.
+        recorder = _make_recorder(app_cfg, workspace, None)
+        manager = MCPManager(app_cfg.mcp, observer=recorder)
         try:
             for tool in await manager.open_all():
                 registry.register(tool)
-            # One recorder for the whole REPL: it re-binds to whichever session is
-            # current when each turn starts, and the store numbers turn files.
-            recorder = _make_recorder(app_cfg, workspace, None)
             guards = _make_guards(app_cfg)
             hooks = _make_hooks(app_cfg, workspace)
             # Interactive REPL: confirm WARN-tier tools (write/edit/bash) with the
@@ -574,7 +575,7 @@ async def _run_turn_with_mcp(
     hooks: Any | None = None,
 ) -> str:
     """Run one turn with MCP tools registered, then release everything."""
-    manager = MCPManager(app_cfg.mcp)
+    manager = MCPManager(app_cfg.mcp, observer=trace)
     try:
         for tool in await manager.open_all():
             registry.register(tool)

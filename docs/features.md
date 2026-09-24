@@ -122,8 +122,28 @@ R3 重写。记忆层现在回答三个问题：**写什么、什么时候写、
 `mcp.enabled=false`（默认）时 `open_all()` 立即返回空列表，不连接任何服务器。
 
 真连验证：`AI_CODING_MCP_STDIO=1 pytest tests/test_mcp_stdio.py -q`
-（默认 skip 并打印原因——沙箱内子进程的 asyncio 循环醒不过来，详见
-[集成测试](integration_testing.md) 的环境矩阵）。
+（默认 skip 并打印原因，详见[集成测试](integration_testing.md) 的环境矩阵）。
+
+**R4 实测（真实第三方 server，2026-09-24）**：
+
+| 验证 | 结果 |
+|---|---|
+| 自建 echo server 端到端 | 模型调用 `echo__echo` → `echo:mcp works`，轨迹 11–59ms，会话里 tool 消息正确配对 |
+| 官方 `@modelcontextprotocol/server-everything`（npx） | 发现 **13 个工具**（前缀 `everything__`），`get-sum(1234,5678)` → `6912` |
+| 失败隔离 | 一个 `command: /bin/false` 的 server 被跳过，另一个照常工作，会话不中断 |
+| 残留进程 | 运行结束后无孤儿 npx/python 子进程 |
+
+**三个需要知道的代价与坑**：
+
+1. **工具 schema 会显著推高每一步的 prompt**：加一个 13 工具的 server，`tools_chars` 从 5241 → **10481**（约翻倍）。
+   原生 function calling 每次调用都要发完整 schema，这份成本**每一步都付**——现在 `ContextAssembled.tools_chars` 能直接量出来。
+2. **冷启动可能撞上默认超时**：`npx -y @modelcontextprotocol/server-everything` 首次运行（含下载）实测约 **27s**，
+   而 `mcp.connection_timeout` 默认是 **30s**。npx/uvx 类 server 建议把它调到 60–90，或先预热缓存。
+3. **MCP 工具是 WARN 级**（远端工具未知 → 保守 WARN）：`ask` 自动放行，`repl` 每次调用都会弹审批；
+   调用会留下 `ToolApprovalRequested` 事件，可在轨迹里看到。
+
+R4 起，server 连不上不再静默：会发一条 `Degraded(component="mcp_server", reason="server '<name>': did not become ready within Ns")`
+并跳过它的工具（`/trace --degraded` 可见）。
 
 ## 交互式 REPL 与 slash 命令
 

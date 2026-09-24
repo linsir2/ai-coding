@@ -8,6 +8,7 @@ The transport is injected: these tests never spawn a subprocess (this sandbox
 cannot do that reliably, and a unit test should not need a live server anyway).
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -77,6 +78,36 @@ def _cfg(*servers, enabled=True) -> MCPConfig:
 
 def _server(name="fs", command="mcp-fs", enabled=True) -> MCPServerConfig:
     return MCPServerConfig(name=name, command=command, enabled=enabled)
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_never_connects_is_reported_not_silent():
+    """R4a: skipping a broken server is fine, skipping it *silently* is not."""
+    from ai_coding.core.events import Degraded, RecordingObserver
+
+    def hanging_factory(server):
+        @asynccontextmanager
+        async def _cm():
+            await asyncio.sleep(30)  # never connects
+            yield _Session()
+
+        return _cm()
+
+    observer = RecordingObserver()
+    manager = MCPManager(
+        _cfg(_server("dead"), _server("alive")),
+        session_factory=hanging_factory,
+        connection_timeout=0.05,
+        observer=observer,
+    )
+
+    await manager.open_all()
+    await manager.aclose()
+
+    degraded = observer.of_type(Degraded)
+    assert [event.component for event in degraded] == ["mcp_server", "mcp_server"]
+    assert "dead" in degraded[0].reason
+    assert degraded[0].fallback
 
 
 # ---- gating ----------------------------------------------------------------
