@@ -201,3 +201,21 @@ def test_a_frame_carries_the_clock_the_prologue_fixed():
     assert frame.hook_context == "<hook-context>x"
     assert frame.deadline is deadline
     assert frame.deadline.expired is False
+
+
+# ---- R7e-2: steering counts, and it restarts the streak ----------------------
+
+
+def test_note_steering_counts_and_resets_the_failure_streak():
+    books = TurnBooks(failed_streak=2, attempted_calls=3, successful_calls=0)
+    books.note_steering(2)
+    assert books.steering_messages == 2
+    assert books.failed_streak == 0  # Q5: 新指令 = 重新开始
+    assert books.attempted_calls == 3  # 但工具确实没成功过，计数不动
+    assert books.successful_calls == 0
+
+
+def test_note_steering_defaults_to_one():
+    books = TurnBooks()
+    books.note_steering()
+    assert books.steering_messages == 1

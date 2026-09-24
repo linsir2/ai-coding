@@ -81,6 +81,9 @@ class TurnBooks:
     #: Whether the tail's memory block has been reported this turn (R3 emits one
     #: ``MemoryInjected`` per turn, not one per iteration).
     memory_announced: bool = False
+    #: Lines the user typed while this turn was running and the loop absorbed
+    #: (R7e-2).
+    steering_messages: int = 0
 
     # ---- notifications ----------------------------------------------------
 
@@ -95,6 +98,15 @@ class TurnBooks:
     def note_strategy_nudge(self) -> None:
         """The escalation ladder spent its one "change strategy" nudge."""
         self.strategy_nudges += 1
+
+    def note_steering(self, count: int = 1) -> None:
+        """The user steered the turn: new instructions, so the streak restarts (Q5).
+
+        The call counters are deliberately untouched: nothing succeeded, and the
+        stall ladder is about tool progress, not about how many times we asked.
+        """
+        self.steering_messages += max(0, int(count))
+        self.failed_streak = 0
 
     def note_step(self, text: str | None) -> None:
         """Remember the latest model text (even when there is none)."""
