@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +113,7 @@ def ask(
         typer.echo(token, nl=False)
 
     console = DialogueConsole()
+    recorder = _make_recorder(app_cfg, workspace, session)
     answer = asyncio.run(
         _run_turn_with_mcp(
             engine=engine,
@@ -123,7 +125,8 @@ def ask(
             on_delta=on_delta,
             workspace=workspace,
             skills_path=skills,
-            observer=ConsoleObserver(console),
+            observer=_compose_observer(ConsoleObserver(console), recorder),
+            trace=recorder,
         )
     )
     # Answer text was already streamed live via on_delta; only ensure a trailing newline.
@@ -198,6 +201,68 @@ def memory_command(
     raise typer.Exit(code=1)
 
 
+@app.command("trace")
+def trace_command(
+    action: str = typer.Argument("list", help="list | show | budget"),
+    session: str = typer.Argument("", help="Session id, or a turn file path."),
+    turn: int = typer.Option(0, "--turn", "-t", help="Turn number for `show` (0 = latest)."),
+    workspace: str = typer.Option(
+        ".", "--workspace", "-w", help="Workspace directory (holds .ai-coding/traces)."
+    ),
+    path: str | None = typer.Option(None, "--path", "-p", help="Path to a YAML config file."),
+) -> None:
+    """Inspect recorded traces and token totals (R4a)."""
+    from ai_coding.ui.trace_render import render_budget, render_turn, summarize_turn
+
+    try:
+        app_cfg = ConfigLoader.load_app(path)
+    except FileNotFoundError as exc:
+        typer.echo(f"config error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    root_cfg = getattr(app_cfg.tracing, "dir", "") if app_cfg.tracing else ""
+    default_root = Path(workspace).expanduser().resolve() / ".ai-coding" / "traces"
+    root = Path(root_cfg) if root_cfg else default_root
+
+    if action == "list":
+        if not Path(root).is_dir():
+            typer.echo("(no traces recorded yet)")
+            return
+        for entry in sorted(Path(root).iterdir()):
+            if not entry.is_dir():
+                continue
+            turns = sorted(entry.glob("turn-*.jsonl"))
+            typer.echo(f"{entry.name}  {len(turns)} turn(s)")
+        return
+
+    if not session:
+        typer.echo(f"usage: trace {action} <session-id>", err=True)
+        raise typer.Exit(code=1)
+
+    session_dir = Path(root) / session
+    if action == "budget":
+        summary_path = session_dir / "summary.json"
+        if summary_path.is_file():
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            typer.echo(render_budget(summary))
+        else:
+            typer.echo("(no recorded usage for this session)")
+        return
+
+    if action == "show":
+        candidates = sorted(session_dir.glob("turn-*.jsonl"))
+        if not candidates:
+            typer.echo(f"(no traces for session {session})")
+            return
+        target = next((c for c in candidates if c.stem == f"turn-{turn}"), candidates[-1])
+        typer.echo(f"{target}")
+        typer.echo(render_turn(summarize_turn(target)))
+        return
+
+    typer.echo(f"unknown action '{action}'", err=True)
+    raise typer.Exit(code=1)
+
+
 @app.command("repl")
 def repl(
     path: str | None = typer.Option(None, "--path", "-p", help="Path to a YAML config file."),
@@ -232,6 +297,9 @@ def repl(
         try:
             for tool in await manager.open_all():
                 registry.register(tool)
+            # One recorder for the whole REPL: it re-binds to whichever session is
+            # current when each turn starts, and the store numbers turn files.
+            recorder = _make_recorder(app_cfg, workspace, None)
             # Interactive REPL: confirm WARN-tier tools (write/edit/bash) with the
             # user via y/N/s prompts, rather than silently blocking them.
             loop = _build_loop(
@@ -242,7 +310,8 @@ def repl(
                 workspace,
                 skills,
                 approval=CLIApprovalCallback(),
-                observer=ConsoleObserver(console),
+                observer=_compose_observer(ConsoleObserver(console), recorder),
+                trace=recorder,
             )
             try:
                 await run_repl(loop, sessions, console)
@@ -266,6 +335,7 @@ def _build_loop(
     *,
     approval: Any | None = None,
     observer: Any | None = None,
+    trace: Any | None = None,
 ) -> Any:
     """Assemble the loop and its optional components (silent degradation)."""
     if approval is None:
@@ -329,7 +399,63 @@ def _build_loop(
         settings=app_cfg.ai,
         observer=observer,
         workspace=str(ws),
+        trace=trace,
     )
+
+
+def _make_recorder(app_cfg: Any, workspace: str, session: Any) -> Any | None:
+    """Build a trace recorder for this run, or ``None`` when tracing is off.
+
+    Tracing is a passive observer: it is composed into the braid the loop already
+    talks to, so nothing about the turn changes when it is enabled
+    (docs/r4-analysis.md 4.7 a9).
+    """
+    tracing = getattr(app_cfg, "tracing", None)
+    if tracing is None or not getattr(tracing, "enabled", False):
+        return None
+    from ai_coding.core.trace import Redactor, TraceRecorder, TraceStore
+
+    default_root = Path(workspace).expanduser().resolve() / ".ai-coding" / "traces"
+    root = getattr(tracing, "dir", "") or default_root
+    store = TraceStore(
+        root,
+        max_turn_bytes=int(getattr(tracing, "max_turn_bytes", 2_000_000)),
+        retention_days=int(getattr(tracing, "retention_days", 14)),
+    )
+    try:
+        store.prune()
+    except Exception:  # noqa: BLE001 — cleanup must never block a run
+        pass
+    model = getattr(app_cfg, "default_model", "")
+    pricing = None
+    try:
+        from ai_coding.core.budget import Pricing
+
+        config = app_cfg.models.get(model) if getattr(app_cfg, "models", None) else None
+        if config is not None:
+            pricing = Pricing(
+                input_per_1k=float(getattr(config, "price_input_per_1k", 0.0)),
+                output_per_1k=float(getattr(config, "price_output_per_1k", 0.0)),
+            )
+    except Exception:  # noqa: BLE001 — pricing is optional
+        pricing = None
+    recorder = TraceRecorder(
+        store,
+        session_id=getattr(session, "session_id", "") if session is not None else "",
+        redactor=Redactor(enabled=bool(getattr(tracing, "redact", True))),
+        capture=str(getattr(tracing, "capture", "previews")),
+    )
+    recorder.pricing = pricing  # type: ignore[attr-defined]
+    return recorder
+
+
+def _compose_observer(base: Any, recorder: Any) -> Any:
+    """Braid the UI observer with the trace recorder (either may be absent)."""
+    if recorder is None:
+        return base
+    from ai_coding.core.observers import Braid
+
+    return Braid(*([base] if base is not None else []), recorder)
 
 
 async def _run_turn_with_mcp(
@@ -345,6 +471,7 @@ async def _run_turn_with_mcp(
     skills_path: str | None,
     approval: Any | None = None,
     observer: Any | None = None,
+    trace: Any | None = None,
 ) -> str:
     """Run one turn with MCP tools registered, then release everything."""
     manager = MCPManager(app_cfg.mcp)
@@ -360,6 +487,7 @@ async def _run_turn_with_mcp(
             skills_path,
             approval=approval,
             observer=observer,
+            trace=trace,
         )
         try:
             return str(await loop.process_input(session, prompt, on_delta=on_delta))

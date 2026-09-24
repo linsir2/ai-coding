@@ -344,6 +344,8 @@ class TraceRecorder:
         self.failures = 0
         self.turn = 0
         self._writer: TurnWriter | None = None
+        # Kept after the turn ends so ``/trace`` still has something to show.
+        self.last_path: Path | None = None
         self._iteration = 0
         self._turn_usage = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
         self._turn_steps = 0
@@ -352,7 +354,9 @@ class TraceRecorder:
 
     @property
     def current_path(self) -> Path | None:
-        return self._writer.path if self._writer is not None else None
+        if self._writer is not None:
+            return self._writer.path
+        return self.last_path
 
     def on_event(self, event: Any) -> None:
         """Record one event.  Never raises (docs/r4-analysis.md P1)."""
@@ -400,6 +404,8 @@ class TraceRecorder:
             self._finish_turn()
 
     def _finish_turn(self) -> None:
+        if self._writer is not None:
+            self.last_path = self._writer.path
         existing = self.store.read_summary(self.session_id)
         usage = self._turn_usage
         self.store.update_summary(

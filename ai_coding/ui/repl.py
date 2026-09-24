@@ -18,6 +18,8 @@ HELP_TEXT = (
     "direct commands:\n"
     "  /help, /h    show this help\n"
     "  /status      show session info\n"
+    "  /trace       show what the last turn cost and what degraded (R4a)\n"
+    "  /budget      show this session's recorded token totals (R4a)\n"
     "  /clear       start a fresh session\n"
     "  /quit, /q    exit the REPL"
 )
@@ -92,7 +94,36 @@ async def handle_input(
     if cmd.name == "memory":
         console.info(_memory_report(loop))
         return REPLAction.CONTINUE, session
+    if cmd.name == "trace":
+        console.info(_trace_report(loop))
+        return REPLAction.CONTINUE, session
+    if cmd.name == "budget":
+        console.info(_budget_report(loop, session))
+        return REPLAction.CONTINUE, session
     return REPLAction.CONTINUE, session
+
+
+def _trace_report(loop: Any) -> str:
+    """Render the last turn's trace summary for ``/trace`` (best-effort)."""
+    from ai_coding.ui.trace_render import render_turn, summarize_turn
+
+    recorder = getattr(loop, "trace", None)
+    path = getattr(recorder, "current_path", None)
+    if path is None:
+        return "[trace] tracing is off for this session"
+    return f"[trace] {render_turn(summarize_turn(path))}"
+
+
+def _budget_report(loop: Any, session: Any) -> str:
+    """Render the session ledger for ``/budget`` (best-effort)."""
+    from ai_coding.ui.trace_render import render_budget
+
+    recorder = getattr(loop, "trace", None)
+    store = getattr(recorder, "store", None)
+    session_id = getattr(session, "session_id", "")
+    if store is None or not session_id:
+        return "[budget] tracing is off for this session"
+    return f"[budget] {render_budget(store.read_summary(session_id))}"
 
 
 def _memory_report(loop: Any) -> str:

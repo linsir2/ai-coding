@@ -29,6 +29,8 @@ _ALIASES: dict[str, str] = {
     "/status": "status",
     "/compact": "compact",
     "/memory": "memory",
+    "/trace": "trace",
+    "/budget": "budget",
 }
 
 

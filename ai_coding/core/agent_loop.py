@@ -129,6 +129,7 @@ class AgentLoop:
         settings: AIConfig | None = None,
         observer: LoopObserver | None = None,
         workspace: str = ".",
+        trace: Any | None = None,
     ) -> None:
         self.engine = engine
         self.sessions = sessions
@@ -141,6 +142,10 @@ class AgentLoop:
         self.settings = settings or AIConfig()
         self.workspace = workspace
         self.observer: LoopObserver = _SafeObserver(observer or NullObserver())
+        # R4a: an optional trace recorder.  It arrives as part of the observer
+        # braid, and the loop only re-binds it to the current session (the CLI
+        # builds one loop for a whole REPL, so the session can change under it).
+        self.trace = trace
         # Task injection + stop policy live in their own pure unit (R2c).
         self.policy = TurnPolicy(TurnPolicyConfig.from_ai_config(self.settings))
         self._tool_schemas = tool_schemas(tools)
@@ -170,6 +175,8 @@ class AgentLoop:
         if observer is not None:
             self.observer = _SafeObserver(observer)
             self.dispatcher.observer = self.observer
+        if self.trace is not None:
+            self.trace.session_id = session.session_id
 
         session.add_message(user_message(user_input, now_utc()))
         self.last_artifacts = []
