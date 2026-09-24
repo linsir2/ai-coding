@@ -62,6 +62,10 @@ class AIConfig(BaseModel):
     # friendly) or appended to the system prompt (survives compaction).
     task_injection: Literal["message", "system"] = "message"
     max_concurrent_tools: int = 4
+    # R7c: how long a human gets to answer an approval prompt.  0 means "only the
+    # turn clock bounds it" — a slow human is not a refusal, but a turn with a
+    # clock must still be able to end.
+    approval_timeout_seconds: float = 0.0
     subagent_timeout_seconds: int = 600
     # R2a: wall-clock ceiling for one user turn.  Iteration counts cannot bound a
     # call that never returns, so any stuck step or tool must still end the turn.

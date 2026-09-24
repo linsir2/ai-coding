@@ -173,6 +173,12 @@ class AgentLoop:
             observer=self.observer,
             guards=guards,
             hooks=hooks,
+            # R7c: an approval prompt is a wait like any other — the turn clock
+            # bounds it, and a configured ceiling bounds it even without a clock.
+            approval_timeout=float(
+                getattr(self.settings, "approval_timeout_seconds", 0.0) or 0.0
+            )
+            or None,
         )
         # R5: everything this turn says about itself (events, ledger, degradation)
         # lives in one unit, so the loop body only has to choreograph.

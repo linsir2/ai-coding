@@ -151,12 +151,21 @@ async def run_repl(
     loop: Any,
     sessions: Any,
     console: DialogueConsole,
+    *,
+    user_prompt: Any | None = None,
 ) -> None:
-    """Interactive loop. Lazily imports prompt_toolkit."""
+    """Interactive loop. Lazily imports prompt_toolkit.
+
+    R7c: ``user_prompt`` (the ``ask_user`` channel) is handed the *same* reader the
+    REPL itself uses, because two readers on one terminal fight over stdin — the
+    scripted-pipe case degraded to ``no_answer`` (docs/r7-analysis.md 3.3).
+    """
     from prompt_toolkit import PromptSession
 
     session = sessions.create()
     prompt: Any = PromptSession()
+    if user_prompt is not None and hasattr(user_prompt, "set_reader"):
+        user_prompt.set_reader(prompt.prompt)
     console.rule("ai-coding REPL — /help for commands")
     while True:
         try:

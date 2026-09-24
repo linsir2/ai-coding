@@ -25,6 +25,7 @@ declared tool_calls still pair up and the model can react (docs/r2-analysis.md �
 from __future__ import annotations
 
 import asyncio
+import enum
 import time
 from dataclasses import dataclass, replace
 from typing import Any
@@ -40,7 +41,12 @@ from ai_coding.core.events import (
 from ai_coding.core.guard import GuardChain, GuardVerdict, TurnView
 from ai_coding.core.hooks import HookDecision, HookPoint
 from ai_coding.domain.message import ToolCall, ToolCallRef, ToolResult, tool_call_from_ref
-from ai_coding.infra.deadline import Deadline, DeadlineExpired, run_with_deadline
+from ai_coding.infra.deadline import (
+    Deadline,
+    DeadlineExpired,
+    remaining_of,
+    run_with_deadline,
+)
 from ai_coding.security.approval import ApprovalCallback, ApprovalResult
 from ai_coding.security.permission_gate import (
     Decision,
@@ -99,6 +105,30 @@ def _call_budget(tool: BaseTool, deadline: Deadline | None) -> float | None:
     return min(float(own), remaining)
 
 
+def _ask_budget(deadline: Deadline | None, approval_timeout: float | None) -> float | None:
+    """How long a human gets to answer: the turn clock, or the configured ceiling.
+
+    R7c: whichever is tighter.  ``None`` means "wait as long as it takes", which is
+    the default (a slow human is not a refusal) — but the moment the turn has a
+    clock, the wait is inside it, so the clock can actually end the turn.
+    """
+    remaining = remaining_of(deadline)
+    if approval_timeout is None or approval_timeout <= 0:
+        return remaining
+    if remaining is None:
+        return float(approval_timeout)
+    return min(float(approval_timeout), remaining)
+
+
+class ApprovalVerdict(enum.Enum):
+    """What came back from asking a human (R7c)."""
+
+    APPROVED = "approved"
+    DECLINED = "declined"
+    STOPPED = "stopped"
+    TIMED_OUT = "timed_out"
+
+
 class ToolDispatcher:
     """Executes tool calls with permission, approval and bounded concurrency."""
 
@@ -112,6 +142,7 @@ class ToolDispatcher:
         observer: LoopObserver | None = None,
         guards: GuardChain | None = None,
         hooks: Any | None = None,
+        approval_timeout: float | None = None,
     ) -> None:
         self.registry = registry
         self.gate = gate
@@ -124,6 +155,9 @@ class ToolDispatcher:
         # R4c: user-supplied policy, run after the built-in guards.  May be a
         # Braid of runners (command + python); ``None`` means no hooks at all.
         self.hooks = hooks
+        # R7c: how long a human gets to answer before the turn moves on without
+        # them (``None``/0 = only the turn clock bounds the wait).
+        self.approval_timeout = approval_timeout
 
     # ---- public API -------------------------------------------------------
 
@@ -284,10 +318,13 @@ class ToolDispatcher:
         if verdict is PermissionDecision.WARN:
             if self.approval is None:
                 return self._not_approved(call, "no approval callback"), True, False
-            approved, stopped = await self._ask(call, reason)
-            if stopped:
+            verdict_from_user = await self._ask(call, reason, deadline)
+            if verdict_from_user is ApprovalVerdict.STOPPED:
                 return self._stopped(call), True, True
-            if not approved:
+            if verdict_from_user is ApprovalVerdict.TIMED_OUT:
+                waited = _ask_budget(deadline, self.approval_timeout)
+                return self._approval_timeout(call, waited), True, False
+            if verdict_from_user is not ApprovalVerdict.APPROVED:
                 return self._not_approved(call, "user declined"), True, False
 
         tool = item.tool
@@ -339,24 +376,38 @@ class ToolDispatcher:
                 return outcome
         return None
 
-    async def _ask(self, call: ToolCall, reason: str) -> tuple[bool, bool]:
-        """Prompt the user.  Returns ``(approved, stopped)``; never raises."""
+    async def _ask(
+        self, call: ToolCall, reason: str, deadline: Deadline | None = None
+    ) -> ApprovalVerdict:
+        """Prompt the user, inside the turn clock.  Never raises (R7c).
+
+        The wait used to be unbounded *and* unwrapped, so a prompt nobody answered
+        held the turn for as long as it liked — measured: 5.00s against a 1.0s
+        clock, and when the human finally answered, the call was refused because
+        the clock had already passed (docs/r7-analysis.md 1.3).
+        """
         self.observer.on_event(
             ToolApprovalRequested(
                 tool_name=call.name, params=dict(call.params), reason=reason
             )
         )
         if self.approval is None:  # pragma: no cover - guarded by the caller
-            return False, False
+            return ApprovalVerdict.DECLINED
         try:
-            answer = await self.approval.approve(call.name, call.params, reason)
+            answer = await run_with_deadline(
+                self.approval.approve(call.name, call.params, reason),
+                timeout=_ask_budget(deadline, self.approval_timeout),
+                label="approval",
+            )
+        except DeadlineExpired:
+            return ApprovalVerdict.TIMED_OUT
         except Exception:  # noqa: BLE001 — approval is a safety boundary: fail closed
-            return False, False
+            return ApprovalVerdict.DECLINED
         if answer is ApprovalResult.YES:
-            return True, False
+            return ApprovalVerdict.APPROVED
         if answer is ApprovalResult.STOP:
-            return False, True
-        return False, False
+            return ApprovalVerdict.STOPPED
+        return ApprovalVerdict.DECLINED
 
     async def _execute(
         self,
@@ -471,6 +522,31 @@ class ToolDispatcher:
             output="error: not approved by user",
             error="not_approved",
             data={"decision": "warn", "approved": False, "reason": reason, "tool": call.name},
+        )
+
+    @staticmethod
+    def _approval_timeout(call: ToolCall, seconds: float | None) -> ToolResult:
+        """Nobody answered in time — a distinct state from "the user said no" (R7c).
+
+        The model has to be able to tell the two apart: "they refused" means find
+        another way, "they did not answer" means decide, say what you assumed, and
+        carry on (which is what ``ask_user`` already does when there is no human).
+        """
+        waited = f" within {seconds:g}s" if seconds else ""
+        return ToolResult(
+            success=False,
+            output=(
+                f"error: nobody answered the approval prompt for '{call.name}'{waited}; "
+                "the call was not run. Decide another way, say what you assumed, or stop."
+            ),
+            error="approval_timeout",
+            data={
+                "decision": "warn",
+                "approved": False,
+                "reason": "approval_timeout",
+                "timeout_seconds": seconds,
+                "tool": call.name,
+            },
         )
 
     @staticmethod

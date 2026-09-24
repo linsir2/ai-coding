@@ -313,8 +313,11 @@ def repl(
         app_cfg = manager.app
         engine = build_engine_from_config(app_cfg)
         # Interactive: the model may ask a question (R6c) and a human can answer it.
+        # R7c: one channel object, so `run_repl` can point it at the REPL's own
+        # prompt session instead of letting a second reader fight over stdin.
+        user_prompt = CLIUserPromptCallback()
         registry = _build_tool_registry(
-            app_cfg, workspace, skills, user_prompt=CLIUserPromptCallback()
+            app_cfg, workspace, skills, user_prompt=user_prompt
         )
     except (ValueError, FileNotFoundError) as exc:
         typer.echo(f"repl error: {exc}", err=True)
@@ -350,7 +353,7 @@ def repl(
                 hooks=hooks,
             )
             try:
-                await run_repl(loop, sessions, console)
+                await run_repl(loop, sessions, console, user_prompt=user_prompt)
             except KeyboardInterrupt:
                 console.info("[aborted]")
             finally:

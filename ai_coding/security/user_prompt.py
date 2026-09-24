@@ -58,15 +58,26 @@ def _format_prompt(question: str, options: Sequence[str]) -> str:
 
 
 class CLIUserPromptCallback:
-    """Read one line from stdin — inside a thread, so the turn clock still works."""
+    """Read one line from stdin — inside a thread, so the turn clock still works.
+
+    R7c: the reader is swappable.  Inside the REPL the terminal already belongs to
+    a ``prompt_toolkit`` session, and a second reader on the same tty competes with
+    it (measured: a scripted pipe degenerates into ``no_answer``).  ``run_repl``
+    therefore hands its own session's ``prompt`` in through :meth:`set_reader`, so
+    there is exactly one reader per terminal (docs/r7-analysis.md 3.3).
+    """
 
     def __init__(self, input_fn: Callable[[str], str] | None = None) -> None:
-        self._input = input_fn or (lambda prompt: input(prompt))
+        self._read: Callable[[str], str] = input_fn or (lambda prompt: input(prompt))
+
+    def set_reader(self, read: Callable[[str], str]) -> None:
+        """Use ``read`` for the next question (the REPL's ``PromptSession.prompt``)."""
+        self._read = read
 
     async def ask(self, question: str, options: Sequence[str] = ()) -> UserAnswer:
         prompt = _format_prompt(question, options)
         try:
-            raw = await asyncio.to_thread(self._input, prompt)
+            raw = await asyncio.to_thread(self._read, prompt)
         except EOFError:
             return UserAnswer(answered=False, reason="eof")
         except OSError:

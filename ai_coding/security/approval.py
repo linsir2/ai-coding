@@ -7,6 +7,7 @@ so the CLI (or future UI) can prompt the user.
 
 from __future__ import annotations
 
+import asyncio
 import enum
 from collections.abc import Callable
 from typing import Any
@@ -36,6 +37,11 @@ class CLIApprovalCallback(ApprovalCallback):
     """CLI-based approval: prompt on stdin, parse y/n/s.
 
     ``input_fn`` is injectable for testing (replaces ``builtins.input``).
+
+    R7c: the read happens in a worker thread.  A synchronous ``input()`` blocks the
+    event loop *thread*, which means the turn clock cannot fire while a prompt is
+    on screen — measured: a 1.0s turn took 5.00s, and the answer that finally
+    arrived was thrown away (docs/r7-analysis.md 1.3).
     """
 
     def __init__(
@@ -52,7 +58,7 @@ class CLIApprovalCallback(ApprovalCallback):
     ) -> ApprovalResult:
         prompt = self._format_prompt(tool_name, params, reason)
         try:
-            answer = self._input(prompt).strip().lower()
+            answer = (await asyncio.to_thread(self._input, prompt)).strip().lower()
         except (EOFError, OSError):
             return ApprovalResult.NO  # fail-closed
 
