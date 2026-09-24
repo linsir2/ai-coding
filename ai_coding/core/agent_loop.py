@@ -30,31 +30,24 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ai_coding.ai.engine import ChatEngine, EngineError
 from ai_coding.config.models import AIConfig
-from ai_coding.core.budget import BudgetLedger
-from ai_coding.core.context_compression import estimate_tokens
 from ai_coding.core.dispatch import DispatchOutcome, ToolDispatcher
 from ai_coding.core.events import (
     AssistantMessage,
-    ContextAssembled,
-    Degraded,
     IterationStarted,
     LoopEvent,
     LoopObserver,
     MemoryHarvested,
     MemoryInjected,
-    ModelStepFinished,
     NullObserver,
     TaskUpdated,
-    TurnFinished,
 )
 from ai_coding.core.guard import GuardChain, TurnView
 from ai_coding.core.hooks import HookDecision, HookPoint
-from ai_coding.core.trace import canonical_request, digest_of, prefix_shared, short_json
+from ai_coding.core.trace import short_json
 from ai_coding.core.turn_policy import (
     TaskInjection,
     TurnAction,
@@ -62,12 +55,12 @@ from ai_coding.core.turn_policy import (
     TurnPolicyConfig,
     TurnSnapshot,
 )
+from ai_coding.core.turn_report import TurnReporter
 from ai_coding.domain.loop import TurnOutcome, TurnStatus
 from ai_coding.domain.message import ChatMessage, ToolArtifact, ToolOutput
 from ai_coding.domain.run import assistant_message, tool_message, user_message
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
-from ai_coding.domain.usage import cache_from_usage
 from ai_coding.infra.deadline import Deadline, DeadlineExpired, run_with_deadline
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.security.approval import ApprovalCallback
@@ -170,6 +163,9 @@ class AgentLoop:
             guards=guards,
             hooks=hooks,
         )
+        # R5: everything this turn says about itself (events, ledger, degradation)
+        # lives in one unit, so the loop body only has to choreograph.
+        self.reporter = TurnReporter(tools_text=self._tools_text, emit=self._emit)
         self.last_outcome: TurnOutcome | None = None
         self.last_artifacts: list[ToolArtifact] = []
 
@@ -198,6 +194,7 @@ class AgentLoop:
         task = session.task
         # R4b: guard state (duplicate calls, …) is per turn, never per process.
         self.dispatcher.guards.reset()
+        self.reporter.begin_turn(self.observer)
         hook_context = await self._hook_context(session)
 
         policy = self.policy
@@ -211,9 +208,8 @@ class AgentLoop:
         memory_announced = False
         # R4a: the turn's ledger and the previous request's canonical form, which
         # together answer "what did this cost" and "did the prefix move".
-        ledger = BudgetLedger()
+        ledger = self.reporter.ledger
         previous_request: str | None = None
-        observer_failures = self._observer_failure_count()
         outcome = TurnOutcome(
             status=TurnStatus.MAX_ITERATIONS, reason="iteration budget exhausted"
         )
@@ -288,17 +284,13 @@ class AgentLoop:
                     )
                     tail_blocks.append(("hook", len(hook_context)))
                 request = [*history, *tail]
-                self._emit_context_assembled(
-                    ledger,
+                previous_request = self.reporter.report_context(
                     iteration=index,
                     instructions=instructions,
                     history=history,
                     request=request,
                     tail_blocks=tuple(tail_blocks),
                     previous=previous_request,
-                )
-                previous_request = canonical_request(
-                    instructions, request, self._tools_text
                 )
 
                 # The one wait that cannot degrade: a model step either answers or
@@ -316,7 +308,7 @@ class AgentLoop:
                 )
                 latency_ms = int((time.monotonic() - step_started) * 1000)
                 last_text = step.text
-                self._emit_step_finished(ledger, index, step, latency_ms)
+                self.reporter.report_step(index=index, step=step, latency_ms=latency_ms)
                 self._emit(
                     AssistantMessage(text=step.text, tool_calls=tuple(step.tool_calls))
                 )
@@ -379,7 +371,7 @@ class AgentLoop:
                 iterations=iterations,
                 reason="cancelled",
             )
-            self._finalize(session, outcome, ledger, observer_failures)
+            self._finalize(session, outcome)
             raise
         except DeadlineExpired as exc:
             outcome = TurnOutcome(
@@ -399,7 +391,7 @@ class AgentLoop:
                 reason=str(exc),
             )
 
-        self._finalize(session, outcome, ledger, observer_failures)
+        self._finalize(session, outcome)
         await self._harvest(session, deadline, summaries, outcome)
         await self._fire_hooks(HookPoint.TURN_END, session)
         return outcome.text or ""
@@ -453,9 +445,6 @@ class AgentLoop:
 
     # ---- request assembly -------------------------------------------------
 
-    def _observer_failure_count(self) -> int:
-        return getattr(self.observer, "failures", 0) if self.observer else 0
-
     async def _hook_context(self, session: SessionData) -> str:
         """Ask ``turn.start`` hooks whether they want to add anything.
 
@@ -497,60 +486,6 @@ class AgentLoop:
         except Exception:  # noqa: BLE001 — hooks must never break a turn
             _log.debug("hook point %s failed", point.value, exc_info=True)
 
-    def _emit_context_assembled(
-        self,
-        ledger: BudgetLedger,
-        *,
-        iteration: int,
-        instructions: str | None,
-        history: list[ChatMessage],
-        request: list[ChatMessage],
-        tail_blocks: tuple[tuple[str, int], ...],
-        previous: str | None,
-    ) -> None:
-        """Report what this request is made of — counts only, never content."""
-        canonical = canonical_request(instructions, request, self._tools_text)
-        shared_chars, shared_ratio = prefix_shared(previous, canonical)
-        event = ContextAssembled(
-            iteration=iteration,
-            system_chars=len(instructions or ""),
-            tools_chars=self._tools_chars,
-            history_messages=len(history),
-            history_chars=sum(len(message.content or "") for message in history),
-            tail_blocks=tail_blocks,
-            estimated_tokens=estimate_tokens(canonical),
-            prefix_shared_chars=shared_chars,
-            prefix_shared_ratio=shared_ratio,
-            digest=digest_of(canonical),
-        )
-        ledger.record_assembly(event.estimated_tokens, shared_ratio)
-        self._emit(event)
-
-    def _emit_step_finished(
-        self,
-        ledger: BudgetLedger,
-        index: int,
-        step: Any,
-        latency_ms: int,
-    ) -> None:
-        """Report one model step's real cost, and feed the ledger."""
-        cached, cache_write = cache_from_usage(step.usage)
-        self._emit(
-            ModelStepFinished(
-                index=index,
-                finish_reason=step.finish_reason,
-                text_chars=len(step.text or ""),
-                tool_call_count=len(step.tool_calls),
-                usage=step.usage,
-                cached_tokens=cached,
-                cache_write_tokens=cache_write,
-                latency_ms=latency_ms,
-            )
-        )
-        ledger.record_step(
-            step.usage, cached=cached, cache_write=cache_write, latency_ms=latency_ms
-        )
-
     @staticmethod
     def _remaining(deadline: Deadline | None) -> float | None:
         """Seconds left in the turn, or ``None`` when there is no ceiling."""
@@ -585,12 +520,10 @@ class AgentLoop:
             )
         except DeadlineExpired:
             _log.debug("context compression ran out of budget; using the raw history")
-            self._emit(
-                Degraded(
-                    component="context_compress",
-                    reason="compression exceeded its budget",
-                    fallback="used the uncompressed history",
-                )
+            self.reporter.report_degraded(
+                "context_compress",
+                "compression exceeded its budget",
+                "used the uncompressed history",
             )
             return history
 
@@ -620,12 +553,10 @@ class AgentLoop:
             return self.memory.render_index_block(notes), tuple(n.id for n in notes)
         except Exception:  # noqa: BLE001 — memory must never break a turn
             _log.debug("memory index block failed", exc_info=True)
-            self._emit(
-                Degraded(
-                    component="memory_block",
-                    reason="memory index could not be rendered",
-                    fallback="no constraint block was injected",
-                )
+            self.reporter.report_degraded(
+                "memory_block",
+                "memory index could not be rendered",
+                "no constraint block was injected",
             )
             return "", ()
 
@@ -672,26 +603,10 @@ class AgentLoop:
         if len(session.messages) <= limit or index % LONG_SESSION_STRIDE == 0:
             self._save(session)
 
-    def _finalize(
-        self,
-        session: SessionData,
-        outcome: TurnOutcome,
-        ledger: BudgetLedger | None = None,
-        observer_failures: int = 0,
-    ) -> None:
-        if ledger is not None:
-            outcome = replace(outcome, usage=ledger.usage_dict())
+    def _finalize(self, session: SessionData, outcome: TurnOutcome) -> None:
+        """Persist, then close the turn through the reporter (order matters)."""
         self._save(session)
-        if self._observer_failure_count() > observer_failures:
-            self._emit(
-                Degraded(
-                    component="observer",
-                    reason="an observer raised while rendering",
-                    fallback="the turn continued without it",
-                )
-            )
-        self._emit(TurnFinished(outcome=outcome))
-        self.last_outcome = outcome
+        self.last_outcome = self.reporter.finish_turn(outcome, self.observer)
 
     def _save(self, session: SessionData) -> None:
         session.ensure_tool_pairing()
@@ -701,12 +616,10 @@ class AgentLoop:
             # Persistence is best-effort, but a silent failure used to be
             # invisible; R4a at least says so (docs/r4-analysis.md 1.1).
             _log.debug("session save failed", exc_info=True)
-            self._emit(
-                Degraded(
-                    component="persist",
-                    reason="the session file could not be written",
-                    fallback="the transcript stays in memory only",
-                )
+            self.reporter.report_degraded(
+                "persist",
+                "the session file could not be written",
+                "the transcript stays in memory only",
             )
 
     async def _harvest(
@@ -753,12 +666,10 @@ class AgentLoop:
                 )
         except Exception:  # noqa: BLE001 — memory is best-effort, and now visible
             _log.debug("memory harvest failed", exc_info=True)
-            self._emit(
-                Degraded(
-                    component="memory_harvest",
-                    reason="this turn's delta could not be reconciled",
-                    fallback="memory was left unchanged",
-                )
+            self.reporter.report_degraded(
+                "memory_harvest",
+                "this turn's delta could not be reconciled",
+                "memory was left unchanged",
             )
             return
         if outcome.text is None:
@@ -771,12 +682,10 @@ class AgentLoop:
             )
         except Exception:  # noqa: BLE001 — memory is best-effort
             _log.debug("memory consolidation failed", exc_info=True)
-            self._emit(
-                Degraded(
-                    component="memory_consolidate",
-                    reason="index consolidation failed",
-                    fallback="the index was left as it was",
-                )
+            self.reporter.report_degraded(
+                "memory_consolidate",
+                "index consolidation failed",
+                "the index was left as it was",
             )
 
     # ---- events -----------------------------------------------------------
