@@ -7,6 +7,7 @@ from typing import Any
 
 from .message import ChatMessage, ToolCallRef, tool_call_from_ref
 from .task import TaskState
+from .turn_digest import TurnDigest
 
 
 def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
@@ -64,6 +65,12 @@ class SessionData:
     # lives in the session (not in the loop) because the CLI builds a fresh loop
     # for every turn, while the session is reloaded each time.
     harvested_messages: int = 0
+    # R6a: the session-level turn counter (1-based) and the bounded ring of
+    # one-line turn digests the volatile <working-memory> block is rendered from.
+    # The counter exists so `source_turn` and the digest header can say "turn N"
+    # instead of "message count" (docs/r6-analysis.md 2.4).
+    turn_count: int = 0
+    turn_digests: list[TurnDigest] = field(default_factory=list)
 
     def add_message(self, message: ChatMessage) -> None:
         self.messages.append(message)
@@ -112,6 +119,11 @@ class SessionData:
             data["task"] = self.task.to_dict()
         if self.harvested_messages:
             data["harvestedMessages"] = self.harvested_messages
+        # Same rule as `task`: an empty ring is not worth a key in every file.
+        if self.turn_count:
+            data["turnCount"] = int(self.turn_count)
+        if self.turn_digests:
+            data["turnDigests"] = [digest.to_dict() for digest in self.turn_digests]
         return data
 
     @classmethod
@@ -122,6 +134,13 @@ class SessionData:
             if isinstance(m, dict)
         ]
         raw_task = data.get("task")
+        raw_digests = data.get("turnDigests")
+        rows = raw_digests if isinstance(raw_digests, list) else []
+        digests = [
+            digest
+            for digest in (TurnDigest.from_dict(row) for row in rows)
+            if digest is not None
+        ]
         return cls(
             session_id=data.get("sessionId", ""),
             title=data.get("title", ""),
@@ -130,6 +149,8 @@ class SessionData:
             messages=messages,
             task=TaskState.from_dict(raw_task) if isinstance(raw_task, dict) else None,
             harvested_messages=int(data.get("harvestedMessages", 0) or 0),
+            turn_count=int(data.get("turnCount", 0) or 0),
+            turn_digests=digests,
         )
 
 
