@@ -170,3 +170,23 @@ def test_degraded_events_are_recorded_like_any_other(tmp_path):
     line = _lines(recorder)[0]
     assert line["evt"] == "Degraded"
     assert line["data"]["component"] == "memory_block"
+
+
+def test_post_turn_events_do_not_invent_a_new_turn(tmp_path):
+    """Harvest/consolidation arrive after TurnFinished — same turn, same file."""
+    from ai_coding.core.events import MemoryHarvested
+
+    recorder, _ = _recorder(tmp_path)
+    recorder.on_event(IterationStarted(index=1, max_iterations=1))
+    recorder.on_event(TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED)))
+    recorder.on_event(MemoryHarvested(added=("n1",)))
+
+    assert recorder.current_path.name == "turn-1.jsonl"
+    assert [line["evt"] for line in _lines(recorder)] == [
+        "IterationStarted",
+        "TurnFinished",
+        "MemoryHarvested",
+    ]
+    # a real next turn still gets its own file
+    recorder.on_event(IterationStarted(index=1, max_iterations=1))
+    assert recorder.current_path.name == "turn-2.jsonl"

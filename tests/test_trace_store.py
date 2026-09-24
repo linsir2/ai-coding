@@ -109,13 +109,17 @@ def test_canonical_request_covers_system_history_and_tools():
         ChatMessage(role="user", content="hi", timestamp=""),
         ChatMessage(role="assistant", content="there", timestamp=""),
     ]
-    text = canonical_request("SYS", messages, tools_chars=120)
+    schemas = '[{"name":"read"}]'
+    text = canonical_request("SYS", messages, schemas)
     assert "SYS" in text
     assert "hi" in text and "there" in text
-    assert "tools:120" in text
+    # The schema *text* is included, not just its length: schemas are a real part
+    # of the prompt (measured ~5k chars), so a count alone understates the request.
+    assert schemas in text
+    assert len(canonical_request("SYS", messages, "x" * 4000)) > 4000
     # an identical request is byte-identical; changing the system prompt moves it
-    assert text == canonical_request("SYS", messages, tools_chars=120)
-    assert text != canonical_request("SYS2", messages, tools_chars=120)
+    assert text == canonical_request("SYS", messages, schemas)
+    assert text != canonical_request("SYS2", messages, schemas)
 
 
 def test_digest_is_stable_and_short():

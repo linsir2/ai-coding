@@ -151,7 +151,8 @@ class AgentLoop:
         self._tool_schemas = tool_schemas(tools)
         # R4a: the tool schemas are part of every prompt, so their size belongs in
         # the attribution (docs/r4-analysis.md 4.3).
-        self._tools_chars = len(short_json(self._tool_schemas))
+        self._tools_text = short_json(self._tool_schemas)
+        self._tools_chars = len(self._tools_text)
         self.dispatcher = ToolDispatcher(
             tools,
             gate or PermissionGate(),
@@ -265,7 +266,7 @@ class AgentLoop:
                     previous=previous_request,
                 )
                 previous_request = canonical_request(
-                    instructions, request, self._tools_chars
+                    instructions, request, self._tools_text
                 )
 
                 # The one wait that cannot degrade: a model step either answers or
@@ -429,7 +430,7 @@ class AgentLoop:
         previous: str | None,
     ) -> None:
         """Report what this request is made of — counts only, never content."""
-        canonical = canonical_request(instructions, request, self._tools_chars)
+        canonical = canonical_request(instructions, request, self._tools_text)
         shared_chars, shared_ratio = prefix_shared(previous, canonical)
         event = ContextAssembled(
             iteration=iteration,

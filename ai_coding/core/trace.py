@@ -135,15 +135,26 @@ def prefix_shared(previous: str | None, current: str) -> tuple[int, float]:
 def canonical_request(
     instructions: str | None,
     messages: Sequence[ChatMessage],
-    tools_chars: int = 0,
+    tools_text: str = "",
 ) -> str:
     """A stable rendering of what will be sent, for prefix comparison.
 
     Deliberately close to (not identical to) the engine's own mapping: the trace
     only needs a *stable* text so two consecutive requests can be compared, and
     the ratio is reported as an estimate (docs/r4-analysis.md 4.2/4.4).
+
+    ``tools_text`` is the serialised tool schemas, not their length: the schemas
+    are genuinely part of the prompt (measured: ~5k chars for the default stack),
+    so passing only a count made ``estimate_tokens`` understate the request by an
+    order of magnitude (docs/r4-analysis.md 4.3).
     """
-    parts: list[str] = [instructions or ""]
+    # Tools first, then the system prompt, then the conversation: that is the
+    # order the provider renders them in, which is what decides how much of the
+    # request is a stable *prefix*.  Putting the (large, constant) schema text at
+    # the end would make the metric meaningless — measured, it is ~5k chars of a
+    # ~5.2k-char request.
+    parts: list[str] = [f"tools:{tools_text}"]
+    parts.append(instructions or "")
     for message in messages:
         calls = ""
         if message.tool_calls:
@@ -151,7 +162,6 @@ def canonical_request(
         parts.append(
             f"{message.role}:{message.tool_call_id or ''}:{message.content or ''}:{calls}"
         )
-    parts.append(f"tools:{tools_chars}")
     return "\n".join(parts)
 
 
@@ -346,6 +356,10 @@ class TraceRecorder:
         self._writer: TurnWriter | None = None
         # Kept after the turn ends so ``/trace`` still has something to show.
         self.last_path: Path | None = None
+        # ``False`` between ``TurnFinished`` and the next ``IterationStarted``:
+        # that is when post-turn bookkeeping (harvest, consolidation) arrives, and
+        # it belongs to the turn that just ended rather than a new one.
+        self._turn_open = False
         self._iteration = 0
         self._turn_usage = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
         self._turn_steps = 0
@@ -369,15 +383,23 @@ class TraceRecorder:
     # ---- internals ---------------------------------------------------------
 
     def _record(self, event: Any) -> None:
-        if self._writer is None:
-            self.turn += 1
-            self._writer = self.store.begin_turn(self.session_id)
-            self._turn_usage = {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "cached_tokens": 0,
-            }
-            self._turn_steps = 0
+        if not self._turn_open:
+            if isinstance(event, IterationStarted) or self.last_path is None:
+                self.turn += 1
+                self._writer = self.store.begin_turn(self.session_id)
+                self._turn_usage = {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cached_tokens": 0,
+                }
+                self._turn_steps = 0
+                self._turn_open = True
+            else:
+                # Append to the turn that just ended instead of fabricating a new,
+                # near-empty trace file (docs/r4-analysis.md 4.2).
+                self._writer = TurnWriter(
+                    self.last_path, max_bytes=self.store.max_turn_bytes
+                )
 
         name, payload, span, parent, iteration, scope = self._describe(event)
         line: dict[str, Any] = {
@@ -393,8 +415,11 @@ class TraceRecorder:
         }
         if scope:
             line["scope"] = scope
-        if not self._writer.write_line(short_json(line)):
-            if self._writer.truncated:
+        writer = self._writer
+        if writer is None:  # pragma: no cover - _record always opens one
+            return
+        if not writer.write_line(short_json(line)):
+            if writer.truncated:
                 return
             self.failures += 1
             return
@@ -421,7 +446,7 @@ class TraceRecorder:
                 + usage["cached_tokens"],
             },
         )
-        self._writer = None
+        self._turn_open = False
 
     def _accumulate(self, event: Any) -> None:
         inner = event.event if isinstance(event, ScopedEvent) else event
