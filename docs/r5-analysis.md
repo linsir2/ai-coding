@@ -436,7 +436,7 @@ async def process_input(self, session, user_input, on_delta=None, observer=None)
 | 指标 | 拆分前 | 拆分后 |
 |---|---:|---:|
 | 文件行数 | 788 | **654** |
-| `AgentLoop` 类行数 | 约 700 | **467** |
+| `AgentLoop` 类行数 | 约 700 | **463** |
 | `process_input` | 229 | **153** |
 | `__init__` | 60 | 64（多了两个单元的组装） |
 | 方法数 | 22 | 24（多了 `_bind_observer` / `_bind_trace` / `_iteration_decision` / `_model_step` / `_run_tools`） |
