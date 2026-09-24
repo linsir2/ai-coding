@@ -95,3 +95,46 @@ async def test_a_reader_that_hits_eof_still_degrades_to_no_answer():
     answer = await callback.ask("在吗？")
     assert answer.answered is False
     assert answer.reason == "eof"
+
+
+# ---- R7e-2: with a reader, the question goes through it ----------------------
+
+
+@pytest.mark.asyncio
+async def test_a_reader_backed_callback_asks_through_the_reader():
+    from ai_coding.security.user_prompt import UserAnswer
+
+    class _Reader:
+        def __init__(self) -> None:
+            self.asked: list[tuple[str, tuple[str, ...]]] = []
+
+        async def ask(self, question, options=()):
+            self.asked.append((question, tuple(options)))
+            return UserAnswer(answered=True, text="走 reader")
+
+    reader = _Reader()
+    callback = CLIUserPromptCallback()
+    callback.set_interactive(reader)
+    answer = await callback.ask("改 A 还是 B？", ["A", "B"])
+    assert answer.text == "走 reader"
+    assert reader.asked == [("改 A 还是 B？", ("A", "B"))]
+
+
+@pytest.mark.asyncio
+async def test_a_broken_reader_degrades_to_no_answer():
+    class _Reader:
+        async def ask(self, question, options=()):
+            raise RuntimeError("terminal gone")
+
+    callback = CLIUserPromptCallback()
+    callback.set_interactive(_Reader())
+    answer = await callback.ask("在吗？")
+    assert answer.answered is False
+    assert answer.reason == "no_user"
+
+
+@pytest.mark.asyncio
+async def test_without_a_reader_the_input_path_still_works():
+    callback = CLIUserPromptCallback(input_fn=lambda _prompt: "老路径")
+    answer = await callback.ask("在吗？")
+    assert answer.text == "老路径"

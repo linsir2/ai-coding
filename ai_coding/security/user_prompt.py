@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 __all__ = [
     "CLIUserPromptCallback",
@@ -69,12 +69,27 @@ class CLIUserPromptCallback:
 
     def __init__(self, input_fn: Callable[[str], str] | None = None) -> None:
         self._read: Callable[[str], str] = input_fn or (lambda prompt: input(prompt))
+        self._interactive: Any | None = None
 
     def set_reader(self, read: Callable[[str], str]) -> None:
         """Use ``read`` for the next question (the REPL's ``PromptSession.prompt``)."""
         self._read = read
 
+    def set_interactive(self, reader: Any) -> None:
+        """Answer questions through the REPL's reader (R7e-2).
+
+        With a reader present this callback no longer touches stdin itself, which is
+        what keeps "one terminal, one reader" true while a question is on screen -
+        the reader decides whether the next line is an answer or a steering message.
+        """
+        self._interactive = reader
+
     async def ask(self, question: str, options: Sequence[str] = ()) -> UserAnswer:
+        if self._interactive is not None:
+            try:
+                return await self._interactive.ask(question, options)
+            except Exception:  # noqa: BLE001 — the channel must never break a turn
+                return UserAnswer(answered=False, reason="no_user")
         prompt = _format_prompt(question, options)
         try:
             raw = await asyncio.to_thread(self._read, prompt)
