@@ -68,6 +68,29 @@ def config_check(
     enabled = [name for name in ("bash", "read", "write", "edit", "glob")
                if getattr(app_cfg.tools, name).enabled]
     typer.echo(f"tools.enabled: {', '.join(enabled) or 'none'}")
+    # R4: what the observability, guard and hook layers will actually do.
+    tracing = app_cfg.tracing
+    typer.echo(
+        f"tracing: enabled={tracing.enabled} capture={tracing.capture} "
+        f"retention_days={tracing.retention_days}"
+    )
+    guards = app_cfg.guard
+    guard_names = []
+    if guards.duplicate_threshold > 0:
+        guard_names.append(f"duplicate_call({guards.duplicate_threshold})")
+    if guards.bash_deny or guards.bash_confirm:
+        guard_names.append("bash_policy")
+    if guards.strict_paths:
+        guard_names.append("path_escape")
+    if guards.redact_history:
+        guard_names.append("secret(history)")
+    typer.echo(f"guard.active: {', '.join(guard_names) or 'none'}")
+    hooks = app_cfg.hooks
+    typer.echo(
+        f"hooks: enabled={hooks.enabled} "
+        f"events={len(hooks.events)} timeout={hooks.timeout_seconds:g}s"
+    )
+    typer.echo(f"ai.turn_token_budget: {app_cfg.ai.turn_token_budget}")
 
 
 @app.command("ask")
@@ -115,6 +138,7 @@ def ask(
     console = DialogueConsole()
     recorder = _make_recorder(app_cfg, workspace, session)
     guards = _make_guards(app_cfg)
+    hooks = _make_hooks(app_cfg, workspace)
     answer = asyncio.run(
         _run_turn_with_mcp(
             engine=engine,
@@ -129,6 +153,7 @@ def ask(
             observer=_compose_observer(ConsoleObserver(console), recorder),
             trace=recorder,
             guards=guards,
+            hooks=hooks,
         )
     )
     # Answer text was already streamed live via on_delta; only ensure a trailing newline.
@@ -303,6 +328,7 @@ def repl(
             # current when each turn starts, and the store numbers turn files.
             recorder = _make_recorder(app_cfg, workspace, None)
             guards = _make_guards(app_cfg)
+            hooks = _make_hooks(app_cfg, workspace)
             # Interactive REPL: confirm WARN-tier tools (write/edit/bash) with the
             # user via y/N/s prompts, rather than silently blocking them.
             loop = _build_loop(
@@ -316,6 +342,7 @@ def repl(
                 observer=_compose_observer(ConsoleObserver(console), recorder),
                 trace=recorder,
                 guards=guards,
+                hooks=hooks,
             )
             try:
                 await run_repl(loop, sessions, console)
@@ -341,6 +368,7 @@ def _build_loop(
     observer: Any | None = None,
     trace: Any | None = None,
     guards: Any | None = None,
+    hooks: Any | None = None,
 ) -> Any:
     """Assemble the loop and its optional components (silent degradation)."""
     if approval is None:
@@ -406,6 +434,7 @@ def _build_loop(
         workspace=str(ws),
         trace=trace,
         guards=guards,
+        hooks=hooks,
     )
 
 
@@ -488,6 +517,36 @@ def _make_guards(app_cfg: Any) -> Any | None:
     return GuardChain(guards) if guards else None
 
 
+
+def _make_hooks(app_cfg: Any, workspace: str) -> Any | None:
+    """Build the hook group from config, or ``None`` when hooks are off (R4c)."""
+    config = getattr(app_cfg, "hooks", None)
+    if config is None or not getattr(config, "enabled", False):
+        return None
+    from ai_coding.core.hooks import (
+        CommandHookRunner,
+        HookRunnerGroup,
+        PythonHookRunner,
+        specs_from_config,
+    )
+
+    specs = specs_from_config(config)
+    if not specs:
+        return None
+    timeout = float(getattr(config, "timeout_seconds", 10.0) or 10.0)
+    plugin_dir = getattr(config, "plugin_dir", "") or str(
+        Path(workspace).expanduser().resolve() / ".ai-coding" / "hooks"
+    )
+    runners: list[Any] = []
+    if any(spec.kind == "command" for spec in specs):
+        runners.append(
+            CommandHookRunner(specs, workspace=workspace, timeout_seconds=timeout)
+        )
+    if any(spec.kind == "python" for spec in specs):
+        runners.append(PythonHookRunner(specs, plugin_dir=plugin_dir, workspace=workspace))
+    return HookRunnerGroup(runners) if runners else None
+
+
 def _compose_observer(base: Any, recorder: Any) -> Any:
     """Braid the UI observer with the trace recorder (either may be absent)."""
     if recorder is None:
@@ -512,6 +571,7 @@ async def _run_turn_with_mcp(
     observer: Any | None = None,
     trace: Any | None = None,
     guards: Any | None = None,
+    hooks: Any | None = None,
 ) -> str:
     """Run one turn with MCP tools registered, then release everything."""
     manager = MCPManager(app_cfg.mcp)
@@ -529,6 +589,7 @@ async def _run_turn_with_mcp(
             observer=observer,
             trace=trace,
             guards=guards,
+            hooks=hooks,
         )
         try:
             return str(await loop.process_input(session, prompt, on_delta=on_delta))
