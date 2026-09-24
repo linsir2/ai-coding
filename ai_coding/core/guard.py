@@ -22,7 +22,7 @@ import json
 import re
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from ai_coding.domain.message import ToolCall, ToolResult
@@ -36,6 +36,7 @@ __all__ = [
     "GuardDecision",
     "GuardVerdict",
     "PathEscapeGuard",
+    "SecretGuard",
     "TurnView",
     "call_fingerprint",
 ]
@@ -210,6 +211,41 @@ class BashPolicyGuard:
 
 
 _TOKEN_SPLIT = re.compile(r"[\s;|&]+")
+
+
+class SecretGuard:
+    """Keep high-confidence secrets out of what the model reads (post-pass).
+
+    Always active for traces (that is the recorder's business, see
+    ``core.trace.Redactor``); rewriting the *history* changes what the model sees,
+    so it is opt-in (docs/r4-analysis.md 5.2, D-R4-8).
+    """
+
+    name = "secret"
+
+    def __init__(self, redact_history: bool = False, redactor: Any | None = None) -> None:
+        from ai_coding.core.trace import Redactor
+
+        self.redact_history = redact_history
+        self._redactor = redactor if redactor is not None else Redactor()
+
+    def check(
+        self, call: ToolCall, ctx: ToolContext, view: TurnView
+    ) -> GuardDecision:
+        del call, ctx, view
+        return GuardDecision(GuardVerdict.ALLOW)
+
+    def after(
+        self,
+        call: ToolCall,
+        result: ToolResult,
+        ctx: ToolContext,
+        view: TurnView,
+    ) -> ToolResult:
+        del call, ctx, view
+        if not self.redact_history:
+            return result
+        return replace(result, output=self._redactor.redact(result.output))
 
 
 def _escaped_paths(command: str, workspace: str) -> list[str]:

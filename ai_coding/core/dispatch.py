@@ -37,6 +37,7 @@ from ai_coding.core.events import (
     ToolStarted,
     preview,
 )
+from ai_coding.core.guard import GuardChain, GuardVerdict, TurnView
 from ai_coding.domain.message import ToolCall, ToolCallRef, ToolResult, tool_call_from_ref
 from ai_coding.infra.deadline import Deadline, DeadlineExpired, run_with_deadline
 from ai_coding.security.approval import ApprovalCallback, ApprovalResult
@@ -108,12 +109,16 @@ class ToolDispatcher:
         *,
         max_parallel: int = 4,
         observer: LoopObserver | None = None,
+        guards: GuardChain | None = None,
     ) -> None:
         self.registry = registry
         self.gate = gate
         self.approval = approval
         self.max_parallel = max(1, int(max_parallel))
         self.observer: LoopObserver = observer or NullObserver()
+        # R4b: stateful policy that runs *after* the static gate and before the
+        # user is bothered (docs/r4-analysis.md 3.2).
+        self.guards = guards if guards is not None else GuardChain([])
 
     # ---- public API -------------------------------------------------------
 
@@ -124,6 +129,7 @@ class ToolDispatcher:
         *,
         deadline: Deadline | None = None,
         iteration: int = 0,
+        view: TurnView | None = None,
     ) -> list[DispatchOutcome]:
         """Run ``calls`` and return one outcome per call, in the given order."""
         if not calls:
@@ -138,7 +144,7 @@ class ToolDispatcher:
 
             async def run(item: _Prepared) -> DispatchOutcome:
                 async with semaphore:
-                    return await self._handle(item, ctx, deadline)
+                    return await self._handle(item, ctx, deadline, view)
 
             return list(await asyncio.gather(*(run(item) for item in prepared)))
 
@@ -152,7 +158,7 @@ class ToolDispatcher:
                     )
                 )
                 continue
-            outcome = await self._handle(item, ctx, deadline)
+            outcome = await self._handle(item, ctx, deadline, view)
             outcomes.append(outcome)
             halted = outcome.halted
         return outcomes
@@ -181,6 +187,7 @@ class ToolDispatcher:
         item: _Prepared,
         ctx: ToolContext,
         deadline: Deadline | None = None,
+        view: TurnView | None = None,
     ) -> DispatchOutcome:
         call = item.call
         # R4a: one context per *call*, so the execution can identify itself even
@@ -196,7 +203,7 @@ class ToolDispatcher:
         )
         started = time.monotonic()
 
-        result, denied, halted = await self._decide(item, ctx, deadline)
+        result, denied, halted = await self._decide(item, ctx, deadline, view)
 
         self.observer.on_event(
             ToolFinished(
@@ -216,6 +223,7 @@ class ToolDispatcher:
         item: _Prepared,
         ctx: ToolContext,
         deadline: Deadline | None = None,
+        view: TurnView | None = None,
     ) -> tuple[ToolResult, bool, bool]:
         """Return ``(result, denied, halted)`` for one prepared call."""
         call = item.call
@@ -229,6 +237,25 @@ class ToolDispatcher:
         if verdict is PermissionDecision.DENY:
             return self._denied(call, reason), True, False
 
+        # ---- A3/A5: guards, and a rewritten call must pass the gate again ----
+        turn_view = view if view is not None else TurnView()
+        guard_decision = self.guards.check(call, ctx, turn_view)
+        rewritten_from: dict[str, Any] | None = None
+        if guard_decision.verdict is GuardVerdict.DENY:
+            return self._guard_denied(call, guard_decision), True, False
+        if guard_decision.verdict is GuardVerdict.REWRITE:
+            rewritten_from = dict(call.params)
+            call = replace(call, params=dict(guard_decision.params or {}))
+            item = replace(item, call=call, tool=item.tool)
+            recheck = self.gate.check(call.name, call.params)
+            if _verdict(recheck) is PermissionDecision.DENY:
+                # A rewrite must never be a way around the static gate.
+                return self._denied(call, _reason(recheck), rewritten=True), True, False
+            if self.approval is None and _verdict(recheck) is PermissionDecision.WARN:
+                # The rewritten form is *more* sensitive than the original; without
+                # anyone to ask, refuse rather than silently run it.
+                return self._not_approved(call, "rewritten call needs approval"), True, False
+
         if verdict is PermissionDecision.WARN:
             if self.approval is None:
                 return self._not_approved(call, "no approval callback"), True, False
@@ -238,7 +265,14 @@ class ToolDispatcher:
             if not approved:
                 return self._not_approved(call, "user declined"), True, False
 
-        return await self._execute(item.tool, call, ctx, deadline), False, False
+        tool = item.tool
+        if tool is None:  # pragma: no cover - guarded above
+            return self._unknown(call), True, False
+        result = await self._execute(tool, call, ctx, deadline)
+        if rewritten_from is not None:
+            result = self._annotate_rewrite(result, rewritten_from, guard_decision.guard)
+        result = self.guards.after(call, result, ctx, turn_view)
+        return result, False, False
 
     async def _ask(self, call: ToolCall, reason: str) -> tuple[bool, bool]:
         """Prompt the user.  Returns ``(approved, stopped)``; never raises."""
@@ -301,13 +335,53 @@ class ToolDispatcher:
         )
 
     @staticmethod
-    def _denied(call: ToolCall, reason: str) -> ToolResult:
+    def _denied(call: ToolCall, reason: str, *, rewritten: bool = False) -> ToolResult:
         detail = f": {reason}" if reason else ""
+        prefix = "the rewritten call " if rewritten else ""
         return ToolResult(
             success=False,
-            output=f"error: denied by permission gate{detail}",
+            output=f"error: {prefix}denied by permission gate{detail}",
             error="denied",
-            data={"decision": "deny", "reason": reason, "tool": call.name},
+            data={
+                "decision": "deny",
+                "reason": reason,
+                "tool": call.name,
+                "rewritten": rewritten,
+            },
+        )
+
+    @staticmethod
+    def _guard_denied(call: ToolCall, decision: Any) -> ToolResult:
+        """A guard refused this call (R4b); the reason is meant for the model."""
+        return ToolResult(
+            success=False,
+            output=f"error: refused by runtime guard '{decision.guard}': {decision.reason}",
+            error="guard_denied",
+            data={
+                "decision": "deny",
+                "reason": decision.reason,
+                "guard": decision.guard,
+                "tool": call.name,
+            },
+        )
+
+    @staticmethod
+    def _annotate_rewrite(
+        result: ToolResult, original: dict[str, Any], guard: str
+    ) -> ToolResult:
+        """Say, in the result, that the arguments changed before execution.
+
+        The persisted assistant message keeps the model's original call (that is
+        what it asked for); without this note the transcript would read
+        "requested X, got Y" with no explanation (docs/r4-analysis.md 5.3).
+        """
+        data = dict(result.data) if isinstance(result.data, dict) else {}
+        data["rewritten_from"] = original
+        data["rewritten_by"] = f"guard:{guard}" if guard else "guard"
+        return replace(
+            result,
+            output=f"{result.output}\nnote: parameters were adjusted before execution",
+            data=data,
         )
 
     @staticmethod
