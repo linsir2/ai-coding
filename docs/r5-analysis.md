@@ -369,15 +369,24 @@ async def process_input(self, session, user_input, on_delta=None, observer=None)
 
 ## 7. 成功之后是什么样
 
-| 指标 | 今天 | 目标 |
-|---|---:|---:|
-| `agent_loop.py` 行数 | 788 | **≤ 360** |
-| `process_input` 行数 | 229 | **≤ 130** |
-| 「上报降级」实现份数 | 3 | **1** |
-| 「压缩包 deadline」实现份数 | 2 | **1**（`Compactor`） |
-| 「易失尾部块」组装位置 | `process_input` 内联 30 行 | `build_tail`，一处、有测试 |
-| 模块 docstring | 过期（R1 形状） | 与实现一致 |
-| 可单独测试的新单元 | —— | 4 个文件、约 30 条契约测试 |
+实际数字（AST 精确统计，见 §11 收尾核验）：
+
+| 指标 | 拆分前 | 目标 | **实际** |
+|---|---:|---:|---:|
+| `agent_loop.py` 行数 | 788 | ≤ 360 | **641** |
+| `process_input` 行数 | 229 | ≤ 130 | **153** |
+| 「上报降级」实现份数 | 3 | 1 | **1**（只有 `turn_report` 构造 `Degraded`） |
+| 「压缩包 deadline」实现份数 | 2 | 1 | **1**（`Compactor`） |
+| 「易失尾部块」组装位置 | 内联 30 行 | `build_tail` | **`build_tail`，有测试** |
+| 模块 docstring | 过期 | 与实现一致 | **已重写** |
+| 可单独测试的新单元 | —— | 4 个文件 | **4 个文件 / 40 条契约测试** |
+
+**两个目标没达到，原因如实说明**：文件仍有 641 行、`process_input` 仍有 153 行。
+`process_input` 剩下的部分是**迭代本身、模型步调用、工具分发、持久化、异常映射与收尾**——
+按 §2.2 的边界这些**必须留在循环里**（把它们搬走就是把循环藏起来）。
+`≤360 / ≤130` 是拆分前拍脑袋估的，没有实测支撑；按同样的边界继续压缩只能靠隐藏代码，
+所以不追这个数字。真正改善的是：**每一段都有名字**（`_iteration_decision` / `_model_step` /
+`_run_tools` / `_bind_trace` …），且四块独立逻辑各自有了单元与测试。
 
 ---
 
@@ -417,3 +426,37 @@ async def process_input(self, session, user_input, on_delta=None, observer=None)
 | `r4-analysis.md` | R4 往这个文件里加了观测/门卫/钩子接线，是本次膨胀的直接原因；本次把「接线」收回到专门的单元 |
 | `architecture.md` | 拆完后模块职责表要补四个新单元 |
 | `r4-plan.md` | 同一种「文件结构先行、按提交切分、每步可验收」的写法 |
+
+---
+
+## 11. 收尾核验（实际执行的结果）
+
+### 11.1 数字（AST 精确统计 `ai_coding/core/agent_loop.py`）
+
+| 指标 | 拆分前 | 拆分后 |
+|---|---:|---:|
+| 文件行数 | 788 | **641** |
+| `AgentLoop` 类行数 | 约 700 | **463** |
+| `process_input` | 229 | **153** |
+| `__init__` | 60 | 64（多了两个单元的组装） |
+| 方法数 | 22 | 24（多了 `_bind_observer` / `_bind_trace` / `_iteration_decision` / `_model_step` / `_run_tools`） |
+
+新单元：`turn_report.py`（`TurnReporter` + `report_degraded`）、`memory_turn.py`（`TurnMemory`）、
+`compaction.py`（`Compactor`）、`request_builder.py`（`TailBlock` / `build_tail` / `tool_context`）。
+
+### 11.2 行为不变性证据
+
+| 证据 | 结果 |
+|---|---|
+| 既有 766 例 | **全绿，且没有改动任何既有断言** |
+| 新增契约测试 | 40 条（`test_turn_reporter` 15 / `test_memory_turn` 13 / `test_compaction` 8 / `test_request_builder` 6）→ 合计 **808 passed / 1 skipped** |
+| `ruff` / `mypy strict` | 0 / 0（84 文件） |
+| `scripts/trace_cases.py` | 6/6 |
+| **真实 LLM 对照** | 同一 prompt（读取 `sample.txt`）的事件序列**逐项一致**：`IterationStarted, ContextAssembled, ModelStepFinished, AssistantMessage, ToolStarted, ToolFinished, IterationStarted, ContextAssembled, ModelStepFinished, AssistantMessage, TurnFinished, MemoryHarvested` |
+| 真实用量对照 | 拆分前 `tools_chars=4995 / est=1326→1369 / prefix=0.951 / prompt=3375`；拆分后**完全相同**（completion 104 vs 100，属模型自身抖动） |
+
+### 11.3 已知未达成项（如实记录）
+
+1. `≤360 行` / `≤130 行` 两个目标是**拍脑袋估的**，实际是 641 / 153。剩余部分按 §2.2 的边界必须留在循环里。
+2. `__init__` 从 60 涨到 64（多了两个单元的组装）——D-R5-3 决定不瘦身构造 API，这个数字是它的代价。
+3. 四个新单元的 docstring 与注释占了它们约一半的行数；如果只看代码行，新增逻辑其实很少（这是一次搬运）。

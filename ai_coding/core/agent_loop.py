@@ -1,27 +1,40 @@
-"""The self-owned ReAct loop (R1a-4).
+"""The self-owned ReAct loop (R1a-4, re-shaped in R5).
 
 The loop is *ours*: it drives the iteration, decides when a turn is over, gates
 the stop on the task list, executes tools through the dispatcher, and checkpoints
 the session between iterations.  The engine only ever performs one model call.
 
-Turn shape::
+R5 kept that shape and gave its parts names.  The loop body is still four moves,
+but each one is a step you can point at:
 
-    append user message
-    task = session.task or TaskState(goal=user_input)
-    for index in 1..max_tool_iterations:
-        compact       = context.compress(session.messages)   # a copy, never written back
-        instructions  = prompt.build(project, skills, memory)
-        request       = compact + volatile <task-state> block
-        step          = engine.step(request, tools, instructions, on_delta)
-        append assistant
-        no tool calls -> stop policy (todo gate) or finish
-        tool calls    -> dispatcher.dispatch_batch(...) -> append tool messages -> checkpoint
+    bind observer / trace, append the user message, reset guard state
+    for each iteration:
+        ask        -> _iteration_decision(): another round, given round/clock/spend?
+        assemble   -> Compactor.compress() + _build_instructions()
+                      + TurnMemory.block() + build_tail()          (the volatile tail)
+                      + TurnReporter.report_context()
+        model      -> _model_step(): one step, timed and reported
+        act        -> _run_tools(): dispatch, write back, checkpoint
+        (no tool calls) -> TurnPolicy.decide_after_step(): finish, or nudge
+        close      -> _finalize() + TurnMemory.harvest() + turn.end hooks
 
-Two things are deliberately asymmetric (docs/r1a-4-analysis.md D1):
-the ``<task-state>`` block is **volatile** (regenerated every request, never
-persisted), while the ``[task-gate]`` nudge is **persisted** — it is a real
-instruction that changed the model's behaviour, so replaying the transcript
-without it would break the conversation's meaning.
+Four things are deliberately asymmetric, and the R5 notes say why:
+
+* the ``<task-state>``/memory/hook blocks are **volatile** (regenerated every
+  request, never persisted) while the ``[task-gate]`` nudge is **persisted** — it
+  is a real instruction that changed the model's behaviour, so replaying the
+  transcript without it would break the conversation's meaning
+  (docs/r1a-4-analysis.md D1);
+* memory, compaction, tracing and hooks are **best-effort**: they degrade and
+  *say so* (a ``Degraded`` event) rather than ending a turn, while a model-call
+  failure does end it (docs/r2-analysis.md 7.3);
+* observation is **write-only** — it never changes a request, a message or a
+  decision (docs/r4-analysis.md P1);
+* the volatile tail is the *only* region allowed to differ between iterations,
+  which is what keeps the provider's prefix cache alive (docs/r3-analysis.md 1.13).
+
+What stayed here on purpose: the iteration, the model call, tool dispatch and
+persistence.  A loop you cannot read is not "ours" any more (docs/r5-analysis.md 2.2).
 """
 
 from __future__ import annotations
@@ -34,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 
 from ai_coding.ai.engine import ChatEngine, EngineError
 from ai_coding.config.models import AIConfig
+from ai_coding.core.compaction import Compactor
 from ai_coding.core.dispatch import DispatchOutcome, ToolDispatcher
 from ai_coding.core.events import (
     AssistantMessage,
@@ -47,16 +61,18 @@ from ai_coding.core.events import (
 from ai_coding.core.guard import GuardChain, TurnView
 from ai_coding.core.hooks import HookDecision, HookPoint
 from ai_coding.core.memory_turn import TurnMemory
+from ai_coding.core.request_builder import TailBlock, build_tail, tool_context
 from ai_coding.core.trace import short_json
 from ai_coding.core.turn_policy import (
     TaskInjection,
     TurnAction,
+    TurnDecision,
     TurnPolicy,
     TurnPolicyConfig,
     TurnSnapshot,
 )
 from ai_coding.core.turn_report import TurnReporter
-from ai_coding.domain.loop import TurnOutcome, TurnStatus
+from ai_coding.domain.loop import StepResult, TurnOutcome, TurnStatus
 from ai_coding.domain.message import ChatMessage, ToolArtifact, ToolOutput
 from ai_coding.domain.run import assistant_message, tool_message, user_message
 from ai_coding.domain.session import SessionData
@@ -71,7 +87,6 @@ from ai_coding.infra.time_utils import now_utc
 from ai_coding.security.approval import ApprovalCallback
 from ai_coding.security.permission_gate import PermissionGate
 from ai_coding.service.session_service import SessionService
-from ai_coding.tools.base import ToolContext
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.schema import tool_schemas
 
@@ -108,6 +123,67 @@ class _SafeObserver:
         except Exception:  # noqa: BLE001 — UI failures must not kill the turn
             self.failures += 1
             _log.debug("loop observer failed on %s", type(event).__name__, exc_info=True)
+
+
+def _terminal_outcome(
+    decision: TurnDecision, *, budget_expired: bool, last_text: str | None, iterations: int
+) -> TurnOutcome:
+    """Translate "stop, but why" into the turn's terminal state (R2/R4b)."""
+    if budget_expired:
+        status = TurnStatus.TIMEOUT
+    elif decision.reason == "turn token budget exhausted":
+        status = TurnStatus.BUDGET
+    else:
+        status = TurnStatus.MAX_ITERATIONS
+    return TurnOutcome(
+        status=status, text=last_text, iterations=iterations, reason=decision.reason
+    )
+
+
+def _stopped_outcome(last_text: str | None, iterations: int) -> TurnOutcome:
+    """The approval callback asked to stop; the turn ends where it stood."""
+    return TurnOutcome(
+        status=TurnStatus.STOPPED,
+        text=last_text,
+        iterations=iterations,
+        reason="user stopped the turn",
+    )
+
+
+def _aborted_outcome(last_text: str | None, iterations: int) -> TurnOutcome:
+    """The user interrupted the turn; the partial work is still worth keeping."""
+    return TurnOutcome(
+        status=TurnStatus.ABORTED, text=last_text, iterations=iterations, reason="cancelled"
+    )
+
+
+def _failed_outcome(
+    error: Exception, *, last_text: str | None, iterations: int
+) -> TurnOutcome:
+    """A deadline or an engine failure — the two states that end a turn early."""
+    if isinstance(error, DeadlineExpired):
+        reason = (
+            f"turn deadline exceeded: {error.label} was abandoned after "
+            f"{error.timeout:g}s"
+        )
+        return TurnOutcome(
+            status=TurnStatus.TIMEOUT, text=last_text, iterations=iterations, reason=reason
+        )
+    return TurnOutcome(
+        status=TurnStatus.ERROR, text=None, iterations=iterations, reason=str(error)
+    )
+
+
+def _volatile(name: str, text: str | None) -> TailBlock | None:
+    """A tail block, or ``None`` when there is nothing to inject."""
+    if not text:
+        return None
+    return TailBlock(name=name, message=ChatMessage(role="user", content=text, timestamp=""))
+
+
+def _content_of(message: ChatMessage | None) -> str | None:
+    """The text of an optional injected message (``None`` when there is none)."""
+    return message.content if message is not None else None
 
 
 class AgentLoop:
@@ -173,6 +249,8 @@ class AgentLoop:
         self.reporter = TurnReporter(tools_text=self._tools_text, emit=self._emit)
         # R5: the memory-facing half of a turn (block / harvest / status).
         self.turn_memory = TurnMemory(memory, emit=self._emit, save=self._save)
+        # R5: history compaction (budget-driven for turns, forced for /compact).
+        self.compactor = Compactor(context, emit=self._emit)
         self.last_outcome: TurnOutcome | None = None
         self.last_artifacts: list[ToolArtifact] = []
 
@@ -186,14 +264,8 @@ class AgentLoop:
         observer: LoopObserver | None = None,
     ) -> str:
         """Run one user turn to completion and return the final assistant text."""
-        if observer is not None:
-            self.observer = _SafeObserver(observer)
-            self.dispatcher.observer = self.observer
-        if self.trace is not None:
-            self.trace.session_id = session.session_id
-            # R4a: full capture reads the session (the only place full text lives).
-            self.trace.attach_session(session, start=len(session.messages))
-
+        self._bind_observer(observer)
+        self._bind_trace(session)
         session.add_message(user_message(user_input, now_utc()))
         self.last_artifacts = []
         if session.task is None:
@@ -226,100 +298,64 @@ class AgentLoop:
             while True:
                 index += 1
                 budget_expired = deadline is not None and deadline.expired
-                decision = policy.decide_next_iteration(
-                    TurnSnapshot(
-                        iteration=index,
-                        nudges=nudges,
-                        tokens_spent=ledger.totals.total_tokens,
-                    ),
-                    budget_expired=budget_expired,
+                decision = self._iteration_decision(
+                    index=index, nudges=nudges, ledger=ledger, budget_expired=budget_expired
                 )
                 if decision.action is TurnAction.FINISH:
-                    expired = budget_expired or decision.reason == (
-                        "turn token budget exhausted"
-                    )
-                    status = (
-                        TurnStatus.TIMEOUT
-                        if budget_expired
-                        else TurnStatus.BUDGET
-                        if expired
-                        else TurnStatus.MAX_ITERATIONS
-                    )
-                    outcome = TurnOutcome(
-                        status=status,
-                        text=last_text,
+                    outcome = _terminal_outcome(
+                        decision,
+                        budget_expired=budget_expired,
+                        last_text=last_text,
                         iterations=iterations,
-                        reason=decision.reason,
                     )
                     break
 
                 iterations = index
                 self._emit(IterationStarted(index=index, max_iterations=max_iterations))
 
-                history = session.messages
-                if self.context is not None:
-                    history = await self._compress(
-                        history, deadline, on_summary=summaries.append
-                    )
+                history = await self.compactor.compress(
+                    session.messages, deadline=deadline, on_summary=summaries.append
+                )
                 instructions = await self._build_instructions(history, deadline)
                 injection: TaskInjection = policy.inject_task(task, instructions)
                 instructions = injection.instructions
                 # Memory and task state are *volatile tail blocks*: the system
                 # prompt stays byte-identical and the history stays append-only, so
                 # only this small region diverges between turns (docs/r2 §1.13).
-                tail: list[ChatMessage] = []
-                tail_blocks: list[tuple[str, int]] = []
                 memory_block, memory_ids = self.turn_memory.block()
-                if memory_block:
-                    tail.append(
-                        ChatMessage(role="user", content=memory_block, timestamp="")
+                if memory_block and not memory_announced:
+                    self._emit(
+                        MemoryInjected(note_ids=memory_ids, chars=len(memory_block))
                     )
-                    tail_blocks.append(("memory", len(memory_block)))
-                    if not memory_announced:
-                        self._emit(
-                            MemoryInjected(
-                                note_ids=memory_ids, chars=len(memory_block)
-                            )
-                        )
-                        memory_announced = True
-                if injection.message is not None:
-                    tail.append(injection.message)
-                    tail_blocks.append(("task", len(injection.message.content or "")))
-                if hook_context:
-                    tail.append(
-                        ChatMessage(role="user", content=hook_context, timestamp="")
-                    )
-                    tail_blocks.append(("hook", len(hook_context)))
+                    memory_announced = True
+                tail, tail_blocks = build_tail(
+                    [
+                        _volatile("memory", memory_block),
+                        _volatile("task", _content_of(injection.message)),
+                        _volatile("hook", hook_context),
+                    ]
+                )
                 request = [*history, *tail]
                 previous_request = self.reporter.report_context(
                     iteration=index,
                     instructions=instructions,
                     history=history,
                     request=request,
-                    tail_blocks=tuple(tail_blocks),
+                    tail_blocks=tail_blocks,
                     previous=previous_request,
                 )
 
                 # The one wait that cannot degrade: a model step either answers or
                 # the turn ends (docs/r2-analysis.md §7.3).
-                step_started = time.monotonic()
-                step = await run_with_deadline(
-                    self.engine.step(
-                        request,
-                        tools=self._tool_schemas,
-                        instructions=instructions,
-                        on_delta=on_delta,
-                    ),
-                    timeout=self._remaining(deadline),
-                    label="model_step",
+                step = await self._model_step(
+                    session=session,
+                    request=request,
+                    instructions=instructions,
+                    deadline=deadline,
+                    on_delta=on_delta,
+                    index=index,
                 )
-                latency_ms = int((time.monotonic() - step_started) * 1000)
                 last_text = step.text
-                self.reporter.report_step(index=index, step=step, latency_ms=latency_ms)
-                self._emit(
-                    AssistantMessage(text=step.text, tool_calls=tuple(step.tool_calls))
-                )
-                session.add_message(assistant_message(step, now_utc()))
 
                 if not step.tool_calls:
                     decision = policy.decide_after_step(
@@ -345,58 +381,27 @@ class AgentLoop:
                     self._checkpoint(session, index)
                     continue
 
-                outcomes = await self.dispatcher.dispatch_batch(
-                    step.tool_calls,
-                    self._tool_context(session, task, history, instructions),
+                struck = await self._run_tools(
+                    step,
+                    session=session,
+                    task=task,
+                    history=history,
+                    instructions=instructions,
                     deadline=deadline,
-                    iteration=index,
-                    view=TurnView(
-                        iteration=index,
-                        tokens_spent=ledger.totals.total_tokens,
-                        task_open=len(task.open_items()),
-                    ),
+                    index=index,
                 )
-                self._write_tool_messages(session, outcomes)
-                if any(item.call.name == "todo_write" for item in outcomes):
-                    self._emit(TaskUpdated(task=task))
-                self._checkpoint(session, index)
-
-                if any(item.halted for item in outcomes):
-                    outcome = TurnOutcome(
-                        status=TurnStatus.STOPPED,
-                        text=step.text,
-                        iterations=index,
-                        reason="user stopped the turn",
-                    )
+                if struck:
+                    outcome = _stopped_outcome(step.text, index)
                     break
         except asyncio.CancelledError:
             # Record what happened, persist the partial transcript, then let the
             # cancellation propagate — swallowing it is an asyncio anti-pattern.
-            outcome = TurnOutcome(
-                status=TurnStatus.ABORTED,
-                text=last_text,
-                iterations=iterations,
-                reason="cancelled",
+            self._finalize(
+                session, _aborted_outcome(last_text, iterations)
             )
-            self._finalize(session, outcome)
             raise
-        except DeadlineExpired as exc:
-            outcome = TurnOutcome(
-                status=TurnStatus.TIMEOUT,
-                text=last_text,
-                iterations=iterations,
-                reason=(
-                    f"turn deadline exceeded: {exc.label} was abandoned after "
-                    f"{exc.timeout:g}s"
-                ),
-            )
-        except EngineError as exc:
-            outcome = TurnOutcome(
-                status=TurnStatus.ERROR,
-                text=None,
-                iterations=iterations,
-                reason=str(exc),
-            )
+        except (DeadlineExpired, EngineError) as exc:
+            outcome = _failed_outcome(exc, last_text=last_text, iterations=iterations)
 
         self._finalize(session, outcome)
         await self.turn_memory.harvest(
@@ -404,6 +409,110 @@ class AgentLoop:
         )
         await self._fire_hooks(HookPoint.TURN_END, session)
         return outcome.text or ""
+
+    def _bind_observer(self, observer: LoopObserver | None) -> None:
+        """Honour a per-call observer (the REPL swaps the UI between turns)."""
+        if observer is not None:
+            self.observer = _SafeObserver(observer)
+            self.dispatcher.observer = self.observer
+
+    def _bind_trace(self, session: SessionData) -> None:
+        """Point the trace at the current session (full capture reads it)."""
+        if self.trace is None:
+            return
+        self.trace.session_id = session.session_id
+        self.trace.attach_session(session, start=len(session.messages))
+
+    def _iteration_decision(
+        self,
+        *,
+        index: int,
+        nudges: int,
+        ledger: Any,
+        budget_expired: bool,
+    ) -> TurnDecision:
+        """May this iteration start, given the round, the clock and the spend?"""
+        return self.policy.decide_next_iteration(
+            TurnSnapshot(
+                iteration=index,
+                nudges=nudges,
+                tokens_spent=ledger.totals.total_tokens,
+            ),
+            budget_expired=budget_expired,
+        )
+
+    async def _run_tools(
+        self,
+        step: StepResult,
+        *,
+        session: SessionData,
+        task: TaskState,
+        history: list[ChatMessage],
+        instructions: str | None,
+        deadline: Deadline | None,
+        index: int,
+    ) -> bool:
+        """Run this step's tool calls; return whether the user stopped the turn.
+
+        Dispatch, write-back, the todo event and the mid-turn checkpoint all
+        happen here, so the loop body reads as the ReAct cycle it is.
+        """
+        outcomes = await self.dispatcher.dispatch_batch(
+            step.tool_calls,
+            tool_context(
+                task=task,
+                workspace=self.workspace,
+                session=session,
+                history=history,
+                instructions=instructions,
+                emit=self._emit,
+            ),
+            deadline=deadline,
+            iteration=index,
+            view=TurnView(
+                iteration=index,
+                tokens_spent=self.reporter.tokens_spent(),
+                task_open=len(task.open_items()),
+            ),
+        )
+        self._write_tool_messages(session, outcomes)
+        if any(item.call.name == "todo_write" for item in outcomes):
+            self._emit(TaskUpdated(task=task))
+        self._checkpoint(session, index)
+        return any(item.halted for item in outcomes)
+
+    async def _model_step(
+        self,
+        *,
+        session: SessionData,
+        request: list[ChatMessage],
+        instructions: str | None,
+        deadline: Deadline | None,
+        on_delta: DeltaSink | None,
+        index: int,
+    ) -> StepResult:
+        """One model call — the only wait that cannot degrade (docs/r2 §7.3).
+
+        It is timed, reported and appended here so the loop body reads as
+        "decide → ask → act" without the bookkeeping in between.
+        """
+        started = time.monotonic()
+        step = await run_with_deadline(
+            self.engine.step(
+                request,
+                tools=self._tool_schemas,
+                instructions=instructions,
+                on_delta=on_delta,
+            ),
+            timeout=self._remaining(deadline),
+            label="model_step",
+        )
+        self.reporter.report_step(
+            index=index, step=step, latency_ms=int((time.monotonic() - started) * 1000)
+        )
+        self._emit(AssistantMessage(text=step.text, tool_calls=tuple(step.tool_calls)))
+        session.add_message(assistant_message(step, now_utc()))
+        return step
 
     async def aclose(self) -> None:
         """Release engine resources (the loop owns nothing else)."""
@@ -418,34 +527,14 @@ class AgentLoop:
 
         Normal turns only compact when the budget demands it (R3b); this is the
         explicit user request, so it forces one page and **replaces** the stored
-        history with the compacted view — L3 persisted outputs, the session file
-        and memory remain as the safety nets.
+        history — L3 persisted outputs, the session file and memory remain as the
+        safety nets (docs/r5-analysis.md 3.3).
         """
-        before = len(session.messages)
-        report = {"messages": before, "after": before, "removed": 0}
-        if self.context is None or before == 0:
-            return report
-        compact = getattr(self.context, "compress_if_needed", None)
         budget = float(getattr(self.settings, "turn_timeout_seconds", 0.0) or 60.0)
-        try:
-            if compact is not None:
-                result = await run_with_deadline(
-                    compact(list(session.messages), force=True),
-                    timeout=budget if budget > 0 else 60.0,
-                    label="compact",
-                )
-            else:
-                result = await run_with_deadline(
-                    self.context.compress(list(session.messages)),
-                    timeout=budget if budget > 0 else 60.0,
-                    label="compact",
-                )
-        except (DeadlineExpired, Exception):  # noqa: BLE001 — never break the REPL
-            return report
-        session.messages = list(result)
-        self._save(session)
-        after = len(session.messages)
-        return {"messages": before, "after": after, "removed": before - after}
+        report = await self.compactor.compact_now(session, timeout=budget)
+        if report["after"] != report["messages"]:
+            self._save(session)
+        return report
 
     # ---- request assembly -------------------------------------------------
 
@@ -495,40 +584,6 @@ class AgentLoop:
         """Seconds left in the turn, or ``None`` when there is no ceiling."""
         return remaining_of(deadline)
 
-    async def _compress(
-        self,
-        history: list[ChatMessage],
-        deadline: Deadline | None = None,
-        *,
-        on_summary: Callable[[str], None] | None = None,
-    ) -> list[ChatMessage]:
-        """Compact only when the budget says so; degrade to the raw history."""
-        if self.context is None:
-            return history
-        # ``compress_if_needed`` is the R3b policy layer; older injected context
-        # objects only implement ``compress`` (duck-typed, keeps them working).
-        compact = getattr(self.context, "compress_if_needed", None)
-        try:
-            if compact is not None:
-                return await run_with_deadline(
-                    compact(history, on_summary=on_summary),
-                    timeout=self._remaining(deadline),
-                    label="context_compress",
-                )
-            return await run_with_deadline(
-                self.context.compress(history),
-                timeout=self._remaining(deadline),
-                label="context_compress",
-            )
-        except DeadlineExpired:
-            _log.debug("context compression ran out of budget; using the raw history")
-            self.reporter.report_degraded(
-                "context_compress",
-                "compression exceeded its budget",
-                "used the uncompressed history",
-            )
-            return history
-
     async def _build_instructions(
         self, history: list[ChatMessage], deadline: Deadline | None = None
     ) -> str | None:
@@ -543,22 +598,6 @@ class AgentLoop:
         )
 
     # ---- memory -----------------------------------------------------------
-
-    def _tool_context(
-        self,
-        session: SessionData,
-        task: TaskState,
-        history: list[ChatMessage],
-        instructions: str | None,
-    ) -> ToolContext:
-        return ToolContext(
-            task=task,
-            workspace=self.workspace,
-            session_id=session.session_id,
-            messages=tuple(history),
-            instructions=instructions,
-            emit=self._emit,
-        )
 
     # ---- persistence ------------------------------------------------------
 

@@ -23,7 +23,6 @@ from ai_coding.infra.deadline import (
     run_with_deadline,
 )
 
-
 # ---- R5: the "how long is left" helper had two copies -----------------------
 
 

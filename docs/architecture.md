@@ -38,7 +38,7 @@ ai_coding/
 | `security` | 失败关闭的安全层 | `Sandbox`、`PermissionGate`、`ApprovalCallback`、`FileStateTracker` |
 | `tools` | 工具契约、实现、注册表、schema | `BaseTool`、`ToolContext`、`ToolRegistry`、`build_tool_registry` |
 | `ai` | 引擎端口 + 实现 + 映射 + 提示装配 | `ChatEngine`、`OpenAIChatEngine`、`PromptAssembler` |
-| `core` | 编排与增强 | `AgentLoop`、`ToolDispatcher`、`ContextManager`、`MCPManager`、`SubAgentRunner` |
+| `core` | 编排与增强 | `AgentLoop`、`ToolDispatcher`、`ContextManager`、`MCPManager`、`SubAgentRunner`；R5 起另有 `TurnReporter`（对外陈述）、`TurnMemory`（记忆侧）、`Compactor`（压缩）、`request_builder`（易失尾部） |
 | `service` | 会话读写（原子） | `SessionService` |
 | `memory` | 记忆三层操作与持久化 | `MemoryService`、`MemoryStore` |
 | `skills` | 技能目录扫描与目录文本 | `SkillRegistry` |
