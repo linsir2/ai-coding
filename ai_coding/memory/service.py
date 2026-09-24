@@ -56,6 +56,13 @@ __all__ = [
 _PROMOTE_HITS = 3
 _OPEN_THREAD_TTL_DAYS = 30.0
 
+# The always-on block's own wrapper.  `index_max_chars` bounds the *rendered* block
+# (that is what the model pays for), so the tags come out of the budget before any
+# note does — R6e's regression test caught the bug where they did not.
+_INDEX_OPEN = "<memory-constraints>"
+_INDEX_CLOSE = "</memory-constraints>"
+_INDEX_OVERHEAD = len(_INDEX_OPEN) + len(_INDEX_CLOSE) + 1
+
 
 def _default_config(**overrides: Any) -> SimpleNamespace:
     base: dict[str, Any] = {
@@ -198,6 +205,7 @@ class MemoryService:
         budget = (
             int(self._get("index_max_chars", 600)) if max_chars is None else int(max_chars)
         )
+        budget -= _INDEX_OVERHEAD
         if budget <= 0:
             return []
         selected = [
@@ -231,7 +239,7 @@ class MemoryService:
         if not notes:
             return ""
         lines = [f"- [{note.kind.value}#{note.id[:8]}] {note.text}" for note in notes]
-        return "<memory-constraints>\n" + "\n".join(lines) + "\n</memory-constraints>"
+        return "\n".join([_INDEX_OPEN, *lines, _INDEX_CLOSE])
 
     # ---- harvest ----------------------------------------------------------
 

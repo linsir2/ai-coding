@@ -230,10 +230,20 @@ async def case_8_decision_survives(root: Path) -> tuple[bool, str]:
     session = loop.sessions.create()
     for index in range(13):
         await loop.process_input(session, f"闲聊第{index}轮")
-    tail = "\n".join(engine.requests[-1]["messages"][-2:])
+    # R6a added a fourth volatile tail block (the digest ring), so the constraint
+    # block is no longer the second-to-last message.  Assert the invariant instead of
+    # the position: the decision is *injected into every request* and never becomes
+    # part of the stored transcript.
+    request_text = "\n".join(engine.requests[-1]["messages"])
+    stored = "\n".join(message.content or "" for message in session.messages)
     junk = store.count
-    ok = "retry 封装" in tail and junk <= 5
-    return ok, f"决策在尾部约束块中={'retry 封装' in tail} 记忆条数={junk}（旧实现是 100 条垃圾）"
+    injected = "retry 封装" in request_text
+    ok = injected and "retry 封装" not in stored and junk <= 5
+    return (
+        ok,
+        f"决策注入每轮请求={injected} 未进transcript={'retry 封装' not in stored} "
+        f"记忆条数={junk}（旧实现是 100 条垃圾）",
+    )
 
 
 async def case_9_relevance_wins(root: Path) -> tuple[bool, str]:
