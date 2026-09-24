@@ -114,6 +114,7 @@ def ask(
 
     console = DialogueConsole()
     recorder = _make_recorder(app_cfg, workspace, session)
+    guards = _make_guards(app_cfg)
     answer = asyncio.run(
         _run_turn_with_mcp(
             engine=engine,
@@ -127,6 +128,7 @@ def ask(
             skills_path=skills,
             observer=_compose_observer(ConsoleObserver(console), recorder),
             trace=recorder,
+            guards=guards,
         )
     )
     # Answer text was already streamed live via on_delta; only ensure a trailing newline.
@@ -300,6 +302,7 @@ def repl(
             # One recorder for the whole REPL: it re-binds to whichever session is
             # current when each turn starts, and the store numbers turn files.
             recorder = _make_recorder(app_cfg, workspace, None)
+            guards = _make_guards(app_cfg)
             # Interactive REPL: confirm WARN-tier tools (write/edit/bash) with the
             # user via y/N/s prompts, rather than silently blocking them.
             loop = _build_loop(
@@ -312,6 +315,7 @@ def repl(
                 approval=CLIApprovalCallback(),
                 observer=_compose_observer(ConsoleObserver(console), recorder),
                 trace=recorder,
+                guards=guards,
             )
             try:
                 await run_repl(loop, sessions, console)
@@ -336,6 +340,7 @@ def _build_loop(
     approval: Any | None = None,
     observer: Any | None = None,
     trace: Any | None = None,
+    guards: Any | None = None,
 ) -> Any:
     """Assemble the loop and its optional components (silent degradation)."""
     if approval is None:
@@ -400,6 +405,7 @@ def _build_loop(
         observer=observer,
         workspace=str(ws),
         trace=trace,
+        guards=guards,
     )
 
 
@@ -449,6 +455,39 @@ def _make_recorder(app_cfg: Any, workspace: str, session: Any) -> Any | None:
     return recorder
 
 
+def _make_guards(app_cfg: Any) -> Any | None:
+    """Build the guard chain from config, or ``None`` when nothing is enabled.
+
+    The duplicate-call guard is on by default: repeated identical calls are a
+    failure mode with no upside, and its threshold leaves one deliberate retry
+    (docs/r4-analysis.md 5.2).
+    """
+    guard_cfg = getattr(app_cfg, "guard", None)
+    if guard_cfg is None:
+        return None
+    from ai_coding.core.guard import (
+        BashPolicyGuard,
+        DuplicateCallGuard,
+        GuardChain,
+        PathEscapeGuard,
+        SecretGuard,
+    )
+
+    guards: list[Any] = []
+    threshold = int(getattr(guard_cfg, "duplicate_threshold", 2) or 0)
+    if threshold > 0:
+        guards.append(DuplicateCallGuard(threshold=threshold))
+    deny = list(getattr(guard_cfg, "bash_deny", []) or [])
+    confirm = list(getattr(guard_cfg, "bash_confirm", []) or [])
+    if deny or confirm:
+        guards.append(BashPolicyGuard(deny=deny, confirm=confirm))
+    if bool(getattr(guard_cfg, "strict_paths", False)):
+        guards.append(PathEscapeGuard(strict=True))
+    if bool(getattr(guard_cfg, "redact_history", False)):
+        guards.append(SecretGuard(redact_history=True))
+    return GuardChain(guards) if guards else None
+
+
 def _compose_observer(base: Any, recorder: Any) -> Any:
     """Braid the UI observer with the trace recorder (either may be absent)."""
     if recorder is None:
@@ -472,6 +511,7 @@ async def _run_turn_with_mcp(
     approval: Any | None = None,
     observer: Any | None = None,
     trace: Any | None = None,
+    guards: Any | None = None,
 ) -> str:
     """Run one turn with MCP tools registered, then release everything."""
     manager = MCPManager(app_cfg.mcp)
@@ -488,6 +528,7 @@ async def _run_turn_with_mcp(
             approval=approval,
             observer=observer,
             trace=trace,
+            guards=guards,
         )
         try:
             return str(await loop.process_input(session, prompt, on_delta=on_delta))

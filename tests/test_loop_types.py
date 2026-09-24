@@ -25,10 +25,13 @@ def test_step_result_carries_tool_calls():
 
 def test_turn_status_members():
     # R2a added "timeout": the turn watchdog needs a terminal state of its own.
+    # R4b added "budget": running out of the turn's token ceiling is not the same
+    # event as running out of time or iterations (docs/r4-analysis.md 5.4).
     assert {s.value for s in TurnStatus} == {
         "completed",
         "max_iterations",
         "timeout",
+        "budget",
         "stopped",
         "aborted",
         "error",

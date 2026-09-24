@@ -47,6 +47,9 @@ _STATUS_MAP: dict[str, str] = {
     "completed": "completed",
     "max_iterations": "max_iterations",
     "timeout": "timeout",
+    # R4b: running out of token budget is partial work, like running out of
+    # iterations — not a failure.  Omitting it would read as "error".
+    "budget": "max_iterations",
     "stopped": "error",
     "aborted": "error",
     "error": "error",

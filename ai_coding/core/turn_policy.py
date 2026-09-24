@@ -53,6 +53,9 @@ class TurnPolicyConfig:
     stop_policy: str = "todo_aware"  # natural | todo_aware | strict
     max_todo_nudges: int = 2
     task_injection: str = "message"  # message | system
+    # R4b: cumulative tokens one turn may spend (0 = no ceiling).  It counts the
+    # re-sent context of every step, so it is a spend cap, not a window size.
+    max_turn_tokens: int = 0
 
     @classmethod
     def from_ai_config(cls, settings: Any) -> TurnPolicyConfig:
@@ -62,6 +65,7 @@ class TurnPolicyConfig:
             stop_policy=str(getattr(settings, "stop_policy", "todo_aware")),
             max_todo_nudges=int(getattr(settings, "max_todo_nudges", 2)),
             task_injection=str(getattr(settings, "task_injection", "message")),
+            max_turn_tokens=int(getattr(settings, "turn_token_budget", 0) or 0),
         )
 
 
@@ -90,6 +94,7 @@ class TurnSnapshot:
     nudges: int = 0
     open_items: tuple[TodoItem, ...] = ()
     final_text: str | None = None
+    tokens_spent: int = 0  # R4b: what this turn has spent so far
 
 
 @dataclass(frozen=True)
@@ -116,6 +121,11 @@ class TurnPolicy:
             return TurnDecision(TurnAction.FINISH, "turn deadline exceeded")
         if snapshot.iteration > self.config.max_iterations:
             return TurnDecision(TurnAction.FINISH, "iteration budget exhausted")
+        if (
+            self.config.max_turn_tokens
+            and snapshot.tokens_spent >= self.config.max_turn_tokens
+        ):
+            return TurnDecision(TurnAction.FINISH, "turn token budget exhausted")
         return TurnDecision(TurnAction.ITERATE, "within budget")
 
     # ---- stopping ----------------------------------------------------------

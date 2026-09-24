@@ -19,6 +19,7 @@ class TurnStatus(enum.Enum):
     COMPLETED = "completed"  # model stopped and (if todo_aware) no open items
     MAX_ITERATIONS = "max_iterations"  # iteration budget exhausted
     TIMEOUT = "timeout"  # the wall-clock turn deadline cut the turn short (R2a)
+    BUDGET = "budget"  # the turn's token ceiling was reached (R4b)
     STOPPED = "stopped"  # approval callback asked to stop
     ABORTED = "aborted"  # user interrupted (CancelledError)
     ERROR = "error"  # engine failed

@@ -52,6 +52,7 @@ from ai_coding.core.events import (
     TaskUpdated,
     TurnFinished,
 )
+from ai_coding.core.guard import GuardChain, TurnView
 from ai_coding.core.trace import canonical_request, digest_of, prefix_shared, short_json
 from ai_coding.core.turn_policy import (
     TaskInjection,
@@ -130,6 +131,7 @@ class AgentLoop:
         observer: LoopObserver | None = None,
         workspace: str = ".",
         trace: Any | None = None,
+        guards: GuardChain | None = None,
     ) -> None:
         self.engine = engine
         self.sessions = sessions
@@ -159,6 +161,7 @@ class AgentLoop:
             approval,
             max_parallel=self.settings.max_concurrent_tools,
             observer=self.observer,
+            guards=guards,
         )
         self.last_outcome: TurnOutcome | None = None
         self.last_artifacts: list[ToolArtifact] = []
@@ -184,6 +187,8 @@ class AgentLoop:
         if session.task is None:
             session.task = TaskState(goal=user_input)
         task = session.task
+        # R4b: guard state (duplicate calls, …) is per turn, never per process.
+        self.dispatcher.guards.reset()
 
         policy = self.policy
         max_iterations = policy.config.max_iterations
@@ -209,14 +214,26 @@ class AgentLoop:
                 index += 1
                 budget_expired = deadline is not None and deadline.expired
                 decision = policy.decide_next_iteration(
-                    TurnSnapshot(iteration=index, nudges=nudges),
+                    TurnSnapshot(
+                        iteration=index,
+                        nudges=nudges,
+                        tokens_spent=ledger.totals.total_tokens,
+                    ),
                     budget_expired=budget_expired,
                 )
                 if decision.action is TurnAction.FINISH:
+                    expired = budget_expired or decision.reason == (
+                        "turn token budget exhausted"
+                    )
+                    status = (
+                        TurnStatus.TIMEOUT
+                        if budget_expired
+                        else TurnStatus.BUDGET
+                        if expired
+                        else TurnStatus.MAX_ITERATIONS
+                    )
                     outcome = TurnOutcome(
-                        status=(
-                            TurnStatus.TIMEOUT if budget_expired else TurnStatus.MAX_ITERATIONS
-                        ),
+                        status=status,
                         text=last_text,
                         iterations=iterations,
                         reason=decision.reason,
@@ -319,6 +336,11 @@ class AgentLoop:
                     self._tool_context(session, task, history, instructions),
                     deadline=deadline,
                     iteration=index,
+                    view=TurnView(
+                        iteration=index,
+                        tokens_spent=ledger.totals.total_tokens,
+                        task_open=len(task.open_items()),
+                    ),
                 )
                 self._write_tool_messages(session, outcomes)
                 if any(item.call.name == "todo_write" for item in outcomes):
