@@ -8,10 +8,11 @@ object, so the move is a move and not a rewrite (docs/r7-analysis.md 3.1).
 """
 
 from ai_coding.core.dispatch import DispatchOutcome
-from ai_coding.core.turn_books import TurnBooks
+from ai_coding.core.turn_books import TurnBooks, TurnFrame
 from ai_coding.core.turn_policy import TurnSnapshot
 from ai_coding.domain.message import ToolCall, ToolResult
-from ai_coding.domain.task import TodoItem
+from ai_coding.domain.task import TaskState, TodoItem
+from ai_coding.infra.deadline import Deadline
 
 
 def _outcome(
@@ -177,3 +178,26 @@ def test_snapshot_passes_open_items_and_final_text_through():
     )
     assert snapshot.open_items == (item,)
     assert snapshot.final_text == "做完了"
+
+
+# ------------------------------------------------------------------- frames
+
+
+def test_a_frame_defaults_to_no_hook_context_and_no_deadline():
+    frame = TurnFrame(turn_number=1, task=TaskState(goal="做点事"))
+    assert frame.hook_context == ""
+    assert frame.deadline is None
+
+
+def test_a_frame_carries_the_clock_the_prologue_fixed():
+    deadline = Deadline.after(30)
+    frame = TurnFrame(
+        turn_number=2,
+        task=TaskState(goal="做点事"),
+        hook_context="<hook-context>x",
+        deadline=deadline,
+    )
+    assert frame.turn_number == 2
+    assert frame.hook_context == "<hook-context>x"
+    assert frame.deadline is deadline
+    assert frame.deadline.expired is False

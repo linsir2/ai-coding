@@ -7,8 +7,15 @@ The loop's body used to carry nine loose locals — ``iterations``, ``nudges``,
 the tool calls are going) and that is exactly why the method grew back after R5
 had split it: every new behaviour had to reach into the same local scope.
 
-This unit is pure: no IO, no asyncio, no events.  The loop notifies it
-(``note_*``) and asks it for the one object a decision needs (``snapshot``); the
+Two values shape a turn, and they are deliberately different things:
+
+* :class:`TurnFrame` is what the **prologue fixed** — the turn number, the task
+  list, what ``turn.start`` hooks injected, the turn clock.  Nothing in an
+  iteration may change it;
+* :class:`TurnBooks` is what the **iterations counted** — the nine counters.
+
+Both are pure: no IO, no asyncio, no events.  The loop notifies the books
+(``note_*``) and asks them for the one object a decision needs (``snapshot``); the
 rules stay table-testable in ``tests/test_turn_books.py``.
 
 The accounting rules are the ones R6 measured and argued for, moved verbatim:
@@ -26,14 +33,27 @@ from dataclasses import dataclass, field
 
 from ai_coding.core.dispatch import DispatchOutcome
 from ai_coding.core.turn_policy import TurnSnapshot
-from ai_coding.domain.task import TodoItem
+from ai_coding.domain.task import TaskState, TodoItem
+from ai_coding.infra.deadline import Deadline
 
-__all__ = ["Failure", "TurnBooks"]
+__all__ = ["Failure", "TurnBooks", "TurnFrame"]
 
 #: One failed call, as the handoff reports it: (tool, error, output excerpt).
 Failure = tuple[str, str, str]
 
 _FAILURE_EXCERPT = 160
+
+
+@dataclass(frozen=True)
+class TurnFrame:
+    """What one turn is, before its first iteration (R7a)."""
+
+    turn_number: int
+    task: TaskState
+    #: What ``turn.start`` hooks injected (a volatile tail block; never persisted).
+    hook_context: str = ""
+    #: The turn clock, or ``None`` when the configuration sets no ceiling.
+    deadline: Deadline | None = None
 
 
 @dataclass
@@ -58,6 +78,9 @@ class TurnBooks:
     last_text: str | None = None
     #: Summaries the compactor produced this turn (for the harvest to look at).
     summaries: list[str] = field(default_factory=list)
+    #: Whether the tail's memory block has been reported this turn (R3 emits one
+    #: ``MemoryInjected`` per turn, not one per iteration).
+    memory_announced: bool = False
 
     # ---- notifications ----------------------------------------------------
 

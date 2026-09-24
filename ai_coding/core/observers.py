@@ -10,8 +10,11 @@ without touching a single call site:
 * :class:`ScopedObserver` is handed to a *nested* run (a sub-agent) so its events
   arrive in the parent's stream wrapped in :class:`ScopedEvent`, carrying the
   parentage needed to rebuild the execution tree (§4.6).
+* :class:`SafeObserver` wraps the *one* observer a turn talks to and swallows its
+  failures, counting them so the turn can still say "a renderer broke"
+  (docs/r4-analysis.md 1.1).
 
-Both are deliberately dumb: no filtering, no sampling, no mutation.
+All three are deliberately dumb: no filtering, no sampling, no mutation.
 """
 
 from __future__ import annotations
@@ -20,9 +23,32 @@ import logging
 
 from ai_coding.core.events import LoopEvent, LoopObserver, ScopedEvent
 
-__all__ = ["Braid", "ScopedObserver"]
+__all__ = ["Braid", "SafeObserver", "ScopedObserver"]
 
 _log = logging.getLogger(__name__)
+
+
+class SafeObserver:
+    """Wraps an observer so a UI failure can never break a turn.
+
+    Rendering is a best-effort side channel: if it explodes we log and carry on,
+    and the failure count is what makes the turn report a ``Degraded`` for it
+    (docs/r1a-4-analysis.md §8 核验⑤).  R7a moved this here from the loop — it is
+    an observer adapter, not part of the iteration.
+    """
+
+    def __init__(self, inner: LoopObserver) -> None:
+        self._inner = inner
+        # R4a: a renderer that keeps failing is still worth reporting once per
+        # turn, instead of vanishing into a debug log (docs/r4-analysis.md 1.1).
+        self.failures = 0
+
+    def on_event(self, event: LoopEvent) -> None:
+        try:
+            self._inner.on_event(event)
+        except Exception:  # noqa: BLE001 — UI failures must not kill the turn
+            self.failures += 1
+            _log.debug("loop observer failed on %s", type(event).__name__, exc_info=True)
 
 
 class Braid:
