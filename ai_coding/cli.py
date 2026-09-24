@@ -302,6 +302,7 @@ def repl(
 ) -> None:
     """Start an interactive REPL session (slash commands: /help /status /clear /quit)."""
     from ai_coding.security.approval import CLIApprovalCallback
+    from ai_coding.security.user_prompt import CLIUserPromptCallback
     from ai_coding.service.session_service import SessionService
     from ai_coding.ui.console import ConsoleObserver, DialogueConsole
     from ai_coding.ui.repl import run_repl
@@ -311,7 +312,10 @@ def repl(
         manager.initialize(path)
         app_cfg = manager.app
         engine = build_engine_from_config(app_cfg)
-        registry = _build_tool_registry(app_cfg, workspace, skills)
+        # Interactive: the model may ask a question (R6c) and a human can answer it.
+        registry = _build_tool_registry(
+            app_cfg, workspace, skills, user_prompt=CLIUserPromptCallback()
+        )
     except (ValueError, FileNotFoundError) as exc:
         typer.echo(f"repl error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -616,17 +620,24 @@ def _llm_helpers_for(service: Any) -> tuple[Any, Any]:
 
 
 def _build_tool_registry(
-    app_cfg: Any, workspace: str, skills_path: str | None
+    app_cfg: Any,
+    workspace: str,
+    skills_path: str | None,
+    *,
+    user_prompt: Any | None = None,
 ) -> Any:
     """Build the domain tool registry the self-owned loop dispatches through.
 
     Permission and approval are *not* part of the registry: they belong to the
     ``ToolDispatcher`` the loop creates.
+
+    ``user_prompt`` (R6c) is the channel ``ask_user`` would use; only an interactive
+    entry point has one, so ``ask`` leaves it ``None`` and the tool is not registered.
     """
     from ai_coding.tools.builder import build_tool_registry
 
     return build_tool_registry(
-        app_cfg, workspace, skills_path, include_subagent=True
+        app_cfg, workspace, skills_path, include_subagent=True, user_prompt=user_prompt
     )
 
 

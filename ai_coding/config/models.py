@@ -25,6 +25,12 @@ class ToolsConfig(BaseModel):
     write: ToolConfig = Field(default_factory=ToolConfig)
     edit: ToolConfig = Field(default_factory=ToolConfig)
     glob: ToolConfig = Field(default_factory=ToolConfig)
+    # R6c: the model asking a human.  `timeout_seconds` is how long it may wait for
+    # an answer (the tool adds 15s of slack for the dispatcher, like bash/subAgent).
+    # Only registered where somebody can actually answer — see tools/builder.py.
+    ask_user: ToolConfig = Field(
+        default_factory=lambda: ToolConfig(timeout_seconds=300)
+    )
 
 
 class AIConfig(BaseModel):

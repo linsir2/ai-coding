@@ -57,13 +57,20 @@ def build_tool_registry(
     skills_path: str | None = None,
     *,
     include_subagent: bool = True,
+    user_prompt: Any | None = None,
 ) -> Any:
     """Build the *domain* tool registry used by the self-owned loop (R1a-4).
 
     The registry holds tools only: the permission gate and the approval callback
     belong to the ``ToolDispatcher``, which the loop builds.
+
+    R6c: ``user_prompt`` is the channel ``ask_user`` would use.  A sub-agent stack
+    (``include_subagent=False``) never gets it: delegating to an isolated worktree
+    means there is nobody to ask, so the tool list must not pretend otherwise.
     """
-    registry, _gate = _assemble_registry(app_cfg, workspace, skills_path, include_subagent)
+    registry, _gate = _assemble_registry(
+        app_cfg, workspace, skills_path, include_subagent, user_prompt
+    )
     return registry
 
 
@@ -72,6 +79,7 @@ def _assemble_registry(
     workspace: str,
     skills_path: str | None,
     include_subagent: bool,
+    user_prompt: Any | None = None,
 ) -> tuple[Any, Any]:
     """Create the sandbox/gate/registry triple shared by both builders."""
 
@@ -112,6 +120,24 @@ def _assemble_registry(
 
     if skills_path and Path(skills_path).is_dir():
         registry.register(SkillTool(skills_path))
+
+    # R6c: only where a human can answer — and never inside a sub-agent.  The tools
+    # config is duck-typed (tests pass namespaces), so a missing block means "not
+    # configured", not an error.
+    ask_user_cfg = getattr(tools_cfg, "ask_user", None)
+    if (
+        include_subagent
+        and user_prompt is not None
+        and bool(getattr(ask_user_cfg, "enabled", False))
+    ):
+        from ai_coding.tools.ask_user_tool import AskUserTool
+
+        registry.register(
+            AskUserTool(
+                user_prompt,
+                timeout_seconds=float(getattr(ask_user_cfg, "timeout_seconds", 300)),
+            )
+        )
 
     if include_subagent:
         # Real sub-agent delegation, isolated in a git worktree when enabled.
