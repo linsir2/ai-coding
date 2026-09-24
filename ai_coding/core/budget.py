@@ -19,65 +19,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from ai_coding.domain.usage import as_int as _as_int
+from ai_coding.domain.usage import cache_from_usage
+
 __all__ = [
     "BudgetLedger",
     "Pricing",
     "UsageTotals",
     "cache_from_usage",
 ]
-
-
-def _as_int(value: Any) -> int | None:
-    """Best-effort int, treating ``None``/garbage as absent (R2 hit ``null``s)."""
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _nested(usage: Mapping[str, Any], key: str, inner: str) -> Any:
-    detail = usage.get(key)
-    if isinstance(detail, Mapping):
-        return detail.get(inner)
-    return None
-
-
-def cache_from_usage(
-    usage: Mapping[str, Any] | None,
-) -> tuple[int | None, int | None]:
-    """Return ``(cached_tokens, cache_write_tokens)``, or ``(None, None)``.
-
-    Known shapes:
-
-    * ours / flat — ``cached_tokens``, ``cache_write_tokens``
-    * OpenAI — ``prompt_tokens_details.cached_tokens``
-    * Anthropic — ``cache_read_input_tokens`` / ``cache_creation_input_tokens``
-    * DeepSeek — ``prompt_cache_hit_tokens`` / ``prompt_cache_miss_tokens``
-
-    Anything else is unknown, and unknown means ``None``.
-    """
-    if not isinstance(usage, Mapping):
-        return None, None
-
-    cached = _as_int(usage.get("cached_tokens"))
-    if cached is None:
-        cached = _as_int(usage.get("cache_read_input_tokens"))
-    if cached is None:
-        cached = _as_int(usage.get("prompt_cache_hit_tokens"))
-    if cached is None:
-        cached = _as_int(_nested(usage, "prompt_tokens_details", "cached_tokens"))
-    if cached is None:
-        cached = _as_int(_nested(usage, "input_tokens_details", "cached_tokens"))
-
-    written = _as_int(usage.get("cache_write_tokens"))
-    if written is None:
-        written = _as_int(usage.get("cache_creation_input_tokens"))
-
-    return cached, written
 
 
 @dataclass(frozen=True)

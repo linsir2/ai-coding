@@ -161,6 +161,70 @@ async def test_step_tolerates_missing_usage():
     assert result.usage is None
 
 
+# ---- R4a: prompt-cache details must survive the engine boundary ------------
+
+
+def _usage_chunk_with_cache(**usage_fields):
+    return SimpleNamespace(
+        choices=[],
+        usage=SimpleNamespace(**usage_fields),
+    )
+
+
+@pytest.mark.asyncio
+async def test_step_carries_openai_prompt_cache_details():
+    chunk = _usage_chunk_with_cache(
+        prompt_tokens=100,
+        completion_tokens=5,
+        total_tokens=105,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=80),
+    )
+    engine, _ = _engine([_text_chunk("x", finish_reason="stop"), chunk])
+
+    result = await engine.step([_user()], tools=[])
+
+    assert result.usage is not None
+    assert result.usage["cached_tokens"] == 80
+    assert result.usage["prompt_tokens"] == 100
+
+
+@pytest.mark.asyncio
+async def test_step_carries_anthropic_cache_read_and_creation():
+    chunk = _usage_chunk_with_cache(
+        prompt_tokens=100,
+        completion_tokens=5,
+        total_tokens=105,
+        cache_read_input_tokens=60,
+        cache_creation_input_tokens=25,
+    )
+    engine, _ = _engine([_text_chunk("x", finish_reason="stop"), chunk])
+
+    result = await engine.step([_user()], tools=[])
+
+    assert result.usage is not None
+    assert result.usage["cached_tokens"] == 60
+    assert result.usage["cache_write_tokens"] == 25
+
+
+@pytest.mark.asyncio
+async def test_step_omits_cache_keys_when_the_endpoint_reports_none():
+    chunk = _usage_chunk_with_cache(
+        prompt_tokens=100,
+        completion_tokens=5,
+        total_tokens=105,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=None),
+    )
+    engine, _ = _engine([_text_chunk("x", finish_reason="stop"), chunk])
+
+    result = await engine.step([_user()], tools=[])
+
+    assert result.usage == {
+        "prompt_tokens": 100,
+        "completion_tokens": 5,
+        "total_tokens": 105,
+    }
+
+
 @pytest.mark.asyncio
 async def test_step_returns_none_text_when_only_tool_calls():
     chunks = [_text_chunk(None, tool_calls=[_tc_delta(0, id="c1", name="read")])]

@@ -20,16 +20,79 @@ from ai_coding.ai.toolcalls import finalize_tool_calls, merge_tool_call_delta
 from ai_coding.domain.loop import StepResult
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.model_config import ModelConfig
+from ai_coding.domain.usage import as_int, cache_from_usage
 
 
 def _usage_to_dict(usage: Any) -> dict[str, int]:
-    """Normalize an SDK usage object into a plain dict (missing keys omitted)."""
+    """Normalize an SDK usage object into a plain flat dict.
+
+    Missing keys are omitted.  R4a adds the prompt-cache figures: a trace is only
+    allowed to claim "the prefix hit the cache" using the provider's own numbers,
+    so whatever the endpoint reports has to survive this boundary
+    (docs/r4-analysis.md 4.4).
+    """
     out: dict[str, int] = {}
     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
         value = getattr(usage, key, None)
         if isinstance(value, int):
             out[key] = value
+    raw = _usage_mapping(usage)
+    cached, written = cache_from_usage(raw)
+    if cached is not None:
+        out["cached_tokens"] = cached
+    if written is not None:
+        out["cache_write_tokens"] = written
     return out
+
+
+def _usage_mapping(usage: Any) -> dict[str, Any]:
+    """Best-effort view of a vendor usage object as a mapping.
+
+    SDKs hand back pydantic models, and the cache figures hide in nested details,
+    so the nested containers are flattened one level before normalisation.
+    """
+    data: dict[str, Any] = {}
+    for key in (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "cache_write_tokens",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "prompt_cache_hit_tokens",
+        "prompt_cache_miss_tokens",
+    ):
+        value = getattr(usage, key, None)
+        if value is not None:
+            data[key] = value
+    for key, inner in (
+        ("prompt_tokens_details", "cached_tokens"),
+        ("input_tokens_details", "cached_tokens"),
+    ):
+        detail = getattr(usage, key, None)
+        inner_value = getattr(detail, inner, None) if detail is not None else None
+        as_int_value = as_int(inner_value)
+        if as_int_value is not None:
+            data.setdefault("cached_tokens", as_int_value)
+    try:
+        dumped = usage.model_dump() if hasattr(usage, "model_dump") else None
+    except Exception:  # noqa: BLE001 — a vendor object that cannot dump is fine
+        dumped = None
+    if isinstance(dumped, dict):
+        for key in (
+            "cached_tokens",
+            "cache_write_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+            "prompt_cache_hit_tokens",
+            "prompt_tokens_details",
+        ):
+            if key in dumped:
+                data.setdefault(key, dumped[key])
+    return data
 
 
 class OpenAIChatEngine(ChatEngine):
