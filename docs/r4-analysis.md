@@ -114,7 +114,7 @@ R4 是**加层**，不是改造。加层最容易犯的错是顺手把老纪律�
 | P2 | **门卫 fail-closed** | 守卫抛异常 = 拒绝（`error="guard_error"`），不静默放行 | 静默放行等于没有守卫 |
 | P3 | **失败语义按能力分** | 钩子：观察/注入类 fail-open；阻断/改写类 fail-closed | 通知脚本写错不该毁掉回合；拦截脚本写错必须拦住 |
 | P4 | **落地即脱敏** | 任何字符串**写进 trace 之前**过 `Redactor` | 轨迹就是泄漏面（`config.local.yaml` 里有真实 key） |
-| P5 | **默认不记全文** | 默认只记元数据 + ≤500 字符预览；`capture: full` 才记全文 | 轨迹体积失控、泄漏面扩大 |
+| P5 | **默认不记全文** | 默认只记元数据 + ≤500 字符预览；`capture: full` 额外写一份取自**会话**的回合快照（同样脱敏/有上限） | 轨迹体积失控、泄漏面扩大 |
 | P6 | **事件是不可变值** | 新事件一律 `@dataclass(frozen=True)` | 观察者之间互相污染 |
 | P7 | **只追加带默认值的字段** | 改动既有 frozen dataclass 时新字段必须有默认值 | 破坏既有调用点与落盘兼容 |
 | P8 | **新能力默认最窄** | 钩子默认关；门卫只开重复调用守卫；trace 默认只记元数据 | 默认值就是事实标准 |
@@ -351,7 +351,7 @@ class ScopedEvent:
 不变式：
 
 1. `data` 是事件字段的 JSON 化结果；**字符串一律先过 `Redactor`**（P4）；
-2. **不写内容大对象**：预览沿用 `events.preview`（500 字符上限）；`capture: full` 才写完整请求；
+2. **不写内容大对象**：预览沿用 `events.preview`（500 字符上限）——事件是**显示通道**，R1a-3 就规定 10MB 的工具输出绝不能搭事件的车；`capture: full` 时另外写一份 `turn-<n>.full.json`，内容取自**会话**（全量文本的唯一真源），同样脱敏、同样有上限。**要全量就去拿真源，不要指望从事件里抠**；
 3. 写盘失败 → 发一条 `Degraded(component="trace_write")` 并继续（I3），同一回合内不重复刷屏；
 4. 单回合超 `max_turn_bytes` → 截断 + 写一条 `{"evt":"truncated",...}` 标记；
 5. 原子性：单行 append（`O_APPEND`）不会写坏已有一行；`summary.json` 用临时文件 + `os.replace`（沿用 `SessionService` 的手法）。
@@ -785,7 +785,7 @@ hooks:                          # 新增顶层块（R4c）
 | `tests/test_observers.py`（新） | ① `Braid` 按序转发给所有观察者；② 一个抛异常不影响其余；③ `ScopedObserver` 包出 `ScopedEvent` 且 `parent` 正确；④ 空 `Braid` 不炸 |
 | `tests/test_redactor.py`（新） | ① 五类模式各命中一次；② 良性文本零改动；③ **幂等**；④ 私钥整块脱敏；⑤ 用假 key 验证形状匹配 |
 | `tests/test_trace_store.py`（新） | ① 目录自动创建；② 超 `max_turn_bytes` 截断并留标记；③ `retention_days` 清理旧目录；④ `summary.json` 原子写（临时文件 + replace） |
-| `tests/test_trace_recorder.py`（新） | ① 事件 → 一行 JSONL，`span/parent/iter` 正确；② **写盘失败 → 发 `Degraded` 且不抛**；③ 敏感字符串**逐字节搜不到**；④ `capture: full` 才写完整请求 |
+| `tests/test_trace_recorder.py`（新） | ① 事件 → 一行 JSONL，`span/parent/iter` 正确；② **写盘失败 → 发 `Degraded` 且不抛**；③ 敏感字符串**逐字节搜不到**；④ `capture: full` 从**会话**快照本回合消息（含脱敏、含上限），默认关闭 |
 | `tests/test_budget_ledger.py`（新） | ① 多步累加；② `usage=None` 不炸且不计；③ 成本计算；④ **价格未知 → `None`**；⑤ 校准比；⑥ **cache 率 = cached/prompt**；⑦ provider 不报 → `None` |
 | `tests/test_cache_normalization.py`（新） | ① OpenAI 形状；② Anthropic 形状（read+creation）；③ DeepSeek 形状；④ 未知形状 → `None`；⑤ `null` 值不炸（R2 踩过这个坑） |
 | `tests/test_context_assembled.py`（新） | ① 各段字符数与实际拼装一致；② `tools_chars` 计入 `estimated_tokens`；③ 纯追加回合 `prefix_shared_ratio ≥ 0.9`；④ 改系统提示后骤降；⑤ **系统提示逐字节静态**的既有断言不破 |

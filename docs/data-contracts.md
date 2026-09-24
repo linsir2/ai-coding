@@ -276,7 +276,7 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 {"v":1,"ts":"2026-09-24T00:56:26.849Z","session":"<id>","turn":1,"span":"i1","parent":"turn","iter":1,"evt":"ContextAssembled","data":{...}}
 ```
 
-不变式：写盘前**强制脱敏**；默认只记元数据 + ≤500 字符预览（`capture: full` 才原样保留）；
+不变式：写盘前**强制脱敏**；默认只记元数据 + ≤500 字符预览（事件是显示通道，R1a-3 规定大输出不得搭事件的车）；`capture: full` 时额外写 `turn-<n>.full.json`，内容取自**会话**（全量文本的唯一真源），同样脱敏、同样受 `max_turn_bytes` 约束；
 单回合超 `max_turn_bytes` 截断并写 `truncated` 标记；`TurnFinished` 结束后到达的
 tail 事件（收割/整理）**追加到本回合文件**，不会凭空造出新回合。
 `summary.json` 记该会话的累计用量，`os.replace` 原子写。

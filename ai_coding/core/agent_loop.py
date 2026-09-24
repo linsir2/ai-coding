@@ -188,6 +188,8 @@ class AgentLoop:
             self.dispatcher.observer = self.observer
         if self.trace is not None:
             self.trace.session_id = session.session_id
+            # R4a: full capture reads the session (the only place full text lives).
+            self.trace.attach_session(session, start=len(session.messages))
 
         session.add_message(user_message(user_input, now_utc()))
         self.last_artifacts = []

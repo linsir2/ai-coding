@@ -337,6 +337,15 @@ class TraceRecorder:
     It owns no opinion about the loop: it labels events with their span, redacts
     strings, keeps a running ledger of the turn's tokens, and swallows every
     failure.  A trace that breaks must never break the thing it observes.
+
+    Two capture modes, for two different questions:
+
+    * ``previews`` — what happened, cheaply: the event stream already carries a
+      500-character preview of each payload, because it doubles as the display
+      channel and a 10MB tool output must never ride an event (R1a-3).
+    * ``full`` — the turn in full, for forensics: it snapshots the turn's
+      messages from the *session*, since that is where the untruncated text is.
+      The events are deliberately the wrong place to look for it.
     """
 
     def __init__(
@@ -356,6 +365,10 @@ class TraceRecorder:
         self._writer: TurnWriter | None = None
         # Kept after the turn ends so ``/trace`` still has something to show.
         self.last_path: Path | None = None
+        # ``capture: full`` writes the turn's *messages* here (see _snapshot).
+        self.last_payload_path: Path | None = None
+        self._session: Any | None = None
+        self._capture_start = 0
         # ``False`` between ``TurnFinished`` and the next ``IterationStarted``:
         # that is when post-turn bookkeeping (harvest, consolidation) arrives, and
         # it belongs to the turn that just ended rather than a new one.
@@ -371,6 +384,64 @@ class TraceRecorder:
         if self._writer is not None:
             return self._writer.path
         return self.last_path
+
+    def attach_session(self, session: Any, *, start: int = 0) -> None:
+        """Remember where this turn's messages begin, for a full-capture snapshot.
+
+        The event stream carries previews *by design* — it is the display channel,
+        and a 10MB tool output must never ride an event (R1a-3).  Full content has
+        exactly one source of truth: the session.  So ``capture: full`` snapshots
+        that range instead of trying to smuggle prose through the events
+        (docs/r4-analysis.md 4.2).
+        """
+        self._session = session
+        self._capture_start = max(0, int(start))
+
+    def _snapshot(self, turn: int) -> None:
+        """Write this turn's messages to ``turn-<n>.full.json`` (redacted, capped)."""
+        session = self._session
+        if session is None or self._writer is None:
+            return
+        messages = list(getattr(session, "messages", []))[self._capture_start :]
+        if not messages:
+            return
+        payload = {
+            "v": TRACE_VERSION,
+            "ts": now_iso(),
+            "session": self.session_id,
+            "turn": turn,
+            "messages": [self._message_dict(message) for message in messages],
+        }
+        data = self.redactor.redact_obj(payload)
+        text = short_json(data)
+        if len(text.encode("utf-8")) > self.store.max_turn_bytes:
+            text = short_json({**data, "messages": [], "truncated": True})
+        path = self._writer.path.with_suffix(".full.json")
+        try:
+            path.write_text(text, encoding="utf-8")
+        except OSError:
+            _log.debug("trace payload write failed", exc_info=True)
+            return
+        self.last_payload_path = path
+
+    @staticmethod
+    def _message_dict(message: Any) -> dict[str, Any]:
+        calls = getattr(message, "tool_calls", None) or ()
+        return {
+            "role": getattr(message, "role", ""),
+            "content": getattr(message, "content", None),
+            "tool_call_id": getattr(message, "tool_call_id", None),
+            "tool_name": getattr(message, "tool_name", None),
+            "tool_calls": (
+                [
+                    {"id": getattr(c, "id", ""), "name": getattr(c, "name", ""),
+                     "arguments": getattr(c, "arguments", "")}
+                    for c in calls
+                ]
+                if calls
+                else None
+            ),
+        }
 
     def on_event(self, event: Any) -> None:
         """Record one event.  Never raises (docs/r4-analysis.md P1)."""
@@ -431,6 +502,8 @@ class TraceRecorder:
     def _finish_turn(self) -> None:
         if self._writer is not None:
             self.last_path = self._writer.path
+        if self.capture == "full" and self._writer is not None:
+            self._snapshot(self.turn)
         existing = self.store.read_summary(self.session_id)
         usage = self._turn_usage
         self.store.update_summary(

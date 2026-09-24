@@ -190,3 +190,67 @@ def test_post_turn_events_do_not_invent_a_new_turn(tmp_path):
     # a real next turn still gets its own file
     recorder.on_event(IterationStarted(index=1, max_iterations=1))
     assert recorder.current_path.name == "turn-2.jsonl"
+
+
+def test_full_capture_snapshots_the_turn_from_the_session(tmp_path):
+    """``capture: full`` reads the *source of truth*, not the display preview.
+
+    Events carry a 500-char preview because they are the display channel; the
+    full text only exists in the session.  So a full capture is a snapshot of the
+    turn's messages — redacted, and still bounded (docs/r4-analysis.md 4.2).
+    """
+    from ai_coding.domain.message import ChatMessage
+    from ai_coding.domain.session import SessionData
+
+    recorder, _ = _recorder(tmp_path, capture="full")
+    session = SessionData(
+        session_id="sess-1", title="", created_time="", last_access_time=""
+    )
+    recorder.attach_session(session, start=0)
+    session.add_message(ChatMessage(role="user", content="hello", timestamp=""))
+    session.add_message(
+        ChatMessage(
+            role="tool",
+            content="x" * 20_000,
+            timestamp="",
+            tool_call_id="c1",
+            tool_name="read",
+        )
+    )
+    recorder.on_event(IterationStarted(index=1, max_iterations=1))
+    recorder.on_event(TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED)))
+
+    payload = recorder.last_payload_path
+    assert payload is not None
+    assert payload.name == "turn-1.full.json"
+    data = json.loads(payload.read_text(encoding="utf-8"))
+    assert [m["role"] for m in data["messages"]] == ["user", "tool"]
+    assert len(data["messages"][1]["content"]) == 20_000  # the whole thing
+    assert data["turn"] == 1
+
+
+def test_full_capture_is_off_by_default(tmp_path):
+    recorder, _ = _recorder(tmp_path, capture="previews")
+    recorder.on_event(IterationStarted(index=1, max_iterations=1))
+    recorder.on_event(TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED)))
+    assert recorder.last_payload_path is None
+
+
+def test_full_capture_redacts_the_snapshot(tmp_path):
+    from ai_coding.domain.message import ChatMessage
+    from ai_coding.domain.session import SessionData
+
+    secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
+    recorder, _ = _recorder(tmp_path, capture="full")
+    session = SessionData(
+        session_id="sess-1", title="", created_time="", last_access_time=""
+    )
+    recorder.attach_session(session, start=0)
+    session.add_message(
+        ChatMessage(role="tool", content=f"KEY={secret}", timestamp="", tool_call_id="c1")
+    )
+    recorder.on_event(IterationStarted(index=1, max_iterations=1))
+    recorder.on_event(TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED)))
+
+    assert recorder.last_payload_path is not None
+    assert secret not in recorder.last_payload_path.read_text(encoding="utf-8")
