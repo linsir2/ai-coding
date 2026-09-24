@@ -160,6 +160,20 @@ class ToolSurfaceWarning:
 
 
 @dataclass(frozen=True)
+class InputSteered:
+    """The user typed while the turn was running, and it became an instruction (R7e-2).
+
+    The line is persisted as a ``[steering] …`` user message (Q4) for the same
+    reason the task gate is: it changed what the model did, so replaying the
+    transcript without it would not reproduce the turn.
+    """
+
+    text_chars: int
+    iteration: int = 0
+    total: int = 1
+
+
+@dataclass(frozen=True)
 class ScopedEvent:
     """An event that happened inside a nested run (a sub-agent), R4a.
 
@@ -242,6 +256,7 @@ LoopEvent = (
     | ContextAssembled
     | Degraded
     | ToolSurfaceWarning
+    | InputSteered
     | ScopedEvent
     | TaskUpdated
     | TurnFinished
@@ -304,6 +319,7 @@ __all__ = [
     "ToolStarted",
     "ToolFinished",
     "ToolSurfaceWarning",
+    "InputSteered",
     "TaskUpdated",
     "TurnFinished",
     "MemoryInjected",

@@ -54,6 +54,7 @@ from ai_coding.core.compaction import Compactor
 from ai_coding.core.dispatch import DispatchOutcome, ToolDispatcher
 from ai_coding.core.events import (
     AssistantMessage,
+    InputSteered,
     IterationStarted,
     LoopEvent,
     LoopObserver,
@@ -149,6 +150,7 @@ class AgentLoop:
         trace: Any | None = None,
         guards: GuardChain | None = None,
         hooks: Any | None = None,
+        steering: Any | None = None,
     ) -> None:
         self.engine = engine
         self.sessions = sessions
@@ -171,6 +173,9 @@ class AgentLoop:
         # calls a turn makes live in their own unit.
         self.hooks = hooks
         self.turn_hooks = TurnHooks(hooks, workspace=self.workspace)
+        # R7e-2: where lines typed mid-turn wait.  None = today's behaviour, and the
+        # loop then never looks at a queue at all.
+        self.steering = steering
         # Task injection + stop policy live in their own pure unit (R2c).
         self.policy = TurnPolicy(TurnPolicyConfig.from_ai_config(self.settings))
         self._tool_schemas = tool_schemas(tools)
@@ -270,6 +275,7 @@ class AgentLoop:
                     continue
 
                 books.note_iteration(index)
+                self._take_steering(session, books, index)
                 self._emit(
                     IterationStarted(
                         index=index, max_iterations=self.policy.config.max_iterations
@@ -394,6 +400,31 @@ class AgentLoop:
             task=task,
             hook_context=hook_context,
             deadline=Deadline.after(turn_timeout) if turn_timeout > 0 else None,
+        )
+
+    def _take_steering(self, session: SessionData, books: TurnBooks, index: int) -> None:
+        """Absorb whatever the user typed, right before this request is assembled.
+
+        Delivery point: the iteration boundary, after the previous batch finished -
+        which is what Claude Code documents ("as soon as those tool calls finish,
+        within the same turn", docs/r7e-analysis.md 2.1b).  The lines are persisted
+        (Q4), and they consume neither an iteration nor a nudge.
+        """
+        if self.steering is None:
+            return
+        lines = self.steering.drain()
+        if not lines:
+            return
+        for line in lines:
+            session.add_message(user_message(f"[steering] {line}", now_utc()))
+        books.note_steering(len(lines))
+        self.closer.checkpoint(session, index)
+        self._emit(
+            InputSteered(
+                text_chars=sum(len(line) for line in lines),
+                iteration=index,
+                total=books.steering_messages,
+            )
         )
 
     def _warn_tools_chars_once(self) -> None:
