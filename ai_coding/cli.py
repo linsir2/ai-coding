@@ -306,10 +306,12 @@ def repl(
     ),
 ) -> None:
     """Start an interactive REPL session (slash commands: /help /status /clear /quit)."""
+    from ai_coding.core.steering import SteeringQueue
     from ai_coding.security.approval import CLIApprovalCallback
     from ai_coding.security.user_prompt import CLIUserPromptCallback
     from ai_coding.service.session_service import SessionService
     from ai_coding.ui.console import ConsoleObserver, DialogueConsole
+    from ai_coding.ui.reader import InteractiveReader
     from ai_coding.ui.repl import run_repl
 
     try:
@@ -329,6 +331,14 @@ def repl(
             skills,
             user_prompt=user_prompt,
             base_instructions=BASE_INSTRUCTIONS,
+        )
+        # R7e-2: the queue the loop drains, and the one reader that fills it.
+        steering = SteeringQueue(
+            max_messages=int(getattr(app_cfg.ai, "steering_max_messages", 5)),
+            max_chars=int(getattr(app_cfg.ai, "steering_max_chars", 2_000)),
+        )
+        reader = InteractiveReader.for_terminal(
+            steering=steering, enabled=bool(getattr(app_cfg.ui, "steering", True))
         )
     except (ValueError, FileNotFoundError) as exc:
         typer.echo(f"repl error: {exc}", err=True)
@@ -362,9 +372,12 @@ def repl(
                 trace=recorder,
                 guards=guards,
                 hooks=hooks,
+                steering=steering,
             )
             try:
-                await run_repl(loop, sessions, console, user_prompt=user_prompt)
+                await run_repl(
+                    loop, sessions, console, user_prompt=user_prompt, reader=reader
+                )
             except KeyboardInterrupt:
                 console.info("[aborted]")
             finally:
@@ -388,6 +401,7 @@ def _build_loop(
     trace: Any | None = None,
     guards: Any | None = None,
     hooks: Any | None = None,
+    steering: Any | None = None,
 ) -> Any:
     """Assemble the loop and its optional components (silent degradation)."""
     if approval is None:
@@ -460,6 +474,7 @@ def _build_loop(
         trace=trace,
         guards=guards,
         hooks=hooks,
+        steering=steering,
     )
 
 

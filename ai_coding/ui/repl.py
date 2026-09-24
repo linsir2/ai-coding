@@ -153,31 +153,56 @@ async def run_repl(
     console: DialogueConsole,
     *,
     user_prompt: Any | None = None,
+    reader: Any | None = None,
 ) -> None:
     """Interactive loop. Lazily imports prompt_toolkit.
 
     R7c: ``user_prompt`` (the ``ask_user`` channel) is handed the *same* reader the
     REPL itself uses, because two readers on one terminal fight over stdin — the
     scripted-pipe case degraded to ``no_answer`` (docs/r7-analysis.md 3.3).
-    """
-    from prompt_toolkit import PromptSession
 
+    R7e-2: when a ``reader`` is given it *is* that reader, and it stays alive while a
+    turn runs — so a line typed mid-turn becomes steering instead of being eaten by
+    the next prompt (docs/r7e-analysis.md 3.2).
+    """
     session = sessions.create()
-    prompt: Any = PromptSession()
-    if user_prompt is not None and hasattr(user_prompt, "set_reader"):
-        user_prompt.set_reader(prompt.prompt)
+    if reader is not None:
+        reader.start()
+        if user_prompt is not None and hasattr(user_prompt, "set_interactive"):
+            user_prompt.set_interactive(reader)
+        read_line: Any = reader.input
+    else:
+        from prompt_toolkit import PromptSession
+
+        prompt: Any = PromptSession()
+        if user_prompt is not None and hasattr(user_prompt, "set_reader"):
+            user_prompt.set_reader(prompt.prompt)
+        read_line = lambda: asyncio.to_thread(prompt.prompt, "you> ")  # noqa: E731
+
     console.rule("ai-coding REPL — /help for commands")
-    while True:
-        try:
-            text = await asyncio.to_thread(prompt.prompt, "you> ")
-        except (KeyboardInterrupt, EOFError):
-            break
-        stripped = text.strip()
-        if not stripped:
-            continue
-        action, session = await handle_input(loop, stripped, session, sessions, console)
-        if action is REPLAction.QUIT:
-            break
+    try:
+        while True:
+            try:
+                text = await read_line()
+            except (KeyboardInterrupt, EOFError):
+                break
+            stripped = text.strip()
+            if not stripped:
+                continue
+            if reader is not None:
+                reader.set_busy(True)
+            try:
+                action, session = await handle_input(
+                    loop, stripped, session, sessions, console
+                )
+            finally:
+                if reader is not None:
+                    reader.set_busy(False)
+            if action is REPLAction.QUIT:
+                break
+    finally:
+        if reader is not None:
+            await reader.aclose()
     console.info("bye")
 
 
