@@ -195,3 +195,46 @@ def test_a_tool_context_carries_the_turn_number_by_default_zero():
     from ai_coding.tools.base import ToolContext
 
     assert ToolContext().turn == 0
+
+
+# ---- the gate and the wiring -------------------------------------------------
+
+
+def test_the_gate_allows_memory_write():
+    from ai_coding.security.permission_gate import PermissionDecision, PermissionGate
+
+    assert PermissionGate().check("memory_write", {}) == PermissionDecision.ALLOW
+
+
+def test_a_subagent_stack_has_no_memory_tools(tmp_path: Path):
+    from ai_coding.config.models import AppConfig
+    from ai_coding.tools.builder import build_tool_registry
+
+    cfg = AppConfig()
+    child = build_tool_registry(cfg, str(tmp_path), None, include_subagent=False)
+    assert child.get("memory_write") is None  # Q3: 子智能体没有
+    assert child.get("memory_search") is None
+
+
+@pytest.mark.asyncio
+async def test_the_composition_root_registers_memory_write(tmp_path: Path):
+    from ai_coding.ai.engine import ChatEngine
+    from ai_coding.cli import _build_loop, _build_tool_registry
+    from ai_coding.config.models import AppConfig
+
+    class _Engine(ChatEngine):
+        async def step(self, *args, **kwargs):  # pragma: no cover - never called
+            raise AssertionError("the loop must not run")
+
+        async def aclose(self) -> None:
+            return None
+
+    class _Sessions:
+        def save(self, session) -> None:
+            return None
+
+    cfg = AppConfig()
+    registry = _build_tool_registry(cfg, str(tmp_path), None)
+    _build_loop(_Engine(), _Sessions(), registry, cfg, str(tmp_path), None)
+    assert registry.get("memory_write") is not None
+    assert registry.get("memory_search") is not None

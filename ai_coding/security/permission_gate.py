@@ -100,6 +100,9 @@ class PermissionGate:
             "skill",
             "subagent",
             "memory_search",  # read-only recall (R3b)
+            # R7e-1: durable, but not a side effect on the repo, and the harness
+            # harvests notes without asking anyway (docs/r7e-analysis.md Q1).
+            "memory_write",
             # R6c: asking a question changes nothing by itself — the answer only
             # becomes an action through further tool calls, which are gated on their
             # own.  Leaving it WARN meant a REPL asked "Allow ask_user?" *before*

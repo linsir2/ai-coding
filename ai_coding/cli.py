@@ -434,6 +434,12 @@ def _build_loop(
             from ai_coding.tools.memory_search_tool import MemorySearchTool
 
             registry.register(MemorySearchTool(memory))
+        # R7e-1: the model may write a note of its own, next to the retrospective
+        # harvest.  Parent-only: a sub-agent stack never gets memory tools at all.
+        if registry.get("memory_write") is None:
+            from ai_coding.tools.memory_write_tool import MemoryWriteTool
+
+            registry.register(MemoryWriteTool(memory))
 
     return AgentLoop(
         engine,
