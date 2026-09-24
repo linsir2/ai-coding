@@ -67,7 +67,7 @@ ai-coding 以「**自持 ReAct 循环** + 工具调用」为核心模型：用�
 |---|---|
 | L3 | 超阈值的大段尾部工具输出持久化到 `transcripts/persisted/`，历史内替换为 `<persisted-output>` 占位 |
 | L1 | 超 `max_messages` 时裁剪中间段，留 `snip_keep_head`/`snip_keep_tail` 条并插入 `[snipped n messages]` |
-| L2 | 早于 `keep_recent_tool_results` 的旧工具结果替换为 `[Previous: used X]`（正文即丢；中段的可读性由 R6a 的回合摘要环补，见下文） |
+| L2 | 早于 `keep_recent_tool_results` 的旧工具结果换成**可回收的信封**：正文先落盘到 `transcripts/elided/`（内容寻址，同一正文不重复写），历史里留「清了多少字符 + 原文路径 + 头 `l2_window_chars` 字符 + 尾 `l2_window_chars` 字符」；窗口总量受 `l2_window_budget` 约束、**从新到旧**分配，预算用完之后只剩信封（路径仍在，所以信息永远取回得到）。比占位还短的正文原样保留（R7b） |
 | L4 | 超上下文预算时用真实 LLM 摘要压缩历史（带 3 次失败熔断），降级为硬裁剪 |
 | 兜底 | 硬裁剪 + `sanitize_pairs` 保证严格配对 |
 
@@ -212,6 +212,13 @@ R4 起，server 连不上不再静默：会发一条 `Degraded(component="mcp_se
 `[Previous: used bash]`，而 L4 摘要在结构压缩之后才评估，几乎不触发（见 r6-analysis.md §1.1）。
 于是模型要么考古（实测：用 bash 翻 270KB 的会话文件，prompt 从 3,363 涨到 6,363），
 要么抱怨「工具输出没有返回给我」。
+
+R7b 把这段话的前半句治掉了：L2 不再丢正文。实测同一份 70 轮历史，套 R6 的真实配置
+（`max_messages=50`）压缩后，被清掉的最旧那条工具结果的头一行
+（`build-backend = poetry.core.masonry.api …`）**现在就在请求里**——正是那个 fixture 里
+「先看看现在用什么」的答案；代价是压缩后 est tokens 从 2,371 涨到 2,743（+372，预算的 0.8%），
+三条正文全文各落一份盘（7.5KB）。默认配置（`max_messages=400`，L1 不触发）下是 69 条信封、
+其中 20 条带窗口（`l2_window_budget=4000` 用尽）、69 份原文共 205KB（docs/r7-analysis.md 3.2）。
 
 `domain/turn_digest.py` 给出**由 harness 派生**的一行回合摘要（用户请求 + 终态 + 产物 +
 未完成项），**不额外调用模型**：

@@ -48,6 +48,11 @@ class AIConfig(BaseModel):
     snip_keep_tail: int = 20
     keep_recent_tool_results: int = 3
     per_result_persist_bytes: int = 30_000
+    # R7b: what an elided tool result keeps on each side, and what all of them may
+    # keep together.  The body itself is written to transcripts/elided/ first, so
+    # a window of 0 is still safe (it only costs the model a read).
+    l2_window_chars: int = 200
+    l2_window_budget: int = 4_000
     l4_keep_tail: int = 6
     # ---- R1a orchestration (docs/r1-analysis.md) --------------------------
     # How a turn is allowed to end.  "todo_aware" gates the stop on open items.

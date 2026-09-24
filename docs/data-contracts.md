@@ -88,9 +88,11 @@ mcp:               # MCPConfig（默认关闭）
 | 参数 | 默认 | 作用 |
 |---|---|---|
 | `max_context_tokens` | 48000 | 上下文预算，驱动压缩与 L4 熔断 |
-| `max_messages` | 50 | L1 裁剪阈值（保留头/尾见下） |
+| `max_messages` | 400 | L1 裁剪阈值（保留头/尾见下；R3b 起它只在预算被突破时才真正触发） |
 | `snip_keep_head` / `snip_keep_tail` | 3 / 20 | L1 裁剪保留条数 |
 | `keep_recent_tool_results` | 3 | L2 保留最近工具结果数 |
+| `l2_window_chars` | 200 | L2 信封保留的头/尾各多少字符（R7b） |
+| `l2_window_budget` | 4000 | L2 一次压缩里所有窗口的总字符预算，从新到旧分配（R7b） |
 | `per_result_persist_bytes` | 30000 | L3 单结果持久化阈值 |
 | `l4_keep_tail` | 6 | L4 摘要保留尾部条数 |
 | `auto_process_tool_results` | true | 是否自动执行工具结果回喂 |

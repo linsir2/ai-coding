@@ -87,12 +87,21 @@ def test_placeholder_empty_when_under_limit():
     assert all("Previous" not in (m.content or "") for m in out)
 
 
-def test_placeholder_marks_older_keeps_recent():
-    msgs = [_tool("r1", "c1"), _tool("r2", "c2"), _tool("r3", "c3"), _tool("r4", "c4")]
-    out = placeholder_old_results(msgs, keep_recent=2)
-    # oldest two get replaced, newest two untouched
-    assert out[0].content == "[Previous: used bash]"
-    assert out[1].content == "[Previous: used bash]"
+def test_placeholder_marks_older_keeps_recent(tmp_path):
+    """R7b restated this contract: an elided body is an envelope, not a blank.
+
+    The old assertion pinned the exact text ``[Previous: used bash]``, which was
+    precisely the defect — the body was dropped with no way back.  The intent is
+    unchanged (older results are marked, the recent ones are left alone, pairing
+    survives); what the mark *is* changed (docs/r7-analysis.md 3.2, Q2).
+    """
+    old = "OLD-" + "x" * 900 + "-TAIL"
+    msgs = [_tool(old, "c1"), _tool(old, "c2"), _tool("r3", "c3"), _tool("r4", "c4")]
+    out = placeholder_old_results(msgs, keep_recent=2, elide_root=tmp_path)
+    # oldest two become recoverable envelopes, newest two untouched
+    assert out[0].content.startswith("[Previous: used bash")
+    assert "full output: " in out[0].content
+    assert out[1].content.startswith("[Previous: used bash")
     assert out[2].content == "r3"
     assert out[3].content == "r4"
     # pairing fields survive the placeholder

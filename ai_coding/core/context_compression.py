@@ -22,7 +22,14 @@ from ai_coding.domain.message import ChatMessage
 PERSISTED_OUTPUT_PREFIX = "<persisted-output"
 PERSISTED_MARKER = PERSISTED_OUTPUT_PREFIX
 SNIPPED_HEADER = "[snipped {n} messages]"
+#: The bare shape, kept for callers that still render a placeholder by hand.
 PREVIOUS_RESULT = "[Previous: used {tool}]"
+#: The lead of an envelope: how much was elided, and where the original now lives.
+ELIDED_NOTE = "[Previous: used {tool} · {chars} chars elided{where}]"
+ELIDED_DIR = "transcripts/elided"
+#: Rough room a note takes (the envelope line + the ellipsis line) when deciding
+#: whether a placeholder would actually shrink a body.
+_NOTE_ALLOWANCE = 160
 HARD_TRIM_KEEP_TAIL = 20
 _L4_BREAKER_THRESHOLD = 3
 _MIN_PAGE_MESSAGES = 4
@@ -73,20 +80,86 @@ def snip_middle(
 # ---------------------------------------------------------------- stage 2 (L2)
 
 
+def elide_and_persist(body: str, tool: str, root: str | Path | None) -> str | None:
+    """Write an elided body to ``root/transcripts/elided/``; return its path.
+
+    Content-addressed: the name is a digest of the body, so the same result
+    elided twice does not produce a second file, and a long session does not need
+    a rotation policy.  Best-effort — ``None`` means "no path", and the envelope
+    simply says less (R7b; the same discipline as L3, docs/r7-analysis.md 3.2).
+    """
+    if root is None or not body:
+        return None
+    directory = Path(root) / ELIDED_DIR
+    path = directory / _elided_name(tool, body)
+    if path.is_file():
+        return str(path)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    except OSError:
+        return None
+    return str(path)
+
+
+def _elided_name(tool: str, body: str) -> str:
+    digest = hashlib.sha1(body.encode("utf-8")).hexdigest()[:12]
+    return f"{tool or 'tool'}_{digest}.txt"
+
+
+def previous_result_note(tool: str, chars: int, path: str | None) -> str:
+    """The envelope line: what this was, how much is gone, and where it went."""
+    where = f" · full output: {path}" if path else ""
+    return ELIDED_NOTE.format(tool=tool or "tool", chars=chars, where=where)
+
+
+def _elided_body(body: str, note: str, window: int) -> str:
+    """The note, then the head and the tail of what it replaced."""
+    if window <= 0:
+        return note
+    return f"{note}\n{body[:window]}\n…\n{body[-window:]}"
+
+
 def placeholder_old_results(
     messages: list[ChatMessage],
     keep_recent: int,
+    *,
+    window_chars: int = 200,
+    window_budget: int = 4000,
+    elide_root: str | Path | None = None,
 ) -> list[ChatMessage]:
-    """Replace tool results older than ``keep_recent`` with a ``[Previous: used X]`` note."""
+    """Replace tool results older than ``keep_recent`` with a recoverable envelope (R7b).
+
+    Four rules, and each one is a test:
+
+    1. a body that a placeholder would not actually shrink is **left alone**;
+    2. otherwise it becomes an envelope naming the artifact, plus a head/tail
+       window of ``window_chars`` on each side;
+    3. the **total window is bounded** (``window_budget``) and spent newest-first —
+       the results that were superseded most recently are the likeliest to still
+       matter, and once the budget is gone the envelope is all that is left (the
+       path is always there, so nothing is unrecoverable);
+    4. pairing fields (``tool_call_id``/``tool_name``) and the message count are
+       untouched, and a ``<persisted-output>`` marker is skipped — L3 already
+       persisted that body.
+    """
     tool_indices = [i for i, m in enumerate(messages) if m.role == "tool"]
     if len(tool_indices) <= keep_recent:
         return messages
     out = list(messages)
-    for i in tool_indices[:-keep_recent]:
+    budget = max(0, int(window_budget))
+    for i in reversed(tool_indices[:-keep_recent]):
         m = messages[i]
-        if m.content and PERSISTED_OUTPUT_PREFIX not in m.content:
-            body = PREVIOUS_RESULT.format(tool=m.tool_name or "tool")
-            out[i] = _tool_copy(m, body)
+        body = m.content or ""
+        if not body or PERSISTED_OUTPUT_PREFIX in body:
+            continue
+        window = min(int(window_chars), budget) if budget > 0 else 0
+        if len(body) <= 2 * window + _NOTE_ALLOWANCE:
+            continue  # rule 1: not worth a placeholder at all
+        path = elide_and_persist(body, m.tool_name or "tool", elide_root)
+        note = previous_result_note(m.tool_name or "tool", len(body), path)
+        out[i] = _tool_copy(m, _elided_body(body, note, window))
+        budget -= window
     return out
 
 
@@ -248,6 +321,11 @@ class ContextManager:
         self._keep_recent_results = int(
             getattr(ai_settings, "keep_recent_tool_results", 3)
         )
+        # R7b: what an elided body keeps (per side) and what all of them may keep
+        # together — the window is bounded, the artifact path is not (it costs one
+        # line and it is what makes the elision reversible).
+        self._l2_window_chars = int(getattr(ai_settings, "l2_window_chars", 200))
+        self._l2_window_budget = int(getattr(ai_settings, "l2_window_budget", 4000))
         self._per_result_bytes = int(getattr(ai_settings, "per_result_persist_bytes", 30000))
         self._l4_keep_tail = int(getattr(ai_settings, "l4_keep_tail", 6))
         # R3b: compaction is budget-triggered, not count-triggered (see below).
@@ -276,7 +354,13 @@ class ContextManager:
             per_result_bytes=self._per_result_bytes,
         )
         out = snip_middle(out, self._max_messages, self._keep_head, self._keep_tail)
-        out = placeholder_old_results(out, self._keep_recent_results)
+        out = placeholder_old_results(
+            out,
+            self._keep_recent_results,
+            window_chars=self._l2_window_chars,
+            window_budget=self._l2_window_budget,
+            elide_root=self._root,
+        )
 
         if self._l4_should_run(out) and self._summarizer is not None:
             out = await self._run_l4(out, on_summary=on_summary)
@@ -366,11 +450,15 @@ class ContextManager:
 
 
 __all__ = [
+    "ELIDED_DIR",
+    "ELIDED_NOTE",
     "PERSISTED_OUTPUT_PREFIX",
     "PERSISTED_MARKER",
     "PREVIOUS_RESULT",
     "HARD_TRIM_KEEP_TAIL",
+    "elide_and_persist",
     "estimate_tokens",
+    "previous_result_note",
     "snip_middle",
     "placeholder_old_results",
     "persist_large_outputs",
