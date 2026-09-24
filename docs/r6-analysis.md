@@ -276,15 +276,21 @@ def did_compact(source: Sequence[ChatMessage], result: Sequence[ChatMessage]) ->
 |---|---|---|---|
 | 1 局部修 | 同一个 `(tool, params)` 重复（已有） | `DuplicateCallGuard` 拒绝并给出前一次调用 | R4b 已完成 |
 | 2 换策略 | **连续 N 轮工具结果全军覆没**（`failed_streak ≥ 2`） | 注入一次 `[strategy-gate]` 提示（**每回合至多一次**） | `TurnPolicy` + 循环计数 |
-| 3 问人 / 收尾 | 跑到 `stall_iterations=3` 仍**零次成功调用** → 立即结束并交接；需要人时用 `ask_user`（R6c） | `FINISH` + `handoff`（§2.1） | `TurnPolicy` + R6a 的交接 |
+| 3 问人 / 收尾 | 跑到 `stall_iterations=3`、本回合**尝试过调用**（`attempted_calls > 0`）却**零次成功** → 立即结束并交接；需要人时用 `ask_user`（R6c） | `FINISH` + `handoff`（§2.1） | `TurnPolicy` + R6a 的交接 |
 
 `TurnSnapshot` 增三个带默认值的字段（向后兼容，既有 19 条表测不动）：
 
 ```python
 failed_streak: int = 0       # 连续「全部工具结果失败」的迭代数
+attempted_calls: int = 0     # 本回合发起过的工具调用数（成功与否都算）
 successful_calls: int = 0    # 本回合成功的工具调用总数
 strategy_nudges: int = 0     # 本回合已经换过几次策略
 ```
+
+> `attempted_calls` 不是装饰：第一版实现只用 `successful_calls == 0` 判 stall，
+> **被既有测试 `test_strict_policy_ignores_the_nudge_cap` 当场抓住**——`strict` 策略下模型
+> 只说话不调工具时「零成功」会被误判成「零进展」，把「一直提醒」的语义打死。
+> 「尝试过但都没成功」才是有病的形状；只说话不干活的回合归停止策略管。
 
 `TurnPolicyConfig` 增（`from_ai_config` 同步）：
 
@@ -298,7 +304,7 @@ stall_iterations: int = 3          # 0 = 关闭提前收尾
 
 1. `budget_expired` → `FINISH`（现状）
 2. 轮次 / token 预算 → `FINISH`（现状）
-3. **stall**：`iteration > stall_iterations and successful_calls == 0` → `FINISH`
+3. **stall**：`iteration > stall_iterations and attempted_calls > 0 and successful_calls == 0` → `FINISH`
    （reason `"no progress: no tool call has succeeded in 3 iterations"`）
 4. **换策略**：`failed_streak >= threshold and strategy_nudges < max` → `NUDGE` +
    `strategy_message()`
@@ -729,10 +735,11 @@ sequenceDiagram
 3. **`[Previous: used bash]` 才是更直接的病根**（竞争方案）：GA 的做法是留 800 字符头尾窗口，
    我们直接把正文扔了。若拍板做这个（D-R6-13），摘要环的价值会下降——所以两者**不要同时上**，
    顺序是：先做环（便宜、不动既有契约），再实测是否还需要窗口。
-4. **stall 判定可能误杀**：`successful_calls == 0` 在「模型先写计划再动手」的回合里可能在前 3 轮
-   成立（例如连续 `todo_write`——但那是成功的工具调用，会计数）。真正的风险是**只读工具被
-   guard 拒绝**的情形：拒绝也是 `success=False`。为此 stall 只在 `iteration > 3` 生效，
-   且阈值可配（`stall_iterations=0` 关闭）。
+4. **stall 判定可能误杀**（这条在实现期真的发生了）：第一版只看 `successful_calls == 0`，
+   于是「只说话不调工具」的回合被判成 stall——既有测试 `test_strict_policy_ignores_the_nudge_cap`
+   当场失败。修法是加 `attempted_calls > 0`：**尝试过但一次都没成功**才是有病的形状。
+   剩余风险是**工具被 guard 拒绝**（拒绝也是 `success=False`、也算 attempted），
+   所以 stall 只在 `iteration > 3` 生效，且阈值可配（`stall_iterations=0` 关闭）。
 5. **`handoff` 会不会污染子智能体回包**：会改变 `SubagentResult.conclusion` 的内容
    （从 `None` 变成一段报告）。这是**改进**（父智能体终于知道子智能体卡在哪），但
    如果哪个调用方依赖 `conclusion is None`，需要检查——已 grep：只有

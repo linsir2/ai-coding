@@ -983,7 +983,7 @@ git commit -m "R6a-4: the live case that used to print nothing now prints a hand
 - Test: `tests/test_turn_policy_escalation.py`
 
 **Interfaces:**
-- Produces: `TurnSnapshot.failed_streak/successful_calls/strategy_nudges`（带默认值）；
+- Produces: `TurnSnapshot.failed_streak/attempted_calls/successful_calls/strategy_nudges`（带默认值）；
   `TurnPolicyConfig.failed_streak_threshold=2` / `max_strategy_nudges=1` / `stall_iterations=3`；
   `TurnPolicy.strategy_message(failed_streak) -> str`；常量 `STRATEGY_GATE_LEAD = "[strategy-gate]"`
 
@@ -1025,7 +1025,10 @@ def test_the_strategy_nudge_is_given_once_per_turn():
 
 def test_a_turn_with_no_success_stops_before_the_iteration_budget():
     decision = _policy().decide_next_iteration(
-        TurnSnapshot(iteration=4, failed_streak=3, successful_calls=0, strategy_nudges=1)
+        TurnSnapshot(
+            iteration=4, failed_streak=3, attempted_calls=3, successful_calls=0,
+            strategy_nudges=1,
+        )
     )
     assert decision.action is TurnAction.FINISH
     assert "no progress" in decision.reason
@@ -1033,14 +1036,25 @@ def test_a_turn_with_no_success_stops_before_the_iteration_budget():
 
 def test_a_successful_call_disarms_the_stall_stop():
     decision = _policy().decide_next_iteration(
-        TurnSnapshot(iteration=4, failed_streak=1, successful_calls=2, strategy_nudges=1)
+        TurnSnapshot(
+            iteration=4, failed_streak=1, attempted_calls=3, successful_calls=2,
+            strategy_nudges=1,
+        )
+    )
+    assert decision.action is TurnAction.ITERATE
+
+
+def test_a_turn_that_never_calls_a_tool_is_not_a_stall():
+    # 只说话不调工具的回合归停止策略管（strict 会一直提醒），不是「零进展」
+    decision = _policy().decide_next_iteration(
+        TurnSnapshot(iteration=5, attempted_calls=0, successful_calls=0)
     )
     assert decision.action is TurnAction.ITERATE
 
 
 def test_budget_still_wins_over_escalation():
     decision = _policy().decide_next_iteration(
-        TurnSnapshot(iteration=4, failed_streak=9, successful_calls=0),
+        TurnSnapshot(iteration=4, failed_streak=9, attempted_calls=9, successful_calls=0),
         budget_expired=True,
     )
     assert decision.action is TurnAction.FINISH
@@ -1051,7 +1065,10 @@ def test_escalation_is_off_when_the_thresholds_are_zero():
     policy = _policy(failed_streak_threshold=0, stall_iterations=0)
     for iteration in (2, 5, 9):
         decision = policy.decide_next_iteration(
-            TurnSnapshot(iteration=iteration, failed_streak=9, successful_calls=0)
+            TurnSnapshot(
+                iteration=iteration, failed_streak=9, attempted_calls=9,
+                successful_calls=0,
+            )
         )
         assert decision.action is TurnAction.ITERATE
 
@@ -1072,7 +1089,7 @@ def test_from_ai_config_reads_the_new_keys():
 ```
 
 - [ ] **Step 2: 跑到失败** → `FAIL：unexpected keyword argument 'failed_streak'`
-- [ ] **Step 3: 实现**（见 spec §2.2 的代码块：三个快照字段、三个配置字段、`from_ai_config` 读取、`decide_next_iteration` 的判定优先级「预算 → 轮次 → stall → 换策略 → ITERATE」、`strategy_message`）
+- [ ] **Step 3: 实现**（见 spec §2.2 的代码块：四个快照字段、三个配置字段、`from_ai_config` 读取、`decide_next_iteration` 的判定优先级「预算 → 轮次 → stall → 换策略 → ITERATE」、`strategy_message`）。**stall 的判据必须是 `attempted_calls > 0 and successful_calls == 0`**：只看 `successful_calls == 0` 会被 `test_strict_policy_ignores_the_nudge_cap` 抓住——只说话不调工具的回合不是「零进展」。
 - [ ] **Step 4: 跑到通过**
 
 Run: `.venv/bin/python -m pytest tests/test_turn_policy_escalation.py tests/test_turn_policy.py -q`
@@ -1243,8 +1260,9 @@ async def test_escalation_never_fires_without_tool_calls():
 ```python
         # process_input 的回合状态
         failures: list[tuple[str, str, str]] = []
-        failed_streak = 0
+        attempted_calls = 0
         successful_calls = 0
+        failed_streak = 0
         strategy_nudges = 0
 
         # _iteration_decision(...) 的新参数，写进 TurnSnapshot
@@ -1258,6 +1276,7 @@ async def test_escalation_never_fires_without_tool_calls():
         # _run_tools 改为返回 outcomes，调用方计数（无测试直接调用私有方法，已核验）
         outcomes = await self._run_tools(...)
         successes = [item for item in outcomes if item.result.success]
+        attempted_calls += len(outcomes)
         successful_calls += len(successes)
         failed_streak = 0 if successes else (failed_streak + 1 if outcomes else failed_streak)
         failures.extend(

@@ -80,6 +80,12 @@ class AIConfig(BaseModel):
     # request's history was actually rewritten, so an ordinary turn pays nothing.
     working_memory_keep: int = 12
     working_memory_chars: int = 1200
+    # R6b: the escalation ladder (docs/r6-analysis.md 2.2).  A streak of failed
+    # iterations buys one strategy nudge; a turn in which nothing succeeds stops
+    # early.  0 disables either half.
+    failed_streak_threshold: int = 2
+    max_strategy_nudges: int = 1
+    stall_iterations: int = 3
 
 
 class TracingConfig(BaseModel):
