@@ -79,6 +79,23 @@ def test_skill_allow():
     assert d == PermissionDecision.ALLOW
 
 
+def test_ask_user_allow():
+    """R6c: asking is not doing.
+
+    WARN here meant the REPL asked "Allow ask_user?" before the model's question —
+    two prompts for one question, and any answer that was not "y" reached the model
+    as "the user declined" (measured in a live REPL run).
+    """
+    gate = _gate()
+    assert gate.check("ask_user", {"question": "改哪个？"}) == PermissionDecision.ALLOW
+
+
+def test_mcp_tool_names_are_still_warned():
+    """The fail-closed rule for genuinely unknown tools is unchanged."""
+    gate = _gate()
+    assert gate.check("mcp__github__create_issue", {}) == PermissionDecision.WARN
+
+
 def test_subagent_allow():
     gate = _gate()
     d = gate.check("subAgent", {"task": "do stuff"})

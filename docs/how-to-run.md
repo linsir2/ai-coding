@@ -129,6 +129,11 @@ R6 的验收（回合摘要环 / 收尾交接 / 失败升级 / `ask_user` / 记�
    模型自己说了话的回合不受影响。
 2. **`repl` 里模型可以反问你**：它会打印问题（附带可选项），你输入的回答直接作为工具结果回给模型；
    `ask`（一次性、无人工）里这个工具不存在，模型只能自行决定并写明假设。
+   注意：`ask_user` 现在**不在**审批门前（问一句不改变任何东西，答案要变成动作还得再走门），
+   所以你不会先被问一次「Allow ask_user?」。等待上限是 `tools.ask_user.timeout_seconds`（默认 300s）。
+   已知限制：把 stdin 管道喂给 `repl` 的脚本化场景里，prompt_toolkit 会先占住输入，
+   提问会降级成 `no_answer`（模型据此写假设）——真终端不受影响，但「复用同一 PromptSession」
+   是后续要做的改进。
 
 想关掉摘要环：把 `ai.working_memory_keep` 设为 0（或 `working_memory_chars` 设 0）；
 想关掉升级阶梯：把 `ai.stall_iterations` 与 `ai.failed_streak_threshold` 设为 0。

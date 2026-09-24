@@ -193,6 +193,24 @@ self-pipe send FAILED: errno=1 (EPERM) [Errno 1] Operation not permitted
 - **R3**（对应 §2.3）：交互组合确实接了 CLI 提问通道（`CLIUserPromptCallback`）+ 等待有上限 +
   脚本化回答变成结构化 `data.answer`。
 
+### R6c 在真 REPL 里的实测（做不到的部分也写清楚）
+
+本机没有可交互终端，于是用三种方式真跑：
+
+1. **管道喂 stdin 的 repl**：`ask_user` 的问题被打印出来；但 prompt_toolkit 的读取器已经把后续行
+   读进自己的缓冲，工具的 `input()` 读到 EOF，于是走**降级路径**——工具返回 `no_answer`，
+   模型自己写「用户未回答，先假设…」并把假设记进任务清单。**降级是优雅的，不是挂死。**
+2. **`script` 造的伪终端**：问题确实被打印（`优先修哪个文件？\n> `），工具停在**等待输入**上，
+   直到我 240s 的外部超时把它杀掉。也就是说：`tools.ask_user.timeout_seconds`（默认 300）
+   + 15s 收割余量确实是这条等待的上限。
+3. 早先的失败还暴露并修掉一个真缺陷：`ask_user` 原本落在权限门的「未知工具 = WARN」档，
+   REPL 会**先弹一次「Allow ask_user?」**——一个问题两次提示，而且任何不是 `y` 的输入都会变成
+   「user declined」。现在它在 ALLOW 表里（问一句不改变任何东西；答案要变成动作还得再走门）。
+
+**结论与后续**：机制接好了、可见、有界、降级优雅；「人在真终端里敲的那一行能否传给工具」
+在本环境无法验证。正确的修法是让 REPL 把它的 `PromptSession` 作为提问通道的 `input_fn`
+（同一读取器），记为 R7 候选。
+
 ```bash
 pytest          # 单元/集成(离线)全部通过；含 bash/worktree，无排除
 ruff check .    # 0 错误

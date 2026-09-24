@@ -4,7 +4,7 @@ Rules mirror the original Java ``PermissionGate``:
   - read / glob          → ALLOW
   - write / edit         → WARN
   - bash                 → WARN (hard-deny list → DENY)
-  - todo_write / skill / subAgent / memory_search → ALLOW
+  - todo_write / skill / subAgent / memory_search / ask_user → ALLOW
   - unknown tools        → WARN (fail-closed, conservative)
 """
 
@@ -91,6 +91,12 @@ class PermissionGate:
             "skill",
             "subagent",
             "memory_search",  # read-only recall (R3b)
+            # R6c: asking a question changes nothing by itself — the answer only
+            # becomes an action through further tool calls, which are gated on their
+            # own.  Leaving it WARN meant a REPL asked "Allow ask_user?" *before*
+            # the question: two prompts for one question, and any answer that was
+            # not "y" turned the question into "the user declined" (measured).
+            "ask_user",
         }
         self._warn_tools = {"write", "edit", "bash"}
 

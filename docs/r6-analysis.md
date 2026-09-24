@@ -754,9 +754,14 @@ sequenceDiagram
    如果拍板砍掉 R6d，R6 依然是完整的——这是我给它排最后的原因。
 7. **`turn_count` 对旧会话不回溯**：老会话从 1 重新开始，历史 note 的 `source_turn` 仍是旧值。
    想彻底一致就得写迁移脚本（移动数据），我判断不值得（D-R6-11）。
-8. **`ask_user` 在 REPL 里的终端行为未实测**：`CLIApprovalCallback` 是同一模式且长期在用，
-   但我没有在真 REPL 里手打验证（§8 的 R3 用脚本化 `input_fn`）。这是本次方案里**唯一**
-   我承认「证据弱」的地方，实现阶段必须补一次真 REPL 手工验收。
+8. **`ask_user` 在 REPL 里的终端行为**（实施后已实测三种方式，见 `docs/integration_testing.md`）：
+   ① 管道喂 stdin：问题被打印，但 prompt_toolkit 已把后续行读进自己的缓冲，工具读到 EOF →
+   **优雅降级**为 `no_answer`，模型写明假设继续；② 伪终端（`script`）：问题被打印，工具停在等待输入，
+   直到外部超时杀掉（说明 `timeout_seconds`+15s 就是这条等待的上限）；
+   ③ 由此暴露并修掉一个真缺陷——`ask_user` 原本在门的 WARN 档，REPL 会先弹一次审批，
+   一个问题两次提示，且非 `y` 的输入会变成「user declined」，现已进 ALLOW 表。
+   **仍未能验证的**：真人在终端里敲的那一行能否穿越 prompt_toolkit 到达工具；
+   正确修法是让 REPL 复用同一个 `PromptSession` 作为 `input_fn`（R7 候选）。
 9. **工具 schema 增长**：`ask_user` +286 字符（+72 est tokens/请求）。若在意，可在
    `ToolsConfig.ask_user.enabled=false` 时彻底不注册（默认 true，可关）。
 10. **执行期新增的两条自我修正**（都是被测试/实测逼出来的，已写进代码与文档）：
