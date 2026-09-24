@@ -31,6 +31,7 @@ __all__ = [
     "HEARTBEAT_SECONDS",
     "Deadline",
     "DeadlineExpired",
+    "remaining_of",
     "run_with_deadline",
 ]
 
@@ -68,6 +69,18 @@ class Deadline:
     @property
     def expired(self) -> bool:
         return self.remaining() <= 0
+
+
+def remaining_of(deadline: Deadline | None) -> float | None:
+    """Seconds left, floored at zero; ``None`` when there is no deadline.
+
+    Callers that pass this straight to ``run_with_deadline`` need "no ceiling" and
+    "no time left" to be different answers, and neither may be negative — the same
+    rule used to be written twice (docs/r5-analysis.md 1.3).
+    """
+    if deadline is None:
+        return None
+    return max(deadline.remaining(), 0.0)
 
 
 def _drain(task: asyncio.Task[Any]) -> None:

@@ -40,13 +40,13 @@ from ai_coding.core.events import (
     IterationStarted,
     LoopEvent,
     LoopObserver,
-    MemoryHarvested,
     MemoryInjected,
     NullObserver,
     TaskUpdated,
 )
 from ai_coding.core.guard import GuardChain, TurnView
 from ai_coding.core.hooks import HookDecision, HookPoint
+from ai_coding.core.memory_turn import TurnMemory
 from ai_coding.core.trace import short_json
 from ai_coding.core.turn_policy import (
     TaskInjection,
@@ -61,7 +61,12 @@ from ai_coding.domain.message import ChatMessage, ToolArtifact, ToolOutput
 from ai_coding.domain.run import assistant_message, tool_message, user_message
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
-from ai_coding.infra.deadline import Deadline, DeadlineExpired, run_with_deadline
+from ai_coding.infra.deadline import (
+    Deadline,
+    DeadlineExpired,
+    remaining_of,
+    run_with_deadline,
+)
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.security.approval import ApprovalCallback
 from ai_coding.security.permission_gate import PermissionGate
@@ -166,6 +171,8 @@ class AgentLoop:
         # R5: everything this turn says about itself (events, ledger, degradation)
         # lives in one unit, so the loop body only has to choreograph.
         self.reporter = TurnReporter(tools_text=self._tools_text, emit=self._emit)
+        # R5: the memory-facing half of a turn (block / harvest / status).
+        self.turn_memory = TurnMemory(memory, emit=self._emit, save=self._save)
         self.last_outcome: TurnOutcome | None = None
         self.last_artifacts: list[ToolArtifact] = []
 
@@ -262,7 +269,7 @@ class AgentLoop:
                 # only this small region diverges between turns (docs/r2 §1.13).
                 tail: list[ChatMessage] = []
                 tail_blocks: list[tuple[str, int]] = []
-                memory_block, memory_ids = self._memory_block()
+                memory_block, memory_ids = self.turn_memory.block()
                 if memory_block:
                     tail.append(
                         ChatMessage(role="user", content=memory_block, timestamp="")
@@ -392,7 +399,9 @@ class AgentLoop:
             )
 
         self._finalize(session, outcome)
-        await self._harvest(session, deadline, summaries, outcome)
+        await self.turn_memory.harvest(
+            session, deadline=deadline, summaries=summaries, outcome=outcome
+        )
         await self._fire_hooks(HookPoint.TURN_END, session)
         return outcome.text or ""
 
@@ -402,12 +411,7 @@ class AgentLoop:
 
     def memory_status(self) -> dict[str, Any]:
         """Memory counts for the UI (``/memory`` / ``/status``); never raises."""
-        if self.memory is None:
-            return {"total": 0, "active": 0, "pinned": 0, "by_kind": {}, "enabled": False}
-        try:
-            return dict(self.memory.status())
-        except Exception:  # noqa: BLE001 — memory is best-effort
-            return {"total": 0, "active": 0, "pinned": 0, "by_kind": {}, "enabled": False}
+        return self.turn_memory.status()
 
     async def compact_session(self, session: SessionData) -> dict[str, int]:
         """Compact the persisted history now (the ``/compact`` command).
@@ -489,9 +493,7 @@ class AgentLoop:
     @staticmethod
     def _remaining(deadline: Deadline | None) -> float | None:
         """Seconds left in the turn, or ``None`` when there is no ceiling."""
-        if deadline is None:
-            return None
-        return max(deadline.remaining(), 0.0)
+        return remaining_of(deadline)
 
     async def _compress(
         self,
@@ -541,24 +543,6 @@ class AgentLoop:
         )
 
     # ---- memory -----------------------------------------------------------
-
-    def _memory_block(self) -> tuple[str, tuple[str, ...]]:
-        """The volatile constraint block for this request (best-effort)."""
-        if self.memory is None:
-            return "", ()
-        try:
-            notes = self.memory.index_notes()
-            if not notes:
-                return "", ()
-            return self.memory.render_index_block(notes), tuple(n.id for n in notes)
-        except Exception:  # noqa: BLE001 — memory must never break a turn
-            _log.debug("memory index block failed", exc_info=True)
-            self.reporter.report_degraded(
-                "memory_block",
-                "memory index could not be rendered",
-                "no constraint block was injected",
-            )
-            return "", ()
 
     def _tool_context(
         self,
@@ -620,72 +604,6 @@ class AgentLoop:
                 "persist",
                 "the session file could not be written",
                 "the transcript stays in memory only",
-            )
-
-    async def _harvest(
-        self,
-        session: SessionData,
-        deadline: Deadline | None,
-        summaries: list[str],
-        outcome: TurnOutcome,
-    ) -> None:
-        """Reconcile **this turn's delta** into memory (best-effort, never raises).
-
-        The cursor lives in the session so a fresh loop (the CLI builds one per
-        turn) does not re-harvest the whole transcript — that is what produced 100
-        junk notes in case 8 of docs/r3-analysis.md.
-        """
-        if self.memory is None:
-            return
-        start = int(getattr(session, "harvested_messages", 0) or 0)
-        delta = session.messages[start:]
-        if not delta:
-            return
-        summary = "\n".join(text for text in summaries if text) or None
-        try:
-            report = await run_with_deadline(
-                self.memory.harvest(
-                    delta,
-                    turn_index=len(session.messages),
-                    session_id=session.session_id,
-                    summary=summary,
-                ),
-                timeout=self._remaining(deadline),
-                label="memory_harvest",
-            )
-            session.harvested_messages = len(session.messages)
-            self._save(session)
-            if report.added or report.updated or report.superseded or report.skipped:
-                self._emit(
-                    MemoryHarvested(
-                        added=tuple(report.added),
-                        updated=tuple(report.updated),
-                        superseded=tuple(report.superseded),
-                        skipped=tuple(report.skipped),
-                    )
-                )
-        except Exception:  # noqa: BLE001 — memory is best-effort, and now visible
-            _log.debug("memory harvest failed", exc_info=True)
-            self.reporter.report_degraded(
-                "memory_harvest",
-                "this turn's delta could not be reconciled",
-                "memory was left unchanged",
-            )
-            return
-        if outcome.text is None:
-            return  # nothing was concluded; no reason to wake consolidation
-        try:
-            await run_with_deadline(
-                self.memory.consolidate(),
-                timeout=self._remaining(deadline),
-                label="memory_consolidate",
-            )
-        except Exception:  # noqa: BLE001 — memory is best-effort
-            _log.debug("memory consolidation failed", exc_info=True)
-            self.reporter.report_degraded(
-                "memory_consolidate",
-                "index consolidation failed",
-                "the index was left as it was",
             )
 
     # ---- events -----------------------------------------------------------

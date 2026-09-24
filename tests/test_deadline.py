@@ -16,7 +16,24 @@ import time
 
 import pytest
 
-from ai_coding.infra.deadline import Deadline, DeadlineExpired, run_with_deadline
+from ai_coding.infra.deadline import (
+    Deadline,
+    DeadlineExpired,
+    remaining_of,
+    run_with_deadline,
+)
+
+
+# ---- R5: the "how long is left" helper had two copies -----------------------
+
+
+def test_remaining_of_returns_none_without_a_deadline():
+    assert remaining_of(None) is None
+
+
+def test_remaining_of_never_goes_negative():
+    assert remaining_of(Deadline.after(0.5)) > 0
+    assert remaining_of(Deadline.after(-5)) == 0.0
 
 
 @pytest.mark.asyncio
