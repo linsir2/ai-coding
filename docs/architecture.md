@@ -20,6 +20,8 @@ ai_coding/
 ├─ core/           自持循环、工具分发、事件、上下文压缩、MCP、子智能体、worktree、项目说明
 │                  R4 追加：observers（扇出）、trace（轨迹+脱敏）、budget（账本）、guard（门卫）、hooks（钩子）
 │                  R5 拆出：turn_report / memory_turn / compaction / request_builder
+│                  R7 拆出：turn_books（回合账本 + TurnFrame）/ turn_close（收尾交接）
+│                              request_assembly（一次请求的组装）/ turn_hooks（钩子的两次调用）
 ├─ service/        会话持久化
 ├─ memory/         记忆检索 / 提取 / 聚合
 ├─ skills/         技能目录注册表

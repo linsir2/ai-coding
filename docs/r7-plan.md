@@ -453,3 +453,37 @@ def test_auto_approve_server_is_allowed():
    `docs/integration_testing.md`；Task 12 的 npx 冷启动数字沿用 R4 实测（本机未再拉 npx）。
 6. **顺序依赖**：Task 1–4 必须先做（后面三个切片都要改 `process_input`）；
    Task 5–7、8、9–10、11–12 相互独立；Task 13 最后。
+
+---
+
+## 执行状态（实施后回填，含与计划的偏差）
+
+四件事全部落地。质量门禁在收尾时跑：**942 passed / 2 skipped**、`ruff` 0、`mypy` 0（91 文件）、
+`scripts/r7_cases.py` 11/11（离线）+ 3/3（真实：pty / MCP 工具面 / 真模型回合）。
+
+| Task | 状态 | 提交 | 与计划的偏差 |
+|---|---|---|---|
+| 1 账本 | ✅ | `R7a-1` | 测试写了 14 条（计划 12 条：补了「空批次不重置 streak」「成功不进失败表」） |
+| 2 尾部小函数 | ✅ | `R7a-2` | —— |
+| 3 收尾单元 | ✅ | `R7a-3` | 多了一条「保存失败只报不抛」的用例；`TurnCloser` 不接 `emit`（它只用 reporter） |
+| 4 循环瘦身 | ✅ | `R7a-4a` + `R7a-4` | **多搬了三处**才到 ≤650：`TurnFrame` 进 `turn_books`、`RequestAssembler` 新建、`TurnHooks` 新建、`SafeObserver` 进 `observers`。最终 **578 行 / `process_input` 139 行**（目标 ≤650 / ≤150） |
+| 5–7 L2 | ✅ | `R7b` | 13 条用例合一提交（计划拆 3 个）；**改了一条既有断言**（见下） |
+| 8 `memory_write` | ⏸ | —— | Q8 未拍板，跳过（仍是候选） |
+| 9–10 人在环 | ✅ | `R7c` | pty 用例门控；**多了一个默认跑的 stdin 回归用例**（实施时发现真正的坏场景是脚本管道，见 §1.4 的更正） |
+| 11–12 MCP | ✅ | `R7d` | 多加了 `scripts/mcp_many_tools_server.py`（让工具面测量可复现）；**改了 `test_mcp_defaults` 的超时断言**（见下） |
+| 13 验收脚本 | ✅ | `R7d` 之后 | 做了 11 离线 + 3 真实；没有单独做「真模型的 tools_chars/审批事件计数」那条（`turn_still_works` 报告了 `tools_chars`，够用） |
+
+**两处既有断言被改**（都是本轮**按设计重定义**的契约，不是测试写错）：
+
+1. `tests/test_context_compression.py::test_placeholder_marks_older_keeps_recent`：
+   旧断言钉的是 `[Previous: used bash]` 这个「正文即丢」的字面量，正是 R7b 要治的病；
+   改成不变量式（信封 + 路径 + 配对字段 + 确实变小），意图不变。
+2. `tests/test_config_loader.py::test_mcp_defaults`：`connection_timeout` 30 → 60（Q6 已拍板）。
+
+**计划外发现（值得记一笔）**：
+
+- `max_messages` 的默认值文档里写的是 50，代码里是 **400**（R3b 之后它只在预算被突破时才触发），
+  这次顺带把 `docs/data-contracts.md` 改正了 —— 它决定了 L1 会不会先动手，也就决定了 L2 的舞台有多大。
+- **R6c 的未验证项其实没坏**：真人手里 `input()` 一直能读到答案；坏的是**脚本一次性喂多行**
+  （prompt_toolkit 先占住 stdin → 工具读到 EOF）。为避免下次误传，更正写进了 `docs/r7-analysis.md` §1.4，
+  并固化成默认跑的回归用例。

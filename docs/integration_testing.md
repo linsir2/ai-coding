@@ -164,6 +164,40 @@ self-pipe send FAILED: errno=1 (EPERM) [Errno 1] Operation not permitted
 
 ## 回归
 
+### R7 验收脚本（`scripts/r7_cases.py`）
+
+离线 11 条（无网络）：
+
+```bash
+.venv/bin/python scripts/r7_cases.py
+```
+
+覆盖：账本喂给决策 / 无话可说的回合给交接 / L2 信封可回收 / 窗口预算从新到旧 /
+短正文不动 / 70 轮长史压到预算一半以下 / 真 ContextManager 落盘被清正文 /
+审批超时（有界且与「用户拒绝」区分）/ 同步审批回调不再冻住事件循环 /
+MCP 信任按 server 生效 / MCP 注册白名单过滤。
+
+真实 3 条（需要 `config.local.yaml`；**只报告不判定退出码**）：
+
+```bash
+.venv/bin/python scripts/r7_cases.py --real --config config.local.yaml
+```
+
+| 案例 | 判据 |
+|---|---|
+| `pty_ask_user` | 真 pty 里跑 `run_repl`，脚本先申请任务、再回答模型的问题；断言**工具结果**里出现所答内容 |
+| `mcp_tool_surface` | 真 stdio 起 `scripts/mcp_many_tools_server.py`（13 工具），打印 no-MCP / 全注册 / 白名单三档 `tools_chars` |
+| `turn_still_works` | 用组合根跑一个真模型回合，断言有答案、有终态、`tools_chars > 0` |
+
+另有两条各自门控的用例（默认 skip，见 `docs/r7-analysis.md` §12 Q4）：
+
+```bash
+AI_CODING_PTY=1 .venv/bin/python -m pytest tests/test_repl_ask_user_pty.py -q   # 真终端
+AI_CODING_MCP_STDIO=1 .venv/bin/python -m pytest tests/test_mcp_stdio.py -q     # 真 stdio
+```
+
+`tests/test_repl_ask_user_stdin.py` 默认跑：它是 R7c 的回归用例（旧代码 `reason=eof`、新代码答对）。
+
 ### R6 验收脚本（`scripts/r6_cases.py`）
 
 离线 9 条（无网络，退出码即结论）：
