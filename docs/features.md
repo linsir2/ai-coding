@@ -18,7 +18,9 @@ ai-coding 以「**自持 ReAct 循环** + 工具调用」为核心模型：用�
 
 ## 内置工具
 
-主工具栈由 `tools/builder.py` 装配。默认 7 个工具随配置注册（bash/read/write/edit/glob 受 `tools.*.enabled` 控制），`todo_write`、`subAgent` 始终注册；提供 `--skills` 技能目录后再追加 `skill` 工具，共 8 个。每个工具实现 `BaseTool` 契约（`name`/`description`/`params_json_schema`/`execute`），经 `sdk_adapter` 包装成 SDK FunctionTool。
+主工具栈由 `tools/builder.py` 装配。默认 7 个工具随配置注册（bash/read/write/edit/glob 受 `tools.*.enabled` 控制），`todo_write`、`subAgent` 始终注册；提供 `--skills` 技能目录后再追加 `skill` 工具，共 8 个。
+记忆开启时组合根再追加 `memory_search`（读）与 **`memory_write`（写，R7e-1）**——后者是模型自己写一条耐久记忆的通道；
+**子智能体的工具栈里没有任何记忆工具**（它连写入口都不该有）。每个工具实现 `BaseTool` 契约（`name`/`description`/`params_json_schema`/`execute`），经 `sdk_adapter` 包装成 SDK FunctionTool。
 
 | 工具 | 权限级别 | 行为要览 |
 |---|---|---|
@@ -35,7 +37,7 @@ ai-coding 以「**自持 ReAct 循环** + 工具调用」为核心模型：用�
 
 ## 安全与权限
 
-- **权限门**：`PermissionGate` 对每次工具调用判定 ALLOW / WARN / DENY。`read`/`glob`/`todo_write`/`skill`/`subAgent` ALLOW；`write`/`edit`/`bash` WARN；未知工具保守归为 WARN；bash 命中硬拒绝模式（`rm -rf /`、`sudo `、`shutdown`、`reboot`、`mkfs`、`dd if=`、`> /dev/sd`、强制 git push、`chmod 777` 等）直接 DENY。
+- **权限门**：`PermissionGate` 对每次工具调用判定 ALLOW / WARN / DENY。`read`/`glob`/`todo_write`/`skill`/`subAgent`/`memory_search`/`memory_write` ALLOW；`write`/`edit`/`bash` WARN；未知工具保守归为 WARN；bash 命中硬拒绝模式（`rm -rf /`、`sudo `、`shutdown`、`reboot`、`mkfs`、`dd if=`、`> /dev/sd`、强制 git push、`chmod 777` 等）直接 DENY。
 - **审批接线**：WARN 层由 `approval` 回调解析。非交互 `ask` 默认 `AutoApproveCallback`（WARN 放行，DENY 仍拦截）；交互 `repl` 用 `CLIApprovalCallback`，对 write/edit/bash 弹 y/N/s 询问用户。既满足了「AI 助手能写文件」，又保留了危险操作的确认与硬拒绝兜底。
 - **沙箱**：`Sandbox` 将文件工具的所有路径解析限制在工作区内，`..`、绝对路径、符号链接逃逸一律抛 `SandboxViolation`。
 - **过期读保护**：`FileStateTracker` 记录最近一次读取的快照，写入/编辑前比对 `mtime`+`size`；未被读过（`NEVER_READ`）或内容被外部改动（`STALE`）时阻止写入，防止盲写与覆盖外部修改。
@@ -91,6 +93,7 @@ R3 重写。记忆层现在回答三个问题：**写什么、什么时候写、
 | 尾部易失块 `<memory-constraints>` | `pinned` + 最近决策，≤600 字符，空则不注入 | 只有这一小块每轮变化 |
 | 历史（只追加） | 对话、工具结果、`memory_search` 结果 | 追加不破坏前缀 |
 | 工具 `memory_search` | 按需召回的详情（id/kind/score） | 结果进历史，**之后长期命中缓存** |
+| 工具 `memory_write` | 模型主动写下的一条耐久记忆（R7e-1） | 走 `_reconcile` 这唯一写路径，带 `evidence="model"`，`/memory` 可查可删 |
 
 实测对比（同一内容、同长度）：记忆放系统提示前缀命中 **7%**，放尾部 **94%**；
 每轮压缩历史中段只有 **26%**（现在改为按预算分页压缩后 92%）。

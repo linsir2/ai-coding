@@ -137,6 +137,7 @@ R6 的验收（回合摘要环 / 收尾交接 / 失败升级 / `ask_user` / 记�
    `tests/test_repl_ask_user_pty.py` 门控 `AI_CODING_PTY=1`）。
 
 想关掉摘要环：把 `ai.working_memory_keep` 设为 0（或 `working_memory_chars` 设 0）；
+
 想关掉升级阶梯：把 `ai.stall_iterations` 与 `ai.failed_streak_threshold` 设为 0。
 
 ## R7 新增配置与行为
@@ -181,3 +182,31 @@ mcp:
 | 写文件被阻止（`NEVER_READ` / `STALE`） | 过期读保护：先让模型 `read` 该文件再写，或目标文件被外部改动。 |
 | 文件工具路径报 `outside workspace` | 路径越出 `--workspace`，沙箱拦截。 |
 | bash 非零退出但仍返回失败 | 命令返回码非 0 即 `success=false`，`output` 含 stdout+stderr。
+
+
+## R7e 新增配置与行为
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `ui.steering` | true | 回合进行中显示 `steer>` 提示并接受转向；关掉＝回到今天「等它跑完」的安静 UX |
+| `ai.steering_max_messages` | 5 | 一次抽干最多吸收几条（多出来的留在队列，下一轮/下一回合继续） |
+| `ai.steering_max_chars` | 2000 | 单条上限，超出截断 |
+| `ai.tools_chars_warn` | 12000 | 工具面超此值发一次 `[tools] …` 提示；0 关闭 |
+| `ai.subagent_context_mode` | `full` | `task_only` 让子智能体用干净窗口（省每一步的上下文，但要求你把背景写进 `task`） |
+
+**四件事怎么用**：
+
+1. **回合中改方向**：agent 在跑工具时直接打字回车——那句话会在**下一次迭代**变成一条
+   `[steering] …` 指令（持久化，可回放），而不是等它跑完或 Ctrl-C 丢掉已有工作。
+   以 `/` 开头的行是命令，会留到回合结束再执行（与 Claude Code 的排队语义一致）。
+2. **模型自己记一笔**：`memory_write` 工具，写一句话、选 `fact/decision/preference/open_thread`；
+   重复写同一句不会报错（返回既有 id），要改旧结论就带 `supersedes`。写完 `/memory` 里能看到
+   `evidence=model` 的那条。
+3. **工具面超支会说一次**：`[tools] 13301 字符（阈值 12000）· everything=10062 · local=4280`，
+   并提示用 `mcp.servers[].tools` 只注册需要的工具。
+4. **子智能体的账单**：`ai.subagent_context_mode: task_only` 时它不再继承父回合的请求视图
+   （省的是它每一步的 prompt），代价是它看不到你的对话——父回合必须把事实写进 `task`；
+   工具描述会自动改成提醒这件事的措辞。
+
+验收脚本：`.venv/bin/python scripts/r7e_cases.py`（离线 9 条）；
+`--real` 再加 3 条真实用例（真 pty 的转向、真 pty 的提问、真模型一个回合）。

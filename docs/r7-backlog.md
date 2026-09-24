@@ -102,9 +102,14 @@
 | R7c | **人在环两处收口**（2.3 + 2.4） | 都是小改动；一个防挂死，一个补 R6c 唯一未验证的路径 | 卡住的审批不再挂死整回合（有超时用例）；真 pty 下 `ask_user` 的答案能进工具结果（脚本化 pty 取证） | ✅ 1.0s 的回合不再被 5s 的审批拖成 5.00s（现在 1.00s，`approval_timeout` 是独立结果）；**更正**：真人路径一直能读到答案，坏的是脚本管道（旧 `eof` → 新 `answer="改 A"`） |
 | R7d | **MCP 工具面治理**（3.1 + 3.2 + 3.3） | 每步 prompt 成本 × 每次调用的审批噪音，两个实测数字都在手上（10481 chars / 每次弹审批 / 27s vs 30s） | 配置了 allow 策略的 server 不再弹审批；给出「按需注册」前后 `tools_chars` 对照 | ✅ `servers[].auto_approve`（默认 false）免审批；`servers[].tools` 让工具面 **13,301 → 5,666**（-57%）；`connection_timeout` 30 → 60 |
 
-候选池（有空再挑，不必进 R7）：2.2 模型写的 checkpoint、2.5 evidence 参与排序、3.4 context_mode、
+候选池（有空再挑，不必进 R7）：2.2 模型写的 checkpoint、2.5 evidence 参与排序、
 3.5 depends_on 硬门禁、3.6 工具流式/取消、4.1 SQLite+FTS5（待你定性质）、5.1/5.2/5.3 观测三件、
 5.5/5.6 工程习惯、5.7 真实基准。
+
+**已由 R7e 做掉**（见 `docs/r7e-analysis.md` / `docs/r7e-plan.md`）：
+- 3.4 `subagent.context_mode`（`full` / `task_only`）——第 3.4 行关闭；
+- 3.2 的工具面治理**再加一半**：超阈值时每 loop 一次 `[tools]` 提示（R7d 给的是开关，R7e 给的是提醒）；
+- `r7-analysis.md` §2.5 优化菜单里的 **O2 `memory_write`**、**O4 回合级 steering**、**O5 工具面阈值告警**、**O6 `context_mode`**：四条全部落地。
 
 ---
 

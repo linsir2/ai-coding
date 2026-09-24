@@ -242,6 +242,8 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 |---|---|---|
 | `ModelStepFinished` | `index`、`finish_reason`、`text_chars`、`tool_call_count`、`usage`、`cached_tokens`、`cache_write_tokens`、`latency_ms` | 一次模型步的**真实**用量与延迟；`cached_tokens` 是 provider 报的缓存命中（不是估算） |
 | `ContextAssembled` | `iteration`、`system_chars`、`tools_chars`、`history_messages`、`history_chars`、`tail_blocks`、`estimated_tokens`、`prefix_shared_chars`、`prefix_shared_ratio`、`digest` | 请求由什么拼成；`tools_chars` 计入估算（工具 schema 也是 prompt 的一部分，实测约 5k 字符） |
+| `ToolSurfaceWarning`（R7e-3） | `tools_chars`、`threshold`、`origins`、`hint` | 工具面超阈值时**每个 loop 一次**的成本提示（纯观测，不改请求） |
+| `InputSteered`（R7e-2） | `text_chars`、`iteration`、`total` | 用户回合中途补的那句话已经变成指令 |
 | `Degraded` | `component`、`reason`、`fallback` | 增强组件静默降级**可见化**（压缩/记忆/落盘/隔离/观察者） |
 | `ScopedEvent` | `scope`、`parent`、`event` | 子智能体事件带父子归属扇出到父观察者 |
 
@@ -356,3 +358,31 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 
 `<memory-constraints>` 的 `index_max_chars` 约束的是**渲染后的整块**（含包装标签），
 由三条测试锁死：每行都是指针、总量不超预算、普通事实增长不推高它。
+
+
+## R7e 记忆写 / 转向 / 工具面告警 / 子智能体上下文契约
+
+### `AIConfig` 新增项
+
+| 配置 | 默认 | 作用 |
+|---|---|---|
+| `subagent_context_mode` | `full` | 子智能体起始上下文：`full`（父回合请求视图 + 父系统提示）或 `task_only`（干净窗口 + 组合根基础提示） |
+| `tools_chars_warn` | `12000` | 工具面超此阈值时发一次 `ToolSurfaceWarning`；0 = 关闭 |
+| `steering_max_messages` | `5` | 一次抽干最多吸收几条转向输入；多出来的留在队列 |
+| `steering_max_chars` | `2000` | 单条转向输入的字符上限（超出截断并加省略号） |
+
+### `AppConfig` 新增块
+
+`ui: UIConfig`，目前只有 `ui.steering: bool = true`（回合进行中是否显示 `steer>` 提示并接受转向）。
+
+### 字段与工具
+
+| 契约 | 位置 | 说明 |
+|---|---|---|
+| `SubagentResult.context_mode` | `domain/subagent.py` | 这次子回合用的是哪种窗口（也在 `to_dict()` 里） |
+| `BaseTool.origin` | `tools/base.py` | 工具来源，默认 `"local"`；`MCPToolAdapter` 返回 server 名 |
+| `ToolContext.turn` | `tools/base.py` | 当前回合号（`source_turn` 用；默认 0） |
+| `MemoryService.write_note(...)` | `memory/service.py` | 模型写记忆的唯一入口，内部复用 `_reconcile`，`evidence="model"` |
+| 工具 `memory_write` | `tools/memory_write_tool.py` | 参数 `text`/`kind`/`importance`/`supersedes`；文本上限 500 字符 |
+| `SteeringQueue` | `core/steering.py` | `put(text) -> bool`（`/` 开头与空行返回 False）、`pending`、`drain()` |
+| `InteractiveReader` | `ui/reader.py` | 唯一读取器 + 仲裁（问题 / 转向 / 命令 / 输入） |

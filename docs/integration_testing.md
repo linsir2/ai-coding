@@ -164,6 +164,26 @@ self-pipe send FAILED: errno=1 (EPERM) [Errno 1] Operation not permitted
 
 ## 回归
 
+### R7e 验收脚本（`scripts/r7e_cases.py`）
+
+离线 9 条（无网络）：
+
+```bash
+.venv/bin/python scripts/r7e_cases.py
+```
+
+覆盖：`memory_write` 新增与去重 / 子智能体栈没有记忆工具 / 工具面告警每 loop 一次 /
+告警不改变请求（逐字节）/ 转向成为持久化指令 / 转向的余量留在队列 /
+转向只重置失败连胜 / `task_only` 的干净窗口 / `full` 仍然继承父上下文。
+
+真实 3 条（`--real`，**只报告不判定退出码**）：
+
+| 案例 | 判据 |
+|---|---|
+| `pty_steering` | 真 pty 里跑带 reader 的 REPL；在慢工具执行期间打字，断言 transcript 里出现 `user:[steering] …` |
+| `pty_ask_user_through_reader` | 真 pty：模型提问，答案经由同一个 reader 进工具结果 |
+| `turn_still_works` | 组合根跑一个真模型回合，断言有答案、有终态，并打印注册的工具名（应含 `memory_write`） |
+
 ### R7 验收脚本（`scripts/r7_cases.py`）
 
 离线 11 条（无网络）：

@@ -2896,5 +2896,32 @@ Task 1–9 与它完全无关，任何情况下都不会白做。
 
 **2. Inline Execution** —— 在当前会话里按 executing-plans 分批执行，到检查点停下来给你看。
 
-> 本项目的既有约定是**不派子任务、由主模型自己按 TDD 实现**（你在早前明确过一次），
-> 所以我默认走 **Inline Execution**；如果你想换成子智能体并行，说一声即可。
+### 执行状态（2026-09-24，全部完成）
+
+按 **Inline Execution**（不派子任务、主模型自己按 TDD）执行，15 个任务全部落地，每个任务一个提交。
+
+| Task | 状态 | 提交 | 偏差 |
+|---|---|---|---|
+| 1 配置面 | ✅ | `R7e-4a` | —— |
+| 2 子智能体两种上下文 | ✅ | `R7e-4b` | 补了 `ChatMessage` 的 import（mypy 抓到） |
+| 3 基础提示词 + 描述 + 透传 | ✅ | `R7e-4c` | `ask`/`repl` 两处调用点也都补了 `base_instructions` |
+| 4 `origin` | ✅ | `R7e-3a` | 用例放进 `tests/test_tool_origin.py`（比计划里的草稿更干净） |
+| 5 工具面告警 | ✅ | `R7e-3b` | `registry.all_tools` 是**属性**不是方法（mypy 抓到） |
+| 6 渲染一行 | ✅ | `R7e-3c` | —— |
+| 7 `write_note` | ✅ | `R7e-1a` | 淘汰用例的文本必须**真的不相似**（相似度 ≥0.8 会被合并，那是去重在工作） |
+| 8 `memory_write` + `ToolContext.turn` | ✅ | `R7e-1b` | —— |
+| 9 门卫与注册 | ✅ | `R7e-1c` | 注册用例走 `_build_loop` + 一个假 engine，不需要 `config.local.yaml` |
+| 10 Phase 0 spike | ✅ | `R7e-2`（文档） | **四项全过**，终端侧照计划做 |
+| 11 队列 + 账本 | ✅ | `R7e-2a` | `put` 返回 `bool`（拒 `/` 行） |
+| 12 循环抽干 | ✅ | `R7e-2b` | 两处用例预期按**行为**修正：预填队列在第 1 轮就被吸收；两轮回合会抽干两次 |
+| 13 reader + REPL | ✅ | `R7e-2c` | 单测用可注入的 prompt（带 gate 消除竞态）；`for_terminal` 里 `session` 需 `Any` 注解 |
+| 14 提问走 reader | ✅ | `R7e-2d` + 一个 fix | 第一次提交漏了 mypy（管道吞掉退出码），补 `R7e-2d fix` |
+| 15 验收脚本 + 文档 | ✅ | 见下 | 脚本的假 engine 要存 `{messages, instructions}`，否则子智能体用例取不到 instructions |
+
+**收尾核验**（实测）：`pytest tests/ -o addopts="" -q` → **1010 passed / 2 skipped**；
+`ruff` 0；`mypy` 0（94 文件）；`scripts/r7e_cases.py` → 离线 **9/9**、`--real` → **12/12**
+（真 pty 转向、真 pty 提问、真模型回合各一条）；既有 `r7_cases.py` 11/11、`r6_cases.py` 9/9、
+`memory_cases.py` 11/11、`trace_cases.py` 6/6 全部仍然通过；R7c 的两条门控终端用例也仍然通过。
+
+**两处「按行为修正用例」**（不是产品缺陷，写在这里备查）：Task 12 的两条、Task 7 的一条；
+理由都写进了各自的提交信息。
