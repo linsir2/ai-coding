@@ -27,8 +27,8 @@ from ai_coding.ai.engine import ChatEngine
 from ai_coding.ai.prompt import PromptAssembler
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
-from ai_coding.core.events import Degraded
 from ai_coding.core.observers import ScopedObserver
+from ai_coding.core.turn_report import report_degraded
 from ai_coding.core.worktree import WorktreeError
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.subagent import ParentContext, SubagentResult
@@ -129,7 +129,12 @@ class SubAgentRunner:
                             task, name, str(wt.path), parent, parent_span=parent_span
                         )
                 except WorktreeError:
-                    self._degrade("worktree_isolate", "the worktree could not be created")
+                    report_degraded(
+                        self._observer,
+                        "worktree_isolate",
+                        "the worktree could not be created",
+                        "ran in the main workspace instead",
+                    )
             return await self._run_in(task, name, None, parent, parent_span=parent_span)
 
     # ---- internals --------------------------------------------------------
@@ -143,21 +148,6 @@ class SubAgentRunner:
             parent=parent_span or "subagent",
             inner=self._observer,
         )
-
-    def _degrade(self, component: str, reason: str) -> None:
-        """Report a fallback (R4a) without letting the report itself fail."""
-        if self._observer is None:
-            return
-        try:
-            self._observer.on_event(
-                Degraded(
-                    component=component,
-                    reason=reason,
-                    fallback="ran in the main workspace instead",
-                )
-            )
-        except Exception:  # noqa: BLE001 — reporting must never break a run
-            _log.debug("sub-agent degraded report failed", exc_info=True)
 
     async def _run_in(
         self,

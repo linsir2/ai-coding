@@ -33,6 +33,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 from ai_coding.config.models import MCPConfig, MCPServerConfig
+from ai_coding.core.turn_report import report_degraded
 from ai_coding.domain.message import ToolResult
 from ai_coding.infra.deadline import DeadlineExpired, run_with_deadline
 from ai_coding.tools.base import BaseTool, ToolContext
@@ -235,23 +236,6 @@ class MCPManager:
         # rather than only skipped (docs/r4-analysis.md 1.1, point 3).
         self._observer = observer
 
-    def _degrade(self, server_name: str, reason: str) -> None:
-        """Say that a server was skipped, without letting the report fail."""
-        if self._observer is None:
-            return
-        from ai_coding.core.events import Degraded
-
-        try:
-            self._observer.on_event(
-                Degraded(
-                    component="mcp_server",
-                    reason=f"server '{server_name}': {reason}",
-                    fallback="its tools are not available this run",
-                )
-            )
-        except Exception:  # noqa: BLE001 — reporting must never break a run
-            _log.debug("mcp degraded report failed", exc_info=True)
-
     async def open_all(self) -> list[BaseTool]:
         """Connect every enabled server; a failure skips just that server."""
         if not self._config.enabled:
@@ -271,9 +255,12 @@ class MCPManager:
             self._owners.append(owner)
             owner.start()
             if not await owner.wait_ready(self._connection_timeout):
-                self._degrade(
-                    server.name,
-                    f"did not become ready within {self._connection_timeout:g}s",
+                report_degraded(
+                    self._observer,
+                    "mcp_server",
+                    f"server '{server.name}': did not become ready within "
+                    f"{self._connection_timeout:g}s",
+                    "its tools are not available this run",
                 )
                 continue
             for tool in owner.tools:
