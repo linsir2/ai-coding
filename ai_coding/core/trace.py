@@ -18,23 +18,33 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
+import time
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from ai_coding.domain.message import ChatMessage
 
 __all__ = [
     "REDACTION_MARK",
+    "TRACE_VERSION",
     "Redactor",
+    "TraceStore",
+    "TurnWriter",
+    "canonical_request",
     "digest_of",
+    "now_iso",
     "prefix_shared",
+    "short_json",
 ]
 
 _log = logging.getLogger(__name__)
 
 REDACTION_MARK = "«redacted»"
+TRACE_VERSION = 1
 
 # High-confidence shapes only.  A missed secret is worse than an ugly trace, but a
 # pattern that eats ordinary prose makes the trace useless — so these all require
@@ -136,9 +146,140 @@ def canonical_request(
 
 def now_iso() -> str:
     """UTC timestamp for trace lines (millisecond precision)."""
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 def short_json(obj: Any) -> str:
     """Compact JSON for a trace line body."""
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+class TurnWriter:
+    """Append-only writer for one turn's trace, bounded by a byte cap.
+
+    Once the cap is reached the writer emits a single ``truncated`` marker and
+    refuses everything after it — a half-written line is never worth keeping.
+    """
+
+    def __init__(self, path: Path, *, max_bytes: int) -> None:
+        self.path = path
+        self.max_bytes = max(1, int(max_bytes))
+        self.truncated = False
+        self._written = 0
+        self._failed = False
+
+    def _append(self, line: str) -> bool:
+        try:
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError:
+            self._failed = True
+            return False
+        self._written += len(line.encode("utf-8")) + 1
+        return True
+
+    def write_line(self, line: str) -> bool:
+        """Append one line.  Returns ``False`` if it was dropped."""
+        if self._failed or self.truncated:
+            return False
+        if self._written + len(line.encode("utf-8")) + 1 > self.max_bytes:
+            self.truncated = True
+            self._append(
+                short_json(
+                    {
+                        "v": TRACE_VERSION,
+                        "ts": now_iso(),
+                        "evt": "truncated",
+                        "data": {"reason": "max_turn_bytes", "limit": self.max_bytes},
+                    }
+                )
+            )
+            return False
+        return self._append(line)
+
+
+class TraceStore:
+    """Where traces live, how they are numbered, capped and cleaned up."""
+
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        max_turn_bytes: int = 2_000_000,
+        retention_days: int = 14,
+    ) -> None:
+        self.root = Path(root)
+        self.max_turn_bytes = max(1, int(max_turn_bytes))
+        self.retention_days = max(0, int(retention_days))
+
+    def session_dir(self, session_id: str) -> Path:
+        return self.root / (session_id or "unknown")
+
+    def begin_turn(self, session_id: str) -> TurnWriter:
+        """Open the next turn file for ``session_id`` (numbering is on disk)."""
+        directory = self.session_dir(session_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"turn-{self.next_turn_number(session_id)}.jsonl"
+        # Touch it now: numbering is derived from the directory listing, so two
+        # turns starting back-to-back must not both claim the same file name.
+        try:
+            path.touch(exist_ok=True)
+        except OSError:
+            _log.debug("trace file touch failed", exc_info=True)
+        return TurnWriter(path, max_bytes=self.max_turn_bytes)
+
+    def next_turn_number(self, session_id: str) -> int:
+        directory = self.session_dir(session_id)
+        highest = 0
+        if directory.is_dir():
+            for entry in directory.glob("turn-*.jsonl"):
+                stem = entry.stem.removeprefix("turn-")
+                if stem.isdigit():
+                    highest = max(highest, int(stem))
+        return highest + 1
+
+    def summary_path(self, session_id: str) -> Path:
+        return self.session_dir(session_id) / "summary.json"
+
+    def update_summary(self, session_id: str, payload: Mapping[str, Any]) -> None:
+        """Merge ``payload`` into the session summary, atomically."""
+        path = self.summary_path(session_id)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            merged: dict[str, Any] = {}
+            if path.is_file():
+                try:
+                    loaded = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        merged = loaded
+                except (OSError, ValueError):
+                    merged = {}
+            merged.update(payload)
+            temp = path.with_suffix(".json.tmp")
+            temp.write_text(short_json(merged), encoding="utf-8")
+            os.replace(temp, path)
+        except OSError:
+            _log.debug("trace summary write failed", exc_info=True)
+
+    def prune(self, now: float | None = None) -> int:
+        """Delete session directories whose last write is past retention."""
+        if self.retention_days <= 0 or not self.root.is_dir():
+            return 0
+        cutoff = (now if now is not None else time.time()) - self.retention_days * 86400
+        removed = 0
+        for entry in self.root.iterdir():
+            if not entry.is_dir():
+                continue
+            try:
+                if entry.stat().st_mtime >= cutoff:
+                    continue
+                for child in sorted(entry.rglob("*"), reverse=True):
+                    if child.is_file():
+                        child.unlink()
+                    else:
+                        child.rmdir()
+                entry.rmdir()
+            except OSError:
+                continue
+            removed += 1
+        return removed
