@@ -5,6 +5,21 @@
 > 步骤用 `- [ ]` 打勾跟踪。**计划路径按用户约定为 `docs/r6-plan.md`**（覆盖技能默认的
 > `docs/superpowers/plans/`）。
 
+> **执行状态（2026-09-24）：全部 13 个任务已实施并提交。** 与计划的四处偏差，均已写回本文与
+> `docs/r6-analysis.md`：
+>
+> 1. **Task 1+2 合成一个提交**——Task 1 的会话往返测试在 Task 2 的字段存在前不可能变绿，
+>    分开提交会留下一个红灯提交；
+> 2. **stall 判据增加 `attempted_calls > 0`**——第一版只看 `successful_calls == 0`，
+>    被既有测试 `test_strict_policy_ignores_the_nudge_cap` 当场抓住（只说话不调工具的回合
+>    不是「零进展」），计划里的 Task 5 Step 3 已同步；
+> 3. **真实案例的 R2 断言按实测重写**——12 行环够不到第 3 轮的决策，改成问「被压缩掉但仍在环内」
+>    的那一轮（第 66 轮）；真实案例整体改为**只报告不判定退出码**（LLM 首步选择有随机性）；
+> 4. **`scripts/memory_cases.py` case 8 改为断言不变量**——它断言的「决策在最后两条消息里」
+>    是位置假设，R6a 的四段尾部让它失效（决策仍被注入每个请求）。
+>
+> 另外实现把摘要单元放在 `domain/` 而非计划初稿的 `core/`（见 r6-analysis.md §2.1 的说明）。
+
 **Goal:** 让「压缩后的中段记忆」和「预算耗尽的回合」不再丢失——用 harness 自己派生的一行摘要与一份收尾交接，加上一次换策略提示、一个可被提问的人在环工具、一个记忆证据字段。
 
 **Architecture:** 新增 `domain/turn_digest.py`（持久值对象 + 渲染，仿 `TaskState` 自带 `render()`）；`TurnOutcome` 增 `handoff`（harness 写的收尾报告，**不改 `text` 语义**）；`SessionData` 增 `turnCount` / `turnDigests` 有界环；易失尾部新增第四块 `digest`，**只在本轮历史被真正改写时注入**；`TurnPolicy` 增「连续失败 → 换策略」与「零成功 → 提前收尾」两档；新增 `security/user_prompt.py` + `tools/ask_user_tool.py`（阻塞式回调，答案即 `ToolResult`）；`MemoryNote` 增 `evidence` 元数据（只观测，不过滤）。

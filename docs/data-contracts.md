@@ -98,7 +98,7 @@ mcp:               # MCPConfig（默认关闭）
 | `max_concurrent_subagents` | 3 | 子代理并发上限 |
 | `subagent_worktree_isolation` | true | 子代理是否 worktree 隔离 |
 
-`MemoryConfig`：`enabled`, `auto_extract`, `consolidate_threshold=10`, `max_index_entries=200`, `max_per_turn_injections=5`。
+`MemoryConfig`：`enabled`, `auto_extract`, `consolidate_threshold=10`, `max_index_entries=200`, `max_per_turn_injections=3`（R3 起：这是 `memory_search` 每次返回的条数上限）。
 
 `MCPConfig`：`enabled=false`, `auto_discover=true`, `connection_timeout=30`, `servers[]`。`MCPServerConfig`：`name`, `command`, `enabled=false`, `args[]`。
 
@@ -288,3 +288,69 @@ tail 事件（收割/整理）**追加到本回合文件**，不会凭空造出�
 `hooks`（enabled/timeout_seconds/plugin_dir/events[]）、
 `ai.turn_token_budget`、`ModelConfig.price_input_per_1k` / `price_output_per_1k`。
 三块全部有默认值，**旧配置不改也能跑**。
+
+---
+
+## R6 回合记忆 / 失败升级 / 人在环 / 记忆证据契约
+
+R6 只改了**一处**对外行为（未完成回合的返回值），其余全是新增字段与默认值。
+
+### 回合终态（`domain/loop.py`）
+
+| 字段 | 说明 |
+|---|---|
+| `TurnOutcome.handoff: str = ""` | **harness 写的**收尾报告（目标 / 已完成 / 未完成 / 最近一次失败 / 产物 / 轨迹）。**不改 `text`**：记忆用 `text is None` 判断「本回合有没有结论」，子智能体用 `text` 当结论，轨迹要能区分「模型交付了没有」 |
+
+`AgentLoop.process_input` 的返回值：`outcome.text or outcome.handoff`（R6 之前是 `outcome.text or ""`）。
+`COMPLETED` 回合永远不产生 handoff（正常结束不编造「未完成」）。
+
+### 会话新增字段（`SessionData`）
+
+| 字段 | JSON 键 | 说明 |
+|---|---|---|
+| `turn_count: int = 0` | `turnCount` | 会话级回合号（1 起）。旧会话从 0 开始重新计数（不回溯） |
+| `turn_digests: list[TurnDigest]` | `turnDigests` | 有界回合摘要环（空则不写，与 `task` 同规则）。坏行忽略 |
+
+`TurnDigest`（`domain/turn_digest.py`）：`turn` / `request` / `outcome` / `status` / `files` / `openItems`（camelCase），
+`render()` 产出一行。派生函数 `build_digest(...)` 不发模型调用；`render_working_memory(...)` 产出
+`<working-memory>` 块（仅当本轮历史真被改写）；`append_digest(...)` 维护有界环且永不抛错。
+
+### 记忆条目与事件（R6d）
+
+| 契约 | 变更 |
+|---|---|
+| `MemoryNote.evidence: str = ""` | `tool` / `model` / `""`（R6 之前）。**只是记录，不做过滤** |
+| `MemoryService.harvest(..., evidence="")` | 回合级事实由循环给出（本回合有无成功工具调用） |
+| `MemoryService.status()["by_evidence"]` | 计数，`/memory` 会显示 |
+| `MemoryHarvested.evidence: str = ""` | 进轨迹 |
+
+`source_turn` 现在填**回合号**（`SessionData.turn_count`），不再填消息条数。
+
+### 工具与人在环（R6c）
+
+| 类型 | 字段 |
+|---|---|
+| `UserAnswer` | `answered: bool`、`text: str`、`reason: str`（`""`/`no_user`/`eof`/`empty`） |
+| `UserPromptCallback` | `async ask(question, options=()) -> UserAnswer` |
+| `CLIUserPromptCallback` | stdin 读一行（`asyncio.to_thread`，可被回合上限打断）；`input_fn` 可注入 |
+| `UnavailableUserPromptCallback` | 立即返回 `no_user` |
+| `AskUserTool` | `name="ask_user"`、`parallel_safe=False`、`max_duration_seconds=timeout+15` |
+
+`ToolResult.error` 新增：`missing_question`、`no_user`、`no_answer`、`user_prompt_error`。
+**注册规则**：`include_subagent and tools.ask_user.enabled and user_prompt is not None` 三者同时成立才注册。
+
+### `AIConfig` / `ToolsConfig` 新增项
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `ai.working_memory_keep` | 12 | 摘要环保留的回合数 |
+| `ai.working_memory_chars` | 1200 | `<working-memory>` 渲染上限（含包装与提示行） |
+| `ai.failed_streak_threshold` | 2 | 连续「全失败」多少轮后换策略；0 关闭 |
+| `ai.max_strategy_nudges` | 1 | 每回合最多几次换策略提示 |
+| `ai.stall_iterations` | 3 | 多少轮后若仍「尝试过但零成功」就提前收尾；0 关闭 |
+| `tools.ask_user` | `ToolConfig(timeout_seconds=300)` | 提问工具的开关与等待上限 |
+
+### 索引不变量（R6e）
+
+`<memory-constraints>` 的 `index_max_chars` 约束的是**渲染后的整块**（含包装标签），
+由三条测试锁死：每行都是指针、总量不超预算、普通事实增长不推高它。

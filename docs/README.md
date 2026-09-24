@@ -72,12 +72,30 @@ R4 之后 `core/agent_loop.py` 涨到 788 行、`process_input` 单方法 229 �
 | [R5 分析](r5-analysis.md) | **已实施**：现状实测、拆什么与不拆什么（YAGNI 边界）、四个新单元的接口、`process_input` 229→153 行、行为不变性证据（既有断言零改动 + 真实 LLM 事件序列逐项一致）、实际未达标项 |
 | [R5 计划](r5-plan.md) | 9 个任务、3 个提交的实施步骤 |
 
+## 回合记忆 / 失败升级 / 人在环（R6，开发追踪）
+
+R6 处理四个候选（工作记忆锚、失败升级、`ask_user`、记忆证据），每一条都先用实测论证：
+压缩探针、两次真实对照、一个真实的失败回合、两次「不许用工具」的断言实验。
+
+| 文档 | 范围 |
+|---|---|
+| [R6 分析](r6-analysis.md) | **已实施**：四个实测、四个候选逐个设计、注入位置与缓存纪律、逐文件步骤、契约变更、数据流、TDD 用例清单、自我核验、14 个决策点 |
+| [R6 计划](r6-plan.md) | 13 个任务的可执行计划（每步含失败测试与命令） |
+
+两处实测修正（都写进 r6-analysis.md）：**摘要环只覆盖最近 12 轮**，更早的决策归记忆层；
+**真实运行里模型是否去翻会话文件是它的自由**，环能保证的是「被压缩掉的那几轮有路可查」。
+
 ## 当前状态
 
-主线里程碑 M0–M6、编排层重构 R1、可靠性收口 R2、记忆层重做 R3 全部完成，分阶段提交。
-质量门禁：`pytest`（**808 例通过 / 1 跳过**）全绿、`ruff` 0 问题、`mypy strict`（按 3.10 下限检查）0 问题；
-`scripts/memory_cases.py` 11/11、`scripts/trace_cases.py` 6/6；
+主线里程碑 M0–M6、编排层重构 R1、可靠性收口 R2、记忆层重做 R3、循环内核拆分 R5、
+回合记忆 R6 全部完成，分阶段提交。
+质量门禁：`pytest`（**862 例通过 / 1 跳过**）全绿、`ruff` 0 问题、`mypy strict`（按 3.10 下限检查）0 问题；
+`scripts/memory_cases.py` 11/11、`scripts/trace_cases.py` 6/6、`scripts/r6_cases.py` 9/9（离线）+ 3 条真实验收；
 MCP 真连与真实 LLM A/B 在正常环境另有 gate 测试 + CI 步骤。
 
 R4（可观测 / 门卫 / hook）**已按 R4a → R4b → R4c 顺序实现**：设计与决策点见 [r4-analysis.md](r4-analysis.md)，
 实施计划见 [r4-plan.md](r4-plan.md)，外部对标见 [r4a-genericagent-research.md](r4a-genericagent-research.md)。
+
+R6（回合摘要环 / 失败升级 / `ask_user` / 记忆证据 / 索引不变量）**已按 R6a → R6b → R6c → R6d → R6e 顺序实现**：
+设计与实测见 [r6-analysis.md](r6-analysis.md)，分步计划见 [r6-plan.md](r6-plan.md)，
+验收脚本 `scripts/r6_cases.py`（离线 9 条 + 真实 3 条）。

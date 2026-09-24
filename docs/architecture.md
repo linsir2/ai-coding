@@ -11,13 +11,15 @@ ai-coding 是一个分层、**引擎可替换**的对话式编码助手：领域
 ai_coding/
 ├─ cli.py          entrypoint：命令注册 + 组合根装配（唯一接触全部层的编排）
 ├─ domain/         纯数据契约 dataclass，零业务依赖，最底层
+│                  R6 追加：turn_digest（回合摘要环 + 收尾交接渲染）
 ├─ config/         配置模型（Pydantic）与 YAML 加载，仅依赖 domain
 ├─ infra/          标准库封装：json / file / time / logger
-├─ security/       沙箱、权限门、审批回调、过期读保护
+├─ security/       沙箱、权限门、审批回调、过期读保护；R6 追加 user_prompt（模型主动提问的通道）
 ├─ tools/          工具契约 + 8 个内置工具 + 注册表 + schema 转换 + 装配
 ├─ ai/             引擎端口（ChatEngine）与直连 chat.completions 的实现、映射、提示装配
 ├─ core/           自持循环、工具分发、事件、上下文压缩、MCP、子智能体、worktree、项目说明
 │                  R4 追加：observers（扇出）、trace（轨迹+脱敏）、budget（账本）、guard（门卫）、hooks（钩子）
+│                  R5 拆出：turn_report / memory_turn / compaction / request_builder
 ├─ service/        会话持久化
 ├─ memory/         记忆检索 / 提取 / 聚合
 ├─ skills/         技能目录注册表
@@ -32,10 +34,10 @@ ai_coding/
 
 | 包 | 职责 | 关键入口 |
 |---|---|---|
-| `domain` | 不可变数据契约，跨层边界 | `ChatMessage`、`TaskState`、`StepResult`、`ToolResult`、`SessionData` |
+| `domain` | 不可变数据契约，跨层边界 | `ChatMessage`、`TaskState`、`StepResult`、`ToolResult`、`SessionData`；R6 起 `TurnDigest`（回合摘要 + 收尾交接，与 `TaskState` 一样自带 `render()`） |
 | `config` | 配置模型、YAML 加载、camel→snake 归一化 | `ConfigLoader`、`ConfigManager`、`AppConfig`、`AIConfig` |
 | `infra` | JSON/文件/时间/日志工具 | `json_utils`、`file_utils`、`time_utils`、`logger_setup` |
-| `security` | 失败关闭的安全层 | `Sandbox`、`PermissionGate`、`ApprovalCallback`、`FileStateTracker` |
+| `security` | 失败关闭的安全层 | `Sandbox`、`PermissionGate`、`ApprovalCallback`、`FileStateTracker`；R6 起 `UserPromptCallback`（模型主动提问的通道，`ask_user` 用） |
 | `tools` | 工具契约、实现、注册表、schema | `BaseTool`、`ToolContext`、`ToolRegistry`、`build_tool_registry` |
 | `ai` | 引擎端口 + 实现 + 映射 + 提示装配 | `ChatEngine`、`OpenAIChatEngine`、`PromptAssembler` |
 | `core` | 编排与增强 | `AgentLoop`、`ToolDispatcher`、`ContextManager`、`MCPManager`、`SubAgentRunner`；R5 起另有 `TurnReporter`（对外陈述）、`TurnMemory`（记忆侧）、`Compactor`（压缩）、`request_builder`（易失尾部） |
@@ -99,9 +101,10 @@ sequenceDiagram
     L->>L: append user message + load/create TaskState
     L->>L: deadline = now + ai.turn_timeout_seconds（0=关闭）
     loop 由 TurnPolicy 决定是否继续
-        L->>P: decide_next_iteration(快照, 回合时钟是否到期)
-        P-->>L: ITERATE / FINISH
-        L->>L: compress(副本) + 拼 instructions + 注入易失任务块
+        L->>P: decide_next_iteration(快照：轮次/时钟/花费 + R6b 失败连胜与成功数)
+        P-->>L: ITERATE / NUDGE([strategy-gate]，落盘) / FINISH（含「零进展」提前收尾）
+        L->>L: compress(副本) + 拼 instructions + 注入易失尾部块
+        Note over L: 尾部 = memory / task / hook / digest（R6a：仅当本轮历史真被改写时才有 digest）
         L->>E: step(messages, tools, instructions, on_delta)  ← 受剩余回合预算约束
         E-->>L: StepResult(text, tool_calls, finish_reason, usage)
         L->>L: append assistant
@@ -116,8 +119,9 @@ sequenceDiagram
         end
     end
     Note over L: 任一步到期 → TurnOutcome(TIMEOUT)，已完成文本与轨迹保留
-    L->>S: ensure_tool_pairing + save
-    L-->>U: 最终文本
+    L->>L: R6a：写回合摘要环 + 未完成时生成 handoff（不改 text）
+    L->>S: ensure_tool_pairing + save（含 turnCount / turnDigests）
+    L-->>U: text or handoff
 ```
 
 ## 扩展点
@@ -131,6 +135,8 @@ sequenceDiagram
 | **加一个运行时守卫**（R4b） | 在 `core/guard.py` 实现 `check()`（返回 `GuardDecision`），加进 `GuardChain`；在 `cli._make_guards` 装配 |
 | **挂钩子**（R4c） | 配置 `hooks.events`，写脚本（stdin/stdout JSON）或放 `<workspace>/.ai-coding/hooks/*.py`（进程内） |
 | **改可观测**（R4a） | 自己实现 `LoopObserver` 并 `Braid` 进去；或改 `core/trace.py` 的落盘与脱敏策略 |
+| **让模型主动提问**（R6c） | 实现 `UserPromptCallback`（`async ask`）并在组合根传给 `build_tool_registry(user_prompt=...)`；无人入口传 `None` 即不注册该工具 |
+| **改回合摘要/交接的措辞与边界** | 改 `domain/turn_digest.py`（纯函数，无 IO）：`build_digest` 的一行内容、`render_working_memory` 的注入规则、`render_handoff` 的报告 |
 | 接入外部工具集 | 用 `MCPManager` 的模式：把远端工具适配成 `BaseTool` 注册进同一个注册表 |
 | 换压缩/记忆实现 | `AgentLoop` 的 `context` / `memory` 都是可注入的可选组件 |
 | 改「什么时候继续/停止」的规则 | 改 `core/turn_policy.py`（纯单元，19 条决策表测试），不要动编排器 |

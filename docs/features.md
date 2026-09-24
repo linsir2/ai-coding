@@ -67,7 +67,7 @@ ai-coding 以「**自持 ReAct 循环** + 工具调用」为核心模型：用�
 |---|---|
 | L3 | 超阈值的大段尾部工具输出持久化到 `transcripts/persisted/`，历史内替换为 `<persisted-output>` 占位 |
 | L1 | 超 `max_messages` 时裁剪中间段，留 `snip_keep_head`/`snip_keep_tail` 条并插入 `[snipped n messages]` |
-| L2 | 早于 `keep_recent_tool_results` 的旧工具结果替换为 `[Previous: used X]` |
+| L2 | 早于 `keep_recent_tool_results` 的旧工具结果替换为 `[Previous: used X]`（正文即丢；中段的可读性由 R6a 的回合摘要环补，见下文） |
 | L4 | 超上下文预算时用真实 LLM 摘要压缩历史（带 3 次失败熔断），降级为硬裁剪 |
 | 兜底 | 硬裁剪 + `sanitize_pairs` 保证严格配对 |
 
@@ -205,6 +205,60 @@ R4 起，server 连不上不再静默：会发一条 `Degraded(component="mcp_se
 子进程走 `infra.subprocess_runner`（进程组 kill）并受超时约束；**钩子环境不含模型 API key**（白名单构造）；
 失败语义按能力分（观察/注入 fail-open，阻断/改写 fail-closed）；`inject` 只进**易失尾部块** `<hook-context>`，
 不进系统提示、不进历史（保住 R3 的缓存前缀纪律）。
+
+## 回合摘要环与收尾交接（R6a）
+
+压缩会挖空中段：实测 60 轮工具密集历史里消息一条没少，但除最后 3 条外所有工具正文都变成
+`[Previous: used bash]`，而 L4 摘要在结构压缩之后才评估，几乎不触发（见 r6-analysis.md §1.1）。
+于是模型要么考古（实测：用 bash 翻 270KB 的会话文件，prompt 从 3,363 涨到 6,363），
+要么抱怨「工具输出没有返回给我」。
+
+`domain/turn_digest.py` 给出**由 harness 派生**的一行回合摘要（用户请求 + 终态 + 产物 +
+未完成项），**不额外调用模型**：
+
+- **有界环**：`ai.working_memory_keep`（默认 12）条，最旧的先淘汰，随会话落盘（`turnDigests`）；
+- **只在该注入时才注入**：本轮历史**真的被改写**时（`Compactor.did_compact`）才把
+  `<working-memory>` 作为**易失尾部第四块**（顺序 memory / task / hook / digest）附上；
+  普通回合一分钱不花（`ai.working_memory_chars` 默认 1200 字符 ≈ 230 est tokens，占预算 0.5%）；
+- **只覆盖最近 12 轮**：更早的决策属于记忆层（pinned decision 进 `<memory-constraints>`），
+  不是摘要环的职责——这条边界是实测确认的，见 r6-analysis.md §10。
+
+**收尾交接**：回合因轮次 / token / 时钟 / 引擎原因中断、而模型没留下话时，
+`TurnOutcome.handoff` 会填一份 harness 写的报告（目标 / 已完成 / 未完成 / 最近一次失败 / 产物 / 轨迹），
+`process_input` 返回 `text or handoff`。这是 R6 **唯一**的对外行为改变：以前这种情况返回空字符串。
+`text` 语义不变（仍然只表示「模型说了什么」），因为记忆用 `text is None` 判断本回合有没有结论，
+子智能体也用它当结论。
+
+## 失败升级三档（R6b）
+
+| 档 | 触发（可测量） | 动作 |
+|---|---|---|
+| 局部修 | 同一 `(tool, params)` 重复 | 门卫拒绝（R4b 已有） |
+| 换策略 | 连续 `failed_streak_threshold`（默认 2）轮工具**全军覆没** | 注入一次 `[strategy-gate]`（每回合至多 `max_strategy_nudges=1` 次），要求先读错误、换手段或提问 |
+| 收尾 | `stall_iterations`（默认 3）轮后**尝试过调用但零成功** | 提前 `FINISH` + 交接报告（R6a） |
+
+「尝试过但零成功」是判据的关键：只说话不调工具的回合归停止策略管（`strict` 会一直提醒），
+这条边界被既有测试当场钉住。提前收尾的 `TurnStatus` 仍是 `max_iterations`，但报告标题写
+「零进展（提前收尾）」，不谎称预算用尽。
+
+## ask_user：模型主动提问（R6c）
+
+与被动审批互补：审批是「这一调用能不能做」，`ask_user` 是「我该做哪个」。
+
+- 阻塞式：答案作为**工具结果**回给模型，避免「回合停在半个工具调用上」被配对清理掉；
+- 有界：`tools.ask_user.timeout_seconds`（默认 300）+ 15s 收割余量，等待走线程池，
+  因此回合上限和调用预算真的能打断它；
+- **没人也是答案**：非交互入口（`ask`）与子智能体**不注册**该工具（工具列表是第一道 harness）；
+  即使注册了而没人，也返回 `no_user` 并让模型「明确写出假设后自行决定」；
+- 空行 / EOF 记 `no_answer`，通道自身出错记 `user_prompt_error`——都不会中断回合。
+
+## 记忆证据（R6d）
+
+每条 note 带 `evidence`：`tool`（该回合有工具调用成功）/ `model`（该回合只说话）/ `""`（R6 之前）。
+它**只是记录，不是过滤**：实测两次「不许用工具就断言」的回合，提取器写的都是
+`open_thread` 而不是编造的 fact，而样本里最重要的一条记忆恰恰来自用户声明——用户声明不需要任何工具调用。
+`/memory` 会多打一行 `evidence: tool=N model=M`，`MemoryHarvested.evidence` 进轨迹。
+同时修正了 `source_turn`（以前填的是消息条数，实测一条属于第 1 回合的 note 写着 16）。
 
 ## 会话持久化
 

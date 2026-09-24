@@ -164,6 +164,35 @@ self-pipe send FAILED: errno=1 (EPERM) [Errno 1] Operation not permitted
 
 ## 回归
 
+### R6 验收脚本（`scripts/r6_cases.py`）
+
+离线 9 条（无网络，退出码即结论）：
+
+```bash
+.venv/bin/python scripts/r6_cases.py
+```
+
+覆盖：摘要环有界 / 未压缩回合不注入 / 压缩回合注入且 ≤ 1200 字符 / 预算耗尽返回交接而非空串 /
+连续失败只插一次 `[strategy-gate]` / 零成功提前收尾并交接 / 无人 `ask_user` / 有人 `ask_user` /
+记忆证据与索引不变量。
+
+真实 3 条（需要 `config.local.yaml`；**只报告不判定退出码**，因为 LLM 的首步选择有随机性）：
+
+```bash
+.venv/bin/python scripts/r6_cases.py --real --config config.local.yaml
+```
+
+它们复现 r6-analysis.md §1 的实验，判据是结构性事实：
+
+- **R1**（对应 §1.3）：`max_tool_iterations=2` 的 `make test` 回合——返回值必须非空且含
+  `[回合未完成`。实测：`159 chars, head='[回合未完成 · 迭代预算用尽（2 轮）]'`。
+- **R2**（对应 §1.2）：压缩后的中段询问——环必须带住被压缩掉的那一轮（实测 `ring_carries_t66=True`），
+  且首步 prompt < 5000（实测 4,043）。**实测两种结局都出现过**：一次模型直接据环回答且没有翻会话文件；
+  另一次它仍去翻 `sessions/*.json` 并耗尽 5 轮预算。结论：环提供的是「有路可查」，
+  不保证模型不去考古；更早的决策本来该由记忆（pinned note）承担。
+- **R3**（对应 §2.3）：交互组合确实接了 CLI 提问通道（`CLIUserPromptCallback`）+ 等待有上限 +
+  脚本化回答变成结构化 `data.answer`。
+
 ```bash
 pytest          # 单元/集成(离线)全部通过；含 bash/worktree，无排除
 ruff check .    # 0 错误
