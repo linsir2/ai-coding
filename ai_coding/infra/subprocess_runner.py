@@ -96,12 +96,21 @@ def run_process(
     shell: bool = False,
     cwd: str | None = None,
     env: Mapping[str, str] | None = None,
+    stdin_data: bytes | str | None = None,
     timeout: float = 60.0,
     kill_grace: float = DEFAULT_KILL_GRACE,
     max_output_chars: int | None = None,
 ) -> ProcessOutcome:
-    """Run ``command`` with a hard timeout.  Never raises for process failures."""
+    """Run ``command`` with a hard timeout.  Never raises for process failures.
+
+    ``stdin_data`` is fed to the child and its stdin is then closed.  R4c needs it
+    for command hooks, which receive their context as one JSON line; everything
+    else keeps the old behaviour (stdin closed immediately).
+    """
     started = time.monotonic()
+    payload: bytes | None = None
+    if stdin_data is not None:
+        payload = stdin_data.encode("utf-8") if isinstance(stdin_data, str) else stdin_data
 
     def _elapsed() -> float:
         return time.monotonic() - started
@@ -112,7 +121,7 @@ def run_process(
             shell=shell,
             cwd=cwd,
             env=None if env is None else dict(env),
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if payload is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -126,13 +135,13 @@ def run_process(
 
     timed_out = False
     try:
-        stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
+        stdout_bytes, stderr_bytes = proc.communicate(input=payload, timeout=timeout)
         returncode: int | None = proc.returncode
     except subprocess.TimeoutExpired as exc:
         timed_out = True
         _kill_group(proc)
         try:
-            stdout_bytes, stderr_bytes = proc.communicate(timeout=kill_grace)
+            stdout_bytes, stderr_bytes = proc.communicate(input=payload, timeout=kill_grace)
         except subprocess.TimeoutExpired:
             # Something escaped the process group and still holds the pipes.
             # Abandon them: the thread must return, and partial output still helps.
@@ -159,6 +168,7 @@ async def run_process_async(
     shell: bool = False,
     cwd: str | None = None,
     env: Mapping[str, str] | None = None,
+    stdin_data: bytes | str | None = None,
     timeout: float = 60.0,
     kill_grace: float = DEFAULT_KILL_GRACE,
     max_output_chars: int | None = None,
@@ -182,6 +192,7 @@ async def run_process_async(
         "shell": shell,
         "cwd": cwd,
         "env": env,
+        "stdin_data": stdin_data,
         "timeout": timeout,
         "kill_grace": kill_grace,
         "max_output_chars": max_output_chars,

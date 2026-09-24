@@ -38,6 +38,7 @@ from ai_coding.core.events import (
     preview,
 )
 from ai_coding.core.guard import GuardChain, GuardVerdict, TurnView
+from ai_coding.core.hooks import HookDecision, HookPoint
 from ai_coding.domain.message import ToolCall, ToolCallRef, ToolResult, tool_call_from_ref
 from ai_coding.infra.deadline import Deadline, DeadlineExpired, run_with_deadline
 from ai_coding.security.approval import ApprovalCallback, ApprovalResult
@@ -110,6 +111,7 @@ class ToolDispatcher:
         max_parallel: int = 4,
         observer: LoopObserver | None = None,
         guards: GuardChain | None = None,
+        hooks: Any | None = None,
     ) -> None:
         self.registry = registry
         self.gate = gate
@@ -119,6 +121,9 @@ class ToolDispatcher:
         # R4b: stateful policy that runs *after* the static gate and before the
         # user is bothered (docs/r4-analysis.md 3.2).
         self.guards = guards if guards is not None else GuardChain([])
+        # R4c: user-supplied policy, run after the built-in guards.  May be a
+        # Braid of runners (command + python); ``None`` means no hooks at all.
+        self.hooks = hooks
 
     # ---- public API -------------------------------------------------------
 
@@ -256,6 +261,26 @@ class ToolDispatcher:
                 # anyone to ask, refuse rather than silently run it.
                 return self._not_approved(call, "rewritten call needs approval"), True, False
 
+        # ---- A4: user hooks may also block or rewrite ------------------------
+        hook_rewriter = ""
+        hook_decision = await self._run_hooks(
+            HookPoint.TOOL_BEFORE,
+            call,
+            ctx,
+            turn_view,
+        )
+        if hook_decision is not None and hook_decision.decision is HookDecision.BLOCK:
+            return self._hook_blocked(call, hook_decision), True, False
+        if hook_decision is not None and hook_decision.decision is HookDecision.REWRITE:
+            hook_rewriter = hook_decision.hook
+            if rewritten_from is None:
+                rewritten_from = dict(call.params)
+            call = replace(call, params=dict(hook_decision.params or {}))
+            item = replace(item, call=call, tool=item.tool)
+            recheck = self.gate.check(call.name, call.params)
+            if _verdict(recheck) is PermissionDecision.DENY:
+                return self._denied(call, _reason(recheck), rewritten=True), True, False
+
         if verdict is PermissionDecision.WARN:
             if self.approval is None:
                 return self._not_approved(call, "no approval callback"), True, False
@@ -270,9 +295,49 @@ class ToolDispatcher:
             return self._unknown(call), True, False
         result = await self._execute(tool, call, ctx, deadline)
         if rewritten_from is not None:
-            result = self._annotate_rewrite(result, rewritten_from, guard_decision.guard)
+            result = self._annotate_rewrite(
+                result, rewritten_from, guard_decision.guard or f"hook:{hook_rewriter}"
+            )
         result = self.guards.after(call, result, ctx, turn_view)
+        await self._run_hooks(HookPoint.TOOL_AFTER, call, ctx, turn_view, result=result)
         return result, False, False
+
+    async def _run_hooks(
+        self,
+        point: HookPoint,
+        call: ToolCall,
+        ctx: ToolContext,
+        view: TurnView,
+        *,
+        result: ToolResult | None = None,
+    ) -> Any | None:
+        """Run user hooks for a point; return the first verdict that matters.
+
+        Hooks are advisory by construction: their own runner already applies the
+        capability-based failure semantics, so nothing here can raise into the
+        dispatcher (docs/r4-analysis.md 6.3).
+        """
+        if self.hooks is None:
+            return None
+        payload: dict[str, Any] = {
+            "tool": {"name": call.name, "params": dict(call.params)},
+            "call_id": call.id,
+            "iteration": view.iteration,
+        }
+        if result is not None:
+            payload["result"] = {
+                "success": result.success,
+                "output_preview": result.output[:500],
+                "error": result.error,
+            }
+        try:
+            outcomes = await self.hooks.run(point, payload)
+        except Exception:  # noqa: BLE001 — hook delivery must never break a call
+            return None
+        for outcome in outcomes:
+            if outcome.decision is not HookDecision.ALLOW:
+                return outcome
+        return None
 
     async def _ask(self, call: ToolCall, reason: str) -> tuple[bool, bool]:
         """Prompt the user.  Returns ``(approved, stopped)``; never raises."""
@@ -361,6 +426,21 @@ class ToolDispatcher:
                 "decision": "deny",
                 "reason": decision.reason,
                 "guard": decision.guard,
+                "tool": call.name,
+            },
+        )
+
+    @staticmethod
+    def _hook_blocked(call: ToolCall, decision: Any) -> ToolResult:
+        """A user hook refused this call (R4c)."""
+        return ToolResult(
+            success=False,
+            output=f"error: refused by hook '{decision.hook}': {decision.reason}",
+            error="hook_blocked",
+            data={
+                "decision": "deny",
+                "reason": decision.reason,
+                "hook": decision.hook,
                 "tool": call.name,
             },
         )

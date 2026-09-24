@@ -53,6 +53,7 @@ from ai_coding.core.events import (
     TurnFinished,
 )
 from ai_coding.core.guard import GuardChain, TurnView
+from ai_coding.core.hooks import HookDecision, HookPoint
 from ai_coding.core.trace import canonical_request, digest_of, prefix_shared, short_json
 from ai_coding.core.turn_policy import (
     TaskInjection,
@@ -132,6 +133,7 @@ class AgentLoop:
         workspace: str = ".",
         trace: Any | None = None,
         guards: GuardChain | None = None,
+        hooks: Any | None = None,
     ) -> None:
         self.engine = engine
         self.sessions = sessions
@@ -148,6 +150,10 @@ class AgentLoop:
         # braid, and the loop only re-binds it to the current session (the CLI
         # builds one loop for a whole REPL, so the session can change under it).
         self.trace = trace
+        # R4c: user hooks.  ``turn.start`` may inject context, which lands in the
+        # volatile tail (never the system prompt, never persisted) so the cache
+        # discipline from R3 still holds (docs/r4-analysis.md 6.4).
+        self.hooks = hooks
         # Task injection + stop policy live in their own pure unit (R2c).
         self.policy = TurnPolicy(TurnPolicyConfig.from_ai_config(self.settings))
         self._tool_schemas = tool_schemas(tools)
@@ -162,6 +168,7 @@ class AgentLoop:
             max_parallel=self.settings.max_concurrent_tools,
             observer=self.observer,
             guards=guards,
+            hooks=hooks,
         )
         self.last_outcome: TurnOutcome | None = None
         self.last_artifacts: list[ToolArtifact] = []
@@ -189,6 +196,7 @@ class AgentLoop:
         task = session.task
         # R4b: guard state (duplicate calls, …) is per turn, never per process.
         self.dispatcher.guards.reset()
+        hook_context = await self._hook_context(session)
 
         policy = self.policy
         max_iterations = policy.config.max_iterations
@@ -272,6 +280,11 @@ class AgentLoop:
                 if injection.message is not None:
                     tail.append(injection.message)
                     tail_blocks.append(("task", len(injection.message.content or "")))
+                if hook_context:
+                    tail.append(
+                        ChatMessage(role="user", content=hook_context, timestamp="")
+                    )
+                    tail_blocks.append(("hook", len(hook_context)))
                 request = [*history, *tail]
                 self._emit_context_assembled(
                     ledger,
@@ -386,6 +399,7 @@ class AgentLoop:
 
         self._finalize(session, outcome, ledger, observer_failures)
         await self._harvest(session, deadline, summaries, outcome)
+        await self._fire_hooks(HookPoint.TURN_END, session)
         return outcome.text or ""
 
     async def aclose(self) -> None:
@@ -439,6 +453,47 @@ class AgentLoop:
 
     def _observer_failure_count(self) -> int:
         return getattr(self.observer, "failures", 0) if self.observer else 0
+
+    async def _hook_context(self, session: SessionData) -> str:
+        """Ask ``turn.start`` hooks whether they want to add anything.
+
+        The result becomes a volatile tail block: it changes every turn, but only
+        inside the small region that already changes, so the cached prefix of the
+        conversation survives (docs/r4-analysis.md 6.4).
+        """
+        if self.hooks is None:
+            return ""
+        try:
+            results = await self.hooks.run(
+                HookPoint.TURN_START,
+                {
+                    "session": session.session_id,
+                    "workspace": self.workspace,
+                    "messages": len(session.messages),
+                },
+            )
+        except Exception:  # noqa: BLE001 — hooks must never break a turn
+            _log.debug("turn.start hooks failed", exc_info=True)
+            return ""
+        parts = [
+            result.context
+            for result in results
+            if result.decision is HookDecision.INJECT and result.context
+        ]
+        if not parts:
+            return ""
+        return "<hook-context>\n" + "\n".join(parts) + "\n</hook-context>"
+
+    async def _fire_hooks(self, point: HookPoint, session: SessionData) -> None:
+        """Fire an observation-only hook point (never affects the turn)."""
+        if self.hooks is None:
+            return
+        try:
+            await self.hooks.run(
+                point, {"session": session.session_id, "workspace": self.workspace}
+            )
+        except Exception:  # noqa: BLE001 — hooks must never break a turn
+            _log.debug("hook point %s failed", point.value, exc_info=True)
 
     def _emit_context_assembled(
         self,
