@@ -99,12 +99,20 @@ class SubAgentTool(BaseTool):
 
     @property
     def description(self) -> str:
+        # R7e-4: say which window the child gets.  In task_only mode the model is
+        # the only one who can hand the facts over, so the description asks for it.
+        if getattr(self._runner, "context_mode", "full") == "task_only":
+            window = (
+                "starts with a CLEAN context: it cannot see this conversation, so put "
+                "every fact, path and decision it needs into 'task'"
+            )
+        else:
+            window = "sees the same conversation context and system prompt as you do"
         return (
-            "Delegate a task to a sub-agent that sees the same conversation "
-            "context and system prompt as you do, then returns a structured "
-            "packet: its conclusion, any unfinished task items, changed files, "
-            "and a ledger path holding the full report. Use 'task' for what to "
-            "do and optionally 'name' for a short agent label. The sub-agent's "
+            f"Delegate a task to a sub-agent that {window}, then returns a "
+            "structured packet: its conclusion, any unfinished task items, changed "
+            "files, and a ledger path holding the full report. Use 'task' for what "
+            "to do and optionally 'name' for a short agent label. The sub-agent's "
             "own reasoning is not returned."
         )
 

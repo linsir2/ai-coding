@@ -16,7 +16,13 @@ from ai_coding.core.worktree import WorktreeManager
 from ai_coding.tools.subagent_tool import SubAgentTool
 
 
-def build_subagent_runner(app_cfg: Any, workspace: str, skills_path: str | None) -> Any:
+def build_subagent_runner(
+    app_cfg: Any,
+    workspace: str,
+    skills_path: str | None,
+    *,
+    base_instructions: str = "",
+) -> Any:
     """Build a :class:`SubAgentRunner` bound to the given workspace.
 
     A sub-agent runs the same loop as its parent, so the runner needs an engine
@@ -48,6 +54,8 @@ def build_subagent_runner(app_cfg: Any, workspace: str, skills_path: str | None)
         # the DENY tier (dangerous bash) still blocks regardless.
         approval=AutoApproveCallback(),
         workspace=main_ws,
+        # R7e-4: a task_only child gets this instead of the parent's prompt.
+        base_instructions=base_instructions,
     )
 
 
@@ -58,6 +66,7 @@ def build_tool_registry(
     *,
     include_subagent: bool = True,
     user_prompt: Any | None = None,
+    base_instructions: str = "",
 ) -> Any:
     """Build the *domain* tool registry used by the self-owned loop (R1a-4).
 
@@ -69,7 +78,7 @@ def build_tool_registry(
     means there is nobody to ask, so the tool list must not pretend otherwise.
     """
     registry, _gate = _assemble_registry(
-        app_cfg, workspace, skills_path, include_subagent, user_prompt
+        app_cfg, workspace, skills_path, include_subagent, user_prompt, base_instructions
     )
     return registry
 
@@ -80,6 +89,7 @@ def _assemble_registry(
     skills_path: str | None,
     include_subagent: bool,
     user_prompt: Any | None = None,
+    base_instructions: str = "",
 ) -> tuple[Any, Any]:
     """Create the sandbox/gate/registry triple shared by both builders."""
 
@@ -141,7 +151,9 @@ def _assemble_registry(
 
     if include_subagent:
         # Real sub-agent delegation, isolated in a git worktree when enabled.
-        runner = build_subagent_runner(app_cfg, workspace, skills_path)
+        runner = build_subagent_runner(
+            app_cfg, workspace, skills_path, base_instructions=base_instructions
+        )
         manager = WorktreeManager(workspace)
         isolate = bool(getattr(app_cfg.ai, "subagent_worktree_isolation", True))
         registry.register(

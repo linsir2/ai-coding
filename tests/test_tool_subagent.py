@@ -188,3 +188,22 @@ def test_subagent_tool_declares_a_per_call_ceiling_above_the_runner_budget():
     assert SubAgentTool(runner=_BoundedRunner()).max_duration_seconds == pytest.approx(615.0)
     # A runner that does not advertise a budget leaves only the turn deadline.
     assert SubAgentTool(runner=_FakeRunner()).max_duration_seconds is None
+
+
+# ---- R7e-4: the description has to say which window the child gets -----------
+
+
+def test_the_description_promises_shared_context_in_full_mode():
+    runner = _FakeRunner()
+    runner.context_mode = "full"
+    text = SubAgentTool(runner=runner).description
+    assert "same conversation context" in text
+    assert "cannot see" not in text
+
+
+def test_the_description_warns_that_a_clean_window_cannot_see_the_conversation():
+    runner = _FakeRunner()
+    runner.context_mode = "task_only"
+    text = SubAgentTool(runner=runner).description
+    assert "cannot see" in text
+    assert "task" in text

@@ -115,7 +115,12 @@ def ask(
         manager.initialize(path)
         app_cfg = manager.app
         engine = build_engine_from_config(app_cfg)
-        registry = _build_tool_registry(app_cfg, workspace, skills)
+        # R7e-4: the same base instructions a task_only sub-agent would get.
+        from ai_coding.ai.prompt import BASE_INSTRUCTIONS
+
+        registry = _build_tool_registry(
+            app_cfg, workspace, skills, base_instructions=BASE_INSTRUCTIONS
+        )
     except (ValueError, FileNotFoundError) as exc:
         typer.echo(f"ask error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -316,8 +321,14 @@ def repl(
         # R7c: one channel object, so `run_repl` can point it at the REPL's own
         # prompt session instead of letting a second reader fight over stdin.
         user_prompt = CLIUserPromptCallback()
+        from ai_coding.ai.prompt import BASE_INSTRUCTIONS
+
         registry = _build_tool_registry(
-            app_cfg, workspace, skills, user_prompt=user_prompt
+            app_cfg,
+            workspace,
+            skills,
+            user_prompt=user_prompt,
+            base_instructions=BASE_INSTRUCTIONS,
         )
     except (ValueError, FileNotFoundError) as exc:
         typer.echo(f"repl error: {exc}", err=True)
@@ -387,7 +398,7 @@ def _build_loop(
 
         approval = AutoApproveCallback()
 
-    from ai_coding.ai.prompt import PromptAssembler
+    from ai_coding.ai.prompt import BASE_INSTRUCTIONS, PromptAssembler
     from ai_coding.core.agent_loop import AgentLoop
     from ai_coding.core.context_compression import ContextManager
     from ai_coding.core.project_instructions import ProjectInstructionsLoader
@@ -414,11 +425,7 @@ def _build_loop(
     )
     context = ContextManager(app_cfg.ai, transcripts_root=ws, summarizer=summarizer)
 
-    base_instructions = (
-        "You are an AI coding assistant. Respond to the user's coding questions "
-        "clearly and concisely, in the same language the user writes in."
-    )
-    prompt = PromptAssembler(base_instructions)
+    prompt = PromptAssembler(BASE_INSTRUCTIONS)
 
     # R3b: the on-demand recall tool needs the memory service, so the composition
     # root registers it here (the registry itself stays a pure tool container).
@@ -632,6 +639,7 @@ def _build_tool_registry(
     skills_path: str | None,
     *,
     user_prompt: Any | None = None,
+    base_instructions: str = "",
 ) -> Any:
     """Build the domain tool registry the self-owned loop dispatches through.
 
@@ -644,7 +652,12 @@ def _build_tool_registry(
     from ai_coding.tools.builder import build_tool_registry
 
     return build_tool_registry(
-        app_cfg, workspace, skills_path, include_subagent=True, user_prompt=user_prompt
+        app_cfg,
+        workspace,
+        skills_path,
+        include_subagent=True,
+        user_prompt=user_prompt,
+        base_instructions=base_instructions,
     )
 
 

@@ -8,6 +8,14 @@ memory catalog into a single string handed to the AI engine each turn
 
 from __future__ import annotations
 
+#: The composition root's default system prompt.  A sub-agent in ``task_only`` mode
+#: gets exactly this instead of its parent's assembled prompt (R7e-4), so the text
+#: has one home instead of being hardcoded in cli.py and the runner.
+BASE_INSTRUCTIONS = (
+    "You are an AI coding assistant. Respond to the user's coding questions "
+    "clearly and concisely, in the same language the user writes in."
+)
+
 
 class PromptAssembler:
     """Build the single system-prompt string from optional sections.
@@ -49,4 +57,4 @@ class PromptAssembler:
         return "\n\n".join(s for s in sections if s)
 
 
-__all__ = ["PromptAssembler"]
+__all__ = ["BASE_INSTRUCTIONS", "PromptAssembler"]
