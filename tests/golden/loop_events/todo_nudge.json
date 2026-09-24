@@ -1,0 +1,98 @@
+{
+  "events": [
+    {
+      "type": "IterationStarted",
+      "index": 1,
+      "max_iterations": 2
+    },
+    {
+      "type": "ContextAssembled",
+      "iteration": 1,
+      "system_chars": 0,
+      "tools_chars": 116,
+      "history_messages": 1,
+      "history_chars": 2,
+      "tail_blocks": [
+        [
+          "task",
+          103
+        ]
+      ],
+      "estimated_tokens": 75
+    },
+    {
+      "type": "ModelStepFinished",
+      "index": 1,
+      "finish_reason": "stop",
+      "text_chars": 5,
+      "tool_call_count": 0
+    },
+    {
+      "type": "AssistantMessage",
+      "text": "我先停一下",
+      "tool_calls": []
+    },
+    {
+      "type": "IterationStarted",
+      "index": 2,
+      "max_iterations": 2
+    },
+    {
+      "type": "ContextAssembled",
+      "iteration": 2,
+      "system_chars": 0,
+      "tools_chars": 116,
+      "history_messages": 3,
+      "history_chars": 91,
+      "tail_blocks": [
+        [
+          "task",
+          103
+        ]
+      ],
+      "estimated_tokens": 114
+    },
+    {
+      "type": "ModelStepFinished",
+      "index": 2,
+      "finish_reason": "stop",
+      "text_chars": 8,
+      "tool_call_count": 0
+    },
+    {
+      "type": "AssistantMessage",
+      "text": "好了，真的做完了",
+      "tool_calls": []
+    },
+    {
+      "type": "TurnFinished",
+      "outcome": {
+        "status": "completed",
+        "text": "好了，真的做完了",
+        "handoff": "",
+        "iterations": 2,
+        "reason": "todo nudge budget exhausted"
+      }
+    }
+  ],
+  "summary": {
+    "answer": "好了，真的做完了",
+    "outcome": {
+      "status": "completed",
+      "text": "好了，真的做完了",
+      "handoff": "",
+      "iterations": 2,
+      "reason": "todo nudge budget exhausted"
+    },
+    "messages": [
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ],
+    "digests": [
+      1
+    ],
+    "saves": 2
+  }
+}

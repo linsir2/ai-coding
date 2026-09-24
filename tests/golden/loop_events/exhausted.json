@@ -1,0 +1,149 @@
+{
+  "events": [
+    {
+      "type": "IterationStarted",
+      "index": 1,
+      "max_iterations": 2
+    },
+    {
+      "type": "ContextAssembled",
+      "iteration": 1,
+      "system_chars": 0,
+      "tools_chars": 116,
+      "history_messages": 1,
+      "history_chars": 2,
+      "tail_blocks": [
+        [
+          "task",
+          68
+        ]
+      ],
+      "estimated_tokens": 61
+    },
+    {
+      "type": "ModelStepFinished",
+      "index": 1,
+      "finish_reason": "tool_calls",
+      "text_chars": 0,
+      "tool_call_count": 1
+    },
+    {
+      "type": "AssistantMessage",
+      "text": null,
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "poke"
+        }
+      ]
+    },
+    {
+      "type": "ToolStarted",
+      "call_id": "c1",
+      "tool_name": "poke",
+      "iteration": 1
+    },
+    {
+      "type": "ToolApprovalRequested",
+      "tool_name": "poke",
+      "reason": "unknown tool 'poke' requires confirmation"
+    },
+    {
+      "type": "ToolFinished",
+      "call_id": "c1",
+      "tool_name": "poke",
+      "success": true,
+      "output_preview": "poked",
+      "error": null,
+      "iteration": 1
+    },
+    {
+      "type": "IterationStarted",
+      "index": 2,
+      "max_iterations": 2
+    },
+    {
+      "type": "ContextAssembled",
+      "iteration": 2,
+      "system_chars": 0,
+      "tools_chars": 116,
+      "history_messages": 3,
+      "history_chars": 48,
+      "tail_blocks": [
+        [
+          "task",
+          68
+        ]
+      ],
+      "estimated_tokens": 81
+    },
+    {
+      "type": "ModelStepFinished",
+      "index": 2,
+      "finish_reason": "tool_calls",
+      "text_chars": 0,
+      "tool_call_count": 1
+    },
+    {
+      "type": "AssistantMessage",
+      "text": null,
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "poke"
+        }
+      ]
+    },
+    {
+      "type": "ToolStarted",
+      "call_id": "c2",
+      "tool_name": "poke",
+      "iteration": 2
+    },
+    {
+      "type": "ToolApprovalRequested",
+      "tool_name": "poke",
+      "reason": "unknown tool 'poke' requires confirmation"
+    },
+    {
+      "type": "ToolFinished",
+      "call_id": "c2",
+      "tool_name": "poke",
+      "success": true,
+      "output_preview": "poked",
+      "error": null,
+      "iteration": 2
+    },
+    {
+      "type": "TurnFinished",
+      "outcome": {
+        "status": "max_iterations",
+        "text": null,
+        "handoff": "[回合未完成 · 迭代预算用尽（2 轮）]\n原因: iteration budget exhausted\n目标: 开始",
+        "iterations": 2,
+        "reason": "iteration budget exhausted"
+      }
+    }
+  ],
+  "summary": {
+    "answer": "[回合未完成 · 迭代预算用尽（2 轮）]\n原因: iteration budget exhausted\n目标: 开始",
+    "outcome": {
+      "status": "max_iterations",
+      "text": null,
+      "handoff": "[回合未完成 · 迭代预算用尽（2 轮）]\n原因: iteration budget exhausted\n目标: 开始",
+      "iterations": 2,
+      "reason": "iteration budget exhausted"
+    },
+    "messages": [
+      "user",
+      "assistant",
+      "tool",
+      "assistant",
+      "tool"
+    ],
+    "digests": [
+      1
+    ],
+    "saves": 3
+  }
+}

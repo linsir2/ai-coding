@@ -1,0 +1,64 @@
+{
+  "events": [
+    {
+      "type": "IterationStarted",
+      "index": 1,
+      "max_iterations": 2
+    },
+    {
+      "type": "ContextAssembled",
+      "iteration": 1,
+      "system_chars": 0,
+      "tools_chars": 116,
+      "history_messages": 1,
+      "history_chars": 2,
+      "tail_blocks": [
+        [
+          "task",
+          68
+        ]
+      ],
+      "estimated_tokens": 61
+    },
+    {
+      "type": "ModelStepFinished",
+      "index": 1,
+      "finish_reason": "stop",
+      "text_chars": 3,
+      "tool_call_count": 0
+    },
+    {
+      "type": "AssistantMessage",
+      "text": "做完了",
+      "tool_calls": []
+    },
+    {
+      "type": "TurnFinished",
+      "outcome": {
+        "status": "completed",
+        "text": "做完了",
+        "handoff": "",
+        "iterations": 1,
+        "reason": "model finished"
+      }
+    }
+  ],
+  "summary": {
+    "answer": "做完了",
+    "outcome": {
+      "status": "completed",
+      "text": "做完了",
+      "handoff": "",
+      "iterations": 1,
+      "reason": "model finished"
+    },
+    "messages": [
+      "user",
+      "assistant"
+    ],
+    "digests": [
+      1
+    ],
+    "saves": 1
+  }
+}
