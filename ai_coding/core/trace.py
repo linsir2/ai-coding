@@ -15,6 +15,7 @@ before it can reach disk (§4.5).
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -26,6 +27,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ai_coding.core.events import (
+    ContextAssembled,
+    IterationStarted,
+    ModelStepFinished,
+    ScopedEvent,
+    ToolFinished,
+    ToolStarted,
+    TurnFinished,
+)
 from ai_coding.domain.message import ChatMessage
 
 __all__ = [
@@ -33,6 +43,7 @@ __all__ = [
     "TRACE_VERSION",
     "Redactor",
     "TraceStore",
+    "TraceRecorder",
     "TurnWriter",
     "canonical_request",
     "digest_of",
@@ -241,6 +252,17 @@ class TraceStore:
     def summary_path(self, session_id: str) -> Path:
         return self.session_dir(session_id) / "summary.json"
 
+    def read_summary(self, session_id: str) -> dict[str, Any]:
+        """The session summary as it stands on disk (``{}`` when absent/broken)."""
+        path = self.summary_path(session_id)
+        if not path.is_file():
+            return {}
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
     def update_summary(self, session_id: str, payload: Mapping[str, Any]) -> None:
         """Merge ``payload`` into the session summary, atomically."""
         path = self.summary_path(session_id)
@@ -283,3 +305,156 @@ class TraceStore:
                 continue
             removed += 1
         return removed
+
+
+_PREVIEW_LIMIT = 500
+
+
+def _trim(value: Any, limit: int) -> Any:
+    """Trim long strings anywhere in a trace payload (recorder-side guard)."""
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + "…"
+    if isinstance(value, Mapping):
+        return {key: _trim(item, limit) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_trim(item, limit) for item in value]
+    return value
+
+
+class TraceRecorder:
+    """A ``LoopObserver`` that writes one JSONL file per turn (R4a).
+
+    It owns no opinion about the loop: it labels events with their span, redacts
+    strings, keeps a running ledger of the turn's tokens, and swallows every
+    failure.  A trace that breaks must never break the thing it observes.
+    """
+
+    def __init__(
+        self,
+        store: TraceStore,
+        session_id: str,
+        *,
+        redactor: Redactor | None = None,
+        capture: str = "previews",
+    ) -> None:
+        self.store = store
+        self.session_id = session_id
+        self.redactor = redactor if redactor is not None else Redactor()
+        self.capture = capture if capture in {"previews", "full"} else "previews"
+        self.failures = 0
+        self.turn = 0
+        self._writer: TurnWriter | None = None
+        self._iteration = 0
+        self._turn_usage = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
+        self._turn_steps = 0
+
+    # ---- public ------------------------------------------------------------
+
+    @property
+    def current_path(self) -> Path | None:
+        return self._writer.path if self._writer is not None else None
+
+    def on_event(self, event: Any) -> None:
+        """Record one event.  Never raises (docs/r4-analysis.md P1)."""
+        try:
+            self._record(event)
+        except Exception:  # noqa: BLE001 — observation must not break the turn
+            self.failures += 1
+            _log.debug("trace recorder failed on %s", type(event).__name__, exc_info=True)
+
+    # ---- internals ---------------------------------------------------------
+
+    def _record(self, event: Any) -> None:
+        if self._writer is None:
+            self.turn += 1
+            self._writer = self.store.begin_turn(self.session_id)
+            self._turn_usage = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cached_tokens": 0,
+            }
+            self._turn_steps = 0
+
+        name, payload, span, parent, iteration, scope = self._describe(event)
+        line: dict[str, Any] = {
+            "v": TRACE_VERSION,
+            "ts": now_iso(),
+            "session": self.session_id,
+            "turn": self.turn,
+            "span": span,
+            "parent": parent,
+            "iter": iteration,
+            "evt": name,
+            "data": payload,
+        }
+        if scope:
+            line["scope"] = scope
+        if not self._writer.write_line(short_json(line)):
+            if self._writer.truncated:
+                return
+            self.failures += 1
+            return
+
+        self._accumulate(event)
+        if name == "TurnFinished":
+            self._finish_turn()
+
+    def _finish_turn(self) -> None:
+        existing = self.store.read_summary(self.session_id)
+        usage = self._turn_usage
+        self.store.update_summary(
+            self.session_id,
+            {
+                "turns": int(existing.get("turns", 0)) + 1,
+                "steps": int(existing.get("steps", 0)) + self._turn_steps,
+                "prompt_tokens": int(existing.get("prompt_tokens", 0))
+                + usage["prompt_tokens"],
+                "completion_tokens": int(existing.get("completion_tokens", 0))
+                + usage["completion_tokens"],
+                "cached_tokens": int(existing.get("cached_tokens", 0))
+                + usage["cached_tokens"],
+            },
+        )
+        self._writer = None
+
+    def _accumulate(self, event: Any) -> None:
+        inner = event.event if isinstance(event, ScopedEvent) else event
+        if isinstance(inner, ModelStepFinished):
+            self._turn_steps += 1
+            usage = inner.usage or {}
+            self._turn_usage["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
+            self._turn_usage["completion_tokens"] += int(
+                usage.get("completion_tokens", 0) or 0
+            )
+            self._turn_usage["cached_tokens"] += int(inner.cached_tokens or 0)
+
+    def _describe(
+        self, event: Any
+    ) -> tuple[str, Any, str, str, int, str]:
+        """Return ``(name, payload, span, parent, iteration, scope)``."""
+        scope = ""
+        if isinstance(event, ScopedEvent):
+            scope = event.scope
+            inner = event.event
+            name, payload, span, _parent, iteration, _inner_scope = self._describe(inner)
+            return name, payload, span, event.parent, iteration, scope
+
+        name = type(event).__name__
+        payload = self.redactor.redact_obj(dataclasses.asdict(event))
+        if self.capture == "previews":
+            payload = _trim(payload, _PREVIEW_LIMIT)
+
+        if isinstance(event, IterationStarted):
+            self._iteration = event.index
+            return name, payload, f"i{event.index}", "turn", event.index, scope
+        if isinstance(event, ModelStepFinished):
+            return name, payload, f"step{event.index}", f"i{event.index}", event.index, scope
+        if isinstance(event, ContextAssembled):
+            self._iteration = event.iteration
+            return name, payload, f"i{event.iteration}", "turn", event.iteration, scope
+        if isinstance(event, (ToolStarted, ToolFinished)):
+            iteration = event.iteration or self._iteration
+            return name, payload, event.call_id, f"i{iteration}", iteration, scope
+        if isinstance(event, TurnFinished):
+            return name, payload, "turn", "", self._iteration, scope
+        return name, payload, f"i{self._iteration}", "turn", self._iteration, scope
