@@ -243,6 +243,7 @@ class MemoryService:
         session_id: str = "",
         summary: str | None = None,
         now: datetime | None = None,
+        evidence: str = "",
     ) -> HarvestReport:
         """Reconcile this turn's delta into the index (never raises)."""
         if not self.enabled:
@@ -271,7 +272,11 @@ class MemoryService:
         if not candidates:
             return HarvestReport()
         return self._reconcile(
-            candidates, turn_index=turn_index, session_id=session_id, now=now
+            candidates,
+            turn_index=turn_index,
+            session_id=session_id,
+            now=now,
+            evidence=evidence,
         )
 
     def _known_memory_hint(self, batch: Sequence[ChatMessage], limit: int = 5) -> str:
@@ -305,6 +310,7 @@ class MemoryService:
         turn_index: int,
         session_id: str,
         now: datetime | None,
+        evidence: str = "",
     ) -> HarvestReport:
         added: list[str] = []
         updated: list[str] = []
@@ -321,6 +327,7 @@ class MemoryService:
                 importance=candidate.importance,
                 source_session=session_id,
                 source_turn=turn_index,
+                evidence=evidence,
             )
             if candidate.action == "noop":
                 skipped.append(note.id)
@@ -419,13 +426,19 @@ class MemoryService:
         """Counts for the CLI / REPL (never raises)."""
         notes = self._store.all()
         by_kind: dict[str, int] = {}
+        by_evidence: dict[str, int] = {}
         for note in notes:
             by_kind[note.kind.value] = by_kind.get(note.kind.value, 0) + 1
+            key = note.evidence or "unknown"
+            by_evidence[key] = by_evidence.get(key, 0) + 1
         return {
             "total": len(notes),
             "active": len([note for note in notes if note.is_active]),
             "pinned": len([note for note in notes if note.pinned]),
             "by_kind": by_kind,
+            # R6d: provenance, so /memory and the trace can say where memories came
+            # from instead of only how many there are (docs/r6-analysis.md 2.4).
+            "by_evidence": by_evidence,
             "enabled": self.enabled,
         }
 

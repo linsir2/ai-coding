@@ -200,6 +200,9 @@ class MemoryHarvested:
     updated: tuple[str, ...] = ()
     superseded: tuple[str, ...] = ()
     skipped: tuple[str, ...] = ()
+    # R6d: the turn's provenance for those notes — "tool" when at least one tool
+    # call succeeded in this turn, "model" when it only talked.
+    evidence: str = ""
 
 
 @dataclass(frozen=True)

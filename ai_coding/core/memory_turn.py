@@ -90,11 +90,17 @@ class TurnMemory:
         deadline: Deadline | None,
         summaries: Sequence[str],
         outcome: TurnOutcome,
+        turn: int | None = None,
+        evidence: str = "",
     ) -> None:
         """Reconcile **this turn's delta** into memory, then consolidate.
 
         The delta is everything after ``session.harvested_messages``; the summary
         (when a compaction produced one) rides along as extra context.
+        ``turn`` is the session-level turn number (R6d: it is what ``source_turn``
+        should mean, instead of the message count), and ``evidence`` says whether
+        this turn had a tool call succeed.  Both default to the R5 behaviour so
+        existing callers and tests are unaffected.
         """
         if self._memory is None:
             return
@@ -107,9 +113,10 @@ class TurnMemory:
             report = await run_with_deadline(
                 self._memory.harvest(
                     delta,
-                    turn_index=len(session.messages),
+                    turn_index=len(session.messages) if turn is None else int(turn),
                     session_id=session.session_id,
                     summary=summary,
+                    evidence=evidence,
                 ),
                 timeout=remaining_of(deadline),
                 label="memory_harvest",
@@ -123,6 +130,7 @@ class TurnMemory:
                         updated=tuple(report.updated),
                         superseded=tuple(report.superseded),
                         skipped=tuple(report.skipped),
+                        evidence=evidence,
                     )
                 )
         except Exception:  # noqa: BLE001 — memory is best-effort, and now visible

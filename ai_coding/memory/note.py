@@ -67,6 +67,12 @@ class MemoryNote:
     last_used: str = ""
     pinned: bool = False
     keywords: tuple[str, ...] = ()
+    # R6d: where the memory came from — "tool" (a tool call in that turn succeeded)
+    # or "model" (the turn only talked).  Provenance for observation and for a UI
+    # that wants to show it; deliberately *not* a filter, because the user's own
+    # statements are our best memories and they involve no tool call
+    # (docs/r6-analysis.md 1.4 / 2.4, D-R6-10).  "" means "recorded before R6".
+    evidence: str = ""
 
     def __post_init__(self) -> None:
         if not str(self.id or "").strip():
@@ -129,6 +135,8 @@ class MemoryNote:
             data["superseded_by"] = self.superseded_by
         if self.keywords:
             data["keywords"] = list(self.keywords)
+        if self.evidence:
+            data["evidence"] = self.evidence
         return data
 
     @classmethod
@@ -160,6 +168,7 @@ class MemoryNote:
             last_used=str(data.get("last_used", "") or ""),
             pinned=bool(data.get("pinned", False)),
             keywords=keywords,
+            evidence=str(data.get("evidence", "") or ""),
         )
 
 
@@ -172,6 +181,7 @@ def new_note(
     source_session: str = "",
     source_turn: int = 0,
     pinned: bool = False,
+    evidence: str = "",
     note_id: str | None = None,
     when: str | None = None,
 ) -> MemoryNote:
@@ -188,4 +198,5 @@ def new_note(
         source_session=source_session,
         source_turn=source_turn,
         pinned=pinned,
+        evidence=evidence,
     )

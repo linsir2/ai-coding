@@ -136,9 +136,13 @@ def _memory_report(loop: Any) -> str:
     except Exception as exc:  # noqa: BLE001
         return f"[memory] unavailable: {exc}"
     kinds = ", ".join(f"{kind}={count}" for kind, count in sorted(stats.get("by_kind", {}).items()))
+    evidence = ", ".join(
+        f"{name}={count}" for name, count in sorted(stats.get("by_evidence", {}).items())
+    )
     return (
         f"[memory] total={stats.get('total', 0)} active={stats.get('active', 0)} "
         f"pinned={stats.get('pinned', 0)} kinds: {kinds or '-'} "
+        f"evidence: {evidence or '-'} "
         f"enabled={stats.get('enabled')}"
     )
 
