@@ -148,3 +148,12 @@ class BudgetLedger:
             self._prompt / 1000 * pricing.input_per_1k
             + self._completion / 1000 * pricing.output_per_1k
         )
+
+    def usage_dict(self) -> dict[str, int]:
+        """The turn's totals in the same shape the engine reports per step."""
+        totals = self.totals
+        return {
+            "prompt_tokens": totals.prompt_tokens,
+            "completion_tokens": totals.completion_tokens,
+            "total_tokens": totals.total_tokens,
+        }

@@ -28,23 +28,31 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ai_coding.ai.engine import ChatEngine, EngineError
 from ai_coding.config.models import AIConfig
+from ai_coding.core.budget import BudgetLedger
+from ai_coding.core.context_compression import estimate_tokens
 from ai_coding.core.dispatch import DispatchOutcome, ToolDispatcher
 from ai_coding.core.events import (
     AssistantMessage,
+    ContextAssembled,
+    Degraded,
     IterationStarted,
     LoopEvent,
     LoopObserver,
     MemoryHarvested,
     MemoryInjected,
+    ModelStepFinished,
     NullObserver,
     TaskUpdated,
     TurnFinished,
 )
+from ai_coding.core.trace import canonical_request, digest_of, prefix_shared, short_json
 from ai_coding.core.turn_policy import (
     TaskInjection,
     TurnAction,
@@ -57,6 +65,7 @@ from ai_coding.domain.message import ChatMessage, ToolArtifact, ToolOutput
 from ai_coding.domain.run import assistant_message, tool_message, user_message
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
+from ai_coding.domain.usage import cache_from_usage
 from ai_coding.infra.deadline import Deadline, DeadlineExpired, run_with_deadline
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.security.approval import ApprovalCallback
@@ -89,11 +98,15 @@ class _SafeObserver:
 
     def __init__(self, inner: LoopObserver) -> None:
         self._inner = inner
+        # R4a: a renderer that keeps failing is still worth reporting once per
+        # turn, instead of vanishing into a debug log (docs/r4-analysis.md 1.1).
+        self.failures = 0
 
     def on_event(self, event: LoopEvent) -> None:
         try:
             self._inner.on_event(event)
         except Exception:  # noqa: BLE001 — UI failures must not kill the turn
+            self.failures += 1
             _log.debug("loop observer failed on %s", type(event).__name__, exc_info=True)
 
 
@@ -131,6 +144,9 @@ class AgentLoop:
         # Task injection + stop policy live in their own pure unit (R2c).
         self.policy = TurnPolicy(TurnPolicyConfig.from_ai_config(self.settings))
         self._tool_schemas = tool_schemas(tools)
+        # R4a: the tool schemas are part of every prompt, so their size belongs in
+        # the attribution (docs/r4-analysis.md 4.3).
+        self._tools_chars = len(short_json(self._tool_schemas))
         self.dispatcher = ToolDispatcher(
             tools,
             gate or PermissionGate(),
@@ -170,6 +186,11 @@ class AgentLoop:
         last_text: str | None = None
         summaries: list[str] = []
         memory_announced = False
+        # R4a: the turn's ledger and the previous request's canonical form, which
+        # together answer "what did this cost" and "did the prefix move".
+        ledger = BudgetLedger()
+        previous_request: str | None = None
+        observer_failures = self._observer_failure_count()
         outcome = TurnOutcome(
             status=TurnStatus.MAX_ITERATIONS, reason="iteration budget exhausted"
         )
@@ -209,11 +230,13 @@ class AgentLoop:
                 # prompt stays byte-identical and the history stays append-only, so
                 # only this small region diverges between turns (docs/r2 §1.13).
                 tail: list[ChatMessage] = []
+                tail_blocks: list[tuple[str, int]] = []
                 memory_block, memory_ids = self._memory_block()
                 if memory_block:
                     tail.append(
                         ChatMessage(role="user", content=memory_block, timestamp="")
                     )
+                    tail_blocks.append(("memory", len(memory_block)))
                     if not memory_announced:
                         self._emit(
                             MemoryInjected(
@@ -223,10 +246,24 @@ class AgentLoop:
                         memory_announced = True
                 if injection.message is not None:
                     tail.append(injection.message)
+                    tail_blocks.append(("task", len(injection.message.content or "")))
                 request = [*history, *tail]
+                self._emit_context_assembled(
+                    ledger,
+                    iteration=index,
+                    instructions=instructions,
+                    history=history,
+                    request=request,
+                    tail_blocks=tuple(tail_blocks),
+                    previous=previous_request,
+                )
+                previous_request = canonical_request(
+                    instructions, request, self._tools_chars
+                )
 
                 # The one wait that cannot degrade: a model step either answers or
                 # the turn ends (docs/r2-analysis.md §7.3).
+                step_started = time.monotonic()
                 step = await run_with_deadline(
                     self.engine.step(
                         request,
@@ -237,7 +274,9 @@ class AgentLoop:
                     timeout=self._remaining(deadline),
                     label="model_step",
                 )
+                latency_ms = int((time.monotonic() - step_started) * 1000)
                 last_text = step.text
+                self._emit_step_finished(ledger, index, step, latency_ms)
                 self._emit(
                     AssistantMessage(text=step.text, tool_calls=tuple(step.tool_calls))
                 )
@@ -271,6 +310,7 @@ class AgentLoop:
                     step.tool_calls,
                     self._tool_context(session, task, history, instructions),
                     deadline=deadline,
+                    iteration=index,
                 )
                 self._write_tool_messages(session, outcomes)
                 if any(item.call.name == "todo_write" for item in outcomes):
@@ -294,7 +334,7 @@ class AgentLoop:
                 iterations=iterations,
                 reason="cancelled",
             )
-            self._finalize(session, outcome)
+            self._finalize(session, outcome, ledger, observer_failures)
             raise
         except DeadlineExpired as exc:
             outcome = TurnOutcome(
@@ -314,7 +354,7 @@ class AgentLoop:
                 reason=str(exc),
             )
 
-        self._finalize(session, outcome)
+        self._finalize(session, outcome, ledger, observer_failures)
         await self._harvest(session, deadline, summaries, outcome)
         return outcome.text or ""
 
@@ -367,6 +407,63 @@ class AgentLoop:
 
     # ---- request assembly -------------------------------------------------
 
+    def _observer_failure_count(self) -> int:
+        return getattr(self.observer, "failures", 0) if self.observer else 0
+
+    def _emit_context_assembled(
+        self,
+        ledger: BudgetLedger,
+        *,
+        iteration: int,
+        instructions: str | None,
+        history: list[ChatMessage],
+        request: list[ChatMessage],
+        tail_blocks: tuple[tuple[str, int], ...],
+        previous: str | None,
+    ) -> None:
+        """Report what this request is made of — counts only, never content."""
+        canonical = canonical_request(instructions, request, self._tools_chars)
+        shared_chars, shared_ratio = prefix_shared(previous, canonical)
+        event = ContextAssembled(
+            iteration=iteration,
+            system_chars=len(instructions or ""),
+            tools_chars=self._tools_chars,
+            history_messages=len(history),
+            history_chars=sum(len(message.content or "") for message in history),
+            tail_blocks=tail_blocks,
+            estimated_tokens=estimate_tokens(canonical),
+            prefix_shared_chars=shared_chars,
+            prefix_shared_ratio=shared_ratio,
+            digest=digest_of(canonical),
+        )
+        ledger.record_assembly(event.estimated_tokens, shared_ratio)
+        self._emit(event)
+
+    def _emit_step_finished(
+        self,
+        ledger: BudgetLedger,
+        index: int,
+        step: Any,
+        latency_ms: int,
+    ) -> None:
+        """Report one model step's real cost, and feed the ledger."""
+        cached, cache_write = cache_from_usage(step.usage)
+        self._emit(
+            ModelStepFinished(
+                index=index,
+                finish_reason=step.finish_reason,
+                text_chars=len(step.text or ""),
+                tool_call_count=len(step.tool_calls),
+                usage=step.usage,
+                cached_tokens=cached,
+                cache_write_tokens=cache_write,
+                latency_ms=latency_ms,
+            )
+        )
+        ledger.record_step(
+            step.usage, cached=cached, cache_write=cache_write, latency_ms=latency_ms
+        )
+
     @staticmethod
     def _remaining(deadline: Deadline | None) -> float | None:
         """Seconds left in the turn, or ``None`` when there is no ceiling."""
@@ -401,6 +498,13 @@ class AgentLoop:
             )
         except DeadlineExpired:
             _log.debug("context compression ran out of budget; using the raw history")
+            self._emit(
+                Degraded(
+                    component="context_compress",
+                    reason="compression exceeded its budget",
+                    fallback="used the uncompressed history",
+                )
+            )
             return history
 
     async def _build_instructions(
@@ -429,6 +533,13 @@ class AgentLoop:
             return self.memory.render_index_block(notes), tuple(n.id for n in notes)
         except Exception:  # noqa: BLE001 — memory must never break a turn
             _log.debug("memory index block failed", exc_info=True)
+            self._emit(
+                Degraded(
+                    component="memory_block",
+                    reason="memory index could not be rendered",
+                    fallback="no constraint block was injected",
+                )
+            )
             return "", ()
 
     def _tool_context(
@@ -474,8 +585,24 @@ class AgentLoop:
         if len(session.messages) <= limit or index % LONG_SESSION_STRIDE == 0:
             self._save(session)
 
-    def _finalize(self, session: SessionData, outcome: TurnOutcome) -> None:
+    def _finalize(
+        self,
+        session: SessionData,
+        outcome: TurnOutcome,
+        ledger: BudgetLedger | None = None,
+        observer_failures: int = 0,
+    ) -> None:
+        if ledger is not None:
+            outcome = replace(outcome, usage=ledger.usage_dict())
         self._save(session)
+        if self._observer_failure_count() > observer_failures:
+            self._emit(
+                Degraded(
+                    component="observer",
+                    reason="an observer raised while rendering",
+                    fallback="the turn continued without it",
+                )
+            )
         self._emit(TurnFinished(outcome=outcome))
         self.last_outcome = outcome
 
@@ -484,7 +611,16 @@ class AgentLoop:
         try:
             self.sessions.save(session)
         except OSError:
-            pass  # persistence is best-effort; never break the turn
+            # Persistence is best-effort, but a silent failure used to be
+            # invisible; R4a at least says so (docs/r4-analysis.md 1.1).
+            _log.debug("session save failed", exc_info=True)
+            self._emit(
+                Degraded(
+                    component="persist",
+                    reason="the session file could not be written",
+                    fallback="the transcript stays in memory only",
+                )
+            )
 
     async def _harvest(
         self,
@@ -517,20 +653,27 @@ class AgentLoop:
                 timeout=self._remaining(deadline),
                 label="memory_harvest",
             )
-        except Exception:  # noqa: BLE001 — memory is best-effort
+            session.harvested_messages = len(session.messages)
+            self._save(session)
+            if report.added or report.updated or report.superseded or report.skipped:
+                self._emit(
+                    MemoryHarvested(
+                        added=tuple(report.added),
+                        updated=tuple(report.updated),
+                        superseded=tuple(report.superseded),
+                        skipped=tuple(report.skipped),
+                    )
+                )
+        except Exception:  # noqa: BLE001 — memory is best-effort, and now visible
             _log.debug("memory harvest failed", exc_info=True)
-            return
-        session.harvested_messages = len(session.messages)
-        self._save(session)
-        if report.added or report.updated or report.superseded or report.skipped:
             self._emit(
-                MemoryHarvested(
-                    added=tuple(report.added),
-                    updated=tuple(report.updated),
-                    superseded=tuple(report.superseded),
-                    skipped=tuple(report.skipped),
+                Degraded(
+                    component="memory_harvest",
+                    reason="this turn's delta could not be reconciled",
+                    fallback="memory was left unchanged",
                 )
             )
+            return
         if outcome.text is None:
             return  # nothing was concluded; no reason to wake consolidation
         try:
@@ -541,6 +684,13 @@ class AgentLoop:
             )
         except Exception:  # noqa: BLE001 — memory is best-effort
             _log.debug("memory consolidation failed", exc_info=True)
+            self._emit(
+                Degraded(
+                    component="memory_consolidate",
+                    reason="index consolidation failed",
+                    fallback="the index was left as it was",
+                )
+            )
 
     # ---- events -----------------------------------------------------------
 

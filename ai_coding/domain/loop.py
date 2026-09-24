@@ -42,6 +42,10 @@ class TurnOutcome:
     text: str | None = None
     iterations: int = 0
     reason: str = ""
+    # R4a: what the turn spent, summed over its model steps.  Carried on the
+    # outcome so a caller does not have to go digging through a trace file to
+    # answer "what did that cost?" (docs/r4-analysis.md 7.3).
+    usage: dict[str, int] | None = None
 
 
 __all__ = ["TurnStatus", "StepResult", "TurnOutcome"]
