@@ -63,13 +63,20 @@ R3 之后：编排层已经跑得对、收得回、记得住，但它是黑盒�
 | [R4 设计文档](r4-analysis.md) | **完整设计文档**：三层定义（观测/门卫/钩子）与分工判据；12 条必须守住的既有不变量 + 12 条新增原则；目标架构（分层图、含 A1–C4 判定管线的时序图、span 模型、存储布局）；R4a 可观测（事件契约 / JSONL 契约 / 账本口径 / cache 真值优先 / 脱敏）、R4b 门卫（守卫链 + 4 内置守卫 + **改写后重过权限门** + token 闸门）、R4c 钩子（点位 × 能力矩阵 + python/command 双形态 + 环境隔离 + 失败语义）；契约汇总、配置与兼容、28 个测试文件、9 条真实验收案例、风险自核；**15 个待拍板决策点** |
 | [GenericAgent 调研](r4a-genericagent-research.md) | 外部对标（14.2k star，arXiv 2604.17091）：源码级拆解它的极简循环、9 原子工具、L0–L4 记忆、四段语境压缩、hooks、观测插件；逐项对照我方；由此产生的 4 条 R4 修订（cache 真值 / hook 双形态 / fail 语义 / 索引不变量）与「不建议照搬的 7 条」 |
 
+## 循环内核拆分记录（R5，开发追踪）
+
+R4 之后 `core/agent_loop.py` 涨到 788 行、`process_input` 单方法 229 行，因此触发一次纯结构重构。
+
+| 文档 | 范围 |
+|---|---|
+| [R5 分析](r5-analysis.md) | 现状实测（方法规模、「上报降级」3 份实现、17 个协作者）、拆什么与不拆什么（YAGNI 边界）、四个新单元的精确接口、`process_input` 前后对照、行为不变性证明方式、约 30 条契约测试、8 条风险自核、6 个决策点 |
+
 ## 当前状态
 
 主线里程碑 M0–M6、编排层重构 R1、可靠性收口 R2、记忆层重做 R3 全部完成，分阶段提交。
-质量门禁：`pytest`（633 例，含 bash/worktree 真实子进程与旧 M3 记忆测试）全绿、`ruff` 0 问题、
-`mypy strict`（按 3.10 下限检查）0 问题；`scripts/memory_cases.py` 11/11；
+质量门禁：`pytest`（**766 例通过 / 1 跳过**）全绿、`ruff` 0 问题、`mypy strict`（按 3.10 下限检查）0 问题；
+`scripts/memory_cases.py` 11/11、`scripts/trace_cases.py` 6/6；
 MCP 真连与真实 LLM A/B 在正常环境另有 gate 测试 + CI 步骤。
 
 R4（可观测 / 门卫 / hook）**已按 R4a → R4b → R4c 顺序实现**：设计与决策点见 [r4-analysis.md](r4-analysis.md)，
 实施计划见 [r4-plan.md](r4-plan.md)，外部对标见 [r4a-genericagent-research.md](r4a-genericagent-research.md)。
-质量门禁：`pytest` **762 例通过 / 1 跳过**、`ruff` 0、`mypy strict` 0（80 文件）。
