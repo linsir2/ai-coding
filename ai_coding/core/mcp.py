@@ -165,6 +165,11 @@ class MCPToolAdapter(BaseTool):
         return f"{self._server}__{getattr(self._tool, 'name', 'tool')}"
 
     @property
+    def origin(self) -> str:
+        """The server this tool belongs to (R7e-3: the tool surface is per server)."""
+        return self._server
+
+    @property
     def description(self) -> str:
         return str(getattr(self._tool, "description", "") or "")
 

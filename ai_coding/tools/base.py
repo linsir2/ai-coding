@@ -63,6 +63,15 @@ class BaseTool(ABC):
     parallel_safe: bool = False
 
     @property
+    def origin(self) -> str:
+        """Where this tool came from: ``"local"``, or an MCP server's name (R7e-3).
+
+        The tool surface is paid for on every model step, so a cost warning has to
+        name the expensive part.  The default keeps every built-in tool out of it.
+        """
+        return "local"
+
+    @property
     def max_duration_seconds(self) -> float | None:
         """Per-call ceiling for the dispatcher (R2a), in seconds.
 
