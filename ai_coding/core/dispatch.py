@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ai_coding.core.events import (
@@ -66,6 +66,8 @@ class _Prepared:
     call: ToolCall
     tool: BaseTool | None
     decision: Any | None
+    # R4a: the loop's iteration, carried so the events can be correlated.
+    iteration: int = 0
 
 
 def _verdict(decision: Any) -> PermissionDecision:
@@ -121,12 +123,15 @@ class ToolDispatcher:
         ctx: ToolContext,
         *,
         deadline: Deadline | None = None,
+        iteration: int = 0,
     ) -> list[DispatchOutcome]:
         """Run ``calls`` and return one outcome per call, in the given order."""
         if not calls:
             return []
 
-        prepared = [self._prepare(tool_call_from_ref(ref)) for ref in calls]
+        prepared = [
+            self._prepare(tool_call_from_ref(ref), iteration=iteration) for ref in calls
+        ]
 
         if self._can_run_parallel(prepared):
             semaphore = asyncio.Semaphore(self.max_parallel)
@@ -154,11 +159,11 @@ class ToolDispatcher:
 
     # ---- preparation ------------------------------------------------------
 
-    def _prepare(self, call: ToolCall) -> _Prepared:
+    def _prepare(self, call: ToolCall, *, iteration: int = 0) -> _Prepared:
         """Resolve the tool and its permission verdict exactly once per call."""
         tool = self.registry.get(call.name)
         decision = None if tool is None else self.gate.check(call.name, call.params)
-        return _Prepared(call=call, tool=tool, decision=decision)
+        return _Prepared(call=call, tool=tool, decision=decision, iteration=iteration)
 
     def _can_run_parallel(self, prepared: list[_Prepared]) -> bool:
         """Concurrency requires *every* call to be an ALLOW-tier safe tool."""
@@ -178,8 +183,16 @@ class ToolDispatcher:
         deadline: Deadline | None = None,
     ) -> DispatchOutcome:
         call = item.call
+        # R4a: one context per *call*, so the execution can identify itself even
+        # when the batch shares the rest of the context (traces need the call id).
+        ctx = replace(ctx, call_id=call.id)
         self.observer.on_event(
-            ToolStarted(call_id=call.id, tool_name=call.name, params=dict(call.params))
+            ToolStarted(
+                call_id=call.id,
+                tool_name=call.name,
+                params=dict(call.params),
+                iteration=item.iteration,
+            )
         )
         started = time.monotonic()
 
@@ -193,6 +206,7 @@ class ToolDispatcher:
                 output_preview=preview(result.output),
                 duration_ms=int((time.monotonic() - started) * 1000),
                 error=result.error,
+                iteration=item.iteration,
             )
         )
         return DispatchOutcome(call=call, result=result, denied=denied, halted=halted)

@@ -7,6 +7,7 @@ and bash with a hard-deny pattern is DENY.
 """
 
 import asyncio
+import dataclasses
 import time
 
 import pytest
@@ -276,7 +277,12 @@ async def test_tool_receives_the_given_context():
     tool = _FakeTool("read")
     ctx = _ctx()
     await _dispatcher([tool]).dispatch_batch([_ref("c1", "read")], ctx)
-    assert tool.contexts_seen == [ctx]
+    # R4a contract change: the dispatcher stamps a per-call ``call_id`` onto a copy
+    # of the batch context, so a concurrent batch can still attribute each
+    # execution (docs/r4-analysis.md 4.6).  Everything else is passed through.
+    received = tool.contexts_seen[0]
+    assert received.call_id == "c1"
+    assert dataclasses.replace(received, call_id="") == ctx
 
 
 # ---- STOP / skipped --------------------------------------------------------

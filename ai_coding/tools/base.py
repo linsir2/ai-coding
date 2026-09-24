@@ -38,6 +38,11 @@ class ToolContext:
     messages: tuple[ChatMessage, ...] = ()
     instructions: str | None = None
     emit: Callable[[Any], None] = _noop_emit
+    # R4a: the id of the call this execution belongs to.  The dispatcher stamps
+    # one context per call (the batch shares everything else), which is what lets
+    # a trace hang a sub-agent's spans under the subAgent call that spawned it
+    # (docs/r4-analysis.md 4.6).
+    call_id: str = ""
 
 
 def resolve_ctx(ctx: ToolContext | None) -> ToolContext:
