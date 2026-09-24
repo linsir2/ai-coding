@@ -74,6 +74,12 @@ class AIConfig(BaseModel):
     # R4b: cumulative token ceiling for one turn (it counts every re-sent context,
     # so it is a spend cap, not a window size).  0 disables the gate.
     turn_token_budget: int = 0
+    # R6a: the volatile <working-memory> ring — at most this many one-line turn
+    # digests, rendered into this many characters (measured ≈230 estimated tokens,
+    # 0.5% of the budget: docs/r6-analysis.md 1.6).  Injected only when the
+    # request's history was actually rewritten, so an ordinary turn pays nothing.
+    working_memory_keep: int = 12
+    working_memory_chars: int = 1200
 
 
 class TracingConfig(BaseModel):

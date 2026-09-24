@@ -10,7 +10,7 @@ the caller's history on failure" rule are stated once (docs/r5-analysis.md 3.3).
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from ai_coding.core.events import LoopEvent
@@ -34,6 +34,17 @@ class Compactor:
     ) -> None:
         self._context = context
         self._emit = emit
+
+    @staticmethod
+    def did_compact(source: Sequence[ChatMessage], result: Sequence[ChatMessage]) -> bool:
+        """True when ``compress`` actually rewrote the history.
+
+        ``compress`` hands back the caller's own list when it does nothing (no
+        context, below the water mark, or the degraded fallback) and a fresh list
+        when it ran.  That identity is the loop's signal for "is the working-memory
+        ring worth its tokens this request?" (docs/r6-analysis.md 2.1, D-R6-2).
+        """
+        return result is not source
 
     async def compress(
         self,

@@ -43,6 +43,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ai_coding.ai.engine import ChatEngine, EngineError
@@ -77,6 +78,12 @@ from ai_coding.domain.message import ChatMessage, ToolArtifact, ToolOutput
 from ai_coding.domain.run import assistant_message, tool_message, user_message
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
+from ai_coding.domain.turn_digest import (
+    append_digest,
+    build_digest,
+    render_handoff,
+    render_working_memory,
+)
 from ai_coding.infra.deadline import (
     Deadline,
     DeadlineExpired,
@@ -267,6 +274,10 @@ class AgentLoop:
         self._bind_observer(observer)
         self._bind_trace(session)
         session.add_message(user_message(user_input, now_utc()))
+        # R6a: the session-level turn counter.  It is what `source_turn` and the
+        # <working-memory> header mean by "turn N" (docs/r6-analysis.md 2.4).
+        session.turn_count = int(getattr(session, "turn_count", 0) or 0) + 1
+        turn_number = session.turn_count
         self.last_artifacts = []
         if session.task is None:
             session.task = TaskState(goal=user_input)
@@ -316,6 +327,10 @@ class AgentLoop:
                 history = await self.compactor.compress(
                     session.messages, deadline=deadline, on_summary=summaries.append
                 )
+                # R6a: the ring only pays for itself when this request's history was
+                # actually rewritten — otherwise the recent turns are still there
+                # (docs/r6-analysis.md 2.1, D-R6-2).
+                compacted = Compactor.did_compact(session.messages, history)
                 instructions = await self._build_instructions(history, deadline)
                 injection: TaskInjection = policy.inject_task(task, instructions)
                 instructions = injection.instructions
@@ -328,11 +343,18 @@ class AgentLoop:
                         MemoryInjected(note_ids=memory_ids, chars=len(memory_block))
                     )
                     memory_announced = True
+                digest_block = render_working_memory(
+                    session.turn_digests,
+                    current_turn=turn_number,
+                    max_chars=int(getattr(self.settings, "working_memory_chars", 1200)),
+                    compacted=compacted,
+                )
                 tail, tail_blocks = build_tail(
                     [
                         _volatile("memory", memory_block),
                         _volatile("task", _content_of(injection.message)),
                         _volatile("hook", hook_context),
+                        _volatile("digest", digest_block),
                     ]
                 )
                 request = [*history, *tail]
@@ -396,19 +418,30 @@ class AgentLoop:
         except asyncio.CancelledError:
             # Record what happened, persist the partial transcript, then let the
             # cancellation propagate — swallowing it is an asyncio anti-pattern.
-            self._finalize(
-                session, _aborted_outcome(last_text, iterations)
+            self._close_turn(
+                session,
+                user_input=user_input,
+                task=task,
+                turn_number=turn_number,
+                outcome=_aborted_outcome(last_text, iterations),
             )
             raise
         except (DeadlineExpired, EngineError) as exc:
             outcome = _failed_outcome(exc, last_text=last_text, iterations=iterations)
 
-        self._finalize(session, outcome)
+        outcome = self._close_turn(
+            session,
+            user_input=user_input,
+            task=task,
+            turn_number=turn_number,
+            outcome=outcome,
+        )
         await self.turn_memory.harvest(
             session, deadline=deadline, summaries=summaries, outcome=outcome
         )
         await self._fire_hooks(HookPoint.TURN_END, session)
-        return outcome.text or ""
+        # R6a: a turn that ran out of budget used to hand the user an empty string.
+        return outcome.text or outcome.handoff
 
     def _bind_observer(self, observer: LoopObserver | None) -> None:
         """Honour a per-call observer (the REPL swaps the UI between turns)."""
@@ -422,6 +455,11 @@ class AgentLoop:
             return
         self.trace.session_id = session.session_id
         self.trace.attach_session(session, start=len(session.messages))
+
+    def _trace_path(self, session: SessionData) -> str:
+        """Where this turn's trace lives, for the handoff (best effort)."""
+        path = getattr(self.trace, "current_path", None)
+        return str(path) if path else ""
 
     def _iteration_decision(
         self,
@@ -630,6 +668,48 @@ class AgentLoop:
         """Persist, then close the turn through the reporter (order matters)."""
         self._save(session)
         self.last_outcome = self.reporter.finish_turn(outcome, self.observer)
+
+    def _close_turn(
+        self,
+        session: SessionData,
+        *,
+        user_input: str,
+        task: TaskState,
+        turn_number: int,
+        outcome: TurnOutcome,
+    ) -> TurnOutcome:
+        """Record what this turn leaves behind, then persist it (R6a).
+
+        Two things happen here, in this order, because both have to be in the saved
+        session: the **handoff** (what to tell the user when the model ran out of
+        turn without a final word) and the **digest** (the one line the next
+        request's ``<working-memory>`` block is rendered from).
+        ``TurnOutcome.text`` is never touched — the handoff is harness-authored, and
+        callers must still be able to tell whether the model itself delivered
+        (docs/r6-analysis.md 2.1, D-R6-4).
+        """
+        if not outcome.text:
+            handoff = render_handoff(
+                outcome=outcome,
+                task=task,
+                artifacts=self.last_artifacts,
+                trace_path=self._trace_path(session),
+            )
+            if handoff:
+                outcome = replace(outcome, handoff=handoff)
+        append_digest(
+            session,
+            build_digest(
+                turn=turn_number,
+                user_input=user_input,
+                outcome=outcome,
+                artifacts=self.last_artifacts,
+                task=task,
+            ),
+            keep=int(getattr(self.settings, "working_memory_keep", 12)),
+        )
+        self._finalize(session, outcome)
+        return outcome
 
     def _save(self, session: SessionData) -> None:
         session.ensure_tool_pairing()

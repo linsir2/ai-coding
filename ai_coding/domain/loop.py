@@ -47,6 +47,11 @@ class TurnOutcome:
     # outcome so a caller does not have to go digging through a trace file to
     # answer "what did that cost?" (docs/r4-analysis.md 7.3).
     usage: dict[str, int] | None = None
+    # R6a: the harness's own report for a turn that ended without a final word
+    # (budget, clock or engine).  Deliberately *not* folded into ``text``: memory
+    # reads ``text is None`` as "this turn concluded nothing", and a sub-agent's
+    # conclusion is the model's own words (docs/r6-analysis.md 2.1, D-R6-4).
+    handoff: str = ""
 
 
 __all__ = ["TurnStatus", "StepResult", "TurnOutcome"]

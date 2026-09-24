@@ -637,8 +637,13 @@ async def test_engine_error_yields_error_status_and_persists(tmp_path):
 
     text = await loop.process_input(session, "go")
 
-    assert text == ""
+    # R6a changed exactly one outward behaviour: an unfinished turn hands back a
+    # harness report instead of "".  `text` keeps its own meaning — the model never
+    # produced a final message (docs/r6-analysis.md 2.1 / section 5).
+    assert text.startswith("[回合未完成 · 引擎错误")
     assert loop.last_outcome is not None
+    assert loop.last_outcome.text is None
+    assert loop.last_outcome.handoff == text
     assert loop.last_outcome.status is TurnStatus.ERROR
     assert "boom" in loop.last_outcome.reason
     persisted = sessions.load(session.session_id)
@@ -826,8 +831,12 @@ async def test_turn_deadline_ends_turn_as_timeout(tmp_path):
     elapsed = time.monotonic() - started
 
     assert elapsed < 2.0, f"the watchdog let the turn run {elapsed:.1f}s"
-    assert text == ""
+    # R6a: same contract change as the engine-error case above — the turn reports
+    # through `handoff`, and `text` still says "the model said nothing".
+    assert text.startswith("[回合未完成 · 回合超时")
     assert loop.last_outcome is not None
+    assert loop.last_outcome.text is None
+    assert loop.last_outcome.handoff == text
     assert loop.last_outcome.status is TurnStatus.TIMEOUT
     assert "turn deadline" in loop.last_outcome.reason
     assert isinstance(observer.events[-1], TurnFinished)

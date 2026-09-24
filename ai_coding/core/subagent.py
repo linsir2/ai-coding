@@ -222,7 +222,11 @@ class SubAgentRunner:
         outcome = loop.last_outcome
         status = _STATUS_MAP.get(outcome.status.value if outcome else "error", "error")
         limit = int(getattr(self._settings, "max_subagent_conclusion_chars", 4000))
-        conclusion = _truncate(outcome.text if outcome else None, limit)
+        # R6a: a sub-agent that ran out of budget still has something to say — the
+        # harness handoff — and the parent should not have to guess why it stopped.
+        conclusion = _truncate(
+            (outcome.text or outcome.handoff) if outcome else None, limit
+        )
         todos = (
             tuple(item.to_dict() for item in session.task.items)
             if session.task is not None
