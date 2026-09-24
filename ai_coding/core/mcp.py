@@ -263,7 +263,14 @@ class MCPManager:
                     "its tools are not available this run",
                 )
                 continue
+            # R7d: register only what the user asked for.  Every tool schema is
+            # re-sent on every model step, so this is the one knob that lowers the
+            # per-step cost of a talkative server (docs/r7-analysis.md 1.2).
+            wanted = {str(name) for name in getattr(server, "tools", []) or []}
             for tool in owner.tools:
+                remote = str(getattr(tool, "name", ""))
+                if wanted and remote not in wanted:
+                    continue
                 tools.append(
                     MCPToolAdapter(server=server.name, tool=tool, session=owner.session)
                 )

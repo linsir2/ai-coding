@@ -75,7 +75,9 @@ def test_mcp_defaults():
     mcp = ConfigLoader.load_mcp(None)
     assert mcp.enabled is False
     assert mcp.auto_discover is True
-    assert mcp.connection_timeout == 30
+    # R7d: 30s left ~3s of headroom against a measured 27s npx cold start, so the
+    # default is now 60 (docs/r7-analysis.md 3.4, r7-backlog.md 3.3).
+    assert mcp.connection_timeout == 60
     assert mcp.servers == []
 
 

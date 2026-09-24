@@ -76,8 +76,8 @@ def _cfg(*servers, enabled=True) -> MCPConfig:
     return MCPConfig(enabled=enabled, servers=list(servers))
 
 
-def _server(name="fs", command="mcp-fs", enabled=True) -> MCPServerConfig:
-    return MCPServerConfig(name=name, command=command, enabled=enabled)
+def _server(name="fs", command="mcp-fs", enabled=True, **kwargs) -> MCPServerConfig:
+    return MCPServerConfig(name=name, command=command, enabled=enabled, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -389,3 +389,50 @@ async def test_default_session_factory_performs_the_handshake(monkeypatch):
         assert isinstance(session, FakeSession)
 
     assert events == ["spawn", "enter", "initialize", "exit"]
+
+
+# ---- R7d: the registration allowlist, and the connection default -------------
+
+
+@pytest.mark.asyncio
+async def test_the_tools_allowlist_filters_the_adapters():
+    session = _Session(tools=[_tool("read_file"), _tool("write_file"), _tool("list_dir")])
+    manager = MCPManager(
+        _cfg(_server(tools=["read_file", "list_dir"])), session_factory=_factory({"fs": session})
+    )
+    try:
+        tools = await manager.open_all()
+    finally:
+        await manager.aclose()
+    assert [tool.name for tool in tools] == ["fs__read_file", "fs__list_dir"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_allowlist_keeps_every_tool():
+    session = _Session(tools=[_tool("read_file"), _tool("write_file")])
+    manager = MCPManager(_cfg(_server()), session_factory=_factory({"fs": session}))
+    try:
+        tools = await manager.open_all()
+    finally:
+        await manager.aclose()
+    assert [tool.name for tool in tools] == ["fs__read_file", "fs__write_file"]
+
+
+@pytest.mark.asyncio
+async def test_the_allowlist_matches_remote_names_not_the_prefix():
+    session = _Session(tools=[_tool("read_file")])
+    manager = MCPManager(
+        _cfg(_server(tools=["fs__read_file"])),  # the adapter name, not the remote one
+        session_factory=_factory({"fs": session}),
+    )
+    try:
+        tools = await manager.open_all()
+    finally:
+        await manager.aclose()
+    assert tools == []
+
+
+def test_the_connection_timeout_default_gives_npx_room_to_start():
+    from ai_coding.config.models import MCPConfig
+
+    assert MCPConfig().connection_timeout == 60

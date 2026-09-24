@@ -393,6 +393,7 @@ def _build_loop(
     from ai_coding.core.project_instructions import ProjectInstructionsLoader
     from ai_coding.memory.service import MemoryService
     from ai_coding.memory.store import MemoryStore
+    from ai_coding.security.permission_gate import PermissionGate
     from ai_coding.skills.registry import SkillRegistry
 
     ws = Path(workspace).expanduser().resolve()
@@ -432,6 +433,9 @@ def _build_loop(
         sessions,
         registry,
         approval=approval,
+        # R7d: the gate is the composition root's policy, so the servers the user
+        # declared trusted are trusted here and nowhere else.
+        gate=PermissionGate.from_config(app_cfg),
         context=context,
         memory=memory,
         prompt=prompt,

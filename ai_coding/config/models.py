@@ -189,6 +189,13 @@ class MCPServerConfig(BaseModel):
     # default set) and its working directory (R2d).
     env: dict[str, str] = Field(default_factory=dict)
     cwd: str = ""
+    # R7d: only register these remote tool names (empty = all of them).  Every
+    # schema is re-sent on every step, so a 13-tool server can double the tool
+    # surface: measured 10,062 of 14,342 characters (docs/r7-analysis.md 1.2).
+    tools: list[str] = Field(default_factory=list)
+    # R7d: this server's tools skip the approval prompt.  Declared by the user in
+    # their own config, and off by default, so an unconfigured run is unchanged.
+    auto_approve: bool = False
 
 
 class MCPConfig(BaseModel):
@@ -196,7 +203,9 @@ class MCPConfig(BaseModel):
 
     enabled: bool = False
     auto_discover: bool = True
-    connection_timeout: int = 30
+    # R7d: npx-class servers measured ~27s to cold start, which left 3s against the
+    # old 30s default (docs/features.md, R4 measurements).
+    connection_timeout: int = 60
     servers: list[MCPServerConfig] = Field(default_factory=list)
 
 

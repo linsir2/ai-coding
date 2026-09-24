@@ -133,14 +133,18 @@ R3 重写。记忆层现在回答三个问题：**写什么、什么时候写、
 | 失败隔离 | 一个 `command: /bin/false` 的 server 被跳过，另一个照常工作，会话不中断 |
 | 残留进程 | 运行结束后无孤儿 npx/python 子进程 |
 
-**三个需要知道的代价与坑**：
+**三个需要知道的代价与坑（R7d 之后都给了开关）**：
 
-1. **工具 schema 会显著推高每一步的 prompt**：加一个 13 工具的 server，`tools_chars` 从 5241 → **10481**（约翻倍）。
-   原生 function calling 每次调用都要发完整 schema，这份成本**每一步都付**——现在 `ContextAssembled.tools_chars` 能直接量出来。
-2. **冷启动可能撞上默认超时**：`npx -y @modelcontextprotocol/server-everything` 首次运行（含下载）实测约 **27s**，
-   而 `mcp.connection_timeout` 默认是 **30s**。npx/uvx 类 server 建议把它调到 60–90，或先预热缓存。
-3. **MCP 工具是 WARN 级**（远端工具未知 → 保守 WARN）：`ask` 自动放行，`repl` 每次调用都会弹审批；
-   调用会留下 `ToolApprovalRequested` 事件，可在轨迹里看到。
+1. **工具 schema 会显著推高每一步的 prompt**：原生 function calling 每次调用都要发完整 schema，这份成本**每一步都付**。
+   可复现的实测（`scripts/mcp_many_tools_server.py`，13 个「描述写得像真 server 那样啰嗦」的工具）：
+   不用 MCP **4,280** 字符 → 全注册 **13,301**（3.11×）→ `servers[].tools` 只留 2 个 **5,666**（1.32×，**-57%**）。
+   开关就是 `tools: [远端工具名]`（留空 = 全部，今天的行为）。
+2. **冷启动曾经撞上默认超时**：`npx -y @modelcontextprotocol/server-everything` 首次运行（含下载）实测约 **27s**，
+   旧的默认 `mcp.connection_timeout` 是 30s——R7d 起默认 **60**；npx/uvx 类 server 还可以再调到 90 或先预热缓存。
+3. **MCP 工具默认仍是 WARN 级**（远端工具未知 → 保守 WARN）：`ask` 自动放行，`repl` 每次调用都会弹审批。
+   若这个 server 是你自己声明在 `config.local.yaml` 里的，可以按 server 声明 **`auto_approve: true`**，
+   它的工具就不再弹审批（**默认 false，不声明就完全是今天的行为**；bash 的硬拒 DENY 表仍然优先）。
+   审批与超时都会留下事件（`ToolApprovalRequested`、`ToolFinished.error=approval_timeout`），可在轨迹里看到。
 
 R4 起，server 连不上不再静默：会发一条 `Degraded(component="mcp_server", reason="server '<name>': did not become ready within Ns")`
 并跳过它的工具（`/trace --degraded` 可见）。

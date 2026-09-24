@@ -131,12 +131,45 @@ R6 的验收（回合摘要环 / 收尾交接 / 失败升级 / `ask_user` / 记�
    `ask`（一次性、无人工）里这个工具不存在，模型只能自行决定并写明假设。
    注意：`ask_user` 现在**不在**审批门前（问一句不改变任何东西，答案要变成动作还得再走门），
    所以你不会先被问一次「Allow ask_user?」。等待上限是 `tools.ask_user.timeout_seconds`（默认 300s）。
-   已知限制：把 stdin 管道喂给 `repl` 的脚本化场景里，prompt_toolkit 会先占住输入，
-   提问会降级成 `no_answer`（模型据此写假设）——真终端不受影响，但「复用同一 PromptSession」
-   是后续要做的改进。
+   **R7c 修掉了脚本化场景**：`run_repl` 现在把 `ask_user` 的读取器换成 REPL 自己的
+   `PromptSession`，所以「一次喂多行」的脚本也能把答案送到工具里（实测旧代码 `reason=eof`、
+   新代码 `answer="改 A"`）；真终端行为不变（`tests/test_repl_ask_user_stdin.py` 默认跑，
+   `tests/test_repl_ask_user_pty.py` 门控 `AI_CODING_PTY=1`）。
 
 想关掉摘要环：把 `ai.working_memory_keep` 设为 0（或 `working_memory_chars` 设 0）；
 想关掉升级阶梯：把 `ai.stall_iterations` 与 `ai.failed_streak_threshold` 设为 0。
+
+## R7 新增配置与行为
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `ai.l2_window_chars` | 200 | L2 被清空的工具结果各保留头/尾多少字符（R7b） |
+| `ai.l2_window_budget` | 4000 | 一次压缩里所有窗口的总字符预算，从新到旧分配；用完之后只剩信封（R7b） |
+| `ai.approval_timeout_seconds` | 0 | 等审批的上限；0 = 只受回合钟约束（R7c） |
+| `mcp.connection_timeout` | 60 | 连不上的 server 等多久（R7d 起，旧默认 30s 撞 npx 冷启动 27s） |
+| `mcp.servers[].tools` | `[]` | 只注册这些远端工具（留空 = 全部）；每步都重发 schema，这是唯一能压它的开关（R7d） |
+| `mcp.servers[].auto_approve` | `false` | 该 server 的工具免审批；默认关，不配就是今天的行为（R7d） |
+
+```yaml
+mcp:
+  enabled: true
+  connection_timeout: 60
+  servers:
+    - name: everything
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-everything"]
+      enabled: true
+      tools: ["get-sum"]     # 只注册这一个（13 个全注册 = 每步多付约 9000 字符）
+      auto_approve: true     # 这个 server 是你在自己的配置里声明的
+```
+
+行为上的三处可见变化：
+
+1. **被压缩掉的工具输出可以取回**：历史里留下的是一行信封 + 头尾窗口，原文在
+   `<workspace>/transcripts/elided/`（文件名是内容哈希，重复正文不会写第二份）。
+2. **没人回答的审批不再拖住整回合**：结果是结构化的 `ToolFinished.error="approval_timeout"`，
+   不是「用户拒绝」——模型被明确告知「自己决定并写明假设」。
+3. **`tools_chars` 可以压下来了**：`repl` 的 `/trace` 里能看到每步的工具面大小。
 
 ## 常见问题
 

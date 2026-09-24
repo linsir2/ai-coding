@@ -11,6 +11,7 @@ Rules mirror the original Java ``PermissionGate``:
 from __future__ import annotations
 
 import enum
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -83,7 +84,15 @@ _BASH_HARD_DENY_PATTERNS: list[tuple[str, str]] = [
 class PermissionGate:
     """Determines whether a tool invocation is allowed, warned, or denied."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        trusted_servers: Iterable[str] = (),
+    ) -> None:
+        # R7d: MCP servers the user declared as trusted.  A remote tool is named
+        # ``server__tool``, so the server is the only thing that can be declared
+        # here — the tool names come from the server, not from our config.
+        self._trusted_servers = {str(name) for name in trusted_servers if name}
         self._allow_tools = {
             "read",
             "glob",
@@ -129,10 +138,34 @@ class PermissionGate:
                 f"tool '{tool_name}' requires confirmation",
             )
 
-        # 4. Unknown tools → WARN (fail-closed / conservative)
+        # 4. A tool from a server the user declared trusted (R7d).  Checked before
+        # the fail-closed rule, and matched on the *server* segment only, so a
+        # local tool cannot be trusted by naming itself "bash__something".
+        server, sep, _remote = tool_name.partition("__")
+        if sep and server in self._trusted_servers:
+            return Decision(PermissionDecision.ALLOW, "")
+
+        # 5. Unknown tools → WARN (fail-closed / conservative)
         return Decision(
             PermissionDecision.WARN,
             f"unknown tool '{tool_name}' requires confirmation",
+        )
+
+    @classmethod
+    def from_config(cls, app_cfg: Any) -> PermissionGate:
+        """The one place the composition root's policy is read (R7d).
+
+        Nothing about the *tool list* is needed: a server is trusted by name, so
+        this works before (and independently of) the MCP connection.
+        """
+        mcp = getattr(app_cfg, "mcp", None)
+        servers = getattr(mcp, "servers", None) or []
+        return cls(
+            trusted_servers=[
+                str(getattr(server, "name", ""))
+                for server in servers
+                if getattr(server, "auto_approve", False)
+            ]
         )
 
 

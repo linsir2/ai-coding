@@ -102,7 +102,7 @@ mcp:               # MCPConfig（默认关闭）
 
 `MemoryConfig`：`enabled`, `auto_extract`, `consolidate_threshold=10`, `max_index_entries=200`, `max_per_turn_injections=3`（R3 起：这是 `memory_search` 每次返回的条数上限）。
 
-`MCPConfig`：`enabled=false`, `auto_discover=true`, `connection_timeout=30`, `servers[]`。`MCPServerConfig`：`name`, `command`, `enabled=false`, `args[]`。
+`MCPConfig`：`enabled=false`, `auto_discover=true`, `connection_timeout=60`（R7d 起；npx 冷启动实测 ~27s）, `servers[]`。`MCPServerConfig`：`name`, `command`, `enabled=false`, `args[]`, `env{}`, `cwd`, `tools=[]`（非空则只注册这些远端工具，R7d）, `auto_approve=false`（该 server 的工具免审批，R7d）。
 
 YAML 加载规则：键做 camel→snake 归一化（`baseURL`→`base_url` 视为同一键）；未知键忽略；缺失时用模型默认值补全。加载函数 `ConfigLoader.load_app`（AppConfig）与 `load_mcp`（MCPConfig）分盒解耦。
 
