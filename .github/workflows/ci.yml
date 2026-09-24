@@ -46,3 +46,6 @@ jobs:
 
       - name: Memory acceptance cases (offline, 11 cases)
         run: python scripts/memory_cases.py
+
+      - name: Observability / guard / hook acceptance cases (offline)
+        run: python scripts/trace_cases.py
