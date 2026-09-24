@@ -19,7 +19,10 @@ class _FakeRunner:
         self.result = result or SubagentResult(status="completed", conclusion="done")
         self.calls: list[dict] = []
 
-    async def run(self, task, name, *, worktree_manager=None, isolate=True, parent=None):
+    async def run(
+        self, task, name, *, worktree_manager=None, isolate=True, parent=None,
+        parent_span="",
+    ):
         self.calls.append(
             {
                 "task": task,
@@ -149,7 +152,10 @@ async def test_subagent_timeout_is_failure():
 @pytest.mark.asyncio
 async def test_subagent_runner_error_is_tool_failure():
     class _BoomRunner:
-        async def run(self, task, name, *, worktree_manager=None, isolate=True, parent=None):
+        async def run(
+        self, task, name, *, worktree_manager=None, isolate=True, parent=None,
+        parent_span="",
+    ):
             raise RuntimeError("boom")
 
     tool = SubAgentTool(runner=_BoomRunner())

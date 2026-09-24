@@ -154,6 +154,8 @@ class SubAgentTool(BaseTool):
                 worktree_manager=self._worktree_manager,
                 isolate=self._isolate,
                 parent=parent,
+                # R4a: the trace hangs the child's spans under this call.
+                parent_span=context.call_id,
             )
         except Exception as exc:  # noqa: BLE001 — tool boundary
             return ToolResult(

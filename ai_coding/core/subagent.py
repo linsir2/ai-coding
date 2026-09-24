@@ -17,6 +17,7 @@ Design notes (docs/r1a-5-analysis.md):
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -26,6 +27,8 @@ from ai_coding.ai.engine import ChatEngine
 from ai_coding.ai.prompt import PromptAssembler
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
+from ai_coding.core.events import Degraded
+from ai_coding.core.observers import ScopedObserver
 from ai_coding.core.worktree import WorktreeError
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.subagent import ParentContext, SubagentResult
@@ -36,6 +39,8 @@ from ai_coding.tools.registry import ToolRegistry
 
 EngineFactory = Callable[[], ChatEngine]
 BuildTools = Callable[[str | None], ToolRegistry]
+
+_log = logging.getLogger(__name__)
 
 # TurnStatus value -> packet status
 _STATUS_MAP: dict[str, str] = {
@@ -74,6 +79,7 @@ class SubAgentRunner:
         settings: AIConfig | None = None,
         approval: Any | None = None,
         workspace: str = ".",
+        observer: Any | None = None,
     ) -> None:
         self._app_config = app_config
         self._engine_factory = engine_factory
@@ -87,6 +93,9 @@ class SubAgentRunner:
 
         self._approval = approval if approval is not None else AutoApproveCallback()
         self._workspace = workspace
+        # R4a: the parent's observer, so a sub-agent stops being a black box.  Its
+        # events are wrapped with their scope/parent by ``ScopedObserver`` below.
+        self._observer = observer
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrent)))
 
     @property
@@ -102,6 +111,7 @@ class SubAgentRunner:
         worktree_manager: Any = None,
         isolate: bool = True,
         parent: ParentContext | None = None,
+        parent_span: str = "",
     ) -> SubagentResult:
         """Run ``task`` and return its packet.  Never raises for a sub-agent failure."""
         async with self._semaphore:
@@ -112,12 +122,39 @@ class SubAgentRunner:
             ):
                 try:
                     async with worktree_manager.temporary(name) as wt:
-                        return await self._run_in(task, name, str(wt.path), parent)
+                        return await self._run_in(
+                            task, name, str(wt.path), parent, parent_span=parent_span
+                        )
                 except WorktreeError:
-                    pass  # degrade to the main workspace rather than failing
-            return await self._run_in(task, name, None, parent)
+                    self._degrade("worktree_isolate", "the worktree could not be created")
+            return await self._run_in(task, name, None, parent, parent_span=parent_span)
 
     # ---- internals --------------------------------------------------------
+
+    def _scoped_observer(self, name: str, parent_span: str) -> Any:
+        """Wrap the parent's observer so the child's events carry their parentage."""
+        if self._observer is None:
+            return None
+        return ScopedObserver(
+            scope=f"subagent:{name}:{parent_span or 'root'}",
+            parent=parent_span or "subagent",
+            inner=self._observer,
+        )
+
+    def _degrade(self, component: str, reason: str) -> None:
+        """Report a fallback (R4a) without letting the report itself fail."""
+        if self._observer is None:
+            return
+        try:
+            self._observer.on_event(
+                Degraded(
+                    component=component,
+                    reason=reason,
+                    fallback="ran in the main workspace instead",
+                )
+            )
+        except Exception:  # noqa: BLE001 — reporting must never break a run
+            _log.debug("sub-agent degraded report failed", exc_info=True)
 
     async def _run_in(
         self,
@@ -125,6 +162,8 @@ class SubAgentRunner:
         name: str,
         workdir: str | None,
         parent: ParentContext | None,
+        *,
+        parent_span: str = "",
     ) -> SubagentResult:
         registry = self._build_tools(workdir)
         engine = self._engine_factory()
@@ -149,6 +188,7 @@ class SubAgentRunner:
             prompt=prompt,
             settings=self._subagent_settings(),
             workspace=workdir or self._workspace,
+            observer=self._scoped_observer(name, parent_span),
         )
         try:
             # The inner loop has its own (slightly tighter) turn deadline, so it
