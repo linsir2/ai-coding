@@ -30,6 +30,7 @@ from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.observers import ScopedObserver
 from ai_coding.core.turn_report import report_degraded
 from ai_coding.core.worktree import WorktreeError
+from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.subagent import ParentContext, SubagentResult
 from ai_coding.infra.deadline import DeadlineExpired, run_with_deadline
@@ -83,6 +84,7 @@ class SubAgentRunner:
         approval: Any | None = None,
         workspace: str = ".",
         observer: Any | None = None,
+        base_instructions: str = "",
     ) -> None:
         self._app_config = app_config
         self._engine_factory = engine_factory
@@ -99,12 +101,19 @@ class SubAgentRunner:
         # R4a: the parent's observer, so a sub-agent stops being a black box.  Its
         # events are wrapped with their scope/parent by ``ScopedObserver`` below.
         self._observer = observer
+        # R7e-4: what a ``task_only`` child gets instead of the parent's prompt.
+        self._base_instructions = str(base_instructions or "")
         self._semaphore = asyncio.Semaphore(max(1, int(max_concurrent)))
 
     @property
     def timeout_seconds(self) -> float:
         """The budget the tool layer advertises as this runner's per-call ceiling."""
         return self._timeout
+
+    @property
+    def context_mode(self) -> str:
+        """``full`` (the parent's view) or ``task_only`` (a clean window), R7e-4."""
+        return str(getattr(self._settings, "subagent_context_mode", "full") or "full")
 
     async def run(
         self,
@@ -161,17 +170,31 @@ class SubAgentRunner:
         registry = self._build_tools(workdir)
         engine = self._engine_factory()
         ts = now_utc()
+        # R7e-4: which window this child gets.  ``task_only`` is a clean context -
+        # the parent has to put every fact it needs into the task text - and an
+        # empty base string must stay None, because a blank PromptAssembler is a
+        # different request, not an equivalent one (an existing test asserts it).
+        mode = self.context_mode
+        if mode == "task_only":
+            seeded: list[ChatMessage] = []
+            prompt = (
+                PromptAssembler(self._base_instructions)
+                if self._base_instructions
+                else None
+            )
+        else:
+            seeded = list(parent.messages) if parent is not None else []
+            prompt = (
+                PromptAssembler(parent.instructions)
+                if parent is not None and parent.instructions
+                else None
+            )
         session = SessionData(
             session_id=f"sub-{uuid.uuid4().hex[:12]}",
             title=name,
             created_time=ts,
             last_access_time=ts,
-            messages=list(parent.messages) if parent is not None else [],
-        )
-        prompt = (
-            PromptAssembler(parent.instructions)
-            if parent is not None and parent.instructions
-            else None
+            messages=seeded,
         )
         loop = AgentLoop(
             engine,
@@ -204,7 +227,7 @@ class SubAgentRunner:
                 await loop.aclose()
             except Exception:  # noqa: BLE001 — releasing resources must not mask the result
                 pass
-        return self._packet(loop, session, workdir)
+        return self._packet(loop, session, workdir, mode)
 
     def _subagent_settings(self) -> AIConfig:
         """Settings for the sub-turn: its own wall-clock ceiling (R2a)."""
@@ -217,7 +240,7 @@ class SubAgentRunner:
         )
 
     def _packet(
-        self, loop: AgentLoop, session: SessionData, workdir: str | None
+        self, loop: AgentLoop, session: SessionData, workdir: str | None, mode: str = "full"
     ) -> SubagentResult:
         outcome = loop.last_outcome
         status = _STATUS_MAP.get(outcome.status.value if outcome else "error", "error")
@@ -241,6 +264,7 @@ class SubAgentRunner:
             iterations=outcome.iterations if outcome else 0,
             workdir=workdir,
             error=(outcome.reason if outcome and outcome.reason else None) if is_error else None,
+            context_mode=mode,
         )
         return _with_ledger(result, self._ledger_root)
 

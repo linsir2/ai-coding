@@ -51,6 +51,8 @@ class SubagentResult:
     workdir: str | None = None
     ledger_path: str | None = None
     error: str | None = None
+    #: Which window the child ran with (R7e-4): ``full`` or ``task_only``.
+    context_mode: str = "full"
 
     @property
     def text(self) -> str | None:
@@ -67,6 +69,7 @@ class SubagentResult:
             "workdir": self.workdir,
             "ledger_path": self.ledger_path,
             "error": self.error,
+            "context_mode": self.context_mode,
         }
 
 

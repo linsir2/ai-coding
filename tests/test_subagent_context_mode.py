@@ -1,0 +1,115 @@
+"""R7e-4: a sub-agent can be given a clean window instead of the parent's view.
+
+`full` is the R1a-5 behaviour and stays the default (the parent's request view plus
+its system prompt); `task_only` seeds an empty session and uses the composition
+root's base instructions, which is the shape Anthropic's sub-agent guidance
+describes - and it means the parent has to put the facts into `task` itself
+(docs/r7e-analysis.md 3.4).
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from ai_coding.ai.engine import ChatEngine
+from ai_coding.config.models import AIConfig
+from ai_coding.core.subagent import SubAgentRunner
+from ai_coding.domain.loop import StepResult
+from ai_coding.domain.message import ChatMessage
+from ai_coding.domain.subagent import ParentContext
+from ai_coding.tools.registry import ToolRegistry
+
+
+class _Engine(ChatEngine):
+    def __init__(self) -> None:
+        self.requests: list[dict[str, object]] = []
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        self.requests.append({"messages": list(messages), "instructions": instructions})
+        return StepResult(text="做完了", tool_calls=[], finish_reason="stop")
+
+
+def _runner(engine: _Engine, *, base_instructions: str = "BASE INSTRUCTIONS", **overrides):
+    cfg = AIConfig(max_tool_iterations=2, stop_policy="natural", **overrides)
+    return SubAgentRunner(
+        cfg,
+        engine_factory=lambda: engine,
+        build_tools=lambda workdir: ToolRegistry(),
+        settings=cfg,
+        workspace=".",
+        base_instructions=base_instructions,
+    )
+
+
+def _parent() -> ParentContext:
+    return ParentContext(
+        messages=(ChatMessage(role="user", content="parent-said-this", timestamp="t"),),
+        instructions="PARENT INSTRUCTIONS",
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_default_mode_is_full():
+    engine = _Engine()
+    result = await _runner(engine).run("do it", parent=_parent())
+    contents = [m.content or "" for m in engine.requests[0]["messages"]]
+    assert any("parent-said-this" in content for content in contents)
+    assert engine.requests[0]["instructions"] == "PARENT INSTRUCTIONS"
+    assert result.context_mode == "full"
+
+
+@pytest.mark.asyncio
+async def test_task_only_starts_with_an_empty_history():
+    engine = _Engine()
+    await _runner(engine, subagent_context_mode="task_only").run("do it", parent=_parent())
+    contents = [m.content or "" for m in engine.requests[0]["messages"]]
+    assert not any("parent-said-this" in content for content in contents)
+    assert any("do it" in content for content in contents)
+
+
+@pytest.mark.asyncio
+async def test_task_only_uses_the_base_instructions():
+    engine = _Engine()
+    await _runner(engine, subagent_context_mode="task_only").run("do it", parent=_parent())
+    assert engine.requests[0]["instructions"] == "BASE INSTRUCTIONS"
+
+
+@pytest.mark.asyncio
+async def test_task_only_with_no_base_instructions_has_no_system_prompt():
+    """兼容性护栏：既有用例断言 instructions is None，空串不能变成空 PromptAssembler。"""
+    engine = _Engine()
+    cfg = AIConfig(subagent_context_mode="task_only")
+    runner = SubAgentRunner(
+        cfg,
+        engine_factory=lambda: engine,
+        build_tools=lambda workdir: ToolRegistry(),
+        settings=cfg,
+        workspace=".",
+    )
+    await runner.run("do it", parent=_parent())
+    assert engine.requests[0]["instructions"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_packet_reports_the_mode():
+    result = await _runner(_Engine(), subagent_context_mode="task_only").run(
+        "t", parent=_parent()
+    )
+    assert result.context_mode == "task_only"
+    assert result.to_dict()["context_mode"] == "task_only"
+
+
+@pytest.mark.asyncio
+async def test_full_mode_still_inherits_the_parent_instructions():
+    engine = _Engine()
+    runner = _runner(engine)
+    assert runner.context_mode == "full"
+    await runner.run("t", parent=_parent())
+    assert engine.requests[0]["instructions"] == "PARENT INSTRUCTIONS"
+
+
+@pytest.mark.asyncio
+async def test_task_only_without_a_parent_uses_the_base_instructions():
+    engine = _Engine()
+    await _runner(engine, subagent_context_mode="task_only").run("t")
+    assert engine.requests[0]["instructions"] == "BASE INSTRUCTIONS"
