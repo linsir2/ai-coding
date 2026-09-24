@@ -62,7 +62,12 @@ from ai_coding.core.events import (
 from ai_coding.core.guard import GuardChain, TurnView
 from ai_coding.core.hooks import HookDecision, HookPoint
 from ai_coding.core.memory_turn import TurnMemory
-from ai_coding.core.request_builder import TailBlock, build_tail, tool_context
+from ai_coding.core.request_builder import (
+    build_tail,
+    content_of,
+    tool_context,
+    volatile_block,
+)
 from ai_coding.core.trace import short_json
 from ai_coding.core.turn_policy import (
     TaskInjection,
@@ -179,18 +184,6 @@ def _failed_outcome(
     return TurnOutcome(
         status=TurnStatus.ERROR, text=None, iterations=iterations, reason=str(error)
     )
-
-
-def _volatile(name: str, text: str | None) -> TailBlock | None:
-    """A tail block, or ``None`` when there is nothing to inject."""
-    if not text:
-        return None
-    return TailBlock(name=name, message=ChatMessage(role="user", content=text, timestamp=""))
-
-
-def _content_of(message: ChatMessage | None) -> str | None:
-    """The text of an optional injected message (``None`` when there is none)."""
-    return message.content if message is not None else None
 
 
 class AgentLoop:
@@ -374,10 +367,10 @@ class AgentLoop:
                 )
                 tail, tail_blocks = build_tail(
                     [
-                        _volatile("memory", memory_block),
-                        _volatile("task", _content_of(injection.message)),
-                        _volatile("hook", hook_context),
-                        _volatile("digest", digest_block),
+                        volatile_block("memory", memory_block),
+                        volatile_block("task", content_of(injection.message)),
+                        volatile_block("hook", hook_context),
+                        volatile_block("digest", digest_block),
                     ]
                 )
                 request = [*history, *tail]

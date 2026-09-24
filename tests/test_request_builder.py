@@ -5,7 +5,13 @@ changes between iterations, so it gets a name, an order and a test instead of
 being 30 inline lines inside the loop (docs/r5-analysis.md 3.4).
 """
 
-from ai_coding.core.request_builder import TailBlock, build_tail, tool_context
+from ai_coding.core.request_builder import (
+    TailBlock,
+    build_tail,
+    content_of,
+    tool_context,
+    volatile_block,
+)
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.task import TaskState
 
@@ -52,6 +58,29 @@ def test_tail_block_chars_tolerates_empty_content():
         name="memory", message=ChatMessage(role="user", content=None, timestamp="")
     )
     assert empty.chars == 0
+
+
+# ---- R7a: the two helpers the loop used to keep privately -------------------
+
+
+def test_volatile_block_returns_none_when_there_is_nothing_to_say():
+    assert volatile_block("memory", "") is None
+    assert volatile_block("memory", None) is None
+
+
+def test_volatile_block_wraps_text_as_a_user_message():
+    block = volatile_block("digest", "<working-memory>x</working-memory>")
+    assert block is not None
+    assert block.name == "digest"
+    assert block.message.role == "user"
+    assert block.message.content == "<working-memory>x</working-memory>"
+    assert block.message.timestamp == ""  # never persisted, so no clock
+
+
+def test_content_of_tolerates_a_missing_message():
+    assert content_of(None) is None
+    message = ChatMessage(role="user", content="hi", timestamp="")
+    assert content_of(message) == "hi"
 
 
 def test_tool_context_carries_everything_a_tool_needs():

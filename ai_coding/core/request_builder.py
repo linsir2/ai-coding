@@ -22,19 +22,38 @@ from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
 from ai_coding.tools.base import ToolContext
 
-__all__ = ["TailBlock", "build_tail", "tool_context"]
+__all__ = ["TailBlock", "build_tail", "content_of", "tool_context", "volatile_block"]
 
 
 @dataclass(frozen=True)
 class TailBlock:
     """One volatile block of a request, with the label it is reported under."""
 
-    name: str  # "memory" | "task" | "hook"
+    name: str  # "memory" | "task" | "hook" | "digest"
     message: ChatMessage
 
     @property
     def chars(self) -> int:
         return len(self.message.content or "")
+
+
+def volatile_block(name: str, text: str | None) -> TailBlock | None:
+    """A tail block, or ``None`` when there is nothing to inject.
+
+    An empty block is not an empty block: it is a message the model would pay for
+    on every iteration, so "nothing to say" must mean "not in the request" (R7a;
+    moved here from the loop, where it was ``_volatile``).
+    """
+    if not text:
+        return None
+    return TailBlock(
+        name=name, message=ChatMessage(role="user", content=text, timestamp="")
+    )
+
+
+def content_of(message: ChatMessage | None) -> str | None:
+    """The text of an optional injected message (``None`` when there is none)."""
+    return message.content if message is not None else None
 
 
 def build_tail(
