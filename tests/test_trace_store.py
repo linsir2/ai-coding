@@ -79,6 +79,60 @@ def test_prune_drops_session_directories_past_retention(tmp_path):
     assert fresh.path.exists()
 
 
+# ---- R9b: listing sessions (docs/r9-analysis.md 3.2) ----
+
+
+def test_r9_sessions_lists_directories_with_mtime_and_turns(tmp_path):
+    store = _store(tmp_path)
+    store.begin_turn("sess-1").write_line("{}")
+    store.begin_turn("sess-1").write_line("{}")
+    (store.root / "stray-file.txt").write_text("not a session", encoding="utf-8")
+
+    refs = store.sessions()
+
+    assert [ref.session for ref in refs] == ["sess-1"]
+    assert refs[0].turns == 2
+    assert refs[0].path == store.session_dir("sess-1")
+    assert refs[0].mtime == store.session_dir("sess-1").stat().st_mtime
+
+
+def test_r9_sessions_are_newest_first(tmp_path):
+    store = _store(tmp_path)
+    store.begin_turn("old").write_line("{}")
+    os.utime(store.session_dir("old"), (1000, 1000))
+    store.begin_turn("new").write_line("{}")
+    os.utime(store.session_dir("new"), (2000, 2000))
+
+    assert [ref.session for ref in store.sessions()] == ["new", "old"]
+
+
+def test_r9_a_new_turn_file_refreshes_the_directory_mtime(tmp_path):
+    """`--since` and `prune` share this basis, so it must hold."""
+    store = _store(tmp_path)
+    store.begin_turn("sess-1").write_line("{}")
+    before = store.session_dir("sess-1").stat().st_mtime
+    time.sleep(0.01)
+    store.begin_turn("sess-1").write_line("{}")
+
+    assert store.session_dir("sess-1").stat().st_mtime > before
+
+
+def test_r9_prune_still_removes_only_expired_sessions(tmp_path):
+    store = _store(tmp_path, retention_days=1)
+    store.begin_turn("fresh").write_line("{}")
+    store.begin_turn("stale").write_line("{}")
+    old = time.time() - 3 * 86400
+    os.utime(store.session_dir("stale"), (old, old))
+
+    assert store.prune() == 1
+    assert store.session_dir("fresh").is_dir()
+    assert not store.session_dir("stale").exists()
+
+
+def test_r9_sessions_on_a_missing_root_is_empty(tmp_path):
+    assert TraceStore(tmp_path / "nope").sessions() == ()
+
+
 def test_summary_is_written_atomically_and_merges(tmp_path):
     store = _store(tmp_path)
     store.update_summary("sess-1", {"turns": 1, "tokens": 100})

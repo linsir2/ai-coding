@@ -42,6 +42,7 @@ __all__ = [
     "REDACTION_MARK",
     "TRACE_VERSION",
     "Redactor",
+    "SessionRef",
     "TraceStore",
     "TraceRecorder",
     "TurnWriter",
@@ -175,6 +176,26 @@ def short_json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
+@dataclasses.dataclass(frozen=True)
+class SessionRef:
+    """One session directory on disk (R9b)."""
+
+    session: str
+    path: Path
+    mtime: float
+    turn_files: tuple[Path, ...]
+
+    @property
+    def turns(self) -> int:
+        return len(self.turn_files)
+
+
+def _turn_number(path: Path) -> int:
+    """``turn-7.jsonl`` → 7；不认识的形状记 0（排最前）。"""
+    stem = path.stem.removeprefix("turn-")
+    return int(stem) if stem.isdigit() else 0
+
+
 class TurnWriter:
     """Append-only writer for one turn's trace, bounded by a byte cap.
 
@@ -259,6 +280,27 @@ class TraceStore:
                     highest = max(highest, int(stem))
         return highest + 1
 
+    def sessions(self) -> tuple[SessionRef, ...]:
+        """Every session directory, newest write first.  Never raises (R9b).
+
+        Newest-first is the order ``trace overview`` wants; ties fall back to the
+        session id, so the output is deterministic.
+        """
+        if not self.root.is_dir():
+            return ()
+        refs: list[SessionRef] = []
+        for entry in sorted(self.root.iterdir()):
+            if not entry.is_dir():
+                continue
+            try:
+                mtime = entry.stat().st_mtime
+            except OSError:
+                continue
+            files = tuple(sorted(entry.glob("turn-*.jsonl"), key=_turn_number))
+            refs.append(SessionRef(entry.name, entry, mtime, files))
+        refs.sort(key=lambda ref: (-ref.mtime, ref.session))
+        return tuple(refs)
+
     def summary_path(self, session_id: str) -> Path:
         return self.session_dir(session_id) / "summary.json"
 
@@ -299,18 +341,16 @@ class TraceStore:
             return 0
         cutoff = (now if now is not None else time.time()) - self.retention_days * 86400
         removed = 0
-        for entry in self.root.iterdir():
-            if not entry.is_dir():
+        for ref in self.sessions():
+            if ref.mtime >= cutoff:
                 continue
             try:
-                if entry.stat().st_mtime >= cutoff:
-                    continue
-                for child in sorted(entry.rglob("*"), reverse=True):
+                for child in sorted(ref.path.rglob("*"), reverse=True):
                     if child.is_file():
                         child.unlink()
                     else:
                         child.rmdir()
-                entry.rmdir()
+                ref.path.rmdir()
             except OSError:
                 continue
             removed += 1
