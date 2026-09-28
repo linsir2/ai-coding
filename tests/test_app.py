@@ -112,3 +112,14 @@ def test_timestamp_added():
     source = inspect.getsource(run_app)
     assert "datetime" in source
     assert "strftime" in source
+
+
+def test_markdown_styles_defined():
+    """Markdown styles must be defined in theme."""
+    from ai_coding.ui.theme import STYLE
+
+    rules = dict(STYLE.style_rules)
+    assert "md-header" in rules
+    assert "md-code" in rules
+    assert "md-bold" in rules
+    assert "md-list" in rules

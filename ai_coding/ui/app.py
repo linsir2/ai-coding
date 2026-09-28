@@ -119,12 +119,25 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         lambda: palette.render() if palette.is_open else []
     )
 
+    def _md_prefix(i: int) -> list[tuple[str, str]]:
+        doc = body.get_buffer().document
+        line = doc.lines[i] if i < doc.line_count else ""
+        if line.startswith("#"):
+            return [("class:md-header", "")]
+        if line.startswith("```"):
+            return [("class:md-code", "")]
+        if line.startswith("-") or line.startswith("*"):
+            return [("class:md-list", "")]
+        if "**" in line:
+            return [("class:md-bold", "")]
+        return []
+
     body_window = Window(
         content=body_control,
         wrap_lines=False,
         scroll_offsets=ScrollOffsets(top=1, bottom=1),
         allow_scroll_beyond_bottom=True,
-        get_line_prefix=lambda i: [("class:user-msg", "  ")] if i in user_lines else [],
+        get_line_prefix=lambda i: [("class:user-msg", "  ")] if i in user_lines else _md_prefix(i),
     )
     input_window = Window(
         content=input_control,

@@ -22,4 +22,8 @@ STYLE = Style.from_dict({
     "input.prefix": "#00d2d3",
     "user-msg": "bg:#2d3436 fg:#dfe4ea",
     "timestamp": "#636e72",
+    "md-header": "#00d2d3 bold",
+    "md-code": "bg:#1e272e fg:#dfe4ea",
+    "md-bold": "#ffa502",
+    "md-list": "#2ed573",
 })
