@@ -2,7 +2,7 @@
 
 import pytest
 
-from ai_coding.domain.task import TaskState, TodoItem
+from ai_coding.domain.task import Blockers, TaskState, TodoItem
 
 
 def test_todo_item_defaults():
@@ -154,3 +154,72 @@ def test_from_dict_tolerates_missing_keys():
     # an unknown status degrades to pending instead of raising
     task = TaskState.from_dict({"items": [{"id": "1", "content": "x", "status": "??"}]})
     assert task.get("1") is not None and task.get("1").status == "pending"
+
+
+# ---- R9a: the dependency query (docs/r9-analysis.md 3.1) ----
+
+
+def test_r9_blockers_are_empty_when_dependencies_are_terminal():
+    task = TaskState()
+    task.add("dep")
+    task.add("next", depends_on=["1"])
+    task.update("1", status="completed")
+    assert task.blockers("2") == Blockers()
+    assert task.blockers("2").any is False
+
+
+def test_r9_blockers_list_open_dependencies():
+    task = TaskState()
+    task.add("dep")
+    task.add("next", depends_on=["1"])
+    blockers = task.blockers("2")
+    assert blockers.open == ("1",)
+    assert blockers.unknown == () and blockers.cycle == ()
+    assert blockers.any is True
+
+
+def test_r9_blockers_report_unknown_ids():
+    task = TaskState.from_dict(
+        {"goal": "g", "items": [{"id": "1", "content": "a", "dependsOn": ["9"]}]}
+    )
+    assert task.blockers("1").unknown == ("9",)
+    assert task.blockers("1").open == ()
+
+
+def test_r9_blockers_detect_a_legacy_cycle():
+    task = TaskState.from_dict(
+        {
+            "goal": "g",
+            "items": [
+                {"id": "1", "content": "a", "dependsOn": ["2"]},
+                {"id": "2", "content": "b", "dependsOn": ["1"]},
+            ],
+        }
+    )
+    assert task.blockers("1").cycle == ("1", "2", "1")
+    assert task.blockers("2").cycle == ("2", "1", "2")
+
+
+def test_r9_dependency_invariant_reports_unknown_self_and_forward():
+    task = TaskState.from_dict(
+        {
+            "goal": "g",
+            "items": [
+                {"id": "1", "content": "forward", "dependsOn": ["2"]},
+                {"id": "2", "content": "self", "dependsOn": ["2"]},
+                {"id": "3", "content": "ghost", "dependsOn": ["99"]},
+                {"id": "4", "content": "clean"},
+            ],
+        }
+    )
+    assert task.dependency_invariant() == ("1", "2", "3")
+
+
+def test_r9_render_and_focus_are_unchanged():
+    """The domain keeps rendering and choosing exactly as before (R1 semantics)."""
+    task = TaskState(goal="g")
+    task.add("dep")
+    task.add("needs dep", depends_on=["1"])
+    assert task.focus() is not None and task.focus().id == "1"
+    task.update("2", status="blocked")
+    assert "[!] 2. needs dep (blocked by 1)" in task.render()

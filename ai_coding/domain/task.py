@@ -83,6 +83,24 @@ class TodoItem:
 
 
 @dataclass
+class Blockers:
+    """Why an item cannot start or finish yet (R9a).  Empty = ready.
+
+    ``open``    - dependencies that exist and are not terminal yet;
+    ``unknown`` - dependencies whose target is gone (legacy or hand-edited data);
+    ``cycle``   - a blocking chain that comes back to this item, when there is one.
+    """
+
+    open: tuple[str, ...] = ()
+    unknown: tuple[str, ...] = ()
+    cycle: tuple[str, ...] = ()
+
+    @property
+    def any(self) -> bool:
+        return bool(self.open or self.unknown or self.cycle)
+
+
+@dataclass
 class TaskState:
     """The goal plus the ordered list of items the model is working through."""
 
@@ -101,7 +119,7 @@ class TaskState:
     ) -> TodoItem:
         """Append a ``pending`` item and return it."""
         item = TodoItem(
-            id=item_id or self._next_id(),
+            id=item_id or self.next_id(),
             content=content,
             status="pending",
             depends_on=list(depends_on or []),
@@ -140,7 +158,8 @@ class TaskState:
     def clear(self) -> None:
         self.items.clear()
 
-    def _next_id(self) -> str:
+    def next_id(self) -> str:
+        """The id ``add`` would assign next (public: the tool layer needs it, R9a)."""
         candidate = len(self.items) + 1
         taken = {item.id for item in self.items}
         while str(candidate) in taken:
@@ -187,6 +206,65 @@ class TaskState:
             if not self.unmet_dependencies(item):
                 return item
         return open_items[0]
+
+    def blockers(self, item_id: str) -> Blockers:
+        """The unmet dependencies of one item, with a diagnostic for legacy data.
+
+        Pure: it reads the list and nothing else, so the tool layer can decide
+        what to refuse without the domain knowing anything about policies.
+        """
+        item = self.get(item_id)
+        if item is None:
+            return Blockers()
+        open_ids: list[str] = []
+        unknown: list[str] = []
+        for dep in item.depends_on:
+            target = self.get(dep)
+            if target is None:
+                unknown.append(dep)
+            elif not target.is_terminal():
+                open_ids.append(dep)
+        cycle = self._cycle_from(item_id) if (open_ids or unknown) else ()
+        return Blockers(open=tuple(open_ids), unknown=tuple(unknown), cycle=cycle)
+
+    def _cycle_from(self, item_id: str) -> tuple[str, ...]:
+        """A non-terminal dependency chain that comes back to ``item_id``.
+
+        Only legacy/hand-edited lists can contain one: ``add`` refuses unknown
+        ids (Task 2) and there is no way to rewrite ``depends_on`` afterwards,
+        so fresh data is a DAG by construction.
+        """
+        visited: set[str] = set()
+        stack: list[tuple[str, tuple[str, ...]]] = [(item_id, (item_id,))]
+        while stack:
+            current, path = stack.pop()
+            node = self.get(current)
+            if node is None or node.is_terminal():
+                continue
+            for dep in node.depends_on:
+                if dep == item_id:
+                    return (*path, item_id)
+                if dep in visited:
+                    continue
+                visited.add(dep)
+                stack.append((dep, (*path, dep)))
+        return ()
+
+    def dependency_invariant(self) -> tuple[str, ...]:
+        """Ids whose ``depends_on`` is not an existing, earlier item id.
+
+        This is the acceptance yardstick for "the list is well formed": the tool
+        refuses to create violations, and this method makes the ones inherited
+        from older sessions visible instead of silent.
+        """
+        order = {item.id: index for index, item in enumerate(self.items)}
+        bad: list[str] = []
+        for item in self.items:
+            for dep in item.depends_on:
+                if dep == item.id or dep not in order or order[dep] >= order[item.id]:
+                    bad.append(item.id)
+                    break
+        return tuple(bad)
 
     # ---- rendering --------------------------------------------------------
 
@@ -238,6 +316,7 @@ __all__ = [
     "VALID_STATUSES",
     "TERMINAL_STATUSES",
     "RENDER_MAX_ITEMS",
+    "Blockers",
     "TodoItem",
     "TaskState",
 ]
