@@ -12,7 +12,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-__all__ = ["render_budget", "render_turn", "summarize_turn"]
+from ai_coding.core.aggregate import AggregateReport
+
+__all__ = ["render_budget", "render_overview", "render_turn", "summarize_turn"]
 
 
 def _blank_summary() -> dict[str, Any]:
@@ -155,3 +157,31 @@ def render_budget(summary: Mapping[str, Any]) -> str:
     if cached and prompt > 0:
         parts.append(f"cache {int(round(cached / prompt * 100))}%")
     return " · ".join(parts)
+
+
+def render_overview(report: AggregateReport) -> str:
+    """One table for every session plus a totals row (R9b).  Pure."""
+    header = (
+        f"{'SESSION':<20} {'TURNS':>5} {'FILES':>5} {'STEPS':>5} {'PROMPT':>9} "
+        f"{'COMPL':>7} {'CACHED':>8} {'HIT%':>6} {'AGE':>6}"
+    )
+    lines = [header, "-" * len(header)]
+    for row in report.rows:
+        flag = "  !mismatch" if row.mismatch else ""
+        lines.append(
+            f"{row.session[:20]:<20} {row.turns:>5} {row.files:>5} {row.steps:>5} "
+            f"{_thousands(row.prompt_tokens):>9} {_thousands(row.completion_tokens):>7} "
+            f"{_thousands(row.cached_tokens):>8} {row.cache_ratio * 100:>5.1f}% "
+            f"{row.age_days:>5.1f}d{flag}"
+        )
+    totals = report.totals
+    lines.append("-" * len(header))
+    lines.append(
+        f"{'TOTAL':<20} {totals.turns:>5} {totals.files:>5} {totals.steps:>5} "
+        f"{_thousands(totals.prompt_tokens):>9} {_thousands(totals.completion_tokens):>7} "
+        f"{_thousands(totals.cached_tokens):>8} {totals.cache_ratio * 100:>5.1f}%"
+    )
+    bad = [row.session for row in report.rows if row.mismatch]
+    if bad:
+        lines.append(f"! summary/disk mismatch in {len(bad)} session(s): {', '.join(bad)}")
+    return "\n".join(lines)

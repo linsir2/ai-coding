@@ -240,13 +240,17 @@ def memory_command(
 
 @app.command("trace")
 def trace_command(
-    action: str = typer.Argument("list", help="list | show | budget"),
+    action: str = typer.Argument("list", help="list | show | budget | overview"),
     session: str = typer.Argument("", help="Session id, or a turn file path."),
     turn: int = typer.Option(0, "--turn", "-t", help="Turn number for `show` (0 = latest)."),
     workspace: str = typer.Option(
         ".", "--workspace", "-w", help="Workspace directory (holds .ai-coding/traces)."
     ),
     path: str | None = typer.Option(None, "--path", "-p", help="Path to a YAML config file."),
+    since: int = typer.Option(
+        0, "--since", help="Only sessions touched in the last N days (0 = all)."
+    ),
+    fmt: str = typer.Option("table", "--format", help="table | json"),
 ) -> None:
     """Inspect recorded traces and token totals (R4a)."""
     from ai_coding.ui.trace_render import render_budget, render_turn, summarize_turn
@@ -270,6 +274,34 @@ def trace_command(
                 continue
             turns = sorted(entry.glob("turn-*.jsonl"))
             typer.echo(f"{entry.name}  {len(turns)} turn(s)")
+        return
+
+    if action == "overview":
+        from dataclasses import asdict
+
+        from ai_coding.core.aggregate import build_report
+        from ai_coding.core.trace import TraceStore
+        from ai_coding.ui.trace_render import render_overview
+
+        report = build_report(TraceStore(root), since_days=max(0, int(since)))
+        if not report.rows:
+            typer.echo("(no traces recorded yet)")
+            return
+        if fmt == "json":
+            payload = {
+                "rows": [
+                    {**asdict(row), "mismatch": row.mismatch, "cache_ratio": row.cache_ratio}
+                    for row in report.rows
+                ],
+                "totals": {
+                    **asdict(report.totals),
+                    "mismatch": report.totals.mismatch,
+                    "cache_ratio": report.cache_ratio,
+                },
+            }
+            typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+            return
+        typer.echo(render_overview(report))
         return
 
     if not session:

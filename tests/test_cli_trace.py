@@ -5,6 +5,9 @@ without opening JSONL by hand (docs/r4-analysis.md 11).
 """
 
 import json
+import os
+import time
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -146,3 +149,74 @@ def test_trace_show_and_budget_render_a_recorded_session(tmp_path):
 def test_trace_show_with_no_session_is_an_error(tmp_path):
     result = runner.invoke(app, ["trace", "show", "--workspace", str(tmp_path)])
     assert result.exit_code == 1
+
+
+# ---- R9b: trace overview (docs/r9-analysis.md 3.2) ----
+
+
+def _session_with(tmp_path, session: str, *, turns: int, summary: dict) -> Path:
+    session_dir = tmp_path / ".ai-coding" / "traces" / session
+    session_dir.mkdir(parents=True)
+    for index in range(1, turns + 1):
+        (session_dir / f"turn-{index}.jsonl").write_text("{}\n", encoding="utf-8")
+    (session_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    return session_dir
+
+
+def test_r9_overview_renders_sessions_and_a_total(tmp_path):
+    _session_with(tmp_path, "sess-1", turns=2,
+                  summary={"turns": 2, "steps": 3, "prompt_tokens": 200,
+                           "completion_tokens": 20, "cached_tokens": 150})
+    _session_with(tmp_path, "sess-2", turns=1,
+                  summary={"turns": 1, "steps": 1, "prompt_tokens": 100,
+                           "completion_tokens": 10, "cached_tokens": 0})
+
+    result = runner.invoke(app, ["trace", "overview", "--workspace", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "sess-1" in result.stdout and "sess-2" in result.stdout
+    assert "TOTAL" in result.stdout
+    assert "300" in result.stdout        # prompt tokens summed
+    assert "50.0%" in result.stdout      # 150/300
+
+
+def test_r9_overview_json_is_machine_readable(tmp_path):
+    _session_with(tmp_path, "sess-1", turns=1,
+                  summary={"turns": 1, "steps": 2, "prompt_tokens": 10,
+                           "completion_tokens": 1, "cached_tokens": 5})
+
+    result = runner.invoke(
+        app, ["trace", "overview", "--workspace", str(tmp_path), "--format", "json"]
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["totals"]["session"] == "(all)"
+    assert payload["totals"]["turns"] == 1
+    assert payload["rows"][0]["session"] == "sess-1"
+    assert payload["rows"][0]["cache_ratio"] == 0.5
+
+
+def test_r9_overview_since_filters_old_sessions(tmp_path):
+    old = _session_with(tmp_path, "old", turns=1, summary={"turns": 1})
+    _session_with(tmp_path, "new", turns=1, summary={"turns": 1})
+    stale = time.time() - 30 * 86400
+    os.utime(old, (stale, stale))
+
+    result = runner.invoke(
+        app, ["trace", "overview", "--workspace", str(tmp_path), "--since", "7"]
+    )
+
+    assert "new" in result.stdout
+    assert "old" not in result.stdout
+
+
+def test_r9_overview_on_an_empty_workspace(tmp_path):
+    result = runner.invoke(app, ["trace", "overview", "--workspace", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "no traces recorded" in result.stdout
+
+
+def test_r9_overview_flags_a_summary_mismatch(tmp_path):
+    _session_with(tmp_path, "sess-1", turns=1, summary={"turns": 9})
+    result = runner.invoke(app, ["trace", "overview", "--workspace", str(tmp_path)])
+    assert "mismatch" in result.stdout.lower()
