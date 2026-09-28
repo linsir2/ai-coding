@@ -56,12 +56,26 @@ def test_body_window_is_scrollable():
 
 
 def test_body_uses_buffer_control():
-    """Body should use BufferControl, not FormattedTextControl."""
+    """Body uses BufferControl and must NOT steal focus from the input.
+
+    R11: ``focusable=True`` on the body made it the Layout's default focus, so
+    every keystroke landed in the scrollback while the input stayed empty — and
+    Enter then had nothing to submit.  This pins the regression.
+    """
     import inspect
 
     from ai_coding.ui.app import run_app
     source = inspect.getsource(run_app)
-    assert "BufferControl(buffer=body.get_buffer(), focusable=True)" in source
+    assert "BufferControl(buffer=body.get_buffer(), focusable=False)" in source
+
+
+def test_input_window_is_explicitly_focused():
+    """The input must be the focused window, not merely the first focusable one."""
+    import inspect
+
+    from ai_coding.ui.app import run_app
+    source = inspect.getsource(run_app)
+    assert "layout.focus(input_window)" in source
 
 
 def test_input_provider_does_not_write_to_body():

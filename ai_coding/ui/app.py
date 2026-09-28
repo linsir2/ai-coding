@@ -109,7 +109,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     footer_control = FormattedTextControl(
         lambda: render_footer(loop, turn_start)
     )
-    body_control = BufferControl(buffer=body.get_buffer(), focusable=True)
+    body_control = BufferControl(buffer=body.get_buffer(), focusable=False)
     input_control = BufferControl(buffer=input_buffer)
     palette_control = FormattedTextControl(
         lambda: palette.render() if palette.is_open else []
@@ -219,6 +219,18 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     def _exit(event: Any) -> None:
         event.app.exit()
 
+    @kb.add("pageup")
+    def _scroll_up(event: Any) -> None:
+        if body_window.render_info:
+            body_window.render_info.vertical_scroll -= 5
+            event.app.invalidate()
+
+    @kb.add("pagedown")
+    def _scroll_down(event: Any) -> None:
+        if body_window.render_info:
+            body_window.render_info.vertical_scroll += 5
+            event.app.invalidate()
+
     root = HSplit([
         Window(
             content=header_control,
@@ -231,8 +243,10 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         Window(content=footer_control, height=1, style="class:footer"),
     ])
 
+    layout = Layout(root)
+    layout.focus(input_window)
     app = Application(
-        layout=Layout(root),
+        layout=layout,
         key_bindings=kb,
         style=STYLE,
         full_screen=True,
