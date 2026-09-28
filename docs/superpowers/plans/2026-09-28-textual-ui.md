@@ -18,7 +18,8 @@
 - 循环必须跑在 **async worker**（禁止 `thread=True`），否则 `push_screen_wait` 抛 `NoActiveWorker`。
 - 模态 provider 必须 `try/finally` 关屏（spec §3.3-5）。
 - 文案固定：`You` / `Nexus` / `Type a message or enter a command...` / `/ for commands` / `● Ready`。
-- 每个 task 结束跑：`.venv/bin/python -m pytest -q`、`.venv/bin/ruff check .`、`.venv/bin/mypy ai_coding`，三者干净才 commit（这三个就是 CI 门槛，见 `.github/workflows/ci.yml`；mypy 是 strict）。
+- 每个 task 结束跑：`.venv/bin/python -m pytest -q`、`.venv/bin/ruff check .`、`.venv/bin/python -m mypy ai_coding`，三者干净才 commit（这三个就是 CI 门槛，见 `.github/workflows/ci.yml`；mypy 是 strict，且**必须用 `python -m`**——`.venv/bin/mypy` 的 shebang 指向已不存在的 `.venv-new`）。
+- **mypy 基线（Task 1 实测）**：分支起点已有 **7 个既存错误**——6 个在 `ai_coding/ui/app.py`（Task 7 删文件后自动消失）、1 个在 `core/agent_loop.py:243`（`ChatEngine` 未声明 `model_config`，Task 7 以纯注解修复）。因此 Task 1–6 的门槛是「**不新增错误**」（错误集合与基线相同），Task 7 之后才要求归零。
 - 异步测试用 `@pytest.mark.asyncio`（仓内约定，无 conftest）。
 - 测试取窗口：`App.run_test(headless=True, size=(80, 24))`。
 
@@ -181,13 +182,13 @@ from ai_coding.ui.textual_app import AICodingApp
 
 
 def _app(**overrides):
-    kwargs = dict(
-        loop=None,
-        session=object(),
-        sessions=object(),
-        workspace="~/projects/ai-app",
-        model_name="DeepSeek-V3",
-    )
+    kwargs = {
+        "loop": None,
+        "session": object(),
+        "sessions": object(),
+        "workspace": "~/projects/ai-app",
+        "model_name": "DeepSeek-V3",
+    }
     kwargs.update(overrides)
     return AICodingApp(**kwargs)
 
@@ -195,14 +196,14 @@ def _app(**overrides):
 @pytest.mark.asyncio
 async def test_shell_mounts_with_status_transcript_and_input():
     app = _app()
-    async with app.run_test() as pilot:
+    async with app.run_test():
         assert app.query_one(StatusBar)
         assert app.query_one("#transcript")
         prompt = app.query_one("#prompt", Input)
         assert prompt.placeholder == "Type a message or enter a command..."
-        assert app.query_one("#input-hint").renderable == "/ for commands"
-        assert "Ready" in app.query_one("#status-right").renderable.plain
-        assert "~/projects/ai-app" in app.query_one("#status-left").renderable.plain
+        assert app.query_one("#input-hint").content == "/ for commands"
+        assert "Ready" in app.query_one("#status-right").content.plain
+        assert "~/projects/ai-app" in app.query_one("#status-left").content.plain
 
 
 @pytest.mark.asyncio
@@ -212,7 +213,7 @@ async def test_status_bar_switches_to_working():
         bar = app.query_one(StatusBar)
         bar.set_busy(True)
         await pilot.pause()
-        assert "Working" in app.query_one("#status-right").renderable.plain
+        assert "Working" in app.query_one("#status-right").content.plain
 ```
 
 - [ ] **Step 3: 运行确认失败**
@@ -287,6 +288,9 @@ HINT = "/ for commands"
 
 class InputBar(Vertical):
     """The input row plus the ``/ for commands`` hint under it."""
+
+    def __init__(self) -> None:
+        super().__init__(id="input-bar")
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="input-row"):
@@ -435,7 +439,7 @@ Expected: `2 passed`
 
 Run:
 ```bash
-.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/mypy ai_coding
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/python -m mypy ai_coding
 ```
 Expected: 全绿（旧 TUI 未受影响）；`All checks passed!`
 
@@ -490,8 +494,8 @@ class _Harness(App[None]):
 def _texts(transcript: Transcript) -> str:
     out = []
     for widget in transcript.query(Static):
-        renderable = widget.renderable
-        out.append(renderable.plain if hasattr(renderable, "plain") else str(renderable))
+        content = widget.content
+        out.append(content.plain if hasattr(content, "plain") else str(content))
     return "\n".join(out)
 
 
@@ -502,8 +506,8 @@ async def test_user_message_has_header_and_bubble():
         t.append_user("分析一下代码结构", "10:24")
         await pilot.pause()
         header = t.query_one(".msg-header", Static)
-        assert "You" in header.renderable.plain
-        assert "10:24" in header.renderable.plain
+        assert "You" in header.content.plain
+        assert "10:24" in header.content.plain
         assert "分析一下代码结构" in _texts(t)
 
 
@@ -766,7 +770,7 @@ Expected: `wrote .../docs/tui-preview.svg`；打开 SVG 肉眼确认状态栏/�
 - [ ] **Step 7: 全量回归 + lint + commit**
 
 ```bash
-.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/mypy ai_coding
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/python -m mypy ai_coding
 git add ai_coding/ui/transcript.py ai_coding/ui/app.tcss scripts/tui_shot.py tests/test_transcript.py
 git commit -m "feat(ui): a transcript that streams markdown and keeps the bottom"
 ```
@@ -1014,7 +1018,7 @@ Expected: `rm 'tests/test_observer.py'`
 - [ ] **Step 7: 全量回归 + lint + commit**
 
 ```bash
-.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/mypy ai_coding
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/python -m mypy ai_coding
 git add ai_coding/ui/blocks.py tests/test_blocks.py tests/test_tool_chunks.py tests/test_tool_surface_warning.py
 git commit -m "feat(ui): loop events become blocks (R8c semantics carried over)"
 ```
@@ -1079,7 +1083,7 @@ async def test_approval_shows_tool_and_reason():
     async with app.run_test() as pilot:
         app.push_screen(ApprovalScreen("bash", {"command": "ls"}, "read-only"))
         await pilot.pause()
-        text = app.screen.query_one("#approval-body").renderable.plain
+        text = app.screen.query_one("#approval-body").content.plain
         assert "bash" in text
         assert "read-only" in text
 
@@ -1245,7 +1249,7 @@ Expected: `4 passed`
 - [ ] **Step 6: 全量回归 + lint + commit**
 
 ```bash
-.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/mypy ai_coding
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/python -m mypy ai_coding
 git add ai_coding/ui/modals.py ai_coding/ui/app.tcss tests/test_modals.py
 git commit -m "feat(ui): approval and ask_user modal screens"
 ```
@@ -1336,7 +1340,7 @@ class _BlockingLoop(_FakeLoop):
 
 
 def _all_static_text(app) -> str:
-    return "\n".join(w.renderable.plain for w in app.query(Static) if hasattr(w.renderable, "plain"))
+    return "\n".join(w.content.plain for w in app.query(Static) if hasattr(w.content, "plain"))
 ```
 
 并在文件头补 `import asyncio`。
@@ -1581,7 +1585,7 @@ Expected: 全屏 TUI 打开；输入一句短话，回答流式出现；`ctrl+q`
 - [ ] **Step 7: 全量回归 + lint + commit**
 
 ```bash
-.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/mypy ai_coding
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/python -m mypy ai_coding
 git add ai_coding/ui/textual_app.py tests/test_textual_app.py
 git commit -m "feat(ui): the loop is wired — submit, stream, events, turn guard"
 ```
@@ -1893,7 +1897,7 @@ Expected: `1 passed`（若时序不稳，按实际输出调整等待条件；不
 - [ ] **Step 8: 全量回归 + lint + commit**
 
 ```bash
-.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/mypy ai_coding
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/python -m mypy ai_coding
 git add ai_coding/ui/console.py ai_coding/ui/textual_app.py tests/test_textual_app.py \
   tests/_pty_textual_child.py tests/test_pty_textual.py
 git commit -m "feat(ui): slash commands, the /permissions provider fix, and a pty E2E"
@@ -1971,22 +1975,38 @@ grep -rn "prompt_toolkit" ai_coding/ tests/ scripts/ --include=*.py | grep -v __
 ```
 Expected: **0 行**。若有残留，说明漏删，逐一处理。
 
-- [ ] **Step 7: 全量回归**
+- [ ] **Step 7: 修掉最后一个既存 mypy 错误**
+
+删掉 `ui/app.py` 后，`mypy ai_coding` 只应剩 `core/agent_loop.py:243`：
+`"ChatEngine" has no attribute "model_config"`（`set_model` 给引擎赋了这个属性，但端口没声明）。
+
+修法（**纯注解，零行为变更**，`Any` 已在文件里导入）：在 `ai_coding/ai/engine.py` 的 `ChatEngine` 类体里、`step` 定义之前加：
+
+```python
+    #: Set by ``AgentLoop.set_model``; concretely a ``ModelConfig``.  Declared
+    #: here (typing only) so the port matches how the loop actually uses it.
+    model_config: Any
+```
+
+Run: `.venv/bin/python -m mypy ai_coding`
+Expected: `Success: no issues found in 110 source files`（若此修法引出别的错误，说明不止一行——回退该改动，把错误记进 ledger 并在最终汇报给用户，不要擅自扩大改动）。
+
+- [ ] **Step 8: 全量回归**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: 全绿；总数比 Task 6 结束时减少（旧测试删除 + 新测试加入），失败数为 0。
 
-- [ ] **Step 8: 更新文档**
+- [ ] **Step 9: 更新文档**
 
 - `docs/features.md`：重写「R10 已知缺口」节 → 改为「R12：Textual UI（v1 会话闭环）」，列出已接线项（事件→块、提交、审批、ask_user、slash、`/model`）、v1 明确不做项（欢迎页/命令面板/侧栏/计划卡、Esc 取消、steering）、验证方式（`run_test` + pty + 真实终端）。
 - `docs/README.md`：把「终端界面重构（R10）」的描述更新为 Textual 版本，删掉「四处数据流尚未接线」的过时段落。
 - `docs/architecture.md`：ui 行更新为新模块清单（textual_app / transcript / blocks / widgets→transcript 等）。
 - `docs/how-to-run.md`：删掉「输出区尚未接上循环事件」的限制说明；补复制（ctrl+c / Shift+拖选）与退出（ctrl+q）说明。
 
-- [ ] **Step 9: lint + commit**
+- [ ] **Step 10: lint + 全量门禁 + commit**
 
 ```bash
-.venv/bin/ruff check . && .venv/bin/mypy ai_coding
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/python -m mypy ai_coding
 git add -A
 git commit -m "refactor(ui): the Textual app is the only UI; prompt-toolkit is gone"
 ```
@@ -2005,7 +2025,7 @@ git commit -m "refactor(ui): the Textual app is the only UI; prompt-toolkit is g
 
 Run:
 ```bash
-.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/mypy ai_coding
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/python -m mypy ai_coding
 ```
 Expected: 全绿、`All checks passed!`；记录实际数字（passed / skipped）。
 
