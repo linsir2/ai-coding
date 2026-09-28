@@ -341,26 +341,26 @@ R7b 把这段话的前半句治掉了：L2 不再丢正文。实测同一份 70 
 
 ## R10 已知缺口
 
-全屏 TUI 的**壳**已经就位，以下三处尚未接线，都不是视觉问题而是数据流问题：
+全屏 TUI 的**壳**与**命令面板**已经就位（已用真实 pty 验证：横幅、状态栏、面板边框、
+键盘导航、`Ctrl-Q` 退出都正常），以下四处尚未接线，都不是视觉问题而是数据流问题：
 
 1. **输出没有接进 body**：`_build_loop(observer=None)`，`ConsoleObserver` 仍在往 `rich.Console`
    逐行打印；`BodyBuffer` 已经在 `app.py` 里创建并写了欢迎语，但**没有从循环事件收数据**。
-   后果：跑真实回合时，模型回复与工具事件仍打印在 body 窗口之外的普通 stdout，
-   而全屏 `Application` 接管了终端，实际效果待接。
-2. **命令面板只能发命令、不能收命令**：`BufferControl` 被用作 body 的输入区，但没有
-   Enter 提交 / 焦点回到面板的按键绑定，因此**无法通过 body 键入自然语言**；
-   面板执行的那条命令走 `handle_input`，它内部用的 `DialogueConsole` 同样写不到 body。
+   后果：跑真实回合时，模型回复与工具事件不会出现在 body 窗口里。
+2. **body 无法提交输入**：`BufferControl` 被用作 body 的输入区，但没有 Enter 提交 /
+   提交后清空缓冲的按键绑定，因此面板里的命令能跑，**自己键入的自然语言不会被发送**。
 3. **人机通道全断**：`ask_user`（`CLIUserPromptCallback`）与工具审批（`CLIApprovalCallback`）
    都在 `asyncio.to_thread` 里读 stdin。全屏 `Application` 独占 stdin，这两个回调拿不到输入，
    也没有改走 `Application` 的焦点。`ui/reader.py` 的仲裁器（问题/转向/命令/输入）已随文件删除。
+4. **`/model <name>` 不会真切换**：`AgentLoop` 没有 `set_model` 方法，handler 会打印
+   「model switching not supported by this loop」。
 
-另外两处小的：turn 计时器在 `run_app` 启动时取一次 `time.monotonic()`，不会随回合重置；
-`/model <name>` 依赖 `loop.set_model`，而 `AgentLoop` 尚未实现该方法，因此实际会打印
-「model switching not supported by this loop」。
+另有一处小的：turn 计时器在 `run_app` 启动时取一次 `time.monotonic()`，不会随回合重置。
 
 补齐顺序建议：先 1（`ConsoleObserver` → `BodyBuffer` 的桥接 observer），
-再 2（body 的 Enter 提交与焦点切换），再 3（把 `ask_user` / 审批改为经 `Application` 焦点取输入，
-等价于把 `InteractiveReader` 的仲裁能力搬进 `app.py`）。
+再 2（body 的 Enter 提交与清空），再 3（把 `ask_user` / 审批改为经 `Application` 焦点取输入，
+等价于把 `InteractiveReader` 的仲裁能力搬进 `app.py`），最后 4。
+
 
 
 ## R1 带来的变化（相对 M6）

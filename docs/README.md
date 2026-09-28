@@ -119,10 +119,10 @@ R10 把界面从「逐行 `console.print()` + 单行提示符」换成 `prompt_t
 `ui/reader.py`（`InteractiveReader`）与 `tests/test_cli.py` / `test_cli_trace.py` 随旧入口一起删除。
 实施计划见 `docs/superpowers/plans/2026-09-28-terminal-interaction-redesign.md`（18 个 TDD 任务）。
 
-质量门禁：`pytest` 1113 例通过 / 4 跳过（`tests/test_mcp.py` 因环境缺 `mcp` 包未跑）、
-`ruff` 0 问题。
+质量门禁：`pytest` 1120 例收集 / 退出码 0（`tests/test_mcp.py` 因环境缺 `mcp` 包未跑）、
+`ruff` 0 问题。已用真实 pty 验证：横幅、状态栏、面板边框、键盘导航、`Ctrl-Q` 退出。
 
-**R10 的壳已就位，但三处数据流尚未接线**（详见 [功能清单 · R10 已知缺口](features.md#r10-已知缺口)）：
-循环事件没有写进 body 输出区、body 无法提交自然语言输入、`ask_user` 与工具审批拿不到输入。
-这三处是后续 R11 的主线。
+**R10 的壳与命令面板已就位，但四处数据流尚未接线**（详见 [功能清单 · R10 已知缺口](features.md#r10-已知缺口)）：
+循环事件没有写进 body 输出区、body 无法提交自然语言、`ask_user` 与工具审批拿不到输入、
+`/model <name>` 不会真切换。这四处是后续 R11 的主线。
 

@@ -70,10 +70,10 @@ ai-coding --path config.local.yaml --workspace /tmp/demo
 
 在面板里选 `/plan` 或直接描述任务即可开始。模型会调用 `read` 读文件，工具结果持久化。
 
-> ⚠️ **当前限制（R10）**：TUI 的输出区尚未接上循环事件，自然语言输入也还不能提交，
-> `ask_user` 与工具审批的输入通道也未接通。详见[功能清单 · R10 已知缺口](features.md#r10-已知缺口)。
-> 现阶段可正常使用面板里的全部只读命令（`/status` `/model` `/resume` `/todo` `/skills`
-> `/config` `/memory` `/trace` `/budget` `/compact` `/help`）。
+> ⚠️ **当前限制（R10）**：面板的全部命令都能跑，但 TUI 的输出区尚未接上循环事件，
+> 自然语言输入也还不能提交，`ask_user` 与工具审批的输入通道也未接通。
+> 详见[功能清单 · R10 已知缺口](features.md#r10-已知缺口)。现阶段可正常使用面板里的全部命令；
+> 会触发模型回合的（`/plan` `/review` `/compact`）能跑通，但回复不会显示在输出区。
 
 ## 产物位置
 
