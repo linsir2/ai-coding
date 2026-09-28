@@ -151,6 +151,7 @@ class AgentLoop:
         guards: GuardChain | None = None,
         hooks: Any | None = None,
         steering: Any | None = None,
+        cancel: asyncio.Event | None = None,
     ) -> None:
         self.engine = engine
         self.sessions = sessions
@@ -176,6 +177,9 @@ class AgentLoop:
         # R7e-2: where lines typed mid-turn wait.  None = today's behaviour, and the
         # loop then never looks at a queue at all.
         self.steering = steering
+        # R8c: what the Esc key sets.  The loop clears it before every batch so one
+        # key press drops one batch, never the rest of the turn (D-7).
+        self.cancel = cancel
         # Task injection + stop policy live in their own pure unit (R2c).
         self.policy = TurnPolicy(TurnPolicyConfig.from_ai_config(self.settings))
         self._tool_schemas = tool_schemas(tools)
@@ -201,6 +205,7 @@ class AgentLoop:
                 getattr(self.settings, "approval_timeout_seconds", 0.0) or 0.0
             )
             or None,
+            cancel=cancel,
         )
         # R5: everything this turn says about itself (events, ledger, degradation)
         # lives in one unit, so the loop body only has to choreograph.
@@ -544,6 +549,9 @@ class AgentLoop:
         here, so the loop body reads as the ReAct cycle it is.
         """
         limit = int(getattr(self.settings, "working_memory_note_chars", 120) or 120)
+        if self.cancel is not None:
+            # R8c: one Escape drops the batch that is starting, not the whole turn.
+            self.cancel.clear()
         outcomes = await self.dispatcher.dispatch_batch(
             step.tool_calls,
             tool_context(

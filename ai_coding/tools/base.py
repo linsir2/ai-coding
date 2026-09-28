@@ -10,6 +10,7 @@ Tools return ``ToolResult`` (M0 domain contract) so all callers treat results un
 
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -49,6 +50,10 @@ class ToolContext:
     # R8a: how a tool tells the running turn "remember this line for later"
     # (``checkpoint_write``).  ``None`` outside a loop that owns a turn book.
     note_checkpoint: Callable[[str], None] | None = None
+    # R8c: a thread-safe "stop" flag for tools that own a subprocess (bash hands
+    # it to the process runner).  The dispatcher sets it when the user cancels, so
+    # the child dies even though the awaiting task was abandoned.
+    kill_event: threading.Event | None = None
 
 
 def resolve_ctx(ctx: ToolContext | None) -> ToolContext:

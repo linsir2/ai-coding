@@ -906,3 +906,73 @@ async def test_zero_turn_timeout_disables_the_watchdog(tmp_path):
     assert await loop.process_input(sessions.create(), "go") == "slow but fine"
     assert loop.last_outcome is not None
     assert loop.last_outcome.status is TurnStatus.COMPLETED
+
+
+# ---- R8c: Esc cancels one batch, and the turn carries on --------------------
+
+
+class _HangsOnFirstCall(BaseTool):
+    """Hangs on its first call; the second one proves the cancel was cleared."""
+
+    parallel_safe = True
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def name(self) -> str:
+        return "read"
+
+    @property
+    def description(self) -> str:
+        return "hangs once"
+
+    @property
+    def params_json_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, params, ctx=None) -> ToolResult:
+        self.calls += 1
+        if self.calls == 1:
+            await asyncio.sleep(30)
+        return ToolResult(success=True, output="the second call ran")
+
+
+class _AsksTwiceThenAnswers(ChatEngine):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        self.calls += 1
+        if self.calls <= 2:
+            return _calls(_ref(f"c{self.calls}", "read"))
+        return _text("好了")
+
+
+@pytest.mark.asyncio
+async def test_r8_a_cancel_does_not_end_the_turn_and_clears_before_the_next_batch(tmp_path):
+    cancel = asyncio.Event()
+    sessions = SessionService(tmp_path / "sessions")
+    tool = _HangsOnFirstCall()
+    loop = _loop(
+        _AsksTwiceThenAnswers(),
+        sessions,
+        registry=_registry(tool),
+        cancel=cancel,
+        settings=_settings(max_tool_iterations=5),
+    )
+    session = sessions.create()
+
+    async def trip() -> None:
+        await asyncio.sleep(0.05)
+        cancel.set()
+
+    answer = await asyncio.gather(loop.process_input(session, "先跑一次"), trip())
+
+    assert answer[0] == "好了"
+    tool_messages = [m.content or "" for m in session.messages if m.role == "tool"]
+    assert any("cancelled_by_user" in body for body in tool_messages)
+    assert any("the second call ran" in body for body in tool_messages)
+    assert tool.calls == 2  # the second batch really ran, not cancelled again
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.status is TurnStatus.COMPLETED

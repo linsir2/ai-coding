@@ -19,7 +19,7 @@ from ai_coding.core.events import (
     ToolFinished,
     ToolStarted,
 )
-from ai_coding.domain.message import ToolCallRef, ToolResult
+from ai_coding.domain.message import CANCELLED_BY_USER, ToolCallRef, ToolResult
 from ai_coding.domain.task import TaskState
 from ai_coding.infra.deadline import Deadline
 from ai_coding.security.approval import ApprovalResult
@@ -280,9 +280,13 @@ async def test_tool_receives_the_given_context():
     # R4a contract change: the dispatcher stamps a per-call ``call_id`` onto a copy
     # of the batch context, so a concurrent batch can still attribute each
     # execution (docs/r4-analysis.md 4.6).  Everything else is passed through.
+    # R8c adds a second stamped field, ``kill_event`` - the flag the cancel path
+    # sets so a tool that owns a subprocess can kill it; it is per call for the
+    # same reason ``call_id`` is.
     received = tool.contexts_seen[0]
     assert received.call_id == "c1"
-    assert dataclasses.replace(received, call_id="") == ctx
+    assert received.kill_event is not None
+    assert dataclasses.replace(received, call_id="", kill_event=None) == ctx
 
 
 # ---- STOP / skipped --------------------------------------------------------
@@ -579,3 +583,103 @@ async def test_tool_finished_event_carries_the_error_code():
     assert len(finished) == 1
     assert finished[0].success is False
     assert finished[0].error == "tool_timeout"
+
+
+# ---- R8c: cancelling one batch, not the turn (docs/r8-analysis.md 3.3-S2) ---
+
+
+class _HangingTool(BaseTool):
+    """Never returns on its own; only a cancel (or a deadline) ends it."""
+
+    parallel_safe = True
+
+    def __init__(self, name: str = "read") -> None:
+        self._name = name
+        self.kill_event: object | None = None
+        self.finished = False
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return "hangs"
+
+    @property
+    def params_json_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, params, ctx: ToolContext | None = None) -> ToolResult:
+        self.kill_event = None if ctx is None else ctx.kill_event
+        await asyncio.sleep(30)
+        self.finished = True  # pragma: no cover - the cancel wins first
+        return ToolResult(success=True, output="never")
+
+
+@pytest.mark.asyncio
+async def test_r8_a_cancelled_call_comes_back_structured():
+    cancel = asyncio.Event()
+    tool = _HangingTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    dispatcher = ToolDispatcher(registry, PermissionGate(), cancel=cancel)
+
+    async def trip() -> None:
+        await asyncio.sleep(0.05)
+        cancel.set()
+
+    batches = await asyncio.gather(
+        dispatcher.dispatch_batch([_ref("t1", "read")], _ctx()), trip()
+    )
+    outcome = batches[0][0]
+
+    assert outcome.result.success is False
+    assert outcome.result.error == CANCELLED_BY_USER
+    assert outcome.denied is False
+    assert outcome.halted is False  # the turn carries on
+
+
+@pytest.mark.asyncio
+async def test_r8_the_cancel_reaches_the_tool_so_a_child_process_can_die():
+    """The tool gets a thread-safe flag; bash hands it to the process runner."""
+    cancel = asyncio.Event()
+    tool = _HangingTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    dispatcher = ToolDispatcher(registry, PermissionGate(), cancel=cancel)
+
+    async def trip() -> None:
+        await asyncio.sleep(0.05)
+        cancel.set()
+
+    await asyncio.gather(dispatcher.dispatch_batch([_ref("t1", "read")], _ctx()), trip())
+    await asyncio.sleep(0.05)
+
+    assert tool.kill_event is not None
+    assert tool.kill_event.is_set() is True  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_r8_a_cancelled_call_does_not_disturb_its_siblings():
+    cancel = asyncio.Event()
+    slow = _HangingTool("read")
+    fast = _FakeTool("glob", parallel_safe=True, result=ToolResult(success=True, output="ok"))
+    registry = ToolRegistry()
+    registry.register(slow)
+    registry.register(fast)
+    dispatcher = ToolDispatcher(registry, PermissionGate(), cancel=cancel)
+
+    async def trip() -> None:
+        await asyncio.sleep(0.05)
+        cancel.set()
+
+    batches = await asyncio.gather(
+        dispatcher.dispatch_batch([_ref("t1", "read"), _ref("t2", "glob")], _ctx()), trip()
+    )
+    outcomes = batches[0]
+
+    assert outcomes[0].result.error == CANCELLED_BY_USER
+    # Both are in the same parallel batch, so the sibling is abandoned too - but
+    # it still gets a *result*: the declared tool_calls must pair up.
+    assert all(outcome.result is not None for outcome in outcomes)

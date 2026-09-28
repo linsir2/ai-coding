@@ -9,6 +9,11 @@ from typing import Any, Literal
 
 Role = Literal["user", "assistant", "tool", "system"]
 
+#: ``ToolResult.error`` when the user cancelled this one call (R8c, D-7).  The
+#: call still gets a result - the declared tool_calls must pair up - and the turn
+#: carries on, so the model can change approach.
+CANCELLED_BY_USER = "cancelled_by_user"
+
 
 @dataclass(frozen=True)
 class ToolCallRef:

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import threading
 import time
 from dataclasses import dataclass, replace
 from typing import Any
@@ -40,10 +41,17 @@ from ai_coding.core.events import (
 )
 from ai_coding.core.guard import GuardChain, GuardVerdict, TurnView
 from ai_coding.core.hooks import HookDecision, HookPoint
-from ai_coding.domain.message import ToolCall, ToolCallRef, ToolResult, tool_call_from_ref
+from ai_coding.domain.message import (
+    CANCELLED_BY_USER,
+    ToolCall,
+    ToolCallRef,
+    ToolResult,
+    tool_call_from_ref,
+)
 from ai_coding.infra.deadline import (
     Deadline,
     DeadlineExpired,
+    RunCancelled,
     remaining_of,
     run_with_deadline,
 )
@@ -143,6 +151,7 @@ class ToolDispatcher:
         guards: GuardChain | None = None,
         hooks: Any | None = None,
         approval_timeout: float | None = None,
+        cancel: asyncio.Event | None = None,
     ) -> None:
         self.registry = registry
         self.gate = gate
@@ -158,6 +167,8 @@ class ToolDispatcher:
         # R7c: how long a human gets to answer before the turn moves on without
         # them (``None``/0 = only the turn clock bounds the wait).
         self.approval_timeout = approval_timeout
+        # R8c: the user's "drop this batch" switch (Esc).  ``None`` = no such key.
+        self.cancel = cancel
 
     # ---- public API -------------------------------------------------------
 
@@ -421,12 +432,22 @@ class ToolDispatcher:
             return self._tool_timeout(call, 0.0, "turn_budget_exhausted")
 
         budget = _call_budget(tool, deadline)
+        # R8c: the tool may own a child process; the kill flag is how the cancel
+        # reaches it (bash hands it to ``run_process``).
+        kill = threading.Event()
+        ctx = replace(ctx, kill_event=kill)
         try:
             return await run_with_deadline(
                 tool.execute(call.params, ctx),
                 timeout=budget,
                 label=f"tool:{call.name}",
+                cancel=self.cancel,
             )
+        except RunCancelled:
+            # The wait is over, but the work is not: set the flag so a subprocess
+            # group is killed rather than left running (docs/r8-analysis.md S2.1).
+            kill.set()
+            return self._cancelled(call)
         except DeadlineExpired:
             return self._tool_timeout(
                 call, budget if budget is not None else 0.0, "call_budget_exhausted"
@@ -582,6 +603,19 @@ class ToolDispatcher:
                 "timeout_seconds": seconds,
                 "reason": reason,
             },
+        )
+
+    @staticmethod
+    def _cancelled(call: ToolCall) -> ToolResult:
+        """The user dropped this call (R8c): structured, and not an error to fix."""
+        return ToolResult(
+            success=False,
+            output=(
+                "cancelled_by_user: the user stopped this call. Do not repeat it "
+                "unchanged - change approach, ask, or wrap the turn up."
+            ),
+            error=CANCELLED_BY_USER,
+            data={"tool": call.name},
         )
 
 

@@ -19,6 +19,7 @@ import pytest
 from ai_coding.infra.deadline import (
     Deadline,
     DeadlineExpired,
+    RunCancelled,
     remaining_of,
     run_with_deadline,
 )
@@ -147,3 +148,50 @@ def test_deadline_value_object():
     assert deadline.expired is False
     assert Deadline.after(0).expired is True
     assert Deadline.after(-1).remaining() < 0
+
+
+# ---- R8c: cancellation is a second reason to abandon an await ---------------
+
+
+@pytest.mark.asyncio
+async def test_r8_a_set_cancel_event_abandons_the_await():
+    cancel = asyncio.Event()
+    started = time.monotonic()
+
+    async def slow() -> None:
+        await asyncio.sleep(30)
+
+    async def trip() -> None:
+        await asyncio.sleep(0.05)
+        cancel.set()
+
+    with pytest.raises(RunCancelled) as caught:
+        await asyncio.gather(
+            run_with_deadline(slow(), timeout=None, label="tool:bash", cancel=cancel),
+            trip(),
+        )
+
+    assert caught.value.label == "tool:bash"
+    assert time.monotonic() - started < 5.0
+
+
+@pytest.mark.asyncio
+async def test_r8_an_unset_cancel_event_changes_nothing():
+    cancel = asyncio.Event()
+    deadline = Deadline.after(5)
+    value = await run_with_deadline(
+        asyncio.sleep(0, result="done"), timeout=deadline.remaining(), label="quick",
+        cancel=cancel,
+    )
+    assert value == "done"
+
+
+@pytest.mark.asyncio
+async def test_r8_a_cancelled_wait_leaves_no_tasks_behind():
+    cancel = asyncio.Event()
+    cancel.set()
+    with pytest.raises(RunCancelled):
+        await run_with_deadline(asyncio.sleep(30), timeout=None, label="slow", cancel=cancel)
+    await asyncio.sleep(0.1)
+    current = asyncio.current_task()
+    assert asyncio.all_tasks() - {current} == set()

@@ -31,6 +31,7 @@ __all__ = [
     "HEARTBEAT_SECONDS",
     "Deadline",
     "DeadlineExpired",
+    "RunCancelled",
     "remaining_of",
     "run_with_deadline",
 ]
@@ -49,6 +50,19 @@ class DeadlineExpired(Exception):
         super().__init__(f"{label} exceeded its {timeout:g}s deadline")
         self.label = label
         self.timeout = timeout
+
+
+class RunCancelled(Exception):
+    """The caller asked to stop waiting (R8c).  The awaitable was abandoned too.
+
+    Distinct from :class:`DeadlineExpired` on purpose: a deadline is the clock
+    running out, this is a human deciding the call is not worth waiting for.  The
+    dispatcher turns it into ``ToolResult.error = "cancelled_by_user"``.
+    """
+
+    def __init__(self, label: str) -> None:
+        super().__init__(f"{label} was cancelled")
+        self.label = label
 
 
 @dataclass(frozen=True)
@@ -122,12 +136,18 @@ async def run_with_deadline(
     label: str,
     tick: float = HEARTBEAT_SECONDS,
     on_abandon: Callable[[asyncio.Task[Any]], None] | None = None,
+    cancel: asyncio.Event | None = None,
 ) -> _T:
     """Await ``awaitable`` with a hard ``timeout`` (``None`` = unbounded).
 
     On expiry the awaitable is cancelled and abandoned, and :class:`DeadlineExpired`
     is raised immediately — the caller is never blocked by a task that ignores
     cancellation.  ``on_abandon`` receives the leftover task (tests and tracing).
+
+    R8c adds a second reason to abandon: ``cancel`` (an ``asyncio.Event`` the user's
+    Esc key sets) stops the wait and raises :class:`RunCancelled`.  Both reasons
+    share this one implementation, so "how to give up on an await" stays written
+    once (the R2a discipline).
     """
     task: asyncio.Task[_T] = asyncio.ensure_future(awaitable)
 
@@ -140,15 +160,27 @@ async def run_with_deadline(
         ticker = asyncio.ensure_future(_heartbeat(tick))
         ticker.set_name("ai-coding-heartbeat")
 
+    watcher: asyncio.Task[bool] | None = None
+    if cancel is not None:
+        watcher = asyncio.ensure_future(cancel.wait())
+        watcher.set_name("ai-coding-cancel-watch")
+
     try:
-        if timeout is None:
+        if timeout is None and watcher is None:
             return await task
-        done, _pending = await asyncio.wait({task}, timeout=timeout)
+        waiter = {task} if watcher is None else {task, watcher}
+        done, _pending = await asyncio.wait(
+            waiter, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+        if watcher is not None and watcher in done:
+            _abandon(task, on_abandon)
+            raise RunCancelled(label)
         if task not in done:
             _abandon(task, on_abandon)
-            raise DeadlineExpired(label, timeout)
+            raise DeadlineExpired(label, timeout or 0.0)
         return task.result()
     finally:
-        if ticker is not None and not ticker.done():
-            ticker.cancel()
-            ticker.add_done_callback(_drain)
+        for helper in (ticker, watcher):
+            if helper is not None and not helper.done():
+                helper.cancel()
+                helper.add_done_callback(_drain)
