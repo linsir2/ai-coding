@@ -78,3 +78,13 @@ def test_app_no_longer_touches_private_vertical_scroll():
 
     source = inspect.getsource(run_app)
     assert "render_info.vertical_scroll" not in source
+
+
+def test_app_auto_scrolls_after_output():
+    """New output must pin the view to the newest line."""
+    import inspect
+
+    from ai_coding.ui.app import run_app
+
+    source = inspect.getsource(run_app)
+    assert "auto_scroll_to_end(body_window)" in source

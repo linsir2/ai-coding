@@ -177,7 +177,9 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         input_event.clear()
         try:
             await input_event.wait()
-            return input_buffer.text
+            answer = input_buffer.text
+            auto_scroll_to_end(body_window)
+            return answer
         finally:
             awaiting_input = False
 
@@ -216,6 +218,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         nonlocal turn_start
         turn_start = time.monotonic()
         await loop.process_input(session, text, on_delta=body.write)
+        auto_scroll_to_end(body_window)
 
     @kb.add("c-c")
     def _exit(event: Any) -> None:
