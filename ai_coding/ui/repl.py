@@ -132,6 +132,24 @@ async def handle_input(
         console.info("[review] reviewing current changes...")
         await loop.process_input(session, "Review the current git diff and identify any issues, bugs, or improvements needed.", on_delta=console.delta)
         return REPLAction.CONTINUE, session
+    if cmd.name == "config":
+        return _handle_config(loop, session, console)
+    return REPLAction.CONTINUE, session
+
+
+def _handle_config(loop: Any, session: Any, console: DialogueConsole) -> tuple[REPLAction, Any]:
+    settings = getattr(loop, "settings", None)
+    if settings is None:
+        console.info("[config] not available")
+        return REPLAction.CONTINUE, session
+    lines = [
+        f"[config] model: {getattr(settings, 'default_model', '?')}",
+        f"  max_context_tokens: {getattr(settings, 'max_context_tokens', '?')}",
+        f"  max_tool_iterations: {getattr(settings, 'max_tool_iterations', '?')}",
+        f"  stop_policy: {getattr(settings, 'stop_policy', '?')}",
+        f"  turn_timeout: {getattr(settings, 'turn_timeout_seconds', '?')}s",
+    ]
+    console.info("\n".join(lines))
     return REPLAction.CONTINUE, session
 
 

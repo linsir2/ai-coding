@@ -235,3 +235,20 @@ async def test_handle_review_sends_prompt():
     assert action is REPLAction.CONTINUE
     assert len(loop.calls) == 1
     assert "review" in loop.calls[0][0].lower() or "审查" in loop.calls[0][0].lower()
+
+
+async def test_handle_config_shows_settings():
+    loop = _FakeLoop()
+    loop.settings = type("S", (), {
+        "default_model": "gpt-4",
+        "max_context_tokens": 48000,
+        "max_tool_iterations": 10,
+        "stop_policy": "todo_aware",
+    })()
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    action, _ = await handle_input(loop, "/config", sessions.items[0], sessions, dc)
+    assert action is REPLAction.CONTINUE
+    out = _session_text(c)
+    assert "gpt-4" in out
+    assert "48000" in out
