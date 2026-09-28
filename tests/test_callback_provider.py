@@ -2,8 +2,8 @@
 
 import asyncio
 
-from ai_coding.security.user_prompt import CLIUserPromptCallback
 from ai_coding.security.approval import CLIApprovalCallback
+from ai_coding.security.user_prompt import CLIUserPromptCallback
 
 
 def test_user_prompt_set_provider():

@@ -61,6 +61,7 @@ def test_timer_reset_in_submit_text():
     # This is a structural test — we verify the reset logic exists
     # by checking that _submit_text sets turn_start before process_input
     import inspect
+
     from ai_coding.ui.app import run_app
     source = inspect.getsource(run_app)
     assert "turn_start = time.monotonic()" in source

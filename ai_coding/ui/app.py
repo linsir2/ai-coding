@@ -83,6 +83,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
 
     body = BodyBuffer()
     body_observer = BodyObserver(body)
+    approval = CLIApprovalCallback()
 
     loop = _build_loop(
         engine, sessions, registry, app_cfg, workspace, skills,
@@ -175,7 +176,6 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
             awaiting_input = False
 
     user_prompt.set_provider(_input_provider)
-    approval = CLIApprovalCallback()
     approval.set_provider(_input_provider)
 
     @kb.add("enter")

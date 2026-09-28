@@ -1,6 +1,7 @@
 """AgentLoop.set_model: switch model mid-session."""
 
 import pytest
+
 from ai_coding.core.agent_loop import AgentLoop
 
 
