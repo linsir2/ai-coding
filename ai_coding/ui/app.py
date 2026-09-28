@@ -106,10 +106,14 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     awaiting_input = False
     user_lines: set[int] = set()
 
-    body.write("  ✨ Welcome to ai-coding! ✨\n")
+    # The header block is body content, not a pinned window (R12): it scrolls
+    # away with the conversation instead of eating nine rows forever.
+
+    for style, text in render_header(loop):
+        body.write(text, style=style)
+    body.write("\n")
     body.write("  Describe a task, or use / for commands.\n\n")
 
-    header_control = FormattedTextControl(lambda: render_header(loop))
     footer_control = FormattedTextControl(
         lambda: render_footer(loop, turn_start)
     )
@@ -119,25 +123,33 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         lambda: palette.render() if palette.is_open else []
     )
 
-    def _md_prefix(i: int) -> list[tuple[str, str]]:
-        doc = body.get_buffer().document
-        line = doc.lines[i] if i < doc.line_count else ""
-        if line.startswith("#"):
+    def _line_style(i: int) -> list[tuple[str, str]]:
+        """Pick a style for one rendered line from how it was *written*.
+
+        The buffer holds the stripped text, so a heading arrives here as its bare
+        title and can no longer be told apart from prose.  ``raw_line`` keeps the
+        original, which is what carries the ``#`` run.
+        """
+        raw = body.raw_line(i)
+        if raw.startswith("#"):
             return [("class:md-header", "")]
-        if line.startswith("```"):
+        if raw.lstrip().startswith("```"):
             return [("class:md-code", "")]
-        if line.startswith("-") or line.startswith("*"):
+        if raw.lstrip().startswith(("-", "*")):
             return [("class:md-list", "")]
-        if "**" in line:
-            return [("class:md-bold", "")]
         return []
+
+    def _md_prefix(i: int, wrap: int = 0) -> list[tuple[str, str]]:
+        if i in user_lines:
+            return [("class:user-msg", "  ")]
+        return _line_style(i)
 
     body_window = Window(
         content=body_control,
         wrap_lines=False,
         scroll_offsets=ScrollOffsets(top=1, bottom=1),
         allow_scroll_beyond_bottom=True,
-        get_line_prefix=lambda i, wrap=0: [("class:user-msg", "  ")] if i in user_lines else _md_prefix(i),
+        get_line_prefix=_md_prefix,
     )
     input_window = Window(
         content=input_control,
@@ -194,6 +206,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         try:
             await input_event.wait()
             answer = input_buffer.text
+            input_buffer.reset()
             auto_scroll_to_end(body_window)
             return answer
         finally:
@@ -238,7 +251,6 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         await loop.process_input(session, text, on_delta=body.write)
         body.write(f"  {datetime.now().strftime('%H:%M')}\n")
         auto_scroll_to_end(body_window)
-
     @kb.add("c-c")
     def _exit(event: Any) -> None:
         event.app.exit()
@@ -254,11 +266,6 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         event.app.invalidate()
 
     root = HSplit([
-        Window(
-            content=header_control,
-            height=D(preferred=HEADER_HEIGHT),
-            style="class:header",
-        ),
         body_window,
         palette_window,
         input_window,

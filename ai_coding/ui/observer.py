@@ -47,11 +47,11 @@ class BodyObserver:
             self._body.write(f"[turn {event.index}/{event.max_iterations}]\n")
         elif isinstance(event, ToolStarted):
             params = _short(json.dumps(event.params, ensure_ascii=False), _PARAM_PREVIEW)
-            self._body.write(f"[tool: {event.tool_name}] {params}\n")
+            self._body.write(f"  [tool: {event.tool_name}] {params}\n")
         elif isinstance(event, ToolFinished):
             mark = "ok" if event.success else "failed"
             preview = _short(event.output_preview, _OUTPUT_PREVIEW)
-            self._body.write(f"  -> {mark}{': ' + preview if preview else ''}\n")
+            self._body.write(f"    -> {mark}{': ' + preview if preview else ''}\n")
         elif isinstance(event, ToolChunk):
             if not self._chunks:
                 return
@@ -60,7 +60,7 @@ class BodyObserver:
             if previous is not None and now - previous < _CHUNK_THROTTLE_SECONDS:
                 return
             self._last_chunk[event.call_id] = now
-            self._body.write(f"  | {_short(event.text, _OUTPUT_PREVIEW)}\n")
+            self._body.write(f"    | {_short(event.text, _OUTPUT_PREVIEW)}\n")
         elif isinstance(event, TurnFinished):
             if event.outcome.status is TurnStatus.TIMEOUT:
                 self._body.write(f"[turn] timed out: {event.outcome.reason}\n")
