@@ -80,3 +80,12 @@ def test_subagent_runner_wires_ledger_root_and_limits(tmp_path):
     assert runner._ledger_root == tmp_path.resolve()
     assert runner._timeout == 45.0
     assert runner._semaphore._value == 2  # asyncio.Semaphore exposes its count
+
+
+def test_r9_the_dependency_gate_is_on_by_default_and_configurable(tmp_path):
+    on = _cfg(str(tmp_path))  # _cfg has no enforce_dependencies → getattr default True
+    assert build_tool_registry(on, str(tmp_path), None).get("todo_write")._enforce is True
+
+    off = _cfg(str(tmp_path))
+    off.ai.enforce_dependencies = False
+    assert build_tool_registry(off, str(tmp_path), None).get("todo_write")._enforce is False

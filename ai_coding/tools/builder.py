@@ -126,7 +126,13 @@ def _assemble_registry(
         registry.register(GlobTool(sandbox))
 
     # Always-registered tools
-    registry.register(TodoWriteTool())
+    # R9a: the dependency gate is on by default; legacy lists can switch it off.
+    # ``app_cfg.ai`` is duck-typed (tests pass namespaces), so read it defensively.
+    registry.register(
+        TodoWriteTool(
+            enforce_dependencies=bool(getattr(app_cfg.ai, "enforce_dependencies", True))
+        )
+    )
 
     if skills_path and Path(skills_path).is_dir():
         registry.register(SkillTool(skills_path))

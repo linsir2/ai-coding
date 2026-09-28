@@ -58,6 +58,10 @@ class AIConfig(BaseModel):
     # How a turn is allowed to end.  "todo_aware" gates the stop on open items.
     stop_policy: Literal["natural", "todo_aware", "strict"] = "todo_aware"
     max_todo_nudges: int = 2
+    # R9a: refuse to start/finish an item whose depends_on is unmet, and refuse
+    # to create a dependency on a missing or self id.  Off = the R1 behaviour,
+    # which exists for legacy lists only (docs/r9-analysis.md D-R9-3).
+    enforce_dependencies: bool = True
     # Where the task list is injected: a volatile trailing message (cache
     # friendly) or appended to the system prompt (survives compaction).
     task_injection: Literal["message", "system"] = "message"
