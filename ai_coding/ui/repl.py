@@ -113,6 +113,17 @@ async def handle_input(
         else:
             console.info(task.render())
         return REPLAction.CONTINUE, session
+    if cmd.name == "skills":
+        skills_reg = getattr(loop, "skills", None)
+        if skills_reg is None:
+            console.info("[skills] not available in this session")
+            return REPLAction.CONTINUE, session
+        catalog = skills_reg.catalog_text()
+        if catalog:
+            console.info(f"[skills] available:\n{catalog}")
+        else:
+            console.info("[skills] no skills found")
+        return REPLAction.CONTINUE, session
     return REPLAction.CONTINUE, session
 
 

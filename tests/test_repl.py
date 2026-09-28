@@ -204,3 +204,14 @@ async def test_handle_todo_no_task():
     assert action is REPLAction.CONTINUE
     out = _session_text(c)
     assert "no task" in out.lower() or "empty" in out.lower() or "0" in out
+
+
+async def test_handle_skills_lists_catalog():
+    loop = _FakeLoop()
+    loop.skills = type("SR", (), {"catalog_text": lambda self: "- test-skill: A test skill"})()
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    action, _ = await handle_input(loop, "/skills", sessions.items[0], sessions, dc)
+    assert action is REPLAction.CONTINUE
+    out = _session_text(c)
+    assert "test-skill" in out
