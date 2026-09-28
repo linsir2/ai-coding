@@ -1,0 +1,50 @@
+Screen {
+    layout: vertical;
+    background: $surface;
+}
+
+#status-bar {
+    height: 1;
+    background: $surface-lighten-1;
+    padding: 0 2;
+}
+
+#status-left {
+    width: 1fr;
+}
+
+#status-right {
+    width: auto;
+}
+
+#transcript {
+    height: 1fr;
+    padding: 1 2;
+    scrollbar-size-vertical: 1;
+}
+
+#input-bar {
+    height: auto;
+    padding: 1 2 0 2;
+}
+
+#input-row {
+    height: auto;
+}
+
+#prompt {
+    width: 1fr;
+    border: round $primary;
+}
+
+#send-icon {
+    width: 3;
+    content-align: center middle;
+    color: $primary;
+}
+
+#input-hint {
+    height: 1;
+    color: $text-muted;
+    text-align: right;
+}
