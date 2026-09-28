@@ -12,8 +12,10 @@ from ai_coding.infra.logger_setup import setup_logging
 
 app = typer.Typer(
     name="ai-coding",
-    help="AI coding assistant CLI.",
-    no_args_is_help=True,
+    help="AI coding assistant.",
+    # R10: bare `ai-coding` starts the TUI, so it must not fall through to help.
+    no_args_is_help=False,
+    invoke_without_command=True,
 )
 
 
@@ -47,9 +49,19 @@ def main(
 ) -> None:
     """ai-coding : an AI coding assistant."""
     setup_logging()
-    if not version:
-        from ai_coding.ui.app import run_app
+    if version:
+        return
+    from ai_coding.ui.app import run_app
+
+    try:
         asyncio.run(run_app(path, workspace, skills))
+    except (ValueError, FileNotFoundError) as exc:
+        # The common case is a missing or model-less config: report it the way a
+        # CLI user expects instead of a traceback.
+        typer.echo(f"ai-coding: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except KeyboardInterrupt:
+        typer.echo("bye", err=True)
 
 
 def _build_loop(

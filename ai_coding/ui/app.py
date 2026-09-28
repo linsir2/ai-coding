@@ -35,6 +35,12 @@ PALETTE_ENTRIES = [
     PaletteEntry("help", "Show available commands", "❓"),
 ]
 
+#: Rows the header occupies: 6 lines of ASCII art + 5 status lines + 1 blank.
+HEADER_HEIGHT = 12
+#: The palette lists every command plus a hint row, and must not reach the footer.
+PALETTE_WIDTH = 72
+PALETTE_HEIGHT = len(PALETTE_ENTRIES) + 3
+
 
 async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     """组装并运行全屏 TUI。"""
@@ -48,7 +54,8 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     from ai_coding.config.loader import ConfigManager
     from ai_coding.core.mcp import MCPManager
     from ai_coding.core.steering import SteeringQueue
-    from ai_coding.security.approval import CLIApprovalCallback, CLIUserPromptCallback
+    from ai_coding.security.approval import CLIApprovalCallback
+    from ai_coding.security.user_prompt import CLIUserPromptCallback
     from ai_coding.service.session_service import SessionService
 
     manager = ConfigManager()
@@ -101,42 +108,50 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         lambda: palette.render() if palette.is_open else []
     )
 
+    body_window = Window(content=body_control, wrap_lines=False)
+    palette_window = Window(
+        content=palette_control,
+        width=D(preferred=PALETTE_WIDTH),
+        height=D(preferred=PALETTE_HEIGHT),
+        wrap_lines=False,
+    )
+
     kb = KeyBindings()
 
     @kb.add("/")
     def _toggle_palette(event: Any) -> None:
-        nonlocal session
         if palette.is_open:
             palette.close()
-            event.app.layout.focus(body_control)
+            event.app.invalidate()
         else:
             palette.open()
-            event.app.layout.focus(palette_control)
+            event.app.invalidate()
 
     @kb.add("escape")
     def _close_palette(event: Any) -> None:
-        nonlocal session
         if palette.is_open:
             palette.close()
-            event.app.layout.focus(body_control)
+            event.app.invalidate()
 
     @kb.add("down")
     def _palette_down(event: Any) -> None:
         if palette.is_open:
             palette.handle_key("down")
+            event.app.invalidate()
 
     @kb.add("up")
     def _palette_up(event: Any) -> None:
         if palette.is_open:
             palette.handle_key("up")
+            event.app.invalidate()
 
     @kb.add("enter")
     def _palette_select(event: Any) -> None:
-        nonlocal session
-        if palette.is_open:
-            entry = palette.select()
-            event.app.layout.focus(body_control)
-            asyncio.create_task(_run_command(entry.name))
+        if not palette.is_open:
+            return
+        entry = palette.select()
+        event.app.invalidate()
+        asyncio.create_task(_run_command(entry.name))
 
     async def _run_command(name: str) -> None:
         nonlocal session
@@ -154,27 +169,21 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     def _exit(event: Any) -> None:
         event.app.exit()
 
-    palette_window = Window(
-        content=palette_control,
-        width=D(preferred=60),
-        height=D(preferred=14),
-    )
-
     root = FloatContainer(
         content=HSplit([
             Window(
                 content=header_control,
-                height=D(preferred=12),
+                height=D(preferred=HEADER_HEIGHT),
                 style="class:header",
             ),
-            Window(content=body_control, wrap_lines=False),
+            body_window,
             Window(content=footer_control, height=1, style="class:footer"),
         ]),
         floats=[
             Float(
                 content=palette_window,
-                top=4,
-                left=10,
+                top=HEADER_HEIGHT + 1,
+                left=2,
                 transparent=True,
             ),
         ],

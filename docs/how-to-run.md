@@ -27,68 +27,53 @@ cp config.example.yaml config.local.yaml
 # 编辑 config.local.yaml，把 deepseek-chat.api_key 换成真实 Key
 ```
 
-`config.local.yaml` 在 `.gitignore` 中，不会误提交。`ask`/`repl` 通过 `--path config.local.yaml` 传入，`config-check` 同理。不传 `--path` 默认加载空配置（仅默认值，无模型），因此真实调用必须显式指定配置路径。
+`config.local.yaml` 在 `.gitignore` 中，不会误提交。通过 `--path config.local.yaml` 传入。
+不传 `--path` 默认加载空配置（仅默认值，无模型），因此真实调用必须显式指定配置路径。
 
 ## 命令速查
+
+R10 起只有一种调用方式：`ai-coding` 直接启动全屏 TUI。旧的 Typer 子命令
+（`config-check` / `ask` / `memory` / `trace` / `repl`）已删除。
 
 ```bash
 ai-coding --version
 ai-coding --help
-ai-coding config-check --path config.local.yaml
-ai-coding ask --prompt "如何删除多余列" --path config.local.yaml
-ai-coding ask --prompt "读取 sample.txt" --path config.local.yaml --session <sid>
-ai-coding repl --path config.local.yaml
-ai-coding trace overview --workspace . --since 7          # 跨会话总览
-ai-coding trace export --format html --session <sid> -o trace.html
-ai-coding trace export --format otlp-json --all -o traces.json
+ai-coding --path config.local.yaml --workspace . --skills ./skills
 ```
 
-| 命令 | 用途 |
+| 参数 | 用途 |
 |---|---|
-| `config-check` | 打印生效配置：默认模型、各模型 base_url/max_tokens/temperature、上下文预算、启用的工具 |
-| `ask` | 单回合对话（带全套工具），直接拿到最终答案 |
-| `repl` | 交互式多轮回话；内置 `/help` `/status` `/clear` `/quit` |
-| `trace list\|show\|budget` | 按会话看轨迹（R4a） |
-| `trace overview` | 所有会话一张表 + `TOTAL` 行（R9b） |
-| `trace export` | 把轨迹导成单文件 HTML 或 OTLP/JSON（R9c/d） |
+| `--version` / `-V` | 打印版本号并退出 |
+| `--path` / `-p` | 配置文件路径（YAML） |
+| `--workspace` / `-w` | 文件工具的工作目录（默认 `.`） |
+| `--skills` | 技能目录，启用 `skill` 工具 |
 
-常用参数：`--workspace/-w` 指定文件工具的工作目录（默认 `.`）；`--skills` 指定技能目录（启用 `skill` 工具）；`--session/-s` 续接指定会话。
+进入 TUI 后，输入 `/` 呼出命令面板（`↑↓` 导航、`Enter` 执行、`Esc` 关闭），
+也可以直接手打 slash 命令。`Ctrl-Q` 退出。完整的命令列表见
+[功能清单 · slash 命令](features.md#slash-命令)。
 
 ## 端到端示例
 
-准备一个临时工作区和一个文件：
+准备一个临时工作区和一个文件，然后启动 TUI：
 
 ```bash
 mkdir -p /tmp/demo && printf 'hello world from workspace\n' > /tmp/demo/sample.txt
-ai-coding ask --prompt "用 read 工具读取 sample.txt，然后告诉我内容" \
-  --path config.local.yaml --workspace /tmp/demo
+ai-coding --path config.local.yaml --workspace /tmp/demo
 ```
 
-模型会调用 `read`，工具结果持久化，最终给出回答。同一会话续聊（多轮 + 记忆注入）：
+```
+  ✨ Welcome to Nexus! ✨
+  Describe a task, or use / for commands.
 
-```bash
-SID=$(ls -t sessions/*.json | head -1 | xargs basename | sed 's/\.json//')
-ai-coding ask --session "$SID" --prompt "sample.txt 里写了什么英文？原样引用" \
-  --path config.local.yaml --workspace /tmp/demo
+/  →  命令面板（↑↓ 选，Enter 执行）
 ```
 
-写文件验证（依赖 WARN 放行与过期读保护）：
+在面板里选 `/plan` 或直接描述任务即可开始。模型会调用 `read` 读文件，工具结果持久化。
 
-```bash
-ai-coding ask --prompt "用 write 工具创建 hello.txt，内容写：content-line-one" \
-  --path config.local.yaml --workspace /tmp/demo
-cat /tmp/demo/hello.txt   # content-line-one
-```
-
-交互 REPL：
-
-```
-$ ai-coding repl --path config.local.yaml --workspace /tmp/demo
-ai-coding REPL — /help for commands
-you> 用 write 把版本号改为 2.0
-```
-
-在 REPL 中，write/edit/bash 会触发 y/N/s 确认；`/quit` 退出。
+> ⚠️ **当前限制（R10）**：TUI 的输出区尚未接上循环事件，自然语言输入也还不能提交，
+> `ask_user` 与工具审批的输入通道也未接通。详见[功能清单 · R10 已知缺口](features.md#r10-已知缺口)。
+> 现阶段可正常使用面板里的全部只读命令（`/status` `/model` `/resume` `/todo` `/skills`
+> `/config` `/memory` `/trace` `/budget` `/compact` `/help`）。
 
 ## 产物位置
 
@@ -224,7 +209,7 @@ mcp:
 | 让模型自己写那句「这一轮该记住什么」 | 什么都不用开：`checkpoint_write` 已注册（REPL/组合根） | 它只进**本会话**的摘要环，且只在压缩回合注入；要跨会话用 `memory_write`。上限 `ai.working_memory_note_chars`（默认 120） |
 | 关掉流式输出（回到「结束时一行预览」） | `ui.tool_chunks: false` | 默认开；每次调用 0.15s 最多一行 |
 | 只找「确实动过手的那一轮」记下的记忆 | `memory_search(evidence="tool")` | `model` 表示「非 tool」，**包含** R6d 之前没有 evidence 字段的老数据 |
-| 丢掉当前卡住的那次工具调用 | 在终端按 **Esc** | 工具结果回 `cancelled_by_user`，**回合继续**；`bash` 的进程组会被真的杀掉；这次取消不算失败、也不推进「换策略」提示 |
+| 丢掉当前卡住的那次工具调用 | 在终端按 **Esc** | 工具结果回 `cancelled_by_user`，**回合继续**；`bash` 的进程组会被真的杀掉；这次取消不算失败、也不推进「换策略」提示。**R10 起该键位暂不可用**：按键绑定在已删除的 `ui/reader.py` 里 |
 | 中止整个回合 | **Ctrl-C**（不变） | 保留已完成的文本与轨迹 |
 | 让 MCP 服务器的进度可见 | 服务器调 `ctx.report_progress(...)` 即可 | 不报进度的服务器什么都不会显示；`scripts/mcp_progress_server.py` 是可用样例 |
 
@@ -237,9 +222,9 @@ mcp:
 |---|---|---|
 | 让 `todo_write` 挡住「依赖没做完就开始/完成」 | 不用开：`ai.enforce_dependencies` 默认 `true` | 同时挡正向引用与自指（`add` 直接拒绝）。老清单若真有环/幽灵依赖，`update` 会返回 `blocked_by_dependencies` 并把 `open` / `unknown` / `cycle` 一起给你 |
 | 关掉依赖门禁（只给历史遗留清单） | `ai.enforce_dependencies: false` | 回到 R1 行为：只渲染、不强制 |
-| 一眼看完所有会话的 token 与命中率 | `ai-coding trace overview --workspace .` | `--since N` 只看最近 N 天（与 `prune` 同口径＝目录 mtime）；`--format json` 给机器读 |
-| 把一次会话导成一个能直接打开的页面 | `ai-coding trace export --format html --session <sid> --out t.html` | 单文件、内联 CSS、无 JS、无外链；**所有动态串都转义**（工具输出里的 `<script>` 只会显示成文本） |
-| 把轨迹喂给别的观测系统 | `ai-coding trace export --format otlp-json --session <sid>` | 零依赖：只写 OTLP/JSON 文件，**不发 HTTP**、不装 OTel SDK；`--all` 导全部会话 |
+| 一眼看完所有会话的 token 与命中率 | R10 起暂无 CLI 入口（`ai-coding trace` 已删除）；`core.aggregate.build_report(TraceStore(root), since_days=N)` 仍在库里 | `--since` 依赖「写文件会刷新目录 mtime」这一文件系统行为，`rsync` / 复制过的目录会整体漂移（与 `prune` 同病同源） |
+| 把一次会话导成一个能直接打开的页面 | `core.export_html.render_session_html([read_session_view(store, sid)])` | 单文件、内联 CSS、无 JS、无外链；**所有动态串都转义**（工具输出里的 `<script>` 只会显示成文本） |
+| 把轨迹喂给别的观测系统 | `core.export_otlp.rows_to_otlp(views)` | 零依赖：只写 OTLP/JSON 文件，**不发 HTTP**、不装 OTel SDK |
 | 连消息全文一起导出（取证用） | 加 `--full` | 默认**不含**全文；只有 `capture: full` 的轨迹才有 `turn-<n>.full.json` 可导 |
 
 两个诚实提醒：`mismatch`（`summary.turns` 与磁盘回合数对不上）**只标注不报错**，退出码仍是 0；

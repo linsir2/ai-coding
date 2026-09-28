@@ -10,6 +10,10 @@ class _FakeLoop:
     def __init__(self):
         self.tools = _FakeTools()
         self.memory_status = lambda: {"total": 42}
+        # The model name comes from the engine, not from the AIConfig slice.
+        self.engine = type("E", (), {
+            "model_config": type("MC", (), {"name": "DeepSeek-V4"})(),
+        })()
         self.settings = type("S", (), {"default_model": "DeepSeek-V4"})()
         self.workspace = "~/projects/atlas"
 

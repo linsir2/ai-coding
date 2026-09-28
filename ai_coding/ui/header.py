@@ -32,10 +32,11 @@ def render_header(loop: Any) -> list[tuple[str, str]]:
             lines.append(("class:header.label", f"  ✓ memory loaded ({total} notes)\n"))
         except Exception:
             lines.append(("class:header.label", "  ✗ memory unavailable\n"))
-    settings = getattr(loop, "settings", None)
-    if settings:
-        model = getattr(settings, "default_model", "?")
-        lines.append(("class:header.model", f"  model: {model}\n"))
+    # ``loop.settings`` is the ``AIConfig`` slice, which has no model name; the
+    # engine is what actually knows (and what ``/model`` swaps).
+    model = getattr(getattr(loop, "engine", None), "model_config", None)
+    name = getattr(model, "name", "") or getattr(loop, "model_name", "") or "?"
+    lines.append(("class:header.model", f"  model:  {name}\n"))
     workspace = getattr(loop, "workspace", "?")
     lines.append(("class:header.cwd", f"  cwd:    {workspace}\n"))
     return lines
