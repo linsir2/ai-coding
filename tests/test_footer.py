@@ -65,3 +65,26 @@ def test_timer_reset_in_submit_text():
     from ai_coding.ui.app import run_app
     source = inspect.getsource(run_app)
     assert "turn_start = time.monotonic()" in source
+
+
+def test_footer_no_http_noise():
+    """Footer should not contain HTTP request logs."""
+    import time
+
+    from ai_coding.ui.footer import render_footer
+
+    class FakeLoop:
+        class engine:
+            class model_config:
+                name = "test-model"
+        class settings:
+            max_context_tokens = 1000
+        last_outcome = None
+
+    loop = FakeLoop()
+    text = "".join(t for _, t in render_footer(loop, time.monotonic()))
+    assert "HTTP" not in text
+    assert "INFO" not in text
+    assert "model:" in text
+    assert "context" in text
+    assert "ctrl+c" in text

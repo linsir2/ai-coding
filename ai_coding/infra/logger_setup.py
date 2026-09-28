@@ -17,4 +17,6 @@ def setup_logging(level: int = logging.INFO, fmt: str = _DEFAULT_FORMAT) -> bool
     handler.setFormatter(logging.Formatter(fmt))
     root.addHandler(handler)
     root.setLevel(level)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
     return True

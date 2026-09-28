@@ -49,6 +49,7 @@ def test_ctrl_c_exits():
 def test_body_window_is_scrollable():
     """Body window should be scrollable."""
     import inspect
+
     from ai_coding.ui.app import run_app
     source = inspect.getsource(run_app)
     assert "scroll_offsets=ScrollOffsets" in source
@@ -57,6 +58,7 @@ def test_body_window_is_scrollable():
 def test_body_uses_buffer_control():
     """Body should use BufferControl, not FormattedTextControl."""
     import inspect
+
     from ai_coding.ui.app import run_app
     source = inspect.getsource(run_app)
     assert "BufferControl(buffer=body.get_buffer(), focusable=True)" in source
@@ -65,6 +67,7 @@ def test_body_uses_buffer_control():
 def test_input_provider_does_not_write_to_body():
     """Approval/ask_user prompts should not write to body."""
     import inspect
+
     from ai_coding.ui.app import run_app
     source = inspect.getsource(run_app)
     assert "awaiting_input = True" in source
