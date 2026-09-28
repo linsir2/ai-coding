@@ -110,3 +110,56 @@ async def test_query_can_be_built_from_the_tool_context(tmp_path):
 
     assert result.success is True
     assert result.data["notes"]
+
+
+# ---- R8b: filtering by where a note came from (D-4) ------------------------
+
+
+def _evidence_service(tmp_path) -> MemoryService:
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="t1", text="构建用 uv", evidence="tool"))
+    store.add_note(MemoryNote(id="m1", text="构建改用 uv，不要 poetry", evidence="model"))
+    store.add_note(MemoryNote(id="l1", text="构建用 uv，老数据", evidence=""))
+    return MemoryService(store)
+
+
+@pytest.mark.asyncio
+async def test_r8_evidence_filter_keeps_only_tool_backed(tmp_path):
+    tool = MemorySearchTool(_evidence_service(tmp_path))
+
+    result = await tool.execute({"query": "构建用什么", "evidence": "tool"})
+
+    assert result.success is True
+    assert result.data is not None
+    assert [n["id"] for n in result.data["notes"]] == ["t1"]
+    assert result.data["notes"][0]["evidence"] == "tool"
+
+
+@pytest.mark.asyncio
+async def test_r8_evidence_filter_model_means_not_tool(tmp_path):
+    """Notes from before R6d have no evidence field; they are not 'tool'."""
+    tool = MemorySearchTool(_evidence_service(tmp_path))
+
+    result = await tool.execute({"query": "构建用什么", "evidence": "model"})
+
+    assert {n["id"] for n in result.data["notes"]} == {"m1", "l1"}
+
+
+@pytest.mark.asyncio
+async def test_r8_evidence_empty_is_exactly_today(tmp_path):
+    tool = MemorySearchTool(_evidence_service(tmp_path))
+
+    result = await tool.execute({"query": "构建用什么"})
+
+    assert {n["id"] for n in result.data["notes"]} == {"t1", "m1", "l1"}
+
+
+@pytest.mark.asyncio
+async def test_r8_unknown_evidence_is_an_error_not_a_silent_pass(tmp_path):
+    tool = MemorySearchTool(_evidence_service(tmp_path))
+
+    result = await tool.execute({"query": "构建用什么", "evidence": "maybe"})
+
+    assert result.success is False
+    assert result.error == "bad_evidence"
+    assert result.data == {"evidence": "maybe"}

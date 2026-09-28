@@ -58,6 +58,14 @@ class MemorySearchTool(BaseTool):
                     "type": "string",
                     "description": "Optional filter: fact | decision | preference | open_thread.",
                 },
+                "evidence": {
+                    "type": "string",
+                    "description": (
+                        "Optional filter: 'tool' = notes recorded in a turn where a "
+                        "tool call succeeded; 'model' = everything else (including "
+                        "notes from before this was recorded)."
+                    ),
+                },
             },
             "required": ["query"],
         }
@@ -87,6 +95,20 @@ class MemorySearchTool(BaseTool):
         wanted = str(params.get("kind", "") or "").strip().casefold()
         if wanted:
             hits = [hit for hit in hits if hit.note.kind.value == wanted]
+        wanted_evidence = str(params.get("evidence", "") or "").strip().casefold()
+        if wanted_evidence and wanted_evidence not in ("tool", "model"):
+            return ToolResult(
+                success=False,
+                output="error: 'evidence' must be 'tool', 'model' or empty",
+                error="bad_evidence",
+                data={"evidence": wanted_evidence},
+            )
+        if wanted_evidence == "tool":
+            hits = [hit for hit in hits if (hit.note.evidence or "") == "tool"]
+        elif wanted_evidence == "model":
+            # "model" is the *complement* of "tool": notes written before R6d have
+            # no provenance at all and must not be hidden by this filter.
+            hits = [hit for hit in hits if (hit.note.evidence or "") != "tool"]
         notes = [
             {
                 "id": hit.note.id,
@@ -96,6 +118,7 @@ class MemorySearchTool(BaseTool):
                 "text": hit.note.text,
                 "updated_time": hit.note.updated_time or hit.note.created_time,
                 "pinned": hit.note.pinned,
+                "evidence": hit.note.evidence,
             }
             for hit in hits
         ]
