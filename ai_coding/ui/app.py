@@ -10,6 +10,7 @@ from prompt_toolkit import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, ScrollOffsets, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import D
@@ -19,6 +20,7 @@ from ai_coding.ui.footer import render_footer
 from ai_coding.ui.header import render_header
 from ai_coding.ui.observer import BodyObserver
 from ai_coding.ui.palette import CommandPalette, PaletteEntry
+from ai_coding.ui.scroll import auto_scroll_to_end, scroll_down, scroll_up
 from ai_coding.ui.theme import STYLE
 
 PALETTE_ENTRIES = [
@@ -219,17 +221,15 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     def _exit(event: Any) -> None:
         event.app.exit()
 
-    @kb.add("pageup")
-    def _scroll_up(event: Any) -> None:
-        if body_window.render_info:
-            body_window.render_info.vertical_scroll -= 5
-            event.app.invalidate()
+    @kb.add(Keys.ScrollUp)
+    def _wheel_up(event: Any) -> None:
+        scroll_up(body_window)
+        event.app.invalidate()
 
-    @kb.add("pagedown")
-    def _scroll_down(event: Any) -> None:
-        if body_window.render_info:
-            body_window.render_info.vertical_scroll += 5
-            event.app.invalidate()
+    @kb.add(Keys.ScrollDown)
+    def _wheel_down(event: Any) -> None:
+        scroll_down(body_window)
+        event.app.invalidate()
 
     root = HSplit([
         Window(
@@ -250,6 +250,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         key_bindings=kb,
         style=STYLE,
         full_screen=True,
+        mouse_support=True,
     )
 
     try:

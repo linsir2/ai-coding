@@ -47,3 +47,34 @@ def test_auto_scroll_to_end_uses_scroll_down():
     auto_scroll_to_end(win)
     win._scroll_down.assert_called_once()
     win._scroll.assert_not_called()
+
+
+def test_app_enables_mouse_support():
+    """The Application must opt into mouse reporting for wheel events."""
+    import inspect
+
+    from ai_coding.ui.app import run_app
+
+    source = inspect.getsource(run_app)
+    assert "mouse_support=True" in source
+
+
+def test_app_binds_wheel_keys():
+    """Wheel keys must be bound to the scroll helpers."""
+    import inspect
+
+    from ai_coding.ui.app import run_app
+
+    source = inspect.getsource(run_app)
+    assert "Keys.ScrollUp" in source
+    assert "Keys.ScrollDown" in source
+
+
+def test_app_no_longer_touches_private_vertical_scroll():
+    """The private field must be gone — it has no bounds clamping."""
+    import inspect
+
+    from ai_coding.ui.app import run_app
+
+    source = inspect.getsource(run_app)
+    assert "render_info.vertical_scroll" not in source
