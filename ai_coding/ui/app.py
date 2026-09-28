@@ -137,7 +137,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         wrap_lines=False,
         scroll_offsets=ScrollOffsets(top=1, bottom=1),
         allow_scroll_beyond_bottom=True,
-        get_line_prefix=lambda i: [("class:user-msg", "  ")] if i in user_lines else _md_prefix(i),
+        get_line_prefix=lambda i, wrap=0: [("class:user-msg", "  ")] if i in user_lines else _md_prefix(i),
     )
     input_window = Window(
         content=input_control,
