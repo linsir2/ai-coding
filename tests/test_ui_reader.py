@@ -118,3 +118,44 @@ async def test_the_prompt_text_tracks_the_state():
     assert reader._message() == "you> "
     await reader.aclose()
     assert scripted is not None
+
+
+# ---- R8c: Esc asks the turn to drop what it is waiting for ------------------
+
+
+@pytest.mark.asyncio
+async def test_r8_request_cancel_sets_the_event():
+    reader = InteractiveReader()
+    assert not reader.cancel_requested.is_set()
+    reader.request_cancel()
+    assert reader.cancel_requested.is_set()
+
+
+@pytest.mark.asyncio
+async def test_r8_the_escape_binding_is_registered_and_silent_until_pressed():
+    """The binding exists, and nothing cancels until a key actually arrives."""
+    from prompt_toolkit.keys import Keys
+
+    reader = InteractiveReader()
+    bindings = reader.key_bindings()
+    assert bindings.get_bindings_for_keys((Keys.Escape,))
+    assert reader.cancel_requested.is_set() is False
+
+
+@pytest.mark.asyncio
+async def test_r8_escape_reaches_the_binding_inside_a_running_prompt():
+    """The spike showed the key can be delivered without a real terminal."""
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.key_binding.key_processor import KeyPress
+    from prompt_toolkit.keys import Keys
+
+    reader = InteractiveReader()
+    session = PromptSession(key_bindings=reader.key_bindings())
+    task = asyncio.create_task(session.prompt_async("you> "))
+    await asyncio.sleep(0.2)
+    session.app.key_processor.feed(KeyPress(Keys.Escape))
+    session.app.key_processor.process_keys()
+    assert reader.cancel_requested.is_set() is True
+    task.cancel()
+    with pytest.raises((asyncio.CancelledError, EOFError)):
+        await task

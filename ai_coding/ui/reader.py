@@ -45,11 +45,16 @@ class InteractiveReader:
         invalidate: Callable[[], None] | None = None,
         steering: SteeringQueue | None = None,
         enabled: bool = True,
+        cancel_key: str = "escape",
+        cancel_requested: asyncio.Event | None = None,
     ) -> None:
         self._prompt = prompt
         self._invalidate = invalidate or (lambda: None)
         self._steering = steering
         self._enabled = bool(enabled)
+        #: R8c: the loop watches this; the Esc key sets it (D-6).
+        self.cancel_requested = cancel_requested or asyncio.Event()
+        self._cancel_key = cancel_key
         self._inputs: deque[str] = deque()
         self._waiting: asyncio.Future[str] | None = None
         self._question: str | None = None
@@ -62,24 +67,54 @@ class InteractiveReader:
 
     @classmethod
     def for_terminal(
-        cls, *, steering: SteeringQueue | None = None, enabled: bool = True
+        cls,
+        *,
+        steering: SteeringQueue | None = None,
+        enabled: bool = True,
+        cancel_key: str = "escape",
     ) -> InteractiveReader:
         """Build the real thing (imports prompt_toolkit lazily)."""
         from prompt_toolkit import PromptSession
         from prompt_toolkit.patch_stdout import patch_stdout
 
-        session: Any = PromptSession()
+        reader = cls(steering=steering, enabled=enabled, cancel_key=cancel_key)
+        # The key bindings have to exist before the session does, and they write
+        # into the reader - so the reader comes first and the session gets them.
+        session: Any = PromptSession(key_bindings=reader.key_bindings())
 
         async def prompt(message: Any) -> str:
             with patch_stdout():
                 return str(await session.prompt_async(message))
 
-        return cls(
-            prompt=prompt,
-            invalidate=session.app.invalidate,
-            steering=steering,
-            enabled=enabled,
-        )
+        reader.configure_prompt(prompt, session.app.invalidate)
+        return reader
+
+    def configure_prompt(
+        self,
+        prompt: Callable[[Any], Awaitable[str]],
+        invalidate: Callable[[], None] | None = None,
+    ) -> None:
+        """Attach the terminal channel (``for_terminal`` builds them in this order)."""
+        self._prompt = prompt
+        self._invalidate = invalidate or (lambda: None)
+
+    # ---- what the Esc key does (R8c) ---------------------------------------
+
+    def request_cancel(self) -> None:
+        """Ask the running turn to drop this batch (the Esc key calls this)."""
+        self.cancel_requested.set()
+
+    def key_bindings(self) -> Any:
+        """The terminal's extra bindings: Esc = "stop waiting for this tool"."""
+        from prompt_toolkit.key_binding import KeyBindings
+
+        bindings = KeyBindings()
+
+        @bindings.add(self._cancel_key)
+        def _cancel(event: Any) -> None:  # noqa: ARG001 - the key needs its event
+            self.request_cancel()
+
+        return bindings
 
     # ---- lifecycle ---------------------------------------------------------
 

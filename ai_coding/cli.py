@@ -373,6 +373,7 @@ def repl(
                 guards=guards,
                 hooks=hooks,
                 steering=steering,
+                cancel=reader.cancel_requested,
             )
             try:
                 await run_repl(
@@ -402,6 +403,7 @@ def _build_loop(
     guards: Any | None = None,
     hooks: Any | None = None,
     steering: Any | None = None,
+    cancel: Any | None = None,
 ) -> Any:
     """Assemble the loop and its optional components (silent degradation)."""
     if approval is None:
@@ -482,6 +484,8 @@ def _build_loop(
         guards=guards,
         hooks=hooks,
         steering=steering,
+        # R8c: the same reader that owns the terminal owns the Esc key.
+        cancel=cancel,
     )
 
 
