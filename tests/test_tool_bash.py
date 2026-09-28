@@ -81,3 +81,22 @@ async def test_bash_timeout_holds_even_when_a_child_keeps_the_pipe(tmp_path: Pat
     assert result.success is False
     assert "timeout" in result.output.lower()
     assert elapsed < 8.0, f"bash tool took {elapsed:.1f}s; the timeout is not hard"
+
+
+@pytest.mark.asyncio
+async def test_r8_bash_emits_chunks_while_running():
+    """R8c: the 2.4s of silence measured in docs/r8-analysis.md 1.4 is gone."""
+    from ai_coding.core.events import ToolChunk
+
+    seen: list[object] = []
+    tool = BashTool()
+
+    result = await tool.execute(
+        {"command": "for i in 1 2 3; do echo step-$i; sleep 0.05; done"},
+        ToolContext(emit=seen.append, call_id="c1", workspace="."),
+    )
+
+    chunks = [event for event in seen if isinstance(event, ToolChunk)]
+    assert result.success is True
+    assert "".join(chunk.text for chunk in chunks) == "step-1\nstep-2\nstep-3\n"
+    assert all(chunk.call_id == "c1" and chunk.tool_name == "bash" for chunk in chunks)

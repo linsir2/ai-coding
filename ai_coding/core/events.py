@@ -82,6 +82,26 @@ class ToolFinished:
     iteration: int = 0
 
 
+# ---- R8c: streamed tool output --------------------------------------------
+
+
+@dataclass(frozen=True)
+class ToolChunk:
+    """One streamed fragment of a running tool (R8c).
+
+    Observation only: chunks never enter a request, the history or the session
+    file - the model still only sees the final ``ToolResult``, so a 10MB command
+    cannot grow the context (docs/r8-analysis.md 6.4).  ``stream`` is "stdout",
+    "stderr" or "progress"; ``seq`` orders the fragments of one call.
+    """
+
+    call_id: str
+    tool_name: str
+    stream: str
+    text: str
+    seq: int = 0
+
+
 # ---- R4a: the observability events ----------------------------------------
 
 
@@ -252,6 +272,7 @@ LoopEvent = (
     | ToolApprovalRequested
     | ToolStarted
     | ToolFinished
+    | ToolChunk
     | ModelStepFinished
     | ContextAssembled
     | Degraded

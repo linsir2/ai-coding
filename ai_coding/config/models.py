@@ -234,6 +234,9 @@ class UIConfig(BaseModel):
 
     #: Show a steering prompt while a turn is running.  Off = today's quiet REPL.
     steering: bool = True
+    #: R8c: show a line per tool output fragment (throttled to 0.15s per call).
+    #: Off = the old "one preview when it finishes" behaviour.
+    tool_chunks: bool = True
 
 
 class AppConfig(BaseModel):

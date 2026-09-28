@@ -188,3 +188,18 @@ def test_r4_scoped_event_wraps_any_loop_event():
     assert scoped.parent == "c9"
     # it is itself a LoopEvent, so a scoped stream fans out through the same seam
     assert isinstance(scoped, ScopedEvent)
+
+
+# ---- R8c: streamed tool output is an event, never content ------------------
+
+
+def test_r8_tool_chunk_is_a_frozen_loop_event():
+    from typing import get_args
+
+    from ai_coding.core.events import LoopEvent, ToolChunk
+
+    assert ToolChunk in set(get_args(LoopEvent))
+    chunk = ToolChunk(call_id="c1", tool_name="bash", stream="stdout", text="hi\n", seq=3)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        chunk.text = "other"  # type: ignore[misc]
+    assert (chunk.call_id, chunk.stream, chunk.seq) == ("c1", "stdout", 3)

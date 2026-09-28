@@ -14,6 +14,7 @@ import pytest
 from ai_coding.ai.engine import ChatEngine
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
+from ai_coding.core.events import ToolChunk
 from ai_coding.domain.loop import StepResult, TurnStatus
 from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolResult
 from ai_coding.domain.session import SessionData
@@ -251,3 +252,50 @@ async def test_r8_the_note_never_enters_the_system_prompt():
     loop, engine = _checkpoint_loop()
     await loop.process_input(_session(), "先写一行 checkpoint")
     assert all("先补 runner 的用例" not in (item or "") for item in engine.instructions)
+
+
+class _ChunkyTool(BaseTool):
+    """Emits a chunk and returns a normal result (R8c's shape)."""
+
+    parallel_safe = True
+
+    @property
+    def name(self) -> str:
+        return "chunky"
+
+    @property
+    def description(self) -> str:
+        return "chunky"
+
+    @property
+    def params_json_schema(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, params, ctx: ToolContext | None = None) -> ToolResult:
+        if ctx is not None:
+            ctx.emit(
+                ToolChunk(
+                    call_id=ctx.call_id,
+                    tool_name="chunky",
+                    stream="stdout",
+                    text="secret-chunk\n",
+                    seq=0,
+                )
+            )
+        return ToolResult(success=True, output="final-output")
+
+
+@pytest.mark.asyncio
+async def test_r8_a_tool_chunk_never_reaches_the_request_or_the_history():
+    engine = _Engine(tool_name="chunky")
+    loop = _loop(engine, _Compacting(rewrite=False), max_tool_iterations=2)
+    loop.tools.register(_ChunkyTool())
+    session = _session()
+
+    await loop.process_input(session, "跑点东西")
+
+    request_text = "\n".join(message.content or "" for message in engine.requests[-1])
+    assert "secret-chunk" not in request_text
+    assert all("secret-chunk" not in (message.content or "") for message in session.messages)
+    # the final ToolResult is what the model gets, and it does land in the history
+    assert any("final-output" in (message.content or "") for message in session.messages)

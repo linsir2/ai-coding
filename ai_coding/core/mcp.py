@@ -27,16 +27,18 @@ server's session from connect to close.**
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 from ai_coding.config.models import MCPConfig, MCPServerConfig
+from ai_coding.core.events import ToolChunk
 from ai_coding.core.turn_report import report_degraded
 from ai_coding.domain.message import ToolResult
 from ai_coding.infra.deadline import DeadlineExpired, run_with_deadline
-from ai_coding.tools.base import BaseTool, ToolContext
+from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 SessionFactory = Callable[[MCPServerConfig], Any]
 
@@ -187,8 +189,29 @@ class MCPToolAdapter(BaseTool):
         ctx: ToolContext | None = None,
     ) -> ToolResult:
         tool_name = str(getattr(self._tool, "name", ""))
+        # R8c-S3: a server that reports progress gets shown like a local tool's
+        # stdout.  Servers that never call report_progress simply emit nothing.
+        live = resolve_ctx(ctx)
+        steps = itertools.count()
+
+        def _progress(
+            progress: float, total: float | None = None, message: str | None = None
+        ) -> None:
+            body = message or (f"{progress}/{total}" if total else str(progress))
+            live.emit(
+                ToolChunk(
+                    call_id=live.call_id,
+                    tool_name=self.name,
+                    stream="progress",
+                    text=str(body),
+                    seq=next(steps),
+                )
+            )
+
         try:
-            result = await self._session.call_tool(tool_name, params)
+            result = await self._session.call_tool(
+                tool_name, params, progress_callback=_progress
+            )
         except Exception as exc:  # noqa: BLE001 — tool boundary
             return ToolResult(
                 success=False,

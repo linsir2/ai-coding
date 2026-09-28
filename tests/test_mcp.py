@@ -32,10 +32,13 @@ class _Session:
     async def list_tools(self):
         return SimpleNamespace(tools=self._tools)
 
-    async def call_tool(self, name, arguments=None):
+    async def call_tool(self, name, arguments=None, progress_callback=None):
         self.calls.append((name, arguments))
         if self._raise is not None:
             raise self._raise
+        if progress_callback is not None:
+            for step in range(1, 4):
+                progress_callback(step, 3, f"step {step}")
         return self._call_result
 
 
@@ -436,3 +439,24 @@ def test_the_connection_timeout_default_gives_npx_room_to_start():
     from ai_coding.config.models import MCPConfig
 
     assert MCPConfig().connection_timeout == 60
+
+
+@pytest.mark.asyncio
+async def test_r8_mcp_progress_becomes_a_tool_chunk():
+    """R8c-S3: the adapter turns report_progress into the same ToolChunk stream."""
+    from ai_coding.core.events import ToolChunk
+    from ai_coding.tools.base import ToolContext
+
+    session = _Session(call_result=_result(texts=["done"]))
+    adapter = MCPToolAdapter(server="fs", tool=_tool(), session=session)
+    seen: list[object] = []
+
+    result = await adapter.execute(
+        {"path": "a.txt"}, ToolContext(emit=seen.append, call_id="c7")
+    )
+
+    chunks = [event for event in seen if isinstance(event, ToolChunk)]
+    assert result.success is True
+    assert [chunk.stream for chunk in chunks] == ["progress", "progress", "progress"]
+    assert [chunk.text for chunk in chunks] == ["step 1", "step 2", "step 3"]
+    assert all(chunk.call_id == "c7" and chunk.tool_name == "fs__read_file" for chunk in chunks)

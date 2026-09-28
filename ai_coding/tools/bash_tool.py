@@ -10,9 +10,11 @@ a sub-agent's shell writes into the parent's tree.
 
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 from typing import Any
 
+from ai_coding.core.events import ToolChunk
 from ai_coding.domain.message import ToolResult
 from ai_coding.infra.subprocess_runner import run_process_async
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
@@ -73,12 +75,29 @@ class BashTool(BaseTool):
         if not command.strip():
             return ToolResult(success=False, output="error: empty command")
 
+        # R8c: stream what the command says while it says it.  Chunks are
+        # observation only - the ToolResult below is what the model ever sees.
+        counter = itertools.count()
+        live = resolve_ctx(ctx)
+
+        def _chunk(stream: str, text: str) -> None:
+            live.emit(
+                ToolChunk(
+                    call_id=live.call_id,
+                    tool_name="bash",
+                    stream=stream,
+                    text=text,
+                    seq=next(counter),
+                )
+            )
+
         outcome = await run_process_async(
             command,
             shell=True,
             cwd=self._workspace_dir(ctx),
             timeout=self._timeout,
             max_output_chars=self._max_output,
+            on_chunk=_chunk,
         )
 
         if outcome.error is not None:
