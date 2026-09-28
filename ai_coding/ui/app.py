@@ -194,7 +194,8 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
                 asyncio.create_task(_submit_text(text))
 
     async def _run_command(name: str) -> None:
-        nonlocal session
+        nonlocal session, turn_start
+        turn_start = time.monotonic()
         from ai_coding.ui.console import DialogueConsole
         from ai_coding.ui.repl import handle_input
 
@@ -206,6 +207,8 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
             session = new_session
 
     async def _submit_text(text: str) -> None:
+        nonlocal turn_start
+        turn_start = time.monotonic()
         await loop.process_input(session, text, on_delta=body.write)
 
     @kb.add("c-c")
