@@ -16,12 +16,22 @@ from ai_coding.ui.slash import parse_slash
 
 HELP_TEXT = (
     "direct commands:\n"
-    "  /help, /h    show this help\n"
-    "  /status      show session info\n"
-    "  /trace       show what the last turn cost and what degraded (R4a)\n"
-    "  /budget      show this session's recorded token totals (R4a)\n"
-    "  /clear       start a fresh session\n"
-    "  /quit, /q    exit the REPL"
+    "  /help, /h       show this help\n"
+    "  /status         show session info\n"
+    "  /model [name]   list or switch models\n"
+    "  /resume [id]    list or resume saved sessions\n"
+    "  /permissions   view or change approval policy\n"
+    "  /todo           show current task list\n"
+    "  /skills         list available skills\n"
+    "  /plan           generate implementation plan\n"
+    "  /review        review current changes\n"
+    "  /config         show effective configuration\n"
+    "  /compact        compact conversation history\n"
+    "  /memory         show memory status\n"
+    "  /trace          show last turn trace\n"
+    "  /budget         show session token totals\n"
+    "  /clear          start a fresh session\n"
+    "  /quit, /q       exit"
 )
 
 

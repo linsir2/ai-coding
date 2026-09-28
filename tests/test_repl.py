@@ -252,3 +252,14 @@ async def test_handle_config_shows_settings():
     out = _session_text(c)
     assert "gpt-4" in out
     assert "48000" in out
+
+
+async def test_help_includes_new_commands():
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    action, _ = await handle_input(loop, "/help", sessions.items[0], sessions, dc)
+    assert action is REPLAction.CONTINUE
+    out = _session_text(c)
+    for cmd in ("/model", "/resume", "/permissions", "/todo", "/skills", "/plan", "/review", "/config"):
+        assert cmd in out
