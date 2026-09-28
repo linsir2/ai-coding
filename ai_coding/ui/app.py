@@ -8,8 +8,9 @@ from typing import Any
 
 from prompt_toolkit import Application
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, Window
+from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import D
 
@@ -120,7 +121,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     palette_window = Window(
         content=palette_control,
         width=D(preferred=PALETTE_WIDTH),
-        height=D(preferred=PALETTE_HEIGHT),
+        height=D(preferred=PALETTE_HEIGHT) if palette.is_open else D(preferred=0),
         wrap_lines=False,
     )
 
@@ -135,11 +136,10 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
             palette.open()
             event.app.invalidate()
 
-    @kb.add("backspace")
+    @kb.add("backspace", filter=Condition(lambda: palette.is_open))
     def _backspace_palette(event: Any) -> None:
-        if palette.is_open:
-            palette.close()
-            event.app.invalidate()
+        palette.close()
+        event.app.invalidate()
 
     @kb.add("escape")
     def _close_palette(event: Any) -> None:
@@ -191,26 +191,17 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     def _exit(event: Any) -> None:
         event.app.exit()
 
-    root = FloatContainer(
-        content=HSplit([
-            Window(
-                content=header_control,
-                height=D(preferred=HEADER_HEIGHT),
-                style="class:header",
-            ),
-            body_window,
-            input_window,
-            Window(content=footer_control, height=1, style="class:footer"),
-        ]),
-        floats=[
-            Float(
-                content=palette_window,
-                top=HEADER_HEIGHT + 1,
-                left=2,
-                transparent=True,
-            ),
-        ],
-    )
+    root = HSplit([
+        Window(
+            content=header_control,
+            height=D(preferred=HEADER_HEIGHT),
+            style="class:header",
+        ),
+        body_window,
+        palette_window,
+        input_window,
+        Window(content=footer_control, height=1, style="class:footer"),
+    ])
 
     app = Application(
         layout=Layout(root),

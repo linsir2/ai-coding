@@ -18,7 +18,8 @@ htmlcov/
 
 # Runtime state
 sessions/
-.memory/
+*.memory/
+.memory
 transcripts/
 worktrees/
 # R4a: traces and the hook plugin directory are per-workspace runtime state
