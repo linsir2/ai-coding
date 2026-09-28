@@ -1,11 +1,12 @@
-"""深色主题配色。"""
+"""Dark theme colors inspired by Claude Code."""
 
 from prompt_toolkit.styles import Style
 
 STYLE = Style.from_dict({
     "header": "#00d2d3",
-    "header.status": "#2ed573",
-    "header.label": "#a4b0be",
+    "header.border": "#00d2d3",
+    "header.text": "#dfe4ea",
+    "header.label": "#2ed573",
     "header.model": "#ffa502",
     "header.cwd": "#a4b0be",
     "body": "#dfe4ea",
@@ -17,5 +18,6 @@ STYLE = Style.from_dict({
     "palette.selected.text": "#1e272e",
     "palette.item": "#dfe4ea",
     "palette.hint": "#a4b0be",
-    "ascii": "#00d2d3",
+    "input": "#dfe4ea",
+    "input.prefix": "#00d2d3",
 })
