@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from ai_coding.domain.message import ChatMessage
-from ai_coding.memory.note import NoteKind, new_note
+from ai_coding.memory.note import MemoryNote, NoteKind, new_note
 from ai_coding.memory.schema import HarvestCandidate
 from ai_coding.memory.service import MemoryService
 from ai_coding.memory.store import MemoryStore
@@ -405,3 +405,36 @@ async def test_deprecated_dream_keeps_m3_semantics(tmp_path):
 
 def _stamp(days_ago: float) -> str:
     return (NOW - timedelta(days=days_ago)).isoformat().replace("+00:00", "Z")
+
+
+# ---- R8b: the merge decision stays exactly as it is (D-13) ----------------
+
+
+def test_r8_merging_ignores_evidence(tmp_path):
+    """`_better_of` keeps deciding on (importance, hits, created_time)."""
+    from ai_coding.memory.service import _better_of
+
+    older_tool = MemoryNote(
+        id="old",
+        text="构建用 uv",
+        evidence="tool",
+        created_time="2026-01-01T00:00:00+00:00",
+    )
+    newer_stated = MemoryNote(
+        id="new",
+        text="构建用 uv",
+        evidence="",
+        created_time="2026-02-01T00:00:00+00:00",
+    )
+    keep, drop = _better_of(older_tool, newer_stated)
+    assert (keep.id, drop.id) == ("new", "old")  # recency wins, not evidence
+
+    hit_heavy = MemoryNote(
+        id="hit",
+        text="构建用 uv",
+        hits=5,
+        evidence="",
+        created_time="2026-01-01T00:00:00+00:00",
+    )
+    keep, drop = _better_of(older_tool, hit_heavy)
+    assert (keep.id, drop.id) == ("hit", "old")  # hits outrank evidence
