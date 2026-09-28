@@ -8,9 +8,6 @@ from typing import Any
 
 import typer
 
-from ai_coding.ai.factory import build_engine_from_config
-from ai_coding.config.loader import ConfigLoader, ConfigManager
-from ai_coding.core.mcp import MCPManager
 from ai_coding.infra.logger_setup import setup_logging
 
 app = typer.Typer(
@@ -38,9 +35,15 @@ def main(
         is_eager=True,
         help="Show version and exit.",
     ),
-    path: str | None = typer.Option(None, "--path", "-p", help="Path to a YAML config file."),
-    workspace: str = typer.Option(".", "--workspace", "-w", help="Workspace directory for file tools."),
-    skills: str | None = typer.Option(None, "--skills", help="Path to skills directory (enables skill tool)."),
+    path: str | None = typer.Option(
+        None, "--path", "-p", help="Path to a YAML config file."
+    ),
+    workspace: str = typer.Option(
+        ".", "--workspace", "-w", help="Workspace directory for file tools."
+    ),
+    skills: str | None = typer.Option(
+        None, "--skills", help="Path to skills directory (enables skill tool)."
+    ),
 ) -> None:
     """ai-coding : an AI coding assistant."""
     setup_logging()

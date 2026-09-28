@@ -28,7 +28,8 @@ def render_header(loop: Any) -> list[tuple[str, str]]:
     if callable(memory_status):
         try:
             stats = memory_status()
-            lines.append(("class:header.label", f"  ✓ memory loaded ({stats.get('total', 0)} notes)\n"))
+            total = stats.get("total", 0)
+            lines.append(("class:header.label", f"  ✓ memory loaded ({total} notes)\n"))
         except Exception:
             lines.append(("class:header.label", "  ✗ memory unavailable\n"))
     settings = getattr(loop, "settings", None)

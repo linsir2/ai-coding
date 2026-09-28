@@ -5,6 +5,8 @@ logic (plain text → run the loop, slash → react) without touching the networ
 Rich console output is captured via ``record=True``.
 """
 
+from typing import Any
+
 import pytest
 from rich.console import Console
 
@@ -125,9 +127,20 @@ async def test_handle_status_prints_session_info():
     assert "1" in out  # one message reported by /status
 
 
+def _model_settings() -> Any:
+    return type(
+        "S",
+        (),
+        {
+            "models": {"gpt-4": "GPT-4", "claude": "Claude"},
+            "default_model": "gpt-4",
+        },
+    )()
+
+
 async def test_handle_model_lists_models():
     loop = _FakeLoop()
-    loop.settings = type("S", (), {"models": {"gpt-4": "GPT-4", "claude": "Claude"}, "default_model": "gpt-4"})()
+    loop.settings = _model_settings()
     sessions = _FakeSessions()
     dc, c = _console_capture()
     action, _ = await handle_input(loop, "/model", sessions.items[0], sessions, dc)
@@ -138,7 +151,7 @@ async def test_handle_model_lists_models():
 
 async def test_handle_model_switches():
     loop = _FakeLoop()
-    loop.settings = type("S", (), {"models": {"gpt-4": "GPT-4", "claude": "Claude"}, "default_model": "gpt-4"})()
+    loop.settings = _model_settings()
     loop.set_model = lambda name: None
     sessions = _FakeSessions()
     dc, c = _console_capture()
@@ -169,8 +182,9 @@ async def test_handle_resume_loads_session():
 
 
 async def test_handle_permissions_shows_current():
+    approval = type("A", (), {"__repr__": lambda s: "CLIApprovalCallback"})()
     loop = _FakeLoop()
-    loop.dispatcher = type("D", (), {"approval": type("A", (), {"__repr__": lambda s: "CLIApprovalCallback"})()})()
+    loop.dispatcher = type("D", (), {"approval": approval})()
     sessions = _FakeSessions()
     dc, c = _console_capture()
     action, _ = await handle_input(loop, "/permissions", sessions.items[0], sessions, dc)
@@ -261,5 +275,9 @@ async def test_help_includes_new_commands():
     action, _ = await handle_input(loop, "/help", sessions.items[0], sessions, dc)
     assert action is REPLAction.CONTINUE
     out = _session_text(c)
-    for cmd in ("/model", "/resume", "/permissions", "/todo", "/skills", "/plan", "/review", "/config"):
+    expected = (
+        "/model", "/resume", "/permissions", "/todo",
+        "/skills", "/plan", "/review", "/config",
+    )
+    for cmd in expected:
         assert cmd in out

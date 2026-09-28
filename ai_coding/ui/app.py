@@ -38,7 +38,13 @@ PALETTE_ENTRIES = [
 
 async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     """组装并运行全屏 TUI。"""
-    from ai_coding.cli import _build_loop, _build_tool_registry, _compose_observer, _make_guards, _make_hooks, _make_recorder
+    from ai_coding.cli import (
+        _build_loop,
+        _build_tool_registry,
+        _make_guards,
+        _make_hooks,
+        _make_recorder,
+    )
     from ai_coding.config.loader import ConfigManager
     from ai_coding.core.mcp import MCPManager
     from ai_coding.core.steering import SteeringQueue
@@ -50,11 +56,14 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     app_cfg = manager.app
 
     from ai_coding.ai.factory import build_engine_from_config
+    from ai_coding.ai.prompt import BASE_INSTRUCTIONS
+
     engine = build_engine_from_config(app_cfg)
     user_prompt = CLIUserPromptCallback()
-
-    from ai_coding.ai.prompt import BASE_INSTRUCTIONS
-    registry = _build_tool_registry(app_cfg, workspace, skills, user_prompt=user_prompt, base_instructions=BASE_INSTRUCTIONS)
+    registry = _build_tool_registry(
+        app_cfg, workspace, skills,
+        user_prompt=user_prompt, base_instructions=BASE_INSTRUCTIONS,
+    )
 
     steering = SteeringQueue()
     sessions = SessionService()
@@ -74,6 +83,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         steering=steering,
     )
 
+
     body = BodyBuffer()
     palette = CommandPalette(PALETTE_ENTRIES)
     session = sessions.create()
@@ -83,7 +93,9 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     body.write("  Describe a task, or use / for commands.\n\n")
 
     header_control = FormattedTextControl(lambda: render_header(loop))
-    footer_control = FormattedTextControl(lambda: render_footer(loop, turn_start))
+    footer_control = FormattedTextControl(
+        lambda: render_footer(loop, turn_start)
+    )
     body_control = BufferControl(buffer=Buffer())
     palette_control = FormattedTextControl(
         lambda: palette.render() if palette.is_open else []
@@ -128,10 +140,13 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
 
     async def _run_command(name: str) -> None:
         nonlocal session
-        from ai_coding.ui.repl import handle_input
         from ai_coding.ui.console import DialogueConsole
+        from ai_coding.ui.repl import handle_input
+
         console = DialogueConsole()
-        action, new_session = await handle_input(loop, f"/{name}", session, sessions, console)
+        action, new_session = await handle_input(
+            loop, f"/{name}", session, sessions, console
+        )
         if action.name == "new_session":
             session = new_session
 
@@ -147,14 +162,19 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
 
     root = FloatContainer(
         content=HSplit([
-            Window(content=header_control, height=D(preferred=12), style="class:header"),
+            Window(
+                content=header_control,
+                height=D(preferred=12),
+                style="class:header",
+            ),
             Window(content=body_control, wrap_lines=False),
             Window(content=footer_control, height=1, style="class:footer"),
         ]),
         floats=[
             Float(
                 content=palette_window,
-                top=4, left=10,
+                top=4,
+                left=10,
                 transparent=True,
             ),
         ],
@@ -166,6 +186,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         style=STYLE,
         full_screen=True,
     )
+
 
     try:
         await app.run_async()
