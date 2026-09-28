@@ -102,7 +102,35 @@ async def handle_input(
         return REPLAction.CONTINUE, session
     if cmd.name == "model":
         return _handle_model(loop, cmd.raw, session, console)
+    if cmd.name == "resume":
+        return _handle_resume(loop, cmd.raw, session, sessions, console)
     return REPLAction.CONTINUE, session
+
+
+def _handle_resume(
+    loop: Any, raw: str, session: Any, sessions: Any, console: DialogueConsole
+) -> tuple[REPLAction, Any]:
+    parts = raw.split()
+    if len(parts) == 1:
+        items = sessions.list_sessions()
+        if not items:
+            console.info("[resume] no saved sessions")
+            return REPLAction.CONTINUE, session
+        lines = ["[resume] saved sessions:"]
+        for s in items:
+            sid = getattr(s, "session_id", "?")
+            title = getattr(s, "title", "")
+            n = len(getattr(s, "messages", []))
+            lines.append(f"  {sid[:12]}  msgs={n}  {title}")
+        console.info("\n".join(lines))
+        return REPLAction.CONTINUE, session
+    target_id = parts[1]
+    loaded = sessions.load(target_id)
+    if loaded is None:
+        console.error(f"[resume] session '{target_id}' not found")
+        return REPLAction.CONTINUE, session
+    console.info(f"[resume] loaded session {loaded.session_id[:12]}")
+    return REPLAction.NEW_SESSION, loaded
 
 
 def _handle_model(loop: Any, raw: str, session: Any, console: DialogueConsole) -> tuple[REPLAction, Any]:

@@ -44,6 +44,9 @@ class _FakeSessions:
     def load(self, session_id):
         return next((s for s in self.items if s.session_id == session_id), None)
 
+    def list_sessions(self):
+        return list(self.items)
+
 
 def _console_capture() -> tuple[DialogueConsole, Console]:
     c = Console(record=True, width=80)
@@ -143,3 +146,23 @@ async def test_handle_model_switches():
     assert action is REPLAction.CONTINUE
     out = _session_text(c)
     assert "claude" in out
+
+
+async def test_handle_resume_lists_sessions():
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    action, _ = await handle_input(loop, "/resume", sessions.items[0], sessions, dc)
+    assert action is REPLAction.CONTINUE
+    out = _session_text(c)
+    assert "s1" in out or "s2" in out
+
+
+async def test_handle_resume_loads_session():
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    target = sessions.items[0]
+    dc, c = _console_capture()
+    action, session = await handle_input(loop, "/resume s1", sessions.items[1], sessions, dc)
+    assert action is REPLAction.NEW_SESSION
+    assert session is target
