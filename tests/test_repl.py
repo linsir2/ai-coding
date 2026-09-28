@@ -177,3 +177,30 @@ async def test_handle_permissions_shows_current():
     assert action is REPLAction.CONTINUE
     out = _session_text(c)
     assert "CLIApprovalCallback" in out or "approval" in out.lower()
+
+
+async def test_handle_todo_renders_task_state():
+    from ai_coding.domain.task import TaskState, TodoItem
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    session = sessions.items[0]
+    task = TaskState(goal="Build feature X")
+    task.add(TodoItem(id="1", content="Write tests", status="pending"))
+    task.add(TodoItem(id="2", content="Implement feature", status="in_progress"))
+    session.task = task
+    dc, c = _console_capture()
+    action, _ = await handle_input(loop, "/todo", session, sessions, dc)
+    assert action is REPLAction.CONTINUE
+    out = _session_text(c)
+    assert "Build feature X" in out
+    assert "Write tests" in out
+
+
+async def test_handle_todo_no_task():
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    action, _ = await handle_input(loop, "/todo", sessions.items[0], sessions, dc)
+    assert action is REPLAction.CONTINUE
+    out = _session_text(c)
+    assert "no task" in out.lower() or "empty" in out.lower() or "0" in out

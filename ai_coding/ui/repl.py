@@ -106,6 +106,13 @@ async def handle_input(
         return _handle_resume(loop, cmd.raw, session, sessions, console)
     if cmd.name == "permissions":
         return _handle_permissions(loop, cmd.raw, session, console)
+    if cmd.name == "todo":
+        task = getattr(session, "task", None)
+        if task is None:
+            console.info("[todo] no task list for this session")
+        else:
+            console.info(task.render())
+        return REPLAction.CONTINUE, session
     return REPLAction.CONTINUE, session
 
 
