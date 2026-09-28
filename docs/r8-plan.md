@@ -1693,3 +1693,30 @@ git commit -m "R8: the acceptance script, and the docs the round changed"
 
 按用户指令走 **Inline Execution**（「不准派子任务，自己实现，或者就用主模型」）：本会话按
 Task 1 → 14 顺序执行，每 Task 跑门禁并单独提交；任何需要改动既有测试断言的时刻先停下来核对原因。
+
+---
+
+## Spike 结论（Task 8 实跑，2026-09-28）
+
+三个问题都是**真跑出来的**，不是推断：
+
+**① Esc 键绑定：go，而且比预想的更好。**
+`prompt_toolkit` 的 `KeyBindings.add("escape")` 正常；`KeyBindings.get_bindings_for_keys((Keys.Escape,))`
+存在，可以拿来做单元级断言。更重要的是：把 `KeyPress(Keys.Escape)` 喂进 `session.app.key_processor`
+**可以在一个正在运行的 `prompt_async(...)` 里触发处理器**（实测 `handler fired: True`）——也就是说
+Task 13 不必只依赖真终端：可以有一条**非门控**的测试，真正把 Esc 送到 reader 的按键处理器上。
+
+**② `killpg`：go，但判据有一个坑。**
+`os.killpg(pgid, SIGKILL)` 对 `start_new_session=True` 起出来的进程组有效，孙进程一起死
+（`sleep 30 & sleep 30` 实测 `DEAD`）。坑在于：**必须先把子进程 reap 掉再判断**——没有 `p.wait()` 时，
+被杀的子进程还是僵尸，`os.killpg(pgid, 0)` 仍然成功，于是看起来「还活着」。所以 Task 12 的判据用例
+写成「`run_process` 返回之后（它内部已经 `proc.wait()`）再 `killpg(pid, 0)` 抛 `ProcessLookupError`」。
+
+**③ 排空与 `patch_stdout`：沿用 R7e 的既有结论。**
+`patch_stdout` 的用法在 `ui/reader.py::for_terminal` 里已经上线（R7e-2），本机 `AI_CODING_PTY=1` 跑
+`tests/test_repl_ask_user_pty.py tests/test_ui_reader.py` = **7 passed**，说明真终端路径在这个环境里是
+可测的。另外实测：一个**阻塞在 `communicate()` 里的线程**，在 `killpg` 之后会立刻返回并带回已经读到的
+部分输出（`b'first'`）——这正是 Task 9「杀完再排空」的设计依据。
+
+**结论**：Esc 交付（含非门控的按键测试），取消路径按 D-10 真的杀进程组，两条门控用例
+（真 pty、真 stdio）也保留。
