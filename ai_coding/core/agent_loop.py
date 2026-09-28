@@ -228,6 +228,20 @@ class AgentLoop:
             emit=self._emit,
         )
 
+    def set_model(self, name: str) -> None:
+        """Switch to a different model.
+
+        Args:
+            name: The model name from settings.models
+
+        Raises:
+            ValueError: If the model name is not in settings.models
+        """
+        models = getattr(self.settings, "models", {})
+        if name not in models:
+            raise ValueError(f"Unknown model: {name}")
+        self.engine.model_config = models[name]
+
     # ---- the turn ---------------------------------------------------------
 
     async def process_input(
