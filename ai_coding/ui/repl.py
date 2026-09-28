@@ -100,6 +100,33 @@ async def handle_input(
     if cmd.name == "budget":
         console.info(_budget_report(loop, session))
         return REPLAction.CONTINUE, session
+    if cmd.name == "model":
+        return _handle_model(loop, cmd.raw, session, console)
+    return REPLAction.CONTINUE, session
+
+
+def _handle_model(loop: Any, raw: str, session: Any, console: DialogueConsole) -> tuple[REPLAction, Any]:
+    settings = getattr(loop, "settings", None)
+    models = getattr(settings, "models", {}) if settings else {}
+    default_model = getattr(settings, "default_model", "") if settings else ""
+    parts = raw.split()
+    if len(parts) == 1:
+        lines = [f"[model] current: {default_model or '(none)'}"]
+        for name in models:
+            marker = " *" if name == default_model else ""
+            lines.append(f"  {name}{marker}")
+        console.info("\n".join(lines))
+        return REPLAction.CONTINUE, session
+    target = parts[1]
+    if target not in models:
+        console.error(f"[model] unknown model '{target}'. Available: {', '.join(models)}")
+        return REPLAction.CONTINUE, session
+    set_model = getattr(loop, "set_model", None)
+    if callable(set_model):
+        set_model(target)
+        console.info(f"[model] switched to {target}")
+    else:
+        console.error("[model] model switching not supported by this loop")
     return REPLAction.CONTINUE, session
 
 

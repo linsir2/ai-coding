@@ -120,3 +120,26 @@ async def test_handle_status_prints_session_info():
     assert loop.calls == []
     out = _session_text(c)
     assert "1" in out  # one message reported by /status
+
+
+async def test_handle_model_lists_models():
+    loop = _FakeLoop()
+    loop.settings = type("S", (), {"models": {"gpt-4": "GPT-4", "claude": "Claude"}, "default_model": "gpt-4"})()
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    action, _ = await handle_input(loop, "/model", sessions.items[0], sessions, dc)
+    assert action is REPLAction.CONTINUE
+    out = _session_text(c)
+    assert "gpt-4" in out and "claude" in out
+
+
+async def test_handle_model_switches():
+    loop = _FakeLoop()
+    loop.settings = type("S", (), {"models": {"gpt-4": "GPT-4", "claude": "Claude"}, "default_model": "gpt-4"})()
+    loop.set_model = lambda name: None
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    action, _ = await handle_input(loop, "/model claude", sessions.items[0], sessions, dc)
+    assert action is REPLAction.CONTINUE
+    out = _session_text(c)
+    assert "claude" in out
