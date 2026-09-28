@@ -141,3 +141,42 @@ def test_limit_is_respected():
 def test_empty_query_recalls_nothing():
     notes = [_note("n1", "项目用 uv 管理依赖")]
     assert rank_notes(notes, "", params=RecallParams(), now=NOW) == []
+
+
+# ---- R8b: evidence is a tie-breaker, nothing more (docs/r8-analysis.md 3.2) ----
+
+
+def _ev_note(note_id: str, evidence: str) -> MemoryNote:
+    return _note(note_id, "构建用 uv", evidence=evidence)
+
+
+def test_r8_evidence_breaks_a_tie_between_identical_notes():
+    """Same text, same metadata: the only difference is where it came from."""
+    notes = [_ev_note("a", "model"), _ev_note("b", "tool")]
+    ranked = rank_notes(notes, "构建用什么工具", params=RecallParams(), now=NOW)
+    assert [r.note.id for r in ranked] == ["b", "a"]
+
+
+def test_r8_evidence_never_beats_a_higher_score():
+    notes = [
+        _note("strong", "构建用 uv，不要用 poetry", importance=5, evidence="model"),
+        _note("weak", "构建用 uv", importance=1, evidence="tool"),
+    ]
+    ranked = rank_notes(notes, "构建用什么工具", params=RecallParams(), now=NOW)
+    assert ranked[0].note.id == "strong"
+    assert ranked[0].score > ranked[-1].score
+
+
+def test_r8_blank_evidence_ranks_like_model_not_worse():
+    """Rows from before R6d recorded evidence must not be punished."""
+    notes = [_ev_note("legacy", ""), _ev_note("stated", "model"), _ev_note("done", "tool")]
+    ranked = rank_notes(notes, "构建用什么工具", params=RecallParams(), now=NOW)
+    assert ranked[0].note.id == "done"
+    assert [r.note.id for r in ranked[1:]] == ["legacy", "stated"]
+
+
+def test_r8_a_lower_score_is_never_reordered_by_evidence():
+    strong = _note("strong", "构建用 uv，不要用 poetry", importance=5, evidence="model")
+    weak = _note("weak", "构建用 uv", importance=1, evidence="tool")
+    ranked = rank_notes([weak, strong], "构建用什么工具", params=RecallParams(), now=NOW)
+    assert [r.note.id for r in ranked] == ["strong", "weak"]

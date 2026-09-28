@@ -43,6 +43,7 @@ __all__ = [
     "RecallScorer",
     "ScoredNote",
     "coverage",
+    "evidence_rank",
     "parse_time",
     "rank_notes",
     "recency",
@@ -54,6 +55,11 @@ DEFAULT_KIND_BOOSTS: Mapping[str, float] = {
     "preference": 0.15,
     "open_thread": 0.10,
 }
+
+#: Where a note came from, as a tie-breaker only (R8b, D-3).  `""` is data
+#: harvested before R6d recorded provenance, so it ranks with "model" - the
+#: tie-break must never punish an old row for missing a field that did not exist.
+_EVIDENCE_RANK: Mapping[str, int] = {"tool": 0, "model": 1, "": 1}
 
 
 @dataclass(frozen=True)
@@ -165,6 +171,16 @@ def _stats(notes: Sequence[MemoryNote]) -> _Stats:
     return _Stats(df=df, n_docs=len(notes))
 
 
+def evidence_rank(note: MemoryNote) -> int:
+    """0 for a tool-backed note, 1 for everything else (R8b, D-3).
+
+    It is a *tie-breaker*, not a weight: it is only consulted after the score and
+    the relevance are equal, so it can never lift a weaker note over a stronger
+    one (docs/r8-analysis.md 3.2).
+    """
+    return _EVIDENCE_RANK.get(str(getattr(note, "evidence", "") or ""), 1)
+
+
 def score_note(
     note: MemoryNote,
     query_tokens: Sequence[str],
@@ -220,7 +236,14 @@ def rank_notes(
         if score < resolved.threshold:
             continue
         scored.append(ScoredNote(note=note, score=score, relevance=relevance))
-    scored.sort(key=lambda item: (-item.score, -item.relevance, item.note.id))
+    scored.sort(
+        key=lambda item: (
+            -item.score,
+            -item.relevance,
+            evidence_rank(item.note),
+            item.note.id,
+        )
+    )
     if limit is not None and limit >= 0:
         return scored[:limit]
     return scored
