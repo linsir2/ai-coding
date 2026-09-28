@@ -1,4 +1,12 @@
+from prompt_toolkit.buffer import Buffer
+
 from ai_coding.ui.body import BodyBuffer
+
+
+def test_body_buffer_has_real_buffer():
+    body = BodyBuffer()
+    buf = body.get_buffer()
+    assert isinstance(buf, Buffer)
 
 
 def test_body_write_text():
