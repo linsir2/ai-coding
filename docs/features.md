@@ -5,16 +5,59 @@ ai-coding 以「**自持 ReAct 循环** + 工具调用」为核心模型：用�
 必要时通过 `ToolDispatcher` 执行工具并把结构化结果回喂，直到满足停止条件。
 整个循环、分发与权限都在本项目内，不依赖任何 agent 框架。下面按能力域展开。
 
-## CLI 入口
+## 入口
 
-入口为 Typer 应用 `ai_coding.cli:app`，三种调用方式等价：`ai-coding ...`、`python -m ai_coding ...`、`python ai_coding/cli.py ...`。
+入口为 Typer 应用 `ai_coding.cli:app`。**R10 之后只有一种调用方式**：`ai-coding`（等价
+`python -m ai_coding`）直接启动全屏 TUI。`--version/-V` 打印版本；`--path/-p` 指定配置；
+`--workspace/-w` 指定工作区；`--skills` 挂载技能目录。
 
-| 命令 | 作用 | 关键参数 |
+R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子命令，现已全部删除：
+前四个的职责收进 TUI 的 slash 命令（见下节），`repl` 本身就是默认行为。
+
+## 全屏 TUI
+
+界面由 `prompt_toolkit.Application` 全屏渲染，取代原先的「逐行 `console.print()` + 单行提示符」模型。
+布局是 `FloatContainer(HSplit(header, body, footer))`，命令面板是浮在上面的 `Float` 覆盖层。
+
+| 区域 | 组件 | 内容 |
 |---|---|---|
-| `--version` / `-V` | 打印版本号 | — |
-| `config-check` | 加载配置并打印生效值（模型清单、工具开关、上下文预算） | `--path/-p` |
-| `ask` | 执行单回合（带工具），一次 Prompt 拿到最终回答 | `--prompt`、`--session/-s`、`--path`、`--workspace/-w`、`--skills` |
-| `repl` | 进入交互式 REPL | `--path`、`--workspace`、`--skills` |
+| 顶部 | `ui/header.py` | ASCII art 标题、`✓ workspace indexed` / `✓ N tools connected` / `✓ memory loaded (N notes)`、当前 model、cwd |
+| 中部 | `ui/body.py` | 可滚动输出区（`BodyBuffer`），欢迎语与后续所有输出 |
+| 底部 | `ui/footer.py` | `N% context · MM:SS`（`last_outcome.usage` / `settings.max_context_tokens` / 回合墙钟） |
+| 覆盖层 | `ui/palette.py` | 命令面板：输入 `/` 打开，`↑↓` 循环导航，`Enter` 执行，`Esc` 关闭 |
+| 配色 | `ui/theme.py` | 深色主题，青色主色 + 绿色对勾（`STYLE`） |
+
+## slash 命令
+
+`/` 打开命令面板选一条执行；也可以直接手打 `/xxx`（`ui/slash.py` 解析，`ui/repl.py::handle_input` 分发）。
+未知 `/xxx` 与裸 `/` 都会**当作普通输入发给模型**，不是错误。
+
+| 命令 | 参数 | 功能 |
+|---|---|---|
+| `/help` `/h` | — | 列出全部直接命令 |
+| `/status` | — | 会话 id、消息数、记忆条数 |
+| `/model [name]` | 模型名 | 无参数列出可用模型（`*` 标记当前），带参数则切换 |
+| `/resume [id]` | 会话 id | 无参数列出历史会话，带参数则恢复并返回 `NEW_SESSION` |
+| `/permissions [auto\|confirm]` | 策略 | 无参数显示当前审批回调，带参数切换自动批准 / 逐次确认 |
+| `/todo` | — | 渲染当前会话的 `TaskState`（目标、进度、逐项状态、下一步） |
+| `/skills` | — | 列出 `SkillRegistry` 目录（`- name: description`） |
+| `/plan` | — | 向模型发一条「生成实现计划」的快捷 prompt |
+| `/review` | — | 向模型发一条「审查当前 git diff」的快捷 prompt |
+| `/config` | — | 打印生效的 model / 上下文预算 / 迭代上限 / 停止策略 / 回合超时 |
+| `/compact` | — | 主动压缩历史并落盘 |
+| `/memory` | — | 记忆统计（总数、活跃、置顶、kind 与 evidence 分布） |
+| `/trace` | — | 上一回合的轨迹摘要（token、耗时、降级、门卫拒绝） |
+| `/budget` | — | 本会话累计 token 账本 |
+| `/clear` | — | 开新会话（旧的仍可 `/resume`） |
+| `/quit` `/q` `/exit` | — | 退出（面板里是 `Ctrl-Q`） |
+
+### 非命令键位
+
+| 键 | 行为 |
+|---|---|
+| `Ctrl-Q` | 退出 |
+| `Esc` | 关闭命令面板 |
+
 
 ## 内置工具
 
@@ -98,7 +141,9 @@ R3 重写。记忆层现在回答三个问题：**写什么、什么时候写、
 实测对比（同一内容、同长度）：记忆放系统提示前缀命中 **7%**，放尾部 **94%**；
 每轮压缩历史中段只有 **26%**（现在改为按预算分页压缩后 92%）。
 
-**命令**：`ai-coding memory list｜search｜forget｜pin`；REPL 里 `/memory` 看状态、`/compact` 主动压缩历史。
+**命令**：R10 起 `ai-coding memory list｜search｜forget｜pin` 已删除（无 CLI 入口）；
+`MemoryService.write_note` / `MemoryStore.pin` / `MemoryStore.delete` / `store.all()` 仍在库里，
+可从代码直接调用。TUI 里 `/memory` 看统计、`/compact` 主动压缩历史。
 索引持久化为工作区下 `.memory`（schema v2，旧的 v1 文件只读迁移）。任何异常静默降级——
 记忆永不抛错、永不阻塞回合，且受 R2 的回合预算约束。
 
@@ -152,18 +197,16 @@ R3 重写。记忆层现在回答三个问题：**写什么、什么时候写、
 R4 起，server 连不上不再静默：会发一条 `Degraded(component="mcp_server", reason="server '<name>': did not become ready within Ns")`
 并跳过它的工具（`/trace --degraded` 可见）。
 
-## 交互式 REPL 与 slash 命令
+## 命令分发与普通输入
 
-`repl` 基于 prompt_toolkit，用富文本输出。`/` 前缀走 `parse_slash` 直接命令解析：
+`parse_slash` 只做**纯解析**（离线、无终端状态）：已知 `/xxx` 返回 `SlashCommand`，
+其余（普通文本、未知 `/xxx`、裸 `/`）返回 `None`，调用方把它交给模型跑单回合。
+`handle_input` 是一处 if/elif 链，产出 `REPLAction`（`CONTINUE` / `QUIT` / `NEW_SESSION`）
+与（可能已替换的）会话对象——`NEW_SESSION` 供 `/clear` 与 `/resume <id>` 使用。
 
-| 命令 | 别名 | 作用 |
-|---|---|---|
-| `/help` | `/h` | 显示帮助 |
-| `/status` | — | 显示当前会话 id 与消息数 |
-| `/clear` | — | 开启新会话 |
-| `/quit` | `/q`、`/exit` | 退出 REPL |
-
-非 `slash` 输入交给模型执行单回合，输出用 wide/cyan 样式实时流式展示。
+R10 之前由 `InteractiveReader` 独占 stdin 并在「问题 / 转向 / 命令 / 输入」四个消费者之间仲裁
+（`ui/reader.py`，含 Esc 取消当前工具批次的 R8c 语义）。全屏 `Application` 自带焦点栈与按键分发，
+该文件随之删除；取消与转向的语义因此在 TUI 里暂未接回，见「已知缺口」。
 
 ## 可观测层（R4a）
 
@@ -294,7 +337,31 @@ R7b 把这段话的前半句治掉了：L2 不再丢正文。实测同一份 70 
 | M6 | 收尾、全量迁移测试 | 完成 |
 | R1 | 编排层重构：自持循环 + todo 门禁 + 分发器 + 子智能体 + MCP 直连 + 移除 SDK | 完成 |
 
-已知约束：bash 工具仅面向 Linux；`ask`/`repl` 需要提供 `--path`（配置发现不做自动探测，否则报 `no default model configured`）。
+已知约束：bash 工具仅面向 Linux；需要提供 `--path`（配置发现不做自动探测，否则报 `no default model configured`）。
+
+## R10 已知缺口
+
+全屏 TUI 的**壳**与**命令面板**已经就位（已用真实 pty 验证：横幅、状态栏、面板边框、
+键盘导航、`Ctrl-Q` 退出都正常），以下四处尚未接线，都不是视觉问题而是数据流问题：
+
+1. **输出没有接进 body**：`_build_loop(observer=None)`，`ConsoleObserver` 仍在往 `rich.Console`
+   逐行打印；`BodyBuffer` 已经在 `app.py` 里创建并写了欢迎语，但**没有从循环事件收数据**。
+   后果：跑真实回合时，模型回复与工具事件不会出现在 body 窗口里。
+2. **body 无法提交输入**：`BufferControl` 被用作 body 的输入区，但没有 Enter 提交 /
+   提交后清空缓冲的按键绑定，因此面板里的命令能跑，**自己键入的自然语言不会被发送**。
+3. **人机通道全断**：`ask_user`（`CLIUserPromptCallback`）与工具审批（`CLIApprovalCallback`）
+   都在 `asyncio.to_thread` 里读 stdin。全屏 `Application` 独占 stdin，这两个回调拿不到输入，
+   也没有改走 `Application` 的焦点。`ui/reader.py` 的仲裁器（问题/转向/命令/输入）已随文件删除。
+4. **`/model <name>` 不会真切换**：`AgentLoop` 没有 `set_model` 方法，handler 会打印
+   「model switching not supported by this loop」。
+
+另有一处小的：turn 计时器在 `run_app` 启动时取一次 `time.monotonic()`，不会随回合重置。
+
+补齐顺序建议：先 1（`ConsoleObserver` → `BodyBuffer` 的桥接 observer），
+再 2（body 的 Enter 提交与清空），再 3（把 `ask_user` / 审批改为经 `Application` 焦点取输入，
+等价于把 `InteractiveReader` 的仲裁能力搬进 `app.py`），最后 4。
+
+
 
 ## R1 带来的变化（相对 M6）
 

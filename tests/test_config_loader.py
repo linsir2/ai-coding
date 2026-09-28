@@ -8,7 +8,24 @@ from ai_coding.config.models import AIConfig, AppConfig
 from ai_coding.domain.model_config import ModelConfig
 
 
-def test_load_returns_defaults_on_none():
+@pytest.fixture
+def no_config(tmp_path, monkeypatch):
+    """Isolate the "nothing found" case from this repo's own config.local.yaml.
+
+    R10 made ``load_app(None)`` discover a config by walking up from the cwd, so
+    a test that wants bare defaults has to stand somewhere with no config above
+    it — otherwise the repo's real settings leak into the assertion.
+    """
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    for parent in (empty, *empty.parents):
+        if (parent / "config.local.yaml").is_file():
+            pytest.skip("a parent directory holds a config; cannot isolate defaults")
+    monkeypatch.chdir(empty)
+    return empty
+
+
+def test_load_returns_defaults_on_none(no_config):
     app = ConfigLoader.load_app(None)
     assert app.default_model == ""
     assert app.models == {}
@@ -75,7 +92,7 @@ def test_tools_default_enabled():
     assert app.tools.read.max_file_size == 10485760
 
 
-def test_mcp_defaults():
+def test_mcp_defaults(no_config):
     mcp = ConfigLoader.load_mcp(None)
     assert mcp.enabled is False
     assert mcp.auto_discover is True
@@ -163,7 +180,7 @@ def test_tracing_block_has_working_defaults_and_can_be_configured(tmp_path):
     assert loaded.tracing.retention_days == 3
 
 
-def test_model_prices_are_optional_and_default_to_zero(tmp_path):
+def test_model_prices_are_optional_and_default_to_zero(tmp_path, no_config):
     default = ConfigLoader.load_app(None)
     assert default.models == {}
 

@@ -29,10 +29,38 @@ def _normalize(value: Any) -> Any:
 class ConfigLoader:
     """Load ``AppConfig`` and ``MCPConfig`` from a YAML file (or built-in defaults)."""
 
+    #: Probed in order when no explicit path is given. ``config.local.yaml`` is
+    #: gitignored and holds the API key, so it must win over the example file.
+    DEFAULT_NAMES: tuple[str, ...] = (
+        "config.local.yaml",
+        "config.yaml",
+        "config.example.yaml",
+    )
+
+    @staticmethod
+    def discover(start: str | Path | None = None) -> Path | None:
+        """Find a config file by walking up from ``start`` (default: cwd).
+
+        Bare ``ai-coding`` in a project directory should just work, so the
+        lookup climbs parent directories: a repo root config applies to any
+        subdirectory you launch from.
+        """
+        base = Path(start).expanduser().resolve() if start else Path.cwd()
+        if base.is_file():
+            base = base.parent
+        for directory in (base, *base.parents):
+            for name in ConfigLoader.DEFAULT_NAMES:
+                candidate = directory / name
+                if candidate.is_file():
+                    return candidate
+        return None
+
     @staticmethod
     def _read_doc(path: str | Path | None) -> dict[str, Any]:
         if path is None:
-            return {}
+            path = ConfigLoader.discover()
+            if path is None:
+                return {}
         file_path = Path(path)
         if not file_path.is_file():
             raise FileNotFoundError(f"config file not found: {file_path}")
@@ -50,6 +78,12 @@ class ConfigLoader:
         }
         doc["models"] = coerced
         return AppConfig.model_validate(doc)
+
+    @staticmethod
+    def load_app_from(start: str | Path | None = None) -> AppConfig:
+        """``load_app`` against a specific search root, ignoring the cwd."""
+        found = ConfigLoader.discover(start)
+        return ConfigLoader.load_app(found) if found is not None else AppConfig()
 
     @staticmethod
     def load_mcp(path: str | Path | None = None) -> MCPConfig:

@@ -1,3 +1,6 @@
-"""REPL / presentation layer (M5-2): slash commands, rich console, interactive shell."""
+"""REPL / presentation layer: slash commands, console, app."""
 
-__all__ = ["slash", "console", "repl"]
+__all__ = [
+    "slash", "console", "repl", "app", "palette", "theme",
+    "header", "body", "footer", "observer",
+]

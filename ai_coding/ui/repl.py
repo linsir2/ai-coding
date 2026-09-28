@@ -16,12 +16,22 @@ from ai_coding.ui.slash import parse_slash
 
 HELP_TEXT = (
     "direct commands:\n"
-    "  /help, /h    show this help\n"
-    "  /status      show session info\n"
-    "  /trace       show what the last turn cost and what degraded (R4a)\n"
-    "  /budget      show this session's recorded token totals (R4a)\n"
-    "  /clear       start a fresh session\n"
-    "  /quit, /q    exit the REPL"
+    "  /help, /h       show this help\n"
+    "  /status         show session info\n"
+    "  /model [name]   list or switch models\n"
+    "  /resume [id]    list or resume saved sessions\n"
+    "  /permissions   view or change approval policy\n"
+    "  /todo           show current task list\n"
+    "  /skills         list available skills\n"
+    "  /plan           generate implementation plan\n"
+    "  /review        review current changes\n"
+    "  /config         show effective configuration\n"
+    "  /compact        compact conversation history\n"
+    "  /memory         show memory status\n"
+    "  /trace          show last turn trace\n"
+    "  /budget         show session token totals\n"
+    "  /clear          start a fresh session\n"
+    "  /quit, /q       exit"
 )
 
 
@@ -100,6 +110,144 @@ async def handle_input(
     if cmd.name == "budget":
         console.info(_budget_report(loop, session))
         return REPLAction.CONTINUE, session
+    if cmd.name == "model":
+        return _handle_model(loop, cmd.raw, session, console)
+    if cmd.name == "resume":
+        return _handle_resume(loop, cmd.raw, session, sessions, console)
+    if cmd.name == "permissions":
+        return _handle_permissions(loop, cmd.raw, session, console)
+    if cmd.name == "todo":
+        task = getattr(session, "task", None)
+        if task is None:
+            console.info("[todo] no task list for this session")
+        else:
+            console.info(task.render())
+        return REPLAction.CONTINUE, session
+    if cmd.name == "skills":
+        skills_reg = getattr(loop, "skills", None)
+        if skills_reg is None:
+            console.info("[skills] not available in this session")
+            return REPLAction.CONTINUE, session
+        catalog = skills_reg.catalog_text()
+        if catalog:
+            console.info(f"[skills] available:\n{catalog}")
+        else:
+            console.info("[skills] no skills found")
+        return REPLAction.CONTINUE, session
+    if cmd.name == "plan":
+        console.info("[plan] generating implementation plan...")
+        await loop.process_input(
+            session,
+            "Create a detailed implementation plan for the current task. "
+            "Break it down into specific, actionable steps.",
+            on_delta=console.delta,
+        )
+        return REPLAction.CONTINUE, session
+    if cmd.name == "review":
+        console.info("[review] reviewing current changes...")
+        await loop.process_input(
+            session,
+            "Review the current git diff and identify any issues, "
+            "bugs, or improvements needed.",
+            on_delta=console.delta,
+        )
+        return REPLAction.CONTINUE, session
+    if cmd.name == "config":
+        return _handle_config(loop, session, console)
+    return REPLAction.CONTINUE, session
+
+
+def _handle_config(loop: Any, session: Any, console: DialogueConsole) -> tuple[REPLAction, Any]:
+    settings = getattr(loop, "settings", None)
+    if settings is None:
+        console.info("[config] not available")
+        return REPLAction.CONTINUE, session
+    lines = [
+        f"[config] model: {getattr(settings, 'default_model', '?')}",
+        f"  max_context_tokens: {getattr(settings, 'max_context_tokens', '?')}",
+        f"  max_tool_iterations: {getattr(settings, 'max_tool_iterations', '?')}",
+        f"  stop_policy: {getattr(settings, 'stop_policy', '?')}",
+        f"  turn_timeout: {getattr(settings, 'turn_timeout_seconds', '?')}s",
+    ]
+    console.info("\n".join(lines))
+    return REPLAction.CONTINUE, session
+
+
+def _handle_permissions(
+    loop: Any, raw: str, session: Any, console: DialogueConsole
+) -> tuple[REPLAction, Any]:
+    parts = raw.split()
+    dispatcher = getattr(loop, "dispatcher", None)
+    approval = getattr(dispatcher, "approval", None) if dispatcher else None
+    if len(parts) == 1:
+        name = type(approval).__name__ if approval else "(none)"
+        console.info(f"[permissions] current approval: {name}")
+        return REPLAction.CONTINUE, session
+    target = parts[1]
+    from ai_coding.security.approval import AutoApproveCallback, CLIApprovalCallback
+    if target == "auto":
+        if dispatcher:
+            dispatcher.approval = AutoApproveCallback()
+        console.info("[permissions] switched to auto-approve")
+    elif target == "confirm":
+        if dispatcher:
+            dispatcher.approval = CLIApprovalCallback()
+        console.info("[permissions] switched to confirm-all")
+    else:
+        console.error(f"[permissions] unknown policy '{target}'. Available: auto, confirm")
+    return REPLAction.CONTINUE, session
+
+
+def _handle_resume(
+    loop: Any, raw: str, session: Any, sessions: Any, console: DialogueConsole
+) -> tuple[REPLAction, Any]:
+    parts = raw.split()
+    if len(parts) == 1:
+        items = sessions.list_sessions()
+        if not items:
+            console.info("[resume] no saved sessions")
+            return REPLAction.CONTINUE, session
+        lines = ["[resume] saved sessions:"]
+        for s in items:
+            sid = getattr(s, "session_id", "?")
+            title = getattr(s, "title", "")
+            n = len(getattr(s, "messages", []))
+            lines.append(f"  {sid[:12]}  msgs={n}  {title}")
+        console.info("\n".join(lines))
+        return REPLAction.CONTINUE, session
+    target_id = parts[1]
+    loaded = sessions.load(target_id)
+    if loaded is None:
+        console.error(f"[resume] session '{target_id}' not found")
+        return REPLAction.CONTINUE, session
+    console.info(f"[resume] loaded session {loaded.session_id[:12]}")
+    return REPLAction.NEW_SESSION, loaded
+
+
+def _handle_model(
+    loop: Any, raw: str, session: Any, console: DialogueConsole
+) -> tuple[REPLAction, Any]:
+    settings = getattr(loop, "settings", None)
+    models = getattr(settings, "models", {}) if settings else {}
+    default_model = getattr(settings, "default_model", "") if settings else ""
+    parts = raw.split()
+    if len(parts) == 1:
+        lines = [f"[model] current: {default_model or '(none)'}"]
+        for name in models:
+            marker = " *" if name == default_model else ""
+            lines.append(f"  {name}{marker}")
+        console.info("\n".join(lines))
+        return REPLAction.CONTINUE, session
+    target = parts[1]
+    if target not in models:
+        console.error(f"[model] unknown model '{target}'. Available: {', '.join(models)}")
+        return REPLAction.CONTINUE, session
+    set_model = getattr(loop, "set_model", None)
+    if callable(set_model):
+        set_model(target)
+        console.info(f"[model] switched to {target}")
+    else:
+        console.error("[model] model switching not supported by this loop")
     return REPLAction.CONTINUE, session
 
 
