@@ -219,3 +219,32 @@ def test_note_steering_defaults_to_one():
     books = TurnBooks()
     books.note_steering()
     assert books.steering_messages == 1
+
+
+# ------------------------------------------------- R8a: the checkpoint line
+
+
+def test_r8_checkpoint_collapses_to_one_line_and_caps():
+    books = TurnBooks()
+    books.note_checkpoint("  第一行\n第二行  ", limit=10)
+    assert books.checkpoint == "第一行 第二行"
+    books.note_checkpoint("字" * 50, limit=5)
+    assert books.checkpoint == "字字字字…"
+
+
+def test_r8_last_checkpoint_of_a_batch_wins():
+    books = TurnBooks()
+    books.note_checkpoint("先写的", limit=120)
+    books.note_checkpoint("后写的", limit=120)
+    assert books.checkpoint == "后写的"
+
+
+def test_r8_a_blank_checkpoint_never_erases_a_real_one():
+    books = TurnBooks()
+    books.note_checkpoint("有价值的", limit=120)
+    books.note_checkpoint("   \n  ", limit=120)
+    assert books.checkpoint == "有价值的"
+
+
+def test_r8_a_fresh_turn_has_no_checkpoint():
+    assert TurnBooks().checkpoint is None

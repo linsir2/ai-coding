@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from ai_coding.core.dispatch import DispatchOutcome
 from ai_coding.core.turn_policy import TurnSnapshot
 from ai_coding.domain.task import TaskState, TodoItem
+from ai_coding.domain.turn_digest import DEFAULT_NOTE_CHARS, one_line
 from ai_coding.infra.deadline import Deadline
 
 __all__ = ["Failure", "TurnBooks", "TurnFrame"]
@@ -84,6 +85,9 @@ class TurnBooks:
     #: Lines the user typed while this turn was running and the loop absorbed
     #: (R7e-2).
     steering_messages: int = 0
+    #: What the model asked its future self to remember about this turn (R8a).
+    #: ``None`` = it never wrote one, and the harness line stands alone.
+    checkpoint: str | None = None
 
     # ---- notifications ----------------------------------------------------
 
@@ -111,6 +115,17 @@ class TurnBooks:
     def note_step(self, text: str | None) -> None:
         """Remember the latest model text (even when there is none)."""
         self.last_text = text
+
+    def note_checkpoint(self, text: str, *, limit: int = DEFAULT_NOTE_CHARS) -> None:
+        """Record the model's own line for this turn (R8a, D-1/D-12).
+
+        Last write wins: within one batch the calls run in the model's order, so
+        the final line is the one it wanted to leave.  A blank body is a no-op -
+        an empty write must never erase a real one.
+        """
+        body = one_line(text, limit)
+        if body:
+            self.checkpoint = body
 
     def note_outcomes(self, outcomes: Sequence[DispatchOutcome]) -> None:
         """Count a batch of tool outcomes: attempts, successes, streak, failures.
