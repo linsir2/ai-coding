@@ -49,3 +49,43 @@ def test_unknown_slash_is_none():
 
 def test_bare_slash_is_none():
     assert parse_slash("/") is None
+
+
+def test_model():
+    cmd = parse_slash("/model")
+    assert cmd is not None and cmd.name == "model"
+
+
+def test_resume():
+    cmd = parse_slash("/resume")
+    assert cmd is not None and cmd.name == "resume"
+
+
+def test_permissions():
+    cmd = parse_slash("/permissions")
+    assert cmd is not None and cmd.name == "permissions"
+
+
+def test_todo():
+    cmd = parse_slash("/todo")
+    assert cmd is not None and cmd.name == "todo"
+
+
+def test_skills():
+    cmd = parse_slash("/skills")
+    assert cmd is not None and cmd.name == "skills"
+
+
+def test_plan():
+    cmd = parse_slash("/plan")
+    assert cmd is not None and cmd.name == "plan"
+
+
+def test_review():
+    cmd = parse_slash("/review")
+    assert cmd is not None and cmd.name == "review"
+
+
+def test_config():
+    cmd = parse_slash("/config")
+    assert cmd is not None and cmd.name == "config"
