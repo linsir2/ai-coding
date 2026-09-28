@@ -39,6 +39,7 @@ from ai_coding.domain.message import ToolArtifact
 from ai_coding.domain.task import TaskState
 
 __all__ = [
+    "DEFAULT_NOTE_CHARS",
     "DEFAULT_OUTCOME_CHARS",
     "DEFAULT_REQUEST_CHARS",
     "WORKING_MEMORY_NOTE",
@@ -52,6 +53,9 @@ __all__ = [
 
 DEFAULT_REQUEST_CHARS = 60
 DEFAULT_OUTCOME_CHARS = 90
+#: R8a: how long the model's own line may be.  The ring has 1096 characters of
+#: per-line budget after its fixed overhead (measured, docs/r8-analysis.md 1.1).
+DEFAULT_NOTE_CHARS = 120
 _ELLIPSIS = "…"
 _MAX_FILES_SHOWN = 4
 _WHITESPACE = re.compile(r"\s+")
@@ -101,12 +105,22 @@ class TurnDigest:
     status: str = ""
     files: tuple[str, ...] = ()
     open_items: int = 0
+    #: R8a: what the model asked its future self to remember.  Empty means this
+    #: line is entirely harness-derived (the R6a behaviour).
+    note: str = ""
+    #: "model" when ``note`` came from ``checkpoint_write``, else "harness".
+    source: str = "harness"
+
+    def display(self) -> str:
+        """The sentence the ring shows: the model's note wins when there is one."""
+        return self.note or self.outcome
 
     def render(self) -> str:
         label = f"t{self.turn}" if self.turn else "t?"
         line = f"- {label} {self.request or '(无请求)'}"
-        if self.outcome:
-            line += f" → {self.outcome}"
+        shown = self.display()
+        if shown:
+            line += f" → {shown}"
         extras: list[str] = []
         if self.files:
             extras.append("改了 " + ", ".join(self.files[:_MAX_FILES_SHOWN]))
@@ -127,6 +141,11 @@ class TurnDigest:
             data["files"] = list(self.files)
         if self.open_items:
             data["openItems"] = int(self.open_items)
+        if self.note:
+            data["note"] = self.note
+        # Written even when it is "harness", so the round trip is exact and a
+        # reloaded session keeps answering "who wrote this line?".
+        data["source"] = self.source or "harness"
         return data
 
     @staticmethod
@@ -158,6 +177,8 @@ class TurnDigest:
             status=str(data.get("status", "") or ""),
             files=files,
             open_items=open_items,
+            note=str(data.get("note", "") or ""),
+            source=str(data.get("source", "") or "harness"),
         )
 
 
@@ -170,6 +191,8 @@ def build_digest(
     task: TaskState | None = None,
     request_chars: int = DEFAULT_REQUEST_CHARS,
     outcome_chars: int = DEFAULT_OUTCOME_CHARS,
+    model_note: str = "",
+    note_chars: int = DEFAULT_NOTE_CHARS,
 ) -> TurnDigest:
     """The one line this turn leaves in the session (harness-derived, no model call)."""
     spoken = one_line(outcome.text or "", outcome_chars)
@@ -177,6 +200,7 @@ def build_digest(
         label = _STATUS_LABEL.get(outcome.status, outcome.status.value)
         reason = one_line(outcome.reason, outcome_chars)
         spoken = f"{label}：{reason}" if reason else label
+    note = one_line(model_note, note_chars) if model_note else ""
     return TurnDigest(
         turn=int(turn),
         request=one_line(user_input, request_chars),
@@ -184,6 +208,8 @@ def build_digest(
         status=outcome.status.value,
         files=_unique_paths(artifacts),
         open_items=len(task.open_items()) if task is not None else 0,
+        note=note,
+        source="model" if note else "harness",
     )
 
 

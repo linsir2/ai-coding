@@ -189,3 +189,69 @@ def test_handoff_is_empty_when_the_model_spoke():
     assert "[回合未完成" in render_handoff(
         outcome=_outcome(status=TurnStatus.TIMEOUT, text="   ", reason="turn deadline exceeded")
     )
+
+
+# ---- R8a: the model may write the line itself (docs/r8-analysis.md 3.1) ----
+
+
+def test_r8_note_replaces_the_outcome_sentence():
+    digest = build_digest(
+        turn=3,
+        user_input="修 bash 超时",
+        outcome=_outcome(text="做完了"),
+        model_note="下一步：先补 runner 的用例",
+    )
+    assert digest.note == "下一步：先补 runner 的用例"
+    assert digest.outcome == "做完了"  # the derived sentence is still kept
+    assert digest.render() == "- t3 修 bash 超时 → 下一步：先补 runner 的用例"
+
+
+def test_r8_harness_facts_still_show_and_open_items_still_do_not():
+    digest = build_digest(
+        turn=3,
+        user_input="修 bash 超时",
+        outcome=_outcome(text="做完了"),
+        artifacts=[_artifact("ai_coding/infra/subprocess_runner.py")],
+        task=_task(),
+        model_note="note",
+    )
+    line = digest.render()
+    assert "改了 ai_coding/infra/subprocess_runner.py" in line
+    assert "open" not in line
+    assert digest.open_items == 1  # stored, just never rendered
+
+
+def test_r8_source_is_recorded_but_never_rendered():
+    model = build_digest(
+        turn=1, user_input="q", outcome=_outcome(), model_note="n"
+    )
+    harness = build_digest(turn=1, user_input="q", outcome=_outcome())
+    assert (model.source, harness.source) == ("model", "harness")
+    assert "harness" not in model.render()
+    assert "model" not in model.render()
+
+
+def test_r8_note_round_trips_and_old_rows_still_parse():
+    digest = build_digest(turn=1, user_input="q", outcome=_outcome(), model_note="n")
+    assert TurnDigest.from_dict(digest.to_dict()) == digest
+    parsed = TurnDigest.from_dict(
+        {"turn": 1, "request": "r", "outcome": "o", "status": "completed"}
+    )
+    assert parsed is not None
+    assert parsed.note == ""
+    assert parsed.source == "harness"  # a row from before R8a was harness-derived
+
+
+def test_r8_no_note_is_byte_identical_to_today():
+    digest = build_digest(
+        turn=1, user_input="q", outcome=_outcome(status=TurnStatus.COMPLETED, text="a")
+    )
+    assert digest.render() == "- t1 q → a"
+    assert digest.source == "harness"
+
+
+def test_r8_a_note_longer_than_the_cap_is_cut():
+    digest = build_digest(
+        turn=1, user_input="q", outcome=_outcome(), model_note="字" * 500, note_chars=10
+    )
+    assert len(digest.note) == 10
