@@ -54,7 +54,11 @@ def main(
     from ai_coding.ui.app import run_app
 
     try:
-        asyncio.run(run_app(path, workspace, skills))
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(run_app(path, workspace, skills))
+        finally:
+            loop.close()
     except (ValueError, FileNotFoundError) as exc:
         # The common case is a missing or model-less config: report it the way a
         # CLI user expects instead of a traceback.

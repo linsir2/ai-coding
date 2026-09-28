@@ -2,9 +2,9 @@
 
 from ai_coding.core.events import (
     IterationStarted,
-    ToolStarted,
-    ToolFinished,
     ToolChunk,
+    ToolFinished,
+    ToolStarted,
     TurnFinished,
 )
 from ai_coding.domain.loop import TurnOutcome, TurnStatus
@@ -29,7 +29,9 @@ def test_writes_tool_started():
 def test_writes_tool_finished_ok():
     body = BodyBuffer()
     obs = BodyObserver(body)
-    obs.on_event(ToolFinished(call_id="1", tool_name="bash", success=True, output_preview="file.txt"))
+    obs.on_event(ToolFinished(
+        call_id="1", tool_name="bash", success=True, output_preview="file.txt"
+    ))
     assert "-> ok" in body.get_formatted_text()
 
 

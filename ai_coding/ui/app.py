@@ -16,6 +16,7 @@ from prompt_toolkit.layout.dimension import D
 from ai_coding.ui.body import BodyBuffer
 from ai_coding.ui.footer import render_footer
 from ai_coding.ui.header import render_header
+from ai_coding.ui.observer import BodyObserver
 from ai_coding.ui.palette import CommandPalette, PaletteEntry
 from ai_coding.ui.theme import STYLE
 
@@ -35,11 +36,10 @@ PALETTE_ENTRIES = [
     PaletteEntry("help", "Show available commands", "❓"),
 ]
 
-#: Rows the header occupies: 6 lines of ASCII art + 5 status lines + 1 blank.
-HEADER_HEIGHT = 12
-#: The palette lists every command plus a hint row, and must not reach the footer.
+HEADER_HEIGHT = 9
 PALETTE_WIDTH = 72
 PALETTE_HEIGHT = len(PALETTE_ENTRIES) + 3
+INPUT_HEIGHT = 3
 
 
 async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
@@ -80,35 +80,43 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     for tool in await mcp_manager.open_all():
         registry.register(tool)
 
+    body = BodyBuffer()
+    body_observer = BodyObserver(body)
+
     loop = _build_loop(
         engine, sessions, registry, app_cfg, workspace, skills,
         approval=CLIApprovalCallback(),
-        observer=None,
+        observer=body_observer,
         trace=recorder,
         guards=_make_guards(app_cfg),
         hooks=_make_hooks(app_cfg, workspace),
         steering=steering,
     )
 
-
-    body = BodyBuffer()
     palette = CommandPalette(PALETTE_ENTRIES)
     session = sessions.create()
     turn_start = time.monotonic()
+    input_buffer = Buffer()
 
-    body.write("  ✨ Welcome to Nexus! ✨\n")
+    body.write("  ✨ Welcome to ai-coding! ✨\n")
     body.write("  Describe a task, or use / for commands.\n\n")
 
     header_control = FormattedTextControl(lambda: render_header(loop))
     footer_control = FormattedTextControl(
         lambda: render_footer(loop, turn_start)
     )
-    body_control = BufferControl(buffer=Buffer())
+    body_control = FormattedTextControl(lambda: body.get_formatted_text())
+    input_control = BufferControl(buffer=input_buffer)
     palette_control = FormattedTextControl(
         lambda: palette.render() if palette.is_open else []
     )
 
     body_window = Window(content=body_control, wrap_lines=False)
+    input_window = Window(
+        content=input_control,
+        height=D(preferred=INPUT_HEIGHT),
+        style="class:input",
+    )
     palette_window = Window(
         content=palette_control,
         width=D(preferred=PALETTE_WIDTH),
@@ -125,6 +133,12 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
             event.app.invalidate()
         else:
             palette.open()
+            event.app.invalidate()
+
+    @kb.add("backspace")
+    def _backspace_palette(event: Any) -> None:
+        if palette.is_open:
+            palette.close()
             event.app.invalidate()
 
     @kb.add("escape")
@@ -146,12 +160,17 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
             event.app.invalidate()
 
     @kb.add("enter")
-    def _palette_select(event: Any) -> None:
-        if not palette.is_open:
-            return
-        entry = palette.select()
-        event.app.invalidate()
-        asyncio.create_task(_run_command(entry.name))
+    def _enter(event: Any) -> None:
+        if palette.is_open:
+            entry = palette.select()
+            event.app.invalidate()
+            asyncio.create_task(_run_command(entry.name))
+        else:
+            text = input_buffer.text
+            if text.strip():
+                body.write(f"> {text}\n")
+                input_buffer.reset()
+                asyncio.create_task(_submit_text(text))
 
     async def _run_command(name: str) -> None:
         nonlocal session
@@ -165,7 +184,10 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         if action.name == "new_session":
             session = new_session
 
-    @kb.add("c-q")
+    async def _submit_text(text: str) -> None:
+        await loop.process_input(session, text, on_delta=body.write)
+
+    @kb.add("c-c")
     def _exit(event: Any) -> None:
         event.app.exit()
 
@@ -177,6 +199,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
                 style="class:header",
             ),
             body_window,
+            input_window,
             Window(content=footer_control, height=1, style="class:footer"),
         ]),
         floats=[
@@ -195,7 +218,6 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         style=STYLE,
         full_screen=True,
     )
-
 
     try:
         await app.run_async()
