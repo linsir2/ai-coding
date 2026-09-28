@@ -13,6 +13,7 @@ import asyncio
 import os
 import pathlib
 import signal
+import threading
 import time
 
 import pytest
@@ -236,3 +237,38 @@ async def test_r8_the_async_variant_streams_too():
 
     assert outcome.stdout == "async-hi\n"
     assert "".join(seen) == "async-hi\n"
+
+
+# ---- R8c-S2: cancelling really stops the command (D-10) ---------------------
+
+
+def test_r8_cancelling_really_kills_the_process_group(tmp_path: pathlib.Path):
+    """Esc must stop the command, not merely stop waiting for it."""
+    pid_file = tmp_path / "pid"
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+
+    outcome = run_process(
+        f"echo $$ > {pid_file}; sleep 30", shell=True, timeout=30, cancel=cancel
+    )
+
+    assert outcome.cancelled is True
+    assert outcome.timed_out is False
+    assert outcome.error is None
+    pgid = int(pid_file.read_text(encoding="utf-8").strip())
+    assert _wait_for_group_teardown(pgid), "the cancelled command must be gone"
+
+
+def test_r8_a_cancelled_run_is_not_a_timeout(tmp_path: pathlib.Path):
+    cancel = threading.Event()
+    cancel.set()  # already cancelled before we even start
+    outcome = run_process("echo ignored; sleep 30", shell=True, timeout=30, cancel=cancel)
+    assert outcome.cancelled is True
+    assert outcome.timed_out is False
+
+
+def test_r8_an_unset_cancel_changes_nothing():
+    cancel = threading.Event()
+    outcome = run_process("echo hi", shell=True, timeout=5, cancel=cancel)
+    assert outcome.cancelled is False
+    assert outcome.stdout == "hi\n"

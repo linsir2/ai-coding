@@ -100,3 +100,56 @@ async def test_r8_bash_emits_chunks_while_running():
     assert result.success is True
     assert "".join(chunk.text for chunk in chunks) == "step-1\nstep-2\nstep-3\n"
     assert all(chunk.call_id == "c1" and chunk.tool_name == "bash" for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_r8_cancelling_a_bash_call_kills_the_command(tmp_path: Path):
+    """The whole chain: dispatcher cancel -> kill_event -> run_process -> killpg."""
+    import asyncio
+    import os
+    import time
+
+    from ai_coding.core.dispatch import ToolDispatcher
+    from ai_coding.domain.message import CANCELLED_BY_USER, ToolCallRef
+    from ai_coding.security.approval import AutoApproveCallback
+    from ai_coding.security.permission_gate import PermissionGate
+    from ai_coding.tools.registry import ToolRegistry
+
+    cancel = asyncio.Event()
+    pid_file = tmp_path / "pid"
+    registry = ToolRegistry()
+    registry.register(BashTool())
+    dispatcher = ToolDispatcher(
+        registry, PermissionGate(), AutoApproveCallback(), cancel=cancel
+    )
+    call = ToolCallRef(
+        id="c1",
+        name="bash",
+        arguments=(
+            '{"command": "echo $$ > ' + str(pid_file) + '; sleep 30"}'
+        ),
+    )
+
+    async def trip() -> None:
+        await asyncio.sleep(0.4)
+        cancel.set()
+
+    batches = await asyncio.gather(
+        dispatcher.dispatch_batch(
+            [call], ToolContext(workspace=str(tmp_path)), iteration=1
+        ),
+        trip(),
+    )
+
+    result = batches[0][0].result
+    assert result.success is False
+    assert result.error == CANCELLED_BY_USER
+    pgid = int(pid_file.read_text(encoding="utf-8").strip())
+    deadline = time.monotonic() + 3.0
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline, "the cancelled command is still alive"
+        await asyncio.sleep(0.05)

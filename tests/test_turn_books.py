@@ -10,7 +10,7 @@ object, so the move is a move and not a rewrite (docs/r7-analysis.md 3.1).
 from ai_coding.core.dispatch import DispatchOutcome
 from ai_coding.core.turn_books import TurnBooks, TurnFrame
 from ai_coding.core.turn_policy import TurnSnapshot
-from ai_coding.domain.message import ToolCall, ToolResult
+from ai_coding.domain.message import CANCELLED_BY_USER, ToolCall, ToolResult
 from ai_coding.domain.task import TaskState, TodoItem
 from ai_coding.infra.deadline import Deadline
 
@@ -271,3 +271,27 @@ def test_r8_a_failed_call_is_never_evidence():
     books = TurnBooks()
     books.note_outcomes([_outcome("bash", success=False, error="nonzero_exit")])
     assert books.evidence_calls == 0
+
+
+# ------------------------------- R8c D-11: a cancel is not a failure
+
+
+def test_r8_a_batch_that_was_only_cancelled_is_not_a_failure():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", success=False, error=CANCELLED_BY_USER)])
+    assert books.failed_streak == 0
+    assert books.failures == []
+    assert books.attempted_calls == 1  # it was attempted, so the stall ladder sees it
+
+
+def test_r8_a_cancelled_call_does_not_hide_a_real_failure():
+    books = TurnBooks()
+    books.note_outcomes(
+        [
+            _outcome("bash", success=False, error=CANCELLED_BY_USER),
+            _outcome("bash", success=False, error="timeout"),
+        ]
+    )
+    assert books.failed_streak == 1
+    assert [tool for tool, _reason, _preview in books.failures] == ["bash"]
+    assert books.failures[0][1] == "timeout"

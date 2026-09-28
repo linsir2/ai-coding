@@ -49,6 +49,8 @@ class ProcessOutcome:
     stdout: str = ""
     stderr: str = ""
     timed_out: bool = False
+    #: R8c: the user cancelled this run (Esc).  Not a timeout: the clock had time.
+    cancelled: bool = False
     error: str | None = None  # the process could not be started at all
     duration_seconds: float = 0.0
 
@@ -101,6 +103,7 @@ def run_process(
     kill_grace: float = DEFAULT_KILL_GRACE,
     max_output_chars: int | None = None,
     on_chunk: Callable[[str, str], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> ProcessOutcome:
     """Run ``command`` with a hard timeout.  Never raises for process failures.
 
@@ -112,6 +115,10 @@ def run_process(
     arrives, while the command is still running.  It is observation only - the
     returned :class:`ProcessOutcome` is the same either way, a raising callback is
     swallowed, and nothing here changes the request/history.
+
+    ``cancel`` (a :class:`threading.Event`, set by the dispatcher when the user
+    hits Esc) kills the process group and returns early, so cancelling stops the
+    command instead of merely stopping the wait for it.
     """
     started = time.monotonic()
     payload: bytes | None = None
@@ -181,6 +188,7 @@ def run_process(
         reader.start()
 
     timed_out = False
+    cancelled = False
     deadline = started + timeout
     while True:
         remaining = deadline - time.monotonic()
@@ -188,11 +196,24 @@ def run_process(
             timed_out = True
             _kill_group(proc)
             break
+        if cancel is not None and cancel.is_set():
+            cancelled = True
+            _kill_group(proc)
+            break
         try:
             proc.wait(timeout=min(HEARTBEAT_SECONDS, remaining))
             break
         except subprocess.TimeoutExpired:
             continue
+
+    if timed_out or cancelled:
+        # Reap the group leader: a zombie keeps the process group alive, which
+        # would both leak the process and make "is the group gone?" lie (measured
+        # in the R8c spike).  The caller still sees ``returncode=None``, as before.
+        try:
+            proc.wait(timeout=kill_grace)
+        except subprocess.TimeoutExpired:  # pragma: no cover - escaped the group
+            _log.debug("process %s did not die after killpg", proc.pid)
 
     # R8c: the process is gone, but a grandchild may still hold the pipe.  Give the
     # readers a bounded window to drain it - returning early here would truncate
@@ -210,7 +231,7 @@ def run_process(
     with lock:
         stdout_bytes = b"".join(buffers["stdout"])
         stderr_bytes = b"".join(buffers["stderr"])
-    returncode: int | None = proc.returncode
+    returncode: int | None = None if (timed_out or cancelled) else proc.returncode
 
     stdout = _decode(stdout_bytes)
     stderr = _decode(stderr_bytes)
@@ -219,6 +240,7 @@ def run_process(
         stdout=_truncate(stdout, max_output_chars, len(stdout)),
         stderr=_truncate(stderr, max_output_chars, len(stderr)),
         timed_out=timed_out,
+        cancelled=cancelled,
         duration_seconds=_elapsed(),
     )
 
@@ -235,6 +257,7 @@ async def run_process_async(
     max_output_chars: int | None = None,
     tick: float = HEARTBEAT_SECONDS,
     on_chunk: Callable[[str, str], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> ProcessOutcome:
     """Async wrapper: the work happens in a daemon thread under a hard deadline.
 
@@ -269,6 +292,7 @@ async def run_process_async(
         "kill_grace": kill_grace,
         "max_output_chars": max_output_chars,
         "on_chunk": deliver,
+        "cancel": cancel,
     }
     try:
         return await run_with_deadline(

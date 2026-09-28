@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 
 from ai_coding.core.dispatch import DispatchOutcome
 from ai_coding.core.turn_policy import TurnSnapshot
+from ai_coding.domain.message import CANCELLED_BY_USER
 from ai_coding.domain.task import TaskState, TodoItem
 from ai_coding.domain.turn_digest import DEFAULT_NOTE_CHARS, one_line
 from ai_coding.infra.deadline import Deadline
@@ -151,6 +152,13 @@ class TurnBooks:
         self.evidence_calls += sum(
             1 for item in succeeded if item.call.name not in STATE_ONLY_TOOLS
         )
+        # R8c D-11: a call the *user* cancelled is not evidence either way - it is
+        # not a failure to fix, so it must not push the escalation ladder (two of
+        # them would inject a persisted strategy nudge, and the turn is supposed
+        # to carry on after an Escape).
+        counted = [item for item in outcomes if item.result.error != CANCELLED_BY_USER]
+        if not counted:
+            return
         self.failed_streak = 0 if succeeded else self.failed_streak + 1
         self.failures.extend(
             (
@@ -158,7 +166,7 @@ class TurnBooks:
                 str(item.result.error or "failed"),
                 (item.result.output or "")[:_FAILURE_EXCERPT],
             )
-            for item in outcomes
+            for item in counted
             if not item.result.success
         )
 

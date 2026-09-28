@@ -98,6 +98,9 @@ class BashTool(BaseTool):
             timeout=self._timeout,
             max_output_chars=self._max_output,
             on_chunk=_chunk,
+            # R8c: when the user cancels, the dispatcher sets this flag and the
+            # runner kills the process group - waiting is not enough (D-10).
+            cancel=live.kill_event,
         )
 
         if outcome.error is not None:
