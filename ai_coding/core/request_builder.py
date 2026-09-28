@@ -84,6 +84,7 @@ def tool_context(
     instructions: str | None,
     emit: Callable[[Any], None],
     turn: int = 0,
+    note_checkpoint: Callable[[str], None] | None = None,
 ) -> ToolContext:
     """The per-invocation context a tool receives (the dispatcher stamps call ids).
 
@@ -98,4 +99,5 @@ def tool_context(
         instructions=instructions,
         emit=emit,
         turn=int(turn),
+        note_checkpoint=note_checkpoint,
     )

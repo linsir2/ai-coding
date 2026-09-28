@@ -190,6 +190,7 @@ class TurnCloser:
         failures: Sequence[tuple[str, str, str]] = (),
         trace_path: str = "",
         observer: Any = None,
+        model_note: str = "",
     ) -> TurnOutcome:
         """Record what this turn leaves behind, then persist it (R6a).
 
@@ -216,6 +217,10 @@ class TurnCloser:
                 outcome=outcome,
                 artifacts=self.artifacts,
                 task=task,
+                model_note=model_note,
+                note_chars=int(
+                    getattr(self._settings, "working_memory_note_chars", 120) or 120
+                ),
             ),
             keep=int(getattr(self._settings, "working_memory_keep", 12)),
         )

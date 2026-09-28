@@ -46,6 +46,9 @@ class ToolContext:
     # R7e-1: the session's turn counter, so a note the model writes can record where
     # it came from (`source_turn` means turn, R6d).
     turn: int = 0
+    # R8a: how a tool tells the running turn "remember this line for later"
+    # (``checkpoint_write``).  ``None`` outside a loop that owns a turn book.
+    note_checkpoint: Callable[[str], None] | None = None
 
 
 def resolve_ctx(ctx: ToolContext | None) -> ToolContext:

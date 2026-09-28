@@ -331,6 +331,7 @@ class AgentLoop:
                     step,
                     session=session,
                     task=task,
+                    books=books,
                     history=assembled.history,
                     instructions=assembled.instructions,
                     deadline=frame.deadline,
@@ -498,6 +499,8 @@ class AgentLoop:
             failures=books.failures,
             trace_path=self._trace_path(session),
             observer=self.observer,
+            # R8a: the line the model wrote for its future self, if it wrote one.
+            model_note=books.checkpoint or "",
         )
 
     def _bind_observer(self, observer: LoopObserver | None) -> None:
@@ -524,6 +527,7 @@ class AgentLoop:
         *,
         session: SessionData,
         task: TaskState,
+        books: TurnBooks,
         history: list[ChatMessage],
         instructions: str | None,
         deadline: Deadline | None,
@@ -537,6 +541,7 @@ class AgentLoop:
         Dispatch, write-back, the todo event and the mid-turn checkpoint all happen
         here, so the loop body reads as the ReAct cycle it is.
         """
+        limit = int(getattr(self.settings, "working_memory_note_chars", 120) or 120)
         outcomes = await self.dispatcher.dispatch_batch(
             step.tool_calls,
             tool_context(
@@ -547,6 +552,9 @@ class AgentLoop:
                 instructions=instructions,
                 emit=self._emit,
                 turn=turn,
+                # R8a: the only channel a tool has to leave something in the
+                # turn's book (checkpoint_write uses it).
+                note_checkpoint=lambda text: books.note_checkpoint(text, limit=limit),
             ),
             deadline=deadline,
             iteration=index,

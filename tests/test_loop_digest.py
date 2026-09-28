@@ -35,10 +35,17 @@ class _Engine(ChatEngine):
         self.instructions.append(instructions)
         if self.tool_name is None:
             return StepResult(text="做完了", tool_calls=[], finish_reason="stop")
+        arguments = (
+            '{"note": "先补 runner 的用例"}'
+            if self.tool_name == "checkpoint_write"
+            else "{}"
+        )
         return StepResult(
             text=None,
             tool_calls=[
-                ToolCallRef(id=f"c{len(self.requests)}", name=self.tool_name, arguments="{}")
+                ToolCallRef(
+                    id=f"c{len(self.requests)}", name=self.tool_name, arguments=arguments
+                )
             ],
             finish_reason="tool_calls",
         )
@@ -61,6 +68,30 @@ class _Poke(BaseTool):
 
     async def execute(self, params, ctx: ToolContext | None = None) -> ToolResult:
         return ToolResult(success=True, output="poked")
+
+
+class _CheckpointTool(BaseTool):
+    """A stand-in for checkpoint_write: it only writes the turn's note (R8a)."""
+
+    parallel_safe = True
+
+    @property
+    def name(self) -> str:
+        return "checkpoint_write"
+
+    @property
+    def description(self) -> str:
+        return "checkpoint"
+
+    @property
+    def params_json_schema(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {"note": {"type": "string"}}}
+
+    async def execute(self, params, ctx: ToolContext | None = None) -> ToolResult:
+        note = str(params.get("note", ""))
+        if ctx is not None and ctx.note_checkpoint is not None:
+            ctx.note_checkpoint(note)
+        return ToolResult(success=True, output=f"remembered: {note}")
 
 
 class _Sessions:
@@ -184,3 +215,39 @@ async def test_a_completed_turn_keeps_text_and_leaves_handoff_empty():
     assert loop.last_outcome is not None
     assert loop.last_outcome.text == "做完了"
     assert loop.last_outcome.handoff == ""
+
+
+# ---- R8a: the model's own line travels tool -> books -> digest ------------
+
+
+def _checkpoint_loop() -> tuple[AgentLoop, _Engine]:
+    engine = _Engine(tool_name="checkpoint_write")
+    loop = _loop(engine, _Compacting(rewrite=False), max_tool_iterations=2)
+    loop.tools.register(_CheckpointTool())
+    return loop, engine
+
+
+@pytest.mark.asyncio
+async def test_r8_the_tool_note_reaches_the_digest():
+    loop, _engine_ = _checkpoint_loop()
+    session = _session()
+    await loop.process_input(session, "先写一行 checkpoint")
+    assert session.turn_digests[-1].note == "先补 runner 的用例"
+    assert session.turn_digests[-1].source == "model"
+
+
+@pytest.mark.asyncio
+async def test_r8_the_call_is_written_back_into_the_history():
+    loop, _engine_ = _checkpoint_loop()
+    session = _session()
+    await loop.process_input(session, "先写一行 checkpoint")
+    tool_messages = [m for m in session.messages if m.role == "tool"]
+    assert tool_messages
+    assert "remembered" in (tool_messages[-1].content or "")
+
+
+@pytest.mark.asyncio
+async def test_r8_the_note_never_enters_the_system_prompt():
+    loop, engine = _checkpoint_loop()
+    await loop.process_input(_session(), "先写一行 checkpoint")
+    assert all("先补 runner 的用例" not in (item or "") for item in engine.instructions)
