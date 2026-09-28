@@ -10,7 +10,7 @@ from prompt_toolkit import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.layout import HSplit, Layout, ScrollOffsets, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import D
 
@@ -109,13 +109,18 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     footer_control = FormattedTextControl(
         lambda: render_footer(loop, turn_start)
     )
-    body_control = FormattedTextControl(lambda: body.get_formatted_text())
+    body_control = BufferControl(buffer=body.get_buffer(), focusable=True)
     input_control = BufferControl(buffer=input_buffer)
     palette_control = FormattedTextControl(
         lambda: palette.render() if palette.is_open else []
     )
 
-    body_window = Window(content=body_control, wrap_lines=False)
+    body_window = Window(
+        content=body_control,
+        wrap_lines=False,
+        scroll_offsets=ScrollOffsets(top=1, bottom=1),
+        allow_scroll_beyond_bottom=True,
+    )
     input_window = Window(
         content=input_control,
         height=D(preferred=INPUT_HEIGHT),
