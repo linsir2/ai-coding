@@ -19,12 +19,14 @@ from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.context_compression import ContextManager
 from ai_coding.core.events import MemoryHarvested, MemoryInjected, RecordingObserver
 from ai_coding.domain.loop import StepResult, TurnStatus
-from ai_coding.domain.message import ChatMessage
+from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolResult
 from ai_coding.memory.note import NoteKind, new_note
 from ai_coding.memory.schema import HarvestCandidate
 from ai_coding.memory.service import MemoryService
 from ai_coding.memory.store import MemoryStore
+from ai_coding.security.approval import AutoApproveCallback
 from ai_coding.service.session_service import SessionService
+from ai_coding.tools.base import BaseTool, ToolContext
 from ai_coding.tools.registry import ToolRegistry
 
 
@@ -285,3 +287,77 @@ async def test_a_broken_memory_service_never_breaks_the_turn(tmp_path):
     assert text == "answer"
     assert loop.last_outcome is not None
     assert loop.last_outcome.status is TurnStatus.COMPLETED
+
+
+# ---- R8a D-14: writing a checkpoint is not evidence about the world --------
+
+
+class _CheckpointThenAnswer(ChatEngine):
+    """Calls checkpoint_write once, then answers."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        self.calls += 1
+        if self.calls == 1:
+            return StepResult(
+                text=None,
+                tool_calls=[
+                    ToolCallRef(
+                        id="c1", name="checkpoint_write", arguments='{"note": "记一行"}'
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        return StepResult(text="好了", finish_reason="stop")
+
+
+class _CheckpointStub(BaseTool):
+    parallel_safe = True
+
+    @property
+    def name(self) -> str:
+        return "checkpoint_write"
+
+    @property
+    def description(self) -> str:
+        return "checkpoint"
+
+    @property
+    def params_json_schema(self) -> dict:
+        return {"type": "object", "properties": {"note": {"type": "string"}}}
+
+    async def execute(self, params, ctx: ToolContext | None = None) -> ToolResult:
+        if ctx is not None and ctx.note_checkpoint is not None:
+            ctx.note_checkpoint(str(params.get("note", "")))
+        return ToolResult(success=True, output="checkpoint: 记一行")
+
+
+@pytest.mark.asyncio
+async def test_r8_a_turn_that_only_wrote_a_checkpoint_is_not_tool_evidence(tmp_path):
+    store = MemoryStore(tmp_path / "m.json")
+    memory = MemoryService(
+        store, extractor=_Extractor("项目用 uv 管理依赖"), config=MemoryConfig()
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    registry = ToolRegistry()
+    registry.register(_CheckpointStub())
+    loop = AgentLoop(
+        _CheckpointThenAnswer(),
+        sessions,
+        registry,
+        approval=AutoApproveCallback(),
+        memory=memory,
+        prompt=PromptAssembler("You are a coding assistant."),
+        settings=_cfg(max_tool_iterations=3),
+        workspace=str(tmp_path),
+    )
+
+    await loop.process_input(sessions.create(), "先记一行再干别的")
+
+    harvested = [note for note in store.all() if "uv" in note.text]
+    assert harvested, "the harvest must still run"
+    assert harvested[-1].evidence == "model", (
+        "a checkpoint call is the turn writing to itself, not tool evidence (D-14)"
+    )

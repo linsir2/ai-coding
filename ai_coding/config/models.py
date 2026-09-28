@@ -108,6 +108,11 @@ class AIConfig(BaseModel):
     # request's history was actually rewritten, so an ordinary turn pays nothing.
     working_memory_keep: int = 12
     working_memory_chars: int = 1200
+    # R8a: how many characters one model-written checkpoint line may keep.  It
+    # replaces the digest line's "what happened" sentence; the ring pays for it
+    # only after a compaction (measured: 104 chars fixed overhead, 1096 per ring,
+    # docs/r8-analysis.md 1.1 / 3.1).
+    working_memory_note_chars: int = 120
     # R6b: the escalation ladder (docs/r6-analysis.md 2.2).  A streak of failed
     # iterations buys one strategy nudge; a turn in which nothing succeeds stops
     # early.  0 disables either half.

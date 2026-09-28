@@ -248,3 +248,26 @@ def test_r8_a_blank_checkpoint_never_erases_a_real_one():
 
 def test_r8_a_fresh_turn_has_no_checkpoint():
     assert TurnBooks().checkpoint is None
+
+
+# --------------------------------------- R8a D-14: what counts as evidence
+
+
+def test_r8_a_checkpoint_write_is_not_world_evidence():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("checkpoint_write", success=True)])
+    assert books.successful_calls == 1  # the stall ladder still sees progress
+    assert books.evidence_calls == 0  # but it is not evidence about the world
+    assert books.failed_streak == 0
+
+
+def test_r8_a_real_tool_call_is_evidence():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", success=True)])
+    assert books.evidence_calls == 1
+
+
+def test_r8_a_failed_call_is_never_evidence():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", success=False, error="nonzero_exit")])
+    assert books.evidence_calls == 0

@@ -473,7 +473,9 @@ class AgentLoop:
             # already has, so memory can record where a note came from without
             # asking the model (and without filtering on it: D-R6-10).
             turn=frame.turn_number,
-            evidence="tool" if books.successful_calls else "model",
+            # R8a D-14: what counts is evidence about the world, and a checkpoint
+            # write is the turn talking about itself.
+            evidence="tool" if books.evidence_calls else "model",
         )
         await self.turn_hooks.fire(HookPoint.TURN_END, session)
         # R6a: a turn that ran out of budget used to hand the user an empty string.

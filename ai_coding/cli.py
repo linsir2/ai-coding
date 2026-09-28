@@ -454,6 +454,13 @@ def _build_loop(
             from ai_coding.tools.memory_write_tool import MemoryWriteTool
 
             registry.register(MemoryWriteTool(memory))
+        # R8a: the model's own line for the next turn in *this* session.  Also
+        # parent-only: a sub-agent's session is temporary, so the line would be
+        # written and thrown away.
+        if registry.get("checkpoint_write") is None:
+            from ai_coding.tools.checkpoint_tool import CheckpointTool
+
+            registry.register(CheckpointTool())
 
     return AgentLoop(
         engine,

@@ -37,10 +37,15 @@ from ai_coding.domain.task import TaskState, TodoItem
 from ai_coding.domain.turn_digest import DEFAULT_NOTE_CHARS, one_line
 from ai_coding.infra.deadline import Deadline
 
-__all__ = ["Failure", "TurnBooks", "TurnFrame"]
+__all__ = ["STATE_ONLY_TOOLS", "Failure", "TurnBooks", "TurnFrame"]
 
 #: One failed call, as the handoff reports it: (tool, error, output excerpt).
 Failure = tuple[str, str, str]
+
+#: Tools whose *success* is not evidence about the world (R8a, D-14): writing a
+#: checkpoint tells the turn about itself, so a turn that only did that is still
+#: a "model" turn as far as the harvest's provenance is concerned.
+STATE_ONLY_TOOLS = frozenset({"checkpoint_write"})
 
 _FAILURE_EXCERPT = 160
 
@@ -88,6 +93,10 @@ class TurnBooks:
     #: What the model asked its future self to remember about this turn (R8a).
     #: ``None`` = it never wrote one, and the harness line stands alone.
     checkpoint: str | None = None
+    #: Successful calls that are evidence about the world (R8a, D-14).  It is what
+    #: the harvest reads, so "the turn used tools" cannot be faked by writing a
+    #: checkpoint: that is the turn talking about itself.
+    evidence_calls: int = 0
 
     # ---- notifications ----------------------------------------------------
 
@@ -139,6 +148,9 @@ class TurnBooks:
         self.attempted_calls += len(outcomes)
         succeeded = [item for item in outcomes if item.result.success]
         self.successful_calls += len(succeeded)
+        self.evidence_calls += sum(
+            1 for item in succeeded if item.call.name not in STATE_ONLY_TOOLS
+        )
         self.failed_streak = 0 if succeeded else self.failed_streak + 1
         self.failures.extend(
             (

@@ -109,6 +109,9 @@ class PermissionGate:
             # the question: two prompts for one question, and any answer that was
             # not "y" turned the question into "the user declined" (measured).
             "ask_user",
+            # R8a: writing one line into the turn's own book touches neither the
+            # repo nor the durable memory (docs/r8-analysis.md 3.1, step 5).
+            "checkpoint_write",
         }
         self._warn_tools = {"write", "edit", "bash"}
 
