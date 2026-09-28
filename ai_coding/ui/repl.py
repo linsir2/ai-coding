@@ -104,6 +104,33 @@ async def handle_input(
         return _handle_model(loop, cmd.raw, session, console)
     if cmd.name == "resume":
         return _handle_resume(loop, cmd.raw, session, sessions, console)
+    if cmd.name == "permissions":
+        return _handle_permissions(loop, cmd.raw, session, console)
+    return REPLAction.CONTINUE, session
+
+
+def _handle_permissions(
+    loop: Any, raw: str, session: Any, console: DialogueConsole
+) -> tuple[REPLAction, Any]:
+    parts = raw.split()
+    dispatcher = getattr(loop, "dispatcher", None)
+    approval = getattr(dispatcher, "approval", None) if dispatcher else None
+    if len(parts) == 1:
+        name = type(approval).__name__ if approval else "(none)"
+        console.info(f"[permissions] current approval: {name}")
+        return REPLAction.CONTINUE, session
+    target = parts[1]
+    from ai_coding.security.approval import AutoApproveCallback, CLIApprovalCallback
+    if target == "auto":
+        if dispatcher:
+            dispatcher.approval = AutoApproveCallback()
+        console.info("[permissions] switched to auto-approve")
+    elif target == "confirm":
+        if dispatcher:
+            dispatcher.approval = CLIApprovalCallback()
+        console.info("[permissions] switched to confirm-all")
+    else:
+        console.error(f"[permissions] unknown policy '{target}'. Available: auto, confirm")
     return REPLAction.CONTINUE, session
 
 

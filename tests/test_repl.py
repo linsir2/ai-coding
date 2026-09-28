@@ -166,3 +166,14 @@ async def test_handle_resume_loads_session():
     action, session = await handle_input(loop, "/resume s1", sessions.items[1], sessions, dc)
     assert action is REPLAction.NEW_SESSION
     assert session is target
+
+
+async def test_handle_permissions_shows_current():
+    loop = _FakeLoop()
+    loop.dispatcher = type("D", (), {"approval": type("A", (), {"__repr__": lambda s: "CLIApprovalCallback"})()})()
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    action, _ = await handle_input(loop, "/permissions", sessions.items[0], sessions, dc)
+    assert action is REPLAction.CONTINUE
+    out = _session_text(c)
+    assert "CLIApprovalCallback" in out or "approval" in out.lower()
