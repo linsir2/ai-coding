@@ -103,6 +103,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     input_buffer = Buffer()
     input_event = asyncio.Event()
     awaiting_input = False
+    user_lines: set[int] = set()
 
     body.write("  ✨ Welcome to ai-coding! ✨\n")
     body.write("  Describe a task, or use / for commands.\n\n")
@@ -122,6 +123,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         wrap_lines=False,
         scroll_offsets=ScrollOffsets(top=1, bottom=1),
         allow_scroll_beyond_bottom=True,
+        get_line_prefix=lambda i: [("class:user-msg", "  ")] if i in user_lines else [],
     )
     input_window = Window(
         content=input_control,
@@ -198,6 +200,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
             text = input_buffer.text
             if text.strip():
                 body.write(f"> {text}\n")
+                user_lines.add(body.get_buffer().document.line_count - 2)
                 input_buffer.reset()
                 asyncio.create_task(_submit_text(text))
 

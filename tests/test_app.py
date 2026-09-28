@@ -90,3 +90,14 @@ def test_input_provider_does_not_write_to_body():
     provider_end = source.find("user_prompt.set_provider")
     provider_code = source[provider_start:provider_end]
     assert "body.write" not in provider_code
+
+
+def test_user_lines_tracked():
+    """User message line numbers must be tracked for styling."""
+    import inspect
+
+    from ai_coding.ui.app import run_app
+
+    source = inspect.getsource(run_app)
+    assert "user_lines" in source
+    assert "get_line_prefix" in source

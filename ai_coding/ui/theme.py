@@ -20,4 +20,5 @@ STYLE = Style.from_dict({
     "palette.hint": "#a4b0be",
     "input": "#dfe4ea",
     "input.prefix": "#00d2d3",
+    "user-msg": "bg:#2d3436 fg:#dfe4ea",
 })
