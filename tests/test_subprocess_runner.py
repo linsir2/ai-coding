@@ -159,3 +159,80 @@ async def test_async_variant_honours_a_deadline_bound():
     assert outcome.timed_out is True
     assert time.monotonic() - started < 5.0
     await asyncio.sleep(0)
+
+
+# ---- R8c-S1: the runner can speak while it works (docs/r8-analysis.md 3.3) ----
+
+
+def test_r8_chunks_arrive_while_the_command_is_still_running():
+    """The old implementation only ever returned at the end (2.4s of silence)."""
+    stamps: list[tuple[float, str, str]] = []
+    started = time.monotonic()
+
+    outcome = run_process(
+        "for i in 1 2 3; do echo step-$i; sleep 0.3; done",
+        shell=True,
+        timeout=10,
+        on_chunk=lambda stream, text: stamps.append(
+            (time.monotonic() - started, stream, text)
+        ),
+    )
+    elapsed = time.monotonic() - started
+
+    assert outcome.returncode == 0
+    assert [text for _at, _stream, text in stamps] == ["step-1\n", "step-2\n", "step-3\n"]
+    assert all(stream == "stdout" for _at, stream, _text in stamps)
+    assert stamps[0][0] < 0.3, "the first line must not wait for the command to finish"
+    assert stamps[0][0] < elapsed
+
+
+def test_r8_streaming_does_not_change_the_outcome():
+    plain = run_process("echo hi && echo err >&2", shell=True, timeout=5)
+    streamed = run_process(
+        "echo hi && echo err >&2", shell=True, timeout=5, on_chunk=lambda *_: None
+    )
+    assert (streamed.stdout, streamed.stderr, streamed.returncode) == (
+        plain.stdout,
+        plain.stderr,
+        plain.returncode,
+    )
+
+
+def test_r8_a_chunk_callback_that_raises_does_not_break_the_run():
+    def boom(*_args: object) -> None:
+        raise RuntimeError("observer")
+
+    outcome = run_process("echo hi", shell=True, timeout=5, on_chunk=boom)
+    assert outcome.returncode == 0
+    assert outcome.stdout == "hi\n"
+
+
+def test_r8_stdin_data_still_reaches_the_child():
+    """Command hooks feed their context through stdin (R4c)."""
+    outcome = run_process("cat", shell=True, timeout=5, stdin_data="from-stdin\n")
+    assert outcome.returncode == 0
+    assert outcome.stdout == "from-stdin\n"
+
+
+def test_r8_output_after_the_shell_exits_is_not_truncated():
+    """A grandchild holding the pipe must not cost us what we already read."""
+    outcome = run_process(
+        "echo first; (sleep 0.4; echo late) & exit 0", shell=True, timeout=5
+    )
+    assert "first" in outcome.stdout
+    assert "late" in outcome.stdout, "the reader must drain before returning"
+
+
+@pytest.mark.asyncio
+async def test_r8_the_async_variant_streams_too():
+    seen: list[str] = []
+
+    outcome = await run_process_async(
+        "echo async-hi",
+        shell=True,
+        timeout=5,
+        on_chunk=lambda _stream, text: seen.append(text),
+    )
+
+    assert outcome.stdout == "async-hi\n"
+    assert "".join(seen) == "async-hi\n"

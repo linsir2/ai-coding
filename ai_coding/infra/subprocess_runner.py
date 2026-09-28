@@ -100,12 +100,18 @@ def run_process(
     timeout: float = 60.0,
     kill_grace: float = DEFAULT_KILL_GRACE,
     max_output_chars: int | None = None,
+    on_chunk: Callable[[str, str], None] | None = None,
 ) -> ProcessOutcome:
     """Run ``command`` with a hard timeout.  Never raises for process failures.
 
     ``stdin_data`` is fed to the child and its stdin is then closed.  R4c needs it
     for command hooks, which receive their context as one JSON line; everything
     else keeps the old behaviour (stdin closed immediately).
+
+    R8c: ``on_chunk(stream, text)`` is called from the reader threads as output
+    arrives, while the command is still running.  It is observation only - the
+    returned :class:`ProcessOutcome` is the same either way, a raising callback is
+    swallowed, and nothing here changes the request/history.
     """
     started = time.monotonic()
     payload: bytes | None = None
@@ -133,23 +139,78 @@ def run_process(
             duration_seconds=_elapsed(),
         )
 
-    timed_out = False
-    try:
-        stdout_bytes, stderr_bytes = proc.communicate(input=payload, timeout=timeout)
-        returncode: int | None = proc.returncode
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        _kill_group(proc)
+    # R8c: the child's stdin is ours to write and close - ``communicate()`` used to
+    # do it for us.  A closed stdin is the default (DEVNULL when there is no data).
+    if payload is not None and proc.stdin is not None:
         try:
-            stdout_bytes, stderr_bytes = proc.communicate(input=payload, timeout=kill_grace)
+            proc.stdin.write(payload)
+            proc.stdin.close()
+        except OSError:  # pragma: no cover - the child died before reading
+            pass
+
+    buffers: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
+    lock = threading.Lock()
+
+    def _reader(stream: Any, name: str) -> None:
+        """Park on one pipe and publish what arrives (never raises)."""
+        try:
+            handle = stream.fileno()
+            while True:
+                data = os.read(handle, 4096)  # returns as soon as anything arrives
+                if not data:
+                    break
+                with lock:
+                    buffers[name].append(data)
+                if on_chunk is not None:
+                    try:
+                        on_chunk(name, _decode(data))
+                    except Exception:  # noqa: BLE001 - observation is optional
+                        pass
+        except Exception:  # noqa: BLE001 - EOF, closed pipes, a dying fd
+            pass
+
+    readers = [
+        threading.Thread(
+            target=_reader, args=(proc.stdout, "stdout"), name=f"{THREAD_NAME}-out", daemon=True
+        ),
+        threading.Thread(
+            target=_reader, args=(proc.stderr, "stderr"), name=f"{THREAD_NAME}-err", daemon=True
+        ),
+    ]
+    for reader in readers:
+        reader.start()
+
+    timed_out = False
+    deadline = started + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            _kill_group(proc)
+            break
+        try:
+            proc.wait(timeout=min(HEARTBEAT_SECONDS, remaining))
+            break
         except subprocess.TimeoutExpired:
-            # Something escaped the process group and still holds the pipes.
-            # Abandon them: the thread must return, and partial output still helps.
-            _log.debug("process %s survived killpg; abandoning its pipes", proc.pid)
-            _close_pipes(proc)
-            stdout_bytes = getattr(exc, "output", None) or b""
-            stderr_bytes = getattr(exc, "stderr", None) or b""
-        returncode = None
+            continue
+
+    # R8c: the process is gone, but a grandchild may still hold the pipe.  Give the
+    # readers a bounded window to drain it - returning early here would truncate
+    # output that the old ``communicate()`` would have delivered.
+    for reader in readers:
+        reader.join(timeout=kill_grace)
+    if any(reader.is_alive() for reader in readers):
+        # Something escaped the process group and still holds the pipes: abandon
+        # them, the thread must return, and partial output still helps.
+        _log.debug("process %s: readers still blocked; abandoning their pipes", proc.pid)
+        _close_pipes(proc)
+        for reader in readers:
+            reader.join(timeout=0.5)
+
+    with lock:
+        stdout_bytes = b"".join(buffers["stdout"])
+        stderr_bytes = b"".join(buffers["stderr"])
+    returncode: int | None = proc.returncode
 
     stdout = _decode(stdout_bytes)
     stderr = _decode(stderr_bytes)
@@ -173,6 +234,7 @@ async def run_process_async(
     kill_grace: float = DEFAULT_KILL_GRACE,
     max_output_chars: int | None = None,
     tick: float = HEARTBEAT_SECONDS,
+    on_chunk: Callable[[str, str], None] | None = None,
 ) -> ProcessOutcome:
     """Async wrapper: the work happens in a daemon thread under a hard deadline.
 
@@ -187,6 +249,16 @@ async def run_process_async(
     # The outer bound is strictly larger than the inner one, so the inner
     # (killpg-backed) timeout is what normally fires and the outer is a backstop.
     budget = timeout + kill_grace + 1.0
+    # R8c: the readers live in the worker thread, so handing a chunk back has to
+    # cross threads - the same ``call_soon_threadsafe`` path R2b already uses for
+    # the outcome itself.
+    loop = asyncio.get_running_loop()
+    deliver: Callable[[str, str], None] | None = None
+    if on_chunk is not None:
+        def _deliver(stream: str, text: str) -> None:
+            loop.call_soon_threadsafe(on_chunk, stream, text)
+
+        deliver = _deliver
     kwargs: dict[str, Any] = {
         "command": command,
         "shell": shell,
@@ -196,6 +268,7 @@ async def run_process_async(
         "timeout": timeout,
         "kill_grace": kill_grace,
         "max_output_chars": max_output_chars,
+        "on_chunk": deliver,
     }
     try:
         return await run_with_deadline(
