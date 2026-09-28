@@ -122,3 +122,102 @@ async def test_execute_without_ctx_does_not_crash(tool):
     """Migration tolerance: legacy call sites may still omit ctx."""
     r = await tool.execute({"action": "list"})
     assert r.success is True
+
+
+# ---- R9a: the gate (docs/r9-analysis.md 3.1) ----
+
+
+def _gate_tool() -> TodoWriteTool:
+    return TodoWriteTool(enforce_dependencies=True)
+
+
+@pytest.mark.asyncio
+async def test_r9_add_refuses_an_unknown_dependency(ctx):
+    r = await _gate_tool().execute(
+        {"action": "add", "content": "b", "depends_on": ["9"]}, ctx
+    )
+    assert r.success is False
+    assert r.error == "unknown_dependency"
+    assert ctx.task.items == []
+
+
+@pytest.mark.asyncio
+async def test_r9_add_refuses_a_self_dependency(ctx):
+    r = await _gate_tool().execute(
+        {"action": "add", "content": "a", "depends_on": ["1"]}, ctx
+    )
+    assert r.success is False
+    assert r.error == "self_dependency"
+    assert ctx.task.items == []
+
+
+@pytest.mark.asyncio
+async def test_r9_add_deduplicates_dependencies(ctx):
+    await _gate_tool().execute({"action": "add", "content": "a"}, ctx)
+    r = await _gate_tool().execute(
+        {"action": "add", "content": "b", "depends_on": ["1", "1"]}, ctx
+    )
+    assert r.success is True
+    assert ctx.task.get("2").depends_on == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_r9_completing_a_blocked_item_is_refused(ctx):
+    tool = _gate_tool()
+    await tool.execute({"action": "add", "content": "dep"}, ctx)
+    await tool.execute({"action": "add", "content": "next", "depends_on": ["1"]}, ctx)
+    r = await tool.execute({"action": "update", "id": "2", "status": "completed"}, ctx)
+    assert r.success is False
+    assert r.error == "blocked_by_dependencies"
+    assert r.data is not None and r.data["open"] == ["1"]
+    assert ctx.task.get("2").status == "pending"  # state untouched
+
+
+@pytest.mark.asyncio
+async def test_r9_starting_a_blocked_item_is_refused_too(ctx):
+    tool = _gate_tool()
+    await tool.execute({"action": "add", "content": "dep"}, ctx)
+    await tool.execute({"action": "add", "content": "next", "depends_on": ["1"]}, ctx)
+    r = await tool.execute({"action": "update", "id": "2", "status": "in_progress"}, ctx)
+    assert r.error == "blocked_by_dependencies"
+    assert ctx.task.get("2").status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_r9_after_the_dependency_completes_the_item_can_finish(ctx):
+    tool = _gate_tool()
+    await tool.execute({"action": "add", "content": "dep"}, ctx)
+    await tool.execute({"action": "add", "content": "next", "depends_on": ["1"]}, ctx)
+    await tool.execute({"action": "update", "id": "1", "status": "completed"}, ctx)
+    r = await tool.execute({"action": "update", "id": "2", "status": "completed"}, ctx)
+    assert r.success is True
+    assert ctx.task.get("2").status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_r9_dropping_the_dependency_unblocks(ctx):
+    tool = _gate_tool()
+    await tool.execute({"action": "add", "content": "dep"}, ctx)
+    await tool.execute({"action": "add", "content": "next", "depends_on": ["1"]}, ctx)
+    await tool.execute({"action": "update", "id": "1", "status": "dropped"}, ctx)
+    r = await tool.execute({"action": "update", "id": "2", "status": "completed"}, ctx)
+    assert r.success is True
+
+
+@pytest.mark.asyncio
+async def test_r9_pending_blocked_and_dropped_are_never_gated(ctx):
+    tool = _gate_tool()
+    await tool.execute({"action": "add", "content": "dep"}, ctx)
+    await tool.execute({"action": "add", "content": "next", "depends_on": ["1"]}, ctx)
+    for status in ("pending", "blocked", "dropped"):
+        r = await tool.execute({"action": "update", "id": "2", "status": status}, ctx)
+        assert r.success is True, status
+
+
+@pytest.mark.asyncio
+async def test_r9_the_gate_can_be_switched_off(ctx):
+    tool = TodoWriteTool(enforce_dependencies=False)
+    await tool.execute({"action": "add", "content": "dep"}, ctx)
+    await tool.execute({"action": "add", "content": "next", "depends_on": ["1"]}, ctx)
+    r = await tool.execute({"action": "update", "id": "2", "status": "completed"}, ctx)
+    assert r.success is True  # today's behaviour

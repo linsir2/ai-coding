@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from ai_coding.domain.message import ToolResult
-from ai_coding.domain.task import VALID_STATUSES, TaskState
+from ai_coding.domain.task import VALID_STATUSES, Blockers, TaskState
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 
@@ -22,6 +22,12 @@ class TodoWriteTool(BaseTool):
     """Maintain the session task list (add / update / list / clear)."""
 
     parallel_safe = True
+
+    def __init__(self, *, enforce_dependencies: bool = True) -> None:
+        #: R9a: refuse to start/finish an item whose dependencies are unmet, and
+        #: refuse to create dependencies that break the list's invariant.  The
+        #: switch exists for legacy lists (docs/r9-analysis.md D-R9-3).
+        self._enforce = bool(enforce_dependencies)
 
     @property
     def name(self) -> str:
@@ -106,6 +112,37 @@ class TodoWriteTool(BaseTool):
             )
         raw_deps = params.get("depends_on") or []
         deps = [str(d) for d in raw_deps] if isinstance(raw_deps, list) else []
+        if self._enforce:
+            new_id = task.next_id()
+            cleaned: list[str] = []
+            for dep in deps:
+                target = dep.strip()
+                if not target:
+                    continue
+                if target == new_id:
+                    return ToolResult(
+                        success=False,
+                        output=(
+                            f"error: item {new_id} cannot depend on itself; "
+                            "drop it from depends_on or add it after the dependency exists"
+                        ),
+                        error="self_dependency",
+                        data={"action": "add", "id": new_id, "depends_on": [target]},
+                    )
+                if task.get(target) is None:
+                    return ToolResult(
+                        success=False,
+                        output=(
+                            f"error: dependency '{target}' is not in the list; "
+                            "add it first (ids are assigned in order), or drop it "
+                            "from depends_on"
+                        ),
+                        error="unknown_dependency",
+                        data={"action": "add", "depends_on": [target]},
+                    )
+                if target not in cleaned:
+                    cleaned.append(target)
+            deps = cleaned
         item = task.add(content, depends_on=deps)
         return self._ok(task, "add", item_id=item.id)
 
@@ -120,10 +157,15 @@ class TodoWriteTool(BaseTool):
         status = params.get("status")
         content = params.get("content")
         evidence = params.get("evidence")
+        normalised = None if status is None else str(status).strip().lower()
+        if self._enforce and normalised in {"in_progress", "completed"}:
+            blockers = task.blockers(item_id)
+            if blockers.any:
+                return self._blocked_result(item_id, blockers)
         try:
             task.update(
                 item_id,
-                status=None if status is None else str(status).strip().lower(),
+                status=normalised,
                 content=None if content is None else str(content),
                 evidence=None if evidence is None else str(evidence),
             )
@@ -142,6 +184,32 @@ class TodoWriteTool(BaseTool):
                 data={"action": "update", "id": item_id},
             )
         return self._ok(task, "update", item_id=item_id)
+
+    @staticmethod
+    def _blocked_result(item_id: str, blockers: Blockers) -> ToolResult:
+        reasons: list[str] = []
+        if blockers.open:
+            reasons.append("未完成的依赖: " + ", ".join(blockers.open))
+        if blockers.unknown:
+            reasons.append("已不存在的依赖: " + ", ".join(blockers.unknown))
+        if blockers.cycle:
+            reasons.append("依赖成环: " + " → ".join(blockers.cycle))
+        return ToolResult(
+            success=False,
+            output=(
+                f"error: todo #{item_id} 还不能开始/完成（{'；'.join(reasons)}）。"
+                "出路：先 update 那些依赖为 completed；若某个依赖已作废，"
+                "update(id=<它>, status=dropped) 解锁；若链条成环，"
+                "把环里任意一项 dropped。"
+            ),
+            error="blocked_by_dependencies",
+            data={
+                "id": item_id,
+                "open": list(blockers.open),
+                "unknown": list(blockers.unknown),
+                "cycle": list(blockers.cycle),
+            },
+        )
 
     @staticmethod
     def _ok(task: TaskState, action: str, item_id: str | None = None) -> ToolResult:
