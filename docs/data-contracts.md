@@ -386,3 +386,38 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 | 工具 `memory_write` | `tools/memory_write_tool.py` | 参数 `text`/`kind`/`importance`/`supersedes`；文本上限 500 字符 |
 | `SteeringQueue` | `core/steering.py` | `put(text) -> bool`（`/` 开头与空行返回 False）、`pending`、`drain()` |
 | `InteractiveReader` | `ui/reader.py` | 唯一读取器 + 仲裁（问题 / 转向 / 命令 / 输入） |
+
+
+## R8 契约（模型写的 checkpoint / evidence / 流式与取消）
+
+### `AIConfig` / `UIConfig` 新增项
+
+| 配置 | 默认 | 作用 |
+|---|---|---|
+| `ai.working_memory_note_chars` | 120 | `checkpoint_write` 一句话的上限（替掉 digest 行的结果句） |
+| `ui.tool_chunks` | `true` | 是否把工具输出片段（含 MCP 进度）逐行显示；关闭＝回到「结束时一行预览」 |
+
+### 字段与工具
+
+| 契约 | 位置 | 说明 |
+|---|---|---|
+| `TurnDigest.note` / `.source` | `domain/turn_digest.py` | 模型自己写的那一行，与「谁写的」（`model` / `harness`）。**落盘持久，注入易失**（只在压缩回合进 `<working-memory>`）；`source` 不进渲染文本 |
+| `TurnDigest.display()` | 同上 | 环里显示的那句话：`note or outcome` |
+| `build_digest(..., model_note="", note_chars=120)` | 同上 | note 非空时作为结果句；`outcome` 字段保留原值供回放 |
+| `TurnBooks.checkpoint` / `.note_checkpoint(text, *, limit)` | `core/turn_books.py` | 本回合的 checkpoint（后写覆盖前写；空写不覆盖） |
+| `TurnBooks.evidence_calls` | 同上 | **算作「世界证据」的成功调用数**：`checkpoint_write` 不计入（D-14）；收割用的是它 |
+| `ToolContext.note_checkpoint` | `tools/base.py` | 工具写回回合状态的唯一通道（`checkpoint_write` 用） |
+| `ToolContext.kill_event` | 同上 | 每个调用一份的 `threading.Event`；取消时由分发器点亮，`bash` 把它交给进程运行器 |
+| 工具 `checkpoint_write` | `tools/checkpoint_tool.py` | 参数 `note`；ALLOW 档、`parallel_safe`、**只在组合根注册**；错误码 `missing_note` / `checkpoint_unavailable` |
+| `memory.relevance.evidence_rank(note)` | `memory/relevance.py` | 召回同分时的 tie-break：`tool`=0，其余=1（`""` 与 `model` 同档） |
+| `memory_search.evidence` | `tools/memory_search_tool.py` | `tool` / `model`（=「非 tool」）/ 空=不限；未知值 → `bad_evidence` |
+| 事件 `ToolChunk(call_id, tool_name, stream, text, seq)` | `core/events.py` | 流式片段（`stdout` / `stderr` / `progress`）。**永不进请求 / 历史 / 会话文件** |
+| `run_process(..., on_chunk=None, cancel=None)` | `infra/subprocess_runner.py` | `on_chunk(stream, text)` 从读线程调用；`cancel`（`threading.Event`）会 `killpg` 并 reap |
+| `run_process_async(..., on_chunk=None, cancel=None)` | 同上 | chunk 经 `loop.call_soon_threadsafe` 回到事件循环 |
+| `ProcessOutcome.cancelled` | 同上 | 取消语义（与 `timed_out` 区分）；取消/超时仍返回 `returncode=None` 与部分输出 |
+| `RunCancelled(label)` | `infra/deadline.py` | 「用户不要等了」——与 `DeadlineExpired`（时钟到点）并列的第二种放弃理由 |
+| `run_with_deadline(..., cancel=None)` | 同上 | 事件置位即放弃并抛 `RunCancelled` |
+| `CANCELLED_BY_USER = "cancelled_by_user"` | `domain/message.py` | `ToolResult.error` 的取值（D-7：调用级结果，不是回合状态） |
+| `TurnBooks.note_outcomes` 的失败计数 | `core/turn_books.py` | `cancelled_by_user` 的调用**不计入** `failed_streak`、不进 `failures`（D-11） |
+| `ToolDispatcher(..., cancel=None)` / `AgentLoop(..., cancel=None)` | `core/dispatch.py` / `core/agent_loop.py` | 取消事件一路贯通；`_run_tools` 在每批开始前 `clear()`（一次 Esc 只影响一批） |
+| `InteractiveReader.cancel_requested` / `request_cancel()` / `key_bindings()` | `ui/reader.py` | Esc 键的落点（`for_terminal` 负责把它装进 `PromptSession`） |

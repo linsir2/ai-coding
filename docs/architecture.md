@@ -163,3 +163,40 @@ sequenceDiagram
   「工具卡住 ⇒ 回合永远不结束」这类故障不可能再出现。回合上限见 `ai.turn_timeout_seconds`。
 - **进程执行只有一个出口（R2）**：`infra/subprocess_runner`（线程 + `killpg`），
   不再让业务代码各自 `create_subprocess_*`——那样会各自踩一次「取消要等管道 EOF」的坑。
+
+## R8 新增/改变的三条边
+
+包结构上多了一个工具与一个验收用 server：
+`tools/checkpoint_tool.py`（`checkpoint_write`）、`scripts/mcp_progress_server.py`。
+
+```mermaid
+flowchart LR
+    CW["checkpoint_write"] --> NB["TurnBooks.checkpoint"]
+    CW --> WB["写回 session.messages（此后每个请求都带着）"]
+    NB --> BD["build_digest(model_note)"]
+    BD --> WM["<working-memory>（仅压缩回合）"]
+    RP["run_process(on_chunk)"] --> TC["ToolChunk"]
+    MC["MCP report_progress"] --> TC
+    TC --> CON["控制台（0.15s/行）"]
+    ESC["Reader 的 Esc"] --> RW["run_with_deadline(cancel=)"]
+    RW --> KS["killpg + reap"]
+    RW --> DP["dispatch：cancelled_by_user"]
+    DP --> BK["不计失败 / 写回一条 tool 消息"]
+    TC -.->|不进| REQ["请求 / 历史 / 会话文件"]
+```
+
+内容分层（哪一层被谁动过，R8 的讨论都按这套编号）：
+
+| 层 | 是什么 |
+|---|---|
+| L1 | 系统提示词（静态，永不含记忆 / digest） |
+| L2 | 持久历史（`session.messages` 经压缩后的 `history`） |
+| L3 | 易失尾块（memory → task → hook → digest，每轮重渲染后追加） |
+| L4 | 写回的工具消息（L2 的子集） |
+| L5 | 会话文件（messages / task / turn_digests / 收割游标） |
+| L6 | 记忆库 `.memory` |
+| L7 | 观测事件与控制台（`ToolChunk` 属于这里） |
+| L8 | 在跑的子进程（R2b 的 runner） |
+
+R8 的结论：**R8b 只动 L6**；**R8a 动 L2/L3/L4/L5/L7（并间接影响 L6 的 evidence）**；
+**R8c 动 L2/L4/L7/L8**。

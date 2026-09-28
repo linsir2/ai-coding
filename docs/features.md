@@ -230,6 +230,9 @@ R7b 把这段话的前半句治掉了：L2 不再丢正文。实测同一份 70 
 `domain/turn_digest.py` 给出**由 harness 派生**的一行回合摘要（用户请求 + 终态 + 产物 +
 未完成项），**不额外调用模型**：
 
+> R8a 之后这一行**也可以是模型自己写的**：`checkpoint_write` 的 note 会替掉「结果那句话」，
+> harness 的产物与状态照旧补在后面（详见文末「R8」一节）。不写就与今天逐字节相同。
+
 - **有界环**：`ai.working_memory_keep`（默认 12）条，最旧的先淘汰，随会话落盘（`turnDigests`）；
 - **只在该注入时才注入**：本轮历史**真的被改写**时（`Compactor.did_compact`）才把
   `<working-memory>` 作为**易失尾部第四块**（顺序 memory / task / hook / digest）附上；
@@ -307,3 +310,27 @@ R7b 把这段话的前半句治掉了：L2 不再丢正文。实测同一份 70 
 | 回合中断 | 无 | 可取消，保留已完成的工具轨迹 |
 | 提示可见性 | 无 | `ask`/`repl` 打印 `[turn i/n]`、`[tool: x]`、结果预览、任务清单 |
 | 依赖 | openai-agents（含 numpy） | 零 agent 框架：`openai` + `mcp` |
+
+## R8：模型写的 checkpoint、evidence 过滤、工具流式与取消
+
+1. **模型可以自己写那一行摘要**（R8a）：`checkpoint_write(note)` 把一句话交给当前回合，
+   它替掉 digest 行里的「结果句」，harness 仍然补 `（改了 …）` 与非 completed 的 status；
+   上限 `ai.working_memory_note_chars`（默认 120）。三条边界：它**只**进会话内的环（要活到下一个
+   会话用 `memory_write`）、**只在压缩回合注入**、写完的那句话**第 N+1 轮才可能被看到**。
+   实测（真模型）：模型真的会用它——`scripts/r8_cases.py --real` 里那一条的 digest note 是
+   「README 不存在于工作区；下一步向用户确认…」。
+2. **`evidence` 从「只能看」变成「能用」**（R8b）：按需召回（`memory_search`）在**分数与相关性
+   完全相同**时才用来源破平局（`tool` 优先，老数据的空值不惩罚）；`memory_search` 新增
+   `evidence` 过滤（`tool` / `model` / 空=不限，未知值报 `bad_evidence`）。合并近重复的判定
+   **不动**（`_better_of` 仍按 importance → hits → 时间）。
+3. **长命令不再黑屏**（R8c-S1）：`bash` 的输出边跑边进控制台，每次调用 0.15s 最多一行
+   （`ui.tool_chunks`，默认开）。chunk 是**纯观测**：不进请求、不进历史、不进会话文件，
+   模型仍然只拿到最终的 `ToolResult`。
+4. **Esc 丢掉当前这一批，而不是整个回合**（R8c-S2）：工具结果回
+   `error="cancelled_by_user"`，模型换做法继续；被取消的调用**不算失败**（不会触发换策略提示）；
+   `bash` 的进程组会被真的杀掉（不是只不再等）。Ctrl-C 仍是整回合中止。
+5. **MCP 的进度也能看见**（R8c-S3）：服务器调 `ctx.report_progress` 时，适配器把它转成同一路
+   `ToolChunk(stream="progress")`；`scripts/mcp_progress_server.py` 是可复现的真 server。
+
+验收脚本：`.venv/bin/python scripts/r8_cases.py`（离线 13 条）；
+`--real` 再加 3 条真实用例（真模型一个回合、真模型 + 真 bash 的流式、真模型的 checkpoint 往返）。

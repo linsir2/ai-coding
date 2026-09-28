@@ -210,3 +210,17 @@ mcp:
 
 验收脚本：`.venv/bin/python scripts/r7e_cases.py`（离线 9 条）；
 `--real` 再加 3 条真实用例（真 pty 的转向、真 pty 的提问、真模型一个回合）。
+
+## R8 新增的配置与行为
+
+| 想做的事 | 怎么做 | 代价 / 边界 |
+|---|---|---|
+| 让模型自己写那句「这一轮该记住什么」 | 什么都不用开：`checkpoint_write` 已注册（REPL/组合根） | 它只进**本会话**的摘要环，且只在压缩回合注入；要跨会话用 `memory_write`。上限 `ai.working_memory_note_chars`（默认 120） |
+| 关掉流式输出（回到「结束时一行预览」） | `ui.tool_chunks: false` | 默认开；每次调用 0.15s 最多一行 |
+| 只找「确实动过手的那一轮」记下的记忆 | `memory_search(evidence="tool")` | `model` 表示「非 tool」，**包含** R6d 之前没有 evidence 字段的老数据 |
+| 丢掉当前卡住的那次工具调用 | 在终端按 **Esc** | 工具结果回 `cancelled_by_user`，**回合继续**；`bash` 的进程组会被真的杀掉；这次取消不算失败、也不推进「换策略」提示 |
+| 中止整个回合 | **Ctrl-C**（不变） | 保留已完成的文本与轨迹 |
+| 让 MCP 服务器的进度可见 | 服务器调 `ctx.report_progress(...)` 即可 | 不报进度的服务器什么都不会显示；`scripts/mcp_progress_server.py` 是可用样例 |
+
+验收脚本：`.venv/bin/python scripts/r8_cases.py`（离线 13 条）；
+`--real` 再加 3 条真实用例（真模型回合、真模型 + 真 bash 的流式、真模型的 checkpoint 往返）。

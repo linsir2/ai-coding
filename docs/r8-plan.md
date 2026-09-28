@@ -78,7 +78,7 @@ rich、pytest（`-o addopts=""`）、ruff、mypy。
 - Consumes: `MemoryNote.evidence`（`"tool"` / `"model"` / `""`）
 - Produces: `evidence_rank(note: MemoryNote) -> int`（0 = tool，1 = 其它）
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 def _ev_note(note_id: str, evidence: str) -> MemoryNote:
@@ -114,12 +114,12 @@ def test_r8_a_lower_score_is_never_reordered_by_evidence():
     assert ranked[0].score > ranked[-1].score
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_memory_relevance.py -o addopts="" -q`
 Expected: `test_r8_evidence_breaks_a_tie_between_identical_notes` FAIL（同分时按 `note.id`，`a` 在前）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ```python
 #: Where a note came from, as a tie-breaker only (R8b, D-3).  `""` is legacy data
@@ -147,12 +147,12 @@ def evidence_rank(note: MemoryNote) -> int:
 
 并把 `"evidence_rank"` 加进 `__all__`。
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_memory_relevance.py tests/test_memory_service.py -o addopts="" -q`
 Expected: PASS（既有 case 2/9/10 一条断言都不改）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/memory/relevance.py tests/test_memory_relevance.py
@@ -170,7 +170,7 @@ git commit -m "R8b-1: evidence only breaks a tie when the scores are equal"
 - Consumes: `memory.service._better_of`
 - Produces: 无（回归钉子，D-13 的先决条件）
 
-- [ ] **Step 1: 写测试（这是「钉现状」，不是红测试）**
+- [x] **Step 1: 写测试（这是「钉现状」，不是红测试）**
 
 ```python
 def test_r8_merging_ignores_evidence(tmp_path):
@@ -196,12 +196,12 @@ def test_r8_merging_ignores_evidence(tmp_path):
     assert (keep.id, drop.id) == ("hit", "old")  # hits outrank evidence
 ```
 
-- [ ] **Step 2: 跑一次**
+- [x] **Step 2: 跑一次**
 
 Run: `.venv/bin/python -m pytest tests/test_memory_service_v2.py -o addopts="" -q`
 Expected: PASS（若 FAIL 说明 `_better_of` 的现状与文档不符 → 先核对，不要改断言）
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add tests/test_memory_service_v2.py
@@ -220,7 +220,7 @@ git commit -m "R8b-2: pin the merge decision so evidence stays out of it"
 - Consumes: `MemoryNote.evidence`
 - Produces: `memory_search` 参数 `evidence: "tool" | "model" | ""`；错误码 `bad_evidence`
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 def _evidence_service(tmp_path) -> MemoryService:
@@ -262,12 +262,12 @@ async def test_r8_unknown_evidence_is_an_error_not_a_silent_pass(tmp_path):
     assert result.error == "bad_evidence"
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_tool_memory_search.py -o addopts="" -q`
 Expected: FAIL（`evidence` 现在被忽略，未知值也当没写）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `params_json_schema` 的 `properties` 加：
 
@@ -301,12 +301,12 @@ Expected: FAIL（`evidence` 现在被忽略，未知值也当没写）
 
 并在每条 note 的 dict 里加 `"evidence": hit.note.evidence`。
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_tool_memory_search.py -o addopts="" -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy ai_coding`
 Expected: 全绿
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/tools/memory_search_tool.py tests/test_tool_memory_search.py
@@ -325,7 +325,7 @@ git commit -m "R8b-3: memory_search can ask for tool-backed notes only"
 - Consumes: `TurnOutcome`
 - Produces: `TurnDigest.note` / `.source` / `.display()`；`build_digest(..., model_note="", note_chars=DEFAULT_NOTE_CHARS)`；`DEFAULT_NOTE_CHARS = 120`
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 def test_r8_note_replaces_the_outcome_sentence():
@@ -386,12 +386,12 @@ def test_r8_a_note_longer_than_the_cap_is_cut():
     assert len(digest.note) == 10
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_turn_digest.py -o addopts="" -q`
 Expected: FAIL（`build_digest()` 没有 `model_note` 参数）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ```python
 DEFAULT_NOTE_CHARS = 120
@@ -449,12 +449,12 @@ def build_digest(
     )
 ```
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_turn_digest.py tests/test_loop_digest.py -o addopts="" -q`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/domain/turn_digest.py tests/test_turn_digest.py
@@ -472,7 +472,7 @@ git commit -m "R8a-1: a digest line can carry the model's own note"
 **Interfaces:**
 - Produces: `TurnBooks.checkpoint: str | None`；`TurnBooks.note_checkpoint(text, *, limit=120) -> None`
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 def test_r8_checkpoint_collapses_to_one_line_and_caps():
@@ -501,12 +501,12 @@ def test_r8_a_fresh_turn_has_no_checkpoint():
     assert TurnBooks().checkpoint is None
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_turn_books.py -o addopts="" -q`
 Expected: FAIL（`AttributeError: 'TurnBooks' object has no attribute 'note_checkpoint'`）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ```python
 from ai_coding.domain.turn_digest import DEFAULT_NOTE_CHARS, one_line
@@ -523,12 +523,12 @@ from ai_coding.domain.turn_digest import DEFAULT_NOTE_CHARS, one_line
             self.checkpoint = body
 ```
 
-- [ ] **Step 4: 跑绿**
+- [x] **Step 4: 跑绿**
 
 Run: `.venv/bin/python -m pytest tests/test_turn_books.py -o addopts="" -q`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/core/turn_books.py tests/test_turn_books.py
@@ -547,7 +547,7 @@ git commit -m "R8a-2: the turn book keeps the model's checkpoint line"
 - Produces: `ToolContext.note_checkpoint: Callable[[str], None] | None`；`TurnCloser.close(..., model_note="")`
 - 注意：`_run_tools` 现在拿不到 `books`（调用点 `core/agent_loop.py:330`），本任务给它加参数
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 class _CheckpointTool(BaseTool):
@@ -623,12 +623,12 @@ async def test_r8_the_note_never_enters_the_system_prompt():
         )
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_loop_digest.py -o addopts="" -q`
 Expected: FAIL（`ToolContext` 没有 `note_checkpoint`）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `tools/base.py`：
 
@@ -657,12 +657,12 @@ Expected: FAIL（`ToolContext` 没有 `note_checkpoint`）
 `core/turn_close.py::close(..., model_note: str = "")` →
 `build_digest(..., model_note=model_note, note_chars=int(getattr(self._settings, "working_memory_note_chars", 120) or 120))`。
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_loop_digest.py tests/test_request_builder.py tests/test_tool_context.py -o addopts="" -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy ai_coding`
 Expected: PASS / clean
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/tools/base.py ai_coding/core/request_builder.py ai_coding/core/agent_loop.py ai_coding/core/turn_close.py tests/test_loop_digest.py
@@ -681,7 +681,7 @@ git commit -m "R8a-3: the loop carries the note from the tool to the digest"
 **Interfaces:**
 - Produces: `CheckpointTool`（`name = "checkpoint_write"`，ALLOW，`parallel_safe = True`）；`TurnBooks.evidence_calls`
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 新文件 `tests/test_tool_checkpoint.py`：
 
@@ -745,12 +745,12 @@ def test_r8_a_real_tool_call_is_evidence():
 `tests/test_memory_turn_evidence.py` 追加一条同义断言（用该文件既有的 `evidence` 判据 helper；
 没有 helper 就直接断言 `books.evidence_calls == 0`）。
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_tool_checkpoint.py tests/test_turn_books.py -o addopts="" -q`
 Expected: FAIL（模块不存在 / 没有 `evidence_calls`）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `tools/checkpoint_tool.py`：
 
@@ -864,11 +864,11 @@ STATE_ONLY_TOOLS = frozenset({"checkpoint_write"})
     working_memory_note_chars: int = 120
 ```
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_tool_checkpoint.py tests/test_turn_books.py tests/test_loop_digest.py tests/test_memory_turn_evidence.py tests/test_cli.py -o addopts="" -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy ai_coding`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/tools/checkpoint_tool.py ai_coding/core/turn_books.py ai_coding/core/agent_loop.py ai_coding/cli.py ai_coding/config/models.py tests/test_tool_checkpoint.py tests/test_turn_books.py tests/test_memory_turn_evidence.py
@@ -885,7 +885,7 @@ git commit -m "R8a-4: checkpoint_write, and a turn that only wrote one is not ev
 **Interfaces:**
 - Produces: 明确的 go / no-go：终端 Esc 是否交付；`killpg` 是否真能杀掉卡住的进程组
 
-- [ ] **Step 1: 跑三个实验**
+- [x] **Step 1: 跑三个实验**
 
 ```bash
 # ① 后台 reader 里 Esc 键绑定会不会注册成功、是否触发
@@ -927,13 +927,13 @@ except ProcessLookupError:
 PY
 ```
 
-- [ ] **Step 2: 记录结论**
+- [x] **Step 2: 记录结论**
 
 在本文档末尾加「## Spike 结论」一节，逐条写：① Esc 键绑定是否注册并触发；② `killpg` 之后
 `ProcessLookupError` 是否出现；③ `patch_stdout` 下提示行是否还能用。
 **任一条不过**：Task 13 只交付程序化取消 API，终端按键记回 backlog（并在结论里写明）。
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add docs/r8-plan.md
@@ -952,7 +952,7 @@ git commit -m "R8c-0: the cancel spike, measured"
 - Produces: `ToolChunk(call_id, tool_name, stream, text, seq)`；
   `run_process(..., on_chunk=None, cancel=None)`；`run_process_async(..., on_chunk=None, cancel=None)`
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 def test_r8_chunks_arrive_while_the_command_is_still_running():
@@ -1015,12 +1015,12 @@ def test_r8_async_variant_streams_too():
     assert seen == ["async-hi\n"]
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_subprocess_runner.py -o addopts="" -q`
 Expected: `TypeError: run_process() got an unexpected keyword argument 'on_chunk'`
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `core/events.py`：加 `ToolChunk`（字段见 Interfaces）并加进 `LoopEvent` 联合：
 
@@ -1115,12 +1115,12 @@ class ToolChunk:
     kwargs: dict[str, Any] = {..., "on_chunk": deliver, "cancel": cancel}
 ```
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_subprocess_runner.py -o addopts="" -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy ai_coding`
 Expected: R2b 既有 11 条与新用例全绿
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/core/events.py ai_coding/infra/subprocess_runner.py tests/test_subprocess_runner.py
@@ -1139,7 +1139,7 @@ git commit -m "R8c-1: the process runner can speak while it works"
 - Consumes: `ToolChunk`、`ToolContext.emit`、`ToolContext.call_id`
 - Produces: `bash` → `ToolChunk`；`ConsoleObserver(console, *, clock=None)` 节流；MCP 进度 → `ToolChunk(stream="progress")`；`UIConfig.tool_chunks: bool = True`
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 @pytest.mark.asyncio
@@ -1170,12 +1170,12 @@ def test_r8_console_throttles_chunks_per_call():
 MCP 的用例用假 session（`call_tool` 里回调两次 `progress_callback`），断言收到
 `[ToolChunk(stream="progress"), ToolChunk(stream="progress")]`。
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_tool_bash.py tests/test_console_events.py -o addopts="" -q`
 Expected: FAIL（没有 chunk 事件）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `tools/bash_tool.py`：
 
@@ -1252,11 +1252,11 @@ class ConsoleObserver:
     tool_chunks: bool = True
 ```
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_tool_bash.py tests/test_console_events.py tests/test_mcp.py tests/test_mcp_stdio.py -o addopts="" -q && .venv/bin/python -m mypy ai_coding`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/tools/bash_tool.py ai_coding/ui/console.py ai_coding/core/mcp.py ai_coding/config/models.py tests/test_tool_bash.py tests/test_console_events.py tests/test_mcp.py
@@ -1275,7 +1275,7 @@ git commit -m "R8c-2: the console and MCP show progress while a tool runs"
 - Produces: `RunCancelled(label)`；`run_with_deadline(..., cancel=None)`；`CANCELLED_BY_USER`；
   `ToolDispatcher(..., cancel=None)`；`AgentLoop(..., cancel=None)`；`ToolContext.kill_event`
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 @pytest.mark.asyncio
@@ -1322,12 +1322,12 @@ async def test_r8_the_loop_clears_the_cancel_before_each_batch():
     ... 两批调用；第一批取消、第二批照常跑 ...
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_deadline.py tests/test_tool_dispatch.py -o addopts="" -q`
 Expected: FAIL（没有 `cancel` / `RunCancelled` / `CANCELLED_BY_USER`）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `infra/deadline.py`：
 
@@ -1424,11 +1424,11 @@ CANCELLED_BY_USER = "cancelled_by_user"
 `AgentLoop(..., cancel: asyncio.Event | None = None)` 传给 `ToolDispatcher`；`_run_tools` 在
 `dispatch_batch` 之前 `if self.cancel is not None: self.cancel.clear()`。
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_deadline.py tests/test_tool_dispatch.py tests/test_agent_loop_react.py tests/test_dispatch_approval_timeout.py -o addopts="" -q && .venv/bin/python -m mypy ai_coding`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/infra/deadline.py ai_coding/domain/message.py ai_coding/tools/base.py ai_coding/core/dispatch.py ai_coding/core/agent_loop.py tests/test_deadline.py tests/test_tool_dispatch.py tests/test_agent_loop_react.py
@@ -1446,7 +1446,7 @@ git commit -m "R8c-3: cancel one batch, and the model hears about it"
 **Interfaces:**
 - Produces: `ProcessOutcome.cancelled: bool`；`bash` 把 `ctx.kill_event` 交给 runner；取消不进失败计数
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 def test_r8_cancelling_really_kills_the_process_group(tmp_path):
@@ -1482,12 +1482,12 @@ def test_r8_a_cancelled_call_does_not_hide_a_real_failure():
     assert [tool for tool, _reason, _preview in books.failures] == ["bash"]
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_subprocess_runner.py tests/test_turn_books.py -o addopts="" -q`
 Expected: FAIL（`ProcessOutcome` 没有 `cancelled`；取消被计成失败）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `infra/subprocess_runner.py`：`ProcessOutcome` 加 `cancelled: bool = False`；等待循环里在超时判断之前：
 
@@ -1524,11 +1524,11 @@ Expected: FAIL（`ProcessOutcome` 没有 `cancelled`；取消被计成失败）
         )
 ```
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_subprocess_runner.py tests/test_turn_books.py tests/test_tool_bash.py -o addopts="" -q`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/infra/subprocess_runner.py ai_coding/tools/bash_tool.py ai_coding/core/turn_books.py tests/test_subprocess_runner.py tests/test_turn_books.py
@@ -1547,7 +1547,7 @@ git commit -m "R8c-4: Esc stops the process, and a cancel is not a failure"
 **Interfaces:**
 - Produces: `InteractiveReader(..., cancel_key="escape")`、`InteractiveReader.cancel_requested`、`request_cancel()`
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 @pytest.mark.asyncio
@@ -1568,12 +1568,12 @@ def test_r8_the_reader_exposes_an_escape_binding():
 MCP 进度门控用例（`tests/test_mcp_progress.py`）用 `scripts/mcp_progress_server.py`，断言 3 次
 进度以 `ToolChunk(stream="progress")` 到达。
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_ui_reader.py -o addopts="" -q`
 Expected: FAIL（没有 `request_cancel`）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `ui/reader.py`：
 
@@ -1604,14 +1604,14 @@ Expected: FAIL（没有 `request_cancel`）
 （先建实例、再把 `key_bindings()` 交给 `PromptSession`）。`cli.py` 把 `reader.cancel_requested`
 交给 `AgentLoop(cancel=...)`。
 
-- [ ] **Step 4: 跑绿 + 门控**
+- [x] **Step 4: 跑绿 + 门控**
 
 Run: `.venv/bin/python -m pytest tests/test_ui_reader.py -o addopts="" -q`
 Run: `AI_CODING_PTY=1 .venv/bin/python -m pytest tests/test_repl_cancel_pty.py -o addopts="" -q`
 Run: `AI_CODING_MCP_STDIO=1 .venv/bin/python -m pytest tests/test_mcp_progress.py -o addopts="" -q`
 Expected: PASS（CI 里跳过门控时要在 `docs/integration_testing.md` 写明原因：需要真 tty / 允许 spawn 子进程）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/ui/reader.py ai_coding/cli.py scripts/mcp_progress_server.py tests/test_ui_reader.py tests/test_repl_cancel_pty.py tests/test_mcp_progress.py
@@ -1630,32 +1630,32 @@ git commit -m "R8c-5: Esc asks the running turn to drop this batch"
 **Interfaces:**
 - Produces: `scripts/r8_cases.py`（离线 12 + `--real` 3）
 
-- [ ] **Step 1: 写验收脚本**
+- [x] **Step 1: 写验收脚本**
 
 沿用 `scripts/r7e_cases.py` 的形状（一个 case 一个函数，返回 PASS/FAIL 与一行理由）。离线 12 条：
 tie-break、`evidence` 过滤、digest note 渲染、写回历史、`evidence` 排除 checkpoint、chunk 顺序、
 `stdin_data` 路径、退出后排空、取消杀进程组、取消不计失败、控制台节流、开关 chunk 的请求逐字节相同。
 `--real` 3 条（需要 `config.local.yaml`）是行为观察，不做硬断言。
 
-- [ ] **Step 2: 跑验收**
+- [x] **Step 2: 跑验收**
 
 Run: `.venv/bin/python scripts/r8_cases.py`
 Run: `.venv/bin/python scripts/r8_cases.py --real --config config.local.yaml`
 Expected: 离线 12/12；真实 3/3
 
-- [ ] **Step 3: 更新六份文档 + backlog**
+- [x] **Step 3: 更新六份文档 + backlog**
 
 按 `docs/r8-analysis.md` §12 的清单逐条改：`features.md`（回合摘要环 + 记忆 + 工具）、
 `data-contracts.md`（本节 Global Constraints 列出的全部新接口）、`architecture.md`（包结构与三条新边）、
 `how-to-run.md`（Esc 会真的杀命令、流式开关、checkpoint 与 memory_write 的分工）、
 `integration_testing.md`（`scripts/r8_cases.py` 与两条门控用例）、`r7-backlog.md`（2.2 / 2.5 / 3.6 划掉）。
 
-- [ ] **Step 4: 全量门禁**
+- [x] **Step 4: 全量门禁**
 
 Run: `.venv/bin/python -m pytest tests/ -o addopts="" -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy ai_coding`
 Expected: 全绿；测试总数从 1010 起只增不减
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add -A
@@ -1720,3 +1720,51 @@ Task 13 不必只依赖真终端：可以有一条**非门控**的测试，真�
 
 **结论**：Esc 交付（含非门控的按键测试），取消路径按 D-10 真的杀进程组，两条门控用例
 （真 pty、真 stdio）也保留。
+
+---
+
+## 执行状态（2026-09-28 完成）
+
+14 个 Task 全部落地并单独提交；每一步都先红后绿。质量门禁：**1072 passed / 4 skipped**（其中 2 条是
+默认跳过的门控用例，另外 2 条来自更早的轮次）、`ruff check .` 0、`mypy ai_coding` 0；
+门控全开（`AI_CODING_PTY=1 AI_CODING_MCP_STDIO=1`）时 13 条相关用例全过；
+`scripts/r8_cases.py` 离线 **13/13**、`--real` **16/16**（真模型三连：普通回合成、流式 bash 收到
+3 个 `ToolChunk`、模型真的用 `checkpoint_write` 并让 digest 带上那句话）。
+
+提交序列（自下向上）：
+
+| 提交 | 内容 |
+|---|---|
+| `8d23e05` | R8b-1 evidence 只在同分时破平局 |
+| `8f7f0c7` | R8b-2 合并判定的回归钉子 |
+| `0c6c2b3` | R8b-3 `memory_search` 的 `evidence` 过滤 |
+| `cac9b22` | R8a-1 digest 行可以带模型的 note |
+| `f35318f` | R8a-2 回合本子记下这句话 |
+| `1131e03` | R8a-3 从工具接到 digest |
+| `c87a4a0` | R8a-4 `checkpoint_write` + evidence 排除 |
+| `c021eef` | R8c-0 spike 结论 |
+| `295507d` | R8c-1 runner 边跑边说 |
+| `e3449cf` | R8c-2 控制台与 MCP 进度 |
+| `c2fb349` | R8c-3 cancel 一路贯通 |
+| `f0c261f` | R8c-4 取消真的杀进程 / 不算失败 |
+| `7205452` | R8c-5 Esc 键 + 门控 pty |
+| 本提交 | 验收脚本 + 六份文档 + 本状态 |
+
+### 与计划的偏差（都写在这里，免得下次重新考古）
+
+1. **`ToolChunk` 事件落在 R8c-2 的提交里**，不在 R8c-1：R8c-1 只改 runner（它不需要事件类型），
+   事件类型跟着第一个消费者（bash / 控制台）一起进，独立审阅反而更清楚。
+2. **`tests/test_console_events.py` 并不存在**（计划里写错了文件名）：节流与「默认开」的用例落在新建的
+   `tests/test_tool_chunks.py`，runner 的流式用例在 `tests/test_subprocess_runner.py`。
+3. **改了一条既有测试断言的措辞**：`tests/test_tool_dispatch.py::test_tool_receives_the_given_context`
+   原本用 `replace(received, call_id="") == ctx` 表达「除 call_id 外全部透传」；R8c 让分发器**又**多了
+   一个逐调用字段 `kill_event`，所以把归一化扩成 `call_id=""` + `kill_event=None` 并补了注释。
+   测试的**意图**没变（当时 R4a 加 `call_id` 时也是同一种改法），提交信息里写明了。
+4. **离线验收是 13 条而不是 12 条**：多出来的是「分发光结构化取消」（`dispatcher_cancel_is_structured`），
+   它把 `deadline → dispatch` 这一层单独钉住，比把它塞进别的 case 更值。
+5. **门控 pty 用例的 child 把结果写文件**：pty 里最后一个 slave fd 关闭后，父进程读 master 会拿到
+   EIO 且排队字节一起消失（实测），所以断言读 `result.json`；**Esc 仍然走真终端**。
+6. **`ProcessOutcome` 多了一个字段** `cancelled`（计划里靠 `timed_out` 之外的方式表达取消语义，
+   实现时发现字段最直接）；取消与超时都仍返回 `returncode=None` 与部分输出。
+7. **`TurnDigest.source` 的默认值是 `"harness"`**（不是空串），这样老会话行在 `from_dict` 之后
+   与新建的 harness 行完全相等，round-trip 才是真的。

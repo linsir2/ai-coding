@@ -31,10 +31,10 @@
 | # | 事项 | 出处 | 现状核验 | 建议 | 规模 |
 |---:|---|---|---|---|---|
 | 2.1 | **L2 占位改「头尾窗口」**（`[Previous: used X]` → 保留头 L/2 + 尾 L/2） | D-R6-13（本次不做） | `context_compression.placeholder_old_results` 仍直接丢弃正文；R6 实测里模型抱怨「这些命令的输出从来没有真正返回给我」 | **P0**（对准病根） | 小-中（会改 `features.md` 的 L2 定义 + `tests/test_context_compression.py:94` 的既有断言） |
-| 2.2 | GA 式**模型写的 checkpoint** 替代 harness 派生摘要 | D-R6-1（R7 优化项） | 现在是 `build_digest` 派生，措辞平实；R6 的 arm B 里模型自己说「这是照抄摘要，不是我知道的事」 | P1 | 中（多一次工具调用 + 提示词） |
+| 2.2 | ~~GA 式**模型写的 checkpoint** 替代 harness 派生摘要~~ | D-R6-1（R7 优化项） | **R8a 已做**：`checkpoint_write` 的 note 替掉 digest 行的结果句（docs/r8-analysis.md 3.1） | —— | —— |
 | 2.3 | **审批回调的 deadline 洞** | D-R6-9（本次不动） | `core/dispatch.py::_ask` 仍是裸 `await approval.approve(...)`：卡住的审批挂死整回合（R6c 的 `ask_user` 已经用 `asyncio.to_thread` 做对了） | **P0**（小改动、安全收益） | 小 |
 | 2.4 | **REPL 提问通道复用 `PromptSession`** | r6-analysis §10.8 / integration_testing R6c 段 | 实测：真 pty 下问题会打印、工具会等待；管道/脚本场景 prompt_toolkit 先占住输入 → 降级为 `no_answer`；真人在终端敲的那一行能否到达工具**未验证** | **P0**（这是 R6c 唯一没验证的路径） | 小-中 |
-| 2.5 | `evidence` 用于召回同分择优 | D-R6-10（只观测） | 现在只进 `/memory` 与轨迹，不参与排序 | P2 | 小 |
+| 2.5 | ~~`evidence` 用于召回同分择优~~ | D-R6-10（只观测） | **R8b 已做**：同分时破平局 + `memory_search` 的 `evidence` 过滤；合并判定刻意不动（docs/r8-analysis.md 3.2） | —— | —— |
 | 2.6 | 自进化 / 自主调度（GA 的 `reflect/scheduler.py` 那层） | R4 §16 与 R6 §14「明确不做」 | 无 | P2（要单独一轮） | 大 |
 
 ## 3. 编排 / 工具 / MCP
@@ -46,7 +46,7 @@
 | 3.3 | `mcp.connection_timeout` 默认 **30s**，而 npx 冷启动实测 **~27s** | features.md:141 | `MCPConfig.connection_timeout = 30`（未改）；文档已建议 60–90 | P1（一行默认值 + 文档 + 用例） | 小 |
 | 3.4 | `subagent.context_mode`（full / task_only）开关位 | r1a-5 §8核验④ 留位未实现 | `rg context_mode ai_coding/` → **无** | P2 | 小 |
 | 3.5 | `depends_on` 硬门禁 | r1-analysis §4.1 YAGNI | `task.py` docstring 仍写「not enforced as a hard gate」 | P2 | 小 |
-| 3.6 | 工具层流式输出 / 取消语义 | R2「明确不做」 | 无 | P2 | 中 |
+| 3.6 | ~~工具层流式输出 / 取消语义~~ | R2「明确不做」 | **R8c 已做**：`run_process(on_chunk)` + Esc 取消（真的 `killpg`，且不计失败）+ MCP 进度（docs/r8-analysis.md 3.3） | —— | —— |
 | 3.7 | ~~非 bash 工具的统一超时~~ | r1a-3「不做」 | **已解决**：R2 的 `max_duration_seconds` + 分发器 `min(工具上限, 回合剩余)` | —— | —— |
 
 ## 4. 记忆层（按你的要求：不含 RAG）

@@ -277,3 +277,24 @@ AI_CODING_MCP_STDIO=1 pytest tests/test_mcp_stdio.py -q
 网络相关执行（`agents_sdk_service.execute_turn`、`llm_helpers._chat`）不列入离线单测；
 其纯解析函数已单独单测（`tests/test_agents_sdk_stream_helpers.py`、
 `tests/test_llm_helpers.py`），并用本文的冒烟脚本做真实覆盖。
+
+## R8 验收与门控用例
+
+离线的 13 条（tie-break、evidence 过滤、digest note、写回历史、evidence 排除 checkpoint、
+chunk 顺序、`stdin_data`、退出后排空、取消杀进程组、取消不计失败、chunk 不进请求、
+分发光结构化取消）与 3 条真实观察：
+
+```bash
+.venv/bin/python scripts/r8_cases.py                                  # 13/13
+.venv/bin/python scripts/r8_cases.py --real --config config.local.yaml # 16/16（真模型）
+
+# 两条门控（默认跳过：需要真终端 / 允许 spawn 子进程）
+AI_CODING_PTY=1 .venv/bin/python -m pytest tests/test_repl_cancel_pty.py -q
+AI_CODING_MCP_STDIO=1 .venv/bin/python -m pytest tests/test_mcp_progress.py -q
+```
+
+`tests/test_repl_cancel_pty.py` 会真的往 pty 里写一个 `\x1b`：断言 transcript 里出现
+`cancelled_by_user`、回合仍然完成、并且那条 `sleep 30` 的进程组已经消失。两个测试工具上的坑
+都写在文件注释里：child 把结果写**文件**而不是 pty（最后一个 slave fd 关闭后，Linux 会让父进程的
+`os.read(master)` 抛 EIO、连同排队字节一起丢掉，实测），以及 `os.killpg(pgid, 0)` 必须在 reap
+之后才可信（僵尸会让它继续成功，spike 实测）。
