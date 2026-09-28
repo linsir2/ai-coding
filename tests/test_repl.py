@@ -215,3 +215,23 @@ async def test_handle_skills_lists_catalog():
     assert action is REPLAction.CONTINUE
     out = _session_text(c)
     assert "test-skill" in out
+
+
+async def test_handle_plan_sends_prompt():
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, _ = _console_capture()
+    action, _ = await handle_input(loop, "/plan", sessions.items[0], sessions, dc)
+    assert action is REPLAction.CONTINUE
+    assert len(loop.calls) == 1
+    assert "plan" in loop.calls[0][0].lower() or "implementation" in loop.calls[0][0].lower()
+
+
+async def test_handle_review_sends_prompt():
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, _ = _console_capture()
+    action, _ = await handle_input(loop, "/review", sessions.items[0], sessions, dc)
+    assert action is REPLAction.CONTINUE
+    assert len(loop.calls) == 1
+    assert "review" in loop.calls[0][0].lower() or "审查" in loop.calls[0][0].lower()

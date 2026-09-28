@@ -124,6 +124,14 @@ async def handle_input(
         else:
             console.info("[skills] no skills found")
         return REPLAction.CONTINUE, session
+    if cmd.name == "plan":
+        console.info("[plan] generating implementation plan...")
+        await loop.process_input(session, "Create a detailed implementation plan for the current task. Break it down into specific, actionable steps.", on_delta=console.delta)
+        return REPLAction.CONTINUE, session
+    if cmd.name == "review":
+        console.info("[review] reviewing current changes...")
+        await loop.process_input(session, "Review the current git diff and identify any issues, bugs, or improvements needed.", on_delta=console.delta)
+        return REPLAction.CONTINUE, session
     return REPLAction.CONTINUE, session
 
 
