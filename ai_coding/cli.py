@@ -155,7 +155,12 @@ def ask(
             on_delta=on_delta,
             workspace=workspace,
             skills_path=skills,
-            observer=_compose_observer(ConsoleObserver(console), recorder),
+            observer=_compose_observer(
+                ConsoleObserver(
+                    console, chunks=bool(getattr(app_cfg.ui, "tool_chunks", True))
+                ),
+                recorder,
+            ),
             trace=recorder,
             guards=guards,
             hooks=hooks,
@@ -368,7 +373,12 @@ def repl(
                 workspace,
                 skills,
                 approval=CLIApprovalCallback(),
-                observer=_compose_observer(ConsoleObserver(console), recorder),
+                observer=_compose_observer(
+                    ConsoleObserver(
+                        console, chunks=bool(getattr(app_cfg.ui, "tool_chunks", True))
+                    ),
+                    recorder,
+                ),
                 trace=recorder,
                 guards=guards,
                 hooks=hooks,

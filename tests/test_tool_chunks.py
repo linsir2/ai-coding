@@ -51,3 +51,11 @@ def test_r8_long_chunks_are_cut_to_one_readable_line():
 def test_r8_streaming_is_on_by_default_and_can_be_turned_off():
     assert UIConfig().tool_chunks is True
     assert UIConfig(tool_chunks=False).tool_chunks is False
+
+
+def test_r8_turning_the_switch_off_silences_the_console():
+    """`ui.tool_chunks: false` must really mean "no streamed lines"."""
+    console = Console(record=True, width=200)
+    observer = ConsoleObserver(DialogueConsole(console), chunks=False)
+    observer.on_event(ToolChunk("c1", "bash", "stdout", "hidden\n", 0))
+    assert console.export_text().strip() == ""

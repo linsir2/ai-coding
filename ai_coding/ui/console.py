@@ -71,11 +71,14 @@ class ConsoleObserver:
         console: DialogueConsole,
         *,
         clock: Callable[[], float] | None = None,
+        chunks: bool = True,
     ) -> None:
         self._c = console
         # Injectable so the throttle can be tested without sleeping.
         self._clock = clock or time.monotonic
         self._last_chunk: dict[str, float] = {}
+        #: R8c: ``ui.tool_chunks`` - off means "one preview when it finishes".
+        self._chunks = bool(chunks)
 
     def on_event(self, event: LoopEvent) -> None:
         if isinstance(event, IterationStarted):
@@ -88,6 +91,8 @@ class ConsoleObserver:
             preview = _short(event.output_preview, _OUTPUT_PREVIEW)
             self._c.info(f"  -> {mark}{': ' + preview if preview else ''}")
         elif isinstance(event, ToolChunk):
+            if not self._chunks:
+                return
             # Streamed output: one line per window, so a chatty command cannot
             # push the rest of the turn off the screen (R8c-S1).
             now = self._clock()
