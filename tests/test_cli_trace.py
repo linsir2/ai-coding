@@ -220,3 +220,31 @@ def test_r9_overview_flags_a_summary_mismatch(tmp_path):
     _session_with(tmp_path, "sess-1", turns=1, summary={"turns": 9})
     result = runner.invoke(app, ["trace", "overview", "--workspace", str(tmp_path)])
     assert "mismatch" in result.stdout.lower()
+
+
+# ---- R9c: trace export (docs/r9-analysis.md 3.3) ----
+
+
+def test_r9_export_html_writes_a_file(tmp_path):
+    _session_with(tmp_path, "sess-1", turns=1, summary={"turns": 1})
+    out = tmp_path / "trace.html"
+
+    result = runner.invoke(
+        app,
+        ["trace", "export", "--format", "html", "--session", "sess-1",
+         "--workspace", str(tmp_path), "--out", str(out)],
+    )
+
+    assert result.exit_code == 0
+    body = out.read_text(encoding="utf-8")
+    assert "<!doctype html>" in body and "sess-1" in body
+
+
+def test_r9_export_an_unknown_session_reports_instead_of_crashing(tmp_path):
+    result = runner.invoke(
+        app,
+        ["trace", "export", "--format", "html", "--session", "nope",
+         "--workspace", str(tmp_path)],
+    )
+    assert result.exit_code == 1
+    assert "no traces" in result.stdout.lower() or "not found" in result.stdout.lower()

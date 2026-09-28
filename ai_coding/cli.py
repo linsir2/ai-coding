@@ -250,7 +250,13 @@ def trace_command(
     since: int = typer.Option(
         0, "--since", help="Only sessions touched in the last N days (0 = all)."
     ),
-    fmt: str = typer.Option("table", "--format", help="table | json"),
+    fmt: str = typer.Option("table", "--format", help="table | json | html | otlp-json"),
+    session_id: str = typer.Option(
+        "", "--session", "-s", help="Session to export (defaults to the positional one)."
+    ),
+    all_sessions: bool = typer.Option(False, "--all", help="Export every session."),
+    out: str = typer.Option("", "--out", "-o", help="Write to this file instead of stdout."),
+    full: bool = typer.Option(False, "--full", help="Include the recorded message payloads."),
 ) -> None:
     """Inspect recorded traces and token totals (R4a)."""
     from ai_coding.ui.trace_render import render_budget, render_turn, summarize_turn
@@ -302,6 +308,38 @@ def trace_command(
             typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
             return
         typer.echo(render_overview(report))
+        return
+
+    if action == "export":
+        from ai_coding.core.aggregate import build_report
+        from ai_coding.core.export_html import (
+            read_session_view,
+            render_index_html,
+            render_session_html,
+        )
+        from ai_coding.core.trace import TraceStore
+
+        session = session_id or session
+        store = TraceStore(root)
+        if all_sessions:
+            views = [read_session_view(store, ref.session, full=full)
+                     for ref in store.sessions()]
+            if not views:
+                typer.echo("(no traces recorded yet)")
+                return
+            body = render_index_html(build_report(store), views)
+        else:
+            directory = store.session_dir(session)
+            if not session or not directory.is_dir():
+                typer.echo(f"error: no traces for session '{session or '(none)'}'")
+                raise typer.Exit(code=1)
+            views = [read_session_view(store, session, full=full)]
+            body = render_session_html(views[0])
+        if out:
+            Path(out).write_text(body, encoding="utf-8")
+            typer.echo(f"wrote {out}")
+            return
+        typer.echo(body)
         return
 
     if not session:
