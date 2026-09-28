@@ -317,11 +317,23 @@ def trace_command(
             render_index_html,
             render_session_html,
         )
+        from ai_coding.core.export_otlp import rows_to_otlp
         from ai_coding.core.trace import TraceStore
 
         session = session_id or session
         store = TraceStore(root)
-        if all_sessions:
+        if fmt == "otlp-json":
+            views = (
+                [read_session_view(store, ref.session) for ref in store.sessions()]
+                if all_sessions
+                else ([read_session_view(store, session)]
+                      if session and store.session_dir(session).is_dir() else [])
+            )
+            if not views:
+                typer.echo(f"error: no traces for session '{session or '(none)'}'")
+                raise typer.Exit(code=1)
+            body = json.dumps(rows_to_otlp(views), ensure_ascii=False, indent=2)
+        elif all_sessions:
             views = [read_session_view(store, ref.session, full=full)
                      for ref in store.sessions()]
             if not views:

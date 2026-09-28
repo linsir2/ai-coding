@@ -248,3 +248,18 @@ def test_r9_export_an_unknown_session_reports_instead_of_crashing(tmp_path):
     )
     assert result.exit_code == 1
     assert "no traces" in result.stdout.lower() or "not found" in result.stdout.lower()
+
+
+def test_r9_export_otlp_json_is_stable(tmp_path):
+    _session_with(tmp_path, "sess-1", turns=1, summary={"turns": 1})
+    args = ["trace", "export", "--format", "otlp-json", "--session", "sess-1",
+            "--workspace", str(tmp_path)]
+
+    first = runner.invoke(app, args)
+    second = runner.invoke(app, args)
+
+    assert first.exit_code == 0
+    payload = json.loads(first.stdout)
+    spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+    assert spans and all("spanId" in span for span in spans)
+    assert first.stdout == second.stdout  # deterministic ids
