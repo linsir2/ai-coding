@@ -169,9 +169,8 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
 
     async def _input_provider(prompt: str) -> str:
         nonlocal awaiting_input
-        body.write(f"\n{prompt}\n")
-        body.write("  (type answer, Enter to submit)\n")
         input_buffer.reset()
+        input_buffer.insert_text(f"{prompt} ")
         awaiting_input = True
         input_event.clear()
         try:

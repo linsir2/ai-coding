@@ -60,3 +60,16 @@ def test_body_uses_buffer_control():
     from ai_coding.ui.app import run_app
     source = inspect.getsource(run_app)
     assert "BufferControl(buffer=body.get_buffer(), focusable=True)" in source
+
+
+def test_input_provider_does_not_write_to_body():
+    """Approval/ask_user prompts should not write to body."""
+    import inspect
+    from ai_coding.ui.app import run_app
+    source = inspect.getsource(run_app)
+    assert "awaiting_input = True" in source
+    # Should NOT have body.write in _input_provider
+    provider_start = source.find("async def _input_provider")
+    provider_end = source.find("user_prompt.set_provider")
+    provider_code = source[provider_start:provider_end]
+    assert "body.write" not in provider_code
