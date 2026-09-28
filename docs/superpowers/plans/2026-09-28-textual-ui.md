@@ -18,7 +18,7 @@
 - 循环必须跑在 **async worker**（禁止 `thread=True`），否则 `push_screen_wait` 抛 `NoActiveWorker`。
 - 模态 provider 必须 `try/finally` 关屏（spec §3.3-5）。
 - 文案固定：`You` / `Nexus` / `Type a message or enter a command...` / `/ for commands` / `● Ready`。
-- 每个 task 结束跑：`.venv/bin/python -m pytest -q`、`.venv/bin/ruff check ai_coding tests`，两者干净才 commit。
+- 每个 task 结束跑：`.venv/bin/python -m pytest -q`、`.venv/bin/ruff check .`、`.venv/bin/mypy ai_coding`，三者干净才 commit（这三个就是 CI 门槛，见 `.github/workflows/ci.yml`；mypy 是 strict）。
 - 异步测试用 `@pytest.mark.asyncio`（仓内约定，无 conftest）。
 - 测试取窗口：`App.run_test(headless=True, size=(80, 24))`。
 
@@ -342,6 +342,13 @@ class AICodingApp(App[None]):
         Binding("ctrl+c", "quit", "Quit", show=False),
     ]
 
+    # Declared here (not only assigned in on_mount) so mypy strict can infer them.
+    _loop: Any
+    _session: Any
+    _sessions: Any
+    _workspace: str
+    _model_name: str
+
     def __init__(
         self,
         *,
@@ -428,7 +435,7 @@ Expected: `2 passed`
 
 Run:
 ```bash
-.venv/bin/python -m pytest -q && .venv/bin/ruff check ai_coding tests
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/mypy ai_coding
 ```
 Expected: 全绿（旧 TUI 未受影响）；`All checks passed!`
 
@@ -575,6 +582,8 @@ Expected: FAIL — `AttributeError: 'Transcript' object has no attribute 'append
 
 from __future__ import annotations
 
+from typing import Any
+
 from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import Markdown, Static
@@ -624,7 +633,10 @@ class Transcript(VerticalScroll):
         self._markdown = None
         self._follow()
 
-    def append_block(self, block) -> None:
+    def append_block(self, block: Any) -> None:
+        # ``Any`` until Task 3 lands ``Block``; importing it now would be a
+        # cycle (blocks must stay Textual-free, so it cannot import Transcript
+        # back).  Task 3 tightens this annotation.
         self.mount(Static(block.render(), classes=f"block-{block.kind}"))
         self._follow()
 
@@ -754,7 +766,7 @@ Expected: `wrote .../docs/tui-preview.svg`；打开 SVG 肉眼确认状态栏/�
 - [ ] **Step 7: 全量回归 + lint + commit**
 
 ```bash
-.venv/bin/python -m pytest -q && .venv/bin/ruff check ai_coding tests
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/mypy ai_coding
 git add ai_coding/ui/transcript.py ai_coding/ui/app.tcss scripts/tui_shot.py tests/test_transcript.py
 git commit -m "feat(ui): a transcript that streams markdown and keeps the bottom"
 ```
@@ -974,6 +986,11 @@ class TranscriptObserver:
             self._append(block)
 ```
 
+同时收紧 Task 2 留下的临时注解：在 `ai_coding/ui/transcript.py` 里把
+`def append_block(self, block: Any) -> None` 改为
+`def append_block(self, block: Block) -> None`，并加
+`from ai_coding.ui.blocks import Block`；`Any` 若不再使用则删除该导入（此时环不存在：`blocks` 不 import `transcript`）。
+
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_blocks.py -q`
@@ -997,7 +1014,7 @@ Expected: `rm 'tests/test_observer.py'`
 - [ ] **Step 7: 全量回归 + lint + commit**
 
 ```bash
-.venv/bin/python -m pytest -q && .venv/bin/ruff check ai_coding tests
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/mypy ai_coding
 git add ai_coding/ui/blocks.py tests/test_blocks.py tests/test_tool_chunks.py tests/test_tool_surface_warning.py
 git commit -m "feat(ui): loop events become blocks (R8c semantics carried over)"
 ```
@@ -1142,7 +1159,8 @@ class ApprovalScreen(ModalScreen[str]):
                 yield Button("Stop", id="stop", variant="warning")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss({"yes": "y", "no": "n", "stop": "s"}[event.button.id])
+        # ``event.button.id`` is ``str | None``; an unknown button fails closed.
+        self.dismiss({"yes": "y", "no": "n", "stop": "s"}.get(event.button.id or "", "n"))
 
     def action_no(self) -> None:
         self.dismiss("n")
@@ -1227,7 +1245,7 @@ Expected: `4 passed`
 - [ ] **Step 6: 全量回归 + lint + commit**
 
 ```bash
-.venv/bin/python -m pytest -q && .venv/bin/ruff check ai_coding tests
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/mypy ai_coding
 git add ai_coding/ui/modals.py ai_coding/ui/app.tcss tests/test_modals.py
 git commit -m "feat(ui): approval and ask_user modal screens"
 ```
@@ -1337,7 +1355,6 @@ Expected: FAIL — 提交后没有 transcript 内容（或 `#prompt` 不存在�
 
 from __future__ import annotations
 
-import asyncio
 import time
 from datetime import datetime
 from typing import Any
@@ -1345,7 +1362,7 @@ from typing import Any
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Input, Markdown
+from textual.widgets import Input
 
 from ai_coding.ui.blocks import Block, TranscriptObserver
 from ai_coding.ui.input_bar import InputBar
@@ -1364,6 +1381,18 @@ class AICodingApp(App[None]):
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+c", "quit", "Quit", show=False),
     ]
+
+    # Declared here (not only assigned in on_mount) so mypy strict can infer them.
+    _loop: Any
+    _session: Any
+    _sessions: Any
+    _workspace: str
+    _model_name: str
+    _status: StatusBar
+    _transcript: Transcript
+    _input: Input
+    _observer: TranscriptObserver
+    _turn_started: float
 
     def __init__(
         self,
@@ -1444,7 +1473,9 @@ class AICodingApp(App[None]):
         """
         screen = ApprovalScreen(tool_name=_first_line(prompt), params={}, reason=prompt)
         try:
-            return await self.push_screen_wait(screen)
+            # ``str()`` silences mypy's warn_return_any: push_screen_wait is typed
+            # as ``ScreenResultType | Any``.
+            return str(await self.push_screen_wait(screen))
         finally:
             # push_screen_wait is shielded: a cancelled turn does not close the
             # screen (spec §3.3-5), so close it here.
@@ -1454,7 +1485,7 @@ class AICodingApp(App[None]):
     async def ask_provider(self, prompt: str) -> str:
         screen = AskScreen(prompt)
         try:
-            return await self.push_screen_wait(screen)
+            return str(await self.push_screen_wait(screen))
         finally:
             if self.screen is screen:
                 self.pop_screen()
@@ -1550,7 +1581,7 @@ Expected: 全屏 TUI 打开；输入一句短话，回答流式出现；`ctrl+q`
 - [ ] **Step 7: 全量回归 + lint + commit**
 
 ```bash
-.venv/bin/python -m pytest -q && .venv/bin/ruff check ai_coding tests
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/mypy ai_coding
 git add ai_coding/ui/textual_app.py tests/test_textual_app.py
 git commit -m "feat(ui): the loop is wired — submit, stream, events, turn guard"
 ```
@@ -1628,8 +1659,10 @@ class TextualConsole(DialogueConsole):
     without touching that file.
     """
 
-    def __init__(self, transcript: Any) -> None:
+    def __init__(self, transcript: Any = None) -> None:
         # Intentionally does not call super().__init__: no rich Console needed.
+        # The default keeps the override Liskov-compatible with DialogueConsole
+        # (mypy strict); the app always passes a transcript.
         self._transcript = transcript
         self._streaming = False
 
@@ -1860,7 +1893,7 @@ Expected: `1 passed`（若时序不稳，按实际输出调整等待条件；不
 - [ ] **Step 8: 全量回归 + lint + commit**
 
 ```bash
-.venv/bin/python -m pytest -q && .venv/bin/ruff check ai_coding tests
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/mypy ai_coding
 git add ai_coding/ui/console.py ai_coding/ui/textual_app.py tests/test_textual_app.py \
   tests/_pty_textual_child.py tests/test_pty_textual.py
 git commit -m "feat(ui): slash commands, the /permissions provider fix, and a pty E2E"
@@ -1953,7 +1986,7 @@ Expected: 全绿；总数比 Task 6 结束时减少（旧测试删除 + 新测�
 - [ ] **Step 9: lint + commit**
 
 ```bash
-.venv/bin/ruff check ai_coding tests
+.venv/bin/ruff check . && .venv/bin/mypy ai_coding
 git add -A
 git commit -m "refactor(ui): the Textual app is the only UI; prompt-toolkit is gone"
 ```
@@ -1972,7 +2005,7 @@ git commit -m "refactor(ui): the Textual app is the only UI; prompt-toolkit is g
 
 Run:
 ```bash
-.venv/bin/python -m pytest -q && .venv/bin/ruff check ai_coding tests
+.venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/mypy ai_coding
 ```
 Expected: 全绿、`All checks passed!`；记录实际数字（passed / skipped）。
 
