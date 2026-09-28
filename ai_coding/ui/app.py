@@ -86,7 +86,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
 
     loop = _build_loop(
         engine, sessions, registry, app_cfg, workspace, skills,
-        approval=CLIApprovalCallback(),
+        approval=approval,
         observer=body_observer,
         trace=recorder,
         guards=_make_guards(app_cfg),
@@ -98,6 +98,8 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     session = sessions.create()
     turn_start = time.monotonic()
     input_buffer = Buffer()
+    input_event = asyncio.Event()
+    awaiting_input = False
 
     body.write("  ✨ Welcome to ai-coding! ✨\n")
     body.write("  Describe a task, or use / for commands.\n\n")
@@ -159,12 +161,31 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
             palette.handle_key("up")
             event.app.invalidate()
 
+    async def _input_provider(prompt: str) -> str:
+        nonlocal awaiting_input
+        body.write(f"\n{prompt}\n")
+        body.write("  (type answer, Enter to submit)\n")
+        input_buffer.reset()
+        awaiting_input = True
+        input_event.clear()
+        try:
+            await input_event.wait()
+            return input_buffer.text
+        finally:
+            awaiting_input = False
+
+    user_prompt.set_provider(_input_provider)
+    approval = CLIApprovalCallback()
+    approval.set_provider(_input_provider)
+
     @kb.add("enter")
     def _enter(event: Any) -> None:
         if palette.is_open:
             entry = palette.select()
             event.app.invalidate()
             asyncio.create_task(_run_command(entry.name))
+        elif awaiting_input:
+            input_event.set()
         else:
             text = input_buffer.text
             if text.strip():
