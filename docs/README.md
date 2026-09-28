@@ -1,6 +1,7 @@
 # 文档导航
 
-**ai-coding** 是基于 OpenAI Agents SDK 的 AI 编程助手 CLI（ThoughtCoding 的 Python 化实现）。本仓库文档按用途分为「面向使用的文档」与「里程碑演进记录」。
+**ai-coding** 是自持 ReAct 循环的 AI 编程助手 CLI（ThoughtCoding 的 Python 化实现；R1 起不再依赖
+OpenAI Agents SDK，只留 `openai` 与 `mcp` 两个库）。本仓库文档按用途分为「面向使用的文档」与「里程碑演进记录」。
 
 ## 面向使用的文档
 
@@ -87,10 +88,10 @@ R6 处理四个候选（工作记忆锚、失败升级、`ask_user`、记忆证�
 
 ## 当前状态
 
-主线里程碑 M0–M6、编排层重构 R1、可靠性收口 R2、记忆层重做 R3、循环内核拆分 R5、
-回合记忆 R6 全部完成，分阶段提交。
-质量门禁：`pytest`（**862 例通过 / 1 跳过**）全绿、`ruff` 0 问题、`mypy strict`（按 3.10 下限检查）0 问题；
-`scripts/memory_cases.py` 11/11、`scripts/trace_cases.py` 6/6、`scripts/r6_cases.py` 9/9（离线）+ 3 条真实验收；
+主线里程碑 M0–M6 与 R1–R9 全部完成，分阶段提交。
+质量门禁：`pytest`（**1122 例通过 / 4 跳过**）全绿、`ruff` 0 问题、`mypy strict`（按 3.10 下限检查）
+0 问题（98 文件）；离线验收脚本：`memory_cases` 11/11、`trace_cases` 6/6、`r6_cases` 全过、
+`r7_cases` 11/11、`r7e_cases` 9/9、`r8_cases` 13/13、`r9_cases` 12/12；
 MCP 真连与真实 LLM A/B 在正常环境另有 gate 测试 + CI 步骤。
 
 R4（可观测 / 门卫 / hook）**已按 R4a → R4b → R4c 顺序实现**：设计与决策点见 [r4-analysis.md](r4-analysis.md)，
@@ -99,3 +100,9 @@ R4（可观测 / 门卫 / hook）**已按 R4a → R4b → R4c 顺序实现**：�
 R6（回合摘要环 / 失败升级 / `ask_user` / 记忆证据 / 索引不变量）**已按 R6a → R6b → R6c → R6d → R6e 顺序实现**：
 设计与实测见 [r6-analysis.md](r6-analysis.md)，分步计划见 [r6-plan.md](r6-plan.md)，
 验收脚本 `scripts/r6_cases.py`（离线 9 条 + 真实 3 条）。
+
+之后的轮次同样都已实现，各自的方案、计划与执行状态写在对应文档里（本文档不再重复展开）：
+R7 `r7-analysis.md` / `r7-plan.md`（含 [待办总账](r7-backlog.md)）、
+R7e `r7e-analysis.md` / `r7e-plan.md`、
+R8 `r8-analysis.md` / `r8-plan.md`、
+R9 `r9-analysis.md` / `r9-plan.md`（依赖硬门禁 + 轨迹的 `overview` / HTML / OTLP-JSON 三个出口）。

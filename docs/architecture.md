@@ -44,7 +44,7 @@ ai_coding/
 | `security` | 失败关闭的安全层 | `Sandbox`、`PermissionGate`、`ApprovalCallback`、`FileStateTracker`；R6 起 `UserPromptCallback`（模型主动提问的通道，`ask_user` 用） |
 | `tools` | 工具契约、实现、注册表、schema | `BaseTool`、`ToolContext`、`ToolRegistry`、`build_tool_registry` |
 | `ai` | 引擎端口 + 实现 + 映射 + 提示装配 | `ChatEngine`、`OpenAIChatEngine`、`PromptAssembler` |
-| `core` | 编排与增强 | `AgentLoop`、`ToolDispatcher`、`ContextManager`、`MCPManager`、`SubAgentRunner`；R5 起另有 `TurnReporter`（对外陈述）、`TurnMemory`（记忆侧）、`Compactor`（压缩）、`request_builder`（易失尾部） |
+| `core` | 编排与增强 | `AgentLoop`、`ToolDispatcher`、`ContextManager`、`MCPManager`、`SubAgentRunner`；R5 起另有 `TurnReporter`（对外陈述）、`TurnMemory`（记忆侧）、`Compactor`（压缩）、`request_builder`（易失尾部）；R9 起 `aggregate`（跨会话聚合）、`export_html` / `export_otlp`（两个渲染器） |
 | `service` | 会话读写（原子） | `SessionService` |
 | `memory` | 记忆三层操作与持久化 | `MemoryService`、`MemoryStore` |
 | `skills` | 技能目录扫描与目录文本 | `SkillRegistry` |
@@ -200,3 +200,52 @@ flowchart LR
 
 R8 的结论：**R8b 只动 L6**；**R8a 动 L2/L3/L4/L5/L7（并间接影响 L6 的 evidence）**；
 **R8c 动 L2/L4/L7/L8**。
+
+## R9：策略在工具层，观测是一个数据源三个出口
+
+### 依赖门禁的边界（谁拥有策略）
+
+R1 把 `depends_on` 记进了数据，却把「要不要执行」留空。R9 补的是**判断权的位置**：
+领域层只回答「谁挡着我」（`blockers()`，纯查询、零策略），工具层才回答「所以你不许动」
+（`todo_write` 的两个拒绝）。这样 `TaskState.update()` 的宽松语义、`<task-state>` 的渲染形状、
+停止判定全都不动，也不需要为了门禁给领域对象引入状态机。
+
+```mermaid
+flowchart TB
+    M["模型"] -->|todo_write(add, depends_on)| T["TodoWriteTool (enforce_dependencies)"]
+    T -->|未知 / 自指 / 重复| RJ["拒绝：unknown_dependency / self_dependency，清单不变"]
+    T -->|合法| D["TaskState.add (next_id)"]
+    M -->|todo_write(update, status)| G{"in_progress / completed?"}
+    G -->|否| OK["直接放行（pending / blocked / dropped）"]
+    G -->|是| Q["TaskState.blockers(id)"]
+    Q -->|空| UP["TaskState.update"]
+    Q -->|"open / unknown / cycle"| RB["拒绝：blocked_by_dependencies + 三条出路"]
+    D --> INV["dependency_invariant(): 新数据天然是 DAG"]
+```
+
+### 观测：一个数据源、三个出口
+
+写入侧一个字都没改（`turn-*.jsonl` + `summary.json`）。R9 加的是**读路径**：
+`TraceStore.sessions()` 枚举目录，`build_report()` 折成一份纯数据，三个渲染器把它变成
+表格 / HTML / OTLP-JSON。
+
+```mermaid
+flowchart LR
+    W["TraceRecorder（写入，未改）"] --> FS[(".ai-coding/traces/<session>/turn-N.jsonl + summary.json")]
+    FS --> REF["TraceStore.sessions() / prune()（同一 mtime 口径）"]
+    REF --> AGG["core.aggregate.build_report()（纯数据，坏文件记零）"]
+    AGG --> T1["ui.trace_render.render_overview（trace overview）"]
+    AGG --> T2["core.export_html（trace export --format html）"]
+    FS --> V["export_html.read_session_view()"]
+    V --> T2
+    V --> T3["core.export_otlp.rows_to_otlp（trace export --format otlp-json）"]
+    T2 --> ESC["每个动态字符串 html.escape；无 JS / 无外链"]
+    T3 --> DET["sha256(session|turn|span) → 两次导出字节一致"]
+    T1 -.->|只读| FS
+    T2 -.->|只读| FS
+    T3 -.->|只读| FS
+```
+
+三条边界：**只读**（三个出口没有一个会写轨迹或改会话）、**格式冻结**（轨迹行的字段名与
+`v/ts/session/turn/span/parent/iter/evt/data` 都不动）、**对账优先**（`summary` 与磁盘回合数不一致
+时只标注 `mismatch`，不用它去猜真相）。

@@ -45,7 +45,7 @@
 | 3.2 | **MCP 工具 schema 的每步成本**：13 工具 server 让 `tools_chars` 5241 → **10481**（≈翻倍），每步 prompt 都付 | features.md:138（R4 实测，只记录未治理） | 无对策（原生 FC 不能省 schema），但可以「按需注册 / 分域注册 / server 级开关」 | P1 | 中 |
 | 3.3 | `mcp.connection_timeout` 默认 **30s**，而 npx 冷启动实测 **~27s** | features.md:141 | `MCPConfig.connection_timeout = 30`（未改）；文档已建议 60–90 | P1（一行默认值 + 文档 + 用例） | 小 |
 | 3.4 | `subagent.context_mode`（full / task_only）开关位 | r1a-5 §8核验④ 留位未实现 | `rg context_mode ai_coding/` → **无** | P2 | 小 |
-| 3.5 | `depends_on` 硬门禁 | r1-analysis §4.1 YAGNI | `task.py` docstring 仍写「not enforced as a hard gate」 | P2 | 小 |
+| 3.5 | ~~`depends_on` 硬门禁~~ | r1-analysis §4.1 YAGNI | **R9a 已做**：`Blockers` 纯查询 + `todo_write` 的两道门禁（add 校验 / 状态门禁）+ `ai.enforce_dependencies` 开关（docs/r9-analysis.md §3.1） | —— | —— |
 | 3.6 | ~~工具层流式输出 / 取消语义~~ | R2「明确不做」 | **R8c 已做**：`run_process(on_chunk)` + Esc 取消（真的 `killpg`，且不计失败）+ MCP 进度（docs/r8-analysis.md 3.3） | —— | —— |
 | 3.7 | ~~非 bash 工具的统一超时~~ | r1a-3「不做」 | **已解决**：R2 的 `max_duration_seconds` + 分发器 `min(工具上限, 回合剩余)` | —— | —— |
 
@@ -63,9 +63,9 @@
 
 | # | 事项 | 出处 | 现状核验 | 建议 | 规模 |
 |---:|---|---|---|---|---|
-| 5.1 | OpenTelemetry / 外部 APM 导出 | R4「不做」，留了 hook（O6） | 无导出 | P2 | 中 |
-| 5.2 | 轨迹的跨会话聚合分析（`summary.json` 只到会话粒度） | R4「不做」 | 无 | P2 | 中 |
-| 5.3 | Web/GUI 轨迹查看器 | R4「不做」 | 只有 `ai-coding trace list\|show\|budget` + REPL 文本渲染 | P2 | 大 |
+| 5.1 | ~~OpenTelemetry / 外部 APM 导出~~ | R4「不做」，留了 hook（O6） | **R9d 已做**（零依赖那一半）：`trace export --format otlp-json`，按 span 分组的真 span 树、确定性 id；**不发 HTTP、不装 OTel SDK**（D-R9-5）。真 collector 验证仍未做 | —— | —— |
+| 5.2 | ~~轨迹的跨会话聚合分析（`summary.json` 只到会话粒度）~~ | R4「不做」 | **R9b 已做**：`TraceStore.sessions()` + `core.aggregate` + `trace overview`（`--since` 与 `prune` 同口径） | —— | —— |
+| 5.3 | ~~Web/GUI 轨迹查看器~~ | R4「不做」 | **R9c 已做**（静态那一档）：`trace export --format html` 出单文件页面（内联 CSS、无 JS、无外链、全转义）；**不做 web 服务**（D-R9-6） | —— | —— |
 | 5.4 | ~~轨迹轮转/清理~~ | R4 计划 | **已解决**：`TraceStore.prune()` 已在 `cli.py:466` 调用，`retention_days` 生效 | —— | —— |
 | 5.5 | `pytest-timeout` 之类插件 | R2「不做」（要联网装包） | CI 用 runner 有界性 + `timeout-minutes` 兜底 | P2 | 小 |
 | 5.6 | Windows 平台验证（`start_new_session` 属 POSIX） | R2「不做」 | 无 | P2 | 中 |
@@ -110,6 +110,15 @@
 - 3.4 `subagent.context_mode`（`full` / `task_only`）——第 3.4 行关闭；
 - 3.2 的工具面治理**再加一半**：超阈值时每 loop 一次 `[tools]` 提示（R7d 给的是开关，R7e 给的是提醒）；
 - `r7-analysis.md` §2.5 优化菜单里的 **O2 `memory_write`**、**O4 回合级 steering**、**O5 工具面阈值告警**、**O6 `context_mode`**：四条全部落地。
+
+**之后几轮又关掉的候选**：
+
+- **R8 做掉 2.2 / 2.5 / 3.6**：`checkpoint_write`、evidence 同分破平局 + 过滤、工具流式与 Esc 取消
+  （含真 `killpg` 与 MCP 进度）——见 `docs/r8-analysis.md`。
+- **R9 做掉 3.5 与 5.1 / 5.2 / 5.3（各自的一部分）**：`depends_on` 硬门禁、跨会话总览、
+  单文件 HTML 导出、零依赖 OTLP/JSON 导出——见 `docs/r9-analysis.md`。**仍未做**：真 collector
+  往返（5.1 只到「产出 OTLP/JSON 文件」）、交互式 Web/GUI（5.3 只到静态页）、
+  SQLite+FTS5（4.1 照旧待你定性质）。
 
 ---
 

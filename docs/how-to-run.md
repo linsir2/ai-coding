@@ -38,6 +38,9 @@ ai-coding config-check --path config.local.yaml
 ai-coding ask --prompt "如何删除多余列" --path config.local.yaml
 ai-coding ask --prompt "读取 sample.txt" --path config.local.yaml --session <sid>
 ai-coding repl --path config.local.yaml
+ai-coding trace overview --workspace . --since 7          # 跨会话总览
+ai-coding trace export --format html --session <sid> -o trace.html
+ai-coding trace export --format otlp-json --all -o traces.json
 ```
 
 | 命令 | 用途 |
@@ -45,6 +48,9 @@ ai-coding repl --path config.local.yaml
 | `config-check` | 打印生效配置：默认模型、各模型 base_url/max_tokens/temperature、上下文预算、启用的工具 |
 | `ask` | 单回合对话（带全套工具），直接拿到最终答案 |
 | `repl` | 交互式多轮回话；内置 `/help` `/status` `/clear` `/quit` |
+| `trace list\|show\|budget` | 按会话看轨迹（R4a） |
+| `trace overview` | 所有会话一张表 + `TOTAL` 行（R9b） |
+| `trace export` | 把轨迹导成单文件 HTML 或 OTLP/JSON（R9c/d） |
 
 常用参数：`--workspace/-w` 指定文件工具的工作目录（默认 `.`）；`--skills` 指定技能目录（启用 `skill` 工具）；`--session/-s` 续接指定会话。
 
@@ -224,3 +230,21 @@ mcp:
 
 验收脚本：`.venv/bin/python scripts/r8_cases.py`（离线 13 条）；
 `--real` 再加 3 条真实用例（真模型回合、真模型 + 真 bash 的流式、真模型的 checkpoint 往返）。
+
+## R9 新增的配置与行为
+
+| 想做的事 | 怎么做 | 代价 / 边界 |
+|---|---|---|
+| 让 `todo_write` 挡住「依赖没做完就开始/完成」 | 不用开：`ai.enforce_dependencies` 默认 `true` | 同时挡正向引用与自指（`add` 直接拒绝）。老清单若真有环/幽灵依赖，`update` 会返回 `blocked_by_dependencies` 并把 `open` / `unknown` / `cycle` 一起给你 |
+| 关掉依赖门禁（只给历史遗留清单） | `ai.enforce_dependencies: false` | 回到 R1 行为：只渲染、不强制 |
+| 一眼看完所有会话的 token 与命中率 | `ai-coding trace overview --workspace .` | `--since N` 只看最近 N 天（与 `prune` 同口径＝目录 mtime）；`--format json` 给机器读 |
+| 把一次会话导成一个能直接打开的页面 | `ai-coding trace export --format html --session <sid> --out t.html` | 单文件、内联 CSS、无 JS、无外链；**所有动态串都转义**（工具输出里的 `<script>` 只会显示成文本） |
+| 把轨迹喂给别的观测系统 | `ai-coding trace export --format otlp-json --session <sid>` | 零依赖：只写 OTLP/JSON 文件，**不发 HTTP**、不装 OTel SDK；`--all` 导全部会话 |
+| 连消息全文一起导出（取证用） | 加 `--full` | 默认**不含**全文；只有 `capture: full` 的轨迹才有 `turn-<n>.full.json` 可导 |
+
+两个诚实提醒：`mismatch`（`summary.turns` 与磁盘回合数对不上）**只标注不报错**，退出码仍是 0；
+`--since` 依赖「写文件会刷新目录 mtime」这一文件系统行为，`rsync` / 复制过的目录会整体漂移
+（与 `prune` 同病同源）。
+
+验收脚本：`.venv/bin/python scripts/r9_cases.py`（离线 12 条）；
+`--real` 再加 1 条：真模型跑一个回合，断言 `build_report` 把这次会话算进去了。

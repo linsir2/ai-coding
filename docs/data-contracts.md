@@ -421,3 +421,49 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 | `TurnBooks.note_outcomes` 的失败计数 | `core/turn_books.py` | `cancelled_by_user` 的调用**不计入** `failed_streak`、不进 `failures`（D-11） |
 | `ToolDispatcher(..., cancel=None)` / `AgentLoop(..., cancel=None)` | `core/dispatch.py` / `core/agent_loop.py` | 取消事件一路贯通；`_run_tools` 在每批开始前 `clear()`（一次 Esc 只影响一批） |
 | `InteractiveReader.cancel_requested` / `request_cancel()` / `key_bindings()` | `ui/reader.py` | Esc 键的落点（`for_terminal` 负责把它装进 `PromptSession`） |
+
+## R9 契约（依赖门禁 / 轨迹出口）
+
+### `AIConfig` 新增项
+
+| 配置 | 默认 | 作用 |
+|---|---|---|
+| `ai.enforce_dependencies` | `true` | `todo_write` 的依赖门禁（add 校验 + 状态门禁）；`false` ＝ R1 行为，只给历史清单用 |
+
+### 依赖查询（`domain/task.py`）
+
+| 契约 | 说明 |
+|---|---|
+| `Blockers` | 冻结数据类，字段 `open` / `unknown` / `cycle`（都是 `tuple[str, ...]`）+ 只读属性 `any`；空＝可以走 |
+| `TaskState.blockers(item_id) -> Blockers` | **纯查询**：`open` 是存在但未终态的依赖，`unknown` 是已不存在的依赖，`cycle` 是非终态依赖链又绕回自己的路径（老数据才有） |
+| `TaskState.dependency_invariant() -> tuple[str, ...]` | `depends_on` 不指向「存在且更早」的条目的 id 列表；工具层用它保证新数据合法 |
+| `TaskState.next_id() -> str` | 原来的 `_next_id` 公开出来（工具层要预判新 id 才能认出自指） |
+
+### 工具与错误码（`tools/todo_write_tool.py`）
+
+| 契约 | 说明 |
+|---|---|
+| `TodoWriteTool(enforce_dependencies: bool = True)` | 关键字构造参数；`_enforce` 是它的落点 |
+| `unknown_dependency` | `add` 的 `depends_on` 里有列表里不存在的 id（含正向引用），清单不变 |
+| `self_dependency` | `add` 的 `depends_on` 指向本次将要分配的 id，清单不变 |
+| `blocked_by_dependencies` | `update` 到 `in_progress` / `completed` 时依赖未满足；`data` 带 `id` / `open` / `unknown` / `cycle` |
+| 门的形态 | `in_progress` 与 `completed` 检查；`pending` / `blocked` / `dropped` 放行；**没有** `diagnose` 动作，三条出路写在 `output` 里 |
+
+### 轨迹读取与导出（`core/trace.py`、`core/aggregate.py`、`core/export_*.py`）
+
+| 契约 | 位置 | 说明 |
+|---|---|---|
+| `SessionRef(session, path, mtime, turn_files)` + `.turns` | `core/trace.py` | 磁盘上的一个会话目录 |
+| `TraceStore.sessions() -> tuple[SessionRef, ...]` | 同上 | mtime 倒序、tie 按 session id；根目录不存在返回 `()`；从不抛异常 |
+| `TraceStore.prune()` | 同上 | 改为走 `sessions()`，行为不变（`--since` 与它同口径＝目录 mtime） |
+| `SessionRow(session, turns, files, steps, prompt_tokens, completion_tokens, cached_tokens, age_days)` | `core/aggregate.py` | 一行读数；`mismatch` = `turns != files`，`cache_ratio` = `cached / prompt`（prompt=0 时为 0.0） |
+| `AggregateReport(rows, totals)` + `.cache_ratio` | 同上 | `totals.session` 固定为 `"(all)"` |
+| `aggregate_sessions(rows)` / `row_from_summary(...)` / `build_report(store, *, since_days=0, now=None)` | 同上 | 前两个纯函数；`build_report` 是唯一的读盘入口，坏 summary 记零 |
+| `SpanRow` / `TurnView` / `SessionView` / `read_session_view(store, session, *, full=False)` | `core/export_html.py` | 读盘 → 视图对象；`full=True` 才去读 `turn-<n>.full.json` |
+| `render_session_html(view)` / `render_index_html(report, views)` | 同上 | 纯函数；单文件 HTML，内联 CSS、无 JS/外链、所有动态串经 `html.escape` |
+| `rows_to_otlp(views, *, service_name="ai-coding")` | `core/export_otlp.py` | 按 `span` 分组 → `resourceSpans[0].scopeSpans[0].spans`；`traceId`/`spanId` 由 sha256 派生（**确定性**，与真 SDK 的随机 id 不同） |
+| `render_overview(report)` | `ui/trace_render.py` | 纯函数，一张表 + `TOTAL` 行 + `!mismatch` 标注 |
+
+OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnixNano`（无时长则
+`start+1` 并标 `ai-coding.instant=true`）；行内 `data` 逐键成 attribute（bool/int/float/str 各自成类型，
+嵌套结构转 JSON 文本，`None` 丢弃）；任一行有 `error` → `status.code = 2`。

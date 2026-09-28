@@ -334,3 +334,42 @@ R7b 把这段话的前半句治掉了：L2 不再丢正文。实测同一份 70 
 
 验收脚本：`.venv/bin/python scripts/r8_cases.py`（离线 13 条）；
 `--real` 再加 3 条真实用例（真模型一个回合、真模型 + 真 bash 的流式、真模型的 checkpoint 往返）。
+
+## R9：依赖门禁 + 轨迹的三个只读出口
+
+### 依赖硬门禁（R9a）
+
+`depends_on` 从 R1 起就是「只渲染、不强制」的装饰字段。R9 让它变成约束，但**只约束在工具层**，
+领域对象保持宽松（`TaskState.update()` 的语义一个字都没变）：
+
+1. **`add` 只接受存在、非空、不自指、不重复的依赖**：正向引用（`depends_on=["2"]` 而 2 还不存在）
+   现在返回 `unknown_dependency`，自指返回 `self_dependency`，清单不变。原来可以造出互指环
+   （`1→2` 再 `2→1`），现在第一条就被拒。
+2. **`in_progress` / `completed` 要检查依赖**：任一依赖未终态就返回 `blocked_by_dependencies`，
+   `data` 里带 `open` / `unknown` / `cycle`；`pending` / `blocked` / `dropped` 一律放行。
+3. **错误信息自带三条出路**（不加 `diagnose` 动作）：完成依赖、把作废的依赖 `dropped`、
+   环里丢一项。模型看到的是可执行的下一步，而不是一句「不行」。
+4. **开关** `ai.enforce_dependencies`（默认 `true`）。关掉＝回到 R1 行为，只给历史遗留清单用。
+
+由此新数据天然是 DAG：`add` 拒绝未知 id，而 `depends_on` 创建后没有任何修改入口，
+所以**不需要环检测算法**；`Blockers.cycle` 只负责把老数据里的环**说清楚**。
+
+### 轨迹的三个出口（R9b/c/d）
+
+轨迹本来就是 `turn-*.jsonl`（一行一个 span）+ 每会话一份 `summary.json`。R9 补上一个读路径和三个出口，
+三者共用同一份数据，**不改写入格式、不新增依赖、不发网络请求**：
+
+| 出口 | 命令 | 形态 |
+|---|---|---|
+| 跨会话总览 | `ai-coding trace overview [--since N] [--format json]` | 一张表 + `TOTAL` 行（turns / files / steps / prompt / completion / cached / 命中率 / 龄期） |
+| 单文件 HTML | `ai-coding trace export --format html --session <id> --out t.html` | 内联 CSS、无 JS、无外链；**每个动态字符串都 `html.escape`** |
+| OTLP/JSON | `ai-coding trace export --format otlp-json --session <id>` | 按 span 分组的真 span 树；`sha256(session\|turn\|span)` 派生 id，导出两次字节一致 |
+
+`TraceStore.sessions()` 让「有哪些会话」可枚举（目录 mtime 倒序、tie 按 id），`--since` 与 `prune`
+**共用同一个口径**（目录 mtime），所以「prune 会删什么」和「什么算旧」永远不会打架。
+某会话的 `summary.json` 缺失或损坏时记零（不抛异常），`summary.turns != 磁盘回合数` 时**只标注**
+`mismatch`、退出码仍为 0。导出**默认不含**消息全文，`--full` 显式打开（`turn-<n>.full.json` 只在
+`capture: full` 时才会存在）。
+
+验收脚本：`.venv/bin/python scripts/r9_cases.py`（离线 12 条）；
+`--real` 再加 1 条：真模型跑一个回合，断言那份报告真的把这次会话算进去了。

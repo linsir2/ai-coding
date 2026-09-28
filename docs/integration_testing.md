@@ -298,3 +298,23 @@ AI_CODING_MCP_STDIO=1 .venv/bin/python -m pytest tests/test_mcp_progress.py -q
 都写在文件注释里：child 把结果写**文件**而不是 pty（最后一个 slave fd 关闭后，Linux 会让父进程的
 `os.read(master)` 抛 EIO、连同排队字节一起丢掉，实测），以及 `os.killpg(pgid, 0)` 必须在 reap
 之后才可信（僵尸会让它继续成功，spike 实测）。
+
+## R9 验收脚本（`scripts/r9_cases.py`）
+
+离线 12 条（无网络、无模型）：门禁挡 `completed` / 挡 `in_progress` / 依赖完成后放行 /
+依赖 `dropped` 后放行 / `add` 拒绝未知与自指 / **正向引用再也造不出环** / 开关关掉回到 R1 /
+总览的数字与命中率 / HTML 转义工具输出 / HTML 无外链 / OTLP 导出确定性 / prune 与 `--since` 同口径。
+
+```bash
+.venv/bin/python scripts/r9_cases.py                                   # 12/12
+.venv/bin/python scripts/r9_cases.py --real --config config.local.yaml # 13/13（真模型）
+```
+
+真实那一条（`real_report_includes_the_turn`）：走组合根（真引擎 + 真工具栈 + `TraceRecorder`）
+跑一个真回合，然后断言 `build_report` 至少数到 1 个会话、1 个回合。实测一次：
+`answer=106 chars, sessions=1, turns=1, prompt=11723`。
+
+离线那 12 条里有三条是**回归钉子**，它们钉的都是 R9 分析阶段真跑出来的洞：
+「两个互相阻塞的条目都能标 completed」（今天被 `blocked_by_dependencies` 挡住）、
+「`depends_on=["2"]` 后接 `["1"]` 能造出 1↔2 环」（今天第一条就返回 `unknown_dependency`）、
+「`--since` 与 `prune` 用了两套时间口径」（今天同一个 `sessions()`）。

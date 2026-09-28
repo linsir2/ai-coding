@@ -77,7 +77,7 @@ typer/rich、pytest（`-o addopts=""`）、ruff、mypy。**不新增任何依赖
   `TaskState.blockers(item_id) -> Blockers`；`TaskState.dependency_invariant() -> tuple[str, ...]`；
   `TaskState.next_id() -> str`（把原来的 `_next_id` 公开，Task 2 需要提前知道新 id）
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 # ---- R9a: the dependency query (docs/r9-analysis.md 3.1) ----
@@ -155,12 +155,12 @@ def test_r9_render_and_focus_are_unchanged():
 from ai_coding.domain.task import Blockers, TaskState
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_domain_task.py -o addopts="" -q`
 Expected: FAIL —— `ImportError: cannot import name 'Blockers' from 'ai_coding.domain.task'`
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 在 `TodoItem` 之后、`TaskState` 之前加：
 
@@ -248,12 +248,12 @@ class Blockers:
 
 `__all__` 里加 `"Blockers"`。
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_domain_task.py -o addopts="" -q`
 Expected: **24 passed**（既有 18 + 新增 6），一条既有断言都没改
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/domain/task.py tests/test_domain_task.py
@@ -273,7 +273,7 @@ git commit -m "R9a-1: dependencies become a query with an invariant"
 - Produces: `TodoWriteTool(enforce_dependencies: bool = True)`；错误码
   `unknown_dependency` / `self_dependency` / `blocked_by_dependencies`
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 # ---- R9a: the gate (docs/r9-analysis.md 3.1) ----
@@ -375,12 +375,12 @@ async def test_r9_the_gate_can_be_switched_off(ctx):
     assert r.success is True  # today's behaviour
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_tool_todo_write.py -o addopts="" -q`
 Expected: FAIL —— `AttributeError: 'TodoWriteTool' object has no attribute '_enforce'`（或 `unknown_dependency` 断言失败）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ```python
 class TodoWriteTool(BaseTool):
@@ -480,12 +480,12 @@ import 需要加 `Blockers`：`from ai_coding.domain.task import VALID_STATUSES,
 > **注意**：`update` 里原有的 `status=None if status is None else str(status).strip().lower()`
 > 逻辑要复用同一个 `normalised` 变量，避免两处各自处理（否则「大写 COMPLETED」会绕过门禁）。
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_tool_todo_write.py tests/test_domain_task.py tests/test_agent_loop_react.py -o addopts="" -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy ai_coding`
 Expected: 全绿（既有 `todo_write` 用例零改动）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/tools/todo_write_tool.py tests/test_tool_todo_write.py
@@ -504,7 +504,7 @@ git commit -m "R9a-2: the todo gate refuses to skip an unmet dependency"
 - Consumes: `TodoWriteTool(enforce_dependencies=...)`
 - Produces: `AIConfig.enforce_dependencies: bool = True`；builder 按配置构造 `todo_write`
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 def test_r9_the_dependency_gate_is_on_by_default_and_configurable(tmp_path):
@@ -516,12 +516,12 @@ def test_r9_the_dependency_gate_is_on_by_default_and_configurable(tmp_path):
     assert build_tool_registry(off, str(tmp_path), None).get("todo_write")._enforce is False
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_builder.py -o addopts="" -q`
 Expected: FAIL —— `AttributeError: 'TodoWriteTool' object has no attribute '_enforce'`（Task 2 已合入时是第二个断言失败）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `config/models.py`，在 `max_todo_nudges` 旁边加：
 
@@ -543,12 +543,12 @@ Expected: FAIL —— `AttributeError: 'TodoWriteTool' object has no attribute '
     )
 ```
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_builder.py tests/test_tool_todo_write.py tests/test_cli.py -o addopts="" -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy ai_coding`
 Expected: 全绿（`tests/test_builder.py` 的 `SimpleNamespace` 缺这个字段，靠 `getattr` 默认开）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/config/models.py ai_coding/tools/builder.py tests/test_builder.py
@@ -567,7 +567,7 @@ git commit -m "R9a-3: the dependency gate has a switch and reaches the tool stac
 - Produces: `SessionRef(session, path, mtime, turn_files)`（属性 `turns`）；
   `TraceStore.sessions() -> tuple[SessionRef, ...]`（mtime 倒序、tie 按 id）；`prune()` 改用同一口径
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 # ---- R9b: listing sessions (docs/r9-analysis.md 3.2) ----
@@ -626,12 +626,12 @@ def test_r9_sessions_on_a_missing_root_is_empty(tmp_path):
 
 （`tests/test_trace_store.py` 已有 `import os, time` 与 `_store` 帮助函数，直接复用。）
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_trace_store.py -o addopts="" -q`
 Expected: FAIL —— `AttributeError: 'TraceStore' object has no attribute 'sessions'`
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 在 `TurnWriter` 之前加：
 
@@ -699,12 +699,12 @@ def _turn_number(path: Path) -> int:
             removed += 1
 ```
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_trace_store.py tests/test_trace_recorder.py tests/test_cli_trace.py -o addopts="" -q`
 Expected: 全绿（既有 prune / numbering 用例零改动）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/core/trace.py tests/test_trace_store.py
@@ -724,7 +724,7 @@ git commit -m "R9b-1: the trace store can list its sessions"
 - Produces: `SessionRow`、`AggregateReport`、`row_from_summary(...)`、`aggregate_sessions(rows)`、
   `build_report(store, *, since_days=0, now=None)`
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 """TDD (R9b): cross-session aggregation — pure maths, one disk entry point."""
@@ -806,12 +806,12 @@ def test_r9_since_filters_by_directory_mtime_and_keeps_order(tmp_path):
     assert [row.session for row in build_report(store).rows] == ["new", "old"]
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_trace_aggregate.py -o addopts="" -q`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'ai_coding.core.aggregate'`
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ```python
 """Cross-session aggregation for ``trace overview`` (R9b).
@@ -946,12 +946,12 @@ def build_report(
     return aggregate_sessions(rows)
 ```
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_trace_aggregate.py -o addopts="" -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy ai_coding`
 Expected: 5 passed / clean
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/core/aggregate.py tests/test_trace_aggregate.py
@@ -970,7 +970,7 @@ git commit -m "R9b-2: one report, folded across every recorded session"
 - Consumes: `core.aggregate.build_report`、`AggregateReport`
 - Produces: `ui.trace_render.render_overview(report) -> str`；CLI `trace overview`（新选项 `--since` / `--format`）
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 # ---- R9b: trace overview (docs/r9-analysis.md 3.2) ----
@@ -1046,12 +1046,12 @@ def test_r9_overview_flags_a_summary_mismatch(tmp_path):
 
 （`tests/test_cli_trace.py` 需要补 `import os, time` 与 `from pathlib import Path`。）
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_trace.py -o addopts="" -q`
 Expected: FAIL —— typer 不认 `overview` / `--since` / `--format`（`exit_code == 2`）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `ui/trace_render.py`（import 处补 `from ai_coding.core.aggregate import AggregateReport`）：
 
@@ -1127,12 +1127,12 @@ def render_overview(report: AggregateReport) -> str:
 
 （放在 `if not session:` 之前——`overview` 不需要会话参数。）
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_trace.py tests/test_trace_render.py -o addopts="" -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy ai_coding`
 Expected: 全绿
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/ui/trace_render.py ai_coding/cli.py tests/test_cli_trace.py
@@ -1152,7 +1152,7 @@ git commit -m "R9b-3: trace overview shows every session in one table"
 - Produces: `SpanRow`、`TurnView`、`SessionView`、`read_session_view(store, session, *, full=False)`、
   `render_session_html(view)`、`render_index_html(report, views)`
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 """TDD (R9c): one self-contained HTML page per session — escaped, offline, stable."""
@@ -1256,12 +1256,12 @@ def test_r9_a_fifty_turn_session_stays_under_a_megabyte(tmp_path):
     assert len(html.encode("utf-8")) < 1_000_000
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_trace_export_html.py -o addopts="" -q`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'ai_coding.core.export_html'`
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ```python
 """Static HTML export of a recorded session (R9c).
@@ -1485,12 +1485,12 @@ def render_index_html(report: AggregateReport, views: list[SessionView]) -> str:
     return "\n".join(parts)
 ```
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_trace_export_html.py -o addopts="" -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy ai_coding`
 Expected: 8 passed / clean
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/core/export_html.py tests/test_trace_export_html.py
@@ -1509,7 +1509,7 @@ git commit -m "R9c-1: a session renders to one escaped, offline HTML page"
 - Consumes: `read_session_view`、`render_session_html`、`render_index_html`、`build_report`
 - Produces: CLI `trace export --format html [--session ID | --all] [--out FILE] [--full]`
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 def test_r9_export_html_writes_a_file(tmp_path):
@@ -1537,12 +1537,12 @@ def test_r9_export_an_unknown_session_reports_instead_of_crashing(tmp_path):
     assert "no traces" in result.stdout.lower() or "not found" in result.stdout.lower()
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_trace.py -k r9_export -o addopts="" -q`
 Expected: FAIL（typer 不认 `export`）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `cli.py::trace_command` 在 `overview` 分支之后、`if not session:` 之前加：
 
@@ -1597,11 +1597,11 @@ Expected: FAIL（typer 不认 `export`）
 
 （`--format otlp-json` 在 Task 10 接同一分支；Task 10 会把它写成 `fmt == "otlp-json"` 的判断。）
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_trace.py -o addopts="" -q`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/cli.py tests/test_cli_trace.py
@@ -1620,7 +1620,7 @@ git commit -m "R9c-2: trace export writes the HTML page"
 - Consumes: `SessionView` / `TurnView` / `SpanRow`（Task 7）
 - Produces: `rows_to_otlp(views, *, service_name="ai-coding") -> dict[str, Any]`
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 """TDD (R9d): recorded rows become OTLP/JSON spans — deterministic, no network."""
@@ -1722,12 +1722,12 @@ def test_r9_the_export_is_deterministic(tmp_path):
     assert first == second
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_trace_export_otlp.py -o addopts="" -q`
 Expected: FAIL —— `ModuleNotFoundError: No module named 'ai_coding.core.export_otlp'`
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ```python
 """OTLP/JSON export of recorded spans (R9d).
@@ -1872,12 +1872,12 @@ def rows_to_otlp(
     return {"resourceSpans": resources}
 ```
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_trace_export_otlp.py -o addopts="" -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy ai_coding`
 Expected: 7 passed / clean
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/core/export_otlp.py tests/test_trace_export_otlp.py
@@ -1896,7 +1896,7 @@ git commit -m "R9d-1: rows become OTLP/JSON spans, deterministically"
 - Consumes: `rows_to_otlp`、`read_session_view`
 - Produces: `trace export --format otlp-json`（与 `html` 共用 `--session/--all/--out`）
 
-- [ ] **Step 1: 写红测试**
+- [x] **Step 1: 写红测试**
 
 ```python
 def test_r9_export_otlp_json_is_stable(tmp_path):
@@ -1914,12 +1914,12 @@ def test_r9_export_otlp_json_is_stable(tmp_path):
     assert first.stdout == second.stdout  # deterministic ids
 ```
 
-- [ ] **Step 2: 跑红**
+- [x] **Step 2: 跑红**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_trace.py -k r9_export_otlp -o addopts="" -q`
 Expected: FAIL（`otlp-json` 还没接）
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 Task 8 的 `export` 分支里，把「取 `body`」的那一段改成按 `fmt` 分派：
 
@@ -1942,11 +1942,11 @@ Task 8 的 `export` 分支里，把「取 `body`」的那一段改成按 `fmt` �
 > 实现提示：`export` 分支里「html」与「otlp-json」共用读盘与写文件，只有**渲染函数**不同；
 > 把渲染抽成一个局部函数比复制两遍 if 更清楚。
 
-- [ ] **Step 4: 跑绿 + 门禁**
+- [x] **Step 4: 跑绿 + 门禁**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_trace.py -o addopts="" -q && .venv/bin/python -m mypy ai_coding`
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add ai_coding/cli.py tests/test_cli_trace.py
@@ -1964,7 +1964,7 @@ git commit -m "R9d-2: trace export speaks OTLP/JSON"
 **Interfaces:**
 - Produces: `scripts/r9_cases.py`（离线 12 + `--real` 1），文档与 backlog 同步
 
-- [ ] **Step 1: 写验收脚本**
+- [x] **Step 1: 写验收脚本**
 
 沿用 `scripts/r8_cases.py` 的形状（一个 case 一个 async 函数，返回 `(ok, detail)`）。离线 12 条：
 
@@ -2053,25 +2053,25 @@ async def prune_and_overview_agree(tmp: Path) -> tuple[bool, str]:
 外加 `--real`：跑一个真模型回合（复用 `scripts/r8_cases.py::_real_loop` 的搭法），
 断言轨迹目录里至少有一个会话、且 `build_report` 把它算进去。
 
-- [ ] **Step 2: 跑验收**
+- [x] **Step 2: 跑验收**
 
 Run: `.venv/bin/python scripts/r9_cases.py`
 Run: `.venv/bin/python scripts/r9_cases.py --real --config config.local.yaml`
 Expected: 离线 12/12；真实 1/1
 
-- [ ] **Step 3: 更新文档**
+- [x] **Step 3: 更新文档**
 
 按 `docs/r9-analysis.md` §12 的清单逐条改：`features.md`（依赖门禁 + 三个观测出口）、
 `data-contracts.md`（§5 那些新契约）、`architecture.md`（「一个数据源、三个出口」+ 策略/领域边界）、
 `how-to-run.md`（新命令与 `ai.enforce_dependencies`）、`integration_testing.md`（脚本跑法）、
 `r7-backlog.md`（3.5 与 5.1/5.2/5.3 划掉并指向本文）。
 
-- [ ] **Step 4: 全量门禁**
+- [x] **Step 4: 全量门禁**
 
 Run: `.venv/bin/python -m pytest tests/ -o addopts="" -q && .venv/bin/python -m ruff check . && .venv/bin/python -m mypy ai_coding`
 Expected: 全绿（用例数从 1073 起只增不减）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add -A
@@ -2117,5 +2117,49 @@ Task 8/10 的 CLI 分支给了完整代码；Task 11 的脚本骨架里用 `...`
 ## Execution Handoff
 
 用户已明确选择 **Inline Execution**（「不准派子任务，自己实现，或者就用主模型」），
-且本轮要求**先只写计划**：因此现在**不启动实现**。等你确认后，按 Task 1 → 11 顺序执行，
-每个 Task 先跑红、再实现、跑绿、单独提交；任何需要改动既有测试断言的时刻先停下来核对原因。
+并按 Task 1 → 11 顺序执行，每个 Task 先跑红、再实现、跑绿、单独提交。
+
+---
+
+## 执行状态（2026-09-28，本轮已完成）
+
+**11 个 Task 全部落地，每一步都先跑红再实现，一个 Task 一个提交。既有测试断言零改动。**
+
+| Task | 提交 | 红 → 绿 | 结果 |
+|---:|---|---|---|
+| 1 | `3aefeda` | `ImportError: Blockers` → **24 passed** | `Blockers` / `blockers()` / `dependency_invariant()` / `next_id()` |
+| 2 | `eac9c4f` | 9 failed（`TypeError: unexpected keyword`）→ **20 passed** | add 校验 + 状态门禁 + 三条出路 |
+| 3 | `026b70a` | 第二个断言 failed（`_enforce` 仍是 `True`）→ **8 passed** | `ai.enforce_dependencies` + builder 接线 |
+| 4 | `ac5c178` | `AttributeError: sessions` → **17 passed** | `SessionRef` / `TraceStore.sessions()` / `prune` 同口径 |
+| 5 | `303ee30` | `ModuleNotFoundError: aggregate` → **5 passed** | `SessionRow` / `AggregateReport` / `build_report` |
+| 6 | `8da0334` | `exit_code == 2` → **16 passed** | `render_overview` + `trace overview --since/--format` |
+| 7 | `00be25f` | `ModuleNotFoundError: export_html` → **8 passed** | 单文件 HTML（全转义、无外链、`--full` 才含全文） |
+| 8 | `660f5ab` | `exit_code == 2` → **13 passed** | `trace export --format html --session/--all/--out/--full` |
+| 9 | `c2dd61a` | `ModuleNotFoundError: export_otlp` → **7 passed** | `rows_to_otlp`（确定性 id、span 树、状态映射） |
+| 10 | `65f6ed4` | `JSONDecodeError`（还是 HTML）→ **14 passed** | `trace export --format otlp-json` |
+| 11 | 见下 | — | `scripts/r9_cases.py` + 六份文档 |
+
+**全量门禁（收尾实测）**：`pytest tests/ -o addopts="" -q` = **1122 passed / 4 skipped**
+（1073 → 1122，正好 +49，与 Self-Review 的用例数一致）；`ruff check .` = 0；`mypy ai_coding` = 0（98 文件）。
+`scripts/r9_cases.py` = **12/12**；`--real --config config.local.yaml` = **13/13**
+（真模型那一条：`answer=106 chars, sessions=1, turns=1, prompt=11723`）。
+
+### 与计划的偏差（全部记录在案）
+
+1. **HTML 体积判据被证实**：计划里「50 回合 < 1MB」是估的，实测 **389,771 字节**（50 回合 × 20 span），
+   余量约 2.5×。用法例 + 一次真跑各钉一遍。
+2. **`ruff` 的 `target-version = py310` 不接受 PEP 701 的 f-string**：计划里
+   `f"{' · <span class=\"muted\">…' if view.full else ''}"` 在 3.10 语法下是非法的
+   （`Cannot use an escape sequence in f-strings on Python 3.10`）。改成先算 `note` 变量再插值，
+   输出逐字节不变。
+3. **`_kv_row` 删掉**：计划里那个私有辅助函数最终没有任何调用点（表格渲染走的是逐行拼
+   `<td class='data'>`），留着就是死代码，实现时移除；不影响任何用法例。
+4. **`SessionRef` 用 `@dataclasses.dataclass`**：`core/trace.py` 是 `import dataclasses`（不是
+   `from dataclasses import dataclass`），照抄计划片段会 `NameError`（已实测）。语义不变。
+5. **`tests/test_trace_export_html.py` 三处换行**：计划里的测试片段有 3 行 >100 字符（`ruff` E501）。
+   只换了行，**断言一条没动**。
+6. **验收脚本的第 12 条**：计划列举了 11 个具名的离线用例，但目标写的是 12 条；补上的那条是
+   `gate_can_be_switched_off`（D-R9-3 的开关），与门禁的其余 6 条同源。
+7. **Task 8 / Task 10 的 CLI 分支**：计划提示「把渲染抽成一个局部函数」，实现时用的是
+   `fmt == "otlp-json"` 先行、其余走 HTML 的 `if/elif` 分派；行为与计划一致（同一个 `store`、
+   同一套 `--session/--all/--out/`）。
