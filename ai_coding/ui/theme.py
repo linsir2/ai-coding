@@ -21,4 +21,5 @@ STYLE = Style.from_dict({
     "input": "#dfe4ea",
     "input.prefix": "#00d2d3",
     "user-msg": "bg:#2d3436 fg:#dfe4ea",
+    "timestamp": "#636e72",
 })

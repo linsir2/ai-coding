@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime
 from typing import Any
 
 from prompt_toolkit import Application
@@ -201,6 +202,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
             if text.strip():
                 body.write(f"> {text}\n")
                 user_lines.add(body.get_buffer().document.line_count - 2)
+                body.write(f"  {datetime.now().strftime('%H:%M')}\n")
                 input_buffer.reset()
                 asyncio.create_task(_submit_text(text))
 
@@ -221,6 +223,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         nonlocal turn_start
         turn_start = time.monotonic()
         await loop.process_input(session, text, on_delta=body.write)
+        body.write(f"  {datetime.now().strftime('%H:%M')}\n")
         auto_scroll_to_end(body_window)
 
     @kb.add("c-c")

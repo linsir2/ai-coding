@@ -101,3 +101,14 @@ def test_user_lines_tracked():
     source = inspect.getsource(run_app)
     assert "user_lines" in source
     assert "get_line_prefix" in source
+
+
+def test_timestamp_added():
+    """Each turn should have a timestamp."""
+    import inspect
+
+    from ai_coding.ui.app import run_app
+
+    source = inspect.getsource(run_app)
+    assert "datetime" in source
+    assert "strftime" in source
