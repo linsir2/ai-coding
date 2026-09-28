@@ -70,6 +70,11 @@ class CLIUserPromptCallback:
     def __init__(self, input_fn: Callable[[str], str] | None = None) -> None:
         self._read: Callable[[str], str] = input_fn or (lambda prompt: input(prompt))
         self._interactive: Any | None = None
+        self._provider: Callable[[str], Any] | None = None
+
+    def set_provider(self, provider: Callable[[str], Any]) -> None:
+        """Use an async provider instead of stdin (TUI mode)."""
+        self._provider = provider
 
     def set_reader(self, read: Callable[[str], str]) -> None:
         """Use ``read`` for the next question (the REPL's ``PromptSession.prompt``)."""
@@ -85,6 +90,15 @@ class CLIUserPromptCallback:
         self._interactive = reader
 
     async def ask(self, question: str, options: Sequence[str] = ()) -> UserAnswer:
+        if self._provider is not None:
+            try:
+                raw = await self._provider(_format_prompt(question, options))
+                text = str(raw or "").strip()
+                if not text:
+                    return UserAnswer(answered=False, reason="empty")
+                return UserAnswer(answered=True, text=text)
+            except Exception:  # noqa: BLE001 — the channel must never break a turn
+                return UserAnswer(answered=False, reason="no_user")
         if self._interactive is not None:
             try:
                 answer: UserAnswer = await self._interactive.ask(question, options)

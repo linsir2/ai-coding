@@ -49,6 +49,11 @@ class CLIApprovalCallback(ApprovalCallback):
         input_fn: Callable[[str], str] | None = None,
     ) -> None:
         self._input = input_fn or _default_input
+        self._provider: Callable[[str], Any] | None = None
+
+    def set_provider(self, provider: Callable[[str], Any]) -> None:
+        """Use an async provider instead of stdin (TUI mode)."""
+        self._provider = provider
 
     async def approve(
         self,
@@ -57,10 +62,16 @@ class CLIApprovalCallback(ApprovalCallback):
         reason: str,
     ) -> ApprovalResult:
         prompt = self._format_prompt(tool_name, params, reason)
-        try:
-            answer = (await asyncio.to_thread(self._input, prompt)).strip().lower()
-        except (EOFError, OSError):
-            return ApprovalResult.NO  # fail-closed
+        if self._provider is not None:
+            try:
+                answer = str(await self._provider(prompt)).strip().lower()
+            except Exception:  # noqa: BLE001 — fail-closed
+                return ApprovalResult.NO
+        else:
+            try:
+                answer = (await asyncio.to_thread(self._input, prompt)).strip().lower()
+            except (EOFError, OSError):
+                return ApprovalResult.NO  # fail-closed
 
         if answer in {"y", "yes"}:
             return ApprovalResult.YES
