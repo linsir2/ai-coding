@@ -66,16 +66,20 @@ Screen {
     color: $text-muted;
 }
 
-.block-tool-start {
-    color: $warning;
-}
-
-.block-tool-end {
-    color: $success;
-}
-
 .block-turn-end {
     color: $error;
+}
+
+Turn {
+    margin-bottom: 1;
+}
+
+Turn Collapsible {
+    margin-left: 2;
+}
+
+Turn Collapsible > CollapsibleTitle {
+    color: $warning;
 }
 
 ApprovalScreen,
@@ -92,6 +96,10 @@ AskScreen {
     background: $surface-lighten-1;
 }
 
+#approval-box {
+    width: 60;
+}
+
 #approval-buttons {
     height: auto;
     align-horizontal: right;
@@ -99,6 +107,7 @@ AskScreen {
 
 #approval-buttons Button {
     margin-left: 2;
+    padding: 0 2;
 }
 
 #ask-input {

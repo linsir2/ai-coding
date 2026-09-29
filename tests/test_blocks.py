@@ -25,7 +25,10 @@ def test_tool_started_names_the_tool_and_previews_params():
         ToolStarted(call_id="c1", tool_name="bash", params={"command": "ls -la"})
     )
     assert block is not None
-    assert "bash" in block.text
+    assert block.kind == "tool"
+    assert block.tool_name == "bash"
+    assert block.call_id == "c1"
+    assert block.tool_status == "running"
     assert "ls -la" in block.text
 
 
@@ -36,8 +39,40 @@ def test_tool_finished_marks_success_and_failure():
     bad = blocks_from_event(
         ToolFinished(call_id="c2", tool_name="bash", success=False, error="boom")
     )
-    assert ok is not None and ok.text.startswith("✓")
-    assert bad is not None and bad.text.startswith("✗")
+    assert ok is not None and ok.tool_status == "ok"
+    assert bad is not None and bad.tool_status == "failed"
+    assert ok.call_id == "c1" and ok.tool_name == "bash"
+
+
+def test_tool_chunk_carries_call_id():
+    block = blocks_from_event(ToolChunk("c1", "bash", "stdout", "step-1\n", 0))
+    assert block is not None
+    assert block.kind == "tool-chunk"
+    assert block.call_id == "c1"
+
+
+def test_tool_target_for_path_tools():
+    block = blocks_from_event(
+        ToolStarted(call_id="c1", tool_name="read", params={"path": "src/foo.py"})
+    )
+    assert block is not None
+    assert block.tool_target == "src/foo.py"
+
+
+def test_tool_target_bash_truncates_long_command():
+    block = blocks_from_event(
+        ToolStarted(call_id="c1", tool_name="bash", params={"command": "x" * 100})
+    )
+    assert block is not None
+    assert block.tool_target == "x" * 60 + "…"
+
+
+def test_tool_target_unknown_tool_is_empty():
+    block = blocks_from_event(
+        ToolStarted(call_id="c1", tool_name="mcp_foo", params={"a": 1})
+    )
+    assert block is not None
+    assert block.tool_target == ""
 
 
 def test_completed_turn_is_silent():

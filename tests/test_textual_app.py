@@ -196,14 +196,52 @@ async def test_textual_console_delta_streams_into_transcript(monkeypatch):
 
     monkeypatch.setattr("ai_coding.ui.textual_app.handle_input", fake_handle_input)
     async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/review"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert seen == ["/review"]
+        text = _all_static_text(app)
+        assert "计划" in text
+        assert "第一步：写代码" in text
+
+
+@pytest.mark.asyncio
+async def test_plan_asks_before_running(monkeypatch):
+    loop = _FakeLoop()
+    app = _app(loop=loop)
+
+    async def fake_wait(screen):
+        return "add tests"
+
+    monkeypatch.setattr(app, "push_screen_wait", fake_wait)
+    async with app.run_test() as pilot:
         app.query_one("#prompt").value = "/plan"
         await pilot.press("enter")
         await pilot.pause()
         await pilot.pause()
-        assert seen == ["/plan"]
-        text = _all_static_text(app)
-        assert "计划" in text
-        assert "第一步：写代码" in text
+        await pilot.pause()
+        assert len(loop.calls) == 1
+        assert "add tests" in loop.calls[0]
+        assert "implementation plan" in loop.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_plan_escape_does_nothing(monkeypatch):
+    loop = _FakeLoop()
+    app = _app(loop=loop)
+
+    async def fake_wait(screen):
+        return ""
+
+    monkeypatch.setattr(app, "push_screen_wait", fake_wait)
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/plan"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+        assert loop.calls == []
 
 
 @pytest.mark.asyncio

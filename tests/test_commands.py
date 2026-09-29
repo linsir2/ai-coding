@@ -143,11 +143,11 @@ async def test_direct_slash_command_still_works(monkeypatch):
 
     monkeypatch.setattr("ai_coding.ui.textual_app.handle_input", fake_handle_input)
     async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/plan"
+        app.query_one("#prompt").value = "/status"
         await pilot.press("enter")
         await pilot.pause()
         await pilot.pause()
-        assert seen == ["/plan"]
+        assert seen == ["/status"]
         assert not CommandPalette.is_open(app)
 
 

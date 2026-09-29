@@ -2,9 +2,10 @@
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Markdown, Static
+from textual.widgets import Collapsible, Markdown, RichLog, Static
 
-from ai_coding.ui.transcript import Transcript
+from ai_coding.ui.blocks import Block
+from ai_coding.ui.transcript import Transcript, Turn
 
 
 class _Harness(App[None]):
@@ -104,3 +105,76 @@ async def test_flush_before_mount_does_not_lose_text():
         await t.end_assistant()
         await pilot.pause()
         assert "x" in t.query_one(Markdown).source
+
+
+@pytest.mark.asyncio
+async def test_one_turn_per_assistant_pair():
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:25")
+        await t.end_assistant()
+        await pilot.pause()
+        assert len(t.query(Turn)) == 1
+        t.begin_assistant("10:26")
+        await t.end_assistant()
+        await pilot.pause()
+        assert len(t.query(Turn)) == 2
+
+
+@pytest.mark.asyncio
+async def test_tool_blocks_become_collapsibles():
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:25")
+        t.append_block(
+            Block(
+                "tool",
+                "{'command': 'ls'}",
+                call_id="c1",
+                tool_name="bash",
+                tool_target="ls",
+                tool_status="running",
+            )
+        )
+        await pilot.pause()
+        coll = t.query_one(Collapsible)
+        assert "bash" in coll.title
+        assert "ls" in coll.title
+        assert coll.collapsed
+
+
+@pytest.mark.asyncio
+async def test_tool_chunks_land_inside_collapsible():
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:25")
+        await pilot.pause()
+        t.append_block(
+            Block("tool", "", call_id="c1", tool_name="bash", tool_status="running")
+        )
+        t.append_block(Block("tool-chunk", "hello output", call_id="c1"))
+        await pilot.pause()
+        coll = t.query_one(Collapsible)
+        coll.collapsed = False
+        await pilot.pause()
+        await pilot.pause()
+        log = t.query_one(RichLog)
+        assert any("hello output" in line.text for line in log.lines)
+
+
+@pytest.mark.asyncio
+async def test_text_and_tools_interleave():
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:25")
+        await pilot.pause()
+        t.stream("before")
+        t.append_block(
+            Block("tool", "", call_id="c1", tool_name="bash", tool_status="running")
+        )
+        t.stream("after")
+        await t.end_assistant()
+        await pilot.pause()
+        turn = t.query_one(Turn)
+        kinds = [type(ch).__name__ for ch in turn.children]
+        assert kinds == ["Static", "Markdown", "Collapsible", "Markdown"]

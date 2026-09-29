@@ -4,7 +4,7 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Input
 
-from ai_coding.ui.modals import ApprovalScreen, AskScreen
+from ai_coding.ui.modals import ApprovalScreen, AskScreen, parse_approval_prompt
 
 
 class _Host(App[str]):
@@ -77,6 +77,34 @@ async def test_approval_unknown_button_id_fails_closed():
 
     screen.on_button_pressed(_UnknownButtonEvent())  # type: ignore[arg-type]
     assert dismissed == ["n"]
+
+
+def test_parse_approval_prompt_extracts_fields():
+    prompt = (
+        "[bash] bash command requires confirmation\n"
+        "  params: {'command': 'ls -la'}\n"
+        "Allow? [y/N/s] "
+    )
+    tool_name, reason, params = parse_approval_prompt(prompt)
+    assert tool_name == "bash"
+    assert reason == "bash command requires confirmation"
+    assert params == {"command": "ls -la"}
+
+
+def test_parse_approval_prompt_drops_allow_suffix():
+    prompt = "[read] read-only\n  params: {}\nAllow? [y/N/s] "
+    tool_name, reason, params = parse_approval_prompt(prompt)
+    assert tool_name == "read"
+    assert reason == "read-only"
+    assert "Allow?" not in reason
+    assert params == {}
+
+
+def test_parse_approval_prompt_truncated_params_become_empty():
+    prompt = "[bash] run\n  params: {'command': 'ls -la && echo hello wor\nAllow? [y/N/s] "
+    tool_name, reason, params = parse_approval_prompt(prompt)
+    assert tool_name == "bash"
+    assert params == {}
 
 
 @pytest.mark.asyncio

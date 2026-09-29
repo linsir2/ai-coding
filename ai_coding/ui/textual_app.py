@@ -14,7 +14,7 @@ from textual.widgets import Input
 from ai_coding.ui.blocks import Block, TranscriptObserver
 from ai_coding.ui.commands import SlashCommandProvider
 from ai_coding.ui.input_bar import InputBar
-from ai_coding.ui.modals import ApprovalScreen, AskScreen
+from ai_coding.ui.modals import ApprovalScreen, AskScreen, parse_approval_prompt
 from ai_coding.ui.repl import REPLAction, handle_input
 from ai_coding.ui.status_bar import StatusBar
 from ai_coding.ui.transcript import Transcript
@@ -128,6 +128,9 @@ class AICodingApp(App[None]):
         self._input.disabled = True
         self._status.set_busy(True)
         try:
+            if text == "/plan":
+                await self._plan_turn()
+                return
             console = TextualConsole(self._transcript)
             action, new_session = await handle_input(
                 self._agent_loop, text, self._session, self._sessions, console
@@ -143,6 +146,28 @@ class AICodingApp(App[None]):
             self._input.disabled = False
             self._status.set_busy(False)
             self._input.focus()
+
+    async def _plan_turn(self) -> None:
+        """/plan asks what to plan, then runs the plan turn with that topic."""
+        screen = AskScreen("What should I plan?")
+        try:
+            topic: str = await self.push_screen_wait(screen)
+        finally:
+            if self.screen is screen:
+                self.pop_screen()
+        if not topic:
+            return
+        self._transcript.begin_assistant(_clock())
+        try:
+            await self._agent_loop.process_input(
+                self._session,
+                f"Create a detailed implementation plan for: {topic}. "
+                "Break it down into specific, actionable steps.",
+                on_delta=self._on_delta,
+                observer=self._observer,
+            )
+        finally:
+            await self._transcript.end_assistant()
 
     def _ensure_approval_provider(self, dispatcher: Any | None = None) -> None:
         """4.1: ``/permissions confirm`` builds a fresh callback with no provider.
@@ -178,11 +203,12 @@ class AICodingApp(App[None]):
     async def approval_provider(self, prompt: str) -> str:
         """Ask through a modal; return the string ``approval.py`` parses.
 
-        ``prompt`` is the whole formatted text (spec §4.2: the provider
-        interface flattens tool name + reason + params), so it is shown as the
-        body and the tool name comes from its first line.
+        ``prompt`` is the flattened ``"[tool] reason\\n  params: {json}\\nAllow?"``
+        text (spec §4.2); it is parsed into tool name, reason and params so the
+        modal shows each once instead of repeating the whole prompt.
         """
-        screen = ApprovalScreen(tool_name=_first_line(prompt), params={}, reason=prompt)
+        tool_name, reason, params = parse_approval_prompt(prompt)
+        screen = ApprovalScreen(tool_name=tool_name, params=params, reason=reason)
         try:
             # The annotation, not a ``str()`` wrapper: it is what binds
             # ``ScreenResultType`` to ``str`` (an unconstrained call resolves to
@@ -203,10 +229,6 @@ class AICodingApp(App[None]):
         finally:
             if self.screen is screen:
                 self.pop_screen()
-
-
-def _first_line(text: str) -> str:
-    return text.splitlines()[0] if text else "?"
 
 
 def _clock() -> str:

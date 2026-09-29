@@ -8,6 +8,8 @@ becomes ``UserAnswer(reason="empty")`` → the tool tells the model to decide
 
 from __future__ import annotations
 
+import ast
+import re
 from typing import Any
 
 from rich.text import Text
@@ -16,6 +18,39 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
+
+_TOOL_RE = re.compile(r"\[([^\]]*)\]\s*(.*)")
+
+
+def parse_approval_prompt(prompt: str) -> tuple[str, str, dict[str, Any]]:
+    """Split an approval prompt into (tool_name, reason, params).
+
+    The prompt is built by ``CLIApprovalCallback._format_prompt`` as
+    ``"[tool] reason\\n  params: {json}\\nAllow? [y/N/s] "``.  The params line
+    is best-effort (the formatter truncates it, so it may not parse); a
+    failure yields ``{}``.  The ``Allow?`` suffix is dropped entirely.
+    """
+    lines = prompt.splitlines()
+    first = lines[0] if lines else ""
+    match = _TOOL_RE.match(first)
+    if match:
+        tool_name = match.group(1)
+        reason = match.group(2).strip()
+    else:
+        tool_name = ""
+        reason = first.strip()
+    params: dict[str, Any] = {}
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped.startswith("params:"):
+            try:
+                parsed = ast.literal_eval(stripped[len("params:") :].strip())
+            except (ValueError, SyntaxError):
+                parsed = None
+            if isinstance(parsed, dict):
+                params = parsed
+            break
+    return tool_name, reason, params
 
 
 class ApprovalScreen(ModalScreen[str]):
