@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from datetime import datetime
 from typing import Any
 
@@ -42,7 +41,6 @@ class AICodingApp(App[None]):
     _transcript: Transcript
     _input: Input
     _observer: TranscriptObserver
-    _turn_started: float
 
     def __init__(
         self,
@@ -60,7 +58,6 @@ class AICodingApp(App[None]):
         self._workspace = workspace
         self._model_name = model_name
         self._observer = TranscriptObserver(self._append_block)
-        self._turn_started = time.monotonic()
 
     # ---- shell -----------------------------------------------------------
 
@@ -93,9 +90,9 @@ class AICodingApp(App[None]):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
+        self._input.value = ""
         if not text or self._input.disabled:
             return
-        self._input.value = ""
         self._transcript.append_user(text, _clock())
         if text.startswith("/"):
             self.run_command(text)
@@ -119,6 +116,8 @@ class AICodingApp(App[None]):
                 self.exit()
         finally:
             self._ensure_approval_provider()
+            model = getattr(getattr(self._agent_loop, "engine", None), "model_config", None)
+            self._status.set_model(getattr(model, "name", "") or "")
             self._input.disabled = False
             self._status.set_busy(False)
             self._input.focus()
@@ -141,7 +140,6 @@ class AICodingApp(App[None]):
     async def run_turn(self, text: str) -> None:
         self._input.disabled = True
         self._status.set_busy(True)
-        self._turn_started = time.monotonic()
         try:
             self._transcript.begin_assistant(_clock())
             await self._agent_loop.process_input(

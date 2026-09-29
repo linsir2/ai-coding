@@ -34,8 +34,9 @@ class ApprovalScreen(ModalScreen[str]):
         body.append(f"{self._tool_name}\n", style="bold")
         if self._reason:
             body.append(f"{self._reason}\n", style="yellow")
-        preview = str(self._params)
-        body.append(preview if len(preview) <= 200 else preview[:197] + "...", style="dim")
+        if self._params:
+            preview = str(self._params)
+            body.append(preview if len(preview) <= 200 else preview[:197] + "...", style="dim")
         with Vertical(id="approval-box"):
             yield Static(body, id="approval-body")
             with Horizontal(id="approval-buttons"):

@@ -385,7 +385,7 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 | `MemoryService.write_note(...)` | `memory/service.py` | 模型写记忆的唯一入口，内部复用 `_reconcile`，`evidence="model"` |
 | 工具 `memory_write` | `tools/memory_write_tool.py` | 参数 `text`/`kind`/`importance`/`supersedes`；文本上限 500 字符 |
 | `SteeringQueue` | `core/steering.py` | `put(text) -> bool`（`/` 开头与空行返回 False）、`pending`、`drain()` |
-| `InteractiveReader` | `ui/reader.py` | 唯一读取器 + 仲裁（问题 / 转向 / 命令 / 输入） |
+| `InteractiveReader` | `ui/reader.py` | **已删除（R10）**；历史契约：唯一读取器 + 仲裁（问题 / 转向 / 命令 / 输入） |
 
 
 ## R8 契约（模型写的 checkpoint / evidence / 流式与取消）
@@ -420,7 +420,7 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 | `CANCELLED_BY_USER = "cancelled_by_user"` | `domain/message.py` | `ToolResult.error` 的取值（D-7：调用级结果，不是回合状态） |
 | `TurnBooks.note_outcomes` 的失败计数 | `core/turn_books.py` | `cancelled_by_user` 的调用**不计入** `failed_streak`、不进 `failures`（D-11） |
 | `ToolDispatcher(..., cancel=None)` / `AgentLoop(..., cancel=None)` | `core/dispatch.py` / `core/agent_loop.py` | 取消事件一路贯通；`_run_tools` 在每批开始前 `clear()`（一次 Esc 只影响一批） |
-| `InteractiveReader.cancel_requested` / `request_cancel()` / `key_bindings()` | `ui/reader.py` | Esc 键的落点（`for_terminal` 负责把它装进 `PromptSession`） |
+| `InteractiveReader.cancel_requested` / `request_cancel()` / `key_bindings()` | `ui/reader.py` | **已删除（R10）**；历史契约：Esc 键的落点（`for_terminal` 负责把它装进 `PromptSession`） |
 
 ## R9 契约（依赖门禁 / 轨迹出口）
 

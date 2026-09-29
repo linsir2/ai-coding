@@ -179,8 +179,7 @@ mcp:
 
 **四件事怎么用**：
 
-1. **回合中改方向**：agent 在跑工具时直接打字回车——那句话会在**下一次迭代**变成一条
-   `[steering] …` 指令（持久化，可回放），而不是等它跑完或 Ctrl-C 丢掉已有工作。
+1. **回合中改方向**：v1 未接线——steering 队列已建好但 Textual UI 尚未接入。
    以 `/` 开头的行是命令，会留到回合结束再执行（与 Claude Code 的排队语义一致）。
 2. **模型自己记一笔**：`memory_write` 工具，写一句话、选 `fact/decision/preference/open_thread`；
    重复写同一句不会报错（返回既有 id），要改旧结论就带 `supersedes`。写完 `/memory` 里能看到

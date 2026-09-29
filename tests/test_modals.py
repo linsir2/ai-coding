@@ -43,6 +43,16 @@ async def test_approval_shows_tool_and_reason():
 
 
 @pytest.mark.asyncio
+async def test_approval_empty_params_no_empty_braces():
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(ApprovalScreen("bash", {}, "read-only"))
+        await pilot.pause()
+        text = app.screen.query_one("#approval-body").content.plain
+        assert "{}" not in text
+
+
+@pytest.mark.asyncio
 async def test_approval_escape_fails_closed():
     app = _Host()
     async with app.run_test() as pilot:

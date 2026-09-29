@@ -136,6 +136,16 @@ async def test_slash_command_runs_through_handle_input(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_status_bar_set_model_updates_display():
+    app = _app()
+    async with app.run_test() as pilot:
+        bar = app.query_one(StatusBar)
+        bar.set_model("NewModel-X")
+        await pilot.pause()
+        assert "NewModel-X" in app.query_one("#status-left").content.plain
+
+
+@pytest.mark.asyncio
 async def test_permissions_switch_re_attaches_the_provider():
     from ai_coding.security.approval import CLIApprovalCallback
 
@@ -167,6 +177,33 @@ async def test_run_command_re_attaches_the_approval_provider(monkeypatch):
         await pilot.pause()
         await pilot.pause()
         assert stale._provider == app.approval_provider
+
+
+@pytest.mark.asyncio
+async def test_textual_console_delta_streams_into_transcript(monkeypatch):
+    from ai_coding.ui.repl import REPLAction
+
+    loop = _FakeLoop()
+    app = _app(loop=loop)
+    seen: list[str] = []
+
+    async def fake_handle_input(loop_, text, session, sessions, console):
+        seen.append(text)
+        console.delta("## 计划\n\n")
+        console.delta("第一步：写代码")
+        console._end_stream()
+        return REPLAction.CONTINUE, session
+
+    monkeypatch.setattr("ai_coding.ui.textual_app.handle_input", fake_handle_input)
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/plan"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert seen == ["/plan"]
+        text = _all_static_text(app)
+        assert "计划" in text
+        assert "第一步：写代码" in text
 
 
 @pytest.mark.asyncio
