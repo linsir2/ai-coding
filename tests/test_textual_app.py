@@ -28,7 +28,7 @@ async def test_shell_mounts_with_status_transcript_and_input():
         prompt = app.query_one("#prompt", Input)
         assert prompt.placeholder == "Type a message or enter a command..."
         assert app.query_one("#input-hint").content == "/ for commands"
-        assert "Ready" in app.query_one("#status-right").content.plain
+        assert "● Ready" in app.query_one("#status-right").content.plain
         assert "~/projects/ai-app" in app.query_one("#status-left").content.plain
 
 
@@ -39,4 +39,4 @@ async def test_status_bar_switches_to_working():
         bar = app.query_one(StatusBar)
         bar.set_busy(True)
         await pilot.pause()
-        assert "Working" in app.query_one("#status-right").content.plain
+        assert "● Working" in app.query_one("#status-right").content.plain

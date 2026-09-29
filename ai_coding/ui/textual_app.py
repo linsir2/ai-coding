@@ -49,5 +49,5 @@ class AICodingApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield StatusBar(self._workspace, self._model_name)
-        yield Transcript(id="transcript")
+        yield Transcript()
         yield InputBar()

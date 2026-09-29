@@ -48,3 +48,32 @@ Screen {
     color: $text-muted;
     text-align: right;
 }
+
+.msg-header {
+    margin-top: 1;
+}
+
+.user-bubble {
+    border: round $surface-lighten-2;
+    background: $surface-lighten-1;
+    padding: 0 1;
+    margin: 0 2;
+    width: auto;
+}
+
+.block-turn,
+.block-tool-chunk {
+    color: $text-muted;
+}
+
+.block-tool-start {
+    color: $warning;
+}
+
+.block-tool-end {
+    color: $success;
+}
+
+.block-turn-end {
+    color: $error;
+}
