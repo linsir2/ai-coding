@@ -43,9 +43,9 @@ class Transcript(VerticalScroll):
             self.flush()
 
     def flush(self) -> None:
-        if self._pending and self._markdown is not None:
+        if self._pending and self._markdown is not None and self._markdown.is_mounted:
             self._markdown.append(self._pending)  # AwaitComplete: starts now
-        self._pending = ""
+            self._pending = ""
         self._follow()
 
     async def end_assistant(self) -> None:

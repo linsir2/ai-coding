@@ -93,3 +93,14 @@ async def test_clear_removes_everything():
         t.clear()
         await pilot.pause()
         assert len(t.query(Static)) == 0
+
+
+@pytest.mark.asyncio
+async def test_flush_before_mount_does_not_lose_text():
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:25")
+        t.stream("x" * 5000)  # ≥ _FLUSH_CHARS → flush() in the same tick as the mount
+        await t.end_assistant()
+        await pilot.pause()
+        assert "x" in t.query_one(Markdown).source
