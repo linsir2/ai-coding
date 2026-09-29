@@ -800,6 +800,7 @@ git commit -m "feat(ui): a transcript that streams markdown and keeps the bottom
 
 from ai_coding.core.events import (
     IterationStarted,
+    TaskUpdated,
     ToolChunk,
     ToolFinished,
     ToolStarted,
@@ -849,8 +850,24 @@ def test_timed_out_turn_says_so():
     assert "timed out" in block.text
 
 
-def test_advisory_events_are_not_shown():
-    assert blocks_from_event(ToolSurfaceWarning(tools_chars=1, threshold=2)) is None
+def test_tool_surface_warning_is_shown():
+    """R7e-3c parity: the old console rendered this advisory; the TUI keeps it visible."""
+    block = blocks_from_event(
+        ToolSurfaceWarning(tools_chars=13_301, threshold=12_000, origins=(("mcp:big", 9000),))
+    )
+    assert block is not None
+    assert "13301" in block.text
+    assert "mcp:big" in block.text
+
+
+def test_task_update_is_shown():
+    class _Task:
+        def render(self, *, max_items: int = 5) -> str:
+            return "[ ] 1. 分析代码结构"
+
+    block = blocks_from_event(TaskUpdated(task=_Task()))
+    assert block is not None
+    assert "分析代码结构" in block.text
 
 
 def test_r8_chunks_reach_the_sink():
@@ -909,9 +926,11 @@ from rich.text import Text
 from ai_coding.core.events import (
     IterationStarted,
     LoopEvent,
+    TaskUpdated,
     ToolChunk,
     ToolFinished,
     ToolStarted,
+    ToolSurfaceWarning,
     TurnFinished,
 )
 from ai_coding.domain.loop import TurnStatus
@@ -956,6 +975,18 @@ def blocks_from_event(event: LoopEvent) -> Block | None:
         )
     if isinstance(event, ToolChunk):
         return Block("tool-chunk", f"│ {_short(event.text, _OUTPUT_PREVIEW)}", "dim")
+    if isinstance(event, ToolSurfaceWarning):
+        # R7e-3c parity: the old console showed the number, the threshold and
+        # the top origins so the operator knows which server to trim.
+        origins = " · ".join(f"{name}={chars}" for name, chars in event.origins[:3])
+        suffix = f"  {origins}" if origins else ""
+        return Block(
+            "notice",
+            f"[tools] {event.tools_chars} 字符（阈值 {event.threshold}）{suffix}",
+            "dim",
+        )
+    if isinstance(event, TaskUpdated):
+        return Block("task", event.task.render(), "dim")
     if isinstance(event, TurnFinished) and event.outcome.status is TurnStatus.TIMEOUT:
         return Block("turn-end", f"[turn] timed out: {event.outcome.reason}", "red")
     return None
@@ -998,13 +1029,16 @@ class TranscriptObserver:
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_blocks.py -q`
-Expected: `9 passed`
+Expected: `10 passed`
 
 - [ ] **Step 5: 迁移旧测试的 observer 用法**
+
+**Parity 要求**：新映射必须覆盖旧 `ConsoleObserver` 渲染的全部 **7 类**事件（`IterationStarted` / `ToolStarted` / `ToolFinished` / `ToolChunk` / `ToolSurfaceWarning` / `TaskUpdated` / `TurnFinished(TIMEOUT)`）。任何一类都不能静默消失。
 
 在 `tests/test_tool_chunks.py` 与 `tests/test_tool_surface_warning.py` 中：
 - 删除 `from ai_coding.ui.console import ConsoleObserver, DialogueConsole`
 - 把 `ConsoleObserver(DialogueConsole(console), clock=...)` 替换为 `TranscriptObserver(seen.append, clock=...)`，断言改为对 `seen` 里 `Block.text` 的断言。
+- `tests/test_tool_surface_warning.py::test_the_console_renders_one_readable_line`（约 :167）：改为把 `ToolSurfaceWarning` 喂给 `TranscriptObserver(seen.append)`，断言 `seen[0].text` 里含 `13301`（tools_chars）、`12000`（threshold）与来源名——即 R7e-3c 的用户可见性在新渲染器里保住。把它重命名为 `test_the_transcript_renders_one_readable_line`。
 
 本轮不做 `ConsoleObserver` 删除（Task 7 才删），以免中途破坏旧入口。
 
@@ -1019,7 +1053,7 @@ Expected: `rm 'tests/test_observer.py'`
 
 ```bash
 .venv/bin/python -m pytest -q && .venv/bin/ruff check . && .venv/bin/python -m mypy ai_coding
-git add ai_coding/ui/blocks.py tests/test_blocks.py tests/test_tool_chunks.py tests/test_tool_surface_warning.py
+git add ai_coding/ui/blocks.py ai_coding/ui/transcript.py tests/test_blocks.py tests/test_tool_chunks.py tests/test_tool_surface_warning.py
 git commit -m "feat(ui): loop events become blocks (R8c semantics carried over)"
 ```
 
