@@ -1143,6 +1143,26 @@ async def test_ask_escape_returns_empty_string():
         await pilot.press("escape")
         await pilot.pause()
         assert app.results[-1] == ""
+
+
+@pytest.mark.asyncio
+async def test_ask_answer_does_not_leak_to_the_apps_submit_handler():
+    """A modal answer must never bubble up as a main-prompt submission."""
+    seen: list[str] = []
+
+    class _HostApp(_Host):
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            seen.append(event.value)
+
+    app = _HostApp()
+    async with app.run_test() as pilot:
+        app.push_screen(AskScreen("Which file?"), app.results.append)
+        await pilot.pause()
+        app.screen.query_one("#ask-input", Input).value = "a.py"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.results[-1] == "a.py"
+        assert seen == []
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -1228,7 +1248,10 @@ class AskScreen(ModalScreen[str]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self._send()
 
-    def on_input_submitted(self) -> None:
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        # The modal owns its input: stop the Submitted message so an App-level
+        # handler (the main prompt, Task 5) never sees a modal answer as a turn.
+        event.stop()
         self._send()
 
     def _send(self) -> None:
@@ -1278,7 +1301,7 @@ AskScreen {
 - [ ] **Step 5: 运行测试确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_modals.py -q`
-Expected: `4 passed`
+Expected: `5 passed`
 
 - [ ] **Step 6: 全量回归 + lint + commit**
 
@@ -1608,7 +1631,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
 - [ ] **Step 5: 运行测试确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_textual_app.py -q`
-Expected: `4 passed`
+Expected: `5 passed`
 
 - [ ] **Step 6: 真实运行一次（本地、有配置时）**
 
