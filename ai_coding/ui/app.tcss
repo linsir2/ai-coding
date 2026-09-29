@@ -77,3 +77,34 @@ Screen {
 .block-turn-end {
     color: $error;
 }
+
+ApprovalScreen,
+AskScreen {
+    align: center middle;
+}
+
+#approval-box,
+#ask-box {
+    width: 70;
+    height: auto;
+    padding: 1 2;
+    border: round $primary;
+    background: $surface-lighten-1;
+}
+
+#approval-buttons {
+    height: auto;
+    align-horizontal: right;
+}
+
+#approval-buttons Button {
+    margin-left: 2;
+}
+
+#ask-input {
+    margin-top: 1;
+}
+
+#ask-send {
+    margin-top: 1;
+}
