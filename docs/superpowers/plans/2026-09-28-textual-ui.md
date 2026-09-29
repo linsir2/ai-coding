@@ -1313,6 +1313,8 @@ git add ai_coding/ui/modals.py ai_coding/ui/app.tcss tests/test_modals.py
 git commit -m "feat(ui): approval and ask_user modal screens"
 ```
 
+**落地偏差（review 后修正，已通过 scoped re-review）**：`ApprovalScreen.__init__` 的 `params: dict` → `dict[str, Any]`（strict mypy）；`AskScreen` 的 question/options 用 `rich.text.Text` 包裹（原始字符串会被当 Rich markup 解析，模型给出的 `[/path]` 会 `MarkupError`）；新增 3 个回归测试（审批 Esc→`"n"`、未知 id→`"n"`、带方括号的问题不入 markup）。实现提交：`87b4a47` + `2c9f1e2`。
+
 ---
 
 ### Task 5: 循环接线（提交、流式、事件、turn 守卫）
