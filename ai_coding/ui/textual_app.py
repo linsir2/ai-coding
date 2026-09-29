@@ -14,6 +14,7 @@ from textual.widgets import Input
 from ai_coding.ui.blocks import Block, TranscriptObserver
 from ai_coding.ui.input_bar import InputBar
 from ai_coding.ui.modals import ApprovalScreen, AskScreen
+from ai_coding.ui.repl import REPLAction, handle_input
 from ai_coding.ui.status_bar import StatusBar
 from ai_coding.ui.transcript import Transcript
 
@@ -96,7 +97,40 @@ class AICodingApp(App[None]):
             return
         self._input.value = ""
         self._transcript.append_user(text, _clock())
-        self.run_turn(text)
+        if text.startswith("/"):
+            self.run_command(text)
+        else:
+            self.run_turn(text)
+
+    @work(exclusive=True, group="turn", thread=False)
+    async def run_command(self, text: str) -> None:
+        from ai_coding.ui.console import TextualConsole
+
+        console = TextualConsole(self._transcript)
+        try:
+            action, new_session = await handle_input(
+                self._agent_loop, text, self._session, self._sessions, console
+            )
+            if action is REPLAction.NEW_SESSION:
+                self._session = new_session
+            elif action is REPLAction.QUIT:
+                self.exit()
+        finally:
+            self._ensure_approval_provider()
+
+    def _ensure_approval_provider(self, dispatcher: Any | None = None) -> None:
+        """4.1: ``/permissions confirm`` builds a fresh callback with no provider.
+
+        Called after every slash command; ``dispatcher`` is injectable so the
+        regression test can pass a throwaway one instead of a real loop.
+        """
+        from ai_coding.security.approval import CLIApprovalCallback
+
+        if dispatcher is None:
+            dispatcher = getattr(self._agent_loop, "dispatcher", None)
+        callback = getattr(dispatcher, "approval", None) if dispatcher else None
+        if isinstance(callback, CLIApprovalCallback):
+            callback.set_provider(self.approval_provider)
 
     @work(exclusive=True, group="turn", thread=False)
     async def run_turn(self, text: str) -> None:

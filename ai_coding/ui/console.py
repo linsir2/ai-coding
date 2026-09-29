@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
+from typing import Any
 
 from rich.console import Console
 
@@ -118,4 +119,51 @@ class ConsoleObserver:
                 self._c.info(f"[turn] timed out: {event.outcome.reason}")
 
 
-__all__ = ["DialogueConsole", "ConsoleObserver"]
+class TextualConsole(DialogueConsole):
+    """DialogueConsole that writes into the Textual transcript instead of stdout.
+
+    Subclassing (rather than duck-typing) keeps ``repl.py``'s annotations true
+    without touching that file.
+    """
+
+    def __init__(self, transcript: Any = None) -> None:
+        # Intentionally does not call super().__init__: no rich Console needed.
+        # The default keeps the override Liskov-compatible with DialogueConsole
+        # (mypy strict); the app always passes a transcript.
+        self._transcript = transcript
+        self._streaming = False
+
+    def delta(self, token: str) -> None:
+        if not self._streaming:
+            from datetime import datetime
+
+            self._transcript.begin_assistant(datetime.now().strftime("%H:%M"))
+            self._streaming = True
+        self._transcript.stream(token)
+
+    def _end_stream(self) -> None:
+        if self._streaming:
+            self._transcript.flush()
+            self._streaming = False
+
+    def info(self, message: str) -> None:
+        self._end_stream()
+        from ai_coding.ui.blocks import Block
+
+        self._transcript.append_block(Block("info", message))
+
+    def error(self, message: str) -> None:
+        self._end_stream()
+        from ai_coding.ui.blocks import Block
+
+        self._transcript.append_block(Block("turn-end", message))
+
+    def rule(self, title: str = "") -> None:
+        self._end_stream()
+        if title:
+            from ai_coding.ui.blocks import Block
+
+            self._transcript.append_block(Block("turn", title))
+
+
+__all__ = ["DialogueConsole", "ConsoleObserver", "TextualConsole"]

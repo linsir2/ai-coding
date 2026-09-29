@@ -1,6 +1,7 @@
 """The Textual shell: status bar, transcript area, input bar."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from textual.widgets import Input, Markdown, Static
@@ -110,3 +111,37 @@ def _all_static_text(app) -> str:
         w.content.plain if hasattr(w.content, "plain") else str(w.content)
         for w in app.query(Static)
     )
+
+
+@pytest.mark.asyncio
+async def test_slash_command_runs_through_handle_input(monkeypatch):
+    loop = _FakeLoop()
+    app = _app(loop=loop)
+    seen: list[str] = []
+
+    async def fake_handle_input(loop_, text, session, sessions, console):
+        seen.append(text)
+        console.info("[status] ok")
+        from ai_coding.ui.repl import REPLAction
+        return REPLAction.CONTINUE, session
+
+    monkeypatch.setattr("ai_coding.ui.textual_app.handle_input", fake_handle_input)
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/status"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert seen == ["/status"]
+        assert "[status] ok" in _all_static_text(app)
+        assert loop.calls == []  # slash does not go to the model
+
+
+@pytest.mark.asyncio
+async def test_permissions_switch_re_attaches_the_provider():
+    from ai_coding.security.approval import CLIApprovalCallback
+
+    app = _app(loop=_FakeLoop())
+    async with app.run_test():
+        fresh = CLIApprovalCallback()
+        dispatcher = SimpleNamespace(approval=fresh)
+        app._ensure_approval_provider(dispatcher)
+        assert fresh._provider == app.approval_provider
