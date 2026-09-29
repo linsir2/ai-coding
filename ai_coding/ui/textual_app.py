@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from textual import work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, get_system_commands_provider
 from textual.binding import Binding
+from textual.command import CommandPalette
 from textual.widgets import Input
 
 from ai_coding.ui.blocks import Block, TranscriptObserver
+from ai_coding.ui.commands import SlashCommandProvider
 from ai_coding.ui.input_bar import InputBar
 from ai_coding.ui.modals import ApprovalScreen, AskScreen
 from ai_coding.ui.repl import REPLAction, handle_input
@@ -28,6 +30,7 @@ class AICodingApp(App[None]):
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+c", "quit", "Quit", show=False),
     ]
+    COMMANDS = {SlashCommandProvider, get_system_commands_provider}
 
     # Declared here (not only assigned in on_mount) so mypy strict can infer them.
     # ``_agent_loop``, not ``_loop``: Textual's App owns ``self._loop`` (its
@@ -74,6 +77,16 @@ class AICodingApp(App[None]):
         # transcript; the prompt must own the keyboard for Enter to submit.
         self._input.focus()
         self.set_interval(_FLUSH_SECONDS, self._flush_stream)
+
+    # ---- command palette ---------------------------------------------------
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.value == "/" and not CommandPalette.is_open(cast("App[object]", self)):
+            self.action_command_palette()
+
+    def on_command_palette_closed(self, event: CommandPalette.Closed) -> None:
+        if self._input.value == "/":
+            self._input.value = ""
 
     # ---- streaming (sync sink → buffered flush) ---------------------------
 

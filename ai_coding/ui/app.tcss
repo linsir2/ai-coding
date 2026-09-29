@@ -108,3 +108,25 @@ AskScreen {
 #ask-send {
     margin-top: 1;
 }
+
+CommandPalette {
+    align: center middle;
+}
+
+CommandPalette > Vertical {
+    width: 70;
+    height: auto;
+    max-height: 20;
+    border: round $primary;
+    background: $surface;
+}
+
+CommandPalette #--input {
+    border: none;
+    height: 1;
+}
+
+CommandPalette OptionList {
+    height: auto;
+    max-height: 16;
+}
