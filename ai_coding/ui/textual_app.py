@@ -106,8 +106,10 @@ class AICodingApp(App[None]):
     async def run_command(self, text: str) -> None:
         from ai_coding.ui.console import TextualConsole
 
-        console = TextualConsole(self._transcript)
+        self._input.disabled = True
+        self._status.set_busy(True)
         try:
+            console = TextualConsole(self._transcript)
             action, new_session = await handle_input(
                 self._agent_loop, text, self._session, self._sessions, console
             )
@@ -117,6 +119,9 @@ class AICodingApp(App[None]):
                 self.exit()
         finally:
             self._ensure_approval_provider()
+            self._input.disabled = False
+            self._status.set_busy(False)
+            self._input.focus()
 
     def _ensure_approval_provider(self, dispatcher: Any | None = None) -> None:
         """4.1: ``/permissions confirm`` builds a fresh callback with no provider.

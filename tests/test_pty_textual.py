@@ -46,6 +46,9 @@ def _drive(script: list[tuple[float, str]], timeout: float = 25.0) -> dict:
             if proc.poll() is not None:
                 break
     finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
         try:
             os.close(master)
         except OSError:

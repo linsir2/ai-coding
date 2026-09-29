@@ -145,3 +145,49 @@ async def test_permissions_switch_re_attaches_the_provider():
         dispatcher = SimpleNamespace(approval=fresh)
         app._ensure_approval_provider(dispatcher)
         assert fresh._provider == app.approval_provider
+
+
+@pytest.mark.asyncio
+async def test_run_command_re_attaches_the_approval_provider(monkeypatch):
+    from ai_coding.security.approval import CLIApprovalCallback
+    from ai_coding.ui.repl import REPLAction
+
+    loop = _FakeLoop()
+    stale = CLIApprovalCallback()  # what /permissions confirm installs: no provider
+    loop.dispatcher = SimpleNamespace(approval=stale)
+    app = _app(loop=loop)
+
+    async def fake_handle_input(loop_, text, session, sessions, console):
+        return REPLAction.CONTINUE, session
+
+    monkeypatch.setattr("ai_coding.ui.textual_app.handle_input", fake_handle_input)
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/status"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert stale._provider == app.approval_provider
+
+
+@pytest.mark.asyncio
+async def test_input_is_disabled_while_a_command_runs(monkeypatch):
+    from ai_coding.ui.repl import REPLAction
+
+    loop = _FakeLoop()
+    app = _app(loop=loop)
+    gate = asyncio.Event()
+
+    async def fake_handle_input(loop_, text, session, sessions, console):
+        await gate.wait()
+        return REPLAction.CONTINUE, session
+
+    monkeypatch.setattr("ai_coding.ui.textual_app.handle_input", fake_handle_input)
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/status"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.query_one("#prompt").disabled
+        gate.set()
+        await pilot.pause()
+        await pilot.pause()
+        assert not app.query_one("#prompt").disabled
