@@ -1,7 +1,7 @@
-"""Render the TUI shell to an SVG for eyeballing against the reference (v1).
+"""Render the TUI to SVGs for eyeballing against the reference.
 
 Run: .venv/bin/python scripts/tui_shot.py
-Output: docs/tui-preview.svg
+Output: docs/tui-preview.svg (conversation) + docs/tui-palette.svg (palette)
 """
 
 from __future__ import annotations
@@ -11,7 +11,9 @@ from pathlib import Path
 
 from ai_coding.ui.textual_app import AICodingApp
 
-OUT = Path(__file__).resolve().parent.parent / "docs" / "tui-preview.svg"
+DOCS = Path(__file__).resolve().parent.parent / "docs"
+OUT = DOCS / "tui-preview.svg"
+OUT_PALETTE = DOCS / "tui-palette.svg"
 
 
 async def main() -> None:
@@ -35,6 +37,13 @@ async def main() -> None:
         transcript.append_block(_block("tool-end", "✓ 已完成代码分析"))
         await pilot.pause()
         app.save_screenshot(str(OUT))
+
+        # The palette (reference panel 2): type "/" to open, then filter.
+        app.query_one("#prompt").value = "/"
+        await pilot.pause()
+        await pilot.press("p", "l", "a", "n")
+        await pilot.pause()
+        app.save_screenshot(str(OUT_PALETTE))
 
 
 def _block(kind: str, text: str):
