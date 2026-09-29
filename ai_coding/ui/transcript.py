@@ -19,8 +19,13 @@ class Turn(Vertical):
 
     Text and tools interleave: each ``start_tool`` finalizes the current markdown
     block so subsequent text starts a fresh one.  A tool is a collapsed
-    ``Collapsible`` whose ``RichLog`` body receives the params preview and any
-    streamed chunks; ``end_tool`` rewrites the title with a ✓/✗ mark.
+    ``Collapsible`` whose ``RichLog`` body receives the params preview, any
+    streamed chunks, and the outcome; ``end_tool`` swaps the leading mark for
+    ✓/✗ and appends the result.
+
+    The label is kept in ``_tools`` because ``ToolFinished`` carries no params:
+    the target cannot be re-derived at finish time, so the title is rebuilt from
+    what ``start_tool`` was given.
     """
 
     def __init__(self, timestamp: str) -> None:
@@ -30,7 +35,7 @@ class Turn(Vertical):
         self._markdown: Markdown | None = None
         self._mount: AwaitMount | None = None
         self._stale: list[tuple[Markdown, AwaitMount | None, str]] = []
-        self._tools: dict[str, tuple[Collapsible, RichLog]] = {}
+        self._tools: dict[str, tuple[Collapsible, RichLog, str]] = {}
         self._header_mounted = False
 
     def ensure_header(self) -> None:
@@ -55,7 +60,7 @@ class Turn(Vertical):
             self._markdown.append(self._pending)  # AwaitComplete: starts now
             self._pending = ""
 
-    def start_tool(self, call_id: str, title: str, body: str) -> None:
+    def start_tool(self, call_id: str, label: str, body: str) -> None:
         self.flush()
         if self._pending:
             # The markdown is not mounted yet, so its text could not be flushed;
@@ -67,8 +72,8 @@ class Turn(Vertical):
         self._mount = None
         log = RichLog()
         log.write(body)
-        collapsible = Collapsible(log, title=title, collapsed=True)
-        self._tools[call_id] = (collapsible, log)
+        collapsible = Collapsible(log, title=f"▸ {label}", collapsed=True)
+        self._tools[call_id] = (collapsible, log, label)
         self.mount(collapsible)
 
     def tool_chunk(self, call_id: str, text: str) -> None:
@@ -76,10 +81,20 @@ class Turn(Vertical):
         if tool is not None:
             tool[1].write(text)
 
-    def end_tool(self, call_id: str, title: str) -> None:
+    def end_tool(self, call_id: str, mark: str, outcome: str) -> None:
+        """Mark the call done, keep its target, and record the result.
+
+        ``outcome`` is the tool's output preview or failure text.  Dropping it
+        left a failed call reading as ``✗ read`` with no reason anywhere, so it
+        goes into the same log the chunks already went to.
+        """
         tool = self._tools.get(call_id)
-        if tool is not None:
-            tool[0].title = title
+        if tool is None:
+            return
+        collapsible, log, label = tool
+        collapsible.title = f"{mark} {label}"
+        if outcome:
+            log.write(outcome)
 
     async def end(self) -> None:
         for markdown, mount, pending in self._stale:
@@ -144,10 +159,10 @@ class Transcript(VerticalScroll):
         turn = self._turn
         if turn is not None and block.kind == "tool":
             if block.tool_status == "running":
-                turn.start_tool(block.call_id, _tool_title("▸", block), block.text)
+                turn.start_tool(block.call_id, _tool_label(block), block.text)
             elif block.tool_status in {"ok", "failed"}:
                 mark = "✓" if block.tool_status == "ok" else "✗"
-                turn.end_tool(block.call_id, _tool_title(mark, block))
+                turn.end_tool(block.call_id, mark, block.text)
             else:
                 self.mount(Static(block.render(), classes=f"block-{block.kind}"))
         elif turn is not None and block.kind == "tool-chunk":
@@ -167,11 +182,12 @@ class Transcript(VerticalScroll):
             self.scroll_end(animate=False)
 
 
-def _tool_title(mark: str, block: Block) -> str:
-    title = f"{mark} {block.tool_name}"
+def _tool_label(block: Block) -> str:
+    """``name  target``, without the leading mark — the mark is the caller's."""
+    label = block.tool_name
     if block.tool_target:
-        title += f"  {block.tool_target}"
-    return title
+        label += f"  {block.tool_target}"
+    return label
 
 
 def _clock() -> str:

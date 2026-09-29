@@ -43,7 +43,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | `/permissions [auto\|confirm]` | 策略 | 无参数显示当前审批回调，带参数切换自动批准 / 逐次确认 |
 | `/todo` | — | 渲染当前会话的 `TaskState`（目标、进度、逐项状态、下一步） |
 | `/skills` | — | 列出 `SkillRegistry` 目录（`- name: description`） |
-| `/plan` | — | 向模型发一条「生成实现计划」的快捷 prompt |
+| `/plan` | — | 先弹 `What should I plan?` 收集主题，再以该主题发起计划回合（`ui/textual_app.py::_plan_turn`） |
 | `/review` | — | 向模型发一条「审查当前 git diff」的快捷 prompt |
 | `/config` | — | 打印生效的 model / 上下文预算 / 迭代上限 / 停止策略 / 回合超时 |
 | `/compact` | — | 主动压缩历史并落盘 |
@@ -361,9 +361,10 @@ R12 把 R10 的 `prompt_toolkit` 壳整体换成 Textual，并接回 R10 断掉�
 **两条已知退化**：
 
 1. **命令面板未接线**：`/` 只是普通文本，必须手打完整命令。
-2. **模型驱动的 slash 命令不渲染工具事件块**：`/plan`、`/review`、未知 `/foo` 在
+2. **模型驱动的 slash 命令不渲染工具事件块**：`/review`、未知 `/foo` 在
    `handle_input` 里直接调 `loop.process_input` 且不传 observer，期间的 `ToolStarted` /
-   `ToolFinished` 不进 transcript（流式回答本身仍进 transcript）。状态栏会照常置忙
+   `ToolFinished` 不进 transcript（流式回答本身仍进 transcript）。`/plan` 不在此列——
+   `_plan_turn` 自己调 `process_input` 并传了 `observer`，工具块照常渲染。状态栏会照常置忙
    （命令与回合同样串行），缺的只是工具事件块；旧 UI 的 loop 级 observer 会渲染，属 v1 退化。
 
 **验证方式**：`tests/test_pty_textual.py`（真 pty 的审批/ask_user E2E）、

@@ -144,6 +144,118 @@ async def test_tool_blocks_become_collapsibles():
 
 
 @pytest.mark.asyncio
+async def test_finished_tool_shows_its_failure_reason():
+    """A failed tool must say why it failed.
+
+    Real tools report failures in ``output`` (see ``read_tool.py``: ``success=
+    False, output="file not found: …"``) while ``error`` carries dispatcher's
+    machine code; ``blocks_from_event`` folds both into ``Block.text``.  Before
+    the fix that text was dropped on the floor — the title said ``✗ read`` and
+    the body held nothing but the params.
+    """
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:25")
+        await pilot.pause()
+        t.append_block(
+            Block("tool", "{'path': 'a.py'}", call_id="c1", tool_name="read",
+                  tool_target="a.py", tool_status="running")
+        )
+        t.append_block(Block("tool-chunk", "│ line one", call_id="c1"))
+        t.append_block(
+            Block("tool", "file not found: a.py", call_id="c1", tool_name="read",
+                  tool_status="failed")
+        )
+        await pilot.pause()
+        coll = t.query_one(Collapsible)
+        coll.collapsed = False
+        await pilot.pause()
+        await pilot.pause()
+        log = t.query_one(RichLog)
+        assert any("file not found: a.py" in line.text for line in log.lines)
+
+
+@pytest.mark.asyncio
+async def test_finished_tool_shows_its_output_summary():
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:25")
+        await pilot.pause()
+        t.append_block(
+            Block("tool", "{'path': 'a.py'}", call_id="c1", tool_name="write",
+                  tool_target="a.py", tool_status="running")
+        )
+        t.append_block(
+            Block("tool", "wrote 42 lines", call_id="c1", tool_name="write",
+                  tool_status="ok")
+        )
+        await pilot.pause()
+        coll = t.query_one(Collapsible)
+        coll.collapsed = False
+        await pilot.pause()
+        await pilot.pause()
+        log = t.query_one(RichLog)
+        assert any("wrote 42 lines" in line.text for line in log.lines)
+
+
+@pytest.mark.asyncio
+async def test_finished_tool_title_keeps_the_target():
+    """``ToolFinished`` carries no params, so the target cannot be re-derived.
+
+    ``blocks_from_event`` has nothing to compute ``tool_target`` from at finish
+    time; the only way to keep it in the title is to remember the label the
+    ``ToolStarted`` block built.
+    """
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:25")
+        await pilot.pause()
+        t.append_block(
+            Block("tool", "", call_id="c1", tool_name="read", tool_target="a.py",
+                  tool_status="running")
+        )
+        t.append_block(
+            Block("tool", "ok", call_id="c1", tool_name="read", tool_status="ok")
+        )
+        await pilot.pause()
+        assert t.query_one(Collapsible).title == "✓ read  a.py"
+
+
+@pytest.mark.asyncio
+async def test_finished_tool_with_no_outcome_writes_nothing():
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:25")
+        await pilot.pause()
+        t.append_block(
+            Block("tool", "{'path': 'a.py'}", call_id="c1", tool_name="read",
+                  tool_target="a.py", tool_status="running")
+        )
+        await pilot.pause()
+        before = len(t.query_one(RichLog).lines)
+        t.append_block(
+            Block("tool", "", call_id="c1", tool_name="read", tool_status="ok")
+        )
+        await pilot.pause()
+        assert len(t.query_one(RichLog).lines) == before
+
+
+@pytest.mark.asyncio
+async def test_end_tool_for_an_unknown_call_is_silent():
+    """A late event must not raise; it just has nowhere to go."""
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:25")
+        await pilot.pause()
+        t.append_block(
+            Block("tool", "orphan", call_id="never-started", tool_name="read",
+                  tool_status="ok")
+        )
+        await pilot.pause()
+        assert not t.query(Collapsible)
+
+
+@pytest.mark.asyncio
 async def test_tool_chunks_land_inside_collapsible():
     async with _Harness().run_test(size=(80, 24)) as pilot:
         t = pilot.app.query_one(Transcript)

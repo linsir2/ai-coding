@@ -59,6 +59,24 @@ def test_tool_target_for_path_tools():
     assert block.tool_target == "src/foo.py"
 
 
+def test_tool_target_glob_uses_pattern_not_path():
+    """``glob_tool.py`` names its argument ``pattern``; reading ``path`` yields ""."""
+    block = blocks_from_event(
+        ToolStarted(call_id="c1", tool_name="glob", params={"pattern": "**/*.py"})
+    )
+    assert block is not None
+    assert block.tool_target == "**/*.py"
+
+
+def test_tool_target_write_and_edit_use_path():
+    for tool_name in ("write", "edit"):
+        block = blocks_from_event(
+            ToolStarted(call_id="c1", tool_name=tool_name, params={"path": "src/foo.py"})
+        )
+        assert block is not None
+        assert block.tool_target == "src/foo.py"
+
+
 def test_tool_target_bash_truncates_long_command():
     block = blocks_from_event(
         ToolStarted(call_id="c1", tool_name="bash", params={"command": "x" * 100})

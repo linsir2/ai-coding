@@ -247,4 +247,4 @@ P2：提交队列 + 接回 `SteeringQueue`（`app.py:79` 构造后从未接线�
 - 计划卡、结构化工具结果卡 → P2
 - Esc 取消工具批、steering 接回 → 单独议题（R10 起已断）
 - 主题切换 UI → 默认亮色，CSS 变量留好
-- **模型驱动的 slash 命令不渲染工具事件块**（`/plan`、`/review`、未知 `/foo`）：`handle_input` 不接受 observer（`repl.py` 签名不动），所以这些命令期间 `ToolStarted`/`ToolFinished` 不进 transcript（流式回答本身仍进；输入禁用与状态栏置忙由 Task 6 的 `run_command` 守卫提供）。旧 UI 因 loop 级 observer 会渲染——属 **v1 已知退化**，与命令面板退化并列记录（Task 7 已把真实行为写进 `docs/features.md`）。
+- **模型驱动的 slash 命令不渲染工具事件块**（`/review`、未知 `/foo`）：`handle_input` 不接受 observer（`repl.py` 签名不动），所以这些命令期间 `ToolStarted`/`ToolFinished` 不进 transcript（流式回答本身仍进；输入禁用与状态栏置忙由 Task 6 的 `run_command` 守卫提供）。`/plan` 不在此列——B2 的 `_plan_turn` 自己调 `process_input` 并传了 `observer`（`textual_app.py:167`），工具块照常渲染。旧 UI 因 loop 级 observer 会渲染——属 **v1 已知退化**，与命令面板退化并列记录（Task 7 已把真实行为写进 `docs/features.md`）。

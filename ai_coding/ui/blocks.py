@@ -56,7 +56,10 @@ def _short(text: str, limit: int) -> str:
 
 def _tool_target(tool_name: str, params: dict[str, Any]) -> str:
     """Human-readable target for a tool call: a path or a truncated command."""
-    if tool_name in {"read", "write", "edit", "glob"}:
+    if tool_name == "glob":
+        # glob_tool.py:45 names it ``pattern``; there is no ``path`` key.
+        return str(params.get("pattern", ""))
+    if tool_name in {"read", "write", "edit"}:
         return str(params.get("path", ""))
     if tool_name == "bash":
         return _short(str(params.get("command", "")), _TARGET_COMMAND_LIMIT)
