@@ -43,6 +43,33 @@ async def test_approval_shows_tool_and_reason():
 
 
 @pytest.mark.asyncio
+async def test_approval_escape_fails_closed():
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(
+            ApprovalScreen("bash", {"command": "ls"}, "read-only"), app.results.append
+        )
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.results[-1] == "n"
+
+
+@pytest.mark.asyncio
+async def test_approval_unknown_button_id_fails_closed():
+    screen = ApprovalScreen("bash", {"command": "ls"}, "read-only")
+    dismissed: list[str] = []
+    screen.dismiss = dismissed.append  # type: ignore[method-assign]
+
+    class _UnknownButtonEvent:
+        class button:
+            id = None
+
+    screen.on_button_pressed(_UnknownButtonEvent())  # type: ignore[arg-type]
+    assert dismissed == ["n"]
+
+
+@pytest.mark.asyncio
 async def test_ask_returns_typed_answer():
     app = _Host()
     async with app.run_test() as pilot:
@@ -52,6 +79,16 @@ async def test_ask_returns_typed_answer():
         await pilot.click("#ask-send")
         await pilot.pause()
         assert app.results[-1] == "a.py"
+
+
+@pytest.mark.asyncio
+async def test_ask_question_with_brackets_is_not_treated_as_markup():
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(AskScreen("Which file? [/path]"), app.results.append)
+        await pilot.pause()
+        content = app.screen.query_one("#ask-question").content
+        assert "[/path]" in (content.plain if hasattr(content, "plain") else str(content))
 
 
 @pytest.mark.asyncio

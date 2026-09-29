@@ -63,9 +63,9 @@ class AskScreen(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="ask-box"):
-            yield Static(self._question, id="ask-question")
+            yield Static(Text(self._question), id="ask-question")
             if self._options:
-                yield Static("可选：" + " / ".join(self._options), id="ask-options")
+                yield Static(Text("可选：" + " / ".join(self._options)), id="ask-options")
             yield Input(id="ask-input")
             yield Button("Send", id="ask-send", variant="primary")
 
