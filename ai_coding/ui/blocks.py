@@ -1,9 +1,8 @@
 """Loop events → human-readable blocks (pure: no Textual, offline-testable).
 
-The console-era renderer (``ui/console.py::ConsoleObserver``) is deleted in
-Task 7; its R8c semantics — one throttled line per tool call, quiet on a
-completed turn — live here now, with an injectable clock so the throttle can
-be tested without sleeping.
+The console-era renderer's R8c semantics — one throttled line per tool call,
+quiet on a completed turn — live here, with an injectable clock so the throttle
+can be tested without sleeping.
 """
 
 from __future__ import annotations

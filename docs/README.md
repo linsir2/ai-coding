@@ -1,9 +1,9 @@
 # 文档导航
 
 **ai-coding** 是自持 ReAct 循环的 AI 编程助手终端应用（ThoughtCoding 的 Python 化实现；R1 起不再依赖
-OpenAI Agents SDK，只留 `openai` 与 `mcp` 两个库）。**R10 起入口 `ai-coding` 直接启动全屏 TUI**：
-`prompt_toolkit.Application` 渲染顶部 ASCII art 横幅 + 状态指示器、中部可滚动输出、底部状态栏，
-`/` 呼出可键盘导航的命令面板；旧的 Typer 子命令（`ask` / `config-check` / `memory` / `trace`）已删除，
+OpenAI Agents SDK，只留 `openai` 与 `mcp` 两个库）。**入口 `ai-coding` 直接启动 Textual 全屏 TUI**：
+顶部状态栏、中部可滚动 transcript（流式回复 + 工具事件块）、底部输入栏；slash 命令直接手打
+（命令面板尚未接线）。旧的 Typer 子命令（`ask` / `config-check` / `memory` / `trace`）已删除，
 职责收进 slash 命令。本仓库文档按用途分为「面向使用的文档」与「里程碑演进记录」。
 
 ## 面向使用的文档
@@ -11,7 +11,7 @@ OpenAI Agents SDK，只留 `openai` 与 `mcp` 两个库）。**R10 起入口 `ai
 | 文档 | 内容 |
 |---|---|
 | [运行指南](how-to-run.md) | 环境要求、安装、配置、入口速查、端到端示例、验证与故障排查 |
-| [功能清单](features.md) | 全面能力列表：入口、全屏 TUI、slash 命令、内置工具、安全、上下文、记忆、子代理、技能、MCP、R10 已知缺口 |
+| [功能清单](features.md) | 全面能力列表：入口、全屏 TUI、slash 命令、内置工具、安全、上下文、记忆、子代理、技能、MCP、R12 Textual UI（v1）与已知退化 |
 | [架构设计](architecture.md) | 分层与依赖方向、模块职责、引擎边界、组合根装配、回合数据流与扩展点 |
 | [数据契约](data-contracts.md) | domain 模型字段、会话 JSON 落盘格式、配置 schema、关键不变量 |
 
@@ -110,19 +110,18 @@ R7e `r7e-analysis.md` / `r7e-plan.md`、
 R8 `r8-analysis.md` / `r8-plan.md`、
 R9 `r9-analysis.md` / `r9-plan.md`（依赖硬门禁 + 轨迹的 `overview` / HTML / OTLP-JSON 三个出口）。
 
-## 终端界面重构（R10）
+## 终端界面重构（R10 → R12）
 
-R10 把界面从「逐行 `console.print()` + 单行提示符」换成 `prompt_toolkit.Application` 全屏 TUI：
-新增 `ui/theme.py`（深色配色）、`ui/header.py`（ASCII art 横幅 + 状态指示器）、`ui/body.py`（输出区）、
-`ui/footer.py`（状态栏）、`ui/palette.py`（`/` 呼出的命令面板）与 `ui/app.py`（组装与按键绑定）；
-`slash.py` 扩到 16 条命令，`repl.py::handle_input` 接了 8 个新 handler；
-`ui/reader.py`（`InteractiveReader`）与 `tests/test_cli.py` / `test_cli_trace.py` 随旧入口一起删除。
-实施计划见 `docs/superpowers/plans/2026-09-28-terminal-interaction-redesign.md`（18 个 TDD 任务）。
+R10 先把界面从「逐行 `console.print()` + 单行提示符」换成 `prompt_toolkit.Application` 全屏壳
+（实施计划见 `docs/superpowers/plans/2026-09-28-terminal-interaction-redesign.md`），但循环事件、
+输入提交、人机通道与 `/model` 四处数据流都没接上。
 
-质量门禁：`pytest` 1120 例收集 / 退出码 0（`tests/test_mcp.py` 因环境缺 `mcp` 包未跑）、
-`ruff` 0 问题。已用真实 pty 验证：横幅、状态栏、面板边框、键盘导航、`Ctrl-Q` 退出。
-
-**R10 的壳与命令面板已就位，但四处数据流尚未接线**（详见 [功能清单 · R10 已知缺口](features.md#r10-已知缺口)）：
-循环事件没有写进 body 输出区、body 无法提交自然语言、`ask_user` 与工具审批拿不到输入、
-`/model <name>` 不会真切换。这四处是后续 R11 的主线。
+R12 把它整体重写为 Textual（设计与计划见 `docs/superpowers/specs/2026-09-28-textual-ui-design.md`、
+`docs/superpowers/plans/2026-09-28-textual-ui.md`）：`ui/textual_app.py` 组装 App，
+`ui/transcript.py` 承载流式 Markdown 与工具事件块（`ui/blocks.py`），`ui/status_bar.py` /
+`ui/input_bar.py` / `ui/modals.py` 分别负责状态栏、输入栏与审批 / `ask_user` 模态；
+旧的 `prompt_toolkit` 模块与依赖一并删除，入口只剩 `ai-coding` 一条。v1 已接：事件→块、提交、
+审批、`ask_user`、slash、`/model`；明确不做：欢迎页 / 命令面板 / 侧栏 / 计划卡、`Esc` 取消、
+steering。两条已知退化（命令面板未接；模型驱动的 slash 命令不渲染工具事件块）见
+[功能清单](features.md) 的「R12：Textual UI」节。
 

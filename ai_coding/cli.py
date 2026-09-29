@@ -51,7 +51,7 @@ def main(
     setup_logging()
     if version:
         return
-    from ai_coding.ui.app import run_app
+    from ai_coding.ui.textual_app import run_app
 
     try:
         loop = asyncio.new_event_loop()

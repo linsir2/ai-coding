@@ -9,7 +9,7 @@ ThoughtCoding 的 Python 化实现 —— 一个**自持 ReAct 循环**的 AI �
 
 编排循环、工具分发、上下文压缩、记忆与会话**全部是自家实现**；模型调用走一个可替换的
 `ChatEngine` 端口，默认实现直连 OpenAI 兼容的 `chat.completions`（不依赖任何 agent 框架）。
-配置用 Pydantic + PyYAML；CLI 用 Typer；终端 UI 用 prompt_toolkit + rich；MCP 用官方 `mcp` 包；
+配置用 Pydantic + PyYAML；CLI 用 Typer；终端 UI 用 Textual + rich；MCP 用官方 `mcp` 包；
 bash 工具仅面向 **Linux**。
 
 ## 开发

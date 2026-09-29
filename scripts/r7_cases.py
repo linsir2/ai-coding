@@ -3,7 +3,7 @@
 
 Each case is one of the round's measured claims (docs/r7-analysis.md §1), run
 against the real units with fakes only where IO would be needed.  The live cases
-re-run the same claims where they depend on the machine: a pty, a real MCP stdio
+re-run the same claims where they depend on the machine: a real MCP stdio
 server, and one real model turn.
 
     .venv/bin/python scripts/r7_cases.py
@@ -15,9 +15,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
-import re
-import subprocess
 import sys
 import tempfile
 import time
@@ -370,61 +367,6 @@ OFFLINE: dict[str, CaseFn] = {
 # ------------------------------------------------------------------- live ----
 
 
-async def real_pty_ask_user(root: Path) -> tuple[bool, str]:
-    """A real REPL in a real pty: the typed answer reaches the tool result."""
-    import pty
-    import select
-
-    child = ROOT / "tests" / "_pty_ask_user_child.py"
-    master, slave = pty.openpty()
-    process = subprocess.Popen(
-        [sys.executable, str(child)],
-        stdin=slave,
-        stdout=slave,
-        stderr=slave,
-        close_fds=True,
-    )
-    os_close(slave)
-    buffer = b""
-
-    def read_until(needle: str, deadline: float, occurrences: int = 1) -> None:
-        nonlocal buffer
-        while time.monotonic() < deadline:
-            ready, _, _ = select.select([master], [], [], 0.5)
-            if not ready:
-                if buffer.count(needle.encode()) >= occurrences:
-                    return
-                continue
-            try:
-                chunk = os_read(master)
-            except OSError:
-                return
-            if not chunk:
-                return
-            buffer += chunk
-            if buffer.count(needle.encode()) >= occurrences:
-                return
-
-    try:
-        read_until("you>", time.monotonic() + 30)
-        os_write(master, "改一下这个仓库\n")
-        read_until("改 A 还是 B？", time.monotonic() + 30)
-        os_write(master, "改 A\n")
-        read_until("you>", time.monotonic() + 30, occurrences=2)
-        os_write(master, "/quit\n")
-        read_until("RESULT ", time.monotonic() + 30)
-        process.wait(timeout=30)
-    finally:
-        if process.poll() is None:
-            process.kill()
-        os_close(master)
-    text = buffer.decode(errors="replace")
-    hits = re.findall(r"RESULT (\[.*?\])", text)
-    messages = json.loads(hits[-1]) if hits else []
-    ok = any("改 A" in message for message in messages)
-    return ok, f"tool messages={' | '.join(messages)[:160]!r}"
-
-
 async def real_mcp_tool_surface(root: Path) -> tuple[bool, str]:
     """The reproducible tool-surface measurement, on this machine."""
     from ai_coding.cli import _build_tool_registry
@@ -514,31 +456,12 @@ async def real_turn_still_works(root: Path) -> tuple[bool, str]:
 
 
 LIVE: dict[str, CaseFn] = {
-    "pty_ask_user": real_pty_ask_user,
     "mcp_tool_surface": real_mcp_tool_surface,
     "turn_still_works": real_turn_still_works,
 }
 
 
 # ------------------------------------------------------------------- main ----
-
-
-def os_read(fd: int) -> bytes:
-    import os
-
-    return os.read(fd, 4096)
-
-
-def os_write(fd: int, text: str) -> None:
-    import os
-
-    os.write(fd, text.encode())
-
-
-def os_close(fd: int) -> None:
-    import os
-
-    os.close(fd)
 
 
 async def main(argv: list[str] | None = None) -> int:

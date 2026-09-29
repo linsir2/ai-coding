@@ -29,6 +29,10 @@ class EngineError(RuntimeError):
 class ChatEngine(ABC):
     """Port for executing exactly one step of a conversation."""
 
+    #: Set by ``AgentLoop.set_model``; concretely a ``ModelConfig``.  Declared
+    #: here (typing only) so the port matches how the loop actually uses it.
+    model_config: Any
+
     @abstractmethod
     async def step(
         self,

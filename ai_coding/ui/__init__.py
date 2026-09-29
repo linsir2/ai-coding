@@ -1,6 +1,6 @@
-"""REPL / presentation layer: slash commands, console, app."""
+"""Presentation layer: Textual app, transcript, slash commands, console."""
 
 __all__ = [
-    "slash", "console", "repl", "app", "palette", "theme",
-    "header", "body", "footer", "observer",
+    "blocks", "console", "input_bar", "modals", "repl", "slash",
+    "status_bar", "textual_app", "trace_render", "transcript",
 ]

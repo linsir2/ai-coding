@@ -14,23 +14,25 @@ ai-coding 以「**自持 ReAct 循环** + 工具调用」为核心模型：用�
 R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子命令，现已全部删除：
 前四个的职责收进 TUI 的 slash 命令（见下节），`repl` 本身就是默认行为。
 
-## 全屏 TUI
+## 全屏 TUI（Textual）
 
-界面由 `prompt_toolkit.Application` 全屏渲染，取代原先的「逐行 `console.print()` + 单行提示符」模型。
-布局是 `FloatContainer(HSplit(header, body, footer))`，命令面板是浮在上面的 `Float` 覆盖层。
+界面由 Textual（`textual.App`）全屏渲染（`ui/textual_app.py`），取代 R10 的 `prompt_toolkit` 版本。
+自上而下是状态栏、可滚动 transcript、输入栏；审批与 `ask_user` 是模态弹层（modal screen）。
 
 | 区域 | 组件 | 内容 |
 |---|---|---|
-| 顶部 | `ui/header.py` | ASCII art 标题、`✓ workspace indexed` / `✓ N tools connected` / `✓ memory loaded (N notes)`、当前 model、cwd |
-| 中部 | `ui/body.py` | 可滚动输出区（`BodyBuffer`），欢迎语与后续所有输出 |
-| 底部 | `ui/footer.py` | `N% context · MM:SS`（`last_outcome.usage` / `settings.max_context_tokens` / 回合墙钟） |
-| 覆盖层 | `ui/palette.py` | 命令面板：输入 `/` 打开，`↑↓` 循环导航，`Enter` 执行，`Esc` 关闭 |
-| 配色 | `ui/theme.py` | 深色主题，青色主色 + 绿色对勾（`STYLE`） |
+| 顶部 | `ui/status_bar.py` | workspace、当前 model、`● Ready / ● Working` |
+| 中部 | `ui/transcript.py` + `ui/blocks.py` | 用户输入、assistant 流式 Markdown、工具事件块（开始/结束/chunk）、回合终态 |
+| 底部 | `ui/input_bar.py` | 单行输入（Enter 提交；回合进行中禁用） |
+| 弹层 | `ui/modals.py` | 审批（y/N/s）与 `ask_user` 提问 |
+| 样式 | `ui/app.tcss` | 全屏布局与配色 |
+
+键位：`Ctrl-Q` 退出；`Ctrl-C` 有选区时复制、无选区时退出；`Shift`+拖选使用终端原生选择。
 
 ## slash 命令
 
-`/` 打开命令面板选一条执行；也可以直接手打 `/xxx`（`ui/slash.py` 解析，`ui/repl.py::handle_input` 分发）。
-未知 `/xxx` 与裸 `/` 都会**当作普通输入发给模型**，不是错误。
+手打 `/xxx`（`ui/slash.py` 解析，`ui/repl.py::handle_input` 分发）；命令面板尚未接线（见 R12 节），
+所以 `/` 本身只是普通文本。未知 `/xxx` 与裸 `/` 都会**当作普通输入发给模型**，不是错误。
 
 | 命令 | 参数 | 功能 |
 |---|---|---|
@@ -56,7 +58,8 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | 键 | 行为 |
 |---|---|
 | `Ctrl-Q` | 退出 |
-| `Esc` | 关闭命令面板 |
+| `Ctrl-C` | 有选区时复制选中文本；无选区时退出 |
+| `Shift`+拖选 | 终端原生选择（在 app 捕获鼠标时仍可用） |
 
 
 ## 内置工具
@@ -81,7 +84,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 ## 安全与权限
 
 - **权限门**：`PermissionGate` 对每次工具调用判定 ALLOW / WARN / DENY。`read`/`glob`/`todo_write`/`skill`/`subAgent`/`memory_search`/`memory_write` ALLOW；`write`/`edit`/`bash` WARN；未知工具保守归为 WARN；bash 命中硬拒绝模式（`rm -rf /`、`sudo `、`shutdown`、`reboot`、`mkfs`、`dd if=`、`> /dev/sd`、强制 git push、`chmod 777` 等）直接 DENY。
-- **审批接线**：WARN 层由 `approval` 回调解析。非交互 `ask` 默认 `AutoApproveCallback`（WARN 放行，DENY 仍拦截）；交互 `repl` 用 `CLIApprovalCallback`，对 write/edit/bash 弹 y/N/s 询问用户。既满足了「AI 助手能写文件」，又保留了危险操作的确认与硬拒绝兜底。
+- **审批接线**：WARN 层由 `approval` 回调解析。无人可问的入口（子智能体）用 `AutoApproveCallback`（WARN 放行，DENY 仍拦截）；交互 TUI 用 `CLIApprovalCallback`，对 write/edit/bash 经模态弹 y/N/s 询问用户。既满足了「AI 助手能写文件」，又保留了危险操作的确认与硬拒绝兜底。
 - **沙箱**：`Sandbox` 将文件工具的所有路径解析限制在工作区内，`..`、绝对路径、符号链接逃逸一律抛 `SandboxViolation`。
 - **过期读保护**：`FileStateTracker` 记录最近一次读取的快照，写入/编辑前比对 `mtime`+`size`；未被读过（`NEVER_READ`）或内容被外部改动（`STALE`）时阻止写入，防止盲写与覆盖外部修改。
 
@@ -189,7 +192,7 @@ R3 重写。记忆层现在回答三个问题：**写什么、什么时候写、
    开关就是 `tools: [远端工具名]`（留空 = 全部，今天的行为）。
 2. **冷启动曾经撞上默认超时**：`npx -y @modelcontextprotocol/server-everything` 首次运行（含下载）实测约 **27s**，
    旧的默认 `mcp.connection_timeout` 是 30s——R7d 起默认 **60**；npx/uvx 类 server 还可以再调到 90 或先预热缓存。
-3. **MCP 工具默认仍是 WARN 级**（远端工具未知 → 保守 WARN）：`ask` 自动放行，`repl` 每次调用都会弹审批。
+3. **MCP 工具默认仍是 WARN 级**（远端工具未知 → 保守 WARN）：无人可问的入口自动放行，TUI 里每次调用都会弹审批。
    若这个 server 是你自己声明在 `config.local.yaml` 里的，可以按 server 声明 **`auto_approve: true`**，
    它的工具就不再弹审批（**默认 false，不声明就完全是今天的行为**；bash 的硬拒 DENY 表仍然优先）。
    审批与超时都会留下事件（`ToolApprovalRequested`、`ToolFinished.error=approval_timeout`），可在轨迹里看到。
@@ -205,8 +208,8 @@ R4 起，server 连不上不再静默：会发一条 `Degraded(component="mcp_se
 与（可能已替换的）会话对象——`NEW_SESSION` 供 `/clear` 与 `/resume <id>` 使用。
 
 R10 之前由 `InteractiveReader` 独占 stdin 并在「问题 / 转向 / 命令 / 输入」四个消费者之间仲裁
-（`ui/reader.py`，含 Esc 取消当前工具批次的 R8c 语义）。全屏 `Application` 自带焦点栈与按键分发，
-该文件随之删除；取消与转向的语义因此在 TUI 里暂未接回，见「已知缺口」。
+（`ui/reader.py`，含 Esc 取消当前工具批次的 R8c 语义）。全屏 App 自带焦点栈与按键分发，
+该文件随之删除；取消与转向的语义在 R12 的 v1 里仍未接回，见下方「R12：Textual UI」节。
 
 ## 可观测层（R4a）
 
@@ -223,7 +226,7 @@ R10 之前由 `InteractiveReader` 独占 stdin 并在「问题 / 转向 / 命令
 | 降级可见 | 压缩超时、记忆读失败、落盘失败、worktree 隔离失败、观察者异常等都会发 `Degraded` 事件 |
 | 子智能体 | 子循环事件以 `ScopedEvent` 扇出到父轨迹（父子 span 可重建；推理仍不回传） |
 
-命令面：`ai-coding trace list｜show｜budget`，REPL 里 `/trace`、`/budget`。
+命令面：TUI 里 `/trace`、`/budget`（R10 删掉 `ai-coding trace` 子命令后，`TraceStore` 的读取入口仍在库里）。
 
 ## 门卫（R4b）
 
@@ -339,27 +342,33 @@ R7b 把这段话的前半句治掉了：L2 不再丢正文。实测同一份 70 
 
 已知约束：bash 工具仅面向 Linux；需要提供 `--path`（配置发现不做自动探测，否则报 `no default model configured`）。
 
-## R10 已知缺口
+## R12：Textual UI（v1 会话闭环）
 
-全屏 TUI 的**壳**与**命令面板**已经就位（已用真实 pty 验证：横幅、状态栏、面板边框、
-键盘导航、`Ctrl-Q` 退出都正常），以下四处尚未接线，都不是视觉问题而是数据流问题：
+R12 把 R10 的 `prompt_toolkit` 壳整体换成 Textual，并接回 R10 断掉的数据流；旧 UI 模块
+（`app.py` / `body.py` / `header.py` / `footer.py` / `palette.py` / `scroll.py` / `theme.py` /
+`markdown.py` / `observer.py`）连同 `prompt_toolkit` 依赖一起删除，`ai-coding` 只有一个入口。
 
-1. **输出没有接进 body**：`_build_loop(observer=None)`，`ConsoleObserver` 仍在往 `rich.Console`
-   逐行打印；`BodyBuffer` 已经在 `app.py` 里创建并写了欢迎语，但**没有从循环事件收数据**。
-   后果：跑真实回合时，模型回复与工具事件不会出现在 body 窗口里。
-2. **body 无法提交输入**：`BufferControl` 被用作 body 的输入区，但没有 Enter 提交 /
-   提交后清空缓冲的按键绑定，因此面板里的命令能跑，**自己键入的自然语言不会被发送**。
-3. **人机通道全断**：`ask_user`（`CLIUserPromptCallback`）与工具审批（`CLIApprovalCallback`）
-   都在 `asyncio.to_thread` 里读 stdin。全屏 `Application` 独占 stdin，这两个回调拿不到输入，
-   也没有改走 `Application` 的焦点。`ui/reader.py` 的仲裁器（问题/转向/命令/输入）已随文件删除。
-4. **`/model <name>` 不会真切换**：`AgentLoop` 没有 `set_model` 方法，handler 会打印
-   「model switching not supported by this loop」。
+**已接线（v1 会话闭环）**：
 
-另有一处小的：turn 计时器在 `run_app` 启动时取一次 `time.monotonic()`，不会随回合重置。
+- 循环事件 → `ui/blocks.py::TranscriptObserver` → transcript（工具开始/结束/chunk、任务清单、回合终态）；
+- 输入提交：Enter 提交自然语言跑完整回合（回合进行中禁用输入，命令与回合串行）；
+- 审批：`CLIApprovalCallback` 经 `set_provider` 接到 `ui/modals.py::ApprovalScreen`（y/N/s）；
+- `ask_user`：`CLIUserPromptCallback` 经 `set_provider` 接到 `AskScreen`；
+- slash 命令：`TextualConsole` 把命令输出写进 transcript；`/model <name>` 经 `AgentLoop.set_model` 真的切换。
 
-补齐顺序建议：先 1（`ConsoleObserver` → `BodyBuffer` 的桥接 observer），
-再 2（body 的 Enter 提交与清空），再 3（把 `ask_user` / 审批改为经 `Application` 焦点取输入，
-等价于把 `InteractiveReader` 的仲裁能力搬进 `app.py`），最后 4。
+**v1 明确不做**：欢迎页、命令面板、侧栏、计划卡；`Esc` 取消工具批；steering 接回。
+
+**两条已知退化**：
+
+1. **命令面板未接线**：`/` 只是普通文本，必须手打完整命令。
+2. **模型驱动的 slash 命令不渲染工具事件块**：`/plan`、`/review`、未知 `/foo` 在
+   `handle_input` 里直接调 `loop.process_input` 且不传 observer，期间的 `ToolStarted` /
+   `ToolFinished` 不进 transcript（流式回答本身仍进 transcript）。状态栏会照常置忙
+   （命令与回合同样串行），缺的只是工具事件块；旧 UI 的 loop 级 observer 会渲染，属 v1 退化。
+
+**验证方式**：`tests/test_pty_textual.py`（真 pty 的审批/ask_user E2E）、
+`tests/test_blocks.py`（事件→块）、`tests/test_textual_app.py`（`run_test` 驱动的壳与提交），
+另以真实终端人工验证流式输出、模态与 `Ctrl-Q`。
 
 
 

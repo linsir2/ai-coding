@@ -1,13 +1,11 @@
 """Interactive REPL (M5-2).
 
-The heavy terminal layer (``prompt_toolkit``) is imported lazily inside
-:func:`run_repl` so the testable core — :func:`handle_input` and the
-:class:`REPLAction` decision — stays import-light and offline.
+The testable core — :func:`handle_input` and the :class:`REPLAction` decision —
+stays import-light and offline; the full-screen UI lives in ``textual_app``.
 """
 
 from __future__ import annotations
 
-import asyncio
 from enum import Enum
 from typing import Any
 
@@ -295,63 +293,4 @@ def _memory_report(loop: Any) -> str:
     )
 
 
-async def run_repl(
-    loop: Any,
-    sessions: Any,
-    console: DialogueConsole,
-    *,
-    user_prompt: Any | None = None,
-    reader: Any | None = None,
-) -> None:
-    """Interactive loop. Lazily imports prompt_toolkit.
-
-    R7c: ``user_prompt`` (the ``ask_user`` channel) is handed the *same* reader the
-    REPL itself uses, because two readers on one terminal fight over stdin — the
-    scripted-pipe case degraded to ``no_answer`` (docs/r7-analysis.md 3.3).
-
-    R7e-2: when a ``reader`` is given it *is* that reader, and it stays alive while a
-    turn runs — so a line typed mid-turn becomes steering instead of being eaten by
-    the next prompt (docs/r7e-analysis.md 3.2).
-    """
-    session = sessions.create()
-    if reader is not None:
-        reader.start()
-        if user_prompt is not None and hasattr(user_prompt, "set_interactive"):
-            user_prompt.set_interactive(reader)
-        read_line: Any = reader.input
-    else:
-        from prompt_toolkit import PromptSession
-
-        prompt: Any = PromptSession()
-        if user_prompt is not None and hasattr(user_prompt, "set_reader"):
-            user_prompt.set_reader(prompt.prompt)
-        read_line = lambda: asyncio.to_thread(prompt.prompt, "you> ")  # noqa: E731
-
-    console.rule("ai-coding REPL — /help for commands")
-    try:
-        while True:
-            try:
-                text = await read_line()
-            except (KeyboardInterrupt, EOFError):
-                break
-            stripped = text.strip()
-            if not stripped:
-                continue
-            if reader is not None:
-                reader.set_busy(True)
-            try:
-                action, session = await handle_input(
-                    loop, stripped, session, sessions, console
-                )
-            finally:
-                if reader is not None:
-                    reader.set_busy(False)
-            if action is REPLAction.QUIT:
-                break
-    finally:
-        if reader is not None:
-            await reader.aclose()
-    console.info("bye")
-
-
-__all__ = ["REPLAction", "handle_input", "run_repl", "HELP_TEXT"]
+__all__ = ["REPLAction", "handle_input", "HELP_TEXT"]

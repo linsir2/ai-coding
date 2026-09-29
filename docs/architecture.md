@@ -26,8 +26,8 @@ ai_coding/
 ├─ service/        会话持久化
 ├─ memory/         记忆检索 / 提取 / 聚合
 ├─ skills/         技能目录注册表
-└─ ui/             全屏 TUI：Application + layout + 区域渲染 + 命令面板 + 命令分发
-                   R10 追加：theme / header / body / footer / palette / app
+└─ ui/             全屏 TUI（Textual）：textual_app + transcript / blocks / status_bar / input_bar / modals
+                   命令分发：slash / repl（handle_input）；行式输出：console（DialogueConsole / TextualConsole）
 ```
 
 依赖方向单向：`domain` 不被任何层反向 import；`config`/`infra` 只依赖 `domain`/标准库；
@@ -48,7 +48,7 @@ ai_coding/
 | `service` | 会话读写（原子） | `SessionService` |
 | `memory` | 记忆三层操作与持久化 | `MemoryService`、`MemoryStore` |
 | `skills` | 技能目录扫描与目录文本 | `SkillRegistry` |
-| `ui` | 全屏终端界面 | R10 入口：`ui/app.py`（`run_app` 组装 `Application`）；区域渲染 `ui/header.py`、`ui/body.py`、`ui/footer.py`、`ui/theme.py`；命令面板 `ui/palette.py`；命令分发 `ui/slash.py` + `ui/repl.py`；行式渲染 `ui/console.py`（`DialogueConsole` / `ConsoleObserver`，R10 后未接入 TUI） |
+| `ui` | 全屏终端界面（Textual） | 入口：`ui/textual_app.py`（`run_app` + `AICodingApp` + 审批/提问 provider）；区域组件 `ui/transcript.py`、`ui/blocks.py`、`ui/status_bar.py`、`ui/input_bar.py`、`ui/modals.py`、`ui/app.tcss`；命令分发 `ui/slash.py` + `ui/repl.py`；行式渲染 `ui/console.py`（`DialogueConsole` / `TextualConsole`） |
 
 ## 引擎边界
 
@@ -71,11 +71,11 @@ class ChatEngine(ABC):
 
 ## 组合根与装配
 
-`cli.py` 提供装配原语，`ui/app.py::run_app` 是运行时组合根（R10 起入口直接调它）：
+`cli.py` 提供装配原语，`ui/textual_app.py::run_app` 是运行时组合根（入口直接调它）：
 
 ```
 cli.py::main(path, workspace, skills)
-   └─ ui/app.py::run_app(path, workspace, skills)
+   └─ ui/textual_app.py::run_app(path, workspace, skills)
          ConfigManager.initialize(path) ─→ AppConfig
             ├─ build_engine_from_config(app_cfg) ─→ OpenAIChatEngine
             ├─ _build_tool_registry(app_cfg, workspace, skills, user_prompt=…)
@@ -85,19 +85,20 @@ cli.py::main(path, workspace, skills)
                                           gate, approval, context, memory, prompt,
                                           skills, project, settings, trace, guards,
                                           hooks, steering)
-            └─ Application(layout=FloatContainer(HSplit(header, body, footer)
-                                                  + Float(palette)))
+            ├─ approval / user_prompt.set_provider(app.*_provider)（接到模态）
+            └─ AICodingApp(...).run_async()（compose：StatusBar + Transcript + InputBar）
 ```
 
 两条关键接线规则：
 
-- **审批策略在组合根决定**：唯一入口是交互式的，`run_app` 显式传 `CLIApprovalCallback` 弹 y/N/s。
-  子智能体内部走 `AutoApproveCallback`（无人可问）。
+- **审批策略在组合根决定**：唯一入口是交互式的，`run_app` 显式传 `CLIApprovalCallback`，
+  经 `set_provider` 接到 `ApprovalScreen` 模态弹 y/N/s。子智能体内部走 `AutoApproveCallback`（无人可问）。
 - **权限门属于分发器，不属于注册表**：注册表只装工具，门与回调由 `AgentLoop` 注入。
 
-> R10 的三处未接线（循环事件→body、body 输入提交、`ask_user`/审批取输入）见
-> [功能清单 · R10 已知缺口](features.md#r10-已知缺口)。在补齐之前 `run_app` 里的
-> `observer=None` 是有意的：TUI 的 body 还没有接收端。
+> `run_app` 构造 `AgentLoop` 时仍传 `observer=None`：loop 级 observer 只服务 `handle_input`
+> 直接驱动的命令（v1 的 slash 退化见 [功能清单](features.md) 的 R12 节）；普通回合由
+> `AICodingApp.run_turn` 在 `process_input(..., observer=...)` 传回合级 `TranscriptObserver`，
+> 事件照常进 transcript。
 
 ## 一次回合的数据流
 
@@ -143,13 +144,13 @@ sequenceDiagram
 |---|---|
 | 换模型引擎 | 实现 `ChatEngine` 并在 `build_engine_from_config` 里返回它 |
 | 新增工具 | 继承 `BaseTool`（实现 `execute(params, ctx)`），在 `build_tool_registry` 注册 |
-| 改审批策略 | 实现 `ApprovalCallback`，在 `ui/app.py::run_app` 传入 |
-| 观察循环 | 实现 `LoopObserver`（`on_event`），挂到 `AgentLoop`；R10 之后目标是让 observer 写进 `ui/body.py::BodyBuffer` 而不是 `rich.Console` |
-| 改 TUI 布局 | `ui/app.py`（`FloatContainer` + `HSplit` + `Float`）；改配色用 `ui/theme.py::STYLE`，改区域内容改 `ui/header.py` / `ui/footer.py` |
+| 改审批策略 | 实现 `ApprovalCallback`，在 `ui/textual_app.py::run_app` 传入 |
+| 观察循环 | 实现 `LoopObserver`（`on_event`）；TUI 用 `ui/blocks.py::TranscriptObserver` 把事件渲染成 transcript 块 |
+| 改 TUI 布局 | `ui/textual_app.py::AICodingApp.compose` + `ui/app.tcss`；区域内容改 `ui/status_bar.py` / `ui/transcript.py` / `ui/input_bar.py` / `ui/modals.py` |
 | **加一个运行时守卫**（R4b） | 在 `core/guard.py` 实现 `check()`（返回 `GuardDecision`），加进 `GuardChain`；在 `cli._make_guards` 装配 |
 | **挂钩子**（R4c） | 配置 `hooks.events`，写脚本（stdin/stdout JSON）或放 `<workspace>/.ai-coding/hooks/*.py`（进程内） |
 | **改可观测**（R4a） | 自己实现 `LoopObserver` 并 `Braid` 进去；或改 `core/trace.py` 的落盘与脱敏策略 |
-| **让模型主动提问**（R6c） | 实现 `UserPromptCallback`（`async ask`）并在 `ui/app.py::run_app` 传给 `_build_tool_registry(user_prompt=...)`；`user_prompt=None` 即不注册该工具。注意全屏 `Application` 独占 stdin，`ask_user` 需要经焦点取输入而不是 `to_thread` 读 stdin |
+| **让模型主动提问**（R6c） | 实现 `UserPromptCallback`（`async ask`）并在 `ui/textual_app.py::run_app` 传给 `_build_tool_registry(user_prompt=...)`；`user_prompt=None` 即不注册该工具。TUI 里用 `set_provider` 把问题接到 `ui/modals.py::AskScreen`，不要自己读 stdin（全屏 App 独占它） |
 | **改回合摘要/交接的措辞与边界** | 改 `domain/turn_digest.py`（纯函数，无 IO）：`build_digest` 的一行内容、`render_working_memory` 的注入规则、`render_handoff` 的报告 |
 | 接入外部工具集 | 用 `MCPManager` 的模式：把远端工具适配成 `BaseTool` 注册进同一个注册表 |
 | 换压缩/记忆实现 | `AgentLoop` 的 `context` / `memory` 都是可注入的可选组件 |

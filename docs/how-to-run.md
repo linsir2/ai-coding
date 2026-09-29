@@ -48,8 +48,9 @@ ai-coding --path config.local.yaml --workspace . --skills ./skills
 | `--workspace` / `-w` | 文件工具的工作目录（默认 `.`） |
 | `--skills` | 技能目录，启用 `skill` 工具 |
 
-进入 TUI 后，输入 `/` 呼出命令面板（`↑↓` 导航、`Enter` 执行、`Esc` 关闭），
-也可以直接手打 slash 命令。`Ctrl-Q` 退出。完整的命令列表见
+进入 TUI 后直接输入，`Enter` 提交（回合进行中输入栏会禁用）。命令面板尚未接线，
+slash 命令请手打完整命令，如 `/help`。`Ctrl-Q` 退出；`Ctrl-C` 在有选区时复制、
+无选区时退出；`Shift`+拖选使用终端原生选择。完整的命令列表见
 [功能清单 · slash 命令](features.md#slash-命令)。
 
 ## 端到端示例
@@ -61,19 +62,11 @@ mkdir -p /tmp/demo && printf 'hello world from workspace\n' > /tmp/demo/sample.t
 ai-coding --path config.local.yaml --workspace /tmp/demo
 ```
 
-```
-  ✨ Welcome to Nexus! ✨
-  Describe a task, or use / for commands.
+启动后界面自上而下是状态栏、transcript、输入栏。直接描述任务即可开始，模型会调用 `read`
+读文件，回复流式写进 transcript，工具调用显示为事件块。
 
-/  →  命令面板（↑↓ 选，Enter 执行）
-```
-
-在面板里选 `/plan` 或直接描述任务即可开始。模型会调用 `read` 读文件，工具结果持久化。
-
-> ⚠️ **当前限制（R10）**：面板的全部命令都能跑，但 TUI 的输出区尚未接上循环事件，
-> 自然语言输入也还不能提交，`ask_user` 与工具审批的输入通道也未接通。
-> 详见[功能清单 · R10 已知缺口](features.md#r10-已知缺口)。现阶段可正常使用面板里的全部命令；
-> 会触发模型回合的（`/plan` `/review` `/compact`）能跑通，但回复不会显示在输出区。
+> v1 的两条已知退化（命令面板未接；`/plan` `/review` 等模型驱动的 slash 命令不渲染工具事件块）
+> 详见[功能清单](features.md) 的「R12：Textual UI」节。
 
 ## 产物位置
 
@@ -118,14 +111,13 @@ R6 的验收（回合摘要环 / 收尾交接 / 失败升级 / `ask_user` / 记�
 1. **未完成的回合不再返回空字符串**：轮次/token/时钟/引擎导致回合中断而模型没留下话时，
    你会看到 `[回合未完成 · …]` 的报告（目标、已完成、未完成、最近一次失败、产物、轨迹路径）。
    模型自己说了话的回合不受影响。
-2. **`repl` 里模型可以反问你**：它会打印问题（附带可选项），你输入的回答直接作为工具结果回给模型；
-   `ask`（一次性、无人工）里这个工具不存在，模型只能自行决定并写明假设。
+2. **TUI 里模型可以反问你**：问题与可选项经 `AskScreen` 模态弹出，你输入的回答直接作为工具结果回给模型；
+   无人可问的入口（子智能体）不注册这个工具，模型只能自行决定并写明假设。
    注意：`ask_user` 现在**不在**审批门前（问一句不改变任何东西，答案要变成动作还得再走门），
    所以你不会先被问一次「Allow ask_user?」。等待上限是 `tools.ask_user.timeout_seconds`（默认 300s）。
-   **R7c 修掉了脚本化场景**：`run_repl` 现在把 `ask_user` 的读取器换成 REPL 自己的
-   `PromptSession`，所以「一次喂多行」的脚本也能把答案送到工具里（实测旧代码 `reason=eof`、
-   新代码 `answer="改 A"`）；真终端行为不变（`tests/test_repl_ask_user_stdin.py` 默认跑，
-   `tests/test_repl_ask_user_pty.py` 门控 `AI_CODING_PTY=1`）。
+   R7c 曾用「把 `ask_user` 的读取器换成 REPL 自己的 `PromptSession`」修脚本化场景；
+   R12 起 `prompt_toolkit` REPL 与那两个 pty/stdin 测试文件已删除，这条通道改走 Textual 模态，
+   行为由 `tests/test_pty_textual.py` 的真 pty E2E 锁定。
 
 想关掉摘要环：把 `ai.working_memory_keep` 设为 0（或 `working_memory_chars` 设 0）；
 
@@ -161,7 +153,7 @@ mcp:
    `<workspace>/transcripts/elided/`（文件名是内容哈希，重复正文不会写第二份）。
 2. **没人回答的审批不再拖住整回合**：结果是结构化的 `ToolFinished.error="approval_timeout"`，
    不是「用户拒绝」——模型被明确告知「自己决定并写明假设」。
-3. **`tools_chars` 可以压下来了**：`repl` 的 `/trace` 里能看到每步的工具面大小。
+3. **`tools_chars` 可以压下来了**：TUI 的 `/trace` 里能看到每步的工具面大小。
 
 ## 常见问题
 
@@ -169,7 +161,7 @@ mcp:
 |---|---|
 | `no default model configured` | 未指定配置路径，默认加载空配置。改为 `--path config.local.yaml`（或你的配置）。 |
 | `default model 'x' not found in models` | `default_model` 与 `models` 下的键不一致，检查 `config.local.yaml`。 |
-| write/edit/bash 在 `ask` 中被放行、在 `repl` 中弹确认 | 设计如此：非交互自动批准 WARN，交互环境弹 y/N/s。危险 bash（如 `sudo`、`rm -rf /`）任何模式都被硬拒。 |
+| write/edit/bash 在无人入口被放行、在 TUI 中弹确认 | 设计如此：无人可问（子智能体）自动批准 WARN，交互 TUI 弹 y/N/s。危险 bash（如 `sudo`、`rm -rf /`）任何模式都被硬拒。 |
 | 写文件被阻止（`NEVER_READ` / `STALE`） | 过期读保护：先让模型 `read` 该文件再写，或目标文件被外部改动。 |
 | 文件工具路径报 `outside workspace` | 路径越出 `--workspace`，沙箱拦截。 |
 | bash 非零退出但仍返回失败 | 命令返回码非 0 即 `success=false`，`output` 含 stdout+stderr。
