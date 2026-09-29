@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, cast
 
-from textual.command import Hit, Provider
+from textual.command import DiscoveryHit, Hit, Provider
 
 if TYPE_CHECKING:
     from ai_coding.ui.textual_app import AICodingApp
@@ -31,15 +31,32 @@ SLASH_COMMANDS = [
 
 
 class SlashCommandProvider(Provider):
-    async def search(self, query: str) -> AsyncIterator[Hit]:
+    """Fuzzy-searches the app's slash commands.
+
+    No ``__init__``: the palette instantiates providers as
+    ``provider_class(screen, match_style)`` (command.py:828).
+    """
+
+    async def discover(self) -> AsyncIterator[DiscoveryHit]:
+        """The palette's initial (empty-query) view: every command."""
+        for name, help_text in SLASH_COMMANDS:
+            yield DiscoveryHit(name, self._run(name), help=help_text)
+
+    async def search(self, query: str) -> AsyncIterator[Hit | DiscoveryHit]:
+        if not query:
+            # The fuzzy matcher raises ValueError on empty input in 8.2.8.
+            async for hit in self.discover():
+                yield hit
+            return
         matcher = self.matcher(query)
         for name, help_text in SLASH_COMMANDS:
             if (score := matcher.match(name)) > 0:
                 yield Hit(score, matcher.highlight(name), self._run(name), help=help_text)
 
     def _run(self, name: str) -> Callable[[], None]:
+        app = cast("AICodingApp", self.app)
+
         def callback() -> None:
-            app = cast("AICodingApp", self.app)
-            app.run_command(f"/{name}")
+            app.submit_slash(f"/{name}")
 
         return callback

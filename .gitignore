@@ -35,4 +35,4 @@ config.local.yaml
 .idea/
 .vscode/
 # Generated TUI preview (scripts/tui_shot.py)
-docs/tui-preview.svg
+docs/tui-*.svg

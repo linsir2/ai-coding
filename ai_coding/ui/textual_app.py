@@ -106,11 +106,20 @@ class AICodingApp(App[None]):
         self._input.value = ""
         if not text or self._input.disabled:
             return
-        self._transcript.append_user(text, _clock())
         if text.startswith("/"):
-            self.run_command(text)
+            self.submit_slash(text)
         else:
+            self._transcript.append_user(text, _clock())
             self.run_turn(text)
+
+    def submit_slash(self, text: str) -> None:
+        """Record a slash command as a user turn, then run it.
+
+        Both the input box (typed + Enter) and the command palette
+        (selected) go through here so the history is complete.
+        """
+        self._transcript.append_user(text, _clock())
+        self.run_command(text)
 
     @work(exclusive=True, group="turn", thread=False)
     async def run_command(self, text: str) -> None:

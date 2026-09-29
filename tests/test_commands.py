@@ -3,10 +3,10 @@
 from types import SimpleNamespace
 
 import pytest
-from textual.command import CommandPalette
+from textual.command import CommandPalette, DiscoveryHit
 from textual.widgets import Input
 
-from ai_coding.ui.commands import SlashCommandProvider
+from ai_coding.ui.commands import SLASH_COMMANDS, SlashCommandProvider
 from ai_coding.ui.textual_app import AICodingApp
 
 
@@ -32,8 +32,24 @@ async def test_slash_opens_palette():
 
 
 @pytest.mark.asyncio
+async def test_discover_yields_every_slash_command():
+    provider = SlashCommandProvider(SimpleNamespace(app=object()), None)
+    hits = [hit async for hit in provider.discover()]
+    assert len(hits) == len(SLASH_COMMANDS) == 16
+    assert all(isinstance(hit, DiscoveryHit) for hit in hits)
+    assert {hit.display for hit in hits} == {name for name, _ in SLASH_COMMANDS}
+
+
+@pytest.mark.asyncio
+async def test_search_empty_query_yields_every_command():
+    provider = SlashCommandProvider(SimpleNamespace(app=object()), None)
+    hits = [hit async for hit in provider.search("")]
+    assert len(hits) == len(SLASH_COMMANDS) == 16
+
+
+@pytest.mark.asyncio
 async def test_search_filters_to_matching_commands():
-    provider = SlashCommandProvider(SimpleNamespace(), None)
+    provider = SlashCommandProvider(SimpleNamespace(app=object()), None)
     hits = [hit async for hit in provider.search("plan")]
     assert any("plan" in (hit.text or "") for hit in hits)
 
@@ -61,6 +77,33 @@ async def test_enter_executes_selected_command(monkeypatch):
         await pilot.pause()
         await pilot.pause()
         assert seen == ["/status"]
+
+
+@pytest.mark.asyncio
+async def test_palette_selection_records_the_user_turn(monkeypatch):
+    app = _app()
+    seen: list[str] = []
+
+    async def fake_handle_input(loop_, text, session, sessions, console):
+        seen.append(text)
+        from ai_coding.ui.repl import REPLAction
+
+        return REPLAction.CONTINUE, session
+
+    monkeypatch.setattr("ai_coding.ui.textual_app.handle_input", fake_handle_input)
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/"
+        await pilot.pause()
+        assert CommandPalette.is_open(app)
+        for ch in "status":
+            await pilot.press(ch)
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert seen == ["/status"]
+        bubbles = app.query("Static.user-bubble")
+        assert any("/status" in str(bubble.content) for bubble in bubbles)
 
 
 @pytest.mark.asyncio
