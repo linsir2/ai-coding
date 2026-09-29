@@ -1,8 +1,10 @@
-"""Rich console wrapper for the REPL (M5-2).
+"""Console interface written through by ``handle_input`` and the Textual app.
 
-Thin, mostly-styling layer on top of ``rich.console.Console`` so the interactive
-loop and its components can share consistent coloring without coupling to
-``typer.echo``.  ``record=True`` consoles can be inspected in tests.
+A thin four-method surface (``delta`` / ``info`` / ``error`` / ``rule``) so the
+slash-command core in ``ui/repl.py`` and the command handlers don't couple to
+``typer.echo`` or to the TUI.  ``DialogueConsole`` renders to a rich console
+(``record=True`` consoles can be inspected in tests); ``TextualConsole`` writes
+into the Textual transcript instead.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ _ERROR_STYLE = "bold red"
 
 
 class DialogueConsole:
-    """Render REPL output (assistant deltas, info, errors) with rich."""
+    """Render assistant deltas, info, errors and rules with rich."""
 
     def __init__(self, console: Console | None = None) -> None:
         self._c = console or Console()

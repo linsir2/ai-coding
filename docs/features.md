@@ -51,7 +51,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | `/trace` | — | 上一回合的轨迹摘要（token、耗时、降级、门卫拒绝） |
 | `/budget` | — | 本会话累计 token 账本 |
 | `/clear` | — | 开新会话（旧的仍可 `/resume`） |
-| `/quit` `/q` `/exit` | — | 退出（面板里是 `Ctrl-Q`） |
+| `/quit` `/q` `/exit` | — | 退出（`Ctrl-Q`） |
 
 ### 非命令键位
 

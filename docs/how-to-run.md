@@ -192,7 +192,8 @@ mcp:
    工具描述会自动改成提醒这件事的措辞。
 
 验收脚本：`.venv/bin/python scripts/r7e_cases.py`（离线 9 条）；
-`--real` 再加 3 条真实用例（真 pty 的转向、真 pty 的提问、真模型一个回合）。
+`--real` 再加 3 条真实用例（真 pty 的转向、真 pty 的提问、真模型一个回合；其中两条 pty 用例的 driver
+已随 R10 删除，现不可跑，见 [集成测试](integration_testing.md)）。
 
 ## R8 新增的配置与行为
 
@@ -202,7 +203,7 @@ mcp:
 | 关掉流式输出（回到「结束时一行预览」） | `ui.tool_chunks: false` | 默认开；每次调用 0.15s 最多一行 |
 | 只找「确实动过手的那一轮」记下的记忆 | `memory_search(evidence="tool")` | `model` 表示「非 tool」，**包含** R6d 之前没有 evidence 字段的老数据 |
 | 丢掉当前卡住的那次工具调用 | 在终端按 **Esc** | 工具结果回 `cancelled_by_user`，**回合继续**；`bash` 的进程组会被真的杀掉；这次取消不算失败、也不推进「换策略」提示。**R10 起该键位暂不可用**：按键绑定在已删除的 `ui/reader.py` 里 |
-| 中止整个回合 | **Ctrl-C**（不变） | 保留已完成的文本与轨迹 |
+| 中止整个回合 | **Ctrl-Q**（退出应用；`Ctrl-C` 现在是「有选区复制，无选区退出」） | 回合被取消，已完成的部分照常落盘（`process_input` 捕获 `CancelledError`）；保留已完成的文本与轨迹 |
 | 让 MCP 服务器的进度可见 | 服务器调 `ctx.report_progress(...)` 即可 | 不报进度的服务器什么都不会显示；`scripts/mcp_progress_server.py` 是可用样例 |
 
 验收脚本：`.venv/bin/python scripts/r8_cases.py`（离线 13 条）；
