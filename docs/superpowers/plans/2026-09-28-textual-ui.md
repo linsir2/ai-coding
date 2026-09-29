@@ -1631,7 +1631,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
 - [ ] **Step 5: 运行测试确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_textual_app.py -q`
-Expected: `5 passed`
+Expected: `4 passed`
 
 - [ ] **Step 6: 真实运行一次（本地、有配置时）**
 
