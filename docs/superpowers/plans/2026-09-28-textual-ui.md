@@ -1183,6 +1183,8 @@ becomes ``UserAnswer(reason="empty")`` → the tool tells the model to decide
 
 from __future__ import annotations
 
+from typing import Any
+
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -1196,7 +1198,7 @@ class ApprovalScreen(ModalScreen[str]):
 
     BINDINGS = [Binding("escape", "no", "No", show=False)]
 
-    def __init__(self, tool_name: str, params: dict, reason: str) -> None:
+    def __init__(self, tool_name: str, params: dict[str, Any], reason: str) -> None:
         super().__init__()
         self._tool_name = tool_name
         self._params = params
