@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 
 from rich.text import Text
-from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.widget import AwaitMount
 from textual.widgets import Collapsible, Markdown, RichLog, Static
@@ -32,11 +31,18 @@ class Turn(Vertical):
         self._mount: AwaitMount | None = None
         self._stale: list[tuple[Markdown, AwaitMount | None, str]] = []
         self._tools: dict[str, tuple[Collapsible, RichLog]] = {}
+        self._header_mounted = False
 
-    def compose(self) -> ComposeResult:
-        yield Static(_header("✦", "Nexus", self._timestamp), classes="msg-header")
+    def ensure_header(self) -> None:
+        # Mounted eagerly rather than in compose(): compose runs one message-loop
+        # tick after attach, so a stream() in the same tick would put its
+        # Markdown above the header.
+        if not self._header_mounted:
+            self.mount(Static(_header("✦", "Nexus", self._timestamp), classes="msg-header"))
+            self._header_mounted = True
 
     def stream(self, text: str) -> None:
+        self.ensure_header()
         if self._markdown is None:
             self._markdown = Markdown()
             self._mount = self.mount(self._markdown)
@@ -112,6 +118,7 @@ class Transcript(VerticalScroll):
     def begin_assistant(self, timestamp: str) -> None:
         self._turn = Turn(timestamp)
         self.mount(self._turn)
+        self._turn.ensure_header()
         self._follow()
 
     def stream(self, text: str) -> None:

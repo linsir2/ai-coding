@@ -163,6 +163,65 @@ async def test_tool_chunks_land_inside_collapsible():
 
 
 @pytest.mark.asyncio
+async def test_header_precedes_markdown_without_a_pause():
+    """The header is mounted eagerly, so it holds the first slot.
+
+    ``compose()`` runs a message-loop tick after attach; a ``stream()`` in the
+    same tick would otherwise land its Markdown above the header.  The real app
+    always awaits a model step in between, so only same-tick callers hit this —
+    and that is exactly the contract this test pins down.
+    """
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:25")
+        t.stream("hello")  # no pause: same tick as begin_assistant
+        await t.end_assistant()
+        await pilot.pause()
+        turn = t.query_one(Turn)
+        assert [type(ch).__name__ for ch in turn.children][:2] == ["Static", "Markdown"]
+
+
+@pytest.mark.asyncio
+async def test_header_is_mounted_once():
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:25")
+        t.stream("a")
+        t.stream("b")
+        await t.end_assistant()
+        await pilot.pause()
+        assert len(t.query_one(Turn).query(".msg-header")) == 1
+
+
+@pytest.mark.asyncio
+async def test_turn_with_no_text_still_gets_a_header():
+    """A tool-only turn, or a turn whose loop raised, never calls ``stream()``.
+
+    The header must not depend on the first delta arriving.
+    """
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:25")
+        await t.end_assistant()
+        await pilot.pause()
+        turn = t.query_one(Turn)
+        assert [type(ch).__name__ for ch in turn.children] == ["Static"]
+        assert "Nexus" in t.query_one(".msg-header", Static).content.plain
+
+
+@pytest.mark.asyncio
+async def test_stream_without_begin_assistant_still_gets_a_header():
+    """``Transcript.stream`` builds its own Turn; it must not skip the header."""
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.stream("orphan delta")
+        await t.end_assistant()
+        await pilot.pause()
+        turn = t.query_one(Turn)
+        assert [type(ch).__name__ for ch in turn.children][:2] == ["Static", "Markdown"]
+
+
+@pytest.mark.asyncio
 async def test_text_and_tools_interleave():
     async with _Harness().run_test(size=(80, 24)) as pilot:
         t = pilot.app.query_one(Transcript)
