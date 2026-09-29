@@ -42,11 +42,13 @@ class SlashCommandProvider(Provider):
         for name, help_text in SLASH_COMMANDS:
             yield DiscoveryHit(name, self._run(name), help=help_text)
 
-    async def search(self, query: str) -> AsyncIterator[Hit | DiscoveryHit]:
+    async def search(self, query: str) -> AsyncIterator[Hit]:
         if not query:
-            # The fuzzy matcher raises ValueError on empty input in 8.2.8.
-            async for hit in self.discover():
-                yield hit
+            # The fuzzy matcher raises ValueError on empty input in 8.2.8;
+            # the palette routes empty queries to discover(), so this is
+            # defensive — but it must still yield Hits, not DiscoveryHits.
+            for name, help_text in SLASH_COMMANDS:
+                yield Hit(1.0, name, self._run(name), help=help_text)
             return
         matcher = self.matcher(query)
         for name, help_text in SLASH_COMMANDS:
