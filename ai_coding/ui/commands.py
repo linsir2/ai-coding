@@ -11,22 +11,22 @@ if TYPE_CHECKING:
     from ai_coding.ui.textual_app import AICodingApp
 
 SLASH_COMMANDS = [
-    ("plan", "Create and refine an implementation plan"),
-    ("review", "Review current changes and surface issues"),
-    ("status", "Show session and runtime status"),
-    ("model", "List or switch models"),
-    ("resume", "List or resume saved sessions"),
-    ("permissions", "View or change approval policy"),
-    ("todo", "Show the current task list"),
-    ("skills", "List available skills"),
-    ("config", "Show effective configuration"),
-    ("compact", "Compact conversation history"),
-    ("memory", "Show memory status"),
-    ("trace", "Show the last turn's trace"),
-    ("budget", "Show session token totals"),
-    ("clear", "Start a fresh session"),
-    ("help", "Show available commands"),
-    ("quit", "Exit the app"),
+    ("/plan", "Create and refine an implementation plan"),
+    ("/review", "Review current changes and surface issues"),
+    ("/status", "Show session and runtime status"),
+    ("/model", "List or switch models"),
+    ("/resume", "List or resume saved sessions"),
+    ("/permissions", "View or change approval policy"),
+    ("/todo", "Show the current task list"),
+    ("/skills", "List available skills"),
+    ("/config", "Show effective configuration"),
+    ("/compact", "Compact conversation history"),
+    ("/memory", "Show memory status"),
+    ("/trace", "Show the last turn's trace"),
+    ("/budget", "Show session token totals"),
+    ("/clear", "Start a fresh session"),
+    ("/help", "Show available commands"),
+    ("/quit", "Exit the app"),
 ]
 
 
@@ -59,6 +59,6 @@ class SlashCommandProvider(Provider):
         app = cast("AICodingApp", self.app)
 
         def callback() -> None:
-            app.submit_slash(f"/{name}")
+            app.submit_slash(name)
 
         return callback
