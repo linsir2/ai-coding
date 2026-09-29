@@ -2065,7 +2065,7 @@ Expected: 全绿；总数比 Task 6 结束时减少（旧测试删除 + 新测�
 
 - [ ] **Step 9: 更新文档**
 
-- `docs/features.md`：重写「R10 已知缺口」节 → 改为「R12：Textual UI（v1 会话闭环）」，列出已接线项（事件→块、提交、审批、ask_user、slash、`/model`）、v1 明确不做项（欢迎页/命令面板/侧栏/计划卡、Esc 取消、steering）、验证方式（`run_test` + pty + 真实终端）。
+- `docs/features.md`：重写「R10 已知缺口」节 → 改为「R12：Textual UI（v1 会话闭环）」，列出已接线项（事件→块、提交、审批、ask_user、slash、`/model`）、v1 明确不做项（欢迎页/命令面板/侧栏/计划卡、Esc 取消、steering）、**两条已知退化**（命令面板未接；模型驱动的 slash 命令不渲染工具事件块——spec §9 末尾条目）以及验证方式（`run_test` + pty + 真实终端）。
 - `docs/README.md`：把「终端界面重构（R10）」的描述更新为 Textual 版本，删掉「四处数据流尚未接线」的过时段落。
 - `docs/architecture.md`：ui 行更新为新模块清单（textual_app / transcript / blocks / widgets→transcript 等）。
 - `docs/how-to-run.md`：删掉「输出区尚未接上循环事件」的限制说明；补复制（ctrl+c / Shift+拖选）与退出（ctrl+q）说明。
