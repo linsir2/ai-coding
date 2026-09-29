@@ -176,12 +176,14 @@ self-pipe send FAILED: errno=1 (EPERM) [Errno 1] Operation not permitted
 告警不改变请求（逐字节）/ 转向成为持久化指令 / 转向的余量留在队列 /
 转向只重置失败连胜 / `task_only` 的干净窗口 / `full` 仍然继承父上下文。
 
-真实 3 条（`--real`，**只报告不判定退出码**）：
+真实 3 条（`--real`，**只报告不判定退出码**；其中两条 pty 用例依赖的
+`tests/_pty_reader_child.py` 与 `ui/reader.py` 已在 R10 删除，现仅 `turn_still_works` 可跑；
+人机通道的现行 pty 覆盖见 R7 节末尾的 `tests/test_pty_textual.py`）：
 
 | 案例 | 判据 |
 |---|---|
-| `pty_steering` | 真 pty 里跑带 reader 的 REPL；在慢工具执行期间打字，断言 transcript 里出现 `user:[steering] …` |
-| `pty_ask_user_through_reader` | 真 pty：模型提问，答案经由同一个 reader 进工具结果 |
+| `pty_steering` | **已不可跑**：driver `tests/_pty_reader_child.py` 随 R10 的 `ui/reader.py` 一起删除 |
+| `pty_ask_user_through_reader` | **已不可跑**（同上）；该通道的现行覆盖见 `tests/test_pty_textual.py` |
 | `turn_still_works` | 组合根跑一个真模型回合，断言有答案、有终态，并打印注册的工具名（应含 `memory_write`） |
 
 ### R7 验收脚本（`scripts/r7_cases.py`）
@@ -197,7 +199,7 @@ self-pipe send FAILED: errno=1 (EPERM) [Errno 1] Operation not permitted
 审批超时（有界且与「用户拒绝」区分）/ 同步审批回调不再冻住事件循环 /
 MCP 信任按 server 生效 / MCP 注册白名单过滤。
 
-真实 3 条（需要 `config.local.yaml`；**只报告不判定退出码**）：
+真实 2 条（需要 `config.local.yaml`；**只报告不判定退出码**）：
 
 ```bash
 .venv/bin/python scripts/r7_cases.py --real --config config.local.yaml
@@ -205,18 +207,24 @@ MCP 信任按 server 生效 / MCP 注册白名单过滤。
 
 | 案例 | 判据 |
 |---|---|
-| `pty_ask_user` | 真 pty 里跑 `run_repl`，脚本先申请任务、再回答模型的问题；断言**工具结果**里出现所答内容 |
 | `mcp_tool_surface` | 真 stdio 起 `scripts/mcp_many_tools_server.py`（13 工具），打印 no-MCP / 全注册 / 白名单三档 `tools_chars` |
 | `turn_still_works` | 用组合根跑一个真模型回合，断言有答案、有终态、`tools_chars > 0` |
 
-另有两条各自门控的用例（默认 skip，见 `docs/r7-analysis.md` §12 Q4）：
+人机通道的 pty 覆盖由默认套件里的 Textual E2E 承担（**无 env gate**）：
 
 ```bash
-AI_CODING_PTY=1 .venv/bin/python -m pytest tests/test_repl_ask_user_pty.py -q   # 真终端
-AI_CODING_MCP_STDIO=1 .venv/bin/python -m pytest tests/test_mcp_stdio.py -q     # 真 stdio
+.venv/bin/python -m pytest tests/test_pty_textual.py -q    # 真 pty + 真 Textual app
 ```
 
-`tests/test_repl_ask_user_stdin.py` 默认跑：它是 R7c 的回归用例（旧代码 `reason=eof`、新代码答对）。
+`tests/_pty_textual_child.py` 在真 pty 里启动真 Textual app（`tests/test_pty_textual.py` 驱动）：
+先提交一行，在审批模态上对默认聚焦的 Allow 按 Enter，再输入 `ask_user` 的答案，最后断言子进程
+输出的 JSON（`approved: true` 与所答内容）——审批与提问两条人机通道的输入真的到达了工具侧。
+
+真 stdio 的 MCP 用例仍单独门控（默认 skip）：
+
+```bash
+AI_CODING_MCP_STDIO=1 .venv/bin/python -m pytest tests/test_mcp_stdio.py -q     # 真 stdio
+```
 
 ### R6 验收脚本（`scripts/r6_cases.py`）
 
