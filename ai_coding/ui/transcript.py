@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widget import AwaitMount
 from textual.widgets import Markdown, Static
+
+from ai_coding.ui.blocks import Block
 
 _FLUSH_CHARS = 4096
 
@@ -63,10 +63,7 @@ class Transcript(VerticalScroll):
             await markdown.append(pending)
         self._follow()
 
-    def append_block(self, block: Any) -> None:
-        # ``Any`` until Task 3 lands ``Block``; importing it now would be a
-        # cycle (blocks must stay Textual-free, so it cannot import Transcript
-        # back).  Task 3 tightens this annotation.
+    def append_block(self, block: Block) -> None:
         self.mount(Static(block.render(), classes=f"block-{block.kind}"))
         self._follow()
 

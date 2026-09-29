@@ -164,18 +164,12 @@ async def test_the_warning_never_changes_the_request():
     assert loud_events.of_type(ToolSurfaceWarning)
 
 
-def test_the_console_renders_one_readable_line():
-    """R7e-3c: the REPL shows the number, the threshold and the top origins."""
-    from ai_coding.core.events import ToolSurfaceWarning
-    from ai_coding.ui.console import ConsoleObserver, DialogueConsole
+def test_the_transcript_renders_one_readable_line():
+    """R7e-3c: the transcript shows the number, the threshold and the top origins."""
+    from ai_coding.ui.blocks import Block, TranscriptObserver
 
-    printed: list[str] = []
-
-    class _Console(DialogueConsole):
-        def info(self, message: str) -> None:
-            printed.append(message)
-
-    ConsoleObserver(_Console()).on_event(
+    seen: list[Block] = []
+    TranscriptObserver(seen.append).on_event(
         ToolSurfaceWarning(
             tools_chars=13_301,
             threshold=12_000,
@@ -183,7 +177,7 @@ def test_the_console_renders_one_readable_line():
             hint="ignore me",
         )
     )
-    assert printed and printed[0].startswith("[tools]")
-    assert "13301" in printed[0]
-    assert "12000" in printed[0]
-    assert "everything=10062" in printed[0]
+    assert seen and seen[0].text.startswith("[tools]")
+    assert "13301" in seen[0].text
+    assert "12000" in seen[0].text
+    assert "everything=10062" in seen[0].text
