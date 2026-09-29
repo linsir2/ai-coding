@@ -1651,6 +1651,12 @@ git add ai_coding/ui/textual_app.py tests/test_textual_app.py
 git commit -m "feat(ui): the loop is wired — submit, stream, events, turn guard"
 ```
 
+**落地偏差（实现时发现的硬冲突/必要修正，均已带注释落地）**：
+1. **`self._loop` → `self._agent_loop`**：Textual 的 `App` 自己拥有 `_loop`（asyncio 事件循环，`run_async` 会覆写它），本计划原命名会被覆盖成事件循环对象。Task 1 的同类命名一并随之修正，Task 6 的 snippet 已同步更新。
+2. **`on_mount` 里补 `self._input.focus()`**：`VerticalScroll` 可聚焦，Textual 的自动聚焦会落在 transcript 上，输入框拿不到键盘。
+3. **provider 用 `answer: str = await self.push_screen_wait(screen)` 注解**（而非 `str(...)` 包裹）：注解才是把 `ScreenResultType` 绑到 `str` 的方式，否则 strict mypy 下解析为 `Screen[object]`。
+4. 测试 helper `_all_static_text` 需兼容 `str` 型 content（不是所有 `Static.content` 都有 `.plain`）。
+
 ---
 
 ### Task 6: slash 命令 + 4.1 缺陷修复 + pty E2E
@@ -1786,7 +1792,7 @@ class TextualConsole(DialogueConsole):
         console = TextualConsole(self._transcript)
         try:
             action, new_session = await handle_input(
-                self._loop, text, self._session, self._sessions, console
+                self._agent_loop, text, self._session, self._sessions, console
             )
             if action is REPLAction.NEW_SESSION:
                 self._session = new_session
@@ -1804,7 +1810,7 @@ class TextualConsole(DialogueConsole):
         from ai_coding.security.approval import CLIApprovalCallback
 
         if dispatcher is None:
-            dispatcher = getattr(self._loop, "dispatcher", None)
+            dispatcher = getattr(self._agent_loop, "dispatcher", None)
         callback = getattr(dispatcher, "approval", None) if dispatcher else None
         if isinstance(callback, CLIApprovalCallback):
             callback.set_provider(self.approval_provider)
