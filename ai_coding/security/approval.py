@@ -49,10 +49,18 @@ class CLIApprovalCallback(ApprovalCallback):
         input_fn: Callable[[str], str] | None = None,
     ) -> None:
         self._input = input_fn or _default_input
-        self._provider: Callable[[str], Any] | None = None
+        self._provider: Callable[..., Any] | None = None
 
-    def set_provider(self, provider: Callable[[str], Any]) -> None:
-        """Use an async provider instead of stdin (TUI mode)."""
+    def set_provider(self, provider: Callable[..., Any]) -> None:
+        """Use an async provider instead of stdin (TUI mode).
+
+        The provider is called as ``provider(tool_name, params, reason)`` — the
+        *structured* arguments, not the formatted prompt.  The prompt truncates
+        ``params`` to 120 characters, and that truncation used to be the only
+        thing a TUI modal ever saw, so a long ``bash`` command could be approved
+        without being displayed.  A UI that wants the prompt can rebuild it with
+        ``_format_prompt``; a UI that wants the data now gets it.
+        """
         self._provider = provider
 
     async def approve(
@@ -61,13 +69,13 @@ class CLIApprovalCallback(ApprovalCallback):
         params: dict[str, Any],
         reason: str,
     ) -> ApprovalResult:
-        prompt = self._format_prompt(tool_name, params, reason)
         if self._provider is not None:
             try:
-                answer = str(await self._provider(prompt)).strip().lower()
+                answer = str(await self._provider(tool_name, params, reason)).strip().lower()
             except Exception:  # noqa: BLE001 — fail-closed
                 return ApprovalResult.NO
         else:
+            prompt = self._format_prompt(tool_name, params, reason)
             try:
                 answer = (await asyncio.to_thread(self._input, prompt)).strip().lower()
             except (EOFError, OSError):

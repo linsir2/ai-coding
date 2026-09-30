@@ -1,8 +1,9 @@
 """Approval and ask_user E2E in a real pty (replaces the deleted run_repl tests).
 
 The child is a real Textual app with a real terminal attached; the test plays a
-human: submit a line (which starts the scripted turn), press Enter on the
-focused Allow button of the approval modal, then type the ask answer.
+human: submit a line (which starts the scripted turn), press "y" on the approval
+modal, then type the ask answer.  ("y", not Enter: the modal focuses Deny so a
+reflexive Enter fails closed — see ``ApprovalScreen``.)
 A pty has no synchronisation point other than the clock, so the schedule below
 is wall-clock; if the first run is flaky, print ``result["output"]`` to see the
 screen and adjust the delays — never skip or delete the test.
@@ -59,9 +60,9 @@ def _drive(script: list[tuple[float, str]], timeout: float = 25.0) -> dict:
 def test_approval_and_ask_user_reach_the_tools():
     result = _drive([
         (1.5, "go\r"),    # submit a line → the scripted turn starts
-        (3.5, "\r"),      # approval modal: Enter activates the focused Allow
-        (5.5, "a.py\r"),  # ask modal: type an answer and submit
-        (7.5, "\r"),      # nudge in case the answer needed one more Enter
+        (3.5, "y"),      # approval modal: y allows (Enter alone would now deny)
+        (6.0, "a.py\r"),  # ask modal: type an answer and submit (extra slack:
+        (8.0, "\r"),      # the approval box grew a hint row, so leave room)
     ])
     assert result["code"] == 0, result["output"]
     assert '"approved": true' in result["output"], result["output"]

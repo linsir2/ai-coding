@@ -43,7 +43,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | `/permissions [auto\|confirm]` | 策略 | 无参数显示当前审批回调，带参数切换自动批准 / 逐次确认 |
 | `/todo` | — | 渲染当前会话的 `TaskState`（目标、进度、逐项状态、下一步） |
 | `/skills` | — | 列出 `SkillRegistry` 目录（`- name: description`） |
-| `/plan` | — | 先弹 `What should I plan?` 收集主题，再以该主题发起计划回合（`ui/textual_app.py::_plan_turn`） |
+| `/plan` | — | 先弹 `What should I plan?` 收集主题，再以该主题发起计划回合（`ui/textual_app.py::_plan_turn`）。**不接受参数**：`/plan 改一下 loader` 会整条落回 `handle_input` 的旧固定 prompt，参数被静默丢弃 |
 | `/review` | — | 向模型发一条「审查当前 git diff」的快捷 prompt |
 | `/config` | — | 打印生效的 model / 上下文预算 / 迭代上限 / 停止策略 / 回合超时 |
 | `/compact` | — | 主动压缩历史并落盘 |
@@ -352,16 +352,19 @@ R12 把 R10 的 `prompt_toolkit` 壳整体换成 Textual，并接回 R10 断掉�
 
 - 循环事件 → `ui/blocks.py::TranscriptObserver` → transcript（工具开始/结束/chunk、任务清单、回合终态）；
 - 输入提交：Enter 提交自然语言跑完整回合（回合进行中禁用输入，命令与回合串行）；
-- 审批：`CLIApprovalCallback` 经 `set_provider` 接到 `ui/modals.py::ApprovalScreen`（y/N/s）；
+- 审批：`CLIApprovalCallback` 经 `set_provider` 接到 `ui/modals.py::ApprovalScreen`；provider 收到的是
+  **结构化的 `(tool_name, params, reason)`**（不是格式化后的 prompt 字符串），所以模态里显示的就是 gate
+  实际决定的那份参数，不存在截断。键盘操作与 CLI 一致：`y` 允许 / `n` 拒绝 / `s` 中止 / `Esc` 拒绝；
+  焦点默认落在 **Deny**，所以裸 Enter 是拒绝而不是批准；
 - `ask_user`：`CLIUserPromptCallback` 经 `set_provider` 接到 `AskScreen`；
 - slash 命令：`TextualConsole` 把命令输出写进 transcript；`/model <name>` 经 `AgentLoop.set_model` 真的切换。
 
-**v1 明确不做**：欢迎页、命令面板、侧栏、计划卡；`Esc` 取消工具批；steering 接回。
+**v1 明确不做**：欢迎页、侧栏、计划卡；`Esc` 取消工具批；steering 接回。
+（命令面板**已实现**：输入 `/` 唤起内置 `CommandPalette`，覆盖全部 slash 命令。）
 
-**两条已知退化**：
+**一条已知退化**：
 
-1. **命令面板未接线**：`/` 只是普通文本，必须手打完整命令。
-2. **模型驱动的 slash 命令不渲染工具事件块**：`/review`、未知 `/foo` 在
+1. **模型驱动的 slash 命令不渲染工具事件块**：`/review`、未知 `/foo` 在
    `handle_input` 里直接调 `loop.process_input` 且不传 observer，期间的 `ToolStarted` /
    `ToolFinished` 不进 transcript（流式回答本身仍进 transcript）。`/plan` 不在此列——
    `_plan_turn` 自己调 `process_input` 并传了 `observer`，工具块照常渲染。状态栏会照常置忙

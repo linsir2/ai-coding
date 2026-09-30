@@ -225,8 +225,10 @@ P2：提交队列 + 接回 `SteeringQueue`（`app.py:79` 构造后从未接线�
 | 6 | 回合并发（旧缺陷） | v1 决策：turn 中禁用输入（4.3），`exclusive=True` 兜底；`process_input` 取消时持久化部分回合（`agent_loop.py:365-376`） |
 | 7 | 退出/中断中途丢数据 | 已核实 `process_input` 的 `CancelledError` 分支会 `_close_turn` 持久化（`agent_loop.py:365-376`）→ `on_unmount` 取消 worker 并 await 即可 |
 | 8 | 删除旧 pty 测试后的覆盖空窗 | 硬性前置：新 pty 测试（§6.4）先绿，再执行删除 |
-| 9 | ask_user 选项被拍平（无法渲染选项列表） | 已知限制，v1 接受（显示整段文本）；P2 改 provider 签名（4.2） |
+| 9 | ask_user 选项被拍平（无法渲染选项列表） | 已知限制，v1 接受（显示整段文本）；P2 改 provider 签名（4.2）——**审批通道已先走这条路**，见下 |
 | 10 | 新依赖引入 | 4 个纯 Python 包；`textual` 是活跃维护的主流框架 |
+| 11 | 审批 provider 签名从 `Callable[[str], Any]` 改为三参 | 已实施。`_format_prompt` 把 `params` 截到 120 字符，而它是 provider 唯一能拿到的东西 → 长 `bash` 命令在模态里完全不可见却仍可被批准。改为 `provider(tool_name, params, reason)` 传结构化数据后，`parse_approval_prompt`（反向解析那根被截断的字符串）整块删除。非 UI 路径仍走 `_format_prompt` 读 stdin，格式逐字节不变 |
+| 12 | 审批模态裸 Enter = 允许 | 已修复。焦点默认在第一个 `Button`，而 `Button` 吞掉字符键，所以**打 `n` 会先被吞、再由 Enter 激活 Allow**。绑定上移到 Screen（`y`/`n`/`s`/`Esc`）并把焦点移到 Deny，恢复旧 prompt-toolkit UI 的 fail-closed 默认。副作用：真 pty E2E 的驱动键从 `"\r"` 改为 `"y"`（断言未动） |
 
 ## 8. 实施顺序（writing-plans 的输入）
 

@@ -4,59 +4,41 @@ Both return the *strings the existing parsers expect*: approval answers are
 parsed by ``security/approval.py`` (``y``/``n``/``s``), and an empty ask answer
 becomes ``UserAnswer(reason="empty")`` → the tool tells the model to decide
 (spec §4.2).  Escape therefore returns ``""``, never raises.
+
+``ApprovalScreen`` takes the gate's structured call — ``tool_name``, ``params``,
+``reason`` — rather than the formatted prompt string.  It used to re-parse that
+string, and the prompt truncates ``params`` at 120 characters, so anything longer
+reached the operator as nothing at all.
 """
 
 from __future__ import annotations
 
-import ast
-import re
 from typing import Any
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
-_TOOL_RE = re.compile(r"\[([^\]]*)\]\s*(.*)")
-
-
-def parse_approval_prompt(prompt: str) -> tuple[str, str, dict[str, Any]]:
-    """Split an approval prompt into (tool_name, reason, params).
-
-    The prompt is built by ``CLIApprovalCallback._format_prompt`` as
-    ``"[tool] reason\\n  params: {json}\\nAllow? [y/N/s] "``.  The params line
-    is best-effort (the formatter truncates it, so it may not parse); a
-    failure yields ``{}``.  The ``Allow?`` suffix is dropped entirely.
-    """
-    lines = prompt.splitlines()
-    first = lines[0] if lines else ""
-    match = _TOOL_RE.match(first)
-    if match:
-        tool_name = match.group(1)
-        reason = match.group(2).strip()
-    else:
-        tool_name = ""
-        reason = first.strip()
-    params: dict[str, Any] = {}
-    for line in lines[1:]:
-        stripped = line.strip()
-        if stripped.startswith("params:"):
-            try:
-                parsed = ast.literal_eval(stripped[len("params:") :].strip())
-            except (ValueError, SyntaxError):
-                parsed = None
-            if isinstance(parsed, dict):
-                params = parsed
-            break
-    return tool_name, reason, params
-
 
 class ApprovalScreen(ModalScreen[str]):
-    """Ask whether one tool call may proceed."""
+    """Ask whether one tool call may proceed.
 
-    BINDINGS = [Binding("escape", "no", "No", show=False)]
+    Keyboard-first, matching the CLI's ``[y/N/s]``: ``y`` allows, ``n`` denies,
+    ``s`` stops, Escape denies.  The bindings live on the *screen* because a
+    focused ``Button`` swallows character keys — with the default focus on Allow,
+    typing "n" would have been consumed as a keypress and then activated Allow.
+    Focus therefore starts on Deny, so an accidental Enter denies.
+    """
+
+    BINDINGS = [
+        Binding("escape", "no", "Deny", show=False),
+        Binding("y", "yes", "Allow", show=False),
+        Binding("n", "no", "Deny", show=False),
+        Binding("s", "stop", "Stop", show=False),
+    ]
 
     def __init__(self, tool_name: str, params: dict[str, Any], reason: str) -> None:
         super().__init__()
@@ -70,21 +52,41 @@ class ApprovalScreen(ModalScreen[str]):
         if self._reason:
             body.append(f"{self._reason}\n", style="yellow")
         if self._params:
-            preview = str(self._params)
-            body.append(preview if len(preview) <= 200 else preview[:197] + "...", style="dim")
+            # Not truncated: the whole point of the box is that the operator
+            # reads what they are about to allow.  ``#approval-body`` wraps and
+            # scrolls, so a long bash command costs a scrollbar, not a decision
+            # made blind.
+            body.append(str(self._params), style="dim")
         with Vertical(id="approval-box"):
-            yield Static(body, id="approval-body")
+            # The scroll view wraps the Static rather than becoming it: a Static
+            # reports a virtual size clamped to its max-height, so it silently
+            # crops instead of scrolling.  The id stays on the Static so the
+            # text is still reachable as one widget.
+            with VerticalScroll(id="approval-body-scroll"):
+                yield Static(body, id="approval-body")
             with Horizontal(id="approval-buttons"):
                 yield Button("Allow", id="yes", variant="success")
                 yield Button("Deny", id="no", variant="error")
                 yield Button("Stop", id="stop", variant="warning")
+            yield Static("y allow · n deny · s stop · esc deny", id="approval-hint")
+
+    def on_mount(self) -> None:
+        # Deny, not Allow: whichever answer a reflexive keypress produces, it
+        # has to be the one that does not run the tool.
+        self.query_one("#no", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         # ``event.button.id`` is ``str | None``; an unknown button fails closed.
         self.dismiss({"yes": "y", "no": "n", "stop": "s"}.get(event.button.id or "", "n"))
 
+    def action_yes(self) -> None:
+        self.dismiss("y")
+
     def action_no(self) -> None:
         self.dismiss("n")
+
+    def action_stop(self) -> None:
+        self.dismiss("s")
 
 
 class AskScreen(ModalScreen[str]):

@@ -14,7 +14,7 @@ from textual.widgets import Input
 from ai_coding.ui.blocks import Block, TranscriptObserver
 from ai_coding.ui.commands import SlashCommandProvider
 from ai_coding.ui.input_bar import InputBar
-from ai_coding.ui.modals import ApprovalScreen, AskScreen, parse_approval_prompt
+from ai_coding.ui.modals import ApprovalScreen, AskScreen
 from ai_coding.ui.repl import REPLAction, handle_input
 from ai_coding.ui.status_bar import StatusBar
 from ai_coding.ui.transcript import Transcript
@@ -200,15 +200,18 @@ class AICodingApp(App[None]):
 
     # ---- human channels --------------------------------------------------
 
-    async def approval_provider(self, prompt: str) -> str:
+    async def approval_provider(
+        self, tool_name: str, params: dict[str, Any], reason: str
+    ) -> str:
         """Ask through a modal; return the string ``approval.py`` parses.
 
-        ``prompt`` is the flattened ``"[tool] reason\\n  params: {json}\\nAllow?"``
-        text (spec §4.2); it is parsed into tool name, reason and params so the
-        modal shows each once instead of repeating the whole prompt.
+        The gate hands over the structured call, so the modal can render the
+        parameters as they are.  It used to arrive as one truncated prompt
+        string that the UI had to re-parse, and the 120-char cut meant anything
+        longer — a real ``bash`` command, say — was simply not shown.
         """
-        tool_name, reason, params = parse_approval_prompt(prompt)
         screen = ApprovalScreen(tool_name=tool_name, params=params, reason=reason)
+
         try:
             # The annotation, not a ``str()`` wrapper: it is what binds
             # ``ScreenResultType`` to ``str`` (an unconstrained call resolves to

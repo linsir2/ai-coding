@@ -82,6 +82,14 @@ Turn Collapsible > CollapsibleTitle {
     color: $warning;
 }
 
+Turn Collapsible.tool-ok > CollapsibleTitle {
+    color: $success;
+}
+
+Turn Collapsible.tool-failed > CollapsibleTitle {
+    color: $error;
+}
+
 ApprovalScreen,
 AskScreen {
     align: center middle;
@@ -98,6 +106,21 @@ AskScreen {
 
 #approval-box {
     width: 60;
+    max-height: 90%;
+}
+
+#approval-body-scroll {
+    height: auto;
+    max-height: 16;
+}
+
+#approval-body {
+    height: auto;
+}
+
+#approval-hint {
+    color: $text-muted;
+    text-align: right;
 }
 
 #approval-buttons {

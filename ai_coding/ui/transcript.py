@@ -26,6 +26,13 @@ class Turn(Vertical):
     The label is kept in ``_tools`` because ``ToolFinished`` carries no params:
     the target cannot be re-derived at finish time, so the title is rebuilt from
     what ``start_tool`` was given.
+
+    Precondition: the Turn must already be attached.  ``mount()`` raises
+    ``MountError`` on an unattached widget, so every method here that touches
+    ``self.mount`` is only safe once ``Transcript`` has mounted the Turn — which
+    it does synchronously via ``_register_child``, so a caller never has to
+    await anything first.  ``ensure_header`` being called from
+    ``Transcript.begin_assistant`` relies on exactly that.
     """
 
     def __init__(self, timestamp: str) -> None:
@@ -72,7 +79,9 @@ class Turn(Vertical):
         self._mount = None
         log = RichLog()
         log.write(body)
-        collapsible = Collapsible(log, title=f"▸ {label}", collapsed=True)
+        collapsible = Collapsible(
+            log, title=f"▸ {label}", collapsed=True, classes="tool-running"
+        )
         self._tools[call_id] = (collapsible, log, label)
         self.mount(collapsible)
 
@@ -81,17 +90,20 @@ class Turn(Vertical):
         if tool is not None:
             tool[1].write(text)
 
-    def end_tool(self, call_id: str, mark: str, outcome: str) -> None:
+    def end_tool(self, call_id: str, mark: str, status: str, outcome: str) -> None:
         """Mark the call done, keep its target, and record the result.
 
         ``outcome`` is the tool's output preview or failure text.  Dropping it
         left a failed call reading as ``✗ read`` with no reason anywhere, so it
-        goes into the same log the chunks already went to.
+        goes into the same log the chunks already went to.  ``status`` becomes
+        a class so CSS can tell a ✓ from a ✗ without parsing the glyph.
         """
         tool = self._tools.get(call_id)
         if tool is None:
             return
         collapsible, log, label = tool
+        collapsible.remove_class("tool-running")
+        collapsible.add_class(f"tool-{status}")
         collapsible.title = f"{mark} {label}"
         if outcome:
             log.write(outcome)
@@ -162,7 +174,7 @@ class Transcript(VerticalScroll):
                 turn.start_tool(block.call_id, _tool_label(block), block.text)
             elif block.tool_status in {"ok", "failed"}:
                 mark = "✓" if block.tool_status == "ok" else "✗"
-                turn.end_tool(block.call_id, mark, block.text)
+                turn.end_tool(block.call_id, mark, block.tool_status, block.text)
             else:
                 self.mount(Static(block.render(), classes=f"block-{block.kind}"))
         elif turn is not None and block.kind == "tool-chunk":

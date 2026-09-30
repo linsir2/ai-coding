@@ -4,7 +4,7 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Input
 
-from ai_coding.ui.modals import ApprovalScreen, AskScreen, parse_approval_prompt
+from ai_coding.ui.modals import ApprovalScreen, AskScreen
 
 
 class _Host(App[str]):
@@ -43,6 +43,30 @@ async def test_approval_shows_tool_and_reason():
 
 
 @pytest.mark.asyncio
+async def test_approval_shows_a_long_command_in_full():
+    """A 300-char command is exactly the case the operator must read."""
+    app = _Host()
+    command = "pytest -q " + "x" * 300
+    async with app.run_test() as pilot:
+        app.push_screen(ApprovalScreen("bash", {"command": command}, "read-only"))
+        await pilot.pause()
+        text = app.screen.query_one("#approval-body").content.plain
+        assert command in text
+
+
+@pytest.mark.asyncio
+async def test_approval_renders_nested_params():
+    app = _Host()
+    params = {"path": "a.py", "meta": {"k": [1, 2, {"z": 3}]}}
+    async with app.run_test() as pilot:
+        app.push_screen(ApprovalScreen("write", params, "tool 'write' requires confirmation"))
+        await pilot.pause()
+        text = app.screen.query_one("#approval-body").content.plain
+        assert "a.py" in text
+        assert "meta" in text
+
+
+@pytest.mark.asyncio
 async def test_approval_empty_params_no_empty_braces():
     app = _Host()
     async with app.run_test() as pilot:
@@ -50,6 +74,88 @@ async def test_approval_empty_params_no_empty_braces():
         await pilot.pause()
         text = app.screen.query_one("#approval-body").content.plain
         assert "{}" not in text
+
+
+@pytest.mark.asyncio
+async def test_approval_bare_enter_denies():
+    """A reflexive Enter must not approve.
+
+    The modal is a trust boundary: whichever answer a keypress produces by
+    accident has to be the safe one.  The old prompt-toolkit UI was a text
+    input where an empty answer fell through to NO, so this is restoring the
+    old default rather than inventing one.
+    """
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(
+            ApprovalScreen("bash", {"command": "ls"}, "read-only"), app.results.append
+        )
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.results[-1] == "n"
+
+
+@pytest.mark.asyncio
+async def test_approval_typing_no_denies():
+    """Pressing "n" must not be swallowed by a focused button."""
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(
+            ApprovalScreen("bash", {"command": "ls"}, "read-only"), app.results.append
+        )
+        await pilot.pause()
+        await pilot.press("n")
+        await pilot.pause()
+        assert app.results[-1] == "n"
+
+
+@pytest.mark.asyncio
+async def test_approval_typing_yes_allows():
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(
+            ApprovalScreen("bash", {"command": "ls"}, "read-only"), app.results.append
+        )
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+        assert app.results[-1] == "y"
+
+
+@pytest.mark.asyncio
+async def test_approval_typing_s_stops():
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(
+            ApprovalScreen("bash", {"command": "ls"}, "read-only"), app.results.append
+        )
+        await pilot.pause()
+        await pilot.press("s")
+        await pilot.pause()
+        assert app.results[-1] == "s"
+
+
+@pytest.mark.asyncio
+async def test_approval_starts_focused_on_deny():
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(ApprovalScreen("bash", {"command": "ls"}, "read-only"))
+        await pilot.pause()
+        assert app.focused is not None
+        assert app.focused.id == "no"
+
+
+@pytest.mark.asyncio
+async def test_approval_advertises_the_keys():
+    """A keyboard-only user has to be told which keys work."""
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(ApprovalScreen("bash", {"command": "ls"}, "read-only"))
+        await pilot.pause()
+        hint = app.screen.query_one("#approval-hint").content
+        plain = hint.plain if hasattr(hint, "plain") else str(hint)
+        assert "y" in plain and "n" in plain and "s" in plain
 
 
 @pytest.mark.asyncio
@@ -77,34 +183,6 @@ async def test_approval_unknown_button_id_fails_closed():
 
     screen.on_button_pressed(_UnknownButtonEvent())  # type: ignore[arg-type]
     assert dismissed == ["n"]
-
-
-def test_parse_approval_prompt_extracts_fields():
-    prompt = (
-        "[bash] bash command requires confirmation\n"
-        "  params: {'command': 'ls -la'}\n"
-        "Allow? [y/N/s] "
-    )
-    tool_name, reason, params = parse_approval_prompt(prompt)
-    assert tool_name == "bash"
-    assert reason == "bash command requires confirmation"
-    assert params == {"command": "ls -la"}
-
-
-def test_parse_approval_prompt_drops_allow_suffix():
-    prompt = "[read] read-only\n  params: {}\nAllow? [y/N/s] "
-    tool_name, reason, params = parse_approval_prompt(prompt)
-    assert tool_name == "read"
-    assert reason == "read-only"
-    assert "Allow?" not in reason
-    assert params == {}
-
-
-def test_parse_approval_prompt_truncated_params_become_empty():
-    prompt = "[bash] run\n  params: {'command': 'ls -la && echo hello wor\nAllow? [y/N/s] "
-    tool_name, reason, params = parse_approval_prompt(prompt)
-    assert tool_name == "bash"
-    assert params == {}
 
 
 @pytest.mark.asyncio

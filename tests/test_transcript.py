@@ -256,6 +256,38 @@ async def test_end_tool_for_an_unknown_call_is_silent():
 
 
 @pytest.mark.asyncio
+async def test_tool_title_is_coloured_by_outcome():
+    """▸ / ✓ / ✗ must not all look the same.
+
+    One ``$warning`` rule covered all three marks, so a failure was
+    indistinguishable from a success without reading the glyph.
+    """
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:25")
+        await pilot.pause()
+        for call_id, status in (("c1", "running"), ("c2", "running"), ("c3", "running")):
+            t.append_block(
+                Block("tool", "body", call_id=call_id, tool_name="bash",
+                      tool_status=status)
+            )
+        t.append_block(
+            Block("tool", "done", call_id="c2", tool_name="bash", tool_status="ok")
+        )
+        t.append_block(
+            Block("tool", "boom", call_id="c3", tool_name="bash", tool_status="failed")
+        )
+        await pilot.pause()
+        running, ok, failed = t.query(Collapsible)
+        for coll, expected in ((running, "tool-running"), (ok, "tool-ok"),
+                               (failed, "tool-failed")):
+            assert expected in coll.classes, f"{coll.title!r} -> {sorted(coll.classes)}"
+        # the running class is swapped, not accumulated
+        assert "tool-running" not in ok.classes
+        assert "tool-running" not in failed.classes
+
+
+@pytest.mark.asyncio
 async def test_tool_chunks_land_inside_collapsible():
     async with _Harness().run_test(size=(80, 24)) as pilot:
         t = pilot.app.query_one(Transcript)
