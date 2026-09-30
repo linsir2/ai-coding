@@ -39,7 +39,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | `/help` `/h` | — | 列出全部直接命令 |
 | `/status` | — | 会话 id、消息数、记忆条数 |
 | `/model [name]` | 模型名 | 无参数列出可用模型（`*` 标记当前），带参数则切换 |
-| `/resume [id]` | 会话 id | 无参数列出历史会话（含真实消息数），带参数则恢复并返回 `NEW_SESSION`。**支持前缀匹配**：`/resume 0113e0acac03`（列表显示的 12 位）即可恢复；歧义前缀会列出候选而非静默取第一个 |
+| `/resume [id]` | 会话 id | **无参数弹出选择面板**（`ResumeProvider`）：每条显示首条用户消息预览（截断 80 字符）+ 12 位 id + 消息数 + 最后访问日期；输入关键词按预览和 id 模糊过滤；↑↓ 选择、Enter 恢复、Esc 取消；已打开的会话不再列出；一个会话都没存时直接提示 `no saved sessions`。带参数则直接恢复并返回 `NEW_SESSION`，**支持前缀匹配**（`/resume 0113e0acac03`），歧义前缀会列出候选而非静默取第一个 |
 | `/permissions [auto\|confirm]` | 策略 | 无参数显示当前审批回调，带参数切换自动批准 / 逐次确认 |
 | `/todo` | — | 渲染当前会话的 `TaskState`（目标、进度、逐项状态、下一步） |
 | `/skills` | — | 列出 `SkillRegistry` 目录（`- name: description`） |

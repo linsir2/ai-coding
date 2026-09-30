@@ -78,6 +78,10 @@ class SessionData:
     # just wrote itself.  -1 means "not computed" (a full ``load``), so callers
     # must treat it as "use ``len(messages)``" rather than as zero.
     message_count: int = -1
+    # NOT persisted — ``to_dict`` is a hand-written whitelist, so this stays out
+    # of the on-disk format.  It is a normalized excerpt from the first user
+    # message, used by the resume picker.
+    first_preview: str = ""
 
     def add_message(self, message: ChatMessage) -> None:
         self.messages.append(message)

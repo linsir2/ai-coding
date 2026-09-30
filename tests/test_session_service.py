@@ -74,6 +74,26 @@ def test_list_sessions_excludes_messages(tmp_path):
     assert listed[0].messages == []
 
 
+def test_list_sessions_preserves_first_user_message_preview(tmp_path):
+    """The picker needs enough content for a user to recognize a session."""
+    svc = _svc(tmp_path / "sessions")
+    s = svc.create()
+    s.add_message(ChatMessage(role="assistant", content="Working on it.", timestamp="ts"))
+    s.add_message(
+        ChatMessage(
+            role="user",
+            content="First saved question\nwith a newline   and extra spaces.",
+            timestamp="ts",
+        )
+    )
+    svc.save(s)
+    listed = svc.list_sessions()
+
+    assert getattr(listed[0], "first_preview", "") == (
+        "First saved question with a newline and extra spaces."
+    )
+
+
 def test_list_sessions_reports_the_real_message_count(tmp_path):
     """The list view drops bodies, but the count has to stay truthful.
 
@@ -91,16 +111,21 @@ def test_list_sessions_reports_the_real_message_count(tmp_path):
     assert listed[0].message_count == 5  # but the count is real
 
 
-def test_message_count_is_not_persisted(tmp_path):
-    """``to_dict`` is a whitelist that stays byte-compatible with the Java side."""
+def test_list_view_fields_are_not_persisted(tmp_path):
+    """``to_dict`` is a whitelist that stays byte-compatible with the Java side.
+
+    ``message_count`` and ``first_preview`` are computed while a session file is
+    being read for the list view; if either reached the disk the saved format
+    would change under the Java reader.
+    """
     svc = _svc(tmp_path / "sessions")
     s = svc.create()
     s.add_message(ChatMessage(role="user", content="hi", timestamp="ts"))
     svc.save(s)
-    svc.list_sessions()  # populates the field
+    svc.list_sessions()  # populates both fields
     on_disk = (tmp_path / "sessions" / f"{s.session_id}.json").read_text(encoding="utf-8")
-    assert "messageCount" not in on_disk
-    assert "message_count" not in on_disk
+    for leaked in ("messageCount", "message_count", "firstPreview", "first_preview"):
+        assert leaked not in on_disk
     assert svc.load(s.session_id).to_dict() == s.to_dict()
 
 

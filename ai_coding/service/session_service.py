@@ -16,6 +16,25 @@ from ai_coding.infra.json_utils import from_json_file, to_json_pretty
 from ai_coding.infra.time_utils import now_utc
 
 
+def _first_user_preview(rows: Any) -> str:
+    """A normalized excerpt of the first user message, for the resume picker.
+
+    The list view drops message bodies, so this has to be taken while the file is
+    still parsed.  Whitespace is collapsed because the picker renders it on one
+    line; an assistant-first session is skipped rather than shown, because an
+    empty body is exactly what made the old list unreadable.
+    """
+    if not isinstance(rows, list):
+        return ""
+    for row in rows:
+        if not isinstance(row, dict) or row.get("role") != "user":
+            continue
+        text = row.get("content")
+        if isinstance(text, str) and text.strip():
+            return " ".join(text.split())
+    return ""
+
+
 class SessionService:
     """Create, save, load, list, and delete sessions under a root directory."""
 
@@ -81,6 +100,7 @@ class SessionService:
             # just parsed in full, so anything that reads ``.messages`` from a
             # listed session would be reporting the zero written two lines up.
             item.message_count = count
+            item.first_preview = _first_user_preview(rows)
             items.append(item)
         return items
 

@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from textual.command import CommandPalette
 from textual.widgets import Input, Markdown, Static
 
 from ai_coding.ui.status_bar import StatusBar
@@ -133,6 +134,133 @@ async def test_slash_command_runs_through_handle_input(monkeypatch):
         assert seen == ["/status"]
         assert "[status] ok" in _all_static_text(app)
         assert loop.calls == []  # slash does not go to the model
+
+
+@pytest.mark.asyncio
+async def test_bare_resume_opens_the_session_picker():
+    """Bare ``/resume`` must offer a picker, not print an ID list."""
+    from ai_coding.domain.session import SessionData
+
+    session = SessionData(
+        session_id="0123456789abcdef0123456789abcdef",
+        title="",
+        created_time="2026-09-30T10:00:00Z",
+        last_access_time="2026-09-30T10:44:00Z",
+        message_count=5,
+        first_preview="Reproduce the payment failure, then add a regression test.",
+    )
+    app = _app(loop=_FakeLoop(), sessions=SimpleNamespace(list_sessions=lambda: [session]))
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/resume"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert CommandPalette.is_open(app)
+
+
+@pytest.mark.asyncio
+async def test_picking_a_session_switches_to_it():
+    """Selecting an entry resumes that exact session, not a prefix guess."""
+    from ai_coding.domain.session import SessionData
+
+    session = SessionData(
+        session_id="0123456789abcdef0123456789abcdef",
+        title="",
+        created_time="2026-09-30T10:00:00Z",
+        last_access_time="2026-09-30T10:44:00Z",
+        message_count=5,
+        first_preview="Reproduce the payment failure, then add a regression test.",
+    )
+    app = _app(
+        loop=_FakeLoop(),
+        sessions=SimpleNamespace(
+            list_sessions=lambda: [session],
+            resolve=lambda prefix: [session] if session.session_id.startswith(prefix) else [],
+        ),
+    )
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/resume"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+        assert app._session is session
+
+
+@pytest.mark.asyncio
+async def test_resume_with_nothing_saved_says_so_instead_of_opening_an_empty_picker():
+    """An empty picker looks like the app ignored the command."""
+    loop = _FakeLoop()
+    app = _app(loop=loop, sessions=SimpleNamespace(list_sessions=lambda: []))
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/resume"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert not CommandPalette.is_open(app)
+        assert "no saved sessions" in _all_static_text(app)
+
+
+@pytest.mark.asyncio
+async def test_escaping_the_picker_keeps_the_current_session():
+    from ai_coding.domain.session import SessionData
+
+    session = SessionData(
+        session_id="0123456789abcdef0123456789abcdef",
+        title="",
+        created_time="2026-09-30T10:00:00Z",
+        last_access_time="2026-09-30T10:44:00Z",
+        message_count=5,
+        first_preview="Reproduce the payment failure, then add a regression test.",
+    )
+    current = object()
+    app = _app(
+        loop=_FakeLoop(),
+        session=current,
+        sessions=SimpleNamespace(list_sessions=lambda: [session]),
+    )
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/resume"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert app._session is current
+
+
+@pytest.mark.asyncio
+async def test_resume_with_an_id_still_works():
+    """The typed form keeps working; only the bare form becomes a picker."""
+    from ai_coding.domain.session import SessionData
+    from ai_coding.ui.repl import REPLAction
+
+    target = SessionData(session_id="a" * 32, title="", created_time="", last_access_time="")
+    seen: list[str] = []
+
+    async def fake_handle_input(loop_, text, session, sessions, console):
+        seen.append(text)
+        return REPLAction.CONTINUE, session
+
+    app = _app(loop=_FakeLoop(), sessions=SimpleNamespace(resolve=lambda p: [target]))
+    import ai_coding.ui.textual_app as ta
+
+    original = ta.handle_input
+    ta.handle_input = fake_handle_input
+    try:
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = f"/resume {target.session_id[:12]}"
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+            assert seen == [f"/resume {target.session_id[:12]}"]
+            assert not CommandPalette.is_open(app)
+    finally:
+        ta.handle_input = original
 
 
 @pytest.mark.asyncio

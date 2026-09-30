@@ -12,7 +12,7 @@ from textual.command import CommandPalette
 from textual.widgets import Input
 
 from ai_coding.ui.blocks import Block, TranscriptObserver
-from ai_coding.ui.commands import SlashCommandProvider
+from ai_coding.ui.commands import ResumeProvider, SlashCommandProvider
 from ai_coding.ui.input_bar import InputBar
 from ai_coding.ui.modals import ApprovalScreen, AskScreen
 from ai_coding.ui.repl import REPLAction, handle_input
@@ -131,6 +131,16 @@ class AICodingApp(App[None]):
             if text == "/plan":
                 await self._plan_turn()
                 return
+            if text == "/resume":
+                # Bare /resume is a picker, not a printout: the saved list is too
+                # long to read and its IDs cannot be typed back.
+                if self._saved_session_count() == 0:
+                    self._transcript.append_block(
+                        Block("info", "[resume] no saved sessions")
+                    )
+                    return
+                self._open_resume_picker()
+                return
             console = TextualConsole(self._transcript)
             action, new_session = await handle_input(
                 self._agent_loop, text, self._session, self._sessions, console
@@ -146,6 +156,30 @@ class AICodingApp(App[None]):
             self._input.disabled = False
             self._status.set_busy(False)
             self._input.focus()
+
+    def _saved_session_count(self) -> int:
+        """How many sessions the picker would offer (excluding this one)."""
+        current = getattr(self._session, "session_id", None)
+        return sum(
+            1
+            for s in self._sessions.list_sessions()
+            if current is None or s.session_id != current
+        )
+
+    def _open_resume_picker(self) -> None:
+        """Push a palette backed only by saved sessions.
+
+        ``providers`` replaces the app-wide providers, so this list holds
+        sessions and nothing else.
+        """
+        if CommandPalette.is_open(cast("App[object]", self)):
+            return
+        self.push_screen(
+            CommandPalette(
+                providers=[ResumeProvider],
+                placeholder="Resume a conversation…",
+            )
+        )
 
     async def _plan_turn(self) -> None:
         """/plan asks what to plan, then runs the plan turn with that topic."""
