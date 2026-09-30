@@ -71,6 +71,13 @@ class SessionData:
     # instead of "message count" (docs/r6-analysis.md 2.4).
     turn_count: int = 0
     turn_digests: list[TurnDigest] = field(default_factory=list)
+    # NOT persisted — ``to_dict`` is a hand-written whitelist, so this stays out
+    # of the on-disk format and the Java side keeps reading the same bytes.
+    # ``SessionService.list_sessions`` reads every file anyway and drops the
+    # bodies; without this the only count a list view could show was the zero it
+    # just wrote itself.  -1 means "not computed" (a full ``load``), so callers
+    # must treat it as "use ``len(messages)``" rather than as zero.
+    message_count: int = -1
 
     def add_message(self, message: ChatMessage) -> None:
         self.messages.append(message)

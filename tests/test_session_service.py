@@ -74,6 +74,121 @@ def test_list_sessions_excludes_messages(tmp_path):
     assert listed[0].messages == []
 
 
+def test_list_sessions_reports_the_real_message_count(tmp_path):
+    """The list view drops bodies, but the count has to stay truthful.
+
+    ``/resume`` printed ``msgs=0`` for every session because it counted
+    ``.messages`` of an already-stripped summary.
+    """
+    svc = _svc(tmp_path / "sessions")
+    s = svc.create()
+    for i in range(5):
+        s.add_message(ChatMessage(role="user", content=f"m{i}", timestamp="ts"))
+    svc.save(s)
+    listed = svc.list_sessions()
+    assert len(listed) == 1
+    assert listed[0].messages == []  # bodies still dropped
+    assert listed[0].message_count == 5  # but the count is real
+
+
+def test_message_count_is_not_persisted(tmp_path):
+    """``to_dict`` is a whitelist that stays byte-compatible with the Java side."""
+    svc = _svc(tmp_path / "sessions")
+    s = svc.create()
+    s.add_message(ChatMessage(role="user", content="hi", timestamp="ts"))
+    svc.save(s)
+    svc.list_sessions()  # populates the field
+    on_disk = (tmp_path / "sessions" / f"{s.session_id}.json").read_text(encoding="utf-8")
+    assert "messageCount" not in on_disk
+    assert "message_count" not in on_disk
+    assert svc.load(s.session_id).to_dict() == s.to_dict()
+
+
+def test_a_full_load_leaves_the_count_unknown(tmp_path):
+    """``load`` returns the real bodies, so -1 ("not computed") is the honest value."""
+    svc = _svc(tmp_path / "sessions")
+    s = svc.create()
+    s.add_message(ChatMessage(role="user", content="hi", timestamp="ts"))
+    svc.save(s)
+    loaded = svc.load(s.session_id)
+    assert loaded.message_count == -1
+    assert len(loaded.messages) == 1
+
+
+def test_list_sessions_count_is_zero_for_an_empty_session(tmp_path):
+    svc = _svc(tmp_path / "sessions")
+    s = svc.create()
+    svc.save(s)
+    assert svc.list_sessions()[0].message_count == 0
+
+
+def test_list_sessions_skips_broken_files_without_counting_them(tmp_path):
+    svc = _svc(tmp_path / "sessions")
+    good = svc.create()
+    good.add_message(ChatMessage(role="user", content="hi", timestamp="ts"))
+    svc.save(good)
+    (tmp_path / "sessions" / "broken.json").write_text("{not json", encoding="utf-8")
+    listed = svc.list_sessions()
+    assert [s.session_id for s in listed] == [good.session_id]
+    assert listed[0].message_count == 1
+
+
+def test_resolve_finds_a_unique_prefix(tmp_path):
+    """The list shows 12 hex chars; loading must accept what the list shows."""
+    svc = _svc(tmp_path / "sessions")
+    s = svc.create()
+    svc.save(s)
+    prefix = s.session_id[:12]
+    assert [m.session_id for m in svc.resolve(prefix)] == [s.session_id]
+
+
+def test_resolve_accepts_the_full_id(tmp_path):
+    svc = _svc(tmp_path / "sessions")
+    s = svc.create()
+    svc.save(s)
+    assert [m.session_id for m in svc.resolve(s.session_id)] == [s.session_id]
+
+
+def test_resolve_returns_every_match_for_an_ambiguous_prefix(tmp_path):
+    """Silently picking the first match would resume the wrong conversation."""
+    svc = _svc(tmp_path / "sessions")
+    ids = []
+    for _ in range(2):
+        s = svc.create()
+        svc.save(s)
+        ids.append(s.session_id)
+    shared = "a"
+    for name in ids:
+        target = tmp_path / "sessions" / f"{name}.json"
+        data = target.read_text(encoding="utf-8")
+        new = shared * 8 + name[8:]
+        target.unlink()
+        (tmp_path / "sessions" / f"{new}.json").write_text(
+            data.replace(name, new), encoding="utf-8"
+        )
+    assert len(svc.resolve(shared * 8)) == 2
+
+
+def test_resolve_returns_nothing_for_an_unknown_prefix(tmp_path):
+    svc = _svc(tmp_path / "sessions")
+    svc.save(svc.create())
+    assert svc.resolve("f" * 32) == []
+
+
+def test_resolve_on_a_missing_root_is_empty(tmp_path):
+    assert _svc(tmp_path / "nope").resolve("a" * 12) == []
+
+
+def test_load_still_prefers_an_exact_hit(tmp_path):
+    """Prefix matching must not change what an exact id does."""
+    svc = _svc(tmp_path / "sessions")
+    s = svc.create()
+    svc.save(s)
+    assert svc.load(s.session_id).session_id == s.session_id
+    assert svc.load(s.session_id[:12]).session_id == s.session_id
+    assert svc.load("0" * 32) is None
+
+
 def test_delete(tmp_path):
     svc = _svc(tmp_path / "sessions")
     s = svc.create()

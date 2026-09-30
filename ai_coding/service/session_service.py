@@ -43,9 +43,25 @@ class SessionService:
 
     def load(self, session_id: str) -> SessionData | None:
         target = self._path(session_id)
-        if not target.is_file():
-            return None
-        return SessionData.from_dict(from_json_file(target))
+        if target.is_file():
+            return SessionData.from_dict(from_json_file(target))
+        # Not an exact id: fall back to a prefix, but only when it is unique.
+        # Resuming the first of several matches would silently open the wrong
+        # conversation, so an ambiguous prefix is a miss.
+        matches = self.resolve(session_id)
+        return matches[0] if len(matches) == 1 else None
+
+    def resolve(self, prefix: str) -> list[SessionData]:
+        """Every saved session whose id starts with ``prefix``.
+
+        Returns the matches rather than one of them so a caller can refuse an
+        ambiguous prefix and show the candidates.  A full 32-char id is an exact
+        hit, since session ids are unique.
+        """
+        if self._path(prefix).is_file():
+            exact = self.load(prefix)
+            return [exact] if exact is not None else []
+        return [s for s in self.list_sessions() if s.session_id.startswith(prefix)]
 
     def list_sessions(self) -> list[SessionData]:
         if not self.root.is_dir():
@@ -56,9 +72,16 @@ class SessionService:
                 data = from_json_file(p)
             except (ValueError, OSError):
                 continue
+            rows = data.get("messages")
+            count = len(rows) if isinstance(rows, list) else 0
             summary: dict[str, Any] = dict(data)
             summary["messages"] = []  # list view drops message bodies
-            items.append(SessionData.from_dict(summary))
+            item = SessionData.from_dict(summary)
+            # The bodies are gone but the number is still known: the file was
+            # just parsed in full, so anything that reads ``.messages`` from a
+            # listed session would be reporting the zero written two lines up.
+            item.message_count = count
+            items.append(item)
         return items
 
     def delete(self, session_id: str) -> bool:

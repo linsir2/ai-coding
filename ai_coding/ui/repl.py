@@ -10,7 +10,7 @@ from enum import Enum
 from typing import Any
 
 from ai_coding.ui.console import DialogueConsole
-from ai_coding.ui.slash import parse_slash
+from ai_coding.ui.slash import parse_slash, suggest_command
 
 HELP_TEXT = (
     "direct commands:\n"
@@ -55,6 +55,15 @@ async def handle_input(
     """
     cmd = parse_slash(text)
     if cmd is None:
+        stripped = text.strip()
+        if stripped.startswith("/"):
+            token = stripped.split(None, 1)[0].lower()
+            suggestion = suggest_command(token)
+            if suggestion:
+                console.error(
+                    f"unknown command '{token}' — did you mean '/{suggestion}'?"
+                )
+                return REPLAction.CONTINUE, session
         answer = await loop.process_input(session, text, on_delta=console.delta)
         if answer and not answer.endswith("\n"):
             console.rule("")
@@ -196,6 +205,20 @@ def _handle_permissions(
     return REPLAction.CONTINUE, session
 
 
+def _message_count(session: Any) -> int:
+    """How many messages a session holds.
+
+    A listed session has had its bodies dropped but keeps ``message_count``;
+    a loaded one reports -1 there and still has the bodies, so counting those is
+    both correct and free.  Anything else (a test double) falls back to the same
+    rule rather than to a hard zero.
+    """
+    count = getattr(session, "message_count", -1)
+    if isinstance(count, int) and count >= 0:
+        return count
+    return len(getattr(session, "messages", []))
+
+
 def _handle_resume(
     loop: Any, raw: str, session: Any, sessions: Any, console: DialogueConsole
 ) -> tuple[REPLAction, Any]:
@@ -209,15 +232,25 @@ def _handle_resume(
         for s in items:
             sid = getattr(s, "session_id", "?")
             title = getattr(s, "title", "")
-            n = len(getattr(s, "messages", []))
+            n = _message_count(s)
             lines.append(f"  {sid[:12]}  msgs={n}  {title}")
         console.info("\n".join(lines))
         return REPLAction.CONTINUE, session
     target_id = parts[1]
-    loaded = sessions.load(target_id)
-    if loaded is None:
-        console.error(f"[resume] session '{target_id}' not found")
+    # The list prints 12 hex chars, so a resume has to accept that back.  An
+    # ambiguous prefix is refused with the candidates rather than resolved to
+    # whichever happened to be read first.
+    matches = sessions.resolve(target_id)
+    if len(matches) == 0:
+        console.error(
+            f"[resume] session '{target_id}' not found — use the id shown by /resume"
+        )
         return REPLAction.CONTINUE, session
+    if len(matches) > 1:
+        listed = ", ".join(sorted(s.session_id[:12] for s in matches))
+        console.error(f"[resume] '{target_id}' matches {len(matches)} sessions: {listed}")
+        return REPLAction.CONTINUE, session
+    loaded = matches[0]
     console.info(f"[resume] loaded session {loaded.session_id[:12]}")
     return REPLAction.NEW_SESSION, loaded
 
@@ -261,7 +294,12 @@ def _trace_report(loop: Any) -> str:
 
 
 def _budget_report(loop: Any, session: Any) -> str:
-    """Render the session ledger for ``/budget`` (best-effort)."""
+    """Render the session ledger for ``/budget`` (best-effort).
+
+    Four states, because "no recorded usage" used to cover two of them and read
+    as a billing bug: tracing off, no turn run yet, a turn ran but the model
+    reported no tokens, and real usage.
+    """
     from ai_coding.ui.trace_render import render_budget
 
     recorder = getattr(loop, "trace", None)
@@ -269,7 +307,14 @@ def _budget_report(loop: Any, session: Any) -> str:
     session_id = getattr(session, "session_id", "")
     if store is None or not session_id:
         return "[budget] tracing is off for this session"
-    return f"[budget] {render_budget(store.read_summary(session_id))}"
+    if not store.summary_path(session_id).is_file():
+        return "[budget] 本会话还没跑过回合"
+    summary = store.read_summary(session_id)
+    prompt = int(summary.get("prompt_tokens", 0) or 0)
+    completion = int(summary.get("completion_tokens", 0) or 0)
+    if prompt == 0 and completion == 0:
+        return "[budget] 本会话尚无 token 用量（模型可能未上报 usage）"
+    return f"[budget] {render_budget(summary)}"
 
 
 def _memory_report(loop: Any) -> str:

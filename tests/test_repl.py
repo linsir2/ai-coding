@@ -49,6 +49,9 @@ class _FakeSessions:
     def list_sessions(self):
         return list(self.items)
 
+    def resolve(self, prefix):
+        return [s for s in self.items if s.session_id.startswith(prefix)]
+
 
 def _console_capture() -> tuple[DialogueConsole, Console]:
     c = Console(record=True, width=80)
@@ -181,6 +184,63 @@ async def test_handle_resume_loads_session():
     assert session is target
 
 
+async def test_handle_resume_shows_real_message_counts():
+    """The list used to say msgs=0 for everything, because it counted the
+    bodies it had just stripped."""
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    target = sessions.items[0]
+    from ai_coding.domain.message import ChatMessage
+
+    for i in range(3):
+        target.add_message(ChatMessage(role="user", content=f"m{i}", timestamp=""))
+    target.message_count = 3
+    sessions.items[1].message_count = 0
+    dc, c = _console_capture()
+
+    await handle_input(loop, "/resume", sessions.items[1], sessions, dc)
+
+    out = _session_text(c)
+    assert "msgs=3" in out
+    assert "msgs=0" in out
+
+
+async def test_handle_resume_accepts_the_prefix_it_printed():
+    """12 hex chars is what the list shows; that is what a user can type."""
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    target = _sd("abcdef0123456789fedcba9876543210")
+    sessions.items.append(target)
+    dc, c = _console_capture()
+
+    action, session = await handle_input(
+        loop, "/resume abcdef012345", sessions.items[1], sessions, dc
+    )
+
+    assert action is REPLAction.NEW_SESSION
+    assert session is target
+    assert loop.calls == []  # a resume must not also become a model turn
+
+
+async def test_handle_resume_refuses_an_ambiguous_prefix():
+    """Two matches must not resolve to whichever came first."""
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    sessions.items.append(_sd("aaaaaaaa1111"))
+    sessions.items.append(_sd("aaaaaaaa2222"))
+    dc, c = _console_capture()
+
+    action, session = await handle_input(
+        loop, "/resume aaaaaaaa", sessions.items[0], sessions, dc
+    )
+
+    assert action is REPLAction.CONTINUE
+    assert session is sessions.items[0]
+    assert loop.calls == []
+    out = _session_text(c)
+    assert "aaaaaaaa1111" in out and "aaaaaaaa2222" in out
+
+
 async def test_handle_permissions_shows_current():
     approval = type("A", (), {"__repr__": lambda s: "CLIApprovalCallback"})()
     loop = _FakeLoop()
@@ -281,3 +341,122 @@ async def test_help_includes_new_commands():
     )
     for cmd in expected:
         assert cmd in out
+
+
+class _FakeTrace:
+    def __init__(self, store):
+        self.store = store
+        self.current_path = None
+
+
+class _BudgetLoop:
+    def __init__(self, store):
+        self.trace = _FakeTrace(store)
+
+
+class _NoTraceLoop:
+    pass
+
+
+def _session(sid):
+    return type("S", (), {"session_id": sid})()
+
+
+def test_budget_says_when_no_turn_has_run(tmp_path):
+    from ai_coding.core.trace import TraceStore
+    from ai_coding.ui.repl import _budget_report
+
+    loop = _BudgetLoop(TraceStore(tmp_path))
+    out = _budget_report(loop, _session("never-ran"))
+    assert "还没跑过回合" in out
+
+
+def test_budget_says_when_zero_tokens(tmp_path):
+    from ai_coding.core.trace import TraceStore
+    from ai_coding.ui.repl import _budget_report
+
+    store = TraceStore(tmp_path)
+    store.update_summary(
+        "zero",
+        {"turns": 2, "steps": 5, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0},
+    )
+    out = _budget_report(_BudgetLoop(store), _session("zero"))
+    assert "尚无 token 用量" in out
+
+
+def test_budget_renders_real_usage(tmp_path):
+    from ai_coding.core.trace import TraceStore
+    from ai_coding.ui.repl import _budget_report
+
+    store = TraceStore(tmp_path)
+    store.update_summary(
+        "good",
+        {
+            "turns": 3,
+            "steps": 9,
+            "prompt_tokens": 30585,
+            "completion_tokens": 798,
+            "cached_tokens": 12288,
+        },
+    )
+    out = _budget_report(_BudgetLoop(store), _session("good"))
+    assert "3 turns" in out and "31,383 tok" in out
+
+
+def test_budget_says_when_tracing_is_off(tmp_path):
+    from ai_coding.ui.repl import _budget_report
+
+    out = _budget_report(_NoTraceLoop(), _session("x"))
+    assert "tracing is off" in out
+
+
+async def test_unknown_close_command_gets_a_suggestion():
+    """A typo must not become a model turn."""
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(loop, "/resum", sessions.items[0], sessions, dc)
+
+    assert action is REPLAction.CONTINUE
+    assert loop.calls == []  # not sent to the model
+    out = _session_text(c)
+    assert "did you mean" in out and "/resume" in out
+
+
+async def test_a_path_is_still_sent_to_the_model():
+    """/path/to/file is not a command; it is text the model may need."""
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, _ = _console_capture()
+
+    action, _ = await handle_input(loop, "/path/to/file", sessions.items[0], sessions, dc)
+
+    assert action is REPLAction.CONTINUE
+    assert loop.calls[0][0] == "/path/to/file"
+
+
+async def test_a_distant_unknown_command_is_still_sent_to_the_model():
+    """/zzz is not close to anything, so it stays text."""
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, _ = _console_capture()
+
+    action, _ = await handle_input(loop, "/zzz", sessions.items[0], sessions, dc)
+
+    assert action is REPLAction.CONTINUE
+    assert loop.calls[0][0] == "/zzz"
+
+
+async def test_unknown_command_at_distance_two_gets_a_suggestion():
+    """``/stat`` is two edits from ``/status`` — still a typo, not a path."""
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(loop, "/stat", sessions.items[0], sessions, dc)
+
+    assert action is REPLAction.CONTINUE
+    assert loop.calls == []
+    out = _session_text(c)
+    assert "did you mean" in out and "/status" in out

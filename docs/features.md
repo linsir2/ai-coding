@@ -39,7 +39,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | `/help` `/h` | — | 列出全部直接命令 |
 | `/status` | — | 会话 id、消息数、记忆条数 |
 | `/model [name]` | 模型名 | 无参数列出可用模型（`*` 标记当前），带参数则切换 |
-| `/resume [id]` | 会话 id | 无参数列出历史会话，带参数则恢复并返回 `NEW_SESSION` |
+| `/resume [id]` | 会话 id | 无参数列出历史会话（含真实消息数），带参数则恢复并返回 `NEW_SESSION`。**支持前缀匹配**：`/resume 0113e0acac03`（列表显示的 12 位）即可恢复；歧义前缀会列出候选而非静默取第一个 |
 | `/permissions [auto\|confirm]` | 策略 | 无参数显示当前审批回调，带参数切换自动批准 / 逐次确认 |
 | `/todo` | — | 渲染当前会话的 `TaskState`（目标、进度、逐项状态、下一步） |
 | `/skills` | — | 列出 `SkillRegistry` 目录（`- name: description`） |
@@ -49,9 +49,11 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | `/compact` | — | 主动压缩历史并落盘 |
 | `/memory` | — | 记忆统计（总数、活跃、置顶、kind 与 evidence 分布） |
 | `/trace` | — | 上一回合的轨迹摘要（token、耗时、降级、门卫拒绝） |
-| `/budget` | — | 本会话累计 token 账本 |
+| `/budget` | — | 本会话累计 token 账本。区分 4 种状态：tracing 关闭 / 本会话还没跑过回合 / 跑了但零 token（模型未上报 usage）/ 正常用量 |
 | `/clear` | — | 开新会话（旧的仍可 `/resume`） |
 | `/quit` `/q` `/exit` | — | 退出（`Ctrl-Q`） |
+
+**未知命令**：`/xxx` 不在别名表时，若与某已知命令编辑距离 ≤ 2（如 `/resum` → `/resume`），提示 `did you mean` 且**不发给模型**；否则（如 `/path/to/file`）照旧发给模型。
 
 ### 非命令键位
 

@@ -56,4 +56,43 @@ def parse_slash(text: str) -> SlashCommand | None:
     return SlashCommand(name=name, raw=stripped)
 
 
-__all__ = ["SlashCommand", "parse_slash"]
+def _levenshtein(a: str, b: str) -> int:
+    """Edit distance between two strings (no external dependency)."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i]
+        for j, cb in enumerate(b, 1):
+            curr.append(min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = curr
+    return prev[-1]
+
+
+def suggest_command(token: str) -> str | None:
+    """Canonical name to suggest for a near-miss token, or ``None``.
+
+    ``parse_slash`` returns ``None`` for anything unknown — deliberately, so a
+    path like ``/path/to/file`` still reaches the model.  A typo such as
+    ``/resum`` is not a path, though, and silently becoming a model turn is
+    worse than a nudge.  Only single-word tokens within edit distance 2 of a
+    known command are suggested; anything else stays text.
+    """
+    name = token.lstrip("/").lower()
+    if not name or "/" in name or " " in name:
+        return None
+    best: str | None = None
+    best_dist = 3
+    for cmd in set(_ALIASES.values()):
+        d = _levenshtein(name, cmd)
+        if d < best_dist:
+            best_dist = d
+            best = cmd
+    return best if best_dist <= 2 else None
+
+
+__all__ = ["SlashCommand", "parse_slash", "suggest_command"]
