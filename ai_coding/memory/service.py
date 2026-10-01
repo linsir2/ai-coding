@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -124,6 +124,11 @@ class RecallDiagnostics:
     ``semantic_unavailable`` is False in every case this round builds; it
     exists so the tool payload does not have to change shape when the
     optional embeddings tier lands.
+
+    ``filtered_out`` counts what the *filters* cost a miss.  It cannot be
+    ``len(ranked) - len(kept)`` any more, because filtering now happens before
+    anything is scored and there is no longer a post-filter list to subtract
+    from; when it is 0 there is nothing to blame on the filters.
     """
 
     terms_known: tuple[str, ...] = ()
@@ -132,6 +137,7 @@ class RecallDiagnostics:
     index_summary: IndexSummary | None = None
     semantic_unavailable: bool = False
     no_vocabulary_match: bool = False
+    filtered_out: int = 0
 
 
 @dataclass(frozen=True)
@@ -214,6 +220,50 @@ class MemoryService:
             ),
         )
 
+    def _candidates(
+        self,
+        *,
+        kinds: Sequence[str] | None,
+        evidence: str | None,
+        scope: str | None,
+        since_days: int | None,
+        now: datetime,
+    ) -> list[MemoryNote]:
+        """The set a query is allowed to match, decided before anything is scored.
+
+        Filtering after the top-k is a real bug, not a style choice: ask for
+        ``kind=decision`` with ``k=3`` when four facts outrank the one decision and
+        the search returns nothing at all, while the note the model asked for is
+        sitting right there in the index.
+
+        ``since_days`` measures the window from ``now``, which is the caller's clock
+        — the production path passes the real one.  A note with no parsable
+        ``updated_time`` *or* ``created_time`` is dropped rather than assumed
+        inside the window, because a filter that lets unmeasurable notes through
+        is a filter that lies about what it did.
+        """
+        wanted_kinds = {
+            str(kind).strip().casefold() for kind in (kinds or []) if str(kind).strip()
+        }
+        wanted_evidence = str(evidence or "").strip().casefold()
+        cutoff = now - timedelta(days=float(since_days)) if since_days else None
+        selected: list[MemoryNote] = []
+        for note in self._store.active():
+            if wanted_kinds and note.kind.value not in wanted_kinds:
+                continue
+            if wanted_evidence == "tool" and (note.evidence or "") != "tool":
+                continue
+            if wanted_evidence == "model" and (note.evidence or "") == "tool":
+                continue
+            if scope is not None and note.scope != scope:
+                continue
+            if cutoff is not None:
+                stamp = parse_time(note.updated_time or note.created_time)
+                if stamp is None or stamp < cutoff:
+                    continue
+            selected.append(note)
+        return selected
+
     async def recall_with_diagnostics(
         self,
         query_or_history: str | Sequence[ChatMessage],
@@ -221,8 +271,16 @@ class MemoryService:
         k: int | None = None,
         now: datetime | None = None,
         limit: int | None = None,
+        kinds: Sequence[str] | None = None,
+        evidence: str | None = None,
+        scope: str | None = None,
+        since_days: int | None = None,
     ) -> tuple[list[ScoredNote], RecallDiagnostics]:
-        """Rank, and also report why — so a caller can say what to try next."""
+        """Rank, and also report why — so a caller can say what to try next.
+
+        The four filters decide the candidate set first (:meth:`_candidates`), so
+        ``k`` is spent on notes the caller actually asked for.
+        """
         if not self.enabled:
             return [], RecallDiagnostics()
         supply = int(self._get("max_per_turn_injections", 3)) if k is None else int(k)
@@ -231,17 +289,42 @@ class MemoryService:
         query = _query_text(query_or_history)
         if not query.strip():
             return [], RecallDiagnostics()
+        moment = now or _now()
+        ceiling = supply if limit is None else limit
         try:
             result = rank_notes_detailed(
-                self._store.active(),
+                self._candidates(
+                    kinds=kinds,
+                    evidence=evidence,
+                    scope=scope,
+                    since_days=since_days,
+                    now=moment,
+                ),
                 query,
                 params=self._params(),
-                now=now or _now(),
-                limit=supply if limit is None else limit,
+                now=moment,
+                limit=ceiling,
             )
+            hits = list(result.kept)
+            filtered_out = 0
+            if not hits and any((kinds, evidence, scope, since_days)):
+                # A miss the filters caused cannot be diagnosed from the set they
+                # left: rank the unfiltered index instead, so `filtered_out`, the
+                # vocabulary and the near misses all describe what the model would
+                # have got.  Only on a miss, and only when a filter was asked for.
+                probe = rank_notes_detailed(
+                    self._store.active(),
+                    query,
+                    params=self._params(),
+                    now=moment,
+                    limit=ceiling,
+                )
+                # An unfiltered corpus is a superset, so an empty probe means the
+                # filtered ranking measured nothing better; keep its answer.
+                if probe.kept:
+                    result, filtered_out = probe, len(probe.kept)
         except Exception:  # noqa: BLE001 — recall is best-effort
             return [], RecallDiagnostics()
-        hits = list(result.kept)
         if hits:
             try:
                 self._store.touch_notes([hit.note.id for hit in hits])
@@ -253,6 +336,7 @@ class MemoryService:
             near_misses=result.rejected[:3],
             index_summary=self.index_summary(),
             no_vocabulary_match=result.no_vocabulary_match,
+            filtered_out=filtered_out,
         )
 
     async def recall_notes(
@@ -262,14 +346,25 @@ class MemoryService:
         k: int | None = None,
         now: datetime | None = None,
         limit: int | None = None,
+        kinds: Sequence[str] | None = None,
+        evidence: str | None = None,
+        scope: str | None = None,
+        since_days: int | None = None,
     ) -> list[ScoredNote]:
         """Rank memories for a query (or a message history); [] when disabled.
 
-        Thin wrapper over :meth:`recall_with_diagnostics`, so the touch-on-hit
-        and the suppression rules live in exactly one place.
+        Thin wrapper over :meth:`recall_with_diagnostics`, so the filters, the
+        touch-on-hit and the suppression rules live in exactly one place.
         """
         hits, _diagnostics = await self.recall_with_diagnostics(
-            query_or_history, k=k, now=now, limit=limit
+            query_or_history,
+            k=k,
+            now=now,
+            limit=limit,
+            kinds=kinds,
+            evidence=evidence,
+            scope=scope,
+            since_days=since_days,
         )
         return hits
 

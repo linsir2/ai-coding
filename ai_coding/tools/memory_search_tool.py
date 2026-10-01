@@ -74,6 +74,23 @@ class MemorySearchTool(BaseTool):
                         "pass true to also get them alongside a hit."
                     ),
                 },
+                "scope": {
+                    "type": "string",
+                    "description": (
+                        "Optional: only notes whose scope matches exactly. Notes "
+                        "written by this build are all 'workspace', so this only "
+                        "narrows notes that were imported or written with another "
+                        "scope."
+                    ),
+                },
+                "since_days": {
+                    "type": "integer",
+                    "description": (
+                        "Optional: only memories changed within the last N days "
+                        "(falls back to the creation date when nothing has been "
+                        "updated since)."
+                    ),
+                },
             },
             "required": ["query"],
         }
@@ -100,17 +117,29 @@ class MemorySearchTool(BaseTool):
                 error="bad_evidence",
                 data={"evidence": wanted_evidence},
             )
+        wanted_kind = str(params.get("kind", "") or "").strip().casefold()
+        wanted_scope = str(params.get("scope", "") or "").strip()
         requested_near_misses = params.get("include_near_misses")
+        # Normalised here, applied by the service: filters that narrow the candidate
+        # set are the only path, so `k` is never spent on notes the model did not
+        # ask for (and a filtered-out note is never recalled, so never touched).
+        filters = {
+            "kinds": [wanted_kind] if wanted_kind else None,
+            "evidence": wanted_evidence or None,
+            "scope": wanted_scope or None,
+            "since_days": _optional_positive_int(params.get("since_days")),
+        }
         try:
             detailed = getattr(self._memory, "recall_with_diagnostics", None)
             if detailed is None:
-                # A memory double from before R10c: keep it working.
-                ranked = await self._memory.recall_notes(
-                    query, k=_as_int(params.get("k"), 3)
-                )
+                # A memory double from before R10c: keep it working.  It cannot take
+                # the filters, so they do not apply on this path.
+                hits = await self._memory.recall_notes(query, k=_as_int(params.get("k"), 3))
                 diagnostics = _EMPTY_DIAGNOSTICS
             else:
-                ranked, diagnostics = await detailed(query, k=_as_int(params.get("k"), 3))
+                hits, diagnostics = await detailed(
+                    query, k=_as_int(params.get("k"), 3), **filters
+                )
         except Exception as exc:  # noqa: BLE001 — the tool boundary
             return ToolResult(
                 success=False,
@@ -118,7 +147,6 @@ class MemorySearchTool(BaseTool):
                 error="memory_error",
                 data={"query": query},
             )
-        hits = _filter_hits(ranked, params)
         notes = [_note_payload(hit) for hit in hits]
         # A hit is the common case and does not need a diagnosis attached; the
         # model opts in when it wants candidates it can aim a follow-up at.
@@ -163,7 +191,10 @@ class MemorySearchTool(BaseTool):
                 success=True,
                 output=_miss_text(
                     data,
-                    filtered_out=len(ranked) - len(notes),
+                    # Measured by the service against the unfiltered index, and
+                    # attributed to the filters that were actually asked for.
+                    filtered_out=_filtered_out(diagnostics, filters),
+                    filters=_filter_names(filters),
                     no_vocabulary_match=bool(diagnostics.no_vocabulary_match),
                 ),
                 data=data,
@@ -174,21 +205,6 @@ class MemorySearchTool(BaseTool):
             for note in notes
         ]
         return ToolResult(success=True, output="\n".join(lines), data=data)
-
-
-def _filter_hits(hits: list[Any], params: dict[str, Any]) -> list[Any]:
-    """kind / evidence filters. Task 5 moves these into the candidate set."""
-    wanted = str(params.get("kind", "") or "").strip().casefold()
-    if wanted:
-        hits = [hit for hit in hits if hit.note.kind.value == wanted]
-    evidence = str(params.get("evidence", "") or "").strip().casefold()
-    if evidence == "tool":
-        hits = [hit for hit in hits if (hit.note.evidence or "") == "tool"]
-    elif evidence == "model":
-        # "model" is the *complement* of "tool": notes written before R6d have
-        # no provenance at all and must not be hidden by this filter.
-        hits = [hit for hit in hits if (hit.note.evidence or "") != "tool"]
-    return hits
 
 
 def _note_payload(hit: Any) -> dict[str, Any]:
@@ -209,6 +225,7 @@ def _miss_text(
     data: dict[str, Any],
     *,
     filtered_out: int = 0,
+    filters: str = "",
     no_vocabulary_match: bool = False,
 ) -> str:
     """The dead end, replaced by something the model can act on.
@@ -241,10 +258,12 @@ def _miss_text(
         lines.append(f"最接近但未经证实：{preview}")
     if filtered_out:
         # Saying "rephrase, or narrow by kind" here would be telling the model to
-        # repeat the filter it just used.
+        # repeat the filter it just used, and blaming kind/evidence for a scope
+        # miss would point it at a filter it never set.
+        blamed = filters or "kind/evidence"
         lines.append(
             f"有 {filtered_out} 条通过了相关度门槛，"
-            "是 kind/evidence 过滤把它们排除了：放宽过滤条件再搜一次。"
+            f"是 {blamed} 过滤把它们排除了：放宽过滤条件再搜一次。"
         )
         return "\n".join(lines)
     if not near and not unknown and index is not None:
@@ -265,9 +284,32 @@ class _EmptyDiagnostics:
     index_summary: Any = None
     semantic_unavailable: bool = False
     no_vocabulary_match: bool = False
+    filtered_out: int = 0
 
 
 _EMPTY_DIAGNOSTICS = _EmptyDiagnostics()
+
+
+def _filter_names(filters: dict[str, Any]) -> str:
+    """The parameters the caller actually set, named as the schema names them."""
+    return "/".join(
+        {"kinds": "kind"}.get(name, name) for name, value in filters.items() if value
+    )
+
+
+def _filtered_out(diagnostics: Any, filters: dict[str, Any]) -> int:
+    """How many notes the filters cost this miss, or 0 when nothing claims a cause.
+
+    Read with ``getattr`` because ``recall_with_diagnostics`` is duck-typed: a
+    double that predates the field reports no count, and inventing one is exactly
+    what this text must not do.
+    """
+    if not any(filters.values()):
+        return 0
+    try:
+        return max(0, int(getattr(diagnostics, "filtered_out", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -276,6 +318,15 @@ def _as_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return number if number > 0 else default
+
+
+def _optional_positive_int(value: Any) -> int | None:
+    """A window in days, or nothing at all — 0 and negatives mean "no window"."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def _query_from_context(ctx: ToolContext) -> str:

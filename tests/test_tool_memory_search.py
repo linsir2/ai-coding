@@ -11,6 +11,7 @@ import json
 import pytest
 
 from ai_coding.domain.message import ChatMessage, ToolResult
+from ai_coding.infra.time_utils import now_utc
 from ai_coding.memory.note import MemoryNote, NoteKind
 from ai_coding.memory.service import MemoryService, _default_config
 from ai_coding.memory.store import MemoryStore
@@ -173,17 +174,18 @@ async def test_r8_unknown_evidence_is_an_error_not_a_silent_pass(tmp_path):
     assert result.data == {"evidence": "maybe"}
 
 
-# ---- R10b: the touch runs before the filters, and that is a defect ----------
+# ---- R10b -> R10c: the filters run before the touch ---------------------------
 
 
 @pytest.mark.asyncio
-async def test_r10b_known_the_filters_run_after_the_touch_so_filtered_out_notes_count(tmp_path):
-    """R10 defect, scheduled for Task 5: filtering happens after the touch.
+async def test_r10c_known_the_filters_now_run_before_the_touch(tmp_path):
+    """Inverted from the R10b defect Task 5 fixed: a filtered-out note gains no hit.
 
-    memory_search recalls (touching every hit) and only then applies kind/evidence,
-    so a note the model never sees still gains a hit — and consolidate promotes on
-    hits >= 3. Task 5 moves filtering ahead of ranking; this test should be inverted
-    or deleted then, not before.
+    The R10b version asserted the opposite on purpose — `hits == 1` on a note the
+    model never saw — to document a bug scheduled for this task.  The defect was
+    not the count being wrong, it was the signal being wrong: `consolidate`
+    promotes on `hits >= 3`, so three searches that all hid the same fact could
+    promote it.
     """
     store = MemoryStore(tmp_path / "m.json")
     store.add_note(MemoryNote(id="a", text="项目用 uv 管理依赖", kind=NoteKind.FACT))
@@ -196,8 +198,9 @@ async def test_r10b_known_the_filters_run_after_the_touch_so_filtered_out_notes_
 
     # The model only ever sees the decision ...
     assert [note["id"] for note in result.data["notes"]] == ["b"]
-    # ... but the fact was recalled, so it was touched, so it counts as a use.
-    assert store.get("a").hits == 1
+    # ... and the fact it never saw was never recalled, so it is not a use.
+    assert store.get("a").hits == 0
+    assert store.get("b").hits == 1
 
 
 # ---- R10c: a miss says what to try next -------------------------------------
@@ -481,3 +484,64 @@ async def test_r10c_a_memory_without_diagnostics_still_works(tmp_path):
     assert result.success is True
     assert result.data["notes"] == []
     assert result.data["no_match"] is True
+
+
+# ---- R10c: scope / since_days narrow the candidate set -----------------------
+
+
+@pytest.mark.asyncio
+async def test_r10c_the_tool_passes_scope_and_since_through(tmp_path):
+    """Both notes answer the query, so each assertion is about the filter alone.
+
+    The brief gave the two notes identical text; `add_note` dedupes on content, so
+    only one survived and the test would have passed with the parameters unread.
+    """
+    store = MemoryStore(tmp_path / "m.json")
+    stamp = now_utc()
+    store.add_note(MemoryNote(id="a", text="依赖用 uv", scope="other",
+                              created_time=stamp))
+    store.add_note(MemoryNote(id="b", text="依赖用 poetry", scope="workspace",
+                              created_time="2000-01-01T00:00:00+00:00"))
+    tool = MemorySearchTool(MemoryService(store))
+
+    scoped = await tool.execute({"query": "依赖", "scope": "other"})
+    recent = await tool.execute({"query": "依赖", "since_days": 7})
+    unfiltered = await tool.execute({"query": "依赖"})
+
+    assert {note["id"] for note in unfiltered.data["notes"]} == {"a", "b"}
+    assert [note["id"] for note in scoped.data["notes"]] == ["a"]
+    assert [note["id"] for note in recent.data["notes"]] == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_r10c_a_miss_names_the_filter_that_caused_it(tmp_path):
+    """The count is measured, so the blame can be too.
+
+    "kind/evidence" was true when those were the only two filters; naming them for
+    a `scope` miss would send the model to loosen a filter it never set.
+    """
+    store = MemoryStore(tmp_path / "m.json")
+    for index in range(3):
+        store.add_note(MemoryNote(id=f"n{index}", text=f"依赖管理用 uv {index}",
+                                  scope="workspace",
+                                  created_time="2026-09-30T00:00:00+00:00"))
+    tool = MemorySearchTool(MemoryService(store))
+
+    result = await tool.execute({"query": "依赖管理", "scope": "other"})
+
+    assert result.data["notes"] == []
+    assert "3 条" in result.output
+    assert "scope" in result.output and "kind" not in result.output
+    assert "放宽过滤条件" in result.output
+
+
+@pytest.mark.asyncio
+async def test_r10c_the_schema_documents_both_new_filters(tmp_path):
+    """A parameter the schema does not mention is a parameter the model will not use."""
+    tool = MemorySearchTool(_service(tmp_path))
+
+    properties = tool.params_json_schema["properties"]
+
+    assert properties["since_days"]["type"] == "integer"
+    assert properties["scope"]["type"] == "string"
+    assert "workspace" in properties["scope"]["description"]
