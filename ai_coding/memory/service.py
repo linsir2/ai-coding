@@ -112,7 +112,7 @@ class HarvestReport:
 class IndexSummary:
     """A bounded map of what is in memory, for the model to aim its next query at."""
 
-    total: int = 0
+    active: int = 0
     by_kind: Mapping[str, int] = field(default_factory=dict)
     recent: tuple[tuple[str, str, str], ...] = ()   # (id, kind, preview)
 
@@ -206,7 +206,7 @@ class MemoryService:
             key=lambda note: (_invert_time(note.updated_time or note.created_time), note.id),
         )[: self._INDEX_RECENT]
         return IndexSummary(
-            total=len(notes),
+            active=len(notes),
             by_kind=by_kind,
             recent=tuple(
                 (note.id, note.kind.value, note.text[: self._PREVIEW_CHARS])

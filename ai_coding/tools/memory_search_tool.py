@@ -138,7 +138,9 @@ class MemorySearchTool(BaseTool):
             summary = diagnostics.index_summary
             if summary is not None:
                 data["index"] = {
-                    "total": summary.total,
+                    # "active", not "total": status() reserves total for all notes
+                    # including superseded ones, and this counts only the active set.
+                    "active": summary.active,
                     "by_kind": dict(summary.by_kind),
                     "recent": [
                         {"id": note_id, "kind": kind, "preview": preview}
@@ -190,10 +192,10 @@ def _miss_text(data: dict[str, Any]) -> str:
     memory has never seen, and that rephrasing is the next move.
     """
     index = data.get("index") or {}
-    total = index.get("total", 0)
+    active = index.get("active", 0)
     by_kind = index.get("by_kind") or {}
     breakdown = ", ".join(f"{k} {v}" for k, v in by_kind.items()) or "空"
-    lines = [f"没有可靠匹配（索引里有 {total} 条：{breakdown}）。"]
+    lines = [f"没有可靠匹配（索引里有 {active} 条：{breakdown}）。"]
     if data["terms_unknown"]:
         lines.append(f"这些词记忆里没有：{'、'.join(data['terms_unknown'][:6])}。")
     near = data.get("near_misses") or []

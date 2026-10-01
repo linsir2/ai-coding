@@ -277,10 +277,36 @@ async def test_r10c_the_index_map_is_bounded_and_only_on_a_miss(tmp_path):
 
     assert "index" in miss.data
     assert len(json.dumps(miss.data["index"], ensure_ascii=False)) <= 400
-    assert miss.data["index"]["total"] == 500
+    assert miss.data["index"]["active"] == 500
     assert sum(miss.data["index"]["by_kind"].values()) == 500
     assert len(miss.data["index"]["recent"]) <= 3
     assert "index" not in hit.data
+
+
+@pytest.mark.asyncio
+async def test_r10c_the_index_count_is_active_not_total(tmp_path):
+    """The key is "active" because the value is the active count, and because
+    status() already spends "total" on all notes including superseded ones.
+
+    A key-name assertion alone would not catch a revert that kept the name and
+    changed the set being counted, which is the half of the bug that lies.
+    """
+    store = MemoryStore(tmp_path / "m.json")
+    for index in range(3):
+        store.add_note(
+            MemoryNote(id=f"a{index}", text=f"依赖管理第 {index} 条",
+                       created_time="2026-09-10T00:00:00+00:00")
+        )
+    store.supersede("a0", MemoryNote(id="new", text="依赖管理统一走 uv",
+                                     created_time="2026-09-11T00:00:00+00:00"))
+    service = MemoryService(store)
+    tool = MemorySearchTool(service)
+
+    miss = await tool.execute({"query": "Kubernetes 集群有多少节点"})
+
+    assert miss.data["index"]["active"] == 3
+    assert service.status()["total"] == 4  # the two keys are not the same count
+    assert "total" not in miss.data["index"]
 
 
 @pytest.mark.asyncio
