@@ -376,6 +376,150 @@ async def a_filter_emptied_everything_still_says_what_it_measured(
     )
 
 
+async def an_empty_store_says_it_is_empty_not_that_the_query_was_wrong(
+    tmp: Path,
+) -> tuple[bool, str]:
+    """Critical 1: the first `memory_search` on a fresh workspace.
+
+    `rank_notes_detailed` returns a bare `RankingResult()` when there are no
+    active notes, so `terms_known`, `terms_unknown` and `no_vocabulary_match`
+    are all empty/false.  Reading the empty `terms_unknown` as "no word was
+    unknown" — i.e. "every word was known" — put three false lines on screen:
+
+        没有可靠匹配（索引里有 0 条：空）。
+        查询用词索引都认识，但没有候选达到相关度门槛。
+        换一个说法再搜，或用 kind=... 缩小范围。
+
+    The third line is the one that costs the model a turn: with nothing stored,
+    no rewording can match.  The premise is asserted first, so this case cannot
+    pass later by the empty store becoming measurable.
+    """
+    service, _ = _service(tmp, [])
+    result = await MemorySearchTool(service).execute({"query": "依赖管理"})
+    data = result.data or {}
+    ok = (
+        data.get("no_match") is True
+        and data.get("terms_known") == []
+        and data.get("terms_unknown") == []
+        and data.get("near_misses") == []
+        # 0 条 is measured, so it stays.
+        and "索引里有 0 条" in (result.output or "")
+        and "查询用词索引都认识" not in (result.output or "")
+        and "换一个说法" not in (result.output or "")
+    )
+    return ok, f"known={data.get('terms_known')} output={result.output!r}"
+
+
+async def a_query_that_measures_no_words_is_not_an_all_known_query(
+    tmp: Path,
+) -> tuple[bool, str]:
+    """Critical 1, second trigger: the same clause, with notes already stored.
+
+    The bare-result path is also reached when `tokenize(query)` yields nothing
+    while the index is fine, so "the store is empty" is not the only thing that
+    can produce it — and the index count here proves the store is not empty, so
+    the clause cannot be excused by that reading either.
+    """
+    service, _ = _service(tmp, [_note("a", "打包命令是 npm run build 产出 dist", age_days=1)])
+    tool = MemorySearchTool(service)
+    seen: list[tuple[Any, bool]] = []
+    for query in ("???", "怎么", "the"):
+        result = await tool.execute({"query": query})
+        data = result.data or {}
+        seen.append(
+            (
+                query,
+                "查询用词索引都认识" not in (result.output or "")
+                and data.get("terms_known") == []
+                and data.get("terms_unknown") == []
+                and (data.get("index") or {}).get("active") == 1,
+            )
+        )
+    ok = all(passed for _query, passed in seen)
+    return ok, f"{[(q, p) for q, p in seen]}"
+
+
+async def a_vocabulary_miss_does_not_claim_the_content_is_absent(
+    tmp: Path,
+) -> tuple[bool, str]:
+    """Critical 2: a claim about content, made from a measurement about tokens.
+
+    `no_vocabulary_match` means no query term has `df > 0` in the candidate
+    set.  Measured here: the store holds 「打包命令是 npm run build 产出 dist」,
+    the query is 「怎么构建」, and `tokenize` gives `['么构', '构建']`.  么构 is a
+    cross-word bigram that would appear in no relevant note, so its absence
+    carries no information about whether the content is stored — the clause was
+    structurally unsupportable, not merely occasionally wrong.  It fired on the
+    ordinary miss path for any query with a wholly unknown vocabulary, denied
+    the problem was a wording one, and contradicted the advice line below it.
+    """
+    service, _ = _service(tmp, [_note("a", "打包命令是 npm run build 产出 dist", age_days=1)])
+    result = await MemorySearchTool(service).execute({"query": "怎么构建"})
+    data = result.data or {}
+    output = result.output or ""
+    ok = (
+        set(data.get("terms_unknown") or []) == {"么构", "构建"}
+        # The measurement is still reported.
+        and "一条笔记都没出现过" in output
+        # No claim about content, and no claim that wording is not the problem.
+        and "不是措辞问题" not in output
+        and "这批内容不在记忆里" not in output
+        # And rephrasing stays on the table, which is what the old clause denied.
+        and "换一个说法" in output
+    )
+    return ok, f"unknown={data.get('terms_unknown')}"
+
+
+async def the_gate_clause_still_fires_when_every_word_is_known(
+    tmp: Path,
+) -> tuple[bool, str]:
+    """The control the three cases above need.
+
+    "Never renders 查询用词索引都认识" also passes on a tool that simply deleted
+    the clause.  This corpus earns the clause: all five query words measure as
+    known, and `near_misses` comes back empty because three zero-match decisions
+    head the rejected list on score and are then dropped by the zero-match
+    filter.  A gate rejection with no other true diagnosis left.
+
+    Two properties carry it, so both are stated rather than left to be
+    rediscovered.  The word-carrying notes are ancient and `importance=1`, so
+    each scores `0.55 * 1.0 = 0.55` — every matching note ties for the best BM25
+    (only matching notes score at all), so freshness and importance are the only
+    levers a zero-match note has.  The decisions must then reach
+    `0.20 + 0.15 + 0.25 = 0.60`, which needs freshness 1.0: they are stamped from
+    the **live** clock because the tool path passes no `now` and the service
+    would otherwise age them against this file's pinned ``NOW``.  Stamped to a
+    fixture date instead, this case passes or fails depending on the day it runs.
+    """
+    words = ["alpha", "bravo", "charlie", "delta", "echo"]
+    notes = [
+        _note(f"old{index}", f"note mentioning {word} once", importance=1, age_days=2000)
+        for index, word in enumerate(words)
+    ]
+    live = datetime.now(timezone.utc).isoformat()
+    notes.extend(
+        MemoryNote(id=f"d{index}",
+                   text=f"decision number {index} about an unrelated workflow",
+                   kind=NoteKind.DECISION, importance=5,
+                   created_time=live, updated_time=live)
+        for index in range(3)
+    )
+    service, _ = _service(tmp, notes)
+    result = await MemorySearchTool(service).execute({"query": " ".join(words)})
+    data = result.data or {}
+    ok = (
+        data.get("no_match") is True
+        and data.get("terms_known") == words
+        and data.get("terms_unknown") == []
+        and data.get("near_misses") == []
+        and "查询用词索引都认识" in (result.output or "")
+    )
+    return ok, (
+        f"known={len(data.get('terms_known') or [])} "
+        f"near={len(data.get('near_misses') or [])}"
+    )
+
+
 async def an_empty_since_days_is_not_a_silent_empty_recall(tmp: Path) -> tuple[bool, str]:
     """The N3 fix: `since_days=""` is what an unfilled tool field arrives as, and
     `float("")` used to raise inside the best-effort `except`, which reported it
@@ -595,6 +739,18 @@ OFFLINE: dict[str, CaseFn] = {
     "kind_filter_narrows_before_ranking": kind_filter_narrows_before_ranking,
     "a_filter_emptied_everything_still_says_what_it_measured": (
         a_filter_emptied_everything_still_says_what_it_measured
+    ),
+    "an_empty_store_says_it_is_empty_not_that_the_query_was_wrong": (
+        an_empty_store_says_it_is_empty_not_that_the_query_was_wrong
+    ),
+    "a_query_that_measures_no_words_is_not_an_all_known_query": (
+        a_query_that_measures_no_words_is_not_an_all_known_query
+    ),
+    "a_vocabulary_miss_does_not_claim_the_content_is_absent": (
+        a_vocabulary_miss_does_not_claim_the_content_is_absent
+    ),
+    "the_gate_clause_still_fires_when_every_word_is_known": (
+        the_gate_clause_still_fires_when_every_word_is_known
     ),
     "an_empty_since_days_is_not_a_silent_empty_recall": (
         an_empty_since_days_is_not_a_silent_empty_recall

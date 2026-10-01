@@ -249,8 +249,17 @@ def _miss_text(
         lines = [f"没有可靠匹配（索引里有 {index['active']} 条：{breakdown}）。"]
     unknown = data["terms_unknown"]
     if no_vocabulary_match:
+        # What was measured: no query term has df > 0 in the candidate set.
+        # That says nothing about whether the *content* is stored — a CJK
+        # cross-word bigram like 么构 out of 「怎么构建」 would appear in no
+        # relevant note, so its absence carries no information about content.
+        # Claiming otherwise asserts a fact about the corpus from a
+        # measurement about tokens, and it contradicted the advice line one
+        # below it (换个说法), which the spec 5.2 makes the whole point of
+        # naming these words.
         lines.append(
-            f"这些词索引里一条笔记都没出现过：{'、'.join(unknown[:6])}——不是措辞问题，是这批内容不在记忆里。"
+            f"这些词索引里一条笔记都没出现过：{'、'.join(unknown[:6])}"
+            "（只说明这些词本身没被记过，不说明记忆里有没有相关内容）。"
         )
     elif unknown:
         lines.append(f"这些词索引里没有：{'、'.join(unknown[:6])}。")
@@ -270,15 +279,25 @@ def _miss_text(
             f"是 {blamed} 过滤把它们排除了：放宽过滤条件再搜一次。"
         )
         return "\n".join(lines)
-    if not near and not unknown and index is not None:
-        # Every word was known and nothing was close: the gate said no.  Gated on
-        # a measured index, because otherwise we cannot tell a real rejection
-        # from a double whose recall told us nothing.
+    if not near and not unknown and data["terms_known"] and index is not None:
+        # Every word was known and nothing was close: the gate said no.  Gated
+        # on a measured index, because otherwise we cannot tell a real rejection
+        # from a double whose recall told us nothing — **and** on a non-empty
+        # `terms_known`, because `rank_notes_detailed` returns a bare result
+        # (naming neither known nor unknown words) when there are no active
+        # notes, or when the query tokenises to nothing.  An empty
+        # `terms_unknown` reads as "no word was unknown"; only a non-empty
+        # `terms_known` reads as "every word was known".
         lines.append("查询用词索引都认识，但没有候选达到相关度门槛。")
     if filters:
         # The model already narrowed by whatever it set; offering to narrow again
         # is the same self-contradiction the filtered-out branch exists to avoid.
         lines.append("换一个说法再搜，或放宽刚才的过滤条件。")
+    elif index is not None and not index["active"]:
+        # Measured: there is nothing stored, so no rephrasing can match it.
+        # This is the first `memory_search` on a fresh workspace, and the
+        # generic advice would send the model round the same empty loop.
+        lines.append("记忆里一条笔记都没有，没有东西可搜：先往记忆里写一条再搜。")
     else:
         lines.append("换一个说法再搜，或用 kind=decision/fact/preference/open_thread 缩小范围。")
     return "\n".join(lines)

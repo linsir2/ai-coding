@@ -485,9 +485,10 @@ OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnix
 | 契约 | 说明 |
 |---|---|
 | `scope` / `since_days` | 新增、均可选；过滤在服务侧生效。工具自身**不再有第二条过滤路径**（`_filter_hits` 已删除），只有「服务返回什么就发什么」 |
-| `data.terms_known` | **两个指代**：命中路径量的是过滤后剩下的候选集；没命中且传了过滤时量的是整个索引——因为被过滤清空的候选集会让排序直接返回一个不提名任何词的空结果，文案会把「没有未知词」读成「每个词都认识」。列出的词都确实存在，只是集合未必是模型以为的那个 |
-| `data.near_misses` / `data.index` | 与 Task 4 相同：只在没命中时带，且都**有界**（3 条 / 500 条记忆的索引 JSON 实测 224 字符）；匹配不到任何查询词的近邻一律丢弃。键是 `index.active` 而不是 `index.total`——`status()` 已经把 `total` 用在「含被取代的条目」上，这里数的是活跃集 |
-| `output` 的没命中文案 | 三种情形分别说：词索引里一条都没有 / 被过滤排除（带**实测**条数，并点名调用方真正设过的过滤参数）/ 门槛拒绝（只有拿到索引概览时才说）。传了过滤时，末尾不再劝模型「按 kind 缩小范围」 |
+| `data.terms_known` | **两个指代**：命中路径量的是过滤后剩下的候选集；没命中且传了过滤时量的是整个索引——因为被过滤清空的候选集会让排序直接返回一个不提名任何词的空结果，文案会把「没有未知词」读成「每个词都认识」。列出的词都确实存在，只是集合未必是模型以为的那个。**空 `terms_known` 有两种含义**：真的一个词都没量到（索引为空、或查询分词后为空），和不适用于上一行的旧路径；文案不得把它读成「每个词都认识」 |
+| `data.near_misses` / `data.index` | 与 Task 4 相同：只在没命中时带，且都**有界**（3 条 / 500 条记忆的索引 JSON 实测 315 字符，验收脚本那份 40–88 字符的语料是 317，同一上限内）；匹配不到任何查询词的近邻一律丢弃。键是 `index.active` 而不是 `index.total`——`status()` 已经把 `total` 用在「含被取代的条目」上，这里数的是活跃集 |
+| `output` 的没命中文案 | 四种情形分别说：词索引里一条都没有 / 被过滤排除（带**实测**条数，并点名调用方真正设过的过滤参数）/ 门槛拒绝（**且 `terms_known` 非空**——空 `terms_unknown` 只说明「没有未知词」，不说明「每个词都认识」）/ 索引实测为空（明说没有东西可搜，不劝换说法）。传了过滤时，末尾不再劝模型「按 kind 缩小范围」 |
+| `output` 的词汇缺席句 | 只陈述测量到的事实：「这些词索引里一条笔记都没出现过：X、Y」+「只说明这些词本身没被记过，不说明记忆里有没有相关内容」。**不得**从词的缺席推出内容的不在场——`no_vocabulary_match` 只说明没有查询词的 `df > 0`，而跨词 bigram（如 `tokenize("怎么构建")` 的 `么构`）在任何相关笔记里都不会出现，其缺席对内容不构成证据。spec 5.2 把「见过哪些词」定为模型**换说法**的信号，所以换说法必须留在建议里 |
 
 ### `memory_search` 的 `data` 完整形状
 
@@ -510,7 +511,8 @@ OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnix
 
 | 契约 | 位置 | 说明 |
 |---|---|---|
-| `RecallParams` | `memory/relevance.py` | 冻结数据类。R10 新增/改动的四个字段：`threshold=0.25`（混合分下限，未改）、`min_relevance=0.25`（**R10 从 0.05 提上来**）、`relative_band=0.55`（**R10 新增**，卡混合分而非相关度）、`recency_source="created"`（`"accessed"` 是列出的备选，本轮从未被走） |
+| `RecallParams` | `memory/relevance.py` | 冻结数据类。R10 新增/改动的四个字段：`threshold=0.25`（混合分下限，未改）、`min_relevance=0.25`（**R10 从 0.05 提上来**）、`relative_band=0.55`（**R10 新增**，卡混合分而非相关度）、`recency_source="created"`（**没接上的旋钮**，见下节） |
+| **`threshold` 在出厂默认下永远不是唯一的门** | 同上 | **实测，不是推断**：`weight_rank=0.55` 意味着 BM25 最高的那条笔记拿到 `0.55 * (raw/best_raw) = 0.55`，其余项非负，于是只要 `best_score > 0` 就有 `best_score >= 0.55`，带宽地板 `0.55 * 0.55 = 0.3025 > threshold 0.25`。因此**任何过了带宽的笔记必然也过了 `threshold`**，删掉 `item.score >= resolved.threshold` 这个条件在出厂默认下不改变任何一次召回。400 组随机语料实测：`best_score` 的最小值是 0.55，带宽地板从未低于 `threshold`；20 000 条随机语料 × 40 次查询里，14 805 条「过了 `min_relevance` 却被拒」的笔记中，**被 `threshold` 单独拒掉的是 0 条**。它只有在 `relative_band` 被配低（或 `threshold` 被配高）时才成为有效门——这正是它作为「兼容老配置」下限的意义。spec §7 用例 8「`threshold` 仍然生效」由 `tests/test_memory_relevance.py::test_r10b_threshold_still_gates_when_the_band_does_not` 按这个口径钉住 |
 | **`min_relevance` 与 `relative_band` 的三处默认值** | `relevance.RecallParams`、`config/models.MemoryConfig`、`service._default_config()` | **三处都要改**，不是两处：`service._default_config()` 是每一个无 config 的 service 实际读的那份（`MemoryService.__init__` 在 `config` 为 `None` 时用它），只改前两处会让整个默认路径静默保留旧值 |
 | `RecallParams.from_memory_config(config)` | 同上 | duck-typed（`getattr` + 默认），测试里的 fake 也能过 |
 | `ScoredNote.matched_terms: tuple[str, ...]` | 同上 | 该笔记命中的**已知**查询词（未知名不算） |
@@ -533,7 +535,7 @@ OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnix
 | `IndexSummary(active, by_kind, recent)` | 有界概览：`recent` 最多 3 条 `(id, kind, preview)`，`preview` 40 字符。失败的召回**不该把整个索引塞回上下文** |
 | `RecallDiagnostics(terms_known, terms_unknown, near_misses, index_summary, semantic_unavailable, no_vocabulary_match, filtered_out)` | 「召回为什么失败」所需的全部信息。外层各字段默认可空；`pre-R10c` 的 double 没有 `recall_with_diagnostics` 时，工具走兼容分支并用 `_EmptyDiagnostics` 占位 |
 
-### 一个没接上的旋钮
+### 没接上的两个旋钮
 
 `memory.detail_max_chars` 在 `MemoryConfig` 里声明了，`_default_config()` 里也有
 （1200），**全仓库没有任何地方读它**（`grep -rn "detail_max_chars" ai_coding/ tests/ --include=*.py`
@@ -542,3 +544,24 @@ OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnix
 而 52 条语料里的笔记长度中位数 40.5、最长 88——也就是说这个旋钮真接上，第一件事是决定**要不要
 让 `preview` 超过 40 字符**，那是 prompt 预算的改动，不是截断。声明留着是为了不破坏已有
 配置文件；一次有行为后果的设计决定不该塞进检索轮次顺手做掉。
+
+`RecallParams.recency_source` 是本轮**新引入**的同类旋钮，形状不同：`created` 是默认值、
+`"accessed"`（按 `last_used` 衰减）是代码里真实存在的分支，`_time_of` 会读它，
+`tests/test_memory_relevance.py::test_r10b_recency_source_accessed_is_off_by_default`
+也钉住了两者行为不同。但**没有任何配置能打开它**：`from_memory_config` 不读它，
+`MemoryConfig` 没有对应字段（全仓只有那一个测试设过 `"accessed"`）。
+
+**本轮的选择是记录，不接线**，理由有三条，按重要性排：
+
+1. spec 5.3 对这一项写的是「`accessed` 作为可选项……**在基准里做 A/B**」。那个 A/B 从没跑过，
+   而 `accessed` 会改变每一条笔记的分数，也就是改变 R@1 / FP@5 这四个门禁数字。接上一个
+   没有实测支撑的排序开关，就是拿门禁当调参记录用。
+2. spec 5.3 的默认值是 `created`，「默认不变」也是它写的；接线本身不改变行为，但会把
+   「R10 发布的是哪套 recency」变成一个配置问题而非一次决定。
+3. plan 的「Deliberately uncovered」已经把它列为**故意不覆盖**（「§5.3 lists it as a
+   parameter with a default of `created`, which is what is built; the alternative is never
+   exercised」）。事后把它接上，等于推翻计划里已经写下的裁决，且没有新证据。
+
+复访触发条件（写下来免得下次当成 bug）：跑一次 `recency_source` 的 A/B，拿到
+`scripts/retrieval_cases.py` 的分类指标对比，再决定是否进 `MemoryConfig` +
+`from_memory_config`（两处必须同时改——同一个字段有**三个**默认值站位，见上表）。

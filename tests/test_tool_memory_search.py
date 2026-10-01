@@ -650,3 +650,148 @@ async def test_r10c_an_emptied_candidate_set_still_reports_a_measured_vocabulary
     # And the payload and the text agree: the index does know every word.
     assert "查询用词索引都认识" not in result.output
     assert result.data["near_misses"]  # the probe's rejected set, which is the diagnosis
+
+
+# ---- R10 final review: the miss text must not claim what it did not measure ---
+
+
+@pytest.mark.asyncio
+async def test_r10_an_empty_store_says_it_is_empty_rather_than_blaming_the_query(tmp_path):
+    """Critical 1, trigger 1: the first `memory_search` on a fresh workspace.
+
+    `rank_notes_detailed` returns a bare `RankingResult()` when there are no
+    active notes, so `terms_known`, `terms_unknown` and `no_vocabulary_match`
+    are all empty/false.  `_miss_text` read the empty `terms_unknown` as "no
+    word was unknown", i.e. "every word was known", and printed three false
+    lines on the first search of a brand-new project:
+
+        没有可靠匹配（索引里有 0 条：空）。          <- true, but the two below
+        查询用词索引都认识，但没有候选达到相关度门槛。  <- nothing was measured
+        换一个说法再搜，或用 kind=... 缩小范围。        <- nothing to rephrase
+
+    The third line matters as much as the second: with zero notes stored, no
+    rewording can match anything, so the generic advice sends the model round
+    the same empty loop instead of telling it the index has nothing in it.
+    """
+    tool = MemorySearchTool(MemoryService(MemoryStore(tmp_path / "m.json")))
+
+    result = await tool.execute({"query": "依赖管理"})
+
+    assert result.data["no_match"] is True
+    # The premise, pinned: nothing was measured, so the payload must be empty
+    # in *both* directions.  If this stops holding the test below would pass
+    # for the wrong reason.
+    assert result.data["terms_known"] == []
+    assert result.data["terms_unknown"] == []
+    assert result.data["near_misses"] == []
+    # 0 条 is the one line here that was measured, and it must stay.
+    assert "索引里有 0 条" in result.output
+    assert "查询用词索引都认识" not in result.output
+    assert "换一个说法" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_r10_a_query_that_tokenises_to_nothing_is_not_an_all_known_query(tmp_path):
+    """Critical 1, trigger 2: the same sentence, with notes already stored.
+
+    The bare-result path is also reached when `tokenize(query)` yields nothing
+    while the index is fine, so "the store is empty" cannot be the whole
+    explanation the text gives.  Measured: `"???"`, `"怎么"` and `"the"` all
+    print 「查询用词索引都认识」 beside `terms_known == []`.
+    """
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="a", text="打包命令是 npm run build 产出 dist",
+                              created_time="2026-09-28T00:00:00+00:00"))
+    tool = MemorySearchTool(MemoryService(store))
+
+    for query in ("???", "怎么", "the"):
+        result = await tool.execute({"query": query})
+
+        assert result.data["no_match"] is True, query
+        assert result.data["terms_known"] == [], query
+        assert result.data["terms_unknown"] == [], query
+        # One note is stored, so the index is measured and non-empty: this is
+        # not the empty-store case, and the advice line is correct here.
+        assert result.data["index"]["active"] == 1, query
+        assert "查询用词索引都认识" not in result.output, query
+
+
+@pytest.mark.asyncio
+async def test_r10_the_gate_clause_still_fires_when_every_word_really_is_known(tmp_path):
+    """The control for the two tests above.
+
+    Without this, "never prints 查询用词索引都认识" would pass on a tool that
+    had simply deleted the clause.  This corpus reaches it for real: all five
+    query words are measured as known, and `near_misses` is empty because the
+    three zero-match decisions head the rejected list on score and are then
+    dropped by the zero-match filter.  What is left is a gate rejection with no
+    other true diagnosis available.
+
+    Two properties are load-bearing, and neither is decoration:
+
+    * the word-carrying notes are ancient **and** ``importance=1``, so they
+      score ``0.55 * 1.0 = 0.55`` — the BM25 share is 1.0 for every one of them
+      (only matching notes score at all), so freshness and importance are the
+      only levers a zero-match note has;
+    * the decisions are stamped from the *live* clock, because the tool path
+      passes no ``now`` and the service would otherwise read them as ageing
+      against a pinned fixture date.  ``0.20 * 1.0 + 0.15 + 0.25 = 0.60 > 0.55``,
+      and that margin is what puts them ahead.  Pinning them to a fixture date
+      makes this case pass or fail depending on the day it is run.
+    """
+    store = MemoryStore(tmp_path / "m.json")
+    words = ["alpha", "bravo", "charlie", "delta", "echo"]
+    for index, word in enumerate(words):
+        store.add_note(MemoryNote(id=f"old{index}", text=f"note mentioning {word} once",
+                                  kind=NoteKind.FACT, importance=1,
+                                  created_time="2020-01-01T00:00:00+00:00"))
+    stamped = now_utc()
+    for index in range(3):
+        store.add_note(MemoryNote(id=f"d{index}",
+                                  text=f"decision number {index} about an unrelated workflow",
+                                  kind=NoteKind.DECISION, importance=5,
+                                  created_time=stamped, updated_time=stamped))
+    tool = MemorySearchTool(MemoryService(store))
+
+    result = await tool.execute({"query": " ".join(words)})
+
+    assert result.data["no_match"] is True
+    assert result.data["terms_known"] == words
+    assert result.data["terms_unknown"] == []
+    assert result.data["near_misses"] == []
+    assert "查询用词索引都认识" in result.output
+
+
+@pytest.mark.asyncio
+async def test_r10_a_vocabulary_miss_does_not_claim_the_content_is_absent(tmp_path):
+    """Critical 2: the clause asserted a fact about *content* from a measurement
+    about *tokens*, one line above telling the model to rephrase.
+
+    `no_vocabulary_match` means no query term has `df > 0` in the candidate
+    set.  That is a fact about words.  Measured here: the store holds
+    「打包命令是 npm run build 产出 dist」, the query is 「怎么构建」, and
+    `tokenize` gives `['么构', '构建']` — 么构 is a cross-word bigram that would
+    appear in no relevant note, so its absence carries no information about
+    whether the content is stored.  The clause called this 「不是措辞问题」 and
+    「这批内容不在记忆里」, which is the opposite of what spec 5.2 says these
+    words are for (the model's signal to rephrase) and contradicted the advice
+    line directly below it.
+    """
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="a", text="打包命令是 npm run build 产出 dist",
+                              created_time="2026-09-28T00:00:00+00:00"))
+    tool = MemorySearchTool(MemoryService(store))
+
+    result = await tool.execute({"query": "怎么构建"})
+
+    assert set(result.data["terms_unknown"]) == {"么构", "构建"}
+    # The measurement itself is still reported...
+    assert "一条笔记都没出现过" in result.output
+    assert "么构" in result.output and "构建" in result.output
+    # ...but no claim about whether the content exists, and no claim that the
+    # problem is not the wording.
+    assert "不是措辞问题" not in result.output
+    assert "这批内容不在记忆里" not in result.output
+    # And rephrasing stays available, which is what made the old clause a
+    # self-contradiction: it denied the fix the next line proposed.
+    assert "换一个说法" in result.output
