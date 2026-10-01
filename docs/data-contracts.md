@@ -502,7 +502,6 @@ OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnix
 | `semantic_unavailable` | `bool` | 有 | **本轮恒为 `false`**。存在的唯一理由是可选语义层落地时 payload 不必改形状；现在没有任何代码把它置真 |
 | `near_misses` | `list[dict]` | **仅未命中时**（除非显式 `include_near_misses: true`） | `id`/`kind`/`score`/`relevance`/`preview`(40 字符)，最多 3 条 |
 | `index` | `dict` | **仅未命中时** | `active` / `by_kind` / `recent`（3 条 `id`+`kind`+`preview`）。**没有索引概览时这个键不存在**（记忆关掉、排序抛错、或 pre-R10c 的 double），文案此时也不编造条数 |
-| `semantic_unavailable` | `bool` | 见上 | — |
 
 失败路径另有三种 `success=False`：`error="empty_query"`、`error="bad_evidence"`（值必须是
 `tool`/`model`/空，**在召回之前**校验，坏值到不了记忆层）、`error="memory_error"`。

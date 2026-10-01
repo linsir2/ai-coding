@@ -101,9 +101,11 @@ class MemoryStore:
 
     Fixing it means holding the lock across the save, which changes the persistence
     shape for every caller.  R10 reviewed this and chose to record it rather than
-    restructure persistence inside a retrieval round;
-    ``scripts/r10_cases.py::recall_survives_concurrent_harvest`` exercises it with
-    real threads and reports what it sees — an observation, not a gate.
+    restructure persistence inside a retrieval round.  The reproduction above is
+    the evidence; ``scripts/r10_cases.py::recall_survives_concurrent_harvest``
+    runs concurrent recalls against concurrent harvests and reports what it sees,
+    which is **survival, not the absence of this hazard** — the corruption needs
+    per-write synchronisation that case does not impose.
     """
 
     def __init__(self, path: str | Path = Path(".memory")) -> None:

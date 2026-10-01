@@ -289,9 +289,11 @@ flowchart TB
 
 三条边界：
 
-- **`benchmark.py` 绝不 import `store` / `service` / `relevance` 之外的任何一层**，尤其不 import
-  它要评分的那个 `rank_notes` 所在模块之外的东西。它复用排序器，但排序器不 import 它——否则
-  基准就在给自己打分了，一次重构能不改检索质量而移动所有数字。
+- **`benchmark.py` 只 import `ai_coding.memory.note`**（全模块唯一的项目内依赖），`store` /
+  `service` / `relevance` 一个都不 import。它要评分的那个排序器是**注入**进去的：
+  `evaluate(rank, cases)` 收一个 `Callable[[str], Sequence[str]]`，由
+  `scripts/retrieval_cases.py` 在脚本里用 `rank_notes` 拼出来。方向是单向的——
+  `relevance.py` 不 import 基准。否则基准就在给自己打分，一次重构能不改检索质量而移动所有数字。
 - **`relevance.py` 不 import 服务层**。它只拿 `MemoryNote` 序列和一个钉死的 `now`，所以
   `scripts/retrieval_cases.py` 能在没有 store、没有 config、没有网络的条件下跑完整张表。
 - **`RecallScorer` 是接缝**。未来的 embedding 打分器实现同一个 `rank_notes` 形状，store 与

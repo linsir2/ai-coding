@@ -36,6 +36,7 @@ from ai_coding.domain.message import ChatMessage  # noqa: E402
 from ai_coding.memory.benchmark import evaluate, load_corpus  # noqa: E402
 from ai_coding.memory.note import MemoryNote, NoteKind  # noqa: E402
 from ai_coding.memory.relevance import (  # noqa: E402
+    RecallParams,
     rank_notes,
     rank_notes_detailed,
 )
@@ -58,6 +59,11 @@ FP_GATE = 0.36
 #: The decoy from docs/r10-analysis.md 1.6, named so two cases can share it.
 DECOY_QUERY = "CLI 命令怎么加一个新子命令"
 DECOY_ID = "n52"
+
+#: Read off the class, not hard-coded: the bounded-index case has to state what
+#: the payload would cost *without* this cap, and a copy of the literal would go
+#: stale the first time somebody tunes it.
+PREVIEW_CHARS = MemoryService._PREVIEW_CHARS
 
 
 def _note(
@@ -109,21 +115,42 @@ async def bm25_prefers_the_specific_note(tmp: Path) -> tuple[bool, str]:
 
 
 async def the_relative_band_cuts_the_tail(tmp: Path) -> tuple[bool, str]:
-    """`relative_band` asks "is this note in the running", and only the blended
-    score can answer that: the tail shares every query term with the best note,
-    so relevance alone keeps all three and the band cuts two."""
+    """The band, and the band *alone*.
+
+    The first version of this case asserted a false mechanism: its tail notes
+    shared only one of the four known query terms, so `relevance 0.043 < 0.25`
+    and the **floor** dropped them -- measured identical at `relative_band=0.0`
+    and `min_relevance=0.0`, which means the case was insensitive to both gates.
+
+    These two tails clear the floor (`relevance 0.290`) and clear the absolute
+    threshold (`score 0.268` / `0.258`, floor is `0.25`), so nothing but the band
+    can drop them.  The assertion therefore runs the same corpus twice and
+    requires the results to **differ**: with the band at its default only `best`
+    survives; with `relative_band=0.0` both tails come back.  If either gate stops
+    dropping what it should, one of those two legs fails.
+    """
+    query = "上下文压缩分几层"
     notes = [
-        _note("best", "上下文压缩有四层", age_days=1),
-        _note("weak", "压缩", age_days=1),
-        _note("tail", "压缩", age_days=1),
+        _note("best", "上下文压缩有四层：L3 落盘、L1 裁剪、L2 信封", age_days=1),
+        # Matched ('上下','下文','压缩') — three of the four known terms, which is
+        # what puts relevance at 0.290 rather than under the floor.  Old and
+        # unimportant so the blended score lands in (threshold, band floor).
+        _note("tail1", "压缩上下文摘要", age_days=30, importance=1),
+        _note("tail2", "上下文与压缩", age_days=45, importance=1),
     ]
-    result = rank_notes_detailed(notes, "上下文压缩分几层", now=NOW)
-    kept = [hit.note.id for hit in result.kept]
-    dropped = [hit.note.id for hit in result.rejected]
-    # The floor is vacuous when only one candidate clears it (plan, known risks),
-    # so this pins the band's own work: the same word in two weaker notes.
-    ok = kept == ["best"] and set(dropped) == {"weak", "tail"}
-    return ok, f"kept={kept} rejected={dropped}"
+    scored = rank_notes_detailed(notes, query, now=NOW)
+    detail = {
+        hit.note.id: (round(hit.score, 3), round(hit.relevance, 3))
+        for hit in scored.kept + scored.rejected
+    }
+    with_band = rank_notes_detailed(notes, query, now=NOW)
+    without_band = rank_notes_detailed(
+        notes, query, params=RecallParams(relative_band=0.0), now=NOW
+    )
+    kept = [hit.note.id for hit in with_band.kept]
+    returned = [hit.note.id for hit in without_band.kept]
+    ok = kept == ["best"] and set(returned) == {"best", "tail1", "tail2"}
+    return ok, f"{detail} kept={kept} band_off={returned}"
 
 
 async def a_query_nothing_in_memory_says_recalls_nothing(tmp: Path) -> tuple[bool, str]:
@@ -228,36 +255,94 @@ async def a_miss_is_structured_and_actionable(tmp: Path) -> tuple[bool, str]:
 
 async def the_index_map_stays_bounded(tmp: Path) -> tuple[bool, str]:
     """A miss must not return the index back into the context: a 500-note store
-    still fits in 400 characters of `index`, because it counts and previews."""
-    service, _ = _service(
-        tmp, [_note(f"n{i:04d}", f"第 {i} 条无关笔记", age_days=30) for i in range(500)]
+    still fits in 400 characters of `index`.
+
+    Note lengths are the spec's measured 40-88 chars, not the ~11 the first
+    version used.  With 11-char notes the map serialised to 224 chars, so
+    raising `PREVIEW_CHARS` from 40 to 200 left the assertion green and the
+    bound was decorative — the same trap
+    `tests/test_tool_memory_search.py::test_r10c_the_index_map_is_bounded_and_only_on_a_miss`
+    documents in its own docstring, reintroduced in this copy.  The assertion
+    below therefore also states that the *uncapped* payload would exceed 400,
+    which is what makes it a test of the cap and not of the corpus.
+    """
+    filler = (
+        "构建产物、依赖锁文件、缓存目录和测试快照都落在同一个工作目录下，"
+        "需要定期清理归档，并且不能提交到仓库里，发布前还要确认一次"
     )
-    result = await MemorySearchTool(service).execute({"query": "Kubernetes 集群有多少节点"})
-    data = result.data or {}
-    size = len(json.dumps(data.get("index") or {}, ensure_ascii=False))
+    texts = [f"第 {index} 条无关笔记：{filler}" for index in range(500)]
+    service, _store = _service(
+        tmp, [_note(f"n{i:04d}", t, age_days=30) for i, t in enumerate(texts)]
+    )
+    tool = MemorySearchTool(service)
+
+    miss = await tool.execute({"query": "Kubernetes 集群有多少节点"})
+    hit = await tool.execute({"query": texts[3][:12]})
+
+    data = miss.data or {}
+    index = data.get("index") or {}
+    size = len(json.dumps(index, ensure_ascii=False))
+    # What the payload would cost with no preview cap at all.  The previews in
+    # `recent` are all exactly `PREVIEW_CHARS`, so the full texts have to come
+    # from the store -- this is the number that proves the cap is load-bearing.
+    previewed = [service.store.get(item["id"]) for item in (index.get("recent") or [])]
+    uncapped = size + sum(
+        max(0, len(note.text) - PREVIEW_CHARS) for note in previewed if note is not None
+    )
     # `active`, not `total`: status() spends `total` on every note including the
     # superseded ones, and this map counts the active set only.
-    ok = size <= 400 and (data.get("index") or {}).get("active") == 500
-    return ok, f"{size} chars for a 500-note store"
+    ok = (
+        size <= 400
+        and uncapped > 400
+        and index.get("active") == 500
+        and len(index.get("recent") or []) <= 3
+        and "index" not in (hit.data or {})
+    )
+    return ok, f"{size} chars (uncapped {uncapped}) for a 500-note store"
 
 
 async def kind_filter_narrows_before_ranking(tmp: Path) -> tuple[bool, str]:
     """R10c: filters run on the candidate set, so `k` is spent on notes the model
-    asked for.  With four facts that outrank the one decision, the old
-    post-filter path spent the whole budget on the facts and returned nothing;
-    the note the model asked for was in the index the whole time."""
-    notes = [_note(f"f{i}", f"依赖管理用 uv 第 {i} 条", age_days=i + 1) for i in range(4)]
-    notes.append(_note("d1", "决定：依赖管理统一用 uv", kind="decision", age_days=30))
+    asked for.
+
+    The corpus matters more than the k, and the first version of this case got it
+    backwards.  Its four facts and one decision all covered 「依赖管理」, and
+    `kind_boosts` gives a decision **+0.25**, so the decision ranked *first* —
+    measured ranking `[d1, f0, f1, f2, f3]` — and post-filtering at **any** k
+    still returned `['d1']`.  The case could not fail.  Its docstring claimed the
+    facts outranked the decision, which was false; lowering k to 1 did not help,
+    because at k=1 the budget *is* `d1`.
+
+    These notes do the opposite: the four facts cover the whole query
+    (`依赖管理用 uv 安装/升级/锁定/发布`, relevance 1.0 each) while the decision
+    covers only `uv` (`决定：uv 作为默认工具`, relevance 0.092).  The facts take the
+    whole budget and post-filtering empties it.  Measured here:
+    `k=3 unfiltered -> ['f0','f1','f2']`, and the same k with `kind=decision`
+    returns the one decision the unfiltered ranking dropped.
+
+    The assertion runs **both** orderings: it requires the unfiltered result to be
+    all facts (so the corpus really is decision-last) and the filtered one to be
+    the decision.  A corpus swap that put the decision back on top fails the
+    first leg instead of quietly passing the second.
+    """
+    notes = [
+        _note(f"f{i}", text, age_days=3)
+        for i, text in enumerate(
+            ("依赖管理用 uv 安装", "依赖管理用 uv 升级", "依赖管理用 uv 锁定", "依赖管理用 uv 发布")
+        )
+    ]
+    notes.append(_note("d1", "决定：uv 作为默认工具", kind="decision", age_days=30))
     service, _ = _service(tmp, notes)
-    result = await MemorySearchTool(service).execute(
-        {"query": "依赖管理", "k": 1, "kind": "decision"}
-    )
-    ids = [note["id"] for note in (result.data or {}).get("notes", [])]
-    # k=1 on purpose: with the pre-R10c ordering the decision already ranked
-    # first (it has a +0.25 kind boost), so a bigger k could not tell the two
-    # implementations apart.  k=1 with a filter asks the only question that has
-    # one right answer.
-    return ids == ["d1"], f"ids={ids}"
+    tool = MemorySearchTool(service)
+
+    unfiltered = await tool.execute({"query": "依赖管理 uv", "k": 3})
+    filtered = await tool.execute({"query": "依赖管理 uv", "k": 3, "kind": "decision"})
+
+    plain = [note["id"] for note in (unfiltered.data or {}).get("notes", [])]
+    ids = [note["id"] for note in (filtered.data or {}).get("notes", [])]
+    # The facts must win unfiltered, or the filtered leg proves nothing.
+    ok = plain == ["f0", "f1", "f2"] and ids == ["d1"]
+    return ok, f"unfiltered={plain} kind=decision -> {ids}"
 
 
 async def a_filter_emptied_everything_still_says_what_it_measured(
@@ -361,22 +446,29 @@ _HARVEST_ROUNDS = 40
 
 
 async def recall_survives_concurrent_harvest(tmp: Path) -> tuple[bool, str]:
-    """An observation, not a gate.  Recall writes, so recall and harvest can
-    interleave on one store.
+    """An observation, not a gate.  Recall writes, so concurrent recalls can
+    interleave with concurrent harvests on one store.
 
     Threads, not ``asyncio.gather``: ``recall_notes`` contains no ``await``, so
     ``gather`` serialises both coroutines completely and this case would pass
-    with the shared-tmp hazard fully present.  Real threads do not.
+    without any concurrency at all.
 
-    What it observes.  Notes are never torn or lost off disk: the file is written
-    whole and swapped in with ``os.replace``.  But ``MemoryStore._mutate``
-    releases its lock *before* ``_save``, and ``_save`` reads ``self._notes``
-    unguarded, so two threads serialise onto the same ``<path>.tmp`` and the
-    reloaded count can come back lower than the in-memory one.  The hazard is
-    pre-existing (M3), R10 reviewed it and chose to record it rather than
-    restructure persistence inside a retrieval round, and the store's docstring
-    now says so.  Hence the assertion is only survival + the usage signal; the
-    count difference is printed.
+    What it observes, precisely: that concurrent recalls against concurrent
+    harvests **survive** -- no thread raised, the recall's usage signal reached
+    disk, the file is still there and still parseable, and the reloaded note
+    count matches the in-memory one.  It prints both counts either way.
+
+    What it does **not** observe: the shared-tmp corruption.  ``MemoryStore``
+    has that hazard (``_mutate`` releases its lock before ``_save``, so two
+    threads serialise onto one ``<path>.tmp`` and a concurrent write can land on
+    the live file), but reproducing it needs the writes to be *individually*
+    synchronised -- a barrier before each write, 4 threads x 30 writes, 5-6 of 25
+    trials corrupt.  Threads merely started together do not hit it: 20 runs of
+    this case and 12 more on review produced no corruption, and a barrier placed
+    once before the loop gives 0/25.  So a clean result here is **not** evidence
+    the hazard is absent; the store's docstring carries the reproduction, and
+    the hazard stays unfixed (pre-existing M3 behaviour, R10 chose to record it
+    rather than restructure persistence in a retrieval round).
     """
     # An extractor is what makes harvest *write*.  Without one, `harvest` returns
     # at the "no extractor" guard after an eviction check, so the two harvest
