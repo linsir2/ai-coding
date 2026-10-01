@@ -269,9 +269,9 @@ memory:
 
 ```bash
 .venv/bin/python scripts/retrieval_cases.py            # 检索基准：分类指标表 + 护栏
-.venv/bin/python scripts/retrieval_cases.py --check    # 护栏门禁，不达标退出码非 0（CI 调这个）
+.venv/bin/python scripts/retrieval_cases.py --check    # 护栏门禁，不达标退出码非 0（本地门禁，CI 目前不调）
 .venv/bin/python scripts/retrieval_cases.py --only-paraphrase   # 只把最难的改述类打全
-.venv/bin/python scripts/r10_cases.py                   # 本轮验收 16 条
+.venv/bin/python scripts/r10_cases.py                   # 本轮验收 22 条
 .venv/bin/python scripts/r10_cases.py --only the_decoy_still_leaks_and_says_so
 ```
 

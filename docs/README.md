@@ -92,12 +92,14 @@ R6 处理四个候选（工作记忆锚、失败升级、`ask_user`、记忆证�
 ## 当前状态
 
 主线里程碑 M0–M6 与 R1–R9 全部完成，分阶段提交。
-质量门禁：`pytest` **1301 例通过 / 2 跳过**全绿（这是**含** `tests/test_pty_textual.py` 的数字；
-CI 那条命令把它 deselect 掉，于是是 **1300 通过 / 2 跳过 / 1 deselected**——两个数字指同一次运行，
-不是一个含 pty 一个不含）、`ruff` 0 问题、`mypy`（按 3.10 下限检查）0 问题（105 文件）；
+质量门禁：`pytest` **1307 例通过 / 2 跳过**全绿（这是**含** `tests/test_pty_textual.py` 的数字；
+**CI 跑的就是同一条命令** `python -m pytest -q`，`ci.yml` 顶部明写 "No test file is excluded
+here"，所以本地与 CI 是同一个数字，不存在 deselect）、`ruff` 0 问题、`mypy`（按 3.10 下限检查）0 问题（105 文件）；
 离线验收脚本：`memory_cases` 11/11、`trace_cases` 6/6、`r6_cases` 9/9 全过、`r7_cases` 11/11、
-`r7e_cases` 9/9、`r8_cases` 13/13、`r9_cases` 12/12、`r10_cases` 16/16；
-检索基准 `retrieval_cases --check` 退出 0。
+`r7e_cases` 9/9、`r8_cases` 13/13、`r9_cases` 12/12、`r10_cases` 22/22。
+检索基准 `retrieval_cases --check` 本地退出 0——但**它不在 CI 里**（CI 只跑 ruff / mypy /
+`pytest -q` / `test_mcp_stdio.py` / `memory_cases.py` / `trace_cases.py`），所以它是本地门禁，
+改动检索后要自己跑。`r10_cases` 同样不在 CI 里。
 MCP 真连与真实 LLM A/B 在正常环境另有 gate 测试 + CI 步骤。
 
 > **R10 的 0.25 相关度门槛让一个 fixture 措辞变成了承重结构。**

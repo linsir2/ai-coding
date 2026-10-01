@@ -13,6 +13,7 @@ import pytest
 from ai_coding.domain.message import ChatMessage
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.memory.note import MemoryNote, NoteKind
+from ai_coding.memory.relevance import rank_notes_detailed
 from ai_coding.memory.service import MemoryService
 from ai_coding.memory.store import MemoryStore
 
@@ -307,3 +308,43 @@ def test_r10c_since_days_of_an_empty_string_is_not_a_silent_empty_recall(tmp_pat
     # interpretation would do.
     assert [hit.note.id for hit in hits] == ["a"]
     assert diagnostics.index_summary is not None
+
+
+def test_r10_only_the_notes_the_model_saw_count_as_a_use(tmp_path):
+    """A use is something the model was shown, not something that ranked.
+
+    `docs/data-contracts.md` and `docs/features.md` both state this invariant
+    ("被过滤掉的候选不算使用（模型没看见它）"), and nothing pinned it: replacing
+    `touch_notes([hit.note.id for hit in hits])` with a touch of every candidate
+    left the whole suite green.  The corpus matters — with one matching note the
+    two behaviours are indistinguishable.
+
+    Six notes here all cover 「依赖管理 uv」 completely, so all six clear the
+    relevance floor, the threshold and the band (measured: `limit=None` keeps all
+    six). `k=1` returns exactly one of them. Touching every candidate would
+    record six uses where the model saw one, which is not a rounding error: it
+    feeds `hits >= 3 -> importance + 1` and the eviction value function
+    `importance + 0.5*min(hits,4) + 0.5*freshness` with signal the model never
+    produced. Two recalls of the same query would then promote a note on the
+    strength of a `k` the caller chose, not of anything recalled.
+    """
+    store = MemoryStore(tmp_path / "m.json")
+    texts = ("依赖管理用 uv 安装", "依赖管理用 uv 升级", "依赖管理用 uv 锁定",
+             "依赖管理用 uv 发布", "依赖管理用 uv 测试", "依赖管理用 uv 部署")
+    for index, text in enumerate(texts):
+        store.add_note(MemoryNote(id=f"f{index}", text=text, kind=NoteKind.FACT,
+                                  created_time="2026-09-25T00:00:00+00:00"))
+    service = MemoryService(store)
+
+    # The premise: all six really do clear the gate, so "only one was touched"
+    # is a decision about k and not about the gates rejecting the rest.
+    unranked = rank_notes_detailed(store.active(), "依赖管理 uv", limit=len(texts))
+    assert [hit.note.id for hit in unranked.kept] == [f"f{i}" for i in range(6)]
+
+    hits, _diagnostics = asyncio.run(
+        service.recall_with_diagnostics("依赖管理 uv", k=1)
+    )
+
+    assert [hit.note.id for hit in hits] == ["f0"]
+    counts = {note.id: note.hits for note in store.active()}
+    assert counts == {"f0": 1, "f1": 0, "f2": 0, "f3": 0, "f4": 0, "f5": 0}

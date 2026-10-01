@@ -301,7 +301,7 @@ flowchart TB
   "near_misses": [               // 未通过门禁、但分数最高的 2-3 条，明确标注「未经证实」
     {"id","kind","score","relevance","preview"}
   ],
-  "index": {                     // 只在 no_match 时给，且有界（<= ~200 字符）
+  "index": {                     // 只在 no_match 时给，且有界（实测 315–317 字符，见下）
     "active": 47, "by_kind": {"fact":20,"decision":12,"preference":8,"open_thread":7},
     "recent": [{"id","kind","preview"}]        // 最多 3 条
   },
@@ -410,7 +410,7 @@ memory:
 
 | 文件 | 改什么 |
 |---|---|
-| `ai_coding/tools/memory_search_tool.py` | 新增 `scope` / `since_days` / `include_near_misses`；`data` 变成 §5.2 的结构；`no_match` 时的 `output` 换成可行动文案；`index` 地图有界（上限 ~200 字符）；「没找到」仍然 `success=True` |
+| `ai_coding/tools/memory_search_tool.py` | 新增 `scope` / `since_days` / `include_near_misses`；`data` 变成 §5.2 的结构；`no_match` 时的 `output` 换成可行动文案；`index` 地图有界（**实测 315–317 字符**，断言上限 400，见下）；「没找到」仍然 `success=True` |
 | `ai_coding/memory/service.py` | `recall_notes(..., with_diagnostics=True)` 返回 `(hits, diagnostics)`（默认 `False`，既有调用不变）；诊断里含 `terms_known/unknown`、`near_misses`、`index_summary` |
 
 ### 6.4 R10d — 可选的语义第二意见
@@ -473,6 +473,16 @@ memory:
 24. `near_misses` 最多 3 条、按分数降序、都**不是** `notes` 里的。
 25. `include_near_misses=false` 时不返回该字段。
 26. `index` 地图只在 `no_match` 时给，且有字符上限（构造 500 条笔记，断言长度有界）。
+    **实现口径与本节的差异（已记录，未消除）**：本节预算写的是「~200 字符」，
+    落地断言是 `<= 400`，实测 **315**（本仓 52 条语料循环到 500 条）与 **317**
+    （验收脚本那份 40–88 字符的语料；不加上限会是 410）。三份文档此前还都写着
+    「500 条记忆…224 字符」，那个数字来自 fix round 2 之前的 8 字符 fixture，
+    已被淘汰。**为什么不对齐到 200**：地图的大小由 `_PREVIEW_CHARS=40` × 3 条预览
+    加上 id/kind 决定，压到 200 以内只能砍预览长度，而预览正是「未命中的时候给模型
+    一点抓手」这条设计的目的（§5.2）。**为什么不改断言**：400 是这轮实际验证过的上限，
+    改成 200 就得同时证明新的预览长度不损失可发现性——那是 prompt 预算的取舍，
+    不是检索轮次顺手能定的。**当前口径**：预算是「有界」，不是某个具体数字；
+    上限由测试钉在 400，实测 315–317。
 27. `index.by_kind` 与实际 active 笔记一致（含被 supersede 的不算）。
 28. `scope` 过滤生效；未知 scope 返回空而非报错。
 29. `since_days` 过滤生效（用固定 now 注入）。

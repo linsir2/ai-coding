@@ -340,7 +340,7 @@ import `relevance` / `store` / `service` 就会变成在给自己打分，一次
 ```bash
 .venv/bin/python scripts/retrieval_cases.py                        # 分类指标表 + missed/spurious
 .venv/bin/python scripts/retrieval_cases.py --only-paraphrase      # 把最难的改述类打全
-.venv/bin/python scripts/retrieval_cases.py --check                # 门禁；不达标退出码非 0（CI 调这个）
+.venv/bin/python scripts/retrieval_cases.py --check                # 门禁；不达标退出码非 0（本地门禁，CI 目前不调）
 ```
 
 实测基线（`--check` 退出 0）：
@@ -380,19 +380,19 @@ all                      R@1=0.72 R@3=0.85 R@5=0.85 MRR=0.78 FP@5=0.35 no-answer
 
 ### `scripts/r10_cases.py` — 本轮验收
 
-离线 16 条，形状与 `scripts/r9_cases.py` 一致（每条是 `async def name(tmp) -> (ok, detail)`，
+离线 22 条，形状与 `scripts/r9_cases.py` 一致（每条是 `async def name(tmp) -> (ok, detail)`，
 `--only NAME` 跑单条）。分组：
 
 | 组 | 钉的是什么 |
 |---|---|
-| 两道门禁 | 地板挡掉响亮的无关笔记 / BM25 偏好具体那条 / band 砍掉尾巴 / 索引里没有的词召回为空 |
+| 三道门禁 | 地板挡掉响亮的无关笔记 / BM25 偏好具体那条 / band 砍掉尾巴 / **`threshold` 在 band 不起作用时仍然是门** / 索引里没有的词召回为空 |
 | 那个已知的洞 | `the_decoy_still_leaks_and_says_so`：诱饵**应该**被返回，且只凭 `cli` 一个词。这条断言的是**被接受的残留**，钉住它是为了防止有人日后顺手「修」掉 |
-| 使用信号 | 命中记一次 / 未命中什么都不写 / 提升规则真的可达 |
-| 工具面 | 未命中有结构且可行动 / 索引概览有界（500 条记忆的 JSON 实测 224 字符）/ 过滤在排序之前 / 过滤清空候选集时诊断仍然成立 / `since_days=""` 不是静默空召回 |
+| 使用信号 | 命中记一次 / 未命中什么都不写 / **只有模型真正看见的那几条算使用**（6 条过门槛、`k=1` 只记 1 次）/ 提升规则真的可达 |
+| 工具面 | 未命中有结构且可行动 / 索引概览有界（500 条记忆的 JSON 实测 315 字符）/ 过滤在排序之前 / 过滤清空候选集时诊断仍然成立 / **空索引与「分不出词」的查询都不许说「用词都认识」** / **词汇缺席只说词、不说内容在不在** / `since_days=""` 不是静默空召回 |
 | 闭环 | 写 → 召回 → 整理；召回与收割并发写同一个 store |
 
 ```bash
-.venv/bin/python scripts/r10_cases.py                        # 16/16
+.venv/bin/python scripts/r10_cases.py                        # 22/22
 .venv/bin/python scripts/r10_cases.py --only the_decoy_still_leaks_and_says_so
 ```
 

@@ -470,6 +470,88 @@ async def a_vocabulary_miss_does_not_claim_the_content_is_absent(
     return ok, f"unknown={data.get('terms_unknown')}"
 
 
+async def the_threshold_is_still_a_gate_when_the_band_is_not(tmp: Path) -> tuple[bool, str]:
+    """spec 7 case 8, which the plan dropped: `threshold` 仍然生效.
+
+    It had zero coverage — deleting `item.score >= resolved.threshold` left all
+    1301 tests green. The band is switched off here so the threshold is the only
+    clause that can reject the second note: it covers the whole query, so the
+    relevance floor never touches it, and it scores 0.2417.
+
+    The band cannot stay at its default, and the reason corrects a natural
+    assumption. **At the shipped defaults the threshold is provably never the
+    binding constraint**: `weight_rank = 0.55` gives the best-BM25 note at least
+    `0.55 * (raw/best_raw) = 0.55`, so `best_score >= 0.55` whenever anything
+    scores, and the band floor `0.55 * 0.55 = 0.3025` is already above
+    `threshold = 0.25`. Measured over 400 random corpora the minimum `best_score`
+    with any BM25 > 0 was exactly 0.55 and the floor never dipped below the
+    threshold; over 20 000 notes, 14 805 cleared `min_relevance` and were
+    rejected, and **zero** of those were rejected by the threshold alone. It is
+    a compatibility floor for configs that lower the band or raise the threshold,
+    which is exactly what the spec case asks for.
+    """
+    notes = [
+        _note("top", "支付服务超时阈值配置在配置文件里", age_days=1),
+        _note("mid", f"支付服务超时阈值{'与查询无关的背景说明' * 60}", importance=1,
+              age_days=300),
+    ]
+    query = "支付服务超时阈值"
+    gated = rank_notes_detailed(
+        notes, query, params=RecallParams(threshold=0.25, relative_band=0.0), now=NOW
+    )
+    ungated = rank_notes_detailed(
+        notes, query, params=RecallParams(threshold=0.0, relative_band=0.0), now=NOW
+    )
+    mid = next(hit for hit in gated.kept + gated.rejected if hit.note.id == "mid")
+    ok = (
+        [hit.note.id for hit in gated.kept] == ["top"]
+        and [hit.note.id for hit in ungated.kept] == ["top", "mid"]
+        and mid.relevance >= 0.25
+        and mid.score < 0.25
+    )
+    return ok, (
+        f"mid relevance={mid.relevance:.3f} score={mid.score:.4f} "
+        f"kept={[h.note.id for h in gated.kept]} "
+        f"threshold_off={[h.note.id for h in ungated.kept]}"
+    )
+
+
+async def only_what_the_model_saw_counts_as_a_use(tmp: Path) -> tuple[bool, str]:
+    """A use is something the model was shown, not something that ranked.
+
+    Both `docs/data-contracts.md` and `docs/features.md` assert this, and
+    nothing pinned it: touching every candidate instead of the returned hits
+    left all 1301 tests green. The corpus is the point — with a single matching
+    note the two behaviours are indistinguishable, so all six notes here cover
+    「依赖管理 uv」 completely and clear every gate (measured with `limit=None`:
+    all six kept). `k=1` returns one of them.
+
+    The cost of getting it wrong is not bookkeeping tidiness. `hits >= 3 ->
+    importance + 1` and the eviction value function both read this column, so
+    six fabricated uses promote a note two recalls earlier than real use would,
+    on the strength of a `k` the caller picked.
+    """
+    texts = ("依赖管理用 uv 安装", "依赖管理用 uv 升级", "依赖管理用 uv 锁定",
+             "依赖管理用 uv 发布", "依赖管理用 uv 测试", "依赖管理用 uv 部署")
+    notes = [_note(f"f{index}", text, age_days=3) for index, text in enumerate(texts)]
+    service, store = _service(tmp, notes)
+
+    # The premise: the gates really do clear all six, so "only one was touched"
+    # is a decision about k rather than the gates rejecting the rest.
+    unranked = rank_notes_detailed(store.active(), "依赖管理 uv", now=NOW, limit=len(texts))
+    hits, _diagnostics = await service.recall_with_diagnostics("依赖管理 uv", k=1)
+    counts = {note.id: note.hits for note in store.active()}
+    ok = (
+        [hit.note.id for hit in unranked.kept] == [f"f{index}" for index in range(6)]
+        and [hit.note.id for hit in hits] == ["f0"]
+        and counts == {"f0": 1, **{f"f{index}": 0 for index in range(1, 6)}}
+    )
+    return ok, (
+        f"gate_cleared={len(unranked.kept)} "
+        f"returned={[h.note.id for h in hits]} hits={counts}"
+    )
+
+
 async def the_gate_clause_still_fires_when_every_word_is_known(
     tmp: Path,
 ) -> tuple[bool, str]:
@@ -722,6 +804,9 @@ OFFLINE: dict[str, CaseFn] = {
     "the_floor_kills_a_loud_irrelevant_note": the_floor_kills_a_loud_irrelevant_note,
     "bm25_prefers_the_specific_note": bm25_prefers_the_specific_note,
     "the_relative_band_cuts_the_tail": the_relative_band_cuts_the_tail,
+    "the_threshold_is_still_a_gate_when_the_band_is_not": (
+        the_threshold_is_still_a_gate_when_the_band_is_not
+    ),
     "a_query_nothing_in_memory_says_recalls_nothing": (
         a_query_nothing_in_memory_says_recalls_nothing
     ),
@@ -730,6 +815,7 @@ OFFLINE: dict[str, CaseFn] = {
     # the usage signal
     "a_hit_counts_as_a_use": a_hit_counts_as_a_use,
     "a_miss_touches_nothing": a_miss_touches_nothing,
+    "only_what_the_model_saw_counts_as_a_use": only_what_the_model_saw_counts_as_a_use,
     "promotion_becomes_reachable_from_real_use": (
         promotion_becomes_reachable_from_real_use
     ),

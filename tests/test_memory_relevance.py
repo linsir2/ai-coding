@@ -401,3 +401,58 @@ def test_r10b_the_blended_rank_term_is_bm25_not_coverage():
     assert order[:2] == ["short", "long"]
     # and the two terms genuinely disagree, so this cannot pass by accident
     assert result.kept[0].relevance < result.kept[1].relevance
+
+
+def test_r10b_threshold_still_gates_when_the_band_does_not():
+    """spec 7 case 8: ``threshold`` is still a live gate (old-config compatibility).
+
+    It had **zero** coverage before this: deleting ``item.score >= resolved.threshold``
+    left the whole suite green. What makes this a test of the threshold rather
+    than of the band is that the band is switched off, so the only clause left
+    that can reject ``mid`` is the threshold. ``mid`` covers the whole query
+    (relevance 1.00) so the floor never touches it, and it scores 0.2417 against
+    a threshold of 0.25.
+
+    The band cannot be left at its default here, and the reason is worth
+    recording because it corrects a natural assumption about this gate. At the
+    shipped defaults the threshold is **provably never the binding constraint**:
+    ``weight_rank = 0.55`` means the best-BM25 note scores at least
+    ``0.55 * (raw/best_raw) = 0.55``, so ``best_score >= 0.55`` whenever any note
+    scores at all, and the band floor ``0.55 * 0.55 = 0.3025`` already exceeds
+    ``threshold = 0.25``. Anything clearing the band therefore clears the
+    threshold, and dropping the threshold clause would change no recall on any
+    corpus at the shipped defaults. Measured over 400 random corpora (minimum
+    ``best_score`` with any BM25 > 0 was exactly 0.55, the floor never dipped
+    below the threshold) and over a 20 000-note corpus (14 805 notes cleared
+    ``min_relevance`` and were rejected; **zero** were rejected by the threshold
+    alone).
+
+    So the clause is a compatibility floor, not a second active gate: it bites
+    only when a config lowers ``relative_band`` or raises ``recall_threshold``.
+    That is exactly what spec 7 case 8 asks for, and it is why the test has to
+    disable the band to observe it.
+    """
+    notes = [
+        _note("top", "支付服务超时阈值配置在配置文件里", age_days=1),
+        # Same query coverage as "top" (relevance 1.00), so only the blended
+        # score can reject it: long, stale and unimportant.  `importance=1` is
+        # load-bearing — the note's default importance lands the score at 0.317,
+        # which is over the threshold and would make this test vacuous.
+        _note("mid", f"支付服务超时阈值{'与查询无关的背景说明' * 60}",
+              importance=1, age_days=300),
+    ]
+    params = RecallParams(threshold=0.25, relative_band=0.0)
+
+    gated = rank_notes_detailed(notes, "支付服务超时阈值", params=params, now=NOW)
+    ungated = rank_notes_detailed(
+        notes, "支付服务超时阈值", params=RecallParams(threshold=0.0, relative_band=0.0),
+        now=NOW,
+    )
+
+    mid = next(h for h in gated.kept + gated.rejected if h.note.id == "mid")
+    assert mid.relevance >= 0.25, "the relevance floor must not be what rejects it"
+    assert 0.0 <= mid.score < 0.25, f"score {mid.score} must sit under the threshold"
+    assert [hit.note.id for hit in gated.kept] == ["top"]
+    # And the control: with the threshold at 0 the same corpus returns both, so
+    # this cannot pass by the fixture being unrecoverable.
+    assert [hit.note.id for hit in ungated.kept] == ["top", "mid"]
