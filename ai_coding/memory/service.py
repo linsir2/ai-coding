@@ -28,15 +28,20 @@ fallback: without an extractor it writes nothing instead of storing raw chatter.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
 from ai_coding.domain.message import ChatMessage
 from ai_coding.memory.note import MemoryNote, NoteKind, new_note
-from ai_coding.memory.relevance import RecallParams, ScoredNote, parse_time
+from ai_coding.memory.relevance import (
+    RecallParams,
+    ScoredNote,
+    parse_time,
+    rank_notes_detailed,
+)
 from ai_coding.memory.schema import HarvestCandidate
 from ai_coding.memory.store import MemoryStore
 from ai_coding.memory.tokenize import similarity
@@ -49,7 +54,9 @@ Extractor = Callable[
 __all__ = [
     "ConsolidateReport",
     "HarvestReport",
+    "IndexSummary",
     "MemoryService",
+    "RecallDiagnostics",
     "asyncio_guard",
 ]
 
@@ -99,6 +106,32 @@ class HarvestReport:
     @property
     def changed(self) -> bool:
         return bool(self.added or self.updated or self.superseded)
+
+
+@dataclass(frozen=True)
+class IndexSummary:
+    """A bounded map of what is in memory, for the model to aim its next query at."""
+
+    total: int = 0
+    by_kind: Mapping[str, int] = field(default_factory=dict)
+    recent: tuple[tuple[str, str, str], ...] = ()   # (id, kind, preview)
+
+
+@dataclass(frozen=True)
+class RecallDiagnostics:
+    """Everything needed to explain a recall, and to retry it.
+
+    ``semantic_unavailable`` is False in every case this round builds; it
+    exists so the tool payload does not have to change shape when the
+    optional embeddings tier lands.
+    """
+
+    terms_known: tuple[str, ...] = ()
+    terms_unknown: tuple[str, ...] = ()
+    near_misses: tuple[ScoredNote, ...] = ()
+    index_summary: IndexSummary | None = None
+    semantic_unavailable: bool = False
+    no_vocabulary_match: bool = False
 
 
 @dataclass(frozen=True)
@@ -158,6 +191,70 @@ class MemoryService:
 
     # ---- recall -----------------------------------------------------------
 
+    _PREVIEW_CHARS = 40
+    _INDEX_RECENT = 3
+
+    def index_summary(self) -> IndexSummary:
+        """Counts by kind plus a few previews.  Bounded on purpose: a failed
+        search must not return the whole index back into the context."""
+        notes = self._store.active()
+        by_kind: dict[str, int] = {}
+        for note in notes:
+            by_kind[note.kind.value] = by_kind.get(note.kind.value, 0) + 1
+        newest = sorted(
+            notes,
+            key=lambda note: (_invert_time(note.updated_time or note.created_time), note.id),
+        )[: self._INDEX_RECENT]
+        return IndexSummary(
+            total=len(notes),
+            by_kind=by_kind,
+            recent=tuple(
+                (note.id, note.kind.value, note.text[: self._PREVIEW_CHARS])
+                for note in newest
+            ),
+        )
+
+    async def recall_with_diagnostics(
+        self,
+        query_or_history: str | Sequence[ChatMessage],
+        *,
+        k: int | None = None,
+        now: datetime | None = None,
+        limit: int | None = None,
+    ) -> tuple[list[ScoredNote], RecallDiagnostics]:
+        """Rank, and also report why — so a caller can say what to try next."""
+        if not self.enabled:
+            return [], RecallDiagnostics()
+        supply = int(self._get("max_per_turn_injections", 3)) if k is None else int(k)
+        if supply <= 0:
+            return [], RecallDiagnostics()
+        query = _query_text(query_or_history)
+        if not query.strip():
+            return [], RecallDiagnostics()
+        try:
+            result = rank_notes_detailed(
+                self._store.active(),
+                query,
+                params=self._params(),
+                now=now or _now(),
+                limit=supply if limit is None else limit,
+            )
+        except Exception:  # noqa: BLE001 — recall is best-effort
+            return [], RecallDiagnostics()
+        hits = list(result.kept)
+        if hits:
+            try:
+                self._store.touch_notes([hit.note.id for hit in hits])
+            except Exception:  # noqa: BLE001
+                pass
+        return hits, RecallDiagnostics(
+            terms_known=result.terms_known,
+            terms_unknown=result.terms_unknown,
+            near_misses=result.rejected[:3],
+            index_summary=self.index_summary(),
+            no_vocabulary_match=result.no_vocabulary_match,
+        )
+
     async def recall_notes(
         self,
         query_or_history: str | Sequence[ChatMessage],
@@ -166,29 +263,14 @@ class MemoryService:
         now: datetime | None = None,
         limit: int | None = None,
     ) -> list[ScoredNote]:
-        """Rank memories for a query (or a message history); [] when disabled."""
-        if not self.enabled:
-            return []
-        supply = int(self._get("max_per_turn_injections", 3)) if k is None else int(k)
-        if supply <= 0:
-            return []
-        query = _query_text(query_or_history)
-        if not query.strip():
-            return []
-        try:
-            hits = self._store.search_scored(
-                query,
-                params=self._params(),
-                now=now or _now(),
-                limit=supply if limit is None else limit,
-            )
-        except Exception:  # noqa: BLE001 — recall is best-effort
-            return []
-        if hits:
-            try:
-                self._store.touch_notes([hit.note.id for hit in hits])
-            except Exception:  # noqa: BLE001 — a hit must not fail because bookkeeping did
-                pass
+        """Rank memories for a query (or a message history); [] when disabled.
+
+        Thin wrapper over :meth:`recall_with_diagnostics`, so the touch-on-hit
+        and the suppression rules live in exactly one place.
+        """
+        hits, _diagnostics = await self.recall_with_diagnostics(
+            query_or_history, k=k, now=now, limit=limit
+        )
         return hits
 
     # ---- the always-on constraint block ----------------------------------
