@@ -176,7 +176,7 @@ class MemoryService:
         if not query.strip():
             return []
         try:
-            return self._store.search_scored(
+            hits = self._store.search_scored(
                 query,
                 params=self._params(),
                 now=now or _now(),
@@ -184,6 +184,12 @@ class MemoryService:
             )
         except Exception:  # noqa: BLE001 — recall is best-effort
             return []
+        if hits:
+            try:
+                self._store.touch_notes([hit.note.id for hit in hits])
+            except Exception:  # noqa: BLE001 — a hit must not fail because bookkeeping did
+                pass
+        return hits
 
     # ---- the always-on constraint block ----------------------------------
 

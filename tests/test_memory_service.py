@@ -4,11 +4,13 @@ Never raises; offline fallback extracts recent user/assistant signal when no
 extractor is provided.
 """
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from ai_coding.domain.message import ChatMessage
+from ai_coding.memory.note import MemoryNote
 from ai_coding.memory.service import MemoryService
 from ai_coding.memory.store import MemoryStore
 
@@ -93,3 +95,50 @@ async def test_extractor_injected_for_remember(tmp_path):
     svc = MemoryService(store, extractor=extractor, config=_cfg())
     await svc.remember([_user("x")], "the deal")
     assert "summary:the deal" in {e.text for e in store.all()}
+
+
+# ---- R10b: the usage signal is wired -----------------------------------------
+
+
+def test_r10b_a_hit_counts_as_a_use(tmp_path):
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(
+        MemoryNote(id="a", text="项目依赖统一用 uv 管理", importance=4,
+                   created_time="2026-09-20T00:00:00+00:00")
+    )
+    service = MemoryService(store)
+
+    hits = asyncio.run(service.recall_notes("依赖怎么装", k=3))
+
+    assert [hit.note.id for hit in hits] == ["a"]
+    assert store.get("a").hits == 1
+    assert store.get("a").last_used != ""
+
+
+def test_r10b_a_miss_touches_nothing(tmp_path):
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(
+        MemoryNote(id="a", text="项目依赖统一用 uv 管理", importance=4,
+                   created_time="2026-09-20T00:00:00+00:00")
+    )
+    service = MemoryService(store)
+
+    assert asyncio.run(service.recall_notes("Kubernetes 集群有多少节点", k=3)) == []
+    assert store.get("a").hits == 0
+
+
+def test_r10b_consolidation_can_now_promote_from_real_use(tmp_path):
+    """`hits >= 3 -> importance + 1` was unreachable while nothing touched on recall."""
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(
+        MemoryNote(id="a", text="项目依赖统一用 uv 管理", importance=3,
+                   created_time="2026-09-20T00:00:00+00:00")
+    )
+    service = MemoryService(store)
+    for _ in range(3):
+        asyncio.run(service.recall_notes("依赖怎么装", k=3))
+
+    report = asyncio.run(service.consolidate(force=True))
+
+    assert "a" in report.promoted
+    assert store.get("a").importance == 4

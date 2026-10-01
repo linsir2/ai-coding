@@ -9,7 +9,7 @@ layer uses.
 
 import json
 
-from ai_coding.memory.note import NoteKind, new_note
+from ai_coding.memory.note import MemoryNote, NoteKind, new_note
 from ai_coding.memory.store import MemoryStore
 
 
@@ -174,3 +174,29 @@ def test_deprecated_add_and_search_still_work(tmp_path):
     store.add("run tests with pytest")
     hits = store.search(["pytest"])
     assert [h.text for h in hits] == ["run tests with pytest"]
+
+
+# ---- R10b: a recall finally counts as a use ----------------------------------
+
+
+def test_r10b_touch_notes_updates_only_the_given_ids(tmp_path):
+    store = _store(tmp_path)
+    store.add_note(MemoryNote(id="a", text="依赖用 uv", created_time="2026-09-01T00:00:00+00:00"))
+    store.add_note(MemoryNote(id="b", text="压缩有四层", created_time="2026-09-01T00:00:00+00:00"))
+
+    touched = store.touch_notes(["a", "does-not-exist"])
+
+    assert touched == 1
+    assert store.get("a").hits == 1
+    assert store.get("a").last_used
+    assert store.get("b").hits == 0
+    assert store.get("b").last_used == ""
+
+
+def test_r10b_touch_notes_survives_a_reload(tmp_path):
+    store = _store(tmp_path)
+    store.add_note(MemoryNote(id="a", text="依赖用 uv", created_time="2026-09-01T00:00:00+00:00"))
+
+    store.touch_notes(["a"])
+
+    assert MemoryStore(tmp_path / "m.json").get("a").hits == 1

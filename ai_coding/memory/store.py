@@ -172,6 +172,29 @@ class MemoryStore:
 
         return self._mutate(_do)
 
+    def touch_notes(self, note_ids: Sequence[str]) -> int:
+        """Record one use per id; return how many were actually touched.
+
+        Batched through ``_mutate`` so a five-hit recall writes the file once.
+        Unknown ids are ignored rather than raising: this is bookkeeping on the
+        read path and must never become a way for recall to fail.
+        """
+        wanted = set(note_ids)
+        if not wanted:
+            return 0
+
+        def _do() -> int:
+            stamp = now_utc()
+            touched = 0
+            for index, note in enumerate(self._notes):
+                if note.id not in wanted:
+                    continue
+                self._notes[index] = note.touch(stamp)
+                touched += 1
+            return touched
+
+        return self._mutate(_do)
+
     def delete(self, note_id: str) -> bool:
         """Delete by id; returns True when removed."""
         return self._mutate(lambda: _drop_by_id(self._notes, note_id))
