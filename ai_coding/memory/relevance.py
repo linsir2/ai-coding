@@ -33,21 +33,23 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from ai_coding.memory.note import MemoryNote
 from ai_coding.memory.tokenize import tokenize
 
 __all__ = [
+    "RankingResult",
     "RecallParams",
     "RecallScorer",
     "ScoredNote",
+    "bm25_scores",
     "coverage",
     "evidence_rank",
     "parse_time",
     "rank_notes",
+    "rank_notes_detailed",
     "recency",
-    "score_note",
 ]
 
 DEFAULT_KIND_BOOSTS: Mapping[str, float] = {
@@ -64,14 +66,24 @@ _EVIDENCE_RANK: Mapping[str, int] = {"tool": 0, "model": 1, "": 1}
 
 @dataclass(frozen=True)
 class RecallParams:
-    """Tunable recall behaviour (defaults validated against the R3 cases)."""
+    """Tunable recall behaviour (defaults validated against the R3 cases).
+
+    ``threshold`` and ``min_relevance`` are two different gates and both stay:
+    the first is the floor on the blended score, the second is a hard floor on
+    relevance alone. 0.05 measured as no gate at all (spec 1.1) — recency and
+    importance sum to 0.35, above the 0.25 threshold — so it is 0.25 now.
+    """
 
     threshold: float = 0.25
-    min_relevance: float = 0.05
-    weight_relevance: float = 0.55
+    min_relevance: float = 0.25
+    relative_band: float = 0.55
+    weight_rank: float = 0.55
     weight_recency: float = 0.20
     weight_importance: float = 0.15
     half_life_days: float = 14.0
+    bm25_k1: float = 1.2
+    bm25_b: float = 0.75
+    recency_source: Literal["created", "accessed"] = "created"
     kind_boosts: Mapping[str, float] = field(
         default_factory=lambda: dict(DEFAULT_KIND_BOOSTS)
     )
@@ -81,18 +93,35 @@ class RecallParams:
         """Build from ``MemoryConfig`` (duck-typed; fakes in tests work too)."""
         return cls(
             threshold=float(getattr(config, "recall_threshold", 0.25)),
-            min_relevance=float(getattr(config, "recall_min_relevance", 0.05)),
+            min_relevance=float(getattr(config, "recall_min_relevance", 0.25)),
+            relative_band=float(getattr(config, "recall_relative_band", 0.55)),
             half_life_days=float(getattr(config, "recency_half_life_days", 14.0)),
         )
 
 
 @dataclass(frozen=True)
 class ScoredNote:
-    """A note with the two numbers that explain why it was (not) recalled."""
+    """A note with the numbers that explain why it was (not) recalled."""
 
     note: MemoryNote
     score: float
     relevance: float
+    matched_terms: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RankingResult:
+    """What a search kept, what it dropped, and why the two differ.
+
+    ``rejected`` is not noise: it is the "closest but unproven" set that
+    R10c hands back so a failed search can suggest a different query.
+    """
+
+    kept: tuple[ScoredNote, ...] = ()
+    rejected: tuple[ScoredNote, ...] = ()
+    terms_known: tuple[str, ...] = ()
+    terms_unknown: tuple[str, ...] = ()
+    no_vocabulary_match: bool = False
 
 
 class RecallScorer(Protocol):
@@ -107,12 +136,6 @@ class RecallScorer(Protocol):
         now: datetime,
         limit: int | None = ...,
     ) -> list[ScoredNote]: ...
-
-
-@dataclass(frozen=True)
-class _Stats:
-    df: Counter[str]
-    n_docs: int
 
 
 def parse_time(value: str) -> datetime | None:
@@ -163,12 +186,64 @@ def coverage(
     return max(0.0, min(hit / total, 1.0))
 
 
-def _stats(notes: Sequence[MemoryNote]) -> _Stats:
-    tokenised = [tokenize(note.text) for note in notes]
+def bm25_scores(
+    notes: Sequence[MemoryNote],
+    query_tokens: Sequence[str],
+    *,
+    k1: float = 1.2,
+    b: float = 0.75,
+) -> dict[str, float]:
+    """Okapi BM25 per note id.
+
+    Ranking only — never a gate (spec 1.1: BM25's length normalisation saturates
+    coverage at 1.0 for short notes, which is why relevance stays the gate).
+    The caller is responsible for any threshold.
+    """
+    corpus = _corpus_of(notes)
+    totals = {note.id: 0.0 for note in notes}
+    if not corpus.n_docs:
+        return totals
+    for term in dict.fromkeys(query_tokens):
+        freq_in_corpus = corpus.df.get(term, 0)
+        if not freq_in_corpus:
+            continue
+        idf = _idf(term, corpus.df, corpus.n_docs)
+        for index, tokens in enumerate(corpus.tokens):
+            freq = tokens.count(term)
+            if not freq:
+                continue
+            length = corpus.lengths[index] or 1
+            norm = 1 - b + b * (length / corpus.avg_len)
+            totals[corpus.notes[index].id] += idf * (freq * (k1 + 1)) / (freq + k1 * norm)
+    return totals
+
+
+@dataclass(frozen=True)
+class _Corpus:
+    """Everything BM25 needs, computed once per query instead of once per note."""
+
+    notes: tuple[MemoryNote, ...]
+    tokens: tuple[tuple[str, ...], ...]
+    lengths: tuple[int, ...]
+    avg_len: float
+    df: Mapping[str, int]
+    n_docs: int
+
+
+def _corpus_of(notes: Sequence[MemoryNote]) -> _Corpus:
+    tokenised = tuple(tuple(tokenize(note.text)) for note in notes)
     df: Counter[str] = Counter()
     for tokens in tokenised:
         df.update(set(tokens))
-    return _Stats(df=df, n_docs=len(notes))
+    lengths = tuple(len(tokens) for tokens in tokenised)
+    return _Corpus(
+        notes=tuple(notes),
+        tokens=tokenised,
+        lengths=lengths,
+        avg_len=(sum(lengths) / len(lengths)) if lengths else 0.0,
+        df=df,
+        n_docs=len(notes),
+    )
 
 
 def evidence_rank(note: MemoryNote) -> int:
@@ -181,30 +256,107 @@ def evidence_rank(note: MemoryNote) -> int:
     return _EVIDENCE_RANK.get(str(getattr(note, "evidence", "") or ""), 1)
 
 
-def score_note(
-    note: MemoryNote,
-    query_tokens: Sequence[str],
+def _time_of(note: MemoryNote, params: RecallParams) -> str:
+    if params.recency_source == "accessed" and note.last_used:
+        return note.last_used
+    return note.created_time
+
+
+def rank_notes_detailed(
+    notes: Sequence[MemoryNote],
+    query: str,
     *,
-    stats: _Stats,
-    params: RecallParams,
-    now: datetime,
-) -> tuple[float, float]:
-    """Return ``(score, relevance)`` for one note."""
-    relevance = coverage(
-        query_tokens, tokenize(note.text), df=stats.df, n_docs=stats.n_docs
+    params: RecallParams | None = None,
+    now: datetime | None = None,
+    limit: int | None = None,
+) -> RankingResult:
+    """Rank with BM25, gate on relevance, then band against the best score.
+
+    Two gates with two different jobs (spec 1.6): ``min_relevance`` decides
+    whether a note is *about* the query at all, ``relative_band`` decides
+    whether it is *in the running*. The band is a share of the best score in
+    this query, which is why it cannot be replaced by an absolute threshold —
+    an absolute one does not transfer across queries.
+    """
+    active = [note for note in notes if note.is_active]
+    resolved = params or RecallParams()
+    moment = now or datetime.now(timezone.utc)
+    query_tokens = tokenize(query)
+    if not query_tokens or not active:
+        return RankingResult()
+
+    corpus = _corpus_of(active)
+    known = tuple(
+        term for term in dict.fromkeys(query_tokens) if corpus.df.get(term, 0) > 0
     )
-    freshness = recency(
-        note.created_time, now=now, half_life_days=params.half_life_days
+    unknown = tuple(
+        term for term in dict.fromkeys(query_tokens) if corpus.df.get(term, 0) == 0
     )
-    importance = max(0.0, min((note.importance - 1) / 4, 1.0))
-    boost = float(params.kind_boosts.get(note.kind.value, 0.0))
-    score = (
-        params.weight_relevance * relevance
-        + params.weight_recency * freshness
-        + params.weight_importance * importance
-        + boost
+    if not known:
+        # Nothing in memory uses any of these words. Returning the freshest
+        # notes would answer a question nobody asked (spec 1.1).
+        return RankingResult(
+            terms_unknown=unknown, no_vocabulary_match=True
+        )
+
+    raw = bm25_scores(active, query_tokens, k1=resolved.bm25_k1, b=resolved.bm25_b)
+    best_raw = max(raw.values(), default=0.0) or 1.0
+    scored: list[ScoredNote] = []
+    for note in active:
+        doc_tokens = tokenize(note.text)
+        relevance = coverage(
+            query_tokens, doc_tokens, df=corpus.df, n_docs=corpus.n_docs
+        )
+        freshness = recency(
+            _time_of(note, resolved),
+            now=moment,
+            half_life_days=resolved.half_life_days,
+        )
+        importance = max(0.0, min((note.importance - 1) / 4, 1.0))
+        boost = float(resolved.kind_boosts.get(note.kind.value, 0.0))
+        score = (
+            resolved.weight_rank * (raw.get(note.id, 0.0) / best_raw)
+            + resolved.weight_recency * freshness
+            + resolved.weight_importance * importance
+            + boost
+        )
+        present = set(doc_tokens)
+        scored.append(
+            ScoredNote(
+                note=note,
+                score=score,
+                relevance=relevance,
+                matched_terms=tuple(term for term in known if term in present),
+            )
+        )
+
+    best_score = max((item.score for item in scored), default=0.0)
+    floor = resolved.relative_band * best_score
+    kept: list[ScoredNote] = []
+    rejected: list[ScoredNote] = []
+    for item in scored:
+        if (
+            item.relevance >= resolved.min_relevance
+            and item.score >= resolved.threshold
+            and item.score >= floor
+        ):
+            kept.append(item)
+        else:
+            rejected.append(item)
+
+    def order(item: ScoredNote) -> tuple[float, float, int, str]:
+        return (-item.score, -item.relevance, evidence_rank(item.note), item.note.id)
+
+    kept.sort(key=order)
+    rejected.sort(key=order)
+    if limit is not None and limit >= 0:
+        kept = kept[:limit]
+    return RankingResult(
+        kept=tuple(kept),
+        rejected=tuple(rejected),
+        terms_known=known,
+        terms_unknown=unknown,
     )
-    return score, relevance
 
 
 def rank_notes(
@@ -216,34 +368,22 @@ def rank_notes(
     limit: int | None = None,
     scorer: RecallScorer | None = None,
 ) -> list[ScoredNote]:
-    """Rank active notes for ``query``, dropping weak and irrelevant ones."""
-    active = [note for note in notes if note.is_active]
+    """Rank active notes for ``query``, dropping weak and irrelevant ones.
+
+    The list-returning shape every existing caller already uses;
+    ``rank_notes_detailed`` is where the diagnosis lives.
+    """
+    materialised = list(notes)
     resolved = params or RecallParams()
     moment = now or datetime.now(timezone.utc)
     if scorer is not None:
-        return scorer(active, query, params=resolved, now=moment, limit=limit)
-    query_tokens = tokenize(query)
-    if not query_tokens or not active:
-        return []
-    stats = _stats(active)
-    scored: list[ScoredNote] = []
-    for note in active:
-        score, relevance = score_note(
-            note, query_tokens, stats=stats, params=resolved, now=moment
+        return scorer(
+            [note for note in materialised if note.is_active],
+            query,
+            params=resolved,
+            now=moment,
+            limit=limit,
         )
-        if relevance < resolved.min_relevance:  # G1: relevance is its own gate
-            continue
-        if score < resolved.threshold:
-            continue
-        scored.append(ScoredNote(note=note, score=score, relevance=relevance))
-    scored.sort(
-        key=lambda item: (
-            -item.score,
-            -item.relevance,
-            evidence_rank(item.note),
-            item.note.id,
-        )
+    return list(
+        rank_notes_detailed(materialised, query, params=resolved, now=moment, limit=limit).kept
     )
-    if limit is not None and limit >= 0:
-        return scored[:limit]
-    return scored

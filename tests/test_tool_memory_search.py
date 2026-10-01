@@ -115,10 +115,14 @@ async def test_query_can_be_built_from_the_tool_context(tmp_path):
 # ---- R8b: filtering by where a note came from (D-4) ------------------------
 
 
+# These tests assert *which ids come back per evidence filter*, not how they rank.
+# The wording is chosen so every note clears the relevance floor: in a 3-note
+# corpus idf is extreme, so a note that covers only the common bigram scores
+# 0.221 and is gated out, which would fail these for the wrong reason.
 def _evidence_service(tmp_path) -> MemoryService:
     store = MemoryStore(tmp_path / "m.json")
     store.add_note(MemoryNote(id="t1", text="构建用 uv", evidence="tool"))
-    store.add_note(MemoryNote(id="m1", text="构建改用 uv，不要 poetry", evidence="model"))
+    store.add_note(MemoryNote(id="m1", text="构建用 uv，改用别家", evidence="model"))
     store.add_note(MemoryNote(id="l1", text="构建用 uv，老数据", evidence=""))
     return MemoryService(store)
 

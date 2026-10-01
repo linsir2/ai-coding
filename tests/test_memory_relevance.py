@@ -17,7 +17,14 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from ai_coding.memory.note import MemoryNote, NoteKind
-from ai_coding.memory.relevance import RecallParams, coverage, rank_notes, recency
+from ai_coding.memory.relevance import (
+    RecallParams,
+    bm25_scores,
+    coverage,
+    rank_notes,
+    rank_notes_detailed,
+    recency,
+)
 from ai_coding.memory.tokenize import tokenize
 
 NOW = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
@@ -180,3 +187,96 @@ def test_r8_a_lower_score_is_never_reordered_by_evidence():
     weak = _note("weak", "构建用 uv", importance=1, evidence="tool")
     ranked = rank_notes([weak, strong], "构建用什么工具", params=RecallParams(), now=NOW)
     assert [r.note.id for r in ranked] == ["strong", "weak"]
+
+
+# ---- R10b: bm25 ranking, a real floor, and the band ----
+
+
+def test_r10b_bm25_prefers_the_document_that_answers_the_question():
+    notes = [
+        _note("loud", "docs 目录的章节要重写一遍", age_days=0, importance=5),
+        _note("real", "构建流程：make build 会先跑 lint 再编译，产物在 dist/", age_days=1),
+    ]
+    scores = bm25_scores(notes, tokenize("make build 产物在哪"))
+    assert scores["real"] > scores["loud"]
+
+
+def test_r10b_bm25_gives_a_document_that_shares_nothing_a_zero():
+    notes = [_note("a", "payment service timeout"), _note("b", "构建用 make")]
+    scores = bm25_scores(notes, tokenize("完全不相干的查询"))
+    assert scores == {"a": 0.0, "b": 0.0}
+
+
+def test_r10b_the_absolute_floor_kills_a_fresh_important_irrelevant_note():
+    """The measured hole (spec 1.1): 0.20*1.0 + 0.15*1.0 = 0.35 > threshold 0.25."""
+    loud = _note("loud", "今天要把 docs 目录重写一遍", importance=5, age_days=0)
+    real = _note("real", "上下文压缩有四层：L3 落盘、L1 裁剪、L2 信封、L4 摘要", age_days=30)
+    params = RecallParams()
+    assert params.min_relevance == 0.25
+    kept = [hit.note.id for hit in rank_notes([loud, real], "上下文压缩分几层",
+                                               params=params, now=NOW)]
+    assert kept == ["real"]
+
+
+def test_r10b_the_relative_band_drops_the_tail():
+    notes = [
+        _note("best", "上下文压缩有四层", age_days=5),
+        _note("weak", "上下文里有压缩这个词，仅此而已", age_days=5),
+    ]
+    params = RecallParams(relative_band=0.99)
+    result = rank_notes_detailed(notes, "上下文压缩分几层", params=params, now=NOW)
+    assert [hit.note.id for hit in result.kept] == ["best"]
+    assert [hit.note.id for hit in result.rejected] == ["weak"]
+
+
+def test_r10b_matched_terms_lists_only_the_query_terms_that_hit():
+    notes = [_note("a", "上下文压缩有四层", age_days=5)]
+    result = rank_notes_detailed(notes, "上下文压缩有四层", now=NOW)
+    assert result.kept[0].matched_terms
+    assert set(result.kept[0].matched_terms) <= set(tokenize("上下文压缩有四层"))
+
+
+def test_r10b_a_query_the_corpus_never_says_recalls_nothing_rather_than_the_freshest():
+    """Spec 1.1: sorting by freshness alone answers a question nobody asked."""
+    notes = [_note("fresh", "payment service timeout", age_days=0, importance=5)]
+    result = rank_notes_detailed(notes, "Kubernetes 集群有多少节点", now=NOW)
+    assert result.kept == ()
+    assert result.no_vocabulary_match is True
+    assert "kubernetes" in result.terms_unknown
+
+
+def test_r10b_the_decoy_still_leaks_and_says_it_matched_one_word():
+    """Spec 1.6: this is the hole we are NOT fixing. Pin it so nobody re-breaks it.
+
+    What this pins is exactly two things: the decoy survives the gates, and it
+    reports exactly one matched term. That is the whole of R10's obligation
+    here. It is deliberately *not* pinned as a good hit — docs/r10-analysis.md
+    §1.6 records that three candidate gates for it were measured and each one
+    killed paraphrase recall, so the leak is accepted and made visible through
+    matched_terms rather than gated away. The note wording is fixture data
+    chosen so the decoy's coverage clears the floor; it is not the point.
+
+    The third note is load-bearing and was not in the plan. With only the decoy
+    and the honest note, `命令`/`子命` have df=1 against `cli`'s df=2, so idf
+    splits 0.18 / 0.69 / 0.69 and the decoy's relevance is 0.116 — under the
+    0.25 floor, which would gate the very leak this test exists to pin. Giving
+    those terms a second holder restores the shape of the real corpus, where
+    n52 leaks with matched_terms=('cli',), and the decoy lands at 0.33.
+    """
+    decoy = _note("decoy", "今天要把 docs 目录里的 CLI 章节重写一遍", age_days=0, importance=5)
+    honest = _note("honest", "CLI 子命令要在 config 里注册", age_days=30)
+    other = _note("other", "命令和子命在别处的说明文字", age_days=20)
+    result = rank_notes_detailed([decoy, honest, other], "CLI 命令怎么加一个新子命令", now=NOW)
+    leaked = [hit for hit in result.kept if hit.note.id == "decoy"]
+    assert leaked, "spec 1.6 says the decoy is not gated away; if this passes, re-read it"
+    assert len(leaked[0].matched_terms) == 1
+
+
+def test_r10b_recency_source_accessed_is_off_by_default():
+    touched = _note("a", "上下文压缩有四层", age_days=90).touch("2026-09-27T12:00:00Z")
+    query = "上下文压缩有四层"
+    created = rank_notes_detailed([touched], query, now=NOW).kept[0]
+    accessed = rank_notes_detailed(
+        [touched], query, params=RecallParams(recency_source="accessed"), now=NOW
+    ).kept[0]
+    assert created.score < accessed.score
