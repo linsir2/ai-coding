@@ -29,8 +29,10 @@ NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)
 CORPUS = ROOT / "scripts" / "retrieval_corpus.json"
 
 #: What this round promised (docs/superpowers/plans/2026-10-01-r10-retrieval.md).
-#: R@1 is deliberately absent: lexical-only retrieval reaches 0.725, and the
-#: 0.85 in the spec belongs to the semantic tier this round does not build.
+#: R@1 is deliberately ungated: it measures 0.675 today, and the 0.85 the spec
+#: quotes belongs to its semantic tier, which this round does not build.  The
+#: 0.725 in the plan is the figure this round is aiming at, not the one it
+#: starts from — do not read it as the current number.
 # FP@5 is gated at 0.35, not at today's 0.518: a "must not get worse" gate
 # would pass on a round that never improved at all. The spec quotes 0.32;
 # this is the same number re-measured on the shipped corpus, and it is left

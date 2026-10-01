@@ -16,8 +16,15 @@ questions:
     fraction were not labelled relevant.  This is the "confident wrong answer"
     rate, and it is what the R10 gates are meant to move.
   - ``no_answer_ok``: how many of the questions with no answer in the corpus
-    came back empty.  A retrieval change that raises recall by answering
-    *everything* scores badly here, which is the point.
+    came back empty.  This one is **reported, not gated** — no guardrail in
+    ``scripts/retrieval_cases.py`` reads it, and nothing else can catch it
+    either: a no-answer query ``continue``s before the false-positive block, so
+    a ranker that answers all six of them moves this from 4/6 to 0/6 with
+    recall, MRR and ``false_positive_share`` bit-identical.  The gate is left off
+    on purpose (docs/r10-analysis.md §1.6): the one leak that remains is the
+    generic-overlap decoy, and every attempt to gate it was measured and cost
+    paraphrase recall.  A hard gate would fail this round on a residual the
+    round has already accepted, so the number is printed and read by a human.
 """
 
 from __future__ import annotations
@@ -55,6 +62,7 @@ class Metrics:
     no_answer_ok: int = 0
     missed: tuple[str, ...] = ()
     spurious: tuple[str, ...] = ()
+    fp_k: int = 5
 
     def recall_at(self, k: int) -> float:
         for size, value in self.recall:
@@ -72,6 +80,15 @@ def evaluate(
 ) -> Metrics:
     """Score one ranking function.
 
+    Every metric describes a **top-``max(ks)`` window** and nothing deeper: a
+    relevant note at rank 6 with ``ks=(1, 3, 5)`` counts for nothing, in recall
+    and in MRR alike.  That is deliberate rather than incidental — the ranker
+    under test is called with ``limit=5``, so a sixth hit could never be shown
+    to a user, and scoring it would reward a ranker for reaching past where it
+    is allowed to reach.  ``fp_k`` is the one window that can differ from
+    ``max(ks)``, and it is recorded on the result so the printed label matches
+    the measurement.
+
     A ranker that raises counts as "returned nothing" rather than killing the
     run: the harness has to survive the implementation it is grading.
     """
@@ -86,7 +103,7 @@ def evaluate(
     for case in cases:
         try:
             returned = list(rank(case.query))
-        except Exception:  # noqa: BLE001 — a broken ranker must not kill the harness
+        except Exception:  # a broken ranker must not kill the harness
             returned = []
         if not case.relevant:
             no_answer += 1
@@ -119,11 +136,12 @@ def evaluate(
         answerable=answerable,
         no_answer=no_answer,
         recall=tuple((k, hits[k] / denominator) for k in ks),
-        mrr=(sum(reciprocal) / denominator) if reciprocal else 0.0,
+        mrr=sum(reciprocal) / denominator,
         false_positive_share=(sum(fp_shares) / len(fp_shares)) if fp_shares else 0.0,
         no_answer_ok=no_answer - len(spurious),
         missed=tuple(missed),
         spurious=tuple(spurious),
+        fp_k=fp_k,
     )
 
 
@@ -132,7 +150,7 @@ def format_metrics(name: str, metrics: Metrics) -> str:
     parts = " ".join(f"R@{k}={metrics.recall_at(k):.2f}" for k, _ in metrics.recall)
     return (
         f"{name:24} {parts} MRR={metrics.mrr:.2f} "
-        f"FP@5={metrics.false_positive_share:.2f} "
+        f"FP@{metrics.fp_k}={metrics.false_positive_share:.2f} "
         f"no-answer={metrics.no_answer_ok}/{metrics.no_answer}"
     )
 

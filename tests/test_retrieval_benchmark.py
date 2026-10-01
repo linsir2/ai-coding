@@ -60,6 +60,31 @@ def test_r10a_recall_mrr_and_false_positive_share_are_what_they_claim():
     assert metrics.missed == ("q3",)
 
 
+def test_r10a_a_relevant_note_below_the_window_scores_nowhere():
+    # The metrics describe a top-max(ks) window and nothing deeper: the ranker
+    # under test is called with limit=5, so a sixth hit is one no user could be
+    # shown.  Pinned here because nothing else in the suite would notice the
+    # window being widened or removed.
+    deep = ["j1", "j2", "j3", "j4", "j5", "a"]
+
+    metrics = evaluate(lambda _q: deep, [EvalCase("lexical", "q", frozenset({"a"}))])
+
+    assert len(deep) == 6, "the relevant note must sit one past the window"
+    assert [metrics.recall_at(k) for k in (1, 3, 5)] == [0.0, 0.0, 0.0]
+    assert metrics.mrr == 0.0
+    assert metrics.missed == ("q",)
+    # It is still the worst possible answer: five notes back, none of them right.
+    assert metrics.false_positive_share == 1.0
+
+
+def test_r10a_the_fp_label_follows_the_window_it_was_measured_at():
+    cases = [EvalCase("lexical", "q", frozenset({"a"}))]
+    five = ["a", "x", "y", "z", "w"]  # 2 of 3 junk, 4 of 5 junk
+
+    assert "FP@3=0.67" in format_metrics("narrow", evaluate(lambda _q: five, cases, fp_k=3))
+    assert "FP@5=0.80" in format_metrics("wide", evaluate(lambda _q: five, cases, fp_k=5))
+
+
 def test_r10a_a_no_answer_case_is_ok_only_when_nothing_came_back():
     cases = [
         EvalCase("noanswer", "q1", frozenset()),
@@ -97,6 +122,7 @@ def test_r10a_the_shipped_corpus_is_well_formed():
     notes, cases = load_corpus(root / "scripts" / "retrieval_corpus.json", now=NOW)
 
     ids = {note.id for note in notes}
+    assert len(notes) == 52, f"the corpus must ship 52 notes, got {len(notes)}"
     assert len(ids) == 52, f"note ids must be unique, got {len(ids)}"
     assert len(cases) == 46
     assert {case.category for case in cases} == {
