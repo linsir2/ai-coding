@@ -200,3 +200,18 @@ def test_r10b_touch_notes_survives_a_reload(tmp_path):
     store.touch_notes(["a"])
 
     assert MemoryStore(tmp_path / "m.json").get("a").hits == 1
+
+
+def test_r10b_touch_notes_writes_once_and_touches_each_note_once(tmp_path):
+    store = _store(tmp_path)
+    store.add_note(MemoryNote(id="a", text="依赖用 uv", created_time="2026-09-01T00:00:00+00:00"))
+    store.add_note(MemoryNote(id="b", text="压缩有四层", created_time="2026-09-01T00:00:00+00:00"))
+
+    saves: list[int] = []
+    store._save = lambda: saves.append(1)  # _mutate calls self._save(); rebinding is enough
+
+    touched = store.touch_notes(["a", "a", "a", "b"])
+
+    assert touched == 2
+    assert len(saves) == 1  # one write for four ids
+    assert store.get("a").hits == 1  # not 3

@@ -167,3 +167,30 @@ async def test_r8_unknown_evidence_is_an_error_not_a_silent_pass(tmp_path):
     assert result.success is False
     assert result.error == "bad_evidence"
     assert result.data == {"evidence": "maybe"}
+
+
+# ---- R10b: the touch runs before the filters, and that is a defect ----------
+
+
+@pytest.mark.asyncio
+async def test_r10b_known_the_filters_run_after_the_touch_so_filtered_out_notes_count(tmp_path):
+    """R10 defect, scheduled for Task 5: filtering happens after the touch.
+
+    memory_search recalls (touching every hit) and only then applies kind/evidence,
+    so a note the model never sees still gains a hit — and consolidate promotes on
+    hits >= 3. Task 5 moves filtering ahead of ranking; this test should be inverted
+    or deleted then, not before.
+    """
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="a", text="项目用 uv 管理依赖", kind=NoteKind.FACT))
+    store.add_note(
+        MemoryNote(id="b", text="决定：依赖管理统一用 uv", kind=NoteKind.DECISION)
+    )
+    tool = MemorySearchTool(MemoryService(store))
+
+    result = await tool.execute({"query": "uv 依赖", "kind": "decision"})
+
+    # The model only ever sees the decision ...
+    assert [note["id"] for note in result.data["notes"]] == ["b"]
+    # ... but the fact was recalled, so it was touched, so it counts as a use.
+    assert store.get("a").hits == 1
