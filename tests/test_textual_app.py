@@ -394,3 +394,37 @@ async def test_input_is_disabled_while_a_command_runs(monkeypatch):
         await pilot.pause()
         await pilot.pause()
         assert not app.query_one("#prompt").disabled
+
+
+@pytest.mark.asyncio
+async def test_escape_sets_the_cancel_event_the_dispatcher_waits_on():
+    """Esc must reach the switch ``ToolDispatcher`` already watches.
+
+    The whole chain was already there — ``dispatch.py:171`` holds the event,
+    ``deadline.py:132`` abandons the tool when it fires, and
+    ``dispatch.py:446-450`` kills the subprocess group on top of that. Nothing
+    ever constructed the event or set it, so a long tool call could only be
+    escaped by quitting the app.
+    """
+    app = _app(loop=_FakeLoop())
+    async with app.run_test() as pilot:
+        assert not app._cancel_event.is_set()
+        await pilot.press("escape")
+        assert app._cancel_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_escape_sets_the_event_the_dispatcher_was_given():
+    """The app must set the loop's event, not a private replacement.
+
+    ``run_app`` builds the dispatcher first and hands the same instance to the
+    app, so Esc has to land on that object.  A fresh ``asyncio.Event()`` here
+    would look identical to every other test while silently disabling the
+    switch in the real app.
+    """
+    cancel = asyncio.Event()
+    app = _app(loop=_FakeLoop(), cancel_event=cancel)
+    assert app._cancel_event is cancel
+    async with app.run_test() as pilot:
+        await pilot.press("escape")
+        assert cancel.is_set()

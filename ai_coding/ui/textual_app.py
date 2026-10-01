@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Any, cast
 
@@ -29,6 +30,7 @@ class AICodingApp(App[None]):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+c", "quit", "Quit", show=False),
+        Binding("escape", "cancel_turn", "Cancel tool batch", show=False),
     ]
     COMMANDS = {SlashCommandProvider, get_system_commands_provider}
 
@@ -44,6 +46,7 @@ class AICodingApp(App[None]):
     _transcript: Transcript
     _input: Input
     _observer: TranscriptObserver
+    _cancel_event: asyncio.Event
 
     def __init__(
         self,
@@ -53,6 +56,7 @@ class AICodingApp(App[None]):
         sessions: Any,
         workspace: str,
         model_name: str = "",
+        cancel_event: asyncio.Event | None = None,
     ) -> None:
         super().__init__()
         self._agent_loop = loop
@@ -61,6 +65,16 @@ class AICodingApp(App[None]):
         self._workspace = workspace
         self._model_name = model_name
         self._observer = TranscriptObserver(self._append_block)
+        # R8c's switch, finally connected: ``ToolDispatcher`` has held this event
+        # since it was written (``dispatch.py:170-171``, "the user's 'drop this
+        # batch' switch (Esc)"), and ``run_with_deadline`` abandons the tool and
+        # raises ``RunCancelled`` when it fires (``deadline.py:132``). Nothing
+        # constructed it, so a long tool call had no way out but quitting.
+        #
+        # ``run_app`` passes the same instance it handed to the dispatcher; the
+        # default keeps the app self-contained for tests and for any future
+        # caller that does not wire a loop.
+        self._cancel_event = cancel_event if cancel_event is not None else asyncio.Event()
 
     # ---- shell -----------------------------------------------------------
 
@@ -232,6 +246,18 @@ class AICodingApp(App[None]):
             self._status.set_busy(False)
             self._input.focus()
 
+    def action_cancel_turn(self) -> None:
+        """Drop the tool batch that is running.
+
+        The semantics are the ones already written down: ``agent_loop.py:566-568``
+        clears the event before every dispatch, so one press drops the batch in
+        flight and the loop carries on with a fresh one.  The turn is not
+        aborted — a cancelled call comes back as an ordinary
+        ``cancelled_by_user`` result (``dispatch.py:609-616``), so the model
+        sees it and can change course.
+        """
+        self._cancel_event.set()
+
     # ---- human channels --------------------------------------------------
 
     async def approval_provider(
@@ -310,6 +336,9 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         registry.register(tool)
 
     approval = CLIApprovalCallback()
+    # Built before the app so the loop and the app can share one event: the app
+    # owns the Esc binding and sets it, the dispatcher waits on it.
+    cancel = asyncio.Event()
     loop = _build_loop(
         engine, sessions, registry, app_cfg, workspace, skills,
         approval=approval,
@@ -318,6 +347,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         guards=_make_guards(app_cfg),
         hooks=_make_hooks(app_cfg, workspace),
         steering=steering,
+        cancel=cancel,
     )
 
     model = getattr(getattr(loop, "engine", None), "model_config", None)
@@ -326,6 +356,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     app = AICodingApp(
         loop=loop, session=sessions.create(), sessions=sessions,
         workspace=workspace, model_name=model_name,
+        cancel_event=cancel,
     )
     approval.set_provider(app.approval_provider)
     user_prompt.set_provider(app.ask_provider)
