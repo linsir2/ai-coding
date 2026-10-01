@@ -1,0 +1,693 @@
+{
+  "notes": [
+    {
+      "id": "n01",
+      "kind": "decision",
+      "importance": 4,
+      "age_days": 30,
+      "text": "项目依赖统一用 uv 管理，不引入 pip 或 poetry；虚拟环境在 .venv。"
+    },
+    {
+      "id": "n02",
+      "kind": "preference",
+      "importance": 4,
+      "age_days": 20,
+      "text": "跑测试必须用 .venv/bin/python -m pytest tests/ -o addopts=\"\" -q，直接 pytest 会带上覆盖率参数变慢。"
+    },
+    {
+      "id": "n03",
+      "kind": "decision",
+      "importance": 4,
+      "age_days": 25,
+      "text": "模型后端用 dashscope 的 compatible-mode（qwen），配置写在 config.local.yaml，key 不进 git。"
+    },
+    {
+      "id": "n04",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 40,
+      "text": "AI_CODING_PTY=1 和 AI_CODING_MCP_STDIO=1 是两条门控环境变量，用来开真 pty 与真 MCP stdio 用例。"
+    },
+    {
+      "id": "n05",
+      "kind": "decision",
+      "importance": 3,
+      "age_days": 18,
+      "text": "提交信息里不要出现反引号，多行信息用 git commit -F 读文件。"
+    },
+    {
+      "id": "n06",
+      "kind": "fact",
+      "importance": 5,
+      "age_days": 60,
+      "text": "提示词缓存的关键是前缀稳定：系统提示与历史保持字节一致，易失内容只能追加在请求尾部。"
+    },
+    {
+      "id": "n07",
+      "kind": "decision",
+      "importance": 4,
+      "age_days": 22,
+      "text": "记忆只有两个注入面：常驻的 memory-constraints 块（pinned 与 decision），和按需调用的 memory_search 工具。"
+    },
+    {
+      "id": "n08",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 15,
+      "text": "轨迹每回合写一个 turn-N.jsonl，一行一个 span，字段是 v/ts/session/turn/span/parent/iter/evt/data。"
+    },
+    {
+      "id": "n09",
+      "kind": "preference",
+      "importance": 5,
+      "age_days": 12,
+      "text": "回答用户时不要和稀泥，必须给出明确决策和理由。"
+    },
+    {
+      "id": "n10",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 35,
+      "text": "bash 工具只在 Linux 上验证过，取消时要 killpg 加 reap 才杀得干净。"
+    },
+    {
+      "id": "n11",
+      "kind": "decision",
+      "importance": 5,
+      "age_days": 50,
+      "text": "不要引入 agent 框架，循环由项目自己维护，只依赖 openai 与 mcp 两个库。"
+    },
+    {
+      "id": "n12",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 28,
+      "text": "子智能体默认继承父上下文（subagent_context_mode=full），task_only 时给它一个干净窗口。"
+    },
+    {
+      "id": "n13",
+      "kind": "fact",
+      "importance": 4,
+      "age_days": 33,
+      "text": "上下文压缩有四层：L3 大结果落盘、L1 裁剪中段、L2 老工具结果换信封、L4 用模型摘要。"
+    },
+    {
+      "id": "n14",
+      "kind": "decision",
+      "importance": 3,
+      "age_days": 26,
+      "text": "记忆存储是单文件 JSON（.memory），不是 SQLite。"
+    },
+    {
+      "id": "n15",
+      "kind": "open_thread",
+      "importance": 2,
+      "age_days": 10,
+      "text": "还没决定要不要把记忆迁移到 SQLite 加 FTS5。"
+    },
+    {
+      "id": "n16",
+      "kind": "preference",
+      "importance": 3,
+      "age_days": 16,
+      "text": "文档要跟着代码改，features/data-contracts/architecture 等六份每轮同步。"
+    },
+    {
+      "id": "n17",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 45,
+      "text": "CI 用的 Python 是 3.13，但 mypy 按 3.10 下限检查。"
+    },
+    {
+      "id": "n18",
+      "kind": "decision",
+      "importance": 3,
+      "age_days": 21,
+      "text": "MCP 远端工具的审批用 servers[].auto_approve 豁免，默认仍然要问用户。"
+    },
+    {
+      "id": "n19",
+      "kind": "fact",
+      "importance": 2,
+      "age_days": 24,
+      "text": "工作目录里的 .ai-coding/traces 是轨迹目录，sessions/ 是会话目录。"
+    },
+    {
+      "id": "n20",
+      "kind": "preference",
+      "importance": 5,
+      "age_days": 5,
+      "text": "改代码要 TDD：先写红测试再实现，不准改既有断言。"
+    },
+    {
+      "id": "n21",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 14,
+      "text": "依赖门禁由 ai.enforce_dependencies 开关控制，默认开；关掉就回到 R1 的宽松行为。"
+    },
+    {
+      "id": "n22",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 19,
+      "text": "memory_search 返回的 note 会作为 tool 结果追加进历史，从那一刻起就被缓存。"
+    },
+    {
+      "id": "n23",
+      "kind": "decision",
+      "importance": 3,
+      "age_days": 17,
+      "text": "决定不装 OpenTelemetry SDK，只导出 OTLP/JSON 文件。"
+    },
+    {
+      "id": "n24",
+      "kind": "fact",
+      "importance": 2,
+      "age_days": 29,
+      "text": "工具面的 token 预算告警阈值是 tools_chars，超过会每个 loop 提示一次。"
+    },
+    {
+      "id": "n25",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 55,
+      "text": "用户偏好中文交流，技术术语可以保留英文原词。"
+    },
+    {
+      "id": "n26",
+      "kind": "preference",
+      "importance": 2,
+      "age_days": 31,
+      "text": "允许联网搜索，允许使用 skill。"
+    },
+    {
+      "id": "n27",
+      "kind": "fact",
+      "importance": 2,
+      "age_days": 42,
+      "text": "项目路径是 /home/linsir365/projects/ai-coding。"
+    },
+    {
+      "id": "n28",
+      "kind": "decision",
+      "importance": 2,
+      "age_days": 23,
+      "text": "会话文件 sessions/*.json 落盘是 camelCase，Python 侧是 snake_case，靠 loader 归一化。"
+    },
+    {
+      "id": "n29",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 13,
+      "text": "checkpoint_write 写的一句话只进本会话的摘要环，跨会话记东西要用 memory_write。"
+    },
+    {
+      "id": "n30",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 11,
+      "text": "收割游标 harvested_messages 存在 session 里，收割失败时不能推进。"
+    },
+    {
+      "id": "n31",
+      "kind": "fact",
+      "importance": 4,
+      "age_days": 9,
+      "text": "召回打分等于 0.55 乘相关性加 0.20 乘新近度加 0.15 乘重要度，再加 kind 加成，阈值 0.25。"
+    },
+    {
+      "id": "n32",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 34,
+      "text": "相关性用的是 idf 加权覆盖度，不是 BM25。"
+    },
+    {
+      "id": "n33",
+      "kind": "decision",
+      "importance": 4,
+      "age_days": 36,
+      "text": "不搞向量检索和 embedding（即 RAG），relevance.py 留了 RecallScorer 接缝。"
+    },
+    {
+      "id": "n34",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 27,
+      "text": "中文分词用字符 bigram，英文用词加一份停用词表。"
+    },
+    {
+      "id": "n35",
+      "kind": "preference",
+      "importance": 3,
+      "age_days": 44,
+      "text": "不喜欢过度设计，坚持 YAGNI。"
+    },
+    {
+      "id": "n36",
+      "kind": "fact",
+      "importance": 4,
+      "age_days": 8,
+      "text": "每次都要在真实环境跑一遍，不能只跑单元测试。"
+    },
+    {
+      "id": "n37",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 20,
+      "text": "验收脚本放在 scripts 目录下，形如 rN_cases.py，分离线与 --real 两种。"
+    },
+    {
+      "id": "n38",
+      "kind": "fact",
+      "importance": 2,
+      "age_days": 28,
+      "text": "记忆的淘汰上限是 max_index_entries，默认 200 条。"
+    },
+    {
+      "id": "n39",
+      "kind": "decision",
+      "importance": 4,
+      "age_days": 32,
+      "text": "钩子是 fail-open，门卫是 fail-closed，两者语义不能混。"
+    },
+    {
+      "id": "n40",
+      "kind": "fact",
+      "importance": 2,
+      "age_days": 26,
+      "text": "审批超时默认 0 秒，表示只受回合时钟约束。"
+    },
+    {
+      "id": "n41",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 25,
+      "text": "子智能体不能再起子智能体，它的工具栈里没有 subAgent。"
+    },
+    {
+      "id": "n42",
+      "kind": "fact",
+      "importance": 2,
+      "age_days": 22,
+      "text": "工具并发上限 max_concurrent_tools 默认是 4。"
+    },
+    {
+      "id": "n43",
+      "kind": "preference",
+      "importance": 3,
+      "age_days": 15,
+      "text": "先说结论再给理由。"
+    },
+    {
+      "id": "n44",
+      "kind": "decision",
+      "importance": 3,
+      "age_days": 30,
+      "text": "不把 sessions/*.json 直接交给模型读，实测会整读 270KB。"
+    },
+    {
+      "id": "n45",
+      "kind": "fact",
+      "importance": 4,
+      "age_days": 7,
+      "text": "导出 HTML 要把所有动态字符串做 escape，否则工具输出里的 script 标签会执行。"
+    },
+    {
+      "id": "n46",
+      "kind": "fact",
+      "importance": 1,
+      "age_days": 37,
+      "text": "SQLite 的 FTS5 是一个全文检索扩展。"
+    },
+    {
+      "id": "n47",
+      "kind": "fact",
+      "importance": 1,
+      "age_days": 38,
+      "text": "BM25 是一种基于词频和文档长度的排序函数。"
+    },
+    {
+      "id": "n48",
+      "kind": "fact",
+      "importance": 1,
+      "age_days": 39,
+      "text": "embedding 可以把文本映射成向量。"
+    },
+    {
+      "id": "n49",
+      "kind": "preference",
+      "importance": 2,
+      "age_days": 6,
+      "text": "喜欢简洁的回答。"
+    },
+    {
+      "id": "n50",
+      "kind": "fact",
+      "importance": 1,
+      "age_days": 41,
+      "text": "uv 是一个 Python 包管理器。"
+    },
+    {
+      "id": "n51",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 6,
+      "text": "todo_write 的 depends_on 现在是硬门禁：转到 in_progress 或 completed 会被 blocked_by_dependencies 拦住。"
+    },
+    {
+      "id": "n52",
+      "kind": "fact",
+      "importance": 5,
+      "age_days": 0,
+      "text": "今天要把 docs 目录里的 CLI 章节重写一遍。"
+    }
+  ],
+  "queries": [
+    {
+      "category": "lexical",
+      "query": "我们用什么装依赖？",
+      "relevant": [
+        "n01"
+      ]
+    },
+    {
+      "category": "lexical",
+      "query": "跑测试的正确命令是什么",
+      "relevant": [
+        "n02"
+      ]
+    },
+    {
+      "category": "lexical",
+      "query": "记忆存在哪里，是数据库吗",
+      "relevant": [
+        "n14",
+        "n15"
+      ]
+    },
+    {
+      "category": "lexical",
+      "query": "依赖门禁怎么关掉",
+      "relevant": [
+        "n21"
+      ]
+    },
+    {
+      "category": "lexical",
+      "query": "上下文压缩分几层",
+      "relevant": [
+        "n13"
+      ]
+    },
+    {
+      "category": "lexical",
+      "query": "轨迹文件有哪些字段",
+      "relevant": [
+        "n08"
+      ]
+    },
+    {
+      "category": "lexical",
+      "query": "中文怎么分词",
+      "relevant": [
+        "n34"
+      ]
+    },
+    {
+      "category": "lexical",
+      "query": "召回打分的公式和各部分权重",
+      "relevant": [
+        "n31"
+      ]
+    },
+    {
+      "category": "lexical",
+      "query": "验收脚本在哪，怎么跑",
+      "relevant": [
+        "n37"
+      ]
+    },
+    {
+      "category": "lexical",
+      "query": "hook 和门卫的失败语义有什么不同",
+      "relevant": [
+        "n39"
+      ]
+    },
+    {
+      "category": "lexical",
+      "query": "为什么不让我直接读会话文件",
+      "relevant": [
+        "n44"
+      ]
+    },
+    {
+      "category": "lexical",
+      "query": "导出 html 时要注意什么安全问题",
+      "relevant": [
+        "n45"
+      ]
+    },
+    {
+      "category": "lexical",
+      "query": "模型的 key 存在哪里",
+      "relevant": [
+        "n03"
+      ]
+    },
+    {
+      "category": "lexical",
+      "query": "记忆的淘汰上限是多少",
+      "relevant": [
+        "n38"
+      ]
+    },
+    {
+      "category": "lexical",
+      "query": "提交信息有什么格式要求",
+      "relevant": [
+        "n05"
+      ]
+    },
+    {
+      "category": "identifier",
+      "query": "todo_write 的 depends_on 现在强制吗",
+      "relevant": [
+        "n51"
+      ]
+    },
+    {
+      "category": "identifier",
+      "query": "max_concurrent_tools 默认多少",
+      "relevant": [
+        "n42"
+      ]
+    },
+    {
+      "category": "identifier",
+      "query": "AI_CODING_PTY 是干什么的",
+      "relevant": [
+        "n04"
+      ]
+    },
+    {
+      "category": "identifier",
+      "query": "tools_chars 告警阈值是什么",
+      "relevant": [
+        "n24"
+      ]
+    },
+    {
+      "category": "identifier",
+      "query": "subagent_context_mode 有哪两个取值",
+      "relevant": [
+        "n12"
+      ]
+    },
+    {
+      "category": "identifier",
+      "query": "harvested_messages 游标放在哪里",
+      "relevant": [
+        "n30"
+      ]
+    },
+    {
+      "category": "identifier",
+      "query": "RecallScorer 接缝是干嘛的",
+      "relevant": [
+        "n33"
+      ]
+    },
+    {
+      "category": "identifier",
+      "query": "OTLP 导出要不要装 SDK",
+      "relevant": [
+        "n23"
+      ]
+    },
+    {
+      "category": "identifier",
+      "query": "max_index_entries 是多少",
+      "relevant": [
+        "n38"
+      ]
+    },
+    {
+      "category": "paraphrase",
+      "query": "怎么让新同事快速上手这个项目",
+      "relevant": [
+        "n16",
+        "n27",
+        "n43"
+      ]
+    },
+    {
+      "category": "paraphrase",
+      "query": "担心模型把前面发过的东西再算一次钱",
+      "relevant": [
+        "n06"
+      ]
+    },
+    {
+      "category": "paraphrase",
+      "query": "我不想每次都被问要不要批准",
+      "relevant": [
+        "n18"
+      ]
+    },
+    {
+      "category": "paraphrase",
+      "query": "怎么防止工具输出把网页搞坏",
+      "relevant": [
+        "n45"
+      ]
+    },
+    {
+      "category": "paraphrase",
+      "query": "长期记性是怎么做的",
+      "relevant": [
+        "n14",
+        "n07"
+      ]
+    },
+    {
+      "category": "paraphrase",
+      "query": "卡住的命令怎么收场",
+      "relevant": [
+        "n10",
+        "n40"
+      ]
+    },
+    {
+      "category": "paraphrase",
+      "query": "怎么让模型别一直重复问同一个问题",
+      "relevant": [
+        "n07",
+        "n30"
+      ]
+    },
+    {
+      "category": "paraphrase",
+      "query": "代码评审之前要做什么",
+      "relevant": [
+        "n02",
+        "n20"
+      ]
+    },
+    {
+      "category": "paraphrase",
+      "query": "我不想被过度设计绑架",
+      "relevant": [
+        "n35"
+      ]
+    },
+    {
+      "category": "paraphrase",
+      "query": "怎么把过去几轮的记忆压缩成一句话",
+      "relevant": [
+        "n29",
+        "n13"
+      ]
+    },
+    {
+      "category": "paraphrase",
+      "query": "which relevance algorithm do we use",
+      "relevant": [
+        "n32"
+      ]
+    },
+    {
+      "category": "paraphrase",
+      "query": "怎么做语义检索",
+      "relevant": [
+        "n33"
+      ]
+    },
+    {
+      "category": "multi",
+      "query": "记忆和提示词缓存怎么取舍",
+      "relevant": [
+        "n06",
+        "n07",
+        "n22"
+      ]
+    },
+    {
+      "category": "multi",
+      "query": "压缩之后老的工具输出还能找回来吗",
+      "relevant": [
+        "n13",
+        "n22"
+      ]
+    },
+    {
+      "category": "multi",
+      "query": "多智能体的上下文怎么给",
+      "relevant": [
+        "n12",
+        "n41"
+      ]
+    },
+    {
+      "category": "multi",
+      "query": "真实环境跑验收的流程",
+      "relevant": [
+        "n36",
+        "n37"
+      ]
+    },
+    {
+      "category": "noanswer",
+      "query": "生产环境的 PostgreSQL 连接串是什么",
+      "relevant": []
+    },
+    {
+      "category": "noanswer",
+      "query": "上次那个客户的发票抬头是什么",
+      "relevant": []
+    },
+    {
+      "category": "noanswer",
+      "query": "我们的 Android 应用上架了吗",
+      "relevant": []
+    },
+    {
+      "category": "noanswer",
+      "query": "Kubernetes 集群有多少节点",
+      "relevant": []
+    },
+    {
+      "category": "noanswer",
+      "query": "帮我改一下按钮的圆角",
+      "relevant": []
+    },
+    {
+      "category": "trap",
+      "query": "CLI 命令怎么加一个新子命令",
+      "relevant": []
+    }
+  ]
+}
