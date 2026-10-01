@@ -296,16 +296,14 @@ chunk 顺序、`stdin_data`、退出后排空、取消杀进程组、取消不�
 .venv/bin/python scripts/r8_cases.py                                  # 13/13
 .venv/bin/python scripts/r8_cases.py --real --config config.local.yaml # 16/16（真模型）
 
-# 两条门控（默认跳过：需要真终端 / 允许 spawn 子进程）
-AI_CODING_PTY=1 .venv/bin/python -m pytest tests/test_repl_cancel_pty.py -q
+# 一条门控（默认跳过：需要允许 spawn 子进程）
 AI_CODING_MCP_STDIO=1 .venv/bin/python -m pytest tests/test_mcp_progress.py -q
 ```
 
-`tests/test_repl_cancel_pty.py` 会真的往 pty 里写一个 `\x1b`：断言 transcript 里出现
-`cancelled_by_user`、回合仍然完成、并且那条 `sleep 30` 的进程组已经消失。两个测试工具上的坑
-都写在文件注释里：child 把结果写**文件**而不是 pty（最后一个 slave fd 关闭后，Linux 会让父进程的
-`os.read(master)` 抛 EIO、连同排队字节一起丢掉，实测），以及 `os.killpg(pgid, 0)` 必须在 reap
-之后才可信（僵尸会让它继续成功，spike 实测）。
+> R8 的 `tests/test_repl_cancel_pty.py` 已删除：它依赖的 `tests/_pty_cancel_child.py` 与
+> `tests/test_ui_reader.py`（prompt_toolkit 的 `ui/reader.py` 一并删除）在 R12 里就不再存在，
+> 该用例自那时起默认跳过、CI 从未真正执行过。上面的 `scripts/r8_cases.py --real` 仍覆盖
+> 取消杀进程组这一行为。
 
 ## R9 验收脚本（`scripts/r9_cases.py`）
 

@@ -31,8 +31,8 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 
 ## slash 命令
 
-手打 `/xxx`（`ui/slash.py` 解析，`ui/repl.py::handle_input` 分发）；命令面板尚未接线（见 R12 节），
-所以 `/` 本身只是普通文本。未知 `/xxx` 与裸 `/` 都会**当作普通输入发给模型**，不是错误。
+手打 `/xxx`（`ui/slash.py` 解析，`ui/repl.py::handle_input` 分发）；输入 `/` 会唤起命令面板（见 R12 节），
+所以 `/` 本身不是普通文本。未知 `/xxx` 仍会**当作普通输入发给模型**，不是错误。
 
 | 命令 | 参数 | 功能 |
 |---|---|---|
@@ -43,7 +43,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | `/permissions [auto\|confirm]` | 策略 | 无参数显示当前审批回调，带参数切换自动批准 / 逐次确认 |
 | `/todo` | — | 渲染当前会话的 `TaskState`（目标、进度、逐项状态、下一步） |
 | `/skills` | — | 列出 `SkillRegistry` 目录（`- name: description`） |
-| `/plan` | — | 先弹 `What should I plan?` 收集主题，再以该主题发起计划回合（`ui/textual_app.py::_plan_turn`）。**不接受参数**：`/plan 改一下 loader` 会整条落回 `handle_input` 的旧固定 prompt，参数被静默丢弃 |
+| `/plan` | — | 先弹 `What should I plan?` 收集主题，再以该主题发起计划回合（`ui/textual_app.py::_plan_turn`）。**不接受参数**：`/plan 改一下 loader` 会整条落回 `handle_input` 的旧固定 prompt，参数被静默丢弃；主题也不回显（`_plan_turn` 不调 `append_user`），transcript 里看不到你规划的是什么 |
 | `/review` | — | 向模型发一条「审查当前 git diff」的快捷 prompt |
 | `/config` | — | 打印生效的 model / 上下文预算 / 迭代上限 / 停止策略 / 回合超时 |
 | `/compact` | — | 主动压缩历史并落盘 |

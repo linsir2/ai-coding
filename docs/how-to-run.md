@@ -48,8 +48,8 @@ ai-coding --path config.local.yaml --workspace . --skills ./skills
 | `--workspace` / `-w` | 文件工具的工作目录（默认 `.`） |
 | `--skills` | 技能目录，启用 `skill` 工具 |
 
-进入 TUI 后直接输入，`Enter` 提交（回合进行中输入栏会禁用）。命令面板尚未接线，
-slash 命令请手打完整命令，如 `/help`。`Ctrl-Q` 退出；`Ctrl-C` 在有选区时复制、
+进入 TUI 后直接输入，`Enter` 提交（回合进行中输入栏会禁用）。slash 命令可手打完整命令
+（如 `/help`），也可输入 `/` 唤起命令面板。`Ctrl-Q` 退出；`Ctrl-C` 在有选区时复制、
 无选区时退出；`Shift`+拖选使用终端原生选择。完整的命令列表见
 [功能清单 · slash 命令](features.md#slash-命令)。
 
@@ -65,8 +65,8 @@ ai-coding --path config.local.yaml --workspace /tmp/demo
 启动后界面自上而下是状态栏、transcript、输入栏。直接描述任务即可开始，模型会调用 `read`
 读文件，回复流式写进 transcript，工具调用显示为事件块。
 
-> v1 的两条已知退化（命令面板未接；`/plan` `/review` 等模型驱动的 slash 命令不渲染工具事件块）
-> 详见[功能清单](features.md) 的「R12：Textual UI」节。
+> v1 的一条已知退化（`/review`、未知 `/foo` 等模型驱动的 slash 命令不渲染工具事件块；
+> `/plan` 不在此列）详见[功能清单](features.md) 的「R12：Textual UI」节。
 
 ## 产物位置
 

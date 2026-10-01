@@ -90,7 +90,12 @@ class ApprovalScreen(ModalScreen[str]):
 
 
 class AskScreen(ModalScreen[str]):
-    """Ask the human a free-form question (options are shown, not enforced)."""
+    """Ask the human a free-form question.
+
+    ``options`` is rendered under the question when a caller supplies it; they
+    are shown, not enforced.  Until the provider passes them through, every
+    caller leaves it empty and the line does not appear.
+    """
 
     BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
 

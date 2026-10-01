@@ -2,8 +2,8 @@
 
 **ai-coding** 是自持 ReAct 循环的 AI 编程助手终端应用（ThoughtCoding 的 Python 化实现；R1 起不再依赖
 OpenAI Agents SDK，只留 `openai` 与 `mcp` 两个库）。**入口 `ai-coding` 直接启动 Textual 全屏 TUI**：
-顶部状态栏、中部可滚动 transcript（流式回复 + 工具事件块）、底部输入栏；slash 命令直接手打
-（命令面板尚未接线）。旧的 Typer 子命令（`ask` / `config-check` / `memory` / `trace`）已删除，
+顶部状态栏、中部可滚动 transcript（流式回复 + 工具事件块）、底部输入栏；slash 命令可手打，
+也可输入 `/` 唤起命令面板。旧的 Typer 子命令（`ask` / `config-check` / `memory` / `trace`）已删除，
 职责收进 slash 命令。本仓库文档按用途分为「面向使用的文档」与「里程碑演进记录」。
 
 ## 面向使用的文档
@@ -121,7 +121,7 @@ R12 把它整体重写为 Textual（设计与计划见 `docs/superpowers/specs/2
 `ui/transcript.py` 承载流式 Markdown 与工具事件块（`ui/blocks.py`），`ui/status_bar.py` /
 `ui/input_bar.py` / `ui/modals.py` 分别负责状态栏、输入栏与审批 / `ask_user` 模态；
 旧的 `prompt_toolkit` 模块与依赖一并删除，入口只剩 `ai-coding` 一条。v1 已接：事件→块、提交、
-审批、`ask_user`、slash、`/model`；明确不做：欢迎页 / 命令面板 / 侧栏 / 计划卡、`Esc` 取消、
-steering。两条已知退化（命令面板未接；模型驱动的 slash 命令不渲染工具事件块）见
+审批、`ask_user`、slash、`/model`、命令面板；明确不做：欢迎页 / 侧栏 / 计划卡、`Esc` 取消、
+steering。一条已知退化（模型驱动的 slash 命令不渲染工具事件块）见
 [功能清单](features.md) 的「R12：Textual UI」节。
 
