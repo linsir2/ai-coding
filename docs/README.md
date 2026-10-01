@@ -92,10 +92,17 @@ R6 处理四个候选（工作记忆锚、失败升级、`ask_user`、记忆证�
 ## 当前状态
 
 主线里程碑 M0–M6 与 R1–R9 全部完成，分阶段提交。
-质量门禁：`pytest`（**1122 例通过 / 4 跳过**）全绿、`ruff` 0 问题、`mypy strict`（按 3.10 下限检查）
-0 问题（98 文件）；离线验收脚本：`memory_cases` 11/11、`trace_cases` 6/6、`r6_cases` 全过、
-`r7_cases` 11/11、`r7e_cases` 9/9、`r8_cases` 13/13、`r9_cases` 12/12；
+质量门禁：`pytest`（**1301 例通过 / 2 跳过**，其中 1 例 pty 默认 deselect）全绿、`ruff` 0 问题、
+`mypy`（按 3.10 下限检查）0 问题（105 文件）；离线验收脚本：`memory_cases` 11/11、
+`trace_cases` 6/6、`r6_cases` 9/9 全过、`r7_cases` 11/11、`r7e_cases` 9/9、
+`r9_cases` 12/12、`r10_cases` 16/16；检索基准 `retrieval_cases --check` 退出 0。
 MCP 真连与真实 LLM A/B 在正常环境另有 gate 测试 + CI 步骤。
+
+> `r8_cases` 目前是 **12/13**：`evidence_filter` 这一条在 R10b（`330a412`）就失败了，原因是它的
+> fixture 文本 `构建改用 uv` 与 Task 2 修好的 `tests/test_tool_memory_search.py` 那份不是同一句
+> （新门禁下它覆盖 1/3 个已知词，coverage 0.22 < floor 0.25）。R10 各任务都跑过这个脚本，
+> 数字没变，**所以不是本轮泄漏**；修法与 Task 2 对测试做的一样是改 fixture 文本、不是改断言，
+> 但它属于 r8 的文件，本轮没经裁决因此没动。
 
 R4（可观测 / 门卫 / hook）**已按 R4a → R4b → R4c 顺序实现**：设计与决策点见 [r4-analysis.md](r4-analysis.md)，
 实施计划见 [r4-plan.md](r4-plan.md)，外部对标见 [r4a-genericagent-research.md](r4a-genericagent-research.md)。
@@ -104,11 +111,31 @@ R6（回合摘要环 / 失败升级 / `ask_user` / 记忆证据 / 索引不变�
 设计与实测见 [r6-analysis.md](r6-analysis.md)，分步计划见 [r6-plan.md](r6-plan.md)，
 验收脚本 `scripts/r6_cases.py`（离线 9 条 + 真实 3 条）。
 
-之后的轮次同样都已实现，各自的方案、计划与执行状态写在对应文档里（本文档不再重复展开）：
-R7 `r7-analysis.md` / `r7-plan.md`（含 [待办总账](r7-backlog.md)）、
-R7e `r7e-analysis.md` / `r7e-plan.md`、
-R8 `r8-analysis.md` / `r8-plan.md`、
-R9 `r9-analysis.md` / `r9-plan.md`（依赖硬门禁 + 轨迹的 `overview` / HTML / OTLP-JSON 三个出口）。
+### R4–R10 一览
+
+里程碑表此前停在 R3，所以它在说谎：R4 之后的所有轮次都存在。逐轮方案、计划与执行状态写在
+对应文档里，这里只列范围。
+
+| 轮次 | 主题 | 文档 |
+|---|---|---|
+| R4 | 可观测 / 门卫 / hook 三件套（看得见 + 拦得住） | [r4-analysis](r4-analysis.md) / [r4-plan](r4-plan.md) / [外部对标](r4a-genericagent-research.md) |
+| R5 | 循环内核拆分（纯结构重构，`process_input` 229→153 行，行为不变） | [r5-analysis](r5-analysis.md) / [r5-plan](r5-plan.md) |
+| R6 | 回合摘要环 / 失败升级 / `ask_user` / 记忆证据 / 索引不变量 | [r6-analysis](r6-analysis.md) / [r6-plan](r6-plan.md) |
+| R7 | 循环瘦身收口 + L2 头尾窗口 + 人在环两处收口 + MCP 工具面治理 | [r7-analysis](r7-analysis.md) / [r7-plan](r7-plan.md) / [待办总账](r7-backlog.md) |
+| R7e | 模型写的 checkpoint + 回合级 steering + 工具面阈值告警 + `memory_write` | [r7e-analysis](r7e-analysis.md) / [r7e-plan](r7e-plan.md) |
+| R8 | 模型侧 checkpoint / 记忆 evidence 同分破平局 + 过滤 / 工具流式与 Esc 取消 | [r8-analysis](r8-analysis.md) / [r8-plan](r8-plan.md) |
+| R9 | 依赖硬门禁（策略在工具层）+ 轨迹的 `overview` / HTML / OTLP-JSON 三个出口 | [r9-analysis](r9-analysis.md) / [r9-plan](r9-plan.md) |
+| **R10（检索）** | 把检索变成**可测量的**：离线基准 + BM25 排序 + 两道门禁 + 召回会解释失败 + 命中即使用 + 过滤先于排序 | [r10-analysis](r10-analysis.md) / [r10-plan](r10-plan.md) / 执行计划 `docs/superpowers/plans/2026-10-01-r10-retrieval.md` |
+
+**两处命名撞车，别混**：`R10`（检索）、`R11`、`R12` 是**检索轮**之后的编号；而
+[终端界面重构](#终端界面重构r10--r12)那一节里的「R10 → R12」指的是**界面轮**的 R10–R12，
+早于检索轮。文档里 `R10b` / `R10c` 永远指检索轮（R10a 基准 / R10b 排序与门禁 / R10c 诊断与过滤）；
+R10d（embeddings）**刻意拆出未实现**，理由见 [r10-plan](r10-plan.md) 末尾的执行记录。
+
+检索轮实测（R10 前 → R10 后）：R@1 0.68→**0.72**、R@3 0.80→**0.85**、FP@5 0.518→**0.350**、
+paraphrase@3 6/12 不变、no-answer 4/6 不变。**通用词重叠的诱饵仍然泄漏**，三种修法都实测赔了
+改述召回，所以它是被接受的残留而不是回归——细节与数字见
+[功能清单](features.md) 的记忆章节。
 
 ## 终端界面重构（R10 → R12）
 

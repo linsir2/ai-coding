@@ -324,3 +324,84 @@ AI_CODING_MCP_STDIO=1 .venv/bin/python -m pytest tests/test_mcp_progress.py -q
 「两个互相阻塞的条目都能标 completed」（今天被 `blocked_by_dependencies` 挡住）、
 「`depends_on=["2"]` 后接 `["1"]` 能造出 1↔2 环」（今天第一条就返回 `unknown_dependency`）、
 「`--since` 与 `prune` 用了两套时间口径」（今天同一个 `sessions()`）。
+
+## R10 的两个检索脚本
+
+本轮把检索变成**可测量的**，于是有了两个新脚本。它们都**离线、无网络、时钟钉死**
+（`NOW = 2026-09-28T00:00:00+00:00`），所以两个不同日子跑出的表逐字节相同。
+
+### `scripts/retrieval_cases.py` — 基准与护栏
+
+语料与标注问题在 `scripts/retrieval_corpus.json`（**数据，不是逻辑**：52 条笔记带 `age_days`，
+46 条标注问法，六类）。评测原语在 `ai_coding/memory/benchmark.py`，它**只 import `note`**——
+import `relevance` / `store` / `service` 就会变成在给自己打分，一次重构能不改检索质量而移动
+所有数字。
+
+```bash
+.venv/bin/python scripts/retrieval_cases.py                        # 分类指标表 + missed/spurious
+.venv/bin/python scripts/retrieval_cases.py --only-paraphrase      # 把最难的改述类打全
+.venv/bin/python scripts/retrieval_cases.py --check                # 门禁；不达标退出码非 0（CI 调这个）
+```
+
+实测基线（`--check` 退出 0）：
+
+```
+all                      R@1=0.72 R@3=0.85 R@5=0.85 MRR=0.78 FP@5=0.35 no-answer=4/6
+  lexical                R@1=0.93 R@3=1.00 R@5=1.00 MRR=0.97 FP@5=0.33 no-answer=0/0
+  identifier             R@1=0.89 R@3=1.00 R@5=1.00 MRR=0.93 FP@5=0.24 no-answer=0/0
+  paraphrase             R@1=0.33 R@3=0.50 R@5=0.50 MRR=0.40 FP@5=0.54 no-answer=0/0
+  multi                  R@1=0.75 R@3=1.00 R@5=1.00 MRR=0.83 FP@5=0.25 no-answer=0/0
+  noanswer               R@1=0.00 R@3=0.00 R@5=0.00 MRR=0.00 FP@5=0.00 no-answer=4/5
+  trap                   R@1=0.00 R@3=0.00 R@5=0.00 MRR=0.00 FP@5=0.00 no-answer=0/1
+```
+
+| 指标 | R10 前 | R10 后 | 护栏 |
+|---|---|---|---|
+| R@1 | 0.68 | **0.72** | **不设**（spec 的 0.85 属于未实现的语义层） |
+| R@3 | 0.80 | **0.85** | `>= 0.80` |
+| FP@5 | 0.518 | **0.350** | `<= 0.36` |
+| paraphrase@3 | 6/12 | 6/12 | `>= 6/12` |
+| no-answer 正确拒绝 | 4/6 | 4/6 | **不设，只打印** |
+
+两条关于门禁本身的诚实说明：
+
+- **`FP@5` 的值是 `0.36` 而不是 `0.35`**。实测原始值是 `0.3504504504504505`，写成 `0.35`
+  的门禁比它自己要守的数**低 0.00045**，于是 `--check` 会在自己这一轮的结果上失败（第五位小数）。
+  门禁取的是实测值**向上**进到自己的两位小数，永不向下压在上面；`0.518` 那一档仍然会失败，所以
+  它照样能拦住「什么都没改进的一轮」。写成 `<= 0.518` 就拦不住了。
+- **`no-answer` 不设门禁，而且没法被别的门禁顺带守住**。无答案的查询在误报统计之前就
+  `continue` 了，所以一个把六个全答出来的排序器能让 4/6 变成 0/6，而 recall、MRR、
+  `false_positive_share` 三个数**逐位不变**。剩下的那个泄漏就是通用词重叠的诱饵，
+  修它的三种办法都实测赔了改述召回（见 [功能清单](features.md)），所以它是被接受的残留，
+  数字印出来给人看。
+
+`answered-but-unlabelled:` 那一行仍然点着两条查询（一条 PostgreSQL 连接串、一条上面说的诱饵）。
+**那是预期输出，不是回归**——删掉它才是回归。
+
+### `scripts/r10_cases.py` — 本轮验收
+
+离线 16 条，形状与 `scripts/r9_cases.py` 一致（每条是 `async def name(tmp) -> (ok, detail)`，
+`--only NAME` 跑单条）。分组：
+
+| 组 | 钉的是什么 |
+|---|---|
+| 两道门禁 | 地板挡掉响亮的无关笔记 / BM25 偏好具体那条 / band 砍掉尾巴 / 索引里没有的词召回为空 |
+| 那个已知的洞 | `the_decoy_still_leaks_and_says_so`：诱饵**应该**被返回，且只凭 `cli` 一个词。这条断言的是**被接受的残留**，钉住它是为了防止有人日后顺手「修」掉 |
+| 使用信号 | 命中记一次 / 未命中什么都不写 / 提升规则真的可达 |
+| 工具面 | 未命中有结构且可行动 / 索引概览有界（500 条记忆的 JSON 实测 224 字符）/ 过滤在排序之前 / 过滤清空候选集时诊断仍然成立 / `since_days=""` 不是静默空召回 |
+| 闭环 | 写 → 召回 → 整理；召回与收割并发写同一个 store |
+
+```bash
+.venv/bin/python scripts/r10_cases.py                        # 16/16
+.venv/bin/python scripts/r10_cases.py --only the_decoy_still_leaks_and_says_so
+```
+
+**并发那条是观察，不是门禁**：`recall_survives_concurrent_harvest` 用真**线程**（不是
+`asyncio.gather`——`recall_notes` 里没有 `await`，`gather` 会把两个协程完全串起来，于是这条在
+共享 tmp 的 hazard 全程存在的情况下也会通过）。它断言的只有「命中数落盘了、文件还在、线程没抛错」，
+并把内存里的条数和重新加载的条数一起打出来。实测那个 hazard 是真的：4 线程、每个 30 次写、
+用 barrier 强制重叠，25 次里有 6 次文件变成非法 JSON（一个完整文档后面接着另一个文档的尾巴），
+下次加载读到 **0 条笔记**——不是少一条，是全丢。原因是 `MemoryStore._mutate` 在 `_save`
+**之前**放掉了锁，而 `_save` 无锁读 `self._notes`，于是两个线程落到同一个 `<path>.tmp` 上。
+它早于本轮存在，本轮决定不为了修它而改动持久化结构（修法是让 `_save` 进锁，但那会改动每个
+调用方的持久化形状）；`store.py` 的类 docstring 原本宣称线程安全，现在说的是这件事。

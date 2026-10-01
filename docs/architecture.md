@@ -260,3 +260,50 @@ flowchart LR
 三条边界：**只读**（三个出口没有一个会写轨迹或改会话）、**格式冻结**（轨迹行的字段名与
 `v/ts/session/turn/span/parent/iter/evt/data` 都不动）、**对账优先**（`summary` 与磁盘回合数不一致
 时只标注 `mismatch`，不用它去猜真相）。
+
+## R10：检索变成可测量的，诊断落在服务层
+
+一句话：**排序是纯函数，门禁是纯函数，「为什么没命中」是服务的职责，工具只负责把诊断排成人能读的话。**
+
+```mermaid
+flowchart TB
+    subgraph tool["tool 层 — ai_coding/tools/"]
+        MS["memory_search(query, k, kind,<br/>scope, since_days, evidence,<br/>include_near_misses)"]
+    end
+    subgraph app["应用层 — ai_coding/memory/service.py"]
+        ORCH["recall_with_diagnostics()<br/>唯一的编排点"]
+    end
+    subgraph domain["领域层 — 纯，无 IO"]
+        RANK["relevance.py<br/>rank_notes_detailed → RankingResult<br/>bm25_scores · coverage · 两道门禁"]
+        BENCH["benchmark.py<br/>recall@k · MRR · FP@k"]
+    end
+    subgraph infra["基础设施"]
+        STORE["store.py<br/>active() · touch_notes()"]
+    end
+    MS -->|kind/scope/since/evidence| ORCH
+    ORCH -->|_candidates| STORE
+    ORCH --> RANK
+    ORCH -->|仅命中 id| STORE
+    BENCH -.->|只读复用| RANK
+```
+
+三条边界：
+
+- **`benchmark.py` 绝不 import `store` / `service` / `relevance` 之外的任何一层**，尤其不 import
+  它要评分的那个 `rank_notes` 所在模块之外的东西。它复用排序器，但排序器不 import 它——否则
+  基准就在给自己打分了，一次重构能不改检索质量而移动所有数字。
+- **`relevance.py` 不 import 服务层**。它只拿 `MemoryNote` 序列和一个钉死的 `now`，所以
+  `scripts/retrieval_cases.py` 能在没有 store、没有 config、没有网络的条件下跑完整张表。
+- **`RecallScorer` 是接缝**。未来的 embedding 打分器实现同一个 `rank_notes` 形状，store 与
+  service 两层不动。
+
+### 内容分层：R10 动了哪几层
+
+按上面那张 L1–L8 表（R8 的编号，R10 沿用）：
+
+| 层 | R10 的变化 |
+|---|---|
+| L4 | **变了**：工具消息的 payload 从「id/kind/score」扩到「score/relevance/`matched_terms`/updated_time/pinned/evidence」，未命中时再加 `terms_known`/`terms_unknown`/`near_misses`/有界的 `index`。这条消息进历史并长期命中缓存，所以**每一次未命中都在为一个会话的剩余部分付 token**——这就是为什么 `index` 概览被硬性限制在 ~400 字符 |
+| L6 | **变了，且本轮没有新文件**：召回命中现在经 `MemoryStore.touch_notes` 写 `hits` + `last_used`，所以 `consolidate` 的 `hits >= 3 → importance + 1` 第一次真正可达。`.memory` 的 schema 没变（字段早就存在），变的是**谁写**。顺带一处诚实化：`MemoryStore` 的类 docstring 原本宣称线程安全，`_mutate` 在 `_save` 之前放锁、`_save` 无锁读 `self._notes`，并发写会落到同一个 `<path>.tmp` 上（实测 4 线程 25 次里有 6 次产出非法 JSON，下次加载读到 0 条）——docstring 现在说的是这件事，`docs/features.md` 也记了 |
+| L7 | **变了**：`memory_search` 的未命中文案现在能说清「索引里没有这些词 / 是你这个过滤排掉的 / 门槛把它挡了」，轨迹和 transcript 因此可以解释**一次搜索为什么失败**，而不只是「没结果」。这是 L7 第一次承载失败的解释 |
+| L1/L2/L3/L5/L8 | 不变。系统提示逐字节静态这条测试锁死的东西没动，易失尾块 `<memory-constraints>` 没动，会话文件没动，子进程没动 |

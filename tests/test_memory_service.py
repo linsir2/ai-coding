@@ -279,3 +279,31 @@ def test_r10c_since_days_of_zero_or_less_means_no_window(tmp_path):
         hits = asyncio.run(service.recall_with_diagnostics("依赖", k=5,
                                                            since_days=since_days))[0]
         assert [hit.note.id for hit in hits] == ["old"], since_days
+
+
+def test_r10c_since_days_of_an_empty_string_is_not_a_silent_empty_recall(tmp_path):
+    """N3: `float("")` raised inside `_candidates`, and nothing reported it.
+
+    `since_days` is `int | None` by annotation, but the caller is duck-typed and
+    the tool boundary is a string-to-int parse of whatever the model sent — an
+    unfilled field arrives as `""`.  The `except Exception` around the whole
+    ranking is what memory's "never raises" invariant needs, and it turns this
+    into an empty recall with no diagnosis at all: `index_summary is None`, so
+    the miss text cannot even count the index.
+    """
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="a", text="依赖管理统一用 uv",
+                              created_time="2000-01-01T00:00:00+00:00",
+                              updated_time="2000-01-01T00:00:00+00:00"))
+    service = MemoryService(store)
+
+    hits, diagnostics = asyncio.run(
+        service.recall_with_diagnostics("依赖管理", k=5, since_days="")
+    )
+
+    # "" is not a window, so this is the whole index — the same answer `0` and
+    # `-5` get.  The note is from 2000 on purpose: `since_days=""` must not
+    # become a window that excludes everything, which is what a NaN-ish
+    # interpretation would do.
+    assert [hit.note.id for hit in hits] == ["a"]
+    assert diagnostics.index_summary is not None

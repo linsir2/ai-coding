@@ -84,7 +84,27 @@ def _load(path: Path) -> list[MemoryNote]:
 
 
 class MemoryStore:
-    """A thread-safe, disk-backed memory index that never raises on IO errors."""
+    """A disk-backed memory index that never raises on IO errors.
+
+    Concurrent **reads** are safe: every read path takes the lock.  Concurrent
+    **writes** are not, and this class does not claim they are.
+
+    :meth:`_mutate` releases the lock *before* :meth:`_save`, and ``_save`` reads
+    ``self._notes`` while holding none.  Two threads therefore serialise onto the
+    **same** ``<path>.tmp``; ``os.replace`` renames that inode to the live path while
+    the second thread still has it open, so its remaining writes land on the live
+    file and append a second JSON document.  Measured (4 threads, 30 writes each,
+    a ``Barrier`` forcing maximum overlap): 6 of 25 trials left a file that
+    ``json.loads`` rejects, and ``_load`` swallows that ``ValueError`` and returns
+    ``[]`` — **every note gone, not one**.  Without forced overlap the rate is
+    3/200.  A single-writer store is fine; that is every real path in this repo.
+
+    Fixing it means holding the lock across the save, which changes the persistence
+    shape for every caller.  R10 reviewed this and chose to record it rather than
+    restructure persistence inside a retrieval round;
+    ``scripts/r10_cases.py::recall_survives_concurrent_harvest`` exercises it with
+    real threads and reports what it sees — an observation, not a gate.
+    """
 
     def __init__(self, path: str | Path = Path(".memory")) -> None:
         self._path = Path(path)

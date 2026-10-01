@@ -18,10 +18,16 @@ This service keeps the three ideas and gives each a real implementation:
 Plus :meth:`index_block`, the tiny always-on constraint block (R3b injects it at
 the **tail** of the request, never into the system prompt — sections 1.13/1.16).
 
-Invariants kept from M3: every public method degrades silently — memory must never
-raise and never block the loop.  ``enabled=False`` now means "neither read nor
-write" (case 6), and ``harvest`` deliberately does **not** use the offline
-fallback: without an extractor it writes nothing instead of storing raw chatter.
+Invariants kept from M3: every public method degrades silently — memory never
+raises at its callers.  "Never blocks the loop" is **no longer true** and is
+dropped rather than softened: recall writes.  A hit calls
+:meth:`MemoryStore.touch_notes`, which is a synchronous whole-file save, so a
+turn now pays one file write per recall that returned something.  The invariant
+that remains is the ``except Exception`` around each public path — a failing
+recall degrades to ``[]``, never to an exception — and ``enabled=False`` means
+"neither read nor write" (case 6).  ``harvest`` deliberately does **not** use the
+offline fallback: without an extractor it writes nothing instead of storing raw
+chatter.
 
 ``remember`` / ``recall`` / ``dream`` remain as deprecated M3-compatible wrappers.
 """
@@ -251,7 +257,14 @@ class MemoryService:
         # every note and a negative one puts the cutoff in the future, so both would
         # answer a question nobody asked.  They mean "no window", same as the tool
         # boundary's answer for them.
-        window = float(since_days) if since_days is not None else 0.0
+        #
+        # `since_days or 0` rather than an `is not None` test: the annotated type is
+        # `int | None` but callers are duck-typed, and `since_days=""` is what a
+        # model writes for "I did not fill this in".  `float("")` raises, and this
+        # whole call is wrapped in `recall_with_diagnostics`'s best-effort
+        # `except Exception`, so the raise did not surface — it surfaced as a silent
+        # empty recall, which is the one failure mode this path must not have.
+        window = float(since_days or 0)
         cutoff = now - timedelta(days=window) if window > 0.0 else None
         selected: list[MemoryNote] = []
         for note in self._store.active():
@@ -334,8 +347,17 @@ class MemoryService:
                     # count of N.  This ranking only ever feeds diagnostic prose.
                     limit=None,
                 )
-                if probe.kept or probe.terms_unknown or probe.no_vocabulary_match:
-                    result, filtered_out = probe, len(probe.kept)
+                # Adopt unconditionally.  The probe is the only ranking here with
+                # a corpus at all, so the filtered result carries no measurement
+                # worth reporting: with an empty candidate set every query word is
+                # trivially absent from it, which the miss text renders as "the
+                # index knows every word you used" — the opposite of the truth.
+                # The three-condition form discarded probes that carried no
+                # diagnosis (reachable: an all-ASCII query whose words are all
+                # known, filtered down to nothing — `terms_known` and
+                # `terms_unknown` both empty, `no_vocabulary_match` False), and
+                # those are exactly the cases the diagnosis exists for.
+                result, filtered_out = probe, len(probe.kept)
         except Exception:  # noqa: BLE001 — recall is best-effort
             return [], RecallDiagnostics()
         if hits:

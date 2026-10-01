@@ -449,6 +449,12 @@ async def test_r10c_the_miss_text_tells_the_model_what_to_do(tmp_path):
     assert "索引里" in text
     assert "发票" in text
     assert "换一个说法" in text
+    # The no-filter advice line, pinned verbatim.  Every other assertion in this
+    # file that touches it only requires 「换一个说法」, which a rewrite to a bare
+    # 「换一个说法再搜。」 also satisfies — so the narrowing hint, the one thing that
+    # tells the model what it may not have asked yet, was unpinned and could be
+    # dropped without a single test noticing.
+    assert "换一个说法再搜，或用 kind=decision/fact/preference/open_thread 缩小范围。" in text
     # The not-one-note diagnosis, not just the word list: no_vocabulary_match
     # says the content is simply not in memory, which is a different problem
     # from a partly-unknown wording and needs a different next move.
@@ -613,3 +619,34 @@ async def test_r10c_the_tool_never_narrows_what_the_service_returned(tmp_path):
     )
 
     assert [note["id"] for note in result.data["notes"]] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_r10c_an_emptied_candidate_set_still_reports_a_measured_vocabulary(tmp_path):
+    """N2: the probe was adopted only when it carried a *diagnosis*.
+
+    An all-ASCII query whose every word is in the index, filtered down to nothing,
+    gives a probe with `terms_known` set and both `terms_unknown` and
+    `no_vocabulary_match` false — nothing for the old condition to fire on.  The
+    filtered ranking was kept instead, and it was measured against an empty
+    corpus, so the text said 「查询用词索引都认识」 with `terms_known == []`
+    sitting in the payload beside it.
+    """
+    store = MemoryStore(tmp_path / "m.json")
+    # One word per note: coverage is then 1/6 per note, under the 0.25 floor, so
+    # the probe keeps nothing and neither does the filtered ranking — the two
+    # differ only in what they can *say*, which is the whole point of the case.
+    words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]
+    for index, word in enumerate(words):
+        store.add_note(MemoryNote(id=f"x{index}", text=f"note about {word} only",
+                                  created_time="2026-09-28T00:00:00+00:00"))
+    tool = MemorySearchTool(MemoryService(store))
+
+    result = await tool.execute({"query": " ".join(words), "kind": "preference"})
+
+    assert result.data["no_match"] is True
+    assert result.data["terms_known"] == words
+    assert result.data["terms_unknown"] == []
+    # And the payload and the text agree: the index does know every word.
+    assert "查询用词索引都认识" not in result.output
+    assert result.data["near_misses"]  # the probe's rejected set, which is the diagnosis

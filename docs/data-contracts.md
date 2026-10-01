@@ -486,5 +486,60 @@ OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnix
 |---|---|
 | `scope` / `since_days` | 新增、均可选；过滤在服务侧生效。工具自身**不再有第二条过滤路径**（`_filter_hits` 已删除），只有「服务返回什么就发什么」 |
 | `data.terms_known` | **两个指代**：命中路径量的是过滤后剩下的候选集；没命中且传了过滤时量的是整个索引——因为被过滤清空的候选集会让排序直接返回一个不提名任何词的空结果，文案会把「没有未知词」读成「每个词都认识」。列出的词都确实存在，只是集合未必是模型以为的那个 |
-| `data.near_misses` / `data.index` | 与 Task 4 相同：只在没命中时带，且都**有界**（3 条 / ~200 字符）；匹配不到任何查询词的近邻一律丢弃 |
+| `data.near_misses` / `data.index` | 与 Task 4 相同：只在没命中时带，且都**有界**（3 条 / 500 条记忆的索引 JSON 实测 224 字符）；匹配不到任何查询词的近邻一律丢弃。键是 `index.active` 而不是 `index.total`——`status()` 已经把 `total` 用在「含被取代的条目」上，这里数的是活跃集 |
 | `output` 的没命中文案 | 三种情形分别说：词索引里一条都没有 / 被过滤排除（带**实测**条数，并点名调用方真正设过的过滤参数）/ 门槛拒绝（只有拿到索引概览时才说）。传了过滤时，末尾不再劝模型「按 kind 缩小范围」 |
+
+### `memory_search` 的 `data` 完整形状
+
+命中和未命中共有五个键，未命中再加三个：
+
+| 键 | 类型 | 命中时 | 说明 |
+|---|---|---|---|
+| `notes` | `list[dict]` | 有 | 每条 `id` / `kind` / `score`(三位小数) / `relevance` / `matched_terms` / `text` / `updated_time` / `pinned` / `evidence`。`matched_terms` 是**凭哪些词**回来的，可为空元组 |
+| `no_match` | `bool` | `false` | `not notes` |
+| `terms_known` | `list[str]` | 有 | 见上表「两个指代」 |
+| `terms_unknown` | `list[str]` | 有 | 索引里一次都没出现过的查询词（CJK bigram 会被拆成 `['依赖','赖怎','么装']`） |
+| `semantic_unavailable` | `bool` | 有 | **本轮恒为 `false`**。存在的唯一理由是可选语义层落地时 payload 不必改形状；现在没有任何代码把它置真 |
+| `near_misses` | `list[dict]` | **仅未命中时**（除非显式 `include_near_misses: true`） | `id`/`kind`/`score`/`relevance`/`preview`(40 字符)，最多 3 条 |
+| `index` | `dict` | **仅未命中时** | `active` / `by_kind` / `recent`（3 条 `id`+`kind`+`preview`）。**没有索引概览时这个键不存在**（记忆关掉、排序抛错、或 pre-R10c 的 double），文案此时也不编造条数 |
+| `semantic_unavailable` | `bool` | 见上 | — |
+
+失败路径另有三种 `success=False`：`error="empty_query"`、`error="bad_evidence"`（值必须是
+`tool`/`model`/空，**在召回之前**校验，坏值到不了记忆层）、`error="memory_error"`。
+
+### 排序与门禁的参数（`memory/relevance.py`）
+
+| 契约 | 位置 | 说明 |
+|---|---|---|
+| `RecallParams` | `memory/relevance.py` | 冻结数据类。R10 新增/改动的四个字段：`threshold=0.25`（混合分下限，未改）、`min_relevance=0.25`（**R10 从 0.05 提上来**）、`relative_band=0.55`（**R10 新增**，卡混合分而非相关度）、`recency_source="created"`（`"accessed"` 是列出的备选，本轮从未被走） |
+| **`min_relevance` 与 `relative_band` 的三处默认值** | `relevance.RecallParams`、`config/models.MemoryConfig`、`service._default_config()` | **三处都要改**，不是两处：`service._default_config()` 是每一个无 config 的 service 实际读的那份（`MemoryService.__init__` 在 `config` 为 `None` 时用它），只改前两处会让整个默认路径静默保留旧值 |
+| `RecallParams.from_memory_config(config)` | 同上 | duck-typed（`getattr` + 默认），测试里的 fake 也能过 |
+| `ScoredNote.matched_terms: tuple[str, ...]` | 同上 | 该笔记命中的**已知**查询词（未知名不算） |
+| `RankingResult(kept, rejected, terms_known, terms_unknown, no_vocabulary_match)` | 同上 | `rejected` 是「最接近但没过门禁」那一侧，诊断文案与 `near_misses` 都从它来；`no_vocabulary_match=True` 表示没有任何查询词在候选集里出现过（注意：是**候选集**，过滤清空时它无意义） |
+| `bm25_scores(notes, query_tokens, *, k1=1.2, b=0.75) -> dict[str, float]` | 同上 | 按 id 索引，所以 **id 必须唯一**：两条同 id 的笔记分数会**相加**。`MemoryStore` 保证唯一（uuid），但这是公开函数，前置条件未强制执行——保留为文档而不是 raise，加检查会把一次静默合并变成热路径上的新崩溃点 |
+| `best_score` 的取值范围 | `rank_notes_detailed` | 在**全部**已打分条目上取，然后才跑 `min_relevance`。于是已被相关度拒绝的条目仍然抬高所有人的地板。这是刻意的（门禁不该被它可能压过的那道门禁定义），但只是一个选择：目前没找到它翻转保留项的案例 |
+
+### 使用信号（`memory/store.py`）
+
+| 契约 | 说明 |
+|---|---|
+| `MemoryStore.touch_notes(note_ids) -> int` | 记一次使用，返回实际 touch 到的条数。经 `_mutate` **批量**走，所以五次命中只写一次文件。未知 id 忽略而不抛错：这是读路径上的记账，不能变成召回失败的方式 |
+| `MemoryNote.touch(when)` | 冻结值对象上的纯变换，返回新条目（`hits + 1`、`last_used`） |
+| 调用点 | **只有一处**：`MemoryService.recall_with_diagnostics` 在 `hits` 非空时。被过滤掉的候选**不算使用**（模型没看见它），所以过滤必须在 touch 之前跑 |
+
+### 诊断数据结构（`memory/service.py`）
+
+| 契约 | 说明 |
+|---|---|
+| `IndexSummary(active, by_kind, recent)` | 有界概览：`recent` 最多 3 条 `(id, kind, preview)`，`preview` 40 字符。失败的召回**不该把整个索引塞回上下文** |
+| `RecallDiagnostics(terms_known, terms_unknown, near_misses, index_summary, semantic_unavailable, no_vocabulary_match, filtered_out)` | 「召回为什么失败」所需的全部信息。外层各字段默认可空；`pre-R10c` 的 double 没有 `recall_with_diagnostics` 时，工具走兼容分支并用 `_EmptyDiagnostics` 占位 |
+
+### 一个没接上的旋钮
+
+`memory.detail_max_chars` 在 `MemoryConfig` 里声明了，`_default_config()` 里也有
+（1200），**全仓库没有任何地方读它**（`grep -rn "detail_max_chars" ai_coding/ tests/ --include=*.py`
+只命中这两处声明和一个照抄默认值的测试 fixture）。本轮**故意不接**：召回返回的
+`preview` 已经固定在 40 字符（`MemorySearchTool._note_payload` 与 `IndexSummary` 各有一处硬编码），
+而 52 条语料里的笔记长度中位数 40.5、最长 88——也就是说这个旋钮真接上，第一件事是决定**要不要
+让 `preview` 超过 40 字符**，那是 prompt 预算的改动，不是截断。声明留着是为了不破坏已有
+配置文件；一次有行为后果的设计决定不该塞进检索轮次顺手做掉。

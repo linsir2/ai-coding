@@ -225,3 +225,55 @@ mcp:
 
 验收脚本：`.venv/bin/python scripts/r9_cases.py`（离线 12 条）；
 `--real` 再加 1 条：真模型跑一个回合，断言 `build_report` 把这次会话算进去了。
+
+## R10 新增的配置与行为
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `memory.recall_relative_band` | `0.55` | **新增**。只保留本次查询里分数达到最高分这一份额的候选。绝对阈值跨查询不可移植，这道门禁才是把 FP@5 从 0.52 压到 0.35 的那道（单独去掉它回到 0.40）。调到 `1.0` 等于关掉它 |
+| `memory.recall_min_relevance` | `0.25` | **R3 时代是 `0.05`**，本轮提上来。0.05 实测等于没有门禁：新近性 0.20 + 重要性 0.15 = 0.35 已经越过 0.25 的分数阈值，于是无关但新鲜且重要的笔记照样被注入。**配置文件里显式写的 `0.05` 依然被照办**——改的是默认值，不是覆盖你配置的权力 |
+| `memory.recall_threshold` | `0.25` | 未改：混合分的绝对下限 |
+
+两道门禁各有职责、不能互相替代：`min_relevance` 回答「这条笔记**是不是在讲这个查询**」，
+`relative_band` 回答「它**是不是还在候选里**」。band 卡的是**混合分**（BM25 + 新近性 + 重要性 +
+类型加权），不是相关度——所以 `min_relevance=0.25` 不等于「相关就留」。
+
+```yaml
+# 想要更严的召回（更少误报、可能更少真命中）：
+memory:
+  recall_relative_band: 0.70
+  recall_min_relevance: 0.35
+# 逐条改一个数字不叫调参。改完跑：
+#   .venv/bin/python scripts/retrieval_cases.py
+# FP@5 涨过 0.36 或 R@3 掉到 0.80 以下，就是换亏了。
+```
+
+新增的 `memory_search` 参数（无需配置，模型按 schema 自己会用）：
+
+| 参数 | 做什么 | 边界 |
+|---|---|---|
+| `scope` | 精确匹配 `note.scope` | 本仓库写出的条目一律 `workspace`，所以它**只可能返回空**；保留它是因为它已被 spec 定义，且导入/外部构造的笔记可以是别的 scope。它占了 schema 1129 字符里的 218 字符（见 [功能清单](features.md) 记的取舍） |
+| `since_days` | 只看最近 N 天内**动过**的（按 `updated_time`，没更新过就按 `created_time`） | 时间基准是**调用方的钟**，生产路径取 `datetime.now(timezone.utc)`。`0` 与负数＝不限；没给索引概览时不会说「索引是空的」 |
+| `include_near_misses` | 未命中时默认返回「最接近但没过门禁」的候选；置 `true` 则命中时也返回 | 最多 3 条，且**与查询没有共享任何词的候选一律丢弃**（它不接近任何东西） |
+
+两条行为上的可见变化：
+
+1. **过滤在排序之前**：`kind` / `evidence` / `scope` / `since_days` 先决定候选集，`k` 只花在
+   候选上。此前是排完 top-k 再过滤，于是「四条 fact 压过唯一一条 decision」时
+   `kind=decision, k=3` 返回**空**，而模型要的那条就在索引里。被过滤掉的候选**不算使用**
+   （模型没看见它，所以不记 `hits`）。
+2. **召回会写盘**：命中每条记一次 `hits` + `last_used`，因此 `consolidate` 的
+   `hits >= 3 → importance + 1` 第一次真正可达。代价是命中路径每轮多一次**同步整文件写**。
+
+验收脚本（两个都是离线、无网络、时钟钉死）：
+
+```bash
+.venv/bin/python scripts/retrieval_cases.py            # 检索基准：分类指标表 + 护栏
+.venv/bin/python scripts/retrieval_cases.py --check    # 护栏门禁，不达标退出码非 0（CI 调这个）
+.venv/bin/python scripts/retrieval_cases.py --only-paraphrase   # 只把最难的改述类打全
+.venv/bin/python scripts/r10_cases.py                   # 本轮验收 16 条
+.venv/bin/python scripts/r10_cases.py --only the_decoy_still_leaks_and_says_so
+```
+
+基线（R@1 0.72 / R@3 0.85 / FP@5 0.350 / paraphrase@3 6/12 / no-answer 4/6）见
+[集成测试](integration_testing.md)。
