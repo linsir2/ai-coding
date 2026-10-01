@@ -317,11 +317,13 @@ class MemoryService:
                 # `hits` is bound and empty, so the only question left is *which
                 # measurement to report*.  The filtered ranking cannot answer it: a
                 # filter that empties the candidate set leaves the ranking with no
-                # corpus at all, and then every query word reads as "not in the
-                # index" — which the miss text renders as the opposite claim.  The
-                # unfiltered index can answer it either way, so it answers, hits or
-                # not: a hit makes it a filtered miss, and a word it has never seen
-                # makes it a vocabulary miss.
+                # corpus at all, and `rank_notes_detailed` returns a bare result for
+                # that case — naming neither the known nor the unknown words.  The
+                # miss text reads that absence as "the index knows every word you
+                # used", which is the opposite of the truth.  The unfiltered index
+                # can answer it either way, so it answers, hits or not: a hit makes
+                # it a filtered miss, and a word it has never seen makes it a
+                # vocabulary miss.
                 probe = rank_notes_detailed(
                     self._store.active(),
                     query,
