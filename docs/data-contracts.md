@@ -467,3 +467,24 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnixNano`（无时长则
 `start+1` 并标 `ai-coding.instant=true`）；行内 `data` 逐键成 attribute（bool/int/float/str 各自成类型，
 嵌套结构转 JSON 文本，`None` 丢弃）；任一行有 `error` → `status.code = 2`。
+
+## R10 契约（`memory_search` 的候选集过滤与诊断）
+
+### 候选集过滤（`memory/service.py`）
+
+| 契约 | 位置 | 说明 |
+|---|---|---|
+| `MemoryService._candidates(*, kinds, evidence, scope, since_days, now)` | `memory/service.py` | **过滤在排序之前**：四个过滤器决定候选集，`k` 只花在候选上。R10c 之前是排完 top-k 再过滤，于是「四条 fact 压过唯一一条 decision」时 `kind=decision, k=3` 返回空 |
+| `recall_with_diagnostics` / `recall_notes` 的 `kinds` / `evidence` / `scope` / `since_days` | 同上 | 默认 `None`＝不限；`recall_notes` 只做转发，过滤与 touch 各只有一个调用点 |
+| `since_days` 的时间基准 | 同上 | 截止点 = `now - N 天`；`now` 缺省取真实时钟（`datetime.now(timezone.utc)`），测试注入 `now`。**0 与负数＝不限**；设了窗口时，没有可解析 `updated_time`/`created_time` 的条目被丢弃 |
+| `scope` | 同上 | 精确匹配 `note.scope`。本仓库所有写入路径都不传 scope（`store.add` / `new_note` / `harvest._reconcile`），因此本构建写出的条目一律 `workspace`；别的值只能来自导入或外部直接构造 |
+| `RecallDiagnostics.filtered_out` | 同上 | 只在「传了过滤 + 一条没命中」时测出，来源是**一次未过滤的排序**；探针不加 `limit`，所以它是集合大小而不是 `min(命中数, k)`。`0`＝没有可归咎于过滤的东西。探针不 touch 条目 |
+
+### `memory_search` 的参数与返回（`tools/memory_search_tool.py`）
+
+| 契约 | 说明 |
+|---|---|
+| `scope` / `since_days` | 新增、均可选；过滤在服务侧生效。工具自身**不再有第二条过滤路径**（`_filter_hits` 已删除），只有「服务返回什么就发什么」 |
+| `data.terms_known` | **两个指代**：命中路径量的是过滤后剩下的候选集；没命中且传了过滤时量的是整个索引（否则一个被过滤清空的候选集会把每个查询词都报成「认识」）。列出的词都确实存在，只是集合未必是模型以为的那个 |
+| `data.near_misses` / `data.index` | 与 Task 4 相同：只在没命中时带，且都**有界**（3 条 / ~200 字符）；匹配不到任何查询词的近邻一律丢弃 |
+| `output` 的没命中文案 | 三种情形分别说：词索引里一条都没有 / 被过滤排除（带**实测**条数，并点名调用方真正设过的过滤参数）/ 门槛拒绝（只有拿到索引概览时才说）。传了过滤时，末尾不再劝模型「按 kind 缩小范围」 |

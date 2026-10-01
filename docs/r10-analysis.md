@@ -283,8 +283,8 @@ flowchart TB
 | `k` | 有 | 保持（默认 3，上限 10） | |
 | `kind` | 有 | 保持 | |
 | `evidence` | 有 | 保持 | |
-| `scope` | 无 | **新增** | `workspace` 或某个 session id |
-| `since_days` | 无 | **新增** | 只看最近 N 天更新过的 |
+| `scope` | 无 | **新增** | 精确匹配 `note.scope`。**本构建写出的条目一律是 `workspace`**——`store.add` / `new_note` / `harvest._reconcile` 都不传 scope，所以别的值只能来自导入或外部直接构造的条目 |
+| `since_days` | 无 | **新增** | 只看最近 N 天更新过（或创建）的；截止点从调用方的时钟算，0 与负数＝不限 |
 | `include_near_misses` | 无 | **新增**，默认**只在没命中时带** | 是否带上「没过门禁但最接近」的候选。显式传 `true` 则命中时也带。命中路径是常用路径，默认不带是为了不给它加负担（§3 原则 1）；且候选里**匹配不到任何查询词**的条目一律丢弃——那不是「接近」 |
 
 ### 5.2 `memory_search` 的返回（`data`）
@@ -296,7 +296,7 @@ flowchart TB
      "text","updated_time","pinned","evidence"}
   ],
   "no_match": false,             // true = 一条都没通过门禁
-  "terms_known": ["依赖","工具"], // 查询里索引认识的词
+  "terms_known": ["依赖","工具"], // 查询里「被测量过的那批条目」认识的词。**两个指代**：命中路径量的是过滤后剩下的候选集（R10c 之前是整个索引），没命中且传了过滤时量的是整个索引。列出的每个词都确实存在，只是集合未必是模型以为的那个
   "terms_unknown": ["批准"],      // 查询里索引不认识的词（模型换词的信号）
   "near_misses": [               // 未通过门禁、但分数最高的 2-3 条，明确标注「未经证实」
     {"id","kind","score","relevance","preview"}

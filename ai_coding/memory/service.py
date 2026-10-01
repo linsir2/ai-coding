@@ -237,16 +237,22 @@ class MemoryService:
         sitting right there in the index.
 
         ``since_days`` measures the window from ``now``, which is the caller's clock
-        — the production path passes the real one.  A note with no parsable
-        ``updated_time`` *or* ``created_time`` is dropped rather than assumed
-        inside the window, because a filter that lets unmeasurable notes through
-        is a filter that lies about what it did.
+        — the production path passes the real one.  ``0`` and negatives mean "no
+        window" rather than a window nothing can be inside, and a note with no
+        parsable ``updated_time`` *or* ``created_time`` is dropped rather than
+        assumed inside the window, because a filter that lets unmeasurable notes
+        through is a filter that lies about what it did.
         """
         wanted_kinds = {
             str(kind).strip().casefold() for kind in (kinds or []) if str(kind).strip()
         }
         wanted_evidence = str(evidence or "").strip().casefold()
-        cutoff = now - timedelta(days=float(since_days)) if since_days else None
+        # 0 and negatives are not windows: a 0-day window would have to exclude
+        # every note and a negative one puts the cutoff in the future, so both would
+        # answer a question nobody asked.  They mean "no window", same as the tool
+        # boundary's answer for them.
+        window = float(since_days) if since_days is not None else 0.0
+        cutoff = now - timedelta(days=window) if window > 0.0 else None
         selected: list[MemoryNote] = []
         for note in self._store.active():
             if wanted_kinds and note.kind.value not in wanted_kinds:
@@ -308,20 +314,25 @@ class MemoryService:
             hits = list(result.kept)
             filtered_out = 0
             if not hits and any((kinds, evidence, scope, since_days)):
-                # A miss the filters caused cannot be diagnosed from the set they
-                # left: rank the unfiltered index instead, so `filtered_out`, the
-                # vocabulary and the near misses all describe what the model would
-                # have got.  Only on a miss, and only when a filter was asked for.
+                # `hits` is bound and empty, so the only question left is *which
+                # measurement to report*.  The filtered ranking cannot answer it: a
+                # filter that empties the candidate set leaves the ranking with no
+                # corpus at all, and then every query word reads as "not in the
+                # index" — which the miss text renders as the opposite claim.  The
+                # unfiltered index can answer it either way, so it answers, hits or
+                # not: a hit makes it a filtered miss, and a word it has never seen
+                # makes it a vocabulary miss.
                 probe = rank_notes_detailed(
                     self._store.active(),
                     query,
                     params=self._params(),
                     now=moment,
-                    limit=ceiling,
+                    # No limit on purpose: `filtered_out` is a set size, and a slice
+                    # would report min(cleared, k) in the same sentence as an index
+                    # count of N.  This ranking only ever feeds diagnostic prose.
+                    limit=None,
                 )
-                # An unfiltered corpus is a superset, so an empty probe means the
-                # filtered ranking measured nothing better; keep its answer.
-                if probe.kept:
+                if probe.kept or probe.terms_unknown or probe.no_vocabulary_match:
                     result, filtered_out = probe, len(probe.kept)
         except Exception:  # noqa: BLE001 — recall is best-effort
             return [], RecallDiagnostics()

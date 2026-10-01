@@ -38,7 +38,11 @@ class MemorySearchTool(BaseTool):
             "decisions made in earlier sessions) and return the best matches with "
             "their ids and scores. Use it when the conversation refers to something "
             "that was decided or configured before, or when the user asks why "
-            "something is the way it is."
+            "something is the way it is. When nothing matches it also reports which "
+            "query words memory has never seen, the notes closest to the match, and "
+            "a bounded map of the index. Note that terms_known is measured over the "
+            "notes the filters left, so it covers the whole index on a miss but only "
+            "the candidates on a hit."
         )
 
     @property
@@ -271,7 +275,12 @@ def _miss_text(
         # a measured index, because otherwise we cannot tell a real rejection
         # from a double whose recall told us nothing.
         lines.append("查询用词索引都认识，但没有候选达到相关度门槛。")
-    lines.append("换一个说法再搜，或用 kind=decision/fact/preference/open_thread 缩小范围。")
+    if filters:
+        # The model already narrowed by whatever it set; offering to narrow again
+        # is the same self-contradiction the filtered-out branch exists to avoid.
+        lines.append("换一个说法再搜，或放宽刚才的过滤条件。")
+    else:
+        lines.append("换一个说法再搜，或用 kind=decision/fact/preference/open_thread 缩小范围。")
     return "\n".join(lines)
 
 

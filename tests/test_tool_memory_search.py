@@ -13,7 +13,8 @@ import pytest
 from ai_coding.domain.message import ChatMessage, ToolResult
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.memory.note import MemoryNote, NoteKind
-from ai_coding.memory.service import MemoryService, _default_config
+from ai_coding.memory.relevance import ScoredNote
+from ai_coding.memory.service import MemoryService, RecallDiagnostics, _default_config
 from ai_coding.memory.store import MemoryStore
 from ai_coding.security.permission_gate import PermissionDecision, PermissionGate
 from ai_coding.tools.memory_search_tool import MemorySearchTool, _miss_text
@@ -521,16 +522,24 @@ async def test_r10c_a_miss_names_the_filter_that_caused_it(tmp_path):
     a `scope` miss would send the model to loosen a filter it never set.
     """
     store = MemoryStore(tmp_path / "m.json")
-    for index in range(3):
-        store.add_note(MemoryNote(id=f"n{index}", text=f"依赖管理用 uv {index}",
+    # Five notes clear the gate, three do not, and k=2.  All three numbers differ:
+    # a truncated slice would say 2, the index line would say 8, and only the true
+    # count is 5 — a bare "5 条" assertion would also match the index line.
+    for index in range(5):
+        store.add_note(MemoryNote(id=f"n{index}", text=f"依赖管理用 uv 第 {index} 条",
                                   scope="workspace",
                                   created_time="2026-09-30T00:00:00+00:00"))
+    for index, text in enumerate(("依赖已经装好了", "管理一个仓库的流程",
+                                  "依赖锁文件怎么生成")):
+        store.add_note(MemoryNote(id=f"w{index}", text=text, scope="workspace",
+                                  created_time="2026-06-01T00:00:00+00:00"))
     tool = MemorySearchTool(MemoryService(store))
 
-    result = await tool.execute({"query": "依赖管理", "scope": "other"})
+    result = await tool.execute({"query": "依赖管理", "scope": "other", "k": 2})
 
     assert result.data["notes"] == []
-    assert "3 条" in result.output
+    assert "有 5 条通过了相关度门槛" in result.output
+    assert "有 2 条" not in result.output
     assert "scope" in result.output and "kind" not in result.output
     assert "放宽过滤条件" in result.output
 
@@ -545,3 +554,62 @@ async def test_r10c_the_schema_documents_both_new_filters(tmp_path):
     assert properties["since_days"]["type"] == "integer"
     assert properties["scope"]["type"] == "string"
     assert "workspace" in properties["scope"]["description"]
+
+
+# ---- R10c fix round 1: the diagnosis must be measured where it is claimed -----
+
+
+@pytest.mark.asyncio
+async def test_r10c_a_vocabulary_miss_behind_a_filter_still_names_the_words(tmp_path):
+    """Critical: a filter that empties the candidate set must not fake a gate miss.
+
+    `kind=preference` left nothing to rank, so the filtered ranking measured the
+    query's vocabulary against an empty corpus and reported every word as known:
+    「查询用词索引都认识」 next to an index that contains neither 量子 nor 纠缠.
+    Reproduced before the fix, on a three-note corpus about 部署流水线.
+    """
+    store = MemoryStore(tmp_path / "m.json")
+    for index in range(3):
+        store.add_note(MemoryNote(id=f"n{index}", text=f"部署流水线第 {index} 条",
+                                  kind=NoteKind.FACT,
+                                  created_time="2026-09-30T00:00:00+00:00"))
+    tool = MemorySearchTool(MemoryService(store))
+
+    result = await tool.execute({"query": "量子纠缠", "kind": "preference"})
+
+    # Measured: tokenize('量子纠缠') -> ['量子', '子纠', '纠缠']; none is in 部署流水线.
+    assert set(result.data["terms_unknown"]) == {"量子", "子纠", "纠缠"}
+    assert result.data["terms_known"] == []
+    assert "一条笔记都没出现过" in result.output
+    assert "查询用词索引都认识" not in result.output
+    # The model just filtered by kind; telling it to narrow by kind is the same
+    # self-contradiction the filtered-out branch was written to avoid.
+    assert "缩小范围" not in result.output
+    assert "放宽" in result.output
+
+
+@pytest.mark.asyncio
+async def test_r10c_the_tool_never_narrows_what_the_service_returned(tmp_path):
+    """One filtering path, pinned by behaviour because grep cannot fail a build.
+
+    A service that ignores `kind` has its hits passed straight through: the tool
+    has no filter of its own left to hide them with. Re-adding `_filter_hits`
+    makes this fail, which is the invariant the manual check used to cover.
+    """
+
+    class _IgnoresFilters:
+        async def recall_with_diagnostics(self, _query, **_kwargs):
+            hits = [
+                ScoredNote(note=note, score=0.9, relevance=0.9, matched_terms=("依赖",))
+                for note in (
+                    MemoryNote(id="a", text="依赖用 uv", kind=NoteKind.FACT),
+                    MemoryNote(id="b", text="依赖用 poetry", kind=NoteKind.DECISION),
+                )
+            ]
+            return hits, RecallDiagnostics()
+
+    result = await MemorySearchTool(_IgnoresFilters()).execute(
+        {"query": "依赖", "kind": "fact"}
+    )
+
+    assert [note["id"] for note in result.data["notes"]] == ["a", "b"]

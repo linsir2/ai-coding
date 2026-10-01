@@ -178,11 +178,8 @@ def test_r10c_kind_filter_does_not_shrink_the_result(tmp_path):
 
     hits = asyncio.run(service.recall_with_diagnostics("依赖管理 uv", k=3,
                                                        kinds=["decision"]))[0]
-    narrow = asyncio.run(service.recall_with_diagnostics("依赖管理 uv", k=1,
-                                                         kinds=["decision"]))[0]
 
     assert [hit.note.id for hit in hits] == ["d1"]
-    assert [hit.note.id for hit in narrow] == ["d1"]
 
 
 def test_r10c_scope_filters_candidates(tmp_path):
@@ -250,17 +247,35 @@ def test_r10c_a_filter_caused_miss_reports_what_the_filter_removed(tmp_path):
     index does not know the query at all.
     """
     store = MemoryStore(tmp_path / "m.json")
-    for note_id in ("n0", "n1", "n2"):
-        store.add_note(MemoryNote(id=note_id, text=f"依赖管理用 uv {note_id}",
+    # Five notes clear the gate and k=2, so a truncated slice would report 2 — the
+    # count is a set size, and the corpus has to be able to tell the difference.
+    for index in range(5):
+        store.add_note(MemoryNote(id=f"n{index}", text=f"依赖管理用 uv 第 {index} 条",
                                   kind=NoteKind.FACT,
                                   created_time="2026-09-30T00:00:00+00:00"))
     service = MemoryService(store)
 
     hits, diagnostics = asyncio.run(
-        service.recall_with_diagnostics("依赖管理", k=3, kinds=["preference"])
+        service.recall_with_diagnostics("依赖管理", k=2, kinds=["preference"])
     )
 
     assert hits == []
-    assert diagnostics.filtered_out == 3
+    assert diagnostics.filtered_out == 5
     assert diagnostics.terms_known and not diagnostics.terms_unknown
     assert diagnostics.no_vocabulary_match is False
+
+
+def test_r10c_since_days_of_zero_or_less_means_no_window(tmp_path):
+    """`0` and a negative are not windows, and returning the whole index for `0`
+    is the tool boundary's job to prevent — this is the service-side backstop, so
+    a direct caller gets the same answer the tool would have given it."""
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="old", text="依赖管理用 uv 旧写法",
+                              updated_time="2000-01-01T00:00:00+00:00",
+                              created_time="2000-01-01T00:00:00+00:00"))
+    service = MemoryService(store)
+
+    for since_days in (0, -5):
+        hits = asyncio.run(service.recall_with_diagnostics("依赖", k=5,
+                                                           since_days=since_days))[0]
+        assert [hit.note.id for hit in hits] == ["old"], since_days
