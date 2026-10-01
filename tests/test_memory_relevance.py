@@ -273,10 +273,131 @@ def test_r10b_the_decoy_still_leaks_and_says_it_matched_one_word():
 
 
 def test_r10b_recency_source_accessed_is_off_by_default():
-    touched = _note("a", "上下文压缩有四层", age_days=90).touch("2026-09-27T12:00:00Z")
+    # The stamp is one day *before* NOW: an earlier version used 2026-09-27
+    # against a NOW of 2026-09-23, and recency() clamps a negative age to 0, so
+    # the "accessed" arm was silently saturating at 1.0 instead of ageing.
+    touched = _note("a", "上下文压缩有四层", age_days=90).touch("2026-09-22T12:00:00Z")
     query = "上下文压缩有四层"
     created = rank_notes_detailed([touched], query, now=NOW).kept[0]
     accessed = rank_notes_detailed(
         [touched], query, params=RecallParams(recency_source="accessed"), now=NOW
     ).kept[0]
     assert created.score < accessed.score
+
+
+# ---- R10b fix round 1: the ranking core, made falsifiable -------------------
+#
+# R10b shipped the ranker with no test that could fail if the ranker were
+# wrong: swapping BM25 out for plain coverage, deleting idf, inverting the
+# length normalisation, or ignoring k1/b all left the whole suite green, and the
+# coverage swap is *better* on FP@5 (0.32 vs 0.35) on this corpus. Each test
+# below therefore names the one mechanism it pins, and was checked to fail when
+# that mechanism is removed.
+
+
+def test_r10b_bm25_idf_makes_a_rare_term_outrank_a_common_one():
+    """idf, not term count, is what separates these two.
+
+    Both notes match exactly one query term at the same frequency and the same
+    length, so the only thing that can order them is how rare the term they
+    matched is. Splitting the query across the notes is deliberate: if one note
+    matched *both* query terms it would win on distinct-term count even with
+    idf deleted, and the test would pass for the wrong reason.
+    """
+    notes = [
+        _note("rare", "flange alpha"),
+        _note("common", "gasket beta"),
+        *[_note(f"f{i}", "gasket housing") for i in range(4)],
+    ]
+    scores = bm25_scores(notes, tokenize("flange gasket"))
+    assert scores["rare"] > scores["common"] * 3
+
+
+def test_r10b_bm25_length_normalisation_favours_the_shorter_note():
+    """What b is for: same query terms, same frequencies, 16x the length."""
+    padded = " ".join(["gasket", "flange", *(f"pad{i}" for i in range(30))])
+    notes = [_note("short", "gasket flange"), _note("long", padded)]
+    assert len(tokenize(padded)) == 32
+    scores = bm25_scores(notes, tokenize("gasket flange"))
+    assert scores["short"] > scores["long"]
+
+
+def test_r10b_bm25_k1_saturates_term_frequency():
+    """Eight mentions are worth less than eight times a single mention."""
+    notes = [_note("once", "gasket housing"), _note("many", " ".join(["gasket"] * 8))]
+    scores = bm25_scores(notes, tokenize("gasket"))
+    assert scores["many"] > scores["once"]
+    assert scores["many"] < scores["once"] * 8
+
+
+def test_r10b_the_relevance_floor_drops_what_the_band_would_keep():
+    """min_relevance is a gate in its own right, not the band under another name.
+
+    "noise" is built to clear every *other* gate: it is the freshest and most
+    important note in the set, so its blended score clears both the threshold and
+    the band floor. Only its relevance is low (0.135, because it matched the
+    common term while the query's rare term went unmatched). Deleting the
+    min_relevance gate therefore flips this assertion, which is what makes the
+    two gates separable instead of interchangeable.
+    """
+    notes = [
+        _note("answer", "flange alpha beta", age_days=5, importance=3),
+        _note("noise", " ".join(["gasket"] * 4) + " filler", age_days=0,
+              importance=5, pinned=True),
+        *[_note(f"f{i}", "gasket housing", age_days=3) for i in range(4)],
+    ]
+    params = RecallParams()
+    result = rank_notes_detailed(notes, "flange gasket", params=params, now=NOW)
+    dropped = {hit.note.id: hit for hit in result.rejected}
+    assert "noise" in dropped, "the floor must drop the fresh, important, off-topic note"
+    noise = dropped["noise"]
+    best = max(hit.score for hit in result.kept + result.rejected)
+    assert noise.relevance < params.min_relevance
+    assert noise.score >= params.threshold
+    assert noise.score >= params.relative_band * best
+    # Switch the band off entirely: still dropped, so the floor is what dropped it.
+    open_band = rank_notes_detailed(
+        notes, "flange gasket", params=RecallParams(relative_band=0.0), now=NOW
+    )
+    assert "noise" not in {hit.note.id for hit in open_band.kept}
+
+
+def test_r10b_matched_terms_omits_a_known_term_the_note_lacks():
+    """The exact tuple, not a subset check: "缓存" is known and still excluded."""
+    notes = [
+        _note("a", "上下文压缩有四层", age_days=5),
+        _note("b", "缓存策略在 dist 目录", age_days=5),
+    ]
+    result = rank_notes_detailed(notes, "上下文压缩有四层 缓存", now=NOW)
+    hit = next(item for item in result.kept if item.note.id == "a")
+    assert "缓存" in result.terms_known
+    assert hit.matched_terms == ("上下", "下文", "文压", "压缩", "缩有", "有四", "四层")
+
+
+def test_r10b_the_blended_rank_term_is_bm25_not_coverage():
+    """The one test that says BM25 is load-bearing at the integration seam.
+
+    The three tests above pin mechanisms inside bm25_scores. They cannot catch
+    the ranker simply ignoring bm25_scores: on this corpus the swap is a wash
+    (R@1 0.72 -> 0.70, FP@5 0.35 -> 0.32) and left the whole suite green. So
+    this builds a case where the two terms *disagree on order* and pins the BM25
+    answer. "long" covers every query term (coverage 1.00) but is 43 tokens, so
+    length normalisation demotes it; "short" covers only the rarest term
+    (coverage 0.37) in 3 tokens. Coverage ranks long first; BM25 ranks short
+    first. Asserting "short" first is what makes the swap a failure rather than
+    a silent improvement.
+    """
+    notes = [
+        _note(
+            "long",
+            " ".join(["flange", "gasket", "widget", *(f"pad{i}" for i in range(40))]),
+            age_days=5,
+        ),
+        _note("short", "widget pad pad", age_days=5),
+        *[_note(f"f{i}", "gasket housing", age_days=5) for i in range(4)],
+    ]
+    result = rank_notes_detailed(notes, "flange gasket widget", now=NOW)
+    order = [hit.note.id for hit in result.kept]
+    assert order[:2] == ["short", "long"]
+    # and the two terms genuinely disagree, so this cannot pass by accident
+    assert result.kept[0].relevance < result.kept[1].relevance

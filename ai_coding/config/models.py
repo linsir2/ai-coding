@@ -195,8 +195,11 @@ class MemoryConfig(BaseModel):
     # spells out 0.05 keeps its old behaviour.
     recall_min_relevance: float = 0.25
     # R10b: also keep only what is within this share of the best score in the
-    # same query. This is what strips the junk tail (FP@5 0.78 -> 0.32 when
-    # measured with the semantic tier).
+    # same query. Measured on our own corpus this is what strips the junk tail:
+    # FP@5 0.52 -> 0.35, and removing the band on its own puts it back at 0.40.
+    # The band is doing that work, not the BM25 ranker — swapping BM25 for plain
+    # coverage measured 0.32 (a wash, see task-2-report.md), so do not credit
+    # recall_relative_band to the ranker.
     recall_relative_band: float = 0.55
     recency_half_life_days: float = 14.0
     # Budgets for the two injection surfaces (the tail constraint block and the

@@ -1,4 +1,4 @@
-"""Recall scoring: relevance + recency + importance + kind, gated by a threshold.
+"""Recall: rank notes by BM25, then gate on relevance and on a share of the best score.
 
 Replaces ``MemoryStore.search`` (substring match, "break on first hit") which
 returned the *oldest* matches in insertion order (cases 2 and 9 of
@@ -13,14 +13,31 @@ Two prototype findings are encoded here as first-class rules:
   - parameters are explicit values on :class:`RecallParams`, so tuning never needs
     a call-site change and tests can pin behaviour.
 
-Relevance is **idf-weighted coverage**, not BM25.  BM25 had to be normalised into
-``[0,1]`` to fit the weighted sum, and its length normalisation gives short
-documents a bonus above the "ideal document", so the ratio saturates at 1.0:
-measured on case 9, a short low-information note scored ``relevance=1.0`` and beat
-the longer note that actually answered the question.  Coverage asks the recall
-question directly — *how much of the informative part of the query does this note
-cover* — and only counts query terms the candidate set actually knows about, so
-CJK bigram noise cannot dilute a real match.
+Ranking is **Okapi BM25** (:func:`bm25_scores`); the *relevance* that gates is still
+**idf-weighted coverage** (:func:`coverage`), not BM25.  Those are two different jobs
+and the split is deliberate:
+
+  - **ranking** asks which note answers the question best, and BM25's term-frequency
+    saturation and length normalisation are what make a short precise note beat a long
+    vague one;
+  - **relevance** asks how much of the query's informative part a note covers, which
+    is a set question, and BM25 could not be normalised into it: its length
+    normalisation gives short documents a bonus above the "ideal document", so the
+    ratio saturates at 1.0 — measured on case 9, a short low-information note scored
+    ``relevance=1.0`` and beat the longer note that actually answered the question.
+    Coverage also only counts query terms the candidate set actually knows about, so
+    CJK bigram noise cannot dilute a real match.
+
+Two gates, two jobs, and they are not interchangeable:
+
+  - ``min_relevance`` answers *is this note about the query at all*. 0.05 measured as
+    no gate at all (see above);
+  - ``relative_band`` answers *is this note in the running*, as a share of the best
+    score in the same query. An absolute threshold cannot stand in for it: it does not
+    transfer across queries. Measured on our own corpus the band is what moves FP@5
+    (0.52 -> 0.35; removing it alone returns 0.40). The BM25 ranker is a wash at this
+    corpus size — swapping it for plain coverage measured 0.32 — so it is kept for
+    behaviour a 52-note corpus cannot demonstrate, not for a measured win.
 
 :class:`RecallScorer` is the seam: a future embedding-based scorer implements the
 same ``rank_notes`` call shape and the store/service layers do not change.
@@ -72,6 +89,13 @@ class RecallParams:
     the first is the floor on the blended score, the second is a hard floor on
     relevance alone. 0.05 measured as no gate at all (spec 1.1) — recency and
     importance sum to 0.35, above the 0.25 threshold — so it is 0.25 now.
+
+    ``relative_band`` is the third gate, and note what it bands: the **blended
+    score**, not relevance. Because that score carries ``0.20 * recency +
+    0.15 * importance + kind_boost``, a note with ``relevance == 1.0`` can
+    still be dropped for being old. So ``min_relevance = 0.25`` does *not* mean
+    "kept if relevant" — relevance is necessary, not sufficient, and the two
+    gates are not interchangeable in either direction.
     """
 
     threshold: float = 0.25
@@ -198,6 +222,16 @@ def bm25_scores(
     Ranking only — never a gate (spec 1.1: BM25's length normalisation saturates
     coverage at 1.0 for short notes, which is why relevance stays the gate).
     The caller is responsible for any threshold.
+
+    Ids must be unique. The result is keyed by id, so two notes sharing one id
+    cannot be told apart and their scores *sum* into a single entry. That is
+    unreachable through :class:`~ai_coding.memory.store.MemoryStore`, which
+    allocates unique ids, but this is a public function and the precondition is
+    not enforced here — kept as documentation rather than a raise so that adding
+    the check does not turn a silent merge into a new crash path on a hot loop.
+    :func:`rank_notes_detailed` inherits the same precondition, and additionally
+    reads these scores back per note, so a duplicate id there also hands both
+    notes the merged score.
     """
     corpus = _corpus_of(notes)
     totals = {note.id: 0.0 for note in notes}
@@ -277,6 +311,14 @@ def rank_notes_detailed(
     whether it is *in the running*. The band is a share of the best score in
     this query, which is why it cannot be replaced by an absolute threshold —
     an absolute one does not transfer across queries.
+
+    The band applies to the blended score, not to relevance, so a note with
+    ``relevance == 1.0`` can still be dropped for being old. And ``best_score``
+    is taken over *every* scored note, before the ``min_relevance`` filter
+    runs — so a note already rejected for irrelevance still raises the floor for
+    everyone else. That ordering is deliberate (the band should not be defined
+    in terms of a gate it might outrank) but it is a choice, not a forced one:
+    no case has been found where it flips a keeper.
     """
     active = [note for note in notes if note.is_active]
     resolved = params or RecallParams()
@@ -330,6 +372,9 @@ def rank_notes_detailed(
             )
         )
 
+    # Over every scored note, not just the ones that cleared min_relevance --
+    # see this function's docstring: an already-rejected note still sets the
+    # floor for everyone else.
     best_score = max((item.score for item in scored), default=0.0)
     floor = resolved.relative_band * best_score
     kept: list[ScoredNote] = []
