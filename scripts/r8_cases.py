@@ -179,7 +179,11 @@ async def evidence_breaks_a_tie(_tmp: Path) -> tuple[bool, str]:
 async def evidence_filter(tmp: Path) -> tuple[bool, str]:
     store = MemoryStore(tmp / "m.json")
     store.add_note(_note("t1", "构建用 uv", "tool"))
-    store.add_note(_note("m1", "构建改用 uv", "model"))
+    # The wording of `m1` is load-bearing: 「构建用什么」 tokenises to
+    # ['构建','建用','用什'] and R10's 0.25 relevance floor needs `m1` to share
+    # 建用, not just 构建. 「构建改用 uv」 covers 1 of the 3 known terms
+    # (relevance 0.221) and this case fails on the floor, not on evidence.
+    store.add_note(_note("m1", "构建用 uv，改用别家", "model"))
     store.add_note(_note("l1", "构建用 uv，老数据", ""))
     tool = MemorySearchTool(MemoryService(store))
     tool_hits = await tool.execute({"query": "构建用什么", "evidence": "tool"})

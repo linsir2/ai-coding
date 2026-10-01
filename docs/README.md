@@ -95,14 +95,20 @@ R6 处理四个候选（工作记忆锚、失败升级、`ask_user`、记忆证�
 质量门禁：`pytest`（**1301 例通过 / 2 跳过**，其中 1 例 pty 默认 deselect）全绿、`ruff` 0 问题、
 `mypy`（按 3.10 下限检查）0 问题（105 文件）；离线验收脚本：`memory_cases` 11/11、
 `trace_cases` 6/6、`r6_cases` 9/9 全过、`r7_cases` 11/11、`r7e_cases` 9/9、
-`r9_cases` 12/12、`r10_cases` 16/16；检索基准 `retrieval_cases --check` 退出 0。
+`r8_cases` 13/13、`r9_cases` 12/12、`r10_cases` 16/16；检索基准 `retrieval_cases --check` 退出 0。
 MCP 真连与真实 LLM A/B 在正常环境另有 gate 测试 + CI 步骤。
 
-> `r8_cases` 目前是 **12/13**：`evidence_filter` 这一条在 R10b（`330a412`）就失败了，原因是它的
-> fixture 文本 `构建改用 uv` 与 Task 2 修好的 `tests/test_tool_memory_search.py` 那份不是同一句
-> （新门禁下它覆盖 1/3 个已知词，coverage 0.22 < floor 0.25）。R10 各任务都跑过这个脚本，
-> 数字没变，**所以不是本轮泄漏**；修法与 Task 2 对测试做的一样是改 fixture 文本、不是改断言，
-> 但它属于 r8 的文件，本轮没经裁决因此没动。
+> **R10 的 0.25 相关度门槛让一个 fixture 措辞变成了承重结构。**
+> `scripts/r8_cases.py::evidence_filter` 与 `tests/test_tool_memory_search.py` 里的 R8b 用例是
+> **同一个三笔记题**（`t1` / `m1` / `l1`，查询「构建用什么」→ `['构建','建用','用什']`）。
+> `m1` 必须与 `t1` / `l1` **共享 `建用`**：只共享 `构建` 时它覆盖 3 个已知词里的 1 个，
+> `relevance 0.221 < 0.25` 的地板，于是被挡掉——**这条用例失败在相关度上，不是失败在
+> evidence 上**。R10 的 Task 2 改了测试那份（`构建改用 uv` → `构建用 uv，改用别家`）却漏了脚本那份，
+> 两处一起修好才回到 13/13。改动是 fixture 文本，**断言一个都没动**；两处现在都有一行注释说明
+> 措辞为什么是承重的。
+> 这类副本是检索改动的真实盲区：同一个 fixture 存在测试与脚本两份，改一处不会让另一处失败。
+> 而且只在**本分支内** bisect 是分不出「本轮弄坏」与「本分支上更早的提交弄坏」的——基线要取
+> 分支之前的那个提交。
 
 R4（可观测 / 门卫 / hook）**已按 R4a → R4b → R4c 顺序实现**：设计与决策点见 [r4-analysis.md](r4-analysis.md)，
 实施计划见 [r4-plan.md](r4-plan.md)，外部对标见 [r4a-genericagent-research.md](r4a-genericagent-research.md)。
