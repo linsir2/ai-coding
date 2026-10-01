@@ -93,19 +93,21 @@ class MemoryStore:
     ``self._notes`` while holding none.  Two threads therefore serialise onto the
     **same** ``<path>.tmp``; ``os.replace`` renames that inode to the live path while
     the second thread still has it open, so its remaining writes land on the live
-    file and append a second JSON document.  Measured (4 threads, 30 writes each,
-    a ``Barrier`` forcing maximum overlap): 6 of 25 trials left a file that
-    ``json.loads`` rejects, and ``_load`` swallows that ``ValueError`` and returns
-    ``[]`` — **every note gone, not one**.  Without forced overlap the rate is
-    3/200.  A single-writer store is fine; that is every real path in this repo.
+    file and append a second JSON document.  Measured (4 threads, barrier before
+    **every** write): 4-6 of 25 trials left a file that ``json.loads`` rejects, and
+    ``_load`` swallows that ``ValueError`` and returns ``[]`` — **every note gone,
+    not one**.  A barrier only before the write *loop* measures 0/25: the race needs
+    the two saves to overlap per write, not merely to start together.  Without any
+    synchronisation the rate is 3/200.  A single-writer store is fine; that is
+    every real path in this repo.
 
     Fixing it means holding the lock across the save, which changes the persistence
     shape for every caller.  R10 reviewed this and chose to record it rather than
-    restructure persistence inside a retrieval round.  The reproduction above is
-    the evidence; ``scripts/r10_cases.py::recall_survives_concurrent_harvest``
-    runs concurrent recalls against concurrent harvests and reports what it sees,
-    which is **survival, not the absence of this hazard** — the corruption needs
-    per-write synchronisation that case does not impose.
+    restructure persistence inside a retrieval round.
+    ``scripts/r10_cases.py::recall_survives_concurrent_harvest`` runs concurrent
+    recalls against concurrent harvests and reports what it sees, which is
+    **survival, not the absence of this hazard** — it imposes no per-write barrier,
+    so it cannot exhibit the corruption, and 32 runs of it never did.
     """
 
     def __init__(self, path: str | Path = Path(".memory")) -> None:

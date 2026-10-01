@@ -466,9 +466,9 @@ async def recall_survives_concurrent_harvest(tmp: Path) -> tuple[bool, str]:
     trials corrupt.  Threads merely started together do not hit it: 20 runs of
     this case and 12 more on review produced no corruption, and a barrier placed
     once before the loop gives 0/25.  So a clean result here is **not** evidence
-    the hazard is absent; the store's docstring carries the reproduction, and
-    the hazard stays unfixed (pre-existing M3 behaviour, R10 chose to record it
-    rather than restructure persistence in a retrieval round).
+    the hazard is absent; ``MemoryStore``'s docstring carries the corrected
+    recipe, and the hazard stays unfixed (pre-existing M3 behaviour, R10 chose
+    to record it rather than restructure persistence in a retrieval round).
     """
     # An extractor is what makes harvest *write*.  Without one, `harvest` returns
     # at the "no extractor" guard after an eviction check, so the two harvest
