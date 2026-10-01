@@ -1314,7 +1314,7 @@ class RecallDiagnostics:
             summary = diagnostics.index_summary
             if summary is not None:
                 data["index"] = {
-                    "total": summary.total,
+                    "active": summary.active,
                     "by_kind": dict(summary.by_kind),
                     "recent": [
                         {"id": note_id, "kind": kind, "preview": preview}
@@ -1408,7 +1408,7 @@ def _miss_text(data: dict[str, Any], query: str) -> str:
     """One actionable paragraph: what was searched, what is missing, what to try."""
     summary = data.get("index") or {}
     kinds = "、".join(f"{kind} {count}" for kind, count in (summary.get("by_kind") or {}).items())
-    lines = [f'没有可靠匹配（查的是 "{query}"；索引里 {summary.get("total", 0)} 条：{kinds or "空"}）。']
+    lines = [f'没有可靠匹配（查的是 "{query}"；索引里 {summary.get("active", 0)} 条：{kinds or "空"}）。']
     if data["terms_unknown"]:
         lines.append("这些词索引里没有：" + "、".join(data["terms_unknown"][:6]) + "。")
     near = data.get("near_misses") or []
