@@ -109,7 +109,7 @@ class MemoryStore:
     path, and the obvious way to stop that blocking the event loop is
     ``asyncio.to_thread(store.touch_notes, ids)``.  That is the one change that
     turns this from latent into live: today every path runs on the single event
-    loop thread and ``recall_notes`` contains no ``await``, so the writes
+    loop thread and ``recall_with_diagnostics`` contains no ``await``, so the writes
     serialise; off-thread they stop doing so.  Move the save inside the lock (or
     to a per-write tmp path) *before* anything touches this store from a thread.
     ``scripts/r10_cases.py::recall_survives_concurrent_harvest`` runs concurrent

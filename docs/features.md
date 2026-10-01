@@ -189,7 +189,7 @@ R3 重写。记忆层现在回答三个问题：**写什么、什么时候写、
 被过滤掉的候选**不算使用**（模型没看见它），所以过滤必须在 touch 之前跑。`k` 截断掉的候选
 同样不算——`touch_notes` 只收**真的返回给模型**的那些 id。这条不变量曾经只写在文档里、
 没有任何测试钉住：把 `touch_notes([hit.note.id for hit in hits])` 换成 touch 全部候选，
-1301 条测试全绿，而 6 条过了门槛的候选配 `k=1` 会记 9 次而不是 1 次，直接喂给
+1301 条测试全绿，而 6 条过了门槛的候选配 `k=1` 会记 6 次而不是 1 次，直接喂给
 `hits >= 3 → importance + 1` 与驱逐价值函数。现在由
 `tests/test_memory_service.py::test_r10_only_the_notes_the_model_saw_count_as_a_use`
 和 `scripts/r10_cases.py::only_what_the_model_saw_counts_as_a_use` 双向钉住。
