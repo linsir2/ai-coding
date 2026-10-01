@@ -12,10 +12,10 @@ import pytest
 
 from ai_coding.domain.message import ChatMessage, ToolResult
 from ai_coding.memory.note import MemoryNote, NoteKind
-from ai_coding.memory.service import MemoryService
+from ai_coding.memory.service import MemoryService, _default_config
 from ai_coding.memory.store import MemoryStore
 from ai_coding.security.permission_gate import PermissionDecision, PermissionGate
-from ai_coding.tools.memory_search_tool import MemorySearchTool
+from ai_coding.tools.memory_search_tool import MemorySearchTool, _miss_text
 
 
 def _service(tmp_path, *texts: str) -> MemoryService:
@@ -214,6 +214,117 @@ async def test_r10c_a_hit_reports_which_words_matched(tmp_path):
     assert "依赖" in result.data["terms_known"]
 
 
+# A corpus where the "closest but unproven" set is dominated by a note that shares
+# no word with the query: x0 is fresh, so its score comes from recency alone, and
+# score — not relevance — is what orders `rejected`.  Measured, the buggy payload
+# ships [x0 (relevance 0.0), m3, m1].
+_FRESH, _STALE = "2026-09-30T00:00:00+00:00", "2026-06-01T00:00:00+00:00"
+
+
+def _near_miss_service(tmp_path) -> MemoryService:
+    store = MemoryStore(tmp_path / "m.json")
+    for note_id, text, when in [
+        ("n0", "依赖管理用 uv", _FRESH),
+        ("n1", "依赖管理统一走 uv", _FRESH),
+        ("n2", "依赖管理方案是 uv", _FRESH),
+        ("x0", "今天天气不错适合出门散步", _FRESH),
+        ("m1", "依赖锁文件怎么生成", _STALE),
+        ("m2", "依赖版本要手动固定", _STALE),
+        ("m3", "管理权限是谁的", _STALE),
+    ]:
+        store.add_note(MemoryNote(id=note_id, text=text, created_time=when))
+    return MemoryService(store)
+
+
+@pytest.mark.asyncio
+async def test_r10c_a_miss_without_an_index_summary_does_not_invent_a_count(tmp_path):
+    """Memory disabled is a documented config value, and the tool still registers.
+
+    Three paths leave index_summary None — memory disabled, the ranker raising,
+    and a pre-R10c double — and none of them means the index is empty.  The
+    payload correctly omits `index`; the text must not print a count it never
+    measured, because the text is what the model reads.
+    """
+    service = _service(tmp_path, "项目用 uv 管理依赖", "构建走 uv", "发票抬头是公司名")
+    disabled = MemoryService(service.store, config=_default_config(enabled=False))
+    tool = MemorySearchTool(disabled)
+
+    result = await tool.execute({"query": "Kubernetes 集群有多少节点"})
+
+    assert result.success is True
+    assert "index" not in result.data  # the payload stays honest
+    assert "没有可靠匹配" in result.output
+    assert "0 条" not in result.output  # the text must not invent a size
+    assert "换一个说法" in result.output  # ... but must still give a next step
+
+
+@pytest.mark.asyncio
+async def test_r10c_a_miss_caused_by_our_own_filter_says_so(tmp_path):
+    """A miss the model caused itself must not be diagnosed as a vocabulary miss.
+
+    Every query word was known and the ranking produced hits; `kind` threw them
+    all away.  The generic advice ("rephrase, or narrow by kind") is
+    self-contradictory here — the caller just narrowed by kind.  The note that
+    would explain it was a kept hit, so it is in neither `notes` nor
+    `near_misses` (which draws from `rejected`).
+    """
+    tool = MemorySearchTool(_near_miss_service(tmp_path))
+
+    result = await tool.execute({"query": "依赖管理", "kind": "preference"})
+
+    assert result.data["no_match"] is True
+    assert result.data["notes"] == []
+    assert result.data["terms_known"] and not result.data["terms_unknown"]
+    assert "3 条" in result.output  # how many the filter removed
+    assert "过滤" in result.output
+
+
+@pytest.mark.asyncio
+async def test_r10c_near_misses_do_not_ship_on_a_hit_unless_asked(tmp_path):
+    """The common case must stay cheap: a hit carries notes, not a diagnosis."""
+    tool = MemorySearchTool(_near_miss_service(tmp_path))
+
+    by_default = await tool.execute({"query": "依赖管理"})
+    opted_in = await tool.execute({"query": "依赖管理", "include_near_misses": True})
+
+    assert by_default.data["notes"]  # it is a hit
+    assert "near_misses" not in by_default.data
+    assert opted_in.data["near_misses"]  # the model can still ask for candidates
+
+
+@pytest.mark.asyncio
+async def test_r10c_a_near_miss_that_matched_nothing_is_dropped(tmp_path):
+    """A near miss that shares no word with the query is not "close"."""
+    tool = MemorySearchTool(_near_miss_service(tmp_path))
+
+    result = await tool.execute({"query": "依赖管理", "include_near_misses": True})
+
+    near = result.data["near_misses"]
+    assert "x0" not in {item["id"] for item in near}
+    assert all(item["relevance"] > 0.0 for item in near)
+    assert near  # and what survives is not simply an empty list
+
+
+@pytest.mark.asyncio
+async def test_r10c_the_miss_text_never_asserts_a_gate_it_could_not_see(tmp_path):
+    """Unit test of the text builder: a measured index licenses a gate claim.
+
+    End to end this branch is unreachable — a miss with every query term known
+    always has near misses, or is filter-caused (which returns earlier) — so it is
+    pinned here directly.  Without the `index is not None` precondition the text
+    would tell a pre-R10c double, whose recall told us nothing at all, that its
+    candidates missed a relevance gate it never ran.
+    """
+    measured = {"notes": [], "terms_known": ["依赖"], "terms_unknown": [],
+                "index": {"active": 5, "by_kind": {"fact": 5}, "recent": []}}
+    unmeasured = {k: v for k, v in measured.items() if k != "index"}
+
+    assert "门槛" in _miss_text(measured)
+    assert "门槛" not in _miss_text(unmeasured)
+    assert "没有可靠匹配" in _miss_text(unmeasured)
+    assert "换一个说法" in _miss_text(unmeasured)
+
+
 @pytest.mark.asyncio
 async def test_r10c_a_miss_names_the_words_memory_has_never_heard(tmp_path):
     """Measured: tokenize('依赖怎么装') -> ['依赖','赖怎','么装']; only 依赖 is in the corpus."""
@@ -254,7 +365,9 @@ async def test_r10c_near_misses_are_bounded_and_never_overlap_the_hits(tmp_path)
         )
     tool = MemorySearchTool(MemoryService(store))
 
-    result = await tool.execute({"query": "依赖管理"})
+    # Opt in: near misses no longer ship on a hit by default, and the
+    # disjointness claim only means something when both sets are non-empty.
+    result = await tool.execute({"query": "依赖管理", "include_near_misses": True})
 
     hits = {note["id"] for note in result.data["notes"]}
     misses = {note["id"] for note in result.data["near_misses"]}
@@ -264,12 +377,24 @@ async def test_r10c_near_misses_are_bounded_and_never_overlap_the_hits(tmp_path)
 
 @pytest.mark.asyncio
 async def test_r10c_the_index_map_is_bounded_and_only_on_a_miss(tmp_path):
+    """Note text is the spec's measured 40-88 chars, not 8.
+
+    With 8-char notes the whole map serialises to 224 chars, so deleting
+    _PREVIEW_CHARS outright leaves the assertion green and the bound is
+    decorative.  At real note lengths removing the cap reaches past 400, which
+    is what makes this a test of the cap rather than of the corpus.
+    """
     store = MemoryStore(tmp_path / "m.json")
+    filler = (
+        "构建产物、依赖锁文件、缓存目录和测试快照都落在同一个工作目录下，"
+        "需要定期清理归档，并且不能提交到仓库里，发布前还要确认一次"
+    )
     for index in range(500):
         store.add_note(
-            MemoryNote(id=f"n{index:04d}", text=f"第 {index} 条无关笔记",
+            MemoryNote(id=f"n{index:04d}", text=f"第 {index} 条无关笔记：{filler}",
                        created_time="2026-09-01T00:00:00+00:00")
         )
+    assert 67 <= len(f"第 0 条无关笔记：{filler}") <= 88  # uncapped must exceed 400
     tool = MemorySearchTool(MemoryService(store))
 
     miss = await tool.execute({"query": "Kubernetes 集群有多少节点"})
@@ -320,26 +445,27 @@ async def test_r10c_the_miss_text_tells_the_model_what_to_do(tmp_path):
     assert "索引里" in text
     assert "发票" in text
     assert "换一个说法" in text
+    # The not-one-note diagnosis, not just the word list: no_vocabulary_match
+    # says the content is simply not in memory, which is a different problem
+    # from a partly-unknown wording and needs a different next move.
+    assert "一条笔记都没出现过" in text
 
 
 @pytest.mark.asyncio
 async def test_r10c_near_misses_can_be_turned_off(tmp_path):
-    """Not in the brief: the new flag is public surface, so it needs a pin.
+    """Not in the brief: the flag is public surface, so it needs a pin.
 
-    Nothing else in the suite observes ``include_near_misses=False``.
+    Asked on a miss, where the default *does* ship candidates — otherwise this
+    would pass even with the flag wired to nothing.
     """
-    store = MemoryStore(tmp_path / "m.json")
-    for index in range(6):
-        store.add_note(
-            MemoryNote(id=f"n{index}", text=f"依赖管理用 uv 第 {index} 条",
-                       created_time=f"2026-09-{10 + index:02d}T00:00:00+00:00")
-        )
-    tool = MemorySearchTool(MemoryService(store))
+    tool = MemorySearchTool(_near_miss_service(tmp_path))
+    params = {"query": "依赖管理", "kind": "preference"}  # a miss with candidates
 
-    result = await tool.execute({"query": "依赖管理", "include_near_misses": False})
+    assert (await tool.execute(params)).data["near_misses"]  # the default ships them
+    off = await tool.execute({**params, "include_near_misses": False})
 
-    assert result.data["notes"]
-    assert "near_misses" not in result.data
+    assert off.data["no_match"] is True
+    assert "near_misses" not in off.data
 
 
 @pytest.mark.asyncio

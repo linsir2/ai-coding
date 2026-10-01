@@ -68,7 +68,11 @@ class MemorySearchTool(BaseTool):
                 },
                 "include_near_misses": {
                     "type": "boolean",
-                    "description": "Include the closest non-matching notes (default true).",
+                    "description": (
+                        "Include the closest notes that did not clear the gate. "
+                        "By default they are returned only when nothing matched; "
+                        "pass true to also get them alongside a hit."
+                    ),
                 },
             },
             "required": ["query"],
@@ -96,17 +100,17 @@ class MemorySearchTool(BaseTool):
                 error="bad_evidence",
                 data={"evidence": wanted_evidence},
             )
-        include_near_misses = bool(params.get("include_near_misses", True))
+        requested_near_misses = params.get("include_near_misses")
         try:
             detailed = getattr(self._memory, "recall_with_diagnostics", None)
             if detailed is None:
                 # A memory double from before R10c: keep it working.
-                hits = await self._memory.recall_notes(
+                ranked = await self._memory.recall_notes(
                     query, k=_as_int(params.get("k"), 3)
                 )
                 diagnostics = _EMPTY_DIAGNOSTICS
             else:
-                hits, diagnostics = await detailed(query, k=_as_int(params.get("k"), 3))
+                ranked, diagnostics = await detailed(query, k=_as_int(params.get("k"), 3))
         except Exception as exc:  # noqa: BLE001 — the tool boundary
             return ToolResult(
                 success=False,
@@ -114,8 +118,13 @@ class MemorySearchTool(BaseTool):
                 error="memory_error",
                 data={"query": query},
             )
-        hits = _filter_hits(hits, params)
+        hits = _filter_hits(ranked, params)
         notes = [_note_payload(hit) for hit in hits]
+        # A hit is the common case and does not need a diagnosis attached; the
+        # model opts in when it wants candidates it can aim a follow-up at.
+        ship_near_misses = (
+            (not notes) if requested_near_misses is None else bool(requested_near_misses)
+        )
         data: dict[str, Any] = {
             "notes": notes,
             "no_match": not notes,
@@ -123,7 +132,7 @@ class MemorySearchTool(BaseTool):
             "terms_unknown": list(diagnostics.terms_unknown),
             "semantic_unavailable": bool(diagnostics.semantic_unavailable),
         }
-        if include_near_misses:
+        if ship_near_misses:
             data["near_misses"] = [
                 {
                     "id": hit.note.id,
@@ -132,7 +141,10 @@ class MemorySearchTool(BaseTool):
                     "relevance": round(hit.relevance, 3),
                     "preview": hit.note.text[:40],
                 }
+                # A candidate that shares no word with the query is not close to
+                # anything, however well it scores on recency alone.
                 for hit in diagnostics.near_misses[:3]
+                if hit.matched_terms
             ]
         if not notes:
             summary = diagnostics.index_summary
@@ -147,7 +159,15 @@ class MemorySearchTool(BaseTool):
                         for note_id, kind, preview in summary.recent
                     ],
                 }
-            return ToolResult(success=True, output=_miss_text(data), data=data)
+            return ToolResult(
+                success=True,
+                output=_miss_text(
+                    data,
+                    filtered_out=len(ranked) - len(notes),
+                    no_vocabulary_match=bool(diagnostics.no_vocabulary_match),
+                ),
+                data=data,
+            )
         lines = [
             f"- [{note['kind']}#{note['id'][:8]} score={note['score']} "
             f"matched={'/'.join(note['matched_terms'])}] {note['text']}"
@@ -185,25 +205,53 @@ def _note_payload(hit: Any) -> dict[str, Any]:
     }
 
 
-def _miss_text(data: dict[str, Any]) -> str:
+def _miss_text(
+    data: dict[str, Any],
+    *,
+    filtered_out: int = 0,
+    no_vocabulary_match: bool = False,
+) -> str:
     """The dead end, replaced by something the model can act on.
 
-    Three things it has to convey: how big memory is, which of its own words
-    memory has never seen, and that rephrasing is the next move.
+    Every clause has to be one we actually measured.  A count we never read, a
+    "no match" that our own filter caused, or a relevance gate a pre-R10c double
+    never ran are all lies, and this text is what the model reads.
     """
-    index = data.get("index") or {}
-    active = index.get("active", 0)
-    by_kind = index.get("by_kind") or {}
-    breakdown = ", ".join(f"{k} {v}" for k, v in by_kind.items()) or "空"
-    lines = [f"没有可靠匹配（索引里有 {active} 条：{breakdown}）。"]
-    if data["terms_unknown"]:
-        lines.append(f"这些词记忆里没有：{'、'.join(data['terms_unknown'][:6])}。")
+    index = data.get("index")
+    if index is None:
+        # No summary means memory is off, the ranker raised, or the double
+        # predates diagnostics — none of which means the index is empty.
+        lines = ["没有可靠匹配（读不到索引概览，不知道记忆里有多少条）。"]
+    else:
+        by_kind = index.get("by_kind") or {}
+        breakdown = ", ".join(f"{k} {v}" for k, v in by_kind.items()) or "空"
+        lines = [f"没有可靠匹配（索引里有 {index['active']} 条：{breakdown}）。"]
+    unknown = data["terms_unknown"]
+    if no_vocabulary_match:
+        lines.append(
+            f"这些词索引里一条笔记都没出现过：{'、'.join(unknown[:6])}——不是措辞问题，是这批内容不在记忆里。"
+        )
+    elif unknown:
+        lines.append(f"这些词索引里没有：{'、'.join(unknown[:6])}。")
     near = data.get("near_misses") or []
     if near:
         preview = "；".join(
             f"#{item['id'][:8]}({item['kind']}) {item['preview']}" for item in near[:3]
         )
         lines.append(f"最接近但未经证实：{preview}")
+    if filtered_out:
+        # Saying "rephrase, or narrow by kind" here would be telling the model to
+        # repeat the filter it just used.
+        lines.append(
+            f"有 {filtered_out} 条通过了相关度门槛，"
+            "是 kind/evidence 过滤把它们排除了：放宽过滤条件再搜一次。"
+        )
+        return "\n".join(lines)
+    if not near and not unknown and index is not None:
+        # Every word was known and nothing was close: the gate said no.  Gated on
+        # a measured index, because otherwise we cannot tell a real rejection
+        # from a double whose recall told us nothing.
+        lines.append("查询用词索引都认识，但没有候选达到相关度门槛。")
     lines.append("换一个说法再搜，或用 kind=decision/fact/preference/open_thread 缩小范围。")
     return "\n".join(lines)
 
