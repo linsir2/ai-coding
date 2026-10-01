@@ -428,3 +428,30 @@ async def test_escape_sets_the_event_the_dispatcher_was_given():
     async with app.run_test() as pilot:
         await pilot.press("escape")
         assert cancel.is_set()
+
+
+@pytest.mark.asyncio
+async def test_ask_screen_receives_the_options_the_model_offered():
+    """The modal's ``options`` parameter must stop being dead code.
+
+    ``AskScreen`` has rendered ``#ask-options`` since it was written, but every
+    caller left the tuple empty, so the line never appeared.
+    """
+    app = _app(loop=_FakeLoop())
+    async with app.run_test() as pilot:
+        worker = pilot.app.run_worker(
+            app.ask_provider("改 A 还是 B？", ["A", "B"]), exclusive=False
+        )
+        for _ in range(10):
+            await pilot.pause()
+            if app.screen.__class__.__name__ == "AskScreen":
+                break
+        assert app.screen.__class__.__name__ == "AskScreen", "modal never opened"
+        assert app.screen._options == ("A", "B")  # type: ignore[attr-defined]
+        # The options line only renders when the tuple is non-empty.
+        assert app.screen.query("#ask-options")  # type: ignore[attr-defined]
+        app.screen.query_one("#ask-input", Input).value = "A"
+        await pilot.press("enter")
+        await worker.wait()
+
+    assert worker.result == "A"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, cast
 
@@ -284,8 +285,15 @@ class AICodingApp(App[None]):
             if self.screen is screen:
                 self.pop_screen()
 
-    async def ask_provider(self, prompt: str) -> str:
-        screen = AskScreen(prompt)
+    async def ask_provider(self, prompt: str, options: Sequence[str] = ()) -> str:
+        """Ask through a modal; return what the human typed (``""`` means no answer).
+
+        ``options`` arrives from the tool (see ``ask_user_tool.py``) and used to
+        be flattened into ``prompt`` one level down, which left
+        ``AskScreen``'s own ``options`` parameter permanently empty.  It is
+        forwarded now, so the modal can list them.
+        """
+        screen = AskScreen(prompt, tuple(options))
         try:
             answer: str = await self.push_screen_wait(screen)
             return answer

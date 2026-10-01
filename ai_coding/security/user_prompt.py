@@ -62,16 +62,19 @@ class CLIUserPromptCallback:
 
     def __init__(self, input_fn: Callable[[str], str] | None = None) -> None:
         self._read: Callable[[str], str] = input_fn or (lambda prompt: input(prompt))
-        self._provider: Callable[[str], Any] | None = None
+        # Two parameters, not one: the TUI renders ``options`` as a list under the
+        # question, which a flattened string cannot produce.  Same shape the
+        # approval channel already uses (``approval.py`` passes tool/params/reason).
+        self._provider: Callable[..., Any] | None = None
 
-    def set_provider(self, provider: Callable[[str], Any]) -> None:
+    def set_provider(self, provider: Callable[..., Any]) -> None:
         """Use an async provider instead of stdin (TUI mode)."""
         self._provider = provider
 
     async def ask(self, question: str, options: Sequence[str] = ()) -> UserAnswer:
         if self._provider is not None:
             try:
-                raw = await self._provider(_format_prompt(question, options))
+                raw = await self._provider(question, list(options))
                 text = str(raw or "").strip()
                 if not text:
                     return UserAnswer(answered=False, reason="empty")

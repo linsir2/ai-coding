@@ -70,3 +70,49 @@ async def test_without_a_reader_the_input_path_still_works():
     callback = CLIUserPromptCallback(input_fn=lambda _prompt: "老路径")
     answer = await callback.ask("在吗？")
     assert answer.text == "老路径"
+
+
+@pytest.mark.asyncio
+async def test_the_provider_receives_the_question_and_the_options_apart():
+    """The modal can only list options if it is handed them, not a blob.
+
+    ``_format_prompt`` flattens question+options into one string, so
+    ``AskScreen``'s options parameter could never be filled: it has been
+    dead code since it was written.
+    """
+    seen: list[tuple[object, ...]] = []
+
+    async def provider(*args: object) -> str:
+        seen.append(args)
+        return "answer"
+
+    callback = CLIUserPromptCallback()
+    callback.set_provider(provider)  # type: ignore[arg-type]
+    answer = await callback.ask("改 A 还是 B？", options=["A", "B"])
+
+    assert answer.answered is True
+    assert answer.text == "answer"
+    assert seen == [("改 A 还是 B？", ["A", "B"])]
+
+
+@pytest.mark.asyncio
+async def test_the_stdin_path_still_gets_one_flattened_prompt():
+    """Non-UI callers are unchanged: one string, options folded into it.
+
+    The provider signature changed; ``_format_prompt`` did not, so the CLI and
+    every test that drives ``input_fn`` see exactly what they saw before.
+    """
+    prompts: list[str] = []
+
+    def scripted(prompt: str) -> str:
+        prompts.append(prompt)
+        return "A"
+
+    answer = await CLIUserPromptCallback(input_fn=scripted).ask(
+        "改 A 还是 B？", options=["A", "B"]
+    )
+
+    assert answer.text == "A"
+    assert len(prompts) == 1
+    assert "改 A 还是 B？" in prompts[0]
+    assert "（可选：A / B）" in prompts[0]

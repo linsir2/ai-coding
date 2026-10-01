@@ -133,6 +133,11 @@ AskScreen {
     padding: 0 2;
 }
 
+#ask-options {
+    color: $text-muted;
+    padding: 0 0 0 2;
+}
+
 #ask-input {
     margin-top: 1;
 }
