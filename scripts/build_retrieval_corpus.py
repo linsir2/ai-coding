@@ -161,12 +161,27 @@ def build() -> dict:
     path = CORPUS
     notes, _ = load_corpus(path, now=NOW)
 
+    # Re-categorise EVERY lexical-or-paraphrase question the same way: top3 hit ->
+    # lexical, missed -> paraphrase.  The previous corpus kept its hand labels for the
+    # original lexical items without re-checking, which is how
+    # "为什么不让我直接读会话文件" was labelled lexical while the ranker top3 returned
+    # n28 and never n44.  This block is what the second pass surfaced.
     lexical: list[dict] = []
     paraphrase: list[dict] = []
-    for query, relevant in CANDIDATES:
-        item = {"query": query, "relevant": sorted(relevant)}
-        found = top3(notes, query)
-        if any(note_id in found for note_id in relevant):
+    sources: list[tuple[str, list[str], str]] = []
+    for q in data["queries"]:
+        if q["category"] in ("lexical", "paraphrase"):
+            sources.append((q["query"], sorted(q["relevant"]), q["category"]))
+    for q, r in CANDIDATES:
+        sources.append((q, sorted(r), None))
+
+    seen_queries: set[str] = set()
+    for query, relevant, _old in sources:
+        if query in seen_queries:
+            continue
+        seen_queries.add(query)
+        item = {"query": query, "relevant": relevant}
+        if any(nid in top3(notes, query) for nid in relevant):
             lexical.append(item)
         else:
             paraphrase.append(item)
@@ -174,7 +189,7 @@ def build() -> dict:
     kept = [
         q
         for q in data["queries"]
-        if q["category"] not in ("paraphrase", "noanswer")
+        if q["category"] in ("identifier", "multi", "trap")
         and q["query"] != DROPPED
         and q["query"] not in NO_ANSWER
     ]
