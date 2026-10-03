@@ -52,13 +52,13 @@ CORPUS = ROOT / "scripts" / "retrieval_corpus.json"
 #: which drags the aggregate to 0.59 while telling us nothing about the ranker.
 #: Gating the aggregate would mean gating a number that can only go down.
 #:
-#: Measured on this corpus: reachable R@3 = 0.97, reachable FP@5 = 0.47.
+#: Measured on this corpus: reachable R@3 = 0.99, reachable FP@5 = 0.46.
 #: The gates sit just outside those, rounded the way the previous round's did —
 #: up, so the gate cannot be satisfied by a change that made things worse.
 #:
 #: ``paraphrase@3`` is deliberately **not** gated.  It is the headroom a semantic
 #: tier would have to capture (docs/r10-analysis.md §1.4 predicted 9/12 on the old,
-#: 12-item set).  Measured on the expanded set it is 0/45 today, so a gate would
+#: 12-item set).  Measured on the expanded set it is 0/46 today, so a gate would
 #: only ever be red until that tier exists — and a permanently red gate is the
 #: "brittle tuning game" D-R10-1 warns about.
 GUARDRAILS = {"reachable_R@3": 0.95, "reachable_FP@5": 0.50}
