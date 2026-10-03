@@ -47,6 +47,11 @@ class TurnOutcome:
     # outcome so a caller does not have to go digging through a trace file to
     # answer "what did that cost?" (docs/r4-analysis.md 7.3).
     usage: dict[str, int] | None = None
+    # Whether the turn's final word was cut by the model output ceiling
+    # (``finish_reason="length"``).  A bare stop is indistinguishable from
+    # done, so only the length cutoff is detectable — and it must surface
+    # instead of reading as a completed answer.
+    truncated_by_length: bool = False
     # R6a: the harness's own report for a turn that ended without a final word
     # (budget, clock or engine).  Deliberately *not* folded into ``text``: memory
     # reads ``text is None`` as "this turn concluded nothing", and a sub-agent's

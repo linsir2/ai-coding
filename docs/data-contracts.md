@@ -24,6 +24,7 @@ R1 之后「一步」与「一回合」是两个契约（`domain/loop.py`）：
 |---|---|---|
 | `StepResult` | `text` / `tool_calls` / `finish_reason` / `usage` | **一次模型调用**的产物；引擎只跑一步 |
 | `TurnOutcome` | `status` / `text` / `iterations` / `reason` | **一次 `process_input`** 的终态 |
+| `TurnOutcome.truncated_by_length` | `bool = False` | 最后一轮模型输出是否被 `max_tokens` 截断（`finish_reason="length"`）。裸停与写完无法区分，只有这一道可检测；置位时 UI 出红色终态块（优先于预算提示），而非静默当写完 |
 | `TurnStatus` | `COMPLETED` / `MAX_ITERATIONS` / `STOPPED` / `ABORTED` / `ERROR` | 回合如何结束 |
 
 旧的 `TurnResult` 已删除（循环归我们之后它没有意义）。
@@ -314,6 +315,7 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 |---|---|---|
 | `turn_count: int = 0` | `turnCount` | 会话级回合号（1 起）。旧会话从 0 开始重新计数（不回溯） |
 | `turn_digests: list[TurnDigest]` | `turnDigests` | 有界回合摘要环（空则不写，与 `task` 同规则）。坏行忽略 |
+| `turn_usages: list[TurnUsage]` | `turnUsages` | 每轮 token 花费（`{turn, promptTokens, completionTokens, totalTokens}`），`reporter` 填数后在 `close()` 里追记并重存一次；零花费/无上报不写行、不重存。旧文件缺键即空表 |
 
 `TurnDigest`（`domain/turn_digest.py`）：`turn` / `request` / `outcome` / `status` / `files` / `openItems`（camelCase），
 `render()` 产出一行。派生函数 `build_digest(...)` 不发模型调用；`render_working_memory(...)` 产出

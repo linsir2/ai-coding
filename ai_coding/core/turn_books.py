@@ -83,6 +83,10 @@ class TurnBooks:
     failures: list[Failure] = field(default_factory=list)
     #: The latest thing the model said (``None`` when it said nothing at all).
     last_text: str | None = None
+    #: Finish reason of the latest model step (``None`` before the first step).
+    #: The loop reads it when closing the turn: only ``"length"`` is
+    #: actionable (a bare stop is indistinguishable from done).
+    last_finish_reason: str | None = None
     #: Summaries the compactor produced this turn (for the harvest to look at).
     summaries: list[str] = field(default_factory=list)
     #: Whether the tail's memory block has been reported this turn (R3 emits one
@@ -122,9 +126,10 @@ class TurnBooks:
         self.steering_messages += max(0, int(count))
         self.failed_streak = 0
 
-    def note_step(self, text: str | None) -> None:
+    def note_step(self, text: str | None, *, finish_reason: str | None = None) -> None:
         """Remember the latest model text (even when there is none)."""
         self.last_text = text
+        self.last_finish_reason = finish_reason
 
     def note_checkpoint(self, text: str, *, limit: int = DEFAULT_NOTE_CHARS) -> None:
         """Record the model's own line for this turn (R8a, D-1/D-12).

@@ -51,6 +51,47 @@ def _message_to_dict(msg: ChatMessage) -> dict[str, Any]:
     return data
 
 
+@dataclass(frozen=True)
+class TurnUsage:
+    """One turn's token spend, for post-hoc forensics (was memory-only).
+
+    ``TurnOutcome.usage`` is filled by the reporter after the session save, so
+    a past length-cutoff could never be confirmed from the file.  Rows are
+    appended in turn order; turns that spent nothing (or reported nothing)
+    leave no row rather than a row of zeros.
+    """
+
+    turn: int
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "turn": int(self.turn),
+            "promptTokens": int(self.prompt_tokens),
+            "completionTokens": int(self.completion_tokens),
+            "totalTokens": int(self.total_tokens),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> TurnUsage | None:
+        if not isinstance(data, dict):
+            return None
+        try:
+            turn = int(data.get("turn", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if turn <= 0:
+            return None
+        return cls(
+            turn=turn,
+            prompt_tokens=int(data.get("promptTokens", 0) or 0),
+            completion_tokens=int(data.get("completionTokens", 0) or 0),
+            total_tokens=int(data.get("totalTokens", 0) or 0),
+        )
+
+
 @dataclass
 class SessionData:
     """A persisted conversation session."""
@@ -71,6 +112,9 @@ class SessionData:
     # instead of "message count" (docs/r6-analysis.md 2.4).
     turn_count: int = 0
     turn_digests: list[TurnDigest] = field(default_factory=list)
+    # Per-turn token spend (see TurnUsage).  Sessions written before this
+    # existed simply have no key; the file stays readable everywhere.
+    turn_usages: list[TurnUsage] = field(default_factory=list)
     # NOT persisted — ``to_dict`` is a hand-written whitelist, so this stays out
     # of the on-disk format and the Java side keeps reading the same bytes.
     # ``SessionService.list_sessions`` reads every file anyway and drops the
@@ -85,6 +129,19 @@ class SessionData:
 
     def add_message(self, message: ChatMessage) -> None:
         self.messages.append(message)
+
+    def record_turn_usage(self, turn: int, usage: dict[str, int] | None) -> None:
+        """Append one usage row; absent or all-zero usage writes no row."""
+        if not usage or not any(int(value or 0) for value in usage.values()):
+            return
+        self.turn_usages.append(
+            TurnUsage(
+                turn=int(turn),
+                prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+                completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+                total_tokens=int(usage.get("total_tokens", 0) or 0),
+            )
+        )
 
     def ensure_tool_pairing(self, strict: bool = True) -> None:
         """Drop orphan tool results and strip unmatched tool calls (defensive)."""
@@ -135,6 +192,10 @@ class SessionData:
             data["turnCount"] = int(self.turn_count)
         if self.turn_digests:
             data["turnDigests"] = [digest.to_dict() for digest in self.turn_digests]
+        # Same rule again: zero-spend turns leave no rows, so most test and
+        # idle sessions never grow this key at all.
+        if self.turn_usages:
+            data["turnUsages"] = [row.to_dict() for row in self.turn_usages]
         return data
 
     @classmethod
@@ -152,6 +213,13 @@ class SessionData:
             for digest in (TurnDigest.from_dict(row) for row in rows)
             if digest is not None
         ]
+        raw_usages = data.get("turnUsages")
+        usage_rows = raw_usages if isinstance(raw_usages, list) else []
+        usages = [
+            row
+            for row in (TurnUsage.from_dict(item) for item in usage_rows)
+            if row is not None
+        ]
         return cls(
             session_id=data.get("sessionId", ""),
             title=data.get("title", ""),
@@ -162,8 +230,9 @@ class SessionData:
             harvested_messages=int(data.get("harvestedMessages", 0) or 0),
             turn_count=int(data.get("turnCount", 0) or 0),
             turn_digests=digests,
+            turn_usages=usages,
         )
 
 
 # Re-export helper for callers that need to resolve references.
-__all__ = ["SessionData", "tool_call_from_ref"]
+__all__ = ["SessionData", "TurnUsage", "tool_call_from_ref"]

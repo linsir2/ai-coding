@@ -46,6 +46,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ai_coding.ai.engine import ChatEngine, EngineError
@@ -322,7 +323,7 @@ class AgentLoop:
                     on_delta=on_delta,
                     index=index,
                 )
-                books.note_step(step.text)
+                books.note_step(step.text, finish_reason=step.finish_reason)
 
                 if not step.tool_calls:
                     decision = self.policy.decide_after_step(
@@ -511,6 +512,12 @@ class AgentLoop:
         outcome: TurnOutcome,
     ) -> TurnOutcome:
         """Record what this turn leaves behind, then persist it (R6a)."""
+        # W1: every exit funnels through here (normal, failed, and the
+        # cancelled path above), so the length-cutoff flag lands uniformly —
+        # including on turns the budget or the clock stopped.
+        outcome = replace(
+            outcome, truncated_by_length=(books.last_finish_reason == "length")
+        )
         return self.closer.close(
             session,
             user_input=user_input,

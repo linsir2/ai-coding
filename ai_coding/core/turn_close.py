@@ -225,6 +225,14 @@ class TurnCloser:
             keep=int(getattr(self._settings, "working_memory_keep", 12)),
         )
         self.finalize(session, outcome, observer)
+        # W3: the reporter fills usage inside finalize (after the save), so a
+        # second save is the only way the row reaches the file.  Zero-spend
+        # turns write no row — and no extra save — keeping save-count tests
+        # and idle sessions exactly where they were.
+        filled = self.last_outcome
+        if filled is not None and filled.usage and any(filled.usage.values()):
+            session.record_turn_usage(turn_number, filled.usage)
+            self.save(session)
         return outcome
 
     # ---- introspection -----------------------------------------------------

@@ -89,3 +89,35 @@ def test_ensure_tool_pairing_drops_orphans():
     assert ("tool", "a") in ids
     assert ("tool", "z") not in ids
     assert all(m.tool_calls is not None for m in s.messages if m.role == "assistant")
+
+
+def test_old_session_without_turn_usages_loads_empty():
+    s = SessionData.from_dict({"sessionId": "old", "messages": []})
+    assert s.turn_usages == []
+    assert "turnUsages" not in s.to_dict()
+
+
+def test_record_turn_usage_appends_row_and_roundtrips():
+    from ai_coding.domain.session import TurnUsage
+
+    s = SessionData("s1", "title", "c", "l")
+    s.record_turn_usage(2, {"prompt_tokens": 100, "completion_tokens": 50,
+                            "total_tokens": 150})
+    s.record_turn_usage(3, None)
+    s.record_turn_usage(4, {"prompt_tokens": 0, "completion_tokens": 0,
+                            "total_tokens": 0})
+    assert s.turn_usages == [
+        TurnUsage(turn=2, prompt_tokens=100, completion_tokens=50, total_tokens=150)
+    ]
+    restored = SessionData.from_dict(s.to_dict())
+    assert restored.turn_usages == s.turn_usages
+
+
+def test_turn_usage_from_dict_rejects_bad_rows():
+    from ai_coding.domain.session import TurnUsage
+
+    assert TurnUsage.from_dict(None) is None
+    assert TurnUsage.from_dict({"turn": 0}) is None
+    assert TurnUsage.from_dict({"turn": "x"}) is None
+    row = TurnUsage.from_dict({"turn": 1})
+    assert row is not None and row.prompt_tokens == 0
