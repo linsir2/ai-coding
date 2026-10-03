@@ -275,3 +275,31 @@ def test_r11b_memory_recall_timeout_default_and_camel(tmp_path):
         )
     )
     assert ConfigLoader.load_app(str(cfg)).memory.recall_timeout_seconds == 0
+
+
+def test_r11d_fusion_defaults_to_blend_and_rejects_unknown_values():
+    """R11d: RRF ships available and off. A bad value fails at load, not mid-recall."""
+    assert MemoryConfig().recall_fusion == "blend"
+    assert MemoryConfig().rrf_k == 60
+    assert MemoryConfig(recall_fusion="rrf").recall_fusion == "rrf"
+    with pytest.raises(ValidationError):
+        MemoryConfig(recall_fusion="rrf-ish")
+
+
+def test_r11d_fusion_loads_from_camel_case_yaml(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        textwrap.dedent(
+            """
+            default_model: x
+            models:
+              x: {name: x, base_url: http://a, api_key: k}
+            memory:
+              recallFusion: rrf
+              rrfK: 30
+            """
+        )
+    )
+    memory = ConfigLoader.load_app(str(cfg)).memory
+    assert memory.recall_fusion == "rrf"
+    assert memory.rrf_k == 30

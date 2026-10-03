@@ -19,6 +19,7 @@ from ai_coding.memory.service import (
     HarvestReport,
     MemoryService,
     RecallDiagnostics,
+    _default_config,
     is_extraction_allowed,
 )
 from ai_coding.memory.store import MemoryStore
@@ -650,3 +651,21 @@ async def test_r11c_consolidate_does_not_merge_across_scenes(tmp_path):
 
     assert report.merged == ()
     assert len(store.active()) == 2
+
+
+def test_r11d_a_service_without_config_ranks_with_blend(tmp_path):
+    """`_default_config()` is what every config-less service reads, so R11d's two
+    keys have to live there too — otherwise the default path would raise or
+    silently miss the switch."""
+    from ai_coding.memory.relevance import RecallParams
+
+    params = RecallParams.from_memory_config(_default_config())
+
+    assert params.recall_fusion == "blend"
+    assert params.rrf_k == 60
+
+    store = MemoryStore(tmp_path / "m.json")
+    svc = MemoryService(store)  # no config at all
+    svc.write_note("构建用 uv 管理依赖", kind="decision")
+    hits, _diagnostics = asyncio.run(svc.recall_with_diagnostics("构建用什么依赖", k=3))
+    assert [hit.note.id for hit in hits]

@@ -59,6 +59,11 @@ memory:
   # far above the measured ~5ms, so it is a placeholder for the day the semantic
   # tier gets slow; 0 disables it.
   # recall_timeout_seconds: 2.0
+  # R11d — how the lexical and semantic opinions become one rank term, for the
+  # optional embeddings tier only.  blend is the default *and* the measured
+  # better one: with `rrf`, reachable R@3 falls 1.00 -> 0.93 (under the 0.95
+  # guardrail) to buy +1/46 paraphrase hit.  Re-measure before switching.
+  # recall_fusion: blend
   # 可选语义档（R10d）：默认整块关掉。打开需要 provider 指向 models 里的一项，
   # 复用它的 base_url / api_key。deepseek 系端点没有 /embeddings（404），开了
   # 等于没开；min_cosine 是在 text-embedding-v4 上量的，换模型必须重标。

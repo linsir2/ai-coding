@@ -628,3 +628,18 @@ R11c 只加**可选字段与只读回显**，不改排序、不改门禁、不�
 | `_parse_version` / `_parse_status` | 只取 frontmatter 首行；`version` 是**字符串**（无 semver 比较，`1.10` 不会排到 `1.9` 之下）；`status` 白名单 `active|archived`，未知值读作 `active`，不发明第三种状态 |
 | `skill list` / `skill read` | 共用同一个 `_suffix`：`version != "1"` 才显示 `(vN)`，`archived` 再加 `[archived]` → **全部老 skill 输出逐字节不变**。`read` 成功新增 `data={name, version, status}`（此前无 `data`）。archived 仍可读，只陈述状态、不推荐替代品（那是策略，registry 保持中立） |
 | `catalog_text()` | **不动**：它进系统提示词（L1 必须逐字节静态），且 `/skills` 复用它 |
+
+### 融合规则（R11d）
+
+| 契约 | 位置 | 说明 |
+|---|---|---|
+| `RecallParams.recall_fusion` / `.rrf_k` | `memory/relevance.py` | 默认 `"blend"` / `60`。`RecallParams` 里**未识别的值按 `blend` 处理**（这个数据类被测试与脚本直接构造，召回中途不为一个没人校验的字符串抛错）；`MemoryConfig.recall_fusion` 是 `Literal`，**加载期**拒绝非法值 |
+| `rrf_rank_term(lexical, semantic, *, k=60)` | 同上 | 两路各自按 `(-score, id)` 确定性排序 → `Σ 1/(k+位次+1)` → **除以 `len(lists)/(k+1)`** 归一到 `[0,1]`。只对**出现在该榜里**的条目计分（缺席只算那一路没表态）。归一不可省：不归一会让 `weight_rank` 的含义被静默改掉 |
+| 只在有 semantic 时生效 | `rank_notes_detailed` | 无 semantic 时 `rrf` **回退 blend**：一路榜不是融合，且 RRF 会把词面排序从分数幅度换成名次，从而改变所有未开语义档用户的排序 |
+| `MemoryConfig.recall_fusion` / `.rrf_k` | `config/models.py` | 有默认值，旧配置不改也能跑。`rrf_k` **不进 `config.example.yaml`**（只为重测存在的旋钮） |
+| `service._default_config()` | `memory/service.py` | 两项同步（R10 记录的「三处默认值」纪律：`RecallParams` / `MemoryConfig` / `_default_config`） |
+| `scripts/retrieval_cases.py --fusion {blend,rrf}` | 同上 | 只影响基准；`--with-embeddings` 的语义表现在打**与词面表同口径**的 per-category + reachable + 门禁行（此前只打全集与 paraphrase） |
+| `--fusion rrf --check` | 同上 | **不失败**，只打印对照与一行「not gated」。默认关闭且实测更差的开关不能被写成契约 |
+
+R11d 不改任何门禁、不改排序器签名、不改落盘；`recall_fusion="blend"`（默认）下今天的
+`retrieval_cases --check` 逐位不变。

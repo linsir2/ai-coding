@@ -56,6 +56,8 @@ from ai_coding.memory.note import MemoryNote
 from ai_coding.memory.tokenize import tokenize
 
 __all__ = [
+    "FUSIONS",
+    "RRF_K",
     "RankingResult",
     "RecallParams",
     "RecallScorer",
@@ -66,6 +68,7 @@ __all__ = [
     "parse_time",
     "rank_notes",
     "rank_notes_detailed",
+    "rrf_rank_term",
     "recency",
 ]
 
@@ -79,6 +82,11 @@ DEFAULT_KIND_BOOSTS: Mapping[str, float] = {
 #: harvested before R6d recorded provenance, so it ranks with "model" - the
 #: tie-break must never punish an old row for missing a field that did not exist.
 _EVIDENCE_RANK: Mapping[str, int] = {"tool": 0, "model": 1, "": 1}
+
+#: RRF's damping constant (the paper's value, and TencentDB Agent Memory's).
+RRF_K = 60
+#: The fusion rules this build knows. Anything else ranks as ``blend``.
+FUSIONS = ("blend", "rrf")
 
 
 @dataclass(frozen=True)
@@ -117,6 +125,18 @@ class RecallParams:
     # recalibration — this constant is model-specific, not universal.
     min_cosine: float = 0.60
     recency_source: Literal["created", "accessed"] = "created"
+    # R11d: how the lexical and semantic opinions become one rank term.
+    # ``blend`` is today's behaviour (min-max each list, average them).  ``rrf``
+    # fuses *positions* instead of scores — measured worse on our corpus
+    # (paraphrase R@3 0.41 -> 0.26, reachable R@3 1.00 -> 0.96), so it is
+    # available and off.  An unrecognised value is treated as ``blend``:
+    # RecallParams is built directly by tests and scripts, and a recall must not
+    # raise over a string nobody validated.
+    recall_fusion: str = "blend"
+    # R11d: RRF's damping constant.  60 is the value from the RRF paper, which is
+    # also what TencentDB Agent Memory uses; with only two lists the curve is
+    # flat enough that this barely matters, and ``rrf10`` measured no better.
+    rrf_k: int = RRF_K
     kind_boosts: Mapping[str, float] = field(
         default_factory=lambda: dict(DEFAULT_KIND_BOOSTS)
     )
@@ -131,6 +151,8 @@ class RecallParams:
             relative_band=float(getattr(config, "recall_relative_band", 0.55)),
             half_life_days=float(getattr(config, "recency_half_life_days", 14.0)),
             min_cosine=float(getattr(embeddings, "min_cosine", 0.60)),
+            recall_fusion=str(getattr(config, "recall_fusion", "blend") or "blend"),
+            rrf_k=int(getattr(config, "rrf_k", RRF_K) or RRF_K),
         )
 
 
@@ -219,6 +241,41 @@ def _minmax(
         for note_id in note_ids
         if note_id in semantic
     }
+
+
+def rrf_rank_term(
+    lexical: Mapping[str, float],
+    semantic: Mapping[str, float],
+    *,
+    k: int = RRF_K,
+) -> dict[str, float]:
+    """Reciprocal Rank Fusion over two ranked lists, normalised to ``[0, 1]``.
+
+    Each list is ordered by descending score with the id as tie-break, so the
+    result is deterministic; a note contributes only from lists that contain it
+    (half credit when one list has no vector for it).  The raw sum is divided by
+    ``len(lists) / (k + 1)`` — the best possible score — because the caller
+    multiplies this by ``weight_rank`` and compares it against gates calibrated
+    for a ``[0, 1]`` term: an un-normalised 2/61 ≈ 0.033 would silently demote
+    the rank term below ``weight_recency`` and re-tune the blend by accident.
+
+    One list is not a fusion, so a caller with no semantic signal must not use
+    this (see :func:`rank_notes_detailed`, which falls back to ``blend``).
+    """
+    lists = [
+        sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+        for scores in (lexical, semantic)
+        if scores
+    ]
+    if not lists:
+        return {}
+    damping = max(1, int(k))
+    fused: dict[str, float] = {}
+    for ranking in lists:
+        for position, (note_id, _score) in enumerate(ranking):
+            fused[note_id] = fused.get(note_id, 0.0) + 1.0 / (damping + position + 1)
+    best = len(lists) / (damping + 1)
+    return {note_id: value / best for note_id, value in fused.items()}
 
 
 def _idf(term: str, df: Mapping[str, int], n_docs: int) -> float:
@@ -390,6 +447,13 @@ def rank_notes_detailed(
     raw = bm25_scores(active, query_tokens, k1=resolved.bm25_k1, b=resolved.bm25_b)
     best_raw = max(raw.values(), default=0.0) or 1.0
     semantic_norm = _minmax(semantic, [note.id for note in active])
+    # R11d: one rank term for everyone, computed once.  RRF needs both lists
+    # ordered, which is why it cannot live inside the per-note branch below.
+    # `rrf` without a semantic signal is not a fusion of one list — it would
+    # silently swap score magnitudes for positions and change lexical-only
+    # ranking for every user who never enabled embeddings — so it falls back.
+    use_rrf = bool(semantic) and str(resolved.recall_fusion).strip().casefold() == "rrf"
+    fused = rrf_rank_term(raw, semantic or {}, k=resolved.rrf_k) if use_rrf else {}
     scored: list[ScoredNote] = []
     for note in active:
         doc_tokens = tokenize(note.text)
@@ -406,9 +470,14 @@ def rank_notes_detailed(
         rank_term = raw.get(note.id, 0.0) / best_raw
         cosine = semantic.get(note.id) if semantic else None
         if cosine is not None:
-            # Half BM25, half semantic.  A note the index could not score keeps
-            # its pure-BM25 term: missing signal is no opinion, not a negative.
-            rank_term = 0.5 * rank_term + 0.5 * semantic_norm.get(note.id, rank_term)
+            if use_rrf:
+                # Missing from the fused map means no vector on either side; the
+                # lexical term is then the only opinion there is.
+                rank_term = fused.get(note.id, rank_term)
+            else:
+                # Half BM25, half semantic.  A note the index could not score keeps
+                # its pure-BM25 term: missing signal is no opinion, not a negative.
+                rank_term = 0.5 * rank_term + 0.5 * semantic_norm.get(note.id, rank_term)
         score = (
             resolved.weight_rank * rank_term
             + resolved.weight_recency * freshness

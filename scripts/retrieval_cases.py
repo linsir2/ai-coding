@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -23,6 +24,7 @@ from datetime import datetime, timezone  # noqa: E402
 
 from ai_coding.memory.benchmark import evaluate, format_metrics, load_corpus  # noqa: E402
 from ai_coding.memory.relevance import RecallParams, rank_notes  # noqa: E402
+from ai_coding.memory.service import _default_config  # noqa: E402
 
 #: Pinned so recency is part of the fixture, not of the day we run it.
 NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)
@@ -80,14 +82,19 @@ def main(argv: list[str] | None = None) -> int:
                         help="config file holding models.* for --with-embeddings")
     parser.add_argument("--provider", default="qwen",
                         help="models.<name> to embed with for --with-embeddings")
+    parser.add_argument("--fusion", default="blend", choices=["blend", "rrf"],
+                        help="R11d: how lexical and semantic opinions become one rank "
+                             "term. blend is the default and the measured better one; "
+                             "rrf is here to be re-measured, not to be shipped blind")
     args = parser.parse_args(argv)
 
     notes, cases = load_corpus(args.corpus, now=NOW)
+    params = RecallParams(recall_fusion=args.fusion)
 
     def rank(query: str) -> list[str]:
         return [
             hit.note.id
-            for hit in rank_notes(notes, query, params=RecallParams(), now=NOW, limit=5)
+            for hit in rank_notes(notes, query, params=params, now=NOW, limit=5)
         ]
 
     overall = evaluate(rank, cases)
@@ -142,10 +149,16 @@ def main(argv: list[str] | None = None) -> int:
 def _run_semantic_table(notes, cases, args) -> int:
     """Second table through the true production path, with a live index.
 
-    This is the only place that touches the network in the benchmark suite.
-    It builds a real MemoryService over the corpus notes with a real
+    This is the only place that touches the network in the benchmark suite.  It
+    builds a real MemoryService over the corpus notes with a real
     EmbeddingIndex, so the numbers measure the shipped code rather than a
     reimplementation of it.  Compare against the lexical table above.
+
+    R11d: it prints the **same breakdown** as the lexical table (per category,
+    then reachable R@3/FP@5 and the guardrail line).  Without that, "does the
+    fusion rule move the gates" is a question the yardstick cannot answer — which
+    is exactly why the earlier semantic numbers in the docs could not be
+    reproduced from this script.
     """
     import asyncio
     import tempfile
@@ -177,7 +190,10 @@ def _run_semantic_table(notes, cases, args) -> int:
         for note in notes:
             store.add_note(note)
         service = MemoryService(
-            store, embeddings=EmbeddingIndex(cfg, models),
+            store,
+            embeddings=EmbeddingIndex(cfg, models),
+            config=SimpleNamespace(**{**vars(_default_config()),
+                                      "recall_fusion": parser_args.fusion}),
         )
 
         def rank(query: str) -> list[str]:
@@ -186,11 +202,30 @@ def _run_semantic_table(notes, cases, args) -> int:
             )
             return [hit.note.id for hit in hits]
 
-        print("\nsemantic (live index, same corpus, same clock):")
+        print(f"\nsemantic (live index, same corpus, same clock, fusion="
+              f"{parser_args.fusion}):")
         print(format_metrics("semantic", evaluate(rank, cases)))
+        for category in CATEGORIES:
+            subset = [case for case in cases if case.category == category]
+            if not subset:
+                continue
+            print(format_metrics(f"  {category}", evaluate(rank, subset)))
+        reachable = evaluate(rank, [c for c in cases if c.category in REACHABLE])
         para_cases = [c for c in cases if c.category == "paraphrase"]
         para_at_3 = round(evaluate(rank, para_cases).recall_at(3) * len(para_cases))
+        print(
+            f"reachable (lexical+identifier+multi): R@3={reachable.recall_at(3):.2f} "
+            f"FP@5={reachable.false_positive_share:.2f}"
+        )
         print(f"semantic paraphrase@3={para_at_3}/{len(para_cases)}")
+        if parser_args.fusion != "blend":
+            # Deliberately not a gate. A switch that is off by default and measured
+            # worse must not be turned into a contract by making it fail CI; what
+            # it owes the reader is this line, and the numbers above it.
+            print(
+                f"note: fusion={parser_args.fusion} is not the default and is not "
+                f"gated -- the guardrails above cover the default lexical path only"
+            )
     return 0
 
 

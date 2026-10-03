@@ -322,6 +322,48 @@ token 删掉一个已被 spec 定义的参数，是在优化那把尺子；语�
 之前"无 await 所以并发串行"的论证不再成立（touch 本身仍同步，所以写不交错，但 embed 并发）。
 `store.py` 的 docstring 已同步到现在的事实。
 
+### 融合规则可切换：RRF 实测更差，所以默认是 blend（R11d）
+
+`memory.recall_fusion` 有两档：`blend`（今天的行为，两路各自 min-max 后取平均）与 `rrf`
+（Reciprocal Rank Fusion，按**名次**融合：`Σ 1/(k+60+位次)`，归一到 `[0,1]`）。**默认 `blend`**，
+理由是实测：
+
+| 口径（124 条查询，同语料同时钟） | blend | rrf |
+|---|---|---|
+| 生产路径 · 可达 R@3 / FP@5 | **1.00 / 0.48** | 0.93 / 0.53（**越过门禁**） |
+| 生产路径 · paraphrase@3 | 6/46 | **7/46** |
+| 生产路径 · 全集 R@1 / MRR / FP@5 | **0.48 / 0.56 / 0.64** | 0.35 / 0.48 / 0.67 |
+| 生产路径 · no-answer 拒答 | 4/10 | 4/10 |
+| 裸排序（不过门禁）· reachable R@3 | **1.00** | 0.96 |
+| 裸排序（不过门禁）· paraphrase R@3 | 0.41 | **0.26** |
+
+两条结论，方向相反，都写在这里：
+
+1. **RRF 换不来改述召回的整体提升，只换来 +1 条**（6/46 → 7/46），代价是可达集 R@3 掉到 **0.93**
+   ——**低于 0.95 门禁** —— FP@5 0.48→0.53 也越过 0.50 门禁，全集 R@1 掉 0.13。所以它不能当默认。
+2. **裸排序与生产路径的结论相反**（裸排序上 rrf 的 paraphrase R@3 是 0.41→0.26，生产路径上是
+   0.13→0.15，两者的分母与门禁都不同）。这不是某一边算错了，是**两个不同的问题**：融合规则改的是
+   `rank_term`，而三道门禁作用在混合分上，所以「换融合规则」的影响只能过完整路径量，不能用裸排序代答。
+   这也是为什么 `_run_semantic_table` 现在打与词面表**同口径**的分解（此前它只打全集与 paraphrase，
+   docs 里那组语义档的可达数字无法从脚本复现）。
+
+**没有 semantic 信号时 RRF 不生效，自动回退 blend**：一路榜不存在「融合」，而且 RRF 会把词面排序
+从「分数幅度」换成「名次」，那样会悄悄改变所有没开语义档用户的排序 —— 这条由
+`test_r11d_rrf_without_a_semantic_signal_falls_back_to_blend` 钉住。归一化同理不可省：不归一的话
+RRF 原始分（2/61≈0.033）会让 `weight_rank=0.55` 的排名项被 `weight_recency=0.20` 压过去，等于
+偷偷重调了整套权重，测出来的结论就不可信了。
+
+**它不设门禁**：`--fusion rrf --check` 只打印对照表与差异、退出码仍为 0。一个默认关闭且实测更差的
+开关不该被写成契约；它欠读者的是那张表，不是 CI 的红灯。`memory.rrf_k`（默认 60，论文与
+TencentDB Agent Memory 同值）同样只为重测而存在，故 `config.example.yaml` 里不给示例。
+
+复现（需要网络与一个支持 `/embeddings` 的端点，例如 `models.qwen`）：
+
+```bash
+.venv/bin/python scripts/retrieval_cases.py --with-embeddings --config config.local.yaml
+.venv/bin/python scripts/retrieval_cases.py --with-embeddings --fusion rrf --config config.local.yaml
+```
+
 ## 技能
 
 `SkillRegistry` 扫描技能目录，凡含 `SKILL.md` 的顶层目录即视为一项技能；`catalog_text()` 把每项技能的 frontmatter `description` 汇成 `- name: description` 目录，供 `skill` 工具与系统提示使用。空目录不产生任何目录。

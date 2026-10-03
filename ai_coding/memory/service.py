@@ -91,6 +91,8 @@ def _default_config(**overrides: Any) -> SimpleNamespace:
         "recall_threshold": 0.25,
         "recall_min_relevance": 0.25,
         "recall_relative_band": 0.55,
+        "recall_fusion": "blend",
+        "rrf_k": 60,
         "recency_half_life_days": 14.0,
         "recall_timeout_seconds": 2.0,
         "extraction_enabled": True,

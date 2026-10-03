@@ -213,3 +213,33 @@ def test_r10a_paraphrase_questions_are_exactly_the_ones_lexical_search_misses():
         )
     ]
     assert not offenders, f"paraphrase items the lexical ranker already answers: {offenders}"
+
+
+# ---- R11d: the fusion switch reaches the yardstick ------------------------
+
+
+def test_r11d_the_fusion_flag_does_not_move_the_lexical_table(capsys):
+    """`--fusion rrf` is a semantic-tier knob. With no embeddings on, the
+    lexical table must be the same numbers, or the switch would quietly become a
+    retrieval change for everyone who never enabled the tier."""
+    from scripts.retrieval_cases import main
+
+    assert main([]) == 0
+    default_out = capsys.readouterr().out
+    assert main(["--fusion", "rrf"]) == 0
+    rrf_out = capsys.readouterr().out
+
+    assert "guardrails OK" in default_out and "guardrails OK" in rrf_out
+    for line in ("reachable (lexical", "paraphrase@3=", "no-answer correctly refused"):
+        assert _line_with(default_out, line) == _line_with(rrf_out, line)
+
+
+def _line_with(text: str, prefix: str) -> str:
+    return next(line for line in text.splitlines() if line.startswith(prefix) or prefix in line)
+
+
+def test_r11d_an_unknown_fusion_flag_is_rejected():
+    from scripts.retrieval_cases import main
+
+    with pytest.raises(SystemExit):
+        main(["--fusion", "max"])

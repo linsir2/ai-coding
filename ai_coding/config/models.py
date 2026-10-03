@@ -226,6 +226,15 @@ class MemoryConfig(BaseModel):
     # coverage measured 0.32 (a wash, see task-2-report.md), so do not credit
     # recall_relative_band to the ranker.
     recall_relative_band: float = 0.55
+    # R11d: how the lexical and semantic opinions become one rank term.
+    # `blend` is today's behaviour and the measured better one (RRF measured
+    # paraphrase R@3 0.41 -> 0.26 on our corpus), so this is a switch for
+    # re-measuring, not a default change. Literal: an unknown rule fails at
+    # load rather than mid-recall, where nothing would report it.
+    recall_fusion: Literal["blend", "rrf"] = "blend"
+    # R11d: RRF's damping constant (paper value). Not in config.example.yaml on
+    # purpose — it is a re-measuring knob, not a user-facing one.
+    rrf_k: int = 60
     recency_half_life_days: float = 14.0
     # R11b: wall-clock budget for one recall (rank + semantic tier + probe).
     # Over budget the hits still return but the optional `touch` write is
