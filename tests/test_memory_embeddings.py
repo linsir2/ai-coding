@@ -184,3 +184,90 @@ def test_r10d_a_404_latches_the_provider_and_stops_hitting_it(tmp_path):
     assert asyncio.run(index.provider_lacks_embeddings()) is True
     assert asyncio.run(index.provider_lacks_embeddings()) is True
     assert len(calls) == 1  # probed once, then short-circuited
+
+
+def test_r10d_cli_builds_no_index_when_off():
+    from types import SimpleNamespace
+
+    from ai_coding.cli import _embeddings_for
+
+    assert _embeddings_for(SimpleNamespace(memory=MemoryConfig())) is None
+    assert _embeddings_for(SimpleNamespace()) is None
+    assert _embeddings_for(SimpleNamespace(memory=SimpleNamespace())) is None
+
+
+def test_r10d_cli_builds_an_index_when_enabled():
+    from types import SimpleNamespace
+
+    from ai_coding.cli import _embeddings_for
+    from ai_coding.memory.embeddings import EmbeddingIndex
+
+    cfg = SimpleNamespace(
+        memory=SimpleNamespace(
+            embeddings=EmbeddingsConfig(enabled=True, provider="qwen")
+        ),
+        models=_models(),
+    )
+    index = _embeddings_for(cfg)
+
+    assert isinstance(index, EmbeddingIndex)
+    assert index.available() is True
+
+
+def test_r10d_large_missing_sets_are_batched_not_one_post(tmp_path):
+    """78 uncached notes must not go out as a single POST."""
+    transport, calls = _fake({f"text {i}": [float(i), 0.0] for i in range(25)})
+    index = EmbeddingIndex(_cfg(), _models(), transport=transport,
+                           cache_path=tmp_path / "e.json")
+
+    vectors = asyncio.run(
+        index.vectors_for([_note(f"n{i}", f"text {i}") for i in range(25)])
+    )
+
+    assert len(vectors) == 25
+    assert len(calls) == 3  # 10 + 10 + 5, not one giant POST
+    assert all(len(batch[1]) <= 10 for _, batch in calls)
+
+
+def test_r10d_urllib_maps_404_to_unsupported_and_raises_the_rest(tmp_path):
+    import urllib.error
+
+    from ai_coding.memory.embeddings import urllib_transport
+
+    async def drive(code: int | None):
+        real = urllib.request.urlopen
+
+        def fake(request, timeout=None):
+            if code is None:
+                raise TimeoutError("timed out")
+
+            class Resp:
+                status = 200
+
+                def read(self):
+                    return b'{"data": [{"index": 0, "embedding": [0.5, 0.5]}]}'
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+            if code != 200:
+                raise urllib.error.HTTPError(
+                    request.full_url, code, "x", {}, None
+                )
+            return Resp()
+
+        urllib.request.urlopen = fake
+        try:
+            transport = await urllib_transport("https://x.example", "k", 5)
+            return await transport("m", ["hi"])
+        finally:
+            urllib.request.urlopen = real
+
+    with pytest.raises(EmbeddingsUnsupportedError):
+        asyncio.run(drive(404))
+    assert asyncio.run(drive(200)) == [[0.5, 0.5]]
+    with pytest.raises(TimeoutError):
+        asyncio.run(drive(None))
