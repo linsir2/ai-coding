@@ -85,6 +85,22 @@ ruff check .    # 静态检查 0 问题
 mypy ai_coding  # 类型检查（strict）通过
 ```
 
+> **用项目 venv 跑**（`.venv/bin/python -m pytest`）。裸 `python` 若 site-packages 里存在同名
+> `tests` 常规包（本机 conda 里就有一个 Ultralytics 带来的），它会遮蔽本仓库的 `tests/` 目录，
+> 4 个 `from tests.… import …` 的模块会以 `ModuleNotFoundError` 收集失败——那是解释器选错了，
+> 不是仓库坏了。
+
+## R11 新增的配置
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `memory.extraction_enabled` | `true` | **写侧总闸**。`false` = 收割与 `memory_write` 全停，召回/注入照常（只读记忆模式）。缺段或非法值 → 放行，只有显式关掉才停 |
+| `memory.extraction_extractors` | `null` | 写通道白名单：`["harvest"]` / `["memory_write"]` / 两者。`null`、缺段或非 list = 全放行。**必须与上一项同时理解**：开关是总闸，本项是分流 |
+| `memory.recall_timeout_seconds` | `2.0` | 一次召回的墙钟预算（覆盖过滤、语义层、排名与未命中探针）。超预算 → **命中照返**，只跳过那次可选的 `touch` 写盘，并发一条 `Degraded(memory_recall)`；`0` 或负数关闭。出厂 2.0s 对实测 ~5ms 是虚位以待，等语义层真的变慢它才开始起作用 |
+
+三项都只加在 `memory.*` 下，旧配置不改也能跑；`memory_search` 的新参数 `scene` 由模型按 schema
+自己会用（详见[数据契约](data-contracts.md) 的 R11c 节）。
+
 真实网络链路可用 `scripts/integration_smoke.py` 验证（工具回合、多轮回放、L4 摘要、记忆提取）。
 
 R6 的验收（回合摘要环 / 收尾交接 / 失败升级 / `ask_user` / 记忆证据）：

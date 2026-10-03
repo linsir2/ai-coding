@@ -91,16 +91,21 @@ R6 处理四个候选（工作记忆锚、失败升级、`ask_user`、记忆证�
 
 ## 当前状态
 
-主线里程碑 M0–M6 与 R1–R10 全部完成，分阶段提交。
-质量门禁：`pytest` **1307 例通过 / 2 跳过**全绿（这是**含** `tests/test_pty_textual.py` 的数字；
+主线里程碑 M0–M6 与 R1–R11 全部完成，分阶段提交。
+质量门禁：`pytest` **1408 例通过 / 2 跳过**全绿（这是**含** `tests/test_pty_textual.py` 的数字；
 **CI 跑的就是同一条命令** `python -m pytest -q`，`ci.yml` 顶部明写 "No test file is excluded
-here"，所以本地与 CI 是同一个数字，不存在 deselect）、`ruff` 0 问题、`mypy`（按 3.10 下限检查）0 问题（105 文件）；
+here"，所以本地与 CI 是同一个数字，不存在 deselect）、`ruff` 0 问题、`mypy`（按 3.10 下限检查）0 问题（106 文件）；
 离线验收脚本：`memory_cases` 11/11、`trace_cases` 6/6、`r6_cases` 9/9 全过、`r7_cases` 11/11、
 `r7e_cases` 9/9、`r8_cases` 13/13、`r9_cases` 12/12、`r10_cases` 22/22。
 检索基准 `retrieval_cases --check` 本地退出 0——但**它不在 CI 里**（CI 只跑 ruff / mypy /
 `pytest -q` / `test_mcp_stdio.py` / `memory_cases.py` / `trace_cases.py`），所以它是本地门禁，
 改动检索后要自己跑。`r10_cases` 同样不在 CI 里。
 MCP 真连与真实 LLM A/B 在正常环境另有 gate 测试 + CI 步骤。
+
+> **本地跑测试必须用项目 venv（`.venv/bin/python -m pytest`）。** 裸 `python` 在本机 conda
+> site-packages 里有一个 Ultralytics 带来的同名 `tests` 包，它是**常规包**（带 `__init__.py`），
+> 会直接遮蔽本仓库的 `tests/` 目录（namespace 目录），于是 4 个 `from tests.test_xxx import …`
+> 的模块以 `ModuleNotFoundError` 收集失败——那是环境问题，不是仓库坏了。
 
 > **R10 的 0.25 相关度门槛让一个 fixture 措辞变成了承重结构。**
 > `scripts/r8_cases.py::evidence_filter` 与 `tests/test_tool_memory_search.py` 里的 R8b 用例是
@@ -121,7 +126,7 @@ R6（回合摘要环 / 失败升级 / `ask_user` / 记忆证据 / 索引不变�
 设计与实测见 [r6-analysis.md](r6-analysis.md)，分步计划见 [r6-plan.md](r6-plan.md)，
 验收脚本 `scripts/r6_cases.py`（离线 9 条 + 真实 3 条）。
 
-### R4–R10 一览
+### R4–R11 一览
 
 里程碑表此前停在 R3，所以它在说谎：R4 之后的所有轮次都存在。逐轮方案、计划与执行状态写在
 对应文档里，这里只列范围。
@@ -136,11 +141,24 @@ R6（回合摘要环 / 失败升级 / `ask_user` / 记忆证据 / 索引不变�
 | R8 | 模型侧 checkpoint / 记忆 evidence 同分破平局 + 过滤 / 工具流式与 Esc 取消 | [r8-analysis](r8-analysis.md) / [r8-plan](r8-plan.md) |
 | R9 | 依赖硬门禁（策略在工具层）+ 轨迹的 `overview` / HTML / OTLP-JSON 三个出口 | [r9-analysis](r9-analysis.md) / [r9-plan](r9-plan.md) |
 | **R10（检索）** | 把检索变成**可测量的**：离线基准 + BM25 排序 + 两道门禁 + 召回会解释失败 + 命中即使用 + 过滤先于排序 + 可选语义档（默认关） | [r10-analysis](r10-analysis.md) / [r10-plan](r10-plan.md) / 执行计划 `docs/superpowers/plans/2026-10-01-r10-retrieval.md` |
+| **R11（记忆）** | 对标 [TencentDB-Agent-Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory) 的三个子交付：`R11a` 查询清洗 + 写侧总开关、`R11b` 召回预算 + 超时可见、`R11c` scene 分组 + 来源位置引用 + skill 版本回显。**只借单机用得上的部分**：网关、向量库、ACL、代理一律不搬 | 无独立 analysis/plan（改动小、可直接验证）；契约见 [数据契约](data-contracts.md) 的 R11a / R11b / R11c 节，过程与取舍在提交 `fa04b9f` 里 |
 
-**两处命名撞车，别混**：`R10`（检索）、`R11`、`R12` 是**检索轮**之后的编号；而
+**两处命名撞车，别混**：`R10`（检索）、`R11`（记忆）、`R12`（界面）是**检索轮**之后的编号；而
 [终端界面重构](#终端界面重构r10--r12)那一节里的「R10 → R12」指的是**界面轮**的 R10–R12，
 早于检索轮。文档里 `R10b` / `R10c` / `R10d` 永远指检索轮（R10a 基准 / R10b 排序与门禁 / R10c 诊断与过滤 / R10d 可选语义档）；
+`R11a` / `R11b` / `R11c` 指记忆轮；界面轮的 R12 早于检索轮的编号，两处都叫 R12 但不是同一件事。
 R10d 在本轮之前曾刻意拆出（理由见 [r10-plan](r10-plan.md) 末尾的执行记录），现已实现并默认关闭。
+
+R11 实测（三件事都可验证，而不是「应该」）：
+
+| 子交付 | 验证口径 | 结果 |
+|---|---|---|
+| `R11a` 查询清洗 | 带 `<tool_output>` / `<memory-constraints>` 的 query 与干净 query 召回同一批 id，且封套词不再出现在 `terms_unknown` | 一致；`a < b` 不被误伤 |
+| `R11a` 写侧总开关 | `extraction_enabled=false` → 收割与 `memory_write` 全停且**索引 0 写**（连 evict 也不做） | 通过；缺段/非 list 配置 → 放行（部分 yaml 不能静默停写） |
+| `R11b` 召回预算 | `recall_timeout_seconds=1e-9` → 命中照返、`data.timed_out=true`、恰好一条 `Degraded(memory_recall)`、`touch` 未发生 | 通过；出厂默认 2.0s 对实测 ~5ms 是虚位以待，**今天不会触发** |
+| `R11c` scene | 6 个场景只出 5 组（按 heat 倒序）；未分组库**不输出新键、不加新句**；模型猜错场景名时 `filtered_out` 点名是 scene 过滤 | 通过 |
+| `R11c` 位置引用 | 20 条 delta + `harvest_max_messages=12` + `source_offset=5` → refs 恰为 `m13..m24`（不是 `m5..m24`） | 通过 |
+| 不回归 | `retrieval_cases --check` 指标**逐位不变**（可达 R@3 0.99 / FP@5 0.46）——scene 与 refs 都不进打分 | 通过；`r10_cases` 22/22、`memory_cases` 11/11、`trace_cases` 6/6 |
 
 检索轮实测（旧 52/46 语料 → 新 78/124 语料）：词面可达 R@3 0.85→**0.99**、可达 FP@5 0.350→**0.46**、
 paraphrase@3 按定义归零（0/46，旧 6/12 里有 3 条是词面本就能答的）。**通用词重叠的诱饵仍然泄漏**，三种修法都实测赔了
