@@ -363,6 +363,188 @@
       "importance": 5,
       "age_days": 0,
       "text": "今天要把 docs 目录里的 CLI 章节重写一遍。"
+    },
+    {
+      "id": "n53",
+      "kind": "open_thread",
+      "importance": 2,
+      "age_days": 12,
+      "text": "还没定要不要给验收脚本加超时保护，长跑的用例目前靠人工掐表。"
+    },
+    {
+      "id": "n54",
+      "kind": "open_thread",
+      "importance": 3,
+      "age_days": 20,
+      "text": "未定：子智能体要不要默认开 git worktree 隔离。"
+    },
+    {
+      "id": "n55",
+      "kind": "open_thread",
+      "importance": 2,
+      "age_days": 26,
+      "text": "还在权衡压缩策略要不要改成先摘要再裁剪。"
+    },
+    {
+      "id": "n56",
+      "kind": "open_thread",
+      "importance": 2,
+      "age_days": 31,
+      "text": "还没决定 UI 层是否继续押注 Textual。"
+    },
+    {
+      "id": "n57",
+      "kind": "open_thread",
+      "importance": 2,
+      "age_days": 15,
+      "text": "待定：轨迹默认是否导出 OTLP。"
+    },
+    {
+      "id": "n58",
+      "kind": "open_thread",
+      "importance": 3,
+      "age_days": 34,
+      "text": "未定：是否支持 Windows，bash 工具只在 Linux 上验过。"
+    },
+    {
+      "id": "n59",
+      "kind": "open_thread",
+      "importance": 2,
+      "age_days": 9,
+      "text": "没定：多智能体之间要不要共享记忆，还是各自隔离。"
+    },
+    {
+      "id": "n60",
+      "kind": "open_thread",
+      "importance": 2,
+      "age_days": 22,
+      "text": "没定：记忆的注入预算要不要按 token 算而不是按字符。"
+    },
+    {
+      "id": "n61",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 11,
+      "text": "每回合结束会写一条 usage 记录，含 prompt、completion、cached 三个 token 数。"
+    },
+    {
+      "id": "n62",
+      "kind": "fact",
+      "importance": 2,
+      "age_days": 17,
+      "text": "回合计时用 turn_started_at 与 turn_finished_at 两个字段，界面靠它显示本回合耗时。"
+    },
+    {
+      "id": "n63",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 13,
+      "text": "门卫在工具执行前检查输入，钩子在回合边界触发，两者时机不同。"
+    },
+    {
+      "id": "n64",
+      "kind": "fact",
+      "importance": 2,
+      "age_days": 29,
+      "text": "OTLP 导出的是 JSON 文件，一行一个 span，字段是 trace_id、span_id、name、start、end。"
+    },
+    {
+      "id": "n65",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 16,
+      "text": "会话 JSON 的 schema_version 字段用来做向后兼容迁移。"
+    },
+    {
+      "id": "n66",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 24,
+      "text": "工具执行失败会返回结构化的 error 字段，模型据此决定重试还是换路。"
+    },
+    {
+      "id": "n67",
+      "kind": "fact",
+      "importance": 3,
+      "age_days": 19,
+      "text": "回合超时由 turn_timeout_seconds 控制，默认 600 秒。"
+    },
+    {
+      "id": "n68",
+      "kind": "fact",
+      "importance": 2,
+      "age_days": 27,
+      "text": "worktree 隔离只在子智能体上生效，主循环始终待在项目根目录。"
+    },
+    {
+      "id": "n69",
+      "kind": "fact",
+      "importance": 2,
+      "age_days": 21,
+      "text": "预算超限时门卫会拒绝新回合，界面显示剩余额度。"
+    },
+    {
+      "id": "n70",
+      "kind": "fact",
+      "importance": 2,
+      "age_days": 23,
+      "text": "轨迹目录默认按轮次分层，r7 的数据落在 .ai-coding/traces/r7。"
+    },
+    {
+      "id": "n71",
+      "kind": "decision",
+      "importance": 4,
+      "age_days": 38,
+      "text": "决定不用 LangChain 一类现成编排库，理由是循环语义要完全可控。"
+    },
+    {
+      "id": "n72",
+      "kind": "decision",
+      "importance": 4,
+      "age_days": 32,
+      "text": "决定错误一律走结构化字段，不塞进自然语言 output。"
+    },
+    {
+      "id": "n73",
+      "kind": "decision",
+      "importance": 3,
+      "age_days": 25,
+      "text": "决定测试里的时间一律注入，不读系统时钟。"
+    },
+    {
+      "id": "n74",
+      "kind": "decision",
+      "importance": 5,
+      "age_days": 14,
+      "text": "决定不把密钥写进任何提交过的文件，包括 config.example.yaml。"
+    },
+    {
+      "id": "n75",
+      "kind": "preference",
+      "importance": 3,
+      "age_days": 18,
+      "text": "代码注释用中文，docstring 讲清「为什么」而不是「是什么」。"
+    },
+    {
+      "id": "n76",
+      "kind": "preference",
+      "importance": 4,
+      "age_days": 10,
+      "text": "不接受先合了再补测试。"
+    },
+    {
+      "id": "n77",
+      "kind": "preference",
+      "importance": 3,
+      "age_days": 8,
+      "text": "倾向小步提交，一个 commit 只做一件事。"
+    },
+    {
+      "id": "n78",
+      "kind": "preference",
+      "importance": 4,
+      "age_days": 6,
+      "text": "文档里的数字必须来自实测，不接受估算。"
     }
   ],
   "queries": [
@@ -536,97 +718,6 @@
       ]
     },
     {
-      "category": "paraphrase",
-      "query": "怎么让新同事快速上手这个项目",
-      "relevant": [
-        "n16",
-        "n27",
-        "n43"
-      ]
-    },
-    {
-      "category": "paraphrase",
-      "query": "担心模型把前面发过的东西再算一次钱",
-      "relevant": [
-        "n06"
-      ]
-    },
-    {
-      "category": "paraphrase",
-      "query": "我不想每次都被问要不要批准",
-      "relevant": [
-        "n18"
-      ]
-    },
-    {
-      "category": "paraphrase",
-      "query": "怎么防止工具输出把网页搞坏",
-      "relevant": [
-        "n45"
-      ]
-    },
-    {
-      "category": "paraphrase",
-      "query": "长期记性是怎么做的",
-      "relevant": [
-        "n14",
-        "n07"
-      ]
-    },
-    {
-      "category": "paraphrase",
-      "query": "卡住的命令怎么收场",
-      "relevant": [
-        "n10",
-        "n40"
-      ]
-    },
-    {
-      "category": "paraphrase",
-      "query": "怎么让模型别一直重复问同一个问题",
-      "relevant": [
-        "n07",
-        "n30"
-      ]
-    },
-    {
-      "category": "paraphrase",
-      "query": "代码评审之前要做什么",
-      "relevant": [
-        "n02",
-        "n20"
-      ]
-    },
-    {
-      "category": "paraphrase",
-      "query": "我不想被过度设计绑架",
-      "relevant": [
-        "n35"
-      ]
-    },
-    {
-      "category": "paraphrase",
-      "query": "怎么把过去几轮的记忆压缩成一句话",
-      "relevant": [
-        "n29",
-        "n13"
-      ]
-    },
-    {
-      "category": "paraphrase",
-      "query": "which relevance algorithm do we use",
-      "relevant": [
-        "n32"
-      ]
-    },
-    {
-      "category": "paraphrase",
-      "query": "怎么做语义检索",
-      "relevant": [
-        "n33"
-      ]
-    },
-    {
       "category": "multi",
       "query": "记忆和提示词缓存怎么取舍",
       "relevant": [
@@ -660,33 +751,668 @@
       ]
     },
     {
-      "category": "noanswer",
-      "query": "生产环境的 PostgreSQL 连接串是什么",
-      "relevant": []
-    },
-    {
-      "category": "noanswer",
-      "query": "上次那个客户的发票抬头是什么",
-      "relevant": []
-    },
-    {
-      "category": "noanswer",
-      "query": "我们的 Android 应用上架了吗",
-      "relevant": []
-    },
-    {
-      "category": "noanswer",
-      "query": "Kubernetes 集群有多少节点",
-      "relevant": []
-    },
-    {
-      "category": "noanswer",
-      "query": "帮我改一下按钮的圆角",
-      "relevant": []
-    },
-    {
       "category": "trap",
       "query": "CLI 命令怎么加一个新子命令",
+      "relevant": []
+    },
+    {
+      "query": "怎么让新同事快速上手这个项目",
+      "relevant": [
+        "n16",
+        "n27",
+        "n43"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "怎么防止工具输出把网页搞坏",
+      "relevant": [
+        "n45"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "代码评审之前要做什么",
+      "relevant": [
+        "n02",
+        "n20"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "我不想被过度设计绑架",
+      "relevant": [
+        "n35"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "怎么把过去几轮的记忆压缩成一句话",
+      "relevant": [
+        "n13",
+        "n29"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "我们平时是怎么管理外部依赖的",
+      "relevant": [
+        "n01"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "跑测试这件事有没有指定的姿势",
+      "relevant": [
+        "n02"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "模型服务是挂在哪家的",
+      "relevant": [
+        "n03"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "写提交说明时有什么不该出现的符号",
+      "relevant": [
+        "n05"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "跟用户沟通的时候能不能打太极",
+      "relevant": [
+        "n09"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "六份说明文档什么时候跟着改",
+      "relevant": [
+        "n16"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "静态检查按哪个版本为下限",
+      "relevant": [
+        "n17"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "外部服务默认会不会弹窗拦一下",
+      "relevant": [
+        "n18"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "哪个开关一关纪律就松了",
+      "relevant": [
+        "n21"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "临时记一句和长期记一笔有什么不同",
+      "relevant": [
+        "n29"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "采到一半出问题能不能挪位置",
+      "relevant": [
+        "n30"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "中文是怎么切开的",
+      "relevant": [
+        "n34"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "设计上的复杂度要控制在什么程度",
+      "relevant": [
+        "n35"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "光跑单元测试够不够",
+      "relevant": [
+        "n36"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "收尾自检放在哪里",
+      "relevant": [
+        "n37"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "派生出来的执行者还能再派生吗",
+      "relevant": [
+        "n41"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "为什么不让它直接翻会话存档",
+      "relevant": [
+        "n44"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "导出网页时哪里容易出安全问题",
+      "relevant": [
+        "n45"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "平时那些第三方包怎么统一起来的",
+      "relevant": [
+        "n01"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "后端接的是哪家的云服务",
+      "relevant": [
+        "n03"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "被叫出来的帮手一开始继承多少历史",
+      "relevant": [
+        "n12"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "那几份说明书每轮要不要跟着动",
+      "relevant": [
+        "n16"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "提取过程失败之后指针还能不能动",
+      "relevant": [
+        "n30"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "验收的东西归谁保管",
+      "relevant": [
+        "n37"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "帮手自己还能不能再叫帮手",
+      "relevant": [
+        "n41"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "为什么不把存档原文喂进去",
+      "relevant": [
+        "n44"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "额度用完了会怎样",
+      "relevant": [
+        "n69"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "为什么不选那种别人写好的编排框架",
+      "relevant": [
+        "n71"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "测试里怎么固定住时间",
+      "relevant": [
+        "n73"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "注释该用什么语言",
+      "relevant": [
+        "n75"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "能先把东西合进去以后再补验证吗",
+      "relevant": [
+        "n76"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "一次提交该塞几件事",
+      "relevant": [
+        "n77"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "说明里的数值能估吗",
+      "relevant": [
+        "n78"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "每轮结束会记哪种用量",
+      "relevant": [
+        "n61"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "存档靠哪个字段做老数据兼容",
+      "relevant": [
+        "n65"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "隔离机制对谁生效",
+      "relevant": [
+        "n68"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "担心模型把前面发过的东西再算一次钱",
+      "relevant": [
+        "n06"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "我不想每次都被问要不要批准",
+      "relevant": [
+        "n18"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "长期记性是怎么做的",
+      "relevant": [
+        "n07",
+        "n14"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "卡住的命令怎么收场",
+      "relevant": [
+        "n10",
+        "n40"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "which relevance algorithm do we use",
+      "relevant": [
+        "n32"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "调试真实终端交互要开哪个开关",
+      "relevant": [
+        "n04"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "省下来的对话费用靠什么拿到",
+      "relevant": [
+        "n06"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "模型总共能从几个地方读到我们的笔记",
+      "relevant": [
+        "n07"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "跑一次之后会留下哪些排查材料",
+      "relevant": [
+        "n08"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "半路叫停一个进程要注意什么",
+      "relevant": [
+        "n10"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "为什么不借用现成的那类代理库",
+      "relevant": [
+        "n11"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "派生出来的执行者默认能看到多少上文",
+      "relevant": [
+        "n12"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "聊太长了怎么办",
+      "relevant": [
+        "n13"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "存这些记录用的是什么格式",
+      "relevant": [
+        "n14"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "临时产物分别落在哪个路径",
+      "relevant": [
+        "n19"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "开工之前要先落什么",
+      "relevant": [
+        "n20"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "捞回来的东西什么时候算被留住",
+      "relevant": [
+        "n22"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "第三方观测库装了没有",
+      "relevant": [
+        "n23"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "每步的花费是怎么被盯住的",
+      "relevant": [
+        "n24"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "日常沟通用什么语言",
+      "relevant": [
+        "n25"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "本机代码放在哪",
+      "relevant": [
+        "n27"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "字段大小写不一致是怎么对上的",
+      "relevant": [
+        "n28"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "排序是怎么算出来的",
+      "relevant": [
+        "n31"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "这些东西最多攒多少",
+      "relevant": [
+        "n38"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "出了岔子该放行还是该拦住",
+      "relevant": [
+        "n39"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "等待批准最长会被卡多久",
+      "relevant": [
+        "n40"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "同一时间最多跑几个",
+      "relevant": [
+        "n42"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "验证代码时命令行该怎么敲",
+      "relevant": [
+        "n02"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "记录变更时哪种字符要避开",
+      "relevant": [
+        "n05"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "答复提问的人时能不能含糊其辞",
+      "relevant": [
+        "n09"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "代码规范按哪一年版本兜底",
+      "relevant": [
+        "n17"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "远端能力是不是每次都要先过一道人工",
+      "relevant": [
+        "n18"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "哪一处能绕开那条硬约束",
+      "relevant": [
+        "n21"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "随手留的短句跟真正入库的记录差在哪",
+      "relevant": [
+        "n29"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "汉字串是怎么拆成可检索单元的",
+      "relevant": [
+        "n34"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "方案要不要往简单里做",
+      "relevant": [
+        "n35"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "只验代码本身够不够",
+      "relevant": [
+        "n36"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "生成页面时哪一步可能被人注入",
+      "relevant": [
+        "n45"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "两种把关一个在动作前一个在收尾处",
+      "relevant": [
+        "n63"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "出错了怎么把原因带回给模型",
+      "relevant": [
+        "n66"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "一轮最多能跑多久就自动掐断",
+      "relevant": [
+        "n67"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "出错信息该放哪",
+      "relevant": [
+        "n72"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "敏感信息可以落到版本库里吗",
+      "relevant": [
+        "n74"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "排查材料怎么分堆",
+      "relevant": [
+        "n70"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "还剩多少东西是悬着的",
+      "relevant": [
+        "n53",
+        "n54",
+        "n55",
+        "n56",
+        "n57",
+        "n58",
+        "n59",
+        "n60"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "category": "noanswer",
+      "query": "怎么让模型别一直重复问同一个问题",
+      "relevant": []
+    },
+    {
+      "category": "noanswer",
+      "query": "生产环境的数据库密码是什么",
+      "relevant": []
+    },
+    {
+      "category": "noanswer",
+      "query": "团队现在有多少人",
+      "relevant": []
+    },
+    {
+      "category": "noanswer",
+      "query": "上线日期定在哪天",
+      "relevant": []
+    },
+    {
+      "category": "noanswer",
+      "query": "服务器的公网地址是多少",
+      "relevant": []
+    },
+    {
+      "category": "noanswer",
+      "query": "这个月的预算是多少",
+      "relevant": []
+    },
+    {
+      "category": "noanswer",
+      "query": "客户端要支持哪些浏览器",
+      "relevant": []
+    },
+    {
+      "category": "noanswer",
+      "query": "昨天的评审会决定了什么",
+      "relevant": []
+    },
+    {
+      "category": "noanswer",
+      "query": "我们的域名是怎么解析的",
       "relevant": []
     }
   ]

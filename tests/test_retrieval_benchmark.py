@@ -6,12 +6,14 @@ would make the rest of the round unfalsifiable.
 """
 
 import json
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from ai_coding.memory.benchmark import EvalCase, evaluate, format_metrics, load_corpus
+from ai_coding.memory.relevance import RecallParams, rank_notes
 
 NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)
 
@@ -122,16 +124,92 @@ def test_r10a_the_shipped_corpus_is_well_formed():
     notes, cases = load_corpus(root / "scripts" / "retrieval_corpus.json", now=NOW)
 
     ids = {note.id for note in notes}
-    assert len(notes) == 52, f"the corpus must ship 52 notes, got {len(notes)}"
-    assert len(ids) == 52, f"note ids must be unique, got {len(ids)}"
-    assert len(cases) == 46
+    # R10a expansion: 52 -> 78 notes, 46 -> 124 questions.  The old corpus had
+    # exactly one open_thread note out of 52, so a category the round's own
+    # eviction rules protect was effectively untested.  These are the counts the
+    # corpus ships, not a target anyone tuned towards.
+    assert len(notes) == 78, f"the corpus must ship 78 notes, got {len(notes)}"
+    assert len(ids) == 78, f"note ids must be unique, got {len(ids)}"
+    assert len(cases) == 124
     assert {case.category for case in cases} == {
         "lexical", "identifier", "paraphrase", "multi", "noanswer", "trap",
     }
     for case in cases:
         assert case.relevant <= ids, f"{case.query!r} points at an unknown note id"
         assert case.query.strip(), "a labelled question must not be blank"
-    # Six questions have no answer on purpose: five noanswer plus one trap.
+    texts = [case.query for case in cases]
+    assert len(set(texts)) == len(texts), "duplicate question strings"
+    # Ten unanswerable questions: nine noanswer (one of them the question that was
+    # mislabelled as paraphrase) plus the one trap.
     unanswerable = [case for case in cases if not case.relevant]
-    assert len(unanswerable) == 6
-    assert any(case.category == "trap" for case in unanswerable)
+    assert len(unanswerable) == 10
+    assert sum(1 for case in unanswerable if case.category == "trap") == 1
+    assert sum(1 for case in unanswerable if case.category == "noanswer") == 9
+
+
+def test_r10a_every_category_is_big_enough_to_measure():
+    """A category with one or two items cannot move a metric, so it is not evidence."""
+    root = Path(__file__).resolve().parent.parent
+    notes, cases = load_corpus(root / "scripts" / "retrieval_corpus.json", now=NOW)
+
+    kinds = Counter(note.kind.value for note in notes)
+    assert kinds["open_thread"] >= 8, f"open_thread notes = {kinds['open_thread']}, need >= 8"
+
+    per_category = Counter(case.category for case in cases)
+    assert per_category["paraphrase"] >= 40, (
+        f"paraphrase questions = {per_category['paraphrase']}, need >= 40. At 12 the "
+        "set moves +/-8% per item, which is not a measurement"
+    )
+    for category in ("lexical", "identifier", "multi", "noanswer"):
+        assert per_category[category] >= 4, f"{category} has only {per_category[category]}"
+
+
+def test_r10a_no_question_asks_about_the_thing_it_scores():
+    """The circular item: how to do semantic retrieval, answered by "we don't".
+
+    It used to sit in the paraphrase set, where a ranker that merely echoed the
+    query back could score it.  It has to stay out.
+    """
+    root = Path(__file__).resolve().parent.parent
+    _, cases = load_corpus(root / "scripts" / "retrieval_corpus.json", now=NOW)
+    assert "怎么做语义检索" not in {case.query for case in cases}
+
+
+def test_r10a_a_question_nothing_answers_is_labelled_noanswer_not_paraphrase():
+    """`怎么让模型别一直重复问同一个问题` was a paraphrase item with two targets.
+
+    Neither target answers it — one describes the injection surfaces, the other
+    the harvest cursor — and no note in the corpus mentions deduplicating a
+    repeated question.  So it measured nothing about paraphrase ability.  Pinned
+    here so it cannot drift back into a category that pretends otherwise.
+    """
+    root = Path(__file__).resolve().parent.parent
+    _, cases = load_corpus(root / "scripts" / "retrieval_corpus.json", now=NOW)
+    by_text = {case.query: case for case in cases}
+    case = by_text["怎么让模型别一直重复问同一个问题"]
+    assert case.category == "noanswer"
+    assert case.relevant == frozenset()
+
+
+def test_r10a_paraphrase_questions_are_exactly_the_ones_lexical_search_misses():
+    """The category is derived by measurement, not declared by hand.
+
+    A paraphrase item is one the lexical ranker does **not** already answer in the
+    top 3 — that is the whole point of the category: the population a second
+    scoring signal could possibly help.  Hand-labelling is how the old corpus
+    ended up with items sharing three content words with their answer.
+    """
+    root = Path(__file__).resolve().parent.parent
+    notes, cases = load_corpus(root / "scripts" / "retrieval_corpus.json", now=NOW)
+    params = RecallParams()
+
+    offenders = [
+        case.query
+        for case in cases
+        if case.category == "paraphrase"
+        and any(
+            hit.note.id in case.relevant
+            for hit in rank_notes(notes, case.query, params=params, now=NOW, limit=3)
+        )
+    ]
+    assert not offenders, f"paraphrase items the lexical ranker already answers: {offenders}"
