@@ -16,9 +16,11 @@ from typing import Any
 from rich.text import Text
 
 from ai_coding.core.events import (
+    AssistantMessage,
     IterationStarted,
     LedgerUpdated,
     LoopEvent,
+    ScopedEvent,
     TaskUpdated,
     ToolChunk,
     ToolFinished,
@@ -38,6 +40,13 @@ _TARGET_COMMAND_LIMIT = 60
 # the session file where the untruncated text lives.
 _FULL_OUTPUT_LIMIT = 20000
 _FULL_PARAMS_LIMIT = 2000
+# R1-4: a step's thinking is rendered whole-ish but bounded — qwen-class
+# reasoning runs to thousands of chars, and an unbounded fold pins the DOM
+# exactly like an unbounded tool output would (same cap discipline as WP3).
+_REASONING_LIMIT = 4000
+# R1-4: nested sub-agent lines are one-liners by contract (a timeline, not a
+# log); longer child text stays in the trace and the ledger file.
+_NESTED_LINE_LIMIT = 120
 
 
 @dataclass(frozen=True)
@@ -284,6 +293,45 @@ def blocks_from_event(event: LoopEvent) -> Block | None:
             "输入「继续」可接上",
             "red",
         )
+    if isinstance(event, AssistantMessage):
+        # R1-4: prose travels the delta stream — mapping the event too would
+        # render every answer twice.  Only the thinking rides this event, and
+        # only when the endpoint produced any.
+        if not event.reasoning:
+            return None
+        return Block("reasoning", _cap(event.reasoning, _REASONING_LIMIT), "dim")
+    if isinstance(event, ScopedEvent):
+        return _nested_block(event)
+    return None
+
+
+def _nested_block(event: ScopedEvent) -> Block | None:
+    """One dim timeline line for delegated work (R1-4/A2).
+
+    The child stays a black box at the reasoning level (R1a-5), but its
+    *behaviour* — started/finished calls and spoken conclusions — is what
+    the parent's transcript was missing.  Everything fine-grained (chunks,
+    deltas, step telemetry, assembly) stays in the trace: the transcript is
+    a timeline, not a log.
+    """
+    inner = event.event
+    tag = f"↳ [{event.scope}]"
+    if isinstance(inner, ToolStarted):
+        kind, _ = tool_card_meta(inner.tool_name)
+        target = _tool_target(inner.tool_name, inner.params)
+        line = f"{tag} ▶ {kind} {target}".rstrip()
+        return Block("subagent", line, "dim")
+    if isinstance(inner, ToolFinished):
+        mark = "✓" if inner.success else "✗"
+        detail = _short(inner.output_preview or inner.error or "", _NESTED_LINE_LIMIT)
+        line = f"{tag} {mark} {inner.tool_name} {detail}".rstrip()
+        return Block("subagent", line, "dim")
+    if isinstance(inner, AssistantMessage):
+        # The child's spoken conclusion — capped to one line.  Its thinking
+        # stays inside the child (R1a-5); only what it said travels up.
+        if not inner.text:
+            return None
+        return Block("subagent", f"{tag} {_short(inner.text, _NESTED_LINE_LIMIT)}", "dim")
     return None
 
 

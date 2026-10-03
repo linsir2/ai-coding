@@ -44,6 +44,10 @@ class AssistantMessage:
 
     text: str | None
     tool_calls: tuple[ToolCallRef, ...] = ()
+    #: The step's thinking, if the endpoint produced any (R1-4).  Travels so
+    #: the transcript can show it; never re-fed to the model (the request
+    #: mapping ignores it — pinned by test).
+    reasoning: str | None = None
 
 
 @dataclass(frozen=True)

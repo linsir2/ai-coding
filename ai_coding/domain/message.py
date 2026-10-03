@@ -119,6 +119,11 @@ class ChatMessage:
     """A single conversation message.
 
     ``content`` is ``None`` for assistant messages that only carry tool calls.
+
+    ``reasoning`` is the model's thinking for an assistant step (R1-4).  It
+    never satisfies the assistant invariant on its own — reasoning without
+    speech or action is not a message — so a reasoning-only step is a loud
+    ``ValueError`` here, not silent corruption downstream.
     """
 
     role: Role
@@ -127,6 +132,7 @@ class ChatMessage:
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_calls: list[ToolCallRef] | None = None
+    reasoning: str | None = None
 
     def __post_init__(self) -> None:
         if self.role == "tool" and not self.tool_call_id:

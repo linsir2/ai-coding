@@ -280,7 +280,16 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `StepDelivery`（`domain/plan_delivery.py`） | `stepId`、`statement`、`status`（completed/blocked/stalled）、`attempts`、`ac`（[{id, passed}]）、`summary`、`turns` | 一步的收据；`SessionData.step_deliveries`，仅非空落盘（键 `stepDeliveries`） |
 | `AIConfig.plan_step_max_iterations` | `int = 8` | plan-runner 单步迭代上限；runner 临时换 policy 副本，`finally` 恢复 |
 
-步骤 prompt 以 `只做这一步，不要做别的：` 开头；replay 靠此前缀匹配用户气泡重建 header（turn 号不穿透压缩，不可信）。无 `verify` 且模型未标记完成的项判 `stalled`（下次可重跑），同一次运行不重试；`verify` 两败判 `blocked`；`open_items` 非空但无 ready 项判 `deadlock` 停止。
+### R1-4 思考时间线契约
+
+| 类型 | 字段 | 说明 |
+|---|---|---|
+| `StepResult.reasoning` | `str \| None = None` | 该步的思考（完成态文本）；引擎 join 网关 `reasoning_content`/`reasoning` 增量，无新 sink（`step()` 签名不动，所有 fake 无感） |
+| `ChatMessage.reasoning` | `str \| None = None` | 随步落盘；`_message_to_dict` 非空才写 `reasoning` 键（Java 兼容）；不满足 assistant 不变量（从不单独旅行，触发是响亮的错） |
+| `AssistantMessage.reasoning` | `str \| None = None` | 事件携带；无则 blocks 映射为 `None`（prose 只走 delta 流，不断片） |
+| 渲染 | `Block("reasoning")` dim + `Block("subagent")` dim | 推理块 `_cap 4000` 折叠（`Turn.append_reasoning`，静态挂载，WP4b 安全）；子跑只取 started/finished/带正文结论三类，chunk/遥测留 trace；live 与 replay 同序（prose→thinking，不虚构“先想后说”） |
+
+禁令：`to_chat_message` 无视 `reasoning`（测试钉死）——思考永不重发给模型；子跑 reasoning 仍按 R1a-5 丢弃（父只看子行为，不见子心路）。实测：qwen3 系经 dashscope 产 `reasoning_content`（`1+1=?` 一问即 145 字），deepseek-chat 无（静默无块）。
 
 ### 合同变更（仅两处）
 

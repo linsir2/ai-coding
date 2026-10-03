@@ -729,7 +729,9 @@ class AgentLoop:
         self.reporter.report_step(
             index=index, step=step, latency_ms=latency_ms
         )
-        self._emit(AssistantMessage(text=step.text, tool_calls=tuple(step.tool_calls)))
+        self._emit(AssistantMessage(
+            text=step.text, tool_calls=tuple(step.tool_calls),
+            reasoning=step.reasoning))
         session.add_message(assistant_message(step, now_utc()))
         return step
 

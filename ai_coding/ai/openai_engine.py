@@ -158,6 +158,7 @@ class OpenAIChatEngine(ChatEngine):
 
         acc: dict[int, dict[str, str]] = {}
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
         finish_reason: str | None = None
         usage: dict[str, int] | None = None
 
@@ -189,6 +190,18 @@ class OpenAIChatEngine(ChatEngine):
                     if on_delta is not None:
                         on_delta(str(content))
 
+                # R1-4: thinking arrives on sibling delta fields
+                # (``reasoning_content`` on DeepSeek-reasoner-likes,
+                # ``reasoning`` on others) and is joined exactly like prose —
+                # completed text per step, deliberately not streamed (adding
+                # an ``on_reasoning`` sink would break every engine fake).
+                # Endpoints that send no thinking yield no reasoning, ever.
+                thinking = getattr(delta, "reasoning_content", None)
+                if thinking is None:
+                    thinking = getattr(delta, "reasoning", None)
+                if thinking:
+                    reasoning_parts.append(str(thinking))
+
                 # Text and tool-call fragments can arrive in the same chunk, so
                 # this is not an ``elif``.
                 tool_deltas = getattr(delta, "tool_calls", None)
@@ -205,6 +218,7 @@ class OpenAIChatEngine(ChatEngine):
             tool_calls=finalize_tool_calls(acc),
             finish_reason=finish_reason,
             usage=usage,
+            reasoning="".join(reasoning_parts) or None,
         )
 
     async def aclose(self) -> None:

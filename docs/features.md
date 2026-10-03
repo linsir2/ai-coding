@@ -22,7 +22,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | 区域 | 组件 | 内容 |
 |---|---|---|
 | 顶部 | `ui/status_bar.py` | workspace、当前 model、`● Ready / ● Working` |
-| 中部 | `ui/transcript.py` + `ui/blocks.py` | 用户输入、assistant 流式 Markdown、工具事件块（开始/结束/chunk）、回合终态 |
+| 中部 | `ui/transcript.py` + `ui/blocks.py` | 用户输入、assistant 流式 Markdown、每步思考折叠块（网关产 reasoning 才有，无则无，不伪造）、工具事件块（开始/结束/chunk）、子智能体嵌套行（`↳ [scope]` 开始/结束/结论，chunk 不上屏）、todo/台账 dim 行、回合终态 |
 | 底部 | `ui/input_bar.py` | 单行输入（Enter 提交；回合进行中禁用） |
 | 弹层 | `ui/modals.py` + `ui/resume_screen.py` | 审批（y/N/s）、`ask_user` 提问、`/resume` 会话选择（分组 + 搜索 + 历史重建） |
 | 样式 | `ui/app.tcss` | 全屏布局与配色 |

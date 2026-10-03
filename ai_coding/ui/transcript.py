@@ -133,6 +133,23 @@ class Turn(VerticalGroup):
             self.mount(Plain(_header("✦", "Nexus", self._timestamp), classes="msg-header"))
             self._header_mounted = True
 
+    def append_reasoning(self, text: str) -> None:
+        """Mount one collapsed thinking fold (R1-4).
+
+        One fold per call (one per model step): reasoning is completed text,
+        never updated in place, so there is nothing to swap — and a static
+        mount keeps the scroll accounting exact (same WP4b structural rule as
+        prose replacement).  Collapsed because qwen-class thinking runs long;
+        the fold, not the wall, is the timeline's presence marker.
+        """
+        self.ensure_header()
+        self.mount(Collapsible(
+            Plain(text, classes="reasoning-body"),
+            title="思考过程",
+            collapsed=True,
+            classes="reasoning-fold",
+        ))
+
     def stream(self, text: str) -> None:
         self.ensure_header()
         if self._prose is None:
@@ -388,6 +405,8 @@ class Transcript(VerticalScroll):
                 self.mount(Plain(block.render(), classes=f"block-{block.kind}"))
         elif turn is not None and block.kind == "tool-chunk":
             turn.tool_chunk(block.call_id, block.text)
+        elif turn is not None and block.kind == "reasoning":
+            turn.append_reasoning(block.text)
         else:
             self.mount(Plain(block.render(), classes=f"block-{block.kind}"))
         self._follow()
@@ -462,6 +481,11 @@ class Transcript(VerticalScroll):
                     mark = "✓" if success else "✗"
                     self._turn.end_tool(ref.id, mark, "ok" if success else "failed", text)
                     self._last_finished = ref.id
+                # R1-4: thinking rides after the step's prose and folds, live
+                # and replayed alike — the event only exists complete at step
+                # end, so "thought first" would be fiction either way.
+                if message.reasoning:
+                    self._turn.append_reasoning(message.reasoning)
         await close_turn()
         self._follow()
 

@@ -33,6 +33,7 @@ def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
         tool_call_id=data.get("toolCallId"),
         tool_name=data.get("toolName"),
         tool_calls=tool_calls,
+        reasoning=data.get("reasoning"),
     )
 
 
@@ -50,6 +51,10 @@ def _message_to_dict(msg: ChatMessage) -> dict[str, Any]:
         data["toolCalls"] = [
             {"id": c.id, "name": c.name, "arguments": c.arguments} for c in msg.tool_calls
         ]
+    # R1-4: thinking travels with its step, written only when present — old
+    # files (and the Java reader) never see the key.
+    if msg.reasoning:
+        data["reasoning"] = msg.reasoning
     return data
 
 

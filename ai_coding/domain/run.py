@@ -28,6 +28,7 @@ def assistant_message(step: StepResult, timestamp: str) -> ChatMessage:
         content=step.text,
         timestamp=timestamp,
         tool_calls=step.tool_calls or None,
+        reasoning=step.reasoning,
     )
 
 

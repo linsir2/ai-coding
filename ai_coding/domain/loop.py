@@ -33,6 +33,10 @@ class StepResult:
     tool_calls: list[ToolCallRef] = field(default_factory=list)
     finish_reason: str | None = None
     usage: dict[str, int] | None = None
+    #: The model's thinking for this step, if the endpoint produced any
+    #: (R1-4/Project A).  Completed text per step — never streamed, never
+    #: re-fed to the model (the request mapping ignores it).
+    reasoning: str | None = None
 
 
 @dataclass(frozen=True)
