@@ -368,7 +368,10 @@ memory:
     provider: ""                 # 复用 models.<name> 的 base_url / api_key
     model: text-embedding-v4
     dimensions: 1024             # 0 = 用端点默认
-    min_cosine: 0.55             # 只作为「绝对门的 OR 分支」
+    min_cosine: 0.60             # 只作为「绝对门的 OR 分支」。0.55 是初稿值；
+                                 # 46 条新分母上实测正例 min 0.44 / 负例 max 0.66，
+                                 # 0.55 救 7 条同时放进高余弦噪音，0.60 救 6 条只花 +0.02 FP。
+                                 # 这是模型相关常数，换 embedding 模型必须重标（见 T6）。
     cache_path: .memory/embeddings.json
     timeout_seconds: 10
 ```

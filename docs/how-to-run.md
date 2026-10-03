@@ -275,5 +275,34 @@ memory:
 .venv/bin/python scripts/r10_cases.py --only the_decoy_still_leaks_and_says_so
 ```
 
-基线（R@1 0.72 / R@3 0.85 / FP@5 0.350 / paraphrase@3 6/12 / no-answer 4/6）见
+基线（78 笔记 / 124 问法：可达 R@3 0.99 / 可达 FP@5 0.46 / paraphrase@3 0/46 / no-answer 4/10）见
 [集成测试](integration_testing.md)。
+
+## R10d：可选的语义档（默认关）
+
+```yaml
+memory:
+  embeddings:
+    enabled: false      # 默认关。打开需要下面的 provider
+    provider: "qwen"    # 指向 models.<name>，复用它的 base_url / api_key
+    model: text-embedding-v4
+    dimensions: 1024    # 0 = 用端点默认
+    min_cosine: 0.60    # 只作绝对门的 OR 分支，不参与排序
+    cache_path: .memory/embeddings.json
+    timeout_seconds: 10
+```
+
+打开之后 `memory_search` 多一路余弦打分：排序按 0.5·BM25 ⊕ 0.5·余弦融合，
+绝对门变成「词面相关度 ≥ 0.25 **或** 余弦 ≥ 0.60」。关掉（或没配、端点不支持、
+网络失败、缓存损坏）时检索结果与纯词面**逐字节一致**——这是硬契约，有单测钉死。
+
+三条必须知道的：
+
+1. **默认关是有原因的**：`deepseek` 端点调 `/embeddings` 直接 404，只有 dashscope 系可用。
+   默认开＝一半配置开箱即坏。
+2. **`min_cosine=0.60` 是量出来的，不是调出来的**：text-embedding-v4 上正例 min 0.44 /
+   负例 max 0.66，分布重叠，没有阈值能分干净。0.60 买 paraphrase@3 6/46 只花 +0.02 FP@5。
+   **换 provider 或模型必须重跑基准重标这个数**（见[集成测试](integration_testing.md)），
+   否则门要么漏放噪音，要么把真正要救的也挡在外面。
+3. **向量只在读时算**：从没被搜过的笔记不产生缓存条目；写路径（harvest / memory_write）
+   不碰网络。用的人付，不用不付。缓存 key 含端点地址，同名模型换端点不会吃到陈旧向量。

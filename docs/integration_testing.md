@@ -332,8 +332,9 @@ AI_CODING_MCP_STDIO=1 .venv/bin/python -m pytest tests/test_mcp_progress.py -q
 
 ### `scripts/retrieval_cases.py` — 基准与护栏
 
-语料与标注问题在 `scripts/retrieval_corpus.json`（**数据，不是逻辑**：52 条笔记带 `age_days`，
-46 条标注问法，六类）。评测原语在 `ai_coding/memory/benchmark.py`，它**只 import `note`**——
+语料与标注问题在 `scripts/retrieval_corpus.json`（**数据，不是逻辑**：78 条笔记带 `age_days`，
+124 条标注问法，六类；`paraphrase` 类是推导的不是手标的——见
+`scripts/build_retrieval_corpus.py`）。评测原语在 `ai_coding/memory/benchmark.py`，它**只 import `note`**——
 import `relevance` / `store` / `service` 就会变成在给自己打分，一次重构能不改检索质量而移动
 所有数字。
 
@@ -343,25 +344,44 @@ import `relevance` / `store` / `service` 就会变成在给自己打分，一次
 .venv/bin/python scripts/retrieval_cases.py --check                # 门禁；不达标退出码非 0（本地门禁，CI 目前不调）
 ```
 
-实测基线（`--check` 退出 0）：
+实测基线（`--check` 退出 0，78 笔记 / 124 问法）：
 
 ```
-all                      R@1=0.72 R@3=0.85 R@5=0.85 MRR=0.78 FP@5=0.35 no-answer=4/6
-  lexical                R@1=0.93 R@3=1.00 R@5=1.00 MRR=0.97 FP@5=0.33 no-answer=0/0
-  identifier             R@1=0.89 R@3=1.00 R@5=1.00 MRR=0.93 FP@5=0.24 no-answer=0/0
-  paraphrase             R@1=0.33 R@3=0.50 R@5=0.50 MRR=0.40 FP@5=0.54 no-answer=0/0
-  multi                  R@1=0.75 R@3=1.00 R@5=1.00 MRR=0.83 FP@5=0.25 no-answer=0/0
-  noanswer               R@1=0.00 R@3=0.00 R@5=0.00 MRR=0.00 FP@5=0.00 no-answer=4/5
-  trap                   R@1=0.00 R@3=0.00 R@5=0.00 MRR=0.00 FP@5=0.00 no-answer=0/1
+reachable (lexical+identifier+multi): R@3=0.99 FP@5=0.46
+paraphrase@3=0/46 (ungated: this is the headroom a semantic tier would capture)
+no-answer correctly refused: 4/10 (reported)
+
+guardrails: reachable R@3>=0.95 reachable FP@5<=0.5
+guardrails OK
 ```
 
-| 指标 | R10 前 | R10 后 | 护栏 |
+| 指标 | 旧语料（52/46） | 新语料（78/124） | 护栏 |
 |---|---|---|---|
-| R@1 | 0.68 | **0.72** | **不设**（spec 的 0.85 属于未实现的语义层） |
-| R@3 | 0.80 | **0.85** | `>= 0.80` |
-| FP@5 | 0.518 | **0.350** | `<= 0.36` |
-| paraphrase@3 | 6/12 | 6/12 | `>= 6/12` |
-| no-answer 正确拒绝 | 4/6 | 4/6 | **不设，只打印** |
+| 可达 R@3 | 0.85 | **0.99** | `>= 0.95` |
+| 可达 FP@5 | 0.350 | **0.46** | `<= 0.50` |
+| paraphrase@3 | 6/12 | **0/46** | **不设，只打印** |
+| no-answer 正确拒绝 | 4/6 | 4/10 | **不设，只打印** |
+
+`paraphrase@3` 从 6/12 掉到 0/46 **不是回归**：新语料的 `paraphrase` 类是推导的——
+词面检索器在 top-3 里找不到目标的才算，找不到是它的定义。所以聚合 R@3 也从
+0.85 掉到 0.59，同样不是回归。门禁只守词面可达子集，`paraphrase@3` 是语义档要
+夺的头寸（见下）。
+
+```bash
+.venv/bin/python scripts/retrieval_cases.py --with-embeddings  # 真连 dashscope，走生产路径
+```
+
+实测（text-embedding-v4，同语料同时钟）：
+
+```
+semantic                 R@1=0.48 R@3=0.65 R@5=0.65 MRR=0.56 FP@5=0.64 no-answer=4/10
+semantic paraphrase@3=6/46
+```
+
+语义档把 paraphrase@3 从 0/46 抬到 6/46，聚合 R@3 从 0.59 抬到 0.65，聚合 FP@5
+基本不动（0.65 → 0.64）。**换 embedding 的 provider 或模型必须重跑这一整节**：
+`min_cosine=0.60` 是在 text-embedding-v4 上量的（正例 min 0.44 / 负例 max 0.66
+重叠，没有能分开的阈值），换模型这个常数就废。向量分布变了，门和权重都要重标。
 
 两条关于门禁本身的诚实说明：
 
