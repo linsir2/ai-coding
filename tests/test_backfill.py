@@ -561,3 +561,73 @@ async def test_chunk_from_bare_thread_cannot_crash():
         for _ in range(6):
             await pilot.pause()
         assert "chunk-text" in _live_text(t)
+
+
+# Textual markup in arbitrary text: for Static(markup=True) a `[` opens a tag.
+# Program output hits both faces of it — MarkupError ("Expected markup value",
+# e.g. "[path=/tmp/x]") and silent loss ("env [k=v] set" -> "env  set").
+LOG_OUTPUT = "[INFO] [path=/tmp/x] [level=debug]\nbuild [k=v] done\n"
+
+
+def _render_now(widget: Static) -> str:
+    """Force the render path that parses markup, and read back plain text."""
+    visual = widget.render()
+    return getattr(visual, "plain", None) or str(visual)
+
+
+@pytest.mark.asyncio
+async def test_settled_card_survives_brackets_in_output():
+    from ai_coding.ui.transcript import Transcript
+
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        await _settled_turn(
+            t, pilot,
+            params={"command": "tail -f build.log"},
+            finished_kwargs={"tool_name": "bash", "success": True,
+                             "output_preview": "x"},
+            messages=[
+                _assistant("c1", '{"command": "tail -f build.log"}'),
+                _tool("c1", LOG_OUTPUT),
+            ],
+        )
+        text = _render_now(t.query_one(".tool-full", Static))
+        assert "[INFO] [path=/tmp/x]" in text
+        assert "build [k=v] done" in text
+
+
+@pytest.mark.asyncio
+async def test_settled_card_survives_brackets_in_command():
+    from ai_coding.ui.transcript import Transcript
+
+    command = "git log --pretty=format:'%h [%an] %s' -3"
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        await _settled_turn(
+            t, pilot,
+            params={"command": command},
+            finished_kwargs={"tool_name": "bash", "success": True,
+                             "output_preview": "ok"},
+            messages=[
+                _assistant("c1", json.dumps({"command": command})),
+                _tool("c1", "ok"),
+            ],
+        )
+        assert "[%an]" in _render_now(t.query_one(".tool-cmd", Static))
+
+
+@pytest.mark.asyncio
+async def test_live_body_survives_brackets_in_params_and_chunks():
+    from ai_coding.ui.transcript import Transcript
+
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        await _live_turn(
+            t, pilot,
+            params={"pattern": "[abc]*.py"},
+            chunks=["[INFO] building\n", "done [k=v]\n"],
+        )
+        text = _render_now(t.query_one(".tool-live", Static))
+        assert "[abc]*.py" in text
+        assert "[INFO] building" in text
+        assert "done [k=v]" in text

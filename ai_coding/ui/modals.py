@@ -20,7 +20,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Input
+
+from ai_coding.ui.plain import Plain
 
 
 class ApprovalScreen(ModalScreen[str]):
@@ -63,12 +65,12 @@ class ApprovalScreen(ModalScreen[str]):
             # crops instead of scrolling.  The id stays on the Static so the
             # text is still reachable as one widget.
             with VerticalScroll(id="approval-body-scroll"):
-                yield Static(body, id="approval-body")
+                yield Plain(body, id="approval-body")
             with Horizontal(id="approval-buttons"):
                 yield Button("Allow", id="yes", variant="success")
                 yield Button("Deny", id="no", variant="error")
                 yield Button("Stop", id="stop", variant="warning")
-            yield Static("y allow · n deny · s stop · esc deny", id="approval-hint")
+            yield Plain("y allow · n deny · s stop · esc deny", id="approval-hint")
 
     def on_mount(self) -> None:
         # Deny, not Allow: whichever answer a reflexive keypress produces, it
@@ -106,9 +108,9 @@ class AskScreen(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="ask-box"):
-            yield Static(Text(self._question), id="ask-question")
+            yield Plain(Text(self._question), id="ask-question")
             if self._options:
-                yield Static(Text("可选：" + " / ".join(self._options)), id="ask-options")
+                yield Plain(Text("可选：" + " / ".join(self._options)), id="ask-options")
             yield Input(id="ask-input")
             yield Button("Send", id="ask-send", variant="primary")
 

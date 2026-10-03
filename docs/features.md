@@ -62,6 +62,8 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 |---|---|
 | `Ctrl-Q` | 退出 |
 | `Ctrl-C` | 有选区时复制选中文本；无选区时退出 |
+| `Ctrl-Y` | 把上一条已完成工具调用的全文（参数 + 输出）复制进系统剪贴板；无可复制内容时在 transcript 里明示 |
+| `Esc` | 丢掉当前这批工具调用（`cancelled_by_user`），回合继续 |
 | `Shift`+拖选 | 终端原生选择（在 app 捕获鼠标时仍可用） |
 
 
@@ -498,6 +500,23 @@ R12 把 R10 的 `prompt_toolkit` 壳整体换成 Textual，并接回 R10 断掉�
 退役而消除，外层 `Transcript` 是唯一的滚动容器。`Ctrl-Y` 把上一条已完成工具的全文
 （参数 + 输出）送进系统剪贴板（OSC 52，macOS Terminal 除外）；标题 chip 保持 60 字截断
 （参考实现亦如此），全文永远在卡片第二行。
+
+**UI 文本边界（markup）**：Textual 与 rich 默认把 `str` 内容当 console markup 解析，而工具输出、
+工具参数、用户消息、会话预览里都有 `[`——解析结果要么**静默吞字**（`build [k=v]` → `build `），
+要么**崩掉整个应用**（`MarkupError: Expected markup value`，如 `[path=/tmp/x]`）。因此所有外部
+文本只经两个出口进界面（`ui/plain.py`）：
+
+| 出口 | 用在哪 | 为什么不能只用别的 |
+|---|---|---|
+| `Plain`（`markup=False` 的 `Static`） | 渲染字符串的挂件位置 | — |
+| `plain(str) -> Content` | 传数据的通道（命令面板的 `Option.prompt`） | `CommandPalette` 自建 `OptionList(markup=True)`，改不到它的参数；`Content` 是 `Visual`，`visualize()` 直接交给渲染器，不进 markup 解析 |
+
+已审计并确认**天生安全**的通道：`Collapsible(title=…)`（Textual 内部走 `Content.from_text`）、
+`Prose`（rich markdown 自己解析）、`rich.text.Text` 输入的状态栏/审批/问答（走 `from_rich_text`）。
+`DialogueConsole` 的三处 `print` 显式 `markup=False`（生产休眠路径，但契约在 `repl.py`）。
+`tests/test_ui_text_boundary.py` 用 AST 强制：全包禁止裸 `Static(`、禁止把非字面量当显示值传给
+`Option/Hit/DiscoveryHit`、`console.py` 的 print 必须 `markup=False`、`RichLog` 不得复现；文件顶部
+维护**已审计通道表**，新增通道必须同步守卫。
 
 **一条已知退化**：
 

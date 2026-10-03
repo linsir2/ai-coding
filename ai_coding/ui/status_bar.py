@@ -5,7 +5,8 @@ from __future__ import annotations
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal
-from textual.widgets import Static
+
+from ai_coding.ui.plain import Plain
 
 
 class StatusBar(Horizontal):
@@ -18,8 +19,8 @@ class StatusBar(Horizontal):
         self._busy = False
 
     def compose(self) -> ComposeResult:
-        yield Static(id="status-left")
-        yield Static(id="status-right")
+        yield Plain(id="status-left")
+        yield Plain(id="status-right")
 
     def on_mount(self) -> None:
         self._refresh()
@@ -38,8 +39,8 @@ class StatusBar(Horizontal):
         left.append(self._workspace)
         if self._model:
             left.append(f"  ·  {self._model}", style="dim")
-        self.query_one("#status-left", Static).update(left)
-        self.query_one("#status-right", Static).update(
+        self.query_one("#status-left", Plain).update(left)
+        self.query_one("#status-right", Plain).update(
             Text("● Working" if self._busy else "● Ready",
                  style="yellow" if self._busy else "green")
         )

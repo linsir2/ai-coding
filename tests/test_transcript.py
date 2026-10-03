@@ -339,7 +339,7 @@ async def test_header_precedes_markdown_without_a_pause():
         await t.end_assistant()
         await pilot.pause()
         turn = t.query_one(Turn)
-        assert [type(ch).__name__ for ch in turn.children][:2] == ["Static", "Prose"]
+        assert [type(ch).__name__ for ch in turn.children][:2] == ["Plain", "Prose"]
 
 
 @pytest.mark.asyncio
@@ -366,7 +366,7 @@ async def test_turn_with_no_text_still_gets_a_header():
         await t.end_assistant()
         await pilot.pause()
         turn = t.query_one(Turn)
-        assert [type(ch).__name__ for ch in turn.children] == ["Static"]
+        assert [type(ch).__name__ for ch in turn.children] == ["Plain"]
         assert "Nexus" in t.query_one(".msg-header", Static).content.plain
 
 
@@ -379,7 +379,7 @@ async def test_stream_without_begin_assistant_still_gets_a_header():
         await t.end_assistant()
         await pilot.pause()
         turn = t.query_one(Turn)
-        assert [type(ch).__name__ for ch in turn.children][:2] == ["Static", "Prose"]
+        assert [type(ch).__name__ for ch in turn.children][:2] == ["Plain", "Prose"]
 
 
 @pytest.mark.asyncio
@@ -397,4 +397,17 @@ async def test_text_and_tools_interleave():
         await pilot.pause()
         turn = t.query_one(Turn)
         kinds = [type(ch).__name__ for ch in turn.children]
-        assert kinds == ["Static", "Prose", "Collapsible", "Prose"]
+        assert kinds == ["Plain", "Prose", "Collapsible", "Prose"]
+
+
+@pytest.mark.asyncio
+async def test_user_bubble_keeps_brackets_verbatim():
+    """User text is literal: markup parsing would eat or crash on any `[`."""
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.append_user("run [INFO] env [k=v] now", "10:25")
+        await pilot.pause()
+        bubble = t.query_one(".user-bubble", Static)
+        visual = bubble.render()
+        text = getattr(visual, "plain", None) or str(visual)
+        assert "[INFO] env [k=v] now" in text

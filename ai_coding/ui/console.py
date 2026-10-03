@@ -26,13 +26,15 @@ class DialogueConsole:
 
     def delta(self, token: str) -> None:
         """Emit one assistant output token (no trailing newline)."""
-        self._c.print(token, end="", style=_ANSWER_STYLE)
+        # markup=False on every print: the text is the model's / the user's
+        # words, and rich would parse (and eat or reject) any ``[`` in it.
+        self._c.print(token, end="", style=_ANSWER_STYLE, markup=False)
 
     def info(self, message: str) -> None:
-        self._c.print(message, style=_INFO_STYLE)
+        self._c.print(message, style=_INFO_STYLE, markup=False)
 
     def error(self, message: str) -> None:
-        self._c.print(message, style=_ERROR_STYLE)
+        self._c.print(message, style=_ERROR_STYLE, markup=False)
 
     def rule(self, title: str = "") -> None:
         self._c.rule(title)

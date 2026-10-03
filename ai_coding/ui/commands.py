@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, cast
 
 from textual.command import DiscoveryHit, Hit, Provider
 
+from ai_coding.ui.plain import plain
+
 if TYPE_CHECKING:
     from ai_coding.domain.session import SessionData
     from ai_coding.ui.textual_app import AICodingApp
@@ -41,7 +43,7 @@ class SlashCommandProvider(Provider):
     async def discover(self) -> AsyncIterator[DiscoveryHit]:
         """The palette's initial (empty-query) view: every command."""
         for name, help_text in SLASH_COMMANDS:
-            yield DiscoveryHit(name, self._run(name), help=help_text)
+            yield DiscoveryHit(plain(name), self._run(name), help=help_text)
 
     async def search(self, query: str) -> AsyncIterator[Hit]:
         if not query:
@@ -49,7 +51,7 @@ class SlashCommandProvider(Provider):
             # the palette routes empty queries to discover(), so this is
             # defensive — but it must still yield Hits, not DiscoveryHits.
             for name, help_text in SLASH_COMMANDS:
-                yield Hit(1.0, name, self._run(name), help=help_text)
+                yield Hit(1.0, plain(name), self._run(name), help=help_text)
             return
         matcher = self.matcher(query)
         for name, help_text in SLASH_COMMANDS:
@@ -82,7 +84,13 @@ class ResumeProvider(Provider):
             help_text = f"{session.session_id[:12]} · {session.message_count} msgs"
             if date:
                 help_text += f" · {date}"
-            yield DiscoveryHit(display, self._resume(session.session_id), help=help_text)
+            # ``plain()``: the preview is the user's own words, so it can contain
+            # ``[`` — and the palette's OptionList parses display values as
+            # markup.  ``Hit.text`` stays a str: it feeds the matcher, not a
+            # renderer, and wrapping it would break `/resume` search.
+            yield DiscoveryHit(
+                plain(display), self._resume(session.session_id), help=help_text
+            )
 
     async def search(self, query: str) -> AsyncIterator[Hit]:
         """Fuzzy-filter on both the preview text and the session id.
@@ -100,7 +108,12 @@ class ResumeProvider(Provider):
                 display = f"{session.session_id[:12]}"
             if best <= 0:
                 continue
-            yield Hit(best, display, self._resume(session.session_id), text=preview or None)
+            yield Hit(
+                best,
+                plain(display),
+                self._resume(session.session_id),
+                text=preview or None,
+            )
 
     def _sessions(self) -> list[SessionData]:
         """Saved sessions except the one already open.

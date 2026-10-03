@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Input, Static
+from textual.widgets import Input
+
+from ai_coding.ui.plain import Plain
 
 PLACEHOLDER = "Type a message or enter a command..."
 HINT = "/ for commands"
@@ -19,8 +21,8 @@ class InputBar(Vertical):
     def compose(self) -> ComposeResult:
         with Horizontal(id="input-row"):
             yield Input(placeholder=PLACEHOLDER, id="prompt")
-            yield Static("➤", id="send-icon")
-        yield Static(HINT, id="input-hint")
+            yield Plain("➤", id="send-icon")
+        yield Plain(HINT, id="input-hint")
 
     @property
     def prompt(self) -> Input:

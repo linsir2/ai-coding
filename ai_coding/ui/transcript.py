@@ -15,6 +15,7 @@ from textual.widgets import Collapsible, Static
 
 from ai_coding.domain.message import ChatMessage
 from ai_coding.ui.blocks import Block, full_call_view, tool_card_meta, tool_title
+from ai_coding.ui.plain import Plain
 
 _FLUSH_CHARS = 4096
 
@@ -28,10 +29,14 @@ class Prose(Static):
     synchronously with a known height, which the scroll accounting handles
     (verified: E1/E3 probes).  ``source`` keeps the markdown text so tests
     and tooling can read back exactly what was streamed.
+
+    Markup is off here too: the prose is handed to ``rich.markdown`` (which
+    parses its own syntax), so Textual's parser would only mangle assistant
+    text such as ``[strategy-gate]`` or ``call[0]``.
     """
 
     def __init__(self) -> None:
-        super().__init__("")
+        super().__init__("", markup=False)
         self.source = ""
 
     def set_source(self, text: str) -> None:
@@ -115,7 +120,7 @@ class Turn(VerticalGroup):
         # tick after attach, so a stream() in the same tick would put its
         # Prose above the header.
         if not self._header_mounted:
-            self.mount(Static(_header("✦", "Nexus", self._timestamp), classes="msg-header"))
+            self.mount(Plain(_header("✦", "Nexus", self._timestamp), classes="msg-header"))
             self._header_mounted = True
 
     def stream(self, text: str) -> None:
@@ -157,7 +162,7 @@ class Turn(VerticalGroup):
             return
         live = _cap_live(fold.live + "".join(items))
         self._folds[call_id] = replace(fold, live=live)
-        self._swap_fold(call_id, Static(live, classes="tool-live"))
+        self._swap_fold(call_id, Plain(live, classes="tool-live"))
 
     def _replace_prose(self, full_text: str) -> AwaitMount | None:
         """Swap the mounted prose for a fresh widget holding ``full_text``.
@@ -189,7 +194,7 @@ class Turn(VerticalGroup):
         self._prose = None
         self._mount = None
         collapsible = Collapsible(
-            Static(body, classes="tool-live"),
+            Plain(body, classes="tool-live"),
             title=tool_title(mark="▸", verb=verb, target=target, running=True),
             collapsed=True,
             classes="tool-running",
@@ -248,7 +253,7 @@ class Turn(VerticalGroup):
         tool = self._folds[call_id]  # drain never removes folds
         live = _cap_live(tool.live + outcome) if outcome else tool.live
         self._folds[call_id] = replace(tool, mark=mark, status=status, live=live)
-        self._swap_fold(call_id, Static(live, classes="tool-live"))
+        self._swap_fold(call_id, Plain(live, classes="tool-live"))
 
     def backfill(self, messages: Sequence[ChatMessage]) -> None:
         """Swap each finished fold for a settled fold with its full session text.
@@ -270,14 +275,14 @@ class Turn(VerticalGroup):
             view = full_call_view(messages, call_id)
             if view.params is None and view.output is None:
                 continue
-            rows: list[Static] = [Static(fold.kind, classes="tool-kind")]
+            rows: list[Widget] = [Plain(fold.kind, classes="tool-kind")]
             if view.params is not None:
-                rows.append(Static(view.params, classes="tool-cmd"))
+                rows.append(Plain(view.params, classes="tool-cmd"))
             if view.output is not None:
-                rows.append(Static(view.output, classes="tool-full"))
+                rows.append(Plain(view.output, classes="tool-full"))
             foot = f"{fold.mark} {'成功' if fold.status == 'ok' else '失败'}"
             foot_class = "tool-foot-ok" if fold.status == "ok" else "tool-foot-bad"
-            rows.append(Static(foot, classes=foot_class))
+            rows.append(Plain(foot, classes=foot_class))
             # VerticalGroup, not Vertical: a 1fr Vertical inside the auto-height
             # fold resolves to fill-available (same disease Turn had), while an
             # auto group is exactly its rows.
@@ -326,8 +331,8 @@ class Transcript(VerticalScroll):
         return self._last_finished
 
     def append_user(self, text: str, timestamp: str) -> None:
-        self.mount(Static(_header("◯", "You", timestamp), classes="msg-header"))
-        self.mount(Static(text, classes="user-bubble"))
+        self.mount(Plain(_header("◯", "You", timestamp), classes="msg-header"))
+        self.mount(Plain(text, classes="user-bubble"))
         self._follow()
 
     def begin_assistant(self, timestamp: str) -> None:
@@ -370,11 +375,11 @@ class Transcript(VerticalScroll):
                 turn.end_tool(block.call_id, mark, block.tool_status, block.text)
                 self._last_finished = block.call_id
             else:
-                self.mount(Static(block.render(), classes=f"block-{block.kind}"))
+                self.mount(Plain(block.render(), classes=f"block-{block.kind}"))
         elif turn is not None and block.kind == "tool-chunk":
             turn.tool_chunk(block.call_id, block.text)
         else:
-            self.mount(Static(block.render(), classes=f"block-{block.kind}"))
+            self.mount(Plain(block.render(), classes=f"block-{block.kind}"))
         self._follow()
 
     def clear(self) -> None:
