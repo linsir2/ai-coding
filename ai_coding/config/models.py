@@ -178,6 +178,31 @@ class HooksConfig(BaseModel):
     events: list[HookEventConfig] = Field(default_factory=list)
 
 
+class EmbeddingsConfig(BaseModel):
+    """Optional semantic second opinion for memory recall (R10d).
+
+    Everything defaults to off or empty: a config without this block, or with
+    it present but disabled, behaves exactly as if the tier did not exist.
+    ``provider`` names a key in ``models`` so the tier reuses that model's
+    ``base_url`` and ``api_key`` instead of introducing a second credential.
+    ``dimensions=0`` means "use whatever the endpoint returns".
+    ``min_cosine`` is only the OR branch of the absolute relevance gate, never
+    a ranking weight — measured 0.60 on text-embedding-v4 (positive min 0.44 /
+    negative max 0.66 overlap, so no threshold separates; 0.60 buys 6/46
+    paraphrase for +0.02 FP@5).  A different embedding model needs recalibration.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    provider: str = ""
+    model: str = "text-embedding-v4"
+    dimensions: int = 1024
+    min_cosine: float = 0.60
+    cache_path: str = ".memory/embeddings.json"
+    timeout_seconds: float = 10.0
+
+
 class MemoryConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -209,6 +234,7 @@ class MemoryConfig(BaseModel):
     harvest_max_messages: int = 12
     dedupe_similarity: float = 0.80
     pinned_kinds: list[str] = Field(default_factory=lambda: ["decision"])
+    embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
 
 
 class MCPServerConfig(BaseModel):

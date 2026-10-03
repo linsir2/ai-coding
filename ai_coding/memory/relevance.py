@@ -107,6 +107,15 @@ class RecallParams:
     half_life_days: float = 14.0
     bm25_k1: float = 1.2
     bm25_b: float = 0.75
+    # R10d: the OR branch of the absolute gate.  A note clears the gate when its
+    # lexical coverage reaches min_relevance OR its raw cosine reaches this.
+    # Raw, never normalised: min-max over a candidate set maps every value into
+    # [0, 1] relative to its neighbours, so a normalised threshold cannot mean
+    # the same thing twice.  Measured 0.60 on text-embedding-v4 (positive min
+    # 0.44 / negative max 0.66 overlap, so no threshold separates; 0.60 buys
+    # 6/46 paraphrase for +0.02 FP@5).  A different embedding model needs
+    # recalibration — this constant is model-specific, not universal.
+    min_cosine: float = 0.60
     recency_source: Literal["created", "accessed"] = "created"
     kind_boosts: Mapping[str, float] = field(
         default_factory=lambda: dict(DEFAULT_KIND_BOOSTS)
@@ -115,11 +124,13 @@ class RecallParams:
     @classmethod
     def from_memory_config(cls, config: Any) -> RecallParams:
         """Build from ``MemoryConfig`` (duck-typed; fakes in tests work too)."""
+        embeddings = getattr(config, "embeddings", None)
         return cls(
             threshold=float(getattr(config, "recall_threshold", 0.25)),
             min_relevance=float(getattr(config, "recall_min_relevance", 0.25)),
             relative_band=float(getattr(config, "recall_relative_band", 0.55)),
             half_life_days=float(getattr(config, "recency_half_life_days", 14.0)),
+            min_cosine=float(getattr(embeddings, "min_cosine", 0.60)),
         )
 
 
@@ -182,6 +193,32 @@ def recency(created_time: str, *, now: datetime, half_life_days: float) -> float
     if half_life_days <= 0:
         return 1.0
     return float(0.5 ** (age_days / half_life_days))
+
+
+def _minmax(
+    semantic: Mapping[str, float] | None, note_ids: Sequence[str]
+) -> dict[str, float]:
+    """Min-max normalise raw cosines over this query's candidates, into [0, 1].
+
+    Empty input maps to empty output, so a missing or empty signal never reaches
+    the blend.  A single candidate normalises to 1.0 — with nothing to compare
+    against, its rank term is unopposed.
+    """
+    if not semantic:
+        return {}
+    values = [semantic[note_id] for note_id in note_ids if note_id in semantic]
+    if not values:
+        return {}
+    low, high = min(values), max(values)
+    if high <= low:
+        # Nothing to compare against: every scored note is equally the best.
+        return {note_id: 1.0 for note_id in note_ids if note_id in semantic}
+    span = high - low
+    return {
+        note_id: (semantic[note_id] - low) / span
+        for note_id in note_ids
+        if note_id in semantic
+    }
 
 
 def _idf(term: str, df: Mapping[str, int], n_docs: int) -> float:
@@ -303,8 +340,17 @@ def rank_notes_detailed(
     params: RecallParams | None = None,
     now: datetime | None = None,
     limit: int | None = None,
+    semantic: Mapping[str, float] | None = None,
 ) -> RankingResult:
     """Rank with BM25, gate on relevance, then band against the best score.
+
+    ``semantic`` maps note ids to raw cosine similarities against the query.
+    When it is None (or empty) this function behaves exactly as it always has.
+    When present it does two things, and only two: it blends half-and-half with
+    the normalised BM25 score for ranking, and its raw value is an OR branch of
+    the absolute gate.  The blend uses min-max normalisation over this query's
+    candidates; the gate reads the raw cosine, because a normalised threshold
+    cannot mean the same thing twice.
 
     Two gates with two different jobs (spec 1.6): ``min_relevance`` decides
     whether a note is *about* the query at all, ``relative_band`` decides
@@ -343,6 +389,7 @@ def rank_notes_detailed(
 
     raw = bm25_scores(active, query_tokens, k1=resolved.bm25_k1, b=resolved.bm25_b)
     best_raw = max(raw.values(), default=0.0) or 1.0
+    semantic_norm = _minmax(semantic, [note.id for note in active])
     scored: list[ScoredNote] = []
     for note in active:
         doc_tokens = tokenize(note.text)
@@ -356,8 +403,14 @@ def rank_notes_detailed(
         )
         importance = max(0.0, min((note.importance - 1) / 4, 1.0))
         boost = float(resolved.kind_boosts.get(note.kind.value, 0.0))
+        rank_term = raw.get(note.id, 0.0) / best_raw
+        cosine = semantic.get(note.id) if semantic else None
+        if cosine is not None:
+            # Half BM25, half semantic.  A note the index could not score keeps
+            # its pure-BM25 term: missing signal is no opinion, not a negative.
+            rank_term = 0.5 * rank_term + 0.5 * semantic_norm.get(note.id, rank_term)
         score = (
-            resolved.weight_rank * (raw.get(note.id, 0.0) / best_raw)
+            resolved.weight_rank * rank_term
             + resolved.weight_recency * freshness
             + resolved.weight_importance * importance
             + boost
@@ -380,8 +433,12 @@ def rank_notes_detailed(
     kept: list[ScoredNote] = []
     rejected: list[ScoredNote] = []
     for item in scored:
+        cosine = semantic.get(item.note.id) if semantic else None
+        through_gate = item.relevance >= resolved.min_relevance or (
+            cosine is not None and cosine >= resolved.min_cosine
+        )
         if (
-            item.relevance >= resolved.min_relevance
+            through_gate
             and item.score >= resolved.threshold
             and item.score >= floor
         ):
