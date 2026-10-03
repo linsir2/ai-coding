@@ -41,6 +41,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from ai_coding.domain.message import ChatMessage
+from ai_coding.memory.embeddings import EmbeddingIndex, EmbeddingsUnsupportedError
 from ai_coding.memory.note import MemoryNote, NoteKind, new_note
 from ai_coding.memory.relevance import (
     RecallParams,
@@ -180,10 +181,12 @@ class MemoryService:
         store: MemoryStore,
         extractor: Extractor | None = None,
         config: Any | None = None,
+        embeddings: EmbeddingIndex | None = None,
     ) -> None:
         self._store = store
         self._extractor = extractor
         self._config = config or _default_config()
+        self._embeddings = embeddings
 
     # ---- configuration helpers -------------------------------------------
 
@@ -283,6 +286,29 @@ class MemoryService:
             selected.append(note)
         return selected
 
+    async def _semantic_scores(
+        self, query: str, candidates: list[MemoryNote]
+    ) -> tuple[dict[str, float] | None, bool]:
+        """Cosines for the candidates, or (None, unavailable-flag).
+
+        Returns ``(None, False)`` whenever the tier is off, unconfigured, or
+        the endpoint has proven it cannot embed — all three are silent, because
+        "no semantic opinion" is not an error.  Only a mid-call failure (network,
+        timeout, malformed response) sets the flag, so the tool can say the tier
+        was configured but unusable this time.
+        """
+        index = self._embeddings
+        if index is None or not index.available() or not candidates:
+            return None, False
+        try:
+            if await index.provider_lacks_embeddings():
+                return None, False
+            return await index.cosine_scores(query, candidates), False
+        except EmbeddingsUnsupportedError:
+            return None, False
+        except Exception:  # noqa: BLE001 — recall is best-effort
+            return None, True
+
     async def recall_with_diagnostics(
         self,
         query_or_history: str | Sequence[ChatMessage],
@@ -311,18 +337,21 @@ class MemoryService:
         moment = now or _now()
         ceiling = supply if limit is None else limit
         try:
+            candidates = self._candidates(
+                kinds=kinds,
+                evidence=evidence,
+                scope=scope,
+                since_days=since_days,
+                now=moment,
+            )
+            semantic, unavailable = await self._semantic_scores(query, candidates)
             result = rank_notes_detailed(
-                self._candidates(
-                    kinds=kinds,
-                    evidence=evidence,
-                    scope=scope,
-                    since_days=since_days,
-                    now=moment,
-                ),
+                candidates,
                 query,
                 params=self._params(),
                 now=moment,
                 limit=ceiling,
+                semantic=semantic,
             )
             hits = list(result.kept)
             filtered_out = 0
@@ -346,6 +375,9 @@ class MemoryService:
                     # would report min(cleared, k) in the same sentence as an index
                     # count of N.  This ranking only ever feeds diagnostic prose.
                     limit=None,
+                    semantic=(
+                        await self._semantic_scores(query, self._store.active())
+                    )[0],
                 )
                 # Adopt unconditionally.  The probe is the only ranking here with
                 # a corpus at all, so the filtered result carries no measurement
@@ -372,6 +404,7 @@ class MemoryService:
             index_summary=self.index_summary(),
             no_vocabulary_match=result.no_vocabulary_match,
             filtered_out=filtered_out,
+            semantic_unavailable=unavailable,
         )
 
     async def recall_notes(

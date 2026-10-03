@@ -107,8 +107,10 @@ def _build_loop(
     project = ProjectInstructionsLoader(ws)
     summarizer, extractor = _llm_helpers_for(engine)
     memory_store = MemoryStore(ws / ".memory")
+    embeddings = _embeddings_for(app_cfg)
     memory = MemoryService(
-        memory_store, extractor=extractor, config=app_cfg.memory
+        memory_store, extractor=extractor, config=app_cfg.memory,
+        embeddings=embeddings,
     )
     context = ContextManager(app_cfg.ai, transcripts_root=ws, summarizer=summarizer)
 
@@ -265,6 +267,22 @@ def _llm_helpers_for(service: Any) -> tuple[Any, Any]:
     from ai_coding.ai.llm_helpers import build_extractor, build_summarizer
 
     return build_summarizer(model_config), build_extractor(model_config)
+
+
+def _embeddings_for(app_cfg: Any) -> Any | None:
+    """Build the optional vector index, or None when it is off or unusable.
+
+    Returns None (rather than a disabled index) so the service never pays for
+    a capability check on the recall path when nothing is configured.
+    """
+    memory_cfg = getattr(app_cfg, "memory", None)
+    embeddings_cfg = getattr(memory_cfg, "embeddings", None)
+    if embeddings_cfg is None or not bool(getattr(embeddings_cfg, "enabled", False)):
+        return None
+    from ai_coding.memory.embeddings import EmbeddingIndex
+
+    models = getattr(app_cfg, "models", {}) or {}
+    return EmbeddingIndex(embeddings_cfg, models)
 
 
 def _build_tool_registry(
