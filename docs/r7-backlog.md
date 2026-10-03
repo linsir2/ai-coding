@@ -82,7 +82,7 @@
 - 新增 `TurnStatus` 成员（R6）→ 用 reason 区分。
 - 把 `TurnOutcome.text` 改写成交接文本 → 会误触发整理。
 - 主动把 `sessions/*.json` 交给模型 → 实测引发 270KB 整读。
-- 向量检索 / embedding（**RAG**）→ 按你本次指示不纳入；`relevance.py` 的 `RecallScorer` 接缝已留。
+- 向量检索 / embedding（**RAG**）→ R10d 已实现并默认关闭（`memory.embeddings`，标准库 urllib + 磁盘缓存 + 纯 Python 余弦，零新依赖）。当初不纳入的理由（缺可信分母）由 R10a 语料扩展解决了一半：paraphrase 从手标 12 条变成推导 46 条。剩下一半（单标注者）仍在。
 
 ---
 

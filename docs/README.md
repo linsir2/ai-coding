@@ -91,7 +91,7 @@ R6 处理四个候选（工作记忆锚、失败升级、`ask_user`、记忆证�
 
 ## 当前状态
 
-主线里程碑 M0–M6 与 R1–R9 全部完成，分阶段提交。
+主线里程碑 M0–M6 与 R1–R10 全部完成，分阶段提交。
 质量门禁：`pytest` **1307 例通过 / 2 跳过**全绿（这是**含** `tests/test_pty_textual.py` 的数字；
 **CI 跑的就是同一条命令** `python -m pytest -q`，`ci.yml` 顶部明写 "No test file is excluded
 here"，所以本地与 CI 是同一个数字，不存在 deselect）、`ruff` 0 问题、`mypy`（按 3.10 下限检查）0 问题（105 文件）；
@@ -135,16 +135,17 @@ R6（回合摘要环 / 失败升级 / `ask_user` / 记忆证据 / 索引不变�
 | R7e | 模型写的 checkpoint + 回合级 steering + 工具面阈值告警 + `memory_write` | [r7e-analysis](r7e-analysis.md) / [r7e-plan](r7e-plan.md) |
 | R8 | 模型侧 checkpoint / 记忆 evidence 同分破平局 + 过滤 / 工具流式与 Esc 取消 | [r8-analysis](r8-analysis.md) / [r8-plan](r8-plan.md) |
 | R9 | 依赖硬门禁（策略在工具层）+ 轨迹的 `overview` / HTML / OTLP-JSON 三个出口 | [r9-analysis](r9-analysis.md) / [r9-plan](r9-plan.md) |
-| **R10（检索）** | 把检索变成**可测量的**：离线基准 + BM25 排序 + 两道门禁 + 召回会解释失败 + 命中即使用 + 过滤先于排序 | [r10-analysis](r10-analysis.md) / [r10-plan](r10-plan.md) / 执行计划 `docs/superpowers/plans/2026-10-01-r10-retrieval.md` |
+| **R10（检索）** | 把检索变成**可测量的**：离线基准 + BM25 排序 + 两道门禁 + 召回会解释失败 + 命中即使用 + 过滤先于排序 + 可选语义档（默认关） | [r10-analysis](r10-analysis.md) / [r10-plan](r10-plan.md) / 执行计划 `docs/superpowers/plans/2026-10-01-r10-retrieval.md` |
 
 **两处命名撞车，别混**：`R10`（检索）、`R11`、`R12` 是**检索轮**之后的编号；而
 [终端界面重构](#终端界面重构r10--r12)那一节里的「R10 → R12」指的是**界面轮**的 R10–R12，
-早于检索轮。文档里 `R10b` / `R10c` 永远指检索轮（R10a 基准 / R10b 排序与门禁 / R10c 诊断与过滤）；
-R10d（embeddings）**刻意拆出未实现**，理由见 [r10-plan](r10-plan.md) 末尾的执行记录。
+早于检索轮。文档里 `R10b` / `R10c` / `R10d` 永远指检索轮（R10a 基准 / R10b 排序与门禁 / R10c 诊断与过滤 / R10d 可选语义档）；
+R10d 在本轮之前曾刻意拆出（理由见 [r10-plan](r10-plan.md) 末尾的执行记录），现已实现并默认关闭。
 
-检索轮实测（R10 前 → R10 后）：R@1 0.68→**0.72**、R@3 0.80→**0.85**、FP@5 0.518→**0.350**、
-paraphrase@3 6/12 不变、no-answer 4/6 不变。**通用词重叠的诱饵仍然泄漏**，三种修法都实测赔了
-改述召回，所以它是被接受的残留而不是回归——细节与数字见
+检索轮实测（旧 52/46 语料 → 新 78/124 语料）：词面可达 R@3 0.85→**0.99**、可达 FP@5 0.350→**0.46**、
+paraphrase@3 按定义归零（0/46，旧 6/12 里有 3 条是词面本就能答的）。**通用词重叠的诱饵仍然泄漏**，三种修法都实测赔了
+改述召回，所以它是被接受的残留而不是回归。开语义档（text-embedding-v4，真连网）：
+paraphrase@3 0/46→**6/46**，可达 R@3 0.99→**1.00**，可达 FP@5 0.46→**0.48**——细节与数字见
 [功能清单](features.md) 的记忆章节。
 
 ## 终端界面重构（R10 → R12）

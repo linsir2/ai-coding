@@ -297,7 +297,9 @@ flowchart TB
 - **`relevance.py` 不 import 服务层**。它只拿 `MemoryNote` 序列和一个钉死的 `now`，所以
   `scripts/retrieval_cases.py` 能在没有 store、没有 config、没有网络的条件下跑完整张表。
 - **`RecallScorer` 是接缝**。未来的 embedding 打分器实现同一个 `rank_notes` 形状，store 与
-  service 两层不动。
+  service 两层不动。**R10d 落地时没走这条缝**：语义分是以可选参数进 `rank_notes_detailed` 的，
+  因为门（`coverage>=0.25 or cos>=min_cosine`）和排序（0.5/0.5 融合）都要同时看到两路分数，
+  一个只返回排序的接缝装不下。接缝本身保留（向后兼容），但新代码不经过它。
 
 ### 内容分层：R10 动了哪几层
 

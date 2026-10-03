@@ -45,6 +45,17 @@ memory:
   consolidate_threshold: 10
   max_index_entries: 200
   max_per_turn_injections: 5
+  # 可选语义档（R10d）：默认整块关掉。打开需要 provider 指向 models 里的一项，
+  # 复用它的 base_url / api_key。deepseek 系端点没有 /embeddings（404），开了
+  # 等于没开；min_cosine 是在 text-embedding-v4 上量的，换模型必须重标。
+  #embeddings:
+  #  enabled: true
+  #  provider: "qwen"
+  #  model: text-embedding-v4
+  #  dimensions: 1024
+  #  min_cosine: 0.60
+  #  cache_path: .memory/embeddings.json
+  #  timeout_seconds: 10
 
 tools:
   bash:

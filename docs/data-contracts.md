@@ -567,3 +567,16 @@ OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnix
 复访触发条件（写下来免得下次当成 bug）：跑一次 `recency_source` 的 A/B，拿到
 `scripts/retrieval_cases.py` 的分类指标对比，再决定是否进 `MemoryConfig` +
 `from_memory_config`（两处必须同时改——同一个字段有**三个**默认值站位，见上表）。
+
+### R10d 可选语义档（`memory/embeddings.py`，默认关）
+
+| 契约 | 内容 |
+|---|---|
+| `EmbeddingsConfig`（`config/models.py`） | `enabled/provider/model/dimensions/min_cosine/cache_path/timeout_seconds`，全有默认，默认全关。`provider` 指向 `models.<name>`，复用其 `base_url/api_key` |
+| `data.semantic_unavailable` | 三态语义：`False` + 有命中＝词面或语义正常返回；`False` + 无命中＝词面没找到（语义没开或端点不支持，**静默**）；`True`＝配了但这次坏了（超时/网络/坏响应），结果是纯词面回退 |
+| 关掉逐字节一致 | `enabled=false` 或整块缺席时，`memory_search` 的 output 与 data 与纯词面逐字节相同（归一化掉随机 id 后比对）。唯一允许不同的键不存在——连 `semantic_unavailable` 都保持 `False` |
+| 缓存 key | `sha1(base_url\|model\|dimensions\|dedupe_key)`。端点在 key 里：同名模型换端点不会吃陈旧向量。`dedupe_key` 已覆盖文本，笔记改写自动重算，旧条目成孤儿（不删） |
+| 能力闩锁 | 端点首次 404 置位，之后短路零网络。配 deepseek 的用户每次搜索不再多等一次 612ms 往返 |
+| `min_cosine=0.60` | 只作绝对门的 OR 分支（`coverage>=0.25 or cos>=min_cosine`），是 text-embedding-v4 上的测量值（正例 min 0.44 / 负例 max 0.66 重叠）。**换 provider 或模型必须重跑基准重标**，否则门要么漏放噪音要么错杀 |
+| 融合权重 | 0.5/0.5 写死在 `relevance.py`（非配置项）。46 条上 w=0.7 多救 1 条但属噪声，未采纳 |
+| `rank_notes_detailed(..., semantic=None)` | `None` 时与今天逐字节相同。`relevance.py` 不 import `embeddings`；`benchmark.py` 不 import 任何一边 |
