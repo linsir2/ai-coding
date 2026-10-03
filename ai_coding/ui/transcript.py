@@ -13,8 +13,16 @@ from textual.containers import VerticalGroup, VerticalScroll
 from textual.widget import AwaitMount, Widget
 from textual.widgets import Collapsible, Static
 
-from ai_coding.domain.message import ChatMessage
-from ai_coding.ui.blocks import Block, full_call_view, tool_card_meta, tool_title
+from ai_coding.domain.message import ChatMessage, tool_call_from_ref
+from ai_coding.ui.blocks import (
+    Block,
+    full_call_view,
+    params_preview,
+    tool_card_identity,
+    tool_card_meta,
+    tool_outcome_from_message,
+    tool_title,
+)
 from ai_coding.ui.plain import Plain
 
 _FLUSH_CHARS = 4096
@@ -387,6 +395,61 @@ class Transcript(VerticalScroll):
             child.remove()
         self._turn = None
 
+    async def replay_history(self, messages: Sequence[ChatMessage]) -> None:
+        """Rebuild the transcript from a loaded session, for ``/resume``.
+
+        Walks the persisted messages in order — user bubbles, assistant prose,
+        settled tool cards — through the same ``Turn`` machinery the live view
+        uses, so a reopened card reads exactly like the card that settled at
+        the time (same titles, same caps, collapsed).  Nothing is streamed:
+        old sessions keep only final ``ToolResult`` values, never the live
+        chunks, so replaying a stream would be fiction.  An orphan tool call
+        (no matching ``role=tool`` message) is skipped rather than rendered
+        half — ``ensure_tool_pairing`` should have removed it, this is the
+        belt to its suspenders.
+        """
+        self.clear()
+        results: dict[str, ChatMessage] = {}
+        for message in messages:
+            if message.role == "tool" and message.tool_call_id:
+                results[message.tool_call_id] = message  # later wins, as in full_call_view
+
+        async def close_turn() -> None:
+            turn = self._turn
+            self._turn = None
+            if turn is not None:
+                turn.backfill(messages)
+                await turn.end()
+
+        for message in messages:
+            if message.role == "user":
+                if not message.content:
+                    continue
+                await close_turn()
+                self.append_user(message.content, _hhmm(message.timestamp))
+            elif message.role == "assistant":
+                if not message.content and not message.tool_calls:
+                    continue
+                if self._turn is None:
+                    self.begin_assistant(_hhmm(message.timestamp))
+                assert self._turn is not None
+                if message.content:
+                    self._turn.stream(message.content)
+                    self._turn.flush()
+                for ref in message.tool_calls or []:
+                    result = results.get(ref.id)
+                    if result is None:
+                        continue
+                    call = tool_call_from_ref(ref)
+                    verb, target, kind = tool_card_identity(call.name, call.params)
+                    self._turn.start_tool(ref.id, verb, target, kind, params_preview(call.params))
+                    success, text = tool_outcome_from_message(result)
+                    mark = "✓" if success else "✗"
+                    self._turn.end_tool(ref.id, mark, "ok" if success else "failed", text)
+                    self._last_finished = ref.id
+        await close_turn()
+        self._follow()
+
     def _follow(self) -> None:
         """Scroll to the newest content only if the user is already at the end."""
         if self.is_vertical_scroll_end:
@@ -407,6 +470,18 @@ def _fold_identity(block: Block) -> tuple[str, str, str]:
 
 def _clock() -> str:
     return datetime.now().strftime("%H:%M")
+
+
+def _hhmm(timestamp: str) -> str:
+    """``HH:MM`` for a persisted message timestamp.
+
+    Session stamps are ISO-8601 (``2026-10-03T08:01:00Z``); anything else —
+    the ``ts``/``ts1`` stamps unit tests use — passes through untouched, so a
+    replayed header shows when the words were said, not when they reload.
+    """
+    if isinstance(timestamp, str) and len(timestamp) >= 16 and timestamp[10] == "T":
+        return timestamp[11:16]
+    return timestamp or ""
 
 
 def _header(icon: str, name: str, timestamp: str) -> Text:

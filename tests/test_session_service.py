@@ -228,3 +228,29 @@ def test_generate_unique_ids(tmp_path):
     svc = _svc(tmp_path / "sessions")
     ids = {svc.create().session_id for _ in range(20)}
     assert len(ids) == 20
+
+
+def test_list_sessions_sorts_newest_first(tmp_path):
+    """The resume picker must lead with the conversation just left, not a
+    filename lottery: ``list_sessions`` is newest-``last_access_time`` first,
+    with missing/garbled timestamps sunk to the bottom instead of raising."""
+    from ai_coding.domain.session import SessionData
+
+    svc = _svc(tmp_path / "sessions")
+    old = SessionData(
+        session_id="0" * 32, title="", created_time="2026-09-01T00:00:00Z",
+        last_access_time="2026-09-01T00:00:00Z",
+    )
+    new = SessionData(
+        session_id="f" * 32, title="", created_time="2026-10-02T00:00:00Z",
+        last_access_time="2026-10-02T00:00:00Z",
+    )
+    timeless = SessionData(
+        session_id="a" * 32, title="", created_time="", last_access_time="garbage"
+    )
+    for s in (old, new, timeless):
+        svc.save(s)
+
+    assert [s.session_id for s in svc.list_sessions()] == [
+        new.session_id, old.session_id, timeless.session_id
+    ]

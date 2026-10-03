@@ -8,12 +8,30 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from ai_coding.domain.session import SessionData
 from ai_coding.infra.json_utils import from_json_file, to_json_pretty
 from ai_coding.infra.time_utils import now_utc
+
+
+def _access_rank(value: Any) -> tuple[int, str]:
+    """Sort key for the resume list: newest ``last_access_time`` first.
+
+    ISO-8601 ``Z`` strings sort chronologically as plain strings, so parsing
+    is only a validity gate — a missing or garbled timestamp sinks to the
+    bottom instead of raising, because one bad file must not hide the rest.
+    """
+    if isinstance(value, str) and value:
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            return (0, value)
+    return (1, "")
 
 
 def _first_user_preview(rows: Any) -> str:
@@ -102,7 +120,14 @@ class SessionService:
             item.message_count = count
             item.first_preview = _first_user_preview(rows)
             items.append(item)
-        return items
+        # The resume list leads with the conversation just left: newest
+        # access first.  Valid stamps sort as strings (ISO-8601 Z, newest
+        # last); broken ones keep filename order at the bottom.
+        valid = [s for s in items if _access_rank(s.last_access_time)[0] == 0]
+        broken = [s for s in items if _access_rank(s.last_access_time)[0] != 0]
+        valid.sort(key=lambda s: s.last_access_time, reverse=True)
+        broken.sort(key=lambda s: s.session_id)
+        return valid + broken
 
     def delete(self, session_id: str) -> bool:
         target = self._path(session_id)

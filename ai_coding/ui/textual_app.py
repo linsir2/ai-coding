@@ -14,10 +14,11 @@ from textual.command import CommandPalette
 from textual.widgets import Input
 
 from ai_coding.ui.blocks import Block, TranscriptObserver, full_call_view
-from ai_coding.ui.commands import ResumeProvider, SlashCommandProvider
+from ai_coding.ui.commands import SlashCommandProvider
 from ai_coding.ui.input_bar import InputBar
 from ai_coding.ui.modals import ApprovalScreen, AskScreen
 from ai_coding.ui.repl import REPLAction, handle_input
+from ai_coding.ui.resume_screen import ResumeScreen
 from ai_coding.ui.status_bar import StatusBar
 from ai_coding.ui.transcript import Transcript
 
@@ -162,7 +163,7 @@ class AICodingApp(App[None]):
                 self._agent_loop, text, self._session, self._sessions, console
             )
             if action is REPLAction.NEW_SESSION:
-                self._session = new_session
+                await self._switch_session(new_session)
             elif action is REPLAction.QUIT:
                 self.exit()
         finally:
@@ -183,19 +184,52 @@ class AICodingApp(App[None]):
         )
 
     def _open_resume_picker(self) -> None:
-        """Push a palette backed only by saved sessions.
+        """Push the session picker; a choice resumes with history replayed.
 
-        ``providers`` replaces the app-wide providers, so this list holds
-        sessions and nothing else.
+        Fire-and-forget on purpose: awaiting the screen here would park the
+        ``run_command`` worker on it, and a cancel/quit while it waits lands
+        the ``finally`` below on an already-torn-down DOM (``NoMatches``).
+        The dismiss callback starts its own worker instead.
         """
-        if CommandPalette.is_open(cast("App[object]", self)):
-            return
+        current = getattr(self._session, "session_id", None)
         self.push_screen(
-            CommandPalette(
-                providers=[ResumeProvider],
-                placeholder="Resume a conversation…",
-            )
+            ResumeScreen(self._sessions.list_sessions(), exclude_id=current),
+            self._resume_chosen,
         )
+
+    def _resume_chosen(self, chosen: str | None) -> None:
+        """A picker dismissal: nothing on cancel, a worker on a choice."""
+        if chosen:
+            self._finish_resume(chosen)
+
+    @work(exclusive=True, group="turn", thread=False)
+    async def _finish_resume(self, chosen: str) -> None:
+        self._input.disabled = True
+        self._status.set_busy(True)
+        try:
+            matches = self._sessions.resolve(chosen)
+            if len(matches) != 1:
+                self._transcript.append_block(
+                    Block("info", f"[resume] session '{chosen[:12]}' not found")
+                )
+                return
+            full = self._sessions.load(matches[0].session_id) or matches[0]
+            await self._switch_session(full)
+        finally:
+            self._input.disabled = False
+            self._status.set_busy(False)
+            self._input.focus()
+
+    async def _switch_session(self, new_session: Any) -> None:
+        """Point the app at a new session and make its history visible.
+
+        Switching data without rebuilding the view was the old bug: the
+        transcript kept showing the previous conversation while the loop
+        talked to the new one.  ``/clear`` lands here too (empty messages =
+        a clean transcript, which is what "fresh session" means).
+        """
+        self._session = new_session
+        await self._transcript.replay_history(getattr(new_session, "messages", ()))
 
     async def _plan_turn(self) -> None:
         """/plan asks what to plan, then runs the plan turn with that topic."""

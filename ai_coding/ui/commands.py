@@ -10,7 +10,6 @@ from textual.command import DiscoveryHit, Hit, Provider
 from ai_coding.ui.plain import plain
 
 if TYPE_CHECKING:
-    from ai_coding.domain.session import SessionData
     from ai_coding.ui.textual_app import AICodingApp
 
 SLASH_COMMANDS = [
@@ -63,76 +62,5 @@ class SlashCommandProvider(Provider):
 
         def callback() -> None:
             app.submit_slash(name)
-
-        return callback
-
-
-class ResumeProvider(Provider):
-    """Lists saved sessions by recognizable content, not bare IDs.
-
-    No ``__init__``: the palette instantiates providers as
-    ``provider_class(screen, match_style)`` (command.py:828).
-    """
-
-    async def discover(self) -> AsyncIterator[DiscoveryHit]:
-        """The picker's initial view: every saved session."""
-        for session in self._sessions():
-            display = session.first_preview
-            if len(display) > 80:
-                display = display[:77] + "..."
-            date = session.last_access_time[:10] if len(session.last_access_time) >= 10 else ""
-            help_text = f"{session.session_id[:12]} · {session.message_count} msgs"
-            if date:
-                help_text += f" · {date}"
-            # ``plain()``: the preview is the user's own words, so it can contain
-            # ``[`` — and the palette's OptionList parses display values as
-            # markup.  ``Hit.text`` stays a str: it feeds the matcher, not a
-            # renderer, and wrapping it would break `/resume` search.
-            yield DiscoveryHit(
-                plain(display), self._resume(session.session_id), help=help_text
-            )
-
-    async def search(self, query: str) -> AsyncIterator[Hit]:
-        """Fuzzy-filter on both the preview text and the session id.
-
-        The id is searched because that is what ``/resume <id>`` takes, so a
-        user who knows the id must still be able to reach it from the picker.
-        """
-        matcher = self.matcher(query)
-        for session in self._sessions():
-            preview = session.first_preview
-            best = matcher.match(preview)
-            display = preview
-            if (score := matcher.match(session.session_id[:12])) > best:
-                best = score
-                display = f"{session.session_id[:12]}"
-            if best <= 0:
-                continue
-            yield Hit(
-                best,
-                plain(display),
-                self._resume(session.session_id),
-                text=preview or None,
-            )
-
-    def _sessions(self) -> list[SessionData]:
-        """Saved sessions except the one already open.
-
-        Resuming the open conversation is a no-op, so it is not offered.
-        """
-        app = cast("AICodingApp", self.app)
-        current_id = getattr(getattr(app, "_session", None), "session_id", None)
-        return [
-            s
-            for s in app._sessions.list_sessions()
-            if current_id is None or s.session_id != current_id
-        ]
-
-    def _resume(self, session_id: str) -> Callable[[], None]:
-        """Resume by full ID — the list only ever shows a 12-char prefix."""
-        app = cast("AICodingApp", self.app)
-
-        def callback() -> None:
-            app.submit_slash(f"/resume {session_id}")
 
         return callback

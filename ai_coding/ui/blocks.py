@@ -84,6 +84,21 @@ def tool_card_meta(tool_name: str) -> tuple[str, str]:
     return _TOOL_CARD_META.get(tool_name, (tool_name, "运行工具"))
 
 
+def tool_card_identity(tool_name: str, params: dict[str, Any]) -> tuple[str, str, str]:
+    """(verb, target, kind) for a fold title — the same table the live view uses.
+
+    History replay builds its folds through this so a reopened card reads
+    exactly like the card that settled at the time.
+    """
+    kind, verb = tool_card_meta(tool_name)
+    return verb, _tool_target(tool_name, params), kind
+
+
+def params_preview(params: dict[str, Any]) -> str:
+    """The one-line params body a fold shows while its full text resolves."""
+    return _short(json.dumps(params, ensure_ascii=False), _PARAM_PREVIEW)
+
+
 def tool_title(*, mark: str, verb: str, target: str, running: bool = False) -> str:
     """Fold title: ``▸ 正在运行命令 · ls`` while running, ``✓ 已运行命令 · ls`` done."""
     action = f"正在{verb}" if running else f"已{verb}"
@@ -139,6 +154,18 @@ def _strip_envelope(content: str) -> str:
             continue
         kept.append(line)
     return "\n".join(kept).strip()
+
+
+def tool_outcome_from_message(message: ChatMessage) -> tuple[bool, str]:
+    """(success, display text) for a persisted ``role=tool`` message.
+
+    The envelope marks failure with ``ok="false"`` (``domain/run.py``); the
+    machine ``<data>`` block is dropped the same way the live view does, so a
+    replayed card shows exactly what the settled card showed at the time.
+    """
+    content = message.content or ""
+    success = 'ok="false"' not in content.splitlines()[0] if content else True
+    return success, _strip_envelope(content)
 
 
 def _cap(text: str, limit: int) -> str:

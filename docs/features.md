@@ -24,7 +24,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | 顶部 | `ui/status_bar.py` | workspace、当前 model、`● Ready / ● Working` |
 | 中部 | `ui/transcript.py` + `ui/blocks.py` | 用户输入、assistant 流式 Markdown、工具事件块（开始/结束/chunk）、回合终态 |
 | 底部 | `ui/input_bar.py` | 单行输入（Enter 提交；回合进行中禁用） |
-| 弹层 | `ui/modals.py` | 审批（y/N/s）与 `ask_user` 提问 |
+| 弹层 | `ui/modals.py` + `ui/resume_screen.py` | 审批（y/N/s）、`ask_user` 提问、`/resume` 会话选择（分组 + 搜索 + 历史重建） |
 | 样式 | `ui/app.tcss` | 全屏布局与配色 |
 
 键位：`Ctrl-Q` 退出；`Ctrl-C` 有选区时复制、无选区时退出；`Shift`+拖选使用终端原生选择。
@@ -39,7 +39,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | `/help` `/h` | — | 列出全部直接命令 |
 | `/status` | — | 会话 id、消息数、记忆条数 |
 | `/model [name]` | 模型名 | 无参数列出可用模型（`*` 标记当前），带参数则切换 |
-| `/resume [id]` | 会话 id | **无参数弹出选择面板**（`ResumeProvider`）：每条显示首条用户消息预览（截断 80 字符）+ 12 位 id + 消息数 + 最后访问日期；输入关键词按预览和 id 模糊过滤；↑↓ 选择、Enter 恢复、Esc 取消；已打开的会话不再列出；一个会话都没存时直接提示 `no saved sessions`。带参数则直接恢复并返回 `NEW_SESSION`，**支持前缀匹配**（`/resume 0113e0acac03`），歧义前缀会列出候选而非静默取第一个 |
+| `/resume [id]` | 会话 id | **无参数弹出会话选择屏**（`ui/resume_screen.py`）：按最后访问时间倒序、按天分组（Today / Yesterday / 绝对日期）；每行显示时间 + 首条用户消息预览（截断 80 字符）+ 消息数；搜索框按预览/标题/id 子串过滤；↑↓ 选择、Enter 恢复、Esc 取消；已打开的会话不再列出；一个会话都没存时直接提示 `no saved sessions`。恢复后 transcript 清空并按消息时间顺序重建全部历史（用户气泡、模型正文、已完成工具卡默认折叠；只显示最终结果，不回放流式过程）。带参数则直接恢复并返回 `NEW_SESSION`，**支持前缀匹配**（`/resume 0113e0acac03`），歧义前缀会列出候选而非静默取第一个；恢复走完整 `load`（列表视图是剥离正文的摘要，直接用它会导致历史丢失） |
 | `/permissions [auto\|confirm]` | 策略 | 无参数显示当前审批回调，带参数切换自动批准 / 逐次确认 |
 | `/todo` | — | 渲染当前会话的 `TaskState`（目标、进度、逐项状态、下一步） |
 | `/skills` | — | 列出 `SkillRegistry` 目录（`- name: description`） |

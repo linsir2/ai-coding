@@ -251,7 +251,13 @@ def _handle_resume(
         listed = ", ".join(sorted(s.session_id[:12] for s in matches))
         console.error(f"[resume] '{target_id}' matches {len(matches)} sessions: {listed}")
         return REPLAction.CONTINUE, session
-    loaded = matches[0]
+    # ``resolve`` answers from the stripped list view (message bodies dropped
+    # for the list), so a resume must follow it with a full ``load`` — handing
+    # the stripped row back would open a session with zero messages, and the
+    # next save would wipe the conversation it just opened.
+    loaded = sessions.load(matches[0].session_id)
+    if loaded is None:
+        loaded = matches[0]
     console.info(f"[resume] loaded session {loaded.session_id[:12]}")
     return REPLAction.NEW_SESSION, loaded
 

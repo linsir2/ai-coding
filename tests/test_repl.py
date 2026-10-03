@@ -424,6 +424,37 @@ async def test_unknown_close_command_gets_a_suggestion():
     assert "did you mean" in out and "/resume" in out
 
 
+async def test_handle_resume_returns_the_full_session_not_the_stripped_row():
+    """``resolve`` answers from the stripped list view (no bodies); resuming
+    must then do a full ``load``, or the new session has zero messages and the
+    next save wipes the conversation it just opened."""
+    from ai_coding.domain.message import ChatMessage
+
+    loop = _FakeLoop()
+    full = _sd("abcdef0123456789fedcba9876543210")
+    full.add_message(ChatMessage(role="user", content="remember me", timestamp="t"))
+    stripped = _sd(full.session_id)  # what list_sessions/resolve hand out
+
+    class _StrippedSessions(_FakeSessions):
+        def __init__(self) -> None:
+            self.items = [full]
+
+        def resolve(self, prefix):
+            return [stripped] if stripped.session_id.startswith(prefix) else []
+
+        def load(self, session_id):
+            return full if session_id == full.session_id else None
+
+    dc, _ = _console_capture()
+    action, session = await handle_input(
+        loop, "/resume abcdef012345", full, _StrippedSessions(), dc
+    )
+
+    assert action is REPLAction.NEW_SESSION
+    assert session is full
+    assert [m.content for m in session.messages] == ["remember me"]
+
+
 async def test_a_path_is_still_sent_to_the_model():
     """/path/to/file is not a command; it is text the model may need."""
     loop = _FakeLoop()

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -129,13 +130,10 @@ def test_rich_log_is_not_used_by_product_code():
 @pytest.mark.asyncio
 async def test_resume_picker_row_survives_brackets_in_preview():
     """`/resume` shows a session's own first message — user text, brackets included."""
-    from types import SimpleNamespace
-
     from textual.app import App, ComposeResult
     from textual.widgets import OptionList
-    from textual.widgets.option_list import Option
 
-    from ai_coding.ui.commands import ResumeProvider
+    from ai_coding.ui.resume_screen import ResumeScreen
 
     preview = "[INFO] [path=/tmp/x] run build [k=v]"
     session = SimpleNamespace(
@@ -144,28 +142,19 @@ async def test_resume_picker_row_survives_brackets_in_preview():
         last_access_time="2026-09-30T10:00:00Z",
         message_count=5,
     )
-    provider = ResumeProvider(
-        SimpleNamespace(
-            app=SimpleNamespace(
-                _sessions=SimpleNamespace(list_sessions=lambda: [session]),
-                submit_slash=lambda text: None,
-            )
-        ),
-        None,
-    )
-    (hit,) = [h async for h in provider.discover()]
 
-    class _Palette(App[None]):
+    class _Host(App[None]):
         def compose(self) -> ComposeResult:
-            yield OptionList()  # markup=True, exactly like CommandPalette's
+            from textual.widgets import Static
 
-    async with _Palette().run_test(size=(80, 10)) as pilot:
-        options = pilot.app.query_one(OptionList)
-        await pilot.pause()
-        options.add_option(Option(hit.display))
+            yield Static("host")
+
+    async with _Host().run_test(size=(80, 10)) as pilot:
+        await pilot.app.push_screen(ResumeScreen([session]))
         for _ in range(4):
             await pilot.pause()
-        shown = getattr(options.get_option_at_index(0).prompt, "plain", "")
+        options = pilot.app.screen.query_one(OptionList)
+        shown = getattr(options.get_option_at_index(1).prompt, "plain", "")
         assert "[path=/tmp/x]" in shown
         assert "build [k=v]" in shown
 
