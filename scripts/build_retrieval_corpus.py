@@ -42,7 +42,9 @@ CANDIDATES: list[tuple[str, list[str]]] = [
     ("我不想每次都被问要不要批准", ["n18"]),
     ("怎么防止工具输出把网页搞坏", ["n45"]),
     ("长期记性是怎么做的", ["n07", "n14"]),
-    ("卡住的命令怎么收场", ["n10", "n40"]),
+    # Third pass (independent verification): n40 ("审批超时默认 0 秒…") does not
+    # answer how to end a stuck command; only n10 does.  Dropped 2026-10-03.
+    ("卡住的命令怎么收场", ["n10"]),
     ("代码评审之前要做什么", ["n02", "n20"]),
     ("我不想被过度设计绑架", ["n35"]),
     ("怎么把过去几轮的记忆压缩成一句话", ["n29", "n13"]),
@@ -168,12 +170,17 @@ def build() -> dict:
     # n28 and never n44.  This block is what the second pass surfaced.
     lexical: list[dict] = []
     paraphrase: list[dict] = []
+    # CANDIDATES first: it is the authored source of truth, and a stale relevant
+    # list sitting in the JSON must never silently win over it.  (Seen once already:
+    # the n40 target survived a rebuild because the file's older entry came first
+    # and `seen_queries` kept it.)  File entries fill in only what CANDIDATES
+    # does not name.
     sources: list[tuple[str, list[str], str]] = []
+    for q, r in CANDIDATES:
+        sources.append((q, sorted(r), None))
     for q in data["queries"]:
         if q["category"] in ("lexical", "paraphrase"):
             sources.append((q["query"], sorted(q["relevant"]), q["category"]))
-    for q, r in CANDIDATES:
-        sources.append((q, sorted(r), None))
 
     seen_queries: set[str] = set()
     for query, relevant, _old in sources:

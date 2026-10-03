@@ -650,105 +650,6 @@
       "relevant": []
     },
     {
-      "query": "我们用什么装依赖？",
-      "relevant": [
-        "n01"
-      ],
-      "category": "lexical"
-    },
-    {
-      "query": "跑测试的正确命令是什么",
-      "relevant": [
-        "n02"
-      ],
-      "category": "lexical"
-    },
-    {
-      "query": "记忆存在哪里，是数据库吗",
-      "relevant": [
-        "n14",
-        "n15"
-      ],
-      "category": "lexical"
-    },
-    {
-      "query": "依赖门禁怎么关掉",
-      "relevant": [
-        "n21"
-      ],
-      "category": "lexical"
-    },
-    {
-      "query": "上下文压缩分几层",
-      "relevant": [
-        "n13"
-      ],
-      "category": "lexical"
-    },
-    {
-      "query": "轨迹文件有哪些字段",
-      "relevant": [
-        "n08"
-      ],
-      "category": "lexical"
-    },
-    {
-      "query": "中文怎么分词",
-      "relevant": [
-        "n34"
-      ],
-      "category": "lexical"
-    },
-    {
-      "query": "召回打分的公式和各部分权重",
-      "relevant": [
-        "n31"
-      ],
-      "category": "lexical"
-    },
-    {
-      "query": "验收脚本在哪，怎么跑",
-      "relevant": [
-        "n37"
-      ],
-      "category": "lexical"
-    },
-    {
-      "query": "hook 和门卫的失败语义有什么不同",
-      "relevant": [
-        "n39"
-      ],
-      "category": "lexical"
-    },
-    {
-      "query": "导出 html 时要注意什么安全问题",
-      "relevant": [
-        "n45"
-      ],
-      "category": "lexical"
-    },
-    {
-      "query": "模型的 key 存在哪里",
-      "relevant": [
-        "n03"
-      ],
-      "category": "lexical"
-    },
-    {
-      "query": "记忆的淘汰上限是多少",
-      "relevant": [
-        "n38"
-      ],
-      "category": "lexical"
-    },
-    {
-      "query": "提交信息有什么格式要求",
-      "relevant": [
-        "n05"
-      ],
-      "category": "lexical"
-    },
-    {
       "query": "怎么让新同事快速上手这个项目",
       "relevant": [
         "n16",
@@ -1040,11 +941,103 @@
       "category": "lexical"
     },
     {
-      "query": "为什么不让我直接读会话文件",
+      "query": "我们用什么装依赖？",
       "relevant": [
-        "n44"
+        "n01"
       ],
-      "category": "paraphrase"
+      "category": "lexical"
+    },
+    {
+      "query": "跑测试的正确命令是什么",
+      "relevant": [
+        "n02"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "记忆存在哪里，是数据库吗",
+      "relevant": [
+        "n14",
+        "n15"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "依赖门禁怎么关掉",
+      "relevant": [
+        "n21"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "上下文压缩分几层",
+      "relevant": [
+        "n13"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "轨迹文件有哪些字段",
+      "relevant": [
+        "n08"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "中文怎么分词",
+      "relevant": [
+        "n34"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "召回打分的公式和各部分权重",
+      "relevant": [
+        "n31"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "验收脚本在哪，怎么跑",
+      "relevant": [
+        "n37"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "hook 和门卫的失败语义有什么不同",
+      "relevant": [
+        "n39"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "导出 html 时要注意什么安全问题",
+      "relevant": [
+        "n45"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "模型的 key 存在哪里",
+      "relevant": [
+        "n03"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "记忆的淘汰上限是多少",
+      "relevant": [
+        "n38"
+      ],
+      "category": "lexical"
+    },
+    {
+      "query": "提交信息有什么格式要求",
+      "relevant": [
+        "n05"
+      ],
+      "category": "lexical"
     },
     {
       "query": "担心模型把前面发过的东西再算一次钱",
@@ -1071,8 +1064,7 @@
     {
       "query": "卡住的命令怎么收场",
       "relevant": [
-        "n10",
-        "n40"
+        "n10"
       ],
       "category": "paraphrase"
     },
@@ -1367,6 +1359,13 @@
         "n58",
         "n59",
         "n60"
+      ],
+      "category": "paraphrase"
+    },
+    {
+      "query": "为什么不让我直接读会话文件",
+      "relevant": [
+        "n44"
       ],
       "category": "paraphrase"
     },
