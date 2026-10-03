@@ -643,3 +643,17 @@ R11c 只加**可选字段与只读回显**，不改排序、不改门禁、不�
 
 R11d 不改任何门禁、不改排序器签名、不改落盘；`recall_fusion="blend"`（默认）下今天的
 `retrieval_cases --check` 逐位不变。
+
+### R11c 实测契约（`scripts/r11c_cases.py`）
+
+| 契约 | 说明 |
+|---|---|
+| 判据先于运行 | `ADOPTION_BAR=0.5` / `MAX_DISTINCT_SCENES=5` / `MAX_SCENE_CHARS=12` 是脚本头部常量，跑之前就定死；C1 红了不改 prompt 重测 |
+| C1 判**池化**采纳率 | 提取器是模型，同一段对话这一轮给候选、下一轮可能什么都不给；按批判等于拿 1/1 读模型的脾气。`pooled_adoption(reports)` 按批加权，样本 <5 时只提示不判通过 |
+| 分母含 JSON 兜底行 | `build_extractor` 在模型不遵守 JSON 契约时回退「一行一条」，这种行**永远没有 scene**，必须留在分母里（`Report.legacy` 单列） |
+| C5 的正确形态 | 未命中 → 文案列出场景 → 用该场景**自己的笔记正文**作查询 + `scene=<标签>` 命中它 → 换另一个场景搜不到它。**不**把标签当查询（实测 `CI/CD` vs「CI 使用 GitHub Actions」证伪），**不**假设 `top_scenes[0]` 与 `recent[0]` 是同一条（实测证伪） |
+| 闸门 | `AI_CODING_R11C_IT=1`（形态照 `tests/test_mcp_stdio.py` 的 `GATE`），未设则只跑离线臂并说明原因 |
+| 分析器离线可测 | `analyze()` / `check_navigation_roundtrip()` / `pooled_adoption()` 是纯函数，由 `tests/test_r11c_measure.py` 用录好的样本驱动；**花钱之前先确认读数字的那段代码是对的** |
+
+顺带一处既有的 doc-vs-code 缺口：`scripts/memory_cases.py:362` 的 docstring 写着 gate
+`AI_CODING_MEMORY_IT=1`，**全仓没有任何代码读这个变量**（该文件未改动，仅记录）。

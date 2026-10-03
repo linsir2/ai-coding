@@ -319,7 +319,13 @@ def _miss_text(
         listed = "、".join(
             f"{scene} {count} 条（被召回 {heat} 次）" for scene, count, heat in scenes[:5]
         )
-        lines.append(f"记忆里的场景分组：{listed}；可用 scene=<场景> 精确再搜。")
+        # Measured: a label is not a query. A live run took the top scene 「CI/CD」
+        # and searched it verbatim; its note read 「CI 使用 GitHub Actions」, so the
+        # search missed a note the map had named correctly. A scene narrows the
+        # candidate set — the query still has to come from the question.
+        lines.append(
+            f"记忆里的场景分组：{listed}；可用 scene=<场景> 收窄候选（查询词仍要自己写）。"
+        )
     if filtered_out:
         # Saying "rephrase, or narrow by kind" here would be telling the model to
         # repeat the filter it just used, and blaming kind/evidence for a scope
