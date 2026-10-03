@@ -73,6 +73,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="print the paraphrase rows in full (they are the hard ones)")
     parser.add_argument("--check", action="store_true",
                         help="exit non-zero when a guardrail is not met")
+    parser.add_argument("--with-embeddings", action="store_true",
+                        help="second table via the real production path with a live "
+                             "EmbeddingIndex (needs network + a configured provider)")
+    parser.add_argument("--config", default="config.local.yaml",
+                        help="config file holding models.* for --with-embeddings")
+    parser.add_argument("--provider", default="qwen",
+                        help="models.<name> to embed with for --with-embeddings")
     args = parser.parse_args(argv)
 
     notes, cases = load_corpus(args.corpus, now=NOW)
@@ -127,6 +134,63 @@ def main(argv: list[str] | None = None) -> int:
         print("GUARDRAIL FAILED: " + ", ".join(failures))
         return 1 if args.check else 0
     print("guardrails OK")
+    if args.with_embeddings:
+        return _run_semantic_table(notes, cases, args)
+    return 0
+
+
+def _run_semantic_table(notes, cases, args) -> int:
+    """Second table through the true production path, with a live index.
+
+    This is the only place that touches the network in the benchmark suite.
+    It builds a real MemoryService over the corpus notes with a real
+    EmbeddingIndex, so the numbers measure the shipped code rather than a
+    reimplementation of it.  Compare against the lexical table above.
+    """
+    import asyncio
+    import tempfile
+
+    import yaml
+
+    from ai_coding.config.models import EmbeddingsConfig, _coerce_model
+    from ai_coding.memory.embeddings import EmbeddingIndex
+    from ai_coding.memory.service import MemoryService
+    from ai_coding.memory.store import MemoryStore
+
+    parser_args = args
+    raw = yaml.safe_load(Path(parser_args.config).read_text(encoding="utf-8"))
+    models = {
+        name: _coerce_model(item)
+        for name, item in (raw.get("models") or {}).items()
+    }
+    if parser_args.provider not in models:
+        print(f"no models.{parser_args.provider} in {parser_args.config}")
+        return 2
+    cfg = EmbeddingsConfig(
+        enabled=True, provider=parser_args.provider, model="text-embedding-v4",
+        min_cosine=0.60, cache_path=str(
+            Path(tempfile.gettempdir()) / "r10-bench-embeddings.json"
+        ),
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        store = MemoryStore(Path(directory) / "m.json")
+        for note in notes:
+            store.add_note(note)
+        service = MemoryService(
+            store, embeddings=EmbeddingIndex(cfg, models),
+        )
+
+        def rank(query: str) -> list[str]:
+            hits, _ = asyncio.run(
+                service.recall_with_diagnostics(query, k=5, now=NOW)
+            )
+            return [hit.note.id for hit in hits]
+
+        print("\nsemantic (live index, same corpus, same clock):")
+        print(format_metrics("semantic", evaluate(rank, cases)))
+        para_cases = [c for c in cases if c.category == "paraphrase"]
+        para_at_3 = round(evaluate(rank, para_cases).recall_at(3) * len(para_cases))
+        print(f"semantic paraphrase@3={para_at_3}/{len(para_cases)}")
     return 0
 
 

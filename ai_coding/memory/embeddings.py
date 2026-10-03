@@ -225,9 +225,16 @@ class EmbeddingIndex:
             missing.append(note)
             missing_keys.append(key)
         if missing:
-            vectors = await self._call([note.text for note in missing])
-            for key, vector in zip(missing_keys, vectors, strict=True):
-                cache[key] = [float(item) for item in vector]
+            # Batch: endpoints cap inputs per request, and one giant POST that
+            # the endpoint rejects would fail the whole search.  Ten is safely
+            # under every documented limit and keeps the failure unit small.
+            for start in range(0, len(missing), 10):
+                chunk = missing[start : start + 10]
+                vectors = await self._call([note.text for note in chunk])
+                for key, vector in zip(
+                    missing_keys[start : start + 10], vectors, strict=True
+                ):
+                    cache[key] = [float(item) for item in vector]
             self._save()
         out: dict[str, tuple[float, ...]] = {}
         for note in notes:
