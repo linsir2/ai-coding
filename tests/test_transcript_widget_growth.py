@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from ai_coding.ui.transcript import Transcript, Turn
+from ai_coding.ui.transcript import Prose, Transcript, Turn
 from tests.test_textual_app import _app, _FakeLoop
 
 
@@ -36,7 +36,7 @@ async def test_one_turn_widget_survives_per_finished_turn(turns):
 
     ``Transcript.end_assistant`` (transcript.py:163-168) awaits ``turn.end()``
     and then discards its reference; nothing calls ``remove()``.  So the tree
-    grows by one ``Turn`` -- plus the ``Markdown`` inside it -- per turn.
+    grows by one ``Turn`` -- plus the ``Prose`` inside it -- per turn.
     """
     app = _app(loop=_FakeLoop())
     async with app.run_test() as pilot:
@@ -48,20 +48,18 @@ async def test_one_turn_widget_survives_per_finished_turn(turns):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("turns", [1, 10, 25, 50])
 async def test_the_markdown_inside_it_survives_too(turns):
-    """The streaming ``Markdown`` is the heavier half and it also stays.
+    """The streaming ``Prose`` is the heavier half and it also stays.
 
-    ``Turn.stream`` mounts a ``Markdown`` per turn (``transcript.py:59-60``)
-    and keeps it on the tree for the life of the app.  This is the cost that
-    actually grows: a ``Turn`` is a container, a ``Markdown`` is a parsed
+    ``Turn.stream`` mounts a ``Prose`` per turn and keeps it on the tree for
+    the life of the app.  This is the cost that
+    actually grows: a ``Turn`` is a container, a ``Prose`` is a parsed
     document.
     """
-    from textual.widgets import Markdown
-
     app = _app(loop=_FakeLoop())
     async with app.run_test() as pilot:
         transcript = await _drive(app, turns)
         await pilot.pause()
-        assert len(transcript.query(Markdown)) == turns
+        assert len(transcript.query(Prose)) == turns
 
 
 @pytest.mark.asyncio

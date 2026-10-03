@@ -2,10 +2,10 @@
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Collapsible, Markdown, RichLog, Static
+from textual.widgets import Collapsible, Static
 
 from ai_coding.ui.blocks import Block
-from ai_coding.ui.transcript import Transcript, Turn
+from ai_coding.ui.transcript import Prose, Transcript, Turn
 
 
 class _Harness(App[None]):
@@ -16,6 +16,17 @@ class _Harness(App[None]):
 def _texts(transcript: Transcript) -> str:
     out = []
     for widget in transcript.query(Static):
+        content = widget.content
+        out.append(content.plain if hasattr(content, "plain") else str(content))
+    return "\n".join(out)
+
+
+def _body_text(transcript: Transcript) -> str:
+    """Live fold body text (`.tool-live` Statics, since the RichLog retired)."""
+    out = []
+    for widget in transcript.query(".tool-live"):
+        if not isinstance(widget, Static):
+            continue
         content = widget.content
         out.append(content.plain if hasattr(content, "plain") else str(content))
     return "\n".join(out)
@@ -42,7 +53,7 @@ async def test_streamed_markdown_lands_after_end():
         t.stream("**粗体**")
         await t.end_assistant()
         await pilot.pause()
-        md = t.query_one(Markdown)
+        md = t.query_one(Prose)
         assert "标题" in md.source
         assert "粗体" in md.source
 
@@ -104,7 +115,7 @@ async def test_flush_before_mount_does_not_lose_text():
         t.stream("x" * 5000)  # ≥ _FLUSH_CHARS → flush() in the same tick as the mount
         await t.end_assistant()
         await pilot.pause()
-        assert "x" in t.query_one(Markdown).source
+        assert "x" in t.query_one(Prose).source
 
 
 @pytest.mark.asyncio
@@ -138,8 +149,9 @@ async def test_tool_blocks_become_collapsibles():
         )
         await pilot.pause()
         coll = t.query_one(Collapsible)
-        assert "bash" in coll.title
-        assert "ls" in coll.title
+        # Card title: status mark + verb + target (no English tool name).
+        # The hand-built Block carries no verb, so the table fallback filled it.
+        assert coll.title == "▸ 正在运行命令 · ls"
         assert coll.collapsed
 
 
@@ -171,8 +183,11 @@ async def test_finished_tool_shows_its_failure_reason():
         coll.collapsed = False
         await pilot.pause()
         await pilot.pause()
-        log = t.query_one(RichLog)
-        assert any("file not found: a.py" in line.text for line in log.lines)
+        body = t.query_one(".tool-live", Static)
+        content = body.content
+        text = content.plain if hasattr(content, "plain") else str(content)
+        assert "file not found: a.py" in text
+        assert "line one" in text
 
 
 @pytest.mark.asyncio
@@ -194,8 +209,10 @@ async def test_finished_tool_shows_its_output_summary():
         coll.collapsed = False
         await pilot.pause()
         await pilot.pause()
-        log = t.query_one(RichLog)
-        assert any("wrote 42 lines" in line.text for line in log.lines)
+        body = t.query_one(".tool-live", Static)
+        content = body.content
+        text = content.plain if hasattr(content, "plain") else str(content)
+        assert "wrote 42 lines" in text
 
 
 @pytest.mark.asyncio
@@ -203,8 +220,8 @@ async def test_finished_tool_title_keeps_the_target():
     """``ToolFinished`` carries no params, so the target cannot be re-derived.
 
     ``blocks_from_event`` has nothing to compute ``tool_target`` from at finish
-    time; the only way to keep it in the title is to remember the label the
-    ``ToolStarted`` block built.
+    time; the only way to keep it in the title is to remember the verb/target
+    the ``ToolStarted`` block built.
     """
     async with _Harness().run_test(size=(80, 24)) as pilot:
         t = pilot.app.query_one(Transcript)
@@ -218,7 +235,7 @@ async def test_finished_tool_title_keeps_the_target():
             Block("tool", "ok", call_id="c1", tool_name="read", tool_status="ok")
         )
         await pilot.pause()
-        assert t.query_one(Collapsible).title == "✓ read  a.py"
+        assert t.query_one(Collapsible).title == "✓ 已读取文件 · a.py"
 
 
 @pytest.mark.asyncio
@@ -232,12 +249,12 @@ async def test_finished_tool_with_no_outcome_writes_nothing():
                   tool_target="a.py", tool_status="running")
         )
         await pilot.pause()
-        before = len(t.query_one(RichLog).lines)
+        before = _body_text(t)
         t.append_block(
             Block("tool", "", call_id="c1", tool_name="read", tool_status="ok")
         )
         await pilot.pause()
-        assert len(t.query_one(RichLog).lines) == before
+        assert _body_text(t) == before
 
 
 @pytest.mark.asyncio
@@ -297,13 +314,13 @@ async def test_tool_chunks_land_inside_collapsible():
             Block("tool", "", call_id="c1", tool_name="bash", tool_status="running")
         )
         t.append_block(Block("tool-chunk", "hello output", call_id="c1"))
+        t.flush()  # the app's 50ms timer tick: drain chunk buffer + render
         await pilot.pause()
         coll = t.query_one(Collapsible)
         coll.collapsed = False
         await pilot.pause()
         await pilot.pause()
-        log = t.query_one(RichLog)
-        assert any("hello output" in line.text for line in log.lines)
+        assert "hello output" in _body_text(t)
 
 
 @pytest.mark.asyncio
@@ -311,7 +328,7 @@ async def test_header_precedes_markdown_without_a_pause():
     """The header is mounted eagerly, so it holds the first slot.
 
     ``compose()`` runs a message-loop tick after attach; a ``stream()`` in the
-    same tick would otherwise land its Markdown above the header.  The real app
+    same tick would otherwise land its Prose above the header.  The real app
     always awaits a model step in between, so only same-tick callers hit this —
     and that is exactly the contract this test pins down.
     """
@@ -322,7 +339,7 @@ async def test_header_precedes_markdown_without_a_pause():
         await t.end_assistant()
         await pilot.pause()
         turn = t.query_one(Turn)
-        assert [type(ch).__name__ for ch in turn.children][:2] == ["Static", "Markdown"]
+        assert [type(ch).__name__ for ch in turn.children][:2] == ["Static", "Prose"]
 
 
 @pytest.mark.asyncio
@@ -362,7 +379,7 @@ async def test_stream_without_begin_assistant_still_gets_a_header():
         await t.end_assistant()
         await pilot.pause()
         turn = t.query_one(Turn)
-        assert [type(ch).__name__ for ch in turn.children][:2] == ["Static", "Markdown"]
+        assert [type(ch).__name__ for ch in turn.children][:2] == ["Static", "Prose"]
 
 
 @pytest.mark.asyncio
@@ -380,4 +397,4 @@ async def test_text_and_tools_interleave():
         await pilot.pause()
         turn = t.query_one(Turn)
         kinds = [type(ch).__name__ for ch in turn.children]
-        assert kinds == ["Static", "Markdown", "Collapsible", "Markdown"]
+        assert kinds == ["Static", "Prose", "Collapsible", "Prose"]

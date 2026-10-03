@@ -90,6 +90,26 @@ Turn Collapsible.tool-failed > CollapsibleTitle {
     color: $error;
 }
 
+Turn .tool-card {
+    border: round $surface-lighten-2;
+    padding: 0 1;
+    margin-left: 2;
+}
+
+Turn .tool-kind {
+    color: $text-muted;
+}
+
+Turn .tool-foot-ok {
+    text-align: right;
+    color: $success;
+}
+
+Turn .tool-foot-bad {
+    text-align: right;
+    color: $error;
+}
+
 ApprovalScreen,
 AskScreen {
     align: center middle;

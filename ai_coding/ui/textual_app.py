@@ -13,7 +13,7 @@ from textual.binding import Binding
 from textual.command import CommandPalette
 from textual.widgets import Input
 
-from ai_coding.ui.blocks import Block, TranscriptObserver
+from ai_coding.ui.blocks import Block, TranscriptObserver, full_call_view
 from ai_coding.ui.commands import ResumeProvider, SlashCommandProvider
 from ai_coding.ui.input_bar import InputBar
 from ai_coding.ui.modals import ApprovalScreen, AskScreen
@@ -31,6 +31,7 @@ class AICodingApp(App[None]):
     BINDINGS = [
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+c", "quit", "Quit", show=False),
+        Binding("ctrl+y", "copy_last_tool", "Copy last tool output", show=False),
         Binding("escape", "cancel_turn", "Cancel tool batch", show=False),
     ]
     COMMANDS = {SlashCommandProvider, get_system_commands_provider}
@@ -216,7 +217,9 @@ class AICodingApp(App[None]):
                 observer=self._observer,
             )
         finally:
-            await self._transcript.end_assistant()
+            # WP3: backfill source; getattr because test stubs pass
+            # session=object() (no messages → no backfill, previews stay).
+            await self._transcript.end_assistant(getattr(self._session, "messages", ()))
 
     def _ensure_approval_provider(self, dispatcher: Any | None = None) -> None:
         """4.1: ``/permissions confirm`` builds a fresh callback with no provider.
@@ -242,7 +245,9 @@ class AICodingApp(App[None]):
                 self._session, text, on_delta=self._on_delta, observer=self._observer
             )
         finally:
-            await self._transcript.end_assistant()
+            # WP3: backfill source; getattr because test stubs pass
+            # session=object() (no messages → no backfill, previews stay).
+            await self._transcript.end_assistant(getattr(self._session, "messages", ()))
             self._input.disabled = False
             self._status.set_busy(False)
             self._input.focus()
@@ -258,6 +263,28 @@ class AICodingApp(App[None]):
         sees it and can change course.
         """
         self._cancel_event.set()
+
+    def action_copy_last_tool(self) -> None:
+        """Copy the most recent finished tool call to the system clipboard.
+
+        Resolved through ``full_call_view`` against the session — the same
+        source the settled cards render — so what lands in the clipboard is
+        the full params + output, not a preview.  Textual delivers it via
+        OSC 52 (no macOS Terminal); in headless/test drivers without a driver
+        only the in-app clipboard is set.
+        """
+        call_id = self._transcript.last_finished
+        if call_id is None:
+            self._transcript.append_block(Block("info", "没有可复制的工具输出"))
+            return
+        view = full_call_view(getattr(self._session, "messages", ()), call_id)
+        parts = [p for p in (view.params, view.output) if p is not None]
+        if not parts:
+            self._transcript.append_block(Block("info", "没有可复制的工具输出"))
+            return
+        text = "\n\n".join(parts)
+        self.copy_to_clipboard(text)
+        self._transcript.append_block(Block("info", f"已复制 {len(text)} 字符"))
 
     # ---- human channels --------------------------------------------------
 

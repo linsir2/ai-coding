@@ -29,7 +29,8 @@ HELP_TEXT = (
     "  /trace          show last turn trace\n"
     "  /budget         show session token totals\n"
     "  /clear          start a fresh session\n"
-    "  /quit, /q       exit"
+    "  /quit, /q       exit\n"
+    "  ctrl-y          copy last tool output to clipboard"
 )
 
 

@@ -1,5 +1,7 @@
 """blocks_from_event + TranscriptObserver: pure, offline, no Textual."""
 
+import pytest
+
 from ai_coding.core.events import (
     IterationStarted,
     TaskUpdated,
@@ -10,14 +12,19 @@ from ai_coding.core.events import (
     TurnFinished,
 )
 from ai_coding.domain.loop import TurnOutcome, TurnStatus
-from ai_coding.ui.blocks import Block, TranscriptObserver, blocks_from_event
+from ai_coding.ui.blocks import (
+    Block,
+    TranscriptObserver,
+    blocks_from_event,
+    tool_card_meta,
+    tool_title,
+)
 
 
-def test_iteration_marker():
-    block = blocks_from_event(IterationStarted(index=1, max_iterations=8))
-    assert block is not None
-    assert "1/8" in block.text
-    assert block.kind == "turn"
+def test_iteration_started_is_silent():
+    # WP1: the event still marks turn boundaries for the trace recorder
+    # (trace.py), but the transcript no longer shows per-step "[turn x/y]".
+    assert blocks_from_event(IterationStarted(index=1, max_iterations=8)) is None
 
 
 def test_tool_started_names_the_tool_and_previews_params():
@@ -93,6 +100,49 @@ def test_tool_target_unknown_tool_is_empty():
     assert block.tool_target == ""
 
 
+@pytest.mark.parametrize(
+    "tool_name,kind,verb",
+    [
+        ("bash", "Shell", "运行命令"),
+        ("read", "Read", "读取文件"),
+        ("edit", "Edit", "编辑文件"),
+        ("write", "Write", "写入文件"),
+        ("glob", "Glob", "查找文件"),
+        ("todo_write", "Todo", "更新计划"),
+        ("subAgent", "Subagent", "委派子任务"),
+        ("skill", "Skill", "读取技能"),
+        ("memory_search", "Memory", "搜索记忆"),
+        ("memory_write", "Memory", "记录记忆"),
+        ("checkpoint_write", "Checkpoint", "记录检查点"),
+        ("ask_user", "Ask", "询问用户"),
+        ("mcp__get_sum", "mcp__get_sum", "运行工具"),
+        ("future_tool", "future_tool", "运行工具"),
+    ],
+)
+def test_tool_card_meta_table(tool_name, kind, verb):
+    assert tool_card_meta(tool_name) == (kind, verb)
+
+
+def test_started_block_carries_verb_and_kind():
+    block = blocks_from_event(
+        ToolStarted(call_id="c1", tool_name="bash", params={"command": "ls"})
+    )
+    assert block is not None
+    assert block.kind_label == "Shell"
+    assert block.verb == "运行命令"
+
+
+def test_tool_title_states():
+    running = tool_title(mark="▸", verb="运行命令", target="ls", running=True)
+    assert running == "▸ 正在运行命令 · ls"
+    done = tool_title(mark="✓", verb="运行命令", target="ls")
+    assert done == "✓ 已运行命令 · ls"
+    failed = tool_title(mark="✗", verb="读取文件", target="a.py")
+    assert failed == "✗ 已读取文件 · a.py"
+    bare = tool_title(mark="✓", verb="运行工具", target="")
+    assert bare == "✓ 已运行工具"
+
+
 def test_completed_turn_is_silent():
     assert blocks_from_event(TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED))) is None
 
@@ -103,6 +153,62 @@ def test_timed_out_turn_says_so():
     )
     assert block is not None
     assert "timed out" in block.text
+
+
+def test_length_cut_turn_says_truncated():
+    # W1: a model cut by max_tokens used to read as "done".  The harness can
+    # only detect the length cutoff (a bare stop is indistinguishable), so a
+    # set flag must surface it with a way back.
+    block = blocks_from_event(
+        TurnFinished(
+            outcome=TurnOutcome(
+                status=TurnStatus.COMPLETED,
+                text="half a sentence",
+                iterations=2,
+                reason="model finished",
+                truncated_by_length=True,
+            )
+        )
+    )
+    assert block is not None
+    assert block.kind == "turn-end"
+    assert "截断" in block.text
+    assert "继续" in block.text
+
+
+def test_length_cut_wins_over_budget_notice():
+    # Both can be true (last step cut, then the budget fired); the cut
+    # explains the visible symptom, so it takes precedence.
+    block = blocks_from_event(
+        TurnFinished(
+            outcome=TurnOutcome(
+                status=TurnStatus.MAX_ITERATIONS,
+                iterations=5,
+                reason="iteration budget exhausted",
+                truncated_by_length=True,
+            )
+        )
+    )
+    assert block is not None
+    assert "截断" in block.text
+
+
+def test_max_iterations_turn_says_continue():
+    # WP2: a budget cut used to end the transcript in silence (only TIMEOUT
+    # rendered); the user could not tell "done" from "cut off".
+    block = blocks_from_event(
+        TurnFinished(
+            outcome=TurnOutcome(
+                status=TurnStatus.MAX_ITERATIONS,
+                iterations=5,
+                reason="iteration budget exhausted",
+            )
+        )
+    )
+    assert block is not None
+    assert block.kind == "turn-end"
+    assert "5" in block.text
+    assert "继续" in block.text
 
 
 def test_tool_surface_warning_is_shown():

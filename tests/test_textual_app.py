@@ -5,10 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 from textual.command import CommandPalette
-from textual.widgets import Input, Markdown, Static
+from textual.widgets import Input, Static
 
 from ai_coding.ui.status_bar import StatusBar
 from ai_coding.ui.textual_app import AICodingApp
+from ai_coding.ui.transcript import Prose
 
 
 def _app(**overrides):
@@ -74,7 +75,7 @@ async def test_submit_runs_the_loop_and_streams_markdown():
         await pilot.pause()
         assert loop.calls == ["你好"]
         assert "你好" in _all_static_text(app)
-        assert "好" in app.query_one(Markdown).source
+        assert "好" in app.query_one(Prose).source
 
 
 @pytest.mark.asyncio
@@ -108,9 +109,12 @@ class _BlockingLoop(_FakeLoop):
 
 
 def _all_static_text(app) -> str:
+    # Prose subclasses Static but holds a Rich renderable whose str() is a
+    # repr; it is covered by .source assertions, not by static-text scans.
     return "\n".join(
         w.content.plain if hasattr(w.content, "plain") else str(w.content)
         for w in app.query(Static)
+        if not isinstance(w, Prose)
     )
 
 
@@ -329,9 +333,12 @@ async def test_textual_console_delta_streams_into_transcript(monkeypatch):
         await pilot.pause()
         await pilot.pause()
         assert seen == ["/review"]
-        text = _all_static_text(app)
-        assert "计划" in text
-        assert "第一步：写代码" in text
+        # Console deltas ride Turn.stream like model deltas; they land in
+        # Prose.source (previously MarkdownParagraph Static children, which
+        # is why a Static scan used to see them).
+        prose = app.query_one(Prose).source
+        assert "计划" in prose
+        assert "第一步：写代码" in prose
 
 
 @pytest.mark.asyncio
@@ -455,3 +462,65 @@ async def test_ask_screen_receives_the_options_the_model_offered():
         await worker.wait()
 
     assert worker.result == "A"
+
+
+@pytest.mark.asyncio
+async def test_ctrl_y_copies_last_tool_output_to_clipboard():
+    """`y` (ctrl) copies the most recent finished tool call, params + output."""
+    from types import SimpleNamespace
+
+    from textual.widgets import Input
+
+    from ai_coding.core.events import ToolFinished, ToolStarted
+    from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolOutput
+    from ai_coding.domain.run import tool_message
+
+    full_output = "commit f9fd276\n 3 files changed"
+    session = SimpleNamespace(
+        messages=[
+            ChatMessage(
+                role="assistant", content=None, timestamp="",
+                tool_calls=[ToolCallRef(id="c1", name="bash",
+                                        arguments='{"command": "git log -1 --stat"}')],
+            ),
+            tool_message(
+                ToolOutput(call_id="c1", tool_name="bash", output=full_output),
+                timestamp="",
+            ),
+        ]
+    )
+
+    class _Loop:
+        async def process_input(self, session, text, *, on_delta=None, observer=None):
+            assert observer is not None
+            observer.on_event(ToolStarted(call_id="c1", tool_name="bash",
+                                         params={"command": "git log -1 --stat"}))
+            observer.on_event(ToolFinished(call_id="c1", tool_name="bash",
+                                           success=True, output_preview="done"))
+            if on_delta is not None:
+                on_delta("answer")
+            return "answer"
+
+        async def aclose(self):
+            return None
+
+    app = _app(loop=_Loop(), session=session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.query_one("#prompt", Input).value = "commit?"
+        await pilot.press("enter")
+        for _ in range(6):
+            await pilot.pause()
+        await pilot.press("ctrl+y")
+        await pilot.pause()
+        copied = app.clipboard
+        assert "$ git log -1 --stat" in copied
+        assert "3 files changed" in copied
+
+
+@pytest.mark.asyncio
+async def test_ctrl_y_with_no_tool_says_so():
+    app = _app(loop=_FakeLoop())
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.press("ctrl+y")
+        await pilot.pause()
+        assert "没有可复制的工具输出" in _all_static_text(app)
