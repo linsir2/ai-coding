@@ -10,11 +10,21 @@ from __future__ import annotations
 
 from typing import Any
 
+from ai_coding.core.observers import EmitObserver
 from ai_coding.domain.message import ToolResult
 from ai_coding.domain.subagent import ParentContext, SubagentResult
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 SUCCESS_STATUSES = frozenset({"completed", "max_iterations"})
+
+#: Machine-readable child termination codes (R0-3): the parent must be able
+#: to tell "done" from "cut" without parsing prose (measured: C1's timeout
+#: arrived with ``error=None``).
+CHILD_ERRORS = {
+    "timeout": "child_timeout",
+    "max_iterations": "child_max_iterations",
+    "error": "child_error",
+}
 
 # Room above the runner's own budget for worktree setup, ledger write and the
 # packet itself (R2a).  The dispatcher takes min(this, remaining turn budget).
@@ -24,6 +34,12 @@ _TIMEOUT_GRACE = 15.0
 def _render(result: SubagentResult, name: str) -> str:
     """Human/LLM-readable rendering of the packet."""
     lines = [f"[{name}] {result.status} in {result.iterations} iteration(s)"]
+    if result.truncated:
+        lines.append(f"⚠ truncated: {result.exit_reason or 'unfinished work remains'}")
+    if result.usage:
+        prompt = result.usage.get("prompt_tokens", 0)
+        completion = result.usage.get("completion_tokens", 0)
+        lines.append(f"tokens: prompt={prompt} completion={completion}")
     if result.conclusion:
         lines.append(result.conclusion)
     elif result.error:
@@ -50,10 +66,18 @@ def _render(result: SubagentResult, name: str) -> str:
 def _to_tool_result(result: SubagentResult, name: str) -> ToolResult:
     """Split the packet into structured data + rendered text."""
     conclusion = result.conclusion
+    # R0-3: the error is always a machine code for non-completed statuses —
+    # C1's timeout arrived with a free-text error the parent could only parse
+    # by reading.  The human detail stays in the output and ``error_detail``.
+    error = None
+    error_detail = result.error
+    if result.status != "completed":
+        error = CHILD_ERRORS.get(result.status, "child_error")
     return ToolResult(
         # A partial result (max_iterations) still beats discarding the work.
         success=result.status in SUCCESS_STATUSES,
         output=_render(result, name),
+        error=error,
         data={
             "status": result.status,
             "iterations": result.iterations,
@@ -61,7 +85,11 @@ def _to_tool_result(result: SubagentResult, name: str) -> ToolResult:
             "artifacts": [artifact.to_dict() for artifact in result.artifacts],
             "ledger_path": result.ledger_path,
             "workdir": result.workdir,
-            "error": result.error,
+            "error": error,
+            "error_detail": error_detail,
+            "truncated": result.truncated,
+            "exit_reason": result.exit_reason,
+            "usage": dict(result.usage) if result.usage is not None else None,
             "conclusion_chars": len(conclusion) if conclusion else 0,
         },
         artifacts=result.artifacts,
@@ -164,6 +192,11 @@ class SubAgentTool(BaseTool):
                 parent=parent,
                 # R4a: the trace hangs the child's spans under this call.
                 parent_span=context.call_id,
+                # R0-3: fan the child's events into the parent stream through
+                # the context emit.  The runner wraps this in a ScopedObserver,
+                # so the parent trace finally sees child spans (previously the
+                # slot was never filled: zero scoped events over 23 runs).
+                observer=EmitObserver(context.emit),
             )
         except Exception as exc:  # noqa: BLE001 — tool boundary
             return ToolResult(

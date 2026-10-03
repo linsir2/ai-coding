@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar, cast
 
+from ai_coding.domain.ledger import UncertaintyItem
 from ai_coding.domain.loop import TurnOutcome
 from ai_coding.domain.message import ToolCallRef
 from ai_coding.domain.task import TaskState
@@ -215,6 +216,19 @@ class TaskUpdated:
 
 
 @dataclass(frozen=True)
+class LedgerUpdated:
+    """The turn's open unknowns moved (R0-2).
+
+    Emitted only when the derived open set changes signature — never every
+    round — so the transcript shows a question once, not as a heartbeat.
+    Items are full values (id, question, level, evidence tails); the 10MB
+    rule still holds because evidence entries are capped at build time.
+    """
+
+    items: tuple[UncertaintyItem, ...] = ()
+
+
+@dataclass(frozen=True)
 class TurnFinished:
     """The turn ended, for better or worse."""
 
@@ -280,6 +294,7 @@ LoopEvent = (
     | InputSteered
     | ScopedEvent
     | TaskUpdated
+    | LedgerUpdated
     | TurnFinished
     | MemoryInjected
     | MemoryRecalled

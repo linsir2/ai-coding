@@ -33,6 +33,12 @@ from dataclasses import dataclass, field
 
 from ai_coding.core.dispatch import DispatchOutcome
 from ai_coding.core.turn_policy import TurnSnapshot
+from ai_coding.domain.acceptance import AcceptanceState
+from ai_coding.domain.ledger import (
+    UncertaintyItem,
+    build_ledger,
+    ledger_states,
+)
 from ai_coding.domain.message import CANCELLED_BY_USER
 from ai_coding.domain.task import TaskState, TodoItem
 from ai_coding.domain.turn_digest import DEFAULT_NOTE_CHARS, one_line
@@ -102,6 +108,40 @@ class TurnBooks:
     #: the harvest reads, so "the turn used tools" cannot be faked by writing a
     #: checkpoint: that is the turn talking about itself.
     evidence_calls: int = 0
+    #: Acceptance verdicts this turn (R0-1): item id -> (passed, output tail).
+    #: Written by the loop after running the proof commands; the policy only
+    #: reads, so the stop decision stays table-testable.
+    verify: dict[str, tuple[bool, str]] = field(default_factory=dict)
+    #: Acceptance-gate nudges injected (``[acceptance-gate]``) — its own budget,
+    #: separate from the todo and strategy ladders.
+    acceptance_nudges: int = 0
+    #: Per-step model latency, newest last (R0-4) — the reporter already emits
+    #: each step's latency as an event; the books keep the series so the turn
+    #: can account its wall-clock the way it accounts its iterations.
+    step_latencies_ms: list[int] = field(default_factory=list)
+    #: Model steps abandoned at the turn deadline (R0-4).  Their streamed
+    #: deltas survive in the transcript; without this counter the books would
+    #: claim those seconds never happened (measured: a 179s step vanishing).
+    abandoned_steps: int = 0
+    #: Latency of the latest model step, however it ended (R0-4).
+    last_step_latency_ms: int = 0
+    #: Tool names with at least one success this turn (R0-2): a later success
+    #: is the evidence that closes an error question, so successes must be
+    #: remembered by name, not just counted.
+    tool_success: set[str] = field(default_factory=set)
+    #: The last emitted ledger signature (R0-2): sorted ``(id, level)`` pairs.
+    #: The loop compares each round's open set against this; an unchanged
+    #: non-empty set means another round with zero uncertainty reduction.
+    ledger_signature: tuple[tuple[str, str], ...] = ()
+    #: Consecutive rounds the open set did not change (R0-2).  Only counts
+    #: while something is actually open — an empty ledger never goes flat.
+    ledger_flat_rounds: int = 0
+    #: Ledger-gate nudges injected (``[ledger-gate]``) — its own budget.
+    ledger_nudges: int = 0
+    #: The current open set, as last derived (R0-2).  The snapshot projects
+    #: these to ``LedgerState`` so a nudge can name the unknowns; the
+    #: signature above is what the flat counter compares.
+    ledger_current: tuple[UncertaintyItem, ...] = ()
 
     # ---- notifications ----------------------------------------------------
 
@@ -112,6 +152,57 @@ class TurnBooks:
     def note_nudge(self) -> None:
         """The task gate injected a reminder and will iterate again."""
         self.nudges += 1
+
+    def note_acceptance_nudge(self) -> None:
+        """The acceptance gate injected a reminder and will iterate again."""
+        self.acceptance_nudges += 1
+
+    def note_ledger_nudge(self) -> None:
+        """The ledger gate injected a reminder and will iterate again."""
+        self.ledger_nudges += 1
+
+    @property
+    def ledger_open(self) -> int:
+        """Open questions right now (length of the tracked signature)."""
+        return len(self.ledger_signature)
+
+    def ledger_items(self, *, stall_threshold: int) -> list[UncertaintyItem]:
+        """Derive this round's open set from the recorded observations.
+
+        Pure: the rules live in ``domain/ledger.py``; the books only supply
+        the state.  The loop calls this once per round and emits when the
+        signature moves.
+        """
+        return build_ledger(
+            failures=self.failures,
+            verify=self.verify,
+            failed_streak=self.failed_streak,
+            iteration=self.iterations,
+            succeeded_tools=frozenset(self.tool_success),
+            stall_threshold=stall_threshold,
+        )
+
+    def note_ledger(
+        self,
+        signature: Sequence[tuple[str, str]],
+        items: Sequence[UncertaintyItem] = (),
+    ) -> bool:
+        """Track the open set's signature; return True when it moved.
+
+        An unchanged *non-empty* set is another round with zero uncertainty
+        reduction (the flat counter the policy gates on); an empty set never
+        counts, and any movement resets the counter.  The items ride along so
+        the snapshot can name the unknowns.
+        """
+        signature = tuple(signature)
+        self.ledger_current = tuple(items)
+        if signature == self.ledger_signature:
+            if signature:
+                self.ledger_flat_rounds += 1
+            return False
+        self.ledger_signature = signature
+        self.ledger_flat_rounds = 0
+        return True
 
     def note_strategy_nudge(self) -> None:
         """The escalation ladder spent its one "change strategy" nudge."""
@@ -126,10 +217,28 @@ class TurnBooks:
         self.steering_messages += max(0, int(count))
         self.failed_streak = 0
 
-    def note_step(self, text: str | None, *, finish_reason: str | None = None) -> None:
+    def note_step(
+        self,
+        text: str | None,
+        *,
+        finish_reason: str | None = None,
+        latency_ms: int = 0,
+    ) -> None:
         """Remember the latest model text (even when there is none)."""
         self.last_text = text
         self.last_finish_reason = finish_reason
+        self.last_step_latency_ms = int(latency_ms)
+        self.step_latencies_ms.append(int(latency_ms))
+
+    def note_abandoned(self, latency_ms: int) -> None:
+        """A model step cut by the turn clock: count its seconds (R0-4)."""
+        self.abandoned_steps += 1
+        self.last_step_latency_ms = int(latency_ms)
+        self.step_latencies_ms.append(int(latency_ms))
+
+    def note_verify(self, results: dict[str, tuple[bool, str]]) -> None:
+        """Record acceptance verdicts by item id (R0-1)."""
+        self.verify.update(results)
 
     def note_checkpoint(self, text: str, *, limit: int = DEFAULT_NOTE_CHARS) -> None:
         """Record the model's own line for this turn (R8a, D-1/D-12).
@@ -154,6 +263,7 @@ class TurnBooks:
         self.attempted_calls += len(outcomes)
         succeeded = [item for item in outcomes if item.result.success]
         self.successful_calls += len(succeeded)
+        self.tool_success.update(item.call.name for item in succeeded)
         self.evidence_calls += sum(
             1 for item in succeeded if item.call.name not in STATE_ONLY_TOOLS
         )
@@ -184,6 +294,7 @@ class TurnBooks:
         tokens_spent: int,
         open_items: Sequence[TodoItem] = (),
         final_text: str | None = None,
+        acceptance: Sequence[AcceptanceState] = (),
     ) -> TurnSnapshot:
         """The one object :class:`TurnPolicy` decides from.
 
@@ -200,4 +311,10 @@ class TurnBooks:
             attempted_calls=self.attempted_calls,
             successful_calls=self.successful_calls,
             strategy_nudges=self.strategy_nudges,
+            acceptance=tuple(acceptance),
+            acceptance_nudges=self.acceptance_nudges,
+            ledger_open=self.ledger_open,
+            ledger_flat_rounds=self.ledger_flat_rounds,
+            ledger_nudges=self.ledger_nudges,
+            ledger=ledger_states(self.ledger_current),
         )

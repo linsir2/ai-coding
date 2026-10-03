@@ -20,12 +20,32 @@ All three are deliberately dumb: no filtering, no sampling, no mutation.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from typing import Any
 
 from ai_coding.core.events import LoopEvent, LoopObserver, ScopedEvent
 
-__all__ = ["Braid", "SafeObserver", "ScopedObserver"]
+__all__ = ["Braid", "EmitObserver", "SafeObserver", "ScopedObserver"]
 
 _log = logging.getLogger(__name__)
+
+
+class EmitObserver:
+    """A :class:`LoopObserver` over a plain emit callable (R0-3).
+
+    Tools receive ``ctx.emit``, not an observer object — this adapter lets a
+    tool fan a nested run's events back into the parent stream without the
+    tool layer importing observer machinery.  Dumb like the rest: no
+    filtering, no mutation.  Failures propagate to the caller (the runner
+    wraps the child loop in ``SafeObserver`` anyway); an emit that must never
+    raise should arrive pre-wrapped.
+    """
+
+    def __init__(self, emit: Callable[[Any], None]) -> None:
+        self._emit = emit
+
+    def on_event(self, event: LoopEvent) -> None:
+        self._emit(event)
 
 
 class SafeObserver:

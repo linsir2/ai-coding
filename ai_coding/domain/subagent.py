@@ -53,6 +53,19 @@ class SubagentResult:
     error: str | None = None
     #: Which window the child ran with (R7e-4): ``full`` or ``task_only``.
     context_mode: str = "full"
+    #: R0-3: the child has more to say/do but was cut short (budget ceiling,
+    #: timeout, or halt) — unfinished, with a cause below.  Without this a
+    #: budget stop reads like a result: C1 recorded a timeout the parent
+    #: could only detect by parsing prose.
+    truncated: bool = False
+    #: R0-3: machine-readable why-it-stopped (e.g. "outer_timeout",
+    #: "turn deadline exceeded: ...").  ``status`` says the class, this says
+    #: the cause.
+    exit_reason: str | None = None
+    #: R0-3: what the child spent (the parent's cost accounting never saw
+    #: children before — no scoped events reached it and the ledger file had
+    #: no usage).  Summed model-step usage, ``None`` when unknown.
+    usage: dict[str, int] | None = None
 
     @property
     def text(self) -> str | None:
@@ -70,6 +83,9 @@ class SubagentResult:
             "ledger_path": self.ledger_path,
             "error": self.error,
             "context_mode": self.context_mode,
+            "truncated": self.truncated,
+            "exit_reason": self.exit_reason,
+            "usage": dict(self.usage) if self.usage is not None else None,
         }
 
 

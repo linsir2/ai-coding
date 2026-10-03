@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .acceptance import AcceptanceItem
 from .message import ChatMessage, ToolCallRef, tool_call_from_ref
 from .task import TaskState
 from .turn_digest import TurnDigest
@@ -126,6 +127,11 @@ class SessionData:
     # of the on-disk format.  It is a normalized excerpt from the first user
     # message, used by the resume picker.
     first_preview: str = ""
+    # Acceptance contracts (R0-1): machine-checkable statements plus the shell
+    # command proving each one.  Populated programmatically for now (the plan
+    # runner will produce these); persisted only when non-empty, same rule as
+    # ``task`` — old files simply have no key.
+    acceptance: list[AcceptanceItem] = field(default_factory=list)
 
     def add_message(self, message: ChatMessage) -> None:
         self.messages.append(message)
@@ -196,6 +202,10 @@ class SessionData:
         # idle sessions never grow this key at all.
         if self.turn_usages:
             data["turnUsages"] = [row.to_dict() for row in self.turn_usages]
+        # Same rule again: sessions without acceptance contracts write no key,
+        # so every file written before R0-1 keeps reading byte-identically.
+        if self.acceptance:
+            data["acceptance"] = [item.to_dict() for item in self.acceptance]
         return data
 
     @classmethod
@@ -220,6 +230,12 @@ class SessionData:
             for row in (TurnUsage.from_dict(item) for item in usage_rows)
             if row is not None
         ]
+        raw_acceptance = data.get("acceptance")
+        acceptance_rows = raw_acceptance if isinstance(raw_acceptance, list) else []
+        acceptance = [
+            AcceptanceItem.from_dict(row) for row in acceptance_rows
+            if isinstance(row, dict)
+        ]
         return cls(
             session_id=data.get("sessionId", ""),
             title=data.get("title", ""),
@@ -231,6 +247,7 @@ class SessionData:
             turn_count=int(data.get("turnCount", 0) or 0),
             turn_digests=digests,
             turn_usages=usages,
+            acceptance=acceptance,
         )
 
 

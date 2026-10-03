@@ -124,8 +124,16 @@ class SubAgentRunner:
         isolate: bool = True,
         parent: ParentContext | None = None,
         parent_span: str = "",
+        observer: Any | None = None,
     ) -> SubagentResult:
-        """Run ``task`` and return its packet.  Never raises for a sub-agent failure."""
+        """Run ``task`` and return its packet.  Never raises for a sub-agent failure.
+
+        ``observer`` is a per-call override for the constructor's observer:
+        the tool layer fans the parent's emit through here, so child events
+        reach the parent trace (previously the slot was never filled and the
+        child ran as a black box — measured: zero scoped events over 23 runs).
+        """
+        active = self._observer if observer is None else observer
         async with self._semaphore:
             if (
                 isolate
@@ -135,27 +143,30 @@ class SubAgentRunner:
                 try:
                     async with worktree_manager.temporary(name) as wt:
                         return await self._run_in(
-                            task, name, str(wt.path), parent, parent_span=parent_span
+                            task, name, str(wt.path), parent,
+                            parent_span=parent_span, observer=active,
                         )
                 except WorktreeError:
                     report_degraded(
-                        self._observer,
+                        active,
                         "worktree_isolate",
                         "the worktree could not be created",
                         "ran in the main workspace instead",
                     )
-            return await self._run_in(task, name, None, parent, parent_span=parent_span)
+            return await self._run_in(
+                task, name, None, parent, parent_span=parent_span, observer=active
+            )
 
     # ---- internals --------------------------------------------------------
 
-    def _scoped_observer(self, name: str, parent_span: str) -> Any:
-        """Wrap the parent's observer so the child's events carry their parentage."""
-        if self._observer is None:
+    def _scoped_observer(self, name: str, parent_span: str, inner: Any) -> Any:
+        """Wrap an observer so the child's events carry their parentage."""
+        if inner is None:
             return None
         return ScopedObserver(
             scope=f"subagent:{name}:{parent_span or 'root'}",
             parent=parent_span or "subagent",
-            inner=self._observer,
+            inner=inner,
         )
 
     async def _run_in(
@@ -166,6 +177,7 @@ class SubAgentRunner:
         parent: ParentContext | None,
         *,
         parent_span: str = "",
+        observer: Any | None = None,
     ) -> SubagentResult:
         registry = self._build_tools(workdir)
         engine = self._engine_factory()
@@ -204,7 +216,7 @@ class SubAgentRunner:
             prompt=prompt,
             settings=self._subagent_settings(),
             workspace=workdir or self._workspace,
-            observer=self._scoped_observer(name, parent_span),
+            observer=self._scoped_observer(name, parent_span, observer),
         )
         try:
             # The inner loop has its own (slightly tighter) turn deadline, so it
@@ -221,6 +233,9 @@ class SubAgentRunner:
                 status="timeout",
                 error=f"exceeded {self._timeout:g}s",
                 workdir=workdir,
+                # R0-3: an outer cut is still a cut — unfinished, with a cause.
+                truncated=True,
+                exit_reason="outer_timeout",
             )
         finally:
             try:
@@ -256,6 +271,12 @@ class SubAgentRunner:
             else ()
         )
         is_error = status in {"error", "timeout"}
+        truncated = status != "completed"
+        exit_reason = None
+        if outcome is not None and status != "completed":
+            exit_reason = outcome.status.value
+            if outcome.reason:
+                exit_reason = f"{exit_reason}: {outcome.reason}"
         result = SubagentResult(
             status=status,
             conclusion=conclusion,
@@ -265,6 +286,9 @@ class SubAgentRunner:
             workdir=workdir,
             error=(outcome.reason if outcome and outcome.reason else None) if is_error else None,
             context_mode=mode,
+            truncated=truncated,
+            exit_reason=exit_reason,
+            usage=dict(outcome.usage) if outcome is not None and outcome.usage else None,
         )
         return _with_ledger(result, self._ledger_root)
 
@@ -298,6 +322,10 @@ def _with_ledger(result: SubagentResult, root: Path | None) -> SubagentResult:
         workdir=result.workdir,
         ledger_path=str(path),
         error=result.error,
+        context_mode=result.context_mode,
+        truncated=result.truncated,
+        exit_reason=result.exit_reason,
+        usage=result.usage,
     )
 
 

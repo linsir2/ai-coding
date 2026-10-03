@@ -17,6 +17,7 @@ from rich.text import Text
 
 from ai_coding.core.events import (
     IterationStarted,
+    LedgerUpdated,
     LoopEvent,
     TaskUpdated,
     ToolChunk,
@@ -254,6 +255,14 @@ def blocks_from_event(event: LoopEvent) -> Block | None:
         )
     if isinstance(event, TaskUpdated):
         return Block("task", event.task.render(), "dim")
+    if isinstance(event, LedgerUpdated):
+        # R0-2: the turn's open unknowns, rendered dim — a question, not a
+        # result.  Emitted only when the set moves, so this block marks the
+        # moment something became unknown (or stopped being so).
+        lines = [f"[{item.level}] {item.question}" for item in event.items]
+        for item in event.items:
+            lines.extend(f"  · {bit}" for bit in item.evidence)
+        return Block("ledger", "\n".join(lines), "dim")
     if isinstance(event, TurnFinished) and event.outcome.status is TurnStatus.TIMEOUT:
         return Block("turn-end", f"[turn] timed out: {event.outcome.reason}", "red")
     if isinstance(event, TurnFinished) and event.outcome.truncated_by_length:

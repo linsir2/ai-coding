@@ -51,12 +51,14 @@ from typing import TYPE_CHECKING, Any
 
 from ai_coding.ai.engine import ChatEngine, EngineError
 from ai_coding.config.models import AIConfig
+from ai_coding.core.acceptance import verify_items
 from ai_coding.core.compaction import Compactor
 from ai_coding.core.dispatch import DispatchOutcome, ToolDispatcher
 from ai_coding.core.events import (
     AssistantMessage,
     InputSteered,
     IterationStarted,
+    LedgerUpdated,
     LoopEvent,
     LoopObserver,
     NullObserver,
@@ -87,6 +89,8 @@ from ai_coding.core.turn_policy import (
     TurnPolicyConfig,
 )
 from ai_coding.core.turn_report import TurnReporter
+from ai_coding.domain.acceptance import acceptance_states, pending_items
+from ai_coding.domain.ledger import ledger_signature
 from ai_coding.domain.loop import StepResult, TurnOutcome, TurnStatus
 from ai_coding.domain.message import ChatMessage, ToolArtifact
 from ai_coding.domain.run import assistant_message, user_message
@@ -270,6 +274,10 @@ class AgentLoop:
             while True:
                 index += 1
                 budget_expired = frame.deadline is not None and frame.deadline.expired
+                # R0-2: derive the open unknowns from the books before deciding.
+                # One call site per round (here, not after every branch), so a
+                # flat round counts exactly once.
+                self._refresh_ledger(books)
                 decision = self.policy.decide_next_iteration(
                     books.snapshot(
                         iteration=index, tokens_spent=self.reporter.tokens_spent()
@@ -277,6 +285,26 @@ class AgentLoop:
                     budget_expired=budget_expired,
                 )
                 if decision.action is TurnAction.FINISH:
+                    # R0-1 (H1-01): a budget stop is not proof the work is
+                    # undone.  When contracts exist and the clock still has
+                    # room for one bounded check, verify before translating
+                    # the stop into a verdict — a green suite turns MAX into
+                    # COMPLETED instead of lying about it.
+                    if (
+                        decision.reason != "turn deadline exceeded"
+                        and pending_items(session.acceptance)
+                    ):
+                        await self._verify_acceptance(session, books)
+                        if session.acceptance and all(
+                            item.passed is True for item in session.acceptance
+                        ):
+                            outcome = TurnOutcome(
+                                status=TurnStatus.COMPLETED,
+                                text=books.last_text,
+                                iterations=books.iterations,
+                                reason="acceptance verified (post-budget)",
+                            )
+                            break
                     outcome = terminal_outcome(
                         decision,
                         budget_expired=budget_expired,
@@ -289,7 +317,10 @@ class AgentLoop:
                     # is a real instruction that changed the model's behaviour, so
                     # replaying the transcript without it would break its meaning
                     # (docs/r1a-4-analysis.md D1).
-                    books.note_strategy_nudge()
+                    if decision.reason == "uncertainty ledger flat":
+                        books.note_ledger_nudge()
+                    else:
+                        books.note_strategy_nudge()
                     session.add_message(user_message(decision.inject or "", now_utc()))
                     self.closer.checkpoint(session, index)
                     continue
@@ -322,16 +353,22 @@ class AgentLoop:
                     deadline=frame.deadline,
                     on_delta=on_delta,
                     index=index,
+                    books=books,
                 )
-                books.note_step(step.text, finish_reason=step.finish_reason)
 
                 if not step.tool_calls:
+                    # R0-1: a turn with contracts does not end on the model's
+                    # word — the proof commands run first, and the policy sees
+                    # only their verdicts (its purity is what keeps the stop
+                    # decision table-testable).
+                    await self._verify_acceptance(session, books)
                     decision = self.policy.decide_after_step(
                         books.snapshot(
                             iteration=index,
                             tokens_spent=self.reporter.tokens_spent(),
                             open_items=task.open_items(),
                             final_text=step.text,
+                            acceptance=acceptance_states(session.acceptance),
                         )
                     )
                     if decision.action is TurnAction.FINISH:
@@ -342,7 +379,10 @@ class AgentLoop:
                             reason=decision.reason,
                         )
                         break
-                    books.note_nudge()
+                    if decision.reason == "acceptance checks failing":
+                        books.note_acceptance_nudge()
+                    else:
+                        books.note_nudge()
                     session.add_message(user_message(decision.inject or "", now_utc()))
                     self.closer.checkpoint(session, index)
                     continue
@@ -601,6 +641,47 @@ class AgentLoop:
         self.closer.checkpoint(session, index)
         return outcomes
 
+    def _refresh_ledger(self, books: TurnBooks) -> None:
+        """Derive the open unknowns and emit when the set moves (R0-2).
+
+        Emission is edge-triggered on the signature: a question appears once
+        in the transcript, not as a per-round heartbeat.
+        """
+        items = books.ledger_items(
+            stall_threshold=self.policy.config.stall_iterations
+        )
+        if books.note_ledger(ledger_signature(items), tuple(items)) and items:
+            self._emit(LedgerUpdated(items=tuple(items)))
+
+    async def _verify_acceptance(self, session: SessionData, books: TurnBooks) -> None:
+        """Run the proof commands for unchecked acceptance items (R0-1).
+
+        Only items that never passed are checked, so a green suite is not
+        re-run every iteration.  Verdicts land on the session items (persisted
+        by the normal save) and in the books (for the policy snapshot and the
+        uncertainty ledger) — the policy itself never touches a shell.
+        """
+        pending = pending_items(session.acceptance)
+        if not pending:
+            return
+        each = float(getattr(self.settings, "acceptance_verify_each_seconds", 120.0) or 0.0)
+        total = float(getattr(self.settings, "acceptance_verify_total_seconds", 300.0) or 0.0)
+        checked = await verify_items(
+            pending, self.workspace, timeout_each=each or 120.0, timeout_total=total or 300.0
+        )
+        by_id = {item.id: item for item in checked}
+        for item in session.acceptance:
+            if item.id in by_id:
+                item.passed = by_id[item.id].passed
+                item.output = by_id[item.id].output
+        # Only verdicts (pass/fail) enter the books — items skipped by the
+        # total cap stay None and must not fabricate ledger entries.
+        books.note_verify({
+            item.id: (item.passed, item.output)
+            for item in checked
+            if item.passed is not None
+        })
+
     async def _model_step(
         self,
         *,
@@ -610,6 +691,7 @@ class AgentLoop:
         deadline: Deadline | None,
         on_delta: DeltaSink | None,
         index: int,
+        books: TurnBooks,
     ) -> StepResult:
         """One model call — the only wait that cannot degrade (docs/r2 §7.3).
 
@@ -617,18 +699,35 @@ class AgentLoop:
         "decide → ask → act" without the bookkeeping in between.
         """
         started = time.monotonic()
-        step = await run_with_deadline(
-            self.engine.step(
-                request,
-                tools=self._tool_schemas,
-                instructions=instructions,
-                on_delta=on_delta,
-            ),
-            timeout=self._remaining(deadline),
-            label="model_step",
-        )
+        try:
+            step = await run_with_deadline(
+                self.engine.step(
+                    request,
+                    tools=self._tool_schemas,
+                    instructions=instructions,
+                    on_delta=on_delta,
+                ),
+                timeout=self._remaining(deadline),
+                label="model_step",
+            )
+        except DeadlineExpired:
+            # R0-4: a step cut by the clock still happened — its streamed
+            # deltas survive in the transcript, and the books count its
+            # seconds instead of claiming they never elapsed (measured: a
+            # 179s step vanishing).  The turn still ends exactly as before;
+            # this is accounting, not a behaviour change.
+            latency_ms = int((time.monotonic() - started) * 1000)
+            books.note_abandoned(latency_ms)
+            self.reporter.report_degraded(
+                "model_step",
+                "turn deadline exceeded",
+                "partial deltas kept in transcript",
+            )
+            raise
+        latency_ms = int((time.monotonic() - started) * 1000)
+        books.note_step(step.text, finish_reason=step.finish_reason, latency_ms=latency_ms)
         self.reporter.report_step(
-            index=index, step=step, latency_ms=int((time.monotonic() - started) * 1000)
+            index=index, step=step, latency_ms=latency_ms
         )
         self._emit(AssistantMessage(text=step.text, tool_calls=tuple(step.tool_calls)))
         session.add_message(assistant_message(step, now_utc()))
