@@ -45,6 +45,20 @@ memory:
   consolidate_threshold: 10
   max_index_entries: 200
   max_per_turn_injections: 5
+  # R11a — the write-side gate.  The master switch and the per-channel split are
+  # two orthogonal things: `extraction_enabled: false` stops every write (recall
+  # keeps working, i.e. a read-only memory), while `extraction_extractors` picks
+  # which channel runs — "harvest" (turn-end reconciliation) and/or
+  # "memory_write" (the model's own tool).  Missing or malformed settings are
+  # PERMISSIVE on purpose: a partial yaml must never silently stop writes.
+  # extraction_enabled: true
+  # extraction_extractors: [harvest, memory_write]   # null = all
+  # R11b — wall-clock budget for one recall (filtering + semantic tier + ranking
+  # + the miss probe).  Over budget the hits still come back; only the optional
+  # `touch` write is skipped and one Degraded(memory_recall) is emitted.  2.0s is
+  # far above the measured ~5ms, so it is a placeholder for the day the semantic
+  # tier gets slow; 0 disables it.
+  # recall_timeout_seconds: 2.0
   # 可选语义档（R10d）：默认整块关掉。打开需要 provider 指向 models 里的一项，
   # 复用它的 base_url / api_key。deepseek 系端点没有 /embeddings（404），开了
   # 等于没开；min_cosine 是在 text-embedding-v4 上量的，换模型必须重标。

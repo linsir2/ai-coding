@@ -132,9 +132,51 @@ R3 重写。记忆层现在回答三个问题：**写什么、什么时候写、
 
 | 动作 | 行为 |
 |---|---|
-| 收割 `harvest` | 回合结束后，只把**本回合增量**（游标存在会话里）交给提取器；提取器输出结构化候选（`text/kind/importance/action/target_id`），服务逐条对账 **ADD / UPDATE / SUPERSEDE / NOOP**；同义（导语剥离后相似度 ≥0.80）合并；空结果不写；无提取器时**不写**（不再把闲聊原样入库） |
-| 召回 `recall_notes` | 排序用 **Okapi BM25**；两道门禁分别管两件事（见下）；中文走字符 bigram + 虚词过滤；返回 id/kind/score/relevance/`matched_terms` 以便追溯 |
-| 整理 `consolidate` | 合并近似重复、按命中提升 importance、淘汰过期 open_thread、按价值淘汰（`pinned` 与决策受保护）；`dream` 仅作为弃用别名保留 |
+| 收割 `harvest` | 回合结束后，只把**本回合增量**（游标存在会话里）交给提取器；提取器输出结构化候选（`text/kind/importance/action/target_id`/`scene`），服务逐条对账 **ADD / UPDATE / SUPERSEDE / NOOP**；同义（导语剥离后相似度 ≥0.80）合并；空结果不写；无提取器时**不写**（不再把闲聊原样入库） |
+| 召回 `recall_notes` | 排序用 **Okapi BM25**；两道门禁分别管两件事（见下）；中文走字符 bigram + 虚词过滤；返回 id/kind/score/relevance/`matched_terms`/`source_refs` 以便追溯 |
+| 整理 `consolidate` | 合并近似重复（**同 kind 且同 scene** 才合并）、按命中提升 importance、淘汰过期 open_thread、按价值淘汰（`pinned` 与决策受保护）；`dream` 仅作为弃用别名保留 |
+
+### 写侧总开关（R11a）
+
+两个正交开关，判定谓词只有 `service.is_extraction_allowed` 一处：总闸 `extraction_enabled`
+（`false` = 收割与 `memory_write` 全停，召回/注入照常，即「只读记忆」模式），分流
+`extraction_extractors`（`["harvest"]` / `["memory_write"]` / 两者；`null`、缺段或非 list = 全放行）。
+**缺段或写错一律放行**，只有显式关掉才停——否则一份残缺的 yaml 会静默停掉写入。
+门被关上时**连 `evict` 也不做**：门的意思是「手别碰索引」，裁剪也是写。
+
+### 查询清洗（R11a）
+
+召回的 query 在分词**之前**先过 `clean_query_for_recall`：整块剥掉 `<tool_output>` 与
+`<memory-constraints>` / `<working-memory>` / `<task-state>` / `<hook-context>` 等易失尾块，
+再剥残留裸标签（首字符必须是字母或 `/`，所以 `a < b` 不受影响），最后截断到 2048 字符。
+动机是实测的：粘贴的工具结果会把 `tool`/`output`/`read` 变成召回词，上一轮注入的记忆块会把
+旧决策词变成这一轮的查询词。对标 TencentDB Agent Memory 的 injector 在检索前剥
+`<user_info>`/`<additional_data>`——同一类病，同一处治。
+**只影响召回，不影响收割**（喂给提取器的原文不能洗，那是另一份契约）。
+
+### 召回预算与超时可见（R11b）
+
+`memory.recall_timeout_seconds`（默认 2.0，0/负关闭）是一次召回的墙钟预算，计时窗口覆盖
+过滤 → 语义层 → 排名 → 未命中探针。超预算时**命中照返**（绝不饿死模型），只跳过那次可选的
+`touch_notes` 整文件写，并经 `ctx.emit` 发一条 `Degraded(component="memory_recall")`，
+回包带 `data.timed_out`。它是**事后计量**而不是 `run_with_deadline` 式抢占——同步 BM25 循环
+没有挂起点可放弃，硬套只会把「慢」伪装成「可取消」。出厂 2.0s 对实测 ~5ms 是虚位以待，
+今天不会触发，等语义层真的变慢才开始起作用。
+
+### 场景分组与来源位置引用（R11c）
+
+| 契约 | 行为 |
+|---|---|
+| `MemoryNote.scene` | **可选**的自由文本话题标签（strip + 80 字截断）。只做分组与过滤：**不进 `dedupe_key`**（完全同文即使 scene 不同仍折叠成一条）、不进打分。两个生产者：提取器 prompt 里作为**可选**字段索要、`memory_write(scene=…)` |
+| 合并的第二维 | `find_similar` 同 kind **且同 scene**；`consolidate` 不跨 scene 合并。方向是收紧：合并会把「构建用 uv」和「发布用 uv」并成一条，而那正是限定词在起作用的地方 |
+| 去重命中回填 | 收割先写、`memory_write` 后补 scene 时把 scene 补到既有条目上，否则「先收割后标注」这个最常见顺序会静默丢标签 |
+| `memory_search(scene=)` | 与 `scope` 同构的**精确匹配**，过滤先于排序。标签是自由文本，模型猜错就匹配不到——`filtered_out` 会点名「是 scene 过滤把它们排除了」 |
+| 未命中导航 | `data.index.by_scene` + `top_scenes`（`(scene, count, heat)`，heat = 该场景 `hits` 之和，倒序取 5、名字 tie-break），文案追加一行列出**库自己的词**让模型照抄。**无 scene 的库不输出新键、不加新句** |
+| `/memory` | 非空时多一段 `scenes: 构建=1, 发布=1` |
+| `MemoryNote.source_message_ids` | `m<下标>` 位置引用，指向 `sessions/<session>.json` 的 `messages`，**只覆盖真正喂给提取器的那段窗口**（实测：20 条 delta + 窗口 12 + `source_offset=5` → `m13..m24`，不是 `m5..m24`）。`memory_search` 的 `notes[].source_refs` 恒带（空 list） |
+
+**位置引用的前提**：消息只 append、压缩只改副本、`ensure_tool_pairing` 在落盘前清洗，所以下标
+长期稳定。**若将来支持编辑或删除历史消息，这个字段必须重审。**
 
 ### 两道门禁（R10b/R10c，各有各的职责，不能互相替代）
 
@@ -283,6 +325,18 @@ token 删掉一个已被 spec 定义的参数，是在优化那把尺子；语�
 ## 技能
 
 `SkillRegistry` 扫描技能目录，凡含 `SKILL.md` 的顶层目录即视为一项技能；`catalog_text()` 把每项技能的 frontmatter `description` 汇成 `- name: description` 目录，供 `skill` 工具与系统提示使用。空目录不产生任何目录。
+
+**版本与状态回显（R11c）**：`SKILL.md` frontmatter 里的 `version` / `status` 会被读出来，模型在
+`skill list` / `skill read` 的结果里看得到——`version != "1"` 才显示 `(vN)`，`status` 不是
+`active` 再加 `[archived]`，`skill read` 额外给 `data={name, version, status}`。三处刻意的克制：
+
+* `version` 是**字符串**，只做回显和「是不是默认值」判断，不做 semver 比较（否则 `1.10` 会排到 `1.9` 之下）；
+* `status` 是白名单 `active|archived`，未知值读作 `active`，不发明第三种状态；
+* **`catalog_text()` 一字未动**——它进系统提示词，必须逐字节静态，`/skills` 也复用它。所以版本信息
+  只出现在工具结果（进历史、缓存友好），不进 L1。
+
+全部老 skill（无 frontmatter、v1、active）的输出与 R11c 之前**逐字节相同**。`archived` 仍然可读，
+只陈述状态、不推荐替代品（那需要知道替代品是谁）；真要拒读是策略，得走门禁层，registry 保持中立。
 
 ## MCP 集成
 
