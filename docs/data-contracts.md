@@ -102,6 +102,8 @@ mcp:               # MCPConfig（默认关闭）
 | `subagent_worktree_isolation` | true | 子代理是否 worktree 隔离 |
 
 `MemoryConfig`：`enabled`, `auto_extract`, `consolidate_threshold=10`, `max_index_entries=200`, `max_per_turn_injections=3`（R3 起：这是 `memory_search` 每次返回的条数上限）。
+R11a 加 `extraction_enabled=true`（写侧总闸，关则收割与自写全停、召回照常）、`extraction_extractors=None`（写通道白名单：`harvest`/`memory_write`，`None`/缺段/非 list = 全放行；判定谓词 `service.is_extraction_allowed`）。
+R11b 加 `recall_timeout_seconds=2.0`（一次召回的墙钟预算，0/负/不可解析 = 关闭；超预算 → 命中照返 + 跳过 `touch` 写盘 + `data.timed_out=true` + 一条 `Degraded`）。**注意它在 `MemoryConfig` 与 `service._default_config()` 两处**，与 R10 的三处纪律同源：`RecallParams` 不读它，所以不需要改第三处。
 
 `MCPConfig`：`enabled=false`, `auto_discover=true`, `connection_timeout=60`（R7d 起；npx 冷启动实测 ~27s）, `servers[]`。`MCPServerConfig`：`name`, `command`, `enabled=false`, `args[]`, `env{}`, `cwd`, `tools=[]`（非空则只注册这些远端工具，R7d）, `auto_approve=false`（该 server 的工具免审批，R7d）。
 
@@ -212,14 +214,21 @@ R2 给 `ToolFinished` 追加末尾字段 `error: str | None = None`（与 `ToolR
 | `supersedes` / `superseded_by` | 取代链：旧条**只标记不删除**，可回滚 |
 | `hits` / `last_used` / `pinned` | 使用统计与淘汰保护 |
 | `dedupe_key`（派生） | `sha1(normalize(text))`，同内容幂等 |
+| `scene`（R11c，默认 `""`） | 话题分组标签，提取器/模型写的**自由文本**（`normalize_scene`：strip + 80 字截断）。只做**分组与过滤**，不进 `dedupe_key`、不进打分。`""` = 未分组 |
+| `source_message_ids`（R11c，默认 `()`） | `m<下标>` 位置引用，指向 `sessions/<source_session>.json` 的 `messages`。**只覆盖真正喂给提取器的那段窗口**（`harvest_max_messages`），不是整个 delta |
 
 `.memory` 文件：`{"version": 2, "notes": [...]}`；读到 v1（`entries`）自动迁移为 v2 字段默认值。
+**R11c 不 bump 版本**：新键全可选、缺失走默认，旧代码读新文件会忽略未知键——没有形状层面的不兼容。
 
 ### 收割契约（`memory/schema.py`，R3）
 
 提取器输出 JSON 数组：`[{"text", "kind", "importance", "action", "target_id"}]`，
 `action ∈ add|update|supersede|noop`。解析容错：代码块、前后散文、坏行、旧的「一行一条」格式都能吃，
 完全不可用时返回空列表（记忆永不抛错）。
+
+R11c 追加可选 `scene`（同一 `normalize_scene` 口径，非字符串被字符串化、`null`→`""`），并在
+`ai/llm_helpers.py::_EXTRACT_SYSTEM_PROMPT` 里作为**可选**字段索要（有测试钉住这段文本，
+因为收割路径上没有第二个生产者，改回去没人会发现）。
 
 ### 新增事件（`core/events.py`，R3）
 
@@ -494,7 +503,7 @@ OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnix
 
 ### `memory_search` 的 `data` 完整形状
 
-命中和未命中共有五个键，未命中再加三个：
+命中和未命中共有六个键，未命中再加三个：
 
 | 键 | 类型 | 命中时 | 说明 |
 |---|---|---|---|
@@ -503,6 +512,7 @@ OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnix
 | `terms_known` | `list[str]` | 有 | 见上表「两个指代」 |
 | `terms_unknown` | `list[str]` | 有 | 索引里一次都没出现过的查询词（CJK bigram 会被拆成 `['依赖','赖怎','么装']`） |
 | `semantic_unavailable` | `bool` | 有 | **本轮恒为 `false`**。存在的唯一理由是可选语义层落地时 payload 不必改形状；现在没有任何代码把它置真 |
+| `timed_out` | `bool` | 有 | R11b：本次召回**超过** `memory.recall_timeout_seconds`。命中照返（超时绝不饿死模型），被跳过的只有那一次可选的 `touch` 整文件写；工具同时经 `ctx.emit` 发一条 `Degraded(component="memory_recall")`。用 `getattr` 读，老 double 没有这个字段时读成 `false` |
 | `near_misses` | `list[dict]` | **仅未命中时**（除非显式 `include_near_misses: true`） | `id`/`kind`/`score`/`relevance`/`preview`(40 字符)，最多 3 条 |
 | `index` | `dict` | **仅未命中时** | `active` / `by_kind` / `recent`（3 条 `id`+`kind`+`preview`）。**没有索引概览时这个键不存在**（记忆关掉、排序抛错、或 pre-R10c 的 double），文案此时也不编造条数 |
 
@@ -536,6 +546,7 @@ OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnix
 |---|---|
 | `IndexSummary(active, by_kind, recent)` | 有界概览：`recent` 最多 3 条 `(id, kind, preview)`，`preview` 40 字符。失败的召回**不该把整个索引塞回上下文** |
 | `RecallDiagnostics(terms_known, terms_unknown, near_misses, index_summary, semantic_unavailable, no_vocabulary_match, filtered_out)` | 「召回为什么失败」所需的全部信息。外层各字段默认可空；`pre-R10c` 的 double 没有 `recall_with_diagnostics` 时，工具走兼容分支并用 `_EmptyDiagnostics` 占位 |
+| `RecallDiagnostics.timed_out` / `.elapsed_seconds` | R11b 追加在末尾（默认 `False` / `0.0`）：排名（**含语义层与未命中探针**）实测耗时与是否超预算。计时窗口从 `_candidates` 之后起、到探针结束止——同步 BM25 没有挂起点可抢占，所以这是**事后计量**而不是 `run_with_deadline` 式取消；超预算只买「跳过 touch」，买不到「掐断计算」 |
 
 ### 没接上的两个旋钮
 
@@ -574,9 +585,46 @@ OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnix
 |---|---|
 | `EmbeddingsConfig`（`config/models.py`） | `enabled/provider/model/dimensions/min_cosine/cache_path/timeout_seconds`，全有默认，默认全关。`provider` 指向 `models.<name>`，复用其 `base_url/api_key` |
 | `data.semantic_unavailable` | 三态语义：`False` + 有命中＝词面或语义正常返回；`False` + 无命中＝词面没找到（语义没开或端点不支持，**静默**）；`True`＝配了但这次坏了（超时/网络/坏响应），结果是纯词面回退 |
-| 关掉逐字节一致 | `enabled=false` 或整块缺席时，`memory_search` 的 output 与 data 与纯词面逐字节相同（归一化掉随机 id 后比对）。唯一允许不同的键不存在——连 `semantic_unavailable` 都保持 `False` |
+| 关掉逐字节一致 | `enabled=false` 或整块缺席时，`memory_search` 的 output 与 data 与纯词面逐字节相同（归一化掉随机 id 后比对）。唯一允许不同的键不存在——连 `semantic_unavailable` 都保持 `False`，R11b 的 `timed_out` 在预算内同样是 `false` |
 | 缓存 key | `sha1(base_url\|model\|dimensions\|dedupe_key)`。端点在 key 里：同名模型换端点不会吃陈旧向量。`dedupe_key` 已覆盖文本，笔记改写自动重算，旧条目成孤儿（不删） |
 | 能力闩锁 | 端点首次 404 置位，之后短路零网络。配 deepseek 的用户每次搜索不再多等一次 612ms 往返 |
 | `min_cosine=0.60` | 只作绝对门的 OR 分支（`coverage>=0.25 or cos>=min_cosine`），是 text-embedding-v4 上的测量值（正例 min 0.44 / 负例 max 0.66 重叠）。**换 provider 或模型必须重跑基准重标**，否则门要么漏放噪音要么错杀 |
 | 融合权重 | 0.5/0.5 写死在 `relevance.py`（非配置项）。46 条上 w=0.7 多救 1 条但属噪声，未采纳 |
 | `rank_notes_detailed(..., semantic=None)` | `None` 时与今天逐字节相同。`relevance.py` 不 import `embeddings`；`benchmark.py` 不 import 任何一边 |
+
+
+---
+
+## R11c 契约（scene 分组 / 来源位置引用 / skill 版本回显）
+
+R11c 只加**可选字段与只读回显**，不改排序、不改门禁、不改落盘版本。
+
+### 记忆条目与检索
+
+| 契约 | 位置 | 说明 |
+|---|---|---|
+| `MemoryNote.scene` | `memory/note.py` | 自由文本标签；`normalize_scene` strip + 80 字截断。**不进 `dedupe_key`**：完全同文即使 scene 不同仍折叠成一条，scene 只影响近似合并与过滤 |
+| `HarvestCandidate.scene` / `write_note(scene=)` | `memory/schema.py` / `memory/service.py` | 两个生产者：提取器 JSON 里的 `scene`，`memory_write` 的 `scene` 参数 |
+| `_candidates(scene=None)` / `recall_*(scene=None)` | `memory/service.py` | 与 `scope` 同构的**精确匹配**，过滤先于排序；被过滤掉的候选不算使用（不 touch） |
+| `store.find_similar(scene=None)` | `memory/store.py` | `None` = 不限（旧调用零改动）；`""` = 只匹配未分组那组 |
+| 去重命中回填 | `memory/service.py::_reconcile` | 收割先写、`memory_write` 后补 scene 时，把 scene 补到既有条目上（否则最常见的顺序会静默丢弃标签） |
+| `consolidate` 不跨 scene 合并 | 同上 | 场景是合并的第二维精确键，方向是收紧 |
+| `IndexSummary.by_scene` / `.top_scenes` | 同上 | `by_scene` 只数非空 scene；`top_scenes` 是 `(scene, count, heat)`，heat = 该场景 `hits` 之和，按 heat 倒序取前 `TOP_SCENES=5`，名字做 tie-break（两次运行一致） |
+| `status()["by_scene"]` → `/memory` | `ui/repl.py` | 非空才渲染成 `scenes: a=1, b=1`，未分组库不出现这一段 |
+
+### `memory_search` 载荷
+
+| 键 | 说明 |
+|---|---|
+| `data.notes[].source_refs` | 恒带（空 list），`list(note.source_message_ids)`。位置引用 `m<下标>` 指向 `sessions/<source_session>.json`；**稳定性前提**：`messages` 只 append、压缩只改副本、`ensure_tool_pairing` 在落盘前清洗。**若将来支持编辑/删除历史消息，此字段必须重审** |
+| `data.index.by_scene` / `.top_scenes` | **仅当存在非空 scene 时输出**，否则键不存在（未命中为剩余会话付 token，空库不增字节） |
+| 未命中文案 | 仅在 `top_scenes` 非空时追加一行「记忆里的场景分组：构建 1 条（被召回 4 次）…；可用 scene=<场景> 精确再搜。」——列出的是**库自己的词**，模型照抄即可命中（自由文本标签的换词问题靠这个缓解） |
+
+### skill 版本回显
+
+| 契约 | 说明 |
+|---|---|
+| `SkillRegistry.meta(name)` | `{name, version, status, description}`；文件不存在时返回**默认值**（v1/active/`description=None`）——「没有版本」与「版本是 1」是两句话，只有前者对不存在的 skill 为真 |
+| `_parse_version` / `_parse_status` | 只取 frontmatter 首行；`version` 是**字符串**（无 semver 比较，`1.10` 不会排到 `1.9` 之下）；`status` 白名单 `active|archived`，未知值读作 `active`，不发明第三种状态 |
+| `skill list` / `skill read` | 共用同一个 `_suffix`：`version != "1"` 才显示 `(vN)`，`archived` 再加 `[archived]` → **全部老 skill 输出逐字节不变**。`read` 成功新增 `data={name, version, status}`（此前无 `data`）。archived 仍可读，只陈述状态、不推荐替代品（那是策略，registry 保持中立） |
+| `catalog_text()` | **不动**：它进系统提示词（L1 必须逐字节静态），且 `/skills` 复用它 |

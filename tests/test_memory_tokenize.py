@@ -7,7 +7,13 @@ note share terms), keeps identifiers such as ``config/pay.yaml`` intact, and dro
 English stopwords (case 10: sharing only "the"/"file" used to inject anything).
 """
 
-from ai_coding.memory.tokenize import normalize, similarity, strip_lead, tokenize
+from ai_coding.memory.tokenize import (
+    clean_query_for_recall,
+    normalize,
+    similarity,
+    strip_lead,
+    tokenize,
+)
 
 
 def test_chinese_splits_into_bigrams():
@@ -85,3 +91,32 @@ def test_similarity_merges_synonyms_with_a_lead_in():
     """Prototype G2: this pair must clear the 0.80 merge threshold."""
     assert similarity("记住：项目用 uv 管理依赖", "项目用 uv 管理依赖") >= 0.80
     assert similarity("项目用 uv 管理依赖", "项目改用 poetry 管理依赖") < 0.80
+
+
+def test_r11a_clean_query_strips_tool_envelope():
+    """R11a: a pasted tool result must not become recall vocabulary."""
+    raw = '构建用什么\n<tool_output tool="read">\n1  hello world\n</tool_output>'
+    assert clean_query_for_recall(raw) == "构建用什么"
+
+
+def test_r11a_clean_query_strips_memory_blocks():
+    """R11a: volatile tail blocks must not leak into the next query."""
+    raw = (
+        "<memory-constraints>\n- [decision#abc] 用 uv\n</memory-constraints>\n"
+        "<working-memory>\nturn 3 done\n</working-memory>\n"
+        "<task-state>\n goal\n</task-state>\n"
+        "依赖怎么装"
+    )
+    assert clean_query_for_recall(raw) == "依赖怎么装"
+
+
+def test_r11a_clean_query_keeps_comparison_operators():
+    """R11a: the tag stripper must not eat `a < b`."""
+    assert clean_query_for_recall("a < b 怎么比") == "a < b 怎么比"
+    assert clean_query_for_recall("") == ""
+
+
+def test_r11a_clean_query_truncates_long_input():
+    """R11a: over-long queries are cut, not passed through whole."""
+    assert clean_query_for_recall("x" * 3000, max_chars=10) == "x" * 10
+    assert len(clean_query_for_recall("构建" * 2000)) == 2048

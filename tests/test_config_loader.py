@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from ai_coding.config.loader import ConfigLoader, ConfigManager
-from ai_coding.config.models import AIConfig, AppConfig
+from ai_coding.config.models import AIConfig, AppConfig, MemoryConfig
 from ai_coding.domain.model_config import ModelConfig
 
 
@@ -257,3 +257,21 @@ def test_the_ui_block_is_independent_of_the_rest():
     cfg = AppConfig.model_validate({"ui": {"steering": False}})
     assert cfg.ui.steering is False
     assert cfg.ai.subagent_context_mode == "full"
+
+
+def test_r11b_memory_recall_timeout_default_and_camel(tmp_path):
+    """R11b: the recall budget defaults to 2.0s and loads from camelCase YAML."""
+    assert MemoryConfig().recall_timeout_seconds == 2.0
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        textwrap.dedent(
+            """
+            default_model: x
+            models:
+              x: {name: x, base_url: http://a, api_key: k}
+            memory:
+              recallTimeoutSeconds: 0
+            """
+        )
+    )
+    assert ConfigLoader.load_app(str(cfg)).memory.recall_timeout_seconds == 0

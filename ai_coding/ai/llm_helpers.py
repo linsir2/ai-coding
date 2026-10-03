@@ -123,9 +123,11 @@ _EXTRACT_SYSTEM_PROMPT = (
     "若对话中给出了 <known-memory> 已知记忆（带 id），当你要写的内容是**取代**或"
     "**更新**其中某一条时，必须输出 action=supersede/update 并给出它的 target_id；"
     "内容与已知记忆重复时输出 action=noop；否则 action=add。\n"
+    "可加 scene 字段（不超过 8 个字的**话题标签**，用于把同一主题的记忆归组，"
+    "例如「依赖管理」）；能明确归组就填，不确定就省略这个字段。\n"
     "只输出一个 JSON 数组，不要寒暄、不要解释、不要代码块以外的文字。元素形如：\n"
     '[{"text": "项目用 uv 管理依赖", "kind": "decision", "importance": 5, '
-    '"action": "add"}]\n'
+    '"scene": "依赖管理", "action": "add"}]\n'
     'kind ∈ fact|decision|preference|open_thread，importance ∈ 1..5。'
     "没有可写入的新事实时输出 []。"
 )

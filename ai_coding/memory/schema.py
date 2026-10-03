@@ -22,7 +22,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from ai_coding.memory.note import NoteKind
+from ai_coding.memory.note import NoteKind, normalize_scene
 
 __all__ = ["ACTIONS", "HarvestCandidate", "parse_candidates"]
 
@@ -41,6 +41,8 @@ class HarvestCandidate:
     importance: int = 3
     action: str = "add"
     target_id: str | None = None
+    # R11c: the topic group the model named, "" when it named none.
+    scene: str = ""
 
 
 def parse_candidates(raw: str) -> list[HarvestCandidate]:
@@ -92,6 +94,7 @@ def _try_json(payload: str) -> list[HarvestCandidate] | None:
                 importance=_clamp(row.get("importance", 3)),
                 action=action,
                 target_id=str(target).strip() if target else None,
+                scene=normalize_scene(row.get("scene", "")),
             )
         )
     return candidates

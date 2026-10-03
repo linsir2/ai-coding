@@ -331,11 +331,17 @@ def _memory_report(loop: Any) -> str:
     evidence = ", ".join(
         f"{name}={count}" for name, count in sorted(stats.get("by_evidence", {}).items())
     )
+    # R11c: only when the library actually has scenes, so an unscoped workspace
+    # shows exactly what it showed before.
+    scenes = ", ".join(
+        f"{name}={count}" for name, count in sorted(stats.get("by_scene", {}).items())
+    )
     return (
         f"[memory] total={stats.get('total', 0)} active={stats.get('active', 0)} "
         f"pinned={stats.get('pinned', 0)} kinds: {kinds or '-'} "
         f"evidence: {evidence or '-'} "
-        f"enabled={stats.get('enabled')}"
+        + (f"scenes: {scenes} " if scenes else "")
+        + f"enabled={stats.get('enabled')}"
     )
 
 

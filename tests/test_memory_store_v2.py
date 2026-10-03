@@ -215,3 +215,25 @@ def test_r10b_touch_notes_writes_once_and_touches_each_note_once(tmp_path):
     assert touched == 2
     assert len(saves) == 1  # one write for four ids
     assert store.get("a").hits == 1  # not 3
+
+
+# ---- R11c: find_similar is scene-aware, and None still means "any" ---------
+
+
+def test_r11c_find_similar_respects_scene_but_none_means_all(tmp_path):
+    # Measured 0.667 similarity and different dedupe keys, so these are two
+    # rows rather than one (identical text collapses on `dedupe_key`, which is
+    # content-only by design and is why scene cannot split an exact duplicate).
+    left = "项目用 uv 管理依赖"
+    right = "项目用 uv 管理依赖，不要用 pip"
+    threshold = 0.6
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="a", text=right, scene="构建"))
+    store.add_note(MemoryNote(id="b", text=left, scene=""))
+
+    # `scene=None` is the pre-R11c behaviour: every note is a candidate.
+    assert store.find_similar(left, threshold=threshold) is not None
+    # An explicit scene is a group of its own; "" is the group of ungrouped notes.
+    assert store.find_similar(left, scene="构建", threshold=threshold).id == "a"
+    assert store.find_similar(left, scene="", threshold=threshold).id == "b"
+    assert store.find_similar(left, scene="发布", threshold=threshold) is None

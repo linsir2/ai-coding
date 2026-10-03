@@ -124,3 +124,37 @@ async def test_repl_memory_reports_status(tmp_path):
     await handle_input(loop, "/memory", session, sessions, console)  # type: ignore[arg-type]
 
     assert any("memory]" in line for line in console.lines)
+
+
+@pytest.mark.asyncio
+async def test_r11c_repl_memory_lists_scenes_when_there_are_any(tmp_path):
+    """`/memory` shows the scene map, but only when one exists — an unscoped
+    library must not grow a dangling `scenes: -` (R11c)."""
+    from ai_coding.memory.note import MemoryNote, NoteKind
+    from ai_coding.memory.service import MemoryService
+    from ai_coding.memory.store import MemoryStore
+
+    settings = _settings()
+    context = ContextManager(settings, transcripts_root=tmp_path)
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="a", text="构建用 uv", scene="构建",
+                              kind=NoteKind.DECISION))
+    store.add_note(MemoryNote(id="b", text="发布走 Actions", scene="发布"))
+    loop = AgentLoop(
+        _Engine(),
+        SessionService(tmp_path / "sessions"),
+        ToolRegistry(),
+        context=context,
+        memory=MemoryService(store),
+        settings=settings,
+        workspace=str(tmp_path),
+    )
+    sessions = loop.sessions
+    session = sessions.create()
+    console = _Console()
+
+    await handle_input(loop, "/memory", session, sessions, console)  # type: ignore[arg-type]
+
+    line = next(line for line in console.lines if "memory]" in line)
+    # Sorted like every other counter in this line (by code point).
+    assert "scenes: 发布=1, 构建=1" in line

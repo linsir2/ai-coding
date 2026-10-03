@@ -221,3 +221,27 @@ def test_status_passes_through_and_never_raises():
     stats = broken.status()
     assert stats["enabled"] is True
     assert stats["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_r11c_turn_passes_the_cursor_offset_so_refs_point_at_real_positions():
+    """`TurnMemory` owns the cursor, so it owns the absolute offset (R11c).
+
+    The service numbers refs from `source_offset`; without it every note would
+    claim to come from messages 0..N of a transcript it never saw.
+    """
+    seen: list[dict] = []
+
+    class _Recorder(_Memory):
+        async def harvest(self, delta, **kwargs):  # type: ignore[no-untyped-def]
+            seen.append(kwargs)
+            return _Report()
+
+    turn, _, _ = _memory(service=_Recorder())
+    session = _Session()
+    session.messages = ["m1", "m2", "m3", "m4"]
+    session.harvested_messages = 2
+
+    await turn.harvest(session, deadline=None, summaries=[], outcome=_outcome())
+
+    assert seen and seen[0]["source_offset"] == 2

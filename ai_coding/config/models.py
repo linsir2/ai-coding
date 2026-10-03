@@ -227,6 +227,10 @@ class MemoryConfig(BaseModel):
     # recall_relative_band to the ranker.
     recall_relative_band: float = 0.55
     recency_half_life_days: float = 14.0
+    # R11b: wall-clock budget for one recall (rank + semantic tier + probe).
+    # Over budget the hits still return but the optional `touch` write is
+    # skipped and the call is flagged; 0 or negative disables the budget.
+    recall_timeout_seconds: float = 2.0
     # Budgets for the two injection surfaces (the tail constraint block and the
     # on-demand tool answer), in characters.
     index_max_chars: int = 600
@@ -234,6 +238,11 @@ class MemoryConfig(BaseModel):
     harvest_max_messages: int = 12
     dedupe_similarity: float = 0.80
     pinned_kinds: list[str] = Field(default_factory=lambda: ["decision"])
+    # R11a: the write-side gate. `extraction_enabled=False` stops every write
+    # while recall keeps working; `extraction_extractors` (None = all) selects
+    # which write channel runs: "harvest" and/or "memory_write".
+    extraction_enabled: bool = True
+    extraction_extractors: list[str] | None = None
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
 
 

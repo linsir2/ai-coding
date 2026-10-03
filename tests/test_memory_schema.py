@@ -86,3 +86,23 @@ def test_candidate_defaults():
     assert candidate.importance == 3
     assert candidate.action == "add"
     assert candidate.target_id is None
+
+
+# ---- R11c: the extractor may name a scene, and may get it wrong ----------
+
+
+def test_r11c_parse_candidates_reads_scene():
+    raw = '[{"text": "构建用 uv", "kind": "fact", "scene": " 构建 "}]'
+    assert parse_candidates(raw)[0].scene == "构建"
+
+
+def test_r11c_parse_candidates_ignores_a_junk_scene():
+    """A model answer is untrusted input: anything unusable becomes ""."""
+    for raw in ('[{"text": "t", "scene": null}]', '[{"text": "t"}]'):
+        assert parse_candidates(raw)[0].scene == ""
+    # A number is still a label, just a useless one: coerced, never raised on.
+    assert parse_candidates('[{"text": "t", "scene": 7}]')[0].scene == "7"
+
+
+def test_r11c_line_fallback_candidates_have_no_scene():
+    assert parse_candidates("- 构建用 uv\n- 发布走 Actions")[0].scene == ""

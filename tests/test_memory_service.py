@@ -14,7 +14,13 @@ from ai_coding.domain.message import ChatMessage
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.memory.note import MemoryNote, NoteKind
 from ai_coding.memory.relevance import rank_notes_detailed
-from ai_coding.memory.service import MemoryService
+from ai_coding.memory.schema import HarvestCandidate
+from ai_coding.memory.service import (
+    HarvestReport,
+    MemoryService,
+    RecallDiagnostics,
+    is_extraction_allowed,
+)
 from ai_coding.memory.store import MemoryStore
 
 
@@ -348,3 +354,299 @@ def test_r10_only_the_notes_the_model_saw_count_as_a_use(tmp_path):
     assert [hit.note.id for hit in hits] == ["f0"]
     counts = {note.id: note.hits for note in store.active()}
     assert counts == {"f0": 1, "f1": 0, "f2": 0, "f3": 0, "f4": 0, "f5": 0}
+
+
+def test_r11a_extraction_gate_missing_config_allows_all():
+    """R11a: no config section means the historical always-on behaviour."""
+    assert is_extraction_allowed(SimpleNamespace(), "harvest") is True
+    assert is_extraction_allowed(SimpleNamespace(), "memory_write") is True
+    assert is_extraction_allowed(None, "harvest") is True
+
+
+def test_r11a_extraction_gate_disabled_denies_everything():
+    """R11a: `extraction_enabled=False` is the master kill switch."""
+    cfg = SimpleNamespace(extraction_enabled=False, extraction_extractors=["harvest"])
+    assert is_extraction_allowed(cfg, "harvest") is False
+    assert is_extraction_allowed(cfg, "memory_write") is False
+
+
+def test_r11a_extraction_gate_allowlist_filters_assets():
+    """R11a: only listed assets run; a malformed list never silently stops writes."""
+    cfg = SimpleNamespace(extraction_enabled=True, extraction_extractors=["memory_write"])
+    assert is_extraction_allowed(cfg, "harvest") is False
+    assert is_extraction_allowed(cfg, "memory_write") is True
+    assert is_extraction_allowed(SimpleNamespace(extraction_enabled=True), "harvest") is True
+    malformed = SimpleNamespace(extraction_enabled=True, extraction_extractors="harvest")
+    assert is_extraction_allowed(malformed, "harvest") is True
+
+
+@pytest.mark.asyncio
+async def test_r11a_harvest_respects_gate_leaves_index_untouched(tmp_path):
+    """R11a: a gated harvest writes nothing — not even an eviction."""
+    store = MemoryStore(tmp_path / "m.json")
+
+    async def extractor(messages, summary):
+        return ["门应该挡住这条"]
+
+    cfg = _cfg(extraction_enabled=True, extraction_extractors=["memory_write"])
+    svc = MemoryService(store, extractor=extractor, config=cfg)
+    report = await svc.harvest([_user("hello")], turn_index=1, session_id="s")
+    assert report == HarvestReport()
+    assert store.count == 0
+
+    cfg2 = _cfg(extraction_enabled=True, extraction_extractors=["harvest"])
+    svc2 = MemoryService(store, extractor=extractor, config=cfg2)
+    report2 = await svc2.harvest([_user("hello")], turn_index=1, session_id="s")
+    assert len(report2.added) == 1
+    assert store.count == 1
+
+
+def test_r11a_write_note_respects_gate(tmp_path):
+    """R11a: the model's own write channel has its own gate entry."""
+    store = MemoryStore(tmp_path / "m.json")
+    blocked = MemoryService(
+        store, config=_cfg(extraction_enabled=True, extraction_extractors=["harvest"])
+    )
+    report = blocked.write_note("模型自写", kind="fact")
+    assert report == HarvestReport()
+    assert store.count == 0
+
+    allowed = MemoryService(
+        store, config=_cfg(extraction_enabled=True, extraction_extractors=["memory_write"])
+    )
+    report2 = allowed.write_note("模型自写", kind="fact")
+    assert len(report2.added) == 1
+    assert store.count == 1
+
+
+@pytest.mark.asyncio
+async def test_r11a_recall_ignores_tool_envelope(tmp_path):
+    """R11a: an envelope pasted into the query must not change the ranking."""
+    store = MemoryStore(tmp_path / "m.json")
+    svc = MemoryService(store, config=_cfg())
+    svc.write_note("构建用 uv 管理依赖", kind="fact")
+    clean_hits, _diag = await svc.recall_with_diagnostics("构建用什么依赖", k=3)
+    assert clean_hits  # premise: the clean query really hits
+    noisy = "构建用什么依赖\n<tool_output tool=\"read\">\n1  hello world\n</tool_output>"
+    noisy_hits, noisy_diag = await svc.recall_with_diagnostics(noisy, k=3)
+    assert [hit.note.id for hit in noisy_hits] == [hit.note.id for hit in clean_hits]
+    assert noisy_diag.terms_unknown == _diag.terms_unknown
+
+
+def test_r11b_diagnostics_timed_out_defaults_false():
+    """R11b: the two new diagnostic fields default to 'never happened'."""
+    diagnostics = RecallDiagnostics()
+    assert diagnostics.timed_out is False
+    assert diagnostics.elapsed_seconds == 0.0
+
+
+@pytest.mark.asyncio
+async def test_r11b_recall_timeout_zero_disables(tmp_path):
+    """R11b: `recall_timeout_seconds=0` means no budget, never a timeout."""
+    store = MemoryStore(tmp_path / "m.json")
+    svc = MemoryService(store, config=_cfg(recall_timeout_seconds=0))
+    svc.write_note("构建用 uv 管理依赖", kind="fact")
+    hits, diagnostics = await svc.recall_with_diagnostics("构建用什么依赖", k=3)
+    assert hits
+    assert diagnostics.timed_out is False
+
+
+@pytest.mark.asyncio
+async def test_r11b_recall_marks_timed_out_and_skips_touch(tmp_path):
+    """R11b: over budget the hits still come back, but the use is not recorded.
+
+    The timeout is a post-hoc guard, not a preemption: a synchronous BM25 loop
+    has no await point to abandon, so what the budget buys is skipping the one
+    optional side effect (the whole-file `touch_notes` write).
+    """
+    store = MemoryStore(tmp_path / "m.json")
+    svc = MemoryService(store, config=_cfg(recall_timeout_seconds=1e-9))
+    svc.write_note("构建用 uv 管理依赖", kind="fact")
+    hits, diagnostics = await svc.recall_with_diagnostics("构建用什么依赖", k=3)
+    assert hits  # a timeout must never starve the model
+    assert diagnostics.timed_out is True
+    assert diagnostics.elapsed_seconds >= 0.0
+    assert [note.hits for note in store.active()] == [0]
+
+
+@pytest.mark.asyncio
+async def test_r11b_timed_out_probe_still_reports_filters(tmp_path):
+    """R11b: the filter diagnosis is computed before the budget check matters."""
+    store = MemoryStore(tmp_path / "m.json")
+    svc = MemoryService(store, config=_cfg(recall_timeout_seconds=1e-9))
+    svc.write_note("构建用 uv 管理依赖", kind="fact")
+    hits, diagnostics = await svc.recall_with_diagnostics(
+        "构建用什么依赖", k=3, kinds=["decision"]
+    )
+    assert hits == []
+    assert diagnostics.timed_out is True
+    assert diagnostics.filtered_out == 1
+
+
+# ---- R11c: source_message_ids — the window the extractor was shown -------
+
+
+@pytest.mark.asyncio
+async def test_r11c_harvest_records_refs_for_the_window_it_showed_the_extractor(tmp_path):
+    """Refs point at the messages the extractor read, not at the whole delta.
+
+    The delta starts at absolute index 5 and holds 20 messages, but only the
+    last `harvest_max_messages` (12) are handed to the extractor.  A ref for
+    every delta message would attribute a note to 8 messages it never saw — the
+    exact lie this field must not tell.
+    """
+    store = MemoryStore(tmp_path / "m.json")
+
+    async def extractor(messages, summary):
+        return ["构建用 uv 管理依赖"]
+
+    svc = MemoryService(
+        store,
+        extractor=extractor,
+        config=_cfg(harvest_max_messages=12, consolidate_threshold=1000),
+    )
+    delta = [_user(f"m{5 + i}") for i in range(20)]
+
+    report = await svc.harvest(delta, turn_index=1, session_id="s1", source_offset=5)
+
+    assert len(report.added) == 1
+    refs = store.get(report.added[0]).source_message_ids
+    assert refs == tuple(f"m{13 + i}" for i in range(12))
+
+
+@pytest.mark.asyncio
+async def test_r11c_harvest_without_an_offset_numbers_from_zero(tmp_path):
+    store = MemoryStore(tmp_path / "m.json")
+
+    async def extractor(messages, summary):
+        return ["短对话里的一条记忆"]
+
+    svc = MemoryService(store, extractor=extractor, config=_cfg(harvest_max_messages=12))
+    delta = [_user("a"), _user("b")]
+
+    report = await svc.harvest(delta, turn_index=1, session_id="s1")
+
+    assert store.get(report.added[0]).source_message_ids == ("m0", "m1")
+
+
+def test_r11c_write_note_leaves_refs_empty(tmp_path):
+    """A note the model writes now has no position in a transcript to point at."""
+    store = MemoryStore(tmp_path / "m.json")
+    svc = MemoryService(store, config=_cfg())
+
+    report = svc.write_note("模型当场写的一条", kind="decision")
+
+    assert store.get(report.added[0]).source_message_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_r11c_merge_keeps_the_winner_refs(tmp_path):
+    """A near-duplicate merge keeps the surviving note's own provenance."""
+    store = MemoryStore(tmp_path / "m.json")
+
+    async def extractor(messages, summary):
+        return ["项目用 uv 管理依赖"]
+
+    svc = MemoryService(
+        store, extractor=extractor, config=_cfg(harvest_max_messages=12,
+                                                 consolidate_threshold=1000)
+    )
+    first = await svc.harvest([_user("a")], turn_index=1, session_id="s1", source_offset=4)
+    keeper = store.get(first.added[0])
+    assert keeper.source_message_ids == ("m4",)
+
+    # Same kind, same text, no dedupe escape: `_reconcile` merges it away.
+    await svc.harvest([_user("a")], turn_index=2, session_id="s1", source_offset=9)
+
+    assert [n.source_message_ids for n in store.active()] == [("m4",)]
+
+
+# ---- R11c: scene groups merging, filtering and the index map -------------
+
+
+@pytest.mark.asyncio
+async def test_r11c_reconcile_merges_only_within_the_same_scene(tmp_path):
+    """Same kind, near-identical text, different scenes: two notes, not one."""
+    store = MemoryStore(tmp_path / "m.json")
+    long_text = "项目用 uv 管理依赖"
+    near = "项目用 uv 管理依赖，不要用 pip"
+
+    async def extractor(messages, summary):
+        return [HarvestCandidate(text=long_text, kind=NoteKind.FACT, scene="构建")]
+
+    svc = MemoryService(
+        store,
+        extractor=extractor,
+        config=_cfg(dedupe_similarity=0.6, consolidate_threshold=1000),
+    )
+    first = await svc.harvest([_user("x")], turn_index=1, session_id="s1")
+
+    async def other_extractor(messages, summary):
+        return [HarvestCandidate(text=near, kind=NoteKind.FACT, scene="发布")]
+
+    svc2 = MemoryService(
+        store,
+        extractor=other_extractor,
+        config=_cfg(dedupe_similarity=0.6, consolidate_threshold=1000),
+    )
+    second = await svc2.harvest([_user("x")], turn_index=2, session_id="s1")
+
+    assert first.added and second.added
+    assert len(store.active()) == 2
+    assert {n.scene for n in store.active()} == {"构建", "发布"}
+
+
+@pytest.mark.asyncio
+async def test_r11c_dedupe_hit_backfills_a_missing_scene(tmp_path):
+    """The common order is harvest first, label later — so a later scene sticks.
+
+    Without this, `memory_write(scene=...)` on a note the extractor had already
+    written would be silently dropped by the dedupe branch and the scene map
+    would stay empty forever.
+    """
+    store = MemoryStore(tmp_path / "m.json")
+
+    async def plain(messages, summary):
+        return [HarvestCandidate(text="项目用 uv 管理依赖", kind=NoteKind.FACT)]
+
+    svc = MemoryService(store, extractor=plain, config=_cfg(consolidate_threshold=1000))
+    first = await svc.harvest([_user("x")], turn_index=1, session_id="s1")
+    assert store.get(first.added[0]).scene == ""
+
+    svc.write_note("项目用 uv 管理依赖", kind="fact", scene="构建")
+
+    assert store.get(first.added[0]).scene == "构建"
+    assert len(store.active()) == 1
+
+
+@pytest.mark.asyncio
+async def test_r11c_candidates_filter_scene_before_ranking(tmp_path):
+    """The R10 bug, scene edition: a filter that runs after ranking returns nothing."""
+    store = MemoryStore(tmp_path / "m.json")
+    for index, scene in enumerate(("构建", "构建", "构建", "构建", "发布")):
+        store.add_note(
+            MemoryNote(id=f"n{index}", text=f"依赖管理用 uv 方式{index}", scene=scene,
+                       created_time="2026-09-25T00:00:00+00:00")
+        )
+    svc = MemoryService(store, config=_cfg())
+
+    hits, diagnostics = await svc.recall_with_diagnostics(
+        "依赖管理 uv", k=1, scene="发布"
+    )
+
+    assert [hit.note.id for hit in hits] == ["n4"]
+
+
+@pytest.mark.asyncio
+async def test_r11c_consolidate_does_not_merge_across_scenes(tmp_path):
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="a", text="项目用 uv 管理依赖", kind=NoteKind.FACT,
+                              scene="构建"))
+    store.add_note(MemoryNote(id="b", text="项目用 uv 管理依赖，不要用 pip",
+                              kind=NoteKind.FACT, scene="发布"))
+    svc = MemoryService(store, config=_cfg(dedupe_similarity=0.6))
+
+    report = await svc.consolidate(force=True)
+
+    assert report.merged == ()
+    assert len(store.active()) == 2

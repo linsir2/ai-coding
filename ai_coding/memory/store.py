@@ -260,12 +260,20 @@ class MemoryStore:
         *,
         kind: NoteKind | None = None,
         threshold: float = _DEFAULT_SIMILARITY,
+        scene: str | None = None,
     ) -> MemoryNote | None:
-        """Most similar *active* note of the same kind, if it clears ``threshold``."""
+        """Most similar *active* note of the same kind, if it clears ``threshold``.
+
+        ``scene`` groups near-duplicates further (R11c): ``None`` means "any
+        scene", which is what every caller before R11c meant, while ``""`` is the
+        group of ungrouped notes and matches only those.
+        """
         best: MemoryNote | None = None
         best_score = threshold
         for note in self.active():
             if kind is not None and note.kind is not kind:
+                continue
+            if scene is not None and note.scene != scene:
                 continue
             score = similarity(text, note.text)
             if score >= best_score and (best is None or score > best_score):

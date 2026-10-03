@@ -763,6 +763,69 @@ async def test_r10_the_gate_clause_still_fires_when_every_word_really_is_known(t
 
 
 @pytest.mark.asyncio
+async def test_r11a_search_with_envelope_query_reports_no_unknown_terms(tmp_path):
+    """R11a: envelope words must not pollute the miss/hit diagnosis.
+
+    The query carries a pasted tool result. Cleaning happens in the service,
+    so the tool path must show the same behaviour: the note still hits and
+    none of the envelope words appear in `terms_unknown`.
+    """
+    svc = _service(tmp_path, "项目用 uv 管理依赖")
+    tool = MemorySearchTool(svc)
+
+    result = await tool.execute(
+        {"query": "依赖怎么装\n<tool_output tool=\"read\">\n1  hello world\n</tool_output>"}
+    )
+
+    assert result.success is True
+    assert [note["text"] for note in result.data["notes"]] == ["项目用 uv 管理依赖"]
+    # The query's own unknown bigrams stay reported; the envelope words are gone.
+    assert "赖怎" in result.data["terms_unknown"]
+    assert set(result.data["terms_unknown"]).isdisjoint(
+        {"tool", "tool_output", "read", "hello", "world"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_r11b_search_payload_carries_timed_out_false_by_default(tmp_path):
+    """R11b: a normal search reports that no budget was exceeded."""
+    svc = _service(tmp_path, "项目用 uv 管理依赖")
+    tool = MemorySearchTool(svc)
+
+    result = await tool.execute({"query": "依赖怎么装"})
+
+    assert result.success is True
+    assert result.data["timed_out"] is False
+
+
+@pytest.mark.asyncio
+async def test_r11b_search_emits_degraded_on_timeout(tmp_path):
+    """R11b: over budget the hits still return, plus one Degraded on the turn bus."""
+    from ai_coding.core.events import Degraded
+    from ai_coding.tools.base import ToolContext
+
+    store = MemoryStore(tmp_path / "m.json")
+    svc = MemoryService(store, config=_default_config(recall_timeout_seconds=1e-9))
+    svc.write_note("构建用 uv 管理依赖", kind="fact")
+    tool = MemorySearchTool(svc)
+    events: list = []
+    ctx = ToolContext(
+        messages=(
+            ChatMessage(role="user", content="构建用什么依赖", timestamp="t"),
+        ),
+        emit=events.append,
+    )
+
+    result = await tool.execute({"query": "构建用什么依赖"}, ctx)
+
+    assert result.success is True
+    assert result.data["timed_out"] is True
+    degraded = [event for event in events if isinstance(event, Degraded)]
+    assert len(degraded) == 1
+    assert degraded[0].component == "memory_recall"
+
+
+@pytest.mark.asyncio
 async def test_r10_a_vocabulary_miss_does_not_claim_the_content_is_absent(tmp_path):
     """Critical 2: the clause asserted a fact about *content* from a measurement
     about *tokens*, one line above telling the model to rephrase.
@@ -795,3 +858,102 @@ async def test_r10_a_vocabulary_miss_does_not_claim_the_content_is_absent(tmp_pa
     # And rephrasing stays available, which is what made the old clause a
     # self-contradiction: it denied the fix the next line proposed.
     assert "换一个说法" in result.output
+
+
+@pytest.mark.asyncio
+async def test_r11c_search_payload_always_carries_source_refs(tmp_path):
+    """`source_refs` is unconditional: a shaped key that never appears and
+    disappears is harder to consume than an empty list (R11c)."""
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="a", text="构建用 uv 管理依赖",
+                              source_message_ids=("m7", "m9")))
+    store.add_note(MemoryNote(id="b", text="发布走 GitHub Actions"))
+    tool = MemorySearchTool(MemoryService(store))
+
+    result = await tool.execute({"query": "构建 uv"})
+
+    assert result.success is True
+    payloads = {note["id"]: note["source_refs"] for note in result.data["notes"]}
+    assert payloads["a"] == ["m7", "m9"]
+    assert all(isinstance(refs, list) for refs in payloads.values())
+
+
+# ---- R11c: the scene map in the miss payload ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_r11c_miss_index_carries_a_bounded_scene_map(tmp_path):
+    """Six scenes in, five out — and ordered by how often they were recalled."""
+    store = MemoryStore(tmp_path / "m.json")
+    heat = {"s0": 9, "s1": 7, "s2": 5, "s3": 4, "s4": 3, "s5": 1}
+    for scene, hits in heat.items():
+        store.add_note(
+            MemoryNote(id=scene, text=f"记忆内容 {scene}", scene=scene, hits=hits)
+        )
+    tool = MemorySearchTool(MemoryService(store))
+
+    result = await tool.execute({"query": "怎么构建"})
+
+    assert result.data["no_match"] is True
+    index = result.data["index"]
+    assert index["by_scene"] == dict.fromkeys(heat, 1)
+    assert [row[0] for row in index["top_scenes"]] == ["s0", "s1", "s2", "s3", "s4"]
+    assert index["top_scenes"][0] == ["s0", 1, 9]  # (scene, count, heat)
+
+
+@pytest.mark.asyncio
+async def test_r11c_an_unscoped_library_output_is_unchanged(tmp_path):
+    """No scenes anywhere: no new keys, no new sentence in the miss text."""
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="a", text="项目用 uv 管理依赖"))
+    tool = MemorySearchTool(MemoryService(store))
+
+    result = await tool.execute({"query": "怎么构建"})
+
+    index = result.data["index"]
+    assert "by_scene" not in index and "top_scenes" not in index
+    assert "场景" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_r11c_search_filters_by_scene(tmp_path):
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="a", text="构建用 uv 管理依赖", scene="构建"))
+    store.add_note(MemoryNote(id="b", text="构建用 uv 管理依赖方案", scene="发布"))
+    tool = MemorySearchTool(MemoryService(store))
+
+    result = await tool.execute({"query": "构建 uv", "scene": "发布"})
+
+    assert [note["id"] for note in result.data["notes"]] == ["b"]
+
+
+@pytest.mark.asyncio
+async def test_r11c_miss_text_names_the_scenes_it_measured(tmp_path):
+    """Every clause in the miss text must be one we measured (R10 discipline)."""
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="s0", text="构建流程用 uv", scene="构建", hits=4))
+    store.add_note(MemoryNote(id="s1", text="发布走 Actions", scene="发布"))
+    tool = MemorySearchTool(MemoryService(store))
+
+    result = await tool.execute({"query": "怎么部署到预发"})
+
+    assert "记忆里的场景分组" in result.output
+    assert "构建 1 条（被召回 4 次）" in result.output
+    assert "发布 1 条（被召回 0 次）" in result.output
+    assert "scene=" in result.output
+
+
+@pytest.mark.asyncio
+async def test_r11c_write_tool_accepts_a_scene(tmp_path):
+    """The model's own write channel labels notes too, or half the library is
+    ungrouped forever (the extractor only sees turns it happened to witness)."""
+    from ai_coding.tools.memory_write_tool import MemoryWriteTool
+
+    store = MemoryStore(tmp_path / "m.json")
+    tool = MemoryWriteTool(MemoryService(store))
+
+    result = await tool.execute({"text": "构建统一用 uv", "kind": "decision",
+                                 "scene": "构建"})
+
+    assert result.success is True
+    assert store.get(result.data["note_id"]).scene == "构建"

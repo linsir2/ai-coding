@@ -117,6 +117,9 @@ class TurnMemory:
                     session_id=session.session_id,
                     summary=summary,
                     evidence=evidence,
+                    # R11c: where this delta starts in the transcript, so a note
+                    # written from it can point back at the messages it came from.
+                    source_offset=start,
                 ),
                 timeout=remaining_of(deadline),
                 label="memory_harvest",

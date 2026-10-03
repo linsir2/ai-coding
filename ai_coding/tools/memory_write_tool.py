@@ -72,6 +72,15 @@ class MemoryWriteTool(BaseTool):
                     "type": "string",
                     "description": "Optional id of an existing note this replaces.",
                 },
+                "scene": {
+                    "type": "string",
+                    "description": (
+                        "Optional short topic label (max 80 characters) grouping "
+                        "this note with related ones, e.g. '依赖管理'. Use the same "
+                        "wording memory already uses — a search that misses lists "
+                        "the labels in index.top_scenes."
+                    ),
+                },
             },
             "required": ["text"],
         }
@@ -104,6 +113,7 @@ class MemoryWriteTool(BaseTool):
                 supersedes=str(params.get("supersedes", "") or "").strip(),
                 turn=context.turn,
                 session_id=context.session_id,
+                scene=str(params.get("scene", "") or ""),
             )
         except Exception as exc:  # noqa: BLE001 - a memory write is never fatal
             return ToolResult(

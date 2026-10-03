@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ai_coding.core.events import Degraded
 from ai_coding.domain.message import ToolResult
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
@@ -95,6 +96,15 @@ class MemorySearchTool(BaseTool):
                         "updated since)."
                     ),
                 },
+                "scene": {
+                    "type": "string",
+                    "description": (
+                        "Optional: only notes in this topic group, matched exactly. "
+                        "The groups are short free-text labels the extractor wrote "
+                        "(e.g. '依赖管理'); when a search misses, `index.top_scenes` "
+                        "lists the labels this memory actually uses."
+                    ),
+                },
             },
             "required": ["query"],
         }
@@ -132,6 +142,7 @@ class MemorySearchTool(BaseTool):
             "evidence": wanted_evidence or None,
             "scope": wanted_scope or None,
             "since_days": _optional_positive_int(params.get("since_days")),
+            "scene": str(params.get("scene", "") or "").strip() or None,
         }
         try:
             detailed = getattr(self._memory, "recall_with_diagnostics", None)
@@ -163,7 +174,27 @@ class MemorySearchTool(BaseTool):
             "terms_known": list(diagnostics.terms_known),
             "terms_unknown": list(diagnostics.terms_unknown),
             "semantic_unavailable": bool(diagnostics.semantic_unavailable),
+            # R11b: getattr, because a pre-R10c double has no such field and
+            # inventing a timeout for it would be exactly what this text must
+            # not do (same duck-typing discipline as `_filtered_out` below).
+            "timed_out": bool(getattr(diagnostics, "timed_out", False)),
         }
+        if data["timed_out"]:
+            # The hits still come back (a timeout must never starve the model);
+            # what was skipped is the optional `touch` write, and that skip is
+            # what this event records.  Best-effort: observation never breaks
+            # the tool, and a context built outside the loop just no-ops.
+            try:
+                elapsed = float(getattr(diagnostics, "elapsed_seconds", 0.0))
+                resolve_ctx(ctx).emit(
+                    Degraded(
+                        component="memory_recall",
+                        reason=f"recall exceeded its time budget after {elapsed:.2f}s",
+                        fallback=(f"returned {len(notes)} hit(s) without recording use"),
+                    )
+                )
+            except Exception:  # noqa: BLE001 — observation never breaks the tool
+                pass
         if ship_near_misses:
             data["near_misses"] = [
                 {
@@ -191,6 +222,13 @@ class MemorySearchTool(BaseTool):
                         for note_id, kind, preview in summary.recent
                     ],
                 }
+                # R11c: the scene map is omitted entirely for a library that has
+                # none, so an unscoped workspace pays nothing for this feature.
+                if summary.by_scene:
+                    data["index"]["by_scene"] = dict(summary.by_scene)
+                    data["index"]["top_scenes"] = [
+                        [scene, count, heat] for scene, count, heat in summary.top_scenes
+                    ]
             return ToolResult(
                 success=True,
                 output=_miss_text(
@@ -222,6 +260,10 @@ def _note_payload(hit: Any) -> dict[str, Any]:
         "updated_time": hit.note.updated_time or hit.note.created_time,
         "pinned": hit.note.pinned,
         "evidence": hit.note.evidence,
+        # R11c: positions in `sessions/<source_session>.json`, always present as a
+        # list so the payload shape does not depend on whether this note had a
+        # transcript to point at.
+        "source_refs": list(hit.note.source_message_ids),
     }
 
 
@@ -269,6 +311,15 @@ def _miss_text(
             f"#{item['id'][:8]}({item['kind']}) {item['preview']}" for item in near[:3]
         )
         lines.append(f"最接近但未经证实：{preview}")
+    scenes = (index or {}).get("top_scenes") or []
+    if scenes:
+        # The labels are the library's own words, which is the point: a model
+        # that guessed a scene name can copy one of these verbatim instead of
+        # inventing a second spelling for the same group.
+        listed = "、".join(
+            f"{scene} {count} 条（被召回 {heat} 次）" for scene, count, heat in scenes[:5]
+        )
+        lines.append(f"记忆里的场景分组：{listed}；可用 scene=<场景> 精确再搜。")
     if filtered_out:
         # Saying "rephrase, or narrow by kind" here would be telling the model to
         # repeat the filter it just used, and blaming kind/evidence for a scope

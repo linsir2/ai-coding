@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_coding.domain.message import ToolResult
+from ai_coding.skills.registry import DEFAULT_VERSION, _parse_status, _parse_version
 from ai_coding.tools.base import BaseTool, ToolContext
 
 
@@ -60,6 +61,34 @@ class SkillTool(BaseTool):
                 names.append(entry.name)
         return names
 
+    def _meta(self, name: str) -> dict[str, str | None]:
+        """Frontmatter metadata for one skill (R11c).
+
+        Reads the file the tool already needs, rather than depending on
+        ``SkillRegistry`` and a second directory walk.  A skill whose file cannot
+        be read reports the same defaults ``SkillRegistry.meta`` does.
+        """
+        path = self._skill_dir / name / "SKILL.md"
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return {"version": DEFAULT_VERSION, "status": "active"}
+        return {"version": _parse_version(text), "status": _parse_status(text)}
+
+    @staticmethod
+    def _suffix(meta: dict[str, str | None]) -> str:
+        """The list/read marker: only what differs from the default is shown.
+
+        A v1 active skill keeps its exact pre-R11c line, so an unversioned
+        directory of skills does not suddenly sprout noise.
+        """
+        out = ""
+        if meta["version"] != DEFAULT_VERSION:
+            out += f" (v{meta['version']})"
+        if meta["status"] != "active":
+            out += " [archived]"
+        return out
+
     # Read-only: safe to run alongside sibling calls in the same message.
     parallel_safe = True
 
@@ -72,7 +101,7 @@ class SkillTool(BaseTool):
             names = self.list_skills()
             if not names:
                 return ToolResult(success=True, output="(no skills available)")
-            lines = [f"  - {n}" for n in names]
+            lines = [f"  - {n}{self._suffix(self._meta(n))}" for n in names]
             return ToolResult(
                 success=True,
                 output="Available skills:\n" + "\n".join(lines),
@@ -95,7 +124,15 @@ class SkillTool(BaseTool):
                 content = skill_path.read_text(encoding="utf-8")
             except OSError as exc:
                 return ToolResult(success=False, output=f"read error: {exc}")
-            return ToolResult(success=True, output=f"# Skill: {name}\n\n{content}")
+            meta = self._meta(name)
+            # An archived skill still reads: refusing would be a policy, and this
+            # tool has no gate.  It only says what it is (R11c) — it does not
+            # recommend a replacement, because we cannot know one.
+            return ToolResult(
+                success=True,
+                output=f"# Skill: {name}{self._suffix(meta)}\n\n{content}",
+                data={"name": name, "version": meta["version"], "status": meta["status"]},
+            )
 
         return ToolResult(
             success=False,

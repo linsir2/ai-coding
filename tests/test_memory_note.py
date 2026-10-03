@@ -105,3 +105,50 @@ def test_touch_counts_hits():
     assert touched.hits == 1
     assert touched.last_used == "2026-09-23T00:00:00Z"
     assert note.hits == 0  # frozen value object
+
+
+# ---- R11c: source_message_ids — position references into the session file ---
+
+
+def test_r11c_source_refs_round_trip():
+    note = new_note("构建用 uv", source_session="s1", source_turn=2,
+                    source_message_ids=("m13", "m14"))
+    again = MemoryNote.from_dict(note.to_dict())
+    assert again.source_message_ids == ("m13", "m14")
+    assert again == note
+
+
+def test_r11c_source_refs_default_empty_and_omitted_from_json():
+    note = new_note("构建用 uv")
+    assert note.source_message_ids == ()
+    assert "source_message_ids" not in note.to_dict()
+
+
+def test_r11c_source_refs_ignore_a_non_sequence():
+    """Old rows have no such key, and a hand-edited file must not crash the load."""
+    assert MemoryNote.from_dict({"id": "a", "text": "t"}).source_message_ids == ()
+    note = MemoryNote.from_dict({"id": "a", "text": "t", "source_message_ids": "m3"})
+    assert note.source_message_ids == ()
+
+
+# ---- R11c: scene — the topic group a note belongs to -----------------------
+
+
+def test_r11c_scene_defaults_empty_and_is_omitted_from_json():
+    note = new_note("构建用 uv")
+    assert note.scene == ""
+    assert "scene" not in note.to_dict()
+
+
+def test_r11c_scene_round_trip():
+    note = new_note("构建用 uv", scene="构建")
+    assert MemoryNote.from_dict(note.to_dict()) == note
+    assert MemoryNote.from_dict(note.to_dict()).scene == "构建"
+
+
+def test_r11c_scene_is_normalised_and_bounded():
+    assert new_note("x", scene="  构建  ").scene == "构建"
+    assert len(new_note("x", scene="构" * 200).scene) == 80
+    # A non-string is coerced, never raised on: this comes from a model answer.
+    assert new_note("x", scene=123).scene == "123"
+    assert new_note("x", scene=None).scene == ""

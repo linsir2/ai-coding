@@ -34,15 +34,16 @@ chatter.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
 from ai_coding.domain.message import ChatMessage
 from ai_coding.memory.embeddings import EmbeddingIndex, EmbeddingsUnsupportedError
-from ai_coding.memory.note import MemoryNote, NoteKind, new_note
+from ai_coding.memory.note import MemoryNote, NoteKind, new_note, normalize_scene
 from ai_coding.memory.relevance import (
     RecallParams,
     ScoredNote,
@@ -51,7 +52,7 @@ from ai_coding.memory.relevance import (
 )
 from ai_coding.memory.schema import HarvestCandidate
 from ai_coding.memory.store import MemoryStore
-from ai_coding.memory.tokenize import similarity
+from ai_coding.memory.tokenize import clean_query_for_recall, similarity
 
 Extractor = Callable[
     [Sequence[ChatMessage], str | None],
@@ -65,6 +66,7 @@ __all__ = [
     "MemoryService",
     "RecallDiagnostics",
     "asyncio_guard",
+    "is_extraction_allowed",
 ]
 
 _PROMOTE_HITS = 3
@@ -90,6 +92,9 @@ def _default_config(**overrides: Any) -> SimpleNamespace:
         "recall_min_relevance": 0.25,
         "recall_relative_band": 0.55,
         "recency_half_life_days": 14.0,
+        "recall_timeout_seconds": 2.0,
+        "extraction_enabled": True,
+        "extraction_extractors": None,
         "index_max_chars": 600,
         "detail_max_chars": 1200,
         "harvest_max_messages": 12,
@@ -122,6 +127,16 @@ class IndexSummary:
     active: int = 0
     by_kind: Mapping[str, int] = field(default_factory=dict)
     recent: tuple[tuple[str, str, str], ...] = ()   # (id, kind, preview)
+    # R11c: the same map one dimension over.  ``by_scene`` counts notes per
+    # scene (ungrouped notes are not counted — "" is not a scene), and
+    # ``top_scenes`` is the navigation line: ``(scene, count, heat)`` where heat
+    # is the summed ``hits``, i.e. how often recall actually landed there.
+    by_scene: Mapping[str, int] = field(default_factory=dict)
+    top_scenes: tuple[tuple[str, int, int], ...] = ()
+
+    #: How many scenes the miss payload may name.  A failed search must not
+    #: hand the whole taxonomy back; five is enough to aim the next query.
+    TOP_SCENES = 5
 
 
 @dataclass(frozen=True)
@@ -145,6 +160,11 @@ class RecallDiagnostics:
     semantic_unavailable: bool = False
     no_vocabulary_match: bool = False
     filtered_out: int = 0
+    # R11b: the recall budget.  `timed_out` means the ranking took longer than
+    # `recall_timeout_seconds`, so the hits came back but the optional `touch`
+    # write was skipped; `elapsed_seconds` is the measured rank time.
+    timed_out: bool = False
+    elapsed_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -171,6 +191,25 @@ def _collect_recent_signal(messages: Sequence[ChatMessage]) -> list[str]:
         if body:
             lines.append(body)
     return lines[-8:]
+
+
+def is_extraction_allowed(config: Any, asset: str) -> bool:
+    """The single semantic gate for the write side (R11a).
+
+    ``asset`` is ``"harvest"`` (turn-end reconciliation) or ``"memory_write"``
+    (the model's own write channel).  Missing or malformed configuration falls
+    back to the historical always-on behaviour, so a partial yaml never
+    silently disables writes; only an explicit opt-out does.
+    """
+    if getattr(config, "extraction_enabled", None) is False:
+        return False
+    extractors = getattr(config, "extraction_extractors", None)
+    if extractors is None:
+        return True
+    if not isinstance(extractors, (list, tuple)):
+        return True
+    wanted = {str(item).strip().casefold() for item in extractors}
+    return str(asset).strip().casefold() in wanted
 
 
 class MemoryService:
@@ -214,12 +253,24 @@ class MemoryService:
         search must not return the whole index back into the context."""
         notes = self._store.active()
         by_kind: dict[str, int] = {}
+        by_scene: dict[str, int] = {}
+        heat: dict[str, int] = {}
         for note in notes:
             by_kind[note.kind.value] = by_kind.get(note.kind.value, 0) + 1
+            if note.scene:
+                by_scene[note.scene] = by_scene.get(note.scene, 0) + 1
+                heat[note.scene] = heat.get(note.scene, 0) + note.hits
         newest = sorted(
             notes,
             key=lambda note: (_invert_time(note.updated_time or note.created_time), note.id),
         )[: self._INDEX_RECENT]
+        # Busiest scenes first, name as the tie-break so two runs agree.
+        top_scenes = tuple(
+            (scene, by_scene[scene], heat[scene])
+            for scene in sorted(heat, key=lambda name: (-heat[name], name))[
+                : IndexSummary.TOP_SCENES
+            ]
+        )
         return IndexSummary(
             active=len(notes),
             by_kind=by_kind,
@@ -227,6 +278,8 @@ class MemoryService:
                 (note.id, note.kind.value, note.text[: self._PREVIEW_CHARS])
                 for note in newest
             ),
+            by_scene=by_scene,
+            top_scenes=top_scenes,
         )
 
     def _candidates(
@@ -237,6 +290,7 @@ class MemoryService:
         scope: str | None,
         since_days: int | None,
         now: datetime,
+        scene: str | None = None,
     ) -> list[MemoryNote]:
         """The set a query is allowed to match, decided before anything is scored.
 
@@ -279,6 +333,11 @@ class MemoryService:
                 continue
             if scope is not None and note.scope != scope:
                 continue
+            if scene is not None and note.scene != scene:
+                # R11c: exact match, like `scope`. The labels are free text the
+                # model wrote, so a scene it guesses wrong matches nothing — and
+                # `filtered_out` is what tells the model which filter did it.
+                continue
             if cutoff is not None:
                 stamp = parse_time(note.updated_time or note.created_time)
                 if stamp is None or stamp < cutoff:
@@ -320,6 +379,7 @@ class MemoryService:
         evidence: str | None = None,
         scope: str | None = None,
         since_days: int | None = None,
+        scene: str | None = None,
     ) -> tuple[list[ScoredNote], RecallDiagnostics]:
         """Rank, and also report why — so a caller can say what to try next.
 
@@ -337,12 +397,14 @@ class MemoryService:
         moment = now or _now()
         ceiling = supply if limit is None else limit
         try:
+            started = time.monotonic()
             candidates = self._candidates(
                 kinds=kinds,
                 evidence=evidence,
                 scope=scope,
                 since_days=since_days,
                 now=moment,
+                scene=scene,
             )
             semantic, unavailable = await self._semantic_scores(query, candidates)
             result = rank_notes_detailed(
@@ -355,7 +417,7 @@ class MemoryService:
             )
             hits = list(result.kept)
             filtered_out = 0
-            if not hits and any((kinds, evidence, scope, since_days)):
+            if not hits and any((kinds, evidence, scope, since_days, scene)):
                 # `hits` is bound and empty, so the only question left is *which
                 # measurement to report*.  The filtered ranking cannot answer it: a
                 # filter that empties the candidate set leaves the ranking with no
@@ -390,9 +452,15 @@ class MemoryService:
                 # `terms_unknown` both empty, `no_vocabulary_match` False), and
                 # those are exactly the cases the diagnosis exists for.
                 result, filtered_out = probe, len(probe.kept)
+            elapsed = time.monotonic() - started
         except Exception:  # noqa: BLE001 — recall is best-effort
             return [], RecallDiagnostics()
-        if hits:
+        try:
+            timeout = float(self._get("recall_timeout_seconds", 2.0) or 0.0)
+        except (TypeError, ValueError):
+            timeout = 0.0  # unparseable config means no budget, never a failure
+        timed_out = bool(timeout > 0.0 and elapsed > timeout)
+        if hits and not timed_out:
             try:
                 self._store.touch_notes([hit.note.id for hit in hits])
             except Exception:  # noqa: BLE001
@@ -405,6 +473,8 @@ class MemoryService:
             no_vocabulary_match=result.no_vocabulary_match,
             filtered_out=filtered_out,
             semantic_unavailable=unavailable,
+            timed_out=timed_out,
+            elapsed_seconds=elapsed,
         )
 
     async def recall_notes(
@@ -418,6 +488,7 @@ class MemoryService:
         evidence: str | None = None,
         scope: str | None = None,
         since_days: int | None = None,
+        scene: str | None = None,
     ) -> list[ScoredNote]:
         """Rank memories for a query (or a message history); [] when disabled.
 
@@ -433,6 +504,7 @@ class MemoryService:
             evidence=evidence,
             scope=scope,
             since_days=since_days,
+            scene=scene,
         )
         return hits
 
@@ -504,15 +576,30 @@ class MemoryService:
         summary: str | None = None,
         now: datetime | None = None,
         evidence: str = "",
+        source_offset: int = 0,
     ) -> HarvestReport:
-        """Reconcile this turn's delta into the index (never raises)."""
+        """Reconcile this turn's delta into the index (never raises).
+
+        ``source_offset`` is the index of ``messages[0]`` in the session's
+        transcript, so the notes this call writes can point back at the exact
+        messages they came from (R11c).
+        """
         if not self.enabled:
             return HarvestReport()  # disabled means hands off, readers included
+        if not is_extraction_allowed(self._config, "harvest"):
+            return HarvestReport()  # gated off: leave the index untouched
         if not bool(self._get("auto_extract", True)) or self._extractor is None:
             # Nothing to extract, but the index cap is a store invariant.
             evicted = self._store.evict(int(self._get("max_index_entries", 200)))
             return HarvestReport(evicted=tuple(evicted))
         batch = list(messages)[-int(self._get("harvest_max_messages", 12)) :]
+        # R11c: the positions this batch occupies in the session file.  Computed
+        # from `batch` itself, *before* the synthetic hint/summary messages are
+        # appended, so a ref can only name a message the extractor really read:
+        # `source_offset` is where the caller's delta begins, and only the last
+        # `harvest_max_messages` of it are shown.
+        window_start = int(source_offset) + max(0, len(messages) - len(batch))
+        refs = tuple(f"m{window_start + i}" for i in range(len(batch)))
         hint = self._known_memory_hint(batch)
         if hint:
             batch.append(ChatMessage(role="system", content=hint, timestamp=""))
@@ -537,6 +624,7 @@ class MemoryService:
             session_id=session_id,
             now=now,
             evidence=evidence,
+            source_refs=refs,
         )
 
     def write_note(
@@ -548,6 +636,7 @@ class MemoryService:
         supersedes: str = "",
         turn: int = 0,
         session_id: str = "",
+        scene: str = "",
     ) -> HarvestReport:
         """Write one memory the model asked for, through the same door as harvest (R7e-1).
 
@@ -560,6 +649,8 @@ class MemoryService:
         body = str(text or "").strip()
         if not self.enabled or not body:
             return HarvestReport()
+        if not is_extraction_allowed(self._config, "memory_write"):
+            return HarvestReport()
         target = str(supersedes or "").strip()
         candidate = HarvestCandidate(
             text=body,
@@ -567,6 +658,7 @@ class MemoryService:
             importance=max(1, min(5, int(importance))),
             action="supersede" if target else "add",
             target_id=target or None,
+            scene=normalize_scene(scene),
         )
         return self._reconcile(
             [candidate],
@@ -582,7 +674,7 @@ class MemoryService:
         Without it a model cannot name a ``target_id``, so a contradiction such as
         "we moved from uv to poetry" (case 4) could only ever be added alongside.
         """
-        query = " ".join(_collect_recent_signal(batch))
+        query = clean_query_for_recall(" ".join(_collect_recent_signal(batch)))
         if not query.strip():
             return ""
         try:
@@ -608,6 +700,7 @@ class MemoryService:
         session_id: str,
         now: datetime | None,
         evidence: str = "",
+        source_refs: Sequence[str] = (),
     ) -> HarvestReport:
         added: list[str] = []
         updated: list[str] = []
@@ -625,6 +718,8 @@ class MemoryService:
                 source_session=session_id,
                 source_turn=turn_index,
                 evidence=evidence,
+                source_message_ids=source_refs,
+                scene=candidate.scene,
             )
             if candidate.action == "noop":
                 skipped.append(note.id)
@@ -644,10 +739,16 @@ class MemoryService:
                     continue
             existing = self._store.find_by_dedupe(note.dedupe_key)
             if existing is not None:
+                # R11c: same content, so this is the *same* fact — but it may be
+                # the first time anyone named its scene (harvest first, label
+                # later). Backfilling is what keeps the scene map from staying
+                # empty in exactly that, the most common, order.
+                if note.scene and not existing.scene:
+                    self._store.update(replace(existing, scene=note.scene))
                 skipped.append(existing.id)
                 continue
             similar = self._store.find_similar(
-                text, kind=note.kind, threshold=threshold
+                text, kind=note.kind, scene=note.scene, threshold=threshold
             )
             if similar is not None:
                 merged = MemoryNote.from_dict(
@@ -694,6 +795,12 @@ class MemoryService:
             for other in active[index + 1 :]:
                 if other.id in retired or other.kind is not note.kind:
                     continue
+                # R11c: scenes are separate groups.  Merging "the uv decision we
+                # made for the build" into "the uv decision we made for the
+                # release" would lose exactly the qualifier that makes either
+                # note worth keeping.
+                if other.scene != note.scene:
+                    continue
                 if similarity(note.text, other.text) < similarity_threshold:
                     continue
                 keep, drop = _better_of(note, other)
@@ -724,10 +831,13 @@ class MemoryService:
         notes = self._store.all()
         by_kind: dict[str, int] = {}
         by_evidence: dict[str, int] = {}
+        by_scene: dict[str, int] = {}
         for note in notes:
             by_kind[note.kind.value] = by_kind.get(note.kind.value, 0) + 1
             key = note.evidence or "unknown"
             by_evidence[key] = by_evidence.get(key, 0) + 1
+            if note.scene:
+                by_scene[note.scene] = by_scene.get(note.scene, 0) + 1
         return {
             "total": len(notes),
             "active": len([note for note in notes if note.is_active]),
@@ -736,6 +846,8 @@ class MemoryService:
             # R6d: provenance, so /memory and the trace can say where memories came
             # from instead of only how many there are (docs/r6-analysis.md 2.4).
             "by_evidence": by_evidence,
+            # R11c: the same for scenes; "" is not a scene and is not counted.
+            "by_scene": by_scene,
             "enabled": self.enabled,
         }
 
@@ -819,8 +931,8 @@ def _as_candidate(item: Any) -> HarvestCandidate | None:
 
 def _query_text(source: str | Sequence[ChatMessage]) -> str:
     if isinstance(source, str):
-        return source
-    return "\n".join(_collect_recent_signal(source))
+        return clean_query_for_recall(source)
+    return clean_query_for_recall("\n".join(_collect_recent_signal(source)))
 
 
 def _better_of(left: MemoryNote, right: MemoryNote) -> tuple[MemoryNote, MemoryNote]:

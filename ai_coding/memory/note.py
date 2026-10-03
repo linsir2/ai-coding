@@ -18,6 +18,7 @@ from __future__ import annotations
 import enum
 import hashlib
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -28,6 +29,29 @@ __all__ = ["DEFAULT_SCOPE", "MemoryNote", "NoteKind", "new_note"]
 
 DEFAULT_SCOPE = "workspace"
 _MIN_IMPORTANCE, _MAX_IMPORTANCE = 1, 5
+#: A scene label is a short topic the model wrote; 80 characters is far past any
+#: sensible label and keeps a runaway answer from bloating every row.
+_MAX_SCENE_CHARS = 80
+
+
+def normalize_scene(value: Any) -> str:
+    """One scene label, coerced and bounded.
+
+    The extractor is a model, so this accepts whatever came back and never
+    raises: a non-string is stringified, whitespace stripped, and anything longer
+    than :data:`_MAX_SCENE_CHARS` cut.  Empty means "no scene" — the value every
+    note written before R11c has, and the value a note the model wrote without
+    one keeps.
+    """
+    text = value if isinstance(value, str) else ("" if value is None else str(value))
+    return text.strip()[:_MAX_SCENE_CHARS]
+
+
+def _refs(raw: Any) -> tuple[str, ...]:
+    """Coerce a reference list, tolerating anything a hand-edited file holds."""
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(str(item).strip() for item in raw if str(item).strip())
 
 
 class NoteKind(str, enum.Enum):
@@ -56,6 +80,11 @@ class MemoryNote:
     text: str
     kind: NoteKind = NoteKind.FACT
     scope: str = DEFAULT_SCOPE
+    # R11c: the topic group this note belongs to (free text the extractor wrote,
+    # e.g. 「依赖管理」).  It is a *grouping and filtering* key only — it is not
+    # part of ``dedupe_key``, so two notes with identical text still collapse,
+    # and it carries no weight in scoring.  "" means ungrouped.
+    scene: str = ""
     importance: int = 3
     created_time: str = ""
     updated_time: str = ""
@@ -67,6 +96,13 @@ class MemoryNote:
     last_used: str = ""
     pinned: bool = False
     keywords: tuple[str, ...] = ()
+    # R11c: where this note came from inside the transcript, as **positions**.
+    # ``ChatMessage`` carries no id, so a reference is ``m<index>`` into
+    # ``sessions/{id}.json``'s ``messages`` — which is stable because messages
+    # are only ever appended (compaction works on copies). ``source_session``
+    # already names the file.  Empty means "no position to point at": a note the
+    # model wrote this turn, or one from before this field existed.
+    source_message_ids: tuple[str, ...] = ()
     # R6d: where the memory came from — "tool" (a tool call in that turn succeeded)
     # or "model" (the turn only talked).  Provenance for observation and for a UI
     # that wants to show it; deliberately *not* a filter, because the user's own
@@ -82,6 +118,7 @@ class MemoryNote:
         object.__setattr__(self, "text", str(self.text).strip())
         object.__setattr__(self, "kind", NoteKind.parse(self.kind))
         object.__setattr__(self, "scope", str(self.scope or DEFAULT_SCOPE))
+        object.__setattr__(self, "scene", normalize_scene(self.scene))
         object.__setattr__(
             self,
             "importance",
@@ -133,8 +170,12 @@ class MemoryNote:
             data["supersedes"] = self.supersedes
         if self.superseded_by:
             data["superseded_by"] = self.superseded_by
+        if self.scene:
+            data["scene"] = self.scene
         if self.keywords:
             data["keywords"] = list(self.keywords)
+        if self.source_message_ids:
+            data["source_message_ids"] = list(self.source_message_ids)
         if self.evidence:
             data["evidence"] = self.evidence
         return data
@@ -157,6 +198,7 @@ class MemoryNote:
             text=text,
             kind=NoteKind.parse(data.get("kind", NoteKind.FACT.value)),
             scope=str(data.get("scope", DEFAULT_SCOPE) or DEFAULT_SCOPE),
+            scene=normalize_scene(data.get("scene", "")),
             importance=int(data.get("importance", 3) or 3),
             created_time=str(data.get("created_time", "") or ""),
             updated_time=str(data.get("updated_time", "") or ""),
@@ -168,6 +210,7 @@ class MemoryNote:
             last_used=str(data.get("last_used", "") or ""),
             pinned=bool(data.get("pinned", False)),
             keywords=keywords,
+            source_message_ids=_refs(data.get("source_message_ids")),
             evidence=str(data.get("evidence", "") or ""),
         )
 
@@ -178,12 +221,14 @@ def new_note(
     kind: NoteKind | str = NoteKind.FACT,
     importance: int = 3,
     scope: str = DEFAULT_SCOPE,
+    scene: str = "",
     source_session: str = "",
     source_turn: int = 0,
     pinned: bool = False,
     evidence: str = "",
     note_id: str | None = None,
     when: str | None = None,
+    source_message_ids: Sequence[str] = (),
 ) -> MemoryNote:
     """Create a fresh note with an id and timestamps filled in."""
     stamp = when or now_utc()
@@ -192,6 +237,7 @@ def new_note(
         text=text,
         kind=NoteKind.parse(kind),
         scope=scope,
+        scene=scene,
         importance=importance,
         created_time=stamp,
         updated_time=stamp,
@@ -199,4 +245,5 @@ def new_note(
         source_turn=source_turn,
         pinned=pinned,
         evidence=evidence,
+        source_message_ids=_refs(source_message_ids),
     )

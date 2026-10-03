@@ -20,7 +20,14 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["STOPWORDS", "normalize", "similarity", "strip_lead", "tokenize"]
+__all__ = [
+    "STOPWORDS",
+    "clean_query_for_recall",
+    "normalize",
+    "similarity",
+    "strip_lead",
+    "tokenize",
+]
 
 STOPWORDS: frozenset[str] = frozenset(
     """
@@ -53,6 +60,34 @@ _LEAD = re.compile(
     r"(?:请?记住|请?注意|备忘|提示|note|todo|remember|[-*·•])\s*[:：]?\s*",
     re.IGNORECASE,
 )
+
+# R11a: envelopes a recall query may carry (pasted tool results, volatile tail
+# blocks that leaked into the next question).  The block pattern pairs opening
+# and closing tags by name, so `<tool_output>…</tool_output>` goes as one piece;
+# the bare-tag pattern only fires when the first character is a letter or `/`,
+# so `a < b` survives.
+_CLEAN_BLOCK = re.compile(
+    r"<(tool_output|memory-constraints|working-memory|task-state|hook-context"
+    r"|persisted-output|known-memory)\b[^>]*>.*?</\1\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+_CLEAN_TAG = re.compile(r"</?[A-Za-z][^>]{0,63}>")
+_CLEAN_BLANK_RUN = re.compile(r"\n{3,}")
+
+
+def clean_query_for_recall(text: str, *, max_chars: int = 2048) -> str:
+    """Strip tool/memory envelopes from a recall query (R11a).
+
+    The ranker only sees what survives here, so a pasted `<tool_output>` block
+    or a leaked `<memory-constraints>` tail can no longer become recall
+    vocabulary.  Plain questions pass through untouched (up to truncation).
+    """
+    body = _CLEAN_BLOCK.sub("", text or "")
+    body = _CLEAN_TAG.sub("", body)
+    body = _CLEAN_BLANK_RUN.sub("\n\n", body).strip()
+    if max_chars > 0 and len(body) > max_chars:
+        body = body[:max_chars]
+    return body
 
 
 def strip_lead(text: str) -> str:
