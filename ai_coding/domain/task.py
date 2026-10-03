@@ -44,6 +44,10 @@ class TodoItem:
     evidence: str | None = None
     created_at: str = ""
     updated_at: str = ""
+    #: R1-1: the shell command proving this item (empty = not machine-checkable).
+    #: The plan runner turns it into an acceptance contract for the step's turn;
+    #: unwritten when empty, so old files read byte-identically.
+    verify: str = ""
 
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATUSES
@@ -58,6 +62,8 @@ class TodoItem:
             data["dependsOn"] = list(self.depends_on)
         if self.evidence:
             data["evidence"] = self.evidence
+        if self.verify:
+            data["verify"] = self.verify
         if self.created_at:
             data["createdAt"] = self.created_at
         if self.updated_at:
@@ -77,6 +83,7 @@ class TodoItem:
             status=cast(TodoStatus, status),
             depends_on=deps,
             evidence=None if evidence is None else str(evidence),
+            verify=str(data.get("verify", "") or ""),
             created_at=str(data.get("createdAt", data.get("created_at", ""))),
             updated_at=str(data.get("updatedAt", data.get("updated_at", ""))),
         )
@@ -114,6 +121,7 @@ class TaskState:
         content: str,
         *,
         depends_on: list[str] | None = None,
+        verify: str = "",
         ts: str = "",
         item_id: str | None = None,
     ) -> TodoItem:
@@ -123,6 +131,7 @@ class TaskState:
             content=content,
             status="pending",
             depends_on=list(depends_on or []),
+            verify=verify,
             created_at=ts,
             updated_at=ts,
         )
@@ -136,6 +145,7 @@ class TaskState:
         status: str | None = None,
         content: str | None = None,
         evidence: str | None = None,
+        verify: str | None = None,
         ts: str = "",
     ) -> TodoItem:
         """Patch an item. Raises ``KeyError`` (unknown id) / ``ValueError`` (bad status)."""
@@ -152,6 +162,8 @@ class TaskState:
             item.content = content
         if evidence is not None:
             item.evidence = evidence
+        if verify is not None:
+            item.verify = verify
         item.updated_at = ts
         return item
 

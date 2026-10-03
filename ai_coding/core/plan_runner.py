@@ -1,0 +1,271 @@
+"""Plan runner (R1-1): a todo plan becomes executable budget allocations.
+
+A plan is a todo list; a run executes its open items in dependency order, one
+bounded turn each, with proof commands verified through the R0 gate that
+already lives in the loop.  Each step leaves a delivery receipt on the
+session; the resume replay rebuilds the step timeline from those receipts.
+
+Design notes (all measured in the 23-run experiment batch):
+
+* One bounded turn per step, not one giant turn: chained short runs used
+  ~30% fewer tokens than one-shot runs on the same work, because a scoped
+  prompt explores less redundantly.
+* The loop's own policy is swapped for a bounded copy per step and restored
+  in a ``finally`` — the runner never mutates shared orchestration state.
+* Mechanical verdicts win over model claims: a step whose proof commands
+  fail is ``blocked`` even if the model marked it done; a step the model
+  left open without proof commands is ``stalled`` (retryable next run),
+  never silently retried inside one run.
+* One repair run per failing step, then stop.  Re-planning is the user's
+  explicit decision (``/plan`` again), never an automatic loop.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field, replace
+from typing import Any
+
+from ai_coding.core.turn_policy import TurnPolicy
+from ai_coding.domain.acceptance import AcceptanceItem
+from ai_coding.domain.plan_delivery import StepDelivery
+
+#: Step prompts start here.  The replay matches user bubbles on this marker
+#: to rebuild step headers — turn numbers do not survive compaction, but the
+#: prompt text travels inside the persisted user message.
+STEP_HEAD = "只做这一步，不要做别的："
+
+#: Cap on the failure output quoted into a repair prompt (same 500-char
+#: preview discipline as the acceptance evidence tails).
+_OUTPUT_TAIL = 500
+
+
+def _tail(text: str | None) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= _OUTPUT_TAIL else f"…{text[-_OUTPUT_TAIL:]}"
+
+
+@dataclass
+class PlanReport:
+    """What one ``/plan-run`` did, for the console and the caller."""
+
+    completed: list[str] = field(default_factory=list)
+    blocked: list[str] = field(default_factory=list)
+    stalled: list[str] = field(default_factory=list)
+    deliveries: list[StepDelivery] = field(default_factory=list)
+    #: None = ran to the end; otherwise why it stopped early.
+    stopped: str | None = None
+
+    def render(self) -> str:
+        parts = [f"[plan-run] 完成 {len(self.completed)} 步"]
+        if self.completed:
+            parts.append("已完成：" + ", ".join(self.completed))
+        if self.blocked:
+            parts.append("受阻：" + ", ".join(self.blocked))
+        if self.stalled:
+            parts.append("停滞（下次可重跑）：" + ", ".join(self.stalled))
+        if self.stopped:
+            parts.append(f"止于：{self.stopped}")
+        return "\n".join(parts)
+
+
+class PlanRunner:
+    """Execute a session's todo plan step by step through a loop."""
+
+    def __init__(self, loop: Any) -> None:
+        self._loop = loop
+
+    async def run(
+        self,
+        session: Any,
+        console: Any = None,
+        *,
+        on_delta: Any = None,
+        observer: Any = None,
+    ) -> PlanReport:
+        """Run every ready todo item; return what happened."""
+        report = PlanReport()
+        task = getattr(session, "task", None)
+        if task is None:
+            report.stopped = "no-open-items"
+            self._say(console, "[plan-run] no open items — run /plan first")
+            return report
+        attempted: set[str] = set()
+        while True:
+            item = self._next_ready(task, attempted)
+            if item is None:
+                if task.open_items():
+                    report.stopped = (
+                        "deadlock: open items remain but none is ready "
+                        "(missing dependency or cycle)"
+                    )
+                break
+            attempted.add(item.id)
+            await self._run_step(session, task, item, report, console,
+                                 on_delta=on_delta, observer=observer)
+            if report.stalled:
+                break
+            if report.blocked and report.blocked[-1] == item.id:
+                break
+        self._say(console, report.render())
+        return report
+
+    # ---- internals ------------------------------------------------------
+
+    def _next_ready(self, task: Any, attempted: set[str]) -> Any:
+        """First open item with no blockers that this run has not tried."""
+        for item in task.open_items():
+            if item.is_terminal() or item.id in attempted:
+                continue
+            if task.blockers(item.id).any:
+                continue
+            return item
+        return None
+
+    def _step_budget(self) -> int:
+        settings = getattr(self._loop, "settings", None)
+        return int(getattr(settings, "plan_step_max_iterations", 8) or 8)
+
+    async def _run_step(
+        self, session: Any, task: Any, item: Any, report: PlanReport,
+        console: Any, *, on_delta: Any, observer: Any,
+    ) -> None:
+        open_count = len(task.open_items())
+        total = len(task.items)
+        self._say(
+            console,
+            f"[plan-run] 步骤 {item.id}/{total}（剩余 {open_count} 项）：{item.content}",
+        )
+        previous_acceptance = list(getattr(session, "acceptance", []))
+        contracts = (
+            [AcceptanceItem(
+                id=f"plan-{item.id}", statement=item.content, verify=item.verify,
+            )]
+            if item.verify else []
+        )
+        original_policy = self._loop.policy
+        budget = self._step_budget()
+        self._loop.policy = TurnPolicy(
+            replace(original_policy.config, max_iterations=budget)
+        )
+        context = self._context(report)
+        attempts = 0
+        try:
+            session.acceptance = list(contracts)
+            start_turn = int(getattr(session, "turn_count", 0) or 0)
+            text = await self._loop.process_input(
+                session, self._step_prompt(item, context),
+                on_delta=on_delta, observer=observer,
+            )
+            attempts = 1
+            if contracts and not self._contracts_passed(session):
+                text = await self._loop.process_input(
+                    session, self._repair_prompt(item, session),
+                    on_delta=on_delta, observer=observer,
+                )
+                attempts = 2
+            end_turn = int(getattr(session, "turn_count", 0) or 0)
+            self._settle(session, task, item, report, text, attempts,
+                         (start_turn, end_turn))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — one bad step must not kill the run
+            task.update(item.id, status="blocked",
+                        evidence=f"runner error: {exc}")
+            report.blocked.append(item.id)
+            report.deliveries.append(self._delivery(
+                item, "blocked", 1, [], f"runner error: {exc}", (0, 0)))
+        finally:
+            self._loop.policy = original_policy
+            session.acceptance = previous_acceptance
+
+    def _contracts_passed(self, session: Any) -> bool:
+        return bool(session.acceptance) and all(
+            item.passed is True for item in session.acceptance
+        )
+
+    def _settle(self, session: Any, task: Any, item: Any, report: PlanReport,
+                text: Any, attempts: int, turns: tuple[int, int]) -> None:
+        """Score one finished step and record its delivery.
+
+        Mechanical verdicts win: a step whose proof commands fail is blocked
+        even if the model marked it done; a step without proof commands that
+        the model left open is stalled (retryable next run), never retried
+        inside this run.
+        """
+        ac = [
+            {"id": entry.id, "passed": entry.passed}
+            for entry in getattr(session, "acceptance", [])
+        ]
+        first_line = _tail(str(text)).splitlines()
+        summary = item.content if not first_line else f"{item.content}：{first_line[0]}"
+        status = "completed"
+        if item.verify:
+            if self._contracts_passed(session):
+                task.update(item.id, status="completed",
+                            evidence=f"verify passed: {_tail(self._verify_output(session))}")
+            else:
+                task.update(item.id, status="blocked",
+                            evidence=f"verify failed: {_tail(self._verify_output(session))}")
+                status = "blocked"
+                report.blocked.append(item.id)
+        elif not self._model_claimed_done(task, item):
+            status = "stalled"
+            report.stalled.append(item.id)
+        if status == "completed":
+            report.completed.append(item.id)
+        delivery = self._delivery(item, status, attempts, ac, summary, turns)
+        report.deliveries.append(delivery)
+        session.step_deliveries.append(delivery)
+
+    def _model_claimed_done(self, task: Any, item: Any) -> bool:
+        current = task.get(item.id)
+        return current is not None and current.status == "completed"
+
+    def _verify_output(self, session: Any) -> str:
+        for entry in getattr(session, "acceptance", []):
+            if entry.output:
+                return str(entry.output)
+        return ""
+
+    def _delivery(self, item: Any, status: str, attempts: int,
+                ac: list[dict[str, Any]], summary: str,
+                turns: tuple[int, int]) -> StepDelivery:
+        return StepDelivery(
+            step_id=item.id, statement=item.content, status=status,
+            attempts=attempts, ac=ac, summary=summary, turns=turns,
+        )
+
+    def _context(self, report: PlanReport) -> str:
+        if not report.deliveries:
+            return ""
+        lines = ["已完成步骤："]
+        lines.extend(
+            f"{entry.step_id}. {entry.statement}（{entry.status}）"
+            for entry in report.deliveries
+        )
+        return "\n".join(lines)
+
+    def _step_prompt(self, item: Any, context: str) -> str:
+        prompt = (
+            f"{STEP_HEAD}{item.content}\n"
+            f"（这是计划步骤 {item.id}，做完停下等验收，不要展开做别的。）"
+        )
+        if context:
+            prompt += f"\n{context}"
+        return prompt
+
+    def _repair_prompt(self, item: Any, session: Any) -> str:
+        return (
+            f"{STEP_HEAD}{item.content}\n"
+            f"上一步验收失败，只修复失败点，不要重做已通过的部分：\n"
+            f"{self._verify_output(session)}"
+        )
+
+    @staticmethod
+    def _say(console: Any, text: str) -> None:
+        if console is not None and text:
+            console.info(text)
+
+
+__all__ = ["PlanReport", "PlanRunner", "STEP_HEAD"]

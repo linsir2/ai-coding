@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 SLASH_COMMANDS = [
     ("/plan", "Create and refine an implementation plan"),
+    ("/plan-run", "Execute the plan step by step"),
     ("/review", "Review current changes and surface issues"),
     ("/status", "Show session and runtime status"),
     ("/model", "List or switch models"),

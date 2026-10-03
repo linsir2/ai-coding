@@ -88,6 +88,9 @@ class AIConfig(BaseModel):
     # call that never returns, so any stuck step or tool must still end the turn.
     # Includes time spent waiting for a human approval prompt; 0 disables it.
     turn_timeout_seconds: float = 600.0
+    # R1-1: iteration ceiling for one plan-runner step.  Measured: simple steps
+    # close in 5-7 iterations; 8 leaves headroom without funding a wander.
+    plan_step_max_iterations: int = 8
     max_result_data_bytes: int = 8_000
     max_subagent_conclusion_chars: int = 4_000
     # Ask the endpoint to emit a final usage frame (stream_options.include_usage).

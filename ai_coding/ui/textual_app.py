@@ -229,7 +229,10 @@ class AICodingApp(App[None]):
         a clean transcript, which is what "fresh session" means).
         """
         self._session = new_session
-        await self._transcript.replay_history(getattr(new_session, "messages", ()))
+        await self._transcript.replay_history(
+            getattr(new_session, "messages", ()),
+            getattr(new_session, "step_deliveries", ()),
+        )
 
     async def _plan_turn(self) -> None:
         """/plan asks what to plan, then runs the plan turn with that topic."""
@@ -246,7 +249,11 @@ class AICodingApp(App[None]):
             await self._agent_loop.process_input(
                 self._session,
                 f"Create a detailed implementation plan for: {topic}. "
-                "Break it down into specific, actionable steps.",
+                "Break it down into specific, actionable steps. "
+                "Write the plan as todo items with todo_write; every step with "
+                "a machine-checkable outcome must carry its proof command in "
+                "'verify' (a shell command), so /plan-run can execute and "
+                "verify each step.",
                 on_delta=self._on_delta,
                 observer=self._observer,
             )

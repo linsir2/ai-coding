@@ -491,3 +491,57 @@ async def test_unknown_command_at_distance_two_gets_a_suggestion():
     assert loop.calls == []
     out = _session_text(c)
     assert "did you mean" in out and "/status" in out
+
+
+async def test_handle_plan_run_with_no_open_items_says_so():
+    """No todos, no runs: point at /plan instead of calling the model."""
+    from ai_coding.domain.session import SessionData
+
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(loop, "/plan-run", session, sessions, dc)
+
+    assert action is REPLAction.CONTINUE
+    assert loop.calls == []
+    assert "no open items" in _session_text(c)
+
+
+async def test_handle_plan_run_executes_open_todos():
+    """Each open item gets its own turn; results come back as a report."""
+    from types import SimpleNamespace
+
+    from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
+    from ai_coding.domain.session import SessionData
+    from ai_coding.domain.task import TaskState
+
+    class _PlanLoop(_FakeLoop):
+        def __init__(self):
+            super().__init__()
+            self.settings = SimpleNamespace(plan_step_max_iterations=8)
+            self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
+
+        async def process_input(self, session, text, on_delta=None, observer=None):
+            session.turn_count += 1
+            self.calls.append((text, on_delta))
+            for item in session.task.open_items():
+                if not item.is_terminal():
+                    item.status = "completed"
+                    break
+            return "step done"
+
+    task = TaskState(goal="g")
+    task.add("fix bug")
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.task = task
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(_PlanLoop(), "/plan-run", session, sessions, dc)
+
+    assert action is REPLAction.CONTINUE
+    out = _session_text(c)
+    assert "plan-run" in out and "已完成" in out
+    assert session.task.items[0].status == "completed"

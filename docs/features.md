@@ -44,7 +44,8 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | `/todo` | — | 渲染当前会话的 `TaskState`（目标、进度、逐项状态、下一步） |
 | `/skills` | — | 列出 `SkillRegistry` 目录（`- name: description`） |
 | `ask_user`（工具） | — | 弹 `AskScreen` 提问；模型给了 `options` 时会在问题下方列出（选项只是提示，不强制，仍可自由输入）。**已实现**（此前 `AskScreen` 的 `options` 参数从未被任何调用方填充，渲染行是死代码） |
-| `/plan` | — | 先弹 `What should I plan?` 收集主题，再以该主题发起计划回合（`ui/textual_app.py::_plan_turn`）。**不接受参数**：`/plan 改一下 loader` 会整条落回 `handle_input` 的旧固定 prompt，参数被静默丢弃；主题也不回显（`_plan_turn` 不调 `append_user`），transcript 里看不到你规划的是什么 |
+| `/plan` | — | 先弹 `What should I plan?` 收集主题，再以该主题发起计划回合（`ui/textual_app.py::_plan_turn`）。计划 prompt 要求模型用 `todo_write` 写成条目，有机器可判的步骤必须带 `verify`（shell 证明命令），供 `/plan-run` 执行。**不接受参数**：`/plan 改一下 loader` 会整条落回 `handle_input` 的旧固定 prompt，参数被静默丢弃；主题也不回显（`_plan_turn` 不调 `append_user`），transcript 里看不到你规划的是什么 |
+| `/plan-run` | — | 按依赖序逐项执行 open todos，每项一个有界回合（`ai.plan_step_max_iterations`，默认 8；loop policy 临时换副本，跑完恢复）。有 `verify` 的项自动转验收契约走 R0 门：失败修一次，再败标 `blocked` 并停；无 `verify` 且模型未标记完成的项标 `stalled`（下次可重跑），同一次运行不重试。每步落 `stepDeliveries` 收据，`/resume` 重放为步骤 header。transcript 即步骤 timeline |
 | `/review` | — | 向模型发一条「审查当前 git diff」的快捷 prompt |
 | `/config` | — | 打印生效的 model / 上下文预算 / 迭代上限 / 停止策略 / 回合超时 |
 | `/compact` | — | 主动压缩历史并落盘 |

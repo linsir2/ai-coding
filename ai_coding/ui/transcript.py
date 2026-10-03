@@ -13,7 +13,9 @@ from textual.containers import VerticalGroup, VerticalScroll
 from textual.widget import AwaitMount, Widget
 from textual.widgets import Collapsible, Static
 
+from ai_coding.core.plan_runner import STEP_HEAD
 from ai_coding.domain.message import ChatMessage, tool_call_from_ref
+from ai_coding.domain.plan_delivery import StepDelivery
 from ai_coding.ui.blocks import (
     Block,
     full_call_view,
@@ -395,7 +397,11 @@ class Transcript(VerticalScroll):
             child.remove()
         self._turn = None
 
-    async def replay_history(self, messages: Sequence[ChatMessage]) -> None:
+    async def replay_history(
+        self,
+        messages: Sequence[ChatMessage],
+        deliveries: Sequence[StepDelivery] = (),
+    ) -> None:
         """Rebuild the transcript from a loaded session, for ``/resume``.
 
         Walks the persisted messages in order — user bubbles, assistant prose,
@@ -407,12 +413,18 @@ class Transcript(VerticalScroll):
         (no matching ``role=tool`` message) is skipped rather than rendered
         half — ``ensure_tool_pairing`` should have removed it, this is the
         belt to its suspenders.
+
+        Plan steps recorded by ``/plan-run`` reappear as headers, matched to
+        the step's own user bubble by prompt marker (turn numbers do not
+        survive compaction, so numbers are not trusted).  A delivery whose
+        bubble was compacted away is skipped, not invented.
         """
         self.clear()
         results: dict[str, ChatMessage] = {}
         for message in messages:
             if message.role == "tool" and message.tool_call_id:
                 results[message.tool_call_id] = message  # later wins, as in full_call_view
+        by_statement = {entry.statement: entry for entry in deliveries}
 
         async def close_turn() -> None:
             turn = self._turn
@@ -426,6 +438,9 @@ class Transcript(VerticalScroll):
                 if not message.content:
                     continue
                 await close_turn()
+                header = _step_header(message.content, by_statement)
+                if header is not None:
+                    self.mount(Plain(header, classes="plan-step"))
                 self.append_user(message.content, _hhmm(message.timestamp))
             elif message.role == "assistant":
                 if not message.content and not message.tool_calls:
@@ -454,6 +469,32 @@ class Transcript(VerticalScroll):
         """Scroll to the newest content only if the user is already at the end."""
         if self.is_vertical_scroll_end:
             self.scroll_end(animate=False)
+
+
+def _step_header(
+    content: str, by_statement: dict[str, StepDelivery]
+) -> Text | None:
+    """A plan-step header for a user bubble that starts a step (R1-1).
+
+    Matches on the runner's prompt marker: the bubble text travels inside the
+    persisted user message, so this survives everything except compaction
+    removing the bubble itself (then there is nothing to head, and nothing
+    is invented).  Returns a ``Text`` (never markup-parsed) or ``None``.
+    """
+    if not content.startswith(STEP_HEAD):
+        return None
+    statement = content[len(STEP_HEAD):].split("\n")[0]
+    entry = by_statement.get(statement)
+    if entry is None:
+        return None
+    mark, word = {
+        "completed": ("✓", "完成"),
+        "blocked": ("✗", "受阻"),
+        "stalled": ("…", "停滞"),
+    }.get(entry.status, ("·", entry.status))
+    text = Text()
+    text.append(f"{mark} 步骤 {entry.step_id}：{entry.statement}（{word}）", style="bold")
+    return text
 
 
 def _fold_identity(block: Block) -> tuple[str, str, str]:

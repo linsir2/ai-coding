@@ -73,6 +73,14 @@ class TodoWriteTool(BaseTool):
                     "items": {"type": "string"},
                     "description": "Ids this item waits on (for 'add').",
                 },
+                "verify": {
+                    "type": "string",
+                    "description": (
+                        "Shell command proving this item (for 'add'/'update'). "
+                        "The plan runner turns it into an acceptance contract "
+                        "for the step's turn; empty means not machine-checkable."
+                    ),
+                },
             },
             "required": ["action"],
         }
@@ -143,7 +151,7 @@ class TodoWriteTool(BaseTool):
                 if target not in cleaned:
                     cleaned.append(target)
             deps = cleaned
-        item = task.add(content, depends_on=deps)
+        item = task.add(content, depends_on=deps, verify=str(params.get("verify", "") or ""))
         return self._ok(task, "add", item_id=item.id)
 
     def _update(self, params: dict[str, Any], task: TaskState) -> ToolResult:
@@ -157,6 +165,7 @@ class TodoWriteTool(BaseTool):
         status = params.get("status")
         content = params.get("content")
         evidence = params.get("evidence")
+        verify = params.get("verify")
         normalised = None if status is None else str(status).strip().lower()
         if self._enforce and normalised in {"in_progress", "completed"}:
             blockers = task.blockers(item_id)
@@ -168,6 +177,7 @@ class TodoWriteTool(BaseTool):
                 status=normalised,
                 content=None if content is None else str(content),
                 evidence=None if evidence is None else str(evidence),
+                verify=None if verify is None else str(verify),
             )
         except KeyError:
             return ToolResult(

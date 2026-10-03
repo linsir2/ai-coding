@@ -223,3 +223,14 @@ def test_r9_render_and_focus_are_unchanged():
     assert task.focus() is not None and task.focus().id == "1"
     task.update("2", status="blocked")
     assert "[!] 2. needs dep (blocked by 1)" in task.render()
+
+
+def test_todo_verify_round_trips_and_stays_absent_when_empty():
+    """A proof command rides the item (R1-1); items without one write no key."""
+    task = TaskState(goal="g")
+    plain = task.add("write docs")
+    assert plain.verify == ""
+    assert "verify" not in plain.to_dict()
+    item = task.add("fix it")
+    item.verify = "pytest tests/ -q"
+    assert TaskState.from_dict(task.to_dict()).get("2").verify == "pytest tests/ -q"

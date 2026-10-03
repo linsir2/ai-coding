@@ -7,6 +7,7 @@ from typing import Any
 
 from .acceptance import AcceptanceItem
 from .message import ChatMessage, ToolCallRef, tool_call_from_ref
+from .plan_delivery import StepDelivery
 from .task import TaskState
 from .turn_digest import TurnDigest
 
@@ -132,6 +133,10 @@ class SessionData:
     # runner will produce these); persisted only when non-empty, same rule as
     # ``task`` — old files simply have no key.
     acceptance: list[AcceptanceItem] = field(default_factory=list)
+    # Step deliveries (R1-1): what each plan-runner step left behind.  The
+    # resume replay reads these to rebuild the step timeline; persisted only
+    # when non-empty, same rule as above.
+    step_deliveries: list[StepDelivery] = field(default_factory=list)
 
     def add_message(self, message: ChatMessage) -> None:
         self.messages.append(message)
@@ -206,6 +211,9 @@ class SessionData:
         # so every file written before R0-1 keeps reading byte-identically.
         if self.acceptance:
             data["acceptance"] = [item.to_dict() for item in self.acceptance]
+        # Same rule again: sessions never plan-run write no key.
+        if self.step_deliveries:
+            data["stepDeliveries"] = [entry.to_dict() for entry in self.step_deliveries]
         return data
 
     @classmethod
@@ -236,6 +244,12 @@ class SessionData:
             AcceptanceItem.from_dict(row) for row in acceptance_rows
             if isinstance(row, dict)
         ]
+        raw_deliveries = data.get("stepDeliveries")
+        delivery_rows = raw_deliveries if isinstance(raw_deliveries, list) else []
+        step_deliveries = [
+            StepDelivery.from_dict(row) for row in delivery_rows
+            if isinstance(row, dict)
+        ]
         return cls(
             session_id=data.get("sessionId", ""),
             title=data.get("title", ""),
@@ -248,6 +262,7 @@ class SessionData:
             turn_digests=digests,
             turn_usages=usages,
             acceptance=acceptance,
+            step_deliveries=step_deliveries,
         )
 
 

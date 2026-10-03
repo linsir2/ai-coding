@@ -89,3 +89,8 @@ def test_review():
 def test_config():
     cmd = parse_slash("/config")
     assert cmd is not None and cmd.name == "config"
+
+
+def test_plan_run():
+    cmd = parse_slash("/plan-run")
+    assert cmd is not None and cmd.name == "plan-run"

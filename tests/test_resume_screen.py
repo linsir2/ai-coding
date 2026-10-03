@@ -235,3 +235,40 @@ async def test_picking_a_session_switches_and_replays():
             await pilot.pause()
         assert app._session is full
         assert app.query_one(Prose).source == "构建通过了 [k=v]，可以继续 call[0]。"
+
+
+@pytest.mark.asyncio
+async def test_resume_rebuilds_plan_step_headers():
+    """Step deliveries recorded by /plan-run reappear as headers on resume:
+    matched to the step's own user bubble, never streamed, never invented."""
+    from ai_coding.domain.message import ChatMessage
+    from ai_coding.domain.plan_delivery import StepDelivery
+
+    messages = [
+        ChatMessage(
+            role="user",
+            content="只做这一步，不要做别的：加边界测试\n（这是计划步骤 2，只做这一项。）",
+            timestamp="2026-10-03T08:01:00Z",
+        ),
+        ChatMessage(
+            role="assistant", content="加好了。", timestamp="2026-10-03T08:01:09Z"
+        ),
+    ]
+    full = _session("a" * 32, "2026-10-03T08:01:00Z", "加边界测试", messages)
+    full.step_deliveries = [
+        StepDelivery(step_id="2", statement="加边界测试", status="completed",
+                     attempts=1, ac=[], summary="加边界测试", turns=(2, 2)),
+    ]
+    app = _app(_sessions_stub(full))
+    async with app.run_test() as pilot:
+        app.query_one("#prompt", Input).value = "/resume aaaaaaaaaaaa"
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+        texts = "\n".join(
+            w.content.plain if hasattr(w.content, "plain") else str(w.content)
+            for w in app.query("Static")
+            if not isinstance(w, Prose)
+        )
+        assert "步骤" in texts and "加边界测试" in texts
+        assert "完成" in texts

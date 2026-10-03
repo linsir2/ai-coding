@@ -272,6 +272,16 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 
 `TurnSnapshot` 扩展（全带默认值，老决策表不受影响）：`acceptance`、`acceptance_nudges`、`ledger_open`、`ledger_flat_rounds`、`ledger_nudges`、`ledger`。`TurnPolicyConfig` 扩展：`max_acceptance_nudges=2`、`max_ledger_nudges=1`（均可经 `AIConfig` 同名键覆盖，无 schema 变更）。`TurnBooks` 扩展：`verify`、`tool_success`（名集合）、`ledger_signature/flat_rounds/nudges/current`、`step_latencies_ms/abandoned_steps/last_step_latency_ms`。
 
+### R1-1 计划执行契约
+
+| 类型 | 字段 | 说明 |
+|---|---|---|
+| `TodoItem.verify` | `str = ""` | 证明该项的 shell 命令；`to_dict` 非空才写 `verify` 键，`todo_write` 的 `add`/`update` 透传；空 = 不可机检，走 todo 语义 |
+| `StepDelivery`（`domain/plan_delivery.py`） | `stepId`、`statement`、`status`（completed/blocked/stalled）、`attempts`、`ac`（[{id, passed}]）、`summary`、`turns` | 一步的收据；`SessionData.step_deliveries`，仅非空落盘（键 `stepDeliveries`） |
+| `AIConfig.plan_step_max_iterations` | `int = 8` | plan-runner 单步迭代上限；runner 临时换 policy 副本，`finally` 恢复 |
+
+步骤 prompt 以 `只做这一步，不要做别的：` 开头；replay 靠此前缀匹配用户气泡重建 header（turn 号不穿透压缩，不可信）。无 `verify` 且模型未标记完成的项判 `stalled`（下次可重跑），同一次运行不重试；`verify` 两败判 `blocked`；`open_items` 非空但无 ready 项判 `deadlock` 停止。
+
 ### 合同变更（仅两处）
 
 | 变更 | 影响面 |

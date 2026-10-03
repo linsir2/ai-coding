@@ -35,7 +35,7 @@ async def test_slash_opens_palette():
 async def test_discover_yields_every_slash_command():
     provider = SlashCommandProvider(SimpleNamespace(app=object()), None)
     hits = [hit async for hit in provider.discover()]
-    assert len(hits) == len(SLASH_COMMANDS) == 16
+    assert len(hits) == len(SLASH_COMMANDS) == 17
     assert all(isinstance(hit, DiscoveryHit) for hit in hits)
     assert {hit.display for hit in hits} == {name for name, _ in SLASH_COMMANDS}
 
@@ -44,7 +44,7 @@ async def test_discover_yields_every_slash_command():
 async def test_search_empty_query_yields_every_command():
     provider = SlashCommandProvider(SimpleNamespace(app=object()), None)
     hits = [hit async for hit in provider.search("")]
-    assert len(hits) == len(SLASH_COMMANDS) == 16
+    assert len(hits) == len(SLASH_COMMANDS) == 17
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,193 @@
+"""Plan runner (R1-1, TDD): plans become executable budget allocations.
+
+A plan is a todo list; a run executes open items in dependency order, one
+bounded turn each, verifying proof commands through the R0 gate that already
+lives in the loop.  Every test below uses stub loops — no model, no shell —
+except where the contract demands the real machinery (policy swap, AC set).
+"""
+
+from types import SimpleNamespace
+
+import pytest
+
+from ai_coding.config.models import AIConfig
+from ai_coding.core.plan_runner import PlanRunner
+from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
+from ai_coding.domain.plan_delivery import StepDelivery
+from ai_coding.domain.session import SessionData
+from ai_coding.domain.task import TaskState
+
+
+def _session_with(*contents, verifies=()):
+    """A session whose task holds one todo per content string."""
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    task = TaskState(goal="plan")
+    for index, content in enumerate(contents):
+        item = task.add(content)
+        if index < len(verifies) and verifies[index]:
+            item.verify = verifies[index]
+    session.task = task
+    return session
+
+
+class _StubLoop:
+    """Stands in for AgentLoop: records prompts, plays a script per call."""
+
+    def __init__(self, script, step_budget=8):
+        self.settings = SimpleNamespace(plan_step_max_iterations=step_budget)
+        self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
+        self._script = list(script)
+        self.calls = []  # (text, policy_max_iterations_at_call)
+        self.restored = True
+
+    async def process_input(self, session, text, on_delta=None, observer=None):
+        session.turn_count += 1
+        self.calls.append((text, self.policy.config.max_iterations))
+        action = self._script.pop(0) if self._script else "complete"
+        if action == "complete":
+            for item in session.task.open_items():
+                if not item.is_terminal():
+                    item.status = "completed"
+                    break
+        elif action == "verify-pass":
+            for item in session.acceptance:
+                item.passed = True
+                item.output = "ok"
+        elif action == "verify-fail":
+            for item in session.acceptance:
+                item.passed = False
+                item.output = "assert 245 == 200"
+        elif action == "ignore":
+            pass
+        return "step done"
+
+
+def test_config_defaults_step_budget_to_eight():
+    assert AIConfig().plan_step_max_iterations == 8
+
+
+def test_step_delivery_round_trips_through_the_session():
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    assert "stepDeliveries" not in session.to_dict()
+    session.step_deliveries = [
+        StepDelivery(step_id="1", statement="fix it", status="completed",
+                     attempts=1, ac=[{"id": "AC-1", "passed": True}],
+                     summary="fixed", turns=(3, 3)),
+    ]
+    data = session.to_dict()
+    assert data["stepDeliveries"][0]["stepId"] == "1"
+    assert SessionData.from_dict(data).step_deliveries == session.step_deliveries
+
+
+@pytest.mark.asyncio
+async def test_run_executes_each_step_in_its_own_bounded_turn():
+    session = _session_with("fix bug", "add tests")
+    loop = _StubLoop(["complete", "complete"])
+    report = await PlanRunner(loop).run(session)
+
+    assert [d.step_id for d in report.deliveries] == ["1", "2"]
+    assert all(d.status == "completed" for d in report.deliveries)
+    assert len(loop.calls) == 2
+    # Each step runs in its own turn, scoped to its own item...
+    assert "fix bug" in loop.calls[0][0] and "add tests" not in loop.calls[0][0]
+    assert "只做这一步" in loop.calls[0][0]
+    # ...under the step budget, not the loop's own ceiling...
+    assert [budget for _, budget in loop.calls] == [8, 8]
+    # ...and the loop's own policy is restored afterwards.
+    assert loop.policy.config.max_iterations == 100
+    assert session.task.items[0].status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_run_respects_dependency_order():
+    session = _session_with("first", "second needs first")
+    session.task.items[1].depends_on = ["1"]
+    loop = _StubLoop(["complete", "complete"])
+    await PlanRunner(loop).run(session)
+    assert "first" in loop.calls[0][0]
+    assert "second needs first" in loop.calls[1][0]
+
+
+@pytest.mark.asyncio
+async def test_verify_failure_triggers_one_repair_run_then_blocks():
+    session = _session_with("fix it", verifies=["pytest tests/ -q"])
+    loop = _StubLoop(["verify-fail", "verify-fail"])
+    report = await PlanRunner(loop).run(session)
+
+    # One repair run carrying the failure output, then blocked — never a third.
+    assert len(loop.calls) == 2
+    assert "245" in loop.calls[1][0]
+    assert report.blocked == ["1"]
+    assert session.task.items[0].status == "blocked"
+    assert "245" in (session.task.items[0].evidence or "")
+    assert report.deliveries[0].status == "blocked"
+    assert report.deliveries[0].attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_verify_failure_repaired_on_second_attempt_completes():
+    session = _session_with("fix it", verifies=["pytest tests/ -q"])
+    loop = _StubLoop(["verify-fail", "verify-pass"])
+    report = await PlanRunner(loop).run(session)
+
+    assert report.completed == ["1"]
+    assert report.deliveries[0].attempts == 2
+    assert session.task.items[0].status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_items_without_verify_trust_a_completed_turn():
+    session = _session_with("write docs")
+    loop = _StubLoop(["complete"])
+    report = await PlanRunner(loop).run(session)
+    assert report.completed == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_unfinished_unverifiable_step_stays_open_and_stops_the_run():
+    """No verify command, model marked nothing: leave it open (retryable next
+    run) and stop — never loop on the same item inside one run."""
+    session = _session_with("write docs", "next step")
+    loop = _StubLoop(["ignore"])
+    report = await PlanRunner(loop).run(session)
+
+    assert session.task.items[0].status == "pending"
+    assert report.stalled == ["1"]
+    assert len(loop.calls) == 1  # second item never started
+
+
+@pytest.mark.asyncio
+async def test_session_acceptance_is_set_per_step_and_restored():
+    """The R0 gate sees exactly this step's contracts — never the user's own
+    list, which is saved aside and restored afterwards."""
+    from ai_coding.domain.acceptance import AcceptanceItem
+
+    session = _session_with("fix it", verifies=["pytest tests/ -q"])
+    session.acceptance = [AcceptanceItem(id="user-AC", statement="u", verify="true")]
+    seen = []
+
+    class _SpyLoop(_StubLoop):
+        async def process_input(self, session, text, on_delta=None, observer=None):
+            seen.append([item.id for item in session.acceptance])
+            return await super().process_input(session, text, on_delta, observer)
+
+    await PlanRunner(_SpyLoop(["verify-pass"])).run(session)
+    assert seen == [["plan-1"]]
+    assert [item.id for item in session.acceptance] == ["user-AC"]
+
+
+@pytest.mark.asyncio
+async def test_empty_plan_reports_nothing_to_do():
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    loop = _StubLoop([])
+    report = await PlanRunner(loop).run(session)
+    assert report.deliveries == [] and loop.calls == []
+    assert report.stopped == "no-open-items"
+
+
+@pytest.mark.asyncio
+async def test_prior_deliveries_are_summarised_into_later_steps():
+    session = _session_with("step one", "step two")
+    loop = _StubLoop(["complete", "complete"])
+    await PlanRunner(loop).run(session)
+    assert "step one" in loop.calls[1][0]

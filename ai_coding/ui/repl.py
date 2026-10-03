@@ -22,6 +22,7 @@ HELP_TEXT = (
     "  /todo           show current task list\n"
     "  /skills         list available skills\n"
     "  /plan           generate implementation plan\n"
+    "  /plan-run       execute the plan step by step\n"
     "  /review        review current changes\n"
     "  /config         show effective configuration\n"
     "  /compact        compact conversation history\n"
@@ -147,9 +148,18 @@ async def handle_input(
         await loop.process_input(
             session,
             "Create a detailed implementation plan for the current task. "
-            "Break it down into specific, actionable steps.",
+            "Break it down into specific, actionable steps. "
+            "Write the plan as todo items with todo_write; every step with "
+            "a machine-checkable outcome must carry its proof command in "
+            "'verify' (a shell command), so /plan-run can execute and "
+            "verify each step.",
             on_delta=console.delta,
         )
+        return REPLAction.CONTINUE, session
+    if cmd.name == "plan-run":
+        from ai_coding.core.plan_runner import PlanRunner
+
+        await PlanRunner(loop).run(session, console)
         return REPLAction.CONTINUE, session
     if cmd.name == "review":
         console.info("[review] reviewing current changes...")
