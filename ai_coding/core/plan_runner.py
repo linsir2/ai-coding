@@ -318,9 +318,13 @@ class PlanRunner:
         budget = self._step_budget()
         # M1-B: close the todo gate too — a step must not be nudged about the
         # plan's other open items.  Same swap-and-restore discipline as before.
+        # C3: 0 as well — the step session shares the plan's task, so on budget
+        # exhaustion every remaining plan item would look like "unfinished
+        # work" and one step would spend the whole plan's list.  A step is one
+        # bounded turn, by design.
         self._loop.policy = TurnPolicy(
             replace(original_policy.config, max_iterations=budget,
-                    stop_policy="natural")
+                    stop_policy="natural", max_auto_continuations=0)
         )
         attempts = 0
         step_usage: dict[str, int] | None = None

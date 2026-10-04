@@ -295,6 +295,7 @@ class TurnBooks:
         open_items: Sequence[TodoItem] = (),
         final_text: str | None = None,
         acceptance: Sequence[AcceptanceState] = (),
+        continuations: int = 0,
     ) -> TurnSnapshot:
         """The one object :class:`TurnPolicy` decides from.
 
@@ -317,4 +318,5 @@ class TurnBooks:
             ledger_flat_rounds=self.ledger_flat_rounds,
             ledger_nudges=self.ledger_nudges,
             ledger=ledger_states(self.ledger_current),
+            continuations=continuations,
         )

@@ -273,6 +273,7 @@ def render_handoff(
     artifacts: Sequence[ToolArtifact] = (),
     trace_path: str = "",
     max_items: int = 5,
+    continuations: int = 0,
 ) -> str:
     """What the harness says when the model ran out of turn without a final word.
 
@@ -317,4 +318,6 @@ def render_handoff(
         lines.append("产物: " + ", ".join(paths[:_MAX_FILES_SHOWN]))
     if trace_path:
         lines.append(f"轨迹: {trace_path}")
+    if continuations:
+        lines.append(f"（已自动续跑 {continuations} 次）")
     return "\n".join(lines)

@@ -83,6 +83,11 @@ class TurnPolicyConfig:
     # R0-2: the ledger gate's own budget — one chance to clarify or split
     # before the turn goes back to iterating (or hits another bound).
     max_ledger_nudges: int = 1
+    # C3: when the iteration budget dies with todo items still open, the turn
+    # injects a continuation prompt and starts a fresh round instead of stopping.
+    # 0 disables it.  The cap is what keeps a model that never closes its items
+    # from running forever.
+    max_auto_continuations: int = 3
 
     @classmethod
     def from_ai_config(cls, settings: Any) -> TurnPolicyConfig:
@@ -100,6 +105,9 @@ class TurnPolicyConfig:
             stall_iterations=int(getattr(settings, "stall_iterations", 3) or 0),
             max_acceptance_nudges=int(getattr(settings, "max_acceptance_nudges", 2) or 0),
             max_ledger_nudges=int(getattr(settings, "max_ledger_nudges", 1) or 0),
+            max_auto_continuations=int(
+                getattr(settings, "max_auto_continuations", 3) or 0
+            ),
         )
 
 
@@ -129,6 +137,10 @@ class TurnSnapshot:
     open_items: tuple[TodoItem, ...] = ()
     final_text: str | None = None
     tokens_spent: int = 0  # R4b: what this turn has spent so far
+    # C3: continuation rounds already spent this turn (budget died with items
+    # open, the loop started a fresh round).  Persisted on the session so it
+    # survives across the rounds.
+    continuations: int = 0
     # R6b: how the tool calls have been going.  Fed in by the loop — the policy
     # never counts anything itself, so it stays pure and table-testable.
     failed_streak: int = 0  # consecutive iterations where every call failed
@@ -175,6 +187,21 @@ class TurnPolicy:
         if budget_expired:
             return TurnDecision(TurnAction.FINISH, "turn deadline exceeded")
         if snapshot.iteration > self.config.max_iterations:
+            # C3: the budget is gone but the work is not — open items mean the
+            # model never finished, so inject a continuation prompt and start a
+            # fresh round rather than handing the user a dead turn.  Fires
+            # regardless of stop_policy: unfinished work is not a stop-policy
+            # question.  The cap keeps a model that never closes its items from
+            # running forever.
+            if (
+                snapshot.open_items
+                and snapshot.continuations < self.config.max_auto_continuations
+            ):
+                return TurnDecision(
+                    TurnAction.NUDGE,
+                    "continue unfinished work",
+                    inject=self.continuation_message(snapshot.open_items),
+                )
             return TurnDecision(TurnAction.FINISH, "iteration budget exhausted")
         if (
             self.config.max_turn_tokens
@@ -289,6 +316,23 @@ class TurnPolicy:
             role="user", content=f"{TASK_MESSAGE_LEAD}\n{render}", timestamp=""
         )
         return TaskInjection(instructions=instructions, message=block)
+
+    @staticmethod
+    def continuation_message(open_items: Sequence[TodoItem]) -> str:
+        """C3's continuation prompt: the budget died, the work did not.
+
+        Names what is still open so the next round knows exactly what to pick
+        up, and says not to redo finished work — the same discipline as the
+        ledger gate's nudge.
+        """
+        lines = [
+            "[continue] 上一轮预算耗尽，但还有未完成的任务项："
+        ]
+        lines.extend(
+            f"- {item.id}. {item.content}" for item in open_items[:NUDGE_ITEM_LIMIT]
+        )
+        lines.append("继续未完成的工作，不要重复已完成的部分。")
+        return "\n".join(lines)
 
     @staticmethod
     def nudge_message(open_items: Sequence[TodoItem]) -> str:

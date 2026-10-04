@@ -91,6 +91,11 @@ class AIConfig(BaseModel):
     # R1-1: iteration ceiling for one plan-runner step.  Measured: simple steps
     # close in 5-7 iterations; 8 leaves headroom without funding a wander.
     plan_step_max_iterations: int = 8
+    # C3: when a normal turn's iteration budget dies with todo items still
+    # open, the loop injects a continuation prompt and starts a fresh round
+    # instead of stopping.  0 disables.  The cap keeps a model that never
+    # closes its items from running forever.  Fires regardless of stop_policy.
+    max_auto_continuations: int = 3
     # R1-4: turn ceiling for one /plan-run.  Steps are bounded but the run was
     # not — a plan that keeps "completing" spent steps x (1-2) turns with no
     # cap, and each process_input starts a FRESH wall-clock deadline

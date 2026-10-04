@@ -280,7 +280,12 @@ class AgentLoop:
                 self._refresh_ledger(books)
                 decision = self.policy.decide_next_iteration(
                     books.snapshot(
-                        iteration=index, tokens_spent=self.reporter.tokens_spent()
+                        iteration=index, tokens_spent=self.reporter.tokens_spent(),
+                        # C3 reads the open set to decide whether the budget
+                        # died with work unfinished.  The old ladder never
+                        # needed it; without it the continuation never fires.
+                        open_items=task.open_items(),
+                        continuations=int(getattr(session, "continuations", 0) or 0),
                     ),
                     budget_expired=budget_expired,
                 )
@@ -317,12 +322,25 @@ class AgentLoop:
                     # is a real instruction that changed the model's behaviour, so
                     # replaying the transcript without it would break its meaning
                     # (docs/r1a-4-analysis.md D1).
+                    restart = False
                     if decision.reason == "uncertainty ledger flat":
                         books.note_ledger_nudge()
+                    elif decision.reason == "continue unfinished work":
+                        # C3: count the continuation on the session (it survives
+                        # across rounds) and re-arm the iteration budget below —
+                        # without the reset the counter keeps climbing, the new
+                        # round sees "budget exhausted" at once, and the model is
+                        # never called again (the cap burns for zero work).
+                        session.continuations = (
+                            int(getattr(session, "continuations", 0) or 0) + 1
+                        )
+                        restart = True
                     else:
                         books.note_strategy_nudge()
                     session.add_message(user_message(decision.inject or "", now_utc()))
                     self.closer.checkpoint(session, index)
+                    if restart:
+                        index = 0
                     continue
 
                 books.note_iteration(index)
@@ -369,6 +387,7 @@ class AgentLoop:
                             open_items=task.open_items(),
                             final_text=step.text,
                             acceptance=acceptance_states(session.acceptance),
+                            continuations=int(getattr(session, "continuations", 0) or 0),
                         )
                     )
                     if decision.action is TurnAction.FINISH:
@@ -450,6 +469,9 @@ class AgentLoop:
         if session.task is None:
             session.task = TaskState(goal=user_input)
         task = session.task
+        # C3: the continuation allowance is per user turn — a new message
+        # starts with a fresh budget, not the previous turn's leftovers.
+        session.continuations = 0
         # R4b: guard state (duplicate calls, …) is per turn, never per process.
         self.dispatcher.guards.reset()
         self.reporter.begin_turn(self.observer)

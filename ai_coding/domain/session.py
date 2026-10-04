@@ -138,6 +138,10 @@ class SessionData:
     # runner will produce these); persisted only when non-empty, same rule as
     # ``task`` — old files simply have no key.
     acceptance: list[AcceptanceItem] = field(default_factory=list)
+    # C3: continuation rounds this turn has already spent (the iteration budget
+    # died with items open, the loop started a fresh round).  Persisted on the
+    # session so it survives across the rounds.
+    continuations: int = 0
     # Step deliveries (R1-1): what each plan-runner step left behind.  The
     # resume replay reads these to rebuild the step timeline; persisted only
     # when non-empty, same rule as above.

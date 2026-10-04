@@ -144,6 +144,16 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 「要不要再来一轮」「模型停下来了但 todo 没做完怎么办」由 `core/turn_policy.py` 决定
 （纯函数、无 IO），`AgentLoop` 只负责编排。决策表见 [R2 分析](r2-analysis.md) §6.7。
 
+### 预算耗尽自动续跑（C3）
+
+正常回合迭代预算耗尽但 todo 仍有 open 项时，循环注入 `[continue]` 提示（点名剩余项）
+并**重新武装迭代预算**（新一轮 `max_tool_iterations`），最多 `ai.max_auto_continuations`
+（默认 3，`0` 关闭）次；todo 清空则正常结束。触发**不受 `stop_policy` 影响**——活没干完
+不是停止策略问题；续跑额度按**用户回合**重置。实测（qwen，`max_tool_iterations=2`）：
+一个三步任务连续 3 次，续跑提示里剩余项随实际进展收缩（3→2→1），最后模型自己收尾"全部完成 3/3"。
+plan-runner 的步内强制关闭（`max_auto_continuations=0`）：步是共享计划 task 的一个有界回合，
+开着会让单步把整个计划的剩余项当成"未完成工作"。
+
 **四层上下文压缩**（`ContextManager`，调用顺序为硬约束）：
 
 | 层 | 动作 |

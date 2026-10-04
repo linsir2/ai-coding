@@ -435,7 +435,11 @@ async def test_strict_policy_ignores_the_nudge_cap(tmp_path):
         engine,
         sessions,
         settings=_settings(
-            stop_policy="strict", max_todo_nudges=1, max_tool_iterations=4
+            stop_policy="strict", max_todo_nudges=1, max_tool_iterations=4,
+            # C3 off: this test is about the nudge cap inside one iteration
+            # round.  With C3 on, budget exhaustion with open items starts a
+            # fresh round (by design), which is a different mechanism.
+            max_auto_continuations=0,
         ),
     )
     session = sessions.create()

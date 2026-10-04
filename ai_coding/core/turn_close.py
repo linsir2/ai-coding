@@ -206,6 +206,7 @@ class TurnCloser:
                 failures=failures,
                 artifacts=self.artifacts,
                 trace_path=trace_path,
+                continuations=int(getattr(session, "continuations", 0) or 0),
             )
             if handoff:
                 outcome = replace(outcome, handoff=handoff)
