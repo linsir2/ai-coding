@@ -277,7 +277,8 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | 类型 | 字段 | 说明 |
 |---|---|---|
 | `TodoItem.verify` | `str = ""` | 证明该项的 shell 命令；`to_dict` 非空才写 `verify` 键，`todo_write` 的 `add`/`update` 透传；空 = 不可机检，走 todo 语义 |
-| `StepDelivery`（`domain/plan_delivery.py`） | `stepId`、`statement`、`status`（completed/blocked/stalled）、`attempts`、`ac`（[{id, passed}]）、`summary`、`turns` | 一步的收据；`SessionData.step_deliveries`，仅非空落盘（键 `stepDeliveries`） |
+| `StepDelivery`（`domain/plan_delivery.py`） | `stepId`、`statement`、`status`（completed/blocked/stalled）、`attempts`、`ac`（[{id, passed}]）、`summary`、`turns`、`usage`（R1-4，该步各回合 usage 求和；loop 未上报则 None） | 一步的收据；`SessionData.step_deliveries`，仅非空落盘（键 `stepDeliveries`）；老收据无 `usage` 键照读（from_dict 默认 None） |
+| `PlanReport`（`core/plan_runner.py`） | `turns_used`（本轮 `process_input` 次数）、`tokens_used`（求和或 None）、`stopped` 新增 `budget:…` 值 | render 头行 `完成 n 步 · 用了 T 回合 [/ K tokens]`；顶盖检查只在还有剩余工作时触发（正好用完跑完=干净结束） |
 | `AIConfig.plan_step_max_iterations` | `int = 8` | plan-runner 单步迭代上限；runner 临时换 policy 副本，`finally` 恢复 |
 
 ### R1-4 思考时间线契约
@@ -296,9 +297,18 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | 类型 | 字段 | 说明 |
 |---|---|---|
 | `BackgroundTask`（`domain/subagent.py`） | `runId`、`name`、`task`、`status`（running/completed/timeout/error/cancelled/rejected）、`started/ended`（monotonic 秒）、`error`、`usage` | runner 内存表（`task_list()` 按 started 排序）；200 行封顶（只剪终态）；重启丢失 |
-| `BackgroundTaskDone`（事件） | `run_id`、`name`、`status`、`summary`（尾 200）、`truncated`、`origin_session` | 捕获的 emit 投递（可能晚 spawning turn 数轮）；transcript dim 行，trace 泛型记录 |
+| `BackgroundTaskDone`（事件） | `run_id`、`name`、`status`、`summary`（尾 200）、`truncated`、`origin_session`、`ledger_path`（无 ledger 时 None） | 捕获的 emit 投递（可能晚 spawning turn 数轮）；transcript dim 行（有指针时缀 `· 完整回包: 路径`），trace 泛型记录 |
 | `subAgent(background)` | `bool = false` | 默认同步（老行为不变）；true 时秒返 handle（`data={run_id, background, status}`），孩子事件经 observer 进父 trace |
 | 错误码 | `subagent_busy` | 信号量满时 spawn 直接失败（不排队）；stop 未知 id 返回 False（`/tasks` 明示） |
+
+### R1-3 结构化 handoff 契约
+
+| 类型 | 字段 | 说明 |
+|---|---|---|
+| `SubagentResult` 新增 | `facts: dict \| None`、`schema_valid: bool \| None`（三态）、`schema_errors: tuple[str, ...]` | 无 schema 时全 None/`()`（老包零变化）；`to_dict`/ledger 同步带键；`_with_ledger` 重构同步复制（R0 前例陷阱） |
+| `subAgent(output_schema)` | JSON object（`required` 键表是唯一被解释的关键字） | runner 把格式指令拼进孩子 task 串尾（task 即孩子 user 消息，无需动 loop/engine）；`_packet` 对截断后结论解析（facts 永不描述父没见过的文本） |
+| render/data | `facts: k=v, …` 紧凑行（valid 时）/`⚠ 结构校验未过 (…)`（invalid 时）；`data += facts/schema_valid/schema_errors` | invalid 时 success 照旧（按 status 定），原文照留 |
+| 错误码 | `schema_too_large`（序列化超 4000 字符）、`schema_invalid`（非对象） | 前置校验，runner 不碰 |
 
 ### 合同变更（仅两处）
 

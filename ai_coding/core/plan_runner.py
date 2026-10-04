@@ -55,9 +55,16 @@ class PlanReport:
     deliveries: list[StepDelivery] = field(default_factory=list)
     #: None = ran to the end; otherwise why it stopped early.
     stopped: str | None = None
+    #: Step-turns (``process_input`` calls) this run spent (R1-4).
+    turns_used: int = 0
+    #: Summed model-step usage, or None when the loop reported none (R1-4).
+    tokens_used: dict[str, int] | None = None
 
     def render(self) -> str:
-        parts = [f"[plan-run] 完成 {len(self.completed)} 步"]
+        head = f"[plan-run] 完成 {len(self.completed)} 步 · 用了 {self.turns_used} 回合"
+        if self.tokens_used:
+            head += f" / {self.tokens_used.get('total_tokens', '?')} tokens"
+        parts = [head]
         if self.completed:
             parts.append("已完成：" + ", ".join(self.completed))
         if self.blocked:
@@ -91,6 +98,7 @@ class PlanRunner:
             self._say(console, "[plan-run] no open items — run /plan first")
             return report
         attempted: set[str] = set()
+        cap = self._run_budget()
         while True:
             item = self._next_ready(task, attempted)
             if item is None:
@@ -99,6 +107,17 @@ class PlanRunner:
                         "deadlock: open items remain but none is ready "
                         "(missing dependency or cycle)"
                     )
+                break
+            # R1-4: the run's own ceiling, checked only while work remains —
+            # a run that spends exactly the cap finishing is a clean end,
+            # not an alarm.  Finished steps persist on the task, so the next
+            # /plan-run resumes where this one stopped.
+            if 0 < cap <= report.turns_used:
+                report.stopped = (
+                    f"budget: plan turn budget exhausted "
+                    f"({report.turns_used}/{cap} step-turns); "
+                    "re-run /plan-run to continue"
+                )
                 break
             attempted.add(item.id)
             await self._run_step(session, task, item, report, console,
@@ -126,6 +145,47 @@ class PlanRunner:
         settings = getattr(self._loop, "settings", None)
         return int(getattr(settings, "plan_step_max_iterations", 8) or 8)
 
+    def _run_budget(self) -> int:
+        """Turn ceiling for this run (R1-4): 0 (or negative) disables."""
+        settings = getattr(self._loop, "settings", None)
+        value = getattr(settings, "plan_max_step_turns", 20)
+        if value is None:
+            return 20
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return 20
+
+    @staticmethod
+    def _merge_usage(
+        into: dict[str, int] | None, extra: dict[str, int] | None
+    ) -> dict[str, int] | None:
+        """Sum two usage dicts key-wise; None when neither reported."""
+        if into is None:
+            return dict(extra) if extra is not None else None
+        if extra is None:
+            return into
+        merged = dict(into)
+        for key, value in extra.items():
+            merged[key] = merged.get(key, 0) + int(value)
+        return merged
+
+    def _turn_usage(self) -> dict[str, int] | None:
+        """What the last ``process_input`` spent, if the loop says (R1-4).
+
+        The real loop exposes ``last_outcome.usage``; stubs do not — the
+        getattr chain keeps both working, and unknown stays unknown (None),
+        never zero (zero would lie about a free turn).
+        """
+        outcome = getattr(self._loop, "last_outcome", None)
+        usage = getattr(outcome, "usage", None)
+        if not isinstance(usage, dict):
+            return None
+        try:
+            return {str(key): int(value) for key, value in usage.items()}
+        except (TypeError, ValueError):
+            return None
+
     async def _run_step(
         self, session: Any, task: Any, item: Any, report: PlanReport,
         console: Any, *, on_delta: Any, observer: Any,
@@ -150,6 +210,7 @@ class PlanRunner:
         )
         context = self._context(report)
         attempts = 0
+        step_usage: dict[str, int] | None = None
         try:
             session.acceptance = list(contracts)
             start_turn = int(getattr(session, "turn_count", 0) or 0)
@@ -158,15 +219,25 @@ class PlanRunner:
                 on_delta=on_delta, observer=observer,
             )
             attempts = 1
+            # R1-4: every returned turn costs budget, and its spend is read
+            # off the loop while it is still "the last turn".
+            report.turns_used += 1
+            turn_usage = self._turn_usage()
+            step_usage = self._merge_usage(step_usage, turn_usage)
+            report.tokens_used = self._merge_usage(report.tokens_used, turn_usage)
             if contracts and not self._contracts_passed(session):
                 text = await self._loop.process_input(
                     session, self._repair_prompt(item, session),
                     on_delta=on_delta, observer=observer,
                 )
                 attempts = 2
+                report.turns_used += 1
+                turn_usage = self._turn_usage()
+                step_usage = self._merge_usage(step_usage, turn_usage)
+                report.tokens_used = self._merge_usage(report.tokens_used, turn_usage)
             end_turn = int(getattr(session, "turn_count", 0) or 0)
             self._settle(session, task, item, report, text, attempts,
-                         (start_turn, end_turn))
+                         (start_turn, end_turn), step_usage)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — one bad step must not kill the run
@@ -174,7 +245,8 @@ class PlanRunner:
                         evidence=f"runner error: {exc}")
             report.blocked.append(item.id)
             report.deliveries.append(self._delivery(
-                item, "blocked", 1, [], f"runner error: {exc}", (0, 0)))
+                item, "blocked", 1, [], f"runner error: {exc}", (0, 0),
+                step_usage))
         finally:
             self._loop.policy = original_policy
             session.acceptance = previous_acceptance
@@ -185,7 +257,8 @@ class PlanRunner:
         )
 
     def _settle(self, session: Any, task: Any, item: Any, report: PlanReport,
-                text: Any, attempts: int, turns: tuple[int, int]) -> None:
+                text: Any, attempts: int, turns: tuple[int, int],
+                usage: dict[str, int] | None) -> None:
         """Score one finished step and record its delivery.
 
         Mechanical verdicts win: a step whose proof commands fail is blocked
@@ -214,7 +287,7 @@ class PlanRunner:
             report.stalled.append(item.id)
         if status == "completed":
             report.completed.append(item.id)
-        delivery = self._delivery(item, status, attempts, ac, summary, turns)
+        delivery = self._delivery(item, status, attempts, ac, summary, turns, usage)
         report.deliveries.append(delivery)
         session.step_deliveries.append(delivery)
 
@@ -230,10 +303,11 @@ class PlanRunner:
 
     def _delivery(self, item: Any, status: str, attempts: int,
                 ac: list[dict[str, Any]], summary: str,
-                turns: tuple[int, int]) -> StepDelivery:
+                turns: tuple[int, int], usage: dict[str, int] | None = None) -> StepDelivery:
         return StepDelivery(
             step_id=item.id, statement=item.content, status=status,
             attempts=attempts, ac=ac, summary=summary, turns=turns,
+            usage=usage,
         )
 
     def _context(self, report: PlanReport) -> str:

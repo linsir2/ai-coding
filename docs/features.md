@@ -46,7 +46,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | `/skills` | — | 列出 `SkillRegistry` 目录（`- name: description`） |
 | `ask_user`（工具） | — | 弹 `AskScreen` 提问；模型给了 `options` 时会在问题下方列出（选项只是提示，不强制，仍可自由输入）。**已实现**（此前 `AskScreen` 的 `options` 参数从未被任何调用方填充，渲染行是死代码） |
 | `/plan` | — | 先弹 `What should I plan?` 收集主题，再以该主题发起计划回合（`ui/textual_app.py::_plan_turn`）。计划 prompt 要求模型用 `todo_write` 写成条目，有机器可判的步骤必须带 `verify`（shell 证明命令），供 `/plan-run` 执行。**不接受参数**：`/plan 改一下 loader` 会整条落回 `handle_input` 的旧固定 prompt，参数被静默丢弃；主题也不回显（`_plan_turn` 不调 `append_user`），transcript 里看不到你规划的是什么 |
-| `/plan-run` | — | 按依赖序逐项执行 open todos，每项一个有界回合（`ai.plan_step_max_iterations`，默认 8；loop policy 临时换副本，跑完恢复）。有 `verify` 的项自动转验收契约走 R0 门：失败修一次，再败标 `blocked` 并停；无 `verify` 且模型未标记完成的项标 `stalled`（下次可重跑），同一次运行不重试。每步落 `stepDeliveries` 收据，`/resume` 重放为步骤 header。transcript 即步骤 timeline |
+| `/plan-run` | — | 按依赖序逐项执行 open todos，每项一个有界回合（`ai.plan_step_max_iterations`，默认 8；loop policy 临时换副本，跑完恢复）。有 `verify` 的项自动转验收契约走 R0 门：失败修一次，再败标 `blocked` 并停；无 `verify` 且模型未标记完成的项标 `stalled`（下次可重跑），同一次运行不重试。每步落 `stepDeliveries` 收据，`/resume` 重放为步骤 header。transcript 即步骤 timeline。**整轮有顶**：`ai.plan_max_step_turns`（默认 20，0=关闭）计 `process_input` 调用次数（含 repair），超了停（`stopped=budget…`）——单步有界而整轮无界是 R1-4 补的洞；每次 `process_input` 起新墙钟 deadline（`_begin_turn` 现场查实），所以 turn-count 顶同时封了轮次/token（×步迭代×max_tokens）/墙钟（×turn_timeout）三界。report 头行写 spend（回合 + total tokens，有 usage 时）；budget 停可续跑（完成的步已 persist，下次从剩余步继续） |
 | `/review` | — | 向模型发一条「审查当前 git diff」的快捷 prompt |
 | `/config` | — | 打印生效的 model / 上下文预算 / 迭代上限 / 停止策略 / 回合超时 |
 | `/compact` | — | 主动压缩历史并落盘 |
@@ -129,6 +129,16 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | 完成通知 | `BackgroundTaskDone` 事件顺捕获的 emit 投递（TUI 落 transcript dim 行，跨会话标注来源会话）；全文包仍在 `transcripts/subagents/` ledger |
 | `/tasks` | 列 run id/名/状态/耗时/tokens；`/tasks stop <id>` 停（→ cancelled 包 + 完成事件）；无 runner 时降级提示 |
 | 容量与重启 | 信号量满时 spawn 直接报错（不静默排队）；表 200 行封顶（只剪终态行）；重启丢表（运行中的孩子无法证副作用，不恢复） |
+
+### 结构化 handoff（R1-3）
+
+| 机制 | 行为 |
+|---|---|
+| `subAgent(output_schema={...})` | 子结论的 JSON 形状合同：孩子被要求把 verdict 以 JSON 对象返回，包带解析出的 `facts` + `schema_valid` 三态 verdict（None=没要合同）；父可编程取数，不再读散文摘数字 |
+| 宽容解析，内容严格 | 去围栏→全文解析→散文内首个平衡 `{…}` 块；只认 `required` 键表（其余 JSON Schema 关键字忽略，文档写明是子集）；多余键容忍；值永不强制转换 |
+| 坏形状不杀工作 | `schema_valid=false` 只标形态失败：包状态照旧（success 按 status 定）、原文照留、render 警告行点名缺的键；ledger 文件同样落 `facts/schema_valid/schema_errors` |
+| 合同大小卡 | schema 序列化超 4000 字符直接拒（`schema_too_large`，runner 不碰）——schema 要进孩子 prompt，无界即 token 炸弹；非对象拒（`schema_invalid`） |
+| 后台同样可用 | `background=true + output_schema` 照走：facts 进包与 ledger；完成事件带 `ledger_path` 指针（块尾 `· 完整回包: 路径`），无 ledger 时不显示 |
 
 ### 任务清单与停止判定（R2 拆分为纯单元）
 

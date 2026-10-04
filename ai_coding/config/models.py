@@ -91,6 +91,13 @@ class AIConfig(BaseModel):
     # R1-1: iteration ceiling for one plan-runner step.  Measured: simple steps
     # close in 5-7 iterations; 8 leaves headroom without funding a wander.
     plan_step_max_iterations: int = 8
+    # R1-4: turn ceiling for one /plan-run.  Steps are bounded but the run was
+    # not — a plan that keeps "completing" spent steps x (1-2) turns with no
+    # cap, and each process_input starts a FRESH wall-clock deadline
+    # (AgentLoop._begin_turn), so wall-clock was unbounded too.  One knob
+    # bounds all three: turns directly, tokens via turns x step-iterations x
+    # max_tokens, wall-clock via turns x turn_timeout_seconds.  0 disables.
+    plan_max_step_turns: int = 20
     max_result_data_bytes: int = 8_000
     max_subagent_conclusion_chars: int = 4_000
     # Ask the endpoint to emit a final usage frame (stream_options.include_usage).

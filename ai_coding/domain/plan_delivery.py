@@ -28,6 +28,10 @@ class StepDelivery:
     #: (first, last) session turn numbers spanned.  Informational only —
     #: replay matches steps to messages by prompt marker, not by number.
     turns: tuple[int, int] = (0, 0)
+    #: What the step's turns spent (summed model-step usage, R1-4) — the
+    #: visibility half of the run budget.  ``None`` when the loop did not
+    #: report it.
+    usage: dict[str, int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -38,6 +42,7 @@ class StepDelivery:
             "ac": [dict(entry) for entry in self.ac],
             "summary": self.summary,
             "turns": [int(self.turns[0]), int(self.turns[1])],
+            "usage": dict(self.usage) if self.usage is not None else None,
         }
 
     @classmethod
@@ -46,6 +51,12 @@ class StepDelivery:
         ac = [dict(entry) for entry in raw_ac] if isinstance(raw_ac, list) else []
         raw_turns = data.get("turns") or [0, 0]
         turns = (int(raw_turns[0]), int(raw_turns[1])) if len(raw_turns) >= 2 else (0, 0)
+        raw_usage = data.get("usage")
+        usage = (
+            {str(key): int(value) for key, value in raw_usage.items()}
+            if isinstance(raw_usage, dict)
+            else None
+        )
         return cls(
             step_id=str(data.get("stepId", "")),
             statement=str(data.get("statement", "")),
@@ -54,6 +65,7 @@ class StepDelivery:
             ac=ac,
             summary=str(data.get("summary", "")),
             turns=turns,
+            usage=usage,
         )
 
 
