@@ -260,9 +260,10 @@ class PlanRunner:
 
         Borrowed from the sub-agent runner (``core/subagent.py:_run_in``): a
         child gets its own ``SessionData`` rather than the parent's history.
-        The seed is the structured handoff, so every step starts from a
-        constant-size context instead of the parent's growing one — measured
-        before: 4 turns cost 41k/82k/130k/254k prompt tokens (quadratic).
+        The seed is the structured handoff, so what a step reads is bounded by
+        the plan instead of by the conversation — measured before: 4 turns
+        cost 41k/82k/130k/254k prompt tokens, because each turn resent
+        everything the earlier ones had said.
         """
         step = SessionData(
             session_id=f"plan-{uuid.uuid4().hex[:12]}",
@@ -285,10 +286,19 @@ class PlanRunner:
         """The step's opening context: goal + the plan's current state.
 
         Only open items are listed — Hermes's rule that re-showing completed
-        items makes the model redo finished work.  The seed stays constant in
-        size as the plan drains, so N steps cost O(N) context, not O(N²): the
-        step learns what is left from the task's own statuses, not from a
-        growing transcript of everything earlier steps said.
+        items makes the model redo finished work.
+
+        What this buys, precisely: a step's context is bounded by *the plan*,
+        not by the conversation.  Before, every step resent the parent's whole
+        history, so turn k carried everything steps 1..k-1 said — 4 turns cost
+        41k/82k/130k/254k prompt tokens.  Now nothing a step said can reach a
+        later step.
+
+        What it does not buy: the seed re-lists the open items, so the total
+        seed text over an N-step plan is still quadratic in N (measured: 8
+        steps 2.4k chars, 16 → 8.8k, 32 → 34k, 64 → 132k) — with a constant
+        roughly two orders of magnitude smaller than transcripts.  Calling
+        that "linear" was wrong; the per-step size is what stayed flat.
         """
         lines = [f"[计划目标] {task.goal or '(未命名计划)'}", "", "[计划步骤]"]
         for entry in task.items:

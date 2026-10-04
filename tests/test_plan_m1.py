@@ -9,8 +9,11 @@ A. ``/plan <topic>`` plans AND executes in one command.  ``/plan-run`` is
 B. Each plan step runs in a FRESH session seeded with goal + plan + prior
    step summaries, instead of resending the parent's whole history.  The
    parent session only receives the step prompt (replay marker) and a one-line
-   summary.  Measured before: 4 turns -> 41k/82k/130k/254k prompt tokens
-   (quadratic).  After: constant per step (linear).
+   summary.  Measured before: 4 turns -> 41k/82k/130k/254k prompt tokens,
+   because each turn resent the earlier turns.  After: each step reads only
+   the goal and the plan's open items (the seed does still grow with the
+   number of open items, so the total over a plan stays quadratic — with a
+   constant ~100x smaller).  See ``test_no_step_reads_an_earlier_step_s_output``.
 
 Borrowed mechanisms (see docs): subagent's fresh-SessionData pattern
 (core/subagent.py:_run_in), Hermes's structured handoff schema, opencode's
@@ -27,6 +30,9 @@ from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
+
+#: Unique per call so a test can ask "did this step read an earlier step?".
+_TOOL_MARK = "tool-output-%d "
 
 
 def _session_with(*contents, goal="plan", verifies=()):
@@ -67,10 +73,12 @@ class _StubLoop:
         self.calls.append((text, session.session_id))
         self.step_sessions.append(session)
         self.prompt_chars.append(sum(len(m.content or "") for m in session.messages))
-        # simulate the real loop: each turn leaves a tool result behind
+        # Simulate the real loop: each turn leaves a tool result behind.  The
+        # marker makes it detectable if a later step ever reads an earlier
+        # step's output — which is the bug M1 exists to prevent.
         session.messages.append(
-            ChatMessage(role="tool", content="x" * 5000, timestamp="",
-                        tool_call_id=f"call-{len(self.calls)}")
+            ChatMessage(role="tool", content=_TOOL_MARK % len(self.calls) + "x" * 5000,
+                        timestamp="", tool_call_id=f"call-{len(self.calls)}")
         )
         action = self._script.pop(0) if self._script else "complete"
         if action in ("complete", "complete-all"):
@@ -267,21 +275,38 @@ async def test_step_session_shares_the_plan_task():
 
 
 @pytest.mark.asyncio
-async def test_prompt_growth_is_linear_not_quadratic():
-    """The token bug, measured: 6 steps must not cost 4x 3 steps."""
-    small = _session_with("a", "b", "c")
-    small_loop = _StubLoop(["complete"] * 3)
-    await PlanRunner(small_loop).run(small)
+async def test_no_step_reads_an_earlier_step_s_output():
+    """The M1 claim, pinned structurally instead of by a growth ratio.
 
-    large = _session_with(*[f"s{n}" for n in range(6)])
-    large_loop = _StubLoop(["complete"] * 6)
-    await PlanRunner(large_loop).run(large)
+    What M1 buys: a step's context is built from the goal and the plan's *open*
+    items, never from what earlier steps produced.  The old test compared total
+    prompt growth for a 3- and a 6-step plan and needed a magic threshold to
+    separate quadratic from linear — it passed at 2.963 against a 3.0 limit and
+    failed at 7 steps, so it was really pinning the quadratic it claimed to
+    rule out.
 
-    small_total = sum(small_loop.prompt_chars)
-    large_total = sum(large_loop.prompt_chars)
-    ratio = large_total / max(small_total, 1)
-    # quadratic would be ~4.0; linear is ~2.0.  Allow slack for the seed.
-    assert ratio < 3.0, f"prompt growth ratio {ratio:.2f} is not linear"
+    Two channels can leak, and both are asserted with no threshold at all:
+
+    1. the sessions themselves are shared, so an earlier step's tool output is
+       in view (the pre-M1 shape);
+    2. the seed grows a "已完成步骤" block, so an earlier step's *statement* is
+       in view — also pre-M1, and the reason this test was needed: channel 1
+       alone stayed green when channel 2 came back.
+    """
+    contents = [f"step {n}" for n in range(4)]
+    session = _session_with(*contents)
+    loop = _StubLoop(["complete"] * 4)
+    await PlanRunner(loop).run(session)
+    assert len(loop.step_sessions) == 4
+
+    for index, step in enumerate(loop.step_sessions):
+        blob = "\n".join(m.content or "" for m in step.messages)
+        finished = [call for call in range(1, index + 1)
+                    if (_TOOL_MARK % call) in blob]
+        assert not finished, f"step {index + 1} reads earlier tool output: {finished}"
+        # the seed lists open items only, so a finished step's statement is a leak
+        stated = [content for content in contents[:index] if content in blob]
+        assert not stated, f"step {index + 1} reads finished steps' statements: {stated}"
 
 
 @pytest.mark.asyncio

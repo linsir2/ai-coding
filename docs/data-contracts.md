@@ -283,7 +283,7 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `PlanReport`（`core/plan_runner.py`） | `turns_used`（本轮 `process_input` 次数）、`tokens_used`（求和或 None）、`stopped` 新增 `budget:…` 值 | render 头行 `完成 n 步 · 用了 T 回合 [/ K tokens]`（R1-5b：n 只计 attested——本轮亲手结算的步；fiat 另列在下一行，`completed` 列表仍含全部 done id）；顶盖检查只在还有剩余工作时触发（正好用完跑完=干净结束） |
 | `StepDelivery.proof`（派生属性，R1-6，不落盘） | `verified`（completed+attested+ac 非空即全过）/`on-claim`（completed+attested+ac 空）/`fiat`（attested=False）/`n/a`（未完成） | 只读推导，无字段、无 `to/from_dict` 改动；老收据 retroactive 可分级；非法组合 fallback 到 on-claim（宁可标没证过，不标证过） |
 | `AIConfig.plan_step_max_iterations` | `int = 8` | plan-runner 单步迭代上限；runner 临时换 policy 副本（同时 `stop_policy=natural` 关 todo 门禁、`max_auto_continuations=0` 禁 C3），`finally` 恢复 |
-| M1 短对话契约 | 每步全新 `SessionData`（`plan-<uuid>`、`ephemeral=True`），seed = goal + 计划当前状态（只列未完成项）+ 本步验收；步骤全文留子 session，父只收 prompt + 一行摘要 + 收据 | token 从 O(N²) 降为 O(N)（实测 4 回合 41k/82k/130k/254k → 恒定）；`/plan-run` 删除，`/plan` 计划并执行；步会话不落盘（`TurnCloser.save` 对 ephemeral 跳过），不污染 `/resume` |
+| M1 短对话契约 | 每步全新 `SessionData`（`plan-<uuid>`、`ephemeral=True`），seed = goal + 计划当前状态（只列未完成项）+ 本步验收；步骤全文留子 session，父只收 prompt + 一行摘要 + 收据 | 每步上下文只由计划决定、不再由对话长度决定（实测 4 回合 41k/82k/130k/254k → 每步平稳；seed 仍随未完成项数增长，全计划合计对步骤数仍是二次，8/16/32/64 步 seed 2.4k/8.8k/34k/132k 字符）；`/plan-run` 删除，`/plan` 计划并执行；步会话不落盘（`TurnCloser.save` 对 ephemeral 跳过），不污染 `/resume` |
 | `SessionData.ephemeral`（H1，不落盘） | `bool = False` | 内部会话旗标：正常 session 为 False；plan 步会话 True。`TurnCloser.save` 唯一持久化闸口处跳过（checkpoint/finalize 都走它） |
 | `SessionData.continuations`（C3，不落盘） | `int = 0` | 本用户回合已用的自动续跑次数；`_begin_turn` 归零，续跑分支 +1；`to_dict` 白名单不含它（跨重启无意义） |
 | `TurnSnapshot.continuations`（C3） | `int = 0` | 策略可见的续跑计数；循环顶部快照必须带 `open_items`（续跑判定的另一个输入），否则续跑永不触发（集成测试钉死） |
