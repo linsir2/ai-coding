@@ -277,11 +277,12 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | 类型 | 字段 | 说明 |
 |---|---|---|
 | `TodoItem.verify` | `str = ""` | 证明该项的 shell 命令；`to_dict` 非空才写 `verify` 键，`todo_write` 的 `add`/`update` 透传；空 = 不可机检，走 todo 语义 |
-| `StepDelivery`（`domain/plan_delivery.py`） | `stepId`、`statement`、`status`（completed/blocked/stalled）、`attempts`、`ac`（[{id, passed}]）、`summary`、`turns`、`usage`（R1-4，该步各回合 usage 求和；loop 未上报则 None）、`attested`（R1-5，runner 亲手结算 True / 分步外回填 False；老收据缺键读 True） | 一步的收据；`SessionData.step_deliveries`，仅非空落盘（键 `stepDeliveries`）；老收据无 `usage` 键照读（from_dict 默认 None） |
-| `PlanReport`（`core/plan_runner.py`） | `turns_used`（本轮 `process_input` 次数）、`tokens_used`（求和或 None）、`stopped` 新增 `budget:…` 值 | render 头行 `完成 n 步 · 用了 T 回合 [/ K tokens]`；顶盖检查只在还有剩余工作时触发（正好用完跑完=干净结束） |
-| `AIConfig.plan_step_max_iterations` | `int = 8` | plan-runner 单步迭代上限；runner 临时换 policy 副本，`finally` 恢复 |
 | `SessionData.begin_plan(goal)`（R1-5b） | 建新 `TaskState(goal=goal)` + 清空 `step_deliveries`，返回新 task | **goal / items / 收据三位一体**：收据按 `stepId` 认领，而每次新清单 id 从 1 重启——带着旧收据走，新计划的完成会被 runner 的回填当成「已收据」而丢弃（实测：重置后 2 步全 done，回填产出 0 条）。消息历史与 `acceptance` 不动 |
+| `StepDelivery`（`domain/plan_delivery.py`） | `stepId`、`statement`、`status`（completed/blocked/stalled）、`attempts`、`ac`（[{id, passed}]）、`summary`、`turns`、`usage`（R1-4）、`attested`（R1-5）、`seed_chars`（M1，该步 seed 字符数；fiat 回填为 0，老收据缺键读 0） | 一步的收据；`SessionData.step_deliveries`，仅非空落盘；老收据无新键照读默认值 |
+| `PlanReport`（`core/plan_runner.py`） | `turns_used`（本轮 `process_input` 次数）、`tokens_used`（求和或 None）、`stopped` 新增 `budget:…` 值 | render 头行 `完成 n 步 · 用了 T 回合 [/ K tokens]`（R1-5b：n 只计 attested——本轮亲手结算的步；fiat 另列在下一行，`completed` 列表仍含全部 done id）；顶盖检查只在还有剩余工作时触发（正好用完跑完=干净结束） |
 | `StepDelivery.proof`（派生属性，R1-6，不落盘） | `verified`（completed+attested+ac 非空即全过）/`on-claim`（completed+attested+ac 空）/`fiat`（attested=False）/`n/a`（未完成） | 只读推导，无字段、无 `to/from_dict` 改动；老收据 retroactive 可分级；非法组合 fallback 到 on-claim（宁可标没证过，不标证过） |
+| `AIConfig.plan_step_max_iterations` | `int = 8` | plan-runner 单步迭代上限；runner 临时换 policy 副本（同时 `stop_policy=natural` 关 todo 门禁），`finally` 恢复 |
+| M1 短对话契约 | 每步全新 `SessionData`（`plan-<uuid>`），seed = goal + 计划当前状态（只列未完成项）+ 本步验收；步骤全文留子 session，父只收 prompt + 一行摘要 + 收据 | token 从 O(N²) 降为 O(N)（实测 4 回合 41k/82k/130k/254k → 恒定）；`/plan-run` 删除，`/plan` 计划并执行 |
 
 ### R1-4 思考时间线契约
 

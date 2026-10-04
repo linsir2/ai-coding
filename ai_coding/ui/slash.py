@@ -38,7 +38,6 @@ _ALIASES: dict[str, str] = {
     "/tasks": "tasks",
     "/skills": "skills",
     "/plan": "plan",
-    "/plan-run": "plan-run",
     "/review": "review",
     "/config": "config",
 }

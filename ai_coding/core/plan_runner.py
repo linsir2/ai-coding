@@ -23,12 +23,16 @@ Design notes (all measured in the 23-run experiment batch):
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ai_coding.core.turn_policy import TurnPolicy
 from ai_coding.domain.acceptance import AcceptanceItem
+from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.plan_delivery import StepDelivery
+from ai_coding.domain.session import SessionData
+from ai_coding.infra.time_utils import now_utc
 
 #: Step prompts start here.  The replay matches user bubbles on this marker
 #: to rebuild step headers — turn numbers do not survive compaction, but the
@@ -109,8 +113,11 @@ class PlanRunner:
         report = PlanReport()
         task = getattr(session, "task", None)
         if task is None:
+            # No task at all (a bare /plan on a session that never had one):
+            # same verdict as an empty plan — "nothing to do", not "run /plan
+            # first", which would be absurd right after planning.
             report.stopped = "no-open-items"
-            self._say(console, "[plan-run] no open items — run /plan first")
+            self._say(console, "[plan-run] 完成 0 步 · 用了 0 回合（无任务项）")
             return report
         attempted: set[str] = set()
         cap = self._run_budget()
@@ -132,8 +139,8 @@ class PlanRunner:
                 break
             # R1-4: the run's own ceiling, checked only while work remains —
             # a run that spends exactly the cap finishing is a clean end,
-            # not an alarm.  Finished steps persist on the task, so the next
-            # /plan-run resumes where this one stopped.
+            # not an alarm.  Finished steps persist on the task; the remaining
+            # open items survive as the plan's state.
             if 0 < cap <= report.turns_used:
                 report.stopped = (
                     f"budget: plan turn budget exhausted "
@@ -203,6 +210,47 @@ class PlanRunner:
         settings = getattr(self._loop, "settings", None)
         return int(getattr(settings, "plan_step_max_iterations", 8) or 8)
 
+    def _make_step_session(self, task: Any, item: Any, report: PlanReport) -> SessionData:
+        """A fresh session for one step — the short conversation (M1-B).
+
+        Borrowed from the sub-agent runner (``core/subagent.py:_run_in``): a
+        child gets its own ``SessionData`` rather than the parent's history.
+        The seed is the structured handoff, so every step starts from a
+        constant-size context instead of the parent's growing one — measured
+        before: 4 turns cost 41k/82k/130k/254k prompt tokens (quadratic).
+        """
+        step = SessionData(
+            session_id=f"plan-{uuid.uuid4().hex[:12]}",
+            title=f"plan step {item.id}",
+            created_time=now_utc(),
+            last_access_time=now_utc(),
+        )
+        # Shared, not copied: a step marking its item done moves the plan.
+        step.task = task
+        step.messages = [
+            ChatMessage(role="user", content=self._seed(task, item, report), timestamp="")
+        ]
+        return step
+
+    def _seed(self, task: Any, item: Any, report: PlanReport) -> str:
+        """The step's opening context: goal + the plan's current state.
+
+        Only open items are listed — Hermes's rule that re-showing completed
+        items makes the model redo finished work.  The seed stays constant in
+        size as the plan drains, so N steps cost O(N) context, not O(N²): the
+        step learns what is left from the task's own statuses, not from a
+        growing transcript of everything earlier steps said.
+        """
+        lines = [f"[计划目标] {task.goal or '(未命名计划)'}", "", "[计划步骤]"]
+        for entry in task.items:
+            if entry.is_terminal():
+                continue
+            marker = " ← 本步" if entry.id == item.id else ""
+            lines.append(f"{entry.id}. [{entry.status}] {entry.content}{marker}")
+        if item.verify:
+            lines += ["", f"[本步验收] {item.verify}"]
+        return "\n".join(lines)
+
     def _run_budget(self) -> int:
         """Turn ceiling for this run (R1-4): 0 (or negative) disables."""
         settings = getattr(self._loop, "settings", None)
@@ -254,6 +302,11 @@ class PlanRunner:
             console,
             f"[plan-run] 步骤 {item.id}/{total}（剩余 {open_count} 项）：{item.content}",
         )
+        # M1-B: the step runs in its own short conversation, not the parent's
+        # ever-growing history.  The parent keeps only the prompt (replay
+        # marker) and a one-line summary.
+        step_session = self._make_step_session(task, item, report)
+        seed = step_session.messages[0].content or ""
         previous_acceptance = list(getattr(session, "acceptance", []))
         contracts = (
             [AcceptanceItem(
@@ -263,17 +316,20 @@ class PlanRunner:
         )
         original_policy = self._loop.policy
         budget = self._step_budget()
+        # M1-B: close the todo gate too — a step must not be nudged about the
+        # plan's other open items.  Same swap-and-restore discipline as before.
         self._loop.policy = TurnPolicy(
-            replace(original_policy.config, max_iterations=budget)
+            replace(original_policy.config, max_iterations=budget,
+                    stop_policy="natural")
         )
-        context = self._context(report)
         attempts = 0
         step_usage: dict[str, int] | None = None
         try:
-            session.acceptance = list(contracts)
-            start_turn = int(getattr(session, "turn_count", 0) or 0)
+            step_session.acceptance = list(contracts)
+            start_turn = int(getattr(step_session, "turn_count", 0) or 0)
+            step_prompt = self._step_prompt(item)
             text = await self._loop.process_input(
-                session, self._step_prompt(item, context),
+                step_session, step_prompt,
                 on_delta=on_delta, observer=observer,
             )
             attempts = 1
@@ -283,9 +339,9 @@ class PlanRunner:
             turn_usage = self._turn_usage()
             step_usage = self._merge_usage(step_usage, turn_usage)
             report.tokens_used = self._merge_usage(report.tokens_used, turn_usage)
-            if contracts and not self._contracts_passed(session):
+            if contracts and not self._contracts_passed(step_session):
                 text = await self._loop.process_input(
-                    session, self._repair_prompt(item, session),
+                    step_session, self._repair_prompt(item, step_session),
                     on_delta=on_delta, observer=observer,
                 )
                 attempts = 2
@@ -293,9 +349,15 @@ class PlanRunner:
                 turn_usage = self._turn_usage()
                 step_usage = self._merge_usage(step_usage, turn_usage)
                 report.tokens_used = self._merge_usage(report.tokens_used, turn_usage)
-            end_turn = int(getattr(session, "turn_count", 0) or 0)
-            self._settle(session, task, item, report, text, attempts,
-                         (start_turn, end_turn), step_usage)
+            end_turn = int(getattr(step_session, "turn_count", 0) or 0)
+            self._settle(step_session, session, task, item, report, text, attempts,
+                         (start_turn, end_turn), step_usage, len(seed))
+            # The parent's transcript stays linear: prompt for the replay
+            # marker, then the one-line summary — never the step's tools.
+            session.add_message(ChatMessage(role="user", content=step_prompt, timestamp=""))
+            session.add_message(
+                ChatMessage(role="assistant", content=report.deliveries[-1].summary, timestamp="")
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — one bad step must not kill the run
@@ -304,40 +366,44 @@ class PlanRunner:
             report.blocked.append(item.id)
             report.deliveries.append(self._delivery(
                 item, "blocked", 1, [], f"runner error: {exc}", (0, 0),
-                step_usage))
+                step_usage, len(seed)))
         finally:
             self._loop.policy = original_policy
             session.acceptance = previous_acceptance
 
-    def _contracts_passed(self, session: Any) -> bool:
-        return bool(session.acceptance) and all(
-            item.passed is True for item in session.acceptance
+    def _contracts_passed(self, step_session: Any) -> bool:
+        return bool(step_session.acceptance) and all(
+            item.passed is True for item in step_session.acceptance
         )
 
-    def _settle(self, session: Any, task: Any, item: Any, report: PlanReport,
+    def _settle(self, step_session: Any, parent: Any, task: Any, item: Any, report: PlanReport,
                 text: Any, attempts: int, turns: tuple[int, int],
-                usage: dict[str, int] | None) -> None:
+                usage: dict[str, int] | None, seed_chars: int) -> None:
         """Score one finished step and record its delivery.
 
         Mechanical verdicts win: a step whose proof commands fail is blocked
         even if the model marked it done; a step without proof commands that
         the model left open is stalled (retryable next run), never retried
         inside this run.
+
+        ``step_session`` is where the turn ran (its acceptance verdicts live);
+        ``parent`` is the session that keeps the receipt — the step's own
+        transcript stays behind in the short conversation.
         """
         ac = [
             {"id": entry.id, "passed": entry.passed}
-            for entry in getattr(session, "acceptance", [])
+            for entry in getattr(step_session, "acceptance", [])
         ]
         first_line = _tail(str(text)).splitlines()
         summary = item.content if not first_line else f"{item.content}：{first_line[0]}"
         status = "completed"
         if item.verify:
-            if self._contracts_passed(session):
+            if self._contracts_passed(step_session):
                 task.update(item.id, status="completed",
-                            evidence=f"verify passed: {_tail(self._verify_output(session))}")
+                            evidence=f"verify passed: {_tail(self._verify_output(step_session))}")
             else:
                 task.update(item.id, status="blocked",
-                            evidence=f"verify failed: {_tail(self._verify_output(session))}")
+                            evidence=f"verify failed: {_tail(self._verify_output(step_session))}")
                 status = "blocked"
                 report.blocked.append(item.id)
         elif not self._model_claimed_done(task, item):
@@ -345,53 +411,41 @@ class PlanRunner:
             report.stalled.append(item.id)
         if status == "completed":
             report.completed.append(item.id)
-        delivery = self._delivery(item, status, attempts, ac, summary, turns, usage)
+        delivery = self._delivery(item, status, attempts, ac, summary, turns, usage, seed_chars)
         report.deliveries.append(delivery)
-        session.step_deliveries.append(delivery)
+        parent.step_deliveries.append(delivery)
 
     def _model_claimed_done(self, task: Any, item: Any) -> bool:
         current = task.get(item.id)
         return current is not None and current.status == "completed"
 
-    def _verify_output(self, session: Any) -> str:
-        for entry in getattr(session, "acceptance", []):
+    def _verify_output(self, step_session: Any) -> str:
+        for entry in getattr(step_session, "acceptance", []):
             if entry.output:
                 return str(entry.output)
         return ""
 
     def _delivery(self, item: Any, status: str, attempts: int,
                 ac: list[dict[str, Any]], summary: str,
-                turns: tuple[int, int], usage: dict[str, int] | None = None) -> StepDelivery:
+                turns: tuple[int, int], usage: dict[str, int] | None = None,
+                seed_chars: int = 0) -> StepDelivery:
         return StepDelivery(
             step_id=item.id, statement=item.content, status=status,
             attempts=attempts, ac=ac, summary=summary, turns=turns,
-            usage=usage,
+            usage=usage, seed_chars=seed_chars,
         )
 
-    def _context(self, report: PlanReport) -> str:
-        if not report.deliveries:
-            return ""
-        lines = ["已完成步骤："]
-        lines.extend(
-            f"{entry.step_id}. {entry.statement}（{entry.status}）"
-            for entry in report.deliveries
-        )
-        return "\n".join(lines)
-
-    def _step_prompt(self, item: Any, context: str) -> str:
-        prompt = (
+    def _step_prompt(self, item: Any) -> str:
+        return (
             f"{STEP_HEAD}{item.content}\n"
             f"（这是计划步骤 {item.id}，做完停下等验收，不要展开做别的。）"
         )
-        if context:
-            prompt += f"\n{context}"
-        return prompt
 
-    def _repair_prompt(self, item: Any, session: Any) -> str:
+    def _repair_prompt(self, item: Any, step_session: Any) -> str:
         return (
             f"{STEP_HEAD}{item.content}\n"
             f"上一步验收失败，只修复失败点，不要重做已通过的部分：\n"
-            f"{self._verify_output(session)}"
+            f"{self._verify_output(step_session)}"
         )
 
     @staticmethod

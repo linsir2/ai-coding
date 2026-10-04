@@ -91,9 +91,10 @@ def test_config():
     assert cmd is not None and cmd.name == "config"
 
 
-def test_plan_run():
-    cmd = parse_slash("/plan-run")
-    assert cmd is not None and cmd.name == "plan-run"
+def test_plan_run_was_absorbed_into_plan():
+    """M1-A: /plan-run no longer exists — /plan plans and executes."""
+    assert parse_slash("/plan-run") is None
+    assert parse_slash("/plan").name == "plan"
 
 
 def test_tasks():

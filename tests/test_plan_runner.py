@@ -34,15 +34,21 @@ class _StubLoop:
     """Stands in for AgentLoop: records prompts, plays a script per call."""
 
     def __init__(self, script, step_budget=8):
-        self.settings = SimpleNamespace(plan_step_max_iterations=step_budget)
+        self.settings = SimpleNamespace(
+            plan_step_max_iterations=step_budget,
+            plan_max_step_turns=0,
+            stop_policy="todo_aware",
+        )
         self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
         self._script = list(script)
         self.calls = []  # (text, policy_max_iterations_at_call)
+        self.step_sessions: list = []
         self.restored = True
 
     async def process_input(self, session, text, on_delta=None, observer=None):
         session.turn_count += 1
         self.calls.append((text, self.policy.config.max_iterations))
+        self.step_sessions.append(session)
         action = self._script.pop(0) if self._script else "complete"
         if action == "complete":
             for item in session.task.open_items():
@@ -190,4 +196,9 @@ async def test_prior_deliveries_are_summarised_into_later_steps():
     session = _session_with("step one", "step two")
     loop = _StubLoop(["complete", "complete"])
     await PlanRunner(loop).run(session)
-    assert "step one" in loop.calls[1][0]
+    # M1: prior progress travels in the step session's seed, not the prompt —
+    # completed items are absent from the open list, which is how a step
+    # learns they are done (re-listing them makes the model redo the work).
+    seed_2 = loop.step_sessions[1].messages[0].content
+    assert "step two" in seed_2
+    assert "step one" not in seed_2

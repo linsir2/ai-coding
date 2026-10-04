@@ -427,6 +427,8 @@ async def test_ctrl_y_with_no_tool_says_so():
         await pilot.press("ctrl+y")
         await pilot.pause()
         assert "没有可复制的工具输出" in _all_static_text(app)
+
+
 @pytest.mark.asyncio
 async def test_plan_with_topic_skips_the_prompt_and_resets_the_list():
     """The typed path: "/plan <topic>" must plan that topic, not ask (R1-5b).
@@ -457,3 +459,20 @@ async def test_plan_with_topic_skips_the_prompt_and_resets_the_list():
         assert "给 /tasks 加一个 show 子命令" in loop.calls[0]
         assert session.task.goal == "给 /tasks 加一个 show 子命令"
         assert session.task.items == []
+
+
+@pytest.mark.asyncio
+async def test_plan_run_is_gone_as_a_command():
+    """M1-A: /plan-run was absorbed into /plan — it is plain text now."""
+    from ai_coding.domain.session import SessionData
+
+    loop = _FakeLoop()
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    app = _app(loop=loop, session=session)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/plan-run"
+        await pilot.press("enter")
+        await pilot.pause()
+        # Not a command: it reaches the model as prose, not the runner.
+        assert loop.calls == ["/plan-run"]

@@ -5,11 +5,13 @@ logic (plain text → run the loop, slash → react) without touching the networ
 Rich console output is captured via ``record=True``.
 """
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from rich.console import Console
 
+from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
 from ai_coding.ui.console import DialogueConsole
 from ai_coding.ui.repl import REPLAction, handle_input
 
@@ -28,6 +30,11 @@ class _FakeLoop:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
         self.reply = "assistant answer"
+        # M1: the runner swaps the loop's policy per step, so a stub needs one.
+        self.settings = SimpleNamespace(
+            plan_step_max_iterations=8, plan_max_step_turns=20, stop_policy="natural"
+        )
+        self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
 
     async def process_input(self, session, text, on_delta=None):
         self.calls.append((text, on_delta))
@@ -493,8 +500,8 @@ async def test_unknown_command_at_distance_two_gets_a_suggestion():
     assert "did you mean" in out and "/status" in out
 
 
-async def test_handle_plan_run_with_no_open_items_says_so():
-    """No todos, no runs: point at /plan instead of calling the model."""
+async def test_handle_plan_with_no_open_items_says_so():
+    """No todos, no execution: the runner says so instead of calling the model."""
     from ai_coding.domain.session import SessionData
 
     loop = _FakeLoop()
@@ -502,15 +509,15 @@ async def test_handle_plan_run_with_no_open_items_says_so():
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
     dc, c = _console_capture()
 
-    action, _ = await handle_input(loop, "/plan-run", session, sessions, dc)
+    action, _ = await handle_input(loop, "/plan", session, sessions, dc)
 
     assert action is REPLAction.CONTINUE
-    assert loop.calls == []
-    assert "no open items" in _session_text(c)
+    assert len(loop.calls) == 1  # only the planning turn
+    assert "完成 0 步" in _session_text(c)
 
 
-async def test_handle_plan_run_executes_open_todos():
-    """Each open item gets its own turn; results come back as a report."""
+async def test_handle_plan_executes_open_todos():
+    """M1-A: /plan plans AND executes — each open item gets its own turn."""
     from types import SimpleNamespace
 
     from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
@@ -520,26 +527,29 @@ async def test_handle_plan_run_executes_open_todos():
     class _PlanLoop(_FakeLoop):
         def __init__(self):
             super().__init__()
-            self.settings = SimpleNamespace(plan_step_max_iterations=8)
+            self.settings = SimpleNamespace(
+                plan_step_max_iterations=8, plan_max_step_turns=20, stop_policy="natural"
+            )
             self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
 
         async def process_input(self, session, text, on_delta=None, observer=None):
             session.turn_count += 1
             self.calls.append((text, on_delta))
+            if "implementation plan" in text:
+                session.task = TaskState(goal="g")
+                session.task.add("fix bug")
+                return "plan written"
             for item in session.task.open_items():
                 if not item.is_terminal():
                     item.status = "completed"
                     break
             return "step done"
 
-    task = TaskState(goal="g")
-    task.add("fix bug")
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
-    session.task = task
     sessions = _FakeSessions()
     dc, c = _console_capture()
 
-    action, _ = await handle_input(_PlanLoop(), "/plan-run", session, sessions, dc)
+    action, _ = await handle_input(_PlanLoop(), "/plan 修 bug", session, sessions, dc)
 
     assert action is REPLAction.CONTINUE
     out = _session_text(c)

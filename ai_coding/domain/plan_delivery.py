@@ -39,6 +39,11 @@ class StepDelivery:
     #: Defaults True: every receipt written before this field existed was
     #: runner-settled.
     attested: bool = True
+    #: Size of the step's seed context in characters (M1-B) — the evidence
+    #: that the step ran as a short conversation rather than a resend of the
+    #: parent's whole history.  ``0`` for receipts written before this field
+    #: existed (and for fiat backfills, which have no step turn at all).
+    seed_chars: int = 0
 
     @property
     def proof(self) -> str:
@@ -72,6 +77,7 @@ class StepDelivery:
             "turns": [int(self.turns[0]), int(self.turns[1])],
             "usage": dict(self.usage) if self.usage is not None else None,
             "attested": bool(self.attested),
+            "seed_chars": int(self.seed_chars),
         }
 
     @classmethod
@@ -97,6 +103,7 @@ class StepDelivery:
             usage=usage,
             # Every receipt predating this field was runner-settled.
             attested=bool(data.get("attested", True)),
+            seed_chars=int(data.get("seed_chars", 0) or 0),
         )
 
 

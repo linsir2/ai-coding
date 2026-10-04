@@ -262,13 +262,22 @@ class AICodingApp(App[None]):
                 "Break it down into specific, actionable steps. "
                 "Write the plan as todo items with todo_write; every step with "
                 "a machine-checkable outcome must carry its proof command in "
-                "'verify' (a shell command), so /plan-run can execute and "
-                "verify each step. "
+                "'verify' (a shell command), so the plan can be executed and "
+                "verified step by step. "
                 "Write the items as pending/open steps only — do not execute "
-                "the work and do not mark items completed during planning; "
-                "execution happens later via /plan-run.",
+                "the work and do not mark items completed during planning.",
                 on_delta=self._on_delta,
                 observer=self._observer,
+            )
+            # M1-A: /plan plans AND executes — one command, one workflow.
+            # The two-command handoff let the plan go stale between /plan and
+            # /plan-run (measured: a run that executed 0 turns against a list
+            # from a prior turn).
+            from ai_coding.core.plan_runner import PlanRunner
+            from ai_coding.ui.console import TextualConsole
+
+            await PlanRunner(self._agent_loop).run(
+                self._session, TextualConsole(self._transcript)
             )
         finally:
             # WP3: backfill source; getattr because test stubs pass

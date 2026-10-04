@@ -23,8 +23,7 @@ HELP_TEXT = (
     "  /todo           show current task list\n"
     "  /tasks          list background sub-agent runs\n"
     "  /skills         list available skills\n"
-    "  /plan           generate implementation plan\n"
-    "  /plan-run       execute the plan step by step\n"
+    "  /plan           generate and execute an implementation plan\n"
     "  /review        review current changes\n"
     "  /config         show effective configuration\n"
     "  /compact        compact conversation history\n"
@@ -148,10 +147,9 @@ async def handle_input(
             console.info("[skills] no skills found")
         return REPLAction.CONTINUE, session
     if cmd.name == "plan":
-        # R1-5b: "/plan <topic>" used to drop the topic silently, and the new
-        # plan landed in the session's stale task (whose goal was the
-        # session's first question).  An explicit topic starts a fresh plan;
-        # a bare /plan refines whatever list is there.
+        # M1-A: /plan plans AND executes.  The two-command handoff let the
+        # plan go stale between /plan and /plan-run (measured: a run that
+        # executed 0 turns against a list from a prior turn).
         topic = cmd.raw[len("/plan"):].strip()
         if topic:
             session.begin_plan(topic)
@@ -165,15 +163,12 @@ async def handle_input(
             "Break it down into specific, actionable steps. "
             "Write the plan as todo items with todo_write; every step with "
             "a machine-checkable outcome must carry its proof command in "
-            "'verify' (a shell command), so /plan-run can execute and "
-            "verify each step. "
+            "'verify' (a shell command), so the plan can be executed and "
+            "verified step by step. "
             "Write the items as pending/open steps only — do not execute "
-            "the work and do not mark items completed during planning; "
-            "execution happens later via /plan-run.",
+            "the work and do not mark items completed during planning.",
             on_delta=console.delta,
         )
-        return REPLAction.CONTINUE, session
-    if cmd.name == "plan-run":
         from ai_coding.core.plan_runner import PlanRunner
 
         await PlanRunner(loop).run(session, console)
