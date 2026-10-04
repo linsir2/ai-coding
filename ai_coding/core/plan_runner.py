@@ -156,10 +156,25 @@ class PlanRunner:
                 break
             if report.blocked and report.blocked[-1] == item.id:
                 break
+        self._persist(session)
         self._say(console, report.render())
         return report
 
     # ---- internals ------------------------------------------------------
+
+    def _persist(self, session: Any) -> None:
+        """Write the run's results back into the parent's session file.
+
+        The steps run on ephemeral sessions (H1), so no turn inside the run
+        saves the parent any more — before this, quitting right after
+        ``/plan`` lost every receipt, every item status and every step bubble
+        (measured: 0 receipts on disk after a completed run).  One save at the
+        end of the run is the whole fix.  A later turn would have re-saved the
+        same mutated object, which is exactly why the loss was easy to miss.
+        """
+        save = getattr(getattr(self._loop, "closer", None), "save", None)
+        if save is not None:
+            save(session)
 
     def _next_ready(self, task: Any, attempted: set[str]) -> Any:
         """First open item with no blockers that this run has not tried."""

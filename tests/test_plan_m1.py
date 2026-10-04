@@ -345,15 +345,8 @@ async def test_usage_still_summed_across_steps():
     }
 
 
-@pytest.mark.asyncio
-async def test_step_sessions_are_ephemeral(tmp_path):
-    """H1 audit fix: step sessions must not pollute the sessions directory.
-
-    They run on the main loop, whose TurnCloser persists every turn — so a
-    plan run used to leave one "plan step N" file per executed step, and the
-    /resume picker listed them all.  Ephemeral sessions are skipped at the
-    single save choke point.
-    """
+def _real_loop(tmp_path, **overrides):
+    """A real AgentLoop on a real SessionService, with a text-only engine."""
     from ai_coding.config.models import AIConfig
     from ai_coding.core.agent_loop import AgentLoop
     from ai_coding.domain.loop import StepResult
@@ -371,12 +364,24 @@ async def test_step_sessions_are_ephemeral(tmp_path):
     sessions = SessionService(root=tmp_path / "sessions")
     registry = ToolRegistry()
     registry.register(TodoWriteTool())
-    loop = AgentLoop(
-        _TextEngine(), sessions, registry,
-        settings=AIConfig(stop_policy="natural", max_tool_iterations=4,
-                          plan_step_max_iterations=2),
-        workspace=str(tmp_path / "ws"),
-    )
+    settings = {"stop_policy": "natural", "max_tool_iterations": 4,
+                "plan_step_max_iterations": 2}
+    settings.update(overrides)
+    loop = AgentLoop(_TextEngine(), sessions, registry, settings=AIConfig(**settings),
+                     workspace=str(tmp_path / "ws"))
+    return loop, sessions
+
+
+@pytest.mark.asyncio
+async def test_step_sessions_are_ephemeral(tmp_path):
+    """H1 audit fix: step sessions must not pollute the sessions directory.
+
+    They run on the main loop, whose TurnCloser persists every turn — so a
+    plan run used to leave one "plan step N" file per executed step, and the
+    /resume picker listed them all.  Ephemeral sessions are skipped at the
+    single save choke point.
+    """
+    loop, sessions = _real_loop(tmp_path)
     session = sessions.create(title="main")
     task = TaskState(goal="g")
     task.add("one")
@@ -388,3 +393,38 @@ async def test_step_sessions_are_ephemeral(tmp_path):
     files = [p.name for p in (tmp_path / "sessions").glob("*.json")]
     assert [name for name in files if not name.startswith("plan-")]
     assert [name for name in files if name.startswith("plan-")] == []
+
+
+@pytest.mark.asyncio
+async def test_run_persists_the_parent_session(tmp_path):
+    """Review fix: the run's own results must reach disk before the user quits.
+
+    Steps run on ephemeral sessions (H1), so no turn inside the run saves the
+    parent any more.  Measured before this fix: right after a run the on-disk
+    parent still had 0 receipts and every item pending — the run's work only
+    reached disk if the user happened to send another message.
+    """
+    import json
+
+    loop, sessions = _real_loop(tmp_path)
+    session = sessions.create(title="main")
+    task = TaskState(goal="g")
+    task.add("one")
+    task.add("two")
+    session.task = task
+
+    await loop.process_input(session, "go")   # a normal turn persists the parent
+    before = len(session.messages)
+    report = await PlanRunner(loop).run(session)
+    assert report.deliveries, "the run settled nothing — nothing to persist"
+
+    saved = json.loads(
+        (tmp_path / "sessions" / f"{session.session_id}.json").read_text()
+    )
+    assert [d["stepId"] for d in saved["stepDeliveries"]] == [
+        d.step_id for d in report.deliveries
+    ]
+    # and the per-step bubbles the runner appended to the parent: one prompt
+    # (the replay marker) plus one summary line per settled step.
+    assert len(session.messages) - before == 2 * len(report.deliveries)
+    assert len(saved["messages"]) == len(session.messages)
