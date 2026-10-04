@@ -277,7 +277,7 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | 类型 | 字段 | 说明 |
 |---|---|---|
 | `TodoItem.verify` | `str = ""` | 证明该项的 shell 命令；`to_dict` 非空才写 `verify` 键，`todo_write` 的 `add`/`update` 透传；空 = 不可机检，走 todo 语义 |
-| `StepDelivery`（`domain/plan_delivery.py`） | `stepId`、`statement`、`status`（completed/blocked/stalled）、`attempts`、`ac`（[{id, passed}]）、`summary`、`turns`、`usage`（R1-4，该步各回合 usage 求和；loop 未上报则 None） | 一步的收据；`SessionData.step_deliveries`，仅非空落盘（键 `stepDeliveries`）；老收据无 `usage` 键照读（from_dict 默认 None） |
+| `StepDelivery`（`domain/plan_delivery.py`） | `stepId`、`statement`、`status`（completed/blocked/stalled）、`attempts`、`ac`（[{id, passed}]）、`summary`、`turns`、`usage`（R1-4，该步各回合 usage 求和；loop 未上报则 None）、`attested`（R1-5，runner 亲手结算 True / 分步外回填 False；老收据缺键读 True） | 一步的收据；`SessionData.step_deliveries`，仅非空落盘（键 `stepDeliveries`）；老收据无 `usage` 键照读（from_dict 默认 None） |
 | `PlanReport`（`core/plan_runner.py`） | `turns_used`（本轮 `process_input` 次数）、`tokens_used`（求和或 None）、`stopped` 新增 `budget:…` 值 | render 头行 `完成 n 步 · 用了 T 回合 [/ K tokens]`；顶盖检查只在还有剩余工作时触发（正好用完跑完=干净结束） |
 | `AIConfig.plan_step_max_iterations` | `int = 8` | plan-runner 单步迭代上限；runner 临时换 policy 副本，`finally` 恢复 |
 

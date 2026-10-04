@@ -32,6 +32,13 @@ class StepDelivery:
     #: visibility half of the run budget.  ``None`` when the loop did not
     #: report it.
     usage: dict[str, int] | None = None
+    #: Whether the runner itself settled this step in a bounded turn (R1-5).
+    #: ``False`` marks a backfilled receipt: the model marked the item done
+    #: outside any step turn, so there was no bounded run and no verify gate
+    #: — the completion stands (done is done), the provenance is recorded.
+    #: Defaults True: every receipt written before this field existed was
+    #: runner-settled.
+    attested: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +50,7 @@ class StepDelivery:
             "summary": self.summary,
             "turns": [int(self.turns[0]), int(self.turns[1])],
             "usage": dict(self.usage) if self.usage is not None else None,
+            "attested": bool(self.attested),
         }
 
     @classmethod
@@ -66,6 +74,8 @@ class StepDelivery:
             summary=str(data.get("summary", "")),
             turns=turns,
             usage=usage,
+            # Every receipt predating this field was runner-settled.
+            attested=bool(data.get("attested", True)),
         )
 
 

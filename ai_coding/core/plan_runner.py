@@ -65,6 +65,9 @@ class PlanReport:
         if self.tokens_used:
             head += f" / {self.tokens_used.get('total_tokens', '?')} tokens"
         parts = [head]
+        unattested = sum(1 for entry in self.deliveries if not entry.attested)
+        if unattested:
+            parts.append(f"(含 {unattested} 步分步外完成，未经分步验收)")
         if self.completed:
             parts.append("已完成：" + ", ".join(self.completed))
         if self.blocked:
@@ -99,7 +102,14 @@ class PlanRunner:
             return report
         attempted: set[str] = set()
         cap = self._run_budget()
+        # R1-5: ids that already have a receipt — history (resumed runs) plus
+        # this run's settlements.  Anything completed without one is a fiat
+        # completion the runner never settled: receipt it, don't re-run it.
+        receipted: set[str] = {
+            entry.step_id for entry in getattr(session, "step_deliveries", [])
+        }
         while True:
+            self._backfill_fiat(task, session, report, receipted)
             item = self._next_ready(task, attempted)
             if item is None:
                 if task.open_items():
@@ -122,6 +132,7 @@ class PlanRunner:
             attempted.add(item.id)
             await self._run_step(session, task, item, report, console,
                                  on_delta=on_delta, observer=observer)
+            receipted.add(item.id)  # settled (or runner-blocked) above
             if report.stalled:
                 break
             if report.blocked and report.blocked[-1] == item.id:
@@ -140,6 +151,41 @@ class PlanRunner:
                 continue
             return item
         return None
+
+    def _backfill_fiat(
+        self, task: Any, session: Any, report: PlanReport,
+        receipted: set[str],
+    ) -> None:
+        """Receipt steps the model finished outside any step turn (R1-5).
+
+        Pure observation: the task state is already right (done is done), so
+        nothing is re-run, verified, or mutated — the run just writes down
+        what happened and where it did not vouch.  Zero turn cost: fiat
+        completions never touch the R1-4 budget.  Runs at the loop top, so
+        even a run that stops right after (stalled/blocked/budget) leaves
+        the receipts behind.
+        """
+        for item in task.items:
+            if item.id in receipted or item.status != "completed":
+                continue
+            delivery = StepDelivery(
+                step_id=item.id,
+                statement=item.content,
+                status="completed",
+                attempts=0,
+                ac=[],
+                summary=(
+                    f"{item.content}：模型在本轮分步之外标 done，"
+                    "未经有界回合与验收门，原文照收"
+                ),
+                turns=(0, 0),
+                usage=None,
+                attested=False,
+            )
+            report.deliveries.append(delivery)
+            session.step_deliveries.append(delivery)
+            receipted.add(item.id)
+            report.completed.append(item.id)
 
     def _step_budget(self) -> int:
         settings = getattr(self._loop, "settings", None)
