@@ -145,8 +145,8 @@ class AICodingApp(App[None]):
         self._input.disabled = True
         self._status.set_busy(True)
         try:
-            if text == "/plan":
-                await self._plan_turn()
+            if text == "/plan" or text.startswith("/plan "):
+                await self._plan_turn(_plan_topic(text))
                 return
             if text == "/resume":
                 # Bare /resume is a picker, not a printout: the saved list is too
@@ -234,16 +234,26 @@ class AICodingApp(App[None]):
             getattr(new_session, "step_deliveries", ()),
         )
 
-    async def _plan_turn(self) -> None:
-        """/plan asks what to plan, then runs the plan turn with that topic."""
-        screen = AskScreen("What should I plan?")
-        try:
-            topic: str = await self.push_screen_wait(screen)
-        finally:
-            if self.screen is screen:
-                self.pop_screen()
-        if not topic:
-            return
+    async def _plan_turn(self, topic: str | None = None) -> None:
+        """/plan plans the topic: from the command line, or asked first."""
+        if topic is None:
+            screen = AskScreen("What should I plan?")
+            try:
+                topic = await self.push_screen_wait(screen)
+            finally:
+                if self.screen is screen:
+                    self.pop_screen()
+            if not topic:
+                return
+        # R1-5b: a new plan starts a fresh book (same rule as the REPL path) —
+        # otherwise the items land in the session's stale task, whose goal is
+        # still the session's first question.  ``begin_plan`` also drops the
+        # old receipts: step ids restart at 1, so keeping them made the
+        # runner believe the new plan's steps were already accounted for.
+        # Guarded like the WP3 getattrs above: test stubs pass a bare
+        # ``object()`` with no task slot.
+        if hasattr(self._session, "begin_plan"):
+            self._session.begin_plan(topic)
         self._transcript.begin_assistant(_clock())
         try:
             await self._agent_loop.process_input(
@@ -253,7 +263,10 @@ class AICodingApp(App[None]):
                 "Write the plan as todo items with todo_write; every step with "
                 "a machine-checkable outcome must carry its proof command in "
                 "'verify' (a shell command), so /plan-run can execute and "
-                "verify each step.",
+                "verify each step. "
+                "Write the items as pending/open steps only — do not execute "
+                "the work and do not mark items completed during planning; "
+                "execution happens later via /plan-run.",
                 on_delta=self._on_delta,
                 observer=self._observer,
             )
@@ -372,6 +385,20 @@ class AICodingApp(App[None]):
 
 def _clock() -> str:
     return datetime.now().strftime("%H:%M")
+
+
+def _plan_topic(text: str) -> str | None:
+    """The topic in ``/plan <topic>``, or ``None`` for a bare ``/plan``.
+
+    R1-5b: the topic used to be dropped on the floor — "/plan 改一下 loader"
+    ran the fixed topic-less prompt and never said so.  ``/plan-run`` yields
+    None on purpose: it is a different command whose name merely starts with
+    the same letters, so slicing must require a real space.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("/plan "):
+        return None
+    return stripped[len("/plan"):].strip() or None
 
 
 async def run_app(path: str | None, workspace: str, skills: str | None) -> None:

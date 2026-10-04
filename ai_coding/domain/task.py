@@ -168,7 +168,15 @@ class TaskState:
         return item
 
     def clear(self) -> None:
+        """Empty the list, and with it the goal (R1-5b).
+
+        The goal is the objective *of this list*; keeping it after the list
+        is gone makes ``<task-state>`` advertise the session's opening
+        question as the objective of a plan that no longer exists
+        (measured: a plan turn ending in ``todo_write(clear)``).
+        """
         self.items.clear()
+        self.goal = ""
 
     def next_id(self) -> str:
         """The id ``add`` would assign next (public: the tool layer needs it, R9a)."""

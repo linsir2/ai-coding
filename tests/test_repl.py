@@ -592,3 +592,45 @@ async def test_handle_tasks_lists_background_rows_and_stops_unknown():
                                    sessions, dc)
     assert action is REPLAction.CONTINUE
     assert "no background task" in _session_text(c)
+
+
+async def test_handle_plan_with_topic_uses_it_and_resets_task():
+    """'/plan <topic>' plans that topic on a fresh list (R1-5b).
+
+    The topic used to be silently dropped, and the new plan landed in the
+    session's stale task (whose goal was the session's first question).
+    """
+    from ai_coding.domain.task import TaskState
+
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    session = sessions.items[0]
+    session.task = TaskState(goal="old goal")
+    session.task.add("stale item")
+    dc, _ = _console_capture()
+
+    action, _ = await handle_input(loop, "/plan 给记忆层加缓存", session, sessions, dc)
+
+    assert action is REPLAction.CONTINUE
+    assert "给记忆层加缓存" in loop.calls[0][0]
+    assert session.task.goal == "给记忆层加缓存"
+    assert session.task.items == []
+    # Planning writes the list; it must not execute it.
+    assert "pending" in loop.calls[0][0].lower() or "do not execute" in loop.calls[0][0].lower()
+
+
+async def test_handle_plan_bare_keeps_existing_task():
+    """Bare /plan refines the current list instead of wiping it."""
+    from ai_coding.domain.task import TaskState
+
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    session = sessions.items[0]
+    session.task = TaskState(goal="old goal")
+    session.task.add("keep me")
+    dc, _ = _console_capture()
+
+    await handle_input(loop, "/plan", session, sessions, dc)
+
+    assert session.task.goal == "old goal"
+    assert [i.content for i in session.task.items] == ["keep me"]

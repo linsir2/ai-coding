@@ -143,6 +143,20 @@ class SessionData:
     # when non-empty, same rule as above.
     step_deliveries: list[StepDelivery] = field(default_factory=list)
 
+    def begin_plan(self, goal: str) -> TaskState:
+        """Start a new plan: fresh goal, no items, no step receipts (R1-5b).
+
+        The three belong together.  Receipts are keyed by step id and ids
+        restart at 1 for every new list, so carrying the old plan's receipts
+        over made the runner's backfill believe the new plan's steps were
+        already receipted (measured: a reset plan produced zero receipts).
+        One owner for the trio, so ``/plan`` cannot reset the goal and
+        forget the book again.
+        """
+        self.task = TaskState(goal=goal)
+        self.step_deliveries = []
+        return self.task
+
     def add_message(self, message: ChatMessage) -> None:
         self.messages.append(message)
 

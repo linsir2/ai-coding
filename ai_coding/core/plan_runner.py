@@ -61,13 +61,25 @@ class PlanReport:
     tokens_used: dict[str, int] | None = None
 
     def render(self) -> str:
-        head = f"[plan-run] 完成 {len(self.completed)} 步 · 用了 {self.turns_used} 回合"
+        # R1-5b: the headline counts work this run did (attested).  Fiat
+        # receipts are real completions but not this run's work — claiming
+        # them in the headline read as a lie (measured: "完成 4 步" for 0
+        # turns).  report.completed still lists every done id (API stable);
+        # only the human sentence splits the provenance.
+        attested_of = {entry.step_id: entry.attested for entry in self.deliveries}
+        attested_done = sum(
+            1 for step_id in self.completed if attested_of.get(step_id, True)
+        )
+        head = f"[plan-run] 完成 {attested_done} 步 · 用了 {self.turns_used} 回合"
         if self.tokens_used:
             head += f" / {self.tokens_used.get('total_tokens', '?')} tokens"
         parts = [head]
         unattested = sum(1 for entry in self.deliveries if not entry.attested)
         if unattested:
             parts.append(f"(含 {unattested} 步分步外完成，未经分步验收)")
+        on_claim = [entry.step_id for entry in self.deliveries if entry.proof == "on-claim"]
+        if on_claim:
+            parts.append(f"(含 {len(on_claim)} 步无证明完成：{', '.join(on_claim)})")
         if self.completed:
             parts.append("已完成：" + ", ".join(self.completed))
         if self.blocked:

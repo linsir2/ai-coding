@@ -280,6 +280,8 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `StepDelivery`（`domain/plan_delivery.py`） | `stepId`、`statement`、`status`（completed/blocked/stalled）、`attempts`、`ac`（[{id, passed}]）、`summary`、`turns`、`usage`（R1-4，该步各回合 usage 求和；loop 未上报则 None）、`attested`（R1-5，runner 亲手结算 True / 分步外回填 False；老收据缺键读 True） | 一步的收据；`SessionData.step_deliveries`，仅非空落盘（键 `stepDeliveries`）；老收据无 `usage` 键照读（from_dict 默认 None） |
 | `PlanReport`（`core/plan_runner.py`） | `turns_used`（本轮 `process_input` 次数）、`tokens_used`（求和或 None）、`stopped` 新增 `budget:…` 值 | render 头行 `完成 n 步 · 用了 T 回合 [/ K tokens]`；顶盖检查只在还有剩余工作时触发（正好用完跑完=干净结束） |
 | `AIConfig.plan_step_max_iterations` | `int = 8` | plan-runner 单步迭代上限；runner 临时换 policy 副本，`finally` 恢复 |
+| `SessionData.begin_plan(goal)`（R1-5b） | 建新 `TaskState(goal=goal)` + 清空 `step_deliveries`，返回新 task | **goal / items / 收据三位一体**：收据按 `stepId` 认领，而每次新清单 id 从 1 重启——带着旧收据走，新计划的完成会被 runner 的回填当成「已收据」而丢弃（实测：重置后 2 步全 done，回填产出 0 条）。消息历史与 `acceptance` 不动 |
+| `StepDelivery.proof`（派生属性，R1-6，不落盘） | `verified`（completed+attested+ac 非空即全过）/`on-claim`（completed+attested+ac 空）/`fiat`（attested=False）/`n/a`（未完成） | 只读推导，无字段、无 `to/from_dict` 改动；老收据 retroactive 可分级；非法组合 fallback 到 on-claim（宁可标没证过，不标证过） |
 
 ### R1-4 思考时间线契约
 
@@ -510,6 +512,7 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 | `self_dependency` | `add` 的 `depends_on` 指向本次将要分配的 id，清单不变 |
 | `blocked_by_dependencies` | `update` 到 `in_progress` / `completed` 时依赖未满足；`data` 带 `id` / `open` / `unknown` / `cycle` |
 | 门的形态 | `in_progress` 与 `completed` 检查；`pending` / `blocked` / `dropped` 放行；**没有** `diagnose` 动作，三条出路写在 `output` 里 |
+| `clear` 的范围（R1-5b） | 清空 `items` **并清空 `goal`**——goal 是这张清单的目标，清单没了还留着它会让 `<task-state>` 把会话第一句提问当成已不存在的计划的目标（实测：计划回合末尾 `todo_write(clear)` 后出现 `目标: 这个项目最近一次提交干嘛的` + `（无任务项）`） |
 
 ### 轨迹读取与导出（`core/trace.py`、`core/aggregate.py`、`core/export_*.py`）
 

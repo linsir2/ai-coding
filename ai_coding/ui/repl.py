@@ -148,15 +148,28 @@ async def handle_input(
             console.info("[skills] no skills found")
         return REPLAction.CONTINUE, session
     if cmd.name == "plan":
-        console.info("[plan] generating implementation plan...")
+        # R1-5b: "/plan <topic>" used to drop the topic silently, and the new
+        # plan landed in the session's stale task (whose goal was the
+        # session's first question).  An explicit topic starts a fresh plan;
+        # a bare /plan refines whatever list is there.
+        topic = cmd.raw[len("/plan"):].strip()
+        if topic:
+            session.begin_plan(topic)
+            console.info(f"[plan] new plan for: {topic} (task list reset)")
+        else:
+            topic = "the current task"
+            console.info("[plan] generating implementation plan...")
         await loop.process_input(
             session,
-            "Create a detailed implementation plan for the current task. "
+            f"Create a detailed implementation plan for: {topic}. "
             "Break it down into specific, actionable steps. "
             "Write the plan as todo items with todo_write; every step with "
             "a machine-checkable outcome must carry its proof command in "
             "'verify' (a shell command), so /plan-run can execute and "
-            "verify each step.",
+            "verify each step. "
+            "Write the items as pending/open steps only — do not execute "
+            "the work and do not mark items completed during planning; "
+            "execution happens later via /plan-run.",
             on_delta=console.delta,
         )
         return REPLAction.CONTINUE, session

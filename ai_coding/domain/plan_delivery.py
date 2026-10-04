@@ -40,6 +40,27 @@ class StepDelivery:
     #: runner-settled.
     attested: bool = True
 
+    @property
+    def proof(self) -> str:
+        """How this completion is evidenced (R1-6, derived, not stored).
+
+        ``verified``: settled with acceptance verdicts on the receipt — and
+        ``_settle`` completes verify-steps only when every contract passed,
+        so verdicts present means verdicts green (invariant, pinned by test).
+        ``on-claim``: settled, but no verdicts were ever offered — the
+        model's word.  ``fiat``: never settled (backfilled).  ``n/a``: not
+        completed.  The illegal combo (settled, no verdicts recorded… yet
+        claiming proof) cannot exist, so there is no branch for it — the
+        fallthrough lands on ``on-claim``: never claim proof that is absent.
+        """
+        if self.status != "completed":
+            return "n/a"
+        if not self.attested:
+            return "fiat"
+        if self.ac:
+            return "verified"
+        return "on-claim"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "stepId": self.step_id,

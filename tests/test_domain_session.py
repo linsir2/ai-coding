@@ -1,5 +1,6 @@
 from ai_coding.domain.message import ChatMessage, ToolCallRef
 from ai_coding.domain.session import SessionData
+from ai_coding.domain.task import TaskState
 
 
 def _user(text: str) -> ChatMessage:
@@ -121,3 +122,40 @@ def test_turn_usage_from_dict_rejects_bad_rows():
     assert TurnUsage.from_dict({"turn": "x"}) is None
     row = TurnUsage.from_dict({"turn": 1})
     assert row is not None and row.prompt_tokens == 0
+
+
+def test_begin_plan_resets_goal_items_and_receipts():
+    """A new plan is a new book: goal, items and receipts move together (R1-5b).
+
+    Receipts are keyed by step id, and ids restart at 1 for every new list —
+    so keeping the old plan's receipts silently swallows the new plan's
+    completions (measured: backfill produced zero receipts).
+    """
+    from ai_coding.domain.plan_delivery import StepDelivery
+
+    s = SessionData("s1", "title", "c", "l")
+    s.task = TaskState(goal="old goal")
+    s.task.add("old one")
+    s.step_deliveries.append(
+        StepDelivery(step_id="1", statement="old one", status="completed"))
+
+    task = s.begin_plan("new goal")
+
+    assert task.goal == "new goal" and task.items == []
+    assert s.task is task
+    assert s.step_deliveries == []
+
+
+def test_begin_plan_keeps_messages_and_acceptance():
+    """Only the plan moves; the conversation and its contracts stay."""
+    from ai_coding.domain.acceptance import AcceptanceItem
+
+    s = SessionData("s1", "title", "c", "l")
+    s.add_message(_user("hi"))
+    s.acceptance = [AcceptanceItem(id="AC-1", statement="x", verify="true")]
+    s.task = TaskState(goal="old")
+
+    s.begin_plan("new")
+
+    assert len(s.messages) == 1
+    assert [a.id for a in s.acceptance] == ["AC-1"]

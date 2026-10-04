@@ -234,3 +234,20 @@ def test_todo_verify_round_trips_and_stays_absent_when_empty():
     item = task.add("fix it")
     item.verify = "pytest tests/ -q"
     assert TaskState.from_dict(task.to_dict()).get("2").verify == "pytest tests/ -q"
+
+
+def test_clear_drops_the_goal_with_the_list():
+    """A goal with no items is a stale artifact, not a plan (R1-5b).
+
+    Measured: a plan turn ended with todo_write(clear), leaving
+    `<task-state>` advertising the session's opening question as the
+    objective of a list that no longer existed.
+    """
+    task = TaskState(goal="这个项目最近一次提交干嘛的")
+    task.add("a")
+    task.clear()
+
+    assert task.items == [] and task.goal == ""
+    out = task.render()
+    assert "这个项目最近一次提交干嘛的" not in out
+    assert "(无任务项)" in out

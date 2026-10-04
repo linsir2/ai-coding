@@ -114,6 +114,23 @@ async def test_stalled_run_still_receipts_fiat_siblings():
 
 
 @pytest.mark.asyncio
+async def test_fiat_only_run_reports_zero_attested():
+    """The screenshot case: everything already done, the run does no work."""
+    session = _session_with("one", "two")
+    session.task.items[0].status = "completed"
+    session.task.items[1].status = "completed"
+    loop = _StubLoop([])
+    report = await PlanRunner(loop).run(session)
+
+    assert loop.calls == []
+    assert report.turns_used == 0
+    assert len(report.deliveries) == 2
+    assert all(d.attested is False for d in report.deliveries)
+    assert "完成 0 步" in report.render()
+    assert "分步外完成" in report.render()
+
+
+@pytest.mark.asyncio
 async def test_clean_run_render_has_no_attestation_note():
     session = _session_with("one")
     report = await PlanRunner(_StubLoop(["complete"])).run(session)
@@ -126,3 +143,32 @@ def test_old_receipt_without_attested_defaults_true():
     loaded = StepDelivery.from_dict({"stepId": "1", "statement": "s"})
     assert loaded.attested is True
     assert loaded.to_dict()["attested"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_reset_plan_gets_its_own_receipts():
+    """The collision bug: ids restart at 1, so old receipts ate the new plan's.
+
+    Reproduced live (probe_collision.py): after `/plan <topic>` reset the
+    list, both new steps were completed out-of-band and the backfill
+    produced zero receipts — the old plan's "1"/"2" matched them.
+    """
+    session = _session_with("old one", "old two")
+    for index, statement in enumerate(("old one", "old two"), start=1):
+        session.step_deliveries.append(StepDelivery(
+            step_id=str(index), statement=statement, status="completed"))
+
+    task = session.begin_plan("new goal")
+    assert session.step_deliveries == []  # the cause: ids are reused, so the
+    task.add("new one")                   # old book must not travel with them
+    task.add("new two")
+    for item in task.items:
+        item.status = "completed"
+
+    report = await PlanRunner(_StubLoop([])).run(session)
+
+    receipts = [d for d in report.deliveries if d.statement.startswith("new")]
+    assert len(receipts) == 2
+    assert {d.step_id for d in receipts} == {"1", "2"}
+    assert all(d.attested is False for d in receipts)
+    assert [d.statement for d in session.step_deliveries] == ["new one", "new two"]

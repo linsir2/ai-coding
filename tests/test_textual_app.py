@@ -427,3 +427,33 @@ async def test_ctrl_y_with_no_tool_says_so():
         await pilot.press("ctrl+y")
         await pilot.pause()
         assert "没有可复制的工具输出" in _all_static_text(app)
+@pytest.mark.asyncio
+async def test_plan_with_topic_skips_the_prompt_and_resets_the_list():
+    """The typed path: "/plan <topic>" must plan that topic, not ask (R1-5b).
+
+    Before, the router matched only the exact string "/plan"; the typed
+    topic fell through to the generic handler and never planned anything.
+    """
+    from ai_coding.domain.session import SessionData
+    from ai_coding.domain.task import TaskState
+
+    loop = _FakeLoop()
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.task = TaskState(goal="这个项目最近一次提交干嘛的")
+    session.task.add("旧的待办")
+    app = _app(loop=loop, session=session)
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("must not ask for a topic when one was typed")
+
+    app.push_screen_wait = refuse
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/plan 给 /tasks 加一个 show 子命令"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+        assert len(loop.calls) == 1
+        assert "给 /tasks 加一个 show 子命令" in loop.calls[0]
+        assert session.task.goal == "给 /tasks 加一个 show 子命令"
+        assert session.task.items == []
