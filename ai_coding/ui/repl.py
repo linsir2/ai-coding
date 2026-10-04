@@ -6,6 +6,7 @@ stays import-light and offline; the full-screen UI lives in ``textual_app``.
 
 from __future__ import annotations
 
+import time
 from enum import Enum
 from typing import Any
 
@@ -20,6 +21,7 @@ HELP_TEXT = (
     "  /resume [id]    list or resume saved sessions\n"
     "  /permissions   view or change approval policy\n"
     "  /todo           show current task list\n"
+    "  /tasks          list background sub-agent runs\n"
     "  /skills         list available skills\n"
     "  /plan           generate implementation plan\n"
     "  /plan-run       execute the plan step by step\n"
@@ -132,6 +134,8 @@ async def handle_input(
         else:
             console.info(task.render())
         return REPLAction.CONTINUE, session
+    if cmd.name == "tasks":
+        return _handle_tasks(loop, cmd.raw, session, console)
     if cmd.name == "skills":
         skills_reg = getattr(loop, "skills", None)
         if skills_reg is None:
@@ -270,6 +274,52 @@ def _handle_resume(
         loaded = matches[0]
     console.info(f"[resume] loaded session {loaded.session_id[:12]}")
     return REPLAction.NEW_SESSION, loaded
+
+
+def _runner_of(loop: Any) -> Any | None:
+    """The sub-agent runner behind this loop's tool stack, if any."""
+    dispatcher = getattr(loop, "dispatcher", None)
+    registry = getattr(dispatcher, "registry", None)
+    tool = registry.get("subAgent") if registry is not None else None
+    return getattr(tool, "runner", None)
+
+
+def _handle_tasks(
+    loop: Any, raw: str, session: Any, console: DialogueConsole
+) -> tuple[REPLAction, Any]:
+    """List background sub-agent runs, or stop one (R1-2)."""
+    runner = _runner_of(loop)
+    if runner is None:
+        console.info("[tasks] no sub-agent runner in this session")
+        return REPLAction.CONTINUE, session
+    parts = raw.split()
+    if len(parts) >= 3 and parts[1] == "stop":
+        if runner.cancel(parts[2]):
+            console.info(f"[tasks] stopping {parts[2][:12]}")
+        else:
+            console.info(f"[tasks] no background task '{parts[2]}'")
+        return REPLAction.CONTINUE, session
+    rows = runner.task_list()
+    if not rows:
+        console.info("[tasks] no background runs")
+        return REPLAction.CONTINUE, session
+    now = time.monotonic()
+    lines = ["[tasks] background sub-agents:"]
+    for row in rows:
+        elapsed = (row.ended if row.ended is not None else now) - row.started
+        tokens = ""
+        if row.usage:
+            total = int(row.usage.get("total_tokens", 0) or 0)
+            if not total:
+                total = int(row.usage.get("prompt_tokens", 0) or 0) + int(
+                    row.usage.get("completion_tokens", 0) or 0
+                )
+            tokens = f" · {total} tok"
+        lines.append(
+            f"  {row.run_id[:12]} {row.name} {row.status} {elapsed:.0f}s{tokens}"
+        )
+    console.info("\n".join(lines))
+    return REPLAction.CONTINUE, session
 
 
 def _handle_model(

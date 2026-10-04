@@ -545,3 +545,50 @@ async def test_handle_plan_run_executes_open_todos():
     out = _session_text(c)
     assert "plan-run" in out and "已完成" in out
     assert session.task.items[0].status == "completed"
+
+
+async def test_handle_tasks_without_a_runner_degrades():
+    """Loops without a sub-agent stack get words, not a traceback."""
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(loop, "/tasks", sessions.items[0], sessions, dc)
+
+    assert action is REPLAction.CONTINUE
+    assert "no sub-agent runner" in _session_text(c)
+
+
+async def test_handle_tasks_lists_background_rows_and_stops_unknown():
+    """The table shows status/elapsed/tokens; stopping a missing id says so."""
+    from types import SimpleNamespace
+
+    from ai_coding.domain.subagent import BackgroundTask
+    from ai_coding.tools.registry import ToolRegistry
+    from ai_coding.tools.subagent_tool import SubAgentTool
+
+    class _TableRunner:
+        def task_list(self):
+            return [BackgroundTask(run_id="abc123", name="probe", task="t",
+                                   status="running", started=10.0, ended=None,
+                                   usage={"prompt_tokens": 100,
+                                          "completion_tokens": 20})]
+
+        def cancel(self, run_id):
+            return False
+
+    registry = ToolRegistry()
+    registry.register(SubAgentTool(_TableRunner()))
+    loop = SimpleNamespace(dispatcher=SimpleNamespace(registry=registry))
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(loop, "/tasks", sessions.items[0], sessions, dc)
+    out = _session_text(c)
+    assert action is REPLAction.CONTINUE
+    assert "abc123" in out and "running" in out and "120" in out
+
+    action, _ = await handle_input(loop, "/tasks stop nope", sessions.items[0],
+                                   sessions, dc)
+    assert action is REPLAction.CONTINUE
+    assert "no background task" in _session_text(c)

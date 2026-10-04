@@ -43,7 +43,7 @@ class ParentContext:
 class SubagentResult:
     """The packet a sub-agent returns to its caller."""
 
-    status: str = "completed"  # completed | max_iterations | timeout | error
+    status: str = "completed"  # completed | max_iterations | timeout | error | cancelled
     conclusion: str | None = None
     todos: tuple[dict[str, Any], ...] = ()
     artifacts: tuple[ToolArtifact, ...] = ()
@@ -89,4 +89,54 @@ class SubagentResult:
         }
 
 
-__all__ = ["SubagentTurn", "ParentContext", "SubagentResult"]
+__all__ = ["BackgroundTask", "SubagentTurn", "ParentContext", "SubagentResult"]
+
+
+#: Terminal states a background task can rest in.  ``running`` is the only
+#: live one; ``rejected`` means it never started (pool saturated at spawn).
+BACKGROUND_FINAL = frozenset({"completed", "timeout", "error", "cancelled", "rejected"})
+
+
+@dataclass(frozen=True)
+class BackgroundTask:
+    """One delegated run tracked across turns (R1-2).
+
+    The table lives in the runner's memory — a restart loses it (same rule
+    as Hermes: a running child cannot be proven side-effect-free, so it is
+    never resumed).  Times are ``time.monotonic`` seconds for elapsed math.
+    """
+
+    run_id: str
+    name: str = "sub-agent"
+    task: str = ""
+    status: str = "running"  # running | completed | timeout | error | cancelled | rejected
+    started: float = 0.0
+    ended: float | None = None
+    error: str | None = None
+    usage: dict[str, int] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "runId": self.run_id,
+            "name": self.name,
+            "task": self.task,
+            "status": self.status,
+            "started": self.started,
+            "ended": self.ended,
+            "error": self.error,
+            "usage": dict(self.usage) if self.usage is not None else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> BackgroundTask:
+        usage = data.get("usage")
+        return cls(
+            run_id=str(data.get("runId", "")),
+            name=str(data.get("name", "sub-agent")),
+            task=str(data.get("task", "")),
+            status=str(data.get("status", "running")),
+            started=float(data.get("started", 0.0) or 0.0),
+            ended=data.get("ended"),
+            error=data.get("error"),
+            usage=dict(usage) if isinstance(usage, dict) else None,
+        )

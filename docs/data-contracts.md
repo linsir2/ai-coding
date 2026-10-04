@@ -291,6 +291,15 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 
 禁令：`to_chat_message` 无视 `reasoning`（测试钉死）——思考永不重发给模型；子跑 reasoning 仍按 R1a-5 丢弃（父只看子行为，不见子心路）。实测：qwen3 系经 dashscope 产 `reasoning_content`（`1+1=?` 一问即 145 字），deepseek-chat 无（静默无块）。
 
+### R1-2 后台子任务契约
+
+| 类型 | 字段 | 说明 |
+|---|---|---|
+| `BackgroundTask`（`domain/subagent.py`） | `runId`、`name`、`task`、`status`（running/completed/timeout/error/cancelled/rejected）、`started/ended`（monotonic 秒）、`error`、`usage` | runner 内存表（`task_list()` 按 started 排序）；200 行封顶（只剪终态）；重启丢失 |
+| `BackgroundTaskDone`（事件） | `run_id`、`name`、`status`、`summary`（尾 200）、`truncated`、`origin_session` | 捕获的 emit 投递（可能晚 spawning turn 数轮）；transcript dim 行，trace 泛型记录 |
+| `subAgent(background)` | `bool = false` | 默认同步（老行为不变）；true 时秒返 handle（`data={run_id, background, status}`），孩子事件经 observer 进父 trace |
+| 错误码 | `subagent_busy` | 信号量满时 spawn 直接失败（不排队）；stop 未知 id 返回 False（`/tasks` 明示） |
+
 ### 合同变更（仅两处）
 
 | 变更 | 影响面 |

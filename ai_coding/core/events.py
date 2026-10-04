@@ -220,6 +220,26 @@ class TaskUpdated:
 
 
 @dataclass(frozen=True)
+class BackgroundTaskDone:
+    """A background sub-agent finished, failed, timed out or was cancelled.
+
+    Emitted on the captured parent emit when the child settles — possibly
+    turns after the spawning turn ended, which is exactly the point (R1-2).
+    The summary is capped at build time; the full packet lives in the ledger
+    file (``transcripts/subagents/``), same as synchronous runs.
+    """
+
+    run_id: str
+    name: str = "sub-agent"
+    status: str = "completed"  # completed | timeout | error | cancelled
+    summary: str = ""
+    truncated: bool = False
+    #: Short id of the session that spawned the run — the announce may land
+    #: in a different (newer) view, and the reader deserves to know whose.
+    origin_session: str = ""
+
+
+@dataclass(frozen=True)
 class LedgerUpdated:
     """The turn's open unknowns moved (R0-2).
 
@@ -298,6 +318,7 @@ LoopEvent = (
     | InputSteered
     | ScopedEvent
     | TaskUpdated
+    | BackgroundTaskDone
     | LedgerUpdated
     | TurnFinished
     | MemoryInjected
@@ -361,6 +382,7 @@ __all__ = [
     "ToolSurfaceWarning",
     "InputSteered",
     "TaskUpdated",
+    "BackgroundTaskDone",
     "TurnFinished",
     "MemoryInjected",
     "MemoryRecalled",

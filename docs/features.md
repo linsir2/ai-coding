@@ -42,6 +42,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | `/resume [id]` | 会话 id | **无参数弹出会话选择屏**（`ui/resume_screen.py`）：按最后访问时间倒序、按天分组（Today / Yesterday / 绝对日期）；每行显示时间 + 首条用户消息预览（截断 80 字符）+ 消息数；搜索框按预览/标题/id 子串过滤；↑↓ 选择、Enter 恢复、Esc 取消；已打开的会话不再列出；一个会话都没存时直接提示 `no saved sessions`。恢复后 transcript 清空并按消息时间顺序重建全部历史（用户气泡、模型正文、已完成工具卡默认折叠；只显示最终结果，不回放流式过程）。带参数则直接恢复并返回 `NEW_SESSION`，**支持前缀匹配**（`/resume 0113e0acac03`），歧义前缀会列出候选而非静默取第一个；恢复走完整 `load`（列表视图是剥离正文的摘要，直接用它会导致历史丢失） |
 | `/permissions [auto\|confirm]` | 策略 | 无参数显示当前审批回调，带参数切换自动批准 / 逐次确认 |
 | `/todo` | — | 渲染当前会话的 `TaskState`（目标、进度、逐项状态、下一步） |
+| `/tasks` | `[stop <id>]` | 列出后台子智能体运行（id/名/状态/耗时/tokens）；`stop` 停掉运行中的任务 |
 | `/skills` | — | 列出 `SkillRegistry` 目录（`- name: description`） |
 | `ask_user`（工具） | — | 弹 `AskScreen` 提问；模型给了 `options` 时会在问题下方列出（选项只是提示，不强制，仍可自由输入）。**已实现**（此前 `AskScreen` 的 `options` 参数从未被任何调用方填充，渲染行是死代码） |
 | `/plan` | — | 先弹 `What should I plan?` 收集主题，再以该主题发起计划回合（`ui/textual_app.py::_plan_turn`）。计划 prompt 要求模型用 `todo_write` 写成条目，有机器可判的步骤必须带 `verify`（shell 证明命令），供 `/plan-run` 执行。**不接受参数**：`/plan 改一下 loader` 会整条落回 `handle_input` 的旧固定 prompt，参数被静默丢弃；主题也不回显（`_plan_turn` 不调 `append_user`），transcript 里看不到你规划的是什么 |
@@ -119,6 +120,15 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | 不确定性台账 | 纯派生（验失败/工具错误聚合/失败连胜），H 只降在记录证据上；open 集签名变化才发 `LedgerUpdated` 事件，transcript 显示 dim 行；open 集连续 2 轮不动 → `[ledger-gate]` nudge（自有预算 1 次）要求澄清或拆分 |
 | 子跑截断信号 | `SubagentResult` 带 `truncated/exit_reason/usage`；`ToolResult.error` 为机器码（`child_timeout`/`child_max_iterations`/`child_error`，max_iterations 仍算成功）；子事件经 observer 进父 trace；ledger 文件保留新字段 |
 | 步骤时间会计 | books 记每步 latency 与被放弃步数；被墙钟掐断的模型步发 `Degraded(model_step)`（verdict 不变）；transcript 已有的流式 partial 即保留 |
+
+### 后台子任务（R1-2）
+
+| 机制 | 行为 |
+|---|---|
+| `subAgent(background=true)` | 调用即返 run id（毫秒级），父回合零等待；孩子照旧走信号量、超时、ledger 纪律；完成以事件 + 表行落地，**永不写第二条 tool 消息**（严格配对只允许一 call 一消息） |
+| 完成通知 | `BackgroundTaskDone` 事件顺捕获的 emit 投递（TUI 落 transcript dim 行，跨会话标注来源会话）；全文包仍在 `transcripts/subagents/` ledger |
+| `/tasks` | 列 run id/名/状态/耗时/tokens；`/tasks stop <id>` 停（→ cancelled 包 + 完成事件）；无 runner 时降级提示 |
+| 容量与重启 | 信号量满时 spawn 直接报错（不静默排队）；表 200 行封顶（只剪终态行）；重启丢表（运行中的孩子无法证副作用，不恢复） |
 
 ### 任务清单与停止判定（R2 拆分为纯单元）
 

@@ -17,6 +17,7 @@ from rich.text import Text
 
 from ai_coding.core.events import (
     AssistantMessage,
+    BackgroundTaskDone,
     IterationStarted,
     LedgerUpdated,
     LoopEvent,
@@ -302,6 +303,17 @@ def blocks_from_event(event: LoopEvent) -> Block | None:
         return Block("reasoning", _cap(event.reasoning, _REASONING_LIMIT), "dim")
     if isinstance(event, ScopedEvent):
         return _nested_block(event)
+    if isinstance(event, BackgroundTaskDone):
+        # R1-2: a background child settled — possibly turns after the spawning
+        # turn ended.  One dim line with the verdict; the full packet lives in
+        # the ledger file (same pointer discipline as WP3).
+        mark = "✓" if event.status == "completed" else "✗"
+        line = f"{mark} 子任务完成 [{event.name}]（{event.status}）"
+        if event.origin_session:
+            line += f" · 会话 {event.origin_session[:12]}"
+        if event.summary:
+            line += f"：{_short(event.summary, _NESTED_LINE_LIMIT)}"
+        return Block("background", line, "dim")
     return None
 
 

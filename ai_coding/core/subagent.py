@@ -17,9 +17,12 @@ Design notes (docs/r1a-5-analysis.md):
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
+import time
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -27,12 +30,13 @@ from ai_coding.ai.engine import ChatEngine
 from ai_coding.ai.prompt import PromptAssembler
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
+from ai_coding.core.events import BackgroundTaskDone
 from ai_coding.core.observers import ScopedObserver
 from ai_coding.core.turn_report import report_degraded
 from ai_coding.core.worktree import WorktreeError
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
-from ai_coding.domain.subagent import ParentContext, SubagentResult
+from ai_coding.domain.subagent import BackgroundTask, ParentContext, SubagentResult
 from ai_coding.infra.deadline import DeadlineExpired, run_with_deadline
 from ai_coding.infra.json_utils import to_json_pretty
 from ai_coding.infra.time_utils import now_utc
@@ -59,6 +63,15 @@ _STATUS_MAP: dict[str, str] = {
 # Fraction of the sub-agent's budget the *inner* turn deadline may use; the rest
 # is left for finalisation and for the outer backstop (R2a).
 _INNER_BUDGET_RATIO = 0.9
+
+#: Completion summary tail for the announce event (R1-2): the full packet
+#: lives in the ledger file; the event carries a pointer, not the prose.
+_SUMMARY_TAIL = 200
+
+#: Background table cap (R1-2): a long-lived process must not grow the table
+#: without bound.  Running rows are never pruned; the oldest terminal rows go
+#: first.  Restarts lose the whole table anyway (documented, Hermes rule).
+_MAX_BACKGROUND_ROWS = 200
 
 
 class _NullSessions:
@@ -103,7 +116,14 @@ class SubAgentRunner:
         self._observer = observer
         # R7e-4: what a ``task_only`` child gets instead of the parent's prompt.
         self._base_instructions = str(base_instructions or "")
-        self._semaphore = asyncio.Semaphore(max(1, int(max_concurrent)))
+        self._max_concurrent_n = max(1, int(max_concurrent))
+        self._semaphore = asyncio.Semaphore(self._max_concurrent_n)
+        # R1-2: background runs tracked across turns: run id -> row, plus the
+        # live asyncio tasks (strong refs so they survive the spawning turn),
+        # plus the announce context (emit/origin/name) keyed the same way.
+        self._background: dict[str, BackgroundTask] = {}
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._announce: dict[str, tuple[Any, str, str]] = {}
 
     @property
     def timeout_seconds(self) -> float:
@@ -135,27 +155,222 @@ class SubAgentRunner:
         """
         active = self._observer if observer is None else observer
         async with self._semaphore:
-            if (
-                isolate
-                and worktree_manager is not None
-                and await worktree_manager.can_isolate()
-            ):
-                try:
-                    async with worktree_manager.temporary(name) as wt:
-                        return await self._run_in(
-                            task, name, str(wt.path), parent,
-                            parent_span=parent_span, observer=active,
-                        )
-                except WorktreeError:
-                    report_degraded(
-                        active,
-                        "worktree_isolate",
-                        "the worktree could not be created",
-                        "ran in the main workspace instead",
-                    )
-            return await self._run_in(
-                task, name, None, parent, parent_span=parent_span, observer=active
+            return await self._run_isolated(
+                task, name, parent, parent_span, active,
+                worktree_manager, isolate,
             )
+
+    async def _run_isolated(
+        self,
+        task: str,
+        name: str,
+        parent: ParentContext | None,
+        parent_span: str,
+        observer: Any | None,
+        worktree_manager: Any | None,
+        isolate: bool,
+    ) -> SubagentResult:
+        """Worktree branch shared by the synchronous and background paths."""
+        if (
+            isolate
+            and worktree_manager is not None
+            and await worktree_manager.can_isolate()
+        ):
+            try:
+                async with worktree_manager.temporary(name) as wt:
+                    return await self._run_in(
+                        task, name, str(wt.path), parent,
+                        parent_span=parent_span, observer=observer,
+                    )
+            except WorktreeError:
+                report_degraded(
+                    observer,
+                    "worktree_isolate",
+                    "the worktree could not be created",
+                    "ran in the main workspace instead",
+                )
+        return await self._run_in(
+            task, name, None, parent, parent_span=parent_span, observer=observer
+        )
+
+    # ---- background runs (R1-2) -------------------------------------------
+
+    def spawn_background(
+        self,
+        task: str,
+        name: str = "sub-agent",
+        *,
+        worktree_manager: Any = None,
+        isolate: bool = True,
+        parent: ParentContext | None = None,
+        parent_span: str = "",
+        observer: Any | None = None,
+        emit: Any = None,
+        origin_session: str = "",
+    ) -> str:
+        """Start a child without waiting; return its run id at once.
+
+        The spawning turn pays nothing past this call — the child runs on
+        under the same semaphore, timeout and ledger discipline as a
+        synchronous run, and its completion lands as a ``BackgroundTaskDone``
+        event on ``emit`` plus a row in :meth:`task_list`.
+
+        A saturated pool rejects loudly (``RuntimeError``) instead of
+        queuing silently: the turn must not pay for work that never starts.
+        (Check-then-act races degrade to background queuing, never to
+        turn-blocking — the semaphore is still the true bound.)  Must be
+        called from async context: the supervised task is created on the
+        running loop.
+        """
+        if self._semaphore.locked():
+            raise RuntimeError(
+                "sub-agent concurrency exhausted: "
+                f"{self._max_concurrent()} background slots busy; "
+                "retry later or raise ai.max_concurrent_subagents"
+            )
+        run_id = uuid.uuid4().hex[:12]
+        active = self._observer if observer is None else observer
+        self._background[run_id] = BackgroundTask(
+            run_id=run_id, name=name, task=task, status="running",
+            started=time.monotonic(),
+        )
+        self._prune_background()
+        background_task = asyncio.get_running_loop().create_task(
+            self._supervised(
+                run_id, task=task, name=name, worktree_manager=worktree_manager,
+                isolate=isolate, parent=parent, parent_span=parent_span,
+                observer=active, emit=emit, origin_session=origin_session,
+            ),
+            name=f"subagent:{run_id}",
+        )
+        self._tasks[run_id] = background_task
+        # A task cancelled before its first step never runs its body — the
+        # supervised path below would never settle it.  The reaper closes
+        # that hole: whatever state the row is still in, it gets settled.
+        background_task.add_done_callback(functools.partial(self._reap, run_id))
+        # The announce context rides alongside (the frozen row cannot hold it).
+        self._announce[run_id] = (emit, origin_session, name)
+        return run_id
+
+    def cancel(self, run_id: str) -> bool:
+        """Stop a running background task.  False when unknown or settled."""
+        row = self._background.get(run_id)
+        background_task = self._tasks.get(run_id)
+        if row is None or background_task is None or row.status != "running":
+            return False
+        background_task.cancel()
+        return True
+
+    def task_list(self) -> list[BackgroundTask]:
+        """Background rows, oldest first (running and settled alike)."""
+        return sorted(self._background.values(), key=lambda row: row.started)
+
+    def _max_concurrent(self) -> int:
+        return self._max_concurrent_n
+
+    def _prune_background(self) -> None:
+        """Bound the table: oldest terminal rows go first, running never."""
+        terminal = sorted(
+            (row for row in self._background.values() if row.status != "running"),
+            key=lambda row: row.started,
+        )
+        while len(self._background) > _MAX_BACKGROUND_ROWS and terminal:
+            self._background.pop(terminal.pop(0).run_id, None)
+
+    async def _supervised(
+        self,
+        run_id: str,
+        *,
+        task: str,
+        name: str,
+        worktree_manager: Any | None,
+        isolate: bool,
+        parent: ParentContext | None,
+        parent_span: str,
+        observer: Any | None,
+        emit: Any,
+        origin_session: str,
+    ) -> None:
+        """Run one background child to settlement, then announce it.
+
+        Never raises: an unretrieved task exception is noise at shutdown, so
+        every failure mode below ends in a table row plus (best-effort) event.
+        """
+        try:
+            async with self._semaphore:
+                result = await self._run_isolated(
+                    task, name, parent, parent_span, observer,
+                    worktree_manager, isolate,
+                )
+        except asyncio.CancelledError:
+            result = SubagentResult(
+                status="cancelled", error="cancelled by user",
+                truncated=True, exit_reason="cancelled",
+            )
+        except Exception as exc:  # noqa: BLE001 — _run_in promises never-raise; belt.
+            result = SubagentResult(
+                status="error", error=f"supervisor: {exc}",
+                truncated=True, exit_reason="supervisor_error",
+            )
+        self._finish_background(run_id, result, emit, origin_session)
+
+    def _finish_background(
+        self, run_id: str, result: SubagentResult, emit: Any, origin_session: str
+    ) -> None:
+        """Settle the row, drop the task ref, announce best-effort."""
+        row = self._background.get(run_id)
+        self._tasks.pop(run_id, None)
+        self._announce.pop(run_id, None)
+        if row is None or row.status != "running":
+            return
+        self._background[run_id] = replace(
+            row, status=result.status, ended=time.monotonic(),
+            error=result.error, usage=result.usage,
+        )
+        if emit is None:
+            return
+        summary = (result.conclusion or result.error or "").strip().replace("\n", " ")
+        if len(summary) > _SUMMARY_TAIL:
+            summary = summary[:_SUMMARY_TAIL] + "…"
+        try:
+            emit(BackgroundTaskDone(
+                run_id=run_id, name=row.name, status=result.status,
+                summary=summary, truncated=result.truncated,
+                origin_session=origin_session,
+            ))
+        except Exception:  # noqa: BLE001 — observation must not break settlement
+            _log.debug("background announce failed for %s", run_id, exc_info=True)
+
+    def _reap(self, run_id: str, _task: asyncio.Task[None] | None = None) -> None:
+        """Settle a row whose task died without going through ``_finish``.
+
+        A task cancelled before its first step never runs the supervised body
+        at all — without this, ``cancel()`` right after spawn would leave the
+        row ``running`` forever.  Runs exactly once per task (done-callback);
+        a no-op unless the row is still live.
+        """
+        row = self._background.get(run_id)
+        self._tasks.pop(run_id, None)
+        announce = self._announce.pop(run_id, None)
+        if row is None or row.status != "running":
+            return
+        self._background[run_id] = replace(
+            row, status="cancelled", ended=time.monotonic(),
+            error="cancelled before start",
+        )
+        if announce is None:
+            return
+        emit, origin_session, name = announce
+        if emit is None:
+            return
+        try:
+            emit(BackgroundTaskDone(
+                run_id=run_id, name=name, status="cancelled",
+                summary="cancelled before start", truncated=True,
+                origin_session=origin_session,
+            ))
+        except Exception:  # noqa: BLE001 — observation must not break settlement
+            _log.debug("background reap announce failed for %s", run_id, exc_info=True)
 
     # ---- internals --------------------------------------------------------
 

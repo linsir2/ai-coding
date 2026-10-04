@@ -157,6 +157,15 @@ class SubAgentTool(BaseTool):
                     "type": "string",
                     "description": "Optional short label for the sub-agent.",
                 },
+                "background": {
+                    "type": "boolean",
+                    "description": (
+                        "Run without waiting: returns a run id at once, the "
+                        "child runs on, and its completion lands as an event "
+                        "plus a /tasks table row. For long work the parent "
+                        "would otherwise wait out its whole turn budget."
+                    ),
+                },
             },
             "required": ["task"],
         }
@@ -183,6 +192,8 @@ class SubAgentTool(BaseTool):
                 instructions=context.instructions,
             )
 
+        if params.get("background"):
+            return self._spawn_background(task, name, context, parent)
         try:
             result = await self._runner.run(
                 task,
@@ -205,6 +216,49 @@ class SubAgentTool(BaseTool):
                 error="subagent_error",
             )
         return _to_tool_result(result, name)
+
+    def _spawn_background(
+        self, task: str, name: str, context: ToolContext, parent: ParentContext | None
+    ) -> ToolResult:
+        """Hand a child to the background and return its handle at once.
+
+        The spawning turn pays nothing past this call — no waiting, no
+        budget burn.  Child events fan into the parent stream through the
+        context emit (R0-3 wiring); completion lands as an event plus a
+        table row, never as a second tool message (strict pairing allows
+        exactly one tool message per call).
+        """
+        try:
+            run_id = self._runner.spawn_background(
+                task,
+                name,
+                worktree_manager=self._worktree_manager,
+                isolate=self._isolate,
+                parent=parent,
+                parent_span=context.call_id,
+                observer=EmitObserver(context.emit),
+                emit=context.emit,
+                origin_session=context.session_id,
+            )
+        except RuntimeError as exc:
+            return ToolResult(
+                success=False,
+                output=f"sub-agent not started: {exc}",
+                error="subagent_busy",
+            )
+        return ToolResult(
+            success=True,
+            output=(
+                f"[{name}] started in background as {run_id} — "
+                "check /tasks for completion"
+            ),
+            data={"run_id": run_id, "background": True, "status": "running"},
+        )
+
+    @property
+    def runner(self) -> Any:
+        """The runner behind this tool (``/tasks`` reads its table)."""
+        return self._runner
 
 
 __all__ = ["SubAgentTool"]
