@@ -256,19 +256,23 @@ class AICodingApp(App[None]):
             self._session.begin_plan(topic)
         self._transcript.begin_assistant(_clock())
         try:
-            await self._agent_loop.process_input(
-                self._session,
-                f"Create a detailed implementation plan for: {topic}. "
-                "Break it down into specific, actionable steps. "
-                "Write the plan as todo items with todo_write; every step with "
-                "a machine-checkable outcome must carry its proof command in "
-                "'verify' (a shell command), so the plan can be executed and "
-                "verified step by step. "
-                "Write the items as pending/open steps only — do not execute "
-                "the work and do not mark items completed during planning.",
-                on_delta=self._on_delta,
-                observer=self._observer,
-            )
+            # C3 off: this turn authors the plan, it does not do the work.
+            from ai_coding.core.plan_runner import continuations_disabled
+
+            with continuations_disabled(self._agent_loop):
+                await self._agent_loop.process_input(
+                    self._session,
+                    f"Create a detailed implementation plan for: {topic}. "
+                    "Break it down into specific, actionable steps. "
+                    "Write the plan as todo items with todo_write; every step with "
+                    "a machine-checkable outcome must carry its proof command in "
+                    "'verify' (a shell command), so the plan can be executed and "
+                    "verified step by step. "
+                    "Write the items as pending/open steps only — do not execute "
+                    "the work and do not mark items completed during planning.",
+                    on_delta=self._on_delta,
+                    observer=self._observer,
+                )
             # M1-A: /plan plans AND executes — one command, one workflow.
             # The two-command handoff let the plan go stale between /plan and
             # /plan-run (measured: a run that executed 0 turns against a list

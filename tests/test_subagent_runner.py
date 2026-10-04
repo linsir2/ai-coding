@@ -450,3 +450,49 @@ async def test_subagent_sub_loop_has_no_subagent_tool(tmp_path):
 def _schemas(engine: _Engine) -> list[dict]:
     """Schemas the sub-loop advertised to the engine."""
     return engine.requests[0]["tools"]
+
+
+@pytest.mark.asyncio
+async def test_subagent_does_not_auto_continue_its_budget():
+    """Review fix: C3 must not multiply a sub-agent's iteration budget.
+
+    A sub-agent is waited on by its parent and already carries its own
+    wall-clock ceiling; letting it start three more rounds after its budget
+    dies turns one delegated task into up to 4x the iterations.  Driven
+    behaviourally rather than through the settings object: the child writes a
+    todo item (so open_items is non-empty — the trigger C3 reads) and then
+    burns the rest of its budget calling a tool that changes nothing.
+    """
+    budget = 3
+    burn = [
+        StepResult(
+            tool_calls=[ToolCallRef(id=f"b{i}", name="noop", arguments="{}")],
+            finish_reason="tool_calls",
+        )
+        for i in range(12)
+    ]
+    engine = _Engine([
+        StepResult(
+            tool_calls=[
+                ToolCallRef(
+                    id="c1",
+                    name="todo_write",
+                    arguments='{"action":"add","content":"ship it"}',
+                )
+            ],
+            finish_reason="tool_calls",
+        ),
+        *burn,
+    ])
+    runner = _runner(engine, registry=_registry(_Tool("noop")),
+                     settings=AIConfig(stop_policy="natural",
+                                       max_tool_iterations=budget))
+
+    await runner.run("t", parent=_parent())
+
+    # todo_write plus the rest of the child's own budget, and not one round more
+    assert len(engine.requests) <= 1 + budget
+    assert not any(
+        "[continue]" in (m.content or "")
+        for request in engine.requests for m in request["messages"]
+    )

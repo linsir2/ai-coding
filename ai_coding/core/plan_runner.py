@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -47,6 +49,34 @@ _OUTPUT_TAIL = 500
 def _tail(text: str | None) -> str:
     text = (text or "").strip()
     return text if len(text) <= _OUTPUT_TAIL else f"…{text[-_OUTPUT_TAIL:]}"
+
+
+@contextmanager
+def continuations_disabled(loop: Any) -> Iterator[None]:
+    """Run a block with C3 (auto-continuation) off, then restore the policy.
+
+    C3 pays off when the model is finishing *its own* work and stopped only
+    because the iteration budget ran out.  It does not pay off when something
+    else is waiting on the turn:
+
+    - the planning turn, whose open items are the plan being authored rather
+      than work in progress.  Continuing it told the model to "keep going" on
+      the one turn whose prompt says *do not execute the work* (measured: 10
+      model calls and 3 ``[continue]`` injections where 2 calls did the job);
+    - plan steps, which get the same treatment inline in ``_run_step``;
+    - sub-agents, which a parent already waits on and which carry their own
+      wall-clock ceiling (``subagent._subagent_settings``).
+
+    Plain ``loop.policy`` access on purpose: a loop without a policy is not an
+    AgentLoop, and quietly skipping the swap would leave C3 armed in exactly
+    the turn this exists to disarm.
+    """
+    original = loop.policy
+    loop.policy = TurnPolicy(replace(original.config, max_auto_continuations=0))
+    try:
+        yield
+    finally:
+        loop.policy = original
 
 
 @dataclass

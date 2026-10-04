@@ -44,6 +44,7 @@ async def test_plan_topic_clears_the_receipt_book_behaviourally():
     Source inspection would prove nothing here — what matters is that after
     `/plan <topic>` the session's step ids belong to the new plan alone.
     """
+    from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
     from ai_coding.domain.plan_delivery import StepDelivery
     from ai_coding.domain.session import SessionData
     from ai_coding.ui.console import DialogueConsole
@@ -52,6 +53,11 @@ async def test_plan_topic_clears_the_receipt_book_behaviourally():
     class _Loop:
         def __init__(self):
             self.calls = []
+            # A real AgentLoop always has a policy; /plan swaps a copy to
+            # disarm C3 for the planning turn.
+            self.policy = TurnPolicy(
+                TurnPolicyConfig(max_auto_continuations=3)
+            )
 
         async def process_input(self, session, text, on_delta=None):
             self.calls.append(text)
@@ -74,3 +80,44 @@ async def test_plan_topic_clears_the_receipt_book_behaviourally():
     assert action is REPLAction.CONTINUE
     assert session.task.goal == "新计划"
     assert session.step_deliveries == []
+
+
+@pytest.mark.asyncio
+async def test_repl_plan_turn_runs_with_auto_continuation_disabled():
+    """Review fix: the REPL's planning turn must not inherit C3 either.
+
+    Same reasoning as the Textual path (see
+    tests/test_textual_app.py::test_plan_turn_runs_with_auto_continuation_disabled):
+    the plan's open items are not work in progress, so continuing the planning
+    turn contradicts its own prompt.  Pinned per call site — dropping the guard
+    from one UI would not fail the other's test.
+    """
+    from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
+    from ai_coding.domain.session import SessionData
+    from ai_coding.ui.console import DialogueConsole
+    from ai_coding.ui.repl import handle_input
+
+    class _Loop:
+        def __init__(self):
+            self.calls = []
+            self.seen: list[int] = []
+            self.policy = TurnPolicy(TurnPolicyConfig(max_auto_continuations=3))
+
+        async def process_input(self, session, text, on_delta=None):
+            self.calls.append(text)
+            self.seen.append(self.policy.config.max_auto_continuations)
+            return "planned"
+
+    class _Sessions:
+        def list_sessions(self):
+            return []
+
+    loop = _Loop()
+    armed = loop.policy
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+
+    await handle_input(loop, "/plan 新计划", session, _Sessions(),
+                       DialogueConsole(Console(record=True, width=80)))
+
+    assert loop.seen[0] == 0
+    assert loop.policy is armed

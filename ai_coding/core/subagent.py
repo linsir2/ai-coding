@@ -493,8 +493,15 @@ class SubAgentRunner:
         budget = self._timeout * _INNER_BUDGET_RATIO
         if configured > 0:
             budget = min(budget, configured)
+        # C3 off: the parent is blocked on this child, so a continuation buys
+        # the parent nothing but latency — and it multiplies the child's
+        # iterations by (1 + max_auto_continuations).  Measured with an open
+        # todo item and max_tool_iterations=3: 12 model calls instead of 4.
         return self._settings.model_copy(
-            update={"turn_timeout_seconds": max(budget, 0.01)}
+            update={
+                "turn_timeout_seconds": max(budget, 0.01),
+                "max_auto_continuations": 0,
+            }
         )
 
     def _packet(

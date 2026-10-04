@@ -7,6 +7,7 @@ import pytest
 from textual.command import CommandPalette
 from textual.widgets import Input, Static
 
+from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
 from ai_coding.ui.status_bar import StatusBar
 from ai_coding.ui.textual_app import AICodingApp
 from ai_coding.ui.transcript import Prose
@@ -52,6 +53,9 @@ class _FakeLoop:
         self.calls: list[str] = []
         self.workspace = "/tmp/ws"
         self.model_name = "fake-model"
+        # A real AgentLoop always has a policy; /plan swaps a copy of it to
+        # disarm C3 for the planning turn, so the stub carries one too.
+        self.policy = TurnPolicy(TurnPolicyConfig(max_auto_continuations=3))
 
     async def process_input(self, session, text, *, on_delta=None, observer=None):
         self.calls.append(text)
@@ -459,6 +463,45 @@ async def test_plan_with_topic_skips_the_prompt_and_resets_the_list():
         assert "给 /tasks 加一个 show 子命令" in loop.calls[0]
         assert session.task.goal == "给 /tasks 加一个 show 子命令"
         assert session.task.items == []
+
+
+@pytest.mark.asyncio
+async def test_plan_turn_runs_with_auto_continuation_disabled():
+    """Review fix: the planning turn must not inherit C3.
+
+    Its open items are the plan being authored, not work in progress, so a
+    budget-exhausted planning turn was told to "continue the unfinished
+    work" — on the one turn whose prompt says *do not execute the work*
+    (measured: 10 model calls and 3 [continue] injections where 2 calls did
+    the job).  The step turns the runner runs afterwards keep their own
+    policy; this only disarms the planning turn, and restores the loop's.
+    """
+    from ai_coding.domain.session import SessionData
+    from ai_coding.domain.task import TaskState
+
+    loop = _FakeLoop()
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.task = TaskState(goal="old goal")
+    armed = loop.policy
+    seen: list[int] = []
+    inner = loop.process_input
+
+    async def spy(target, text, **kwargs):
+        seen.append(loop.policy.config.max_auto_continuations)
+        return await inner(target, text, **kwargs)
+
+    loop.process_input = spy
+    app = _app(loop=loop, session=session)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/plan 加一个子命令"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+    assert seen == [0]          # the planning turn ran with C3 disarmed
+    assert loop.policy is armed  # and the loop got its policy back
 
 
 @pytest.mark.asyncio

@@ -157,20 +157,22 @@ async def handle_input(
         else:
             topic = "the current task"
             console.info("[plan] generating implementation plan...")
-        await loop.process_input(
-            session,
-            f"Create a detailed implementation plan for: {topic}. "
-            "Break it down into specific, actionable steps. "
-            "Write the plan as todo items with todo_write; every step with "
-            "a machine-checkable outcome must carry its proof command in "
-            "'verify' (a shell command), so the plan can be executed and "
-            "verified step by step. "
-            "Write the items as pending/open steps only — do not execute "
-            "the work and do not mark items completed during planning.",
-            on_delta=console.delta,
-        )
-        from ai_coding.core.plan_runner import PlanRunner
+        from ai_coding.core.plan_runner import PlanRunner, continuations_disabled
 
+        # C3 off: this turn authors the plan, it does not do the work.
+        with continuations_disabled(loop):
+            await loop.process_input(
+                session,
+                f"Create a detailed implementation plan for: {topic}. "
+                "Break it down into specific, actionable steps. "
+                "Write the plan as todo items with todo_write; every step with "
+                "a machine-checkable outcome must carry its proof command in "
+                "'verify' (a shell command), so the plan can be executed and "
+                "verified step by step. "
+                "Write the items as pending/open steps only — do not execute "
+                "the work and do not mark items completed during planning.",
+                on_delta=console.delta,
+            )
         await PlanRunner(loop).run(session, console)
         return REPLAction.CONTINUE, session
     if cmd.name == "review":
