@@ -158,7 +158,15 @@ class TurnCloser:
             self.save(session)
 
     def save(self, session: SessionData) -> None:
-        """Persist the session, reporting (not raising) a failure."""
+        """Persist the session, reporting (not raising) a failure.
+
+        Internal sessions (``ephemeral``) are skipped: they run on the main
+        loop, so without this guard every plan step would leave a
+        "plan step N" file in the sessions directory and the /resume picker
+        would list them (H1 audit fix).
+        """
+        if getattr(session, "ephemeral", False):
+            return
         session.ensure_tool_pairing()
         try:
             self._sessions.save(session)

@@ -75,6 +75,9 @@ class TurnBooks:
 
     #: The last iteration index the loop started (0 = nothing started yet).
     iterations: int = 0
+    #: Every model step this turn made, across C3 continuation rounds.  The
+    #: outcome and handoff report this one; ``iterations`` is round-local.
+    total_iterations: int = 0
     #: Task-gate nudges injected (``[task-gate]``) — the R2 stop policy's budget.
     nudges: int = 0
     #: Tool calls asked for this turn, successful or not.
@@ -146,8 +149,15 @@ class TurnBooks:
     # ---- notifications ----------------------------------------------------
 
     def note_iteration(self, index: int) -> None:
-        """Record the iteration index about to start."""
+        """Record the iteration index about to start.
+
+        ``iterations`` stays round-local (the C3 restart resets it), while
+        ``total_iterations`` counts every model step this turn made — the
+        number outcome and handoff report (H2 audit fix: a turn with three
+        continuation rounds used to claim the last round's index).
+        """
         self.iterations = index
+        self.total_iterations += 1
 
     def note_nudge(self) -> None:
         """The task gate injected a reminder and will iterate again."""

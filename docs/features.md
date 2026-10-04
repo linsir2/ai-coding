@@ -45,7 +45,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | `/tasks` | `[stop <id>]` | 列出后台子智能体运行（id/名/状态/耗时/tokens）；`stop` 停掉运行中的任务 |
 | `/skills` | — | 列出 `SkillRegistry` 目录（`- name: description`） |
 | `ask_user`（工具） | — | 弹 `AskScreen` 提问；模型给了 `options` 时会在问题下方列出（选项只是提示，不强制，仍可自由输入）。**已实现**（此前 `AskScreen` 的 `options` 参数从未被任何调用方填充，渲染行是死代码） |
-| `/plan` | `<topic>` | **计划并执行**（M1）：裸 `/plan` 先弹 `What should I plan?` 收集主题；`/plan <topic>` 直接用话题、不再弹窗。两条路径都重开一份计划（`SessionData.begin_plan(topic)`：新 goal + 空清单 + 清空 step 收据）。计划回合写 todo 清单后**立即逐步执行**——`/plan-run` 已删除（两命令接力会让清单过期：实测 0 回合跑在上一轮的清单上）。每步一个**短对话**（全新 session，seed = goal + 计划当前状态 + 本步验收，不继承父历史）——实测 4 回合 prompt 从 41k/82k/130k/254k（二次）降为恒定。有 `verify` 的项走 R0 验收门（失败修一次再败标 `blocked`）；无 `verify` 且模型未标完成的标 `stalled`。每步落收据，`/resume` 重放为步骤 header。整轮有顶（`ai.plan_max_step_turns`，默认 20，0=关闭）。**分步外完成有收据**（R1-5）：模型在计划回合顺手标 done 的步，runner 补 `attested=false` 收据、0 花费。**收据带证明分级**（R1-6）：`verified`/`on-claim`/`fiat`/`n-a`，report 点名无证明的 id |
+| `/plan` | `<topic>` | **计划并执行**（M1）：裸 `/plan` 先弹 `What should I plan?` 收集主题；`/plan <topic>` 直接用话题、不再弹窗。两条路径都重开一份计划（`SessionData.begin_plan(topic)`：新 goal + 空清单 + 清空 step 收据）。计划回合写 todo 清单后**立即逐步执行**——`/plan-run` 已删除（两命令接力会让清单过期：实测 0 回合跑在上一轮的清单上）。每步一个**短对话**（全新 `ephemeral` session，seed = goal + 计划当前状态 + 本步验收，不继承父历史；步会话不落盘，不污染 `/resume`）——实测 4 回合 prompt 从 41k/82k/130k/254k（二次）降为恒定。有 `verify` 的项走 R0 验收门（失败修一次再败标 `blocked`）；无 `verify` 且模型未标完成的标 `stalled`。每步落收据，`/resume` 重放为步骤 header。整轮有顶（`ai.plan_max_step_turns`，默认 20，0=关闭；budget 停后剩余项保持 open）。**分步外完成有收据**（R1-5）：模型在计划回合顺手标 done 的步，runner 补 `attested=false` 收据、0 花费。**收据带证明分级**（R1-6）：`verified`/`on-claim`/`fiat`/`n-a`，report 点名无证明的 id |
 | `/review` | — | 向模型发一条「审查当前 git diff」的快捷 prompt |
 | `/config` | — | 打印生效的 model / 上下文预算 / 迭代上限 / 停止策略 / 回合超时 |
 | `/compact` | — | 主动压缩历史并落盘 |
@@ -149,7 +149,9 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 正常回合迭代预算耗尽但 todo 仍有 open 项时，循环注入 `[continue]` 提示（点名剩余项）
 并**重新武装迭代预算**（新一轮 `max_tool_iterations`），最多 `ai.max_auto_continuations`
 （默认 3，`0` 关闭）次；todo 清空则正常结束。触发**不受 `stop_policy` 影响**——活没干完
-不是停止策略问题；续跑额度按**用户回合**重置。实测（qwen，`max_tool_iterations=2`）：
+不是停止策略问题；续跑额度按**用户回合**重置。token 预算耗尽（`ai.turn_token_budget>0`）
+是终态，优先于续跑——不会注入注定无效的提示白烧一次额度。handoff/`TurnOutcome.iterations`
+报**累计模型步数**（跨续跑轮），不是最后一轮的序号。实测（qwen，`max_tool_iterations=2`）：
 一个三步任务连续 3 次，续跑提示里剩余项随实际进展收缩（3→2→1），最后模型自己收尾"全部完成 3/3"。
 plan-runner 的步内强制关闭（`max_auto_continuations=0`）：步是共享计划 task 的一个有界回合，
 开着会让单步把整个计划的剩余项当成"未完成工作"。

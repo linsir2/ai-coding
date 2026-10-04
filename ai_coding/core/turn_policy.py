@@ -138,8 +138,9 @@ class TurnSnapshot:
     final_text: str | None = None
     tokens_spent: int = 0  # R4b: what this turn has spent so far
     # C3: continuation rounds already spent this turn (budget died with items
-    # open, the loop started a fresh round).  Persisted on the session so it
-    # survives across the rounds.
+    # open, the loop started a fresh round).  Kept on the session so it
+    # survives across the rounds — in-process only; the session's to_dict
+    # whitelist does not persist it, and a new user turn resets it.
     continuations: int = 0
     # R6b: how the tool calls have been going.  Fed in by the loop — the policy
     # never counts anything itself, so it stays pure and table-testable.
@@ -186,16 +187,24 @@ class TurnPolicy:
         """May ``snapshot.iteration`` start?  The turn clock wins over the count."""
         if budget_expired:
             return TurnDecision(TurnAction.FINISH, "turn deadline exceeded")
+        # M1 audit fix: token exhaustion must not burn a C3 continuation.  The
+        # gate is computed once and guards the continuation below; the reason
+        # precedence for the plain ladder (iteration first) is unchanged.
+        token_gate = bool(self.config.max_turn_tokens) and (
+            snapshot.tokens_spent >= self.config.max_turn_tokens
+        )
         if snapshot.iteration > self.config.max_iterations:
             # C3: the budget is gone but the work is not — open items mean the
             # model never finished, so inject a continuation prompt and start a
             # fresh round rather than handing the user a dead turn.  Fires
             # regardless of stop_policy: unfinished work is not a stop-policy
             # question.  The cap keeps a model that never closes its items from
-            # running forever.
+            # running forever; an exhausted token budget makes the continuation
+            # pointless, so it falls through to FINISH instead.
             if (
                 snapshot.open_items
                 and snapshot.continuations < self.config.max_auto_continuations
+                and not token_gate
             ):
                 return TurnDecision(
                     TurnAction.NUDGE,
@@ -203,10 +212,7 @@ class TurnPolicy:
                     inject=self.continuation_message(snapshot.open_items),
                 )
             return TurnDecision(TurnAction.FINISH, "iteration budget exhausted")
-        if (
-            self.config.max_turn_tokens
-            and snapshot.tokens_spent >= self.config.max_turn_tokens
-        ):
+        if token_gate:
             return TurnDecision(TurnAction.FINISH, "turn token budget exhausted")
         # R6b tier 3: the turn keeps *calling tools* and none of them ever works,
         # so another round is not going to start working — stop while there is

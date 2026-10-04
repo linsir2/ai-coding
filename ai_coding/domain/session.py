@@ -139,9 +139,15 @@ class SessionData:
     # ``task`` — old files simply have no key.
     acceptance: list[AcceptanceItem] = field(default_factory=list)
     # C3: continuation rounds this turn has already spent (the iteration budget
-    # died with items open, the loop started a fresh round).  Persisted on the
-    # session so it survives across the rounds.
+    # died with items open, the loop started a fresh round).  Kept on the
+    # session because the books are per-turn and would lose it across rounds —
+    # in-process only: ``to_dict`` is a whitelist and a new user turn resets it.
     continuations: int = 0
+    # NOT persisted, by the same whitelist.  Internal sessions (plan-runner
+    # steps) never touch the sessions directory: they run on the main loop,
+    # whose TurnCloser would otherwise write one "plan step N" file per step
+    # and flood the /resume picker.
+    ephemeral: bool = False
     # Step deliveries (R1-1): what each plan-runner step left behind.  The
     # resume replay reads these to rebuild the step timeline; persisted only
     # when non-empty, same rule as above.

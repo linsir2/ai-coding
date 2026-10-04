@@ -51,7 +51,7 @@ def _tail(text: str | None) -> str:
 
 @dataclass
 class PlanReport:
-    """What one ``/plan-run`` did, for the console and the caller."""
+    """What one ``/plan`` execution did, for the console and the caller."""
 
     completed: list[str] = field(default_factory=list)
     blocked: list[str] = field(default_factory=list)
@@ -74,7 +74,7 @@ class PlanReport:
         attested_done = sum(
             1 for step_id in self.completed if attested_of.get(step_id, True)
         )
-        head = f"[plan-run] 完成 {attested_done} 步 · 用了 {self.turns_used} 回合"
+        head = f"[plan] 完成 {attested_done} 步 · 用了 {self.turns_used} 回合"
         if self.tokens_used:
             head += f" / {self.tokens_used.get('total_tokens', '?')} tokens"
         parts = [head]
@@ -117,7 +117,7 @@ class PlanRunner:
             # same verdict as an empty plan — "nothing to do", not "run /plan
             # first", which would be absurd right after planning.
             report.stopped = "no-open-items"
-            self._say(console, "[plan-run] 完成 0 步 · 用了 0 回合（无任务项）")
+            self._say(console, "[plan] 完成 0 步 · 用了 0 回合（无任务项）")
             return report
         attempted: set[str] = set()
         cap = self._run_budget()
@@ -145,7 +145,7 @@ class PlanRunner:
                 report.stopped = (
                     f"budget: plan turn budget exhausted "
                     f"({report.turns_used}/{cap} step-turns); "
-                    "re-run /plan-run to continue"
+                    "remaining steps stay open"
                 )
                 break
             attempted.add(item.id)
@@ -225,6 +225,10 @@ class PlanRunner:
             created_time=now_utc(),
             last_access_time=now_utc(),
         )
+        # Internal by definition (H1 audit fix): the step transcript is
+        # disposable once its receipt is on the parent, and persisting it
+        # would flood the sessions directory / /resume picker.
+        step.ephemeral = True
         # Shared, not copied: a step marking its item done moves the plan.
         step.task = task
         step.messages = [
@@ -300,7 +304,7 @@ class PlanRunner:
         total = len(task.items)
         self._say(
             console,
-            f"[plan-run] 步骤 {item.id}/{total}（剩余 {open_count} 项）：{item.content}",
+            f"[plan] 步骤 {item.id}/{total}（剩余 {open_count} 项）：{item.content}",
         )
         # M1-B: the step runs in its own short conversation, not the parent's
         # ever-growing history.  The parent keeps only the prompt (replay

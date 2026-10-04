@@ -343,3 +343,48 @@ async def test_usage_still_summed_across_steps():
     assert report.tokens_used == {
         "prompt_tokens": 200, "completion_tokens": 40, "total_tokens": 240,
     }
+
+
+@pytest.mark.asyncio
+async def test_step_sessions_are_ephemeral(tmp_path):
+    """H1 audit fix: step sessions must not pollute the sessions directory.
+
+    They run on the main loop, whose TurnCloser persists every turn — so a
+    plan run used to leave one "plan step N" file per executed step, and the
+    /resume picker listed them all.  Ephemeral sessions are skipped at the
+    single save choke point.
+    """
+    from ai_coding.config.models import AIConfig
+    from ai_coding.core.agent_loop import AgentLoop
+    from ai_coding.domain.loop import StepResult
+    from ai_coding.service.session_service import SessionService
+    from ai_coding.tools.registry import ToolRegistry
+    from ai_coding.tools.todo_write_tool import TodoWriteTool
+
+    class _TextEngine:
+        async def step(self, messages, *, tools, instructions=None, on_delta=None):
+            return StepResult(text="done", finish_reason="stop")
+
+        async def aclose(self):
+            return None
+
+    sessions = SessionService(root=tmp_path / "sessions")
+    registry = ToolRegistry()
+    registry.register(TodoWriteTool())
+    loop = AgentLoop(
+        _TextEngine(), sessions, registry,
+        settings=AIConfig(stop_policy="natural", max_tool_iterations=4,
+                          plan_step_max_iterations=2),
+        workspace=str(tmp_path / "ws"),
+    )
+    session = sessions.create(title="main")
+    task = TaskState(goal="g")
+    task.add("one")
+    session.task = task
+
+    await loop.process_input(session, "go")   # a normal turn persists the parent
+    await PlanRunner(loop).run(session)
+
+    files = [p.name for p in (tmp_path / "sessions").glob("*.json")]
+    assert [name for name in files if not name.startswith("plan-")]
+    assert [name for name in files if name.startswith("plan-")] == []

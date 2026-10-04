@@ -306,7 +306,7 @@ class AgentLoop:
                             outcome = TurnOutcome(
                                 status=TurnStatus.COMPLETED,
                                 text=books.last_text,
-                                iterations=books.iterations,
+                                iterations=books.total_iterations,
                                 reason="acceptance verified (post-budget)",
                             )
                             break
@@ -314,7 +314,7 @@ class AgentLoop:
                         decision,
                         budget_expired=budget_expired,
                         last_text=books.last_text,
-                        iterations=books.iterations,
+                        iterations=books.total_iterations,
                     )
                     break
                 if decision.action is TurnAction.NUDGE:
@@ -394,7 +394,7 @@ class AgentLoop:
                         outcome = TurnOutcome(
                             status=TurnStatus.COMPLETED,
                             text=step.text,
-                            iterations=index,
+                            iterations=books.total_iterations,
                             reason=decision.reason,
                         )
                         break
@@ -419,7 +419,7 @@ class AgentLoop:
                 )
                 books.note_outcomes(outcomes)
                 if any(item.halted for item in outcomes):
-                    outcome = stopped_outcome(step.text, index)
+                    outcome = stopped_outcome(step.text, books.total_iterations)
                     break
         except asyncio.CancelledError:
             # Record what happened, persist the partial transcript, then let the
@@ -430,12 +430,12 @@ class AgentLoop:
                 task=task,
                 frame=frame,
                 books=books,
-                outcome=aborted_outcome(books.last_text, books.iterations),
+                outcome=aborted_outcome(books.last_text, books.total_iterations),
             )
             raise
         except (DeadlineExpired, EngineError) as exc:
             outcome = failed_outcome(
-                exc, last_text=books.last_text, iterations=books.iterations
+                exc, last_text=books.last_text, iterations=books.total_iterations
             )
 
         return await self._finish_turn(

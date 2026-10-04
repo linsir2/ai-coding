@@ -553,7 +553,11 @@ async def test_handle_plan_executes_open_todos():
 
     assert action is REPLAction.CONTINUE
     out = _session_text(c)
-    assert "plan-run" in out and "已完成" in out
+    # H3 audit fix: the deleted /plan-run must not appear anywhere, and the
+    # runner now reports under [plan].  The old assertion "plan-run in out"
+    # could not catch this: "[plan]" is a substring of "[plan-run]".
+    assert "[plan-run]" not in out
+    assert "[plan]" in out and "已完成" in out
     assert session.task.items[0].status == "completed"
 
 

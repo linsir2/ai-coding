@@ -254,3 +254,46 @@ async def test_plan_step_does_not_auto_continue(tmp_path):
     await PlanRunner(_StubLoop()).run(session)
 
     assert seen and all(value == 0 for value in seen)
+
+
+def test_token_budget_beats_continuation():
+    """M1 audit fix: an exhausted token budget must not burn a continuation.
+
+    The C3 branch used to fire even with the token budget spent: [continue]
+    was injected, the round re-armed, and the very next gate hit the token
+    cap — the count was consumed with no model call.  The continuation is
+    guarded by the token gate; the reason precedence of the plain ladder
+    (iteration first) is unchanged.
+    """
+    policy = TurnPolicy(_config(max_iterations=3, max_turn_tokens=100,
+                                max_auto_continuations=3))
+    decision = policy.decide_next_iteration(
+        TurnSnapshot(iteration=4, open_items=(_item("1"),), continuations=0,
+                     tokens_spent=100)
+    )
+    assert decision.action is TurnAction.FINISH
+    assert decision.inject is None  # no pointless [continue]
+    assert decision.reason == "iteration budget exhausted"
+
+
+@pytest.mark.asyncio
+async def test_outcome_iterations_count_every_model_call(tmp_path):
+    """H2 audit fix: outcome.iterations is cumulative across continuation rounds.
+
+    Two rounds of two iterations (then the cap) are four model calls; the
+    old counter reported the last round's index (2) because the C3 restart
+    reset it.
+    """
+    engine = _ScriptedEngine([_tool_call(f"c{i}") for i in range(8)])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _integration_loop(engine, sessions, max_tool_iterations=2,
+                             max_auto_continuations=2)
+    session = sessions.create()
+    session.task = TaskState(goal="g")
+    session.task.add("still open")
+
+    await loop.process_input(session, "go")
+
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.iterations == len(engine.requests)
+    assert loop.last_outcome.iterations == 6

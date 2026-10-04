@@ -196,7 +196,7 @@ R2 给 `ToolFinished` 追加末尾字段 `error: str | None = None`（与 `ToolR
 | `stream_usage` | `true` | 是否请求 `stream_options.include_usage` |
 | `persist_checkpoint_messages` | `200` | 超过此条数后，回合内落盘按步长（每 3 轮）节流 |
 | `turn_timeout_seconds` | `600.0` | **回合墙钟上限**（R2）：到期 → `TurnStatus.TIMEOUT`，保留已产出文本与轨迹；`0` 关闭。含人工审批等待时间 |
-| `max_auto_continuations` | `3` | **C3**：正常回合迭代预算耗尽且 todo 仍有 open 项时，注入 `[continue]` 提示并**重新武装迭代预算**（新一轮 `max_tool_iterations`），最多 N 次；`0` 关闭。不受 `stop_policy` 影响；每用户回合重置。plan-runner 步内强制 `0`（一步一个有界回合，共享计划 task 不能让单步续跑） |
+| `max_auto_continuations` | `3` | **C3**：正常回合迭代预算耗尽且 todo 仍有 open 项时，注入 `[continue]` 提示并**重新武装迭代预算**（新一轮 `max_tool_iterations`），最多 N 次；`0` 关闭。不受 `stop_policy` 影响；每用户回合重置。token 预算耗尽优先判终态（不白烧续跑额度）。plan-runner 步内强制 `0`（一步一个有界回合，共享计划 task 不能让单步续跑） |
 
 ### 回合终态（`domain/loop.py`）
 
@@ -283,10 +283,12 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `PlanReport`（`core/plan_runner.py`） | `turns_used`（本轮 `process_input` 次数）、`tokens_used`（求和或 None）、`stopped` 新增 `budget:…` 值 | render 头行 `完成 n 步 · 用了 T 回合 [/ K tokens]`（R1-5b：n 只计 attested——本轮亲手结算的步；fiat 另列在下一行，`completed` 列表仍含全部 done id）；顶盖检查只在还有剩余工作时触发（正好用完跑完=干净结束） |
 | `StepDelivery.proof`（派生属性，R1-6，不落盘） | `verified`（completed+attested+ac 非空即全过）/`on-claim`（completed+attested+ac 空）/`fiat`（attested=False）/`n/a`（未完成） | 只读推导，无字段、无 `to/from_dict` 改动；老收据 retroactive 可分级；非法组合 fallback 到 on-claim（宁可标没证过，不标证过） |
 | `AIConfig.plan_step_max_iterations` | `int = 8` | plan-runner 单步迭代上限；runner 临时换 policy 副本（同时 `stop_policy=natural` 关 todo 门禁、`max_auto_continuations=0` 禁 C3），`finally` 恢复 |
-| M1 短对话契约 | 每步全新 `SessionData`（`plan-<uuid>`），seed = goal + 计划当前状态（只列未完成项）+ 本步验收；步骤全文留子 session，父只收 prompt + 一行摘要 + 收据 | token 从 O(N²) 降为 O(N)（实测 4 回合 41k/82k/130k/254k → 恒定）；`/plan-run` 删除，`/plan` 计划并执行 |
+| M1 短对话契约 | 每步全新 `SessionData`（`plan-<uuid>`、`ephemeral=True`），seed = goal + 计划当前状态（只列未完成项）+ 本步验收；步骤全文留子 session，父只收 prompt + 一行摘要 + 收据 | token 从 O(N²) 降为 O(N)（实测 4 回合 41k/82k/130k/254k → 恒定）；`/plan-run` 删除，`/plan` 计划并执行；步会话不落盘（`TurnCloser.save` 对 ephemeral 跳过），不污染 `/resume` |
+| `SessionData.ephemeral`（H1，不落盘） | `bool = False` | 内部会话旗标：正常 session 为 False；plan 步会话 True。`TurnCloser.save` 唯一持久化闸口处跳过（checkpoint/finalize 都走它） |
 | `SessionData.continuations`（C3，不落盘） | `int = 0` | 本用户回合已用的自动续跑次数；`_begin_turn` 归零，续跑分支 +1；`to_dict` 白名单不含它（跨重启无意义） |
 | `TurnSnapshot.continuations`（C3） | `int = 0` | 策略可见的续跑计数；循环顶部快照必须带 `open_items`（续跑判定的另一个输入），否则续跑永不触发（集成测试钉死） |
 | `TurnPolicy.continuation_message`（C3） | `[continue] 上一轮预算耗尽，但还有未完成的任务项：…` | 与 `[task-gate]`（模型停手时）分开：C3 管"预算耗尽"，task-gate 管"模型停手"；两条消息都是持久化的 user 消息，replay 可重建 |
+| `TurnBooks.total_iterations`（C3，H2） | `int`，`note_iteration` 每次 +1 | 跨续跑轮累计模型步数；`TurnOutcome.iterations`/handoff "N 轮" 一律用它，`books.iterations` 保持轮内序号（重启归零，预算判定用） |
 
 ### R1-4 思考时间线契约
 
