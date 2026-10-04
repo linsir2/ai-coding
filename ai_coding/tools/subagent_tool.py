@@ -8,6 +8,7 @@ machine-readable ``data``.  The sub-agent's reasoning is not returned.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ai_coding.core.observers import EmitObserver
@@ -16,6 +17,11 @@ from ai_coding.domain.subagent import ParentContext, SubagentResult
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 SUCCESS_STATUSES = frozenset({"completed", "max_iterations"})
+
+#: Bound on a caller-supplied ``output_schema`` (R1-3): the schema is pasted
+#: into the child's prompt, so an unbounded one is a token bomb.  4000 chars
+#: fits any honest contract (a dozen required keys with descriptions).
+_MAX_SCHEMA_CHARS = 4000
 
 #: Machine-readable child termination codes (R0-3): the parent must be able
 #: to tell "done" from "cut" without parsing prose (measured: C1's timeout
@@ -44,6 +50,16 @@ def _render(result: SubagentResult, name: str) -> str:
         lines.append(result.conclusion)
     elif result.error:
         lines.append(f"error: {result.error}")
+    # R1-3: the machine verdict on the conclusion's shape.  A valid packet
+    # gets one compact facts line; an invalid one names the miss but keeps
+    # the raw text above — the work stands, only the shape failed.
+    if result.schema_valid is True:
+        facts = result.facts or {}
+        parts = [f"{key}={str(value)[:80]}" for key, value in list(facts.items())[:8]]
+        lines.append("facts: " + (", ".join(parts) if parts else "(empty)"))
+    elif result.schema_valid is False:
+        miss = "; ".join(result.schema_errors) or "unparseable conclusion"
+        lines.append(f"⚠ 结构校验未过 ({miss})，已保留原文")
 
     open_items = [
         entry
@@ -91,6 +107,9 @@ def _to_tool_result(result: SubagentResult, name: str) -> ToolResult:
             "exit_reason": result.exit_reason,
             "usage": dict(result.usage) if result.usage is not None else None,
             "conclusion_chars": len(conclusion) if conclusion else 0,
+            "facts": dict(result.facts) if result.facts is not None else None,
+            "schema_valid": result.schema_valid,
+            "schema_errors": list(result.schema_errors),
         },
         artifacts=result.artifacts,
     )
@@ -166,6 +185,19 @@ class SubAgentTool(BaseTool):
                         "would otherwise wait out its whole turn budget."
                     ),
                 },
+                "output_schema": {
+                    "type": "object",
+                    "description": (
+                        "JSON-shape contract for the sub-agent's conclusion "
+                        "(R1-3): the child is instructed to return its verdict "
+                        "as a JSON object, and the packet carries the parsed "
+                        "'facts' plus a 'schema_valid' verdict. Only require "
+                        "fields you will actually read. Only 'required' is "
+                        "enforced; other JSON Schema keywords are ignored. "
+                        "A bad shape never sinks the work — the raw "
+                        "conclusion is always kept."
+                    ),
+                },
             },
             "required": ["task"],
         }
@@ -184,6 +216,26 @@ class SubAgentTool(BaseTool):
             )
         name = str(params.get("name", "sub-agent")).strip() or "sub-agent"
 
+        # R1-3: validate the shape contract before the runner ever sees it.
+        schema = params.get("output_schema")
+        if schema is not None:
+            if not isinstance(schema, dict):
+                return ToolResult(
+                    success=False,
+                    output="error: 'output_schema' must be a JSON object",
+                    error="schema_invalid",
+                )
+            if len(json.dumps(schema, ensure_ascii=False)) > _MAX_SCHEMA_CHARS:
+                return ToolResult(
+                    success=False,
+                    output=(
+                        "error: 'output_schema' is too large "
+                        f"(>{_MAX_SCHEMA_CHARS} chars): it is pasted into the "
+                        "child's prompt"
+                    ),
+                    error="schema_too_large",
+                )
+
         context = resolve_ctx(ctx)
         parent: ParentContext | None = None
         if context.messages or context.instructions:
@@ -193,7 +245,7 @@ class SubAgentTool(BaseTool):
             )
 
         if params.get("background"):
-            return self._spawn_background(task, name, context, parent)
+            return self._spawn_background(task, name, context, parent, schema)
         try:
             result = await self._runner.run(
                 task,
@@ -208,6 +260,9 @@ class SubAgentTool(BaseTool):
                 # so the parent trace finally sees child spans (previously the
                 # slot was never filled: zero scoped events over 23 runs).
                 observer=EmitObserver(context.emit),
+                # R1-3: the shape contract, always passed (None = prose as
+                # usual) so the call shape is one stable contract.
+                output_schema=schema,
             )
         except Exception as exc:  # noqa: BLE001 — tool boundary
             return ToolResult(
@@ -218,7 +273,8 @@ class SubAgentTool(BaseTool):
         return _to_tool_result(result, name)
 
     def _spawn_background(
-        self, task: str, name: str, context: ToolContext, parent: ParentContext | None
+        self, task: str, name: str, context: ToolContext, parent: ParentContext | None,
+        schema: dict[str, Any] | None = None,
     ) -> ToolResult:
         """Hand a child to the background and return its handle at once.
 
@@ -239,6 +295,10 @@ class SubAgentTool(BaseTool):
                 observer=EmitObserver(context.emit),
                 emit=context.emit,
                 origin_session=context.session_id,
+                # R1-3: the shape contract rides with the supervised run —
+                # facts land in the packet and its ledger file, pointed at by
+                # the completion event.
+                output_schema=schema,
             )
         except RuntimeError as exc:
             return ToolResult(

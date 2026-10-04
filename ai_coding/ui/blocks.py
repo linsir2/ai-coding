@@ -313,6 +313,8 @@ def blocks_from_event(event: LoopEvent) -> Block | None:
             line += f" · 会话 {event.origin_session[:12]}"
         if event.summary:
             line += f"：{_short(event.summary, _NESTED_LINE_LIMIT)}"
+        if event.ledger_path:
+            line += f" · 完整回包: {event.ledger_path}"
         return Block("background", line, "dim")
     return None
 

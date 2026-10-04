@@ -237,6 +237,11 @@ class BackgroundTaskDone:
     #: Short id of the session that spawned the run — the announce may land
     #: in a different (newer) view, and the reader deserves to know whose.
     origin_session: str = ""
+    #: Pointer to the full packet (``transcripts/subagents/*.json``, facts
+    #: included) — the summary above is capped, this is how the reader (or a
+    #: later turn) retrieves the whole report.  ``None`` when no ledger root
+    #: was configured or the write failed (best-effort).
+    ledger_path: str | None = None
 
 
 @dataclass(frozen=True)

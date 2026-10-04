@@ -36,7 +36,12 @@ from ai_coding.core.turn_report import report_degraded
 from ai_coding.core.worktree import WorktreeError
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
-from ai_coding.domain.subagent import BackgroundTask, ParentContext, SubagentResult
+from ai_coding.domain.subagent import (
+    BackgroundTask,
+    ParentContext,
+    SubagentResult,
+    extract_json_facts,
+)
 from ai_coding.infra.deadline import DeadlineExpired, run_with_deadline
 from ai_coding.infra.json_utils import to_json_pretty
 from ai_coding.infra.time_utils import now_utc
@@ -145,6 +150,7 @@ class SubAgentRunner:
         parent: ParentContext | None = None,
         parent_span: str = "",
         observer: Any | None = None,
+        output_schema: dict[str, Any] | None = None,
     ) -> SubagentResult:
         """Run ``task`` and return its packet.  Never raises for a sub-agent failure.
 
@@ -152,12 +158,17 @@ class SubAgentRunner:
         the tool layer fans the parent's emit through here, so child events
         reach the parent trace (previously the slot was never filled and the
         child ran as a black box — measured: zero scoped events over 23 runs).
+
+        ``output_schema`` (R1-3) is a JSON-shape contract for the conclusion:
+        the child is instructed to return its verdict as JSON, and the packet
+        carries the parsed ``facts`` plus a ``schema_valid`` verdict.  The raw
+        conclusion always survives — a bad brace must not kill an hour of work.
         """
         active = self._observer if observer is None else observer
         async with self._semaphore:
             return await self._run_isolated(
                 task, name, parent, parent_span, active,
-                worktree_manager, isolate,
+                worktree_manager, isolate, output_schema,
             )
 
     async def _run_isolated(
@@ -169,6 +180,7 @@ class SubAgentRunner:
         observer: Any | None,
         worktree_manager: Any | None,
         isolate: bool,
+        output_schema: dict[str, Any] | None = None,
     ) -> SubagentResult:
         """Worktree branch shared by the synchronous and background paths."""
         if (
@@ -181,6 +193,7 @@ class SubAgentRunner:
                     return await self._run_in(
                         task, name, str(wt.path), parent,
                         parent_span=parent_span, observer=observer,
+                        output_schema=output_schema,
                     )
             except WorktreeError:
                 report_degraded(
@@ -190,7 +203,8 @@ class SubAgentRunner:
                     "ran in the main workspace instead",
                 )
         return await self._run_in(
-            task, name, None, parent, parent_span=parent_span, observer=observer
+            task, name, None, parent, parent_span=parent_span, observer=observer,
+            output_schema=output_schema,
         )
 
     # ---- background runs (R1-2) -------------------------------------------
@@ -207,6 +221,7 @@ class SubAgentRunner:
         observer: Any | None = None,
         emit: Any = None,
         origin_session: str = "",
+        output_schema: dict[str, Any] | None = None,
     ) -> str:
         """Start a child without waiting; return its run id at once.
 
@@ -240,6 +255,7 @@ class SubAgentRunner:
                 run_id, task=task, name=name, worktree_manager=worktree_manager,
                 isolate=isolate, parent=parent, parent_span=parent_span,
                 observer=active, emit=emit, origin_session=origin_session,
+                output_schema=output_schema,
             ),
             name=f"subagent:{run_id}",
         )
@@ -290,6 +306,7 @@ class SubAgentRunner:
         observer: Any | None,
         emit: Any,
         origin_session: str,
+        output_schema: dict[str, Any] | None = None,
     ) -> None:
         """Run one background child to settlement, then announce it.
 
@@ -300,7 +317,7 @@ class SubAgentRunner:
             async with self._semaphore:
                 result = await self._run_isolated(
                     task, name, parent, parent_span, observer,
-                    worktree_manager, isolate,
+                    worktree_manager, isolate, output_schema,
                 )
         except asyncio.CancelledError:
             result = SubagentResult(
@@ -337,6 +354,10 @@ class SubAgentRunner:
                 run_id=run_id, name=row.name, status=result.status,
                 summary=summary, truncated=result.truncated,
                 origin_session=origin_session,
+                # R1-3: the pointer the event docstring always promised — the
+                # full packet (facts included) lives in this file.  Without
+                # it a background+schema run's facts would be unreachable.
+                ledger_path=result.ledger_path,
             ))
         except Exception:  # noqa: BLE001 — observation must not break settlement
             _log.debug("background announce failed for %s", run_id, exc_info=True)
@@ -393,6 +414,7 @@ class SubAgentRunner:
         *,
         parent_span: str = "",
         observer: Any | None = None,
+        output_schema: dict[str, Any] | None = None,
     ) -> SubagentResult:
         registry = self._build_tools(workdir)
         engine = self._engine_factory()
@@ -438,8 +460,14 @@ class SubAgentRunner:
             # normally finalises itself and reports a status.  This outer call is
             # a backstop for a loop that is stuck inside something that ignores
             # cancellation — ``asyncio.wait_for`` could not bound that.
+            # R1-3: the format contract rides as a trailer on the task text —
+            # the task *is* the child's user message, so no loop/engine change
+            # is needed for the child to see it.
+            child_task = task
+            if output_schema:
+                child_task = task + _format_instruction(output_schema)
             await run_with_deadline(
-                loop.process_input(session, task),
+                loop.process_input(session, child_task),
                 timeout=self._timeout,
                 label="subagent_turn",
             )
@@ -457,7 +485,7 @@ class SubAgentRunner:
                 await loop.aclose()
             except Exception:  # noqa: BLE001 — releasing resources must not mask the result
                 pass
-        return self._packet(loop, session, workdir, mode)
+        return self._packet(loop, session, workdir, mode, output_schema)
 
     def _subagent_settings(self) -> AIConfig:
         """Settings for the sub-turn: its own wall-clock ceiling (R2a)."""
@@ -470,7 +498,8 @@ class SubAgentRunner:
         )
 
     def _packet(
-        self, loop: AgentLoop, session: SessionData, workdir: str | None, mode: str = "full"
+        self, loop: AgentLoop, session: SessionData, workdir: str | None, mode: str = "full",
+        output_schema: dict[str, Any] | None = None,
     ) -> SubagentResult:
         outcome = loop.last_outcome
         status = _STATUS_MAP.get(outcome.status.value if outcome else "error", "error")
@@ -492,6 +521,15 @@ class SubAgentRunner:
             exit_reason = outcome.status.value
             if outcome.reason:
                 exit_reason = f"{exit_reason}: {outcome.reason}"
+        # R1-3: parse what the parent will actually read — the truncated
+        # conclusion — so facts can never describe text the parent never saw.
+        facts: dict[str, Any] | None = None
+        schema_valid: bool | None = None
+        schema_errors: tuple[str, ...] = ()
+        if output_schema:
+            facts, schema_valid, schema_errors = extract_json_facts(
+                conclusion, output_schema
+            )
         result = SubagentResult(
             status=status,
             conclusion=conclusion,
@@ -504,6 +542,9 @@ class SubAgentRunner:
             truncated=truncated,
             exit_reason=exit_reason,
             usage=dict(outcome.usage) if outcome is not None and outcome.usage else None,
+            facts=facts,
+            schema_valid=schema_valid,
+            schema_errors=schema_errors,
         )
         return _with_ledger(result, self._ledger_root)
 
@@ -541,7 +582,27 @@ def _with_ledger(result: SubagentResult, root: Path | None) -> SubagentResult:
         truncated=result.truncated,
         exit_reason=result.exit_reason,
         usage=result.usage,
+        facts=result.facts,
+        schema_valid=result.schema_valid,
+        schema_errors=result.schema_errors,
     )
+
+
+def _format_instruction(schema: dict[str, Any]) -> str:
+    """The machine contract trailer appended to the child's task text (R1-3)."""
+    required = schema.get("required", []) if isinstance(schema, dict) else []
+    keys = ", ".join(map(str, required)) if isinstance(required, list) else ""
+    lines = [
+        "",
+        "",
+        "[response format — machine contract, not prose]",
+        "Return your conclusion as a JSON object"
+        + (f" with these required keys: {keys}." if keys else "."),
+        "Output the JSON object and nothing else (no code fences, no commentary).",
+        "If you cannot produce valid JSON, still write your conclusion as plain "
+        "text — partial work is never discarded.",
+    ]
+    return "\n".join(lines)
 
 
 __all__ = ["SubAgentRunner"]
