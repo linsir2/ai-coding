@@ -83,18 +83,28 @@ async def test_submit_runs_the_loop_and_streams_markdown():
 
 
 @pytest.mark.asyncio
-async def test_input_is_disabled_while_a_turn_runs():
+async def test_input_stays_live_and_queues_while_a_turn_runs():
     loop = _BlockingLoop()
     app = _app(loop=loop)
     async with app.run_test() as pilot:
         app.query_one("#prompt").value = "第一次"
         await pilot.press("enter")
+        for _ in range(20):
+            await pilot.pause()
+            if app._turn_active:
+                break
+        assert app._turn_active, "the turn never started"
+        assert app.query_one("#prompt").disabled is False, "输入框被禁用了"
+        app.query_one("#prompt").value = "第二次"
+        await pilot.press("enter")
         await pilot.pause()
-        assert app.query_one("#prompt").disabled
+        assert list(app._queued) == ["第二次"], "回合运行中的提交没有被排队"
         loop.release()
-        await pilot.pause()
-        await pilot.pause()
-        assert not app.query_one("#prompt").disabled
+        for _ in range(20):
+            await pilot.pause()
+            if loop.calls == ["第一次", "第二次"]:
+                break
+        assert loop.calls == ["第一次", "第二次"], "第一条结束后排队的那条没有按序执行"
 
 
 class _BlockingLoop(_FakeLoop):
@@ -287,14 +297,18 @@ async def test_plan_escape_does_nothing(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_input_is_disabled_while_a_command_runs(monkeypatch):
+async def test_input_stays_live_and_queues_while_a_command_runs(monkeypatch):
+    """The old guard was ``input.disabled`` for the whole command; it is now a
+    queue.  Same invariant (no concurrent turns), usable input."""
     from ai_coding.ui.repl import REPLAction
 
     loop = _FakeLoop()
     app = _app(loop=loop)
     gate = asyncio.Event()
+    started = asyncio.Event()
 
     async def fake_handle_input(loop_, text, session, sessions, console):
+        started.set()
         await gate.wait()
         return REPLAction.CONTINUE, session
 
@@ -302,12 +316,23 @@ async def test_input_is_disabled_while_a_command_runs(monkeypatch):
     async with app.run_test() as pilot:
         app.query_one("#prompt").value = "/status"
         await pilot.press("enter")
+        for _ in range(20):
+            await pilot.pause()
+            if started.is_set():
+                break
+        assert started.is_set(), "the command never started"
+        assert app.query_one("#prompt").disabled is False, "输入框被禁用了"
+        app.query_one("#prompt").value = "later"
+        await pilot.press("enter")
         await pilot.pause()
-        assert app.query_one("#prompt").disabled
+        assert list(app._queued) == ["later"], "命令运行中的提交没有被排队"
+        assert loop.calls == [], "排队的那条在命令没结束时就开始跑了"
         gate.set()
-        await pilot.pause()
-        await pilot.pause()
-        assert not app.query_one("#prompt").disabled
+        for _ in range(20):
+            await pilot.pause()
+            if loop.calls == ["later"]:
+                break
+        assert loop.calls == ["later"], "命令结束后排队的那条没有执行"
 
 
 @pytest.mark.asyncio

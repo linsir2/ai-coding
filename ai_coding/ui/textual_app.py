@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, cast
@@ -12,6 +13,7 @@ from textual.app import App, ComposeResult, get_system_commands_provider
 from textual.binding import Binding
 from textual.command import CommandPalette
 from textual.widgets import Input
+from textual.worker import Worker, WorkerState
 
 from ai_coding.ui.blocks import Block, TranscriptObserver, full_call_view
 from ai_coding.ui.commands import SlashCommandProvider
@@ -78,6 +80,14 @@ class AICodingApp(App[None]):
         # default keeps the app self-contained for tests and for any future
         # caller that does not wire a loop.
         self._cancel_event = cancel_event if cancel_event is not None else asyncio.Event()
+        # Lines submitted while a turn is running.  The old guard against two
+        # concurrent ``process_input`` calls was ``input.disabled = True`` for
+        # the whole turn — correct but it made the box unusable.  The guard is
+        # the same (never two turns at once), it just queues the input instead
+        # of dropping it.  ``_turn_active`` is the synchronous flag the submit
+        # path reads; ``on_worker_state_changed`` clears it and drains the queue.
+        self._queued: deque[str] = deque()
+        self._turn_active: bool = False
 
     # ---- shell -----------------------------------------------------------
 
@@ -121,13 +131,13 @@ class AICodingApp(App[None]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         self._input.value = ""
-        if not text or self._input.disabled:
+        if not text:
             return
         if text.startswith("/"):
             self.submit_slash(text)
         else:
             self._transcript.append_user(text, _clock())
-            self.run_turn(text)
+            self._submit_text(text)
 
     def submit_slash(self, text: str) -> None:
         """Record a slash command as a user turn, then run it.
@@ -136,13 +146,64 @@ class AICodingApp(App[None]):
         (selected) go through here so the history is complete.
         """
         self._transcript.append_user(text, _clock())
-        self.run_command(text)
+        self._submit_text(text)
+
+    def _submit_text(self, text: str) -> None:
+        """Run it now, or queue it behind the turn that is already running."""
+        if self._turn_active:
+            self._enqueue(text)
+        else:
+            self._dispatch(text)
+
+    def _enqueue(self, text: str) -> None:
+        # Bare /resume opens a modal picker and returns; its worker cannot
+        # stand in for the whole resume, so it is refused rather than queued
+        # (a background turn could then race the picker for the exclusive
+        # group).  Every other submission — text, /plan, /clear — queues.
+        if text == "/resume" or text.startswith("/resume "):
+            self._transcript.append_block(
+                Block("info", "[queue] /resume 请在回合结束后使用")
+            )
+            return
+        self._queued.append(text)
+        self._transcript.append_block(Block("info", "[queue] 回合结束后执行"))
+
+    def _dispatch(self, text: str) -> None:
+        """Start the turn worker; its completion is drained by the state hook."""
+        self._turn_active = True
+        if text.startswith("/"):
+            self.run_command(text)
+        else:
+            self.run_turn(text)
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        """A turn worker reached a terminal state: free the slot, drain the queue.
+
+        One hook rather than a done callback per worker: Textual's ``Worker``
+        exposes no public done-callback, and every turn worker (text, command,
+        resume) is in the ``turn`` group on this node, so they all land here.
+        """
+        if event.worker.group != "turn" or event.worker.node is not self:
+            return
+        if event.state not in (WorkerState.SUCCESS, WorkerState.CANCELLED, WorkerState.ERROR):
+            return
+        self._turn_done()
+
+    def _turn_done(self) -> None:
+        self._turn_active = False
+        if not self._queued:
+            return
+        nxt = self._queued.popleft()
+        # Deferred, not called inline: starting a new exclusive worker cancels
+        # every worker in the group, including this one still unwinding its
+        # finally (which would interrupt ``end_assistant``).  ``call_later``
+        # runs after this worker is removed.
+        self.call_later(lambda: self._dispatch(nxt))
 
     @work(exclusive=True, group="turn", thread=False)
     async def run_command(self, text: str) -> None:
         from ai_coding.ui.console import TextualConsole
 
-        self._input.disabled = True
         self._status.set_busy(True)
         try:
             if text == "/plan" or text.startswith("/plan "):
@@ -170,7 +231,6 @@ class AICodingApp(App[None]):
             self._ensure_approval_provider()
             model = getattr(getattr(self._agent_loop, "engine", None), "model_config", None)
             self._status.set_model(getattr(model, "name", "") or "")
-            self._input.disabled = False
             self._status.set_busy(False)
             self._input.focus()
 
@@ -200,11 +260,11 @@ class AICodingApp(App[None]):
     def _resume_chosen(self, chosen: str | None) -> None:
         """A picker dismissal: nothing on cancel, a worker on a choice."""
         if chosen:
+            self._turn_active = True
             self._finish_resume(chosen)
 
     @work(exclusive=True, group="turn", thread=False)
     async def _finish_resume(self, chosen: str) -> None:
-        self._input.disabled = True
         self._status.set_busy(True)
         try:
             matches = self._sessions.resolve(chosen)
@@ -216,7 +276,6 @@ class AICodingApp(App[None]):
             full = self._sessions.load(matches[0].session_id) or matches[0]
             await self._switch_session(full)
         finally:
-            self._input.disabled = False
             self._status.set_busy(False)
             self._input.focus()
 
@@ -281,7 +340,6 @@ class AICodingApp(App[None]):
 
     @work(exclusive=True, group="turn", thread=False)
     async def run_turn(self, text: str) -> None:
-        self._input.disabled = True
         self._status.set_busy(True)
         try:
             self._transcript.begin_assistant(_clock())
@@ -292,7 +350,6 @@ class AICodingApp(App[None]):
             # WP3: backfill source; getattr because test stubs pass
             # session=object() (no messages → no backfill, previews stay).
             await self._transcript.end_assistant(getattr(self._session, "messages", ()))
-            self._input.disabled = False
             self._status.set_busy(False)
             self._input.focus()
 
@@ -306,10 +363,10 @@ class AICodingApp(App[None]):
         used to do nothing visible while tokens burned.  Cancelling the
         "turn"-group worker delivers ``CancelledError`` wherever the turn
         happens to be; the loop already closes that as ABORTED, persists the
-        partial work, and re-raises, and ``run_turn``'s finally restores the
-        input.  Workers already being cancelled are skipped: a second Esc
-        mid-unwind would interrupt that finally (``end_assistant``) and can
-        leave the input disabled.
+        partial work, and re-raises, and ``run_turn``'s finally closes the
+        transcript and restores focus.  Workers already being cancelled are
+        skipped: a second Esc mid-unwind would interrupt that finally and
+        leave the turn half-closed (busy flag set, transcript turn open).
         """
         self._cancel_event.set()
         for worker in self.workers:

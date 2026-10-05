@@ -181,12 +181,15 @@ async def test_escape_aborts_the_running_turn():
 
     app = _app(loop=_HangingLoop())
     async with app.run_test() as pilot:
-        app.run_turn("long task")
+        # Real submit path (not run_turn directly): _turn_active is what the
+        # queue reads, and it is set by the dispatch, not by the worker body.
+        app.query_one("#prompt", Input).value = "long task"
+        await pilot.press("enter")
         for _ in range(20):
             await pilot.pause()
-            if app.query_one("#prompt").disabled:
+            if app._turn_active:
                 break
-        assert app.query_one("#prompt").disabled, "turn worker never started"
+        assert app._turn_active, "turn worker never started"
         await pilot.press("escape")
         for _ in range(20):
             await pilot.pause()
@@ -195,9 +198,9 @@ async def test_escape_aborts_the_running_turn():
         assert cancelled == [True], "Esc never reached the running turn"
         for _ in range(20):
             await pilot.pause()
-            if not app.query_one("#prompt").disabled:
+            if not app._turn_active:
                 break
-        assert not app.query_one("#prompt").disabled, "input stayed disabled after abort"
+        assert not app._turn_active, "the turn slot never freed after abort"
 
 
 @pytest.mark.asyncio
@@ -206,7 +209,7 @@ async def test_escape_when_idle_is_a_noop():
     app = _app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert not app.query_one("#prompt").disabled
+        assert app.query_one("#prompt", Input).disabled is False
         await pilot.press("escape")
         await pilot.pause()
         assert not app.query_one("#prompt").disabled
