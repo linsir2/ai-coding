@@ -100,6 +100,7 @@ here"，所以本地与 CI 是同一个数字，不存在 deselect）、`ruff` 0
 检索基准 `retrieval_cases --check` 本地退出 0——但**它不在 CI 里**（CI 只跑 ruff / mypy /
 `pytest -q` / `test_mcp_stdio.py` / `memory_cases.py` / `trace_cases.py`），所以它是本地门禁，
 改动检索后要自己跑。`r10_cases` 同样不在 CI 里。
+`cache_probe.py`（prompt 缓存命中率，**在线**）也不在 CI 里：改 prompt 装配、工具面或易变尾部后自己跑，判读标准见 [计划链路收口分析](plan-pipeline-analysis.md) §7c。
 MCP 真连与真实 LLM A/B 在正常环境另有 gate 测试 + CI 步骤。
 
 > **本地跑测试必须用项目 venv（`.venv/bin/python -m pytest`）。** 裸 `python` 在本机 conda

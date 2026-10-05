@@ -203,6 +203,34 @@ item.status=blocked      模型调用=6 [continue]=3   ← blocked 也算「未�
 
 ---
 
+## 5c. Prompt 缓存：实测结论（不需要显式断点）
+
+脚本：[`scripts/cache_probe.py`](../scripts/cache_probe.py)（在线，几千 token，退出码总是 0）。
+**改动 prompt 装配、工具面或易变尾部（`core/request_builder.build_tail`）后必须重跑。**
+
+| 模式 | 形状 | qwen | DeepSeek |
+|---|---|---|---|
+| `stable` | system prompt 固定，历史增长 | 67.0% | 78.9% |
+| `churn` | **system prompt 每步变**（把 todo 状态塞进 instructions） | **49.2%** | **16.6%** |
+| `loop` | 真实 `AgentLoop` + 真实工具 + 真实引擎，4 回合 | **66.7%**（逐 step 72/69/66/65%） | 未跑 |
+| `diff` | 不发请求，只比对相邻两次请求的前缀 | system prompt 不变 · tools 4031 字符不变 · 消息只增不改 | 同 |
+
+结论三条：
+
+1. **两个 provider 都自动前缀缓存、零参数**（`cache_control` / `prompt_cache_key` 都没有必要）。真实路径 66.7%，
+   逐 step 随历史变长稳定上升。
+2. **真正的风险不是"没有断点"，而是"易变内容跑进 system prompt"**：`churn` 让 DeepSeek 从 78.9% 掉到 16.6%。
+   本项目当前把 `<task-state>` / memory / hook 放在**消息尾部**（`request_builder.build_tail`），所以 `diff`
+   显示前缀逐字节稳定——这个纪律比断点重要得多。
+3. **我们此前"看不见"自己的命中**：`CostLedger` 一直在累加 `cached_tokens`，但 `usage_dict()` 没交出去，于是
+   `loop.last_outcome.usage` 恒为 0，计划收据、`turnUsages`、`/budget` 全把缓存当免费。旧 trace 里的 41.2%
+   不是缓存坏了，是聚合把它吞了；修好后同一形状是 66.7%–69.6%。
+
+**同期的另一个决定：`ToolChunk` 不进 trace**。它是唯一随输出体积增长的事件（1MB 构建日志按 4KB 分片 ≈ 250 行），
+而工具起止已由 `ToolStarted`/`ToolFinished` 记录。实测接上循环事件后真实每回合 ≈ 4.1 KB / 10 类事件。
+
+---
+
 ## 6. 自我核验与留下的坑
 
 1. **过程失误**：一次 pytest 失败的情况下提交了 `bee4452`（命令用换行串联，退出码没拦住 commit）。提交内容事后
@@ -213,5 +241,12 @@ item.status=blocked      模型调用=6 [continue]=3   ← blocked 也算「未�
    （旧实现有负载时 2/6，新实现 0/6），另两条新测试是策略 characterization，两版都绿 —— 不冒充回归护栏。
 4. **实时视图与重放不对称**：步正文只在 live 可见，`/resume` 只能重建收据那一行。这是 M1「步 transcript 用完即弃」
    的直接后果，写进了 `features.md`，不是遗漏。
-5. **没做的事**：R7 backlog 的 P0（`agent_loop.py` 现 828 行 / `process_input` 仍是本轮最大函数）本轮又长大了一点；
+5. **又犯了一次同样的流程错误**：提交 `2674375`（trace 接线）时测试是红的——`tail -1` 吃掉了 pytest 的退出码。
+   起因是我无意中改了「不传 observer 时保持原样」的语义，被
+   `tests/test_agent_loop_memory.py` 抓到；修在 `4cabf2b`，没有 amend，保留记录。
+6. **两处我自己的分析错误**（都由实现阶段的报错纠正）：`cache_write_tokens` 我写进了契约，但 `record_step`
+   明确 `del cache_write`（R4a 决定：写入由事件带，账本只累加读取）；「加缓存定价」我以为有消费者，其实
+   `CostLedger.cost()` 与 `recorder.pricing` 都**零消费者**——不做 UI 接线就是假实现，所以 `/budget` 现在读
+   recorder 的价格，没配价格时行为不变。
+7. **没做的事**：R7 backlog 的 P0（`agent_loop.py` 现 828 行 / `process_input` 仍是本轮最大函数）本轮又长大了一点；
    cache 断点仍未测（按当初决定：先测量命中率）。
