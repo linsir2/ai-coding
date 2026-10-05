@@ -4,7 +4,7 @@ Commands are the ``直接命令`` reserved in M4.  Unknown slash-prefixed input 
 plain text both return ``None`` (so they go to the model).  All pure and offline.
 """
 
-from ai_coding.ui.slash import SlashCommand, parse_slash
+from ai_coding.ui.slash import SlashCommand, parse_slash, suggest_command
 
 
 def test_plain_text_is_none():
@@ -100,3 +100,19 @@ def test_plan_run_was_absorbed_into_plan():
 def test_tasks():
     cmd = parse_slash("/tasks")
     assert cmd is not None and cmd.name == "tasks"
+
+
+def test_absorbed_command_points_at_its_replacement():
+    """/plan-run was absorbed into /plan; muscle memory deserves an answer.
+
+    Four commits of docs, help text and commit messages still say /plan-run,
+    and it is four edits away from "plan", so the near-miss rule (edit
+    distance <= 2) never fires: the token fell through parse_slash, past
+    suggest_command, and became a literal user turn — the model was asked to
+    plan a command that no longer exists.  A tombstone answers exactly, for
+    every UI at once, because both front-ends route unknown /commands
+    through suggest_command.
+    """
+    assert suggest_command("/plan-run") == "plan"
+    # still not a command: parse_slash must keep letting paths through
+    assert parse_slash("/plan-run") is None

@@ -500,6 +500,25 @@ async def test_unknown_command_at_distance_two_gets_a_suggestion():
     assert "did you mean" in out and "/status" in out
 
 
+async def test_absorbed_command_is_answered_instead_of_becoming_a_model_turn():
+    """The end-to-end half: a tombstone suggestion must stop the turn.
+
+    suggest_command returning "plan" is only half the fix — if the caller then
+    forwards the token anyway, the user still gets a model turn, which is the
+    behaviour this replaces.
+    """
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(loop, "/plan-run", sessions.items[0], sessions, dc)
+
+    assert action is REPLAction.CONTINUE
+    assert loop.calls == []
+    out = _session_text(c)
+    assert "did you mean" in out and "/plan" in out
+
+
 async def test_handle_plan_with_no_open_items_says_so():
     """No todos, no execution: the runner says so instead of calling the model."""
     from ai_coding.domain.session import SessionData

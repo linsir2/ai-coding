@@ -506,7 +506,15 @@ async def test_plan_turn_runs_with_auto_continuation_disabled():
 
 @pytest.mark.asyncio
 async def test_plan_run_is_gone_as_a_command():
-    """M1-A: /plan-run was absorbed into /plan — it is plain text now."""
+    """M1-A: /plan-run was absorbed into /plan — and now says so.
+
+    This test used to assert the opposite tail: that /plan-run "reaches the
+    model as prose".  That was the M1-A behaviour and it was wrong — a command
+    the docs and muscle memory still advertise was forwarded as a model turn,
+    and at four edits from "plan" the near-miss rule could not catch it.  The
+    tombstone answers it instead.  What must remain true is the part M1-A was
+    actually about: it is not a command, so it never reaches the plan runner.
+    """
     from ai_coding.domain.session import SessionData
 
     loop = _FakeLoop()
@@ -517,5 +525,8 @@ async def test_plan_run_is_gone_as_a_command():
         app.query_one("#prompt").value = "/plan-run"
         await pilot.press("enter")
         await pilot.pause()
-        # Not a command: it reaches the model as prose, not the runner.
-        assert loop.calls == ["/plan-run"]
+        await pilot.pause()
+        # Not a command, and not a model turn either: it gets a pointer.
+        assert loop.calls == []
+        out = _all_static_text(app)
+        assert "did you mean" in out and "/plan" in out

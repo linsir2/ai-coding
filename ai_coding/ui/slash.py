@@ -74,6 +74,15 @@ def _levenshtein(a: str, b: str) -> int:
     return prev[-1]
 
 
+#: Commands that existed and were absorbed by another one.  A tombstone beats
+#: the edit-distance rule: "/plan-run" is four edits from "plan", so the
+#: near-miss logic below would never fire, and the user who typed it got a
+#: model turn instead of an answer.  Keys are the full token, values the
+#: command that replaced it.  Kept (not deleted) because help text, docs and
+#: habits outlive the rename.
+_DEPRECATED: dict[str, str] = {"/plan-run": "/plan"}
+
+
 def suggest_command(token: str) -> str | None:
     """Canonical name to suggest for a near-miss token, or ``None``.
 
@@ -82,10 +91,17 @@ def suggest_command(token: str) -> str | None:
     ``/resum`` is not a path, though, and silently becoming a model turn is
     worse than a nudge.  Only single-word tokens within edit distance 2 of a
     known command are suggested; anything else stays text.
+
+    Absorbed commands are answered from the tombstone table first, because
+    their distance to the replacement is exactly what the near-miss rule
+    cannot see.
     """
     name = token.lstrip("/").lower()
     if not name or "/" in name or " " in name:
         return None
+    replacement = _DEPRECATED.get(token.strip().lower())
+    if replacement is not None:
+        return replacement.lstrip("/")
     best: str | None = None
     best_dist = 3
     for cmd in set(_ALIASES.values()):
