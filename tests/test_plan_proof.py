@@ -122,3 +122,34 @@ async def test_clean_verified_run_has_no_proof_note():
     report = await PlanRunner(_StubLoop(["verify-pass"])).run(session)
 
     assert "无证明" not in report.render()
+
+
+def test_unrun_verdicts_do_not_grade_verified():
+    """A receipt is only as strong as its verdicts — presence is not proof.
+
+    ``from_dict`` copies ``ac`` verbatim, so a hand-edited file, a truncated
+    write or a future writer regression can hand the grader a verdict that
+    never ran (``passed: None``) or failed.  The writer cannot produce that
+    today — ``_settle`` completes a verify-step only when every contract
+    passed — but that is a property of the writer, not of the reader, and
+    the docs already state the rule this keeps: never claim proof that is
+    absent.
+    """
+    unrun = StepDelivery.from_dict({
+        "stepId": "1", "statement": "s", "status": "completed",
+        "ac": [{"id": "AC-1", "passed": None}],
+    })
+    assert unrun.proof == "on-claim"
+
+    failed = StepDelivery(step_id="1", statement="s", status="completed",
+                          attempts=1, ac=[{"id": "AC-1", "passed": False}],
+                          attested=True)
+    assert failed.proof == "on-claim"
+
+    # and a mixed receipt must not read as verified either
+    mixed = StepDelivery(step_id="1", statement="s", status="completed",
+                         attempts=1,
+                         ac=[{"id": "AC-1", "passed": True},
+                             {"id": "AC-2", "passed": None}],
+                         attested=True)
+    assert mixed.proof == "on-claim"

@@ -51,18 +51,21 @@ class StepDelivery:
 
         ``verified``: settled with acceptance verdicts on the receipt — and
         ``_settle`` completes verify-steps only when every contract passed,
-        so verdicts present means verdicts green (invariant, pinned by test).
+        so verdicts present means verdicts green.  That is a property of the
+        writer, though, and this is the reader: ``from_dict`` copies ``ac``
+        verbatim, so a hand-edited file or a truncated write can offer a
+        verdict that never ran.  Hence every verdict must be ``passed is
+        True`` — the same test ``_contracts_passed`` applies.
         ``on-claim``: settled, but no verdicts were ever offered — the
         model's word.  ``fiat``: never settled (backfilled).  ``n/a``: not
-        completed.  The illegal combo (settled, no verdicts recorded… yet
-        claiming proof) cannot exist, so there is no branch for it — the
-        fallthrough lands on ``on-claim``: never claim proof that is absent.
+        completed.  The fallthrough lands on ``on-claim``: never claim proof
+        that is absent.
         """
         if self.status != "completed":
             return "n/a"
         if not self.attested:
             return "fiat"
-        if self.ac:
+        if self.ac and all(entry.get("passed") is True for entry in self.ac):
             return "verified"
         return "on-claim"
 
