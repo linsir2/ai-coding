@@ -160,3 +160,55 @@ async def test_plan_fold_title_is_not_warning_yellow():
         assert title.styles.color == ref.styles.color, (
             f"计划标题颜色 {title.styles.color} 不是 muted {ref.styles.color}"
         )
+
+
+@pytest.mark.asyncio
+async def test_user_bubble_has_no_box():
+    """用户气泡的四面 `round` 框是阅读噪音（opencode 只有左边一条 `┃`）。
+
+    根因在 `.user-bubble` 一条规则：`border: round` + 灰底。改后只剩左边
+    一条重竖线。
+    """
+    async with _Harness().run_test(size=(100, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.append_user("读 config.example.yaml 的第 1 行", "16:01")
+        await pilot.pause()
+
+        bubble = t.query_one(".user-bubble")
+        for side in ("top", "right", "bottom"):
+            style = getattr(bubble.styles, f"border_{side}")[0]
+            assert not style, f"气泡还有 {side} 边框：{style!r}"
+        assert bubble.styles.border_left[0] == "heavy", (
+            f"气泡左边应是 heavy 竖线，实际 {bubble.styles.border_left!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_user_bubble_has_no_background_fill():
+    """灰底是"气泡感"的一半来源：去框必须连底一起去掉，否则等于没去。"""
+    async with _Harness().run_test(size=(100, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.append_user("读 config.example.yaml 的第 1 行", "16:01")
+        await pilot.pause()
+
+        bubble = t.query_one(".user-bubble")
+        assert bubble.styles.background.a == 0, (
+            f"气泡还有背景填充：{bubble.styles.background!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_send_icon_is_gone():
+    """输入区右边那个 `➤` 永远对不齐（`content-align` 是盒内对齐，管不到
+    3 行高的父容器），且零功能、无引用、opencode 也没有 —— 直接去掉。"""
+    from ai_coding.ui.input_bar import InputBar
+
+    class _InputHarness(App[None]):
+        CSS_PATH = str(Path(__file__).resolve().parents[1] / "ai_coding/ui/app.tcss")
+
+        def compose(self) -> ComposeResult:
+            yield InputBar()
+
+    async with _InputHarness().run_test(size=(100, 10)) as pilot:
+        await pilot.pause()
+        assert len(pilot.app.query("#send-icon")) == 0, "输入区还有对不齐的 ➤"

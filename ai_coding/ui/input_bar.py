@@ -1,4 +1,4 @@
-"""Bottom input: rounded box, placeholder, send glyph, hint line."""
+"""Bottom input: rounded box, placeholder, hint line."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ class InputBar(Vertical):
     def compose(self) -> ComposeResult:
         with Horizontal(id="input-row"):
             yield Input(placeholder=PLACEHOLDER, id="prompt")
-            yield Plain("➤", id="send-icon")
         yield Plain(HINT, id="input-hint")
 
     @property

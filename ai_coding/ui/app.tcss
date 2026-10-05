@@ -37,12 +37,6 @@ Screen {
     border: round $primary;
 }
 
-#send-icon {
-    width: 3;
-    content-align: center middle;
-    color: $primary;
-}
-
 #input-hint {
     height: 1;
     color: $text-muted;
@@ -54,8 +48,14 @@ Screen {
 }
 
 .user-bubble {
-    border: round $surface-lighten-2;
-    background: $surface-lighten-1;
+    /* No box: a single heavy rule on the left, like the reference client.
+       The round border + filled background read as a chat bubble and cost
+       two rows plus two columns on every message for decoration.
+       NOTE: the color must be a plain hex variable ($surface-lighten-2):
+       $text-muted expands to `ansi_default 50%` (color + opacity, with a
+       space), which does not fit border's <bordertype> <color> shape and
+       fails stylesheet parsing. */
+    border-left: heavy $surface-lighten-2;
     padding: 0 1;
     margin: 0 2;
     /* 1fr, not auto: auto shrink-wraps, which left a 54-column bubble and 60
