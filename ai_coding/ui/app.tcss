@@ -58,7 +58,9 @@ Screen {
     background: $surface-lighten-1;
     padding: 0 1;
     margin: 0 2;
-    width: auto;
+    /* 1fr, not auto: auto shrink-wraps, which left a 54-column bubble and 60
+       columns of dead space beside it on a 118-column terminal. */
+    width: 1fr;
 }
 
 .block-turn,
@@ -71,11 +73,23 @@ Screen {
 }
 
 Turn {
-    margin-bottom: 1;
+    /* Only .msg-header's margin-top spaces turns: both rules applied, so every
+       turn boundary cost two blank rows. */
+    margin-bottom: 0;
 }
 
 Turn Collapsible {
     margin-left: 2;
+}
+
+/* Textual's Collapsible ships `border-top: hkey $background` and
+   `padding-bottom: 1`.  Neither was ever ours: a collapsed fold then spends
+   three rows on one line of text and rules a full-width line across the
+   transcript.  Step folds (M3) carry no status mark, so they keep `▶` as their
+   only disclosure cue; tool folds drop it in favour of their own ▸/✓/✗. */
+Transcript Collapsible {
+    border: none;
+    padding-bottom: 0;
 }
 
 Turn Collapsible > CollapsibleTitle {
@@ -149,6 +163,11 @@ AskScreen {
 }
 
 #approval-buttons Button {
+    /* Textual's Button is `height: auto` over `border: block`, i.e. three rows
+       (▔ / label / ▁) for one word.  `border: none` drops it to one row, and
+       the variant colour (Allow green / Deny red / Stop yellow) survives it. */
+    border: none;
+    height: 1;
     margin-left: 2;
     padding: 0 2;
 }

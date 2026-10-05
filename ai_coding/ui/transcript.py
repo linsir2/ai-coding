@@ -236,6 +236,10 @@ class Turn(VerticalGroup):
             Plain(body, classes="tool-live"),
             title=tool_title(mark="▸", verb=verb, target=target, running=True),
             collapsed=True,
+            # No ▶: the title already carries ▸/✓/✗, and with the default symbol
+            # a tool fold read `▶ ✓ 已读取文件` while a thinking fold read a bare
+            # `▶ 思考过程` — two glyphs for one fact on one, none on the other.
+            collapsed_symbol=" ",
             classes="tool-running",
         )
         self._folds[call_id] = _ToolFold(collapsible, verb, target, kind, live=body)
@@ -261,6 +265,7 @@ class Turn(VerticalGroup):
             body,
             title=title,
             collapsed=fold.collapsible.collapsed,
+            collapsed_symbol=" ",
             classes=classes,
         )
         self._folds[call_id] = replace(fold, collapsible=new)

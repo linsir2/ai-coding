@@ -1,5 +1,7 @@
 """Approval and ask_user screens: return values and Esc semantics."""
 
+from pathlib import Path
+
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Input
@@ -8,6 +10,10 @@ from ai_coding.ui.modals import ApprovalScreen, AskScreen
 
 
 class _Host(App[str]):
+    # The real app's stylesheet: the button-height and params assertions are
+    # about our CSS and our compose(), not about Textual's widget defaults.
+    CSS_PATH = str(Path(__file__).resolve().parents[1] / "ai_coding/ui/app.tcss")
+
     def compose(self) -> ComposeResult:
         yield Button("open", id="open")
 
@@ -236,3 +242,35 @@ async def test_ask_answer_does_not_leak_to_the_apps_submit_handler():
         await pilot.pause()
         assert app.results[-1] == "a.py"
         assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_approval_buttons_are_one_row_tall():
+    """Textual `Button` 默认 `border: tall`，1 行内容 + 上下边框 = 3 行。
+
+    实测三个按钮各占 3 行（`▔▔▔` / Allow / `▁▁▁`），一个确认弹窗白吃 3 行。
+    """
+    app = _Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.push_screen(ApprovalScreen("bash", {"command": "ls"}, "read-only"))
+        await pilot.pause()
+        for button in app.screen.query(Button):
+            assert button.outer_size.height == 1, (
+                f"按钮 {button.label!r} 高 {button.outer_size.height}，应为 1"
+            )
+
+
+@pytest.mark.asyncio
+async def test_approval_shows_params_as_key_value_lines():
+    """弹窗把 params 直接 `str()`，屏幕上出现 Python dict repr。
+
+    实测：`{'command': 'ls -la'}`。用户要判断的是"这条命令会做什么"，不是数据结构的
+    括号引号；每个 key 一行、值截断，才是要读的信息。
+    """
+    app = _Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.push_screen(ApprovalScreen("bash", {"command": "ls -la"}, "read-only"))
+        await pilot.pause()
+        text = app.screen.query_one("#approval-body").content.plain
+        assert "command = ls -la" in text, text
+        assert "{" not in text, f"弹窗仍在显示 dict repr：{text}"

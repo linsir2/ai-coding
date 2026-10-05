@@ -58,7 +58,14 @@ class ApprovalScreen(ModalScreen[str]):
             # reads what they are about to allow.  ``#approval-body`` wraps and
             # scrolls, so a long bash command costs a scrollbar, not a decision
             # made blind.
-            body.append(str(self._params), style="dim")
+            #
+            # One key per line rather than ``str(params)``: the operator is
+            # judging what the call will do, and dict repr spends the width on
+            # braces, quotes and commas between the key and the value.
+            body.append(
+                "\n".join(f"{key} = {value}" for key, value in self._params.items()),
+                style="dim",
+            )
         with Vertical(id="approval-box"):
             # The scroll view wraps the Static rather than becoming it: a Static
             # reports a virtual size clamped to its max-height, so it silently
