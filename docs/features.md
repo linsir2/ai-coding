@@ -22,7 +22,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | 区域 | 组件 | 内容 |
 |---|---|---|
 | 顶部 | `ui/status_bar.py` | workspace、当前 model、`● Ready / ● Working` |
-| 中部 | `ui/transcript.py` + `ui/blocks.py` | 用户输入、assistant 流式 Markdown、每步思考折叠块（网关产 reasoning 才有，无则无，不伪造）、工具事件块（开始/结束/chunk）、子智能体嵌套行（`↳ [scope]` 开始/结束/结论，chunk 不上屏）、todo/台账 dim 行、回合终态 |
+| 中部 | `ui/transcript.py` + `ui/blocks.py` | 用户输入、assistant 流式 Markdown、**每回合一个思考折叠块**（网关产 reasoning 才有，无则无，不伪造；各步思考累积进同一折叠体，展开按步空行分隔）、工具事件块（开始/结束/chunk）、子智能体嵌套行（`↳ [scope]` 开始/结束/结论，chunk 不上屏）、todo/台账 dim 行、回合终态 |
 | 底部 | `ui/input_bar.py` | 单行输入（Enter 提交；回合运行中**仍可输入**，提交的内容进队列，当前回合结束后按序自动执行；`/resume` 是唯一例外——它开 modal picker，忙碌时拒绝并提示） |
 | 弹层 | `ui/modals.py` + `ui/resume_screen.py` | 审批（y/N/s）、`ask_user` 提问、`/resume` 会话选择（分组 + 搜索 + 历史重建） |
 | 样式 | `ui/app.tcss` | 全屏布局与配色 |
@@ -674,6 +674,12 @@ transcript 上划一道全屏横线（实测一屏 3 条）。`Transcript Collap
 padding-bottom: 0`。折叠标题的展开指示由**持有状态符的一方**决定：工具标题自带 `▸/✓/✗`，所以
 工具折叠用 `collapsed_symbol=" "` 让位（否则渲染成 `▶ ✓ 已读取文件`，两个符号讲同一件事）；思考
 折叠与计划步折叠没有自己的状态符，保留默认 `▶`。
+
+**思考聚合**：`append_reasoning` 每回合只保留**一个** `▶ 思考过程` 折叠体，各步 reasoning 累积进去
+（`\n\n` 分隔）。此前每个 model step 各挂一个，实测一个单工具回合就有 2 条、15 步回合 15 条。累积用
+**重建折叠体**（mount 新的、remove 旧的，同 `_swap_fold`/`plan_state` 的 WP4b 结构纪律），不用
+`.update()`：`/resume` 重放会在同一 tick 连续调用多次，重建挂在 Turn 上、不依赖旧折叠体 body 是否
+已组合。用户展开/折叠的选择随重建保留。工具折叠体不受影响，仍各自独立（Stage 2 再聚合）。
 
 **用户气泡宽度**：`width: 1fr`。原本是 `auto`（shrink-wrap），实测在 118 列终端上只占 54 列，
 右边空 60 多列，正文被挤成两三行却把横向空间白扔；`margin: 0 2` 保留。后去掉四面包围盒与

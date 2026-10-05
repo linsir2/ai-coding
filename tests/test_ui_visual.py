@@ -212,3 +212,19 @@ async def test_send_icon_is_gone():
     async with _InputHarness().run_test(size=(100, 10)) as pilot:
         await pilot.pause()
         assert len(pilot.app.query("#send-icon")) == 0, "输入区还有对不齐的 ➤"
+
+
+@pytest.mark.asyncio
+async def test_accumulated_reasoning_fold_is_one_row():
+    """15 条 `▶ 思考过程` 变成 1 条：折叠态必须只有 1 行。"""
+    async with _Harness().run_test(size=(100, 40)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        for i in range(10):
+            t._turn.append_reasoning(f"第 {i} 步的思考内容")
+        await pilot.pause()
+        folds = t.query(".reasoning-fold")
+        assert len(folds) == 1
+        assert folds[0].outer_size.height == 1, (
+            f"聚合后的思考折叠体占 {folds[0].outer_size.height} 行，应为 1"
+        )

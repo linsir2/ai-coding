@@ -627,3 +627,81 @@ async def test_plan_fold_survives_backfill_untouched():
         assert plans[0].title == "计划 1/2"
         # 工具卡照常生成（backfill 没坏），且只有工具的那一张
         assert len(t.query(".tool-card")) == 1
+
+
+@pytest.mark.asyncio
+async def test_consecutive_reasoning_shares_one_fold():
+    """Every model step used to mount its own `▶ 思考过程`; a 15-step turn
+    cost 15 lines.  One fold per turn, accumulated."""
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        t._turn.append_reasoning("先看目录")
+        await pilot.pause()
+        t._turn.append_reasoning("再看文件")
+        await pilot.pause()
+        folds = t.query(".reasoning-fold")
+        assert len(folds) == 1, f"思考折叠体应合并成一个，实际 {len(folds)} 个"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_fold_accumulates_in_order():
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        for text in ("第一步", "第二步", "第三步"):
+            t._turn.append_reasoning(text)
+            await pilot.pause()
+        body = t.query_one(".reasoning-body")
+        content = body.content
+        plain = content.plain if hasattr(content, "plain") else str(content)
+        assert plain.index("第一步") < plain.index("第二步") < plain.index("第三步")
+        assert plain.count("第一步") == 1, "换体时应替换而不是叠加"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_and_tools_stay_separate_folds():
+    """Stage 1 only merges reasoning; tools keep their own folds."""
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        t._turn.append_reasoning("想一想")
+        t._turn.start_tool("c1", "运行命令", "ls", "shell", "")
+        await pilot.pause()
+        assert len(t.query(".reasoning-fold")) == 1
+        assert len(t.query(".tool-running, .tool-ok, .tool-failed")) == 1
+
+
+@pytest.mark.asyncio
+async def test_replay_accumulates_reasoning_into_one_fold():
+    from ai_coding.domain.message import ChatMessage
+
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        await t.replay_history([
+            ChatMessage(role="assistant", content="a", timestamp="t", reasoning="第一段思考"),
+            ChatMessage(role="assistant", content="b", timestamp="t", reasoning="第二段思考"),
+        ])
+        await pilot.pause()
+        folds = t.query(".reasoning-fold")
+        assert len(folds) == 1
+        body = t.query_one(".reasoning-body")
+        plain = body.content.plain if hasattr(body.content, "plain") else str(body.content)
+        assert "第一段思考" in plain and "第二段思考" in plain
+
+
+@pytest.mark.asyncio
+async def test_expanded_reasoning_fold_stays_expanded_across_appends():
+    """Rebuilding the fold must not reset what the user chose."""
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        t._turn.append_reasoning("第一段")
+        await pilot.pause()
+        t.query_one(".reasoning-fold").collapsed = False
+        await pilot.pause()
+        t._turn.append_reasoning("第二段")
+        await pilot.pause()
+        folds = t.query(".reasoning-fold")
+        assert len(folds) == 1
+        assert folds[0].collapsed is False, "追加后展开状态被重置了"

@@ -123,6 +123,12 @@ class Turn(VerticalGroup):
         self._mount: AwaitMount | None = None
         self._stale: list[tuple[Prose, AwaitMount | None, str]] = []
         self._folds: dict[str, _ToolFold] = {}
+        # The turn's single reasoning fold: every model step's thinking is
+        # accumulated here instead of mounting a fresh `▶ 思考过程` per step
+        # (a 15-step turn cost 15 lines).  Live and replay both call
+        # ``append_reasoning``, so they group identically.
+        self._reasoning: Collapsible | None = None
+        self._reasoning_text = ""
         # The turn's single plan fold (TaskUpdated).  Deliberately NOT in
         # `_folds`: backfill() resolves every entry there against session
         # messages by call_id and rebuilds it as a four-row tool card — a
@@ -139,21 +145,35 @@ class Turn(VerticalGroup):
             self._header_mounted = True
 
     def append_reasoning(self, text: str) -> None:
-        """Mount one collapsed thinking fold (R1-4).
+        """Accumulate the turn's thinking into one collapsed fold (R1-4).
 
-        One fold per call (one per model step): reasoning is completed text,
-        never updated in place, so there is nothing to swap — and a static
-        mount keeps the scroll accounting exact (same WP4b structural rule as
-        prose replacement).  Collapsed because qwen-class thinking runs long;
-        the fold, not the wall, is the timeline's presence marker.
+        One fold per *turn*, not per model step: the label `思考过程` carries no
+        information, so repeating it once per step was pure noise (measured:
+        two folds for a single-tool turn, N per step).  The fold is rebuilt
+        (mount new, remove old) rather than its body swapped in place — the
+        same WP4b structural discipline as ``_swap_fold``/``plan_state``, and
+        it needs no composition guard because the new fold is mounted on the
+        Turn, not into the old fold's (possibly uncomposed) body.  Replay
+        calls this several times in one tick, so that guard would have been
+        required.  The user's collapsed/expanded choice carries over.
         """
         self.ensure_header()
-        self.mount(Collapsible(
-            Plain(text, classes="reasoning-body"),
+        old = self._reasoning
+        self._reasoning_text = (
+            text if old is None else f"{self._reasoning_text}\n\n{text}"
+        )
+        new = Collapsible(
+            Plain(self._reasoning_text, classes="reasoning-body"),
             title="思考过程",
-            collapsed=True,
+            collapsed=old.collapsed if old is not None else True,
             classes="reasoning-fold",
-        ))
+        )
+        self._reasoning = new
+        if old is None:
+            self.mount(new)
+            return
+        self.mount(new, before=old)
+        old.remove()
 
     def plan_state(self, title: str, body: str) -> None:
         """Show the turn's plan list: one fold, updated in place.
