@@ -141,7 +141,12 @@ R6（回合摘要环 / 失败升级 / `ask_user` / 记忆证据 / 索引不变�
 | R8 | 模型侧 checkpoint / 记忆 evidence 同分破平局 + 过滤 / 工具流式与 Esc 取消 | [r8-analysis](r8-analysis.md) / [r8-plan](r8-plan.md) |
 | R9 | 依赖硬门禁（策略在工具层）+ 轨迹的 `overview` / HTML / OTLP-JSON 三个出口 | [r9-analysis](r9-analysis.md) / [r9-plan](r9-plan.md) |
 | **R10（检索）** | 把检索变成**可测量的**：离线基准 + BM25 排序 + 两道门禁 + 召回会解释失败 + 命中即使用 + 过滤先于排序 + 可选语义档（默认关） | [r10-analysis](r10-analysis.md) / [r10-plan](r10-plan.md) / 执行计划 `docs/superpowers/plans/2026-10-01-r10-retrieval.md` |
+| **计划链路收口** | `/plan` 一条工作流（计划+执行）· 每步短对话（M1）· 预算耗尽自动续跑（C3）· 收口审核的 1 个 HIGH + 3 个 MEDIUM + 9 个 LOW 修复：执行结果落盘、C3 作用域、步正文实时可见（折叠块）、REPL/TUI 分叉消除、`blocked` 不再买续跑、吸底改用 anchor | [计划链路收口分析](plan-pipeline-analysis.md)（不占轮次号，原因见该文档开头） |
 | **R11（记忆）** | 对标 [TencentDB-Agent-Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory) 的三个子交付：`R11a` 查询清洗 + 写侧总开关、`R11b` 召回预算 + 超时可见、`R11c` scene 分组 + 来源位置引用 + skill 版本回显。**只借单机用得上的部分**：网关、向量库、ACL、代理一律不搬 | 无独立 analysis/plan（改动小、可直接验证）；契约见 [数据契约](data-contracts.md) 的 R11a / R11b / R11c 节，过程与取舍在提交 `fa04b9f` 里 |
+
+> **写文档前先查轮次号有没有被占。** 计划链路收口那轮原本写成 `r11-analysis.md`，而 `R11` 已经是记忆轮
+> （上表下一行），差点造出第二份 R11 —— 与 R10 的 fixture 事故同一类：编号是**跨文档的承重约定**，
+> 撞了不会让任何测试变红。
 
 **两处命名撞车，别混**：`R10`（检索）、`R11`（记忆）、`R12`（界面）是**检索轮**之后的编号；而
 [终端界面重构](#终端界面重构r10--r12)那一节里的「R10 → R12」指的是**界面轮**的 R10–R12，

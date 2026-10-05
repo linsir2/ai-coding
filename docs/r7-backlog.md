@@ -21,8 +21,8 @@
 
 | # | 事项 | 出处 | 现状核验（今天实测） | 建议 | 规模 |
 |---:|---|---|---|---|---|
-| 1.1 | **`core/agent_loop.py` 瘦身（第二回合）** | r5-analysis §7/§11.3 承认 654/153 未达标；R6 又加功能 | **795 行**（R5 前是 788），`process_input` **228 行**（R5 后曾 153）。R5 的收益被 R6 吃回去了 | **P0** | 中 |
-| 1.2 | 拆法：把回合账本收进一个对象 | R6 遗留（本次实测发现） | `process_input` 里现在有 9 个局部状态：`iterations / nudges / attempted_calls / successful_calls / failed_streak / strategy_nudges / failures / last_text / summaries`，散落在 228 行里 | **P0**（与 1.1 同批） | 小-中 |
+| 1.1 | **`core/agent_loop.py` 瘦身（第二回合）** | r5-analysis §7/§11.3 承认 654/153 未达标；R6 又加功能；R11 又加 C3 | **828 行**（R11 实测；R5 前 788、R7 盘点时 795），`process_input` **195 行**（R11 实测；R7 盘点时 228 —— 这一项唯一变好了） | **P0** | 中 |
+| 1.2 | 拆法：把回合账本收进一个对象 | R6 遗留；R11 部分完成 | 9 个局部状态里，R11 把 `total_iterations` 收进了 `TurnBooks`（`plan_runner`/handoff 的账本已有同类对象）。剩下的仍在 `process_input` 里 | **P0**（与 1.1 同批） | 小-中 |
 | 1.3 | `AgentLoop.__init__` 参数对象化 | D-R5-3（当时**不做**） | 64 行、17 个协作者 | P2 | 小（但要改公开构造 API） |
 | 1.4 | R5 的量化目标（≤360 行 / ≤130 行） | r5-analysis §7 | 早已不复存在（795/228），目标数字本身是拍脑袋估的 | P2（重设目标再谈） | —— |
 
@@ -126,11 +126,33 @@
 
 ---
 
+## 7b. R11 期间已解决 / 新发现（R11 收口计划链路时顺手核验的）
+
+> 每条都有代码出处或 R11 实测；关闭它的提交号可直接 `git show`。
+
+| # | 事项 | 结论 | 出处 |
+|---:|---|---|---|
+| 7b.1 | 计划执行结果不落盘（M1 删掉了唯一保存父会话的路径） | **已解决**：run 结束一次 `closer.save` | `1467cca` |
+| 7b.2 | C3 泄漏到计划回合与子智能体 | **已解决**：两处都关，守卫直接读 `loop.policy` | `e54d3b6` |
+| 7b.3 | `blocked` 项会买 C3 的额度 | **已解决**：过滤只在 policy 内，`open_items()` 不变 | `f60acf3` |
+| 7b.4 | 步正文执行时不可见（M3） | **已解决**：每步一个折叠块，标题最终等于收据摘要 | `10b4d9e` |
+| 7b.5 | REPL 与 TUI 的 `/plan` 分叉 + prompt 双写 | **已解决**：`plan_and_run` + `PLAN_PROMPT` 单一来源 | `8a5df6e` |
+| 7b.6 | transcript 吸底采样竞态（`is_vertical_scroll_end` 在 mount 后采样） | **已解决**：改用 Textual `anchor()` + `_pinned` | `00d44fc` |
+| 7b.7 | 失败步只有收据没有气泡（重放里看不见） | **已解决**：两条路径共用 `_record_on_parent` | `add2ed4` |
+| 7b.8 | 换清单后旧收据按 id 冒名顶替 | **已解决**：丢掉 statement 不在当前清单里的收据（有意销毁历史） | `bee4452` |
+| 7b.9 | `/plan-run` 静默变成模型回合 | **已解决**：`_DEPRECATED` 墓碑表 | `18b48b8` |
+| 7b.10 | `cli.py:_compose_observer` 零调用者 → recorder 只收 MCP 事件 | **仍未接线**（本轮只保证 trace 不再被 ephemeral 步接管目录）。要么接上（循环事件进 trace），要么删掉这个函数 | P2 |
+| 7b.11 | M1「线性」说法与 ratio 测试（阈值 3.0 上以 2.963 通过） | **已解决**：改结构化断言 + 文档改成准确说法 | `a5bfd11` / `24064db` |
+
+本节 11 条的完整因果链、实测数据与被否掉的候选见 [计划链路收口分析](plan-pipeline-analysis.md)。
+
+---
+
 ## 8. 核验命令（本文档每条现状都可用它们复现）
 
 ```bash
-wc -l ai_coding/core/agent_loop.py            # 795
-.venv/bin/python - <<'PY'                      # process_input 228 行
+wc -l ai_coding/core/agent_loop.py            # 828（R11）
+.venv/bin/python - <<'PY'                      # process_input 195 行（R11）
 import ast; t=ast.parse(open('ai_coding/core/agent_loop.py').read())
 print([(n.name, n.end_lineno-n.lineno+1) for n in ast.walk(t)
        if isinstance(n, ast.AsyncFunctionDef) and n.name=='process_input'])
