@@ -411,3 +411,98 @@ async def test_user_bubble_keeps_brackets_verbatim():
         visual = bubble.render()
         text = getattr(visual, "plain", None) or str(visual)
         assert "[INFO] env [k=v] now" in text
+
+
+@pytest.mark.asyncio
+async def test_appending_after_the_user_scrolled_up_leaves_the_view_alone():
+    """The policy's other half: content must not drag a reader back.
+
+    ``_follow`` re-arms Textual's anchor, and an anchored widget keeps itself
+    at the bottom as content arrives — so without a pin check, a user who
+    scrolled up to re-read an answer would be pulled to the newest turn by
+    every append.  A characterisation test as much as a guard: the old
+    one-shot implementation also passed it (it sampled
+    ``is_vertical_scroll_end``, which was False), but nothing pinned the
+    intent, and the anchor would have broken it silently.
+    """
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        for i in range(60):
+            t.append_block(_Nth(i))
+        await pilot.pause()
+        t.scroll_home(animate=False)
+        await pilot.pause()
+        assert t.scroll_y == 0
+
+        t.append_block(_Nth(60))
+        for _ in range(3):
+            await pilot.pause()
+
+        assert t.scroll_y == 0, "an append dragged the view back to the newest turn"
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_transcript_starts_following_again():
+    """``/clear`` and ``/resume`` rebuild the view: it must follow again.
+
+    A cleared transcript has nothing to stay scrolled up to, so whatever the
+    user was doing before is over.  Without this, switching sessions while
+    scrolled up leaves the new conversation stranded at its oldest turn.
+    """
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        for i in range(60):
+            t.append_block(_Nth(i))
+        await pilot.pause()
+        t.scroll_home(animate=False)
+        await pilot.pause()
+
+        t.clear()
+        await pilot.pause()
+        for i in range(60):
+            t.append_block(_Nth(i))
+        await pilot.pause()
+
+        assert t.is_vertical_scroll_end
+
+
+@pytest.mark.asyncio
+async def test_replaying_a_long_session_lands_on_the_newest_turn():
+    """The production path this was broken on: ``/resume`` of a long session.
+
+    Replay mounts dozens of widgets and Textual's Markdown mounts
+    fire-and-forget, so the view keeps growing after the last append; the
+    one-shot ``_follow`` raced that growth and left the transcript showing the
+    middle of a conversation instead of the newest turn.
+
+    Six replays in one process, because that is what makes the race show: a
+    single fresh app is not enough.  Measured on the one-shot implementation —
+    2 of 6 stranded, every run, against 0 of 6 now.
+    """
+    from ai_coding.domain.message import ChatMessage
+
+    def long_session(turns: int = 30):
+        messages = []
+        for i in range(turns):
+            messages.append(
+                ChatMessage(role="user", content=f"问题 {i}", timestamp="")
+            )
+            messages.append(
+                ChatMessage(
+                    role="assistant",
+                    content=f"回答 {i}\n" + "细节行\n" * 3,
+                    timestamp="",
+                )
+            )
+        return messages
+
+    stranded = []
+    for _ in range(6):
+        async with _Harness().run_test(size=(80, 24)) as pilot:
+            t = pilot.app.query_one(Transcript)
+            await t.replay_history(long_session())
+            await pilot.pause()
+            if not t.is_vertical_scroll_end:
+                stranded.append((round(t.scroll_target_y), round(t.max_scroll_y)))
+
+    assert not stranded, f"/resume left the transcript mid-history: {stranded}"

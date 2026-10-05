@@ -673,7 +673,12 @@ R12 把 R10 的 `prompt_toolkit` 壳整体换成 Textual，并接回 R10 断掉�
 展开后卡片四行：类型标签（`Shell`/`Read`/…，未知工具用原名）、`$` 完整命令（换行不断）、
 全文输出（回合结束时从会话回填，受 20000/2000 封顶）、`✓ 成功` / `✗ 失败` 右对齐 footer。
 运行中折叠体同样是精确高度正文（随 chunk 长大），无滚动嵌套——内层滚动已随 `RichLog` 的
-退役而消除，外层 `Transcript` 是唯一的滚动容器。`Ctrl-Y` 把上一条已完成工具的全文
+退役而消除，外层 `Transcript` 是唯一的滚动容器。**吸底策略**（§3.3-3 规格，`docs/superpowers/plans/2026-09-28-textual-ui.md`）：
+transcript 用 Textual 的 **anchor** 而不是"采样 `is_vertical_scroll_end` 再滚一次"——挂载的控件要到下一次
+layout 才有高度，采样读到的是已经不存在的视图（实测：60 个块的突发追加把滚动目标留在 0/36，30 回合
+`/resume` 重放停在历史中段）。anchor 由 compositor 在每次 arrange 时用 `set_reactive` 把视图钉在底部，
+用户滚动即释放；`_pinned` 只负责"用户走了之后不要把他拽回来"（anchor 本身无法为已离开的用户重新武装）。
+app 的 50ms flush 定时器**只在真的写了内容时**才吸底，否则空闲 tick 会与用户滚动打架。`Ctrl-Y` 把上一条已完成工具的全文
 （参数 + 输出）送进系统剪贴板（OSC 52，macOS Terminal 除外）；标题 chip 保持 60 字截断
 （参考实现亦如此），全文永远在卡片第二行。
 

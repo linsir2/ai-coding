@@ -2141,7 +2141,7 @@ git commit -m "fix(ui): real-terminal acceptance findings"
 | §3.2 数据流（slash 分支、@work、50ms flush、事件→块、模态、teardown） | Task 5、6 |
 | §3.3-1 同步 sink → 定时 flush | Task 2（`stream`/`flush`/`end_assistant`）+ Task 5（`set_interval`） |
 | §3.3-2 async worker（禁 thread） | Task 5（`@work(exclusive=True, group="turn", thread=False)`） |
-| §3.3-3 吸底策略 | Task 2（`_follow` + `is_vertical_scroll_end`） |
+| §3.3-3 吸底策略 | Task 2（`_follow` + `is_vertical_scroll_end`）——**实现已演进**：`_follow` 改为 `Transcript.anchor()` + `_pinned`（采样法在挂载后读不到真实高度，见 docs/features.md「吸底策略」与 tests/test_transcript.py），验收测试原文未改 |
 | §3.3-4 turn 中禁用输入 | Task 5（测试 + `_input.disabled`） |
 | §3.3-5 模态 teardown | Task 4（Esc）→ Task 5（provider `try/finally`）；"超时后模态关闭"用 Task 5 的 provider 结构覆盖 |
 | §4 #1–#19 集成核对表 | Task 5（#1–#5、#8–#10、#12、#14、#15）、Task 6（#6、#7、#18）、Task 8（#11、#13、#19 明确不接回） |

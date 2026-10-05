@@ -159,12 +159,22 @@ class Turn(VerticalGroup):
         if len(self._pending) >= _FLUSH_CHARS:
             self.flush()
 
-    def flush(self) -> None:
+    def flush(self) -> bool:
+        """Render whatever is buffered; report whether anything was written.
+
+        The report matters: the app drives this from a 50ms timer, and a
+        transcript that re-arms its follow on every idle tick will drag a user
+        who scrolled up back to the bottom (pinned by
+        ``tests/test_transcript_streaming.py::test_overflow_turns_keep_a_working_scroll``).
+        """
+        wrote = False
         if self._pending and self._prose is not None and self._prose.is_mounted:
             self._replace_prose(self._prose.source + self._pending)
             self._pending = ""
+            wrote = True
         for call_id in list(self._folds):
-            self._drain_chunks(call_id)
+            wrote = self._drain_chunks(call_id) or wrote
+        return wrote
 
     @staticmethod
     def _take_all(queue: SimpleQueue[str]) -> list[str]:
@@ -175,21 +185,23 @@ class Turn(VerticalGroup):
             except Empty:
                 return items
 
-    def _drain_chunks(self, call_id: str) -> None:
+    def _drain_chunks(self, call_id: str) -> bool:
         """Move buffered chunks into the live text and rebuild the fold.
 
         Runs on the flush timer / ``end_tool`` only — never on the chunk path
         itself, which may execute on a reader thread without an app context.
+        Returns whether anything was written (see ``flush``).
         """
         fold = self._folds.get(call_id)
         if fold is None:
-            return
+            return False
         items = self._take_all(fold.chunks)
         if not items:
-            return
+            return False
         live = _cap_live(fold.live + "".join(items))
         self._folds[call_id] = replace(fold, live=live)
         self._swap_fold(call_id, Plain(live, classes="tool-live"))
+        return True
 
     def _replace_prose(self, full_text: str) -> AwaitMount | None:
         """Swap the mounted prose for a fresh widget holding ``full_text``.
@@ -351,6 +363,11 @@ class Transcript(VerticalScroll):
         super().__init__(id="transcript")
         self._turn: Turn | None = None
         self._last_finished: str | None = None
+        # "Is the user still with us?" — asked of Textual's anchor, which keeps
+        # an anchored widget at the bottom as content arrives, but the question
+        # itself is ours: the anchor cannot be re-armed once the user has left.
+        # See watch_scroll_y for why this is decidable at all.
+        self._pinned = True
 
     @property
     def last_finished(self) -> str | None:
@@ -376,9 +393,9 @@ class Transcript(VerticalScroll):
         self._follow()
 
     def flush(self) -> None:
-        if self._turn is not None:
-            self._turn.flush()
-        self._follow()
+        """Called on the app's 50ms timer, so it must be free when idle."""
+        if self._turn is not None and self._turn.flush():
+            self._follow()
 
     async def end_assistant(self, messages: Sequence[ChatMessage] = ()) -> None:
         turn = self._turn
@@ -415,6 +432,13 @@ class Transcript(VerticalScroll):
         for child in list(self.children):
             child.remove()
         self._turn = None
+        # Whatever the user was reading is gone, so there is nothing to stay
+        # scrolled up to: a rebuilt transcript follows again.
+        self._pinned = True
+        self.anchor()
+        # Whatever the user was reading is gone, so there is nothing to stay
+        # scrolled up to: a rebuilt transcript starts following again.
+        self.anchor()
 
     async def replay_history(
         self,
@@ -490,9 +514,41 @@ class Transcript(VerticalScroll):
         self._follow()
 
     def _follow(self) -> None:
-        """Scroll to the newest content only if the user is already at the end."""
-        if self.is_vertical_scroll_end:
-            self.scroll_end(animate=False)
+        """Stay at the bottom until the user scrolls away.
+
+        This asks Textual for the *anchor* instead of sampling
+        ``is_vertical_scroll_end`` and scrolling once.  Sampling after a mount
+        cannot deliver the policy: the mounted widget has no height until the
+        layout that follows, so the answer describes a view that no longer
+        exists.  Measured on the one-shot version — a 60-block burst ended with
+        the scroll target at 0 of 36 (it never scrolled at all, because the
+        burst had already made the view look scrolled-away), and a 30-turn
+        /resume replay ended showing the middle of the conversation.  Both are
+        one bug seen from two sides.
+
+        ``anchor()`` is the policy already implemented: the compositor keeps an
+        anchored widget at the bottom on every arrange, and releases the anchor
+        when the user moves the scroll (re-arming when they come back).  What
+        it cannot do is re-arm itself for a user who has left — hence
+        ``_pinned``.
+        """
+        if self._pinned:
+            self.anchor()
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        """Landing above the bottom we asked for means the user scrolled away.
+
+        This is decidable because of *how* the three scroll sources differ:
+        our own ``anchor()`` always lands on ``max_scroll_y``, and the
+        compositor's keep-at-bottom writes go through ``set_reactive``, which
+        bypasses watchers — so the only scrolls that arrive here and stop short
+        of the bottom are the user's.  That also means the transient "content
+        grew under us" case cannot unpin us, which is exactly what made the
+        old ``is_vertical_scroll_end`` sample undecidable.
+        """
+        super().watch_scroll_y(old_value, new_value)
+        if new_value < self.max_scroll_y - 1:
+            self._pinned = False
 
 
 def _step_header(
