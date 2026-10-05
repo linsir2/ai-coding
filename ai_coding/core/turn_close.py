@@ -165,7 +165,7 @@ class TurnCloser:
         "plan step N" file in the sessions directory and the /resume picker
         would list them (H1 audit fix).
         """
-        if getattr(session, "ephemeral", False):
+        if session.ephemeral:
             return
         session.ensure_tool_pairing()
         try:
@@ -214,7 +214,7 @@ class TurnCloser:
                 failures=failures,
                 artifacts=self.artifacts,
                 trace_path=trace_path,
-                continuations=int(getattr(session, "continuations", 0) or 0),
+                continuations=session.continuations,
             )
             if handoff:
                 outcome = replace(outcome, handoff=handoff)

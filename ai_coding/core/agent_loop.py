@@ -285,7 +285,7 @@ class AgentLoop:
                         # died with work unfinished.  The old ladder never
                         # needed it; without it the continuation never fires.
                         open_items=task.open_items(),
-                        continuations=int(getattr(session, "continuations", 0) or 0),
+                        continuations=session.continuations,
                     ),
                     budget_expired=budget_expired,
                 )
@@ -331,9 +331,7 @@ class AgentLoop:
                         # without the reset the counter keeps climbing, the new
                         # round sees "budget exhausted" at once, and the model is
                         # never called again (the cap burns for zero work).
-                        session.continuations = (
-                            int(getattr(session, "continuations", 0) or 0) + 1
-                        )
+                        session.continuations += 1
                         restart = True
                     else:
                         books.note_strategy_nudge()
@@ -387,7 +385,7 @@ class AgentLoop:
                             open_items=task.open_items(),
                             final_text=step.text,
                             acceptance=acceptance_states(session.acceptance),
-                            continuations=int(getattr(session, "continuations", 0) or 0),
+                            continuations=session.continuations,
                         )
                     )
                     if decision.action is TurnAction.FINISH:
@@ -612,7 +610,7 @@ class AgentLoop:
         """
         if self.trace is None:
             return
-        if not getattr(session, "ephemeral", False):
+        if not session.ephemeral:
             self.trace.session_id = session.session_id
         self.trace.attach_session(session, start=len(session.messages))
 
