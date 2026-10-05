@@ -600,10 +600,20 @@ class AgentLoop:
             self.dispatcher.observer = self.observer
 
     def _bind_trace(self, session: SessionData) -> None:
-        """Point the trace at the current session (full capture reads it)."""
+        """Point the trace at the current session (full capture reads it).
+
+        An ephemeral session (a plan step) is deliberately not a session as
+        far as the trace is concerned: its transcript is discarded on
+        purpose, so letting it take the session id scattered ``plan-*``
+        directories, split the run's token spend into a summary the parent
+        never shows, and left the recorder pointing at a dead id after the
+        run.  The id therefore stays on the parent; the step's messages are
+        still attached, so ``capture: full`` snapshots what actually ran.
+        """
         if self.trace is None:
             return
-        self.trace.session_id = session.session_id
+        if not getattr(session, "ephemeral", False):
+            self.trace.session_id = session.session_id
         self.trace.attach_session(session, start=len(session.messages))
 
     def _trace_path(self, session: SessionData) -> str:

@@ -370,7 +370,7 @@ async def test_usage_still_summed_across_steps():
     }
 
 
-def _real_loop(tmp_path, **overrides):
+def _real_loop(tmp_path, *, trace=None, **overrides):
     """A real AgentLoop on a real SessionService, with a text-only engine."""
     from ai_coding.config.models import AIConfig
     from ai_coding.core.agent_loop import AgentLoop
@@ -393,7 +393,7 @@ def _real_loop(tmp_path, **overrides):
                 "plan_step_max_iterations": 2}
     settings.update(overrides)
     loop = AgentLoop(_TextEngine(), sessions, registry, settings=AIConfig(**settings),
-                     workspace=str(tmp_path / "ws"))
+                     workspace=str(tmp_path / "ws"), trace=trace)
     return loop, sessions
 
 
@@ -453,3 +453,43 @@ async def test_run_persists_the_parent_session(tmp_path):
     # (the replay marker) plus one summary line per settled step.
     assert len(session.messages) - before == 2 * len(report.deliveries)
     assert len(saved["messages"]) == len(session.messages)
+
+
+@pytest.mark.asyncio
+async def test_step_turns_trace_under_the_parent_session(tmp_path):
+    """An ephemeral step must not take the trace's session id with it.
+
+    Steps run on throwaway sessions, and the trace follows whatever session
+    the current turn runs on (``_bind_trace``).  So a step used to repoint
+    the recorder at ``plan-<hex>``: MCP events fired during a step wrote
+    ``traces/plan-<hex>/…``, the step's token spend landed in a summary the
+    parent never shows, and the pointer stayed on the dead id after the run
+    — the next event of any kind opened a fresh directory for it.
+
+    Nothing writes today only because the Textual app hands the recorder no
+    loop events (``AgentLoop(observer=None, trace=recorder)``) and only MCP
+    events reach it; ``cli._compose_observer``, the code that would close
+    that gap, has no callers.  So the test feeds the recorder an event by
+    hand — the directory is created by ``session_id`` alone.
+    """
+    from ai_coding.core.events import IterationStarted
+    from ai_coding.core.trace import TraceRecorder, TraceStore
+
+    store = TraceStore(tmp_path / "traces")
+    recorder = TraceRecorder(store, session_id="")
+    loop, sessions = _real_loop(tmp_path, trace=recorder)
+    session = sessions.create(title="main")
+    task = TaskState(goal="g")
+    task.add("one")
+    task.add("two")
+    session.task = task
+
+    await loop.process_input(session, "go")
+    recorder.session_id = session.session_id      # what a normal turn binds
+    await PlanRunner(loop).run(session)
+
+    assert recorder.session_id == session.session_id
+    recorder.on_event(IterationStarted(index=0, max_iterations=2))
+    written = sorted(p.name for p in (tmp_path / "traces").rglob("turn-*.jsonl"))
+    assert written, "the recorder wrote nothing — the event never landed"
+    assert not list((tmp_path / "traces").glob("plan-*"))
