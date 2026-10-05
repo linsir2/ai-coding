@@ -479,9 +479,16 @@ class PlanRunner:
         transcript stays in its short conversation.  Both the settled and the
         failed path go through here, because a receipt with no bubble is a
         step ``/resume`` cannot show.
+
+        Both bubbles are stamped like any other persisted message: these are
+        replayed through the same view as the rest of the transcript, and an
+        unstamped one shows an empty clock (``_hhmm`` passes non-ISO through)
+        and exports as epoch zero.  ``timestamp`` is display-only — nothing
+        sorts or trims by it.
         """
-        session.add_message(ChatMessage(role="user", content=prompt, timestamp=""))
-        session.add_message(ChatMessage(role="assistant", content=summary, timestamp=""))
+        now = now_utc()
+        session.add_message(ChatMessage(role="user", content=prompt, timestamp=now))
+        session.add_message(ChatMessage(role="assistant", content=summary, timestamp=now))
 
     def _contracts_passed(self, step_session: Any) -> bool:
         return bool(step_session.acceptance) and all(

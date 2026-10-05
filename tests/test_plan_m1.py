@@ -536,3 +536,31 @@ async def test_a_replaced_list_does_not_inherit_the_previous_plan_s_receipts():
     assert len({e.step_id for e in session.step_deliveries}) == len(
         session.step_deliveries
     )
+
+
+@pytest.mark.asyncio
+async def test_parent_step_bubbles_carry_real_timestamps():
+    """The parent's per-step bubbles are persisted messages, so they get stamps.
+
+    The runner wrote them with timestamp="", which is not a formatting detail:
+    _hhmm() passes anything that is not ISO-8601 straight through, so every
+    replayed step header showed an empty clock, and the OTLP exporter's
+    _nano() returned 0 for them.  Nothing sorts or trims by timestamp (checked
+    across core and domain), so this is display and export only — but a
+    persisted message with no time is a lie about when the words were said.
+
+    Asserted through _hhmm, the function replay actually uses, rather than
+    against a literal format.
+    """
+    from ai_coding.ui.transcript import _hhmm
+
+    session = _session_with("one")
+    await PlanRunner(_StubLoop(["complete"])).run(session)
+
+    bubbles = session.messages[-2:]
+    assert [m.role for m in bubbles] == ["user", "assistant"]
+    for message in bubbles:
+        stamp = message.timestamp
+        assert stamp, "a persisted message with no timestamp"
+        shown = _hhmm(stamp)
+        assert len(shown) == 5 and shown[2] == ":", f"replay would show {shown!r}"
