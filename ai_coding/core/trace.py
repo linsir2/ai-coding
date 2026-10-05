@@ -32,6 +32,7 @@ from ai_coding.core.events import (
     IterationStarted,
     ModelStepFinished,
     ScopedEvent,
+    ToolChunk,
     ToolFinished,
     ToolStarted,
     TurnFinished,
@@ -494,6 +495,16 @@ class TraceRecorder:
     # ---- internals ---------------------------------------------------------
 
     def _record(self, event: Any) -> None:
+        # Streamed tool output is not recorded.  A call still appears twice —
+        # ToolStarted with its params, ToolFinished with its result — so the
+        # timeline keeps the call and its outcome; a chunk only adds volume, one
+        # line per fragment, and a build log arriving in 4KB pieces would spend
+        # the turn's 2MB budget on fragments and crowd out the events that
+        # explain what the turn did (measured: everything else is ~15 events /
+        # 3 KiB per turn, a 1MB log would be ~250 chunk lines).  The live fold
+        # still shows them; that is a different sink.
+        if isinstance(event, ToolChunk):
+            return
         if not self._turn_open:
             if isinstance(event, IterationStarted) or self.last_path is None:
                 self.turn += 1

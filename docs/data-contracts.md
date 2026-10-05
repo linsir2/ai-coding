@@ -344,7 +344,7 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 
 ### 轨迹文件（`core/trace.py`）
 
-路径：`<workspace>/.ai-coding/traces/<session_id>/turn-<n>.jsonl`，一行一事件：
+路径：`<workspace>/.ai-coding/traces/<session_id>/turn-<n>.jsonl`，一行一事件。**循环事件由 `AgentLoop._bind_observer` 编进 `Braid` 直达 recorder**（构造期传入的 recorder 会被每回合的 per-call observer 顶掉，所以编辫子必须在 rebind 处做）；**`ToolChunk` 不记录**——调用本身已由 `ToolStarted`/`ToolFinished` 各记一次，分片只会随输出体积增长挤占同一回合的 2MB 预算。实测真实 2 回合 ≈ 4.1KB/回合、10 类事件：
 
 ```json
 {"v":1,"ts":"2026-09-24T00:56:26.849Z","session":"<id>","turn":1,"span":"i1","parent":"turn","iter":1,"evt":"ContextAssembled","data":{...}}

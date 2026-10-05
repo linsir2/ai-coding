@@ -96,6 +96,41 @@ def test_secrets_never_reach_the_file(tmp_path):
     assert "redacted" in raw
 
 
+def test_streamed_tool_output_is_not_recorded(tmp_path):
+    """ToolChunk is the one event that grows with the output; skip it.
+
+    A call still announces itself twice — ``ToolStarted`` with its params and
+    ``ToolFinished`` with its result — so the timeline keeps the call and its
+    outcome.  What a chunk adds is volume: one line per fragment, so a build log
+    arriving in 4KB pieces is a few hundred lines inside the same 2MB turn
+    budget, crowding out the events that explain what the turn did.  Measured on
+    a real two-turn run, everything else is 15 events / 3 KiB per turn.
+
+    The live view is unaffected: chunks still reach the transcript fold, which is
+    a different sink.
+    """
+    from ai_coding.core.events import ToolChunk
+
+    recorder, store = _recorder(tmp_path)
+    recorder.on_event(ToolStarted(call_id="c1", tool_name="bash",
+                                 params={"command": "npm ci"}, iteration=0))
+    recorder.on_event(ToolChunk(call_id="c1", tool_name="bash", stream="stdout",
+                                text="x" * 4000, seq=0))
+    recorder.on_event(ToolFinished(call_id="c1", tool_name="bash", success=True,
+                                  output_preview="done", duration_ms=5, iteration=0))
+    recorder.on_event(TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED)))
+
+    lines = store.session_dir("sess-1").glob("turn-*.jsonl")
+    written = [
+        json.loads(line)
+        for path in lines
+        for line in path.read_text().splitlines()
+    ]
+    kinds = [entry["evt"] for entry in written]
+    assert "ToolStarted" in kinds and "ToolFinished" in kinds
+    assert "ToolChunk" not in kinds
+
+
 def test_a_broken_disk_never_raises(tmp_path):
     # ``traces`` is a file, so no session directory (and no trace file) can exist
     blocked = tmp_path / "traces"

@@ -250,15 +250,6 @@ def _make_hooks(app_cfg: Any, workspace: str) -> Any | None:
     return HookRunnerGroup(runners) if runners else None
 
 
-def _compose_observer(base: Any, recorder: Any) -> Any:
-    """Braid the UI observer with the trace recorder (either may be absent)."""
-    if recorder is None:
-        return base
-    from ai_coding.core.observers import Braid
-
-    return Braid(*([base] if base is not None else []), recorder)
-
-
 def _llm_helpers_for(service: Any) -> tuple[Any, Any]:
     """Build (summarizer, extractor) from the engine's ModelConfig when available."""
     model_config = getattr(service, "model_config", None)

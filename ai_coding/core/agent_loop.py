@@ -68,7 +68,7 @@ from ai_coding.core.events import (
 from ai_coding.core.guard import GuardChain, TurnView
 from ai_coding.core.hooks import HookPoint
 from ai_coding.core.memory_turn import TurnMemory
-from ai_coding.core.observers import SafeObserver
+from ai_coding.core.observers import Braid, SafeObserver
 from ai_coding.core.request_assembly import RequestAssembler
 from ai_coding.core.request_builder import (
     tool_context,
@@ -168,7 +168,8 @@ class AgentLoop:
         self.project = project
         self.settings = settings or AIConfig()
         self.workspace = workspace
-        self.observer: LoopObserver = SafeObserver(observer or NullObserver())
+        self._base_observer: LoopObserver = observer or NullObserver()
+        self.observer: LoopObserver = SafeObserver(self._base_observer)
         # R4a: an optional trace recorder.  It arrives as part of the observer
         # braid, and the loop only re-binds it to the current session (the CLI
         # builds one loop for a whole REPL, so the session can change under it).
@@ -592,10 +593,33 @@ class AgentLoop:
         )
 
     def _bind_observer(self, observer: LoopObserver | None) -> None:
-        """Honour a per-call observer (the REPL swaps the UI between turns)."""
-        if observer is not None:
-            self.observer = SafeObserver(observer)
-            self.dispatcher.observer = self.observer
+        """Honour a per-call observer (the REPL swaps the UI between turns).
+
+        The trace recorder rides along in the same braid.  It used to be the
+        caller's job to compose the two (``cli._compose_observer``, which exists
+        and has no callers) — but a per-call observer *replaces*
+        ``self.observer``, so anything composed at construction time was thrown
+        away on the first turn.  Measured consequence in the Textual app: the
+        recorder saw MCP events only, so no iteration, no tool call and no
+        ``TurnFinished`` reached ``traces/`` — and with no ``TurnFinished`` there
+        is no ``summary.json`` and no ``capture: full`` snapshot either.
+
+        Composing here rather than at the call site keeps the swap semantics
+        intact and makes every front-end (TUI, REPL, a future CLI) get it for
+        free.  ``Braid`` isolates each sink, so a failing UI cannot silence the
+        recorder, and both are wrapped because either may misbehave.
+
+        Note the ``else`` branch: a caller that passes *no* observer still gets
+        the trace, off the construction-time base.  The REPL does exactly that,
+        and the first end-to-end run of this change produced an empty trace
+        directory for precisely this reason.
+        """
+        base = observer if observer is not None else self._base_observer
+        if self.trace is not None:
+            self.observer = Braid(SafeObserver(base), SafeObserver(self.trace))
+        else:
+            self.observer = SafeObserver(base)
+        self.dispatcher.observer = self.observer
 
     def _bind_trace(self, session: SessionData) -> None:
         """Point the trace at the current session (full capture reads it).
