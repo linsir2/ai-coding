@@ -493,3 +493,46 @@ async def test_step_turns_trace_under_the_parent_session(tmp_path):
     written = sorted(p.name for p in (tmp_path / "traces").rglob("turn-*.jsonl"))
     assert written, "the recorder wrote nothing — the event never landed"
     assert not list((tmp_path / "traces").glob("plan-*"))
+
+
+@pytest.mark.asyncio
+async def test_a_replaced_list_does_not_inherit_the_previous_plan_s_receipts():
+    """Step ids restart at 1 for every list, so old receipts must be dropped.
+
+    ``/plan <topic>`` resets goal, items and receipts together
+    (``SessionData.begin_plan``).  The path nobody covered is the model
+    replacing the list mid-turn — ``todo_write(clear)`` then re-adding items,
+    which restarts ids at 1 while the previous plan's receipts stay in the
+    session.  Then step id "1" is ambiguous: the runner's ``receipted`` set
+    matched on the id alone, so the new plan's step 1 was treated as already
+    accounted for and its out-of-band completion was never receipted.
+
+    Measured before this fix: receipts for ids 1 and 2 from plan A coexisted
+    with plan B's, and B's completed-out-of-band step produced nothing.
+    """
+    from ai_coding.domain.plan_delivery import StepDelivery
+
+    session = _session_with("A 的第一步", "A 的第二步")
+    session.step_deliveries = [
+        StepDelivery(step_id="1", statement="A 的第一步", status="completed",
+                     ac=[], summary="A1"),
+        StepDelivery(step_id="2", statement="A 的第二步", status="completed",
+                     ac=[], summary="A2"),
+    ]
+    # the model wiped the list mid-turn and wrote a different plan; ids restart
+    session.task.clear()
+    session.task.goal = "B 的目标"
+    out_of_band = session.task.add("B 的第一步")
+    session.task.add("B 的第二步")
+    out_of_band.status = "completed"   # marked done outside any step turn
+
+    report = await PlanRunner(_StubLoop(["complete"])).run(session)
+
+    # B's out-of-band completion gets its own receipt…
+    statements = [(entry.step_id, entry.statement) for entry in report.deliveries]
+    assert ("1", "B 的第一步") in statements, f"no receipt for the new plan: {statements}"
+    # …and A's receipts are gone from the book, so no id names two plans
+    assert [(e.step_id, e.statement) for e in session.step_deliveries] == statements
+    assert len({e.step_id for e in session.step_deliveries}) == len(
+        session.step_deliveries
+    )

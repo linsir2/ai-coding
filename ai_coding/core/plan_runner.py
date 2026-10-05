@@ -151,9 +151,18 @@ class PlanRunner:
             return report
         attempted: set[str] = set()
         cap = self._run_budget()
-        # R1-5: ids that already have a receipt — history (resumed runs) plus
-        # this run's settlements.  Anything completed without one is a fiat
-        # completion the runner never settled: receipt it, don't re-run it.
+        # R1-5: ids that already have a receipt — this run's settlements plus
+        # whatever the session still remembers about *this* list.  Anything
+        # completed without one is a fiat completion the runner never settled:
+        # receipt it, don't re-run it.
+        #
+        # Receipts are keyed by step id and ids restart at 1 for every list, so
+        # a list replaced mid-turn (the model does todo_write(clear) and writes
+        # a new one) leaves receipts whose ids collide with the new list's.  A
+        # receipt describes the statement it settled, so anything whose
+        # statement is no longer on the list belongs to a plan that is gone —
+        # dropped here, before they can stand in for the new plan's steps.
+        self._drop_foreign_receipts(session, task)
         receipted: set[str] = {
             entry.step_id for entry in getattr(session, "step_deliveries", [])
         }
@@ -205,6 +214,27 @@ class PlanRunner:
         save = getattr(getattr(self._loop, "closer", None), "save", None)
         if save is not None:
             save(session)
+
+    @staticmethod
+    def _drop_foreign_receipts(session: Any, task: Any) -> None:
+        """Forget receipts that describe steps this list does not contain.
+
+        Step ids are per-list (they restart at 1), so once a list is replaced
+        the old receipts are not history of the current plan — they are
+        history of a plan that no longer exists, keyed identically.  Left in
+        place they make the new plan's step 1 look already-receipted, and the
+        run then skips backfilling a completion the model really made
+        (measured: plan B's out-of-band step 1 produced no receipt at all).
+
+        This destroys persisted history on purpose: the alternative keeps ids
+        ambiguous forever.  ``/plan <topic>`` has always done the same thing
+        through ``SessionData.begin_plan``; this closes the in-turn variant.
+        """
+        on_list = {item.content for item in task.items}
+        kept = [entry for entry in getattr(session, "step_deliveries", [])
+                if entry.statement in on_list]
+        if len(kept) != len(session.step_deliveries):
+            session.step_deliveries = kept
 
     def _next_ready(self, task: Any, attempted: set[str]) -> Any:
         """First open item with no blockers that this run has not tried."""
