@@ -235,53 +235,30 @@ class AICodingApp(App[None]):
         )
 
     async def _plan_turn(self, topic: str | None = None) -> None:
-        """/plan plans the topic: from the command line, or asked first."""
-        if topic is None:
+        """/plan plans the topic: from the command line, or asked first.
+
+        The workflow itself lives in ``plan_runner.plan_and_run`` — it used to
+        be written out here *and* in the REPL dispatcher, and the two drifted
+        because only this copy was reachable in the shipped app (the router
+        intercepts ``/plan`` before the generic handler sees it).
+        """
+        from ai_coding.core.plan_runner import plan_and_run
+        from ai_coding.ui.console import TextualConsole
+
+        async def ask() -> str | None:
             screen = AskScreen("What should I plan?")
             try:
-                topic = await self.push_screen_wait(screen)
+                return await self.push_screen_wait(screen)
             finally:
                 if self.screen is screen:
                     self.pop_screen()
-            if not topic:
-                return
-        # R1-5b: a new plan starts a fresh book (same rule as the REPL path) —
-        # otherwise the items land in the session's stale task, whose goal is
-        # still the session's first question.  ``begin_plan`` also drops the
-        # old receipts: step ids restart at 1, so keeping them made the
-        # runner believe the new plan's steps were already accounted for.
-        # Guarded like the WP3 getattrs above: test stubs pass a bare
-        # ``object()`` with no task slot.
-        if hasattr(self._session, "begin_plan"):
-            self._session.begin_plan(topic)
+
         self._transcript.begin_assistant(_clock())
         try:
-            # C3 off: this turn authors the plan, it does not do the work.
-            from ai_coding.core.plan_runner import continuations_disabled
-
-            with continuations_disabled(self._agent_loop):
-                await self._agent_loop.process_input(
-                    self._session,
-                    f"Create a detailed implementation plan for: {topic}. "
-                    "Break it down into specific, actionable steps. "
-                    "Write the plan as todo items with todo_write; every step with "
-                    "a machine-checkable outcome must carry its proof command in "
-                    "'verify' (a shell command), so the plan can be executed and "
-                    "verified step by step. "
-                    "Write the items as pending/open steps only — do not execute "
-                    "the work and do not mark items completed during planning.",
-                    on_delta=self._on_delta,
-                    observer=self._observer,
-                )
-            # M1-A: /plan plans AND executes — one command, one workflow.
-            # The two-command handoff let the plan go stale between /plan and
-            # /plan-run (measured: a run that executed 0 turns against a list
-            # from a prior turn).
-            from ai_coding.core.plan_runner import PlanRunner
-            from ai_coding.ui.console import TextualConsole
-
-            await PlanRunner(self._agent_loop).run(
-                self._session, TextualConsole(self._transcript)
+            await plan_and_run(
+                self._agent_loop, self._session, TextualConsole(self._transcript),
+                topic=topic, ask_topic=ask,
+                on_delta=self._on_delta, observer=self._observer,
             )
         finally:
             # WP3: backfill source; getattr because test stubs pass

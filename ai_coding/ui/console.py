@@ -57,6 +57,19 @@ class DialogueConsole:
         self.info(title)
         return _LineSink(self)
 
+    def ask(self, prompt: str) -> str | None:
+        """Ask the user a question on the terminal; ``None`` if they decline.
+
+        ``None`` for an empty answer *and* for EOF, so Ctrl-D at a prompt ends
+        the question instead of raising out of the command handler.
+        """
+        from rich.prompt import Prompt
+
+        try:
+            return Prompt.ask(prompt, console=self._c, default="") or None
+        except (EOFError, KeyboardInterrupt):
+            return None
+
     def info(self, message: str) -> None:
         self._c.print(message, style=_INFO_STYLE, markup=False)
 

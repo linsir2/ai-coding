@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -49,6 +49,59 @@ _OUTPUT_TAIL = 500
 def _tail(text: str | None) -> str:
     text = (text or "").strip()
     return text if len(text) <= _OUTPUT_TAIL else f"…{text[-_OUTPUT_TAIL:]}"
+
+
+#: The planning prompt.  One definition: it used to be written out twice (the
+#: Textual front-end and the REPL dispatcher), which is how the two drifted.
+PLAN_PROMPT = (
+    "Create a detailed implementation plan for: {topic}. "
+    "Break it down into specific, actionable steps. "
+    "Write the plan as todo items with todo_write; every step with "
+    "a machine-checkable outcome must carry its proof command in "
+    "'verify' (a shell command), so the plan can be executed and "
+    "verified step by step. "
+    "Write the items as pending/open steps only — do not execute "
+    "the work and do not mark items completed during planning."
+)
+
+
+async def plan_and_run(
+    loop: Any,
+    session: Any,
+    console: Any,
+    *,
+    topic: str | None,
+    ask_topic: Callable[[], Awaitable[str | None]],
+    on_delta: Any = None,
+    observer: Any = None,
+) -> PlanReport:
+    """``/plan``: plan the topic, then execute the plan.  One workflow.
+
+    Both front-ends go through here, which is the point.  The Textual app
+    intercepted ``/plan`` before the generic slash handler ever saw it, so the
+    REPL's own copy of this workflow was unreachable in the shipped app — and
+    the two copies had already drifted: the REPL one sent the literal string
+    "the current task" as the topic and, without a typed topic, never reopened
+    the plan at all (no fresh goal, no cleared receipts).
+
+    ``ask_topic`` is injected because only the front-end knows how to ask: the
+    Textual app pushes a modal, the REPL prompts on the terminal.  Returning
+    empty (or None) means the user cancelled, and nothing is planned or run.
+    """
+    if topic is None:
+        topic = await ask_topic()
+        if not topic:
+            return PlanReport()
+    # A new plan starts a fresh book: goal, items and receipts belong together,
+    # or the new plan's step ids collide with the old plan's receipts.
+    begin = getattr(session, "begin_plan", None)
+    if begin is not None:
+        begin(topic)
+    with continuations_disabled(loop):
+        await loop.process_input(session, PLAN_PROMPT.format(topic=topic),
+                                 on_delta=on_delta, observer=observer)
+    return await PlanRunner(loop).run(session, console,
+                                      on_delta=on_delta, observer=observer)
 
 
 @contextmanager
@@ -595,4 +648,5 @@ class PlanRunner:
             console.info(text)
 
 
-__all__ = ["PlanReport", "PlanRunner", "STEP_HEAD"]
+__all__ = ["PLAN_PROMPT", "PlanReport", "PlanRunner", "STEP_HEAD",
+           "continuations_disabled", "plan_and_run"]

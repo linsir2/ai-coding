@@ -59,7 +59,7 @@ async def test_plan_topic_clears_the_receipt_book_behaviourally():
                 TurnPolicyConfig(max_auto_continuations=3)
             )
 
-        async def process_input(self, session, text, on_delta=None):
+        async def process_input(self, session, text, on_delta=None, observer=None):
             self.calls.append(text)
             return "planned"
 
@@ -103,7 +103,7 @@ async def test_repl_plan_turn_runs_with_auto_continuation_disabled():
             self.seen: list[int] = []
             self.policy = TurnPolicy(TurnPolicyConfig(max_auto_continuations=3))
 
-        async def process_input(self, session, text, on_delta=None):
+        async def process_input(self, session, text, on_delta=None, observer=None):
             self.calls.append(text)
             self.seen.append(self.policy.config.max_auto_continuations)
             return "planned"

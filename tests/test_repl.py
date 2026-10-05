@@ -36,7 +36,7 @@ class _FakeLoop:
         )
         self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
 
-    async def process_input(self, session, text, on_delta=None):
+    async def process_input(self, session, text, on_delta=None, observer=None):
         self.calls.append((text, on_delta))
         return self.reply
 
@@ -298,14 +298,25 @@ async def test_handle_skills_lists_catalog():
     assert "test-skill" in out
 
 
-async def test_handle_plan_sends_prompt():
+async def test_handle_plan_sends_prompt(monkeypatch):
+    """Bare /plan asks for the topic first (M4-a), then plans it.
+
+    It used to send the literal string "the current task" as the topic.  That
+    branch was unreachable in the shipped app — the Textual router intercepts
+    /plan and asks with a modal — which is exactly how the two front-ends
+    drifted apart.  Both now share plan_runner.plan_and_run and both ask.
+    """
     loop = _FakeLoop()
     sessions = _FakeSessions()
     dc, _ = _console_capture()
+    monkeypatch.setattr(dc, "ask", lambda _prompt: "改一下 loader")
+
     action, _ = await handle_input(loop, "/plan", sessions.items[0], sessions, dc)
+
     assert action is REPLAction.CONTINUE
     assert len(loop.calls) == 1
-    assert "plan" in loop.calls[0][0].lower() or "implementation" in loop.calls[0][0].lower()
+    assert "改一下 loader" in loop.calls[0][0]
+    assert sessions.items[0].task.goal == "改一下 loader"
 
 
 async def test_handle_review_sends_prompt():
@@ -519,7 +530,7 @@ async def test_absorbed_command_is_answered_instead_of_becoming_a_model_turn():
     assert "did you mean" in out and "/plan" in out
 
 
-async def test_handle_plan_with_no_open_items_says_so():
+async def test_handle_plan_with_no_open_items_says_so(monkeypatch):
     """No todos, no execution: the runner says so instead of calling the model."""
     from ai_coding.domain.session import SessionData
 
@@ -527,6 +538,7 @@ async def test_handle_plan_with_no_open_items_says_so():
     sessions = _FakeSessions()
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
     dc, c = _console_capture()
+    monkeypatch.setattr(dc, "ask", lambda _prompt: "改一下 loader")
 
     action, _ = await handle_input(loop, "/plan", session, sessions, dc)
 
@@ -652,8 +664,16 @@ async def test_handle_plan_with_topic_uses_it_and_resets_task():
     assert "pending" in loop.calls[0][0].lower() or "do not execute" in loop.calls[0][0].lower()
 
 
-async def test_handle_plan_bare_keeps_existing_task():
-    """Bare /plan refines the current list instead of wiping it."""
+async def test_handle_plan_bare_asks_and_reopens_the_plan(monkeypatch):
+    """Bare /plan opens a *new* plan on the topic it was given (M4-a).
+
+    This test used to pin the opposite: that bare /plan "refines the current
+    list instead of wiping it", keeping the old goal and the old items.  That
+    was the divergence — a typed topic reopened the plan while a bare one
+    refined whatever was left, so the plan the user was looking at was not the
+    plan being executed.  Both paths now reopen, which is what makes step ids
+    line up with the receipts (they restart at 1 per list).
+    """
     from ai_coding.domain.task import TaskState
 
     loop = _FakeLoop()
@@ -662,8 +682,23 @@ async def test_handle_plan_bare_keeps_existing_task():
     session.task = TaskState(goal="old goal")
     session.task.add("keep me")
     dc, _ = _console_capture()
+    monkeypatch.setattr(dc, "ask", lambda _prompt: "新计划")
 
     await handle_input(loop, "/plan", session, sessions, dc)
 
-    assert session.task.goal == "old goal"
-    assert [i.content for i in session.task.items] == ["keep me"]
+    assert session.task.goal == "新计划"
+    assert [i.content for i in session.task.items] == []
+
+
+async def test_handle_plan_bare_cancelled_plans_nothing(monkeypatch):
+    """An empty answer at the topic prompt plans nothing and runs nothing."""
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    session = sessions.items[0]
+    dc, _ = _console_capture()
+    monkeypatch.setattr(dc, "ask", lambda _prompt: None)
+
+    action, _ = await handle_input(loop, "/plan", session, sessions, dc)
+
+    assert action is REPLAction.CONTINUE
+    assert loop.calls == []

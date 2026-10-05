@@ -6,6 +6,7 @@ stays import-light and offline; the full-screen UI lives in ``textual_app``.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from enum import Enum
 from typing import Any
@@ -42,6 +43,14 @@ class REPLAction(Enum):
     CONTINUE = "continue"
     QUIT = "quit"
     NEW_SESSION = "new_session"
+
+
+async def _ask_topic(console: Any) -> str | None:
+    """Ask for a plan topic on the terminal (the TUI uses a modal instead)."""
+    ask = getattr(console, "ask", None)
+    if ask is None:            # a console that cannot ask (test stubs)
+        return None
+    return await asyncio.to_thread(ask, "What should I plan?")
 
 
 async def handle_input(
@@ -150,30 +159,20 @@ async def handle_input(
         # M1-A: /plan plans AND executes.  The two-command handoff let the
         # plan go stale between /plan and /plan-run (measured: a run that
         # executed 0 turns against a list from a prior turn).
-        topic = cmd.raw[len("/plan"):].strip()
-        if topic:
-            session.begin_plan(topic)
-            console.info(f"[plan] new plan for: {topic} (task list reset)")
-        else:
-            topic = "the current task"
-            console.info("[plan] generating implementation plan...")
-        from ai_coding.core.plan_runner import PlanRunner, continuations_disabled
+        #
+        # M4-a: the workflow is plan_runner.plan_and_run, shared with the
+        # Textual front-end.  This copy used to send the literal string
+        # "the current task" as the topic and skipped begin_plan when no topic
+        # was typed — unreachable in the shipped app, which is exactly why it
+        # drifted.  A bare /plan now asks, on either front-end.
+        from ai_coding.core.plan_runner import plan_and_run
 
-        # C3 off: this turn authors the plan, it does not do the work.
-        with continuations_disabled(loop):
-            await loop.process_input(
-                session,
-                f"Create a detailed implementation plan for: {topic}. "
-                "Break it down into specific, actionable steps. "
-                "Write the plan as todo items with todo_write; every step with "
-                "a machine-checkable outcome must carry its proof command in "
-                "'verify' (a shell command), so the plan can be executed and "
-                "verified step by step. "
-                "Write the items as pending/open steps only — do not execute "
-                "the work and do not mark items completed during planning.",
-                on_delta=console.delta,
-            )
-        await PlanRunner(loop).run(session, console)
+        await plan_and_run(
+            loop, session, console,
+            topic=cmd.raw[len("/plan"):].strip() or None,
+            ask_topic=lambda: _ask_topic(console),
+            on_delta=console.delta,
+        )
         return REPLAction.CONTINUE, session
     if cmd.name == "review":
         console.info("[review] reviewing current changes...")
