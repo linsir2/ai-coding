@@ -278,8 +278,8 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | 类型 | 字段 | 说明 |
 |---|---|---|
 | `TodoItem.verify` | `str = ""` | 证明该项的 shell 命令；`to_dict` 非空才写 `verify` 键，`todo_write` 的 `add`/`update` 透传；空 = 不可机检，走 todo 语义 |
-| `SessionData.begin_plan(goal)`（R1-5b） | 建新 `TaskState(goal=goal)` + 清空 `step_deliveries`，返回新 task | **goal / items / 收据三位一体**：收据按 `stepId` 认领，而每次新清单 id 从 1 重启——带着旧收据走，新计划的完成会被 runner 的回填当成「已收据」而丢弃（实测：重置后 2 步全 done，回填产出 0 条）。消息历史与 `acceptance` 不动 |
-| `StepDelivery`（`domain/plan_delivery.py`） | `stepId`、`statement`、`status`（completed/blocked/stalled）、`attempts`、`ac`（[{id, passed}]）、`summary`、`turns`、`usage`（R1-4）、`attested`（R1-5）、`seed_chars`（M1，该步 seed 字符数；fiat 回填为 0，老收据缺键读 0） | 一步的收据；`SessionData.step_deliveries`，仅非空落盘；老收据无新键照读默认值 |
+| `SessionData.begin_plan(goal)`（R1-5b） | 建新 `TaskState(goal=goal)` + 清空 `step_deliveries`，返回新 task | **goal / items / 收据三位一体**：收据按 `stepId` 认领，而每次新清单 id 从 1 重启——带着旧收据走，新计划的完成会被 runner 的回填当成「已收据」而丢弃（实测：重置后 2 步全 done，回填产出 0 条）。消息历史与 `acceptance` 不动。**回合内换清单走同一条路**：模型 `todo_write(clear)` + 重新 add 时 id 同样从 1 重启，所以 `PlanRunner.run` 起步会调用 `_drop_foreign_receipts` 丢弃 statement 已不在当前清单里的收据——否则新计划的同名 id 被旧收据占住，out-of-band 完成永远拿不到收据（实测：计划 B 的第 1 步产出 0 条收据）。这是**有意的历史销毁**，与 `begin_plan` 同一取舍；只被细化（statement 未变）的清单则一条收据都不丢 |
+| `StepDelivery`（`domain/plan_delivery.py`） | `stepId`、`statement`、`status`（completed/blocked/stalled）、`attempts`、`ac`（[{id, passed}]）、`summary`、`turns`、`usage`（R1-4）、`attested`（R1-5）、`seedChars`（M1，该步 seed 字符数；fiat 回填为 0，缺键或旧 snake_case 键读 0） | 一步的收据；`SessionData.step_deliveries`，仅非空落盘；老收据无新键照读默认值 |
 | `PlanReport`（`core/plan_runner.py`） | `turns_used`（本轮 `process_input` 次数）、`tokens_used`（求和或 None）、`stopped` 新增 `budget:…` 值 | render 头行 `完成 n 步 · 用了 T 回合 [/ K tokens]`（R1-5b：n 只计 attested——本轮亲手结算的步；fiat 另列在下一行，`completed` 列表仍含全部 done id）；顶盖检查只在还有剩余工作时触发（正好用完跑完=干净结束） |
 | `StepDelivery.proof`（派生属性，R1-6，不落盘） | `verified`（completed+attested+ac 非空即全过）/`on-claim`（completed+attested+ac 空）/`fiat`（attested=False）/`n/a`（未完成） | 只读推导，无字段、无 `to/from_dict` 改动；老收据 retroactive 可分级；非法组合 fallback 到 on-claim（宁可标没证过，不标证过） |
 | `AIConfig.plan_step_max_iterations` | `int = 8` | plan-runner 单步迭代上限；runner 临时换 policy 副本（同时 `stop_policy=natural` 关 todo 门禁、`max_auto_continuations=0` 禁 C3），`finally` 恢复 |
@@ -519,7 +519,7 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 | `self_dependency` | `add` 的 `depends_on` 指向本次将要分配的 id，清单不变 |
 | `blocked_by_dependencies` | `update` 到 `in_progress` / `completed` 时依赖未满足；`data` 带 `id` / `open` / `unknown` / `cycle` |
 | 门的形态 | `in_progress` 与 `completed` 检查；`pending` / `blocked` / `dropped` 放行；**没有** `diagnose` 动作，三条出路写在 `output` 里 |
-| `clear` 的范围（R1-5b） | 清空 `items` **并清空 `goal`**——goal 是这张清单的目标，清单没了还留着它会让 `<task-state>` 把会话第一句提问当成已不存在的计划的目标（实测：计划回合末尾 `todo_write(clear)` 后出现 `目标: 这个项目最近一次提交干嘛的` + `（无任务项）`） |
+| `clear` 的范围（R1-5b） | 清空 `items` **并清空 `goal`**——goal 是这张清单的目标，清单没了还留着它会让 `<task-state>` 把会话第一句提问当成已不存在的计划的目标（实测：计划回合末尾 `todo_write(clear)` 后出现 `目标: 这个项目最近一次提交干嘛的` + `（无任务项）`）。**这是永久的**：`_begin_turn` 只在 `task is None` 时新建 task，所以清单被清空后本会话不会再补种 goal，`<task-state>` 会一直显示无任务项；要新目标走 `/plan <topic>`（`begin_plan`）|
 
 ### 轨迹读取与导出（`core/trace.py`、`core/aggregate.py`、`core/export_*.py`）
 

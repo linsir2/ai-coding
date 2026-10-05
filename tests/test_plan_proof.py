@@ -153,3 +153,23 @@ def test_unrun_verdicts_do_not_grade_verified():
                              {"id": "AC-2", "passed": None}],
                          attested=True)
     assert mixed.proof == "on-claim"
+
+
+def test_seed_metric_is_camel_case_on_disk():
+    """The persisted receipt contract is camelCase, with no second spelling.
+
+    Every other key on this record is camelCase (stepId, createdAt,
+    turnCount), and readers elsewhere take camelCase with a snake_case
+    fallback for data written by older builds.  seed_chars was the one
+    exception, added as an afterthought; unifying it is cheaper than
+    documenting a permanent second convention.  Files written before this
+    change read their metric as 0, which is already the documented meaning
+    of 0 ("no seed turn recorded") — the value is a diagnostic, not state.
+    """
+    receipt = StepDelivery(step_id="1", statement="s", status="completed",
+                           seed_chars=4321)
+    stored = receipt.to_dict()
+
+    assert stored["seedChars"] == 4321
+    assert "seed_chars" not in stored
+    assert StepDelivery.from_dict(stored).seed_chars == 4321

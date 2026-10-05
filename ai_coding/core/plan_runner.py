@@ -396,7 +396,6 @@ class PlanRunner:
         # marker) and a one-line summary.
         step_session = self._make_step_session(task, item, report)
         seed = step_session.messages[0].content or ""
-        previous_acceptance = list(getattr(session, "acceptance", []))
         contracts = (
             [AcceptanceItem(
                 id=f"plan-{item.id}", statement=item.content, verify=item.verify,
@@ -468,7 +467,6 @@ class PlanRunner:
             self._record_on_parent(session, step_prompt, delivery.summary)
         finally:
             self._loop.policy = original_policy
-            session.acceptance = previous_acceptance
 
     @staticmethod
     def _record_on_parent(session: Any, prompt: str, summary: str) -> None:

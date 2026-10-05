@@ -564,3 +564,30 @@ async def test_parent_step_bubbles_carry_real_timestamps():
         assert stamp, "a persisted message with no timestamp"
         shown = _hhmm(stamp)
         assert len(shown) == 5 and shown[2] == ":", f"replay would show {shown!r}"
+
+
+@pytest.mark.asyncio
+async def test_step_contracts_never_touch_the_parent_acceptance_list():
+    """A step's verify contracts belong to the step session, and only there.
+
+    The runner used to snapshot the parent's acceptance list and restore it in
+    a finally — dead work since the contracts moved onto the step session
+    (M1-B): nothing writes the parent's list during a step any more, so the
+    save/restore could only ever restore what it had copied.  The behaviour
+    worth keeping is the one the dead code implied: the parent's own
+    acceptance list is not the step's scratch space.
+    """
+    from ai_coding.domain.acceptance import AcceptanceItem
+
+    session = _session_with("one", verifies=["pytest -q"])
+    session.acceptance = [AcceptanceItem(id="parent-1", statement="mine",
+                                         verify="true")]
+
+    await PlanRunner(_StubLoop(["verify-pass", "complete"])).run(session)
+
+    assert [item.id for item in session.acceptance] == ["parent-1"]
+    assert session.acceptance[0].passed is None
+    # and the step's verdicts landed on its receipt, where replay can see them
+    assert session.step_deliveries[0].ac == [
+        {"id": "plan-1", "passed": True}
+    ]

@@ -41,8 +41,9 @@ class StepDelivery:
     attested: bool = True
     #: Size of the step's seed context in characters (M1-B) — the evidence
     #: that the step ran as a short conversation rather than a resend of the
-    #: parent's whole history.  ``0`` for receipts written before this field
-    #: existed (and for fiat backfills, which have no step turn at all).
+    #: parent's whole history.  Persisted as ``seedChars``.  ``0`` means "not
+    #: known": fiat backfills have no step turn, and so do receipts written
+    #: before the field existed (including under its old snake_case key).
     seed_chars: int = 0
 
     @property
@@ -80,7 +81,7 @@ class StepDelivery:
             "turns": [int(self.turns[0]), int(self.turns[1])],
             "usage": dict(self.usage) if self.usage is not None else None,
             "attested": bool(self.attested),
-            "seed_chars": int(self.seed_chars),
+            "seedChars": int(self.seed_chars),
         }
 
     @classmethod
@@ -106,7 +107,10 @@ class StepDelivery:
             usage=usage,
             # Every receipt predating this field was runner-settled.
             attested=bool(data.get("attested", True)),
-            seed_chars=int(data.get("seed_chars", 0) or 0),
+            # camelCase only, like every other key here.  Receipts written
+            # before the rename keep their metric as 0 — the documented
+            # meaning of 0, and a diagnostic rather than state.
+            seed_chars=int(data.get("seedChars", 0) or 0),
         )
 
 

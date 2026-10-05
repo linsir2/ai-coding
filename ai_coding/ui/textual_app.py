@@ -404,9 +404,9 @@ def _plan_topic(text: str) -> str | None:
     """The topic in ``/plan <topic>``, or ``None`` for a bare ``/plan``.
 
     R1-5b: the topic used to be dropped on the floor — "/plan 改一下 loader"
-    ran the fixed topic-less prompt and never said so.  ``/plan-run`` yields
-    None on purpose: it is a different command whose name merely starts with
-    the same letters, so slicing must require a real space.
+    ran the fixed topic-less prompt and never said so.  Slicing requires a
+    real space, so any token that merely starts with the same letters is left
+    alone and takes the unknown-command path rather than losing its tail.
     """
     stripped = text.strip()
     if not stripped.startswith("/plan "):
