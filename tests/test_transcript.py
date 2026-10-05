@@ -546,3 +546,84 @@ async def test_a_plan_step_view_grows_live_and_closes_on_the_summary():
         # the whole step body, in order — nothing replaced it away
         assert "先看 loader" in _prose_source(t)
         assert "再改它" in _prose_source(t)
+
+
+def _plan(title="计划 0/2", body="第一行\n第二行"):
+    return Block("task", body, "dim", title=title)
+
+
+@pytest.mark.asyncio
+async def test_repeated_task_updates_share_one_plan_fold():
+    """15 次 TaskUpdated 曾经刷出 8 屏：每次全量挂 Transcript 顶层。
+
+    改后每 Turn 只有一个计划折叠体，后续更新只改标题。
+    """
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        for i in range(10):
+            t.append_block(_plan(title=f"计划 {i}/10", body=f"正文{i}"))
+        await pilot.pause()
+        folds = t.query(".plan-state")
+        assert len(folds) == 1
+        assert folds[0].title == "计划 9/10"
+
+
+@pytest.mark.asyncio
+async def test_plan_fold_starts_collapsed():
+    """折叠是默认值：1 行标题是全部存在感，展开是用户的主动选择。"""
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        t.append_block(_plan())
+        await pilot.pause()
+        assert t.query_one(".plan-state", Collapsible).collapsed is True
+
+
+@pytest.mark.asyncio
+async def test_expanded_plan_fold_refreshes_body_in_place():
+    """用户正展开看着，计划变了必须刷新正文 —— 但还是那一个折叠体。"""
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        t.append_block(_plan(title="计划 0/2", body="旧正文"))
+        await pilot.pause()
+        t.query_one(".plan-state", Collapsible).collapsed = False
+        await pilot.pause()
+        t.append_block(_plan(title="计划 1/2", body="新正文"))
+        await pilot.pause()
+        folds = t.query(".plan-state")
+        assert len(folds) == 1
+        assert folds[0].collapsed is False
+        assert folds[0].title == "计划 1/2"
+        assert "新正文" in _texts(t)
+        assert "旧正文" not in _texts(t)
+
+
+@pytest.mark.asyncio
+async def test_plan_fold_survives_backfill_untouched():
+    """约束 A：计划折叠体不能进 Turn._folds，否则 backfill 会拿 call_id
+    反查会话，给它换上四行工具卡。"""
+    from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolOutput
+    from ai_coding.domain.run import tool_message
+
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        turn = t._turn
+        turn.start_tool("c1", "已运行命令", "ls", "shell", "")
+        turn.end_tool("c1", "✓", "ok", "done")
+        t.append_block(_plan(title="计划 1/2", body="计划正文"))
+        await t.end_assistant([
+            ChatMessage(role="assistant", content=None, timestamp="",
+                        tool_calls=[ToolCallRef(id="c1", name="bash",
+                                                arguments='{"command": "ls"}')]),
+            tool_message(ToolOutput(call_id="c1", tool_name="bash",
+                                    output="done"), timestamp=""),
+        ])
+        await pilot.pause()
+        plans = t.query(".plan-state")
+        assert len(plans) == 1
+        assert plans[0].title == "计划 1/2"
+        # 工具卡照常生成（backfill 没坏），且只有工具的那一张
+        assert len(t.query(".tool-card")) == 1

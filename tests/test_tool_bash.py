@@ -153,3 +153,81 @@ async def test_r8_cancelling_a_bash_call_kills_the_command(tmp_path: Path):
             break
         assert time.monotonic() < deadline, "the cancelled command is still alive"
         await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_bash_per_call_timeout_widens_a_slow_command():
+    """模型自己加宽：默认 1s 下必死的命令，带 timeout_seconds=3 必须活。
+
+    这是根因修复的载体 —— 以前模型手里没有这个旋钮，只能用 shell 的
+    `timeout 55` 自残（见 session 5ce5b8fb turn-1 it14）。
+    """
+    tool = BashTool(timeout_seconds=1)
+    result = await tool.execute({"command": "sleep 2", "timeout_seconds": 3})
+    assert result.success is True
+
+
+@pytest.mark.asyncio
+async def test_bash_default_timeout_still_applies():
+    """不带参的行为一个字都不能变：默认超时还是超时。"""
+    tool = BashTool(timeout_seconds=1)
+    result = await tool.execute({"command": "sleep 2"})
+    assert result.success is False
+    assert result.error == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_bash_timeout_is_clamped_to_the_ceiling():
+    """要 999999 秒只能拿到 600 秒，且 data 里能观测到实际生效值。"""
+    tool = BashTool(timeout_seconds=1)
+    result = await tool.execute({"command": "echo ok", "timeout_seconds": 999999})
+    assert result.success is True
+    assert result.data is not None
+    assert result.data["timeout_seconds"] == 600
+
+
+def test_bash_constructor_default_is_capped_by_max():
+    """构造时给的默认也不能越过上限，否则默认与按次两套口径。"""
+    assert BashTool(timeout_seconds=9999)._timeout == 600
+
+
+@pytest.mark.asyncio
+async def test_bash_timeout_result_teaches_self_widening():
+    """超时结果必须告诉模型“怎么加宽、能加到多少”，否则循环无出口。"""
+    tool = BashTool(timeout_seconds=1)
+    result = await tool.execute({"command": "sleep 5"})
+    assert result.success is False
+    assert result.error == "timeout"
+    assert "timeout_seconds" in result.output
+    assert "600" in result.output
+
+
+@pytest.mark.asyncio
+async def test_bash_timeout_at_ceiling_suggests_splitting():
+    """已经到顶（max=2s 的构造，sleep 3 真超时）就别再劝加宽，
+    改劝拆分/缩小范围/后台跑。"""
+    tool = BashTool(timeout_seconds=1, max_timeout_seconds=2)
+    result = await tool.execute({"command": "sleep 3", "timeout_seconds": 999})
+    assert result.success is False
+    assert result.error == "timeout"
+    lowered = result.output.lower()
+    assert "ceiling" in lowered
+    assert "background" in lowered
+
+
+@pytest.mark.asyncio
+async def test_bash_invalid_timeout_is_rejected():
+    """0、负数、字符串、布尔都不是合法秒数：显式拒绝，不静默吞掉。"""
+    tool = BashTool()
+    for bad in (0, -5, "abc", True):
+        result = await tool.execute({"command": "echo hi", "timeout_seconds": bad})
+        assert result.success is False, bad
+        assert result.error == "invalid_params", bad
+        assert "timeout_seconds" in result.output, bad
+
+
+def test_bash_schema_advertises_per_call_timeout():
+    """旋钮不写进 schema 就等于不存在：模型看不到就不会用。"""
+    schema = BashTool().params_json_schema
+    assert "timeout_seconds" in schema["properties"]
+    assert "timeout_seconds" not in schema.get("required", [])

@@ -83,7 +83,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | `skill` | ALLOW | 读取技能目录中某技能 `SKILL.md` 全文（需 `--skills`） |
 | `write` | WARN | 写入文件；未先读覆盖目标会触发过期读保护 |
 | `edit` | WARN | 精确字符串替换；`old_string` 须唯一或显式 `replace_all`；同样受过期读保护 |
-| `bash` | WARN（危险命令 DENY） | 执行 shell 命令，Linux 专用，`timeout_seconds` 超时、输出截断 50 000 字符 |
+| `bash` | WARN（危险命令 DENY） | 执行 shell 命令，Linux 专用，`timeout_seconds` 超时、输出截断 50 000 字符。超时默认 60s，单次调用可用 `timeout_seconds` 参数加宽到 600s（上限对齐回合墙钟）；超时结果会写明上限，模型自行加宽重试，不再需要 shell 的 `timeout(1)` 自残或 nohup+轮询 |
 
 `subAgent` 默认加入主栈；子代理内部栈不嵌套 `subAgent`，避免无限递归。
 
@@ -677,6 +677,11 @@ padding-bottom: 0`。折叠标题的展开指示由**持有状态符的一方**�
 
 **用户气泡宽度**：`width: 1fr`。原本是 `auto`（shrink-wrap），实测在 118 列终端上只占 54 列，
 右边空 60 多列，正文被挤成两三行却把横向空间白扔；`margin: 0 2` 保留。
+
+**计划折叠体**：每个 `TaskUpdated` 曾经在 transcript 顶层挂一份全量计划渲染——一次 `/plan`
+产生 15 次更新，实测 110 列终端下约 29 物理行 × 15 ≈ 8 屏。现在每 Turn 只保留一个折叠体
+（标题 `计划 1/7`，中性 muted 配色），后续更新只改标题；展开后是去 `<task-state>` 标签的
+完整计划。模型读的那份（`todo_write` 输出、prompt 注入）保持原样。
 
 **工具折叠卡片**：工具调用渲染为可折叠卡片——折叠标题 `▸ 正在运行命令 · <命令头60字>` /
 `✓ 已运行命令 · …` / `✗ 已读取文件 · …`（动词-目标中文标题，标题左侧是状态符本身，展开时状态符

@@ -104,6 +104,13 @@ Turn Collapsible.tool-failed > CollapsibleTitle {
     color: $error;
 }
 
+/* The plan fold is neutral state, not a warning: without this it inherits
+   the $warning yellow above.  Same selector shape as the tool-ok/tool-failed
+   overrides, so it wins for the same specificity reason. */
+Turn .plan-state > CollapsibleTitle {
+    color: $text-muted;
+}
+
 Turn .tool-card {
     border: round $surface-lighten-2;
     padding: 0 1;

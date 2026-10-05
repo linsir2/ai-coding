@@ -288,15 +288,16 @@ class TaskState:
 
     # ---- rendering --------------------------------------------------------
 
-    def render(self, *, max_items: int = RENDER_MAX_ITEMS) -> str:
-        """Render for prompt injection / tool output. Stable and compact."""
-        lines: list[str] = ["<task-state>"]
+    def _body_lines(self, *, max_items: int) -> list[str]:
+        """The list itself, without the ``<task-state>`` envelope.  Pure move
+        of what ``render()`` used to build inline — one home for the format,
+        two framings of it."""
+        lines: list[str] = []
         if self.goal:
             lines.append(f"目标: {self.goal}")
         if not self.items:
             lines.append("(无任务项)")
-            lines.append("</task-state>")
-            return "\n".join(lines)
+            return lines
 
         lines.append(f"进度: {self.done_count}/{self.total}")
         shown = self.items[:max_items]
@@ -312,8 +313,18 @@ class TaskState:
         nxt = self.focus()
         if nxt is not None:
             lines.append(f"下一步: {nxt.id}. {nxt.content}")
-        lines.append("</task-state>")
-        return "\n".join(lines)
+        return lines
+
+    def render(self, *, max_items: int = RENDER_MAX_ITEMS) -> str:
+        """Render for prompt injection / tool output. Stable and compact."""
+        return "\n".join(["<task-state>", *self._body_lines(max_items=max_items), "</task-state>"])
+
+    def render_display(self, *, max_items: int = RENDER_MAX_ITEMS) -> str:
+        """Render for the human transcript: the same list, without the
+        ``<task-state>`` envelope.  The tags are prompt format; leaking them
+        into the UI is noise.  Only the UI uses this — the model keeps
+        reading ``render()``."""
+        return "\n".join(self._body_lines(max_items=max_items))
 
     # ---- serialization ----------------------------------------------------
 

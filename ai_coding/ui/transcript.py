@@ -123,6 +123,11 @@ class Turn(VerticalGroup):
         self._mount: AwaitMount | None = None
         self._stale: list[tuple[Prose, AwaitMount | None, str]] = []
         self._folds: dict[str, _ToolFold] = {}
+        # The turn's single plan fold (TaskUpdated).  Deliberately NOT in
+        # `_folds`: backfill() resolves every entry there against session
+        # messages by call_id and rebuilds it as a four-row tool card — a
+        # plan has no call_id, so it would come back as a broken card.
+        self._plan_fold: Collapsible | None = None
         self._header_mounted = False
 
     def ensure_header(self) -> None:
@@ -149,6 +154,40 @@ class Turn(VerticalGroup):
             collapsed=True,
             classes="reasoning-fold",
         ))
+
+    def plan_state(self, title: str, body: str) -> None:
+        """Show the turn's plan list: one fold, updated in place.
+
+        Every ``TaskUpdated`` used to mount a full task render on the
+        transcript — fifteen of them cost eight screens for one /plan.  Now
+        the first update mounts a single collapsed fold and later updates
+        only retitle it (zero structural work while collapsed, same as
+        ``StepView.end`` retitling).  An expanded fold gets its body swapped
+        via remove+mount, the WP4b structural rule for content that grows.
+        """
+        self.ensure_header()
+        fold = self._plan_fold
+        if fold is None:
+            self._plan_fold = Collapsible(
+                Plain(body, classes="plan-state-body"),
+                title=title,
+                collapsed=True,
+                classes="plan-state",
+            )
+            self.mount(self._plan_fold)
+            return
+        if fold.collapsed:
+            fold.title = title
+            return
+        new = Collapsible(
+            Plain(body, classes="plan-state-body"),
+            title=title,
+            collapsed=False,
+            classes="plan-state",
+        )
+        self._plan_fold = new
+        self.mount(new, before=fold)
+        fold.remove()
 
     def stream(self, text: str) -> None:
         self.ensure_header()
@@ -507,6 +546,11 @@ class Transcript(VerticalScroll):
             turn.tool_chunk(block.call_id, block.text)
         elif turn is not None and block.kind == "reasoning":
             turn.append_reasoning(block.text)
+        elif turn is not None and block.kind == "task":
+            # Into the Turn, not onto the transcript: as a transcript-level
+            # Plain it sat below the whole turn, detached from the tool calls
+            # it describes, and every update added another full copy.
+            turn.plan_state(block.title, block.text)
         else:
             self.mount(Plain(block.render(), classes=f"block-{block.kind}"))
         self._follow()

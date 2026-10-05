@@ -65,6 +65,10 @@ class Block:
     # ("运行命令") and the kind label ("Shell").  Empty for non-tool blocks.
     verb: str = ""
     kind_label: str = ""
+    # Plan-fold title ("计划 1/7"): the one-line presence marker.  Only the
+    # TaskUpdated mapping sets it; last field so every existing positional
+    # construction keeps working.
+    title: str = ""
 
     def render(self) -> Text:
         return Text(self.text, style=self.style)
@@ -264,7 +268,17 @@ def blocks_from_event(event: LoopEvent) -> Block | None:
             "dim",
         )
     if isinstance(event, TaskUpdated):
-        return Block("task", event.task.render(), "dim")
+        # One fold per turn (Transcript routes this into the Turn, which keeps
+        # a single plan fold and updates its title): the title is the one-line
+        # presence marker, the body is the same list the model reads, minus
+        # the prompt-format envelope.
+        task = event.task
+        return Block(
+            "task",
+            task.render_display(),
+            "dim",
+            title=f"计划 {task.done_count}/{task.total}",
+        )
     if isinstance(event, LedgerUpdated):
         # R0-2: the turn's open unknowns, rendered dim — a question, not a
         # result.  Emitted only when the set moves, so this block marks the

@@ -223,12 +223,35 @@ def test_tool_surface_warning_is_shown():
 
 def test_task_update_is_shown():
     class _Task:
+        done_count = 0
+        total = 1
+
         def render(self, *, max_items: int = 5) -> str:
             return "[ ] 1. 分析代码结构"
+
+        def render_display(self, *, max_items: int = 5) -> str:
+            return self.render(max_items=max_items)
 
     block = blocks_from_event(TaskUpdated(task=_Task()))
     assert block is not None
     assert "分析代码结构" in block.text
+
+
+def test_task_update_carries_a_one_line_title():
+    """TaskUpdated 刷屏的根因：每次全量 render() 挂 Transcript 顶层。
+
+    改后 Block 自带单行标题（折叠用），正文是去标签版 —— 模型那份不动。
+    """
+    from ai_coding.domain.task import TaskState
+
+    task = TaskState(goal="g")
+    task.add("first")
+    task.add("second")
+    block = blocks_from_event(TaskUpdated(task=task))
+    assert block is not None
+    assert block.title == "计划 0/2"
+    assert "<task-state>" not in block.text
+    assert "first" in block.text and "second" in block.text
 
 
 def test_r8_chunks_reach_the_sink():

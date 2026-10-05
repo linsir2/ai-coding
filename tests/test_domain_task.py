@@ -251,3 +251,20 @@ def test_clear_drops_the_goal_with_the_list():
     out = task.render()
     assert "这个项目最近一次提交干嘛的" not in out
     assert "(无任务项)" in out
+
+
+def test_render_display_strips_only_the_envelope():
+    """UI 正文去掉 <task-state> 标签：那是 prompt 格式，泄漏到界面是噪音。
+
+    正文一字不差 —— 模型那份（render()）和人看的这份是同一内容。
+    """
+    task = TaskState(goal="重构编排层")
+    task.add("读通 agent_loop.py")
+    task.add("重写循环")
+    task.update("2", status="in_progress")
+    full = task.render().split("\n")
+    shown = task.render_display()
+    assert shown == "\n".join(full[1:-1])
+    assert "<task-state>" not in shown
+    assert "[ ] 1. 读通 agent_loop.py" in shown
+    assert "[>] 2. 重写循环" in shown

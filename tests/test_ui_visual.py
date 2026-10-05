@@ -116,3 +116,47 @@ async def test_thinking_fold_keeps_its_disclosure_marker():
 
         titles = [w.content.plain for w in t.query("CollapsibleTitle")]
         assert any(x.startswith("▶") for x in titles), f"思考折叠丢了 ▶：{titles}"
+
+
+@pytest.mark.asyncio
+async def test_ten_task_updates_cost_one_row():
+    """15 次 TaskUpdated 曾经刷出 8 屏：每次全量 render() 挂 Transcript 顶层。
+
+    改后每 Turn 只有一个折叠体，折叠态只占 1 行 —— 这是真正防霸屏的那条。
+    """
+    from ai_coding.ui.blocks import Block
+
+    async with _Harness().run_test(size=(100, 40)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        for i in range(10):
+            t.append_block(Block("task", "第一行\n第二行\n第三行", "dim",
+                                 title=f"计划 {i}/10"))
+        await pilot.pause()
+        folds = t.query(".plan-state")
+        assert len(folds) == 1
+        assert folds[0].outer_size.height == 1, (
+            f"计划折叠体占 {folds[0].outer_size.height} 行，折叠态必须只有 1 行"
+        )
+
+
+@pytest.mark.asyncio
+async def test_plan_fold_title_is_not_warning_yellow():
+    """`Turn Collapsible > CollapsibleTitle` 是 $warning 黄；计划是中性状态，
+    标题必须是 muted 配色（和 .block-turn 同色），不能被染成警告色。"""
+    from textual.widgets._collapsible import CollapsibleTitle
+
+    from ai_coding.ui.blocks import Block
+    from ai_coding.ui.plain import Plain
+
+    async with _Harness().run_test(size=(100, 40)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        ref = Plain("参照", classes="block-turn")
+        t.mount(ref)
+        t.append_block(Block("task", "正文", "dim", title="计划 0/2"))
+        await pilot.pause()
+        title = t.query_one(".plan-state").query_one(CollapsibleTitle)
+        assert title.styles.color == ref.styles.color, (
+            f"计划标题颜色 {title.styles.color} 不是 muted {ref.styles.color}"
+        )
