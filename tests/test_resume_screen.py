@@ -171,7 +171,10 @@ async def test_resume_rebuilds_history_with_brackets_intact():
         assert "看看日志 [INFO] env" in texts
         assert "build [k=v] done" in texts
         assert app.query_one(Prose).source == "构建通过了 [k=v]，可以继续 call[0]。"
-        cards = list(app.query(Collapsible))
+        cards = [
+            c for c in app.query(Collapsible)
+            if {"tool-running", "tool-ok", "tool-failed"} & set(c.classes)
+        ]
         assert cards and all(card.collapsed for card in cards)
         assert "tail build.log" in str(cards[0].title)
 

@@ -129,6 +129,18 @@ class Turn(VerticalGroup):
         # ``append_reasoning``, so they group identically.
         self._reasoning: Collapsible | None = None
         self._reasoning_text = ""
+        # The turn's activity fold: every tool fold is nested inside it so a run
+        # of tools costs one line.  It is built at turn start (hidden) so its
+        # body is composed before any tool arrives — a fold built in the same
+        # tick as its first child hits MountError, and deferring the mount made
+        # the view nondeterministic (measured: one test red 3/5 runs).
+        self._activity: Collapsible | None = None
+        self._activity_body: VerticalGroup | None = None
+        # Tool folds from a tick where the body was not composed yet (the body
+        # is built at turn start, but a same-tick batch — replay — still beats
+        # its first compose).  Mounted by ``_flush_activity`` once composed.
+        self._activity_pending: dict[str, Collapsible] = {}
+        self._flush_scheduled = False
         # The turn's single plan fold (TaskUpdated).  Deliberately NOT in
         # `_folds`: backfill() resolves every entry there against session
         # messages by call_id and rebuilds it as a four-row tool card — a
@@ -138,11 +150,22 @@ class Turn(VerticalGroup):
 
     def ensure_header(self) -> None:
         # Mounted eagerly rather than in compose(): compose runs one message-loop
-        # tick after attach, so a stream() in the same tick would put its
-        # Prose above the header.
+        # tick after attach, so a stream() in the same tick would put its Prose
+        # above the header.
         if not self._header_mounted:
             self.mount(Plain(_header("✦", "Nexus", self._timestamp), classes="msg-header"))
             self._header_mounted = True
+            # The activity fold is mounted right after the header so its body
+            # composes this tick, before any tool fold is mounted into it.  It
+            # stays hidden until the first tool, so a tool-less turn shows no
+            # empty "工具 0 个" line.
+            body = VerticalGroup()
+            self._activity_body = body
+            self._activity = Collapsible(
+                body, title="工具", collapsed=True, classes="activity-fold"
+            )
+            self._activity.display = False
+            self.mount(self._activity)
 
     def append_reasoning(self, text: str) -> None:
         """Accumulate the turn's thinking into one collapsed fold (R1-4).
@@ -170,7 +193,10 @@ class Turn(VerticalGroup):
         )
         self._reasoning = new
         if old is None:
-            self.mount(new)
+            # First reasoning of the turn: sit before the activity fold so the
+            # order is [思考][工具] like the reference, regardless of which
+            # arrived first.
+            self.mount(new, before=self._activity)
             return
         self.mount(new, before=old)
         old.remove()
@@ -282,6 +308,7 @@ class Turn(VerticalGroup):
         return mount
 
     def start_tool(self, call_id: str, verb: str, target: str, kind: str, body: str) -> None:
+        self.ensure_header()
         self.flush()
         if self._pending:
             # The prose is not mounted yet, so its text could not be flushed;
@@ -302,7 +329,35 @@ class Turn(VerticalGroup):
             classes="tool-running",
         )
         self._folds[call_id] = _ToolFold(collapsible, verb, target, kind, live=body)
-        self.mount(collapsible)
+        # The activity fold and its body were built at turn start, so in
+        # production (tools arrive turns after begin_assistant) the body is
+        # composed and this mounts directly.  A same-tick batch (replay) beats
+        # the compose and is deferred until the body exists.
+        assert self._activity is not None and self._activity_body is not None
+        self._activity.display = True
+        if self._activity_body.parent is None:
+            self._activity_pending[call_id] = collapsible
+            self._schedule_activity_flush()
+        else:
+            self._activity_body.mount(collapsible)
+        self._activity.title = f"工具 {len(self._folds)} 个"
+
+    def _schedule_activity_flush(self) -> None:
+        if self._flush_scheduled or self._activity is None:
+            return
+        self._flush_scheduled = True
+        self._activity.call_after_refresh(self._flush_activity)
+
+    def _flush_activity(self) -> None:
+        self._flush_scheduled = False
+        if self._activity is None or self._activity_body is None:
+            return
+        if self._activity_body.parent is None:
+            self._schedule_activity_flush()
+            return
+        for fold in self._activity_pending.values():
+            self._activity_body.mount(fold)
+        self._activity_pending.clear()
 
     def _swap_fold(self, call_id: str, body: Widget) -> None:
         """Rebuild a fold around a new body, preserving title/state/collapse.
@@ -328,8 +383,16 @@ class Turn(VerticalGroup):
             classes=classes,
         )
         self._folds[call_id] = replace(fold, collapsible=new)
-        self.mount(new, before=fold.collapsible)
-        fold.collapsible.remove()
+        old = fold.collapsible
+        if call_id in self._activity_pending:
+            self._activity_pending[call_id] = new
+            return
+        # Mount relative to the fold's real parent (the activity body), not the
+        # Turn: the tool folds are nested now.
+        parent = old.parent
+        assert isinstance(parent, Widget)
+        parent.mount(new, before=old)
+        old.remove()
 
     def tool_chunk(self, call_id: str, text: str) -> None:
         # Buffer only — no widget work.  Chunks arrive on subprocess reader

@@ -172,7 +172,6 @@ def test_scoped_assistant_text_is_capped_and_silent_when_empty():
 async def test_reasoning_block_mounts_a_collapsed_thinking_fold():
     """One collapsed fold per step — qwen-class reasoning runs long."""
     from textual.app import App, ComposeResult
-    from textual.widgets import Collapsible
 
     from ai_coding.ui.blocks import Block
     from ai_coding.ui.transcript import Transcript
@@ -186,7 +185,7 @@ async def test_reasoning_block_mounts_a_collapsed_thinking_fold():
         t.begin_assistant("10:25")
         t.append_block(Block("reasoning", "plan [k=v] first", "dim"))
         await pilot.pause()
-        folds = list(t.query(Collapsible))
+        folds = list(t.query(".reasoning-fold"))
         assert len(folds) == 1 and folds[0].collapsed is True
         assert "思考过程" in str(folds[0].title)
 
@@ -194,7 +193,6 @@ async def test_reasoning_block_mounts_a_collapsed_thinking_fold():
 @pytest.mark.asyncio
 async def test_replay_renders_reasoning_as_a_collapsed_fold():
     from textual.app import App, ComposeResult
-    from textual.widgets import Collapsible
 
     from ai_coding.domain.message import ChatMessage
     from ai_coding.ui.transcript import Transcript
@@ -210,5 +208,5 @@ async def test_replay_renders_reasoning_as_a_collapsed_fold():
                         timestamp="t", reasoning="because reasons"),
         ])
         await pilot.pause()
-        folds = list(t.query(Collapsible))
+        folds = list(t.query(".reasoning-fold"))
         assert len(folds) == 1 and folds[0].collapsed is True

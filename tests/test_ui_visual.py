@@ -228,3 +228,17 @@ async def test_accumulated_reasoning_fold_is_one_row():
         assert folds[0].outer_size.height == 1, (
             f"聚合后的思考折叠体占 {folds[0].outer_size.height} 行，应为 1"
         )
+
+
+@pytest.mark.asyncio
+async def test_activity_fold_is_one_row():
+    async with _Harness().run_test(size=(100, 40)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        for i in range(3):
+            t._turn.start_tool(f"c{i}", "运行命令", f"cmd{i}", "shell", "")
+        await pilot.pause()
+        activity = t.query_one(".activity-fold")
+        assert activity.outer_size.height == 1, (
+            f"活动折叠体占 {activity.outer_size.height} 行，折叠态应为 1"
+        )

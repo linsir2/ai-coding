@@ -302,7 +302,6 @@ async def _settled_turn(t, pilot, *, tool_name="bash", params, finished_kwargs,
 
 @pytest.mark.asyncio
 async def test_settled_card_has_kind_command_output_footer():
-    from textual.widgets import Collapsible
 
     from ai_coding.ui.transcript import Transcript
 
@@ -323,7 +322,7 @@ async def test_settled_card_has_kind_command_output_footer():
         assert rows[1] == "$ git log -1 --stat"
         assert "3 files changed" in "\n".join(rows)
         assert rows[-1] == "✓ 成功"
-        title = t.query_one(Collapsible).title
+        title = t.query_one(".tool-ok").title
         assert "已运行命令" in title
 
 

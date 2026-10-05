@@ -111,6 +111,12 @@ Turn .plan-state > CollapsibleTitle {
     color: $text-muted;
 }
 
+/* The tool activity fold is neutral chrome, not a warning: without this it
+   inherits the $warning yellow above.  Same selector shape as plan-state. */
+Turn .activity-fold > CollapsibleTitle {
+    color: $text-muted;
+}
+
 Turn .tool-card {
     border: round $surface-lighten-2;
     padding: 0 1;

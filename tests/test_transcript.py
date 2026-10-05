@@ -26,6 +26,20 @@ def _prose_source(transcript: Transcript) -> str:
     return "\n".join(md.source for md in transcript.query(Prose))
 
 
+def _visible_children(turn) -> list:
+    """Direct children minus the hidden activity fold (a tool-only chrome).
+
+    Every Turn carries an ``activity-fold`` (built at turn start, hidden until
+    a tool arrives) so its body is composed before tools mount.  Order tests
+    about header/prose should not count it.
+    """
+    return [
+        ch
+        for ch in turn.children
+        if "activity-fold" not in getattr(ch, "classes", set())
+    ]
+
+
 def _body_text(transcript: Transcript) -> str:
     """Live fold body text (`.tool-live` Statics, since the RichLog retired)."""
     out = []
@@ -153,7 +167,7 @@ async def test_tool_blocks_become_collapsibles():
             )
         )
         await pilot.pause()
-        coll = t.query_one(Collapsible)
+        coll = t.query_one(".tool-running")
         # Card title: status mark + verb + target (no English tool name).
         # The hand-built Block carries no verb, so the table fallback filled it.
         assert coll.title == "▸ 正在运行命令 · ls"
@@ -184,7 +198,7 @@ async def test_finished_tool_shows_its_failure_reason():
                   tool_status="failed")
         )
         await pilot.pause()
-        coll = t.query_one(Collapsible)
+        coll = t.query_one(".tool-failed")
         coll.collapsed = False
         await pilot.pause()
         await pilot.pause()
@@ -210,7 +224,7 @@ async def test_finished_tool_shows_its_output_summary():
                   tool_status="ok")
         )
         await pilot.pause()
-        coll = t.query_one(Collapsible)
+        coll = t.query_one(".tool-ok")
         coll.collapsed = False
         await pilot.pause()
         await pilot.pause()
@@ -240,7 +254,7 @@ async def test_finished_tool_title_keeps_the_target():
             Block("tool", "ok", call_id="c1", tool_name="read", tool_status="ok")
         )
         await pilot.pause()
-        assert t.query_one(Collapsible).title == "✓ 已读取文件 · a.py"
+        assert t.query_one(".tool-ok").title == "✓ 已读取文件 · a.py"
 
 
 @pytest.mark.asyncio
@@ -274,7 +288,7 @@ async def test_end_tool_for_an_unknown_call_is_silent():
                   tool_status="ok")
         )
         await pilot.pause()
-        assert not t.query(Collapsible)
+        assert not t.query(".tool-running, .tool-ok, .tool-failed")
 
 
 @pytest.mark.asyncio
@@ -300,7 +314,11 @@ async def test_tool_title_is_coloured_by_outcome():
             Block("tool", "boom", call_id="c3", tool_name="bash", tool_status="failed")
         )
         await pilot.pause()
-        running, ok, failed = t.query(Collapsible)
+        tool_folds = [
+            c for c in t.query(Collapsible)
+            if {"tool-running", "tool-ok", "tool-failed"} & set(c.classes)
+        ]
+        running, ok, failed = tool_folds
         for coll, expected in ((running, "tool-running"), (ok, "tool-ok"),
                                (failed, "tool-failed")):
             assert expected in coll.classes, f"{coll.title!r} -> {sorted(coll.classes)}"
@@ -344,7 +362,7 @@ async def test_header_precedes_markdown_without_a_pause():
         await t.end_assistant()
         await pilot.pause()
         turn = t.query_one(Turn)
-        assert [type(ch).__name__ for ch in turn.children][:2] == ["Plain", "Prose"]
+        assert [type(ch).__name__ for ch in _visible_children(turn)][:2] == ["Plain", "Prose"]
 
 
 @pytest.mark.asyncio
@@ -371,7 +389,7 @@ async def test_turn_with_no_text_still_gets_a_header():
         await t.end_assistant()
         await pilot.pause()
         turn = t.query_one(Turn)
-        assert [type(ch).__name__ for ch in turn.children] == ["Plain"]
+        assert [type(ch).__name__ for ch in _visible_children(turn)] == ["Plain"]
         assert "Nexus" in t.query_one(".msg-header", Static).content.plain
 
 
@@ -384,7 +402,7 @@ async def test_stream_without_begin_assistant_still_gets_a_header():
         await t.end_assistant()
         await pilot.pause()
         turn = t.query_one(Turn)
-        assert [type(ch).__name__ for ch in turn.children][:2] == ["Plain", "Prose"]
+        assert [type(ch).__name__ for ch in _visible_children(turn)][:2] == ["Plain", "Prose"]
 
 
 @pytest.mark.asyncio
@@ -401,8 +419,12 @@ async def test_text_and_tools_interleave():
         await t.end_assistant()
         await pilot.pause()
         turn = t.query_one(Turn)
+        # Tools no longer interleave with prose as siblings: they group into
+        # the activity fold, so the direct children are header, activity,
+        # then the two prose runs.
         kinds = [type(ch).__name__ for ch in turn.children]
-        assert kinds == ["Plain", "Prose", "Collapsible", "Prose"]
+        assert kinds == ["Plain", "Collapsible", "Prose", "Prose"]
+        assert len(turn.query_one(".activity-fold").query(Collapsible)) == 1
 
 
 @pytest.mark.asyncio
@@ -705,3 +727,90 @@ async def test_expanded_reasoning_fold_stays_expanded_across_appends():
         folds = t.query(".reasoning-fold")
         assert len(folds) == 1
         assert folds[0].collapsed is False, "追加后展开状态被重置了"
+
+
+@pytest.mark.asyncio
+async def test_consecutive_tools_share_one_activity_fold():
+    """A batch mounts several tool folds in one tick; they must land in one
+    activity fold, not one line each.  Deterministic: the activity body is
+    composed before tools arrive (the fold is pre-built at turn start)."""
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        for i in range(3):
+            t._turn.start_tool(f"c{i}", "运行命令", f"cmd{i}", "shell", "")
+        await pilot.pause()
+        activities = t.query(".activity-fold")
+        assert len(activities) == 1, f"应有 1 个活动折叠体，实际 {len(activities)}"
+        assert len(activities[0].query(Collapsible)) == 3, "3 个工具折叠体应都在活动内"
+
+
+@pytest.mark.asyncio
+async def test_activity_fold_title_counts_tools():
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        for i in range(3):
+            t._turn.start_tool(f"c{i}", "运行命令", f"cmd{i}", "shell", "")
+        await pilot.pause()
+        assert "工具 3 个" in str(t.query_one(".activity-fold").title)
+
+
+@pytest.mark.asyncio
+async def test_end_tool_swaps_inside_the_activity_fold():
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        t._turn.start_tool("c1", "运行命令", "pwd", "shell", "")
+        await pilot.pause()
+        t._turn.end_tool("c1", "✓", "ok", "output")
+        await pilot.pause()
+        activity = t.query_one(".activity-fold")
+        kids = list(activity.query(Collapsible))
+        assert len(kids) == 1
+        assert "✓" in str(kids[0].title), f"子折叠体标题没换成 ✓：{kids[0].title}"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_fold_sits_before_the_activity_fold():
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        t._turn.append_reasoning("想一想")
+        t._turn.start_tool("c1", "运行命令", "ls", "shell", "")
+        await pilot.pause()
+        tops = [ch for ch in t._turn.children if isinstance(ch, Collapsible)]
+        assert len(tops) == 2, f"应有思考+活动两个顶层折叠体，实际 {len(tops)}"
+        assert "reasoning-fold" in tops[0].classes, "思考折叠体应在活动之前"
+
+
+@pytest.mark.asyncio
+async def test_activity_fold_is_hidden_without_tools():
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        t._turn.append_reasoning("只想不做")
+        await pilot.pause()
+        activity = t.query_one(".activity-fold")
+        assert activity.display is False, "无工具的回合，活动折叠体应隐藏"
+
+
+@pytest.mark.asyncio
+async def test_replay_groups_tools_into_one_activity_fold():
+    from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolOutput
+    from ai_coding.domain.run import tool_message
+
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        await t.replay_history([
+            ChatMessage(
+                role="assistant", content=None, timestamp="t",
+                tool_calls=[ToolCallRef(id="c1", name="bash", arguments='{"command": "ls"}')],
+            ),
+            tool_message(ToolOutput(call_id="c1", tool_name="bash", output="done"), timestamp=""),
+        ])
+        await pilot.pause()
+        activities = t.query(".activity-fold")
+        assert len(activities) == 1
+        kids = list(activities[0].query(Collapsible))
+        assert len(kids) == 1 and "✓" in str(kids[0].title)
