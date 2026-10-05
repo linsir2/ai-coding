@@ -360,7 +360,7 @@ tail 事件（收割/整理）**追加到本回合文件**，不会凭空造出�
 `tracing`（enabled/dir/capture/max_turn_bytes/retention_days/redact）、
 `guard`（duplicate_threshold/bash_deny/bash_confirm/strict_paths/redact_history）、
 `hooks`（enabled/timeout_seconds/plugin_dir/events[]）、
-`ai.turn_token_budget`、`ModelConfig.price_input_per_1k` / `price_output_per_1k`。
+`ai.turn_token_budget`、`ModelConfig.price_input_per_1k` / `price_output_per_1k` / `price_cached_per_1k`（R11 新增：缓存输入价，0 = 未知，此时按 input 价计而不是按 0 计）。`/budget` 只在 `recorder.pricing` 有价格时追加 `≈ ¥x` 估算（拆分新鲜/缓存输入），无价格则只有 token。
 三块全部有默认值，**旧配置不改也能跑**。
 
 ---

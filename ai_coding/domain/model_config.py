@@ -20,3 +20,7 @@ class ModelConfig:
     # (docs/r4-analysis.md 4.3).
     price_input_per_1k: float = 0.0
     price_output_per_1k: float = 0.0
+    # R11: cache hits are billed at their own rate (DeepSeek roughly a tenth of
+    # input).  Zero means "unknown" and the cost then charges those tokens at
+    # the input price — never free.
+    price_cached_per_1k: float = 0.0

@@ -702,3 +702,39 @@ async def test_handle_plan_bare_cancelled_plans_nothing(monkeypatch):
 
     assert action is REPLAction.CONTINUE
     assert loop.calls == []
+
+
+def test_budget_shows_money_when_the_recorder_knows_the_price(tmp_path):
+    """`/budget` finally reads the price the recorder has been handed.
+
+    cli.py has been setting ``recorder.pricing`` since R4a with nothing reading
+    it, so cached tokens were not merely mispriced — no money was shown at all.
+    With a price configured the estimate splits fresh and cached input; without
+    one the line stays token-only, which is R4a's rule for unknown prices.
+    """
+    from ai_coding.core.budget import Pricing
+    from ai_coding.core.trace import TraceStore
+    from ai_coding.ui.repl import _budget_report
+
+    store = TraceStore(tmp_path)
+    store.update_summary("priced", {
+        "turns": 3, "steps": 9, "prompt_tokens": 30_000,
+        "completion_tokens": 3_000, "cached_tokens": 18_000,
+    })
+
+    class _PricedLoop:
+        def __init__(self, store):
+            self.trace = _FakeTrace(store)
+
+    loop = _PricedLoop(store)
+    loop.trace.pricing = Pricing(input_per_1k=0.002, output_per_1k=0.008,
+                                 cached_per_1k=0.0002)
+    priced = _budget_report(loop, _session("priced"))
+    assert "cache 60%" in priced
+    # 12k fresh * 0.002 + 18k cached * 0.0002 + 3k out * 0.008 = 0.0516
+    assert "≈ ¥0.0516" in priced
+
+    loop.trace.pricing = None
+    plain = _budget_report(loop, _session("priced"))
+    assert "≈" not in plain
+    assert "cache 60%" in plain

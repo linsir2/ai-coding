@@ -32,10 +32,18 @@ __all__ = [
 
 @dataclass(frozen=True)
 class Pricing:
-    """Per-1k-token prices; both zero means "not configured" (cost is unknown)."""
+    """Per-1k-token prices; both zero means "not configured" (cost is unknown).
+
+    ``cached_per_1k`` is the price of a prefix the provider already has.  Both
+    configured providers sell it at a fraction of the input price (DeepSeek
+    roughly a tenth), so charging cache hits as fresh input overstates a turn
+    that is two thirds cached.  Left at 0 it means "no cache price known", and
+    ``cost`` then charges those tokens at the input price — never free.
+    """
 
     input_per_1k: float = 0.0
     output_per_1k: float = 0.0
+    cached_per_1k: float = 0.0
 
     @property
     def configured(self) -> bool:
@@ -144,16 +152,31 @@ class BudgetLedger:
         """Money spent, or ``None`` when no price is configured."""
         if pricing is None or not pricing.configured:
             return None
+        cached = min(self._cached, self._prompt) if self._cached_reported else 0
+        fresh = max(self._prompt - cached, 0)
+        cached_rate = pricing.cached_per_1k or pricing.input_per_1k
         return (
-            self._prompt / 1000 * pricing.input_per_1k
+            fresh / 1000 * pricing.input_per_1k
+            + cached / 1000 * cached_rate
             + self._completion / 1000 * pricing.output_per_1k
         )
 
     def usage_dict(self) -> dict[str, int]:
-        """The turn's totals in the same shape the engine reports per step."""
+        """The turn's totals in the same shape the engine reports per step.
+
+        Including the cache figures, which the ledger has counted all along:
+        measured on the real loop before this, every provider call reported
+        ``cached_tokens: 1024`` while this dict said 0, so receipts, the
+        persisted per-turn usage and /budget all treated the cache as free.
+        Omitted rather than zeroed when nobody reported them — a zero would be
+        a claim, and "no provider numbers" is a different fact from "no hits".
+        """
         totals = self.totals
-        return {
+        out = {
             "prompt_tokens": totals.prompt_tokens,
             "completion_tokens": totals.completion_tokens,
             "total_tokens": totals.total_tokens,
         }
+        if self._cached_reported:
+            out["cached_tokens"] = totals.cached_tokens
+        return out

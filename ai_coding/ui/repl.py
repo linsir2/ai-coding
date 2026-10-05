@@ -390,7 +390,9 @@ def _budget_report(loop: Any, session: Any) -> str:
     completion = int(summary.get("completion_tokens", 0) or 0)
     if prompt == 0 and completion == 0:
         return "[budget] 本会话尚无 token 用量（模型可能未上报 usage）"
-    return f"[budget] {render_budget(summary)}"
+    # The recorder is handed the model's prices at startup (cli.py) and nothing
+    # read them until now; without a price the line stays token-only.
+    return f"[budget] {render_budget(summary, price=getattr(recorder, 'pricing', None))}"
 
 
 def _memory_report(loop: Any) -> str:

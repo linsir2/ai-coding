@@ -180,6 +180,7 @@ def _make_recorder(app_cfg: Any, workspace: str, session: Any) -> Any | None:
             pricing = Pricing(
                 input_per_1k=float(getattr(config, "price_input_per_1k", 0.0)),
                 output_per_1k=float(getattr(config, "price_output_per_1k", 0.0)),
+                cached_per_1k=float(getattr(config, "price_cached_per_1k", 0.0)),
             )
     except Exception:  # noqa: BLE001
         pricing = None

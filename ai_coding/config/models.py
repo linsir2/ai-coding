@@ -341,4 +341,5 @@ def _coerce_model(raw: dict[str, Any]) -> ModelConfig:
         timeout=int(raw.get("timeout", 60)),
         price_input_per_1k=float(raw.get("price_input_per_1k", 0.0) or 0.0),
         price_output_per_1k=float(raw.get("price_output_per_1k", 0.0) or 0.0),
+        price_cached_per_1k=float(raw.get("price_cached_per_1k", 0.0) or 0.0),
     )

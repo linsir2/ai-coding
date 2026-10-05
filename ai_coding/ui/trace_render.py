@@ -141,8 +141,17 @@ def render_turn(summary: Mapping[str, Any]) -> str:
     return " · ".join(parts)
 
 
-def render_budget(summary: Mapping[str, Any]) -> str:
-    """Session-level totals from ``summary.json``."""
+def render_budget(
+    summary: Mapping[str, Any], *, price: Any | None = None
+) -> str:
+    """Session-level totals from ``summary.json``.
+
+    ``price`` is an optional ``core.budget.Pricing``.  When given and
+    configured, an estimate is appended — split into fresh and cached input,
+    because the two are billed at different rates.  Without it the line stays
+    token-only: R4a's rule is that an unknown price yields no cost rather than a
+    fake 0.0, and a session's summary is also what ``/budget`` reads.
+    """
     prompt = int(summary.get("prompt_tokens", 0) or 0)
     completion = int(summary.get("completion_tokens", 0) or 0)
     if prompt == 0 and completion == 0:
@@ -156,7 +165,27 @@ def render_budget(summary: Mapping[str, Any]) -> str:
     cached = int(summary.get("cached_tokens", 0) or 0)
     if cached and prompt > 0:
         parts.append(f"cache {int(round(cached / prompt * 100))}%")
+    estimate = _estimate(prompt, completion, cached, price)
+    if estimate is not None:
+        parts.append(estimate)
     return " · ".join(parts)
+
+
+def _estimate(
+    prompt: int, completion: int, cached: int, price: Any | None
+) -> str | None:
+    """``≈ $x`` for a priced session, or ``None`` when the price is unknown."""
+    if price is None or not getattr(price, "configured", False):
+        return None
+    cached = min(cached, prompt)
+    fresh = max(prompt - cached, 0)
+    cached_rate = getattr(price, "cached_per_1k", 0.0) or price.input_per_1k
+    money = (
+        fresh / 1000 * price.input_per_1k
+        + cached / 1000 * cached_rate
+        + completion / 1000 * price.output_per_1k
+    )
+    return f"≈ ¥{money:.4f}"
 
 
 def render_overview(report: AggregateReport) -> str:

@@ -117,3 +117,30 @@ def test_summarize_turn_survives_a_missing_file(tmp_path):
     summary = summarize_turn(tmp_path / "nope.jsonl")
     assert summary["turn"] == 0
     assert summary["spans"] == 0
+
+
+def test_budget_shows_an_estimate_when_prices_are_configured():
+    """Money appears only when the model config knows its prices.
+
+    ``CostLedger.cost`` had no production caller, so cached tokens were not
+    merely mispriced — nobody was charged anything at all.  With a cache price
+    configured the estimate splits the input into fresh and cached, because the
+    two are billed differently; without prices the line stays absent, per R4a's
+    "an unknown price must yield no cost rather than a fake 0.0".
+    """
+    from ai_coding.core.budget import BudgetLedger, Pricing
+
+    ledger = BudgetLedger()
+    ledger.record_step({"prompt_tokens": 10_000, "completion_tokens": 2_000,
+                        "total_tokens": 12_000, "cached_tokens": 6_000})
+
+    priced = render_budget(ledger.usage_dict(),
+                           price=Pricing(input_per_1k=0.002, output_per_1k=0.008,
+                                         cached_per_1k=0.0002))
+    # 4k fresh * 0.002 + 6k cached * 0.0002 + 2k out * 0.008 = 0.0252
+    assert "≈" in priced
+    assert "0.0252" in priced
+
+    unpriced = render_budget(ledger.usage_dict())
+    assert "≈" not in unpriced
+    assert "cache 60%" in unpriced
