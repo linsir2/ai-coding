@@ -196,7 +196,7 @@ R2 给 `ToolFinished` 追加末尾字段 `error: str | None = None`（与 `ToolR
 | `stream_usage` | `true` | 是否请求 `stream_options.include_usage` |
 | `persist_checkpoint_messages` | `200` | 超过此条数后，回合内落盘按步长（每 3 轮）节流 |
 | `turn_timeout_seconds` | `600.0` | **回合墙钟上限**（R2）：到期 → `TurnStatus.TIMEOUT`，保留已产出文本与轨迹；`0` 关闭。含人工审批等待时间 |
-| `max_auto_continuations` | `3` | **C3**：正常回合迭代预算耗尽且 todo 仍有 open 项时，注入 `[continue]` 提示并**重新武装迭代预算**（新一轮 `max_tool_iterations`），最多 N 次；`0` 关闭。不受 `stop_policy` 影响；每用户回合重置。token 预算耗尽优先判终态（不白烧续跑额度）。plan-runner 步内强制 `0`（一步一个有界回合，共享计划 task 不能让单步续跑） |
+| `max_auto_continuations` | `3` | **C3**：正常回合迭代预算耗尽且 todo 仍有 open 项时，注入 `[continue]` 提示并**重新武装迭代预算**（新一轮 `max_tool_iterations`），最多 N 次；`0` 关闭。不受 `stop_policy` 影响；每用户回合重置。**`blocked` 项不算未完成**：blocked 是「这一步现在做不了」（模型放弃或验收否决），与 C3「模型自己的活没干完」的前提相反；过滤只发生在 policy 的判定里，`open_items()` 仍把 blocked 视为 open（runner 下次 `/plan` 要重试它）。实测：单个 blocked 项从 6 次模型调用 / 3 次续跑降到 2 次 / 0 次。token 预算耗尽优先判终态（不白烧续跑额度）。plan-runner 步内强制 `0`（一步一个有界回合，共享计划 task 不能让单步续跑） |
 
 ### 回合终态（`domain/loop.py`）
 

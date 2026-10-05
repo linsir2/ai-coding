@@ -201,15 +201,25 @@ class TurnPolicy:
             # question.  The cap keeps a model that never closes its items from
             # running forever; an exhausted token budget makes the continuation
             # pointless, so it falls through to FINISH instead.
+            # A blocked item is open but not continuable: it says this step
+            # cannot be finished now (the model gave up, or the verify gate
+            # ruled it out), which is the opposite of C3's premise — the model
+            # stopped mid-way through its own work.  The runner still retries
+            # those steps on the next /plan; they just must not cost this
+            # turn extra rounds (measured: 6 model calls and 3 continuations
+            # for a single blocked item, identical to a pending one).
+            actionable = tuple(
+                item for item in snapshot.open_items if item.status != "blocked"
+            )
             if (
-                snapshot.open_items
+                actionable
                 and snapshot.continuations < self.config.max_auto_continuations
                 and not token_gate
             ):
                 return TurnDecision(
                     TurnAction.NUDGE,
                     "continue unfinished work",
-                    inject=self.continuation_message(snapshot.open_items),
+                    inject=self.continuation_message(actionable),
                 )
             return TurnDecision(TurnAction.FINISH, "iteration budget exhausted")
         if token_gate:

@@ -297,3 +297,72 @@ async def test_outcome_iterations_count_every_model_call(tmp_path):
     assert loop.last_outcome is not None
     assert loop.last_outcome.iterations == len(engine.requests)
     assert loop.last_outcome.iterations == 6
+
+
+def _items_in(*statuses):
+    from ai_coding.domain.task import TaskState
+
+    task = TaskState(goal="g")
+    for index, status in enumerate(statuses, start=1):
+        item = task.add(f"step {index}")
+        item.status = status
+    return task
+
+
+@pytest.mark.parametrize("status", ["pending", "in_progress"])
+def test_continuation_fires_for_work_the_model_still_wants(status):
+    """The premise holds for these: open work, budget died, keep going."""
+    task = _items_in(status)
+    decision = TurnPolicy(TurnPolicyConfig(max_iterations=0)).decide_next_iteration(
+        TurnSnapshot(iteration=9, open_items=tuple(task.open_items())),
+        budget_expired=False,
+    )
+    assert decision.action is TurnAction.NUDGE
+    assert decision.reason == "continue unfinished work"
+
+
+def test_a_blocked_item_is_not_unfinished_work():
+    """F1: a blocked item must not buy more rounds of the model's own budget.
+
+    C3's premise is that the model stopped because the budget ran out while it
+    was still finishing *its own* work.  ``blocked`` is the opposite statement
+    — the model (or the runner's verify gate) has already said this step cannot
+    be finished now — yet ``blocked`` is not a terminal status, so
+    ``open_items()`` reported it as open and every following turn spent up to
+    ``max_auto_continuations`` extra rounds chasing a step that was ruled out.
+    Measured before this test: 6 model calls and 3 continuations for a single
+    blocked item, identical to a pending one.
+
+    Only C3's view changes.  ``open_items()`` still lists blocked items, because
+    the runner must retry a verify-failed step on the next run — that is a
+    decision about the next /plan, not about spending this turn's money.
+    """
+    task = _items_in("blocked")
+    assert [item.id for item in task.open_items()] == ["1"], (
+        "the runner still needs to see blocked items as open"
+    )
+
+    decision = TurnPolicy(TurnPolicyConfig(max_iterations=0)).decide_next_iteration(
+        TurnSnapshot(iteration=9, open_items=tuple(task.open_items())),
+        budget_expired=False,
+    )
+    assert decision.action is TurnAction.FINISH
+    assert decision.reason == "iteration budget exhausted"
+
+
+def test_blocked_does_not_hide_the_other_open_items():
+    """F1 filters C3's view, not the task: a pending sibling still continues.
+
+    The policy does the filtering itself, so the loop keeps handing it the
+    whole open set — the message it injects must name only what it will pay
+    for.
+    """
+    task = _items_in("blocked", "pending")
+
+    decision = TurnPolicy(TurnPolicyConfig(max_iterations=0)).decide_next_iteration(
+        TurnSnapshot(iteration=9, open_items=tuple(task.open_items())),
+        budget_expired=False,
+    )
+    assert decision.action is TurnAction.NUDGE
+    assert "step 2" in (decision.inject or "")
+    assert "step 1" not in (decision.inject or "")
