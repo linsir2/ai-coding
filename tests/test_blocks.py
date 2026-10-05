@@ -280,3 +280,31 @@ def test_chunks_can_be_disabled():
     observer = TranscriptObserver(seen.append, chunks=False)
     observer.on_event(ToolChunk("c1", "bash", "stdout", "hidden\n", 0))
     assert seen == []
+
+
+def test_aborted_turn_renders_interrupted_marker():
+    # Esc abort used to end the transcript in silence (only TIMEOUT/MAX
+    # rendered); the user could not tell "done" from "interrupted".
+    block = blocks_from_event(
+        TurnFinished(outcome=TurnOutcome(status=TurnStatus.ABORTED))
+    )
+    assert block is not None
+    assert block.kind == "turn-end"
+    assert "已中断" in block.text
+
+
+def test_abort_wins_over_length_cut():
+    # A step can be length-truncated and then the user hits Esc.  The user's
+    # action is the authoritative ending; "截断：输入继续可接上" would be a lie.
+    block = blocks_from_event(
+        TurnFinished(
+            outcome=TurnOutcome(
+                status=TurnStatus.ABORTED,
+                reason="cancelled",
+                truncated_by_length=True,
+            )
+        )
+    )
+    assert block is not None
+    assert "已中断" in block.text
+    assert "截断" not in block.text

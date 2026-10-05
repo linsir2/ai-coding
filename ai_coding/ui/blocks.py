@@ -289,6 +289,19 @@ def blocks_from_event(event: LoopEvent) -> Block | None:
         return Block("ledger", "\n".join(lines), "dim")
     if isinstance(event, TurnFinished) and event.outcome.status is TurnStatus.TIMEOUT:
         return Block("turn-end", f"[turn] timed out: {event.outcome.reason}", "red")
+    if isinstance(event, TurnFinished) and event.outcome.status is TurnStatus.ABORTED:
+        # An explicit user abort outranks the length/budget notices: the user
+        # caused this ending and knows it, so "截断：输入继续可接上" would be a
+        # lie.  No "继续可接上" promise either — resuming an aborted turn is a
+        # separate continuation-policy question, and this marker must not
+        # pledge it.  (Same silence problem as WP2 before it: Esc ended the
+        # turn and the transcript showed nothing, so "done" and "interrupted"
+        # read identically.)
+        return Block(
+            "turn-end",
+            "[turn] 已中断（Esc），任务未收尾",
+            "red",
+        )
     if isinstance(event, TurnFinished) and event.outcome.truncated_by_length:
         # W1: a length cutoff reads as "done" everywhere else (COMPLETED, and
         # even MAX when the last step was cut) — it explains the visible

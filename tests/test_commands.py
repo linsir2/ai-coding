@@ -158,3 +158,56 @@ async def test_slash_plan_does_not_open_palette():
         app.query_one("#prompt").value = "/plan"
         await pilot.pause()
         assert not CommandPalette.is_open(app)
+
+
+@pytest.mark.asyncio
+async def test_escape_aborts_the_running_turn():
+    """Esc must end the whole turn, not just drop the tool batch.
+
+    The engine boundary is faked (no model in tests); what is real: the
+    worker task, its cancellation, and the finally that restores input.
+    """
+    import asyncio
+
+    cancelled: list[bool] = []
+
+    class _HangingLoop:
+        async def process_input(self, *args, **kwargs):
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+    app = _app(loop=_HangingLoop())
+    async with app.run_test() as pilot:
+        app.run_turn("long task")
+        for _ in range(20):
+            await pilot.pause()
+            if app.query_one("#prompt").disabled:
+                break
+        assert app.query_one("#prompt").disabled, "turn worker never started"
+        await pilot.press("escape")
+        for _ in range(20):
+            await pilot.pause()
+            if cancelled:
+                break
+        assert cancelled == [True], "Esc never reached the running turn"
+        for _ in range(20):
+            await pilot.pause()
+            if not app.query_one("#prompt").disabled:
+                break
+        assert not app.query_one("#prompt").disabled, "input stayed disabled after abort"
+
+
+@pytest.mark.asyncio
+async def test_escape_when_idle_is_a_noop():
+    """Nothing running: Esc must not break anything nor invent a marker."""
+    app = _app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert not app.query_one("#prompt").disabled
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app.query_one("#prompt").disabled
+        assert len(app.query(".block-turn-end")) == 0

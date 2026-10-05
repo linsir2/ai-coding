@@ -195,3 +195,39 @@ async def test_r8_a_cancelled_wait_leaves_no_tasks_behind():
     await asyncio.sleep(0.1)
     current = asyncio.current_task()
     assert asyncio.all_tasks() - {current} == set()
+
+
+@pytest.mark.asyncio
+async def test_external_cancellation_reaches_the_inner_task():
+    """If the caller is cancelled, the awaited work must be cancelled too.
+
+    Otherwise the inner task is orphaned and keeps running.  Measured live:
+    a bash `sleep 60` outlived its aborted turn (Esc) because the dispatcher's
+    ``run_with_deadline`` dropped the tool task instead of cancelling it, and
+    the subprocess thread — which no cancellation reaches — never got the kill.
+    """
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def work() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    outer = asyncio.ensure_future(
+        # An (unset) cancel event forces the ``asyncio.wait`` path — the one
+        # that orphans the inner task without the fix.  ``timeout=None`` alone
+        # would take the ``await task`` path, which forwards cancellation for
+        # free and would pass even on the broken code.
+        run_with_deadline(
+            work(), timeout=None, label="tool:bash", cancel=asyncio.Event()
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    outer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+    await asyncio.wait_for(cancelled.wait(), timeout=2.0)

@@ -297,16 +297,27 @@ class AICodingApp(App[None]):
             self._input.focus()
 
     def action_cancel_turn(self) -> None:
-        """Drop the tool batch that is running.
+        """Abort the running turn (Esc).
 
-        The semantics are the ones already written down: ``agent_loop.py:566-568``
-        clears the event before every dispatch, so one press drops the batch in
-        flight and the loop carries on with a fresh one.  The turn is not
-        aborted — a cancelled call comes back as an ordinary
-        ``cancelled_by_user`` result (``dispatch.py:609-616``), so the model
-        sees it and can change course.
+        Two layers, and both are needed.  ``_cancel_event`` is the tool
+        layer's fast path (a batch in flight comes back ``cancelled_by_user``
+        and the model sees it).  But a turn is usually *not* in a tool batch
+        — it is inside a model call, which never watches that event — so Esc
+        used to do nothing visible while tokens burned.  Cancelling the
+        "turn"-group worker delivers ``CancelledError`` wherever the turn
+        happens to be; the loop already closes that as ABORTED, persists the
+        partial work, and re-raises, and ``run_turn``'s finally restores the
+        input.  Workers already being cancelled are skipped: a second Esc
+        mid-unwind would interrupt that finally (``end_assistant``) and can
+        leave the input disabled.
         """
         self._cancel_event.set()
+        for worker in self.workers:
+            if worker.group != "turn" or worker.node is not self:
+                continue
+            if worker.is_cancelled:
+                continue
+            worker.cancel()
 
     def action_copy_last_tool(self) -> None:
         """Copy the most recent finished tool call to the system clipboard.

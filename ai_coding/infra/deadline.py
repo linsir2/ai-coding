@@ -179,6 +179,18 @@ async def run_with_deadline(
             _abandon(task, on_abandon)
             raise DeadlineExpired(label, timeout or 0.0)
         return task.result()
+    except asyncio.CancelledError:
+        # The caller's task was cancelled while we waited on ``asyncio.wait``.
+        # ``await task`` (the no-timeout path above) forwards cancellation to
+        # the awaited task for free — it is the task's ``_fut_waiter`` — but
+        # ``asyncio.wait`` waits on its own internal future, so the inner task
+        # would be orphaned and keep running.  (Measured live: Esc left a bash
+        # ``sleep 60`` alive because the dispatcher's wrapper dropped the tool.)
+        # The timeout / cancel-event paths already abandoned it above and do
+        # not raise CancelledError, so this only fires for external cancel.
+        if not task.done():
+            _abandon(task, on_abandon)
+        raise
     finally:
         for helper in (ticker, watcher):
             if helper is not None and not helper.done():

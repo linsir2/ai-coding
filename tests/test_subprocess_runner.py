@@ -272,3 +272,87 @@ def test_r8_an_unset_cancel_changes_nothing():
     outcome = run_process("echo hi", shell=True, timeout=5, cancel=cancel)
     assert outcome.cancelled is False
     assert outcome.stdout == "hi\n"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_wait_kills_the_process(tmp_path):
+    """Esc-abort cancels the awaiting task, not via the cancel event: the
+    runner must translate task-cancellation into the same kill signal, or a
+    `sleep 30` outlives the aborted turn (measured live: its echo ran at 29s
+    while the turn died at 24s, and the chunk landed under the abort marker).
+    """
+    pid_file = tmp_path / "pid"
+    task = asyncio.ensure_future(
+        run_process_async(
+            "echo $$ > " + str(pid_file) + "; sleep 30",
+            shell=True,
+            timeout=60,
+            cancel=threading.Event(),
+        )
+    )
+    deadline = time.monotonic() + 5.0
+    while not pid_file.exists():
+        assert time.monotonic() < deadline, "process never spawned"
+        await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    pgid = int(pid_file.read_text(encoding="utf-8").strip())
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline, "orphaned process group survived the abort"
+        await asyncio.sleep(0.05)
+
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_task_cancel_kills_the_tool_subprocess(tmp_path):
+    """End-to-end: real dispatcher + real bash tool, cancel the dispatch task
+    (what Esc's worker.cancel does).  The isolated runner test passed, so the
+    gap must be in this stack — this is the reproduction.
+    """
+    from ai_coding.core.dispatch import ToolDispatcher
+    from ai_coding.domain.message import ToolCallRef
+    from ai_coding.security.approval import AutoApproveCallback
+    from ai_coding.security.permission_gate import PermissionGate
+    from ai_coding.tools.bash_tool import BashTool
+    from ai_coding.tools.registry import ToolRegistry
+
+    pid_file = tmp_path / "pid"
+    registry = ToolRegistry()
+    registry.register(BashTool(timeout_seconds=120))
+    dispatcher = ToolDispatcher(
+        registry, PermissionGate(), AutoApproveCallback(), cancel=asyncio.Event()
+    )
+    call = ToolCallRef(
+        id="c1",
+        name="bash",
+        arguments='{"command": "echo $$ > ' + str(pid_file) + '; sleep 60"}',
+    )
+    from ai_coding.tools.base import ToolContext
+
+    task = asyncio.ensure_future(
+        dispatcher.dispatch_batch(
+            [call], ToolContext(workspace=str(tmp_path)), iteration=1
+        )
+    )
+    deadline = time.monotonic() + 5.0
+    while not pid_file.exists():
+        assert time.monotonic() < deadline, "process never spawned"
+        await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    pgid = int(pid_file.read_text(encoding="utf-8").strip())
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline, "dispatcher cancel left the process running"
+        await asyncio.sleep(0.05)

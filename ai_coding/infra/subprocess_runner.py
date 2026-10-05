@@ -301,6 +301,15 @@ async def run_process_async(
             label="process",
             tick=tick,
         )
+    except asyncio.CancelledError:
+        # The wait was cancelled (Esc-abort cancels the awaiting task rather
+        # than firing `cancel`): stop the command too, not just the wait.
+        # The work lives in a daemon thread that no cancellation reaches, so
+        # without this a `sleep 30` outlives its turn and its late chunks land
+        # in dead transcript.  Re-raised: cancellation is not ours to swallow.
+        if cancel is not None:
+            cancel.set()
+        raise
     except DeadlineExpired:
         _log.warning("process runner exceeded its outer deadline; thread abandoned")
         return ProcessOutcome(
