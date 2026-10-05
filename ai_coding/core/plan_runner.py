@@ -387,10 +387,12 @@ class PlanRunner:
         )
         attempts = 0
         step_usage: dict[str, int] | None = None
+        # Built before the try: a step that dies mid-turn still has to leave a
+        # replay marker on the parent, and the marker is this prompt.
+        step_prompt = self._step_prompt(item)
         try:
             step_session.acceptance = list(contracts)
             start_turn = int(getattr(step_session, "turn_count", 0) or 0)
-            step_prompt = self._step_prompt(item)
             text = await self._loop.process_input(
                 step_session, step_prompt,
                 on_delta=on_delta, observer=observer,
@@ -413,26 +415,43 @@ class PlanRunner:
                 step_usage = self._merge_usage(step_usage, turn_usage)
                 report.tokens_used = self._merge_usage(report.tokens_used, turn_usage)
             end_turn = int(getattr(step_session, "turn_count", 0) or 0)
-            self._settle(step_session, session, task, item, report, text, attempts,
-                         (start_turn, end_turn), step_usage, len(seed))
-            # The parent's transcript stays linear: prompt for the replay
-            # marker, then the one-line summary — never the step's tools.
-            session.add_message(ChatMessage(role="user", content=step_prompt, timestamp=""))
-            session.add_message(
-                ChatMessage(role="assistant", content=report.deliveries[-1].summary, timestamp="")
-            )
+            delivery = self._settle(step_session, session, task, item, report, text,
+                                   attempts, (start_turn, end_turn), step_usage,
+                                   len(seed))
+            self._record_on_parent(session, step_prompt, delivery.summary)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — one bad step must not kill the run
             task.update(item.id, status="blocked",
                         evidence=f"runner error: {exc}")
             report.blocked.append(item.id)
-            report.deliveries.append(self._delivery(
+            delivery = self._delivery(
                 item, "blocked", 1, [], f"runner error: {exc}", (0, 0),
-                step_usage, len(seed)))
+                step_usage, len(seed))
+            # Both halves of the parent's record, exactly as the settled path
+            # leaves them: the receipt in the book and the bubble for replay.
+            # This path used to write neither, so a step that crashed the turn
+            # was blocked in the task list and invisible everywhere else — no
+            # receipt to match a header against, no bubble to match at all.
+            report.deliveries.append(delivery)
+            session.step_deliveries.append(delivery)
+            self._record_on_parent(session, step_prompt, delivery.summary)
         finally:
             self._loop.policy = original_policy
             session.acceptance = previous_acceptance
+
+    @staticmethod
+    def _record_on_parent(session: Any, prompt: str, summary: str) -> None:
+        """Leave the parent's two-bubble trace of one step.
+
+        The prompt is the replay marker (``STEP_HEAD``); the summary is the
+        one line the user reads instead of the step's tools.  The step's own
+        transcript stays in its short conversation.  Both the settled and the
+        failed path go through here, because a receipt with no bubble is a
+        step ``/resume`` cannot show.
+        """
+        session.add_message(ChatMessage(role="user", content=prompt, timestamp=""))
+        session.add_message(ChatMessage(role="assistant", content=summary, timestamp=""))
 
     def _contracts_passed(self, step_session: Any) -> bool:
         return bool(step_session.acceptance) and all(
@@ -441,8 +460,8 @@ class PlanRunner:
 
     def _settle(self, step_session: Any, parent: Any, task: Any, item: Any, report: PlanReport,
                 text: Any, attempts: int, turns: tuple[int, int],
-                usage: dict[str, int] | None, seed_chars: int) -> None:
-        """Score one finished step and record its delivery.
+                usage: dict[str, int] | None, seed_chars: int) -> StepDelivery:
+        """Score one finished step, record its delivery, and return it.
 
         Mechanical verdicts win: a step whose proof commands fail is blocked
         even if the model marked it done; a step without proof commands that
@@ -477,6 +496,7 @@ class PlanRunner:
         delivery = self._delivery(item, status, attempts, ac, summary, turns, usage, seed_chars)
         report.deliveries.append(delivery)
         parent.step_deliveries.append(delivery)
+        return delivery
 
     def _model_claimed_done(self, task: Any, item: Any) -> bool:
         current = task.get(item.id)

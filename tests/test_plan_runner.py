@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from ai_coding.config.models import AIConfig
-from ai_coding.core.plan_runner import PlanRunner
+from ai_coding.core.plan_runner import STEP_HEAD, PlanRunner
 from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
 from ai_coding.domain.plan_delivery import StepDelivery
 from ai_coding.domain.session import SessionData
@@ -202,3 +202,50 @@ async def test_prior_deliveries_are_summarised_into_later_steps():
     seed_2 = loop.step_sessions[1].messages[0].content
     assert "step two" in seed_2
     assert "step one" not in seed_2
+
+
+@pytest.mark.asyncio
+async def test_a_failed_step_still_leaves_a_replay_marker():
+    """A step that dies mid-turn must be visible on /resume, not just in the book.
+
+    The step timeline is rebuilt from prompt markers: replay finds the user
+    bubble, matches its statement against the receipts, and only then draws a
+    header (transcript._step_header).  The runner-error path used to write a
+    blocked receipt and no bubble, so the failure existed in the data and not
+    on screen — and nothing tested it.
+
+    Asserted through the matcher replay itself uses, so a marker that exists
+    but cannot be matched (statement drift) fails here too.
+    """
+    from ai_coding.ui.transcript import _step_header
+
+    class _DyingLoop:
+        settings = SimpleNamespace(plan_step_max_iterations=8, plan_max_step_turns=0)
+
+        def __init__(self):
+            self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=8))
+
+        async def process_input(self, session, text, on_delta=None, observer=None):
+            raise RuntimeError("engine exploded")
+
+    session = SessionData(session_id="s", title="", created_time="t",
+                          last_access_time="t")
+    task = TaskState(goal="g")
+    task.add("改一下 loader")
+    session.task = task
+
+    report = await PlanRunner(_DyingLoop()).run(session)
+
+    assert [entry.status for entry in report.deliveries] == ["blocked"]
+    # the receipt must reach the parent's book too, or replay has nothing to
+    # match the marker against and the block never reaches the user
+    assert [entry.step_id for entry in session.step_deliveries] == ["1"]
+    assert session.step_deliveries[0].status == "blocked"
+    bubbles = [m for m in session.messages if m.role == "user"]
+    assert len(bubbles) == 1 and bubbles[0].content.startswith(STEP_HEAD)
+    assert "engine exploded" in session.messages[-1].content
+
+    by_statement = {e.statement: e for e in session.step_deliveries}
+    header = _step_header(bubbles[0].content, by_statement)
+    assert header is not None
+    assert "受阻" in header.plain
