@@ -18,6 +18,28 @@ _INFO_STYLE = "green"
 _ERROR_STYLE = "bold red"
 
 
+class _LineSink:
+    """A step view for consoles that have no folding: writes the deltas out.
+
+    The REPL prints the step's words as they arrive instead of folding them —
+    a terminal has no widget to collapse, and hiding the work behind a
+    one-line summary would be exactly the invisibility M3 exists to remove.
+    """
+
+    def __init__(self, console: DialogueConsole) -> None:
+        self._console = console
+
+    def delta(self, text: str) -> None:
+        self._console.delta(text)
+
+    def flush(self) -> bool:
+        return False
+
+    def end(self, summary: str | None = None) -> None:
+        if summary:
+            self._console.info(f"  → {summary}")
+
+
 class DialogueConsole:
     """Render assistant deltas, info, errors and rules with rich."""
 
@@ -29,6 +51,11 @@ class DialogueConsole:
         # markup=False on every print: the text is the model's / the user's
         # words, and rich would parse (and eat or reject) any ``[`` in it.
         self._c.print(token, end="", style=_ANSWER_STYLE, markup=False)
+
+    def step(self, title: str) -> Any:
+        """Open a step view (M3).  No folding here: the REPL prints the work."""
+        self.info(title)
+        return _LineSink(self)
 
     def info(self, message: str) -> None:
         self._c.print(message, style=_INFO_STYLE, markup=False)
@@ -61,6 +88,16 @@ class TextualConsole(DialogueConsole):
             self._transcript.begin_assistant(datetime.now().strftime("%H:%M"))
             self._streaming = True
         self._transcript.stream(token)
+
+    def step(self, title: str) -> Any:
+        """Open a fold for one plan step's live output (M3).
+
+        Returns the view so the runner can route that step's deltas into it
+        and close it with the receipt summary; ``Transcript.begin_plan_step``
+        owns the widget, this only hands it over.
+        """
+        self._end_stream()
+        return self._transcript.begin_plan_step(title)
 
     def _end_stream(self) -> None:
         if self._streaming:

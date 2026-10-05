@@ -530,3 +530,62 @@ async def test_plan_run_is_gone_as_a_command():
         assert loop.calls == []
         out = _all_static_text(app)
         assert "did you mean" in out and "/plan" in out
+
+
+@pytest.mark.asyncio
+async def test_planning_shows_each_step_as_a_live_fold():
+    """M3: executing a plan must show the work, not only "[plan] 步骤 k/N".
+
+    The runner already threaded ``on_delta`` into every step turn, but the
+    app passed none for the run, so a plan executed in front of the user as a
+    sequence of step headers while the model wrote prose and ran commands
+    that nobody could see — and the step transcripts are discarded by design
+    (M1), so this view was the only place that work could ever appear.
+
+    Driven through the real runner with the app's own console, so the wiring
+    is what is under test, not a stub's.
+    """
+    from ai_coding.core.plan_runner import STEP_HEAD
+    from ai_coding.domain.session import SessionData
+    from ai_coding.domain.task import TaskState
+
+    class _PlanningLoop(_FakeLoop):
+        """Plans like the model does, then works one step per turn."""
+
+        def __init__(self):
+            super().__init__()
+            self.policy = TurnPolicy(TurnPolicyConfig(max_auto_continuations=3))
+
+        async def process_input(self, session, text, *, on_delta=None, observer=None):
+            if text.startswith("Create a detailed implementation plan"):
+                session.task.add("改 loader")
+                session.task.add("补测试")
+                return "计划写好了"
+            if text.startswith(STEP_HEAD):
+                if on_delta is not None:
+                    on_delta("读了 loader，准备改\n")
+                for item in session.task.open_items()[:1]:
+                    item.status = "completed"
+                return "改完了"
+            return await super().process_input(
+                session, text, on_delta=on_delta, observer=observer
+            )
+
+    loop = _PlanningLoop()
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.task = TaskState(goal="")
+    app = _app(loop=loop, session=session)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/plan 改 loader"
+        await pilot.press("enter")
+        for _ in range(4):
+            await pilot.pause()
+        # queried inside run_test: the DOM is gone once the app stops
+        folds = app.query(".plan-step-fold")
+        assert len(folds) == 2, [f.title for f in folds]
+        assert "读了 loader，准备改" in "\n".join(
+            md.source for md in app.query(Prose)
+        )
+        # the first step's title carries its receipt summary
+        assert "改 loader" in folds[0].title

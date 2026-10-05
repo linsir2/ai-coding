@@ -80,6 +80,9 @@ class _StubLoop:
             ChatMessage(role="tool", content=_TOOL_MARK % len(self.calls) + "x" * 5000,
                         timestamp="", tool_call_id=f"call-{len(self.calls)}")
         )
+        answer = "step done"
+        if on_delta is not None:
+            on_delta(answer)      # the real loop streams its answer as it comes
         action = self._script.pop(0) if self._script else "complete"
         if action in ("complete", "complete-all"):
             targets = session.task.open_items()
@@ -98,7 +101,7 @@ class _StubLoop:
                 item.output = "assert 245 == 200"
         elif action == "ignore":
             pass
-        return "step done"
+        return answer
 
     @property
     def last_outcome(self):
@@ -591,3 +594,82 @@ async def test_step_contracts_never_touch_the_parent_acceptance_list():
     assert session.step_deliveries[0].ac == [
         {"id": "plan-1", "passed": True}
     ]
+
+
+class _StepViewConsole:
+    """A console that can open a per-step view (M3 seam)."""
+
+    def __init__(self):
+        self.messages = []
+        self.opened = []      # (title, sink)
+        self.ended = []       # (title, summary)
+
+    def info(self, message):
+        self.messages.append(message)
+
+    def error(self, message):
+        self.messages.append(message)
+
+    def step(self, title):
+        sink = _StepSink(title, self)
+        self.opened.append((title, sink))
+        return sink
+
+
+class _StepSink:
+    def __init__(self, title, console):
+        self.title, self.console, self.deltas = title, console, []
+
+    def delta(self, text):
+        self.deltas.append(text)
+
+    def end(self, summary=None):
+        self.console.ended.append((self.title, summary))
+
+
+@pytest.mark.asyncio
+async def test_each_step_streams_into_its_own_view():
+    """M3: the step's live output must reach the user, per step.
+
+    The runner already threaded ``on_delta`` into every step turn (it was
+    written for the planning turn and never wired up), but neither UI passed
+    one for the run, so a plan executed in front of the user as a sequence of
+    "[plan] 步骤 k/N" lines and nothing else — the model wrote a paragraph,
+    ran three commands, and none of it was visible.  Steps run on throwaway
+    sessions whose transcript is discarded on purpose, so this is the only
+    place the work can be shown.
+
+    The runner's job is to open a view per step, route that step's deltas into
+    it, and close it with the settled summary — so the live title says what
+    replay will say.
+    """
+    session = _session_with("改 loader", "写测试")
+    seen_outer = []
+    console = _StepViewConsole()
+
+    async def outer_delta(text):        # the caller-level sink, must stay unused
+        seen_outer.append(text)
+
+    loop = _StubLoop(["complete", "complete"])
+    await PlanRunner(loop).run(session, console, on_delta=outer_delta)
+
+    assert [title for title, _ in console.opened] == [
+        "[plan] 步骤 1/2：改 loader", "[plan] 步骤 2/2：写测试",
+    ]
+    for _title, sink in console.opened:
+        assert sink.deltas, "the step's own deltas never arrived"
+    assert seen_outer == [], "step output leaked into the caller's stream"
+    # closed with the receipt summary, which is what /resume will show
+    assert [summary for _title, summary in console.ended] == [
+        entry.summary for entry in session.step_deliveries
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_console_without_step_support_still_runs():
+    """The seam is optional: a console that cannot open a view is not an error."""
+    session = _session_with("one")
+
+    report = await PlanRunner(_StubLoop(["complete"])).run(session, None)
+
+    assert [entry.status for entry in report.deliveries] == ["completed"]

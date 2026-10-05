@@ -391,6 +391,11 @@ class PlanRunner:
             console,
             f"[plan] 步骤 {item.id}/{total}（剩余 {open_count} 项）：{item.content}",
         )
+        # M3: the step's live output goes into a view of its own, closed with
+        # the receipt summary — the same sentence /resume will show.  Optional:
+        # a console that cannot open one (or none at all) still runs the plan.
+        step_view = self._open_step_view(console, item, total)
+        step_delta = step_view.delta if step_view is not None else on_delta
         # M1-B: the step runs in its own short conversation, not the parent's
         # ever-growing history.  The parent keeps only the prompt (replay
         # marker) and a one-line summary.
@@ -416,6 +421,7 @@ class PlanRunner:
         )
         attempts = 0
         step_usage: dict[str, int] | None = None
+        step_summary: str | None = None
         # Built before the try: a step that dies mid-turn still has to leave a
         # replay marker on the parent, and the marker is this prompt.
         step_prompt = self._step_prompt(item)
@@ -424,7 +430,7 @@ class PlanRunner:
             start_turn = int(getattr(step_session, "turn_count", 0) or 0)
             text = await self._loop.process_input(
                 step_session, step_prompt,
-                on_delta=on_delta, observer=observer,
+                on_delta=step_delta, observer=observer,
             )
             attempts = 1
             # R1-4: every returned turn costs budget, and its spend is read
@@ -436,7 +442,7 @@ class PlanRunner:
             if contracts and not self._contracts_passed(step_session):
                 text = await self._loop.process_input(
                     step_session, self._repair_prompt(item, step_session),
-                    on_delta=on_delta, observer=observer,
+                    on_delta=step_delta, observer=observer,
                 )
                 attempts = 2
                 report.turns_used += 1
@@ -447,7 +453,8 @@ class PlanRunner:
             delivery = self._settle(step_session, session, task, item, report, text,
                                    attempts, (start_turn, end_turn), step_usage,
                                    len(seed))
-            self._record_on_parent(session, step_prompt, delivery.summary)
+            step_summary = delivery.summary
+            self._record_on_parent(session, step_prompt, step_summary)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — one bad step must not kill the run
@@ -464,9 +471,12 @@ class PlanRunner:
             # receipt to match a header against, no bubble to match at all.
             report.deliveries.append(delivery)
             session.step_deliveries.append(delivery)
-            self._record_on_parent(session, step_prompt, delivery.summary)
+            step_summary = delivery.summary
+            self._record_on_parent(session, step_prompt, step_summary)
         finally:
             self._loop.policy = original_policy
+            if step_view is not None:
+                step_view.end(step_summary)
 
     @staticmethod
     def _record_on_parent(session: Any, prompt: str, summary: str) -> None:
@@ -487,6 +497,19 @@ class PlanRunner:
         now = now_utc()
         session.add_message(ChatMessage(role="user", content=prompt, timestamp=now))
         session.add_message(ChatMessage(role="assistant", content=summary, timestamp=now))
+
+    @staticmethod
+    def _open_step_view(console: Any, item: Any, total: int) -> Any:
+        """Ask the console for a view of one step, or ``None`` if it has none.
+
+        Duck-typed on purpose: the runner is handed whatever console the UI
+        passes (a Textual one, a dialogue one, or nothing at all in tests), and
+        a console that cannot show a step must not stop a plan from running.
+        """
+        opener = getattr(console, "step", None)
+        if opener is None:
+            return None
+        return opener(f"[plan] 步骤 {item.id}/{total}：{item.content}")
 
     def _contracts_passed(self, step_session: Any) -> bool:
         return bool(step_session.acceptance) and all(

@@ -21,6 +21,11 @@ def _texts(transcript: Transcript) -> str:
     return "\n".join(out)
 
 
+def _prose_source(transcript: Transcript) -> str:
+    """Prose text as the model wrote it (``source``, not the Rich render)."""
+    return "\n".join(md.source for md in transcript.query(Prose))
+
+
 def _body_text(transcript: Transcript) -> str:
     """Live fold body text (`.tool-live` Statics, since the RichLog retired)."""
     out = []
@@ -506,3 +511,38 @@ async def test_replaying_a_long_session_lands_on_the_newest_turn():
                 stranded.append((round(t.scroll_target_y), round(t.max_scroll_y)))
 
     assert not stranded, f"/resume left the transcript mid-history: {stranded}"
+
+
+@pytest.mark.asyncio
+async def test_a_plan_step_view_grows_live_and_closes_on_the_summary():
+    """M3: one step's live output is a fold of its own, closed on its receipt.
+
+    Plan steps run on throwaway sessions whose transcript is discarded by
+    design, so the live view is the only place their work can appear.  The
+    fold's body must grow the way prose does — remove+mount, never an in-place
+    update, because the scroll container's arrangement keys on DOM structure
+    (WP4b) — and the title has to end up saying what /resume will say, so the
+    live timeline and the replayed one read the same.
+    """
+    async with _Harness().run_test(size=(80, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        view = t.begin_plan_step("[plan] 步骤 1/2：改 loader")
+
+        view.delta("先看 loader\n")
+        await pilot.pause()
+        view.flush()
+        await pilot.pause()
+        assert "先看 loader" in _prose_source(t)
+
+        view.delta("再改它\n")
+        view.flush()
+        await pilot.pause()
+        view.end("改 loader：已改")
+        await pilot.pause()
+
+        fold = t.query_one(".plan-step-fold")
+        assert "步骤 1/2" in fold.title
+        assert "已改" in fold.title
+        # the whole step body, in order — nothing replaced it away
+        assert "先看 loader" in _prose_source(t)
+        assert "再改它" in _prose_source(t)

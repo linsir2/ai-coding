@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from queue import Empty, SimpleQueue
@@ -350,6 +350,72 @@ class Turn(VerticalGroup):
         self._folds.clear()
 
 
+class StepView:
+    """One plan step's live body: buffered prose inside a Collapsible.
+
+    Same growth discipline as a tool fold and for the same reason (WP4b): the
+    scroll container's arrangement cache keys on DOM structure, so the body is
+    replaced (remove+mount) rather than updated in place, or the view grows
+    without the scrollbar knowing.  Buffering follows ``Turn``: deltas arrive
+    as tokens and only a flush renders, so a chatty step does not thrash the
+    DOM.
+    """
+
+    def __init__(self, fold: Collapsible, body: Prose,
+                 on_end: Callable[[], None] | None = None) -> None:
+        self._fold = fold
+        self._body: Prose | None = body
+        self._pending = ""
+        self._on_end = on_end
+
+    def delta(self, text: str) -> None:
+        """Take one streamed token."""
+        self._pending += text
+
+    def flush(self) -> bool:
+        """Render what is buffered; report whether anything was written."""
+        if not self._pending:
+            return False
+        old = self._body
+        if old is not None and old.parent is None:
+            # The Collapsible has not composed its body yet (compose runs a
+            # message-loop tick after attach, and a fast step can flush before
+            # that).  Textual's Collapsible only takes children through its
+            # constructor — mounting afterwards would land outside the
+            # Contents container — so wait one refresh and keep the text
+            # buffered rather than writing it somewhere it will not show.
+            # Through the fold: StepView is not a widget, the fold is.
+            self._fold.call_after_refresh(self.flush)
+            return False
+        assert old is not None  # guarded by the parent check above
+        text, self._pending = self._pending, ""
+        new = Prose()
+        new.set_source(old.source + text)
+        # remove+mount, not in-place: the scroll container's arrangement keys on
+        # DOM structure, so growing a widget in place never reaches its virtual
+        # size (WP4b).  `before=old` keeps the body's place among its siblings.
+        self._fold.mount(new, before=old)
+        old.remove()
+        self._body = new
+        return True
+
+    def end(self, summary: str | None = None) -> None:
+        """Close the step: final flush, and the title becomes the receipt.
+
+        The title is where the outcome lives for the live view, because the
+        step's own transcript is gone by design and only the summary is
+        persisted — so this is the same sentence /resume will rebuild from the
+        receipt.  If the body never got composed (a step that produced no
+        deltas at all), the text is dropped rather than written blind: there is
+        nothing to show.
+        """
+        self.flush()
+        if summary:
+            self._fold.title = f"{self._fold.title} — {summary}"
+        if self._on_end is not None:
+            self._on_end()
+
+
 class Transcript(VerticalScroll):
     """Append-only conversation area with a "stay at the bottom" policy.
 
@@ -363,6 +429,7 @@ class Transcript(VerticalScroll):
         super().__init__(id="transcript")
         self._turn: Turn | None = None
         self._last_finished: str | None = None
+        self._step_view: StepView | None = None
         # "Is the user still with us?" — asked of Textual's anchor, which keeps
         # an anchored widget at the bottom as content arrives, but the question
         # itself is ours: the anchor cannot be re-armed once the user has left.
@@ -393,8 +460,19 @@ class Transcript(VerticalScroll):
         self._follow()
 
     def flush(self) -> None:
-        """Called on the app's 50ms timer, so it must be free when idle."""
-        if self._turn is not None and self._turn.flush():
+        """Called on the app's 50ms timer, so it must be free when idle.
+
+        A running plan step is flushed on the same cadence as assistant prose —
+        otherwise the step's words would sit in the buffer until the step ended,
+        which is the invisibility M3 exists to remove.
+        """
+        wrote = False
+        if self._turn is not None:
+            wrote = self._turn.flush()
+        step = self._step_view
+        if step is not None:
+            wrote = step.flush() or wrote
+        if wrote:
             self._follow()
 
     async def end_assistant(self, messages: Sequence[ChatMessage] = ()) -> None:
@@ -512,6 +590,33 @@ class Transcript(VerticalScroll):
                     self._turn.append_reasoning(message.reasoning)
         await close_turn()
         self._follow()
+
+    def begin_plan_step(self, title: str) -> StepView:
+        """Open a fold for one plan step's live output (M3).
+
+        Collapsed, like a tool fold: a step's prose is bounded but long, and
+        the title is the step's presence in the timeline.  Not part of the
+        current turn — the planning turn's assistant block stays intact, and
+        the step's words never enter the parent's transcript (M1: a step is a
+        short conversation, and replay reconstructs the timeline from
+        receipts, not from these bodies).
+        """
+        # The body goes in through the constructor because Textual's Collapsible
+        # only adopts children that way (compose_add_child); it is a tick later
+        # before that body has a parent, which StepView.flush waits out.  Our own
+        # reference is what we swap, not a query — the fold has not composed yet.
+        body = Prose()
+        fold = Collapsible(body, title=title, collapsed=True,
+                           classes="plan-step-fold")
+        self.mount(fold)
+        self._follow()
+        view = StepView(fold, body, self._forget_step_view)
+        self._step_view = view
+        return view
+
+    def _forget_step_view(self) -> None:
+        """The step closed: stop flushing it (the next step opens its own)."""
+        self._step_view = None
 
     def _follow(self) -> None:
         """Stay at the bottom until the user scrolls away.
