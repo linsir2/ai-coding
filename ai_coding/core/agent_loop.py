@@ -609,11 +609,15 @@ class AgentLoop:
         free.  ``Braid`` isolates each sink, so a failing UI cannot silence the
         recorder, and both are wrapped because either may misbehave.
 
-        Note the ``else`` branch: a caller that passes *no* observer still gets
-        the trace, off the construction-time base.  The REPL does exactly that,
-        and the first end-to-end run of this change produced an empty trace
-        directory for precisely this reason.
+        A caller that passes *no* observer still gets the trace, off the
+        construction-time base: the REPL does exactly that, and the first
+        end-to-end run of this change produced an empty trace directory for
+        precisely this reason.  With no trace *and* no per-call observer the
+        current observer is left untouched, which is what callers assigning
+        ``loop.observer`` directly rely on.
         """
+        if observer is None and self.trace is None:
+            return          # nothing to swap: leave the current observer alone
         base = observer if observer is not None else self._base_observer
         if self.trace is not None:
             self.observer = Braid(SafeObserver(base), SafeObserver(self.trace))
