@@ -196,8 +196,12 @@ class SubAgentRunner:
                         output_schema=output_schema,
                     )
             except WorktreeError:
+                # Scoped like the child's own events: this record says the child
+                # ran in the *main* workspace, and `report_degraded` carries no
+                # name, so without the wrapper nothing ties it to a child — and
+                # up to three run at once.
                 report_degraded(
-                    observer,
+                    self._scoped_observer(name, parent_span, observer),
                     "worktree_isolate",
                     "the worktree could not be created",
                     "ran in the main workspace instead",

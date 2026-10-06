@@ -32,6 +32,11 @@ def _blank_summary() -> dict[str, Any]:
         "degraded": [],
         "guard_denied": 0,
         "tools": [],
+        # The sub-agent slice of the totals above.  Kept as a split rather than
+        # subtracted, so the totals still mean "what this turn cost".
+        "subagent_scopes": 0,
+        "subagent_model_steps": 0,
+        "subagent_prompt_tokens": 0,
     }
 
 
@@ -59,6 +64,7 @@ def summarize_turn(path: str | Path) -> dict[str, Any]:
         return summary
 
     spans: set[str] = set()
+    scopes: set[str] = set()
     tools: list[str] = []
     try:
         lines = file_path.read_text(encoding="utf-8").splitlines()
@@ -79,6 +85,13 @@ def summarize_turn(path: str | Path) -> dict[str, Any]:
         span = record.get("span")
         if isinstance(span, str) and span:
             spans.add(span)
+        # A sub-agent's events arrive with `scope` beside `evt`, never as an
+        # event name of their own, so this key is the only marker there is.
+        scope = record.get("scope")
+        scoped = False
+        if isinstance(scope, str) and scope:
+            scopes.add(scope)
+            scoped = True
         event = record.get("evt")
         raw_data = record.get("data")
         data: Mapping[str, Any] = raw_data if isinstance(raw_data, Mapping) else {}
@@ -86,9 +99,14 @@ def summarize_turn(path: str | Path) -> dict[str, Any]:
             summary["model_steps"] += 1
             summary["model_ms"] += _int(data.get("latency_ms"))
             usage = data.get("usage")
+            prompt = 0
             if isinstance(usage, Mapping):
-                summary["prompt_tokens"] += _int(usage.get("prompt_tokens"))
+                prompt = _int(usage.get("prompt_tokens"))
+                summary["prompt_tokens"] += prompt
                 summary["completion_tokens"] += _int(usage.get("completion_tokens"))
+            if scoped:
+                summary["subagent_model_steps"] += 1
+                summary["subagent_prompt_tokens"] += prompt
             cached = data.get("cached_tokens")
             if cached is not None:
                 summary["cached_tokens"] += _int(cached)
@@ -108,6 +126,7 @@ def summarize_turn(path: str | Path) -> dict[str, Any]:
                 summary["degraded"].append(component)
 
     summary["spans"] = len(spans)
+    summary["subagent_scopes"] = len(scopes)
     summary["tools"] = tools
     return summary
 
@@ -130,6 +149,16 @@ def render_turn(summary: Mapping[str, Any]) -> str:
         f"{int(summary.get('model_steps', 0) or 0)} model steps · "
         f"{int(summary.get('tool_calls', 0) or 0)} tool calls"
     )
+    # Only when there were any: a turn that delegated nothing must not grow a
+    # zero-valued tail, and most turns do not delegate.
+    if int(summary.get("subagent_scopes", 0) or 0):
+        parts.append(
+            f"subagents {int(summary['subagent_scopes'])} · "
+            f"{int(summary.get('subagent_model_steps', 0) or 0)}/"
+            f"{int(summary.get('model_steps', 0) or 0)} steps · "
+            f"{_thousands(int(summary.get('subagent_prompt_tokens', 0) or 0))}/"
+            f"{_thousands(prompt)} prompt"
+        )
     model_ms = int(summary.get("model_ms", 0) or 0)
     tool_ms = int(summary.get("tool_ms", 0) or 0)
     if model_ms or tool_ms:

@@ -16,6 +16,7 @@ import pytest
 
 from ai_coding.ai.engine import ChatEngine, EngineError
 from ai_coding.config.models import AIConfig
+from ai_coding.core.events import Degraded, RecordingObserver, ScopedEvent
 from ai_coding.core.subagent import SubAgentRunner
 from ai_coding.core.worktree import WorktreeError
 from ai_coding.domain.loop import StepResult
@@ -127,6 +128,7 @@ def _runner(
     max_concurrent: int = 3,
     timeout: float = 600,
     settings: AIConfig | None = None,
+    observer=None,
 ) -> SubAgentRunner:
     seen = seen_tools if seen_tools is not None else []
 
@@ -142,6 +144,7 @@ def _runner(
         max_concurrent=max_concurrent,
         timeout_seconds=timeout,
         settings=settings or AIConfig(stop_policy="natural"),
+        observer=observer,
     )
 
 
@@ -496,3 +499,46 @@ async def test_subagent_does_not_auto_continue_its_budget():
         "[continue]" in (m.content or "")
         for request in engine.requests for m in request["messages"]
     )
+
+
+@pytest.mark.asyncio
+async def test_worktree_failure_names_the_subagent_that_escaped_isolation(tmp_path):
+    """A child that loses its worktree runs in the *main* workspace instead.
+
+    `report_degraded` carries no name of its own, so the only thing tying that
+    record to a child is the scope wrapper every other one of its events goes
+    through — and up to three sub-agents run at once, so an unscoped event
+    cannot say which one wrote to the real tree.
+
+    `worktree_isolate` has never fired in the recorded sessions (0 across every
+    trace on disk), so this pins the shape, not a failure we have watched happen.
+    """
+    observer = RecordingObserver()
+    await _runner(_Engine(), observer=observer).run(
+        "t",
+        name="escaper",
+        worktree_manager=_Worktree(fail=True),
+        isolate=True,
+        parent_span="call_1",
+    )
+
+    scoped = [
+        event
+        for event in observer.events
+        if isinstance(event, ScopedEvent) and isinstance(event.event, Degraded)
+    ]
+    assert len(scoped) == 1, [type(e).__name__ for e in observer.events]
+    assert scoped[0].event.component == "worktree_isolate"
+    assert scoped[0].scope == "subagent:escaper:call_1"
+    assert scoped[0].parent == "call_1"
+
+
+@pytest.mark.asyncio
+async def test_worktree_failure_stays_silent_without_an_observer(tmp_path):
+    """`_scoped_observer` returns None for no inner observer, and
+    `report_degraded` returns early on None — the fallback must not need one."""
+    result = await _runner(_Engine()).run(
+        "t", worktree_manager=_Worktree(fail=True), isolate=True
+    )
+
+    assert result.status == "completed"
