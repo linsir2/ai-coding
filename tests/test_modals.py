@@ -274,3 +274,141 @@ async def test_approval_shows_params_as_key_value_lines():
         text = app.screen.query_one("#approval-body").content.plain
         assert "command = ls -la" in text, text
         assert "{" not in text, f"弹窗仍在显示 dict repr：{text}"
+
+
+@pytest.mark.asyncio
+async def test_approval_shows_edit_as_a_diff():
+    """edit 的 old/new 当普通参数显示看不出"改了什么"；diff 才是要读的信息。
+
+    断言整行而不是子串：`lineterm=""` 会吃掉 `--- 原` 后的换行，所有 diff 行
+    粘成一行，子串断言照样通过。
+    """
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(ApprovalScreen(
+            "edit",
+            {"path": "a.py", "old_string": "old line", "new_string": "new line"},
+            "tool 'edit' requires confirmation",
+        ))
+        await pilot.pause()
+        text = app.screen.query_one("#approval-body").content.plain
+        lines = text.splitlines()
+        assert "a.py" in text
+        assert "-old line" in lines, lines
+        assert "+new line" in lines, lines
+        assert "old_string =" not in text, f"edit 仍在显示原始参数：{text}"
+
+
+@pytest.mark.asyncio
+async def test_approval_edit_diff_spans_multiple_lines():
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(ApprovalScreen(
+            "edit",
+            {
+                "path": "a.py",
+                "old_string": "one\ntwo\nthree",
+                "new_string": "one\nTWO\nthree",
+            },
+            "",
+        ))
+        await pilot.pause()
+        lines = app.screen.query_one("#approval-body").content.plain.splitlines()
+        assert "-two" in lines, lines
+        assert "+TWO" in lines, lines
+        assert "-one" not in lines, "未改动的行不该出现在 +/- 里"
+
+
+@pytest.mark.asyncio
+async def test_approval_always_button_returns_a():
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(
+            ApprovalScreen("edit", {"path": "a.py", "old_string": "x", "new_string": "y"}, ""),
+            app.results.append,
+        )
+        await pilot.pause()
+        await pilot.click("#always")
+        await pilot.pause()
+        assert app.results[-1] == "a"
+
+
+@pytest.mark.asyncio
+async def test_approval_always_button_is_advertised():
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(
+            ApprovalScreen("edit", {"path": "a.py", "old_string": "x", "new_string": "y"}, "")
+        )
+        await pilot.pause()
+        assert app.screen.query_one("#always", Button) is not None
+        hint = app.screen.query_one("#approval-hint").content
+        plain = hint.plain if hasattr(hint, "plain") else str(hint)
+        assert "a always" in plain
+
+
+@pytest.mark.asyncio
+async def test_approval_hides_always_for_bash():
+    """bash 的 always 等于放弃所有命令审查，所以不给这个按钮。"""
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(ApprovalScreen("bash", {"command": "ls"}, "read-only"))
+        await pilot.pause()
+        assert not app.screen.query("#always")
+        hint = app.screen.query_one("#approval-hint").content
+        plain = hint.plain if hasattr(hint, "plain") else str(hint)
+        assert "a always" not in plain
+
+
+@pytest.mark.asyncio
+async def test_write_still_shows_key_value_lines():
+    """write 没有 old_string，做不出 diff；保持 key=value（嵌套参数测试依赖它）。"""
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(ApprovalScreen("write", {"path": "a.py", "content": "body"}, ""))
+        await pilot.pause()
+        text = app.screen.query_one("#approval-body").content.plain
+        assert "path = a.py" in text
+        assert "content = body" in text
+
+
+@pytest.mark.asyncio
+async def test_approval_edit_surfaces_replace_all():
+    """replace_all 把一次替换变成整文件重写，diff 本身看不出这件事。"""
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(ApprovalScreen(
+            "edit",
+            {"path": "a.py", "old_string": "x", "new_string": "y", "replace_all": True},
+            "",
+        ))
+        await pilot.pause()
+        assert "replace_all" in app.screen.query_one("#approval-body").content.plain
+
+        app.pop_screen()
+        await pilot.pause()
+        app.push_screen(ApprovalScreen(
+            "edit",
+            {"path": "a.py", "old_string": "x", "new_string": "y", "replace_all": False},
+            "",
+        ))
+        await pilot.pause()
+        assert "replace_all" not in app.screen.query_one("#approval-body").content.plain
+
+
+@pytest.mark.asyncio
+async def test_approval_a_does_nothing_for_bash():
+    """The `a` key is bound on every tool, so hiding the Always button is not
+    enough: an excluded tool has to refuse the key too, or `a` auto-approves a
+    bash command without ever recording it.
+    """
+    app = _Host()
+    async with app.run_test() as pilot:
+        app.push_screen(
+            ApprovalScreen("bash", {"command": "ls"}, "read-only"), app.results.append
+        )
+        await pilot.pause()
+        await pilot.press("a")
+        await pilot.pause()
+        assert app.results == [], "bash 弹窗不应被 `a` 关闭"
+        assert app.screen.__class__.__name__ == "ApprovalScreen"

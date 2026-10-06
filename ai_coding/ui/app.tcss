@@ -183,6 +183,10 @@ AskScreen {
     height: 1;
     margin-left: 2;
     padding: 0 2;
+    /* Textual's Button carries `min-width: 16`, so three buttons already claim
+       48 of the box's 56 usable columns and a fourth lands off-screen —
+       unclickable.  The labels are words, not fields: size them to content. */
+    min-width: 0;
 }
 
 #ask-options {

@@ -614,3 +614,73 @@ async def test_planning_shows_each_step_as_a_live_fold():
         )
         # the first step's title carries its receipt summary
         assert "改 loader" in folds[0].title
+
+
+@pytest.mark.asyncio
+async def test_always_allow_skips_the_modal_for_that_tool():
+    app = _app(loop=_FakeLoop())
+    async with app.run_test():
+        app._always_allow.add("edit")
+        answer = await app.approval_provider("edit", {"path": "a.py"}, "reason")
+        assert answer == "y"
+        assert len(app.screen_stack) == 1, "always 命中不应弹窗"
+
+
+@pytest.mark.asyncio
+async def test_always_allow_is_scoped_to_the_tool():
+    """Drive the provider, not a hand-pushed modal: only the provider decides
+    whether the modal appears at all."""
+    app = _app(loop=_FakeLoop())
+    async with app.run_test() as pilot:
+        app._always_allow.add("edit")
+        worker = app.run_worker(
+            app.approval_provider("bash", {"command": "ls"}, "r"), exclusive=False
+        )
+        for _ in range(10):
+            await pilot.pause()
+            if app.screen.__class__.__name__ == "ApprovalScreen":
+                break
+        assert app.screen.__class__.__name__ == "ApprovalScreen", "bash 应弹窗"
+        await pilot.click("#no")
+        await worker.wait()
+    assert worker.result == "n"
+
+
+@pytest.mark.asyncio
+async def test_always_allow_records_on_answer_a():
+    app = _app(loop=_FakeLoop())
+    async with app.run_test() as pilot:
+        worker = app.run_worker(
+            app.approval_provider(
+                "edit", {"path": "a.py", "old_string": "x", "new_string": "y"}, ""
+            ),
+            exclusive=False,
+        )
+        for _ in range(10):
+            await pilot.pause()
+            if app.screen.__class__.__name__ == "ApprovalScreen":
+                break
+        assert app.screen.__class__.__name__ == "ApprovalScreen", "edit 应弹窗"
+        await pilot.click("#always")
+        await worker.wait()
+    assert worker.result == "y"
+    assert "edit" in app._always_allow
+
+
+@pytest.mark.asyncio
+async def test_always_allow_excludes_bash():
+    """bash 的 always 等于放弃所有命令审查——永远不允许。"""
+    app = _app(loop=_FakeLoop())
+    async with app.run_test() as pilot:
+        app._always_allow.add("bash")
+        worker = app.run_worker(
+            app.approval_provider("bash", {"command": "ls"}, "r"), exclusive=False
+        )
+        for _ in range(10):
+            await pilot.pause()
+            if app.screen.__class__.__name__ == "ApprovalScreen":
+                break
+        assert app.screen.__class__.__name__ == "ApprovalScreen", "bash 即使在集合里也应弹窗"
+        await pilot.click("#no")
+        await worker.wait()
+    assert worker.result == "n"

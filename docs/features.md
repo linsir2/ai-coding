@@ -24,7 +24,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 | 顶部 | `ui/status_bar.py` | workspace、当前 model、`● Ready / ● Working` |
 | 中部 | `ui/transcript.py` + `ui/blocks.py` | 用户输入、assistant 流式 Markdown、**每回合一个思考折叠块**（网关产 reasoning 才有，无则无，不伪造；各步思考累积进同一折叠体，展开按步空行分隔）、工具事件块（开始/结束/chunk）、子智能体嵌套行（`↳ [scope]` 开始/结束/结论，chunk 不上屏）、todo/台账 dim 行、回合终态 |
 | 底部 | `ui/input_bar.py` | 单行输入（Enter 提交；回合运行中**仍可输入**，提交的内容进队列，当前回合结束后按序自动执行；`/resume` 是唯一例外——它开 modal picker，忙碌时拒绝并提示） |
-| 弹层 | `ui/modals.py` + `ui/resume_screen.py` | 审批（y/N/s）、`ask_user` 提问、`/resume` 会话选择（分组 + 搜索 + 历史重建） |
+| 弹层 | `ui/modals.py` + `ui/resume_screen.py` | 审批（y/N/s，`edit` 显示 diff，非 bash 可 a 永久放行）、`ask_user` 提问、`/resume` 会话选择（分组 + 搜索 + 历史重建） |
 | 样式 | `ui/app.tcss` | 全屏布局与配色 |
 
 键位：`Ctrl-Q` 退出；`Ctrl-C` 有选区时复制、无选区时退出；`Shift`+拖选使用终端原生选择。

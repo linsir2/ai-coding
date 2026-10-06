@@ -18,7 +18,7 @@ from textual.worker import Worker, WorkerState
 from ai_coding.ui.blocks import Block, TranscriptObserver, full_call_view
 from ai_coding.ui.commands import SlashCommandProvider
 from ai_coding.ui.input_bar import InputBar
-from ai_coding.ui.modals import ApprovalScreen, AskScreen
+from ai_coding.ui.modals import ALWAYS_EXCLUDED, ApprovalScreen, AskScreen
 from ai_coding.ui.repl import REPLAction, handle_input
 from ai_coding.ui.resume_screen import ResumeScreen
 from ai_coding.ui.status_bar import StatusBar
@@ -88,6 +88,11 @@ class AICodingApp(App[None]):
         # path reads; ``on_worker_state_changed`` clears it and drains the queue.
         self._queued: deque[str] = deque()
         self._turn_active: bool = False
+        # Tools the operator chose "Always" for this session.  In-memory only:
+        # a persisted grant would outlive the decision that made it.
+        # ``bash`` is never admitted — an always-allow on bash approves every
+        # command, which is the one grant that must not exist.
+        self._always_allow: set[str] = set()
 
     # ---- shell -----------------------------------------------------------
 
@@ -410,6 +415,10 @@ class AICodingApp(App[None]):
         string that the UI had to re-parse, and the 120-char cut meant anything
         longer — a real ``bash`` command, say — was simply not shown.
         """
+        # "Always allow" (session-scoped, bash excluded): answer without a modal.
+        if tool_name not in ALWAYS_EXCLUDED and tool_name in self._always_allow:
+            return "y"
+
         screen = ApprovalScreen(tool_name=tool_name, params=params, reason=reason)
 
         try:
@@ -417,12 +426,21 @@ class AICodingApp(App[None]):
             # ``ScreenResultType`` to ``str`` (an unconstrained call resolves to
             # ``Screen[object]`` under strict mypy).
             answer: str = await self.push_screen_wait(screen)
-            return answer
         finally:
             # push_screen_wait is shielded: a cancelled turn does not close the
             # screen (spec §3.3-5), so close it here.
             if self.screen is screen:
                 self.pop_screen()
+
+        if answer == "a":
+            # ``a`` means allow now; whether it also grants is ALWAYS_EXCLUDED's
+            # question, and the record must never be the deciding factor for the
+            # allow itself — returning the raw "a" would reach approval.py's
+            # parser, which fails closed to NO.
+            if tool_name not in ALWAYS_EXCLUDED:
+                self._always_allow.add(tool_name)
+            return "y"
+        return answer
 
     async def ask_provider(self, prompt: str, options: Sequence[str] = ()) -> str:
         """Ask through a modal; return what the human typed (``""`` means no answer).
