@@ -436,6 +436,93 @@ async def real_cases(config_path: str) -> int:
     return 0 if failures == 0 else 2
 
 
+async def c10_subagent_scope_is_recorded(root: Path) -> tuple[bool, str]:
+    """A sub-agent's work reaches the trace, under the call that spawned it.
+
+    Wired through ``SubAgentTool`` on purpose.  ``SubAgentRunner`` also accepts
+    an ``observer=`` in its constructor, which is what
+    ``tests/test_subagent_scoped_events.py`` uses — but production never fills
+    it (``tools/builder.py``), so a probe that took that slot would measure a
+    path nothing runs.  The only production source is
+    ``tools/subagent_tool.py``: ``observer=EmitObserver(context.emit)``.
+
+    Assertion 4 is the one worth keeping: ``ScopedEvent`` is *unwrapped* by
+    ``TraceRecorder._describe`` and never written as an ``evt``, so counting
+    ``evt == "ScopedEvent"`` reports 0 on a perfectly healthy run.  That is how
+    a probe once concluded the observer chain was dead while 343 scoped rows sat
+    in one real turn file.
+    """
+    from ai_coding.core.subagent import SubAgentRunner
+    from ai_coding.tools.subagent_tool import SubAgentTool
+
+    child_steps = [
+        _calls(_ref("child-1", "sample.txt", name="read")),
+        StepResult(text="child done", finish_reason="stop"),
+    ]
+
+    def build_tools(_workdir: str | None) -> ToolRegistry:
+        registry = ToolRegistry()
+        registry.register(_EchoTool(name="read"))
+        return registry
+
+    runner = SubAgentRunner(
+        app_config=None,
+        engine_factory=lambda: _Engine(list(child_steps)),
+        build_tools=build_tools,
+        timeout_seconds=5.0,
+        workspace=str(root),
+        # No `observer=`: tools/builder.py does not pass one either, and the
+        # per-call slot is the whole point of this case.
+    )
+    engine = _Engine(
+        [
+            _calls(
+                ToolCallRef(
+                    id="c1",
+                    name="subAgent",
+                    arguments=json.dumps({"task": "read sample.txt", "name": "child"}),
+                )
+            ),
+            StepResult(text="done", finish_reason="stop"),
+        ]
+    )
+    loop = _loop(root, engine, tools=[SubAgentTool(runner, isolate=False), _EchoTool()])
+
+    await loop.process_input(_session(), "delegate the read")
+
+    rows = _turn_lines(root)
+    scoped = [r for r in rows if r.get("scope")]
+    scopes = {r["scope"] for r in scoped}
+    parents = {r["parent"] for r in scoped}
+    # A set, not a count: `_loop` hands the recorder to the loop twice, so every
+    # row is written twice and a count would measure that harness detail.
+    inner_tools = {
+        (r["data"]["call_id"], r["data"]["tool_name"])
+        for r in scoped
+        if r["evt"] == "ToolStarted"
+    }
+    parent_rows = [r for r in rows if r["evt"] in {"ToolStarted", "ToolFinished"}]
+    own_tools = {(r["data"]["call_id"], r["data"]["tool_name"]) for r in parent_rows}
+    as_evt = [r for r in rows if r["evt"] == "ScopedEvent"]
+
+    details = (
+        f"scoped_rows={len(scoped)} scopes={sorted(scopes)} parents={sorted(parents)} "
+        f"inner={sorted(inner_tools)} as_evt_ScopedEvent={len(as_evt)}"
+    )
+    ok = (
+        bool(scoped)
+        and len(scopes) == 1
+        and next(iter(scopes)).startswith("subagent:")
+        and parents == {"c1"}
+        and inner_tools == {("child-1", "read")}
+        # the parent's own calls stay distinguishable from the child's
+        and all("scope" not in r for r in parent_rows if r["data"]["call_id"] == "c1")
+        and ("c1", "subAgent") in own_tools
+        and not as_evt
+    )
+    return ok, details
+
+
 CASES: list[tuple[str, CaseFn]] = [
     ("c1", c1_tool_spans),
     ("c5", c5_secret_never_reaches_disk),
@@ -443,6 +530,7 @@ CASES: list[tuple[str, CaseFn]] = [
     ("c7", c7_hook_blocks_a_call),
     ("c8", c8_token_gate),
     ("c9", c9_degraded_is_visible),
+    ("c10", c10_subagent_scope_is_recorded),
 ]
 
 
