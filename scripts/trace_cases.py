@@ -131,7 +131,6 @@ def _loop(
         registry.register(tool)
     store = TraceStore(root / ".ai-coding" / "traces")
     recorder = recorder if recorder is not None else TraceRecorder(store, session_id="case-session")
-    from ai_coding.core.observers import Braid
 
     return AgentLoop(
         engine,
@@ -139,7 +138,10 @@ def _loop(
         registry,
         prompt=PromptAssembler("You are a test assistant."),
         settings=settings or AIConfig(stop_policy="natural", max_tool_iterations=4),
-        observer=Braid(recorder),
+        # `trace=` alone, the way ui/textual_app.py builds the real loop.  Passing
+        # the recorder as `observer=` too made `_bind_observer` braid it in a
+        # second time, so every event was written twice and the cases that assert
+        # an exact count (c1, c6, c7) all went red for that one reason.
         trace=recorder,
         guards=guards,
         hooks=hooks,
@@ -371,15 +373,14 @@ async def real_cases(config_path: str) -> int:
         recorder = TraceRecorder(
             TraceStore(root / ".ai-coding" / "traces"), session_id="real"
         )
-        from ai_coding.core.observers import Braid
-
         loop = AgentLoop(
             build_engine_from_config(app_cfg),
             SessionService(root / "sessions"),
             registry,
             prompt=PromptAssembler("You are a test assistant. Be brief."),
             settings=app_cfg.ai,
-            observer=Braid(recorder),
+            # `trace=` alone, same as `_loop` and the real app.  This path needs a
+            # live model, so unlike the offline gate it has no automated check.
             trace=recorder,
             workspace=str(root),
         )
