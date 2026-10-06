@@ -17,6 +17,21 @@ class _Report:
         self.updated: tuple[str, ...] = ()
         self.superseded: tuple[str, ...] = ()
         self.skipped: tuple[str, ...] = ()
+        # The real `HarvestReport` carries this (service.py), and TurnMemory
+        # reads it — a stand-in without it made the harvest emit raise, and the
+        # `except Exception` turned that into a Degraded instead of the event
+        # this test is about.
+        self.evicted: tuple[str, ...] = ()
+
+
+class _Consolidation:
+    """The real `consolidate()` returns a `ConsolidateReport`, never None."""
+
+    def __init__(self) -> None:
+        self.merged: tuple[str, ...] = ()
+        self.promoted: tuple[str, ...] = ()
+        self.expired: tuple[str, ...] = ()
+        self.evicted: tuple[str, ...] = ()
 
 
 class _Memory:
@@ -29,8 +44,8 @@ class _Memory:
         self.kwargs = kwargs
         return _Report()
 
-    async def consolidate(self) -> None:
-        return None
+    async def consolidate(self) -> _Consolidation:
+        return _Consolidation()
 
 
 class _Session:

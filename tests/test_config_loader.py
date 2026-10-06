@@ -303,3 +303,50 @@ def test_r11d_fusion_loads_from_camel_case_yaml(tmp_path):
     memory = ConfigLoader.load_app(str(cfg)).memory
     assert memory.recall_fusion == "rrf"
     assert memory.rrf_k == 30
+
+
+def test_r_p0_1_model_retry_budget_loads_and_clamps(tmp_path):
+    """The retry budget is per-model transport config; 0 must survive as "off"
+    and a negative value must not become extra attempts."""
+    from ai_coding.config.loader import ConfigLoader
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+        default_model: a
+        models:
+          a:
+            name: m
+            base_url: "https://example.invalid/v1"
+            api_key: k
+            max_retries: 5
+            retry_base_seconds: 1.5
+          b: {name: m, base_url: "https://example.invalid/v1", api_key: k, max_retries: 0}
+          c: {name: m, base_url: "https://example.invalid/v1", api_key: k, max_retries: -4}
+        """,
+        encoding="utf-8",
+    )
+    loaded = ConfigLoader.load_app(cfg)
+
+    assert loaded.models["a"].max_retries == 5
+    assert loaded.models["a"].retry_base_seconds == 1.5
+    assert loaded.models["b"].max_retries == 0
+    assert loaded.models["c"].max_retries == 0
+
+
+def test_r_p0_1_model_retry_budget_defaults_to_three(tmp_path):
+    from ai_coding.config.loader import ConfigLoader
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        """
+        default_model: a
+        models:
+          a: {name: m, base_url: "https://example.invalid/v1", api_key: k}
+        """,
+        encoding="utf-8",
+    )
+    loaded = ConfigLoader.load_app(cfg)
+
+    assert loaded.models["a"].max_retries == 3
+    assert loaded.models["a"].retry_base_seconds == 2.0

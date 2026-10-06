@@ -339,6 +339,9 @@ def _coerce_model(raw: dict[str, Any]) -> ModelConfig:
         temperature=float(raw.get("temperature", 0.7)),
         top_p=float(raw.get("top_p", 0.9)),
         timeout=int(raw.get("timeout", 60)),
+        # P0-1: a negative budget is nonsense, so clamp rather than trust the file.
+        max_retries=max(0, int(raw.get("max_retries", 3) or 0)),
+        retry_base_seconds=max(0.0, float(raw.get("retry_base_seconds", 2.0) or 0.0)),
         price_input_per_1k=float(raw.get("price_input_per_1k", 0.0) or 0.0),
         price_output_per_1k=float(raw.get("price_output_per_1k", 0.0) or 0.0),
         price_cached_per_1k=float(raw.get("price_cached_per_1k", 0.0) or 0.0),

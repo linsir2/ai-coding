@@ -10,9 +10,11 @@ whole assembly path is unit-testable offline.
 
 from __future__ import annotations
 
+import asyncio
+import enum
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 
 from ai_coding.ai.engine import ChatEngine, DeltaSink, EngineError
 from ai_coding.ai.mapping import history_to_chat_messages
@@ -21,6 +23,81 @@ from ai_coding.domain.loop import StepResult
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.model_config import ModelConfig
 from ai_coding.domain.usage import as_int, cache_from_usage
+
+
+class FailureKind(enum.Enum):
+    """What to do about one failed model call.
+
+    Four values, and only four, because three of them mean the same thing to the
+    caller — wait and try again — and the fourth means stop.  The distinction
+    that earns ``RATE_LIMITED`` its own value is not the verdict but the wait:
+    a rate-limited provider states how long to wait and repeating it earlier
+    earns another 429 (P0-1).
+    """
+
+    RATE_LIMITED = "rate_limited"
+    SERVER_ERROR = "server_error"
+    TRANSPORT = "transport"
+    FATAL = "fatal"
+
+
+def classify_failure(exc: BaseException) -> FailureKind:
+    """Sort a provider failure into a verdict.  Pure.
+
+    Keyed on the SDK's own exception hierarchy and ``status_code`` rather than on
+    named subclasses: an OpenAI-compatible gateway can answer 429 or 503 without
+    the SDK picking a subclass, and the status is the fact that matters.
+    Anything unrecognised is ``FATAL`` — the default has to be "do not spend
+    three more round trips guessing".
+    """
+    if isinstance(exc, (APITimeoutError, APIConnectionError)):
+        return FailureKind.TRANSPORT
+    if isinstance(exc, APIStatusError):
+        status = exc.status_code
+        if status == 429:
+            return FailureKind.RATE_LIMITED
+        if status >= 500:
+            return FailureKind.SERVER_ERROR
+    return FailureKind.FATAL
+
+
+def _retry_after(exc: BaseException) -> float | None:
+    """The provider's own "come back in N seconds", in seconds.
+
+    Only the numeric form is honoured.  HTTP also allows an HTTP-date, and
+    parsing that would need a clock and a date parser to serve a value the turn
+    deadline would overrule anyway; an unparsable header is simply absent.
+    """
+    response = getattr(exc, "response", None)
+    raw = (getattr(response, "headers", None) or {}).get("retry-after")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def retry_delay(
+    attempt: int,
+    kind: FailureKind,
+    *,
+    base: float,
+    cap: float,
+    retry_after: float | None = None,
+) -> float:
+    """Seconds to wait before ``attempt`` (0-based).  Pure, and therefore testable.
+
+    ``kind`` has no default: omitting it would silently drop the ``retry_after``
+    branch, which is exactly the mistake worth making impossible.
+
+    ``cap`` is the per-request timeout: waiting longer than one whole request
+    would take is the turn deadline's decision, not this function's, and the
+    engine cannot see the deadline.
+    """
+    if kind is FailureKind.RATE_LIMITED and retry_after is not None:
+        return float(min(max(0.0, retry_after), cap))
+    return float(min(base * (2**attempt), cap))
 
 
 def _usage_to_dict(usage: Any) -> dict[str, int]:
@@ -140,6 +217,12 @@ class OpenAIChatEngine(ChatEngine):
         instructions: str | None = None,
         on_delta: DeltaSink | None = None,
     ) -> StepResult:
+        """One step, with bounded retries for a transient provider failure.
+
+        The turn's own deadline is the outer bound: the loop wraps this call in
+        ``run_with_deadline``, so a retry storm is abandoned at the deadline and
+        this function never has to know what it is.
+        """
         cfg = self.model_config
         kwargs: dict[str, Any] = {
             "model": cfg.name,
@@ -156,6 +239,36 @@ class OpenAIChatEngine(ChatEngine):
         if self._stream_usage:
             kwargs["stream_options"] = {"include_usage": True}
 
+        attempts = max(0, cfg.max_retries) + 1
+        for attempt in range(attempts):
+            try:
+                return await self._stream(kwargs, on_delta)
+            except EngineError:
+                # Raised by _stream when output had already reached the caller:
+                # a retry would hand the operator the same text twice.
+                raise
+            except Exception as exc:  # noqa: BLE001 — engine boundary, re-raised typed
+                kind = classify_failure(exc)
+                last = attempt == attempts - 1
+                if kind is FailureKind.FATAL or last:
+                    # The verdict alone is not a diagnosis: "fatal: bad key"
+                    # tells the operator nothing they could act on, so the
+                    # underlying type goes in too.
+                    raise EngineError(f"{kind.value}: {type(exc).__name__}: {exc}") from exc
+                delay = retry_delay(
+                    attempt,
+                    kind,
+                    base=cfg.retry_base_seconds,
+                    cap=float(cfg.timeout),
+                    retry_after=_retry_after(exc),
+                )
+                await asyncio.sleep(delay)
+        raise AssertionError("unreachable: the loop returns or raises on every path")
+
+    async def _stream(
+        self, kwargs: dict[str, Any], on_delta: DeltaSink | None
+    ) -> StepResult:
+        """One streaming attempt: assemble the fragments into a ``StepResult``."""
         acc: dict[int, dict[str, str]] = {}
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -193,8 +306,8 @@ class OpenAIChatEngine(ChatEngine):
                 # R1-4: thinking arrives on sibling delta fields
                 # (``reasoning_content`` on DeepSeek-reasoner-likes,
                 # ``reasoning`` on others) and is joined exactly like prose —
-                # completed text per step, deliberately not streamed (adding
-                # an ``on_reasoning`` sink would break every engine fake).
+                # completed text per step, deliberately not streamed (adding an
+                # ``on_reasoning`` sink would break every engine fake).
                 # Endpoints that send no thinking yield no reasoning, ever.
                 thinking = getattr(delta, "reasoning_content", None)
                 if thinking is None:
@@ -211,7 +324,16 @@ class OpenAIChatEngine(ChatEngine):
         except EngineError:
             raise
         except Exception as exc:  # noqa: BLE001 — engine boundary, re-raised typed
-            raise EngineError(str(exc)) from exc
+            if text_parts or acc:
+                # The caller already saw this text and may already be holding a
+                # half-built tool call; retrying would duplicate the former and
+                # splice the latter.  This is the same split OpenCode draws
+                # between `Retry` and `Continue` on `outputStarted`.
+                raise EngineError(
+                    f"stream failed after {len(text_parts)} text chunk(s) and "
+                    f"{len(acc)} partial tool call(s) had already been delivered: {exc}"
+                ) from exc
+            raise
 
         return StepResult(
             text="".join(text_parts) or None,

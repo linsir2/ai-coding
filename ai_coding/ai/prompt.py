@@ -33,7 +33,6 @@ class PromptAssembler:
         self,
         project_instructions: str = "",
         skills_catalog: str = "",
-        memory_catalog: str = "",
     ) -> str:
         sections: list[str] = [self._base.strip()]
         if project_instructions.strip():
@@ -49,10 +48,6 @@ class PromptAssembler:
         if skills_catalog.strip():
             sections.append(
                 f"<skills>Available skills:\n{skills_catalog.strip()}</skills>"
-            )
-        if memory_catalog.strip():
-            sections.append(
-                f"<memory>Relevant prior notes:\n{memory_catalog.strip()}</memory>"
             )
         return "\n\n".join(s for s in sections if s)
 

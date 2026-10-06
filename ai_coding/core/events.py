@@ -293,6 +293,9 @@ class MemoryHarvested:
     updated: tuple[str, ...] = ()
     superseded: tuple[str, ...] = ()
     skipped: tuple[str, ...] = ()
+    # `HarvestReport.evicted` was already filled — this is how a note leaves
+    # `.memory`, so a turn that only evicted used to leave no trace at all.
+    evicted: tuple[str, ...] = ()
     # R6d: the turn's provenance for those notes — "tool" when at least one tool
     # call succeeded in this turn, "model" when it only talked.
     evidence: str = ""

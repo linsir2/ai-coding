@@ -20,7 +20,7 @@ import logging
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from ai_coding.core.events import LoopEvent, MemoryHarvested
+from ai_coding.core.events import LoopEvent, MemoryConsolidated, MemoryHarvested
 from ai_coding.core.turn_report import emit_degraded
 from ai_coding.domain.loop import TurnOutcome
 from ai_coding.domain.session import SessionData
@@ -126,13 +126,20 @@ class TurnMemory:
             )
             session.harvested_messages = len(session.messages)
             self._save(session)
-            if report.added or report.updated or report.superseded or report.skipped:
+            if (
+                report.added
+                or report.updated
+                or report.superseded
+                or report.skipped
+                or report.evicted
+            ):
                 self._emit(
                     MemoryHarvested(
                         added=tuple(report.added),
                         updated=tuple(report.updated),
                         superseded=tuple(report.superseded),
                         skipped=tuple(report.skipped),
+                        evicted=tuple(report.evicted),
                         evidence=evidence,
                     )
                 )
@@ -147,11 +154,23 @@ class TurnMemory:
         if outcome.text is None:
             return  # nothing was concluded; no reason to wake consolidation
         try:
-            await run_with_deadline(
+            report = await run_with_deadline(
                 self._memory.consolidate(),
                 timeout=remaining_of(deadline),
                 label="memory_consolidate",
             )
+            # The same guard the harvest emit uses.  Consolidating on every turn
+            # that concluded something means this reports rarely, which is the
+            # point: it fires when a note actually changed or left.
+            if report.merged or report.promoted or report.expired or report.evicted:
+                self._emit(
+                    MemoryConsolidated(
+                        merged=tuple(report.merged),
+                        promoted=tuple(report.promoted),
+                        expired=tuple(report.expired),
+                        evicted=tuple(report.evicted),
+                    )
+                )
         except Exception:  # noqa: BLE001 — memory is best-effort
             _log.debug("memory consolidation failed", exc_info=True)
             self._degraded(

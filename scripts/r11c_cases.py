@@ -156,10 +156,19 @@ def analyze(
     """Measure C1–C4 over what a real batch produced.
 
     ``candidates`` is whatever the extractor returned, which is *not* always
-    ``HarvestCandidate`` objects: ``build_extractor`` falls back to plain lines
-    when the model ignores the JSON contract, and a line can never carry a scene.
-    Those are counted as ``legacy`` — a distinct failure mode from "the model
-    filled the field in", so the two must not be conflated.
+    ``HarvestCandidate`` objects.  ``legacy`` counts the ones that arrived as
+    bare strings — a line can never carry a scene, so it must stay in the
+    denominator; dropping it would make adoption look better than it is.
+
+    That count is **0 since the malformed-answer fix**, and that is correct
+    rather than a regression.  The plain-line fallback used to fire only when
+    ``parse_candidates`` came back empty, which in practice meant it re-read
+    *broken* JSON — so it was counting our own parser defect, not "the model
+    ignored the JSON contract".  Genuine line-per-note answers now go through
+    ``parse_candidates`` and arrive as ``HarvestCandidate`` without a scene, so
+    they land in ``structured``/``labelled=0`` where they still count against
+    C1.  Keep the field: it is what would catch a second route back to bare
+    strings.
 
     ``messages`` is the session's transcript after the turn, so a reference is
     "real" exactly when it names a message that exists there. ``window`` is the

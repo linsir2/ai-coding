@@ -10,7 +10,12 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from ai_coding.core.events import Degraded, MemoryHarvested, RecordingObserver
+from ai_coding.core.events import (
+    Degraded,
+    MemoryConsolidated,
+    MemoryHarvested,
+    RecordingObserver,
+)
 from ai_coding.core.memory_turn import TurnMemory
 from ai_coding.domain.loop import TurnOutcome, TurnStatus
 from ai_coding.domain.session import SessionData
@@ -29,14 +34,26 @@ class _Report:
     updated: list[str] = field(default_factory=list)
     superseded: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    evicted: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _Consolidation:
+    """The real `consolidate()` returns a `ConsolidateReport`, never None."""
+
+    merged: list[str] = field(default_factory=list)
+    promoted: list[str] = field(default_factory=list)
+    expired: list[str] = field(default_factory=list)
+    evicted: list[str] = field(default_factory=list)
 
 
 class _Memory:
     """A memory service that behaves, and records what it was asked."""
 
-    def __init__(self, *, notes=None, report=None) -> None:
+    def __init__(self, *, notes=None, report=None, consolidation=None) -> None:
         self._notes = notes or []
         self._report = report or _Report()
+        self._consolidation = consolidation or _Consolidation()
         self.harvested: list[list] = []
         self.consolidated = 0
         self.raise_on: set[str] = set()
@@ -59,6 +76,7 @@ class _Memory:
         if "consolidate" in self.raise_on:
             raise RuntimeError("consolidate exploded")
         self.consolidated += 1
+        return self._consolidation
 
     def status(self):  # type: ignore[no-untyped-def]
         if "status" in self.raise_on:
@@ -245,3 +263,61 @@ async def test_r11c_turn_passes_the_cursor_offset_so_refs_point_at_real_position
     await turn.harvest(session, deadline=None, summaries=[], outcome=_outcome())
 
     assert seen and seen[0]["source_offset"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_harvest_that_only_evicts_is_still_reported():
+    """Eviction is how a note disappears from `.memory`, and it used to leave
+    no trace at all: `HarvestReport.evicted` was filled, `MemoryHarvested` had
+    no field for it, and the emit guard did not even count it — so a harvest
+    that only made room for new notes emitted nothing."""
+    service = _Memory(report=_Report(evicted=["e1", "e2"]))
+    turn, observer, _ = _memory(service=service)
+    session = _Session()
+    session.messages = ["m1"]
+
+    await turn.harvest(session, deadline=None, summaries=[], outcome=_outcome())
+
+    harvested = [e for e in observer.events if isinstance(e, MemoryHarvested)]
+    assert len(harvested) == 1, [type(e).__name__ for e in observer.events]
+    assert harvested[0].evicted == ("e1", "e2")
+
+
+@pytest.mark.asyncio
+async def test_consolidation_reports_what_it_changed():
+    """`ConsolidateReport` was awaited and thrown away, so merging two notes,
+    promoting a hit one, expiring a stale open_thread and evicting for room
+    were all invisible — while `MemoryConsolidated` sat in the event union
+    with exactly these four fields."""
+    service = _Memory(
+        consolidation=_Consolidation(
+            merged=["a1", "a2"], promoted=["p1"], expired=["b7"], evicted=["c9"]
+        )
+    )
+    turn, observer, _ = _memory(service=service)
+    session = _Session()
+    session.messages = ["m1"]
+
+    await turn.harvest(session, deadline=None, summaries=[], outcome=_outcome())
+
+    events = [e for e in observer.events if isinstance(e, MemoryConsolidated)]
+    assert len(events) == 1, [type(e).__name__ for e in observer.events]
+    assert events[0].merged == ("a1", "a2")
+    assert events[0].promoted == ("p1",)
+    assert events[0].expired == ("b7",)
+    assert events[0].evicted == ("c9",)
+
+
+@pytest.mark.asyncio
+async def test_an_empty_consolidation_is_not_reported():
+    """The same guard the harvest emit uses: consolidation that changed nothing
+    must not add a row to every turn that concluded something."""
+    service = _Memory(consolidation=_Consolidation())
+    turn, observer, _ = _memory(service=service)
+    session = _Session()
+    session.messages = ["m1"]
+
+    await turn.harvest(session, deadline=None, summaries=[], outcome=_outcome())
+
+    assert service.consolidated == 1
+    assert not [e for e in observer.events if isinstance(e, MemoryConsolidated)]

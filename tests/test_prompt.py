@@ -34,14 +34,12 @@ def test_plan_mode_segment():
     assert "<plan-mode>" not in plain
 
 
-def test_memory_catalog():
-    out = _assembler().build(memory_catalog="remember: paths matter")
-    assert "<memory>Relevant prior notes:" in out
-    assert "remember: paths matter" in out
-
-
 def test_blank_optional_sections_omitted():
-    out = _assembler().build(project_instructions="", skills_catalog="", memory_catalog="")
+    out = _assembler().build(project_instructions="", skills_catalog="")
     assert "<system-reminder>" not in out
     assert "<skills>" not in out
+    # No <memory> section, and no parameter to ask for one: memory reaches the
+    # model as a <memory-constraints> block on the request *tail*, never in the
+    # system prompt — tests/test_agent_loop_memory.py pins that on the real loop,
+    # where a decision note is injected and the prompt is unchanged.
     assert "<memory>" not in out
