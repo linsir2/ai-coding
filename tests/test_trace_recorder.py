@@ -289,3 +289,76 @@ def test_full_capture_redacts_the_snapshot(tmp_path):
 
     assert recorder.last_payload_path is not None
     assert secret not in recorder.last_payload_path.read_text(encoding="utf-8")
+
+
+def test_a_sub_agents_streamed_output_is_not_recorded(tmp_path):
+    """The chunk guard judged the event as it arrived.
+
+    A sub-agent's events reach the recorder wrapped in ``ScopedEvent``, so
+    ``isinstance(event, ToolChunk)`` was False and every streamed fragment of a
+    child call landed on disk — 37 rows, all scoped, in one real session.  The
+    reason for dropping chunks is the turn's byte budget, which does not care
+    who asked.
+    """
+    from ai_coding.core.events import ToolChunk
+
+    recorder, store = _recorder(tmp_path)
+    recorder.on_event(ToolStarted(call_id="c1", tool_name="bash",
+                                 params={"command": "npm ci"}, iteration=0))
+    recorder.on_event(ScopedEvent(
+        scope="subagent:probe:c1", parent="c1",
+        event=ToolChunk(call_id="c1", tool_name="bash", stream="stdout",
+                        text="x" * 4000, seq=0),
+    ))
+    recorder.on_event(ToolFinished(call_id="c1", tool_name="bash", success=True,
+                                  output_preview="done", duration_ms=5, iteration=0))
+    recorder.on_event(TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED)))
+
+    kinds = [entry["evt"] for entry in _lines(recorder)]
+    assert "ToolChunk" not in kinds, kinds
+    assert "ToolStarted" in kinds and "ToolFinished" in kinds
+
+
+def test_a_sub_agents_turn_finishing_does_not_end_the_parent_turn(tmp_path):
+    """`TurnFinished` is decided on the *unwrapped* name, so a child ending its
+    turn ran the parent's finaliser — and `_finish_turn` never zeroes the
+    running totals, so the parent's own `TurnFinished` added them a second time.
+
+    Measured on one real session: summary.json reported 2.00x the
+    ModelStepFinished rows actually on disk, 2.54x the prompt tokens.
+    """
+    recorder, store = _recorder(tmp_path)
+
+    def step() -> ModelStepFinished:
+        return ModelStepFinished(
+            index=1,
+            usage={"prompt_tokens": 100, "completion_tokens": 20,
+                   "total_tokens": 120},
+            cached_tokens=80,
+            latency_ms=5,
+        )
+
+    recorder.on_event(IterationStarted(index=1, max_iterations=8))
+    recorder.on_event(
+        ScopedEvent(scope="subagent:probe:c1", parent="c1", event=step())
+    )
+    recorder.on_event(
+        ScopedEvent(
+            scope="subagent:probe:c1", parent="c1",
+            event=TurnFinished(
+                outcome=TurnOutcome(status=TurnStatus.COMPLETED, iterations=1)
+            ),
+        )
+    )
+    recorder.on_event(step())
+    recorder.on_event(
+        TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, iterations=1))
+    )
+
+    summary = json.loads(store.summary_path("sess-1").read_text(encoding="utf-8"))
+    # The child's step is real spend and stays in the parent's total; what must
+    # not happen is the child's TurnFinished flushing it early.
+    assert summary["turns"] == 1
+    assert summary["steps"] == 2
+    assert summary["prompt_tokens"] == 200
+    assert summary["cached_tokens"] == 160

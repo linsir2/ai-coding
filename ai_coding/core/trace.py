@@ -503,7 +503,12 @@ class TraceRecorder:
         # explain what the turn did (measured: everything else is ~15 events /
         # 3 KiB per turn, a 1MB log would be ~250 chunk lines).  The live fold
         # still shows them; that is a different sink.
-        if isinstance(event, ToolChunk):
+        #
+        # Unwrap first: a sub-agent's events arrive inside a ``ScopedEvent``, so
+        # judging the wrapper dropped nothing and every streamed fragment of a
+        # child call landed on disk (37 rows, all scoped, in one real session).
+        inner = event.event if isinstance(event, ScopedEvent) else event
+        if isinstance(inner, ToolChunk):
             return
         if not self._turn_open:
             if isinstance(event, IterationStarted) or self.last_path is None:
@@ -547,7 +552,12 @@ class TraceRecorder:
             return
 
         self._accumulate(event)
-        if name == "TurnFinished":
+        # ``name`` is the *unwrapped* name, so a sub-agent ending its own turn
+        # used to run the parent's finaliser — and ``_finish_turn`` never zeroes
+        # the running totals, so the parent's own TurnFinished added them again.
+        # Measured on one real session: summary.json reported 2.00x the
+        # ModelStepFinished rows on disk and 2.54x the prompt tokens.
+        if name == "TurnFinished" and not scope:
             self._finish_turn()
 
     def _finish_turn(self) -> None:
