@@ -8,6 +8,8 @@ line-per-note format must still be usable, and a broken answer must degrade to
 nothing rather than raise (memory is best-effort by invariant).
 """
 
+import json
+
 from ai_coding.memory.note import NoteKind
 from ai_coding.memory.schema import HarvestCandidate, parse_candidates
 
@@ -106,3 +108,37 @@ def test_r11c_parse_candidates_ignores_a_junk_scene():
 
 def test_r11c_line_fallback_candidates_have_no_scene():
     assert parse_candidates("- 构建用 uv\n- 发布走 Actions")[0].scene == ""
+
+
+def _truncated_json_array() -> str:
+    """The shape a `max_tokens` cut leaves behind: valid prefix, invalid JSON."""
+    return json.dumps(
+        [
+            {
+                "text": "AI-Coding 的配置模板是 config.example.yaml，"
+                "本地配置应复制为 config.local.yaml 后编辑。",
+                "kind": "decision",
+                "importance": 4,
+                "scene": "配置约定",
+                "action": "add",
+            },
+            {
+                "text": "AI-Coding 配置键遵循 snake_case，加载时兼容 camelCase。",
+                "kind": "decision",
+                "importance": 4,
+                "action": "add",
+            },
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )[:220]
+
+
+def test_a_truncated_json_array_is_not_a_list_of_memories():
+    """Half a JSON array is not a legacy line-per-note answer.
+
+    `_from_lines` guards ``{`` and ``[``, so a truncated array used to leak every
+    *field* line — `"kind": "decision",` and friends — through as a memory, and
+    `.memory` collected 12 of them from one real turn.
+    """
+    assert parse_candidates(_truncated_json_array()) == []

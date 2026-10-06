@@ -107,10 +107,13 @@ def build_extractor(model_config: Any) -> Extractor:
             )
             if not out:
                 return []
-            candidates = parse_candidates(out)
-            if candidates:
-                return list(candidates)
-            return _parse_memory_lines(out)  # legacy line-per-note answer
+            # One parse path.  There used to be a second fallback here that
+            # split the answer into plain lines with no guard at all, so a
+            # malformed answer became a memory twice over: `parse_candidates`
+            # returned `[]`, then this re-read the same broken JSON.  A broken
+            # answer is a failed harvest; `parse_candidates` already owns the
+            # legacy line-per-note format, with the guard.
+            return list(parse_candidates(out))
         except Exception:
             return []  # best-effort; never raise
 
@@ -147,21 +150,9 @@ def _messages_to_text(
     return "\n".join(parts)
 
 
-def _parse_memory_lines(text: str) -> list[str]:
-    """Split LLM output into one memory note per non-empty line, stripped."""
-    out: list[str] = []
-    for raw in text.splitlines():
-        line = raw.strip().lstrip("-•*").strip()
-        if len(line) < 2:
-            continue
-        out.append(line)
-    return out
-
-
 __all__ = [
     "build_summarizer",
     "build_extractor",
     "_chat",
-    "_parse_memory_lines",
     "_messages_to_text",
 ]

@@ -107,8 +107,12 @@ def _from_lines(text: str) -> list[HarvestCandidate]:
         body = line.strip().lstrip("-*•").strip()
         if not body:
             continue
-        if body.startswith("{") or body.startswith("["):
-            continue  # half-parsed JSON is not a memory
+        if body.startswith(("{", "[", '"', "}", "]")):
+            # Half-parsed JSON is not a memory.  `{`/`[` only catch the opening
+            # lines; a truncated array's *field* lines start with a quoted key
+            # and its closers start with `}`/`]`, and those were stored verbatim
+            # — one real turn put 12 of them in `.memory`.
+            continue
         out.append(HarvestCandidate(text=body))
     return out
 
