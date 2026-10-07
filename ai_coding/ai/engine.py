@@ -32,17 +32,29 @@ FallbackObserver = Callable[..., None]
 
 
 class EngineError(RuntimeError):
-    """A model-call failure the loop must see (never swallowed)."""
+    """A model-call failure the loop must see (never swallowed).
+
+    ``kind`` is the verdict ``ai.openai_engine.classify_failure`` reached.  It
+    lives on the base class rather than on ``FallbackWorthwhile`` because the
+    loop makes a second, unrelated decision from it: a context overflow is not
+    worth another model (M2) but *is* worth compacting the history (G5-1), and it
+    needs the same field to tell the two apart.  Re-deriving it by matching the
+    message would make a human-readable string a contract -- the mistake M2
+    removed.
+
+    Empty for failures that carry no verdict, such as a stream that broke after
+    the operator already saw text.
+    """
+
+    kind: str = ""
+
+    def __init__(self, *args: Any, kind: str = "") -> None:
+        super().__init__(*args)
+        self.kind = kind
 
 
 class FallbackWorthwhile(EngineError):
     """One model gave up and another might still answer (M2).
-
-    ``kind`` is the verdict that ``ai.openai_engine.classify_failure`` reached
-    (``rate_limited``, ``server_error``, ``transport``, ``auth_error``).  It is a
-    field rather than something parsed back out of the message: the chain shows
-    it to the operator and records it in the trace, and a substring of a
-    human-readable string is not a contract.
 
     A subclass so every existing ``except EngineError`` keeps working: when the
     whole chain is exhausted the turn still ends in ``ERROR`` the way it always
@@ -58,12 +70,6 @@ class FallbackWorthwhile(EngineError):
     Args:
         kind: the failure verdict, carried through verbatim from the classifier.
     """
-
-    kind: str = ""
-
-    def __init__(self, *args: Any, kind: str = "") -> None:
-        super().__init__(*args)
-        self.kind = kind
 
 
 class ChatEngine(ABC):

@@ -533,6 +533,24 @@ def test_classify_failure_uses_status_codes_not_just_sdk_classes():
     assert classify_failure(
         openai.APIStatusError("odd", response=_Resp(400), body=None)
     ) is FailureKind.FATAL
+    # A rejected *context* is a different verdict from a rejected *request*: the
+    # first is fixable by compacting the history, the second is not (G5-1).  The
+    # only signal the provider gives is the text, which is why it is matched.
+    assert classify_failure(
+        openai.BadRequestError(
+            "This model's maximum context length is 65536 tokens",
+            response=_Resp(400),
+            body=None,
+        )
+    ) is FailureKind.CONTEXT_OVERFLOW
+    assert classify_failure(
+        openai.APIStatusError("request too large", response=_Resp(413), body=None)
+    ) is FailureKind.CONTEXT_OVERFLOW
+    # A 413 whose text says nothing about size stays fatal: guessing here would
+    # rewrite the operator's history for a failure compaction cannot fix.
+    assert classify_failure(
+        openai.APIStatusError("weird gateway error", response=_Resp(413), body=None)
+    ) is FailureKind.FATAL
     assert classify_failure(RuntimeError("boom")) is FailureKind.FATAL
     assert classify_failure(ValueError("bad json")) is FailureKind.FATAL
 
@@ -655,3 +673,78 @@ async def test_a_stream_failure_before_any_output_is_fallback_worthwhile():
 
     with pytest.raises(FallbackWorthwhile):
         await engine.step([_user()], tools=[])
+
+
+# ---- G5-1: a context overflow is recoverable, but not here ------------------
+
+
+def _context_overflow():
+    import openai
+
+    return openai.BadRequestError(
+        "This model's maximum context length is 65536 tokens. "
+        "However, you requested 70000 tokens",
+        response=_Resp(400),
+        body=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_context_overflow_is_not_retried_here():
+    """Asking again with the same messages earns the same rejection, so the
+    retry budget would be spent learning nothing.  The loop compacts first."""
+    client = _SequencedClient([_context_overflow()])
+    engine = _fast_engine(client, max_retries=3)
+
+    with pytest.raises(EngineError):
+        await engine.step([_user()], tools=[])
+
+    assert client.completions.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_context_overflow_never_tries_another_model():
+    """The invariant from M2 (docs spec §5) that G5-1 must not break.
+
+    The same messages overflow every model in the chain, and ``ModelConfig``
+    carries no window, so a fallback would be a blind guess that burns the chain
+    before the loop gets a chance to compact.
+    """
+    client = _SequencedClient([_context_overflow()])
+    engine = _fast_engine(client, max_retries=1)
+
+    with pytest.raises(EngineError) as excinfo:
+        await engine.step([_user()], tools=[])
+
+    assert not isinstance(excinfo.value, FallbackWorthwhile)
+
+
+@pytest.mark.asyncio
+async def test_the_failure_carries_its_kind_rather_than_its_wording():
+    """The loop decides whether to compact by reading ``kind``.  Re-deriving it
+    from the message would make a human-readable string a contract -- the exact
+    mistake M2 removed when it moved ``kind`` onto the exception."""
+    client = _SequencedClient([_context_overflow()])
+    engine = _fast_engine(client)
+
+    with pytest.raises(EngineError) as excinfo:
+        await engine.step([_user()], tools=[])
+
+    assert excinfo.value.kind == "context_overflow"
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_bad_request_does_not_claim_to_be_an_overflow():
+    """A 400 with nothing about size must not carry the kind that makes the loop
+    rewrite the operator's history."""
+    import openai
+
+    client = _SequencedClient([
+        openai.BadRequestError("invalid tool schema", response=_Resp(400), body=None)
+    ])
+    engine = _fast_engine(client)
+
+    with pytest.raises(EngineError) as excinfo:
+        await engine.step([_user()], tools=[])
+
+    assert excinfo.value.kind != "context_overflow"

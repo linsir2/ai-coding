@@ -13,11 +13,11 @@
 | ID | 名称 | 影响 | 成本 | 依赖 | 状态 |
 |---|---|---|---|---|---|
 | G1-1 | turn 重入闸门提升到编排层 | 中 | 1 文件 ~30 行 | — | ✅ 已做 |
-| G5-5 | 压缩 reserve | 低 | 1 行 | — | ⬜ 待做 |
+| ~~G5-5~~ | ~~压缩 reserve~~ | — | — | ❌ 砍掉 |
 | G7-1/3 | 成本核算 + provider 归因 | 高 | 1-2 文件 | — | ⬜ 待做 |
-| G5-6 | token 估算改混合口径 | 中-高 | 1 文件 | — | ⬜ 待做 |
+| G5-6 | token 估算改混合口径 | 中-高 | 1 文件 | — | ⏸ 暂缓（实测后降级） |
 | G8-1 | 预算压力注入 | 中高 | 1 文件 | — | ⬜ 待做 |
-| G5-1 | provider 拒绝时压缩重试 | 高 | 2 文件 ~50 行 | G5-6 | ⬜ 待做 |
+| G5-1 | provider 拒绝时压缩重试 | 高 | 2 文件 ~50 行 | — | ✅ 已做 |
 | G4 | 权限 resource 维度 + glob + always 持久化 | 高 | 2-3 文件 | — | ⬜ 待做 |
 | G3-1 | deny 的工具不出现在 schema | 中 | 1-2 文件 | **G4** | ⬜ 待做 |
 | G8-2 | 达上限时让模型自己收尾 | 中 | 1-2 文件 | G8-1 | ⬜ 待做 |
@@ -55,9 +55,13 @@
 
 ---
 
-### G5-5｜压缩 reserve
+### ~~G5-5｜压缩 reserve~~ ❌ 砍掉
 
-`max_context_tokens - max(0.1*W, 16000)`，一行。给压缩留出余量，避免压到边界后又溢出。
+**实测后决定不做的理由**：OpenCode 需要 reserve，是因为它的 ceiling 直接是**真实 provider 窗口**
+（`compaction.ts:890-897`）。本项目的 `max_context_tokens=48000` 是**自设预算**
+（`docs/data-contracts.md:100` 原文"上下文预算，驱动压缩"），远低于任何已知 provider 窗口——
+实测本仓 trace 里真实 prompt 最大 75k 且全部调用成功。0.8 软水位留下的 20% 间隙本身就是余量，
+再叠一层 reserve 是重复计算。
 
 ---
 
@@ -69,11 +73,28 @@
 
 ---
 
-### G5-6｜token 估算改混合口径
+### G5-6｜token 估算改混合口径 ⏸ 暂缓
 
-**为什么在 G5-1 之前**：估算偏低 → 压缩触发太晚 → provider 先拒绝 → G5-1 才有事可做。**它是 G5-1 的放大器**，先修估算，G5-1 的效果才测得准。
+**实测证据（本仓 165 条真实 trace，`estimated_tokens` vs `usage.prompt_tokens`）**：
 
-本项目已有真实 usage（`domain/usage.py`），可学 OpenCode 的「最近一次实测 + 之后按字符估」（`compaction.ts:859-883`）。
+| 指标 | 值 |
+|---|---|
+| `real/est` 中位数 | **1.356** |
+| 低估 >15% 的样本 | **76%** |
+| 高估 >15% 的样本 | **1%** |
+| 最坏低估 | **2.08x** |
+
+偏差真实存在且是**有方向的**，不是"不精确"。但**修复它不是纯收益**：
+
+- 当前自设预算（48k）吸收了它——trace 里 75k 真实 prompt 全部成功
+- 改准后压缩会更早触发 → **降低 prompt cache 命中率**（`context_compression.py:390-391`
+  有实测注释：append-only 92-93% vs 每轮重写 26%）
+
+**决定**：G5-1 已提供安全网（估错时压缩重试而不是死在原地）。是否值得用 cache 命中率换估算精度，
+应该等 G5-1 上线后看 `/trace` 的 `degraded` 计数——如果反应式压缩很少触发，说明预算已经够用。
+
+**⚠ 与旧报告的分歧**：差距报告把它标为"中-高，做"。本项基于本仓实测数据降级为"暂缓"，
+理由是当时的判断没有实测支撑。
 
 ---
 
@@ -87,15 +108,27 @@
 
 ---
 
-### G5-1｜provider 拒绝时压缩重试
+### G5-1｜provider 拒绝时压缩重试 ✅ 已做
 
 **为什么是「高」**：唯一一个「用户已经付出全部成本，但因为上下文超长而彻底失败」的场景。
 
-**改法**：
-1. `classify_failure` 增 `CONTEXT_OVERFLOW` / `PAYLOAD_TOO_LARGE`
-2. `AgentLoop._model_step` 在 `EngineError` 落到 `except` 之前，若 kind 是这两者 → 强制压缩一次并重放当前 step
+**实施结果与报告建议的四处差异**：
 
-**⚠ 风险（报告明确标注）**：这会动 M1/M2 的异常分层。必须确认不破坏 `FallbackWorthwhile` 的语义——**上下文超长对任何模型都一样，所以它应该是普通 `EngineError` 而非 `FallbackWorthwhile`**（否则降级链会去白试其他模型）。这一点实施时必须写成测试。
+| 报告建议 | 实际做法 | 原因 |
+|---|---|---|
+| 增 `CONTEXT_OVERFLOW` + `PAYLOAD_TOO_LARGE` | **只增 `CONTEXT_OVERFLOW`** | 413 已并入同一分支；单独的 `PAYLOAD_TOO_LARGE` 没有消费者，是冗余 |
+| 在 `_model_step` 的 `except` 前加分支 | **循环体捕获后 `continue`** | 重试必须经过正常的 `assemble()` 路径（新 tail 块、新估算）；在 `_model_step` 内重试需要手搓请求 |
+| 未提 | **`kind` 从 `FallbackWorthwhile` 上提到 `EngineError`** | 循环层要靠它判断是否压缩，而普通 `EngineError` 原本没有该字段；靠 `str(exc)` 匹配会重犯 M2 修过的错 |
+| 未提 | **复用 `Compactor.compact_now`** | 它已经是"强制压缩 + 只在真的变小时写回"，零新方法 |
+
+**M2 安全闸**（报告明确警告的点）：`CONTEXT_OVERFLOW` 不在 `WORTH_ANOTHER_MODEL`，
+所以走普通 `EngineError`，`FallbackEngine` 不会白试下一个模型。由
+`test_a_context_overflow_never_tries_another_model` 钉住。
+
+**防死循环**：每回合上限一次 + `removed == 0` 立即放弃。
+
+**实测（真实路径）**：首次请求 14 条消息被 DeepSeek 风格 400 拒绝 → 压缩会话 12→4 条 →
+重发成功，`Degraded(model_step, provider rejected..., compacted...)` 落 trace。
 
 ---
 

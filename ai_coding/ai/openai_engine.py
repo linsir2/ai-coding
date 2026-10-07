@@ -48,7 +48,37 @@ class FailureKind(enum.Enum):
     SERVER_ERROR = "server_error"
     TRANSPORT = "transport"
     AUTH_ERROR = "auth_error"
+    #: The prompt does not fit.  Not worth another model -- the same messages
+    #: overflow every one of them, and ``ModelConfig`` carries no window to pick
+    #: a bigger one with -- but worth compacting the history, which is what the
+    #: loop does with this verdict (G5-1).
+    CONTEXT_OVERFLOW = "context_overflow"
     FATAL = "fatal"
+
+
+#: Substrings that identify a context overflow inside a 400/413 response.
+#: A text match is the only signal available: none of the four reference
+#: implementations gets a structured code from every provider, and all of them
+#: fall back to the same thing (OpenCode keeps ~50 patterns, Hermes ~20).
+#: Deliberately short -- a marker that misfires would rewrite the operator's
+#: history for a failure compaction cannot fix.
+_OVERFLOW_MARKERS = (
+    "maximum context length",
+    "context length",
+    "context_length_exceeded",
+    "too many tokens",
+    "prompt is too long",
+    "request too large",
+    "request_too_large",
+    "input length",
+    "reduce the length",
+)
+
+
+def _looks_like_context_overflow(exc: BaseException) -> bool:
+    """True when a rejected request was rejected *for being too big*."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _OVERFLOW_MARKERS)
 
 
 #: Verdicts another provider could plausibly survive (M2 §5).  ``FATAL`` is
@@ -73,12 +103,15 @@ def _exhausted(kind: FailureKind, message: str) -> EngineError:
     at each ``raise`` is how the two paths drift: a stream that died after the
     operator saw text and a budget that ran out are both "this model is done",
     but only one of them may be taken over by another provider.
+
+    The verdict travels on both spellings.  ``FallbackEngine`` reads the type to
+    decide whether to try another model; the loop reads ``kind`` to decide
+    whether to compact the history (G5-1) -- two independent decisions made from
+    the same classifier, which is why neither may re-derive it from the message.
     """
-    return (
-        FallbackWorthwhile(message, kind=kind.value)
-        if kind in WORTH_ANOTHER_MODEL
-        else EngineError(message)
-    )
+    if kind in WORTH_ANOTHER_MODEL:
+        return FallbackWorthwhile(message, kind=kind.value)
+    return EngineError(message, kind=kind.value)
 
 
 def classify_failure(exc: BaseException) -> FailureKind:
@@ -100,6 +133,8 @@ def classify_failure(exc: BaseException) -> FailureKind:
             return FailureKind.SERVER_ERROR
         if status in (401, 403):
             return FailureKind.AUTH_ERROR
+        if status in (400, 413) and _looks_like_context_overflow(exc):
+            return FailureKind.CONTEXT_OVERFLOW
     return FailureKind.FATAL
 
 

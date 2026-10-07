@@ -123,6 +123,16 @@ DeltaSink = Callable[[str], None]
 
 _log = logging.getLogger(__name__)
 
+#: G5-1: the verdict string from ``FailureKind.CONTEXT_OVERFLOW``.  Spelled out
+#: rather than imported because the loop must not depend on which engine
+#: implementation produced it -- the same reason ``ProviderRetried.kind`` is a
+#: plain string on the event.
+_CONTEXT_OVERFLOW = "context_overflow"
+
+#: How long a reactive compaction may take when the turn has no deadline left
+#: to divide.  Matches the floor ``compact_now`` already applies to ``/compact``.
+_REACTIVE_COMPACT_SECONDS = 60.0
+
 
 def _tools_by_origin(registry: ToolRegistry) -> dict[str, int]:
     """Serialised schema chars per origin, biggest first (R7e-3).
@@ -320,6 +330,10 @@ class AgentLoop:
         outcome = TurnOutcome(
             status=TurnStatus.MAX_ITERATIONS, reason="iteration budget exhausted"
         )
+        # G5-1: one compaction per turn, not per iteration.  Compaction rewrites
+        # the stored history, so a session that still does not fit must fail
+        # honestly rather than be shredded into a summary of a summary.
+        reactive_compacted = False
 
         try:
             index = 0
@@ -413,16 +427,43 @@ class AgentLoop:
                 previous_request = assembled.previous_request
 
                 # The one wait that cannot degrade: a model step either answers or
-                # the turn ends (docs/r2-analysis.md §7.3).
-                step = await self._model_step(
-                    session=session,
-                    request=assembled.request,
-                    instructions=assembled.instructions,
-                    deadline=frame.deadline,
-                    on_delta=on_delta,
-                    index=index,
-                    books=books,
-                )
+                # the turn ends (docs/r2-analysis.md §7.3).  The single exception
+                # is a provider that rejects the *context*: that is recoverable
+                # by compacting, and it is the only failure where the operator
+                # has already paid for the whole turn and would lose all of it.
+                try:
+                    step = await self._model_step(
+                        session=session,
+                        request=assembled.request,
+                        instructions=assembled.instructions,
+                        deadline=frame.deadline,
+                        on_delta=on_delta,
+                        index=index,
+                        books=books,
+                    )
+                except EngineError as exc:
+                    if reactive_compacted or exc.kind != _CONTEXT_OVERFLOW:
+                        raise
+                    reactive_compacted = True
+                    report = await self.compactor.compact_now(
+                        session,
+                        timeout=self._remaining(frame.deadline) or _REACTIVE_COMPACT_SECONDS,
+                    )
+                    if not report["removed"]:
+                        # Nothing shrank: the history is already as small as this
+                        # pipeline can make it, so the rejection is the truth and
+                        # a second attempt would earn the same answer.
+                        raise
+                    self.reporter.report_degraded(
+                        "model_step",
+                        "provider rejected the request as too long",
+                        "compacted the history and retried the step",
+                    )
+                    # Re-run the iteration so the retry goes through the normal
+                    # path: a fresh assembly (new tail blocks, new estimates) over
+                    # the history that was just rewritten.  Inlining the retry
+                    # here would mean assembling a request by hand.
+                    continue
 
                 if not step.tool_calls:
                     # R0-1: a turn with contracts does not end on the model's
