@@ -212,6 +212,14 @@ class AgentLoop:
         # behalf -- otherwise the switch stays silent until the status bar
         # refreshes at the end of the command.
         engine.on_fallback = self._restate_engine_fallback
+        # G1-1: "one turn at a time" was a Textual property -- an exclusive
+        # worker plus a submit queue -- so it held inside one app instance and
+        # nowhere else.  The REPL, a plan step and any future front end had only
+        # the convention that callers happen to await in order, and two turns that
+        # interleave append their messages in whatever order they finish.  Holding
+        # the rule here makes it the loop's own; the UI keeps its own because it
+        # answers a different question (whether the box should accept input).
+        self._turn_lock = asyncio.Lock()
         self._tool_schemas = tool_schemas(tools)
         # R4a: the tool schemas are part of every prompt, so their size belongs in
         # the attribution (docs/r4-analysis.md 4.3).
@@ -281,7 +289,26 @@ class AgentLoop:
         on_delta: DeltaSink | None = None,
         observer: LoopObserver | None = None,
     ) -> str:
-        """Run one user turn to completion and return the final assistant text."""
+        """Run one user turn to completion and return the final assistant text.
+
+        Serialised per loop (G1-1).  A second caller waits rather than failing,
+        which is the semantics the TUI already had when it queued submitted
+        lines; rejecting instead would leave the front end queueing something the
+        loop then refuses.
+        """
+        async with self._turn_lock:
+            return await self._run_turn(session, user_input, on_delta, observer)
+
+    async def _run_turn(
+        self,
+        session: SessionData,
+        user_input: str,
+        on_delta: DeltaSink | None = None,
+        observer: LoopObserver | None = None,
+    ) -> str:
+        """One turn, ungated.  The body below is ``process_input`` unchanged:
+        splitting it out keeps the re-entry guard a two-line diff instead of a
+        re-indent of the whole turn."""
         frame = await self._begin_turn(session, user_input, observer)
         task = frame.task
         # R7a: everything the turn counts about itself lives in one object, so a

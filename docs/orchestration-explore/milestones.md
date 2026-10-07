@@ -12,7 +12,7 @@
 
 | ID | 名称 | 影响 | 成本 | 依赖 | 状态 |
 |---|---|---|---|---|---|
-| G1-1 | turn 重入闸门提升到编排层 | 中 | 1 文件 ~30 行 | — | ⬜ 待做 |
+| G1-1 | turn 重入闸门提升到编排层 | 中 | 1 文件 ~30 行 | — | ✅ 已做 |
 | G5-5 | 压缩 reserve | 低 | 1 行 | — | ⬜ 待做 |
 | G7-1/3 | 成本核算 + provider 归因 | 高 | 1-2 文件 | — | ⬜ 待做 |
 | G5-6 | token 估算改混合口径 | 中-高 | 1 文件 | — | ⬜ 待做 |
@@ -37,9 +37,15 @@
 
 ## 逐项详述
 
-### G1-1｜turn 重入闸门提升到编排层
+### G1-1｜turn 重入闸门提升到编排层 ✅ 已做
 
-**问题**：`input.disabled` 在 `ui/textual_app.py` 是唯一的重入保护。前端任何一个 bug，两个 turn 就并发写同一个 session，`tool_call` 配对会错乱。报告原话：「前端不该持有编排不变量」。
+**实施时的发现（与报告描述不同）**：`input.disabled` **早已被移除**（`ui/textual_app.py:88-92`），换成了 `_queued` 队列 + `_turn_active` 标志 + Textual 的 `@work(exclusive=True)`。功能等价，但那是**单个 app 实例内**的保护。REPL（`ui/repl.py:79/179`）和 plan step（`core/plan_runner.py:484/496`）只靠「调用方恰好 await 串行」的约定。
+
+所以本项不是「修一个已知的洞」，是**把前端已有的不变量上移，让它对所有入口生效**。
+
+**实测对照**（真实 `AgentLoop` + `SessionService`）：
+- 无闸门（直调 `_run_turn`）：`['user', 'user', 'assistant', 'assistant']`
+- 有闸门（`process_input`）：`['user', 'assistant', 'tool', 'assistant', 'user', 'assistant']`
 
 **改法**：`AgentLoop` 持一个 `asyncio.Lock` 或 `_running` 标志，`process_input` 进入时若已在跑，按 steering 语义排队而非并发。
 
