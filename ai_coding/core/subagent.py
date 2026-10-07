@@ -31,6 +31,7 @@ from ai_coding.ai.prompt import PromptAssembler
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.events import BackgroundTaskDone
+from ai_coding.core.guard import build_guards
 from ai_coding.core.observers import ScopedObserver
 from ai_coding.core.turn_report import report_degraded
 from ai_coding.core.worktree import WorktreeError
@@ -105,6 +106,13 @@ class SubAgentRunner:
         base_instructions: str = "",
     ) -> None:
         self._app_config = app_config
+        # M2 fix: the guard chain used to be assembled only for the parent loop,
+        # so every sub-agent got ``AgentLoop(guards=None)`` -- which the
+        # dispatcher turns into an empty chain, i.e. no red lines, no path
+        # strictness, no duplicate-call budget.  A worktree isolates *files*; it
+        # never relaxed the policy, and a child inherits the parent's policy
+        # rather than a copy of the parent's turn counters.
+        self._guards = build_guards(app_config)
         self._engine_factory = engine_factory
         self._build_tools = build_tools
         self._ledger_root = Path(ledger_root) if ledger_root is not None else None
@@ -456,6 +464,7 @@ class SubAgentRunner:
             approval=self._approval,
             prompt=prompt,
             settings=self._subagent_settings(),
+            guards=self._guards,
             workspace=workdir or self._workspace,
             observer=self._scoped_observer(name, parent_span, observer),
         )

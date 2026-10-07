@@ -38,8 +38,41 @@ __all__ = [
     "PathEscapeGuard",
     "SecretGuard",
     "TurnView",
+    "build_guards",
     "call_fingerprint",
 ]
+
+
+def build_guards(app_config: Any) -> GuardChain | None:
+    """Build the guard chain from config, or ``None`` when nothing is enabled.
+
+    Lives here rather than in ``cli.py`` because three call sites need it -- the
+    REPL loop, the TUI loop, and every sub-agent -- and a policy that only one of
+    them can assemble is a policy the other two silently lack.  ``None`` is the
+    honest answer for "nothing configured"; the dispatcher turns it into an empty
+    chain, which is why nothing may default to it.
+
+    Returns a *fresh* chain per call: ``DuplicateCallGuard`` counts calls within a
+    turn, and a sub-agent sharing the parent's counter would be refused for calls
+    it never made.
+    """
+    guard_cfg = getattr(app_config, "guard", None)
+    if guard_cfg is None:
+        return None
+
+    guards: list[Guard] = []
+    threshold = int(getattr(guard_cfg, "duplicate_threshold", 2) or 0)
+    if threshold > 0:
+        guards.append(DuplicateCallGuard(threshold=threshold))
+    deny = list(getattr(guard_cfg, "bash_deny", []) or [])
+    confirm = list(getattr(guard_cfg, "bash_confirm", []) or [])
+    if deny or confirm:
+        guards.append(BashPolicyGuard(deny=deny, confirm=confirm))
+    if bool(getattr(guard_cfg, "strict_paths", False)):
+        guards.append(PathEscapeGuard(strict=True))
+    if bool(getattr(guard_cfg, "redact_history", False)):
+        guards.append(SecretGuard(redact_history=True))
+    return GuardChain(guards) if guards else None
 
 
 class GuardVerdict(enum.Enum):

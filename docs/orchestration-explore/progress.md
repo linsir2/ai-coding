@@ -24,9 +24,9 @@
 
 ## 待办（按投入产出排序）
 
-### P0 —— 现成漏洞，不是新功能
+### P0 —— 已完成
 
-- [ ] **子 agent 的 guard 链是空的。** `core/subagent.py:452-461` 未传 `guards`，`core/dispatch.py:163` 把 `None` 变成 `GuardChain([])`（恒 ALLOW）。父循环有 `BashPolicyGuard` / `PathEscapeGuard` / `DuplicateCallGuard`，子 agent 全无。一个文件、十几行，修完整个 guard 层对并发子 agent 生效。
+- [x] **子 agent 的 guard 链是空的。** 根因：`core/subagent.py:452-461` 未传 `guards`，`core/dispatch.py:163` 把 `None` 变成 `GuardChain([])`（恒 ALLOW）。修法：`_make_guards` 从 `cli.py` 搬到 `core/guard.py::build_guards`（三处调用点共用：REPL、TUI、子 agent），`SubAgentRunner.__init__` 建一次并传给每个子循环。真实路径已验证 `cat /etc/shadow` 在执行前被拦、拒绝理由回喂给模型。
 
 ### P1 —— 结构性差距
 

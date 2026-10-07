@@ -93,6 +93,7 @@ def _build_loop(
     from ai_coding.ai.prompt import BASE_INSTRUCTIONS, PromptAssembler
     from ai_coding.core.agent_loop import AgentLoop
     from ai_coding.core.context_compression import ContextManager
+    from ai_coding.core.guard import build_guards
     from ai_coding.core.project_instructions import ProjectInstructionsLoader
     from ai_coding.memory.service import MemoryService
     from ai_coding.memory.store import MemoryStore
@@ -147,7 +148,7 @@ def _build_loop(
         observer=observer,
         workspace=str(ws),
         trace=trace,
-        guards=guards,
+        guards=guards if guards is not None else build_guards(app_cfg),
         hooks=hooks,
         steering=steering,
         cancel=cancel,
@@ -194,34 +195,6 @@ def _make_recorder(app_cfg: Any, workspace: str, session: Any) -> Any | None:
     )
     recorder.pricing = pricing  # type: ignore[attr-defined]
     return recorder
-
-
-def _make_guards(app_cfg: Any) -> Any | None:
-    """Build the guard chain from config, or ``None`` when nothing is enabled."""
-    guard_cfg = getattr(app_cfg, "guard", None)
-    if guard_cfg is None:
-        return None
-    from ai_coding.core.guard import (
-        BashPolicyGuard,
-        DuplicateCallGuard,
-        GuardChain,
-        PathEscapeGuard,
-        SecretGuard,
-    )
-
-    guards: list[Any] = []
-    threshold = int(getattr(guard_cfg, "duplicate_threshold", 2) or 0)
-    if threshold > 0:
-        guards.append(DuplicateCallGuard(threshold=threshold))
-    deny = list(getattr(guard_cfg, "bash_deny", []) or [])
-    confirm = list(getattr(guard_cfg, "bash_confirm", []) or [])
-    if deny or confirm:
-        guards.append(BashPolicyGuard(deny=deny, confirm=confirm))
-    if bool(getattr(guard_cfg, "strict_paths", False)):
-        guards.append(PathEscapeGuard(strict=True))
-    if bool(getattr(guard_cfg, "redact_history", False)):
-        guards.append(SecretGuard(redact_history=True))
-    return GuardChain(guards) if guards else None
 
 
 def _make_hooks(app_cfg: Any, workspace: str) -> Any | None:

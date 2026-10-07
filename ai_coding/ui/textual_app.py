@@ -482,11 +482,11 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
     from ai_coding.cli import (
         _build_loop,
         _build_tool_registry,
-        _make_guards,
         _make_hooks,
         _make_recorder,
     )
     from ai_coding.config.loader import ConfigManager
+    from ai_coding.core.guard import build_guards
     from ai_coding.core.mcp import MCPManager
     from ai_coding.core.steering import SteeringQueue
     from ai_coding.security.approval import CLIApprovalCallback
@@ -523,7 +523,7 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         approval=approval,
         observer=None,
         trace=recorder,
-        guards=_make_guards(app_cfg),
+        guards=build_guards(app_cfg),
         hooks=_make_hooks(app_cfg, workspace),
         steering=steering,
         cancel=cancel,
