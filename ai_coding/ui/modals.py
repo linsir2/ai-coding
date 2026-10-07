@@ -23,14 +23,20 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input
 
+from ai_coding.security.permission_gate import grant_key
 from ai_coding.ui.plain import Plain
 
 _DIFF_LIMIT = 200
 
-#: Tools that never get an "Always" grant: on bash that would approve every
-#: command, which is the one grant that must not exist.  The screen hides the
-#: button and the provider refuses to record, so both read this.
-ALWAYS_EXCLUDED = frozenset({"bash"})
+#: How much of the resource an "always" would remember is spelled out in the
+#: hint line.  The operator has to be able to check it: a grant that is not what
+#: they think they granted is the defect this whole feature exists to remove.
+_GRANT_HINT_LIMIT = 60
+
+
+def _clip(text: str, limit: int) -> str:
+    """Shorten a label for the hint line; the modal body already shows it whole."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _edit_diff(params: dict[str, Any]) -> list[str]:
@@ -84,6 +90,10 @@ class ApprovalScreen(ModalScreen[str]):
         self._tool_name = tool_name
         self._params = params
         self._reason = reason
+        # Computed once, from the same pure function the provider records with:
+        # the button's existence and the remembered key can then never disagree
+        # about what is grantable.
+        self._grant_key = grant_key(tool_name, params)
 
     def compose(self) -> ComposeResult:
         body = Text()
@@ -134,14 +144,16 @@ class ApprovalScreen(ModalScreen[str]):
                 yield Button("Allow", id="yes", variant="success")
                 yield Button("Deny", id="no", variant="error")
                 yield Button("Stop", id="stop", variant="warning")
-                # bash is excluded from "always" (ALWAYS_EXCLUDED): an
-                # always-allow on bash would approve every command, so the
-                # button is not offered for it.
-                if self._tool_name not in ALWAYS_EXCLUDED:
+                # Offered only when the grant can name what it would remember.
+                # "Always" on a tool with no resource means "always every call
+                # of this tool", which is more than the one call on screen.
+                if self._grant_key is not None:
                     yield Button("Always", id="always", variant="primary")
             keys = "y allow · n deny · s stop"
-            if self._tool_name not in ALWAYS_EXCLUDED:
-                keys += " · a always"
+            if self._grant_key is not None:
+                # Say what will be remembered, so the grant the operator gets is
+                # the grant they read.
+                keys += f" · a always ({_clip(self._grant_key, _GRANT_HINT_LIMIT)})"
             yield Plain(f"{keys} · esc deny", id="approval-hint")
 
     def on_mount(self) -> None:
@@ -167,10 +179,10 @@ class ApprovalScreen(ModalScreen[str]):
         self.dismiss("s")
 
     def action_always(self) -> None:
-        # The key is bound on every tool, so an excluded one has to refuse here:
-        # dismissing ``"a"`` for bash would auto-approve the command without ever
-        # recording it, which is the grant ALWAYS_EXCLUDED exists to prevent.
-        if self._tool_name in ALWAYS_EXCLUDED:
+        # ``a`` is bound on every screen, so an un-grantable one refuses here:
+        # dismissing it would auto-approve the call without recording anything,
+        # which is how an unmatchable key turns into an unconditional yes.
+        if self._grant_key is None:
             return
         self.dismiss("a")
 

@@ -11,7 +11,8 @@ Rules mirror the original Java ``PermissionGate``:
 from __future__ import annotations
 
 import enum
-from collections.abc import Iterable
+import os
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -79,6 +80,44 @@ _BASH_HARD_DENY_PATTERNS: list[tuple[str, str]] = [
     ("git push -f ", "force git push (short)"),
     ("chmod 777", "world-writable permissions"),
 ]
+
+
+#: Tools an "always" may never remember, whatever resource can be extracted.
+#: A policy exclusion rather than a technical one: an always on bash would be an
+#: always on every command it may ever run.  It lives here, beside the gate,
+#: because it is a permission rule -- it used to live in the approval modal,
+#: where the button and the recorder each had to remember to consult it.
+_NEVER_REMEMBERED = frozenset({"bash"})
+
+#: Tools whose params name a single file, so a grant can say which one.
+_PATH_TOOLS = frozenset({"write", "edit"})
+
+
+def grant_key(tool_name: str, params: Mapping[str, Any]) -> str | None:
+    """What an "always" would actually remember, or ``None`` when it cannot be said.
+
+    The key has to be *what the operator just read*.  Keyed on the tool name
+    alone it is strictly broader than the modal it came from: the operator reads
+    "edit src/foo.py" -- diff included -- and would otherwise be granting edits
+    to every file in the workspace.
+
+    ``None`` means the grant must not be offered at all: either the tool is
+    excluded by policy, or its params name no single resource (a remote tool's
+    arguments are not summarisable).  Remembering "something" in those cases
+    would repeat the same defect one level down.
+
+    Paths are normalised lexically (``./a`` -> ``a``) because the key is for
+    *matching*, not for enforcing a boundary -- ``Sandbox`` owns that, and it
+    resolves properly.  Two spellings this cannot unify cost an extra prompt,
+    never a wrong decision.
+    """
+    name = tool_name.lower()
+    if name in _NEVER_REMEMBERED:
+        return None
+    path = str(params.get("path") or "").strip()
+    if name in _PATH_TOOLS and path:
+        return f"{name}:{os.path.normpath(path)}"
+    return None
 
 
 class PermissionGate:
@@ -175,4 +214,4 @@ class PermissionGate:
         )
 
 
-__all__ = ["PermissionGate", "PermissionDecision", "Decision"]
+__all__ = ["PermissionGate", "PermissionDecision", "Decision", "grant_key"]

@@ -15,10 +15,11 @@ from textual.command import CommandPalette
 from textual.widgets import Input
 from textual.worker import Worker, WorkerState
 
+from ai_coding.security.permission_gate import grant_key
 from ai_coding.ui.blocks import Block, TranscriptObserver, full_call_view
 from ai_coding.ui.commands import SlashCommandProvider
 from ai_coding.ui.input_bar import InputBar
-from ai_coding.ui.modals import ALWAYS_EXCLUDED, ApprovalScreen, AskScreen
+from ai_coding.ui.modals import ApprovalScreen, AskScreen
 from ai_coding.ui.repl import REPLAction, handle_input
 from ai_coding.ui.resume_screen import ResumeScreen
 from ai_coding.ui.status_bar import StatusBar
@@ -88,11 +89,13 @@ class AICodingApp(App[None]):
         # path reads; ``on_worker_state_changed`` clears it and drains the queue.
         self._queued: deque[str] = deque()
         self._turn_active: bool = False
-        # Tools the operator chose "Always" for this session.  In-memory only:
-        # a persisted grant would outlive the decision that made it.
-        # ``bash`` is never admitted — an always-allow on bash approves every
-        # command, which is the one grant that must not exist.
-        self._always_allow: set[str] = set()
+        # What the operator chose "Always" for, as keys from ``grant_key`` — the
+        # resource they were shown, not the tool they were shown it through.
+        # A grant keyed on the tool name is broader than the modal it came from:
+        # the operator reads one edit's diff and would otherwise be granting
+        # edits to every file in the workspace.  In-memory only: a persisted
+        # grant would outlive the decision that made it.
+        self._grants: set[str] = set()
 
     # ---- shell -----------------------------------------------------------
 
@@ -415,8 +418,10 @@ class AICodingApp(App[None]):
         string that the UI had to re-parse, and the 120-char cut meant anything
         longer — a real ``bash`` command, say — was simply not shown.
         """
-        # "Always allow" (session-scoped, bash excluded): answer without a modal.
-        if tool_name not in ALWAYS_EXCLUDED and tool_name in self._always_allow:
+        # "Always" for exactly this call, from the same pure function the modal
+        # uses to decide whether to offer the button at all.
+        key = grant_key(tool_name, params)
+        if key is not None and key in self._grants:
             return "y"
 
         screen = ApprovalScreen(tool_name=tool_name, params=params, reason=reason)
@@ -433,12 +438,14 @@ class AICodingApp(App[None]):
                 self.pop_screen()
 
         if answer == "a":
-            # ``a`` means allow now; whether it also grants is ALWAYS_EXCLUDED's
+            # ``a`` means allow now; whether it also grants is the grant key's
             # question, and the record must never be the deciding factor for the
             # allow itself — returning the raw "a" would reach approval.py's
-            # parser, which fails closed to NO.
-            if tool_name not in ALWAYS_EXCLUDED:
-                self._always_allow.add(tool_name)
+            # parser, which fails closed to NO.  A key of ``None`` means the
+            # screen never offered the button, so nothing is recorded and this
+            # call is approved once.
+            if key is not None:
+                self._grants.add(key)
             return "y"
         return answer
 

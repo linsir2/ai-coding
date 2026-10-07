@@ -18,7 +18,7 @@
 | G5-6 | token 估算改混合口径 | 中-高 | 1 文件 | — | ⏸ 暂缓（实测后降级） |
 | G8-1 | 预算压力注入 | 中高 | 1 文件 | — | ⬜ 待做 |
 | G5-1 | provider 拒绝时压缩重试 | 高 | 2 文件 ~50 行 | — | ✅ 已做 |
-| G4 | 权限 resource 维度 + glob + always 持久化 | 高 | 2-3 文件 | — | ⬜ 待做 |
+| G4 | 权限 resource 维度（部分） | 高 | 3 文件 | — | ✅ 已做（缩减） |
 | G3-1 | deny 的工具不出现在 schema | 中 | 1-2 文件 | **G4** | ⬜ 待做 |
 | G8-2 | 达上限时让模型自己收尾 | 中 | 1-2 文件 | G8-1 | ⬜ 待做 |
 | G5-3 | L4 摘要形状校验 | 中 | 1 文件 ~20 行 | — | ⬜ 待做 |
@@ -132,19 +132,46 @@
 
 ---
 
-### G4｜权限 resource 维度 + glob + always 持久化
+### G4｜权限 resource 维度 ✅ 已做（缩减后）
 
-**三个子项，同一批做**（报告建议的最小方案，不是照搬 OpenCode）：
+**核验推翻了差距报告的两个前提**：
 
-| 子项 | 内容 | 影响 |
-|---|---|---|
-| G4-1 | `always_allowed` 持久化到 session，**按资源模式而非工具名** | 高。用户以为记住了，其实没有 |
-| G4-2 | `PermissionGate` 增资源维度：`write`/`edit`/`read` 提取 `path`，`bash` 提取命令模式 | 高。安全边界实质缺失 |
-| G4-3 | glob 匹配（新增 ~14 行 `wildcard.match`） | 中。当前只能子串 |
+| 报告的说法 | 实测 |
+|---|---|
+| 「allow write = 允许写整个文件系统，包括 `/etc` 和 `~/.ssh/authorized_keys`」 | **错**。`security/sandbox.py:22-34` 已把 write/edit/read/glob 约束在 workspace 内，越界抛 `SandboxViolation`，与权限门无关地生效 |
+| 「存进 session 文件」实现持久化 | **机制不成立**。session 是一次对话，存 session 文件重启开新对话照样丢；要跨重启必须项目级存储 |
 
-**不做完整版 `Action/Resource/Effect` 三元组**：OpenCode 的三元组是为「多 agent × 多 session × 多工具集」设计的，本项目是单 agent 单 session。完整版会引入 ruleset 合成、优先级、agent 级配置三个不需要的概念。
+**真正的缺陷**：授权粒度 ≠ 被展示的粒度。用户在模态里读 `edit src/foo.py`（含 diff），"Always" 记住的是 `edit`——覆盖整个 workspace。与 `guards=None`→恒 ALLOW 同类：一个键看起来像"就这一件"，运行起来是"所有事"。
 
-**`ALWAYS_EXCLUDED` 的变化**：从「按工具名排除 bash」变成「按资源粒度不足时排除」。
+**实际可授权面极小**：`_warn_tools = {write, edit, bash}`，bash 被策略排除，MCP 工具无资源可提取 → 真正受影响的只有 `write`/`edit`。
+
+**实现**：
+- `security/permission_gate.py` 新增纯函数 `grant_key(tool, params)`，返回 `"edit:src/foo.py"` 或 `None`
+- `_NEVER_REMEMBERED = {bash}` / `_PATH_TOOLS = {write, edit}` 从 `ui/modals.py` 的 `ALWAYS_EXCLUDED` 迁到权限层——排除 bash 是**权限策略**，不是 UI 布局
+- `ui/modals.py` 删 `ALWAYS_EXCLUDED`，按钮与提示按 `grant_key` 判定；提示显示将记住什么（`a always (edit:src/foo.py)`），供用户核对
+- `ui/textual_app.py` `_always_allow: set[str]` → `_grants: set[str]`（键）
+
+**明确砍掉**：
+- **glob 匹配**：只有授权是"生成的模式"时才需要，而模式**必须让用户看到**否则缺陷下移；"模式该多宽"没有唯一正确答案
+- **bash 的精确命令授权**：排除 bash 是刻意安全立场，改它应是独立决定；且精确命令授权实用性低（命令很少完全相同）
+
+**真实路径实测**：
+```
+edit src/a.py    → key=edit:src/a.py    gate=warn
+write ./src/a.py → key=write:src/a.py   gate=warn   （normpath 归一化）
+edit src/b.py    → key=edit:src/b.py    gate=warn
+
+grants={edit:src/a.py} 之后：
+  edit src/a.py   还会问吗: False
+  edit ./src/a.py 还会问吗: False
+  edit src/b.py   还会问吗: True
+  write src/a.py  还会问吗: True   （write ≠ edit）
+  bash 任意命令    还会问吗: True
+```
+
+**下一轮做**（用户已确认）：
+1. always-allow 持久化 —— 正确形态是**项目级**存储 + 撤销 + gitignore 考量
+2. 把授权搬进 `PermissionGate` —— 修「REPL 没有 always，每次都要敲 y」这个真痛点，需改 `ApprovalResult` 加 `ALWAYS` 成员、`approve_from_gate_decision`、dispatch、gate 查表
 
 ---
 
