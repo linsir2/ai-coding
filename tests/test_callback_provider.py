@@ -95,14 +95,14 @@ def test_approval_stdin_prompt_is_unchanged_by_the_structured_provider():
     from ai_coding.security.approval import CLIApprovalCallback as C
 
     assert C._format_prompt("bash", {"command": "ls"}, "read-only") == (
-        "[bash] read-only\n  params: {'command': 'ls'}\nAllow? [y/N/s] "
+        "[bash] read-only\n  params: {'command': 'ls'}\nAllow? [y/N/a/s] "
     )
     long = C._format_prompt("bash", {"command": "x" * 300}, "read-only")
     params_line = next(line for line in long.splitlines() if "params:" in line)
     # str(params)[:117] + "..." — 13 chars are "{'command': '", so 104 x's fit
     # and the closing brace is the 118th character, i.e. it is cut.
     assert params_line == "  params: {'command': '" + "x" * 104 + "..."
-    assert long.endswith("Allow? [y/N/s] ")
+    assert long.endswith("Allow? [y/N/a/s] ")
 
 
 def test_approval_provider_exception_fails_closed():

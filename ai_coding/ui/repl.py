@@ -210,11 +210,31 @@ def _handle_permissions(
     parts = raw.split()
     dispatcher = getattr(loop, "dispatcher", None)
     approval = getattr(dispatcher, "approval", None) if dispatcher else None
+    gate = getattr(dispatcher, "gate", None)
     if len(parts) == 1:
         name = type(approval).__name__ if approval else "(none)"
-        console.info(f"[permissions] current approval: {name}")
+        lines = [f"[permissions] current approval: {name}"]
+        # G4b: a standing grant outlives the process, so it has to be visible --
+        # an authorisation the operator cannot inspect is one they cannot
+        # consent to.  The path is shown so it can be deleted by hand too.
+        grants = list(getattr(gate, "grants", ()) or ())
+        lines.append(f"[permissions] remembered ({len(grants)}):")
+        if grants:
+            lines.extend(f"  {key}" for key in grants)
+        else:
+            lines.append("  (none)")
+        store = getattr(gate, "_store", None)
+        if store is not None:
+            lines.append(f"[permissions] stored at: {store.path}")
+        lines.append("[permissions] /permissions clear removes them")
+        console.info("\n".join(lines))
         return REPLAction.CONTINUE, session
     target = parts[1]
+    if target == "clear":
+        if gate is not None:
+            gate.revoke_all()
+        console.info("[permissions] cleared remembered grants for this workspace")
+        return REPLAction.CONTINUE, session
     from ai_coding.security.approval import AutoApproveCallback, CLIApprovalCallback
     if target == "auto":
         if dispatcher:
@@ -225,7 +245,7 @@ def _handle_permissions(
             dispatcher.approval = CLIApprovalCallback()
         console.info("[permissions] switched to confirm-all")
     else:
-        console.error(f"[permissions] unknown policy '{target}'. Available: auto, confirm")
+        console.error(f"[permissions] unknown policy '{target}'. Available: auto, confirm, clear")
     return REPLAction.CONTINUE, session
 
 

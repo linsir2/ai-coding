@@ -19,6 +19,8 @@
 | G8-1 | 预算压力注入 | 中高 | 1 文件 | — | ⬜ 待做 |
 | G5-1 | provider 拒绝时压缩重试 | 高 | 2 文件 ~50 行 | — | ✅ 已做 |
 | G4 | 权限 resource 维度（部分） | 高 | 3 文件 | — | ✅ 已做（缩减） |
+| G4b-1 | 授权进权限层（REPL 也有） | 高 | 4 文件 | — | ✅ 已做 |
+| G4b-2 | always-allow 项目级持久化 | 高 | 2 文件 | G4b-1 | ✅ 已做 |
 | G3-1 | deny 的工具不出现在 schema | 中 | 1-2 文件 | **G4** | ⬜ 待做 |
 | G8-2 | 达上限时让模型自己收尾 | 中 | 1-2 文件 | G8-1 | ⬜ 待做 |
 | G5-3 | L4 摘要形状校验 | 中 | 1 文件 ~20 行 | — | ⬜ 待做 |
@@ -169,11 +171,54 @@ grants={edit:src/a.py} 之后：
   bash 任意命令    还会问吗: True
 ```
 
-**下一轮做**（用户已确认）：
-1. always-allow 持久化 —— 正确形态是**项目级**存储 + 撤销 + gitignore 考量
-2. 把授权搬进 `PermissionGate` —— 修「REPL 没有 always，每次都要敲 y」这个真痛点，需改 `ApprovalResult` 加 `ALWAYS` 成员、`approve_from_gate_decision`、dispatch、gate 查表
+### G4b-1｜授权进权限层 ✅ 已做
 
----
+**为什么**：授权原本是 `ui/textual_app.py` 里的一个 `set`，导致三件事——REPL 永远无法授权
+（它的回调只解析 y/n/s，所以 REPL 用户每次 write 都要手敲 y）、trace 看不到用户授权过什么、
+策略层完全不知道有这回事。**授权是权限，就该和权限住在一起。**
+
+**契约变更**：
+- `ApprovalResult` 加 `ALWAYS`（不是 YES 上的标志位：前端只回一个字母，把 "a" 压成 "y"
+  正是让授权变成 UI 私产、REPL 够不着的原因）
+- `PermissionGate.grant(tool, params)` / `gate.grants` / `gate.revoke_all()`
+- `check()` 顺序成为契约：**deny → grant → 静态表**。放前面会让将来任何路径级 deny
+  被"之前给的 always"绕开
+- `dispatch._ask` 处理 ALWAYS → `gate.grant()` → `APPROVED`（`ApprovalVerdict` **不加成员**：
+  调用方无需区分"批准且记住"与"批准"）
+- `CLIApprovalCallback` 解析 `a`，提示 `[y/N/a/s]`——**两个前端共用的唯一解析器**
+- TUI **净删**：`_grants`、短路、`"a"→"y"` 全部消失
+
+**删掉的死代码**：`approve_from_gate_decision` + 其 2 个测试文件里的用例。生产路径从不经过它
+（`dispatch._ask` 直接调回调），它的 docstring 还在描述一个已不存在的 SDK 钩子。
+
+### G4b-2｜项目级持久化 ✅ 已做
+
+**存储位置的关键决策**：**不放在 workspace 内**。
+
+`.ai-coding/` 是显而易见的落点（已是 per-workspace runtime 目录、已被 gitignore），
+但 `git add -f` 能提交被 ignore 的文件，所以**恶意仓库可以自带
+`.ai-coding/grants.json` 预授权 `edit:.git/hooks/pre-commit`** —— 授权会关掉提示，
+所以这个攻击是**静默**的，而 hook 在下一次 git 操作时执行。
+
+存在 `~/.config/ai-coding/grants.json`（按 workspace 分键）根除它：clone 的仓库写不进去，
+文件工具被 Sandbox 挡、bash 不可授权，所以 agent 也无法静默改它。
+`test_a_workspace_local_file_cannot_authorise_anything` 钉住这个攻击面。
+
+**撤销**：`/permissions` 列出授权与文件路径，`/permissions clear` 清空。
+一个跨重启的常驻授权如果无法撤销，就是把用户锁在自己过去的决定里。
+
+**实现**：`security/grants.py` 的 `GrantStore`（载入/追加/清空，全部 best-effort：
+坏 JSON、只读目录都降级为"无授权"，绝不阻止启动）；`from_config(app_cfg, workspace=...)` 注入。
+
+**真实路径实测**（真 CLI 回调读 stdin、真 gate、真 dispatch、模拟重启）：
+```
+会话1 edit a.py  → denied=False success=True  用户输入 a → 授权 ('edit:src/a.py',)
+会话2 edit a.py  → denied=False success=True  （重启后不问,直接执行）
+会话2 edit b.py  → denied=True                （问,答 n 被拒）
+落盘            → {"version":1,"workspaces":{"/tmp/.../workspace":["edit:src/a.py"]}}
+撤销后          → 内存 () 磁盘 ()
+恶意仓库自带文件 → 载入 () ← 攻击面闭合
+```
 
 ### G3-1｜deny 的工具不出现在 schema
 

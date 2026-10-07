@@ -80,37 +80,6 @@ def test_cli_approval_long_params_truncated():
     assert len(seg) == 120  # 117 chars + "...", capped
 
 
-async def test_approve_from_enum_and_unknown():
-    from ai_coding.security.approval import approve_from_gate_decision
-
-    assert await approve_from_gate_decision(PermissionDecision.ALLOW, "read", {}, None) is True
-    assert await approve_from_gate_decision(PermissionDecision.DENY, "bash", {}, None) is False
-    # unknown string -> WARN, no callback -> fail-closed False
-    assert await approve_from_gate_decision("bogus", "x", {}, None) is False
-
-
-async def test_approve_warn_without_callback_fails_closed():
-    from ai_coding.security.approval import approve_from_gate_decision
-
-    decision = Decision(PermissionDecision.WARN, "needs human")
-    assert await approve_from_gate_decision(decision, "edit", {}, None) is False
-
-
-async def test_approve_warn_with_yes_callback():
-    from ai_coding.security.approval import (
-        ApprovalCallback,
-        ApprovalResult,
-        approve_from_gate_decision,
-    )
-
-    class _Yes(ApprovalCallback):
-        async def approve(self, tool_name, params, reason):
-            return ApprovalResult.YES
-
-    decision = Decision(PermissionDecision.WARN, "ok")
-    assert await approve_from_gate_decision(decision, "edit", {}, _Yes()) is True
-
-
 # ---------------------------------------------------------------- permission gate Decision
 
 def test_decision_equality_and_hash_repr():
@@ -126,8 +95,6 @@ def test_decision_equality_and_hash_repr():
     assert a1 != d  # different decision value, even same reason
     assert "allow" in repr(a1)
     assert "x" in repr(a1)
-
-
 
 
 # ---------------------------------------------------------------- skill tool

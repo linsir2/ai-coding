@@ -1,8 +1,9 @@
 """HITL (human-in-the-loop) approval callback protocol.
 
-The ``needs_approval`` hook in the SDK's FunctionTool asks *us* whether to let a
-tool call proceed.  We wire it through ``PermissionGate`` + an ``ApprovalCallback``
-so the CLI (or future UI) can prompt the user.
+``ToolDispatcher`` asks the callback whenever ``PermissionGate`` returns WARN, and
+maps the answer to an ``ApprovalVerdict``.  Both front ends implement the same
+three-way (four with ALWAYS) answer, so the vocabulary lives here rather than in
+either of them.
 """
 
 from __future__ import annotations
@@ -12,11 +13,14 @@ import enum
 from collections.abc import Callable
 from typing import Any
 
-from ai_coding.security.permission_gate import Decision, PermissionDecision
-
 
 class ApprovalResult(enum.Enum):
     YES = "yes"
+    #: Allow this call *and* remember exactly this resource.  A separate member
+    #: rather than a flag on YES: the front ends answer with one letter, and
+    #: flattening "a" into "y" is what used to make the grant a UI-private
+    #: affair that the REPL could never reach (G4b).
+    ALWAYS = "always"
     NO = "no"
     STOP = "stop"
 
@@ -81,6 +85,11 @@ class CLIApprovalCallback(ApprovalCallback):
             except (EOFError, OSError):
                 return ApprovalResult.NO  # fail-closed
 
+        if answer in {"a", "always"}:
+            # Not flattened into YES: the caller has to know to record it.  This
+            # is the only parser for either front end -- the TUI hands its modal
+            # answer back through the same ``_provider`` hook.
+            return ApprovalResult.ALWAYS
         if answer in {"y", "yes"}:
             return ApprovalResult.YES
         if answer in {"s", "stop"}:
@@ -93,16 +102,17 @@ class CLIApprovalCallback(ApprovalCallback):
         preview = str(params)
         if len(preview) > 120:
             preview = preview[:117] + "..."
-        return f"[{tool_name}] {reason}\n  params: {preview}\nAllow? [y/N/s] "
+        return f"[{tool_name}] {reason}\n  params: {preview}\nAllow? [y/N/a/s] "
 
 
 class AutoApproveCallback(ApprovalCallback):
     """Non-interactive approval: always permits WARN tiers.
 
     Use for non-interactive entry points (``ask``) and for sub-agent tool
-    stacks where no human is present to confirm.  Hard-deny (``DENY``) tiers
-    are still blocked upstream by ``approve_from_gate_decision``, so this only
-    relaxes the interactive tier, never the deny tier.
+    stacks where no human is present to confirm.  It answers ``YES`` and never
+    ``ALWAYS``: a grant is a human decision, and nothing here made one.  Hard-deny
+    (``DENY``) tiers are still blocked by the dispatcher before it ever asks, so
+    this relaxes the interactive tier only, never the deny tier.
     """
 
     async def approve(
@@ -118,48 +128,9 @@ def _default_input(prompt: str) -> str:  # pragma: no cover - trivial wrapper
     return input(prompt)
 
 
-async def approve_from_gate_decision(
-    decision: Decision | PermissionDecision | str,
-    tool_name: str,
-    params: dict[str, Any],
-    approval: ApprovalCallback | None,
-) -> bool:
-    """Translate a gate decision into a boolean for SDK's ``needs_approval``.
-
-    - ALLOW → True (proceed, no approval needed)
-    - DENY → False (block, don't ask)
-    - WARN → ask the user via ``approval``; return True only if they say YES
-
-    Accepts ``Decision``, ``PermissionDecision`` enum, or a string like
-    ``"ALLOW"`` / ``"WARN"`` / ``"DENY"``.
-    """
-    value: PermissionDecision
-    if isinstance(decision, Decision):
-        value = decision.decision
-    elif isinstance(decision, PermissionDecision):
-        value = decision
-    else:
-        try:
-            value = PermissionDecision(str(decision).lower())
-        except ValueError:
-            value = PermissionDecision.WARN  # fail-closed on unknown
-
-    if value == PermissionDecision.ALLOW:
-        return True
-    if value == PermissionDecision.DENY:
-        return False
-    # WARN: need human approval
-    if approval is None:
-        return False  # fail-closed without a callback
-    reason = decision.reason if isinstance(decision, Decision) else ""
-    result = await approval.approve(tool_name, params, reason)
-    return result == ApprovalResult.YES
-
-
 __all__ = [
     "ApprovalCallback",
     "ApprovalResult",
     "CLIApprovalCallback",
     "AutoApproveCallback",
-    "approve_from_gate_decision",
 ]

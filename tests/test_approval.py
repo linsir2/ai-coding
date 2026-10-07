@@ -5,7 +5,6 @@ import pytest
 from ai_coding.security.approval import (
     ApprovalResult,
     CLIApprovalCallback,
-    approve_from_gate_decision,
 )
 
 
@@ -47,17 +46,3 @@ async def test_approve_default_no_on_empty():
     assert r == ApprovalResult.NO  # fail-closed
 
 
-@pytest.mark.asyncio
-async def test_approve_from_gate_decision_allow():
-    result = await approve_from_gate_decision(
-        decision="ALLOW", tool_name="read", params={}, approval=None
-    )
-    assert result is True
-
-
-@pytest.mark.asyncio
-async def test_approve_from_gate_decision_deny():
-    result = await approve_from_gate_decision(
-        decision="DENY", tool_name="bash", params={"command": "sudo ls"}, approval=None
-    )
-    assert result is False

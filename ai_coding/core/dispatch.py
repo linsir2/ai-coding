@@ -414,6 +414,13 @@ class ToolDispatcher:
             return ApprovalVerdict.TIMED_OUT
         except Exception:  # noqa: BLE001 — approval is a safety boundary: fail closed
             return ApprovalVerdict.DECLINED
+        if answer is ApprovalResult.ALWAYS:
+            # Recording is the *core's* job now, not the front end's: the REPL
+            # and the TUI both arrive here, and a front end that forgot to
+            # record would turn "always" into a silent "this once" -- exactly
+            # how the REPL never had the feature at all (G4b).
+            self.gate.grant(call.name, call.params)
+            return ApprovalVerdict.APPROVED
         if answer is ApprovalResult.YES:
             return ApprovalVerdict.APPROVED
         if answer is ApprovalResult.STOP:

@@ -101,7 +101,7 @@ class _RecordingTool(BaseTool):
         self.calls.append(params)
         from ai_coding.domain.message import ToolResult
 
-        return ToolResult(content="ok")
+        return ToolResult(success=True, output="ok")
 
 
 def _runner(tmp_path, guard_cfg: GuardConfig, tool: BaseTool, call: ToolCallRef):

@@ -16,6 +16,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from ai_coding.security.grants import GrantStore
+
 
 class PermissionDecision(enum.Enum):
     ALLOW = "allow"
@@ -127,7 +129,16 @@ class PermissionGate:
         self,
         *,
         trusted_servers: Iterable[str] = (),
+        grants: Iterable[str] = (),
+        store: Any | None = None,
     ) -> None:
+        #: Calls the operator answered "Always" for, as ``grant_key`` strings.
+        #: Seeded from the store at startup and extended by ``grant``.
+        self._grants = {str(key) for key in grants}
+        #: Where a new grant is written down, or ``None`` for this process only.
+        #: Injected rather than built here so the gate stays constructible
+        #: without a filesystem -- every test in the suite relies on that.
+        self._store = store
         # R7d: MCP servers the user declared as trusted.  A remote tool is named
         # ``server__tool``, so the server is the only thing that can be declared
         # here — the tool names come from the server, not from our config.
@@ -172,45 +183,89 @@ class PermissionGate:
                 "bash command requires confirmation",
             )
 
-        # 2. Known allow-list
+        # 2. A resource the operator already approved.  After the deny rules, so
+        # a standing grant can never reopen something that is refused outright:
+        # doing this first would make every future path-based deny bypassable by
+        # an "always" the user gave before it existed.
+        key = grant_key(name, params)
+        if key is not None and key in self._grants:
+            return Decision(PermissionDecision.ALLOW, "")
+
+        # 3. Known allow-list
         if name in self._allow_tools:
             return Decision(PermissionDecision.ALLOW, "")
 
-        # 3. Known warn-list
+        # 4. Known warn-list
         if name in self._warn_tools:
             return Decision(
                 PermissionDecision.WARN,
                 f"tool '{tool_name}' requires confirmation",
             )
 
-        # 4. A tool from a server the user declared trusted (R7d).  Checked before
+        # 5. A tool from a server the user declared trusted (R7d).  Checked before
         # the fail-closed rule, and matched on the *server* segment only, so a
         # local tool cannot be trusted by naming itself "bash__something".
         server, sep, _remote = tool_name.partition("__")
         if sep and server in self._trusted_servers:
             return Decision(PermissionDecision.ALLOW, "")
 
-        # 5. Unknown tools → WARN (fail-closed / conservative)
+        # 6. Unknown tools → WARN (fail-closed / conservative)
         return Decision(
             PermissionDecision.WARN,
             f"unknown tool '{tool_name}' requires confirmation",
         )
 
+    def grant(self, tool_name: str, params: Mapping[str, Any]) -> str | None:
+        """Remember exactly this call; return the key, or ``None`` if unnameable.
+
+        Called by the dispatcher when the human answered ``ALWAYS``.  Writing
+        through to the store is best effort -- the operator did say always, so
+        the grant holds for this process even if it cannot be written down.
+        """
+        key = grant_key(tool_name, params)
+        if key is None:
+            return None
+        if key not in self._grants:
+            self._grants.add(key)
+            store = self._store
+            if store is not None:
+                store.add(key)
+        return key
+
+    @property
+    def grants(self) -> tuple[str, ...]:
+        """What is currently remembered, sorted for display."""
+        return tuple(sorted(self._grants))
+
+    def revoke_all(self) -> None:
+        """Forget everything, on disk as well as in memory."""
+        self._grants.clear()
+        if self._store is not None:
+            self._store.clear()
+
     @classmethod
-    def from_config(cls, app_cfg: Any) -> PermissionGate:
+    def from_config(cls, app_cfg: Any, *, workspace: str | None = None) -> PermissionGate:
         """The one place the composition root's policy is read (R7d).
 
         Nothing about the *tool list* is needed: a server is trusted by name, so
         this works before (and independently of) the MCP connection.
+
+        ``workspace`` turns on persistence (G4b-2): the grants the operator has
+        given in this directory are loaded, and new ones are written beside them.
+        Without it the gate is session-only -- which is what a sub-agent builds,
+        and it never asks anyway.
         """
         mcp = getattr(app_cfg, "mcp", None)
         servers = getattr(mcp, "servers", None) or []
+        store = GrantStore(workspace) if workspace else None
         return cls(
             trusted_servers=[
                 str(getattr(server, "name", ""))
                 for server in servers
                 if getattr(server, "auto_approve", False)
-            ]
+            ],
+            grants=store.load() if store is not None else (),
+            store=store,
         )
 
 

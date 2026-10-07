@@ -15,7 +15,6 @@ from textual.command import CommandPalette
 from textual.widgets import Input
 from textual.worker import Worker, WorkerState
 
-from ai_coding.security.permission_gate import grant_key
 from ai_coding.ui.blocks import Block, TranscriptObserver, full_call_view
 from ai_coding.ui.commands import SlashCommandProvider
 from ai_coding.ui.input_bar import InputBar
@@ -89,13 +88,6 @@ class AICodingApp(App[None]):
         # path reads; ``on_worker_state_changed`` clears it and drains the queue.
         self._queued: deque[str] = deque()
         self._turn_active: bool = False
-        # What the operator chose "Always" for, as keys from ``grant_key`` — the
-        # resource they were shown, not the tool they were shown it through.
-        # A grant keyed on the tool name is broader than the modal it came from:
-        # the operator reads one edit's diff and would otherwise be granting
-        # edits to every file in the workspace.  In-memory only: a persisted
-        # grant would outlive the decision that made it.
-        self._grants: set[str] = set()
 
     # ---- shell -----------------------------------------------------------
 
@@ -418,12 +410,6 @@ class AICodingApp(App[None]):
         string that the UI had to re-parse, and the 120-char cut meant anything
         longer — a real ``bash`` command, say — was simply not shown.
         """
-        # "Always" for exactly this call, from the same pure function the modal
-        # uses to decide whether to offer the button at all.
-        key = grant_key(tool_name, params)
-        if key is not None and key in self._grants:
-            return "y"
-
         screen = ApprovalScreen(tool_name=tool_name, params=params, reason=reason)
 
         try:
@@ -437,16 +423,10 @@ class AICodingApp(App[None]):
             if self.screen is screen:
                 self.pop_screen()
 
-        if answer == "a":
-            # ``a`` means allow now; whether it also grants is the grant key's
-            # question, and the record must never be the deciding factor for the
-            # allow itself — returning the raw "a" would reach approval.py's
-            # parser, which fails closed to NO.  A key of ``None`` means the
-            # screen never offered the button, so nothing is recorded and this
-            # call is approved once.
-            if key is not None:
-                self._grants.add(key)
-            return "y"
+        # The answer travels back verbatim: ``CLIApprovalCallback`` is the one
+        # parser for both front ends, and the core records the grant when it is
+        # "a".  Flattening it to "y" here is what used to make this a UI-private
+        # feature the REPL could not reach (G4b).
         return answer
 
     async def ask_provider(self, prompt: str, options: Sequence[str] = ()) -> str:

@@ -136,7 +136,7 @@ def _build_loop(
         sessions,
         registry,
         approval=approval,
-        gate=PermissionGate.from_config(app_cfg),
+        gate=PermissionGate.from_config(app_cfg, workspace=str(ws)),
         context=context,
         memory=memory,
         prompt=prompt,
