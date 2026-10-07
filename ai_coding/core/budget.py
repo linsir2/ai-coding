@@ -68,6 +68,7 @@ class BudgetLedger:
     """A turn's ledger: pure, synchronous, IO-free."""
 
     def __init__(self) -> None:
+        self._by_model: dict[str, dict[str, int]] = {}
         self._prompt = 0
         self._completion = 0
         self._cached = 0
@@ -83,14 +84,33 @@ class BudgetLedger:
         self,
         usage: Mapping[str, Any] | None,
         *,
+        model: str = "",
         cached: int | None = None,
         cache_write: int | None = None,
         latency_ms: int = 0,
     ) -> None:
-        """Record one model step.  Absent figures are simply not added."""
+        """Record one model step.  Absent figures are simply not added.
+
+        ``model`` attributes the step to whoever answered it (G7).  Empty means
+        nobody could say, and the step is then counted in the totals but in no
+        bucket -- a bucket named "unknown" would be a claim the ledger cannot
+        support, and it would hide the difference from a real model whose name
+        happens to be missing.
+        """
         del cache_write  # recorded by the caller's event; the ledger sums reads
         self._steps += 1
         self._latency_ms += int(latency_ms or 0)
+        if model and isinstance(usage, Mapping):
+            bucket = self._by_model.setdefault(
+                model, {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "steps": 0}
+            )
+            bucket["steps"] += 1
+            bucket["prompt_tokens"] += int(_as_int(usage.get("prompt_tokens")) or 0)
+            bucket["completion_tokens"] += int(_as_int(usage.get("completion_tokens")) or 0)
+            derived, _ = cache_from_usage(usage)
+            effective = cached if cached is not None else derived
+            if effective is not None:
+                bucket["cached_tokens"] += int(effective)
         if not isinstance(usage, Mapping):
             derived, _ = cache_from_usage(None)
             cached = cached if cached is not None else derived
@@ -147,6 +167,13 @@ class BudgetLedger:
         if not self._cached_reported or self._prompt <= 0:
             return None
         return self._cached / self._prompt
+
+    def by_model(self) -> dict[str, dict[str, int]]:
+        """Token usage per model, for "did the fallback cost more or less".
+
+        A copy, so a caller rendering it cannot rewrite what was recorded.
+        """
+        return {name: dict(spend) for name, spend in self._by_model.items()}
 
     def cost(self, pricing: Pricing | None) -> float | None:
         """Money spent, or ``None`` when no price is configured."""

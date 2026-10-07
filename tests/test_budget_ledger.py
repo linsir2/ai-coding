@@ -168,3 +168,58 @@ def test_cost_falls_back_to_the_input_price_when_no_cache_price_is_configured():
     price = Pricing(input_per_1k=0.01, output_per_1k=0.03)
 
     assert ledger.cost(price) == 1.000 * 0.01 + 0.500 * 0.03
+
+
+# ---- G7: spend attributed to the model that spent it ------------------------
+
+
+def test_usage_is_bucketed_by_the_model_that_spent_it():
+    """A fallback chain routes one turn through two providers, and "did that
+    cost more or less" cannot be answered from a single total."""
+    ledger = BudgetLedger()
+    ledger.record_step({"prompt_tokens": 1_000, "completion_tokens": 100}, model="qwen")
+    ledger.record_step({"prompt_tokens": 2_000, "completion_tokens": 200}, model="deepseek")
+    ledger.record_step({"prompt_tokens": 500, "completion_tokens": 50}, model="qwen")
+
+    by_model = ledger.by_model()
+
+    assert by_model["qwen"]["prompt_tokens"] == 1_500
+    assert by_model["qwen"]["completion_tokens"] == 150
+    assert by_model["qwen"]["steps"] == 2
+    assert by_model["deepseek"]["prompt_tokens"] == 2_000
+    assert by_model["deepseek"]["steps"] == 1
+
+
+def test_the_totals_still_include_every_model():
+    """Bucketing is an attribution, not a replacement: the session total is
+    the same number it was before."""
+    ledger = BudgetLedger()
+    ledger.record_step({"prompt_tokens": 1_000, "completion_tokens": 100}, model="qwen")
+    ledger.record_step({"prompt_tokens": 2_000, "completion_tokens": 200}, model="deepseek")
+
+    assert ledger.totals.prompt_tokens == 3_000
+    assert ledger.totals.completion_tokens == 300
+
+
+def test_a_step_without_a_model_is_counted_but_not_attributed():
+    """No model means nobody could say which one -- a bucket named "unknown"
+    would be a claim the ledger cannot support."""
+    ledger = BudgetLedger()
+    ledger.record_step({"prompt_tokens": 1_000, "completion_tokens": 100})
+
+    assert ledger.totals.prompt_tokens == 1_000
+    assert ledger.by_model() == {}
+
+
+def test_cached_tokens_are_bucketed_too():
+    ledger = BudgetLedger()
+    ledger.record_step(
+        {"prompt_tokens": 1_000, "completion_tokens": 10, "cached_tokens": 600},
+        model="qwen",
+    )
+
+    assert ledger.by_model()["qwen"]["cached_tokens"] == 600
+
+
+def test_an_empty_ledger_has_no_models():
+    assert BudgetLedger().by_model() == {}

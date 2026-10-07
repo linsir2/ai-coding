@@ -417,6 +417,7 @@ class TraceRecorder:
         self._iteration = 0
         self._turn_usage = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
         self._turn_steps = 0
+        self._turn_by_model: dict[str, dict[str, int]] = {}
 
     # ---- public ------------------------------------------------------------
 
@@ -567,19 +568,34 @@ class TraceRecorder:
             self._snapshot(self.turn)
         existing = self.store.read_summary(self.session_id)
         usage = self._turn_usage
-        self.store.update_summary(
-            self.session_id,
-            {
-                "turns": int(existing.get("turns", 0)) + 1,
-                "steps": int(existing.get("steps", 0)) + self._turn_steps,
-                "prompt_tokens": int(existing.get("prompt_tokens", 0))
-                + usage["prompt_tokens"],
-                "completion_tokens": int(existing.get("completion_tokens", 0))
-                + usage["completion_tokens"],
-                "cached_tokens": int(existing.get("cached_tokens", 0))
-                + usage["cached_tokens"],
-            },
-        )
+        # ``update_summary`` merges the top level shallowly, so a nested map has
+        # to be accumulated here or each turn would overwrite the last one's
+        # split.
+        by_model = existing.get("by_model")
+        merged_by_model = dict(by_model) if isinstance(by_model, dict) else {}
+        for name, spend in self._turn_by_model.items():
+            prior = merged_by_model.get(name)
+            bucket = dict(prior) if isinstance(prior, dict) else {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cached_tokens": 0,
+                "steps": 0,
+            }
+            for field, value in spend.items():
+                bucket[field] = int(bucket.get(field, 0) or 0) + int(value)
+            merged_by_model[name] = bucket
+        payload: dict[str, Any] = {
+            "turns": int(existing.get("turns", 0)) + 1,
+            "steps": int(existing.get("steps", 0)) + self._turn_steps,
+            "prompt_tokens": int(existing.get("prompt_tokens", 0)) + usage["prompt_tokens"],
+            "completion_tokens": int(existing.get("completion_tokens", 0))
+            + usage["completion_tokens"],
+            "cached_tokens": int(existing.get("cached_tokens", 0)) + usage["cached_tokens"],
+        }
+        if merged_by_model:
+            payload["by_model"] = merged_by_model
+        self.store.update_summary(self.session_id, payload)
+        self._turn_by_model = {}
         self._turn_open = False
 
     def _accumulate(self, event: Any) -> None:
@@ -587,11 +603,21 @@ class TraceRecorder:
         if isinstance(inner, ModelStepFinished):
             self._turn_steps += 1
             usage = inner.usage or {}
-            self._turn_usage["prompt_tokens"] += int(usage.get("prompt_tokens", 0) or 0)
-            self._turn_usage["completion_tokens"] += int(
-                usage.get("completion_tokens", 0) or 0
-            )
-            self._turn_usage["cached_tokens"] += int(inner.cached_tokens or 0)
+            prompt = int(usage.get("prompt_tokens", 0) or 0)
+            completion = int(usage.get("completion_tokens", 0) or 0)
+            cached = int(inner.cached_tokens or 0)
+            self._turn_usage["prompt_tokens"] += prompt
+            self._turn_usage["completion_tokens"] += completion
+            self._turn_usage["cached_tokens"] += cached
+            if inner.model:
+                bucket = self._turn_by_model.setdefault(
+                    inner.model,
+                    {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "steps": 0},
+                )
+                bucket["prompt_tokens"] += prompt
+                bucket["completion_tokens"] += completion
+                bucket["cached_tokens"] += cached
+                bucket["steps"] += 1
 
     def _describe(
         self, event: Any

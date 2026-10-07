@@ -146,8 +146,15 @@ class TurnReporter:
         self._emit(event)
         return canonical
 
-    def report_step(self, *, index: int, step: StepResult, latency_ms: int) -> None:
-        """Report one model step's real cost, and feed the ledger."""
+    def report_step(
+        self, *, index: int, step: StepResult, latency_ms: int, model: str = ""
+    ) -> None:
+        """Report one model step's real cost, and feed the ledger.
+
+        ``model`` is who actually answered, which is not always the configured
+        default: a fallback chain may have moved the step to another provider
+        (G7).  Passed through to the event and the ledger, which attributes by it.
+        """
         cached, cache_write = cache_from_usage(step.usage)
         self._emit(
             ModelStepFinished(
@@ -159,10 +166,15 @@ class TurnReporter:
                 cached_tokens=cached,
                 cache_write_tokens=cache_write,
                 latency_ms=latency_ms,
+                model=model,
             )
         )
         self._ledger.record_step(
-            step.usage, cached=cached, cache_write=cache_write, latency_ms=latency_ms
+            step.usage,
+            model=model,
+            cached=cached,
+            cache_write=cache_write,
+            latency_ms=latency_ms,
         )
 
     def report_degraded(self, component: str, reason: str, fallback: str = "") -> None:

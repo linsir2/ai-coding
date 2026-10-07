@@ -171,15 +171,26 @@ def render_turn(summary: Mapping[str, Any]) -> str:
 
 
 def render_budget(
-    summary: Mapping[str, Any], *, price: Any | None = None
+    summary: Mapping[str, Any],
+    *,
+    price: Any | None = None,
+    prices: Mapping[str, Any] | None = None,
 ) -> str:
     """Session-level totals from ``summary.json``.
 
-    ``price`` is an optional ``core.budget.Pricing``.  When given and
-    configured, an estimate is appended — split into fresh and cached input,
-    because the two are billed at different rates.  Without it the line stays
-    token-only: R4a's rule is that an unknown price yields no cost rather than a
-    fake 0.0, and a session's summary is also what ``/budget`` reads.
+    ``prices`` maps a model name to its ``core.budget.Pricing`` (G7).  With a
+    fallback chain one session is billed by two providers, and the totals alone
+    cannot say which one the money went to.  ``price`` is the older single-model
+    form and stays supported: a caller with one model -- or a summary written
+    before per-model attribution existed -- has nothing to split.
+
+    When given and configured, an estimate is appended, split into fresh and
+    cached input because the two are billed at different rates.  Without a price
+    the line stays token-only: R4a's rule is that an unknown price yields no cost
+    rather than a fake 0.0.
+
+    A per-model breakdown appears only once more than one model was used: for a
+    single model it would repeat the total on a second line.
     """
     prompt = int(summary.get("prompt_tokens", 0) or 0)
     completion = int(summary.get("completion_tokens", 0) or 0)
@@ -194,10 +205,70 @@ def render_budget(
     cached = int(summary.get("cached_tokens", 0) or 0)
     if cached and prompt > 0:
         parts.append(f"cache {int(round(cached / prompt * 100))}%")
-    estimate = _estimate(prompt, completion, cached, price)
-    if estimate is not None:
-        parts.append(estimate)
-    return " · ".join(parts)
+
+    by_model = summary.get("by_model")
+    rows = _model_rows(by_model, prices) if isinstance(by_model, dict) else None
+    if rows is None:
+        estimate = _estimate(prompt, completion, cached, price)
+        if estimate is not None:
+            parts.append(estimate)
+        return " · ".join(parts)
+
+    # The total is still the headline; the split explains it.  Summed from the
+    # models that have a price, so an unpriced one neither adds nor hides money.
+    money_total = 0.0
+    any_priced = False
+    for row in rows:
+        if row[3] is not None:
+            money_total += row[3]
+            any_priced = True
+    if any_priced:
+        parts.append(f"≈ ¥{money_total:.4f}")
+    body = " · ".join(parts)
+    width = max(len(str(row[0])) for row in rows)
+    lines = [body]
+    for name, prompt_t, completion_t, money in rows:
+        line = (
+            f"  {str(name):<{width}}  "
+            f"{_thousands(prompt_t)} in / {_thousands(completion_t)} out"
+        )
+        if money is not None:
+            line += f"  ≈ ¥{money:.4f}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _model_rows(
+    by_model: Mapping[str, Any], prices: Mapping[str, Any] | None
+) -> list[tuple[str, int, int, float | None]] | None:
+    """One row per model, or ``None`` when a breakdown would say nothing.
+
+    Sorted by name so the output is stable between runs; a session with a single
+    attributed model returns ``None`` and the caller falls back to one line.
+    """
+    if len(by_model) < 2:
+        return None
+    rows: list[tuple[str, int, int, float | None]] = []
+    for name in sorted(by_model):
+        spend = by_model[name]
+        if not isinstance(spend, Mapping):
+            continue
+        prompt_t = int(spend.get("prompt_tokens", 0) or 0)
+        completion_t = int(spend.get("completion_tokens", 0) or 0)
+        cached_t = int(spend.get("cached_tokens", 0) or 0)
+        price = (prices or {}).get(name)
+        money = None
+        if price is not None and getattr(price, "configured", False):
+            cached_t = min(cached_t, prompt_t)
+            fresh = max(prompt_t - cached_t, 0)
+            cached_rate = getattr(price, "cached_per_1k", 0.0) or price.input_per_1k
+            money = (
+                fresh / 1000 * price.input_per_1k
+                + cached_t / 1000 * cached_rate
+                + completion_t / 1000 * price.output_per_1k
+            )
+        rows.append((name, prompt_t, completion_t, money))
+    return rows or None
 
 
 def _estimate(

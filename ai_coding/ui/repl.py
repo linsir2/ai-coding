@@ -372,7 +372,16 @@ def _handle_model(
         return REPLAction.CONTINUE, session
     set_model = getattr(loop, "set_model", None)
     if callable(set_model):
-        set_model(target)
+        try:
+            set_model(target)
+        except ValueError as exc:
+            # A model can be configured and still not be servable: with a
+            # fallback chain the engine only knows the models on that chain, and
+            # switching to a third one would mean rebuilding it (G7).  The
+            # command has to say so -- it used to raise out of the submit path,
+            # where nothing catches it.
+            console.error(f"[model] cannot switch to '{target}': {exc}")
+            return REPLAction.CONTINUE, session
         console.info(f"[model] switched to {target}")
     else:
         console.error("[model] model switching not supported by this loop")
@@ -413,7 +422,12 @@ def _budget_report(loop: Any, session: Any) -> str:
         return "[budget] 本会话尚无 token 用量（模型可能未上报 usage）"
     # The recorder is handed the model's prices at startup (cli.py) and nothing
     # read them until now; without a price the line stays token-only.
-    return f"[budget] {render_budget(summary, price=getattr(recorder, 'pricing', None))}"
+    rendered = render_budget(
+        summary,
+        price=getattr(recorder, "pricing", None),
+        prices=getattr(recorder, "pricings", None),
+    )
+    return f"[budget] {rendered}"
 
 
 def _memory_report(loop: Any) -> str:

@@ -876,8 +876,16 @@ class AgentLoop:
             raise
         latency_ms = int((time.monotonic() - started) * 1000)
         books.note_step(step.text, finish_reason=step.finish_reason, latency_ms=latency_ms)
+        # Who answered, not who was configured: a fallback chain may have moved
+        # this step, and the spend has to land on the provider that took it
+        # (G7).  Read rather than threaded through StepResult -- the chain
+        # already maintains this, and a new field would touch every construction
+        # site in the codebase to say something one attribute already says.
         self.reporter.report_step(
-            index=index, step=step, latency_ms=latency_ms
+            index=index,
+            step=step,
+            latency_ms=latency_ms,
+            model=str(getattr(getattr(self.engine, "model_config", None), "name", "") or ""),
         )
         self._emit(AssistantMessage(
             text=step.text, tool_calls=tuple(step.tool_calls),

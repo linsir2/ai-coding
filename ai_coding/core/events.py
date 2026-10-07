@@ -128,6 +128,10 @@ class ModelStepFinished:
     cached_tokens: int | None = None
     cache_write_tokens: int | None = None
     latency_ms: int = 0
+    #: Which model answered (G7).  With a fallback chain the step may not have
+    #: been taken by the configured default, and usage that cannot be attributed
+    #: cannot answer "did the fallback cost more".  Empty means nobody said.
+    model: str = ""
 
 
 @dataclass(frozen=True)

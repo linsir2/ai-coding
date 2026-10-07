@@ -230,3 +230,143 @@ def test_render_turn_says_nothing_about_subagents_when_there_were_none(tmp_path)
     text = render_turn(summarize_turn(_turn_file(tmp_path)))
 
     assert "subagent" not in text
+
+
+# ---- G7: /budget splits the spend by model ----------------------------------
+
+
+def test_budget_splits_by_model_once_more_than_one_was_used():
+    from ai_coding.core.budget import Pricing
+
+    text = render_budget(
+        {
+            "turns": 1,
+            "steps": 3,
+            "prompt_tokens": 15_000,
+            "completion_tokens": 900,
+            "by_model": {
+                "qwen": {
+                    "prompt_tokens": 10_000,
+                    "completion_tokens": 500,
+                    "cached_tokens": 0,
+                    "steps": 2,
+                },
+                "deepseek": {
+                    "prompt_tokens": 5_000,
+                    "completion_tokens": 400,
+                    "cached_tokens": 0,
+                    "steps": 1,
+                },
+            },
+        },
+        prices={
+            "qwen": Pricing(input_per_1k=0.002, output_per_1k=0.008),
+            "deepseek": Pricing(input_per_1k=0.001, output_per_1k=0.004),
+        },
+    )
+
+    assert "qwen" in text
+    assert "deepseek" in text
+    # qwen: 10 * 0.002 + 0.5 * 0.008 = 0.024 ; deepseek: 5 * 0.001 + 0.4 * 0.004 = 0.0066
+    assert "0.0240" in text
+    assert "0.0066" in text
+
+
+def test_budget_stays_one_line_for_a_single_model():
+    """A per-model breakdown of one model is the total, repeated."""
+    from ai_coding.core.budget import Pricing
+
+    text = render_budget(
+        {
+            "turns": 1,
+            "steps": 2,
+            "prompt_tokens": 1_000,
+            "completion_tokens": 100,
+            "by_model": {
+                "qwen": {
+                    "prompt_tokens": 1_000,
+                    "completion_tokens": 100,
+                    "cached_tokens": 0,
+                    "steps": 2,
+                }
+            },
+        },
+        prices={"qwen": Pricing(input_per_1k=0.002, output_per_1k=0.008)},
+    )
+
+    assert text.count("\n") == 0
+
+
+def test_an_unpriced_model_shows_tokens_and_no_estimate():
+    """R4a's rule, per model: an unknown price yields no cost, never a fake
+    zero, and the tokens are still reported."""
+    from ai_coding.core.budget import Pricing
+
+    text = render_budget(
+        {
+            "turns": 1,
+            "steps": 2,
+            "prompt_tokens": 6_000,
+            "completion_tokens": 300,
+            "by_model": {
+                "qwen": {
+                    "prompt_tokens": 5_000,
+                    "completion_tokens": 200,
+                    "cached_tokens": 0,
+                    "steps": 1,
+                },
+                "mystery": {
+                    "prompt_tokens": 1_000,
+                    "completion_tokens": 100,
+                    "cached_tokens": 0,
+                    "steps": 1,
+                },
+            },
+        },
+        prices={"qwen": Pricing(input_per_1k=0.002, output_per_1k=0.008)},
+    )
+
+    mystery = next(line for line in text.splitlines() if "mystery" in line)
+    assert "1,000" in mystery or "1000" in mystery
+    assert "≈" not in mystery
+    # The session total is still priced, but only from the models that can be.
+    assert "≈" in text.splitlines()[0]
+
+
+def test_a_summary_without_by_model_renders_as_before():
+    """Every summary written before this change has no per-model split, and the
+    line has to stay exactly what it was."""
+    text = render_budget({"turns": 1, "steps": 1, "prompt_tokens": 10, "completion_tokens": 1})
+
+    assert text.count("\n") == 0
+
+
+def test_the_price_map_is_keyed_by_the_wire_name(tmp_path):
+    """The trap the first version fell into: a config key need not equal the
+    name sent to the provider (``qwen`` -> ``qwen3.8-2.4t-a95b``), and the step
+    reports the wire name.  Keying the prices by the config key produced a
+    summary with tokens and no money -- silently, because an unknown price is
+    supposed to yield nothing.
+    """
+    from ai_coding.cli import _make_recorder
+    from ai_coding.config.models import AIConfig, AppConfig
+    from ai_coding.domain.model_config import ModelConfig
+
+    cfg = AppConfig(
+        default_model="qwen",
+        ai=AIConfig(),
+        models={
+            "qwen": ModelConfig(
+                name="qwen3.8-2.4t-a95b",
+                base_url="https://a/v1",
+                api_key="k",
+                price_input_per_1k=0.01,
+            ),
+        },
+    )
+    cfg.tracing.enabled = True
+
+    recorder = _make_recorder(cfg, str(tmp_path), session=None)
+
+    assert recorder is not None
+    assert list(recorder.pricings) == ["qwen3.8-2.4t-a95b"]

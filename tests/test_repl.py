@@ -738,3 +738,31 @@ def test_budget_shows_money_when_the_recorder_knows_the_price(tmp_path):
     plain = _budget_report(loop, _session("priced"))
     assert "≈" not in plain
     assert "cache 60%" in plain
+
+
+async def test_handle_model_reports_a_model_the_engine_cannot_serve():
+    """A model can be configured and still not be servable (G7).
+
+    With a fallback chain the engine only knows the models on that chain, so
+    switching to a third one is refused -- and the refusal used to be a
+    ``ValueError`` raised out of the submit path, where nothing catches it.
+    The command has to say what happened.
+    """
+    loop = _FakeLoop()
+    _model_table(loop)
+
+    def refuse(name: str) -> None:
+        raise ValueError(f"model '{name}' is not in this fallback chain")
+
+    loop.set_model = refuse
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(loop, "/model claude", sessions.items[0], sessions, dc)
+
+    assert action is REPLAction.CONTINUE
+    out = _session_text(c)
+    # ``console.error`` here is a real Rich console, so the message is what
+    # proves it was reported rather than raised.
+    assert "cannot switch to 'claude'" in out
+    assert "not in this fallback chain" in out

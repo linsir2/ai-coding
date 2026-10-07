@@ -14,7 +14,7 @@
 |---|---|---|---|---|---|
 | G1-1 | turn 重入闸门提升到编排层 | 中 | 1 文件 ~30 行 | — | ✅ 已做 |
 | ~~G5-5~~ | ~~压缩 reserve~~ | — | — | ❌ 砍掉 |
-| G7-1/3 | 成本核算 + provider 归因 | 高 | 1-2 文件 | — | ⬜ 待做 |
+| G7-1/3 | 成本核算 + provider 归因 | 高 | 9 文件 | — | ✅ 已做 |
 | G5-6 | token 估算改混合口径 | 中-高 | 1 文件 | — | ⏸ 暂缓（实测后降级） |
 | G8-1 | 预算压力注入 | 中高 | 1 文件 | — | ⬜ 待做 |
 | G5-1 | provider 拒绝时压缩重试 | 高 | 2 文件 ~50 行 | — | ✅ 已做 |
@@ -67,11 +67,55 @@
 
 ---
 
-### G7-1 / G7-3｜成本核算 + provider 维度归因
+### G7-1 / G7-3｜成本核算 + provider 维度归因 ✅ 已做
 
-**为什么重要**：本项目把 M1/M2 挂在重试和降级上，那么「这次降级省了钱还是多花了钱」就是核心问题。`core/budget.py::cost()` 已有纯函数骨架，缺的是 ①实际记账 ②`/trace` 汇总 ③降级到不同模型时按各自单价分账（G7-3 与 M2 直接相关）。
+**调研中先确证了三个 bug**（都在 M2 的 `FallbackEngine` 上，是归因的前提）：
 
-**注意**：`config.local.yaml` 里 qwen 无可核验公开价目，`Pricing.cost()` 未配置时返回 `None`（不假装 0）。所以这一项的 UI 展示在 qwen 上仍是「无估算」——**这是正确行为，不是 bug**。
+| # | 问题 | 证据 |
+|---|---|---|
+| P1 | `_active` 被设成「**预测的下一个**引擎」且 `step()` 从不重置 → 一回降级之后，后续每步都报告降级落点，即使主模型作答 | 真实代码跑通：回合1 降级到 deepseek，回合2 由 qwen 作答，`model_config.name` 仍报 deepseek。**状态栏据此显示错误的模型** |
+| P2 | `/model X`（X 在链中）改了 `_active`，但 `step()` 恒从 index 0 开始 → **命令报成功，什么都没发生** | `set_model("deepseek")` 后仍由 qwen 作答 |
+| P3 | `/model` 切到「已配置但不在链中」的模型 → setter 抛 `ValueError`，而 `handle_input` 与 TUI worker **都没有 try/except** | 异常从 worker 冒出 |
+
+**修法**：
+- `_active` = 「**最近一次尝试的引擎**」，`step()` 入口重置为 0，每次尝试前设为 index
+- `set_model` 命中链成员时**把它移到链头**（语义 = 「先试它，再按原顺序」），不再改一个被忽略的下标
+- `/model` 捕获 `ValueError` 并显示成错误行
+
+**归因实现**（9 文件，每处几行，无新概念）：
+- `ModelStepFinished.model: str = ""` —— 丢失的那个事实
+- `AgentLoop._model_step` **读** `engine.model_config.name` 而非给 `StepResult` 加字段
+  （链已维护该事实；加字段要改遍全仓每个 `StepResult(...)` 构造点，只为说一句一个属性已经说过的话）
+- `BudgetLedger._by_model` 分桶 + `by_model()`；空 model 进总量不进桶
+- `summary.json` 合并 `by_model`（顶层 `update_summary` 是浅合并，嵌套必须自己累加）
+- `render_budget(prices=...)` 按模型分行；`price=` 旧形参保留
+- `cli._make_recorder` 构建**全模型**价格表，键是 **wire name**
+
+**真实路径实测**（真 factory + 真 AgentLoop + 真 trace + 真 `/budget`）：
+
+```
+回合1: qwen 429 → 降级 deepseek 作答
+回合2: qwen 恢复并作答
+两轮后引擎报告的模型: qwen3.8-2.4t-a95b     ← P1 已修（改前会报 deepseek）
+
+by_model: {deepseek-chat: 1 step, qwen3.8-2.4t-a95b: 1 step}
+trace 每步 model: [(1, 'deepseek-chat'), (1, 'qwen3.8-2.4t-a95b')]
+
+/budget:
+2 turns · 2 steps · 2,200 tok (2,000 in / 200 out) · ≈ ¥1.5097
+  deepseek-chat      1,000 in / 100 out  ≈ ¥1.4910
+  qwen3.8-2.4t-a95b  1,000 in / 100 out  ≈ ¥0.0187
+```
+
+**这直接回答了 M2 的评估问题**：同样 1000/100 token，deepseek 比 qwen 贵 **79 倍**。
+
+**真实路径抓到的第 4 个 bug**（单测抓不到，因为我测试里两边都写同名）：
+`by_model` 用 `ModelConfig.name`（wire name），而价格表按**配置键**构建——`qwen` 与
+`qwen3.8-2.4t-a95b` 不同名 → **token 有、钱没有，且静默**（未知价格本来就该什么都不显示）。
+已修 + 回归钉子 `test_the_price_map_is_keyed_by_the_wire_name`。
+
+**明确不做**：跨 session 的按模型归因（`aggregate.py`）——降级发生在回合内，session 级已能回答
+「降级贵不贵」；`/model` 切到链外模型（需重建引擎：换链、关旧 client、重订阅回调，是独立设计）。
 
 ---
 

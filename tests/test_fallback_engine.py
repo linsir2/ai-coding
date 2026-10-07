@@ -216,3 +216,73 @@ def test_duplicate_models_would_loop_forever_at_config_time():
     model = _model("a")
     assert replace(model, name="a") is not model
     assert model.name == "a"
+
+
+# ---- G7: "which model answered" has to survive the next step -----------------
+
+
+@pytest.mark.asyncio
+async def test_model_config_names_the_engine_that_answered():
+    """Not the engine that failed, and not the one from an earlier turn.
+
+    ``_active`` used to be set to the *predicted* next engine when one gave up,
+    and never reset: after a fallback every later step reported the fallback
+    target, even a step the primary answered.  The status bar read that name and
+    so did the cost ledger, which is how a mislabelled model becomes
+    misattributed spend.
+    """
+    engine = _engine(
+        (_model("a"), [_exhausted(), _answer("from a")]),
+        (_model("b"), [_answer("from b")]),
+    )
+
+    assert (await engine.step([], tools=[])).text == "from b"
+    assert engine.model_config.name == "b", "the fallback target answered"
+
+    assert (await engine.step([], tools=[])).text == "from a"
+    assert engine.model_config.name == "a", "the primary answered again"
+
+
+@pytest.mark.asyncio
+async def test_the_chain_starts_from_the_top_every_step():
+    """A turn that fell back must not leave the next turn starting mid-chain:
+    the primary is the one to prefer until it fails again."""
+    engine = _engine(
+        (_model("a"), [_exhausted(), _answer("from a")]),
+        (_model("b"), [_answer("from b")]),
+    )
+
+    await engine.step([], tools=[])  # a fails, b answers
+    await engine.step([], tools=[])
+
+    assert engine._engines[0].calls == 2, "the next step skipped the primary"
+
+
+@pytest.mark.asyncio
+async def test_switching_to_a_chain_member_makes_it_primary():
+    """``/model b`` has to actually change who answers.
+
+    It used to set ``_active``, which ``step`` then ignored -- it always began
+    at index 0 -- so the command reported success and nothing happened.
+    """
+    engine = _engine((_model("a"), [_answer("from a")]), (_model("b"), [_answer("from b")]))
+
+    engine.model_config = _model("b")
+
+    assert (await engine.step([], tools=[])).text == "from b"
+    assert [e.model_config.name for e in engine._engines] == ["b", "a"]
+
+
+@pytest.mark.asyncio
+async def test_switching_keeps_the_remaining_chain_in_order():
+    """What comes after the new primary is still the original chain, minus the
+    model that moved to the front."""
+    engine = _engine(
+        (_model("a"), [_answer("a")]),
+        (_model("b"), [_answer("b")]),
+        (_model("c"), [_answer("c")]),
+    )
+
+    engine.model_config = _model("c")
+
+    assert [e.model_config.name for e in engine._engines] == ["c", "a", "b"]

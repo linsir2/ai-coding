@@ -376,3 +376,21 @@ def test_the_loop_turns_a_switch_into_an_event(tmp_path):
     assert [(e.from_model, e.to_model, e.kind) for e in switches] == [
         ("qwen", "deepseek", "rate_limited")
     ]
+
+
+def test_model_step_finished_carries_the_model_that_answered():
+    """G7: the trace records per-step usage already; without the model name the
+    spend cannot be attributed to anyone."""
+    from ai_coding.core.events import ModelStepFinished
+
+    event = ModelStepFinished(index=1, model="deepseek-chat")
+
+    assert event.model == "deepseek-chat"
+
+
+def test_model_step_finished_defaults_to_no_model():
+    """Optional, so every existing construction keeps working and "nobody said"
+    stays distinguishable from a fabricated name."""
+    from ai_coding.core.events import ModelStepFinished
+
+    assert ModelStepFinished(index=1).model == ""

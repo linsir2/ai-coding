@@ -53,9 +53,23 @@ class FallbackEngine(ChatEngine):
 
     @model_config.setter
     def model_config(self, value: Any) -> None:
+        """Make this model the one to try first.
+
+        Not "start at its index": ``step`` begins at the top of the chain on
+        purpose, so recording a preference anywhere else would be ignored -- which
+        is exactly what ``/model`` used to do while reporting success.  Moving the
+        engine to the front keeps the promise the command makes, and the models
+        that followed it stay behind it in their original order.
+
+        Rebuilding the chain from a model that is *not* in it would mean
+        replacing the engine -- new clients, new subscriptions, the old ones
+        closed -- so that is refused rather than half-done.
+        """
         for index, engine in enumerate(self._engines):
             if engine.model_config is value or engine.model_config == value:
-                self._active = index
+                rest = tuple(e for i, e in enumerate(self._engines) if i != index)
+                self._engines = (engine, *rest)
+                self._active = 0
                 return
         raise ValueError(f"model {getattr(value, 'name', value)!r} is not in this fallback chain")
 
@@ -90,7 +104,13 @@ class FallbackEngine(ChatEngine):
         on_delta: DeltaSink | None = None,
     ) -> StepResult:
         last: FallbackWorthwhile | None = None
+        # Start from the top every step: a turn that fell back must not leave the
+        # next one beginning mid-chain, and ``_active`` has to end up naming the
+        # engine that actually answered (the status bar and the cost ledger both
+        # read it afterwards).
+        self._active = 0
         for index, engine in enumerate(self._engines):
+            self._active = index
             try:
                 return await engine.step(
                     messages, tools=tools, instructions=instructions, on_delta=on_delta
@@ -99,7 +119,6 @@ class FallbackEngine(ChatEngine):
                 last = exc
                 if index + 1 >= len(self._engines):
                     raise
-                self._active = index + 1
                 self._announce(self._engines[index], self._engines[index + 1], exc)
         # Unreachable: the loop either returns or re-raises on its last pass.
         raise AssertionError("unreachable") from last

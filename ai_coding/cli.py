@@ -173,27 +173,35 @@ def _make_recorder(app_cfg: Any, workspace: str, session: Any) -> Any | None:
         store.prune()
     except Exception:  # noqa: BLE001
         pass
-    model = getattr(app_cfg, "default_model", "")
-    pricing = None
+    # Every configured model's price, not just the default's: a fallback chain
+    # bills one session through two providers, and pricing only the default
+    # would silently charge the fallback's tokens at the wrong rate (G7).
+    pricings: dict[str, Any] = {}
     try:
         from ai_coding.core.budget import Pricing
 
-        config = app_cfg.models.get(model) if getattr(app_cfg, "models", None) else None
-        if config is not None:
-            pricing = Pricing(
+        for name, config in (getattr(app_cfg, "models", None) or {}).items():
+            # Keyed by the *wire* name, which is what a step reports and what
+            # the ledger attributes by -- the config key can differ from it
+            # (``qwen`` -> ``qwen3.8-2.4t-a95b``), and keying by the wrong one
+            # silently yields tokens with no price.
+            pricings[str(getattr(config, "name", "") or name)] = Pricing(
                 input_per_1k=float(getattr(config, "price_input_per_1k", 0.0)),
                 output_per_1k=float(getattr(config, "price_output_per_1k", 0.0)),
                 cached_per_1k=float(getattr(config, "price_cached_per_1k", 0.0)),
             )
     except Exception:  # noqa: BLE001
-        pricing = None
+        pricings = {}
+    # The old single-price attribute stays for callers that have one model.
+    default_price = pricings.get(str(getattr(app_cfg, "default_model", "")))
     recorder = TraceRecorder(
         store,
         session_id=getattr(session, "session_id", "") if session is not None else "",
         redactor=Redactor(enabled=bool(getattr(tracing, "redact", True))),
         capture=str(getattr(tracing, "capture", "previews")),
     )
-    recorder.pricing = pricing  # type: ignore[attr-defined]
+    recorder.pricing = default_price  # type: ignore[attr-defined]
+    recorder.pricings = pricings  # type: ignore[attr-defined]
     return recorder
 
 
