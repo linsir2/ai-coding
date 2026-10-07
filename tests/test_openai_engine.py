@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ai_coding.ai.engine import EngineError
+from ai_coding.ai.engine import EngineError, FallbackWorthwhile
 from ai_coding.ai.openai_engine import OpenAIChatEngine
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.model_config import ModelConfig
@@ -443,11 +443,16 @@ async def test_a_rate_limit_is_retried_and_the_next_attempt_succeeds():
 
 @pytest.mark.asyncio
 async def test_an_authentication_error_is_not_retried():
-    """Retrying a rejected key cannot help, and each try costs a round trip."""
+    """Retrying a rejected key cannot help, and each try costs a round trip.
+
+    M2 widened the contract: a rejected key is now ``FallbackWorthwhile``, so
+    the engine layer can be composed into a chain that tries another provider.
+    Still an ``EngineError``, so every existing handler is unaffected.
+    """
     client = _SequencedClient([_auth_error()])
     engine = _fast_engine(client)
 
-    with pytest.raises(EngineError) as excinfo:
+    with pytest.raises(FallbackWorthwhile) as excinfo:
         await engine.step([_user()], tools=[])
 
     assert client.completions.calls == 1
@@ -519,6 +524,15 @@ def test_classify_failure_uses_status_codes_not_just_sdk_classes():
     assert classify_failure(
         openai.APIStatusError("odd", response=_Resp(502), body=None)
     ) is FailureKind.SERVER_ERROR
+    # A rejected key is a different problem from a rejected request: the first is
+    # worth another provider, the second is worth nothing (M2 §5).
+    assert classify_failure(_auth_error()) is FailureKind.AUTH_ERROR
+    assert classify_failure(
+        openai.APIStatusError("odd", response=_Resp(403), body=None)
+    ) is FailureKind.AUTH_ERROR
+    assert classify_failure(
+        openai.APIStatusError("odd", response=_Resp(400), body=None)
+    ) is FailureKind.FATAL
     assert classify_failure(RuntimeError("boom")) is FailureKind.FATAL
     assert classify_failure(ValueError("bad json")) is FailureKind.FATAL
 
@@ -553,3 +567,91 @@ def test_retry_after_is_read_from_the_header_and_ignored_when_unparsable():
     assert _retry_after(_rate_limited()) is None
     assert _retry_after(_server_error()) is None
     assert _retry_after(RuntimeError("boom")) is None
+
+
+@pytest.mark.asyncio
+async def test_engine_reports_each_retry_to_on_retry():
+    """Without an out-of-band channel the engine is silent, so the operator
+    waits and cannot tell a rate-limit backoff from a stalled turn."""
+    seen: list[tuple[str, int]] = []
+    client = _SequencedClient([
+        _rate_limited(),
+        _server_error(),
+        [_text_chunk("好", finish_reason="stop")],
+    ])
+    engine = OpenAIChatEngine(
+        _model(retry_base_seconds=0.0),
+        client=client,
+        on_retry=lambda *, kind, attempt, delay_seconds, reason: seen.append((kind, attempt)),
+    )
+
+    await engine.step([_user()], tools=[])
+
+    assert seen == [("rate_limited", 1), ("server_error", 2)]
+
+
+@pytest.mark.asyncio
+async def test_engine_works_without_an_on_retry_hook():
+    """The hook is optional: a teacher asking for one must not change the default
+    engine, and today's callers that never pass it keep working."""
+    client = _SequencedClient([_server_error(), [_text_chunk("好", finish_reason="stop")]])
+
+    assert (await _fast_engine(client).step([_user()], tools=[])).text == "好"
+
+
+# ---- M2: what is worth another model, and what is not ----------------------
+
+
+@pytest.mark.asyncio
+async def test_exhausted_retries_raise_fallback_worthwhile():
+    """A transient failure that used up its budget is the one case where trying
+    a different provider can still produce an answer."""
+    client = _SequencedClient([_rate_limited()])
+    engine = _fast_engine(client, max_retries=2)
+
+    with pytest.raises(FallbackWorthwhile):
+        await engine.step([_user()], tools=[])
+
+    assert client.completions.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_a_bad_request_is_not_fallback_worthwhile():
+    """400 is a property of the messages we sent, not of the server: the same
+    request fails identically on every provider, so a chain would only burn the
+    next model's whole budget to learn nothing."""
+    import openai
+
+    client = _SequencedClient([openai.BadRequestError("nope", response=_Resp(400), body=None)])
+    engine = _fast_engine(client, max_retries=2)
+
+    with pytest.raises(EngineError) as excinfo:
+        await engine.step([_user()], tools=[])
+
+    assert not isinstance(excinfo.value, FallbackWorthwhile)
+    assert client.completions.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failure_after_text_started_is_not_fallback_worthwhile():
+    """The invariant that makes M2 safe (docs spec §5): once text or a partial
+    tool call has reached the operator, no other model may take over — it would
+    repeat the prose and splice a half-built tool call."""
+    client = _CutClient([_text_chunk("partial")], _server_error())
+    engine = _fast_engine(client)
+
+    with pytest.raises(EngineError) as excinfo:
+        await engine.step([_user()], tools=[])
+
+    assert not isinstance(excinfo.value, FallbackWorthwhile)
+
+
+@pytest.mark.asyncio
+async def test_a_stream_failure_before_any_output_is_fallback_worthwhile():
+    """The other side of the same boundary: nothing was delivered, so the turn
+    is intact and another model can still answer it."""
+    client = _SequencedClient([_server_error()])
+    engine = _fast_engine(client, max_retries=1)
+
+    with pytest.raises(FallbackWorthwhile):
+        await engine.step([_user()], tools=[])

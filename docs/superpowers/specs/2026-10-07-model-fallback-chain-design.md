@@ -106,17 +106,19 @@ engines[N-1].step() → FallbackWorthwhile，且已到最后一个
 
 ### `FallbackEngine`（新增 `ai_coding/ai/fallback_engine.py`）
 
-| 成员 | 作用 |
-|---|---|
-| `_engines: tuple[OpenAIChatEngine, ...]` | 链，构造时即全部创建（各自持有 client） |
-| `_active: int` | 当前活跃下标 |
-| `model_config` (property, 只读) | 返回 `_engines[_active].model_config`，满足 F2 |
-| `on_retry` (property + setter) | 读取本对象的值；赋值时广播给所有子引擎，保持 M1 契约 |
-| `on_fallback` (property + setter) | 同上，由 `AgentLoop.__init__` 订阅 |
-| `step()` | 遍历链，仅捕获 `FallbackWorthwhile`；切换前触发 `on_fallback` |
-| `aclose()` | 关闭所有子引擎的 client |
+| 成员 | 读 | 写 | 作用 |
+|---|---|---|---|
+| `_engines: tuple[OpenAIChatEngine, ...]` | — | 构造 | 链，构造时即全部创建（各自持有 client，满足 F3） |
+| `_active: int` | 内部 | 内部 | 当前活跃下标 |
+| `model_config` | ✅ | ✅ | 读：`_engines[_active].model_config`（满足 F2）。写：跳到链中 `model_config` 相同的那个引擎，不在链中则 `ValueError` |
+| `on_retry` | — | ✅ | setter 广播给所有子引擎，保持 M1 契约 |
+| `on_fallback` | — | ✅ | setter 广播给所有子引擎，由 `AgentLoop.__init__` 订阅 |
+| `step()` | — | — | 遍历链，仅捕获 `FallbackWorthwhile`；切换前触发 `on_fallback` |
+| `aclose()` | — | — | 关闭所有子引擎的 client |
 
-`model_config` **只做 getter**。`AgentLoop.set_model` 保持死代码原状（F5 不在范围内）。
+**只读还是可写——一个自查出来的隐患。** 初稿把 `model_config` 定为只读，理由是"`set_model` 是死代码，保持原状"。这是错的：只读 property 并非"保持原状"，而是把一个**原本无害的死代码**变成**会炸的雷**。`AgentLoop.set_model`（`core/agent_loop.py:256`）执行的是赋值语句；一旦有人修复 F5（`AIConfig` 补 `models` 字段），该行将开始执行，届时只读 property 会抛 `AttributeError` ——且**只在降级链场景下崩**，单引擎引擎不受影响。这种"配置一改就炸、且炸在别处"的隐患必须在本次设计里根除，因此 setter 的语义定义为「跳到链中对应模型的引擎」，约 8 行。
+
+**两个回调都只写不读。** `on_retry` / `on_fallback` 的 getter 在全项目没有任何消费者（唯一读取发生在子引擎内部读自己的属性）。因此不实现 getter——写了就是无人调用的代码。
 
 ### `ProviderFallback` 事件（新增 `ai_coding/core/events.py`）
 

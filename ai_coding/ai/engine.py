@@ -21,9 +21,49 @@ from ai_coding.domain.message import ChatMessage
 
 DeltaSink = Callable[[str], None]
 
+#: Told about a retry *before* the engine waits.  Keyword-only so the shape is
+#: stated once and cannot be reordered at a call site; a positional free-for-all
+#: of four same-typed arguments is exactly where a wiring bug hides.
+RetryObserver = Callable[..., None]
+
+#: Told when the active model is abandoned for another one (M2).  Keyword-only
+#: for the same reason as ``RetryObserver``.
+FallbackObserver = Callable[..., None]
+
 
 class EngineError(RuntimeError):
     """A model-call failure the loop must see (never swallowed)."""
+
+
+class FallbackWorthwhile(EngineError):
+    """One model gave up and another might still answer (M2).
+
+    ``kind`` is the verdict that ``ai.openai_engine.classify_failure`` reached
+    (``rate_limited``, ``server_error``, ``transport``, ``auth_error``).  It is a
+    field rather than something parsed back out of the message: the chain shows
+    it to the operator and records it in the trace, and a substring of a
+    human-readable string is not a contract.
+
+    A subclass so every existing ``except EngineError`` keeps working: when the
+    whole chain is exhausted the turn still ends in ``ERROR`` the way it always
+    did.  What the subclass buys is the one distinction that was previously
+    impossible to make -- an exhausted retry budget is worth another provider,
+    while a stream that broke *after* the operator already saw text is not,
+    because a second model would repeat the prose and splice a half-built tool
+    call.
+
+    Both spellings are raised by ``OpenAIChatEngine``; ``FallbackEngine`` is the
+    only consumer that cares about the difference.
+
+    Args:
+        kind: the failure verdict, carried through verbatim from the classifier.
+    """
+
+    kind: str = ""
+
+    def __init__(self, *args: Any, kind: str = "") -> None:
+        super().__init__(*args)
+        self.kind = kind
 
 
 class ChatEngine(ABC):
@@ -32,6 +72,17 @@ class ChatEngine(ABC):
     #: Set by ``AgentLoop.set_model``; concretely a ``ModelConfig``.  Declared
     #: here (typing only) so the port matches how the loop actually uses it.
     model_config: Any
+
+    #: M1: where a retry is reported.  Declared on the port because the loop
+    #: subscribes unconditionally -- a ``getattr`` probe would invert the
+    #: question ("does this engine already have a listener?") into "does this
+    #: engine retry?", which no engine can answer before its first failure.
+    on_retry: RetryObserver | None = None
+
+    #: M2: where a switch to a different model is reported.  Declared here for
+    #: the same reason as ``on_retry``: ``AgentLoop`` assigns it without asking,
+    #: so the port has to carry it.  Only ``FallbackEngine`` ever calls it.
+    on_fallback: FallbackObserver | None = None
 
     @abstractmethod
     async def step(
@@ -56,4 +107,11 @@ class ChatEngine(ABC):
         return None
 
 
-__all__ = ["ChatEngine", "EngineError", "DeltaSink"]
+__all__ = [
+    "ChatEngine",
+    "DeltaSink",
+    "EngineError",
+    "FallbackObserver",
+    "FallbackWorthwhile",
+    "RetryObserver",
+]

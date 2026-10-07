@@ -328,6 +328,20 @@ class AppConfig(BaseModel):
     ui: UIConfig = Field(default_factory=UIConfig)
 
 
+def _coerce_fallbacks(raw: Any) -> tuple[str, ...]:
+    """Normalise a chain into a tuple of model keys.
+
+    A bare ``fallback_models: backup`` parses as a string, and iterating a
+    string yields its characters -- so without this the chain would become six
+    one-letter model names and only fail later, on the first outage.
+    """
+    if raw is None or raw == "":
+        return ()
+    if isinstance(raw, str):
+        return (raw,)
+    return tuple(str(name) for name in raw)
+
+
 def _coerce_model(raw: dict[str, Any]) -> ModelConfig:
     """Build a domain ``ModelConfig`` accepting snake_case or legacy camelCase keys."""
     return ModelConfig(
@@ -345,4 +359,5 @@ def _coerce_model(raw: dict[str, Any]) -> ModelConfig:
         price_input_per_1k=float(raw.get("price_input_per_1k", 0.0) or 0.0),
         price_output_per_1k=float(raw.get("price_output_per_1k", 0.0) or 0.0),
         price_cached_per_1k=float(raw.get("price_cached_per_1k", 0.0) or 0.0),
+        fallback_models=_coerce_fallbacks(raw.get("fallback_models")),
     )

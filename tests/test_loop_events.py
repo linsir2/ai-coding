@@ -14,7 +14,10 @@ from ai_coding.core.events import (
     AssistantMessage,
     AssistantTextDelta,
     IterationStarted,
+    LoopEvent,
     NullObserver,
+    ProviderFallback,
+    ProviderRetried,
     RecordingObserver,
     TaskUpdated,
     ToolApprovalRequested,
@@ -203,3 +206,173 @@ def test_r8_tool_chunk_is_a_frozen_loop_event():
     with pytest.raises(dataclasses.FrozenInstanceError):
         chunk.text = "other"  # type: ignore[misc]
     assert (chunk.call_id, chunk.stream, chunk.seq) == ("c1", "stdout", 3)
+
+
+# ---- provider retry visibility (M1) ---------------------------------------
+
+
+def test_provider_retried_is_in_the_event_union():
+    """A retry is a fact the loop must be able to state; an event that is not in
+    the union cannot travel, and the trace would never see it."""
+    from typing import get_args
+
+    assert ProviderRetried in set(get_args(LoopEvent))
+
+
+def test_provider_retried_is_frozen():
+    assert dataclasses.is_dataclass(ProviderRetried)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ProviderRetried(kind="server_error", attempt=1, delay_seconds=2.0).kind = "other"  # type: ignore[misc]
+
+
+def test_provider_retried_renders_one_dim_line():
+    """A retry is an occasional event, not a work unit: it gets a line, never a
+    fold — the same reasoning as the "no zero-valued tail" rule on /trace."""
+    from ai_coding.ui.blocks import blocks_from_event
+
+    block = blocks_from_event(
+        ProviderRetried(kind="rate_limited", attempt=2, delay_seconds=7.0, reason="slow down")
+    )
+
+    assert block is not None
+    assert block.kind == "info"
+    text = block.text if isinstance(block.text, str) else str(block.text)
+    assert "rate_limited" in text
+    assert "2" in text
+    assert "7" in text
+
+
+@pytest.mark.asyncio
+async def test_the_loop_surfaces_an_engine_retry_to_its_observer(tmp_path):
+    """The end-to-end claim, not the unit one: a flaky provider must put a
+    ProviderRetried on the loop's own observer.  The engine test proves the
+    callback fires; only this proves the loop is listening to it."""
+    from ai_coding.ai.openai_engine import OpenAIChatEngine
+    from ai_coding.core.agent_loop import AgentLoop
+    from ai_coding.domain.model_config import ModelConfig
+    from ai_coding.service.session_service import SessionService
+    from ai_coding.tools.registry import ToolRegistry
+    from tests.test_openai_engine import _rate_limited, _SequencedClient, _text_chunk
+
+    observer = RecordingObserver()
+    engine = OpenAIChatEngine(
+        ModelConfig(name="m", base_url="http://x", api_key="k", retry_base_seconds=0.0),
+        client=_SequencedClient([_rate_limited(), [_text_chunk("好", finish_reason="stop")]]),
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    loop = AgentLoop(engine, sessions, ToolRegistry(), observer=observer)
+
+    assert await loop.process_input(sessions.create(), "hi") == "好"
+
+    retried = [e for e in observer.events if isinstance(e, ProviderRetried)]
+    assert [(e.kind, e.attempt) for e in retried] == [("rate_limited", 1)]
+
+
+def test_provider_retried_lands_in_the_trace_with_its_span(tmp_path):
+    import json
+
+    """The recorder needs no branch for a new event -- it writes any dataclass
+    by class name -- so this test guards the *wiring*, not the recorder: a retry
+    that never reaches disk is invisible after the turn ends."""
+    from ai_coding.core.trace import TraceRecorder, TraceStore
+
+    store = TraceStore(tmp_path / "traces", max_turn_bytes=1_000_000)
+    recorder = TraceRecorder(store, session_id="sess-1", capture="full")
+    recorder.on_event(IterationStarted(index=1, max_iterations=10))
+    recorder.on_event(
+        ProviderRetried(kind="server_error", attempt=2, delay_seconds=4.0, reason="502")
+    )
+
+    rows = [
+        json.loads(line)
+        for path in store.root.glob("**/*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    hit = [r for r in rows if r["evt"] == "ProviderRetried"]
+    assert len(hit) == 1
+    assert hit[0]["span"] == "i1", "a retry belongs to the iteration that hit it"
+    assert hit[0]["data"] == {
+        "kind": "server_error",
+        "attempt": 2,
+        "delay_seconds": 4.0,
+        "reason": "502",
+    }
+
+
+# ---- M2: the operator is told which model is answering ---------------------
+
+
+def test_provider_fallback_is_in_the_event_union():
+    from typing import get_args
+
+    assert ProviderFallback in set(get_args(LoopEvent))
+
+
+def test_provider_fallback_is_frozen():
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ProviderFallback(from_model="qwen", to_model="deepseek", kind="rate_limited").kind = "x"  # type: ignore[misc]
+
+
+def test_provider_fallback_renders_one_dim_line_naming_both_models():
+    """The line has to name both models: "something changed" is not actionable
+    when the operator cannot tell what they are now paying for."""
+    from ai_coding.ui.blocks import blocks_from_event
+
+    block = blocks_from_event(
+        ProviderFallback(
+            from_model="qwen", to_model="deepseek", kind="rate_limited", reason="slow down"
+        )
+    )
+
+    assert block is not None
+    assert block.kind == "info"
+    assert "qwen" in block.text and "deepseek" in block.text
+    assert "rate_limited" in block.text
+
+
+def test_the_loop_turns_a_switch_into_an_event(tmp_path):
+    """The end-to-end wiring, as in M1: the unit tests prove the engine reports,
+    only this proves the loop is listening."""
+    import asyncio
+
+    from ai_coding.ai.engine import FallbackWorthwhile
+    from ai_coding.ai.fallback_engine import FallbackEngine
+    from ai_coding.domain.loop import StepResult
+    from ai_coding.domain.model_config import ModelConfig
+
+    class _Dead:
+        def __init__(self, name):
+            self.model_config = ModelConfig(name=name, base_url="https://x/v1", api_key="k")
+            self.on_retry = None
+            self.on_fallback = None
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None):
+            raise FallbackWorthwhile("rate_limited: 429", kind="rate_limited")
+
+        async def aclose(self):
+            return None
+
+    class _Alive(_Dead):
+        async def step(self, messages, *, tools, instructions=None, on_delta=None):
+            return StepResult(
+                text="ok", tool_calls=(), finish_reason="stop", usage=None, reasoning=None
+            )
+
+    observer = RecordingObserver()
+    engine = FallbackEngine([_Dead("qwen"), _Alive("deepseek")])
+
+    async def run():
+        from ai_coding.core.agent_loop import AgentLoop
+        from ai_coding.service.session_service import SessionService
+        from ai_coding.tools.registry import ToolRegistry
+
+        sessions = SessionService(tmp_path / "sessions")
+        loop = AgentLoop(engine, sessions, ToolRegistry(), observer=observer)
+        return await loop.process_input(sessions.create(), "hi")
+
+    assert asyncio.run(run()) == "ok"
+
+    switches = [e for e in observer.events if isinstance(e, ProviderFallback)]
+    assert [(e.from_model, e.to_model, e.kind) for e in switches] == [
+        ("qwen", "deepseek", "rate_limited")
+    ]

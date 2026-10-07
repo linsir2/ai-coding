@@ -169,6 +169,47 @@ class Degraded:
 
 
 @dataclass(frozen=True)
+class ProviderRetried:
+    """A transient model call failed and is being tried again (M1).
+
+    Not a ``Degraded``: that event means an enhancement *gave up and fell back*,
+    and a retry that succeeds gave up nothing.  Folding the two together would
+    also corrupt ``/trace``'s degraded count and the c9 acceptance case.
+
+    This exists because the engine layer has no other way to speak.  With four
+    attempts against a 60s per-request timeout the worst case is 254s of a turn
+    in which nothing has been said; the status bar's ``● Working`` says *that*
+    something is happening, and this says *why it is slow*.
+    """
+
+    kind: str
+    attempt: int
+    delay_seconds: float
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class ProviderFallback:
+    """One model gave up and the turn is now being answered by another (M2).
+
+    Not a ``Degraded``, and deliberately not folded into ``ProviderRetried``:
+    those are the same model trying itself again, this is a *different* model
+    taking the turn.  ``Degraded`` is also wrong because it means an
+    enhancement abandoned a nicety -- ``/trace`` counts those, and a model
+    switch is not something the operator should have to filter out of a count
+    to find it.
+
+    ``reason`` is the underlying failure verbatim.  It can name a bad key, so the
+    trace is where it belongs; the transcript truncates it when rendering.
+    """
+
+    from_model: str
+    to_model: str
+    kind: str
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class ToolSurfaceWarning:
     """The serialised tool schemas cost more than the configured ceiling (R7e-3).
 
@@ -323,6 +364,8 @@ LoopEvent = (
     | ContextAssembled
     | Degraded
     | ToolSurfaceWarning
+    | ProviderRetried
+    | ProviderFallback
     | InputSteered
     | ScopedEvent
     | TaskUpdated
@@ -379,6 +422,8 @@ __all__ = [
     "OUTPUT_PREVIEW_CHARS",
     "ContextAssembled",
     "Degraded",
+    "ProviderFallback",
+    "ProviderRetried",
     "IterationStarted",
     "AssistantTextDelta",
     "AssistantMessage",

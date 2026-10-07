@@ -62,6 +62,8 @@ from ai_coding.core.events import (
     LoopEvent,
     LoopObserver,
     NullObserver,
+    ProviderFallback,
+    ProviderRetried,
     TaskUpdated,
     ToolSurfaceWarning,
 )
@@ -188,6 +190,17 @@ class AgentLoop:
         self.cancel = cancel
         # Task injection + stop policy live in their own pure unit (R2c).
         self.policy = TurnPolicy(TurnPolicyConfig.from_ai_config(self.settings))
+        # M1: the engine owns the retry loop but has no observer of its own, so the
+        # loop subscribes on its behalf and restates a retry as an event.
+        # Subscribing here rather than in the TUI keeps the contract honest for
+        # every consumer at once (transcript, trace recorder, REPL).  Engines
+        # that never retry simply never call it.
+        engine.on_retry = self._restate_engine_retry
+        # M2: the same seam one level up.  A chain of engines decides when to move
+        # on, but only the loop knows how to say so, so it subscribes on their
+        # behalf -- otherwise the switch stays silent until the status bar
+        # refreshes at the end of the command.
+        engine.on_fallback = self._restate_engine_fallback
         self._tool_schemas = tool_schemas(tools)
         # R4a: the tool schemas are part of every prompt, so their size belongs in
         # the attribution (docs/r4-analysis.md 4.3).
@@ -851,6 +864,50 @@ class AgentLoop:
 
     def _emit(self, event: LoopEvent) -> None:
         self.observer.on_event(event)
+
+    def _restate_engine_retry(
+        self, *, kind: str, attempt: int, delay_seconds: float, reason: str
+    ) -> None:
+        """Engine-level retry -> loop event (M1).
+
+        Called synchronously from inside the engine's retry loop, so it must stay
+        trivial: an observer that raised here would surface as a provider error,
+        which is exactly the wrong diagnosis for a UI problem.  ``_emit`` already
+        funnels through ``SafeObserver``, and the transcript observer is the
+        component that swallows presentation errors.
+        """
+        self._emit(
+            ProviderRetried(
+                kind=kind,
+                attempt=attempt,
+                delay_seconds=delay_seconds,
+                # The exception text can be a whole HTTP body; the transcript
+                # truncates too, but an unbounded string would be copied into
+                # every recorder that keeps the event.
+                reason=reason[:200],
+            )
+        )
+
+    def _restate_engine_fallback(
+        self, *, from_model: str, to_model: str, kind: str, reason: str
+    ) -> None:
+        """Engine chain switch -> loop event (M2).
+
+        Synchronous, like the retry restatement above, so it has to stay
+        trivial: it runs inside the engine's own step, where a raised exception
+        would be read as a provider failure -- the one diagnosis that must never
+        be caused by a UI bug.
+        """
+        self._emit(
+            ProviderFallback(
+                from_model=from_model,
+                to_model=to_model,
+                kind=kind,
+                # A rejected key lives in here, so the trace is the right place
+                # for the full text; the transcript truncates when rendering.
+                reason=reason[:200],
+            )
+        )
 
 
 __all__ = ["AgentLoop", "DeltaSink"]

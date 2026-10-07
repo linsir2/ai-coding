@@ -29,3 +29,9 @@ class ModelConfig:
     # input).  Zero means "unknown" and the cost then charges those tokens at
     # the input price — never free.
     price_cached_per_1k: float = 0.0
+    # M2: models to try, in order, when this one cannot answer.  Keys of
+    # ``AppConfig.models`` -- not ``name``, which may differ (``qwen`` ->
+    # ``qwen3.8-2.4t-a95b``).  Empty means "no chain", which is what every
+    # config written before M2 means, so the factory can short-circuit on it and
+    # behave exactly as before.
+    fallback_models: tuple[str, ...] = ()

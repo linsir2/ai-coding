@@ -71,6 +71,15 @@ R1 之后「一步」与「一回合」是两个契约（`domain/loop.py`）：
 
 `ModelConfig`：`name`, `base_url`（纠正自 Java `baseURL`）, `api_key`, 以及默认值 `streaming=True`, `max_tokens=4096`, `temperature=0.7`, `top_p=0.9`, `timeout=60`。
 
+其余字段：
+
+- `max_retries=3` / `retry_base_seconds=2.0`：P0-1 的有界重试预算，`0` 恢复旧行为。
+- `price_input_per_1k` / `price_output_per_1k` / `price_cached_per_1k`：R4a/R11 的可选价格，`0` 表示未知，不假装 0 成本。
+- `fallback_models: tuple[str, ...] = ()`：M2 的降级链，**元素是 `models` 的键名**（不是 `name`，
+  两者可以不同，如 `qwen` → `qwen3.8-2.4t-a95b`）。可写列表 `[backup]` 或单个标量 `backup`。
+  空元组表示不降级，工厂直接返回单个引擎，行为与 M2 之前完全一致。
+  链在启动时解析：名字不存在或成环都直接抛 `ValueError`。
+
 ## 配置 schema
 
 `AppConfig` 是顶层根，字段均带默认值：

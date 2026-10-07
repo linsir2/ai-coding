@@ -16,7 +16,13 @@ from typing import Any
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 
-from ai_coding.ai.engine import ChatEngine, DeltaSink, EngineError
+from ai_coding.ai.engine import (
+    ChatEngine,
+    DeltaSink,
+    EngineError,
+    FallbackWorthwhile,
+    RetryObserver,
+)
 from ai_coding.ai.mapping import history_to_chat_messages
 from ai_coding.ai.toolcalls import finalize_tool_calls, merge_tool_call_delta
 from ai_coding.domain.loop import StepResult
@@ -28,17 +34,51 @@ from ai_coding.domain.usage import as_int, cache_from_usage
 class FailureKind(enum.Enum):
     """What to do about one failed model call.
 
-    Four values, and only four, because three of them mean the same thing to the
-    caller — wait and try again — and the fourth means stop.  The distinction
-    that earns ``RATE_LIMITED`` its own value is not the verdict but the wait:
-    a rate-limited provider states how long to wait and repeating it earlier
-    earns another 429 (P0-1).
+    The question each value answers is no longer just "wait or stop" but "wait,
+    stop, or stop *this* model" — which is what lets a chain of providers be
+    composed without any of them knowing about each other (M2).
+
+    ``RATE_LIMITED`` earns its own value for the wait, not the verdict: a
+    rate-limited provider states how long to wait and repeating it earlier earns
+    another 429 (P0-1).  ``AUTH_ERROR`` earns its own because it is the one
+    verdict where waiting is pointless but a different provider may still work.
     """
 
     RATE_LIMITED = "rate_limited"
     SERVER_ERROR = "server_error"
     TRANSPORT = "transport"
+    AUTH_ERROR = "auth_error"
     FATAL = "fatal"
+
+
+#: Verdicts another provider could plausibly survive (M2 §5).  ``FATAL`` is
+#: absent on purpose: it means the request itself is unacceptable, so every
+#: provider would reject it identically and the next model would only burn its
+#: own budget to learn nothing.  Kept beside the classifier so the two stay in
+#: step.
+WORTH_ANOTHER_MODEL = frozenset(
+    {
+        FailureKind.RATE_LIMITED,
+        FailureKind.SERVER_ERROR,
+        FailureKind.TRANSPORT,
+        FailureKind.AUTH_ERROR,
+    }
+)
+
+
+def _exhausted(kind: FailureKind, message: str) -> EngineError:
+    """Pick the exception type for a model call that will not be retried here.
+
+    One function, because the choice is the whole point of M2 and duplicating it
+    at each ``raise`` is how the two paths drift: a stream that died after the
+    operator saw text and a budget that ran out are both "this model is done",
+    but only one of them may be taken over by another provider.
+    """
+    return (
+        FallbackWorthwhile(message, kind=kind.value)
+        if kind in WORTH_ANOTHER_MODEL
+        else EngineError(message)
+    )
 
 
 def classify_failure(exc: BaseException) -> FailureKind:
@@ -58,6 +98,8 @@ def classify_failure(exc: BaseException) -> FailureKind:
             return FailureKind.RATE_LIMITED
         if status >= 500:
             return FailureKind.SERVER_ERROR
+        if status in (401, 403):
+            return FailureKind.AUTH_ERROR
     return FailureKind.FATAL
 
 
@@ -181,11 +223,16 @@ class OpenAIChatEngine(ChatEngine):
         *,
         client: AsyncOpenAI | None = None,
         stream_usage: bool = True,
+        on_retry: RetryObserver | None = None,
     ) -> None:
         if not isinstance(model_config, ModelConfig):
             raise TypeError("model_config must be a ModelConfig")
         self.model_config = model_config
         self._stream_usage = stream_usage
+        # The engine is the deepest layer with no observer of its own, so a retry
+        # is invisible unless it is handed someone to tell.  Optional by design:
+        # every existing caller keeps working without one.
+        self.on_retry = on_retry
         # Ownership matters: we only close a client we created ourselves.
         self._owns_client = client is None
         self._client = client or AsyncOpenAI(
@@ -250,11 +297,26 @@ class OpenAIChatEngine(ChatEngine):
             except Exception as exc:  # noqa: BLE001 — engine boundary, re-raised typed
                 kind = classify_failure(exc)
                 last = attempt == attempts - 1
-                if kind is FailureKind.FATAL or last:
+                if kind not in WORTH_ANOTHER_MODEL or last:
                     # The verdict alone is not a diagnosis: "fatal: bad key"
                     # tells the operator nothing they could act on, so the
-                    # underlying type goes in too.
-                    raise EngineError(f"{kind.value}: {type(exc).__name__}: {exc}") from exc
+                    # underlying type goes in too.  The count is added only
+                    # when retries actually ran, so the common no-retry case
+                    # keeps its exact wording and never reads "1 attempts".
+                    # Whether this is *fallback* worthy is a separate question,
+                    # answered by the exception type (M2): a stream that broke
+                    # after output also lands here, and no other model may take
+                    # over from there.
+                    tried = f" (after {attempt + 1} attempts)" if attempt else ""
+                    message = f"{kind.value}{tried}: {type(exc).__name__}: {exc}"
+                    raise _exhausted(kind, message) from exc
+                if kind is FailureKind.AUTH_ERROR:
+                    # Waiting cannot fix a rejected key, so the budget is not
+                    # spent on it -- but another provider can.  Exits on the
+                    # first attempt instead of after four identical 401s.
+                    raise FallbackWorthwhile(
+                        f"{kind.value}: {type(exc).__name__}: {exc}", kind=kind.value
+                    ) from exc
                 delay = retry_delay(
                     attempt,
                     kind,
@@ -262,6 +324,13 @@ class OpenAIChatEngine(ChatEngine):
                     cap=float(cfg.timeout),
                     retry_after=_retry_after(exc),
                 )
+                if self.on_retry is not None:
+                    self.on_retry(
+                        kind=kind.value,
+                        attempt=attempt + 1,
+                        delay_seconds=delay,
+                        reason=str(exc),
+                    )
                 await asyncio.sleep(delay)
         raise AssertionError("unreachable: the loop returns or raises on every path")
 

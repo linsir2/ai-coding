@@ -21,6 +21,8 @@ from ai_coding.core.events import (
     IterationStarted,
     LedgerUpdated,
     LoopEvent,
+    ProviderFallback,
+    ProviderRetried,
     ScopedEvent,
     TaskUpdated,
     ToolChunk,
@@ -343,6 +345,16 @@ def blocks_from_event(event: LoopEvent) -> Block | None:
         if event.ledger_path:
             line += f" · 完整回包: {event.ledger_path}"
         return Block("background", line, "dim")
+    if isinstance(event, ProviderRetried):
+        line = f"  ⤷ 重试 [{event.kind}] 第 {event.attempt} 次，等 {event.delay_seconds:g}s"
+        if event.reason:
+            line += f"：{_short(event.reason, 60)}"
+        return Block("info", line, "dim")
+    if isinstance(event, ProviderFallback):
+        line = f"  ⤬ 降级 {event.from_model} → {event.to_model}（{event.kind}）"
+        if event.reason:
+            line += f"：{_short(event.reason, 60)}"
+        return Block("info", line, "dim")
     return None
 
 

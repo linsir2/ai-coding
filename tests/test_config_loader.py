@@ -350,3 +350,75 @@ def test_r_p0_1_model_retry_budget_defaults_to_three(tmp_path):
 
     assert loaded.models["a"].max_retries == 3
     assert loaded.models["a"].retry_base_seconds == 2.0
+
+
+# ---- M2: the fallback chain lives on the model it belongs to ---------------
+
+
+def _write_models(tmp_path, body: str):
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(textwrap.dedent(body), encoding="utf-8")
+    return ConfigLoader.load_app(cfg)
+
+
+def test_a_model_without_fallbacks_declares_none(tmp_path):
+    """The default has to be "no chain": the factory keys its short-circuit on
+    it, and every config written before M2 takes this path."""
+    app = _write_models(
+        tmp_path,
+        """
+        models:
+          m:
+            name: m
+            base_url: https://a.test/v1
+            api_key: k
+        default_model: m
+        """,
+    )
+
+    assert app.models["m"].fallback_models == ()
+
+
+def test_fallback_models_parse_as_a_tuple_of_names(tmp_path):
+    app = _write_models(
+        tmp_path,
+        """
+        models:
+          primary:
+            name: primary
+            base_url: https://a.test/v1
+            api_key: k
+            fallback_models: [backup]
+          backup:
+            name: backup
+            base_url: https://b.test/v1
+            api_key: k
+        default_model: primary
+        """,
+    )
+
+    assert app.models["primary"].fallback_models == ("backup",)
+
+
+def test_a_single_fallback_may_be_written_without_brackets(tmp_path):
+    """YAML reads ``fallback_models: backup`` as a plain string, and iterating
+    that yields one item per *character*.  A chain would then be built from the
+    letters b-a-c-k-u-p, silently, and only when the first model fails."""
+    app = _write_models(
+        tmp_path,
+        """
+        models:
+          primary:
+            name: primary
+            base_url: https://a.test/v1
+            api_key: k
+            fallback_models: backup
+          backup:
+            name: backup
+            base_url: https://b.test/v1
+            api_key: k
+        default_model: primary
+        """,
+    )
+
+    assert app.models["primary"].fallback_models == ("backup",)
