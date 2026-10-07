@@ -45,12 +45,18 @@ class _Memory:
 
 
 class _Reporter:
-    def __init__(self) -> None:
+    def __init__(self, tokens_spent: int = 0) -> None:
         self.calls: list[dict[str, Any]] = []
+        self._tokens_spent = tokens_spent
 
     def report_context(self, **kwargs: Any) -> str:
         self.calls.append(kwargs)
         return f"canonical-{len(self.calls)}"
+
+    def tokens_spent(self) -> int:
+        """The assembler reads this for the budget pressure block (G8-1); the
+        real ``TurnReporter`` has had it since R4b."""
+        return self._tokens_spent
 
 
 class _Settings:
@@ -182,3 +188,33 @@ async def test_the_history_that_was_compressed_is_what_the_engine_sees():
     assembled = await _assemble(assembler)
     assert assembled.history[-1].content == "[压缩后的历史]"
     assert parts["reporter"].calls[0]["history"] is assembled.history
+
+
+# ---- G8-1: the budget pressure block reaches the request --------------------
+
+
+@pytest.mark.asyncio
+async def test_a_nearly_exhausted_turn_gets_a_pressure_block():
+    """The model can see none of the six budgets; the assembler is where the
+    honest one gets a chance to speak before the cap is reached."""
+    assembler, _parts = _assembler()
+    assembler._policy = TurnPolicy(  # noqa: SLF001 - the config under test
+        TurnPolicyConfig(max_iterations=10)
+    )
+
+    assembled = await _assemble(assembler, index=9)
+
+    budget = [m for m in assembled.request if (m.content or "").startswith("[budget]")]
+    assert len(budget) == 1
+    assert "9/10" in budget[0].content
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_turn_gets_no_pressure_block():
+    """Heavy-handed pressure on every request would teach the model to ignore
+    it, and would spend tail tokens on every iteration to say nothing."""
+    assembler, _parts = _assembler()
+
+    assembled = await _assemble(assembler, index=2)
+
+    assert not [m for m in assembled.request if (m.content or "").startswith("[budget]")]

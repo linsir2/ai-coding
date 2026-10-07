@@ -349,7 +349,10 @@ async def test_max_iterations_enforced(tmp_path):
 
     await loop.process_input(sessions.create(), "go")
 
-    assert len(engine.requests) == 2
+    # Two iterations, then the one closing call G8-2 asks for: the budget is
+    # what stopped this turn, so the model gets a chance to say what it did
+    # rather than leaving the harness to write a status report.
+    assert len(engine.requests) == 3
     assert loop.last_outcome is not None
     assert loop.last_outcome.status is TurnStatus.MAX_ITERATIONS
 
@@ -448,8 +451,9 @@ async def test_strict_policy_ignores_the_nudge_cap(tmp_path):
 
     await loop.process_input(session, "go")
 
-    # todo_aware would have stopped at 2; strict keeps nudging until the budget ends
-    assert len(engine.requests) == 4
+    # todo_aware would have stopped at 2; strict keeps nudging until the budget
+    # ends, and then the closing call (G8-2) is one more.
+    assert len(engine.requests) == 5
     assert loop.last_outcome is not None
     assert loop.last_outcome.status is TurnStatus.MAX_ITERATIONS
 
@@ -980,3 +984,97 @@ async def test_r8_a_cancel_does_not_end_the_turn_and_clears_before_the_next_batc
     assert tool.calls == 2  # the second batch really ran, not cancelled again
     assert loop.last_outcome is not None
     assert loop.last_outcome.status is TurnStatus.COMPLETED
+
+
+# ---- G8-2: the model gets to write the closing, the banner still stands -----
+
+
+@pytest.mark.asyncio
+async def test_the_model_is_asked_to_close_when_the_iteration_budget_ends(tmp_path):
+    """The harness report is a status ("steps exhausted"), not an answer.  One
+    more call turns it into prose the operator can act on -- inside the report,
+    so a cut-off turn still reads as cut off."""
+    engine = ScriptedEngine(
+        [
+            _calls(_ref("c1", "read")),
+            _calls(_ref("c2", "read")),
+            _text("读了两次，还差一个结论。"),
+        ]
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, settings=_settings(max_tool_iterations=2))
+
+    text = await loop.process_input(sessions.create(), "go")
+
+    assert len(engine.requests) == 3, "one iteration past the budget, for the closing"
+    assert engine.requests[-1]["messages"][-1].content.startswith("本轮步数预算已用完")
+    assert "[回合未完成" in text
+    assert "读了两次，还差一个结论。" in text
+
+
+@pytest.mark.asyncio
+async def test_a_turn_stopped_by_the_clock_is_not_asked_to_close(tmp_path):
+    """Nothing is left to spend: the clock ran out, so an extra call would be
+    refused by the deadline rather than answered.
+
+    The engine has to actually hang -- a scripted engine returns instantly, the
+    clock never fires, and the turn ends on the iteration budget instead, which
+    is a different path.
+    """
+    engine = _HangingEngine()
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, settings=_settings(turn_timeout_seconds=0.2))
+
+    await loop.process_input(sessions.create(), "go")
+
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.status is TurnStatus.TIMEOUT
+    assert engine.calls == 1, "the closing call must not be attempted after the clock"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_with_no_room_left_in_its_token_budget_is_not_asked(tmp_path):
+    """The token ceiling is precisely the budget that is already gone -- asking
+    again would spend the one resource that is out."""
+    costly = StepResult(
+        tool_calls=[_ref("c1", "read")],
+        finish_reason="tool_calls",
+        usage={"prompt_tokens": 5_000, "completion_tokens": 10},
+    )
+    engine = ScriptedEngine([costly])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        engine,
+        sessions,
+        settings=_settings(max_tool_iterations=5, turn_token_budget=1_000),
+    )
+
+    await loop.process_input(sessions.create(), "go")
+
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.status is TurnStatus.BUDGET
+    # One step spent the ceiling; the ladder stops on the token gate, and the
+    # closing call never happens because that budget is what ran out.
+    assert len(engine.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_closing_call_does_not_fail_the_turn(tmp_path):
+    """A courtesy must not be able to turn a finished turn into an error."""
+
+    # An *instance*: the scripted engine raises what it is handed, and calling
+    # a function here would raise during setup instead of during the turn.
+    engine = ScriptedEngine(
+        [
+            _calls(_ref("c1", "read")),
+            _calls(_ref("c2", "read")),
+            RuntimeError("provider exploded"),
+        ]
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, settings=_settings(max_tool_iterations=2))
+
+    text = await loop.process_input(sessions.create(), "go")
+
+    assert "[回合未完成" in text
+    assert "provider exploded" not in text

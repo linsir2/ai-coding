@@ -57,6 +57,12 @@ LEDGER_GATE_LEAD = "[ledger-gate]"
 #: two full rounds of motion without reduction, then clarify-or-split.
 LEDGER_FLAT_ROUNDS = 2
 NUDGE_ITEM_LIMIT = 10
+#: G8-1: the marker for the one block that tells the model its budget is nearly
+#: gone.  Volatile (never persisted) like the memory and task blocks -- it
+#: describes a counter, not a fact about the work.
+BUDGET_PRESSURE_LEAD = "[budget] 本轮预算快用完了"
+#: How much of a budget may remain before the warning appears.
+PRESSURE_RATIO = 0.2
 
 
 @dataclass(frozen=True)
@@ -332,6 +338,41 @@ class TurnPolicy:
             role="user", content=f"{TASK_MESSAGE_LEAD}\n{render}", timestamp=""
         )
         return TaskInjection(instructions=instructions, message=block)
+
+    def budget_pressure(self, *, iteration: int, tokens_spent: int) -> str | None:
+        """A note to the model when the turn's budget is nearly gone (G8-1).
+
+        Six separate budgets govern a turn and the model can see none of them --
+        it discovers the cap by being cut off mid-plan, which is the one moment
+        the work is least resumable.  This is the harness saying so while there
+        is still a round left to spend on wrapping up.
+
+        Pure and side-effect free: it reads the config it was built with and two
+        numbers the caller already has.  No tokens of its own, no extra call.
+
+        Returns ``None`` when there is nothing true to say -- a healthy budget,
+        a turn that is already past its cap (the decision ladder owns that), or
+        an unlimited token budget, where warning about a ceiling that does not
+        exist would be a lie the model acts on.
+        """
+        parts: list[str] = []
+        if 0 < iteration <= self.config.max_iterations:
+            remaining = self.config.max_iterations - iteration
+            if remaining <= max(1, int(self.config.max_iterations * PRESSURE_RATIO)):
+                parts.append(f"步数 {iteration}/{self.config.max_iterations}")
+        limit = self.config.max_turn_tokens
+        if limit > 0:
+            remaining_tokens = limit - tokens_spent
+            if remaining_tokens <= int(limit * PRESSURE_RATIO):
+                parts.append(f"token {tokens_spent:,}/{limit:,}")
+        if not parts:
+            return None
+        return "\n".join(
+            [
+                f"{BUDGET_PRESSURE_LEAD}（{'，'.join(parts)}）。",
+                "请用这一轮收尾：把已完成的和还差的讲清楚，不要再开新的工作。",
+            ]
+        )
 
     @staticmethod
     def continuation_message(open_items: Sequence[TodoItem]) -> str:

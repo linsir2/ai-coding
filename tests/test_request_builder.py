@@ -104,3 +104,24 @@ def test_tool_context_carries_everything_a_tool_needs():
     assert ctx.instructions == "SYS"
     ctx.emit("event")
     assert emitted == ["event"]
+
+
+# ---- G8-1: the pressure block is just another tail block --------------------
+
+
+def test_a_budget_block_joins_the_tail_in_declared_order():
+    """The tail is the only region allowed to change between iterations, which
+    is exactly what a counter describing *this* iteration needs."""
+    from ai_coding.core.events import preview
+    from ai_coding.core.request_builder import build_tail, volatile_block
+
+    messages, sizes = build_tail(
+        [
+            volatile_block("memory", None),
+            volatile_block("budget", "[budget] 快用完了"),
+            volatile_block("digest", "d"),
+        ]
+    )
+
+    assert sizes == (("budget", len("[budget] 快用完了")), ("digest", 1))
+    assert preview(messages[0].content) == "[budget] 快用完了"

@@ -57,6 +57,9 @@ DEFAULT_OUTCOME_CHARS = 90
 #: per-line budget after its fixed overhead (measured, docs/r8-analysis.md 1.1).
 DEFAULT_NOTE_CHARS = 120
 _ELLIPSIS = "…"
+#: How much of the model's own wrap-up is repeated in the report.  The turn is
+#: already over; a full transcript here would bury the facts below it.
+_CLOSING_LIMIT = 600
 _MAX_FILES_SHOWN = 4
 _WHITESPACE = re.compile(r"\s+")
 
@@ -274,6 +277,7 @@ def render_handoff(
     trace_path: str = "",
     max_items: int = 5,
     continuations: int = 0,
+    closing: str = "",
 ) -> str:
     """What the harness says when the model ran out of turn without a final word.
 
@@ -281,6 +285,13 @@ def render_handoff(
     model's own conclusion (docs/r6-analysis.md 2.1).  A turn that *completed*
     normally is not "unfinished" either — a blank answer there is the model's own
     (unhelpful) ending, and inventing a report for it would misreport the status.
+
+    ``closing`` is a summary the model produced *because* it was asked to wrap up
+    (G8-2).  It goes inside the report rather than into ``outcome.text``: this
+    turn genuinely ran out of budget, and the banner is the harness's promise
+    that it did.  Letting prose stand in for the banner would let a cut-off turn
+    read as a finished one — the model's words belong in the report, not in place
+    of it.
     """
     if (outcome.text or "").strip() or outcome.status is TurnStatus.COMPLETED:
         return ""
@@ -288,6 +299,8 @@ def render_handoff(
     if outcome.reason.startswith(_STALL_PREFIX):
         label = "零进展（提前收尾）"
     lines = [f"[回合未完成 · {label}（{outcome.iterations} 轮）]"]
+    if closing.strip():
+        lines.append(f"模型收尾: {one_line(closing, _CLOSING_LIMIT)}")
     if outcome.reason:
         lines.append(f"原因: {one_line(outcome.reason, 160)}")
     if task is not None and task.goal:

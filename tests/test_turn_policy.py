@@ -170,3 +170,50 @@ def test_from_ai_config_reads_the_orchestration_settings():
 
 def test_from_ai_config_clamps_a_zero_iteration_budget():
     assert TurnPolicyConfig.from_ai_config(AIConfig(max_tool_iterations=0)).max_iterations == 1
+
+
+# ---- G8-1: the model is told when the budget is nearly gone ----------------
+
+
+def test_no_pressure_while_the_budget_is_healthy():
+    policy = TurnPolicy(TurnPolicyConfig(max_iterations=10))
+
+    assert policy.budget_pressure(iteration=2, tokens_spent=0) is None
+
+
+def test_pressure_appears_once_the_iterations_run_low():
+    """The model cannot see any of these counters; without a word it discovers
+    the cap only by being cut off mid-plan."""
+    policy = TurnPolicy(TurnPolicyConfig(max_iterations=10))
+
+    text = policy.budget_pressure(iteration=9, tokens_spent=0)
+
+    assert text is not None
+    assert "9/10" in text
+    assert "收尾" in text
+
+
+def test_pressure_appears_once_the_token_budget_runs_low():
+    policy = TurnPolicy(TurnPolicyConfig(max_iterations=10, max_turn_tokens=10_000))
+
+    text = policy.budget_pressure(iteration=1, tokens_spent=9_000)
+
+    assert text is not None
+    assert "10,000" in text or "10000" in text
+
+
+def test_an_unlimited_token_budget_says_nothing_about_tokens():
+    """``0`` means "no ceiling", and a warning about a ceiling that does not
+    exist would be a lie the model acts on."""
+    policy = TurnPolicy(TurnPolicyConfig(max_iterations=100, max_turn_tokens=0))
+
+    assert policy.budget_pressure(iteration=1, tokens_spent=10**9) is None
+
+
+def test_the_last_iteration_is_not_announced_as_available():
+    """Pressure means "wrap up now", not "you have another round" -- firing at
+    the last allowed iteration is exactly when it is most needed."""
+    policy = TurnPolicy(TurnPolicyConfig(max_iterations=10))
+
+    assert policy.budget_pressure(iteration=10, tokens_spent=0) is not None
+    assert policy.budget_pressure(iteration=11, tokens_spent=0) is None

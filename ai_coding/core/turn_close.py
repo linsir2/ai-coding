@@ -199,6 +199,7 @@ class TurnCloser:
         trace_path: str = "",
         observer: Any = None,
         model_note: str = "",
+        closing: str = "",
     ) -> TurnOutcome:
         """Record what this turn leaves behind, then persist it (R6a).
 
@@ -215,6 +216,7 @@ class TurnCloser:
                 artifacts=self.artifacts,
                 trace_path=trace_path,
                 continuations=session.continuations,
+                closing=closing,
             )
             if handoff:
                 outcome = replace(outcome, handoff=handoff)

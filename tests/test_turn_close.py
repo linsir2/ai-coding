@@ -224,3 +224,47 @@ def _filler():
     from ai_coding.domain.message import ChatMessage
 
     return ChatMessage(role="user", content="x", timestamp="")
+
+
+# ---- G8-2: the model gets the last word, without losing the banner ----------
+
+
+def test_a_model_closing_is_shown_inside_the_unfinished_report():
+    """The turn genuinely ran out of iterations, so the banner stays: it is the
+    harness's promise that this turn did not finish.  The model's closing words
+    are added to it rather than replacing it -- letting prose silently stand in
+    for the banner would let a cut-off turn read as a completed one.
+    """
+    from ai_coding.core.turn_close import terminal_outcome
+    from ai_coding.domain.loop import TurnStatus
+    from ai_coding.domain.turn_digest import render_handoff
+
+    outcome = terminal_outcome(
+        TurnDecision(TurnAction.FINISH, "iteration budget exhausted"),
+        budget_expired=False,
+        last_text=None,
+        iterations=10,
+    )
+    text = render_handoff(outcome=outcome, closing="读完了三个文件，还差一个用例没写。")
+
+    assert "[回合未完成" in text
+    assert "读完了三个文件，还差一个用例没写。" in text
+    assert text.index("[回合未完成") < text.index("读完了三个文件")
+    assert outcome.status is TurnStatus.MAX_ITERATIONS
+
+
+def test_without_a_closing_the_report_is_unchanged():
+    from ai_coding.core.turn_close import terminal_outcome
+    from ai_coding.domain.turn_digest import render_handoff
+
+    outcome = terminal_outcome(
+        TurnDecision(TurnAction.FINISH, "iteration budget exhausted"),
+        budget_expired=False,
+        last_text=None,
+        iterations=10,
+    )
+
+    text = render_handoff(outcome=outcome)
+
+    assert "[回合未完成" in text
+    assert "收尾" not in text

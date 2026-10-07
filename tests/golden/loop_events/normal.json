@@ -16,9 +16,13 @@
         [
           "task",
           68
+        ],
+        [
+          "budget",
+          57
         ]
       ],
-      "estimated_tokens": 61
+      "estimated_tokens": 86
     },
     {
       "type": "ModelStepFinished",

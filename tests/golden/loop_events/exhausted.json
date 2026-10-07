@@ -16,9 +16,13 @@
         [
           "task",
           68
+        ],
+        [
+          "budget",
+          57
         ]
       ],
-      "estimated_tokens": 61
+      "estimated_tokens": 86
     },
     {
       "type": "ModelStepFinished",
@@ -73,9 +77,13 @@
         [
           "task",
           68
+        ],
+        [
+          "budget",
+          57
         ]
       ],
-      "estimated_tokens": 81
+      "estimated_tokens": 106
     },
     {
       "type": "ModelStepFinished",
@@ -113,6 +121,28 @@
       "output_preview": "poked",
       "error": null,
       "iteration": 2
+    },
+    {
+      "type": "ContextAssembled",
+      "iteration": 3,
+      "system_chars": 0,
+      "tools_chars": 116,
+      "history_messages": 5,
+      "history_chars": 94,
+      "tail_blocks": [
+        [
+          "task",
+          68
+        ]
+      ],
+      "estimated_tokens": 101
+    },
+    {
+      "type": "ModelStepFinished",
+      "index": 3,
+      "finish_reason": "tool_calls",
+      "text_chars": 0,
+      "tool_call_count": 1
     },
     {
       "type": "TurnFinished",

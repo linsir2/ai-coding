@@ -16,13 +16,13 @@
 | ~~G5-5~~ | ~~压缩 reserve~~ | — | — | ❌ 砍掉 |
 | G7-1/3 | 成本核算 + provider 归因 | 高 | 9 文件 | — | ✅ 已做 |
 | G5-6 | token 估算改混合口径 | 中-高 | 1 文件 | — | ⏸ 暂缓（实测后降级） |
-| G8-1 | 预算压力注入 | 中高 | 1 文件 | — | ⬜ 待做 |
+| G8-1 | 预算压力注入 | 中高 | 3 文件 | — | ✅ 已做 |
 | G5-1 | provider 拒绝时压缩重试 | 高 | 2 文件 ~50 行 | — | ✅ 已做 |
 | G4 | 权限 resource 维度（部分） | 高 | 3 文件 | — | ✅ 已做（缩减） |
 | G4b-1 | 授权进权限层（REPL 也有） | 高 | 4 文件 | — | ✅ 已做 |
 | G4b-2 | always-allow 项目级持久化 | 高 | 2 文件 | G4b-1 | ✅ 已做 |
 | G3-1 | deny 的工具不出现在 schema | 中 | 1-2 文件 | **G4** | ⬜ 待做 |
-| G8-2 | 达上限时让模型自己收尾 | 中 | 1-2 文件 | G8-1 | ⬜ 待做 |
+| G8-2 | 达上限时让模型自己收尾 | 中 | 3 文件 | G8-1 | ✅ 已做 |
 | G5-3 | L4 摘要形状校验 | 中 | 1 文件 ~20 行 | — | ⬜ 待做 |
 | G1-2 | 消息幂等 | 中-高 | 1 文件 | — | ⬜ 待做 |
 
@@ -144,15 +144,55 @@ trace 每步 model: [(1, 'deepseek-chat'), (1, 'qwen3.8-2.4t-a95b')]
 
 ---
 
-### G8-1｜预算压力注入
+### G8-1｜预算压力注入 ✅ 已做
 
-**问题**：本项目有 6 个独立预算（`turn_token_budget` / `max_context_tokens` / `max_iterations` / `stall_iterations` / 各种 nudge 上限），模型对它们一无所知，只能靠 harness 的 nudge 猜。
+**问题**：6 个预算（`max_iterations` / `max_turn_tokens` / `stall_iterations` /
+`max_auto_continuations` / 各种 nudge 上限）模型一个都看不见，只能靠 harness 的 nudge 猜，
+而它发现上限的方式是被中途切断——那正是工作最不可续的时刻。
 
-**改法**：剩余 10% 时往 tail 注入一句 warning。**纯文本注入，零额外模型调用。**
+**实现**（3 文件，零额外模型调用）：
+- `TurnPolicy.budget_pressure(iteration, tokens_spent)` —— 纯方法，读自己的 config，返回
+  `None` 或一段话。`0` 表示无上限，所以不会警告一个不存在的天花板
+- `request_assembly` 把它作为第 5 个 volatile 尾块（`budget`），**放在 digest 之后**：
+  它是**指令**，而指令受益于最近性；它上面的都是要读的状态
+- 阈值 `PRESSURE_RATIO = 0.2`
 
-**与 G8-2 的取舍**：G8-1 零成本，G8-2 多一次调用。先做 G8-1。
+**为什么零成本**：尾部本来就是唯一允许在迭代间变化、且不破坏 prompt cache 前缀的区域。
 
----
+### G8-2｜达上限时让模型自己收尾 ✅ 已做
+
+**问题**：harness 的 handoff 是**状态报告**，不是回答。模型用步数没用完就结束时，用户拿到的是
+「步骤耗尽」加一串产物清单。
+
+**关键核验**：`render_handoff` 的既有规则是「模型说了话就返回 `""`」——所以若把收尾文本放进
+`outcome.text`，**banner 会消失**，一轮被截断的回合会读起来像正常完成。
+
+**处置（信任边界，按最保守）**：收尾文本进 **banner 内部**（`模型收尾: ...`），
+`outcome.status` 仍是 `MAX_ITERATIONS`。banner 是 harness 的**保证**，不能让模型的散文静默替换它。
+
+**守卫**：仅当停止原因是 `iteration budget exhausted`（时钟/token 不是）、每回合至多一次、
+`max_turn_tokens` 还有余量；调用失败静默降级（礼节不能把已完成的回合变成失败的）。
+
+**契约澄清（由既有测试暴露）**：`outcome.iterations` 数的是**策略允许的轮次**，不是模型调用次数。
+G8-2 让这个区别可见：一轮可以「被允许 6 轮、调用 7 次」。把收尾算作迭代会报「6 轮里的第 7 轮」。
+`test_outcome_iterations_count_every_model_call` 据此改名为
+`..._count_the_rounds_the_policy_allowed`。
+
+**golden 录制重录**：`tests/golden/loop_events/` 是 R7a 的重构等价基线。本次是**有意的行为变更**
+（非重构），所以重录——但先逐文件 diff 确认**只有两处**变化：新增 `budget` 块（+57 字符）
+与 `exhausted` 场景多一个 index 3 的收尾步。重录而不审查等价于关掉这个测试。
+
+**真实路径实测**：
+```
+provider 调用次数: 3              （2 轮 + 1 次收尾）
+每步请求带的预算压力块: [True, True, False]   （收尾请求不带——它就是收尾）
+用户看到:
+  [回合未完成 · 迭代预算用尽（2 轮）]
+  模型收尾: 已探测两次，结论未出。
+  原因: iteration budget exhausted
+状态: max_iterations | iterations: 2   （不是 3）
+trace 步骤: [(1, 'm'), (2, 'm'), (3, 'm')]
+```
 
 ### G5-1｜provider 拒绝时压缩重试 ✅ 已做
 

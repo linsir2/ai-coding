@@ -129,6 +129,19 @@ _log = logging.getLogger(__name__)
 #: plain string on the event.
 _CONTEXT_OVERFLOW = "context_overflow"
 
+#: G8-2: the decision reason that means "the iteration budget is what stopped
+#: this turn".  Matched by value because the policy states reasons as text and
+#: they are part of its observable contract (tests assert on them).
+_ITERATION_BUDGET = "iteration budget exhausted"
+
+#: G8-2: what the model is asked when the harness would otherwise write the
+#: report.  It asks for a summary, and says not to start anything: an unanswered
+#: "what should I do next" would just spend the round on more work.
+_CLOSING_PROMPT = (
+    "本轮步数预算已用完，请用一段话收尾：说明已经完成了什么、还差什么、"
+    "下一步该做什么。不要再调用任何工具。"
+)
+
 #: How long a reactive compaction may take when the turn has no deadline left
 #: to divide.  Matches the floor ``compact_now`` already applies to ``/compact``.
 _REACTIVE_COMPACT_SECONDS = 60.0
@@ -334,6 +347,9 @@ class AgentLoop:
         # the stored history, so a session that still does not fit must fail
         # honestly rather than be shredded into a summary of a summary.
         reactive_compacted = False
+        #: G8-2: the model's own wrap-up, if it was asked for one.  Kept off
+        #: ``outcome.text`` on purpose -- see ``render_handoff``.
+        closing = ""
 
         try:
             index = 0
@@ -382,6 +398,21 @@ class AgentLoop:
                         last_text=books.last_text,
                         iterations=books.total_iterations,
                     )
+                    # G8-2: the harness report is a status, not an answer.  When
+                    # the iteration budget -- not the clock, and not the token
+                    # ceiling -- is what stopped the turn, ask the model for a
+                    # closing word so the operator gets prose about the work
+                    # instead of a list of artifacts.  Bounded to once per turn,
+                    # and skipped when there is no room left to answer.
+                    if not closing and decision.reason == _ITERATION_BUDGET:
+                        closing = await self._ask_for_closing(
+                            session=session,
+                            task=task,
+                            books=books,
+                            frame=frame,
+                            previous_request=previous_request,
+                            on_delta=on_delta,
+                        )
                     break
                 if decision.action is TurnAction.NUDGE:
                     # R6b tier 2.  Like the [task-gate] nudge, this is persisted: it
@@ -536,6 +567,7 @@ class AgentLoop:
             frame=frame,
             books=books,
             outcome=outcome,
+            closing=closing,
         )
 
     async def _begin_turn(
@@ -632,10 +664,17 @@ class AgentLoop:
         frame: TurnFrame,
         books: TurnBooks,
         outcome: TurnOutcome,
+        closing: str = "",
     ) -> str:
         """Close the books: persist, harvest, fire ``turn.end``, hand back the text."""
         outcome = self._close_turn(
-            session, user_input=user_input, task=task, frame=frame, books=books, outcome=outcome
+            session,
+            user_input=user_input,
+            task=task,
+            frame=frame,
+            books=books,
+            outcome=outcome,
+            closing=closing,
         )
         await self.turn_memory.harvest(
             session,
@@ -663,6 +702,7 @@ class AgentLoop:
         frame: TurnFrame,
         books: TurnBooks,
         outcome: TurnOutcome,
+        closing: str = "",
     ) -> TurnOutcome:
         """Record what this turn leaves behind, then persist it (R6a)."""
         # W1: every exit funnels through here (normal, failed, and the
@@ -682,6 +722,8 @@ class AgentLoop:
             observer=self.observer,
             # R8a: the line the model wrote for its future self, if it wrote one.
             model_note=books.checkpoint or "",
+            # G8-2: the wrap-up the model wrote when asked to close the turn.
+            closing=closing,
         )
 
     def _bind_observer(self, observer: LoopObserver | None) -> None:
@@ -831,6 +873,66 @@ class AgentLoop:
             for item in checked
             if item.passed is not None
         })
+
+    async def _ask_for_closing(
+        self,
+        *,
+        session: SessionData,
+        task: TaskState,
+        books: TurnBooks,
+        frame: TurnFrame,
+        previous_request: str | None,
+        on_delta: DeltaSink | None,
+    ) -> str:
+        """One last model call asking for a summary (G8-2).
+
+        Returns ``""`` when it is not worth asking or the answer did not come:
+        the harness report is written either way, so a failure here costs
+        nothing but the attempt.  Never raises -- a close-out nicety must not be
+        able to turn a finished turn into a failed one.
+        """
+        limit = self.policy.config.max_turn_tokens
+        if limit > 0 and self.reporter.tokens_spent() >= limit:
+            # No room to answer: the request would be refused, and the token
+            # ceiling is precisely the budget that is already gone.
+            return ""
+        try:
+            assembled = await self.assembler.assemble(
+                session=session,
+                task=task,
+                books=books,
+                turn_number=frame.turn_number,
+                hook_context=frame.hook_context,
+                deadline=frame.deadline,
+                index=self.policy.config.max_iterations + 1,
+                previous_request=previous_request,
+            )
+            request = [
+                *assembled.request,
+                user_message(_CLOSING_PROMPT, now_utc()),
+            ]
+            step = await run_with_deadline(
+                self.engine.step(
+                    request,
+                    tools=self._tool_schemas,
+                    instructions=assembled.instructions,
+                    on_delta=on_delta,
+                ),
+                timeout=self._remaining(frame.deadline),
+                label="closing_step",
+            )
+        except Exception:  # noqa: BLE001 -- the report is still owed, and it is
+            # the harness's, not the model's: a failed courtesy call must not
+            # replace it with an error.
+            return ""
+        # The model answered, so it gets a step on the record like any other.
+        self.reporter.report_step(
+            index=self.policy.config.max_iterations + 1,
+            step=step,
+            latency_ms=0,
+            model=str(getattr(getattr(self.engine, "model_config", None), "name", "") or ""),
+        )
+        return step.text or ""
 
     async def _model_step(
         self,

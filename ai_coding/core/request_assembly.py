@@ -112,12 +112,20 @@ class RequestAssembler:
             max_chars=int(getattr(self._settings, "working_memory_chars", 1200)),
             compacted=compacted,
         )
+        # G8-1: the one block that tells the model its budget is nearly gone.
+        # Last, after the digest, because it is an instruction and instructions
+        # are the thing recency helps -- everything above it is state to read,
+        # this is the one line asking for a change of behaviour.
+        pressure = self._policy.budget_pressure(
+            iteration=index, tokens_spent=self._reporter.tokens_spent()
+        )
         tail, tail_blocks = build_tail(
             [
                 volatile_block("memory", memory_block),
                 volatile_block("task", content_of(injection.message)),
                 volatile_block("hook", hook_context),
                 volatile_block("digest", digest_block),
+                volatile_block("budget", pressure),
             ]
         )
         request = [*history, *tail]

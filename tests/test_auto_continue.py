@@ -192,7 +192,9 @@ async def test_continuation_actually_buys_model_rounds(tmp_path):
 
     continuations = [m for m in session.messages if "[continue]" in (m.content or "")]
     assert len(continuations) == 2          # cap respected
-    assert len(engine.requests) == 3        # each round really ran the model
+    # Three rounds, plus the one closing call G8-2 adds when the iteration
+    # budget is finally what stops the turn.
+    assert len(engine.requests) == 4
     assert session.continuations == 2
     assert loop.last_outcome is not None
     assert loop.last_outcome.status is TurnStatus.MAX_ITERATIONS
@@ -214,7 +216,9 @@ async def test_continuations_reset_for_the_next_user_turn(tmp_path):
 
     continuations = [m for m in session.messages if "[continue]" in (m.content or "")]
     assert len(continuations) == 4          # 2 per turn
-    assert len(engine.requests) == 6        # both turns bought their rounds
+    # Both turns bought their rounds (3 + 3), and each ended on the iteration
+    # budget, so each got one closing call (G8-2).
+    assert len(engine.requests) == 8
 
 
 @pytest.mark.asyncio
@@ -277,12 +281,18 @@ def test_token_budget_beats_continuation():
 
 
 @pytest.mark.asyncio
-async def test_outcome_iterations_count_every_model_call(tmp_path):
+async def test_outcome_iterations_count_the_rounds_the_policy_allowed(tmp_path):
     """H2 audit fix: outcome.iterations is cumulative across continuation rounds.
 
     Two rounds of two iterations (then the cap) are four model calls; the
     old counter reported the last round's index (2) because the C3 restart
     reset it.
+
+    It is *not* a count of model calls, and G8-2 made the difference visible:
+    the closing call (G8-2) answers outside the budget, so a turn can make seven
+    calls having been allowed six rounds.  Counting it as an iteration would
+    report "7 of 6 rounds", and counting model calls was only ever the same
+    number because every call used to be one round.
     """
     engine = _ScriptedEngine([_tool_call(f"c{i}") for i in range(8)])
     sessions = SessionService(tmp_path / "sessions")
@@ -295,8 +305,8 @@ async def test_outcome_iterations_count_every_model_call(tmp_path):
     await loop.process_input(session, "go")
 
     assert loop.last_outcome is not None
-    assert loop.last_outcome.iterations == len(engine.requests)
-    assert loop.last_outcome.iterations == 6
+    assert loop.last_outcome.iterations == 6, "six rounds were allowed"
+    assert len(engine.requests) == 7, "six rounds plus the closing call"
 
 
 def _items_in(*statuses):
