@@ -65,3 +65,92 @@ async def test_the_extractor_never_turns_malformed_json_into_memories(monkeypatc
     got = await extract([ChatMessage(role="user", content="约定", timestamp="t")], None)
 
     assert got == []
+
+
+# ---- G5-3: a summary that ignores the format is a failure, not a summary ----
+
+
+def test_the_shape_check_accepts_a_structured_summary():
+    from ai_coding.ai.llm_helpers import summary_is_usable
+
+    assert summary_is_usable("## 目标\n完成压缩\n## 已完成\n- 读了 loader")
+    assert summary_is_usable("## 关键文件\n- `a.py`")
+
+
+def test_the_shape_check_refuses_an_unstructured_reply():
+    """The failure this exists for: the model answers in prose, the pipeline
+    installs it as the early history, and the agent continues on a summary that
+    says nothing."""
+    from ai_coding.ai.llm_helpers import summary_is_usable
+
+    assert not summary_is_usable("好的，这段对话主要讲了压缩的事情。")
+    assert not summary_is_usable("")
+    assert not summary_is_usable("   \n  ")
+
+
+@pytest.mark.asyncio
+async def test_a_well_formed_summary_is_taken_on_the_first_call(monkeypatch):
+    calls: list[str] = []
+
+    async def fake_chat(model_config, system, user, max_tokens):
+        calls.append(user)
+        return "## 目标\n压缩历史\n## 待办\n- 无"
+
+    monkeypatch.setattr(llm_helpers, "_chat", fake_chat)
+
+    got = await llm_helpers.build_summarizer(object())("很长的历史")
+
+    assert got is not None and got.startswith("## 目标")
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unstructured_reply_is_asked_for_again(monkeypatch):
+    """One nudge, matching the reference implementations: cheaper than
+    degrading, and bounded so a model that will not comply cannot hold the
+    pipeline."""
+    replies = iter(["好的，我总结了一下。", "## 目标\n压缩历史\n## 已完成\n- 跑了测试"])
+    calls: list[str] = []
+
+    async def fake_chat(model_config, system, user, max_tokens):
+        calls.append(user)
+        return next(replies)
+
+    monkeypatch.setattr(llm_helpers, "_chat", fake_chat)
+
+    got = await llm_helpers.build_summarizer(object())("很长的历史")
+
+    assert got is not None and "## 已完成" in got
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_never_takes_the_shape_is_refused(monkeypatch):
+    """Returning ``None`` is what makes the pipeline fall back to the trimmed
+    history.  Returning the prose would be worse than no summary at all: it
+    would be installed as the record of what happened."""
+    async def fake_chat(model_config, system, user, max_tokens):
+        return "好的，我总结了一下。"
+
+    monkeypatch.setattr(llm_helpers, "_chat", fake_chat)
+
+    assert await llm_helpers.build_summarizer(object())("很长的历史") is None
+
+
+@pytest.mark.asyncio
+async def test_the_summary_prompt_asks_for_the_shape_that_is_checked(monkeypatch):
+    """The prompt is the only thing producing output the check accepts, so a
+    prompt that stops naming the sections turns every summary into a failure."""
+    seen: list[str] = []
+
+    async def fake_chat(model_config, system, user, max_tokens):
+        seen.append(system)
+        return "## 目标\nx"
+
+    monkeypatch.setattr(llm_helpers, "_chat", fake_chat)
+
+    await llm_helpers.build_summarizer(object())("历史")
+
+    # The sections belong in the instruction, not in the payload.
+    for section in ("## 目标", "## 已完成", "## 关键文件", "## 待办"):
+        assert section in seen[0]

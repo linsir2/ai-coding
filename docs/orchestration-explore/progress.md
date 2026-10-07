@@ -14,7 +14,7 @@
 | **M2** | 模型降级链：`FallbackEngine` 组合多引擎、`FallbackWorthwhile`、`fallback_models` 配置、启动时解析链 + 环检测、`ProviderFallback` 事件 | `3da4840` | 已全绿 |
 | — | `/model` 死代码修复：`AgentLoop(models=...)`，模型表从 `AIConfig` 移到显式参数 | `aa72115` | 已全绿 |
 
-**当前门禁**：`2003 passed, 2 skipped` / ruff clean / mypy 115 files clean。
+**当前门禁**：`2009 passed, 2 skipped` / ruff clean / mypy 115 files clean。
 
 **已知偶发**（非回归，均为无同步点的时序测试）：`test_pty_textual.py::test_approval_and_ask_user_reach_the_tools`、`test_ui_visual.py::test_collapsible_has_no_top_border`。
 

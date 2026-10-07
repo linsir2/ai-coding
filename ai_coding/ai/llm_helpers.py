@@ -55,24 +55,67 @@ async def _chat(
     return (resp.choices[0].message.content or "").strip()
 
 
+#: The sections an L4 summary must use.  They are the prompt's contract *and*
+#: the shape check's vocabulary: if the prompt stops naming one, every summary
+#: becomes a failure, and if the check accepts anything, a reply that says
+#: "好的，我总结了一下" is installed as the record of what happened.
+SUMMARY_SECTIONS = ("## 目标", "## 已完成", "## 关键文件", "## 待办")
+
+_SUMMARY_SYSTEM_PROMPT = (
+    "你是资深研发助手。请把一段很长的编程会话早期历史压缩成精炼的要点（中文），"
+    "去掉寒暄与重复。只输出下面四个小节，不要前言、不要结语：\n"
+    + "\n".join(SUMMARY_SECTIONS)
+    + "\n每节用短句分行；没有内容的节写「无」。"
+)
+
+#: Appended on the one retry, so the model knows what was wrong with the last
+#: answer rather than being asked the same thing again.
+_SUMMARY_NUDGE = (
+    "\n\n注意：上一次回复没有使用要求的小节结构。请只输出以 "
+    + " / ".join(SUMMARY_SECTIONS)
+    + " 开头的正文，不要任何其它文字。"
+)
+
+
+def summary_is_usable(text: str) -> bool:
+    """True when a model reply is shaped like a summary (G5-3).
+
+    Deliberately coarse — at least one required section heading — because the
+    cost of the two mistakes is asymmetric: accepting prose installs a useless
+    summary that the agent then reasons from, while rejecting a good one only
+    degrades to the trimmed history the pipeline already falls back on.  This is
+    the same check the reference implementations make.
+    """
+    body = (text or "").strip()
+    if not body:
+        return False
+    return any(section in body for section in SUMMARY_SECTIONS)
+
+
 def build_summarizer(model_config: Any) -> Summarizer:
-    """Return an async ``(history_text) -> summary|None`` closure for L4."""
+    """Return an async ``(history_text) -> summary|None`` closure for L4.
+
+    Asks once, checks the shape, and asks once more before giving up (G5-3).
+    ``None`` means "no usable summary", which is what makes the pipeline fall
+    back to the trimmed history -- a *better* outcome than installing a reply
+    that ignored the format.
+    """
 
     async def summarize(text: str) -> str | None:
-        try:
-            out = await _chat(
-                model_config,
-                (
-                    "你是资深研发助手。请把一段很长的编程会话早期历史压缩成精炼的要点"
-                    "（中文），保留：已做决策、关键文件路径、打开的问题。用短句分行，"
-                    "去掉寒暄与重复。"
-                ),
-                f"请压缩以下对话历史：\n\n{text[:_MAX_SUMMARY_CHARS]}",
-                max_tokens=800,
-            )
-            return out or None
-        except Exception:
-            return None  # best-effort; never break the compression pipeline
+        prompt = f"请压缩以下对话历史：\n\n{text[:_MAX_SUMMARY_CHARS]}"
+        for attempt in range(2):
+            try:
+                out = await _chat(
+                    model_config,
+                    _SUMMARY_SYSTEM_PROMPT,
+                    prompt if attempt == 0 else prompt + _SUMMARY_NUDGE,
+                    max_tokens=800,
+                )
+            except Exception:
+                return None  # best-effort; never break the compression pipeline
+            if summary_is_usable(out):
+                return out
+        return None
 
     return summarize
 
@@ -151,6 +194,8 @@ def _messages_to_text(
 
 
 __all__ = [
+    "SUMMARY_SECTIONS",
+    "summary_is_usable",
     "build_summarizer",
     "build_extractor",
     "_chat",
