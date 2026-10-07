@@ -38,7 +38,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 |---|---|---|
 | `/help` `/h` | — | 列出全部直接命令 |
 | `/status` | — | 会话 id、消息数、记忆条数 |
-| `/model [name]` | 模型名 | 无参数列出可用模型（`*` 标记当前），带参数则切换 |
+| `/model [name]` | 模型名 | 无参数列出配置里声明的模型（`*` 标记 `default_model`），带参数则切换 |
 | `/resume [id]` | 会话 id | **无参数弹出会话选择屏**（`ui/resume_screen.py`）：按最后访问时间倒序、按天分组（Today / Yesterday / 绝对日期）；每行显示时间 + 首条用户消息预览（截断 80 字符）+ 消息数；搜索框按预览/标题/id 子串过滤；↑↓ 选择、Enter 恢复、Esc 取消；已打开的会话不再列出；一个会话都没存时直接提示 `no saved sessions`。恢复后 transcript 清空并按消息时间顺序重建全部历史（用户气泡、模型正文、已完成工具卡默认折叠；只显示最终结果，不回放流式过程）。带参数则直接恢复并返回 `NEW_SESSION`，**支持前缀匹配**（`/resume 0113e0acac03`），歧义前缀会列出候选而非静默取第一个；恢复走完整 `load`（列表视图是剥离正文的摘要，直接用它会导致历史丢失） |
 | `/permissions [auto\|confirm]` | 策略 | 无参数显示当前审批回调，带参数切换自动批准 / 逐次确认 |
 | `/todo` | — | 渲染当前会话的 `TaskState`（目标、进度、逐项状态、下一步） |
@@ -673,6 +673,7 @@ R12 把 R10 的 `prompt_toolkit` 壳整体换成 Textual，并接回 R10 断掉�
   焦点默认落在 **Deny**，所以裸 Enter 是拒绝而不是批准；
 - `ask_user`：`CLIUserPromptCallback` 经 `set_provider` 接到 `AskScreen`；
 - slash 命令：`TextualConsole` 把命令输出写进 transcript；`/model <name>` 经 `AgentLoop.set_model` 真的切换。
+  模型表由 `cli.py` 作为 `AgentLoop(models=...)` 传入——它挂在 `AppConfig` 上，`AIConfig` 从不携带模型表（曾因此使 `/model` 恒报 unknown model）。
 
 **v1 明确不做**：欢迎页、侧栏、计划卡；`Esc` 取消工具批；steering 接回。
 （命令面板**已实现**：输入 `/` 唤起内置 `CommandPalette`，覆盖全部 slash 命令。）

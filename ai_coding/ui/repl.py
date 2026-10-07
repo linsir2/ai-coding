@@ -194,7 +194,7 @@ def _handle_config(loop: Any, session: Any, console: DialogueConsole) -> tuple[R
         console.info("[config] not available")
         return REPLAction.CONTINUE, session
     lines = [
-        f"[config] model: {getattr(settings, 'default_model', '?')}",
+        f"[config] model: {getattr(loop, 'default_model', '') or '?'}",
         f"  max_context_tokens: {getattr(settings, 'max_context_tokens', '?')}",
         f"  max_tool_iterations: {getattr(settings, 'max_tool_iterations', '?')}",
         f"  stop_policy: {getattr(settings, 'stop_policy', '?')}",
@@ -334,9 +334,10 @@ def _handle_tasks(
 def _handle_model(
     loop: Any, raw: str, session: Any, console: DialogueConsole
 ) -> tuple[REPLAction, Any]:
-    settings = getattr(loop, "settings", None)
-    models = getattr(settings, "models", {}) if settings else {}
-    default_model = getattr(settings, "default_model", "") if settings else ""
+    # Read off the loop, not off ``settings``: the model table is an ``AppConfig``
+    # field and ``loop.settings`` is an ``AIConfig``, which has never carried one.
+    models = getattr(loop, "models", None) or {}
+    default_model = getattr(loop, "default_model", "") or ""
     parts = raw.split()
     if len(parts) == 1:
         lines = [f"[model] current: {default_model or '(none)'}"]

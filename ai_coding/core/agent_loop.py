@@ -45,7 +45,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -95,6 +95,7 @@ from ai_coding.domain.acceptance import acceptance_states, pending_items
 from ai_coding.domain.ledger import ledger_signature
 from ai_coding.domain.loop import StepResult, TurnOutcome, TurnStatus
 from ai_coding.domain.message import ChatMessage, ToolArtifact
+from ai_coding.domain.model_config import ModelConfig
 from ai_coding.domain.run import assistant_message, user_message
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
@@ -152,6 +153,8 @@ class AgentLoop:
         skills: SkillRegistry | None = None,
         project: ProjectInstructionsLoader | None = None,
         settings: AIConfig | None = None,
+        models: Mapping[str, ModelConfig] | None = None,
+        default_model: str = "",
         observer: LoopObserver | None = None,
         workspace: str = ".",
         trace: Any | None = None,
@@ -169,6 +172,14 @@ class AgentLoop:
         self.skills = skills
         self.project = project
         self.settings = settings or AIConfig()
+        # The model table lives on ``AppConfig``, not on ``AIConfig``: it is a
+        # catalogue of connections, not a behaviour knob, and ``AIConfig`` is
+        # shared by every entry point.  Without it ``/model`` could only ever
+        # report "unknown model" (``set_model`` below is the only reader).
+        self.models: dict[str, ModelConfig] = dict(models or {})
+        # Remembered separately from ``engine.model_config`` so ``/model`` can
+        # still mark the configured default after the user switched away.
+        self.default_model = default_model
         self.workspace = workspace
         self._base_observer: LoopObserver = observer or NullObserver()
         self.observer: LoopObserver = SafeObserver(self._base_observer)
@@ -256,10 +267,10 @@ class AgentLoop:
         Raises:
             ValueError: If the model name is not in settings.models
         """
-        models = getattr(self.settings, "models", {})
-        if name not in models:
-            raise ValueError(f"Unknown model: {name}")
-        self.engine.model_config = models[name]
+        if name not in self.models:
+            available = ", ".join(sorted(self.models)) or "none configured"
+            raise ValueError(f"Unknown model: {name} (available: {available})")
+        self.engine.model_config = self.models[name]
 
     # ---- the turn ---------------------------------------------------------
 

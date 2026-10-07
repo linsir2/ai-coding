@@ -142,6 +142,8 @@ def _build_loop(
         skills=skills_reg,
         project=project,
         settings=app_cfg.ai,
+        models=app_cfg.models,
+        default_model=app_cfg.default_model,
         observer=observer,
         workspace=str(ws),
         trace=trace,

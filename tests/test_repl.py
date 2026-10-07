@@ -137,20 +137,20 @@ async def test_handle_status_prints_session_info():
     assert "1" in out  # one message reported by /status
 
 
-def _model_settings() -> Any:
-    return type(
-        "S",
-        (),
-        {
-            "models": {"gpt-4": "GPT-4", "claude": "Claude"},
-            "default_model": "gpt-4",
-        },
-    )()
+def _model_table(loop: Any) -> None:
+    """Put the model catalogue on the loop, where it actually lives.
+
+    It used to be installed on ``loop.settings``, which is an ``AIConfig`` --
+    a type that has never carried a model table, so the shipped ``/model`` could
+    only ever report "unknown model" while these tests passed.
+    """
+    loop.models = {"gpt-4": "GPT-4", "claude": "Claude"}
+    loop.default_model = "gpt-4"
 
 
 async def test_handle_model_lists_models():
     loop = _FakeLoop()
-    loop.settings = _model_settings()
+    _model_table(loop)
     sessions = _FakeSessions()
     dc, c = _console_capture()
     action, _ = await handle_input(loop, "/model", sessions.items[0], sessions, dc)
@@ -161,7 +161,7 @@ async def test_handle_model_lists_models():
 
 async def test_handle_model_switches():
     loop = _FakeLoop()
-    loop.settings = _model_settings()
+    _model_table(loop)
     loop.set_model = lambda name: None
     sessions = _FakeSessions()
     dc, c = _console_capture()
@@ -331,8 +331,8 @@ async def test_handle_review_sends_prompt():
 
 async def test_handle_config_shows_settings():
     loop = _FakeLoop()
+    loop.default_model = "gpt-4"
     loop.settings = type("S", (), {
-        "default_model": "gpt-4",
         "max_context_tokens": 48000,
         "max_tool_iterations": 10,
         "stop_policy": "todo_aware",
