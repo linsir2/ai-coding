@@ -160,6 +160,20 @@ class ContextAssembled:
 
 
 @dataclass(frozen=True)
+class ContextCompacted:
+    """The history was rewritten before this request (hotel audit, root cause R5).
+
+    Emitted once per turn, on the first assembly whose history the pipeline
+    actually rewrote; per-iteration sizes stay in ``ContextAssembled``.
+    """
+
+    before_messages: int = 0
+    after_messages: int = 0
+    before_chars: int = 0
+    after_chars: int = 0
+
+
+@dataclass(frozen=True)
 class Degraded:
     """An enhancement gave up and fell back, instead of failing the turn (R4a).
 
@@ -366,6 +380,7 @@ LoopEvent = (
     | ToolChunk
     | ModelStepFinished
     | ContextAssembled
+    | ContextCompacted
     | Degraded
     | ToolSurfaceWarning
     | ProviderRetried
@@ -425,6 +440,7 @@ def preview(text: str, limit: int = OUTPUT_PREVIEW_CHARS) -> str:
 __all__ = [
     "OUTPUT_PREVIEW_CHARS",
     "ContextAssembled",
+    "ContextCompacted",
     "Degraded",
     "ProviderFallback",
     "ProviderRetried",

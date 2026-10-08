@@ -30,7 +30,7 @@ class _Compactor:
         self.rewrite = rewrite
         self.summaries: list[str] = []
 
-    async def compress(self, history, *, deadline, on_summary=None, force=False):
+    async def compress(self, history, *, deadline, on_summary=None, force=False, pinned=()):
         if not self.rewrite:
             return history
         return [*history, ChatMessage(role="user", content="[压缩后的历史]", timestamp="")]
@@ -158,7 +158,11 @@ async def test_the_memory_block_is_announced_once_per_turn():
     session = _session([_digest()])
     await _assemble(assembler, session=session, books=books, index=1)
     await _assemble(assembler, session=session, books=books, index=2)
-    assert len(parts["events"]) == 1  # one MemoryInjected for the whole turn
+    from ai_coding.core.events import MemoryInjected
+
+    assert (
+        len([e for e in parts["events"] if isinstance(e, MemoryInjected)]) == 1
+    )  # one MemoryInjected for the whole turn
     assert books.memory_announced is True
 
 
@@ -218,3 +222,17 @@ async def test_a_healthy_turn_gets_no_pressure_block():
     assembled = await _assemble(assembler, index=2)
 
     assert not [m for m in assembled.request if (m.content or "").startswith("[budget]")]
+
+
+@pytest.mark.asyncio
+async def test_a_compacted_history_reports_itself_exactly_once():
+    assembler, parts = _assembler(rewrite=True)
+    session = _session([_digest()])
+    books = TurnBooks()
+
+    await _assemble(assembler, session=session, books=books)
+    await _assemble(assembler, session=session, books=books)
+
+    from ai_coding.core.events import ContextCompacted
+
+    assert len([e for e in parts["events"] if isinstance(e, ContextCompacted)]) == 1

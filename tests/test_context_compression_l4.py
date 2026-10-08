@@ -153,6 +153,18 @@ async def test_compress_sanitizes_orphan_pairs(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_compress_reinserts_the_pinned_instruction(tmp_path):
+    cm = ContextManager(_settings(max_messages=10), transcripts_root=tmp_path)
+    instruction = _user("审查一下这个项目")
+    msgs = [_user(f"m{i}") for i in range(34)]
+    msgs.insert(5, instruction)
+
+    out = await cm.compress(msgs, pinned=[instruction])
+
+    assert any(m.content == "审查一下这个项目" for m in out)
+
+
+@pytest.mark.asyncio
 async def test_l4_persists_audit_copy(tmp_path):
     fake = _Fake(["s"])
     cm = ContextManager(_settings(max_context_tokens=5), tmp_path, summarizer=fake)

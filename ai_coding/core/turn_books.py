@@ -101,6 +101,9 @@ class TurnBooks:
     #: Whether the tail's memory block has been reported this turn (R3 emits one
     #: ``MemoryInjected`` per turn, not one per iteration).
     memory_announced: bool = False
+    #: Whether the tail's compaction event has been reported this turn (the
+    #: ``ContextCompacted`` event fires once per turn, not once per iteration).
+    compaction_announced: bool = False
     #: Lines the user typed while this turn was running and the loop absorbed
     #: (R7e-2).
     steering_messages: int = 0

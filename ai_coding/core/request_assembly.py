@@ -19,12 +19,12 @@ every new block was another ten lines inside the same method.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from ai_coding.core.compaction import Compactor
-from ai_coding.core.events import LoopEvent, MemoryInjected
+from ai_coding.core.events import ContextCompacted, LoopEvent, MemoryInjected
 from ai_coding.core.request_builder import build_tail, content_of, volatile_block
 from ai_coding.core.turn_books import TurnBooks
 from ai_coding.domain.message import ChatMessage
@@ -83,15 +83,26 @@ class RequestAssembler:
         deadline: Deadline | None,
         index: int,
         previous_request: str | None,
+        pinned: Sequence[ChatMessage] = (),
     ) -> Assembled:
         """Compress, instruct, inject, tail — in that order, every iteration."""
         history = await self._compactor.compress(
-            session.messages, deadline=deadline, on_summary=books.summaries.append
+            session.messages, deadline=deadline, on_summary=books.summaries.append, pinned=pinned
         )
         # R6a: the ring only pays for itself when this request's history was
         # actually rewritten — otherwise the recent turns are still there
         # (docs/r6-analysis.md 2.1, D-R6-2).
         compacted = Compactor.did_compact(session.messages, history)
+        if compacted and not books.compaction_announced:
+            self._emit(
+                ContextCompacted(
+                    before_messages=len(session.messages),
+                    after_messages=len(history),
+                    before_chars=sum(len(m.content or "") for m in session.messages),
+                    after_chars=sum(len(m.content or "") for m in history),
+                )
+            )
+            books.compaction_announced = True
         instructions = (
             await self._build_instructions(deadline)
             if self._build_instructions is not None

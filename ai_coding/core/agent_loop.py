@@ -202,6 +202,7 @@ class AgentLoop:
         self.models: dict[str, ModelConfig] = dict(models or {})
         # Remembered separately from ``engine.model_config`` so ``/model`` can
         # still mark the configured default after the user switched away.
+        self._current_instruction: ChatMessage | None = None
         self.default_model = default_model
         self.workspace = workspace
         self._base_observer: LoopObserver = observer or NullObserver()
@@ -454,6 +455,7 @@ class AgentLoop:
                     deadline=frame.deadline,
                     index=index,
                     previous_request=previous_request,
+                    pinned=(self._current_instruction,) if self._current_instruction else (),
                 )
                 previous_request = assembled.previous_request
 
@@ -585,6 +587,10 @@ class AgentLoop:
         self._bind_observer(observer)
         self._bind_trace(session)
         session.add_message(user_message(user_input, now_utc()))
+        # T5: remember this request's instruction so compaction can keep it in
+        # the history (hotel audit root cause R5: the instruction at index 80 fell
+        # out of the L1 tail window and the model re-anchored on old content).
+        self._current_instruction = session.messages[-1]
         # R6a: the session-level turn counter.  It is what `source_turn` and the
         # <working-memory> header mean by "turn N" (docs/r6-analysis.md 2.4).
         session.turn_count = int(getattr(session, "turn_count", 0) or 0) + 1
@@ -906,6 +912,7 @@ class AgentLoop:
                 deadline=frame.deadline,
                 index=self.policy.config.max_iterations + 1,
                 previous_request=previous_request,
+                pinned=(self._current_instruction,) if self._current_instruction else (),
             )
             request = [
                 *assembled.request,

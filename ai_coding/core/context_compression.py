@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -300,6 +300,26 @@ def _joined_history_text(messages: list[ChatMessage]) -> str:
     return "\n".join(parts)
 
 
+def _ensure_pinned(
+    messages: list[ChatMessage], pinned: Sequence[ChatMessage]
+) -> list[ChatMessage]:
+    """Keep the live user instruction through every stage.
+
+    L1/L4/hard-trim cut by position; the instruction can be older than the tail
+    window (hotel T15: index 80 fell out of a 20-message tail) and the model
+    then re-anchors on whatever survived.  A missing pin is re-appended at the
+    end of the history — closest to the tail blocks, where recency helps.
+    """
+    for pin in pinned:
+        if any(
+            m is pin or (m.role == pin.role and m.content == pin.content)
+            for m in messages
+        ):
+            continue
+        messages = [*messages, pin]
+    return messages
+
+
 class ContextManager:
     """Orchestrates the four-layer compression pipeline over a history copy.
 
@@ -344,6 +364,7 @@ class ContextManager:
         messages: list[ChatMessage],
         *,
         on_summary: Callable[[str], None] | None = None,
+        pinned: Sequence[ChatMessage] = (),
     ) -> list[ChatMessage]:
         """Run the four-layer pipeline once (M3 semantics, unchanged)."""
         out = list(messages)  # copy — never mutate the caller's history
@@ -368,6 +389,7 @@ class ContextManager:
         if estimate_tokens(_joined_history_text(out)) > self._max_context_tokens:
             out = hard_trim(out, HARD_TRIM_KEEP_TAIL)
 
+        out = _ensure_pinned(out, pinned)
         return sanitize_pairs(out)
 
     # ---- R3b: the compaction policy -----------------------------------
@@ -383,6 +405,7 @@ class ContextManager:
         *,
         force: bool = False,
         on_summary: Callable[[str], None] | None = None,
+        pinned: Sequence[ChatMessage] = (),
     ) -> list[ChatMessage]:
         """Compact **only** when the budget says so (or the user asked).
 
@@ -392,7 +415,7 @@ class ContextManager:
         """
         if not force and not self.should_compact(messages):
             return messages
-        out = await self.compress(messages, on_summary=on_summary)
+        out = await self.compress(messages, on_summary=on_summary, pinned=pinned)
         target = int(self._max_context_tokens * self._compress_target_ratio)
         guard = 0
         while (
@@ -402,6 +425,7 @@ class ContextManager:
         ):
             out = hard_trim(out, max(_MIN_PAGE_MESSAGES, len(out) // 2))
             guard += 1
+        out = _ensure_pinned(out, pinned)
         return out
 
     # ---- L4 -----------------------------------------------------------

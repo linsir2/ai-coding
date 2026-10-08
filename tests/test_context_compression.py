@@ -215,3 +215,18 @@ def test_sanitize_keeps_plain_user_and_assistant():
     msgs = [_user("hi"), _assistant("hello")]
     out = sanitize_pairs(msgs)
     assert len(out) == 2
+
+
+def test_snip_can_lose_the_instruction_and_pin_brings_it_back():
+    from ai_coding.core.context_compression import _ensure_pinned
+
+    instruction = _user("审查一下这个项目")
+    msgs = [_user(f"m{i}") for i in range(60)]
+    msgs.insert(5, instruction)
+
+    out = snip_middle(msgs, max_messages=10, keep_head=3, keep_tail=4)
+    assert instruction not in out  # the T15 failure, reproduced
+
+    out = _ensure_pinned(out, [instruction])
+    assert out[-1] is instruction
+    assert sum(1 for m in out if m.content == "审查一下这个项目") == 1

@@ -53,6 +53,7 @@ class Compactor:
         deadline: Deadline | None,
         on_summary: Callable[[str], None] | None = None,
         force: bool = False,
+        pinned: Sequence[ChatMessage] = (),
     ) -> list[ChatMessage]:
         """Compact only when the budget says so; degrade to the raw history.
 
@@ -68,8 +69,14 @@ class Compactor:
         aware = getattr(self._context, "compress_if_needed", None)
         try:
             if aware is not None:
+                kwargs: dict[str, Any] = {
+                    "on_summary": on_summary,
+                    "force": force,
+                }
+                if pinned:
+                    kwargs["pinned"] = pinned
                 return await run_with_deadline(
-                    aware(history, on_summary=on_summary, force=force),
+                    aware(history, **kwargs),
                     timeout=budget,
                     label="context_compress",
                 )
