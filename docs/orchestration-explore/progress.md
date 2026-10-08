@@ -58,15 +58,23 @@
 4. 折叠标题带信息（参考 opencode 的 thinking 折叠）：
    `▶ 思考过程 · The user wants to read...`、`▶ 工具 2 个 · 查找文件 · 读取文件`。
 
-### 未修（有证据的既有缺陷）
-5. **输入框中间行右侧残留 2 个字符**（观测到 `a"` / `e"`）。证据：
-   - 全新启动无；**跑一个无工具、无 modal 的回合后立即出现**
-   - 精确测量：框的上下边框止于 108 列，只有中间行到 110 列
-   - 不在任何 widget 的声明区域内（`InputBar` 覆盖 0..109，其子节点止于 97/98）
-   - **改动前就存在**（`git stash` 后同样复现）
-   - resize 强制全屏重绘后自愈
-   - 试过 `on_screen_resume` → `refresh(layout=True)`，**无效**，已删除该非修复
-   → 属 Textual 渲染层的陈旧单元格问题，不盲目打补丁。
+### 已修（根因：日志写进了 TUI 的帧）
+5. **输入框中间行右侧残留 2 个字符**（观测到 `a"` / `e"`）。
+   - 测试里**不复现**（`run_test` 是 headless 驱动，compositor 里那 2 格是空格）
+   - 用 `tmux pipe-pane` 抓 pty 原始字节流，在里面搜到：
+     ```
+     row=39 col=109  后续可打印='2026-10-08 09:57:20,015 IN'
+     ```
+   - **根因**：`setup_logging()` 把 `StreamHandler(sys.stderr)` 装在 root logger 上，
+     而 TUI 的 stderr **就是 Textual 正在渲染的终端**。一条 152 字符的 httpx 日志被写在
+     帧中间的任意位置，Textual 之后只重绘它认为脏的区域 → 留下 2 格碎片（只有 resize 能清）。
+   - **为什么 httpx 的 INFO 没被滤掉**：原有过滤只压了 `logging.getLogger("httpx")`，
+     而这条日志的 logger 名字是 **`httpx2`**（`%(name)s` 字段直接证据）——是另一个顶层 logger，
+     不受影响。
+   - **修法**：`send_logs_to_file(workspace)` 在 TUI 接管终端前把 root 日志改到
+     `<workspace>/.ai-coding/ai-coding.log`（RotatingFileHandler，2MB×3，可写失败降级为丢弃），
+     并把 `httpx2` 加入压制名单。CLI/REPL 路径保持 stderr（面向行，日志只是交错不破坏画面）。
+   - **验证**：真机重跑，多回合，`超 108 列的行: 无`。
 
 ### 真机观察（非缺陷）
 - 长对话（4+ 回合、多工具、审批 y/n、排队命令）累积正常：折叠汇总、transcript 滚动、

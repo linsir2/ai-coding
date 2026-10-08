@@ -8,7 +8,7 @@ from typing import Any
 
 import typer
 
-from ai_coding.infra.logger_setup import setup_logging
+from ai_coding.infra.logger_setup import send_logs_to_file, setup_logging
 
 app = typer.Typer(
     name="ai-coding",
@@ -51,6 +51,12 @@ def main(
     setup_logging()
     if version:
         return
+    # The TUI owns the terminal from here: a log record written to stderr lands
+    # in the middle of Textual's frame, and Textual repaints only the regions it
+    # believes changed, so fragments of it stay on screen (measured: a stray two
+    # characters at the input row's right edge after every turn, cleared only by
+    # a resize).  Logs go to the workspace's .ai-coding/ instead.
+    send_logs_to_file(workspace)
     from ai_coding.ui.textual_app import run_app
 
     try:
