@@ -614,3 +614,49 @@ async def test_planning_shows_each_step_as_a_live_fold():
         )
         # the first step's title carries its receipt summary
         assert "改 loader" in folds[0].title
+
+
+@pytest.mark.asyncio
+async def test_submitting_while_the_palette_is_open_closes_it():
+    """Typing "/" opens the palette on the first character, so anything typed
+    after it lands in the prompt while the palette is still up.  Pressing Enter
+    then runs the command *and leaves the palette covering the transcript* --
+    seen by really running it: three commands in a row, the palette still on
+    screen until an Escape.
+
+    Textual's palette is a two-Enter flow (pick, then run) when you search
+    inside it; when the command is typed into the prompt there is nothing left
+    to pick, so the submit has to close it.
+    """
+    app = _app(loop=_FakeLoop())
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        prompt.value = "/"
+        await pilot.pause()
+        assert CommandPalette.is_open(app), "typing / opens the palette"
+
+        # Type the rest and submit, the way a paste or fast typing arrives.
+        prompt.value = "/help"
+        await pilot.press("enter")
+        # The command runs on a worker; letting the test tear the app down
+        # mid-flight fails on the app's own shutdown, not on the behaviour.
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert not CommandPalette.is_open(app), "the submit must close the palette"
+
+
+@pytest.mark.asyncio
+async def test_escape_still_closes_the_palette_by_itself():
+    """The other half: the palette is still dismissable without submitting."""
+    app = _app(loop=_FakeLoop())
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", Input)
+        prompt.value = "/"
+        await pilot.pause()
+        assert CommandPalette.is_open(app)
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert not CommandPalette.is_open(app)

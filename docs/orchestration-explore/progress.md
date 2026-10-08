@@ -14,7 +14,7 @@
 | **M2** | 模型降级链：`FallbackEngine` 组合多引擎、`FallbackWorthwhile`、`fallback_models` 配置、启动时解析链 + 环检测、`ProviderFallback` 事件 | `3da4840` | 已全绿 |
 | — | `/model` 死代码修复：`AgentLoop(models=...)`，模型表从 `AIConfig` 移到显式参数 | `aa72115` | 已全绿 |
 
-**当前门禁**：`2009 passed, 2 skipped` / ruff clean / mypy 115 files clean。
+**当前门禁**：`2014 passed, 2 skipped` / ruff clean / mypy 115 files clean。
 
 **已知偶发**（非回归，均为无同步点的时序测试）：`test_pty_textual.py::test_approval_and_ask_user_reach_the_tools`、`test_ui_visual.py::test_collapsible_has_no_top_border`。
 
@@ -30,3 +30,14 @@
 ### P0 —— 已完成
 
 - [x] **子 agent 的 guard 链是空的。** 根因：`core/subagent.py:452-461` 未传 `guards`，`core/dispatch.py:163` 把 `None` 变成 `GuardChain([])`（恒 ALLOW）。修法：`_make_guards` 从 `cli.py` 搬到 `core/guard.py::build_guards`（三处调用点共用：REPL、TUI、子 agent），`SubAgentRunner.__init__` 建一次并传给每个子循环。真实路径已验证 `cat /etc/shadow` 在执行前被拦、拒绝理由回喂给模型。
+
+## G5-6 复查（2026-10-08，有证据）
+
+用全仓真实 trace 统计：**172 个 model step 里 provider 因上下文超长拒绝 0 次**；
+`Degraded` 全是别的原因（8 次回合超时、3 次 delta 对账）。估算偏差仍在
+（`real/est` 中位 **1.349**，与改动前的 1.356 一致）。
+
+→ **自设预算（48k）确实吸收了估算偏差**，反应式压缩在真实使用中从未触发。
+修估算会压缩更早、降低 prompt cache 命中率，而问题没有发生。**G5-6 继续暂缓。**
+
+注意："0 次"是"没遇到这种情况"，不是"恢复路径坏了"——G5-1 的真实路径验证过它能触发。

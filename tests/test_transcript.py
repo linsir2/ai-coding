@@ -814,3 +814,61 @@ async def test_replay_groups_tools_into_one_activity_fold():
         assert len(activities) == 1
         kids = list(activities[0].query(Collapsible))
         assert len(kids) == 1 and "✓" in str(kids[0].title)
+
+
+# ---- collapsed folds carry information, not just a label --------------------
+
+
+def test_a_fold_title_is_the_first_real_line_flattened():
+    """The collapsed fold is all most turns ever show, so its title has to say
+    something.  The reference client's thinking fold leads with a summary line
+    rather than the constant word "thinking"; a model that writes prose instead
+    of a bold lead-in gets its first line."""
+    from ai_coding.ui.transcript import one_line_title
+
+    assert one_line_title("\n\n  第一行   有   空白  \n第二行") == "第一行 有 空白"
+    assert one_line_title("") == ""
+    assert one_line_title("   \n \n") == ""
+
+
+def test_a_fold_title_is_truncated_rather_than_wrapping():
+    from ai_coding.ui.transcript import one_line_title
+
+    title = one_line_title("字" * 200, limit=20)
+
+    assert len(title) == 20
+    assert title.endswith("…")
+
+
+@pytest.mark.asyncio
+async def test_the_reasoning_fold_title_shows_what_was_thought():
+    async with _Harness().run_test(size=(120, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        t._turn.append_reasoning("先看 loader，判断它是否可选。\n然后决定改哪里。")
+        await pilot.pause()
+
+        title = str(t.query(".reasoning-fold").first().title)
+
+        # Still recognisable as the thinking fold, and now informative.
+        assert "思考过程" in title
+        assert "先看 loader" in title
+
+
+@pytest.mark.asyncio
+async def test_the_activity_fold_says_which_tools_ran():
+    """``工具 3 个`` answered "how many" and nothing else; the operator
+    scanning the transcript wants to know what ran without opening the fold."""
+    async with _Harness().run_test(size=(120, 24)) as pilot:
+        t = pilot.app.query_one(Transcript)
+        t.begin_assistant("10:00")
+        t._turn.start_tool("c0", "运行命令", "ls", "shell", "")
+        t._turn.start_tool("c1", "运行命令", "pwd", "shell", "")
+        t._turn.start_tool("c2", "读取文件", "a.py", "read", "")
+        await pilot.pause()
+
+        title = str(t.query_one(".activity-fold").title)
+
+        assert "工具 3 个" in title, "the existing contract survives"
+        assert "运行命令 ×2" in title
+        assert "读取文件" in title

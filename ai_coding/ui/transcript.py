@@ -54,6 +54,42 @@ class Prose(Static):
         self.update(RichMarkdown(text) if text else "")
 
 
+#: How much of a fold's one-line summary is shown.  A collapsed fold is one
+#: row, and a title long enough to wrap would spend a second to say less.
+_TITLE_LIMIT = 60
+
+
+def one_line_title(text: str, limit: int = _TITLE_LIMIT) -> str:
+    """The first line of a block, flattened, for use as a fold title.
+
+    The collapsed fold is all most turns ever show, so its title has to carry
+    information.  The reference client leads its thinking fold with a summary
+    line rather than the constant word "thinking"; a model that writes prose
+    instead of a bolded lead-in gets the first line of that prose.
+    """
+    for raw in (text or "").splitlines():
+        line = " ".join(raw.split())
+        if line:
+            return line if len(line) <= limit else line[: limit - 1] + "…"
+    return ""
+
+
+def tool_summary(folds: Sequence[_ToolFold]) -> str:
+    """Which tools ran and how often, for the collapsed activity fold.
+
+    ``工具 3 个`` answered "how many" and nothing else.  Grouped by the verb the
+    transcript already shows on each tool's own title, so the summary and the
+    children name the same thing.
+    """
+    counts: dict[str, int] = {}
+    for fold in folds:
+        label = fold.verb or fold.kind or "工具"
+        counts[label] = counts.get(label, 0) + 1
+    return " · ".join(
+        f"{label} ×{count}" if count > 1 else label for label, count in counts.items()
+    )
+
+
 @dataclass(frozen=True)
 class _ToolFold:
     """One tool call's fold: title parts, live text, finish state.
@@ -185,9 +221,13 @@ class Turn(VerticalGroup):
         self._reasoning_text = (
             text if old is None else f"{self._reasoning_text}\n\n{text}"
         )
+        summary = one_line_title(self._reasoning_text)
+        # The marker stays (it is what makes the fold recognisable at a glance,
+        # and tests/greps rely on it); the first line is what makes it useful.
+        title = f"思考过程 · {summary}" if summary else "思考过程"
         new = Collapsible(
             Plain(self._reasoning_text, classes="reasoning-body"),
-            title="思考过程",
+            title=title,
             collapsed=old.collapsed if old is not None else True,
             classes="reasoning-fold",
         )
@@ -340,7 +380,8 @@ class Turn(VerticalGroup):
             self._schedule_activity_flush()
         else:
             self._activity_body.mount(collapsible)
-        self._activity.title = f"工具 {len(self._folds)} 个"
+        summary = tool_summary(list(self._folds.values()))
+        self._activity.title = f"工具 {len(self._folds)} 个 · {summary}"
 
     def _schedule_activity_flush(self) -> None:
         if self._flush_scheduled or self._activity is None:

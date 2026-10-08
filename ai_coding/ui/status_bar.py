@@ -17,10 +17,19 @@ class StatusBar(Horizontal):
         self._workspace = workspace
         self._model = model_name
         self._busy = False
+        #: The two halves, held rather than looked up by id.  ``_refresh`` runs
+        #: from a turn worker, and a screen transition (a modal pushes and pops)
+        #: can leave this bar detached for a moment -- a lookup then raises
+        #: ``NoMatches`` out of the worker and kills the command it was running.
+        #: A refresh on a detached bar updates nothing, which is exactly right.
+        self._left: Plain | None = None
+        self._right: Plain | None = None
 
     def compose(self) -> ComposeResult:
-        yield Plain(id="status-left")
-        yield Plain(id="status-right")
+        self._left = Plain(id="status-left")
+        self._right = Plain(id="status-right")
+        yield self._left
+        yield self._right
 
     def on_mount(self) -> None:
         self._refresh()
@@ -34,13 +43,17 @@ class StatusBar(Horizontal):
         self._refresh()
 
     def _refresh(self) -> None:
+        if self._left is None or self._right is None:
+            return  # not composed yet (``set_busy`` can arrive first)
         left = Text()
         left.append(">_ ", style="bold")
         left.append(self._workspace)
         if self._model:
             left.append(f"  ·  {self._model}", style="dim")
-        self.query_one("#status-left", Plain).update(left)
-        self.query_one("#status-right", Plain).update(
-            Text("● Working" if self._busy else "● Ready",
-                 style="yellow" if self._busy else "green")
+        self._left.update(left)
+        self._right.update(
+            Text(
+                "● Working" if self._busy else "● Ready",
+                style="yellow" if self._busy else "green",
+            )
         )

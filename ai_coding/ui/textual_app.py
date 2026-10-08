@@ -131,6 +131,7 @@ class AICodingApp(App[None]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         self._input.value = ""
+        self._close_palette()
         if not text:
             return
         if text.startswith("/"):
@@ -138,6 +139,23 @@ class AICodingApp(App[None]):
         else:
             self._transcript.append_user(text, _clock())
             self._submit_text(text)
+
+    def _close_palette(self) -> None:
+        """Dismiss the palette a typed command arrived under.
+
+        Typing ``/`` opens the palette on the first character, so a command
+        typed (or pasted) into the prompt leaves it up -- and Enter then reaches
+        the prompt, runs the command, and leaves the palette covering the
+        transcript until an Escape.  Textual only dismisses it when its own list
+        is used, so submitting from the prompt has to close it.  Seen by running
+        the app: three commands in a row, palette still on screen.
+        """
+        screen = self.screen
+        if isinstance(screen, CommandPalette):
+            # Its own dismissal, not ``pop_screen``: the palette posts its
+            # ``Closed`` event and unwinds its command gathering, and popping it
+            # by hand raced the app's shutdown (``ScreenStackError``).
+            screen.dismiss(None)
 
     def submit_slash(self, text: str) -> None:
         """Record a slash command as a user turn, then run it.
