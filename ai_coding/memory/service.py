@@ -65,6 +65,27 @@ Extractor = Callable[
     "list[Any] | Awaitable[list[Any]]",
 ]
 
+_VOLATILE_PATTERNS = (
+    "下一步", "接下来", "已完成", "当前进度",
+    "/tmp/", "/var/folders", "pid", "进程",
+)
+_VOLATILE_PREFIXES = ("当前", "刚才", "刚刚")
+
+
+def _is_volatile_note(text: str) -> bool:
+    """Reject session-transient state masquerading as durable memory.
+
+    Per GenericAgent's "No Execution, No Memory" axiom: progress notes
+    ("done with X, next do Y"), temp paths and PIDs are not durable facts
+    and must not be written. Pure mechanical rule — no LLM call.
+    """
+    body = text.strip()
+    if any(body.startswith(p) for p in _VOLATILE_PREFIXES):
+        return True
+    lowered = body.lower()
+    return any(p in lowered for p in _VOLATILE_PATTERNS)
+
+
 __all__ = [
     "ConsolidateReport",
     "HarvestReport",
@@ -659,6 +680,8 @@ class MemoryService:
             return HarvestReport()
         if not is_plausible_note_text(body):
             return HarvestReport()
+        if _is_volatile_note(body):
+            return HarvestReport()
         if not is_extraction_allowed(self._config, "memory_write"):
             return HarvestReport()
         target = str(supersedes or "").strip()
@@ -722,6 +745,8 @@ class MemoryService:
             if not text:
                 continue
             if not is_plausible_note_text(text):
+                continue
+            if _is_volatile_note(text):
                 continue
             note = new_note(
                 text,
@@ -937,6 +962,20 @@ async def asyncio_guard(value: list[Any] | Awaitable[list[Any]]) -> list[Any]:
 def _as_candidate(item: Any) -> HarvestCandidate | None:
     if isinstance(item, HarvestCandidate):
         return item if item.text.strip() else None
+    if isinstance(item, dict):
+        text = str(item.get("text", "")).strip()
+        if not text:
+            return None
+        kind = NoteKind.parse(item.get("kind", "fact"))
+        importance = int(item.get("importance", 3))
+        return HarvestCandidate(
+            text=text,
+            kind=kind,
+            importance=importance,
+            action=item.get("action", "add"),
+            target_id=item.get("target_id"),
+            scene=item.get("scene", ""),
+        )
     body = str(item).strip()
     return HarvestCandidate(text=body) if body else None
 

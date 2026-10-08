@@ -197,8 +197,8 @@ async def test_prior_deliveries_are_summarised_into_later_steps():
     loop = _StubLoop(["complete", "complete"])
     await PlanRunner(loop).run(session)
     # M1: prior progress travels in the step session's seed, not the prompt —
-    # completed items are absent from the open list, which is how a step
-    # learns they are done (re-listing them makes the model redo the work).
+    # completed items are absent from the open list, so a step learns they're
+    # done without re-listing them (re-listing would make the model redo work).
     seed_2 = loop.step_sessions[1].messages[0].content
     assert "step two" in seed_2
     assert "step one" not in seed_2
