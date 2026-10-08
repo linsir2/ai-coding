@@ -62,6 +62,16 @@ class ReadTool(BaseTool):
     # Read-only: safe to run alongside sibling calls in the same message.
     parallel_safe = True
 
+    def precheck(self, params: dict[str, Any]) -> ToolResult | None:
+        path_str = str(params.get("path", ""))
+        if not path_str:
+            return None
+        try:
+            self._sandbox.resolve(path_str)
+        except SandboxViolation as exc:
+            return ToolResult(success=False, output=str(exc), error="sandbox_violation")
+        return None
+
     async def execute(
         self, params: dict[str, Any], ctx: ToolContext | None = None
     ) -> ToolResult:
@@ -73,7 +83,7 @@ class ReadTool(BaseTool):
         try:
             target = self._sandbox.resolve(path_str)
         except SandboxViolation as exc:
-            return ToolResult(success=False, output=str(exc))
+            return ToolResult(success=False, output=str(exc), error="sandbox_violation")
 
         if not target.is_file():
             return ToolResult(success=False, output=f"file not found: {path_str}")

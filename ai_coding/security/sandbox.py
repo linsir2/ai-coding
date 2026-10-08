@@ -30,6 +30,8 @@ class Sandbox:
         except ValueError as exc:
             raise SandboxViolation(
                 f"path '{path}' resolves outside workspace '{self.workspace}'"
+                " — file tools cannot touch it; use bash instead"
+                " (cat, sed -n, or a heredoc write)"
             ) from exc
         return resolved
 

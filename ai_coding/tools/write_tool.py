@@ -55,6 +55,16 @@ class WriteTool(BaseTool):
             "required": ["path", "content"],
         }
 
+    def precheck(self, params: dict[str, Any]) -> ToolResult | None:
+        path_str = str(params.get("path", ""))
+        if not path_str:
+            return None
+        try:
+            self._sandbox.resolve(path_str)
+        except SandboxViolation as exc:
+            return ToolResult(success=False, output=str(exc), error="sandbox_violation")
+        return None
+
     async def execute(
         self, params: dict[str, Any], ctx: ToolContext | None = None
     ) -> ToolResult:
@@ -70,7 +80,7 @@ class WriteTool(BaseTool):
         try:
             target = self._sandbox.resolve(path_str)
         except SandboxViolation as exc:
-            return ToolResult(success=False, output=str(exc))
+            return ToolResult(success=False, output=str(exc), error="sandbox_violation")
 
         # Stale-read check for existing files
         if target.exists():

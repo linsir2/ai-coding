@@ -48,3 +48,10 @@ def test_sandbox_violation_message(tmp_path):
     sb = Sandbox(tmp_path)
     with pytest.raises(SandboxViolation, match="outside workspace"):
         sb.resolve("/tmp/evil")
+
+
+def test_sandbox_violation_message_points_to_bash(tmp_path):
+    sb = Sandbox(tmp_path)
+    with pytest.raises(SandboxViolation) as exc:
+        sb.resolve("/tmp/evil")
+    assert "use bash instead" in str(exc.value)

@@ -683,3 +683,30 @@ async def test_r8_a_cancelled_call_does_not_disturb_its_siblings():
     # Both are in the same parallel batch, so the sibling is abandoned too - but
     # it still gets a *result*: the declared tool_calls must pair up.
     assert all(outcome.result is not None for outcome in outcomes)
+
+
+# ---- T1: precheck refusal happens before approval ---------------------------
+
+
+class _SandboxedWrite(_FakeTool):
+    """A write-shaped fake whose precheck refuses before the WARN approval runs."""
+
+    def precheck(self, params):
+        return ToolResult(
+            success=False, output="outside workspace; use bash", error="sandbox_violation"
+        )
+
+
+@pytest.mark.asyncio
+async def test_precheck_refusal_skips_approval_and_execution():
+    tool = _SandboxedWrite("write")
+    approval = _NeverAsked()
+    dispatcher = _dispatcher([tool], approval=approval)
+
+    outcomes = await dispatcher.dispatch_batch(
+        [_ref("c1", "write", '{"path": "/outside/x.py"}')], _ctx()
+    )
+
+    assert outcomes[0].result.error == "sandbox_violation"
+    assert outcomes[0].denied is True
+    assert tool.executed is False

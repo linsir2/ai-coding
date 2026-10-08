@@ -122,5 +122,15 @@ class BaseTool(ABC):
         should always pass one.
         """
 
+    def precheck(self, params: dict[str, Any]) -> ToolResult | None:
+        """Cheap refusal for calls that cannot execute — checked before approval.
+
+        The dispatcher runs this *before* asking the user: a call the sandbox
+        will reject must not prompt for consent (hotel audit, root cause R2).
+        Default ``None`` means "no opinion"; file tools override it with the
+        same ``Sandbox`` they execute against, so the two can never disagree.
+        """
+        return None
+
 
 __all__ = ["BaseTool", "ToolContext", "resolve_ctx"]

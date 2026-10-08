@@ -326,6 +326,14 @@ class ToolDispatcher:
             if _verdict(recheck) is PermissionDecision.DENY:
                 return self._denied(call, _reason(recheck), rewritten=True), True, False
 
+        # T1: a call that cannot execute must not be offered for approval.
+        tool = item.tool
+        if tool is None:  # pragma: no cover - checked at the top of _decide
+            return self._unknown(call), True, False
+        blocked = tool.precheck(call.params)
+        if blocked is not None:
+            return blocked, True, False
+
         if verdict is PermissionDecision.WARN:
             if self.approval is None:
                 return self._not_approved(call, "no approval callback"), True, False
