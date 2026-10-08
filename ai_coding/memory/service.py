@@ -43,7 +43,13 @@ from typing import Any
 
 from ai_coding.domain.message import ChatMessage
 from ai_coding.memory.embeddings import EmbeddingIndex, EmbeddingsUnsupportedError
-from ai_coding.memory.note import MemoryNote, NoteKind, new_note, normalize_scene
+from ai_coding.memory.note import (
+    MemoryNote,
+    NoteKind,
+    is_plausible_note_text,
+    new_note,
+    normalize_scene,
+)
 from ai_coding.memory.relevance import (
     RecallParams,
     ScoredNote,
@@ -651,6 +657,8 @@ class MemoryService:
         body = str(text or "").strip()
         if not self.enabled or not body:
             return HarvestReport()
+        if not is_plausible_note_text(body):
+            return HarvestReport()
         if not is_extraction_allowed(self._config, "memory_write"):
             return HarvestReport()
         target = str(supersedes or "").strip()
@@ -712,6 +720,8 @@ class MemoryService:
         for candidate in candidates:
             text = candidate.text.strip()
             if not text:
+                continue
+            if not is_plausible_note_text(text):
                 continue
             note = new_note(
                 text,

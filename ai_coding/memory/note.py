@@ -116,6 +116,8 @@ class MemoryNote:
         if not str(self.text or "").strip():
             raise ValueError("memory note requires text")
         object.__setattr__(self, "text", str(self.text).strip())
+        if not is_plausible_note_text(self.text):
+            raise ValueError("memory note text looks like a serialized record")
         object.__setattr__(self, "kind", NoteKind.parse(self.kind))
         object.__setattr__(self, "scope", str(self.scope or DEFAULT_SCOPE))
         object.__setattr__(self, "scene", normalize_scene(self.scene))
@@ -213,6 +215,20 @@ class MemoryNote:
             source_message_ids=_refs(data.get("source_message_ids")),
             evidence=str(data.get("evidence", "") or ""),
         )
+
+
+_SERIALIZED_PREFIXES = ('{', '[', ']', '}', '"')
+
+
+def is_plausible_note_text(text: str) -> bool:
+    """A memory is a sentence, not a serialized record.
+
+    One real turn put twelve JSON fragments into ``.memory``; the loader accepted
+    any non-empty text, so they stayed.  Positional rule, not JSON parsing: every
+    fragment starts with a brace, bracket or quote.
+    """
+    body = str(text or "").strip()
+    return bool(body) and body[0] not in _SERIALIZED_PREFIXES
 
 
 def new_note(
