@@ -116,7 +116,7 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 |---|---|
 | 验收项（`session.acceptance`） | 一条可机检的陈述 + 一条 shell 证明命令；落盘仅当非空（Java 兼容）。暂由调用方/计划 runner 填充，不做模型自由文本解析 |
 | 验收门 | 模型停下先跑未过项的证明命令（单项 120s/总额 300s，只验未过项）；全过 → `COMPLETED（acceptance verified）`；失败 → `[acceptance-gate]` nudge（自有预算 2 次）把失败输出拍进历史；预算型 FINISH 时若有时钟余量则补验一次，全过改判 COMPLETED（预算用尽但活干完不再撒谎） |
-| 不确定性台账 | 纯派生（验失败/工具错误聚合/失败连胜），H 只降在记录证据上；open 集签名变化才发 `LedgerUpdated` 事件，transcript 显示 dim 行；open 集连续 2 轮不动 → `[ledger-gate]` nudge（自有预算 1 次）要求澄清或拆分 |
+| 不确定性台账 | 纯派生（验失败/工具错误聚合/失败连胜），H 只降在记录证据上；open 集签名变化才发 `LedgerUpdated` 事件，transcript 显示 dim 行；ledger 仅作 trace 观测，不再注入 nudge |
 | 子跑截断信号 | `SubagentResult` 带 `truncated/exit_reason/usage`；`ToolResult.error` 为机器码（`child_timeout`/`child_max_iterations`/`child_error`，max_iterations 仍算成功）；子事件经 observer 进父 trace；ledger 文件保留新字段 |
 | 步骤时间会计 | books 记每步 latency 与被放弃步数；被墙钟掐断的模型步发 `Degraded(model_step)`（verdict 不变）；transcript 已有的流式 partial 即保留 |
 

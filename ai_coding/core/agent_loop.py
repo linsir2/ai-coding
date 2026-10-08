@@ -421,9 +421,7 @@ class AgentLoop:
                     # replaying the transcript without it would break its meaning
                     # (docs/r1a-4-analysis.md D1).
                     restart = False
-                    if decision.reason == "uncertainty ledger flat":
-                        books.note_ledger_nudge()
-                    elif decision.reason == "continue unfinished work":
+                    if decision.reason == "continue unfinished work":
                         # C3: count the continuation on the session (it survives
                         # across rounds) and re-arm the iteration budget below —
                         # without the reset the counter keeps climbing, the new
@@ -848,7 +846,7 @@ class AgentLoop:
         items = books.ledger_items(
             stall_threshold=self.policy.config.stall_iterations
         )
-        if books.note_ledger(ledger_signature(items), tuple(items)) and items:
+        if books.note_ledger(ledger_signature(items)) and items:
             self._emit(LedgerUpdated(items=tuple(items)))
 
     async def _verify_acceptance(self, session: SessionData, books: TurnBooks) -> None:

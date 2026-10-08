@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from ai_coding.domain.acceptance import AcceptanceState
-from ai_coding.domain.ledger import LedgerState
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.task import TaskState, TodoItem
 
@@ -49,13 +48,6 @@ STRATEGY_GATE_LEAD = "[strategy-gate]"
 #: The acceptance gate's marker (R0-1): failing proof commands, persisted
 #: like the other gates because they changed what the model did next.
 ACCEPTANCE_GATE_LEAD = "[acceptance-gate]"
-#: The ledger gate's marker (R0-2): rounds with zero uncertainty reduction.
-#: Persisted for the same replay doctrine — without it, a resumed turn would
-#: not reproduce why the model stopped to clarify.
-LEDGER_GATE_LEAD = "[ledger-gate]"
-#: Rounds the open set may sit unchanged before the ledger gate fires (R0-2):
-#: two full rounds of motion without reduction, then clarify-or-split.
-LEDGER_FLAT_ROUNDS = 2
 NUDGE_ITEM_LIMIT = 10
 #: G8-1: the marker for the one block that tells the model its budget is nearly
 #: gone.  Volatile (never persisted) like the memory and task blocks -- it
@@ -86,13 +78,6 @@ class TurnPolicyConfig:
     # strategy ladders — a turn that keeps failing its proof commands stops
     # asking instead of re-running the suite forever.
     max_acceptance_nudges: int = 2
-    # R0-2: the ledger gate's own budget — one chance to clarify or split
-    # before the turn goes back to iterating (or hits another bound).
-    max_ledger_nudges: int = 1
-    # C3: when the iteration budget dies with todo items still open, the turn
-    # injects a continuation prompt and starts a fresh round instead of stopping.
-    # 0 disables it.  The cap is what keeps a model that never closes its items
-    # from running forever.
     max_auto_continuations: int = 3
 
     @classmethod
@@ -110,7 +95,6 @@ class TurnPolicyConfig:
             max_strategy_nudges=int(getattr(settings, "max_strategy_nudges", 1) or 0),
             stall_iterations=int(getattr(settings, "stall_iterations", 3) or 0),
             max_acceptance_nudges=int(getattr(settings, "max_acceptance_nudges", 2) or 0),
-            max_ledger_nudges=int(getattr(settings, "max_ledger_nudges", 1) or 0),
             max_auto_continuations=int(
                 getattr(settings, "max_auto_continuations", 3) or 0
             ),
@@ -160,15 +144,6 @@ class TurnSnapshot:
     # exactly as before.
     acceptance: tuple[AcceptanceState, ...] = ()
     acceptance_nudges: int = 0  # acceptance nudges already injected this turn
-    # R0-2: the uncertainty ledger, fed in by the loop — the policy never
-    # derives anything itself.  All three default to "nothing open", so turns
-    # without a ledger behave exactly as before.
-    ledger_open: int = 0  # open questions right now
-    ledger_flat_rounds: int = 0  # consecutive rounds the open set did not move
-    ledger_nudges: int = 0  # ledger nudges already injected this turn
-    # R0-2: what the open questions are, so a nudge can name them.  Counts
-    # alone would wave at the unknowns without saying which.
-    ledger: tuple[LedgerState, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -260,20 +235,6 @@ class TurnPolicy:
                 TurnAction.NUDGE,
                 "repeated tool failures",
                 inject=self.strategy_message(snapshot.failed_streak),
-            )
-        # R0-2: motion without reduction.  Tools may even be succeeding — what
-        # matters is the open set has not moved for LEDGER_FLAT_ROUNDS rounds,
-        # so another round of the same is not going to move it either.  The
-        # nudge asks for clarification or a split, not another attempt.
-        if (
-            snapshot.ledger_open
-            and snapshot.ledger_flat_rounds >= LEDGER_FLAT_ROUNDS
-            and snapshot.ledger_nudges < self.config.max_ledger_nudges
-        ):
-            return TurnDecision(
-                TurnAction.NUDGE,
-                "uncertainty ledger flat",
-                inject=self.ledger_message(snapshot.ledger),
             )
         return TurnDecision(TurnAction.ITERATE, "within budget")
 
@@ -414,22 +375,4 @@ class TurnPolicy:
             if state.output:
                 lines.append(f"  输出：{state.output}")
         lines.append("请继续推进；修正后验收会自动重跑，无需手动重验。")
-        return "\n".join(lines)
-
-    @staticmethod
-    def ledger_message(states: Sequence[LedgerState]) -> str:
-        """The ledger gate's nudge: name the unknowns, ask to resolve them.
-
-        Not another attempt — the last LEDGER_FLAT_ROUNDS rounds already tried.
-        Clarify (ask), split (fork a sub-task per independent unknown), or
-        state the missing evidence so the next round can go get it.
-        """
-        lines = [
-            f"{LEDGER_GATE_LEAD} 以下问题已连续 {LEDGER_FLAT_ROUNDS} 轮没有进展："
-        ]
-        lines.extend(
-            f"- {state.id} [{state.level}] {state.question}"
-            for state in states[:NUDGE_ITEM_LIMIT]
-        )
-        lines.append("不要重复同样的尝试：说清缺什么信息，或把独立的问题拆出去，或提问。")
         return "\n".join(lines)

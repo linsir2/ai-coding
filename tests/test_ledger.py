@@ -63,27 +63,20 @@ def test_books_tracks_flat_rounds_and_resets_on_change():
     books = TurnBooks()
     item = UncertaintyItem(id="U-1", question="q?", kind="epistemic", level="high")
     assert books.note_ledger([]) is False
-    assert books.ledger_flat_rounds == 0
     assert books.note_ledger([item]) is True  # empty -> something: changed
-    assert books.ledger_flat_rounds == 0 and books.ledger_open == 1
-    assert books.note_ledger([item]) is False  # same signature: flat +1
-    assert books.ledger_flat_rounds == 1
-    assert books.note_ledger([item]) is False
-    assert books.ledger_flat_rounds == 2
-    assert books.note_ledger([]) is True  # emptied: changed, counter resets
-    assert books.ledger_flat_rounds == 0 and books.ledger_open == 0
+    assert books.ledger_open == 1
+    assert books.note_ledger([item]) is False  # same signature: no change
+    assert books.note_ledger([]) is True  # emptied: changed
+    assert books.ledger_open == 0
 
 
-def test_policy_ledger_gate_fires_only_after_two_flat_rounds():
-    policy = TurnPolicy(TurnPolicyConfig(max_iterations=10, max_ledger_nudges=1))
-    flat2 = TurnSnapshot(iteration=5, ledger_open=2, ledger_flat_rounds=2)
-    decision = policy.decide_next_iteration(flat2)
-    assert decision.action.name == "NUDGE"
-    assert "[ledger-gate]" in (decision.inject or "")
-    flat1 = TurnSnapshot(iteration=5, ledger_open=2, ledger_flat_rounds=1)
-    assert policy.decide_next_iteration(flat1).action.name == "ITERATE"
-    spent = TurnSnapshot(iteration=5, ledger_open=2, ledger_flat_rounds=9, ledger_nudges=1)
-    assert policy.decide_next_iteration(spent).action.name == "ITERATE"
+def test_policy_never_nudges_on_a_flat_ledger():
+    """D1: the gate is retired — a flat ledger stays observable, not persuasive."""
+    policy = TurnPolicy(TurnPolicyConfig())
+    snapshot = TurnSnapshot(iteration=3, attempted_calls=1, successful_calls=1)
+    decision = policy.decide_next_iteration(snapshot)
+    assert decision.reason != "uncertainty ledger flat"
+    assert decision.inject is None
 
 
 def test_policy_acceptance_gate_nudges_then_finishes():

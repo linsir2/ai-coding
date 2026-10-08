@@ -280,7 +280,7 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `SubagentResult` 扩展 | `truncated`、`exit_reason`、`usage` | 未完成必须明说；ledger 文件（`to_dict`）保留新字段 |
 | `ToolResult.error`（子跑） | `child_timeout` / `child_max_iterations` / `child_error` | 非完成态恒为机器码；max_iterations 仍算成功（streak 照 reset），细节在 `error_detail` 与输出文本 |
 
-`TurnSnapshot` 扩展（全带默认值，老决策表不受影响）：`acceptance`、`acceptance_nudges`、`ledger_open`、`ledger_flat_rounds`、`ledger_nudges`、`ledger`。`TurnPolicyConfig` 扩展：`max_acceptance_nudges=2`、`max_ledger_nudges=1`（均可经 `AIConfig` 同名键覆盖，无 schema 变更）。`TurnBooks` 扩展：`verify`、`tool_success`（名集合）、`ledger_signature/flat_rounds/nudges/current`、`step_latencies_ms/abandoned_steps/last_step_latency_ms`。
+`TurnSnapshot` 扩展（全带默认值，老决策表不受影响）：`acceptance`、`acceptance_nudges`。`TurnPolicyConfig` 扩展：`max_acceptance_nudges=2`（均可经 `AIConfig` 同名键覆盖，无 schema 变更）。`TurnBooks` 扩展：`verify`、`tool_success`（名集合）、`ledger_signature`、`step_latencies_ms/abandoned_steps/last_step_latency_ms`。
 
 ### R1-1 计划执行契约
 

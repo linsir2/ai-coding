@@ -34,11 +34,7 @@ from dataclasses import dataclass, field
 from ai_coding.core.dispatch import DispatchOutcome
 from ai_coding.core.turn_policy import TurnSnapshot
 from ai_coding.domain.acceptance import AcceptanceState
-from ai_coding.domain.ledger import (
-    UncertaintyItem,
-    build_ledger,
-    ledger_states,
-)
+from ai_coding.domain.ledger import UncertaintyItem, build_ledger
 from ai_coding.domain.message import CANCELLED_BY_USER
 from ai_coding.domain.task import TaskState, TodoItem
 from ai_coding.domain.turn_digest import DEFAULT_NOTE_CHARS, one_line
@@ -135,19 +131,9 @@ class TurnBooks:
     #: is the evidence that closes an error question, so successes must be
     #: remembered by name, not just counted.
     tool_success: set[str] = field(default_factory=set)
-    #: The last emitted ledger signature (R0-2): sorted ``(id, level)`` pairs.
-    #: The loop compares each round's open set against this; an unchanged
-    #: non-empty set means another round with zero uncertainty reduction.
+    #: The last emitted ledger signature: sorted ``(id, level)`` pairs.  The
+    #: loop compares each round's open set against this to detect movement.
     ledger_signature: tuple[tuple[str, str], ...] = ()
-    #: Consecutive rounds the open set did not change (R0-2).  Only counts
-    #: while something is actually open — an empty ledger never goes flat.
-    ledger_flat_rounds: int = 0
-    #: Ledger-gate nudges injected (``[ledger-gate]``) — its own budget.
-    ledger_nudges: int = 0
-    #: The current open set, as last derived (R0-2).  The snapshot projects
-    #: these to ``LedgerState`` so a nudge can name the unknowns; the
-    #: signature above is what the flat counter compares.
-    ledger_current: tuple[UncertaintyItem, ...] = ()
 
     # ---- notifications ----------------------------------------------------
 
@@ -170,10 +156,6 @@ class TurnBooks:
         """The acceptance gate injected a reminder and will iterate again."""
         self.acceptance_nudges += 1
 
-    def note_ledger_nudge(self) -> None:
-        """The ledger gate injected a reminder and will iterate again."""
-        self.ledger_nudges += 1
-
     @property
     def ledger_open(self) -> int:
         """Open questions right now (length of the tracked signature)."""
@@ -195,26 +177,16 @@ class TurnBooks:
             stall_threshold=stall_threshold,
         )
 
-    def note_ledger(
-        self,
-        signature: Sequence[tuple[str, str]],
-        items: Sequence[UncertaintyItem] = (),
-    ) -> bool:
+    def note_ledger(self, signature: Sequence[tuple[str, str]]) -> bool:
         """Track the open set's signature; return True when it moved.
 
-        An unchanged *non-empty* set is another round with zero uncertainty
-        reduction (the flat counter the policy gates on); an empty set never
-        counts, and any movement resets the counter.  The items ride along so
-        the snapshot can name the unknowns.
+        Emits are edge-triggered: the signature is what the emission triggers on.
+        The ``LedgerUpdated`` event carries the item names, derived separately.
         """
         signature = tuple(signature)
-        self.ledger_current = tuple(items)
         if signature == self.ledger_signature:
-            if signature:
-                self.ledger_flat_rounds += 1
             return False
         self.ledger_signature = signature
-        self.ledger_flat_rounds = 0
         return True
 
     def note_strategy_nudge(self) -> None:
@@ -327,9 +299,5 @@ class TurnBooks:
             strategy_nudges=self.strategy_nudges,
             acceptance=tuple(acceptance),
             acceptance_nudges=self.acceptance_nudges,
-            ledger_open=self.ledger_open,
-            ledger_flat_rounds=self.ledger_flat_rounds,
-            ledger_nudges=self.ledger_nudges,
-            ledger=ledger_states(self.ledger_current),
             continuations=continuations,
         )

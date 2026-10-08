@@ -115,33 +115,10 @@ def ledger_signature(items: Sequence[UncertaintyItem]) -> tuple[tuple[str, str],
     return tuple(sorted((item.id, item.level) for item in items))
 
 
-@dataclass(frozen=True)
-class LedgerState:
-    """The policy-visible shadow of an open item: id, question, level.
-
-    The question travels so a nudge can name the unknowns instead of waving
-    at them — same doctrine as ``AcceptanceState`` carrying its evidence.
-    """
-
-    id: str
-    question: str = ""
-    level: Level = "medium"
-
-
-def ledger_states(items: Sequence[UncertaintyItem]) -> tuple[LedgerState, ...]:
-    """Project open items to what ``TurnSnapshot`` carries."""
-    return tuple(
-        LedgerState(id=item.id, question=item.question, level=item.level)
-        for item in items
-    )
-
-
 __all__ = [
     "Kind",
-    "LedgerState",
     "Level",
     "UncertaintyItem",
     "build_ledger",
     "ledger_signature",
-    "ledger_states",
 ]
