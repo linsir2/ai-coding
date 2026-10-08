@@ -23,8 +23,9 @@ Design notes (all measured in the 23-run experiment batch):
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -35,6 +36,7 @@ from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.plan_delivery import StepDelivery
 from ai_coding.domain.session import SessionData
 from ai_coding.infra.time_utils import now_utc
+from ai_coding.security.sandbox import Sandbox, SandboxViolation
 
 #: Step prompts start here.  The replay matches user bubbles on this marker
 #: to rebuild step headers — turn numbers do not survive compaction, but the
@@ -65,6 +67,39 @@ PLAN_PROMPT = (
 )
 
 
+# Conservative on purpose: only well-known filesystem roots are candidates, and
+# a leading word/colon is excluded so URLs and prose never match.  The gate
+# exists because file tools refuse outside paths anyway; failing at plan time
+# beats seventeen failed calls (hotel-session audit, root cause R2).
+_OUTSIDE_PATH_RE = re.compile(
+    r"(?<![:\w])/(?:home|Users|etc|tmp|opt|srv|mnt|media|var|root)/[^\s'\"`,;)\]]+"
+)
+
+
+def outside_workspace_paths(texts: Iterable[str], workspace: str) -> list[str]:
+    """Absolute filesystem paths in ``texts`` that file tools cannot reach."""
+    sandbox = Sandbox(workspace or ".")
+    offenders: list[str] = []
+    for text in texts:
+        for raw in _OUTSIDE_PATH_RE.findall(str(text or "")):
+            candidate = raw.rstrip(".,")
+            if candidate in offenders:
+                continue
+            try:
+                sandbox.resolve(candidate)
+            except SandboxViolation:
+                offenders.append(candidate)
+    return offenders
+
+
+def _outside_workspace_message(paths: Sequence[str]) -> str:
+    return (
+        "目标路径在工作区外：" + ", ".join(paths)
+        + "。文件工具（read/write/edit/glob）无法访问工作区外的路径；"
+        "请 cd 到目标目录重新启动 ai-coding，或把计划改为工作区内的路径。"
+    )
+
+
 async def plan_and_run(
     loop: Any,
     session: Any,
@@ -92,6 +127,10 @@ async def plan_and_run(
         topic = await ask_topic()
         if not topic:
             return PlanReport()
+    workspace = str(getattr(loop, "workspace", "") or ".")
+    offenders = outside_workspace_paths([topic], workspace)
+    if offenders:
+        return PlanReport(stopped=_outside_workspace_message(offenders))
     # A new plan starts a fresh book: goal, items and receipts belong together,
     # or the new plan's step ids collide with the old plan's receipts.
     begin = getattr(session, "begin_plan", None)
@@ -100,6 +139,10 @@ async def plan_and_run(
     with continuations_disabled(loop):
         await loop.process_input(session, PLAN_PROMPT.format(topic=topic),
                                  on_delta=on_delta, observer=observer)
+    items = getattr(getattr(session, "task", None), "items", ())
+    offenders = outside_workspace_paths([item.content for item in items], workspace)
+    if offenders:
+        return PlanReport(stopped=_outside_workspace_message(offenders))
     return await PlanRunner(loop).run(session, console,
                                       on_delta=on_delta, observer=observer)
 
