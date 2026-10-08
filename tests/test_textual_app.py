@@ -660,3 +660,25 @@ async def test_escape_still_closes_the_palette_by_itself():
         await pilot.pause()
 
         assert not CommandPalette.is_open(app)
+
+
+@pytest.mark.asyncio
+async def test_the_status_bar_sits_with_the_composer_not_at_the_top():
+    """Status belongs next to where the operator acts.
+
+    At the top of the screen it is as far from the prompt as the layout allows,
+    and the eye has to travel the whole transcript to check it.  The reference
+    clients keep this line in the composer's footer, next to the input.
+    """
+    from ai_coding.ui.input_bar import InputBar
+    from ai_coding.ui.transcript import Transcript
+
+    app = _app(loop=_FakeLoop())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one(Transcript)
+        bar = app.query_one(StatusBar)
+        composer = app.query_one(InputBar)
+
+        assert transcript.region.y < bar.region.y, "status belongs below the transcript"
+        assert bar.region.y < composer.region.y, "status belongs above the input"

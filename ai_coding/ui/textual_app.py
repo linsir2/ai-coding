@@ -92,8 +92,12 @@ class AICodingApp(App[None]):
     # ---- shell -----------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield StatusBar(self._workspace, self._model_name)
+        # Status belongs with the composer, not at the top: at the top it is as
+        # far from the prompt as the layout allows, and the eye travels the
+        # whole transcript to check it.  The reference clients keep this line in
+        # the composer's footer for the same reason.
         yield Transcript()
+        yield StatusBar(self._workspace, self._model_name)
         yield InputBar()
 
     def on_mount(self) -> None:
