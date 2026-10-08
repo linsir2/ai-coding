@@ -112,6 +112,11 @@ class TurnReporter:
     def begin_turn(self, observer: LoopObserver) -> None:
         """Remember the observer's failure count so the turn can report its own."""
         self._failures_before = int(getattr(observer, "failures", 0) or 0)
+        # T4: the ledger is *this turn's* spend.  It used to live for the whole
+        # loop, so turn 2's usage re-stated turn 1's, `session.turnUsages` rows
+        # were cumulative values shaped as per-turn, and `tokens_spent()` made a
+        # configured turn-token budget trip at the start of every later turn.
+        self._ledger = BudgetLedger()
 
     def report_context(
         self,

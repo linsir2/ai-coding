@@ -231,3 +231,29 @@ def test_finish_turn_preserves_the_status_and_text(status):
     assert outcome.text == "t"
     assert outcome.iterations == 3
     assert outcome.reason == "r"
+
+
+def test_begin_turn_resets_the_ledger_so_usage_is_per_turn():
+    reporter, _sink = _reporter()
+    observer = RecordingObserver()
+
+    reporter.begin_turn(observer)
+    reporter.report_step(
+        index=1,
+        step=StepResult(
+            usage={"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100}
+        ),
+        latency_ms=1,
+    )
+    reporter.finish_turn(TurnOutcome(status=TurnStatus.COMPLETED), observer)
+
+    reporter.begin_turn(observer)
+    reporter.report_step(
+        index=1,
+        step=StepResult(usage={"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}),
+        latency_ms=1,
+    )
+    second = reporter.finish_turn(TurnOutcome(status=TurnStatus.COMPLETED), observer)
+
+    assert second.usage == {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+    assert reporter.tokens_spent() == 10
