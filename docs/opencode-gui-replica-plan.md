@@ -460,7 +460,7 @@ frontend/
 | **M1** 主题 + Home 完整 ✅ | token 表、placeholder 随机示例、footer（`~dir:branch` + 版本 + 阈值显隐）+ 主题跟随终端 | 完整首页 | ✅ 140×42 列号实测对齐 + 80×24/40×10 边界 + 15 bun 单测 |
 | **M2** 真实会话 ✅ | 接 AgentLoop 事件桥（经 keymap/ipc 封装）；消息/工具/推理/计划渲染；中断 | 完整对话 | ✅ 真回合 tmux 实测（含 Esc 中断/忙时输入/ctrl+t）+ 34 桥单测 + 12 socket 集成 + 48 bun 单测 |
 | **M3** 对话框系统 ✅ | Dialog 宿主 + DialogSelect（fuzzysort）+ palette/models/sessions/skills/status/help | Ctrl+P 全可用 | ✅ tmux 实测（面板/模型切换/会话重放/门控/refocus）+ 与 OC 面板结构对比 + 69 bun 单测 |
-| **M4** 标签 + 侧栏 | session tabs（横向）+ sidebar（Context/MCP）+ 状态 | 多会话 | 截图对比 |
+| **M4** 标签 + 侧栏 + 状态 ✅ | session tabs（切换式）+ sidebar（Context/dir）+ 状态栏（真实用量） | 多会话可切换 | ✅ tmux 140×42 实测（tabs/切换/New/Context/窄屏）+ 72 bun 单测 |
 | **M5** 交互细节 | leader 键位、autocomplete（`@opentui/keymap` 层）、审批面板（ipc 双向请求）、toast、队列、两段式 esc | 全功能 | 端到端 + 截图 |
 | **M6** 收尾 | Python/TS 测试补全、删除旧 Textual UI、文档、启动脚本 | 合并就绪 | `pytest`+`ruff`+`mypy`+`bun test` 全绿 |
 

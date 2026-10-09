@@ -222,6 +222,25 @@ def make_handlers(
             "stopPolicy": str(getattr(ai_cfg, "stop_policy", "") or ""),
         }
 
+    def session_stats(params: dict[str, Any]) -> dict[str, Any]:
+        """Token usage for the sidebar/status bar (M4).
+
+        The session file persists one summed usage row per turn (prompt +
+        completion), not a per-request context size; ``tokens`` is therefore
+        the most recent turn's prompt tokens — the context it sent, our
+        closest measure of context occupancy.
+        """
+        session = state.session
+        tokens = 0
+        usages = getattr(session, "turn_usages", None) if session is not None else None
+        if usages:
+            tokens = int(getattr(usages[-1], "prompt_tokens", 0) or 0)
+        ai_cfg = getattr(world.config, "ai", None)
+        return {
+            "tokens": tokens,
+            "maxContextTokens": int(getattr(ai_cfg, "max_context_tokens", 0) or 0),
+        }
+
     def shutdown_handler(params: dict[str, Any]) -> dict[str, Any]:
         if shutdown is not None:
             shutdown()
@@ -238,5 +257,6 @@ def make_handlers(
         "model.set": model_set,
         "skills.list": skills_list,
         "config.summary": config_summary,
+        "session.stats": session_stats,
         "shutdown": shutdown_handler,
     }

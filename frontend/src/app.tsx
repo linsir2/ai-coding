@@ -10,18 +10,20 @@
 
 import type { CliRenderer } from "@opentui/core"
 import { useBindings } from "@opentui/keymap/solid"
-import { Show, createSignal } from "solid-js"
+import { Show, createSignal, onMount } from "solid-js"
 import { CommandPalette } from "./component/command-palette"
 import { DialogHelp } from "./component/dialog-help"
 import { DialogModels, type ModelRow } from "./component/dialog-models"
 import { DialogSessions } from "./component/dialog-sessions"
 import { DialogSkills } from "./component/dialog-skills"
 import { DialogStatus } from "./component/dialog-status"
+import type { SessionTab } from "./component/session-tabs"
 import { DialogProvider, useDialog } from "./dialog/context"
 import type { IpcClient } from "./ipc"
 import { Home } from "./routes/home"
 import { Session } from "./routes/session"
-import type { SessionState } from "./state/session"
+import { loadSession } from "./state/replay"
+import { initialState, type SessionState } from "./state/session"
 import { theme } from "./theme/tokens"
 
 export interface Hello {
@@ -45,6 +47,16 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
   const [providerName, setProviderName] = createSignal(props.hello.provider)
   const [modelKey, setModelKey] = createSignal(props.hello.modelKey)
   const [hydrate, setHydrate] = createSignal<{ key: string; state: SessionState } | null>(null)
+  const [sessions, setSessions] = createSignal<SessionTab[]>([])
+
+  const refreshSessions = async () => {
+    try {
+      const data = (await props.client.request("session.list")) as { sessions?: SessionTab[] }
+      setSessions(data.sessions ?? [])
+    } catch {
+      /* the tabs keep their last list; the next turn retries */
+    }
+  }
 
   const switchModel = async (key: string, name: string): Promise<boolean> => {
     try {
@@ -58,12 +70,59 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
     }
   }
 
-  const onSessionLoaded = (id: string, state: SessionState) => {
+  const switchTo = (id: string, state: SessionState) => {
     setSessionId(id)
     setHydrate({ key: id, state })
-    setPendingPrompt("") // a loaded session must not auto-send a stale home prompt
+    setPendingPrompt("") // a switched session must not auto-send a stale home prompt
     setRoute("session")
   }
+
+  const onSessionLoaded = (id: string, state: SessionState) => switchTo(id, state)
+
+  const onSelectSession = async (id: string) => {
+    try {
+      switchTo(id, await loadSession(props.client, id))
+    } catch {
+      /* a failed load leaves the current session in place */
+    }
+  }
+
+  const onNewSession = async () => {
+    try {
+      const created = (await props.client.request("session.create", {})) as { id: string }
+      switchTo(created.id, initialState())
+      void refreshSessions()
+    } catch {
+      /* ignore: the current session stays */
+    }
+  }
+
+  const currentTitle = () => {
+    const row = sessions().find((session) => session.id === sessionId())
+    return row?.title || row?.preview || "New session"
+  }
+
+  // The session from initialize is not persisted until its first turn, so the
+  // current one is synthesised into the strip.  The strip keeps only the most
+  // recent few (OpenCode overflows/scrolls a 1800-line rail; M4 caps instead).
+  const tabs = () => {
+    const list = sessions()
+    const recent = list.slice(0, 5)
+    if (recent.some((session) => session.id === sessionId())) return recent
+    return [{ id: sessionId(), title: "New session", preview: "" }, ...recent.slice(0, 4)]
+  }
+
+  const cycleSession = (delta: number) => {
+    const list = tabs()
+    if (list.length === 0) return
+    const index = list.findIndex((session) => session.id === sessionId())
+    const target = list[(((index < 0 ? 0 : index) + delta) % list.length + list.length) % list.length]
+    if (target) void onSelectSession(target.id)
+  }
+
+  onMount(() => {
+    void refreshSessions()
+  })
 
   const startSession = (text: string) => {
     setPendingPrompt(text)
@@ -138,6 +197,30 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
         run: () => dialog.open(() => <DialogHelp />, "large"),
       },
       {
+        name: "session.new",
+        title: "New session",
+        group: "Session",
+        desc: "Start a fresh session",
+        palette: true,
+        run: () => void onNewSession(),
+      },
+      {
+        name: "session.next",
+        title: "Next session",
+        group: "Session",
+        desc: "Switch to the next tab",
+        palette: true,
+        run: () => cycleSession(1),
+      },
+      {
+        name: "session.prev",
+        title: "Previous session",
+        group: "Session",
+        desc: "Switch to the previous tab",
+        palette: true,
+        run: () => cycleSession(-1),
+      },
+      {
         name: "app.exit",
         title: "Exit",
         group: "System",
@@ -179,6 +262,14 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
           provider={providerName()}
           initialPrompt={pendingPrompt()}
           hydrate={hydrate()}
+          sessions={tabs()}
+          title={currentTitle()}
+          workspace={props.hello.workspace}
+          branch={props.hello.vcs?.branch ?? ""}
+          version={props.hello.version}
+          onSelectSession={(id) => void onSelectSession(id)}
+          onNewSession={() => void onNewSession()}
+          onTurnFinished={() => void refreshSessions()}
         />
       </Show>
     </box>

@@ -8,7 +8,7 @@ import { createSignal, onMount } from "solid-js"
 import { useDialog } from "../dialog/context"
 import type { IpcClient } from "../ipc"
 import type { SessionState } from "../state/session"
-import { messagesToState, type WireMessage } from "../state/replay"
+import { loadSession } from "../state/replay"
 import { dayCategory } from "../util/session-group"
 import type { SelectOption } from "../util/dialog-select"
 import { DialogSelect } from "./dialog-select"
@@ -50,10 +50,7 @@ export function DialogSessions(props: {
 
   const choose = async (option: SelectOption) => {
     try {
-      const data = (await props.client.request("session.load", { id: option.value })) as {
-        messages?: WireMessage[]
-      }
-      props.onSelect(option.value, messagesToState(data.messages ?? []))
+      props.onSelect(option.value, await loadSession(props.client, option.value))
       dialog.close()
     } catch (cause) {
       setError(String(cause))

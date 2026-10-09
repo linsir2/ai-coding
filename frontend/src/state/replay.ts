@@ -9,6 +9,7 @@
  * one assistant message, exactly like the live event stream.
  */
 
+import type { IpcClient } from "../ipc"
 import { shorten, toolTarget, toolVerb } from "../util/toolmeta"
 import type { ChatMessage, Part, SessionState } from "./session"
 
@@ -118,4 +119,10 @@ export function messagesToState(messages: WireMessage[]): SessionState {
     messages: out.filter((message) => message.role === "user" || message.parts.length > 0),
     busy: false,
   }
+}
+
+/** Load a persisted session and replay it — shared by the dialog and the tabs. */
+export async function loadSession(client: IpcClient, id: string): Promise<SessionState> {
+  const data = (await client.request("session.load", { id })) as { messages?: WireMessage[] }
+  return messagesToState(data.messages ?? [])
 }

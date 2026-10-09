@@ -25,6 +25,7 @@ from pylsp_jsonrpc.streams import JsonRpcStreamReader, JsonRpcStreamWriter
 
 from ai_coding.core.events import ToolFinished, ToolStarted, TurnFinished
 from ai_coding.domain.loop import TurnOutcome, TurnStatus
+from ai_coding.domain.session import TurnUsage
 from ai_coding.server.handlers import make_handlers
 from ai_coding.server.service import IpcService
 from ai_coding.service.session_service import SessionService
@@ -331,6 +332,25 @@ async def test_config_summary(ipc):
     assert result["model"] == "fake"
     assert result["maxContextTokens"] == 48000
 
+
+@pytest.mark.asyncio
+async def test_session_stats_without_usage(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+    assert client.request("session.stats") == {"tokens": 0, "maxContextTokens": 48000}
+
+
+@pytest.mark.asyncio
+async def test_session_stats_reports_last_turn_prompt_tokens(ipc):
+    world, _service, client = ipc
+    client.request("initialize")
+    client.request("session.prompt", {"text": "x"})
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+    session = world.loop.calls[-1]["session"]
+    session.turn_usages.append(
+        TurnUsage(turn=1, prompt_tokens=1234, completion_tokens=56, total_tokens=1290)
+    )
+    assert client.request("session.stats") == {"tokens": 1234, "maxContextTokens": 48000}
 
 @pytest.mark.asyncio
 async def test_model_set_routes_to_loop(ipc):
