@@ -3,7 +3,7 @@
  *
  * A loaded session is a flat list of persisted messages; the transcript wants
  * the same parts model live events produce.  The rules are a port of the old
- * Textual replay (ai_coding/ui/blocks.py: _strip_envelope,
+ * Textual replay (ui/blocks.py, now retired: _strip_envelope,
  * tool_outcome_from_message, tool_card_identity), pinned here so a reopened
  * session reads like the turn that produced it.
  */

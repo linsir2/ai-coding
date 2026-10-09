@@ -1,6 +1,6 @@
 /**
  * TDD (M2): tool card metadata — a faithful port of the verb table and target
- * extraction the old Textual transcript used (ai_coding/ui/blocks.py), minus
+ * extraction the retired Textual transcript used (ui/blocks.py), minus
  * the `kind` labels: those only ever grouped folds, which the parts model
  * does not have.  What the card renders is exactly what is pinned here.
  */

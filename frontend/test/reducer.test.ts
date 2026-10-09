@@ -2,7 +2,7 @@
  * TDD (M2): the session reducer — pure state transitions from wire events.
  *
  * Every text here is the contract the UI renders; the strings are ports of
- * ai_coding/ui/blocks.py (same source the old Textual transcript used) plus
+ * ui/blocks.py (same source the retired Textual transcript used) plus
  * the approved M2 deltas (handoff, turn ERROR marker, compaction notice —
  * docs/opencode-gui-m2-plan.md §1; the approval notice moved to the M5 panel).
  */
