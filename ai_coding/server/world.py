@@ -1,0 +1,107 @@
+"""The application world the IPC server serves (M0).
+
+Mirrors the assembly ``ui/textual_app.py::run_app`` performs, minus the
+Textual app: config -> engine -> tools -> MCP -> AgentLoop.  When the old
+Textual UI is deleted (plan M2/M6) this becomes the single composition for
+both the TUI frontend and any future front-end.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from typing import Any
+
+_log = logging.getLogger(__name__)
+
+__all__ = ["AppWorld", "build_world"]
+
+
+@dataclass
+class AppWorld:
+    """Everything one TUI run owns; closed together in ``aclose``."""
+
+    config: Any
+    engine: Any
+    registry: Any
+    sessions: Any
+    loop: Any
+    mcp: Any
+    workspace: str
+    skills: str | None
+    cancel: asyncio.Event
+    steering: Any
+
+    async def aclose(self) -> None:
+        for closer in (
+            getattr(self.loop, "aclose", None),
+            getattr(self.mcp, "aclose", None),
+        ):
+            if closer is None:
+                continue
+            try:
+                await closer()
+            except Exception:  # noqa: BLE001 — shutdown is best-effort
+                _log.debug("world close failed", exc_info=True)
+
+
+async def build_world(path: str | None, workspace: str, skills: str | None) -> AppWorld:
+    """Build config -> engine -> registry -> MCP -> loop (never starts a UI)."""
+    from ai_coding.cli import _build_loop, _build_tool_registry, _make_hooks, _make_recorder
+    from ai_coding.config.loader import ConfigManager
+    from ai_coding.core.guard import build_guards
+    from ai_coding.core.mcp import MCPManager
+    from ai_coding.core.steering import SteeringQueue
+    from ai_coding.security.approval import AutoApproveCallback
+    from ai_coding.security.user_prompt import UnavailableUserPromptCallback
+    from ai_coding.service.session_service import SessionService
+
+    manager = ConfigManager()
+    manager.initialize(path)
+    app_cfg = manager.app
+
+    from ai_coding.ai.factory import build_engine_from_config
+    from ai_coding.ai.prompt import BASE_INSTRUCTIONS
+
+    engine = build_engine_from_config(app_cfg)
+    # M0: ask_user answers "no user"; the IPC bridge lands with the full
+    # event round-trip (plan M5).
+    user_prompt = UnavailableUserPromptCallback()
+    registry = _build_tool_registry(
+        app_cfg, workspace, skills,
+        user_prompt=user_prompt, base_instructions=BASE_INSTRUCTIONS,
+    )
+
+    steering = SteeringQueue()
+    sessions = SessionService()
+    recorder = _make_recorder(app_cfg, workspace, None)
+    mcp_manager = MCPManager(app_cfg.mcp, observer=recorder)
+    for tool in await mcp_manager.open_all():
+        registry.register(tool)
+
+    # M0: approvals are auto-answered until the IPC approval bridge lands (M5).
+    approval = AutoApproveCallback()
+    cancel = asyncio.Event()
+    loop = _build_loop(
+        engine, sessions, registry, app_cfg, workspace, skills,
+        approval=approval,
+        observer=None,
+        trace=recorder,
+        guards=build_guards(app_cfg),
+        hooks=_make_hooks(app_cfg, workspace),
+        steering=steering,
+        cancel=cancel,
+    )
+    return AppWorld(
+        config=app_cfg,
+        engine=engine,
+        registry=registry,
+        sessions=sessions,
+        loop=loop,
+        mcp=mcp_manager,
+        workspace=workspace,
+        skills=skills,
+        cancel=cancel,
+        steering=steering,
+    )
