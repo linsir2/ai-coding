@@ -9,12 +9,9 @@ import pytest
 from ai_coding.core.sop_router import (
     DendriticIndex,
     SOPRouter,
-    MATCH_THRESHOLD,
-    SIGNATURE_MATCH_WEIGHT,
     StructuralSignature,
 )
 from ai_coding.skills.registry import SkillRegistry
-
 
 # ---------------------------------------------------------------------------
 # 1. StructuralSignature
@@ -98,7 +95,7 @@ class TestDendriticIndexPersistence:
             timestamp="2024-01-01T00:00:00Z",
         )
         idx.record(sig)
-        
+
         # Reload
         idx2 = DendriticIndex(tmp_path / "index.json")
         matches = idx2.match(
@@ -156,7 +153,7 @@ class TestMatching:
             timestamp="2024-01-01T00:00:00Z",
         )
         idx.record(sig)
-        
+
         matches = idx.match(
             tools={"bash", "read"},
             errors={"permission denied"},
@@ -176,7 +173,7 @@ class TestMatching:
             timestamp="2024-01-01T00:00:00Z",
         )
         idx.record(sig)
-        
+
         # Only tools overlap partially, no errors, different task
         matches = idx.match(
             tools={"bash", "read"},
@@ -202,7 +199,7 @@ class TestMatching:
             timestamp="2024-01-01T00:00:00Z",
         )
         idx.record(sig)
-        
+
         matches = idx.match(
             tools={"python", "node"},
             errors={"syntax error"},
@@ -238,7 +235,7 @@ class TestMatching:
             skill_name="skill-b",
             timestamp="2024-01-01T00:00:00Z",
         ))
-        
+
         matches = idx.match(
             tools={"bash", "read"},
             errors={"permission denied"},
@@ -273,7 +270,7 @@ class TestSOPRouterIntegration:
             "triggers:\n"
             "  keywords: [\"sandbox\"]\n"
         ))
-        
+
         # Record a signature
         idx = DendriticIndex(tmp_path / "index.json")
         idx.record(StructuralSignature(
@@ -283,10 +280,10 @@ class TestSOPRouterIntegration:
             skill_name="sandbox-fix",
             timestamp="2024-01-01T00:00:00Z",
         ))
-        
+
         reg = SkillRegistry(tmp_path)
         router = SOPRouter(reg, threshold=0.0, dendritic_path=tmp_path / "index.json")
-        
+
         # Route with matching context
         matches = router.route(
             user_input="fix sandbox",
@@ -295,11 +292,11 @@ class TestSOPRouterIntegration:
             recent_failures=["permission denied by sandbox"],
             turn_number=1,
         )
-        
+
         assert len(matches) == 1
         assert matches[0].name == "sandbox-fix"
         # Score should include dendritic boost
-        # base_score: keyword "sandbox" = 3.0, task_type "sandbox" contains task? 
+        # base_score: keyword "sandbox" = 3.0, task_type "sandbox" contains task?
         # Actually task_type matching: task_goal contains "sandbox" → task_type match = 2.0
         # failure_pattern: no failure_patterns defined → 0
         # total before dendritic: 3.0 + 2.0 = 5.0 (plus freshness)
@@ -314,10 +311,10 @@ class TestSOPRouterIntegration:
             "triggers:\n"
             "  keywords: [\"sandbox\"]\n"
         ))
-        
+
         reg = SkillRegistry(tmp_path)
         router = SOPRouter(reg, threshold=0.0)  # No dendritic_path
-        
+
         matches = router.route(
             user_input="fix sandbox",
             recent_tools=["bash"],
@@ -325,7 +322,7 @@ class TestSOPRouterIntegration:
             recent_failures=[],
             turn_number=1,
         )
-        
+
         assert len(matches) == 1
         # Score without dendritic boost
         assert matches[0].score > 0
@@ -343,7 +340,7 @@ class TestRecordSignature:
         """record_signature stores the signature."""
         reg = SkillRegistry(tmp_path)
         router = SOPRouter(reg, dendritic_path=tmp_path / "index.json")
-        
+
         sig = StructuralSignature(
             tools=frozenset(["bash"]),
             error_keywords=frozenset(["denied"]),
@@ -352,7 +349,7 @@ class TestRecordSignature:
             timestamp="2024-01-01T00:00:00Z",
         )
         router.record_signature(sig)
-        
+
         # Verify by reloading
         idx2 = DendriticIndex(tmp_path / "index.json")
         matches = idx2.match(
@@ -367,7 +364,7 @@ class TestRecordSignature:
         """record_signature with no dendritic index is a no-op."""
         reg = SkillRegistry(tmp_path)
         router = SOPRouter(reg)  # No dendritic_path
-        
+
         sig = StructuralSignature(
             tools=frozenset(["bash"]),
             error_keywords=frozenset(),
