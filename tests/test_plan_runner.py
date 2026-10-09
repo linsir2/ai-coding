@@ -206,18 +206,12 @@ async def test_prior_deliveries_are_summarised_into_later_steps():
 
 @pytest.mark.asyncio
 async def test_a_failed_step_still_leaves_a_replay_marker():
-    """A step that dies mid-turn must be visible on /resume, not just in the book.
+    """A step that dies mid-turn must be visible, not just in the book.
 
-    The step timeline is rebuilt from prompt markers: replay finds the user
-    bubble, matches its statement against the receipts, and only then draws a
-    header (transcript._step_header).  The runner-error path used to write a
-    blocked receipt and no bubble, so the failure existed in the data and not
-    on screen — and nothing tested it.
-
-    Asserted through the matcher replay itself uses, so a marker that exists
-    but cannot be matched (statement drift) fails here too.
+    The runner-error path used to write a blocked receipt and no bubble, so
+    the failure existed in the data and not in the session transcript — and
+    nothing tested it.
     """
-    from ai_coding.ui.transcript import _step_header
 
     class _DyingLoop:
         settings = SimpleNamespace(plan_step_max_iterations=8, plan_max_step_turns=0)
@@ -237,15 +231,10 @@ async def test_a_failed_step_still_leaves_a_replay_marker():
     report = await PlanRunner(_DyingLoop()).run(session)
 
     assert [entry.status for entry in report.deliveries] == ["blocked"]
-    # the receipt must reach the parent's book too, or replay has nothing to
-    # match the marker against and the block never reaches the user
+    # the receipt must reach the parent's book too, or the failure never
+    # reaches the user at all
     assert [entry.step_id for entry in session.step_deliveries] == ["1"]
     assert session.step_deliveries[0].status == "blocked"
     bubbles = [m for m in session.messages if m.role == "user"]
     assert len(bubbles) == 1 and bubbles[0].content.startswith(STEP_HEAD)
     assert "engine exploded" in session.messages[-1].content
-
-    by_statement = {e.statement: e for e in session.step_deliveries}
-    header = _step_header(bubbles[0].content, by_statement)
-    assert header is not None
-    assert "受阻" in header.plain

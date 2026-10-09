@@ -2,7 +2,7 @@
  * Slash-command autocomplete, the pure half (M5).
  *
  * Only commands this TUI can actually run are listed — the backend's REPL
- * vocabulary (ai_coding/ui/slash.py) has 21 entries, but 14 of them have no
+ * vocabulary (the retired ui/slash.py) has 21 entries, but 14 of them have no
  * TUI action, and offering a dead command would send its text to the model
  * as a plain prompt.  Each entry therefore points at a keymap command.
  */

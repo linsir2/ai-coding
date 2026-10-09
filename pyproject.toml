@@ -11,7 +11,6 @@ dependencies = [
     "PyYAML>=6.0",
     "typer>=0.12",
     "rich>=13.0",
-    "textual>=8.2",
     # TUI IPC (plan B, M0.5): the Python port of vscode-jsonrpc, maintained by
     # the python-lsp team; the TS side pairs with vscode-jsonrpc itself.
     "python-lsp-jsonrpc>=1.1.2",

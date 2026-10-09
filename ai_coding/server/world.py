@@ -2,8 +2,8 @@
 
 The single composition root for the backend: config -> engine -> tools ->
 MCP -> AgentLoop.  The CLI launches it through ``server/launcher.py`` for
-the OpenTUI frontend; the retired Textual UI (still present under
-``ai_coding/ui/``, deletion deferred) assembled the same pieces itself.
+the OpenTUI frontend; the retired Textual UI assembled the same pieces
+itself (its module tree under ``ai_coding/ui/`` is gone).
 """
 
 from __future__ import annotations

@@ -453,7 +453,9 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 
 ### `AppConfig` 新增块
 
-`ui: UIConfig`，目前只有 `ui.steering: bool = true`（回合进行中是否显示 `steer>` 提示并接受转向）。
+~~`ui: UIConfig`，`ui.steering: bool = true`（回合进行中是否显示 `steer>` 提示并接受转向）。~~
+**已删除**（GUI 复刻收尾）：该块的两个字段（`steering` / `tool_chunks`）在生产中零读取，
+随旧 Textual UI 一并移除；`AppConfig`  `extra="ignore"` 会容忍配置里残留的 `ui:` 段。
 
 ### 字段与工具
 
@@ -475,7 +477,7 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 | 配置 | 默认 | 作用 |
 |---|---|---|
 | `ai.working_memory_note_chars` | 120 | `checkpoint_write` 一句话的上限（替掉 digest 行的结果句） |
-| `ui.tool_chunks` | `true` | 是否把工具输出片段（含 MCP 进度）逐行显示；关闭＝回到「结束时一行预览」 |
+| ~~`ui.tool_chunks`~~ | — | **已删除**（随旧 Textual UI）：工具输出片段现在由前端实时显示，无开关 |
 
 ### 字段与工具
 

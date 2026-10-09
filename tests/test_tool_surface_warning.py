@@ -164,20 +164,3 @@ async def test_the_warning_never_changes_the_request():
     assert loud_events.of_type(ToolSurfaceWarning)
 
 
-def test_the_transcript_renders_one_readable_line():
-    """R7e-3c: the transcript shows the number, the threshold and the top origins."""
-    from ai_coding.ui.blocks import Block, TranscriptObserver
-
-    seen: list[Block] = []
-    TranscriptObserver(seen.append).on_event(
-        ToolSurfaceWarning(
-            tools_chars=13_301,
-            threshold=12_000,
-            origins=(("everything", 10_062), ("local", 4_280)),
-            hint="ignore me",
-        )
-    )
-    assert seen and seen[0].text.startswith("[tools]")
-    assert "13301" in seen[0].text
-    assert "12000" in seen[0].text
-    assert "everything=10062" in seen[0].text

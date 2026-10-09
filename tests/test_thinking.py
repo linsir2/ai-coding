@@ -1,32 +1,12 @@
-"""Thinking timeline (Project A, TDD): make the process visible.
+"""Thinking timeline: the model's reasoning text survives the stack.
 
-Two gaps, both measured against the reference screenshots (icon rows with
-text interleaved) rather than today's transcript (tool cards + final prose
-and nothing between):
+Three production claims, none about rendering (the transcript that used to
+show it is gone; these are the data-layer invariants behind it):
 
-* A1: the model's reasoning text is dropped on the floor — the engine reads
-  ``delta.content`` only.  Completed reasoning per step renders as one
-  collapsed dim fold ("thinking first" is not faked: the gateway only ever
-  hands us completed text per step, so streaming fidelity is explicitly out
-  of scope for v1).
-* A2: delegated work is invisible in the TUI transcript — child events ride
-  ``ScopedEvent`` since R0-3 but ``blocks_from_event`` drops them all.
+* the engine hands the gateway's thinking through instead of dropping it;
+* the session persists it, and reads back None when the key is absent;
+* the request builder must never re-feed it to the model.
 """
-
-import pytest
-
-from ai_coding.core.events import (
-    AssistantMessage,
-    ModelStepFinished,
-    ScopedEvent,
-    ToolFinished,
-    ToolStarted,
-)
-
-
-def _started():
-    return ToolStarted(call_id="c1", tool_name="bash",
-                       params={"command": "ls"}, iteration=1)
 
 
 def test_engine_accumulates_reasoning_deltas():
@@ -107,106 +87,8 @@ def test_assistant_message_carries_reasoning_but_mapping_ignores_it():
     assert wire["content"] == "done"
 
 
-def test_plain_assistant_message_still_maps_to_nothing():
-    """Prose travels the delta stream — mapping the event too would double it."""
-    from ai_coding.ui.blocks import blocks_from_event
-
-    assert blocks_from_event(AssistantMessage(text="hi", tool_calls=())) is None
 
 
-def test_reasoning_assistant_message_maps_to_a_capped_dim_block():
-    from ai_coding.ui.blocks import blocks_from_event
-
-    block = blocks_from_event(AssistantMessage(
-        text="hi", tool_calls=(), reasoning="plan [k=v] first"))
-    assert block is not None and block.kind == "reasoning" and block.style == "dim"
-    assert "plan [k=v] first" in block.text
-    long = blocks_from_event(AssistantMessage(
-        text="hi", tool_calls=(), reasoning="r" * 5000))
-    assert long is not None and len(long.text) < 5000
-    assert "完整内容见会话文件" in long.text
 
 
-def test_scoped_tool_events_render_as_nested_lines():
-    from ai_coding.ui.blocks import blocks_from_event
 
-    line = blocks_from_event(ScopedEvent(scope="subagent:probe", parent="root",
-                                         event=_started()))
-    assert line is not None and "subagent:probe" in line.text and "ls" in line.text
-    done = blocks_from_event(ScopedEvent(
-        scope="s", parent="p",
-        event=ToolFinished(call_id="c1", tool_name="bash", success=False,
-                           output_preview="", error="boom")))
-    assert done is not None and "✗" in done.text
-
-
-def test_scoped_noise_stays_silent():
-    """Chunks and telemetry stay in the trace — the transcript is not a log."""
-    from ai_coding.ui.blocks import blocks_from_event
-
-    assert blocks_from_event(ScopedEvent(
-        scope="s", parent="p", event=_chunk())) is None
-    assert blocks_from_event(ScopedEvent(
-        scope="s", parent="p", event=ModelStepFinished(index=1))) is None
-
-
-def _chunk():
-    from ai_coding.core.events import ToolChunk
-
-    return ToolChunk(call_id="c1", tool_name="bash", stream="stdout", text="x")
-
-
-def test_scoped_assistant_text_is_capped_and_silent_when_empty():
-    from ai_coding.ui.blocks import blocks_from_event
-
-    full = blocks_from_event(ScopedEvent(
-        scope="s", parent="p",
-        event=AssistantMessage(text="x" * 500, tool_calls=())))
-    assert full is not None and len(full.text) <= 200
-    empty = blocks_from_event(ScopedEvent(
-        scope="s", parent="p", event=AssistantMessage(text=None, tool_calls=())))
-    assert empty is None
-
-
-@pytest.mark.asyncio
-async def test_reasoning_block_mounts_a_collapsed_thinking_fold():
-    """One collapsed fold per step — qwen-class reasoning runs long."""
-    from textual.app import App, ComposeResult
-
-    from ai_coding.ui.blocks import Block
-    from ai_coding.ui.transcript import Transcript
-
-    class _Harness(App[None]):
-        def compose(self) -> ComposeResult:
-            yield Transcript()
-
-    async with _Harness().run_test(size=(80, 24)) as pilot:
-        t = pilot.app.query_one(Transcript)
-        t.begin_assistant("10:25")
-        t.append_block(Block("reasoning", "plan [k=v] first", "dim"))
-        await pilot.pause()
-        folds = list(t.query(".reasoning-fold"))
-        assert len(folds) == 1 and folds[0].collapsed is True
-        assert "思考过程" in str(folds[0].title)
-
-
-@pytest.mark.asyncio
-async def test_replay_renders_reasoning_as_a_collapsed_fold():
-    from textual.app import App, ComposeResult
-
-    from ai_coding.domain.message import ChatMessage
-    from ai_coding.ui.transcript import Transcript
-
-    class _Harness(App[None]):
-        def compose(self) -> ComposeResult:
-            yield Transcript()
-
-    async with _Harness().run_test(size=(80, 24)) as pilot:
-        t = pilot.app.query_one(Transcript)
-        await t.replay_history([
-            ChatMessage(role="assistant", content="done [k=v]",
-                        timestamp="t", reasoning="because reasons"),
-        ])
-        await pilot.pause()
-        folds = list(t.query(".reasoning-fold"))
-        assert len(folds) == 1 and folds[0].collapsed is True

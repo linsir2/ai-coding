@@ -47,69 +47,95 @@ mock 边界：`node:net` + `vscode-jsonrpc/node`（`mock.module`），不启真�
 - 移除 `--legacy-ui` 选项与 `if legacy_ui: run_app else: run_tui` 分支，入口直接 `from ai_coding.server.launcher import run_tui`。`ai-coding --help` 中 legacy 字样 0 处；`tests/test_cli_cleanup.py` 4 pass。
 - 残留注释清理：`server/handlers.py`（cancel 两层设计注明「ported from textual_app」）、`server/world.py` docstring（world 成为唯一后端组合根）、`app/commands.py` docstring（指向 OpenTUI over IPC）。
 
-## 4. ⚠️ 延后事项：旧 Textual UI 删除（用户指示：延后，勿忘）
+## 4. 旧 Textual UI 删除 —— ✅ 已执行（2026-10-09）
 
-以下清单固化了删除 `ai_coding/ui/` 时的**全部**牵连。执行删除时按此走，删完全量核验。
+原为延后事项（用户指示「延后删除的别忘了」），用户确认后执行完毕。执行记录如下。
 
-**生产代码（16 文件，3738 行）** — `ai_coding/ui/`：
+**生产代码 — `ai_coding/ui/` 16 文件整目录删除**（3738 行）：transcript / textual_app / repl /
+blocks / trace_render / modals / app.tcss / console / slash / resume / resume_screen / commands /
+plain / status_bar / input_bar / `__init__`。产出与渲染逻辑的旧拷贝随删；`app/` 四件套
+（slash / trace_text / console / commands）成为唯一实现，`server/` + `frontend/` 承担运行时。
 
-`transcript.py`(891)、`textual_app.py`(556)、`repl.py`(460)、`blocks.py`(417)、`trace_render.py`(316)、`modals.py`(229)、`app.tcss`(225)、`console.py`(140)、`slash.py`(115)、`resume.py`(83)、`resume_screen.py`(80)、`commands.py`(67)、`plain.py`(66)、`status_bar.py`(59)、`input_bar.py`(28)、`__init__.py`(6)。
-（`app/slash.py`、`app/trace_text.py`、`app/console.py`、`app/commands.py` 是前四者的活拷贝，删除后以 app/ 为唯一实现。）
+**测试**：14 个整删 + 1 个重写改名 + 9 个外科手术 + 1 个契约同步：
 
-**Textual 专属测试（import `ai_coding.ui` 的）**：
+- 整删（Textual 专属）：test_textual_app、test_commands、test_modals、test_blocks、
+  test_backfill、test_transcript×3、test_ui_queue、test_resume_screen、test_pty_textual
+  （含 `_pty_textual_child.py`）、test_resume（`ui/resume.py` 无生产使用）、test_tool_chunks
+  （TranscriptObserver 随删）
+- 重写：`test_ui_text_boundary.py` → `test_console_text_boundary.py`（只保留活 guard：
+  `app/console.py` 的 print 必须 `markup=False`、RichLog 禁用、bracket 逐字行为；
+  Textual AST 规则随 UI 消失）
+- 外科手术（删 Textual render 用例、保生产断言）：
+  test_plan_command（删 4 个 `_plan_topic`/路由用例）、
+  test_plan_m1（时间戳用例改用 `datetime.fromisoformat`）、
+  test_plan_runner（删 `_step_header` 匹配段）、test_loop_events（2 个 blocks render 用例）、
+  test_thinking（7 个 render/fold 用例 + 无用的模块级 import/helper）、test_ledger、
+  test_background_tasks、test_structured_handoff、test_tool_surface_warning（各 1 个用例）
+- 契约同步：`test_config_loader.py` 删 ui 块两条断言
 
-- 完全专属（随删）：`test_textual_app.py`、`test_commands.py`、`test_modals.py`、`test_blocks.py`、`test_transcript*.py`（3 个）、`test_ui_queue.py`、`test_resume_screen.py`、`test_backfill.py`、`test_dispatch_grants.py`、`test_pty_textual.py` + `_pty_textual_child.py`、`test_tool_chunks.py`、`test_structured_handoff.py`、`test_loop_events.py`（部分用例）、`test_thinking.py`（部分用例）、`test_ledger.py`/`test_background_tasks.py`/`test_tool_surface_warning.py`/`test_plan_runner.py`（局部 import 用例）
-- **部分依赖**（需局部改造而非整删）：`test_plan_command.py`（`_plan_topic` ← textual_app）、`test_plan_m1.py`（`_hhmm` ← transcript）、`test_ui_text_boundary.py`（`ResumeScreen` 用例）、`test_compact_command.py`（已归口，复核）
-- 注意：`test_textual_app.py`/`test_commands.py` 被 `test_backfill.py`/`test_transcript_streaming.py`/`test_transcript_widget_growth.py` 反向 import（`_app`/`_FakeLoop` fixture）
+**连带清理**：`pyproject.toml` 移除 `textual>=8.2` 依赖；`config/models.py` 删除 `UIConfig`
+（`ui.steering` / `ui.tool_chunks` 生产零读取，只被待删测试引用；`AppConfig` `extra="ignore"`
+容忍配置里的残留 `ui:` 段）；`scripts/tui_shot.py` 删除；`scripts/trace_cases.py` 注释改写；
+`frontend/src/routes/session.tsx` 与 `state/session.ts` 三处对 `ui/textual_app.py` 的悬空引用
+改为「retired Textual UI」表述；`docs/architecture.md`、`features.md`、`data-contracts.md`、
+`how-to-run.md`、`README.md` 的当前态描述改写。
 
-**脚本/文档**：`scripts/tui_shot.py`（import textual_app）、`scripts/trace_cases.py`（注释提及）、`docs/architecture.md`（ui/ 目录描述需改写为 app/ + frontend/）。
+**替代覆盖缺口核对**：旧「事件→块渲染」由 `frontend/test/`（107 bun tests）覆盖；
+socket 级 IPC 由 `tests/test_server_ipc.py` 覆盖——无缺口。
 
-**替代覆盖缺口**：旧 Textual 测试覆盖的「事件→块渲染」（blocks/transcript）在新前端由 bun 测试覆盖（`frontend/test/`，107 tests）；删除时逐条对照 `docs/features.md` 的测试映射段，确认新前端有等价用例，没有的先补。
+**附带收益**：M6 记录的 flaky 挂起（`app.workers.wait_for_complete()`，全量 ~50% 概率）
+随 `test_textual_app.py` 删除而消失，全量 pytest 恢复稳定。
 
 ## 5. 核验记录
 
 | 项 | 结果 |
 |---|---|
-| `pytest`（全量） | ✅ 2 failed（预存 loop_digest）+ 2384 passed + 2 skipped（179s）；另有预存 flaky 挂起，见 §5.1 |
-| `ruff check`（本里程碑触碰文件） | ✅ All checks passed（含 11 处 I001 自动修复） |
-| `mypy --strict`（同上） | ✅ 8 files, no issues |
+| `pytest`（全量，删除后） | ✅ 2012 passed + 2 failed（预存 loop_digest）+ 2 skipped（total 2016，到 100%，无挂起） |
+| `ruff check`（触碰文件） | ✅ All checks passed（迁移 11 处 I001 + test_ledger 1 处 F401 自动修复） |
+| `mypy --strict` | ✅ 116 files, no issues |
 | `bun test` | ✅ 107 pass / 0 fail |
 | `tsc --noEmit` | ✅ clean |
-| `ai-coding --help` | ✅ 无 legacy 字样 |
-| tmux 冒烟 | ✅ 见 §5.2 |
+| tmux 冒烟 | ✅ 见 §5.2（删除后重跑，真实回合 pong 往返） |
 
 ### 5.1 全量 pytest
 
-**通过记录**（2026-10-09，`python -u -m pytest -v -p no:warnings`）：
+**通过记录（Textual UI 删除后，2026-10-09，`python -u -m pytest -q`）**：
 
 ```
-2 failed, 2384 passed, 2 skipped in 179.34s (0:02:59)
+[100%]  2012 passed, 2 failed, 2 skipped（total 2016，~100s）
 ```
 
 2 个失败是 HEAD 上的预存问题（`test_loop_digest.py` 的
 `test_working_memory_is_injected_only_when_history_was_compacted` /
 `test_working_memory_is_a_tail_block_never_the_system_prompt`），非本里程碑回归。
 
-**已知 flaky（预存，非 M6 引入）**：全量跑约 1/2 概率挂在
-`tests/test_textual_app.py::test_submitting_while_the_palette_is_open_closes_it`
-（第 23 个用例，全量第 ~1714 个）的 `await app.workers.wait_for_complete()`
-（textual/worker_manager.py:172 `asyncio.gather(*[worker.wait() ...])`）——
-某个 turn-group worker 永不 settle 时该 await 无界阻塞。复现与证据：
+删除前 2388 项、后 2016 项；§5.1 记录的 flaky 挂起（`workers.wait_for_complete()`）随
+`test_textual_app.py` 删除消失，连续两次全量均一次到 100%、无挂起。
+> 环境备忘：全量跑完的进程在写完全部测试点后、`short test summary` 之后退出，
+> 偶见末尾统计行不落盘（本机 bash 工具的 120s 管道超时所致）；百分比与逐字符计数
+> （[.Fxs]）与 `--collect-only` 总数一致，判定以两者对齐为准。
 
-- 最小组合 `pytest tests/test_repl.py tests/test_textual_app.py` 同状态跑两次：一过一挂；`slash+textual`、`commands+textual` 组合通过 → 与具体前序文件 + 时序相关。
-- **HEAD 版 `test_repl.py`（import `ui.*`）同样挂**：`git checkout tests/test_repl.py` 后复现 61 dots 无完成行 → 与 M6 的 import 迁移无关。
-- 挂起时 faulthandler 栈：主线程在 `asyncio select`（等 future），无异常。
-- 处置：**不修**——该测试文件及 `ai_coding/ui/` 全部在 §4 延后删除清单内，修 throwaway 代码违背最小化原则。删除 ui/ 后此 flaky 随之消失。
+**flaky 记录（已消解）**：删除前 `test_submitting_while_the_palette_is_open_closes_it` 的
+`await app.workers.wait_for_complete()`（`textual/worker_manager.py:172`
+`asyncio.gather(*[worker.wait() ...])`）存在顺序依赖的无界等待，最小复现为
+`pytest tests/test_repl.py tests/test_textual_app.py`（同状态跑两次一过一挂；
+HEAD 版 `test_repl.py` 同样挂 → 预存、非 M6 迁移引入）。该文件及 `ai_coding/ui/` 已随
+本次删除移除，flaky 随之消失。
 
-### 5.2 tmux 冒烟（M6 后入口链路）
+### 5.2 tmux 冒烟（M6 后入口链路；Textual 删除后又跑了一次）
 
-`tmux new-session -d -s tui6 -x 140 -y 42` + `.venv/bin/ai-coding --path config.local.yaml --workspace /tmp/tui-m6-ws --skills ./skills`：
+`tmux new-session -d -s tuiN -x 140 -y 42` + `.venv/bin/ai-coding --path config.local.yaml --workspace /tmp/tui-m6del-ws --skills ./skills`：
 
 - Home 正常渲染（Logo / prompt / `dashscope · qwen3.8-2.4t-a95b`）；
-- 真实回合：输入 `Reply with exactly one word: pong` → 回复 `pong`，`+ Thought` 折叠、Context 侧栏 `3,073 tokens / 6% used`、会话 tabs 正常；
-- `--legacy-ui` 移除后入口唯一（`cli.py` 直接 `run_tui`），无回归。
+- 真实回合：输入 `Reply with exactly one word: pong` → 回复 `pong`，`+ Thought` 折叠、Context 侧栏 `3,073 tokens / 6% used`、footer `3,073 (6%) · ctrl+p commands · 0.1.0` 均正常；
+- `--legacy-ui` 移除后入口唯一（`cli.py` 直接 `run_tui`），删除 `ai_coding/ui/` 后无回归（`ui:` 配置段被 `extra="ignore"` 容忍）。
 
 ## 6. 踩坑记录
 
 1. **后台 pytest 会被工具超时连坐杀掉**（进程组级 kill）：必须 `setsid sh -c '...' < /dev/null &` 脱离，且外层 shell 的 stdout/stderr 也要断开，否则工具会等管道关闭直至超时。
 2. 前端测试 mock `net`/`vscode-jsonrpc` 用 `mock.module`；`onEvent` 退订测试不能靠 mock connection 验证（dispose 是 no-op），改为断言退订调用后 listener 计数不变。
+3. **用正则删测试函数要吃装饰器**：`(?=\ndef |\nasync def )` 这类前瞻会越过 `@pytest.mark.asyncio`，
+   把装饰器吞掉（`test_loop_events.py` 就留下了游离 `o` 与裸 async def）。安全做法：前瞻
+   `\n\n\n` 或 `\n\n@`，或直接读文件确认边界。
+4. **全量 pytest 末尾统计行偶发不落盘**（进程写完 short summary 就退出）：判定以 `[100%]` +
+   进度区 `[.Fxs]` 字符计数与 `--collect-only` 总数对齐为准。

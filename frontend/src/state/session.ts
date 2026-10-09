@@ -3,7 +3,7 @@
  *
  * The reducer is the single place that turns wire data into what the UI
  * shows; every string here is pinned by test/reducer.test.ts and ports the
- * old transcript's wording (ai_coding/ui/blocks.py) plus the four approved
+ * retired Textual transcript's wording (ui/blocks.py) plus the four approved
  * M2 deltas.  Components stay thin: they render parts, they never derive.
  *
  * Updates are immutable but referentially stable: untouched messages and
@@ -327,8 +327,8 @@ export function reduce(state: SessionState, action: Action): SessionState {
         busy: true,
       }
     case "queued":
-      // The user message lands now (the old Textual UI appended at submit too,
-      // ui/textual_app.py:144); the turn itself starts when the running one ends.
+      // The user message lands now (the retired Textual UI appended at submit
+      // too); the turn itself starts when the running one ends.
       return {
         ...state,
         messages: [

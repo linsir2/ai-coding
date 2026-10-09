@@ -546,16 +546,16 @@ async def test_parent_step_bubbles_carry_real_timestamps():
     """The parent's per-step bubbles are persisted messages, so they get stamps.
 
     The runner wrote them with timestamp="", which is not a formatting detail:
-    _hhmm() passes anything that is not ISO-8601 straight through, so every
-    replayed step header showed an empty clock, and the OTLP exporter's
-    _nano() returned 0 for them.  Nothing sorts or trims by timestamp (checked
-    across core and domain), so this is display and export only — but a
-    persisted message with no time is a lie about when the words were said.
+    a non-ISO-8601 stamp shows an empty clock wherever it is replayed, and the
+    OTLP exporter's ``_nano()`` returned 0 for them.  Nothing sorts or trims by
+    timestamp (checked across core and domain), so this is display and export
+    only — but a persisted message with no time is a lie about when the words
+    were said.
 
-    Asserted through _hhmm, the function replay actually uses, rather than
-    against a literal format.
+    Asserted by parsing the stamp as ISO-8601 — the format every consumer
+    (replay, export, OTLP) assumes — rather than against a literal string.
     """
-    from ai_coding.ui.transcript import _hhmm
+    from datetime import datetime
 
     session = _session_with("one")
     await PlanRunner(_StubLoop(["complete"])).run(session)
@@ -565,8 +565,7 @@ async def test_parent_step_bubbles_carry_real_timestamps():
     for message in bubbles:
         stamp = message.timestamp
         assert stamp, "a persisted message with no timestamp"
-        shown = _hhmm(stamp)
-        assert len(shown) == 5 and shown[2] == ":", f"replay would show {shown!r}"
+        datetime.fromisoformat(stamp)  # raises if not a real stamp
 
 
 @pytest.mark.asyncio

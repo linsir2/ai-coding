@@ -305,18 +305,6 @@ class MCPConfig(BaseModel):
     servers: list[MCPServerConfig] = Field(default_factory=list)
 
 
-class UIConfig(BaseModel):
-    """Terminal-facing switches (R7e-2)."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    #: Show a steering prompt while a turn is running.  Off = today's quiet REPL.
-    steering: bool = True
-    #: R8c: show a line per tool output fragment (throttled to 0.15s per call).
-    #: Off = the old "one preview when it finishes" behaviour.
-    tool_chunks: bool = True
-
-
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -329,7 +317,6 @@ class AppConfig(BaseModel):
     tracing: TracingConfig = Field(default_factory=TracingConfig)
     guard: GuardConfig = Field(default_factory=GuardConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
-    ui: UIConfig = Field(default_factory=UIConfig)
 
 
 def _coerce_fallbacks(raw: Any) -> tuple[str, ...]:

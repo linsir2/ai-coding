@@ -98,8 +98,8 @@ export function Session(props: SessionProps) {
   }
 
   const submit = (text: string): boolean => {
-    // The old Textual UI queued a submit that arrived mid-turn and ran it
-    // when the turn ended (ui/textual_app.py:173-223); replicate that here.
+    // The retired Textual UI queued a submit that arrived mid-turn and ran it
+    // when the turn ended; replicate that here.
     if (state.busy) {
       apply({ kind: "queued", text })
       return true
@@ -152,7 +152,7 @@ export function Session(props: SessionProps) {
         disarmInterrupt()
         void refreshStats()
         props.onTurnFinished()
-        // One queued line per finished turn (textual_app.py:214-223).
+        // One queued line per finished turn.
         const next = state.queued[0]
         if (next !== undefined) {
           apply({ kind: "queued-dispatched" })

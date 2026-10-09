@@ -1,5 +1,5 @@
 /**
- * Tool card metadata (M2) — a faithful port of ai_coding/ui/blocks.py:
+ * Tool card metadata (M2) — a faithful port of the retired ui/blocks.py:
  *
  *   _TOOL_CARD_META  -> TOOL_VERBS     (the Chinese verbs the card renders)
  *   _tool_target()   -> toolTarget()   (which param names the call)

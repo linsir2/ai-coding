@@ -2,7 +2,7 @@
  * History replay (M3) — persisted messages → the parts model the transcript
  * renders, so a reopened session reads like the turn that produced it.
  *
- * Ports the old Textual replay semantics (ai_coding/ui/blocks.py):
+ * Ports the old Textual replay semantics (ui/blocks.py, now retired):
  * ``_strip_envelope`` drops the ``<tool_output>`` wrapper and its machine
  * ``<data>`` block, a first line containing ``ok="false"`` marks failure, and
  * tool cards derive their verb/target from the call arguments.  One turn is

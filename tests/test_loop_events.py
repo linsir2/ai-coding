@@ -225,23 +225,6 @@ def test_provider_retried_is_frozen():
         ProviderRetried(kind="server_error", attempt=1, delay_seconds=2.0).kind = "other"  # type: ignore[misc]
 
 
-def test_provider_retried_renders_one_dim_line():
-    """A retry is an occasional event, not a work unit: it gets a line, never a
-    fold — the same reasoning as the "no zero-valued tail" rule on /trace."""
-    from ai_coding.ui.blocks import blocks_from_event
-
-    block = blocks_from_event(
-        ProviderRetried(kind="rate_limited", attempt=2, delay_seconds=7.0, reason="slow down")
-    )
-
-    assert block is not None
-    assert block.kind == "info"
-    text = block.text if isinstance(block.text, str) else str(block.text)
-    assert "rate_limited" in text
-    assert "2" in text
-    assert "7" in text
-
-
 @pytest.mark.asyncio
 async def test_the_loop_surfaces_an_engine_retry_to_its_observer(tmp_path):
     """The end-to-end claim, not the unit one: a flaky provider must put a
@@ -313,21 +296,6 @@ def test_provider_fallback_is_frozen():
         ProviderFallback(from_model="qwen", to_model="deepseek", kind="rate_limited").kind = "x"  # type: ignore[misc]
 
 
-def test_provider_fallback_renders_one_dim_line_naming_both_models():
-    """The line has to name both models: "something changed" is not actionable
-    when the operator cannot tell what they are now paying for."""
-    from ai_coding.ui.blocks import blocks_from_event
-
-    block = blocks_from_event(
-        ProviderFallback(
-            from_model="qwen", to_model="deepseek", kind="rate_limited", reason="slow down"
-        )
-    )
-
-    assert block is not None
-    assert block.kind == "info"
-    assert "qwen" in block.text and "deepseek" in block.text
-    assert "rate_limited" in block.text
 
 
 def test_the_loop_turns_a_switch_into_an_event(tmp_path):

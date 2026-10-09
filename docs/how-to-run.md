@@ -187,7 +187,7 @@ mcp:
 
 | 配置 | 默认 | 说明 |
 |---|---|---|
-| `ui.steering` | true | 回合进行中显示 `steer>` 提示并接受转向；关掉＝回到今天「等它跑完」的安静 UX |
+| ~~`ui.steering`~~ | — | **已删除**（随旧 Textual UI）：回合中输入排队/中断由前端负责（见 M5 交互） |
 | `ai.steering_max_messages` | 5 | 一次抽干最多吸收几条（多出来的留在队列，下一轮/下一回合继续） |
 | `ai.steering_max_chars` | 2000 | 单条上限，超出截断 |
 | `ai.tools_chars_warn` | 12000 | 工具面超此值发一次 `[tools] …` 提示；0 关闭 |

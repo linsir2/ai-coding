@@ -21,7 +21,6 @@ from ai_coding.domain.subagent import SubagentResult, extract_json_facts
 from ai_coding.tools.base import ToolContext
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.subagent_tool import SubAgentTool
-from ai_coding.ui.blocks import blocks_from_event
 
 SCHEMA = {"type": "object", "required": ["failed", "passed"]}
 
@@ -279,10 +278,3 @@ async def test_completion_event_carries_ledger_pointer(tmp_path):
     assert payload["facts"] == {"failed": [], "passed": 5}
 
 
-def test_block_shows_ledger_pointer():
-    event = BackgroundTaskDone(
-        run_id="abc", name="probe", status="completed", summary="done",
-        ledger_path="/tmp/x.json",
-    )
-    block = blocks_from_event(event)
-    assert block is not None and "/tmp/x.json" in block.text

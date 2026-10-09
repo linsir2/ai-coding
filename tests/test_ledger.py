@@ -6,7 +6,6 @@ only ever drops on recorded evidence.  The policy gates on the flat counter,
 not on prose.
 """
 
-import pytest
 
 from ai_coding.core.turn_books import TurnBooks
 from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig, TurnSnapshot
@@ -96,18 +95,3 @@ def test_policy_acceptance_gate_nudges_then_finishes():
     assert done.action.name == "FINISH" and "acceptance verified" in done.reason
 
 
-@pytest.mark.asyncio
-async def test_ledger_block_renders_questions_and_evidence():
-    from ai_coding.core.events import LedgerUpdated
-    from ai_coding.domain.ledger import UncertaintyItem
-    from ai_coding.ui.blocks import blocks_from_event
-
-    event = LedgerUpdated(items=(
-        UncertaintyItem(id="U-ac-AC-2", question="SAVE20 是 0.02 还是 0.20？",
-                        kind="epistemic", level="high",
-                        evidence=("assert 245 == 200",), resolves=("AC-2",)),
-    ))
-    block = blocks_from_event(event)
-    assert block is not None and block.kind == "ledger"
-    text = block.render().plain
-    assert "SAVE20" in text and "245" in text

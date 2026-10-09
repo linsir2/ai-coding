@@ -138,7 +138,8 @@ def _loop(
         registry,
         prompt=PromptAssembler("You are a test assistant."),
         settings=settings or AIConfig(stop_policy="natural", max_tool_iterations=4),
-        # `trace=` alone, the way ui/textual_app.py builds the real loop.  Passing
+        # `trace=` alone, the way the backend assembles the real loop
+        # (server/world.py).  Passing
         # the recorder as `observer=` too made `_bind_observer` braid it in a
         # second time, so every event was written twice and the cases that assert
         # an exact count (c1, c6, c7) all went red for that one reason.
