@@ -1,9 +1,10 @@
 # OpenCode GUI 复刻方案（方案 B：TS+OpenTUI 同款）
 
 > 分支：`feat/opencode-gui-replica`
-> 状态：**技术选型已拍板 = 方案 B**
+> 状态：**技术选型 = 方案 B；已按"库优先"原则重新设计（v2）**
 > 探索来源：`/home/linsir365/projects/opencode/packages/tui/`（源码）+ tmux 实机截图
 > 工具链已验证：`@opentui/core@0.5.17` + `@opentui/solid` + `solid-js@1.9.17` + bun，最小渲染测试通过
+> **v2 变更**：IPC/键位/Logo/搜索等全部换成熟第三方库（研究见第三部分，联调已通过）
 
 ---
 
@@ -218,45 +219,129 @@ Footer 状态:
 
 ---
 
-## 第三部分：技术选型（已拍板：方案 B）
+## 第三部分：技术选型 v2（库优先，调研+实测完成）
 
-### 3.1 决定的架构
+> 原则：**能用成熟库就不手写**。v1 手写的 IPC / 键位 / Logo 全部替换为生态标准件。
+
+### 3.0 库调研结论（关键项已双端联调）
+
+| 关注点 | 选定库 | 版本 | 验证 | 替代掉的手写物 |
+|--------|--------|------|------|----------------|
+| TUI 渲染/组件 | `@opentui/core` + `@opentui/solid` | 0.5.17 | ✅ M0 跑通 | — |
+| 响应式 | `solid-js` | 1.9.17 | ✅ | — |
+| **键位/命令** | `@opentui/keymap`（`/addons` `/opentui` `/solid`） | 0.5.17 | 同生态/**OpenCode 同款**：分层优先级、leader 超时、多键序列、命令目录、focus 隔离 | 手写 `useKeyboard` 分支 |
+| **IPC（TS）** | `vscode-jsonrpc` | 9.0.3 | ✅ 联调通过 | 手写 `ipc.ts` |
+| **IPC（Python）** | `python-lsp-jsonrpc` | 1.1.2 | ✅ 联调通过 | 手写 `protocol.py`+`server.py`（~300 行） |
+| 参数校验 | `zod`(TS) + `pydantic`(Py，已有) | 4.x / 2.x | — | — |
+| **Logo** | `figlet`（`ANSI Compact` 字体） | 1.12.0 | ✅ 渲染确认（3 行块字符，风格贴近 OpenCode） | 手写 22 行字形表 |
+| Spinner | `opentui-spinner` | 0.0.7 | OpenCode 生产在用 | — |
+| 模糊搜索 | `fuzzysort` | 4.0.2 | OpenCode 生产在用 | — |
+| CJK 宽度 | `string-width` + `get-east-asian-width` | 8.3.0 / 1.7.0 | 中文对齐刚需 | — |
+| Diff 渲染 | `diff`（jsdiff） | 9.0.0 | — | — |
+
+**联调证据**（`vscode-jsonrpc` ↔ `python-lsp-jsonrpc`，Unix socket）：
+```
+TS→Py 请求:  hello → {"msg":"world","echo":{"name":"ts"}}   ✅
+Py→TS 通知:  tick 到达                                       ✅
+帧协议:      双方默认 Content-Length 帧（LSP 风格），互认     ✅
+```
+
+### 3.1 架构 v2
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  TS TUI 前端（frontend/，bun + @opentui/core + solid-js） │
-│  - 直接占用 tty 渲染（继承 stdin/stdout）                  │
-│  - SolidJS 组件树，复刻 OpenCode 设计语言                   │
-│  - JSON-RPC 客户端（Unix socket）                          │
-└───────────────┬──────────────────────────────────────────┘
-                │ Unix domain socket · 换行分隔 JSON-RPC
-                │ TS→Py: 请求; Py→TS: 响应 + 事件推送 + 审批请求
-┌───────────────▼──────────────────────────────────────────┐
-│  Python 后端（ai_coding/server/，新增，不动现有业务层）     │
-│  - asyncio Unix socket server（与 AgentLoop 同进程）       │
-│  - 复用 core/domain/memory/skills/tools/security 全部      │
-│  - LoopObserver → 事件序列化桥（bridge.py）                │
-│  - IPC 审批回调（替代 CLIApprovalCallback）                 │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  TS TUI 前端（frontend/，bun）                                │
+│  - @opentui/core + solid 渲染（继承 tty）                      │
+│  - @opentui/keymap：命令 ID + 键位 + leader + 模式层           │
+│  - vscode-jsonrpc 客户端（Content-Length 帧，双向请求）        │
+└───────────────┬──────────────────────────────────────────────┘
+                │ Unix socket · JSON-RPC 2.0（Content-Length 帧）
+                │ TS→Py: sendRequest / onNotification
+                │ Py→TS: endpoint.notify / endpoint.request(审批)
+┌───────────────▼──────────────────────────────────────────────┐
+│  Python 后端（ai_coding/server/，与 AgentLoop 同进程）         │
+│  - python-lsp-jsonrpc：Endpoint(dispatcher, writer.write)     │
+│  - 读线程 JsonRpcStreamReader.listen(endpoint.consume)        │
+│  - 业务复用 core/domain/memory/skills/tools/security 全部      │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-**进程模型**（保留 `ai-coding` 为唯一入口）：
+**进程模型**（不变，`ai-coding` 唯一入口）：
 
 ```
 $ ai-coding --path config.yaml --workspace . --skills ./skills
       │
       ▼ Python CLI（cli.py）
-      1. 构建 config/engine/tools/loop（现有代码不动）
-      2. 启动 asyncio Unix socket server（临时 socket：/tmp/ai-coding-<pid>.sock）
+      1. 构建 world（现有代码不动）
+      2. Unix socket 监听：/tmp/ai-coding-<pid>.sock
       3. spawn：bun frontend/src/index.tsx（继承 tty，env 传 socket 路径）
       4. 等待子进程退出，清理 socket
 ```
 
-**为什么用 Unix socket 而不是 stdio**：TUI 需要真 tty 渲染；socket 保持终端干净、可调试（`nc -U` 可手测）、为将来「服务端模式/重连」留路（对齐 OpenCode 的 client/server 模型）。
+**线程模型 v2**（python-lsp-jsonrpc 是线程模型，与 asyncio 世界的桥接方式）：
 
-### 3.2 IPC 协议（v1）
+```
+主线程：asyncio loop（AgentLoop/world）
+  ├─ 读线程：JsonRpcStreamReader.listen → Endpoint 分发 → ThreadPoolExecutor(max_workers=5)
+  │     └─ handler（线程内）→ asyncio.run_coroutine_threadsafe(协程, 主loop) 调度业务
+  ├─ 事件推送（主loop内）：endpoint.notify("event", ...)（writer 有 threading.Lock，线程安全）
+  └─ 审批（主loop内）：await asyncio.wrap_future(endpoint.request("approval.request", ...))
+```
 
-JSON-RPC 2.0，换行分隔 JSON，双向：
+**为什么保留 Unix socket**：TUI 需要真 tty；socket 保持终端干净、可用 `nc -U` 手测、为「服务端模式/重连」留路（对齐 OpenCode 的 client/server）。
+
+### 3.2 IPC 协议 v2（方法/事件表不变，承载换成标准库）
+
+方法/事件清单与 v1 相同（`initialize` / `session.*` / `model.set` / `skills.list` / `config.summary` / `shutdown`；事件 `turn.start` / `text.delta` / `reasoning` / `tool.*` / `task.updated` / `notice` / `turn.finish` / `memory.injected`）。变化只有两点：
+
+1. **帧格式**：换行 JSON → Content-Length 帧（两库默认，互认已实测）
+2. **审批往返**：v1 的"通知+回包" → 标准双向请求：
+   - Python：`endpoint.request("approval.request", params)` → concurrent Future → `asyncio.wrap_future` 等待
+   - TS：`connection.onRequest("approval.request", async (params) => decision)`
+   - 超时 → 拒绝（fail-closed）
+3. **参数校验**：Python 侧 pydantic 模型解析 params；TS 侧 zod schema（可选强化）
+
+### 3.3 目录结构 v2
+
+```
+frontend/
+├── package.json           # + vscode-jsonrpc / @opentui/keymap / figlet / fuzzysort
+│                          #   / string-width / get-east-asian-width / diff / zod / opentui-spinner
+├── tsconfig.json          # jsxImportSource: @opentui/solid
+├── bunfig.toml            # preload = @opentui/solid/preload（必须，M0 踩坑记录）
+├── src/
+│   ├── index.tsx          # 入口：连接 socket → createMessageConnection → render(App)
+│   ├── ipc.ts             # vscode-jsonrpc 封装（连接/重连/事件订阅/审批应答）
+│   ├── keymap.ts          # @opentui/keymap：命令注册表（app.exit/session.*/input.*）
+│   ├── state.tsx          # Solid stores
+│   ├── theme/             # tokens.ts（抄 OpenCode 主题数据）+ provider
+│   ├── ui/                # dialog / dialog-select / toast / border（基于 @opentui 原语）
+│   ├── component/
+│   │   ├── logo.tsx       # figlet 'ANSI Compact' 渲染 + 双色分割
+│   │   ├── prompt.tsx     # 输入框（keymap 管理 submit 命令）
+│   │   ├── message.tsx / tool.tsx / tabs.tsx
+│   └── routes/
+│       ├── home.tsx
+│       └── session.tsx
+└── test/                  # bun test + tmux 截图脚本
+```
+
+### 3.4 对 v1（M0 已交付）的替换清单
+
+| v1 手写物 | v2 替换 | 动作 |
+|-----------|---------|------|
+| `frontend/src/ipc.ts`（70 行手写 JSON-RPC） | `vscode-jsonrpc` 封装 | 重写 |
+| `ai_coding/server/protocol.py`（90 行） | 删除 | 删除 |
+| `ai_coding/server/server.py`（180 行 IpcServer） | `python-lsp-jsonrpc` Endpoint | 删除，重写 service 层 |
+| `frontend/src/component/logo.tsx`（字形表） | `figlet` | 重写（保留双色分割逻辑） |
+| `app.tsx` 的 `useKeyboard` ctrl+c 分支 | `@opentui/keymap` 命令 | 重写 |
+| prompt textarea `keyBindings` hack | keymap `input.submit` 命令（opentui addon 预制） | 替换 |
+| 测试 `test_server_protocol.py` | 删除（协议归库） | 删除 |
+| 测试 `test_server_ipc.py` | 改为库版 service 测试 | 重写 |
+
+保留：`world.py`、`launcher.py`（骨架）、`handlers.py` 的业务处理、主题 token、Home/Session 布局。
+
+### 附录 A：IPC 方法/事件表（协议参考）
 
 **TS → Python 请求**：
 | 方法 | 参数 | 返回 |
@@ -292,38 +377,7 @@ JSON-RPC 2.0，换行分隔 JSON，双向：
 
 **审批往返**：Python 的 `IpcApprovalCallback` 发送 `approval.request`（JSON-RPC 请求），等待 TS 的 `permission.reply` 响应；超时 → 拒绝（fail-closed）。
 
-### 3.3 目录结构（新建 `frontend/`）
-
-```
-frontend/
-├── package.json           # bun + @opentui/core + @opentui/solid + solid-js
-├── tsconfig.json          # jsxImportSource: @opentui/solid
-├── src/
-│   ├── index.tsx          # 入口：读 env → 连接 socket → render(App)
-│   ├── ipc.ts             # JSON-RPC 客户端（net.connect + 行解析）
-│   ├── state.tsx          # Solid stores：app/session/messages/dialogs
-│   ├── keymap.ts          # 命令 ID + 键位 + leader
-│   ├── theme/
-│   │   ├── tokens.ts      # dark/light token 表（见 2.4）
-│   │   └── index.tsx      # ThemeProvider + useTheme
-│   ├── ui/
-│   │   ├── border.ts      # ┃ ╹ ▀ 边框工具
-│   │   ├── dialog.tsx     # 对话框宿主 + 遮罩 + 尺寸档
-│   │   ├── dialog-select.tsx
-│   │   └── toast.tsx
-│   ├── component/
-│   │   ├── logo.tsx       # 块字符 Logo（宽/高自适应）
-│   │   ├── prompt.tsx     # 输入框 + 元数据行 + footer
-│   │   ├── message.tsx    # 用户/助手/推理行
-│   │   ├── tool.tsx       # 工具行状态机
-│   │   └── tabs.tsx       # 会话标签
-│   └── routes/
-│       ├── home.tsx
-│       └── session.tsx
-└── test/                  # bun test（协议/纯逻辑）+ tmux 截图脚本
-```
-
-### 3.4 原「三选一」评估（存档）
+### 3.6 原「三选一」评估（存档）
 
 | 方案 | 栈 | 保真度 | 工作量 | 结论 |
 |------|-----|--------|--------|------|
@@ -369,25 +423,31 @@ frontend/
 | trace 文本渲染 | `app/trace_text.py` | 对话框内容 |
 | plain 文本安全 | `app/safe_text.py` | markup 安全（若仍用 Rich） |
 
-### 4.4 新建（`ai_coding/ui/` 全新）
+### 4.4 新建（TS 前端 `frontend/`，方案 B）
 
-| 模块 | 内容 | 对标 OpenCode |
-|------|------|---------------|
-| `theme.py` | 设计 token（dark/light）、颜色工具（decrease/tint 预计算） | packages/theme |
-| `styles.tcss` | 全局样式 | — |
-| `app.py` | App 壳：路由（home/session）、全局键位、遮罩层 | app.tsx |
-| `screens/home.py` | Logo + 居中 Prompt + footer | routes/home.tsx |
-| `screens/session.py` | 转录 + 底部 Prompt + footer 状态 | routes/session/index.tsx |
-| `widgets/logo.py` | 块字符 Logo（宽/高自适应） | component/logo.tsx |
-| `widgets/prompt.py` | 左框线输入框 + 元数据行 + 自动补全弹层 | component/prompt/ |
-| `widgets/tabs.py` | 会话标签（横向条 + 状态指示） | component/session-tabs.tsx |
-| `widgets/message.py` | 用户/助手/推理/工具行组件 | message-parts.tsx |
-| `widgets/dialog.py` | Dialog 宿主 + DialogSelect | ui/dialog*.tsx |
-| `widgets/toast.py` | 右上角通知 | ui/toast.tsx |
-| `dialogs/` | 各 picker：commands/models/sessions/themes/skills/mcps/status/help | component/dialog-*.tsx |
-| `bridge.py` | LoopEvent → 组件更新（事件桥） | —（服务端推送） |
-| `keymap.py` | 命令 ID + 键位 + leader | config/keybind.ts |
-| `spinner.py` | braille 帧动画 | component/spinner.tsx |
+| 模块 | 内容 | 库 | 对标 OpenCode |
+|------|------|-----|---------------|
+| `theme/tokens.ts` | 设计 token（dark/light） | —（数据抄 OpenCode 主题） | packages/theme |
+| `app.tsx` | App 壳：路由（home/session）、遮罩层 | `@opentui/solid` | app.tsx |
+| `keymap.ts` | 命令注册表（app.exit/session.*/input.*）+ leader | `@opentui/keymap` | config/keybind.ts |
+| `ipc.ts` | 连接/事件订阅/审批应答 | `vscode-jsonrpc` | —（客户端） |
+| `component/logo.tsx` | 双色 Logo | `figlet`（ANSI Compact） | component/logo.tsx |
+| `component/prompt.tsx` | 左框线输入框 + 元数据行 + footer | `@opentui/keymap` 管理 submit | component/prompt/ |
+| `component/tabs.tsx` | 会话标签（横向 + 状态指示） | `opentui-spinner` | component/session-tabs.tsx |
+| `component/message.tsx` / `tool.tsx` | 用户/助手/推理/工具行状态机 | `diff`（编辑 diff）、`string-width`（CJK） | message-parts.tsx |
+| `ui/dialog*.tsx` | Dialog 宿主 + DialogSelect（搜索） | `fuzzysort` | ui/dialog*.tsx |
+| `ui/toast.tsx` | 右上角通知 | — | ui/toast.tsx |
+| `state.tsx` | Solid stores | `solid-js` | —（服务端推送） |
+
+### 4.5 新建（Python 服务层 `ai_coding/server/`）
+
+| 模块 | 内容 | 状态 |
+|------|------|------|
+| `world.py` | 世界装配（config→engine→tools→loop） | ✅ M0 已有，保留 |
+| `handlers.py` | 业务 handler 表（initialize/session.*/model.set/...） | ✅ M0 已有，改为库 dispatcher 注入 |
+| `launcher.py` | 起 socket、spawn bun、清理 | ✅ M0 已有，传输层换库 |
+| `service.py` | python-lsp-jsonrpc Endpoint 封装（读线程+线程池+asyncio 桥） | 🔜 M0.5 新建 |
+| `protocol.py` / `server.py` | v1 手写 IPC | ❌ M0.5 删除 |
 
 ---
 
@@ -396,11 +456,12 @@ frontend/
 | 阶段 | 内容 | 交付物 | 验证 |
 |------|------|--------|------|
 | **M0** 骨架（IPC 往返）✅ | Python socket server + 启 bun；TS Home 屏（Logo+Prompt）；提交→echo 显示 | 端到端可跑 | ✅ tmux 实测 + 18 个 IPC 单测 |
+| **M0.5** 库替换（v2） | IPC 换 `vscode-jsonrpc`↔`python-lsp-jsonrpc`；键位换 `@opentui/keymap`；Logo 换 `figlet`；依赖落地（fuzzysort/string-width/diff/zod/opentui-spinner） | 同样功能、零手写协议 | 联调脚本复跑 + 单测重写全绿 |
 | **M1** 主题 + Home 完整 | token 表、placeholder 随机示例、footer（dir:branch + 版本 + 快捷键提示） | 完整首页 | 截图对比 OpenCode 首页 |
-| **M2** 真实会话 | 接 AgentLoop；事件桥全部类型；消息/工具/推理/计划渲染；中断 | 完整对话 | 截图对比 + 事件桥测试 |
-| **M3** 对话框系统 | Dialog 宿主 + DialogSelect + palette/models/sessions/skills/status/help | Ctrl+P 全可用 | 截图对比 |
+| **M2** 真实会话 | 接 AgentLoop 事件桥（经 keymap/ipc 封装）；消息/工具/推理/计划渲染；中断 | 完整对话 | 截图对比 + 事件桥测试 |
+| **M3** 对话框系统 | Dialog 宿主 + DialogSelect（fuzzysort）+ palette/models/sessions/skills/status/help | Ctrl+P 全可用 | 截图对比 |
 | **M4** 标签 + 侧栏 | session tabs（横向）+ sidebar（Context/MCP）+ 状态 | 多会话 | 截图对比 |
-| **M5** 交互细节 | leader 键位、autocomplete（@文件/技能）、审批面板、toast、队列、两段式 esc | 全功能 | 端到端 + 截图 |
+| **M5** 交互细节 | leader 键位、autocomplete（`@opentui/keymap` 层）、审批面板（ipc 双向请求）、toast、队列、两段式 esc | 全功能 | 端到端 + 截图 |
 | **M6** 收尾 | Python/TS 测试补全、删除旧 Textual UI、文档、启动脚本 | 合并就绪 | `pytest`+`ruff`+`mypy`+`bun test` 全绿 |
 
 ### M0 实测截图（2026-10-09）
@@ -427,12 +488,13 @@ Session（echo 往返）:
    ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 ```
 
-### M0 关键技术发现（写进 bunfig，防回退）
+### M0 关键技术发现（防回退）
 
 1. **`preload = ["@opentui/solid/preload"]` 必须**：bun 把 `solid-js` 解析到 `dist/server.js`（SSR 版），`createEffect/onMount` 全是 no-op；preload 插件把它重写成 `dist/solid.js` 客户端 runtime，否则 UI 渲染但无响应
-2. **textarea 默认 `return = newline`**：需要 `keyBindings` 覆盖为 `return → submit`、`shift+return → newline`
-3. **`await render()` 挂载后立即返回**：不能在它之后 `client.close()`
+2. **textarea 默认 `return = newline`**：v2 起由 `@opentui/keymap` 的 `input.submit` 命令接管（M0.5）；在此之前保持 `keyBindings` 覆盖
+3. **`await render()` 挂载后立即返回**：不能在它之后关闭 IPC 连接
 4. **焦点**：`onMount` 里 `input.focus()`（`queueMicrotask` 太早，渲染器未挂）
+5. **v2 IPC 帧协议是 Content-Length（LSP 风格）**，不是行分隔 JSON；联调脚本 `vscode-jsonrpc ↔ python-lsp-jsonrpc` 已实测通过
 
 ### 验证方法（贯穿全程）
 
