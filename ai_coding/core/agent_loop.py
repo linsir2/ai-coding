@@ -435,7 +435,10 @@ class AgentLoop:
                         session.continuations += 1
                         restart = True
                     else:
-                        books.note_strategy_nudge()
+                        if "fatigue" in decision.reason:
+                            books.note_fatigue_nudge()
+                        else:
+                            books.note_strategy_nudge()
                     session.add_message(user_message(decision.inject or "", now_utc()))
                     self.closer.checkpoint(session, index)
                     if restart:

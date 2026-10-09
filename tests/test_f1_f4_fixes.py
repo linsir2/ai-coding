@@ -89,7 +89,7 @@ class TestF3InterventionFix:
         from ai_coding.core.sop_router import SOPRouter
         skill_dir = tmp_path / "fix-skill"
         skill_dir.mkdir()
-        (fix_skill := skill_dir / "SKILL.md").write_text(
+        (skill_dir / "SKILL.md").write_text(
             "---\nname: fix-skill\ndescription: Fix\n"
             "pattern_dna: 'Use bash'\n"
             "triggers:\n  failure_patterns: ['resolves outside']\n"
@@ -169,7 +169,8 @@ class TestF4TraceFieldFix:
     def test_extract_notes_handles_markdown(self, tmp_path):
         """Notes extraction should handle markdown-formatted output."""
         from ai_coding.core.subagent import _extract_notes_and_confidence
-        conclusion = "Some output\n\n**置信度: low**\n原因: not sure\n给后来者的笔记: Use bash for external paths"
+        conclusion = ("Some output\n\n**置信度: low**\n"
+                       "原因: not sure\n给后来者的笔记: Use bash for external paths")
         notes, confidence = _extract_notes_and_confidence(conclusion)
         assert confidence == "low"
         assert "bash" in notes

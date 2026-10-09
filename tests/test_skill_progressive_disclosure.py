@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from ai_coding.core.sop_router import SkillStats
 from ai_coding.skills.registry import SkillRegistry
 
 # ---------------------------------------------------------------------------
@@ -180,7 +181,7 @@ class TestSOPRouterWithFreshness:
         })
         router = SOPRouter(reg, threshold=1.0)
         stats = {
-            "cold-match": SimpleNamespace(last_recommended_turn=0, recommend_count=0),
+            "cold-match": SkillStats(last_recommended_turn=0),
         }
         matches = router.route("测试任务", [], "", [], turn_number=10, stats=stats)
         assert len(matches) >= 1

@@ -32,6 +32,8 @@ _MIN_IMPORTANCE, _MAX_IMPORTANCE = 1, 5
 #: A scene label is a short topic the model wrote; 80 characters is far past any
 #: sensible label and keeps a runaway answer from bloating every row.
 _MAX_SCENE_CHARS = 80
+#: F1: stake ceiling — prevents unbounded growth from repeated recalls.
+_STAKE_MAX = 10.0
 
 
 def normalize_scene(value: Any) -> str:
@@ -129,7 +131,7 @@ class MemoryNote:
             max(_MIN_IMPORTANCE, min(_MAX_IMPORTANCE, int(self.importance))),
         )
         stake_val = float(self.stake) if self.stake is not None else 1.0
-        object.__setattr__(self, "stake", max(0.0, stake_val))
+        object.__setattr__(self, "stake", max(0.0, min(_STAKE_MAX, stake_val)))
 
     # ---- derived ----------------------------------------------------------
 
@@ -156,8 +158,9 @@ class MemoryNote:
         return replace(self, importance=importance, updated_time=when or now_utc())
 
     def with_stake(self, stake: float, when: str | None = None) -> MemoryNote:
-        """Return a new note with updated stake."""
-        return replace(self, stake=max(0.0, stake), updated_time=when or now_utc())
+        """Return a new note with updated stake (clamped to [0, _STAKE_MAX])."""
+        return replace(self, stake=max(0.0, min(_STAKE_MAX, stake)),
+                       updated_time=when or now_utc())
 
     # ---- serialisation ----------------------------------------------------
 

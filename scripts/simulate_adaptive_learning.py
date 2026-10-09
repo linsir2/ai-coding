@@ -6,34 +6,29 @@ the effects of Skill Market, Fatigue System, and Dendritic Index.
 
 from __future__ import annotations
 
-import json
-import os
 import random
 import sys
 import tempfile
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from ai_coding.core.dispatch import DispatchOutcome
 from ai_coding.core.sop_router import (
     DendriticIndex,
+    SkillStats,
     SOPRouter,
     StructuralSignature,
-    SkillStats,
 )
-from ai_coding.skills.registry import SkillRegistry
 from ai_coding.core.turn_books import TurnBooks
-from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig, TurnSnapshot, TurnAction
-from ai_coding.core.dispatch import DispatchOutcome
+from ai_coding.core.turn_policy import TurnAction, TurnPolicy, TurnPolicyConfig, TurnSnapshot
 from ai_coding.domain.message import ToolCall, ToolResult
-from ai_coding.domain.session import SessionData
-from ai_coding.domain.task import TaskState
+from ai_coding.infra.time_utils import now_utc
 from ai_coding.memory.note import new_note
 from ai_coding.memory.store import MemoryStore
-from ai_coding.infra.time_utils import now_utc
-
+from ai_coding.skills.registry import SkillRegistry
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -118,7 +113,7 @@ pattern_dna: "部署前跑一遍 lint + test + build，全部通过才部署
 
 class SessionSimulator:
     """Simulates a session with multiple turns, tracking feature effects."""
-    
+
     def __init__(self, tmp_path: Path, session_id: str):
         self.tmp_path = tmp_path
         self.session_id = session_id
@@ -138,7 +133,7 @@ class SessionSimulator:
             "dendritic_boosts": [],
             "prices": [],
         }
-    
+
     def run_turn(self, user_input: str, task_goal: str,
                  tools_used: list[str], errors: list[str],
                  skill_to_load: str | None = None) -> dict:
@@ -150,7 +145,7 @@ class SessionSimulator:
             failed_streak_threshold=3,
             stall_iterations=0,
         ))
-        
+
         turn_result = {
             "turn": self.turn_count,
             "user_input": user_input,
@@ -160,12 +155,12 @@ class SessionSimulator:
             "fatigue_index": 0.0,
             "dendritic_boost": 0.0,
         }
-        
+
         # Record skill load
         if skill_to_load:
             self.router.record_load(skill_to_load, self.turn_count, self.stats)
             self.metrics["skills_loaded"].append(skill_to_load)
-        
+
         # Simulate tool outcomes
         if errors:
             for err in errors:
@@ -174,17 +169,17 @@ class SessionSimulator:
         else:
             for tool in tools_used:
                 books.note_outcomes([outcome(tool, success=True)])
-        
+
         # Record fatigue
         turn_result["fatigue_index"] = books.fatigue_index
-        
+
         # Check fatigue gate
         snapshot = books.snapshot(iteration=1, tokens_spent=0)
         decision = policy.decide_next_iteration(snapshot)
         if decision.action == TurnAction.NUDGE and "fatigue" in decision.reason:
             self.metrics["fatigue_triggers"].append(self.turn_count)
             turn_result["fatigue_triggered"] = True
-        
+
         # Route: get recommendations
         matches = self.router.route(
             user_input=user_input,
@@ -195,18 +190,6 @@ class SessionSimulator:
             stats=self.stats,
         )
         turn_result["recommendations"] = [(m.name, round(m.score, 2)) for m in matches]
-        
-        # Calculate dendritic boost
-        if matches and self.dendritic_path.exists():
-            for m in matches:
-                # Check if this match got a dendritic boost
-                base_score = 0.0
-                # Re-calculate base score without dendritic
-                # (simplified: if score > base, there was a boost)
-                if m.score > 3.0:  # threshold
-                    # Check if it's purely from dendritic
-                    pass
-        
         # Record skill outcome
         if skill_to_load:
             success = not errors
@@ -233,12 +216,12 @@ class SessionSimulator:
                 self.router.record_signature(sig)
             else:
                 self.metrics["skills_failed"].append(skill_to_load)
-        
+
         # Track prices
         self.metrics["prices"] = {
             name: round(s.price, 3) for name, s in self.stats.items()
         }
-        
+
         return turn_result
 
 
@@ -251,59 +234,59 @@ def scenario_skill_market(tmp_path: Path) -> dict:
     print("\n" + "=" * 70)
     print("SCENARIO 1: Skill Market — Price Convergence")
     print("=" * 70)
-    
+
     router = SOPRouter(SkillRegistry(tmp_path))
     results = {}
-    
+
     # Simulate: sandbox-fix has 80% success rate
     random.seed(42)
     stats = {}
     price_history = []
-    for i in range(30):
+    for _i in range(30):
         success = random.random() < 0.8
         router.record_outcome("sandbox-fix", success, stats)
         price_history.append(round(stats["sandbox-fix"].price, 3))
-    
+
     results["sandbox-fix"] = {
         "success_rate": 0.8,
         "final_price": stats["sandbox-fix"].price,
         "price_history": price_history,
     }
     print(f"  sandbox-fix (80% success): price → {stats['sandbox-fix'].price:.3f}")
-    
+
     # Simulate: debug-test has 30% success rate
     stats2 = {}
-    for i in range(30):
+    for _i in range(30):
         success = random.random() < 0.3
         router.record_outcome("debug-test", success, stats2)
-    
+
     results["debug-test"] = {
         "success_rate": 0.3,
         "final_price": stats2["debug-test"].price,
     }
     print(f"  debug-test (30% success): price → {stats2['debug-test'].price:.3f}")
-    
+
     # Simulate: refactor-code has 100% success rate
     stats3 = {}
-    for i in range(20):
+    for _i in range(20):
         router.record_outcome("refactor-code", True, stats3)
-    
+
     results["refactor-code"] = {
         "success_rate": 1.0,
         "final_price": stats3["refactor-code"].price,
     }
     print(f"  refactor-code (100% success): price → {stats3['refactor-code'].price:.3f}")
-    
+
     # Verify: higher success rate → higher price
     assert stats["sandbox-fix"].price > stats2["debug-test"].price, \
         "Higher success rate should have higher price"
     assert stats3["refactor-code"].price > stats["sandbox-fix"].price, \
         "100% success should have highest price"
-    
+
     print(f"\n  ✅ Price ordering: refactor-code({stats3['refactor-code'].price:.3f}) > "
           f"sandbox-fix({stats['sandbox-fix'].price:.3f}) > "
           f"debug-test({stats2['debug-test'].price:.3f})")
-    
+
     return results
 
 
@@ -316,22 +299,22 @@ def scenario_fatigue_system(tmp_path: Path) -> dict:
     print("\n" + "=" * 70)
     print("SCENARIO 2: Fatigue System — Error Accumulation")
     print("=" * 70)
-    
+
     results = {}
-    
+
     # Test 1: Single severe error (timeout)
     books = TurnBooks()
     books.note_outcomes([outcome("bash", success=False, error="connection timeout")])
     print(f"  1 timeout error: fatigue = {books.fatigue_index:.1f}")
     assert books.fatigue_index == 25.0  # 5²
-    
+
     # Test 2: Multiple medium errors
     books2 = TurnBooks()
     for _ in range(3):
         books2.note_outcomes([outcome("bash", success=False, error="permission denied")])
     print(f"  3 permission-denied errors: fatigue = {books2.fatigue_index:.1f}")
     assert books2.fatigue_index == 27.0  # 3 × 9
-    
+
     # Test 3: Mixed severity
     books3 = TurnBooks()
     books3.note_outcomes([outcome("bash", success=False, error="timeout")])  # 25
@@ -339,7 +322,7 @@ def scenario_fatigue_system(tmp_path: Path) -> dict:
     books3.note_outcomes([outcome("edit", success=False, error="unknown problem")])  # 1
     print(f"  Mixed (timeout + not-found + unknown): fatigue = {books3.fatigue_index:.1f}")
     assert books3.fatigue_index == 30.0  # 25 + 4 + 1
-    
+
     # Test 4: Fatigue gate triggers
     policy = TurnPolicy(TurnPolicyConfig(
         max_iterations=10, failed_streak_threshold=5, stall_iterations=0,
@@ -349,7 +332,7 @@ def scenario_fatigue_system(tmp_path: Path) -> dict:
     print(f"  Fatigue gate at 30.0: action = {decision.action.value}, reason = {decision.reason}")
     assert decision.action == TurnAction.NUDGE
     assert "fatigue" in decision.reason
-    
+
     # Test 5: Below threshold → no trigger
     books4 = TurnBooks()
     books4.note_outcomes([outcome("bash", success=False, error="file not found")])
@@ -357,7 +340,7 @@ def scenario_fatigue_system(tmp_path: Path) -> dict:
     decision4 = policy.decide_next_iteration(snapshot4)
     print(f"  Fatigue gate at 4.0: action = {decision4.action.value}")
     assert decision4.action == TurnAction.ITERATE
-    
+
     # Test 6: Fatigue gate only fires once
     books5 = TurnBooks()
     for _ in range(4):
@@ -368,9 +351,9 @@ def scenario_fatigue_system(tmp_path: Path) -> dict:
     decision5 = policy.decide_next_iteration(snapshot5)
     print(f"  Fatigue gate (already nudged): action = {decision5.action.value}")
     assert decision5.action == TurnAction.ITERATE  # Already nudged
-    
-    print(f"\n  ✅ Fatigue system working correctly")
-    
+
+    print("\n  ✅ Fatigue system working correctly")
+
     return results
 
 
@@ -383,12 +366,12 @@ def scenario_dendritic_index(tmp_path: Path) -> dict:
     print("\n" + "=" * 70)
     print("SCENARIO 3: Dendritic Index — Cross-Domain Matching")
     print("=" * 70)
-    
+
     results = {}
-    
+
     # Record past successful signatures
     idx = DendriticIndex(tmp_path / "dendritic.json")
-    
+
     # Session 1: sandbox-fix succeeded
     idx.record(StructuralSignature(
         tools=frozenset(["bash", "read"]),
@@ -397,7 +380,7 @@ def scenario_dendritic_index(tmp_path: Path) -> dict:
         skill_name="sandbox-fix",
         timestamp="2024-01-01T00:00:00Z",
     ))
-    
+
     # Session 2: debug-test succeeded
     idx.record(StructuralSignature(
         tools=frozenset(["bash", "read", "glob"]),
@@ -406,7 +389,7 @@ def scenario_dendritic_index(tmp_path: Path) -> dict:
         skill_name="debug-test",
         timestamp="2024-01-01T00:00:00Z",
     ))
-    
+
     # Session 3: git-helper succeeded
     idx.record(StructuralSignature(
         tools=frozenset(["bash", "read"]),
@@ -415,9 +398,9 @@ def scenario_dendritic_index(tmp_path: Path) -> dict:
         skill_name="git-helper",
         timestamp="2024-01-01T00:00:00Z",
     ))
-    
-    print(f"  Recorded 3 signatures: sandbox-fix, debug-test, git-helper")
-    
+
+    print("  Recorded 3 signatures: sandbox-fix, debug-test, git-helper")
+
     # Test 1: Match sandbox-fix context
     matches1 = idx.match(
         tools={"bash", "read"},
@@ -428,7 +411,7 @@ def scenario_dendritic_index(tmp_path: Path) -> dict:
     assert len(matches1) >= 1
     assert matches1[0][0] == "sandbox-fix"
     assert matches1[0][1] > 0.5
-    
+
     # Test 2: Match debug-test context
     matches2 = idx.match(
         tools={"bash", "read", "glob"},
@@ -438,7 +421,7 @@ def scenario_dendritic_index(tmp_path: Path) -> dict:
     print(f"  Match debug context: {[(m[0], round(m[1], 2)) for m in matches2]}")
     assert len(matches2) >= 1
     assert matches2[0][0] == "debug-test"
-    
+
     # Test 3: No match for completely different context
     matches3 = idx.match(
         tools={"python", "node"},
@@ -447,7 +430,7 @@ def scenario_dendritic_index(tmp_path: Path) -> dict:
     )
     print(f"  Match deploy context: {[(m[0], round(m[1], 2)) for m in matches3]}")
     assert len(matches3) == 0
-    
+
     # Test 4: Cross-domain match (partial overlap)
     matches4 = idx.match(
         tools={"bash", "read"},
@@ -457,7 +440,7 @@ def scenario_dendritic_index(tmp_path: Path) -> dict:
     print(f"  Cross-domain match: {[(m[0], round(m[1], 2)) for m in matches4]}")
     # Should match both sandbox-fix and git-helper (both use bash+read)
     assert len(matches4) >= 1
-    
+
     # Test 5: Persistence
     idx2 = DendriticIndex(tmp_path / "dendritic.json")
     matches5 = idx2.match(
@@ -468,9 +451,9 @@ def scenario_dendritic_index(tmp_path: Path) -> dict:
     print(f"  After reload: {[(m[0], round(m[1], 2)) for m in matches5]}")
     assert len(matches5) >= 1
     assert matches5[0][0] == "sandbox-fix"
-    
-    print(f"\n  ✅ Dendritic index working correctly")
-    
+
+    print("\n  ✅ Dendritic index working correctly")
+
     return results
 
 
@@ -483,12 +466,10 @@ def scenario_all_features(tmp_path: Path) -> dict:
     print("\n" + "=" * 70)
     print("SCENARIO 4: All Features — Multi-Session Realistic Workflow")
     print("=" * 70)
-    
+
     setup_workspace(tmp_path)
     dendritic_path = tmp_path / "dendritic.json"
-    
-    all_metrics = defaultdict(list)
-    
+
     # Session 1: Fix sandbox issue (sandbox-fix succeeds)
     print("\n  --- Session 1: Fix sandbox issue ---")
     sim1 = SessionSimulator(tmp_path, "session-1")
@@ -499,11 +480,11 @@ def scenario_all_features(tmp_path: Path) -> dict:
         errors=[],  # Success!
         skill_to_load="sandbox-fix",
     )
-    print(f"    Loaded: sandbox-fix, Success: True")
+    print("    Loaded: sandbox-fix, Success: True")
     print(f"    Recommendations: {result1['recommendations']}")
     print(f"    Fatigue: {result1['fatigue_index']}")
     print(f"    Price: {sim1.stats.get('sandbox-fix', SkillStats()).price:.3f}")
-    
+
     # Session 2: Debug test failure (debug-test succeeds)
     print("\n  --- Session 2: Debug test failure ---")
     sim2 = SessionSimulator(tmp_path, "session-2")
@@ -514,10 +495,10 @@ def scenario_all_features(tmp_path: Path) -> dict:
         errors=[],  # Success!
         skill_to_load="debug-test",
     )
-    print(f"    Loaded: debug-test, Success: True")
+    print("    Loaded: debug-test, Success: True")
     print(f"    Recommendations: {result2['recommendations']}")
     print(f"    Price: {sim2.stats.get('debug-test', SkillStats()).price:.3f}")
-    
+
     # Session 3: Another sandbox issue (should benefit from dendritic)
     print("\n  --- Session 3: Another sandbox issue (dendritic boost) ---")
     sim3 = SessionSimulator(tmp_path, "session-3")
@@ -528,10 +509,10 @@ def scenario_all_features(tmp_path: Path) -> dict:
         errors=[],  # Success!
         skill_to_load="sandbox-fix",
     )
-    print(f"    Loaded: sandbox-fix, Success: True")
+    print("    Loaded: sandbox-fix, Success: True")
     print(f"    Recommendations: {result3['recommendations']}")
     print(f"    Price: {sim3.stats.get('sandbox-fix', SkillStats()).price:.3f}")
-    
+
     # Session 4: Git push failure (git-helper fails, then succeeds)
     print("\n  --- Session 4: Git push failure (with errors) ---")
     sim4 = SessionSimulator(tmp_path, "session-4")
@@ -542,10 +523,10 @@ def scenario_all_features(tmp_path: Path) -> dict:
         errors=["non-fast-forward rejected"],  # Failure
         skill_to_load="git-helper",
     )
-    print(f"    Loaded: git-helper, Success: False")
+    print("    Loaded: git-helper, Success: False")
     print(f"    Fatigue: {result4['fatigue_index']}")
     print(f"    Price: {sim4.stats.get('git-helper', SkillStats()).price:.3f}")
-    
+
     # Session 5: Repeated errors → fatigue gate
     print("\n  --- Session 5: Repeated errors (fatigue gate) ---")
     sim5 = SessionSimulator(tmp_path, "session-5")
@@ -567,11 +548,12 @@ def scenario_all_features(tmp_path: Path) -> dict:
         if decision.action == TurnAction.NUDGE:
             fatigue_history[-1]["triggered"] = True
             break
-    
+
     for h in fatigue_history:
         trigger = " ← FATIGUE GATE!" if h.get("triggered") else ""
-        print(f"    Iteration {h['iteration']}: fatigue={h['fatigue']:.1f}, action={h['action']}{trigger}")
-    
+        print(f"    Iteration {h['iteration']}: "
+              f"fatigue={h['fatigue']:.1f}, action={h['action']}{trigger}")
+
     # Session 6: Cross-domain recommendation via dendritic
     print("\n  --- Session 6: Cross-domain recommendation ---")
     sim6 = SessionSimulator(tmp_path, "session-6")
@@ -583,13 +565,13 @@ def scenario_all_features(tmp_path: Path) -> dict:
         skill_to_load=None,  # No skill loaded, just routing
     )
     print(f"    Recommendations: {result6['recommendations']}")
-    print(f"    (sandbox-fix should be boosted by dendritic from Session 1)")
-    
+    print("    (sandbox-fix should be boosted by dendritic from Session 1)")
+
     # Summary
     print("\n" + "-" * 70)
     print("SUMMARY")
     print("-" * 70)
-    
+
     # Price summary
     print("\n  Skill Prices (F1):")
     all_stats = {}
@@ -599,14 +581,14 @@ def scenario_all_features(tmp_path: Path) -> dict:
     for name, s in sorted(all_stats.items(), key=lambda x: x[1].price, reverse=True):
         bar = "█" * int(s.price * 20)
         print(f"    {name:20s} {s.price:.3f} {bar}")
-    
+
     # Dendritic signatures count
     idx = DendriticIndex(dendritic_path)
     print(f"\n  Dendritic Signatures (F3): {len(idx._signatures)} stored")
-    
+
     # Fatigue triggers
     print(f"\n  Fatigue Triggers (F2): {len(sim5.metrics['fatigue_triggers'])} gate(s) triggered")
-    
+
     return {}
 
 
@@ -619,41 +601,42 @@ def scenario_memory_staking(tmp_path: Path) -> dict:
     print("\n" + "=" * 70)
     print("SCENARIO 5: Memory Staking — Eviction Priority")
     print("=" * 70)
-    
+
     store = MemoryStore(tmp_path / "memory.json")
-    
+
     # Add memories with different stakes
-    id1 = store.add_note(new_note("Critical: always use bash heredoc for external paths", importance=3))
+    id1 = store.add_note(
+        new_note("Critical: always use bash heredoc for external paths", importance=3))
     id2 = store.add_note(new_note("Minor: prefer dark theme", importance=3))
     id3 = store.add_note(new_note("Important: project uses Python 3.11", importance=3))
     id4 = store.add_note(new_note("TEMP: debugging session notes", importance=3))
-    
+
     # Set different stakes
     store.update_stake(id1, 5.0)   # High: validated many times
     store.update_stake(id2, 0.1)   # Low: contradicted
     store.update_stake(id3, 3.0)   # Medium
     store.update_stake(id4, 0.05)  # Very low: contradicted many times
-    
-    print(f"  Before eviction:")
+
+    print("  Before eviction:")
     for note in store.all():
         print(f"    [{note.stake:5.2f}] {note.text[:50]}...")
-    
+
     # Evict to 2
     evicted = store.evict(2)
-    
+
     print(f"\n  Evicted: {len(evicted)} notes")
-    print(f"  Remaining:")
+    print("  Remaining:")
     for note in store.all():
         print(f"    [{note.stake:5.2f}] {note.text[:50]}...")
-    
+
     # Verify: lowest stake evicted first
     assert id4 in evicted, "Lowest stake should be evicted"
     assert id2 in evicted, "Second lowest stake should be evicted"
     assert id1 not in evicted, "Highest stake should survive"
     assert id3 not in evicted, "Medium stake should survive"
-    
-    print(f"\n  ✅ Stake-based eviction: lowest stake removed first")
-    
+
+    print("\n  ✅ Stake-based eviction: lowest stake removed first")
+
     return {}
 
 
@@ -666,18 +649,18 @@ def main():
     print("ADAPTIVE LEARNING FEATURES — REAL-WORLD SIMULATION")
     print("F1: Skill Market | F2: Fatigue System | F3: Dendritic Index")
     print("=" * 70)
-    
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         setup_workspace(tmp_path)
-        
+
         # Run all scenarios
-        r1 = scenario_skill_market(tmp_path)
-        r2 = scenario_fatigue_system(tmp_path)
-        r3 = scenario_dendritic_index(tmp_path)
-        r4 = scenario_all_features(tmp_path)
-        r5 = scenario_memory_staking(tmp_path)
-    
+        scenario_skill_market(tmp_path)
+        scenario_fatigue_system(tmp_path)
+        scenario_dendritic_index(tmp_path)
+        scenario_all_features(tmp_path)
+        scenario_memory_staking(tmp_path)
+
     print("\n" + "=" * 70)
     print("ALL SCENARIOS COMPLETED SUCCESSFULLY")
     print("=" * 70)

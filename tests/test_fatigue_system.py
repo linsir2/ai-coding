@@ -122,9 +122,10 @@ class TestFatigueComputation:
         ])
         # CANCELLED_BY_USER is not in severity keywords → severity=1
         # But cancelled calls don't count toward failures
-        # Actually looking at the code, cancelled calls are excluded from failures
-        # Let me check...
-        # In note_outcomes: counted = [item for item in outcomes if item.result.error != CANCELLED_BY_USER]
+        # Actually looking at the code, cancelled calls are excluded
+        # from failures. Let me check...
+        # In note_outcomes: counted = [item for item in outcomes
+        #     if item.result.error != CANCELLED_BY_USER]
         # So cancelled calls don't add to failures
         assert books.fatigue_index == 0.0
 
@@ -171,8 +172,8 @@ class TestFatigueGate:
         policy = TurnPolicy(_config())
         snapshot = TurnSnapshot(iteration=1, fatigue_index=35.0, fatigue_nudges=1)
         decision = policy.decide_next_iteration(snapshot)
-        # Already nudged once → should ITERATE (or fall through to other gates)
-        assert decision.action is not TurnAction.NUDGE or "fatigue" not in decision.reason
+        # Already nudged once → fatigue gate should NOT fire again
+        assert decision.action is not TurnAction.NUDGE
 
     def test_fatigue_message_content(self):
         """Fatigue message tells model to change approach or summarize."""

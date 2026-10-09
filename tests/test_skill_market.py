@@ -2,22 +2,19 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
-import pytest
-
 from ai_coding.core.sop_router import (
-    PRICE_ALPHA,
     PRICE_MAX,
     PRICE_MIN,
-    SOPRouter,
     SkillMatch,
     SkillStats,
+    SOPRouter,
 )
 from ai_coding.memory.note import MemoryNote, new_note
 from ai_coding.memory.store import MemoryStore
 from ai_coding.skills.registry import SkillRegistry
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -76,10 +73,8 @@ class TestDynamicPricing:
             router.record_outcome("test-skill", True, stats)
         assert stats["test-skill"].price <= PRICE_MAX
 
-    def test_price_weighted_scoring(self):
+    def test_price_weighted_scoring(self, tmp_path: Path):
         """Two skills with same base score but different prices — higher price wins."""
-        tmp_path = Path("/tmp/test_pricing")
-        tmp_path.mkdir(exist_ok=True)
         _write_skill(tmp_path, "skill-a", (
             "name: skill-a\n"
             "description: Skill A\n"
@@ -113,10 +108,8 @@ class TestDynamicPricing:
         skill_b = next(m for m in matches if m.name == "skill-b")
         assert skill_a.score > skill_b.score
 
-    def test_price_display_in_match(self):
+    def test_price_display_in_match(self, tmp_path: Path):
         """SkillMatch includes price for display."""
-        tmp_path = Path("/tmp/test_pricing_display")
-        tmp_path.mkdir(exist_ok=True)
         _write_skill(tmp_path, "skill-a", (
             "name: skill-a\n"
             "description: Skill A\n"
@@ -173,7 +166,8 @@ class TestMemoryStaking:
 
     def test_stake_increases_on_recall(self):
         """After successful recall, stake increases."""
-        store = MemoryStore(Path("/tmp/test_stake_increase.json"))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(Path(tmp) / "memory.json")
         note_id = store.add_note(new_note("test memory"))
         note = store.get(note_id)
         assert note is not None
@@ -185,7 +179,8 @@ class TestMemoryStaking:
 
     def test_stake_slash_on_supersede(self):
         """When a note is contradicted, its stake is slashed."""
-        store = MemoryStore(Path("/tmp/test_stake_slash.json"))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(Path(tmp) / "memory.json")
         old_id = store.add_note(new_note("old fact"))
         old_note = store.get(old_id)
         assert old_note is not None
@@ -197,7 +192,8 @@ class TestMemoryStaking:
 
     def test_stake_weighted_eviction(self):
         """Low-stake note is evicted before high-stake note."""
-        store = MemoryStore(Path("/tmp/test_stake_eviction.json"))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(Path(tmp) / "memory.json")
         # Add two notes with different stakes
         low_id = store.add_note(new_note("low value", importance=1))
         high_id = store.add_note(new_note("high value", importance=1))
@@ -232,7 +228,8 @@ class TestMemoryStaking:
 
     def test_update_stake_nonexistent_note(self):
         """update_stake returns False for nonexistent note."""
-        store = MemoryStore(Path("/tmp/test_stake_nonexistent.json"))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(Path(tmp) / "memory.json")
         assert store.update_stake("nonexistent-id", 2.0) is False
 
 
@@ -298,10 +295,8 @@ class TestCoactivationGraph:
 class TestSkillMarketIntegration:
     """End-to-end workflow tests."""
 
-    def test_full_workflow_pricing(self):
+    def test_full_workflow_pricing(self, tmp_path: Path):
         """Skill recommended → used → outcome recorded → price updated → next routing affected."""
-        tmp_path = Path("/tmp/test_full_workflow")
-        tmp_path.mkdir(exist_ok=True)
         _write_skill(tmp_path, "good-skill", (
             "name: good-skill\n"
             "description: A good skill\n"
@@ -360,7 +355,8 @@ class TestSkillMarketIntegration:
 
     def test_memory_stake_affects_eviction_order(self):
         """Stake affects eviction order — high stake survives."""
-        store = MemoryStore(Path("/tmp/test_stake_order.json"))
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(Path(tmp) / "memory.json")
         # Add 3 notes with same importance but different stakes
         id1 = store.add_note(new_note("note 1", importance=2))
         id2 = store.add_note(new_note("note 2", importance=2))

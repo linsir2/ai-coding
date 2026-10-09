@@ -53,7 +53,6 @@ STATE_ONLY_TOOLS = frozenset({"checkpoint_write"})
 # F2: Paris' Law fatigue tracking — accumulated error damage.
 _FATIGUE_C = 1.0
 _FATIGUE_M = 2.0
-_FATIGUE_THRESHOLD = 30.0
 
 _SEVERITY_KEYWORDS: dict[int, tuple[str, ...]] = {
     5: ("timeout", "context overflow", "out of memory", "token limit"),
@@ -282,16 +281,17 @@ class TurnBooks:
         if not counted:
             return
         self.failed_streak = 0 if succeeded else self.failed_streak + 1
-        self.failures.extend(
-            (
-                item.call.name,
-                str(item.result.error or "failed"),
-                (item.result.output or "")[:_FAILURE_EXCERPT],
-            )
-            for item in counted
-            if not item.result.success
-        )
-        self._compute_fatigue()
+        for item in counted:
+            if not item.result.success:
+                error = str(item.result.error or "failed")
+                self.failures.append((
+                    item.call.name,
+                    error,
+                    (item.result.output or "")[:_FAILURE_EXCERPT],
+                ))
+                # F2: incremental fatigue accumulation (Paris' Law: ΔD = C × s^m)
+                severity = self._severity_of(error)
+                self.fatigue_index += _FATIGUE_C * (severity ** _FATIGUE_M)
 
     # ---- F2: Paris' Law fatigue ------------------------------------------
 
@@ -303,15 +303,6 @@ class TurnBooks:
             if any(kw in error_lower for kw in _SEVERITY_KEYWORDS.get(level, ())):
                 return level
         return 1
-
-    def _compute_fatigue(self) -> float:
-        """Compute fatigue index: D = Σ C × severity² (Paris' Law)."""
-        fatigue = 0.0
-        for failure in self.failures:
-            severity = self._severity_of(failure[1])
-            fatigue += _FATIGUE_C * (severity ** _FATIGUE_M)
-        self.fatigue_index = fatigue
-        return fatigue
 
     # ---- what a decision needs -------------------------------------------
 
