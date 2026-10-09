@@ -1,8 +1,11 @@
 /**
- * Root component: route state (home <-> session), global keys, initial hello.
+ * Root component: route state (home <-> session), global keymap layer.
+ *
+ * Global commands live here (M0.5: just app.exit); more commands land with
+ * the command palette (M3) and the full keybinding table (M5).
  */
 
-import { useKeyboard } from "@opentui/solid"
+import { useBindings } from "@opentui/keymap/solid"
 import { Show, createSignal } from "solid-js"
 import type { IpcClient } from "./ipc"
 import { Home } from "./routes/home"
@@ -21,15 +24,21 @@ export function App(props: { client: IpcClient; hello: Hello }) {
   const [sessionId, setSessionId] = createSignal(props.hello.sessionId)
   const [pendingPrompt, setPendingPrompt] = createSignal("")
 
-  useKeyboard((key) => {
-    // OpenCode: ctrl+c exits from anywhere (prompt clear lands later).
-    if (key.ctrl && key.name === "c") {
-      void props.client.request("shutdown").finally(() => {
-        props.client.close()
-        process.exit(0)
-      })
-    }
-  })
+  useBindings(() => ({
+    commands: [
+      {
+        name: "app.exit",
+        desc: "Exit",
+        run: () => {
+          void props.client.request("shutdown").finally(() => {
+            props.client.close()
+            process.exit(0)
+          })
+        },
+      },
+    ],
+    bindings: [{ key: "ctrl+c", cmd: "app.exit" }],
+  }))
 
   const startSession = (text: string) => {
     setPendingPrompt(text)

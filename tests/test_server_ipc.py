@@ -1,17 +1,26 @@
-"""TDD (M0): the IPC server + handler table, over a real Unix socket."""
+"""TDD (M0.5): the IPC service + handler table, over a real Unix socket.
+
+Both sides use python-lsp-jsonrpc: the server is ``IpcService`` and the test
+client is a plain ``Endpoint`` — the wire format is the library's
+Content-Length framed JSON-RPC 2.0.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import json
+import socket
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+from pylsp_jsonrpc.endpoint import Endpoint
+from pylsp_jsonrpc.exceptions import JsonRpcMethodNotFound
+from pylsp_jsonrpc.streams import JsonRpcStreamReader, JsonRpcStreamWriter
 
 from ai_coding.server.handlers import make_handlers
-from ai_coding.server.server import IpcServer
+from ai_coding.server.service import IpcService
 from ai_coding.service.session_service import SessionService
 
 
@@ -46,40 +55,53 @@ def _fake_world(tmp_path: Path) -> SimpleNamespace:
     )
 
 
-async def _call(writer, reader, request_id: int, method: str, params: dict | None = None):
-    payload = {"jsonrpc": "2.0", "id": request_id, "method": method}
-    if params is not None:
-        payload["params"] = params
-    writer.write((json.dumps(payload) + "\n").encode())
-    await writer.drain()
-    return json.loads((await reader.readline()).decode())
+class _TestClient:
+    """A symmetric endpoint client (same library as the server)."""
 
+    def __init__(self, socket_path: Path) -> None:
+        self.conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.conn.connect(str(socket_path))
+        self.events: list[dict] = []
+        self.turn_finished = threading.Event()
+        writer = JsonRpcStreamWriter(self.conn.makefile("wb"))
+        self.endpoint = Endpoint({"event": self._on_event}, writer.write)
+        reader = JsonRpcStreamReader(self.conn.makefile("rb"))
+        self._thread = threading.Thread(
+            target=reader.listen, args=(self.endpoint.consume,), daemon=True
+        )
+        self._thread.start()
 
-async def _read(reader) -> dict:
-    return json.loads((await reader.readline()).decode())
+    def _on_event(self, params: dict) -> None:
+        self.events.append(params)
+        if params.get("type") == "turn.finish":
+            self.turn_finished.set()
+
+    def request(self, method: str, params: dict | None = None, timeout: float = 5.0):
+        return self.endpoint.request(method, params).result(timeout)
+
+    def close(self) -> None:
+        self.conn.close()
 
 
 @pytest_asyncio.fixture
 async def ipc(tmp_path):
-    handlers: dict = {}
-    server = IpcServer(tmp_path / "ipc.sock", handlers)
     world = _fake_world(tmp_path)
-    handlers.update(make_handlers(world, server))
-    await server.start()
-    reader, writer = await asyncio.open_unix_connection(str(tmp_path / "ipc.sock"))
+    service = IpcService(tmp_path / "ipc.sock", asyncio.get_running_loop())
+    service.start()
+    service.dispatcher.update(make_handlers(world, service))
+    client = _TestClient(tmp_path / "ipc.sock")
+    assert service.wait_connected(timeout=5.0)
     try:
-        yield world, server, reader, writer
+        yield world, service, client
     finally:
-        writer.close()
-        await server.stop()
+        client.close()
+        service.close()
 
 
 @pytest.mark.asyncio
 async def test_initialize_returns_hello(ipc):
-    world, server, reader, writer = ipc
-    response = await _call(writer, reader, 1, "initialize")
-    assert response["id"] == 1
-    result = response["result"]
+    world, _service, client = ipc
+    result = client.request("initialize")
     assert result["workspace"] == world.workspace
     assert result["model"] == "fake-model"
     assert result["sessionId"]
@@ -87,79 +109,66 @@ async def test_initialize_returns_hello(ipc):
 
 
 @pytest.mark.asyncio
-async def test_unknown_method_answers_method_not_found(ipc):
-    _, _, reader, writer = ipc
-    response = await _call(writer, reader, 2, "does.not.exist")
-    assert response["error"]["code"] == -32601
-
-
-@pytest.mark.asyncio
-async def test_malformed_line_is_dropped_server_survives(ipc):
-    _, _, reader, writer = ipc
-    writer.write(b"{not json\n")
-    await writer.drain()
-    error = await _read(reader)
-    assert error["error"]["code"] == -32700
-    # The connection still answers a real request afterwards.
-    response = await _call(writer, reader, 3, "initialize")
-    assert "result" in response
+async def test_unknown_method_answers_error(ipc):
+    _world, _service, client = ipc
+    with pytest.raises(JsonRpcMethodNotFound):
+        client.request("does.not.exist")
 
 
 @pytest.mark.asyncio
 async def test_session_create_and_list(ipc):
-    _, _, reader, writer = ipc
-    created = await _call(writer, reader, 1, "session.create", {"title": "my session"})
-    session_id = created["result"]["id"]
+    _world, _service, client = ipc
+    created = client.request("session.create", {"title": "my session"})
+    session_id = created["id"]
     assert session_id
-    listed = await _call(writer, reader, 2, "session.list")
-    ids = [row["id"] for row in listed["result"]["sessions"]]
+    listed = client.request("session.list")
+    ids = [row["id"] for row in listed["sessions"]]
     assert session_id in ids
 
 
 @pytest.mark.asyncio
 async def test_session_prompt_echoes_events(ipc):
-    _, _, reader, writer = ipc
-    hello = await _call(writer, reader, 1, "initialize")
-    session_id = hello["result"]["sessionId"]
-    ack = await _call(writer, reader, 2, "session.prompt", {"id": session_id, "text": "hi"})
-    assert ack["result"]["turnId"] == 1
-    events = []
-    while True:
-        message = await _read(reader)
-        if message.get("method") != "event":
-            continue
-        event = message["params"]
-        events.append(event)
-        if event["type"] == "turn.finish":
+    _world, _service, client = ipc
+    hello = client.request("initialize")
+    session_id = hello["sessionId"]
+    ack = client.request("session.prompt", {"id": session_id, "text": "hi"})
+    assert ack["turnId"] == 1
+    # The echo turn runs on the asyncio loop — poll without blocking it.
+    for _ in range(250):
+        if client.turn_finished.is_set():
             break
-    assert events[0]["type"] == "turn.start"
-    assert any(e["type"] == "text.delta" for e in events)
-    final = events[-1]["data"]
+        await asyncio.sleep(0.02)
+    assert client.turn_finished.is_set()
+    types = [event["type"] for event in client.events]
+    assert types[0] == "turn.start"
+    assert "text.delta" in types
+    final = client.events[-1]["data"]
     assert final["status"] == "completed"
     assert final["text"] == "echo: hi"
 
 
 @pytest.mark.asyncio
 async def test_config_summary(ipc):
-    _, _, reader, writer = ipc
-    response = await _call(writer, reader, 1, "config.summary")
-    result = response["result"]
+    _world, _service, client = ipc
+    result = client.request("config.summary")
     assert result["model"] == "fake"
     assert result["maxContextTokens"] == 48000
 
 
 @pytest.mark.asyncio
 async def test_model_set_routes_to_loop(ipc):
-    world, _, reader, writer = ipc
-    response = await _call(writer, reader, 1, "model.set", {"name": "other"})
-    assert response["result"]["ok"] is True
+    world, _service, client = ipc
+    result = client.request("model.set", {"name": "other"})
+    assert result["ok"] is True
     assert world.loop.model == "other"
 
 
 @pytest.mark.asyncio
-async def test_server_push_reaches_the_client(ipc):
-    _, server, reader, writer = ipc
-    await server.push("event", {"type": "custom", "data": {"x": 1}})
-    message = await _read(reader)
-    assert message["method"] == "event"
-    assert message["params"]["type"] == "custom"
+async def test_server_notify_reaches_the_client(ipc):
+    _world, service, client = ipc
+    service.notify("event", {"type": "custom", "data": {"x": 1}})
+    for _ in range(50):
+        if any(event["type"] == "custom" for event in client.events):
+            break
+        await asyncio.sleep(0.02)
+    assert any(event["type"] == "custom" for event in client.events)

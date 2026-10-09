@@ -456,7 +456,7 @@ frontend/
 | 阶段 | 内容 | 交付物 | 验证 |
 |------|------|--------|------|
 | **M0** 骨架（IPC 往返）✅ | Python socket server + 启 bun；TS Home 屏（Logo+Prompt）；提交→echo 显示 | 端到端可跑 | ✅ tmux 实测 + 18 个 IPC 单测 |
-| **M0.5** 库替换（v2） | IPC 换 `vscode-jsonrpc`↔`python-lsp-jsonrpc`；键位换 `@opentui/keymap`；Logo 换 `figlet`；依赖落地（fuzzysort/string-width/diff/zod/opentui-spinner） | 同样功能、零手写协议 | 联调脚本复跑 + 单测重写全绿 |
+| **M0.5** 库替换（v2）✅ | IPC 换 `vscode-jsonrpc`↔`python-lsp-jsonrpc`；键位换 `@opentui/keymap`；Logo 换 `figlet`；依赖落地（fuzzysort/string-width/diff/zod/opentui-spinner） | 同样功能、零手写协议 | ✅ tmux 实测 + 7 个服务层单测 |
 | **M1** 主题 + Home 完整 | token 表、placeholder 随机示例、footer（dir:branch + 版本 + 快捷键提示） | 完整首页 | 截图对比 OpenCode 首页 |
 | **M2** 真实会话 | 接 AgentLoop 事件桥（经 keymap/ipc 封装）；消息/工具/推理/计划渲染；中断 | 完整对话 | 截图对比 + 事件桥测试 |
 | **M3** 对话框系统 | Dialog 宿主 + DialogSelect（fuzzysort）+ palette/models/sessions/skills/status/help | Ctrl+P 全可用 | 截图对比 |
@@ -491,10 +491,18 @@ Session（echo 往返）:
 ### M0 关键技术发现（防回退）
 
 1. **`preload = ["@opentui/solid/preload"]` 必须**：bun 把 `solid-js` 解析到 `dist/server.js`（SSR 版），`createEffect/onMount` 全是 no-op；preload 插件把它重写成 `dist/solid.js` 客户端 runtime，否则 UI 渲染但无响应
-2. **textarea 默认 `return = newline`**：v2 起由 `@opentui/keymap` 的 `input.submit` 命令接管（M0.5）；在此之前保持 `keyBindings` 覆盖
+2. **textarea 默认 `return = newline`**：v2 起由 `@opentui/keymap` 的 `input.submit` 命令接管（M5）；在此之前保持 `keyBindings` 覆盖
 3. **`await render()` 挂载后立即返回**：不能在它之后关闭 IPC 连接
 4. **焦点**：`onMount` 里 `input.focus()`（`queueMicrotask` 太早，渲染器未挂）
 5. **v2 IPC 帧协议是 Content-Length（LSP 风格）**，不是行分隔 JSON；联调脚本 `vscode-jsonrpc ↔ python-lsp-jsonrpc` 已实测通过
+
+### M0.5 关键发现（库实测细节）
+
+1. **`python-lsp-jsonrpc` 的 Endpoint 在请求缺省参数时传 `params=None`**（不是 `{}`）：handler 必须归一化（`service.py::_with_dict_params`）
+2. **线程模型**：handler 跑在库的线程池里；碰 asyncio 世界用 `run_coroutine_threadsafe`（`service.run/spawn`）；事件用 `endpoint.notify`（writer 自带锁）；审批用 `endpoint.request` + `asyncio.wrap_future`
+3. **测试不能在协程里 `threading.Event.wait()`**：会阻塞事件循环导致 echo 永不调度；用 `await asyncio.sleep` 轮询
+4. **keymap 接入**：`createCliRenderer({exitOnCtrlC:false})` 显式创建 renderer → `createDefaultOpenTuiKeymap(renderer)` → `KeymapProvider`；ctrl+c 现在是 `app.exit` 命令（先 shutdown 后退出）
+5. **figlet `ANSI Compact`**：3 行块字符、风格贴近 OpenCode；裁剪 figlet 的首尾空行后使用
 
 ### 验证方法（贯穿全程）
 

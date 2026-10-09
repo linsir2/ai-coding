@@ -3,13 +3,13 @@
 Process model (plan M0):
 
     ai-coding (this Python process)
-      |-- asyncio Unix-socket JSON-RPC server  (in-process)
-      |-- bun frontend/src/index.tsx           (child; inherits the tty)
+      |-- Unix-socket JSON-RPC service          (in-process, python-lsp-jsonrpc)
+      |-- bun frontend/src/index.tsx            (child; inherits the tty)
       '-- wait for the child to exit, then close the world
 
 The frontend receives ``AI_CODING_SOCKET`` in its environment and connects
-back to the server.  Python stays the entry point, so the existing CLI and
-install flow are unchanged.
+back to the service with ``vscode-jsonrpc``.  Python stays the entry point,
+so the existing CLI and install flow are unchanged.
 """
 
 from __future__ import annotations
@@ -20,10 +20,9 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any
 
 from ai_coding.server.handlers import make_handlers
-from ai_coding.server.server import IpcServer
+from ai_coding.server.service import IpcService
 from ai_coding.server.world import build_world
 
 _log = logging.getLogger(__name__)
@@ -57,13 +56,12 @@ async def run_tui(path: str | None, workspace: str, skills: str | None) -> None:
     world = await build_world(path, workspace, skills)
     socket_path = Path(f"/tmp/ai-coding-{os.getpid()}.sock")
     stop_event = asyncio.Event()
-    # The handler table needs the server (event push/approval calls), and the
-    # server needs the table — the dict is shared and filled in one step.
-    handlers: dict[str, Any] = {}
-    server = IpcServer(socket_path, handlers)
-    handlers.update(make_handlers(world, server, shutdown=stop_event.set))
+    # The handler table needs the service (event push/approval calls), and the
+    # service needs the table — the dict is shared and filled in one step.
+    service = IpcService(socket_path, asyncio.get_running_loop())
+    service.start()
+    service.dispatcher.update(make_handlers(world, service, shutdown=stop_event.set))
 
-    await server.start()
     env = {**os.environ, "AI_CODING_SOCKET": str(socket_path)}
     proc = await asyncio.create_subprocess_exec(
         bun, str(entry),
@@ -77,7 +75,7 @@ async def run_tui(path: str | None, workspace: str, skills: str | None) -> None:
     try:
         await proc.wait()
     finally:
-        await server.stop()
+        service.close()
         await world.aclose()
         if proc.returncode not in (0, None):
             print(f"frontend exited with code {proc.returncode}", file=sys.stderr)
