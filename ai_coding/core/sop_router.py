@@ -361,7 +361,7 @@ class SOPRouter:
             if self._dendritic:
                 dendritic_matches = self._dendritic.match(
                     tools=set(recent_tools),
-                    errors={f[1] for f in all_failures},
+                    errors=set(all_failures),
                     task_keywords=set(task_goal.lower().split()),
                 )
                 for match_name, match_score in dendritic_matches:
