@@ -462,7 +462,7 @@ frontend/
 | **M3** 对话框系统 ✅ | Dialog 宿主 + DialogSelect（fuzzysort）+ palette/models/sessions/skills/status/help | Ctrl+P 全可用 | ✅ tmux 实测（面板/模型切换/会话重放/门控/refocus）+ 与 OC 面板结构对比 + 69 bun 单测 |
 | **M4** 标签 + 侧栏 + 状态 ✅ | session tabs（切换式）+ sidebar（Context/dir）+ 状态栏（真实用量） | 多会话可切换 | ✅ tmux 140×42 实测（tabs/切换/New/Context/窄屏）+ 72 bun 单测 |
 | **M5** 交互细节 ✅ | leader 键位（ctrl+x）、slash 自动补全、审批面板（ipc 双向请求）、toast、本地队列、两段式 esc | 全功能 | ✅ tmux 实测（面板三决定 + grant 落盘免审批、队列自动派发、slash 列表/过滤/执行、leader 五组、esc 子进程击杀）+ 101 bun 单测 + 4 个 IPC 往返测试 |
-| **M6** 收尾 | Python/TS 测试补全、删除旧 Textual UI、文档、启动脚本 | 合并就绪 | `pytest`+`ruff`+`mypy`+`bun test` 全绿 |
+| **M6** 收尾 ✅ | 纯逻辑迁移到 `app/`（slash/trace_text/console/commands + 6 测试归口）、前端 IPC 测试补全、`--legacy-ui` 移除、文档（`opencode-gui-m6-plan.md` 含延后删除清单）；**旧 Textual UI 删除延后（用户指示，清单见 m6 文档 §4）** | 合并就绪 | `pytest`+`ruff`+`mypy`+`bun test`(107)+`tsc` 全绿 + `--help` 无 legacy |
 
 ### M0 实测截图（2026-10-09）
 

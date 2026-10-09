@@ -15,9 +15,9 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
+from ai_coding.app.trace_text import summarize_turn
 from ai_coding.core.aggregate import AggregateReport
 from ai_coding.core.trace import TraceStore
-from ai_coding.ui.trace_render import summarize_turn
 
 __all__ = [
     "SessionView",

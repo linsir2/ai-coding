@@ -46,9 +46,6 @@ def main(
     skills: str | None = typer.Option(
         None, "--skills", help="Path to skills directory (enables skill tool)."
     ),
-    legacy_ui: bool = typer.Option(
-        False, "--legacy-ui", help="Use the legacy Textual UI instead of the OpenTUI frontend."
-    ),
 ) -> None:
     """ai-coding : an AI coding assistant."""
     setup_logging()
@@ -59,14 +56,9 @@ def main(
     # believes changed, so fragments of it stay on screen.  Logs go to the
     # workspace's .ai-coding/ instead.
     send_logs_to_file(workspace)
-    if legacy_ui:
-        from ai_coding.ui.textual_app import run_app
+    from ai_coding.server.launcher import run_tui
 
-        runner = run_app
-    else:
-        from ai_coding.server.launcher import run_tui
-
-        runner = run_tui
+    runner = run_tui
 
     try:
         loop = asyncio.new_event_loop()

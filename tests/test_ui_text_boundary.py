@@ -162,7 +162,7 @@ async def test_resume_picker_row_survives_brackets_in_preview():
 def test_dialogue_console_prints_brackets_verbatim():
     from rich.console import Console
 
-    from ai_coding.ui.console import DialogueConsole
+    from ai_coding.app.console import DialogueConsole
 
     recorder = Console(record=True, width=200)
     console = DialogueConsole(recorder)

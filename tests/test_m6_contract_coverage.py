@@ -308,7 +308,7 @@ async def test_glob_symbolic_link_escape_filtered(tmp_path):
 def test_console_delta_info_error_rule_render():
     from rich.console import Console
 
-    from ai_coding.ui.console import DialogueConsole
+    from ai_coding.app.console import DialogueConsole
 
     c = Console(record=True, width=40)
     dc = DialogueConsole(c)

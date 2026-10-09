@@ -11,14 +11,14 @@ from pathlib import Path
 import pytest
 
 from ai_coding.ai.engine import ChatEngine
+from ai_coding.app.commands import handle_input
+from ai_coding.app.slash import parse_slash
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.context_compression import ContextManager
 from ai_coding.domain.loop import StepResult
 from ai_coding.service.session_service import SessionService
 from ai_coding.tools.registry import ToolRegistry
-from ai_coding.ui.repl import handle_input
-from ai_coding.ui.slash import parse_slash
 
 
 class _Engine(ChatEngine):

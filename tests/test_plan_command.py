@@ -44,11 +44,11 @@ async def test_plan_topic_clears_the_receipt_book_behaviourally():
     Source inspection would prove nothing here — what matters is that after
     `/plan <topic>` the session's step ids belong to the new plan alone.
     """
+    from ai_coding.app.commands import REPLAction, handle_input
+    from ai_coding.app.console import DialogueConsole
     from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
     from ai_coding.domain.plan_delivery import StepDelivery
     from ai_coding.domain.session import SessionData
-    from ai_coding.ui.console import DialogueConsole
-    from ai_coding.ui.repl import REPLAction, handle_input
 
     class _Loop:
         def __init__(self):
@@ -92,10 +92,10 @@ async def test_repl_plan_turn_runs_with_auto_continuation_disabled():
     turn contradicts its own prompt.  Pinned per call site — dropping the guard
     from one UI would not fail the other's test.
     """
+    from ai_coding.app.commands import handle_input
+    from ai_coding.app.console import DialogueConsole
     from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
     from ai_coding.domain.session import SessionData
-    from ai_coding.ui.console import DialogueConsole
-    from ai_coding.ui.repl import handle_input
 
     class _Loop:
         def __init__(self):

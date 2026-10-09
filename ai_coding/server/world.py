@@ -1,9 +1,9 @@
 """The application world the IPC server serves (M0).
 
-Mirrors the assembly ``ui/textual_app.py::run_app`` performs, minus the
-Textual app: config -> engine -> tools -> MCP -> AgentLoop.  When the old
-Textual UI is deleted (plan M2/M6) this becomes the single composition for
-both the TUI frontend and any future front-end.
+The single composition root for the backend: config -> engine -> tools ->
+MCP -> AgentLoop.  The CLI launches it through ``server/launcher.py`` for
+the OpenTUI frontend; the retired Textual UI (still present under
+``ai_coding/ui/``, deletion deferred) assembled the same pieces itself.
 """
 
 from __future__ import annotations

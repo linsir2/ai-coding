@@ -192,9 +192,10 @@ def make_handlers(
         return {"turnId": turn_id, "sessionId": session_id}
 
     def session_interrupt(params: dict[str, Any]) -> dict[str, Any]:
-        # Two layers, both needed (ui/textual_app.py::action_cancel_turn):
-        # the event is the tool batch's fast path (the loop clears it before
-        # each batch), the future cancellation reaches a model call.
+        # Two layers, both needed (ported from ui/textual_app.py::
+        # action_cancel_turn): the event is the tool batch's fast path (the
+        # loop clears it before each batch), the future cancellation reaches
+        # a model call.
         world.cancel.set()
         interrupted = sum(1 for future in list(state.turn_futures) if future.cancel())
         return {"ok": True, "interrupted": interrupted}

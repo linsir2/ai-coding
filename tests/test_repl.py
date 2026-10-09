@@ -11,9 +11,9 @@ from typing import Any
 import pytest
 from rich.console import Console
 
+from ai_coding.app.commands import REPLAction, handle_input
+from ai_coding.app.console import DialogueConsole
 from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
-from ai_coding.ui.console import DialogueConsole
-from ai_coding.ui.repl import REPLAction, handle_input
 
 pytestmark = pytest.mark.asyncio
 
@@ -381,8 +381,8 @@ def _session(sid):
 
 
 def test_budget_says_when_no_turn_has_run(tmp_path):
+    from ai_coding.app.commands import _budget_report
     from ai_coding.core.trace import TraceStore
-    from ai_coding.ui.repl import _budget_report
 
     loop = _BudgetLoop(TraceStore(tmp_path))
     out = _budget_report(loop, _session("never-ran"))
@@ -390,8 +390,8 @@ def test_budget_says_when_no_turn_has_run(tmp_path):
 
 
 def test_budget_says_when_zero_tokens(tmp_path):
+    from ai_coding.app.commands import _budget_report
     from ai_coding.core.trace import TraceStore
-    from ai_coding.ui.repl import _budget_report
 
     store = TraceStore(tmp_path)
     store.update_summary(
@@ -403,8 +403,8 @@ def test_budget_says_when_zero_tokens(tmp_path):
 
 
 def test_budget_renders_real_usage(tmp_path):
+    from ai_coding.app.commands import _budget_report
     from ai_coding.core.trace import TraceStore
-    from ai_coding.ui.repl import _budget_report
 
     store = TraceStore(tmp_path)
     store.update_summary(
@@ -422,7 +422,7 @@ def test_budget_renders_real_usage(tmp_path):
 
 
 def test_budget_says_when_tracing_is_off(tmp_path):
-    from ai_coding.ui.repl import _budget_report
+    from ai_coding.app.commands import _budget_report
 
     out = _budget_report(_NoTraceLoop(), _session("x"))
     assert "tracing is off" in out
@@ -712,9 +712,9 @@ def test_budget_shows_money_when_the_recorder_knows_the_price(tmp_path):
     With a price configured the estimate splits fresh and cached input; without
     one the line stays token-only, which is R4a's rule for unknown prices.
     """
+    from ai_coding.app.commands import _budget_report
     from ai_coding.core.budget import Pricing
     from ai_coding.core.trace import TraceStore
-    from ai_coding.ui.repl import _budget_report
 
     store = TraceStore(tmp_path)
     store.update_summary("priced", {

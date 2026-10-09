@@ -7,7 +7,7 @@ much / what degraded" without opening the JSONL by hand
 
 import json
 
-from ai_coding.ui.trace_render import render_budget, render_turn, summarize_turn
+from ai_coding.app.trace_text import render_budget, render_turn, summarize_turn
 
 
 def _write(path, events):

@@ -142,8 +142,8 @@ async def test_plan_command_plans_and_executes_in_one_command():
     """'/plan <topic>' must not stop at the plan — it executes it (M1-A)."""
     from rich.console import Console
 
-    from ai_coding.ui.console import DialogueConsole
-    from ai_coding.ui.repl import REPLAction, handle_input
+    from ai_coding.app.commands import REPLAction, handle_input
+    from ai_coding.app.console import DialogueConsole
 
     class _Sessions:
         def __init__(self, session):
@@ -167,7 +167,7 @@ async def test_plan_command_plans_and_executes_in_one_command():
 
 @pytest.mark.asyncio
 async def test_plan_run_is_no_longer_a_command():
-    from ai_coding.ui.slash import parse_slash
+    from ai_coding.app.slash import parse_slash
 
     assert parse_slash("/plan-run") is None
     assert parse_slash("/plan-run 继续") is None
@@ -317,8 +317,8 @@ async def test_planning_failure_does_not_execute():
     """No todos from the plan turn -> no execution, a clear message."""
     from rich.console import Console
 
-    from ai_coding.ui.console import DialogueConsole
-    from ai_coding.ui.repl import handle_input
+    from ai_coding.app.commands import handle_input
+    from ai_coding.app.console import DialogueConsole
 
     class _EmptyLoop:
         def __init__(self):
