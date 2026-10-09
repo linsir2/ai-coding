@@ -11,7 +11,7 @@ import time
 from enum import Enum
 from typing import Any
 
-from ai_coding.app.console import DialogueConsole
+from ai_coding.app.console import ConsoleSink
 from ai_coding.app.slash import parse_slash, suggest_command
 
 HELP_TEXT = (
@@ -58,12 +58,18 @@ async def handle_input(
     text: str,
     session: Any,
     sessions: Any,
-    console: DialogueConsole,
+    console: ConsoleSink,
+    observer: Any = None,
 ) -> tuple[REPLAction, Any]:
     """Process a single input line. Plain text runs the loop; slash reacts.
 
     Returns ``(action, session)`` where ``session`` may be a fresh one when a
     new session was started.  ``sessions`` only needs ``create()``.
+
+    ``observer`` is threaded into every turn this dispatches runs (the plain
+    path, ``/review``, the plan workflow's step turns): a front-end that sees
+    only deltas cannot render tool cards or turn ends.  ``None`` keeps the
+    REPL's console-only behaviour.
     """
     cmd = parse_slash(text)
     if cmd is None:
@@ -76,7 +82,9 @@ async def handle_input(
                     f"unknown command '{token}' — did you mean '/{suggestion}'?"
                 )
                 return REPLAction.CONTINUE, session
-        answer = await loop.process_input(session, text, on_delta=console.delta)
+        answer = await loop.process_input(
+            session, text, on_delta=console.delta, observer=observer
+        )
         if answer and not answer.endswith("\n"):
             console.rule("")
         return REPLAction.CONTINUE, session
@@ -172,6 +180,7 @@ async def handle_input(
             topic=cmd.raw[len("/plan"):].strip() or None,
             ask_topic=lambda: _ask_topic(console),
             on_delta=console.delta,
+            observer=observer,
         )
         return REPLAction.CONTINUE, session
     if cmd.name == "review":
@@ -181,6 +190,7 @@ async def handle_input(
             "Review the current git diff and identify any issues, "
             "bugs, or improvements needed.",
             on_delta=console.delta,
+            observer=observer,
         )
         return REPLAction.CONTINUE, session
     if cmd.name == "config":
@@ -188,7 +198,7 @@ async def handle_input(
     return REPLAction.CONTINUE, session
 
 
-def _handle_config(loop: Any, session: Any, console: DialogueConsole) -> tuple[REPLAction, Any]:
+def _handle_config(loop: Any, session: Any, console: ConsoleSink) -> tuple[REPLAction, Any]:
     settings = getattr(loop, "settings", None)
     if settings is None:
         console.info("[config] not available")
@@ -205,7 +215,7 @@ def _handle_config(loop: Any, session: Any, console: DialogueConsole) -> tuple[R
 
 
 def _handle_permissions(
-    loop: Any, raw: str, session: Any, console: DialogueConsole
+    loop: Any, raw: str, session: Any, console: ConsoleSink
 ) -> tuple[REPLAction, Any]:
     parts = raw.split()
     dispatcher = getattr(loop, "dispatcher", None)
@@ -264,7 +274,7 @@ def _message_count(session: Any) -> int:
 
 
 def _handle_resume(
-    loop: Any, raw: str, session: Any, sessions: Any, console: DialogueConsole
+    loop: Any, raw: str, session: Any, sessions: Any, console: ConsoleSink
 ) -> tuple[REPLAction, Any]:
     parts = raw.split()
     if len(parts) == 1:
@@ -314,7 +324,7 @@ def _runner_of(loop: Any) -> Any | None:
 
 
 def _handle_tasks(
-    loop: Any, raw: str, session: Any, console: DialogueConsole
+    loop: Any, raw: str, session: Any, console: ConsoleSink
 ) -> tuple[REPLAction, Any]:
     """List background sub-agent runs, or stop one (R1-2)."""
     runner = _runner_of(loop)
@@ -352,7 +362,7 @@ def _handle_tasks(
 
 
 def _handle_model(
-    loop: Any, raw: str, session: Any, console: DialogueConsole
+    loop: Any, raw: str, session: Any, console: ConsoleSink
 ) -> tuple[REPLAction, Any]:
     # Read off the loop, not off ``settings``: the model table is an ``AppConfig``
     # field and ``loop.settings`` is an ``AIConfig``, which has never carried one.

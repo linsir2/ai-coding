@@ -8,7 +8,7 @@ to ``typer.echo`` or to the TUI.  ``DialogueConsole`` renders to a rich console
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol
 
 from rich.console import Console
 
@@ -79,4 +79,23 @@ class DialogueConsole:
         self._c.rule(title)
 
 
-__all__ = ["DialogueConsole"]
+class ConsoleSink(Protocol):
+    """The surface ``handle_input`` writes through (the TUI's is ``IpcConsole``).
+
+    A protocol, not the rich-backed class: the dispatcher only needs these
+    five methods, and an IPC console must not drag a rich ``Console`` into the
+    server just to satisfy a type.
+    """
+
+    def delta(self, token: str) -> None: ...
+
+    def info(self, message: str) -> None: ...
+
+    def error(self, message: str) -> None: ...
+
+    def rule(self, title: str = "") -> None: ...
+
+    def step(self, title: str) -> Any: ...
+
+
+__all__ = ["ConsoleSink", "DialogueConsole"]

@@ -285,6 +285,27 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
         run: () => void onNewSession(),
       },
       {
+        // The session route registers its own (closer) versions of these two,
+        // which run them in the live session.  On Home there is no session
+        // layer: start one with the command as its first prompt — the
+        // session's dispatch routes a "/"-prefixed line to session.command,
+        // the backend's command dispatcher.
+        name: "session.plan",
+        title: "Plan",
+        group: "Session",
+        desc: "Plan a topic and execute it step by step",
+        palette: true,
+        run: () => startSession("/plan "),
+      },
+      {
+        name: "session.review",
+        title: "Review",
+        group: "Session",
+        desc: "Review the current git diff",
+        palette: true,
+        run: () => startSession("/review"),
+      },
+      {
         name: "session.next",
         title: "Next session",
         group: "Session",

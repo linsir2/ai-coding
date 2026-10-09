@@ -267,6 +267,24 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
         },
       ])
     }
+    case "console.line": {
+      const text = str(data["text"])
+      if (!text) return state
+      const tone: Tone = str(data["tone"]) === "error" ? "error" : "muted"
+      return updateAssistant(state, (parts) => appendNotice(parts, text, tone))
+    }
+    case "turn.step": {
+      // A command's inner turn (session.command runs /review and each /plan
+      // step as its own loop turn): settle what is streaming, keep the run
+      // busy — the command's own terminal turn.finished ends it.
+      const handoff = str(data["handoff"])
+      return updateAssistant(state, (parts) => {
+        const settled = parts.map((part) =>
+          part.kind === "text" && part.streaming ? { ...part, streaming: false } : part,
+        )
+        return handoff ? [...settled, { kind: "text", text: handoff, streaming: false }] : settled
+      })
+    }
     case "plan.updated": {
       const plan: Part = {
         kind: "plan",

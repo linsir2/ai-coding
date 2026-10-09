@@ -239,6 +239,12 @@ class EventBridge:
         self._notify = notify
         self._clock = clock or time.monotonic
         self._last_chunk: dict[str, float] = {}
+        #: True while a slash command's runner owns the turn (handlers.py::
+        #: session_command).  The loop's inner ``TurnFinished`` is then a
+        #: *step* of the command, not the end of the run: the command emits
+        #: its own terminal event after ``handle_input`` returns.  Mirrors
+        #: the old TUI, which wrapped one command in one assistant block.
+        self.command_run = False
 
     def on_delta(self, text: str) -> None:
         self._notify("event", {"type": "text.delta", "data": {"text": text}})
@@ -252,4 +258,6 @@ class EventBridge:
             self._last_chunk[event.call_id] = now
         message = to_wire(event)
         if message is not None:
+            if self.command_run and message["type"] == "turn.finished":
+                message = {**message, "type": "turn.step"}
             self._notify("event", message)

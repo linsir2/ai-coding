@@ -61,6 +61,18 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     title: "Quit",
     description: "Exit the app",
   },
+  {
+    name: "plan",
+    command: "session.plan",
+    title: "Plan",
+    description: "Plan a topic and execute it step by step",
+  },
+  {
+    name: "review",
+    command: "session.review",
+    title: "Review",
+    description: "Review the current git diff",
+  },
 ]
 
 /**

@@ -96,7 +96,13 @@ export function Session(props: SessionProps) {
   }
 
   const dispatch = (text: string) => {
-    void props.client.request("session.prompt", { id: props.sessionId, text }).catch((error) => {
+    // A "/"-prefixed line is a slash command: the backend's dispatcher
+    // (app/commands.py::handle_input) decides what it means, so the TUI gains
+    // the whole command layer through one entry.  Unknown commands fall
+    // through it as plain text — the same verdict the model would get either
+    // way.  Plain text keeps the live-turn path (bridge deltas, no console).
+    const method = text.startsWith("/") ? "session.command" : "session.prompt"
+    void props.client.request(method, { id: props.sessionId, text }).catch((error) => {
       apply({ kind: "submit-failed", reason: String(error) })
     })
   }
@@ -142,12 +148,42 @@ export function Session(props: SessionProps) {
         palette: true,
         run: () => setThinking((value) => !value),
       },
+      {
+        name: "session.plan",
+        title: "Plan",
+        group: "Session",
+        desc: "Plan a topic and execute it step by step",
+        palette: true,
+        // Bare /plan needs a topic: pre-fill it and let the user type one.
+        // The old TUI asked in a modal; asking in the composer keeps the
+        // slash-list selection a single keystroke.
+        run: () => setPromptSeed("/plan "),
+      },
+      {
+        name: "session.review",
+        title: "Review",
+        group: "Session",
+        desc: "Review the current git diff",
+        palette: true,
+        run: () => {
+          if (state.busy) {
+            apply({ kind: "queued", text: "/review" })
+            return
+          }
+          apply({ kind: "submitted", text: "/review" })
+          dispatch("/review")
+        },
+      },
     ],
     bindings: [
       { key: "escape", cmd: "session.interrupt" },
       { key: "ctrl+t", cmd: "session.toggle.thinking" },
     ],
   }))
+
+  // The slash list's /plan pre-fills the composer (bare /plan asks for a
+  // topic); the seed lands the text in the textarea and focuses it.
+  const [promptSeed, setPromptSeed] = createSignal("")
 
   onMount(() => {
     const unsubscribe = props.client.onEvent((event) => {
@@ -156,6 +192,12 @@ export function Session(props: SessionProps) {
         disarmInterrupt()
         void refreshStats()
         props.onTurnFinished()
+        // /clear and /resume <id> end with the REPL's NEW_SESSION action; the
+        // backend has already switched the live session, so the tabs follow.
+        if (event.data["action"] === "new_session") {
+          const id = String(event.data["sessionId"] ?? "")
+          if (id) props.onSelectSession(id)
+        }
         // One queued line per finished turn.
         const next = state.queued[0]
         if (next !== undefined) {
@@ -261,6 +303,8 @@ export function Session(props: SessionProps) {
               metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
               onSubmit={submit}
               onOverlay={setSuggesting}
+              seed={promptSeed()}
+              onSeedDone={() => setPromptSeed("")}
             />
           </>
         </Show>

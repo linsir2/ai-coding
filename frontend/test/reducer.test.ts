@@ -411,3 +411,62 @@ describe("input queue", () => {
     expect(failed.busy).toBe(false)
   })
 })
+
+describe("slash commands over IPC (session.command)", () => {
+  const done = {
+    status: "completed",
+    reason: "",
+    iterations: 1,
+    truncatedByLength: false,
+    handoff: "",
+  }
+
+  test("console.line lands as a notice: the command's own output", () => {
+    const state = feed(
+      initialState(),
+      { kind: "submitted", text: "/help" },
+      wire("console.line", { tone: "info", text: "[status] session=abc messages=3" }),
+      wire("turn.finished", done),
+    )
+    const parts = lastAssistant(state).parts
+    expect(parts).toContainEqual({ kind: "notice", tone: "muted", text: "[status] session=abc messages=3" })
+    expect(state.busy).toBe(false)
+  })
+
+  test("an error line keeps the error tone", () => {
+    const state = feed(
+      initialState(),
+      wire("console.line", { tone: "error", text: "unknown command '/plan-run'" }),
+    )
+    expect(lastAssistant(state).parts).toContainEqual({
+      kind: "notice",
+      tone: "error",
+      text: "unknown command '/plan-run'",
+    })
+  })
+
+  test("a command's inner turn is a step: streaming settles, the run stays busy", () => {
+    const state = feed(
+      initialState(),
+      { kind: "submitted", text: "/review" },
+      wire("text.delta", { text: "reviewing" }),
+      wire("turn.step", { ...done, text: "reviewing" }),
+    )
+    // the step settled the streaming text ...
+    expect(lastAssistant(state).parts).toContainEqual({ kind: "text", text: "reviewing", streaming: false })
+    // ... but the command is still running: no second message, no free prompt
+    expect(state.busy).toBe(true)
+    expect(state.messages.filter((m) => m.role === "assistant")).toHaveLength(1)
+  })
+
+  test("the run ends once, on the terminal turn.finished", () => {
+    const state = feed(
+      initialState(),
+      { kind: "submitted", text: "/review" },
+      wire("turn.step", done),
+      wire("turn.finished", done),
+    )
+    expect(state.busy).toBe(false)
+    expect(state.messages.filter((m) => m.role === "assistant")).toHaveLength(1)
+  })
+})

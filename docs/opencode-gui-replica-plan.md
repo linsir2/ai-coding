@@ -462,6 +462,7 @@ frontend/
 | **M3** 对话框系统 ✅ | Dialog 宿主 + DialogSelect（fuzzysort）+ palette/models/sessions/skills/status/help | Ctrl+P 全可用 | ✅ tmux 实测（面板/模型切换/会话重放/门控/refocus）+ 与 OC 面板结构对比 + 69 bun 单测 |
 | **M4** 标签 + 侧栏 + 状态 ✅ | session tabs（切换式）+ sidebar（Context/dir）+ 状态栏（真实用量） | 多会话可切换 | ✅ tmux 140×42 实测（tabs/切换/New/Context/窄屏）+ 72 bun 单测 |
 | **M5** 交互细节 ✅ | leader 键位（ctrl+x）、slash 自动补全、审批面板（ipc 双向请求）、toast、本地队列、两段式 esc | 全功能 | ✅ tmux 实测（面板三决定 + grant 落盘免审批、队列自动派发、slash 列表/过滤/执行、leader 五组、esc 子进程击杀）+ 101 bun 单测 + 4 个 IPC 往返测试 |
+| **A1** `/plan`+`/review` ✅ | 一个 `session.command` 入口对接后端 `handle_input` 分发（`observer` 透传 + `IpcConsole` → `console.line` + 命令内层 `turn.step`）+ 前端 submit 拦截 + reducer 两分支 + `/plan` `/review` 命令（Shell 层 Home 行为） | 计划/审查可达 | ✅ tmux 真模型：`/review` 全程、`/plan` 计划→步骤→验收→`[plan] 完成 1 步`、esc 中断、`/budget` 直通；11 个新用例；全量 2021 passed |
 | **M6.5** ask_user 对接 ✅ | `world` 装配 `CLIUserPromptCallback` + `handlers._wire_user_prompt`（`user_prompt.ask` 双向请求）、前端 `AskPanel`（`◆ Question` 面板）+ 7 纯逻辑用例 + 2 IPC 往返 + tmux 双路径 E2E | 合并就绪 | 见 `opencode-gui-m6-plan.md` §7 |
 | **M6** 收尾 ✅ | 纯逻辑迁移到 `app/`（slash/trace_text/console/commands + 9 测试归口）、前端 IPC 测试补全、`--legacy-ui` 移除、**旧 Textual UI 删除**（`ai_coding/ui/` 16 文件 + 14 测试 + tui_shot；含 UIConfig 死配置与 textual 依赖移除；记录见 `opencode-gui-m6-plan.md` §4） | 合并就绪 | `pytest`+`ruff`+`mypy`+`bun test`(107)+`tsc` 全绿 + tmux 冒烟 |
 

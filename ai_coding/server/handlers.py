@@ -23,7 +23,7 @@ from concurrent.futures import Future
 from typing import Any
 
 from ai_coding.domain.session import _message_to_dict
-from ai_coding.server.bridge import EventBridge
+from ai_coding.server.bridge import EventBridge, Notify
 from ai_coding.server.display import provider_from_base_url
 from ai_coding.server.service import IpcService
 from ai_coding.server.vcs import git_branch
@@ -81,6 +81,44 @@ def _wire_user_prompt(world: AppWorld, service: IpcService) -> None:
         return str(raw or "")
 
     set_provider(provider)
+
+
+class IpcConsole:
+    """The console ``handle_input`` writes through, over IPC (A1/M6.5).
+
+    ``delta`` rides the bridge — the same ``text.delta`` event a live turn
+    sends.  ``info``/``error``/``rule`` become ``console.line`` events the
+    frontend renders as dim lines: the port of the old Textual UI's
+    ``Block("info")``.  There is deliberately no ``ask``: a bare ``/plan``'s
+    topic is collected by the frontend (it pre-fills "/plan ") before the
+    command is sent, and the stdin prompt the REPL uses does not exist here.
+    """
+
+    def __init__(self, notify: Notify, on_delta: Callable[[str], None]) -> None:
+        self._notify = notify
+        self._on_delta = on_delta
+
+    def delta(self, token: str) -> None:
+        self._on_delta(token)
+
+    def step(self, title: str) -> Any:
+        """No folding over IPC; the caller prints what it needs."""
+        return None
+
+    def info(self, message: str) -> None:
+        self._line("info", message)
+
+    def error(self, message: str) -> None:
+        self._line("error", message)
+
+    def rule(self, title: str = "") -> None:
+        if title:
+            self._line("info", title)
+
+    def _line(self, tone: str, text: str) -> None:
+        if not text:
+            return
+        self._notify("event", {"type": "console.line", "data": {"tone": tone, "text": text}})
 
 
 class _WorldState:
@@ -224,6 +262,86 @@ def make_handlers(
         interrupted = sum(1 for future in list(state.turn_futures) if future.cancel())
         return {"ok": True, "interrupted": interrupted}
 
+    def session_command(params: dict[str, Any]) -> dict[str, Any]:
+        """Run a slash command through the REPL dispatcher (A1).
+
+        One entry for every command — the dispatch itself is
+        ``app/commands.py::handle_input``, the backend's command design, so
+        the TUI gains the whole command layer (``/plan``, ``/review``,
+        ``/compact``, …) without a second implementation.  A command may run
+        several turns (``/plan`` runs one per step); each of the loop's
+        ``TurnFinished`` events is a *step* (``turn.step``), and the run's own
+        terminal event is emitted after ``handle_input`` returns — the same
+        one-command-one-turn-end shape the old TUI had.
+        """
+        from ai_coding.app.commands import REPLAction, handle_input
+
+        text = str(params.get("text", "") or "")
+        session_id = str(params.get("id", "") or state.session_id)
+        session = state.session
+        if session is None:
+            raise ValueError("no session initialized")
+        if session_id != state.session_id:
+            raise ValueError(f"session not loaded: {session_id}")
+        state.turn_id += 1
+        turn_id = state.turn_id
+        console = IpcConsole(
+            lambda method, message: service.notify(method, message), bridge.on_delta
+        )
+
+        async def run_command() -> None:
+            action_name = "continue"
+            status, reason = "completed", ""
+            bridge.command_run = True
+            try:
+                action, next_session = await handle_input(
+                    world.loop, text, session, world.sessions, console, observer=bridge
+                )
+                if isinstance(action, REPLAction):
+                    action_name = action.value
+                if action is REPLAction.NEW_SESSION and next_session is not None:
+                    # /clear and /resume <id>: the live session follows the
+                    # dispatcher, and it must be listable/loadable so the
+                    # tab strip can switch to it.
+                    world.sessions.save(next_session)
+                    state.session = next_session
+                    state.session_id = str(
+                        getattr(next_session, "session_id", "") or state.session_id
+                    )
+            except asyncio.CancelledError:
+                # The loop's own TurnFinished(ABORTED) already went out as a
+                # step; the run itself ends aborted.
+                status, reason = "aborted", "interrupted"
+            except Exception as exc:  # noqa: BLE001 — a bug must not hang the UI
+                _log.exception("command runner failed outside the dispatcher")
+                status, reason = "error", f"{type(exc).__name__}: {exc}"[:300]
+            finally:
+                bridge.command_run = False
+            service.notify(
+                "event",
+                {
+                    "type": "turn.finished",
+                    "data": {
+                        "status": status,
+                        "reason": reason,
+                        "iterations": 0,
+                        "truncatedByLength": False,
+                        "handoff": "",
+                        "action": action_name,
+                        # the live session after the command (a NEW_SESSION
+                        # action has switched it)
+                        "sessionId": state.session_id,
+                    },
+                },
+            )
+            if action_name == "quit" and shutdown is not None:
+                shutdown()
+
+        future = service.spawn(run_command())
+        state.turn_futures.add(future)
+        future.add_done_callback(state.turn_futures.discard)
+        return {"turnId": turn_id, "sessionId": session_id}
+
     def session_delete(params: dict[str, Any]) -> dict[str, Any]:
         session_id = str(params.get("id", ""))
         return {"ok": bool(session_id) and world.sessions.delete(session_id)}
@@ -302,6 +420,7 @@ def make_handlers(
         "session.load": session_load,
         "session.prompt": session_prompt,
         "session.interrupt": session_interrupt,
+        "session.command": session_command,
         "session.delete": session_delete,
         "model.set": model_set,
         "skills.list": skills_list,

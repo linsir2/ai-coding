@@ -257,6 +257,93 @@ async def test_session_create_and_list(ipc):
 
 
 @pytest.mark.asyncio
+async def test_session_command_routes_through_handle_input(ipc):
+    """A slash command goes through the REPL dispatcher, not to the model.
+
+    ``handle_input`` is the backend's command design (app/commands.py); the
+    TUI's entry is one generic ``session.command`` — the console lines the
+    dispatcher prints arrive as ``console.line`` events, and the run ends
+    once, with the action in the terminal event's data.
+    """
+    _world, _service, client = ipc
+    client.request("initialize")
+    ack = client.request("session.command", {"text": "/help"})
+    assert ack["sessionId"]
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    types = [event["type"] for event in client.events]
+    assert "console.line" in types, "the command's output must reach the client"
+    assert types[-1] == "turn.finished"
+    assert client.events[-1]["data"]["status"] == "completed"
+    assert client.events[-1]["data"]["action"] == "continue"
+
+
+@pytest.mark.asyncio
+async def test_session_command_inner_turns_are_steps_not_endings(ipc):
+    """A command that runs turns (/review, /plan steps) drives one run.
+
+    The loop's inner ``TurnFinished`` is a *step* of the command — the same
+    assistant block the old TUI kept open — and the run's single terminal
+    ``turn.finished`` is emitted after ``handle_input`` returns, so the queue
+    and the busy flag settle exactly once.
+    """
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop.script = [
+        lambda obs, _delta: obs.on_event(
+            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="done"))
+        )
+    ]
+    client.request("session.command", {"text": "/review"})
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    types = [event["type"] for event in client.events]
+    assert types.count("turn.step") == 1
+    assert types.count("turn.finished") == 1
+    assert types[-1] == "turn.finished"
+    # the observer reached the turn: the step event exists at all
+    assert client.events[-1]["data"]["action"] == "continue"
+
+
+@pytest.mark.asyncio
+async def test_session_command_quit_reports_the_action(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+    client.request("session.command", {"text": "/quit"})
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert client.events[-1]["data"]["action"] == "quit"
+
+
+@pytest.mark.asyncio
+async def test_session_command_new_session_switches_the_live_session(ipc):
+    """/clear ends with the REPL's NEW_SESSION action: the live session
+    follows the dispatcher, and the terminal event names the new one so the
+    tab strip can switch (and the session is listable)."""
+    _world, _service, client = ipc
+    hello = client.request("initialize")
+    client.request("session.command", {"text": "/clear"})
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    final = client.events[-1]["data"]
+    assert final["action"] == "new_session"
+    assert final["sessionId"] and final["sessionId"] != hello["sessionId"]
+    listed = client.request("session.list")
+    assert any(row["id"] == final["sessionId"] for row in listed["sessions"])
+
+
+@pytest.mark.asyncio
+async def test_session_command_interrupt_ends_the_run_aborted(ipc):
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop = _SlowLoop()
+    client.request("session.command", {"text": "/review"})
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+    client.request("session.interrupt")
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert client.events[-1]["data"]["status"] == "aborted"
+
+
+@pytest.mark.asyncio
 async def test_session_prompt_runs_scripted_turn(ipc):
     world, _service, client = ipc
     hello = client.request("initialize")

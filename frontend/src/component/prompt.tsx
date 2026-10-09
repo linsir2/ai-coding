@@ -53,6 +53,12 @@ export interface PromptProps {
   autofocus?: boolean
   /** True while the slash list is up — the session mutes its own bindings. */
   onOverlay?: (visible: boolean) => void
+  /**
+   * Text to drop into the composer (then clear).  The slash list's bare
+   * ``/plan`` pre-fills "/plan " so the user types the topic and submits.
+   */
+  seed?: string
+  onSeedDone?: () => void
 }
 
 export function Prompt(props: PromptProps) {
@@ -91,6 +97,14 @@ export function Prompt(props: PromptProps) {
     if (props.autofocus !== false) {
       input?.focus()
     }
+  })
+
+  createEffect(() => {
+    const seed = props.seed
+    if (!seed) return
+    input?.setText(seed)
+    input?.focus()
+    props.onSeedDone?.()
   })
 
   createEffect(() => props.onOverlay?.(visible()))

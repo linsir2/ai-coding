@@ -37,7 +37,7 @@ class _FakeLoop:
         self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
 
     async def process_input(self, session, text, on_delta=None, observer=None):
-        self.calls.append((text, on_delta))
+        self.calls.append((text, on_delta, observer))
         return self.reply
 
 
@@ -766,3 +766,50 @@ async def test_handle_model_reports_a_model_the_engine_cannot_serve():
     # proves it was reported rather than raised.
     assert "cannot switch to 'claude'" in out
     assert "not in this fallback chain" in out
+
+
+async def test_handle_input_threads_the_observer_to_the_loop():
+    """A TUI driving ``handle_input`` must see turn events, not only deltas
+    (the IPC bridge is the observer; tool cards and turn ends depend on it)."""
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, _ = _console_capture()
+
+    class _Marker:
+        pass
+
+    marker = _Marker()
+    await handle_input(loop, "tell me", sessions.items[0], sessions, dc, observer=marker)
+    assert loop.calls[-1][2] is marker
+
+    loop.calls.clear()
+    await handle_input(loop, "/review", sessions.items[0], sessions, dc, observer=marker)
+    assert loop.calls[-1][2] is marker
+
+
+async def test_handle_input_threads_the_observer_into_plan_and_run(monkeypatch):
+    """The plan workflow's step turns must reach the same observer."""
+    from ai_coding.core import plan_runner as plan_runner_mod
+
+    seen: dict = {}
+
+    async def fake_plan_and_run(loop, session, console, *, topic, ask_topic,
+                                on_delta=None, observer=None):
+        seen.update(topic=topic, observer=observer, on_delta=on_delta)
+        return None
+
+    monkeypatch.setattr(plan_runner_mod, "plan_and_run", fake_plan_and_run)
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, _ = _console_capture()
+
+    class _Marker:
+        pass
+
+    marker = _Marker()
+    await handle_input(
+        loop, "/plan 加缓存", sessions.items[0], sessions, dc, observer=marker
+    )
+
+    assert seen["topic"] == "加缓存"
+    assert seen["observer"] is marker

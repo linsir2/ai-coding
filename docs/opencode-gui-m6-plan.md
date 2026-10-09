@@ -160,3 +160,50 @@ HEAD 版 `test_repl.py` 同样挂 → 预存、非 M6 迁移引入）。该文�
   `▸ 1 继续 / 2 停止` + 工具卡 `⠏ 正在询问用户`）→ 按 `2` → `✓ 已询问用户 /
   用户回答：停止` → 模型「不再继续重构」；第二次 esc → `✗ 已询问用户 / no_answer`
   → 模型「我将自行决定：选择 A」。
+
+## 8. A1：`/plan` `/review` —— 对接后端命令层（A1，2026-10-10）
+
+**设计修正（重要）**：最初设计为新增 `session.plan` / `session.review` 两个专用 handler 与
+`plan.finished` 事件——这等于在后端命令层之外再造一条平行通路，违反「对接既有后端设计、
+不造自研轮子」。实际实现改为**一个通用入口 `session.command`，把文本交给后端既有的
+`app/commands.py::handle_input` 分发**（即 REPL 的命令设计），一个 handler 覆盖全部命令，
+A2 只需往前端列表加条目。
+
+### 后端
+
+1. **`handle_input(..., observer=None)`**（`app/commands.py`）：把 observer 透传进它发起的
+   每一个回合（普通文本 `/review` 的 `process_input`、`/plan` 的 `plan_and_run`）。旧 TUI 的
+   `_plan_turn` 本就传 observer，新 TUI 此前缺此通道导致工具卡/回合事件丢失。REPL 路径
+   传 None 保持原行为。
+2. **`IpcConsole`**（`server/handlers.py`）：`handle_input` 的 console 面。`delta` 直接复用
+   `bridge.on_delta`（同一 `text.delta` 事件）；`info`/`error`/`rule` → `console.line` 事件
+   （前端落 `notice` part，端口于旧 `Block("info")`）；无 `ask`（bare `/plan` 的主题由前端
+   预填 `/plan ` 保证，后端 ask_topic 恒 None → 空计划即取消）。
+3. **`session_command` handler**：spawn runner 执行 `handle_input`；`bridge.command_run=True`
+   期间内层 `TurnFinished` 重映射为 `turn.step`（命令内的多回合是「步」不是「回合」，端口
+   旧 TUI「整个命令一个 assistant 块」语义）；runner 结束发一次终局 `turn.finished`
+   （`data.action` = REPLAction 值、`data.sessionId` = 当前会话，`NEW_SESSION` 时 handler
+   已切 `state.session` 并 `save` 新会话供 tab 切换）。
+
+### 前端
+
+- `state/session.ts`：`turn.step`（结算流式、busy 保持——命令仍在跑）、`console.line` → notice part。
+- `routes/session.tsx`：`dispatch()` 拦截 `/` 开头 → `session.command`（后端分发；未知命令
+  与原来一样落到模型）；`turn.finished` 的 `action === "new_session"` → 切换 tab；
+  `/plan`、`/review` 两个 keymap 命令；`promptSeed` 信号。
+- `component/prompt.tsx`：新增 `seed` prop（slash 列表选 `/plan` → 预填 `/plan ` 并聚焦）。
+- `util/slash.ts`：`/plan`、`/review` 加入目录。
+- `app.tsx`：Shell 层同名命令（Home 时以命令为首条 prompt 开启会话；会话内由更近的
+  session 层接管），解决 Home 上选会话内命令静默失败的问题。
+
+### 测试与 E2E
+
+- 后端：`test_repl.py` 2 个 observer 透传单测；`test_server_ipc.py` 5 个 socket 级测试
+  （路由 console.line+终局 action、inner turn=turn.step 且终局唯一、quit action、
+  NEW_SESSION 切会话+可列、interrupt→aborted）。全量 **2021 passed / 2 failed（预存）/ 2 skipped**。
+- 前端：reducer 4 个新用例（console.line info/error 色调、turn.step 不解锁、终局唯一）。
+- E2E（tmux 140×42 真模型）：`/review` Home 触发→console.line `[review] reviewing…`→审批面板
+  （`y`）→工具卡→模型继续；`/plan 在这个目录创建 hello.txt…` → `计划 0/1` 面板→步骤 receipt→
+  write 工具→验收命令→`[plan] 完成 1 步 · 用了 1 回合 / 13985 tokens`，全程一个助手消息、
+  队列未误触发；多步计划执行中两段式 esc → `[turn] 已中断（Esc），任务未收尾`；`/budget`
+  直通 → `[budget] 4 turns · 15 steps · 84,290 tok …`（A2 杠杆验证：命令列表加条目即可）。
