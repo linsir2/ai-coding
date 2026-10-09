@@ -80,5 +80,10 @@ export const lightTheme: Theme = {
   agentColor: "#d97848",
 };
 
-/** The active theme.  A provider lands when /themes needs live switching. */
-export const theme: Theme = darkTheme;
+/**
+ * The active theme.  Own copy (not the darkTheme constant) so
+ * ``applyTheme`` can swap values without mutating the source tables.
+ * Live switching (/themes dialog) lands in M3 and will move this into a
+ * Solid context; M1 only applies the detected mode once at startup.
+ */
+export const theme: Theme = { ...darkTheme };

@@ -16,6 +16,8 @@ export interface Hello {
   version: string
   workspace: string
   model: string
+  provider: string
+  vcs: { branch: string }
   sessionId: string
 }
 
@@ -54,6 +56,8 @@ export function App(props: { client: IpcClient; hello: Hello }) {
             workspace={props.hello.workspace}
             version={props.hello.version}
             model={props.hello.model}
+            provider={props.hello.provider}
+            branch={props.hello.vcs?.branch ?? ""}
             onSubmit={startSession}
           />
         }
@@ -62,6 +66,7 @@ export function App(props: { client: IpcClient; hello: Hello }) {
           client={props.client}
           sessionId={sessionId()}
           model={props.hello.model}
+          provider={props.hello.provider}
           initialPrompt={pendingPrompt()}
         />
       </Show>

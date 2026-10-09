@@ -11,6 +11,7 @@ import { render } from "@opentui/solid"
 import { App, type Hello } from "./app"
 import { IpcClient } from "./ipc"
 import { setupKeymap } from "./keymap"
+import { applyTheme, detectThemeMode } from "./theme"
 
 const socketPath = process.env.AI_CODING_SOCKET
 if (!socketPath) {
@@ -40,6 +41,8 @@ try {
 // cleanly (see app.exit in app.tsx).
 const renderer = await createCliRenderer({ exitOnCtrlC: false })
 const keymap = setupKeymap(renderer)
+// Terminal dark/light preference before the first frame (M1).
+applyTheme(await detectThemeMode(renderer))
 
 // render() resolves once the tree is mounted; the renderer (stdin listener)
 // keeps the process alive after that.  The client must NOT be closed here —

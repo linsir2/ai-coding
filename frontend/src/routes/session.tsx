@@ -39,6 +39,7 @@ export interface SessionProps {
   client: IpcClient
   sessionId: string
   model: string
+  provider: string
   /** Text submitted from home; auto-sent once the route mounts. */
   initialPrompt?: string
 }
@@ -138,7 +139,7 @@ export function Session(props: SessionProps) {
       <box paddingLeft={2} paddingRight={2} paddingBottom={1}>
         <Prompt
           placeholder={busy() ? "Working…" : 'Ask anything…'}
-          metadata={`Build · ${props.model || "no model"}${busy() ? " · working" : ""}`}
+          metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${busy() ? " · working" : ""}`}
           onSubmit={submit}
           autofocus={!busy()}
         />

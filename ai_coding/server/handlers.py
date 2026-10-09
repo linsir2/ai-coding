@@ -20,7 +20,9 @@ from collections.abc import Callable
 from typing import Any
 
 from ai_coding.domain.session import _message_to_dict
+from ai_coding.server.display import provider_from_base_url
 from ai_coding.server.service import IpcService
+from ai_coding.server.vcs import git_branch
 from ai_coding.server.world import AppWorld
 
 _log = logging.getLogger(__name__)
@@ -62,6 +64,8 @@ def make_handlers(
             "version": __version__,
             "workspace": world.workspace,
             "model": str(getattr(model, "name", "") or ""),
+            "provider": provider_from_base_url(str(getattr(model, "base_url", "") or "")),
+            "vcs": {"branch": git_branch(world.workspace)},
             "models": models,
             "sessionId": session.session_id,
             "sessionTitle": session.title,

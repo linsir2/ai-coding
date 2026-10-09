@@ -25,7 +25,9 @@ from ai_coding.service.session_service import SessionService
 
 
 class _FakeEngine:
-    model_config = SimpleNamespace(name="fake-model")
+    model_config = SimpleNamespace(
+        name="fake-model", base_url="https://api.deepseek.com/v1"
+    )
 
 
 class _FakeLoop:
@@ -106,6 +108,9 @@ async def test_initialize_returns_hello(ipc):
     assert result["model"] == "fake-model"
     assert result["sessionId"]
     assert result["models"] == [{"name": "fake-model", "key": "fake"}]
+    # M1: the home footer/metadata read these two.
+    assert result["provider"] == "deepseek"
+    assert result["vcs"] == {"branch": ""}  # tmp_path is not a git repository
 
 
 @pytest.mark.asyncio
