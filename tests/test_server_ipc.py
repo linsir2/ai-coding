@@ -26,6 +26,7 @@ from pylsp_jsonrpc.streams import JsonRpcStreamReader, JsonRpcStreamWriter
 from ai_coding.core.events import ToolFinished, ToolStarted, TurnFinished
 from ai_coding.domain.loop import TurnOutcome, TurnStatus
 from ai_coding.domain.session import TurnUsage
+from ai_coding.security.approval import ApprovalResult, CLIApprovalCallback
 from ai_coding.server.handlers import make_handlers
 from ai_coding.server.service import IpcService
 from ai_coding.service.session_service import SessionService
@@ -119,6 +120,7 @@ def _fake_world(tmp_path: Path) -> SimpleNamespace:
         loop=_FakeLoop(),
         workspace=str(tmp_path),
         cancel=asyncio.Event(),
+        approval=CLIApprovalCallback(),
     )
 
 
@@ -130,8 +132,12 @@ class _TestClient:
         self.conn.connect(str(socket_path))
         self.events: list[dict] = []
         self.turn_finished = threading.Event()
+        self.approval_answer = "yes"
+        self.approval_requests: list[dict] = []
         writer = JsonRpcStreamWriter(self.conn.makefile("wb"))
-        self.endpoint = Endpoint({"event": self._on_event}, writer.write)
+        self.endpoint = Endpoint(
+            {"event": self._on_event, "approval.request": self._on_approval}, writer.write
+        )
         reader = JsonRpcStreamReader(self.conn.makefile("rb"))
         self._thread = threading.Thread(
             target=reader.listen, args=(self.endpoint.consume,), daemon=True
@@ -142,6 +148,11 @@ class _TestClient:
         self.events.append(params)
         if params.get("type") == "turn.finished":
             self.turn_finished.set()
+
+    def _on_approval(self, params: dict) -> str:
+        """Answer a server-initiated approval request (M5)."""
+        self.approval_requests.append(dict(params or {}))
+        return self.approval_answer
 
     def request(self, method: str, params: dict | None = None, timeout: float = 5.0):
         return self.endpoint.request(method, params).result(timeout)
@@ -311,6 +322,31 @@ async def test_interrupt_with_no_turn_is_a_noop(ipc):
     _world, _service, client = ipc
     client.request("initialize")
     assert client.request("session.interrupt") == {"ok": True, "interrupted": 0}
+
+
+@pytest.mark.asyncio
+async def test_approval_round_trip_over_the_wire(ipc):
+    """M5: a WARN call's prompt travels as a server-initiated JSON-RPC request.
+
+    The client's answer maps through the CLI vocabulary the shared parser
+    already speaks (security/approval.py:88-98).
+    """
+    world, _service, client = ipc
+    client.approval_answer = "always"
+    result = await world.approval.approve("write", {"path": "a.py"}, "warn tier")
+    assert result is ApprovalResult.ALWAYS
+    assert client.approval_requests[-1] == {
+        "toolName": "write",
+        "params": {"path": "a.py"},
+        "reason": "warn tier",
+    }
+
+
+@pytest.mark.asyncio
+async def test_approval_fails_closed_on_an_unknown_answer(ipc):
+    world, _service, client = ipc
+    client.approval_answer = "???"
+    assert await world.approval.approve("bash", {"command": "ls"}, "warn") is ApprovalResult.NO
 
 
 @pytest.mark.asyncio

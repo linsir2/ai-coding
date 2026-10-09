@@ -1,20 +1,21 @@
 /**
- * Keymap setup — @opentui/keymap (M0.5), the same engine OpenCode uses.
+ * Keymap setup — @opentui/keymap (M0.5/M5), the same engine OpenCode uses.
  *
  * Layers are declared with ``useBindings`` inside components (see app.tsx);
- * this module owns the renderer-bound instance and the universal addons.
+ * this module owns the renderer-bound instance.  The renderer-free addons
+ * (the ``<leader>`` token) live in ``keymap-addons.ts`` and are shared with
+ * the tests; ``createDefaultOpenTuiKeymap`` already installs the default key
+ * parser and the enabled/metadata layer fields.
  */
 
 import type { CliRenderer } from "@opentui/core"
-import { registerDefaultKeys, registerMetadataFields } from "@opentui/keymap/addons"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
+import { registerAppKeymapAddons } from "./keymap-addons"
 
 export type AppKeymap = ReturnType<typeof setupKeymap>
 
 export function setupKeymap(renderer: CliRenderer) {
   const keymap = createDefaultOpenTuiKeymap(renderer)
-  registerDefaultKeys(keymap)
-  // desc/group/title/category on commands (used by the command palette later).
-  registerMetadataFields(keymap)
+  registerAppKeymapAddons(keymap)
   return keymap
 }

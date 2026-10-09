@@ -18,16 +18,19 @@ export function StatusBar(props: {
   tokens: number
   maxContextTokens: number
   version: string
+  interruptArmed?: boolean
 }) {
   const dimensions = useTerminalDimensions()
+  const locationColor = props.interruptArmed ? theme.feedbackWarning : theme.textMuted
   const location = () => {
+    if (props.interruptArmed) return "Press esc again to interrupt"
     const label = formatLocation(abbreviateHome(props.workspace, process.env.HOME ?? ""), props.branch)
     return truncatePath(label, Math.max(8, dimensions().width - FIXED_WIDTH))
   }
 
   return (
     <box flexDirection="row" flexShrink={0} gap={2} paddingLeft={2} paddingRight={2}>
-      <text wrapMode="none" flexGrow={1} fg={theme.textMuted}>
+      <text wrapMode="none" flexGrow={1} fg={locationColor}>
         {location()}
       </text>
       <text wrapMode="none" fg={theme.textMuted}>

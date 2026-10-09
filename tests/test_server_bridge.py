@@ -96,13 +96,15 @@ def test_tool_finished_passes_every_field() -> None:
     }
 
 
-def test_approval_requested() -> None:
+def test_approval_requested_stays_off_the_event_stream() -> None:
+    """M5: approvals use the request round-trip, not a wire event.
+
+    The dispatcher still emits ``ToolApprovalRequested`` for trace observers,
+    but mapping it here would duplicate the panel's channel and the old
+    auto-approve notice was factually wrong once the panel exists.
+    """
     event = ToolApprovalRequested(tool_name="bash", params={"command": "rm x"}, reason="warn")
-    wire = to_wire(event)
-    assert wire == {
-        "type": "approval.requested",
-        "data": {"toolName": "bash", "params": {"command": "rm x"}, "reason": "warn"},
-    }
+    assert to_wire(event) is None
 
 
 def test_plan_updated_renders_display_and_counts() -> None:

@@ -16,6 +16,7 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { Index, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js"
 import { createStore } from "solid-js/store"
 import { MessageView } from "../component/message"
+import { PermissionPanel, type PermissionRequest } from "../component/permission"
 import { Prompt } from "../component/prompt"
 import { SessionTabs, type SessionTab } from "../component/session-tabs"
 import { Sidebar } from "../component/sidebar"
@@ -24,6 +25,10 @@ import { useDialog } from "../dialog/context"
 import type { IpcClient } from "../ipc"
 import type { Action, SessionState } from "../state/session"
 import { initialState, reduce } from "../state/session"
+import { useToast } from "../component/toast"
+import { theme } from "../theme/tokens"
+import { escStep } from "../util/esc"
+import type { PermissionDecision } from "../util/permission"
 
 export interface SessionProps {
   client: IpcClient
@@ -39,6 +44,9 @@ export interface SessionProps {
   workspace: string
   branch: string
   version: string
+  /** A pending WARN-tier approval; replaces the prompt while non-null (M5). */
+  permission: PermissionRequest | null
+  onPermissionDecide: (decision: PermissionDecision) => void
   onSelectSession: (id: string) => void
   onNewSession: () => void
   /** The tab list can go stale after a turn; the shell refreshes it. */
@@ -52,11 +60,23 @@ interface Stats {
 
 export function Session(props: SessionProps) {
   const dialog = useDialog()
+  const toast = useToast()
   const dimensions = useTerminalDimensions()
   const [state, setState] = createStore<SessionState>(initialState())
   const [thinking, setThinking] = createSignal(false)
   const [stats, setStats] = createSignal<Stats>({ tokens: 0, maxContextTokens: 0 })
+  const [interruptArmed, setInterruptArmed] = createSignal(false)
+  const [suggesting, setSuggesting] = createSignal(false)
   let transcript: ScrollBoxRenderable | undefined
+  let interruptTimer: ReturnType<typeof setTimeout> | undefined
+
+  const disarmInterrupt = () => {
+    if (interruptTimer !== undefined) {
+      clearTimeout(interruptTimer)
+      interruptTimer = undefined
+    }
+    setInterruptArmed(false)
+  }
 
   const apply = (action: Action) => {
     const next = reduce(state, action)
@@ -71,17 +91,26 @@ export function Session(props: SessionProps) {
     }
   }
 
-  const submit = (text: string): boolean => {
-    if (state.busy) return false
-    apply({ kind: "submitted", text })
+  const dispatch = (text: string) => {
     void props.client.request("session.prompt", { id: props.sessionId, text }).catch((error) => {
       apply({ kind: "submit-failed", reason: String(error) })
     })
+  }
+
+  const submit = (text: string): boolean => {
+    // The old Textual UI queued a submit that arrived mid-turn and ran it
+    // when the turn ended (ui/textual_app.py:173-223); replicate that here.
+    if (state.busy) {
+      apply({ kind: "queued", text })
+      return true
+    }
+    apply({ kind: "submitted", text })
+    dispatch(text)
     return true
   }
 
   useBindings(() => ({
-    enabled: !dialog.isOpen(),
+    enabled: !dialog.isOpen() && !suggesting() && props.permission === null,
     commands: [
       {
         name: "session.interrupt",
@@ -91,6 +120,13 @@ export function Session(props: SessionProps) {
         palette: true,
         run: () => {
           if (!state.busy) return
+          const step = escStep(interruptArmed())
+          setInterruptArmed(step.armed)
+          if (!step.interrupt) {
+            interruptTimer = setTimeout(() => setInterruptArmed(false), 5000)
+            return
+          }
+          disarmInterrupt()
           void props.client.request("session.interrupt")
         },
       },
@@ -113,8 +149,36 @@ export function Session(props: SessionProps) {
     const unsubscribe = props.client.onEvent((event) => {
       apply({ kind: "wire", event })
       if (event.type === "turn.finished") {
+        disarmInterrupt()
         void refreshStats()
         props.onTurnFinished()
+        // One queued line per finished turn (textual_app.py:214-223).
+        const next = state.queued[0]
+        if (next !== undefined) {
+          apply({ kind: "queued-dispatched" })
+          dispatch(next)
+        }
+      }
+      if (event.type === "provider.retried") {
+        toast.show({
+          title: "Retry",
+          message: `Attempt ${String(event.data["attempt"] ?? "")}: ${String(event.data["reason"] ?? "")}`,
+          variant: "warning",
+        })
+      }
+      if (event.type === "provider.fallback") {
+        toast.show({
+          title: "Fallback",
+          message: `${String(event.data["fromModel"] ?? "")} → ${String(event.data["toModel"] ?? "")}`,
+          variant: "warning",
+        })
+      }
+      if (event.type === "background.done") {
+        toast.show({
+          title: "Sub-agent",
+          message: `${String(event.data["name"] ?? "")} ${String(event.data["status"] ?? "")}`,
+          variant: event.data["status"] === "completed" ? "success" : "error",
+        })
       }
     })
     onCleanup(unsubscribe)
@@ -171,12 +235,27 @@ export function Session(props: SessionProps) {
           />
         </Show>
       </box>
-      <box paddingLeft={2} paddingRight={2} paddingBottom={1} paddingTop={1} flexShrink={0}>
-        <Prompt
-          placeholder={state.busy ? "Working…" : "Ask anything…"}
-          metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
-          onSubmit={submit}
-        />
+      <box paddingLeft={2} paddingRight={2} paddingBottom={1} paddingTop={1} flexShrink={0} flexDirection="column">
+        <Show
+          when={props.permission}
+          fallback={
+            <>
+              <Show when={state.queued.length > 0}>
+                <text fg={theme.textMuted}>{`${state.queued.length} queued`}</text>
+              </Show>
+              <Prompt
+                placeholder={state.busy ? "Working…" : "Ask anything…"}
+                metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
+                onSubmit={submit}
+                onOverlay={setSuggesting}
+              />
+            </>
+          }
+        >
+          {(request) => (
+            <PermissionPanel request={request()} onDecide={props.onPermissionDecide} />
+          )}
+        </Show>
       </box>
       <StatusBar
         workspace={props.workspace}
@@ -184,6 +263,7 @@ export function Session(props: SessionProps) {
         tokens={stats().tokens}
         maxContextTokens={stats().maxContextTokens}
         version={props.version}
+        interruptArmed={interruptArmed()}
       />
     </box>
   )

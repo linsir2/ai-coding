@@ -43,15 +43,19 @@ export interface SessionState {
   messages: ChatMessage[]
   /** True from submit until the turn's finish event; gates the prompt. */
   busy: boolean
+  /** Lines typed while a turn was running; one is dispatched per finished turn. */
+  queued: string[]
 }
 
 export type Action =
   | { kind: "submitted"; text: string }
+  | { kind: "queued"; text: string }
+  | { kind: "queued-dispatched" }
   | { kind: "submit-failed"; reason: string }
   | { kind: "wire"; event: EventMessage }
 
 export function initialState(): SessionState {
-  return { messages: [], busy: false }
+  return { messages: [], busy: false, queued: [] }
 }
 
 // ---- data narrowing (wire values arrive as unknown) ------------------------
@@ -103,11 +107,6 @@ function appendNotice(parts: Part[], text: string, tone: Tone = "muted"): Part[]
 // ---- wire-type handlers -----------------------------------------------------
 
 const notices: Record<string, (data: Record<string, unknown>) => string> = {
-  "approval.requested": (data) => {
-    const reason = str(data["reason"])
-    const suffix = reason ? `：${shorten(reason, REASON_CHARS)}` : ""
-    return `⚠ 需审批 [${str(data["toolName"])}] 已自动批准（审批面板 M5）${suffix}`
-  },
   "provider.retried": (data) => {
     const reason = str(data["reason"])
     const suffix = reason ? `：${shorten(reason, REASON_CHARS)}` : ""
@@ -320,20 +319,35 @@ export function reduce(state: SessionState, action: Action): SessionState {
   switch (action.kind) {
     case "submitted":
       return {
+        ...state,
         messages: [
           ...state.messages,
           { role: "user", parts: [{ kind: "text", text: action.text, streaming: false }] },
         ],
         busy: true,
       }
-    case "submit-failed":
+    case "queued":
+      // The user message lands now (the old Textual UI appended at submit too,
+      // ui/textual_app.py:144); the turn itself starts when the running one ends.
       return {
-        busy: false,
-        messages: updateAssistant(
-          { ...state, busy: false },
-          (parts) => appendNotice(parts, `[ipc] ${action.reason}`, "error"),
+        ...state,
+        messages: [
+          ...state.messages,
+          { role: "user", parts: [{ kind: "text", text: action.text, streaming: false }] },
+        ],
+        queued: [...state.queued, action.text],
+      }
+    case "queued-dispatched":
+      return { ...state, busy: true, queued: state.queued.slice(1) }
+    case "submit-failed": {
+      const quiet = { ...state, busy: false }
+      return {
+        ...quiet,
+        messages: updateAssistant(quiet, (parts) =>
+          appendNotice(parts, `[ipc] ${action.reason}`, "error"),
         ).messages,
       }
+    }
     case "wire":
       return reduceWire(state, action.event)
   }

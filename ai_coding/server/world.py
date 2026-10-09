@@ -32,6 +32,9 @@ class AppWorld:
     skills: str | None
     cancel: asyncio.Event
     steering: Any
+    #: The WARN-tier approval callback; the IPC layer installs its provider
+    #: (handlers.py::_wire_approval) so the panel can answer it (M5).
+    approval: Any
 
     async def aclose(self) -> None:
         for closer in (
@@ -53,7 +56,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     from ai_coding.core.guard import build_guards
     from ai_coding.core.mcp import MCPManager
     from ai_coding.core.steering import SteeringQueue
-    from ai_coding.security.approval import AutoApproveCallback
+    from ai_coding.security.approval import CLIApprovalCallback
     from ai_coding.security.user_prompt import UnavailableUserPromptCallback
     from ai_coding.service.session_service import SessionService
 
@@ -80,8 +83,10 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     for tool in await mcp_manager.open_all():
         registry.register(tool)
 
-    # M0: approvals are auto-answered until the IPC approval bridge lands (M5).
-    approval = AutoApproveCallback()
+    # M5: approvals go to the TUI as a server-initiated request; the IPC layer
+    # installs the provider in ``make_handlers``.  Without one (a stray
+    # non-TUI use) the callback falls back to the stdin prompt.
+    approval = CLIApprovalCallback()
     cancel = asyncio.Event()
     loop = _build_loop(
         engine, sessions, registry, app_cfg, workspace, skills,
@@ -104,4 +109,5 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         skills=skills,
         cancel=cancel,
         steering=steering,
+        approval=approval,
     )

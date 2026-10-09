@@ -17,7 +17,9 @@ import { DialogModels, type ModelRow } from "./component/dialog-models"
 import { DialogSessions } from "./component/dialog-sessions"
 import { DialogSkills } from "./component/dialog-skills"
 import { DialogStatus } from "./component/dialog-status"
+import { type PermissionRequest } from "./component/permission"
 import type { SessionTab } from "./component/session-tabs"
+import { ToastProvider } from "./component/toast"
 import { DialogProvider, useDialog } from "./dialog/context"
 import type { IpcClient } from "./ipc"
 import { Home } from "./routes/home"
@@ -25,6 +27,7 @@ import { Session } from "./routes/session"
 import { loadSession } from "./state/replay"
 import { initialState, type SessionState } from "./state/session"
 import { theme } from "./theme/tokens"
+import type { PermissionDecision } from "./util/permission"
 
 export interface Hello {
   version: string
@@ -48,6 +51,16 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
   const [modelKey, setModelKey] = createSignal(props.hello.modelKey)
   const [hydrate, setHydrate] = createSignal<{ key: string; state: SessionState } | null>(null)
   const [sessions, setSessions] = createSignal<SessionTab[]>([])
+  const [permission, setPermission] = createSignal<PermissionRequest | null>(null)
+  // The pending ``approval.request``'s resolver; the panel's answer resolves it.
+  let resolvePermission: ((decision: PermissionDecision) => void) | null = null
+
+  const decidePermission = (decision: PermissionDecision) => {
+    const resolve = resolvePermission
+    resolvePermission = null
+    setPermission(null)
+    resolve?.(decision)
+  }
 
   const refreshSessions = async () => {
     try {
@@ -120,8 +133,43 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
     if (target) void onSelectSession(target.id)
   }
 
+  /** Jump to a tab by its strip index — the `<leader>1..5` quick slots. */
+  const selectTab = (index: number) => {
+    const target = tabs()[index]
+    if (target) void onSelectSession(target.id)
+  }
+
+  // OpenCode binds `<leader>1..5` to tab select (config/keybind.ts:150); the
+  // strip shows at most five tabs, so five quick slots cover it.
+  const tabSelects = [0, 1, 2, 3, 4].map((index) => ({
+    name: `session.tab.select.${index + 1}`,
+    title: `Tab ${index + 1}`,
+    group: "Session",
+    desc: `Switch to session tab ${index + 1}`,
+    run: () => selectTab(index),
+  }))
+
   onMount(() => {
     void refreshSessions()
+    // M5: the backend asks WARN-tier approvals as a server-initiated request;
+    // answering it IS the JSON-RPC response, so the panel just resolves this.
+    props.client.onRequest("approval.request", (params) => {
+      // A newer request supersedes a stale panel (a timed-out one whose
+      // backend already moved on): resolve the old waiter fail-closed.
+      resolvePermission?.("no")
+      return new Promise<PermissionDecision>((resolve) => {
+        resolvePermission = resolve
+        setPermission({
+          toolName: String(params["toolName"] ?? ""),
+          params: (params["params"] as Record<string, unknown> | undefined) ?? {},
+          reason: String(params["reason"] ?? ""),
+        })
+      })
+    })
+    // A finished turn settles any pending approval; the backend has moved on.
+    props.client.onEvent((event) => {
+      if (event.type === "turn.finished" && permission() !== null) decidePermission("no")
+    })
   })
 
   const startSession = (text: string) => {
@@ -130,7 +178,7 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
   }
 
   useBindings(() => ({
-    enabled: !dialog.isOpen(),
+    enabled: !dialog.isOpen() && permission() === null,
     commands: [
       {
         name: "command.palette.show",
@@ -220,6 +268,7 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
         palette: true,
         run: () => cycleSession(-1),
       },
+      ...tabSelects,
       {
         name: "app.exit",
         title: "Exit",
@@ -237,6 +286,13 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
     bindings: [
       { key: "ctrl+p", cmd: "command.palette.show" },
       { key: "ctrl+c", cmd: "app.exit" },
+      // OpenCode's leader bindings (config/keybind.ts:48,109,110,102,150,164).
+      { key: "<leader>m", cmd: "dialog.models.show" },
+      { key: "<leader>l", cmd: "dialog.sessions.show" },
+      { key: "<leader>n", cmd: "session.new" },
+      { key: "<leader>s", cmd: "dialog.status.show" },
+      { key: "<leader>q", cmd: "app.exit" },
+      ...tabSelects.map((command, index) => ({ key: `<leader>${index + 1}`, cmd: command.name })),
     ],
   }))
 
@@ -255,22 +311,26 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
           />
         }
       >
-        <Session
-          client={props.client}
-          sessionId={sessionId()}
-          model={modelName()}
-          provider={providerName()}
-          initialPrompt={pendingPrompt()}
-          hydrate={hydrate()}
-          sessions={tabs()}
-          title={currentTitle()}
-          workspace={props.hello.workspace}
-          branch={props.hello.vcs?.branch ?? ""}
-          version={props.hello.version}
-          onSelectSession={(id) => void onSelectSession(id)}
-          onNewSession={() => void onNewSession()}
-          onTurnFinished={() => void refreshSessions()}
-        />
+        <ToastProvider>
+          <Session
+            client={props.client}
+            sessionId={sessionId()}
+            model={modelName()}
+            provider={providerName()}
+            initialPrompt={pendingPrompt()}
+            hydrate={hydrate()}
+            sessions={tabs()}
+            title={currentTitle()}
+            workspace={props.hello.workspace}
+            branch={props.hello.vcs?.branch ?? ""}
+            version={props.hello.version}
+            permission={permission()}
+            onPermissionDecide={decidePermission}
+            onSelectSession={(id) => void onSelectSession(id)}
+            onNewSession={() => void onNewSession()}
+            onTurnFinished={() => void refreshSessions()}
+          />
+        </ToastProvider>
       </Show>
     </box>
   )

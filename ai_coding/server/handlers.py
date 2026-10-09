@@ -37,6 +37,29 @@ __all__ = ["HandlerTable", "make_handlers"]
 HandlerTable = dict[str, Callable[[dict[str, Any]], Any]]
 
 
+def _wire_approval(world: AppWorld, service: IpcService) -> None:
+    """Route WARN-tier approvals to the client as a JSON-RPC request (M5).
+
+    The callback answers with the CLI vocabulary (``yes``/``always``/``no``/
+    ``stop``) so one parser serves both front ends (security/approval.py:88-98)
+    and a failed round-trip stays fail-closed inside ``approve`` itself.
+    """
+    approval = getattr(world, "approval", None)
+    set_provider = getattr(approval, "set_provider", None)
+    if set_provider is None:
+        return
+
+    async def provider(tool_name: str, params: dict[str, Any], reason: str) -> str:
+        return str(
+            await service.call(
+                "approval.request",
+                {"toolName": tool_name, "params": params, "reason": reason},
+            )
+        )
+
+    set_provider(provider)
+
+
 class _WorldState:
     """Mutable bits shared by handlers (live session, turn counter, futures)."""
 
@@ -60,6 +83,7 @@ def make_handlers(
     """Build the request table bound to one world + one service."""
     state = _WorldState()
     bridge = EventBridge(lambda method, params: service.notify(method, params))
+    _wire_approval(world, service)
 
     def initialize(params: dict[str, Any]) -> dict[str, Any]:
         from ai_coding import __version__

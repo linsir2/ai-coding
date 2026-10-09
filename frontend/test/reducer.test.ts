@@ -3,8 +3,8 @@
  *
  * Every text here is the contract the UI renders; the strings are ports of
  * ai_coding/ui/blocks.py (same source the old Textual transcript used) plus
- * the four approved M2 deltas (handoff, approval notice, turn ERROR marker,
- * compaction notice — docs/opencode-gui-m2-plan.md §1).
+ * the approved M2 deltas (handoff, turn ERROR marker, compaction notice —
+ * docs/opencode-gui-m2-plan.md §1; the approval notice moved to the M5 panel).
  */
 
 import { describe, expect, test } from "bun:test"
@@ -218,16 +218,12 @@ describe("notices", () => {
     ])
   })
 
-  test("approval.requested is visible while M2 auto-approves", () => {
+  test("approval.requested stays off the transcript (M5: the panel owns it)", () => {
     const state = feed(
       initialState(),
       wire("approval.requested", { toolName: "bash", params: {}, reason: "warn tier" }),
     )
-    expect(lastAssistant(state).parts[0]).toEqual({
-      kind: "notice",
-      tone: "muted",
-      text: "⚠ 需审批 [bash] 已自动批准（审批面板 M5）：warn tier",
-    })
+    expect(state).toEqual(initialState())
   })
 
   test("context.compacted makes the history rewrite visible", () => {
@@ -363,5 +359,55 @@ describe("turn lifecycle", () => {
     const state = feed(initialState(), wire("provider.retried", { kind: "x", attempt: 1, delaySeconds: 2, reason: "" }))
     expect(state.messages).toHaveLength(1)
     expect(state.messages[0]!.role).toBe("assistant")
+  })
+})
+
+describe("input queue", () => {
+  const finished = wire("turn.finished", {
+    status: "completed",
+    reason: "",
+    iterations: 1,
+    truncatedByLength: false,
+    handoff: "",
+  })
+
+  test("submitting while busy queues the line and shows it as a user message", () => {
+    const running = feed(initialState(), { kind: "submitted", text: "first" })
+    const queued = feed(running, { kind: "queued", text: "second" })
+    expect(queued.busy).toBe(true)
+    expect(queued.queued).toEqual(["second"])
+    expect(queued.messages.map((message) => message.role)).toEqual(["user", "user"])
+  })
+
+  test("turn.finished keeps the queue (lines are never dropped)", () => {
+    const queued = feed(
+      initialState(),
+      { kind: "submitted", text: "a" },
+      { kind: "queued", text: "b" },
+      finished,
+    )
+    expect(queued.busy).toBe(false)
+    expect(queued.queued).toEqual(["b"])
+  })
+
+  test("queued-dispatched pops the first line, stays busy, and does not re-append it", () => {
+    const queued = feed(
+      initialState(),
+      { kind: "submitted", text: "a" },
+      { kind: "queued", text: "b" },
+      { kind: "queued", text: "c" },
+      finished,
+    )
+    const dispatched = feed(queued, { kind: "queued-dispatched" })
+    expect(dispatched.busy).toBe(true)
+    expect(dispatched.queued).toEqual(["c"])
+    expect(dispatched.messages.filter((message) => message.role === "user")).toHaveLength(3)
+  })
+
+  test("submit-failed keeps whatever is still queued", () => {
+    const queued = feed(initialState(), { kind: "queued", text: "b" })
+    const failed = feed(queued, { kind: "submit-failed", reason: "boom" })
+    expect(failed.queued).toEqual(["b"])
+    expect(failed.busy).toBe(false)
   })
 })

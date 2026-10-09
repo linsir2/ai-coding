@@ -8,6 +8,7 @@
 import { formatCommandBindings } from "@opentui/keymap/extras"
 import { useKeymap, useKeymapSelector } from "@opentui/keymap/solid"
 import type { Accessor } from "solid-js"
+import { LEADER_KEY } from "../keymap-addons"
 
 export interface CommandRow {
   name: string
@@ -26,6 +27,9 @@ export function useCommandRows(): Accessor<CommandRow[]> {
     const entries = km.getCommandEntries({ visibility: "registered" })
     const names = entries.map((entry) => entry.command.name)
     const bindings = km.getCommandBindings({ visibility: "registered", commands: names })
+    // `<leader>` is a token; the human-facing form is the trigger key
+    // (OpenCode passes the same tokenDisplay in context/keymap.tsx:455-474).
+    const formatOptions = { tokenDisplay: { leader: LEADER_KEY } }
     return entries.map((entry) => {
       const command = entry.command
       return {
@@ -34,7 +38,7 @@ export function useCommandRows(): Accessor<CommandRow[]> {
         description: command.desc ? String(command.desc) : undefined,
         group: String(command.group ?? ""),
         palette: Boolean(command.palette),
-        shortcut: formatCommandBindings(bindings.get(command.name)) ?? "",
+        shortcut: formatCommandBindings(bindings.get(command.name), formatOptions) ?? "",
       }
     })
   })

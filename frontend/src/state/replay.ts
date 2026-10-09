@@ -118,6 +118,7 @@ export function messagesToState(messages: WireMessage[]): SessionState {
   return {
     messages: out.filter((message) => message.role === "user" || message.parts.length > 0),
     busy: false,
+    queued: [],
   }
 }
 

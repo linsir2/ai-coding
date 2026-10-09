@@ -13,11 +13,15 @@ Two channels, because the loop has two:
   this bridge as the observer loses nothing).
 
 What maps: the conversation transcript set the old Textual UI rendered
-(``ui/blocks.py``) plus four deliberate additions (handoff, approval notice,
-turn ERROR marker, compaction notice — see docs/opencode-gui-m2-plan.md §1).
+(``ui/blocks.py``) plus three deliberate additions (handoff, turn ERROR
+marker, compaction notice — see docs/opencode-gui-m2-plan.md §1).
 What does not: telemetry (assembly, model steps, iteration counters), memory
 bookkeeping and ``Degraded`` — the ``/trace`` dialog (M3) owns those.  Dropping
 them here keeps the wire small and the reducer honest.
+
+M5: ``ToolApprovalRequested`` is deliberately *not* mapped — approvals travel
+as a server-initiated request (``approval.request``, handlers.py::_wire_approval)
+whose answer is the decision, and the panel is the display.
 """
 
 from __future__ import annotations
@@ -36,7 +40,6 @@ from ai_coding.core.events import (
     ProviderRetried,
     ScopedEvent,
     TaskUpdated,
-    ToolApprovalRequested,
     ToolChunk,
     ToolFinished,
     ToolStarted,
@@ -129,13 +132,6 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
                 "text": event.text,
                 "seq": event.seq,
             },
-        }
-    if isinstance(event, ToolApprovalRequested):
-        # M2 runs AutoApproveCallback; the notice keeps the security gate
-        # visible.  M5 replaces it with the interactive panel.
-        return {
-            "type": "approval.requested",
-            "data": {"toolName": event.tool_name, "params": event.params, "reason": event.reason},
         }
     if isinstance(event, TaskUpdated):
         task = event.task
