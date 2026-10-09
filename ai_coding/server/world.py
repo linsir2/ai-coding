@@ -33,8 +33,12 @@ class AppWorld:
     cancel: asyncio.Event
     steering: Any
     #: The WARN-tier approval callback; the IPC layer installs its provider
-    #: (handlers.py::_wire_approval) so the panel can answer it (M5).
+    # (handlers.py::_wire_approval) so the panel can answer it (M5).
     approval: Any
+    #: The model's question channel; the IPC layer installs its provider
+    # (handlers.py::_wire_user_prompt) so the panel can answer it.  Without a
+    # provider it falls back to the stdin prompt (the non-TUI entry points).
+    user_prompt: Any
 
     async def aclose(self) -> None:
         for closer in (
@@ -57,7 +61,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     from ai_coding.core.mcp import MCPManager
     from ai_coding.core.steering import SteeringQueue
     from ai_coding.security.approval import CLIApprovalCallback
-    from ai_coding.security.user_prompt import UnavailableUserPromptCallback
+    from ai_coding.security.user_prompt import CLIUserPromptCallback
     from ai_coding.service.session_service import SessionService
 
     manager = ConfigManager()
@@ -68,9 +72,10 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     from ai_coding.ai.prompt import BASE_INSTRUCTIONS
 
     engine = build_engine_from_config(app_cfg)
-    # M0: ask_user answers "no user"; the IPC bridge lands with the full
-    # event round-trip (plan M5).
-    user_prompt = UnavailableUserPromptCallback()
+    # The question channel: with the TUI's provider installed by
+    # handlers._wire_user_prompt the model's questions reach the panel; the
+    # stdin fallback serves the non-TUI entry points.
+    user_prompt = CLIUserPromptCallback()
     registry = _build_tool_registry(
         app_cfg, workspace, skills,
         user_prompt=user_prompt, base_instructions=BASE_INSTRUCTIONS,
@@ -110,4 +115,5 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         cancel=cancel,
         steering=steering,
         approval=approval,
+        user_prompt=user_prompt,
     )

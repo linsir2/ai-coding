@@ -16,6 +16,7 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { Index, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js"
 import { createStore } from "solid-js/store"
 import { MessageView } from "../component/message"
+import { AskPanel } from "../component/ask"
 import { PermissionPanel, type PermissionRequest } from "../component/permission"
 import { Prompt } from "../component/prompt"
 import { SessionTabs, type SessionTab } from "../component/session-tabs"
@@ -28,6 +29,7 @@ import { initialState, reduce } from "../state/session"
 import { useToast } from "../component/toast"
 import { theme } from "../theme/tokens"
 import { escStep } from "../util/esc"
+import type { AskRequest } from "../util/ask"
 import type { PermissionDecision } from "../util/permission"
 
 export interface SessionProps {
@@ -47,6 +49,8 @@ export interface SessionProps {
   /** A pending WARN-tier approval; replaces the prompt while non-null (M5). */
   permission: PermissionRequest | null
   onPermissionDecide: (decision: PermissionDecision) => void
+  ask: AskRequest | null
+  onAskAnswer: (answer: string) => void
   onSelectSession: (id: string) => void
   onNewSession: () => void
   /** The tab list can go stale after a turn; the shell refreshes it. */
@@ -110,7 +114,7 @@ export function Session(props: SessionProps) {
   }
 
   useBindings(() => ({
-    enabled: !dialog.isOpen() && !suggesting() && props.permission === null,
+    enabled: !dialog.isOpen() && !suggesting() && props.permission === null && props.ask === null,
     commands: [
       {
         name: "session.interrupt",
@@ -236,25 +240,29 @@ export function Session(props: SessionProps) {
         </Show>
       </box>
       <box paddingLeft={2} paddingRight={2} paddingBottom={1} paddingTop={1} flexShrink={0} flexDirection="column">
-        <Show
-          when={props.permission}
-          fallback={
-            <>
-              <Show when={state.queued.length > 0}>
-                <text fg={theme.textMuted}>{`${state.queued.length} queued`}</text>
-              </Show>
-              <Prompt
-                placeholder={state.busy ? "Working…" : "Ask anything…"}
-                metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
-                onSubmit={submit}
-                onOverlay={setSuggesting}
-              />
-            </>
-          }
-        >
+        <Show when={props.permission}>
           {(request) => (
             <PermissionPanel request={request()} onDecide={props.onPermissionDecide} />
           )}
+        </Show>
+        <Show when={props.ask}>
+          {(request) => <AskPanel request={request()} onAnswer={props.onAskAnswer} />}
+        </Show>
+        <Show
+          when={props.permission === null && props.ask === null}
+          fallback={<></>}
+        >
+          <>
+            <Show when={state.queued.length > 0}>
+              <text fg={theme.textMuted}>{`${state.queued.length} queued`}</text>
+            </Show>
+            <Prompt
+              placeholder={state.busy ? "Working…" : "Ask anything…"}
+              metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
+              onSubmit={submit}
+              onOverlay={setSuggesting}
+            />
+          </>
         </Show>
       </box>
       <StatusBar

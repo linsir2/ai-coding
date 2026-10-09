@@ -139,3 +139,24 @@ HEAD 版 `test_repl.py` 同样挂 → 预存、非 M6 迁移引入）。该文�
    `\n\n\n` 或 `\n\n@`，或直接读文件确认边界。
 4. **全量 pytest 末尾统计行偶发不落盘**（进程写完 short summary 就退出）：判定以 `[100%]` +
    进度区 `[.Fxs]` 字符计数与 `--collect-only` 总数对齐为准。
+
+## 7. ask_user 通道对接（M6 后增量，2026-10-09）
+
+唯一一根「后端已实现、前端没接」的线（P6c/R6c），M6 删除收尾后补上：
+
+- **后端**：`world.build_world` 由 `UnavailableUserPromptCallback` 改为
+  `CLIUserPromptCallback`（无 provider 时退回 stdin，非 TUI 入口不变）；
+  `handlers._wire_user_prompt` 复制 `_wire_approval` 的范式，把 provider 装成
+  对前端的 `user_prompt.ask` 服务端请求（`{question, options}` → 纯文本答案）。
+- **前端**：`util/ask.ts`（纯逻辑：参数整形 + 选择→答案）、`component/ask.tsx`
+  （`◆ Question` 面板，占 prompt 槽位，与 PermissionPanel 同一视觉语言；
+  ↑/↓/j/k + 1-9 + enter + esc）、`app.tsx`（onRequest 处理器 + pending 状态 +
+  turn.finished 兜底 settle + prompt/Shell 层门控）、`session.tsx`（props + 槽位）。
+- **测试**：`tests/test_server_ipc.py` 新增 2 个 socket 级往返
+  （`test_user_prompt_round_trip_over_the_wire`、
+  `test_user_prompt_an_empty_answer_is_not_an_answer`）；`frontend/test/ask.test.ts`
+  7 个纯逻辑用例（含 options 非字符串丢弃、越界选择=跳过）。
+- **E2E**（tmux 140×42 真模型）：提问面板出现（`◆ Question 要不要继续重构？` +
+  `▸ 1 继续 / 2 停止` + 工具卡 `⠏ 正在询问用户`）→ 按 `2` → `✓ 已询问用户 /
+  用户回答：停止` → 模型「不再继续重构」；第二次 esc → `✗ 已询问用户 / no_answer`
+  → 模型「我将自行决定：选择 A」。

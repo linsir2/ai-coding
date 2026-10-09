@@ -27,6 +27,7 @@ from ai_coding.core.events import ToolFinished, ToolStarted, TurnFinished
 from ai_coding.domain.loop import TurnOutcome, TurnStatus
 from ai_coding.domain.session import TurnUsage
 from ai_coding.security.approval import ApprovalResult, CLIApprovalCallback
+from ai_coding.security.user_prompt import CLIUserPromptCallback
 from ai_coding.server.handlers import make_handlers
 from ai_coding.server.service import IpcService
 from ai_coding.service.session_service import SessionService
@@ -121,6 +122,7 @@ def _fake_world(tmp_path: Path) -> SimpleNamespace:
         workspace=str(tmp_path),
         cancel=asyncio.Event(),
         approval=CLIApprovalCallback(),
+        user_prompt=CLIUserPromptCallback(),
     )
 
 
@@ -134,9 +136,16 @@ class _TestClient:
         self.turn_finished = threading.Event()
         self.approval_answer = "yes"
         self.approval_requests: list[dict] = []
+        self.ask_answer = "自定义回答"
+        self.ask_requests: list[dict] = []
         writer = JsonRpcStreamWriter(self.conn.makefile("wb"))
         self.endpoint = Endpoint(
-            {"event": self._on_event, "approval.request": self._on_approval}, writer.write
+            {
+                "event": self._on_event,
+                "approval.request": self._on_approval,
+                "user_prompt.ask": self._on_ask,
+            },
+            writer.write,
         )
         reader = JsonRpcStreamReader(self.conn.makefile("rb"))
         self._thread = threading.Thread(
@@ -153,6 +162,11 @@ class _TestClient:
         """Answer a server-initiated approval request (M5)."""
         self.approval_requests.append(dict(params or {}))
         return self.approval_answer
+
+    def _on_ask(self, params: dict) -> str:
+        """Answer the model's question (M6.5): the text the tool renders."""
+        self.ask_requests.append(dict(params or {}))
+        return self.ask_answer
 
     def request(self, method: str, params: dict | None = None, timeout: float = 5.0):
         return self.endpoint.request(method, params).result(timeout)
@@ -347,6 +361,36 @@ async def test_approval_fails_closed_on_an_unknown_answer(ipc):
     world, _service, client = ipc
     client.approval_answer = "???"
     assert await world.approval.approve("bash", {"command": "ls"}, "warn") is ApprovalResult.NO
+
+
+@pytest.mark.asyncio
+async def test_user_prompt_round_trip_over_the_wire(ipc):
+    """The model's question travels as a server-initiated JSON-RPC request.
+
+    Same shape as the approval channel; the answer comes back as the plain
+    text the tool renders to the model (``用户回答：…``).
+    """
+    from ai_coding.security.user_prompt import UserAnswer
+
+    world, _service, client = ipc
+    client.ask_answer = "第二个"
+    answer = await world.user_prompt.ask("哪个文件？", ["a.py", "b.py"])
+    assert answer == UserAnswer(answered=True, text="第二个")
+    assert client.ask_requests[-1] == {
+        "question": "哪个文件？",
+        "options": ["a.py", "b.py"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_user_prompt_an_empty_answer_is_not_an_answer(ipc):
+    """esc / a closed panel returns "": the model must decide itself."""
+    from ai_coding.security.user_prompt import UserAnswer
+
+    world, _service, client = ipc
+    client.ask_answer = ""
+    answer = await world.user_prompt.ask("确认吗？", ["yes", "no"])
+    assert answer == UserAnswer(answered=False, reason="empty")
 
 
 @pytest.mark.asyncio

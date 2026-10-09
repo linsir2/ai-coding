@@ -60,6 +60,29 @@ def _wire_approval(world: AppWorld, service: IpcService) -> None:
     set_provider(provider)
 
 
+def _wire_user_prompt(world: AppWorld, service: IpcService) -> None:
+    """Route the model's questions to the client as a JSON-RPC request.
+
+    The other direction of ``_wire_approval``: the model (``ask_user`` tool)
+    decides it needs an answer.  The client's answer comes back as the plain
+    text the tool renders; an empty answer (esc, a closed panel, a dead
+    round-trip) becomes ``reason="empty"``/``"no_user"`` inside
+    ``CLIUserPromptCallback`` so the model decides for itself.
+    """
+    prompt = getattr(world, "user_prompt", None)
+    set_provider = getattr(prompt, "set_provider", None)
+    if set_provider is None:
+        return
+
+    async def provider(question: str, options: list[str]) -> str:
+        raw = await service.call(
+            "user_prompt.ask", {"question": question, "options": list(options)}
+        )
+        return str(raw or "")
+
+    set_provider(provider)
+
+
 class _WorldState:
     """Mutable bits shared by handlers (live session, turn counter, futures)."""
 
@@ -84,6 +107,7 @@ def make_handlers(
     state = _WorldState()
     bridge = EventBridge(lambda method, params: service.notify(method, params))
     _wire_approval(world, service)
+    _wire_user_prompt(world, service)
 
     def initialize(params: dict[str, Any]) -> dict[str, Any]:
         from ai_coding import __version__

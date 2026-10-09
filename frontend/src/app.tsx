@@ -17,6 +17,7 @@ import { DialogModels, type ModelRow } from "./component/dialog-models"
 import { DialogSessions } from "./component/dialog-sessions"
 import { DialogSkills } from "./component/dialog-skills"
 import { DialogStatus } from "./component/dialog-status"
+import { AskPanel } from "./component/ask"
 import { type PermissionRequest } from "./component/permission"
 import type { SessionTab } from "./component/session-tabs"
 import { ToastProvider } from "./component/toast"
@@ -27,6 +28,7 @@ import { Session } from "./routes/session"
 import { loadSession } from "./state/replay"
 import { initialState, type SessionState } from "./state/session"
 import { theme } from "./theme/tokens"
+import type { AskRequest } from "./util/ask"
 import type { PermissionDecision } from "./util/permission"
 
 export interface Hello {
@@ -60,6 +62,17 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
     resolvePermission = null
     setPermission(null)
     resolve?.(decision)
+  }
+
+  const [ask, setAsk] = createSignal<AskRequest | null>(null)
+  // The pending ``user_prompt.ask``'s resolver; the panel's answer resolves it.
+  let resolveAsk: ((answer: string) => void) | null = null
+
+  const answerAsk = (answer: string) => {
+    const resolve = resolveAsk
+    resolveAsk = null
+    setAsk(null)
+    resolve?.(answer)
   }
 
   const refreshSessions = async () => {
@@ -166,9 +179,28 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
         })
       })
     })
-    // A finished turn settles any pending approval; the backend has moved on.
+    // The other direction: the model's own question (ask_user tool).
+    // Answering it IS the JSON-RPC response, so the panel just resolves this.
+    props.client.onRequest("user_prompt.ask", (params) => {
+      // A newer question supersedes a stale panel; the old waiter gets the
+      // empty answer so the model decides itself.
+      resolveAsk?.("")
+      return new Promise<string>((resolve) => {
+        resolveAsk = resolve
+        setAsk({
+          question: String(params["question"] ?? ""),
+          options: Array.isArray(params["options"])
+            ? params["options"].filter((option): option is string => typeof option === "string")
+            : [],
+        })
+      })
+    })
+    // A finished turn settles any pending approval or question; the backend
+    // has moved on (the tool result says "nobody answered").
     props.client.onEvent((event) => {
-      if (event.type === "turn.finished" && permission() !== null) decidePermission("no")
+      if (event.type !== "turn.finished") return
+      if (permission() !== null) decidePermission("no")
+      if (ask() !== null) answerAsk("")
     })
   })
 
@@ -178,7 +210,7 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
   }
 
   useBindings(() => ({
-    enabled: !dialog.isOpen() && permission() === null,
+    enabled: !dialog.isOpen() && permission() === null && ask() === null,
     commands: [
       {
         name: "command.palette.show",
@@ -326,6 +358,8 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
             version={props.hello.version}
             permission={permission()}
             onPermissionDecide={decidePermission}
+            ask={ask()}
+            onAskAnswer={answerAsk}
             onSelectSession={(id) => void onSelectSession(id)}
             onNewSession={() => void onNewSession()}
             onTurnFinished={() => void refreshSessions()}
