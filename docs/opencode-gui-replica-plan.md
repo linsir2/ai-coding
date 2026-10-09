@@ -395,13 +395,44 @@ frontend/
 
 | 阶段 | 内容 | 交付物 | 验证 |
 |------|------|--------|------|
-| **M0** 骨架（IPC 往返） | Python socket server + 启 bun；TS Home 屏（Logo+Prompt）；提交→echo 显示 | 端到端可跑 | tmux 截图 + IPC 单测 |
+| **M0** 骨架（IPC 往返）✅ | Python socket server + 启 bun；TS Home 屏（Logo+Prompt）；提交→echo 显示 | 端到端可跑 | ✅ tmux 实测 + 18 个 IPC 单测 |
 | **M1** 主题 + Home 完整 | token 表、placeholder 随机示例、footer（dir:branch + 版本 + 快捷键提示） | 完整首页 | 截图对比 OpenCode 首页 |
 | **M2** 真实会话 | 接 AgentLoop；事件桥全部类型；消息/工具/推理/计划渲染；中断 | 完整对话 | 截图对比 + 事件桥测试 |
 | **M3** 对话框系统 | Dialog 宿主 + DialogSelect + palette/models/sessions/skills/status/help | Ctrl+P 全可用 | 截图对比 |
 | **M4** 标签 + 侧栏 | session tabs（横向）+ sidebar（Context/MCP）+ 状态 | 多会话 | 截图对比 |
 | **M5** 交互细节 | leader 键位、autocomplete（@文件/技能）、审批面板、toast、队列、两段式 esc | 全功能 | 端到端 + 截图 |
 | **M6** 收尾 | Python/TS 测试补全、删除旧 Textual UI、文档、启动脚本 | 合并就绪 | `pytest`+`ruff`+`mypy`+`bun test` 全绿 |
+
+### M0 实测截图（2026-10-09）
+
+```
+Home（复刻 OpenCode 首页）:
+   █▀▀█ ▀█▀     █▀▀ █▀▀█ █▀▀▄ ▀█▀ █▄ █ █▀▀▀
+   █▄▄█  █  ▀▀▀ █   █  █ █  █  █  █ ▀█ █ ▀█
+   ▀  ▀ ▀▀▀     ▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀ █  █ ▀▀▀▀
+   ┃
+   ┃  Ask anything… "What is the tech stack of this project?"
+   ┃
+   ┃  Build · qwen3.8-2.4t-a95b
+   ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+                                                    ctrl+p commands
+   /tmp/tui-ws                                             v0.1.0
+
+Session（echo 往返）:
+   ┃  hello world
+      echo: hello world
+   ┃
+   ┃  Ask anything…
+   ┃  Build · qwen3.8-2.4t-a95b
+   ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+```
+
+### M0 关键技术发现（写进 bunfig，防回退）
+
+1. **`preload = ["@opentui/solid/preload"]` 必须**：bun 把 `solid-js` 解析到 `dist/server.js`（SSR 版），`createEffect/onMount` 全是 no-op；preload 插件把它重写成 `dist/solid.js` 客户端 runtime，否则 UI 渲染但无响应
+2. **textarea 默认 `return = newline`**：需要 `keyBindings` 覆盖为 `return → submit`、`shift+return → newline`
+3. **`await render()` 挂载后立即返回**：不能在它之后 `client.close()`
+4. **焦点**：`onMount` 里 `input.focus()`（`queueMicrotask` 太早，渲染器未挂）
 
 ### 验证方法（贯穿全程）
 
