@@ -52,7 +52,7 @@ applyTheme(await detectThemeMode(renderer))
 await render(
   () => (
     <KeymapProvider keymap={keymap}>
-      <App client={client} hello={hello} />
+      <App client={client} hello={hello} renderer={renderer} />
     </KeymapProvider>
   ),
   renderer,

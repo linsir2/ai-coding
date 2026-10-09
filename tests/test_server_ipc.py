@@ -36,6 +36,20 @@ class _FakeEngine:
     )
 
 
+class _FakeRegistry:
+    """Minimal SkillRegistry stand-in: ``names()`` + ``meta(name)``."""
+
+    def __init__(self, names: list[str], meta: dict[str, dict]) -> None:
+        self._names = names
+        self._meta = meta
+
+    def names(self) -> list[str]:
+        return list(self._names)
+
+    def meta(self, name: str) -> dict:
+        return self._meta[name]
+
+
 class _FakeLoop:
     """Scriptable stand-in for ``AgentLoop.process_input``.
 
@@ -166,9 +180,36 @@ async def test_initialize_returns_hello(ipc):
     assert result["model"] == "fake-model"
     assert result["sessionId"]
     assert result["models"] == [{"name": "fake-model", "key": "fake"}]
+    # M3: the models dialog marks the current entry by key.
+    assert result["modelKey"] == "fake"
     # M1: the home footer/metadata read these two.
     assert result["provider"] == "deepseek"
     assert result["vcs"] == {"branch": ""}  # tmp_path is not a git repository
+
+
+@pytest.mark.asyncio
+async def test_skills_list_is_structured(ipc):
+    world, _service, client = ipc
+    world.loop.skills = _FakeRegistry(
+        names=["alpha", "beta"],
+        meta={
+            "alpha": {"name": "alpha", "description": "does alpha", "phase": "planning"},
+            "beta": {"name": "beta", "description": None, "phase": ""},
+        },
+    )
+    result = client.request("skills.list")
+    assert result == {
+        "skills": [
+            {"name": "alpha", "description": "does alpha", "phase": "planning"},
+            {"name": "beta", "description": None, "phase": ""},
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_skills_list_empty_without_registry(ipc):
+    _world, _service, client = ipc
+    assert client.request("skills.list") == {"skills": []}
 
 
 @pytest.mark.asyncio
@@ -297,6 +338,8 @@ async def test_model_set_routes_to_loop(ipc):
     result = client.request("model.set", {"name": "other"})
     assert result["ok"] is True
     assert world.loop.model == "other"
+    # M3: the metadata label follows the newly active model's endpoint.
+    assert result["provider"] == "deepseek"
 
 
 @pytest.mark.asyncio

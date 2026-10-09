@@ -15,10 +15,11 @@
 
 import type { ScrollBoxRenderable } from "@opentui/core"
 import { useBindings } from "@opentui/keymap/solid"
-import { Index, createSignal, onCleanup, onMount } from "solid-js"
+import { Index, createEffect, createSignal, on, onCleanup, onMount } from "solid-js"
 import { createStore } from "solid-js/store"
 import { MessageView } from "../component/message"
 import { Prompt } from "../component/prompt"
+import { useDialog } from "../dialog/context"
 import type { IpcClient } from "../ipc"
 import type { Action, SessionState } from "../state/session"
 import { initialState, reduce } from "../state/session"
@@ -30,9 +31,12 @@ export interface SessionProps {
   provider: string
   /** Text submitted from home; auto-sent once the route mounts. */
   initialPrompt?: string
+  /** A replayed session (from the sessions dialog); replaces the transcript. */
+  hydrate?: { key: string; state: SessionState } | null
 }
 
 export function Session(props: SessionProps) {
+  const dialog = useDialog()
   const [state, setState] = createStore<SessionState>(initialState())
   const [thinking, setThinking] = createSignal(false)
   let transcript: ScrollBoxRenderable | undefined
@@ -52,10 +56,14 @@ export function Session(props: SessionProps) {
   }
 
   useBindings(() => ({
+    enabled: !dialog.isOpen(),
     commands: [
       {
         name: "session.interrupt",
-        desc: "Interrupt the running turn",
+        title: "Interrupt turn",
+        group: "Session",
+        desc: "Stop the current turn",
+        palette: true,
         run: () => {
           if (!state.busy) return
           void props.client.request("session.interrupt")
@@ -63,7 +71,10 @@ export function Session(props: SessionProps) {
       },
       {
         name: "session.toggle.thinking",
-        desc: "Toggle thinking",
+        title: "Toggle thinking",
+        group: "Session",
+        desc: "Show or hide reasoning",
+        palette: true,
         run: () => setThinking((value) => !value),
       },
     ],
@@ -82,6 +93,17 @@ export function Session(props: SessionProps) {
       submit(props.initialPrompt)
     }
   })
+
+  // A session picked in the dialog replays into this store.  Runs on mount
+  // too: the route switches with the hydration already in place.
+  createEffect(
+    on(
+      () => props.hydrate,
+      (hydrated) => {
+        if (hydrated && hydrated.key === props.sessionId) setState(hydrated.state)
+      },
+    ),
+  )
 
   return (
     <box flexDirection="column" width="100%" height="100%">

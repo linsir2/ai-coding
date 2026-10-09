@@ -76,6 +76,7 @@ def make_handlers(
             "version": __version__,
             "workspace": world.workspace,
             "model": str(getattr(model, "name", "") or ""),
+            "modelKey": str(getattr(world.config, "default_model", "") or ""),
             "provider": provider_from_base_url(str(getattr(model, "base_url", "") or "")),
             "vcs": {"branch": git_branch(world.workspace)},
             "models": models,
@@ -181,12 +182,35 @@ def make_handlers(
     def model_set(params: dict[str, Any]) -> dict[str, Any]:
         name = str(params.get("name", ""))
         world.loop.set_model(name)
-        return {"ok": True, "model": name}
+        # The metadata label reads the endpoint of the *active* model, so a
+        # switch across providers must report the new one.
+        model = getattr(world.engine, "model_config", None)
+        return {
+            "ok": True,
+            "model": name,
+            "provider": provider_from_base_url(str(getattr(model, "base_url", "") or "")),
+        }
 
     def skills_list(params: dict[str, Any]) -> dict[str, Any]:
+        """Structured rows for the skills dialog (M3).
+
+        The model's catalogue stays on ``registry.catalog_text()`` (system
+        prompt); this is only what the human list needs.
+        """
         registry = getattr(world.loop, "skills", None)
-        catalog = registry.catalog_text() if registry is not None else ""
-        return {"catalog": catalog}
+        if registry is None:
+            return {"skills": []}
+        rows = []
+        for name in registry.names():
+            meta = registry.meta(name)
+            rows.append(
+                {
+                    "name": name,
+                    "description": meta.get("description"),
+                    "phase": meta.get("phase") or "",
+                }
+            )
+        return {"skills": rows}
 
     def config_summary(params: dict[str, Any]) -> dict[str, Any]:
         ai_cfg = getattr(world.config, "ai", None)
