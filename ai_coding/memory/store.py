@@ -176,6 +176,19 @@ class MemoryStore:
         """Replace the stored note with the same id; ``False`` if it is unknown."""
         return self._mutate(lambda: _replace_by_id(self._notes, note))
 
+    def update_stake(self, note_id: str, new_stake: float) -> bool:
+        """Update a note's stake; False if not found."""
+
+        def _do() -> bool:
+            for index, note in enumerate(self._notes):
+                if note.id != note_id:
+                    continue
+                self._notes[index] = note.with_stake(new_stake)
+                return True
+            return False
+
+        return self._mutate(_do)
+
     def supersede(self, old_id: str, newer: MemoryNote) -> bool:
         """Retire ``old_id`` in favour of ``newer`` (which is stored too)."""
 
@@ -381,11 +394,11 @@ def _is_protected(note: MemoryNote) -> bool:
 
 
 def _value_of(note: MemoryNote, moment: datetime) -> float:
-    """Higher is more worth keeping: importance, usage, freshness."""
+    """Higher is more worth keeping: importance, usage, freshness, stake."""
     freshness = recency(
         note.created_time, now=moment, half_life_days=_EVICTION_HALF_LIFE_DAYS
     )
-    return note.importance + 0.5 * min(note.hits, 4) + 0.5 * freshness
+    return note.importance + 0.5 * min(note.hits, 4) + 0.5 * freshness + note.stake
 
 
 def _now() -> datetime:

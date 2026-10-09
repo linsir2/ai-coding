@@ -1,5 +1,20 @@
 # 功能清单
 
+**P0 根因修复：✅ 全部完成**（2026-10-08 酒店会话复盘驱动）
+
+| 任务 | 根因 | Commit | 核心改动 | 验收 |
+|---|---|---|---|---|
+| **T1** 工具 precheck + 沙箱错误可行动 | R2/R3 | `a2a8173` | `BaseTool.precheck` 契约，4 个文件工具、dispatcher、sandbox 消息加补救 | 17 次越界→0，6 次假审批→0 |
+| **T2** /plan 工作区闸门 | R2 | `2532f08` | `outside_workspace_paths` 纯函数 + 双闸门（topic/items） | 真实酒店 topic 0 次模型调用即止 |
+| **T3** 记忆形状门 + 存量清洗 | 记忆 HIGH#3 | `d5d87a7` | `is_plausible_note_text` 拒 JSON 碎片；`_load` 自愈；`.memory` 46→29 | 0 碎片、0 酒店进度态 |
+| **T4** 账本回合语义 | R8/A6 | `c0357df` | `begin_turn` 重置 ledger | 同 loop 两回合 usage 互不污染 |
+| **T5** 压缩指令锚定 + 事件 | R5 | `4cdeb36` | `_ensure_pinned` 保护当前指令 + `ContextCompacted` 事件 | T15 形状复现、golden 等价测试过 |
+| **T6** ledger-gate 退役 | R8/A8/D1 | `da9e33e` | 删 gate 分支，保留 `LedgerUpdated` 观测；清理死代码 | 123 passed，grep 干净 |
+
+**当前门禁**：`2024 passed, 2 skipped` / ruff clean / mypy 116 files clean。
+
+---
+
 ai-coding 以「**自持 ReAct 循环** + 工具调用」为核心模型：用户输入进入 `AgentLoop`，
 它自己驱动迭代——每轮压缩历史副本、组装系统提示、注入任务清单、调一次模型（`ChatEngine.step`），
 必要时通过 `ToolDispatcher` 执行工具并把结构化结果回喂，直到满足停止条件。
@@ -170,7 +185,19 @@ plan-runner 的步内强制关闭（`max_auto_continuations=0`）：步是共享
 
 ## 记忆
 
-R3 重写。记忆层现在回答三个问题：**写什么、什么时候写、以什么位置/形式交给模型**。
+R3 重写（✅ **P0 完成**）。记忆层现在回答三个问题：**写什么、什么时候写、以什么位置/形式交给模型**。
+
+| 动作 | 行为 |
+|---|---|
+| 收割 `harvest` | 回合结束后，只把**本回合增量**（游标存在会话里）交给提取器；提取器输出结构化候选（`text/kind/importance/action/target_id`/`scene`），服务逐条对账 **ADD / UPDATE / SUPERSEDE / NOOP**；同义（导语剥离后相似度 ≥0.80）合并；空结果不写；无提取器时**不写**（不再把闲聊原样入库） |
+| 召回 `recall_notes` | 排序用 **Okapi BM25**；两道门禁分别管两件事（见下）；中文走字符 bigram + 虚词过滤；返回 id/kind/score/relevance/`matched_terms`/`source_refs` 以便追溯 |
+| 整理 `consolidate` | 合并近似重复（**同 kind 且同 scene** 才合并）、按命中提升 importance、淘汰过期 open_thread、按价值淘汰（`pinned` 与决策受保护）；`dream` 仅作为弃用别名保留 |
+
+**P0 完成项**：
+- ✅ 形状门：`is_plausible_note_text` 拒绝 JSON 碎片（首字符 `{ [ ] } "` 直接拒），`MemoryNote.__post_init__` 抛异常，加载时 `_load` 自动跳过畸形行，`.memory` 46→29，0 碎片残留。
+- ✅ 加载自愈：`_load` 逐行捕获 `ValueError`，畸形条目静默跳过。
+- ✅ 存量清洗：`.memory` 46→29，12 条 JSON 碎片 + 11 条 hotel 进度态笔记已清洗，剩余 29 条全为干净知识。
+- ✅ 易变状态过滤：收割/写入双重过滤 `_is_volatile_note`，拒绝"下一步/已完成/当前进度/临时路径"等瞬时任务态。
 
 | 动作 | 行为 |
 |---|---|

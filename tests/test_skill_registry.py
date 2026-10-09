@@ -63,7 +63,7 @@ def test_r11c_meta_defaults_for_a_bare_skill(tmp_path):
 
     meta = SkillRegistry(tmp_path).meta("bare")
 
-    assert meta == {"name": "bare", "version": "1", "status": "active", "description": None}
+    assert meta == {"name": "bare", "version": "1", "status": "active", "description": None, "phase": "", "pattern_dna": ""}
 
 
 def test_r11c_meta_parses_version_and_status(tmp_path):

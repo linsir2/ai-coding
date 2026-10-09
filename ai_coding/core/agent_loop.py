@@ -47,6 +47,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ai_coding.ai.engine import ChatEngine, EngineError
@@ -280,6 +281,9 @@ class AgentLoop:
         self.compactor = Compactor(context, emit=self._emit)
         # R7a: one request per iteration, assembled in its own unit (the four
         # volatile blocks, in their declared order).
+        from ai_coding.core.sop_router import ToolObserver
+        self._tool_observer = ToolObserver([])  # observations list, updated per turn
+
         self.assembler = RequestAssembler(
             compactor=self.compactor,
             policy=self.policy,
@@ -288,6 +292,7 @@ class AgentLoop:
             build_instructions=self._build_instructions,
             settings=self.settings,
             emit=self._emit,
+            skills=self.skills,
         )
 
     def set_model(self, name: str) -> None:
@@ -540,6 +545,22 @@ class AgentLoop:
                     turn=frame.turn_number,
                 )
                 books.note_outcomes(outcomes)
+                # I2: check constraint violations after tool execution
+                router = getattr(self.assembler, '_router', None)
+                if router is not None:
+                    used_tools = [
+                        item.call.name for item in outcomes
+                        if item.result.success
+                    ]
+                    active_constraints = getattr(
+                        session, "constraint_tracking", {}
+                    )
+                    if active_constraints:
+                        router.check_constraint_violations(
+                            list(active_constraints.keys()),
+                            used_tools,
+                            session,
+                        )
                 if any(item.halted for item in outcomes):
                     outcome = stopped_outcome(step.text, books.total_iterations)
                     break
@@ -584,6 +605,22 @@ class AgentLoop:
         """
         self._bind_observer(observer)
         self._bind_trace(session)
+        # M3: point ToolObserver to current session's observations list
+        self._tool_observer._observations = session.tool_observations
+        # M4: point SkillTool load callback to current session's stats
+        # F1: also track loaded skill for outcome recording
+        from ai_coding.tools.skill_tool import SkillTool
+        skill_tool = self.tools.get("skill")
+        router = getattr(self.assembler, '_router', None)
+        if isinstance(skill_tool, SkillTool) and router:
+            def _on_skill_loaded(
+                name: str,
+                _router: Any = router,
+                _session: SessionData = session,
+            ) -> None:
+                _router.record_load(name, _session.turn_count, _session.skill_stats)
+                _session.loaded_skill = name
+            skill_tool.set_on_loaded(_on_skill_loaded)
         session.add_message(user_message(user_input, now_utc()))
         # T5: remember this request's instruction so compaction can keep it in
         # the history (hotel audit root cause R5: the instruction at index 80 fell
@@ -671,6 +708,33 @@ class AgentLoop:
         closing: str = "",
     ) -> str:
         """Close the books: persist, harvest, fire ``turn.end``, hand back the text."""
+        # F1: record skill outcome for dynamic pricing
+        # F3: record structural signature on skill success
+        router = getattr(self.assembler, '_router', None)
+        if router and session.loaded_skill:
+            stats = getattr(session, 'skill_stats', {})
+            success = not books.failures
+            router.record_outcome(session.loaded_skill, success, stats)
+            if success and task:
+                from ai_coding.core.sop_router import StructuralSignature
+                error_keywords = frozenset(
+                    word.lower()
+                    for obs in getattr(session, "tool_observations", [])
+                    if obs.error
+                    for word in obs.error.lower().split()
+                    if len(word) > 2
+                )
+                task_keywords = frozenset(
+                    word for word in task.goal.lower().split() if len(word) > 2
+                ) if task.goal else frozenset()
+                signature = StructuralSignature(
+                    tools=frozenset(books.tool_success),
+                    error_keywords=error_keywords,
+                    task_keywords=task_keywords,
+                    skill_name=session.loaded_skill,
+                    timestamp=now_utc(),
+                )
+                router.record_signature(signature)
         outcome = self._close_turn(
             session,
             user_input=user_input,
@@ -694,8 +758,60 @@ class AgentLoop:
             evidence="tool" if books.evidence_calls else "model",
         )
         await self.turn_hooks.fire(HookPoint.TURN_END, session)
+        # M1: schedule a background skill review if the interval has been reached.
+        self._maybe_schedule_skill_review(session)
         # R6a: a turn that ran out of budget used to hand the user an empty string.
         return outcome.text or outcome.handoff
+
+    # ---- skill review (M1) --------------------------------------------------
+
+    def _maybe_schedule_skill_review(self, session: SessionData) -> None:
+        """Schedule a background skill review when the interval is reached.
+
+        Best-effort: the review runs after the user has received its response,
+        so a slow or failed review never blocks the conversation.
+        """
+        interval = getattr(self.settings, "skill_review_interval", 0) or 0
+        if interval <= 0:
+            return
+        if self.skills is None:
+            return
+        counter = int(getattr(session, "skill_review_counter", 0) or 0) + 1
+        session.skill_review_counter = counter
+        if counter < interval:
+            return
+        session.skill_review_counter = 0
+        # Fire-and-forget: review runs after the user has received their response.
+        asyncio.create_task(
+            self._run_skill_review(session),
+            name=f"skill-review:{session.session_id}",
+        )
+
+    async def _run_skill_review(self, session: SessionData) -> None:
+        """Run the skill review in the background.  Best-effort, never raises."""
+        from ai_coding.core.skill_review import run_skill_review
+        cursor = int(getattr(session, "skill_review_cursor", 0) or 0)
+        delta = session.messages[cursor:]
+        if not delta:
+            return
+        try:
+            model_config = getattr(self.engine, "model_config", None)
+            if model_config is None:
+                return
+            result = await run_skill_review(
+                messages=delta,
+                existing_skills=self.skills.names() if self.skills else [],
+                model_config=model_config,
+                skill_dir=self.skills.root if self.skills else Path("."),
+            )
+            if result.created:
+                session.skill_review_cursor = len(session.messages)
+                _log.info(
+                    "skill review created: %s at %s",
+                    result.skill_name, result.skill_path,
+                )
+        except Exception:  # noqa: BLE001 — best-effort, never affect the user
+            _log.debug("skill review failed", exc_info=True)
 
     def _close_turn(
         self,
@@ -757,10 +873,12 @@ class AgentLoop:
         if observer is None and self.trace is None:
             return          # nothing to swap: leave the current observer alone
         base = observer if observer is not None else self._base_observer
+        # M3: ToolObserver auto-records tool call outcomes (always included)
+        tool_obs = SafeObserver(self._tool_observer)
         if self.trace is not None:
-            self.observer = Braid(SafeObserver(base), SafeObserver(self.trace))
+            self.observer = Braid(SafeObserver(base), SafeObserver(self.trace), tool_obs)
         else:
-            self.observer = SafeObserver(base)
+            self.observer = Braid(SafeObserver(base), tool_obs)
         self.dispatcher.observer = self.observer
 
     def _bind_trace(self, session: SessionData) -> None:

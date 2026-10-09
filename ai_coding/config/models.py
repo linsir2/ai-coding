@@ -138,6 +138,10 @@ class AIConfig(BaseModel):
     failed_streak_threshold: int = 2
     max_strategy_nudges: int = 1
     stall_iterations: int = 3
+    #: M1: turns between background skill reviews (0=disabled).  After every N
+    #: turns, a background task reviews the conversation delta and optionally
+    #: creates a new skill in the skills directory.
+    skill_review_interval: int = 10
 
 
 class TracingConfig(BaseModel):

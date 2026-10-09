@@ -99,6 +99,10 @@ __all__ = [
 _PROMOTE_HITS = 3
 _OPEN_THREAD_TTL_DAYS = 30.0
 
+# F1: Memory staking
+STAKE_REWARD_RATE = 0.2
+STAKE_SLASH_RATE = 0.3
+
 # The always-on block's own wrapper.  `index_max_chars` bounds the *rendered* block
 # (that is what the model pays for), so the tags come out of the budget before any
 # note does — R6e's regression test caught the bug where they did not.
@@ -491,6 +495,9 @@ class MemoryService:
         timed_out = bool(timeout > 0.0 and elapsed > timeout)
         if hits and not timed_out:
             try:
+                for hit in hits:
+                    new_stake = hit.note.stake * (1 + STAKE_REWARD_RATE)
+                    self._store.update_stake(hit.note.id, new_stake)
                 self._store.touch_notes([hit.note.id for hit in hits])
             except Exception:  # noqa: BLE001
                 pass
@@ -546,6 +553,12 @@ class MemoryService:
         notes = self.index_notes(scope=scope, max_chars=max_chars)
         return self.render_index_block(notes)
 
+    @staticmethod
+    def _looks_like_constraint(text: str, keywords: list[str]) -> bool:
+        """Check if a fact note's text looks like a constraint/decision."""
+        text_lower = text.lower()
+        return any(kw.lower() in text_lower for kw in keywords)
+
     def index_notes(
         self, *, scope: str | None = None, max_chars: int | None = None
     ) -> list[MemoryNote]:
@@ -561,10 +574,19 @@ class MemoryService:
         budget -= _INDEX_OVERHEAD
         if budget <= 0:
             return []
+        # I2: Also select fact notes that look like constraints
+        constraint_keywords = [
+            "必须", "只能", "不要", "禁止", "只能",
+            "must ", "should not", "always ", "never ",
+            "改用", "换用", "使用", "改用",
+        ]
         selected = [
             note
             for note in self._store.active()
-            if (note.pinned or note.kind.value in pinned_kinds)
+            if (note.pinned
+                or note.kind.value in pinned_kinds
+                or (note.kind == NoteKind.FACT
+                    and self._looks_like_constraint(note.text, constraint_keywords)))
             and (scope is None or note.scope == scope)
         ]
         selected.sort(
@@ -762,6 +784,10 @@ class MemoryService:
                 skipped.append(note.id)
                 continue
             if candidate.action == "supersede" and candidate.target_id:
+                old_note = self._store.get(candidate.target_id)
+                if old_note:
+                    slashed = old_note.stake * (1 - STAKE_SLASH_RATE)
+                    self._store.update_stake(candidate.target_id, slashed)
                 if self._store.supersede(candidate.target_id, note):
                     superseded.append(note.id)
                 else:

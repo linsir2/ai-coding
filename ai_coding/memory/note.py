@@ -109,6 +109,8 @@ class MemoryNote:
     # statements are our best memories and they involve no tool call
     # (docs/r6-analysis.md 1.4 / 2.4, D-R6-10).  "" means "recorded before R6".
     evidence: str = ""
+    #: F1: stake for staking/slashing — higher = more validated. 1.0 = default.
+    stake: float = 1.0
 
     def __post_init__(self) -> None:
         if not str(self.id or "").strip():
@@ -126,6 +128,8 @@ class MemoryNote:
             "importance",
             max(_MIN_IMPORTANCE, min(_MAX_IMPORTANCE, int(self.importance))),
         )
+        stake_val = float(self.stake) if self.stake is not None else 1.0
+        object.__setattr__(self, "stake", max(0.0, stake_val))
 
     # ---- derived ----------------------------------------------------------
 
@@ -150,6 +154,10 @@ class MemoryNote:
 
     def with_importance(self, importance: int, when: str | None = None) -> MemoryNote:
         return replace(self, importance=importance, updated_time=when or now_utc())
+
+    def with_stake(self, stake: float, when: str | None = None) -> MemoryNote:
+        """Return a new note with updated stake."""
+        return replace(self, stake=max(0.0, stake), updated_time=when or now_utc())
 
     # ---- serialisation ----------------------------------------------------
 
@@ -180,6 +188,8 @@ class MemoryNote:
             data["source_message_ids"] = list(self.source_message_ids)
         if self.evidence:
             data["evidence"] = self.evidence
+        if self.stake != 1.0:
+            data["stake"] = round(self.stake, 4)
         return data
 
     @classmethod
@@ -214,6 +224,7 @@ class MemoryNote:
             keywords=keywords,
             source_message_ids=_refs(data.get("source_message_ids")),
             evidence=str(data.get("evidence", "") or ""),
+            stake=float(data.get("stake", 1.0)) if data.get("stake") is not None else 1.0,
         )
 
 

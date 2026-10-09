@@ -26,12 +26,14 @@ from typing import Any
 from ai_coding.core.compaction import Compactor
 from ai_coding.core.events import ContextCompacted, LoopEvent, MemoryInjected
 from ai_coding.core.request_builder import build_tail, content_of, volatile_block
+from ai_coding.core.sop_router import SOPRouter
 from ai_coding.core.turn_books import TurnBooks
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
 from ai_coding.domain.turn_digest import render_working_memory
 from ai_coding.infra.deadline import Deadline
+from ai_coding.skills.registry import SkillRegistry
 
 __all__ = ["Assembled", "RequestAssembler"]
 
@@ -60,6 +62,7 @@ class RequestAssembler:
         build_instructions: Callable[[Deadline | None], Awaitable[str | None]] | None = None,
         settings: Any,
         emit: Callable[[LoopEvent], None],
+        skills: SkillRegistry | None = None,
     ) -> None:
         self._compactor = compactor
         self._policy = policy
@@ -71,6 +74,8 @@ class RequestAssembler:
         self._build_instructions = build_instructions
         self._settings = settings
         self._emit = emit
+        # M2: SOP router for recommending skills based on current context.
+        self._router = SOPRouter(skills) if skills is not None else None
 
     async def assemble(
         self,
@@ -86,6 +91,10 @@ class RequestAssembler:
         pinned: Sequence[ChatMessage] = (),
     ) -> Assembled:
         """Compress, instruct, inject, tail — in that order, every iteration."""
+        # I3: capture anchor before compaction
+        if self._router is not None:
+            constraints = self._get_active_constraints(session)
+            self._router.capture_pre_compaction_anchor(session, task, constraints)
         history = await self._compactor.compress(
             session.messages, deadline=deadline, on_summary=books.summaries.append, pinned=pinned
         )
@@ -117,6 +126,15 @@ class RequestAssembler:
         if memory_block and not books.memory_announced:
             self._emit(MemoryInjected(note_ids=memory_ids, chars=len(memory_block)))
             books.memory_announced = True
+        # I2: track constraint injection
+        if memory_block and self._router is not None:
+            # Extract individual constraints from the block
+            constraints = [
+                line.strip("- ").strip()
+                for line in memory_block.split("\n")
+                if line.strip().startswith("- ")
+            ]
+            self._router.record_constraint_injection(constraints, session)
         digest_block = render_working_memory(
             session.turn_digests,
             current_turn=turn_number,
@@ -130,10 +148,57 @@ class RequestAssembler:
         pressure = self._policy.budget_pressure(
             iteration=index, tokens_spent=self._reporter.tokens_spent()
         )
+        # M2: recommend skills based on current context (after task, before hook).
+        recommended_skills_block = ""
+        recovery_block = ""
+        if self._router is not None:
+            user_input = self._extract_user_input(session)
+            recent_tools = self._extract_recent_tools(session, books)
+            task_goal = task.goal if task else ""
+            recent_failures = [f[1] for f in books.failures]
+            observations = getattr(session, "tool_observations", None)
+            # F1: check for cached recovery
+            recovery = self._router.check_recovery(recent_failures, session)
+            if recovery:
+                recovery_block = (
+                    "<error-recovery>\n"
+                    f"之前遇到类似错误时，这个方法是有效的：\n{recovery}\n"
+                    "</error-recovery>"
+                )
+            # F2: compute current phase
+            phase = self._compute_phase(session, books, task)
+            # F3: check for intervention
+            intervention = self._router.intervene(
+                recent_failures, observations, session,
+                getattr(session, "skill_stats", None),
+            )
+            if intervention.mode == "hard":
+                recommended_skills_block = self._format_intervention(intervention)
+            else:
+                matches = self._router.route(
+                    user_input, recent_tools, task_goal, recent_failures,
+                    observations=observations,
+                    turn_number=turn_number,
+                    stats=getattr(session, "skill_stats", None),
+                    phase=phase,
+                )
+                recommended_skills_block = SOPRouter.format_block(matches)
+                # F3: soft intervention appends pattern_dna
+                if intervention.mode == "soft":
+                    recommended_skills_block += (
+                        "\n\n<skill-pattern>\n"
+                        f"[{intervention.skill_name}] {intervention.content}\n"
+                        "</skill-pattern>"
+                    )
+        # I3: inject anchor after compaction
+        anchor_block = self._format_anchor_block(session, compacted)
         tail, tail_blocks = build_tail(
             [
                 volatile_block("memory", memory_block),
                 volatile_block("task", content_of(injection.message)),
+                volatile_block("recommended_skills", recommended_skills_block),
+                volatile_block("error_recovery", recovery_block),
+                volatile_block("anchor", anchor_block),
                 volatile_block("hook", hook_context),
                 volatile_block("digest", digest_block),
                 volatile_block("budget", pressure),
@@ -154,3 +219,77 @@ class RequestAssembler:
             request=request,
             previous_request=canonical,
         )
+
+    # ---- helpers (M2) -------------------------------------------------------
+
+    @staticmethod
+    def _extract_user_input(session: SessionData) -> str:
+        """Get the last user message content."""
+        for m in reversed(session.messages):
+            if m.role == "user":
+                return (m.content or "").strip()
+        return ""
+
+    @staticmethod
+    def _extract_recent_tools(session: SessionData, books: TurnBooks) -> list[str]:
+        """Get recently used tools from books + message scan."""
+        tools = set(getattr(books, "tool_success", set()) or set())
+        for m in session.messages[-10:]:
+            if m.role == "assistant" and m.tool_calls:
+                for call in m.tool_calls:
+                    tools.add(call.name)
+        return list(tools)
+
+    # ---- F2: Phase computation ----------------------------------------------
+
+    @staticmethod
+    def _compute_phase(session: SessionData, books: Any, task: Any) -> str:
+        """Determine current task phase.
+
+        Returns one of: "planning", "executing", "debugging", "reviewing".
+        """
+        # Debugging takes priority — repeated failures need debugging skills
+        # Lowered threshold: 1 turn of failures is enough to trigger debugging
+        if getattr(books, "failed_streak", 0) >= 1:
+            return "debugging"
+        # If there's an active task with items
+        if task is not None and task.items:
+            # Check if any item has a verify command (reviewing phase)
+            if any(item.verify for item in task.items if item.status != "completed"):
+                return "reviewing"
+            return "executing"
+        return "planning"
+
+    # ---- F3: Intervention formatting ----------------------------------------
+
+    @staticmethod
+    def _format_intervention(intervention: Any) -> str:
+        """Format a hard intervention as a tail block."""
+        return (
+            "<skill-intervention>\n"
+            f"检测到连续失败，以下是 [{intervention.skill_name}] 的修复步骤：\n\n"
+            f"{intervention.content}\n"
+            "</skill-intervention>"
+        )
+
+    # ---- I3: Anchor block ---------------------------------------------------
+
+    @staticmethod
+    def _format_anchor_block(session: SessionData, compacted: bool) -> str:
+        """Format pre-compaction anchor as tail block."""
+        anchor = getattr(session, "pre_compaction_anchor", "")
+        if not compacted or not anchor:
+            return ""
+        return (
+            "<task-anchor>\n"
+            f"压缩前的任务锚点：{anchor}\n"
+            "如果当前工作偏离此目标，请回到原始任务。\n"
+            "</task-anchor>"
+        )
+
+    # ---- I2: Constraint extraction ------------------------------------------
+
+    def _get_active_constraints(self, session: SessionData) -> list[str]:
+        """Get currently active memory constraints from session tracking."""
+        tracking = getattr(session, "constraint_tracking", {})
+        return [c for c, t in tracking.items() if t.get("injected")]

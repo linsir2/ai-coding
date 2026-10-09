@@ -7,6 +7,7 @@ skill's full text.  Zero API calls — purely local file reads.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,11 @@ class SkillTool(BaseTool):
 
     def __init__(self, skill_dir: str | Path) -> None:
         self._skill_dir = Path(skill_dir)
+        self._on_loaded: Callable[[str], None] | None = None
+
+    def set_on_loaded(self, callback: Callable[[str], None]) -> None:
+        """Set callback invoked when a skill is successfully loaded."""
+        self._on_loaded = callback
 
     @property
     def name(self) -> str:
@@ -125,6 +131,9 @@ class SkillTool(BaseTool):
             except OSError as exc:
                 return ToolResult(success=False, output=f"read error: {exc}")
             meta = self._meta(name)
+            # M4: notify load tracking
+            if self._on_loaded:
+                self._on_loaded(name)
             # An archived skill still reads: refusing would be a policy, and this
             # tool has no gate.  It only says what it is (R11c) — it does not
             # recommend a replacement, because we cannot know one.

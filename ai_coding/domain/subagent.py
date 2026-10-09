@@ -80,6 +80,10 @@ class SubagentResult:
     #: R1-3: why validation failed (missing keys, bad JSON) — named so the
     #: parent can ask for exactly what is absent instead of guessing.
     schema_errors: tuple[str, ...] = ()
+    #: F4: notes for future sub-agents (trace field).
+    notes: str = ""
+    #: F4: confidence level (high/medium/low) — uncertainty protocol.
+    confidence: str = "high"
 
     @property
     def text(self) -> str | None:
@@ -103,6 +107,8 @@ class SubagentResult:
             "facts": dict(self.facts) if self.facts is not None else None,
             "schema_valid": self.schema_valid,
             "schema_errors": list(self.schema_errors),
+            "notes": self.notes,
+            "confidence": self.confidence,
         }
 
 

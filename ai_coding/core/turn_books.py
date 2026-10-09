@@ -50,6 +50,18 @@ Failure = tuple[str, str, str]
 #: a "model" turn as far as the harvest's provenance is concerned.
 STATE_ONLY_TOOLS = frozenset({"checkpoint_write"})
 
+# F2: Paris' Law fatigue tracking — accumulated error damage.
+_FATIGUE_C = 1.0
+_FATIGUE_M = 2.0
+_FATIGUE_THRESHOLD = 30.0
+
+_SEVERITY_KEYWORDS: dict[int, tuple[str, ...]] = {
+    5: ("timeout", "context overflow", "out of memory", "token limit"),
+    4: ("rate limit", "too many requests", "quota exceeded"),
+    3: ("permission denied", "access forbidden", "unauthorized"),
+    2: ("not found", "invalid", "malformed", "bad request", "error", "failed"),
+}
+
 _FAILURE_EXCERPT = 160
 
 
@@ -134,6 +146,12 @@ class TurnBooks:
     #: The last emitted ledger signature: sorted ``(id, level)`` pairs.  The
     #: loop compares each round's open set against this to detect movement.
     ledger_signature: tuple[tuple[str, str], ...] = ()
+    #: F1: skill loaded this turn (for outcome tracking). Empty = none loaded.
+    loaded_skill: str = ""
+    #: F2: Paris' Law fatigue index — accumulated error damage (Σ severity²).
+    fatigue_index: float = 0.0
+    #: F2: fatigue nudges already injected this turn.
+    fatigue_nudges: int = 0
 
     # ---- notifications ----------------------------------------------------
 
@@ -155,6 +173,10 @@ class TurnBooks:
     def note_acceptance_nudge(self) -> None:
         """The acceptance gate injected a reminder and will iterate again."""
         self.acceptance_nudges += 1
+
+    def note_fatigue_nudge(self) -> None:
+        """The fatigue gate injected a reminder and will iterate again."""
+        self.fatigue_nudges += 1
 
     @property
     def ledger_open(self) -> int:
@@ -269,6 +291,27 @@ class TurnBooks:
             for item in counted
             if not item.result.success
         )
+        self._compute_fatigue()
+
+    # ---- F2: Paris' Law fatigue ------------------------------------------
+
+    @staticmethod
+    def _severity_of(error: str) -> int:
+        """Derive error severity from error text (1-5, 5 = most severe)."""
+        error_lower = error.lower()
+        for level in (5, 4, 3, 2):
+            if any(kw in error_lower for kw in _SEVERITY_KEYWORDS.get(level, ())):
+                return level
+        return 1
+
+    def _compute_fatigue(self) -> float:
+        """Compute fatigue index: D = Σ C × severity² (Paris' Law)."""
+        fatigue = 0.0
+        for failure in self.failures:
+            severity = self._severity_of(failure[1])
+            fatigue += _FATIGUE_C * (severity ** _FATIGUE_M)
+        self.fatigue_index = fatigue
+        return fatigue
 
     # ---- what a decision needs -------------------------------------------
 
@@ -300,4 +343,6 @@ class TurnBooks:
             acceptance=tuple(acceptance),
             acceptance_nudges=self.acceptance_nudges,
             continuations=continuations,
+            fatigue_index=self.fatigue_index,
+            fatigue_nudges=self.fatigue_nudges,
         )

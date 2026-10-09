@@ -148,10 +148,42 @@ class SessionData:
     # whose TurnCloser would otherwise write one "plan step N" file per step
     # and flood the /resume picker.
     ephemeral: bool = False
+    # M1: in-process only — skill review tracks which turns and messages have
+    #: been reviewed.  Not persisted (to_dict is a whitelist); restarting
+    #: re-reviews from 0, which is idempotent (won't create duplicate skills).
+    skill_review_counter: int = 0
+    skill_review_cursor: int = 0
     # Step deliveries (R1-1): what each plan-runner step left behind.  The
     # resume replay reads these to rebuild the step timeline; persisted only
     # when non-empty, same rule as above.
     step_deliveries: list[StepDelivery] = field(default_factory=list)
+    # M3: in-process only — tool call observations for SOP routing.
+    # Recorded by ToolObserver, consumed by SOPRouter for failure_pattern matching.
+    # Not persisted (to_dict is a whitelist); keeps last 50 entries.
+    tool_observations: list[Any] = field(default_factory=list)
+    # M4: in-process only — skill recommendation/loading stats for freshness scoring.
+    # Tracked by SOPRouter (recommendations) and SkillTool (loads).
+    # Not persisted (to_dict is a whitelist).
+    skill_stats: dict[str, Any] = field(default_factory=dict)
+    # F1: in-process only — cross-turn error → recovery mapping.
+    # Key = sha1(error)[:12], Value = {"recovery": str, "used_count": int, "last_used_turn": int}
+    # Not persisted (to_dict is a whitelist).
+    error_recovery_cache: dict[str, Any] = field(default_factory=dict)
+    # I2: in-process only — constraint effectiveness tracking.
+    # Key = constraint text, Value = {"injected": bool, "followed": bool, "violation_count": int}
+    # Not persisted (to_dict is a whitelist).
+    constraint_tracking: dict[str, Any] = field(default_factory=dict)
+    # I3: in-process only — pre-compaction task anchor (goal + key constraints).
+    # Captured before compaction, injected after if drift detected.
+    # Not persisted (to_dict is a whitelist).
+    pre_compaction_anchor: str = ""
+    # F1: in-process only — skill co-activation graph.
+    # Key = from_skill, Value = {to_skill: count}
+    # Not persisted (to_dict is a whitelist).
+    coactivation_graph: dict[str, dict[str, int]] = field(default_factory=dict)
+    # F1: in-process only — name of skill loaded this turn (for outcome tracking).
+    # Not persisted (to_dict is a whitelist).
+    loaded_skill: str = ""
 
     def begin_plan(self, goal: str) -> TaskState:
         """Start a new plan: fresh goal, no items, no step receipts (R1-5b).

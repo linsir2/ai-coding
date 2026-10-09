@@ -55,6 +55,11 @@ NUDGE_ITEM_LIMIT = 10
 BUDGET_PRESSURE_LEAD = "[budget] 本轮预算快用完了"
 #: How much of a budget may remain before the warning appears.
 PRESSURE_RATIO = 0.2
+#: F2: fatigue gate marker.
+FATIGUE_GATE_LEAD = "[fatigue-gate]"
+#: F2: Paris' Law fatigue threshold — accumulated error damage that triggers
+#: the fatigue gate.
+FATIGUE_THRESHOLD = 30.0
 
 
 @dataclass(frozen=True)
@@ -144,6 +149,10 @@ class TurnSnapshot:
     # exactly as before.
     acceptance: tuple[AcceptanceState, ...] = ()
     acceptance_nudges: int = 0  # acceptance nudges already injected this turn
+    # F2: Paris' Law fatigue index — accumulated error damage.
+    fatigue_index: float = 0.0
+    # F2: fatigue nudges already injected this turn.
+    fatigue_nudges: int = 0
 
 
 @dataclass(frozen=True)
@@ -224,6 +233,17 @@ class TurnPolicy:
                 f"no progress: no tool call has succeeded in "
                 f"{snapshot.iteration - 1} iterations",
             )
+        # F2: fatigue gate — accumulated errors beyond threshold buy one chance
+        # to change approach or summarize progress.
+        if (
+            snapshot.fatigue_index >= FATIGUE_THRESHOLD
+            and snapshot.fatigue_nudges < 1
+        ):
+            return TurnDecision(
+                TurnAction.NUDGE,
+                "accumulated errors (fatigue)",
+                inject=self.fatigue_message(snapshot.fatigue_index),
+            )
         # R6b tier 2: repeated failures buy one chance to change approach.
         threshold = self.config.failed_streak_threshold
         if (
@@ -249,6 +269,19 @@ class TurnPolicy:
                 "2) 换手段或把目标切小（换工具、换路径、先写最小复现）；",
                 "3) 若确实缺信息或需要人拍板，用 ask_user 提问；"
                 "没有人回答时就给出结论与假设后收尾。",
+            ]
+        )
+
+    @staticmethod
+    def fatigue_message(fatigue_index: float) -> str:
+        """The nudge when accumulated errors cross the fatigue threshold."""
+        return "\n".join(
+            [
+                f"{FATIGUE_GATE_LEAD} 错误累积过高（fatigue index: {fatigue_index:.1f}）。"
+                "不要继续当前路径：",
+                "1) 停下来，总结你当前的理解和已取得的进展；",
+                "2) 换一种完全不同的方法；",
+                "3) 如果确实需要更多信息，用 ask_user 提问。",
             ]
         )
 

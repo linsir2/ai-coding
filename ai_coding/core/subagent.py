@@ -358,6 +358,8 @@ class SubAgentRunner:
         )
         if emit is None:
             return
+        # F4: write trace note for future sub-agents
+        _write_trace_note(result, self._ledger_root)
         summary = (result.conclusion or result.error or "").strip().replace("\n", " ")
         if len(summary) > _SUMMARY_TAIL:
             summary = summary[:_SUMMARY_TAIL] + "…"
@@ -479,6 +481,8 @@ class SubAgentRunner:
             child_task = task
             if output_schema:
                 child_task = task + _format_instruction(output_schema)
+            # F4: append uncertainty protocol
+            child_task += _UNCERTAINTY_PROTOCOL
             await run_with_deadline(
                 loop.process_input(session, child_task),
                 timeout=self._timeout,
@@ -550,6 +554,8 @@ class SubAgentRunner:
             facts, schema_valid, schema_errors = extract_json_facts(
                 conclusion, output_schema
             )
+        # F4: extract notes and confidence from conclusion
+        notes, confidence = _extract_notes_and_confidence(conclusion)
         result = SubagentResult(
             status=status,
             conclusion=conclusion,
@@ -565,7 +571,11 @@ class SubAgentRunner:
             facts=facts,
             schema_valid=schema_valid,
             schema_errors=schema_errors,
+            notes=notes,
+            confidence=confidence,
         )
+        # F4: write trace note (sync path — background path does it in _finish_background)
+        _write_trace_note(result, self._ledger_root)
         return _with_ledger(result, self._ledger_root)
 
 
@@ -575,6 +585,34 @@ def _truncate(text: str | None, limit: int) -> str | None:
     if limit <= 0 or len(text) <= limit:
         return text
     return text[:limit] + "…"
+
+
+def _extract_notes_and_confidence(conclusion: str | None) -> tuple[str, str]:
+    """Extract notes and confidence from a sub-agent's conclusion.
+
+    Looks for the uncertainty protocol markers in the text.
+    Handles markdown formatting (bold, etc.) and both Chinese/English colons.
+    Returns (notes, confidence).
+    """
+    if not conclusion:
+        return "", "high"
+    notes = ""
+    confidence = "high"
+    for line in conclusion.split("\n"):
+        # Strip markdown formatting
+        stripped = line.strip().strip("*").strip()
+        # Handle both Chinese and English colons
+        for prefix in ["置信度:", "置信度："]:
+            if stripped.startswith(prefix):
+                value = stripped[len(prefix):].strip().lower()
+                if value in ("high", "medium", "low"):
+                    confidence = value
+                break
+        for prefix in ["给后来者的笔记:", "给后来者的笔记："]:
+            if stripped.startswith(prefix):
+                notes = stripped[len(prefix):].strip()
+                break
+    return notes, confidence
 
 
 def _with_ledger(result: SubagentResult, root: Path | None) -> SubagentResult:
@@ -605,7 +643,10 @@ def _with_ledger(result: SubagentResult, root: Path | None) -> SubagentResult:
         facts=result.facts,
         schema_valid=result.schema_valid,
         schema_errors=result.schema_errors,
+        notes=result.notes,
+        confidence=result.confidence,
     )
+
 
 
 def _format_instruction(schema: dict[str, Any]) -> str:
@@ -626,3 +667,48 @@ def _format_instruction(schema: dict[str, Any]) -> str:
 
 
 __all__ = ["SubAgentRunner"]
+
+MAX_TRACE_ENTRIES = 100  #: Cap trace-field.md entries to prevent unbounded growth.
+
+
+def _write_trace_note(result: SubagentResult, root: Path | None) -> None:
+    """Write a note to the shared trace field for future sub-agents.
+
+    Bounded: keeps the last MAX_TRACE_ENTRIES entries (FIFO eviction).
+    """
+    if root is None or not result.notes:
+        return
+    try:
+        target_dir = root / "transcripts" / "skill-traces"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        trace_file = target_dir / "trace-field.md"
+        with open(trace_file, "a", encoding="utf-8") as f:
+            f.write(f"\n---\n[{result.status}] {result.ledger_path}\n{result.notes}\n")
+        # Enforce bound: read all lines, keep last N entries
+        _enforce_trace_limit(trace_file)
+    except OSError:
+        pass  # best-effort
+
+
+def _enforce_trace_limit(trace_file: Path) -> None:
+    """Keep only the last MAX_TRACE_ENTRIES entries in the trace file."""
+    if not trace_file.exists():
+        return
+    content = trace_file.read_text(encoding="utf-8")
+    entries = content.split("\n---\n")
+    # Remove empty first element if file starts with ---
+    entries = [e for e in entries if e.strip()]
+    if len(entries) > MAX_TRACE_ENTRIES:
+        # Keep the last N entries
+        kept = entries[-MAX_TRACE_ENTRIES:]
+        trace_file.write_text("\n---\n".join(kept) + "\n", encoding="utf-8")
+
+
+_UNCERTAINTY_PROTOCOL = (
+    "\n\n## 不确定协议\n"
+    "如果你对结论不完全确定，请在最后用以下格式标记：\n"
+    "置信度: [high|medium|low]\n"
+    "原因: [为什么不确定]\n"
+    "需要: [需要什么信息才能确定]\n"
+    "给后来者的笔记: [你踩的坑、发现的捷径、未完成的探索]\n"
+)
