@@ -8,6 +8,8 @@
 import { createCliRenderer } from "@opentui/core"
 import { KeymapProvider } from "@opentui/keymap/solid"
 import { render } from "@opentui/solid"
+// Registers the <spinner> intrinsic (side-effect import, once per process).
+import "opentui-spinner/solid"
 import { App, type Hello } from "./app"
 import { IpcClient } from "./ipc"
 import { setupKeymap } from "./keymap"

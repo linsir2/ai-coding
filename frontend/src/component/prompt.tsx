@@ -33,7 +33,11 @@ export const PROMPT_BORDER = {
 export interface PromptProps {
   placeholder: string
   metadata: string
-  onSubmit: (text: string) => void
+  /**
+   * Submit handler.  Returning ``false`` rejects the submission and keeps the
+   * text in the box (busy turns: docs/opencode-gui-m2-plan.md §1).
+   */
+  onSubmit: (text: string) => boolean | void
   /** Focus the textarea on mount; disable while a turn streams. */
   autofocus?: boolean
 }
@@ -52,8 +56,8 @@ export function Prompt(props: PromptProps) {
   const submit = () => {
     const text = (input?.plainText ?? "").trim()
     if (!text) return
+    if (props.onSubmit(text) === false) return
     input?.setText("")
-    props.onSubmit(text)
   }
 
   return (

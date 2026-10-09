@@ -1,8 +1,12 @@
-"""TDD (M0.5): the IPC service + handler table, over a real Unix socket.
+"""TDD (M0.5/M2): the IPC service + handler table, over a real Unix socket.
 
 Both sides use python-lsp-jsonrpc: the server is ``IpcService`` and the test
 client is a plain ``Endpoint`` — the wire format is the library's
 Content-Length framed JSON-RPC 2.0.
+
+M2: ``session.prompt`` runs a scripted ``process_input`` (the fake replays
+loop events through the bridge), and ``session.interrupt`` must really cancel
+the spawned turn — not the M0 stub that set and immediately cleared a flag.
 """
 
 from __future__ import annotations
@@ -19,6 +23,8 @@ from pylsp_jsonrpc.endpoint import Endpoint
 from pylsp_jsonrpc.exceptions import JsonRpcMethodNotFound
 from pylsp_jsonrpc.streams import JsonRpcStreamReader, JsonRpcStreamWriter
 
+from ai_coding.core.events import ToolFinished, ToolStarted, TurnFinished
+from ai_coding.domain.loop import TurnOutcome, TurnStatus
 from ai_coding.server.handlers import make_handlers
 from ai_coding.server.service import IpcService
 from ai_coding.service.session_service import SessionService
@@ -31,13 +37,57 @@ class _FakeEngine:
 
 
 class _FakeLoop:
+    """Scriptable stand-in for ``AgentLoop.process_input``.
+
+    ``script`` is a list of ``(observer, on_delta) -> None`` steps replayed in
+    order; every call is recorded so tests can assert the handler wired the
+    bridge into both channels.
+    """
+
     skills = None
 
-    def __init__(self) -> None:
+    def __init__(self, script: list | None = None) -> None:
         self.model = ""
+        self.script = list(script or [])
+        self.calls: list[dict] = []
 
     def set_model(self, name: str) -> None:
         self.model = name
+
+    async def process_input(self, session, user_input, on_delta=None, observer=None):
+        self.calls.append(
+            {"session": session, "text": user_input, "on_delta": on_delta, "observer": observer}
+        )
+        for step in self.script:
+            step(observer, on_delta)
+        return "done"
+
+
+class _SlowLoop(_FakeLoop):
+    """A turn that hangs until cancelled, honouring the loop's cancel contract."""
+
+    async def process_input(self, session, user_input, on_delta=None, observer=None):
+        self.calls.append(
+            {"session": session, "text": user_input, "on_delta": on_delta, "observer": observer}
+        )
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            # The real loop emits TurnFinished(ABORTED) and persists before
+            # re-raising (core/agent_loop.py:570); the fake mirrors the event
+            # so the socket-level test sees the contract, not a stub.
+            observer.on_event(
+                TurnFinished(outcome=TurnOutcome(status=TurnStatus.ABORTED, reason="interrupted"))
+            )
+            raise
+        return ""
+
+
+class _BrokenLoop(_FakeLoop):
+    """A turn that dies outside the loop's own error handling."""
+
+    async def process_input(self, session, user_input, on_delta=None, observer=None):
+        raise RuntimeError("boom")
 
 
 def _fake_world(tmp_path: Path) -> SimpleNamespace:
@@ -75,11 +125,19 @@ class _TestClient:
 
     def _on_event(self, params: dict) -> None:
         self.events.append(params)
-        if params.get("type") == "turn.finish":
+        if params.get("type") == "turn.finished":
             self.turn_finished.set()
 
     def request(self, method: str, params: dict | None = None, timeout: float = 5.0):
         return self.endpoint.request(method, params).result(timeout)
+
+    async def wait_for(self, predicate, attempts: int = 250) -> bool:
+        """Poll without blocking the loop (a threading wait would starve it)."""
+        for _ in range(attempts):
+            if predicate():
+                return True
+            await asyncio.sleep(0.02)
+        return predicate()
 
     def close(self) -> None:
         self.conn.close()
@@ -132,24 +190,97 @@ async def test_session_create_and_list(ipc):
 
 
 @pytest.mark.asyncio
-async def test_session_prompt_echoes_events(ipc):
-    _world, _service, client = ipc
+async def test_session_prompt_runs_scripted_turn(ipc):
+    world, _service, client = ipc
     hello = client.request("initialize")
     session_id = hello["sessionId"]
+    world.loop.script = [
+        lambda _obs, delta: delta("hel"),
+        lambda _obs, delta: delta("lo"),
+        lambda obs, _delta: obs.on_event(
+            ToolStarted(call_id="c1", tool_name="bash", params={"command": "ls"}, iteration=1)
+        ),
+        lambda obs, _delta: obs.on_event(
+            ToolFinished(call_id="c1", tool_name="bash", success=True, output_preview="ok")
+        ),
+        lambda obs, _delta: obs.on_event(
+            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="hello"))
+        ),
+    ]
     ack = client.request("session.prompt", {"id": session_id, "text": "hi"})
     assert ack["turnId"] == 1
-    # The echo turn runs on the asyncio loop — poll without blocking it.
-    for _ in range(250):
-        if client.turn_finished.is_set():
-            break
-        await asyncio.sleep(0.02)
-    assert client.turn_finished.is_set()
+    assert ack["sessionId"] == session_id
+    assert await client.wait_for(client.turn_finished.is_set)
     types = [event["type"] for event in client.events]
-    assert types[0] == "turn.start"
-    assert "text.delta" in types
+    assert types == ["text.delta", "text.delta", "tool.started", "tool.finished", "turn.finished"]
+    assert client.events[0]["data"] == {"text": "hel"}
+    assert client.events[2]["data"]["callId"] == "c1"
+    assert client.events[-1]["data"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_session_prompt_wires_bridge_into_both_channels(ipc):
+    """The fake records how it was called: on_delta and observer must be the
+    bridge's, so live turns reach the client through the real mapping."""
+    world, _service, client = ipc
+    client.request("initialize")
+    ack = client.request("session.prompt", {"text": "x"})
+    assert ack["turnId"] == 1
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+    call = world.loop.calls[-1]
+    assert call["text"] == "x"
+    call["on_delta"]("live")
+    call["observer"].on_event(
+        TurnFinished(outcome=TurnOutcome(status=TurnStatus.ABORTED, reason="stop"))
+    )
+    assert await client.wait_for(client.turn_finished.is_set)
+    types = [event["type"] for event in client.events]
+    assert types == ["text.delta", "turn.finished"]
+    assert client.events[0]["data"] == {"text": "live"}
+    assert client.events[1]["data"]["status"] == "aborted"
+
+
+@pytest.mark.asyncio
+async def test_session_prompt_requires_initialize(ipc):
+    _world, _service, client = ipc
+    with pytest.raises(Exception, match="session"):
+        client.request("session.prompt", {"text": "no session yet"})
+
+
+@pytest.mark.asyncio
+async def test_interrupt_cancels_running_turn(ipc):
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop = _SlowLoop()
+    client.request("session.prompt", {"text": "slow"})
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+    ack = client.request("session.interrupt")
+    assert ack["ok"] is True
+    assert ack["interrupted"] == 1
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert client.events[-1]["data"]["status"] == "aborted"
+    # The tool-batch fast path: one Esc leaves the event set; the loop clears
+    # it before each batch (core/agent_loop.py:932).
+    assert world.cancel.is_set()
+
+
+@pytest.mark.asyncio
+async def test_interrupt_with_no_turn_is_a_noop(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+    assert client.request("session.interrupt") == {"ok": True, "interrupted": 0}
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_reports_unexpected_errors(ipc):
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop = _BrokenLoop()
+    client.request("session.prompt", {"text": "boom"})
+    assert await client.wait_for(client.turn_finished.is_set)
     final = client.events[-1]["data"]
-    assert final["status"] == "completed"
-    assert final["text"] == "echo: hi"
+    assert final["status"] == "error"
+    assert "boom" in final["reason"]
 
 
 @pytest.mark.asyncio

@@ -1,39 +1,27 @@
 /**
- * Session route (M0): transcript + streaming + composer.
+ * Session route (M2): real AgentLoop turns over the IPC event bridge.
  *
- * Message rows follow OpenCode's grammar:
- *   user       -> left ┃ border in agent color, raised background
- *   assistant  -> markdown/text padded left 3 (no border)
- *   streaming  -> an assistant row fed by text.delta events
+ * Data flow, one direction only:
+ *   IpcClient.onEvent -> reduce(state, event) -> createStore -> <MessageView>
  *
- * The event contract is the M0 server's echo turn; M2 swaps the backend for
- * the real AgentLoop without changing any of this file.
+ * Local state is limited to two things the reducer does not own:
+ *   busy   (in the store: reducer decides it from submitted/turn.finished)
+ *   thinking (a signal: OC's global thinking=hide/show toggle, bound to ctrl+t)
+ *
+ * Busy semantics (user-approved): the prompt stays editable while a turn
+ * runs; Enter is ignored and the text stays in the box.  Esc interrupts
+ * through the server's two-layer cancel (tool batch + turn future).
  */
 
 import type { ScrollBoxRenderable } from "@opentui/core"
-import { For, createSignal, onCleanup, onMount } from "solid-js"
-import type { IpcClient } from "../ipc"
+import { useBindings } from "@opentui/keymap/solid"
+import { Index, createSignal, onCleanup, onMount } from "solid-js"
+import { createStore } from "solid-js/store"
+import { MessageView } from "../component/message"
 import { Prompt } from "../component/prompt"
-import { theme } from "../theme/tokens"
-
-interface ChatLine {
-  role: "user" | "assistant"
-  text: string
-}
-
-const USER_BORDER = {
-  topLeft: "",
-  topRight: "",
-  bottomRight: "",
-  horizontal: "▀",
-  vertical: "┃",
-  bottomLeft: "╹",
-  topT: "",
-  bottomT: "",
-  leftT: "",
-  rightT: "",
-  cross: "",
-}
+import type { IpcClient } from "../ipc"
+import type { Action, SessionState } from "../state/session"
+import { initialState, reduce } from "../state/session"
 
 export interface SessionProps {
   client: IpcClient
@@ -45,55 +33,55 @@ export interface SessionProps {
 }
 
 export function Session(props: SessionProps) {
-  const [lines, setLines] = createSignal<ChatLine[]>([])
-  const [streaming, setStreaming] = createSignal("")
-  const [busy, setBusy] = createSignal(false)
+  const [state, setState] = createStore<SessionState>(initialState())
+  const [thinking, setThinking] = createSignal(false)
   let transcript: ScrollBoxRenderable | undefined
+
+  const apply = (action: Action) => {
+    const next = reduce(state, action)
+    if (next !== state) setState(next)
+  }
+
+  const submit = (text: string): boolean => {
+    if (state.busy) return false
+    apply({ kind: "submitted", text })
+    void props.client.request("session.prompt", { id: props.sessionId, text }).catch((error) => {
+      apply({ kind: "submit-failed", reason: String(error) })
+    })
+    return true
+  }
+
+  useBindings(() => ({
+    commands: [
+      {
+        name: "session.interrupt",
+        desc: "Interrupt the running turn",
+        run: () => {
+          if (!state.busy) return
+          void props.client.request("session.interrupt")
+        },
+      },
+      {
+        name: "session.toggle.thinking",
+        desc: "Toggle thinking",
+        run: () => setThinking((value) => !value),
+      },
+    ],
+    bindings: [
+      { key: "escape", cmd: "session.interrupt" },
+      { key: "ctrl+t", cmd: "session.toggle.thinking" },
+    ],
+  }))
 
   onMount(() => {
     const unsubscribe = props.client.onEvent((event) => {
-      switch (event.type) {
-        case "turn.start":
-          setBusy(true)
-          break
-        case "text.delta":
-          setStreaming((current) => current + String(event.data["text"] ?? ""))
-          break
-        case "turn.finish": {
-          const finalText = String(event.data["text"] ?? "")
-          const streamed = streaming()
-          setLines((current) => [
-            ...current,
-            { role: "assistant", text: finalText || streamed },
-          ])
-          setStreaming("")
-          setBusy(false)
-          break
-        }
-      }
-      transcript?.scrollTo(transcript?.scrollHeight ?? 0)
+      apply({ kind: "wire", event })
     })
     onCleanup(unsubscribe)
     if (props.initialPrompt) {
-      void submit(props.initialPrompt)
+      submit(props.initialPrompt)
     }
   })
-
-  const submit = async (text: string) => {
-    setLines((current) => [...current, { role: "user", text }])
-    try {
-      await props.client.request("session.prompt", {
-        id: props.sessionId,
-        text,
-      })
-    } catch (error) {
-      setLines((current) => [
-        ...current,
-        { role: "assistant", text: `[error] ${error}` },
-      ])
-      setBusy(false)
-    }
-  }
 
   return (
     <box flexDirection="column" width="100%" height="100%">
@@ -106,42 +94,16 @@ export function Session(props: SessionProps) {
         paddingRight={2}
         paddingTop={1}
       >
-        <For each={lines()}>
-          {(line) =>
-            line.role === "user" ? (
-              <box
-                marginTop={1}
-                border={["left"]}
-                customBorderChars={USER_BORDER}
-                borderColor={theme.agentColor}
-                backgroundColor={theme.backgroundRaised}
-                paddingLeft={2}
-                paddingRight={2}
-                paddingTop={0}
-                paddingBottom={0}
-              >
-                <text fg={theme.textBase}>{line.text}</text>
-              </box>
-            ) : (
-              <box marginTop={1} paddingLeft={3}>
-                <text fg={theme.textBase}>{line.text}</text>
-              </box>
-            )
-          }
-        </For>
-        {streaming() ? (
-          <box marginTop={1} paddingLeft={3}>
-            <text fg={theme.textBase}>{streaming()}</text>
-          </box>
-        ) : null}
+        <Index each={state.messages}>
+          {(message) => <MessageView message={message()} thinking={thinking()} />}
+        </Index>
         <box height={1} />
       </scrollbox>
-      <box paddingLeft={2} paddingRight={2} paddingBottom={1}>
+      <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexShrink={0}>
         <Prompt
-          placeholder={busy() ? "Working…" : 'Ask anything…'}
-          metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${busy() ? " · working" : ""}`}
+          placeholder={state.busy ? "Working…" : "Ask anything…"}
+          metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
           onSubmit={submit}
-          autofocus={!busy()}
         />
       </box>
     </box>

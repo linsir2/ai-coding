@@ -25,6 +25,7 @@ import logging
 import socket
 import threading
 from collections.abc import Callable, Coroutine
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -165,6 +166,11 @@ class IpcService:
         """Run a coroutine on the asyncio loop and block for its result."""
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout)
 
-    def spawn(self, coro: Coroutine[Any, Any, Any]) -> None:
-        """Schedule a coroutine on the asyncio loop without waiting."""
-        asyncio.run_coroutine_threadsafe(coro, self._loop)
+    def spawn(self, coro: Coroutine[Any, Any, Any]) -> Future[Any]:
+        """Schedule a coroutine on the asyncio loop without waiting.
+
+        Returns the concurrent future wrapping the task: cancelling it chains
+        to the asyncio task (``session.interrupt`` relies on this from the
+        handler thread), and a done-callback prunes the caller's bookkeeping.
+        """
+        return asyncio.run_coroutine_threadsafe(coro, self._loop)

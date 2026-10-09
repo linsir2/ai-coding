@@ -458,7 +458,7 @@ frontend/
 | **M0** 骨架（IPC 往返）✅ | Python socket server + 启 bun；TS Home 屏（Logo+Prompt）；提交→echo 显示 | 端到端可跑 | ✅ tmux 实测 + 18 个 IPC 单测 |
 | **M0.5** 库替换（v2）✅ | IPC 换 `vscode-jsonrpc`↔`python-lsp-jsonrpc`；键位换 `@opentui/keymap`；Logo 换 `figlet`；依赖落地（fuzzysort/string-width/diff/zod/opentui-spinner） | 同样功能、零手写协议 | ✅ tmux 实测 + 7 个服务层单测 |
 | **M1** 主题 + Home 完整 ✅ | token 表、placeholder 随机示例、footer（`~dir:branch` + 版本 + 阈值显隐）+ 主题跟随终端 | 完整首页 | ✅ 140×42 列号实测对齐 + 80×24/40×10 边界 + 15 bun 单测 |
-| **M2** 真实会话 | 接 AgentLoop 事件桥（经 keymap/ipc 封装）；消息/工具/推理/计划渲染；中断 | 完整对话 | 截图对比 + 事件桥测试 |
+| **M2** 真实会话 ✅ | 接 AgentLoop 事件桥（经 keymap/ipc 封装）；消息/工具/推理/计划渲染；中断 | 完整对话 | ✅ 真回合 tmux 实测（含 Esc 中断/忙时输入/ctrl+t）+ 34 桥单测 + 12 socket 集成 + 48 bun 单测 |
 | **M3** 对话框系统 | Dialog 宿主 + DialogSelect（fuzzysort）+ palette/models/sessions/skills/status/help | Ctrl+P 全可用 | 截图对比 |
 | **M4** 标签 + 侧栏 | session tabs（横向）+ sidebar（Context/MCP）+ 状态 | 多会话 | 截图对比 |
 | **M5** 交互细节 | leader 键位、autocomplete（`@opentui/keymap` 层）、审批面板（ipc 双向请求）、toast、队列、两段式 esc | 全功能 | 端到端 + 截图 |
