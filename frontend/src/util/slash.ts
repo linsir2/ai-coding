@@ -12,10 +12,24 @@ import { go } from "fuzzysort"
 export interface SlashCommand {
   /** Canonical name without the slash, e.g. ``help``. */
   name: string
-  /** The keymap command a selection runs. */
-  command: string
+  /**
+   * The keymap command a selection runs, or ``undefined`` for a **text**
+   * command: the selection submits ``/<name>`` to ``session.command`` and the
+   * backend's dispatcher decides what it means (A2.3).  An entry must have one
+   * or the other — an entry pointing at a command that only the session route
+   * registers silently did nothing on Home.
+   */
+  command?: string
   title: string
   description: string
+}
+
+/**
+ * The line a catalogue selection submits.  A keymap entry returns nothing (the
+ * command runs instead); a text entry returns its own slash line.
+ */
+export function slashSelectionText(entry: SlashCommand): string | undefined {
+  return entry.command ? undefined : `/${entry.name}`
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
@@ -72,6 +86,22 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     command: "session.review",
     title: "Review",
     description: "Review the current git diff",
+  },
+  // ---- text commands: submitted verbatim, dispatched by the backend (A2.3).
+  // Each one is a query or a requested action the backend already implements
+  // (app/commands.py); the output lands in the transcript as notice lines.
+  { name: "budget", title: "Budget", description: "This session's token ledger" },
+  { name: "trace", title: "Trace", description: "Last turn's trace summary" },
+  { name: "todo", title: "Todo", description: "Render the current task list" },
+  { name: "memory", title: "Memory", description: "Memory store statistics" },
+  { name: "config", title: "Config", description: "Model and runtime limits in effect" },
+  { name: "tasks", title: "Tasks", description: "Background sub-agent runs (add: stop <id>)" },
+  { name: "compact", title: "Compact", description: "Compact this session's history now" },
+  {
+    name: "permissions",
+    command: "session.permissions",
+    title: "Permissions",
+    description: "Show or switch the approval policy (add: auto|confirm|clear)",
   },
 ]
 

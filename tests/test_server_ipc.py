@@ -24,7 +24,7 @@ from pylsp_jsonrpc.exceptions import JsonRpcMethodNotFound
 from pylsp_jsonrpc.streams import JsonRpcStreamReader, JsonRpcStreamWriter
 
 from ai_coding.core.events import ToolFinished, ToolStarted, TurnFinished
-from ai_coding.domain.loop import TurnOutcome, TurnStatus
+from ai_coding.domain.loop import StepResult, TurnOutcome, TurnStatus
 from ai_coding.domain.session import TurnUsage
 from ai_coding.security.approval import ApprovalResult, CLIApprovalCallback
 from ai_coding.security.user_prompt import CLIUserPromptCallback
@@ -77,7 +77,20 @@ class _FakeLoop:
         )
         for step in self.script:
             step(observer, on_delta)
+        # The real loop persists the exchange; commands that rewrite history
+        # (``/compact``) need something to rewrite.
+        from ai_coding.domain.run import assistant_message, user_message
+
+        stamp = "2026-01-01T00:00:00Z"
+        session.add_message(user_message(user_input, stamp))
+        session.add_message(assistant_message(StepResult(text="done"), stamp))
         return "done"
+
+    async def compact_session(self, session):
+        """The real loop replaces the stored history (compaction.py:101)."""
+        before = len(session.messages)
+        session.messages = list(session.messages)[-1:]
+        return {"messages": before, "after": len(session.messages), "removed": before - 1}
 
 
 class _SlowLoop(_FakeLoop):
@@ -108,6 +121,12 @@ class _BrokenLoop(_FakeLoop):
 
 
 def _fake_world(tmp_path: Path) -> SimpleNamespace:
+    # Faithful in one respect the /permissions invariant depends on: a real
+    # AgentLoop hands the very callback world holds to its dispatcher, so the
+    # command layer can swap ``dispatcher.approval`` out from under it (I1).
+    approval = CLIApprovalCallback()
+    loop = _FakeLoop()
+    loop.dispatcher = SimpleNamespace(approval=approval, gate=None)
     return SimpleNamespace(
         sessions=SessionService(tmp_path / "sessions"),
         engine=_FakeEngine(),
@@ -118,10 +137,10 @@ def _fake_world(tmp_path: Path) -> SimpleNamespace:
             ),
             default_model="fake",
         ),
-        loop=_FakeLoop(),
+        loop=loop,
         workspace=str(tmp_path),
         cancel=asyncio.Event(),
-        approval=CLIApprovalCallback(),
+        approval=approval,
         user_prompt=CLIUserPromptCallback(),
     )
 
@@ -312,6 +331,80 @@ async def test_session_command_quit_reports_the_action(ipc):
     client.request("session.command", {"text": "/quit"})
     assert await client.wait_for(client.turn_finished.is_set)
     assert client.events[-1]["data"]["action"] == "quit"
+
+
+@pytest.mark.asyncio
+async def test_permissions_confirm_keeps_approvals_on_the_wire(ipc):
+    """I1: ``/permissions confirm`` swaps in a FRESH CLIApprovalCallback with no
+    provider — without re-installing the IPC provider afterwards the next WARN
+    approval falls back to reading stdin and the turn hangs (the retired TUI
+    called ``_ensure_approval_provider`` after every command for this reason).
+    """
+    from ai_coding.security.approval import ApprovalResult
+
+    world, _service, client = ipc
+    client.request("initialize")
+    client.request("session.command", {"text": "/permissions confirm"})
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    # the swapped callback must still answer over the socket, not stdin
+    client.approval_answer = "yes"
+    result = await world.loop.dispatcher.approval.approve(
+        "write", {"path": "b.py"}, "warn tier"
+    )
+    assert result is ApprovalResult.YES
+    assert client.approval_requests[-1]["toolName"] == "write"
+
+
+@pytest.mark.asyncio
+async def test_session_command_inner_turns_end_once_when_cancelled(ipc):
+    """I3 on the cancel path: exactly one terminal event, status aborted."""
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop = _SlowLoop()
+    client.request("session.command", {"text": "/review"})
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+    client.request("session.interrupt")
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    types = [event["type"] for event in client.events]
+    assert types.count("turn.finished") == 1
+    assert client.events[-1]["data"]["status"] == "aborted"
+
+
+@pytest.mark.asyncio
+async def test_compact_asks_the_client_to_re_project(ipc):
+    """D1/I9: the transcript is a projection of persisted messages, so a
+    command that rewrote the history shorter tells the client to re-project —
+    detected by the fact, not by sniffing the command text."""
+    world, _service, client = ipc
+    client.request("initialize")
+    # give the session something to compact
+    world.loop.script = [
+        lambda obs, _delta: obs.on_event(
+            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="done"))
+        )
+    ]
+    client.request("session.prompt", {"text": "one"})
+    assert await client.wait_for(client.turn_finished.is_set)
+    client.turn_finished.clear()
+    client.events.clear()
+
+    client.request("session.command", {"text": "/compact"})
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    data = client.events[-1]["data"]
+    assert data["reload"] is True
+    assert data["messagesAfter"] < data["messagesBefore"]
+
+
+@pytest.mark.asyncio
+async def test_a_query_command_asks_for_no_re_projection(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+    client.request("session.command", {"text": "/status"})
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert client.events[-1]["data"]["reload"] is False
 
 
 @pytest.mark.asyncio

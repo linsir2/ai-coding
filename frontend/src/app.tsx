@@ -29,6 +29,7 @@ import { loadSession } from "./state/replay"
 import { initialState, type SessionState } from "./state/session"
 import { theme } from "./theme/tokens"
 import type { AskRequest } from "./util/ask"
+import { quitSequence } from "./util/exit"
 import type { PermissionDecision } from "./util/permission"
 
 export interface Hello {
@@ -43,8 +44,26 @@ export interface Hello {
   models: ModelRow[]
 }
 
-function Shell(props: { client: IpcClient; hello: Hello }) {
+function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }) {
   const dialog = useDialog()
+  // One exit path (I5): the socket closes, the renderer is torn down so the
+  // terminal leaves raw mode, then the process goes.  `/quit` from a command,
+  // ctrl+c, and a dropped backend connection all land here.
+  const exitWith = (message?: string) =>
+    quitSequence({
+      close: () => props.client.close(),
+      destroy: () => props.renderer.destroy(),
+      exit: () => process.exit(0),
+      error: (line) => console.error(line),
+    }, message ? { message } : undefined)
+  const requestExit = () => {
+    // Ask the backend to stop first; it may already be gone (a command's
+    // `/quit`), and the finally keeps the sequence running either way.
+    void props.client
+      .request("shutdown")
+      .catch(() => undefined)
+      .finally(() => exitWith())
+  }
   const [route, setRoute] = createSignal<"home" | "session">("home")
   const [sessionId, setSessionId] = createSignal(props.hello.sessionId)
   const [pendingPrompt, setPendingPrompt] = createSignal("")
@@ -198,9 +217,18 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
     // A finished turn settles any pending approval or question; the backend
     // has moved on (the tool result says "nobody answered").
     props.client.onEvent((event) => {
+      if (event.type === "connection.closed") {
+        // The backend is gone (crash, external kill).  Our own close() sets the
+        // client's `closed` flag, so this only fires for an unexpected drop.
+        exitWith("ai-coding: backend connection closed")
+        return
+      }
       if (event.type !== "turn.finished") return
       if (permission() !== null) decidePermission("no")
       if (ask() !== null) answerAsk("")
+      // `/quit` as a command: the backend already stopped on its side, so the
+      // socket is closing — leave through the same sequence (I5).
+      if (event.data["action"] === "quit") exitWith()
     })
   })
 
@@ -306,6 +334,14 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
         run: () => startSession("/review"),
       },
       {
+        name: "session.permissions",
+        title: "Permissions",
+        group: "Session",
+        desc: "Show or switch the approval policy",
+        palette: true,
+        run: () => startSession("/permissions "),
+      },
+      {
         name: "session.next",
         title: "Next session",
         group: "Session",
@@ -328,12 +364,7 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
         group: "System",
         desc: "Exit the app",
         palette: true,
-        run: () => {
-          void props.client.request("shutdown").finally(() => {
-            props.client.close()
-            process.exit(0)
-          })
-        },
+        run: () => requestExit(),
       },
     ],
     bindings: [
@@ -381,6 +412,7 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
             onPermissionDecide={decidePermission}
             ask={ask()}
             onAskAnswer={answerAsk}
+            onQuit={exitWith}
             onSelectSession={(id) => void onSelectSession(id)}
             onNewSession={() => void onNewSession()}
             onTurnFinished={() => void refreshSessions()}
@@ -394,7 +426,7 @@ function Shell(props: { client: IpcClient; hello: Hello }) {
 export function App(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }) {
   return (
     <DialogProvider renderer={props.renderer}>
-      <Shell client={props.client} hello={props.hello} />
+      <Shell client={props.client} hello={props.hello} renderer={props.renderer} />
     </DialogProvider>
   )
 }

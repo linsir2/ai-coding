@@ -50,6 +50,12 @@ GUI 复刻里程碑中已删除）。旧 Textual 实现的布局/组件细节见
 `frontend/src/prompt` 的自动补全 + `util/slash.ts` 过滤）；输入 `/` 会唤起命令面板（见 R12 节），
 所以 `/` 本身不是普通文本。未知 `/xxx` 仍会**当作普通输入发给模型**，不是错误。
 
+> **TUI 接线状态（A2）**：TUI 里 `/` 开头的行统一经 `session.command` 交给上面的
+> `handle_input` 分发（GUI 复刻 §A1/A2），输出以 `console.line` 落进对话。目录（`util/slash.ts`）只收录**真能跑**的条目：对话框型（models/sessions/skills/status/help/new/quit）、
+命令型（plan/review/permissions）、文本型（budget/trace/todo/memory/config/tasks/compact——
+选择即提交 `/<name>`，语义全在后端）。带参命令（`/permissions auto`、`/tasks stop <id>`）
+在命令后带空格即可（补全遇空格自动收起，Enter 走提交）。
+
 | 命令 | 参数 | 功能 |
 |---|---|---|
 | `/help` `/h` | — | 列出全部直接命令 |

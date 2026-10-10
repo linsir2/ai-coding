@@ -33,11 +33,10 @@ class AppWorld:
     cancel: asyncio.Event
     steering: Any
     #: The WARN-tier approval callback; the IPC layer installs its provider
-    # (handlers.py::_wire_approval) so the panel can answer it (M5).
+    # (handlers.py::_install_providers) so the panel can answer it (M5), and
     approval: Any
-    #: The model's question channel; the IPC layer installs its provider
-    # (handlers.py::_wire_user_prompt) so the panel can answer it.  Without a
-    # provider it falls back to the stdin prompt (the non-TUI entry points).
+    #: is re-armed after every command that may swap it (I1).  The
+    #: model's question channel is installed the same way.
     user_prompt: Any
 
     async def aclose(self) -> None:
@@ -73,7 +72,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
 
     engine = build_engine_from_config(app_cfg)
     # The question channel: with the TUI's provider installed by
-    # handlers._wire_user_prompt the model's questions reach the panel; the
+    # handlers._install_providers the model's questions reach the panel; the
     # stdin fallback serves the non-TUI entry points.
     user_prompt = CLIUserPromptCallback()
     registry = _build_tool_registry(

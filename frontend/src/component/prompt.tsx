@@ -24,7 +24,7 @@ import { For, Show, createEffect, createSignal, onMount } from "solid-js"
 import { theme } from "../theme/tokens"
 import { moveSelection } from "../util/dialog-select"
 import type { SlashCommand } from "../util/slash"
-import { filterSlashCommands, slashQuery } from "../util/slash"
+import { filterSlashCommands, slashQuery, slashSelectionText } from "../util/slash"
 
 /** OpenCode's prompt border: left-only ┃ with a half-block bottom cap. */
 export const PROMPT_BORDER = {
@@ -88,7 +88,14 @@ export function Prompt(props: PromptProps) {
     if (!choice) return
     setSuggestions([])
     input?.setText("")
-    keymap.runCommand(choice.command)
+    // A text entry (no keymap command) is submitted verbatim: the backend's
+    // dispatcher owns what a slash line means (A2.3, SlashCommand's contract).
+    const text = slashSelectionText(choice)
+    if (text !== undefined) {
+      props.onSubmit(text)
+      return
+    }
+    keymap.runCommand(choice.command!)
   }
 
   onMount(() => {
@@ -103,6 +110,9 @@ export function Prompt(props: PromptProps) {
     const seed = props.seed
     if (!seed) return
     input?.setText(seed)
+    // The cursor lands at 0 after setText; a pre-filled command must be
+    // *completed* by typing, not prefixed (E2E caught "auto/permissions").
+    if (input) input.cursorOffset = seed.length
     input?.focus()
     props.onSeedDone?.()
   })

@@ -619,8 +619,12 @@ async def test_handle_tasks_lists_background_rows_and_stops_unknown():
                                    usage={"prompt_tokens": 100,
                                           "completion_tokens": 20})]
 
+        def resolve_run_id(self, prefix):
+            return prefix if prefix.startswith("abc123") else None
+
         def cancel(self, run_id):
-            return False
+            self.cancelled = run_id
+            return True
 
     registry = ToolRegistry()
     registry.register(SubAgentTool(_TableRunner()))
@@ -632,6 +636,43 @@ async def test_handle_tasks_lists_background_rows_and_stops_unknown():
     out = _session_text(c)
     assert action is REPLAction.CONTINUE
     assert "abc123" in out and "running" in out and "120" in out
+
+
+@pytest.mark.asyncio
+async def test_handle_tasks_stop_accepts_the_printed_prefix():
+    """``/tasks`` prints 12 chars; stopping by exactly those must work (the
+    operator has nothing else to copy)."""
+    from ai_coding.core.subagent import BackgroundTask
+    from ai_coding.tools.registry import ToolRegistry
+    from ai_coding.tools.subagent_tool import SubAgentTool
+
+    class _TableRunner:
+        cancelled = None
+
+        def task_list(self):
+            return [BackgroundTask(run_id="abc123def4567890", name="probe", task="t",
+                                   status="running", started=10.0, ended=None)]
+
+        def resolve_run_id(self, prefix):
+            return prefix if prefix.startswith("abc123") else None
+
+        def cancel(self, run_id):
+            self.cancelled = run_id
+            return True
+
+    runner = _TableRunner()
+    registry = ToolRegistry()
+    registry.register(SubAgentTool(runner))
+    loop = SimpleNamespace(dispatcher=SimpleNamespace(registry=registry))
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(
+        loop, "/tasks stop abc123", sessions.items[0], sessions, dc
+    )
+    assert action is REPLAction.CONTINUE
+    assert runner.cancelled == "abc123"  # the prefix itself resolves to the row
+    assert "stopping abc123" in _session_text(c)
 
     action, _ = await handle_input(loop, "/tasks stop nope", sessions.items[0],
                                    sessions, dc)

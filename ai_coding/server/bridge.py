@@ -20,7 +20,7 @@ bookkeeping and ``Degraded`` — the ``/trace`` dialog (M3) owns those.  Droppin
 them here keeps the wire small and the reducer honest.
 
 M5: ``ToolApprovalRequested`` is deliberately *not* mapped — approvals travel
-as a server-initiated request (``approval.request``, handlers.py::_wire_approval)
+as a server-initiated request (``approval.request``, handlers.py::_install_providers)
 whose answer is the decision, and the panel is the display.
 """
 

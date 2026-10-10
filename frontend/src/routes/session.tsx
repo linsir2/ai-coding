@@ -29,6 +29,7 @@ import { initialState, reduce } from "../state/session"
 import { useToast } from "../component/toast"
 import { theme } from "../theme/tokens"
 import { escStep } from "../util/esc"
+import { loadSession } from "../state/replay"
 import type { AskRequest } from "../util/ask"
 import type { PermissionDecision } from "../util/permission"
 
@@ -51,6 +52,8 @@ export interface SessionProps {
   onPermissionDecide: (decision: PermissionDecision) => void
   ask: AskRequest | null
   onAskAnswer: (answer: string) => void
+  /** Leave through the shell's exit sequence (a command's `/quit`, I5). */
+  onQuit: () => void
   onSelectSession: (id: string) => void
   onNewSession: () => void
   /** The tab list can go stale after a turn; the shell refreshes it. */
@@ -174,6 +177,17 @@ export function Session(props: SessionProps) {
           dispatch("/review")
         },
       },
+      {
+        // Bare /permissions would print the report; the interesting half is
+        // the argument (auto|confirm|clear), so pre-fill the command and let
+        // the operator type it — the same trick /plan uses for its topic.
+        name: "session.permissions",
+        title: "Permissions",
+        group: "Session",
+        desc: "Show or switch the approval policy",
+        palette: true,
+        run: () => setPromptSeed("/permissions "),
+      },
     ],
     bindings: [
       { key: "escape", cmd: "session.interrupt" },
@@ -194,9 +208,29 @@ export function Session(props: SessionProps) {
         props.onTurnFinished()
         // /clear and /resume <id> end with the REPL's NEW_SESSION action; the
         // backend has already switched the live session, so the tabs follow.
-        if (event.data["action"] === "new_session") {
+        const action = event.data["action"]
+        if (action === "new_session") {
           const id = String(event.data["sessionId"] ?? "")
           if (id) props.onSelectSession(id)
+        }
+        if (action === "quit") props.onQuit()
+        if (event.data["reload"] === true) {
+          // The command rewrote the persisted history shorter (/compact):
+          // the transcript is a projection of it, so re-project — the queued
+          // line survives (I9) and the explanation rides a toast because the
+          // "[compact] …" notice is wiped by the very re-projection (D1).
+          void (async () => {
+            const before = Number(event.data["messagesBefore"] ?? 0)
+            const after = Number(event.data["messagesAfter"] ?? 0)
+            const loaded = await loadSession(props.client, props.sessionId)
+            setState({ ...loaded, queued: state.queued })
+            void refreshStats()
+            toast.show({
+              title: "Compacted",
+              message: `${before} → ${after} messages · transcript resynced`,
+              variant: "info",
+            })
+          })()
         }
         // One queued line per finished turn.
         const next = state.queued[0]

@@ -333,10 +333,21 @@ def _handle_tasks(
         return REPLAction.CONTINUE, session
     parts = raw.split()
     if len(parts) >= 3 and parts[1] == "stop":
-        if runner.cancel(parts[2]):
-            console.info(f"[tasks] stopping {parts[2][:12]}")
+        given = parts[2]
+        # The listing prints run_id[:12]; accept what was actually copyable.
+        resolved = runner.resolve_run_id(given)
+        if resolved is None:
+            matches = [row for row in runner.task_list() if row.run_id.startswith(given)]
+            if len(matches) > 1:
+                listed = ", ".join(row.run_id[:12] for row in matches)
+                console.error(f"[tasks] '{given}' is ambiguous: {listed}")
+            else:
+                console.info(f"[tasks] no background task '{given}'")
+            return REPLAction.CONTINUE, session
+        if runner.cancel(resolved):
+            console.info(f"[tasks] stopping {resolved[:12]}")
         else:
-            console.info(f"[tasks] no background task '{parts[2]}'")
+            console.info(f"[tasks] '{given}' is not running")
         return REPLAction.CONTINUE, session
     rows = runner.task_list()
     if not rows:

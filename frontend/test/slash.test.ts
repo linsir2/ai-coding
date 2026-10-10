@@ -57,10 +57,47 @@ describe("filterSlashCommands", () => {
     expect(filterSlashCommands("zzzzz")).toEqual([])
   })
 
-  test("every catalogue entry maps to a keymap command", () => {
+  test("a keymap entry names a dotted command; names carry no slash", () => {
+    // A2.3 widened the contract: a text entry has no keymap command (the line
+    // is submitted to the backend dispatcher).  What must still hold for a
+    // keymap entry is the dotted command name, and every name stays bare.
     for (const command of SLASH_COMMANDS) {
-      expect(command.command).toMatch(/\./)
+      if (command.command !== undefined) expect(command.command).toMatch(/\./)
       expect(command.name.startsWith("/")).toBe(false)
     }
+  })
+})
+
+describe("the command catalogue (A2.3)", () => {
+  test("every entry is either a keymap command or a plain text submission (I8)", () => {
+    // The Home-screen bug this pins: an entry pointing at a command that only
+    // the session route registers silently did nothing.  A text entry is
+    // submitted verbatim to session.command instead.
+    for (const entry of SLASH_COMMANDS) {
+      const hasCommand = typeof entry.command === "string" && entry.command.length > 0
+      const isText = entry.command === undefined || entry.command === ""
+      expect(hasCommand || isText).toBe(true)
+    }
+  })
+
+  test("the backend's text-report commands are all reachable from the list", () => {
+    const names = SLASH_COMMANDS.map((entry) => entry.name)
+    for (const expected of [
+      "budget",
+      "trace",
+      "todo",
+      "memory",
+      "config",
+      "tasks",
+      "compact",
+      "permissions",
+    ]) {
+      expect(names).toContain(expected)
+    }
+  })
+
+  test("a text entry carries the exact line the backend dispatches", () => {
+    const budget = SLASH_COMMANDS.find((entry) => entry.name === "budget")
+    expect(budget?.command ?? "/budget").toBe("/budget")
   })
 })

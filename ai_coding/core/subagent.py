@@ -289,6 +289,22 @@ class SubAgentRunner:
         background_task.cancel()
         return True
 
+    def resolve_run_id(self, prefix: str) -> str | None:
+        """The full run id a printed prefix stands for, or None.
+
+        ``/tasks`` shows ``run_id[:12]`` and ``cancel`` needs the whole thing;
+        without this bridge the operator can only copy something that does not
+        work.  Ambiguous prefixes resolve to None (the caller lists candidates)
+        — the same rule ``/resume`` follows via ``SessionService.resolve``.
+        """
+        if not prefix:
+            return None
+        exact = self._background.get(prefix)
+        if exact is not None:
+            return prefix
+        matches = [key for key in self._background if key.startswith(prefix)]
+        return matches[0] if len(matches) == 1 else None
+
     def task_list(self) -> list[BackgroundTask]:
         """Background rows, oldest first (running and settled alike)."""
         return sorted(self._background.values(), key=lambda row: row.started)

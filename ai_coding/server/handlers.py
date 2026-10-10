@@ -37,50 +37,51 @@ __all__ = ["HandlerTable", "make_handlers"]
 HandlerTable = dict[str, Callable[[dict[str, Any]], Any]]
 
 
-def _wire_approval(world: AppWorld, service: IpcService) -> None:
-    """Route WARN-tier approvals to the client as a JSON-RPC request (M5).
+def _install_providers(world: AppWorld, service: IpcService) -> None:
+    """Route both question channels to the client as JSON-RPC requests.
 
-    The callback answers with the CLI vocabulary (``yes``/``always``/``no``/
+    Called twice on purpose, and idempotent: once when the handler table is
+    built, and again after every ``session.command`` run.  A command can swap
+    the callbacks out from under us — ``/permissions confirm`` installs a
+    FRESH ``CLIApprovalCallback`` with no provider — and a callback without a
+    provider falls back to reading **stdin**, which in a full-screen TUI means
+    the turn waits on the terminal and the approval panel never appears.  The
+    retired Textual UI re-armed this after every slash command for exactly that
+    reason (``ui/textual_app.py::_ensure_approval_provider``).
+
+    Approvals answer with the CLI vocabulary (``yes``/``always``/``no``/
     ``stop``) so one parser serves both front ends (security/approval.py:88-98)
     and a failed round-trip stays fail-closed inside ``approve`` itself.
-    """
-    approval = getattr(world, "approval", None)
-    set_provider = getattr(approval, "set_provider", None)
-    if set_provider is None:
-        return
-
-    async def provider(tool_name: str, params: dict[str, Any], reason: str) -> str:
-        return str(
-            await service.call(
-                "approval.request",
-                {"toolName": tool_name, "params": params, "reason": reason},
-            )
-        )
-
-    set_provider(provider)
-
-
-def _wire_user_prompt(world: AppWorld, service: IpcService) -> None:
-    """Route the model's questions to the client as a JSON-RPC request.
-
-    The other direction of ``_wire_approval``: the model (``ask_user`` tool)
-    decides it needs an answer.  The client's answer comes back as the plain
-    text the tool renders; an empty answer (esc, a closed panel, a dead
-    round-trip) becomes ``reason="empty"``/``"no_user"`` inside
+    Questions answer with the plain text the ``ask_user`` tool renders; an
+    empty answer (esc, a closed panel) becomes ``reason="empty"`` inside
     ``CLIUserPromptCallback`` so the model decides for itself.
     """
+    dispatcher = getattr(getattr(world, "loop", None), "dispatcher", None)
+    approval = getattr(dispatcher, "approval", None) or getattr(world, "approval", None)
+    set_approval_provider = getattr(approval, "set_provider", None)
+    if set_approval_provider is not None:
+
+        async def approval_provider(tool_name: str, params: dict[str, Any], reason: str) -> str:
+            return str(
+                await service.call(
+                    "approval.request",
+                    {"toolName": tool_name, "params": params, "reason": reason},
+                )
+            )
+
+        set_approval_provider(approval_provider)
+
     prompt = getattr(world, "user_prompt", None)
-    set_provider = getattr(prompt, "set_provider", None)
-    if set_provider is None:
-        return
+    set_prompt_provider = getattr(prompt, "set_provider", None)
+    if set_prompt_provider is not None:
 
-    async def provider(question: str, options: list[str]) -> str:
-        raw = await service.call(
-            "user_prompt.ask", {"question": question, "options": list(options)}
-        )
-        return str(raw or "")
+        async def question_provider(question: str, options: list[str]) -> str:
+            raw = await service.call(
+                "user_prompt.ask", {"question": question, "options": list(options)}
+            )
+            return str(raw or "")
 
-    set_provider(provider)
+        set_prompt_provider(question_provider)
 
 
 class IpcConsole:
@@ -144,8 +145,7 @@ def make_handlers(
     """Build the request table bound to one world + one service."""
     state = _WorldState()
     bridge = EventBridge(lambda method, params: service.notify(method, params))
-    _wire_approval(world, service)
-    _wire_user_prompt(world, service)
+    _install_providers(world, service)
 
     def initialize(params: dict[str, Any]) -> dict[str, Any]:
         from ai_coding import __version__
@@ -292,6 +292,11 @@ def make_handlers(
         async def run_command() -> None:
             action_name = "continue"
             status, reason = "completed", ""
+            # A command that rewrote the persisted history shortens it
+            # (``/compact`` today).  The transcript is a projection of that
+            # history (replay.ts), so the client has to re-project — detected
+            # by the fact, not by sniffing the command text (D1).
+            history_before = len(getattr(session, "messages", ()) or ())
             bridge.command_run = True
             try:
                 action, next_session = await handle_input(
@@ -317,6 +322,10 @@ def make_handlers(
                 status, reason = "error", f"{type(exc).__name__}: {exc}"[:300]
             finally:
                 bridge.command_run = False
+                # A command may have swapped the callbacks (/permissions
+                # confirm installs a fresh, unprovided one) — re-arm before the
+                # next turn can ask anything (I1/I2).
+                _install_providers(world, service)
             service.notify(
                 "event",
                 {
@@ -331,6 +340,10 @@ def make_handlers(
                         # the live session after the command (a NEW_SESSION
                         # action has switched it)
                         "sessionId": state.session_id,
+                        # history rewritten shorter: re-project the transcript
+                        "reload": len(getattr(session, "messages", ()) or ()) < history_before,
+                        "messagesBefore": history_before,
+                        "messagesAfter": len(getattr(session, "messages", ()) or ()),
                     },
                 },
             )

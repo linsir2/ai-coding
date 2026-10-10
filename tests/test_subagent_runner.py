@@ -542,3 +542,13 @@ async def test_worktree_failure_stays_silent_without_an_observer(tmp_path):
     )
 
     assert result.status == "completed"
+
+@pytest.mark.asyncio
+async def test_resolve_run_id_matches_a_unique_prefix():
+    """``/tasks`` prints run_id[:12]; ``stop`` must accept what the operator can
+    actually copy — the same requirement the retired picker had."""
+    runner = _runner(_Engine())
+    run_id = runner.spawn_background("t", name="bg")
+    assert runner.resolve_run_id(run_id) == run_id
+    assert runner.resolve_run_id(run_id[:12]) == run_id
+    assert runner.resolve_run_id("zzz") is None
