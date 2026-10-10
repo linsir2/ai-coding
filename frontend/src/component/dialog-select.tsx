@@ -14,7 +14,7 @@ import { useBindings } from "@opentui/keymap/solid"
 import { useTerminalDimensions } from "@opentui/solid"
 import { Index, Show, createEffect, createMemo, createSignal, onMount } from "solid-js"
 import { theme } from "../theme/tokens"
-import type { SelectOption } from "../util/dialog-select"
+import type { SelectAction, SelectOption } from "../util/dialog-select"
 import { filterOptions, flattenGroups, groupOptions, moveSelection } from "../util/dialog-select"
 
 export interface DialogSelectProps {
@@ -22,6 +22,8 @@ export interface DialogSelectProps {
   options: SelectOption[]
   /** Selection handler; falls back to the option's own onSelect. */
   onSelect?: (option: SelectOption) => void
+  /** Row actions on the focused option, e.g. delete.  OpenCode's `actions`. */
+  actions?: readonly SelectAction[]
   /** Left footer text; defaults to the select hint. */
   footer?: string
   /** Fuzzysort threshold (the palette uses a stricter 0.7). */
@@ -59,6 +61,14 @@ export function DialogSelect(props: DialogSelectProps) {
       { name: "dialog.select.home", desc: "First item", run: () => setSelected(0) },
       { name: "dialog.select.end", desc: "Last item", run: () => setSelected(Math.max(0, flat().length - 1)) },
       { name: "dialog.select.submit", desc: "Select item", run: submit },
+      ...(props.actions ?? []).map((action) => ({
+        name: `dialog.select.action.${action.title}`,
+        desc: action.title,
+        run: () => {
+          const option = flat()[selected()]
+          if (option) action.onTrigger(option)
+        },
+      })),
     ],
     bindings: [
       { key: "up", cmd: "dialog.select.prev" },
@@ -70,6 +80,10 @@ export function DialogSelect(props: DialogSelectProps) {
       { key: "home", cmd: "dialog.select.home" },
       { key: "end", cmd: "dialog.select.end" },
       { key: "return", cmd: "dialog.select.submit" },
+      ...(props.actions ?? []).map((action) => ({
+        key: action.key,
+        cmd: `dialog.select.action.${action.title}`,
+      })),
     ],
   }))
 
@@ -126,8 +140,8 @@ export function DialogSelect(props: DialogSelectProps) {
                 <text
                   flexGrow={1}
                   wrapMode="none"
-                  fg={index === selected() ? theme.textBase : theme.textMuted}
-                  attributes={index === selected() ? TextAttributes.BOLD : undefined}
+                  fg={option().danger ? theme.feedbackError : index === selected() ? theme.textBase : theme.textMuted}
+                  attributes={index === selected() || option().danger ? TextAttributes.BOLD : undefined}
                 >
                   {option().title}
                   <Show when={option().description}>

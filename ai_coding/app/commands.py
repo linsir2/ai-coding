@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from ai_coding.app.console import ConsoleSink
@@ -134,6 +135,11 @@ async def handle_input(
     if cmd.name == "trace":
         console.info(_trace_report(loop))
         return REPLAction.CONTINUE, session
+    if cmd.name == "stats":
+        console.info(_stats_report(loop))
+        return REPLAction.CONTINUE, session
+    if cmd.name == "export":
+        return _handle_export(loop, cmd.raw, session, console)
     if cmd.name == "budget":
         console.info(_budget_report(loop, session))
         return REPLAction.CONTINUE, session
@@ -406,6 +412,109 @@ def _handle_model(
         console.info(f"[model] switched to {target}")
     else:
         console.error("[model] model switching not supported by this loop")
+    return REPLAction.CONTINUE, session
+
+
+def _stats_report(loop: Any) -> str:
+    """Cross-session rollup (R9b's numbers) for ``/stats``.
+
+    Read-only: every traced session is folded into one report, newest first.
+    An empty store says so — a hollow table would read as a bug.
+    """
+    from ai_coding.core.aggregate import build_report
+
+    recorder = getattr(loop, "trace", None)
+    store = getattr(recorder, "store", None)
+    if store is None:
+        return "[stats] tracing is off for this session"
+    report = build_report(store)
+    if not report.rows:
+        return "[stats] no traced sessions under this workspace yet"
+    lines = ["[stats] sessions:"]
+    for row in report.rows:
+        lines.append(
+            f"  {row.session[:12]}  turns={row.turns} steps={row.steps} "
+            f"tok={row.prompt_tokens + row.completion_tokens} "
+            f"cache={row.cache_ratio * 100:.0f}% age={row.age_days:.1f}d"
+        )
+    totals = report.totals
+    lines.append(
+        f"  (all)  sessions={len(report.rows)} turns={totals.turns} "
+        f"steps={totals.steps} tok={totals.prompt_tokens + totals.completion_tokens} "
+        f"cache={report.cache_ratio * 100:.0f}%"
+    )
+    return "\n".join(lines)
+
+
+def _export_dir(loop: Any) -> Any:
+    """Where exports land: inside the workspace, beside the traces (J4)."""
+    workspace = str(getattr(loop, "workspace", "") or ".")
+    return Path(workspace).expanduser().resolve() / ".ai-coding" / "exports"
+
+
+def _handle_export(
+    loop: Any, raw: str, session: Any, console: ConsoleSink
+) -> tuple[REPLAction, Any]:
+    """Write the traced sessions out as one HTML page or an OTLP/JSON file.
+
+    ``/export html [session-id]`` renders the whole workspace index (or one
+    session's page); ``/export otlp`` writes the OTLP/JSON structure.  The
+    renderers are pure (J5: nothing here mutates a session), and the target is
+    always inside the workspace (J4).
+    """
+    import json
+
+    from ai_coding.core.aggregate import build_report
+    from ai_coding.core.export_html import read_session_view, render_index_html, render_session_html
+    from ai_coding.core.export_otlp import rows_to_otlp
+
+    parts = raw.split()
+    target = parts[1] if len(parts) >= 2 else ""
+    if target not in {"html", "otlp"}:
+        console.error(
+            f"[export] unknown format '{target or '(none)'}'. Available: html, otlp"
+        )
+        return REPLAction.CONTINUE, session
+
+    recorder = getattr(loop, "trace", None)
+    store = getattr(recorder, "store", None)
+    if store is None:
+        console.info("[export] tracing is off for this session")
+        return REPLAction.CONTINUE, session
+    only = parts[2] if len(parts) >= 3 else ""
+
+    try:
+        if target == "html":
+            if only:
+                view = read_session_view(store, only)
+                payload = render_session_html(view)
+            else:
+                report = build_report(store)
+                if not report.rows:
+                    console.info("[export] nothing traced yet under this workspace")
+                    return REPLAction.CONTINUE, session
+                views = [read_session_view(store, row.session) for row in report.rows]
+                payload = render_index_html(report, views)
+            suffix = "html"
+        else:
+            report = build_report(store)
+            rows = [row.session for row in report.rows] if not only else [only]
+            views = [read_session_view(store, sid) for sid in rows]
+            if not views:
+                console.info("[export] nothing traced yet under this workspace")
+                return REPLAction.CONTINUE, session
+            payload = json.dumps(rows_to_otlp(views), indent=2, ensure_ascii=False)
+            suffix = "json"
+    except Exception as exc:  # noqa: BLE001 — a failed export must not break the REPL
+        console.error(f"[export] failed: {exc}")
+        return REPLAction.CONTINUE, session
+
+    directory = _export_dir(loop)
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    path = directory / f"traces-{stamp}.{suffix}"
+    path.write_text(payload, encoding="utf-8")
+    console.info(f"[export] wrote {path}")
     return REPLAction.CONTINUE, session
 
 

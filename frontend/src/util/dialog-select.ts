@@ -16,7 +16,16 @@ export interface SelectOption {
   category?: string
   footer?: string
   current?: boolean
+  /** Destructive: the row is armed and waiting for the second press. */
+  danger?: boolean
   onSelect?: () => void
+}
+
+/** A key-actuated action on the focused row (OpenCode's `actions`). */
+export interface SelectAction {
+  key: string
+  title: string
+  onTrigger: (option: SelectOption) => void
 }
 
 /** Default fuzzysort threshold; the palette uses a stricter 0.7. */

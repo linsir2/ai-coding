@@ -408,6 +408,71 @@ async def test_a_query_command_asks_for_no_re_projection(ipc):
 
 
 @pytest.mark.asyncio
+async def test_deleting_the_live_session_switches_to_a_new_one(ipc):
+    """J6: deleting the session the turn runs against must move the live
+    session, or the next turn persists into a deleted file (recreating it)."""
+    _world, _service, client = ipc
+    hello = client.request("initialize")
+    result = client.request("session.delete", {"id": hello["sessionId"]})
+    assert result["ok"] is True
+    assert result["sessionId"] and result["sessionId"] != hello["sessionId"]
+
+    listed = client.request("session.list")
+    assert all(row["id"] != hello["sessionId"] for row in listed["sessions"])
+
+
+@pytest.mark.asyncio
+async def test_deleting_another_session_leaves_the_live_one(ipc):
+    """Deleting a session that is *not* live does not move the live session.
+
+    ``session.create`` persists and makes live, so the middle of three is the
+    one that is on disk and not live — the only shape a client can delete
+    without the J6 switch firing.
+    """
+    _world, _service, client = ipc
+    client.request("initialize")
+    spare = client.request("session.create", {"title": "spare"})
+    live = client.request("session.create", {"title": "live"})
+
+    result = client.request("session.delete", {"id": spare["id"]})
+    assert result["ok"] is True
+    assert result["sessionId"] == ""  # the live session did not move
+
+    listed = client.request("session.list")["sessions"]
+    ids = {row["id"] for row in listed}
+    assert spare["id"] not in ids and live["id"] in ids
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_unknown_session_is_a_no_op(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+    assert client.request("session.delete", {"id": "nope"})["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_permissions_state_reports_policy_grants_and_store(ipc):
+    """The dialog's read side: current policy, remembered grants, store path.
+
+    Read-only on purpose — every mutation goes through the command channel so
+    the provider re-arm (I1) has exactly one home.
+    """
+    world, _service, client = ipc
+    client.request("initialize")
+
+    state = client.request("permissions.state")
+    assert state["policy"] == "confirm"  # the fake world ships CLIApprovalCallback
+    assert state["grants"] == []
+    assert state["storePath"] == ""      # no store in the fake gate
+
+    client.request("session.command", {"text": "/permissions auto"})
+    assert await client.wait_for(client.turn_finished.is_set)
+    client.turn_finished.clear()
+    assert client.request("permissions.state")["policy"] == "auto"
+    assert world.loop.dispatcher.approval.__class__.__name__ == "AutoApproveCallback"
+
+
+@pytest.mark.asyncio
 async def test_session_command_new_session_switches_the_live_session(ipc):
     """/clear ends with the REPL's NEW_SESSION action: the live session
     follows the dispatcher, and the terminal event names the new one so the

@@ -508,7 +508,9 @@ async def test_unknown_command_at_distance_two_gets_a_suggestion():
     assert action is REPLAction.CONTINUE
     assert loop.calls == []
     out = _session_text(c)
-    assert "did you mean" in out and "/status" in out
+    # /stats joined the vocabulary in A3.2, so it is now the nearest match for
+    # "/stat" — the suggestion follows the table, not the other way round.
+    assert "did you mean" in out and "/stats" in out
 
 
 async def test_absorbed_command_is_answered_instead_of_becoming_a_model_turn():
@@ -854,3 +856,111 @@ async def test_handle_input_threads_the_observer_into_plan_and_run(monkeypatch):
 
     assert seen["topic"] == "加缓存"
     assert seen["observer"] is marker
+
+
+async def test_stats_reports_across_sessions(tmp_path):
+    """``/stats`` folds every traced session into one report.
+
+    Read-only by construction (J5), and an empty store says so instead of
+    rendering a hollow table.
+    """
+    from ai_coding.core.trace import TraceStore
+
+    store = TraceStore(tmp_path / "traces")
+    store.update_summary(
+        "s-one",
+        {"turns": 2, "prompt_tokens": 120, "completion_tokens": 30},
+    )
+    store.update_summary(
+        "s-two",
+        {"turns": 1, "prompt_tokens": 10, "completion_tokens": 5},
+    )
+
+    class _StatsLoop:
+        def __init__(self):
+            self.trace = _FakeTrace(store)
+
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(_StatsLoop(), "/stats", _sd("s"), sessions, dc)
+    out = _session_text(c)
+    assert action is REPLAction.CONTINUE
+    assert "[stats]" in out
+    assert "s-one" in out and "s-two" in out
+    assert "165" in out  # the totals row sums both sessions
+
+
+async def test_stats_says_when_nothing_is_traced(tmp_path):
+    from ai_coding.core.trace import TraceStore
+
+    class _StatsLoop:
+        def __init__(self):
+            self.trace = _FakeTrace(TraceStore(tmp_path / "empty"))
+
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    await handle_input(_StatsLoop(), "/stats", _sd("s"), sessions, dc)
+    assert "no traced sessions" in _session_text(c)
+
+
+async def test_export_writes_html_into_the_workspace(tmp_path):
+    """J4: the export lands inside the workspace, and the path is reported."""
+    from ai_coding.core.trace import TraceStore
+
+    store = TraceStore(tmp_path / ".ai-coding" / "traces")
+    store.update_summary("s-one", {"turns": 1, "prompt_tokens": 7, "completion_tokens": 3})
+
+    class _ExportLoop:
+        workspace = str(tmp_path)
+
+        def __init__(self):
+            self.trace = _FakeTrace(store)
+
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(_ExportLoop(), "/export html", _sd("s"), sessions, dc)
+    out = _session_text(c)
+    assert action is REPLAction.CONTINUE
+    assert "[export]" in out
+    written = list((tmp_path / ".ai-coding" / "exports").glob("*.html"))
+    assert written, f"no export written; said: {out}"
+    assert "<!doctype html>" in written[0].read_text(encoding="utf-8")
+
+
+async def test_export_otlp_writes_json(tmp_path):
+    from ai_coding.core.trace import TraceStore
+
+    store = TraceStore(tmp_path / ".ai-coding" / "traces")
+    store.update_summary("s-one", {"turns": 1, "prompt_tokens": 7, "completion_tokens": 3})
+
+    class _ExportLoop:
+        workspace = str(tmp_path)
+
+        def __init__(self):
+            self.trace = _FakeTrace(store)
+
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    await handle_input(_ExportLoop(), "/export otlp", _sd("s"), sessions, dc)
+    written = list((tmp_path / ".ai-coding" / "exports").glob("*.json"))
+    assert written, f"no export written; said: {_session_text(c)}"
+    assert "resourceSpans" in written[0].read_text(encoding="utf-8")
+
+
+async def test_export_needs_a_known_format(tmp_path):
+    from ai_coding.core.trace import TraceStore
+
+    class _ExportLoop:
+        workspace = str(tmp_path)
+
+        def __init__(self):
+            self.trace = _FakeTrace(TraceStore(tmp_path / "t"))
+
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    await handle_input(_ExportLoop(), "/export pdf", _sd("s"), sessions, dc)
+    said = _session_text(c)  # one read: the recorder drains on export
+    assert "html" in said and "otlp" in said
+

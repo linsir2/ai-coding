@@ -103,6 +103,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     title: "Permissions",
     description: "Show or switch the approval policy (add: auto|confirm|clear)",
   },
+  { name: "stats", title: "Stats", description: "Every traced session, rolled up" },
+  {
+    name: "export",
+    title: "Export",
+    description: "Write traces out (add: html|otlp, optionally a session id)",
+  },
 ]
 
 /**

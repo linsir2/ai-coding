@@ -124,6 +124,15 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
 
   const onSessionLoaded = (id: string, state: SessionState) => switchTo(id, state)
 
+  // J6, client half: the server moved the live session when it was deleted, and
+  // the replacement is empty — same shape as a freshly created one.
+  const onSessionDeleted = async (deleted: string, next: string) => {
+    const wasLive = sessionId() === deleted // read before switchTo moves it
+    if (next) switchTo(next, initialState())
+    void refreshSessions()
+    if (wasLive) dialog.close()
+  }
+
   const onSelectSession = async (id: string) => {
     try {
       switchTo(id, await loadSession(props.client, id))
@@ -266,7 +275,14 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         palette: true,
         run: () =>
           dialog.open(
-            () => <DialogSessions client={props.client} currentId={sessionId()} onSelect={onSessionLoaded} />,
+            () => (
+              <DialogSessions
+                client={props.client}
+                currentId={sessionId()}
+                onSelect={onSessionLoaded}
+                onDeleted={(_deleted, next) => void onSessionDeleted(_deleted, next)}
+              />
+            ),
             "large",
           ),
       },

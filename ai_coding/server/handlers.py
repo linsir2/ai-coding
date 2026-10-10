@@ -356,8 +356,53 @@ def make_handlers(
         return {"turnId": turn_id, "sessionId": session_id}
 
     def session_delete(params: dict[str, Any]) -> dict[str, Any]:
+        """Delete a session; deleting the live one moves the live session (J6).
+
+        Without the switch the next turn would persist into the deleted file
+        and recreate it — a delete that does not stick.  The new session id
+        rides the answer so the client can follow the tab strip to it (the
+        same contract ``/clear`` uses via the terminal event's sessionId).
+        """
         session_id = str(params.get("id", ""))
-        return {"ok": bool(session_id) and world.sessions.delete(session_id)}
+        if not session_id:
+            return {"ok": False, "sessionId": ""}
+        deleted = world.sessions.delete(session_id)
+        was_live = session_id == state.session_id
+        if not (deleted or was_live):
+            # Nothing went away and nothing was live under that id: the client
+            # is holding a stale id, and saying "failed" tells it to refresh.
+            return {"ok": False, "sessionId": ""}
+        # A live session that has not run a turn yet has no file, so `delete`
+        # cannot unlink it — but it is gone the moment we move the live session
+        # off it, which is why `was_live` alone is enough to call this a delete.
+        replacement = ""
+        if was_live:
+            fresh = world.sessions.create()
+            world.sessions.save(fresh)
+            state.session = fresh
+            state.session_id = fresh.session_id
+            replacement = fresh.session_id
+        return {"ok": deleted or was_live, "sessionId": replacement}
+
+    def permissions_state(params: dict[str, Any]) -> dict[str, Any]:
+        """Read-only view for the permissions dialog (A3.1).
+
+        Current policy is the approval callback's own kind — there is no policy
+        field anywhere (J1): ``AutoApproveCallback`` means auto, anything else
+        means confirm.  Grants and their on-disk home come from the gate, which
+        is also what ``/permissions clear`` empties.
+        """
+        from ai_coding.security.approval import AutoApproveCallback
+
+        dispatcher = getattr(world.loop, "dispatcher", None)
+        approval = getattr(dispatcher, "approval", None)
+        gate = getattr(dispatcher, "gate", None)
+        store = getattr(gate, "_store", None)
+        return {
+            "policy": "auto" if isinstance(approval, AutoApproveCallback) else "confirm",
+            "grants": list(getattr(gate, "grants", ()) or ()),
+            "storePath": str(getattr(store, "path", "") or ""),
+        }
 
     def model_set(params: dict[str, Any]) -> dict[str, Any]:
         name = str(params.get("name", ""))
@@ -436,6 +481,7 @@ def make_handlers(
         "session.command": session_command,
         "session.delete": session_delete,
         "model.set": model_set,
+        "permissions.state": permissions_state,
         "skills.list": skills_list,
         "config.summary": config_summary,
         "session.stats": session_stats,
