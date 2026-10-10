@@ -11,7 +11,9 @@ dependencies = [
     "PyYAML>=6.0",
     "typer>=0.12",
     "rich>=13.0",
-    "textual>=8.2",
+    # TUI IPC (plan B, M0.5): the Python port of vscode-jsonrpc, maintained by
+    # the python-lsp team; the TS side pairs with vscode-jsonrpc itself.
+    "python-lsp-jsonrpc>=1.1.2",
 ]
 
 [project.optional-dependencies]
@@ -52,3 +54,8 @@ python_version = "3.10"
 strict = true
 check_untyped_defs = true
 exclude = ["tests/", ".venv/"]
+# python-lsp-jsonrpc ships no py.typed marker; the IPC boundary adapts its
+# untyped dict messages to our typed handlers (see ai_coding/server/service.py).
+[[tool.mypy.overrides]]
+module = ["pylsp_jsonrpc.*"]
+ignore_missing_imports = true

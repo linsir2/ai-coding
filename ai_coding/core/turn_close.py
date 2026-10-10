@@ -25,7 +25,7 @@ from typing import Any
 
 from ai_coding.core.dispatch import DispatchOutcome
 from ai_coding.core.turn_policy import TurnDecision
-from ai_coding.domain.loop import TurnOutcome, TurnStatus
+from ai_coding.domain.loop import EmptyStepError, TurnOutcome, TurnStatus
 from ai_coding.domain.message import ToolArtifact, ToolOutput
 from ai_coding.domain.run import tool_message
 from ai_coding.domain.session import SessionData
@@ -99,6 +99,19 @@ def failed_outcome(
         )
         return TurnOutcome(
             status=TurnStatus.TIMEOUT, text=last_text, iterations=iterations, reason=reason
+        )
+    if isinstance(error, EmptyStepError):
+        # The model thought and stopped without answering.  Named in words for
+        # the same reason the deadline branch above is: this string is what the
+        # screen shows, and "EmptyStepError" tells the operator nothing.
+        return TurnOutcome(
+            status=TurnStatus.ERROR,
+            text=None,
+            iterations=iterations,
+            reason=(
+                "模型只返回了思考内容，没有回答"
+                f"（finish_reason={error.finish_reason or 'unknown'}）"
+            ),
         )
     return TurnOutcome(
         status=TurnStatus.ERROR, text=None, iterations=iterations, reason=str(error)

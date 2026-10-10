@@ -159,15 +159,7 @@ async def test_tool_defaults_to_the_synchronous_path():
     assert result.success is True and "done" in result.output
 
 
-def test_scoped_completion_block_is_transcript_safe():
-    from ai_coding.ui.blocks import blocks_from_event
 
-    event = BackgroundTaskDone(run_id="abc123", name="probe", status="timeout",
-                               summary="build [k=v] hung", truncated=True,
-                               origin_session="s1")
-    block = blocks_from_event(event)
-    assert block is not None
-    assert "probe" in block.text and "build [k=v] hung" in block.text
 
 
 @pytest.mark.asyncio

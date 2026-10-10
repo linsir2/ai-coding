@@ -1,0 +1,698 @@
+"""TDD (M0.5/M2): the IPC service + handler table, over a real Unix socket.
+
+Both sides use python-lsp-jsonrpc: the server is ``IpcService`` and the test
+client is a plain ``Endpoint`` — the wire format is the library's
+Content-Length framed JSON-RPC 2.0.
+
+M2: ``session.prompt`` runs a scripted ``process_input`` (the fake replays
+loop events through the bridge), and ``session.interrupt`` must really cancel
+the spawned turn — not the M0 stub that set and immediately cleared a flag.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import socket
+import threading
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import pytest_asyncio
+from pylsp_jsonrpc.endpoint import Endpoint
+from pylsp_jsonrpc.exceptions import JsonRpcMethodNotFound
+from pylsp_jsonrpc.streams import JsonRpcStreamReader, JsonRpcStreamWriter
+
+from ai_coding.core.events import ToolFinished, ToolStarted, TurnFinished
+from ai_coding.domain.loop import StepResult, TurnOutcome, TurnStatus
+from ai_coding.domain.session import TurnUsage
+from ai_coding.security.approval import ApprovalResult, CLIApprovalCallback
+from ai_coding.security.user_prompt import CLIUserPromptCallback
+from ai_coding.server.handlers import make_handlers
+from ai_coding.server.service import IpcService
+from ai_coding.service.session_service import SessionService
+
+
+class _FakeEngine:
+    model_config = SimpleNamespace(
+        name="fake-model", base_url="https://api.deepseek.com/v1"
+    )
+
+
+class _FakeRegistry:
+    """Minimal SkillRegistry stand-in: ``names()`` + ``meta(name)``."""
+
+    def __init__(self, names: list[str], meta: dict[str, dict]) -> None:
+        self._names = names
+        self._meta = meta
+
+    def names(self) -> list[str]:
+        return list(self._names)
+
+    def meta(self, name: str) -> dict:
+        return self._meta[name]
+
+
+class _FakeLoop:
+    """Scriptable stand-in for ``AgentLoop.process_input``.
+
+    ``script`` is a list of ``(observer, on_delta) -> None`` steps replayed in
+    order; every call is recorded so tests can assert the handler wired the
+    bridge into both channels.
+    """
+
+    skills = None
+
+    def __init__(self, script: list | None = None) -> None:
+        self.model = ""
+        self.script = list(script or [])
+        self.calls: list[dict] = []
+
+    def set_model(self, name: str) -> None:
+        self.model = name
+
+    async def process_input(self, session, user_input, on_delta=None, observer=None):
+        self.calls.append(
+            {"session": session, "text": user_input, "on_delta": on_delta, "observer": observer}
+        )
+        for step in self.script:
+            step(observer, on_delta)
+        # The real loop persists the exchange; commands that rewrite history
+        # (``/compact``) need something to rewrite.
+        from ai_coding.domain.run import assistant_message, user_message
+
+        stamp = "2026-01-01T00:00:00Z"
+        session.add_message(user_message(user_input, stamp))
+        session.add_message(assistant_message(StepResult(text="done"), stamp))
+        return "done"
+
+    async def compact_session(self, session):
+        """The real loop replaces the stored history (compaction.py:101)."""
+        before = len(session.messages)
+        session.messages = list(session.messages)[-1:]
+        return {"messages": before, "after": len(session.messages), "removed": before - 1}
+
+
+class _SlowLoop(_FakeLoop):
+    """A turn that hangs until cancelled, honouring the loop's cancel contract."""
+
+    async def process_input(self, session, user_input, on_delta=None, observer=None):
+        self.calls.append(
+            {"session": session, "text": user_input, "on_delta": on_delta, "observer": observer}
+        )
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            # The real loop emits TurnFinished(ABORTED) and persists before
+            # re-raising (core/agent_loop.py:570); the fake mirrors the event
+            # so the socket-level test sees the contract, not a stub.
+            observer.on_event(
+                TurnFinished(outcome=TurnOutcome(status=TurnStatus.ABORTED, reason="interrupted"))
+            )
+            raise
+        return ""
+
+
+class _BrokenLoop(_FakeLoop):
+    """A turn that dies outside the loop's own error handling."""
+
+    async def process_input(self, session, user_input, on_delta=None, observer=None):
+        raise RuntimeError("boom")
+
+
+def _fake_world(tmp_path: Path) -> SimpleNamespace:
+    # Faithful in one respect the /permissions invariant depends on: a real
+    # AgentLoop hands the very callback world holds to its dispatcher, so the
+    # command layer can swap ``dispatcher.approval`` out from under it (I1).
+    approval = CLIApprovalCallback()
+    loop = _FakeLoop()
+    loop.dispatcher = SimpleNamespace(approval=approval, gate=None)
+    return SimpleNamespace(
+        sessions=SessionService(tmp_path / "sessions"),
+        engine=_FakeEngine(),
+        config=SimpleNamespace(
+            models={"fake": SimpleNamespace(name="fake-model")},
+            ai=SimpleNamespace(
+                max_context_tokens=48000, max_tool_iterations=10, stop_policy="todo_aware"
+            ),
+            default_model="fake",
+        ),
+        loop=loop,
+        workspace=str(tmp_path),
+        cancel=asyncio.Event(),
+        approval=approval,
+        user_prompt=CLIUserPromptCallback(),
+    )
+
+
+class _TestClient:
+    """A symmetric endpoint client (same library as the server)."""
+
+    def __init__(self, socket_path: Path) -> None:
+        self.conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.conn.connect(str(socket_path))
+        self.events: list[dict] = []
+        self.turn_finished = threading.Event()
+        self.approval_answer = "yes"
+        self.approval_requests: list[dict] = []
+        self.ask_answer = "自定义回答"
+        self.ask_requests: list[dict] = []
+        writer = JsonRpcStreamWriter(self.conn.makefile("wb"))
+        self.endpoint = Endpoint(
+            {
+                "event": self._on_event,
+                "approval.request": self._on_approval,
+                "user_prompt.ask": self._on_ask,
+            },
+            writer.write,
+        )
+        reader = JsonRpcStreamReader(self.conn.makefile("rb"))
+        self._thread = threading.Thread(
+            target=reader.listen, args=(self.endpoint.consume,), daemon=True
+        )
+        self._thread.start()
+
+    def _on_event(self, params: dict) -> None:
+        self.events.append(params)
+        if params.get("type") == "turn.finished":
+            self.turn_finished.set()
+
+    def _on_approval(self, params: dict) -> str:
+        """Answer a server-initiated approval request (M5)."""
+        self.approval_requests.append(dict(params or {}))
+        return self.approval_answer
+
+    def _on_ask(self, params: dict) -> str:
+        """Answer the model's question (M6.5): the text the tool renders."""
+        self.ask_requests.append(dict(params or {}))
+        return self.ask_answer
+
+    def request(self, method: str, params: dict | None = None, timeout: float = 5.0):
+        return self.endpoint.request(method, params).result(timeout)
+
+    async def wait_for(self, predicate, attempts: int = 250) -> bool:
+        """Poll without blocking the loop (a threading wait would starve it)."""
+        for _ in range(attempts):
+            if predicate():
+                return True
+            await asyncio.sleep(0.02)
+        return predicate()
+
+    def close(self) -> None:
+        self.conn.close()
+
+
+@pytest_asyncio.fixture
+async def ipc(tmp_path):
+    world = _fake_world(tmp_path)
+    service = IpcService(tmp_path / "ipc.sock", asyncio.get_running_loop())
+    service.start()
+    service.dispatcher.update(make_handlers(world, service))
+    client = _TestClient(tmp_path / "ipc.sock")
+    assert service.wait_connected(timeout=5.0)
+    try:
+        yield world, service, client
+    finally:
+        client.close()
+        service.close()
+
+
+@pytest.mark.asyncio
+async def test_initialize_returns_hello(ipc):
+    world, _service, client = ipc
+    result = client.request("initialize")
+    assert result["workspace"] == world.workspace
+    assert result["model"] == "fake-model"
+    assert result["sessionId"]
+    assert result["models"] == [{"name": "fake-model", "key": "fake"}]
+    # M3: the models dialog marks the current entry by key.
+    assert result["modelKey"] == "fake"
+    # M1: the home footer/metadata read these two.
+    assert result["provider"] == "deepseek"
+    assert result["vcs"] == {"branch": ""}  # tmp_path is not a git repository
+
+
+@pytest.mark.asyncio
+async def test_skills_list_is_structured(ipc):
+    world, _service, client = ipc
+    world.loop.skills = _FakeRegistry(
+        names=["alpha", "beta"],
+        meta={
+            "alpha": {"name": "alpha", "description": "does alpha", "phase": "planning"},
+            "beta": {"name": "beta", "description": None, "phase": ""},
+        },
+    )
+    result = client.request("skills.list")
+    assert result == {
+        "skills": [
+            {"name": "alpha", "description": "does alpha", "phase": "planning"},
+            {"name": "beta", "description": None, "phase": ""},
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_skills_list_empty_without_registry(ipc):
+    _world, _service, client = ipc
+    assert client.request("skills.list") == {"skills": []}
+
+
+@pytest.mark.asyncio
+async def test_unknown_method_answers_error(ipc):
+    _world, _service, client = ipc
+    with pytest.raises(JsonRpcMethodNotFound):
+        client.request("does.not.exist")
+
+
+@pytest.mark.asyncio
+async def test_session_create_and_list(ipc):
+    _world, _service, client = ipc
+    created = client.request("session.create", {"title": "my session"})
+    session_id = created["id"]
+    assert session_id
+    listed = client.request("session.list")
+    ids = [row["id"] for row in listed["sessions"]]
+    assert session_id in ids
+
+
+@pytest.mark.asyncio
+async def test_session_command_routes_through_handle_input(ipc):
+    """A slash command goes through the REPL dispatcher, not to the model.
+
+    ``handle_input`` is the backend's command design (app/commands.py); the
+    TUI's entry is one generic ``session.command`` — the console lines the
+    dispatcher prints arrive as ``console.line`` events, and the run ends
+    once, with the action in the terminal event's data.
+    """
+    _world, _service, client = ipc
+    client.request("initialize")
+    ack = client.request("session.command", {"text": "/help"})
+    assert ack["sessionId"]
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    types = [event["type"] for event in client.events]
+    assert "console.line" in types, "the command's output must reach the client"
+    assert types[-1] == "turn.finished"
+    assert client.events[-1]["data"]["status"] == "completed"
+    assert client.events[-1]["data"]["action"] == "continue"
+
+
+@pytest.mark.asyncio
+async def test_session_command_inner_turns_are_steps_not_endings(ipc):
+    """A command that runs turns (/review, /plan steps) drives one run.
+
+    The loop's inner ``TurnFinished`` is a *step* of the command — the same
+    assistant block the old TUI kept open — and the run's single terminal
+    ``turn.finished`` is emitted after ``handle_input`` returns, so the queue
+    and the busy flag settle exactly once.
+    """
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop.script = [
+        lambda obs, _delta: obs.on_event(
+            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="done"))
+        )
+    ]
+    client.request("session.command", {"text": "/review"})
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    types = [event["type"] for event in client.events]
+    assert types.count("turn.step") == 1
+    assert types.count("turn.finished") == 1
+    assert types[-1] == "turn.finished"
+    # the observer reached the turn: the step event exists at all
+    assert client.events[-1]["data"]["action"] == "continue"
+
+
+@pytest.mark.asyncio
+async def test_session_command_quit_reports_the_action(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+    client.request("session.command", {"text": "/quit"})
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert client.events[-1]["data"]["action"] == "quit"
+
+
+@pytest.mark.asyncio
+async def test_permissions_confirm_keeps_approvals_on_the_wire(ipc):
+    """I1: ``/permissions confirm`` swaps in a FRESH CLIApprovalCallback with no
+    provider — without re-installing the IPC provider afterwards the next WARN
+    approval falls back to reading stdin and the turn hangs (the retired TUI
+    called ``_ensure_approval_provider`` after every command for this reason).
+    """
+    from ai_coding.security.approval import ApprovalResult
+
+    world, _service, client = ipc
+    client.request("initialize")
+    client.request("session.command", {"text": "/permissions confirm"})
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    # the swapped callback must still answer over the socket, not stdin
+    client.approval_answer = "yes"
+    result = await world.loop.dispatcher.approval.approve(
+        "write", {"path": "b.py"}, "warn tier"
+    )
+    assert result is ApprovalResult.YES
+    assert client.approval_requests[-1]["toolName"] == "write"
+
+
+@pytest.mark.asyncio
+async def test_session_command_inner_turns_end_once_when_cancelled(ipc):
+    """I3 on the cancel path: exactly one terminal event, status aborted."""
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop = _SlowLoop()
+    client.request("session.command", {"text": "/review"})
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+    client.request("session.interrupt")
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    types = [event["type"] for event in client.events]
+    assert types.count("turn.finished") == 1
+    assert client.events[-1]["data"]["status"] == "aborted"
+
+
+@pytest.mark.asyncio
+async def test_compact_asks_the_client_to_re_project(ipc):
+    """D1/I9: the transcript is a projection of persisted messages, so a
+    command that rewrote the history shorter tells the client to re-project —
+    detected by the fact, not by sniffing the command text."""
+    world, _service, client = ipc
+    client.request("initialize")
+    # give the session something to compact
+    world.loop.script = [
+        lambda obs, _delta: obs.on_event(
+            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="done"))
+        )
+    ]
+    client.request("session.prompt", {"text": "one"})
+    assert await client.wait_for(client.turn_finished.is_set)
+    client.turn_finished.clear()
+    client.events.clear()
+
+    client.request("session.command", {"text": "/compact"})
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    data = client.events[-1]["data"]
+    assert data["reload"] is True
+    assert data["messagesAfter"] < data["messagesBefore"]
+
+
+@pytest.mark.asyncio
+async def test_a_query_command_asks_for_no_re_projection(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+    client.request("session.command", {"text": "/status"})
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert client.events[-1]["data"]["reload"] is False
+
+
+@pytest.mark.asyncio
+async def test_deleting_the_live_session_switches_to_a_new_one(ipc):
+    """J6: deleting the session the turn runs against must move the live
+    session, or the next turn persists into a deleted file (recreating it)."""
+    _world, _service, client = ipc
+    hello = client.request("initialize")
+    result = client.request("session.delete", {"id": hello["sessionId"]})
+    assert result["ok"] is True
+    assert result["sessionId"] and result["sessionId"] != hello["sessionId"]
+
+    listed = client.request("session.list")
+    assert all(row["id"] != hello["sessionId"] for row in listed["sessions"])
+
+
+@pytest.mark.asyncio
+async def test_deleting_another_session_leaves_the_live_one(ipc):
+    """Deleting a session that is *not* live does not move the live session.
+
+    ``session.create`` persists and makes live, so the middle of three is the
+    one that is on disk and not live — the only shape a client can delete
+    without the J6 switch firing.
+    """
+    _world, _service, client = ipc
+    client.request("initialize")
+    spare = client.request("session.create", {"title": "spare"})
+    live = client.request("session.create", {"title": "live"})
+
+    result = client.request("session.delete", {"id": spare["id"]})
+    assert result["ok"] is True
+    assert result["sessionId"] == ""  # the live session did not move
+
+    listed = client.request("session.list")["sessions"]
+    ids = {row["id"] for row in listed}
+    assert spare["id"] not in ids and live["id"] in ids
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_unknown_session_is_a_no_op(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+    assert client.request("session.delete", {"id": "nope"})["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_permissions_state_reports_policy_grants_and_store(ipc):
+    """The dialog's read side: current policy, remembered grants, store path.
+
+    Read-only on purpose — every mutation goes through the command channel so
+    the provider re-arm (I1) has exactly one home.
+    """
+    world, _service, client = ipc
+    client.request("initialize")
+
+    state = client.request("permissions.state")
+    assert state["policy"] == "confirm"  # the fake world ships CLIApprovalCallback
+    assert state["grants"] == []
+    assert state["storePath"] == ""      # no store in the fake gate
+
+    client.request("session.command", {"text": "/permissions auto"})
+    assert await client.wait_for(client.turn_finished.is_set)
+    client.turn_finished.clear()
+    assert client.request("permissions.state")["policy"] == "auto"
+    assert world.loop.dispatcher.approval.__class__.__name__ == "AutoApproveCallback"
+
+
+@pytest.mark.asyncio
+async def test_session_command_new_session_switches_the_live_session(ipc):
+    """/clear ends with the REPL's NEW_SESSION action: the live session
+    follows the dispatcher, and the terminal event names the new one so the
+    tab strip can switch (and the session is listable)."""
+    _world, _service, client = ipc
+    hello = client.request("initialize")
+    client.request("session.command", {"text": "/clear"})
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    final = client.events[-1]["data"]
+    assert final["action"] == "new_session"
+    assert final["sessionId"] and final["sessionId"] != hello["sessionId"]
+    listed = client.request("session.list")
+    assert any(row["id"] == final["sessionId"] for row in listed["sessions"])
+
+
+@pytest.mark.asyncio
+async def test_session_command_interrupt_ends_the_run_aborted(ipc):
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop = _SlowLoop()
+    client.request("session.command", {"text": "/review"})
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+    client.request("session.interrupt")
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert client.events[-1]["data"]["status"] == "aborted"
+
+
+@pytest.mark.asyncio
+async def test_session_prompt_runs_scripted_turn(ipc):
+    world, _service, client = ipc
+    hello = client.request("initialize")
+    session_id = hello["sessionId"]
+    world.loop.script = [
+        lambda _obs, delta: delta("hel"),
+        lambda _obs, delta: delta("lo"),
+        lambda obs, _delta: obs.on_event(
+            ToolStarted(call_id="c1", tool_name="bash", params={"command": "ls"}, iteration=1)
+        ),
+        lambda obs, _delta: obs.on_event(
+            ToolFinished(call_id="c1", tool_name="bash", success=True, output_preview="ok")
+        ),
+        lambda obs, _delta: obs.on_event(
+            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="hello"))
+        ),
+    ]
+    ack = client.request("session.prompt", {"id": session_id, "text": "hi"})
+    assert ack["turnId"] == 1
+    assert ack["sessionId"] == session_id
+    assert await client.wait_for(client.turn_finished.is_set)
+    types = [event["type"] for event in client.events]
+    assert types == ["text.delta", "text.delta", "tool.started", "tool.finished", "turn.finished"]
+    assert client.events[0]["data"] == {"text": "hel"}
+    assert client.events[2]["data"]["callId"] == "c1"
+    assert client.events[-1]["data"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_session_prompt_wires_bridge_into_both_channels(ipc):
+    """The fake records how it was called: on_delta and observer must be the
+    bridge's, so live turns reach the client through the real mapping."""
+    world, _service, client = ipc
+    client.request("initialize")
+    ack = client.request("session.prompt", {"text": "x"})
+    assert ack["turnId"] == 1
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+    call = world.loop.calls[-1]
+    assert call["text"] == "x"
+    call["on_delta"]("live")
+    call["observer"].on_event(
+        TurnFinished(outcome=TurnOutcome(status=TurnStatus.ABORTED, reason="stop"))
+    )
+    assert await client.wait_for(client.turn_finished.is_set)
+    types = [event["type"] for event in client.events]
+    assert types == ["text.delta", "turn.finished"]
+    assert client.events[0]["data"] == {"text": "live"}
+    assert client.events[1]["data"]["status"] == "aborted"
+
+
+@pytest.mark.asyncio
+async def test_session_prompt_requires_initialize(ipc):
+    _world, _service, client = ipc
+    with pytest.raises(Exception, match="session"):
+        client.request("session.prompt", {"text": "no session yet"})
+
+
+@pytest.mark.asyncio
+async def test_interrupt_cancels_running_turn(ipc):
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop = _SlowLoop()
+    client.request("session.prompt", {"text": "slow"})
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+    ack = client.request("session.interrupt")
+    assert ack["ok"] is True
+    assert ack["interrupted"] == 1
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert client.events[-1]["data"]["status"] == "aborted"
+    # The tool-batch fast path: one Esc leaves the event set; the loop clears
+    # it before each batch (core/agent_loop.py:932).
+    assert world.cancel.is_set()
+
+
+@pytest.mark.asyncio
+async def test_interrupt_with_no_turn_is_a_noop(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+    assert client.request("session.interrupt") == {"ok": True, "interrupted": 0}
+
+
+@pytest.mark.asyncio
+async def test_approval_round_trip_over_the_wire(ipc):
+    """M5: a WARN call's prompt travels as a server-initiated JSON-RPC request.
+
+    The client's answer maps through the CLI vocabulary the shared parser
+    already speaks (security/approval.py:88-98).
+    """
+    world, _service, client = ipc
+    client.approval_answer = "always"
+    result = await world.approval.approve("write", {"path": "a.py"}, "warn tier")
+    assert result is ApprovalResult.ALWAYS
+    assert client.approval_requests[-1] == {
+        "toolName": "write",
+        "params": {"path": "a.py"},
+        "reason": "warn tier",
+    }
+
+
+@pytest.mark.asyncio
+async def test_approval_fails_closed_on_an_unknown_answer(ipc):
+    world, _service, client = ipc
+    client.approval_answer = "???"
+    assert await world.approval.approve("bash", {"command": "ls"}, "warn") is ApprovalResult.NO
+
+
+@pytest.mark.asyncio
+async def test_user_prompt_round_trip_over_the_wire(ipc):
+    """The model's question travels as a server-initiated JSON-RPC request.
+
+    Same shape as the approval channel; the answer comes back as the plain
+    text the tool renders to the model (``用户回答：…``).
+    """
+    from ai_coding.security.user_prompt import UserAnswer
+
+    world, _service, client = ipc
+    client.ask_answer = "第二个"
+    answer = await world.user_prompt.ask("哪个文件？", ["a.py", "b.py"])
+    assert answer == UserAnswer(answered=True, text="第二个")
+    assert client.ask_requests[-1] == {
+        "question": "哪个文件？",
+        "options": ["a.py", "b.py"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_user_prompt_an_empty_answer_is_not_an_answer(ipc):
+    """esc / a closed panel returns "": the model must decide itself."""
+    from ai_coding.security.user_prompt import UserAnswer
+
+    world, _service, client = ipc
+    client.ask_answer = ""
+    answer = await world.user_prompt.ask("确认吗？", ["yes", "no"])
+    assert answer == UserAnswer(answered=False, reason="empty")
+
+
+@pytest.mark.asyncio
+async def test_turn_runner_reports_unexpected_errors(ipc):
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop = _BrokenLoop()
+    client.request("session.prompt", {"text": "boom"})
+    assert await client.wait_for(client.turn_finished.is_set)
+    final = client.events[-1]["data"]
+    assert final["status"] == "error"
+    assert "boom" in final["reason"]
+
+
+@pytest.mark.asyncio
+async def test_config_summary(ipc):
+    _world, _service, client = ipc
+    result = client.request("config.summary")
+    assert result["model"] == "fake"
+    assert result["maxContextTokens"] == 48000
+
+
+@pytest.mark.asyncio
+async def test_session_stats_without_usage(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+    assert client.request("session.stats") == {"tokens": 0, "maxContextTokens": 48000}
+
+
+@pytest.mark.asyncio
+async def test_session_stats_reports_last_turn_prompt_tokens(ipc):
+    world, _service, client = ipc
+    client.request("initialize")
+    client.request("session.prompt", {"text": "x"})
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+    session = world.loop.calls[-1]["session"]
+    session.turn_usages.append(
+        TurnUsage(turn=1, prompt_tokens=1234, completion_tokens=56, total_tokens=1290)
+    )
+    assert client.request("session.stats") == {"tokens": 1234, "maxContextTokens": 48000}
+
+@pytest.mark.asyncio
+async def test_model_set_routes_to_loop(ipc):
+    world, _service, client = ipc
+    result = client.request("model.set", {"name": "other"})
+    assert result["ok"] is True
+    assert world.loop.model == "other"
+    # M3: the metadata label follows the newly active model's endpoint.
+    assert result["provider"] == "deepseek"
+
+
+@pytest.mark.asyncio
+async def test_server_notify_reaches_the_client(ipc):
+    _world, service, client = ipc
+    service.notify("event", {"type": "custom", "data": {"x": 1}})
+    for _ in range(50):
+        if any(event["type"] == "custom" for event in client.events):
+            break
+        await asyncio.sleep(0.02)
+    assert any(event["type"] == "custom" for event in client.events)

@@ -94,7 +94,12 @@ from ai_coding.core.turn_policy import (
 from ai_coding.core.turn_report import TurnReporter
 from ai_coding.domain.acceptance import acceptance_states, pending_items
 from ai_coding.domain.ledger import ledger_signature
-from ai_coding.domain.loop import StepResult, TurnOutcome, TurnStatus
+from ai_coding.domain.loop import (
+    EmptyStepError,
+    StepResult,
+    TurnOutcome,
+    TurnStatus,
+)
 from ai_coding.domain.message import ChatMessage, ToolArtifact
 from ai_coding.domain.model_config import ModelConfig
 from ai_coding.domain.run import assistant_message, user_message
@@ -579,7 +584,7 @@ class AgentLoop:
                 outcome=aborted_outcome(books.last_text, books.total_iterations),
             )
             raise
-        except (DeadlineExpired, EngineError) as exc:
+        except (DeadlineExpired, EngineError, EmptyStepError) as exc:
             outcome = failed_outcome(
                 exc, last_text=books.last_text, iterations=books.total_iterations
             )
@@ -1118,6 +1123,13 @@ class AgentLoop:
         self._emit(AssistantMessage(
             text=step.text, tool_calls=tuple(step.tool_calls),
             reasoning=step.reasoning))
+        # A step that neither spoke nor acted cannot become a message, and
+        # ChatMessage says so on purpose (message.py:139).  Named here so the
+        # turn ends as a turn — closed, persisted, counted — instead of the
+        # domain error escaping to the IPC catch-all (A6).  After the emit on
+        # purpose: the thinking is still worth showing before the reason.
+        if not step.text and not step.tool_calls:
+            raise EmptyStepError(step.finish_reason)
         session.add_message(assistant_message(step, now_utc()))
         return step
 

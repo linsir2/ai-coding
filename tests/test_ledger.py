@@ -6,7 +6,6 @@ only ever drops on recorded evidence.  The policy gates on the flat counter,
 not on prose.
 """
 
-import pytest
 
 from ai_coding.core.turn_books import TurnBooks
 from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig, TurnSnapshot
@@ -96,18 +95,16 @@ def test_policy_acceptance_gate_nudges_then_finishes():
     assert done.action.name == "FINISH" and "acceptance verified" in done.reason
 
 
-@pytest.mark.asyncio
-async def test_ledger_block_renders_questions_and_evidence():
-    from ai_coding.core.events import LedgerUpdated
-    from ai_coding.domain.ledger import UncertaintyItem
-    from ai_coding.ui.blocks import blocks_from_event
-
-    event = LedgerUpdated(items=(
-        UncertaintyItem(id="U-ac-AC-2", question="SAVE20 是 0.02 还是 0.20？",
-                        kind="epistemic", level="high",
-                        evidence=("assert 245 == 200",), resolves=("AC-2",)),
-    ))
-    block = blocks_from_event(event)
-    assert block is not None and block.kind == "ledger"
-    text = block.render().plain
-    assert "SAVE20" in text and "245" in text
+def test_failure_question_shows_the_count_not_the_machine_code():
+    """A5 T9: the ledger line is human-facing (bridge.py:148 -> the transcript
+    only; nothing injects it into the model's context), so the raw failure code
+    must not reach the screen.  The code stays in the item id, which is internal,
+    and the evidence line below already carries the real failure output."""
+    items = build_ledger(
+        failures=(("bash", "nonzero_exit", "fatal: not a git repository"),) * 2,
+        verify={}, failed_streak=2, iteration=2,
+        succeeded_tools=frozenset(), stall_threshold=2,
+    )
+    question = next(i for i in items if i.id.startswith("U-err")).question
+    assert "2 次" in question
+    assert "nonzero_exit" not in question

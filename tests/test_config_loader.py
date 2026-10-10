@@ -79,7 +79,6 @@ def test_load_models_camelcase_compat(tmp_path):
 
 
 def test_load_unknown_keys_ignored():
-    from ai_coding.config.models import AppConfig
 
     app = AppConfig.model_validate({"unknown_root": 1, "ai": {"not_a_key": True}})
     assert app.ai.max_context_tokens == 48000
@@ -245,18 +244,11 @@ def test_r7e_defaults_keep_every_behaviour_unchanged():
     assert ai.tools_chars_warn == 12_000  # Q7
     assert ai.steering_max_messages == 5  # Q6
     assert ai.steering_max_chars == 2_000  # Q6
-    assert AppConfig().ui.steering is True  # Q6
 
 
 def test_an_unknown_subagent_context_mode_is_rejected_at_load():
     with pytest.raises(ValidationError):
         AIConfig(subagent_context_mode="clean")
-
-
-def test_the_ui_block_is_independent_of_the_rest():
-    cfg = AppConfig.model_validate({"ui": {"steering": False}})
-    assert cfg.ui.steering is False
-    assert cfg.ai.subagent_context_mode == "full"
 
 
 def test_r11b_memory_recall_timeout_default_and_camel(tmp_path):

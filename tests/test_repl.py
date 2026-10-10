@@ -11,9 +11,9 @@ from typing import Any
 import pytest
 from rich.console import Console
 
+from ai_coding.app.commands import REPLAction, handle_input
+from ai_coding.app.console import DialogueConsole
 from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
-from ai_coding.ui.console import DialogueConsole
-from ai_coding.ui.repl import REPLAction, handle_input
 
 pytestmark = pytest.mark.asyncio
 
@@ -37,7 +37,7 @@ class _FakeLoop:
         self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
 
     async def process_input(self, session, text, on_delta=None, observer=None):
-        self.calls.append((text, on_delta))
+        self.calls.append((text, on_delta, observer))
         return self.reply
 
 
@@ -381,8 +381,8 @@ def _session(sid):
 
 
 def test_budget_says_when_no_turn_has_run(tmp_path):
+    from ai_coding.app.commands import _budget_report
     from ai_coding.core.trace import TraceStore
-    from ai_coding.ui.repl import _budget_report
 
     loop = _BudgetLoop(TraceStore(tmp_path))
     out = _budget_report(loop, _session("never-ran"))
@@ -390,8 +390,8 @@ def test_budget_says_when_no_turn_has_run(tmp_path):
 
 
 def test_budget_says_when_zero_tokens(tmp_path):
+    from ai_coding.app.commands import _budget_report
     from ai_coding.core.trace import TraceStore
-    from ai_coding.ui.repl import _budget_report
 
     store = TraceStore(tmp_path)
     store.update_summary(
@@ -403,8 +403,8 @@ def test_budget_says_when_zero_tokens(tmp_path):
 
 
 def test_budget_renders_real_usage(tmp_path):
+    from ai_coding.app.commands import _budget_report
     from ai_coding.core.trace import TraceStore
-    from ai_coding.ui.repl import _budget_report
 
     store = TraceStore(tmp_path)
     store.update_summary(
@@ -422,7 +422,7 @@ def test_budget_renders_real_usage(tmp_path):
 
 
 def test_budget_says_when_tracing_is_off(tmp_path):
-    from ai_coding.ui.repl import _budget_report
+    from ai_coding.app.commands import _budget_report
 
     out = _budget_report(_NoTraceLoop(), _session("x"))
     assert "tracing is off" in out
@@ -508,7 +508,9 @@ async def test_unknown_command_at_distance_two_gets_a_suggestion():
     assert action is REPLAction.CONTINUE
     assert loop.calls == []
     out = _session_text(c)
-    assert "did you mean" in out and "/status" in out
+    # /stats joined the vocabulary in A3.2, so it is now the nearest match for
+    # "/stat" — the suggestion follows the table, not the other way round.
+    assert "did you mean" in out and "/stats" in out
 
 
 async def test_absorbed_command_is_answered_instead_of_becoming_a_model_turn():
@@ -619,8 +621,12 @@ async def test_handle_tasks_lists_background_rows_and_stops_unknown():
                                    usage={"prompt_tokens": 100,
                                           "completion_tokens": 20})]
 
+        def resolve_run_id(self, prefix):
+            return prefix if prefix.startswith("abc123") else None
+
         def cancel(self, run_id):
-            return False
+            self.cancelled = run_id
+            return True
 
     registry = ToolRegistry()
     registry.register(SubAgentTool(_TableRunner()))
@@ -632,6 +638,43 @@ async def test_handle_tasks_lists_background_rows_and_stops_unknown():
     out = _session_text(c)
     assert action is REPLAction.CONTINUE
     assert "abc123" in out and "running" in out and "120" in out
+
+
+@pytest.mark.asyncio
+async def test_handle_tasks_stop_accepts_the_printed_prefix():
+    """``/tasks`` prints 12 chars; stopping by exactly those must work (the
+    operator has nothing else to copy)."""
+    from ai_coding.core.subagent import BackgroundTask
+    from ai_coding.tools.registry import ToolRegistry
+    from ai_coding.tools.subagent_tool import SubAgentTool
+
+    class _TableRunner:
+        cancelled = None
+
+        def task_list(self):
+            return [BackgroundTask(run_id="abc123def4567890", name="probe", task="t",
+                                   status="running", started=10.0, ended=None)]
+
+        def resolve_run_id(self, prefix):
+            return prefix if prefix.startswith("abc123") else None
+
+        def cancel(self, run_id):
+            self.cancelled = run_id
+            return True
+
+    runner = _TableRunner()
+    registry = ToolRegistry()
+    registry.register(SubAgentTool(runner))
+    loop = SimpleNamespace(dispatcher=SimpleNamespace(registry=registry))
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(
+        loop, "/tasks stop abc123", sessions.items[0], sessions, dc
+    )
+    assert action is REPLAction.CONTINUE
+    assert runner.cancelled == "abc123"  # the prefix itself resolves to the row
+    assert "stopping abc123" in _session_text(c)
 
     action, _ = await handle_input(loop, "/tasks stop nope", sessions.items[0],
                                    sessions, dc)
@@ -712,9 +755,9 @@ def test_budget_shows_money_when_the_recorder_knows_the_price(tmp_path):
     With a price configured the estimate splits fresh and cached input; without
     one the line stays token-only, which is R4a's rule for unknown prices.
     """
+    from ai_coding.app.commands import _budget_report
     from ai_coding.core.budget import Pricing
     from ai_coding.core.trace import TraceStore
-    from ai_coding.ui.repl import _budget_report
 
     store = TraceStore(tmp_path)
     store.update_summary("priced", {
@@ -766,3 +809,158 @@ async def test_handle_model_reports_a_model_the_engine_cannot_serve():
     # proves it was reported rather than raised.
     assert "cannot switch to 'claude'" in out
     assert "not in this fallback chain" in out
+
+
+async def test_handle_input_threads_the_observer_to_the_loop():
+    """A TUI driving ``handle_input`` must see turn events, not only deltas
+    (the IPC bridge is the observer; tool cards and turn ends depend on it)."""
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, _ = _console_capture()
+
+    class _Marker:
+        pass
+
+    marker = _Marker()
+    await handle_input(loop, "tell me", sessions.items[0], sessions, dc, observer=marker)
+    assert loop.calls[-1][2] is marker
+
+    loop.calls.clear()
+    await handle_input(loop, "/review", sessions.items[0], sessions, dc, observer=marker)
+    assert loop.calls[-1][2] is marker
+
+
+async def test_handle_input_threads_the_observer_into_plan_and_run(monkeypatch):
+    """The plan workflow's step turns must reach the same observer."""
+    from ai_coding.core import plan_runner as plan_runner_mod
+
+    seen: dict = {}
+
+    async def fake_plan_and_run(loop, session, console, *, topic, ask_topic,
+                                on_delta=None, observer=None):
+        seen.update(topic=topic, observer=observer, on_delta=on_delta)
+        return None
+
+    monkeypatch.setattr(plan_runner_mod, "plan_and_run", fake_plan_and_run)
+    loop = _FakeLoop()
+    sessions = _FakeSessions()
+    dc, _ = _console_capture()
+
+    class _Marker:
+        pass
+
+    marker = _Marker()
+    await handle_input(
+        loop, "/plan 加缓存", sessions.items[0], sessions, dc, observer=marker
+    )
+
+    assert seen["topic"] == "加缓存"
+    assert seen["observer"] is marker
+
+
+async def test_stats_reports_across_sessions(tmp_path):
+    """``/stats`` folds every traced session into one report.
+
+    Read-only by construction (J5), and an empty store says so instead of
+    rendering a hollow table.
+    """
+    from ai_coding.core.trace import TraceStore
+
+    store = TraceStore(tmp_path / "traces")
+    store.update_summary(
+        "s-one",
+        {"turns": 2, "prompt_tokens": 120, "completion_tokens": 30},
+    )
+    store.update_summary(
+        "s-two",
+        {"turns": 1, "prompt_tokens": 10, "completion_tokens": 5},
+    )
+
+    class _StatsLoop:
+        def __init__(self):
+            self.trace = _FakeTrace(store)
+
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(_StatsLoop(), "/stats", _sd("s"), sessions, dc)
+    out = _session_text(c)
+    assert action is REPLAction.CONTINUE
+    assert "[stats]" in out
+    assert "s-one" in out and "s-two" in out
+    assert "165" in out  # the totals row sums both sessions
+
+
+async def test_stats_says_when_nothing_is_traced(tmp_path):
+    from ai_coding.core.trace import TraceStore
+
+    class _StatsLoop:
+        def __init__(self):
+            self.trace = _FakeTrace(TraceStore(tmp_path / "empty"))
+
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    await handle_input(_StatsLoop(), "/stats", _sd("s"), sessions, dc)
+    assert "no traced sessions" in _session_text(c)
+
+
+async def test_export_writes_html_into_the_workspace(tmp_path):
+    """J4: the export lands inside the workspace, and the path is reported."""
+    from ai_coding.core.trace import TraceStore
+
+    store = TraceStore(tmp_path / ".ai-coding" / "traces")
+    store.update_summary("s-one", {"turns": 1, "prompt_tokens": 7, "completion_tokens": 3})
+
+    class _ExportLoop:
+        workspace = str(tmp_path)
+
+        def __init__(self):
+            self.trace = _FakeTrace(store)
+
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(_ExportLoop(), "/export html", _sd("s"), sessions, dc)
+    out = _session_text(c)
+    assert action is REPLAction.CONTINUE
+    assert "[export]" in out
+    written = list((tmp_path / ".ai-coding" / "exports").glob("*.html"))
+    assert written, f"no export written; said: {out}"
+    assert "<!doctype html>" in written[0].read_text(encoding="utf-8")
+
+
+async def test_export_otlp_writes_json(tmp_path):
+    from ai_coding.core.trace import TraceStore
+
+    store = TraceStore(tmp_path / ".ai-coding" / "traces")
+    store.update_summary("s-one", {"turns": 1, "prompt_tokens": 7, "completion_tokens": 3})
+
+    class _ExportLoop:
+        workspace = str(tmp_path)
+
+        def __init__(self):
+            self.trace = _FakeTrace(store)
+
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    await handle_input(_ExportLoop(), "/export otlp", _sd("s"), sessions, dc)
+    written = list((tmp_path / ".ai-coding" / "exports").glob("*.json"))
+    assert written, f"no export written; said: {_session_text(c)}"
+    assert "resourceSpans" in written[0].read_text(encoding="utf-8")
+
+
+async def test_export_needs_a_known_format(tmp_path):
+    from ai_coding.core.trace import TraceStore
+
+    class _ExportLoop:
+        workspace = str(tmp_path)
+
+        def __init__(self):
+            self.trace = _FakeTrace(TraceStore(tmp_path / "t"))
+
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    await handle_input(_ExportLoop(), "/export pdf", _sd("s"), sessions, dc)
+    said = _session_text(c)  # one read: the recorder drains on export
+    assert "html" in said and "otlp" in said
+

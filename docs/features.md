@@ -29,39 +29,46 @@ ai-coding 以「**自持 ReAct 循环** + 工具调用」为核心模型：用�
 R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子命令，现已全部删除：
 前四个的职责收进 TUI 的 slash 命令（见下节），`repl` 本身就是默认行为。
 
-## 全屏 TUI（Textual）
+## 全屏 TUI（OpenTUI 前端）
 
-界面由 Textual（`textual.App`）全屏渲染（`ui/textual_app.py`），取代 R10 的 `prompt_toolkit` 版本。
-自上而下是状态栏、可滚动 transcript、输入栏；审批与 `ask_user` 是模态弹层（modal screen）。
+界面由 `frontend/`（TypeScript + OpenTUI + Bun）全屏渲染，经 `server/` 的 Unix socket IPC
+与后端对话；它取代了 R10 的 `prompt_toolkit` 版本与随后的 Textual 版本（`ai_coding/ui/`，
+GUI 复刻里程碑中已删除）。旧 Textual 实现的布局/组件细节见文末「历史」备注。
 
-| 区域 | 组件 | 内容 |
+| 区域 | 实现 | 内容 |
 |---|---|---|
-| 顶部 | `ui/status_bar.py` | workspace、当前 model、`● Ready / ● Working` |
-| 中部 | `ui/transcript.py` + `ui/blocks.py` | 用户输入、assistant 流式 Markdown、**每回合一个思考折叠块**（网关产 reasoning 才有，无则无，不伪造；各步思考累积进同一折叠体，展开按步空行分隔）、工具事件块（开始/结束/chunk）、子智能体嵌套行（`↳ [scope]` 开始/结束/结论，chunk 不上屏）、todo/台账 dim 行、回合终态 |
-| 底部 | `ui/input_bar.py` | 单行输入（Enter 提交；回合运行中**仍可输入**，提交的内容进队列，当前回合结束后按序自动执行；`/resume` 是唯一例外——它开 modal picker，忙碌时拒绝并提示） |
-| 弹层 | `ui/modals.py` + `ui/resume_screen.py` | 审批（y/N/s，`edit` 显示 diff，非 bash 可 a 永久放行）、`ask_user` 提问、`/resume` 会话选择（分组 + 搜索 + 历史重建） |
-| 样式 | `ui/app.tcss` | 全屏布局与配色 |
+| 顶部 | `frontend/src/component/session-tabs.tsx` | 多会话标签（切换式）+ New |
+| 中部 | `frontend/src/state/` + `component/` | 用户输入、assistant 流式 Markdown、思考折叠块、工具事件块（开始/结束/chunk）、子智能体嵌套行、todo/台账 dim 行、回合终态 |
+| 底部 | `frontend/src/component/prompt.tsx` | 输入（Enter 提交；回合运行中仍可输入，提交的内容进队列，当前回合结束后按序自动执行；`/resume` 走会话对话框） |
+| 弹层 | `frontend/src/dialog/` + `component/permission.tsx` | 审批（←/→ 选择，y/a/n 快捷键）、命令面板 / 模型 / 会话 / 技能 / 状态 / 帮助对话框 |
 
-键位：`Ctrl-Q` 退出；`Ctrl-C` 有选区时复制、无选区时退出；`Shift`+拖选使用终端原生选择。
+键位：`<leader>`（ctrl+x）+ `q` 退出；`esc` 两段式中断；`ctrl+x m/l/s/n` 打开对应对话框。键位表以 `frontend/src/keymap.ts` 为准。
 
 ## slash 命令
 
-手打 `/xxx`（`ui/slash.py` 解析，`ui/repl.py::handle_input` 分发）；输入 `/` 会唤起命令面板（见 R12 节），
+手打 `/xxx`（`app/slash.py` 解析，`app/commands.py::handle_input` 分发；TUI 侧由
+`frontend/src/prompt` 的自动补全 + `util/slash.ts` 过滤）；输入 `/` 会唤起命令面板（见 R12 节），
 所以 `/` 本身不是普通文本。未知 `/xxx` 仍会**当作普通输入发给模型**，不是错误。
+
+> **TUI 接线状态（A2）**：TUI 里 `/` 开头的行统一经 `session.command` 交给上面的
+> `handle_input` 分发（GUI 复刻 §A1/A2），输出以 `console.line` 落进对话。目录（`util/slash.ts`）只收录**真能跑**的条目：对话框型（models/sessions/skills/status/help/new/quit）、
+命令型（plan/review/permissions）、文本型（budget/trace/todo/memory/config/tasks/compact——
+选择即提交 `/<name>`，语义全在后端）。带参命令（`/permissions auto`、`/tasks stop <id>`）
+在命令后带空格即可（补全遇空格自动收起，Enter 走提交）。
 
 | 命令 | 参数 | 功能 |
 |---|---|---|
 | `/help` `/h` | — | 列出全部直接命令 |
 | `/status` | — | 会话 id、消息数、记忆条数 |
 | `/model [name]` | 模型名 | 无参数列出配置里声明的模型（`*` 标记 `default_model`），带参数则切换 |
-| `/resume [id]` | 会话 id | **无参数弹出会话选择屏**（`ui/resume_screen.py`）：按最后访问时间倒序、按天分组（Today / Yesterday / 绝对日期）；每行显示时间 + 首条用户消息预览（截断 80 字符）+ 消息数；搜索框按预览/标题/id 子串过滤；↑↓ 选择、Enter 恢复、Esc 取消；已打开的会话不再列出；一个会话都没存时直接提示 `no saved sessions`。恢复后 transcript 清空并按消息时间顺序重建全部历史（用户气泡、模型正文、已完成工具卡默认折叠；只显示最终结果，不回放流式过程）。带参数则直接恢复并返回 `NEW_SESSION`，**支持前缀匹配**（`/resume 0113e0acac03`），歧义前缀会列出候选而非静默取第一个；恢复走完整 `load`（列表视图是剥离正文的摘要，直接用它会导致历史丢失） |
+| `/resume [id]` | 会话 id | **无参数弹出会话选择屏**（`ui/resume_screen.py`）：按最后访问时间倒序、按天分组（Today / Yesterday / 绝对日期）；每行显示时间 + 首条用户消息预览（截断 80 字符）+ 消息数；搜索框按预览/标题/id 子串过滤；↑↓ 选择、Enter 恢复、Esc 取消；已打开的会话不再列出；一个会话都没存时直接提示 `no saved sessions`。恢复后 transcript 清空并按消息时间顺序重建全部历史（用户气泡、模型正文、已完成工具卡默认折叠；只显示最终结果，不回放流式过程）。    带参数则直接恢复并返回 `NEW_SESSION`，**支持前缀匹配**（`/resume 0113e0acac03`），歧义前缀会列出候选而非静默取第一个；恢复走完整 `load`（列表视图是剥离正文的摘要，直接用它会导致历史丢失）。TUI 里由 `dialog/sessions.tsx` 呈现（后端 `session.list` 供数） |
 | `/permissions [auto\|confirm]` | 策略 | 无参数显示当前审批回调，带参数切换自动批准 / 逐次确认 |
 | `/todo` | — | 渲染当前会话的 `TaskState`（目标、进度、逐项状态、下一步） |
 | `/tasks` | `[stop <id>]` | 列出后台子智能体运行（id/名/状态/耗时/tokens）；`stop` 停掉运行中的任务 |
 | `/skills` | — | 列出 `SkillRegistry` 目录（`- name: description`） |
-| `ask_user`（工具） | — | 弹 `AskScreen` 提问；模型给了 `options` 时会在问题下方列出（选项只是提示，不强制，仍可自由输入）。**已实现**（此前 `AskScreen` 的 `options` 参数从未被任何调用方填充，渲染行是死代码） |
-| `/plan` | `<topic>` | **计划并执行**（M1）：裸 `/plan` 先弹 `What should I plan?` 收集主题；`/plan <topic>` 直接用话题、不再弹窗。两条路径都走 `plan_runner.plan_and_run`（M4-a：此前 TUI 与 REPL 各写一份，TUI 那份因为先被路由拦下而成为唯一可达实现，于是 REPL 那份漂移成「把 `the current task` 当话题、不重开计划」）；裸 `/plan` 在两个前端都会先问话题（TUI 弹窗、REPL `Prompt.ask`），prompt 只有 `PLAN_PROMPT` 一处定义。两条路径都重开一份计划（`SessionData.begin_plan(topic)`：新 goal + 空清单 + 清空 step 收据）。计划回合写 todo 清单后**立即逐步执行**——`/plan-run` 已删除（两命令接力会让清单过期：实测 0 回合跑在上一轮的清单上）；仍输入 `/plan-run` 会得到「did you mean '/plan'?」而不是被当作一句话发给模型（`ui/slash.py` 的 `_DEPRECATED` 墓碑表，近似命令规则看不到 4 个编辑距离的它）。每步一个**短对话**（全新 `ephemeral` session，seed = goal + 计划当前状态 + 本步验收，不继承父历史；步会话不落盘，不污染 `/resume`）——实测 4 回合 prompt 从 41k/82k/130k/254k（每回合重发全部历史）降为每步只带 seed（seed 本身随未完成项数增长）。有 `verify` 的项走 R0 验收门（失败修一次再败标 `blocked`）；无 `verify` 且模型未标完成的标 `stalled`。每步落收据，`/resume` 重放为步骤 header。整轮有顶（`ai.plan_max_step_turns`，默认 20，0=关闭；budget 停后剩余项保持 open）。**分步外完成有收据**（R1-5）：模型在计划回合顺手标 done 的步，runner 补 `attested=false` 收据、0 花费。**收据带证明分级**（R1-6）：`verified`/`on-claim`/`fiat`/`n/a`，report 点名无证明的 id（`verified` 要求每条验收判定都是 `passed is True`，读取端不信任 `ac` 非空）；**失败步同样留记录**（`✗ 受阻` 收据 + 气泡），`/resume` 能看到；回合内换清单（模型 `todo_write(clear)` 后重写）会清掉不属于新清单的旧收据 |
-| `/review` | — | 向模型发一条「审查当前 git diff」的快捷 prompt |
+| `ask_user`（工具） | — | TUI 里弹 `component/ask.tsx` 的 `◆ Question` 面板（M6.5）：模型给了 `options` 时在问题下方列出，↑/↓ 或 1-9 选择、enter 回答；无 `options` 时面板内置一行输入框可直接打字；esc 回答空串（模型收到 `no_answer` 后自行决定）。IPC 走 `user_prompt.ask` 双向请求（与 `approval.request` 同一范式） |
+| `/plan` | `<topic>` | TUI 接线（A1）：`/` 开头走 `session.command` → 后端 `handle_input` 分发，计划/步骤/报告全程经 `console.line` + `plan.updated` 事件渲染。**计划并执行**（M1）：裸 `/plan` 先弹 `What should I plan?` 收集主题；`/plan <topic>` 直接用话题、不再弹窗。两条路径都走 `plan_runner.plan_and_run`（M4-a：此前 TUI 与 REPL 各写一份，TUI 那份因为先被路由拦下而成为唯一可达实现，于是 REPL 那份漂移成「把 `the current task` 当话题、不重开计划」）；裸 `/plan` 在两个前端都会先问话题（TUI 弹窗、REPL `Prompt.ask`），prompt 只有 `PLAN_PROMPT` 一处定义。两条路径都重开一份计划（`SessionData.begin_plan(topic)`：新 goal + 空清单 + 清空 step 收据）。计划回合写 todo 清单后**立即逐步执行**——`/plan-run` 已删除（两命令接力会让清单过期：实测 0 回合跑在上一轮的清单上）；仍输入 `/plan-run` 会得到「did you mean '/plan'?」而不是被当作一句话发给模型（`ui/slash.py` 的 `_DEPRECATED` 墓碑表，近似命令规则看不到 4 个编辑距离的它）。每步一个**短对话**（全新 `ephemeral` session，seed = goal + 计划当前状态 + 本步验收，不继承父历史；步会话不落盘，不污染 `/resume`）——实测 4 回合 prompt 从 41k/82k/130k/254k（每回合重发全部历史）降为每步只带 seed（seed 本身随未完成项数增长）。有 `verify` 的项走 R0 验收门（失败修一次再败标 `blocked`）；无 `verify` 且模型未标完成的标 `stalled`。每步落收据，`/resume` 重放为步骤 header。整轮有顶（`ai.plan_max_step_turns`，默认 20，0=关闭；budget 停后剩余项保持 open）。**分步外完成有收据**（R1-5）：模型在计划回合顺手标 done 的步，runner 补 `attested=false` 收据、0 花费。**收据带证明分级**（R1-6）：`verified`/`on-claim`/`fiat`/`n/a`，report 点名无证明的 id（`verified` 要求每条验收判定都是 `passed is True`，读取端不信任 `ac` 非空）；**失败步同样留记录**（`✗ 受阻` 收据 + 气泡），`/resume` 能看到；回合内换清单（模型 `todo_write(clear)` 后重写）会清掉不属于新清单的旧收据 |
+| `/review` | — | 向模型发一条「审查当前 git diff」的快捷 prompt（TUI：命令入口见 `/plan` 行） |
 | `/config` | — | 打印生效的 model / 上下文预算 / 迭代上限 / 停止策略 / 回合超时 |
 | `/compact` | — | 主动压缩历史并落盘 |
 | `/memory` | — | 记忆统计（总数、活跃、置顶、kind 与 evidence 分布） |
@@ -657,6 +664,13 @@ R7b 把这段话的前半句治掉了：L2 不再丢正文。实测同一份 70 
   即使注册了而没人，也返回 `no_user` 并让模型「明确写出假设后自行决定」；
 - 空行 / EOF 记 `no_answer`，通道自身出错记 `user_prompt_error`——都不会中断回合。
 
+**TUI 接线**（M6.5，GUI 复刻后补的最后一环）：`world.build_world` 装配
+`CLIUserPromptCallback`，`handlers._wire_user_prompt` 把 provider 装成对前端的
+`user_prompt.ask` 服务端请求——前端 `AskPanel`（`◆ Question`）显示问题与选项，
+答案作为该请求的 JSON-RPC 应答返回，工具结果即 `用户回答：…`；esc / 回合结束
+（后端已走远）回空串，模型按契约自行决定。此前该入口用
+`UnavailableUserPromptCallback`（模型恒被告知「没人可回答」）。
+
 ## 记忆证据（R6d）
 
 每条 note 带 `evidence`：`tool`（该回合有工具调用成功）/ `model`（该回合只说话）/ `""`（R6 之前）。
@@ -782,9 +796,9 @@ app 的 50ms flush 定时器**只在真的写了内容时**才吸底，否则空
    `_plan_turn` 自己调 `process_input` 并传了 `observer`，工具块照常渲染。状态栏会照常置忙
    （命令与回合同样串行），缺的只是工具事件块；旧 UI 的 loop 级 observer 会渲染，属 v1 退化。
 
-**验证方式**：`tests/test_pty_textual.py`（真 pty 的审批/ask_user E2E）、
-`tests/test_blocks.py`（事件→块）、`tests/test_textual_app.py`（`run_test` 驱动的壳与提交），
-另以真实终端人工验证流式输出、模态与 `Ctrl-Q`。
+**验证方式**：`tests/test_server_ipc.py`（socket 级审批/会话/中断 E2E）、
+`tests/test_server_bridge.py`（事件→IPC 映射）、`tests/test_console_text_boundary.py`
+（markup 边界守卫），前端渲染由 `frontend/test/`（bun test）覆盖，另以真实终端人工验证。
 
 
 
@@ -816,7 +830,7 @@ app 的 50ms flush 定时器**只在真的写了内容时**才吸底，否则空
    `evidence` 过滤（`tool` / `model` / 空=不限，未知值报 `bad_evidence`）。合并近重复的判定
    **不动**（`_better_of` 仍按 importance → hits → 时间）。
 3. **长命令不再黑屏**（R8c-S1）：`bash` 的输出边跑边进控制台，每次调用 0.15s 最多一行
-   （`ui.tool_chunks`，默认开）。chunk 是**纯观测**：不进请求、不进历史、不进会话文件，
+   （前端实时显示）。chunk 是**纯观测**：不进请求、不进历史、不进会话文件，
    模型仍然只拿到最终的 `ToolResult`。
 4. **Esc 丢掉当前这一批，而不是整个回合**（R8c-S2）：工具结果回
    `error="cancelled_by_user"`，模型换做法继续；被取消的调用**不算失败**（不会触发换策略提示）；

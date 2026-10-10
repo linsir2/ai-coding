@@ -52,17 +52,18 @@ def main(
     if version:
         return
     # The TUI owns the terminal from here: a log record written to stderr lands
-    # in the middle of Textual's frame, and Textual repaints only the regions it
-    # believes changed, so fragments of it stay on screen (measured: a stray two
-    # characters at the input row's right edge after every turn, cleared only by
-    # a resize).  Logs go to the workspace's .ai-coding/ instead.
+    # in the middle of the frame, and the renderer repaints only the regions it
+    # believes changed, so fragments of it stay on screen.  Logs go to the
+    # workspace's .ai-coding/ instead.
     send_logs_to_file(workspace)
-    from ai_coding.ui.textual_app import run_app
+    from ai_coding.server.launcher import run_tui
+
+    runner = run_tui
 
     try:
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(run_app(path, workspace, skills))
+            loop.run_until_complete(runner(path, workspace, skills))
         finally:
             loop.close()
     except (ValueError, FileNotFoundError) as exc:

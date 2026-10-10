@@ -36,3 +36,7 @@ config.local.yaml
 .vscode/
 # Generated TUI preview (scripts/tui_shot.py)
 docs/tui-*.svg
+
+# Frontend (bun)
+frontend/node_modules/
+frontend/.bun/

@@ -142,8 +142,8 @@ async def test_plan_command_plans_and_executes_in_one_command():
     """'/plan <topic>' must not stop at the plan — it executes it (M1-A)."""
     from rich.console import Console
 
-    from ai_coding.ui.console import DialogueConsole
-    from ai_coding.ui.repl import REPLAction, handle_input
+    from ai_coding.app.commands import REPLAction, handle_input
+    from ai_coding.app.console import DialogueConsole
 
     class _Sessions:
         def __init__(self, session):
@@ -167,7 +167,7 @@ async def test_plan_command_plans_and_executes_in_one_command():
 
 @pytest.mark.asyncio
 async def test_plan_run_is_no_longer_a_command():
-    from ai_coding.ui.slash import parse_slash
+    from ai_coding.app.slash import parse_slash
 
     assert parse_slash("/plan-run") is None
     assert parse_slash("/plan-run 继续") is None
@@ -317,8 +317,8 @@ async def test_planning_failure_does_not_execute():
     """No todos from the plan turn -> no execution, a clear message."""
     from rich.console import Console
 
-    from ai_coding.ui.console import DialogueConsole
-    from ai_coding.ui.repl import handle_input
+    from ai_coding.app.commands import handle_input
+    from ai_coding.app.console import DialogueConsole
 
     class _EmptyLoop:
         def __init__(self):
@@ -546,16 +546,16 @@ async def test_parent_step_bubbles_carry_real_timestamps():
     """The parent's per-step bubbles are persisted messages, so they get stamps.
 
     The runner wrote them with timestamp="", which is not a formatting detail:
-    _hhmm() passes anything that is not ISO-8601 straight through, so every
-    replayed step header showed an empty clock, and the OTLP exporter's
-    _nano() returned 0 for them.  Nothing sorts or trims by timestamp (checked
-    across core and domain), so this is display and export only — but a
-    persisted message with no time is a lie about when the words were said.
+    a non-ISO-8601 stamp shows an empty clock wherever it is replayed, and the
+    OTLP exporter's ``_nano()`` returned 0 for them.  Nothing sorts or trims by
+    timestamp (checked across core and domain), so this is display and export
+    only — but a persisted message with no time is a lie about when the words
+    were said.
 
-    Asserted through _hhmm, the function replay actually uses, rather than
-    against a literal format.
+    Asserted by parsing the stamp as ISO-8601 — the format every consumer
+    (replay, export, OTLP) assumes — rather than against a literal string.
     """
-    from ai_coding.ui.transcript import _hhmm
+    from datetime import datetime
 
     session = _session_with("one")
     await PlanRunner(_StubLoop(["complete"])).run(session)
@@ -565,8 +565,7 @@ async def test_parent_step_bubbles_carry_real_timestamps():
     for message in bubbles:
         stamp = message.timestamp
         assert stamp, "a persisted message with no timestamp"
-        shown = _hhmm(stamp)
-        assert len(shown) == 5 and shown[2] == ":", f"replay would show {shown!r}"
+        datetime.fromisoformat(stamp)  # raises if not a real stamp
 
 
 @pytest.mark.asyncio

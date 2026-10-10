@@ -4,7 +4,7 @@ Commands are the ``直接命令`` reserved in M4.  Unknown slash-prefixed input 
 plain text both return ``None`` (so they go to the model).  All pure and offline.
 """
 
-from ai_coding.ui.slash import SlashCommand, parse_slash, suggest_command
+from ai_coding.app.slash import SlashCommand, parse_slash, suggest_command
 
 
 def test_plain_text_is_none():
