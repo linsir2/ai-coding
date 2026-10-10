@@ -18,7 +18,6 @@ import { DialogSessions } from "./component/dialog-sessions"
 import { DialogSkills } from "./component/dialog-skills"
 import { DialogPermissions } from "./component/dialog-permissions"
 import { DialogStatus } from "./component/dialog-status"
-import { AskPanel } from "./component/ask"
 import { type PermissionRequest } from "./component/permission"
 
 import { ToastProvider } from "./component/toast"

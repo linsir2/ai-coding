@@ -95,7 +95,12 @@ def build_ledger(
         hot = count >= 2 or (stall_threshold and failed_streak >= stall_threshold)
         items.append(UncertaintyItem(
             id=f"U-err-{tool}-{error}",
-            question=f"{tool} 反复失败（{error}×{count}）：直接原因是什么？",
+            # The failure code stays in the item id, not in the sentence: this
+            # line is human-facing (bridge.py:148 puts it in the transcript and
+            # nothing injects it into the model's context), and the evidence
+            # below it already carries the real output, so the code would only
+            # be noise on screen (A5 §3b).
+            question=f"{tool} 反复失败（{count} 次）：直接原因是什么？",
             kind="epistemic",
             level="high" if hot else "medium",
             evidence=(_tail(tails[tool, error]),),

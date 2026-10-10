@@ -148,8 +148,10 @@ describe("tools", () => {
       target: "ls -la",
       status: "running",
       tail: "",
+      tailDropped: false,
       preview: "",
       error: "",
+      durationMs: 0,
     })
   })
 
@@ -201,6 +203,52 @@ describe("tools", () => {
     if (part.kind !== "tool") throw new Error("expected tool part")
     expect(part.tail.length).toBe(4000)
     expect(part.tail.endsWith("y".repeat(100))).toBe(true)
+  })
+
+
+  // A5 T3/T4: duration and truncation are facts the wire already sent and the
+  // card now shows; a dropped tail head must be recorded, not silently lost.
+  test("tool.finished records the duration the wire measured", () => {
+    const state = feed(
+      initialState(),
+      wire("tool.started", { callId: "c1", toolName: "bash", params: { command: "ls" } }),
+      wire("tool.finished", {
+        callId: "c1",
+        toolName: "bash",
+        success: true,
+        outputPreview: "line one",
+        durationMs: 820,
+        error: null,
+      }),
+    )
+    const part = lastAssistant(state).parts[0]
+    if (part.kind !== "tool") throw new Error("expected tool part")
+    expect(part.durationMs).toBe(820)
+    expect(part.tailDropped).toBe(false)
+  })
+
+  test("a tool call the card cannot expand past records that the head was dropped", () => {
+    const state = feed(
+      initialState(),
+      wire("tool.started", { callId: "c1", toolName: "bash", params: { command: "yes" } }),
+      wire("tool.chunk", { callId: "c1", text: "x".repeat(4000) }),
+      wire("tool.chunk", { callId: "c1", text: "y" }),
+    )
+    const part = lastAssistant(state).parts[0]
+    if (part.kind !== "tool") throw new Error("expected tool part")
+    expect(part.tail.length).toBe(4000)
+    expect(part.tailDropped).toBe(true)
+  })
+
+  test("a short tool call records no truncation", () => {
+    const state = feed(
+      initialState(),
+      wire("tool.started", { callId: "c1", toolName: "bash", params: { command: "ls" } }),
+      wire("tool.chunk", { callId: "c1", text: "short" }),
+    )
+    const part = lastAssistant(state).parts[0]
+    if (part.kind !== "tool") throw new Error("expected tool part")
+    expect(part.tailDropped).toBe(false)
   })
 
   test("output preview is shortened to 120 chars like the old fold body", () => {

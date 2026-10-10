@@ -95,9 +95,13 @@ export function messagesToState(messages: WireMessage[]): SessionState {
           verb: toolVerb(call.name),
           target: toolTarget(call.name, parseArguments(call.arguments)),
           status: "running",
+          // A replayed card has no stream behind it: no live tail, so there is
+          // nothing to expand and nothing that was dropped (A5 §4).
           tail: "",
+          tailDropped: false,
           preview: "",
           error: "",
+          durationMs: 0,
         })
       }
     } else if (message.role === "tool") {

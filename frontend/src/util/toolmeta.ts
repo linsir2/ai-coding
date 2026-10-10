@@ -63,3 +63,54 @@ export function toolTitle(verb: string, target: string, running: boolean): strin
   const action = `${running ? "正在" : "已"}${verb}`
   return target ? `${action} · ${target}` : action
 }
+
+/**
+ * How a settled tool call reads.  `denied` means something stopped the call on
+ * purpose (the operator, the guard, a hook); `failed` means it broke or ran out
+ * of time.  The card colours and strikes through by tone, which is why the
+ * distinction is a value and not a boolean.
+ */
+export type FailureTone = "denied" | "failed"
+
+/**
+ * The failure code → human label (A5 §4).  Transcribed from the documented
+ * `ToolResult.error` contract (docs/data-contracts.md:159,167,347) so the
+ * screen never shows a machine code; an unknown code keeps itself visible
+ * rather than being swallowed, so a new backend code is visible when it lands.
+ */
+const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
+  denied: { label: "被拒绝", tone: "denied" },
+  not_approved: { label: "未获批准", tone: "denied" },
+  guard_denied: { label: "门卫拦截", tone: "denied" },
+  hook_blocked: { label: "钩子拦截", tone: "denied" },
+  approval_timeout: { label: "审批超时", tone: "denied" },
+  stopped: { label: "已停止", tone: "denied" },
+  skipped: { label: "已跳过", tone: "denied" },
+  nonzero_exit: { label: "命令返回非零", tone: "failed" },
+  timeout: { label: "命令超时", tone: "failed" },
+  spawn_failed: { label: "命令无法启动", tone: "failed" },
+  tool_timeout: { label: "工具调用超时", tone: "failed" },
+  tool_error: { label: "工具异常", tone: "failed" },
+  unknown_tool: { label: "未知工具", tone: "failed" },
+  mcp_error: { label: "MCP 调用失败", tone: "failed" },
+  subagent_error: { label: "子代理失败", tone: "failed" },
+}
+
+export function toolFailure(error: string): { label: string; tone: FailureTone } {
+  if (!error) return { label: "", tone: "failed" }
+  return FAILURES[error] ?? { label: `未知原因（${error}）`, tone: "failed" }
+}
+
+/** Milliseconds the way a reader wants it: 820ms / 1.5s / 2m 5s. */
+export function formatDuration(ms: number): string {
+  if (ms <= 0) return "0ms"
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  const minutes = Math.floor(ms / 60_000)
+  return `${minutes}m ${Math.round((ms % 60_000) / 1000)}s`
+}
+
+/** The head of a long tool tail is dropped; say so rather than pretend. */
+export function truncationNote(dropped: boolean): string {
+  return dropped ? "…（前面的输出已截断）" : ""
+}

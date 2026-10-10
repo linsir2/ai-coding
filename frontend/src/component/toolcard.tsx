@@ -1,31 +1,48 @@
 /**
- * Tool card (M2) — the three states OpenCode's BlockTool shows, with this
- * project's real verbs (ported from the old transcript's table):
+ * Tool card (M2, folded in A5) — what a settled call reads like:
  *
- *   running : <spinner> 正在运行命令 · ls      (+ live tail, last 3 lines)
- *   ok      : ✓ 已运行命令 · ls                (+ 120-char output preview)
- *   failed  : ✗ 已运行命令 · ls                (+ error code line)
+ *   row     : ± ✓/✗/⊘  已运行命令 · git branch · 820ms      (click opens)
+ *   folded  : the failure as a sentence, or the output preview
+ *   open    : the whole tail, with a note when its head was dropped
  *
- * `tail` is capped by the reducer (4000 chars) — rendering only ever reads
- * the last three non-empty lines, so a `yes`-style firehose stays cheap.
+ * Three things the old card got wrong, all fixed here rather than in the
+ * reducer: the failure was the raw machine code (`nonzero_exit`), the duration
+ * the wire measured was thrown away, and 4,000 characters of output had no
+ * way out.  The code → label table is `toolFailure()` in util/toolmeta (A5 §4).
  */
 
-import { For } from "solid-js"
+import { TextAttributes } from "@opentui/core"
+import { For, Show, createSignal } from "solid-js"
 import type { Part } from "../state/session"
 import { theme } from "../theme/tokens"
-import { toolTitle } from "../util/toolmeta"
+import {
+  formatDuration,
+  toolFailure,
+  toolTitle,
+  truncationNote,
+} from "../util/toolmeta"
 
 type ToolPart = Extract<Part, { kind: "tool" }>
 
 export function ToolCard(props: { part: ToolPart }) {
-  const running = () => props.part.status === "running"
-  const color = () =>
-    running()
-      ? theme.textBase
-      : props.part.status === "ok"
-        ? theme.feedbackSuccess
-        : theme.feedbackError
+  // Per-card fold, like the reasoning block (A4 §3): view state, never state.
+  const [expanded, setExpanded] = createSignal(false)
+  const toggle = () => setExpanded((value) => !value)
 
+  const running = () => props.part.status === "running"
+  const failure = () => toolFailure(props.part.error)
+  const denied = () => props.part.status !== "running" && failure().tone === "denied"
+
+  const accent = () => {
+    if (running()) return theme.textBase
+    if (denied()) return theme.feedbackWarning
+    return props.part.status === "ok" ? theme.feedbackSuccess : theme.feedbackError
+  }
+
+  const icon = () => (running() ? null : denied() ? "⊘" : props.part.status === "ok" ? "✓" : "✗")
+  /** Only a settled call with a tail has something to open; no marker, no lie. */
+  const canExpand = () => !running() && props.part.tail.length > 0
+  const strike = () => (denied() ? TextAttributes.STRIKETHROUGH : undefined)
   const tailLines = () =>
     props.part.tail
       .split("\n")
@@ -34,21 +51,42 @@ export function ToolCard(props: { part: ToolPart }) {
 
   return (
     <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
-      <box flexDirection="row" gap={1}>
-        {running() ? (
-          <spinner name="dots" color={theme.textMuted} />
-        ) : (
-          <text fg={color()}>{props.part.status === "ok" ? "✓" : "✗"}</text>
-        )}
-        <text fg={color()}>{toolTitle(props.part.verb, props.part.target, running())}</text>
+      {/* The whole row is the target (OpenCode message-parts.tsx:218): no
+          `+`/`−` glyph — next to ✓/✗/⊘ it read as part of the outcome — and a
+          row-wide target beats making the reader find the label. */}
+      <box flexDirection="row" gap={1} onMouseUp={canExpand() ? toggle : undefined}>
+        <Show when={!running()} fallback={<spinner name="dots" color={theme.textMuted} />}>
+          <text fg={accent()} attributes={strike()}>
+            {icon()}
+          </text>
+        </Show>
+        <text fg={accent()} attributes={strike()}>
+          {toolTitle(props.part.verb, props.part.target, running())}
+        </text>
+        <Show when={props.part.durationMs > 0}>
+          <text fg={theme.textMuted}>{`· ${formatDuration(props.part.durationMs)}`}</text>
+        </Show>
       </box>
-      {running() ? (
+      <Show when={!running() && failure().label} fallback={<Show when={running()}>
         <For each={tailLines()}>{(line) => <text fg={theme.textMuted}>{`│ ${line}`}</text>}</For>
-      ) : props.part.error ? (
-        <text fg={theme.feedbackError}>{props.part.error}</text>
-      ) : props.part.preview ? (
+      </Show>}>
+        <text fg={denied() ? theme.feedbackWarning : theme.feedbackError}>{failure().label}</text>
+      </Show>
+      <Show when={!running() && !failure().label && props.part.preview}>
         <text fg={theme.textMuted}>{props.part.preview}</text>
-      ) : null}
+      </Show>
+      <Show when={expanded() && canExpand()}>
+        <box border={["left"]} borderColor={theme.backgroundRaisedMax} paddingLeft={1} flexShrink={0}>
+          <box flexDirection="column">
+            <Show when={props.part.tailDropped}>
+              <text fg={theme.textMuted}>{truncationNote(true)}</text>
+            </Show>
+            <For each={props.part.tail.split("\n").filter((line) => line.length > 0)}>
+              {(line) => <text fg={theme.textMuted}>{line}</text>}
+            </For>
+          </box>
+        </box>
+      </Show>
     </box>
   )
 }

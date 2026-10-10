@@ -27,8 +27,12 @@ export type Part =
       target: string
       status: "running" | "ok" | "failed"
       tail: string
+      /** True once `tail` dropped its head; the card says so instead of lying. */
+      tailDropped: boolean
       preview: string
       error: string
+      /** What the wire measured; 0 when the event carried none. */
+      durationMs: number
     }
   | { kind: "plan"; title: string; body: string }
   | { kind: "notice"; tone: Tone; text: string }
@@ -227,8 +231,10 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
           target: toolTarget(toolName, obj(data["params"])),
           status: "running",
           tail: "",
+          tailDropped: false,
           preview: "",
           error: "",
+          durationMs: 0,
         },
       ])
     }
@@ -239,7 +245,13 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
       return updateAssistant(state, (parts) =>
         mapParts(parts, (part) =>
           part.kind === "tool" && part.callId === callId
-            ? { ...part, tail: (part.tail + text).slice(-TOOL_TAIL_CHARS) }
+            ? {
+                ...part,
+                tail: (part.tail + text).slice(-TOOL_TAIL_CHARS),
+                // The head went away; remember that it did, so the card can
+                // mark the cut instead of passing it off as the whole output.
+                tailDropped: part.tailDropped || part.tail.length + text.length > TOOL_TAIL_CHARS,
+              }
             : part,
         ),
       )
@@ -250,12 +262,13 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
       const success = data["success"] === true
       const preview = shorten(str(data["outputPreview"]), PREVIEW_CHARS)
       const error = str(data["error"])
+      const durationMs = num(data["durationMs"])
       let found = false
       const updated = updateAssistant(state, (parts) =>
         mapParts(parts, (part) => {
           if (part.kind !== "tool" || part.callId !== callId) return part
           found = true
-          return { ...part, status: success ? "ok" : "failed", preview, error }
+          return { ...part, status: success ? "ok" : "failed", preview, error, durationMs }
         }),
       )
       if (found) return updated
@@ -270,8 +283,10 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
           target: toolTarget(toolName, {}),
           status: success ? "ok" : "failed",
           tail: "",
+          tailDropped: false,
           preview,
           error,
+          durationMs,
         },
       ])
     }

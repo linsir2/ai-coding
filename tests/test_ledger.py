@@ -95,3 +95,16 @@ def test_policy_acceptance_gate_nudges_then_finishes():
     assert done.action.name == "FINISH" and "acceptance verified" in done.reason
 
 
+def test_failure_question_shows_the_count_not_the_machine_code():
+    """A5 T9: the ledger line is human-facing (bridge.py:148 -> the transcript
+    only; nothing injects it into the model's context), so the raw failure code
+    must not reach the screen.  The code stays in the item id, which is internal,
+    and the evidence line below already carries the real failure output."""
+    items = build_ledger(
+        failures=(("bash", "nonzero_exit", "fatal: not a git repository"),) * 2,
+        verify={}, failed_streak=2, iteration=2,
+        succeeded_tools=frozenset(), stall_threshold=2,
+    )
+    question = next(i for i in items if i.id.startswith("U-err")).question
+    assert "2 次" in question
+    assert "nonzero_exit" not in question
