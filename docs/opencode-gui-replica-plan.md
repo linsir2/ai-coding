@@ -467,6 +467,18 @@ frontend/
 | **M6.5** ask_user 对接 ✅ | `world` 装配 `CLIUserPromptCallback` + `handlers._wire_user_prompt`（`user_prompt.ask` 双向请求）、前端 `AskPanel`（`◆ Question` 面板）+ 7 纯逻辑用例 + 2 IPC 往返 + tmux 双路径 E2E | 合并就绪 | 见 `opencode-gui-m6-plan.md` §7 |
 | **M6** 收尾 ✅ | 纯逻辑迁移到 `app/`（slash/trace_text/console/commands + 9 测试归口）、前端 IPC 测试补全、`--legacy-ui` 移除、**旧 Textual UI 删除**（`ai_coding/ui/` 16 文件 + 14 测试 + tui_shot；含 UIConfig 死配置与 textual 依赖移除；记录见 `opencode-gui-m6-plan.md` §4） | 合并就绪 | `pytest`+`ruff`+`mypy`+`bun test`(107)+`tsc` 全绿 + tmux 冒烟 |
 
+| **A3** 权限/统计/导出/会话删除 ✅ | `permissions.state` 只读查询；传给前端的 trace 统计 `/stats` 与导出 `/export html\|otlp [id]`（落 `<workspace>/.ai-coding/exports/`，J4）；`session.delete` 删除 live 会话时切换新会话（J6）；会话面板 `ctrl+d` 武装式两按删除（对位 OpenCode `dialog-session-list.tsx`） | 三项缺口补齐 | ✅ tmux 真模型逐条验证（策略切换+审计回执、两会话加权 cache 47%、导出 7.7KB HTML + 17KB OTLP、删 live 会话后自动切空会话且旧 trace 保留）；20 个新用例；设计 `opencode-gui-a3-design.md` |
+| **A4** 转录/Thought/布局/权限对话框 ✅ | **两层根因**：reducer 把 reasoning append 到末尾（应为 insert-before 于本步 text 前）+ `PartView` 函数体 `switch` 非响应式而 `<Index>` 按位置复用实例（推理全文被当正文渲染）；折叠态收归 part（点击展开、首句标题）；composer 移入左列（底边框 140→110）；权限从逐会话面板提升为 app 层全局对话框（`liveSessionId` 命名即"传输通道"）；假 tab 条改会话头+面板入口 | 四条实测抱怨全消 | ✅ tmux 真机：`+ Thought <首句>`→点击展开全文、110 vs 540 边框对比、窄屏 88 列复验、palette→Permissions 切换、`<leader>1` 失效；新增 OpenTUI 自带 `testRender`+`mockMouse` 真渲染测试；设计 `opencode-gui-a4-design.md` |
+| **A5** 工具卡失败文案/展开/耗时/截断 ✅ | `toolFailure()` 15 个码映射（照 `data-contracts.md` 派生，未知码 `未知原因（code）` 不吞）；denied 独立 tone（`⊘`+黄+`STRIKETHROUGH`）；整行 `onMouseUp` 展开（无 `+/−` 字形）；`durationMs` 落库；`tailDropped` 标记头部丢弃；ledger question 删机器码留次数 | 屏幕无机器码、输出可展开 | ✅ tmux 真机 `✗ 已运行命令 · … · 20.1s` + `命令返回非零` + 点击展开 + 被拒 `⊘ …未获批准`；`captureSpans` 断言删除线；设计 `opencode-gui-a5-design.md` |
+| **A6** 空 model step 不再裸异常 ✅ | `EmptyStepError(finish_reason)` + 循环唯一一行判断（发射之后）+ `except` 接住 + `failed_outcome` 写人话（照 `DeadlineExpired` 分支形状）；**不变式未动**（它复刻上游 API 硬要求）；空判定同时要求无正文且无工具调用（T6 钉住，否则误杀所有工具步） | 回合正常收尾、屏幕无 Python 异常串 | ✅ provider 桩强制复现（真引擎→循环→IPC→前端）：`回合未完成 · 引擎错误（1 轮）`+`[turn] 错误：模型只返回了思考内容，没有回答（finish_reason=stop）`，全屏 0 处 `ValueError`；设计 `opencode-gui-a6-design.md` |
+| **A7** workspace 隔离+流染色+通知+人话 ✅ | `SessionService` 显式传 `<ws>/.ai-coding/sessions`（traces 同构，默认值不动）；`foldToolChunk()` 把 `tail: string` 改为 `lines: [{text,stream}]`（跨块续行、预算覆盖未闭合行、行内截断也报 dropped）；子任务 notice 带 `runId[:12]`+截断说明；4 处拒绝 output 改中文（`error` 码不动，两头都测） | 会话不再落 CWD、stderr 可辨 | ✅ tmux 真机 stderr/stdout 按行呈现；TDD 过程中发现并修掉自己设计里的错（单行长输出会卡在 pending 永不显示）；设计 `opencode-gui-a7-design.md` |
+| **A8** 回合结束提示补全 ✅ | `turnEndMarker` 补 `budget`/`stopped` 两条（原来落到空串=回合停了却无声）；`timeout` 英文串统一中文 | 7 种回合结束方式全有话 | ✅ reducer 用例逐条钉住；设计并入本轮提交说明 |
+
+> **A3–A8 小结（2026-10-10）**：六轮都是"后端已把答案带着、前端丢在半路"或"异常被当意外"两类问题——
+> 权限是全局的却挂在逐会话面板、`stream`/`durationMs`/`runId` 收到即弃、`ChatMessage` 不变式把 provider 抖动升级成裸异常、
+> 会话文件落在进程 CWD。每轮的共同点：**先找根因再动手，砍掉说不清作用的改动，用真机或真实渲染链路验收**。
+> 设计文档：`opencode-gui-a3/a4/a5/a6/a7-design.md`（a8 并入提交说明）。
+
 ### M0 实测截图（2026-10-09）
 
 ```
