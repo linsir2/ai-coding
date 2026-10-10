@@ -123,7 +123,7 @@ props：`{ client: IpcClient }`。
 - `onMount`：`client.request("mcp.list")` → `setServers(data.servers ?? [])`
 - 选项：`title=name`、`description=mcpToolNote(server)`、`footer=server.detail`、`category` 按 status 分组（`已连接` / `有问题`）
 - `current`：无（没有"当前 server"概念）
-- 整个面板**只读，无逐行动作**——我们的 MCP 是启动时一次性连接，没有重连机制，加按钮就是假实现
+- ~~整个面板**只读，无逐行动作**~~ **M3 起被推翻并记录在此**：该结论的前提「启动时一次性连接，没有重连机制」被外部 MCP 的 M3 消除——现在每个 server 有永久 backoff 重连的 supervisor，`mcp.connect` 唤醒一次立即重试。半自动面板的前提成立了，failed 行的 enter 就是那个动作（且仅 failed 行：connected 无可重试、disabled 不可连、connecting 正在试）。原判据（没有背后机制的按钮是假实现）依然有效，变的是机制是否存在。
 - footer：`esc close`
 
 为什么用 `DialogSelect`：它已提供标题+esc、fuzzy 搜索、分组、footer 行。MCP 面板是一个纯只读列表，与 `dialog-skills.tsx` 同构但更简单。

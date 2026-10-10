@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _mcp_wait import until_mcp_settled
 
 from ai_coding.config.models import MCPConfig, MCPServerConfig, MCPTimeout
 from ai_coding.core.mcp import MCPManager, MCPToolAdapter
@@ -53,6 +54,7 @@ def _config() -> MCPConfig:
 async def test_real_stdio_server_lists_and_answers():
     manager = MCPManager(_config())
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     try:
         handle = manager.lookup("echo", "echo")
         assert handle is not None

@@ -80,6 +80,16 @@ def test_an_unknown_local_tool_still_warns():
     assert gate.check("who_knows", {}) == PermissionDecision.WARN
 
 
+def test_the_dispatcher_vessel_is_allowed_the_call_is_still_judged():
+    """M2: ``mcp_call`` is ours, so invoking it needs no prompt; what it carries
+    is judged as ``server__tool`` — including a call whose pair is not callable,
+    which must be able to come back as an error result rather than a prompt."""
+    gate = PermissionGate.from_config(_app(_server("fs")))
+
+    assert gate.check("mcp_call", {"server": "fs", "tool": "read_file"}) == PermissionDecision.ALLOW
+    assert gate.check("fs__read_file", {}) == PermissionDecision.WARN
+
+
 def test_the_local_allow_list_is_unchanged():
     gate = PermissionGate.from_config(_app(_server("everything", auto_approve=True)))
     for name in ("read", "glob", "todo_write", "skill", "subagent", "memory_search", "ask_user"):

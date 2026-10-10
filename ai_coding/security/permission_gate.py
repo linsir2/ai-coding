@@ -175,6 +175,14 @@ class PermissionGate:
             # R8a: writing one line into the turn's own book touches neither the
             # repo nor the durable memory (docs/r8-analysis.md 3.1, step 5).
             "checkpoint_write",
+            # M2: the MCP dispatcher is a vessel, not an action — what it carries
+            # is authorized as ``server__tool`` (BaseTool.permission_name), which
+            # is what the gate actually judges.  The only calls that reach it
+            # under its own name are ones whose pair is not callable (not
+            # connected, unknown, whitelisted out), and those must come back as a
+            # *result* naming the real tools, not as an approval prompt for a
+            # call that cannot run (seen in the M3 end-to-end).
+            "mcp_call",
         }
         self._warn_tools = {"write", "edit", "bash"}
 

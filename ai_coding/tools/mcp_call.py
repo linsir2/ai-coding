@@ -122,6 +122,11 @@ class MCPCallTool(BaseTool):
             ctx=ctx,
             execution_timeout=handle.execution_timeout,
             progress_name=f"{server}__{tool}",
+            # A parked owner never sees its subprocess die, so this call is the
+            # only witness: a dead transport marks the server and wakes its
+            # supervisor (M3 §1).  An ordinary tool error is not reported here
+            # — the kernel only calls this for the transport-class ones.
+            on_transport_error=lambda: self._manager.note_transport_death(server),
         )
 
     def _error(self, message: str, server: str, tool: str) -> ToolResult:

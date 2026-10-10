@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _mcp_wait import until_mcp_settled
 
 from ai_coding.config.models import MCPConfig, MCPServerConfig
 from ai_coding.core.events import ToolChunk
@@ -53,6 +54,7 @@ def _config() -> MCPConfig:
 async def test_a_real_server_progress_reaches_us_as_chunks():
     manager = MCPManager(_config())
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     try:
         handle = manager.lookup("progress", "slow_task")
         assert handle is not None

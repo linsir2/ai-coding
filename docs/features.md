@@ -522,6 +522,8 @@ schema**：LLM 只见一个 `mcp_call(server, tool, input)`，可调用的工具
   这是 anyio cancel scope 的硬约束）；连接受 `mcp.servers[].timeout.startup`（ms）约束，装死的 server 到点跳过；
   server 的 `environment` / `cwd` 会透传给子进程（`environment` 的键大小写敏感，YAML 里原样透传，不参与 camel 归一化）；
   factory 在交出 session 前显式 `initialize()` 完成握手。
+- **M2 起**：每个远端工具不再是注册表里的一条 function schema（13 工具实测每步多付 ~9,000 字符）。LLM 只见 `mcp_call(server, tool, input)`，可调用工具由 `MCPManager.available()` 单一来源渲染成有预算的 catalog（每条描述 ≤120 字符、总量 ≤8,000 字符）挂进 loop 的 volatile tail 每步重建，重连后新工具下一步即可见；`permissions{allow,deny}` 按远端工具名授权（deny 优先且凌驾 always），目录可见性与执行授权分离。
+- **M3 起（生命周期）**：启动不阻塞——`open_all` 起 supervisor 即返回，TUI 秒起，行显示 `Connecting …` 直到首次 attempt 落定；连接并发 ≤4（否则 10 个 npx server 同时冷启动）；每个 server 永久 backoff 重连（1s 翻倍、封顶 60s），修好 PATH/装好依赖后自愈无需重启；`Degraded` 每 server 仅首次。**掉线只在调用时可见**（parked owner 不读流，实测）：传输类调用失败才标记「连接已断开，正在重连」并重连，参数错等普通工具错误不重启 server。面板 failed 行 enter → `mcp.connect` 立即重试；`mcp.status.changed` 事件驱动开门的面板刷新。
 - **M1 起（v2 契约）**：`command` 是 argv 一体（`["npx","-y","pkg"]`，原来的 `args` 并入）；
   per-server 开关从 `enabled` 翻成 `disabled`（默认开）；`env` 改名 `environment`；单个 `connection_timeout`
   拆成 `timeout{startup, catalog, execution}` 三段（毫秒）——握手、tools/list、单次调用各管各，

@@ -31,6 +31,15 @@ const ROWS = {
  * frames are cropped to the list's visible height, so sharing one renderer
  * across cases lets one case's rows bleed into the next one's capture.
  */
+/**
+ * Note on what is *not* here: the key path (return -> dialog.select.submit ->
+ * a row's onSelect) cannot be driven in this harness.  A probe with a bare
+ * ``DialogSelect`` and no component of ours at all shows the same silence, so
+ * it is the harness, not the panel — and that chain is what every palette
+ * selection in production already exercises.  The panel's own decision (which
+ * rows carry the action) is a pure function, tested in test/mcp.test.ts; the
+ * whole loop is verified by the M3 end-to-end run.
+ */
 describe("DialogMcp", () => {
   const frame = async (servers: unknown[]): Promise<string> => {
     const base = await createTestRenderer({ width: 78, height: 26 })
@@ -81,5 +90,12 @@ describe("DialogMcp", () => {
   test("no configured servers says so instead of listing nothing", async () => {
     const text = await frame([])
     expect(text).toContain("没有配置 MCP 服务器")
+  })
+
+  test("a server still connecting says so (M3)", async () => {
+    const text = await frame([
+      { name: "slow", command: "npx slow", status: "connecting", toolCount: 0, wantedCount: 0, detail: "正在连接…" },
+    ])
+    expect(text).toContain("Connecting …")
   })
 })

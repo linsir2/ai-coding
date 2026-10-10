@@ -178,6 +178,17 @@ mcp_call(server: str, tool: str, input: object) → ToolResult
 - per-tool ruleset 落点（M2 定）：倾向 per-server `permissions` 子表
 - volatile tail 具体字段与缓存键交互（M2 开工先读 agent_loop 缓存逻辑）
 
+## 4A. M3 生命周期决策记录（2026-10-10 拍板）
+
+| 决定 | 选择 | 后果 |
+|---|---|---|
+| 启动阻塞 | **不阻塞**（TUI 立即起，OpenCode 的 fork 方式） | `open_all` 只起 supervisor 即返回；行新增 `connecting` 态（M1 为避开它而选阻塞，现按拍板捡回）；~20 个既有测试需加"等 settle"助手 |
+| 重试终止 | 永久，间隔 1s→2s→4s…封顶 60s | 无"放弃"计数；直到进程退出 / `disabled` / aclose |
+| Degraded | 每 server 仅首次失败 | 重试静默；行 detail 显示最近一次错误 |
+| 面板动作 | 仅 failed 行 enter → `mcp.connect` | off/connected/filtered 行无动作 |
+
+两个实验支撑：① 真 stdio 桩在 tools/list 后退出，parked 的 owner 任务 3s 无感知——**空闲掉线不可见，唯一信号是下一次调用失败**，故 `mcp_call` 的传输类异常（anyio `ClosedResourceError`/`BrokenResourceError`/`EndOfStream`，惰性 import 判别）才标记死亡并唤醒重连，普通工具错误不触发；② `_serve` 在 ready 后只 `await _stop.wait()`，任务在 park 期间永不结束——**监听 owner 任务是死代码，已砍**。jitter 同样砍掉：Semaphore(4) 已吸收同步重试的惊群，且 jitter 会让退避断言变概率。
+
 ## 11. 上游依据（对齐溯源）
 
 | 我们的决策 | OpenCode 依据 |

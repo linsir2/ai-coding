@@ -39,8 +39,11 @@ server's session from connect to close.**
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import itertools
 import logging
+import os
+import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
@@ -57,6 +60,28 @@ SessionFactory = Callable[[MCPServerConfig], Any]
 
 _log = logging.getLogger(__name__)
 
+_DEV_NULL: Any = None
+
+
+def _devnull() -> Any:
+    """The process-wide ``/dev/null``, opened once.
+
+    Being a *real* file is the whole requirement: ``stdio_client`` hands it to
+    ``anyio``, which asks for its ``fileno``.
+    """
+    global _DEV_NULL
+    if _DEV_NULL is None:
+        _DEV_NULL = open(os.devnull, "w")  # noqa: SIM115 — lives for the process
+    return _DEV_NULL
+
+
+#: The stderr capture of the attempt being connected, if the owner set one.
+#: Only alive across ``enter_async_context`` — that is when ``anyio`` asks the
+#: file for its ``fileno`` and dups it into the child.
+_current_errlog: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "mcp_errlog", default=None
+)
+
 # How long a *connected* session may take to shut down before it is cancelled.
 # A session that never connected is cancelled almost immediately instead.
 _CLOSE_TIMEOUT = 5.0
@@ -69,6 +94,33 @@ _CATALOG_DESCRIPTION_LIMIT = 120
 #: ~4 characters per token, so this is OpenCode's INLINE_BUDGET of 2,000 tokens
 #: (catalog.ts:50).  Over it, configured servers are dropped, loudly.
 _CATALOG_BUDGET_CHARS = 8_000
+
+#: The pause between a server's connect attempts, doubling up to the cap (M3).
+_BACKOFF_MIN = 1.0
+_BACKOFF_MAX = 60.0
+
+#: How many connects may run at once.  Spawning is the expensive half of a
+#: connect (npx cold starts measured ~27s, docs/features.md), so ten servers
+#: configured means ten cold starts at once — the bound OpenCode's reconcile
+#: lacks and its own review names.  The bound is also why the backoff needs no
+#: jitter: a room full of servers retrying in lockstep is absorbed here.
+_MAX_CONCURRENT_CONNECTS = 4
+
+
+def _is_transport_death(exc: BaseException) -> bool:
+    """Whether an exception means the *connection* is gone, not just this call.
+
+    A parked owner never reads the stream, so a subprocess that exits mid
+    session is invisible until a call fails (M3 §1) — and only a dead transport
+    justifies tearing the session down.  A bad argument is not that.
+    anyio is imported here, lazily, so this module still loads without the MCP
+    SDK; by the time a call fails the SDK is loaded anyway.
+    """
+    from anyio import BrokenResourceError, ClosedResourceError, EndOfStream
+
+    return isinstance(
+        exc, (ClosedResourceError, BrokenResourceError, EndOfStream, ConnectionError)
+    )
 
 
 @dataclass(frozen=True)
@@ -138,20 +190,52 @@ class _MCPSessionOwner:
         self.tools: list[Any] = []
         self.session: Any = None
         self.error: BaseException | None = None
+        #: Set when a call learned the transport is gone (M3 §1).  Keeps the
+        #: owner installed so rows can say why, while ``available()`` stops
+        #: offering it.
+        self.dead: str | None = None
         #: Which budget ran out, if one did: "startup" / "catalog" (M1).
         self.failed_phase: str | None = None
+        #: The child's stderr for this attempt (a real file: ``anyio`` dups its
+        #: fd into the child).  Most spawn failures are visible only here.
+        self.stderr_file = tempfile.TemporaryFile()
         self._factory = factory
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
+    def stderr_tail(self, limit: int = 300) -> str:
+        """The last of what the child wrote to stderr, for the row's detail.
+
+        Empty when nothing was captured or nothing was written.
+        """
+        try:
+            self.stderr_file.seek(0)
+            return self.stderr_file.read().decode("utf-8", "replace").strip()[-limit:]
+        except (OSError, ValueError):  # closed file, or a stream that cannot seek
+            return ""
+
     def start(self) -> None:
         self._task = asyncio.create_task(self._serve(), name=f"mcp:{self.server.name}")
+
+    def mark_dead(self, reason: str) -> None:
+        """Record that this session's transport is gone (a call learned of it).
+
+        The owner stays installed — the row has to be able to say *why* the
+        server is gone — but stops being a source of tools, so the catalog
+        drops them on the same step rather than after the reconnect.
+        """
+        if self.dead is None:
+            self.dead = reason
 
     async def _serve(self) -> None:
         """Connect, publish the tool list, hold the session, then close it here."""
         try:
             async with AsyncExitStack() as stack:
-                self.session = await stack.enter_async_context(self._factory(self.server))
+                token = _current_errlog.set(self.stderr_file)
+                try:
+                    self.session = await stack.enter_async_context(self._factory(self.server))
+                finally:
+                    _current_errlog.reset(token)
                 self.connected.set()
                 listed = await self.session.list_tools()
                 self.tools = list(getattr(listed, "tools", None) or [])
@@ -229,7 +313,16 @@ def _default_session_factory(server: MCPServerConfig) -> Any:
 
     @asynccontextmanager
     async def _cm() -> AsyncIterator[Any]:
-        async with stdio_client(_server_parameters(server)) as (read, write):
+        # The child's stderr is captured, not printed: a server that fails its
+        # spawn (a missing script, a package that never installed) says so only
+        # there, and with a supervisor retrying every few seconds the operator's
+        # terminal would fill with another copy of the same complaint.  The
+        # capture must be a *real* file — ``anyio`` asks it for a ``fileno``
+        # and dups that into the child, which then writes it directly.
+        async with stdio_client(
+            _server_parameters(server),
+            errlog=_current_errlog.get() or _devnull(),
+        ) as (read, write):
             async with ClientSession(read, write) as session:
                 # ``ClientSession.__aenter__`` only starts the dispatcher: the
                 # handshake is a separate (idempotent) call.  Without it a real
@@ -261,6 +354,7 @@ async def invoke_remote_tool(
     ctx: ToolContext | None,
     execution_timeout: float | None,
     progress_name: str,
+    on_transport_error: Callable[[], None] | None = None,
 ) -> ToolResult:
     """Call one remote tool and normalize whatever comes back (M2 kernel).
 
@@ -305,6 +399,10 @@ async def invoke_remote_tool(
             data={"server": server, "tool": tool_name},
         )
     except Exception as exc:  # noqa: BLE001 — tool boundary
+        if on_transport_error is not None and _is_transport_death(exc):
+            # The session is gone, not just this call: whoever owns the server
+            # needs to know before the model tries again.
+            on_transport_error()
         return ToolResult(
             success=False,
             output=f"error: MCP tool '{tool_name}' failed: {exc}",
@@ -395,7 +493,22 @@ class MCPToolAdapter(BaseTool):
 
 
 class MCPManager:
-    """Connects the configured stdio MCP servers and returns their tools."""
+    """Connects the configured MCP servers and keeps them connected (M3).
+
+    Startup is non-blocking: :meth:`open_all` starts one supervisor per server
+    and returns, so the TUI appears immediately and a row says ``connecting``
+    until its first attempt settles.  Each supervisor then retries its server
+    forever — a doubling pause capped at ``_BACKOFF_MAX`` — until the process
+    ends, the server is disabled, or it comes back.
+
+    The one hard lesson in here: a server can only be known dead *by trying to
+    use it*.  After connecting, the owner parks in ``_stop.wait()`` and never
+    reads the stream, so a subprocess that exits mid-session is invisible
+    (measured: the task sits unbothered while the child is gone).  So a
+    transport-class call failure marks the server, drops it from
+    :meth:`available`, and wakes its supervisor; an ordinary tool error does
+    none of that, because restarting a server over a bad argument is theatre.
+    """
 
     def __init__(
         self,
@@ -406,137 +519,218 @@ class MCPManager:
     ) -> None:
         self._config = config or MCPConfig()
         self._session_factory = session_factory or _default_session_factory
-        self._owners: list[_MCPSessionOwner] = []
-        # R4a: an optional observer, so a server that never connects is *reported*
-        # rather than only skipped (docs/r4-analysis.md 1.1, point 3).
         self._observer = observer
+        # Settled owners, in config order (``available`` reads them in that
+        # order, which is the catalog's order: first configured, first listed).
+        self._owners: list[_MCPSessionOwner] = []
+        self._supervisors: dict[str, asyncio.Task[None]] = {}
+        #: Per-server "try now" flags: a manual connect, or a dead transport.
+        self._wake: dict[str, asyncio.Event] = {}
+        #: Servers already reported degraded once (M3: the first failure only).
+        self._degraded: set[str] = set()
+        self._stop = asyncio.Event()
+        self._notifier: Callable[[str, Any], None] | None = None
+        self._semaphore = asyncio.Semaphore(_MAX_CONCURRENT_CONNECTS)
+
+    # -- lifecycle ----------------------------------------------------------
 
     async def open_all(self) -> None:
-        """Connect every enabled server; a failure skips just that server.
+        """Start a supervisor per connectable server; do not wait for any of them.
 
-        Returns nothing: M2 made :meth:`available` the single source for what
-        can be called (the dispatcher and the catalog both read it), so letting
-        this hand out a second list of tools would invite the two to drift.
+        Idempotent, so a composition root built twice cannot double the retry
+        loops, and inert after :meth:`aclose`.
         """
-        if not self._config.enabled:
+        if not self._config.enabled or self._supervisors or self._stop.is_set():
             return
-        seen_servers: set[str] = set()
+        seen: set[str] = set()
         for server in self._config.servers:
             if server.disabled or not server.name or not server.command:
                 continue
-            if server.name in seen_servers:
+            if server.name in seen:
                 # Two servers sharing a name produce identical tool prefixes, which
                 # the registry rejects; keep the first and move on rather than
                 # letting a config typo escape as a CLI traceback.
                 continue
-            seen_servers.add(server.name)
-            owner = _MCPSessionOwner(server, self._session_factory)
-            self._owners.append(owner)
-            owner.start()
-            ok, phase = await owner.wait_ready(
-                server.timeout.startup / 1000, server.timeout.catalog / 1000
+            seen.add(server.name)
+            self._supervisors[server.name] = asyncio.create_task(
+                self._supervise(server), name=f"mcp-sup:{server.name}"
             )
-            if not ok:
-                if phase == "error":
-                    reason = f"server '{server.name}': {owner.error!r}"
-                elif phase == "catalog":
-                    reason = (
-                        f"server '{server.name}': tool listing did not finish "
-                        f"within {server.timeout.catalog / 1000:g}s"
-                    )
+
+    async def _supervise(self, server: MCPServerConfig) -> None:
+        """One server's connect-retry-hold loop, for the life of the process."""
+        delay = _BACKOFF_MIN
+        previous: _MCPSessionOwner | None = None
+        try:
+            while not self._stop.is_set():
+                if previous is not None:
+                    await previous.close()
+                    previous = None
+                owner = _MCPSessionOwner(server, self._session_factory)
+                ok, phase = await self._attempt(owner)
+                if self._stop.is_set():
+                    await owner.close()
+                    return
+                previous = owner
+                if ok:
+                    self._install(owner)
+                    self._publish(server.name)
+                    await self._hold(server.name)
+                    if self._stop.is_set():
+                        return
+                    # A wake while healthy means either a manual reconnect or a
+                    # dead transport: either way this session is finished.
+                    self._mark_dead(server.name, "连接已断开，正在重连")
+                    self._publish(server.name)
+                    delay = _BACKOFF_MIN
                 else:
-                    reason = (
-                        f"server '{server.name}': did not become ready within "
-                        f"{server.timeout.startup / 1000:g}s"
+                    self._install(owner)
+                    self._publish(server.name)
+                    if server.name not in self._degraded:
+                        self._degraded.add(server.name)
+                        report_degraded(
+                            self._observer,
+                            "mcp_server",
+                            _fail_reason(server, owner, phase),
+                            "its tools are not available this run",
+                        )
+                    woken = await self._pause(server.name, delay)
+                    if woken:
+                        delay = _BACKOFF_MIN
+                    else:
+                        delay = min(delay * 2, _BACKOFF_MAX)
+        finally:
+            if previous is not None:
+                try:
+                    await previous.close()
+                except Exception:  # noqa: BLE001 — shutting down must not raise
+                    _log.debug(
+                        "MCP session %r failed to close",
+                        previous.server.name,
+                        exc_info=True,
                     )
-                report_degraded(
-                    self._observer,
-                    "mcp_server",
-                    reason,
-                    "its tools are not available this run",
-                )
 
-    def servers(self) -> list[dict[str, Any]]:
-        """Every configured server and what became of it (MCP-MCP §2.1).
+    async def _attempt(self, owner: _MCPSessionOwner) -> tuple[bool, str | None]:
+        """Connect and list, bounded by the spawn bound and the server's budgets."""
+        async with self._semaphore:
+            owner.start()
+            return await owner.wait_ready(
+                owner.server.timeout.startup / 1000,
+                owner.server.timeout.catalog / 1000,
+            )
 
-        Two sources are needed and neither is enough alone: ``_config.servers``
-        is what the operator asked for, ``_owners`` is what happened.  A server
-        skipped before an owner existed (no name, no command, a duplicate name)
-        only exists in the config, and a server whose command is wrong only
-        exists in ``_owners`` — reporting one side would make the other
-        disappear from the dialog, which is worse than reporting a failure.
+    async def _hold(self, name: str) -> None:
+        """Park while the server is up; returns on shutdown or a wake."""
+        stop = asyncio.create_task(self._stop.wait())
+        wake = asyncio.create_task(self._wake_event(name).wait())
+        try:
+            await asyncio.wait({stop, wake}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stop.cancel()
+            wake.cancel()
 
-        ``ready`` is set on both the connected and the failed path, so success is
-        "ready and no error" rather than "ready".
+    async def _pause(self, name: str, delay: float) -> bool:
+        """Wait out the backoff, or cut it short on a wake.  True means woken."""
+        timer = asyncio.create_task(asyncio.sleep(delay))
+        wake = asyncio.create_task(self._wake_event(name).wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {timer, wake}, return_when=asyncio.FIRST_COMPLETED
+            )
+            return wake in done
+        finally:
+            timer.cancel()
+            wake.cancel()
+            self._wake_event(name).clear()
+
+    def _wake_event(self, name: str) -> asyncio.Event:
+        return self._wake.setdefault(name, asyncio.Event())
+
+    def _install(self, owner: _MCPSessionOwner) -> None:
+        """Make ``owner`` the settled record for its server, in place.
+
+        Superseded sessions are closed by the supervisor that replaced them
+        (its ``previous``), so this only swaps references.
         """
-        owners = {owner.server.name: owner for owner in self._owners}
-        rows: list[dict[str, Any]] = []
-        for server in self._config.servers:
-            wanted = sorted({str(name) for name in getattr(server, "tools", None) or []})
-            owner = owners.get(server.name)
-            row: dict[str, Any] = {
-                "name": server.name,
-                "command": " ".join(server.command).strip(),
-                "status": "failed",
-                "toolCount": 0,
-                "wantedCount": len(wanted),
-                "detail": "",
-            }
-            if not self._config.enabled:
-                row["status"] = "off"
-            elif owner is None:
-                # No owner means open_all never even tried: name, command or a
-                # duplicate name.  Say which, rather than leaving a blank row.
-                if not server.name:
-                    row["detail"] = "配置缺少 name"
-                elif not server.command:
-                    row["detail"] = "配置缺少 command"
-                else:
-                    row["detail"] = "与同名服务器重复，只连了第一个"
-            elif owner.error is not None:
-                # An exception can carry no message (``raise RuntimeError``), so
-                # fall back to its class name rather than showing an empty row.
-                row["detail"] = str(owner.error) or type(owner.error).__name__
-            elif owner.failed_phase == "catalog":
-                row["detail"] = (
-                    f"工具列表未在 {server.timeout.catalog / 1000:g}s 内返回"
-                )
-            elif not owner.ready.is_set():
-                row["detail"] = f"未在 {server.timeout.startup / 1000:g}s 内就绪"
-            elif not owner.tools:
-                row["detail"] = "已连接，但没有工具"
-            else:
-                listed = sorted({str(getattr(t, "name", "")) for t in owner.tools})
-                # Filtered = the server offered it and the whitelist did not
-                # want it — the other direction is a whitelist naming a tool the
-                # server does not have, which is a different (quieter) problem.
-                skipped = [name for name in listed if name not in wanted]
-                if wanted and skipped:
-                    row["status"] = "filtered"
-                    row["toolCount"] = len(listed) - len(skipped)
-                    row["detail"] = f"已过滤：{'、'.join(skipped[:8])}"
-                    if len(skipped) > 8:
-                        row["detail"] += f" 等 {len(skipped)} 个"
-                else:
-                    row["status"] = "connected"
-                    row["toolCount"] = len(listed)
-            rows.append(row)
-        return rows
+        for index, existing in enumerate(self._owners):
+            if existing.server.name == owner.server.name:
+                self._owners[index] = owner
+                return
+        self._owners.append(owner)
+
+    def _owner(self, name: str) -> _MCPSessionOwner | None:
+        for owner in self._owners:
+            if owner.server.name == name:
+                return owner
+        return None
+
+    def _mark_dead(self, name: str, reason: str) -> None:
+        owner = self._owner(name)
+        if owner is not None:
+            owner.mark_dead(reason)
+
+    def _publish(self, name: str) -> None:
+        """Announce that a server's state settled (``mcp.status.changed``).
+
+        The notifier is attached by ``make_handlers`` once the IPC service
+        exists; anything published before then can have no listener, and the
+        panel's own fetch-on-open covers the initial state, so dropping is
+        safe rather than lossy.
+        """
+        if self._notifier is None:
+            return
+        try:
+            self._notifier("mcp.status.changed", {"server": name})
+        except Exception:  # noqa: BLE001 — observation must not break the loop
+            _log.debug("mcp status publish failed for %r", name, exc_info=True)
+
+    def attach_status_notifier(self, notifier: Callable[[str, Any], None]) -> None:
+        """Where status changes go once the IPC service exists (``make_handlers``)."""
+        self._notifier = notifier
+
+    def request_connect(self, name: str) -> bool:
+        """Wake a server's supervisor for an immediate attempt (``mcp.connect``).
+
+        False for anything not connectable right now — unknown, disabled, or
+        the master switch off.  The panel only offers this on a failed row, so
+        this is the guard behind that button.
+        """
+        if not self._config.enabled:
+            return False
+        server = next((s for s in self._config.servers if s.name == name), None)
+        if server is None or server.disabled or not server.command:
+            return False
+        self._wake_event(name).set()
+        return True
+
+    def note_transport_death(self, name: str) -> None:
+        """Learn that a call to ``name`` failed on a dead transport (M3 §1).
+
+        The only death signal a parked owner can get.  Marks the server so rows
+        and the catalog drop it at once, and wakes the supervisor — the return
+        is the point of the exercise.  Idempotent: a batch of calls failing
+        together is one death.
+        """
+        owner = self._owner(name)
+        if owner is None or owner.dead is not None:
+            return
+        owner.mark_dead("连接已断开，正在重连")
+        self._wake_event(name).set()
+        self._publish(name)
+
+    # -- what the rest of the system reads -----------------------------------
 
     def available(self) -> list[tuple[str, list[MCPToolHandle]]]:
         """Connected servers and the handles the dispatcher may call (M2).
 
-        Whitelist applies (an ``R7d`` filter is a budget decision, not a
-        permission one), permissions deliberately do not: a tool the gate refuses
-        must still be *listed* in the catalog, or its refusal reads as a bug.
+        Whitelist applies (an R7d filter is a budget decision, not a
+        permission one), permissions deliberately do not: a tool the gate
+        refuses must still be *listed* in the catalog, or its refusal reads as
+        a bug.  A dead transport excludes its server immediately — the catalog
+        drops it on the same step, rather than offering calls that cannot run.
         """
         rows: list[tuple[str, list[MCPToolHandle]]] = []
-        # Owners, not the config list: a duplicate name is skipped before an
-        # owner exists (open_all), so iterating the config would list the same
-        # connected server once per config row.  The owner carries the config
-        # it was built from, which is the one that matters.
         for owner in self._owners:
-            if owner.error is not None or not owner.ready.is_set():
+            if owner.error is not None or owner.dead is not None or not owner.ready.is_set():
                 continue
             server = owner.server
             wanted = {str(name) for name in server.tools or []}
@@ -573,14 +767,16 @@ class MCPManager:
         return None
 
     def unreachable_reason(self, server: str) -> str | None:
-        """Why a *configured* server cannot be called, for the model's benefit.
-
-        Deliberately says "reconnect from the panel": the one action that exists.
-        """
+        """Why a *configured* server cannot be called, for the model's benefit."""
         cfg = next((s for s in self._config.servers if s.name == server), None)
         if cfg is None:
             return None
         owner = self._owner(server)
+        if owner is not None and owner.dead is not None:
+            return (
+                f"MCP server '{server}' is not connected: its connection dropped "
+                "and a retry is in progress."
+            )
         if owner is not None and owner.error is not None:
             detail = str(owner.error) or type(owner.error).__name__
             return (
@@ -590,24 +786,113 @@ class MCPManager:
         if owner is not None and owner.failed_phase is not None:
             return (
                 f"MCP server '{server}' is not connected: it did not settle in "
-                f"time. Reconnect it from the MCP panel."
+                "time. Reconnect it from the MCP panel."
             )
         if owner is None:
             if cfg.disabled:
                 return f"MCP server '{server}' is disabled."
             if not cfg.command:
                 return f"MCP server '{server}' has no command configured."
-            return f"MCP server '{server}' is not connected. Reconnect it from the MCP panel."
+            if server in self._supervisors:
+                return f"MCP server '{server}' is still connecting."
+            return (
+                f"MCP server '{server}' is not connected. "
+                "Reconnect it from the MCP panel."
+            )
         return None
 
-    def _owner(self, name: str) -> _MCPSessionOwner | None:
-        for owner in self._owners:
-            if owner.server.name == name:
-                return owner
-        return None
+    def servers(self) -> list[dict[str, Any]]:
+        """Every configured server and what became of it (MCP-MCP §2.1).
+
+        Two sources are needed and neither is enough alone: ``_config.servers``
+        is what the operator asked for, ``_owners`` is what happened.  A server
+        skipped before an owner existed (no name, no command, a duplicate name)
+        only exists in the config, and a server whose command is wrong only
+        exists in ``_owners`` — reporting one side would make the other
+        disappear from the dialog, which is worse than reporting a failure.
+
+        A server whose first attempt has not settled yet says ``connecting``
+        rather than borrowing a failure it does not have yet (M3: startup is
+        non-blocking, so that state is observable by design).
+        """
+        owners = {owner.server.name: owner for owner in self._owners}
+        rows: list[dict[str, Any]] = []
+        for server in self._config.servers:
+            wanted = sorted({str(name) for name in getattr(server, "tools", None) or []})
+            owner = owners.get(server.name)
+            row: dict[str, Any] = {
+                "name": server.name,
+                "command": " ".join(server.command).strip(),
+                "status": "failed",
+                "toolCount": 0,
+                "wantedCount": len(wanted),
+                "detail": "",
+            }
+            if not self._config.enabled:
+                row["status"] = "off"
+            elif server.disabled:
+                # M1 flipped the polarity; the row used to fall through to the
+                # duplicate-name reason here, which named the wrong defect.
+                row["status"] = "off"
+                row["detail"] = "该 server 已禁用"
+            elif owner is None:
+                # No owner means open_all never even tried: name, command, a
+                # duplicate name — or no attempt has settled yet.
+                if not server.name:
+                    row["detail"] = "配置缺少 name"
+                elif not server.command:
+                    row["detail"] = "配置缺少 command"
+                elif server.name in self._supervisors:
+                    row["status"] = "connecting"
+                    row["detail"] = "正在连接…"
+                else:
+                    row["detail"] = "与同名服务器重复，只连了第一个"
+            elif owner.dead is not None:
+                row["detail"] = owner.dead
+            elif owner.error is not None:
+                # An exception can carry no message (``raise RuntimeError``), so
+                # fall back to its class name rather than showing an empty row.
+                # anyio wraps a dead child in nested groups whose str() is always
+                # "unhandled errors in a TaskGroup" — unactionable, so the leaves
+                # are what the row says.
+                row["detail"] = _error_detail(owner.error)
+                tail = owner.stderr_tail()
+                if tail and tail not in row["detail"]:
+                    row["detail"] = f"{row['detail']}: {tail}"
+            elif owner.failed_phase == "catalog":
+                row["detail"] = f"工具列表未在 {server.timeout.catalog / 1000:g}s 内返回"
+            elif owner.failed_phase == "startup":
+                row["detail"] = f"未在 {server.timeout.startup / 1000:g}s 内就绪"
+            elif not owner.ready.is_set():
+                row["detail"] = f"未在 {server.timeout.startup / 1000:g}s 内就绪"
+            elif not owner.tools:
+                row["detail"] = "已连接，但没有工具"
+            else:
+                listed = sorted({str(getattr(t, "name", "")) for t in owner.tools})
+                # Filtered = the server offered it and the whitelist did not
+                # want it — the other direction is a whitelist naming a tool the
+                # server does not have, which is a different (quieter) problem.
+                skipped = [name for name in listed if name not in wanted]
+                if wanted and skipped:
+                    row["status"] = "filtered"
+                    row["toolCount"] = len(listed) - len(skipped)
+                    row["detail"] = f"已过滤：{'、'.join(skipped[:8])}"
+                    if len(skipped) > 8:
+                        row["detail"] += f" 等 {len(skipped)} 个"
+                else:
+                    row["status"] = "connected"
+                    row["toolCount"] = len(listed)
+            rows.append(row)
+        return rows
 
     async def aclose(self) -> None:
-        """Tear down every session opened by :meth:`open_all` (idempotent)."""
+        """Stop every supervisor and tear down every session (idempotent)."""
+        self._stop.set()
+        supervisors, self._supervisors = self._supervisors, {}
+        for task in supervisors.values():
+            task.cancel()
+        if supervisors:
+            await asyncio.gather(*supervisors.values(), return_exceptions=True)
         owners, self._owners = self._owners, []
         for owner in owners:
             try:
@@ -616,4 +901,39 @@ class MCPManager:
                 _log.debug("MCP session %r failed to close", owner.server.name, exc_info=True)
 
 
-__all__ = ["MCPManager", "MCPToolAdapter"]
+def _error_detail(exc: BaseException, depth: int = 0) -> str:
+    """What an operator can act on, out of whatever the SDK raised.
+
+    ``anyio`` reports a child that died as nested ExceptionGroups, and the
+    group's own ``str()`` is always "unhandled errors in a TaskGroup (1
+    sub-exception)" — it names no file, no errno and no cause.  The leaves are
+    the real story, so the row shows them.
+    """
+    # Duck-typed rather than ``isinstance(..., BaseExceptionGroup)``: anyio's
+    # groups are builtins, but the project does not pin a target version, and
+    # "has .exceptions" is exactly the question being asked.
+    leaves = getattr(exc, "exceptions", None)
+    if leaves and depth <= 4:
+        parts = [_error_detail(sub, depth + 1).strip() for sub in leaves]
+        parts = [part for part in parts if part]
+        if parts:
+            return "; ".join(dict.fromkeys(parts))
+    return str(exc) or type(exc).__name__
+
+
+def _fail_reason(server: MCPServerConfig, owner: _MCPSessionOwner, phase: str | None) -> str:
+    """The degraded line for one failed attempt — which budget ran out, or why."""
+    if phase == "error":
+        return f"server '{server.name}': {owner.error!r}"
+    if phase == "catalog":
+        return (
+            f"server '{server.name}': tool listing did not finish "
+            f"within {server.timeout.catalog / 1000:g}s"
+        )
+    return (
+        f"server '{server.name}': did not become ready within "
+        f"{server.timeout.startup / 1000:g}s"
+    )
+
+
+__all__ = ["MCPManager", "MCPToolAdapter", "build_mcp_catalog"]

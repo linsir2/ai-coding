@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from _mcp_wait import until_mcp_settled
 
 from ai_coding.config.models import MCPConfig, MCPServerConfig, MCPTimeout
 from ai_coding.core.mcp import MCPManager, MCPToolAdapter
@@ -127,6 +128,7 @@ async def test_a_server_that_never_connects_is_reported_not_silent():
     )
 
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     await manager.aclose()
 
     degraded = observer.of_type(Degraded)
@@ -147,6 +149,7 @@ async def test_disabled_config_yields_no_tools():
         session_factory=lambda server: called.append(server),
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     assert _callable(manager) == []
     assert called == []
 
@@ -159,6 +162,7 @@ async def test_disabled_server_skipped():
         session_factory=lambda server: called.append(server),
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     assert _callable(manager) == []
     assert called == []
 
@@ -171,6 +175,7 @@ async def test_server_without_name_or_command_skipped():
         session_factory=lambda server: called.append(server),
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     assert _callable(manager) == []
     assert called == []
 
@@ -184,6 +189,7 @@ async def test_tools_become_base_tools():
     manager = MCPManager(_cfg(_server()), session_factory=_factory({"fs": session}))
 
     await manager.open_all()
+    assert await until_mcp_settled(manager)
 
     assert _callable(manager) == ["fs__read_file", "fs__write_file"]
     await manager.aclose()
@@ -195,6 +201,7 @@ async def test_tool_name_prefixed_with_server():
     manager = MCPManager(_cfg(_server("fsx")), session_factory=_factory({"fsx": session}))
 
     await manager.open_all()
+    assert await until_mcp_settled(manager)
 
     assert _callable(manager) == ["fsx__read_file"]
     await manager.aclose()
@@ -207,6 +214,7 @@ async def test_schema_passed_through():
     manager = MCPManager(_cfg(_server()), session_factory=_factory({"fs": session}))
 
     await manager.open_all()
+    assert await until_mcp_settled(manager)
 
     # M2: the schema and description the model sees are the catalog's, built
     # from the same tool the dispatcher would call.
@@ -286,6 +294,7 @@ async def test_connect_failure_degrades_silently():
     )
 
     await manager.open_all()
+    assert await until_mcp_settled(manager)
 
     assert _callable(manager) == ["good__ok"]  # only the healthy server
     await manager.aclose()
@@ -296,6 +305,7 @@ async def test_aclose_closes_sessions():
     session = _Session(tools=[_tool()])
     manager = MCPManager(_cfg(_server()), session_factory=_factory({"fs": session}))
     await manager.open_all()
+    assert await until_mcp_settled(manager)
 
     await manager.aclose()
 
@@ -318,6 +328,7 @@ async def test_duplicate_server_names_are_skipped():
     )
 
     await manager.open_all()
+    assert await until_mcp_settled(manager)
 
     assert _callable(manager) == ["dup__read_file"]
     await manager.aclose()
@@ -365,6 +376,7 @@ async def test_open_all_skips_a_server_that_never_connects():
 
     started = time.monotonic()
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     elapsed = time.monotonic() - started
 
     assert _callable(manager) == []
@@ -388,8 +400,11 @@ async def test_default_session_factory_performs_the_handshake(monkeypatch):
     events: list[str] = []
 
     @asynccontextmanager
-    async def fake_stdio_client(params):
+    async def fake_stdio_client(params, errlog=None):
         events.append("spawn")
+        # M3: the child's stderr is routed to our log rather than the terminal,
+        # so the factory hands stdio_client a sink (see _StdErrLog).
+        events.append("errlog" if errlog is not None else "no-errlog")
         yield "read", "write"
 
     class FakeSession:
@@ -414,7 +429,7 @@ async def test_default_session_factory_performs_the_handshake(monkeypatch):
     async with _default_session_factory(cfg) as session:
         assert isinstance(session, FakeSession)
 
-    assert events == ["spawn", "enter", "initialize", "exit"]
+    assert events == ["spawn", "errlog", "enter", "initialize", "exit"]
 
 
 # ---- v2 split: startup bounds the connection, catalog bounds the listing -----
@@ -435,6 +450,7 @@ async def test_a_slow_tool_listing_costs_the_catalog_budget_not_startup():
 
     started = time.monotonic()
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     elapsed = time.monotonic() - started
 
     assert _callable(manager) == []
@@ -476,6 +492,7 @@ async def test_the_tools_allowlist_filters_the_adapters():
     )
     try:
         await manager.open_all()
+        assert await until_mcp_settled(manager)
         assert _callable(manager) == ["fs__read_file", "fs__list_dir"]
     finally:
         await manager.aclose()
@@ -487,6 +504,7 @@ async def test_an_empty_allowlist_keeps_every_tool():
     manager = MCPManager(_cfg(_server()), session_factory=_factory({"fs": session}))
     try:
         await manager.open_all()
+        assert await until_mcp_settled(manager)
         assert _callable(manager) == ["fs__read_file", "fs__write_file"]
     finally:
         await manager.aclose()
@@ -501,6 +519,7 @@ async def test_the_allowlist_matches_remote_names_not_the_prefix():
     )
     try:
         await manager.open_all()
+        assert await until_mcp_settled(manager)
         # The whitelist matches the *remote* name; the adapter name never matches.
         assert _callable(manager) == []
     finally:
@@ -556,6 +575,7 @@ async def test_a_connected_server_reports_its_tool_count():
     session = _Session([_tool("read_file"), _tool("write_file")])
     manager = MCPManager(_cfg(_server("fs")), session_factory=_factory({"fs": session}))
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     try:
         row = _rows(manager)["fs"]
         assert row["status"] == "connected"
@@ -580,6 +600,7 @@ async def test_a_server_that_never_connects_is_a_row_not_an_absence():
 
     manager = MCPManager(_cfg(_server("dead")), session_factory=broken_factory)
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     try:
         row = _rows(manager)["dead"]
         assert row["status"] == "failed"
@@ -605,6 +626,7 @@ async def test_a_server_that_times_out_is_reported_as_failed():
         session_factory=hanging_factory,
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     try:
         row = _rows(manager)["slow"]
         assert row["status"] == "failed"
@@ -621,6 +643,7 @@ async def test_a_whitelist_that_filtered_tools_says_which_ones():
         _cfg(_server("fs", tools=["read_file"])), session_factory=_factory({"fs": session})
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     try:
         row = _rows(manager)["fs"]
         assert row["status"] == "filtered"
@@ -640,6 +663,7 @@ async def test_a_whitelist_that_matched_everything_is_not_a_filter():
         session_factory=_factory({"fs": session}),
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     try:
         row = _rows(manager)["fs"]
         assert row["status"] == "connected"
@@ -659,6 +683,56 @@ def test_a_server_the_loader_skips_still_gets_a_row():
     for row in rows.values():
         assert row["status"] == "failed"
         assert row["detail"]
+
+
+@pytest.mark.asyncio
+async def test_a_dead_child_says_why_not_just_that_it_died():
+    """M3: anyio reports a child that died as a TaskGroup, whose str() is always
+    the same useless sentence.  The row has to carry the leaf."""
+    class _Group(BaseException):
+        """Stands in for anyio's group: the detail unwraps whatever has
+        ``.exceptions`` (duck-typed on purpose), so the shape is what matters."""
+
+        def __init__(self, subs: list[BaseException]) -> None:
+            self.exceptions = list(subs)
+
+        def __str__(self) -> str:
+            return "unhandled errors in a TaskGroup (1 sub-exception)"
+
+    inner = RuntimeError("No such file or directory: '/tmp/nope.py'")
+    group = _Group([inner])
+
+    def broken_factory(server):
+        @asynccontextmanager
+        async def _cm():
+            raise group
+            yield  # pragma: no cover
+
+        return _cm()
+
+    manager = MCPManager(_cfg(_server("dead")), session_factory=broken_factory)
+    await manager.open_all()
+    assert await until_mcp_settled(manager)
+    try:
+        row = _rows(manager)["dead"]
+        assert row["status"] == "failed"
+        assert "No such file or directory" in row["detail"]
+        assert "TaskGroup" not in row["detail"]
+    finally:
+        await manager.aclose()
+
+
+def test_a_childs_stderr_reaches_the_row_when_it_has_something_to_say():
+    """M3: the most common real failure (a script that is not there, a package
+    that was never installed) is visible *only* in the child's stderr, so the
+    capture's tail joins the reason."""
+    from ai_coding.core.mcp import _MCPSessionOwner
+
+    owner = _MCPSessionOwner(_server("fs"), lambda server: None)
+    owner.stderr_file.write(b"python: can't open file '/tmp/nope.py'\n")
+    owner.stderr_file.flush()
+
+    assert "can't open file" in owner.stderr_tail()
 
 
 def test_with_mcp_off_every_configured_server_says_so():

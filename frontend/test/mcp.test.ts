@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mcpStatusLabel, mcpStatusTone, mcpToolNote } from "../src/util/mcp"
+import { mcpRowCanConnect, mcpStatusLabel, mcpStatusTone, mcpToolNote } from "../src/util/mcp"
 
 /**
  * MCP-MCP T6: the panel's words.  Four states, and the only one that needs
@@ -12,6 +12,7 @@ describe("mcpStatusLabel", () => {
     expect(mcpStatusLabel("failed")).toBe("Failed !")
     expect(mcpStatusLabel("filtered")).toBe("已过滤")
     expect(mcpStatusLabel("off")).toBe("未启用")
+    expect(mcpStatusLabel("connecting")).toBe("Connecting …")
   })
 })
 
@@ -22,6 +23,23 @@ describe("mcpStatusTone", () => {
     expect(mcpStatusTone("failed")).toBe("error")
     expect(mcpStatusTone("filtered")).toBe("warn")
     expect(mcpStatusTone("off")).toBe("muted")
+    expect(mcpStatusTone("connecting")).toBe("muted")
+  })
+})
+
+/**
+ * M3: the panel's one action.  Exactly one state offers it, and the interesting
+ * half is the three that do not: retrying a connected server is theatre,
+ * retrying a disabled one is impossible, and retrying a connecting one
+ * duplicates what is already happening.
+ */
+describe("mcpRowCanConnect", () => {
+  test("only a failed row can be retried", () => {
+    expect(mcpRowCanConnect("failed")).toBe(true)
+    expect(mcpRowCanConnect("connected")).toBe(false)
+    expect(mcpRowCanConnect("filtered")).toBe(false)
+    expect(mcpRowCanConnect("off")).toBe(false)
+    expect(mcpRowCanConnect("connecting")).toBe(false)
   })
 })
 

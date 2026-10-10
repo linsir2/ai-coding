@@ -466,6 +466,35 @@ async def test_mcp_list_reports_what_became_of_the_servers(ipc):
 
 
 @pytest.mark.asyncio
+async def test_mcp_connect_wakes_the_manager_for_that_server(ipc):
+    """M3: the panel's failed row has one action, and it reaches the manager."""
+    world, _service, client = ipc
+    woken: list[str] = []
+    world.mcp = SimpleNamespace(request_connect=lambda name: woken.append(name) or True)
+
+    assert client.request("mcp.connect", {"server": "fs"}) == {"ok": True}
+    assert woken == ["fs"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_connect_answers_false_for_a_server_that_cannot_connect(ipc):
+    world, _service, client = ipc
+    world.mcp = SimpleNamespace(request_connect=lambda name: False)
+
+    result = client.request("mcp.connect", {"server": "ghost"})
+
+    assert result["ok"] is False
+    assert "ghost" in result["reason"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_connect_with_no_manager_is_an_error_not_a_crash(ipc):
+    _world, _service, client = ipc
+    result = client.request("mcp.connect", {"server": "fs"})
+    assert result["ok"] is False
+
+
+@pytest.mark.asyncio
 async def test_mcp_list_with_no_manager_is_an_empty_list_not_an_error(ipc):
     """T5b: a world built before mcp existed (or a test's fake world) must not
     turn a read-only panel into a crash."""

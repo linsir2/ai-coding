@@ -350,11 +350,31 @@ async def case_mcp_allowlist_filters_adapters(root: Path) -> tuple[bool, str]:
         session_factory=factory,
     )
     try:
-        tools = await manager.open_all()
+        await manager.open_all()
+        await _until(lambda: all(row["status"] != "connecting" for row in manager.servers()))
+        # Read before aclose: a closed manager has no owners, so asking it what
+        # is callable afterwards answers [] — the question is about the run.
+        names = [
+            f"{server}__{h.name}"
+            for server, handles in manager.available()
+            for h in handles
+        ]
     finally:
         await manager.aclose()
-    ok = [tool.name for tool in tools] == ["fs__read_file", "fs__list_dir"]
-    return ok, f"registered {[tool.name for tool in tools]}"
+    ok = names == ["fs__read_file", "fs__list_dir"]
+    return ok, f"registered {names}"
+
+
+async def _until(predicate, timeout: float = 30.0) -> bool:
+    """M3: wait for the supervisors' first attempts (startup does not wait)."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return predicate()
 
 
 OFFLINE: dict[str, CaseFn] = {

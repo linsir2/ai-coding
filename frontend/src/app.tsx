@@ -76,6 +76,9 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
   const [sessionId, setSessionId] = createSignal(props.hello.sessionId)
   const [pendingPrompt, setPendingPrompt] = createSignal("")
   const [modelName, setModelName] = createSignal(props.hello.model)
+  // M3: bumped on every mcp.status.changed, so an open MCP panel re-reads its
+  // rows when a supervisor settles a server behind its back.
+  const [mcpRevision, setMcpRevision] = createSignal(0)
   const [providerName, setProviderName] = createSignal(props.hello.provider)
   const [modelKey, setModelKey] = createSignal(props.hello.modelKey)
   const [hydrate, setHydrate] = createSignal<{ key: string; state: SessionState } | null>(null)
@@ -224,6 +227,12 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         exitWith("ai-coding: backend connection closed")
         return
       }
+      // M3: a supervisor reconnecting in the background changes what the MCP
+      // panel should say, so the open dialog re-reads its rows.
+      if (event.type === "mcp.status.changed") {
+        setMcpRevision((n) => n + 1)
+        return
+      }
       if (event.type !== "turn.finished") return
       if (permission() !== null) decidePermission("no")
       if (ask() !== null) answerAsk("")
@@ -275,7 +284,8 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         group: "Agent", // OpenCode's own category for this command (app.tsx:895)
         desc: "Show configured MCP servers and what came of them",
         palette: true,
-        run: () => dialog.open(() => <DialogMcp client={props.client} />, "large"),
+        run: () =>
+          dialog.open(() => <DialogMcp client={props.client} revision={mcpRevision} />, "large"),
       },
       {
         name: "dialog.skills.show",

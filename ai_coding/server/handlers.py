@@ -146,6 +146,21 @@ def make_handlers(
     state = _WorldState()
     bridge = EventBridge(lambda method, params: service.notify(method, params))
     _install_providers(world, service)
+    # M3: MCP state changes are wire events too, so the dialog does not have to
+    # poll a manager that reconnects on its own.  Attached here because this is
+    # where the service exists; events published before it can have no listener,
+    # and the dialog's fetch-on-open covers the initial state.
+    mcp_manager = getattr(world, "mcp", None)
+    if mcp_manager is not None and hasattr(mcp_manager, "attach_status_notifier"):
+        # The wire speaks one notification method, "event", whose payload names
+        # the type (frontend/src/ipc.ts subscribes to *that*).  The manager says
+        # "this server settled" without knowing the envelope, so the translation
+        # happens here, where every other event's does.
+        mcp_manager.attach_status_notifier(
+            lambda event_type, data: service.notify(
+                "event", {"type": event_type, "data": data}
+            )
+        )
 
     def initialize(params: dict[str, Any]) -> dict[str, Any]:
         from ai_coding import __version__
@@ -466,6 +481,28 @@ def make_handlers(
             "maxContextTokens": int(getattr(ai_cfg, "max_context_tokens", 0) or 0),
         }
 
+    def mcp_connect(params: dict[str, Any]) -> dict[str, Any]:
+        """M3: the failed row's action — try this server again, now.
+
+        The manager owns the retry loop, so this only wakes it: an immediate
+        attempt instead of whatever backoff pause it was sitting in.  False is
+        reported rather than raised, because the panel is asking about a row
+        the operator can see, and "that server cannot be connected" is an
+        answer, not a fault.
+        """
+        # ``reason``, not ``error``: a top-level ``error`` key is the JSON-RPC
+        # error field, and a front end that reads one gets a decode failure
+        # instead of the answer (the convention session.delete already follows).
+        manager = getattr(world, "mcp", None)
+        if manager is None:
+            return {"ok": False, "reason": "no MCP manager in this world"}
+        name = str(params.get("server") or "")
+        if not name:
+            return {"ok": False, "reason": "missing server name"}
+        if not manager.request_connect(name):
+            return {"ok": False, "reason": f"no connectable MCP server named '{name}'"}
+        return {"ok": True}
+
     def mcp_list(params: dict[str, Any]) -> dict[str, Any]:
         """Rows for the MCP dialog: what was configured and what came of it.
 
@@ -498,5 +535,6 @@ def make_handlers(
         "config.summary": config_summary,
         "session.stats": session_stats,
         "mcp.list": mcp_list,
+        "mcp.connect": mcp_connect,
         "shutdown": shutdown_handler,
     }

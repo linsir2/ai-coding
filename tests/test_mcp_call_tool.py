@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from _mcp_wait import until_mcp_settled
 
 from ai_coding.config.models import MCPConfig, MCPServerConfig, MCPToolRules
 from ai_coding.core.mcp import MCPManager, build_mcp_catalog
@@ -87,6 +88,7 @@ async def test_every_server_shares_one_tool():
         sessions={"fs": fs, "web": web},
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
 
     registry = await _tools(manager)
 
@@ -100,6 +102,7 @@ async def test_a_call_reaches_the_right_server_and_tool():
         MCPServerConfig(name="fs", command=["mcp-fs"]), sessions={"fs": session}
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     tool = (await _tools(manager)).get("mcp_call")
 
     result = await tool.execute(
@@ -118,6 +121,7 @@ async def test_an_unknown_server_comes_back_naming_the_real_ones():
         MCPServerConfig(name="fs", command=["mcp-fs"]), sessions={"fs": session}
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     tool = (await _tools(manager)).get("mcp_call")
 
     result = await tool.execute({"server": "nope", "tool": "read_file", "input": {}})
@@ -134,6 +138,7 @@ async def test_an_unknown_tool_comes_back_naming_that_server_tools():
         MCPServerConfig(name="fs", command=["mcp-fs"]), sessions={"fs": session}
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     tool = (await _tools(manager)).get("mcp_call")
 
     result = await tool.execute({"server": "fs", "tool": "delete_all", "input": {}})
@@ -157,6 +162,7 @@ async def test_a_server_that_never_connected_says_so():
         session_factory=broken,
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     tool = (await _tools(manager)).get("mcp_call")
 
     result = await tool.execute({"server": "dead", "tool": "read_file", "input": {}})
@@ -175,6 +181,7 @@ async def test_the_gate_judges_the_real_call_not_the_vessel():
         MCPServerConfig(name="fs", command=["mcp-fs"]), sessions={"fs": session}
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
 
     tool = MCPCallTool(manager)
 
@@ -197,6 +204,7 @@ async def test_a_whitelisted_out_tool_is_not_callable_either():
         sessions={"fs": session},
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     tool = (await _tools(manager)).get("mcp_call")
 
     result = await tool.execute({"server": "fs", "tool": "write_file", "input": {}})
@@ -212,6 +220,7 @@ async def test_a_remote_error_result_is_not_an_exception():
         MCPServerConfig(name="fs", command=["mcp-fs"]), sessions={"fs": session}
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
     tool = (await _tools(manager)).get("mcp_call")
 
     result = await tool.execute({"server": "fs", "tool": "read_file", "input": {}})
@@ -236,6 +245,7 @@ async def test_a_denied_tool_still_has_a_place_in_the_catalog():
         sessions={"fs": session},
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
 
     listed = [h.name for _server, handles in manager.available() for h in handles]
 
@@ -253,6 +263,7 @@ async def test_the_catalog_builder_sees_exactly_what_the_dispatcher_can_call():
         sessions={"fs": fs, "web": web},
     )
     await manager.open_all()
+    assert await until_mcp_settled(manager)
 
     catalog = build_mcp_catalog(manager.available())
 
