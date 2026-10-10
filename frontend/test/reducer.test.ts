@@ -64,15 +64,57 @@ describe("assistant text", () => {
     ])
   })
 
-  test("message.finished with reasoning appends a reasoning part", () => {
+  // A4 T1: reasoning belongs in FRONT of the text it was thinking about.  The
+  // old assertion pinned the append-at-end order, which is why a finished turn
+  // used to end with a dangling "+ Thought"; see docs/opencode-gui-a4-design.md.
+  test("message.finished puts the step's reasoning before its text", () => {
     const state = feed(
       initialState(),
       delta("answer"),
       wire("message.finished", { text: "answer", reasoning: "because" }),
     )
     expect(lastAssistant(state).parts).toEqual([
-      { kind: "text", text: "answer", streaming: false },
       { kind: "reasoning", text: "because" },
+      { kind: "text", text: "answer", streaming: false },
+    ])
+  })
+
+  // A4 T2: a tool-only step carries text:"" — it must not leave an empty text
+  // part behind (that empty part rendered as a blank line per step).
+  test("a tool-only step leaves no empty text part", () => {
+    const state = feed(initialState(), wire("message.finished", { text: "", reasoning: "need ls" }))
+    expect(lastAssistant(state).parts).toEqual([{ kind: "reasoning", text: "need ls" }])
+  })
+
+  // A4 T3: whitespace is not a thought; it would render an empty "+ Thought".
+  test("whitespace-only reasoning produces no part", () => {
+    const state = feed(initialState(), wire("message.finished", { text: "hi", reasoning: "  \n " }))
+    expect(lastAssistant(state).parts).toEqual([{ kind: "text", text: "hi", streaming: false }])
+  })
+
+  // A4 T4: the two-step turn from the bug report — each step's reasoning sits
+  // in front of that step's own output, tool card included.
+  test("a two-step turn keeps each reasoning in front of its own output", () => {
+    const state = feed(
+      initialState(),
+      wire("message.finished", { text: "", reasoning: "need the branch list" }),
+      wire("tool.started", { callId: "c1", toolName: "bash", params: { command: "git branch" } }),
+      wire("tool.finished", {
+        callId: "c1",
+        toolName: "bash",
+        success: true,
+        outputPreview: "* main",
+        durationMs: 5,
+        error: null,
+      }),
+      delta("You are on main"),
+      wire("message.finished", { text: "You are on main", reasoning: "summarise it" }),
+    )
+    expect(lastAssistant(state).parts.map((part) => part.kind)).toEqual([
+      "reasoning",
+      "tool",
+      "reasoning",
+      "text",
     ])
   })
 

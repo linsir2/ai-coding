@@ -10,7 +10,6 @@ import { describe, expect, test } from "bun:test"
 import {
   policyLabel,
   grantLine,
-  PERMISSION_ACTIONS,
   toggledPolicy,
   toggleCommand,
 } from "../src/util/permissions-dialog"
@@ -29,16 +28,6 @@ describe("grantLine", () => {
 
   test("an empty grant list says so instead of rendering nothing", () => {
     expect(grantLine("")).toBe("(none)")
-  })
-})
-
-describe("PERMISSION_ACTIONS", () => {
-  test("each action is the exact command line the backend dispatches", () => {
-    expect(PERMISSION_ACTIONS.map((action) => action.command)).toEqual([
-      "/permissions auto",
-      "/permissions confirm",
-      "/permissions clear",
-    ])
   })
 })
 

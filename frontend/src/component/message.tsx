@@ -16,7 +16,7 @@
  * reactive without remounting.
  */
 
-import { Index } from "solid-js"
+import { Index, Match, Switch } from "solid-js"
 import type { ChatMessage, Part } from "../state/session"
 import { theme } from "../theme/tokens"
 import { markdownSyntax } from "../theme/syntax"
@@ -38,49 +38,70 @@ export const USER_BORDER = {
   cross: "",
 }
 
-function PartView(props: { part: Part; thinking: boolean }) {
-  switch (props.part.kind) {
-    case "text":
-      return (
-        <box paddingLeft={3} marginTop={1} flexShrink={0}>
-          <markdown
-            content={props.part.text}
-            streaming={props.part.streaming}
-            syntaxStyle={markdownSyntax}
-            fg={theme.textBase}
-            bg={theme.backgroundBase}
-          />
-        </box>
-      )
-    case "reasoning":
-      return <Reasoning text={props.part.text} expanded={props.thinking} />
-    case "tool":
-      return <ToolCard part={props.part} />
-    case "plan":
-      return (
-        <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
-          <text fg={theme.textMuted}>{props.part.title}</text>
-          <text fg={theme.textMuted}>{props.part.body}</text>
-        </box>
-      )
-    case "notice":
-      return (
-        <box paddingLeft={3} marginTop={1} flexShrink={0}>
-          <text fg={props.part.tone === "error" ? theme.feedbackError : theme.textMuted}>
-            {props.part.text}
-          </text>
-        </box>
-      )
-    case "turn-end":
-      return (
-        <box paddingLeft={3} marginTop={1} flexShrink={0}>
-          <text fg={theme.feedbackError}>{props.part.text}</text>
-        </box>
-      )
-  }
+/**
+ * One part, rendered by kind.
+ *
+ * The branch lives in `<Switch>`/`<Match>`, not in a `switch` statement: the
+ * transcript renders parts through `<Index>`, which reuses the instance sitting
+ * at a POSITION when the part there changes kind (a streaming text part becomes
+ * a reasoning one when `message.finished` lands).  A statement branch is chosen
+ * once, at creation, so the reused instance would keep drawing the old kind —
+ * which is how a thought ended up rendered as a wall of prose.
+ */
+function PartView(props: { part: Part; alwaysOpen: boolean }) {
+  return (
+    <Switch>
+      <Match when={props.part.kind === "text" && props.part}>
+        {(part) => (
+          <box paddingLeft={3} marginTop={1} flexShrink={0}>
+            <markdown
+              content={part().text}
+              streaming={part().streaming}
+              syntaxStyle={markdownSyntax}
+              fg={theme.textBase}
+              bg={theme.backgroundBase}
+            />
+          </box>
+        )}
+      </Match>
+      <Match when={props.part.kind === "reasoning" && props.part}>
+        {(part) => <Reasoning text={part().text} alwaysOpen={props.alwaysOpen} />}
+      </Match>
+      <Match when={props.part.kind === "tool" && props.part}>
+        {(part) => <ToolCard part={part() as Extract<Part, { kind: "tool" }>} />}
+      </Match>
+      <Match when={props.part.kind === "plan" && props.part}>
+        {(part) => (
+          <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
+            <text fg={theme.textMuted}>{(part() as Extract<Part, { kind: "plan" }>).title}</text>
+            <text fg={theme.textMuted}>{(part() as Extract<Part, { kind: "plan" }>).body}</text>
+          </box>
+        )}
+      </Match>
+      <Match when={props.part.kind === "notice" && props.part}>
+        {(part) => {
+          const notice = () => part() as Extract<Part, { kind: "notice" }>
+          return (
+            <box paddingLeft={3} marginTop={1} flexShrink={0}>
+              <text fg={notice().tone === "error" ? theme.feedbackError : theme.textMuted}>
+                {notice().text}
+              </text>
+            </box>
+          )
+        }}
+      </Match>
+      <Match when={props.part.kind === "turn-end" && props.part}>
+        {(part) => (
+          <box paddingLeft={3} marginTop={1} flexShrink={0}>
+            <text fg={theme.feedbackError}>{(part() as Extract<Part, { kind: "turn-end" }>).text}</text>
+          </box>
+        )}
+      </Match>
+    </Switch>
+  )
 }
 
-export function MessageView(props: { message: ChatMessage; thinking: boolean }) {
+export function MessageView(props: { message: ChatMessage; alwaysOpen: boolean }) {
   if (props.message.role === "user") {
     const text = () => {
       const part = props.message.parts[0]
@@ -103,7 +124,7 @@ export function MessageView(props: { message: ChatMessage; thinking: boolean }) 
   }
   return (
     <Index each={props.message.parts}>
-      {(part) => <PartView part={part()} thinking={props.thinking} />}
+      {(part) => <PartView part={part()} alwaysOpen={props.alwaysOpen} />}
     </Index>
   )
 }

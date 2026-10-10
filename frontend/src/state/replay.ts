@@ -79,11 +79,13 @@ export function messagesToState(messages: WireMessage[]): SessionState {
       out.push(assistant)
     }
     if (message.role === "assistant") {
-      if (message.content) {
-        assistant.parts.push({ kind: "text", text: message.content, streaming: false })
-      }
+      // Reasoning first, then the prose it produced — the same order the live
+      // reducer rebuilds, so a reloaded transcript reads like the live one.
       if (message.reasoning) {
         assistant.parts.push({ kind: "reasoning", text: message.reasoning })
+      }
+      if (message.content) {
+        assistant.parts.push({ kind: "text", text: message.content, streaming: false })
       }
       for (const call of message.toolCalls ?? []) {
         assistant.parts.push({

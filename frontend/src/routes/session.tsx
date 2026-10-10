@@ -5,7 +5,7 @@
  * Data flow, one direction only:
  *   IpcClient.onEvent -> reduce(state, event) -> createStore -> <MessageView>
  *
- * Local state beyond the reducer: `thinking` (ctrl+t) and `stats` (the real
+ * Local state beyond the reducer: `alwaysThinking` (ctrl+t) and `stats` (the real
  * token usage the sidebar/status bar show, refreshed on mount and after every
  * turn).  The chrome is fed by the app shell (sessions list, title, location).
  */
@@ -19,7 +19,7 @@ import { MessageView } from "../component/message"
 import { AskPanel } from "../component/ask"
 import { PermissionPanel, type PermissionRequest } from "../component/permission"
 import { Prompt } from "../component/prompt"
-import { SessionTabs, type SessionTab } from "../component/session-tabs"
+import { SessionHeader } from "../component/session-header"
 import { Sidebar } from "../component/sidebar"
 import { StatusBar } from "../component/status-bar"
 import { useDialog } from "../dialog/context"
@@ -42,7 +42,6 @@ export interface SessionProps {
   initialPrompt?: string
   /** A replayed session (from the dialog or tabs); replaces the transcript. */
   hydrate?: { key: string; state: SessionState } | null
-  sessions: SessionTab[]
   title: string
   workspace: string
   branch: string
@@ -54,8 +53,10 @@ export interface SessionProps {
   onAskAnswer: (answer: string) => void
   /** Leave through the shell's exit sequence (a command's `/quit`, I5). */
   onQuit: () => void
+  /** Follow the live session when the backend switched it (/clear, /resume). */
   onSelectSession: (id: string) => void
-  onNewSession: () => void
+  /** Open the sessions panel — the strip is a header now, not a tab rail. */
+  onOpenSessions: () => void
   /** The tab list can go stale after a turn; the shell refreshes it. */
   onTurnFinished: () => void
 }
@@ -70,7 +71,7 @@ export function Session(props: SessionProps) {
   const toast = useToast()
   const dimensions = useTerminalDimensions()
   const [state, setState] = createStore<SessionState>(initialState())
-  const [thinking, setThinking] = createSignal(false)
+  const [alwaysThinking, setAlwaysThinking] = createSignal(false)
   const [stats, setStats] = createSignal<Stats>({ tokens: 0, maxContextTokens: 0 })
   const [interruptArmed, setInterruptArmed] = createSignal(false)
   const [suggesting, setSuggesting] = createSignal(false)
@@ -149,7 +150,7 @@ export function Session(props: SessionProps) {
         group: "Session",
         desc: "Show or hide reasoning",
         palette: true,
-        run: () => setThinking((value) => !value),
+        run: () => setAlwaysThinking((value) => !value),
       },
       {
         name: "session.plan",
@@ -176,17 +177,6 @@ export function Session(props: SessionProps) {
           apply({ kind: "submitted", text: "/review" })
           dispatch("/review")
         },
-      },
-      {
-        // Bare /permissions would print the report; the interesting half is
-        // the argument (auto|confirm|clear), so pre-fill the command and let
-        // the operator type it — the same trick /plan uses for its topic.
-        name: "session.permissions",
-        title: "Permissions",
-        group: "Session",
-        desc: "Show or switch the approval policy",
-        palette: true,
-        run: () => setPromptSeed("/permissions "),
       },
     ],
     bindings: [
@@ -284,27 +274,59 @@ export function Session(props: SessionProps) {
 
   return (
     <box flexDirection="column" width="100%" height="100%">
-      <SessionTabs
-        sessions={props.sessions}
-        currentId={props.sessionId}
-        onSelect={props.onSelectSession}
-        onNew={props.onNewSession}
+      <SessionHeader
+        title={props.title}
+        id={props.sessionId}
+        onOpen={props.onOpenSessions}
       />
       <box flexDirection="row" flexGrow={1} minHeight={0}>
-        <scrollbox
-          ref={(element: ScrollBoxRenderable) => (transcript = element)}
-          flexGrow={1}
-          stickyScroll
-          stickyStart="bottom"
-          paddingLeft={2}
-          paddingRight={2}
-          paddingTop={1}
-        >
-          <Index each={state.messages}>
-            {(message) => <MessageView message={message()} thinking={thinking()} />}
-          </Index>
-          <box height={1} />
-        </scrollbox>
+        {/* Composer sits INSIDE the left column (OpenCode routes/session/
+            index.tsx:1365-1372), so its border stops at the sidebar edge
+            instead of running underneath it. */}
+        <box flexDirection="column" flexGrow={1} minHeight={0}>
+          <scrollbox
+            ref={(element: ScrollBoxRenderable) => (transcript = element)}
+            flexGrow={1}
+            stickyScroll
+            stickyStart="bottom"
+            paddingLeft={2}
+            paddingRight={2}
+            paddingTop={1}
+          >
+            <Index each={state.messages}>
+              {(message) => <MessageView message={message()} alwaysOpen={alwaysThinking()} />}
+            </Index>
+            <box height={1} />
+          </scrollbox>
+        <box paddingLeft={2} paddingRight={2} paddingBottom={1} paddingTop={1} flexShrink={0} flexDirection="column">
+          <Show when={props.permission}>
+            {(request) => (
+              <PermissionPanel request={request()} onDecide={props.onPermissionDecide} />
+            )}
+          </Show>
+          <Show when={props.ask}>
+            {(request) => <AskPanel request={request()} onAnswer={props.onAskAnswer} />}
+          </Show>
+          <Show
+            when={props.permission === null && props.ask === null}
+            fallback={<></>}
+          >
+            <>
+              <Show when={state.queued.length > 0}>
+                <text fg={theme.textMuted}>{`${state.queued.length} queued`}</text>
+              </Show>
+              <Prompt
+                placeholder={state.busy ? "Working…" : "Ask anything…"}
+                metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
+                onSubmit={submit}
+                onOverlay={setSuggesting}
+                seed={promptSeed()}
+                onSeedDone={() => setPromptSeed("")}
+              />
+            </>
+          </Show>
+        </box>
+        </box>
         <Show when={dimensions().width >= 100}>
           <Sidebar
             title={props.title}
@@ -313,34 +335,6 @@ export function Session(props: SessionProps) {
             workspace={props.workspace}
             branch={props.branch}
           />
-        </Show>
-      </box>
-      <box paddingLeft={2} paddingRight={2} paddingBottom={1} paddingTop={1} flexShrink={0} flexDirection="column">
-        <Show when={props.permission}>
-          {(request) => (
-            <PermissionPanel request={request()} onDecide={props.onPermissionDecide} />
-          )}
-        </Show>
-        <Show when={props.ask}>
-          {(request) => <AskPanel request={request()} onAnswer={props.onAskAnswer} />}
-        </Show>
-        <Show
-          when={props.permission === null && props.ask === null}
-          fallback={<></>}
-        >
-          <>
-            <Show when={state.queued.length > 0}>
-              <text fg={theme.textMuted}>{`${state.queued.length} queued`}</text>
-            </Show>
-            <Prompt
-              placeholder={state.busy ? "Working…" : "Ask anything…"}
-              metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
-              onSubmit={submit}
-              onOverlay={setSuggesting}
-              seed={promptSeed()}
-              onSeedDone={() => setPromptSeed("")}
-            />
-          </>
         </Show>
       </box>
       <StatusBar

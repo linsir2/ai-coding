@@ -191,7 +191,13 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
     }
     case "message.finished": {
       const authoritative = typeof data["text"] === "string" ? (data["text"] as string) : null
-      const reasoning = str(data["reasoning"])
+      // A step's thinking goes in FRONT of that step's own text: the wire
+      // carries one message per step, so the order OpenCode gets from the
+      // server's part stream is ours to rebuild (A4 §2).  Whitespace is not a
+      // thought, and a tool-only step has no text — neither may become a part.
+      const reasoning = str(data["reasoning"]).trim()
+        ? [{ kind: "reasoning", text: str(data["reasoning"]) } as Part]
+        : []
       return updateAssistant(state, (parts) => {
         let next = parts
         const index = next.findLastIndex((part) => part.kind === "text" && part.streaming)
@@ -199,10 +205,12 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
           const part = next[index] as Extract<Part, { kind: "text" }>
           next = next.slice()
           next[index] = { kind: "text", text: authoritative ?? part.text, streaming: false }
-        } else if (authoritative !== null) {
-          next = [...next, { kind: "text", text: authoritative, streaming: false }]
+          next.splice(index, 0, ...reasoning)
+        } else if (authoritative) {
+          next = [...next, ...reasoning, { kind: "text", text: authoritative, streaming: false }]
+        } else {
+          next = [...next, ...reasoning]
         }
-        if (reasoning) next = [...next, { kind: "reasoning", text: reasoning }]
         return next
       })
     }

@@ -16,10 +16,11 @@ import { DialogHelp } from "./component/dialog-help"
 import { DialogModels, type ModelRow } from "./component/dialog-models"
 import { DialogSessions } from "./component/dialog-sessions"
 import { DialogSkills } from "./component/dialog-skills"
+import { DialogPermissions } from "./component/dialog-permissions"
 import { DialogStatus } from "./component/dialog-status"
 import { AskPanel } from "./component/ask"
 import { type PermissionRequest } from "./component/permission"
-import type { SessionTab } from "./component/session-tabs"
+
 import { ToastProvider } from "./component/toast"
 import { DialogProvider, useDialog } from "./dialog/context"
 import type { IpcClient } from "./ipc"
@@ -42,6 +43,13 @@ export interface Hello {
   sessionId: string
   sessionTitle: string
   models: ModelRow[]
+}
+
+/** The session.list row, trimmed to what this shell reads off it. */
+interface SessionRow {
+  id: string
+  title: string
+  preview: string
 }
 
 function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }) {
@@ -71,7 +79,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
   const [providerName, setProviderName] = createSignal(props.hello.provider)
   const [modelKey, setModelKey] = createSignal(props.hello.modelKey)
   const [hydrate, setHydrate] = createSignal<{ key: string; state: SessionState } | null>(null)
-  const [sessions, setSessions] = createSignal<SessionTab[]>([])
+  const [sessions, setSessions] = createSignal<SessionRow[]>([])
   const [permission, setPermission] = createSignal<PermissionRequest | null>(null)
   // The pending ``approval.request``'s resolver; the panel's answer resolves it.
   let resolvePermission: ((decision: PermissionDecision) => void) | null = null
@@ -96,12 +104,30 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
 
   const refreshSessions = async () => {
     try {
-      const data = (await props.client.request("session.list")) as { sessions?: SessionTab[] }
+      const data = (await props.client.request("session.list")) as { sessions?: SessionRow[] }
       setSessions(data.sessions ?? [])
     } catch {
-      /* the tabs keep their last list; the next turn retries */
+      /* the sidebar title keeps its last value; the next turn retries */
     }
   }
+
+  // One definition each, shared by the palette command and the session header's
+  // click: two copies of this JSX would drift (A4 §4 step 10).
+  const openSessions = () =>
+    dialog.open(
+      () => (
+        <DialogSessions
+          client={props.client}
+          currentId={sessionId()}
+          onSelect={onSessionLoaded}
+          onDeleted={(_deleted, next) => void onSessionDeleted(_deleted, next)}
+        />
+      ),
+      "large",
+    )
+
+  const openPermissions = () =>
+    dialog.open(() => <DialogPermissions client={props.client} liveSessionId={sessionId()} />)
 
   const switchModel = async (key: string, name: string): Promise<boolean> => {
     try {
@@ -155,40 +181,6 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
     const row = sessions().find((session) => session.id === sessionId())
     return row?.title || row?.preview || "New session"
   }
-
-  // The session from initialize is not persisted until its first turn, so the
-  // current one is synthesised into the strip.  The strip keeps only the most
-  // recent few (OpenCode overflows/scrolls a 1800-line rail; M4 caps instead).
-  const tabs = () => {
-    const list = sessions()
-    const recent = list.slice(0, 5)
-    if (recent.some((session) => session.id === sessionId())) return recent
-    return [{ id: sessionId(), title: "New session", preview: "" }, ...recent.slice(0, 4)]
-  }
-
-  const cycleSession = (delta: number) => {
-    const list = tabs()
-    if (list.length === 0) return
-    const index = list.findIndex((session) => session.id === sessionId())
-    const target = list[(((index < 0 ? 0 : index) + delta) % list.length + list.length) % list.length]
-    if (target) void onSelectSession(target.id)
-  }
-
-  /** Jump to a tab by its strip index — the `<leader>1..5` quick slots. */
-  const selectTab = (index: number) => {
-    const target = tabs()[index]
-    if (target) void onSelectSession(target.id)
-  }
-
-  // OpenCode binds `<leader>1..5` to tab select (config/keybind.ts:150); the
-  // strip shows at most five tabs, so five quick slots cover it.
-  const tabSelects = [0, 1, 2, 3, 4].map((index) => ({
-    name: `session.tab.select.${index + 1}`,
-    title: `Tab ${index + 1}`,
-    group: "Session",
-    desc: `Switch to session tab ${index + 1}`,
-    run: () => selectTab(index),
-  }))
 
   onMount(() => {
     void refreshSessions()
@@ -273,18 +265,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         group: "Session",
         desc: "Open a saved session",
         palette: true,
-        run: () =>
-          dialog.open(
-            () => (
-              <DialogSessions
-                client={props.client}
-                currentId={sessionId()}
-                onSelect={onSessionLoaded}
-                onDeleted={(_deleted, next) => void onSessionDeleted(_deleted, next)}
-              />
-            ),
-            "large",
-          ),
+        run: () => openSessions(),
       },
       {
         name: "dialog.skills.show",
@@ -350,30 +331,16 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         run: () => startSession("/review"),
       },
       {
-        name: "session.permissions",
+        // Workspace-global, so it is its own dialog at the app layer rather than
+        // a panel inside the session route (A4 §2).  liveSessionId is only the
+        // transport session.command needs; the policy itself is not per session.
+        name: "dialog.permissions.show",
         title: "Permissions",
-        group: "Session",
+        group: "System",
         desc: "Show or switch the approval policy",
         palette: true,
-        run: () => startSession("/permissions "),
+        run: () => openPermissions(),
       },
-      {
-        name: "session.next",
-        title: "Next session",
-        group: "Session",
-        desc: "Switch to the next tab",
-        palette: true,
-        run: () => cycleSession(1),
-      },
-      {
-        name: "session.prev",
-        title: "Previous session",
-        group: "Session",
-        desc: "Switch to the previous tab",
-        palette: true,
-        run: () => cycleSession(-1),
-      },
-      ...tabSelects,
       {
         name: "app.exit",
         title: "Exit",
@@ -392,7 +359,6 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
       { key: "<leader>n", cmd: "session.new" },
       { key: "<leader>s", cmd: "dialog.status.show" },
       { key: "<leader>q", cmd: "app.exit" },
-      ...tabSelects.map((command, index) => ({ key: `<leader>${index + 1}`, cmd: command.name })),
     ],
   }))
 
@@ -419,7 +385,6 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
             provider={providerName()}
             initialPrompt={pendingPrompt()}
             hydrate={hydrate()}
-            sessions={tabs()}
             title={currentTitle()}
             workspace={props.hello.workspace}
             branch={props.hello.vcs?.branch ?? ""}
@@ -430,7 +395,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
             onAskAnswer={answerAsk}
             onQuit={exitWith}
             onSelectSession={(id) => void onSelectSession(id)}
-            onNewSession={() => void onNewSession()}
+            onOpenSessions={openSessions}
             onTurnFinished={() => void refreshSessions()}
           />
         </ToastProvider>

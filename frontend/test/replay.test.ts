@@ -78,11 +78,14 @@ describe("messagesToState", () => {
     })
   })
 
-  test("reasoning travels with its step", () => {
+  // A4 T5: the replayed order must match the live stream's exactly (A4 §2 —
+  // one contract, two implementation points), so reasoning leads its text here
+  // just as it does in the reducer.
+  test("reasoning travels in front of the text it belongs to", () => {
     const state = messagesToState([{ role: "assistant", content: "answer", reasoning: "because" }])
     expect(state.messages[0]!.parts).toEqual([
-      { kind: "text", text: "answer", streaming: false },
       { kind: "reasoning", text: "because" },
+      { kind: "text", text: "answer", streaming: false },
     ])
   })
 

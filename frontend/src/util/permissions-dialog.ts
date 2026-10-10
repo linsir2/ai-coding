@@ -1,10 +1,11 @@
 /**
- * Permissions dialog, the pure half (A3.1).
+ * Permissions dialog, the pure half (A3.1, moved to its own dialog in A4).
  *
  * The dialog reads through ``permissions.state`` and switches by dispatching
  * the backend's own commands — one mutation path, so the provider re-arm
  * (I1) stays where it is.  There is no policy beyond the two the callback
- * types express (J1).
+ * types express (J1).  A4 cut the PERMISSION_ACTIONS catalogue: it had no
+ * consumer outside its own test, and the dialog is key-driven, not a menu.
  */
 
 export type ApprovalPolicy = "auto" | "confirm"
@@ -25,35 +26,6 @@ export function grantLine(grant: string): string {
   const separator = grant.indexOf(":")
   return separator < 0 ? grant : `${grant.slice(0, separator)} · ${grant.slice(separator + 1)}`
 }
-
-export interface PermissionAction {
-  key: "auto" | "confirm" | "clear"
-  label: string
-  /** The exact line the backend's dispatcher understands. */
-  command: string
-  description: string
-}
-
-export const PERMISSION_ACTIONS: PermissionAction[] = [
-  {
-    key: "auto",
-    label: "Auto-approve",
-    command: "/permissions auto",
-    description: "Never ask; every call proceeds",
-  },
-  {
-    key: "confirm",
-    label: "Confirm each call",
-    command: "/permissions confirm",
-    description: "Ask before every warning-tier call",
-  },
-  {
-    key: "clear",
-    label: "Forget grants",
-    command: "/permissions clear",
-    description: "Drop remembered always-allow entries, on disk too",
-  },
-]
 
 /**
  * The other policy — what a toggle moves to.  OpenCode's config dialog flips
