@@ -13,6 +13,7 @@ import { useBindings } from "@opentui/keymap/solid"
 import { Show, createSignal, onMount } from "solid-js"
 import { CommandPalette } from "./component/command-palette"
 import { DialogHelp } from "./component/dialog-help"
+import { DialogMcp } from "./component/dialog-mcp"
 import { DialogModels, type ModelRow } from "./component/dialog-models"
 import { DialogSessions } from "./component/dialog-sessions"
 import { DialogSkills } from "./component/dialog-skills"
@@ -265,6 +266,16 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         desc: "Open a saved session",
         palette: true,
         run: () => openSessions(),
+      },
+      {
+        // Read-only by design: MCP is connected once at startup, so there is
+        // nothing for a reconnect button to call (MCP-MCP §6).
+        name: "mcp.list",
+        title: "MCP servers",
+        group: "Agent", // OpenCode's own category for this command (app.tsx:895)
+        desc: "Show configured MCP servers and what came of them",
+        palette: true,
+        run: () => dialog.open(() => <DialogMcp client={props.client} />, "large"),
       },
       {
         name: "dialog.skills.show",

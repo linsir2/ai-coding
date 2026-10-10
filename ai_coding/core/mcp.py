@@ -304,6 +304,69 @@ class MCPManager:
                 )
         return tools
 
+    def servers(self) -> list[dict[str, Any]]:
+        """Every configured server and what became of it (MCP-MCP §2.1).
+
+        Two sources are needed and neither is enough alone: ``_config.servers``
+        is what the operator asked for, ``_owners`` is what happened.  A server
+        skipped before an owner existed (no name, no command, a duplicate name)
+        only exists in the config, and a server whose command is wrong only
+        exists in ``_owners`` — reporting one side would make the other
+        disappear from the dialog, which is worse than reporting a failure.
+
+        ``ready`` is set on both the connected and the failed path, so success is
+        "ready and no error" rather than "ready".
+        """
+        owners = {owner.server.name: owner for owner in self._owners}
+        rows: list[dict[str, Any]] = []
+        for server in self._config.servers:
+            wanted = sorted({str(name) for name in getattr(server, "tools", None) or []})
+            owner = owners.get(server.name)
+            row: dict[str, Any] = {
+                "name": server.name,
+                "command": " ".join([server.command, *server.args]).strip(),
+                "status": "failed",
+                "toolCount": 0,
+                "wantedCount": len(wanted),
+                "detail": "",
+            }
+            if not self._config.enabled:
+                row["status"] = "off"
+            elif owner is None:
+                # No owner means open_all never even tried: name, command or a
+                # duplicate name.  Say which, rather than leaving a blank row.
+                if not server.name:
+                    row["detail"] = "配置缺少 name"
+                elif not server.command:
+                    row["detail"] = "配置缺少 command"
+                else:
+                    row["detail"] = "与同名服务器重复，只连了第一个"
+            elif not owner.ready.is_set():
+                row["detail"] = f"未在 {self._connection_timeout:g}s 内就绪"
+            elif owner.error is not None:
+                # An exception can carry no message (``raise RuntimeError``), so
+                # fall back to its class name rather than showing an empty row.
+                row["detail"] = str(owner.error) or type(owner.error).__name__
+            elif not owner.tools:
+                row["detail"] = "已连接，但没有工具"
+            else:
+                listed = sorted({str(getattr(t, "name", "")) for t in owner.tools})
+                # Filtered = the server offered it and the whitelist did not
+                # want it — the other direction is a whitelist naming a tool the
+                # server does not have, which is a different (quieter) problem.
+                skipped = [name for name in listed if name not in wanted]
+                if wanted and skipped:
+                    row["status"] = "filtered"
+                    row["toolCount"] = len(listed) - len(skipped)
+                    row["detail"] = f"已过滤：{'、'.join(skipped[:8])}"
+                    if len(skipped) > 8:
+                        row["detail"] += f" 等 {len(skipped)} 个"
+                else:
+                    row["status"] = "connected"
+                    row["toolCount"] = len(listed)
+            rows.append(row)
+        return rows
+
     async def aclose(self) -> None:
         """Tear down every session opened by :meth:`open_all` (idempotent)."""
         owners, self._owners = self._owners, []

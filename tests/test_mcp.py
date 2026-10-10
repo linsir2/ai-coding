@@ -460,3 +460,131 @@ async def test_r8_mcp_progress_becomes_a_tool_chunk():
     assert [chunk.stream for chunk in chunks] == ["progress", "progress", "progress"]
     assert [chunk.text for chunk in chunks] == ["step 1", "step 2", "step 3"]
     assert all(chunk.call_id == "c7" and chunk.tool_name == "fs__read_file" for chunk in chunks)
+
+
+# ---- m1-mcp: what became of every configured server ------------------------
+#
+# The manager already knew all of this; nothing carried it out of the process.
+# These rows are the contract the IPC handler hands the dialog.
+
+
+def _rows(manager) -> list[dict]:
+    return {row["name"]: row for row in manager.servers()}
+
+
+@pytest.mark.asyncio
+async def test_a_connected_server_reports_its_tool_count():
+    """T1: the happy row is connected + how many tools it brought."""
+    session = _Session([_tool("read_file"), _tool("write_file")])
+    manager = MCPManager(_cfg(_server("fs")), session_factory=_factory({"fs": session}))
+    await manager.open_all()
+    try:
+        row = _rows(manager)["fs"]
+        assert row["status"] == "connected"
+        assert row["toolCount"] == 2
+        assert row["wantedCount"] == 0  # no whitelist in play
+        assert row["detail"] == ""
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_never_connects_is_a_row_not_an_absence():
+    """T3, the line this feature stands on: a server whose command is wrong has
+    to stay visible.  It got an owner and failed, so the row says failed."""
+    def broken_factory(server):
+        @asynccontextmanager
+        async def _cm():
+            raise RuntimeError("spawn failed: no such command")
+            yield  # pragma: no cover
+
+        return _cm()
+
+    manager = MCPManager(_cfg(_server("dead")), session_factory=broken_factory)
+    await manager.open_all()
+    try:
+        row = _rows(manager)["dead"]
+        assert row["status"] == "failed"
+        assert "spawn failed" in row["detail"]
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_times_out_is_reported_as_failed():
+    """T2: ready is set on both paths, so failure has to be read from .error
+    (or its absence), not from ready alone."""
+    def hanging_factory(server):
+        @asynccontextmanager
+        async def _cm():
+            await asyncio.sleep(30)  # never connects
+            yield _Session()
+
+        return _cm()
+
+    manager = MCPManager(
+        _cfg(_server("slow")), session_factory=hanging_factory, connection_timeout=0.05
+    )
+    await manager.open_all()
+    try:
+        row = _rows(manager)["slow"]
+        assert row["status"] == "failed"
+        assert row["detail"]
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_whitelist_that_filtered_tools_says_which_ones():
+    """T4: R7d keeps 1 of 3 tools, and that cost has to be visible."""
+    session = _Session([_tool("read_file"), _tool("write_file"), _tool("glob")])
+    manager = MCPManager(
+        _cfg(_server("fs", tools=["read_file"])), session_factory=_factory({"fs": session})
+    )
+    await manager.open_all()
+    try:
+        row = _rows(manager)["fs"]
+        assert row["status"] == "filtered"
+        assert row["toolCount"] == 1
+        assert row["wantedCount"] == 1
+        assert "write_file" in row["detail"] and "glob" in row["detail"]
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_whitelist_that_matched_everything_is_not_a_filter():
+    """T4b: all three wanted, three arrived — that is connected, not filtered."""
+    session = _Session([_tool("read_file"), _tool("write_file"), _tool("glob")])
+    manager = MCPManager(
+        _cfg(_server("fs", tools=["read_file", "write_file", "glob"])),
+        session_factory=_factory({"fs": session}),
+    )
+    await manager.open_all()
+    try:
+        row = _rows(manager)["fs"]
+        assert row["status"] == "connected"
+        assert row["detail"] == ""
+    finally:
+        await manager.aclose()
+
+
+def test_a_server_the_loader_skips_still_gets_a_row():
+    """T3b: no name or no command is skipped before an owner exists, so the
+    config is the only record — and a typo must not vanish from the list."""
+    manager = MCPManager(_cfg(_server(name="", command="mcp-fs"), _server(command="")))
+    rows = _rows(manager)
+    assert len(rows) == 2
+    for row in rows.values():
+        assert row["status"] == "failed"
+        assert row["detail"]
+
+
+def test_with_mcp_off_every_configured_server_says_so():
+    """MCP-MCP §2.1: an empty list would make "not enabled" and "not configured"
+    look the same."""
+    manager = MCPManager(_cfg(_server("fs"), enabled=False))
+    rows = manager.servers()
+    assert [row["name"] for row in rows] == ["fs"]
+    assert rows[0]["status"] == "off"
+    assert rows[0]["toolCount"] == 0

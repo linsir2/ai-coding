@@ -466,6 +466,18 @@ def make_handlers(
             "maxContextTokens": int(getattr(ai_cfg, "max_context_tokens", 0) or 0),
         }
 
+    def mcp_list(params: dict[str, Any]) -> dict[str, Any]:
+        """Rows for the MCP dialog: what was configured and what came of it.
+
+        The manager is the only place that knows both halves — the config is
+        what was asked for, its owners are what happened — so it answers with
+        the rows rather than the dialog reading a private list (MCP-MCP §2.2).
+        """
+        manager = getattr(world, "mcp", None)
+        if manager is None:
+            return {"servers": []}
+        return {"servers": manager.servers()}
+
     def shutdown_handler(params: dict[str, Any]) -> dict[str, Any]:
         if shutdown is not None:
             shutdown()
@@ -485,5 +497,6 @@ def make_handlers(
         "skills.list": skills_list,
         "config.summary": config_summary,
         "session.stats": session_stats,
+        "mcp.list": mcp_list,
         "shutdown": shutdown_handler,
     }

@@ -451,6 +451,31 @@ async def test_deleting_an_unknown_session_is_a_no_op(ipc):
 
 
 @pytest.mark.asyncio
+async def test_mcp_list_reports_what_became_of_the_servers(ipc):
+    """T5: the dialog's rows, over the real IPC the front end uses."""
+    world, _service, client = ipc
+    world.mcp = SimpleNamespace(servers=lambda: [
+        {"name": "fs", "command": "mcp-fs", "status": "connected", "toolCount": 2,
+         "wantedCount": 0, "detail": ""},
+        {"name": "dead", "command": "nope", "status": "failed", "toolCount": 0,
+         "wantedCount": 0, "detail": "spawn failed"},
+    ])
+    result = client.request("mcp.list")
+    assert [row["name"] for row in result["servers"]] == ["fs", "dead"]
+    assert result["servers"][0]["status"] == "connected"
+
+
+@pytest.mark.asyncio
+async def test_mcp_list_with_no_manager_is_an_empty_list_not_an_error(ipc):
+    """T5b: a world built before mcp existed (or a test's fake world) must not
+    turn a read-only panel into a crash."""
+    _world, _service, client = ipc
+    # The shared fixture has no `mcp` attribute at all.
+    client.request("initialize")
+    assert client.request("mcp.list") == {"servers": []}
+
+
+@pytest.mark.asyncio
 async def test_permissions_state_reports_policy_grants_and_store(ipc):
     """The dialog's read side: current policy, remembered grants, store path.
 
