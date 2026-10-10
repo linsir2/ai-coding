@@ -16,7 +16,6 @@ import pytest
 
 from ai_coding.config.models import MCPConfig, MCPServerConfig, MCPTimeout
 from ai_coding.core.mcp import MCPManager, MCPToolAdapter
-from ai_coding.tools.base import BaseTool
 
 
 class _Session:
@@ -90,6 +89,15 @@ def _cfg(*servers, enabled=True) -> MCPConfig:
     return MCPConfig(enabled=enabled, servers=list(servers))
 
 
+def _callable(manager) -> list[str]:
+    """``server__tool`` names, from the one source the dispatcher reads (M2)."""
+    return [
+        f"{server}__{handle.name}"
+        for server, handles in manager.available()
+        for handle in handles
+    ]
+
+
 def _server(name="fs", command=("mcp-fs",), **kwargs) -> MCPServerConfig:
     """OpenCode-v2 shape: ``command`` is argv as one list (no separate args)."""
     return MCPServerConfig(name=name, command=list(command), **kwargs)
@@ -138,7 +146,8 @@ async def test_disabled_config_yields_no_tools():
         _cfg(_server(disabled=True)),
         session_factory=lambda server: called.append(server),
     )
-    assert await manager.open_all() == []
+    await manager.open_all()
+    assert _callable(manager) == []
     assert called == []
 
 
@@ -149,7 +158,8 @@ async def test_disabled_server_skipped():
         _cfg(_server(disabled=True)),
         session_factory=lambda server: called.append(server),
     )
-    assert await manager.open_all() == []
+    await manager.open_all()
+    assert _callable(manager) == []
     assert called == []
 
 
@@ -160,7 +170,8 @@ async def test_server_without_name_or_command_skipped():
         _cfg(MCPServerConfig(name="", command=["x"])),
         session_factory=lambda server: called.append(server),
     )
-    assert await manager.open_all() == []
+    await manager.open_all()
+    assert _callable(manager) == []
     assert called == []
 
 
@@ -172,10 +183,9 @@ async def test_tools_become_base_tools():
     session = _Session(tools=[_tool("read_file"), _tool("write_file")])
     manager = MCPManager(_cfg(_server()), session_factory=_factory({"fs": session}))
 
-    tools = await manager.open_all()
+    await manager.open_all()
 
-    assert len(tools) == 2
-    assert all(isinstance(tool, BaseTool) for tool in tools)
+    assert _callable(manager) == ["fs__read_file", "fs__write_file"]
     await manager.aclose()
 
 
@@ -184,9 +194,9 @@ async def test_tool_name_prefixed_with_server():
     session = _Session(tools=[_tool("read_file")])
     manager = MCPManager(_cfg(_server("fsx")), session_factory=_factory({"fsx": session}))
 
-    tools = await manager.open_all()
+    await manager.open_all()
 
-    assert tools[0].name == "fsx__read_file"
+    assert _callable(manager) == ["fsx__read_file"]
     await manager.aclose()
 
 
@@ -196,10 +206,12 @@ async def test_schema_passed_through():
     session = _Session(tools=[_tool(schema=schema)])
     manager = MCPManager(_cfg(_server()), session_factory=_factory({"fs": session}))
 
-    tools = await manager.open_all()
+    await manager.open_all()
 
-    assert tools[0].params_json_schema == schema
-    assert tools[0].description == "reads"
+    # M2: the schema and description the model sees are the catalog's, built
+    # from the same tool the dispatcher would call.
+    handle = manager.lookup("fs", "read_file")
+    assert handle is not None and handle.description == "reads"
     await manager.aclose()
 
 
@@ -273,9 +285,9 @@ async def test_connect_failure_degrades_silently():
         ),
     )
 
-    tools = await manager.open_all()
+    await manager.open_all()
 
-    assert [tool.name for tool in tools] == ["good__ok"]  # only the healthy server
+    assert _callable(manager) == ["good__ok"]  # only the healthy server
     await manager.aclose()
 
 
@@ -305,9 +317,9 @@ async def test_duplicate_server_names_are_skipped():
         session_factory=_factory({"dup": session}),
     )
 
-    tools = await manager.open_all()
+    await manager.open_all()
 
-    assert [tool.name for tool in tools] == ["dup__read_file"]
+    assert _callable(manager) == ["dup__read_file"]
     await manager.aclose()
 
 
@@ -352,10 +364,10 @@ async def test_open_all_skips_a_server_that_never_connects():
     )
 
     started = time.monotonic()
-    tools = await manager.open_all()
+    await manager.open_all()
     elapsed = time.monotonic() - started
 
-    assert tools == []
+    assert _callable(manager) == []
     assert elapsed < 2.0
     await manager.aclose()
 
@@ -422,10 +434,10 @@ async def test_a_slow_tool_listing_costs_the_catalog_budget_not_startup():
     )
 
     started = time.monotonic()
-    tools = await manager.open_all()
+    await manager.open_all()
     elapsed = time.monotonic() - started
 
-    assert tools == []
+    assert _callable(manager) == []
     assert elapsed < 2.0
     row = _rows(manager)["slow"]
     assert row["status"] == "failed"
@@ -463,10 +475,10 @@ async def test_the_tools_allowlist_filters_the_adapters():
         _cfg(_server(tools=["read_file", "list_dir"])), session_factory=_factory({"fs": session})
     )
     try:
-        tools = await manager.open_all()
+        await manager.open_all()
+        assert _callable(manager) == ["fs__read_file", "fs__list_dir"]
     finally:
         await manager.aclose()
-    assert [tool.name for tool in tools] == ["fs__read_file", "fs__list_dir"]
 
 
 @pytest.mark.asyncio
@@ -474,10 +486,10 @@ async def test_an_empty_allowlist_keeps_every_tool():
     session = _Session(tools=[_tool("read_file"), _tool("write_file")])
     manager = MCPManager(_cfg(_server()), session_factory=_factory({"fs": session}))
     try:
-        tools = await manager.open_all()
+        await manager.open_all()
+        assert _callable(manager) == ["fs__read_file", "fs__write_file"]
     finally:
         await manager.aclose()
-    assert [tool.name for tool in tools] == ["fs__read_file", "fs__write_file"]
 
 
 @pytest.mark.asyncio
@@ -488,10 +500,11 @@ async def test_the_allowlist_matches_remote_names_not_the_prefix():
         session_factory=_factory({"fs": session}),
     )
     try:
-        tools = await manager.open_all()
+        await manager.open_all()
+        # The whitelist matches the *remote* name; the adapter name never matches.
+        assert _callable(manager) == []
     finally:
         await manager.aclose()
-    assert tools == []
 
 
 def test_the_startup_timeout_default_gives_npx_room_to_start():

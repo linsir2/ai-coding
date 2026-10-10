@@ -60,6 +60,11 @@ class RequestAssembler:
         memory: Any,
         reporter: Any,
         build_instructions: Callable[[Deadline | None], Awaitable[str | None]] | None = None,
+        # M2: the MCP catalog, rebuilt per step from live manager state.  A
+        # callable rather than a string because it must never be frozen into a
+        # schema: a reconnected server's new tools have to show up on the very
+        # next step.
+        catalog_builder: Callable[[], str] | None = None,
         settings: Any,
         emit: Callable[[LoopEvent], None],
         skills: SkillRegistry | None = None,
@@ -72,6 +77,7 @@ class RequestAssembler:
         # the skills catalogue), so the loop hands its builder in rather than the
         # assembler learning about prompt assembly.
         self._build_instructions = build_instructions
+        self._catalog_builder = catalog_builder
         self._settings = settings
         self._emit = emit
         # M2: SOP router for recommending skills based on current context.
@@ -192,9 +198,13 @@ class RequestAssembler:
                     )
         # I3: inject anchor after compaction
         anchor_block = self._format_anchor_block(session, compacted)
+        # M2: the catalog sits with the other state to read, before the
+        # instructions — it is reference data, not an instruction.
+        catalog = self._catalog_builder() if self._catalog_builder is not None else ""
         tail, tail_blocks = build_tail(
             [
                 volatile_block("memory", memory_block),
+                volatile_block("mcp_catalog", catalog),
                 volatile_block("task", content_of(injection.message)),
                 volatile_block("recommended_skills", recommended_skills_block),
                 volatile_block("error_recovery", recovery_block),

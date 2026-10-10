@@ -177,6 +177,10 @@ class AgentLoop:
         gate: PermissionGate | None = None,
         approval: ApprovalCallback | None = None,
         prompt: PromptAssembler | None = None,
+        # M2: per-step MCP catalog text (``mcp_call``'s other half).  The
+        # composition root hands it in, from the same manager the tool closes
+        # over, so the text and the callable surface cannot drift apart.
+        catalog_builder: Callable[[], str] | None = None,
         context: ContextManager | None = None,
         memory: MemoryService | None = None,
         skills: SkillRegistry | None = None,
@@ -196,6 +200,7 @@ class AgentLoop:
         self.sessions = sessions
         self.tools = tools
         self.prompt = prompt
+        self.catalog_builder = catalog_builder
         self.context = context
         self.memory = memory
         self.skills = skills
@@ -284,7 +289,7 @@ class AgentLoop:
         self.turn_memory = TurnMemory(memory, emit=self._emit, save=self.closer.save)
         # R5: history compaction (budget-driven for turns, forced for /compact).
         self.compactor = Compactor(context, emit=self._emit)
-        # R7a: one request per iteration, assembled in its own unit (the four
+        # R7a: one request per iteration, assembled in its own unit (the
         # volatile blocks, in their declared order).
         from ai_coding.core.sop_router import ToolObserver
         self._tool_observer = ToolObserver([])  # observations list, updated per turn
@@ -295,6 +300,7 @@ class AgentLoop:
             memory=self.turn_memory,
             reporter=self.reporter,
             build_instructions=self._build_instructions,
+            catalog_builder=self.catalog_builder,
             settings=self.settings,
             emit=self._emit,
             skills=self.skills,

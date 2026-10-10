@@ -49,11 +49,17 @@ def test_a_tool_without_a_path_has_no_grant():
     assert grant_key("edit", {"path": "   "}) is None
 
 
-def test_an_mcp_tool_has_no_grant():
-    """A remote tool's arguments are not summarisable into a resource, and the
-    modal cannot state what would be remembered."""
-    assert grant_key("github__create_issue", {"title": "x"}) is None
-    assert grant_key("filesystem__read_file", {"path": "a.py"}) is None
+def test_an_mcp_tool_is_remembered_as_itself():
+    """M2 inverted this one, on purpose.
+
+    It used to return None ("a remote tool's arguments are not summarisable"),
+    which made every "Always" on a remote call silently "this once" — there was
+    nothing to remember *as*.  The remote tool's own name is the resource the
+    operator read and approved, exactly like a path is for ``edit``.  Its
+    arguments are the tool's business, not the question being granted.
+    """
+    assert grant_key("github__create_issue", {"title": "x"}) == "github__create_issue"
+    assert grant_key("filesystem__read_file", {"path": "a.py"}) == "filesystem__read_file"
 
 
 def test_bash_is_never_remembered():

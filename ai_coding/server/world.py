@@ -58,11 +58,12 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     from ai_coding.cli import _build_loop, _build_tool_registry, _make_hooks, _make_recorder
     from ai_coding.config.loader import ConfigManager
     from ai_coding.core.guard import build_guards
-    from ai_coding.core.mcp import MCPManager
+    from ai_coding.core.mcp import MCPManager, build_mcp_catalog
     from ai_coding.core.steering import SteeringQueue
     from ai_coding.security.approval import CLIApprovalCallback
     from ai_coding.security.user_prompt import CLIUserPromptCallback
     from ai_coding.service.session_service import SessionService
+    from ai_coding.tools.mcp_call import MCPCallTool
 
     manager = ConfigManager()
     manager.initialize(path)
@@ -92,8 +93,11 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     )
     recorder = _make_recorder(app_cfg, workspace, None)
     mcp_manager = MCPManager(app_cfg.mcp, observer=recorder)
-    for tool in await mcp_manager.open_all():
-        registry.register(tool)
+    await mcp_manager.open_all()
+    # M2: one dispatcher carries every remote call, and the catalog it is
+    # chosen from is built from the same manager — the text the model reads and
+    # the calls it can make come from one source, so they cannot drift apart.
+    registry.register(MCPCallTool(mcp_manager))
 
     # M5: approvals go to the TUI as a server-initiated request; the IPC layer
     # installs the provider in ``make_handlers``.  Without one (a stray
@@ -102,6 +106,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     cancel = asyncio.Event()
     loop = _build_loop(
         engine, sessions, registry, app_cfg, workspace, skills,
+        catalog_builder=lambda: build_mcp_catalog(mcp_manager.available()),
         approval=approval,
         observer=None,
         trace=recorder,

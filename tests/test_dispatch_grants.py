@@ -181,3 +181,46 @@ def test_the_verdict_vocabulary_is_unchanged_for_callers():
         ApprovalVerdict.STOPPED,
         ApprovalVerdict.TIMED_OUT,
     }
+
+
+@pytest.mark.asyncio
+async def test_the_gate_and_the_prompt_see_the_real_call_not_the_vessel():
+    """M2: one dispatcher (mcp_call) carries every remote call, but the gate
+    must judge fs__write_file — otherwise the prompt reads "mcp_call" and the
+    operator has no idea what they are approving.  ``permission_name`` is the
+    seam: the registry name and the authorized name are deliberately different
+    things, exactly like OpenCode asserting the leaf inside execute."""
+
+    class _Remote(BaseTool):
+        parallel_safe = False
+
+        @property
+        def name(self) -> str:
+            return "mcp_call"
+
+        @property
+        def description(self) -> str:
+            return "call a remote MCP tool"
+
+        @property
+        def params_json_schema(self) -> dict:
+            return {"type": "object", "properties": {"server": {"type": "string"}}}
+
+        def permission_name(self, params: dict) -> str:
+            return f"{params.get('server')}__{params.get('tool')}"
+
+        async def execute(self, params, ctx: ToolContext | None = None):
+            from ai_coding.domain.message import ToolResult
+
+            return ToolResult(success=True, output="remote ok")
+
+    registry = ToolRegistry()
+    registry.register(_Remote())
+    gate = PermissionGate()
+    approval = _Recorder(ApprovalResult.YES)
+
+    dispatcher = ToolDispatcher(registry, gate, approval)
+    await _decide(dispatcher, _ref("c1", "mcp_call", server="fs", tool="write_file"))
+
+    assert approval.asked == [("fs__write_file", {"server": "fs", "tool": "write_file"})]
+    assert gate.grants == ()

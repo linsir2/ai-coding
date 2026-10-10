@@ -82,6 +82,15 @@ class BaseTool(ABC):
         """
         return "local"
 
+    def permission_name(self, params: dict[str, Any] | None = None) -> str:
+        """The name the *gate* judges, which is not always the registry name.
+
+        One vessel can carry many calls: ``mcp_call`` is authorized as
+        ``fs__write_file``, because approving "mcp_call" tells the operator
+        nothing about what will run.  Every ordinary tool is its own name.
+        """
+        return self.name
+
     @property
     def max_duration_seconds(self) -> float | None:
         """Per-call ceiling for the dispatcher (R2a), in seconds.

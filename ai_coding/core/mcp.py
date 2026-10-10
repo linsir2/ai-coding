@@ -1,10 +1,17 @@
 """MCP integration over the ``mcp`` package directly (R1a-6).
 
 Replaces the M5 implementation, which produced ``agents.mcp.MCPServerStdio``
-objects for the OpenAI Agents SDK.  Now the manager connects stdio servers
-itself and exposes each remote tool as an ordinary ``BaseTool`` in the same
-registry the dispatcher uses — so MCP tools go through the same permission gate
-and the same approval path as local ones.
+objects for the OpenAI Agents SDK.  The manager connects the configured servers
+and exposes their tools through the same permission gate and approval path as
+local ones.
+
+M2 changed *how*: one ``mcp_call`` dispatcher (``tools/mcp_call.py``) carries
+every remote call instead of one registered ``BaseTool`` per remote tool,
+because a schema per tool is re-sent on every step — 13 tools measured 13,301
+characters per step (docs/features.md 538-541).  What the model reads is the
+bounded catalog (``build_mcp_catalog``), regenerated per step from live state by
+the caller, so it rides the loop's volatile tail rather than a frozen schema.
+``MCPToolAdapter`` stays as the per-tool execution kernel both paths share.
 
 Design notes (docs/r1a-6-analysis.md §3.2):
   - the transport is injectable, so tests need no subprocess and no live server;
@@ -36,6 +43,7 @@ import itertools
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass
 from typing import Any
 
 from ai_coding.config.models import MCPConfig, MCPServerConfig
@@ -53,6 +61,71 @@ _log = logging.getLogger(__name__)
 # A session that never connected is cancelled almost immediately instead.
 _CLOSE_TIMEOUT = 5.0
 _CLOSE_TIMEOUT_NEVER_CONNECTED = 0.2
+
+#: Description length per tool in the catalog, as OpenCode bounds it
+#: (packages/core/src/codemode/catalog.ts:48).
+_CATALOG_DESCRIPTION_LIMIT = 120
+
+#: ~4 characters per token, so this is OpenCode's INLINE_BUDGET of 2,000 tokens
+#: (catalog.ts:50).  Over it, configured servers are dropped, loudly.
+_CATALOG_BUDGET_CHARS = 8_000
+
+
+@dataclass(frozen=True)
+class MCPToolHandle:
+    """One callable remote tool: what to call, on which session, under what cap.
+
+    The single source both the catalog text and the dispatcher read, so what the
+    model is told and what it can actually invoke cannot drift apart.
+    """
+
+    server: str
+    name: str
+    #: The remote tool as the server described it (schema, description).
+    tool: Any
+    session: Any
+    execution_timeout: float | None
+    description: str = ""
+
+
+def build_mcp_catalog(
+    servers: list[tuple[str, list[MCPToolHandle]]],
+    budget_chars: int = _CATALOG_BUDGET_CHARS,
+) -> str:
+    """The catalog text: one entry per callable remote tool (M2).
+
+    Pure, and deliberately so — the budget discipline is the whole reason this
+    exists, and it is testable without a connection.  Config order is priority
+    (the first server is the one the operator listed first); over budget, whole
+    trailing servers are dropped and the drop is *said*, because silently
+    invisible tools read as bugs to whoever debugged the model's call.
+    """
+    if not servers:
+        return ""
+    lines: list[str] = []
+    used = 0
+    dropped = 0
+    for name, handles in servers:
+        block: list[str] = [name]
+        for handle in handles:
+            description = (handle.description or "").strip().replace("\n", " ")
+            if len(description) > _CATALOG_DESCRIPTION_LIMIT:
+                description = description[:_CATALOG_DESCRIPTION_LIMIT] + "…"
+            block.append(f"  {handle.name}: {description}" if description else f"  {handle.name}")
+        text = "\n".join(block)
+        if lines and used + len(text) + 1 > budget_chars:
+            dropped += 1
+            continue
+        lines.append(text)
+        used += len(text) + 1
+    if dropped:
+        lines.append(f"({dropped} more server(s) omitted: catalog budget)")
+    header = (
+        "<mcp-catalog>\n"
+        "Remote tools, called with mcp_call(server, tool, input).\n"
+        "server and tool must be spelled exactly as listed here.\n"
+    )
+    return header + "\n".join(lines) + "\n</mcp-catalog>"
 
 
 class _MCPSessionOwner:
@@ -179,8 +252,94 @@ def _join_text(content: Any) -> str:
     return "\n".join(parts)
 
 
+async def invoke_remote_tool(
+    *,
+    server: str,
+    tool_name: str,
+    session: Any,
+    arguments: dict[str, Any],
+    ctx: ToolContext | None,
+    execution_timeout: float | None,
+    progress_name: str,
+) -> ToolResult:
+    """Call one remote tool and normalize whatever comes back (M2 kernel).
+
+    The single execution path for MCP: the dispatcher calls it directly, and
+    :class:`MCPToolAdapter` is a thin adapter over it for the gated real-connection
+    tests.  Everything it can go wrong stays inside: a remote error, an is_error
+    result or an expired call becomes a ``ToolResult``, because an MCP exception
+    must never reach the turn (docs/data-contracts.md:126).
+    """
+    live = resolve_ctx(ctx)
+    steps = itertools.count()
+
+    def _progress(progress: float, total: float | None = None, message: str | None = None) -> None:
+        body = message or (f"{progress}/{total}" if total else str(progress))
+        live.emit(
+            ToolChunk(
+                call_id=live.call_id,
+                tool_name=progress_name,
+                stream="progress",
+                text=str(body),
+                seq=next(steps),
+            )
+        )
+
+    try:
+        if execution_timeout is not None:
+            result = await run_with_deadline(
+                session.call_tool(tool_name, arguments, progress_callback=_progress),
+                timeout=execution_timeout,
+                label=f"mcp_call:{tool_name}",
+            )
+        else:
+            result = await session.call_tool(
+                tool_name, arguments, progress_callback=_progress
+            )
+    except DeadlineExpired:
+        return ToolResult(
+            success=False,
+            output=f"error: MCP tool '{tool_name}' did not answer within "
+            f"{execution_timeout:g}s",
+            error="mcp_error",
+            data={"server": server, "tool": tool_name},
+        )
+    except Exception as exc:  # noqa: BLE001 — tool boundary
+        return ToolResult(
+            success=False,
+            output=f"error: MCP tool '{tool_name}' failed: {exc}",
+            error="mcp_error",
+            data={"server": server, "tool": tool_name},
+        )
+
+    is_error = bool(getattr(result, "is_error", False))
+    output = _join_text(getattr(result, "content", None))
+    if not output:
+        output = (
+            "error: MCP tool reported a failure"
+            if is_error
+            else "(empty MCP result)"
+        )
+    return ToolResult(
+        success=not is_error,
+        output=output,
+        data={
+            "server": server,
+            "tool": tool_name,
+            "is_error": is_error,
+            "structured": getattr(result, "structured_content", None),
+        },
+        error="mcp_error" if is_error else None,
+    )
+
+
 class MCPToolAdapter(BaseTool):
-    """Exposes one remote MCP tool as a local ``BaseTool``."""
+    """The per-tool shape of a remote call, kept for the real-connection tests.
+
+    M2 routes calls through ``mcp_call`` instead of registering one of these per
+    tool, so production no longer builds them; ``tests/test_mcp_stdio.py`` drives
+    this class against a real subprocess, which is why it stays.
+    """
 
     # Remote side effects are unknown, so never run these concurrently.
     parallel_safe = False
@@ -196,8 +355,6 @@ class MCPToolAdapter(BaseTool):
         self._server = server
         self._tool = tool
         self._session = session
-        # Seconds (None = only the turn deadline bounds this call).  Comes from
-        # ``timeout.execution`` (ms) converted at the manager.
         self._execution_timeout = execution_timeout
 
     @property
@@ -226,73 +383,14 @@ class MCPToolAdapter(BaseTool):
         params: dict[str, Any],
         ctx: ToolContext | None = None,
     ) -> ToolResult:
-        tool_name = str(getattr(self._tool, "name", ""))
-        # R8c-S3: a server that reports progress gets shown like a local tool's
-        # stdout.  Servers that never call report_progress simply emit nothing.
-        live = resolve_ctx(ctx)
-        steps = itertools.count()
-
-        def _progress(
-            progress: float, total: float | None = None, message: str | None = None
-        ) -> None:
-            body = message or (f"{progress}/{total}" if total else str(progress))
-            live.emit(
-                ToolChunk(
-                    call_id=live.call_id,
-                    tool_name=self.name,
-                    stream="progress",
-                    text=str(body),
-                    seq=next(steps),
-                )
-            )
-
-        try:
-            if self._execution_timeout is not None:
-                result = await run_with_deadline(
-                    self._session.call_tool(
-                        tool_name, params, progress_callback=_progress
-                    ),
-                    timeout=self._execution_timeout,
-                    label=f"mcp_call:{tool_name}",
-                )
-            else:
-                result = await self._session.call_tool(
-                    tool_name, params, progress_callback=_progress
-                )
-        except DeadlineExpired:
-            return ToolResult(
-                success=False,
-                output=f"error: MCP tool '{tool_name}' did not answer within "
-                f"{self._execution_timeout:g}s",
-                error="mcp_error",
-                data={"server": self._server, "tool": tool_name},
-            )
-        except Exception as exc:  # noqa: BLE001 — tool boundary
-            return ToolResult(
-                success=False,
-                output=f"error: MCP tool '{tool_name}' failed: {exc}",
-                error="mcp_error",
-                data={"server": self._server, "tool": tool_name},
-            )
-
-        is_error = bool(getattr(result, "is_error", False))
-        output = _join_text(getattr(result, "content", None))
-        if not output:
-            output = (
-                "error: MCP tool reported a failure"
-                if is_error
-                else "(empty MCP result)"
-            )
-        return ToolResult(
-            success=not is_error,
-            output=output,
-            data={
-                "server": self._server,
-                "tool": tool_name,
-                "is_error": is_error,
-                "structured": getattr(result, "structured_content", None),
-            },
-            error="mcp_error" if is_error else None,
+        return await invoke_remote_tool(
+            server=self._server,
+            tool_name=str(getattr(self._tool, "name", "")),
+            session=self._session,
+            arguments=dict(params),
+            ctx=ctx,
+            execution_timeout=self._execution_timeout,
+            progress_name=self.name,
         )
 
 
@@ -313,11 +411,15 @@ class MCPManager:
         # rather than only skipped (docs/r4-analysis.md 1.1, point 3).
         self._observer = observer
 
-    async def open_all(self) -> list[BaseTool]:
-        """Connect every enabled server; a failure skips just that server."""
+    async def open_all(self) -> None:
+        """Connect every enabled server; a failure skips just that server.
+
+        Returns nothing: M2 made :meth:`available` the single source for what
+        can be called (the dispatcher and the catalog both read it), so letting
+        this hand out a second list of tools would invite the two to drift.
+        """
         if not self._config.enabled:
-            return []
-        tools: list[BaseTool] = []
+            return
         seen_servers: set[str] = set()
         for server in self._config.servers:
             if server.disabled or not server.name or not server.command:
@@ -353,29 +455,6 @@ class MCPManager:
                     reason,
                     "its tools are not available this run",
                 )
-                continue
-            # R7d: register only what the user asked for.  Every tool schema is
-            # re-sent on every model step, so this is the one knob that lowers the
-            # per-step cost of a talkative server (docs/r7-analysis.md 1.2).
-            wanted = {str(name) for name in getattr(server, "tools", []) or []}
-            execution_s = (
-                server.timeout.execution / 1000
-                if server.timeout.execution is not None
-                else None
-            )
-            for tool in owner.tools:
-                remote = str(getattr(tool, "name", ""))
-                if wanted and remote not in wanted:
-                    continue
-                tools.append(
-                    MCPToolAdapter(
-                        server=server.name,
-                        tool=tool,
-                        session=owner.session,
-                        execution_timeout=execution_s,
-                    )
-                )
-        return tools
 
     def servers(self) -> list[dict[str, Any]]:
         """Every configured server and what became of it (MCP-MCP §2.1).
@@ -443,6 +522,89 @@ class MCPManager:
                     row["toolCount"] = len(listed)
             rows.append(row)
         return rows
+
+    def available(self) -> list[tuple[str, list[MCPToolHandle]]]:
+        """Connected servers and the handles the dispatcher may call (M2).
+
+        Whitelist applies (an ``R7d`` filter is a budget decision, not a
+        permission one), permissions deliberately do not: a tool the gate refuses
+        must still be *listed* in the catalog, or its refusal reads as a bug.
+        """
+        rows: list[tuple[str, list[MCPToolHandle]]] = []
+        # Owners, not the config list: a duplicate name is skipped before an
+        # owner exists (open_all), so iterating the config would list the same
+        # connected server once per config row.  The owner carries the config
+        # it was built from, which is the one that matters.
+        for owner in self._owners:
+            if owner.error is not None or not owner.ready.is_set():
+                continue
+            server = owner.server
+            wanted = {str(name) for name in server.tools or []}
+            handles: list[MCPToolHandle] = []
+            for tool in owner.tools:
+                remote = str(getattr(tool, "name", ""))
+                if wanted and remote not in wanted:
+                    continue
+                handles.append(
+                    MCPToolHandle(
+                        server=server.name,
+                        name=remote,
+                        tool=tool,
+                        session=owner.session,
+                        execution_timeout=(
+                            server.timeout.execution / 1000
+                            if server.timeout.execution is not None
+                            else None
+                        ),
+                        description=str(getattr(tool, "description", "") or ""),
+                    )
+                )
+            if handles:
+                rows.append((server.name, handles))
+        return rows
+
+    def lookup(self, server: str, tool: str) -> MCPToolHandle | None:
+        """One callable handle, or ``None`` when the pair is not callable."""
+        for name, handles in self.available():
+            if name == server:
+                for handle in handles:
+                    if handle.name == tool:
+                        return handle
+        return None
+
+    def unreachable_reason(self, server: str) -> str | None:
+        """Why a *configured* server cannot be called, for the model's benefit.
+
+        Deliberately says "reconnect from the panel": the one action that exists.
+        """
+        cfg = next((s for s in self._config.servers if s.name == server), None)
+        if cfg is None:
+            return None
+        owner = self._owner(server)
+        if owner is not None and owner.error is not None:
+            detail = str(owner.error) or type(owner.error).__name__
+            return (
+                f"MCP server '{server}' is not connected: {detail}. "
+                "Reconnect it from the MCP panel."
+            )
+        if owner is not None and owner.failed_phase is not None:
+            return (
+                f"MCP server '{server}' is not connected: it did not settle in "
+                f"time. Reconnect it from the MCP panel."
+            )
+        if owner is None:
+            if cfg.disabled:
+                return f"MCP server '{server}' is disabled."
+            if not cfg.command:
+                return f"MCP server '{server}' has no command configured."
+            return f"MCP server '{server}' is not connected. Reconnect it from the MCP panel."
+        return None
+
+    def _owner(self, name: str) -> _MCPSessionOwner | None:
+        for owner in self._owners:
+            if owner.server.name == name:
+                return owner
+        return None
 
     async def aclose(self) -> None:
         """Tear down every session opened by :meth:`open_all` (idempotent)."""

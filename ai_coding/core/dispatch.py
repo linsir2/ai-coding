@@ -113,6 +113,16 @@ def _call_budget(tool: BaseTool, deadline: Deadline | None) -> float | None:
     return min(float(own), remaining)
 
 
+def _authorized_name(tool: BaseTool | None, call: ToolCall) -> str:
+    """What the *gate* judges for this call.
+
+    One vessel can carry many calls: ``mcp_call`` delegates to ``fs__write_file``
+    (M2), and the name has to be re-derived from the *current* params because a
+    guard or hook rewrite may have changed which remote tool is about to run.
+    """
+    return call.name if tool is None else tool.permission_name(call.params)
+
+
 def _ask_budget(deadline: Deadline | None, approval_timeout: float | None) -> float | None:
     """How long a human gets to answer: the turn clock, or the configured ceiling.
 
@@ -218,7 +228,9 @@ class ToolDispatcher:
     def _prepare(self, call: ToolCall, *, iteration: int = 0) -> _Prepared:
         """Resolve the tool and its permission verdict exactly once per call."""
         tool = self.registry.get(call.name)
-        decision = None if tool is None else self.gate.check(call.name, call.params)
+        decision = (
+            None if tool is None else self.gate.check(_authorized_name(tool, call), call.params)
+        )
         return _Prepared(call=call, tool=tool, decision=decision, iteration=iteration)
 
     def _can_run_parallel(self, prepared: list[_Prepared]) -> bool:
@@ -297,7 +309,7 @@ class ToolDispatcher:
             rewritten_from = dict(call.params)
             call = replace(call, params=dict(guard_decision.params or {}))
             item = replace(item, call=call, tool=item.tool)
-            recheck = self.gate.check(call.name, call.params)
+            recheck = self.gate.check(_authorized_name(item.tool, call), call.params)
             if _verdict(recheck) is PermissionDecision.DENY:
                 # A rewrite must never be a way around the static gate.
                 return self._denied(call, _reason(recheck), rewritten=True), True, False
@@ -322,7 +334,7 @@ class ToolDispatcher:
                 rewritten_from = dict(call.params)
             call = replace(call, params=dict(hook_decision.params or {}))
             item = replace(item, call=call, tool=item.tool)
-            recheck = self.gate.check(call.name, call.params)
+            recheck = self.gate.check(_authorized_name(item.tool, call), call.params)
             if _verdict(recheck) is PermissionDecision.DENY:
                 return self._denied(call, _reason(recheck), rewritten=True), True, False
 
@@ -337,7 +349,9 @@ class ToolDispatcher:
         if verdict is PermissionDecision.WARN:
             if self.approval is None:
                 return self._not_approved(call, "no approval callback"), True, False
-            verdict_from_user = await self._ask(call, reason, deadline)
+            verdict_from_user = await self._ask(
+                call, reason, deadline, _authorized_name(tool, call)
+            )
             if verdict_from_user is ApprovalVerdict.STOPPED:
                 return self._stopped(call), True, True
             if verdict_from_user is ApprovalVerdict.TIMED_OUT:
@@ -396,7 +410,11 @@ class ToolDispatcher:
         return None
 
     async def _ask(
-        self, call: ToolCall, reason: str, deadline: Deadline | None = None
+        self,
+        call: ToolCall,
+        reason: str,
+        deadline: Deadline | None = None,
+        auth_name: str | None = None,
     ) -> ApprovalVerdict:
         """Prompt the user, inside the turn clock.  Never raises (R7c).
 
@@ -405,16 +423,19 @@ class ToolDispatcher:
         clock, and when the human finally answered, the call was refused because
         the clock had already passed (docs/r7-analysis.md 1.3).
         """
+        # The prompt, the event and the grant all name the authorized call: an
+        # operator asked to approve "mcp_call" cannot make an informed decision.
+        named = auth_name or call.name
         self.observer.on_event(
             ToolApprovalRequested(
-                tool_name=call.name, params=dict(call.params), reason=reason
+                tool_name=named, params=dict(call.params), reason=reason
             )
         )
         if self.approval is None:  # pragma: no cover - guarded by the caller
             return ApprovalVerdict.DECLINED
         try:
             answer = await run_with_deadline(
-                self.approval.approve(call.name, call.params, reason),
+                self.approval.approve(named, call.params, reason),
                 timeout=_ask_budget(deadline, self.approval_timeout),
                 label="approval",
             )
@@ -427,7 +448,7 @@ class ToolDispatcher:
             # and the TUI both arrive here, and a front end that forgot to
             # record would turn "always" into a silent "this once" -- exactly
             # how the REPL never had the feature at all (G4b).
-            self.gate.grant(call.name, call.params)
+            self.gate.grant(named, call.params)
             return ApprovalVerdict.APPROVED
         if answer is ApprovalResult.YES:
             return ApprovalVerdict.APPROVED

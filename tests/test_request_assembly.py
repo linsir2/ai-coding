@@ -80,6 +80,7 @@ def _assembler(
     memory_block: str = "",
     task_injection: str = "message",
     instructions: str | None = None,
+    catalog: str = "",
 ) -> tuple[RequestAssembler, dict[str, Any]]:
     reporter = _Reporter()
     parts: dict[str, Any] = {
@@ -91,6 +92,9 @@ def _assembler(
     async def _instructions(deadline: Any) -> str | None:
         return instructions
 
+    def _catalog() -> str:
+        return catalog
+
     assembler = RequestAssembler(
         compactor=parts["compactor"],
         policy=TurnPolicy(TurnPolicyConfig(task_injection=task_injection)),
@@ -99,6 +103,7 @@ def _assembler(
         build_instructions=_instructions,
         settings=_Settings(),
         emit=parts["events"].append,
+        catalog_builder=_catalog,
     )
     return assembler, parts
 
@@ -236,3 +241,18 @@ async def test_a_compacted_history_reports_itself_exactly_once():
     from ai_coding.core.events import ContextCompacted
 
     assert len([e for e in parts["events"] if isinstance(e, ContextCompacted)]) == 1
+
+
+async def test_the_mcp_catalog_rides_the_volatile_tail():
+    """M2: the catalog is per-step state, not a frozen schema — it must land in
+    the tail (the only region allowed to differ between iterations) so a server
+    that reconnects with new tools is visible on the very next step."""
+    assembler, parts = _assembler(catalog="fs\n  read_file: reads")
+    assembled = await _assemble(assembler)
+
+    texts = [m.content for m in assembled.request]
+    assert any("read_file" in (t or "") for t in texts)
+    # And its size is handed to the reporter with every other block's, which is
+    # what ends up in ContextAssembled — so the trace shows what the catalog cost.
+    block = ("mcp_catalog", len("fs\n  read_file: reads"))
+    assert block in parts["reporter"].calls[-1]["tail_blocks"]

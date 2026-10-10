@@ -90,6 +90,9 @@ def _build_loop(
     hooks: Any | None = None,
     steering: Any | None = None,
     cancel: Any | None = None,
+    # M2: per-step MCP catalog text; ``None`` in paths without an MCP manager
+    # (the bare CLI), where there is nothing to catalog.
+    catalog_builder: Any | None = None,
 ) -> Any:
     """Assemble the loop and its optional components (silent degradation)."""
     if approval is None:
@@ -147,6 +150,7 @@ def _build_loop(
         context=context,
         memory=memory,
         prompt=prompt,
+        catalog_builder=catalog_builder,
         skills=skills_reg,
         project=project,
         settings=app_cfg.ai,

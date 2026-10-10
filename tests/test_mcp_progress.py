@@ -18,7 +18,7 @@ import pytest
 
 from ai_coding.config.models import MCPConfig, MCPServerConfig
 from ai_coding.core.events import ToolChunk
-from ai_coding.core.mcp import MCPManager
+from ai_coding.core.mcp import MCPManager, MCPToolAdapter
 from ai_coding.tools.base import ToolContext
 
 GATE = "AI_CODING_MCP_STDIO"
@@ -43,8 +43,7 @@ def _config() -> MCPConfig:
         servers=[
             MCPServerConfig(
                 name="progress",
-                command=sys.executable,
-                args=[str(SERVER)],
+                command=[sys.executable, str(SERVER)],
                 enabled=True,
             )
         ],
@@ -53,9 +52,13 @@ def _config() -> MCPConfig:
 
 async def test_a_real_server_progress_reaches_us_as_chunks():
     manager = MCPManager(_config())
-    tools = await manager.open_all()
+    await manager.open_all()
     try:
-        adapter = next(tool for tool in tools if tool.name.endswith("__slow_task"))
+        handle = manager.lookup("progress", "slow_task")
+        assert handle is not None
+        adapter = MCPToolAdapter(
+            server=handle.server, tool=handle.tool, session=handle.session
+        )
         seen: list[object] = []
 
         result = await adapter.execute(

@@ -39,7 +39,7 @@ from ai_coding.core.context_compression import (  # noqa: E402
     placeholder_old_results,
 )
 from ai_coding.core.dispatch import ToolDispatcher  # noqa: E402
-from ai_coding.core.mcp import MCPManager  # noqa: E402
+from ai_coding.core.mcp import MCPManager, build_mcp_catalog  # noqa: E402
 from ai_coding.core.trace import short_json  # noqa: E402
 from ai_coding.core.turn_books import TurnBooks  # noqa: E402
 from ai_coding.core.turn_close import TurnCloser  # noqa: E402
@@ -60,6 +60,7 @@ from ai_coding.security.approval import (  # noqa: E402
 )
 from ai_coding.security.permission_gate import PermissionDecision, PermissionGate  # noqa: E402
 from ai_coding.tools.base import BaseTool, ToolContext  # noqa: E402
+from ai_coding.tools.mcp_call import MCPCallTool  # noqa: E402
 from ai_coding.tools.registry import ToolRegistry  # noqa: E402
 from ai_coding.tools.schema import tool_schemas  # noqa: E402
 
@@ -385,7 +386,8 @@ async def real_mcp_tool_surface(root: Path) -> tuple[bool, str]:
     base_registry = _build_tool_registry(app_cfg, str(ROOT), None)
     base = len(short_json(tool_schemas(base_registry)))
 
-    async def with_tools(allowlist: list[str]) -> int:
+    async def with_tools(allowlist: list[str]) -> tuple[int, int]:
+        """M2's cost model: one dispatcher schema + the per-step catalog text."""
         cfg = MCPConfig(
             enabled=True,
             servers=[
@@ -399,20 +401,21 @@ async def real_mcp_tool_surface(root: Path) -> tuple[bool, str]:
         )
         mcp = MCPManager(cfg)
         try:
-            tools = await mcp.open_all()
+            await mcp.open_all()
             registry = _build_tool_registry(app_cfg, str(ROOT), None)
-            for tool in tools:
-                registry.register(tool)
-            return len(short_json(tool_schemas(registry))), len(tools)
+            registry.register(MCPCallTool(mcp))
+            schemas = len(short_json(tool_schemas(registry)))
+            catalog = len(build_mcp_catalog(mcp.available()))
+            return schemas + catalog, len(mcp.available()[0][1]) if mcp.available() else 0
         finally:
             await mcp.aclose()
 
-    all_tools, count = await with_tools([])
-    few_tools, few_count = await with_tools(["tool_3", "tool_7"])
-    ok = few_tools < all_tools and count == 13 and few_count == 2
+    all_cost, count = await with_tools([])
+    few_cost, few_count = await with_tools(["tool_3", "tool_7"])
+    ok = few_cost < all_cost and count == 13 and few_count == 2
     return ok, (
-        f"no MCP {base} → {count} tools {all_tools} → {few_count} tools {few_tools} "
-        f"({few_tools / all_tools:.0%} of the full server)"
+        f"no MCP {base} → {count} tools {all_cost} → {few_count} tools {few_cost} "
+        f"({few_cost / all_cost:.0%} of the full server), catalog+schema chars per step"
     )
 
 

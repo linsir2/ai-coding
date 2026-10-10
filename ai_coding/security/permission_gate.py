@@ -116,6 +116,12 @@ def grant_key(tool_name: str, params: Mapping[str, Any]) -> str | None:
     name = tool_name.lower()
     if name in _NEVER_REMEMBERED:
         return None
+    # M2: ``server__tool`` — the remote tool's own name is what was approved.
+    # It used to return None here ("a remote tool's arguments are not
+    # summarisable"), which made "Always" silently "this once" for every MCP
+    # tool: the operator's answer had nothing to be remembered *as*.
+    if "__" in name:
+        return name
     path = str(params.get("path") or "").strip()
     if name in _PATH_TOOLS and path:
         return f"{name}:{os.path.normpath(path)}"
@@ -131,6 +137,8 @@ class PermissionGate:
         trusted_servers: Iterable[str] = (),
         grants: Iterable[str] = (),
         store: Any | None = None,
+        denied_tools: Iterable[str] = (),
+        allowed_tools: Iterable[str] = (),
     ) -> None:
         #: Calls the operator answered "Always" for, as ``grant_key`` strings.
         #: Seeded from the store at startup and extended by ``grant``.
@@ -143,6 +151,11 @@ class PermissionGate:
         # ``server__tool``, so the server is the only thing that can be declared
         # here — the tool names come from the server, not from our config.
         self._trusted_servers = {str(name) for name in trusted_servers if name}
+        # M2: per-tool rules, declared per server (``mcp.servers[].permissions``).
+        # Full ``server__tool`` names, so a rule reads the same way the catalog
+        # and the gate do.
+        self._denied_tools = {str(name) for name in denied_tools if name}
+        self._allowed_tools = {str(name) for name in allowed_tools if name}
         self._allow_tools = {
             "read",
             "glob",
@@ -183,6 +196,15 @@ class PermissionGate:
                 "bash command requires confirmation",
             )
 
+        # 1.5. M2: a tool the config denies outright.  Before the grants, for the
+        # same reason the bash list is first: a standing "always" may never
+        # reopen what the operator's own config refuses.
+        if tool_name in self._denied_tools:
+            return Decision(
+                PermissionDecision.DENY,
+                f"tool '{tool_name}' is denied by configuration",
+            )
+
         # 2. A resource the operator already approved.  After the deny rules, so
         # a standing grant can never reopen something that is refused outright:
         # doing this first would make every future path-based deny bypassable by
@@ -193,6 +215,11 @@ class PermissionGate:
 
         # 3. Known allow-list
         if name in self._allow_tools:
+            return Decision(PermissionDecision.ALLOW, "")
+
+        # 3.5. M2: a tool the config explicitly allows — no prompt, like the
+        # trusted-server rule but for one tool instead of the whole server.
+        if tool_name in self._allowed_tools:
             return Decision(PermissionDecision.ALLOW, "")
 
         # 4. Known warn-list
@@ -258,6 +285,15 @@ class PermissionGate:
         mcp = getattr(app_cfg, "mcp", None)
         servers = getattr(mcp, "servers", None) or []
         store = GrantStore(workspace) if workspace else None
+        denied: list[str] = []
+        allowed: list[str] = []
+        for server in servers:
+            name = str(getattr(server, "name", ""))
+            rules = getattr(server, "permissions", None)
+            for remote in getattr(rules, "deny", None) or []:
+                denied.append(f"{name}__{remote}")
+            for remote in getattr(rules, "allow", None) or []:
+                allowed.append(f"{name}__{remote}")
         return cls(
             trusted_servers=[
                 str(getattr(server, "name", ""))
@@ -266,6 +302,8 @@ class PermissionGate:
             ],
             grants=store.load() if store is not None else (),
             store=store,
+            denied_tools=denied,
+            allowed_tools=allowed,
         )
 
 

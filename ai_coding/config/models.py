@@ -290,6 +290,19 @@ class MCPTimeout(BaseModel):
     execution: int | None = None
 
 
+class MCPToolRules(BaseModel):
+    """Per-tool authorization for one server, by *remote* tool name (M2).
+
+    Deny wins, and a standing "always" the operator gave can never reopen a
+    denied tool — the same ordering the bash hard-deny list uses.  Visibility is
+    a separate question: a denied tool still appears in the catalog, so the
+    refusal is legible instead of an unexplained absence.
+    """
+
+    allow: list[str] = Field(default_factory=list)
+    deny: list[str] = Field(default_factory=list)
+
+
 class MCPServerConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -311,6 +324,8 @@ class MCPServerConfig(BaseModel):
     # R7d: this server's tools skip the approval prompt.  Declared by the user in
     # their own config, and off by default, so an unconfigured run is unchanged.
     auto_approve: bool = False
+    # M2: per-tool rules, beside the whitelist they resemble.
+    permissions: MCPToolRules = Field(default_factory=MCPToolRules)
 
 
 class MCPConfig(BaseModel):

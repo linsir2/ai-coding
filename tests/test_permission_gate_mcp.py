@@ -17,6 +17,7 @@ from ai_coding.config.models import (
     AppConfig,
     MCPConfig,
     MCPServerConfig,
+    MCPToolRules,
     ToolsConfig,
 )
 from ai_coding.security.permission_gate import PermissionDecision, PermissionGate
@@ -83,3 +84,48 @@ def test_the_local_allow_list_is_unchanged():
     gate = PermissionGate.from_config(_app(_server("everything", auto_approve=True)))
     for name in ("read", "glob", "todo_write", "skill", "subagent", "memory_search", "ask_user"):
         assert gate.check(name, {}) == PermissionDecision.ALLOW
+
+
+# ------------------------------------------------------ per-tool rules (M2)
+
+# One dispatcher means one schema, but the gate still has to judge the real
+# call: catalog visibility and execution authorization stay separate
+# (OpenCode, packages/core/src/tool/AGENTS.md:54).  These rules are declared
+# per server, beside the tools whitelist they resemble.
+
+
+def _rules(**kwargs) -> MCPServerConfig:
+    return MCPServerConfig(name="fs", command=["mcp-fs"], permissions=MCPToolRules(**kwargs))
+
+
+def test_a_server_can_deny_one_of_its_tools_by_name():
+    gate = PermissionGate.from_config(_app(_rules(deny=["write_file"])))
+
+    assert gate.check("fs__write_file", {}) == PermissionDecision.DENY
+    assert gate.check("fs__read_file", {}) == PermissionDecision.WARN
+
+
+def test_a_config_deny_beats_an_always_the_operator_gave_earlier():
+    """A standing grant may never reopen what the config refuses outright —
+    the same ordering reason the bash deny list is checked first."""
+    gate = PermissionGate.from_config(_app(_rules(deny=["write_file"])))
+    gate.grant("fs__write_file", {})
+
+    assert gate.check("fs__write_file", {}) == PermissionDecision.DENY
+
+
+def test_an_allow_rule_skips_the_prompt():
+    gate = PermissionGate.from_config(_app(_rules(allow=["read_file"])))
+
+    assert gate.check("fs__read_file", {}) == PermissionDecision.ALLOW
+
+
+def test_an_always_on_a_remote_tool_is_remembered_by_name():
+    """grant_key used to return None for every remote tool, so "Always" could
+    never persist one (docs/r7-analysis.md).  The tool name *is* the resource."""
+    gate = PermissionGate.from_config(_app(_server("fs")))
+
+    assert gate.grant("fs__read_file", {}) == "fs__read_file"
+    assert gate.grants == ("fs__read_file",)
+    assert gate.check("fs__read_file", {}) == PermissionDecision.ALLOW
+    assert gate.check("fs__write_file", {}) == PermissionDecision.WARN

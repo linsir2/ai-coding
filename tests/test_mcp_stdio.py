@@ -52,10 +52,14 @@ def _config() -> MCPConfig:
 
 async def test_real_stdio_server_lists_and_answers():
     manager = MCPManager(_config())
-    tools = await manager.open_all()
+    await manager.open_all()
     try:
-        assert [tool.name for tool in tools] == ["echo__echo"]
-        adapter = tools[0]
+        handle = manager.lookup("echo", "echo")
+        assert handle is not None
+        adapter = MCPToolAdapter(
+            server=handle.server, tool=handle.tool, session=handle.session
+        )
+        assert adapter.name == "echo__echo"
         assert isinstance(adapter, MCPToolAdapter)
         assert adapter.params_json_schema.get("type") == "object"
 

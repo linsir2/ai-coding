@@ -505,9 +505,12 @@ TencentDB Agent Memory 同值）同样只为重测而存在，故 `config.exampl
 
 ## MCP 集成
 
-`MCPManager` 用官方 `mcp` 包**直接连 stdio 服务器**：`open_all()` 逐个连接启用的 server、
-`list_tools()` 发现远端工具，并把每个工具包装成 `MCPToolAdapter`（`BaseTool` 子类）
-注册进**同一个工具注册表**——因此 MCP 工具与内置工具走**同一套权限门、审批与结构化结果**通道。
+`MCPManager` 用官方 `mcp` 包**直接连 stdio 服务器**：`open_all()` 连接启用的 server、
+`list_tools()` 发现远端工具。**M2 起每个远端工具不再是注册表里的一条 function
+schema**：LLM 只见一个 `mcp_call(server, tool, input)`，可调用的工具由
+`MCPManager.available()` 单一来源（`tools` whitelist 在此生效）渲染成有预算的 catalog
+文本（每条描述 ≤120 字符、总量 ≤8000 字符），**每步**挂进 loop 的 volatile tail——
+所以重连后新工具下一步就可见，且目录可见性与执行授权分离（被 deny 的工具仍在目录里）。
 
 - 工具名带 `{server}__{tool}` 前缀，避免两个 server 同名工具互相覆盖；
 - `MCPToolAdapter.parallel_safe = False`（远端副作用未知，保守串行）；
