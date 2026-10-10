@@ -114,3 +114,81 @@ export function formatDuration(ms: number): string {
 export function truncationNote(dropped: boolean): string {
   return dropped ? "…（前面的输出已截断）" : ""
 }
+
+/** Which pipe a streamed line came off (the wire's ``stream`` field). */
+export type ToolStream = "stdout" | "stderr" | "progress"
+
+/** One line of a running tool's output, tagged with the pipe it came from. */
+export interface TailLine {
+  text: string
+  stream: ToolStream
+}
+
+/**: Same budget the old flat ``tail`` string had (session.ts TOOL_TAIL_CHARS). */
+export const TAIL_CHAR_LIMIT = 4000
+
+export interface FoldedChunk {
+  lines: TailLine[]
+  /** Text that has not been terminated by a newline yet. */
+  pending: string
+  /** True once the budget forced the oldest lines out. */
+  dropped: boolean
+}
+
+/**
+ * Fold one streamed chunk into the tail (A7 §2).
+ *
+ * Chunks arrive wherever the reader thread got to, so a line can arrive in
+ * pieces.  Splitting on every chunk would cut a line apart and tag the second
+ * half with whichever pipe delivered it, so an unterminated tail is held in
+ * ``pending`` and joined with what follows.
+ *
+ * The budget is on characters, and it drops from the head — the newest output
+ * is the part worth reading — reporting that it did, because a tail that
+ * silently lost its top reads as the whole story.
+ */
+export function foldToolChunk(
+  lines: TailLine[],
+  pending: string,
+  text: string,
+  stream: ToolStream,
+): FoldedChunk {
+  if (!text) return { lines, pending, dropped: false }
+  const joined = pending + text
+  const parts = joined.split("\n")
+  // A chunk that ends a line leaves an empty last part: nothing is pending.
+  const rest = parts.pop() ?? ""
+  const added: TailLine[] = parts.map((line) => ({ text: line, stream }))
+  const next = [...lines, ...added]
+  let dropped = false
+  let chars = next.reduce((sum, line) => sum + line.text.length + 1, 0)
+  while (chars > TAIL_CHAR_LIMIT && next.length > 0) {
+    const gone = next.shift()!
+    chars -= gone.text.length + 1
+    dropped = true
+  }
+  // A command that prints one long line with no newline would otherwise park it
+  // all in `pending`, where the card can never show it — and what it holds
+  // counts toward the same budget, so a 10k single line has to be cut or the
+  // tail stops being a tail.  Promote the open line to a settled one once the
+  // total passes the limit, keeping as much of its end as fits, which is what
+  // the flat tail used to show.
+  if (chars + rest.length > TAIL_CHAR_LIMIT) {
+    let room = TAIL_CHAR_LIMIT - chars
+    while (room < 0 && next.length > 1) {
+      room += next.shift()!.text.length + 1
+      dropped = true
+    }
+    const tail = room > 0 ? rest.slice(-room) : ""
+    if (tail.length < rest.length) {
+      // The middle of this line is gone.  Same honesty as a dropped line: the
+      // card says the output was cut, so a 4000-char line cannot pass itself
+      // off as the whole story.
+      dropped = true
+    }
+    chars += tail.length
+    next.push({ text: tail, stream })
+    return { lines: next, pending: "", dropped }
+  }
+  return { lines: next, pending: rest, dropped }
+}

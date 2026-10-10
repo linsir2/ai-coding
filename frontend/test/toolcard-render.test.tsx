@@ -18,8 +18,9 @@ const part = (over: Partial<ToolPart> = {}): ToolPart => ({
   verb: "运行命令",
   target: "git branch",
   status: "failed",
-  tail: "",
-  tailDropped: false,
+  lines: [],
+  pending: "",
+  linesDropped: false,
   preview: "",
   error: "",
   durationMs: 0,
@@ -63,9 +64,39 @@ describe("ToolCard", () => {
     setup.renderer.destroy()
   })
 
+
+  test("stderr lines read as errors and stdout lines do not", async () => {
+    const setup = await render(
+      part({
+        status: "ok",
+        lines: [
+          { text: "all good", stream: "stdout" },
+          { text: "it broke", stream: "stderr" },
+        ],
+      }),
+    )
+    await setup.mockMouse.click(8, 1)
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    const spans = setup.captureSpans().lines.flatMap((line) => line.spans)
+    const pick = (text: string) => spans.find((span) => span.text.includes(text))
+    expect(pick("all good")).toBeDefined()
+    expect(pick("it broke")).toBeDefined()
+    expect(pick("it broke")!.fg).not.toEqual(pick("all good")!.fg)
+    setup.renderer.destroy()
+  })
+
   test("a click opens the tail and a second click closes it", async () => {
     const setup = await render(
-      part({ status: "ok", tail: "first line\nsecond line\nthird line", preview: "third line" }),
+      part({
+        status: "ok",
+        lines: [
+          { text: "first line", stream: "stdout" },
+          { text: "second line", stream: "stdout" },
+          { text: "third line", stream: "stdout" },
+        ],
+        preview: "third line",
+      }),
     )
     const collapsed = setup.captureCharFrame()
     expect(collapsed).not.toContain("first line")
@@ -83,7 +114,9 @@ describe("ToolCard", () => {
   })
 
   test("a dropped head is announced when the tail is opened", async () => {
-    const setup = await render(part({ status: "ok", tail: "kept tail", tailDropped: true }))
+    const setup = await render(
+      part({ status: "ok", lines: [{ text: "kept tail", stream: "stdout" }], linesDropped: true }),
+    )
     await setup.mockMouse.click(8, 1)
     await setup.flush()
     await setup.waitForVisualIdle()

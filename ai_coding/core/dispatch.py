@@ -492,7 +492,7 @@ class ToolDispatcher:
         prefix = "the rewritten call " if rewritten else ""
         return ToolResult(
             success=False,
-            output=f"error: {prefix}denied by permission gate{detail}",
+            output=f"error: {prefix}被权限门拒绝{detail}",
             error="denied",
             data={
                 "decision": "deny",
@@ -555,7 +555,7 @@ class ToolDispatcher:
     def _not_approved(call: ToolCall, reason: str) -> ToolResult:
         return ToolResult(
             success=False,
-            output="error: not approved by user",
+            output="error: 用户未批准这次调用",
             error="not_approved",
             data={"decision": "warn", "approved": False, "reason": reason, "tool": call.name},
         )
@@ -589,7 +589,7 @@ class ToolDispatcher:
     def _stopped(call: ToolCall) -> ToolResult:
         return ToolResult(
             success=False,
-            output="error: stopped by user",
+            output="error: 用户已停止",
             error="stopped",
             data={"decision": "warn", "stopped": True, "tool": call.name},
         )
@@ -598,7 +598,7 @@ class ToolDispatcher:
     def _skipped(call: ToolCall) -> ToolResult:
         return ToolResult(
             success=False,
-            output="error: skipped (turn stopped by user)",
+            output="error: 已跳过（本回合被用户停止）",
             error="skipped",
             data={"skipped": True, "tool": call.name},
         )

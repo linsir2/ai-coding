@@ -12,7 +12,8 @@
  */
 
 import type { EventMessage } from "../ipc"
-import { shorten, toolTarget, toolVerb } from "../util/toolmeta"
+import { foldToolChunk, shorten, toolTarget, toolVerb } from "../util/toolmeta"
+import type { TailLine, ToolStream } from "../util/toolmeta"
 
 export type Tone = "muted" | "error"
 
@@ -26,9 +27,12 @@ export type Part =
       verb: string
       target: string
       status: "running" | "ok" | "failed"
-      tail: string
-      /** True once `tail` dropped its head; the card says so instead of lying. */
-      tailDropped: boolean
+      /** The live output, line by line, each tagged with the pipe it came off. */
+      lines: TailLine[]
+      /** Text not yet terminated by a newline; joined with the next chunk. */
+      pending: string
+      /** True once the budget forced the oldest lines out. */
+      linesDropped: boolean
       preview: string
       error: string
       /** What the wire measured; 0 when the event carried none. */
@@ -73,7 +77,6 @@ const obj = (value: unknown): Record<string, unknown> =>
 const PREVIEW_CHARS = 120
 const REASON_CHARS = 60
 const NESTED_CHARS = 120
-const TOOL_TAIL_CHARS = 4000
 
 // ---- immutable helpers ------------------------------------------------------
 
@@ -142,6 +145,13 @@ const notices: Record<string, (data: Record<string, unknown>) => string> = {
     if (summary) line += `：${shorten(summary, NESTED_CHARS)}`
     const ledger = str(data["ledgerPath"])
     if (ledger) line += ` · 完整回包: ${ledger}`
+    // The run id is how this notice ties back to `/tasks stop <id>`, which
+    // prints the same 12 chars (commands.py).  A truncated summary says so:
+    // not toolmeta.truncationNote — that one marks a tail's dropped head, this
+    // is a summary cut at its end (A7).
+    const runId = str(data["runId"])
+    if (runId) line += ` · 任务 ${runId.slice(0, 12)}`
+    if (data["truncated"] === true) line += "…（摘要已截断）"
     return line
   },
 }
@@ -230,8 +240,9 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
           verb: toolVerb(toolName),
           target: toolTarget(toolName, obj(data["params"])),
           status: "running",
-          tail: "",
-          tailDropped: false,
+          lines: [],
+          pending: "",
+          linesDropped: false,
           preview: "",
           error: "",
           durationMs: 0,
@@ -241,19 +252,27 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
     case "tool.chunk": {
       const callId = str(data["callId"])
       const text = str(data["text"])
+      const stream = str(data["stream"]) as ToolStream
       if (!text) return state
       return updateAssistant(state, (parts) =>
-        mapParts(parts, (part) =>
-          part.kind === "tool" && part.callId === callId
-            ? {
-                ...part,
-                tail: (part.tail + text).slice(-TOOL_TAIL_CHARS),
-                // The head went away; remember that it did, so the card can
-                // mark the cut instead of passing it off as the whole output.
-                tailDropped: part.tailDropped || part.tail.length + text.length > TOOL_TAIL_CHARS,
-              }
-            : part,
-        ),
+        mapParts(parts, (part) => {
+          if (part.kind !== "tool" || part.callId !== callId) return part
+          // The pipe tag comes with the chunk: a line terminated by a stderr
+          // chunk is red, and the fold in util/toolmeta keeps a line that
+          // arrived in pieces from being split (and re-tagged) in half.
+          const folded = foldToolChunk(
+            part.lines,
+            part.pending,
+            text,
+            stream === "stdout" || stream === "stderr" || stream === "progress" ? stream : "stdout",
+          )
+          return {
+            ...part,
+            lines: folded.lines,
+            pending: folded.pending,
+            linesDropped: part.linesDropped || folded.dropped,
+          }
+        }),
       )
     }
     case "tool.finished": {
@@ -282,8 +301,9 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
           verb: toolVerb(toolName),
           target: toolTarget(toolName, {}),
           status: success ? "ok" : "failed",
-          tail: "",
-          tailDropped: false,
+          lines: [],
+          pending: "",
+          linesDropped: false,
           preview,
           error,
           durationMs,

@@ -14,6 +14,7 @@
 import { TextAttributes } from "@opentui/core"
 import { For, Show, createSignal } from "solid-js"
 import type { Part } from "../state/session"
+import type { TailLine } from "../util/toolmeta"
 import { theme } from "../theme/tokens"
 import {
   formatDuration,
@@ -40,14 +41,10 @@ export function ToolCard(props: { part: ToolPart }) {
   }
 
   const icon = () => (running() ? null : denied() ? "⊘" : props.part.status === "ok" ? "✓" : "✗")
-  /** Only a settled call with a tail has something to open; no marker, no lie. */
-  const canExpand = () => !running() && props.part.tail.length > 0
+  /** Only a settled call with output has something to open; no target, no lie. */
+  const canExpand = () => !running() && props.part.lines.length > 0
   const strike = () => (denied() ? TextAttributes.STRIKETHROUGH : undefined)
-  const tailLines = () =>
-    props.part.tail
-      .split("\n")
-      .filter((line) => line.length > 0)
-      .slice(-3)
+  const tailLines = () => props.part.lines.slice(-3)
 
   return (
     <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
@@ -68,7 +65,13 @@ export function ToolCard(props: { part: ToolPart }) {
         </Show>
       </box>
       <Show when={!running() && failure().label} fallback={<Show when={running()}>
-        <For each={tailLines()}>{(line) => <text fg={theme.textMuted}>{`│ ${line}`}</text>}</For>
+        <For each={tailLines()}>
+          {(line) => (
+            <text fg={line.stream === "stderr" ? theme.feedbackError : theme.textMuted}>
+              {`│ ${line.text}`}
+            </text>
+          )}
+        </For>
       </Show>}>
         <text fg={denied() ? theme.feedbackWarning : theme.feedbackError}>{failure().label}</text>
       </Show>
@@ -78,11 +81,15 @@ export function ToolCard(props: { part: ToolPart }) {
       <Show when={expanded() && canExpand()}>
         <box border={["left"]} borderColor={theme.backgroundRaisedMax} paddingLeft={1} flexShrink={0}>
           <box flexDirection="column">
-            <Show when={props.part.tailDropped}>
+            <Show when={props.part.linesDropped}>
               <text fg={theme.textMuted}>{truncationNote(true)}</text>
             </Show>
-            <For each={props.part.tail.split("\n").filter((line) => line.length > 0)}>
-              {(line) => <text fg={theme.textMuted}>{line}</text>}
+            <For each={props.part.lines}>
+              {(line) => (
+                <text fg={line.stream === "stderr" ? theme.feedbackError : theme.textMuted}>
+                  {line.text}
+                </text>
+              )}
             </For>
           </box>
         </box>

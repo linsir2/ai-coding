@@ -710,3 +710,24 @@ async def test_precheck_refusal_skips_approval_and_execution():
     assert outcomes[0].result.error == "sandbox_violation"
     assert outcomes[0].denied is True
     assert tool.executed is False
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_speaks_chinese_but_keeps_its_code():
+    """A7 T5: two halves of the same result, asserted together — changing one
+    without the other is a half-done fix.  `error` is the machine code the TUI
+    maps through toolFailure(); `output` is what the model reads and what the
+    ledger's evidence line shows the human."""
+    for approval, expected_code, expected_text in (
+        (ApprovalResult.NO, "not_approved", "未批准"),
+        (ApprovalResult.STOP, "stopped", "停止"),
+    ):
+        tool = _FakeTool("write")
+        outcomes = await _dispatcher([tool], approval=_Approval(approval)).dispatch_batch(
+            [_ref("c1", "write")], _ctx()
+        )
+        result = outcomes[0].result
+        assert result.success is False
+        assert result.error == expected_code
+        assert expected_text in result.output
+        assert result.output.isascii() is False  # no English boilerplate left

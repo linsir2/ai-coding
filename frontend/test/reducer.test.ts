@@ -147,8 +147,9 @@ describe("tools", () => {
       verb: "运行命令",
       target: "ls -la",
       status: "running",
-      tail: "",
-      tailDropped: false,
+      lines: [],
+      pending: "",
+      linesDropped: false,
       preview: "",
       error: "",
       durationMs: 0,
@@ -201,8 +202,13 @@ describe("tools", () => {
     )
     const part = lastAssistant(state).parts[0]
     if (part.kind !== "tool") throw new Error("expected tool part")
-    expect(part.tail.length).toBe(4000)
-    expect(part.tail.endsWith("y".repeat(100))).toBe(true)
+    // Same budget as before, counted across the lines it is kept in: an open
+    // line has no newline after it, so it costs its length and nothing more.
+    const kept = part.lines.reduce((sum, line) => sum + line.text.length + 1, -1)
+    expect(kept).toBeLessThanOrEqual(4000)
+    expect(kept).toBeGreaterThan(3900) // the cap was actually reached
+    expect(part.lines.at(-1)!.text.endsWith("y".repeat(100))).toBe(true)
+    expect(part.linesDropped).toBe(true)
   })
 
 
@@ -224,7 +230,24 @@ describe("tools", () => {
     const part = lastAssistant(state).parts[0]
     if (part.kind !== "tool") throw new Error("expected tool part")
     expect(part.durationMs).toBe(820)
-    expect(part.tailDropped).toBe(false)
+    expect(part.linesDropped).toBe(false)
+  })
+
+  test("tool.chunk carries each line's stream and joins a line split across chunks", () => {
+    const state = feed(
+      initialState(),
+      wire("tool.started", { callId: "c1", toolName: "bash", params: { command: "cc" } }),
+      wire("tool.chunk", { callId: "c1", text: "warn: ", stream: "stderr" }),
+      wire("tool.chunk", { callId: "c1", text: "unused\n", stream: "stderr" }),
+      wire("tool.chunk", { callId: "c1", text: "ok\n", stream: "stdout" }),
+    )
+    const part = lastAssistant(state).parts[0]
+    if (part.kind !== "tool") throw new Error("expected tool part")
+    expect(part.lines).toEqual([
+      { text: "warn: unused", stream: "stderr" },
+      { text: "ok", stream: "stdout" },
+    ])
+    expect(part.pending).toBe("")
   })
 
   test("a tool call the card cannot expand past records that the head was dropped", () => {
@@ -232,12 +255,13 @@ describe("tools", () => {
       initialState(),
       wire("tool.started", { callId: "c1", toolName: "bash", params: { command: "yes" } }),
       wire("tool.chunk", { callId: "c1", text: "x".repeat(4000) }),
-      wire("tool.chunk", { callId: "c1", text: "y" }),
+      wire("tool.chunk", { callId: "c1", text: "y\n" }),
     )
     const part = lastAssistant(state).parts[0]
     if (part.kind !== "tool") throw new Error("expected tool part")
-    expect(part.tail.length).toBe(4000)
-    expect(part.tailDropped).toBe(true)
+    const kept = part.lines.reduce((sum, line) => sum + line.text.length + 1, 0)
+    expect(kept).toBeLessThanOrEqual(4000)
+    expect(part.linesDropped).toBe(true)
   })
 
   test("a short tool call records no truncation", () => {
@@ -248,7 +272,7 @@ describe("tools", () => {
     )
     const part = lastAssistant(state).parts[0]
     if (part.kind !== "tool") throw new Error("expected tool part")
-    expect(part.tailDropped).toBe(false)
+    expect(part.linesDropped).toBe(false)
   })
 
   test("output preview is shortened to 120 chars like the old fold body", () => {
@@ -346,7 +370,7 @@ describe("notices", () => {
     expect(messages[0]!.parts.at(-1)).toEqual({
       kind: "notice",
       tone: "muted",
-      text: "✓ 子任务完成 [scout]（completed） · 会话 abcdef123456：found it · 完整回包: /tmp/x.json",
+      text: "✓ 子任务完成 [scout]（completed） · 会话 abcdef123456：found it · 完整回包: /tmp/x.json · 任务 r1",
     })
   })
 
@@ -370,6 +394,28 @@ describe("notices", () => {
     ])
   })
 })
+
+  test("background.done says when the summary was cut", () => {
+    const state = feed(
+      initialState(),
+      { kind: "submitted", text: "hi" },
+      delta("done"),
+      wire("background.done", {
+        runId: "abcdef0123456789",
+        name: "scout",
+        status: "completed",
+        summary: "and then it kept going",
+        truncated: true,
+        originSession: "",
+        ledgerPath: "",
+      }),
+    )
+    const notice = lastAssistant(state).parts.at(-1)
+    expect(notice).toMatchObject({ kind: "notice" })
+    expect((notice as { text: string }).text).toContain("截断")
+    // 12 chars is what /tasks prints, so the id on screen can be pasted there.
+    expect((notice as { text: string }).text).toContain("任务 abcdef012345")
+  })
 
 describe("turn lifecycle", () => {
   test("completed turns are silent and free the prompt", () => {

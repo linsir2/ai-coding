@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 _log = logging.getLogger(__name__)
@@ -81,7 +82,14 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     )
 
     steering = SteeringQueue()
-    sessions = SessionService()
+    # Per-workspace state lives under the workspace, beside the traces
+    # (cli.py::_make_recorder resolves the same ``.ai-coding/<kind>`` shape).
+    # The service's default is relative, which resolved against whatever
+    # directory the process started in — so a user's conversations landed in
+    # the source tree they happened to launch from (A7).
+    sessions = SessionService(
+        Path(workspace).expanduser().resolve() / ".ai-coding" / "sessions"
+    )
     recorder = _make_recorder(app_cfg, workspace, None)
     mcp_manager = MCPManager(app_cfg.mcp, observer=recorder)
     for tool in await mcp_manager.open_all():
