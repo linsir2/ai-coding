@@ -439,7 +439,17 @@ describe("turn lifecycle", () => {
       ],
       [
         { status: "timeout", reason: "deadline", iterations: 2, truncatedByLength: false, handoff: "" },
-        "[turn] timed out: deadline",
+        "[turn] 超时：deadline",
+      ],
+      // The two statuses the loop can end on that had no words at all: the
+      // turn stopped and the transcript said nothing, so it read as silence.
+      [
+        { status: "budget", reason: "token ceiling", iterations: 3, truncatedByLength: false, handoff: "" },
+        "[turn] 预算用完（token ceiling），输入「继续」可接上",
+      ],
+      [
+        { status: "stopped", reason: "", iterations: 3, truncatedByLength: false, handoff: "" },
+        "[turn] 已停止（operator asked to stop）",
       ],
       [
         { status: "completed", reason: "", iterations: 2, truncatedByLength: true, handoff: "" },

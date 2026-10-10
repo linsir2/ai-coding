@@ -175,15 +175,21 @@ function subagentLine(data: Record<string, unknown>): string {
 
 function turnEndMarker(data: Record<string, unknown>): string {
   const status = str(data["status"])
-  if (status === "timeout") return `[turn] timed out: ${str(data["reason"])}`
+  const reason = str(data["reason"])
+  if (status === "timeout") return `[turn] 超时：${reason || "turn deadline exceeded"}`
   if (status === "aborted") return "[turn] 已中断（Esc），任务未收尾"
+  // The loop can also stop on its token ceiling or on the operator's word; both
+  // used to fall through to the empty string, so the turn ended and the
+  // transcript said nothing (A8).
+  if (status === "budget") return `[turn] 预算用完（${reason || "turn's token ceiling"}），输入「继续」可接上`
+  if (status === "stopped") return "[turn] 已停止（operator asked to stop）"
   if (data["truncatedByLength"] === true) {
     return "[turn] 回答因长度上限被截断：输入「继续」可接上"
   }
   if (status === "max_iterations") {
     return `[turn] 步数用完（${num(data["iterations"])} 步），任务未收尾：输入「继续」可接上`
   }
-  if (status === "error") return `[turn] 错误：${str(data["reason"])}`
+  if (status === "error") return `[turn] 错误：${reason}`
   return ""
 }
 
