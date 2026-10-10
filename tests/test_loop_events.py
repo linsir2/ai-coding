@@ -5,6 +5,7 @@ things that already happened) and they are the reason a 10MB tool output can
 never leak into the UI or a log line.
 """
 
+import asyncio
 import dataclasses
 
 import pytest
@@ -362,3 +363,138 @@ def test_model_step_finished_defaults_to_no_model():
     from ai_coding.core.events import ModelStepFinished
 
     assert ModelStepFinished(index=1).model == ""
+
+
+# ---- A6: a step that thought and said nothing -------------------------------
+#
+# The provider can end a step with no text and no tool call.  ChatMessage
+# refuses such a step on purpose, so the loop has to decide the turn's fate
+# instead of letting the domain error escape to the IPC catch-all.
+
+def _step_engine(step):
+    """A one-model engine that always answers `step`; the same shape as the fake
+    in test_the_loop_turns_a_switch_into_an_event, without the chain."""
+    from ai_coding.ai.engine import ChatEngine
+    from ai_coding.domain.model_config import ModelConfig
+
+    class _One(ChatEngine):
+        def __init__(self):
+            self.model_config = ModelConfig(name="m", base_url="https://x/v1", api_key="k")
+            self.on_retry = None
+            self.on_fallback = None
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None):
+            return step
+
+        async def aclose(self):
+            return None
+
+    return _One()
+
+
+def _turn_with(tmp_path, step):
+    """Run one real turn whose only model answer is `step`.
+
+    Returns ``(session, observer)``: the session proves what was persisted, the
+    observer proves what the UI was told — and TurnFinished is the contract the
+    frontend actually renders.
+    """
+    from ai_coding.core.agent_loop import AgentLoop
+    from ai_coding.service.session_service import SessionService
+    from ai_coding.tools.registry import ToolRegistry
+
+    async def run():
+        sessions = SessionService(tmp_path / "sessions")
+        observer = RecordingObserver()
+        loop = AgentLoop(_step_engine(step), sessions, ToolRegistry(), observer=observer)
+        session = sessions.create()
+        await loop.process_input(session, "hi")
+        return session, observer
+
+    return asyncio.run(run())
+
+
+def _finished(observer):
+    turns = [e for e in observer.events if isinstance(e, TurnFinished)]
+    assert len(turns) == 1, f"expected exactly one TurnFinished, got {turns}"
+    return turns[0]
+
+
+def test_an_empty_step_ends_the_turn_in_words_not_in_a_python_message(tmp_path):
+    """A6 T1: the screen shows the reason, so the reason must be readable."""
+    from ai_coding.domain.loop import StepResult, TurnStatus
+
+    _session, observer = _turn_with(
+        tmp_path,
+        StepResult(
+            text=None, tool_calls=(), finish_reason="stop", usage=None, reasoning="想了一下"
+        ),
+    )
+    outcome = _finished(observer).outcome
+    assert outcome.status is TurnStatus.ERROR
+    assert "没有回答" in outcome.reason
+    assert "stop" in outcome.reason
+    assert "ValueError" not in outcome.reason
+    assert "EmptyStepError" not in outcome.reason
+
+
+def test_an_empty_step_persists_no_empty_assistant_message(tmp_path):
+    """A6 T2: the invariant still holds — nothing degenerate reaches disk."""
+    from ai_coding.domain.loop import StepResult
+
+    session, _observer = _turn_with(
+        tmp_path,
+        StepResult(
+            text=None, tool_calls=(), finish_reason="stop", usage=None, reasoning="想了一下"
+        ),
+    )
+    assert [m for m in session.messages if m.role == "assistant"] == []
+
+
+def test_an_empty_step_still_shows_the_thinking_it_did(tmp_path):
+    """A6 T3: the model did think, and that is worth seeing before the reason."""
+    from ai_coding.core.events import AssistantMessage
+    from ai_coding.domain.loop import StepResult
+
+    _session, observer = _turn_with(
+        tmp_path,
+        StepResult(
+            text=None, tool_calls=(), finish_reason="stop", usage=None, reasoning="想了一下"
+        ),
+    )
+    assert [m.reasoning for m in observer.events if isinstance(m, AssistantMessage)] == ["想了一下"]
+
+
+def test_a_tool_only_step_is_not_an_empty_step(tmp_path):
+    """A6 T6, the line this feature stands on: `text=None` is normal for a step
+    that only calls tools.  Judging emptiness on text alone would kill every
+    tool step in the product."""
+    from ai_coding.domain.loop import StepResult, TurnStatus
+    from ai_coding.domain.message import ToolCallRef
+
+    session, observer = _turn_with(
+        tmp_path,
+        StepResult(
+            text=None,
+            tool_calls=(ToolCallRef(id="c1", name="bash", arguments='{"command":"ls"}'),),
+            finish_reason="tool_calls",
+            usage=None,
+            reasoning=None,
+        ),
+    )
+    outcome = _finished(observer).outcome
+    assert outcome.status is not TurnStatus.ERROR or "没有回答" not in outcome.reason
+    assert [m for m in session.messages if m.role == "assistant"] != []
+
+
+def test_an_answered_step_is_unaffected(tmp_path):
+    """A6 T5: the ordinary turn still completes."""
+    from ai_coding.domain.loop import StepResult, TurnStatus
+
+    _session, observer = _turn_with(
+        tmp_path,
+        StepResult(text="ok", tool_calls=(), finish_reason="stop", usage=None, reasoning=None),
+    )
+    outcome = _finished(observer).outcome
+    assert outcome.status is TurnStatus.COMPLETED
+    assert "没有回答" not in outcome.reason

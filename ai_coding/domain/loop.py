@@ -39,6 +39,27 @@ class StepResult:
     reasoning: str | None = None
 
 
+class EmptyStepError(Exception):
+    """A model step that thought but neither spoke nor acted (A6).
+
+    ``ChatMessage`` refuses such a step on purpose — an assistant message with
+    neither content nor tool_calls is rejected by providers on the next request
+    — so the loop has to decide what the turn does instead.  Raising this lets
+    it end as an ordinary turn failure with a reason a person can read, rather
+    than letting the domain error escape to the IPC catch-all where the turn
+    loses its bookkeeping (sessions, iteration count) and the screen shows a
+    Python message.
+
+    ``finish_reason`` is the provider's own verdict (``"stop"`` and friends).
+    It travels with the error because it is what tells an operator whether this
+    was the upstream declining to answer or something we did.
+    """
+
+    def __init__(self, finish_reason: str | None = None) -> None:
+        super().__init__(f"empty model step (finish_reason={finish_reason or 'unknown'})")
+        self.finish_reason = finish_reason
+
+
 @dataclass(frozen=True)
 class TurnOutcome:
     """Terminal state of one ``process_input`` call."""
@@ -63,4 +84,4 @@ class TurnOutcome:
     handoff: str = ""
 
 
-__all__ = ["TurnStatus", "StepResult", "TurnOutcome"]
+__all__ = ["EmptyStepError", "TurnStatus", "StepResult", "TurnOutcome"]

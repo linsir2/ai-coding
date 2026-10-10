@@ -19,7 +19,7 @@ from ai_coding.core.turn_close import (
     terminal_outcome,
 )
 from ai_coding.core.turn_policy import TurnAction, TurnDecision
-from ai_coding.domain.loop import TurnOutcome, TurnStatus
+from ai_coding.domain.loop import EmptyStepError, TurnOutcome, TurnStatus
 from ai_coding.domain.message import ToolArtifact
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
@@ -117,6 +117,20 @@ def test_failed_outcome_maps_an_engine_error_to_no_text():
     assert outcome.status is TurnStatus.ERROR
     assert outcome.text is None  # a failed call is not the model's last word
     assert outcome.reason == "boom"
+
+
+def test_failed_outcome_names_an_empty_step_in_words_and_keeps_the_finish_reason():
+    """A6 T4: the provider returned thinking and nothing else.  Same shape as
+    the deadline branch above — a reason a person can act on, not the class name
+    and the Python message.  finish_reason rides along because it tells the
+    operator whether this was an upstream stop or our own doing."""
+    outcome = failed_outcome(
+        EmptyStepError("stop"), last_text=None, iterations=1
+    )
+    assert outcome.status is TurnStatus.ERROR
+    assert outcome.text is None
+    assert "没有回答" in (outcome.reason or "")
+    assert "stop" in (outcome.reason or "")
 
 
 def test_stopped_and_aborted_keep_the_partial_work():
