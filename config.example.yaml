@@ -91,13 +91,16 @@ tools:
     enabled: true
 
 mcp:
-  enabled: false
-  auto_discover: true
-  connection_timeout: 30          # R2: a server that never answers is skipped
-  # servers:
+  enabled: false                  # master switch; per-server default is ON
+  # servers:                     # v2 shape (docs/specs/2026-10-10-external-mcp.md)
   #   - name: fs
-  #     command: /usr/bin/python3
-  #     args: ["-m", "my_mcp_server"]
-  #     enabled: true
-  #     env: {TOKEN: "..."}        # merged over a safe default environment
+  #     command: ["/usr/bin/python3", "-m", "my_mcp_server"]   # argv as one list
+  #     environment: {TOKEN: "..."}  # keys are data: case preserved
   #     cwd: /path/to/workspace
+  #     disabled: false           # v2 polarity: on unless it says otherwise
+  #     timeout:
+  #       startup: 60000          # handshake (ms); npx cold start measured ~27s
+  #       catalog: 30000          # tools/list (ms)
+  #       execution: 600000       # one remote call (ms); omit = turn deadline only
+  #     tools: ["read_file"]      # only register these remote tools (R7d)
+  #     auto_approve: true        # this server's tools skip the prompt (R7d)

@@ -25,7 +25,13 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from ai_coding.config.models import AIConfig, AppConfig, MCPConfig, MCPServerConfig  # noqa: E402
+from ai_coding.config.models import (  # noqa: E402
+    AIConfig,
+    AppConfig,
+    MCPConfig,
+    MCPServerConfig,
+    MCPTimeout,
+)
 from ai_coding.core.context_compression import (  # noqa: E402
     ContextManager,
     _joined_history_text,
@@ -290,7 +296,9 @@ async def case_mcp_trust_is_server_scoped(root: Path) -> tuple[bool, str]:
         mcp=MCPConfig(
             enabled=True,
             servers=[
-                MCPServerConfig(name="everything", command="npx", enabled=True, auto_approve=True)
+                MCPServerConfig(
+                    name="everything", command=["npx"], auto_approve=True
+                )
             ],
         )
     )
@@ -333,8 +341,7 @@ async def case_mcp_allowlist_filters_adapters(root: Path) -> tuple[bool, str]:
             servers=[
                 MCPServerConfig(
                     name="fs",
-                    command="x",
-                    enabled=True,
+                    command=["x"],
                     tools=["read_file", "list_dir"],
                 )
             ],
@@ -384,14 +391,13 @@ async def real_mcp_tool_surface(root: Path) -> tuple[bool, str]:
             servers=[
                 MCPServerConfig(
                     name="many",
-                    command=sys.executable,
-                    args=[str(ROOT / "scripts" / "mcp_many_tools_server.py")],
-                    enabled=True,
+                    command=[sys.executable, str(ROOT / "scripts" / "mcp_many_tools_server.py")],
+                    timeout=MCPTimeout(startup=30_000),
                     tools=allowlist,
                 )
             ],
         )
-        mcp = MCPManager(cfg, connection_timeout=30)
+        mcp = MCPManager(cfg)
         try:
             tools = await mcp.open_all()
             registry = _build_tool_registry(app_cfg, str(ROOT), None)

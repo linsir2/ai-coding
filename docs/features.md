@@ -516,8 +516,13 @@ TencentDB Agent Memory 同值）同样只为重测而存在，故 `config.exampl
 - `aclose()` 统一拆除会话，幂等且对未开启的 manager 安全；
 - 传输层可注入（`session_factory`），因此单测不需要真的 spawn 子进程。
 - **R2 起**：每个 server 由一个「会话属主任务」持有（连接与关闭必须在同一任务里，
-  这是 anyio cancel scope 的硬约束）；连接受 `mcp.connection_timeout` 约束，装死的 server 到点跳过；
-  server 的 `env` / `cwd` 会透传给子进程；factory 在交出 session 前显式 `initialize()` 完成握手。
+  这是 anyio cancel scope 的硬约束）；连接受 `mcp.servers[].timeout.startup`（ms）约束，装死的 server 到点跳过；
+  server 的 `environment` / `cwd` 会透传给子进程（`environment` 的键大小写敏感，YAML 里原样透传，不参与 camel 归一化）；
+  factory 在交出 session 前显式 `initialize()` 完成握手。
+- **M1 起（v2 契约）**：`command` 是 argv 一体（`["npx","-y","pkg"]`，原来的 `args` 并入）；
+  per-server 开关从 `enabled` 翻成 `disabled`（默认开）；`env` 改名 `environment`；单个 `connection_timeout`
+  拆成 `timeout{startup, catalog, execution}` 三段（毫秒）——握手、tools/list、单次调用各管各，
+  挂住的工具列表不再躲在为 npx 冷启动准备的启动预算后面；删除无消费点的 `auto_discover`。
 
 `mcp.enabled=false`（默认）时 `open_all()` 立即返回空列表，不连接任何服务器。
 
@@ -540,7 +545,8 @@ TencentDB Agent Memory 同值）同样只为重测而存在，故 `config.exampl
    不用 MCP **4,280** 字符 → 全注册 **13,301**（3.11×）→ `servers[].tools` 只留 2 个 **5,666**（1.32×，**-57%**）。
    开关就是 `tools: [远端工具名]`（留空 = 全部，今天的行为）。
 2. **冷启动曾经撞上默认超时**：`npx -y @modelcontextprotocol/server-everything` 首次运行（含下载）实测约 **27s**，
-   旧的默认 `mcp.connection_timeout` 是 30s——R7d 起默认 **60**；npx/uvx 类 server 还可以再调到 90 或先预热缓存。
+   旧的默认 `mcp.connection_timeout` 是 30s——R7d 起默认 **60**（M1 起为 `timeout.startup=60000` 毫秒）；
+   npx/uvx 类 server 还可以再调高，或先预热缓存。
 3. **MCP 工具默认仍是 WARN 级**（远端工具未知 → 保守 WARN）：无人可问的入口自动放行，TUI 里每次调用都会弹审批。
    若这个 server 是你自己声明在 `config.local.yaml` 里的，可以按 server 声明 **`auto_approve: true`**，
    它的工具就不再弹审批（**默认 false，不声明就完全是今天的行为**；bash 的硬拒 DENY 表仍然优先）。

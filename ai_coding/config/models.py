@@ -274,17 +274,36 @@ class MemoryConfig(BaseModel):
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
 
 
+class MCPTimeout(BaseModel):
+    """Three budgets instead of one, as in OpenCode v2 (schema/src/mcp.ts).
+
+    A single ``connection_timeout`` conflated two very different jobs: waiting
+    for ``npx`` to cold start (slow, measured ~27s, docs/r7-analysis.md 3.4) and
+    waiting for a hung ``tools/list`` (a dead server, which must not hide behind
+    a budget sized for cold starts).
+    """
+
+    # Milliseconds, like every v2 timeout.
+    startup: int = 60_000
+    catalog: int = 30_000
+    #: One remote call.  ``None`` leaves the turn deadline as the only bound.
+    execution: int | None = None
+
+
 class MCPServerConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     name: str = ""
-    command: str = ""
-    enabled: bool = False
-    args: list[str] = Field(default_factory=list)
+    #: argv as one list, OpenCode-v2 shape, so a pasted OpenCode config works.
+    #: (Was ``command: str`` + ``args: list[str]``.)
+    command: list[str] = Field(default_factory=list)
     # Extra environment variables for the child process (merged over a safe
-    # default set) and its working directory (R2d).
-    env: dict[str, str] = Field(default_factory=dict)
+    # default set) and its working directory (R2d).  (Was ``env``.)
+    environment: dict[str, str] = Field(default_factory=dict)
     cwd: str = ""
+    # On unless it says otherwise (v2 ``disabled``, was an opt-in ``enabled``).
+    disabled: bool = False
+    timeout: MCPTimeout = Field(default_factory=MCPTimeout)
     # R7d: only register these remote tool names (empty = all of them).  Every
     # schema is re-sent on every step, so a 13-tool server can double the tool
     # surface: measured 10,062 of 14,342 characters (docs/r7-analysis.md 1.2).
@@ -298,10 +317,6 @@ class MCPConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = False
-    auto_discover: bool = True
-    # R7d: npx-class servers measured ~27s to cold start, which left 3s against the
-    # old 30s default (docs/features.md, R4 measurements).
-    connection_timeout: int = 60
     servers: list[MCPServerConfig] = Field(default_factory=list)
 
 

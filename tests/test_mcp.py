@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ai_coding.config.models import MCPConfig, MCPServerConfig
+from ai_coding.config.models import MCPConfig, MCPServerConfig, MCPTimeout
 from ai_coding.core.mcp import MCPManager, MCPToolAdapter
 from ai_coding.tools.base import BaseTool
 
@@ -22,18 +22,29 @@ from ai_coding.tools.base import BaseTool
 class _Session:
     """Stands in for an initialized MCP ClientSession."""
 
-    def __init__(self, tools=(), call_result=None, raise_on_call=None) -> None:
+    def __init__(
+        self,
+        tools=(),
+        call_result=None,
+        raise_on_call=None,
+        list_delay=0.0,
+        call_delay=0.0,
+    ) -> None:
         self._tools = list(tools)
         self._call_result = call_result
         self._raise = raise_on_call
+        self._list_delay = list_delay
+        self._call_delay = call_delay
         self.calls: list[tuple] = []
         self.closed = False
 
     async def list_tools(self):
+        await asyncio.sleep(self._list_delay)
         return SimpleNamespace(tools=self._tools)
 
     async def call_tool(self, name, arguments=None, progress_callback=None):
         self.calls.append((name, arguments))
+        await asyncio.sleep(self._call_delay)
         if self._raise is not None:
             raise self._raise
         if progress_callback is not None:
@@ -79,8 +90,9 @@ def _cfg(*servers, enabled=True) -> MCPConfig:
     return MCPConfig(enabled=enabled, servers=list(servers))
 
 
-def _server(name="fs", command="mcp-fs", enabled=True, **kwargs) -> MCPServerConfig:
-    return MCPServerConfig(name=name, command=command, enabled=enabled, **kwargs)
+def _server(name="fs", command=("mcp-fs",), **kwargs) -> MCPServerConfig:
+    """OpenCode-v2 shape: ``command`` is argv as one list (no separate args)."""
+    return MCPServerConfig(name=name, command=list(command), **kwargs)
 
 
 @pytest.mark.asyncio
@@ -98,9 +110,11 @@ async def test_a_server_that_never_connects_is_reported_not_silent():
 
     observer = RecordingObserver()
     manager = MCPManager(
-        _cfg(_server("dead"), _server("alive")),
+        _cfg(
+            _server("dead", timeout=MCPTimeout(startup=50)),
+            _server("alive", timeout=MCPTimeout(startup=50)),
+        ),
         session_factory=hanging_factory,
-        connection_timeout=0.05,
         observer=observer,
     )
 
@@ -121,7 +135,7 @@ async def test_disabled_config_yields_no_tools():
     called: list = []
 
     manager = MCPManager(
-        _cfg(_server(), enabled=False),
+        _cfg(_server(disabled=True)),
         session_factory=lambda server: called.append(server),
     )
     assert await manager.open_all() == []
@@ -132,7 +146,7 @@ async def test_disabled_config_yields_no_tools():
 async def test_disabled_server_skipped():
     called: list = []
     manager = MCPManager(
-        _cfg(_server(enabled=False)),
+        _cfg(_server(disabled=True)),
         session_factory=lambda server: called.append(server),
     )
     assert await manager.open_all() == []
@@ -143,7 +157,7 @@ async def test_disabled_server_skipped():
 async def test_server_without_name_or_command_skipped():
     called: list = []
     manager = MCPManager(
-        _cfg(MCPServerConfig(name="", command="x", enabled=True)),
+        _cfg(MCPServerConfig(name="", command=["x"])),
         session_factory=lambda server: called.append(server),
     )
     assert await manager.open_all() == []
@@ -300,16 +314,14 @@ async def test_duplicate_server_names_are_skipped():
 # ---- R2d: real connections are bounded and configurable --------------------
 
 
-def test_server_parameters_carry_command_args_env_and_cwd():
+def test_server_parameters_split_command_argv_and_carry_env_and_cwd():
     from ai_coding.core.mcp import _server_parameters
 
     cfg = MCPServerConfig(
         name="fs",
-        command="/usr/bin/python3",
-        args=["-m", "server"],
-        env={"TOKEN": "x"},
+        command=["/usr/bin/python3", "-m", "server"],
+        environment={"TOKEN": "x"},
         cwd="/tmp/ws",
-        enabled=True,
     )
 
     params = _server_parameters(cfg)
@@ -335,9 +347,8 @@ async def test_open_all_skips_a_server_that_never_connects():
         return _cm()
 
     manager = MCPManager(
-        _cfg(_server("dead")),
+        _cfg(_server("dead", timeout=MCPTimeout(startup=100))),
         session_factory=hanging_factory,
-        connection_timeout=0.1,
     )
 
     started = time.monotonic()
@@ -387,11 +398,59 @@ async def test_default_session_factory_performs_the_handshake(monkeypatch):
     monkeypatch.setattr(stdio_mod, "stdio_client", fake_stdio_client)
     monkeypatch.setattr(mcp, "ClientSession", FakeSession)
 
-    cfg = MCPServerConfig(name="s", command="x", enabled=True)
+    cfg = MCPServerConfig(name="s", command=["x"])
     async with _default_session_factory(cfg) as session:
         assert isinstance(session, FakeSession)
 
     assert events == ["spawn", "enter", "initialize", "exit"]
+
+
+# ---- v2 split: startup bounds the connection, catalog bounds the listing -----
+
+
+@pytest.mark.asyncio
+async def test_a_slow_tool_listing_costs_the_catalog_budget_not_startup():
+    """A server that connects instantly but never answers tools/list must be
+    charged to the catalog budget, not spend the whole startup one — otherwise
+    a hung listing hides behind a budget sized for npx cold starts."""
+    import time
+
+    session = _Session(list_delay=30)
+    manager = MCPManager(
+        _cfg(_server("slow", timeout=MCPTimeout(startup=60_000, catalog=50))),
+        session_factory=_factory({"slow": session}),
+    )
+
+    started = time.monotonic()
+    tools = await manager.open_all()
+    elapsed = time.monotonic() - started
+
+    assert tools == []
+    assert elapsed < 2.0
+    row = _rows(manager)["slow"]
+    assert row["status"] == "failed"
+    assert "工具列表" in row["detail"] and "0.05" in row["detail"]
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_execution_timeout_bounds_one_hanging_tool_call():
+    """A per-server execution cap: the turn deadline bounds the whole step, this
+    bounds one remote call so it cannot eat the step by itself."""
+    import time
+
+    session = _Session(call_delay=30)
+    adapter = MCPToolAdapter(
+        server="fs", tool=_tool(), session=session, execution_timeout=0.05
+    )
+
+    started = time.monotonic()
+    result = await adapter.execute({}, None)
+    elapsed = time.monotonic() - started
+
+    assert result.success is False
+    assert result.error == "mcp_error"
+    assert elapsed < 2.0
 
 
 # ---- R7d: the registration allowlist, and the connection default -------------
@@ -435,10 +494,16 @@ async def test_the_allowlist_matches_remote_names_not_the_prefix():
     assert tools == []
 
 
-def test_the_connection_timeout_default_gives_npx_room_to_start():
-    from ai_coding.config.models import MCPConfig
+def test_the_startup_timeout_default_gives_npx_room_to_start():
+    from ai_coding.config.models import MCPServerConfig
 
-    assert MCPConfig().connection_timeout == 60
+    # R7d: 30s left ~3s of headroom against a measured 27s npx cold start, so the
+    # default is now 60s (docs/r7-analysis.md 3.4, r7-backlog.md 3.3).  The two
+    # other budgets are the v2 split: listing tools and one call.
+    timeout = MCPServerConfig().timeout
+    assert timeout.startup == 60_000
+    assert timeout.catalog == 30_000
+    assert timeout.execution is None  # the turn deadline stays the only bound
 
 
 @pytest.mark.asyncio
@@ -523,7 +588,8 @@ async def test_a_server_that_times_out_is_reported_as_failed():
         return _cm()
 
     manager = MCPManager(
-        _cfg(_server("slow")), session_factory=hanging_factory, connection_timeout=0.05
+        _cfg(_server("slow", timeout=MCPTimeout(startup=50))),
+        session_factory=hanging_factory,
     )
     await manager.open_all()
     try:
@@ -572,7 +638,9 @@ async def test_a_whitelist_that_matched_everything_is_not_a_filter():
 def test_a_server_the_loader_skips_still_gets_a_row():
     """T3b: no name or no command is skipped before an owner exists, so the
     config is the only record — and a typo must not vanish from the list."""
-    manager = MCPManager(_cfg(_server(name="", command="mcp-fs"), _server(command="")))
+    manager = MCPManager(
+        _cfg(_server(name="", command=["mcp-fs"]), _server(command=[]))
+    )
     rows = _rows(manager)
     assert len(rows) == 2
     for row in rows.values():

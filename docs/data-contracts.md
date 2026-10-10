@@ -114,9 +114,9 @@ mcp:               # MCPConfig（默认关闭）
 R11a 加 `extraction_enabled=true`（写侧总闸，关则收割与自写全停、召回照常）、`extraction_extractors=None`（写通道白名单：`harvest`/`memory_write`，`None`/缺段/非 list = 全放行；判定谓词 `service.is_extraction_allowed`）。
 R11b 加 `recall_timeout_seconds=2.0`（一次召回的墙钟预算，0/负/不可解析 = 关闭；超预算 → 命中照返 + 跳过 `touch` 写盘 + `data.timed_out=true` + 一条 `Degraded`）。**注意它在 `MemoryConfig` 与 `service._default_config()` 两处**，与 R10 的三处纪律同源：`RecallParams` 不读它，所以不需要改第三处。
 
-`MCPConfig`：`enabled=false`, `auto_discover=true`, `connection_timeout=60`（R7d 起；npx 冷启动实测 ~27s）, `servers[]`。`MCPServerConfig`：`name`, `command`, `enabled=false`, `args[]`, `env{}`, `cwd`, `tools=[]`（非空则只注册这些远端工具，R7d）, `auto_approve=false`（该 server 的工具免审批，R7d）。
+`MCPConfig`：`enabled=false`, `servers[]`。`MCPServerConfig`：`name`, `command=[]`（argv 一体，对齐 OpenCode v2）, `environment={}`（原 `env`）, `cwd`, `disabled=false`（极性反转，原 `enabled=false`）, `timeout{startup=60000, catalog=30000, execution=null}`（毫秒；startup 管握手、catalog 管 tools/list、execution 管单次调用，null=只受回合钟约束）, `tools=[]`（非空则只注册这些远端工具，R7d）, `auto_approve=false`（该 server 的工具免审批，R7d）。M1 起删 `auto_discover`（全仓无消费点）与全局 `connection_timeout`（被三段 timeout 取代）。
 
-YAML 加载规则：键做 camel→snake 归一化（`baseURL`→`base_url` 视为同一键）；未知键忽略；缺失时用模型默认值补全。加载函数 `ConfigLoader.load_app`（AppConfig）与 `load_mcp`（MCPConfig）分盒解耦。
+YAML 加载规则：键做 camel→snake 归一化（`baseURL`→`base_url` 视为同一键）；**`environment` 的键是数据不是字段名，原样透传**（env 变量名大小写敏感，M1 修的坑：`TOKEN` 曾被归一化成 `token`）；未知键忽略；缺失时用模型默认值补全。加载函数 `ConfigLoader.load_app`（AppConfig）与 `load_mcp`（MCPConfig）分盒解耦。
 
 ## 关键不变量汇总
 

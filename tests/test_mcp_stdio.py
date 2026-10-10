@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_coding.config.models import MCPConfig, MCPServerConfig
+from ai_coding.config.models import MCPConfig, MCPServerConfig, MCPTimeout
 from ai_coding.core.mcp import MCPManager, MCPToolAdapter
 from ai_coding.tools.base import ToolContext
 
@@ -40,13 +40,11 @@ pytestmark = [
 def _config() -> MCPConfig:
     return MCPConfig(
         enabled=True,
-        connection_timeout=30,
         servers=[
             MCPServerConfig(
                 name="echo",
-                command=sys.executable,
-                args=[str(SERVER)],
-                enabled=True,
+                command=[sys.executable, str(SERVER)],
+                timeout=MCPTimeout(startup=30_000),
             )
         ],
     )

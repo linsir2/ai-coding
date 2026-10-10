@@ -18,9 +18,17 @@ def _to_snake(key: str) -> str:
     ).lower()
 
 
-def _normalize(value: Any) -> Any:
+#: Maps whose keys are data rather than field names: they must reach the model
+#: verbatim.  An environment variable name is case-sensitive, so normalizing
+#: ``TOKEN`` into ``token`` would hand the child process the wrong variable.
+_OPAQUE_MAPS = frozenset({"environment"})
+
+
+def _normalize(value: Any, parent_key: str | None = None) -> Any:
     if isinstance(value, dict):
-        return {_to_snake(k): _normalize(v) for k, v in value.items()}
+        if parent_key in _OPAQUE_MAPS:
+            return dict(value)
+        return {_to_snake(k): _normalize(v, k) for k, v in value.items()}
     if isinstance(value, list):
         return [_normalize(v) for v in value]
     return value

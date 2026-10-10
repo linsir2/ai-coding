@@ -31,7 +31,7 @@ def _app(*servers: MCPServerConfig) -> AppConfig:
 
 
 def _server(name: str, **kwargs: object) -> MCPServerConfig:
-    return MCPServerConfig(name=name, command="npx", enabled=True, **kwargs)
+    return MCPServerConfig(name=name, command=["npx"], **kwargs)
 
 
 # ------------------------------------------------------------------ default

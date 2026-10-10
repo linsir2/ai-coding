@@ -94,10 +94,9 @@ def test_tools_default_enabled():
 def test_mcp_defaults(no_config):
     mcp = ConfigLoader.load_mcp(None)
     assert mcp.enabled is False
-    assert mcp.auto_discover is True
     # R7d: 30s left ~3s of headroom against a measured 27s npx cold start, so the
-    # default is now 60 (docs/r7-analysis.md 3.4, r7-backlog.md 3.3).
-    assert mcp.connection_timeout == 60
+    # default is now 60s (docs/r7-analysis.md 3.4, r7-backlog.md 3.3).  The
+    # timeout defaults themselves live on MCPServerConfig (test_mcp.py).
     assert mcp.servers == []
 
 
@@ -134,8 +133,11 @@ def test_mcp_servers_from_yaml(tmp_path):
               enabled: true
               servers:
                 - name: github
-                  command: npx
-                  args: ["-y", "@modelcontextprotocol/server-github"]
+                  command: ["npx", "-y", "@modelcontextprotocol/server-github"]
+                  environment: {TOKEN: "ghp_x"}
+                  timeout:
+                    startup: 45000
+                    catalog: 15000
             """
         ),
         encoding="utf-8",
@@ -143,8 +145,13 @@ def test_mcp_servers_from_yaml(tmp_path):
     mcp = ConfigLoader.load_mcp(cfg)
     assert mcp.enabled is True
     assert mcp.servers[0].name == "github"
-    assert mcp.servers[0].command == "npx"
-    assert mcp.servers[0].enabled is False
+    # argv is one list, as in OpenCode v2, so pasting an OpenCode config works.
+    assert mcp.servers[0].command == ["npx", "-y", "@modelcontextprotocol/server-github"]
+    assert mcp.servers[0].environment == {"TOKEN": "ghp_x"}
+    # The v2 polarity: a server is on unless it says otherwise.
+    assert mcp.servers[0].disabled is False
+    assert mcp.servers[0].timeout.startup == 45_000
+    assert mcp.servers[0].timeout.catalog == 15_000
 
 
 # ---- R4a: tracing and pricing configuration --------------------------------

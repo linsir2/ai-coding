@@ -146,21 +146,25 @@ R6 的验收（回合摘要环 / 收尾交接 / 失败升级 / `ask_user` / 记�
 | `ai.l2_window_chars` | 200 | L2 被清空的工具结果各保留头/尾多少字符（R7b） |
 | `ai.l2_window_budget` | 4000 | 一次压缩里所有窗口的总字符预算，从新到旧分配；用完之后只剩信封（R7b） |
 | `ai.approval_timeout_seconds` | 0 | 等审批的上限；0 = 只受回合钟约束（R7c） |
-| `mcp.connection_timeout` | 60 | 连不上的 server 等多久（R7d 起，旧默认 30s 撞 npx 冷启动 27s） |
+| `mcp.servers[].timeout.startup` | 60000 | 握手等多久（ms；R7d 起旧默认 30s 撞 npx 冷启动 27s，故 60s） |
+| `mcp.servers[].timeout.catalog` | 30000 | tools/list 等多久（ms） |
+| `mcp.servers[].timeout.execution` | `null` | 单次远端调用上限（ms）；`null` = 只受回合钟约束 |
 | `mcp.servers[].tools` | `[]` | 只注册这些远端工具（留空 = 全部）；每步都重发 schema，这是唯一能压它的开关（R7d） |
 | `mcp.servers[].auto_approve` | `false` | 该 server 的工具免审批；默认关，不配就是今天的行为（R7d） |
 
 ```yaml
 mcp:
   enabled: true
-  connection_timeout: 60
   servers:
     - name: everything
-      command: npx
-      args: ["-y", "@modelcontextprotocol/server-everything"]
-      enabled: true
-      tools: ["get-sum"]     # 只注册这一个（13 个全注册 = 每步多付约 9000 字符）
-      auto_approve: true     # 这个 server 是你在自己的配置里声明的
+      command: ["npx", "-y", "@modelcontextprotocol/server-everything"]
+      # enabled/args 两个字段没了：v2 契约里 command 是 argv 一体，server 默认开
+      # （想关用 disabled: true）。env 改名 environment。
+      timeout:
+        startup: 60000      # 握手（npx 冷启动实测 ~27s，别调太低）
+        catalog: 30000      # tools/list
+      tools: ["get-sum"]    # 只注册这一个（13 个全注册 = 每步多付约 9000 字符）
+      auto_approve: true    # 这个 server 是你在自己的配置里声明的
 ```
 
 行为上的三处可见变化：
