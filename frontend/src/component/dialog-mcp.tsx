@@ -24,7 +24,12 @@ import type { IpcClient } from "../ipc"
 import type { SelectOption } from "../util/dialog-select"
 import { DialogSelect } from "./dialog-select"
 import type { McpServer } from "../util/mcp"
-import { mcpRowCanConnect, mcpStatusLabel, mcpToolNote } from "../util/mcp"
+import {
+  mcpRowCanConnect,
+  mcpRowCanLogin,
+  mcpStatusLabel,
+  mcpToolNote,
+} from "../util/mcp"
 
 /** The status word plus the tool count, which is the whole answer per row. */
 const statusLine = (server: McpServer): string => {
@@ -68,10 +73,15 @@ export function DialogMcp(props: {
       // Grouped by "is anything wrong", not by "did it connect": a filtered
       // server did connect, it just brought fewer tools than it could have.
       category: server.status === "failed" ? "未连接" : "已连接",
-      // The one action the panel has (M3): a failed row can be retried now.
-      onSelect: mcpRowCanConnect(server.status)
-        ? () => void props.client.request("mcp.connect", { server: server.name })
-        : undefined,
+      // The panel's actions, one per waiting state (M3/M4): a failed row
+      // retries, a needs_auth row signs in.  Both are "the operator did
+      // something"; nothing else offers an action.  (M4: the arrow in
+      // "Sign in required →" is literal — enter starts it.)
+      onSelect: mcpRowCanLogin(server.status)
+        ? () => void props.client.request("mcp.login", { server: server.name })
+        : mcpRowCanConnect(server.status)
+          ? () => void props.client.request("mcp.connect", { server: server.name })
+          : undefined,
     }))
 
   return (

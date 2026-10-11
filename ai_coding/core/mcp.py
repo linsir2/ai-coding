@@ -41,15 +41,18 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import itertools
+import json
 import logging
 import os
 import tempfile
+import urllib.parse as urllib_parse
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from ai_coding.config.models import MCPConfig, MCPServerConfig
+from ai_coding.config.models import MCPConfig, MCPOAuthConfig, MCPServerConfig
 from ai_coding.core.events import ToolChunk
 from ai_coding.core.turn_report import report_degraded
 from ai_coding.domain.message import ToolResult
@@ -105,6 +108,10 @@ _BACKOFF_MAX = 60.0
 #: lacks and its own review names.  The bound is also why the backoff needs no
 #: jitter: a room full of servers retrying in lockstep is absorbed here.
 _MAX_CONCURRENT_CONNECTS = 4
+
+#: How long ``mcp.login`` waits for the browser to come back.  A human reading
+#: a consent screen is slow, but not indefinitely slow.
+_LOGIN_TIMEOUT = 300.0
 
 
 def _is_transport_death(exc: BaseException) -> bool:
@@ -291,6 +298,272 @@ class _MCPSessionOwner:
         done, _pending = await asyncio.wait({task}, timeout=budget)
         if not done:
             task.cancel()
+
+
+def _auth_store_path() -> Path:
+    """Where the OAuth tokens live: outside the repo and outside the config.
+
+    ``~/.local/share/ai-coding/mcp-auth.json`` — the config file is meant to be
+    shareable and this file is meant to be a secret, so they never meet.
+    """
+    root = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(root) / "ai-coding" / "mcp-auth.json"
+
+
+class _TokenStore:
+    """``TokenStorage`` over one JSON file, scoped to one server (M4).
+
+    The SDK's protocol is per-connection (get/set tokens and client info); the
+    file is per-process so every server's tokens share it, keyed by name.  A
+    token is a secret: the file is created 0600, and nothing here ever puts it
+    in the config, a trace event or a log line.
+    """
+
+    def __init__(self, server: str) -> None:
+        self._server = server
+        self._path = _auth_store_path()
+
+    def _read(self) -> dict[str, Any]:
+        try:
+            loaded = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    def _write(self, doc: dict[str, Any]) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        # Create with 0600 from the start: a token file that is briefly
+        # world-readable is a token file that leaked.
+        fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle, ensure_ascii=False, indent=2)
+
+    async def get_tokens(self) -> Any:
+        from mcp.shared.auth import OAuthToken
+
+        raw = self._read().get("servers", {}).get(self._server, {}).get("tokens")
+        return OAuthToken.model_validate(raw) if raw else None
+
+    async def set_tokens(self, tokens: Any) -> None:
+        doc = self._read()
+        doc.setdefault("servers", {}).setdefault(self._server, {})["tokens"] = (
+            tokens.model_dump(mode="json")
+        )
+        self._write(doc)
+
+    async def get_client_info(self) -> Any:
+        from mcp.shared.auth import OAuthClientInformationFull
+
+        raw = self._read().get("servers", {}).get(self._server, {}).get("client_info")
+        return OAuthClientInformationFull.model_validate(raw) if raw else None
+
+    async def set_client_info(self, client_info: Any) -> None:
+        doc = self._read()
+        doc.setdefault("servers", {}).setdefault(self._server, {})["client_info"] = (
+            client_info.model_dump(mode="json")
+        )
+        self._write(doc)
+
+    def clear(self) -> None:
+        """Forget this server's tokens (``mcp.logout``)."""
+        doc = self._read()
+        servers = doc.get("servers", {})
+        if self._server in servers:
+            del servers[self._server]
+            self._write(doc)
+
+
+class _CallbackServer:
+    """The local endpoint an authorization redirect returns to (M4).
+
+    One request and then it closes: the OAuth callback is a single GET carrying
+    the code, and a listener that stayed up would be a port held open for a call
+    that is never coming again.  The SDK validates the ``state`` against the one
+    it generated, so this only has to hand back what arrived.
+    """
+
+    def __init__(self, port: int) -> None:
+        self.port = port
+        self._server: asyncio.Server | None = None
+        self._code: asyncio.Future[tuple[str, str]] | None = None
+
+    async def start(self) -> None:
+        self._code = asyncio.get_running_loop().create_future()
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", self.port)
+        # The configured port may be taken (another login in progress, another
+        # program); the OS assigns one and the redirect URI is built from it, so
+        # the operator is never sent to a port nothing is listening on.
+        if self.port == 0:
+            self.port = self._server.sockets[0].getsockname()[1]
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            request = await reader.readline()
+            target = request.decode("latin-1").split(" ")[1] if request else "/"
+            query = urllib_parse.parse_qs(urllib_parse.urlparse(target).query)
+            code = (query.get("code") or [""])[0]
+            state = (query.get("state") or [""])[0]
+            error = (query.get("error") or [""])[0]
+            if error:
+                body = f"Sign-in failed: {error}".encode()
+            else:
+                body = b"Signed in - you can close this window."
+                if self._code is not None and not self._code.done():
+                    self._code.set_result((code, state))
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "
+                + str(len(body)).encode()
+                + b"\r\nConnection: close\r\n\r\n"
+                + body
+            )
+            await writer.drain()
+        except Exception:  # noqa: BLE001 — a half-written callback is not fatal
+            pass
+        finally:
+            writer.close()
+
+    async def result(self, timeout: float) -> Any:
+        """Wait for the browser to come back with a code."""
+        from mcp.client.auth import AuthorizationCodeResult
+
+        if self._code is None:
+            raise RuntimeError("callback server was never started")
+        try:
+            code, state = await asyncio.wait_for(self._code, timeout=timeout)
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            raise OAuthLoginTimeout(f"no sign-in callback within {timeout:g}s") from exc
+        return AuthorizationCodeResult(code=code, state=state or None)
+
+    async def stop(self) -> None:
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+
+
+class OAuthLoginTimeout(Exception):
+    """The operator never came back from the browser (M4)."""
+
+
+def _find_leaf(exc: BaseException | None, cls: type) -> BaseException | None:
+    """The first leaf of ``exc`` that is a ``cls``, walking anyio's groups.
+
+    A transport failure arrives wrapped — the group's own ``str()`` says only
+    "unhandled errors in a TaskGroup" — so everything that classifies or quotes
+    an error goes through this instead of reading the top level.
+    """
+    if exc is None:
+        return None
+    if isinstance(exc, cls):
+        return exc
+    for sub in getattr(exc, "exceptions", None) or []:
+        found = _find_leaf(sub, cls)
+        if found is not None:
+            return found
+    return None
+
+
+def _is_auth_failure(exc: BaseException | None) -> bool:
+    """Whether a connect failed because a human has to sign in (M4).
+
+    Two shapes, one meaning: the SDK's ``OAuthFlowError`` for everything the
+    authorization flow could not complete, and our own ``OAuthLoginTimeout``
+    for a sign-in nobody finished.  Both say "this server is waiting on a
+    login", and neither is changed by retrying on a timer.
+    """
+    from mcp.client.auth import OAuthFlowError
+
+    return (
+        _find_leaf(exc, OAuthFlowError) is not None
+        or _find_leaf(exc, OAuthLoginTimeout) is not None
+    )
+
+
+def _remote_session_factory(
+    server: MCPServerConfig, *, interactive: bool, callback_timeout: float
+) -> Any:
+    """Connect a remote MCP server over Streamable HTTP (M4).
+
+    ``interactive`` is the whole difference between a connect and a login: with
+    it, a 401 drives the browser and the callback; without it, the same 401 ends
+    the flow immediately and the server lands in ``needs_auth`` — a state, not a
+    retry.
+    """
+    from mcp import ClientSession
+    from mcp.client.auth import OAuthClientProvider
+    from mcp.client.streamable_http import streamable_http_client
+    from mcp.shared.auth import OAuthClientMetadata
+    from pydantic import AnyUrl
+
+    oauth = server.oauth or MCPOAuthConfig()
+    headers = dict(server.headers)
+
+    @asynccontextmanager
+    async def _cm() -> AsyncIterator[Any]:
+        callback: _CallbackServer | None = None
+        if interactive:
+            callback = _CallbackServer(oauth.callback_port)
+            await callback.start()
+        try:
+            redirect_uri = (
+                f"http://127.0.0.1:{callback.port}/mcp/oauth/callback"
+                if callback is not None
+                else None
+            )
+            store = _TokenStore(server.name)
+            provider = OAuthClientProvider(
+                server_url=server.url,
+                client_metadata=OAuthClientMetadata(
+                    client_name="ai-coding",
+                    redirect_uris=[AnyUrl(redirect_uri)] if redirect_uri else None,
+                    grant_types=["authorization_code", "refresh_token"],
+                    response_types=["code"],
+                    token_endpoint_auth_method="none",
+                    scope=oauth.scope or None,
+                ),
+                storage=store,
+                redirect_handler=_open_browser if interactive else None,
+                callback_handler=(
+                    (lambda: callback.result(callback_timeout))
+                    if callback is not None
+                    else None
+                ),
+            )
+            import httpx2
+
+            async with streamable_http_client(
+                server.url,
+                http_client=httpx2.AsyncClient(auth=provider, headers=headers or None),
+            ) as (read, write):
+                async with ClientSession(read, write) as session:
+                    # ``ClientSession.__aenter__`` only starts the dispatcher:
+                    # the handshake is a separate (idempotent) call, and for a
+                    # remote server it is also the request that discovers the
+                    # token is missing and starts the flow.
+                    await session.initialize()
+                    yield session
+        finally:
+            if callback is not None:
+                await callback.stop()
+
+    return _cm()
+
+
+async def _open_browser(url: str) -> None:
+    """Send the operator to the authorization URL (async: the SDK awaits it).
+
+    ``webbrowser.open`` blocks — it may fork a browser and wait for it — so it
+    runs off the loop.  It returns False on a headless machine, and the URL is
+    logged either way, because an operator over SSH has to be able to paste it
+    somewhere.
+    """
+    import webbrowser
+
+    opened = await asyncio.get_running_loop().run_in_executor(
+        None, webbrowser.open, url
+    )
+    if not opened:
+        _log.warning("open this URL to sign in: %s", url)
 
 
 def _server_parameters(server: MCPServerConfig) -> Any:
@@ -544,7 +817,9 @@ class MCPManager:
             return
         seen: set[str] = set()
         for server in self._config.servers:
-            if server.disabled or not server.name or not server.command:
+            if server.disabled or not server.name:
+                continue
+            if not _is_connectable_shape(server):
                 continue
             if server.name in seen:
                 # Two servers sharing a name produce identical tool prefixes, which
@@ -565,7 +840,9 @@ class MCPManager:
                 if previous is not None:
                     await previous.close()
                     previous = None
-                owner = _MCPSessionOwner(server, self._session_factory)
+                owner = _MCPSessionOwner(
+                    server, self._factory_for(server, interactive=False)
+                )
                 ok, phase = await self._attempt(owner)
                 if self._stop.is_set():
                     await owner.close()
@@ -593,6 +870,16 @@ class MCPManager:
                             _fail_reason(server, owner, phase),
                             "its tools are not available this run",
                         )
+                    if _is_auth_failure(owner.error):
+                        # Waiting on a human, not on time: retrying on a timer
+                        # would re-run metadata discovery against the
+                        # authorization server every second for an answer only a
+                        # login can change.  Park until one arrives.
+                        await self._hold(server.name)
+                        if self._stop.is_set():
+                            return
+                        delay = _BACKOFF_MIN
+                        continue
                     woken = await self._pause(server.name, delay)
                     if woken:
                         delay = _BACKOFF_MIN
@@ -619,7 +906,12 @@ class MCPManager:
             )
 
     async def _hold(self, name: str) -> None:
-        """Park while the server is up; returns on shutdown or a wake."""
+        """Park while the server is up; returns on shutdown or a wake.
+
+        Clears the wake it consumed, the way ``_pause`` does: a flag left set
+        after the wait makes the *next* park return immediately, and the loop
+        then reconnects the healthy server over and over.
+        """
         stop = asyncio.create_task(self._stop.wait())
         wake = asyncio.create_task(self._wake_event(name).wait())
         try:
@@ -627,6 +919,7 @@ class MCPManager:
         finally:
             stop.cancel()
             wake.cancel()
+            self._wake_event(name).clear()
 
     async def _pause(self, name: str, delay: float) -> bool:
         """Wait out the backoff, or cut it short on a wake.  True means woken."""
@@ -641,6 +934,86 @@ class MCPManager:
             timer.cancel()
             wake.cancel()
             self._wake_event(name).clear()
+
+    def _factory_for(
+        self,
+        server: MCPServerConfig,
+        *,
+        interactive: bool,
+        callback_timeout: float = _LOGIN_TIMEOUT,
+    ) -> SessionFactory:
+        """The transport for this server's kind (M4).
+
+        The injected factory stays the seam for ``local`` (and for the tests
+        that refuse to spawn anything); ``remote`` is built here because its
+        pieces — the SDK transport, the token store, the callback server — are
+        exactly what this module owns.
+        """
+        if server.type == "remote":
+            return lambda _s: _remote_session_factory(
+                server, interactive=interactive, callback_timeout=callback_timeout
+            )
+        return self._session_factory
+
+    async def login(self, name: str, timeout: float = _LOGIN_TIMEOUT) -> dict[str, Any]:
+        """Run the OAuth dance for a remote server (``mcp.login``).
+
+        This obtains and persists the token and nothing else: the session it
+        used to get there is closed again, and the supervisor — woken at the
+        end — is what owns the server's connection from then on.  One extra
+        handshake buys a design where exactly one component holds a session.
+        """
+        server = next((s for s in self._config.servers if s.name == name), None)
+        if server is None:
+            return {"ok": False, "reason": f"no MCP server named '{name}'"}
+        if server.type != "remote":
+            return {"ok": False, "reason": f"server '{name}' is not a remote server"}
+        owner = _MCPSessionOwner(
+            server,
+            self._factory_for(
+                server, interactive=True, callback_timeout=timeout
+            ),
+        )
+        owner.start()
+        try:
+            # The callback's own timeout is the one the operator should read,
+            # so the overall wait is a backstop behind it, not a race with it.
+            ok, _phase = await owner.wait_ready(timeout + 5.0, 30.0)
+        finally:
+            await owner.close()
+        if not ok:
+            timeout_error = _find_leaf(owner.error, OAuthLoginTimeout)
+            reason = (
+                str(timeout_error)
+                if timeout_error is not None
+                else f"sign-in failed: {_error_detail(owner.error)}"
+            )
+            # The settled owner still carries the *connect-time* refusal, which
+            # is now stale: the operator tried to sign in and this is why it did
+            # not take.  Recording it keeps the row the single source of truth.
+            settled = self._owner(name)
+            if settled is not None:
+                settled.error = owner.error or OAuthLoginTimeout(reason)
+            self._publish(name)
+            return {"ok": False, "reason": reason}
+        # The token is on disk now (the provider persisted it), so a plain
+        # connect will find it: wake the supervisor and let it do its job.
+        self._wake_event(name).set()
+        self._publish(name)
+        return {"ok": True}
+
+    def logout(self, name: str) -> dict[str, Any]:
+        """Forget a remote server's tokens (``mcp.logout``).
+
+        The supervisor is woken, so the server is re-attempted at once and lands
+        back in ``needs_auth`` instead of pretending to be connected.
+        """
+        server = next((s for s in self._config.servers if s.name == name), None)
+        if server is None:
+            return {"ok": False, "reason": f"no MCP server named '{name}'"}
+        _TokenStore(name).clear()
+        self._wake_event(name).set()
+        return {"ok": True}
 
     def _wake_event(self, name: str) -> asyncio.Event:
         return self._wake.setdefault(name, asyncio.Event())
@@ -772,6 +1145,11 @@ class MCPManager:
         if cfg is None:
             return None
         owner = self._owner(server)
+        if owner is not None and _is_auth_failure(owner.error):
+            return (
+                f"MCP server '{server}' needs authentication: "
+                f"{_error_detail(owner.error)}. Sign in from the MCP panel."
+            )
         if owner is not None and owner.dead is not None:
             return (
                 f"MCP server '{server}' is not connected: its connection dropped "
@@ -840,8 +1218,10 @@ class MCPManager:
                 # duplicate name — or no attempt has settled yet.
                 if not server.name:
                     row["detail"] = "配置缺少 name"
-                elif not server.command:
+                elif not server.command and server.type == "local":
                     row["detail"] = "配置缺少 command"
+                elif not server.url and server.type == "remote":
+                    row["detail"] = "配置缺少 url"
                 elif server.name in self._supervisors:
                     row["status"] = "connecting"
                     row["detail"] = "正在连接…"
@@ -849,6 +1229,9 @@ class MCPManager:
                     row["detail"] = "与同名服务器重复，只连了第一个"
             elif owner.dead is not None:
                 row["detail"] = owner.dead
+            elif _is_auth_failure(owner.error):
+                row["status"] = "needs_auth"
+                row["detail"] = _error_detail(owner.error)
             elif owner.error is not None:
                 # An exception can carry no message (``raise RuntimeError``), so
                 # fall back to its class name rather than showing an empty row.
@@ -901,7 +1284,7 @@ class MCPManager:
                 _log.debug("MCP session %r failed to close", owner.server.name, exc_info=True)
 
 
-def _error_detail(exc: BaseException, depth: int = 0) -> str:
+def _error_detail(exc: BaseException | None, depth: int = 0) -> str:
     """What an operator can act on, out of whatever the SDK raised.
 
     ``anyio`` reports a child that died as nested ExceptionGroups, and the
@@ -909,6 +1292,8 @@ def _error_detail(exc: BaseException, depth: int = 0) -> str:
     sub-exception)" — it names no file, no errno and no cause.  The leaves are
     the real story, so the row shows them.
     """
+    if exc is None:
+        return ""
     # Duck-typed rather than ``isinstance(..., BaseExceptionGroup)``: anyio's
     # groups are builtins, but the project does not pin a target version, and
     # "has .exceptions" is exactly the question being asked.
@@ -919,6 +1304,18 @@ def _error_detail(exc: BaseException, depth: int = 0) -> str:
         if parts:
             return "; ".join(dict.fromkeys(parts))
     return str(exc) or type(exc).__name__
+
+
+def _is_connectable_shape(server: MCPServerConfig) -> bool:
+    """Whether this server has what its kind needs to be attempted at all (M4).
+
+    ``local`` needs a command and ``remote`` needs a URL; the two shapes share
+    nothing else, so one missing field is the whole check — and the row says
+    which one, so a half-configured server never vanishes from the panel.
+    """
+    if server.type == "remote":
+        return bool(server.url)
+    return bool(server.command)
 
 
 def _fail_reason(server: MCPServerConfig, owner: _MCPSessionOwner, phase: str | None) -> str:

@@ -92,6 +92,17 @@ describe("DialogMcp", () => {
     expect(text).toContain("没有配置 MCP 服务器")
   })
 
+  test("a server that needs a sign-in says so (M4)", async () => {
+    // The full string is "Sign in required →"; the arrow does not survive this
+    // harness's frame capture (the ellipsis in "Connecting …" does), so the
+    // exact wording is pinned by the pure test and only the words here.
+    const text = await frame([
+      { name: "gh", command: "", status: "needs_auth", toolCount: 0, wantedCount: 0, detail: "No redirect URIs provided for authorization code grant" },
+    ])
+    expect(text).toContain("Sign in required")
+    expect(text).toContain("No redirect URIs provided")
+  })
+
   test("a server still connecting says so (M3)", async () => {
     const text = await frame([
       { name: "slow", command: "npx slow", status: "connecting", toolCount: 0, wantedCount: 0, detail: "正在连接…" },

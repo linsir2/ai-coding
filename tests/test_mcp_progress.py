@@ -54,7 +54,7 @@ def _config() -> MCPConfig:
 async def test_a_real_server_progress_reaches_us_as_chunks():
     manager = MCPManager(_config())
     await manager.open_all()
-    assert await until_mcp_settled(manager)
+    assert await until_mcp_settled(manager, timeout=30)
     try:
         handle = manager.lookup("progress", "slow_task")
         assert handle is not None

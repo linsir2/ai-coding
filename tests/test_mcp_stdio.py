@@ -54,7 +54,7 @@ def _config() -> MCPConfig:
 async def test_real_stdio_server_lists_and_answers():
     manager = MCPManager(_config())
     await manager.open_all()
-    assert await until_mcp_settled(manager)
+    assert await until_mcp_settled(manager, timeout=30)
     try:
         handle = manager.lookup("echo", "echo")
         assert handle is not None

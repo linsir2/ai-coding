@@ -189,6 +189,18 @@ mcp_call(server: str, tool: str, input: object) → ToolResult
 
 两个实验支撑：① 真 stdio 桩在 tools/list 后退出，parked 的 owner 任务 3s 无感知——**空闲掉线不可见，唯一信号是下一次调用失败**，故 `mcp_call` 的传输类异常（anyio `ClosedResourceError`/`BrokenResourceError`/`EndOfStream`，惰性 import 判别）才标记死亡并唤醒重连，普通工具错误不触发；② `_serve` 在 ready 后只 `await _stop.wait()`，任务在 park 期间永不结束——**监听 owner 任务是死代码，已砍**。jitter 同样砍掉：Semaphore(4) 已吸收同步重试的惊群，且 jitter 会让退避断言变概率。
 
+## 4B. M4 ADR：remote 传输与 OAuth 子系统（2026-10-10）
+
+**决策**：传输用 SDK 的 `streamable_http_client`；OAuth 只实现应用独有的三件事（TokenStorage、redirect_handler、_CallbackServer），协议机制（PKCE、state 校验、DCR、元数据发现、刷新）全部复用 SDK。不给 `client_id/secret` 配置。
+
+**理由**：SDK 2.2.0 的 `OAuthClientProvider` 已含全流程，重复实现的每一行都是新的错误面；`state` 由 SDK `compare_digest` 校验，重写只会更弱。DCR（RFC 7591）覆盖大多数托管 server 的注册，预注册 client 等有真实需求再加（OpenCode v1 有该字段，但其存在不构成我们的需求）。
+
+**信任边界**（相对 M2 的变化）：remote server 的数据离开本机、token 是长效凭据。三条红线写进契约：token 只进 `~/.local/share/ai-coding/mcp-auth.json`（0600，`XDG_DATA_HOME` 可覆盖），**不进 config.yaml、不进 trace 事件、不进日志**；授权头/URL query 不落任何事件；callback 只绑 127.0.0.1。
+
+**已知边界**（诚实记录，非缺陷）：① 一个 server 一个 provider 一个刷新锁，跨连接（login 的临时 provider 与 supervisor 的）理论上可并发刷新同一轮换 token——概率极低，登录是人工低频操作；② DCR 不可用的 server 无法接入（无静态 client 配置）；③ `protocol` 版本协商用 SDK 默认（legacy），未开 auto 探测（OpenCode 文档明说 auto 对 local legacy server 会多起一个进程）。
+
+**实验记录**：① 子进程保持期死亡不可见（M3）→ 掉线唯一信号是传输类调用失败；② `stdio_client` 的 errlog 必须是对应真实 fd 的 file 对象（anyio 会 `fileno()`），TextIO shim 会让 spawn 直接失败；③ `_hold` 等完不清 wake 事件会造成 healthy server 无限重连环（被 logout 测试抓到）。
+
 ## 11. 上游依据（对齐溯源）
 
 | 我们的决策 | OpenCode 依据 |

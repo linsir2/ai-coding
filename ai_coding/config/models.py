@@ -303,13 +303,41 @@ class MCPToolRules(BaseModel):
     deny: list[str] = Field(default_factory=list)
 
 
+class MCPOAuthConfig(BaseModel):
+    """How the operator's browser comes back (M4, remote servers only).
+
+    Deliberately two knobs.  ``client_id``/``client_secret`` are absent because
+    dynamic client registration (RFC 7591) is what the SDK does when the
+    authorization server advertises it, and most hosted MCP servers do; a
+    pre-registered client is a separate request with a real server behind it,
+    not a speculative field.
+    """
+
+    #: The local port the authorization redirect returns to.  19876 is
+    #: OpenCode's default for the same purpose.
+    callback_port: int = 19876
+    #: Empty means "ask for whatever the server advertises" — a scope guessed
+    #: here can only make a server refuse the request.
+    scope: str = ""
+
+
 class MCPServerConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     name: str = ""
+    #: ``local`` spawns a command; ``remote`` speaks Streamable HTTP (M4).
+    #: The two shapes are disjoint on purpose: a local server has no URL and a
+    #: remote one has no command, so one missing field is the whole check.
+    type: Literal["local", "remote"] = "local"
     #: argv as one list, OpenCode-v2 shape, so a pasted OpenCode config works.
     #: (Was ``command: str`` + ``args: list[str]``.)
     command: list[str] = Field(default_factory=list)
+    #: The endpoint for a remote server (M4).
+    url: str = ""
+    #: Sent with every request, e.g. an API key a proxy wants (M4).
+    headers: dict[str, str] = Field(default_factory=dict)
+    #: Present on a remote server that needs the operator to sign in.
+    oauth: MCPOAuthConfig | None = None
     # Extra environment variables for the child process (merged over a safe
     # default set) and its working directory (R2d).  (Was ``env``.)
     environment: dict[str, str] = Field(default_factory=dict)

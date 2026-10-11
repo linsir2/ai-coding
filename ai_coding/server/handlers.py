@@ -503,6 +503,53 @@ def make_handlers(
             return {"ok": False, "reason": f"no connectable MCP server named '{name}'"}
         return {"ok": True}
 
+    def mcp_login(params: dict[str, Any]) -> dict[str, Any]:
+        """M4: sign a remote server in (the panel's needs_auth action).
+
+        It waits on a human — browser, consent screen, redirect back — so it
+        cannot hold this call: the reply means "started", and what happened
+        arrives the way every other MCP state change does, as events the dialog
+        reads.  Same shape as ``session.turn``'s long work.
+        """
+        manager = getattr(world, "mcp", None)
+        if manager is None:
+            return {"ok": False, "reason": "no MCP manager in this world"}
+        name = str(params.get("server") or "")
+        if not name:
+            return {"ok": False, "reason": "missing server name"}
+
+        async def run_login() -> None:
+            try:
+                await manager.login(name)
+            except Exception as exc:  # noqa: BLE001 — a bug must not hang the UI
+                _log.exception("mcp login failed outside the manager")
+                service.notify(
+                    "event",
+                    {
+                        "type": "mcp.login.finished",
+                        "data": {
+                            "server": name,
+                            "ok": False,
+                            "reason": str(exc)[:300],
+                        },
+                    },
+                )
+
+        future = service.spawn(run_login())
+        future.add_done_callback(lambda _f: None)
+        return {"ok": True}
+
+    def mcp_logout(params: dict[str, Any]) -> dict[str, Any]:
+        """M4: forget a remote server's token; it returns to needs_auth."""
+        manager = getattr(world, "mcp", None)
+        if manager is None:
+            return {"ok": False, "reason": "no MCP manager in this world"}
+        name = str(params.get("server") or "")
+        if not name:
+            return {"ok": False, "reason": "missing server name"}
+        verdict: dict[str, Any] = manager.logout(name)
+        return verdict
+
     def mcp_list(params: dict[str, Any]) -> dict[str, Any]:
         """Rows for the MCP dialog: what was configured and what came of it.
 
@@ -536,5 +583,7 @@ def make_handlers(
         "session.stats": session_stats,
         "mcp.list": mcp_list,
         "mcp.connect": mcp_connect,
+        "mcp.login": mcp_login,
+        "mcp.logout": mcp_logout,
         "shutdown": shutdown_handler,
     }

@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { mcpRowCanConnect, mcpStatusLabel, mcpStatusTone, mcpToolNote } from "../src/util/mcp"
+import {
+  mcpRowCanConnect,
+  mcpRowCanLogin,
+  mcpStatusLabel,
+  mcpStatusTone,
+  mcpToolNote,
+} from "../src/util/mcp"
 
 /**
  * MCP-MCP T6: the panel's words.  Four states, and the only one that needs
@@ -13,6 +19,7 @@ describe("mcpStatusLabel", () => {
     expect(mcpStatusLabel("filtered")).toBe("已过滤")
     expect(mcpStatusLabel("off")).toBe("未启用")
     expect(mcpStatusLabel("connecting")).toBe("Connecting …")
+    expect(mcpStatusLabel("needs_auth")).toBe("Sign in required →")
   })
 })
 
@@ -24,6 +31,7 @@ describe("mcpStatusTone", () => {
     expect(mcpStatusTone("filtered")).toBe("warn")
     expect(mcpStatusTone("off")).toBe("muted")
     expect(mcpStatusTone("connecting")).toBe("muted")
+    expect(mcpStatusTone("needs_auth")).toBe("warn")
   })
 })
 
@@ -40,6 +48,22 @@ describe("mcpRowCanConnect", () => {
     expect(mcpRowCanConnect("filtered")).toBe(false)
     expect(mcpRowCanConnect("off")).toBe(false)
     expect(mcpRowCanConnect("connecting")).toBe(false)
+  })
+})
+
+/**
+ * M4: the other waiting state gets the *other* action.  A needs_auth server
+ * answered 401, so re-running a connect would only 401 again — the row's
+ * action starts a sign-in instead.
+ */
+describe("mcpRowCanLogin", () => {
+  test("only a needs_auth row can be signed in", () => {
+    expect(mcpRowCanLogin("needs_auth")).toBe(true)
+    expect(mcpRowCanLogin("failed")).toBe(false)
+    expect(mcpRowCanLogin("connected")).toBe(false)
+    expect(mcpRowCanLogin("filtered")).toBe(false)
+    expect(mcpRowCanLogin("off")).toBe(false)
+    expect(mcpRowCanLogin("connecting")).toBe(false)
   })
 })
 

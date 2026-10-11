@@ -227,9 +227,9 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         exitWith("ai-coding: backend connection closed")
         return
       }
-      // M3: a supervisor reconnecting in the background changes what the MCP
-      // panel should say, so the open dialog re-reads its rows.
-      if (event.type === "mcp.status.changed") {
+      // M3/M4: a supervisor settling a server, or a sign-in finishing, changes
+      // what the MCP panel should say, so the open dialog re-reads its rows.
+      if (event.type === "mcp.status.changed" || event.type === "mcp.login.finished") {
         setMcpRevision((n) => n + 1)
         return
       }

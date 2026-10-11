@@ -11,7 +11,16 @@
  * can actually see (OpenCode's `pending` words it, `Connecting …`).
  */
 
-export type McpStatus = "connected" | "failed" | "filtered" | "off" | "connecting"
+export type McpStatus =
+  | "connected"
+  | "failed"
+  | "filtered"
+  | "off"
+  | "connecting"
+  // M4: a remote server that answered 401 — waiting on the operator, not on a
+  // timer.  OpenCode words it "Sign in required →", and the arrow is literal:
+  // the row's action starts a sign-in.
+  | "needs_auth"
 
 export interface McpServer {
   name: string
@@ -39,6 +48,8 @@ export function mcpStatusLabel(status: McpStatus): string {
       return "已过滤"
     case "connecting":
       return "Connecting …"
+    case "needs_auth":
+      return "Sign in required →"
     case "off":
       return "未启用"
   }
@@ -57,6 +68,8 @@ export function mcpStatusTone(status: McpStatus): McpTone {
     // Not settled either way yet: the neutral colour is the honest one.
     case "connecting":
       return "muted"
+    case "needs_auth":
+      return "warn"
     case "off":
       return "muted"
   }
@@ -72,6 +85,17 @@ export function mcpStatusTone(status: McpStatus): McpTone {
  */
 export function mcpRowCanConnect(status: McpStatus): boolean {
   return status === "failed"
+}
+
+/**
+ * Whether a row's action is a sign-in rather than a reconnect (M4).
+ *
+ * Exactly one state offers it, and it is not the same state as a reconnect: a
+ * needs_auth server is waiting on a human, so the action opens a browser rather
+ * than re-running a connect that will only 401 again.
+ */
+export function mcpRowCanLogin(status: McpStatus): boolean {
+  return status === "needs_auth"
 }
 
 /** `3 tools`, or `1 / 3 tools` when a whitelist was in play. */

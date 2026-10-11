@@ -1,0 +1,468 @@
+"""M4: remote MCP servers over Streamable HTTP, and the OAuth that guards them.
+
+The transport is the SDK's (``streamable_http_client``), and so is every part of
+the OAuth flow except the three things only an application can do: keep the
+tokens, open the browser, and answer the redirect.  Those three are what this
+file pins, together with the state machine around them — a server that needs a
+sign-in is a *state*, not a retry, so the supervisor parks instead of hammering
+the authorization server's metadata endpoint once a second.
+
+The fake authorization server in here is a real HTTP server: the flow under test
+is a real DCR, a real PKCE exchange, a real redirect and a real token request.
+The only thing simulated is the human — ``/authorize`` redirects straight to the
+callback, which is what a real server does after the operator consents.
+"""
+
+import asyncio
+import json
+import time
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
+import pytest_asyncio
+
+from ai_coding.config.models import (
+    MCPConfig,
+    MCPOAuthConfig,
+    MCPServerConfig,
+    MCPTimeout,
+)
+from ai_coding.core.mcp import MCPManager
+
+pytestmark = pytest.mark.asyncio
+
+
+# ---- the fake authorization server + MCP endpoint --------------------------
+
+
+class _AsState:
+    """What the fake AS has done, so a test can assert on the dance."""
+
+    def __init__(self) -> None:
+        self.registrations: list[dict] = []
+        self.token_grants: list[dict] = []
+        self.authorizations: list[dict] = []
+        self.code_to_issue = "code-123"
+        self.refused = False
+
+
+class _FakeAsHandler(BaseHTTPRequestHandler):
+    """Serves the well-knowns, /register, /authorize, /token — and the MCP
+    endpoint itself, JSON-only (the SDK's client accepts application/json)."""
+
+    def log_message(self, *args) -> None:  # keep the test output readable
+        return None
+
+    @property
+    def state(self) -> _AsState:
+        return self.server.state  # type: ignore[attr-defined]
+
+    def _json(self, payload: dict, status: int = 200) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:
+        path = urllib.parse.urlparse(self.path).path
+        base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        if path == "/authorize":
+            # A real AS redirects here once the operator consents; the fake one
+            # does it immediately.  redirect_uri and state come from the query,
+            # so the redirect lands on whatever callback port the client chose.
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            redirect_uri = (query.get("redirect_uri") or [""])[0]
+            state = (query.get("state") or [""])[0]
+            self.send_response(302)
+            target = f"{redirect_uri}?code={self.state.code_to_issue}&state={state}"
+            self.send_header("Location", target)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if path == "/mcp":
+            # The spec's answer for "no server-initiated stream": the client
+            # must not treat it as an error (streamable_http.py's GET path).
+            self.send_response(405)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if path == "/.well-known/oauth-protected-resource/mcp":
+            self._json(
+                {"resource": f"{base}/mcp", "authorization_servers": [base]}
+            )
+            return
+        if path == "/.well-known/oauth-authorization-server":
+            self._json(
+                {
+                    "issuer": base,
+                    "authorization_endpoint": f"{base}/authorize",
+                    "token_endpoint": f"{base}/token",
+                    "registration_endpoint": f"{base}/register",
+                    "response_types_supported": ["code"],
+                    "grant_types_supported": ["authorization_code", "refresh_token"],
+                    "code_challenge_methods_supported": ["S256"],
+                }
+            )
+            return
+        self._json({"error": "not_found"}, status=404)
+
+    def do_POST(self) -> None:
+        path = urllib.parse.urlparse(self.path).path
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        form = urllib.parse.parse_qs(body.decode())
+        flat = {k: v[0] for k, v in form.items()}
+        base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+        if path == "/register":
+            self.state.registrations.append(flat)
+            self._json({"client_id": "fake-client", "client_id_issued_at": int(time.time())})
+            return
+
+        if path == "/token":
+            self.state.token_grants.append(flat)
+            self._json(
+                {
+                    "access_token": "token-abc",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                    "refresh_token": "refresh-xyz",
+                }
+            )
+            return
+
+        if path == "/mcp":
+            # The MCP endpoint: requires a bearer token, then answers JSON-RPC.
+            if self.headers.get("Authorization") != "Bearer token-abc":
+                self.send_response(401)
+                self.send_header(
+                    "WWW-Authenticate",
+                    f'Bearer resource_metadata="{base}/.well-known/oauth-protected-resource/mcp"',
+                )
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            request = json.loads(body)
+            method = request.get("method")
+            if method == "initialize":
+                self._json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "result": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "fake-remote", "version": "1"},
+                        },
+                    }
+                )
+            elif method == "tools/list":
+                self._json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "result": {
+                            "tools": [
+                                {
+                                    "name": "read_file",
+                                    "description": "Read a file",
+                                    "inputSchema": {"type": "object"},
+                                }
+                            ]
+                        },
+                    }
+                )
+            else:
+                self._json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request.get("id"),
+                        "error": {"code": -32601, "message": "nope"},
+                    }
+                )
+            return
+
+        self._json({"error": "not_found"}, status=404)
+
+    def do_HEAD(self) -> None:  # some SDK paths probe with HEAD first
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+class _FakeAs:
+    """The fake authorization server, on a real port, in a real thread."""
+
+    def __init__(self) -> None:
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeAsHandler)
+        self.server.state = _AsState()  # type: ignore[attr-defined]
+        self.port = self.server.server_address[1]
+
+    @property
+    def base(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    @property
+    def state(self) -> _AsState:
+        return self.server.state  # type: ignore[attr-defined]
+
+    def start(self) -> None:
+        import threading
+
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest_asyncio.fixture
+async def fake_as():
+    server = _FakeAs()
+    server.start()
+    try:
+        yield server
+    finally:
+        server.stop()
+
+
+def _remote(name: str, base: str, **kwargs) -> MCPServerConfig:
+    kwargs.setdefault("oauth", MCPOAuthConfig(callback_port=0))
+    return MCPServerConfig(
+        name=name,
+        type="remote",
+        url=f"{base}/mcp",
+        timeout=MCPTimeout(startup=5000, catalog=5000),
+        **kwargs,
+    )
+
+
+async def _until(predicate, timeout: float = 10.0, step: float = 0.02) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(step)
+    return predicate()
+
+
+# ---- the fake AS's /authorize (a real redirect to the callback) -----------
+#
+# The SDK calls redirect_handler(authorization_url); the "browser" then has to
+# visit it.  A real AS answers that visit with a 302 to the redirect URI once
+# the operator consents, so this is the one endpoint the fake AS still needs.
+
+
+def _patch_authorize(monkeypatch) -> None:
+    """Simulate the browser: follow the authorize URL to the callback.
+
+    Only ``webbrowser.open`` is patched — the call the production redirect
+    handler itself makes — so the handler, the callback server and the whole
+    SDK flow are the real ones.
+    """
+    import urllib.request
+    import webbrowser
+
+    def browser(url: str) -> bool:
+        """Follow the authorize URL the way a browser would: the 302 lands on
+        the callback server.  Synchronous, because the production handler runs
+        this off the loop in an executor thread.
+        """
+        try:
+            urllib.request.urlopen(url, timeout=10)
+        except OSError:
+            return False
+        return True
+
+    monkeypatch.setattr(webbrowser, "open", browser)
+
+
+# ---- R1: the token store --------------------------------------------------
+
+
+async def test_tokens_round_trip_and_are_scoped_per_server(tmp_path, monkeypatch):
+    from mcp.shared.auth import OAuthToken
+
+    from ai_coding.core.mcp import _auth_store_path, _TokenStore
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    store = _TokenStore("remote-one")
+    other = _TokenStore("remote-two")
+
+    await store.set_tokens(OAuthToken(access_token="t1", token_type="Bearer"))
+    await other.set_tokens(OAuthToken(access_token="t2", token_type="Bearer"))
+
+    assert (await store.get_tokens()).access_token == "t1"
+    assert (await other.get_tokens()).access_token == "t2"
+    # The file is a secret: 0600, and outside the repo by construction.
+    mode = oct(_auth_store_path().stat().st_mode & 0o777)
+    assert mode == "0o600"
+
+
+async def test_logout_forgets_only_that_server(tmp_path, monkeypatch):
+    from mcp.shared.auth import OAuthToken
+
+    from ai_coding.core.mcp import _TokenStore
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    store, other = _TokenStore("a"), _TokenStore("b")
+    await store.set_tokens(OAuthToken(access_token="t1", token_type="Bearer"))
+    await other.set_tokens(OAuthToken(access_token="t2", token_type="Bearer"))
+
+    store.clear()
+
+    assert await store.get_tokens() is None
+    assert (await other.get_tokens()).access_token == "t2"
+
+
+# ---- R2/R3: needs_auth is a state, not a retry ----------------------------
+
+
+async def test_a_server_that_needs_a_login_is_a_state_not_a_retry(fake_as, monkeypatch):
+    from ai_coding.core import mcp as mcp_module
+
+    monkeypatch.setattr(mcp_module, "_BACKOFF_MIN", 0.01)
+    manager = MCPManager(
+        MCPConfig(enabled=True, servers=[_remote("r", fake_as.base)]),
+        session_factory=lambda server: (_ for _ in ()).throw(AssertionError("local factory")),
+    )
+    await manager.open_all()
+
+    assert await _until(lambda: manager.servers()[0]["status"] == "needs_auth")
+    # The state is the whole point: the supervisor must NOT be re-running
+    # metadata discovery against the AS once a second.
+    await asyncio.sleep(0.3)
+    row = manager.servers()[0]
+    assert row["status"] == "needs_auth"
+    # The SDK refuses at the first thing a non-interactive connect lacks: with
+    # no redirect URIs there is nothing to send the operator to.  Either message
+    # means the same thing to the row — needs_auth — and only a login changes it.
+    assert "No redirect URIs provided" in row["detail"]
+    assert len(fake_as.state.authorizations) == 0  # never even asked the operator
+    await manager.aclose()
+
+
+async def test_a_plain_remote_failure_still_backs_off(fake_as, monkeypatch):
+    """No regression: M4's auth parking does not swallow M3's retry loop."""
+    from ai_coding.core import mcp as mcp_module
+
+    monkeypatch.setattr(mcp_module, "_BACKOFF_MIN", 0.02)
+    manager = MCPManager(
+        MCPConfig(enabled=True, servers=[_remote("r", fake_as.base)]),
+        session_factory=lambda server: (_ for _ in ()).throw(AssertionError("local factory")),
+    )
+    await manager.open_all()
+
+    # A URL that answers 404 on every well-known is a plain failure: it retries.
+    dead = _remote("r", "http://127.0.0.1:1")
+    manager2 = MCPManager(MCPConfig(enabled=True, servers=[dead]))
+    await manager2.open_all()
+    assert await _until(lambda: manager2.servers()[0]["status"] == "failed")
+    await asyncio.sleep(0.1)
+    assert manager2.servers()[0]["status"] == "failed"
+    await manager.aclose()
+    await manager2.aclose()
+
+
+# ---- R4: the whole dance --------------------------------------------------
+
+
+async def test_login_runs_the_real_flow_and_the_server_comes_up(fake_as, tmp_path, monkeypatch):
+    from ai_coding.core import mcp as mcp_module
+
+    monkeypatch.setattr(mcp_module, "_BACKOFF_MIN", 0.01)
+    monkeypatch.delenv("AI_CODING_MCP", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    _patch_authorize(monkeypatch)
+
+    manager = MCPManager(
+        MCPConfig(
+            enabled=True,
+            servers=[_remote("r", fake_as.base, oauth=MCPOAuthConfig(callback_port=0))],
+        ),
+        session_factory=lambda server: (_ for _ in ()).throw(AssertionError("local factory")),
+    )
+    await manager.open_all()
+    assert await _until(lambda: manager.servers()[0]["status"] == "needs_auth")
+
+    result = await manager.login("r", timeout=15)
+
+    assert result["ok"] is True, result
+    # DCR happened, the token was exchanged, and it landed on disk.
+    assert len(fake_as.state.registrations) == 1
+    assert fake_as.state.token_grants[0]["grant_type"] == "authorization_code"
+    assert fake_as.state.token_grants[0]["code_verifier"]  # PKCE, not a plain code
+    from ai_coding.core.mcp import _TokenStore
+
+    assert (await _TokenStore("r").get_tokens()).access_token == "token-abc"
+    # And the supervisor, woken, connected with it — tools and all.
+    assert await _until(lambda: bool(manager.available()))
+    row = manager.servers()[0]
+    assert row["status"] == "connected"
+    assert row["toolCount"] == 1
+    assert "read_file" in [h.name for _s, handles in manager.available() for h in handles]
+    await manager.aclose()
+
+
+async def test_login_times_out_cleanly_when_nobody_consents(fake_as, tmp_path, monkeypatch):
+    from ai_coding.core import mcp as mcp_module
+
+    monkeypatch.setattr(mcp_module, "_BACKOFF_MIN", 0.01)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    manager = MCPManager(
+        MCPConfig(
+            enabled=True,
+            servers=[_remote("r", fake_as.base, oauth=MCPOAuthConfig(callback_port=0))],
+        ),
+        session_factory=lambda server: (_ for _ in ()).throw(AssertionError("local factory")),
+    )
+    await manager.open_all()
+    assert await _until(lambda: manager.servers()[0]["status"] == "needs_auth")
+
+    # No browser follow: the callback never arrives, and login says so.
+    result = await manager.login("r", timeout=0.6)
+
+    assert result["ok"] is False
+    assert "callback" in result["reason"]
+    assert manager.servers()[0]["status"] == "needs_auth"  # back where it was
+    await manager.aclose()
+
+
+async def test_logout_sends_the_server_back_to_needs_auth(fake_as, tmp_path, monkeypatch):
+    from ai_coding.core import mcp as mcp_module
+
+    monkeypatch.setattr(mcp_module, "_BACKOFF_MIN", 0.01)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    _patch_authorize(monkeypatch)
+
+    manager = MCPManager(
+        MCPConfig(
+            enabled=True,
+            servers=[_remote("r", fake_as.base, oauth=MCPOAuthConfig(callback_port=0))],
+        ),
+    )
+    await manager.open_all()
+    assert await _until(lambda: manager.servers()[0]["status"] == "needs_auth")
+    assert (await manager.login("r", timeout=15))["ok"] is True
+    assert await _until(lambda: bool(manager.available()))
+
+    assert manager.logout("r") == {"ok": True}
+
+    assert await _until(lambda: manager.servers()[0]["status"] == "needs_auth")
+    assert manager.available() == []
+    await manager.aclose()
+
+
+async def test_login_and_logout_name_what_they_refuse():
+    manager = MCPManager(
+        MCPConfig(
+            enabled=True,
+            servers=[MCPServerConfig(name="local", command=["x"])],
+        )
+    )
+    assert (await manager.login("nope"))["ok"] is False
+    assert (await manager.login("local"))["ok"] is False  # not remote
+    assert manager.logout("nope")["ok"] is False

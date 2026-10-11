@@ -495,6 +495,52 @@ async def test_mcp_connect_with_no_manager_is_an_error_not_a_crash(ipc):
 
 
 @pytest.mark.asyncio
+async def test_mcp_login_reaches_the_managers_login(ipc):
+    """M4: the panel's sign-in action is a real login, and the world is the
+    only place that knows the manager."""
+    world, _service, client = ipc
+    started: list[str] = []
+
+    async def login(name: str, timeout: float = 300.0):
+        started.append(name)
+        return {"ok": True}
+
+    world.mcp = SimpleNamespace(login=login, logout=lambda name: {"ok": True})
+
+    assert client.request("mcp.login", {"server": "github"}) == {"ok": True}
+    # The reply means "started": the login itself is spawned, so the call lands
+    # on the next loop pass — the same shape session.turn uses.
+    await asyncio.sleep(0.05)
+    assert started == ["github"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_logout_answers_with_the_managers_verdict(ipc):
+    world, _service, client = ipc
+    world.mcp = SimpleNamespace(
+        login=None, logout=lambda name: {"ok": False, "reason": "nope"}
+    )
+
+    result = client.request("mcp.logout", {"server": "ghost"})
+
+    assert result == {"ok": False, "reason": "nope"}
+
+
+@pytest.mark.asyncio
+async def test_mcp_login_with_no_manager_is_an_error_not_a_crash(ipc):
+    _world, _service, client = ipc
+    assert client.request("mcp.login", {"server": "fs"})["ok"] is False
+    assert client.request("mcp.logout", {"server": "fs"})["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_login_without_a_name_is_an_error(ipc):
+    world, _service, client = ipc
+    world.mcp = SimpleNamespace(login=None, logout=lambda name: {"ok": True})
+    assert client.request("mcp.login", {})["ok"] is False
+
+
+@pytest.mark.asyncio
 async def test_mcp_list_with_no_manager_is_an_empty_list_not_an_error(ipc):
     """T5b: a world built before mcp existed (or a test's fake world) must not
     turn a read-only panel into a crash."""
