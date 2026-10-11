@@ -201,6 +201,20 @@ mcp_call(server: str, tool: str, input: object) → ToolResult
 
 **实验记录**：① 子进程保持期死亡不可见（M3）→ 掉线唯一信号是传输类调用失败；② `stdio_client` 的 errlog 必须是对应真实 fd 的 file 对象（anyio 会 `fileno()`），TextIO shim 会让 spawn 直接失败；③ `_hold` 等完不清 wake 事件会造成 healthy server 无限重连环（被 logout 测试抓到）。
 
+## 4C. M5 ADR：引导式接入（2026-10-10）
+
+**决策**：面板可新增，接入走三步向导（kind → 字段 → 信任）；palette 从 `ctrl+p` 改成 `<leader>p`；运行时新增的 server 落**旁挂文件** `mcp.local.yaml`，绝不程序化改写 `config.local.yaml`；向导不做删除/修改。
+
+**理由**：① `config.local.yaml` 存着注释和 API key，代码重写它等于毁掉两者，旁挂文件由代码独占（追加式写入、0600、已 gitignore），碰撞交给 manager 报错而不是静默覆盖；② OAuth 不单独提问——remote 返回 401 走 M4 已有的 `needs_auth`→登录，问一次等于把 M4 的状态机在向导里重写一遍；③ `ctrl+p` 与 VS Code 撞车，`<leader>p` 是 OpenCode 自己的约定。
+
+**信任边界**：信任选择写在向导里而不是让用户事后改配置——`auto_approve` + `PermissionGate.trust_server()` 一次完成，拒绝仍留 deny list；环境变量/header 不经向导，避免在一个明文输入框里收密钥。
+
+**实现约束**（都是这轮真机测出来的，不是推演）：
+- `MCPManager.adopt()` 只做数据变更与校验，`start_supervisor()` 是唯一创建 supervisor task 的入口。IPC handler 跑在 serve 线程，不能 `asyncio.create_task`，必须走 `service.spawn()`（与 `session.turn` 同理）。
+- **`load_app` 也必须合并 sidecar**：world 传给 manager 的是 `app_cfg.mcp` 而不是 `load_mcp()` 的结果，只改 `load_mcp` 会导致"重启后新增的 server 消失"。这是本轮唯一的真实 bug，已由 `test_the_sidecar_merges_into_the_app_config_too` 锁住。
+- 向导 input 必须**只读不写**：对活动 input 调 `value` / `deleteLine()` 会让它渲染出自己不再持有的文本；`focused` 作为 JSX 属性（而非 `dialog-select` 那样的 `ref` + `focus()`）同样如此。input 也不该和 `› ` 标记放在同一个 row flex box 里——那个布局会把 input 排得比文本窄。
+- **已知缺陷（非本轮引入）**：opentui 0.5.17 的 input 在快速输入长文本时重绘会少画开头几个字符（`.venv/bin` 显示成 `env/bin`）。palette 自带的搜索框用同一串同样如此，所以是 opentui 的重绘问题；提交和落盘的值始终完整（sidecar 已证）。
+
 ## 11. 上游依据（对齐溯源）
 
 | 我们的决策 | OpenCode 依据 |
@@ -215,3 +229,5 @@ mcp_call(server: str, tool: str, input: object) → ToolResult
 | OAuth 故意不 redirect，落 needs_auth | client.ts:149、oauth.ts:135 |
 | token 刷新并发去重 | oauth.ts:29 refreshes Map |
 | 运行时 add 不落盘（我们不做） | index.ts:635 overrides map |
+| 面板只读、增删改走配置文件（我们反转） | index.ts:410 tools → edit |
+| `<leader>p` 进 palette（M5） | packages/tui/src/routes/palette.tsx:32 keybind hint |

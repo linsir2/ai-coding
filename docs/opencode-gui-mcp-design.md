@@ -124,6 +124,7 @@ props：`{ client: IpcClient }`。
 - 选项：`title=name`、`description=mcpToolNote(server)`、`footer=server.detail`、`category` 按 status 分组（`已连接` / `有问题`）
 - `current`：无（没有"当前 server"概念）
 - ~~整个面板**只读，无逐行动作**~~ **M3 起被推翻并记录在此**：该结论的前提「启动时一次性连接，没有重连机制」被外部 MCP 的 M3 消除——现在每个 server 有永久 backoff 重连的 supervisor，`mcp.connect` 唤醒一次立即重试。半自动面板的前提成立了，failed 行的 enter 就是那个动作（且仅 failed 行：connected 无可重试、disabled 不可连、connecting 正在试）。原判据（没有背后机制的按钮是假实现）依然有效，变的是机制是否存在。
+- ~~**不做 slash `/mcps`**~~ **M5 起被推翻并记录在此**：面板回答「连了谁的 server、什么状态」，正是 slash 目录的用途。现在 `/mcp` 打开同一面板，且面板多一个 `a` 动作打开引导式连接向导。理由：操作者要从 slash 发现 MCP，且「连接」被要求是引导式（原先「不做运行时增删」的前提是没有任何 UI 要加 server；现在有）。**删/改仍不做**：删除没有出现过的需求，且误删代价高。：该结论的前提「启动时一次性连接，没有重连机制」被外部 MCP 的 M3 消除——现在每个 server 有永久 backoff 重连的 supervisor，`mcp.connect` 唤醒一次立即重试。半自动面板的前提成立了，failed 行的 enter 就是那个动作（且仅 failed 行：connected 无可重试、disabled 不可连、connecting 正在试）。原判据（没有背后机制的按钮是假实现）依然有效，变的是机制是否存在。
 - footer：`esc close`
 
 为什么用 `DialogSelect`：它已提供标题+esc、fuzzy 搜索、分组、footer 行。MCP 面板是一个纯只读列表，与 `dialog-skills.tsx` 同构但更简单。
@@ -196,7 +197,7 @@ config.mcp
 |---|---|
 | 逐 server 的**重连/断开/启用**按钮 | 我们的 MCP 是启动时一次性连接，没有重连机制。OpenCode 有，**但那要连着改连接生命周期**，不是加个按钮。要么单开一轮做重连，要么在 detail 里写"重启后生效" |
 | `needs_auth` 态 | 无 OAuth 型 server；死代码 |
-| slash `/mcps` | OpenCode `dialog-mcp.tsx` 有 `slash:{name:"mcps"}`；我们的 slash 目录已砍掉全部同义入口，保持一致 |
+| slash `/mcps` | ~~OpenCode `dialog-mcp.tsx` 有 `slash:{name:"mcps"}`；我们的 slash 目录已砍掉全部同义入口~~ **M5 起推翻**：加 `/mcp`（见上），因为操作者要求 slash 能发现并引导连接 |
 | sidebar 常驻 MCP 状态 | OpenCode 有 `feature-plugins/sidebar/mcp.tsx`；我们的 sidebar 固定四项，且 MCP 是启动态、不需要常看 |
 | 显示 `auto_approve` | 配置里有（`models.py:294`），但这会把"要不要审批"和"连没连上"混在一起。要显示就单开一项，本轮不混 |
 

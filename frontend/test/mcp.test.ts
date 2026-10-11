@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  parseCommandLine,
   mcpRowCanConnect,
   mcpRowCanLogin,
   mcpStatusLabel,
@@ -41,6 +42,35 @@ describe("mcpStatusTone", () => {
  * retrying a disabled one is impossible, and retrying a connecting one
  * duplicates what is already happening.
  */
+/**
+ * M5: the wizard's command field is one line; argv is what the config wants.
+ */
+describe("parseCommandLine", () => {
+  test("splits a plain command into argv", () => {
+    expect(parseCommandLine("python -m srv --flag")).toEqual(["python", "-m", "srv", "--flag"])
+  })
+
+  test("keeps a quoted path whole", () => {
+    expect(parseCommandLine('npx -y "@modelcontextprotocol/server-github"')).toEqual([
+      "npx",
+      "-y",
+      "@modelcontextprotocol/server-github",
+    ])
+    expect(parseCommandLine("python '/tmp/my server.py'")).toEqual([
+      "python",
+      "/tmp/my server.py",
+    ])
+  })
+
+  test("extra whitespace produces no empty arguments", () => {
+    expect(parseCommandLine("  npx   -y  pkg  ")).toEqual(["npx", "-y", "pkg"])
+  })
+
+  test("an empty line is an empty argv", () => {
+    expect(parseCommandLine("   ")).toEqual([])
+  })
+})
+
 describe("mcpRowCanConnect", () => {
   test("only a failed row can be retried", () => {
     expect(mcpRowCanConnect("failed")).toBe(true)

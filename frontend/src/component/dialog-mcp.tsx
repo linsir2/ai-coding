@@ -5,8 +5,10 @@
  * startup, so a "reconnect" button would have been a control with nothing
  * behind it.  M3 changed that — a supervisor per server retries forever, and
  * `mcp.connect` wakes one now — so the failed row's enter key is that control.
- * It is the only action: a connected server has nothing to ask it, and a
- * disabled one cannot be connected at all.
+ * A connected server has nothing to ask it, and a disabled one cannot be
+ * connected at all.  M5 added the panel's second action, `ctrl+a`: the guided
+ * connect wizard, because "let me add one" has to start somewhere, and the
+ * panel that lists servers is the somewhere.
  *
  * Each row's line is `status · tool count`; the command sits under it and the
  * failure reason (or the dropped tool names) takes the row's footer.
@@ -20,6 +22,7 @@
  */
 
 import { createEffect, createSignal, onMount } from "solid-js"
+import type { SelectAction } from "../util/dialog-select"
 import type { IpcClient } from "../ipc"
 import type { SelectOption } from "../util/dialog-select"
 import { DialogSelect } from "./dialog-select"
@@ -41,6 +44,8 @@ export function DialogMcp(props: {
   client: IpcClient
   /** Bumped on every `mcp.status.changed`; the panel re-reads its rows. */
   revision?: () => number
+  /** Opens the guided connect wizard (M5); the app wires the dialog itself. */
+  onConnectNew?: () => void
 }) {
   const [rows, setRows] = createSignal<McpServer[]>([])
   const [error, setError] = createSignal("")
@@ -84,11 +89,29 @@ export function DialogMcp(props: {
           : undefined,
     }))
 
+  // A ctrl-combo, not a bare letter: the panel's search input has focus, so a
+  // plain "a" would be typed into the filter instead of reaching the binding
+  // (the same reason the sessions panel's delete is ctrl+d).
+  const actions = (): readonly SelectAction[] =>
+    props.onConnectNew
+      ? [{ key: "ctrl+a", title: "connect", onTrigger: props.onConnectNew }]
+      : []
+
   return (
     <DialogSelect
       title="MCP servers"
       options={options()}
-      footer={error() || (rows().length === 0 ? "没有配置 MCP 服务器" : "esc close")}
+      actions={actions()}
+      footer={
+        error() ||
+        [
+          rows().length === 0 ? "没有配置 MCP 服务器" : "",
+          props.onConnectNew ? "ctrl+a connect a new server" : "",
+          "esc close",
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      }
     />
   )
 }

@@ -15,7 +15,7 @@ export interface CommandRow {
   title: string
   description?: string
   group: string
-  /** True when the command opts into the Ctrl+P palette. */
+  /** True when the command opts into the palette (<leader>p, M5b). */
   palette: boolean
   /** The formatted keybinding hint, or "" when unbound. */
   shortcut: string

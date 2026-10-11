@@ -21,11 +21,16 @@ export interface SelectOption {
   onSelect?: () => void
 }
 
-/** A key-actuated action on the focused row (OpenCode's `actions`). */
+/**
+ * A key-actuated action.  It receives the focused row when there is one; a
+ * panel-level action (the MCP dialog's "connect a new server", which matters
+ * most when the list is *empty*) takes none and ignores it — which is why the
+ * parameter is optional rather than the call being guarded by a row existing.
+ */
 export interface SelectAction {
   key: string
   title: string
-  onTrigger: (option: SelectOption) => void
+  onTrigger: (option?: SelectOption) => void
 }
 
 /** Default fuzzysort threshold; the palette uses a stricter 0.7. */

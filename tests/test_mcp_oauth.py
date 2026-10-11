@@ -17,7 +17,9 @@ import asyncio
 import json
 import time
 import urllib.parse
+from contextlib import asynccontextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -249,6 +251,64 @@ async def _until(predicate, timeout: float = 10.0, step: float = 0.02) -> bool:
     return predicate()
 
 
+class _Scripted:
+    """A session whose ``call_tool`` raises what the script says."""
+
+    def __init__(self, raise_on_call: BaseException | None = None) -> None:
+        self._raise_on_call = raise_on_call
+        self.calls = 0
+
+    async def list_tools(self):
+        return SimpleNamespace(
+            tools=[SimpleNamespace(name="read_file", description="reads", input_schema={})]
+        )
+
+    async def call_tool(self, name, arguments=None, progress_callback=None):
+        self.calls += 1
+        if self._raise_on_call is not None:
+            raise self._raise_on_call
+        return SimpleNamespace(
+            content=[SimpleNamespace(text=f"ok:{name}")],
+            structured_content=None,
+            is_error=False,
+        )
+
+
+def _session() -> _Scripted:
+    return _Scripted()
+
+
+class _Factory:
+    """A session_factory that scripts what each attempt does.
+
+    The only instrumentation these tests need: how many attempts ran and when
+    each started — observed on the *factory*, not the manager, because watching
+    retries is a test's need and a production API only tests consume is what M1
+    deleted.
+    """
+
+    def __init__(self, script, delay: float = 0.0) -> None:
+        self.script = list(script)
+        self.delay = delay
+        self.attempts = 0
+        self.attempt_times: list[float] = []
+
+    def __call__(self, server):
+        attempt = self.attempts
+        self.attempts += 1
+        self.attempt_times.append(time.monotonic())
+
+        @asynccontextmanager
+        async def _cm():
+            await asyncio.sleep(self.delay)
+            item = self.script[attempt] if attempt < len(self.script) else self.script[-1]
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
+        return _cm()
+
+
 # ---- the fake AS's /authorize (a real redirect to the callback) -----------
 #
 # The SDK calls redirect_handler(authorization_url); the "browser" then has to
@@ -466,3 +526,72 @@ async def test_login_and_logout_name_what_they_refuse():
     assert (await manager.login("nope"))["ok"] is False
     assert (await manager.login("local"))["ok"] is False  # not remote
     assert manager.logout("nope")["ok"] is False
+
+
+# ---- M5: the wizard's backend ----------------------------------------------
+
+
+async def test_adopt_adds_the_server_and_supervises_it():
+    """Runtime add: the wizard's collected fields become a live supervisor."""
+    factory = _Factory([_session()])
+    manager = MCPManager(
+        MCPConfig(enabled=True, servers=[]), session_factory=factory
+    )
+    await manager.open_all()
+
+    verdict = manager.adopt(MCPServerConfig(name="fs", command=["fs"]))
+
+    assert verdict["ok"] is True
+    assert "fs" not in manager._supervisors  # adopt alone starts nothing
+    await manager.start_supervisor(manager._config.servers[-1])
+    assert await _until(lambda: bool(manager.available()))
+    assert manager.servers()[0]["name"] == "fs"
+    # The config now holds it too: a restart re-adopts the same server.
+    assert [s.name for s in manager._config.servers] == ["fs"]
+    await manager.aclose()
+
+
+def test_adopt_refuses_what_it_cannot_use():
+    from ai_coding.core.mcp import MCPManager as _M
+
+    manager = _M(MCPConfig(enabled=False))
+    assert manager.adopt(MCPServerConfig(name="x", command=["x"]))["ok"] is False
+    manager = _M(MCPConfig(enabled=True))
+    assert manager.adopt(MCPServerConfig(name="x"))["ok"] is False  # no command
+    assert manager.adopt(MCPServerConfig(name="x", type="remote"))["ok"] is False  # no url
+    assert manager.servers() == []
+
+
+async def test_adopt_refuses_a_duplicate_name():
+    """A second server with the same name would collide in the tool namespace;
+    the first one keeps the name and the row says so (M5)."""
+    manager = MCPManager(
+        MCPConfig(enabled=True, servers=[MCPServerConfig(name="fs", command=["x"])]),
+    )
+    await manager.open_all()
+
+    verdict = manager.adopt(MCPServerConfig(name="fs", command=["y"]))
+
+    assert verdict["ok"] is False
+    assert "fs" in verdict["reason"]
+    assert len(manager.servers()) == 1  # the original is untouched
+    await manager.aclose()
+
+
+def test_trusting_a_server_skips_its_prompts():
+    """The wizard's last step, as a gate method (M5).
+
+    The gate is built once from the config at startup, so a server added at
+    runtime has to be trusted on the live object too — otherwise the answer the
+    operator just gave would be ignored until the next start.
+    """
+    from ai_coding.security.permission_gate import PermissionDecision, PermissionGate
+
+    gate = PermissionGate()
+    assert gate.check("fs__read_file", {}) == PermissionDecision.WARN
+
+    gate.trust_server("fs")
+
+    assert gate.check("fs__read_file", {}) == PermissionDecision.ALLOW
+    # The same ordering guarantee from_config's trusted servers have.
+    assert gate.check("bash", {"command": "rm -rf /"}) == PermissionDecision.DENY

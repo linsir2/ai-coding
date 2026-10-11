@@ -827,9 +827,46 @@ class MCPManager:
                 # letting a config typo escape as a CLI traceback.
                 continue
             seen.add(server.name)
-            self._supervisors[server.name] = asyncio.create_task(
-                self._supervise(server), name=f"mcp-sup:{server.name}"
-            )
+            await self.start_supervisor(server)
+
+    def adopt(self, server: MCPServerConfig) -> dict[str, Any]:
+        """Take a server into the running process (the wizard's backend, M5).
+
+        Adds it to the config this manager holds — so ``servers()`` and a later
+        restart's ``load`` see the same set — and starts the same supervisor
+        ``open_all`` would have.  Returns the verdict rather than raising: the
+        caller is a panel, and "a server by that name already exists" is an
+        answer it should show, not a traceback.
+        """
+        if not self._config.enabled:
+            return {"ok": False, "reason": "MCP is disabled (mcp.enabled is false)"}
+        if any(existing.name == server.name for existing in self._config.servers):
+            return {
+                "ok": False,
+                "reason": f"a server named '{server.name}' already exists",
+            }
+        if not _is_connectable_shape(server):
+            missing = "command" if server.type == "local" else "url"
+            return {"ok": False, "reason": f"a {server.type} server needs a {missing}"}
+        self._config.servers.append(server)
+        self._publish(server.name)
+        return {"ok": True}
+
+    async def start_supervisor(self, server: MCPServerConfig) -> bool:
+        """Give one server its retry loop, if it does not have one (M5).
+
+        Separated from :meth:`adopt` because they run in different threads:
+        adopt is called from the IPC serve thread (a plain data change), while
+        this creates a task and must therefore run on the manager's loop — the
+        IPC layer marshals it with ``service.spawn``, the same wheel
+        ``session.turn`` uses.  Calling it directly is what ``open_all`` does.
+        """
+        if self._stop.is_set() or server.name in self._supervisors:
+            return False
+        self._supervisors[server.name] = asyncio.create_task(
+            self._supervise(server), name=f"mcp-sup:{server.name}"
+        )
+        return True
 
     async def _supervise(self, server: MCPServerConfig) -> None:
         """One server's connect-retry-hold loop, for the life of the process."""

@@ -37,7 +37,7 @@ export function StatusBar(props: {
         {`${formatTokens(props.tokens)} (${percentUsed(props.tokens, props.maxContextTokens)}%)`}
       </text>
       <text wrapMode="none" fg={theme.textMuted}>
-        ctrl+p commands
+        ctrl+x p commands
       </text>
       <text wrapMode="none" fg={theme.textMuted}>
         {`• ai-coding ${props.version}`}

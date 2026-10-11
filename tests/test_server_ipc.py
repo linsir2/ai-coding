@@ -541,6 +541,92 @@ async def test_mcp_login_without_a_name_is_an_error(ipc):
 
 
 @pytest.mark.asyncio
+async def test_mcp_add_adopts_and_persists_the_wizards_server(ipc, tmp_path):
+    """M5: the guided add is one round trip — adopt on the live manager, then
+    write the sidecar so a restart reconnects the same server."""
+    world, _service, client = ipc
+    adopted: list[dict] = []
+    started: list[str] = []
+
+    async def start_supervisor(server):
+        started.append(server.name)
+
+    world.mcp = SimpleNamespace(
+        adopt=lambda server: adopted.append(server.model_dump()) or {"ok": True},
+        start_supervisor=start_supervisor,
+        login=None,
+        logout=lambda name: {"ok": True},
+    )
+    world.config_path = str(tmp_path / "config.local.yaml")
+    (tmp_path / "config.local.yaml").write_text("mcp:\n  enabled: true\n", encoding="utf-8")
+
+    result = client.request(
+        "mcp.add",
+        {"name": "fs", "type": "local", "command": ["python", "-m", "srv"], "auto_approve": True},
+    )
+
+    assert result["ok"] is True
+    assert result["saved"].endswith("mcp.local.yaml")
+    assert adopted[0]["name"] == "fs"
+    assert adopted[0]["command"] == ["python", "-m", "srv"]
+    # And a supervisor was started for it, on the loop that serves IPC rather
+    # than one this thread has no right to create (M3 owns the retry/backoff).
+    # It is spawned, not awaited, so give the serve loop a turn to run it.
+    for _ in range(20):
+        if started:
+            break
+        await asyncio.sleep(0.01)
+    assert started == ["fs"]
+    # And it is on disk, so the next start loads it.
+    from ai_coding.config.loader import ConfigLoader
+
+    assert [s.name for s in ConfigLoader.load_mcp(tmp_path / "config.local.yaml").servers] == ["fs"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_add_refuses_what_the_manager_refuses(ipc):
+    world, _service, client = ipc
+    world.mcp = SimpleNamespace(
+        adopt=lambda server: {"ok": False, "reason": "already exists"},
+        login=None,
+        logout=lambda name: {"ok": True},
+    )
+    world.config_path = None
+
+    result = client.request("mcp.add", {"name": "fs", "type": "local", "command": ["x"]})
+
+    assert result == {"ok": False, "reason": "already exists"}
+
+
+@pytest.mark.asyncio
+async def test_mcp_add_with_no_manager_is_an_error_not_a_crash(ipc):
+    _world, _service, client = ipc
+    assert client.request("mcp.add", {"name": "fs"})["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_add_refuses_a_name_the_tools_cannot_carry(ipc):
+    """The name becomes `server__tool`; a space in it would be a tool name no
+    provider accepts, so the backend refuses it before adopting."""
+    world, _service, client = ipc
+    adopted: list[str] = []
+    world.mcp = SimpleNamespace(adopt=lambda server: adopted.append(server.name) or {"ok": True})
+
+    for bad in ("f fs", "zzfs.venv/bin", "a/b"):
+        result = client.request("mcp.add", {"name": bad, "type": "local", "command": ["x"]})
+        assert result["ok"] is False, bad
+        assert "letters" in result["reason"]
+    assert adopted == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_add_without_a_name_is_an_error(ipc):
+    world, _service, client = ipc
+    world.mcp = SimpleNamespace(adopt=lambda server: {"ok": True})
+    assert client.request("mcp.add", {"type": "local", "command": ["x"]})["ok"] is False
+
+
+@pytest.mark.asyncio
 async def test_mcp_list_with_no_manager_is_an_empty_list_not_an_error(ipc):
     """T5b: a world built before mcp existed (or a test's fake world) must not
     turn a read-only panel into a crash."""

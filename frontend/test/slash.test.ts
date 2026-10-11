@@ -7,7 +7,27 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { SLASH_COMMANDS, filterSlashCommands, slashQuery } from "../src/util/slash"
+import {
+  SLASH_COMMANDS,
+  filterSlashCommands,
+  slashQuery,
+  slashSelectionText,
+} from "../src/util/slash"
+
+/**
+ * M5b: `/mcp` is the entry the operator asked for — the MCP dialog had been
+ * reachable only from the palette, and a slash command that listed it was cut
+ * back in MCP-MCP §6.  Reversed on request: the panel answers "whose server
+ * did I connect", which is exactly what a slash catalogue is for.
+ */
+describe("mcp slash entry", () => {
+  test("/mcp runs the MCP dialog command", () => {
+    const entry = SLASH_COMMANDS.find((command) => command.name === "mcp")
+    expect(entry?.command).toBe("mcp.list")
+    // A keymap-backed entry submits nothing: the command runs instead.
+    expect(slashSelectionText(entry!)).toBeUndefined()
+  })
+})
 
 describe("slashQuery", () => {
   test("a slash at the start of the input triggers with the typed query", () => {

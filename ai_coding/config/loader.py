@@ -2,13 +2,41 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from .models import AppConfig, MCPConfig, _coerce_model
+from .models import AppConfig, MCPConfig, MCPServerConfig, _coerce_model
+
+_log = logging.getLogger(__name__)
+
+
+def _mcp_doc(doc: dict[str, Any], path: str | Path | None) -> dict[str, Any]:
+    """The ``mcp:`` section with any sidecar servers merged in (M5).
+
+    The main file's servers come first, then the ones the wizard added, so a
+    name collision is visible rather than silently resolved: the manager
+    refuses to adopt a duplicate, and the row says which server won.
+    """
+    section = dict(doc.get("mcp") or {})
+    sidecar = ConfigLoader.mcp_sidecar(path)
+    if sidecar is None or not sidecar.is_file():
+        return section
+    try:
+        extra = yaml.safe_load(sidecar.read_text(encoding="utf-8")) or []
+    except yaml.YAMLError:
+        _log.warning("mcp.local.yaml is not valid YAML; ignoring it")
+        return section
+    if not isinstance(extra, list):
+        return section
+    servers = list(section.get("servers") or [])
+    servers.extend(entry for entry in extra if isinstance(entry, dict))
+    section["servers"] = servers
+    return section
 
 
 def _to_snake(key: str) -> str:
@@ -85,6 +113,11 @@ class ConfigLoader:
             for name, entry in models_raw.items()
         }
         doc["models"] = coerced
+        # The app config carries its own ``mcp:`` root — that is the one
+        # ``build_world`` hands the manager — so the sidecar has to be merged
+        # into this document as well, or a wizard-added server is invisible on
+        # the next start even though ``load_mcp`` can see it.
+        doc["mcp"] = _mcp_doc(doc, path)
         return AppConfig.model_validate(doc)
 
     @staticmethod
@@ -96,7 +129,44 @@ class ConfigLoader:
     @staticmethod
     def load_mcp(path: str | Path | None = None) -> MCPConfig:
         doc = _normalize(ConfigLoader._read_doc(path))
-        return MCPConfig.model_validate(doc.get("mcp") or {})
+        return MCPConfig.model_validate(_mcp_doc(doc, path))
+
+    @staticmethod
+    def mcp_sidecar(path: str | Path | None = None) -> Path | None:
+        """Where runtime-added MCP servers live (``mcp.local.yaml``, M5).
+
+        A *sibling* of the config file, never the config file itself: that one
+        holds comments and the API key, so rewriting it from code would destroy
+        both.  Gitignored for the same reason ``config.local.yaml`` is.
+        """
+        base = Path(path) if path is not None else ConfigLoader.discover()
+        if base is None or not base.is_file():
+            return None
+        return base.parent / "mcp.local.yaml"
+
+    @staticmethod
+    def append_mcp_server(path: str | Path | None, server: MCPServerConfig) -> Path:
+        """Persist one runtime-added server to the sidecar (M5).
+
+        Write-merge-append over a file this code owns, so the operator's own
+        config is never touched.  Returns the file written.
+        """
+        sidecar = ConfigLoader.mcp_sidecar(path)
+        if sidecar is None:
+            raise FileNotFoundError("no config file to write mcp.local.yaml beside")
+        existing: list[Any] = []
+        if sidecar.is_file():
+            loaded = yaml.safe_load(sidecar.read_text(encoding="utf-8")) or []
+            if isinstance(loaded, list):
+                existing = loaded
+        existing.append(server.model_dump(mode="json", exclude_none=True))
+        sidecar.write_text(
+            yaml.safe_dump(existing, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        # The sidecar can carry environment variables, which are secrets.
+        os.chmod(sidecar, 0o600)
+        return sidecar
 
 
 class ConfigManager:

@@ -24,6 +24,9 @@ class AppWorld:
     """Everything one TUI run owns; closed together in ``aclose``."""
 
     config: Any
+    #: Where the config was loaded from, so a runtime-added MCP server has
+    #: somewhere to persist beside (M5, ``mcp.local.yaml``).
+    config_path: str | None
     engine: Any
     registry: Any
     sessions: Any
@@ -117,6 +120,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     )
     return AppWorld(
         config=app_cfg,
+        config_path=str(path) if path else None,
         engine=engine,
         registry=registry,
         sessions=sessions,

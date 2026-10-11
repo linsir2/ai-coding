@@ -250,6 +250,17 @@ class PermissionGate:
             f"unknown tool '{tool_name}' requires confirmation",
         )
 
+    def trust_server(self, name: str) -> None:
+        """Trust a server's tools from now on (M5, the wizard's last step).
+
+        The gate is built once from the config at startup, so a server added at
+        runtime has to be trusted on the *live* object — otherwise the answer
+        the operator just gave would be ignored until the next start, which is
+        the same set of rules from_config installs.
+        """
+        if name:
+            self._trusted_servers.add(str(name))
+
     def grant(self, tool_name: str, params: Mapping[str, Any]) -> str | None:
         """Remember exactly this call; return the key, or ``None`` if unnameable.
 

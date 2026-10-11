@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
@@ -539,6 +540,67 @@ def make_handlers(
         future.add_done_callback(lambda _f: None)
         return {"ok": True}
 
+    def mcp_add(params: dict[str, Any]) -> dict[str, Any]:
+        """M5: connect a server the wizard just collected (the guided add).
+
+        Adopt first, persist second: adopting validates against the live set
+        (a duplicate name, a missing command) and costs nothing to refuse,
+        while a failed write afterwards must be *reported* — a server that runs
+        this session but silently vanishes on the next start is the failure mode
+        this ordering exists to avoid.
+        """
+        manager = getattr(world, "mcp", None)
+        if manager is None:
+            return {"ok": False, "reason": "no MCP manager in this world"}
+        from ai_coding.config.loader import ConfigLoader
+        from ai_coding.config.models import MCPServerConfig
+
+        name = str(params.get("name") or "").strip()
+        kind = str(params.get("type") or "local")
+        if not name:
+            return {"ok": False, "reason": "a server needs a name"}
+        # The name is a tool prefix: ``server__tool`` is the name the gate, the
+        # catalog and the model all spell, so a space in it would produce tool
+        # names no provider accepts.
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            return {
+                "ok": False,
+                "reason": "a server name may only hold letters, digits, - and _",
+            }
+        server = MCPServerConfig(
+            name=name,
+            type="remote" if kind == "remote" else "local",
+            command=[str(part) for part in params.get("command") or []],
+            url=str(params.get("url") or ""),
+            auto_approve=bool(params.get("auto_approve")),
+        )
+        verdict: dict[str, Any] = manager.adopt(server)
+        if not verdict.get("ok"):
+            return verdict
+        # The supervisor is a task, and this handler runs on the IPC serve
+        # thread: spawning it is the same marshalling ``session.turn`` uses,
+        # and the reason adopt() does not create it itself.
+        service.spawn(manager.start_supervisor(server))
+        # The trust answer belongs to the live gate as well as the config: the
+        # gate was built at startup, so a server added since would otherwise
+        # prompt anyway until the next start.
+        if server.auto_approve:
+            gate = getattr(getattr(world.loop, "dispatcher", None), "gate", None)
+            if gate is not None and hasattr(gate, "trust_server"):
+                gate.trust_server(server.name)
+        path = getattr(world, "config_path", None)
+        if not path:
+            return {"ok": True, "reason": "connected, but no config file to persist beside"}
+        try:
+            saved = ConfigLoader.append_mcp_server(path, server)
+        except OSError as exc:
+            return {
+                "ok": True,
+                "reason": f"connected, but not persisted: {exc}",
+                "saved": None,
+            }
+        return {"ok": True, "saved": str(saved)}
+
     def mcp_logout(params: dict[str, Any]) -> dict[str, Any]:
         """M4: forget a remote server's token; it returns to needs_auth."""
         manager = getattr(world, "mcp", None)
@@ -585,5 +647,6 @@ def make_handlers(
         "mcp.connect": mcp_connect,
         "mcp.login": mcp_login,
         "mcp.logout": mcp_logout,
+        "mcp.add": mcp_add,
         "shutdown": shutdown_handler,
     }

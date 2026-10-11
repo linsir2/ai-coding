@@ -40,3 +40,6 @@ docs/tui-*.svg
 # Frontend (bun)
 frontend/node_modules/
 frontend/.bun/
+
+# Runtime-added MCP servers (the wizard writes this; never commit secrets)
+mcp.local.yaml

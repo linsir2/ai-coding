@@ -64,10 +64,7 @@ export function DialogSelect(props: DialogSelectProps) {
       ...(props.actions ?? []).map((action) => ({
         name: `dialog.select.action.${action.title}`,
         desc: action.title,
-        run: () => {
-          const option = flat()[selected()]
-          if (option) action.onTrigger(option)
-        },
+        run: () => action.onTrigger(flat()[selected()]),
       })),
     ],
     bindings: [

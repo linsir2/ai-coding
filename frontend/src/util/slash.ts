@@ -46,6 +46,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "Switch the active model",
   },
   {
+    name: "mcp",
+    command: "mcp.list",
+    title: "MCP servers",
+    description: "Connected MCP servers, and connecting one",
+  },
+  {
     name: "sessions",
     command: "dialog.sessions.show",
     title: "Sessions",

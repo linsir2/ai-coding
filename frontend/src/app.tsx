@@ -14,6 +14,7 @@ import { Show, createSignal, onMount } from "solid-js"
 import { CommandPalette } from "./component/command-palette"
 import { DialogHelp } from "./component/dialog-help"
 import { DialogMcp } from "./component/dialog-mcp"
+import { DialogMcpAdd } from "./component/dialog-mcp-add"
 import { DialogModels, type ModelRow } from "./component/dialog-models"
 import { DialogSessions } from "./component/dialog-sessions"
 import { DialogSkills } from "./component/dialog-skills"
@@ -86,6 +87,26 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
   const [permission, setPermission] = createSignal<PermissionRequest | null>(null)
   // The pending ``approval.request``'s resolver; the panel's answer resolves it.
   let resolvePermission: ((decision: PermissionDecision) => void) | null = null
+
+  // One dialog shows at a time and opening replaces what is there, so the
+  // wizard hands the panel back rather than closing to the composer: the row
+  // the add produced is the thing the operator wants to see (M5).
+  const openMcpPanel = () =>
+    dialog.open(
+      () => (
+        <DialogMcp
+          client={props.client}
+          revision={mcpRevision}
+          onConnectNew={() =>
+            dialog.open(
+              () => <DialogMcpAdd client={props.client} onDone={openMcpPanel} />,
+              "medium",
+            )
+          }
+        />
+      ),
+      "large",
+    )
 
   const decidePermission = (decision: PermissionDecision) => {
     const resolve = resolvePermission
@@ -284,8 +305,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         group: "Agent", // OpenCode's own category for this command (app.tsx:895)
         desc: "Show configured MCP servers and what came of them",
         palette: true,
-        run: () =>
-          dialog.open(() => <DialogMcp client={props.client} revision={mcpRevision} />, "large"),
+        run: openMcpPanel,
       },
       {
         name: "dialog.skills.show",
@@ -371,7 +391,9 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
       },
     ],
     bindings: [
-      { key: "ctrl+p", cmd: "command.palette.show" },
+      // ctrl+p is VS Code's quick open and it wins inside its terminal, so the
+      // palette lives on the leader like every other dialog: <leader>p.
+      { key: "<leader>p", cmd: "command.palette.show" },
       { key: "ctrl+c", cmd: "app.exit" },
       // OpenCode's leader bindings (config/keybind.ts:48,109,110,102,150,164).
       { key: "<leader>m", cmd: "dialog.models.show" },

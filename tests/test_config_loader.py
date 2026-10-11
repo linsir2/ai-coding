@@ -421,3 +421,72 @@ def test_a_single_fallback_may_be_written_without_brackets(tmp_path):
     )
 
     assert app.models["primary"].fallback_models == ("backup",)
+
+
+# ---- M5: the mcp.local.yaml sidecar ----------------------------------------
+
+
+def test_the_sidecar_merges_its_servers_in(tmp_path):
+    from ai_coding.config.loader import ConfigLoader
+    from ai_coding.config.models import MCPServerConfig
+
+    cfg = tmp_path / "config.local.yaml"
+    cfg.write_text(
+        "models:\n  m:\n    name: m\nmcp:\n  enabled: true\n  servers:\n"
+        "    - name: from-config\n      command: [a]\n",
+        encoding="utf-8",
+    )
+    ConfigLoader.append_mcp_server(cfg, MCPServerConfig(name="added", command=["b"]))
+
+    mcp = ConfigLoader.load_mcp(cfg)
+
+    # The main file's server first, then the wizard's — in that order.
+    assert [s.name for s in mcp.servers] == ["from-config", "added"]
+    assert mcp.enabled is True
+
+
+def test_the_sidecar_merges_into_the_app_config_too(tmp_path):
+    """The app's own config carries the MCP root the world builds from.
+
+    ``load_mcp`` was not the only way in: ``AppConfig.mcp`` is what
+    ``build_world`` hands the manager, so a sidecar server the wizard added has
+    to be in that one too or it is invisible until the next ``mcp.add``.
+    """
+    from ai_coding.config.loader import ConfigLoader
+    from ai_coding.config.models import MCPServerConfig
+
+    cfg = tmp_path / "config.local.yaml"
+    cfg.write_text("mcp:\n  enabled: true\n", encoding="utf-8")
+    ConfigLoader.append_mcp_server(cfg, MCPServerConfig(name="added", command=["b"]))
+
+    app = ConfigLoader.load_app(cfg)
+
+    assert [s.name for s in app.mcp.servers] == ["added"]
+    assert app.mcp.enabled is True
+
+
+def test_the_sidecar_is_optional_and_secret(tmp_path):
+    from ai_coding.config.loader import ConfigLoader
+    from ai_coding.config.models import MCPServerConfig
+
+    cfg = tmp_path / "config.local.yaml"
+    cfg.write_text("mcp:\n  enabled: true\n", encoding="utf-8")
+    assert ConfigLoader.mcp_sidecar(cfg) == tmp_path / "mcp.local.yaml"
+    mcp = ConfigLoader.load_mcp(cfg)
+    assert mcp.servers == []
+
+    ConfigLoader.append_mcp_server(cfg, MCPServerConfig(name="s", command=["x"]))
+    mode = oct((tmp_path / "mcp.local.yaml").stat().st_mode & 0o777)
+    assert mode == "0o600"
+    # The operator's own file is untouched by the append.
+    assert "s" not in cfg.read_text(encoding="utf-8")
+
+
+def test_a_broken_sidecar_is_ignored_not_fatal(tmp_path):
+    cfg = tmp_path / "config.local.yaml"
+    cfg.write_text("mcp:\n  enabled: true\n", encoding="utf-8")
+    (tmp_path / "mcp.local.yaml").write_text("- : : not yaml [\n", encoding="utf-8")
+
+    mcp = ConfigLoader.load_mcp(cfg)
+
+    assert mcp.servers == []

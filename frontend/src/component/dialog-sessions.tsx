@@ -97,7 +97,7 @@ export function DialogSessions(props: {
   }
 
   const actions: SelectAction[] = [
-    { key: "ctrl+d", title: "delete", onTrigger: (option) => void remove(option) },
+    { key: "ctrl+d", title: "delete", onTrigger: (option) => option && void remove(option) },
   ]
 
   const choose = async (option: SelectOption) => {

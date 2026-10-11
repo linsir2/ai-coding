@@ -76,6 +76,34 @@ export function mcpStatusTone(status: McpStatus): McpTone {
 }
 
 /**
+ * Parse the wizard's one-line command into argv (M5).
+ *
+ * Splits on whitespace, so `python -m srv --flag` becomes the argv the config
+ * wants.  Quotes are honoured, because a path with a space is exactly the case
+ * where a naive split would hand the child process a broken argument.
+ */
+export function parseCommandLine(line: string): string[] {
+  const argv: string[] = []
+  let current = ""
+  let quote: '"' | "'" | null = null
+  for (const char of line.trim()) {
+    if (quote) {
+      if (char === quote) quote = null
+      else current += char
+    } else if (char === '"' || char === "'") {
+      quote = char
+    } else if (/\s/.test(char)) {
+      if (current) argv.push(current)
+      current = ""
+    } else {
+      current += char
+    }
+  }
+  if (current) argv.push(current)
+  return argv
+}
+
+/**
  * Whether a row offers the panel's one action (M3).
  *
  * Exactly one state qualifies: `failed`.  A connected server has nothing to
