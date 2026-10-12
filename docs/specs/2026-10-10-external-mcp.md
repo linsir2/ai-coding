@@ -155,9 +155,9 @@ mcp_call(server: str, tool: str, input: object) → ToolResult
 | A3 | execution 超时：session.call_tool 挂 → execution ms 后 ToolResult(mcp_error) | 假 session sleep + 断言 wall clock |
 | A4 | 4 个装死 server 总墙钟 ≤ 70s（现状 ~240s） | 集成测试（假 factory） |
 | A5 | backoff：失败后 1s→2s→4s…cap 60s，恢复即停 | 假时钟 |
-| A6 | remote 桩直连，工具进 catalog 且可调通 | mock httpx |
+| A6 | remote 桩直连，工具进 catalog 且可调通 | ~~mock httpx~~ → 真实 HTTP 桩（`test_mcp_oauth.py::test_a_remote_server_that_needs_no_login_*`）。**2026-10-12 补**：原判据只覆盖了"先 OAuth 再连"的路径，一个**不需要鉴权的公开 endpoint 从未被任何测试或真跑覆盖**，而那是用户第一次粘贴 URL 时的形态 |
 | A7 | 401 → needs_auth → 假 AS 全流程（DCR+PKCE+callback）→ connected | mock http + browser open 打桩，零真实浏览器 |
-| A8 | token 文件 0600；请求/事件/日志无 Authorization | 静态断言 + grep 测试 |
+| A8 | token 文件 0600；请求/事件/日志无 Authorization | 0600 已覆盖；**2026-10-12 补**了此前缺失的负面半——token 不得出现在任何发布出去的事件里（`test_a_token_never_reaches_an_event_or_a_trace_field`），且该断言自带"检测器有牙齿"的自证 |
 | A9 | 幻觉工具名 → ToolResult 报错含合法名 | 单测 |
 | A10 | deny `stub__write_file` 后：catalog 仍列、调用被 gate 拒 | 单测 |
 | A11 | catalog 40 工具 ≤ 2000 token 等价（8000 字符） | 单测 |

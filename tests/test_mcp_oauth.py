@@ -30,6 +30,7 @@ from ai_coding.config.models import (
     MCPServerConfig,
     MCPTimeout,
 )
+from ai_coding.core.events import RecordingObserver
 from ai_coding.core.mcp import MCPManager
 
 pytestmark = pytest.mark.asyncio
@@ -47,6 +48,7 @@ class _AsState:
         self.authorizations: list[dict] = []
         self.code_to_issue = "code-123"
         self.refused = False
+        self.seen_authorization: list[str | None] = []
 
 
 class _FakeAsHandler(BaseHTTPRequestHandler):
@@ -136,8 +138,14 @@ class _FakeAsHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/mcp":
-            # The MCP endpoint: requires a bearer token, then answers JSON-RPC.
-            if self.headers.get("Authorization") != "Bearer token-abc":
+            # The MCP endpoint.  ``require_auth`` off models the very common
+            # public hosted MCP server that needs no credentials at all — the
+            # path that had no coverage: every remote success in this file used
+            # to go through the browser flow first.
+            self.server.state.seen_authorization.append(self.headers.get("Authorization"))  # type: ignore[attr-defined]
+            if getattr(self.server, "require_auth", True) and (
+                self.headers.get("Authorization") != "Bearer token-abc"
+            ):
                 self.send_response(401)
                 self.send_header(
                     "WWW-Authenticate",
@@ -176,6 +184,18 @@ class _FakeAsHandler(BaseHTTPRequestHandler):
                         },
                     }
                 )
+            elif method == "tools/call":
+                self._json(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "result": {
+                            "content": [
+                                {"type": "text", "text": f"called {request['params']['name']}"}
+                            ]
+                        },
+                    }
+                )
             else:
                 self._json(
                     {
@@ -197,9 +217,10 @@ class _FakeAsHandler(BaseHTTPRequestHandler):
 class _FakeAs:
     """The fake authorization server, on a real port, in a real thread."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, require_auth: bool = True) -> None:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeAsHandler)
         self.server.state = _AsState()  # type: ignore[attr-defined]
+        self.server.require_auth = require_auth  # type: ignore[attr-defined]
         self.port = self.server.server_address[1]
 
     @property
@@ -224,6 +245,17 @@ class _FakeAs:
 @pytest_asyncio.fixture
 async def fake_as():
     server = _FakeAs()
+    server.start()
+    try:
+        yield server
+    finally:
+        server.stop()
+
+
+@pytest_asyncio.fixture
+async def open_as():
+    """The same fake with authentication switched off (A6)."""
+    server = _FakeAs(require_auth=False)
     server.start()
     try:
         yield server
@@ -595,3 +627,126 @@ def test_trusting_a_server_skips_its_prompts():
     assert gate.check("fs__read_file", {}) == PermissionDecision.ALLOW
     # The same ordering guarantee from_config's trusted servers have.
     assert gate.check("bash", {"command": "rm -rf /"}) == PermissionDecision.DENY
+
+
+# ---- A6: a remote server that needs no credentials at all -------------------
+#
+# Every other remote test here begins with a browser login.  That left the
+# commonest shape of hosted MCP server — a public endpoint, no OAuth — with no
+# coverage at all: ``_connect_remote`` always builds an ``OAuthClientProvider``,
+# so whether that path can connect *without* a token was never established by
+# anything.  It is the path a user hits the first time they paste a URL.
+
+
+async def test_a_remote_server_that_needs_no_login_connects_lists_and_answers(open_as):
+    from ai_coding.config.models import MCPConfig
+    from ai_coding.core.mcp import MCPManager, build_mcp_catalog, invoke_remote_tool
+
+    manager = MCPManager(
+        MCPConfig(enabled=True, servers=[_remote("public", open_as.base)])
+    )
+    await manager.open_all()
+    try:
+        assert await _until(lambda: bool(manager.available())), "a no-auth endpoint never connected"
+        assert [name for name, _ in manager.available()] == ["public"]
+
+        # The tool reached the catalog with the arguments the server declared.
+        catalog = build_mcp_catalog(manager.available())
+        assert "read_file" in catalog
+
+        # The call works, all the way to a result the model could read.
+        handle = manager.lookup("public", "read_file")
+        assert handle is not None
+        result = await invoke_remote_tool(
+            server="public",
+            tool_name="read_file",
+            session=handle.session,
+            arguments={},
+            ctx=None,
+            execution_timeout=handle.execution_timeout,
+            progress_name="public__read_file",
+        )
+        assert result.success is True, result
+        assert "called read_file" in str(result.output)
+
+        # And nothing about the browser flow ran: no client was registered, no
+        # token was exchanged, and not one request carried credentials.
+        assert open_as.state.registrations == []
+        assert open_as.state.token_grants == []
+        assert open_as.state.seen_authorization
+        assert all(value is None for value in open_as.state.seen_authorization)
+    finally:
+        await manager.aclose()
+
+
+async def test_a_remote_server_that_needs_no_login_never_reaches_needs_auth(open_as):
+    """needs_auth is for a server that *asked* for a login. One that never did
+    must settle as connected, or the panel would offer a sign-in that cannot
+    help."""
+    from ai_coding.config.models import MCPConfig
+    from ai_coding.core.mcp import MCPManager
+
+    manager = MCPManager(
+        MCPConfig(enabled=True, servers=[_remote("public", open_as.base)])
+    )
+    await manager.open_all()
+    try:
+        assert await _until(
+            lambda: all(row["status"] != "connecting" for row in manager.servers())
+        )
+        row = next(r for r in manager.servers() if r["name"] == "public")
+        assert row["status"] == "connected", row
+    finally:
+        await manager.aclose()
+
+
+async def test_a_token_never_reaches_an_event_or_a_trace_field(fake_as, tmp_path, monkeypatch):
+    """A8's negative half, which the other A8 test does not cover.
+
+    ``test_tokens_round_trip_and_are_scoped_per_server`` proves the file is
+    0600; this proves the other half of the same promise — that the token does
+    not leave the token store. Everything the manager publishes goes through one
+    observer, so it is the only place a leak could come from, and a long-lived
+    OAuth token in a trace file is exactly the kind of secret that is easy to
+    write and impossible to take back.
+    """
+    from ai_coding.core import mcp as mcp_module
+
+    monkeypatch.setattr(mcp_module, "_BACKOFF_MIN", 0.01)
+    monkeypatch.delenv("AI_CODING_MCP", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    _patch_authorize(monkeypatch)
+
+    observer = RecordingObserver()
+    manager = MCPManager(
+        MCPConfig(enabled=True, servers=[_remote("r", fake_as.base)]),
+        observer=observer,
+        session_factory=lambda server: (_ for _ in ()).throw(AssertionError("local factory")),
+    )
+    await manager.open_all()
+    assert await _until(lambda: manager.servers()[0]["status"] == "needs_auth")
+
+    # A 401 parks the server in needs_auth; the token is only issued once the
+    # operator signs in, so the login is what this test is about.
+    assert (await manager.login("r", timeout=15))["ok"] is True
+    assert await _until(lambda: bool(manager.available())), "the login never landed"
+
+    # The token really was issued, or the rest of this proves nothing.
+    assert fake_as.state.token_grants, "no token was exchanged; the test is vacuous"
+    issued = fake_as.state.token_grants
+
+    # Events are dataclasses, so repr() is the faithful text of everything a
+    # trace writer would serialise.
+    published = repr(observer.events)
+    assert "token-abc" not in published
+    assert "refresh-xyz" not in published
+    assert "access_token" not in published
+    # ...and the observer really did see this server, or the three assertions
+    # above prove nothing at all.
+    assert "mcp_server" in published, published[:400]
+    # The check has teeth: the same predicate flags an event that does carry a
+    # token, so passing above is a fact about the code and not about the
+    # expression being blind.
+    assert "token-abc" in repr([SimpleNamespace(detail="Bearer token-abc")])
+    assert issued, "sanity"
+    await manager.aclose()
