@@ -215,6 +215,24 @@ mcp_call(server: str, tool: str, input: object) → ToolResult
 - 向导 input 必须**只读不写**：对活动 input 调 `value` / `deleteLine()` 会让它渲染出自己不再持有的文本；`focused` 作为 JSX 属性（而非 `dialog-select` 那样的 `ref` + `focus()`）同样如此。input 也不该和 `› ` 标记放在同一个 row flex box 里——那个布局会把 input 排得比文本窄。
 - **已知缺陷（非本轮引入）**：opentui 0.5.17 的 input 在快速输入长文本时重绘会少画开头几个字符（`.venv/bin` 显示成 `env/bin`）。palette 自带的搜索框用同一串同样如此，所以是 opentui 的重绘问题；提交和落盘的值始终完整（sidecar 已证）。
 
+## 4D. 已知缺口：catalog 不带参数 schema（2026-10-10 调研后记录，尚未修）
+
+**事实**：MCP 规范**要求** `tools/list` 的每个工具带 `inputSchema`（`schema/2025-06-18/schema.ts:930-944`，字段无 `?`）。我们的 `MCPToolHandle.tool` 原样存着它（实测 `{'properties': {'text': {'type':'string'}}, 'required': ['text'], 'type':'object'}`），但 `build_mcp_catalog` 只取 `description` 并截到 120 字符，**把 schema 扔了**；而 `mcp_call` 的 `input` 是裸 `{"type":"object"}`，模型只能从描述散文里猜参数名。
+
+**上游怎么做的（已核实）**：
+- OpenCode 注册**每个远程工具一个原生工具**，带真实 `inputSchema`（`packages/core/src/tool/mcp.ts:41-48`），名字 `server_tool`（`tool/mcp.ts:16-17`）。它**不**用 `mcp_call` 这类单壳。
+- OpenCode 的 Code Mode（`packages/core/src/codemode/`）才是"单工具 + 目录"的形态，而且目录里放的是**渲染出来的签名**不是 JSON：`jsonSchemaToTypeScript()` 生成 `github.create_issue({owner: string; body?: string})`，深度上限 8，越界返回 `unknown`，`required`→无 `?`、可选→`?`，约束折成 JSDoc `@minLength` 等，并中和 `*/` 防注入逃逸（`packages/codemode/src/tool-schema.ts:130,142,201`）。
+- Claude Code / Cursor / Cline / Copilot CLI **全是**每工具一个原生工具。
+- MCP 的 "compact schema"（SEP-1576）**从未落地**，2026-06-26 以 dormant 关闭——不要按它设计。
+
+**为什么不全盘照抄 OpenCode**：它的原生工具定义落在 prompt position 0，**tools 一变整个前缀缓存作废**（Anthropic 层级 tools→system→messages）。我们的目录在**易失尾巴**里（`request_assembly.py:207`），本来就在缓存前缀之外——这是 M2 选"单壳 + 目录"时白拿的优势，注册 N 个原生工具会把它还回去。代价是模型拿不到参数 schema。
+
+**成本量级**：Anthropic 实测 58 个工具 ≈ 55K token；完整 schema ≈ 344 token/工具，压成签名 ≈ 54 token/工具（6.4×）。我们自己 13 个工具 = 13,301 字符 ≈ 3,325 token。
+
+**倾向（待拍板）**：采纳 (b) 但**渲染而非截断**——在目录里放 `echo(text: string)` 这样的签名，深度上限 3-4，越界输出 `...`，`$ref` 解不掉就丢整个属性而不是留悬空引用，单工具字节上限 + 现有 8000 总预算 + 整 server 丢弃并明说（已实现），再加跨 server 轮转取用（OpenCode `codemode/catalog.ts:115-127`）。**绝对不能截断 JSON**：`{"properties":{"a":{"type":"string"}}` 从中间切开就是非法语法，等于教模型一门坏语法。
+
+**执行顺序**：先修安全洞（权限面板不显示参数），此项作为独立决策排在后面。
+
 ## 11. 上游依据（对齐溯源）
 
 | 我们的决策 | OpenCode 依据 |

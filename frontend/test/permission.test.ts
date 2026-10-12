@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { PERMISSION_OPTIONS } from "../src/util/permission"
+import { PERMISSION_OPTIONS, permissionPayload } from "../src/util/permission"
 
 describe("permission options", () => {
   test("offers once, always and reject with OpenCode's labels", () => {
@@ -27,5 +27,53 @@ describe("permission options", () => {
 
   test("esc's fail-closed answer exists as the reject decision", () => {
     expect(PERMISSION_OPTIONS.find((option) => option.key === "reject")?.decision).toBe("no")
+  })
+})
+
+describe("what the approval shows about an MCP call", () => {
+  const call = {
+    server: "fs",
+    tool: "write_file",
+    input: { path: "/etc/passwd", content: "root::0:0" },
+  }
+
+  test("shows the arguments — approving blind is the hole this closes", () => {
+    const lines = permissionPayload({ toolName: "fs__write_file", params: call })
+    expect(lines.join("\n")).toContain("/etc/passwd")
+    expect(lines.join("\n")).toContain("root::0:0")
+  })
+
+  test("a scalar argument is shown, not JSON-dumped", () => {
+    const lines = permissionPayload({ toolName: "fs__echo", params: { server: "fs", tool: "echo", input: "ping" } })
+    expect(lines.join("\n")).toContain("ping")
+  })
+
+  test("a huge argument is cut, and says it was cut", () => {
+    const lines = permissionPayload({
+      toolName: "fs__write_file",
+      params: { server: "fs", tool: "w", input: { blob: "x".repeat(5000) } },
+    })
+    const text = lines.join("\n")
+    expect(text.length).toBeLessThan(1200)
+    expect(text).toContain("…")
+  })
+
+  test("many arguments do not scroll the panel away", () => {
+    const input: Record<string, string> = {}
+    for (let i = 0; i < 40; i += 1) input[`k${i}`] = `v${i}`
+    const lines = permissionPayload({ toolName: "fs__many", params: { server: "fs", tool: "many", input } })
+    expect(lines.length).toBeLessThanOrEqual(12)
+  })
+
+  test("a local tool's own salient text is not duplicated into the payload", () => {
+    // read/write/edit already name their path and bash names its command via
+    // toolTarget; showing the whole params object there would be noise.
+    expect(permissionPayload({ toolName: "write", params: { path: "a.py", content: "x" } })).toEqual([])
+    expect(permissionPayload({ toolName: "bash", params: { command: "ls -la", timeout: 10 } })).toEqual([])
+  })
+
+  test("nothing to show is an empty block, not a blank line", () => {
+    expect(permissionPayload({ toolName: "fs__echo", params: { server: "fs", tool: "echo", input: {} } })).toEqual([])
+    expect(permissionPayload({ toolName: "todo_write", params: {} })).toEqual([])
   })
 })

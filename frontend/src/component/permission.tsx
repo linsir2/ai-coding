@@ -10,11 +10,12 @@
 
 import { TextAttributes } from "@opentui/core"
 import { useBindings } from "@opentui/keymap/solid"
+import { useTerminalDimensions } from "@opentui/solid"
 import { For, Show, createSignal } from "solid-js"
 import { theme } from "../theme/tokens"
 import { moveSelection } from "../util/dialog-select"
 import type { PermissionDecision } from "../util/permission"
-import { PERMISSION_OPTIONS } from "../util/permission"
+import { PERMISSION_OPTIONS, permissionPayload } from "../util/permission"
 import { toolTarget, toolVerb } from "../util/toolmeta"
 import { PROMPT_BORDER } from "./prompt"
 
@@ -28,6 +29,7 @@ export function PermissionPanel(props: {
   request: PermissionRequest
   onDecide: (decision: PermissionDecision) => void
 }) {
+  const dimensions = useTerminalDimensions()
   const [selected, setSelected] = createSignal(0)
   const move = (delta: number) =>
     setSelected((current) => moveSelection(current, delta, PERMISSION_OPTIONS.length))
@@ -61,6 +63,11 @@ export function PermissionPanel(props: {
   }))
 
   const target = () => toolTarget(props.request.toolName, props.request.params)
+  const payload = () => permissionPayload(props.request)
+  // The panel is anchored bottom-left, so the terminal width is the budget; the
+  // block is a glance, not a diff, and a long line must not wrap into the
+  // answer keys.
+  const panelWidth = () => Math.max(40, dimensions().width - 8)
 
   return (
     <box
@@ -80,6 +87,17 @@ export function PermissionPanel(props: {
       <text fg={theme.textBase}>
         {`${toolVerb(props.request.toolName)}${target() ? ` · ${target()}` : ""}`}
       </text>
+      {/* What the call will actually do. An MCP call's own line can only echo
+          ``fs__write_file`` — the arguments arrived with the request and were
+          never printed, so this is what turns "approve?" into an informed
+          answer. */}
+      <For each={payload()}>
+        {(line) => (
+          <text fg={theme.textMuted}>
+            {line.length > panelWidth() - 4 ? `  ${line.slice(0, panelWidth() - 7)}…` : `  ${line}`}
+          </text>
+        )}
+      </For>
       <Show when={props.request.reason}>
         <text fg={theme.textMuted}>{props.request.reason}</text>
       </Show>

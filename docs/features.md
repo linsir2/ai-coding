@@ -113,6 +113,7 @@ GUI 复刻里程碑中已删除）。旧 Textual 实现的布局/组件细节见
 
 - **权限门**：`PermissionGate` 对每次工具调用判定 ALLOW / WARN / DENY。`read`/`glob`/`todo_write`/`skill`/`subAgent`/`memory_search`/`memory_write` ALLOW；`write`/`edit`/`bash` WARN；未知工具保守归为 WARN；bash 命中硬拒绝模式（`rm -rf /`、`sudo `、`shutdown`、`reboot`、`mkfs`、`dd if=`、`> /dev/sd`、强制 git push、`chmod 777` 等）直接 DENY。
 - **审批接线**：WARN 层由 `approval` 回调解析。无人可问的入口（子智能体）用 `AutoApproveCallback`（WARN 放行，DENY 仍拦截）；交互 TUI 用 `CLIApprovalCallback`，对 write/edit/bash 经模态弹 y/N/s 询问用户。既满足了「AI 助手能写文件」，又保留了危险操作的确认与硬拒绝兜底。
+- **审批面板显示参数**：WARN 层的确认面板会打印这次调用**将要做什么**，而不只是工具名。本地工具本来就有一行摘要（`read` 的路径、`bash` 的命令）；MCP 调用过去只有 `fs__write_file` 这个名字，参数到了前端却被丢在渲染层——也就是在批准一个你看不见副作用的远程调用。现在 `permissionPayload()` 把 `input` 的每个参数逐行打印，单值截断 160 字符、整块上限 12 行（超了明说还剩几个），长值不换行以免把选项挤出屏幕。
 - **沙箱**：`Sandbox` 将文件工具的所有路径解析限制在工作区内，`..`、绝对路径、符号链接逃逸一律抛 `SandboxViolation`。
 - **过期读保护**：`FileStateTracker` 记录最近一次读取的快照，写入/编辑前比对 `mtime`+`size`；未被读过（`NEVER_READ`）或内容被外部改动（`STALE`）时阻止写入，防止盲写与覆盖外部修改。
 

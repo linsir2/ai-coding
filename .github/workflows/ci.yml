@@ -44,6 +44,12 @@ jobs:
       - name: Real MCP stdio round trip
         run: AI_CODING_MCP_STDIO=1 python -m pytest tests/test_mcp_stdio.py -q
 
+      # The class the model actually calls, end to end: engine -> mcp_call ->
+      # real subprocess -> write_back. Without this, mcp_call has never been
+      # executed against a real server by anything (M5 follow-up).
+      - name: Real MCP call, whole path
+        run: AI_CODING_MCP_STDIO=1 python -m pytest tests/test_mcp_end_to_end.py -q
+
       - name: Memory acceptance cases (offline, 11 cases)
         run: python scripts/memory_cases.py
 
