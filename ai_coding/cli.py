@@ -31,6 +31,7 @@ def _version_callback(value: bool) -> None:
 
 @app.callback()
 def main(
+    ctx: typer.Context,
     version: bool | None = typer.Option(
         None,
         "--version",
@@ -50,6 +51,10 @@ def main(
     ),
 ) -> None:
     """ai-coding : an AI coding assistant."""
+    if ctx.invoked_subcommand is not None:
+        # A subcommand owns the invocation. Falling through here would launch
+        # the TUI underneath `ai-coding skill list`.
+        return
     setup_logging()
     if version:
         return
@@ -301,6 +306,101 @@ def _build_tool_registry(
         user_prompt=user_prompt,
         base_instructions=base_instructions,
     )
+
+
+# ---- ai-coding skill ------------------------------------------------------
+#
+# Kept in this module so the subcommand lives beside the options it shares
+# (`-w`), rather than in a second Typer app that would have to be dispatched by
+# hand and could drift.
+
+
+def _library(workspace: str, *, global_scope: bool) -> Path:
+    """Where a command reads and writes.
+
+    Default is the project's own library, because a skill you install while
+    working on a repo belongs to that repo. `--global` says otherwise
+    deliberately, rather than by accident of which directory you are in.
+    """
+    from ai_coding.paths import Paths
+
+    paths = Paths.for_workspace(workspace)
+    return paths.user_skills if global_scope else paths.project_skills
+
+
+skill_app = typer.Typer(
+    help="Install, list and remove skills.", no_args_is_help=True
+)
+
+
+@skill_app.command("install")
+def skill_install(
+    source: str = typer.Argument(..., help="A local directory, or owner/repo."),
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+    global_scope: bool = typer.Option(
+        False, "--global", help="Install into the user library instead of the project's."
+    ),
+    force: bool = typer.Option(False, "--force", help="Replace a skill of the same name."),
+) -> None:
+    """Install one skill, or every skill in a directory or repository."""
+    import asyncio
+
+    from ai_coding.paths import Paths
+    from ai_coding.skills.install import InstallError, install_from_git, install_from_path
+
+    library = _library(workspace, global_scope=global_scope)
+    library.mkdir(parents=True, exist_ok=True)
+    try:
+        looks_remote = "://" in source or source.count("/") == 1
+        if looks_remote:
+            result = asyncio.run(install_from_git(source, library, force=force))
+        else:
+            result = install_from_path(Path(source).expanduser(), library, force=force)
+    except InstallError as exc:
+        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from None
+    where = Paths.for_workspace(workspace).user_skills if global_scope else library
+    for name in result.installed:
+        typer.echo(f"installed {name}  →  {where}")
+    for name in result.replaced:
+        typer.echo(f"replaced {name}  →  {where}")
+    if not result.changed:
+        typer.echo("nothing to do")
+
+
+@skill_app.command("list")
+def skill_list(
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+    global_scope: bool = typer.Option(False, "--global"),
+) -> None:
+    """List the installed skills and where each description came from."""
+    from ai_coding.skills.install import list_installed
+
+    rows = list_installed(_library(workspace, global_scope=global_scope))
+    if not rows:
+        typer.echo("(no skills installed here)")
+        return
+    for row in rows:
+        typer.echo(f"  {row['name']}  {row['description']}  [{row['status']}]")
+
+
+@skill_app.command("remove")
+def skill_remove(
+    name: str = typer.Argument(..., help="Skill to remove."),
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+    global_scope: bool = typer.Option(False, "--global"),
+) -> None:
+    """Remove an installed skill. There is no undo."""
+    from ai_coding.skills.install import remove_skill
+
+    library = _library(workspace, global_scope=global_scope)
+    if not remove_skill(library, name):
+        typer.secho(f"error: no skill named {name} in {library}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"removed {name}")
+
+
+app.add_typer(skill_app, name="skill")
 
 
 def run() -> None:
