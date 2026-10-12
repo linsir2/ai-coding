@@ -54,6 +54,29 @@ def data_home() -> Path:
     return Path(base).expanduser() / APP_DIR
 
 
+def ancestors_up_to_home(base: Path | str) -> list[Path]:
+    """``base`` then its parents, stopping short of the user's home directory.
+
+    `~` is an ancestor of every workspace, so without this a file written at
+    ``$HOME/config.local.yaml`` — or ``$HOME/CLAUDE.md`` — would be found for
+    every project on the machine. Scope has to stop somewhere, and the user's
+    own home is where it stops.
+
+    The user's own settings have a named home of their own
+    (:meth:`Paths.user_config`); project discovery must not guess at it.
+    """
+    base = Path(base)
+    try:
+        chain = [base, *base.parents]
+        home = Path.home().resolve()
+    except (RuntimeError, OSError, AttributeError):
+        # A test double without ``parents`` or a home that cannot be determined:
+        # a single directory is the honest answer, not an exception from a
+        # discovery path that has to keep working.
+        return [base]
+    return chain[: chain.index(home)] if home in chain else chain
+
+
 @dataclass(frozen=True)
 class Paths:
     """Every path the app derives, computed from two roots.

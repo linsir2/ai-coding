@@ -792,6 +792,21 @@ XDG 表达式原本在 `grants.py`/`mcp.py` 各写一份，现在统一向 `path
 | `ai-coding skill install/list/remove` | 本地目录或 `owner/repo`（浅克隆、有界、入临时目录故远程无法自选目的地）。**装入的 skill 是模型会执行的指令**，故：默认拒绝覆盖同名（需 `--force`）、拒绝符号链接（仓库可携带 `skills/x/SKILL.md -> /etc/shadow`）、拒绝无 description 的 skill（description 是模型唯一的选它的依据） |
 | 标准互操作 | 遵守 Agent Skills 标准：`name`/`description` 语义与 Claude Code/Codex 一致，`license`/`compatibility`/`allowed-tools`/`metadata` 读入保存；他运行时自定义的键（`context: fork` 等）保留在 `extra` 但**不呈现为已生效的指令**；YAML 破损的 description（如 `Build for AWS: ECS`）修复后重解析 |
 
+### 项目指令：父目录也算（M9 补）
+
+`ProjectInstructionsLoader` 原来只读 workspace 根，于是 `/projects/CLAUDE.md` 在
+`/projects/sub` 里启动的会话中**静默不可见**——无报错、无警告，只是少了上下文。现在从
+workspace 根向上走到用户主目录为止（home 是硬边界，否则 `~/CLAUDE.md` 会渗进机器上每个
+项目），**由宽到窄全部拼接**，每层最多贡献一个文件（CLAUDE.md 优先于 AGENTS.md，
+与原来同名优先级一致）。
+
+预算从「每层 64KiB」改成**全栈一个 64KiB**——每层各一份的预算等于让模型收到四倍。
+被截断的那层在尾部以 `(src/<层级名>)` 标出：只写「truncated」的话，一处被策略截断的
+内容看起来和文件本来就结束在这里一模一样。
+
+单文件场景与 M9 之前**逐字节一致**（既有契约），一级分隔符只在实际有多层时才出现。
+某个文件读失败只跳过它，其余层照常生效（比原来的整体失败强）。
+
 ### 明确未做：memory 分层
 
 `.memory` 仍**每工作区一份**。全局化需要给 `MemoryNote` 加 scope 字段、跨库召回合并，

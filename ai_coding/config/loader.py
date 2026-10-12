@@ -6,6 +6,8 @@ import logging
 import os
 import re
 from pathlib import Path
+
+from ai_coding.paths import ancestors_up_to_home
 from typing import Any
 
 import yaml
@@ -81,19 +83,14 @@ class ConfigLoader:
 
     @staticmethod
     def _ancestors(base: Path) -> list[Path]:
-        """``base`` then its parents, stopping at the user's home directory.
+        """``base`` then its parents, stopping short of the user's home
+        directory.
 
-        `~` is an ancestor of every workspace, so without this a config written
-        at `$HOME/config.local.yaml` for one project would be found for all of
-        them. The user's own config has its own, named location
-        (`paths.Paths.user_config`); project discovery must not guess at it.
+        Shared with the project-instruction loader: both walk up from the
+        workspace, and both would otherwise let a file at ``$HOME`` answer for
+        every project. One helper, so the boundary cannot drift between them.
         """
-        chain = [base, *base.parents]
-        try:
-            home = Path.home().resolve()
-        except (RuntimeError, OSError):
-            return chain
-        return chain[: chain.index(home)] if home in chain else chain
+        return ancestors_up_to_home(base)
 
     @staticmethod
     def discover(start: str | Path | None = None) -> Path | None:
