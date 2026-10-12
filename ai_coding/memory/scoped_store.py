@@ -111,6 +111,27 @@ class ScopedStore:
         holder = self._holder(note_id)
         return holder.delete(note_id) if holder is not None else False
 
+    def move_tier(self, note_id: str, scope: str) -> MemoryNote | None:
+        """Move one note to another tier, keeping its id, text and history.
+
+        ``update`` cannot do this: it finds the note by id and rewrites it *in
+        the tier that holds it*, so a note whose scope changed in place would sit
+        in the project's file wearing a user-tier label — recalled from no other
+        project, and reported as global by the panel. Promotion has to be a move.
+        """
+        holder = self._holder(note_id)
+        if holder is None:
+            return None
+        note = holder.get(note_id)
+        destination = self._tier(scope)
+        if note is None or destination is holder:
+            return note
+        if not holder.delete(note_id):
+            return None
+        moved = MemoryNote.from_dict({**note.to_dict(), "scope": scope})
+        destination.add_note(moved)
+        return destination.get(moved.id)
+
     def clear(self) -> None:
         self.project.clear()
         if self.user is not None:

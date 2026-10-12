@@ -7,14 +7,17 @@ through it too - a second write path is how invariants get bypassed.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
 from ai_coding.config.models import MemoryConfig
 from ai_coding.memory.note import NoteKind
+from ai_coding.memory.scoped_store import ScopedStore
 from ai_coding.memory.service import MemoryService
 from ai_coding.memory.store import MemoryStore
+from ai_coding.tools.memory_write_tool import MemoryWriteTool
 
 
 def _service(tmp_path: Path, **overrides) -> MemoryService:
@@ -22,6 +25,23 @@ def _service(tmp_path: Path, **overrides) -> MemoryService:
         MemoryStore(tmp_path / ".memory"),
         config=MemoryConfig(**overrides),
     )
+
+
+def _scoped(tmp_path: Path) -> MemoryService:
+    """A service with both tiers, so the write path can be observed."""
+    return MemoryService(
+        ScopedStore(
+            MemoryStore(tmp_path / "project" / ".memory"),
+            MemoryStore(tmp_path / "user" / "memory.json"),
+        ),
+        config=MemoryConfig(),
+    )
+
+
+def _ctx():
+    from ai_coding.tools.base import ToolContext
+
+    return ToolContext(workspace=str(Path(".")), session_id="s")
 
 
 def test_write_note_adds_a_note(tmp_path: Path):
@@ -238,3 +258,53 @@ async def test_the_composition_root_registers_memory_write(tmp_path: Path):
     _build_loop(_Engine(), _Sessions(), registry, cfg, str(tmp_path), None)
     assert registry.get("memory_write") is not None
     assert registry.get("memory_search") is not None
+
+
+# ---- the user tier (M10) ---------------------------------------------------
+#
+# `scope` is the only thing that opens the file outside every workspace, so the
+# tool's handling of it is worth pinning: the exact value works, and everything
+# else — a typo, a plural, a subagent's own marker — stays with the workspace.
+
+
+def test_scope_user_routes_to_the_user_tier(tmp_path):
+    from ai_coding.memory.note import USER_SCOPE
+
+    service = _scoped(tmp_path)
+    tool = MemoryWriteTool(service)
+
+    result = asyncio.run(tool.execute({"text": "偏好 pytest", "kind": "preference",
+                                       "scope": "user"}, _ctx()))
+
+    assert result.success is True
+    assert [n.scope for n in service.store.all()] == [USER_SCOPE]
+
+
+def test_anything_that_is_not_exactly_user_stays_in_the_workspace(tmp_path):
+    from ai_coding.memory.note import DEFAULT_SCOPE
+
+    service = _scoped(tmp_path)
+    tool = MemoryWriteTool(service)
+
+    for declared in ("users", "global", "user-tier", "", None):
+        params = {"text": f"note {declared!r}", "scope": declared}
+        asyncio.run(tool.execute(params, _ctx()))
+
+    assert {n.scope for n in service.store.all()} == {DEFAULT_SCOPE}, (
+        "a value nobody declared must not reach the file that follows the person"
+    )
+
+
+def test_the_case_and_stray_space_of_the_value_are_not_a_new_tier(tmp_path):
+    """`User` and `user ` are the same declaration a person made, so they must not
+    quietly become the workspace tier instead — the surprising outcome would be a
+    preference the user asked to be global that never left the repo."""
+    from ai_coding.memory.note import USER_SCOPE
+
+    service = _scoped(tmp_path)
+    tool = MemoryWriteTool(service)
+
+    for declared in ("user", "USER", "user "):
+        asyncio.run(tool.execute({"text": f"note {declared!r}", "scope": declared}, _ctx()))
+
+    assert {n.scope for n in service.store.all()} == {USER_SCOPE}

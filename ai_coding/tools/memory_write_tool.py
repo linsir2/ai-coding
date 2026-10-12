@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from ai_coding.domain.message import ToolResult
-from ai_coding.memory.note import NoteKind
+from ai_coding.memory.note import DEFAULT_SCOPE, USER_SCOPE, NoteKind
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 __all__ = ["MAX_TEXT", "MemoryWriteTool"]
@@ -81,6 +81,16 @@ class MemoryWriteTool(BaseTool):
                         "the labels in index.top_scenes."
                     ),
                 },
+                "scope": {
+                    "type": "string",
+                    "description": (
+                        "'workspace' (default) keeps the note with this project. "
+                        "'user' writes it to a file outside any workspace, so it is "
+                        "recalled from every project — use it only when the note is "
+                        "about the person (a preference, a habit), never for a fact "
+                        "about this repo's code or decisions."
+                    ),
+                },
             },
             "required": ["text"],
         }
@@ -114,6 +124,7 @@ class MemoryWriteTool(BaseTool):
                 turn=context.turn,
                 session_id=context.session_id,
                 scene=str(params.get("scene", "") or ""),
+                scope=_as_scope(params.get("scope")),
             )
         except Exception as exc:  # noqa: BLE001 - a memory write is never fatal
             return ToolResult(
@@ -151,6 +162,16 @@ class MemoryWriteTool(BaseTool):
                 "text_chars": len(text),
             },
         )
+
+
+def _as_scope(raw: Any) -> str:
+    """The declared tier, or the workspace tier.
+
+    Anything that is not exactly ``user`` is the workspace tier, including a
+    typo: a value nobody declared must not be able to write into the file that
+    follows the person to every project.
+    """
+    return USER_SCOPE if str(raw or "").strip().casefold() == USER_SCOPE else DEFAULT_SCOPE
 
 
 def _as_importance(raw: Any) -> int:

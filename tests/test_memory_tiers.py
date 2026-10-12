@@ -275,6 +275,12 @@ def test_with_one_tier_the_ordering_is_unchanged(tmp_path):
 # ---- the two properties this layer exists for, end to end ------------------
 
 
+def _turn(service):
+    from ai_coding.core.memory_turn import TurnMemory
+
+    return TurnMemory(service, emit=lambda event: None, save=lambda session: None)
+
+
 def _service(tmp_path, *, extractor=None):
     from ai_coding.memory.relevance import RecallParams
     from ai_coding.memory.service import MemoryService
@@ -427,3 +433,90 @@ def test_a_service_given_a_bare_store_still_works(tmp_path):
 def _user(content):
 
     return ChatMessage(role="user", content=content, timestamp="t")
+
+
+# ---- promotion: the way a project fact becomes a personal one ---------------
+
+
+def test_promotion_moves_a_note_into_the_user_tier(tmp_path):
+
+
+    service, _ = _service(tmp_path)
+    service.write_note("偏好用 pytest 跑测试", kind="preference")
+    note_id = service.store.all()[0].id
+
+    _turn(service).promote(note_id)
+
+    assert service.store.get(note_id).scope == USER_SCOPE
+    assert service.store.active(scope=USER_SCOPE)
+    assert not service.store.active(scope="workspace")
+
+
+def test_promotion_leaves_the_id_and_text_alone(tmp_path):
+    """Only the store it lives in moves. A new id would orphan every reference
+    the panel or a supersede chain holds."""
+
+    service, _ = _service(tmp_path)
+    service.write_note("偏好中文回答", kind="preference")
+    before = service.store.all()[0]
+
+    moved = _turn(service).promote(before.id)
+
+    assert (moved.id, moved.text, moved.kind) == (before.id, before.text, before.kind)
+
+
+def test_promoting_something_already_global_is_not_a_failure(tmp_path):
+
+    service, _ = _service(tmp_path)
+    service.write_note("已经是全局的", scope=USER_SCOPE)
+    note_id = service.store.all()[0].id
+
+    assert _turn(service).promote(note_id).id == note_id
+
+
+def test_promoting_a_note_that_does_not_exist_is_none(tmp_path):
+
+    service, _ = _service(tmp_path)
+
+    assert _turn(service).promote("ghost") is None
+
+
+def test_promotion_actually_moves_the_file_it_lives_in(tmp_path):
+    """`update` rewrites the note in whichever tier holds it, so editing the scope
+    field in place would leave a user-tier *label* on a note still sitting in the
+    project's file — recalled from no other project, and reported as global by the
+    panel. Promotion is a move, not an edit."""
+    scoped, project, user = _pair(tmp_path)
+    scoped.add_note(new_note("项目的一条"))
+    note_id = scoped.all()[0].id
+
+    moved = scoped.move_tier(note_id, USER_SCOPE)
+
+    assert moved.scope == USER_SCOPE
+    assert [n.id for n in user.all()] == [note_id]
+    assert project.all() == [], "the project's file no longer holds it"
+
+
+def test_moving_to_the_tier_it_is_already_in_is_a_no_op(tmp_path):
+    scoped, project, user = _pair(tmp_path)
+    scoped.add_note(_note("用户的一条", scope="user"))
+    note_id = scoped.all()[0].id
+
+    same = scoped.move_tier(note_id, USER_SCOPE)
+
+    assert same.id == note_id
+    assert [n.id for n in user.all()] == [note_id]
+    assert project.all() == []
+
+
+def test_the_panel_can_see_the_tier_of_every_note(tmp_path):
+    """A leak has to be visible to be fixable. Without the tier in the row, a
+    user-tier note looks like any other and nobody can tell why it is showing up
+    everywhere."""
+    service, _ = _service(tmp_path)
+    service.write_note("项目的一条")
+    service.write_note("用户的一条", scope=USER_SCOPE)
+
+    rows = [n.to_dict()["scope"] for n in service.store.all()]
+
+    assert sorted(rows) == ["user", "workspace"]

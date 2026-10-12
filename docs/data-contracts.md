@@ -807,10 +807,26 @@ workspace 根向上走到用户主目录为止（home 是硬边界，否则 `~/C
 单文件场景与 M9 之前**逐字节一致**（既有契约），一级分隔符只在实际有多层时才出现。
 某个文件读失败只跳过它，其余层照常生效（比原来的整体失败强）。
 
-### 明确未做：memory 分层
+### memory 分层（M10）
 
-`.memory` 仍**每工作区一份**。全局化需要给 `MemoryNote` 加 scope 字段、跨库召回合并，
-并有把一个项目的技术决策带进另一个项目的风险。本轮有意推迟，记在此处。
+`.memory` 仍然**每工作区一份**，但它不再只有一份——第二层是**用户级**，放在
+`~/.local/share/ai-coding/memory.json`，跟着人走而不是跟着仓库走。
+
+| 契约 | 说明 |
+|---|---|
+| `ScopedStore` | `MemoryStore` 同接口的复合对象。**读 = 两层并集，写 = 按 `note.scope` 路由**。做成同接口是因为 `service.py` 有 38 处 `self._store`——接口一致则三行改动替代三十八处 |
+| `MemoryNote.scope` | 复用既有字段（此前**无任何生产者写入非默认值**，已实现已测试生产空转）。`"workspace"` 默认不变，`"user"` 是唯一打开用户层的值 |
+| 写入路由 | **只有 `user` 进用户层**，其余一切值——默认、子 agent 自己的标记、拼写错误——都留在工作区。一个没人声明过的值不能写入跟着人走的文件 |
+| 收割不路由 | 收割候选无 scope 声明 → 落到工作区。理由：提取器无法判断一条事实是否超出本仓库成立，而 Claude Code 的 `type: user` 正是「模型声明了但不路由」，作者以为生效了。用户层只由**显式声明**产生 |
+| 去重分层 | `find_by_dedupe` / `find_similar` 带 `scope` 参数，**默认 = 将要写入的那一层**（即旧语义全文保留）。搜索并集会让项目事实「本仓库用 pytest」命中用户层「prefers pytest」并被合并进去——那条项目事实从此进入所有未来项目 |
+| consolidate 分层 | 每层各跑一次。合并是 `supersede` 会真的删掉一条；跨层合并等于把用户层某条从**所有**项目里删掉，而替代品只在本项目 |
+| 排序 tie-break | 并列时项目层在前，落在 `relevance.order`（唯一排序决策点），因此 `recall` / `search_scilled` / 尾块全部继承。单层时 rank 恒为 0，排序不变 |
+| `paths.user_memory` | `data_home/memory.json`。与 MCP token 同层而非 `config_home`：它是累积数据不是设置 |
+| `write_note(scope=)` | 经 `HarvestCandidate.scope → _reconcile → new_note`，走收割同一道门 |
+| `move_tier(id, scope)` | 提升是**搬家不是改字段**：`update` 按 id 在持有该笔记的那一层原地改写，就地改 scope 会让一条笔记留在项目文件里却戴着用户层标签——别的项目召不回它，面板却报它全局 |
+| `memory.promote` / 面板 ctrl+g | 除 `memory_write` 外唯一的用户层入口，也是修正「这条本该全局」的路 |
+
+**面板必须显示 tier**，否则泄漏只是从「搜不到」变成「看得见但不知道为什么」。
 
 
 真实库实测：43 条记忆、35 个标签、29 个是单例（67%）。因为标签是模型从**开放词表**里挑的，

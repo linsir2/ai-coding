@@ -483,6 +483,10 @@ def make_handlers(
                     "text": note.text,
                     "kind": str(getattr(note.kind, "value", note.kind)),
                     "scene": note.scene,
+                    # M10: which tier the note lives in. Without it a user-tier
+                    # note is indistinguishable from a project one, and the
+                    # operator has no way to see why it shows up everywhere.
+                    "scope": str(getattr(note, "scope", "") or "workspace"),
                     "pinned": bool(note.pinned),
                     "importance": int(note.importance),
                     "evidence": note.evidence,
@@ -499,6 +503,20 @@ def make_handlers(
             return {"ok": False, "reason": "no such memory"}
         pinned = bool(params.get("pinned", True))
         return {"ok": facade.pin(note_id, pinned) is not None, "pinned": pinned}
+
+    def memory_promote(params: dict[str, Any]) -> dict[str, Any]:
+        """Move one note from the workspace tier to the user tier (M10).
+
+        The only way in besides ``memory_write(scope="user")``, and the way to
+        correct the common case: a preference the model stored while working, or
+        one you taught it in a project and then found yourself repeating
+        elsewhere.
+        """
+        facade = _memory_facade()
+        note_id = str(params.get("id") or "").strip()
+        if facade is None or not note_id:
+            return {"ok": False, "reason": "no such memory"}
+        return {"ok": facade.promote(note_id) is not None}
 
     def memory_delete(params: dict[str, Any]) -> dict[str, Any]:
         facade = _memory_facade()
@@ -752,6 +770,7 @@ def make_handlers(
         "memory.list": memory_list,
         "memory.pin": memory_pin,
         "memory.delete": memory_delete,
+        "memory.promote": memory_promote,
         "skill.pending.list": skill_pending_list,
         "skill.pending.approve": skill_pending_approve,
         "skill.pending.reject": skill_pending_reject,

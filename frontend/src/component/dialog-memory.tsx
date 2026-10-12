@@ -118,8 +118,22 @@ export function DialogMemory(props: { client: IpcClient }) {
     await call("memory.pin", { id: note.id, pinned: !note.pinned })
   }
 
+  const promote = async (option: SelectOption) => {
+    const note = notes().find((entry) => entry.id === option.value)
+    if (!note || note.scope === "user") return
+    await call("memory.promote", { id: note.id })
+  }
+
   const actions = (): readonly SelectAction[] => [
     { key: "ctrl+d", title: "delete", onTrigger: (option) => option && void remove(option) },
+    // The only other way into the user tier besides `memory_write(scope=...)`,
+    // and the way to correct the common case: a preference stored while working
+    // on one project that turns out to be true everywhere.
+    {
+      key: "ctrl+g",
+      title: "promote to every project",
+      onTrigger: (option) => option && void promote(option),
+    },
     {
       // ctrl+p is already the select's own "previous" alias (and a duplicate
       // of `up`), so pin takes ctrl+t: mnemonic enough, and it moves nothing
@@ -164,7 +178,7 @@ export function DialogMemory(props: { client: IpcClient }) {
           error(),
           summary(),
           notes().length === 0 ? "没有记忆" : "",
-          "enter 全文 · ctrl+d delete · ctrl+t pin/unpin · esc close",
+          "enter 全文 · ctrl+d delete · ctrl+t pin/unpin · ctrl+g 跨项目 · esc close",
         ]
           .filter(Boolean)
           .join(" · ") || undefined

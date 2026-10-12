@@ -179,6 +179,9 @@ export interface MemoryNote {
   /** The extractor's free-text topic label; a subtitle and a filter, never a
    *  group — 33 of them for 43 notes, several near-duplicates. */
   scene: string
+  // M10: "user" means the note lives outside any workspace and is recalled from
+  // every project; anything else is this project's own.
+  scope?: string
   pinned: boolean
   importance: number
   /** "tool" when a tool call in that turn backed it, "model" when the turn only
@@ -207,6 +210,7 @@ export function memoryRowLine(note: MemoryNote): { title: string; description: s
     .filter(Boolean)
     .join(" · ")
   const title = `${note.pinned ? "📌 " : ""}${note.text}`
-  const detail = [kind, marks, note.scene].filter(Boolean).join(" · ")
+  const tier = note.scope === "user" ? "跨项目" : "本项目"
+  const detail = [kind, marks, note.scene, tier].filter(Boolean).join(" · ")
   return { title, description: detail, category: kind }
 }

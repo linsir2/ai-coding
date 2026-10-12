@@ -25,6 +25,7 @@ from ai_coding.core.turn_report import emit_degraded
 from ai_coding.domain.loop import TurnOutcome
 from ai_coding.domain.session import SessionData
 from ai_coding.infra.deadline import Deadline, remaining_of, run_with_deadline
+from ai_coding.memory.note import USER_SCOPE
 
 __all__ = ["TurnMemory"]
 
@@ -106,6 +107,21 @@ class TurnMemory:
             return self._memory.store.pin(note_id, pinned)
         except Exception:  # noqa: BLE001
             _log.debug("memory pin failed", exc_info=True)
+            return None
+
+    def promote(self, note_id: str) -> Any | None:
+        """Move one note to the user tier, so every project recalls it (M10).
+
+        The note text and id are unchanged; only the store it lives in moves. A
+        note already in the user tier is returned unchanged rather than reported
+        as a failure, because the operator's intent is satisfied either way.
+        """
+        if self._memory is None:
+            return None
+        try:
+            return self._memory.store.move_tier(note_id, USER_SCOPE)
+        except Exception:  # noqa: BLE001
+            _log.debug("memory promote failed", exc_info=True)
             return None
 
     def delete(self, note_id: str) -> bool:
