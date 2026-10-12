@@ -133,3 +133,39 @@ export function mcpToolNote(server: McpServer): string {
     ? `${server.toolCount} / ${server.wantedCount} tools`
     : `${server.toolCount} tools`
 }
+
+/** The fields the wizard collects, per kind — the shape both halves agree on. */
+export interface McpAddValues {
+  name?: string
+  command?: string
+  url?: string
+  token?: string
+}
+
+/**
+ * The `mcp.add` request body (M7).
+ *
+ * A remote token is sent as `token`, never pre-baked into a header here: the
+ * backend owns what becomes an `Authorization` header, so the secret exists in
+ * exactly one place on the way through. A blank token is dropped rather than
+ * sent as `""`, which a server reads as bad credentials rather than as none.
+ */
+export function mcpAddBody(
+  kind: "local" | "remote",
+  values: McpAddValues,
+  trust: boolean,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    name: (values.name ?? "").trim(),
+    type: kind,
+    auto_approve: trust,
+  }
+  if (kind === "local") {
+    body.command = parseCommandLine(values.command ?? "")
+    return body
+  }
+  body.url = (values.url ?? "").trim()
+  const token = (values.token ?? "").trim()
+  if (token) body.token = token
+  return body
+}

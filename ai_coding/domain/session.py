@@ -143,6 +143,11 @@ class SessionData:
     # session because the books are per-turn and would lose it across rounds —
     # in-process only: ``to_dict`` is a whitelist and a new user turn resets it.
     continuations: int = 0
+    # M7: how many times this turn has asked a model that thought-and-stopped to
+    # finish its answer.  Same lifetime as ``continuations`` — per turn, in
+    # process — because the point of it is to cap the retry inside one turn, not
+    # to remember anything about the operator.
+    thinking_retries: int = 0
     # NOT persisted, by the same whitelist.  Internal sessions (plan-runner
     # steps) never touch the sessions directory: they run on the main loop,
     # whose TurnCloser would otherwise write one "plan step N" file per step

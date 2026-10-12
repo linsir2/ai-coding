@@ -60,6 +60,29 @@ class EmptyStepError(Exception):
         self.finish_reason = finish_reason
 
 
+class ThinkingOnlyStepError(Exception):
+    """A step that carried reasoning and nothing else (M7).
+
+    A reasoning model can spend its whole budget thinking and stop with nothing
+    to show for it.  That is not the same as saying nothing at all: the
+    thinking was emitted and is on the operator's screen, so the turn did get
+    an answer — in the register this provider thinks in.  It is kept apart from
+    :class:`EmptyStepError` precisely so the verdict can say so in words.
+
+    ``reasoning_chars`` is not decoration either: it is what separates "the
+    model gave up immediately" from "the model thought at length and then ran
+    out", which are different advice for whoever reads the turn.
+    """
+
+    def __init__(self, finish_reason: str | None = None, reasoning_chars: int = 0) -> None:
+        super().__init__(
+            f"thinking-only model step (finish_reason={finish_reason or 'unknown'},"
+            f" reasoning={reasoning_chars} chars)"
+        )
+        self.finish_reason = finish_reason
+        self.reasoning_chars = reasoning_chars
+
+
 @dataclass(frozen=True)
 class TurnOutcome:
     """Terminal state of one ``process_input`` call."""
@@ -84,4 +107,4 @@ class TurnOutcome:
     handoff: str = ""
 
 
-__all__ = ["EmptyStepError", "TurnStatus", "StepResult", "TurnOutcome"]
+__all__ = ["EmptyStepError", "ThinkingOnlyStepError", "TurnStatus", "StepResult", "TurnOutcome"]

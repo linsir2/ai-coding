@@ -567,11 +567,18 @@ def make_handlers(
                 "ok": False,
                 "reason": "a server name may only hold letters, digits, - and _",
             }
+        # A manual token becomes a bearer header and nothing else. It is never
+        # echoed into a refusal, and it never becomes an empty "Bearer " when
+        # the operator skipped the step — an empty bearer reads as *bad*
+        # credentials to a server, which is worse than sending nothing.
+        token = str(params.get("token") or "").strip()
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
         server = MCPServerConfig(
             name=name,
             type="remote" if kind == "remote" else "local",
             command=[str(part) for part in params.get("command") or []],
             url=str(params.get("url") or ""),
+            headers=headers,
             auto_approve=bool(params.get("auto_approve")),
         )
         verdict: dict[str, Any] = manager.adopt(server)

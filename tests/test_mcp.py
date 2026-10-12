@@ -812,3 +812,68 @@ async def test_a_server_added_at_runtime_lands_last_in_config_order():
 
     assert [name for name, _ in manager.available()] == ["configured", "added"]
     await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_remote_server_that_times_out_says_what_to_check(monkeypatch):
+    """M7: "not ready in 60s" is what an operator sees when a remote server's
+    authorization server is unreachable — which is how a GitHub endpoint
+    presents itself when its metadata chain stalls. Measured on one machine:
+    4.1s, 15.1s, 60.2s for the same request, ending in a message that named
+    neither the network nor the login.
+
+    A local server's timeout is about the process; a remote one is about the
+    network or the credential, so the row says so."""
+    from ai_coding.core import mcp as mcp_module
+
+    @asynccontextmanager
+    async def _never_connects(server, **kwargs):
+        await asyncio.sleep(30)
+        yield _Session()
+
+    monkeypatch.setattr(mcp_module, "_remote_session_factory", _never_connects)
+
+    manager = MCPManager(
+        _cfg(
+            _server(
+                "remote-one",
+                type="remote",
+                url="https://example.invalid/mcp/",
+                timeout=MCPTimeout(startup=80),
+            )
+        )
+    )
+    await manager.open_all()
+    assert await until_mcp_settled(manager)
+    await asyncio.sleep(0.05)
+
+    detail = manager.servers()[0]["detail"]
+    assert "网络" in detail, detail
+    assert "授权" in detail, detail
+    assert "内就绪" in detail  # the fact stays; it just stops being the whole story
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_local_server_that_times_out_still_names_only_itself(monkeypatch):
+    """The other half: a local timeout is about a process that did not start,
+    and adding network advice there would be noise."""
+    from ai_coding.core import mcp as mcp_module
+
+    @asynccontextmanager
+    async def _never_connects(server, **kwargs):
+        await asyncio.sleep(30)
+        yield _Session()
+
+    monkeypatch.setattr(mcp_module, "_default_session_factory", _never_connects, raising=False)
+    manager = MCPManager(
+        _cfg(_server("slow", timeout=MCPTimeout(startup=80)))
+    )
+    await manager.open_all()
+    assert await until_mcp_settled(manager)
+    await asyncio.sleep(0.05)
+
+    detail = manager.servers()[0]["detail"]
+    assert "内就绪" in detail
+    assert "授权" not in detail, detail
+    await manager.aclose()

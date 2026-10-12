@@ -229,6 +229,24 @@ mcp_call(server: str, tool: str, input: object) → ToolResult
 
 **被打破的测试**：`test_the_budget_keeps_configured_servers_and_drops_the_rest_loudly` 的 `s5 not in text` 断言随轮转策略翻转（已批准）。其余断言未动。
 
+## 4E. M7 ADR：远程 server 的静态 token，与"只思考不回答"的重试（2026-10-12）
+
+**背景**：操作者把 `https://api.githubcopilot.com/mcp/` 接进来，得到的是 `Failed ! · 未在 60s 内就绪`。真跑复现（60.2 秒，正好撞满启动预算）后，链路是：401 → OAuth 元数据 200 → 授权服务器元数据 → `POST /register` **404**。
+
+**决策一：远程 server 走静态 token，且带 token 时完全不建 OAuth provider。**
+GitHub 官方文档：`github/github-copilot` 的 host-integration.md 写着 "**Dynamic Client Registration is NOT supported by Remote GitHub MCP Server at this time**"；员工在 `github-mcp-server#2532` 补了 "we will never be able to implement on GH auth server"。OAuth 那条路对第三方客户端本就不可用——GitHub 要求 **client secret**，分布式客户端持有不了。官方 MCP Registry 里该 server 的 remote 定义只有一个 secret header，官方矩阵中 Claude Code / Cline / Cursor / Roo / OpenCode 全部是 `PAT ✅ / OAuth ❌`。
+于是：向导的 remote 分支多一步可选 token → `headers.Authorization`；`_remote_session_factory` 在有 Authorization 头时**不构造 provider**（等同 OpenCode 配置里的 `oauth: false`）。实测：不带 token 时 4 次请求耗满 60 秒；带 token 时 **1 次请求、5.1 秒**给出真实错误。面板行、`config.summary`、事件里都不含 header（已断言）。
+
+**决策二：远程连接超时必须说人话。** 原来只有"未在 Xs 内就绪"。远程超时的成因是网络或其授权服务器，本地超时是进程没起来——同一句文案套两种病因。现在远程会说"查网络是否可达，以及该端的授权服务器是否响应；若它要 token，请在向导里填 API token"。
+
+**决策三：思考后停止的回答，追一次再判错。**
+原行为：模型只返回 reasoning、`finish_reason=stop` → 判"引擎错误"。调研（读源码）发现：**OpenCode 恰恰也是这么做的，而且它自己的 tracker 把两条同类 issue 关成了缺陷**——#37372「empty reasoning-only response is recorded as successful completion」（completed）、#48599「Assistant turn ends silently…」（not_planned）。Cline/Roo 重试 ≤3 次带退避，openclaw 追一句"请给出可见答案"再重试，OpenHands 把 `REASONING_ONLY` 单列成一类并追加纠正提示，Claude Code 静默（维护者自认是 bug）。
+**没有一家把它当"完成"**；Anthropic 文档对 `max_tokens` 截断的措辞是 "Treat any response … as **failed** … and retry"。故取**有界重试一次、仍不行则报错**，并复用 turn policy 已有的续答通道（`session.continuations` 同款的注入 + 计数），不另造机制。`finish_reason: length` **不重试**——那是答案预算耗尽，同预算再问一次只会复现截断。
+
+**顺带修掉一条长期假绿**：`test_config_loader.py::test_missing_file_falls_back_defaults_for_manager_init` 名字说"缺文件回落默认值"，实际 `initialize(None)` 会向上发现仓库里开发者真实的 `config.local.yaml`，只因该文件当时 `mcp.enabled: false` 才碰巧过——操作者一打开 MCP 它就变红。已改为在 `tmp_path` 里隔离。
+
+**打破的既有断言（两处，均因上述已批准的行为变更）**：① `test_loop_events.py::test_an_empty_step_still_shows_the_thinking_it_did` 原本钉住"思考恰好出现一次"，重试后可能出现两次——按其 docstring 的意图（A6 T3"思考值得被看见"）改为"被展示且内容一致"；② 本轮未再改动 `test_an_empty_step_ends_the_turn_in_words_not_in_a_python_message`，`status is ERROR` 与"没有回答"两处原样保留，只是文案多了字数。
+
 ## 11. 上游依据（对齐溯源）
 
 | 我们的决策 | OpenCode 依据 |

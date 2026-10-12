@@ -129,6 +129,8 @@ R11b 加 `recall_timeout_seconds=2.0`（一次召回的墙钟预算，0/负/不�
 **开关与注册**：`mcp.enabled: false` 时 `build_world` 不注册 `mcp_call`，模型的工具数组里没有它（`tests/test_server_world.py` 真跑 `build_world` 断言）。gate 仍按名字知道 `mcp_call`——那是给 MCP **开着**时的幻觉配对用的，不受影响。
 **工具卡片**：`tool.started` 带的是壳名 `mcp_call`，真实配对在 `params` 里；`util/toolmeta.ts::toolTarget` 因此对 `mcp_call` 返回 `{server}__{tool}`，一处改动同时覆盖实时卡片、会话回放和折叠时间线。
 
+**M7 契约**：① `mcp.add` 接受可选 `token`，转为 `headers.Authorization: Bearer <token>`；空 token 被丢弃而非发成空 bearer。token 不出现在任何拒绝信息、面板行、`config.summary` 或事件里（`tests/test_server_ipc.py` 三条断言）。② `_manual_bearer(server)` 为真时 `_remote_session_factory` **不构造** `OAuthClientProvider`——有 token 就没有 401 要处理，也没有元数据可发现（GitHub 端点不支持 DCR，带 token 时实测 1 次请求 / 5.1s，无 token 时 4 次请求 / 60s 耗尽启动预算）。③ 远程连接超时文案为 `未在 Xs 内就绪（远程：查网络是否可达，以及该端的授权服务器是否响应；若它要 token，请在向导里填 API token）`；本地超时文案不变。
+**思考后停止的步骤（M7）**：模型返回 reasoning、无正文、无工具调用时，若 `finish_reason == "stop"` 且本回合尚未追答过，则注入一条 `user` 消息（"请直接给出最终答案"）并重跑本轮，计数在 `SessionData.thinking_retries`（不落盘）；否则按 `ThinkingOnlyStepError` 结束为 `ERROR`，文案含思考字数与 finish_reason。`finish_reason == "length"` 不重试（预算耗尽，同预算再问只会复现截断）。
 **端到端证明**：`tests/test_mcp_end_to_end.py`（CI 以 `AI_CODING_MCP_STDIO=1` 跑）是唯一让 `MCPCallTool` 对着真实 stdio 子进程执行的地方——此前真实子进程测试全走 `MCPToolAdapter`，而 M2 之后生产已不再构造该类。它断言：catalog 进了首次请求、请求里只有 `mcp_call` 一个工具、审批问的是 `fs__echo` 而非壳名、结果以 `<tool_output>` 回到下一次请求并落进 session、拒绝时不伪造答案、猜错的 server/tool 会被点名真实工具。
 
 YAML 加载规则：键做 camel→snake 归一化（`baseURL`→`base_url` 视为同一键）；**`environment` 的键是数据不是字段名，原样透传**（env 变量名大小写敏感，M1 修的坑：`TOKEN` 曾被归一化成 `token`）；未知键忽略；缺失时用模型默认值补全。加载函数 `ConfigLoader.load_app`（AppConfig）与 `load_mcp`（MCPConfig）分盒解耦。

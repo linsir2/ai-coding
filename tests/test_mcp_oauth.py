@@ -750,3 +750,63 @@ async def test_a_token_never_reaches_an_event_or_a_trace_field(fake_as, tmp_path
     assert "token-abc" in repr([SimpleNamespace(detail="Bearer token-abc")])
     assert issued, "sanity"
     await manager.aclose()
+
+
+# ---- M7: a manual token replaces the OAuth dance ---------------------------
+
+
+async def test_a_manual_bearer_header_never_builds_an_oauth_provider(monkeypatch):
+    """GitHub's remote endpoint rejects dynamic client registration, so OAuth
+    can never authenticate it — and *trying* costs the operator the whole
+    startup budget: the 401 starts a metadata-discovery chain, and when the
+    authorization server is slow or unreachable that chain burns all 60s and
+    the row reports "not ready in 60s", which says nothing actionable.
+
+    With a token already in hand there is nothing to discover, so the provider
+    must not be constructed. OpenCode's own guide for this endpoint says the
+    same thing in config terms: ``oauth: false`` next to the header.
+    """
+    import mcp.client.auth as sdk_auth
+
+    from ai_coding.core.mcp import _remote_session_factory
+
+    built: list[str] = []
+
+    class _Recorder:
+        def __init__(self, *args, **kwargs):
+            built.append("provider")
+
+    monkeypatch.setattr(sdk_auth, "OAuthClientProvider", _Recorder)
+
+    server = _remote(
+        "gh", "https://example.invalid/mcp/", headers={"Authorization": "Bearer ghp_manual"}
+    )
+    context = _remote_session_factory(server, interactive=False, callback_timeout=1.0)
+
+    try:
+        async with context:
+            pass
+    except Exception:
+        # Whatever the transport does with an unreachable host is beside the
+        # point; which path was taken is the point.
+        pass
+
+    assert built == [], "an OAuth provider was built for a server that already has a token"
+
+
+async def test_a_remote_server_without_a_token_still_asks_for_one(monkeypatch):
+    """The other half: skipping OAuth must follow the token, not the
+    transport. A server with no header keeps the flow it had — a 401 lands in
+    ``needs_auth`` for the panel's sign-in row."""
+    from ai_coding.config.models import MCPConfig
+    from ai_coding.core.mcp import MCPManager
+
+    manager = MCPManager(MCPConfig(enabled=True, servers=[_remote("r", "http://127.0.0.1:1/mcp")]))
+    await manager.open_all()
+    try:
+        assert await _until(
+            lambda: all(row["status"] != "connecting" for row in manager.servers())
+        )
+        assert manager.servers()[0]["status"] != "connected"
+    finally:
+        await manager.aclose()

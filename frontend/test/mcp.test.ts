@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  mcpAddBody,
   parseCommandLine,
   mcpRowCanConnect,
   mcpRowCanLogin,
@@ -120,5 +121,26 @@ describe("mcpToolNote", () => {
 
   test("a server with nothing to show says so instead of 0 tools", () => {
     expect(mcpToolNote(server({ toolCount: 0 }))).toBe("")
+  })
+})
+describe("the body the wizard sends", () => {
+  const values = { name: "github", url: "https://api.githubcopilot.com/mcp/", token: "ghp_x" }
+
+  test("a remote server's token rides along as a token field, not as a header", () => {
+    const body = mcpAddBody("remote", values, false)
+    expect(body.token).toBe("ghp_x")
+    expect(body.url).toBe("https://api.githubcopilot.com/mcp/")
+    expect(body.type).toBe("remote")
+  })
+
+  test("a skipped token is absent rather than an empty string", () => {
+    const body = mcpAddBody("remote", { ...values, token: "   " }, false)
+    expect(body.token).toBeUndefined()
+  })
+
+  test("a local server never carries a token, even if the field was filled", () => {
+    const body = mcpAddBody("local", { ...values, command: "python -m srv" }, true)
+    expect(body.token).toBeUndefined()
+    expect(body.command).toEqual(["python", "-m", "srv"])
   })
 })

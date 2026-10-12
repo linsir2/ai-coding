@@ -109,7 +109,17 @@ def test_model_config_defaults():
     assert m.timeout == 60
 
 
-def test_missing_file_falls_back_defaults_for_manager_init(tmp_path):
+def test_missing_file_falls_back_defaults_for_manager_init(tmp_path, monkeypatch):
+    """Runs from a directory with no config above it, because ``initialize(None)``
+    discovers one by walking up from the cwd.
+
+    It used to run from the repo, where ``config.local.yaml`` happened to say
+    ``mcp.enabled: false`` — so the assertion was really testing the developer's
+    own file, and went red the moment anyone switched MCP on.  Fixed here by
+    isolating the lookup, which is what the test's name has always claimed.
+    """
+    monkeypatch.chdir(tmp_path)
+
     mgr = ConfigManager()
     mgr.initialize(None)
     assert mgr.mcp.enabled is False

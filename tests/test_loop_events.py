@@ -452,7 +452,14 @@ def test_an_empty_step_persists_no_empty_assistant_message(tmp_path):
 
 
 def test_an_empty_step_still_shows_the_thinking_it_did(tmp_path):
-    """A6 T3: the model did think, and that is worth seeing before the reason."""
+    """A6 T3: the model did think, and that is worth seeing before the reason.
+
+    M7 changed the count, not the intent. A step that only thought now gets one
+    chance to finish its answer before the turn ends, so the thinking can appear
+    twice — and this fixture hands back the same step both times, which is an
+    artifact of the fake. What A6 T3 asks is that the thinking is *shown*; a
+    retry that shows it again does not violate that.
+    """
     from ai_coding.core.events import AssistantMessage
     from ai_coding.domain.loop import StepResult
 
@@ -462,7 +469,9 @@ def test_an_empty_step_still_shows_the_thinking_it_did(tmp_path):
             text=None, tool_calls=(), finish_reason="stop", usage=None, reasoning="想了一下"
         ),
     )
-    assert [m.reasoning for m in observer.events if isinstance(m, AssistantMessage)] == ["想了一下"]
+    shown = [m.reasoning for m in observer.events if isinstance(m, AssistantMessage)]
+    assert shown, "the step's thinking was not shown at all"
+    assert set(shown) == {"想了一下"}
 
 
 def test_a_tool_only_step_is_not_an_empty_step(tmp_path):

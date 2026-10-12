@@ -97,6 +97,7 @@ from ai_coding.domain.ledger import ledger_signature
 from ai_coding.domain.loop import (
     EmptyStepError,
     StepResult,
+    ThinkingOnlyStepError,
     TurnOutcome,
     TurnStatus,
 )
@@ -491,6 +492,37 @@ class AgentLoop:
                         index=index,
                         books=books,
                     )
+                except ThinkingOnlyStepError as exc:
+                    # It thought and stopped (M7). One bounded chance to finish
+                    # the sentence, then the turn ends with the reason — the same
+                    # shape the turn policy already uses for "continue
+                    # unfinished work", so the retry is counted, surfaced and
+                    # reuses the path instead of inventing a second one.
+                    #
+                    # `length` is deliberately excluded: that is the answer
+                    # running out of budget, not the model running out of
+                    # things to say, and asking again with the same budget would
+                    # reproduce the truncation. Anthropic's guidance is to
+                    # raise the budget for that case, which is a config decision,
+                    # not something a retry here could decide.
+                    if exc.finish_reason == "length" or session.thinking_retries:
+                        raise
+                    session.thinking_retries += 1
+                    books.note_strategy_nudge()
+                    self.reporter.report_degraded(
+                        "model_step",
+                        "the model thought and stopped without answering",
+                        "asked it once to finish the answer",
+                    )
+                    session.add_message(
+                        user_message(
+                            "你刚才只输出了思考内容，没有给出最终答案。"
+                            "请直接给出最终答案。",
+                            now_utc(),
+                        )
+                    )
+                    self.closer.checkpoint(session, index)
+                    continue
                 except EngineError as exc:
                     if reactive_compacted or exc.kind != _CONTEXT_OVERFLOW:
                         raise
@@ -590,7 +622,7 @@ class AgentLoop:
                 outcome=aborted_outcome(books.last_text, books.total_iterations),
             )
             raise
-        except (DeadlineExpired, EngineError, EmptyStepError) as exc:
+        except (DeadlineExpired, EngineError, EmptyStepError, ThinkingOnlyStepError) as exc:
             outcome = failed_outcome(
                 exc, last_text=books.last_text, iterations=books.total_iterations
             )
@@ -1134,8 +1166,23 @@ class AgentLoop:
         # turn ends as a turn — closed, persisted, counted — instead of the
         # domain error escaping to the IPC catch-all (A6).  After the emit on
         # purpose: the thinking is still worth showing before the reason.
-        if not step.text and not step.tool_calls:
+        if not step.text and not step.tool_calls and not step.reasoning:
             raise EmptyStepError(step.finish_reason)
+        if not step.text and not step.tool_calls:
+            # It thought and then stopped (M7).  The reasoning was emitted a
+            # line above and is on screen, so the model *did* answer — in the
+            # register this provider uses for thinking.  Calling that an engine
+            # error was wrong twice over: it is not a failed call, and it told
+            # the operator nothing about a model that simply ran out of room.
+            # Measured against a real provider: the same model answered the
+            # same question with and without MCP connected.
+            #
+            # It is *not* added to the session: an assistant message with
+            # neither content nor tool_calls is rejected by providers on the
+            # next request (message.py:139), so persisting one would poison
+            # every later turn.  The reasoning went out as the event above,
+            # which is what the screen shows.
+            raise ThinkingOnlyStepError(step.finish_reason, len(step.reasoning or ""))
         session.add_message(assistant_message(step, now_utc()))
         return step
 

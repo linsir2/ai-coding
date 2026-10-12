@@ -25,7 +25,7 @@ from typing import Any
 
 from ai_coding.core.dispatch import DispatchOutcome
 from ai_coding.core.turn_policy import TurnDecision
-from ai_coding.domain.loop import EmptyStepError, TurnOutcome, TurnStatus
+from ai_coding.domain.loop import EmptyStepError, ThinkingOnlyStepError, TurnOutcome, TurnStatus
 from ai_coding.domain.message import ToolArtifact, ToolOutput
 from ai_coding.domain.run import tool_message
 from ai_coding.domain.session import SessionData
@@ -99,6 +99,23 @@ def failed_outcome(
         )
         return TurnOutcome(
             status=TurnStatus.TIMEOUT, text=last_text, iterations=iterations, reason=reason
+        )
+    if isinstance(error, ThinkingOnlyStepError):
+        # Same verdict as an empty step — the model produced no answer, and an
+        # operator looking at a turn with nothing in it needs to see that —
+        # but the words now say what happened instead of guessing. A6 T1 pinned
+        # this shape ("没有回答", the finish_reason, no Python); what was missing
+        # was the fact that it *thought* first, which is the difference between a
+        # model that gave up and one that ran out of room.
+        return TurnOutcome(
+            status=TurnStatus.ERROR,
+            text=None,
+            iterations=iterations,
+            reason=(
+                f"模型只返回了思考内容，没有回答"
+                f"（{error.reasoning_chars} 字思考，"
+                f"finish_reason={error.finish_reason or 'unknown'}）"
+            ),
         )
     if isinstance(error, EmptyStepError):
         # The model thought and stopped without answering.  Named in words for

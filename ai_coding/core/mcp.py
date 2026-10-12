@@ -689,6 +689,37 @@ def _is_auth_failure(exc: BaseException | None) -> bool:
     )
 
 
+def _startup_detail(server: MCPServerConfig) -> str:
+    """Why a connect ran out of time, in the words that let the operator act.
+
+    A local server's startup is the process not coming up, and the sentence
+    already says so. A remote one is a different failure wearing the same
+    clothes: the 401 starts a metadata-discovery chain, and if the network or
+    the authorization server stalls, the chain burns the whole budget and the
+    operator is told only that it was not ready. Measured against GitHub's
+    endpoint on one machine: 4.1s, 15.1s, then 60.2s and a dead end. Both
+    causes are things the operator can check.
+    """
+    seconds = server.timeout.startup / 1000
+    if server.type == "remote":
+        return (
+            f"未在 {seconds:g}s 内就绪"
+            "（远程：查网络是否可达，以及该端的授权服务器是否响应；"
+            "若它要 token，请在向导里填 API token）"
+        )
+    return f"未在 {seconds:g}s 内就绪"
+
+
+def _manual_bearer(server: MCPServerConfig) -> bool:
+    """Whether the config already carries its own credential (M7).
+
+    One question, asked once, at the only place it matters: a header the
+    operator supplied *is* the answer to the challenge an OAuth provider would
+    otherwise turn into a browser flow.
+    """
+    return any(str(name).lower() == "authorization" for name in server.headers)
+
+
 def _remote_session_factory(
     server: MCPServerConfig, *, interactive: bool, callback_timeout: float
 ) -> Any:
@@ -715,13 +746,27 @@ def _remote_session_factory(
             callback = _CallbackServer(oauth.callback_port)
             await callback.start()
         try:
+            manual = _manual_bearer(server)
+            if interactive and manual and callback is not None:
+                # The operator already gave a token; opening a browser would ask
+                # them for one they have.
+                await callback.stop()
+                callback = None
             redirect_uri = (
                 f"http://127.0.0.1:{callback.port}/mcp/oauth/callback"
                 if callback is not None
                 else None
             )
             store = _TokenStore(server.name)
-            provider = OAuthClientProvider(
+            # With a manual bearer there is nothing to discover: the provider's
+            # whole job is to turn a 401 into a login, and a header already
+            # answers the challenge.  Building it anyway is not merely wasted —
+            # against an endpoint that refuses dynamic client registration
+            # (GitHub's, by its own documentation) the discovery chain runs,
+            # fails, retries, and consumes the whole startup budget before the
+            # operator sees anything worse than "not ready in 60s".  Measured:
+            # 4.1s / 15.1s / 60.2s for the same request on the same machine.
+            provider = None if manual else OAuthClientProvider(
                 server_url=server.url,
                 client_metadata=OAuthClientMetadata(
                     client_name="ai-coding",
@@ -1510,10 +1555,8 @@ class MCPManager:
                     row["detail"] = f"{row['detail']}: {tail}"
             elif owner.failed_phase == "catalog":
                 row["detail"] = f"工具列表未在 {server.timeout.catalog / 1000:g}s 内返回"
-            elif owner.failed_phase == "startup":
-                row["detail"] = f"未在 {server.timeout.startup / 1000:g}s 内就绪"
-            elif not owner.ready.is_set():
-                row["detail"] = f"未在 {server.timeout.startup / 1000:g}s 内就绪"
+            elif owner.failed_phase == "startup" or not owner.ready.is_set():
+                row["detail"] = _startup_detail(server)
             elif not owner.tools:
                 row["detail"] = "已连接，但没有工具"
             else:

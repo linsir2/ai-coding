@@ -19,16 +19,18 @@ import { For, createSignal, onMount, Show } from "solid-js"
 import { TextAttributes, type InputRenderable } from "@opentui/core"
 import { useBindings } from "@opentui/keymap/solid"
 import type { IpcClient } from "../ipc"
-import { parseCommandLine } from "../util/mcp"
+import { mcpAddBody } from "../util/mcp"
 import { theme } from "../theme/tokens"
 
 type Kind = "local" | "remote"
 type Step = "kind" | "field" | "trust"
 
 interface Field {
-  key: "name" | "command" | "url"
+  key: "name" | "command" | "url" | "token"
   label: string
   placeholder: string
+  /** A secret: shown as typed, never echoed back into a later step. */
+  secret?: boolean
 }
 
 const FIELDS: Record<Kind, Field[]> = {
@@ -39,6 +41,15 @@ const FIELDS: Record<Kind, Field[]> = {
   remote: [
     { key: "name", label: "Name (the tools will be <name>__<tool>)", placeholder: "github" },
     { key: "url", label: "Endpoint URL", placeholder: "https://api.githubcopilot.com/mcp/" },
+    // Optional on purpose: a server that speaks OAuth still wants this left
+    // blank, and one that refuses dynamic client registration — GitHub's,
+    // by its own documentation — cannot be reached any other way.
+    {
+      key: "token",
+      label: "API token (optional — a server that wants a token in the Authorization header)",
+      placeholder: "ghp_…   leave blank if the server does its own login",
+      secret: true,
+    },
   ],
 }
 
@@ -143,13 +154,7 @@ export function DialogMcpAdd(props: { client: IpcClient; onDone: () => void }) {
   const pickTrust = async () => {
     const answers = values()
     const k = kind()!
-    const body: Record<string, unknown> = {
-      name: (answers.name ?? "").trim(),
-      type: k,
-      auto_approve: TRUST[cursor()].value,
-    }
-    body[k === "local" ? "command" : "url"] =
-      k === "local" ? parseCommandLine(answers.command ?? "") : (answers.url ?? "").trim()
+    const body = mcpAddBody(k, answers, TRUST[cursor()].value)
     if (nameInvalid()) {
       setError("the name may only hold letters, digits, - and _")
       setFieldIndex(0)

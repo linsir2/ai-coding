@@ -902,3 +902,89 @@ async def test_server_notify_reaches_the_client(ipc):
             break
         await asyncio.sleep(0.02)
     assert any(event["type"] == "custom" for event in client.events)
+
+
+@pytest.mark.asyncio
+async def test_mcp_add_carries_a_manual_token_into_the_server_headers(ipc, tmp_path):
+    """M7: GitHub's remote MCP endpoint refuses dynamic client registration
+    ("Dynamic Client Registration is NOT supported by Remote GitHub MCP
+    Server"), so OAuth can never authenticate it. The universal path every
+    client uses is a static ``Authorization: Bearer`` header — so the wizard
+    has to be able to collect one."""
+    world, _service, client = ipc
+    adopted: list[dict] = []
+
+    async def start_supervisor(server):
+        return True
+
+    world.mcp = SimpleNamespace(
+        adopt=lambda server: adopted.append(server.model_dump()) or {"ok": True},
+        start_supervisor=start_supervisor,
+        login=None,
+        logout=lambda name: {"ok": True},
+    )
+    world.config_path = str(tmp_path / "config.local.yaml")
+    (tmp_path / "config.local.yaml").write_text("mcp:\n  enabled: true\n", encoding="utf-8")
+
+    result = client.request(
+        "mcp.add",
+        {
+            "name": "github",
+            "type": "remote",
+            "url": "https://api.githubcopilot.com/mcp/",
+            "token": "ghp_example",
+            "auto_approve": False,
+        },
+    )
+
+    assert result["ok"] is True
+    assert adopted[0]["headers"] == {"Authorization": "Bearer ghp_example"}
+    assert adopted[0]["url"] == "https://api.githubcopilot.com/mcp/"
+
+
+@pytest.mark.asyncio
+async def test_a_token_is_never_echoed_back_in_a_failure(ipc, tmp_path):
+    """A refusal must not quote the secret the operator just typed."""
+    world, _service, client = ipc
+    world.mcp = SimpleNamespace(
+        adopt=lambda server: {"ok": False, "reason": "that url is not usable"},
+        login=None,
+        logout=lambda name: {"ok": True},
+    )
+    world.config_path = str(tmp_path / "config.local.yaml")
+    (tmp_path / "config.local.yaml").write_text("mcp:\n  enabled: true\n", encoding="utf-8")
+
+    result = client.request(
+        "mcp.add",
+        {"name": "gh", "type": "remote", "url": "https://x/", "token": "ghp_secret_value"},
+    )
+
+    assert result["ok"] is False
+    assert "ghp_secret_value" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_no_token_means_no_authorization_header(ipc, tmp_path):
+    """Omitting the token must leave the OAuth path intact, not send an empty
+    bearer that would look like bad credentials."""
+    world, _service, client = ipc
+    adopted: list[dict] = []
+
+    async def start_supervisor(server):
+        return True
+
+    world.mcp = SimpleNamespace(
+        adopt=lambda server: adopted.append(server.model_dump()) or {"ok": True},
+        start_supervisor=start_supervisor,
+        login=None,
+        logout=lambda name: {"ok": True},
+    )
+    world.config_path = str(tmp_path / "config.local.yaml")
+    (tmp_path / "config.local.yaml").write_text("mcp:\n  enabled: true\n", encoding="utf-8")
+
+    client.request(
+        "mcp.add",
+        {"name": "gh", "type": "remote", "url": "https://x/", "auto_approve": False},
+    )
+
+    assert adopted[0]["headers"] == {}
