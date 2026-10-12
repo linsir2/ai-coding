@@ -215,23 +215,19 @@ mcp_call(server: str, tool: str, input: object) → ToolResult
 - 向导 input 必须**只读不写**：对活动 input 调 `value` / `deleteLine()` 会让它渲染出自己不再持有的文本；`focused` 作为 JSX 属性（而非 `dialog-select` 那样的 `ref` + `focus()`）同样如此。input 也不该和 `› ` 标记放在同一个 row flex box 里——那个布局会把 input 排得比文本窄。
 - **已知缺陷（非本轮引入）**：opentui 0.5.17 的 input 在快速输入长文本时重绘会少画开头几个字符（`.venv/bin` 显示成 `env/bin`）。palette 自带的搜索框用同一串同样如此，所以是 opentui 的重绘问题；提交和落盘的值始终完整（sidecar 已证）。
 
-## 4D. 已知缺口：catalog 不带参数 schema（2026-10-10 调研后记录，尚未修）
+## 4D. M6 ADR：catalog 带签名、预算共享、开关即不提供（2026-10-10 拍板并实现）
 
-**事实**：MCP 规范**要求** `tools/list` 的每个工具带 `inputSchema`（`schema/2025-06-18/schema.ts:930-944`，字段无 `?`）。我们的 `MCPToolHandle.tool` 原样存着它（实测 `{'properties': {'text': {'type':'string'}}, 'required': ['text'], 'type':'object'}`），但 `build_mcp_catalog` 只取 `description` 并截到 120 字符，**把 schema 扔了**；而 `mcp_call` 的 `input` 是裸 `{"type":"object"}`，模型只能从描述散文里猜参数名。
+**决策**：① catalog 每行渲染服务器真实的参数签名 `echo(text: string)`，有签名时描述上限从 120 降到 80；② `available()` 按**配置顺序**而非连接完成顺序；③ 预算改为**跨 server 轮转**，且任何放不下的 server 会被**点名**而不是静默消失；④ `mcp.enabled: false` 时**不注册** `mcp_call`；⑤ 工具卡片显示 `fs__echo` 而非 `mcp_call`。
 
-**上游怎么做的（已核实）**：
-- OpenCode 注册**每个远程工具一个原生工具**，带真实 `inputSchema`（`packages/core/src/tool/mcp.ts:41-48`），名字 `server_tool`（`tool/mcp.ts:16-17`）。它**不**用 `mcp_call` 这类单壳。
-- OpenCode 的 Code Mode（`packages/core/src/codemode/`）才是"单工具 + 目录"的形态，而且目录里放的是**渲染出来的签名**不是 JSON：`jsonSchemaToTypeScript()` 生成 `github.create_issue({owner: string; body?: string})`，深度上限 8，越界返回 `unknown`，`required`→无 `?`、可选→`?`，约束折成 JSDoc `@minLength` 等，并中和 `*/` 防注入逃逸（`packages/codemode/src/tool-schema.ts:130,142,201`）。
-- Claude Code / Cursor / Cline / Copilot CLI **全是**每工具一个原生工具。
-- MCP 的 "compact schema"（SEP-1576）**从未落地**，2026-06-26 以 dormant 关闭——不要按它设计。
+**理由**：① MCP 规范**要求** `tools/list` 带 `inputSchema`，而 `MCPToolHandle.tool` 一直原样存着它——我们把它扔了，模型只能从描述散文里猜参数名。实测 13 工具服务器：签名让描述可缩短，**净 -16 token**，预算根本不是约束（8000 字符能装 55→57 个工具）。② catalog 预算的 docstring 承诺 "config order is priority"，而 owner 是按连上顺序 append 的——真机实测配置 `[fat, thin]` 恒定输出 `[thin, fat]`，预算吃紧时被丢的正是用户**排在最前**的那个。③ 整 server 丢弃会产生最坏结果：一个已连接、能用、面板显示"Connected ✓"的 server，对模型完全不存在。④ 关着时仍提供 `mcp_call`，其描述指向永远不会出现的 catalog 块，模型会被引导去调一个必然失败的东西（实测 556 字符/step）。⑤ 卡片显示壳名，一整个会话的远程调用都读作 `mcp_call`，看不出哪个 server 跑的。
 
-**为什么不全盘照抄 OpenCode**：它的原生工具定义落在 prompt position 0，**tools 一变整个前缀缓存作废**（Anthropic 层级 tools→system→messages）。我们的目录在**易失尾巴**里（`request_assembly.py:207`），本来就在缓存前缀之外——这是 M2 选"单壳 + 目录"时白拿的优势，注册 N 个原生工具会把它还回去。代价是模型拿不到参数 schema。
+**不抄 OpenCode 的地方**：它注册每工具一个原生工具，代价是 N 份 schema 落在 prompt position 0，tools 一变整个前缀缓存作废。我们的 catalog 在易失尾巴里（`request_assembly.py:207`），本来就在缓存前缀之外——而且**我们从不发 `cache_control`**（只在用量里读回 `cached_tokens`），所以这条反对意见对我们的实际约束力远小于直觉。我们只偷它的 schema→签名编译器。
 
-**成本量级**：Anthropic 实测 58 个工具 ≈ 55K token；完整 schema ≈ 344 token/工具，压成签名 ≈ 54 token/工具（6.4×）。我们自己 13 个工具 = 13,301 字符 ≈ 3,325 token。
+**不引入新依赖**：实测 `datamodel-code-generator` 给**一个工具**生成 23 行 Python（我们要 160 字符一行）且拖 33 个依赖进一个刻意只有 7 个依赖的项目；`jsonref` 只解决 `$ref`。签名渲染的三重护栏（深度 8 / 宽度 160 / 只解析本地 `$ref`）无论如何都得自己写——外部 `$ref` 若被解析，就等于在渲染目录时发网络请求。
 
-**倾向（待拍板）**：采纳 (b) 但**渲染而非截断**——在目录里放 `echo(text: string)` 这样的签名，深度上限 3-4，越界输出 `...`，`$ref` 解不掉就丢整个属性而不是留悬空引用，单工具字节上限 + 现有 8000 总预算 + 整 server 丢弃并明说（已实现），再加跨 server 轮转取用（OpenCode `codemode/catalog.ts:115-127`）。**绝对不能截断 JSON**：`{"properties":{"a":{"type":"string"}}` 从中间切开就是非法语法，等于教模型一门坏语法。
+**顺带修掉的真 bug**：预算的记账漏了三处——header、闭合标签 `</mcp-catalog>`、结尾的 omitted 说明，导致"预算 240 产出 282 字符"。现在全程预留 `used` 精确记账，并有穷举测试守住不变式 `len(text) <= budget_chars`。预算小到放不下任何 server 时返回空目录（与 `build_mcp_catalog([])` 同义），因为一个只写着"omitted"的目录对模型毫无用处。
 
-**执行顺序**：先修安全洞（权限面板不显示参数），此项作为独立决策排在后面。
+**被打破的测试**：`test_the_budget_keeps_configured_servers_and_drops_the_rest_loudly` 的 `s5 not in text` 断言随轮转策略翻转（已批准）。其余断言未动。
 
 ## 11. 上游依据（对齐溯源）
 

@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test"
 import type { Action, SessionState } from "../src/state/session"
 import { initialState, reduce } from "../src/state/session"
+import { toolTitle } from "../src/util/toolmeta"
 
 const wire = (type: string, data: Record<string, unknown> = {}): Action => ({
   kind: "wire",
@@ -90,6 +91,32 @@ describe("assistant text", () => {
   test("whitespace-only reasoning produces no part", () => {
     const state = feed(initialState(), wire("message.finished", { text: "hi", reasoning: "  \n " }))
     expect(lastAssistant(state).parts).toEqual([{ kind: "text", text: "hi", streaming: false }])
+  })
+
+  // M6: the event path, not just the pure function. A dispatcher emits the
+  // vessel name; the card must end up naming the server and tool that ran, or
+  // a whole session of MCP calls reads as "mcp_call".
+  test("an mcp_call event puts the resolved name on the card", () => {
+    const state = feed(
+      initialState(),
+      wire("tool.started", {
+        callId: "c1",
+        toolName: "mcp_call",
+        params: { server: "fs", tool: "echo", input: { text: "hi" } },
+      }),
+      wire("tool.finished", {
+        callId: "c1",
+        toolName: "mcp_call",
+        success: true,
+        outputPreview: "echo:hi",
+        durationMs: 5,
+        error: null,
+      }),
+    )
+    const part = lastAssistant(state).parts.find((entry) => entry.kind === "tool")
+    if (part?.kind !== "tool") throw new Error("no tool part")
+    expect(part).toMatchObject({ toolName: "mcp_call", target: "fs__echo" })
+    expect(toolTitle(part.verb, part.target, false)).toBe("已运行工具 · fs__echo")
   })
 
   // A4 T4: the two-step turn from the bug report — each step's reasoning sits

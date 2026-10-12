@@ -67,3 +67,45 @@ async def test_a_session_lands_under_the_workspace_not_the_cwd(tmp_path, monkeyp
         assert list(elsewhere.glob("sessions/*.json")) == []
     finally:
         await world.aclose()
+
+
+# ---- M6: what the model is offered, decided by the real world --------------
+
+
+async def _world_with(tmp_path: Path, mcp_block: str):
+    config = tmp_path / "config.yaml"
+    config.write_text(CONFIG + mcp_block, encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    return await build_world(str(config), str(workspace), None)
+
+
+def _tool_names(world) -> list[str]:
+    return world.registry.list_names()
+
+
+@pytest.mark.asyncio
+async def test_mcp_call_is_not_offered_to_the_model_while_mcp_is_switched_off(tmp_path):
+    """The tool's description promises an ``mcp-catalog`` block that a disabled
+    manager never produces, and ``build_mcp_catalog`` returns ``""`` for it — so
+    the model was being invited, 556 characters of schema every step, to make a
+    call that could only come back as an error.
+
+    Asserted on a real ``build_world`` because the decision is a single ``if``
+    in world.py: a test that re-implemented it would have passed before the fix
+    and after any typo in the fix.
+    """
+    world = await _world_with(tmp_path, "mcp:\n  enabled: false\n")
+    try:
+        assert "mcp_call" not in _tool_names(world)
+    finally:
+        await world.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mcp_call_is_offered_while_mcp_is_on(tmp_path):
+    world = await _world_with(tmp_path, "mcp:\n  enabled: true\n")
+    try:
+        assert "mcp_call" in _tool_names(world)
+    finally:
+        await world.aclose()

@@ -48,6 +48,26 @@ describe("toolTarget", () => {
     expect(target.endsWith("…")).toBe(true)
   })
 
+  test("an MCP call is shown by what it actually calls, not by the vessel", () => {
+    // The dispatcher emits tool.started with the vessel name; the resolved pair
+    // is in params. Without this the transcript reads "运行工具 · mcp_call" and
+    // the operator cannot tell which server ran, or which of its tools.
+    expect(
+      toolTarget("mcp_call", { server: "fs", tool: "echo", input: { text: "hi" } }),
+    ).toBe("fs__echo")
+  })
+
+  test("a half-formed MCP call does not render a broken name", () => {
+    expect(toolTarget("mcp_call", { server: "fs" })).toBe("mcp_call")
+    expect(toolTarget("mcp_call", { tool: "echo" })).toBe("mcp_call")
+  })
+
+  test("the already-resolved name still resolves to itself", () => {
+    // The permission panel receives fs__echo, not the vessel: it must not go
+    // through this branch.
+    expect(toolTarget("fs__echo", { server: "fs", tool: "echo", input: {} })).toBe("fs__echo")
+  })
+
   test("unknown tools identify themselves by name", () => {
     expect(toolTarget("mcp__search__web", { query: "x" })).toBe("mcp__search__web")
   })

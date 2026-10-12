@@ -46,7 +46,7 @@ import logging
 import os
 import tempfile
 import urllib.parse as urllib_parse
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,9 +94,32 @@ _CLOSE_TIMEOUT_NEVER_CONNECTED = 0.2
 #: (packages/core/src/codemode/catalog.ts:48).
 _CATALOG_DESCRIPTION_LIMIT = 120
 
+#: With a signature on the line, the description has less to say: the argument
+#: names and types were the half of it that was load-bearing.  Measured on the
+#: 13-tool server, 120→80 together with signatures is *cheaper* than 120 alone
+#: (1804 vs 1865 characters), so this is not a concession.
+_CATALOG_DESCRIPTION_LIMIT_SIGNED = 80
+
+#: A rendered signature's own width, and the nesting depth it will follow.  The
+#: width is what keeps one wide tool from eating the budget; the depth is what
+#: keeps a hostile or self-referential schema from taking the turn down with
+#: it — both are total-function guards, not budget policy.
+_SIGNATURE_MAX_CHARS = 160
+_SIGNATURE_MAX_DEPTH = 8
+
 #: ~4 characters per token, so this is OpenCode's INLINE_BUDGET of 2,000 tokens
 #: (catalog.ts:50).  Over it, configured servers are dropped, loudly.
 _CATALOG_BUDGET_CHARS = 8_000
+
+#: Characters held back for the trailing "omitted" note, sized for three digits
+#: so it fits whatever the count turns out to be.
+#:
+#: Held for the whole build rather than checked at the end, because the note is
+#: only *sometimes* needed and "sometimes" is what let a 240-character budget
+#: produce 282 characters.  The cost is that an unused reserve is thrown away:
+#: 45 characters, 0.6% of the budget, in exchange for a bound that cannot be
+#: violated by any input.
+_OMITTED_NOTE_RESERVE = len("(999 more server(s) omitted: catalog budget)") + 1
 
 #: The pause between a server's connect attempts, doubling up to the cap (M3).
 _BACKOFF_MIN = 1.0
@@ -147,6 +170,152 @@ class MCPToolHandle:
     description: str = ""
 
 
+def _schema_signature(
+    schema: Any,
+    defs: Mapping[str, Any],
+    depth: int = 0,
+) -> str:
+    """One remote tool's call signature: ``(title: string, body?: string)``.
+
+    The MCP spec *requires* ``inputSchema`` on ``tools/list``, and every handle
+    already carries the server's own schema (``MCPToolHandle.tool``).  Without
+    this the model was told a tool existed and nothing about how to call it —
+    the only clue to the argument names was whatever prose the description
+    happened to contain.  OpenCode compiles the same schema into a TypeScript
+    signature for its Code Mode catalog
+    (``packages/codemode/src/tool-schema.ts``); this is that compiler, with
+    three guards it needs and this catalog does not:
+
+    * a **depth** cap, so a self-referential schema ends in ``unknown`` instead
+      of recursing until the turn is dead;
+    * a **width** cap, so one 40-argument tool cannot spend the budget alone —
+      the omitted arguments are *said*, because a silently truncated signature
+      teaches the model a grammar the server does not have;
+    * local ``$ref`` only.  A ``$ref`` to an http URL is not resolved: fetching
+      a URL while rendering a catalog would turn a text format into an SSRF
+      surface, and no real tool schema needs it.
+
+    Total by construction: every branch returns a string, and no input can make
+    it raise — a malformed schema yields ``unknown``, not a failed turn.
+    """
+    if depth >= _SIGNATURE_MAX_DEPTH:
+        return "unknown"
+    if not isinstance(schema, Mapping):
+        return "unknown"
+
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        if not ref.startswith("#/"):
+            return "unknown"
+        path = ref[2:].split("/")
+        # ``defs`` is already the ``$defs`` (or ``definitions``) map, and the
+        # pointer starts by naming it, so the first segment is skipped.
+        if path and path[0] in ("$defs", "definitions"):
+            path = path[1:]
+        target: Any = defs
+        for part in path:
+            if not isinstance(target, Mapping):
+                return "unknown"
+            part = part.replace("~1", "/").replace("~0", "~")
+            target = target.get(part)
+        if target is None:
+            return "unknown"
+        return _schema_signature(target, defs, depth + 1)
+
+    kind = schema.get("type")
+    if kind == "array":
+        return f"Array<{_schema_signature(schema.get('items'), defs, depth + 1)}>"
+    if kind == "object" or (kind is None and "properties" in schema):
+        return _object_signature(schema, defs, depth)
+    if isinstance(kind, list):
+        # JSON Schema 2020-12 allows a type union; the first member that names
+        # itself is as good an answer as the catalog can give.
+        for member in kind:
+            rendered = _schema_signature({**schema, "type": member}, defs, depth)
+            if rendered != "unknown":
+                return rendered
+        return "unknown"
+    if kind in ("string", "integer", "number", "boolean", "null"):
+        return str(kind)
+    return "unknown"
+
+
+def _object_signature(schema: Mapping[str, Any], defs: Mapping[str, Any], depth: int) -> str:
+    parts = _object_parts(schema, defs, depth)
+    return "object" if parts is None else "{" + ", ".join(parts) + "}"
+
+
+def _object_parts(
+    schema: Mapping[str, Any], defs: Mapping[str, Any], depth: int
+) -> list[str] | None:
+    """``None`` when there is nothing to enumerate, else the rendered members.
+
+    The members come back without their delimiters because the root prints them
+    as an argument list ``(a, b)`` while a nested object prints as ``{a, b}``.
+    """
+    properties = schema.get("properties")
+    if not isinstance(properties, Mapping) or not properties:
+        return None
+    required = {str(name) for name in (schema.get("required") or [])}
+    parts: list[str] = []
+    omitted = False
+    for raw_name, raw_value in properties.items():
+        name = str(raw_name)
+        rendered = f"{_safe_identifier(name)}: {_schema_signature(raw_value, defs, depth + 1)}"
+        if name not in required:
+            rendered = rendered.replace(":", "?:", 1)
+        candidate = f"{', '.join(parts)}, {rendered}" if parts else rendered
+        # Width is checked as the line is built so the cut lands between
+        # arguments, never inside one.
+        if len(candidate) > _SIGNATURE_MAX_CHARS - 4:
+            omitted = True
+            break
+        parts.append(rendered)
+    if omitted:
+        parts.append("…")
+    return parts
+
+
+def _safe_identifier(name: str) -> str:
+    """A JSON-schema key is not necessarily an identifier (``content-type``)."""
+    plain = all(c.isalnum() or c == "_" for c in name)
+    if name and plain and (name[0].isalpha() or name[0] == "_"):
+        return name
+    return f'"{name}"'
+
+
+def tool_signature(handle: MCPToolHandle) -> str:
+    """The signature to print after a tool's name, or ``""`` when it has none.
+
+    Empty means "the server sent nothing to render": ``build_mcp_catalog`` then
+    prints exactly the line it printed before this existed, because a broken
+    server should not change the shape of every other line.
+    """
+    tool = getattr(handle, "tool", None)
+    schema = getattr(tool, "input_schema", None)
+    if not isinstance(schema, Mapping):
+        return ""
+    defs = schema.get("$defs") or schema.get("definitions") or {}
+    if not isinstance(defs, Mapping):
+        defs = {}
+    properties = schema.get("properties")
+    parts = _object_parts(schema, defs, 0)
+    if isinstance(properties, Mapping) and not properties:
+        return "()"
+    return "(" + ", ".join(parts or []) + ")"
+
+
+def _tool_line(handle: MCPToolHandle) -> str:
+    """One catalog line for one tool: name, signature, description."""
+    signature = tool_signature(handle)
+    description = (handle.description or "").strip().replace("\n", " ")
+    limit = _CATALOG_DESCRIPTION_LIMIT_SIGNED if signature else _CATALOG_DESCRIPTION_LIMIT
+    if len(description) > limit:
+        description = description[:limit] + "…"
+    label = f"  {handle.name}{signature}"
+    return f"{label}: {description}" if description else label
+
+
 def build_mcp_catalog(
     servers: list[tuple[str, list[MCPToolHandle]]],
     budget_chars: int = _CATALOG_BUDGET_CHARS,
@@ -154,36 +323,77 @@ def build_mcp_catalog(
     """The catalog text: one entry per callable remote tool (M2).
 
     Pure, and deliberately so — the budget discipline is the whole reason this
-    exists, and it is testable without a connection.  Config order is priority
-    (the first server is the one the operator listed first); over budget, whole
-    trailing servers are dropped and the drop is *said*, because silently
-    invisible tools read as bugs to whoever debugged the model's call.
+    exists, and it is testable without a connection.
+
+    Order is the config's (see :meth:`MCPManager.available`), and the budget is
+    **shared round-robin**: every server gets one tool before any server gets a
+    second.  It used to fill servers in order and drop whole trailing ones,
+    which produced the worst outcome this function can produce — a connected,
+    working server the model cannot see, behind a panel row that says
+    "Connected ✓".  A server that gets no room at all is now *named* with its
+    tool count rather than dropped silently, and a server whose header itself
+    does not fit is counted in the trailing line.
+
+    The header is counted against the budget too.  It used to be added after
+    the accounting, so a full 8,000 budget actually produced ~8,200 characters
+    and the documented bound was not the enforced one.
     """
     if not servers:
         return ""
-    lines: list[str] = []
-    used = 0
-    dropped = 0
-    for name, handles in servers:
-        block: list[str] = [name]
-        for handle in handles:
-            description = (handle.description or "").strip().replace("\n", " ")
-            if len(description) > _CATALOG_DESCRIPTION_LIMIT:
-                description = description[:_CATALOG_DESCRIPTION_LIMIT] + "…"
-            block.append(f"  {handle.name}: {description}" if description else f"  {handle.name}")
-        text = "\n".join(block)
-        if lines and used + len(text) + 1 > budget_chars:
-            dropped += 1
-            continue
-        lines.append(text)
-        used += len(text) + 1
-    if dropped:
-        lines.append(f"({dropped} more server(s) omitted: catalog budget)")
     header = (
         "<mcp-catalog>\n"
         "Remote tools, called with mcp_call(server, tool, input).\n"
         "server and tool must be spelled exactly as listed here.\n"
     )
+    lines: list[str] = []
+    # Every character of the output is accounted for before anything is added:
+    # the opening header, the newline after it, and the closing tag. Leaving the
+    # tag out is how a 240-character budget produced 282 characters.
+    used = len(header) + 1 + len("</mcp-catalog>") + _OMITTED_NOTE_RESERVE
+    shown = [0] * len(servers)
+    taken = [0] * len(servers)
+
+    progressed = True
+    while progressed:
+        progressed = False
+        for index, (_name, handles) in enumerate(servers):
+            if taken[index] >= len(handles):
+                continue
+            line = _tool_line(handles[taken[index]])
+            # A server's header is paid for by the first tool it gets.
+            cost = len(line) + 1 + (len(_name) + 1 if shown[index] == 0 else 0)
+            if used + cost > budget_chars:
+                continue
+            if shown[index] == 0:
+                lines.append(_name)
+                shown[index] = 1
+            lines.append(line)
+            used += cost
+            taken[index] += 1
+            progressed = True
+
+    omitted = 0
+    for index, (name, handles) in enumerate(servers):
+        if not handles or shown[index] or taken[index] == len(handles):
+            continue
+        line = f"{name} ({len(handles)} tools, none shown)"
+        # The note's room was already held back above; this line may only spend
+        # what is left of it.
+        if used + len(line) + 1 > budget_chars:
+            omitted += 1
+            continue
+        lines.append(line)
+        used += len(line) + 1
+    if not lines:
+        # Nothing at all fitted.  A catalog whose whole content is "(3 more
+        # server(s) omitted)" tells the model nothing it could act on, and the
+        # header alone is larger than a small budget — so an empty catalog is
+        # the honest answer, and it is the one ``build_mcp_catalog([])`` already
+        # means.  This also keeps ``len(text) <= budget_chars`` true for every
+        # budget, instead of only for budgets above the header's own size.
+        return ""
+    if omitted:
+        lines.append(f"({omitted} more server(s) omitted: catalog budget)")
     return header + "\n".join(lines) + "\n</mcp-catalog>"
 
 
@@ -1137,9 +1347,18 @@ class MCPManager:
         refuses must still be *listed* in the catalog, or its refusal reads as
         a bug.  A dead transport excludes its server immediately — the catalog
         drops it on the same step, rather than offering calls that cannot run.
+
+        **Order is the config's, not the connect race's.**  ``_owners`` is
+        appended as each server finishes connecting, so iterating it sorted
+        servers by startup time; the catalog's budget then dropped whichever
+        the operator had listed *last*.  Config order is what the budget's own
+        docstring promises, so it is read from the config instead.  A server
+        the wizard added at runtime is appended to that config and therefore
+        sorts last, which is also the only stable answer for it.
         """
         rows: list[tuple[str, list[MCPToolHandle]]] = []
-        for owner in self._owners:
+        order = {server.name: index for index, server in enumerate(self._config.servers)}
+        for owner in sorted(self._owners, key=lambda o: order.get(o.server.name, len(order))):
             if owner.error is not None or owner.dead is not None or not owner.ready.is_set():
                 continue
             server = owner.server

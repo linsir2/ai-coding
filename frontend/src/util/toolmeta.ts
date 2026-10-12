@@ -53,9 +53,22 @@ export function toolTarget(toolName: string, params: Record<string, unknown>): s
       return String(params["path"] ?? "")
     case "bash":
       return shorten(String(params["command"] ?? ""), TARGET_COMMAND_LIMIT)
+    case "mcp_call":
+      // The dispatcher reports the vessel; the call it carried is in params.
+      // Naming the vessel alone made every remote tool read as "运行工具 ·
+      // mcp_call", which says nothing about which server ran. A pair that is
+      // not both present is left as the vessel rather than rendered half-formed.
+      return mcpCallTarget(params)
     default:
       return TOOL_VERBS[toolName] ? "" : toolName
   }
+}
+
+/** ``fs__echo`` for the call an ``mcp_call`` actually made. */
+function mcpCallTarget(params: Record<string, unknown>): string {
+  const server = typeof params["server"] === "string" ? params["server"] : ""
+  const tool = typeof params["tool"] === "string" ? params["tool"] : ""
+  return server && tool ? `${server}__${tool}` : "mcp_call"
 }
 
 /** `正在运行命令 · ls` while running, `已运行命令 · ls` once settled. */

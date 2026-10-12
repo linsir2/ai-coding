@@ -100,7 +100,15 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     # M2: one dispatcher carries every remote call, and the catalog it is
     # chosen from is built from the same manager — the text the model reads and
     # the calls it can make come from one source, so they cannot drift apart.
-    registry.register(MCPCallTool(mcp_manager))
+    #
+    # Registered only when MCP is switched on (M6).  With it off the catalog
+    # builder returns "" forever, so the tool's description would point at a
+    # block that never arrives and every call would come back as an error —
+    # 556 characters of schema per step spent advertising a dead end.  The gate
+    # still knows ``mcp_call`` by name; that is for a hallucinated pair while
+    # MCP *is* on, and is unaffected.
+    if app_cfg.mcp.enabled:
+        registry.register(MCPCallTool(mcp_manager))
 
     # M5: approvals go to the TUI as a server-initiated request; the IPC layer
     # installs the provider in ``make_handlers``.  Without one (a stray

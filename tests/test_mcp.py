@@ -743,3 +743,72 @@ def test_with_mcp_off_every_configured_server_says_so():
     assert [row["name"] for row in rows] == ["fs"]
     assert rows[0]["status"] == "off"
     assert rows[0]["toolCount"] == 0
+
+
+# ---- M6: available() follows the config, not the race -----------------------
+
+
+@pytest.mark.asyncio
+async def test_available_follows_config_order_not_which_server_connected_first():
+    """``build_mcp_catalog``'s budget says config order is priority, so the
+    manager has to hand servers over in that order.
+
+    It did not: owners were appended as they finished connecting, so a slow
+    first-listed server sorted itself *behind* a fast second one. Measured on
+    two real servers, config ``[fat, thin]`` came back ``[thin, fat]`` every
+    time.  Over budget that is not cosmetic — the server the operator listed
+    first is the one that gets dropped.
+    """
+    started: list[str] = []
+
+    def slow_first(server):
+        @asynccontextmanager
+        async def _cm():
+            started.append(server.name)
+            if server.name == "first":
+                await asyncio.sleep(0.15)
+            yield _Session(tools=[_tool(f"{server.name}_tool")])
+
+        return _cm()
+
+    manager = MCPManager(
+        _cfg(_server("first"), _server("second")),
+        session_factory=slow_first,
+    )
+    await manager.open_all()
+    assert await until_mcp_settled(manager)
+
+    # The factory ran in config order, so any reordering happens in available().
+    assert started == ["first", "second"]
+    assert [name for name, _ in manager.available()] == ["first", "second"]
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_server_added_at_runtime_lands_last_in_config_order():
+    """M5's wizard appends to the config, so an added server sorts after the
+    configured ones — including when it connects first, which is the same race
+    as above in a different hat.
+
+    The two are put in flight together on purpose: waiting for the configured
+    server to settle before adopting would leave the owners already in config
+    order and prove nothing.
+    """
+    def factory(server):
+        @asynccontextmanager
+        async def _cm():
+            if server.name == "configured":
+                await asyncio.sleep(0.15)
+            yield _Session(tools=[_tool(f"{server.name}_tool")])
+
+        return _cm()
+
+    manager = MCPManager(_cfg(_server("configured")), session_factory=factory)
+    await manager.open_all()
+
+    assert manager.adopt(MCPServerConfig(name="added", command=["added"]))["ok"] is True
+    await manager.start_supervisor(manager._config.servers[-1])
+    assert await until_mcp_settled(manager)
+
+    assert [name for name, _ in manager.available()] == ["configured", "added"]
+    await manager.aclose()
