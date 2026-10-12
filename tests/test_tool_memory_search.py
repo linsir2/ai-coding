@@ -885,20 +885,25 @@ async def test_r11c_search_payload_always_carries_source_refs(tmp_path):
 async def test_r11c_miss_index_carries_a_bounded_scene_map(tmp_path):
     """Six scenes in, five out — and ordered by how often they were recalled."""
     store = MemoryStore(tmp_path / "m.json")
+    # Five labels of three notes each, so all five are groups; s5 has one note,
+    # so it is reported in the raw map but is not navigation.
     heat = {"s0": 9, "s1": 7, "s2": 5, "s3": 4, "s4": 3, "s5": 1}
     for scene, hits in heat.items():
-        store.add_note(
-            MemoryNote(id=scene, text=f"记忆内容 {scene}", scene=scene, hits=hits)
-        )
+        repeats = 3 if scene != "s5" else 1
+        for index in range(repeats):
+            store.add_note(
+                MemoryNote(id=f"{scene}{index}", text=f"记忆内容 {scene} {index}",
+                           scene=scene, hits=hits)
+            )
     tool = MemorySearchTool(MemoryService(store))
 
     result = await tool.execute({"query": "怎么构建"})
 
     assert result.data["no_match"] is True
     index = result.data["index"]
-    assert index["by_scene"] == dict.fromkeys(heat, 1)
+    assert index["by_scene"] == {"s0": 3, "s1": 3, "s2": 3, "s3": 3, "s4": 3, "s5": 1}
     assert [row[0] for row in index["top_scenes"]] == ["s0", "s1", "s2", "s3", "s4"]
-    assert index["top_scenes"][0] == ["s0", 1, 9]  # (scene, count, heat)
+    assert index["top_scenes"][0] == ["s0", 3, 27]  # (scene, count, heat)
 
 
 @pytest.mark.asyncio
@@ -918,28 +923,33 @@ async def test_r11c_an_unscoped_library_output_is_unchanged(tmp_path):
 @pytest.mark.asyncio
 async def test_r11c_search_filters_by_scene(tmp_path):
     store = MemoryStore(tmp_path / "m.json")
-    store.add_note(MemoryNote(id="a", text="构建用 uv 管理依赖", scene="构建"))
-    store.add_note(MemoryNote(id="b", text="构建用 uv 管理依赖方案", scene="发布"))
+    _fill(store, "构建", 3)
+    _fill(store, "发布", 3)
     tool = MemorySearchTool(MemoryService(store))
 
-    result = await tool.execute({"query": "构建 uv", "scene": "发布"})
+    result = await tool.execute({"query": "记忆", "scene": "发布"})
 
-    assert [note["id"] for note in result.data["notes"]] == ["b"]
+    assert {note["id"] for note in result.data["notes"]} == {"发布0", "发布1", "发布2"}
 
 
 @pytest.mark.asyncio
 async def test_r11c_miss_text_names_the_scenes_it_measured(tmp_path):
     """Every clause in the miss text must be one we measured (R10 discipline)."""
     store = MemoryStore(tmp_path / "m.json")
-    store.add_note(MemoryNote(id="s0", text="构建流程用 uv", scene="构建", hits=4))
-    store.add_note(MemoryNote(id="s1", text="发布走 Actions", scene="发布"))
+    for index in range(3):
+        store.add_note(
+            MemoryNote(id=f"b{index}", text=f"构建流程用 uv {index}", scene="构建", hits=4)
+        )
+        store.add_note(
+            MemoryNote(id=f"p{index}", text=f"发布走 Actions {index}", scene="发布")
+        )
     tool = MemorySearchTool(MemoryService(store))
 
     result = await tool.execute({"query": "怎么部署到预发"})
 
     assert "记忆里的场景分组" in result.output
-    assert "构建 1 条（被召回 4 次）" in result.output
-    assert "发布 1 条（被召回 0 次）" in result.output
+    assert "构建 3 条（被召回 12 次）" in result.output
+    assert "发布 3 条（被召回 0 次）" in result.output
     assert "scene=" in result.output
 
 
@@ -957,3 +967,67 @@ async def test_r11c_write_tool_accepts_a_scene(tmp_path):
 
     assert result.success is True
     assert store.get(result.data["note_id"]).scene == "构建"
+
+
+# ---- M8: a label is only navigation once enough memories share it ----------
+#
+# The extractor writes scenes from an open vocabulary, so the real store held 36
+# labels over 43 notes and 30 of them were singletons. Offering those as
+# navigation teaches the model to narrow by labels that cannot narrow — the
+# documented cost of a scene filter is recall, so a one-note label can only lose.
+# Support count decides, read on demand; nothing is stored or migrated.
+
+
+def _fill(store, scene, notes):
+    for index in range(notes):
+        store.add_note(
+            MemoryNote(id=f"{scene}{index}", text=f"{scene} 第 {index} 条记忆", scene=scene)
+        )
+
+
+@pytest.mark.asyncio
+async def test_m8_a_one_note_label_is_not_offered_as_a_group(tmp_path):
+    store = MemoryStore(tmp_path / "m.json")
+    _fill(store, "环境", 3)
+    _fill(store, "酒店管理系统", 1)
+    tool = MemorySearchTool(MemoryService(store))
+
+    result = await tool.execute({"query": "完全不相关的查询词"})
+
+    names = [row[0] for row in result.data["index"]["top_scenes"]]
+    assert names == ["环境"]
+    assert "酒店管理系统" not in result.output
+    # The raw count is still reported: the label exists, it is just not a group.
+    assert result.data["index"]["by_scene"]["酒店管理系统"] == 1
+
+
+@pytest.mark.asyncio
+async def test_m8_narrowing_by_a_one_note_label_is_reported_not_obeyed(tmp_path):
+    store = MemoryStore(tmp_path / "m.json")
+    _fill(store, "环境", 3)
+    _fill(store, "酒店管理系统", 1)
+    tool = MemorySearchTool(MemoryService(store))
+    query = {"query": "环境怎么配置"}
+
+    with_filter = await tool.execute({**query, "scene": "酒店管理系统"})
+    without = await tool.execute(query)
+
+    assert [note["id"] for note in with_filter.data["notes"]] == [
+        note["id"] for note in without.data["notes"]
+    ], "the lone label must be dropped, so the search is the one the model asked for"
+    assert "酒店管理系统" in with_filter.output
+    assert "没有用来收窄" in with_filter.output
+
+
+@pytest.mark.asyncio
+async def test_m8_no_repeated_label_means_no_scene_navigation_at_all(tmp_path):
+    store = MemoryStore(tmp_path / "m.json")
+    _fill(store, "甲", 1)
+    _fill(store, "乙", 1)
+    tool = MemorySearchTool(MemoryService(store))
+
+    result = await tool.execute({"query": "完全不相关的查询词"})
+
+    index = result.data["index"]
+    assert "top_scenes" not in index
+    assert "场景" not in result.output

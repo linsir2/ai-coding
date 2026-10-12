@@ -438,3 +438,39 @@ def test_r8_merging_ignores_evidence(tmp_path):
     )
     keep, drop = _better_of(older_tool, hit_heavy)
     assert (keep.id, drop.id) == ("hit", "old")  # hits outrank evidence
+
+
+@pytest.mark.asyncio
+async def test_harvest_offers_the_scene_groups_the_memory_already_uses(tmp_path):
+    """The cause of 36 labels over 43 notes: the extractor was shown no labels,
+    so it invented one per note.  Showing it the head invites reuse — without
+    forbidding a new label, because a label no memory shares cannot be a group
+    and must not be blocked from existing (Heaps' law, arxiv.org/pdf/0704.3316).
+    """
+    store = MemoryStore(tmp_path / "m.json")
+    for index in range(3):
+        store.add_note(new_note(f"环境配置说明 {index}", scene="环境"))
+    store.add_note(new_note("某个具体项目", scene="酒店管理系统"))
+    extractor = _extractor_returning("nothing new")
+    svc = MemoryService(store, extractor=extractor, config=_cfg())
+
+    await svc.harvest([_user("新的依赖约定")])
+
+    hint = extractor.seen[0][-1].content or ""
+    assert "<scene-groups" in hint
+    assert "环境" in hint
+    assert "酒店管理系统" not in hint, "a one-note label is not worth offering"
+    assert "新标签" in hint or "新的标签" in hint
+
+
+@pytest.mark.asyncio
+async def test_harvest_says_nothing_about_scenes_when_nothing_repeats(tmp_path):
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(new_note("一条孤立的记忆", scene="甲"))
+    extractor = _extractor_returning("nothing new")
+    svc = MemoryService(store, extractor=extractor, config=_cfg())
+
+    await svc.harvest([_user("新的依赖约定")])
+
+    contents = " ".join(message.content or "" for message in extractor.seen[0])
+    assert "<scene-groups" not in contents

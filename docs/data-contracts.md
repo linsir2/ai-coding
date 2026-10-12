@@ -748,3 +748,26 @@ R11d 不改任何门禁、不改排序器签名、不改落盘；`recall_fusion=
 
 顺带一处既有的 doc-vs-code 缺口：`scripts/memory_cases.py:362` 的 docstring 写着 gate
 `AI_CODING_MEMORY_IT=1`，**全仓没有任何代码读这个变量**（该文件未改动，仅记录）。
+
+## M8 契约：scene 只在够多人用时才算一个组
+
+真实库实测：43 条记忆、35 个标签、29 个是单例（67%）。因为标签是模型从**开放词表**里挑的，
+它的数量**不会收敛**——Heaps 定律（`arxiv.org/pdf/0704.3316`）给出的是词表无界增长而
+**头部占比稳定**，所以正确的目标是分出一个受治理的头部，而不是锁死一份词表。
+
+量化危害：`scene=` 过滤的代价是召回，而这些标签里 67% 的只挂在一条记忆上——按它过滤只能
+召回那一条，严格差于不过滤。
+
+| 契约 | 位置 | 规则 |
+|---|---|---|
+| `IndexSummary.SCENE_SUPPORT = 3` | `memory/service.py` | 多少条记忆共用才算一个组。三条起，因为两条和巧合无法区分，一条就是全部问题 |
+| `MemoryService.governed_scenes()` | 同上 | **读时**计算的头部：支持度 ≥3 的标签，按 heat 倒序、名字做 tie-break。不落盘、无新字段、无需迁移；标签靠被使用自动晋升 |
+| `IndexSummary.governed_scenes` | 同上 | 头部标签名，供调用方判断"这个标签是不是组" |
+| `top_scenes` | 同上 | **只取头部**。它是 schema description 指给模型看的东西，把单例塞进去就是教模型按不能收窄的标签收窄 |
+| `by_scene` | 同上 | 仍是全部标签的原始计数——标签就在每条记忆上，只是不再被当成组 |
+| `recall_*(scene=非头部)` | 同上 | **忽略该过滤并说明**，记在 `RecallDiagnostics.ignored_scene`。不报错、不静默丢弃：静默丢弃会让模型以为"这就是那个组的全部" |
+| 命中与未命中文案都说明 | `tools/memory_search_tool.py` | 命中路径同样要说明，否则模型会以为过滤生效了 |
+| `harvest` 头部提示 | `memory/service.py::_scene_hint` | 以 `<scene-groups>` 系统消息把头部标签给提取器，并写明"能归入就原样用，没有合适的可以自己起新标签，实在归不了组就省略"——**邀请复用，不禁止新造** |
+| `normalize_scene` 不变 | `memory/note.py` | 词表若落在这一层，所有既有归一化测试会被打碎；闸门只在读时与过滤时 |
+| 一次性拼写归并 | `scripts/migrate_scenes.py` | 手写映射，默认 dry-run，`--apply` 写入前把旧标签落到 `<store>.scenes.bak`。**逐条读原文定的**：模糊匹配会把"工具约束"和"执行约束"并到一起，而它们讲的是不同的事 |
+

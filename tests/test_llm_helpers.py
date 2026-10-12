@@ -31,7 +31,13 @@ def test_r11c_extract_prompt_asks_for_a_scene_and_says_it_is_optional():
     from ai_coding.ai.llm_helpers import _EXTRACT_SYSTEM_PROMPT
 
     assert "scene" in _EXTRACT_SYSTEM_PROMPT
-    assert "不确定" in _EXTRACT_SYSTEM_PROMPT  # optional, not mandatory
+    # Optional, not mandatory.  The wording moved when M8 added the reuse rule
+    # ("归不了组就省略这个字段"), so this pins the *property* — there must still be a
+    # way out of filling the field — rather than the old adverb.
+    assert "省略" in _EXTRACT_SYSTEM_PROMPT
+    # M8: reuse what the memory already groups by, without forbidding a new label.
+    assert "<scene-groups>" in _EXTRACT_SYSTEM_PROMPT
+    assert "新标签" in _EXTRACT_SYSTEM_PROMPT
     # The pre-R11c contract must survive verbatim for the fields that matter.
     assert "target_id" in _EXTRACT_SYSTEM_PROMPT
     assert "kind ∈ fact|decision|preference|open_thread" in _EXTRACT_SYSTEM_PROMPT

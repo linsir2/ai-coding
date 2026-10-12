@@ -22,6 +22,7 @@ htmlcov/
 sessions/
 *.memory/
 .memory
+.memory.scenes.bak
 transcripts/
 worktrees/
 # R4a: traces and the hook plugin directory are per-workspace runtime state

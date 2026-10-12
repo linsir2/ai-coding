@@ -226,6 +226,11 @@ class MemorySearchTool(BaseTool):
                 # none, so an unscoped workspace pays nothing for this feature.
                 if summary.by_scene:
                     data["index"]["by_scene"] = dict(summary.by_scene)
+                # Only the head is navigation.  `top_scenes` is what the schema
+                # description points a model at, so a label that is not a group
+                # must not appear: it cannot narrow anything, and filtering on it
+                # costs recall.  Omitted entirely when nothing has repeated.
+                if summary.top_scenes:
                     data["index"]["top_scenes"] = [
                         [scene, count, heat] for scene, count, heat in summary.top_scenes
                     ]
@@ -238,6 +243,7 @@ class MemorySearchTool(BaseTool):
                     filtered_out=_filtered_out(diagnostics, filters),
                     filters=_filter_names(filters),
                     no_vocabulary_match=bool(diagnostics.no_vocabulary_match),
+                    ignored_scene=_ignored_scene(diagnostics),
                 ),
                 data=data,
             )
@@ -246,6 +252,11 @@ class MemorySearchTool(BaseTool):
             f"matched={'/'.join(note['matched_terms'])}] {note['text']}"
             for note in notes
         ]
+        if _ignored_scene(diagnostics):
+            # On a hit too, not only on a miss: the model set a filter that was
+            # not applied, and a silent drop would read as "these are the notes in
+            # that group".
+            lines.append(_ignored_scene_note(_ignored_scene(diagnostics)))
         return ToolResult(success=True, output="\n".join(lines), data=data)
 
 
@@ -271,6 +282,7 @@ def _miss_text(
     data: dict[str, Any],
     *,
     filtered_out: int = 0,
+    ignored_scene: str = "",
     filters: str = "",
     no_vocabulary_match: bool = False,
 ) -> str:
@@ -326,6 +338,11 @@ def _miss_text(
         lines.append(
             f"记忆里的场景分组：{listed}；可用 scene=<场景> 收窄候选（查询词仍要自己写）。"
         )
+    if ignored_scene:
+        # Said where the model can act on it: the filter it set was not wrong, it
+        # named a label too thin to narrow — and the labels that *can* narrow are
+        # the ones just listed above.
+        lines.append(_ignored_scene_note(ignored_scene))
     if filtered_out:
         # Saying "rephrase, or narrow by kind" here would be telling the model to
         # repeat the filter it just used, and blaming kind/evidence for a scope
@@ -370,9 +387,27 @@ class _EmptyDiagnostics:
     semantic_unavailable: bool = False
     no_vocabulary_match: bool = False
     filtered_out: int = 0
+    ignored_scene: str | None = None
 
 
 _EMPTY_DIAGNOSTICS = _EmptyDiagnostics()
+
+
+def _ignored_scene(diagnostics: Any) -> str:
+    """The ``scene=`` the service refused to apply, or "" when it applied it.
+
+    ``getattr`` because the diagnostics object is duck-typed like the rest: a
+    double from before this field has no claim to make.
+    """
+    return str(getattr(diagnostics, "ignored_scene", None) or "")
+
+
+def _ignored_scene_note(scene: str) -> str:
+    """The sentence that tells the model its filter was not the one it thinks."""
+    return (
+        f"scene={scene} 这个标签没有用来收窄：它只出现在一条记忆上，"
+        f"按它过滤只会丢掉其他记忆。"
+    )
 
 
 def _filter_names(filters: dict[str, Any]) -> str:

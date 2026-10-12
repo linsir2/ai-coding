@@ -624,7 +624,12 @@ async def test_r11c_dedupe_hit_backfills_a_missing_scene(tmp_path):
 async def test_r11c_candidates_filter_scene_before_ranking(tmp_path):
     """The R10 bug, scene edition: a filter that runs after ranking returns nothing."""
     store = MemoryStore(tmp_path / "m.json")
-    for index, scene in enumerate(("构建", "构建", "构建", "构建", "发布")):
+    # Both labels need three notes: a label that thin is not a group, so M8 drops
+    # it instead of filtering (see the ignored-filter tests below).  The subject
+    # here is ordering, not the label, so both sides are made into real groups —
+    # if the filter ran after ranking, the top-1 would be one of the four
+    # identical 构建 notes, not n4.
+    for index, scene in enumerate(("构建", "构建", "构建", "构建", "发布", "发布", "发布")):
         store.add_note(
             MemoryNote(id=f"n{index}", text=f"依赖管理用 uv 方式{index}", scene=scene,
                        created_time="2026-09-25T00:00:00+00:00")
@@ -669,3 +674,99 @@ def test_r11d_a_service_without_config_ranks_with_blend(tmp_path):
     svc.write_note("构建用 uv 管理依赖", kind="decision")
     hits, _diagnostics = asyncio.run(svc.recall_with_diagnostics("构建用什么依赖", k=3))
     assert [hit.note.id for hit in hits]
+
+
+# ---- M8: a scene is only a group once enough memories share it -------------
+#
+# Measured on the real store: 43 notes, 36 labels, 30 of them singletons. The
+# label is chosen by the extractor from an *open* vocabulary, so its count does
+# not converge (Heaps' law — arxiv.org/pdf/0704.3316): the shape to aim for is
+# a governed head separated from an ungoverned tail, not a fixed list. Support
+# — how many notes carry the label — is the evidence, computed on read, so
+# nothing is stored and nothing migrates.
+
+
+def _scene_service(tmp_path, *scenes):
+    from ai_coding.memory.service import MemoryService
+
+    store = MemoryStore(tmp_path / "m.json")
+    for index, scene in enumerate(scenes):
+        store.add_note(MemoryNote(id=f"n{index}", text=f"note {index}", scene=scene))
+    return MemoryService(store, config=_cfg())
+
+
+def test_a_label_needs_three_memories_before_it_counts_as_a_group(tmp_path):
+    svc = _scene_service(
+        tmp_path, "项目", "项目", "项目", "环境", "环境", "环境", "文档"
+    )
+
+    summary = svc.index_summary()
+
+    assert set(summary.governed_scenes) == {"项目", "环境"}
+    assert "文档" not in summary.governed_scenes, "a one-note label is not a group"
+
+
+def test_the_head_follows_the_data_so_a_label_is_promoted_by_being_used(tmp_path):
+    """The point of an open vocabulary: nothing has to be registered. A label
+    with one note today enters the head the day a second note joins it."""
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="a", text="one", scene="记忆"))
+    svc = MemoryService(store, config=_cfg())
+    assert svc.index_summary().governed_scenes == ()
+
+    for index in range(2):
+        store.add_note(MemoryNote(id=f"b{index}", text=f"more {index}", scene="记忆"))
+
+    assert svc.index_summary().governed_scenes == ("记忆",)
+
+
+def test_a_store_with_no_repeated_label_has_no_groups_and_says_nothing(tmp_path):
+    svc = _scene_service(tmp_path, "甲", "乙", "丙")
+
+    summary = svc.index_summary()
+
+    assert summary.governed_scenes == ()
+    # The raw counts stay available: the label is still on every note, it just
+    # is not offered as a group.
+    assert summary.by_scene == {"甲": 1, "乙": 1, "丙": 1}
+
+
+@pytest.mark.asyncio
+async def test_narrowing_by_a_one_note_label_is_ignored_and_explained(tmp_path):
+    """Measured on the real store: 67% of notes sat on a scene nothing else
+    shared, so `scene=` could only ever return that single note — strictly worse
+    than not filtering, because it throws the rest of the index away. So a
+    label that is not a group may not narrow: the filter is dropped and the
+    caller is told why, instead of the model silently losing recall."""
+    from ai_coding.memory.service import MemoryService
+
+    store = MemoryStore(tmp_path / "m.json")
+    store.add_note(MemoryNote(id="a", text="the user prefers pytest", scene="酒店管理系统"))
+    store.add_note(MemoryNote(id="b", text="the user prefers ruff", scene="酒店管理系统"))
+    for index in range(3):
+        store.add_note(MemoryNote(id=f"e{index}", text=f"env note {index}", scene="环境"))
+    svc = MemoryService(store, config=_cfg())
+    history = [_user("which linter does the user prefer?")]
+
+    kept, diag = await svc.recall_with_diagnostics(history, scene="酒店管理系统")
+
+    assert "pytest" in kept[0].note.text, "the lone label must not narrow to one note"
+    assert diag.ignored_scene == "酒店管理系统"
+    assert "ruff" in "".join(hit.note.text for hit in kept)
+
+
+@pytest.mark.asyncio
+async def test_narrowing_by_a_real_group_still_narrows(tmp_path):
+    from ai_coding.memory.service import MemoryService
+
+    store = MemoryStore(tmp_path / "m.json")
+    for index in range(3):
+        store.add_note(MemoryNote(id=f"e{index}", text=f"env note {index}", scene="环境"))
+    store.add_note(MemoryNote(id="x", text="the user prefers pytest", scene="酒店管理系统"))
+    svc = MemoryService(store, config=_cfg())
+    history = [_user("note?")]
+
+    kept, diag = await svc.recall_with_diagnostics(history, scene="环境")
+
+    assert diag.ignored_scene is None
+    assert kept and {hit.note.scene for hit in kept} == {"环境"}

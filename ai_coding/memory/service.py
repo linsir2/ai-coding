@@ -35,6 +35,7 @@ chatter.
 from __future__ import annotations
 
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -167,9 +168,24 @@ class IndexSummary:
     by_scene: Mapping[str, int] = field(default_factory=dict)
     top_scenes: tuple[tuple[str, int, int], ...] = ()
 
+    #: The head of the scene distribution: labels enough memories share to be
+    #: worth grouping by.  Measured on the real store (43 notes) 30 of 36
+    #: labels were singletons, and since the extractor picks from an open
+    #: vocabulary the count never converges — Heaps' law
+    #: (arxiv.org/pdf/0704.3316) shows vocabulary growth with a *stable head
+    #: fraction*, not a bounded one.  So the goal is separating a governed head
+    #: from an ungoverned tail, not a fixed list.  Support count is that
+    #: evidence, read on demand: nothing is stored, nothing migrates, and a
+    #: label is promoted simply by being used.
+    governed_scenes: tuple[str, ...] = ()
+
     #: How many scenes the miss payload may name.  A failed search must not
     #: hand the whole taxonomy back; five is enough to aim the next query.
     TOP_SCENES = 5
+
+    #: Notes that must share a label before it may group or filter.  Three
+    #: because two is what a coincidence looks like; one is the whole problem.
+    SCENE_SUPPORT = 3
 
 
 @dataclass(frozen=True)
@@ -193,6 +209,10 @@ class RecallDiagnostics:
     semantic_unavailable: bool = False
     no_vocabulary_match: bool = False
     filtered_out: int = 0
+    #: A ``scene=`` that named a label too thin to group by, so it was dropped
+    #: instead of applied — see :meth:`MemoryService.governed_scenes`.  Named
+    #: so the tool can say why the filter it asked for was not used.
+    ignored_scene: str | None = None
     # R11b: the recall budget.  `timed_out` means the ranking took longer than
     # `recall_timeout_seconds`, so the hits came back but the optional `touch`
     # write was skipped; `elapsed_seconds` is the measured rank time.
@@ -297,12 +317,13 @@ class MemoryService:
             notes,
             key=lambda note: (_invert_time(note.updated_time or note.created_time), note.id),
         )[: self._INDEX_RECENT]
-        # Busiest scenes first, name as the tie-break so two runs agree.
+        governed = self.governed_scenes()
+        # Busiest scenes first, name as the tie-break so two runs agree.  The
+        # head only: a label one note wears alone is not a group, and sending it
+        # here is how the model learns to narrow by labels that cannot narrow.
         top_scenes = tuple(
             (scene, by_scene[scene], heat[scene])
-            for scene in sorted(heat, key=lambda name: (-heat[name], name))[
-                : IndexSummary.TOP_SCENES
-            ]
+            for scene in governed[: IndexSummary.TOP_SCENES]
         )
         return IndexSummary(
             active=len(notes),
@@ -313,7 +334,26 @@ class MemoryService:
             ),
             by_scene=by_scene,
             top_scenes=top_scenes,
+            governed_scenes=self.governed_scenes(),
         )
+
+    def governed_scenes(self) -> tuple[str, ...]:
+        """Labels at least ``IndexSummary.SCENE_SUPPORT`` notes share, hottest
+        first.
+
+        Ordered by heat and then by name so two runs agree.  Read-only on
+        purpose: promotion happens by usage, so there is no registry to write
+        and no migration to keep in step.
+        """
+        counts = Counter(note.scene for note in self._store.active() if note.scene)
+        qualified = {scene for scene, n in counts.items() if n >= IndexSummary.SCENE_SUPPORT}
+        if not qualified:
+            return ()
+        heat: Counter[str] = Counter()
+        for note in self._store.active():
+            if note.scene in qualified:
+                heat[note.scene] += note.hits
+        return tuple(sorted(qualified, key=lambda name: (-heat[name], name)))
 
     def _candidates(
         self,
@@ -427,6 +467,15 @@ class MemoryService:
         query = _query_text(query_or_history)
         if not query.strip():
             return [], RecallDiagnostics()
+        ignored_scene = None
+        if scene is not None and scene not in self.governed_scenes():
+            # A label that nothing else shares cannot narrow anything: it would
+            # keep one note and throw the rest of the index away, which is worse
+            # than not filtering at all (67% of the real store's notes sat on
+            # such a label).  Drop it, and say so, so the model learns which
+            # labels are groups instead of re-guessing one that is not.
+            ignored_scene = scene
+            scene = None
         moment = now or _now()
         ceiling = supply if limit is None else limit
         try:
@@ -508,6 +557,7 @@ class MemoryService:
             index_summary=self.index_summary(),
             no_vocabulary_match=result.no_vocabulary_match,
             filtered_out=filtered_out,
+            ignored_scene=ignored_scene,
             semantic_unavailable=unavailable,
             timed_out=timed_out,
             elapsed_seconds=elapsed,
@@ -654,6 +704,9 @@ class MemoryService:
         hint = self._known_memory_hint(batch)
         if hint:
             batch.append(ChatMessage(role="system", content=hint, timestamp=""))
+        scenes = self._scene_hint()
+        if scenes:
+            batch.append(ChatMessage(role="system", content=scenes, timestamp=""))
         if summary:
             batch.append(ChatMessage(role="system", content=summary, timestamp=""))
         if not batch:
@@ -746,6 +799,27 @@ class MemoryService:
         )
         lines.append("</known-memory>")
         return "\n".join(lines)
+
+    def _scene_hint(self) -> str:
+        """Offer the labels this memory already groups by, so they get reused.
+
+        The extractor was shown no vocabulary, so it named a new label for
+        almost every note — 36 labels over 43 notes, 30 of them singletons, and
+        a singleton cannot narrow a search.  Reuse is invited, not required: the
+        head changes as memory does, and a label no memory shares yet is not a
+        mistake, just not yet a group.
+        """
+        scenes = self.governed_scenes()
+        if not scenes:
+            return ""
+        return (
+            '<scene-groups hint="能归到下列任一组就原样使用该标签">'
+            f"{'、'.join(scenes)}"
+            "</scene-groups>"
+            "scene 填能明确归组时的标签：能归入上面某组就原样用，"
+            "没有合适的可以自己起一个新标签（只有多条记忆都用它，它才会成为一个组），"
+            "实在归不了组就省略这个字段。"
+        )
 
     def _reconcile(
         self,

@@ -162,8 +162,11 @@ async def test_r11c_the_navigation_loop_names_a_scene_and_narrows_to_it(tmp_path
     returns that scene's note, and filtering by a *different* scene does not.
     """
     store = MemoryStore(tmp_path / "m.json")
-    store.add_note(_note("n1", "构建走 make 再跑 lint", scene="构建"))
-    store.add_note(_note("n2", "CI 使用 GitHub Actions 发布", scene="发布"))
+    # Three notes per scene: since M8 a label has to be shared by at least three
+    # memories to be a group, so a one-note scene is correctly *not* named.
+    for index in range(3):
+        store.add_note(_note(f"b{index}", f"构建走 make 再跑 lint {index}", scene="构建"))
+        store.add_note(_note(f"r{index}", f"CI 使用 GitHub Actions 发布 {index}", scene="发布"))
     tool = MemorySearchTool(MemoryService(store))
 
     ok, detail = await check_navigation_roundtrip(
@@ -185,7 +188,8 @@ async def test_r11c_the_navigation_check_catches_a_scene_filter_that_leaks(tmp_p
     """The other half: filtering by one scene must not return another scene's
     note, or the map is decoration."""
     store = MemoryStore(tmp_path / "m.json")
-    store.add_note(_note("n1", "构建走 make 再跑 lint", scene="构建"))
+    for index in range(3):
+        store.add_note(_note(f"b{index}", f"构建走 make 再跑 lint {index}", scene="构建"))
     tool = MemorySearchTool(MemoryService(store))
 
     ok, detail = await check_navigation_roundtrip(
