@@ -71,7 +71,7 @@ GUI 复刻里程碑中已删除）。旧 Textual 实现的布局/组件细节见
 | `/review` | — | 向模型发一条「审查当前 git diff」的快捷 prompt（TUI：命令入口见 `/plan` 行） |
 | `/config` | — | 打印生效的 model / 上下文预算 / 迭代上限 / 停止策略 / 回合超时 |
 | `/compact` | — | 主动压缩历史并落盘 |
-| `/memory` | — | 记忆统计（总数、活跃、置顶、kind 与 evidence 分布） |
+| `/memory` | — | 记忆面板（M7）：按 kind 分组的每一条记忆，可搜索、enter 看全文、`ctrl+t` 钉住/取消、`ctrl+d` 二次确认删除。非 TUI 入口仍打印统计行 |
 | `/trace` | — | 上一回合的轨迹摘要（token、耗时、降级、门卫拒绝） |
 | `/budget` | — | 本会话累计 token 账本。区分 4 种状态：tracing 关闭 / 本会话还没跑过回合 / 跑了但零 token（模型未上报 usage）/ 正常用量 |
 | `/clear` | — | 开新会话（旧的仍可 `/resume`） |

@@ -99,7 +99,15 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "budget", title: "Budget", description: "This session's token ledger" },
   { name: "trace", title: "Trace", description: "Last turn's trace summary" },
   { name: "todo", title: "Todo", description: "Render the current task list" },
-  { name: "memory", title: "Memory", description: "Memory store statistics" },
+  {
+    // M7: was a text command, so it printed the store's counts — 43 notes, 33
+    // scene labels — and nothing you could read, pin or remove. It now opens the
+    // panel. The backend keeps handling `/memory` for the non-TUI entry points.
+    name: "memory",
+    command: "dialog.memory.show",
+    title: "Memory",
+    description: "What the agent remembers, with pin and delete",
+  },
   { name: "config", title: "Config", description: "Model and runtime limits in effect" },
   { name: "tasks", title: "Tasks", description: "Background sub-agent runs (add: stop <id>)" },
   { name: "compact", title: "Compact", description: "Compact this session's history now" },

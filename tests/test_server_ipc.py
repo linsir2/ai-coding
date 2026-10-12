@@ -988,3 +988,115 @@ async def test_no_token_means_no_authorization_header(ipc, tmp_path):
     )
 
     assert adopted[0]["headers"] == {}
+
+
+# ---- memory: what the agent already knows, made visible ---------------------
+#
+# ``/memory`` printed one line of counts (43 notes, 33 scene labels) and nothing
+# else: the operator could not read a single memory, could not pin one, and
+# could not remove one they had taught it wrongly.
+
+
+class _Note:
+    """The attribute surface the rows read off a real MemoryNote."""
+
+    def __init__(self, row):
+        self.id = row["id"]
+        self.text = row["text"]
+        self.kind = row.get("kind", "fact")
+        self.scene = row.get("scene", "")
+        self.pinned = bool(row.get("pinned"))
+        self.importance = row.get("importance", 3)
+        self.evidence = row.get("evidence", "")
+        self.hits = row.get("hits", 0)
+        self.updated_time = row.get("updated", "")
+
+
+class _MemoryDouble:
+    """Stands in for the memory facade the loop hands the panel."""
+
+    def __init__(self, notes):
+        self._notes = {row["id"]: row for row in notes}
+
+    def list_rows(self):
+        return [_Note(row) for row in self._notes.values()]
+
+    def pin(self, note_id, pinned):
+        row = self._notes.get(note_id)
+        if row is None:
+            return None
+        row["pinned"] = bool(pinned)
+        return _Note(row)
+
+    def delete(self, note_id):
+        return self._notes.pop(note_id, None) is not None
+
+    def status(self):
+        return {"total": len(self._notes), "active": len(self._notes), "pinned": 0, "enabled": True}
+
+
+def _with_memory(client_notes):
+    def _attach(world):
+        world.loop.turn_memory = _MemoryDouble(client_notes)
+
+    return _attach
+
+
+@pytest.mark.asyncio
+async def test_memory_list_shows_every_note_not_just_counts(ipc):
+    world, _service, client = ipc
+    world.loop.turn_memory = _MemoryDouble(
+        [
+            {"id": "n1", "text": "用户偏好中文回答", "kind": "preference", "scene": "写作偏好"},
+            {"id": "n2", "text": "MCP 采用单壳分发", "kind": "decision", "evidence": "tool"},
+        ]
+    )
+
+    result = client.request("memory.list")
+
+    assert [note["text"] for note in result["notes"]] == ["用户偏好中文回答", "MCP 采用单壳分发"]
+    assert result["notes"][1]["evidence"] == "tool"
+    assert result["enabled"] is True
+    assert result["stats"]["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_memory_pin_and_unpin_round_trip(ipc):
+    world, _service, client = ipc
+    world.loop.turn_memory = _MemoryDouble([{"id": "n1", "text": "x"}])
+
+    assert client.request("memory.pin", {"id": "n1", "pinned": True})["ok"] is True
+    assert client.request("memory.list")["notes"][0]["pinned"] is True
+    assert client.request("memory.pin", {"id": "n1", "pinned": False})["ok"] is True
+    assert client.request("memory.list")["notes"][0]["pinned"] is False
+
+
+@pytest.mark.asyncio
+async def test_pinning_or_deleting_a_note_that_does_not_exist_says_so(ipc):
+    world, _service, client = ipc
+    world.loop.turn_memory = _MemoryDouble([{"id": "n1", "text": "x"}])
+
+    assert client.request("memory.pin", {"id": "gone", "pinned": True})["ok"] is False
+    assert client.request("memory.delete", {"id": "gone"})["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_memory_delete_removes_exactly_one_note(ipc):
+    world, _service, client = ipc
+    world.loop.turn_memory = _MemoryDouble(
+        [{"id": "n1", "text": "keep"}, {"id": "n2", "text": "drop"}]
+    )
+
+    assert client.request("memory.delete", {"id": "n2"})["ok"] is True
+    assert [note["id"] for note in client.request("memory.list")["notes"]] == ["n1"]
+
+
+@pytest.mark.asyncio
+async def test_memory_handlers_are_hands_off_without_a_store(ipc):
+    """A world whose loop has no memory (or no turn_memory at all) must answer,
+    not raise — the same rule the MCP panel follows."""
+    _world, _service, client = ipc
+
+    assert client.request("memory.list")["notes"] == []
+    assert client.request("memory.pin", {"id": "x", "pinned": True})["ok"] is False
+    assert client.request("memory.delete", {"id": "x"})["ok"] is False

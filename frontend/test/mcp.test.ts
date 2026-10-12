@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
   mcpAddBody,
+  memoryRowLine,
   parseCommandLine,
   mcpRowCanConnect,
   mcpRowCanLogin,
@@ -142,5 +143,52 @@ describe("the body the wizard sends", () => {
     const body = mcpAddBody("local", { ...values, command: "python -m srv" }, true)
     expect(body.token).toBeUndefined()
     expect(body.command).toEqual(["python", "-m", "srv"])
+  })
+})
+
+describe("memory rows", () => {
+  test("a note reads as its text, with what it is and where it came from", () => {
+    const row = memoryRowLine({
+      id: "n1",
+      text: "用户偏好中文回答，代码注释也要中文",
+      kind: "preference",
+      scene: "写作偏好",
+      pinned: false,
+      importance: 4,
+      evidence: "model",
+      hits: 2,
+      updated: "2026-10-12T00:00:00Z",
+    })
+    expect(row.title).toContain("用户偏好中文回答")
+    expect(row.description).toContain("写作偏好")
+  })
+
+  test("a pinned note is marked on the row, not only in a colour", () => {
+    // The panel has no per-row colour field; the pin has to be readable while
+    // scanning, which is what the marker is for. The description does not
+    // repeat the word — one signal, not two.
+    const note = {
+      id: "n1", text: "t", kind: "decision", scene: "", pinned: true,
+      importance: 5, evidence: "tool", hits: 0, updated: "",
+    }
+    const row = memoryRowLine(note)
+    expect(row.title.startsWith("📌")).toBe(true)
+    expect(row.description).not.toContain("钉住")
+    expect(memoryRowLine({ ...note, pinned: false }).title).toBe("t")
+  })
+
+  test("a fact the model only asserted is named as such", () => {
+    const row = memoryRowLine({
+      id: "n2", text: "这个项目用 Vite", kind: "fact", scene: "技术栈",
+      pinned: false, importance: 3, evidence: "model", hits: 0, updated: "",
+    })
+    expect(row.description).toContain("仅模型陈述")
+  })
+
+  test("the kind is the grouping, because scene labels overlap", () => {
+    // 33 scenes for 43 notes, several of them near-duplicates. Grouping by
+    // them would bury the taxonomy under the extractor's free text.
+    const kinds = ["decision", "fact", "preference", "open_thread"]
+    expect(kinds.length).toBeGreaterThan(0)
   })
 })

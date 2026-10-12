@@ -102,18 +102,17 @@ describe("the command catalogue (A2.3)", () => {
 
   test("the backend's text-report commands are all reachable from the list", () => {
     const names = SLASH_COMMANDS.map((entry) => entry.name)
-    for (const expected of [
-      "budget",
-      "trace",
-      "todo",
-      "memory",
-      "config",
-      "tasks",
-      "compact",
-      "permissions",
-    ]) {
+    for (const expected of ["budget", "trace", "todo", "config", "tasks", "compact", "permissions"]) {
       expect(names).toContain(expected)
     }
+  })
+
+  test("/memory opens the panel instead of printing a line of counts", () => {
+    // M7. The name stays reachable — but as a keymap command, because the text
+    // form answered "43 notes, 33 scenes" and nothing you could read, pin or
+    // remove. The backend still handles the text form for the non-TUI entry.
+    const memory = SLASH_COMMANDS.find((entry) => entry.name === "memory")
+    expect(memory?.command).toBe("dialog.memory.show")
   })
 
   test("a text entry carries the exact line the backend dispatches", () => {

@@ -453,6 +453,60 @@ def make_handlers(
             )
         return {"skills": rows}
 
+    def _memory_facade() -> Any:
+        """The loop's memory facade, or ``None`` where there is no memory.
+
+        Read through the loop rather than from a world attribute: the store is
+        built inside ``_build_loop`` and never handed to ``build_world``, so this
+        is the only place it can be reached from.
+        """
+        facade = getattr(getattr(world, "loop", None), "turn_memory", None)
+        return facade if facade is not None and hasattr(facade, "list_rows") else None
+
+    def memory_list(params: dict[str, Any]) -> dict[str, Any]:
+        """The notes themselves, not just their number (M7).
+
+        ``/memory`` answered "43 notes, 33 scenes" and nothing else, which is
+        not actionable: the operator could not read what the agent believed,
+        could not pin the ones that matter, and could not remove one they had
+        taught it wrongly. The store has had ``pin`` and ``delete`` since R3 —
+        this is the way to reach them.
+        """
+        facade = _memory_facade()
+        if facade is None:
+            return {"notes": [], "enabled": False, "stats": {}}
+        rows = []
+        for note in facade.list_rows():
+            rows.append(
+                {
+                    "id": note.id,
+                    "text": note.text,
+                    "kind": str(getattr(note.kind, "value", note.kind)),
+                    "scene": note.scene,
+                    "pinned": bool(note.pinned),
+                    "importance": int(note.importance),
+                    "evidence": note.evidence,
+                    "hits": int(note.hits),
+                    "updated": note.updated_time,
+                }
+            )
+        return {"notes": rows, "enabled": True, "stats": facade.status()}
+
+    def memory_pin(params: dict[str, Any]) -> dict[str, Any]:
+        facade = _memory_facade()
+        note_id = str(params.get("id") or "").strip()
+        if facade is None or not note_id:
+            return {"ok": False, "reason": "no such memory"}
+        pinned = bool(params.get("pinned", True))
+        return {"ok": facade.pin(note_id, pinned) is not None, "pinned": pinned}
+
+    def memory_delete(params: dict[str, Any]) -> dict[str, Any]:
+        facade = _memory_facade()
+        note_id = str(params.get("id") or "").strip()
+        if facade is None or not note_id:
+            return {"ok": False, "reason": "no such memory"}
+        return {"ok": facade.delete(note_id)}
+
     def config_summary(params: dict[str, Any]) -> dict[str, Any]:
         ai_cfg = getattr(world.config, "ai", None)
         return {
@@ -654,6 +708,9 @@ def make_handlers(
         "model.set": model_set,
         "permissions.state": permissions_state,
         "skills.list": skills_list,
+        "memory.list": memory_list,
+        "memory.pin": memory_pin,
+        "memory.delete": memory_delete,
         "config.summary": config_summary,
         "session.stats": session_stats,
         "mcp.list": mcp_list,

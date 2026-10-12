@@ -81,6 +81,43 @@ class TurnMemory:
         except Exception:  # noqa: BLE001 — memory is best-effort
             return {**empty, "enabled": True}
 
+    # ---- managing ----------------------------------------------------------
+    #
+    # The panel's three calls. They live here rather than in the handler
+    # because this object is already memory's only public face in a running
+    # loop: the store is built inside ``_build_loop`` and never handed
+    # anywhere, so without these the operator has counts and no way to act.
+
+    def list_rows(self) -> list[Any]:
+        """Every note, newest bookkeeping fields included; ``[]`` without memory."""
+        if self._memory is None:
+            return []
+        try:
+            return list(self._memory.store.all())
+        except Exception:  # noqa: BLE001 — memory must never break a turn
+            _log.debug("memory listing failed", exc_info=True)
+            return []
+
+    def pin(self, note_id: str, pinned: bool = True) -> Any:
+        """Pin or unpin one note; ``None`` when there is no such note."""
+        if self._memory is None:
+            return None
+        try:
+            return self._memory.store.pin(note_id, pinned)
+        except Exception:  # noqa: BLE001
+            _log.debug("memory pin failed", exc_info=True)
+            return None
+
+    def delete(self, note_id: str) -> bool:
+        """Remove one note. Irreversible, and the panel asks twice first."""
+        if self._memory is None:
+            return False
+        try:
+            return bool(self._memory.store.delete(note_id))
+        except Exception:  # noqa: BLE001
+            _log.debug("memory delete failed", exc_info=True)
+            return False
+
     # ---- writing -----------------------------------------------------------
 
     async def harvest(

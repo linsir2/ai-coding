@@ -169,3 +169,44 @@ export function mcpAddBody(
   if (token) body.token = token
   return body
 }
+
+
+export interface MemoryNote {
+  id: string
+  text: string
+  /** One of fact / decision / preference / open_thread. */
+  kind: string
+  /** The extractor's free-text topic label; a subtitle and a filter, never a
+   *  group — 33 of them for 43 notes, several near-duplicates. */
+  scene: string
+  pinned: boolean
+  importance: number
+  /** "tool" when a tool call in that turn backed it, "model" when the turn only
+   *  talked. Provenance for a human reading the row. */
+  evidence: string
+  hits: number
+  updated: string
+}
+
+/** The kind labels the panel groups by, in the order an operator reads them. */
+export const MEMORY_KIND_LABELS: Record<string, string> = {
+  decision: "决策",
+  preference: "偏好",
+  fact: "事实",
+  open_thread: "未完事项",
+}
+
+/** One memory as the panel's row: the note itself, then what it is and where
+ *  it came from. A pinned note says so in words — the panel has no per-row
+ *  colour, and a fact only the model asserted is worth naming as such. */
+export function memoryRowLine(note: MemoryNote): { title: string; description: string; category: string } {
+  const kind = MEMORY_KIND_LABELS[note.kind] ?? note.kind
+  // The pin is already marked on the title; repeating it here would be two
+  // signals for one fact. What the subtitle adds is provenance.
+  const marks = [note.evidence === "tool" ? "有工具佐证" : note.evidence === "model" ? "仅模型陈述" : ""]
+    .filter(Boolean)
+    .join(" · ")
+  const title = `${note.pinned ? "📌 " : ""}${note.text}`
+  const detail = [kind, marks, note.scene].filter(Boolean).join(" · ")
+  return { title, description: detail, category: kind }
+}
