@@ -759,7 +759,44 @@ R11d 不改任何门禁、不改排序器签名、不改落盘；`recall_fusion=
 顺带一处既有的 doc-vs-code 缺口：`scripts/memory_cases.py:362` 的 docstring 写着 gate
 `AI_CODING_MEMORY_IT=1`，**全仓没有任何代码读这个变量**（该文件未改动，仅记录）。
 
-## M8 契约：scene 只在够多人用时才算一个组
+## M9 契约：作用域、全局 skill 库、安装与标准互操作
+
+### 为什么有这一节
+
+一次审计发现全仓只有**两个**用户级路径（MCP token 和 grants 文件），其余全绑在 workspace，
+所以「换个目录」= 换掉模型姓��、key、skills、API key（后者直接导致起不来）。三处真 bug 让它
+比「设计局限」更糟：配置发现锚在进程 CWD 而非 `-w`；目录优先级压过文件优先级导致
+`config.example.yaml` 遮住 `config.local.yaml`（key 就在后者）；向量缓存跟着 CWD 走。
+
+### 两层模型
+
+`paths.py` 从两个根算全部路径，一次 `resolve`：
+
+| 层 | 内容 | 位置 |
+|---|---|---|
+| **用户全局** | 配置（key/模型）、全局 skills、grants、MCP token | `~/.config/ai-coding/`、`~/.local/share/ai-coding/`（XDG） |
+| **工作区** | memory、sessions、traces、transcripts、hooks、项目 skills、项目配置 | `<ws>/.ai-coding/`、`<ws>/skills/` |
+
+XDG 表达式原本在 `grants.py`/`mcp.py` 各写一份，现在统一向 `paths.py` 取，有测试保证不再重复。
+
+### 各契约
+
+| 契约 | 说明 |
+|---|---|
+| `ConfigLoader.discover(start)` | 锚在**工作区**（非进程 CWD）；**真实配置优先于 example 配置**，无论谁离得近（example 是文档，不是配置） |
+| `ConfigLoader.load_layers(paths)` | 全局 config 为 base，项目 overlay **深度合并、项目按 key 赢**。`mcp.servers` 是唯一累加的 list（全局服务器和项目服务器都是真的）；其余 list 替换，避免项目重开全局关掉的开关 |
+| `load_layers_report` | 额外返回**每个顶层 key 来自哪个文件**——合并后的配置回答不了「这个项目为什么用这个模型」，而「两个目录行为不同」正是本改动要修的 bug |
+| 坏层降级 | 某一层 YAML 损坏则跳过该层并告警，不致命——个人的坏配置不能让所有项目起不来 |
+| `SkillRegistry(roots)` | 多 root，**项目在后即项目赢**（Claude Code 反过来让个人层压项目层，这会让仓库改写使用者的工具与约定）。冲突经 `shadowed()` 报告，不静默 |
+| `SkillRegistry.write(root=)` | 默认写项目库；要装到全局须显式指定 root |
+| `ai-coding skill install/list/remove` | 本地目录或 `owner/repo`（浅克隆、有界、入临时目录故远程无法自选目的地）。**装入的 skill 是模型会执行的指令**，故：默认拒绝覆盖同名（需 `--force`）、拒绝符号链接（仓库可携带 `skills/x/SKILL.md -> /etc/shadow`）、拒绝无 description 的 skill（description 是模型唯一的选它的依据） |
+| 标准互操作 | 遵守 Agent Skills 标准：`name`/`description` 语义与 Claude Code/Codex 一致，`license`/`compatibility`/`allowed-tools`/`metadata` 读入保存；他运行时自定义的键（`context: fork` 等）保留在 `extra` 但**不呈现为已生效的指令**；YAML 破损的 description（如 `Build for AWS: ECS`）修复后重解析 |
+
+### 明确未做：memory 分层
+
+`.memory` 仍**每工作区一份**。全局化需要给 `MemoryNote` 加 scope 字段、跨库召回合并，
+并有把一个项目的技术决策带进另一个项目的风险。本轮有意推迟，记在此处。
+
 
 真实库实测：43 条记忆、35 个标签、29 个是单例（67%）。因为标签是模型从**开放词表**里挑的，
 它的数量**不会收敛**——Heaps 定律（`arxiv.org/pdf/0704.3316`）给出的是词表无界增长而

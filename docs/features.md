@@ -24,7 +24,11 @@ ai-coding 以「**自持 ReAct 循环** + 工具调用」为核心模型：用�
 
 入口为 Typer 应用 `ai_coding.cli:app`。**R10 之后只有一种调用方式**：`ai-coding`（等价
 `python -m ai_coding`）直接启动全屏 TUI。`--version/-V` 打印版本；`--path/-p` 指定配置；
-`--workspace/-w` 指定工作区；`--skills` 挂载技能目录。
+`--workspace/-w` 指定工作区；`--skills` 覆盖技能目录（默认含用户全局库 + 项目库）。
+配置分层为 `~/.config/ai-coding/config.yaml`（全局，含 key/模型）叠加项目配置，无需每个项目
+各放一份 key。子命令 `ai-coding skill install/list/remove` 管理技能（install 支持本地目录与
+`owner/repo`；默认拒绝覆盖同名，需 `--force`；装入即模型会执行的指令，拒绝符号链接与无
+description 的 skill）。
 
 R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子命令，现已全部删除：
 前四个的职责收进 TUI 的 slash 命令（见下节），`repl` 本身就是默认行为。
