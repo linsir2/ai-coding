@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -263,21 +263,61 @@ class SkillRegistry:
     the "byte-stable within a session" comment in the old ``meta()`` untrue.
     """
 
-    def __init__(self, skill_dir: str | Path = Path("skills")) -> None:
-        self.root = Path(skill_dir)
+    def __init__(
+        self, skill_dir: str | Path | Sequence[str | Path] = "skills"
+    ) -> None:
+        """``skill_dir`` is one root or several, **lowest precedence first**.
+
+        Two roots is the normal shape (M9): the user's global library, then the
+        project's. Later wins, which is the ``AGENTS.md`` convention — the
+        nearer scope makes the more specific claim. Claude Code inverts this and
+        lets the personal layer override the repository's, which would let a
+        checked-out repo rewrite the tools and conventions of the person running
+        it.
+        """
+        if isinstance(skill_dir, (str, Path)):
+            roots = [Path(skill_dir)]
+        else:
+            roots = [Path(root) for root in skill_dir]
+        self.roots: tuple[Path, ...] = tuple(roots)
+        #: The highest-precedence root — where ``write`` goes by default, and
+        #: what ``.pending`` is staged under.  A skill you write while working
+        #: on a repo belongs to that repo until you deliberately promote it.
+        self.root = self.roots[-1] if self.roots else Path("skills")
         self._cache: dict[str, tuple[tuple[float, int], Skill]] = {}
+        self._owner: dict[str, int] = {}
+
+    def _locate(self, name: str) -> Path | None:
+        """The ``SKILL.md`` for ``name`` from the highest-precedence root."""
+        for root in reversed(self.roots):
+            candidate = root / name / _SKILL_FILE
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _reindex(self) -> None:
+        """Record which root each name came from, **highest precedence winning**.
+
+        Later roots overwrite earlier ones, which is what ``_locate`` does by
+        walking the roots in reverse. The two must agree or ``shadowed()``
+        would report the wrong side of every collision.
+        """
+        self._owner = {}
+        for index, root in enumerate(self.roots):
+            if not root.is_dir():
+                continue
+            for child in sorted(root.iterdir()):
+                if child.name.startswith("."):
+                    continue
+                if child.is_dir() and (child / _SKILL_FILE).is_file():
+                    self._owner[child.name] = index
 
     # ---- discovery --------------------------------------------------------
 
     def names(self) -> list[str]:
-        """Directory names holding a ``SKILL.md``, sorted."""
-        if not self.root.is_dir():
-            return []
-        return [
-            child.name
-            for child in sorted(self.root.iterdir())
-            if child.is_dir() and (child / _SKILL_FILE).is_file()
-        ]
+        """Directory names holding a ``SKILL.md``, sorted, across all roots."""
+        self._reindex()
+        return sorted(self._owner)
 
     @property
     def is_empty(self) -> bool:
@@ -285,10 +325,36 @@ class SkillRegistry:
 
     # ---- access ------------------------------------------------------------
 
+    def shadowed(self) -> list[tuple[str, str]]:
+        """``(name, losing_scope)`` for every name defined in more than one root.
+
+        A collision is resolved by precedence, but saying so is the difference
+        between a user who can find out why the skill they installed is not the
+        one running, and one who cannot. OpenCode v2 resolves the same
+        collision with a bare ``map.set()`` and logs nothing.
+        """
+        self._reindex()
+        scopes = ("user", "project") if len(self.roots) <= 2 else tuple(
+            f"root{i}" for i in range(len(self.roots))
+        )
+        found: list[tuple[str, str]] = []
+        for root_index, root in enumerate(self.roots):
+            if not root.is_dir():
+                continue
+            for child in sorted(root.iterdir()):
+                if child.name.startswith("."):
+                    continue
+                if not (child.is_dir() and (child / _SKILL_FILE).is_file()):
+                    continue
+                if self._owner.get(child.name) == root_index:
+                    continue
+                found.append((child.name, scopes[min(root_index, len(scopes) - 1)]))
+        return found
+
     def get(self, name: str) -> Skill | None:
         """One skill by directory name, parsed and cached. ``None`` if absent."""
-        target = self.root / name / _SKILL_FILE
-        if not target.is_file():
+        target = self._locate(name)
+        if target is None:
             self._cache.pop(name, None)
             return None
         try:
@@ -304,7 +370,7 @@ class SkillRegistry:
         return skill
 
     def resolve(self, wanted: str) -> Skill | None:
-        """One skill by id *or* by its declared alias."""
+        """One skill by id *or* by its declared alias, across every root."""
         direct = self.get(wanted)
         if direct is not None:
             return direct
@@ -325,7 +391,7 @@ class SkillRegistry:
 
     # ---- write (M1) ---------------------------------------------------------
 
-    def write(self, name: str, content: str) -> Path | None:
+    def write(self, name: str, content: str, *, root: str | Path | None = None) -> Path | None:
         """Atomically write ``skills/<name>/SKILL.md``.  Returns path or None.
 
         Refuses names that would escape the skill directory (``/``, ``..``).
@@ -334,7 +400,8 @@ class SkillRegistry:
         """
         if not name or "/" in name or ".." in name or len(name) > 80:
             return None
-        target = self.root / name / _SKILL_FILE
+        base = Path(root) if root is not None else self.root
+        target = base / name / _SKILL_FILE
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp = target.with_suffix(".tmp")

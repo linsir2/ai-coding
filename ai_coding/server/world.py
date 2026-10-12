@@ -59,19 +59,22 @@ class AppWorld:
 async def build_world(path: str | None, workspace: str, skills: str | None) -> AppWorld:
     """Build config -> engine -> registry -> MCP -> loop (never starts a UI)."""
     from ai_coding.cli import _build_loop, _build_tool_registry, _make_hooks, _make_recorder
-    from ai_coding.config.loader import ConfigManager
+    from ai_coding.config.loader import ConfigLoader
     from ai_coding.core.guard import build_guards
     from ai_coding.core.mcp import MCPManager, build_mcp_catalog
     from ai_coding.core.steering import SteeringQueue
+    from ai_coding.paths import Paths
     from ai_coding.security.approval import CLIApprovalCallback
     from ai_coding.security.user_prompt import CLIUserPromptCallback
     from ai_coding.service.session_service import SessionService
     from ai_coding.skills.registry import SkillRegistry
     from ai_coding.tools.mcp_call import MCPCallTool
 
-    manager = ConfigManager()
-    manager.initialize(path)
-    app_cfg = manager.app
+    paths = Paths.for_workspace(workspace)
+    # Layered: the user-global config as the base, the project's on top (M9).
+    # With no project file, the global one still answers — which is what makes
+    # `ai-coding` startable from a fresh directory with only a personal key.
+    app_cfg = ConfigLoader.load_layers(paths, path)
 
     from ai_coding.ai.factory import build_engine_from_config
     from ai_coding.ai.prompt import BASE_INSTRUCTIONS
@@ -86,7 +89,14 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     # They used to be given different things: the loop always got
     # `<workspace>/skills` while the tool was registered only when `--skills` was
     # passed, so `ai-coding -w .` advertised skills with no way to load them.
-    skill_registry = SkillRegistry(skills or str(Path(workspace).expanduser() / "skills"))
+    # Both scopes, project last so it wins. `--skills` still overrides, and now
+    # it overrides *everything* rather than only the project half.
+    roots = (
+        (Path(skills).expanduser().resolve(),) if skills else paths.skill_roots
+    )
+    skill_registry = SkillRegistry(roots)
+    for name, scope in skill_registry.shadowed():
+        _log.warning("skill %r from the %s library is shadowed by the project's", name, scope)
     registry = _build_tool_registry(
         app_cfg, workspace, skill_registry,
         user_prompt=user_prompt, base_instructions=BASE_INSTRUCTIONS,
@@ -99,9 +109,9 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     # directory the process started in — so a user's conversations landed in
     # the source tree they happened to launch from (A7).
     sessions = SessionService(
-        Path(workspace).expanduser().resolve() / ".ai-coding" / "sessions"
+        paths.sessions
     )
-    recorder = _make_recorder(app_cfg, workspace, None)
+    recorder = _make_recorder(app_cfg, str(paths.workspace), None)
     mcp_manager = MCPManager(app_cfg.mcp, observer=recorder)
     await mcp_manager.open_all()
     # M2: one dispatcher carries every remote call, and the catalog it is
@@ -123,13 +133,13 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     approval = CLIApprovalCallback()
     cancel = asyncio.Event()
     loop = _build_loop(
-        engine, sessions, registry, app_cfg, workspace, skill_registry,
+        engine, sessions, registry, app_cfg, str(paths.workspace), skill_registry,
         catalog_builder=lambda: build_mcp_catalog(mcp_manager.available()),
         approval=approval,
         observer=None,
         trace=recorder,
         guards=build_guards(app_cfg),
-        hooks=_make_hooks(app_cfg, workspace),
+        hooks=_make_hooks(app_cfg, str(paths.workspace)),
         steering=steering,
         cancel=cancel,
     )
@@ -141,7 +151,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         sessions=sessions,
         loop=loop,
         mcp=mcp_manager,
-        workspace=workspace,
+        workspace=str(paths.workspace),
         skills=skills,
         cancel=cancel,
         steering=steering,

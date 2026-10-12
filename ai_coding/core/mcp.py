@@ -56,6 +56,7 @@ from ai_coding.config.models import MCPConfig, MCPOAuthConfig, MCPServerConfig
 from ai_coding.core.events import ToolChunk
 from ai_coding.core.turn_report import report_degraded
 from ai_coding.domain.message import ToolResult
+from ai_coding.paths import data_home
 from ai_coding.infra.deadline import DeadlineExpired, run_with_deadline
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
@@ -516,8 +517,7 @@ def _auth_store_path() -> Path:
     ``~/.local/share/ai-coding/mcp-auth.json`` — the config file is meant to be
     shareable and this file is meant to be a secret, so they never meet.
     """
-    root = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(root) / "ai-coding" / "mcp-auth.json"
+    return data_home() / "mcp-auth.json"
 
 
 class _TokenStore:

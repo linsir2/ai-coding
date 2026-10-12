@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+
+from ai_coding.paths import config_home
 from typing import Any
 
 __all__ = ["GrantStore", "grants_path", "GRANTS_VERSION"]
@@ -32,8 +34,7 @@ GRANTS_VERSION = 1
 
 def grants_path() -> Path:
     """The one grants file, shared by every workspace and keyed by path."""
-    base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
-    return Path(base) / "ai-coding" / "grants.json"
+    return config_home() / "grants.json"
 
 
 class GrantStore:

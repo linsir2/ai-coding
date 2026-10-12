@@ -156,3 +156,94 @@ def test_the_registry_caches_by_mtime_and_notices_a_rewrite(tmp_path):
 
     _write_skill(tmp_path, "bash", "run shell commands safely")
     assert reg.get("bash").description == "run shell commands safely"
+
+
+# ---- two roots: a global library and the project's (M9) --------------------
+#
+# One skills directory meant that changing directory lost everything you had
+# taught the agent. `SkillRegistry` now takes a list, lowest precedence first,
+# with the project last so it wins — the same rule AGENTS.md follows: the repo's
+# own instructions are facts about the repo, the user's are defaults.
+
+
+def _multi(tmp_path, monkeypatch, *, user=(), project=()):
+    from ai_coding.paths import Paths
+    from ai_coding.skills.registry import SkillRegistry
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    paths = Paths.for_workspace(tmp_path / "proj")
+    registry = SkillRegistry(paths.skill_roots)
+    for root, names in ((paths.user_skills, user), (paths.project_skills, project)):
+        for name in names:
+            (root / name).mkdir(parents=True, exist_ok=True)
+            (root / name / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: the {name} one\n---\nbody of {name}\n",
+                encoding="utf-8",
+            )
+    return registry, paths
+
+
+def test_skills_from_both_scopes_are_visible(tmp_path, monkeypatch):
+    registry, _ = _multi(tmp_path, monkeypatch, user=["tidy"], project=["deploy"])
+
+    assert sorted(skill.id for skill in registry.all()) == ["deploy", "tidy"]
+
+
+def test_the_project_wins_when_both_scopes_hold_the_same_name(tmp_path, monkeypatch):
+    """Claude Code puts the personal layer above the project's. That lets a
+    repository rewrite the tools and conventions of the person using it, which
+    is backwards: the nearer scope is the more specific statement."""
+    registry, paths = _multi(tmp_path, monkeypatch, user=["shared"], project=["shared"])
+    (paths.project_skills / "shared" / "SKILL.md").write_text(
+        "---\nname: shared\ndescription: project's version\n---\nproject body\n",
+        encoding="utf-8",
+    )
+
+    winner = registry.get("shared")
+
+    assert winner is not None
+    assert winner.description == "project's version"
+    assert winner.body.strip() == "project body"
+
+
+def test_a_shadowed_skill_is_reported_rather_than_dropped_silently(tmp_path, monkeypatch):
+    """OpenCode v2 resolves collisions with a bare `map.set()`: last wins, and
+    nothing says so. The user then cannot find out why the skill they installed
+    is not the one running."""
+    registry, _ = _multi(tmp_path, monkeypatch, user=["shared"], project=["shared"])
+
+    assert registry.shadowed() == [("shared", "user")], (
+        "which name collided, and which scope lost to it"
+    )
+
+
+def test_no_collisions_means_nothing_to_report(tmp_path, monkeypatch):
+    registry, _ = _multi(tmp_path, monkeypatch, user=["a"], project=["b"])
+
+    assert registry.shadowed() == []
+
+
+def test_a_name_only_in_the_global_scope_still_resolves_by_alias(tmp_path, monkeypatch):
+    registry, _ = _multi(tmp_path, monkeypatch, user=["portable"])
+
+    assert registry.resolve("portable").id == "portable"
+
+
+def test_writing_goes_to_the_project_root_unless_told_otherwise(tmp_path, monkeypatch):
+    """Default is the project's own library: a skill you write while working on
+    a repo belongs to that repo until you deliberately promote it."""
+    registry, paths = _multi(tmp_path, monkeypatch)
+
+    registry.write("new-one", "---\nname: new-one\ndescription: d\n---\nb\n")
+
+    assert (paths.project_skills / "new-one" / "SKILL.md").is_file()
+    assert not (paths.user_skills / "new-one").exists()
+
+
+def test_a_write_can_be_aimed_at_the_global_library(tmp_path, monkeypatch):
+    registry, paths = _multi(tmp_path, monkeypatch)
+
+    registry.write("global-one", "---\nname: global-one\ndescription: d\n---\nb\n",
+                   root=paths.user_skills)
+
+    assert (paths.user_skills / "global-one" / "SKILL.md").is_file()

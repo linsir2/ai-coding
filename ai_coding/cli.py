@@ -9,6 +9,7 @@ from typing import Any
 import typer
 
 from ai_coding.infra.logger_setup import send_logs_to_file, setup_logging
+from ai_coding.paths import Paths
 from ai_coding.skills.registry import SkillRegistry
 
 app = typer.Typer(
@@ -83,6 +84,7 @@ def _build_loop(
     app_cfg: Any,
     workspace: str,
     skills: SkillRegistry,
+    paths: Paths | None = None,
     *,
     approval: Any | None = None,
     observer: Any | None = None,
@@ -111,11 +113,12 @@ def _build_loop(
     from ai_coding.security.permission_gate import PermissionGate
 
     ws = Path(workspace).expanduser().resolve()
+    paths = paths or Paths(workspace=ws)
 
     project = ProjectInstructionsLoader(ws)
     summarizer, extractor = _llm_helpers_for(engine)
-    memory_store = MemoryStore(ws / ".memory")
-    embeddings = _embeddings_for(app_cfg)
+    memory_store = MemoryStore(paths.memory)
+    embeddings = _embeddings_for(app_cfg, paths)
     memory = MemoryService(
         memory_store, extractor=extractor, config=app_cfg.memory,
         embeddings=embeddings,
@@ -252,11 +255,16 @@ def _llm_helpers_for(service: Any) -> tuple[Any, Any]:
     return build_summarizer(model_config), build_extractor(model_config)
 
 
-def _embeddings_for(app_cfg: Any) -> Any | None:
+def _embeddings_for(app_cfg: Any, paths: Paths | None = None) -> Any | None:
     """Build the optional vector index, or None when it is off or unusable.
 
     Returns None (rather than a disabled index) so the service never pays for
     a capability check on the recall path when nothing is configured.
+
+    The cache path defaults next to the memory it indexes. It used to default
+    to the bare string ``.memory/embeddings.json``, resolved against the
+    *process* CWD — so an unrelated ``cd`` orphaned the vector index and two
+    projects started from the same directory shared one.
     """
     memory_cfg = getattr(app_cfg, "memory", None)
     embeddings_cfg = getattr(memory_cfg, "embeddings", None)
@@ -265,7 +273,13 @@ def _embeddings_for(app_cfg: Any) -> Any | None:
     from ai_coding.memory.embeddings import EmbeddingIndex
 
     models = getattr(app_cfg, "models", {}) or {}
-    return EmbeddingIndex(embeddings_cfg, models)
+    if paths is None:
+        return EmbeddingIndex(embeddings_cfg, models)
+    configured = str(getattr(embeddings_cfg, "cache_path", "") or "").strip()
+    target = Path(configured).expanduser() if configured else paths.memory / "embeddings.json"
+    if not target.is_absolute():
+        target = paths.workspace / target
+    return EmbeddingIndex(embeddings_cfg, models, cache_path=target)
 
 
 def _build_tool_registry(

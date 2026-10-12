@@ -73,22 +73,60 @@ class ConfigLoader:
         "config.example.yaml",
     )
 
+    #: The file that only documents itself. It is a fallback, never a winner:
+    #: it ships in the repo, so directory proximity alone used to let it shadow
+    #: an operator's `config.local.yaml` one level up — the file that holds the
+    #: API key.
+    EXAMPLE_NAME = "config.example.yaml"
+
+    @staticmethod
+    def _ancestors(base: Path) -> list[Path]:
+        """``base`` then its parents, stopping at the user's home directory.
+
+        `~` is an ancestor of every workspace, so without this a config written
+        at `$HOME/config.local.yaml` for one project would be found for all of
+        them. The user's own config has its own, named location
+        (`paths.Paths.user_config`); project discovery must not guess at it.
+        """
+        chain = [base, *base.parents]
+        try:
+            home = Path.home().resolve()
+        except (RuntimeError, OSError):
+            return chain
+        return chain[: chain.index(home)] if home in chain else chain
+
     @staticmethod
     def discover(start: str | Path | None = None) -> Path | None:
-        """Find a config file by walking up from ``start`` (default: cwd).
+        """Find a config file by walking up from ``start``.
 
-        Bare ``ai-coding`` in a project directory should just work, so the
-        lookup climbs parent directories: a repo root config applies to any
+        Bare ``ai-coding`` in a project directory should just work, so the lookup
+        climbs parent directories: a repo root config applies to any
         subdirectory you launch from.
+
+        Two ordering rules, both of which used to be wrong:
+
+        * the search is anchored on the **workspace**, not the process CWD.
+          ``ai-coding -w /projects/B`` from anywhere must find B's config, or
+          the run starts on empty defaults and cannot even build an engine.
+        * a **real** config beats an example one wherever each sits. Directory
+          proximity is not evidence of intent; ``config.example.yaml`` is
+          documentation and is consulted only if nothing real exists anywhere
+          on the way up.
         """
         base = Path(start).expanduser().resolve() if start else Path.cwd()
         if base.is_file():
             base = base.parent
-        for directory in (base, *base.parents):
-            for name in ConfigLoader.DEFAULT_NAMES:
+        directories = ConfigLoader._ancestors(base)
+        real = [name for name in ConfigLoader.DEFAULT_NAMES if name != ConfigLoader.EXAMPLE_NAME]
+        for name in real:
+            for directory in directories:
                 candidate = directory / name
                 if candidate.is_file():
                     return candidate
+        for directory in directories:
+            candidate = directory / ConfigLoader.EXAMPLE_NAME
+            if candidate.is_file():
+                return candidate
         return None
 
     @staticmethod
@@ -106,7 +144,18 @@ class ConfigLoader:
 
     @staticmethod
     def load_app(path: str | Path | None = None) -> AppConfig:
-        doc = _normalize(ConfigLoader._read_doc(path))
+        return ConfigLoader.app_from_doc(
+            _normalize(ConfigLoader._read_doc(path)), path
+        )
+
+    @staticmethod
+    def app_from_doc(doc: dict[str, Any], path: str | Path | None = None) -> AppConfig:
+        """Validate an already-merged document.
+
+        Split out from :meth:`load_app` because layering produces one document
+        from several files, and re-reading any single one of them to validate it
+        would silently drop the rest.
+        """
         models_raw = doc.get("models") or {}
         coerced = {
             name: _coerce_model(entry) if isinstance(entry, dict) else entry
@@ -119,6 +168,92 @@ class ConfigLoader:
         # the next start even though ``load_mcp`` can see it.
         doc["mcp"] = _mcp_doc(doc, path)
         return AppConfig.model_validate(doc)
+
+    # ---- layered config (M9) -----------------------------------------------
+
+    @staticmethod
+    def _layers_for(
+        paths: Any, explicit: str | Path | None
+    ) -> list[tuple[str, Path | None]]:
+        """``[(role, path)]`` from broadest to narrowest.
+
+        An explicit ``--path`` is the only layer: it means that file, which is
+        what it meant before layering existed.
+        """
+        if explicit is not None:
+            return [("explicit", Path(explicit))]
+        layers: list[tuple[str, Path | None]] = [("user", paths.user_config)]
+        project = ConfigLoader.discover(paths.workspace)
+        if project is not None:
+            layers.append(("project", project))
+        return layers
+
+    @staticmethod
+    def _read_layer(path: Path | None) -> dict[str, Any]:
+        if path is None or not Path(path).is_file():
+            return {}
+        try:
+            return ConfigLoader._read_doc(path)
+        except (OSError, yaml.YAMLError):
+            # A malformed personal file must not make every project
+            # unstartable; a malformed project file must not lose the personal
+            # settings either. Either way it is skipped, and the next layer in
+            # is the one that answers.
+            _log.warning("config layer ignored: %s is unreadable", path)
+            return {}
+
+    @staticmethod
+    def _overlay(base: dict[str, Any], top: dict[str, Any]) -> dict[str, Any]:
+        """Deep merge, ``top`` wins per key. Lists replace rather than extend.
+
+        Lists replace on purpose: ``mcp.servers`` and ``tools.enabled`` are
+        declarations of what exists, not additive layers, and concatenating
+        them would let a project's ``enabled: [bash]`` silently re-enable
+        everything the global layer turned off.
+        """
+        merged = dict(base)
+        for key, value in top.items():
+            current = merged.get(key)
+            if isinstance(current, dict) and isinstance(value, dict):
+                merged[key] = ConfigLoader._overlay(current, value)
+            elif key == "servers" and isinstance(current, list) and isinstance(value, list):
+                merged[key] = current + value
+            else:
+                merged[key] = value
+        return merged
+
+    @staticmethod
+    def load_layers_report(
+        paths: Any, path: str | Path | None = None
+    ) -> LayeredConfig:
+        """Load both layers and record which file answered each top-level key.
+
+        The record exists because a merged config cannot answer "why did this
+        project pick that model?" — and a run that behaves differently in two
+        directories is exactly the bug this layering was added to fix.
+        """
+        merged: dict[str, Any] = {}
+        sources: dict[str, str] = {}
+        chosen: Path | None = None
+        for _role, layer in ConfigLoader._layers_for(paths, path):
+            document = ConfigLoader._read_layer(layer)
+            if not document:
+                continue
+            if chosen is None or layer is not None:
+                chosen = layer
+            for key in document:
+                sources[key] = str(layer)
+            merged = ConfigLoader._overlay(merged, _normalize(document))
+        return LayeredConfig(
+            config=ConfigLoader.app_from_doc(merged, chosen) if merged else AppConfig(),
+            sources=sources,
+            layers=[str(layer) for _role, layer in ConfigLoader._layers_for(paths, path)],
+        )
+
+    @staticmethod
+    def load_layers(paths: Any, path: str | Path | None = None) -> AppConfig:
+        """``AppConfig`` from the user layer with the project layer on top."""
+        return ConfigLoader.load_layers_report(paths, path).config
 
     @staticmethod
     def load_app_from(start: str | Path | None = None) -> AppConfig:
@@ -169,6 +304,22 @@ class ConfigLoader:
         return sidecar
 
 
+class LayeredConfig:
+    """A merged ``AppConfig`` plus where each top-level key came from."""
+
+    __slots__ = ("config", "sources", "layers")
+
+    def __init__(
+        self,
+        config: AppConfig,
+        sources: dict[str, str],
+        layers: list[str],
+    ) -> None:
+        self.config = config
+        self.sources = sources
+        self.layers = layers
+
+
 class ConfigManager:
     """Holds the two decoupled roots, loaded together from a single YAML file."""
 
@@ -176,6 +327,17 @@ class ConfigManager:
         self.app: AppConfig = AppConfig()
         self.mcp: MCPConfig = MCPConfig()
 
-    def initialize(self, path: str | Path | None = None) -> None:
-        self.app = ConfigLoader.load_app(path)
-        self.mcp = ConfigLoader.load_mcp(path)
+    def initialize(
+        self, path: str | Path | None = None, *, search_from: str | Path | None = None
+    ) -> None:
+        """``path`` is an explicit ``--path``; ``search_from`` is where to look
+        when there is none.
+
+        They are separate because they were not: discovery used to fall back to
+        ``Path.cwd()``, so ``ai-coding -w /projects/B`` started from anywhere
+        else read *that* directory's config and then built an engine on empty
+        defaults.
+        """
+        found = ConfigLoader.discover(search_from) if path is None else Path(path)
+        self.app = ConfigLoader.load_app(found)
+        self.mcp = ConfigLoader.load_mcp(found)
