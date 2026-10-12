@@ -1216,6 +1216,16 @@ class MCPManager:
             )
         return None
 
+    @property
+    def enabled(self) -> bool:
+        """Whether the master switch is on (``mcp.enabled``).
+
+        Read by the panel and the wizard so they can say so before the
+        operator answers three questions, instead of ``adopt`` refusing at
+        the end of them.
+        """
+        return self._config.enabled
+
     def servers(self) -> list[dict[str, Any]]:
         """Every configured server and what became of it (MCP-MCP §2.1).
 

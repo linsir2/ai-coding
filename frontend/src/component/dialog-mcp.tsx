@@ -49,11 +49,20 @@ export function DialogMcp(props: {
 }) {
   const [rows, setRows] = createSignal<McpServer[]>([])
   const [error, setError] = createSignal("")
+  // The master switch, which decides whether the wizard is even worth
+  // opening: `mcp.enabled: false` is the shipped default, so without this the
+  // panel cheerfully offers "connect" and the wizard collects three answers
+  // before the backend refuses.
+  const [enabled, setEnabled] = createSignal(true)
 
   const refresh = async (): Promise<void> => {
     try {
-      const data = (await props.client.request("mcp.list")) as { servers?: McpServer[] }
+      const data = (await props.client.request("mcp.list")) as {
+        servers?: McpServer[]
+        enabled?: boolean
+      }
       setRows(data.servers ?? [])
+      setEnabled(data.enabled !== false)
     } catch (cause) {
       setError(String(cause))
     }
@@ -93,7 +102,7 @@ export function DialogMcp(props: {
   // plain "a" would be typed into the filter instead of reaching the binding
   // (the same reason the sessions panel's delete is ctrl+d).
   const actions = (): readonly SelectAction[] =>
-    props.onConnectNew
+    props.onConnectNew && enabled()
       ? [{ key: "ctrl+a", title: "connect", onTrigger: props.onConnectNew }]
       : []
 
@@ -106,7 +115,11 @@ export function DialogMcp(props: {
         error() ||
         [
           rows().length === 0 ? "没有配置 MCP 服务器" : "",
-          props.onConnectNew ? "ctrl+a connect a new server" : "",
+          enabled()
+            ? props.onConnectNew
+              ? "ctrl+a connect a new server"
+              : ""
+            : "MCP 已关闭（配置里 mcp.enabled: false）· 先打开它才能接入",
           "esc close",
         ]
           .filter(Boolean)

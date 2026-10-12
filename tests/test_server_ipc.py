@@ -527,6 +527,26 @@ async def test_mcp_logout_answers_with_the_managers_verdict(ipc):
 
 
 @pytest.mark.asyncio
+async def test_mcp_list_says_whether_mcp_is_switched_on(ipc):
+    """M5 follow-up: the panel has to be able to tell the operator *before*
+    they type anything that the master switch is off.
+
+    Without this the wizard collects three answers and only then refuses, which
+    is what a real operator reported: ``MCP is disabled (mcp.enabled is
+    false)`` arriving after they had already chosen kind, name, command and
+    trust.  ``adopt`` stays the authority; this is the panel's chance not to
+    waste the steps.
+    """
+    world, _service, client = ipc
+    world.mcp = SimpleNamespace(enabled=False, servers=lambda: [])
+
+    listed = client.request("mcp.list", {})
+
+    assert listed["enabled"] is False
+    assert listed["servers"] == []
+
+
+@pytest.mark.asyncio
 async def test_mcp_login_with_no_manager_is_an_error_not_a_crash(ipc):
     _world, _service, client = ipc
     assert client.request("mcp.login", {"server": "fs"})["ok"] is False
@@ -633,7 +653,7 @@ async def test_mcp_list_with_no_manager_is_an_empty_list_not_an_error(ipc):
     _world, _service, client = ipc
     # The shared fixture has no `mcp` attribute at all.
     client.request("initialize")
-    assert client.request("mcp.list") == {"servers": []}
+    assert client.request("mcp.list") == {"servers": [], "enabled": False}
 
 
 @pytest.mark.asyncio

@@ -621,8 +621,14 @@ def make_handlers(
         """
         manager = getattr(world, "mcp", None)
         if manager is None:
-            return {"servers": []}
-        return {"servers": manager.servers()}
+            return {"servers": [], "enabled": False}
+        # The master switch rides along with the rows: a panel that cannot see
+        # it offers "connect a new server" against a subsystem that is off, and
+        # the operator only learns at the end of the wizard (M5 follow-up).
+        return {
+            "servers": manager.servers(),
+            "enabled": bool(getattr(manager, "enabled", True)),
+        }
 
     def shutdown_handler(params: dict[str, Any]) -> dict[str, Any]:
         if shutdown is not None:

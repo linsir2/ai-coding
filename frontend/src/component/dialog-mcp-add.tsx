@@ -60,9 +60,26 @@ export function DialogMcpAdd(props: { client: IpcClient; onDone: () => void }) {
   const [values, setValues] = createSignal<Partial<Record<Field["key"], string>>>({})
   const [typed, setTyped] = createSignal("")
   const [error, setError] = createSignal("")
+  // Asked before anything else: `mcp.enabled: false` is the shipped default,
+  // and the backend's `adopt` refuses at the *end* of the wizard.  Collecting
+  // a kind, a name, a command and a trust answer first is four questions the
+  // operator could have been spared.
+  const [checked, setChecked] = createSignal(false)
+  const [enabled, setEnabled] = createSignal(true)
   let input: InputRenderable | undefined
 
-  onMount(() => input?.focus())
+  onMount(() => {
+    void (async () => {
+      try {
+        const listed = (await props.client.request("mcp.list")) as { enabled?: boolean }
+        setEnabled(listed.enabled !== false)
+      } catch {
+        // An unreadable switch is not a reason to block the wizard; `mcp.add`
+        // is still the authority and will refuse with the same sentence.
+      }
+      setChecked(true)
+    })()
+  })
 
   const field = (): Field | null => {
     const k = kind()
@@ -154,6 +171,23 @@ export function DialogMcpAdd(props: { client: IpcClient; onDone: () => void }) {
     } catch (cause) {
       setError(String(cause))
     }
+  }
+
+  if (checked() && !enabled()) {
+    return (
+      <box flexDirection="column" width="100%" paddingLeft={4} paddingRight={4} gap={1}>
+        <text fg={theme.textBase} attributes={TextAttributes.BOLD}>
+          Connect an MCP server
+        </text>
+        <text fg={theme.feedbackWarning}>
+          MCP is switched off — nothing you add here could run.
+        </text>
+        <text fg={theme.textMuted}>
+          Set `mcp.enabled: true` in your config file, restart, and come back.
+        </text>
+        <text fg={theme.textMuted}>esc close</text>
+      </box>
+    )
   }
 
   return (
