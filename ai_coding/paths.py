@@ -153,6 +153,16 @@ class Paths:
         return self.workspace / ".memory"
 
     @property
+    def user_memory(self) -> Path:
+        """The user-tier memory file.
+
+        In ``data_home`` next to the MCP tokens rather than in ``config_home``:
+        it is accumulated state, not a setting, and a person editing their config
+        must not be surprised to find it beside a memory store.
+        """
+        return self.data_home / "memory.json"
+
+    @property
     def project_skills(self) -> Path:
         """The project's skill library, which wins over the global one (M9)."""
         return self.workspace / "skills"

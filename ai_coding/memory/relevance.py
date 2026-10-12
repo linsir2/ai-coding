@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
 
-from ai_coding.memory.note import MemoryNote
+from ai_coding.memory.note import USER_SCOPE, MemoryNote
 from ai_coding.memory.tokenize import tokenize
 
 __all__ = [
@@ -390,6 +390,15 @@ def _time_of(note: MemoryNote, params: RecallParams) -> str:
     return note.created_time
 
 
+def _scope_rank(note: MemoryNote) -> int:
+    """0 for the workspace tier, 1 for the user tier.
+
+    Inert when there is no user tier: every note then ranks 0, so the ordering is
+    unchanged for everyone who has not written a user-tier note.
+    """
+    return 1 if note.scope == USER_SCOPE else 0
+
+
 def rank_notes_detailed(
     notes: Sequence[MemoryNote],
     query: str,
@@ -515,8 +524,17 @@ def rank_notes_detailed(
         else:
             rejected.append(item)
 
-    def order(item: ScoredNote) -> tuple[float, float, int, str]:
-        return (-item.score, -item.relevance, evidence_rank(item.note), item.note.id)
+    def order(item: ScoredNote) -> tuple[float, float, int, int, str]:
+        # The nearer scope wins a tie: a project note beats a user-tier one.
+        # Ranked here, the one place every ordering is decided, so `recall`,
+        # `search_scored` and the tail block all inherit it without repeating it.
+        return (
+            -item.score,
+            -item.relevance,
+            evidence_rank(item.note),
+            _scope_rank(item.note),
+            item.note.id,
+        )
 
     kept.sort(key=order)
     rejected.sort(key=order)

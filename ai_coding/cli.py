@@ -113,6 +113,7 @@ def _build_loop(
     from ai_coding.core.context_compression import ContextManager
     from ai_coding.core.guard import build_guards
     from ai_coding.core.project_instructions import ProjectInstructionsLoader
+    from ai_coding.memory.scoped_store import ScopedStore
     from ai_coding.memory.service import MemoryService
     from ai_coding.memory.store import MemoryStore
     from ai_coding.security.permission_gate import PermissionGate
@@ -122,7 +123,10 @@ def _build_loop(
 
     project = ProjectInstructionsLoader(ws)
     summarizer, extractor = _llm_helpers_for(engine)
-    memory_store = MemoryStore(paths.memory)
+    # Two tiers (M10): the project's own file, and the one that follows the
+    # person to every project. A user file that does not exist contributes
+    # nothing, so a machine that has never written one behaves exactly as before.
+    memory_store = ScopedStore(MemoryStore(paths.memory), MemoryStore(paths.user_memory))
     embeddings = _embeddings_for(app_cfg, paths)
     memory = MemoryService(
         memory_store, extractor=extractor, config=app_cfg.memory,

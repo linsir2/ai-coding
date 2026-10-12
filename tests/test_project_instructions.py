@@ -60,7 +60,6 @@ def test_read_error_returns_empty(tmp_path, monkeypatch):
     guarded = unreadable / "CLAUDE.md"
     guarded.write_text("# Sub rules\n", encoding="utf-8")
 
-    import ai_coding.core.project_instructions as pi
 
     real_read_text = Path.read_text
 

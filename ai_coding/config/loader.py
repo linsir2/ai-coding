@@ -6,11 +6,11 @@ import logging
 import os
 import re
 from pathlib import Path
-
-from ai_coding.paths import ancestors_up_to_home
 from typing import Any
 
 import yaml
+
+from ai_coding.paths import ancestors_up_to_home
 
 from .models import AppConfig, MCPConfig, MCPServerConfig, _coerce_model
 

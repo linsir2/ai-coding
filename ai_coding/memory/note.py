@@ -28,6 +28,13 @@ from ai_coding.memory.tokenize import normalize
 __all__ = ["DEFAULT_SCOPE", "MemoryNote", "NoteKind", "new_note"]
 
 DEFAULT_SCOPE = "workspace"
+
+#: The one scope that means "this is about the person, not this repo". Notes
+#: carrying it live in a user-level store outside any workspace, so they are
+#: recalled from every project. Anything else — including a scope nobody
+#: declared — stays with the workspace, because a value that is not explicitly
+#: this one must never be able to reach the file that follows the person around.
+USER_SCOPE = "user"
 _MIN_IMPORTANCE, _MAX_IMPORTANCE = 1, 5
 #: A scene label is a short topic the model wrote; 80 characters is far past any
 #: sensible label and keeps a runaway answer from bloating every row.

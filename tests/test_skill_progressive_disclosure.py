@@ -7,7 +7,6 @@ record_recommendation(), format_block() with trigger hints, SkillTool load track
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 from ai_coding.core.sop_router import SkillStats
 from ai_coding.skills.catalog import build_catalog

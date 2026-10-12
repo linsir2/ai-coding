@@ -56,8 +56,8 @@ from ai_coding.config.models import MCPConfig, MCPOAuthConfig, MCPServerConfig
 from ai_coding.core.events import ToolChunk
 from ai_coding.core.turn_report import report_degraded
 from ai_coding.domain.message import ToolResult
-from ai_coding.paths import data_home
 from ai_coding.infra.deadline import DeadlineExpired, run_with_deadline
+from ai_coding.paths import data_home
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 SessionFactory = Callable[[MCPServerConfig], Any]

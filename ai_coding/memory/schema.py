@@ -43,6 +43,12 @@ class HarvestCandidate:
     target_id: str | None = None
     # R11c: the topic group the model named, "" when it named none.
     scene: str = ""
+    # M10: which tier this writes to.  The default is the workspace, which is
+    # what every producer before layering meant — the extractor has no opinion
+    # about whether a fact generalises beyond this repo, and guessing would be
+    # the failure Claude Code documents (a model-declared type that silently does
+    # not route).  ``user`` is reached only by an explicit caller.
+    scope: str = "workspace"
 
 
 def parse_candidates(raw: str) -> list[HarvestCandidate]:

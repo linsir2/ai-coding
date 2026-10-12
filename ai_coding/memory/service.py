@@ -45,6 +45,8 @@ from typing import Any
 from ai_coding.domain.message import ChatMessage
 from ai_coding.memory.embeddings import EmbeddingIndex, EmbeddingsUnsupportedError
 from ai_coding.memory.note import (
+    DEFAULT_SCOPE,
+    USER_SCOPE,
     MemoryNote,
     NoteKind,
     is_plausible_note_text,
@@ -58,6 +60,7 @@ from ai_coding.memory.relevance import (
     rank_notes_detailed,
 )
 from ai_coding.memory.schema import HarvestCandidate
+from ai_coding.memory.scoped_store import ScopedStore
 from ai_coding.memory.store import MemoryStore
 from ai_coding.memory.tokenize import clean_query_for_recall, similarity
 
@@ -270,12 +273,19 @@ class MemoryService:
 
     def __init__(
         self,
-        store: MemoryStore,
+        store: MemoryStore | ScopedStore,
         extractor: Extractor | None = None,
         config: Any | None = None,
         embeddings: EmbeddingIndex | None = None,
     ) -> None:
-        self._store = store
+        # One tier or two: a bare ``MemoryStore`` means "just the workspace tier".
+        # Wrapping here rather than requiring callers to means the wrong shape
+        # cannot be constructed — the tier-scoped dedupe below would raise on a
+        # plain store, and memory is best-effort, so it would raise *silently*
+        # and every harvest would quietly stop writing.
+        self._store = (
+            store if isinstance(store, ScopedStore) else ScopedStore(store)
+        )
         self._extractor = extractor
         self._config = config or _default_config()
         self._embeddings = embeddings
@@ -283,7 +293,7 @@ class MemoryService:
     # ---- configuration helpers -------------------------------------------
 
     @property
-    def store(self) -> MemoryStore:
+    def store(self) -> MemoryStore | ScopedStore:
         return self._store
 
     @property
@@ -741,6 +751,7 @@ class MemoryService:
         turn: int = 0,
         session_id: str = "",
         scene: str = "",
+        scope: str = DEFAULT_SCOPE,
     ) -> HarvestReport:
         """Write one memory the model asked for, through the same door as harvest (R7e-1).
 
@@ -767,6 +778,7 @@ class MemoryService:
             action="supersede" if target else "add",
             target_id=target or None,
             scene=normalize_scene(scene),
+            scope=scope,
         )
         return self._reconcile(
             [candidate],
@@ -853,6 +865,7 @@ class MemoryService:
                 evidence=evidence,
                 source_message_ids=source_refs,
                 scene=candidate.scene,
+                scope=candidate.scope,
             )
             if candidate.action == "noop":
                 skipped.append(note.id)
@@ -874,7 +887,7 @@ class MemoryService:
                 ):
                     updated.append(target.id)
                     continue
-            existing = self._store.find_by_dedupe(note.dedupe_key)
+            existing = self._store.find_by_dedupe(note.dedupe_key, scope=note.scope)
             if existing is not None:
                 # R11c: same content, so this is the *same* fact — but it may be
                 # the first time anyone named its scene (harvest first, label
@@ -885,7 +898,11 @@ class MemoryService:
                 skipped.append(existing.id)
                 continue
             similar = self._store.find_similar(
-                text, kind=note.kind, scene=note.scene, threshold=threshold
+                text,
+                kind=note.kind,
+                scene=note.scene,
+                threshold=threshold,
+                scope=note.scope,
             )
             if similar is not None:
                 merged = MemoryNote.from_dict(
@@ -924,26 +941,30 @@ class MemoryService:
         merged: list[str] = []
         promoted: list[str] = []
         expired: list[str] = []
-        active = self._store.active()
         retired: set[str] = set()
-        for index, note in enumerate(active):
-            if note.id in retired:
-                continue
-            for other in active[index + 1 :]:
-                if other.id in retired or other.kind is not note.kind:
+        # One pass per tier. Pairing across the union would retire a user-tier
+        # note in favour of a project-tier one — deleting it from every other
+        # project while the replacement lived only in this one.
+        for scope in (DEFAULT_SCOPE, USER_SCOPE):
+            active = self._store.active(scope=scope)
+            for index, note in enumerate(active):
+                if note.id in retired:
                     continue
-                # R11c: scenes are separate groups.  Merging "the uv decision we
-                # made for the build" into "the uv decision we made for the
-                # release" would lose exactly the qualifier that makes either
-                # note worth keeping.
-                if other.scene != note.scene:
-                    continue
-                if similarity(note.text, other.text) < similarity_threshold:
-                    continue
-                keep, drop = _better_of(note, other)
-                self._store.supersede(drop.id, keep.touch(moment.isoformat()))
-                retired.add(drop.id)
-                merged.append(drop.id)
+                for other in active[index + 1 :]:
+                    if other.id in retired or other.kind is not note.kind:
+                        continue
+                    # R11c: scenes are separate groups.  Merging "the uv decision
+                    # we made for the build" into "the uv decision we made for
+                    # the release" would lose exactly the qualifier that makes
+                    # either note worth keeping.
+                    if other.scene != note.scene:
+                        continue
+                    if similarity(note.text, other.text) < similarity_threshold:
+                        continue
+                    keep, drop = _better_of(note, other)
+                    self._store.supersede(drop.id, keep.touch(moment.isoformat()))
+                    retired.add(drop.id)
+                    merged.append(drop.id)
         for note in self._store.active():
             if note.hits >= _PROMOTE_HITS and note.importance < 5:
                 self._store.update(note.with_importance(note.importance + 1))
@@ -1013,7 +1034,7 @@ class MemoryService:
             if not body:
                 continue
             note = new_note(body)
-            if self._store.find_by_dedupe(note.dedupe_key) is not None:
+            if self._store.find_by_dedupe(note.dedupe_key, scope=note.scope) is not None:
                 continue
             ids.append(self._store.add_note(note))
         self._store.evict(int(self._get("max_index_entries", 200)))
