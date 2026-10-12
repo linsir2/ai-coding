@@ -9,6 +9,7 @@ from typing import Any
 import typer
 
 from ai_coding.infra.logger_setup import send_logs_to_file, setup_logging
+from ai_coding.skills.registry import SkillRegistry
 
 app = typer.Typer(
     name="ai-coding",
@@ -81,7 +82,7 @@ def _build_loop(
     registry: Any,
     app_cfg: Any,
     workspace: str,
-    skills_path: str | None,
+    skills: SkillRegistry,
     *,
     approval: Any | None = None,
     observer: Any | None = None,
@@ -108,12 +109,8 @@ def _build_loop(
     from ai_coding.memory.service import MemoryService
     from ai_coding.memory.store import MemoryStore
     from ai_coding.security.permission_gate import PermissionGate
-    from ai_coding.skills.registry import SkillRegistry
 
     ws = Path(workspace).expanduser().resolve()
-
-    skill_root = skills_path or str(ws / "skills")
-    skills_reg = SkillRegistry(skill_root)
 
     project = ProjectInstructionsLoader(ws)
     summarizer, extractor = _llm_helpers_for(engine)
@@ -151,7 +148,7 @@ def _build_loop(
         memory=memory,
         prompt=prompt,
         catalog_builder=catalog_builder,
-        skills=skills_reg,
+        skills=skills,
         project=project,
         settings=app_cfg.ai,
         models=app_cfg.models,
@@ -274,7 +271,7 @@ def _embeddings_for(app_cfg: Any) -> Any | None:
 def _build_tool_registry(
     app_cfg: Any,
     workspace: str,
-    skills_path: str | None,
+    skills: SkillRegistry,
     *,
     user_prompt: Any | None = None,
     base_instructions: str = "",
@@ -285,7 +282,7 @@ def _build_tool_registry(
     return build_tool_registry(
         app_cfg,
         workspace,
-        skills_path,
+        skills,
         include_subagent=True,
         user_prompt=user_prompt,
         base_instructions=base_instructions,

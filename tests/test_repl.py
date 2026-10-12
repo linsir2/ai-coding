@@ -287,9 +287,17 @@ async def test_handle_todo_no_task():
     assert "no task" in out.lower() or "empty" in out.lower() or "0" in out
 
 
-async def test_handle_skills_lists_catalog():
+async def test_handle_skills_lists_catalog(tmp_path):
+    from ai_coding.skills.registry import Skill
+
     loop = _FakeLoop()
-    loop.skills = type("SR", (), {"catalog_text": lambda self: "- test-skill: A test skill"})()
+    skill = Skill(
+        id="test-skill",
+        body="b",
+        path=tmp_path / "SKILL.md",
+        description="A test skill",
+    )
+    loop.skills = type("SR", (), {"all": lambda self: (skill,)})()
     sessions = _FakeSessions()
     dc, c = _console_capture()
     action, _ = await handle_input(loop, "/skills", sessions.items[0], sessions, dc)

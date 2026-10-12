@@ -29,7 +29,7 @@ from typing import Any
 from ai_coding.core.events import LoopEvent, ToolFinished
 from ai_coding.infra.json_utils import from_json_file, to_json_pretty
 from ai_coding.infra.time_utils import now_utc
-from ai_coding.skills.registry import SkillRegistry
+from ai_coding.skills.registry import Skill, SkillRegistry, SkillTriggers
 
 _log = logging.getLogger(__name__)
 
@@ -106,6 +106,17 @@ class SkillMatch:
 
 
 # ---- F3: Structural signature (skill success context) ----------------------
+
+
+def _as_dict(triggers: Any) -> dict[str, list[str]]:
+    """``SkillTriggers`` as the plain dict the match/intervention dataclasses
+    carry, so the shape every existing caller already handles is unchanged."""
+    return {
+        "keywords": list(triggers.keywords),
+        "tools": list(triggers.tools),
+        "task_types": list(triggers.task_types),
+        "failure_patterns": list(triggers.failure_patterns),
+    }
 
 
 @dataclass(frozen=True)
@@ -333,16 +344,19 @@ class SOPRouter:
             )
         stats = stats or {}
         matches: list[SkillMatch] = []
-        for name in self._skills.names():
-            triggers = self._skills.triggers(name)
+        for skill in self._skills.all():
+            name = skill.id
+            triggers = skill.triggers
             if not triggers:
                 continue
+            # `status: archived` means "do not recommend this proactively". It
+            # still reads by name; what it must not do is occupy the tail block
+            # every turn. It used to: `names()` never looked at status.
+            if skill.is_archived:
+                continue
             # F2: phase filtering — skip skills locked to a different phase
-            if phase:
-                meta = self._skills.meta(name)
-                skill_phase = meta.get("phase", "")
-                if skill_phase and skill_phase != phase:
-                    continue
+            if phase and skill.phase and skill.phase != phase:
+                continue
             base_score, dimensions = self._score(
                 user_input, recent_tools, task_goal, all_failures, triggers)
             # M4: add freshness bonus only when there's at least one strong
@@ -368,13 +382,12 @@ class SOPRouter:
                     if name == match_name:
                         total_score += match_score * SIGNATURE_MATCH_WEIGHT
             if total_score >= self._threshold:
-                meta = self._skills.meta(name)
                 matches.append(SkillMatch(
                     name=name,
-                    description=meta.get("description", "") or "",
+                    description=skill.description,
                     score=total_score,
                     matched_dimensions=tuple(dimensions),
-                    triggers=triggers,
+                    triggers=_as_dict(skill.triggers),
                     price=price,
                 ))
         matches.sort(key=lambda m: m.score, reverse=True)
@@ -455,11 +468,10 @@ class SOPRouter:
         if not all_errors:
             return Intervention(mode="none", skill_name="", content="", triggers={})
 
-        for name in self._skills.names():
-            triggers = self._skills.triggers(name)
-            if not triggers:
+        for skill in self._skills.all():
+            if skill.is_archived:
                 continue
-            failure_patterns = triggers.get("failure_patterns", [])
+            failure_patterns = skill.triggers.failure_patterns
             if not failure_patterns:
                 continue
             # Check if at least 2 errors match this skill's failure patterns
@@ -470,32 +482,24 @@ class SOPRouter:
             ]
             if len(matching_errors) >= 2:
                 # Hard intervention — load steps section
-                content = self._load_skill_steps(name)
+                content = self._skill_steps(skill)
                 return Intervention(
-                    mode="hard", skill_name=name,
-                    content=content, triggers=triggers,
+                    mode="hard", skill_name=skill.id,
+                    content=content, triggers=_as_dict(skill.triggers),
                 )
-            elif len(matching_errors) >= 1:
+            elif len(matching_errors) >= 1 and skill.pattern_dna:
                 # Soft intervention — inject pattern_dna
-                meta = self._skills.meta(name)
-                pattern_dna = meta.get("pattern_dna", "")
-                if pattern_dna:
-                    return Intervention(
-                        mode="soft", skill_name=name,
-                        content=pattern_dna, triggers=triggers,
-                    )
+                return Intervention(
+                    mode="soft", skill_name=skill.id,
+                    content=skill.pattern_dna, triggers=_as_dict(skill.triggers),
+                )
         return Intervention(mode="none", skill_name="", content="", triggers={})
 
-    def _load_skill_steps(self, name: str) -> str:
-        """Load the steps section from a skill's SKILL.md."""
-        text = self._skills.load(name)
-        if not text:
+    def _skill_steps(self, skill: Skill) -> str:
+        """The steps section of one skill, from the body already parsed."""
+        body: str = skill.body
+        if not body:
             return ""
-        # Extract content after frontmatter
-        parts = text.split("---", 2)
-        if len(parts) < 3:
-            return text
-        body = parts[2]
         # Try to find a steps section
         for marker in ["## 步骤", "## Steps", "## Procedure"]:
             if marker in body:
@@ -518,16 +522,12 @@ class SOPRouter:
         if not recent_failures:
             return None
         latest_error = recent_failures[-1]
-        for name in self._skills.names():
-            triggers = self._skills.triggers(name)
-            if not triggers:
+        for skill in self._skills.all():
+            if skill.is_archived:
                 continue
-            failure_patterns = triggers.get("failure_patterns", [])
-            if any(fp in latest_error for fp in failure_patterns):
-                meta = self._skills.meta(name)
-                pattern_dna = meta.get("pattern_dna", "")
-                if pattern_dna:
-                    return pattern_dna
+            if any(fp in latest_error for fp in skill.triggers.failure_patterns):
+                if skill.pattern_dna:
+                    return skill.pattern_dna
         return None
 
     # ---- I2: Cross-turn duplicate failure detection --------------------------
@@ -599,23 +599,22 @@ class SOPRouter:
         session.pre_compaction_anchor = " | ".join(parts) if parts else ""
 
     def _score(self, user_input: str, recent_tools: list[str], task_goal: str,
-               recent_failures: list[str], triggers: dict[str, list[str]],
+               recent_failures: list[str], triggers: SkillTriggers,
     ) -> tuple[float, list[str]]:
         """Calculate match score for a single skill."""
         score = 0.0
         dimensions: list[str] = []
 
-        if any(kw in user_input for kw in triggers.get("keywords", [])):
+        if any(kw in user_input for kw in triggers.keywords):
             score += _WEIGHT_KEYWORD
             dimensions.append("keyword")
-        if any(t in recent_tools for t in triggers.get("tools", [])):
+        if any(t in recent_tools for t in triggers.tools):
             score += _WEIGHT_TOOL
             dimensions.append("tool")
-        if any(tt in task_goal for tt in triggers.get("task_types", [])):
+        if any(tt in task_goal for tt in triggers.task_types):
             score += _WEIGHT_TASK_TYPE
             dimensions.append("task_type")
-        failure_patterns = triggers.get("failure_patterns", [])
-        if any(fp in fail for fail in recent_failures for fp in failure_patterns):
+        if any(fp in fail for fail in recent_failures for fp in triggers.failure_patterns):
             score += _WEIGHT_FAILURE
             dimensions.append("failure_pattern")
 
@@ -646,7 +645,11 @@ class SOPRouter:
             if trigger_hint:
                 lines.append(f"  When: {trigger_hint}")
             lines.append(f"  Why: {dim_str}")
-            lines.append(f'  Load with: skill(id="{m.name}")')
+            # `name=`, not `id=` — the tool's schema is {action, name}. This
+            # block is injected into the prompt on every recommendation, so
+            # `id=` was an instruction the model could not follow, in the same
+            # class of bug as a filter silently dropped by a recall.
+            lines.append(f'  Load with: skill(action="read", name="{m.name}")')
         lines.append("</recommended-skills>")
         return "\n".join(lines)
 

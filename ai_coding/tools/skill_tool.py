@@ -1,26 +1,35 @@
-"""skill tool — list and read skill definitions from a skills directory.
+"""skill tool — list and read skills from the shared registry.
 
-Skills are subdirectories under ``skill_dir`` that each contain a ``SKILL.md``
-file.  The tool lets the model list available skills and read a specific
-skill's full text.  Zero API calls — purely local file reads.
+The tool takes a :class:`~ai_coding.skills.registry.SkillRegistry`, not a
+directory. It used to take a path and do its own directory walk and its own
+frontmatter parsing, which meant two answers to "what skills exist" and a real
+split-brain: ``cli.py`` built the registry from ``<workspace>/skills``
+unconditionally while ``tools/builder.py`` registered this tool only when
+``--skills`` was passed — so a plain ``ai-coding -w .`` advertised skills in the
+system prompt that the model had no tool to load. One registry makes that
+impossible to express.
+
+Loading is by the name the catalog prints. A ``name:`` in the frontmatter that
+differs from the directory name is accepted as an alias, so a skill copied from
+Claude Code or Codex still loads under either spelling — but it is never a
+second identity.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 from ai_coding.domain.message import ToolResult
-from ai_coding.skills.registry import DEFAULT_VERSION, _parse_status, _parse_version
+from ai_coding.skills.registry import DEFAULT_VERSION, Skill, SkillRegistry
 from ai_coding.tools.base import BaseTool, ToolContext
 
 
 class SkillTool(BaseTool):
-    """List and read skill definitions from a local skills directory."""
+    """List and read skills. Zero API calls — purely local file reads."""
 
-    def __init__(self, skill_dir: str | Path) -> None:
-        self._skill_dir = Path(skill_dir)
+    def __init__(self, registry: SkillRegistry) -> None:
+        self._registry = registry
         self._on_loaded: Callable[[str], None] | None = None
 
     def set_on_loaded(self, callback: Callable[[str], None]) -> None:
@@ -58,41 +67,23 @@ class SkillTool(BaseTool):
         }
 
     def list_skills(self) -> list[str]:
-        """Return all skill names found under the skills directory."""
-        if not self._skill_dir.is_dir():
-            return []
-        names: list[str] = []
-        for entry in sorted(self._skill_dir.iterdir()):
-            if entry.is_dir() and (entry / "SKILL.md").is_file():
-                names.append(entry.name)
-        return names
-
-    def _meta(self, name: str) -> dict[str, str | None]:
-        """Frontmatter metadata for one skill (R11c).
-
-        Reads the file the tool already needs, rather than depending on
-        ``SkillRegistry`` and a second directory walk.  A skill whose file cannot
-        be read reports the same defaults ``SkillRegistry.meta`` does.
-        """
-        path = self._skill_dir / name / "SKILL.md"
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            return {"version": DEFAULT_VERSION, "status": "active"}
-        return {"version": _parse_version(text), "status": _parse_status(text)}
+        """Every skill id the registry finds, broken ones included."""
+        return self._registry.names()
 
     @staticmethod
-    def _suffix(meta: dict[str, str | None]) -> str:
+    def _suffix(skill: Skill) -> str:
         """The list/read marker: only what differs from the default is shown.
 
         A v1 active skill keeps its exact pre-R11c line, so an unversioned
         directory of skills does not suddenly sprout noise.
         """
         out = ""
-        if meta["version"] != DEFAULT_VERSION:
-            out += f" (v{meta['version']})"
-        if meta["status"] != "active":
+        if skill.version != DEFAULT_VERSION:
+            out += f" (v{skill.version})"
+        if skill.is_archived:
             out += " [archived]"
+        if not skill.is_healthy:
+            out += " [broken]"
         return out
 
     # Read-only: safe to run alongside sibling calls in the same message.
@@ -107,7 +98,12 @@ class SkillTool(BaseTool):
             names = self.list_skills()
             if not names:
                 return ToolResult(success=True, output="(no skills available)")
-            lines = [f"  - {n}{self._suffix(self._meta(n))}" for n in names]
+            lines = [
+                f"  - {name}{self._suffix(skill)}"
+                for name in names
+                for skill in (self._registry.get(name),)
+                if skill is not None
+            ]
             return ToolResult(
                 success=True,
                 output="Available skills:\n" + "\n".join(lines),
@@ -116,31 +112,37 @@ class SkillTool(BaseTool):
         if action == "read":
             name = str(params.get("name", "")).strip()
             if not name:
-                return ToolResult(success=False, output="error: 'name' is required for 'read'")
-            # Sanitize: no path separators allowed
+                return ToolResult(
+                    success=False, output="error: 'name' is required for 'read'"
+                )
             if "/" in name or "\\" in name or ".." in name:
                 return ToolResult(success=False, output="error: invalid skill name")
-            skill_path = self._skill_dir / name / "SKILL.md"
-            if not skill_path.is_file():
+            skill = self._registry.resolve(name)
+            if skill is None:
+                return ToolResult(success=False, output=f"skill '{name}' not found")
+            if self._on_loaded:
+                self._on_loaded(skill.id)
+            if not skill.is_healthy:
+                # Reported rather than returned as instructions: handing a model
+                # half-parsed frontmatter and calling it a skill is worse than
+                # saying the file is broken, because the failure is then
+                # indistinguishable from the skill being unhelpful.
                 return ToolResult(
                     success=False,
-                    output=f"skill '{name}' not found",
+                    output=f"skill '{skill.id}' 无法解析 frontmatter: {skill.error}",
+                    data={"name": skill.id, "version": skill.version, "status": skill.status},
                 )
-            try:
-                content = skill_path.read_text(encoding="utf-8")
-            except OSError as exc:
-                return ToolResult(success=False, output=f"read error: {exc}")
-            meta = self._meta(name)
-            # M4: notify load tracking
-            if self._on_loaded:
-                self._on_loaded(name)
             # An archived skill still reads: refusing would be a policy, and this
-            # tool has no gate.  It only says what it is (R11c) — it does not
-            # recommend a replacement, because we cannot know one.
+            # tool has no gate. It only says what it is — it does not recommend a
+            # replacement, because we cannot know one.
             return ToolResult(
                 success=True,
-                output=f"# Skill: {name}{self._suffix(meta)}\n\n{content}",
-                data={"name": name, "version": meta["version"], "status": meta["status"]},
+                output=f"# Skill: {skill.id}{self._suffix(skill)}\n\n{skill.body}",
+                data={
+                    "name": skill.id,
+                    "version": skill.version,
+                    "status": skill.status,
+                },
             )
 
         return ToolResult(

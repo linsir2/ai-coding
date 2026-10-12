@@ -14,6 +14,7 @@ from typing import Any
 
 from ai_coding.app.console import ConsoleSink
 from ai_coding.app.slash import parse_slash, suggest_command
+from ai_coding.skills.catalog import build_catalog
 
 HELP_TEXT = (
     "direct commands:\n"
@@ -163,7 +164,7 @@ async def handle_input(
         if skills_reg is None:
             console.info("[skills] not available in this session")
             return REPLAction.CONTINUE, session
-        catalog = skills_reg.catalog_text()
+        catalog = build_catalog(skills_reg.all())
         if catalog:
             console.info(f"[skills] available:\n{catalog}")
         else:

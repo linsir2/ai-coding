@@ -46,6 +46,7 @@ from ai_coding.domain.subagent import (
 from ai_coding.infra.deadline import DeadlineExpired, run_with_deadline
 from ai_coding.infra.json_utils import to_json_pretty
 from ai_coding.infra.time_utils import now_utc
+from ai_coding.skills.registry import SkillRegistry
 from ai_coding.tools.registry import ToolRegistry
 
 EngineFactory = Callable[[], ChatEngine]
@@ -104,8 +105,10 @@ class SubAgentRunner:
         workspace: str = ".",
         observer: Any | None = None,
         base_instructions: str = "",
+        skills: SkillRegistry | None = None,
     ) -> None:
         self._app_config = app_config
+        self._skills = skills
         # M2 fix: the guard chain used to be assembled only for the parent loop,
         # so every sub-agent got ``AgentLoop(guards=None)`` -- which the
         # dispatcher turns into an empty chain, i.e. no red lines, no path
@@ -481,6 +484,12 @@ class SubAgentRunner:
             registry,
             approval=self._approval,
             prompt=prompt,
+            # The same registry the parent uses, so the child reads live skills
+            # rather than the frozen copy in the parent's instructions. It used
+            # to take none at all, which left the child holding the `skill` tool
+            # (the tool registry always got the path) with no catalog naming
+            # anything it could load.
+            skills=self._skills,
             settings=self._subagent_settings(),
             guards=self._guards,
             workspace=workdir or self._workspace,

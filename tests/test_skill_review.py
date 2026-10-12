@@ -215,10 +215,11 @@ class TestRunSkillReview:
         from ai_coding.core.skill_review import run_skill_review
         result = await run_skill_review(_make_messages(), [], _make_model_config(), tmp_path)
         assert result.created is True
+        assert result.pending is True, "a human approves before it installs"
         assert result.skill_name == "debug-pytest"
-        assert result.skill_path == str(tmp_path / "debug-pytest" / "SKILL.md")
-        # Verify file content
-        written = (tmp_path / "debug-pytest" / "SKILL.md").read_text()
+        assert result.skill_path == str(tmp_path / ".pending" / "debug-pytest" / "SKILL.md")
+        assert not (tmp_path / "debug-pytest").exists(), "not in the live tree"
+        written = (tmp_path / ".pending" / "debug-pytest" / "SKILL.md").read_text()
         assert written == skill_content
 
     @pytest.mark.asyncio
@@ -510,3 +511,81 @@ class TestAgentLoopSkillReview:
         )
         # Should not raise
         await loop._run_skill_review(session)
+
+
+# ---- approval gate (TUI) ---------------------------------------------------
+#
+# The review used to write straight into `skills/<name>/SKILL.md`, every
+# `skill_review_interval` turns, by default, with no diff, no prompt, and only a
+# `_log.info` line. The agent was editing the user's source tree unattended.
+# Generated skills now land in `skills/.pending/` and a human moves them.
+
+
+def test_a_generated_skill_lands_in_pending_not_in_the_live_tree(tmp_path):
+    from ai_coding.core.skill_review import stage_skill
+    from ai_coding.skills.registry import SkillRegistry
+
+    content = "---\nname: staged\ndescription: d\n---\nbody\n"
+
+    result = stage_skill(tmp_path, "staged", content, reason="test")
+
+    registry = SkillRegistry(tmp_path)
+    assert result.created and result.pending
+    assert ".pending" in result.skill_path
+    assert registry.names() == [], "nothing enters the live tree without a human"
+    assert (tmp_path / ".pending" / "staged" / "SKILL.md").is_file()
+
+
+def test_approving_a_pending_skill_moves_it_into_the_live_tree(tmp_path):
+    from ai_coding.core.skill_review import approve_skill, stage_skill
+    from ai_coding.skills.registry import SkillRegistry
+
+    stage_skill(tmp_path, "staged", "---\nname: staged\ndescription: d\n---\nbody\n")
+
+    assert approve_skill(tmp_path, "staged") is True
+
+    registry = SkillRegistry(tmp_path)
+    assert registry.names() == ["staged"]
+    assert registry.get("staged").description == "d"
+    assert not (tmp_path / ".pending" / "staged").exists(), "one copy, not two"
+
+
+def test_approving_something_that_was_never_staged_says_so(tmp_path):
+    from ai_coding.core.skill_review import approve_skill
+
+    assert approve_skill(tmp_path, "nothing") is False
+
+
+def test_rejecting_a_pending_skill_removes_it(tmp_path):
+    from ai_coding.core.skill_review import reject_skill, stage_skill
+
+    stage_skill(tmp_path, "staged", "---\nname: staged\ndescription: d\n---\nbody\n")
+
+    assert reject_skill(tmp_path, "staged") is True
+    assert not (tmp_path / ".pending" / "staged").exists()
+
+
+def test_pending_skills_can_be_listed_with_their_reason(tmp_path):
+    from ai_coding.core.skill_review import list_pending, stage_skill
+
+    stage_skill(tmp_path, "one", "---\nname: one\ndescription: d\n---\nb\n", reason="因为重复出现三次")
+    stage_skill(tmp_path, "two", "---\nname: two\ndescription: d\n---\nb\n", reason="因为踩坑")
+
+    pending = {name: reason for name, reason in list_pending(tmp_path)}
+
+    assert set(pending) == {"one", "two"}
+    assert "踩坑" in pending["two"]
+
+
+def test_the_pending_directory_is_never_scanned_as_a_skill(tmp_path):
+    """It lives under `skills/`, so discovery walks over it. A staged skill
+    must not also appear in the catalog, or 'pending' means nothing."""
+    from ai_coding.core.skill_review import stage_skill
+    from ai_coding.skills.registry import SkillRegistry
+
+    stage_skill(tmp_path, "staged", "---\nname: staged\ndescription: d\n---\nb\n")
+
+    registry = SkillRegistry(tmp_path)
+    assert registry.names() == []
+    # and the walker must not mistake `.pending` for a skill directory either
+    assert all(not name.startswith(".") for name in registry.names())

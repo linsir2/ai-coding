@@ -66,6 +66,7 @@ GUI 复刻里程碑中已删除）。旧 Textual 实现的布局/组件细节见
 | `/todo` | — | 渲染当前会话的 `TaskState`（目标、进度、逐项状态、下一步） |
 | `/tasks` | `[stop <id>]` | 列出后台子智能体运行（id/名/状态/耗时/tokens）；`stop` 停掉运行中的任务 |
 | `/skills` | — | 列出 `SkillRegistry` 目录（`- name: description`） |
+| 待审批技能面板 | `a` 批准 / `d` 拒绝 | 审阅 `skill_review` 生成的、尚未进入 `skills/` 的 skill |
 | `ask_user`（工具） | — | TUI 里弹 `component/ask.tsx` 的 `◆ Question` 面板（M6.5）：模型给了 `options` 时在问题下方列出，↑/↓ 或 1-9 选择、enter 回答；无 `options` 时面板内置一行输入框可直接打字；esc 回答空串（模型收到 `no_answer` 后自行决定）。IPC 走 `user_prompt.ask` 双向请求（与 `approval.request` 同一范式） |
 | `/plan` | `<topic>` | TUI 接线（A1）：`/` 开头走 `session.command` → 后端 `handle_input` 分发，计划/步骤/报告全程经 `console.line` + `plan.updated` 事件渲染。**计划并执行**（M1）：裸 `/plan` 先弹 `What should I plan?` 收集主题；`/plan <topic>` 直接用话题、不再弹窗。两条路径都走 `plan_runner.plan_and_run`（M4-a：此前 TUI 与 REPL 各写一份，TUI 那份因为先被路由拦下而成为唯一可达实现，于是 REPL 那份漂移成「把 `the current task` 当话题、不重开计划」）；裸 `/plan` 在两个前端都会先问话题（TUI 弹窗、REPL `Prompt.ask`），prompt 只有 `PLAN_PROMPT` 一处定义。两条路径都重开一份计划（`SessionData.begin_plan(topic)`：新 goal + 空清单 + 清空 step 收据）。计划回合写 todo 清单后**立即逐步执行**——`/plan-run` 已删除（两命令接力会让清单过期：实测 0 回合跑在上一轮的清单上）；仍输入 `/plan-run` 会得到「did you mean '/plan'?」而不是被当作一句话发给模型（`ui/slash.py` 的 `_DEPRECATED` 墓碑表，近似命令规则看不到 4 个编辑距离的它）。每步一个**短对话**（全新 `ephemeral` session，seed = goal + 计划当前状态 + 本步验收，不继承父历史；步会话不落盘，不污染 `/resume`）——实测 4 回合 prompt 从 41k/82k/130k/254k（每回合重发全部历史）降为每步只带 seed（seed 本身随未完成项数增长）。有 `verify` 的项走 R0 验收门（失败修一次再败标 `blocked`）；无 `verify` 且模型未标完成的标 `stalled`。每步落收据，`/resume` 重放为步骤 header。整轮有顶（`ai.plan_max_step_turns`，默认 20，0=关闭；budget 停后剩余项保持 open）。**分步外完成有收据**（R1-5）：模型在计划回合顺手标 done 的步，runner 补 `attested=false` 收据、0 花费。**收据带证明分级**（R1-6）：`verified`/`on-claim`/`fiat`/`n/a`，report 点名无证明的 id（`verified` 要求每条验收判定都是 `passed is True`，读取端不信任 `ac` 非空）；**失败步同样留记录**（`✗ 受阻` 收据 + 气泡），`/resume` 能看到；回合内换清单（模型 `todo_write(clear)` 后重写）会清掉不属于新清单的旧收据 |
 | `/review` | — | 向模型发一条「审查当前 git diff」的快捷 prompt（TUI：命令入口见 `/plan` 行） |
@@ -92,7 +93,7 @@ GUI 复刻里程碑中已删除）。旧 Textual 实现的布局/组件细节见
 
 ## 内置工具
 
-主工具栈由 `tools/builder.py` 装配。默认 7 个工具随配置注册（bash/read/write/edit/glob 受 `tools.*.enabled` 控制），`todo_write`、`subAgent` 始终注册；提供 `--skills` 技能目录后再追加 `skill` 工具，共 8 个。
+主工具栈由 `tools/builder.py` 装配。默认 7 个工具随配置注册（bash/read/write/edit/glob 受 `tools.*.enabled` 控制），`todo_write`、`subAgent` 始终注册；只要工作区存在 `skills/` 就追加 `skill` 工具，共 8 个。
 记忆开启时组合根再追加 `memory_search`（读）与 **`memory_write`（写，R7e-1）**——后者是模型自己写一条耐久记忆的通道；
 **子智能体的工具栈里没有任何记忆工具**（它连写入口都不该有）。每个工具实现 `BaseTool` 契约（`name`/`description`/`params_json_schema`/`execute`），经 `sdk_adapter` 包装成 SDK FunctionTool。
 
@@ -102,7 +103,7 @@ GUI 复刻里程碑中已删除）。旧 Textual 实现的布局/组件细节见
 | `glob` | ALLOW | 通配符匹配文件，过滤符号链接逃逸项 |
 | `todo_write` | ALLOW | 计划模式待办维护（始终注册） |
 | `subAgent` | ALLOW | 委派子任务；工作区为 git 仓库且开启隔离时在临时 worktree 内运行 |
-| `skill` | ALLOW | 读取技能目录中某技能 `SKILL.md` 全文（需 `--skills`） |
+| `skill` | ALLOW | 读取技能目录中某技能的正文（`name=`；默认工作区 `skills/` 始终可用，`--skills` 只用于改位置） |
 | `write` | WARN | 写入文件；未先读覆盖目标会触发过期读保护 |
 | `edit` | WARN | 精确字符串替换；`old_string` 须唯一或显式 `replace_all`；同样受过期读保护 |
 | `bash` | WARN（危险命令 DENY） | 执行 shell 命令，Linux 专用，`timeout_seconds` 超时、输出截断 50 000 字符。超时默认 60s，单次调用可用 `timeout_seconds` 参数加宽到 600s（上限对齐回合墙钟）；超时结果会写明上限，模型自行加宽重试，不再需要 shell 的 `timeout(1)` 自残或 nohup+轮询 |
@@ -490,16 +491,18 @@ TencentDB Agent Memory 同值）同样只为重测而存在，故 `config.exampl
 
 ## 技能
 
-`SkillRegistry` 扫描技能目录，凡含 `SKILL.md` 的顶层目录即视为一项技能；`catalog_text()` 把每项技能的 frontmatter `description` 汇成 `- name: description` 目录，供 `skill` 工具与系统提示使用。空目录不产生任何目录。
+`SkillRegistry` 扫描技能目录，凡含 `SKILL.md` 的顶层目录即视为一项技能（M8 起 `.` 点目录除外，`.pending/` 就靠这条不可见）；一次解析产出一个 `Skill` 对象，`skills/catalog.py::build_catalog` 把它们汇成带 8000 字符预算的目录，供 `skill` 工具与系统提示使用。空目录不产生任何目录。
 
 **版本与状态回显（R11c）**：`SKILL.md` frontmatter 里的 `version` / `status` 会被读出来，模型在
 `skill list` / `skill read` 的结果里看得到——`version != "1"` 才显示 `(vN)`，`status` 不是
-`active` 再加 `[archived]`，`skill read` 额外给 `data={name, version, status}`。三处刻意的克制：
+`active` 再加 `[archived]`、解析失败加 `[broken]`，`skill read` 额外给 `data={name, version, status}`。三处刻意的克制：
 
 * `version` 是**字符串**，只做回显和「是不是默认值」判断，不做 semver 比较（否则 `1.10` 会排到 `1.9` 之下）；
 * `status` 是白名单 `active|archived`，未知值读作 `active`，不发明第三种状态；
-* **`catalog_text()` 一字未动**——它进系统提示词，必须逐字节静态，`/skills` 也复用它。所以版本信息
-  只出现在工具结果（进历史、缓存友好），不进 L1。
+* **版本信息不进 L1**——目录是系统提示词里最贵、最缓存敏感的槽位，所以 `(vN)` 只出现在工具结果
+  （进历史、缓存友好）。注意：这条在 M8 之前写的是「`catalog_text()` 一字未动 / 逐字节静态」，
+  而代码每轮重读所有文件，且 `skill_review` 每 10 轮就会新增 skill——那个不变量本来就没成立。
+  M8 改成 `(mtime, size)` 缓存 + 变更时显式声明，而不是继续声称一份假的稳定性。
 
 全部老 skill（无 frontmatter、v1、active）的输出与 R11c 之前**逐字节相同**。`archived` 仍然可读，
 只陈述状态、不推荐替代品（那需要知道替代品是谁）；真要拒读是策略，得走门禁层，registry 保持中立。

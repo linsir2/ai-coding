@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from ai_coding.core.sop_router import SkillStats
+from ai_coding.skills.catalog import build_catalog
 from ai_coding.skills.registry import SkillRegistry
 
 # ---------------------------------------------------------------------------
@@ -69,7 +70,7 @@ class TestCatalogTextWithTriggers:
             "  failure_patterns: [\"resolves outside workspace\"]\n"
         ))
         reg = SkillRegistry(tmp_path)
-        text = reg.catalog_text()
+        text = build_catalog(reg.all())
         assert "sandbox-fix" in text
         assert "Use bash heredoc" in text
         assert "Triggers:" in text
@@ -81,7 +82,7 @@ class TestCatalogTextWithTriggers:
             "description: A simple skill\n"
         ))
         reg = SkillRegistry(tmp_path)
-        text = reg.catalog_text()
+        text = build_catalog(reg.all())
         assert "no-triggers" in text
         assert "Triggers:" not in text
 
@@ -97,7 +98,7 @@ class TestCatalogTextWithTriggers:
             "description: No triggers\n"
         ))
         reg = SkillRegistry(tmp_path)
-        text = reg.catalog_text()
+        text = build_catalog(reg.all())
         lines = text.split("\n")
         # Find the with-triggers section
         with_triggers_idx = next(i for i, l in enumerate(lines) if "with-triggers" in l)
@@ -223,7 +224,7 @@ class TestFormatBlockWithTriggers:
         assert "When:" in block
         assert "Why:" in block
         assert "keyword, failure_pattern" in block
-        assert 'skill(id="sandbox-fix")' in block
+        assert 'skill(action="read", name="sandbox-fix")' in block
 
     def test_no_triggers_only_why(self):
         from ai_coding.core.sop_router import SkillMatch, SOPRouter

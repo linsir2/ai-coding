@@ -715,10 +715,20 @@ R11c 只加**可选字段与只读回显**，不改排序、不改门禁、不�
 
 | 契约 | 说明 |
 |---|---|
-| `SkillRegistry.meta(name)` | `{name, version, status, description}`；文件不存在时返回**默认值**（v1/active/`description=None`）——「没有版本」与「版本是 1」是两句话，只有前者对不存在的 skill 为真 |
-| `_parse_version` / `_parse_status` | 只取 frontmatter 首行；`version` 是**字符串**（无 semver 比较，`1.10` 不会排到 `1.9` 之下）；`status` 白名单 `active|archived`，未知值读作 `active`，不发明第三种状态 |
-| `skill list` / `skill read` | 共用同一个 `_suffix`：`version != "1"` 才显示 `(vN)`，`archived` 再加 `[archived]` → **全部老 skill 输出逐字节不变**。`read` 成功新增 `data={name, version, status}`（此前无 `data`）。archived 仍可读，只陈述状态、不推荐替代品（那是策略，registry 保持中立） |
-| `catalog_text()` | **不动**：它进系统提示词（L1 必须逐字节静态），且 `/skills` 复用它 |
+| `Skill` | M8 取代 `meta(name)`。一个文件 → 一次解析 → **一个冻结对象**，每个字段在每个实例上都存在。旧的 `meta()` 对不存在的文件返回 4 键、对存在的返回 6 键，于是读 `phase` 是一次等待正确输入的 `KeyError` |
+| `parse_skill(path)` | 唯一的解析器。frontmatter **锚定在文件首行**（正文里的 `---` 分隔线不再被当成头）；一次 `yaml.safe_load`；失败则**逐行给畸形标量加引号后重试**（`description: Build for AWS: ECS` 是真实写法，旧的正则 fallback 就是为它而存在）；再失败则返回带 `error` 的 Skill 而非消失——Codex #11385 的教训是 skill 静默消失后唯一证据是日志里一行没人读的 warning |
+| 身份 | **目录名**。OpenCode v1 用未校验的 frontmatter `name` 当身份，全局与项目 skill 同名就静默覆盖；v2 移到文件系统并把 `name` 降为展示。我们本来就是目录名，所以不动；**声明的 `name` 作为可接受别名**（`resolve()`），所以从别的 agent 拷来的 skill 两种拼法都能读，但系统里只有一个身份 |
+| 未知字段 | 存进 `Skill.extra`，**不丢也不报错**。Codex 与 OpenCode 都发布了自家 loader 不读的字段，于是作者以为指令生效了而实际没有 |
+| 标准字段 | `license`/`compatibility`/`allowed-tools`/`metadata` 读入并保存（Agent Skills 规范），本轮**不实现行为**——持有它们是为了将来能用 |
+| `status: archived` | **不进 catalog、不被路由**，但**按名仍可读**（输出带 `[archived]`）。这是 Claude Code `disable-model-invocation` 的语义：禁止主动推荐，不禁止访问。拒绝读取会让一个误归档的 skill 彻底无法调试，而那已是一项策略，不属于一个没有闸门的工具 |
+| 缓存 | 按 `(mtime, size)` 缓存。目录每个请求重建，但不再每轮重读每个文件 |
+| `build_catalog(skills, budget)` | 取代 `catalog_text()`，**预算 8000 字符**（与 `core/mcp.py` 同值，因为两者都在系统提示词里争同一个前缀）。**三段预算分配**：先给每个 skill 名字（可达性的地板），再给描述，最后才是 triggers/phase 提示。逐个 skill 分配会让一个长描述把其余全部挤出目录——这正是 `build_mcp_catalog`「每个 server 先给一个 tool」的原因。压力下退化的是提示 → 描述 → 名字，**永不淘汰**（见下） |
+| 为什么不用 Claude 的「按最少调用淘汰」 | 那是富者愈富策略，有冷启动死锁：从未被调用的 skill 使用历史为零 → 排第一 → 描述被删 → 模型匹配不到 → 永远不被调用。新 skill 结构性地挣不回预算。我们不需要淘汰任何人，因为名字这一级永远保留 |
+| 目录变更声明 | `skill_review` 默认每 10 轮新增 skill，所以目录**必然**中途变化（三处文档曾声称不会）。`superseded_note(previous, current)` 把变化写出来；提示词只增不减，所以**移除必须写成否定句**（OpenCode v2 同理）。记在 `session.listed_skill_ids`，不落盘 |
+| `skill list` / `skill read` | 共用同一个 `_suffix`：`version != "1"` 才显示 `(vN)`，`archived` 加 `[archived]`，解析失败加 `[broken]`。`read` 返回**正文**（不是整个文件），避免模型上下文里 frontmatter 出现第二次；`data={name, version, status}` |
+| `SkillTool(registry)` | 接 registry 不接路径。旧版自己遍历目录、自己再解析一遍，于是可能与 catalog 不一致；更糟的是两个构建器拿到了**不同的 root**：`cli.py` 总是用 `<workspace>/skills`，而 `tools/builder.py` 只在传了 `--skills` 时注册工具——于是 `ai-coding -w .` 会向模型宣告一批它没有工具可加载的 skill |
+| 推荐块的加载指令 | `skill(action="read", name="…")`。旧文本写 `skill(id="…")`，而 schema 是 `{action, name}`——那段提示每次推荐都注入一次，教模型发一个必然非法的调用 |
+| `.pending/` 审批 | `skill_review` 生成的 skill 写入 `skills/.pending/<name>/SKILL.md`，**不进 live 树**；`.pending` 是点目录，遍历跳过它，所以未审批的 skill 不可读、不可路由、不可被宣告。TUI `a` 批准 / `d` 拒绝；非 TUI 入口本轮不提供 |
 
 ### 融合规则（R11d）
 

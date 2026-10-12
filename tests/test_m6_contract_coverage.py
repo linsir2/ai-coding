@@ -100,9 +100,10 @@ def test_decision_equality_and_hash_repr():
 # ---------------------------------------------------------------- skill tool
 
 def test_skill_tool_metadata_and_missing_dir(tmp_path):
+    from ai_coding.skills.registry import SkillRegistry
     from ai_coding.tools.skill_tool import SkillTool
 
-    tool = SkillTool(tmp_path / "nope")
+    tool = SkillTool(SkillRegistry(tmp_path / "nope"))
     assert tool.name == "skill"
     assert tool.description
     assert tool.params_json_schema
@@ -110,19 +111,21 @@ def test_skill_tool_metadata_and_missing_dir(tmp_path):
 
 
 async def test_skill_tool_action_list_no_skills(tmp_path):
+    from ai_coding.skills.registry import SkillRegistry
     from ai_coding.tools.skill_tool import SkillTool
 
-    tool = SkillTool(tmp_path / "empty")
+    tool = SkillTool(SkillRegistry(tmp_path / "empty"))
     r = await tool.execute({"action": "list"})
     assert r.success is True
     assert "(no skills available)" in r.output
 
 
 async def test_skill_tool_read_requires_name_and_sanitizes(tmp_path):
+    from ai_coding.skills.registry import SkillRegistry
     from ai_coding.tools.skill_tool import SkillTool
 
     (tmp_path / "empty").mkdir()
-    tool = SkillTool(tmp_path / "empty")
+    tool = SkillTool(SkillRegistry(tmp_path / "empty"))
 
     r1 = await tool.execute({"action": "read"})
     assert r1.success is False and "name" in r1.output.lower()
@@ -132,13 +135,14 @@ async def test_skill_tool_read_requires_name_and_sanitizes(tmp_path):
 
 
 async def test_skill_tool_read_content(tmp_path):
+    from ai_coding.skills.registry import SkillRegistry
     from ai_coding.tools.skill_tool import SkillTool
 
     skill = tmp_path / "python"
     skill.mkdir()
     (skill / "SKILL.md").write_text("write clean code", encoding="utf-8")
 
-    tool = SkillTool(tmp_path)
+    tool = SkillTool(SkillRegistry(tmp_path))
     r = await tool.execute({"action": "read", "name": "python"})
     assert r.success is True
     assert "write clean code" in r.output

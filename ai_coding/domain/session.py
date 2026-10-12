@@ -153,6 +153,12 @@ class SessionData:
     # whose TurnCloser would otherwise write one "plan step N" file per step
     # and flood the /resume picker.
     ephemeral: bool = False
+    # The skill ids last listed in the system prompt. `skill_review` writes new
+    # skills every few turns, so the catalog does change mid-session — three
+    # places in our docs claim it cannot. Rather than repeat a claim the code
+    # does not keep, the change is declared: a prompt only grows, so a removal
+    # has to be written as an explicit negation. In-process only.
+    listed_skill_ids: tuple[str, ...] = ()
     # M1: in-process only — skill review tracks which turns and messages have
     #: been reviewed.  Not persisted (to_dict is a whitelist); restarting
     #: re-reviews from 0, which is idempotent (won't create duplicate skills).

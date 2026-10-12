@@ -116,6 +116,7 @@ from ai_coding.infra.time_utils import now_utc
 from ai_coding.security.approval import ApprovalCallback
 from ai_coding.security.permission_gate import PermissionGate
 from ai_coding.service.session_service import SessionService
+from ai_coding.skills.catalog import build_catalog, superseded_note
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.schema import tool_schema, tool_schemas
 
@@ -1215,15 +1216,29 @@ class AgentLoop:
         """Seconds left in the turn, or ``None`` when there is no ceiling."""
         return remaining_of(deadline)
 
-    async def _build_instructions(self, deadline: Deadline | None = None) -> str | None:
+    async def _build_instructions(
+        self, deadline: Deadline | None = None, session: Any = None
+    ) -> str | None:
         """Assemble the **static** system prompt (memory is never part of it)."""
         if self.prompt is None:
             return None
         project_text = self.project.load() if self.project is not None else ""
-        skills_catalog = self.skills.catalog_text() if self.skills is not None else ""
+        catalog = ""
+        if self.skills is not None:
+            current = self.skills.all()
+            catalog = build_catalog(current)
+            # The catalog is *not* byte-stable within a session: `skill_review`
+            # writes new skills every few turns. So say so when it changes —
+            # otherwise the model reads a list that silently grew. A prompt only
+            # grows, so a removal is stated as a negation.
+            if session is not None:
+                change = superseded_note(tuple(session.listed_skill_ids), current)
+                if change:
+                    catalog = f"{catalog}\n{change}" if catalog else change
+                session.listed_skill_ids = tuple(skill.id for skill in current)
         return self.prompt.build(
             project_instructions=project_text,
-            skills_catalog=skills_catalog,
+            skills_catalog=catalog,
         )
 
     # ---- memory -----------------------------------------------------------

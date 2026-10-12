@@ -66,6 +66,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     from ai_coding.security.approval import CLIApprovalCallback
     from ai_coding.security.user_prompt import CLIUserPromptCallback
     from ai_coding.service.session_service import SessionService
+    from ai_coding.skills.registry import SkillRegistry
     from ai_coding.tools.mcp_call import MCPCallTool
 
     manager = ConfigManager()
@@ -80,8 +81,14 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     # handlers._install_providers the model's questions reach the panel; the
     # stdin fallback serves the non-TUI entry points.
     user_prompt = CLIUserPromptCallback()
+    # One root, resolved once, and the *same* registry object handed to both the
+    # catalog (which the system prompt reads) and the tool (which loads one).
+    # They used to be given different things: the loop always got
+    # `<workspace>/skills` while the tool was registered only when `--skills` was
+    # passed, so `ai-coding -w .` advertised skills with no way to load them.
+    skill_registry = SkillRegistry(skills or str(Path(workspace).expanduser() / "skills"))
     registry = _build_tool_registry(
-        app_cfg, workspace, skills,
+        app_cfg, workspace, skill_registry,
         user_prompt=user_prompt, base_instructions=BASE_INSTRUCTIONS,
     )
 
@@ -116,7 +123,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     approval = CLIApprovalCallback()
     cancel = asyncio.Event()
     loop = _build_loop(
-        engine, sessions, registry, app_cfg, workspace, skills,
+        engine, sessions, registry, app_cfg, workspace, skill_registry,
         catalog_builder=lambda: build_mcp_catalog(mcp_manager.available()),
         approval=approval,
         observer=None,

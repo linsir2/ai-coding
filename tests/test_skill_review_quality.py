@@ -297,8 +297,10 @@ async def test_review_captures_pattern(pattern_name, tmp_path, monkeypatch):
     if result.created:
         print(f"  Skill: {result.skill_name}")
         print(f"  Path: {result.skill_path}")
-        # Validate skill content quality
-        content = (tmp_path / result.skill_name / "SKILL.md").read_text()
+        # Validate skill content quality. Staged, not installed: a generated
+        # instruction waits for a human before it lands in the source tree.
+        assert result.pending, "the review must not write into the live tree"
+        content = (tmp_path / ".pending" / result.skill_name / "SKILL.md").read_text()
         quality_checks = {
             "has_frontmatter": "---" in content[:50],
             "has_name_field": "name:" in content[:100],

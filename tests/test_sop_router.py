@@ -1,6 +1,6 @@
 """TDD (M2): SOP routing — match context against skill triggers.
 
-Covers: SkillRegistry.triggers(), SOPRouter scoring/threshold/format,
+Covers: skill frontmatter parsing, SOPRouter scoring/threshold/format,
 RequestAssembler integration, and AgentLoop wiring.
 """
 
@@ -27,12 +27,12 @@ def _write_skill(tmp_path: Path, name: str, frontmatter: str, body: str = "# Ski
 
 
 # ---------------------------------------------------------------------------
-# SkillRegistry.triggers()
+# skill frontmatter -> triggers
 # ---------------------------------------------------------------------------
 
 
 class TestSkillRegistryTriggers:
-    """SkillRegistry.triggers() — parse triggers from frontmatter."""
+    """triggers from frontmatter."""
 
     def test_parses_full_triggers(self, tmp_path):
         _write_skill(tmp_path, "test-skill", (
@@ -45,28 +45,28 @@ class TestSkillRegistryTriggers:
             "  failure_patterns: [\"resolves outside\"]\n"
         ))
         reg = SkillRegistry(tmp_path)
-        triggers = reg.triggers("test-skill")
+        triggers = reg.get("test-skill").triggers
         assert triggers is not None
-        assert triggers["keywords"] == ["沙箱", "workspace"]
-        assert triggers["tools"] == ["write", "edit"]
-        assert triggers["task_types"] == ["file_creation"]
-        assert triggers["failure_patterns"] == ["resolves outside"]
+        assert triggers.keywords == ("沙箱", "workspace")
+        assert triggers.tools == ("write", "edit")
+        assert triggers.task_types == ("file_creation",)
+        assert triggers.failure_patterns == ("resolves outside",)
 
     def test_returns_none_when_no_triggers(self, tmp_path):
         _write_skill(tmp_path, "no-triggers", "name: no-triggers\ndescription: test\n")
         reg = SkillRegistry(tmp_path)
-        assert reg.triggers("no-triggers") is None
+        assert not reg.get("no-triggers").triggers
 
     def test_returns_none_when_no_frontmatter(self, tmp_path):
         skill_dir = tmp_path / "no-fm"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("# Just a title\n")
         reg = SkillRegistry(tmp_path)
-        assert reg.triggers("no-fm") is None
+        assert not reg.get("no-fm").triggers
 
     def test_returns_none_when_file_missing(self, tmp_path):
         reg = SkillRegistry(tmp_path)
-        assert reg.triggers("nonexistent") is None
+        assert reg.get("nonexistent") is None
 
     def test_handles_string_values(self, tmp_path):
         """YAML allows `keywords: "single"` instead of arrays."""
@@ -77,10 +77,9 @@ class TestSkillRegistryTriggers:
             "  tools: \"write\"\n"
         ))
         reg = SkillRegistry(tmp_path)
-        triggers = reg.triggers("string-triggers")
-        assert triggers is not None
-        assert triggers["keywords"] == ["沙箱"]
-        assert triggers["tools"] == ["write"]
+        triggers = reg.get("string-triggers").triggers
+        assert triggers.keywords == ("沙箱",)
+        assert triggers.tools == ("write",)
 
     def test_handles_empty_triggers(self, tmp_path):
         _write_skill(tmp_path, "empty-triggers", (
@@ -88,22 +87,22 @@ class TestSkillRegistryTriggers:
             "triggers:\n"
         ))
         reg = SkillRegistry(tmp_path)
-        triggers = reg.triggers("empty-triggers")
-        # triggers is present but empty dict
-        assert triggers is not None
-        assert triggers["keywords"] == []
-        assert triggers["tools"] == []
+        triggers = reg.get("empty-triggers").triggers
+        # present but empty, which is different from absent
+        assert not triggers
 
     def test_handles_malformed_yaml(self, tmp_path):
+        """The old answer was an empty dict indistinguishable from "no triggers
+        declared". Now the skill says it could not be parsed, which is the fact."""
         skill_dir = tmp_path / "bad-yaml"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
             "---\nname: bad\ntriggers: [invalid yaml: :\n---\n\n# Body\n"
         )
         reg = SkillRegistry(tmp_path)
-        # Should not raise, returns empty dict (regex fallback found nothing)
-        result = reg.triggers("bad-yaml")
-        assert result == {}
+        result = reg.get("bad-yaml")
+        assert result.error is not None
+        assert not result.triggers
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +262,11 @@ class TestSOPRouterFormatBlock:
         assert "<recommended-skills>" in block
         assert "sandbox-fix" in block
         assert "Fix sandbox issues" in block
-        assert 'skill(id="sandbox-fix")' in block
+        # The call must name a parameter the tool actually has. It used to say
+        # `id=`, which is not in {action, name}, so the block instructed the model
+        # to make a call it could not make.
+        assert 'skill(action="read", name="sandbox-fix")' in block
+        assert "id=" not in block
         assert "keyword, failure_pattern" in block
         assert "</recommended-skills>" in block
 

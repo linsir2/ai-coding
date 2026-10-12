@@ -13,13 +13,14 @@ from typing import Any
 
 from ai_coding.config.models import AIConfig
 from ai_coding.core.worktree import WorktreeManager
+from ai_coding.skills.registry import SkillRegistry
 from ai_coding.tools.subagent_tool import SubAgentTool
 
 
 def build_subagent_runner(
     app_cfg: Any,
     workspace: str,
-    skills_path: str | None,
+    skills: SkillRegistry | None,
     *,
     base_instructions: str = "",
 ) -> Any:
@@ -38,7 +39,7 @@ def build_subagent_runner(
 
     def build_tools(workdir: str | None) -> Any:
         return build_tool_registry(
-            app_cfg, workdir or main_ws, skills_path, include_subagent=False
+            app_cfg, workdir or main_ws, skills, include_subagent=False
         )
 
     ai_cfg = getattr(app_cfg, "ai", None)
@@ -46,6 +47,7 @@ def build_subagent_runner(
         app_cfg,
         engine_factory=lambda: build_engine_from_config(app_cfg),
         build_tools=build_tools,
+        skills=skills,
         ledger_root=main_ws,
         max_concurrent=int(getattr(ai_cfg, "max_concurrent_subagents", 3)),
         timeout_seconds=float(getattr(ai_cfg, "subagent_timeout_seconds", 600)),
@@ -62,7 +64,7 @@ def build_subagent_runner(
 def build_tool_registry(
     app_cfg: Any,
     workspace: str,
-    skills_path: str | None = None,
+    skills: SkillRegistry | None = None,
     *,
     include_subagent: bool = True,
     user_prompt: Any | None = None,
@@ -78,7 +80,7 @@ def build_tool_registry(
     means there is nobody to ask, so the tool list must not pretend otherwise.
     """
     registry, _gate = _assemble_registry(
-        app_cfg, workspace, skills_path, include_subagent, user_prompt, base_instructions
+        app_cfg, workspace, skills, include_subagent, user_prompt, base_instructions
     )
     return registry
 
@@ -86,7 +88,7 @@ def build_tool_registry(
 def _assemble_registry(
     app_cfg: Any,
     workspace: str,
-    skills_path: str | None,
+    skills: SkillRegistry | None,
     include_subagent: bool,
     user_prompt: Any | None = None,
     base_instructions: str = "",
@@ -134,8 +136,8 @@ def _assemble_registry(
         )
     )
 
-    if skills_path and Path(skills_path).is_dir():
-        registry.register(SkillTool(skills_path))
+    if skills is not None:
+        registry.register(SkillTool(skills))
 
     # R6c: only where a human can answer — and never inside a sub-agent.  The tools
     # config is duck-typed (tests pass namespaces), so a missing block means "not
@@ -158,7 +160,7 @@ def _assemble_registry(
     if include_subagent:
         # Real sub-agent delegation, isolated in a git worktree when enabled.
         runner = build_subagent_runner(
-            app_cfg, workspace, skills_path, base_instructions=base_instructions
+            app_cfg, workspace, skills, base_instructions=base_instructions
         )
         manager = WorktreeManager(workspace)
         isolate = bool(getattr(app_cfg.ai, "subagent_worktree_isolation", True))

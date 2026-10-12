@@ -12,7 +12,7 @@ from ai_coding.skills.registry import SkillRegistry
 
 
 class TestPatternDnaFrontmatter:
-    """SkillRegistry.meta() should parse pattern_dna field."""
+    """pattern_dna is read from the parsed skill."""
 
     def test_parses_pattern_dna(self, tmp_path):
         skill_dir = tmp_path / "sandbox-fix"
@@ -25,8 +25,8 @@ class TestPatternDnaFrontmatter:
             "---\n\n# Skill\n"
         )
         reg = SkillRegistry(tmp_path)
-        meta = reg.meta("sandbox-fix")
-        assert "bash heredoc" in meta["pattern_dna"]
+        meta = reg.get("sandbox-fix")
+        assert "bash heredoc" in meta.pattern_dna
 
     def test_no_pattern_dna(self, tmp_path):
         skill_dir = tmp_path / "simple"
@@ -35,8 +35,8 @@ class TestPatternDnaFrontmatter:
             "---\nname: simple\ndescription: test\n---\n\n# Skill\n"
         )
         reg = SkillRegistry(tmp_path)
-        meta = reg.meta("simple")
-        assert meta["pattern_dna"] == ""
+        meta = reg.get("simple")
+        assert meta.pattern_dna == ""
 
 
 # ---------------------------------------------------------------------------

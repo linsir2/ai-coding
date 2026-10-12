@@ -89,7 +89,7 @@ def _assembler(
         "reporter": reporter,
         "events": [],
     }
-    async def _instructions(deadline: Any) -> str | None:
+    async def _instructions(deadline: Any, session: Any = None) -> str | None:
         return instructions
 
     def _catalog() -> str:

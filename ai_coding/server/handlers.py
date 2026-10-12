@@ -435,23 +435,23 @@ def make_handlers(
     def skills_list(params: dict[str, Any]) -> dict[str, Any]:
         """Structured rows for the skills dialog (M3).
 
-        The model's catalogue stays on ``registry.catalog_text()`` (system
-        prompt); this is only what the human list needs.
+        The model's catalogue is ``skills.catalog.build_catalog`` in the system
+        prompt; this is only what the human list needs. Both read the same
+        parsed objects, so the two can no longer disagree about a skill.
         """
         registry = getattr(world.loop, "skills", None)
         if registry is None:
             return {"skills": []}
-        rows = []
-        for name in registry.names():
-            meta = registry.meta(name)
-            rows.append(
+        return {
+            "skills": [
                 {
-                    "name": name,
-                    "description": meta.get("description"),
-                    "phase": meta.get("phase") or "",
+                    "name": skill.id,
+                    "description": skill.description or None,
+                    "phase": skill.phase or "",
                 }
-            )
-        return {"skills": rows}
+                for skill in registry.all()
+            ]
+        }
 
     def _memory_facade() -> Any:
         """The loop's memory facade, or ``None`` where there is no memory.
@@ -506,6 +506,47 @@ def make_handlers(
         if facade is None or not note_id:
             return {"ok": False, "reason": "no such memory"}
         return {"ok": facade.delete(note_id)}
+
+    def _skills_root() -> Any:
+        """The loop's skills registry root, or ``None`` when there is no registry."""
+        registry = getattr(getattr(world, "loop", None), "skills", None)
+        return getattr(registry, "root", None)
+
+    def skill_pending_list(params: dict[str, Any]) -> dict[str, Any]:
+        """Skills the review generated and nobody has approved yet (M8).
+
+        `skill_review` runs on a timer, by default on, and used to write straight
+        into `skills/`. A generated instruction is something the model will then
+        follow, so it waits in `.pending/` until a human says so.
+        """
+        from ai_coding.core.skill_review import list_pending
+
+        root = _skills_root()
+        if root is None:
+            return {"pending": []}
+        return {
+            "pending": [
+                {"name": name, "reason": reason} for name, reason in list_pending(root)
+            ]
+        }
+
+    def skill_pending_approve(params: dict[str, Any]) -> dict[str, Any]:
+        from ai_coding.core.skill_review import approve_skill
+
+        root = _skills_root()
+        name = str(params.get("name") or "").strip()
+        if root is None or not name:
+            return {"ok": False, "reason": "no such pending skill"}
+        return {"ok": approve_skill(root, name), "name": name}
+
+    def skill_pending_reject(params: dict[str, Any]) -> dict[str, Any]:
+        from ai_coding.core.skill_review import reject_skill
+
+        root = _skills_root()
+        name = str(params.get("name") or "").strip()
+        if root is None or not name:
+            return {"ok": False, "reason": "no such pending skill"}
+        return {"ok": reject_skill(root, name), "name": name}
 
     def config_summary(params: dict[str, Any]) -> dict[str, Any]:
         ai_cfg = getattr(world.config, "ai", None)
@@ -711,6 +752,9 @@ def make_handlers(
         "memory.list": memory_list,
         "memory.pin": memory_pin,
         "memory.delete": memory_delete,
+        "skill.pending.list": skill_pending_list,
+        "skill.pending.approve": skill_pending_approve,
+        "skill.pending.reject": skill_pending_reject,
         "config.summary": config_summary,
         "session.stats": session_stats,
         "mcp.list": mcp_list,

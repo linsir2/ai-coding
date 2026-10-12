@@ -40,17 +40,20 @@ class _FakeEngine:
 
 
 class _FakeRegistry:
-    """Minimal SkillRegistry stand-in: ``names()`` + ``meta(name)``."""
+    """Minimal SkillRegistry stand-in: the parsed skills, not a metadata dict.
 
-    def __init__(self, names: list[str], meta: dict[str, dict]) -> None:
-        self._names = names
-        self._meta = meta
+    The handler reads ``all()`` and takes the fields off the object, because
+    that is the one parse every consumer now shares.
+    """
+
+    def __init__(self, skills: list) -> None:
+        self._skills = skills
+
+    def all(self) -> tuple:
+        return tuple(self._skills)
 
     def names(self) -> list[str]:
-        return list(self._names)
-
-    def meta(self, name: str) -> dict:
-        return self._meta[name]
+        return [skill.id for skill in self._skills]
 
 
 class _FakeLoop:
@@ -235,12 +238,13 @@ async def test_initialize_returns_hello(ipc):
 @pytest.mark.asyncio
 async def test_skills_list_is_structured(ipc):
     world, _service, client = ipc
+    from ai_coding.skills.registry import Skill
+
     world.loop.skills = _FakeRegistry(
-        names=["alpha", "beta"],
-        meta={
-            "alpha": {"name": "alpha", "description": "does alpha", "phase": "planning"},
-            "beta": {"name": "beta", "description": None, "phase": ""},
-        },
+        [
+            Skill(id="alpha", body="", path=Path("."), description="does alpha", phase="planning"),
+            Skill(id="beta", body="", path=Path(".")),
+        ]
     )
     result = client.request("skills.list")
     assert result == {
@@ -1100,3 +1104,49 @@ async def test_memory_handlers_are_hands_off_without_a_store(ipc):
     assert client.request("memory.list")["notes"] == []
     assert client.request("memory.pin", {"id": "x", "pinned": True})["ok"] is False
     assert client.request("memory.delete", {"id": "x"})["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_pending_skill_approval_round_trip(ipc, tmp_path):
+    """The review stages into `.pending/`; the human moves it in or drops it."""
+    from ai_coding.core.skill_review import stage_skill
+    from ai_coding.skills.registry import SkillRegistry
+
+    world, _service, client = ipc
+    registry = SkillRegistry(tmp_path)
+    world.loop.skills = registry
+    stage_skill(tmp_path, "debug-pytest", "---\nname: debug-pytest\ndescription: d\n---\nb\n",
+                reason="踩坑三次")
+
+    listed = client.request("skill.pending.list")
+    assert listed == {"pending": [{"name": "debug-pytest", "reason": "踩坑三次"}]}
+    assert registry.names() == [], "staged means not loadable"
+
+    assert client.request("skill.pending.approve", {"name": "debug-pytest"}) == {
+        "ok": True,
+        "name": "debug-pytest",
+    }
+    assert registry.names() == ["debug-pytest"]
+
+
+@pytest.mark.asyncio
+async def test_pending_skill_rejection(ipc, tmp_path):
+    from ai_coding.core.skill_review import stage_skill
+    from ai_coding.skills.registry import SkillRegistry
+
+    world, _service, client = ipc
+    world.loop.skills = SkillRegistry(tmp_path)
+    stage_skill(tmp_path, "junk", "---\nname: junk\ndescription: d\n---\nb\n")
+
+    assert client.request("skill.pending.reject", {"name": "junk"})["ok"] is True
+    assert client.request("skill.pending.list") == {"pending": []}
+
+
+@pytest.mark.asyncio
+async def test_approving_an_unknown_pending_skill_is_not_ok(ipc, tmp_path):
+    from ai_coding.skills.registry import SkillRegistry
+
+    world, _service, client = ipc
+    world.loop.skills = SkillRegistry(tmp_path)
+
+    assert client.request("skill.pending.approve", {"name": "nothing"})["ok"] is False

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
+from ai_coding.skills.catalog import build_catalog
 from ai_coding.skills.registry import SkillRegistry
 
 # ---------------------------------------------------------------------------
@@ -27,9 +28,7 @@ class TestPhaseFrontmatter:
             "phase: debugging\n"
             "---\n\n# Debug Skill\n"
         )
-        reg = SkillRegistry(tmp_path)
-        meta = reg.meta("debug-skill")
-        assert meta["phase"] == "debugging"
+        assert SkillRegistry(tmp_path).get("debug-skill").phase == "debugging"
 
     def test_no_phase_field(self, tmp_path):
         skill_dir = tmp_path / "no-phase"
@@ -38,8 +37,7 @@ class TestPhaseFrontmatter:
             "---\nname: no-phase\ndescription: test\n---\n\n# Skill\n"
         )
         reg = SkillRegistry(tmp_path)
-        meta = reg.meta("no-phase")
-        assert meta["phase"] == ""
+        assert reg.get("no-phase").phase == ""
 
     def test_catalog_includes_phase_hint(self, tmp_path):
         skill_dir = tmp_path / "debug-skill"
@@ -51,8 +49,7 @@ class TestPhaseFrontmatter:
             "phase: debugging\n"
             "---\n\n# Debug Skill\n"
         )
-        reg = SkillRegistry(tmp_path)
-        text = reg.catalog_text()
+        text = build_catalog(SkillRegistry(tmp_path).all())
         assert "debug-skill" in text
         assert "[phase: debugging]" in text
 

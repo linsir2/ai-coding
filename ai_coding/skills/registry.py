@@ -1,121 +1,327 @@
-"""Skill directory registry (M3).
+"""Skill registry — one file, one parse, one object.
 
-Design (m3-analysis §4.7): scans a skills root for top-level directories that
-contain a ``SKILL.md``, exposes their names and a catalog for the system prompt,
-and can load a single skill's ``SKILL.md`` full text (parsing the frontmatter
-``description`` for the catalog).  Independent from the M2 ``SkillTool``; an empty
-directory yields no catalog (mirrors "empty dir does not register skill tool").
+A skill is a directory holding a ``SKILL.md`` whose frontmatter follows the
+[Agent Skills] open standard (Anthropic published it 2025-12-16; Codex and
+OpenCode both implement it). This module keeps that standard's ``name`` and
+``description`` meaningful while carrying the fields this project added
+(``version``/``status``/``phase``/``pattern_dna``/``triggers``).
+
+There used to be three parsers for the same file: five regexes for scalars, a
+YAML pass for ``triggers`` with a regex fallback, and ``SkillTool`` re-reading
+every file through two of those regexes. Three sources that can disagree, with
+no way to tell which is right. :class:`Skill` is now the single answer, and
+every consumer — catalog, tool, router, IPC — reads that one object.
+
+[Agent Skills]: https://agentskills.io
+
+Two lessons are baked in rather than rediscovered:
+
+* **Identity is the directory name.**  OpenCode v1 keyed on the frontmatter
+  ``name``, so a global and a project skill sharing a name collided silently;
+  v2 moved identity to the filesystem.  Ours was already the directory name, so
+  it stays — and a *different* declared ``name`` becomes an accepted alias, so a
+  skill copied from another agent still loads under either spelling.
+* **Unknown fields are kept, not dropped.**  Both Codex and OpenCode ship
+  frontmatter their own loader never reads, so the author believes an
+  instruction took effect when it did not.  Unrecognised keys land in
+  :attr:`Skill.extra` where they can be seen.
 """
 
 from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 _SKILL_FILE = "SKILL.md"
-_FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
-_DESC = re.compile(r"(?im)^description\s*:\s*(.+)$")
-_VERSION = re.compile(r"(?im)^version\s*:\s*(.+)$")
-_STATUS = re.compile(r"(?im)^status\s*:\s*(.+)$")
-_PHASE = re.compile(r"(?im)^phase\s*:\s*(.+)$")
-_PATTERN_DNA = re.compile(r"(?im)^pattern_dna\s*:\s*(.+)$")
-_YAML_SCALAR_STRIP = '"\''
+_FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)", re.DOTALL)
+
 #: The only two states a skill may declare.  Anything else reads as `active`
 #: rather than inventing a third state nobody handles downstream.
 SKILL_STATUSES = ("active", "archived")
 DEFAULT_VERSION = "1"
 
+#: Frontmatter keys this module reads.  Everything else goes to
+#: :attr:`Skill.extra` — see the module docstring on why.
+_KNOWN_KEYS = frozenset(
+    {
+        "name",
+        "description",
+        "license",
+        "compatibility",
+        "allowed-tools",
+        "metadata",
+        "version",
+        "status",
+        "phase",
+        "pattern_dna",
+        "triggers",
+    }
+)
+
+#: A ``key: value`` line whose value YAML would choke on because it contains an
+#: unquoted colon — `description: Build for AWS: ECS`.  Quoted on repair.
+_COLON_VALUE = re.compile(r"^(\s*)([A-Za-z0-9_.-]+)\s*:\s*(.+?)\s*$")
+
+
+@dataclass(frozen=True)
+class SkillTriggers:
+    """The four dimensions :mod:`ai_coding.core.sop_router` scores on."""
+
+    keywords: tuple[str, ...] = ()
+    tools: tuple[str, ...] = ()
+    task_types: tuple[str, ...] = ()
+    failure_patterns: tuple[str, ...] = ()
+
+    def __bool__(self) -> bool:
+        return any((self.keywords, self.tools, self.task_types, self.failure_patterns))
+
+
+@dataclass(frozen=True)
+class Skill:
+    """One parsed ``SKILL.md``.  Every field exists on every instance.
+
+    That uniformity is the point: the old ``meta()`` returned four keys for a
+    missing file and six for a present one, so reading ``phase`` off the answer
+    was a ``KeyError`` waiting for the right input.
+    """
+
+    #: Identity — the directory name.  What the catalog prints and the tool
+    #: takes, so the model is never told to call a name that does not resolve.
+    id: str
+    #: The body after the frontmatter, i.e. what the model actually reads.
+    body: str
+    #: Where it came from.
+    path: Path
+    description: str = ""
+    #: A ``name:`` in the frontmatter that differs from the directory name.
+    #: Accepted as a second spelling for loading; never a second identity.
+    alias: str | None = None
+    # Agent Skills standard, read and stored. Nothing acts on these yet; holding
+    # them is what lets a skill round-trip between agents.
+    license: str | None = None
+    compatibility: str | None = None
+    allowed_tools: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    # This project's own fields.
+    version: str = DEFAULT_VERSION
+    status: str = "active"
+    phase: str = ""
+    pattern_dna: str = ""
+    triggers: SkillTriggers = field(default_factory=SkillTriggers)
+    # Keys this version does not know, kept whole.
+    extra: Mapping[str, Any] = field(default_factory=dict)
+    #: Set when the frontmatter could not be parsed even after repair. The skill
+    #: is still discovered — vanishing without trace was Codex issue #11385.
+    error: str | None = None
+
+    @property
+    def name(self) -> str:
+        """The one name the model uses. Alias included for tools."""
+        return self.id
+
+    @property
+    def is_archived(self) -> bool:
+        return self.status == "archived"
+
+    @property
+    def is_healthy(self) -> bool:
+        return self.error is None
+
+    def matches(self, wanted: str) -> bool:
+        """Whether ``wanted`` addresses this skill — by id or by declared name."""
+        return wanted == self.id or (self.alias is not None and wanted == self.alias)
+
+
+def _split_frontmatter(text: str) -> tuple[str, str]:
+    """``(header, body)``. ``("", text)`` when there is no frontmatter block.
+
+    Anchored at the start: a ``---`` further down the file is body text, not a
+    header, and treating it as one silently emptied every field.
+    """
+    match = _FRONTMATTER.search(text)
+    if not match:
+        return "", text
+    return match.group(1), text[match.end() :]
+
+
+def _repair_header(header: str) -> str:
+    """Quote ``key: value`` lines whose value carries an unquoted second colon.
+
+    `description: Build for AWS: ECS` is how a skill author writes "build for
+    AWS ECS" and is a YAML scanner error. The registry used to survive this with
+    a regex fallback; keeping one parser means repairing the value and re-reading
+    it with the *same* parser, rather than parsing the file two ways.
+    """
+    lines: list[str] = []
+    for line in header.splitlines():
+        match = _COLON_VALUE.match(line)
+        if match:
+            prefix, key, value = match.groups()
+            if ":" in value and not value.startswith(("'", '"', "[", "{")):
+                line = f'{prefix}{key}: "{value}"'
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _parse_header(header: str) -> tuple[Mapping[str, Any] | None, str | None]:
+    """``(data, error)``. Repairs once, then reports rather than swallowing."""
+    if not header.strip():
+        return {}, None
+    try:
+        data = yaml.safe_load(header)
+    except yaml.YAMLError:
+        try:
+            data = yaml.safe_load(_repair_header(header))
+        except yaml.YAMLError as exc:
+            return None, str(exc).splitlines()[0]
+    if data is None:
+        return {}, None
+    if not isinstance(data, dict):
+        return None, f"frontmatter is {type(data).__name__}, not a mapping"
+    return data, None
+
+
+def _as_str(value: object) -> str:
+    """A frontmatter scalar as text, without YAML's quoting already stripped."""
+    if value is None or isinstance(value, (dict, list)):
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value).strip()
+
+
+def _as_tuple(value: object) -> tuple[str, ...]:
+    """YAML allows ``x: single`` and ``x: [a, b]``; both mean the same here."""
+    if not value:
+        return ()
+    if isinstance(value, str):
+        return (value,) if value.strip() else ()
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    return ()
+
+
+def _parse_triggers(value: object) -> SkillTriggers:
+    if not isinstance(value, dict):
+        return SkillTriggers()
+    return SkillTriggers(
+        keywords=_as_tuple(value.get("keywords")),
+        tools=_as_tuple(value.get("tools")),
+        task_types=_as_tuple(value.get("task_types")),
+        failure_patterns=_as_tuple(value.get("failure_patterns")),
+    )
+
+
+def parse_skill(path: Path | str) -> Skill:
+    """Parse one ``SKILL.md``. Never raises: a bad file is a skill with an
+    ``error``, because a skill that silently disappears cannot be debugged."""
+    target = Path(path)
+    skill_id = target.parent.name
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError as exc:
+        return Skill(id=skill_id, body="", path=target, error=str(exc))
+    header, body = _split_frontmatter(text)
+    data, error = _parse_header(header)
+    if data is None:
+        return Skill(id=skill_id, body=body, path=target, error=error)
+
+    declared = _as_str(data.get("name"))
+    status = (_as_str(data.get("status")) or "").casefold()
+    metadata = data.get("metadata")
+    return Skill(
+        id=skill_id,
+        body=body.strip(),
+        path=target,
+        description=_as_str(data.get("description")),
+        alias=declared or None if declared != skill_id else None,
+        license=_as_str(data.get("license")) or None,
+        compatibility=_as_str(data.get("compatibility")) or None,
+        allowed_tools=_as_tuple(data.get("allowed-tools")),
+        metadata=dict(metadata) if isinstance(metadata, dict) else {},
+        version=_as_str(data.get("version")) or DEFAULT_VERSION,
+        status=status if status in SKILL_STATUSES else "active",
+        phase=_as_str(data.get("phase")),
+        pattern_dna=_as_str(data.get("pattern_dna")),
+        triggers=_parse_triggers(data.get("triggers")),
+        extra={k: v for k, v in data.items() if k not in _KNOWN_KEYS},
+        error=error,
+    )
+
 
 class SkillRegistry:
-    """Read-only view over a skills directory tree."""
+    """A skills directory, parsed once per revision.
+
+    Cached on ``(mtime, size)``: the catalog is rebuilt on every request but
+    re-reading every ``SKILL.md`` each time is both slow and, worse, what made
+    the "byte-stable within a session" comment in the old ``meta()`` untrue.
+    """
 
     def __init__(self, skill_dir: str | Path = Path("skills")) -> None:
         self.root = Path(skill_dir)
+        self._cache: dict[str, tuple[tuple[float, int], Skill]] = {}
 
     # ---- discovery --------------------------------------------------------
 
     def names(self) -> list[str]:
-        """Top-level directories that contain a ``SKILL.md``, sorted."""
+        """Directory names holding a ``SKILL.md``, sorted."""
         if not self.root.is_dir():
             return []
-        result: list[str] = []
-        for child in sorted(self.root.iterdir()):
-            if child.is_dir() and (child / _SKILL_FILE).is_file():
-                result.append(child.name)
-        return result
+        return [
+            child.name
+            for child in sorted(self.root.iterdir())
+            if child.is_dir() and (child / _SKILL_FILE).is_file()
+        ]
 
     @property
     def is_empty(self) -> bool:
         return not self.names()
 
-    # ---- catalog ----------------------------------------------------------
+    # ---- access ------------------------------------------------------------
 
-    def catalog_text(self) -> str:
-        """``- name: description`` lines with trigger hints; '' when empty.
-
-        M4: includes trigger hints so the model knows when to load each skill.
-        """
-        lines: list[str] = []
-        for name in self.names():
-            desc = self.load(name)
-            line = f"- {name}"
-            if desc:
-                summary = _parse_description(desc)
-                if summary:
-                    line += f": {summary}"
-            # M4: add trigger hints
-            triggers = self.triggers(name)
-            if triggers:
-                hint = _format_catalog_trigger_hint(triggers)
-                if hint:
-                    line += f"\n  Triggers: {hint}"
-            # F2: add phase lock hint
-            meta = self.meta(name)
-            if meta.get("phase"):
-                line += f"\n  [phase: {meta['phase']}]"
-            lines.append(line)
-        return "\n".join(lines) if lines else ""
-
-    # ---- load -------------------------------------------------------------
-
-    def load(self, name: str) -> str | None:
-        """SKILL.md full text for ``name``, or None when absent."""
+    def get(self, name: str) -> Skill | None:
+        """One skill by directory name, parsed and cached. ``None`` if absent."""
         target = self.root / name / _SKILL_FILE
         if not target.is_file():
+            self._cache.pop(name, None)
             return None
         try:
-            return target.read_text(encoding="utf-8")
+            stat = target.stat()
         except OSError:
             return None
+        stamp = (stat.st_mtime, stat.st_size)
+        cached = self._cache.get(name)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        skill = parse_skill(target)
+        self._cache[name] = (stamp, skill)
+        return skill
 
-    # ---- metadata (R11c) ---------------------------------------------------
+    def resolve(self, wanted: str) -> Skill | None:
+        """One skill by id *or* by its declared alias."""
+        direct = self.get(wanted)
+        if direct is not None:
+            return direct
+        for name in self.names():
+            skill = self.get(name)
+            if skill is not None and skill.matches(wanted):
+                return skill
+        return None
 
-    def meta(self, name: str) -> dict[str, str | None]:
-        """``{name, version, status, description}`` read from the frontmatter.
+    def all(self) -> tuple[Skill, ...]:
+        """Every skill, in id order. Broken ones are included and say so."""
+        found = [self.get(name) for name in self.names()]
+        return tuple(skill for skill in found if skill is not None)
 
-        A missing file reports the *defaults* rather than a version we made up:
-        "there is no version here" and "the version is 1" are different claims,
-        and only the first is true for a skill that does not exist.  Callers that
-        need to tell them apart check ``description is None``.
-
-        The catalog is untouched by this (``catalog_text`` feeds the system
-        prompt, which has to stay byte-stable within a session).
-        """
-        text = self.load(name)
-        if text is None:
-            return {"name": name, "version": DEFAULT_VERSION, "status": "active",
-                    "description": None}
-        return {
-            "name": name,
-            "version": _parse_version(text),
-            "status": _parse_status(text),
-            "description": _parse_description(text),
-            "phase": _frontmatter_value(text, _PHASE) or "",
-            "pattern_dna": _frontmatter_value(text, _PATTERN_DNA) or "",
-        }
+    def loadable(self) -> tuple[Skill, ...]:
+        """Skills that parse. The ones that do not are broken, not hidden."""
+        return tuple(skill for skill in self.all() if skill.is_healthy)
 
     # ---- write (M1) ---------------------------------------------------------
 
@@ -134,144 +340,17 @@ class SkillRegistry:
             tmp = target.with_suffix(".tmp")
             tmp.write_text(content, encoding="utf-8")
             os.replace(tmp, target)
+            self._cache.pop(name, None)
             return target
         except OSError:
             return None
-
-    # ---- triggers (M2) ------------------------------------------------------
-
-    def triggers(self, name: str) -> dict[str, list[str]] | None:
-        """Parse ``triggers`` from the skill's frontmatter.
-
-        Returns ``{"keywords": [], "tools": [], "task_types": [], "failure_patterns": []}``
-        when the triggers block is present, ``None`` when the file/frontmatter/triggers
-        is missing or unparseable.  Uses ``yaml.safe_load`` (same dependency as
-        ``config/loader.py``) because triggers is a map of arrays — regex parsing
-        would be brittle for nested YAML.
-        """
-        text = self.load(name)
-        if text is None:
-            return None
-        fm_match = _FRONTMATTER.search(text)
-        if not fm_match:
-            return None
-        try:
-            data = yaml.safe_load(fm_match.group(1))
-        except yaml.YAMLError:
-            # YAML parse failed (e.g., special chars like << in values).
-            # Try regex fallback for triggers.
-            return _parse_triggers_regex(fm_match.group(1))
-        if not isinstance(data, dict):
-            return None
-        if "triggers" not in data:
-            return None
-        triggers = data["triggers"]
-        if triggers is None:
-            return {
-                "keywords": [],
-                "tools": [],
-                "task_types": [],
-                "failure_patterns": [],
-            }
-        if not isinstance(triggers, dict):
-            return None
-        return {
-            "keywords": _as_str_list(triggers.get("keywords")),
-            "tools": _as_str_list(triggers.get("tools")),
-            "task_types": _as_str_list(triggers.get("task_types")),
-            "failure_patterns": _as_str_list(triggers.get("failure_patterns")),
-        }
-
-
-def _as_str_list(value: object) -> list[str]:
-    """Normalize a frontmatter value to ``list[str]``.
-
-    YAML allows ``keywords: "single"`` (scalar) or ``keywords: [a, b]`` (sequence);
-    this normalizes both to ``list[str]``.  ``None`` or non-list/non-str → ``[]``.
-    """
-    if not value:
-        return []
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, list):
-        return [str(v) for v in value if v]
-    return []
-
-
-def _parse_description(text: str) -> str | None:
-    match = _FRONTMATTER.search(text)
-    header = match.group(1) if match else ""
-    if not header:
-        return None
-    desc = _DESC.search(header)
-    if not desc:
-        return None
-    return desc.group(1).strip().strip(_YAML_SCALAR_STRIP) or None
-
-
-def _format_catalog_trigger_hint(triggers: dict[str, list[str]]) -> str:
-    """Format trigger hints for the catalog display."""
-    parts: list[str] = []
-    if triggers.get("keywords"):
-        parts.append(f"keywords: {', '.join(triggers['keywords'][:3])}")
-    if triggers.get("tools"):
-        parts.append(f"tools: {', '.join(triggers['tools'][:3])}")
-    if triggers.get("failure_patterns"):
-        parts.append(f"on error: {', '.join(triggers['failure_patterns'][:2])}")
-    return "; ".join(parts)
-
-
-def _frontmatter_value(text: str, pattern: re.Pattern[str]) -> str | None:
-    """One scalar out of the frontmatter block, or None when it is not there."""
-    match = _FRONTMATTER.search(text)
-    header = match.group(1) if match else ""
-    if not header:
-        return None
-    found = pattern.search(header)
-    if not found:
-        return None
-    # Only the first line of a value counts: YAML would allow continuations, and
-    # reading them wrong is worse than not reading them at all.
-    return found.group(1).splitlines()[0].strip().strip(_YAML_SCALAR_STRIP) or None
-
-
-def _parse_triggers_regex(header: str) -> dict[str, list[str]]:
-    """Fallback triggers parser when YAML fails (e.g., special chars in values).
-
-    Uses regex to extract trigger arrays from frontmatter.
-    """
-    result: dict[str, list[str]] = {}
-    for key in ("keywords", "tools", "task_types", "failure_patterns"):
-        match = re.compile(rf"(?im)^{key}\s*:\s*\[(.+)\]").search(header)
-        if match:
-            items = [
-                item.strip().strip("'\"") for item in match.group(1).split(",")
-            ]
-            result[key] = [item for item in items if item]
-    return result
-
-
-def _parse_version(text: str) -> str:
-    """The declared version, or ``"1"``.
-
-    A **string**, deliberately: there is no semver comparison here, only
-    display and a "is this the default?" test, so ``1.10`` must not be able to
-    sort below ``1.9`` later.
-    """
-    return _frontmatter_value(text, _VERSION) or DEFAULT_VERSION
-
-
-def _parse_status(text: str) -> str:
-    """``active`` or ``archived``; anything unrecognised reads as ``active``."""
-    declared = (_frontmatter_value(text, _STATUS) or "").casefold()
-    return declared if declared in SKILL_STATUSES else "active"
 
 
 __all__ = [
     "DEFAULT_VERSION",
     "SKILL_STATUSES",
+    "Skill",
     "SkillRegistry",
-    "_parse_description",
-    "_parse_status",
-    "_parse_version",
+    "SkillTriggers",
+    "parse_skill",
 ]

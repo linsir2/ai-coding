@@ -18,6 +18,7 @@ import { DialogMcpAdd } from "./component/dialog-mcp-add"
 import { DialogMemory } from "./component/dialog-memory"
 import { DialogModels, type ModelRow } from "./component/dialog-models"
 import { DialogSessions } from "./component/dialog-sessions"
+import { DialogSkillPending } from "./component/dialog-skill-pending"
 import { DialogSkills } from "./component/dialog-skills"
 import { DialogPermissions } from "./component/dialog-permissions"
 import { DialogStatus } from "./component/dialog-status"
@@ -315,6 +316,18 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         desc: "List available skills",
         palette: true,
         run: () => dialog.open(() => <DialogSkills client={props.client} />, "large"),
+      },
+      {
+        // M8: `skill_review` runs on a timer, by default on, and used to write
+        // generated SKILL.md files into the source tree unattended. They now
+        // wait here for a human.
+        name: "dialog.skillPending.show",
+        title: "Pending skills",
+        group: "Skill",
+        desc: "Review skills the agent generated and nobody has approved",
+        palette: true,
+        run: () =>
+          dialog.open(() => <DialogSkillPending client={props.client} />, "large"),
       },
       {
         // M7: what the agent believes. `/memory` existed in the CLI as one line

@@ -59,7 +59,9 @@ class RequestAssembler:
         policy: Any,
         memory: Any,
         reporter: Any,
-        build_instructions: Callable[[Deadline | None], Awaitable[str | None]] | None = None,
+        build_instructions: Callable[
+            [Deadline | None, SessionData], Awaitable[str | None]
+        ] | None = None,
         # M2: the MCP catalog, rebuilt per step from live manager state.  A
         # callable rather than a string because it must never be frozen into a
         # schema: a reconnected server's new tools have to show up on the very
@@ -119,7 +121,7 @@ class RequestAssembler:
             )
             books.compaction_announced = True
         instructions = (
-            await self._build_instructions(deadline)
+            await self._build_instructions(deadline, session)
             if self._build_instructions is not None
             else None
         )

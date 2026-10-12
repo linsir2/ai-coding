@@ -211,11 +211,14 @@ class TestDendriticIndexE2E:
             tmp_path = Path(tmp)
 
             # Setup: create a skill
+            # `keywords` is indented under `triggers:`. It was not, which made
+            # it a *top-level* key: the old regex fallback read it anyway and hid
+            # the mistake, so the fixture "worked" against a broken skill.
             _write_skill(tmp_path, "sandbox-fix", (
                 "name: sandbox-fix\n"
                 "description: Fix sandbox/permission issues\n"
                 "triggers:\n"
-                "keywords: [\"sandbox\"]\n"
+                "  keywords: [\"sandbox\"]\n"
             ))
 
             # Record a past successful execution

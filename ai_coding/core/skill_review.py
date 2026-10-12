@@ -99,6 +99,9 @@ class ReviewResult:
     skill_name: str = ""
     skill_path: str = ""
     reason: str = ""
+    #: Written to ``.pending/`` and waiting for a human. ``created`` stays True:
+    #: the file exists, it is just not installed.
+    pending: bool = False
 
 
 def _messages_to_text(messages: Sequence[ChatMessage]) -> str:
@@ -286,20 +289,97 @@ async def run_skill_review(
             created=False, reason=f"content validation failed: {validation_reason}"
         )
 
-    # Write skill file atomically (same pattern as MemoryStore._save)
+    # Staged, not installed. The review ran unattended on a timer with no diff
+    # and no prompt, and it wrote into the user's source tree; a generated
+    # instruction the model will then follow is not something to add silently.
+    # `skill_review_interval` defaults to on, so this ran every 10 turns.
+    return stage_skill(skill_dir, name, content, reason=reason)
+
+
+# ---- staging and approval --------------------------------------------------
+
+#: Where a generated skill waits for a human.  Under the skills root, so the
+#: TUI reaches it without a second path, and named with a leading dot so the
+#: directory walk skips it.
+PENDING_DIR = ".pending"
+
+
+def stage_skill(skill_dir: Path, name: str, content: str, *, reason: str = "") -> ReviewResult:
+    """Write a generated skill to ``<skills>/.pending/<name>/SKILL.md``.
+
+    Nothing here is loadable: the registry walks one level of directories
+    looking for ``SKILL.md`` and a dot-directory is skipped, so a staged skill
+    cannot be read, routed or advertised until :func:`approve_skill` moves it.
+    """
+    target = skill_dir / PENDING_DIR / name / "SKILL.md"
     try:
-        target = skill_dir / name / "SKILL.md"
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".tmp")
         tmp.write_text(content, encoding="utf-8")
         os.replace(tmp, target)
-        _log.info("skill created: %s (%d chars)", name, len(content))
-        return ReviewResult(
-            created=True,
-            skill_name=name,
-            skill_path=str(target),
-            reason=reason,
-        )
-    except OSError as e:  # noqa: BLE001 — best-effort
-        _log.debug("skill write failed: %s", e)
-        return ReviewResult(created=False, reason=f"write error: {e}")
+        (target.parent / "REASON.md").write_text(reason or "(no reason given)", encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001 — best-effort by design
+        _log.debug("skill staging failed: %s", exc)
+        return ReviewResult(created=False, reason=f"write error: {exc}")
+    _log.info("skill staged for approval: %s", name)
+    return ReviewResult(
+        created=True,
+        pending=True,
+        skill_name=name,
+        skill_path=str(target),
+        reason=reason,
+    )
+
+
+def _pending_root(skill_dir: Path) -> Path:
+    return skill_dir / PENDING_DIR
+
+
+def list_pending(skill_dir: Path) -> list[tuple[str, str]]:
+    """``(name, reason)`` for everything awaiting approval, name-ordered."""
+    root = _pending_root(skill_dir)
+    if not root.is_dir():
+        return []
+    found: list[tuple[str, str]] = []
+    for child in sorted(root.iterdir()):
+        if not (child / "SKILL.md").is_file():
+            continue
+        reason = ""
+        marker = child / "REASON.md"
+        if marker.is_file():
+            reason = marker.read_text(encoding="utf-8").strip()
+        found.append((child.name, reason))
+    return found
+
+
+def approve_skill(skill_dir: Path, name: str) -> bool:
+    """Move a staged skill into the live tree. ``False`` if there was none."""
+    source = _pending_root(skill_dir) / name / "SKILL.md"
+    if not source.is_file():
+        return False
+    target = skill_dir / name / "SKILL.md"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, target)
+        (source.parent / "REASON.md").unlink(missing_ok=True)
+        source.parent.rmdir()
+    except OSError as exc:  # noqa: BLE001
+        _log.debug("skill approval failed: %s", exc)
+        return False
+    _log.info("skill approved: %s", name)
+    return True
+
+
+def reject_skill(skill_dir: Path, name: str) -> bool:
+    """Delete a staged skill. ``False`` if there was none."""
+    staged = _pending_root(skill_dir) / name
+    if not (staged / "SKILL.md").is_file():
+        return False
+    import shutil
+
+    try:
+        shutil.rmtree(staged)
+    except OSError as exc:  # noqa: BLE001
+        _log.debug("skill rejection failed: %s", exc)
+        return False
+    return True
