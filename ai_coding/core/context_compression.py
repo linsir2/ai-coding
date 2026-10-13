@@ -18,11 +18,22 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from ai_coding.ai.llm_helpers import (
+    CHECKPOINT_CLOSE,
+    CHECKPOINT_OPEN,
+    SINCE_CLOSE,
+    SINCE_OPEN,
+    SUMMARY_SECTIONS,
+)
 from ai_coding.domain.message import ChatMessage
 
 PERSISTED_OUTPUT_PREFIX = "<persisted-output"
 PERSISTED_MARKER = PERSISTED_OUTPUT_PREFIX
 SNIPPED_HEADER = "[snipped {n} messages]"
+#: The last compaction's verdict.  A named constant because it now has to be
+#: *recognised*, not just written: ``split_checkpoint`` looks for it, and the
+#: string is public enough that a pasted log could contain it.
+CHECKPOINT_MARK = "[以下为早期对话摘要]"
 #: The bare shape, kept for callers that still render a placeholder by hand.
 PREVIOUS_RESULT = "[Previous: used {tool}]"
 #: The lead of an envelope: how much was elided, and where the original now lives.
@@ -301,6 +312,40 @@ def _joined_history_text(messages: list[ChatMessage]) -> str:
     return "\n".join(parts)
 
 
+def split_checkpoint(
+    messages: Sequence[ChatMessage],
+) -> tuple[str, list[ChatMessage]]:
+    """Separate the previous compaction's verdict from what came after it.
+
+    Measured: on the second compaction the old summary *was* reaching the
+    summariser, as ``[user] [以下为早期对话摘要]…`` — indistinguishable from a
+    message the user typed, under a prompt that said "compress this
+    conversation". The model therefore summarised the summary like anything
+    else, and every later pass rewrote it with nothing asking it to carry
+    anything forward.
+
+    Only one thing can be our checkpoint: the note ``_run_l4`` returns at the
+    head of the compacted history.  Position and marker alone are not enough —
+    the marker is a public string, and a user's first message can carry it
+    verbatim.  The third check is the one that actually discriminates: a real
+    checkpoint's body begins with a section heading, because ``build_summarizer``
+    is the only thing that ever writes one.
+
+    Pure, total, and a no-op on a clean history — which is what keeps the first
+    compaction bit-identical.
+    """
+    if not messages:
+        return "", list(messages)
+    head = messages[0]
+    body = head.content or ""
+    if head.role != "user" or not body.startswith(CHECKPOINT_MARK):
+        return "", list(messages)
+    verdict = body[len(CHECKPOINT_MARK) :].strip()
+    if not verdict.startswith(SUMMARY_SECTIONS):
+        return "", list(messages)
+    return verdict, list(messages[1:])
+
+
 def _ensure_pinned(
     messages: list[ChatMessage], pinned: Sequence[ChatMessage]
 ) -> list[ChatMessage]:
@@ -473,10 +518,24 @@ class ContextManager:
         return estimate_tokens(_joined_history_text(messages)) > self._max_context_tokens
 
     def _l4_head_text(self, messages: list[ChatMessage]) -> str:
-        """The text L4 is meant to summarise, taken while it still exists."""
-        if self._l4_keep_tail >= len(messages):
-            return _joined_history_text(messages)
-        return _joined_history_text(messages[: -self._l4_keep_tail])
+        """The text L4 is meant to summarise, with the checkpoint labelled apart.
+
+        With no checkpoint this is exactly what it has always been — the joined
+        transcript — so the first compaction does not move.
+        """
+        head = (
+            messages
+            if self._l4_keep_tail >= len(messages)
+            else messages[: -self._l4_keep_tail]
+        )
+        checkpoint, rest = split_checkpoint(head)
+        body = _joined_history_text(rest)
+        if not checkpoint:
+            return body
+        return (
+            f"{CHECKPOINT_OPEN}\n{checkpoint}\n{CHECKPOINT_CLOSE}\n\n"
+            f"{SINCE_OPEN}\n{body}\n{SINCE_CLOSE}"
+        )
 
     async def _run_l4(
         self,
@@ -538,6 +597,7 @@ class ContextManager:
 
 
 __all__ = [
+    "CHECKPOINT_MARK",
     "ELIDED_DIR",
     "ELIDED_NOTE",
     "PERSISTED_OUTPUT_PREFIX",
@@ -548,6 +608,7 @@ __all__ = [
     "estimate_tokens",
     "previous_result_note",
     "snip_middle",
+    "split_checkpoint",
     "placeholder_old_results",
     "persist_large_outputs",
     "hard_trim",

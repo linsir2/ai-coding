@@ -25,6 +25,23 @@ Extractor = Any  # Callable[[Sequence[ChatMessage], str | None], Awaitable[list[
 
 _MAX_SUMMARY_CHARS = 60_000
 _MAX_EXTRACT_CHARS = 40_000
+#: One seven-section set is roughly this many characters.  It is also the floor
+#: under the growth bound: the template grew from four sections to seven, so a
+#: first merge can legitimately more than double a short predecessor, and
+#: rejecting that would drop the summary entirely (see docs/r11-analysis.md 12.2).
+_MIN_SUMMARY_CHARS = 1_200
+_CREATE_TOKENS = 1_200
+_MERGE_TOKENS = 1_600
+_TRUNCATION_NOTE = "\n[历史过长，此处截断]"
+
+#: The two halves of a checkpoint-aware summary input, and the labels that
+#: separate them.  They live here rather than next to the compressor because
+#: they are the prompt's wire format — ``core/context_compression.py`` imports
+#: them the same way it already imports ``_chat``.
+CHECKPOINT_OPEN = "<previous-checkpoint>"
+CHECKPOINT_CLOSE = "</previous-checkpoint>"
+SINCE_OPEN = "<conversation-since-checkpoint>"
+SINCE_CLOSE = "</conversation-since-checkpoint>"
 
 
 async def _chat(
@@ -59,13 +76,56 @@ async def _chat(
 #: the shape check's vocabulary: if the prompt stops naming one, every summary
 #: becomes a failure, and if the check accepts anything, a reply that says
 #: "好的，我总结了一下" is installed as the record of what happened.
-SUMMARY_SECTIONS = ("## 目标", "## 已完成", "## 关键文件", "## 待办")
+#:
+#: Seven, matching OpenCode's ``SUMMARY_TEMPLATE``: with four there was nowhere
+#: to put the user's constraints or the reasons behind a decision, so a merge
+#: had to crush them into "目标" or drop them. Those are exactly the two kinds
+#: of knowledge a checkpoint exists to carry forward.
+SUMMARY_SECTIONS = (
+    "## 目标",
+    "## 约束与要求",
+    "## 决策",
+    "## 工作状态",
+    "## 下一步",
+    "## 关键文件",
+    "## 重要上下文",
+)
+
+#: Under "## 工作状态".  Reported so the prompt can name them; not part of the
+#: shape check, because ``## `` is a substring of ``### `` and a top-level
+#: check would accept a subsection as the whole section.
+_WORK_STATE_SUBHEADS = ("### 已完成", "### 进行中", "### 阻塞")
+
+_INPUT_SHAPE = (
+    "输入固定分成两部分，用 XML 标签隔开：\n"
+    f"{CHECKPOINT_OPEN} —— 上一次压缩得出的结论。若该标签内为空，说明这是首次压缩，"
+    "没有已有结论。\n"
+    f"{SINCE_OPEN} —— 上一次压缩之后新发生的对话原文。\n"
+)
+
+_MERGE_RULES = (
+    "\n若" + CHECKPOINT_OPEN + " 非空，本次是**更新**而不是重写：\n"
+    "· 新内容优先，但默认保留旧结论里仍然有效的信息；\n"
+    "· 仅当新内容明确推翻、取代、解决或使其失效时，才移除旧信息；\n"
+    "· 只更新各小节的内容，不要新增、删除或改名字节；\n"
+    "· 逐字保留文件路径、命令、标识符、错误串、URL。\n"
+    "· 若" + CHECKPOINT_OPEN + " 为空，则直接总结" + SINCE_OPEN + "。\n"
+)
 
 _SUMMARY_SYSTEM_PROMPT = (
-    "你是资深研发助手。请把一段很长的编程会话早期历史压缩成精炼的要点（中文），"
-    "去掉寒暄与重复。只输出下面四个小节，不要前言、不要结语：\n"
-    + "\n".join(SUMMARY_SECTIONS)
-    + "\n每节用短句分行；没有内容的节写「无」。"
+    "你是资深研发助手。你要把一段很长的编程会话压缩成一份 checkpoint，"
+    "交给另一个 agent 接着干活。只输出下面的小节，不要前言、不要结语：\n"
+    # The sub-headings have to sit immediately under their parent in the
+    # template the model is shown.  Listed after all seven top-level sections,
+    # a real run appended them to whichever section came last — they landed
+    # under "重要上下文" instead of "工作状态".
+    + "\n".join(SUMMARY_SECTIONS[:3])
+    + "\n## 工作状态\n" + "\n".join(_WORK_STATE_SUBHEADS) + "\n"
+    + "\n".join(SUMMARY_SECTIONS[4:]) + "\n"
+    "每节用短句分行；没有内容的节写「无」。\n"
+    + _INPUT_SHAPE
+    + _MERGE_RULES
+    + "\n不要描述你在做总结这件事，不要调用工具。"
 )
 
 #: Appended on the one retry, so the model knows what was wrong with the last
@@ -92,6 +152,35 @@ def summary_is_usable(text: str) -> bool:
     return any(section in body for section in SUMMARY_SECTIONS)
 
 
+def _clip_for_summary(text: str) -> str:
+    """Trim an over-long history, and say that it was trimmed.
+
+    The slice used to end in silence, so a third compaction could lose its tail
+    and leave nothing to notice the loss by.
+    """
+    if len(text) <= _MAX_SUMMARY_CHARS:
+        return text
+    return text[:_MAX_SUMMARY_CHARS] + _TRUNCATION_NOTE
+
+
+def summary_within_growth_bound(previous_chars: int, summary: str) -> bool:
+    """True when a merged checkpoint has not run away from its predecessor.
+
+    OpenCode needed a whole one-shot rewrite path (#48058) because an
+    "update" prompt that preserves everything makes the checkpoint grow on
+    every pass.  Here ``max_tokens`` already bounds it structurally, but a model
+    that ignores the instruction can still return a transcript dump, and the
+    floor is there so the seven-section template — fatter than the four-section
+    one it replaced — is not mistaken for runaway growth on a first merge
+    (docs/r11-analysis.md 12.2).
+
+    No predecessor means nothing to have grown from, so nothing to check.
+    """
+    if previous_chars <= 0:
+        return True
+    return len(summary) <= max(previous_chars * 2, _MIN_SUMMARY_CHARS)
+
+
 def build_summarizer(model_config: Any) -> Summarizer:
     """Return an async ``(history_text) -> summary|None`` closure for L4.
 
@@ -101,20 +190,26 @@ def build_summarizer(model_config: Any) -> Summarizer:
     that ignored the format.
     """
 
-    async def summarize(text: str) -> str | None:
-        prompt = f"请压缩以下对话历史：\n\n{text[:_MAX_SUMMARY_CHARS]}"
+    async def summarize(text: str, previous: str | None = None) -> str | None:
+        prompt = (
+            f"请{('更新' if previous else '压缩')}以下对话：\n\n{_clip_for_summary(text)}"
+        )
+        previous_len = len(previous or "")
         for attempt in range(2):
             try:
                 out = await _chat(
                     model_config,
                     _SUMMARY_SYSTEM_PROMPT,
                     prompt if attempt == 0 else prompt + _SUMMARY_NUDGE,
-                    max_tokens=800,
+                    max_tokens=_MERGE_TOKENS if previous else _CREATE_TOKENS,
                 )
             except Exception:
                 return None  # best-effort; never break the compression pipeline
-            if summary_is_usable(out):
-                return out
+            if not summary_is_usable(out):
+                continue
+            if not summary_within_growth_bound(previous_len, out):
+                continue
+            return out
         return None
 
     return summarize
@@ -198,6 +293,8 @@ def _messages_to_text(
 __all__ = [
     "SUMMARY_SECTIONS",
     "summary_is_usable",
+    "summary_within_growth_bound",
+    "build_summarizer",
     "build_summarizer",
     "build_extractor",
     "_chat",

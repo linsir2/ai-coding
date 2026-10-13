@@ -157,6 +157,10 @@ async def test_the_summary_prompt_asks_for_the_shape_that_is_checked(monkeypatch
 
     await llm_helpers.build_summarizer(object())("历史")
 
-    # The sections belong in the instruction, not in the payload.
-    for section in ("## 目标", "## 已完成", "## 关键文件", "## 待办"):
+    # The sections belong in the instruction, not in the payload.  Read from the
+    # shared constant rather than a literal copy: the invariant this test exists
+    # for is that the prompt and the shape check cannot drift apart, and a
+    # hardcoded list is exactly how they would drift (R11 replaced the four
+    # sections with OpenCode's seven, and this literal did not notice).
+    for section in llm_helpers.SUMMARY_SECTIONS:
         assert section in seen[0]
