@@ -45,11 +45,13 @@ def _observed_prompt_tokens(session: SessionData) -> int:
     The compaction gate used to read only ``estimate_tokens``, which counts
     characters and underestimated a tool-output-heavy history by ~4x on a real
     session (60k estimated against 237,157 billed). The provider's number is the
-    ground truth, so it is what the gate gets. 0 means nothing has been measured
-    yet, and the gate falls back to the estimate exactly as before.
+    ground truth, so it is what the gate gets.
+
+    The boundary question is the session's to answer, not this module's: a row at
+    or before the last compaction measured a context that no longer exists, and
+    reading it would make the gate compact again on the very next request.
     """
-    usages = getattr(session, "turn_usages", None) or []
-    return int(getattr(usages[-1], "prompt_tokens", 0) or 0) if usages else 0
+    return session.live_prompt_tokens()
 
 
 @dataclass(frozen=True)

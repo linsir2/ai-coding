@@ -299,3 +299,52 @@ def test_a_session_that_was_never_compacted_writes_no_key():
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
 
     assert "lastCompactedTurn" not in session.to_dict()
+
+
+# ---- 3b. one rule for "which usage still describes the live context" -------
+
+
+def test_the_gate_stops_reading_a_usage_row_the_compaction_invalidated():
+    """The regression this file's own fix introduced.
+
+    The meter learned to ignore usage at or before the boundary, but the gate
+    kept reading `usages[-1]` unconditionally. After `/compact` that row sits
+    behind the boundary, so the next request assembly saw 237,157 again and
+    compacted once more — before the model had produced anything to measure.
+    Each of those is a paid model call that throws away the summary just made.
+    """
+    from ai_coding.core.request_assembly import _observed_prompt_tokens
+
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.turn_count = 20
+    session.record_turn_usage(20, {"prompt_tokens": 237_157})
+    session.last_compacted_turn = 20
+
+    assert _observed_prompt_tokens(session) == 0, (
+        "the gate and the meter must agree on which usage rows still describe "
+        "the live context"
+    )
+
+
+def test_the_gate_still_reads_usage_recorded_after_the_compaction():
+    from ai_coding.core.request_assembly import _observed_prompt_tokens
+
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.turn_count = 20
+    session.record_turn_usage(20, {"prompt_tokens": 237_157})
+    session.last_compacted_turn = 20
+    session.record_turn_usage(21, {"prompt_tokens": 4_450})
+
+    assert _observed_prompt_tokens(session) == 4_450
+
+
+def test_the_rule_lives_on_the_session_so_it_cannot_drift_again():
+    """Two readers, one implementation. The meter and the gate ask the same
+    question of the same state, so the answer cannot depend on who is asking."""
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.record_turn_usage(1, {"prompt_tokens": 1000})
+    session.record_turn_usage(2, {"prompt_tokens": 9000})
+    session.last_compacted_turn = 2
+
+    assert session.live_prompt_tokens() == context_tokens(session) == 0
+    assert session.live_prompt_tokens() == 0

@@ -218,6 +218,26 @@ class SessionData:
     def add_message(self, message: ChatMessage) -> None:
         self.messages.append(message)
 
+    def live_prompt_tokens(self) -> int:
+        """The newest turn's prompt tokens that still describe the live context.
+
+        Two readers need this and they once answered it differently: the sidebar
+        meter skipped usage at or before the compaction boundary, while the
+        compaction gate read the last row outright. The gate therefore kept
+        seeing 237,157 through a boundary that had already invalidated it and
+        compacted again, immediately, before the model had produced anything to
+        measure — each time paying for a summary it then discarded.
+
+        The boundary is session state, so the rule belongs to the session. One
+        implementation, two callers, no way to drift again.
+        """
+        if not self.turn_usages:
+            return 0
+        live = [row for row in self.turn_usages if int(row.turn) > self.last_compacted_turn]
+        if not live:
+            return 0
+        return int(live[-1].prompt_tokens or 0)
+
     def record_turn_usage(self, turn: int, usage: dict[str, int] | None) -> None:
         """Append one usage row; absent or all-zero usage writes no row."""
         if not usage or not any(int(value or 0) for value in usage.values()):

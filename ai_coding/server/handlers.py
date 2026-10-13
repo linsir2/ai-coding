@@ -154,14 +154,9 @@ def context_tokens(session: Any) -> int:
     """
     if session is None:
         return 0
-    usages = getattr(session, "turn_usages", None)
-    if not usages:
-        return 0
-    boundary = int(getattr(session, "last_compacted_turn", 0) or 0)
-    after = [row for row in usages if int(getattr(row, "turn", 0)) > boundary]
-    if not after:
-        return 0
-    return int(getattr(after[-1], "prompt_tokens", 0) or 0)
+    # The same question the compaction gate asks, answered by the same code:
+    # two readers of one rule is what let the gate and the meter disagree once.
+    return int(session.live_prompt_tokens())
 
 
 def make_handlers(
