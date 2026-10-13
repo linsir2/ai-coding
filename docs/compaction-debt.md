@@ -64,13 +64,18 @@
 
 ---
 
-## 3. ⬜ P2 — 摘要请求不会因"太大"而收缩
+## 3. ✅ P2 — 摘要请求不会因"太大"而收缩
 
-`compaction.ts:420-427`：`context-overflow` / `payload-too-large` 时按 `SHRINK_STEPS = [0.7, 0.5, 0.35]` 逐级收缩重发，四次后放弃。
-
-我们只有 `hard_trim` 这一个降级，且是在摘要**之后**作用于历史，不作用于摘要**请求**本身。
-
-**触发条件**：历史本身能塞进窗口，但"旧摘要 + 待摘内容"装不下。第 N 次压缩时才会真正需要这条 —— 与 P0 强相关。
+> **2026-10-13 已修（反应式，不预测）。** 方案见 `docs/r15-summary-shrink.md`。
+>
+> `llm_helpers.py`：`_SHRINK_STEPS = (0.7, 0.5, 0.35)`，锚定**首次实际发送大小**
+> （`len(_clip_for_summary(text))`），四次耗尽后放弃。触发是**反应式**——复用
+> `openai_engine._looks_like_context_overflow` 判拒因（与主循环同一条分类规则），
+> 不做预测式收缩（`estimate_tokens` 在 `core/`，ai/ 引用即违反单向依赖）。
+> 非 overflow 异常 / 形状失败 / 增长超限——全部行为不变（不收缩、不加重试）。
+> 验证：`tests/test_summary_shrink.py` 8 用例，其中 R2 让真 `AsyncOpenAI` 对本地真
+> HTTP 服务器发请求（首 POST 回 400 `context_length_exceeded`），断言第二次
+> wire payload 更小。
 
 ---
 

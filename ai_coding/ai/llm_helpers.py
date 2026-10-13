@@ -17,6 +17,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from ai_coding.ai.openai_engine import _looks_like_context_overflow
 from ai_coding.domain.message import ChatMessage
 from ai_coding.memory.schema import parse_candidates
 
@@ -33,6 +34,13 @@ _MIN_SUMMARY_CHARS = 1_200
 _CREATE_TOKENS = 1_200
 _MERGE_TOKENS = 1_600
 _TRUNCATION_NOTE = "\n[历史过长，此处截断]"
+
+#: OpenCode's shrink ladder (compaction.ts:92): when the provider rejects a
+#: request as too big, retry at 70%/50%/35% of the size actually sent, then give
+#: up.  The anchor is the first *sent* size, not the raw history, so a history
+#: that only overflowed after ``_clip_for_summary`` truncation still shrinks
+#: from where it actually is.
+_SHRINK_STEPS = (0.7, 0.5, 0.35)
 
 #: The two halves of a checkpoint-aware summary input, and the labels that
 #: separate them.  They live here rather than next to the compressor because
@@ -164,15 +172,17 @@ def checkpoint_body(text: str) -> str | None:
     return None
 
 
-def _clip_for_summary(text: str) -> str:
+def _clip_for_summary(text: str, cap: int = _MAX_SUMMARY_CHARS) -> str:
     """Trim an over-long history, and say that it was trimmed.
 
     The slice used to end in silence, so a third compaction could lose its tail
-    and leave nothing to notice the loss by.
+    and leave nothing to notice the loss by.  ``cap`` lets the shrink ladder
+    (docs/r15-summary-shrink.md) reuse the same "say it was trimmed" logic at
+    each lower budget instead of slicing again silently.
     """
-    if len(text) <= _MAX_SUMMARY_CHARS:
+    if len(text) <= cap:
         return text
-    return text[:_MAX_SUMMARY_CHARS] + _TRUNCATION_NOTE
+    return text[:cap] + _TRUNCATION_NOTE
 
 
 def summary_within_growth_bound(previous_chars: int, summary: str) -> bool:
@@ -197,32 +207,45 @@ def build_summarizer(model_config: Any) -> Summarizer:
     """Return an async ``(history_text) -> summary|None`` closure for L4.
 
     Asks once, checks the shape, and asks once more before giving up (G5-3).
-    ``None`` means "no usable summary", which is what makes the pipeline fall
-    back to the trimmed history -- a *better* outcome than installing a reply
-    that ignored the format.
+    When the provider rejects the request as *too big*, the same two asks
+    repeat at each lower size of ``_SHRINK_STEPS`` before giving up
+    (docs/r15-summary-shrink.md).  ``None`` means "no usable summary", which is
+    what makes the pipeline fall back to the trimmed history -- a *better*
+    outcome than installing a reply that ignored the format.
     """
 
     async def summarize(text: str, previous: str | None = None) -> str | None:
-        prompt = (
-            f"请{('更新' if previous else '压缩')}以下对话：\n\n{_clip_for_summary(text)}"
-        )
+        max_tokens = _MERGE_TOKENS if previous else _CREATE_TOKENS
+        base = _clip_for_summary(text)
+        caps = [len(base)] + [max(1, int(len(base) * step)) for step in _SHRINK_STEPS]
         previous_len = len(previous or "")
-        for attempt in range(2):
-            try:
-                out = await _chat(
-                    model_config,
-                    _SUMMARY_SYSTEM_PROMPT,
-                    prompt if attempt == 0 else prompt + _SUMMARY_NUDGE,
-                    max_tokens=_MERGE_TOKENS if previous else _CREATE_TOKENS,
-                )
-            except Exception:
-                return None  # best-effort; never break the compression pipeline
-            body = checkpoint_body(out)
-            if body is None:
-                continue
-            if not summary_within_growth_bound(previous_len, body):
-                continue
-            return body
+        for cap in caps:
+            prompt = (
+                f"请{('更新' if previous else '压缩')}以下对话：\n"
+                f"\n{_clip_for_summary(text, cap)}"
+            )
+            too_big = False
+            for attempt in range(2):
+                try:
+                    out = await _chat(
+                        model_config,
+                        _SUMMARY_SYSTEM_PROMPT,
+                        prompt if attempt == 0 else prompt + _SUMMARY_NUDGE,
+                        max_tokens=max_tokens,
+                    )
+                except Exception as exc:
+                    if _looks_like_context_overflow(exc):
+                        too_big = True
+                        break
+                    return None  # not an overflow: shrinking the input cannot help
+                body = checkpoint_body(out)
+                if body is None:
+                    continue
+                if not summary_within_growth_bound(previous_len, body):
+                    continue
+                return body
+            if not too_big:
+                return None  # shape/growth failure: stay on the NUDGE axis, no shrink
         return None
 
     return summarize
