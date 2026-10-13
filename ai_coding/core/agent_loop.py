@@ -1206,7 +1206,6 @@ class AgentLoop:
         budget = float(getattr(self.settings, "turn_timeout_seconds", 0.0) or 60.0)
         report = await self.compactor.compact_now(session, timeout=budget)
         if report["after"] != report["messages"]:
-            session.last_compacted_turn = int(getattr(session, "turn_number", 0) or 0)
             self.closer.save(session)
         return report
 

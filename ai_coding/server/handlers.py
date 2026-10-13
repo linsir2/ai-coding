@@ -23,6 +23,7 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
 
+from ai_coding.config.models import resolve_context_window
 from ai_coding.domain.session import _message_to_dict
 from ai_coding.server.bridge import EventBridge, Notify
 from ai_coding.server.display import provider_from_base_url
@@ -597,7 +598,7 @@ def make_handlers(
         return {
             "model": str(getattr(world.config, "default_model", "") or ""),
             "workspace": world.workspace,
-            "maxContextTokens": int(getattr(ai_cfg, "max_context_tokens", 0) or 0),
+            "maxContextTokens": resolve_context_window(world.config),
             "maxToolIterations": int(getattr(ai_cfg, "max_tool_iterations", 0) or 0),
             "stopPolicy": str(getattr(ai_cfg, "stop_policy", "") or ""),
         }
@@ -609,10 +610,9 @@ def make_handlers(
         """
         session = state.session
         tokens = context_tokens(session)
-        ai_cfg = getattr(world.config, "ai", None)
         return {
             "tokens": tokens,
-            "maxContextTokens": int(getattr(ai_cfg, "max_context_tokens", 0) or 0),
+            "maxContextTokens": resolve_context_window(world.config),
         }
 
     def mcp_connect(params: dict[str, Any]) -> dict[str, Any]:

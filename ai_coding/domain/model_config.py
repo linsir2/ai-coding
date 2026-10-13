@@ -35,3 +35,7 @@ class ModelConfig:
     # config written before M2 means, so the factory can short-circuit on it and
     # behave exactly as before.
     fallback_models: tuple[str, ...] = ()
+    # The model's own context window, in tokens.  0 means "not declared", which
+    # is not the same as any number: a model that has not said keeps the
+    # conservative default instead of being trusted with an invented one.
+    context_window: int = 0

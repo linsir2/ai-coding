@@ -421,3 +421,29 @@ __all__ = [
     "SkillTriggers",
     "parse_skill",
 ]
+
+
+#: ``@name`` — what the TUI writes into the composer when a skill is picked from
+#: the panel, and what OpenCode writes for the same gesture.
+_MENTION = re.compile(r"(?<![\w@])@([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def resolve_mentions(text: str, registry: SkillRegistry | None) -> list[str]:
+    """The skills a human explicitly pointed at, in the order they wrote them.
+
+    An unknown name is not a reference: ``cc @alice`` is prose, and turning it
+    into a tool call would hand the model a name it cannot load. Resolution
+    reuses ``registry.get``, which already answers by id *or* declared alias, so
+    a skill is reachable by both spellings without a second parser.
+
+    Archived skills resolve. Archived means "do not offer this proactively", and
+    naming one is the opposite of proactive.
+    """
+    if not text or registry is None:
+        return []
+    found: list[str] = []
+    for mention in _MENTION.findall(text):
+        skill = registry.resolve(mention)
+        if skill is not None and skill.id not in found:
+            found.append(skill.id)
+    return found

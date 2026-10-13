@@ -16,6 +16,7 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { Index, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js"
 import { createStore } from "solid-js/store"
 import { MessageView } from "../component/message"
+import { DialogSkills } from "../component/dialog-skills"
 import { AskPanel } from "../component/ask"
 import { PermissionPanel, type PermissionRequest } from "../component/permission"
 import { Prompt } from "../component/prompt"
@@ -106,9 +107,18 @@ export function Session(props: SessionProps) {
     // through it as plain text — the same verdict the model would get either
     // way.  Plain text keeps the live-turn path (bridge deltas, no console).
     const method = text.startsWith("/") ? "session.command" : "session.prompt"
-    void props.client.request(method, { id: props.sessionId, text }).catch((error) => {
-      apply({ kind: "submit-failed", reason: String(error) })
-    })
+    void props.client
+      .request(method, { id: props.sessionId, text })
+      .then(() => {
+        // A command can rewrite the history. `/compact` moves the context
+        // meter's boundary, so without this the sidebar kept reporting the
+        // pre-compaction occupancy until the next turn happened to refresh it —
+        // which reads as "the compaction did nothing".
+        if (method === "session.command") return refreshStats()
+      })
+      .catch((error) => {
+        apply({ kind: "submit-failed", reason: String(error) })
+      })
   }
 
   const submit = (text: string): boolean => {
@@ -177,6 +187,27 @@ export function Session(props: SessionProps) {
           apply({ kind: "submitted", text: "/review" })
           dispatch("/review")
         },
+      },
+      {
+        name: "dialog.skills.show",
+        title: "Skills",
+        group: "Skill",
+        desc: "List available skills",
+        palette: true,
+        // The app layer opens the same panel read-only, because Home has no
+        // composer to hand a selection to. Inside a session the selection goes
+        // to the composer, which writes `@name` — the spelling the request
+        // assembler resolves back into a skill. Registering the command here is
+        // what the session route already does for `/plan` and `/review`; the
+        // closer layer wins (keymap: registerLayer), so no dialog plumbing is
+        // needed to reach the composer.
+        run: () =>
+          dialog.open(
+            () => (
+              <DialogSkills client={props.client} onSelect={(name: string) => setPromptSeed(`@${name} `)} />
+            ),
+            "large",
+          ),
       },
     ],
     bindings: [

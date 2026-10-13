@@ -8,6 +8,7 @@ from typing import Any
 
 import typer
 
+from ai_coding.config.models import resolve_context_window
 from ai_coding.infra.logger_setup import send_logs_to_file, setup_logging
 from ai_coding.paths import Paths
 from ai_coding.skills.registry import SkillRegistry
@@ -132,7 +133,12 @@ def _build_loop(
         memory_store, extractor=extractor, config=app_cfg.memory,
         embeddings=embeddings,
     )
-    context = ContextManager(app_cfg.ai, transcripts_root=ws, summarizer=summarizer)
+    context = ContextManager(
+        app_cfg.ai,
+        transcripts_root=ws,
+        summarizer=summarizer,
+        context_window=resolve_context_window(app_cfg),
+    )
 
     prompt = PromptAssembler(BASE_INSTRUCTIONS)
 

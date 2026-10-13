@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from ai_coding.config.loader import ConfigLoader, ConfigManager
-from ai_coding.config.models import AIConfig, AppConfig, MemoryConfig
+from ai_coding.config.models import AIConfig, AppConfig, MemoryConfig, resolve_context_window
 from ai_coding.domain.model_config import ModelConfig
 
 
@@ -29,7 +29,10 @@ def test_load_returns_defaults_on_none(no_config):
     app = ConfigLoader.load_app(None)
     assert app.default_model == ""
     assert app.models == {}
-    assert app.ai.max_context_tokens == 48000
+    # The raw field is 0 = "ask the model"; what a caller actually needs is the
+    # window the policy and the meter will use, and an undeclared model must
+    # still resolve to the conservative default rather than an invented large one.
+    assert resolve_context_window(app) == 48_000
     assert app.ai.max_tool_iterations == 10
 
 
@@ -81,7 +84,7 @@ def test_load_models_camelcase_compat(tmp_path):
 def test_load_unknown_keys_ignored():
 
     app = AppConfig.model_validate({"unknown_root": 1, "ai": {"not_a_key": True}})
-    assert app.ai.max_context_tokens == 48000
+    assert resolve_context_window(app) == 48_000
 
 
 def test_tools_default_enabled():
@@ -123,7 +126,7 @@ def test_missing_file_falls_back_defaults_for_manager_init(tmp_path, monkeypatch
     mgr = ConfigManager()
     mgr.initialize(None)
     assert mgr.mcp.enabled is False
-    assert mgr.app.ai.max_context_tokens == 48000
+    assert resolve_context_window(mgr.app) == 48_000
 
 
 def test_missing_explicit_path_raises(tmp_path):

@@ -9,6 +9,7 @@ the caller's history on failure" rule are stated once (docs/r5-analysis.md 3.3).
 
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -54,6 +55,8 @@ class Compactor:
         on_summary: Callable[[str], None] | None = None,
         force: bool = False,
         pinned: Sequence[ChatMessage] = (),
+        session: Any | None = None,
+        observed_tokens: int = 0,
     ) -> list[ChatMessage]:
         """Compact only when the budget says so; degrade to the raw history.
 
@@ -62,7 +65,30 @@ class Compactor:
         but not required.  ``force`` is what separates the budget-driven path from
         the user's explicit ``/compact`` — the latter must not be talked out of it
         by the watermark.
+
+        This is the one funnel every compaction passes through — the command, the
+        budget-driven turn and the overflow fallback alike — so it is also where
+        the context meter's boundary is written. It used to be written by the
+        command alone, on a field name that does not exist, so it was never
+        written at all and the meter kept reporting a context that had been
+        thrown away.
         """
+        result = await self._compress(history, deadline=deadline, on_summary=on_summary,
+                                      force=force, pinned=pinned, observed_tokens=observed_tokens)
+        if session is not None and self.did_compact(history, result):
+            session.last_compacted_turn = int(getattr(session, "turn_count", 0) or 0)
+        return result
+
+    async def _compress(
+        self,
+        history: list[ChatMessage],
+        *,
+        deadline: Deadline | None,
+        on_summary: Callable[[str], None] | None = None,
+        force: bool = False,
+        pinned: Sequence[ChatMessage] = (),
+        observed_tokens: int = 0,
+    ) -> list[ChatMessage]:
         if self._context is None:
             return history
         budget = remaining_of(deadline)
@@ -75,6 +101,11 @@ class Compactor:
                 }
                 if pinned:
                     kwargs["pinned"] = pinned
+                # An injected context may predate the observed-token gate, and a
+                # compaction must never fail because of an argument it did not
+                # ask for.
+                if observed_tokens and "observed_tokens" in inspect.signature(aware).parameters:
+                    kwargs["observed_tokens"] = observed_tokens
                 return await run_with_deadline(
                     aware(history, **kwargs),
                     timeout=budget,
@@ -111,7 +142,7 @@ class Compactor:
         budget = timeout if timeout > 0 else 60.0
         try:
             result = await self.compress(
-                list(session.messages), deadline=Deadline.after(budget), force=True
+                list(session.messages), deadline=Deadline.after(budget), force=True, session=session
             )
         except Exception:  # noqa: BLE001 — a REPL command must never crash
             return report

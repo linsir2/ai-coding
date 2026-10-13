@@ -19,6 +19,7 @@ every new block was another ten lines inside the same method.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -33,9 +34,22 @@ from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
 from ai_coding.domain.turn_digest import render_working_memory
 from ai_coding.infra.deadline import Deadline
-from ai_coding.skills.registry import SkillRegistry
+from ai_coding.skills.registry import SkillRegistry, resolve_mentions
 
 __all__ = ["Assembled", "RequestAssembler"]
+
+
+def _observed_prompt_tokens(session: SessionData) -> int:
+    """The provider's own count for the newest turn that reported one.
+
+    The compaction gate used to read only ``estimate_tokens``, which counts
+    characters and underestimated a tool-output-heavy history by ~4x on a real
+    session (60k estimated against 237,157 billed). The provider's number is the
+    ground truth, so it is what the gate gets. 0 means nothing has been measured
+    yet, and the gate falls back to the estimate exactly as before.
+    """
+    usages = getattr(session, "turn_usages", None) or []
+    return int(getattr(usages[-1], "prompt_tokens", 0) or 0) if usages else 0
 
 
 @dataclass(frozen=True)
@@ -84,6 +98,9 @@ class RequestAssembler:
         self._emit = emit
         # M2: SOP router for recommending skills based on current context.
         self._router = SOPRouter(skills) if skills is not None else None
+        # Kept beside the router so an explicitly named skill can be resolved
+        # against the same registry the automatic recommendation uses.
+        self._skills = skills
 
     async def assemble(
         self,
@@ -104,7 +121,11 @@ class RequestAssembler:
             constraints = self._get_active_constraints(session)
             self._router.capture_pre_compaction_anchor(session, task, constraints)
         history = await self._compactor.compress(
-            session.messages, deadline=deadline, on_summary=books.summaries.append, pinned=pinned
+            session.messages,
+            deadline=deadline,
+            on_summary=books.summaries.append,
+            pinned=pinned,
+            **self._compactor_extras(session),
         )
         # R6a: the ring only pays for itself when this request's history was
         # actually rewritten — otherwise the recent turns are still there
@@ -198,6 +219,19 @@ class RequestAssembler:
                         f"[{intervention.skill_name}] {intervention.content}\n"
                         "</skill-pattern>"
                     )
+            # A skill the human named is the same kind of signal, stated by a
+            # person rather than a heuristic, so it rides the same block. The
+            # TUI writes `@name` into the composer; without this the name is
+            # decoration that reaches the model as prose.
+            requested = resolve_mentions(user_input, self._skills)
+            if requested:
+                named = ", ".join(f'name="{name}"' for name in requested)
+                recommended_skills_block += (
+                    "\n\n<requested-skills>\n"
+                    "用户显式指定了以下 skill，动手前先读取："
+                    f'skill(action="read", {named})。\n'
+                    "</requested-skills>"
+                )
         # I3: inject anchor after compaction
         anchor_block = self._format_anchor_block(session, compacted)
         # M2: the catalog sits with the other state to read, before the
@@ -300,6 +334,25 @@ class RequestAssembler:
         )
 
     # ---- I2: Constraint extraction ------------------------------------------
+
+    def _compactor_extras(self, session: SessionData) -> dict[str, Any]:
+        """The compaction arguments this particular compactor can accept.
+
+        ``compactor`` is injected as ``Any`` and an older one may only implement
+        the pre-existing signature. The new arguments are additive — the
+        compaction boundary and the provider's token count — so a compactor that
+        has not heard of them keeps working instead of raising, exactly as this
+        module already prefers ``compress_if_needed`` over ``compress``.
+        """
+        wanted = {
+            "session": session,
+            "observed_tokens": _observed_prompt_tokens(session),
+        }
+        try:
+            accepted = inspect.signature(self._compactor.compress).parameters
+        except (TypeError, ValueError):  # pragma: no cover — not introspectable
+            return {}
+        return {name: value for name, value in wanted.items() if name in accepted}
 
     def _get_active_constraints(self, session: SessionData) -> list[str]:
         """Get currently active memory constraints from session tracking."""

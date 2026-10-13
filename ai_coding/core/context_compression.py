@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -333,8 +334,15 @@ class ContextManager:
         ai_settings: Any,
         transcripts_root: str | Path,
         summarizer: Callable[[str], Awaitable[str | None]] | None = None,
+        context_window: int | None = None,
     ) -> None:
-        self._max_context_tokens = int(getattr(ai_settings, "max_context_tokens", 48000))
+        # ``context_window`` is the resolved number (config or model metadata).
+        # It wins over the raw setting because resolving it once at the
+        # composition root is what keeps the policy and the meter from
+        # disagreeing about how big the window is.
+        self._max_context_tokens = int(
+            context_window or getattr(ai_settings, "max_context_tokens", 0) or 48_000
+        )
         self._max_messages = int(getattr(ai_settings, "max_messages", 50))
         self._keep_head = int(getattr(ai_settings, "snip_keep_head", 3))
         self._keep_tail = int(getattr(ai_settings, "snip_keep_tail", 20))
@@ -374,8 +382,19 @@ class ContextManager:
             max_result_bytes=self._max_result_bytes,
             per_result_bytes=self._per_result_bytes,
         )
+        # What L4 must be shown is decided and captured BEFORE the snip, because
+        # the snip is the stage that destroys the evidence. Measured on a real
+        # session: `/compact` on 74 messages produced a bare
+        # `[snipped 51 messages]` and asked the model nothing — and once the
+        # order was "fixed" the summariser was still handed that marker, so the
+        # model wrote a summary of a sentence saying something had been deleted.
+        # A snip without a summary is deletion wearing a placeholder's clothes;
+        # a summary of the placeholder is deletion wearing a summary's clothes.
+        l4_head = self._l4_head_text(out)
         snipped = snip_middle(out, self._max_messages, self._keep_head, self._keep_tail)
         dropped = len(snipped) < len(out)
+        if dropped:
+            self._archive_dropped_history(out)
         out = snipped
         out = placeholder_old_results(
             out,
@@ -385,17 +404,9 @@ class ContextManager:
             elide_root=self._root,
         )
 
-        # Whether to summarise was decided BEFORE the snip, on the real history.
-        # Measured on a real session: `/compact` on 74 messages produced a bare
-        # `[snipped 51 messages]` and asked the model nothing. The cause was the
-        # order — snip cut 74 -> 24 messages, which dropped the estimate under
-        # the water mark, so the token-gated stage could no longer fire. A snip
-        # without a summary is deletion wearing a placeholder's clothes, and a
-        # compaction that drops messages is precisely the case that must not
-        # lose them.
         should_summarise = self._l4_should_run(out) or dropped
         if should_summarise and self._summarizer is not None:
-            out = await self._run_l4(out, on_summary=on_summary)
+            out = await self._run_l4(out, head_text=l4_head, on_summary=on_summary)
 
         if estimate_tokens(_joined_history_text(out)) > self._max_context_tokens:
             out = hard_trim(out, HARD_TRIM_KEEP_TAIL)
@@ -405,10 +416,24 @@ class ContextManager:
 
     # ---- R3b: the compaction policy -----------------------------------
 
-    def should_compact(self, messages: list[ChatMessage]) -> bool:
-        """True only once the estimate crosses the soft water mark."""
+    def should_compact(
+        self, messages: list[ChatMessage], observed_tokens: int = 0
+    ) -> bool:
+        """True once the context crosses the soft water mark.
+
+        ``estimate_tokens`` counts characters. Measured live, it read ~60k for a
+        history the provider billed at 237,157 — the gap is tool output (JSON,
+        code, base64) where four-characters-per-token is simply wrong. A gate that
+        only reads the estimate therefore cannot open until the request has
+        already failed, which is what it did.
+
+        So the gate takes the provider's own count when there is one, and takes
+        the larger of the two. A first session has no usage yet, and 0 keeps the
+        pre-existing estimate-only behaviour there.
+        """
         soft = int(self._max_context_tokens * self._compress_soft_ratio)
-        return estimate_tokens(_joined_history_text(messages)) > soft
+        observed = max(int(observed_tokens or 0), estimate_tokens(_joined_history_text(messages)))
+        return observed > soft
 
     async def compress_if_needed(
         self,
@@ -417,6 +442,7 @@ class ContextManager:
         force: bool = False,
         on_summary: Callable[[str], None] | None = None,
         pinned: Sequence[ChatMessage] = (),
+        observed_tokens: int = 0,
     ) -> list[ChatMessage]:
         """Compact **only** when the budget says so (or the user asked).
 
@@ -424,7 +450,7 @@ class ContextManager:
         keeps the prompt-cache prefix stable (measured: 92-93% hit rate with
         append-only turns, 26% when the middle was rewritten every turn).
         """
-        if not force and not self.should_compact(messages):
+        if not force and not self.should_compact(messages, observed_tokens):
             return messages
         out = await self.compress(messages, on_summary=on_summary, pinned=pinned)
         target = int(self._max_context_tokens * self._compress_target_ratio)
@@ -446,14 +472,21 @@ class ContextManager:
             return False
         return estimate_tokens(_joined_history_text(messages)) > self._max_context_tokens
 
+    def _l4_head_text(self, messages: list[ChatMessage]) -> str:
+        """The text L4 is meant to summarise, taken while it still exists."""
+        if self._l4_keep_tail >= len(messages):
+            return _joined_history_text(messages)
+        return _joined_history_text(messages[: -self._l4_keep_tail])
+
     async def _run_l4(
         self,
         messages: list[ChatMessage],
         *,
+        head_text: str | None = None,
         on_summary: Callable[[str], None] | None = None,
     ) -> list[ChatMessage]:
-        head, tail = messages[:-self._l4_keep_tail], messages[-self._l4_keep_tail:]
-        head_text = _joined_history_text(head)
+        tail = messages[-self._l4_keep_tail :]
+        head_text = self._l4_head_text(messages) if head_text is None else head_text
         self._persist_audit_copy(head_text)
         summary: str | None
         try:
@@ -473,6 +506,26 @@ class ContextManager:
             role="user", content=f"[以下为早期对话摘要]\n{summary}", timestamp=""
         )
         return [note, *tail]
+
+    def _archive_dropped_history(self, messages: list[ChatMessage]) -> None:
+        """The messages a compaction is about to remove, kept where a human can read them.
+
+        Compression answers "what does the model still see". It does not answer
+        "what did we say", and the transcript pane goes on rendering the
+        compacted history — so without this the only record of those messages is
+        a content-hashed audit file nobody can locate. The file is dated so the
+        newest is obvious on disk, and it lives outside the context: the model
+        never reads it unless something asks it to.
+        """
+        text = _joined_history_text(messages)
+        try:
+            root = self._root / "transcripts" / "archive"
+            root.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+            (root / f"{stamp}-{digest}.md").write_text(text, encoding="utf-8")
+        except OSError:
+            pass  # best-effort; an unwritable disk must not fail a turn
 
     def _persist_audit_copy(self, text: str) -> None:
         try:

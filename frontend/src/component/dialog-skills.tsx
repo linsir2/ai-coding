@@ -1,7 +1,13 @@
 /**
  * Skills dialog (M3) — DialogSkill: the registry's skills with their
- * description and phase.  Read-only: this project has no "attach skill to
- * prompt" action (the model loads skills itself), so selecting just closes.
+ * description and phase.
+ *
+ * The panel is opened from two places. On Home there is no composer, so a
+ * selection just closes it. Inside a session the selection hands the name to the
+ * composer, which writes `@name` — the same spelling the request assembler
+ * resolves back into a skill (OpenCode writes `@${skill}` at
+ * `prompt/index.tsx:590` for the identical gesture). `onSelect` is absent on
+ * Home, which is what makes the two cases the same component.
  */
 
 import { createSignal, onMount } from "solid-js"
@@ -16,7 +22,7 @@ interface SkillRow {
   phase: string
 }
 
-export function DialogSkills(props: { client: IpcClient }) {
+export function DialogSkills(props: { client: IpcClient; onSelect?: (name: string) => void }) {
   const dialog = useDialog()
   const [rows, setRows] = createSignal<SkillRow[]>([])
   const [error, setError] = createSignal("")
@@ -38,12 +44,17 @@ export function DialogSkills(props: { client: IpcClient }) {
       category: skill.phase || "Skills",
     }))
 
+  const choose = (option: SelectOption) => {
+    props.onSelect?.(String(option.value ?? option.title))
+    dialog.close()
+  }
+
   return (
     <DialogSelect
       title="Skills"
       options={options()}
-      onSelect={() => dialog.close()}
-      footer={error() || "esc close"}
+      onSelect={choose}
+      footer={error() || (props.onSelect ? "enter add to prompt" : "esc close")}
     />
   )
 }

@@ -40,7 +40,7 @@ class AIConfig(BaseModel):
     max_tool_iterations: int = 10
     max_concurrent_subagents: int = 3
     subagent_worktree_isolation: bool = True
-    max_context_tokens: int = 48_000
+    max_context_tokens: int = 0
     # R3b: demoted from "trim every turn at 50 messages" to "fallback cap used
     # when the token budget is exceeded" (docs/r3-analysis.md 1.15).
     max_messages: int = 400
@@ -409,4 +409,32 @@ def _coerce_model(raw: dict[str, Any]) -> ModelConfig:
         price_output_per_1k=float(raw.get("price_output_per_1k", 0.0) or 0.0),
         price_cached_per_1k=float(raw.get("price_cached_per_1k", 0.0) or 0.0),
         fallback_models=_coerce_fallbacks(raw.get("fallback_models")),
+        context_window=max(0, int(raw.get("context_window", 0) or 0)),
     )
+
+
+#: What a model that has not declared a window gets.  It was a hardcoded guess
+#: that a 256k model inherited as 48k, so the soft water mark sat at 15% of real
+#: capacity.  Unknown now means "assume the small one" rather than "assume the
+#: large one": a too-low guess costs an unnecessary compaction, a too-high guess
+#: costs a failed request.
+DEFAULT_CONTEXT_TOKENS = 48_000
+
+
+def resolve_context_window(config: Any) -> int:
+    """The window the compaction policy and the meter must both agree on.
+
+    Three sources, in order of authority: an explicit ``ai.max_context_tokens``,
+    then the active model's own ``context_window``, then the conservative
+    default.  The config stays the override (per decision) but stops being the
+    only place the number can come from, so switching models cannot silently
+    leave the previous model's window in force.
+    """
+    configured = int(getattr(getattr(config, "ai", None), "max_context_tokens", 0) or 0)
+    if configured > 0:
+        return configured
+    default_model = str(getattr(config, "default_model", "") or "")
+    models = getattr(config, "models", None) or {}
+    model = models.get(default_model)
+    declared = int(getattr(model, "context_window", 0) or 0)
+    return declared if declared > 0 else DEFAULT_CONTEXT_TOKENS

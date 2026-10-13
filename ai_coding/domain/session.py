@@ -284,6 +284,11 @@ class SessionData:
         # idle sessions never grow this key at all.
         if self.turn_usages:
             data["turnUsages"] = [row.to_dict() for row in self.turn_usages]
+        # Same rule again.  Without this the boundary survives only in memory:
+        # reloading a compacted session brought back the usage rows the
+        # compaction had already invalidated, and the meter read them again.
+        if self.last_compacted_turn:
+            data["lastCompactedTurn"] = int(self.last_compacted_turn)
         # Same rule again: sessions without acceptance contracts write no key,
         # so every file written before R0-1 keeps reading byte-identically.
         if self.acceptance:
@@ -338,6 +343,7 @@ class SessionData:
             turn_count=int(data.get("turnCount", 0) or 0),
             turn_digests=digests,
             turn_usages=usages,
+            last_compacted_turn=int(data.get("lastCompactedTurn", 0) or 0),
             acceptance=acceptance,
             step_deliveries=step_deliveries,
         )
