@@ -23,7 +23,7 @@ from ai_coding.ai.llm_helpers import (
     CHECKPOINT_OPEN,
     SINCE_CLOSE,
     SINCE_OPEN,
-    SUMMARY_SECTIONS,
+    checkpoint_body,
 )
 from ai_coding.domain.message import ChatMessage
 
@@ -79,6 +79,13 @@ def snip_middle(
 ) -> list[ChatMessage]:
     """Trim the (invisible) middle of an over-long history into a placeholder."""
     if len(messages) <= max_messages:
+        return messages
+    if len(messages) <= keep_head + keep_tail:
+        # head and tail would overlap, and trimming that copies the head: a
+        # checkpoint at the head is then installed twice, and every trimmed
+        # message is sent twice.  Going over budget is temporary; duplication is
+        # corruption.  Measured live with max_messages=12 — see
+        # tests/test_compaction_shape.py.
         return messages
     head = messages[:keep_head]
     tail = messages[-keep_tail:]
@@ -325,11 +332,11 @@ def split_checkpoint(
     anything forward.
 
     Only one thing can be our checkpoint: the note ``_run_l4`` returns at the
-    head of the compacted history.  Position and marker alone are not enough —
-    the marker is a public string, and a user's first message can carry it
-    verbatim.  The third check is the one that actually discriminates: a real
-    checkpoint's body begins with a section heading, because ``build_summarizer``
-    is the only thing that ever writes one.
+    head of the compacted history.  Position and marker are not enough — the
+    marker is a public string and a user's first message can carry it verbatim —
+    so the shape is decided by ``checkpoint_body``, the same definition the
+    summariser accepts against.  Three private copies of "is this a checkpoint"
+    would drift; two readers of one function cannot.
 
     Pure, total, and a no-op on a clean history — which is what keeps the first
     compaction bit-identical.
@@ -340,8 +347,8 @@ def split_checkpoint(
     body = head.content or ""
     if head.role != "user" or not body.startswith(CHECKPOINT_MARK):
         return "", list(messages)
-    verdict = body[len(CHECKPOINT_MARK) :].strip()
-    if not verdict.startswith(SUMMARY_SECTIONS):
+    verdict = checkpoint_body(body[len(CHECKPOINT_MARK) :])
+    if verdict is None:
         return "", list(messages)
     return verdict, list(messages[1:])
 

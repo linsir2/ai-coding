@@ -25,7 +25,7 @@ from pathlib import Path
 from ai_coding.ai.llm_helpers import (
     SUMMARY_SECTIONS,
     build_summarizer,
-    summary_is_usable,
+    checkpoint_body,
     summary_within_growth_bound,
 )
 from ai_coding.config.models import AIConfig
@@ -219,9 +219,13 @@ def test_the_template_carries_the_seven_sections():
 
 
 def test_a_reply_with_any_section_still_counts_as_a_summary():
-    assert summary_is_usable("## 决策\n用了 uv") is True
-    assert summary_is_usable("好的，我总结了一下") is False
-    assert summary_is_usable("") is False
+    # `summary_is_usable` was replaced by `checkpoint_body` (R14): one
+    # definition, read by the summariser and by the compressor, instead of a
+    # substring test and a prefix test that disagreed. The three cases below are
+    # unchanged — only the name they ask is.
+    assert checkpoint_body("## 决策\n用了 uv") == "## 决策\n用了 uv"
+    assert checkpoint_body("好的，我总结了一下") is None
+    assert checkpoint_body("") is None
 
 
 def test_the_merged_prompt_names_both_halves_and_the_merge_rules():

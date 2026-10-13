@@ -77,21 +77,24 @@ async def test_the_extractor_never_turns_malformed_json_into_memories(monkeypatc
 
 
 def test_the_shape_check_accepts_a_structured_summary():
-    from ai_coding.ai.llm_helpers import summary_is_usable
+    # `summary_is_usable` was replaced by `checkpoint_body` in R14 — the answer
+    # is now also the canonical body, and the compressor reads the same function
+    # so the two cannot disagree about what a checkpoint is. Cases unchanged.
+    from ai_coding.ai.llm_helpers import checkpoint_body
 
-    assert summary_is_usable("## 目标\n完成压缩\n## 已完成\n- 读了 loader")
-    assert summary_is_usable("## 关键文件\n- `a.py`")
+    assert checkpoint_body("## 目标\n完成压缩\n## 工作状态\n- 读了 loader")
+    assert checkpoint_body("## 关键文件\n- `a.py`")
 
 
 def test_the_shape_check_refuses_an_unstructured_reply():
     """The failure this exists for: the model answers in prose, the pipeline
     installs it as the early history, and the agent continues on a summary that
     says nothing."""
-    from ai_coding.ai.llm_helpers import summary_is_usable
+    from ai_coding.ai.llm_helpers import checkpoint_body
 
-    assert not summary_is_usable("好的，这段对话主要讲了压缩的事情。")
-    assert not summary_is_usable("")
-    assert not summary_is_usable("   \n  ")
+    assert checkpoint_body("好的，这段对话主要讲了压缩的事情。") is None
+    assert checkpoint_body("") is None
+    assert checkpoint_body("   \n  ") is None
 
 
 @pytest.mark.asyncio

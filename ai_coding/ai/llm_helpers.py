@@ -137,19 +137,31 @@ _SUMMARY_NUDGE = (
 )
 
 
-def summary_is_usable(text: str) -> bool:
-    """True when a model reply is shaped like a summary (G5-3).
+def checkpoint_body(text: str) -> str | None:
+    """The canonical checkpoint in ``text``, or ``None`` if there is not one.
 
-    Deliberately coarse — at least one required section heading — because the
-    cost of the two mistakes is asymmetric: accepting prose installs a useless
-    summary that the agent then reasons from, while rejecting a good one only
-    degrades to the trimmed history the pipeline already falls back on.  This is
-    the same check the reference implementations make.
+    One definition of "what counts as a checkpoint", read by the two places that
+    have to agree: the summariser that decides whether to accept a reply, and the
+    compressor that decides whether a stored note is one.  They used to answer
+    separately — a substring test and a prefix test — and disagreed, so a reply
+    carrying a preamble was installed and then never found again, and R11's merge
+    silently stopped working for that session.  Same shape as the meter and the
+    gate both answering "which usage is still live" on their own (M11-0g).
+
+    A heading matches when the whole trimmed line is one, which is what OpenCode
+    does (``filled``, compaction.ts:269).  Substring matching cannot tell
+    ``### 已完成`` from ``## 工作状态`` — ``## `` sits inside the former — and
+    it accepts prose that merely mentions a heading.
+
+    Returns from the first heading onward, so a preamble is dropped rather than
+    rejected: it costs a paid retry to reject, and the retry usually does not
+    help.  ``docs/r11-analysis.md`` §14.
     """
-    body = (text or "").strip()
-    if not body:
-        return False
-    return any(section in body for section in SUMMARY_SECTIONS)
+    lines = (text or "").strip().split("\n")
+    for index, line in enumerate(lines):
+        if line.strip() in SUMMARY_SECTIONS:
+            return "\n".join(lines[index:]).strip()
+    return None
 
 
 def _clip_for_summary(text: str) -> str:
@@ -205,11 +217,12 @@ def build_summarizer(model_config: Any) -> Summarizer:
                 )
             except Exception:
                 return None  # best-effort; never break the compression pipeline
-            if not summary_is_usable(out):
+            body = checkpoint_body(out)
+            if body is None:
                 continue
-            if not summary_within_growth_bound(previous_len, out):
+            if not summary_within_growth_bound(previous_len, body):
                 continue
-            return out
+            return body
         return None
 
     return summarize
@@ -292,9 +305,8 @@ def _messages_to_text(
 
 __all__ = [
     "SUMMARY_SECTIONS",
-    "summary_is_usable",
+    "checkpoint_body",
     "summary_within_growth_bound",
-    "build_summarizer",
     "build_summarizer",
     "build_extractor",
     "_chat",
