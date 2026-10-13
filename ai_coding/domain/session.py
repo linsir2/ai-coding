@@ -122,6 +122,11 @@ class SessionData:
     # Per-turn token spend (see TurnUsage).  Sessions written before this
     # existed simply have no key; the file stays readable everywhere.
     turn_usages: list[TurnUsage] = field(default_factory=list)
+    # M11: the turn the last compaction happened in. Usage rows at or before it
+    # measured a context that no longer exists, so the context meter ignores them
+    # (see `server.handlers.context_tokens`). 0 means "never compacted", which
+    # keeps the ordinary reading — the newest turn — unchanged.
+    last_compacted_turn: int = 0
     # NOT persisted — ``to_dict`` is a hand-written whitelist, so this stays out
     # of the on-disk format and the Java side keeps reading the same bytes.
     # ``SessionService.list_sessions`` reads every file anyway and drops the

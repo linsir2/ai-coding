@@ -374,7 +374,9 @@ class ContextManager:
             max_result_bytes=self._max_result_bytes,
             per_result_bytes=self._per_result_bytes,
         )
-        out = snip_middle(out, self._max_messages, self._keep_head, self._keep_tail)
+        snipped = snip_middle(out, self._max_messages, self._keep_head, self._keep_tail)
+        dropped = len(snipped) < len(out)
+        out = snipped
         out = placeholder_old_results(
             out,
             self._keep_recent_results,
@@ -383,7 +385,16 @@ class ContextManager:
             elide_root=self._root,
         )
 
-        if self._l4_should_run(out) and self._summarizer is not None:
+        # Whether to summarise was decided BEFORE the snip, on the real history.
+        # Measured on a real session: `/compact` on 74 messages produced a bare
+        # `[snipped 51 messages]` and asked the model nothing. The cause was the
+        # order — snip cut 74 -> 24 messages, which dropped the estimate under
+        # the water mark, so the token-gated stage could no longer fire. A snip
+        # without a summary is deletion wearing a placeholder's clothes, and a
+        # compaction that drops messages is precisely the case that must not
+        # lose them.
+        should_summarise = self._l4_should_run(out) or dropped
+        if should_summarise and self._summarizer is not None:
             out = await self._run_l4(out, on_summary=on_summary)
 
         if estimate_tokens(_joined_history_text(out)) > self._max_context_tokens:

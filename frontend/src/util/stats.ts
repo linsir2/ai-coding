@@ -10,8 +10,17 @@ export function formatTokens(tokens: number): string {
   return formatter.format(tokens)
 }
 
-/** Rounded 0..100 percentage; a non-positive limit reads as 0. */
+/**
+ * Rounded percentage; a non-positive limit reads as 0.
+ *
+ * Not clamped to 100. Measured live: `max_context_tokens` was set to 48,000
+ * against a model whose real window is 256k, so the meter reported 237,157
+ * tokens as a flat "100% used" — and a full window that still accepted
+ * requests looks exactly like a bug. Showing 494% says plainly that the
+ * configured window disagrees with the model, which is the truth and is
+ * actionable.
+ */
 export function percentUsed(tokens: number, max: number): number {
   if (max <= 0) return 0
-  return Math.min(100, Math.max(0, Math.round((tokens / max) * 100)))
+  return Math.max(0, Math.round((tokens / max) * 100))
 }

@@ -137,6 +137,32 @@ class _WorldState:
         self.turn_futures: set[Future[Any]] = set()
 
 
+def context_tokens(session: Any) -> int:
+    """The newest turn's prompt tokens that still describe the live context.
+
+    Measured live: after ``/compact`` the sidebar still read 237,157 / 100%, because
+    it reported the last turn's prompt tokens and a compaction produces no turn.
+    The pre-compaction number describes a context that no longer exists, so
+    presenting it as the current occupancy is a false statement about how full the
+    window is.
+
+    So usage from a turn at or before the boundary is discarded, and the meter
+    reads zero until a turn has actually been measured against the compacted
+    history. OpenCode does the same by dropping every assistant usage recorded
+    before the latest completed compaction.
+    """
+    if session is None:
+        return 0
+    usages = getattr(session, "turn_usages", None)
+    if not usages:
+        return 0
+    boundary = int(getattr(session, "last_compacted_turn", 0) or 0)
+    after = [row for row in usages if int(getattr(row, "turn", 0)) > boundary]
+    if not after:
+        return 0
+    return int(getattr(after[-1], "prompt_tokens", 0) or 0)
+
+
 def make_handlers(
     world: AppWorld,
     service: IpcService,
@@ -579,16 +605,10 @@ def make_handlers(
     def session_stats(params: dict[str, Any]) -> dict[str, Any]:
         """Token usage for the sidebar/status bar (M4).
 
-        The session file persists one summed usage row per turn (prompt +
-        completion), not a per-request context size; ``tokens`` is therefore
-        the most recent turn's prompt tokens — the context it sent, our
-        closest measure of context occupancy.
+        ``context_tokens`` explains why a compaction zeroes the reading.
         """
         session = state.session
-        tokens = 0
-        usages = getattr(session, "turn_usages", None) if session is not None else None
-        if usages:
-            tokens = int(getattr(usages[-1], "prompt_tokens", 0) or 0)
+        tokens = context_tokens(session)
         ai_cfg = getattr(world.config, "ai", None)
         return {
             "tokens": tokens,
