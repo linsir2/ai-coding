@@ -96,7 +96,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     )
     skill_registry = SkillRegistry(roots)
     for name, scope in skill_registry.shadowed():
-        _log.warning("skill %r from the %s library is shadowed by the project's", name, scope)
+        _log.warning("skill %r at %s is shadowed (project scope wins)", name, scope)
     registry = _build_tool_registry(
         app_cfg, workspace, skill_registry,
         user_prompt=user_prompt, base_instructions=BASE_INSTRUCTIONS,

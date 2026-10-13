@@ -53,7 +53,12 @@ class AIConfig(BaseModel):
     # a window of 0 is still safe (it only costs the model a read).
     l2_window_chars: int = 200
     l2_window_budget: int = 4_000
-    l4_keep_tail: int = 6
+    # P3-2 refactor: the L4 tail is token-budgeted (OpenCode parity), not
+    # counted.  Effective budget is min(l4_tail_tokens, window // 4): the
+    # tail alone can never approach the post-compaction paging target.
+    # The default 15k matches OpenCode's keep; backtracked to a user
+    # boundary, never empty.
+    l4_tail_tokens: int = 15_000
     # ---- R1a orchestration (docs/r1-analysis.md) --------------------------
     # How a turn is allowed to end.  "todo_aware" gates the stop on open items.
     stop_policy: Literal["natural", "todo_aware", "strict"] = "todo_aware"
@@ -115,9 +120,19 @@ class AIConfig(BaseModel):
     # R3b: compaction is budget-triggered, not count-triggered.  Measured on the
     # old defaults, the message-count rule trimmed at turn 26 while 5.2% of the
     # token budget was used, rewriting the middle of the history every turn and
-    # destroying prompt-cache hits.  Compact at 0.8 of the budget, down to 0.5.
-    compress_soft_ratio: float = 0.8
+    # destroying prompt-cache hits.  The gate is the OpenCode ceiling —
+    # window minus max(10%, 16k once the window is >= 32k) — and the result
+    # pages down to compress_target_ratio of the budget.
     compress_target_ratio: float = 0.5
+    # OpenCode's settings.auto, our shape: False stops the proactive (budget
+    # driven) compaction only.  /compact and the overflow rescue are outside
+    # this gate — a turn must still finish even with proactive compaction off.
+    auto_compact: bool = True
+    # E-5: per-skill policy for the model's skill tool (allow | ask | deny).
+    # deny also hides the skill from the model's catalog and withholds
+    # @mention injection; ask routes the model's own reads through the
+    # approval panel. A typo is a load error, not a silent allow.
+    skill_permissions: dict[str, Literal["allow", "ask", "deny"]] = Field(default_factory=dict)
     # R4b: cumulative token ceiling for one turn (it counts every re-sent context,
     # so it is a spend cap, not a window size).  0 disables the gate.
     turn_token_budget: int = 0

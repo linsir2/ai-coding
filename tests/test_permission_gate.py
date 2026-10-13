@@ -114,3 +114,40 @@ def test_decision_reason_for_warn():
     d = gate.check("write", {"path": "f.txt"})
     assert d == PermissionDecision.WARN
     assert d.reason
+
+
+# ---- r16/E-5: per-skill policy for the model's skill tool -----------------
+
+
+def test_a_denied_skill_cannot_be_read_by_the_model():
+    gate = PermissionGate(skill_permissions={"danger": "deny"})
+
+    decision = gate.check("skill", {"action": "read", "name": "danger"})
+
+    assert decision == PermissionDecision.DENY
+
+
+def test_an_ask_skill_routes_the_read_through_approval():
+    gate = PermissionGate(skill_permissions={"careful": "ask"})
+
+    decision = gate.check("skill", {"action": "read", "name": "careful"})
+
+    assert decision == PermissionDecision.WARN
+    assert "careful" in decision.reason
+
+
+def test_the_policy_is_keyed_by_canonical_id_not_spelling():
+    def resolve(name: str) -> str | None:
+        return "tidy" if name in {"tidy", "clean"} else None
+
+    gate = PermissionGate(skill_permissions={"clean": "deny"}, skill_resolver=resolve)
+
+    assert gate.check("skill", {"action": "read", "name": "tidy"}) == PermissionDecision.DENY
+    assert gate.check("skill", {"action": "read", "name": "clean"}) == PermissionDecision.DENY
+
+
+def test_listing_and_unlisted_skills_are_untouched():
+    gate = PermissionGate(skill_permissions={"danger": "deny"})
+
+    assert gate.check("skill", {"action": "list"}) == PermissionDecision.ALLOW
+    assert gate.check("skill", {"action": "read", "name": "plain"}) == PermissionDecision.ALLOW

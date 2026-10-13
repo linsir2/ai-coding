@@ -1,13 +1,15 @@
-"""A skill the user pointed at must reach the model.
+"""A skill the user pointed at must reach the model — loaded, not just named.
 
 The TUI's `/skills` panel closed on Enter and did nothing. That is a UI symptom;
 the reason nothing happened afterwards is that `@name` meant nothing to the
 system — there was no mention syntax anywhere in the codebase, so the text landed
 in the transcript as decoration.
 
-Rather than invent an attachment type, an explicit reference rides the block that
-already carries the router's *automatic* recommendation. A user naming a skill is
-the same kind of signal, stated by a human instead of a heuristic.
+The first fix routed the reference through the router's block as a *directive*
+(the model still had to call the tool). r16/E-3 finished the OpenCode
+semantics: the block carries the skill's full `<skill_content>` — same shape
+the tool renders (``skills/render.py``) — so the naming turn needs no second
+round trip.
 """
 
 import asyncio
@@ -76,7 +78,7 @@ def test_an_archived_skill_still_resolves_when_it_is_named(tmp_path):
 # ---- the block the model actually reads ------------------------------------
 
 
-def _assembler(registry) -> RequestAssembler:
+def _assembler(registry, permissions=None) -> RequestAssembler:
     class _Compactor:
         async def compress(self, history, **kwargs):
             return history
@@ -94,6 +96,7 @@ def _assembler(registry) -> RequestAssembler:
 
     class _Settings:
         working_memory_chars = 1200
+        skill_permissions = permissions or {}
 
     async def _instructions(deadline, session=None):
         return None
@@ -110,10 +113,10 @@ def _assembler(registry) -> RequestAssembler:
     )
 
 
-def _request_text(registry, user_text: str) -> str:
+def _request_text(registry, user_text: str, permissions=None) -> str:
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
     session.messages.append(ChatMessage(role="user", content=user_text, timestamp="t"))
-    assembler = _assembler(registry)
+    assembler = _assembler(registry, permissions)
 
     async def _run():
         return await assembler.assemble(
@@ -147,9 +150,10 @@ def test_the_named_skill_appears_in_the_request_the_model_sees(tmp_path):
     )
 
 
-def test_the_named_skill_is_told_how_to_load_itself(tmp_path):
-    """Reusing the router's block means reusing the contract the model already
-    knows: skills are read through the skill tool by name."""
+def test_the_named_skill_is_spelled_the_way_the_tool_takes_it(tmp_path):
+    """The block names the skill exactly as the tool's argument schema does —
+    since r16/E-3 via the `<skill_content name="…">` wrapper that carries the
+    content itself."""
     _write_skill(tmp_path, "tidy")
 
     text = _request_text(SkillRegistry(tmp_path), "用 @tidy 收拾一下")
@@ -174,3 +178,45 @@ def test_mention_resolution_is_usable_without_a_registry():
 def test_sop_router_format_block_still_accepts_nothing():
     """Ignore case for the new path: the automatic recommendation keeps working."""
     assert SOPRouter.format_block([]) == "" or True
+
+def test_the_named_skill_content_travels_with_the_request(tmp_path):
+    """E-3: the model acts in the naming turn — no round trip through the
+    tool. This is OpenCode's @-mention semantics (prompt.ts:56-76)."""
+    _write_skill(tmp_path, "tidy")
+
+    text = _request_text(SkillRegistry(tmp_path), "用 @tidy 收拾一下")
+
+    assert '<skill_content name="tidy">' in text
+    assert "tidy 的正文" in text
+    assert 'skill(action="read"' not in text, "the tool pointer is gone: the content is here"
+
+
+def test_the_injected_skill_carries_its_base_directory(tmp_path):
+    _write_skill(tmp_path, "tidy")
+
+    text = _request_text(SkillRegistry(tmp_path), "用 @tidy 收拾一下")
+
+    assert f"Base directory for this skill: {tmp_path / 'tidy'}" in text
+
+
+def test_a_broken_skill_says_why_instead_of_injecting_a_body(tmp_path):
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / "SKILL.md").write_text(
+        "---\nname: [unclosed\n---\nbody\n", encoding="utf-8"
+    )
+
+    text = _request_text(SkillRegistry(tmp_path), "@broken 走一遍")
+
+    assert "无法加载" in text
+    assert "<skill_content" not in text
+
+
+def test_a_denied_skill_is_withheld_from_the_mention_block(tmp_path):
+    _write_skill(tmp_path, "tidy")
+
+    text = _request_text(
+        SkillRegistry(tmp_path), "用 @tidy 收拾一下", permissions={"tidy": "deny"}
+    )
+
+    assert "已被配置禁止" in text
+    assert "tidy 的正文" not in text

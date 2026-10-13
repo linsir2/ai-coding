@@ -25,6 +25,7 @@ import { Sidebar } from "../component/sidebar"
 import { StatusBar } from "../component/status-bar"
 import { useDialog } from "../dialog/context"
 import type { IpcClient } from "../ipc"
+import type { SkillOption } from "../util/mention"
 import type { Action, SessionState } from "../state/session"
 import { initialState, reduce } from "../state/session"
 import { useToast } from "../component/toast"
@@ -60,6 +61,8 @@ export interface SessionProps {
   onOpenSessions: () => void
   /** The tab list can go stale after a turn; the shell refreshes it. */
   onTurnFinished: () => void
+  /** The registry's skills, for the composer's `@` suggestions (r16/E-2). */
+  skills: SkillOption[]
 }
 
 interface Stats {
@@ -194,13 +197,10 @@ export function Session(props: SessionProps) {
         group: "Skill",
         desc: "List available skills",
         palette: true,
-        // The app layer opens the same panel read-only, because Home has no
-        // composer to hand a selection to. Inside a session the selection goes
-        // to the composer, which writes `@name` — the spelling the request
-        // assembler resolves back into a skill. Registering the command here is
-        // what the session route already does for `/plan` and `/review`; the
-        // closer layer wins (keymap: registerLayer), so no dialog plumbing is
-        // needed to reach the composer.
+        // Registered here rather than at the app layer (r16/E-1): the command
+        // seeds `@name` into *this* route's composer, so every composer-owning
+        // route registers its own variant. Registering both layers used to
+        // show two identical "Skills" rows in the palette.
         run: () =>
           dialog.open(
             () => (
@@ -236,22 +236,32 @@ export function Session(props: SessionProps) {
         }
         if (action === "quit") props.onQuit()
         if (event.data["reload"] === true) {
-          // The command rewrote the persisted history shorter (/compact):
-          // the transcript is a projection of it, so re-project — the queued
-          // line survives (I9) and the explanation rides a toast because the
-          // "[compact] …" notice is wiped by the very re-projection (D1).
+          // The live session switched (/clear, /resume): re-project onto the
+          // new history.  Same-session rewrites (/compact) no longer reload —
+          // the live rows stay, and the fact rides `compacted` below.
           void (async () => {
-            const before = Number(event.data["messagesBefore"] ?? 0)
-            const after = Number(event.data["messagesAfter"] ?? 0)
             const loaded = await loadSession(props.client, props.sessionId)
             setState({ ...loaded, queued: state.queued })
             void refreshStats()
+          })()
+        }
+        {
+          // A same-session history rewrite reports itself for the toast.  It
+          // is separate from `reload` above: only a switch re-projects.
+          const compacted = event.data["compacted"] as
+            | { before?: unknown; after?: unknown }
+            | null
+            | undefined
+          const before = typeof compacted?.before === "number" ? compacted.before : 0
+          const after = typeof compacted?.after === "number" ? compacted.after : 0
+          if (compacted && before > after) {
             toast.show({
               title: "Compacted",
-              message: `${before} → ${after} messages · transcript resynced`,
+              message: `${before} → ${after} messages`,
               variant: "info",
             })
-          })()
+            void refreshStats()
+          }
         }
         // One queued line per finished turn.
         const next = state.queued[0]
@@ -279,6 +289,13 @@ export function Session(props: SessionProps) {
           title: "Sub-agent",
           message: `${String(event.data["name"] ?? "")} ${String(event.data["status"] ?? "")}`,
           variant: event.data["status"] === "completed" ? "success" : "error",
+        })
+      }
+      if (event.type === "compaction.failed") {
+        toast.show({
+          title: "Compaction failed",
+          message: String(event.data["error"] ?? ""),
+          variant: "error",
         })
       }
     })
@@ -353,6 +370,7 @@ export function Session(props: SessionProps) {
                 onOverlay={setSuggesting}
                 seed={promptSeed()}
                 onSeedDone={() => setPromptSeed("")}
+                skills={props.skills}
               />
             </>
           </Show>

@@ -24,7 +24,16 @@ ai:
   snip_keep_tail: 20
   keep_recent_tool_results: 3
   per_result_persist_bytes: 30000
-  l4_keep_tail: 6
+  l4_tail_tokens: 15000
+  # false stops the proactive (budget-driven) compaction; /compact and the
+  # overflow rescue still work (OpenCode settings.auto parity).
+  auto_compact: true
+  # E-5: per-skill policy for the model's skill tool. deny hides the skill
+  # from the model's catalog and withholds @mention injection too; ask sends
+  # the model's own reads through the approval panel. Example:
+  # skill_permissions:
+  #   some-imported-skill: ask
+  skill_permissions: {}
   # R1a orchestration (see docs/r1-analysis.md)
   stop_policy: todo_aware          # natural | todo_aware | strict
   max_todo_nudges: 2

@@ -243,7 +243,7 @@ async def test_l4_summary_reaches_the_harvest(tmp_path):
     async def summarizer(text: str) -> str:
         return "摘要：决定用 uv"
 
-    cfg = _cfg(max_context_tokens=60, max_messages=400, l4_keep_tail=2, max_tool_iterations=1)
+    cfg = _cfg(max_context_tokens=60, max_messages=400, max_tool_iterations=1)
     loop = _loop(
         _Engine("很长的一段回答" * 40),
         sessions,

@@ -97,6 +97,41 @@ function PartView(props: { part: Part; alwaysOpen: boolean }) {
           </box>
         )}
       </Match>
+      <Match when={props.part.kind === "compaction" && props.part}>
+        {(part) => {
+          const row = () => part() as Extract<Part, { kind: "compaction" }>
+          const reasonLabel =
+            row().reason === "manual" ? "手动" : row().reason === "overflow" ? "溢出" : "自动"
+          return (
+            <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
+              {row().status === "running" ? (
+                <text fg={theme.textMuted}>◇ 正在压缩（{reasonLabel}）…</text>
+              ) : row().status === "failed" ? (
+                <text fg={theme.feedbackError}>✗ 压缩失败：{row().error}</text>
+              ) : row().status === "skipped" ? (
+                <text fg={theme.textMuted}>○ 无可压缩内容</text>
+              ) : (
+                <text fg={theme.textMuted}>── 压缩 ──</text>
+              )}
+              {row().text ? (
+                <markdown
+                  content={row().text}
+                  streaming={row().status === "running"}
+                  syntaxStyle={markdownSyntax}
+                  fg={theme.textBase}
+                  bg={theme.backgroundBase}
+                />
+              ) : null}
+              {row().status === "done" ? (
+                <text fg={theme.textMuted}>
+                  · {row().beforeMessages}→{row().afterMessages} 条 · {row().inputTokens} in ·{" "}
+                  {row().outputTokens} out · 压缩耗 {row().totalTokens}
+                </text>
+              ) : null}
+            </box>
+          )
+        }}
+      </Match>
     </Switch>
   )
 }

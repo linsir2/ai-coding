@@ -42,7 +42,7 @@ CANARY_OLD = "CANARY-OLD-1111"
 
 def _manager(summarizer, **overrides) -> ContextManager:
     return ContextManager(
-        AIConfig(**{"max_context_tokens": 3000, "max_messages": 12, "l4_keep_tail": 6, **overrides}),
+        AIConfig(**{"max_context_tokens": 3000, "max_messages": 12, **overrides}),
         transcripts_root=Path(tempfile.mkdtemp()),
         summarizer=summarizer,
     )
@@ -109,10 +109,11 @@ def test_the_previous_verdict_reaches_the_summariser_intact():
 
     assert CANARY_OLD not in FIRST_SUMMARY  # guard the fixture itself
     assert "把审计做完" in sink[0], "the previous verdict rides in whole"
-    assert "第一批-34" in sink[0], (
-        "what happened since the checkpoint rides beside it — the tail the first "
-        "compaction kept verbatim"
+    assert "第一批-" in sink[0], (
+        "what happened since the checkpoint rides beside it — first-batch "
+        "content outside the verbatim tail the first compaction kept"
     )
+    assert "第二批-0" in sink[0], "and the new conversation beside that"
 
 
 def test_truncation_says_so_instead_of_ending_in_silence():
@@ -139,17 +140,23 @@ def test_a_history_with_no_checkpoint_is_untouched():
 
 def test_the_first_pass_produces_exactly_the_old_text():
     """The I case that matters: with no checkpoint there is nothing to label, so
-    the head must be the plain joined transcript it has always been."""
+    the head must be the plain joined transcript it has always been — minus
+    exactly the tail that survives verbatim (summarising what stays would be
+    paying twice for the same words)."""
     from ai_coding.core.context_compression import _joined_history_text
 
     sink: list[str] = []
     manager = _manager(_recorder(sink))
 
-    asyncio.run(manager.compress(_chat(40, "第一批")))
+    history = _chat(40, "第一批")
+    out = asyncio.run(manager.compress(history))
 
     assert "<previous-checkpoint>" not in sink[0]
     assert "<conversation-since-checkpoint>" not in sink[0]
-    assert sink[0] == _joined_history_text(_chat(40, "第一批")[:-6])
+    kept = len(out) - 1  # the note plus the verbatim tail
+    assert kept >= 1, "the tail never vanishes"
+    assert sink[0] == _joined_history_text(history[: len(history) - kept])
+    assert [m.content for m in out[1:]] == [m.content for m in history[len(history) - kept :]]
 
 
 def test_only_the_head_checkpoint_counts():

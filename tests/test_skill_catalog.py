@@ -152,3 +152,13 @@ def test_a_removed_skill_is_withdrawn_explicitly(tmp_path):
     note = superseded_note(("a", "b"), (_skill(tmp_path, "a", "d"),))
 
     assert "b" in note and "do not use" in note
+
+
+def test_a_skill_the_author_disabled_is_not_listed(tmp_path):
+    quiet = _skill(tmp_path, "quiet", "d", **{"disable-model-invocation": True})
+    loud = _skill(tmp_path, "loud", "d")
+
+    text = build_catalog([quiet, loud])
+
+    assert "quiet" not in text
+    assert "loud" in text

@@ -167,6 +167,20 @@ class Paths:
         """The project's skill library, which wins over the global one (M9)."""
         return self.workspace / "skills"
 
+    @property
+    def compat_skill_roots(self) -> tuple[Path, ...]:
+        """Workspace skill libraries written for other agents (r16/E-7).
+
+        Claude Code's ``.claude/skills`` and the ``.agents/skills``
+        convention, workspace-scoped only: a repo that ships its skills for
+        several agents loads them here unmodified, and a personal library
+        does not silently flood every project's catalog.
+        """
+        return (
+            self.workspace / ".claude" / "skills",
+            self.workspace / ".agents" / "skills",
+        )
+
     # ---- derived ------------------------------------------------------------
 
     @property
@@ -176,9 +190,10 @@ class Paths:
         Order is the precedence, and ``SkillRegistry`` resolves in it. A nearer
         scope beats a broader one, which is the same rule ``AGENTS.md`` follows:
         the repo's own instructions are facts about the repo; the user's are
-        defaults.
+        defaults. The compat roots sit between the two: a repo's foreign-layout
+        skills are project assets, but its native ``skills/`` speaks loudest.
         """
-        return (self.user_skills, self.project_skills)
+        return (self.user_skills, *self.compat_skill_roots, self.project_skills)
 
 
 __all__ = ["APP_DIR", "Paths", "config_home", "data_home"]

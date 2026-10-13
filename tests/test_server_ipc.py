@@ -377,10 +377,11 @@ async def test_session_command_inner_turns_end_once_when_cancelled(ipc):
 
 
 @pytest.mark.asyncio
-async def test_compact_asks_the_client_to_re_project(ipc):
-    """D1/I9: the transcript is a projection of persisted messages, so a
-    command that rewrote the history shorter tells the client to re-project —
-    detected by the fact, not by sniffing the command text."""
+async def test_compact_reports_in_place_without_re_projection(ipc):
+    """P3-4: the transcript is cumulative — live rows stay where they landed.
+    A command that rewrote the history in the same session reports the fact
+    (`compacted`) for the toast instead of asking for a re-projection that
+    would wipe the live compaction row.  Only a session switch reloads."""
     world, _service, client = ipc
     client.request("initialize")
     # give the session something to compact
@@ -398,8 +399,24 @@ async def test_compact_asks_the_client_to_re_project(ipc):
     assert await client.wait_for(client.turn_finished.is_set)
 
     data = client.events[-1]["data"]
+    assert data["reload"] is False
+    assert data["compacted"]["after"] < data["compacted"]["before"]
+
+
+@pytest.mark.asyncio
+async def test_clear_switching_session_still_asks_for_re_projection(ipc):
+    """The reload survives for its remaining purpose: /clear moves the live
+    session, so the client must re-project onto the new one."""
+    _world, _service, client = ipc
+    hello = client.request("initialize")
+
+    client.request("session.command", {"text": "/clear"})
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    data = client.events[-1]["data"]
     assert data["reload"] is True
-    assert data["messagesAfter"] < data["messagesBefore"]
+    assert data["sessionId"] != hello["sessionId"]
+    assert data.get("compacted") is None
 
 
 @pytest.mark.asyncio

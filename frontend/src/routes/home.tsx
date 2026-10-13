@@ -15,10 +15,16 @@
  * capability (docs/opencode-gui-m1-plan.md §2).
  */
 
+import { useBindings } from "@opentui/keymap/solid"
 import { useTerminalDimensions } from "@opentui/solid"
+import { createSignal } from "solid-js"
 import stringWidth from "string-width"
+import { DialogSkills } from "../component/dialog-skills"
 import { Logo } from "../component/logo"
 import { Prompt } from "../component/prompt"
+import { useDialog } from "../dialog/context"
+import type { IpcClient } from "../ipc"
+import type { SkillOption } from "../util/mention"
 import { theme } from "../theme/tokens"
 import { abbreviateHome, formatLocation, truncatePath } from "../util/location"
 
@@ -35,12 +41,43 @@ export interface HomeProps {
   provider: string
   branch: string
   onSubmit: (text: string) => void
+  client: IpcClient
+  /** The registry's skills, for the composer's `@` suggestions (r16/E-2). */
+  skills: SkillOption[]
 }
 
 export function Home(props: HomeProps) {
   const dimensions = useTerminalDimensions()
   const width = () => dimensions().width
   const height = () => dimensions().height
+  const dialog = useDialog()
+  const [promptSeed, setPromptSeed] = createSignal("")
+
+  // r16/E-1: Home has a composer too — the old app-layer registration called
+  // this panel read-only on the belief that it did not. Selecting a skill
+  // seeds `@name`, so a session can start on a skill, not only during one.
+  useBindings(() => ({
+    commands: [
+      {
+        name: "dialog.skills.show",
+        title: "Skills",
+        group: "Skill",
+        desc: "List available skills",
+        palette: true,
+        run: () =>
+          dialog.open(
+            () => (
+              <DialogSkills
+                client={props.client}
+                onSelect={(name: string) => setPromptSeed(`@${name} `)}
+              />
+            ),
+            "large",
+          ),
+      },
+    ],
+  }))
+
   const placeholder = () =>
     `Ask anything… "${PROMPT_EXAMPLES[Math.floor(Math.random() * PROMPT_EXAMPLES.length)]}"`
   const metadata = () => [props.provider, props.model].filter(Boolean).join(" · ")
@@ -67,6 +104,9 @@ export function Home(props: HomeProps) {
           placeholder={placeholder()}
           metadata={metadata()}
           onSubmit={props.onSubmit}
+          seed={promptSeed()}
+          onSeedDone={() => setPromptSeed("")}
+          skills={props.skills}
         />
       </box>
       <box flexGrow={1} />

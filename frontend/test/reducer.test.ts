@@ -9,7 +9,7 @@
 
 import { describe, expect, test } from "bun:test"
 import type { Action, SessionState } from "../src/state/session"
-import { initialState, reduce } from "../src/state/session"
+import { MAX_TRANSCRIPT_MESSAGES, initialState, reduce } from "../src/state/session"
 import { toolTitle } from "../src/util/toolmeta"
 
 const wire = (type: string, data: Record<string, unknown> = {}): Action => ({
@@ -641,5 +641,322 @@ describe("slash commands over IPC (session.command)", () => {
     )
     expect(state.busy).toBe(false)
     expect(state.messages.filter((m) => m.role === "assistant")).toHaveLength(1)
+  })
+})
+
+describe("compaction lifecycle (P3-2)", () => {
+  test("started opens a running compaction row, busy stays true", () => {
+    const state = feed(initialState(), wire("compaction.started", { reason: "manual" }))
+    expect(lastAssistant(state).parts).toEqual([
+      {
+        kind: "compaction",
+        status: "running",
+        reason: "manual",
+        text: "",
+        beforeMessages: 0,
+        afterMessages: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        error: "",
+      },
+    ])
+    expect(state.busy).toBe(false)
+  })
+
+  test("deltas accumulate into the running row", () => {
+    const state = feed(
+      initialState(),
+      wire("compaction.started", { reason: "auto" }),
+      wire("compaction.delta", { text: "## 目标\n" }),
+      wire("compaction.delta", { text: "done" }),
+    )
+    expect(lastAssistant(state).parts[0]).toMatchObject({
+      kind: "compaction",
+      status: "running",
+      text: "## 目标\ndone",
+    })
+  })
+
+  test("ended finalises the row with counts, usage and the authoritative text", () => {
+    const state = feed(
+      initialState(),
+      wire("compaction.started", { reason: "auto" }),
+      wire("compaction.delta", { text: "partial" }),
+      wire("compaction.ended", {
+        reason: "auto",
+        beforeMessages: 74,
+        afterMessages: 3,
+        inputTokens: 1312,
+        outputTokens: 147,
+        totalTokens: 1896,
+        text: "## 目标\nfull",
+      }),
+    )
+    expect(lastAssistant(state).parts[0]).toEqual({
+      kind: "compaction",
+      status: "done",
+      reason: "auto",
+      text: "## 目标\nfull",
+      beforeMessages: 74,
+      afterMessages: 3,
+      inputTokens: 1312,
+      outputTokens: 147,
+      totalTokens: 1896,
+      error: "",
+    })
+  })
+
+  test("ended without a started row still lands a done row", () => {
+    const state = feed(
+      initialState(),
+      wire("compaction.ended", {
+        reason: "overflow",
+        beforeMessages: 10,
+        afterMessages: 2,
+        inputTokens: 5,
+        outputTokens: 1,
+        totalTokens: 6,
+        text: "## 目标\nx",
+      }),
+    )
+    expect(lastAssistant(state).parts[0]).toMatchObject({ kind: "compaction", status: "done" })
+  })
+
+  test("ended swallows the legacy context.compacted one-liner", () => {
+    const state = feed(
+      initialState(),
+      wire("compaction.started", { reason: "auto" }),
+      wire("context.compacted", { beforeMessages: 74, afterMessages: 3 }),
+      wire("compaction.ended", {
+        reason: "auto",
+        beforeMessages: 74,
+        afterMessages: 3,
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+        text: "## 目标\nfull",
+      }),
+    )
+    const texts = lastAssistant(state).parts.map((p) => p.kind)
+    expect(texts).toEqual(["compaction"])
+  })
+
+  test("failed turns the row red exactly once (no duplicate notice)", () => {
+    // The card renders ✗ 压缩失败：{error} itself; a same-text notice beside it
+    // doubled the report (measured live: two identical ✗ lines per failure).
+    const state = feed(
+      initialState(),
+      wire("compaction.started", { reason: "manual" }),
+      wire("compaction.failed", { reason: "manual", error: "boom" }),
+    )
+    expect(lastAssistant(state).parts).toEqual([
+      {
+        kind: "compaction",
+        status: "failed",
+        reason: "manual",
+        text: "",
+        beforeMessages: 0,
+        afterMessages: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        error: "boom",
+      },
+    ])
+  })
+
+  test("a failure with no running row still lands one red card", () => {
+    const state = feed(
+      initialState(),
+      wire("compaction.failed", { reason: "auto", error: "late" }),
+    )
+    expect(lastAssistant(state).parts).toEqual([
+      {
+        kind: "compaction",
+        status: "failed",
+        reason: "auto",
+        text: "",
+        beforeMessages: 0,
+        afterMessages: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        error: "late",
+      },
+    ])
+  })
+
+  test("a skip replaces the running row with a muted card, not an error", () => {
+    // Decided 2026-10-14: "nothing worth summarising" is a skip, rendered
+    // muted; only a failed summary call turns red.
+    const state = feed(
+      initialState(),
+      wire("compaction.started", { reason: "manual" }),
+      wire("compaction.skipped", { reason: "manual" }),
+    )
+    expect(lastAssistant(state).parts).toEqual([
+      {
+        kind: "compaction",
+        status: "skipped",
+        reason: "manual",
+        text: "",
+        beforeMessages: 0,
+        afterMessages: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        error: "",
+      },
+    ])
+  })
+
+  test("a skip with no running row still lands one muted card", () => {
+    const state = feed(initialState(), wire("compaction.skipped", { reason: "auto" }))
+    expect(lastAssistant(state).parts).toEqual([
+      {
+        kind: "compaction",
+        status: "skipped",
+        reason: "auto",
+        text: "",
+        beforeMessages: 0,
+        afterMessages: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        error: "",
+      },
+    ])
+  })
+})
+
+describe("transcript retirement (P3-4)", () => {
+  const submitMany = (n: number): SessionState => {
+    let state = initialState()
+    for (let i = 0; i < n; i++) state = reduce(state, { kind: "submitted", text: `m${i}` })
+    return state
+  }
+
+  const doneCard = (text = "## 目标\nx") => [
+    wire("compaction.started", { reason: "manual" }),
+    wire("compaction.ended", {
+      reason: "manual",
+      beforeMessages: 29,
+      afterMessages: 2,
+      inputTokens: 1,
+      outputTokens: 1,
+      totalTokens: 2,
+      text,
+    }),
+  ]
+
+  test("past the cap the oldest messages retire silently", () => {
+    const state = submitMany(MAX_TRANSCRIPT_MESSAGES + 1)
+    expect(state.messages).toHaveLength(MAX_TRANSCRIPT_MESSAGES)
+    expect(state.messages[0]).toEqual({
+      role: "user",
+      parts: [{ kind: "text", text: "m1", streaming: false }],
+    })
+    expect(state.messages[MAX_TRANSCRIPT_MESSAGES - 1]).toEqual({
+      role: "user",
+      parts: [{ kind: "text", text: `m${MAX_TRANSCRIPT_MESSAGES}`, streaming: false }],
+    })
+    const notices = state.messages.flatMap((m) => m.parts).filter((p) => p.kind === "notice")
+    expect(notices).toHaveLength(0)
+  })
+
+  test("a running compaction row at the tail survives retirement", () => {
+    let state = submitMany(MAX_TRANSCRIPT_MESSAGES - 1)
+    state = reduce(state, wire("compaction.started", { reason: "manual" }))
+    expect(state.messages).toHaveLength(MAX_TRANSCRIPT_MESSAGES)
+    // One more row forces an eviction; the running card is the tail, not the victim.
+    state = reduce(state, { kind: "submitted", text: "new" })
+    state = reduce(state, wire("compaction.delta", { text: "## 目标\n" }))
+    expect(state.messages).toHaveLength(MAX_TRANSCRIPT_MESSAGES)
+    const card = state.messages
+      .flatMap((m) => m.parts)
+      .find((p) => p.kind === "compaction")
+    expect(card).toEqual({
+      kind: "compaction",
+      status: "running",
+      reason: "manual",
+      text: "## 目标\n",
+      beforeMessages: 0,
+      afterMessages: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      error: "",
+    })
+  })
+
+  test("a finished compaction card is exempt from retirement", () => {
+    let state = feed(initialState(), ...doneCard())
+    for (let i = 0; i < MAX_TRANSCRIPT_MESSAGES; i++) {
+      state = reduce(state, { kind: "submitted", text: `m${i}` })
+    }
+    // 101 rows, one exempt: the oldest plain row retires instead of the card.
+    // The card was first, so it still heads the transcript after m0 retires.
+    expect(state.messages).toHaveLength(MAX_TRANSCRIPT_MESSAGES)
+    expect(
+      state.messages.some((m) => m.parts.some((part) => part.kind === "compaction")),
+    ).toBe(true)
+    expect(state.messages[1]).toEqual({
+      role: "user",
+      parts: [{ kind: "text", text: "m1", streaming: false }],
+    })
+  })
+
+  test("eviction on the event path leaves one muted notice, not one per eviction", () => {
+    let state = submitMany(MAX_TRANSCRIPT_MESSAGES - 1)
+    state = reduce(state, wire("compaction.started", { reason: "manual" }))
+    // At cap; one more event row evicts the oldest and explains itself once.
+    state = reduce(state, { kind: "submitted", text: "new" })
+    state = reduce(state, wire("compaction.started", { reason: "auto" }))
+    state = reduce(state, { kind: "submitted", text: "newer" })
+    state = reduce(state, wire("compaction.started", { reason: "auto" }))
+    const notices = state.messages
+      .flatMap((m) => m.parts)
+      .filter((p) => p.kind === "notice" && p.tone === "muted")
+    expect(notices).toHaveLength(1)
+    expect(state.messages).toHaveLength(MAX_TRANSCRIPT_MESSAGES)
+  })
+})
+
+describe("compaction cards survive interleaved input (P3-4)", () => {
+  test("a delta finds the running card even after a queued user row", () => {
+    let state = feed(
+      initialState(),
+      { kind: "submitted", text: "/compact" },
+      wire("compaction.started", { reason: "manual" }),
+      { kind: "queued", text: "别停" },
+      wire("compaction.delta", { text: "## 目标\n" }),
+    )
+    const cards = state.messages.flatMap((m) => m.parts).filter((p) => p.kind === "compaction")
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toMatchObject({ status: "running", text: "## 目标\n" })
+    // No empty assistant message was created for the homeless chunk.
+    expect(state.messages.every((m) => m.role === "user" || m.parts.length > 0)).toBe(true)
+  })
+
+  test("ended finalises the running card in place, no duplicate row", () => {
+    let state = feed(
+      initialState(),
+      { kind: "submitted", text: "/compact" },
+      wire("compaction.started", { reason: "manual" }),
+      { kind: "queued", text: "别停" },
+      wire("compaction.ended", {
+        reason: "manual",
+        beforeMessages: 29,
+        afterMessages: 2,
+        inputTokens: 1,
+        outputTokens: 1,
+        totalTokens: 2,
+        text: "## 目标\nx",
+      }),
+    )
+    const cards = state.messages.flatMap((m) => m.parts).filter((p) => p.kind === "compaction")
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toMatchObject({ status: "done", text: "## 目标\nx" })
   })
 })

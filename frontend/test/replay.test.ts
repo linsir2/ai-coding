@@ -106,4 +106,57 @@ describe("messagesToState", () => {
       { role: "user", parts: [{ kind: "text", text: "q", streaming: false }] },
     ])
   })
+
+  // P3-2 refactor follow-up: the checkpoint note is stored as a user-role
+  // message (so the model reads it as history and replies pair correctly),
+  // but it is model-generated markdown.  Replayed as a plain user row the
+  // `##` sections show literally (screenshot: unrendered summary replacing
+  // the transcript after /compact).  It replays as assistant prose instead —
+  // the same part the live stream renders markdown through — with zero view
+  // changes.
+  test("a checkpoint note replays as assistant prose, not a plain user row", () => {
+    const body = "[以下为早期对话摘要]\n## 目标\n继续修压缩"
+    const state = messagesToState([{ role: "user", content: body }])
+    expect(state.messages).toEqual([
+      { role: "assistant", parts: [{ kind: "text", text: body, streaming: false }] },
+    ])
+  })
+
+  test("a user message merely mentioning the mark stays a user row", () => {
+    const state = messagesToState([{ role: "user", content: "看到[以下为早期对话摘要]这行字了吗" }])
+    expect(state.messages).toEqual([
+      {
+        role: "user",
+        parts: [{ kind: "text", text: "看到[以下为早期对话摘要]这行字了吗", streaming: false }],
+      },
+    ])
+  })
+
+  test("a replayed checkpoint followed by new turns keeps turn shape", () => {
+    const state = messagesToState([
+      { role: "user", content: "[以下为早期对话摘要]\n## 目标\n做完" },
+      { role: "user", content: "继续" },
+      { role: "assistant", content: "好" },
+    ])
+    expect(state.messages.map((m) => m.role)).toEqual(["assistant", "user", "assistant"])
+    expect(state.messages[0]!.parts).toEqual([
+      { kind: "text", text: "[以下为早期对话摘要]\n## 目标\n做完", streaming: false },
+    ])
+  })
+})
+
+describe("replay retirement (P3-4)", () => {
+  test("a reopened transcript lands under the same cap, newest kept", async () => {
+    const { MAX_TRANSCRIPT_MESSAGES } = await import("../src/state/session")
+    const messages: WireMessage[] = []
+    for (let i = 0; i < MAX_TRANSCRIPT_MESSAGES + 50; i++) {
+      messages.push({ role: "user", content: `old-${i}` })
+    }
+    const state = messagesToState(messages)
+    expect(state.messages).toHaveLength(MAX_TRANSCRIPT_MESSAGES)
+    expect(state.messages[0]).toEqual({
+      role: "user",
+      parts: [{ kind: "text", text: "old-50", streaming: false }],
+    })
+  })
 })

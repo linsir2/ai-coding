@@ -29,8 +29,6 @@ def _cfg(**overrides):
         "snip_keep_tail": 3,
         "keep_recent_tool_results": 3,
         "per_result_persist_bytes": 30_000,
-        "l4_keep_tail": 2,
-        "compress_soft_ratio": 0.8,
         "compress_target_ratio": 0.5,
     }
     base.update(overrides)
@@ -84,7 +82,7 @@ async def test_force_compacts_below_the_budget(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_should_compact_follows_the_soft_ratio(tmp_path):
+async def test_should_compact_follows_the_ceiling(tmp_path):
     manager = ContextManager(_cfg(max_context_tokens=400), transcripts_root=tmp_path)
     assert manager.should_compact(_msgs(2)) is False
     assert manager.should_compact(_msgs(40)) is True
@@ -98,7 +96,7 @@ async def test_l4_summary_is_reported_to_the_caller(tmp_path):
         return "早期摘要：决定了用 uv"
 
     manager = ContextManager(
-        _cfg(max_context_tokens=120, max_messages=400, l4_keep_tail=2),
+        _cfg(max_context_tokens=120, max_messages=400),
         transcripts_root=tmp_path,
         summarizer=summarizer,
     )

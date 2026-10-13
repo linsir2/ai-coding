@@ -18,7 +18,7 @@ from ai_coding.ai.openai_engine import OpenAIChatEngine
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.context_compression import ContextManager
-from ai_coding.core.events import Degraded, RecordingObserver
+from ai_coding.core.events import CompactionStarted, Degraded, RecordingObserver
 from ai_coding.domain.model_config import ModelConfig
 from ai_coding.domain.session import SessionData
 from ai_coding.service.session_service import SessionService
@@ -79,7 +79,6 @@ def _settings(**over) -> AIConfig:
         "max_messages": 4,
         "snip_keep_head": 1,
         "snip_keep_tail": 1,
-        "compress_soft_ratio": 0.8,
         "compress_target_ratio": 0.5,
     }
     base.update(over)
@@ -241,3 +240,21 @@ async def test_the_recovery_is_visible_in_the_trace(tmp_path):
 
     degraded = list(observer.of_type(Degraded))
     assert any("too long" in e.reason or "context" in e.reason.lower() for e in degraded), degraded
+
+
+@pytest.mark.asyncio
+async def test_the_reactive_compaction_is_reported_as_overflow(tmp_path):
+    """P3-2: the reactive path must say why it compacted.  The budget path
+    passes no reason (funnel defaults to auto); only the provider-rejection
+    path says overflow."""
+    client = _SequencedClient([_overflow_error(), [_text_chunk("好了", finish_reason="stop")]])
+    engine = _CountingEngine(client)
+    observer = RecordingObserver()
+    loop = _loop(tmp_path, engine, observer=observer)
+    sessions = SessionService(tmp_path / "sessions")
+    session = _session_with_history(sessions)
+
+    await loop.process_input(session, "继续")
+
+    started = list(observer.of_type(CompactionStarted))
+    assert [s.reason for s in started] == ["overflow"]

@@ -349,10 +349,10 @@ class SOPRouter:
             triggers = skill.triggers
             if not triggers:
                 continue
-            # `status: archived` means "do not recommend this proactively". It
-            # still reads by name; what it must not do is occupy the tail block
-            # every turn. It used to: `names()` never looked at status.
-            if skill.is_archived:
+            # "Do not recommend this proactively" — archived by us or
+            # disabled by its author (r16/E-4). It still reads by name; what
+            # it must not do is occupy the tail block every turn.
+            if not skill.is_auto_invocable:
                 continue
             # F2: phase filtering — skip skills locked to a different phase
             if phase and skill.phase and skill.phase != phase:
@@ -469,7 +469,7 @@ class SOPRouter:
             return Intervention(mode="none", skill_name="", content="", triggers={})
 
         for skill in self._skills.all():
-            if skill.is_archived:
+            if not skill.is_auto_invocable:
                 continue
             failure_patterns = skill.triggers.failure_patterns
             if not failure_patterns:
@@ -523,7 +523,7 @@ class SOPRouter:
             return None
         latest_error = recent_failures[-1]
         for skill in self._skills.all():
-            if skill.is_archived:
+            if not skill.is_auto_invocable:
                 continue
             if any(fp in latest_error for fp in skill.triggers.failure_patterns):
                 if skill.pattern_dna:

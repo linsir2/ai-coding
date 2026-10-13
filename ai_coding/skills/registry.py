@@ -56,6 +56,7 @@ _KNOWN_KEYS = frozenset(
         "compatibility",
         "allowed-tools",
         "metadata",
+        "disable-model-invocation",
         "version",
         "status",
         "phase",
@@ -108,6 +109,9 @@ class Skill:
     compatibility: str | None = None
     allowed_tools: tuple[str, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    #: Agent Skills standard: the author's "do not offer this to the model".
+    #: Read and acted on (r16/E-4) — the standard field whose behaviour landed.
+    disable_model_invocation: bool = False
     # This project's own fields.
     version: str = DEFAULT_VERSION
     status: str = "active"
@@ -128,6 +132,16 @@ class Skill:
     @property
     def is_archived(self) -> bool:
         return self.status == "archived"
+
+    @property
+    def is_auto_invocable(self) -> bool:
+        """Whether the catalog/router may offer this skill on their own.
+
+        False for ``status: archived`` (our lifecycle) and for the standard's
+        ``disable-model-invocation`` (the author's). Both stay readable by
+        name — what they lose is the proactive offer, not the address.
+        """
+        return not self.is_archived and not self.disable_model_invocation
 
     @property
     def is_healthy(self) -> bool:
@@ -207,6 +221,21 @@ def _as_tuple(value: object) -> tuple[str, ...]:
     return ()
 
 
+def _as_bool(value: object) -> bool:
+    """A YAML boolean as a bool; the loose spellings an author may write too.
+
+    YAML gives ``true``/``1`` as real booleans; ``'yes'``/``'on'`` arrive as
+    strings and mean the same thing to every runtime that reads this field.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().casefold() in {"true", "yes", "on", "1"}
+    return False
+
+
 def _parse_triggers(value: object) -> SkillTriggers:
     if not isinstance(value, dict):
         return SkillTriggers()
@@ -245,6 +274,7 @@ def parse_skill(path: Path | str) -> Skill:
         compatibility=_as_str(data.get("compatibility")) or None,
         allowed_tools=_as_tuple(data.get("allowed-tools")),
         metadata=dict(metadata) if isinstance(metadata, dict) else {},
+        disable_model_invocation=_as_bool(data.get("disable-model-invocation")),
         version=_as_str(data.get("version")) or DEFAULT_VERSION,
         status=status if status in SKILL_STATUSES else "active",
         phase=_as_str(data.get("phase")),
@@ -334,8 +364,10 @@ class SkillRegistry:
         collision with a bare ``map.set()`` and logs nothing.
         """
         self._reindex()
-        scopes = ("user", "project") if len(self.roots) <= 2 else tuple(
-            f"root{i}" for i in range(len(self.roots))
+        scopes = (
+            ("user", "project")
+            if len(self.roots) <= 2
+            else tuple(str(root) for root in self.roots)
         )
         found: list[tuple[str, str]] = []
         for root_index, root in enumerate(self.roots):

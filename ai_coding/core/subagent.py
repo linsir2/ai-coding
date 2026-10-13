@@ -438,6 +438,26 @@ class SubAgentRunner:
             inner=inner,
         )
 
+    def _skill_gate(self) -> Any | None:
+        """The operator's skill policy for a child that cannot prompt (E-5).
+
+        Only the skill rule travels — a child's MCP surface is not this
+        task's to change. ``ask`` degrades the way every WARN does for a
+        child (``AutoApproveCallback``); ``deny`` still blocks.
+        """
+        from ai_coding.security.permission_gate import PermissionGate
+
+        raw = getattr(getattr(self._app_config, "ai", None), "skill_permissions", None) or {}
+        if not raw:
+            return None
+        skills = self._skills
+
+        def resolve(name: str) -> str | None:
+            skill = skills.resolve(name) if skills is not None else None
+            return skill.id if skill is not None else None
+
+        return PermissionGate(skill_permissions=raw, skill_resolver=resolve)
+
     async def _run_in(
         self,
         task: str,
@@ -483,6 +503,7 @@ class SubAgentRunner:
             _NullSessions(),  # type: ignore[arg-type]
             registry,
             approval=self._approval,
+            gate=self._skill_gate(),
             prompt=prompt,
             # The same registry the parent uses, so the child reads live skills
             # rather than the frozen copy in the parent's instructions. It used

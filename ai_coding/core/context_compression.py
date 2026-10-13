@@ -12,7 +12,9 @@ copy and must never mutate the caller's list.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import math
+import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
@@ -25,15 +27,15 @@ from ai_coding.ai.llm_helpers import (
     SINCE_OPEN,
     checkpoint_body,
 )
-from ai_coding.domain.message import ChatMessage
+from ai_coding.domain.message import CHECKPOINT_MARK, ChatMessage
 
 PERSISTED_OUTPUT_PREFIX = "<persisted-output"
 PERSISTED_MARKER = PERSISTED_OUTPUT_PREFIX
 SNIPPED_HEADER = "[snipped {n} messages]"
-#: The last compaction's verdict.  A named constant because it now has to be
-#: *recognised*, not just written: ``split_checkpoint`` looks for it, and the
-#: string is public enough that a pasted log could contain it.
-CHECKPOINT_MARK = "[以下为早期对话摘要]"
+#: ``CHECKPOINT_MARK`` is re-exported from ``domain.message`` so the compressor
+#: keeps one definition with the two other readers (session preview, frontend).
+#: The string is public enough that a pasted log could contain it, which is why
+#: recognising it also goes through ``checkpoint_body``'s shape check.
 #: The bare shape, kept for callers that still render a placeholder by hand.
 PREVIOUS_RESULT = "[Previous: used {tool}]"
 #: The lead of an envelope: how much was elided, and where the original now lives.
@@ -62,6 +64,23 @@ def estimate_tokens(text: str) -> int:
 def _is_cjk(ch: str) -> bool:
     o = ord(ch)
     return (0x4E00 <= o <= 0x9FFF) or (0x3400 <= o <= 0x4DBF) or (0xF900 <= o <= 0xFAFF)
+
+
+def compaction_ceiling(window: int) -> int:
+    """The usage level at which compaction is due (OpenCode parity).
+
+    ``window - max(10% of window, 16k once the window is >= 32k)``
+    (compaction.ts ``calculateCeiling``): a percentage alone leaves a small
+    model no room to finish its answer, and no floor at all leaves a big
+    model compacting constantly.  The measure compared against it stays
+    ``max(observed, estimate)`` — the provider's own count when there is
+    one (M11-0e), not a second estimate.
+    """
+    window = int(window or 0)
+    if window <= 0:
+        return window
+    reserve = max(window // 10, 16_000 if window >= 32_000 else 0)
+    return window - reserve
 
 
 def _text_bytes(content: str | None) -> int:
@@ -94,6 +113,20 @@ def snip_middle(
         role="user", content=SNIPPED_HEADER.format(n=n), timestamp=""
     )
     return [*head, placeholder, *tail]
+
+
+def _is_snip_placeholder(message: ChatMessage) -> bool:
+    """True for a ``snip_middle`` deletion marker — and only for one.
+
+    The marker is a public string a user could theoretically type, so the
+    match is the whole template shape (``[snipped <n> messages]``), not a
+    substring: prose merely mentioning a snip must survive.
+    """
+    body = (message.content or "").strip()
+    return bool(_SNIP_PLACEHOLDER_RE.match(body))
+
+
+_SNIP_PLACEHOLDER_RE = re.compile(r"\[snipped \d+ messages\]")
 
 
 # ---------------------------------------------------------------- stage 2 (L2)
@@ -407,15 +440,25 @@ class ContextManager:
         self._l2_window_chars = int(getattr(ai_settings, "l2_window_chars", 200))
         self._l2_window_budget = int(getattr(ai_settings, "l2_window_budget", 4000))
         self._per_result_bytes = int(getattr(ai_settings, "per_result_persist_bytes", 30000))
-        self._l4_keep_tail = int(getattr(ai_settings, "l4_keep_tail", 6))
-        # R3b: compaction is budget-triggered, not count-triggered (see below).
-        self._compress_soft_ratio = float(getattr(ai_settings, "compress_soft_ratio", 0.8))
+        # P3-2 refactor: the L4 tail is token-budgeted, not counted.  Six
+        # messages can be six one-liners or six 30KB tool dumps — a count
+        # bounds neither cost nor coverage.  The budget is capped at a
+        # quarter of the window so the tail alone can never approach the
+        # post-compaction paging target (half the window).
+        self._l4_tail_tokens = int(getattr(ai_settings, "l4_tail_tokens", 15_000))
         self._compress_target_ratio = float(
             getattr(ai_settings, "compress_target_ratio", 0.5)
         )
         self._root = Path(transcripts_root)
         self._summarizer = summarizer
         self._l4_failures = 0
+        #: The last L4 summary call's own usage (prompt/completion/total), for
+        #: the compaction funnel's Ended event.  Never fed to the meter.
+        self.last_summary_usage: dict[str, int] | None = None
+        #: Whether the last pipeline run actually attempted an L4 summary.
+        #: The funnel reads it to tell "nothing worth summarising" (skip,
+        #: muted) from "the summary call failed" (failure, red).
+        self.last_summary_attempted = False
         # L3 triggers at (roughly) half the context budget, mirroring the Java rule.
         self._max_result_bytes = max(1, self._max_context_tokens // 2)
 
@@ -424,9 +467,16 @@ class ContextManager:
         messages: list[ChatMessage],
         *,
         on_summary: Callable[[str], None] | None = None,
+        on_delta: Callable[[str], None] | None = None,
         pinned: Sequence[ChatMessage] = (),
+        force: bool = False,
     ) -> list[ChatMessage]:
         """Run the four-layer pipeline once (M3 semantics, unchanged)."""
+        # Per-call bookkeeping resets here, the call boundary: a run that
+        # never reaches the summariser must not report the previous call's
+        # usage or attempt as its own (the funnel reads both).
+        self.last_summary_usage = None
+        self.last_summary_attempted = False
         out = list(messages)  # copy — never mutate the caller's history
         out = persist_large_outputs(
             out,
@@ -442,7 +492,12 @@ class ContextManager:
         # model wrote a summary of a sentence saying something had been deleted.
         # A snip without a summary is deletion wearing a placeholder's clothes;
         # a summary of the placeholder is deletion wearing a summary's clothes.
-        l4_head = self._l4_head_text(out)
+        #
+        # The reference (not the text) is captured here: the surviving tail is
+        # only known after the snip, and the head text is the full list minus
+        # exactly what survives — so a snipped-away message always reaches the
+        # summariser, and a verbatim-kept one is never summarised twice.
+        l4_source = out
         snipped = snip_middle(out, self._max_messages, self._keep_head, self._keep_tail)
         dropped = len(snipped) < len(out)
         if dropped:
@@ -455,10 +510,19 @@ class ContextManager:
             window_budget=self._l2_window_budget,
             elide_root=self._root,
         )
+        _, surviving_tail = self.split_tail(out)
+        l4_head = self._l4_head_text_excluding(l4_source, surviving_tail)
 
-        should_summarise = self._l4_should_run(out) or dropped
+        should_summarise = (
+            (force and not self._l4_since_empty(out))
+            or self._l4_should_run(out)
+            or dropped
+        )
         if should_summarise and self._summarizer is not None:
-            out = await self._run_l4(out, head_text=l4_head, on_summary=on_summary)
+            self.last_summary_attempted = True
+            out = await self._run_l4(
+                out, head_text=l4_head, on_summary=on_summary, on_delta=on_delta
+            )
 
         if estimate_tokens(_joined_history_text(out)) > self._max_context_tokens:
             out = hard_trim(out, HARD_TRIM_KEEP_TAIL)
@@ -471,7 +535,7 @@ class ContextManager:
     def should_compact(
         self, messages: list[ChatMessage], observed_tokens: int = 0
     ) -> bool:
-        """True once the context crosses the soft water mark.
+        """True once the context reaches the ceiling.
 
         ``estimate_tokens`` counts characters. Measured live, it read ~60k for a
         history the provider billed at 237,157 — the gap is tool output (JSON,
@@ -483,9 +547,9 @@ class ContextManager:
         the larger of the two. A first session has no usage yet, and 0 keeps the
         pre-existing estimate-only behaviour there.
         """
-        soft = int(self._max_context_tokens * self._compress_soft_ratio)
+        ceiling = compaction_ceiling(self._max_context_tokens)
         observed = max(int(observed_tokens or 0), estimate_tokens(_joined_history_text(messages)))
-        return observed > soft
+        return observed >= ceiling
 
     async def compress_if_needed(
         self,
@@ -493,6 +557,7 @@ class ContextManager:
         *,
         force: bool = False,
         on_summary: Callable[[str], None] | None = None,
+        on_delta: Callable[[str], None] | None = None,
         pinned: Sequence[ChatMessage] = (),
         observed_tokens: int = 0,
     ) -> list[ChatMessage]:
@@ -504,7 +569,9 @@ class ContextManager:
         """
         if not force and not self.should_compact(messages, observed_tokens):
             return messages
-        out = await self.compress(messages, on_summary=on_summary, pinned=pinned)
+        out = await self.compress(
+            messages, on_summary=on_summary, on_delta=on_delta, pinned=pinned, force=force
+        )
         target = int(self._max_context_tokens * self._compress_target_ratio)
         guard = 0
         while (
@@ -524,17 +591,85 @@ class ContextManager:
             return False
         return estimate_tokens(_joined_history_text(messages)) > self._max_context_tokens
 
+    def split_tail(
+        self, messages: list[ChatMessage]
+    ) -> tuple[list[ChatMessage], list[ChatMessage]]:
+        """Split history into (head, tail) by token budget (OpenCode parity).
+
+        The tail keeps the most recent messages that fit the budget, then
+        backtracks to a user boundary so question-answer pairs stay whole,
+        and never comes back empty (a tail of zero would leave the next
+        request with a summary of nothing recent).  A count cannot do any
+        of this: six messages bound neither cost nor coverage.
+        """
+        budget = min(int(self._l4_tail_tokens), self._max_context_tokens // 4)
+        if not messages:
+            return [], []
+        tail: list[ChatMessage] = []
+        used = 0
+        for message in reversed(messages):
+            cost = estimate_tokens(message.content or "")
+            if tail and used + cost > budget:
+                break
+            tail.append(message)
+            used += cost
+        tail.reverse()
+        while len(tail) > 1 and tail[0].role != "user":
+            tail.pop(0)
+        head = messages[: len(messages) - len(tail)] if tail else list(messages)
+        if not head and len(messages) > 1:
+            # Everything fit the budget: keep only the latest exchange
+            # verbatim and summarize the rest (OpenCode parity).  Without
+            # this a small /compact installs a summary of an empty input
+            # beside a full verbatim tail — cost with zero information.
+            latest = max(
+                (index for index, m in enumerate(messages) if m.role == "user"),
+                default=len(messages) - 1,
+            )
+            tail = messages[latest:]
+            head = messages[:latest]
+        return head, tail
+
+    def _l4_since_empty(self, messages: list[ChatMessage]) -> bool:
+        """True when there is nothing new for a forced summary to say.
+
+        A second /compact with no new turns must not burn two model calls on
+        an empty prompt: the head is then either empty (a single message has
+        nothing to split off) or an old checkpoint with nothing since it.
+        """
+        head, _ = self.split_tail(messages)
+        if not head:
+            return True
+        _, rest = split_checkpoint(head)
+        return not _joined_history_text(rest).strip()
+
     def _l4_head_text(self, messages: list[ChatMessage]) -> str:
         """The text L4 is meant to summarise, with the checkpoint labelled apart.
 
         With no checkpoint this is exactly what it has always been — the joined
         transcript — so the first compaction does not move.
         """
-        head = (
-            messages
-            if self._l4_keep_tail >= len(messages)
-            else messages[: -self._l4_keep_tail]
-        )
+        return self._l4_head_text_excluding(messages, self.split_tail(messages)[1])
+
+    def _l4_head_text_excluding(
+        self,
+        full: list[ChatMessage],
+        surviving: Sequence[ChatMessage],
+    ) -> str:
+        """The head text over ``full`` minus what survives verbatim.
+
+        ``surviving`` is the tail the pipeline kept (same objects); everything
+        else in ``full`` is what L4 must preserve, including messages a snip
+        already dropped elsewhere.  Snip markers never qualify: they describe
+        a deletion, and summarising one is how the model once wrote a summary
+        of a sentence saying something had been deleted (M11-0).
+        """
+        kept = {id(message) for message in surviving}
+        head = [
+            message
+            for message in full
+            if id(message) not in kept and not _is_snip_placeholder(message)
+        ]
         checkpoint, rest = split_checkpoint(head)
         body = _joined_history_text(rest)
         if not checkpoint:
@@ -544,19 +679,62 @@ class ContextManager:
             f"{SINCE_OPEN}\n{body}\n{SINCE_CLOSE}"
         )
 
+    async def _call_summarizer(
+        self,
+        head_text: str,
+        *,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> str | None:
+        """Call the injected summarizer, tolerating its age.
+
+        New fakes accept ``(text, previous, on_delta, usage_sink)``; old ones
+        take a single ``text``.  Probing by ``TypeError`` keeps every existing
+        caller working without a flag day (same pattern as
+        ``Compactor._compress``'s ``inspect`` probe).  Usage from the streaming
+        path is summed into :attr:`last_summary_usage` for the Ended event.
+        """
+        summarizer: Any = self._summarizer
+        assert summarizer is not None
+        usage_sink: list[dict[str, int]] = []
+        result: Any = None
+        try:
+            result = summarizer(head_text, None, on_delta=on_delta, usage_sink=usage_sink)
+            if inspect.isawaitable(result):
+                result = await result
+        except TypeError:
+            try:
+                result = summarizer(head_text, None)
+                if inspect.isawaitable(result):
+                    result = await result
+            except TypeError:
+                result = summarizer(head_text)
+                if inspect.isawaitable(result):
+                    result = await result
+        total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        for entry in usage_sink:
+            for key in total:
+                value = entry.get(key, 0) if isinstance(entry, dict) else 0
+                if isinstance(value, int):
+                    total[key] += value
+        self.last_summary_usage = total if any(total.values()) else None
+        if result is not None and not isinstance(result, str):
+            return None
+        return result
+
     async def _run_l4(
         self,
         messages: list[ChatMessage],
         *,
         head_text: str | None = None,
         on_summary: Callable[[str], None] | None = None,
+        on_delta: Callable[[str], None] | None = None,
     ) -> list[ChatMessage]:
-        tail = messages[-self._l4_keep_tail :]
+        _, tail = self.split_tail(messages)
         head_text = self._l4_head_text(messages) if head_text is None else head_text
         self._persist_audit_copy(head_text)
         summary: str | None
         try:
-            summary = await self._summarizer(head_text)  # type: ignore[misc]
+            summary = await self._call_summarizer(head_text, on_delta=on_delta)
             self._l4_failures = 0
         except Exception:
             self._l4_failures += 1
@@ -571,6 +749,11 @@ class ContextManager:
         note = ChatMessage(
             role="user", content=f"[以下为早期对话摘要]\n{summary}", timestamp=""
         )
+        # The summary now describes the loss, so the deletion marker would
+        # read as a second, separate loss beside it.  It stays whenever no
+        # summary was installed (that path returns `messages` above) — a
+        # deletion without a summary keeps its placeholder, per M11-0.
+        tail = [message for message in tail if not _is_snip_placeholder(message)]
         return [note, *tail]
 
     def _archive_dropped_history(self, messages: list[ChatMessage]) -> None:
@@ -611,6 +794,7 @@ __all__ = [
     "PERSISTED_MARKER",
     "PREVIOUS_RESULT",
     "HARD_TRIM_KEEP_TAIL",
+    "compaction_ceiling",
     "elide_and_persist",
     "estimate_tokens",
     "previous_result_note",

@@ -94,6 +94,56 @@ def test_list_sessions_preserves_first_user_message_preview(tmp_path):
     )
 
 
+def test_preview_skips_the_compaction_checkpoint(tmp_path):
+    """After /compact the first user-role row is the checkpoint note, not user
+    content.  Measured live: the session header showed the whole summary
+    single-lined, because the preview took history[0] verbatim."""
+    svc = _svc(tmp_path / "sessions")
+    s = svc.create()
+    s.add_message(
+        ChatMessage(
+            role="user",
+            content="[以下为早期对话摘要]\n## 目标\n排查 /compact 指令执行失败原因",
+            timestamp="ts",
+        )
+    )
+    s.add_message(ChatMessage(role="user", content="第二轮的问题", timestamp="ts"))
+    svc.save(s)
+
+    listed = svc.list_sessions()
+
+    assert getattr(listed[0], "first_preview", "") == "第二轮的问题"
+
+
+def test_preview_is_capped_because_a_preview_is_one_line(tmp_path):
+    """A long first message must not blow up the header — the checkpoint bug
+    exposed that previews had no bound at all."""
+    svc = _svc(tmp_path / "sessions")
+    s = svc.create()
+    s.add_message(ChatMessage(role="user", content="字" * 300, timestamp="ts"))
+    svc.save(s)
+
+    listed = svc.list_sessions()
+
+    preview = getattr(listed[0], "first_preview", "")
+    assert len(preview) == 80
+
+
+def test_preview_of_a_checkpoint_only_session_is_empty(tmp_path):
+    """A history that is nothing but the checkpoint has no user content to
+    preview; showing the summary again would recreate the defect."""
+    svc = _svc(tmp_path / "sessions")
+    s = svc.create()
+    s.add_message(
+        ChatMessage(role="user", content="[以下为早期对话摘要]\n## 目标\n无", timestamp="ts")
+    )
+    svc.save(s)
+
+    listed = svc.list_sessions()
+
+    assert getattr(listed[0], "first_preview", "") == ""
+
+
 def test_list_sessions_reports_the_real_message_count(tmp_path):
     """The list view drops bodies, but the count has to stay truthful.
 

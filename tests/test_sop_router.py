@@ -380,3 +380,17 @@ class TestHelperFunctions:
         books = SimpleNamespace(tool_success=set(), failures=[])
         result = RequestAssembler._extract_recent_tools(session, books)
         assert result == []
+
+
+def test_a_disabled_skill_is_not_recommended(tmp_path):
+    from ai_coding.core.sop_router import SOPRouter
+
+    _write_skill(
+        tmp_path,
+        "quiet-fix",
+        "name: quiet-fix\ndescription: d\ndisable-model-invocation: true\n"
+        "triggers:\n  keywords: ['沙箱']\n",
+    )
+    router = SOPRouter(SkillRegistry(tmp_path), threshold=1.0)
+
+    assert router.route("沙箱越界了", [], "", []) == []

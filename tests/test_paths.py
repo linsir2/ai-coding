@@ -128,3 +128,20 @@ def test_the_home_fallback_is_used_when_xdg_is_unset(monkeypatch, tmp_path, name
 
     fallback = tmp_path / ".config" if name == "config_home" else tmp_path / ".local" / "share"
     assert resolved == fallback / APP_DIR
+
+
+def test_compat_roots_sit_between_user_and_project(monkeypatch, tmp_path):
+    """r16/E-7: a repo that ships skills for other agents (Claude Code's
+    .claude/skills, the .agents/skills convention) loads them unmodified —
+    between the personal library and the repo's own skills/, so the native
+    layout still speaks loudest."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    workspace = tmp_path / "proj"
+    paths = Paths.for_workspace(workspace)
+
+    assert paths.skill_roots == (
+        paths.user_skills,
+        workspace / ".claude" / "skills",
+        workspace / ".agents" / "skills",
+        paths.project_skills,
+    )

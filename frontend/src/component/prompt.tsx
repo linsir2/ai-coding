@@ -15,6 +15,10 @@
  * up/down/return/escape while the list is up (dispatched bindings stop the
  * event from reaching the textarea), so return picks a command instead of
  * submitting.  Selection runs a keymap command — never model text.
+ *
+ * r16/E-2: typing `@` opens the same list over the skill registry; selecting
+ * there inserts `@name ` in place of the typed token (it does not submit) —
+ * the spelling `resolve_mentions` parses on the backend.
  */
 
 import type { TextareaRenderable } from "@opentui/core"
@@ -23,8 +27,17 @@ import { useBindings, useKeymap } from "@opentui/keymap/solid"
 import { For, Show, createEffect, createSignal, onMount } from "solid-js"
 import { theme } from "../theme/tokens"
 import { moveSelection } from "../util/dialog-select"
+import type { SkillOption } from "../util/mention"
+import { filterSkillMentions, mentionQuery, replaceMentionToken } from "../util/mention"
 import type { SlashCommand } from "../util/slash"
 import { filterSlashCommands, slashQuery, slashSelectionText } from "../util/slash"
+
+/** One row of the suggestion list: `/command` or `@skill`. */
+interface Suggestion {
+  label: string
+  description: string
+  run: () => void
+}
 
 /** OpenCode's prompt border: left-only ┃ with a half-block bottom cap. */
 export const PROMPT_BORDER = {
@@ -59,25 +72,63 @@ export interface PromptProps {
    */
   seed?: string
   onSeedDone?: () => void
+  /** The registry's skills, for the `@` suggestions (r16/E-2). */
+  skills?: SkillOption[]
 }
 
 export function Prompt(props: PromptProps) {
   const keymap = useKeymap()
   let input: TextareaRenderable | undefined
-  const [suggestions, setSuggestions] = createSignal<SlashCommand[]>([])
+  const [suggestions, setSuggestions] = createSignal<Suggestion[]>([])
   const [selected, setSelected] = createSignal(0)
   const visible = () => suggestions().length > 0
 
+  const slashSuggestion = (entry: SlashCommand): Suggestion => ({
+    label: `/${entry.name}`,
+    description: entry.description,
+    run: () => {
+      input?.setText("")
+      // A text entry (no keymap command) is submitted verbatim: the backend's
+      // dispatcher owns what a slash line means (A2.3, SlashCommand's contract).
+      const text = slashSelectionText(entry)
+      if (text !== undefined) {
+        props.onSubmit(text)
+        return
+      }
+      keymap.runCommand(entry.command!)
+    },
+  })
+
+  const mentionSuggestion = (skill: SkillOption): Suggestion => ({
+    label: `@${skill.name}`,
+    description: skill.description ?? "",
+    run: () => {
+      if (!input) return
+      const inserted = replaceMentionToken(input.plainText, input.cursorOffset, skill.name)
+      input.setText(inserted.text)
+      input.cursorOffset = inserted.cursor
+      input.focus()
+    },
+  })
+
   const refresh = () => {
     const text = input?.plainText ?? ""
-    const query = slashQuery(text, input?.cursorOffset ?? text.length)
-    if (query === null) {
-      setSuggestions([])
+    const cursor = input?.cursorOffset ?? text.length
+    const slash = slashQuery(text, cursor)
+    if (slash !== null) {
+      const list = filterSlashCommands(slash).map(slashSuggestion)
+      setSuggestions(list)
+      setSelected((current) => Math.min(current, Math.max(0, list.length - 1)))
       return
     }
-    const list = filterSlashCommands(query)
-    setSuggestions(list)
-    setSelected((current) => Math.min(current, Math.max(0, list.length - 1)))
+    const mention = mentionQuery(text, cursor)
+    if (mention !== null) {
+      const list = filterSkillMentions(mention, props.skills ?? []).map(mentionSuggestion)
+      setSuggestions(list)
+      setSelected((current) => Math.min(current, Math.max(0, list.length - 1)))
+      return
+    }
+    setSuggestions([])
   }
 
   const move = (delta: number) =>
@@ -87,15 +138,7 @@ export function Prompt(props: PromptProps) {
     const choice = suggestions()[selected()]
     if (!choice) return
     setSuggestions([])
-    input?.setText("")
-    // A text entry (no keymap command) is submitted verbatim: the backend's
-    // dispatcher owns what a slash line means (A2.3, SlashCommand's contract).
-    const text = slashSelectionText(choice)
-    if (text !== undefined) {
-      props.onSubmit(text)
-      return
-    }
-    keymap.runCommand(choice.command!)
+    choice.run()
   }
 
   onMount(() => {
@@ -170,7 +213,7 @@ export function Prompt(props: PromptProps) {
                     fg={index() === selected() ? theme.actionPrimaryFocused : theme.textBase}
                     attributes={index() === selected() ? TextAttributes.BOLD : undefined}
                   >
-                    {`/${command.name}`.padEnd(10)}
+                    {command.label.padEnd(14)}
                   </text>
                   <text fg={theme.textMuted}>{command.description}</text>
                 </box>

@@ -41,6 +41,18 @@ export type Part =
   | { kind: "plan"; title: string; body: string }
   | { kind: "notice"; tone: Tone; text: string }
   | { kind: "turn-end"; tone: "error"; text: string }
+  | {
+      kind: "compaction"
+      status: "running" | "done" | "failed" | "skipped"
+      reason: string
+      text: string
+      beforeMessages: number
+      afterMessages: number
+      inputTokens: number
+      outputTokens: number
+      totalTokens: number
+      error: string
+    }
 
 export interface ChatMessage {
   role: "user" | "assistant"
@@ -78,7 +90,55 @@ const PREVIEW_CHARS = 120
 const REASON_CHARS = 60
 const NESTED_CHARS = 120
 
+// P3-4: the live transcript is cumulative (old rows stay after /compact),
+// so it needs a bound the store never had.  Eviction is display-only: the
+// session file and the transcript archive keep everything.  Shared with
+// replay.ts so a reopened session lands under the same cap.
+export const MAX_TRANSCRIPT_MESSAGES = 100
+
+const RETIREMENT_NOTICE =
+  "── 更早的消息已超出显示上限，仅保留最近 100 条（完整记录在存档与会话文件中）──"
+
 // ---- immutable helpers ------------------------------------------------------
+
+/** A compaction card is never retired: it is the visible record of a rewrite. */
+function isRetirementExempt(message: ChatMessage): boolean {
+  return message.parts.some((part) => part.kind === "compaction")
+}
+
+/**
+ * Drop the oldest evictable messages past the cap, oldest first.
+ * Exempt cards stay where they were (chronology keeps its holes honest —
+ * the notice below says rows retired).  At or under the cap the array is
+ * returned untouched, so Solid's keyed rendering keeps every identity.
+ */
+function retireOldest(messages: ChatMessage[], explain: boolean): ChatMessage[] {
+  if (messages.length <= MAX_TRANSCRIPT_MESSAGES) return messages
+  const evictable = messages.filter((message) => !isRetirementExempt(message))
+  const dropped = Math.min(messages.length - MAX_TRANSCRIPT_MESSAGES, evictable.length)
+  if (dropped <= 0) return messages
+  const victims = new Set(evictable.slice(0, dropped))
+  let next: ChatMessage[] = messages.filter((message) => !victims.has(message))
+  if (explain) {
+    // One standing notice per transcript, not one per eviction: it lives in
+    // whatever message is the tail when the first eviction happens, and later
+    // evictions stay silent until that message itself retires.
+    const mentioned = next.some((message) =>
+      message.parts.some((part) => part.kind === "notice" && part.text === RETIREMENT_NOTICE),
+    )
+    if (!mentioned) {
+      const tail = next[next.length - 1]
+      const notice = (parts: Part[]): Part[] => appendNotice(parts, RETIREMENT_NOTICE)
+      if (tail !== undefined && tail.role === "assistant") {
+        next = next.slice()
+        next[next.length - 1] = { role: "assistant", parts: notice(tail.parts.slice()) }
+      } else {
+        next = [...next, { role: "assistant", parts: notice([]) }]
+      }
+    }
+  }
+  return next
+}
 
 /** Update the turn's assistant message: the tail one, or a fresh one. */
 function updateAssistant(
@@ -91,9 +151,20 @@ function updateAssistant(
     if (parts === last.parts) return state
     const messages = state.messages.slice()
     messages[messages.length - 1] = { role: "assistant", parts }
-    return { ...state, messages }
+    return { ...state, messages: retireOldest(messages, true) }
   }
-  return { ...state, messages: [...state.messages, { role: "assistant", parts: update([]) }] }
+  const messages: ChatMessage[] = [...state.messages, { role: "assistant", parts: update([]) }]
+  return { ...state, messages: retireOldest(messages, true) }
+}
+
+/** Index of the last message holding a running compaction card, if any. */
+function findRunningCompaction(messages: ChatMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index]!.parts.some((part) => part.kind === "compaction" && part.status === "running")) {
+      return index
+    }
+  }
+  return -1
 }
 
 /** Map parts, preserving the array identity when nothing changed. */
@@ -361,6 +432,142 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
     }
     case "subagent.event":
       return updateAssistant(state, (parts) => appendNotice(parts, subagentLine(data)))
+    case "compaction.started": {
+      const reason = str(data["reason"]) || "auto"
+      return updateAssistant(state, (parts) => [
+        ...parts,
+        {
+          kind: "compaction",
+          status: "running",
+          reason,
+          text: "",
+          beforeMessages: 0,
+          afterMessages: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          error: "",
+        },
+      ])
+    }
+    case "compaction.delta": {
+      const text = str(data["text"])
+      if (!text) return state
+      // The running card is found wherever it is, not just at the tail: the
+      // user may have typed (a queued row) mid-compaction, and the wipe that
+      // used to hide the misplacement is gone (cumulative transcript).
+      const index = findRunningCompaction(state.messages)
+      if (index < 0) return state
+      const messages = state.messages.slice()
+      const message = messages[index]!
+      messages[index] = {
+        ...message,
+        parts: mapParts(message.parts, (part) =>
+          part.kind === "compaction" && part.status === "running"
+            ? { ...part, text: part.text + text }
+            : part,
+        ),
+      }
+      return { ...state, messages: retireOldest(messages, true) }
+    }
+    case "compaction.ended": {
+      const authoritative = str(data["text"])
+      const done = {
+        kind: "compaction",
+        status: "done",
+        reason: str(data["reason"]) || "auto",
+        text: authoritative,
+        beforeMessages: num(data["beforeMessages"]),
+        afterMessages: num(data["afterMessages"]),
+        inputTokens: num(data["inputTokens"]),
+        outputTokens: num(data["outputTokens"]),
+        totalTokens: num(data["totalTokens"]),
+        error: "",
+      } as Part
+      const withoutLegacy = (parts: Part[]): Part[] =>
+        parts.filter(
+          (part) =>
+            part.kind !== "notice" ||
+            !String((part as { text: string }).text).startsWith("[context] 上下文已压缩"),
+        )
+      // The legacy one-liner is swallowed once the lifecycle row exists:
+      // two rows for one compaction would read as two compactions.
+      const index = findRunningCompaction(state.messages)
+      if (index < 0) {
+        return updateAssistant(state, (parts) => withoutLegacy([...parts, done]))
+      }
+      const messages = state.messages.slice()
+      const message = messages[index]!
+      messages[index] = {
+        ...message,
+        parts: withoutLegacy(
+          message.parts.map((part) =>
+            part.kind === "compaction" && part.status === "running" ? done : part,
+          ),
+        ),
+      }
+      return { ...state, messages: retireOldest(messages, true) }
+    }
+    case "compaction.failed": {
+      const error = str(data["error"]) || "unknown error"
+      const failed = {
+        kind: "compaction",
+        status: "failed",
+        reason: str(data["reason"]) || "auto",
+        text: "",
+        beforeMessages: 0,
+        afterMessages: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        error,
+      } as Part
+      // The failed card IS the red error row (✗ 压缩失败：{error}); appending a
+      // notice with the same text doubled the report (measured live: two
+      // identical ✗ lines for one failure).
+      const index = findRunningCompaction(state.messages)
+      if (index < 0) {
+        return updateAssistant(state, (parts) => [...parts, failed])
+      }
+      const messages = state.messages.slice()
+      const message = messages[index]!
+      messages[index] = {
+        ...message,
+        parts: message.parts.map((part) =>
+          part.kind === "compaction" && part.status === "running" ? failed : part,
+        ),
+      }
+      return { ...state, messages: retireOldest(messages, true) }
+    }
+    case "compaction.skipped": {
+      // Nothing worth summarising (single exchange / nothing since the
+      // checkpoint): a muted card, not a failure.  No billing happened.
+      const skipped = {
+        kind: "compaction",
+        status: "skipped",
+        reason: str(data["reason"]) || "auto",
+        text: "",
+        beforeMessages: 0,
+        afterMessages: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        error: "",
+      } as Part
+      const index = findRunningCompaction(state.messages)
+      if (index < 0) {
+        return updateAssistant(state, (parts) => [...parts, skipped])
+      }
+      const messages = state.messages.slice()
+      const message = messages[index]!
+      messages[index] = {
+        ...message,
+        parts: message.parts.map((part) =>
+          part.kind === "compaction" && part.status === "running" ? skipped : part,
+        ),
+      }
+      return { ...state, messages: retireOldest(messages, true) }
+    }
     case "turn.finished": {
       const handoff = str(data["handoff"])
       const marker = turnEndMarker(data)
@@ -387,10 +594,13 @@ export function reduce(state: SessionState, action: Action): SessionState {
     case "submitted":
       return {
         ...state,
-        messages: [
-          ...state.messages,
-          { role: "user", parts: [{ kind: "text", text: action.text, streaming: false }] },
-        ],
+        messages: retireOldest(
+          [
+            ...state.messages,
+            { role: "user", parts: [{ kind: "text", text: action.text, streaming: false }] },
+          ],
+          false,
+        ),
         busy: true,
       }
     case "queued":
@@ -398,10 +608,13 @@ export function reduce(state: SessionState, action: Action): SessionState {
       // too); the turn itself starts when the running one ends.
       return {
         ...state,
-        messages: [
-          ...state.messages,
-          { role: "user", parts: [{ kind: "text", text: action.text, streaming: false }] },
-        ],
+        messages: retireOldest(
+          [
+            ...state.messages,
+            { role: "user", parts: [{ kind: "text", text: action.text, streaming: false }] },
+          ],
+          false,
+        ),
         queued: [...state.queued, action.text],
       }
     case "queued-dispatched":

@@ -16,7 +16,6 @@ def _settings(**overrides) -> SimpleNamespace:
         "snip_keep_tail": 6,
         "keep_recent_tool_results": 2,
         "per_result_persist_bytes": 1000,
-        "l4_keep_tail": 2,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -74,9 +73,11 @@ async def test_l4_returns_summary_plus_tail(tmp_path):
     original = list(msgs)
     out = await cm.compress(msgs)
     assert len(fake.calls) == 1  # called once
-    # first message is the summary note; tail preserved
+    # first message is the summary note; the tail is token-budgeted
+    # (window 5 → budget 1 → the newest message only), never empty
     assert "digested" in out[0].content
-    assert len(out) == 1 + 2  # summary + l4_keep_tail(2)
+    assert len(out) == 1 + 1  # summary + the surviving tail
+    assert out[-1].content == msgs[-1].content  # verbatim
     assert msgs == original  # input untouched
 
 

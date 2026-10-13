@@ -11,6 +11,7 @@ import typer
 from ai_coding.config.models import resolve_context_window
 from ai_coding.infra.logger_setup import send_logs_to_file, setup_logging
 from ai_coding.paths import Paths
+from ai_coding.security.permission_gate import PermissionGate
 from ai_coding.skills.registry import SkillRegistry
 
 app = typer.Typer(
@@ -83,6 +84,21 @@ def main(
         typer.echo("bye", err=True)
 
 
+def _build_gate(app_cfg: Any, workspace: str, skills: SkillRegistry) -> PermissionGate:
+    """The permission gate with the skill policy wired (E-5).
+
+    The resolver is the registry: ``ai.skill_permissions`` keys and the tool's
+    ``name`` argument must meet in one namespace even when a skill is
+    addressed by its declared alias.
+    """
+
+    def resolve(name: str) -> str | None:
+        skill = skills.resolve(name)
+        return skill.id if skill is not None else None
+
+    return PermissionGate.from_config(app_cfg, workspace=workspace, skill_resolver=resolve)
+
+
 def _build_loop(
     engine: Any,
     sessions: Any,
@@ -117,7 +133,6 @@ def _build_loop(
     from ai_coding.memory.scoped_store import ScopedStore
     from ai_coding.memory.service import MemoryService
     from ai_coding.memory.store import MemoryStore
-    from ai_coding.security.permission_gate import PermissionGate
 
     ws = Path(workspace).expanduser().resolve()
     paths = paths or Paths(workspace=ws)
@@ -161,7 +176,7 @@ def _build_loop(
         sessions,
         registry,
         approval=approval,
-        gate=PermissionGate.from_config(app_cfg, workspace=str(ws)),
+        gate=_build_gate(app_cfg, str(ws), skills),
         context=context,
         memory=memory,
         prompt=prompt,

@@ -95,7 +95,10 @@ async def test_r11c_read_carries_version_and_status_in_data(tmp_path):
     assert r.success is True
     assert r.data == {"name": "deploy", "version": "3", "status": "archived"}
     # One marker for both actions: read and list cannot disagree about a skill.
-    assert r.output.startswith("# Skill: deploy (v3) [archived]")
+    # r16/E-6: read now returns the OpenCode-shaped <skill_content> block (the
+    # @mention injection shares the renderer), so the marker rides inside it.
+    assert r.output.startswith('<skill_content name="deploy">')
+    assert "# Skill: deploy (v3) [archived]" in r.output
 
 
 # ---- one directory walk, one parser ---------------------------------------

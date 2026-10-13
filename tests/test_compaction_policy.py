@@ -58,14 +58,22 @@ def test_the_summary_keeps_the_recent_tail_intact(tmp_path):
     async def summarizer(text: str) -> str:
         return "早期对话的摘要"
 
-    manager = _manager(tmp_path, summarizer=summarizer, l4_keep_tail=6)
+    manager = _manager(tmp_path, summarizer=summarizer)
     messages = _messages(74)
 
     out = asyncio.run(manager.compress(messages))
 
-    assert len(out) == 1 + 6, "the summary plus the kept tail"
+    # Token-budgeted tail (was: exactly 6 messages): the newest turn verbatim,
+    # the tail within budget from a user boundary, no deletion marker beside
+    # the summary that now describes the loss.
+    from ai_coding.core.context_compression import estimate_tokens
+
+    assert out[0].content.startswith("[以下为早期对话摘要]")
     assert out[-1].content.startswith("第73条"), "the newest turn survives verbatim"
-    assert out[-6].content.startswith("第68条"), "and the whole kept tail, oldest first"
+    assert out[-1].content == messages[-1].content, "verbatim, not requoted"
+    tail_text = "\n".join(m.content or "" for m in out[1:])
+    assert estimate_tokens(tail_text) <= min(15_000, 48_000 // 4)
+    assert not any("snipped" in (m.content or "") for m in out)
 
 
 def test_no_summariser_still_degrades_to_the_placeholder_rather_than_raising(tmp_path):
@@ -150,21 +158,23 @@ def test_a_session_with_no_usage_reports_zero_rather_than_raising():
 # ---- M11: the meter must not flatter a wrong configuration -----------------
 
 
-def test_the_water_mark_is_a_fraction_of_the_configured_window():
-    """Measured live: `max_context_tokens` was 48,000 against a 256k model, so the
-    soft mark sat at 38k — 15% of the real capacity — and the meter reported
-    237,157 tokens as a flat 100%. The configuration was the defect; the policy
-    is unchanged."""
+def test_the_ceiling_leaves_headroom_for_the_next_request():
+    """Measured live: `max_context_tokens` was 48,000 against a 256k model, so a
+    mark sat at a fraction of real capacity while the meter reported 237,157
+    tokens as a flat 100%. The configuration was the defect; the policy is
+    unchanged apart from the gate: the OpenCode ceiling (window minus
+    max(10%, 16k past 32k)) instead of a flat 0.8 ratio.
+
+    256,000 → 230,400: the estimator is ~1 token per 4 ASCII characters."""
     import tempfile
     from pathlib import Path
 
     from ai_coding.core.context_compression import ContextManager
 
-    cfg = AIConfig(max_context_tokens=256_000, compress_soft_ratio=0.8)
+    cfg = AIConfig(max_context_tokens=256_000)
     manager = ContextManager(cfg, transcripts_root=Path(tempfile.mkdtemp()), summarizer=None)
 
-    # Sized against the mark itself, not by a round number: 0.8 x 256,000 is
-    # 204,800 tokens, and the estimator is ~1 token per 4 ASCII characters.
+    # Sized against the mark itself, not by a round number.
     def sized(tokens: int) -> list[ChatMessage]:
         return [ChatMessage(role="user", content="a" * (tokens * 4), timestamp="")]
 

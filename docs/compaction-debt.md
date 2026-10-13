@@ -97,25 +97,67 @@
 
 ---
 
-## 5. ⬜ P3 — headroom 无下限
+## 5. ✅ P3 — headroom 无下限（2026-10-14 已按 OC 对齐）
 
-我们：`soft = max_context_tokens * compress_soft_ratio`（默认 0.8，即留 20%）。
+~~我们：`soft = max_context_tokens * compress_soft_ratio`（默认 0.8，即留 20%）。~~
 
-OpenCode `compaction.ts:895`：`window - max(window * 0.1, window >= 32k ? 16_000 : 0)` —— 留 10%，但**有 16k 保底**。
-
-小窗口模型上我们留得更多（安全），大窗口模型上留得一样多比例但绝对值大得多（够用）。目前无实际问题，仅记录口径差异。
+现在：`compaction_ceiling(window) = window - max(⌊10%⌋, window≥32k ? 16k : 0)`
+（`core/context_compression.py`），与 OpenCode `compaction.ts:895` 同式；
+`compress_soft_ratio` 配置项已删除。32k 模型 25.6k→16k 触发（更勤），
+200k/1M 模型 160k/800k→180k/900k（更晚）。`max(observed, estimate)` 度量保留。
 
 > 反向记录 OpenCode 的一个 footgun：`calculateCeiling` 不校验 `window - buffer >= 0`，设大了会退化成"每步压一次且压不动"。我们没有这个坑。
+> 另保留一点不同：未知窗口 OC 取 INF（auto 永不触发），我们仍取 48k 保守默认。
 
----
+## 6. ✅ P3 — 压缩事件粒度（2026-10-14 四事件已落地）
 
-## 6. ⬜ P3 — 压缩事件粒度
+~~我们只发 `ContextCompacted`（含 before/after 消息数与字符数）。~~
 
-我们只发 `ContextCompacted`（含 before/after 消息数与字符数）。
-
-OpenCode 发四个：`started`(durable) / `delta`(ephemeral) / `ended`(durable，含 cost+tokens) / `failed`(durable)。
+现在发五个：`ContextCompacted`（保留：它是"历史被重写"的事实，books/测试依赖）
++ `CompactionStarted(reason)` / `CompactionDelta`（ephemeral，桥 150ms 节流）
+/ `CompactionEnded(reason, counts, 自身 usage, 全文）` / `CompactionFailed(reason, error, usage)`。
+漏斗以内容相等判改写：无变化返回原对象 + Failed，不再有 N→N 的 phantom Ended；
+异常路径的重复 Failed 已去重（对象同一性区分）。
 
 **注意**：OpenCode 的 `ended.tokens` 注释明写是**压缩请求自身的消耗**，"not the size of the resulting context" —— 不能直接拿来喂 meter。
+我们同样独立字段，meter 仍读 `live_prompt_tokens`（压缩后归 0，下 turn 实测恢复），
+Ended 行内写消耗（双数都显；`session.ts` 压缩行）。
+
+## 7. ✅ P3-2 重构附带（2026-10-14）
+
+- force 直达 L4：`force` 同时 bypass L4 内门（`_l4_should_run`），手动/溢出必出摘要；
+  空输入守卫（`_l4_since_empty`）防第二次 `/compact` 烧两次调用。
+- token 预算 tail：`split_tail`（`min(l4_tail_tokens=15k, window//4)` + user 边界回退 +
+  至少 1 条；全 fit 只留最新 exchange，其余全总结——OC `split` 同规则）。
+  `l4_keep_tail`（条数）配置项已删除。
+- L4 输入排除 verbatim tail（对象同一性排除）+ 摘要成功时去 snip marker
+  （失败/无摘要时 marker 保留，M11-0 诚实性不变）。
+- `/compact` 成功时控制台 `[compact] N→M` 消音（转录行已有全文+计数）；无变化时保留诊断行。
+
+## 8. ✅ P3-4（2026-10-14）：累积转录 + 触发对齐 + 失败去重
+
+**触发机制与 OpenCode 的最终差额（全部收口）**：
+
+- `auto_compact: bool = True`（`ai.` 段，OC `settings.auto`）：False 只关主动路径
+  （`request_assembly` 一处 gate，无调用无事件）；`/compact` 与 overflow 救援不受影响
+  —— 比 OC 更安全，OC 连 overflow 一起关。
+- 并发去重（OC inbox merge 的等价物）：`Compactor._lock` 一把锁覆盖两个入口
+  （turn assembly 与 command）；`compact_now` 在**锁内取快照**，第二个 `/compact`
+  等待后基于压完的历史发现无事可做—— 一次模型调用，两份诚实报告。
+- **skip ≠ failure**：漏斗以"是否真的调过摘要器"（`last_summary_attempted`）区分：
+  没事可做 → `CompactionSkipped`（muted `○ 无可压缩内容`，tmux 实证）；
+  摘要失败 → `CompactionFailed`（红）。console `[compact] N→N` 诊断行保留。
+- 溢出首枪 estimate×0.7：不做（我们的摘要器自带反应式 0.7/0.5/0.35 收缩，更强）；
+  native provider compaction：不做（deepseek/qwen 不支持）。
+- 单 exchange `/compact`：按 B 案不烧调用（OC 是全总结——已评估并放弃：
+  摘要成本 > 原文，且刚发生的对话不应被有损替换）。
+
+**UI 缺陷修复（tmux 实测驱动）**：
+
+- failed 双报：一次失败曾出现两条同文案红行（failed 卡 + 冗余 notice）——notice 砍掉。
+- 会话预览污染：`_first_user_preview` 跳过 checkpoint 笔记（`CHECKPOINT_MARK`
+  上移 `domain/message.py`，与压缩器/前端共用一处定义）并截 80 字符；
+  tmux 实证 header 现显示 tail 中真用户消息。
 
 ---
 

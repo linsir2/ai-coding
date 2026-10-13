@@ -1,13 +1,10 @@
 /**
- * Skills dialog (M3) — DialogSkill: the registry's skills with their
- * description and phase.
+ * Skills dialog (M3) — the registry's skills with their description and phase.
  *
- * The panel is opened from two places. On Home there is no composer, so a
- * selection just closes it. Inside a session the selection hands the name to the
- * composer, which writes `@name` — the same spelling the request assembler
- * resolves back into a skill (OpenCode writes `@${skill}` at
- * `prompt/index.tsx:590` for the identical gesture). `onSelect` is absent on
- * Home, which is what makes the two cases the same component.
+ * Opened from the route that owns the composer (Home or the session); the
+ * selection hands the name back and the composer writes `@name` — the same
+ * spelling the request assembler resolves back into a skill (OpenCode writes
+ * `@${skill}` at `prompt/index.tsx:590` for the identical gesture).
  */
 
 import { createSignal, onMount } from "solid-js"
@@ -22,7 +19,7 @@ interface SkillRow {
   phase: string
 }
 
-export function DialogSkills(props: { client: IpcClient; onSelect?: (name: string) => void }) {
+export function DialogSkills(props: { client: IpcClient; onSelect: (name: string) => void }) {
   const dialog = useDialog()
   const [rows, setRows] = createSignal<SkillRow[]>([])
   const [error, setError] = createSignal("")
@@ -45,7 +42,7 @@ export function DialogSkills(props: { client: IpcClient; onSelect?: (name: strin
     }))
 
   const choose = (option: SelectOption) => {
-    props.onSelect?.(String(option.value ?? option.title))
+    props.onSelect(String(option.value ?? option.title))
     dialog.close()
   }
 
@@ -54,7 +51,7 @@ export function DialogSkills(props: { client: IpcClient; onSelect?: (name: strin
       title="Skills"
       options={options()}
       onSelect={choose}
-      footer={error() || (props.onSelect ? "enter add to prompt" : "esc close")}
+      footer={error() || "enter add to prompt"}
     />
   )
 }

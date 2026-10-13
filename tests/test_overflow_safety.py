@@ -92,7 +92,7 @@ def _compactable(tmp_path) -> ContextManager:
         return "## 目标\n无"
 
     return ContextManager(
-        AIConfig(max_context_tokens=500, max_messages=2, l4_keep_tail=1),
+        AIConfig(max_context_tokens=500, max_messages=2),
         transcripts_root=tmp_path,
         summarizer=summarizer,
     )

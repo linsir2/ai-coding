@@ -81,7 +81,7 @@ def test_the_summariser_is_handed_the_messages_the_snip_deleted():
     summariser was *called*; this one checks what it was handed.
     """
     seen: list[str] = []
-    manager = _manager(summarizer=_collector(seen), l4_keep_tail=6)
+    manager = _manager(summarizer=_collector(seen))
 
     asyncio.run(manager.compress(_with_a_canary()))
 
@@ -93,7 +93,7 @@ def test_the_summariser_is_handed_the_messages_the_snip_deleted():
 
 def test_the_summary_is_built_before_the_snip_removes_the_evidence():
     seen: list[str] = []
-    manager = _manager(summarizer=_collector(seen), l4_keep_tail=6)
+    manager = _manager(summarizer=_collector(seen))
 
     asyncio.run(manager.compress(_with_a_canary()))
 
@@ -107,7 +107,7 @@ def test_the_tail_is_still_summarised_verbatim_when_nothing_was_snipped():
     """The snip is not the only route into L4; a large-but-short history still
     gets summarised, and that path must keep working unchanged."""
     seen: list[str] = []
-    manager = _manager(summarizer=_collector(seen), l4_keep_tail=6, max_messages=400)
+    manager = _manager(summarizer=_collector(seen), max_messages=400)
 
     messages = _messages(8)
     messages[1] = ChatMessage(role="user", content="x" * 400_000, timestamp="")
@@ -194,6 +194,10 @@ def test_a_budget_driven_compaction_leaves_a_boundary_the_meter_can_read():
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
     session.turn_count = 9
     session.record_turn_usage(9, {"prompt_tokens": 237_157})
+    # A real history: an empty one is now an honest no-op (Failed, no
+    # boundary) instead of a phantom rewrite, so there must be content
+    # for the boundary to mean anything.
+    session.messages = _with_a_canary()
     compactor = Compactor(manager, emit=lambda event: None)
 
     history = asyncio.run(

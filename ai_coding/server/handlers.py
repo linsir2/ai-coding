@@ -330,10 +330,13 @@ def make_handlers(
         async def run_command() -> None:
             action_name = "continue"
             status, reason = "completed", ""
-            # A command that rewrote the persisted history shortens it
-            # (``/compact`` today).  The transcript is a projection of that
-            # history (replay.ts), so the client has to re-project — detected
-            # by the fact, not by sniffing the command text (D1).
+            # The transcript is cumulative (OpenCode parity): live rows stay
+            # where they landed, so a command that rewrote the history no
+            # longer asks the client to re-project and wipe them.  A reload
+            # is only needed when the live session itself switched
+            # (/clear, /resume — detected by identity, not by sniffing the
+            # command text).  A same-session rewrite (/compact today) rides
+            # as an explicit `compacted` fact for the toast instead.
             history_before = len(getattr(session, "messages", ()) or ())
             bridge.command_run = True
             try:
@@ -378,10 +381,21 @@ def make_handlers(
                         # the live session after the command (a NEW_SESSION
                         # action has switched it)
                         "sessionId": state.session_id,
-                        # history rewritten shorter: re-project the transcript
-                        "reload": len(getattr(session, "messages", ()) or ()) < history_before,
+                        # A switched session must re-project; a same-session
+                        # rewrite (/compact) only reports the fact.
+                        "reload": state.session is not session,
                         "messagesBefore": history_before,
                         "messagesAfter": len(getattr(session, "messages", ()) or ()),
+                        "compacted": (
+                            {
+                                "before": history_before,
+                                "after": len(getattr(session, "messages", ()) or ()),
+                            }
+                            if state.session is session
+                            and len(getattr(session, "messages", ()) or ())
+                            < history_before
+                            else None
+                        ),
                     },
                 },
             )

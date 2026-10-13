@@ -21,7 +21,8 @@ from collections.abc import Callable
 from typing import Any
 
 from ai_coding.domain.message import ToolResult
-from ai_coding.skills.registry import DEFAULT_VERSION, Skill, SkillRegistry
+from ai_coding.skills.registry import SkillRegistry
+from ai_coding.skills.render import render_skill_content, skill_suffix
 from ai_coding.tools.base import BaseTool, ToolContext
 
 
@@ -70,22 +71,6 @@ class SkillTool(BaseTool):
         """Every skill id the registry finds, broken ones included."""
         return self._registry.names()
 
-    @staticmethod
-    def _suffix(skill: Skill) -> str:
-        """The list/read marker: only what differs from the default is shown.
-
-        A v1 active skill keeps its exact pre-R11c line, so an unversioned
-        directory of skills does not suddenly sprout noise.
-        """
-        out = ""
-        if skill.version != DEFAULT_VERSION:
-            out += f" (v{skill.version})"
-        if skill.is_archived:
-            out += " [archived]"
-        if not skill.is_healthy:
-            out += " [broken]"
-        return out
-
     # Read-only: safe to run alongside sibling calls in the same message.
     parallel_safe = True
 
@@ -99,7 +84,7 @@ class SkillTool(BaseTool):
             if not names:
                 return ToolResult(success=True, output="(no skills available)")
             lines = [
-                f"  - {name}{self._suffix(skill)}"
+                f"  - {name}{skill_suffix(skill)}"
                 for name in names
                 for skill in (self._registry.get(name),)
                 if skill is not None
@@ -137,7 +122,7 @@ class SkillTool(BaseTool):
             # replacement, because we cannot know one.
             return ToolResult(
                 success=True,
-                output=f"# Skill: {skill.id}{self._suffix(skill)}\n\n{skill.body}",
+                output=render_skill_content(skill),
                 data={
                     "name": skill.id,
                     "version": skill.version,

@@ -185,3 +185,29 @@ async def test_components_absent_behaves_like_bare_loop(tmp_path):
     assert text == "ok"
     assert engine.requests[0]["instructions"] is None
     assert [m.role for m in session.messages] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_a_denied_skill_is_hidden_from_the_model_catalog(tmp_path):
+    """r16/E-5: deny is an operator boundary — the model is not told the skill
+    exists (the gate and the mention block withhold it too)."""
+    skill_dir = tmp_path / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: demo skill for testing\n---\nbody\n",
+        encoding="utf-8",
+    )
+    engine = _Engine()
+    sessions = SessionService(tmp_path / "sessions")
+    loop = AgentLoop(
+        engine,
+        sessions,
+        _registry(),
+        prompt=PromptAssembler("base"),
+        skills=SkillRegistry(tmp_path / "skills"),
+        settings=AIConfig(stop_policy="natural", skill_permissions={"demo": "deny"}),
+    )
+
+    await loop.process_input(sessions.create(), "go")
+
+    assert "demo skill for testing" not in (engine.requests[0]["instructions"] or "")

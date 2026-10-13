@@ -117,18 +117,28 @@ def test_fields_another_runtime_defines_do_not_break_the_parse(tmp_path):
 
 
 def test_those_fields_are_kept_rather_than_silently_dropped(tmp_path):
-    """Dropping them is how an author ends up believing `disable-model-invocation`
-    or `context: fork` is doing something here."""
+    """Dropping them is how an author ends up believing `context: fork` is
+    doing something here. ``disable-model-invocation`` left this set in r16:
+    it is honoured now, so it is no longer inert data."""
     skill = parse_skill(_write(tmp_path, "code-review", CODE_REVIEW))
 
     assert skill.extra["context"] == "fork"
-    assert skill.extra["disable-model-invocation"] is True
     assert skill.extra["effort"] == "high"
+    assert "disable-model-invocation" not in skill.extra
+
+
+def test_disable_model_invocation_is_honoured_the_standard_way(tmp_path):
+    """r16/E-4: the field the standard defines for "do not offer this to the
+    model" now actually withholds the offer — while a named read still works."""
+    skill = parse_skill(_write(tmp_path, "code-review", CODE_REVIEW))
+
+    assert skill.disable_model_invocation is True
+    assert "code-review" not in build_catalog([skill])
 
 
 def test_and_are_not_presented_as_instructions_we_honour(tmp_path):
-    """They are inert data. Nothing in this codebase reads them, and the catalog
-    must not imply otherwise by echoing them back."""
+    """`context`/`effort`/`hooks` stay inert data. Nothing in this codebase
+    reads them, and the catalog must not imply otherwise by echoing them back."""
     skill = parse_skill(_write(tmp_path, "code-review", CODE_REVIEW))
 
     catalog = build_catalog([skill])

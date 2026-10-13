@@ -33,6 +33,11 @@ from typing import Any
 from ai_coding.core.events import (
     AssistantMessage,
     BackgroundTaskDone,
+    CompactionDelta,
+    CompactionEnded,
+    CompactionFailed,
+    CompactionSkipped,
+    CompactionStarted,
     ContextCompacted,
     LedgerUpdated,
     LoopEvent,
@@ -219,6 +224,45 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
                 "afterMessages": event.after_messages,
             },
         }
+    if isinstance(event, CompactionStarted):
+        return {
+            "type": "compaction.started",
+            "data": {"reason": event.reason},
+        }
+    if isinstance(event, CompactionDelta):
+        return {
+            "type": "compaction.delta",
+            "data": {"text": event.text},
+        }
+    if isinstance(event, CompactionEnded):
+        return {
+            "type": "compaction.ended",
+            "data": {
+                "reason": event.reason,
+                "beforeMessages": event.before_messages,
+                "afterMessages": event.after_messages,
+                "inputTokens": event.prompt_tokens,
+                "outputTokens": event.completion_tokens,
+                "totalTokens": event.total_tokens,
+                "text": event.text,
+            },
+        }
+    if isinstance(event, CompactionFailed):
+        return {
+            "type": "compaction.failed",
+            "data": {
+                "reason": event.reason,
+                "error": event.error,
+                "inputTokens": event.prompt_tokens,
+                "outputTokens": event.completion_tokens,
+                "totalTokens": event.total_tokens,
+            },
+        }
+    if isinstance(event, CompactionSkipped):
+        return {
+            "type": "compaction.skipped",
+            "data": {"reason": event.reason},
+        }
     if isinstance(event, ScopedEvent):
         inner = _scoped_inner(event)
         if inner is None:
@@ -256,6 +300,12 @@ class EventBridge:
             if previous is not None and now - previous < CHUNK_THROTTLE_SECONDS:
                 return
             self._last_chunk[event.call_id] = now
+        if isinstance(event, CompactionDelta):
+            now = self._clock()
+            previous = self._last_chunk.get("compaction")
+            if previous is not None and now - previous < CHUNK_THROTTLE_SECONDS:
+                return
+            self._last_chunk["compaction"] = now
         message = to_wire(event)
         if message is not None:
             if self.command_run and message["type"] == "turn.finished":

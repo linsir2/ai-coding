@@ -100,11 +100,12 @@ def build_catalog(
     So what degrades under pressure is the hint, then the description, and only
     then the name.
 
-    Archived skills are not listed. They stay readable by name — ``status:
-    archived`` means "do not recommend this proactively", which is what Claude
-    Code's ``disable-model-invocation`` does, not "this is gone".
+    Archived skills are not listed, and neither are skills whose author set
+    the standard's ``disable-model-invocation`` (r16/E-4): ``is_auto_invocable``
+    is the one reading of "do not offer this proactively". Both stay readable
+    by name — the rule withholds the offer, not the address.
     """
-    listed = [skill for skill in skills if not skill.is_archived]
+    listed = [skill for skill in skills if skill.is_auto_invocable]
     if not listed:
         return ""
 

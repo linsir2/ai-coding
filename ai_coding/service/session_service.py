@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ai_coding.domain.message import CHECKPOINT_MARK
 from ai_coding.domain.session import SessionData
 from ai_coding.infra.json_utils import from_json_file, to_json_pretty
 from ai_coding.infra.time_utils import now_utc
@@ -34,13 +35,21 @@ def _access_rank(value: Any) -> tuple[int, str]:
     return (1, "")
 
 
+#: A preview is one line by definition; measured on the compaction checkpoint,
+#: an unbounded preview rendered the whole summary single-lined in the header.
+_PREVIEW_CHARS = 80
+
+
 def _first_user_preview(rows: Any) -> str:
-    """A normalized excerpt of the first user message, for the resume picker.
+    """A normalized excerpt of the first *user-written* message, for the picker.
 
     The list view drops message bodies, so this has to be taken while the file is
-    still parsed.  Whitespace is collapsed because the picker renders it on one
-    line; an assistant-first session is skipped rather than shown, because an
-    empty body is exactly what made the old list unreadable.
+    still parsed.  Whitespace is collapsed and the excerpt is capped because the
+    picker renders it on one line; an assistant-first session is skipped rather
+    than shown, because an empty body is exactly what made the old list
+    unreadable.  A compaction checkpoint note is stored as a user-role message
+    but was not written by the user, so it is skipped too (measured: after
+    ``/compact`` the header showed the whole summary).
     """
     if not isinstance(rows, list):
         return ""
@@ -49,7 +58,10 @@ def _first_user_preview(rows: Any) -> str:
             continue
         text = row.get("content")
         if isinstance(text, str) and text.strip():
-            return " ".join(text.split())
+            collapsed = " ".join(text.split())
+            if collapsed.startswith(CHECKPOINT_MARK):
+                continue
+            return collapsed[:_PREVIEW_CHARS]
     return ""
 
 

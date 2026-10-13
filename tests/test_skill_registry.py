@@ -166,14 +166,20 @@ def test_the_registry_caches_by_mtime_and_notices_a_rewrite(tmp_path):
 # own instructions are facts about the repo, the user's are defaults.
 
 
-def _multi(tmp_path, monkeypatch, *, user=(), project=()):
+def _multi(tmp_path, monkeypatch, *, user=(), project=(), claude=(), agents=()):
     from ai_coding.paths import Paths
     from ai_coding.skills.registry import SkillRegistry
 
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     paths = Paths.for_workspace(tmp_path / "proj")
     registry = SkillRegistry(paths.skill_roots)
-    for root, names in ((paths.user_skills, user), (paths.project_skills, project)):
+    claude_root, agents_root = paths.compat_skill_roots
+    for root, names in (
+        (paths.user_skills, user),
+        (claude_root, claude),
+        (agents_root, agents),
+        (paths.project_skills, project),
+    ):
         for name in names:
             (root / name).mkdir(parents=True, exist_ok=True)
             (root / name / "SKILL.md").write_text(
@@ -209,10 +215,11 @@ def test_the_project_wins_when_both_scopes_hold_the_same_name(tmp_path, monkeypa
 def test_a_shadowed_skill_is_reported_rather_than_dropped_silently(tmp_path, monkeypatch):
     """OpenCode v2 resolves collisions with a bare `map.set()`: last wins, and
     nothing says so. The user then cannot find out why the skill they installed
-    is not the one running."""
-    registry, _ = _multi(tmp_path, monkeypatch, user=["shared"], project=["shared"])
+    is not the one running. r16/E-7: with four roots the losing scope is named
+    by its path (the two-root case keeps "user"/"project")."""
+    registry, paths = _multi(tmp_path, monkeypatch, user=["shared"], project=["shared"])
 
-    assert registry.shadowed() == [("shared", "user")], (
+    assert registry.shadowed() == [("shared", str(paths.user_skills))], (
         "which name collided, and which scope lost to it"
     )
 
@@ -247,3 +254,43 @@ def test_a_write_can_be_aimed_at_the_global_library(tmp_path, monkeypatch):
                    root=paths.user_skills)
 
     assert (paths.user_skills / "global-one" / "SKILL.md").is_file()
+
+
+def test_disable_model_invocation_is_read_from_the_standard_field(tmp_path):
+    on = _parse(tmp_path, "a", "---\ndescription: d\ndisable-model-invocation: true\n---\nbody")
+    off = _parse(tmp_path, "b", "---\ndescription: d\n---\nbody")
+    loose = _parse(tmp_path, "c", "---\ndescription: d\ndisable-model-invocation: 'yes'\n---\nbody")
+
+    assert on.disable_model_invocation is True
+    assert off.disable_model_invocation is False
+    assert loose.disable_model_invocation is True
+
+
+def test_a_disabled_skill_is_not_auto_invocable_but_stays_addressable(tmp_path):
+    skill = _parse(tmp_path, "a", "---\ndescription: d\ndisable-model-invocation: true\n---\nbody")
+
+    assert skill.is_auto_invocable is False
+    assert skill.is_archived is False, "the two lifecycle reasons stay distinct"
+
+
+def test_a_compat_root_skill_loads_and_the_project_native_one_wins(tmp_path, monkeypatch):
+    """r16/E-7: the workspace's foreign layouts are read; a name they share
+    with the repo's own skills/ resolves to the native one, and the loss is
+    reported with the losing scope's path (four roots: labels are paths)."""
+    registry, paths = _multi(
+        tmp_path, monkeypatch, claude=["portable"], project=["portable"]
+    )
+    (paths.project_skills / "portable" / "SKILL.md").write_text(
+        "---\nname: portable\ndescription: ours\n---\nour body\n", encoding="utf-8"
+    )
+
+    skill = registry.resolve("portable")
+
+    assert skill is not None and "our body" in skill.body
+    assert ("portable", str(paths.compat_skill_roots[0])) in registry.shadowed()
+
+
+def test_a_skill_only_in_the_compat_root_is_still_discovered(tmp_path, monkeypatch):
+    registry, _ = _multi(tmp_path, monkeypatch, agents=["portable"])
+
+    assert [skill.id for skill in registry.all()] == ["portable"]

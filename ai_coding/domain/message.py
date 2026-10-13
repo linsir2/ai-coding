@@ -14,6 +14,14 @@ Role = Literal["user", "assistant", "tool", "system"]
 #: carries on, so the model can change approach.
 CANCELLED_BY_USER = "cancelled_by_user"
 
+#: The first line of a compaction checkpoint note.  The note is stored as a
+#: user-role message (so the model reads it as history and replies pair up),
+#: but it is model-generated content, not something the user typed.  It lives
+#: here, the lowest shared layer, because three readers must agree on it:
+#: the compressor that recognises its own note (``split_checkpoint``), the
+#: session preview that must skip it, and the frontend replay's TS twin.
+CHECKPOINT_MARK = "[以下为早期对话摘要]"
+
 
 @dataclass(frozen=True)
 class ToolCallRef:

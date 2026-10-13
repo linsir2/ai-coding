@@ -173,6 +173,72 @@ class ContextCompacted:
     after_chars: int = 0
 
 
+CompactionReason = str
+"""Why a compaction ran: auto (budget gate), manual (/compact), overflow (provider rejection)."""
+
+
+@dataclass(frozen=True)
+class CompactionStarted:
+    """A compaction job started (durable, replayable)."""
+
+    reason: CompactionReason = "auto"
+
+
+@dataclass(frozen=True)
+class CompactionDelta:
+    """One streamed chunk of the summary text (ephemeral, live only)."""
+
+    text: str = ""
+
+
+@dataclass(frozen=True)
+class CompactionEnded:
+    """A compaction job finished (durable).
+
+    Tokens are the compaction request's own usage, not the resulting
+    context size (OpenCode parity, docs/compaction-debt.md P3).  ``text`` is
+    the accepted summary body for the transcript row; deltas are lossy
+    (bridge throttles them), so the row cannot be reconstructed from them.
+    """
+
+    reason: CompactionReason = "auto"
+    before_messages: int = 0
+    after_messages: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    text: str = ""
+
+
+@dataclass(frozen=True)
+class CompactionFailed:
+    """A compaction job failed; the turn continues on raw history (durable).
+
+    ``unchanged`` is also a failure: the job ran and changed nothing (the
+    summary was unusable or there was nothing new), so reporting Ended
+    with N→N and zero usage would be a lie.  Usage is whatever streamed
+    before the failure (often zeros) — same accounting rule as Ended.
+    """
+
+    reason: CompactionReason = "auto"
+    error: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class CompactionSkipped:
+    """A compaction was requested but there was nothing worth doing (durable).
+
+    Not a failure: the pipeline concluded there was nothing to summarise
+    (nothing new since the checkpoint, or a single exchange), so no model
+    call was made.  The transcript renders this muted, not red.
+    """
+
+    reason: CompactionReason = "auto"
+
+
 @dataclass(frozen=True)
 class Degraded:
     """An enhancement gave up and fell back, instead of failing the turn (R4a).
@@ -381,6 +447,11 @@ LoopEvent = (
     | ModelStepFinished
     | ContextAssembled
     | ContextCompacted
+    | CompactionStarted
+    | CompactionDelta
+    | CompactionEnded
+    | CompactionFailed
+    | CompactionSkipped
     | Degraded
     | ToolSurfaceWarning
     | ProviderRetried
@@ -439,6 +510,12 @@ def preview(text: str, limit: int = OUTPUT_PREVIEW_CHARS) -> str:
 
 __all__ = [
     "OUTPUT_PREVIEW_CHARS",
+    "CompactionReason",
+    "CompactionStarted",
+    "CompactionDelta",
+    "CompactionEnded",
+    "CompactionFailed",
+    "CompactionSkipped",
     "ContextAssembled",
     "ContextCompacted",
     "Degraded",

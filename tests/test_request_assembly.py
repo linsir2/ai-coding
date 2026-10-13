@@ -29,8 +29,10 @@ class _Compactor:
     def __init__(self, rewrite: bool) -> None:
         self.rewrite = rewrite
         self.summaries: list[str] = []
+        self.compress_calls = 0
 
     async def compress(self, history, *, deadline, on_summary=None, force=False, pinned=()):
+        self.compress_calls += 1
         if not self.rewrite:
             return history
         return [*history, ChatMessage(role="user", content="[压缩后的历史]", timestamp="")]
@@ -62,6 +64,9 @@ class _Reporter:
 class _Settings:
     working_memory_chars = 1200
 
+    def __init__(self, auto_compact: bool = True) -> None:
+        self.auto_compact = auto_compact
+
 
 def _session(digests: list[TurnDigest] | None = None) -> SessionData:
     session = SessionData(session_id="s1", title="", created_time="t", last_access_time="t")
@@ -81,6 +86,7 @@ def _assembler(
     task_injection: str = "message",
     instructions: str | None = None,
     catalog: str = "",
+    auto_compact: bool = True,
 ) -> tuple[RequestAssembler, dict[str, Any]]:
     reporter = _Reporter()
     parts: dict[str, Any] = {
@@ -101,7 +107,7 @@ def _assembler(
         memory=parts["memory"],
         reporter=reporter,
         build_instructions=_instructions,
-        settings=_Settings(),
+        settings=_Settings(auto_compact=auto_compact),
         emit=parts["events"].append,
         catalog_builder=_catalog,
     )
@@ -124,6 +130,19 @@ async def _assemble(assembler: RequestAssembler, session: SessionData | None = N
 
 
 # ------------------------------------------------------------------ the tail
+
+
+async def test_auto_compact_off_skips_the_proactive_compaction():
+    """OC's settings.auto: with the switch off the budget-driven path never
+    reaches the compactor (no call, no events); manual /compact and the
+    overflow rescue run outside this gate and are unaffected."""
+    off_assembler, off_parts = _assembler(auto_compact=False)
+    await _assemble(off_assembler)
+    assert off_parts["compactor"].compress_calls == 0
+
+    on_assembler, on_parts = _assembler(auto_compact=True)
+    await _assemble(on_assembler)
+    assert on_parts["compactor"].compress_calls == 1
 
 
 async def test_blocks_keep_the_declared_order():

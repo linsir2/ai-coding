@@ -217,7 +217,7 @@ def test_the_compressor_still_installs_exactly_one_checkpoint():
             return PREAMBLE + GOOD
 
         return ContextManager(
-            AIConfig(max_context_tokens=3000, max_messages=12, l4_keep_tail=6),
+            AIConfig(max_context_tokens=3000, max_messages=12),
             transcripts_root=Path(tempfile.mkdtemp()),
             summarizer=summarizer,
         )

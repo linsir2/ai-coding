@@ -117,6 +117,7 @@ from ai_coding.security.approval import ApprovalCallback
 from ai_coding.security.permission_gate import PermissionGate
 from ai_coding.service.session_service import SessionService
 from ai_coding.skills.catalog import build_catalog, superseded_note
+from ai_coding.skills.policy import denied_skill_ids
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.schema import tool_schema, tool_schemas
 
@@ -531,6 +532,7 @@ class AgentLoop:
                     report = await self.compactor.compact_now(
                         session,
                         timeout=self._remaining(frame.deadline) or _REACTIVE_COMPACT_SECONDS,
+                        reason="overflow",
                     )
                     if not report["removed"]:
                         # Nothing shrank: the history is already as small as this
@@ -1226,6 +1228,14 @@ class AgentLoop:
         catalog = ""
         if self.skills is not None:
             current = self.skills.all()
+            # E-5: a denied skill is not offered to the model at all.  The
+            # gate withholds the call and the mention block withholds the
+            # injection; this is the third face of the same boundary.
+            denied = denied_skill_ids(
+                self.skills, getattr(self.settings, "skill_permissions", None)
+            )
+            if denied:
+                current = tuple(skill for skill in current if skill.id not in denied)
             catalog = build_catalog(current)
             # The catalog is *not* byte-stable within a session: `skill_review`
             # writes new skills every few turns. So say so when it changes —

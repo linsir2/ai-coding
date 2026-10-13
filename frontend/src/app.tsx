@@ -19,13 +19,13 @@ import { DialogMemory } from "./component/dialog-memory"
 import { DialogModels, type ModelRow } from "./component/dialog-models"
 import { DialogSessions } from "./component/dialog-sessions"
 import { DialogSkillPending } from "./component/dialog-skill-pending"
-import { DialogSkills } from "./component/dialog-skills"
 import { DialogPermissions } from "./component/dialog-permissions"
 import { DialogStatus } from "./component/dialog-status"
 import { type PermissionRequest } from "./component/permission"
 
 import { ToastProvider } from "./component/toast"
 import { DialogProvider, useDialog } from "./dialog/context"
+import type { SkillOption } from "./util/mention"
 import type { IpcClient } from "./ipc"
 import { Home } from "./routes/home"
 import { Session } from "./routes/session"
@@ -137,6 +137,18 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
     }
   }
 
+  const [skills, setSkills] = createSignal<SkillOption[]>([])
+  // The composer's @ list. skill_review can add skills mid-session, so the
+  // table is refreshed with the same cadence as the session list.
+  const refreshSkills = async () => {
+    try {
+      const data = (await props.client.request("skills.list")) as { skills?: SkillOption[] }
+      setSkills(data.skills ?? [])
+    } catch {
+      /* the composer keeps the last list; the panel refetches on open */
+    }
+  }
+
   // One definition each, shared by the palette command and the session header's
   // click: two copies of this JSX would drift (A4 §4 step 10).
   const openSessions = () =>
@@ -210,6 +222,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
 
   onMount(() => {
     void refreshSessions()
+    void refreshSkills()
     // M5: the backend asks WARN-tier approvals as a server-initiated request;
     // answering it IS the JSON-RPC response, so the panel just resolves this.
     props.client.onRequest("approval.request", (params) => {
@@ -257,6 +270,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         return
       }
       if (event.type !== "turn.finished") return
+      void refreshSkills()
       if (permission() !== null) decidePermission("no")
       if (ask() !== null) answerAsk("")
       // `/quit` as a command: the backend already stopped on its side, so the
@@ -308,14 +322,6 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         desc: "Show configured MCP servers and what came of them",
         palette: true,
         run: openMcpPanel,
-      },
-      {
-        name: "dialog.skills.show",
-        title: "Skills",
-        group: "Skill",
-        desc: "List available skills",
-        palette: true,
-        run: () => dialog.open(() => <DialogSkills client={props.client} />, "large"),
       },
       {
         // M8: `skill_review` runs on a timer, by default on, and used to write
@@ -441,6 +447,8 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
             provider={providerName()}
             branch={props.hello.vcs?.branch ?? ""}
             onSubmit={startSession}
+            client={props.client}
+            skills={skills()}
           />
         }
       >
@@ -458,6 +466,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
             version={props.hello.version}
             permission={permission()}
             onPermissionDecide={decidePermission}
+            skills={skills()}
             ask={ask()}
             onAskAnswer={answerAsk}
             onQuit={exitWith}

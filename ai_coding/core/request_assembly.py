@@ -34,7 +34,9 @@ from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
 from ai_coding.domain.turn_digest import render_working_memory
 from ai_coding.infra.deadline import Deadline
+from ai_coding.skills.policy import denied_skill_ids
 from ai_coding.skills.registry import SkillRegistry, resolve_mentions
+from ai_coding.skills.render import render_skill_content
 
 __all__ = ["Assembled", "RequestAssembler"]
 
@@ -122,13 +124,19 @@ class RequestAssembler:
         if self._router is not None:
             constraints = self._get_active_constraints(session)
             self._router.capture_pre_compaction_anchor(session, task, constraints)
-        history = await self._compactor.compress(
-            session.messages,
-            deadline=deadline,
-            on_summary=books.summaries.append,
-            pinned=pinned,
-            **self._compactor_extras(session),
-        )
+        if getattr(self._settings, "auto_compact", True):
+            history = await self._compactor.compress(
+                session.messages,
+                deadline=deadline,
+                on_summary=books.summaries.append,
+                pinned=pinned,
+                **self._compactor_extras(session),
+            )
+        else:
+            # settings.auto off (OpenCode parity): the budget-driven path is
+            # silenced here, the single proactive entry point.  /compact and
+            # the overflow rescue call the compactor directly and still work.
+            history = session.messages
         # R6a: the ring only pays for itself when this request's history was
         # actually rewritten — otherwise the recent turns are still there
         # (docs/r6-analysis.md 2.1, D-R6-2).
@@ -222,18 +230,13 @@ class RequestAssembler:
                         "</skill-pattern>"
                     )
             # A skill the human named is the same kind of signal, stated by a
-            # person rather than a heuristic, so it rides the same block. The
-            # TUI writes `@name` into the composer; without this the name is
-            # decoration that reaches the model as prose.
+            # person rather than a heuristic — and (r16/E-3) it arrives loaded:
+            # the full content rides this tail block, so the turn needs no
+            # round trip through the tool. The block is volatile: rebuilt from
+            # the last user message every iteration, gone with the next one.
             requested = resolve_mentions(user_input, self._skills)
             if requested:
-                named = ", ".join(f'name="{name}"' for name in requested)
-                recommended_skills_block += (
-                    "\n\n<requested-skills>\n"
-                    "用户显式指定了以下 skill，动手前先读取："
-                    f'skill(action="read", {named})。\n'
-                    "</requested-skills>"
-                )
+                recommended_skills_block += "\n\n" + self._requested_skills_block(requested)
         # I3: inject anchor after compaction
         anchor_block = self._format_anchor_block(session, compacted)
         # M2: the catalog sits with the other state to read, before the
@@ -269,6 +272,36 @@ class RequestAssembler:
         )
 
     # ---- helpers (M2) -------------------------------------------------------
+
+    def _requested_skills_block(self, requested: Sequence[str]) -> str:
+        """The named skills' full content, the same shape a read returns.
+
+        A broken skill says so instead of injecting a half-parsed body — the
+        tool would have returned the same verdict, one call later. A denied
+        one (E-5) is withheld: the operator's boundary beats the user's
+        naming, exactly as it beats the model's own call.
+        """
+        denied = denied_skill_ids(
+            self._skills, getattr(self._settings, "skill_permissions", None)
+        )
+        lines = [
+            "<requested-skills>",
+            "用户显式指定了以下 skill，完整内容已加载，无需再调用 skill 工具读取：",
+        ]
+        for name in requested:
+            if name in denied:
+                lines.append(f"- {name}: 已被配置禁止（skill_permissions: deny），不要读取。")
+                continue
+            skill = self._skills.resolve(name) if self._skills is not None else None
+            if skill is None:  # unreachable: resolve_mentions yields resolved names
+                lines.append(f"- {name}: 无法加载。")
+                continue
+            if not skill.is_healthy:
+                lines.append(f"- {name}: 无法加载（{skill.error}）。")
+                continue
+            lines.append(render_skill_content(skill))
+        lines.append("</requested-skills>")
+        return "\n".join(lines)
 
     @staticmethod
     def _extract_user_input(session: SessionData) -> str:

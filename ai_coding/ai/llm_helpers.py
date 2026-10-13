@@ -17,12 +17,13 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from ai_coding.ai.openai_engine import _looks_like_context_overflow
+from ai_coding.ai.openai_engine import _looks_like_context_overflow, _usage_to_dict
 from ai_coding.domain.message import ChatMessage
 from ai_coding.memory.schema import parse_candidates
 
 Summarizer = Any  # Callable[[str], Awaitable[str | None]]
 Extractor = Any  # Callable[[Sequence[ChatMessage], str | None], Awaitable[list[str]]]
+DeltaSink = Any  # Callable[[str], None], chunks of a streaming summary
 
 _MAX_SUMMARY_CHARS = 60_000
 _MAX_EXTRACT_CHARS = 40_000
@@ -78,6 +79,58 @@ async def _chat(
     finally:
         await client.close()
     return (resp.choices[0].message.content or "").strip()
+
+
+async def _chat_stream(
+    model_config: Any,
+    system: str,
+    user: str,
+    max_tokens: int,
+    on_delta: DeltaSink | None = None,
+) -> tuple[str, dict[str, int]]:
+    """Streaming twin of :func:`_chat`: same request, plus live chunks + usage.
+
+    Reuses the engine's wire shape (``stream=True`` + ``include_usage`` trailer,
+    :func:`openai_engine._usage_to_dict`) so the summary path reports the same
+    usage numbers the main loop does.  Raises on failure, same as :func:`_chat`
+    (overflow classification stays with the caller).
+    """
+    client = AsyncOpenAI(
+        base_url=model_config.base_url,
+        api_key=model_config.api_key,
+        timeout=getattr(model_config, "timeout", 60),
+        max_retries=0,
+    )
+    try:
+        stream = await client.chat.completions.create(
+            model=model_config.name,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=max_tokens,
+            temperature=0.2,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+        parts: list[str] = []
+        usage: dict[str, int] = {}
+        async for chunk in stream:
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                usage = _usage_to_dict(chunk_usage)
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            content = getattr(delta, "content", None) if delta is not None else None
+            if content:
+                parts.append(str(content))
+                if on_delta is not None:
+                    on_delta(str(content))
+        return "".join(parts).strip(), usage
+    finally:
+        await client.close()
 
 
 #: The sections an L4 summary must use.  They are the prompt's contract *and*
@@ -212,13 +265,23 @@ def build_summarizer(model_config: Any) -> Summarizer:
     (docs/r15-summary-shrink.md).  ``None`` means "no usable summary", which is
     what makes the pipeline fall back to the trimmed history -- a *better*
     outcome than installing a reply that ignored the format.
+
+    Streaming (P3-2) is opt-in: ``on_delta`` receives each chunk live and
+    ``usage_sink`` collects one usage dict per attempt.  Callers without both
+    keep the exact old one-shot path (and return type).
     """
 
-    async def summarize(text: str, previous: str | None = None) -> str | None:
+    async def summarize(
+        text: str,
+        previous: str | None = None,
+        on_delta: DeltaSink | None = None,
+        usage_sink: list[dict[str, int]] | None = None,
+    ) -> str | None:
         max_tokens = _MERGE_TOKENS if previous else _CREATE_TOKENS
         base = _clip_for_summary(text)
         caps = [len(base)] + [max(1, int(len(base) * step)) for step in _SHRINK_STEPS]
         previous_len = len(previous or "")
+        streaming = on_delta is not None or usage_sink is not None
         for cap in caps:
             prompt = (
                 f"请{('更新' if previous else '压缩')}以下对话：\n"
@@ -227,12 +290,26 @@ def build_summarizer(model_config: Any) -> Summarizer:
             too_big = False
             for attempt in range(2):
                 try:
-                    out = await _chat(
-                        model_config,
-                        _SUMMARY_SYSTEM_PROMPT,
-                        prompt if attempt == 0 else prompt + _SUMMARY_NUDGE,
-                        max_tokens=max_tokens,
-                    )
+                    if streaming:
+                        # Live chunks go out as they arrive; a shape-rejected
+                        # attempt's text is already shown (ephemeral progress,
+                        # the ended row carries the authoritative body).
+                        out, usage = await _chat_stream(
+                            model_config,
+                            _SUMMARY_SYSTEM_PROMPT,
+                            prompt if attempt == 0 else prompt + _SUMMARY_NUDGE,
+                            max_tokens=max_tokens,
+                            on_delta=on_delta,
+                        )
+                        if usage_sink is not None and usage:
+                            usage_sink.append(usage)
+                    else:
+                        out = await _chat(
+                            model_config,
+                            _SUMMARY_SYSTEM_PROMPT,
+                            prompt if attempt == 0 else prompt + _SUMMARY_NUDGE,
+                            max_tokens=max_tokens,
+                        )
                 except Exception as exc:
                     if _looks_like_context_overflow(exc):
                         too_big = True

@@ -123,6 +123,13 @@ async def handle_input(
         except Exception as exc:  # noqa: BLE001 — never break the REPL
             console.error(f"[compact] failed: {exc}")
             return REPLAction.CONTINUE, session
+        if report.get("removed"):
+            # Success already has its row (── 压缩 ── + counts + usage):
+            # a second line saying the same thing reads as a second
+            # compaction.  Silence here; failure/no-change still reports.
+            if getattr(sessions, "save", None) is not None:
+                sessions.save(session)
+            return REPLAction.CONTINUE, session
         console.info(
             f"[compact] messages {report.get('messages')} → {report.get('after')} "
             f"(removed {report.get('removed')})"

@@ -719,15 +719,17 @@ R11c 只加**可选字段与只读回显**，不改排序、不改门禁、不�
 | `parse_skill(path)` | 唯一的解析器。frontmatter **锚定在文件首行**（正文里的 `---` 分隔线不再被当成头）；一次 `yaml.safe_load`；失败则**逐行给畸形标量加引号后重试**（`description: Build for AWS: ECS` 是真实写法，旧的正则 fallback 就是为它而存在）；再失败则返回带 `error` 的 Skill 而非消失——Codex #11385 的教训是 skill 静默消失后唯一证据是日志里一行没人读的 warning |
 | 身份 | **目录名**。OpenCode v1 用未校验的 frontmatter `name` 当身份，全局与项目 skill 同名就静默覆盖；v2 移到文件系统并把 `name` 降为展示。我们本来就是目录名，所以不动；**声明的 `name` 作为可接受别名**（`resolve()`），所以从别的 agent 拷来的 skill 两种拼法都能读，但系统里只有一个身份 |
 | 未知字段 | 存进 `Skill.extra`，**不丢也不报错**。Codex 与 OpenCode 都发布了自家 loader 不读的字段，于是作者以为指令生效了而实际没有 |
-| 标准字段 | `license`/`compatibility`/`allowed-tools`/`metadata` 读入并保存（Agent Skills 规范），本轮**不实现行为**——持有它们是为了将来能用 |
-| `status: archived` | **不进 catalog、不被路由**，但**按名仍可读**（输出带 `[archived]`）。这是 Claude Code `disable-model-invocation` 的语义：禁止主动推荐，不禁止访问。拒绝读取会让一个误归档的 skill 彻底无法调试，而那已是一项策略，不属于一个没有闸门的工具 |
+| 标准字段 | `license`/`compatibility`/`allowed-tools`/`metadata` 读入并保存（Agent Skills 规范），本轮**不实现行为**——持有它们是为了将来能用。**r16/E-4**：`disable-model-invocation` 例外，已生效（进 `is_auto_invocable`，catalog/router 不再主动提供，按名仍可读） |
+| `status: archived` | **不进 catalog、不被路由**，但**按名仍可读**（输出带 `[archived]`）。与作者自述的 `disable-model-invocation` 共用 `is_auto_invocable` 一个判定（r16/E-4）：两者都是"禁止主动推荐，不禁止访问"。拒绝读取会让一个误归档的 skill 彻底无法调试，而那已是一项策略，不属于一个没有闸门的工具 |
 | 缓存 | 按 `(mtime, size)` 缓存。目录每个请求重建，但不再每轮重读每个文件 |
 | `build_catalog(skills, budget)` | 取代 `catalog_text()`，**预算 8000 字符**（与 `core/mcp.py` 同值，因为两者都在系统提示词里争同一个前缀）。**三段预算分配**：先给每个 skill 名字（可达性的地板），再给描述，最后才是 triggers/phase 提示。逐个 skill 分配会让一个长描述把其余全部挤出目录——这正是 `build_mcp_catalog`「每个 server 先给一个 tool」的原因。压力下退化的是提示 → 描述 → 名字，**永不淘汰**（见下） |
 | 为什么不用 Claude 的「按最少调用淘汰」 | 那是富者愈富策略，有冷启动死锁：从未被调用的 skill 使用历史为零 → 排第一 → 描述被删 → 模型匹配不到 → 永远不被调用。新 skill 结构性地挣不回预算。我们不需要淘汰任何人，因为名字这一级永远保留 |
 | 目录变更声明 | `skill_review` 默认每 10 轮新增 skill，所以目录**必然**中途变化（三处文档曾声称不会）。`superseded_note(previous, current)` 把变化写出来；提示词只增不减，所以**移除必须写成否定句**（OpenCode v2 同理）。记在 `session.listed_skill_ids`，不落盘 |
-| `skill list` / `skill read` | 共用同一个 `_suffix`：`version != "1"` 才显示 `(vN)`，`archived` 加 `[archived]`，解析失败加 `[broken]`。`read` 返回**正文**（不是整个文件），避免模型上下文里 frontmatter 出现第二次；`data={name, version, status}` |
+| `skill list` / `skill read` | list 标记来自 `skills/render.py::skill_suffix`：`version != "1"` 才显示 `(vN)`，`archived` 加 `[archived]`，解析失败加 `[broken]`。**r16/E-6**：`read` 返回 OpenCode 形状的 `<skill_content>` 块（正文 + `Base directory` + ≤10 个文件的 `<skill_files>` 采样，`render.py` 是唯一渲染器，@mention 注入共用同一形状），frontmatter 仍不出现第二次；`data={name, version, status}` |
 | `SkillTool(registry)` | 接 registry 不接路径。旧版自己遍历目录、自己再解析一遍，于是可能与 catalog 不一致；更糟的是两个构建器拿到了**不同的 root**：`cli.py` 总是用 `<workspace>/skills`，而 `tools/builder.py` 只在传了 `--skills` 时注册工具——于是 `ai-coding -w .` 会向模型宣告一批它没有工具可加载的 skill |
 | 推荐块的加载指令 | `skill(action="read", name="…")`。旧文本写 `skill(id="…")`，而 schema 是 `{action, name}`——那段提示每次推荐都注入一次，教模型发一个必然非法的调用 |
+| `@mention` 注入（r16/E-3） | `resolve_mentions` 命中后，`<requested-skills>` 块**直接携带** `render_skill_content` 渲染的全文（与 tool read 同形），不再是指令；坏 skill 只写"无法加载（err）"。块是 volatile tail：以最后一条 user 消息为源、每迭代重建、下一条 user 消息后消失 |
+| `ai.skill_permissions`（r16/E-5） | `{名字: allow\|ask\|deny}`，pydantic 校验（拼错=加载错误，不静默放行）。**alias 归一**：`skills/policy.py::denied_skill_ids`（catalog/mention 侧）与 gate 构造期的 resolver 归一（调用侧）是同一规则的两种落点。**deny 三面全拦**：模型目录隐藏、@mention 不注入（块内写"已被配置禁止"）、模型 `skill(read)` 被 DENY。**ask 只拦模型自主 read**：走既有 WARN 审批面板；@ 提及（用户明确意图）与 `list` 不受影响。子代理：`ask` 与所有 WARN 一样被 `AutoApproveCallback` 放行，`deny` 依旧拦截 |
 | `.pending/` 审批 | `skill_review` 生成的 skill 写入 `skills/.pending/<name>/SKILL.md`，**不进 live 树**；`.pending` 是点目录，遍历跳过它，所以未审批的 skill 不可读、不可路由、不可被宣告。TUI `a` 批准 / `d` 拒绝；非 TUI 入口本轮不提供 |
 
 ### 融合规则（R11d）

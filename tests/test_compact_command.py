@@ -97,7 +97,10 @@ async def test_compact_session_shrinks_and_persists(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_repl_compact_reports_the_shrinkage(tmp_path):
+async def test_repl_compact_stays_silent_on_success(tmp_path):
+    """Success is silent on the console: the transcript row (── 压缩 ── +
+    counts + usage) already reports it, and a second line would read as a
+    second compaction.  The no-change path keeps its diagnostic line."""
     settings = _settings()
     loop = _loop(tmp_path, settings)
     sessions = loop.sessions
@@ -109,8 +112,25 @@ async def test_repl_compact_reports_the_shrinkage(tmp_path):
     action, returned = await handle_input(loop, "/compact", session, sessions, console)  # type: ignore[arg-type]
 
     assert returned is session
-    assert any("/compact" in line or "compact]" in line for line in console.lines)
+    assert not any("compact]" in line for line in console.lines), console.lines
     assert not any(line.startswith("ERROR") for line in console.lines)
+
+
+@pytest.mark.asyncio
+async def test_repl_compact_still_reports_when_nothing_changed(tmp_path):
+    """The silence above is for success.  A no-op (tiny history, no
+    summariser) keeps its one diagnostic line — otherwise /compact on a
+    fresh session answers with nothing at all."""
+    settings = _settings()
+    loop = _loop(tmp_path, settings)
+    sessions = loop.sessions
+    session = sessions.create()
+    await loop.process_input(session, "第一轮")
+    console = _Console()
+
+    await handle_input(loop, "/compact", session, sessions, console)  # type: ignore[arg-type]
+
+    assert any("compact] messages" in line for line in console.lines), console.lines
 
 
 @pytest.mark.asyncio

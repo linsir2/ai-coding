@@ -176,8 +176,6 @@ class _Settings:
     snip_keep_tail = 20
     keep_recent_tool_results = 3
     per_result_persist_bytes = 30000
-    l4_keep_tail = 6
-    compress_soft_ratio = 0.8
     compress_target_ratio = 0.5
     l2_window_chars = 200
     l2_window_budget = 4000

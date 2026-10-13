@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import enum
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -139,6 +139,8 @@ class PermissionGate:
         store: Any | None = None,
         denied_tools: Iterable[str] = (),
         allowed_tools: Iterable[str] = (),
+        skill_permissions: Mapping[str, str] | None = None,
+        skill_resolver: Callable[[str], str | None] | None = None,
     ) -> None:
         #: Calls the operator answered "Always" for, as ``grant_key`` strings.
         #: Seeded from the store at startup and extended by ``grant``.
@@ -156,6 +158,15 @@ class PermissionGate:
         # and the gate do.
         self._denied_tools = {str(name) for name in denied_tools if name}
         self._allowed_tools = {str(name) for name in allowed_tools if name}
+        # E-5: the model's skill tool is judged per skill id (alias-normalized
+        # once, here, so check() is a dict lookup).  ``skill_resolver`` maps a
+        # spelling to the canonical id; without one, spellings must match the
+        # config literally.
+        self._skill_resolver = skill_resolver
+        self._skill_permissions = {
+            (skill_resolver(key) or key) if skill_resolver is not None else key: str(value)
+            for key, value in (skill_permissions or {}).items()
+        }
         self._allow_tools = {
             "read",
             "glob",
@@ -220,6 +231,28 @@ class PermissionGate:
         key = grant_key(name, params)
         if key is not None and key in self._grants:
             return Decision(PermissionDecision.ALLOW, "")
+
+        # 2.5. E-5: a per-skill policy for the model's skill tool.  Only the
+        # model-initiated read is judged: a human's @mention is its own
+        # authorization, and ``list`` names skills but reads none.
+        if name == "skill" and str(params.get("action", "")).lower() == "read":
+            target = str(params.get("name", "")).strip()
+            canonical = self._skill_resolver(target) if self._skill_resolver is not None else None
+            policy = (
+                self._skill_permissions.get(canonical or "")
+                or self._skill_permissions.get(target)
+                or "allow"
+            )
+            if policy == "deny":
+                return Decision(
+                    PermissionDecision.DENY,
+                    f"skill '{target}' is denied by configuration",
+                )
+            if policy == "ask":
+                return Decision(
+                    PermissionDecision.WARN,
+                    f"skill '{target}' requires confirmation",
+                )
 
         # 3. Known allow-list
         if name in self._allow_tools:
@@ -290,7 +323,13 @@ class PermissionGate:
             self._store.clear()
 
     @classmethod
-    def from_config(cls, app_cfg: Any, *, workspace: str | None = None) -> PermissionGate:
+    def from_config(
+        cls,
+        app_cfg: Any,
+        *,
+        workspace: str | None = None,
+        skill_resolver: Callable[[str], str | None] | None = None,
+    ) -> PermissionGate:
         """The one place the composition root's policy is read (R7d).
 
         Nothing about the *tool list* is needed: a server is trusted by name, so
@@ -300,6 +339,9 @@ class PermissionGate:
         given in this directory are loaded, and new ones are written beside them.
         Without it the gate is session-only -- which is what a sub-agent builds,
         and it never asks anyway.
+
+        ``skill_resolver`` (E-5) turns a skill spelling into its canonical id so
+        ``ai.skill_permissions`` keys and call arguments meet in one namespace.
         """
         mcp = getattr(app_cfg, "mcp", None)
         servers = getattr(mcp, "servers", None) or []
@@ -323,6 +365,9 @@ class PermissionGate:
             store=store,
             denied_tools=denied,
             allowed_tools=allowed,
+            skill_permissions=getattr(getattr(app_cfg, "ai", None), "skill_permissions", None)
+            or {},
+            skill_resolver=skill_resolver,
         )
 
 

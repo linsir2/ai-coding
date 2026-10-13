@@ -9,12 +9,21 @@ the caller's history on failure" rule are stated once (docs/r5-analysis.md 3.3).
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from ai_coding.core.events import LoopEvent
+from ai_coding.core.events import (
+    CompactionDelta,
+    CompactionEnded,
+    CompactionFailed,
+    CompactionReason,
+    CompactionSkipped,
+    CompactionStarted,
+    LoopEvent,
+)
 from ai_coding.core.turn_report import emit_degraded
 from ai_coding.domain.message import ChatMessage
 from ai_coding.infra.deadline import Deadline, DeadlineExpired, remaining_of, run_with_deadline
@@ -35,6 +44,9 @@ class Compactor:
     ) -> None:
         self._context = context
         self._emit = emit
+        # One compaction at a time (see ``compress``): both entries — the
+        # turn's assembly and the user's command — pass through it.
+        self._lock = asyncio.Lock()
 
     @staticmethod
     def did_compact(source: Sequence[ChatMessage], result: Sequence[ChatMessage]) -> bool:
@@ -57,6 +69,7 @@ class Compactor:
         pinned: Sequence[ChatMessage] = (),
         session: Any | None = None,
         observed_tokens: int = 0,
+        reason: CompactionReason = "auto",
     ) -> list[ChatMessage]:
         """Compact only when the budget says so; degrade to the raw history.
 
@@ -72,14 +85,33 @@ class Compactor:
         command alone, on a field name that does not exist, so it was never
         written at all and the meter kept reporting a context that had been
         thrown away.
-        """
-        result = await self._compress(history, deadline=deadline, on_summary=on_summary,
-                                      force=force, pinned=pinned, observed_tokens=observed_tokens)
-        if session is not None and self.did_compact(history, result):
-            session.last_compacted_turn = int(getattr(session, "turn_count", 0) or 0)
-        return result
 
-    async def _compress(
+        Lifecycle events (P3-2) are owned here too: Started before the delegate
+        runs, Delta per summary chunk, Ended with the summary call's own usage,
+        Failed when the summary call failed, Skipped when there was nothing to
+        summarise.  Below-watermark turns emit nothing: the gate is probed
+        before Started so an ordinary iteration stays silent.
+
+        One compaction at a time per compactor: the lock serialises the two
+        entries (turn assembly and the command) so a second caller waits and
+        then usually finds nothing left to do — the safe half of OpenCode's
+        inbox merge, without a queue.
+        """
+        if self._context is None:
+            return history
+        async with self._lock:
+            return await self._compress_once(
+                history,
+                deadline=deadline,
+                on_summary=on_summary,
+                force=force,
+                pinned=pinned,
+                session=session,
+                observed_tokens=observed_tokens,
+                reason=reason,
+            )
+
+    async def _compress_once(
         self,
         history: list[ChatMessage],
         *,
@@ -87,7 +119,127 @@ class Compactor:
         on_summary: Callable[[str], None] | None = None,
         force: bool = False,
         pinned: Sequence[ChatMessage] = (),
+        session: Any | None = None,
         observed_tokens: int = 0,
+        reason: CompactionReason = "auto",
+    ) -> list[ChatMessage]:
+        """One funnel pass; the caller holds the lock (see ``compress``)."""
+        if not force and not self._should_run(history, observed_tokens):
+            return history
+        self._emit(CompactionStarted(reason=reason))
+
+        def _delta(text: str) -> None:
+            self._emit(CompactionDelta(text=text))
+
+        summaries: list[str] = []
+
+        def _summary(text: str) -> None:
+            summaries.append(text)
+            if on_summary is not None:
+                on_summary(text)
+
+        result = await self._compress(
+            history,
+            deadline=deadline,
+            on_summary=_summary,
+            on_delta=_delta,
+            force=force,
+            pinned=pinned,
+            observed_tokens=observed_tokens,
+            reason=reason,
+        )
+        usage = self._summary_usage()
+        if result is history:
+            # The delegate gave up and handed the list straight back (the
+            # exception path in _compress, which already reported Degraded +
+            # Failed).  Nothing more to say.
+            return history
+        if result == history:
+            # Content truth, not object identity: the pipeline always works
+            # on a copy, so `did_compact` is True for even a no-op.  A job
+            # that changed nothing is either a skip (nothing worth
+            # summarising — muted) or a failure (the summary call itself
+            # failed — red); the delegate's attempt bookkeeping says which.
+            # The ORIGINAL list goes back so every downstream identity judge
+            # (did_compact, ContextCompacted, the working-memory ring) agrees
+            # nothing happened.
+            if self._summary_attempted():
+                self._emit(
+                    CompactionFailed(
+                        reason=reason,
+                        error="summary unavailable (the model's reply was unusable, "
+                        "or the summary call failed)",
+                        prompt_tokens=usage.get("prompt_tokens", 0),
+                        completion_tokens=usage.get("completion_tokens", 0),
+                        total_tokens=usage.get("total_tokens", 0),
+                    )
+                )
+            else:
+                self._emit(CompactionSkipped(reason=reason))
+            return history
+        if session is not None:
+            session.last_compacted_turn = int(getattr(session, "turn_count", 0) or 0)
+        self._emit(
+            CompactionEnded(
+                reason=reason,
+                before_messages=len(history),
+                after_messages=len(result),
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                total_tokens=usage.get("total_tokens", 0),
+                text=summaries[-1] if summaries else "",
+            )
+        )
+        return result
+
+    def _summary_attempted(self) -> bool:
+        """Did the delegate actually try to summarise?  (Skip vs failure.)"""
+        return bool(getattr(self._context, "last_summary_attempted", False))
+
+    def _should_run(self, history: list[ChatMessage], observed_tokens: int) -> bool:
+        """True unless the delegate's own gate says this turn needs nothing.
+
+        Unknown delegates (old fakes, legacy ``compress``-only objects) have no
+        gate and always run; the real ``ContextManager.should_compact`` is
+        probed by keyword so a below-watermark iteration emits no Started.
+        """
+        gate = getattr(self._context, "should_compact", None)
+        if not callable(gate):
+            return True
+        try:
+            params = inspect.signature(gate).parameters
+        except (TypeError, ValueError):
+            return True
+        try:
+            if "observed_tokens" in params:
+                return bool(gate(history, observed_tokens))
+            return bool(gate(history))
+        except Exception:
+            return True
+
+    def _summary_usage(self) -> dict[str, int]:
+        """The summary call's own usage for the Ended event (never the meter)."""
+        raw = getattr(self._context, "last_summary_usage", None)
+        if not isinstance(raw, dict):
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        out = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        for key in out:
+            value = raw.get(key, 0)
+            if isinstance(value, int):
+                out[key] = value
+        return out
+
+    async def _compress(
+        self,
+        history: list[ChatMessage],
+        *,
+        deadline: Deadline | None,
+        on_summary: Callable[[str], None] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+        force: bool = False,
+        pinned: Sequence[ChatMessage] = (),
+        observed_tokens: int = 0,
+        reason: CompactionReason = "auto",
     ) -> list[ChatMessage]:
         if self._context is None:
             return history
@@ -104,8 +256,16 @@ class Compactor:
                 # An injected context may predate the observed-token gate, and a
                 # compaction must never fail because of an argument it did not
                 # ask for.
-                if observed_tokens and "observed_tokens" in inspect.signature(aware).parameters:
+                try:
+                    params: Mapping[str, Any] = inspect.signature(aware).parameters
+                except (TypeError, ValueError):
+                    params = {}
+                if observed_tokens and "observed_tokens" in params:
                     kwargs["observed_tokens"] = observed_tokens
+                if on_delta is not None and "on_delta" in params:
+                    kwargs["on_delta"] = on_delta
+                if "reason" in params:
+                    kwargs["reason"] = reason
                 return await run_with_deadline(
                     aware(history, **kwargs),
                     timeout=budget,
@@ -124,33 +284,54 @@ class Compactor:
                 else "compression failed",
                 "used the uncompressed history",
             )
+            usage = self._summary_usage()
+            self._emit(
+                CompactionFailed(
+                    reason=reason,
+                    error=f"{type(exc).__name__}: {exc}"[:300],
+                    prompt_tokens=usage.get("prompt_tokens", 0),
+                    completion_tokens=usage.get("completion_tokens", 0),
+                    total_tokens=usage.get("total_tokens", 0),
+                )
+            )
             return history
 
     async def compact_now(
-        self, session: Any, *, timeout: float
+        self, session: Any, *, timeout: float, reason: CompactionReason = "manual"
     ) -> dict[str, int]:
         """The user's explicit ``/compact``: force one page, replace the history.
 
         Unlike the budget-driven path this **does** rewrite the session — that is
         what was asked for — but only when the compression succeeded.  L3 persisted
         outputs, the session file and memory remain as safety nets either way.
+
+        The snapshot is taken inside the lock: a second concurrent /compact
+        waits, then plans against the history the first one left, so it finds
+        nothing new instead of paying for a second summary.
         """
-        before = len(session.messages)
-        report = {"messages": before, "after": before, "removed": 0}
-        if self._context is None or before == 0:
-            return report
-        budget = timeout if timeout > 0 else 60.0
-        try:
-            result = await self.compress(
-                list(session.messages), deadline=Deadline.after(budget), force=True, session=session
-            )
-        except Exception:  # noqa: BLE001 — a REPL command must never crash
-            return report
-        if result == list(session.messages):
-            return report  # nothing changed; do not pretend it did
-        session.messages = list(result)
-        after = len(session.messages)
-        return {"messages": before, "after": after, "removed": before - after}
+        if self._context is None:
+            return {"messages": len(session.messages), "after": len(session.messages), "removed": 0}
+        async with self._lock:
+            before = len(session.messages)
+            report = {"messages": before, "after": before, "removed": 0}
+            if before == 0:
+                return report
+            budget = timeout if timeout > 0 else 60.0
+            try:
+                result = await self._compress_once(
+                    list(session.messages),
+                    deadline=Deadline.after(budget),
+                    force=True,
+                    session=session,
+                    reason=reason,
+                )
+            except Exception:  # noqa: BLE001 — a REPL command must never crash
+                return report
+            if result == list(session.messages):
+                return report  # nothing changed; do not pretend it did
+            session.messages = list(result)
+            after = len(session.messages)
+            return {"messages": before, "after": after, "removed": before - after}
 
     # ---- internals ---------------------------------------------------------
 
