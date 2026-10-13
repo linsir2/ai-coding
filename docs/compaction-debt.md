@@ -74,11 +74,21 @@
 
 ---
 
-## 4. ⬜ P2 — overflow 兜底不检查是否已开始输出
+## 4. ✅ P2 — overflow 兜底不检查是否已开始输出（**前提不成立，已关闭**）
 
-`step.ts:108-115` 要求 `!publisher.record().outputStarted` 才允许压缩；已开始输出则直接放弃。
-
-我们 `agent_loop.py` 的 `_CONTEXT_OVERFLOW` 兜底没有这个前置判断。
+> **2026-10-13 核验：保护早就存在，只是在上面一层没看出来。**
+>
+> `openai_engine.py:428-439`：`_stream` 记录每个已投递的 chunk（`text_parts` / `acc`），
+> 之后任何失败都抛 **无 kind** 的 `EngineError`——
+> `if text_parts or acc: raise EngineError(f"stream failed after {len(text_parts)} text chunk(s)…")`。
+> 无 kind 的失败永远匹配不上 `exc.kind == "context_overflow"`，所以**流已输出后被拒，本来就不会重试**。
+>
+> 唯一两个 engine 实现是 `OpenAIChatEngine`（有上述保护）和 `FallbackEngine`（纯委派）。
+> 脚本化的假 engine 可以造出"先 on_delta 再抛 typed overflow"，但没有真实 engine 能产生它。
+>
+> **结论**：债务清单这条是从 `agent_loop.py:528` 单点读出来的，漏了下游的既有多温护。
+> 未加代码（加了就是同一规则的第二份拷贝，且没有调用方走那条路）；
+> 改为补回归锚点 `tests/test_overflow_safety.py`，其中驱动**真 engine** 端到端验证。
 
 ---
 
