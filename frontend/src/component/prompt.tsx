@@ -22,13 +22,14 @@
  */
 
 import type { TextareaRenderable } from "@opentui/core"
-import { TextAttributes } from "@opentui/core"
+import { TextAttributes, createHostClipboard } from "@opentui/core"
 import { useBindings, useKeymap } from "@opentui/keymap/solid"
 import { For, Show, createEffect, createSignal, onMount } from "solid-js"
 import { theme } from "../theme/tokens"
+import { type PromptImage, imageDataUrl } from "../util/attachment"
 import { moveSelection } from "../util/dialog-select"
-import type { SkillOption } from "../util/mention"
-import { filterSkillMentions, mentionQuery, replaceMentionToken } from "../util/mention"
+import type { MentionOption } from "../util/mention"
+import { filterMentions, mentionQuery, replaceMentionToken } from "../util/mention"
 import type { SlashCommand } from "../util/slash"
 import { filterSlashCommands, slashQuery, slashSelectionText } from "../util/slash"
 
@@ -61,7 +62,7 @@ export interface PromptProps {
    * Submit handler.  Returning ``false`` rejects the submission and keeps the
    * text in the box (busy turns: docs/opencode-gui-m2-plan.md §1).
    */
-  onSubmit: (text: string) => boolean | void
+  onSubmit: (text: string, images: PromptImage[]) => boolean | void
   /** Focus the textarea on mount; disable while a turn streams. */
   autofocus?: boolean
   /** True while the slash list is up — the session mutes its own bindings. */
@@ -73,7 +74,9 @@ export interface PromptProps {
   seed?: string
   onSeedDone?: () => void
   /** The registry's skills, for the `@` suggestions (r16/E-2). */
-  skills?: SkillOption[]
+  skills?: MentionOption[]
+  /** Workspace files/directories for the same list (r17/T4). */
+  files?: MentionOption[]
 }
 
 export function Prompt(props: PromptProps) {
@@ -82,6 +85,36 @@ export function Prompt(props: PromptProps) {
   const [suggestions, setSuggestions] = createSignal<Suggestion[]>([])
   const [selected, setSelected] = createSignal(0)
   const visible = () => suggestions().length > 0
+  // r17/T5: pasted images wait here until the message is sent.
+  const [images, setImages] = createSignal<PromptImage[]>([])
+  const [hint, setHint] = createSignal("")
+  const clipboard = createHostClipboard()
+
+  const paste = async () => {
+    try {
+      const result = (await clipboard.read({
+        preferredTypes: ["image/png", "text/plain"],
+        selection: "clipboard",
+        signal: AbortSignal.timeout(2000),
+      })) as {
+        status: string
+        representation?: { mimeType: string; bytes: Uint8Array }
+      }
+      if (result.status !== "read" || !result.representation) return
+      const { mimeType, bytes } = result.representation
+      if (mimeType.toLowerCase().startsWith("image/")) {
+        const dataUrl = imageDataUrl(mimeType, bytes)
+        if (dataUrl) {
+          setImages((all) => [...all, { name: `image-${all.length + 1}`, dataUrl }])
+          setHint("")
+        }
+        return
+      }
+      input?.insertText(new TextDecoder().decode(bytes))
+    } catch {
+      /* no clipboard here (headless/tmux): the key does nothing */
+    }
+  }
 
   const slashSuggestion = (entry: SlashCommand): Suggestion => ({
     label: `/${entry.name}`,
@@ -92,24 +125,26 @@ export function Prompt(props: PromptProps) {
       // dispatcher owns what a slash line means (A2.3, SlashCommand's contract).
       const text = slashSelectionText(entry)
       if (text !== undefined) {
-        props.onSubmit(text)
+        props.onSubmit(text, images())
         return
       }
       keymap.runCommand(entry.command!)
     },
   })
 
-  const mentionSuggestion = (skill: SkillOption): Suggestion => ({
-    label: `@${skill.name}`,
-    description: skill.description ?? "",
+  const mentionSuggestion = (option: MentionOption): Suggestion => ({
+    label: option.name.startsWith("@") ? option.name : `@${option.name}`,
+    description: option.description ?? "",
     run: () => {
       if (!input) return
-      const inserted = replaceMentionToken(input.plainText, input.cursorOffset, skill.name)
+      const name = option.name.endsWith("/") ? option.name.slice(0, -1) : option.name
+      const inserted = replaceMentionToken(input.plainText, input.cursorOffset, name)
       input.setText(inserted.text)
       input.cursorOffset = inserted.cursor
       input.focus()
     },
   })
+
 
   const refresh = () => {
     const text = input?.plainText ?? ""
@@ -123,7 +158,16 @@ export function Prompt(props: PromptProps) {
     }
     const mention = mentionQuery(text, cursor)
     if (mention !== null) {
-      const list = filterSkillMentions(mention, props.skills ?? []).map(mentionSuggestion)
+      // Skills first: the backend claims a token for a skill before a file, so
+      // the list has to read the same way (a name that is both resolves once).
+      const seen = new Set<string>()
+      const options = [...(props.skills ?? []), ...(props.files ?? [])].filter((option) => {
+        const key = option.name.replace(/\/$/, "")
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      const list = filterMentions(mention, options).map(mentionSuggestion)
       setSuggestions(list)
       setSelected((current) => Math.min(current, Math.max(0, list.length - 1)))
       return
@@ -163,6 +207,13 @@ export function Prompt(props: PromptProps) {
   createEffect(() => props.onOverlay?.(visible()))
 
   useBindings(() => ({
+    // Always on while the composer is mounted: paste must work mid-busy too.
+    target: () => input,
+    commands: [{ name: "prompt.paste", desc: "Paste from the clipboard", run: () => void paste() }],
+    bindings: [{ key: "ctrl+v", cmd: "prompt.paste" }],
+  }))
+
+  useBindings(() => ({
     enabled: visible(),
     target: () => input,
     commands: [
@@ -186,9 +237,15 @@ export function Prompt(props: PromptProps) {
 
   const submit = () => {
     const text = (input?.plainText ?? "").trim()
-    if (!text) return
+    if (!text && images().length === 0) return
     setSuggestions([])
-    if (props.onSubmit(text) === false) return
+    if (props.onSubmit(text, images()) === false) {
+      // Busy turns queue text only; the images stay in the box for the retry.
+      if (images().length > 0) setHint("回合进行中：图片不能排队，等这轮结束后再发送")
+      return
+    }
+    setImages([])
+    setHint("")
     input?.setText("")
   }
 
@@ -204,6 +261,20 @@ export function Prompt(props: PromptProps) {
       paddingTop={1}
     >
       <box flexDirection="column" width="100%">
+        <Show when={images().length > 0 || hint()}>
+          <box flexDirection="column" width="100%">
+            <Show when={images().length > 0}>
+              <text fg={theme.textMuted}>
+                {images()
+                  .map((image) => `[Image: ${image.name}]`)
+                  .join(" ")}
+              </text>
+            </Show>
+            <Show when={hint()}>
+              <text fg={theme.textMuted}>{hint()}</text>
+            </Show>
+          </box>
+        </Show>
         <Show when={visible()}>
           <box flexDirection="column" width="100%" paddingBottom={1}>
             <For each={suggestions()}>

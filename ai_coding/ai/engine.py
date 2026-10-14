@@ -98,6 +98,7 @@ class ChatEngine(ABC):
         tools: list[dict[str, Any]],
         instructions: str | None = None,
         on_delta: DeltaSink | None = None,
+        image_loader: Any | None = None,
     ) -> StepResult:
         """Run one model call over ``messages`` and return what it produced.
 

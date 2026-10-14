@@ -24,7 +24,7 @@ import { Logo } from "../component/logo"
 import { Prompt } from "../component/prompt"
 import { useDialog } from "../dialog/context"
 import type { IpcClient } from "../ipc"
-import type { SkillOption } from "../util/mention"
+import type { MentionOption } from "../util/mention"
 import { theme } from "../theme/tokens"
 import { abbreviateHome, formatLocation, truncatePath } from "../util/location"
 
@@ -43,7 +43,9 @@ export interface HomeProps {
   onSubmit: (text: string) => void
   client: IpcClient
   /** The registry's skills, for the composer's `@` suggestions (r16/E-2). */
-  skills: SkillOption[]
+  skills: MentionOption[]
+  /** Workspace files/directories for the same list (r17/T4). */
+  files: MentionOption[]
 }
 
 export function Home(props: HomeProps) {
@@ -107,6 +109,7 @@ export function Home(props: HomeProps) {
           seed={promptSeed()}
           onSeedDone={() => setPromptSeed("")}
           skills={props.skills}
+          files={props.files}
         />
       </box>
       <box flexGrow={1} />

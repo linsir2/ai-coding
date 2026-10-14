@@ -28,6 +28,8 @@ _ALIASES: dict[str, str] = {
     "/h": "help",
     "/status": "status",
     "/compact": "compact",
+    "/undo": "undo",
+    "/redo": "redo",
     "/memory": "memory",
     "/trace": "trace",
     "/budget": "budget",

@@ -25,7 +25,8 @@ import { Sidebar } from "../component/sidebar"
 import { StatusBar } from "../component/status-bar"
 import { useDialog } from "../dialog/context"
 import type { IpcClient } from "../ipc"
-import type { SkillOption } from "../util/mention"
+import type { PromptImage } from "../util/attachment"
+import type { MentionOption } from "../util/mention"
 import type { Action, SessionState } from "../state/session"
 import { initialState, reduce } from "../state/session"
 import { useToast } from "../component/toast"
@@ -62,7 +63,9 @@ export interface SessionProps {
   /** The tab list can go stale after a turn; the shell refreshes it. */
   onTurnFinished: () => void
   /** The registry's skills, for the composer's `@` suggestions (r16/E-2). */
-  skills: SkillOption[]
+  skills: MentionOption[]
+  /** Workspace files/directories for the same list (r17/T4). */
+  files: MentionOption[]
 }
 
 interface Stats {
@@ -103,15 +106,25 @@ export function Session(props: SessionProps) {
     }
   }
 
-  const dispatch = (text: string) => {
+  const dispatch = (text: string, images: PromptImage[] = []) => {
     // A "/"-prefixed line is a slash command: the backend's dispatcher
     // (app/commands.py::handle_input) decides what it means, so the TUI gains
     // the whole command layer through one entry.  Unknown commands fall
     // through it as plain text — the same verdict the model would get either
     // way.  Plain text keeps the live-turn path (bridge deltas, no console).
     const method = text.startsWith("/") ? "session.command" : "session.prompt"
+    // r17/T5: clipboard images ride only the plain-prompt path; a slash line
+    // has no use for them.  The wire spelling is data URLs.
+    const payload =
+      method === "session.prompt" && images.length > 0
+        ? {
+            id: props.sessionId,
+            text,
+            images: images.map((image) => ({ name: image.name, data_url: image.dataUrl })),
+          }
+        : { id: props.sessionId, text }
     void props.client
-      .request(method, { id: props.sessionId, text })
+      .request(method, payload)
       .then(() => {
         // A command can rewrite the history. `/compact` moves the context
         // meter's boundary, so without this the sidebar kept reporting the
@@ -124,15 +137,18 @@ export function Session(props: SessionProps) {
       })
   }
 
-  const submit = (text: string): boolean => {
+  const submit = (text: string, images: PromptImage[] = []): boolean => {
     // The retired Textual UI queued a submit that arrived mid-turn and ran it
-    // when the turn ended; replicate that here.
+    // when the turn ended; replicate that here.  The queue holds text only, so
+    // a submission carrying images is refused while busy (the composer keeps
+    // them and says why) rather than silently dropped.
     if (state.busy) {
+      if (images.length > 0) return false
       apply({ kind: "queued", text })
       return true
     }
-    apply({ kind: "submitted", text })
-    dispatch(text)
+    apply({ kind: "submitted", text, images })
+    dispatch(text, images)
     return true
   }
 
@@ -236,14 +252,19 @@ export function Session(props: SessionProps) {
         }
         if (action === "quit") props.onQuit()
         if (event.data["reload"] === true) {
-          // The live session switched (/clear, /resume): re-project onto the
-          // new history.  Same-session rewrites (/compact) no longer reload —
-          // the live rows stay, and the fact rides `compacted` below.
+          // The live session switched (/clear, /resume), or /undo|/redo
+          // rewrote this session's history in place (r17/T1): re-project.
           void (async () => {
             const loaded = await loadSession(props.client, props.sessionId)
             setState({ ...loaded, queued: state.queued })
             void refreshStats()
           })()
+        }
+        {
+          // /undo hands the undone user message back so it can be edited and
+          // re-sent, the gesture the old TUI had.
+          const undo = event.data["undo"] as { text?: unknown } | null | undefined
+          if (undo && typeof undo.text === "string") setPromptSeed(undo.text)
         }
         {
           // A same-session history rewrite reports itself for the toast.  It
@@ -371,6 +392,7 @@ export function Session(props: SessionProps) {
                 seed={promptSeed()}
                 onSeedDone={() => setPromptSeed("")}
                 skills={props.skills}
+                files={props.files}
               />
             </>
           </Show>

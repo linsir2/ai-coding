@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from ai_coding.infra.subprocess_runner import run_process_async
+from ai_coding.core.gitcmd import git
 
 _BRANCH_PREFIX = "ai_sub_"
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
@@ -67,17 +67,19 @@ class WorktreeManager:
         self._timeout = float(timeout)
 
     async def _git(self, *args: str) -> tuple[int, str]:
-        """Run one bounded git command; failures and timeouts raise WorktreeError."""
-        outcome = await run_process_async(
-            ("git", *args), cwd=str(self._root), timeout=self._timeout
-        )
+        """Run one bounded git command; failures and timeouts raise WorktreeError.
+
+        The invocation itself lives in ``gitcmd`` (shared with the r17 snapshot
+        store); this wrapper only translates its two hard failures into this
+        module's own contract.
+        """
         verb = args[0] if args else "git"
-        if outcome.error is not None:
-            raise WorktreeError(f"could not run git {verb}: {outcome.error}")
-        if outcome.timed_out:
-            raise WorktreeError(f"git {verb} timed out after {self._timeout:g}s")
-        text = (outcome.stdout + outcome.stderr).strip()
-        return (outcome.returncode or 0), text
+        try:
+            return await git(self._root, *args, timeout=self._timeout)
+        except OSError as exc:
+            raise WorktreeError(f"could not run git {verb}: {exc}") from exc
+        except TimeoutError as exc:
+            raise WorktreeError(str(exc)) from exc
 
     async def can_isolate(self) -> bool:
         """True when the root is inside a git work tree and git is callable."""

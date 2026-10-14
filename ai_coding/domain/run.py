@@ -14,11 +14,13 @@ import json
 from typing import Any
 
 from .loop import StepResult
-from .message import ChatMessage, ToolOutput
+from .message import ChatMessage, ImageRef, ToolOutput
 
 
-def user_message(content: str, timestamp: str) -> ChatMessage:
-    return ChatMessage(role="user", content=content, timestamp=timestamp)
+def user_message(
+    content: str, timestamp: str, images: tuple[ImageRef, ...] = ()
+) -> ChatMessage:
+    return ChatMessage(role="user", content=content, timestamp=timestamp, images=images)
 
 
 def assistant_message(step: StepResult, timestamp: str) -> ChatMessage:

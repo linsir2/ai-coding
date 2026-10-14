@@ -118,6 +118,9 @@ def _build_loop(
     # M2: per-step MCP catalog text; ``None`` in paths without an MCP manager
     # (the bare CLI), where there is nothing to catalog.
     catalog_builder: Any | None = None,
+    # r17/T1: pre-turn workspace snapshots.  ``None`` keeps /undo to the
+    # history half (the bare-CLI paths that never wire one).
+    snapshots: Any | None = None,
 ) -> Any:
     """Assemble the loop and its optional components (silent degradation)."""
     if approval is None:
@@ -171,12 +174,19 @@ def _build_loop(
 
             registry.register(CheckpointTool())
 
+    if snapshots is None:
+        # Every interactive entry point gets undo; only the history half works
+        # outside a git repo (SnapshotStore degrades there by design).
+        from ai_coding.core.snapshots import SnapshotStore
+
+        snapshots = SnapshotStore(ws)
     return AgentLoop(
         engine,
         sessions,
         registry,
         approval=approval,
         gate=_build_gate(app_cfg, str(ws), skills),
+        snapshots=snapshots,
         context=context,
         memory=memory,
         prompt=prompt,

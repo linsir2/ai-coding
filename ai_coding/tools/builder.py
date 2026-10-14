@@ -101,10 +101,13 @@ def _assemble_registry(
     from ai_coding.tools.bash_tool import BashTool
     from ai_coding.tools.edit_tool import EditTool
     from ai_coding.tools.glob_tool import GlobTool
+    from ai_coding.tools.grep_tool import GrepTool
     from ai_coding.tools.read_tool import ReadTool
     from ai_coding.tools.registry import ToolRegistry
     from ai_coding.tools.skill_tool import SkillTool
     from ai_coding.tools.todo_write_tool import TodoWriteTool
+    from ai_coding.tools.webfetch_tool import WebfetchTool
+    from ai_coding.tools.websearch_tool import WebsearchTool
     from ai_coding.tools.write_tool import WriteTool
 
     sandbox = Sandbox(workspace)
@@ -126,6 +129,20 @@ def _assemble_registry(
         registry.register(EditTool(sandbox, fst))
     if tools_cfg.glob.enabled:
         registry.register(GlobTool(sandbox))
+    if getattr(getattr(tools_cfg, "grep", None), "enabled", True):
+        registry.register(GrepTool(sandbox))
+
+    # r17/T3: the two network tools.  Read-only toward the workspace; the gate
+    # allows them (they only read the outside world), the SSRF guard bounds
+    # *which* outside world webfetch will touch.
+    ai_cfg = getattr(app_cfg, "ai", None)
+    registry.register(WebfetchTool())
+    registry.register(
+        WebsearchTool(
+            str(getattr(ai_cfg, "websearch_api_key", "") or ""),
+            max_results=int(getattr(ai_cfg, "websearch_max_results", 5) or 5),
+        )
+    )
 
     # Always-registered tools
     # R9a: the dependency gate is on by default; legacy lists can switch it off.

@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { filterSkillMentions, mentionQuery, replaceMentionToken } from "../src/util/mention"
+import { filterMentions, mentionQuery, replaceMentionToken } from "../src/util/mention"
 
 describe("mentionQuery", () => {
   test("opens on a word boundary and takes the text after @", () => {
@@ -46,19 +46,29 @@ describe("filterSkillMentions", () => {
   ]
 
   test("an empty query keeps the list, capped", () => {
-    expect(filterSkillMentions("", skills).map((s) => s.name)).toEqual([
+    expect(filterMentions("", skills).map((s) => s.name)).toEqual([
       "demo-skill",
       "review-helper",
     ])
   })
 
   test("matches on name and description", () => {
-    expect(filterSkillMentions("review", skills).map((s) => s.name)).toEqual(["review-helper"])
-    expect(filterSkillMentions("demo", skills).map((s) => s.name)).toEqual(["demo-skill"])
+    expect(filterMentions("review", skills).map((s) => s.name)).toEqual(["review-helper"])
+    expect(filterMentions("demo", skills).map((s) => s.name)).toEqual(["demo-skill"])
   })
 
   test("a skill without a description still matches on its name", () => {
     const bare = [{ name: "demo-skill" }]
-    expect(filterSkillMentions("de", bare).map((s) => s.name)).toEqual(["demo-skill"])
+    expect(filterMentions("de", bare).map((s) => s.name)).toEqual(["demo-skill"])
+  })
+
+  test("workspace files ride the same list (r17/T4)", () => {
+    const options = [{ name: "docs/api.md" }, { name: "src/" }]
+    expect(filterMentions("api", options).map((s) => s.name)).toEqual(["docs/api.md"])
+    expect(filterMentions("", options).map((s) => s.name)).toEqual(["docs/api.md", "src/"])
+  })
+
+  test("a path token is replaced whole", () => {
+    expect(replaceMentionToken("@do", 3, "docs/api.md").text).toBe("@docs/api.md ")
   })
 })

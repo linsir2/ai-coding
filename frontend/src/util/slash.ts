@@ -111,6 +111,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "config", title: "Config", description: "Model and runtime limits in effect" },
   { name: "tasks", title: "Tasks", description: "Background sub-agent runs (add: stop <id>)" },
   { name: "compact", title: "Compact", description: "Compact this session's history now" },
+  { name: "undo", title: "Undo", description: "Roll the last turn back (history + files)" },
+  { name: "redo", title: "Redo", description: "Put back the turn /undo removed" },
   {
     name: "permissions",
     command: "session.permissions",

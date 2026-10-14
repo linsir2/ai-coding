@@ -170,6 +170,11 @@ class PermissionGate:
         self._allow_tools = {
             "read",
             "glob",
+            "grep",  # r17/T2: read-only content search
+            # r17/T3: read-only network tools.  webfetch keeps its own SSRF
+            # guard (public http(s) only); neither writes anything locally.
+            "webfetch",
+            "websearch",
             "todo_write",
             "skill",
             "subagent",

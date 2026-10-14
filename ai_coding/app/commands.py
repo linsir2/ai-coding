@@ -30,6 +30,8 @@ HELP_TEXT = (
     "  /review        review current changes\n"
     "  /config         show effective configuration\n"
     "  /compact        compact conversation history\n"
+    "  /undo           roll the last turn back (history + files)\n"
+    "  /redo           put back the turn /undo removed\n"
     "  /memory         show memory status\n"
     "  /trace          show last turn trace\n"
     "  /budget         show session token totals\n"
@@ -45,6 +47,10 @@ class REPLAction(Enum):
     CONTINUE = "continue"
     QUIT = "quit"
     NEW_SESSION = "new_session"
+    #: The command rewrote the *same* session's history (/undo, /redo): the
+    #: client must re-project it.  Distinct from NEW_SESSION, where the live
+    #: session itself was switched.
+    RELOAD = "reload"
 
 
 async def _ask_topic(console: Any) -> str | None:
@@ -136,6 +142,31 @@ async def handle_input(
         )
         if getattr(sessions, "save", None) is not None:
             sessions.save(session)
+        return REPLAction.CONTINUE, session
+    if cmd.name == "undo":
+        undo = getattr(loop, "undo_last_turn", None)
+        if undo is None:
+            console.info("[undo] not supported by this loop")
+            return REPLAction.CONTINUE, session
+        report = await undo(session)
+        if not report.get("ok"):
+            console.info(f"[undo] {report.get('reason', 'failed')}")
+            return REPLAction.CONTINUE, session
+        console.info(
+            f"[undo] {report['messages_before']} → {report['messages_after']} 条，"
+            f"还原 {len(report.get('files') or [])} 个文件"
+        )
+        return REPLAction.RELOAD, session
+    if cmd.name == "redo":
+        redo = getattr(loop, "redo_last_turn", None)
+        if redo is None:
+            console.info("[redo] not supported by this loop")
+            return REPLAction.CONTINUE, session
+        report = await redo(session)
+        if report.get("ok"):
+            console.info("[redo] 已恢复上一回合")
+            return REPLAction.RELOAD, session
+        console.info(f"[redo] {report.get('reason', 'failed')}")
         return REPLAction.CONTINUE, session
     if cmd.name == "memory":
         console.info(_memory_report(loop))

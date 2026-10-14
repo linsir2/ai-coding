@@ -43,6 +43,7 @@ A loop you cannot read is not "ours" any more (docs/r5-analysis.md 2.2).
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import time
 from collections.abc import Callable, Mapping
@@ -101,7 +102,12 @@ from ai_coding.domain.loop import (
     TurnOutcome,
     TurnStatus,
 )
-from ai_coding.domain.message import ChatMessage, ToolArtifact
+from ai_coding.domain.message import (
+    IMAGE_MIME_BY_SUFFIX,
+    ChatMessage,
+    ImageRef,
+    ToolArtifact,
+)
 from ai_coding.domain.model_config import ModelConfig
 from ai_coding.domain.run import assistant_message, user_message
 from ai_coding.domain.session import SessionData
@@ -129,6 +135,8 @@ if TYPE_CHECKING:
     from ai_coding.skills.registry import SkillRegistry
 
 DeltaSink = Callable[[str], None]
+
+
 
 _log = logging.getLogger(__name__)
 
@@ -198,6 +206,7 @@ class AgentLoop:
         hooks: Any | None = None,
         steering: Any | None = None,
         cancel: asyncio.Event | None = None,
+        snapshots: Any | None = None,
     ) -> None:
         self.engine = engine
         self.sessions = sessions
@@ -208,6 +217,16 @@ class AgentLoop:
         self.memory = memory
         self.skills = skills
         self.project = project
+        # r17/T1: pre-turn workspace snapshots (``core/snapshots.SnapshotStore``).
+        # ``None`` (every sub-agent, and every caller that did not wire one)
+        # means undo has no files to restore — the history half still works.
+        self.snapshots = snapshots
+        # What the last ``undo_last_turn`` reported, for the IPC layer to hand
+        # the client with its reload (the composer gets the text back).
+        self.last_undo: dict[str, Any] | None = None
+        # The messages undo removed, held for /redo.  In-process only: a restart
+        # loses redo, which is the honest cost of not writing it to the session.
+        self._undo_tail: list[ChatMessage] = []
         self.settings = settings or AIConfig()
         # The model table lives on ``AppConfig``, not on ``AIConfig``: it is a
         # catalogue of connections, not a behaviour knob, and ``AIConfig`` is
@@ -307,6 +326,7 @@ class AgentLoop:
             settings=self.settings,
             emit=self._emit,
             skills=self.skills,
+            workspace=workspace,
         )
 
     def set_model(self, name: str) -> None:
@@ -331,6 +351,7 @@ class AgentLoop:
         user_input: str,
         on_delta: DeltaSink | None = None,
         observer: LoopObserver | None = None,
+        images: tuple[ImageRef, ...] = (),
     ) -> str:
         """Run one user turn to completion and return the final assistant text.
 
@@ -340,7 +361,7 @@ class AgentLoop:
         loop then refuses.
         """
         async with self._turn_lock:
-            return await self._run_turn(session, user_input, on_delta, observer)
+            return await self._run_turn(session, user_input, on_delta, observer, images)
 
     async def _run_turn(
         self,
@@ -348,11 +369,19 @@ class AgentLoop:
         user_input: str,
         on_delta: DeltaSink | None = None,
         observer: LoopObserver | None = None,
+        images: tuple[ImageRef, ...] = (),
     ) -> str:
         """One turn, ungated.  The body below is ``process_input`` unchanged:
         splitting it out keeps the re-entry guard a two-line diff instead of a
         re-indent of the whole turn."""
-        frame = await self._begin_turn(session, user_input, observer)
+        await self._capture_snapshot(session)
+        # r17/T5: clipboard images plus any @path.png in the text ride the user
+        # message as parts; a token is claimed once, first spelling wins.
+        attached = tuple(images) + tuple(
+            ref for ref in self._extract_image_mentions(user_input)
+            if ref.path not in {existing.path for existing in images}
+        )
+        frame = await self._begin_turn(session, user_input, observer, attached)
         task = frame.task
         # R7a: everything the turn counts about itself lives in one object, so a
         # new rule is a method on the books rather than a tenth local variable.
@@ -645,6 +674,7 @@ class AgentLoop:
         session: SessionData,
         user_input: str,
         observer: LoopObserver | None,
+        images: tuple[ImageRef, ...] = (),
     ) -> TurnFrame:
         """Everything that must happen before the first iteration.
 
@@ -670,7 +700,7 @@ class AgentLoop:
                 _router.record_load(name, _session.turn_count, _session.skill_stats)
                 _session.loaded_skill = name
             skill_tool.set_on_loaded(_on_skill_loaded)
-        session.add_message(user_message(user_input, now_utc()))
+        session.add_message(user_message(user_input, now_utc(), images))
         # T5: remember this request's instruction so compaction can keep it in
         # the history (hotel audit root cause R5: the instruction at index 80 fell
         # out of the L1 tail window and the model re-anchored on old content).
@@ -1089,6 +1119,14 @@ class AgentLoop:
                     tools=self._tool_schemas,
                     instructions=assembled.instructions,
                     on_delta=on_delta,
+                    # r17/T5 offered only when the request actually carries
+                    # images: an engine (or test double) that predates the
+                    # parameter stays callable for every text-only turn.
+                    **(
+                        {"image_loader": self._load_image}
+                        if any(m.images for m in request)
+                        else {}
+                    ),
                 ),
                 timeout=self._remaining(frame.deadline),
                 label="closing_step",
@@ -1130,6 +1168,11 @@ class AgentLoop:
                     tools=self._tool_schemas,
                     instructions=instructions,
                     on_delta=on_delta,
+                    **(
+                        {"image_loader": self._load_image}
+                        if any(m.images for m in request)
+                        else {}
+                    ),
                 ),
                 timeout=self._remaining(deadline),
                 label="model_step",
@@ -1210,6 +1253,119 @@ class AgentLoop:
         if report["after"] != report["messages"]:
             self.closer.save(session)
         return report
+
+    # ---- undo / redo (r17/T1) ----------------------------------------------
+
+    @staticmethod
+    def _turn_key(session: SessionData, user_turns_before: int) -> str:
+        """``<session_id>/<n>`` — the one spelling capture and restore share."""
+        return f"{session.session_id}/{user_turns_before + 1}"
+
+    def _extract_image_mentions(self, text: str) -> tuple[ImageRef, ...]:
+        """``@shot.png`` tokens that name a real image file under the workspace.
+
+        These ride as message parts (r17/T5), not as injected text: the bytes
+        are what the model needs, and ``<referenced-files>`` skips them.
+        """
+        from ai_coding.skills.registry import iter_mentions
+
+        root = Path(self.workspace).expanduser().resolve()
+        refs: list[ImageRef] = []
+        seen: set[str] = set()
+        for token in iter_mentions(text):
+            mime = IMAGE_MIME_BY_SUFFIX.get(Path(token).suffix.lower())
+            if mime is None or token in seen:
+                continue
+            try:
+                resolved = (root / token).resolve()
+                resolved.relative_to(root)
+            except (OSError, ValueError):
+                continue
+            if resolved.is_file():
+                seen.add(token)
+                refs.append(ImageRef(path=token, mime=mime, name=Path(token).name))
+        return tuple(refs)
+
+    def _load_image(self, ref: ImageRef) -> str | None:
+        """Read one message image as a data URL, or None when unreadable (T5)."""
+        try:
+            raw = (Path(self.workspace).expanduser() / ref.path).read_bytes()
+        except OSError:
+            return None
+        return f"data:{ref.mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+    async def _capture_snapshot(self, session: SessionData) -> None:
+        """Pin the pre-turn workspace state under refs/ai-coding/undo.
+
+        Best effort by design: undo is a safety net, not a turn prerequisite, so
+        a missing git (or a git that overran its timeout) must not fail the turn.
+        """
+        if self.snapshots is None:
+            return
+        turn = sum(1 for m in session.messages if m.role == "user")
+        try:
+            await self.snapshots.capture(self._turn_key(session, turn))
+            await self.snapshots.prune(session.session_id)
+        except (OSError, TimeoutError, ValueError):
+            pass
+
+    async def undo_last_turn(self, session: SessionData) -> dict[str, Any]:
+        """Roll the last user turn back: files to the snapshot, history to before it.
+
+        The text is handed back so the client can put it in the composer (the
+        ``/undo`` gesture the old TUI had).  ``redo_last_turn`` is the inverse,
+        held in process memory — restarting after an undo loses redo.
+        """
+        index = next(
+            (
+                i
+                for i in range(len(session.messages) - 1, -1, -1)
+                if session.messages[i].role == "user"
+            ),
+            None,
+        )
+        if index is None:
+            return {"ok": False, "reason": "nothing to undo"}
+        text = session.messages[index].content or ""
+        restored: list[str] = []
+        if self.snapshots is not None:
+            before = sum(1 for m in session.messages[:index] if m.role == "user")
+            key = self._turn_key(session, before)
+            try:
+                if await self.snapshots.exists(key):
+                    # remember the state we are about to leave, so /redo can return to it
+                    await self.snapshots.capture(f"{session.session_id}/redo")
+                    restored = await self.snapshots.restore(key)
+            except (OSError, TimeoutError, ValueError):
+                restored = []
+        self._undo_tail = list(session.messages[index:])
+        session.messages = list(session.messages[:index])
+        self.closer.save(session)
+        self.last_undo = {
+            "ok": True,
+            "text": text,
+            "files": restored,
+            "messages_before": index + len(self._undo_tail),
+            "messages_after": index,
+        }
+        return self.last_undo
+
+    async def redo_last_turn(self, session: SessionData) -> dict[str, Any]:
+        """Put back the turn ``undo_last_turn`` removed (files and history)."""
+        if not self._undo_tail:
+            return {"ok": False, "reason": "nothing to redo"}
+        if self.snapshots is not None:
+            try:
+                key = f"{session.session_id}/redo"
+                if await self.snapshots.exists(key):
+                    await self.snapshots.restore(key)
+            except (OSError, TimeoutError, ValueError):
+                pass
+        session.messages = list(session.messages) + self._undo_tail
+        self._undo_tail = []
+        self.closer.save(session)
+        self.last_undo = None
+        return {"ok": True, "messages": len(session.messages)}
 
     # ---- request assembly -------------------------------------------------
 

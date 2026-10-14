@@ -34,6 +34,9 @@ ai:
   # skill_permissions:
   #   some-imported-skill: ask
   skill_permissions: {}
+  # r17/T3: web search (Tavily).  Empty = the tool explains how to configure it.
+  websearch_api_key: ""
+  websearch_max_results: 5
   # R1a orchestration (see docs/r1-analysis.md)
   stop_policy: todo_aware          # natural | todo_aware | strict
   max_todo_nudges: 2
@@ -97,6 +100,8 @@ tools:
   edit:
     enabled: true
   glob:
+    enabled: true
+  grep:
     enabled: true
 
 mcp:

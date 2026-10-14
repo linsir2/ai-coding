@@ -25,6 +25,8 @@ class ToolsConfig(BaseModel):
     write: ToolConfig = Field(default_factory=ToolConfig)
     edit: ToolConfig = Field(default_factory=ToolConfig)
     glob: ToolConfig = Field(default_factory=ToolConfig)
+    # r17/T2: content search.  Same tier as glob (read-only, ALLOW).
+    grep: ToolConfig = Field(default_factory=ToolConfig)
     # R6c: the model asking a human.  `timeout_seconds` is how long it may wait for
     # an answer (the tool adds 15s of slack for the dispatcher, like bash/subAgent).
     # Only registered where somebody can actually answer — see tools/builder.py.
@@ -133,6 +135,10 @@ class AIConfig(BaseModel):
     # @mention injection; ask routes the model's own reads through the
     # approval panel. A typo is a load error, not a silent allow.
     skill_permissions: dict[str, Literal["allow", "ask", "deny"]] = Field(default_factory=dict)
+    # r17/T3: web search (Tavily).  Empty key = the tool stays registered but
+    # answers with how to configure it (a vanishing tool cannot be diagnosed).
+    websearch_api_key: str = ""
+    websearch_max_results: int = 5
     # R4b: cumulative token ceiling for one turn (it counts every re-sent context,
     # so it is a spend cap, not a window size).  0 disables the gate.
     turn_token_budget: int = 0

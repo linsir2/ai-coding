@@ -1,15 +1,15 @@
 /**
- * `@skill` suggestions, the pure half (r16/E-2).
+ * `@mention` suggestions, the pure half (r16/E-2; generalized in r17/T4).
  *
  * Mirrors `slashQuery`'s boundary rule (start or whitespace before the
- * trigger, no whitespace after) and the registry's mention pattern
- * (`skills/registry.py:428`) closely enough that anything this panel
- * suggests resolves server-side after submit.
+ * trigger, no whitespace after) and the registry's mention pattern closely
+ * enough that anything this panel suggests resolves server-side after submit:
+ * skills first, then workspace files (the backend resolves them in that order).
  */
 
 import { go } from "fuzzysort"
 
-export interface SkillOption {
+export interface MentionOption {
   name: string
   description?: string | null
   phase?: string
@@ -28,15 +28,15 @@ export function mentionQuery(text: string, cursor: number): string | null {
   return null
 }
 
-/** Fuzzy-match the skill list; an empty query keeps it (top `limit`). */
-export function filterSkillMentions(
+/** Fuzzy-match the suggestion list (skills and files); empty keeps the top. */
+export function filterMentions(
   query: string,
-  skills: readonly SkillOption[],
+  options: readonly MentionOption[],
   limit = 10,
-): SkillOption[] {
+): MentionOption[] {
   const needle = query.trim()
-  if (!needle) return skills.slice(0, limit)
-  return go(needle, skills, {
+  if (!needle) return options.slice(0, limit)
+  return go(needle, options, {
     keys: ["name", "description"],
     scoreFn: (result) => (result[0]?.score ?? 0) * 2 + (result[1]?.score ?? 0),
     threshold: 0,

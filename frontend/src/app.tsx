@@ -25,7 +25,7 @@ import { type PermissionRequest } from "./component/permission"
 
 import { ToastProvider } from "./component/toast"
 import { DialogProvider, useDialog } from "./dialog/context"
-import type { SkillOption } from "./util/mention"
+import type { MentionOption } from "./util/mention"
 import type { IpcClient } from "./ipc"
 import { Home } from "./routes/home"
 import { Session } from "./routes/session"
@@ -137,15 +137,23 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
     }
   }
 
-  const [skills, setSkills] = createSignal<SkillOption[]>([])
+  const [skills, setSkills] = createSignal<MentionOption[]>([])
+  const [files, setFiles] = createSignal<MentionOption[]>([])
   // The composer's @ list. skill_review can add skills mid-session, so the
-  // table is refreshed with the same cadence as the session list.
+  // table is refreshed with the same cadence as the session list.  r17/T4:
+  // the workspace's files ride the same list (skills first, files after).
   const refreshSkills = async () => {
     try {
-      const data = (await props.client.request("skills.list")) as { skills?: SkillOption[] }
+      const data = (await props.client.request("skills.list")) as { skills?: MentionOption[] }
       setSkills(data.skills ?? [])
     } catch {
       /* the composer keeps the last list; the panel refetches on open */
+    }
+    try {
+      const data = (await props.client.request("files.find", {})) as { files?: string[] }
+      setFiles((data.files ?? []).map((name) => ({ name })))
+    } catch {
+      /* same: the last list survives a failed walk */
     }
   }
 
@@ -449,6 +457,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
             onSubmit={startSession}
             client={props.client}
             skills={skills()}
+            files={files()}
           />
         }
       >
@@ -467,6 +476,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
             permission={permission()}
             onPermissionDecide={decidePermission}
             skills={skills()}
+            files={files()}
             ask={ask()}
             onAskAnswer={answerAsk}
             onQuit={exitWith}

@@ -12,7 +12,6 @@ import pytest
 
 from ai_coding.core import worktree
 from ai_coding.core.worktree import WorktreeError, WorktreeManager
-from ai_coding.infra.subprocess_runner import ProcessOutcome
 
 pytestmark = pytest.mark.asyncio
 
@@ -117,12 +116,17 @@ async def test_create_raises_worktree_error_when_git_times_out(git_repo: Path) -
 async def test_git_spawn_failure_is_mapped(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A runner-level failure must not leak as an OSError to the caller."""
+    """A runner-level failure must not leak as an OSError to the caller.
 
-    async def _spawn_error(*_args: object, **_kwargs: object) -> ProcessOutcome:
-        return ProcessOutcome(returncode=None, error="FileNotFoundError: git")
+    r17/T1: the invocation seam moved to ``core/gitcmd.git`` (worktrees and
+    snapshots now share one bounded git call), so the patch targets it — the
+    behaviour under test is unchanged.
+    """
 
-    monkeypatch.setattr(worktree, "run_process_async", _spawn_error)
+    async def _spawn_error(*_args: object, **_kwargs: object) -> tuple[int, str]:
+        raise OSError("FileNotFoundError: git")
+
+    monkeypatch.setattr(worktree, "git", _spawn_error)
     mgr = WorktreeManager(git_repo)
     assert await mgr.can_isolate() is False
     with pytest.raises(WorktreeError, match="could not run git"):

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .acceptance import AcceptanceItem
-from .message import ChatMessage, ToolCallRef, tool_call_from_ref
+from .message import ChatMessage, ImageRef, ToolCallRef, tool_call_from_ref
 from .plan_delivery import StepDelivery
 from .task import TaskState
 from .turn_digest import TurnDigest
@@ -26,6 +26,16 @@ def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
             for item in raw_calls
             if isinstance(item, dict) and item.get("id") and item.get("name")
         ]
+    raw_images = data.get("images")
+    images = tuple(
+        ImageRef(
+            path=str(item.get("path", "")),
+            mime=str(item.get("mime", "")),
+            name=str(item.get("name", "")),
+        )
+        for item in (raw_images if isinstance(raw_images, list) else [])
+        if isinstance(item, dict) and item.get("path")
+    )
     return ChatMessage(
         role=data["role"],
         content=data.get("content"),
@@ -34,6 +44,7 @@ def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
         tool_name=data.get("toolName"),
         tool_calls=tool_calls,
         reasoning=data.get("reasoning"),
+        images=images,
     )
 
 
@@ -47,6 +58,12 @@ def _message_to_dict(msg: ChatMessage) -> dict[str, Any]:
         data["toolCallId"] = msg.tool_call_id
     if msg.tool_name is not None:
         data["toolName"] = msg.tool_name
+    # r17/T5: written only when present — old files (and the Java reader) never
+    # see the key, same rule as `reasoning`.
+    if msg.images:
+        data["images"] = [
+            {"path": ref.path, "mime": ref.mime, "name": ref.name} for ref in msg.images
+        ]
     if msg.tool_calls:
         data["toolCalls"] = [
             {"id": c.id, "name": c.name, "arguments": c.arguments} for c in msg.tool_calls

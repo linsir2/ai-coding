@@ -451,13 +451,27 @@ __all__ = [
     "Skill",
     "SkillRegistry",
     "SkillTriggers",
+    "iter_mentions",
     "parse_skill",
+    "resolve_mentions",
 ]
 
 
 #: ``@name`` — what the TUI writes into the composer when a skill is picked from
-#: the panel, and what OpenCode writes for the same gesture.
-_MENTION = re.compile(r"(?<![\w@])@([A-Za-z0-9][A-Za-z0-9._-]*)")
+#: the panel, and what OpenCode writes for the same gesture.  ``/`` is in the
+#: token class since r17/T4 so ``@docs/api.md`` is one token; a path never
+#: resolves to a skill, so the skills consumer simply declines it.
+_MENTION = re.compile(r"(?<![\w@])@([A-Za-z0-9][A-Za-z0-9._/-]*)")
+
+
+def iter_mentions(text: str) -> list[str]:
+    """The ``@name`` tokens in a message, in order, duplicates kept.
+
+    One tokenizer for two consumers (r17/T4): the skills resolver below and
+    ``core/file_mentions``.  Two regexes would drift the day one learning
+    matched a spelling the other did not.
+    """
+    return _MENTION.findall(text) if text else []
 
 
 def resolve_mentions(text: str, registry: SkillRegistry | None) -> list[str]:
@@ -471,10 +485,10 @@ def resolve_mentions(text: str, registry: SkillRegistry | None) -> list[str]:
     Archived skills resolve. Archived means "do not offer this proactively", and
     naming one is the opposite of proactive.
     """
-    if not text or registry is None:
+    if registry is None:
         return []
     found: list[str] = []
-    for mention in _MENTION.findall(text):
+    for mention in iter_mentions(text):
         skill = registry.resolve(mention)
         if skill is not None and skill.id not in found:
             found.append(skill.id)

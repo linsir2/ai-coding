@@ -281,12 +281,15 @@ class OpenAIChatEngine(ChatEngine):
     def build_request_messages(
         messages: list[ChatMessage],
         instructions: str | None,
+        image_loader: Any | None = None,
     ) -> list[dict[str, Any]]:
         """Map history to chat messages and prepend the system prompt if any.
 
         Nothing is appended here: ``messages`` already contains the user turn.
+        ``image_loader`` (r17/T5) resolves message images to data URLs; the
+        caller owns the workspace, so the loader travels with the call.
         """
-        request = history_to_chat_messages(messages)
+        request = history_to_chat_messages(messages, image_loader=image_loader)
         if instructions:
             request.insert(0, {"role": "system", "content": instructions})
         return request
@@ -298,6 +301,7 @@ class OpenAIChatEngine(ChatEngine):
         tools: list[dict[str, Any]],
         instructions: str | None = None,
         on_delta: DeltaSink | None = None,
+        image_loader: Any | None = None,
     ) -> StepResult:
         """One step, with bounded retries for a transient provider failure.
 
@@ -308,7 +312,7 @@ class OpenAIChatEngine(ChatEngine):
         cfg = self.model_config
         kwargs: dict[str, Any] = {
             "model": cfg.name,
-            "messages": self.build_request_messages(messages, instructions),
+            "messages": self.build_request_messages(messages, instructions, image_loader),
             "stream": True,
             "temperature": cfg.temperature,
             "max_tokens": cfg.max_tokens,

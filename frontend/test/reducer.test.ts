@@ -960,3 +960,29 @@ describe("compaction cards survive interleaved input (P3-4)", () => {
     expect(cards[0]).toMatchObject({ status: "done", text: "## 目标\nx" })
   })
 })
+
+
+describe("image attachments (r17/T5)", () => {
+  test("a submitted image lands as its own part", () => {
+    const state = reduce(initialState(), {
+      kind: "submitted",
+      text: "看这个",
+      images: [{ name: "shot", dataUrl: "data:image/png;base64,AA" }],
+    })
+
+    expect(state.messages[0]!.parts).toEqual([
+      { kind: "text", text: "看这个", streaming: false },
+      { kind: "image", name: "shot" },
+    ])
+  })
+
+  test("an image-only submission has no empty text part", () => {
+    const state = reduce(initialState(), {
+      kind: "submitted",
+      text: "",
+      images: [{ name: "shot", dataUrl: "data:image/png;base64,AA" }],
+    })
+
+    expect(state.messages[0]!.parts).toEqual([{ kind: "image", name: "shot" }])
+  })
+})

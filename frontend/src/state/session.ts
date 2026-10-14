@@ -12,6 +12,7 @@
  */
 
 import type { EventMessage } from "../ipc"
+import type { PromptImage } from "../util/attachment"
 import { foldToolChunk, shorten, toolTarget, toolVerb } from "../util/toolmeta"
 import type { TailLine, ToolStream } from "../util/toolmeta"
 
@@ -40,6 +41,7 @@ export type Part =
     }
   | { kind: "plan"; title: string; body: string }
   | { kind: "notice"; tone: Tone; text: string }
+  | { kind: "image"; name: string }
   | { kind: "turn-end"; tone: "error"; text: string }
   | {
       kind: "compaction"
@@ -68,7 +70,7 @@ export interface SessionState {
 }
 
 export type Action =
-  | { kind: "submitted"; text: string }
+  | { kind: "submitted"; text: string; images?: PromptImage[] }
   | { kind: "queued"; text: string }
   | { kind: "queued-dispatched" }
   | { kind: "submit-failed"; reason: string }
@@ -597,7 +599,16 @@ export function reduce(state: SessionState, action: Action): SessionState {
         messages: retireOldest(
           [
             ...state.messages,
-            { role: "user", parts: [{ kind: "text", text: action.text, streaming: false }] },
+            {
+              role: "user",
+              parts: [
+                // An image-only message has no text part at all (r17/T5).
+                ...(action.text
+                  ? [{ kind: "text", text: action.text, streaming: false } as const]
+                  : []),
+                ...(action.images ?? []).map((image) => ({ kind: "image", name: image.name }) as const),
+              ],
+            },
           ],
           false,
         ),

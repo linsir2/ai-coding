@@ -16,9 +16,15 @@ gone by construction.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
-from ai_coding.domain.message import ChatMessage, ToolCallRef
+from ai_coding.domain.message import ChatMessage, ImageRef, ToolCallRef
+
+#: Turns one message image into a data URL, or None when it cannot be read
+#: (r17/T5).  The caller that owns the workspace supplies it for a call, so
+#: this module stays pure and the engine stays ignorant of where files live.
+ImageLoader = Callable[[ImageRef], str | None]
 
 
 def tool_call_to_dict(ref: ToolCallRef) -> dict[str, Any]:
@@ -30,8 +36,16 @@ def tool_call_to_dict(ref: ToolCallRef) -> dict[str, Any]:
     }
 
 
-def to_chat_message(msg: ChatMessage) -> dict[str, Any]:
-    """Convert one domain message into a native chat-completions message dict."""
+def to_chat_message(
+    msg: ChatMessage, *, image_loader: ImageLoader | None = None
+) -> dict[str, Any]:
+    """Convert one domain message into a native chat-completions message dict.
+
+    A user message with images becomes the content-parts form
+    (``[{type: text}, {type: image_url, ...}]``); the loader resolves each
+    reference.  An unreadable image degrades to a text part naming the failure
+    -- a broken image must not fail the whole request (r17/T5).
+    """
     if msg.role == "tool":
         return {
             "role": "tool",
@@ -41,7 +55,19 @@ def to_chat_message(msg: ChatMessage) -> dict[str, Any]:
     if msg.role == "system":
         return {"role": "system", "content": msg.content or ""}
     if msg.role == "user":
-        return {"role": "user", "content": msg.content or ""}
+        if not msg.images:
+            return {"role": "user", "content": msg.content or ""}
+        parts: list[dict[str, Any]] = []
+        text = msg.content or ""
+        if text:
+            parts.append({"type": "text", "text": text})
+        for ref in msg.images:
+            data_url = image_loader(ref) if image_loader is not None else None
+            if data_url:
+                parts.append({"type": "image_url", "image_url": {"url": data_url}})
+            else:
+                parts.append({"type": "text", "text": f"（图片 {ref.name} 无法读取）"})
+        return {"role": "user", "content": parts}
 
     if msg.tool_calls:
         return {
@@ -52,9 +78,11 @@ def to_chat_message(msg: ChatMessage) -> dict[str, Any]:
     return {"role": "assistant", "content": msg.content or ""}
 
 
-def history_to_chat_messages(history: list[ChatMessage]) -> list[dict[str, Any]]:
+def history_to_chat_messages(
+    history: list[ChatMessage], *, image_loader: ImageLoader | None = None
+) -> list[dict[str, Any]]:
     """Convert a full history to native chat messages, preserving order."""
-    return [to_chat_message(msg) for msg in history]
+    return [to_chat_message(msg, image_loader=image_loader) for msg in history]
 
 
 __all__ = ["tool_call_to_dict", "to_chat_message", "history_to_chat_messages"]

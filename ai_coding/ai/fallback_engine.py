@@ -102,6 +102,7 @@ class FallbackEngine(ChatEngine):
         tools: list[dict[str, Any]],
         instructions: str | None = None,
         on_delta: DeltaSink | None = None,
+        image_loader: Any | None = None,
     ) -> StepResult:
         last: FallbackWorthwhile | None = None
         # Start from the top every step: a turn that fell back must not leave the
@@ -113,7 +114,13 @@ class FallbackEngine(ChatEngine):
             self._active = index
             try:
                 return await engine.step(
-                    messages, tools=tools, instructions=instructions, on_delta=on_delta
+                    messages,
+                    tools=tools,
+                    instructions=instructions,
+                    on_delta=on_delta,
+                    # same rule as the loop: forward the loader only when there
+                    # is one (r17/T5), so chain members predating it stay valid
+                    **({"image_loader": image_loader} if image_loader is not None else {}),
                 )
             except FallbackWorthwhile as exc:
                 last = exc

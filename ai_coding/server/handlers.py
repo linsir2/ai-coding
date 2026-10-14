@@ -23,6 +23,7 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
 
+from ai_coding.attachments import save_data_url
 from ai_coding.config.models import resolve_context_window
 from ai_coding.domain.session import _message_to_dict
 from ai_coding.server.bridge import EventBridge, Notify
@@ -256,13 +257,32 @@ def make_handlers(
             # Loading other sessions is the sessions dialog's job (M3); running
             # the *current* session under a foreign id would be silent data loss.
             raise ValueError(f"session not loaded: {session_id}")
+        # r17/T5: clipboard images arrive as data URLs; they are written under
+        # the workspace once and the message references the file.
+        images: list[Any] = []
+        for item in params.get("images", []) or []:
+            if not isinstance(item, dict):
+                continue
+            ref = save_data_url(
+                world.workspace,
+                str(item.get("name", "") or ""),
+                str(item.get("data_url", "") or ""),
+            )
+            if ref is not None:
+                images.append(ref)
         state.turn_id += 1
         turn_id = state.turn_id
 
         async def run_turn() -> None:
             try:
                 await world.loop.process_input(
-                    session, text, on_delta=bridge.on_delta, observer=bridge
+                    session,
+                    text,
+                    on_delta=bridge.on_delta,
+                    observer=bridge,
+                    # offered only when there is something to offer, so loop
+                    # doubles that predate r17/T5 stay callable for text turns
+                    **({"images": tuple(images)} if images else {}),
                 )
             except asyncio.CancelledError:
                 # The loop already persisted the partial turn and emitted
@@ -329,6 +349,7 @@ def make_handlers(
 
         async def run_command() -> None:
             action_name = "continue"
+            reload_in_place = False
             status, reason = "completed", ""
             # The transcript is cumulative (OpenCode parity): live rows stay
             # where they landed, so a command that rewrote the history no
@@ -345,6 +366,9 @@ def make_handlers(
                 )
                 if isinstance(action, REPLAction):
                     action_name = action.value
+                # /undo and /redo rewrite this session's history in place: the
+                # client must re-project it (r17/T1).
+                reload_in_place = action is REPLAction.RELOAD
                 if action is REPLAction.NEW_SESSION and next_session is not None:
                     # /clear and /resume <id>: the live session follows the
                     # dispatcher, and it must be listable/loadable so the
@@ -382,8 +406,13 @@ def make_handlers(
                         # action has switched it)
                         "sessionId": state.session_id,
                         # A switched session must re-project; a same-session
-                        # rewrite (/compact) only reports the fact.
-                        "reload": state.session is not session,
+                        # rewrite (/compact) only reports the fact — except
+                        # /undo and /redo, which *rewrite the history in place*
+                        # and therefore do need the client to re-project
+                        # (r17/T1).  The text rides along so the composer can
+                        # get the undone user message back.
+                        "reload": state.session is not session or reload_in_place,
+                        "undo": getattr(world.loop, "last_undo", None) if reload_in_place else None,
                         "messagesBefore": history_before,
                         "messagesAfter": len(getattr(session, "messages", ()) or ()),
                         "compacted": (
@@ -467,6 +496,44 @@ def make_handlers(
             "model": name,
             "provider": provider_from_base_url(str(getattr(model, "base_url", "") or "")),
         }
+
+    def files_find(params: dict[str, Any]) -> dict[str, Any]:
+        """Workspace files/directories for the composer's @ suggestions (r17/T4).
+
+        A bounded walk with the same ignore list the grep fallback uses, so the
+        list the user picks from and the tree the tools see agree.  Directories
+        end with '/'; the client fuzz-sorts (it already ships fuzzysort).
+        """
+        from pathlib import Path as _Path
+
+        query = str(params.get("query", "") or "").strip().casefold()
+        try:
+            limit = int(params.get("limit", 200) or 200)
+        except (TypeError, ValueError):
+            limit = 200
+        skip = {".git", ".venv", "venv", "node_modules", "__pycache__", ".ai-coding"}
+        root = _Path(world.workspace)
+        found: list[str] = []
+        scanned = 0
+        for path in sorted(root.rglob("*")):
+            scanned += 1
+            if scanned > 20_000:
+                break
+            rel = path.relative_to(root)
+            if any(part in skip for part in rel.parts):
+                continue
+            if path.is_dir():
+                name = rel.as_posix() + "/"
+            elif path.is_file():
+                name = rel.as_posix()
+            else:
+                continue
+            if query and query not in name.casefold():
+                continue
+            found.append(name)
+            if len(found) >= limit:
+                break
+        return {"files": found}
 
     def skills_list(params: dict[str, Any]) -> dict[str, Any]:
         """Structured rows for the skills dialog (M3).
@@ -796,6 +863,7 @@ def make_handlers(
         "model.set": model_set,
         "permissions.state": permissions_state,
         "skills.list": skills_list,
+        "files.find": files_find,
         "memory.list": memory_list,
         "memory.pin": memory_pin,
         "memory.delete": memory_delete,

@@ -90,6 +90,16 @@ function PartView(props: { part: Part; alwaysOpen: boolean }) {
           )
         }}
       </Match>
+      <Match when={props.part.kind === "image" && props.part}>
+        {(part) => {
+          const image = () => part() as Extract<Part, { kind: "image" }>
+          return (
+            <box paddingLeft={3} flexShrink={0}>
+              <text fg={theme.textMuted}>{`[Image: ${image().name}]`}</text>
+            </box>
+          )
+        }}
+      </Match>
       <Match when={props.part.kind === "turn-end" && props.part}>
         {(part) => (
           <box paddingLeft={3} marginTop={1} flexShrink={0}>

@@ -122,6 +122,32 @@ def tool_call_from_ref(ref: ToolCallRef) -> ToolCall:
     return ToolCall(id=ref.id, name=ref.name, params=params)
 
 
+#: r17/T5: what counts as an image a message can carry.  One table, two
+#: readers: the loop extracting ``@shot.png`` and the file-mention block that
+#: must *not* also inject those bytes as text.
+IMAGE_MIME_BY_SUFFIX = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+
+@dataclass(frozen=True)
+class ImageRef:
+    """A message image, referenced by path (r17/T5).
+
+    The bytes are *not* stored in the message: a session file must not grow by
+    the screenshot.  ``path`` is workspace-relative; whoever sends the request
+    loads it through the loader the engine is handed for that call.
+    """
+
+    path: str
+    mime: str
+    name: str
+
+
 @dataclass
 class ChatMessage:
     """A single conversation message.
@@ -141,6 +167,9 @@ class ChatMessage:
     tool_name: str | None = None
     tool_calls: list[ToolCallRef] | None = None
     reasoning: str | None = None
+    #: r17/T5: images the user attached (clipboard paste or an @path.png).  Empty
+    #: for every message that predates them, so nothing downstream changed.
+    images: tuple[ImageRef, ...] = ()
 
     def __post_init__(self) -> None:
         if self.role == "tool" and not self.tool_call_id:

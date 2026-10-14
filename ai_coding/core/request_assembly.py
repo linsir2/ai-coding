@@ -22,6 +22,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ai_coding.core.compaction import Compactor
@@ -29,16 +30,22 @@ from ai_coding.core.events import ContextCompacted, LoopEvent, MemoryInjected
 from ai_coding.core.request_builder import build_tail, content_of, volatile_block
 from ai_coding.core.sop_router import SOPRouter
 from ai_coding.core.turn_books import TurnBooks
-from ai_coding.domain.message import ChatMessage
+from ai_coding.domain.message import IMAGE_MIME_BY_SUFFIX, ChatMessage
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
 from ai_coding.domain.turn_digest import render_working_memory
 from ai_coding.infra.deadline import Deadline
+from ai_coding.core.file_mentions import resolve_file_mentions
 from ai_coding.skills.policy import denied_skill_ids
-from ai_coding.skills.registry import SkillRegistry, resolve_mentions
+from ai_coding.skills.registry import SkillRegistry, iter_mentions, resolve_mentions
 from ai_coding.skills.render import render_skill_content
 
 __all__ = ["Assembled", "RequestAssembler"]
+
+#: r17/T4 caps: one file, one directory listing, and the whole block.
+_FILE_CHARS = 20_000
+_DIR_ENTRIES = 200
+_FILES_BLOCK_BUDGET = 40_000
 
 
 def _observed_prompt_tokens(session: SessionData) -> int:
@@ -88,6 +95,7 @@ class RequestAssembler:
         settings: Any,
         emit: Callable[[LoopEvent], None],
         skills: SkillRegistry | None = None,
+        workspace: str = "",
     ) -> None:
         self._compactor = compactor
         self._policy = policy
@@ -105,6 +113,9 @@ class RequestAssembler:
         # Kept beside the router so an explicitly named skill can be resolved
         # against the same registry the automatic recommendation uses.
         self._skills = skills
+        # r17/T4: where @path references resolve.  Empty means the feature is
+        # off for this assembler (old constructors, tests) -- never an error.
+        self._workspace = workspace
 
     async def assemble(
         self,
@@ -190,8 +201,8 @@ class RequestAssembler:
         # M2: recommend skills based on current context (after task, before hook).
         recommended_skills_block = ""
         recovery_block = ""
+        user_input = self._extract_user_input(session)
         if self._router is not None:
-            user_input = self._extract_user_input(session)
             recent_tools = self._extract_recent_tools(session, books)
             task_goal = task.goal if task else ""
             recent_failures = [f[1] for f in books.failures]
@@ -237,6 +248,9 @@ class RequestAssembler:
             requested = resolve_mentions(user_input, self._skills)
             if requested:
                 recommended_skills_block += "\n\n" + self._requested_skills_block(requested)
+        # r17/T4: @path references ride their own volatile block -- independent
+        # of the router, because a workspace can hold files without skills.
+        file_block = self._referenced_files_block(user_input)
         # I3: inject anchor after compaction
         anchor_block = self._format_anchor_block(session, compacted)
         # M2: the catalog sits with the other state to read, before the
@@ -248,6 +262,7 @@ class RequestAssembler:
                 volatile_block("mcp_catalog", catalog),
                 volatile_block("task", content_of(injection.message)),
                 volatile_block("recommended_skills", recommended_skills_block),
+                volatile_block("referenced_files", file_block),
                 volatile_block("error_recovery", recovery_block),
                 volatile_block("anchor", anchor_block),
                 volatile_block("hook", hook_context),
@@ -272,6 +287,68 @@ class RequestAssembler:
         )
 
     # ---- helpers (M2) -------------------------------------------------------
+
+    def _referenced_files_block(self, user_input: str) -> str:
+        """The user's ``@path`` references: file content, or a directory listing.
+
+        Volatile, like the skills mention: rebuilt from the last user message
+        every iteration, gone with the next message.  A token a skill already
+        claimed is left to the skill path (instructions win over a file that
+        shares the name).
+        """
+        if not self._workspace:
+            return ""
+        claimed: set[str] = set()
+        if self._skills is not None:
+            claimed = {
+                token
+                for token in iter_mentions(user_input)
+                if self._skills.resolve(token) is not None
+            }
+        paths = resolve_file_mentions(user_input, self._workspace, exclude=claimed)
+        if not paths:
+            return ""
+        root = Path(self._workspace).expanduser().resolve()
+        lines = ["<referenced-files>", "用户用 @ 引用了以下文件/目录，内容如下："]
+        used = 0
+        for rel in paths:
+            # r17/T5: an image mention rides as a message part (the loop reads
+            # its bytes); injecting it as text would be noise at best.
+            if Path(rel).suffix.lower() in IMAGE_MIME_BY_SUFFIX:
+                continue
+            target = root / rel
+            block = (
+                self._directory_listing(rel, target)
+                if target.is_dir()
+                else self._file_content(rel, target)
+            )
+            if used + len(block) > _FILES_BLOCK_BUDGET:
+                lines.append(f"- {rel}: [budget exhausted, not included]")
+                continue
+            used += len(block)
+            lines.append(block)
+        lines.append("</referenced-files>")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _file_content(rel: str, target: Path) -> str:
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return f'<file path="{rel}">[unreadable: {exc}]</file>'
+        if len(text) > _FILE_CHARS:
+            text = text[:_FILE_CHARS] + f"\n[truncated: {len(text)} chars total]"
+        return f'<file path="{rel}">\n{text}\n</file>'
+
+    @staticmethod
+    def _directory_listing(rel: str, target: Path) -> str:
+        try:
+            entries = sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())
+        except OSError as exc:
+            return f'<file path="{rel}" type="dir">[unreadable: {exc}]</file>'
+        shown = entries[:_DIR_ENTRIES]
+        note = f"\n[+{len(entries) - _DIR_ENTRIES} more]" if len(entries) > _DIR_ENTRIES else ""
+        return f'<file path="{rel}" type="dir">\n' + "\n".join(shown) + note + "\n</file>"
 
     def _requested_skills_block(self, requested: Sequence[str]) -> str:
         """The named skills' full content, the same shape a read returns.
