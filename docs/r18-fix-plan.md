@@ -374,7 +374,7 @@ OC 文档：*"Sending a new prompt while an undo is staged **commits the revert*
 ## 13. 打勾清单
 
 ### 安全边界
-- [ ] **F1** webfetch 换 httpx：逐跳 `_is_public_url` 守卫 + `max_bytes` 边读边限 + 跳数上限
+- [x] **F1** webfetch 换 httpx：逐跳 `_is_public_url` 守卫 + `max_bytes` 边读边限 + 跳数上限
 - [ ] **F2** `_load_image` 复用 `Sandbox.resolve` + mime 白名单 + 尺寸上限
 
 ### undo 正确性
