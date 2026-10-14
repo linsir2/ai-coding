@@ -27,6 +27,7 @@ from typing import Any
 
 from ai_coding.core.compaction import Compactor
 from ai_coding.core.events import ContextCompacted, LoopEvent, MemoryInjected
+from ai_coding.core.file_mentions import resolve_file_mentions
 from ai_coding.core.request_builder import build_tail, content_of, volatile_block
 from ai_coding.core.sop_router import SOPRouter
 from ai_coding.core.turn_books import TurnBooks
@@ -35,7 +36,6 @@ from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
 from ai_coding.domain.turn_digest import render_working_memory
 from ai_coding.infra.deadline import Deadline
-from ai_coding.core.file_mentions import resolve_file_mentions
 from ai_coding.skills.policy import denied_skill_ids
 from ai_coding.skills.registry import SkillRegistry, iter_mentions, resolve_mentions
 from ai_coding.skills.render import render_skill_content

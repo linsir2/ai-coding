@@ -43,7 +43,6 @@ A loop you cannot read is not "ours" any more (docs/r5-analysis.md 2.2).
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import time
 from collections.abc import Callable, Mapping
@@ -52,6 +51,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ai_coding.ai.engine import ChatEngine, EngineError
+from ai_coding.attachments import load_image
 from ai_coding.config.models import AIConfig
 from ai_coding.core.acceptance import verify_items
 from ai_coding.core.compaction import Compactor
@@ -1287,12 +1287,12 @@ class AgentLoop:
         return tuple(refs)
 
     def _load_image(self, ref: ImageRef) -> str | None:
-        """Read one message image as a data URL, or None when unreadable (T5)."""
-        try:
-            raw = (Path(self.workspace).expanduser() / ref.path).read_bytes()
-        except OSError:
-            return None
-        return f"data:{ref.mime};base64,{base64.b64encode(raw).decode('ascii')}"
+        """The image loader handed to the engine (r17/T5).
+
+        Every gate on the bytes lives in ``attachments.load_image`` (r18/F2) --
+        this stays a named injection point, not a second implementation.
+        """
+        return load_image(self.workspace, ref)
 
     async def _capture_snapshot(self, session: SessionData) -> None:
         """Pin the pre-turn workspace state under refs/ai-coding/undo.

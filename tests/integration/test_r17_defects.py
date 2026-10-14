@@ -127,10 +127,6 @@ def _bare_loop(workspace: Path) -> AgentLoop:
     return loop
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: _load_image joins without containment (agent_loop.py:1292)",
-    strict=False,
-)
 def test_an_absolute_path_outside_the_workspace_must_not_be_read(tmp_path):
     """``Path(workspace) / "/etc/hostname"`` is ``/etc/hostname`` in Python
     (agent_loop.py:1292) -- no resolve(), no containment, no Sandbox."""
@@ -141,10 +137,6 @@ def test_an_absolute_path_outside_the_workspace_must_not_be_read(tmp_path):
     assert data_url is None, f"read outside the workspace: {str(data_url)[:40]}"
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: _load_image joins without containment (agent_loop.py:1292)",
-    strict=False,
-)
 def test_a_dot_dot_path_outside_the_workspace_must_not_be_read(tmp_path):
     """Same seam, relative spelling -- the way a session file carries it."""
     loop = _bare_loop(tmp_path)
@@ -155,29 +147,79 @@ def test_a_dot_dot_path_outside_the_workspace_must_not_be_read(tmp_path):
     assert data_url is None, f"read outside the workspace: {str(data_url)[:40]}"
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: mime defaults to empty and is interpolated (session.py:33)",
-    strict=False,
-)
-def test_a_session_message_without_a_mime_must_not_produce_an_image_part():
-    """``session.py:33`` defaults mime to "" and ``_load_image`` interpolates it
-    unconditionally, so the request carries ``data:;base64,...`` -- a non-empty
-    string, so mapping sends it as an image and the provider 400s the whole turn.
-    Replay poisons the session permanently."""
+def test_a_session_message_without_a_mime_degrades_instead_of_breaking_the_request(tmp_path):
+    """``session.py`` defaults a missing mime to ``""``, and the old loader
+    interpolated it unconditionally -- producing ``data:;base64,...``, which is a
+    non-empty string, so mapping sent it as an image and the provider 400'd the
+    whole turn.  The refusal now happens at the byte出口, so this walks the real
+    chain: session dict -> load_image -> content parts."""
     from ai_coding.ai.mapping import to_chat_message
     from ai_coding.domain.session import _message_from_dict
 
+    loop = _bare_loop(tmp_path)
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
     msg = _message_from_dict(
         {"role": "user", "content": "hi", "timestamp": "t", "images": [{"path": "a.png"}]}
     )
-    out = to_chat_message(msg, image_loader=lambda ref: "data:;base64,iVBORw0KGgo=")
 
-    urls = [
-        part["image_url"]["url"]
-        for part in (out["content"] if isinstance(out["content"], list) else [])
-        if part.get("type") == "image_url"
-    ]
-    assert not urls, f"an image part with an empty mime reached the provider: {urls}"
+    out = to_chat_message(msg, image_loader=loop._load_image)
+
+    parts = out["content"] if isinstance(out["content"], list) else []
+    assert not [p for p in parts if p.get("type") == "image_url"], (
+        "an image part with an empty mime reached the provider"
+    )
+    # The note is keyed on ``ref.name`` (mapping.py:69), which this session dict
+    # does not carry -- so the contract asserted here is "a readable refusal
+    # note exists", not its exact wording.
+    assert any("无法读取" in str(p.get("text", "")) for p in parts), (
+        f"the refusal did not degrade to a readable note: {parts}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "label"),
+    [
+        ("link-out.png", "a symlink that leaves the workspace"),
+        ("nested/deep.png", "a file that simply is not there"),
+    ],
+)
+def test_paths_the_workspace_owns_nothing_of_are_refused(tmp_path, path, label):
+    """``Sandbox.resolve`` follows the symlink before deciding, so a link that
+    points out of the workspace is refused by the same rule as ``..``."""
+    from ai_coding.attachments import load_image
+
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"\x89PNG\r\n\x1a\nnot really")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "link-out.png").symlink_to(outside)
+    ref = ImageRef(path=path, mime="image/png", name=path)
+
+    assert load_image(ws, ref) is None, f"{label} was read"
+
+
+def test_a_mime_outside_the_whitelist_is_refused(tmp_path):
+    """The whitelist is the same table ``@path`` extraction uses; a mime the
+    model was never promised must not become an ``image_url`` part."""
+    from ai_coding.attachments import load_image
+
+    (tmp_path / "diagram.bmp").write_bytes(b"BM not really")
+    ref = ImageRef(path="diagram.bmp", mime="image/bmp", name="diagram")
+
+    assert load_image(tmp_path, ref) is None
+
+
+def test_an_image_over_the_budget_is_refused_before_the_bytes_are_read(tmp_path):
+    """The budget is checked with ``stat``, so an oversized file costs a stat and
+    not its whole size in memory."""
+    from ai_coding.attachments import DEFAULT_MAX_BYTES, load_image
+
+    (tmp_path / "big.png").write_bytes(b"\x89PNG" + b"x" * 4096)
+    ref = ImageRef(path="big.png", mime="image/png", name="big")
+
+    assert load_image(tmp_path, ref, max_bytes=1024) is None, "over budget but read"
+    assert load_image(tmp_path, ref) is not None, "the same file under budget failed"
+    assert DEFAULT_MAX_BYTES == 20 * 1024 * 1024, "the paste budget moved"
 
 
 # ------------------------------------------------------------- T3: htmltext

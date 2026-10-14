@@ -101,41 +101,164 @@ F16 mime 表合并为一处投影
 - **Pass**：既有 `tests/test_webtools.py` 6 条**保持绿**（opener 兼容）。
 - **Refactor**：`FetchRefused` 统一带 reason，`execute` 只有一条 except。
 
-## 3. F2 — `_load_image` 沙箱收口（+ mime + 尺寸）
+## 3. F2 — 图片读出口收口（沙箱 + mime + 尺寸）
 
-### 影响面
-| 文件 | 改动 |
-|---|---|
-| `core/agent_loop.py:1289` `_load_image` | 复用 `Sandbox.resolve`；加 mime 白名单 + 尺寸上限；失败一律 `None`（走既有降级路径） |
-| `tools/webfetch_tool.py` 无 | — |
-| `pyproject.toml` | 无 |
+### 3.1 现状与病灶
 
-### 分步（单点收口）
 ```python
+# agent_loop.py:1289-1295现状
 def _load_image(self, ref: ImageRef) -> str | None:
     try:
-        target = Sandbox(self.workspace).resolve(ref.path)   # 复用，不自写
-        if ref.mime not in IMAGE_MIME_BY_SUFFIX.values():    # 白名单一张表
-            return None
-        if target.stat().st_size > MAX_IMAGE_BYTES:          # 复用 attachments 常量
+        raw = (Path(self.workspace).expanduser() / ref.path).read_bytes()   # ← 病灶
+    except OSError:
+        return None
+    return f"data:{ref.mime};base64,{base64.b64encode(raw).decode('ascii')}"
+```
+
+三个缺口，全部集中在这 7 行里：
+
+| 缺口 | 后果 | 实测证据 |
+|---|---|---|
+| 无路径包含性检查 | `Path("/ws") / "/etc/passwd"` == `/etc/passwd`（Python 语义），session JSON 里的任意 `path` 被读成 base64 外发给模型厂商 | `/etc/hostname` → `data:image/png;base64,bG9jYWxob3N0Cg==` |
+| 无 mime 校验 | `session.py:33` 缺 mime 默认 `""` → 拼出 `data:;base64,...`，是非空串 → mapping 走 image_url 分支 → **provider 400 整轮**，且 replay 永久毒化 | `data:;base64,iVBOR...` 进入 content parts |
+| 无尺寸上限 | `@huge.png` 无paste 时的 20MB 限制；60MB 文件 → 80MB base64 塞进单个请求 | 未设限 |
+
+**并且与既有代码自相矛盾**：`_extract_image_mentions`（`agent_loop.py:1279-1284`）**已经**做了 `resolve()` + `relative_to()` + `is_file()` 检查。同一个类里两套边界规则，一套有一套没有。
+
+### 3.2 影响面（执行范围）
+
+| 文件 | 现状 | 改动 | 为什么必须动 |
+|---|---|---|---|
+| `ai_coding/attachments.py` | 只有 `save_data_url`（写路径）+ `_ALLOWED_MIME` + `DEFAULT_MAX_BYTES` | 新增 `load_image(workspace, ref, *, max_bytes)` | 模块职责已是「图片在磁盘上」，读路径属于它；放这里 `DEFAULT_MAX_BYTES` 与白名单是就近的唯一使用点 |
+| `ai_coding/core/agent_loop.py:1289` | 7 行裸读| 缩成 3 行委派 | 它只剩「把 workspace 交给 attachments」，不再自己拼路径 |
+| `ai_coding/ai/mapping.py` | 不变 | — | 它只管 content parts 形状，不该知道文件 |
+| `ai_coding/domain/session.py` | 不变（**明确不改**，见 3.6） | — | — |
+| `pyproject.toml` | 不变 | — | 复用 `Sandbox`，不新增依赖 |
+
+**不动**：`process_input(images=)` 的签名（`ImageRef` 由调用方构造，但字节只从 `load_image` 出）、engine/mapping 的 image_loader 契约（形状不变）。
+
+### 3.3 复用的契约（不造轮子）
+
+| 复用 | 位置 | 用法 |
+|---|---|---|
+| `Sandbox.resolve()` | `security/sandbox.py:22` | 它内部已 `resolve()`（跟随符号链接）+ `relative_to()` + 抛 `SandboxViolation`。**不自写 resolve/relative_to** |
+| `SandboxViolation` | 同上 | 与 `OSError` 一起捕获 |
+| `IMAGE_MIME_BY_SUFFIX` | `domain/message.py` | 白名单 = `frozenset(IMAGE_MIME_BY_SUFFIX.values())`，**不新建第三张 mime 表** |
+| `DEFAULT_MAX_BYTES` | `attachments.py:29` | 粘贴与读取共用同一预算 |
+
+`Sandbox` 每张图构造一次（`__init__` 只做一次 `.resolve()`）。一张图一次系统调用量级，与「每个工具各自持有 Sandbox」（`builder.py:113`）的既有做法一致，不引入新的生命周期状态。
+
+### 3.4 每文件每步
+
+**Step 1 — `attachments.py` 新增读出口**
+```python
+def load_image(workspace, ref, *, max_bytes: int = DEFAULT_MAX_BYTES) -> str | None:
+    """Read one message image as a data URL, or None when it may not be read."""
+    if ref.mime not in IMAGE_MIMES:          # 白名单一张表
+        return None
+    try:
+        target = Sandbox(workspace).resolve(ref.path)   # 复用沙箱
+        if target.stat().st_size > max_bytes:           # 先 stat 再读，不把 60MB 读进内存
             return None
         raw = target.read_bytes()
     except (OSError, ValueError, SandboxViolation):
         return None
     return f"data:{ref.mime};base64,{base64.b64encode(raw).decode('ascii')}"
 ```
-- **为什么不改 `session.py` 的反序列化**：`_load_image` 是**唯一的字节出口**，在这里收口即全覆盖。再加一处校验就是第二份真相源（正是本轮要消灭的东西）。session 里存了越界 path 的后果，最坏是 UI 显示一张读不出的图——不外泄。
-- **`Sandbox.resolve` 会 `resolve()` 符号链接**，因此指向外部的 symlink 也被拒（`_extract_image_mentions` 已经这么做了，两处行为终于一致）。
+导入：`from ai_coding.domain.message import IMAGE_MIME_BY_SUFFIX, ImageRef`、`from ai_coding.security.sandbox import Sandbox, SandboxViolation`。
+无循环依赖：`attachments → domain.message` 与 `attachments → security.sandbox`，两者都不反向依赖 core。
 
-### 数据流影响
-`ChatMessage.images → _load_image → content part`。多一层拒绝，失败降级为已有文本提示，模型侧无感。
+**Step 2 — `agent_loop.py` 改为委派**
+```python
+def _load_image(self, ref: ImageRef) -> str | None:
+    """The one place image bytes leave the workspace (r18/F2)."""
+    return load_image(self.workspace, ref)
+```
+`_load_image` **保留为方法**：它是 `engine.step(image_loader=…)` 的命名注入点（`agent_loop.py:1126/1172`），也是集成测试的调用面。
 
-### RIPR 用例
-- **Red**：绊线 3 条（绝对路径 / `..` / 缺 mime）去 xfail。当前返回 `data:image/png;base64,bG9jYWxob3N0Cg==`。
-- **Red（新增）**：`test_an_image_over_the_limit_degrades`——造 21MB 文件，断言返回 None（现在无上限，会把 28MB base64 塞进请求）。
-- **Refactor**：把白名单投影提为 `attachments.py` 的 `_ALLOWED_MIME = {mime: suffix…}` 从 `IMAGE_MIME_BY_SUFFIX` 派生（F16）。
+**Step 3 — 清死导入**：`agent_loop.py` 若不再用 `base64` / `Path` 于此处，检查是否别处仍在用，ruff 兜底。
 
----
+### 3.5 数据流影响
+
+```
+session.json images[].path
+      │  ← 不可信（可被手工编辑/跨机同步）
+      ▼
+AgentLoop._load_image ──委派──► attachments.load_image(workspace, ref)
+                                   ├ mime ∈ IMAGE_MIMES ?        ──否→ None
+                                   ├ Sandbox.resolve(path)       ──越界→ SandboxViolation→ None
+                                   ├ stat().st_size ≤ 预算 ?      ──超→ None
+                                   └ read_bytes() → data URL
+                                   ▼
+mapping.to_chat_message  （loader 返回 None → 文本 part「（图片 X 无法读取）」）
+                                   ▼
+                              provider
+```
+失败一律返回 `None`，走**既有**降级路径，模型侧无感、请求不失败。数据流形状不变，只是多三道闸。
+
+### 3.6 为什么不在 `session.py` 反序列化时丢弃非法条目
+
+`session.py:37` 目前只校验 `item.get("path")` 存在。若在那里再加一层「path 必须像 workspace 相对路径」，就是**第二份边界规则**——正是本轮要消灭的东西。而且那里的判断只能看字符串形状，拦不住符号链接，拦不住实际读取。
+**`_load_image` 是唯一的字节出口，在这里收口即 100% 覆盖**。session 里存了越界 path 的唯一后果是 UI 显示一张读不出来的图（不外泄）。
+> 这条如果你不认同，请拍板——见问卷第 2 题。
+
+### 3.7 完成后效果
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| `path="/etc/hostname"` | base64 外发 | `None` → 文本降级 |
+| `path="../../../../etc/x.png"` | base64 外发 | `None` |
+| 指向外部的符号链接 | base64 外发 | `None`（`Sandbox.resolve` 跟随后越界） |
+| `mime=""`（缺字段） | `data:;base64,` → provider 400 | `None` → 降级，本轮正常 |
+| `mime="image/bmp"` | 发出（mime 不在白名单） | `None` |
+| 60MB 的 png | 80MB base64 进请求 | `stat` 阶段即拒 |
+| 正常 workspace 内图片 | data URL | **不变** |
+
+### 3.8 RIPR 用例
+
+- **Red（摘 3 条既有绊线）**
+  - `test_an_absolute_path_outside_the_workspace_must_not_be_read`
+  - `test_a_dot_dot_path_outside_the_workspace_must_not_be_read`
+  - `test_a_session_message_without_a_mime_must_not_produce_an_image_part`
+  现状：全部 XPASS→摘标；改前应仍是 XFAIL（返回值非 None）。
+- **Red（新增 3 条）**
+  1. `test_a_symlink_out_of_the_workspace_is_refused`：workspace 内建 symlink 指向外部文件 → `None`。
+  2. `test_an_image_over_the_budget_is_refused`：写一个超过 `max_bytes` 的文件 → `None`，且**不把文件读进内存**（断言 `stat` 早于 `read_bytes`，用注入的假 Path 难以断言则改为断言返回 None + 单元级 `_MAX` 常量一致）。
+  3. `test_a_mime_outside_the_whitelist_is_refused`：`ImageRef(mime="image/bmp")` → `None`。
+- **Pass**：既有 `test_image_input.py` 与集成闭环 `test_a_pasted_image_reaches_the_provider_as_an_image_part` 保持绿（正常图片必须仍然工作）。
+- **Refactor**：`attachments.__all__` 补 `load_image`；`save_data_url` 与 `load_image` 共用 `IMAGE_MIMES`（F16 再合并扩展名表）。
+
+### 3.9 架构图（F2 后）
+
+```
+                    ┌── 写：粘贴 data URL ──► save_data_url ──┐
+                    │      （20MB + mime 白名单）              │
+  TUI paste ────────┤                                        ├──► .ai-coding/attachments/<sha1>.<ext>
+                    └── 引用：@shot.png ──► ImageRef ─────────┘            │
+                                        │                                │
+  session.json ──images[]──► _load_image ─┘(委派)                         │
+                                   │                                      │
+                                   ▼                                      │
+                        attachments.load_image(workspace, ref)  ★F2      │
+                          ① mime ∈ IMAGE_MIMES（domain 那一张表）           │
+                          ② Sandbox.resolve(path)  ← 复用 security/sandbox │
+                          ③ stat ≤ DEFAULT_MAX_BYTES  ← 复用 attachments   │
+                          ④ read_bytes → data URL                          │
+                                   │ None → 降级文本 part                   │
+                                   ▼                                      │
+                        mapping.to_chat_message ────────────────────────┘
+                                   ▼
+                              provider（只看到 workspace 内的、白名单内的、有预算内的图片）
+```
+
+### 3.10 最终形态自检
+
+1. 用户粘贴截图 → 会话跑 20 轮 → replay → 图片仍能加载（mime/path 都在，预算内）。
+2. 同事发来一个 session.json，`images[].path` 写成 `../../../../root/.ssh/id_rsa` → 打开会话时该图降级为文本提示，**不发任何字节**。
+3. 同一 session 里一张 25MB 的图 → paste 时就被拒（20MB），`@` 引用时也被拒 → 用户看到「无法读取」，模型看到降级文本 → **不会**出现 provider 400。
+4. `Sandbox.resolve` 抛 `SandboxViolation`（Exception，不是 OSError）→ 必须显式捕获，否则整轮崩。**这是最容易漏的一步，Step 1 的 except 已包含。**
+5. 集成闭环里那张 1×1 PNG（68 字节）远小于预算 → 不受影响，正常产出 image part。
+6. `_load_image` 变成一行委派后，`base64` 是否还在 `agent_loop.py` 别处使用？→ ruff 兜底，不留死导入。
 
 ## 4. F3 — 合成消息标记 + 回合键改用 turn_count（根因修复）
 
@@ -375,7 +498,7 @@ OC 文档：*"Sending a new prompt while an undo is staged **commits the revert*
 
 ### 安全边界
 - [x] **F1** webfetch 换 httpx：逐跳 `_is_public_url` 守卫 + `max_bytes` 边读边限 + 跳数上限
-- [ ] **F2** `_load_image` 复用 `Sandbox.resolve` + mime 白名单 + 尺寸上限
+- [x] **F2** `_load_image` 复用 `Sandbox.resolve` + mime 白名单 + 尺寸上限
 
 ### undo 正确性
 - [ ] **F3** `synthetic` 标记（4 处注入点 + 落盘）+ 回合键改 `turn_count` + undo 回退 `turn_count` 并裁 digest
