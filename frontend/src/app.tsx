@@ -141,6 +141,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
 
   const [skills, setSkills] = createSignal<MentionOption[]>([])
   const [files, setFiles] = createSignal<MentionOption[]>([])
+  const [commands, setCommands] = createSignal<string[]>([])
   // The composer's @ list. skill_review can add skills mid-session, so the
   // table is refreshed with the same cadence as the session list.  r17/T4:
   // the workspace's files ride the same list (skills first, files after).
@@ -156,6 +157,14 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
       setFiles((data.files ?? []).map((name) => ({ name })))
     } catch {
       /* same: the last list survives a failed walk */
+    }
+    // r19/F5: the dispatcher's vocabulary, so a submission is classified as a
+    // command by the one authority rather than by guessing at the slash.
+    try {
+      const data = (await props.client.request("slash.list", {})) as { commands?: string[] }
+      setCommands(data.commands ?? [])
+    } catch {
+      /* an empty vocabulary means every line is treated as prompt text */
     }
   }
 
@@ -463,6 +472,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
             client={props.client}
             skills={skills()}
             files={files()}
+            commands={commands()}
           />
         }
       >
@@ -482,6 +492,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
             onPermissionDecide={decidePermission}
             skills={skills()}
             files={files()}
+            commands={commands()}
             ask={ask()}
             onAskAnswer={answerAsk}
             onQuit={exitWith}

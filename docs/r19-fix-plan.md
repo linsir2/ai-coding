@@ -184,7 +184,7 @@ def _image_tokens(messages: list[ChatMessage]) -> int:
 - [x] **F2** 删 `IMAGE_MIMES`，`load_image` 直接用 `_allowed_mime()`；同步契约文档
 - [x] **F3** `ImageRef.bytes` + 压缩预算按体积计（含旧 session 兼容）
 - [ ] **F4** ~~两条 harness user 消息~~ —— **已证伪，不改**（见 §0）
-- [ ] **F5** `slash.list` IPC + 前端不猜（删除前端手写词汇表）
+- [x] **F5** `slash.list` IPC + 前端不猜（删除前端手写词汇表）
 - [ ] `scripts/r18_acceptance.py` 全绿
 - [ ] `docs/data-contracts.md` 去掉本轮已修条目的「已知缺口」
 - [ ] 全门禁：pytest / mypy / ruff / bun / tsc

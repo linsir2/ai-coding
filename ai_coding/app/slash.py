@@ -47,6 +47,18 @@ _ALIASES: dict[str, str] = {
 }
 
 
+def command_names() -> tuple[str, ...]:
+    """Every canonical command the dispatcher recognises (r19/F5).
+
+    Published over IPC so the TUI can ask "is this line a command?" instead of
+    guessing from the leading slash: ``/path/to/file.py`` starts with one but
+    the backend hands it to the model as ordinary text, and a guess that says
+    "command" makes the client drop the picture the model is about to be sent.
+    Derived from ``_ALIASES``, which is the only place the vocabulary is written.
+    """
+    return tuple(sorted(set(_ALIASES.values())))
+
+
 def parse_slash(text: str) -> SlashCommand | None:
     """Return a ``SlashCommand`` for a known ``/``-command, else ``None``."""
     stripped = text.strip()

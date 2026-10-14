@@ -47,6 +47,8 @@ export interface HomeProps {
   skills: MentionOption[]
   /** Workspace files/directories for the same list (r17/T4). */
   files: MentionOption[]
+  /** The dispatcher's vocabulary (r19/F5); decides what a submission is. */
+  commands: string[]
 }
 
 export function Home(props: HomeProps) {

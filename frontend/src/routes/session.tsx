@@ -44,6 +44,8 @@ export interface SessionProps {
   provider: string
   /** Text submitted from home; auto-sent once the route mounts. */
   initialPrompt?: PendingPrompt | null
+  /** The dispatcher's vocabulary (r19/F5): decides whether a line is a command. */
+  commands?: string[]
   /** A replayed session (from the dialog or tabs); replaces the transcript. */
   hydrate?: { key: string; state: SessionState } | null
   title: string
@@ -116,7 +118,7 @@ export function Session(props: SessionProps) {
     // r18/F14: the method, the payload and what stays in the composer all come
     // from one decision, so the transcript cannot show a picture the model
     // never received.
-    const { method, payload } = buildSubmission(props.sessionId, text, images)
+    const { method, payload } = buildSubmission(props.commands ?? [], props.sessionId, text, images)
     void props.client
       .request(method, payload)
       .then(() => {
@@ -144,7 +146,7 @@ export function Session(props: SessionProps) {
     // r18/F14: a command sends no images, so it shows none either and hands
     // them back with a reason instead of letting the transcript imply they
     // were sent.
-    const submission = buildSubmission(props.sessionId, text, images)
+    const submission = buildSubmission(props.commands ?? [], props.sessionId, text, images)
     if (submission.kept.length > 0) return submission.withheldReason
     apply({ kind: "submitted", text, images })
     dispatch(text, images)

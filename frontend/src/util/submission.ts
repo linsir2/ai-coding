@@ -27,6 +27,16 @@ export interface Withheld {
   withheldReason: string
 }
 
+/** The name in "/name", or "" when the line is not a command at all. */
+export function commandName(commands: readonly string[], text: string): string {
+  const match = /^\/([A-Za-z][\w-]*)/.exec(text.trim())
+  return match && commands.includes(match[1].toLowerCase()) ? match[1].toLowerCase() : ""
+}
+
+function isCommandLine(commands: readonly string[], text: string): boolean {
+  return commandName(commands, text) !== ""
+}
+
 export interface WireSubmission extends Withheld {
   method: "session.prompt" | "session.command"
   payload: {
@@ -37,19 +47,26 @@ export interface WireSubmission extends Withheld {
 }
 
 /**
- * A line is a command exactly when the backend would call it one: it strips
- * both ends before looking for the slash (``app/commands.py:108``).  Mirroring
- * that rule is the whole point -- if this guessed "prompt" for a line the
- * backend dispatches as a command, the two would disagree about what the
- * submission was.  Images ride the prompt path only: a command has no use for
- * them, and passing them along would put a screenshot into /compact's input.
+ * A line is a command exactly when the backend says it is one -- so the client
+ * asks (`slash.list`, derived from `app/slash.py::_ALIASES`) instead of
+ * guessing from the leading slash.
+ *
+ * Guessing was r18's version and it was wrong in the expensive direction:
+ * `/path/to/file.py` starts with a slash, but the dispatcher does not
+ * recognise it and hands the line to the model as ordinary text.  The client
+ * declared it a command, kept the picture, and told the user the command would
+ * not send it -- while the model received the line with no picture at all.
+ *
+ * Images ride the prompt path only: a command has no use for them, and passing
+ * them along would put a screenshot into /compact's input.
  */
 export function buildSubmission(
+  commands: readonly string[],
   sessionId: string,
   text: string,
   images: PromptImage[],
 ): WireSubmission {
-  const isCommand = text.trim().startsWith("/")
+  const isCommand = isCommandLine(commands, text)
   if (!images.length || isCommand) {
     return {
       method: isCommand ? "session.command" : "session.prompt",

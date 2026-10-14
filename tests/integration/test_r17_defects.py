@@ -866,6 +866,43 @@ async def test_websearch_keeps_the_good_entries_and_drops_the_malformed():
     assert "not a dict" not in result.output, result.output
 
 
+# ------------------------------------------------- the command vocabulary
+
+
+def test_the_published_command_list_is_exactly_what_the_dispatcher_accepts():
+    """r19/F5: the TUI has to decide whether a line is a command, and only the
+    backend knows.  It used to guess from the leading slash, which is wrong for
+    "/path/to/file.py" -- the backend hands that to the model as text, so taking
+    the picture away on the strength of a guess loses it.
+
+    The list is proved against the parser itself, not against a copy of the
+    table, so the two cannot drift apart without this going red.
+    """
+    from ai_coding.app import slash
+
+    names = slash.command_names()
+
+    recognised = set()
+    for name in names:
+        parsed = slash.parse_slash(f"/{name}")
+        if parsed is not None:
+            recognised.add(parsed.name)
+
+    assert recognised == set(names), (
+        f"published {sorted(set(names) - recognised)} the dispatcher will not take, "
+        f"or omitted {sorted(recognised - set(names))}"
+    )
+
+
+def test_an_alias_resolves_to_the_same_canonical_name_the_list_publishes():
+    from ai_coding.app import slash
+
+    for alias, canonical in (("/h", "help"), ("/q", "quit"), ("/undo", "undo")):
+        parsed = slash.parse_slash(alias)
+        assert parsed is not None and parsed.name == canonical
+        assert canonical in slash.command_names()
+
+
 # ------------------------------------------------------------- T4: mentions
 
 

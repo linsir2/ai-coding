@@ -501,6 +501,12 @@ def make_handlers(
             "provider": provider_from_base_url(str(getattr(model, "base_url", "") or "")),
         }
 
+    def slash_list(params: dict[str, Any]) -> dict[str, Any]:
+        """The dispatcher's vocabulary, so the client never guesses (r19/F5)."""
+        from ai_coding.app.slash import command_names
+
+        return {"ok": True, "commands": list(command_names())}
+
     def files_find(params: dict[str, Any]) -> dict[str, Any]:
         """Workspace files/directories for the composer's @ suggestions (r17/T4).
 
@@ -854,6 +860,7 @@ def make_handlers(
         "model.set": model_set,
         "permissions.state": permissions_state,
         "skills.list": skills_list,
+        "slash.list": slash_list,
         "files.find": files_find,
         "memory.list": memory_list,
         "memory.pin": memory_pin,

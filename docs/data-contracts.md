@@ -873,13 +873,14 @@ workspace 根向上走到用户主目录为止（home 是硬边界，否则 `~/C
 | 工作区文件枚举 | `core/workspace_files.py` 是**唯一**定义：`SKIP_DIRS` + `walk_workspace()`（`os.scandir` + 剪枝，pathspec 按目录叠加 `.gitignore`）。grep 兜底、grep 的 rg argv（`--glob=!**/<dir>/**`）、`files.find` 三处共用。~~`os.walk` + `rglob` 事后过滤~~ 已删除 |
 | 图片消息 | `ImageRef(path, mime, name)`；`ChatMessage.images`；session 仅存路径不存 base64。**`attachments.load_image` 是图片字节的唯一出口**：mime ∈ 同一张表 + `Sandbox.resolve` 包含性 + `stat` 预算（20MB，先 stat 再读）。失败一律 `None`，走既有"降级为文本提示"路径 |
 | mime 真相源 | `domain.IMAGE_MIME_BY_SUFFIX` 是**唯一**表。`attachments._allowed_mime()` 从它**派生**（同一 mime 多后缀时取**最短**，故 `image/jpeg → jpg`）。⚠️ `IMAGE_MIMES` 常量是 import 期快照，新增后缀需重启进程才生效（**已知缺口，见 r19**） |
+| 命令词汇 | 后端 `app/slash.py::_ALIASES` 是**唯一**词汇表，经 `slash.list` IPC 发布给前端；前端 `buildSubmission` 按**名字**判定是否为命令，不再猜前缀。`/path/to/file.py`、`/unknown`、`//help` 都不是命令 |
 | 提交契约 | 前端 `buildSubmission(sessionId, text, images)` 是"发什么/显示什么"的**唯一决定**：命令行不携带图片 → 转录区不显示、图片退回 composer 并给出原因。Home 的 `onSubmit` 与 Session 同签名（r18 前窄一个参数，tsc 不报错，静默丢图） |
 
 ### 已知缺口（r18 后仍然成立）
 - `walk_workspace` 目前只对**文件**应用 `.gitignore`，被忽略的**目录**仍会被 walk 进入并出现在 `files.find` 的候选里
 - `walk_workspace` 用 LIFO 栈，兄弟目录按字母序**倒序**展开，`files.find` 的 `limit=200` 会先填满靠后的子树
-- `grep(pattern, path="<子目录>")` 在 Python 兜底路径上恒返回 `(no matches)`（`workspace / rel` 应为 `target / rel`）
-- `ChatMessage.images` 对全部压缩预算函数贡献 0 token，一张大图每步重发但永不触发压缩
+- ~~`grep(path="<子目录>")` 恒返回无命中~~ **r19/F1 已修**：两条路径都把「相对搜索目标」重新锚定到 workspace
+- ~~`ChatMessage.images` 对压缩预算贡献 0 token~~ **r19/F3 已修**：`ImageRef.bytes` 记录真实体积，预算按 `bytes//4` 计
 - 两条 harness user 消息（压缩摘要、snip 占位符）未标 `synthetic`，undo 可能把它们当作"最后一个真人回合"
 - `webfetch` 输出无字符数上限（只有下载字节上限）
 - 嵌套 `.gitignore` 已支持；但 rg 与兜底在**文件大小/二进制嗅探**上仍不同形
