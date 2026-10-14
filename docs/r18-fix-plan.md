@@ -1,0 +1,403 @@
+# r18 — r17 P1 验收缺陷修复方案（20c1468 review）
+
+> **执行约定**：每完成一项，在该节的 `- [ ]` 上打勾并提交一次。测试先行（RIPR），只改根源，最小化。
+
+**背景**：`20c1468` 的集成验收（`tests/integration/test_r17_dataflow.py`，13/13 通过）证明五项功能主链路闭环，但 16 条边界缺陷成立，其中 2 条为安全边界。本方案逐条给出影响面、复用契约、分步实现、数据流影响与验收用例。
+
+**拍板结论（6 项）**
+
+| 决策 | 结论 | 依据 |
+|---|---|---|
+| SSRF 重定向 | **httpx + 项目内逐跳重校验**（httpx 官方 `follow_redirects=False` 手动循环，复用 `_is_public_url`） | 调研 6 个候选无一可用；实测 **drawbridge 0.1.2 的 HTTPS 全崩**（`_transport.py:49` 把 `bytes` 塞进 httpx 的 `sni_hostname` 扩展，降级 httpx/httpcore 仍复现；http 正常）→ 开源方案作废，改用已实测通过的 httpx 手动循环 |
+| undo 删文件 | 按 OC 方式接线 `ToolArtifact` | OC 官方："只还原归属于已完成 assistant step 的路径"；`revert.ts` 收集 `part.type=="patch"` 后 `Snapshot.revert(patches)`。我们已有该契约，只缺生产者 |
+| undo 回合编号 | 回退 `turn_count` + 裁该轮 digest | 保证 working-memory 不出现两条"第 N 轮" |
+| grep 同形 | 全对齐 + 引入 pathspec | pathspec 月下载 5.05 亿，已在环境里；rg 的忽略语义以此为准 |
+| Home 图片 | 支持附件透传 | OC 是单入口故无此问题；我们的 Home 是自有第二入口，静默丢数据是 bug |
+| undo 告知 | 后端补 `reason` + TUI 打印 | 契约已写明"明说"，当前未实现 |
+
+**⚠️ 记录在案的踩坑**：drawbridge 0.1.2 实测 HTTPS 全崩（`_transport.py:49` 的 `request.extensions["sni_hostname"] = hostname.encode("idna")` 塞 bytes，anyio `idna2008_resolve()` 期望 str）。降级 httpx 0.27.2 + httpcore 0.18.0 仍复现 → 是包本身的 bug，不是版本不兼容。它能拦住重定向到私网（已实测），但 80% 的网页是 HTTPS，采用即等于 webfetch 对多数站点失效。**"引入成熟库更安全"在这里不成立，库本身比 20 行自己的代码风险更高。**
+
+---
+
+## 0. 执行范围与顺序
+
+```
+F1 SSRF（httpx 逐跳守卫）      ─┐ 安全边界
+F2 _load_image 沙箱收口          ─┘
+        ↓
+F3 synthetic 标记 + turn_count 回合键   ← 根因，后续 undo 类修复的前置
+        ↓
+F4 ToolArtifact 接线      F5 redo 失效 + 按会话隔离
+F6 快照基线 all-or-nothing F7 undo 走 turn_lock   F8 reason 字段
+        ↓
+F9 grep 假答案 + 阻塞      F10 grep 两路同形（pathspec）
+F11 htmltext embed         F12 websearch 形状与上限
+        ↓
+F13 Home 附件透传          F14 slash 命令图片不渲染
+        ↓
+F15 工作区文件枚举单一真相源（被 F10/F13 前置依赖，最后收敛）
+F16 mime 表合并为一处投影
+```
+
+**统一不动的部分**（明确排除，避免范围蔓延）：`websearch` 的 HTTP 客户端（它的 host 是模块常量，模型无法控制 URL，**无 SSRF 面**，不动）；压缩/工作记忆本体（2 个 `test_loop_digest` 基线红与 r17 无关，不在本轮）；bash 工具的写入溯源（OC 同样不做，见 F4）。
+
+---
+
+## 1. 复用契约表（动手前必须知道的东西）
+
+| 契约 | 位置 | 本轮怎么用 |
+|---|---|---|
+| `Sandbox.resolve(path)` | `security/sandbox.py:22` | F2 直接复用，**不自己写 resolve+relative_to** |
+| `ToolArtifact(path, kind, bytes, description)` | `domain/message.py:45` | F4 接线（已存在，零生产者） |
+| `ToolResult.artifacts` | `domain/message.py:87` | F4 write/edit 产出 |
+| `TurnCloser.artifacts` | `core/turn_close.py:154` | F4 已收集，验证链路 |
+| `SessionData.turn_count` | `domain/session.py:137` | F3 回合键真相源（`source_turn`/`last_compacted_turn` 已用它） |
+| `user_message()` 工厂 | `domain/run.py:20` | F3 加 `synthetic` 关键字（唯一 user 消息入口，6 处调用） |
+| `AgentLoop._turn_lock` | `core/agent_loop.py:279` | F7 undo/redo 复用（OC 对应 `assertNotBusy`） |
+| `_message_to_dict` "只在非空时写键" | `domain/session.py:51-75` | F3/F4 新字段一律遵此惯例 |
+| `_is_public_url()` | `tools/webfetch_tool.py:36` | F1 保留为前置（复用，不删） |
+| `_VOID`/`_SKIP`/`_BOILERPLATE` | `tools/htmltext.py:20-28` | F11 只改 `_VOID` 一处 |
+| `gitcmd.git()` | `core/gitcmd.py` | F6/F5 复用，唯一 git 调用形状 |
+
+---
+
+## 2. F1 — webfetch SSRF：httpx + 逐跳重校验
+
+### 影响面
+| 文件 | 现状 | 改动 |
+|---|---|---|
+| `tools/webfetch_tool.py` | stdlib urllib；`_is_public_url` 只查首跳；`max_bytes` 读完才判 | `_urllib_fetch` → `_http_fetch`（httpx 异步 + 手动跳 + 流式限长）；`execute` 兼容同步/异步 opener |
+| `pyproject.toml` | 无 httpx | 加 `httpx>=0.27` |
+| `tests/test_webtools.py` | 同步 opener 注入 | **一行不改**（`execute` 对 awaitable 与普通返回值都支持） |
+| `tests/integration/test_r17_defects.py` | 绊线 1 条 | 重写为真正的"公网→私网"重定向场景并摘 xfail |
+
+### 分步
+1. **`opener` 契约扩展为"同步或异步皆可"**：`execute` 里 `outcome = self._opener(url, timeout)`，`inspect.isawaitable(outcome)` 则 await。
+   - 理由：生产默认是 async（httpx 原生），测试注入是 sync（既有 6 个测试不改）。这是复用既有 seam，不是加第二个 seam。
+2. **`_http_fetch(url, timeout, *, max_bytes, max_redirects, send=None)`**：
+   ```
+   async with httpx.AsyncClient(follow_redirects=False) as client:
+     for _ in range(max_redirects + 1):
+       ok, why = _is_public_url(url)          # 每跳都查（复用现有函数）
+       if not ok: raise FetchRefused(why)
+       status, headers, chunks = await send(client, url)   # 单跳，不跟
+       if 3xx and Location: url = urljoin(url, location); continue
+       边收 chunk 边计长，> max_bytes 立刻 raise FetchRefused（不读完）
+     raise FetchRefused("too many redirects")
+   ```
+3. **`send` 是唯一的内部注入点**（`_httpx_send` 为默认）：让"跳"这一层可测。对应 grep 的 `runner` 注入风格。
+4. **去掉 `asyncio.to_thread`**（httpx 原生 async）与 `webfetch_tool.py:145` 的事后长度判断。
+
+### 数据流影响
+`模型 → _is_public_url(每跳) → httpx(单跳/不自动跟) → 流式限长 → htmltext → 输出`。守卫从 1 次变每跳 1 次。
+
+### 完成后效果
+302→127.0.0.1 被拒；>5MB 在读取中截断；HTTP/HTTPS 均正常。
+
+### RIPR 用例
+- **Red**：`test_a_redirect_into_a_private_address_must_be_refused` —— 注入 `send`：第一跳返回 `302 Location: http://127.0.0.1:8080/latest/meta-data/`，断言**内网地址一次都没被请求**且工具报 refused。
+- **Red**：`test_max_bytes_stops_the_read_mid_stream` —— 注入 10MB 的 chunk 流，`max_bytes=1024`，断言 refused 且**已收字节 ≤ 1MB**。
+- **Red**：`test_too_many_redirects_is_refused` —— 无限 302，断言 refused 而非死循环。
+- **Pass**：既有 `tests/test_webtools.py` 6 条**保持绿**（opener 兼容）。
+- **Refactor**：`FetchRefused` 统一带 reason，`execute` 只有一条 except。
+
+## 3. F2 — `_load_image` 沙箱收口（+ mime + 尺寸）
+
+### 影响面
+| 文件 | 改动 |
+|---|---|
+| `core/agent_loop.py:1289` `_load_image` | 复用 `Sandbox.resolve`；加 mime 白名单 + 尺寸上限；失败一律 `None`（走既有降级路径） |
+| `tools/webfetch_tool.py` 无 | — |
+| `pyproject.toml` | 无 |
+
+### 分步（单点收口）
+```python
+def _load_image(self, ref: ImageRef) -> str | None:
+    try:
+        target = Sandbox(self.workspace).resolve(ref.path)   # 复用，不自写
+        if ref.mime not in IMAGE_MIME_BY_SUFFIX.values():    # 白名单一张表
+            return None
+        if target.stat().st_size > MAX_IMAGE_BYTES:          # 复用 attachments 常量
+            return None
+        raw = target.read_bytes()
+    except (OSError, ValueError, SandboxViolation):
+        return None
+    return f"data:{ref.mime};base64,{base64.b64encode(raw).decode('ascii')}"
+```
+- **为什么不改 `session.py` 的反序列化**：`_load_image` 是**唯一的字节出口**，在这里收口即全覆盖。再加一处校验就是第二份真相源（正是本轮要消灭的东西）。session 里存了越界 path 的后果，最坏是 UI 显示一张读不出的图——不外泄。
+- **`Sandbox.resolve` 会 `resolve()` 符号链接**，因此指向外部的 symlink 也被拒（`_extract_image_mentions` 已经这么做了，两处行为终于一致）。
+
+### 数据流影响
+`ChatMessage.images → _load_image → content part`。多一层拒绝，失败降级为已有文本提示，模型侧无感。
+
+### RIPR 用例
+- **Red**：绊线 3 条（绝对路径 / `..` / 缺 mime）去 xfail。当前返回 `data:image/png;base64,bG9jYWxob3N0Cg==`。
+- **Red（新增）**：`test_an_image_over_the_limit_degrades`——造 21MB 文件，断言返回 None（现在无上限，会把 28MB base64 塞进请求）。
+- **Refactor**：把白名单投影提为 `attachments.py` 的 `_ALLOWED_MIME = {mime: suffix…}` 从 `IMAGE_MIME_BY_SUFFIX` 派生（F16）。
+
+---
+
+## 4. F3 — 合成消息标记 + 回合键改用 turn_count（根因修复）
+
+> 这一条一次修掉 4 个症状：undo 键错位、composer 拿到系统串、`<referenced-files>` 被 nudge 顶掉、`turn_count` 不回退。
+
+### 影响面
+| 文件 | 现状 | 改动 |
+|---|---|---|
+| `domain/message.py` | `ChatMessage` 有 `images` | 加 `synthetic: bool = False` |
+| `domain/run.py:20` | `user_message(content, ts, images)` | 加关键字参数 `synthetic: bool = False` |
+| `core/agent_loop.py:485,549,610,745` | 4 处注入合成 user 消息 | 传 `synthetic=True`（`:703` 是真人输入，**不动**；`:1114` 的 closing prompt 不落 session，**不动**） |
+| `core/agent_loop.py:1305,1332` | `sum(role=="user")` 数回合 | 改用 `session.turn_count` |
+| `core/agent_loop.py:1319-1326,1341` | 取最后一条 user | 跳过 `synthetic` |
+| `core/request_assembly.py:384` `_extract_user_input` | 取最后 user | 跳过 `synthetic` |
+| `domain/session.py` `_message_to_dict/_from_dict` | — | `synthetic` 只在 True 时写键 |
+
+### 回合键推导（关键，必须先验算）
+```
+turn N 开始时  _run_turn 先调 _capture_snapshot，此时 turn_count == N-1
+             → key = _turn_key(session, turn_count) = "<sid>/N"
+_begin_turn    之后 turn_count == N
+undo 时         最后一条真人 user 消息属于第 N 轮
+             → key = _turn_key(session, session.turn_count - 1) = "<sid>/N"   ✓ 对齐
+```
+- 回合在 `_begin_turn` 之前崩掉：`turn_count` 未增，undo 拿到的是上一轮真人消息的键 → 语义正确，多出的 ref 交给 `prune`。
+
+### 为什么不用"数真人消息"
+`turn_count` 已是 `source_turn` / `last_compacted_turn` / working-memory 表头的真相源；再数一遍消息就是第二份真相源（本轮要消灭的正是这类）。`synthetic` 只用于**定位截断点**与**@提及的来源消息**，职责单一。
+
+### undo 同时回退的状态（F3 第二半）
+```python
+# 截断 messages 后，与该轮绑定的回合状态一起收回：
+session.turn_count = max(0, session.turn_count - 1)
+session.turn_digests = [d for d in session.turn_digests if d.turn < session.turn_count + 1]
+```
+- **回退 `turn_count`**：下一条消息重新是第 N 轮（"收回"语义）。
+- **裁 digest**：否则工作记忆里会留下已被收回的那一行。`last_compacted_turn` **不动**——压缩边界是物理事实（历史确实被重写过），动它会让压缩逻辑算错。
+
+### 数据流影响
+`合成消息 → 带 synthetic=True → 落盘 → 历史扫描点跳过`。模型侧零影响：`to_chat_message` 不读该字段。
+
+### RIPR 用例
+- **Red**：绊线 3 条（nudge 后 undo / turn_count 回退 / mentioned file 撑过 nudge）去 xfail。
+- **Red（新增）**：`test_a_synthetic_message_never_becomes_the_undo_subject`——注入 nudge 后断言 `report["text"] == "REAL USER TURN"`。
+- **Red（新增）**：`test_synthetic_survives_a_restart`——落盘重载后 `_extract_user_input` 仍拿到真人消息（验证 `synthetic` 真的持久化了）。
+- **Refactor**：`synthetic` 为 True 的消息不计入 `working_memory` 的回合语义（已是现状，回归守住）。
+
+---
+
+## 5. F4 — ToolArtifact 接线（undo 只动模型写过的文件）
+
+### 影响面
+| 文件 | 现状 | 改动 |
+|---|---|---|
+| `tools/write_tool.py:108` | `ToolResult(success=True, output=...)` | 加 `artifacts=(ToolArtifact(path=rel, kind="file", bytes=len(content)),)` |
+| `tools/edit_tool.py:120` | 同上 | 加 `artifacts=(ToolArtifact(path=rel, kind="file"),)` |
+| `domain/run.py:64` `tool_message()` | 丢弃 artifacts | 带上（写入 `ChatMessage.artifacts`） |
+| `domain/message.py` | 无 `artifacts` | 加 `artifacts: tuple[ToolArtifact, ...] = ()`（与 images 同款） |
+| `domain/session.py` | 未序列化 | 只在非空时写 `artifacts` 键 |
+| `core/agent_loop.py` `undo_last_turn` | `restore(key)` 全量删除推断 | 改为按 artifact 路径还原 |
+| `core/snapshots.py:117` `restore` | `ls-files --others` 推断删除 | 改签名 `restore(key, *, created: set[str])`，**只删这个集合** |
+
+### 还原语义（三分法，与 OC 一致）
+| 文件来源 | 处理 | 依据 |
+|---|---|---|
+| 已跟踪文件被改（含 bash 改的） | `git checkout <ref> -- path` | 快照里**确实有**该文件 → 还原 |
+| 模型 write/edit 新建的 untracked | 删除 | `artifacts` 里有它，且快照里没有 |
+| 用户自己新建的 untracked | **保留** | artifacts 里没有它 |
+| bash 新建的 untracked | **保留** | 保守默认；OC 同样不追踪 bash |
+
+### 为什么删掉「基线推断删除」
+`baseline`（`refs/ai-coding/untracked/<key>`）原本只为区分"回合建的 vs 用户原有的"。有了 artifacts，这个区分由**写入记录**直接给出，基线 blob 的推断既多余又是 H3/H4 两个缺陷的根源。**基线整套删除**（含 `snapshots.py:75-95,111-115,134-147` 与 F6 的一半）——这就是本轮要砍的冗余。
+
+### 数据流影响
+`write/edit → ToolResult.artifacts → TurnCloser.artifacts（既有）→ tool_message → ChatMessage.artifacts → 落盘 → undo 扫描尾巴 → restore(created=…)`。新增一个字段，链路每一环都已存在。
+
+### RIPR 用例
+- **Red**：绊线 `test_undo_must_not_delete_a_file_the_user_created` 去 xfail。
+- **Red（新增）**：`test_undo_deletes_a_file_the_turn_created`——write 工具建文件后 undo，文件消失（证明能力没被砍掉）。
+- **Red（新增）**：`test_artifacts_survive_a_restart`——artifacts 落盘重载后仍可读（undo 跨重启可用）。
+- **Red（新增）**：`test_a_bash_created_file_is_left_alone`——bash 建文件后 undo，文件保留（保守默认被守住）。
+- **Refactor**：`SnapshotStore.baseline_ref` 参数与其全部方法一并删除。
+
+---
+
+## 6. F5 — redo 失效 + 跨会话隔离
+
+### 影响面
+| 文件 | 改动 |
+|---|---|
+| `core/agent_loop.py:229` | `_undo_tail: list` → `dict[str, list[ChatMessage]]`（按 session_id） |
+| `core/agent_loop.py:226` | `last_undo: dict` → `dict[str, dict]`（按 session_id） |
+| `core/agent_loop.py:1297` `_capture_snapshot` | 开头 `_undo_tail.pop(session_id, None)` + 删 `<sid>/redo` 两个 ref |
+| `core/server/handlers.py:415` | `loop.last_undo.get(session.id)` |
+| `core/snapshots.py` | 新增 `forget(key)`（删 undo+baseline ref 两条命名空间的同一 key） |
+
+### 为什么在 `_capture_snapshot` 里清
+OC 文档：*"Sending a new prompt while an undo is staged **commits the revert**"*。而 `_capture_snapshot` 是 `_run_turn` 的第一行，正好是"新回合开始"的唯一钩子——不需要新状态机。
+
+### RIPR 用例
+- **Red**：绊线 `test_redo_after_a_new_turn_must_not_duplicate_history` 去 xfail。
+- **Red（新增）**：`test_undo_in_session_a_does_not_leak_into_session_b`——A undo → B redo 报 `nothing to redo`（当前会把 A 的尾巴塞进 B）。
+- **Red（新增）**：`test_last_undo_is_scoped_to_the_session_that_asked`。
+
+---
+
+## 7. F6+F7+F8 — 快照基线 all-or-nothing / 回合锁 / 告知字段
+
+| 编号 | 文件 | 改动 | 用例（Red） |
+|---|---|---|---|
+| F6 | `snapshots.py:62` | `capture` 变成 all-or-nothing：任一 ref 写失败即回滚已写的 ref 并返回 `None`（随 F4 基线删除后自然消失大半，只保留"undo ref 写失败返回 None"） | `test_capture_returns_none_when_the_ref_write_fails` |
+| F7 | `agent_loop.py:1312,1353` | `async with self._turn_lock:` 包住 undo/redo（对齐 OC `assertNotBusy`） | `test_undo_waits_for_a_running_turn`（回合持锁时并发 undo 阻塞） |
+| F8 | `agent_loop.py:1344` + `app/commands.py:155` | `last_undo` 加 `reason`：`ok` / `not-a-repo` / `capture-failed` / `restore-failed` / `no-changes`；`commands.py` 按 reason 打不同中文 | `test_the_report_says_why_nothing_was_restored`（非 git 仓 → `reason == "not-a-repo"`） |
+
+**F8 的 TUI 形态**（`console.info` 一行，不新增 UI）：
+```
+[undo] 回退 6 → 4 条，还原 2 个文件
+[undo] 回退 6 → 4 条；该工作区不是 git 仓库，文件未还原
+[undo] 回退 6 → 4 条；快照还原失败（detail），文件可能仍是改动后的状态
+```
+
+---
+
+## 8. F9+F10 — grep：先修假答案与阻塞，再对齐两路
+
+| 编号 | 文件 | 改动 |
+|---|---|---|
+| F9a | `tools/grep_tool.py:186` | 检查 `outcome.error` / `returncode is None`：runner 不可用 → **回落到 Python 兜底**（不是失败，因为兜底本就完整），两条都不行才失败 |
+| F9b | `tools/grep_tool.py:140` | `return await asyncio.to_thread(self._grep_with_python, ...)` |
+| F10a | 新模块 `core/workspace_files.py` | `iter_workspace_files(root) -> Iterator[Path]`：`os.walk` + `dirs[:]` 剪枝 + `pathspec` 读根 `.gitignore`。**grep 兜底与 `files.find` 共用**（F15） |
+| F10b | `grep_tool.py:228` | `include` 改：`PurePosixPath(rel).match(include)`（`*` 不跨 `/`，对齐 rg） |
+| F10c | `grep_tool.py` 渲染前 | 两个分支的命中都 `sort(key=(path, line))` **再**套 `limit`；尾注的 total 用排序后总数 |
+
+### 明确不做的（避免过度）
+- **嵌套 `.gitignore`**：只读搜索根一份，写进文档。rg 支持多层，自研会引入语义漂移。
+- **rg 加 `--max-count`**：rg 的 `-m` 是 per-file 语义，与全局 limit 不同义，硬套会错。排序后截断即可保证两路同形。
+
+### pyproject
+加 `pathspec>=0.12`（环境已有，PyPI 月下载 5.05 亿）。
+
+### RIPR 用例
+- **Red**：绊线 2 条（假 `(no matches)`、阻塞事件循环）去 xfail。
+- **Red（新增，双跑一致性）**：`test_both_runners_answer_the_same_question`——`@pytest.mark.skipif(not shutil.which("rg"))`，同一棵树分别跑两路，断言**输出逐行相同**。本机无 rg 时自动 skip，装了 rg 的机器上会真的抓住分歧。
+- **Red（新增）**：`test_gitignored_files_are_not_searched`——`.gitignore` 写 `*.log`，两路都不得命中 `x.log`。
+
+---
+
+## 9. F11–F14 — 清洗、websearch、前端
+
+| 编号 | 文件 | 改动 | 用例（Red） |
+|---|---|---|---|
+| F11 | `htmltext.py:22` | `_VOID` 增加 `embed`（它是 void 元素却在 `_SKIP`，抑制计数器永不归零） | 绊线去 xfail |
+| F12a | `websearch_tool.py:125` | `results` 非 list / 元素非 dict → `success=False` + 明确原因 | 绊线去 xfail |
+| F12b | `websearch_tool.py:92` | `limit = min(max(1, limit), 20)` | 绊线去 xfail |
+| F13 | `app.tsx:290` `home.tsx:43` `session.tsx` | `startSession(text, images)`；`pendingPrompt` 改 `{text, images}`；会话路由消费后清空（与现有 pendingPrompt 生命周期合并） | 前端：Home 提交带 images → `startSession` 收到 images（`frontend/test/`） |
+| F14 | `session.tsx:150` | `method` 先算，`apply({kind:"submitted", text, images})` 只在 payload 真带 images 时传 images —— **所见即所发** | 前端：slash 提交不渲染 image part |
+
+**F13 的生命周期**：`pendingPrompt` 目前是 `createSignal<string|null>`。改成对象后，`session.tsx` 现有"消费后清空"的代码路径不动，只是取值方式变 `pending().text` / `pending().images`。
+
+---
+
+## 10. F15+F16 — 真相源收敛
+
+| 编号 | 改动 |
+|---|---|
+| F15 | 新模块 `core/workspace_files.py` 持有 `SKIP_DIRS` + `iter_workspace_files()`；`grep_tool` 与 `handlers.files.find` 都改为调用它，**删除两份副本**。`files.find` 同时从 `rglob("*")+sorted()` 换成带剪枝的 `os.walk`（现在先全量物化再撞 20k 上限，实测 8k 树枚举 8068 条而计数器只到 228） |
+| F16 | `attachments._ALLOWED_MIME` 改为从 `domain.IMAGE_MIME_BY_SUFFIX` 派生：`{mime: suffix.lstrip(".") for suffix, mime in IMAGE_MIME_BY_SUFFIX.items()}`。两张表合一，`message.py` 里"One table, two readers"才成立 |
+
+---
+
+## 11. 修完后的数据流 / 架构图
+
+```
+                        ┌──────────────── 提交入口（两个，都带附件）──────────────┐
+   TUI Prompt ──paste/@──┤ Home: startSession(text, images) → pendingPrompt       │
+                        │ Session: session.prompt / session.command（slash 不带图）│
+                        └────────────────────────┬───────────────────────────────┘
+                                                 ▼
+   handlers ──files.find────────► core/workspace_files.iter_workspace_files()  ★F15 单一真相源
+                                  (os.walk 剪枝 + pathspec 读 .gitignore)
+   handlers ──session.prompt───► attachments.save_data_url ─► ImageRef
+                                                 ▼
+  ┌────────────────────────── AgentLoop.process_input ───────────────────────────┐
+  │ _capture_snapshot:  key = "<sid>/<turn_count+1>"        ★F3 回合键真相源      │
+  │     ⤷ 同时作废本会话的 redo（_undo_tail.pop + 删 redo ref）  ★F5             │
+  │ _begin_turn: user_message(text, images)  real  /  synthetic=True           │
+  │     turn_count += 1                                              ★F3        │
+  │ 循环每轮: RequestAssembler.assemble                                        │
+  │     ├ <requested-skills>    ← _extract_user_input() 跳过 synthetic  ★F3      │
+  │     ├ <referenced-files>    ← 同上（同一个真相源）               ★F3        │
+  │     └ volatile tail                                                      │
+  │ 工具: write/edit ─► ToolResult.artifacts ─► tool msg ─► 落盘    ★F4        │
+  │       grep  ─► rg(--json) │ os.walk+pathspec      两路排序后截断  ★F9★F10    │
+  │       webfetch ─► _is_public_url ─► drawbridge ─► httpx(手动跳)  ★F1        │
+  │       websearch ─► urllib POST 常量 host（无 SSRF 面，不动）                │
+  │ _load_image: Sandbox.resolve + mime 白名单 + 尺寸上限         ★F2          │
+  └──────────────────────────────┬───────────────────────────────────────────────┘
+                                 ▼ mapping.to_chat_message → content parts → provider
+                                 ▼ SessionService.save（synthetic / artifacts / images）
+                                 ▼
+   /undo:  _turn_lock 内 ★F7
+           定位最后一条**真人** user 消息                     ★F3
+           key = "<sid>/<turn_count>" ; 不存在 → reason=not-a-repo/capture-failed
+           截断 messages + turn_count -= 1 + 裁该轮 digest   ★F3
+           restore(key, created=该回合 artifacts 的路径)     ★F4
+              ├ 快照里有 → git checkout 还原（bash 改的也算）
+              └ 只有 artifacts 里有 → 删除
+                 其余 untracked（用户的、bash 的）→ 一律保留   ★F3
+           /redo: 新回合已作废 ★F5 ；按 session_id 隔离 ★F5
+           reason 字段 → console.info 打印人话                ★F8
+```
+
+---
+
+## 12. 最终形态自检（设想全部修完后，检查中途细节是否成立）
+
+1. **用户在脏树上工作**：非 git 也能 undo（只截历史，`reason=not-a-repo` 说清文件没动）。
+2. **回合中模型写入 `a.py` + `new.py`，用户同时手建 `note.md`** → undo：`a.py` 还原、`new.py` 删、`note.md` **在**。这正是 H3 的目标形态。
+3. **回合触发 R6b 疲劳 nudge 后 undo** → 键对齐（`turn_count`），文件还原，composer 拿到**真人的那句话**，`<referenced-files>` 仍在本轮有效。
+4. **undo 后不重新提问，直接发新消息** → redo 自动失效（TUI 打印"已无可恢复"），不会出现陈旧尾巴叠加。
+5. **两个会话交替 undo/redo** → 互不串（`last_undo` 按 session 取）。
+6. **webfetch 抓一个 301 到 https 的正常站点** → 跟到 https 仍合法，正常返回；抓一个 302 到 `169.254.169.254` → 两层守卫都拒。
+7. **drawbridge 被升级且防护失效** → `test_the_ssrf_library_still_blocks_a_redirect_into_a_private_address` 红，CI 拦住，**不是**用户内网被读。
+8. **装了 rg 的机器与没装的机器跑同一个 grep prompt** → 输出逐行相同（双跑一致性测试守住）。
+9. **session.json 里有一张 60MB 的图**（外部导入）→ `_load_image` 因尺寸上限返回 None → 降级成文本提示，本轮请求正常，**不会**把 80MB base64 塞给 provider。
+10. **用户在首页粘贴图片回车** → 附件随会话创建后的首轮发出，零丢失。
+
+**未覆盖、明确留作已知限制**（写进 `docs/data-contracts.md`）：
+- 嵌套 `.gitignore`（只读根一份）；rg 与兜底仍可能逐字节不同（rg 有索引）。
+- bash 工具写入的新建文件不会被 undo 删除。
+- 剪贴板图片在 tmux 里无法真机验证（无剪贴板）。
+- 2 个 `test_loop_digest` 基线红与本轮无关。
+
+---
+
+## 13. 打勾清单
+
+### 安全边界
+- [ ] **F1** webfetch 换 httpx：逐跳 `_is_public_url` 守卫 + `max_bytes` 边读边限 + 跳数上限
+- [ ] **F2** `_load_image` 复用 `Sandbox.resolve` + mime 白名单 + 尺寸上限
+
+### undo 正确性
+- [ ] **F3** `synthetic` 标记（4 处注入点 + 落盘）+ 回合键改 `turn_count` + undo 回退 `turn_count` 并裁 digest
+- [ ] **F4** `ToolArtifact` 接线：write/edit 产出 → 落盘 → `restore(created=…)`，删掉基线推断
+- [ ] **F5** 新回合作废 redo + `_undo_tail`/`last_undo` 按 session 隔离
+- [ ] **F6** `capture` all-or-nothing（写失败即回滚并返回 None）
+- [ ] **F7** undo/redo 走 `_turn_lock`
+- [ ] **F8** `report.reason` + `commands.py` 按 reason 打印
+
+### 工具正确性
+- [ ] **F9** grep runner 失败不再报 `(no matches)`；兜底 `to_thread`
+- [ ] **F10** grep 两路同形：pathspec + `PurePosixPath.match` + 排序后截断 + 双跑一致性测试
+- [ ] **F11** `_VOID` 加 `embed`
+- [ ] **F12** websearch 形状校验 + `max_results ≤ 20`
+
+### 前端与真相源
+- [ ] **F13** Home 附件透传（`pendingPrompt` 带 images）
+- [ ] **F14** slash 命令不渲染未发送的 image part
+- [ ] **F15** `core/workspace_files.py` 单一真相源，`files.find` 换 `os.walk`
+- [ ] **F16** mime 白名单从 `IMAGE_MIME_BY_SUFFIX` 派生
+
+### 收尾
+- [ ] `tests/integration/test_r17_defects.py` 全部 xfail 摘除并转绿
+- [ ] `docs/data-contracts.md` 更新 r17 契约 + 记录已知限制
+- [ ] 全门禁：pytest / mypy / ruff / bun / tsc

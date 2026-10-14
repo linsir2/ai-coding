@@ -1,0 +1,498 @@
+"""Defect tripwires for r17 P1 (written during the 20c1468 acceptance review).
+
+Each test asserts the *contract*, not the current behaviour.  They carry
+``xfail(strict=False)`` so the suite stays green while the defect is open, and
+they flip to XPASS the moment someone fixes it -- which is the signal to delete
+the marker.  Nothing here mocks the seam under test: every case reproduces
+through the production code path.
+
+Each xfail reason names the file:line that owns the fix.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import pytest
+
+from ai_coding.core.agent_loop import AgentLoop
+from ai_coding.core.snapshots import SnapshotStore
+from ai_coding.domain.message import ChatMessage, ImageRef
+from ai_coding.security.sandbox import Sandbox
+from ai_coding.service.session_service import SessionService
+from ai_coding.tools.grep_tool import GrepTool
+from ai_coding.tools.htmltext import html_to_text
+from ai_coding.tools.registry import ToolRegistry
+from ai_coding.tools.webfetch_tool import FetchRefused, WebfetchTool, _is_public_url
+from ai_coding.tools.websearch_tool import WebsearchTool
+
+# --------------------------------------------------------------- T3: SSRF
+
+
+#: A host that passes the guard but redirects into the user's own network --
+#: the exact shape of the bypass: hop 0 is public, hop 1 is 127.0.0.1.
+#: Only the DNS lookup behind the guard is real; the hop itself is injected.
+_REDIRECTOR = "https://example.com/start"
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_into_a_private_address_must_be_refused():
+    """The guard ran on the first URL only (webfetch_tool.py:127) while stdlib
+    urlopen followed the 302 on its own (webfetch_tool.py:65), so a public host
+    that redirects to 127.0.0.1 handed the model the internal response body."""
+    from ai_coding.tools.webfetch_tool import _http_fetch
+
+    asked: list[str] = []
+
+    async def empty() -> AsyncIterator[bytes]:  # the seam's body iterator
+        return
+        yield b""  # pragma: no cover - makes this an async generator
+
+    async def send(client, url):  # noqa: ARG001 - the one-hop seam
+        asked.append(url)
+        return 302, {"location": "http://127.0.0.1:8080/latest/meta-data/"}, empty()
+
+    with pytest.raises(FetchRefused) as refused:
+        await _http_fetch(_REDIRECTOR, 5.0, max_bytes=1_000_000, max_redirects=5, send=send)
+
+    assert "127.0.0.1" in str(refused.value) or "redirect" in str(refused.value).lower()
+    assert len(asked) == 1, f"the private hop was actually requested: {asked}"
+
+
+@pytest.mark.asyncio
+async def test_max_bytes_stops_the_read_mid_stream():
+    """``max_bytes`` was a filter applied after ``response.read()`` had already
+    pulled the whole body into memory (webfetch_tool.py:67/145)."""
+    from ai_coding.tools.webfetch_tool import _http_fetch
+
+    received = 0
+
+    async def chunks():
+        nonlocal received
+        for _ in range(20):
+            received += 512 * 1024
+            yield b"x" * (512 * 1024)
+
+    async def send(client, url):  # noqa: ARG001
+        return 200, {}, chunks()
+
+    with pytest.raises(FetchRefused):
+        await _http_fetch("https://example.com/big", 5.0, max_bytes=1024, send=send)
+
+    assert received <= 512 * 1024, f"read {received} bytes before giving up"
+
+
+@pytest.mark.asyncio
+async def test_too_many_redirects_is_refused():
+    """A redirect loop must end in a refusal, not a hang."""
+    from ai_coding.tools.webfetch_tool import _http_fetch
+
+    hops = 0
+
+    async def empty() -> AsyncIterator[bytes]:
+        return
+        yield b""  # pragma: no cover - makes this an async generator
+
+    async def send(client, url):  # noqa: ARG001
+        nonlocal hops
+        hops += 1
+        return 302, {"location": "https://example.com/loop"}, empty()
+
+    with pytest.raises(FetchRefused):
+        await _http_fetch("https://example.com/loop", 5.0, send=send)
+
+    assert hops <= 6, f"followed {hops} redirects"
+
+
+def test_the_direct_private_url_is_still_refused():
+    """The guard that does exist must keep working -- this is the control."""
+    assert WebfetchTool() is not None
+    ok, why = _is_public_url("http://127.0.0.1/x")
+    assert ok is False and "SSRF" in why
+
+
+# ---------------------------------------------------------------- T5: images
+
+
+def _bare_loop(workspace: Path) -> AgentLoop:
+    """A loop with nothing but ``workspace`` set -- the only field ``_load_image``
+    reads.  Built this way so the test cannot be moved by collaborators it does
+    not care about."""
+
+    loop = AgentLoop.__new__(AgentLoop)
+    loop.workspace = str(workspace)
+    return loop
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: _load_image joins without containment (agent_loop.py:1292)",
+    strict=False,
+)
+def test_an_absolute_path_outside_the_workspace_must_not_be_read(tmp_path):
+    """``Path(workspace) / "/etc/hostname"`` is ``/etc/hostname`` in Python
+    (agent_loop.py:1292) -- no resolve(), no containment, no Sandbox."""
+    loop = _bare_loop(tmp_path)
+
+    data_url = loop._load_image(ImageRef(path="/etc/hostname", mime="image/png", name="p"))
+
+    assert data_url is None, f"read outside the workspace: {str(data_url)[:40]}"
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: _load_image joins without containment (agent_loop.py:1292)",
+    strict=False,
+)
+def test_a_dot_dot_path_outside_the_workspace_must_not_be_read(tmp_path):
+    """Same seam, relative spelling -- the way a session file carries it."""
+    loop = _bare_loop(tmp_path)
+    ref = ImageRef(path="../../../../etc/hostname", mime="image/png", name="p")
+
+    data_url = loop._load_image(ref)
+
+    assert data_url is None, f"read outside the workspace: {str(data_url)[:40]}"
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: mime defaults to empty and is interpolated (session.py:33)",
+    strict=False,
+)
+def test_a_session_message_without_a_mime_must_not_produce_an_image_part():
+    """``session.py:33`` defaults mime to "" and ``_load_image`` interpolates it
+    unconditionally, so the request carries ``data:;base64,...`` -- a non-empty
+    string, so mapping sends it as an image and the provider 400s the whole turn.
+    Replay poisons the session permanently."""
+    from ai_coding.ai.mapping import to_chat_message
+    from ai_coding.domain.session import _message_from_dict
+
+    msg = _message_from_dict(
+        {"role": "user", "content": "hi", "timestamp": "t", "images": [{"path": "a.png"}]}
+    )
+    out = to_chat_message(msg, image_loader=lambda ref: "data:;base64,iVBORw0KGgo=")
+
+    urls = [
+        part["image_url"]["url"]
+        for part in (out["content"] if isinstance(out["content"], list) else [])
+        if part.get("type") == "image_url"
+    ]
+    assert not urls, f"an image part with an empty mime reached the provider: {urls}"
+
+
+# ------------------------------------------------------------- T3: htmltext
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: embed is in _SKIP but not _VOID (htmltext.py:22-26)",
+    strict=False,
+)
+def test_a_void_element_must_not_swallow_the_whole_document():
+    """``_SKIP`` holds ``embed`` (htmltext.py:24) but ``_VOID`` does not
+    (htmltext.py:22), and ``<embed>`` never closes -- so the suppression counter
+    never returns to zero and the model receives an empty page.  This is the
+    meta/link bug again, one tag over."""
+    html = "<html><body><embed src='x.pdf'><p>REAL CONTENT</p></body></html>"
+
+    assert "REAL CONTENT" in html_to_text(html), "the document vanished"
+
+
+# ------------------------------------------------------------------ T2: grep
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: runner errors are ignored (grep_tool.py:186)",
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_an_unusable_rg_must_not_be_reported_as_no_matches(tmp_path):
+    """``grep_tool.py:186`` never inspects ``outcome.error`` /
+    ``returncode is None``.  A missing or broken binary therefore returns
+    ``success=True`` with "(no matches)" -- a confident wrong answer."""
+    (tmp_path / "a.py").write_text("target\n", encoding="utf-8")
+    tool = GrepTool(Sandbox(tmp_path), use_ripgrep=True, rg_path="/nonexistent/rg")
+
+    result = await tool.execute({"pattern": "target"})
+
+    assert result.success is False or "no matches" not in result.output, (
+        f"the runner failed and the tool answered {result.output!r}"
+    )
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: the sync fallback returns without await (grep_tool.py:140)",
+    strict=False,
+)
+def test_the_fallback_does_not_block_the_event_loop(tmp_path):
+    """``grep_tool.py:140`` returns ``self._grep_with_python(...)`` without
+    ``await``, so the whole os.walk runs on the event loop -- the SSE bridge and
+    the TUI stop for its duration."""
+    import asyncio
+
+    (tmp_path / "many").mkdir()
+    for i in range(200):
+        (tmp_path / "many" / f"f{i}.py").write_text("target\n" * 20, encoding="utf-8")
+    tool = GrepTool(Sandbox(tmp_path), use_ripgrep=False)
+    ticks = 0
+
+    async def ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.005)
+            ticks += 1
+
+    async def main():
+        background = asyncio.create_task(ticker())
+        await tool.execute({"pattern": "target"})
+        background.cancel()
+
+    asyncio.run(main())
+    assert ticks >= 3, f"the event loop was blocked: {ticks} ticks in the whole scan"
+
+
+# -------------------------------------------------------------- T1: undo/redo
+
+
+def _repo(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir()
+    ident = ["-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(
+        ["git", *ident, "commit", "-qm", "i", "--allow-empty"], cwd=root, check=True
+    )
+    (root / "a.txt").write_text("v1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", *ident, "commit", "-qm", "a"], cwd=root, check=True)
+    return root
+
+
+def _loop(tmp_path: Path, root: Path) -> tuple[AgentLoop, SessionService]:
+    from ai_coding.ai.engine import ChatEngine
+    from ai_coding.domain.loop import StepResult
+
+    class _Eng(ChatEngine):
+        async def step(  # type: ignore[override]
+            self, messages, *, tools, instructions=None, on_delta=None, **kwargs
+        ):
+            return StepResult(text="ok")
+
+    sessions = SessionService(tmp_path / "sessions")
+    loop = AgentLoop(
+        _Eng(), sessions, ToolRegistry(), workspace=str(root), snapshots=SnapshotStore(root)
+    )
+    return loop, sessions
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: the turn key counts synthetic user messages "
+    "(agent_loop.py:1305/1332)",
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_undo_must_work_after_a_nudge_was_injected(tmp_path):
+    """Auto-continuation, fatigue nudges and steering all write role="user"
+    (agent_loop.py:485/745).  ``undo_last_turn`` takes the *last* one as the turn,
+    so the key misses the snapshot: history unrolls, zero files are restored, and
+    the composer receives an internal system string."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+
+    await loop.process_input(session, "REAL USER TURN")
+    (root / "a.txt").write_text("TURN CHANGED IT\n", encoding="utf-8")
+    session.add_message(
+        ChatMessage(role="user", content="[系统] 还有未完成的任务项，请继续。", timestamp="t")
+    )
+
+    report = await loop.undo_last_turn(session)
+
+    assert report["files"] == ["a.txt"], "no file was restored"
+    assert (root / "a.txt").read_text(encoding="utf-8") == "v1\n"
+    assert report["text"] == "REAL USER TURN"
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: _undo_tail and the redo ref are never invalidated "
+    "(agent_loop.py:1297-1310)",
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_redo_after_a_new_turn_must_not_duplicate_history(tmp_path):
+    """A new turn neither clears the in-memory tail nor the ``<sid>/redo`` ref,
+    so redo re-applies a stale tail and rolls the workspace back under it."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+
+    await loop.process_input(session, "TURN ONE")
+    (root / "a.txt").write_text("AFTER TURN ONE\n", encoding="utf-8")
+    await loop.undo_last_turn(session)
+    await loop.process_input(session, "TURN TWO")
+    (root / "a.txt").write_text("AFTER TURN TWO\n", encoding="utf-8")
+
+    await loop.redo_last_turn(session)
+
+    assert [m.content for m in session.messages if m.role == "user"] == ["TURN TWO"]
+    assert (root / "a.txt").read_text(encoding="utf-8") == "AFTER TURN TWO\n"
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: the baseline cannot tell turn-created from user-created "
+    "(snapshots.py:134-147)",
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_undo_must_not_delete_a_file_the_user_created(tmp_path):
+    """The baseline is 'untracked at capture time'; it has no notion of who wrote
+    a file afterwards, so /undo deletes what the user typed mid-turn and reports
+    it as restored."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+
+    await loop.process_input(session, "TURN")
+    (root / "draft.txt").write_text("I typed this while it ran\n", encoding="utf-8")
+
+    await loop.undo_last_turn(session)
+
+    assert (root / "draft.txt").exists(), "undo deleted a file the user created"
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: an absent baseline reads as an empty one "
+    "(snapshots.py:87-95,111-115)",
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_a_missing_baseline_must_not_delete_every_untracked_file(tmp_path):
+    """``capture`` returns the undo ref even when the baseline ref write fails,
+    and ``_baseline_paths`` cannot tell 'absent' from 'empty' -- so the deletion
+    pass treats every untracked file as turn-created."""
+    root = _repo(tmp_path)
+    (root / "old_notes.md").write_text("mine for months\n", encoding="utf-8")
+    store = SnapshotStore(root)
+    await store.capture("s/1")
+    subprocess.run(
+        ["git", "update-ref", "-d", "refs/ai-coding/untracked/s/1"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+    )
+    (root / "created.md").write_text("agent\n", encoding="utf-8")
+
+    await store.restore("s/1")
+
+    assert (root / "old_notes.md").exists(), "restore wiped a pre-snapshot file"
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: undo truncates messages but not session.turn_count "
+    "(agent_loop.py:1312)",
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_undo_must_rewind_the_session_turn_counter(tmp_path):
+    """turn_count drives working memory, source_turn and last_compacted_turn;
+    after an undo it permanently overstates the session, across restarts."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+
+    await loop.process_input(session, "TURN")
+    after_turn = session.turn_count
+    await loop.undo_last_turn(session)
+
+    assert session.turn_count < after_turn
+
+
+# ------------------------------------------------------------- T4: mentions
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: _extract_user_input takes the last user message of any "
+    "origin (request_assembly.py:384)",
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_the_referenced_file_must_survive_a_nudge_in_the_same_turn(tmp_path):
+    """The block is rebuilt from the last role="user" message; a nudge or
+    steering line replaces it, so the file the user explicitly attached vanishes
+    mid-turn.  Contract: gone with the next *user* message."""
+    root = _repo(tmp_path)
+    (root / "notes.txt").write_text("unique-payload-42\n", encoding="utf-8")
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+
+    await loop.process_input(session, "@notes.txt")
+    session.add_message(
+        ChatMessage(role="user", content="[系统] 还有未完成的任务项，请继续。", timestamp="t")
+    )
+    assembler = loop.assembler
+    from ai_coding.core.request_assembly import RequestAssembler
+
+    current = RequestAssembler._extract_user_input(session)
+    block = assembler._referenced_files_block(current)
+
+    assert "unique-payload-42" in block, f"the file vanished after a nudge: {block!r}"
+
+
+# ------------------------------------------------------------ T3: websearch
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: the provider payload shape is unvalidated "
+    "(websearch_tool.py:125)",
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_websearch_must_not_crash_on_an_unexpected_payload_shape():
+    """``websearch_tool.py:125`` assumes a list of dicts; anything else raises
+    inside the tool and the Python error text reaches the model."""
+
+    def opener(url, timeout, data):  # noqa: ARG001
+        return "application/json", json.dumps({"results": ["not a dict"]}).encode()
+
+    result = await WebsearchTool(api_key="k", opener=opener).execute({"query": "q"})
+
+    assert result.success is False, f"a malformed payload raised instead: {result.output!r}"
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: a missing results key reads as 'no results' "
+    "(websearch_tool.py:121)",
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_websearch_must_say_when_the_payload_had_no_results_field():
+    """A provider contract change is currently indistinguishable from 'nothing
+    found' -- the model concludes the web has no answer."""
+
+    def opener(url, timeout, data):  # noqa: ARG001
+        return "application/json", b'{"answer": "x"}'
+
+    result = await WebsearchTool(api_key="k", opener=opener).execute({"query": "q"})
+
+    assert result.success is False, "a shape change was reported as 'no results'"
+
+
+@pytest.mark.xfail(
+    reason="r17 defect: max_results has no ceiling (websearch_tool.py:92)",
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_websearch_must_cap_the_result_count():
+    """``max(1, limit)`` has no ceiling, so the model can ask the provider for an
+    unbounded page."""
+    captured: dict = {}
+
+    def opener(url, timeout, data):  # noqa: ARG001
+        captured["n"] = json.loads(data).get("max_results")
+        return "application/json", json.dumps({"results": []}).encode()
+
+    tool = WebsearchTool(api_key="k", opener=opener)
+    await tool.execute({"query": "q", "max_results": 10000})
+
+    assert captured["n"] is not None and captured["n"] <= 20, (
+        f"asked the provider for {captured['n']} results"
+    )
