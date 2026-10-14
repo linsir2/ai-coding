@@ -327,16 +327,32 @@ if ref is not None: images.append(ref)     # 拒绝 → 静默丢弃
 
 ## 10. 打勾清单
 
-- [ ] **F0** `_workspace_relative` 绝对分支 + 注入式回归用例 + 验收脚本 parity 节（本轮装 rg 必跑）
-- [ ] **F1**（M1+M2）`RestoreReport(restored, failed)`，失败不再抛、报告点名
-- [ ] **F2**（M3+M9）暂存回退合并：基线只拍一次 / 尾巴累积 / `saved` 文件留底与写回 / redo 复原 count+digest
-- [ ] **F3**（M5）gitignore 管到目录 + 按序下降
-- [ ] **F4**（M6）webfetch 50k（清洗后截断，警示留末尾）
-- [ ] **F5**（M7）被拒图片回音（`rejected` + reducer notice part）
-- [ ] **F6**（M8）rg `--max-filesize`
-- [ ] **证伪不修**：M8 二进制嗅探、`edit_tool` 误删、F2 的 `created` 漏删
-- [ ] 全门禁 + parity 在装 rg 状态下绿
-- [ ] `docs/data-contracts.md` 同步
+| # | 项 | 提交 |
+|---|---|---|
+| 1 | **F0** `_workspace_relative` 绝对分支 + 注入式回归用例 + 验收脚本 parity 节 | `dde6414` |
+| 2 | **F1**（M1+M2）`RestoreReport(restored, failed)`，失败不再抛、报告点名 | `d92b121` |
+| 3 | **F2**（M3+M9）暂存回退合并：基线只拍一次 / 尾巴累积 / `saved` 留底与写回 / redo 复原 count+digest | `cae1293` |
+| 4 | **F3**（M5）gitignore 管到目录 + 按序下降 | `8bb3f0c` |
+| 5 | **F4**（M6）webfetch 50k（清洗后截断，警示留末尾） | `d9f9e27` |
+| 6 | **F5**（M7）被拒图片回音（`rejected` + reducer notice part） | `8255856` |
+| 7 | **F6**（M8）rg `--max-filesize` | `7e8c6c6` |
+| — | **证伪不修**：M8 二进制嗅探（复现不出）、`edit_tool` 误删（有 `cat-file -e` 分支保护）、F2 的 `created` 漏删（实测文件系统正确） | — |
+| — | `docs/data-contracts.md` 同步（含"已知缺口"逐条改成已修 + 剩余项） | 本提交 |
+
+**最终门禁**（全绿）
+- pytest `2610 passed / 6 skipped / 0 failed`（基线 2588 → +22）
+- mypy `132 source files` 干净
+- `ruff check ai_coding/ tests/integration/ scripts/r18_acceptance.py` 干净
+- 前端 `250 pass / 26 files`（基线 248 → +2）、`tsc --noEmit` 干净
+- `scripts/r18_acceptance.py` `36 passed / 0 failed`（rg 缺席时显式打印 UNVERIFIED）
+- **真实业务链路 9/9**（走真 git / 真 write 工具 / 真快照，只有模型是替身）：
+  ① rg 绝对路径已重锚定 ② 删不掉的文件被点名 ③ redo 带回合新建文件 ④ undo×3 → redo 一次全回
+  ⑤ 新回合提交暂存回退 ⑥ 被忽略目录不吃预算 ⑦ 5MB 网页截断到 50k ⑧ >1MB 两路不搜 ⑨ 四类粘贴拒绝各带理由
+
+### 实施中发现并修正的三处自身错误
+1. F0 的红用例最初写成子串断言——`/ws/sub/c.txt` **包含** `sub/c.txt`，弱断言在 bug 存在时也绿。改为精确匹配后才真红。
+2. F2 写完发现 `taken_digests` 累积会**重复**（第二次 undo 读到的是已被裁过的环），`turn_count` 累加会得 3 而非原值 2。改为：`_Staged` 记**首次 undo 之前**的状态，后续 undo 只加 `turns`。
+3. 前端 `updateLastUser` 返回的是整个 state，我误当 `messages` 数组赋值——被自己的用例抓到（`messages[0]` undefined）。
 
 ---
 
