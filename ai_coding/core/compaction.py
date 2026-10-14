@@ -251,15 +251,17 @@ class Compactor:
                     "on_summary": on_summary,
                     "force": force,
                 }
-                if pinned:
-                    kwargs["pinned"] = pinned
-                # An injected context may predate the observed-token gate, and a
+                # An injected context may predate any of these gates, and a
                 # compaction must never fail because of an argument it did not
-                # ask for.
+                # ask for -- so every optional argument is probed, not just the
+                # observed-token one.  ``pinned`` was added without the probe and
+                # silently degraded every delegate that did not declare it.
                 try:
                     params: Mapping[str, Any] = inspect.signature(aware).parameters
                 except (TypeError, ValueError):
                     params = {}
+                if pinned and "pinned" in params:
+                    kwargs["pinned"] = pinned
                 if observed_tokens and "observed_tokens" in params:
                     kwargs["observed_tokens"] = observed_tokens
                 if on_delta is not None and "on_delta" in params:
