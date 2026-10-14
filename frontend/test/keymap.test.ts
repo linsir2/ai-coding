@@ -18,6 +18,25 @@ function harnessWithLeader() {
   return harness
 }
 
+describe("composer paste key", () => {
+  // r21: ctrl+v was the only ctrl binding in the app with no test at all, so
+  // "paste does nothing" could have meant "the key never fires" and nothing in
+  // the suite could tell the two apart.
+  test("ctrl+v dispatches its command", () => {
+    const harness = createTestKeymap({ defaultKeys: true })
+    let runs = 0
+    harness.keymap.registerLayer({
+      commands: [{ name: "prompt.paste", run: () => void (runs += 1) }],
+      bindings: [{ key: "ctrl+v", cmd: "prompt.paste" }],
+    })
+
+    harness.host.press("v", { ctrl: true })
+
+    expect(runs).toBe(1)
+    harness.cleanup()
+  })
+})
+
 describe("leader key", () => {
   test("uses OpenCode's trigger and timeout", () => {
     expect(LEADER_KEY).toBe("ctrl+x")

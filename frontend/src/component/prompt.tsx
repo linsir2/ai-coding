@@ -22,11 +22,11 @@
  */
 
 import type { TextareaRenderable } from "@opentui/core"
-import { TextAttributes, createHostClipboard } from "@opentui/core"
+import { TextAttributes } from "@opentui/core"
 import { useBindings, useKeymap } from "@opentui/keymap/solid"
 import { For, Show, createEffect, createSignal, onMount } from "solid-js"
 import { theme } from "../theme/tokens"
-import { type PromptImage, imageDataUrl } from "../util/attachment"
+import { type PasteOutcome, type PromptImage, hostClipboard, interpretPaste } from "../util/attachment"
 import { moveSelection } from "../util/dialog-select"
 import type { MentionOption } from "../util/mention"
 import { filterMentions, mentionQuery, replaceMentionToken } from "../util/mention"
@@ -88,32 +88,34 @@ export function Prompt(props: PromptProps) {
   // r17/T5: pasted images wait here until the message is sent.
   const [images, setImages] = createSignal<PromptImage[]>([])
   const [hint, setHint] = createSignal("")
-  const clipboard = createHostClipboard()
+  const clipboard = hostClipboard()
 
   const paste = async () => {
+    let outcome: PasteOutcome
     try {
-      const result = (await clipboard.read({
+      const result = await clipboard.read({
         preferredTypes: ["image/png", "text/plain"],
         selection: "clipboard",
         signal: AbortSignal.timeout(2000),
-      })) as {
-        status: string
-        representation?: { mimeType: string; bytes: Uint8Array }
-      }
-      if (result.status !== "read" || !result.representation) return
-      const { mimeType, bytes } = result.representation
-      if (mimeType.toLowerCase().startsWith("image/")) {
-        const dataUrl = imageDataUrl(mimeType, bytes)
-        if (dataUrl) {
-          setImages((all) => [...all, { name: `image-${all.length + 1}`, dataUrl }])
-          setHint("")
-        }
-        return
-      }
-      input?.insertText(new TextDecoder().decode(bytes))
-    } catch {
-      /* no clipboard here (headless/tmux): the key does nothing */
+      })
+      outcome = interpretPaste(result)
+    } catch (error) {
+      outcome = interpretPaste(null, error instanceof Error ? error : new Error(String(error)))
     }
+    if (outcome.kind === "image") {
+      setImages((all) => [...all, { name: `image-${all.length + 1}`, dataUrl: outcome.dataUrl }])
+      setHint("")
+      return
+    }
+    if (outcome.kind === "text") {
+      input?.insertText(outcome.text)
+      setHint("")
+      return
+    }
+    // r21: every refusal used to `return` silently, so pressing ctrl+v on a
+    // machine whose clipboard this process cannot reach looked identical to the
+    // key not being bound at all.  Say which of the six reasons it was.
+    setHint(outcome.message)
   }
 
   const slashSuggestion = (entry: SlashCommand): Suggestion => ({
