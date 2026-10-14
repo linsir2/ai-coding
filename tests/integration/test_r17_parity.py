@@ -198,3 +198,67 @@ async def test_both_runners_answer_the_same_question(tmp_path):
         assert real.output == fallback.output, (
             f"{params} diverged:\nrg: {real.output!r}\npy: {fallback.output!r}"
         )
+
+
+# --------------------------------------------------- scoped searches (r19/F1)
+#
+# Every fallback test above omits ``path``, and with the target defaulting to
+# the workspace two mistakes are invisible: joining the target-relative path
+# onto the workspace, and resolving a ripgrep path against the *server's* cwd.
+# Both need a scoped search to show up.
+
+
+@pytest.mark.asyncio
+async def test_the_fallback_searches_the_directory_it_was_pointed_at(tmp_path):
+    root = _tree(tmp_path / "ws")
+
+    result = await _fallback(root).execute({"pattern": "target", "path": "sub"})
+
+    assert result.success, result.output
+    assert "sub/b.py:1" in result.output, (
+        f"a scoped search reported nothing it should have found: {result.output!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_scoped_search_reports_workspace_relative_paths(tmp_path):
+    """Whatever the search was pointed at, the model is told where the file is
+    in the *workspace* -- that is the only frame it can act on."""
+    root = _tree(tmp_path / "ws")
+    payload = json.dumps(
+        {
+            "type": "match",
+            "data": {"path": {"text": "c.txt"}, "line_number": 1,
+                     "lines": {"text": "target\n"}},
+        }
+    )
+
+    async def runner(argv, *, cwd, timeout):  # noqa: ARG001
+        return SimpleNamespace(returncode=0, stdout=payload, stderr="",
+                               timed_out=False, error=None)
+
+    tool = GrepTool(Sandbox(root), use_ripgrep=True, rg_path="/bin/rg", runner=runner)
+
+    result = await tool.execute({"pattern": "target", "path": "sub"})
+
+    assert "sub/c.txt:1" in result.output, (
+        f"the ripgrep path was not anchored to the workspace: {result.output!r}"
+    )
+
+
+@pytest.mark.skipif(not shutil.which("rg"), reason="ripgrep is not installed")
+@pytest.mark.asyncio
+async def test_both_runners_agree_on_a_scoped_search(tmp_path):
+    root = _tree(tmp_path / "ws")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+
+    cases = (
+        {"pattern": "target", "path": "sub"},
+        {"pattern": "target", "path": "sub", "include": "*.py"},
+    )
+    for params in cases:
+        fallback = await _fallback(root).execute(params)
+        real = await GrepTool(Sandbox(root)).execute(params)
+        assert fallback.output == real.output, (
+            f"{params} diverged:\nrg: {real.output!r}\npy: {fallback.output!r}"
+        )

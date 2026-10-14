@@ -244,14 +244,14 @@ class GrepTool(BaseTool):
             if record.get("type") != "match":
                 continue
             data = record.get("data", {})
-            path = str(data.get("path", {}).get("text", ""))
-            try:
-                path = str(Path(path).resolve().relative_to(self._sandbox.workspace))
-            except (OSError, ValueError):
-                pass
+            # rg runs with cwd=workspace, so its paths are already relative to
+            # it.  Resolving them here used the *server's* cwd, which only came
+            # out right because the resulting ValueError left the raw string
+            # in place (r19/F1).
+            path = self._workspace_relative(target, data.get("path", {}).get("text", ""))
             hits.append(
                 (
-                    PurePosixPath(path).as_posix(),
+                    path.as_posix(),
                     int(data.get("line_number", 0)),
                     self._clip(str(data.get("lines", {}).get("text", ""))),
                 )
@@ -272,9 +272,11 @@ class GrepTool(BaseTool):
             if target.is_file()
             else self._walk(target)
         )
+        anchor = PurePosixPath(target.relative_to(self._sandbox.workspace).as_posix())
         hits: list[tuple[str, int, str]] = []
         for path, rel in files:
-            if include and not _include_matches(rel, include):
+            shown = rel if anchor == PurePosixPath(".") else anchor / rel
+            if include and not _include_matches(shown, include):
                 continue
             try:
                 if path.stat().st_size > _MAX_FILE_BYTES:
@@ -287,16 +289,25 @@ class GrepTool(BaseTool):
             text = raw.decode("utf-8", errors="replace")
             for number, line in enumerate(text.splitlines(), start=1):
                 if matcher.search(line):
-                    hits.append((rel.as_posix(), number, self._clip(line)))
+                    hits.append((shown.as_posix(), number, self._clip(line)))
         return self._render(hits, limit)
 
     def _walk(self, root: Path) -> list[tuple[Path, PurePosixPath]]:
-        """The files under ``root``, through the shared workspace walk (r18/F15)."""
-        return [
-            (self._sandbox.workspace / rel, rel)
-            for rel, is_dir in walk_workspace(root)
-            if not is_dir
-        ]
+        """The files under ``root``, through the shared workspace walk.
+
+        ``walk_workspace`` yields paths relative to *its* root, so they are
+        read from there; what the model is shown is relative to the workspace,
+        which is the only frame it can act on.  Joining the target-relative
+        path onto the workspace instead was invisible until a search was
+        actually pointed at a subdirectory (r19/F1).
+        """
+        return [(root / rel, rel) for rel, is_dir in walk_workspace(root) if not is_dir]
+
+    def _workspace_relative(self, target: Path, from_target: str) -> PurePosixPath:
+        """Re-anchor a path the search root produced onto the workspace."""
+        prefix = PurePosixPath(target.relative_to(self._sandbox.workspace).as_posix())
+        tail = PurePosixPath(from_target)
+        return tail if prefix == PurePosixPath(".") else prefix / tail
 
 
 __all__ = ["GrepTool"]
