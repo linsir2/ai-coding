@@ -165,7 +165,7 @@ async def section_images() -> None:
     base = Path(tempfile.mkdtemp())
     (base / "inside.png").write_bytes(PNG)
     (base / "link-out.png").symlink_to("/etc/hostname")
-    ref = save_data_url(base, "clip", "data:image/png;base64," + base64.b64encode(PNG).decode())
+    ref = save_data_url(base, "clip", "data:image/png;base64," + base64.b64encode(PNG).decode()).ref
     loop = AgentLoop.__new__(AgentLoop)
     loop.workspace = str(base)
 

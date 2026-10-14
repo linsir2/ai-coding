@@ -284,7 +284,7 @@ async def test_both_ways_of_attaching_an_image_record_its_size(tmp_path):
 
     pasted = save_data_url(
         tmp_path, "clip", "data:image/png;base64," + base64.b64encode(_png_b64()).decode()
-    )
+    ).ref
     assert pasted is not None and pasted.bytes == len(_png_b64())
 
     (tmp_path / "shot.png").write_bytes(_png_b64())

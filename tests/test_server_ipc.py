@@ -729,6 +729,56 @@ async def test_session_command_interrupt_ends_the_run_aborted(ipc):
 
 
 @pytest.mark.asyncio
+async def test_a_rejected_paste_is_reported_in_the_prompt_ack(ipc):
+    """r20/F5.  The transcript draws the pasted picture before the request is
+    sent, so a refusal in the handler left the user looking at an image the
+    model never received -- and the ack said nothing at all.  The ack is the
+    response the client already awaits, so this costs no new IPC call."""
+    world, _service, client = ipc
+    hello = client.request("initialize")
+    session_id = hello["sessionId"]
+    world.loop.script = [
+        lambda obs, _delta: obs.on_event(
+            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="ok"))
+        ),
+    ]
+    ack = client.request("session.prompt", {
+        "id": session_id,
+        "text": "看这个",
+        "images": [{"name": "shot.png", "data_url": "data:text/plain;base64,aGk="}],
+    })
+
+    assert ack["rejected"], f"a refused paste was dropped in silence: {ack}"
+    assert ack["rejected"][0]["name"] == "shot.png"
+    assert "text/plain" in ack["rejected"][0]["reason"], ack["rejected"]
+
+
+@pytest.mark.asyncio
+async def test_an_accepted_paste_reports_no_rejection(ipc):
+    """The new field must not make every ordinary paste look suspicious."""
+    import base64
+
+    from tests.integration.test_r17_dataflow import PNG_1PX
+
+    world, _service, client = ipc
+    hello = client.request("initialize")
+    session_id = hello["sessionId"]
+    world.loop.script = [
+        lambda obs, _delta: obs.on_event(
+            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="ok"))
+        ),
+    ]
+    png = base64.b64encode(PNG_1PX).decode()
+    ack = client.request("session.prompt", {
+        "id": session_id,
+        "text": "看这个",
+        "images": [{"name": "shot.png", "data_url": f"data:image/png;base64,{png}"}],
+    })
+
+    assert ack["rejected"] == [], ack
+
+
+@pytest.mark.asyncio
 async def test_session_prompt_runs_scripted_turn(ipc):
     world, _service, client = ipc
     hello = client.request("initialize")

@@ -24,16 +24,41 @@ _PNG = base64.b64encode(
 
 
 def test_a_data_url_becomes_a_path_backed_reference(tmp_path):
-    ref = save_data_url(tmp_path, "shot", f"data:image/png;base64,{_PNG}")
+    saved = save_data_url(tmp_path, "shot", f"data:image/png;base64,{_PNG}")
 
-    assert ref is not None
-    assert ref.mime == "image/png"
-    assert ref.path.startswith(".ai-coding/attachments/")
-    assert (tmp_path / ref.path).is_file()
+    assert saved.ref is not None
+    assert saved.ref.mime == "image/png"
+    assert saved.ref.path.startswith(".ai-coding/attachments/")
+    assert (tmp_path / saved.ref.path).is_file()
 
 
 def test_a_non_image_data_url_is_refused(tmp_path):
-    assert save_data_url(tmp_path, "x", "data:text/plain;base64,aGk=") is None
+    assert save_data_url(tmp_path, "x", "data:text/plain;base64,aGk=").ref is None
+
+
+def test_a_refusal_says_why(tmp_path):
+    """A refusal the caller cannot explain is a refusal the user cannot act on.
+    ``save_data_url`` has five separate ways to say no, and the handler used to
+    see only a ``None`` -- so the client could tell that something was dropped
+    but never what to change."""
+    unsupported = save_data_url(tmp_path, "x", "data:text/plain;base64,aGk=")
+    assert unsupported.ref is None
+    assert "text/plain" in unsupported.reason, unsupported.reason
+
+    malformed = save_data_url(tmp_path, "x", "not a data url at all")
+    assert malformed.ref is None
+    assert malformed.reason, "a malformed payload was dropped with no reason"
+
+    oversized = save_data_url(tmp_path, "x", "data:image/png;base64," + "A" * 64, max_bytes=8)
+    assert oversized.ref is None
+    assert "8" in oversized.reason, f"the limit was not named: {oversized.reason}"
+
+
+def test_an_accepted_image_carries_no_refusal(tmp_path):
+    accepted = save_data_url(tmp_path, "shot", f"data:image/png;base64,{_PNG}")
+
+    assert accepted.ref is not None
+    assert accepted.reason == "", accepted.reason
 
 
 def test_the_message_round_trips_through_session_json():

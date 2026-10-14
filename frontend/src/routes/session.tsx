@@ -121,7 +121,16 @@ export function Session(props: SessionProps) {
     const { method, payload } = buildSubmission(props.commands ?? [], props.sessionId, text, images)
     void props.client
       .request(method, payload)
-      .then(() => {
+      .then((ack: unknown) => {
+        // r20/F5: the backend refuses a paste it cannot store (bad mime, corrupt
+        // payload, over the budget) and says so in the ack.  The transcript has
+        // already drawn the picture, so without this the user watches an image
+        // go out that the model never received.  The rules stay on the backend;
+        // the client only relays the verdict.
+        const rejected = Array.isArray((ack as { rejected?: unknown } | null)?.rejected)
+          ? ((ack as { rejected: { name: string; reason: string }[] }).rejected)
+          : []
+        if (rejected.length > 0) apply({ kind: "attachment-rejected", items: rejected })
         // A command can rewrite the history. `/compact` moves the context
         // meter's boundary, so without this the sidebar kept reporting the
         // pre-compaction occupancy until the next turn happened to refresh it —

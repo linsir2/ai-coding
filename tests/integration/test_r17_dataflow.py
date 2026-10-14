@@ -338,10 +338,12 @@ async def test_a_pasted_image_reaches_the_provider_as_an_image_part(tmp_path, re
     loop, sessions = build_loop(tmp_path, repo, engine=engine)
     session = sessions.create()
 
-    ref = save_data_url(repo, "shot", "data:image/png;base64," + base64.b64encode(PNG_1PX).decode())
-    assert ref is not None and (repo / ref.path).is_file()
+    saved = save_data_url(
+        repo, "shot", "data:image/png;base64," + base64.b64encode(PNG_1PX).decode()
+    )
+    assert saved.ref is not None and (repo / saved.ref.path).is_file()
 
-    await loop.process_input(session, "看这个图", images=(ref,))
+    await loop.process_input(session, "看这个图", images=(saved.ref,))
 
     message = RecordingEngine.user_message_with_parts(engine.last_request())
     kinds = [part.get("type") for part in message["content"]]

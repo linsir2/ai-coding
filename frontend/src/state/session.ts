@@ -74,6 +74,10 @@ export type Action =
   | { kind: "queued"; text: string }
   | { kind: "queued-dispatched" }
   | { kind: "submit-failed"; reason: string }
+  // r20/F5: a paste the backend refused.  Not a failed submit -- the turn runs,
+  // just without the picture -- so `busy` is left alone and the notice lands on
+  // the user message that drew the image.
+  | { kind: "attachment-rejected"; items: { name: string; reason: string }[] }
   | { kind: "wire"; event: EventMessage }
 
 export function initialState(): SessionState {
@@ -157,6 +161,28 @@ function updateAssistant(
   }
   const messages: ChatMessage[] = [...state.messages, { role: "assistant", parts: update([]) }]
   return { ...state, messages: retireOldest(messages, true) }
+}
+
+/** Append to the last message the user sent -- the one that drew the picture.
+ *
+ *  Deliberately not ``updateAssistant``: by the time a refusal arrives the turn
+ *  has usually started, so the last message is an assistant one and the notice
+ *  would land on text the user did not write about.
+ */
+function updateLastUser(
+  state: SessionState,
+  update: (parts: Part[]) => Part[],
+): SessionState {
+  for (let index = state.messages.length - 1; index >= 0; index--) {
+    const message = state.messages[index]!
+    if (message.role !== "user") continue
+    const parts = update(message.parts)
+    if (parts === message.parts) return state
+    const messages = state.messages.slice()
+    messages[index] = { role: "user", parts }
+    return { ...state, messages }
+  }
+  return state
 }
 
 /** Index of the last message holding a running compaction card, if any. */
@@ -638,6 +664,13 @@ export function reduce(state: SessionState, action: Action): SessionState {
           appendNotice(parts, `[ipc] ${action.reason}`, "error"),
         ).messages,
       }
+    }
+    case "attachment-rejected": {
+      if (action.items.length === 0) return state
+      const line = action.items
+        .map((item) => `[附件未附加] ${item.name}：${item.reason}`)
+        .join("；")
+      return updateLastUser(state, (parts) => appendNotice(parts, line, "error"))
     }
     case "wire":
       return reduceWire(state, action.event)

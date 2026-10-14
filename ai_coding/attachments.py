@@ -20,6 +20,7 @@ import base64
 import binascii
 import hashlib
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from ai_coding.domain import message as _message
@@ -54,32 +55,50 @@ _DATA_URL = re.compile(r"^data:(?P<mime>[-\w.+/]+);base64,(?P<data>[A-Za-z0-9+/=
 DEFAULT_MAX_BYTES = 20 * 1024 * 1024
 
 
+@dataclass(frozen=True)
+class SavedImage:
+    """The outcome of saving one pasted image, refusal included.
+
+    ``save_data_url`` has five separate ways to say no.  Returning a bare
+    ``None`` collapsed all of them into "nothing happened", which is why the
+    session handler could only drop a rejected paste in silence while the
+    transcript went on showing it as sent (r20/F5).
+    """
+
+    ref: ImageRef | None
+    reason: str = ""
+
+
 def save_data_url(
     workspace: str | Path,
     name: str,
     data_url: str,
     *,
     max_bytes: int = DEFAULT_MAX_BYTES,
-) -> ImageRef | None:
-    """Write a pasted image under the workspace; ``None`` when unacceptable.
+) -> SavedImage:
+    """Write a pasted image under the workspace, saying why if it is refused.
 
-    Returns the reference (workspace-relative path, mime, display name), or
-    None for a non-image, malformed, or oversized payload — the caller reports
-    that rather than sending a request the provider would reject.
+    The reference carries the workspace-relative path, mime and display name.
+    A payload that is not a data URL, is not an image type, is not valid
+    base64, is empty or over the size budget, or cannot be written comes back
+    with no reference and the rule it broke -- so the caller can tell the user
+    what to change instead of silently dropping what they pasted.
     """
     match = _DATA_URL.match((data_url or "").strip())
     if match is None:
-        return None
+        return SavedImage(None, "不是图片数据（data URL 格式无法解析）")
     mime = match.group("mime").lower()
     extensions = allowed_mime()
     if mime not in extensions:
-        return None
+        return SavedImage(None, f"不支持的图片格式：{mime}")
     try:
         raw = base64.b64decode(match.group("data"), validate=False)
     except (binascii.Error, ValueError):
-        return None
-    if not raw or len(raw) > max_bytes:
-        return None
+        return SavedImage(None, "图片数据损坏（base64 解码失败）")
+    if not raw:
+        return SavedImage(None, "图片数据为空")
+    if len(raw) > max_bytes:
+        return SavedImage(None, f"图片过大（{len(raw)} 字节 > {max_bytes} 字节上限）")
     relative = f".ai-coding/attachments/{hashlib.sha1(raw).hexdigest()}.{extensions[mime]}"
     target = Path(workspace).expanduser() / relative
     try:
@@ -87,8 +106,10 @@ def save_data_url(
         if not target.exists():
             target.write_bytes(raw)
     except OSError:
-        return None
-    return ImageRef(path=relative, mime=mime, name=name or target.stem, bytes=len(raw))
+        return SavedImage(None, "图片写入失败（工作区不可写）")
+    return SavedImage(
+        ref=ImageRef(path=relative, mime=mime, name=name or target.stem, bytes=len(raw))
+    )
 
 
 def load_image(
@@ -119,4 +140,4 @@ def load_image(
     return f"data:{ref.mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
-__all__ = ["DEFAULT_MAX_BYTES", "allowed_mime", "load_image", "save_data_url"]
+__all__ = ["DEFAULT_MAX_BYTES", "SavedImage", "allowed_mime", "load_image", "save_data_url"]

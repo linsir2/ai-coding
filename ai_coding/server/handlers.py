@@ -260,16 +260,25 @@ def make_handlers(
         # r17/T5: clipboard images arrive as data URLs; they are written under
         # the workspace once and the message references the file.
         images: list[Any] = []
+        rejected: list[dict[str, str]] = []
         for item in params.get("images", []) or []:
             if not isinstance(item, dict):
                 continue
-            ref = save_data_url(
+            saved = save_data_url(
                 world.workspace,
                 str(item.get("name", "") or ""),
                 str(item.get("data_url", "") or ""),
             )
-            if ref is not None:
-                images.append(ref)
+            # r20/F5: the transcript has already drawn this picture by the time
+            # the request lands here, so dropping it in silence left the user
+            # looking at an image the model never received.  Name it and say
+            # which rule it broke.
+            if saved.ref is not None:
+                images.append(saved.ref)
+            else:
+                rejected.append(
+                    {"name": str(item.get("name", "") or "图片"), "reason": saved.reason}
+                )
         state.turn_id += 1
         turn_id = state.turn_id
 
@@ -309,7 +318,10 @@ def make_handlers(
         future = service.spawn(run_turn())
         state.turn_futures.add(future)
         future.add_done_callback(state.turn_futures.discard)
-        return {"turnId": turn_id, "sessionId": session_id}
+        # ``rejected`` rides the response the client already awaits, so no new
+        # IPC call and no new event type is needed to tell the user a paste did
+        # not make it.
+        return {"turnId": turn_id, "sessionId": session_id, "rejected": rejected}
 
     def session_interrupt(params: dict[str, Any]) -> dict[str, Any]:
         # Two layers, both needed (ported from ui/textual_app.py::

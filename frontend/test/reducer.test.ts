@@ -577,6 +577,29 @@ describe("input queue", () => {
     expect(dispatched.messages.filter((message) => message.role === "user")).toHaveLength(3)
   })
 
+  test("a refused paste says so on the message that showed it", () => {
+    // r20/F5: the picture is drawn the moment the user hits send, so the
+    // transcript already claims it went out.  The refusal has to land on that
+    // same message, or the user reads a sent image the model never received.
+    const busy = feed(initialState(), { kind: "submitted", text: "看这个", images: [{ name: "shot.png", dataUrl: "data:image/png;base64,AA" }] })
+    const after = feed(busy, {
+      kind: "attachment-rejected",
+      items: [{ name: "shot.png", reason: "不支持的图片格式：text/plain" }],
+    })
+
+    expect(after.busy).toBe(true), "a refused attachment is not a failed submit"
+    const parts = after.messages[0]!.parts
+    expect(parts.some((part) => part.kind === "notice")).toBe(true)
+    expect(JSON.stringify(parts)).toContain("text/plain")
+  })
+
+  test("an accepted paste adds no notice", () => {
+    const busy = feed(initialState(), { kind: "submitted", text: "hi" })
+    const after = feed(busy, { kind: "attachment-rejected", items: [] })
+
+    expect(after.messages[0]!.parts).toHaveLength(1)
+  })
+
   test("submit-failed keeps whatever is still queued", () => {
     const queued = feed(initialState(), { kind: "queued", text: "b" })
     const failed = feed(queued, { kind: "submit-failed", reason: "boom" })
