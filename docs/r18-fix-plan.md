@@ -1225,14 +1225,213 @@ def walk_workspace(root, *, respect_gitignore=True, max_entries=20_000):
 5. `limit=5` 在两台机器上截到同样 5 行，尾注的 total 也一样。
 6. 没有 `.gitignore` 的目录 → 行为退化为"只看 SKIP_DIRS"，两路一致。
 
-## 10. F15+F16 — 真相源收敛
+## 10. F13 + F14 + F16 — 前端附件闭环与 mime 真相源
 
-| 编号 | 改动 |
+> 三条互相独立，但都小。F13/F14 在同一处真相上：**一次提交里"显示什么"和"发什么"必须是同一个决定**。
+
+### 10.1 F14 病灶：同一个提交被决定了两次
+
+```tsx
+// session.tsx submit()
+apply({ kind: "submitted", text, images })     // ← 决定一：无条件把图片画进转录区
+dispatch(text, images)
+
+// session.tsx dispatch()
+const method = text.startsWith("/") ? "session.command" : "session.prompt"
+const payload =
+  method === "session.prompt" && images.length > 0
+    ? { id, text, images: [...] }
+    : { id, text }                              // ← 决定二：slash 行不带图
+```
+两处独立判断同一个问题，**结论可以相反**。现状就是相反的：
+
+```
+会话里粘贴图片 → 输入 /help → 回车
+转录区出现 [Image: image-1]     ← 决定一：submitted 带了 images
+session.command 的 payload 里没有 images  ← 决定二：slash 不带
+→ 用户看到的图，模型永远看不到
+```
+r17 的注释写着"a slash line has no use for them"——意图没错，错在**用两个决定去实现一个意图**。
+
+### 10.2 F13 病灶：Home 的签名比 Prompt 窄一个参数
+
+```ts
+// component/prompt.tsx:65
+onSubmit: (text: string, images: PromptImage[]) => boolean | void
+// routes/home.tsx:43
+onSubmit: (text: string) => void          // ← 窄一个参数
+// app.tsx:290
+const startSession = (text: string) => { setPendingPrompt(text); setRoute("session") }
+```
+`tsc` **不会报错**（把 1 参函数赋给 2 参类型是允许的），Prompt 内部照常调 2 个参数，第二个被静默丢弃：
+
+```
+启动 → 首页 ctrl+v 粘一张图 → chip 出现 [Image: image-1] → 回车
+→ 路由跳到 session → session.prompt 只带 {id, text}
+→ 图片彻底消失，零报错、零提示
+```
+根因与 F14 同源：**跨组件的数据流在边界上被截断，而两侧的签名没有让这件事显形。**
+
+> OC 对照：v2 TUI 是**单屏单入口**（文档：*"Running OpenCode starts the TUI... Once you're in the TUI, you can prompt it"*），根本没有第二个提交入口，所以不存在这个问题；而它的图片粘贴本身是已知缺陷（issue #44310 标题即 "silently ignored"）。我们不能照抄一个没有的形状，只能自己把入口补齐。
+
+### 10.3 F16 病灶：两张 mime 表，内容相同、结构上却会漂移
+
+```python
+domain/message.py      IMAGE_MIME_BY_SUFFIX = {".png":"image/png", ".jpg":"image/jpeg",
+                                                ".jpeg":"image/jpeg", ".gif":"image/gif", ".webp":"image/webp"}
+attachments.py         _ALLOWED_MIME         = {"image/png":"png", "image/jpeg":"jpg", ...}
+```
+- `message.py` 的注释写着 *"One table, two readers"* —— 但那是**两个不同形状的表**，不是一张表的两个投影
+- 读者：`_load_image` 用 values()、`_extract_image_mentions` 用 keys()、`_ALLOWED_MIME` 是唯一执行点但只覆盖粘贴
+- 今天内容恰好一致；**任何一边的增删都会立刻分叉**：比如加 `.bmp` → 粘贴被拒而 `@x.bmp` 放行 → 发出 `data:image/bmp` → provider 拒 → **整轮请求失败**（叠加 H7）
+
+推导规则（实测三种）：
+```
+朴素推导（后者覆盖前者）: image/jpeg → 'jpeg'   ← 会改变落盘扩展名（现在存的是 .jpg）
+首出现（依赖字典顺序）  : image/jpeg → 'jpg'    ← 与现状一致，但依赖插入顺序，脆弱
+最短后缀（与顺序无关）  : image/jpeg → 'jpg'    ← 与现状一致，且规则自述 ✔
+```
+
+### 10.4 影响面（执行范围）
+
+| 文件 | 现状 | 改动 |
+|---|---|---|
+| **新增** `frontend/src/util/submission.ts` | 无 | `buildSubmission(sessionId, text, images) -> {method, payload}`（F14 的一次决定） |
+| `frontend/src/routes/session.tsx` | submit/dispatch 各自决定 | 都改调 `buildSubmission`；`submitted` 只派发它认可的图片 |
+| `frontend/src/routes/home.tsx:43` | `onSubmit: (text) => void` | `onSubmit: (text, images) => void` |
+| `frontend/src/app.tsx:290` | `startSession(text)` + `pendingPrompt: string` | `startSession(text, images)` + `pendingPrompt: PendingPrompt` |
+| `frontend/src/routes/session.tsx:45` | `initialPrompt?: string` | `initialPrompt?: PendingPrompt`（消费处 `:325` 同步改） |
+| `ai_coding/attachments.py:22` | `_ALLOWED_MIME` 手写 | 从 `IMAGE_MIME_BY_SUFFIX` 派生（最短后缀规则） |
+
+### 10.5 复用的契约
+
+| 复用 | 位置 |
 |---|---|
-| F15 | 新模块 `core/workspace_files.py` 持有 `SKIP_DIRS` + `iter_workspace_files()`；`grep_tool` 与 `handlers.files.find` 都改为调用它，**删除两份副本**。`files.find` 同时从 `rglob("*")+sorted()` 换成带剪枝的 `os.walk`（现在先全量物化再撞 20k 上限，实测 8k 树枚举 8068 条而计数器只到 228） |
-| F16 | `attachments._ALLOWED_MIME` 改为从 `domain.IMAGE_MIME_BY_SUFFIX` 派生：`{mime: suffix.lstrip(".") for suffix, mime in IMAGE_MIME_BY_SUFFIX.items()}`。两张表合一，`message.py` 里"One table, two readers"才成立 |
+| `PromptImage` | `util/attachment.ts:9`（前端已有，不新建类型） |
+| reducer 的 `submitted` 动作 | `state/session.ts:73`（形状不变，只是 images 可能为空） |
+| `pendingPrompt` 的现有生命周期 | `app.tsx:80/470` + `session.tsx:325`（创建后消费，不新建机制） |
+| `IMAGE_MIME_BY_SUFFIX` | `domain/message.py`（F16 的唯一真相源） |
 
----
+### 10.6 每文件每步
+
+**Step 1 — `util/submission.ts`（F14 的根本修复）**
+```ts
+export interface WireSubmission {
+  method: "session.prompt" | "session.command"
+  payload: { id: string; text: string; images?: { name: string; data_url: string }[] }
+}
+/** One decision about a submission: what it sends, and therefore what it shows. */
+export function buildSubmission(sessionId: string, text: string, images: PromptImage[]): WireSubmission {
+  const command = text.startsWith("/")
+  const ride = !command && images.length > 0
+  return {
+    method: command ? "session.command" : "session.prompt",
+    payload: ride
+      ? { id: sessionId, text, images: images.map(i => ({ name: i.name, data_url: i.dataUrl })) }
+      : { id: sessionId, text },
+  }
+}
+```
+**为什么值得多一个模块**：现在"发什么"和"画什么"是两次判断；合并后它们不可能不一致。纯函数、无 React、可直接测。
+
+**Step 2 — `session.tsx`**：`dispatch` 用它的 `method`/`payload`；`submit` 用 `payload.images` 决定 `submitted` 派不派 images。
+
+**Step 3 — `home.tsx` / `app.tsx`**：签名带 images；`pendingPrompt` 改 `{text, images}`。
+
+**Step 4 — `session.tsx` 消费 `initialPrompt`**：`submit(p.text, p.images)`。
+
+**Step 5 — `attachments.py`**：
+```python
+_ALLOWED_MIME = {
+    mime: min(s for s, m in IMAGE_MIME_BY_SUFFIX.items() if m == mime).lstrip(".")
+    for mime in set(IMAGE_MIME_BY_SUFFIX.values())
+}
+```
+最短后缀：与字典顺序无关，且保持现状（`image/jpeg → jpg`）。
+
+### 10.7 数据流影响
+
+```
+【F14】Prompt.submit ──► submit(text, images)
+                            │
+                            ├─► buildSubmission(text, images) ──► {method, payload}
+                            │       ▲                │
+                            │       └ 一次决定 ──────┘
+                            ├─ busy + 有图 → return false（保留 chip）
+                            └─► apply({kind:"submitted", images: payload.images ?? []})
+                                    │              ▲
+                                    ▼              └── 与线上载荷同一个来源
+                              转录区渲染（所见即所发）
+
+【F13】Home Prompt ──► startSession(text, images)
+                         └─► setPendingPrompt({text, images})
+                                └─► route=session → initialPrompt={text, images}
+                                       └─► submit(text, images) ──► 走上面同一条路
+
+【F16】粘贴 mime ──► _ALLOWED_MIME（派生自 IMAGE_MIME_BY_SUFFIX）
+      @图 mime   ──► IMAGE_MIME_BY_SUFFIX ──► values() ──► _load_image 白名单
+                                        ↑ 同一张表
+```
+
+### 10.8 完成后效果
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| 会话里粘图后敲 `/help` | 转录区显示图片，模型收不到 | 转录区**不显示**图片（所见即所发） |
+| 首页粘图后回车 | 图片静默消失 | 图片随首轮发出 |
+| `state/session.ts` 的 `submitted` | 契约与传输层可能分歧 | 同一个 `buildSubmission` 决定 |
+| mime 表 | 两张手写表 | 一张表 + 一条派生规则，`image/jpeg` 仍存 `.jpg` |
+
+### 10.9 RIPR 用例
+
+**F14（真实可测，纯函数）**
+- **Red**：`test_a_slash_line_shows_nothing_it_does_not_send` —— `buildSubmission("/help", [img])` 的 `payload.images` 为 `undefined`（断言这就是 reducer 该收到的）
+- **Red**：`test_a_plain_line_carries_its_images`
+- **Red**：`test_the_showed_and_the_sent_come_from_one_decision` —— 对同一输入，`payload.images?.length` 与提交给 reducer 的 images 长度**必须一致**（参数化：纯文本 / 带图 / slash+图 三种）
+
+**F16（真实可测）**
+- **Red**：`test_the_paste_whitelist_is_derived_from_the_suffix_table` —— 断言 `set(_ALLOWED_MIME) == set(IMAGE_MIME_BY_SUFFIX.values())`，且 `_ALLOWED_MIME["image/jpeg"] == "jpg"`
+- **Red**：`test_a_new_suffix_makes_the_paste_whitelist_follow` —— **临时**往 `IMAGE_MIME_BY_SUFFIX` 加 `.bmp` 后，`_ALLOWED_MIME` 自动含 `image/bmp`（证明是派生不是抄写；用 monkeypatch 注入的表重跑派生逻辑）
+
+**F13（诚实说明：能自动测的部分有限）**
+- 现有仓库**没有任何测试渲染 Session 路由**（`frontend/test/` 里只有 reducer 被测）。要端到端测需要给 Session 造 client/state/events 的完整渲染夹具，超出本轮最小化。
+- 因此 F13 的保证是：① `tsc` 两侧签名一致；② **结构性断言测试**（与本轮 Python 侧 `test_the_ignore_list_has_exactly_one_home` 同风格，读源码断言 `home.tsx` 的 onSubmit 签名带 images）；③ **真机 tmux 验证**作为主要证据。
+- 另加：`PendingPrompt` 的形状由 `submission.ts` 导出，reducer 层的 `submitted` 已有测试覆盖。
+
+### 10.10 架构图（F13+F14+F16 后）
+
+```
+   ┌── Home ────────────────────┐        ┌── Session ──────────────────┐
+   │ Prompt.onSubmit(text,imgs) │        │ Prompt.onSubmit(text,imgs)  │
+   └──────────┬─────────────────┘        └──────────┬──────────────────┘
+              │ startSession(text, images)          │ submit(text, images)
+              ▼                                     ▼
+   PendingPrompt{text,images}          buildSubmission(text, images) ★唯一决定
+              │                                     │            │
+              │                        ┌────────────┘            └──────────┐
+              ▼                        ▼                                  ▼
+   route=session            wire: {method, payload}        reducer: submitted(images)
+   initialPrompt            ┌──────────────┐                  │
+              │             │              │                  ▼
+              └────────────►│ 同一份 payload.images │      转录区渲染（所见即所发）
+                            └──────────────┘
+
+   粘贴/引用 mime ──► domain.IMAGE_MIME_BY_SUFFIX ──┬──► keys()   @图提取
+                                                    └──► values() ┬─► _load_image 白名单
+                                                                  └─► attachments._ALLOWED_MIME ★派生
+```
+
+### 10.11 需要你拍板的一处
+
+见问卷（F13 的 `pendingPrompt` 形状与 slash+图的用户提示）。
+
+### 10.12 最终形态自检
+
+1. 会话里粘贴图片 → `/help` → 转录区**没有**图片，命令正常执行，composer 里的 chip 保留可继续用。
+2. 会话里粘贴图片 → 正常文字 → 转录区有图片，模型收到图片。
+3. 首页粘贴图片 → 回车 → 进入会话后首轮就带图（不再需要先建会话再粘）。
+4. 往 `IMAGE_MIME_BY_SUFFIX` 加 `.bmp` → 粘贴自动接受 bmp，`@x.bmp` 也被提取，**不再出现"粘贴被拒但 @ 放行"的裂口**。
+5. 老 session / 老前端状态不受影响（`PendingPrompt` 只存在于内存 signal，不落盘）。
 
 ## 11. 修完后的数据流 / 架构图
 
@@ -1320,10 +1519,10 @@ def walk_workspace(root, *, respect_gitignore=True, max_entries=20_000):
 - [x] **F12** websearch 形状校验 + `max_results ≤ 20`
 
 ### 前端与真相源
-- [ ] **F13** Home 附件透传（`pendingPrompt` 带 images）
-- [ ] **F14** slash 命令不渲染未发送的 image part
+- [x] **F13** Home 附件透传（`pendingPrompt` 带 images）
+- [x] **F14** slash 命令不渲染未发送的 image part
 - [x] **F15** `core/workspace_files.py` 单一真相源，`files.find` 换 `os.walk`
-- [ ] **F16** mime 白名单从 `IMAGE_MIME_BY_SUFFIX` 派生
+- [x] **F16** mime 白名单从 `IMAGE_MIME_BY_SUFFIX` 派生
 
 ### 收尾
 - [ ] `tests/integration/test_r17_defects.py` 全部 xfail 摘除并转绿

@@ -24,6 +24,7 @@ import { Logo } from "../component/logo"
 import { Prompt } from "../component/prompt"
 import { useDialog } from "../dialog/context"
 import type { IpcClient } from "../ipc"
+import type { PromptImage } from "../util/attachment"
 import type { MentionOption } from "../util/mention"
 import { theme } from "../theme/tokens"
 import { abbreviateHome, formatLocation, truncatePath } from "../util/location"
@@ -40,7 +41,7 @@ export interface HomeProps {
   model: string
   provider: string
   branch: string
-  onSubmit: (text: string) => void
+  onSubmit: (text: string, images: PromptImage[]) => void
   client: IpcClient
   /** The registry's skills, for the composer's `@` suggestions (r16/E-2). */
   skills: MentionOption[]

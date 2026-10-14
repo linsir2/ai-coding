@@ -22,21 +22,35 @@ import hashlib
 import re
 from pathlib import Path
 
-from ai_coding.domain.message import IMAGE_MIME_BY_SUFFIX, ImageRef
+from ai_coding.domain import message as _message
+from ai_coding.domain.message import ImageRef
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
 
-#: What the model can be shown.  A whitelist, not a sniff: the client already
-#: declares the mime, and anything else is not an image input.
-_ALLOWED_MIME = {
-    "image/png": "png",
-    "image/jpeg": "jpg",
-    "image/gif": "gif",
-    "image/webp": "webp",
-}
 #: The same set, read from the table the loop and request assembly already use --
 #: one truth source for "is this an image", two projections of it (extensions
-#: for naming files, mimes for checking them).
-IMAGE_MIMES = frozenset(IMAGE_MIME_BY_SUFFIX.values())
+#: for naming files, mimes for checking them).  The module is imported rather
+#: than the name, so there is only ever one binding of that table in this file.
+IMAGE_MIMES = frozenset(_message.IMAGE_MIME_BY_SUFFIX.values())
+
+
+def _allowed_mime() -> dict[str, str]:
+    """``{mime: file extension}`` for the images the model can be shown.
+
+    Derived from ``IMAGE_MIME_BY_SUFFIX`` rather than written out (r18/F16): two
+    hand-kept copies of the same set is how a suffix became acceptable to ``@``
+    while the paste path still rejected it -- and the provider then refused the
+    whole turn.  Where a mime has several suffixes the shortest names the file,
+    which is also what the table was written to produce.
+    """
+    table = _message.IMAGE_MIME_BY_SUFFIX
+    return {
+        mime: min(
+            (suffix for suffix, m in table.items() if m == mime),
+            key=len,  # shortest wins; ``min()`` alone would order lexically and
+                      # pick ".jpeg" over ".jpg"
+        ).lstrip(".")
+        for mime in set(table.values())
+    }
 _DATA_URL = re.compile(r"^data:(?P<mime>[-\w.+/]+);base64,(?P<data>[A-Za-z0-9+/=\s]+)$")
 DEFAULT_MAX_BYTES = 20 * 1024 * 1024
 
@@ -58,7 +72,8 @@ def save_data_url(
     if match is None:
         return None
     mime = match.group("mime").lower()
-    if mime not in _ALLOWED_MIME:
+    extensions = _allowed_mime()
+    if mime not in extensions:
         return None
     try:
         raw = base64.b64decode(match.group("data"), validate=False)
@@ -66,7 +81,7 @@ def save_data_url(
         return None
     if not raw or len(raw) > max_bytes:
         return None
-    relative = f".ai-coding/attachments/{hashlib.sha1(raw).hexdigest()}.{_ALLOWED_MIME[mime]}"
+    relative = f".ai-coding/attachments/{hashlib.sha1(raw).hexdigest()}.{extensions[mime]}"
     target = Path(workspace).expanduser() / relative
     try:
         target.parent.mkdir(parents=True, exist_ok=True)

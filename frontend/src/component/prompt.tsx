@@ -62,7 +62,7 @@ export interface PromptProps {
    * Submit handler.  Returning ``false`` rejects the submission and keeps the
    * text in the box (busy turns: docs/opencode-gui-m2-plan.md §1).
    */
-  onSubmit: (text: string, images: PromptImage[]) => boolean | void
+  onSubmit: (text: string, images: PromptImage[]) => boolean | string | void
   /** Focus the textarea on mount; disable while a turn streams. */
   autofocus?: boolean
   /** True while the slash list is up — the session mutes its own bindings. */
@@ -239,9 +239,12 @@ export function Prompt(props: PromptProps) {
     const text = (input?.plainText ?? "").trim()
     if (!text && images().length === 0) return
     setSuggestions([])
-    if (props.onSubmit(text, images()) === false) {
-      // Busy turns queue text only; the images stay in the box for the retry.
-      if (images().length > 0) setHint("回合进行中：图片不能排队，等这轮结束后再发送")
+    // A string is a refusal with a reason (r18/F14: a command sent no images,
+    // so the composer keeps them and says so); false is the busy refusal.
+    const refused = props.onSubmit(text, images())
+    if (refused === false || typeof refused === "string") {
+      if (typeof refused === "string") setHint(refused)
+      else if (images().length > 0) setHint("回合进行中：图片不能排队，等这轮结束后再发送")
       return
     }
     setImages([])

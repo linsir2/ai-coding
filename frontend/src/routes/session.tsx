@@ -20,6 +20,7 @@ import { DialogSkills } from "../component/dialog-skills"
 import { AskPanel } from "../component/ask"
 import { PermissionPanel, type PermissionRequest } from "../component/permission"
 import { Prompt } from "../component/prompt"
+import { buildSubmission, type PendingPrompt } from "../util/submission"
 import { SessionHeader } from "../component/session-header"
 import { Sidebar } from "../component/sidebar"
 import { StatusBar } from "../component/status-bar"
@@ -42,7 +43,7 @@ export interface SessionProps {
   model: string
   provider: string
   /** Text submitted from home; auto-sent once the route mounts. */
-  initialPrompt?: string
+  initialPrompt?: PendingPrompt | null
   /** A replayed session (from the dialog or tabs); replaces the transcript. */
   hydrate?: { key: string; state: SessionState } | null
   title: string
@@ -112,17 +113,10 @@ export function Session(props: SessionProps) {
     // the whole command layer through one entry.  Unknown commands fall
     // through it as plain text — the same verdict the model would get either
     // way.  Plain text keeps the live-turn path (bridge deltas, no console).
-    const method = text.startsWith("/") ? "session.command" : "session.prompt"
-    // r17/T5: clipboard images ride only the plain-prompt path; a slash line
-    // has no use for them.  The wire spelling is data URLs.
-    const payload =
-      method === "session.prompt" && images.length > 0
-        ? {
-            id: props.sessionId,
-            text,
-            images: images.map((image) => ({ name: image.name, data_url: image.dataUrl })),
-          }
-        : { id: props.sessionId, text }
+    // r18/F14: the method, the payload and what stays in the composer all come
+    // from one decision, so the transcript cannot show a picture the model
+    // never received.
+    const { method, payload } = buildSubmission(props.sessionId, text, images)
     void props.client
       .request(method, payload)
       .then(() => {
@@ -137,7 +131,7 @@ export function Session(props: SessionProps) {
       })
   }
 
-  const submit = (text: string, images: PromptImage[] = []): boolean => {
+  const submit = (text: string, images: PromptImage[] = []): boolean | string => {
     // The retired Textual UI queued a submit that arrived mid-turn and ran it
     // when the turn ended; replicate that here.  The queue holds text only, so
     // a submission carrying images is refused while busy (the composer keeps
@@ -147,6 +141,11 @@ export function Session(props: SessionProps) {
       apply({ kind: "queued", text })
       return true
     }
+    // r18/F14: a command sends no images, so it shows none either and hands
+    // them back with a reason instead of letting the transcript imply they
+    // were sent.
+    const submission = buildSubmission(props.sessionId, text, images)
+    if (submission.kept.length > 0) return submission.withheldReason
     apply({ kind: "submitted", text, images })
     dispatch(text, images)
     return true
@@ -323,7 +322,7 @@ export function Session(props: SessionProps) {
     onCleanup(unsubscribe)
     void refreshStats()
     if (props.initialPrompt) {
-      submit(props.initialPrompt)
+      submit(props.initialPrompt.text, props.initialPrompt.images)
     }
   })
 

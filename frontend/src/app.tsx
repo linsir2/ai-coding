@@ -35,6 +35,8 @@ import { theme } from "./theme/tokens"
 import type { AskRequest } from "./util/ask"
 import { quitSequence } from "./util/exit"
 import type { PermissionDecision } from "./util/permission"
+import type { PromptImage } from "./util/attachment"
+import type { PendingPrompt } from "./util/submission"
 
 export interface Hello {
   version: string
@@ -77,7 +79,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
   }
   const [route, setRoute] = createSignal<"home" | "session">("home")
   const [sessionId, setSessionId] = createSignal(props.hello.sessionId)
-  const [pendingPrompt, setPendingPrompt] = createSignal("")
+  const [pendingPrompt, setPendingPrompt] = createSignal<PendingPrompt | null>(null)
   const [modelName, setModelName] = createSignal(props.hello.model)
   // M3: bumped on every mcp.status.changed, so an open MCP panel re-reads its
   // rows when a supervisor settles a server behind its back.
@@ -190,7 +192,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
   const switchTo = (id: string, state: SessionState) => {
     setSessionId(id)
     setHydrate({ key: id, state })
-    setPendingPrompt("") // a switched session must not auto-send a stale home prompt
+    setPendingPrompt(null) // a switched session must not auto-send a stale home prompt
     setRoute("session")
   }
 
@@ -287,8 +289,11 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
     })
   })
 
-  const startSession = (text: string) => {
-    setPendingPrompt(text)
+  const startSession = (text: string, images: PromptImage[] = []) => {
+    // r18/F13: Home is a second submit entry, so it has to carry the images the
+    // way Session does.  Home's onSubmit used to take one argument, Prompt
+    // passed two, and the second was dropped without a word.
+    setPendingPrompt({ text, images })
     setRoute("session")
   }
 

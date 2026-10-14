@@ -227,6 +227,39 @@ def test_an_image_over_the_budget_is_refused_before_the_bytes_are_read(tmp_path)
     assert DEFAULT_MAX_BYTES == 20 * 1024 * 1024, "the paste budget moved"
 
 
+# ------------------------------------------------------- T5: the mime tables
+
+
+def test_the_paste_whitelist_is_derived_from_the_suffix_table():
+    """r17 kept two hand-written tables that happened to agree.  Add ``.bmp`` to
+    one and the paste whitelist refuses it while ``@file.bmp`` is extracted --
+    and the provider then rejects the whole request (r18/F16)."""
+    from ai_coding.attachments import _allowed_mime
+    from ai_coding.domain.message import IMAGE_MIME_BY_SUFFIX
+
+    assert set(_allowed_mime()) == set(IMAGE_MIME_BY_SUFFIX.values()), (
+        "the paste whitelist and the suffix table have drifted apart"
+    )
+    assert _allowed_mime()["image/jpeg"] == "jpg", "pasted jpegs must keep their name"
+
+
+def test_a_new_suffix_reaches_the_paste_whitelist(monkeypatch):
+    """Derived, not copied: patching the one table has to move the other."""
+    from ai_coding import attachments
+    from ai_coding.domain import message
+
+    monkeypatch.setattr(
+        message,
+        "IMAGE_MIME_BY_SUFFIX",
+        {**message.IMAGE_MIME_BY_SUFFIX, ".bmp": "image/bmp"},
+    )
+
+    derived = attachments._allowed_mime()
+
+    assert derived["image/bmp"] == "bmp", derived
+    assert attachments.IMAGE_MIMES <= set(message.IMAGE_MIME_BY_SUFFIX.values())
+
+
 # ------------------------------------------------------------- T3: htmltext
 
 
