@@ -34,15 +34,10 @@ import pytest
 
 from ai_coding.ai.engine import ChatEngine, EngineError
 from ai_coding.config.models import AIConfig
-from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.context_compression import ContextManager
-from ai_coding.domain.loop import StepResult
 from ai_coding.domain.session import SessionData
 from ai_coding.service.session_service import SessionService
-from ai_coding.tools.registry import ToolRegistry
-from ai_coding.tools.todo_write_tool import TodoWriteTool
-
-from tests.test_agent_loop_react import ScriptedEngine, _loop, _registry, _settings, _text
+from tests.test_agent_loop_react import ScriptedEngine, _loop, _text
 
 
 class _OverflowEngine(ChatEngine):
@@ -217,8 +212,9 @@ async def test_the_real_engine_streaming_first_blocks_the_retry(tmp_path):
     only *then* rejects the request. If the tracker sat anywhere other than on
     the path the engine really uses, this is where it would show.
     """
-    import openai
     from types import SimpleNamespace
+
+    import openai
 
     from ai_coding.ai.openai_engine import OpenAIChatEngine
     from ai_coding.domain.model_config import ModelConfig

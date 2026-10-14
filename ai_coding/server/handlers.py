@@ -412,7 +412,11 @@ def make_handlers(
                         # (r17/T1).  The text rides along so the composer can
                         # get the undone user message back.
                         "reload": state.session is not session or reload_in_place,
-                        "undo": getattr(world.loop, "last_undo", None) if reload_in_place else None,
+                        "undo": (
+                            world.loop.last_undo_for(state.session_id)
+                            if reload_in_place
+                            else None
+                        ),
                         "messagesBefore": history_before,
                         "messagesAfter": len(getattr(session, "messages", ()) or ()),
                         "compacted": (

@@ -75,7 +75,8 @@ async def test_undo_truncates_history_restores_files_and_reports_the_text(tmp_pa
     assert session.messages == [], "history is truncated to before the user message"
     assert (root / "a.txt").read_text(encoding="utf-8") == "v1\n"
     assert report["files"] == ["a.txt"]
-    assert loop.last_undo == report
+    # r18/F5: the staged report is per session, read through its accessor.
+    assert loop.last_undo_for(session.session_id) == report
 
     await loop.redo_last_turn(session)
 

@@ -116,6 +116,10 @@ class SnapshotStore:
             restored.add(rel)
         return sorted(restored)
 
+    async def forget(self, key: str) -> None:
+        """Drop one snapshot -- the redo slot -- without touching anything else."""
+        await git(self._root, "update-ref", "-d", self._ref(key), timeout=self._timeout)
+
     async def prune(self, session_id: str) -> None:
         """Keep only the newest ``keep`` refs of one session."""
         code, out = await git(

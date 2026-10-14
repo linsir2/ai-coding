@@ -61,6 +61,30 @@ async def _ask_topic(console: Any) -> str | None:
     return await asyncio.to_thread(ask, "What should I plan?")
 
 
+#: Why an undo or redo moved nothing, in the words the user gets.  r17 reported
+#: an empty file list, which reads the same as "nothing had changed" (r18/F8).
+_REASON_TEXT = {
+    "a turn is running": "回合进行中，等这一轮结束再试",
+    "nothing to undo": "没有可撤销的回合",
+    "nothing to redo": "没有可恢复的回合",
+    "no-snapshot": "本回合没有可用快照（工作区不是 git 仓库，或捕获失败），文件未还原",
+}
+
+
+def _reason_text(reason: str) -> str:
+    """The sentence for a refusal; unknown reasons keep their own text."""
+    base = reason.split(":", 1)[0]
+    return _REASON_TEXT.get(base, reason or "failed")
+
+
+def _undo_outcome(report: dict[str, Any]) -> str:
+    """The file half of an undo, said plainly either way."""
+    reason = str(report.get("reason") or "")
+    if not reason:
+        return f"还原 {len(report.get('files') or [])} 个文件"
+    return _reason_text(reason)
+
+
 async def handle_input(
     loop: Any,
     text: str,
@@ -150,11 +174,11 @@ async def handle_input(
             return REPLAction.CONTINUE, session
         report = await undo(session)
         if not report.get("ok"):
-            console.info(f"[undo] {report.get('reason', 'failed')}")
+            console.info("[undo] " + _reason_text(report.get("reason", "")))
             return REPLAction.CONTINUE, session
         console.info(
             f"[undo] {report['messages_before']} → {report['messages_after']} 条，"
-            f"还原 {len(report.get('files') or [])} 个文件"
+            + _undo_outcome(report)
         )
         return REPLAction.RELOAD, session
     if cmd.name == "redo":
@@ -164,9 +188,9 @@ async def handle_input(
             return REPLAction.CONTINUE, session
         report = await redo(session)
         if report.get("ok"):
-            console.info("[redo] 已恢复上一回合")
+            console.info(f"[redo] 已恢复上一回合，还原 {len(report.get('files') or [])} 个文件")
             return REPLAction.RELOAD, session
-        console.info(f"[redo] {report.get('reason', 'failed')}")
+        console.info("[redo] " + _reason_text(report.get("reason", "")))
         return REPLAction.CONTINUE, session
     if cmd.name == "memory":
         console.info(_memory_report(loop))

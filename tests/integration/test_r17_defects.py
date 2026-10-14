@@ -356,11 +356,6 @@ async def test_undo_must_work_after_a_nudge_was_injected(tmp_path):
     assert report["text"] == "REAL USER TURN"
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: _undo_tail and the redo ref are never invalidated "
-    "(agent_loop.py:1297-1310)",
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_redo_after_a_new_turn_must_not_duplicate_history(tmp_path):
     """A new turn neither clears the in-memory tail nor the ``<sid>/redo`` ref,
@@ -543,6 +538,125 @@ async def test_the_write_tool_reports_a_workspace_relative_path(tmp_path):
     result = await tool.execute({"path": "./a/../b.txt", "content": "x"})
 
     assert result.success and [a.path for a in result.artifacts] == ["b.txt"]
+
+
+@pytest.mark.asyncio
+async def test_undo_in_one_session_does_not_leak_into_another(tmp_path):
+    """One loop serves every session the TUI switches between; the staged tail
+    must not travel with it."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    first, second = sessions.create(), sessions.create()
+    await loop.process_input(first, "SESSION A SECRET")
+    await loop.process_input(second, "SESSION B")
+
+    await loop.undo_last_turn(second)
+    report = await loop.redo_last_turn(first)
+
+    assert report["ok"] is False, "session A redid session B's staged turn"
+    assert [m.content for m in first.messages if m.role == "user"] == [
+        "SESSION A SECRET"
+    ], "A's own history was disturbed by B's undo"
+
+
+@pytest.mark.asyncio
+async def test_the_undo_report_reaches_the_session_that_asked(tmp_path):
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    first, second = sessions.create(), sessions.create()
+    await loop.process_input(first, "A 的回合")
+
+    await loop.undo_last_turn(first)
+
+    assert loop.last_undo_for(first.session_id) is not None
+    assert loop.last_undo_for(second.session_id) is None, (
+        "A's report is addressable from another session"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_redo_ref_does_not_survive_a_new_turn(tmp_path):
+    """OC: sending a new prompt while a revert is staged commits the revert."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+    await loop.process_input(session, "TURN ONE")
+    await loop.undo_last_turn(session)
+    assert await loop.snapshots.exists(f"{session.session_id}/redo")
+
+    await loop.process_input(session, "TURN TWO")
+
+    assert not await loop.snapshots.exists(f"{session.session_id}/redo"), (
+        "the redo snapshot outlived the turn that should have committed it"
+    )
+
+
+@pytest.mark.asyncio
+async def test_undo_says_why_no_file_was_restored(tmp_path):
+    """The contract said "明说"; r17 reported an empty file list, which reads
+    the same as "nothing had changed"."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    loop, sessions = _loop(tmp_path, plain)
+    session = sessions.create()
+    await loop.process_input(session, "no git here")
+
+    report = await loop.undo_last_turn(session)
+
+    assert report["ok"] is True, "the conversation half still unrolls without git"
+    assert report["reason"] == "no-snapshot", report
+    assert report["files"] == [], "no file moved, and the report must say so"
+
+
+@pytest.mark.asyncio
+async def test_undo_while_a_turn_is_running_is_refused(tmp_path):
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+    await loop.process_input(session, "TURN")
+    await loop._turn_lock.acquire()
+    try:
+        report = await loop.undo_last_turn(session)
+    finally:
+        loop._turn_lock.release()
+
+    assert report == {"ok": False, "reason": "a turn is running"}
+    assert [m.content for m in session.messages if m.role == "user"] == ["TURN"], (
+        "undo rewrote the history while a turn was still running"
+    )
+
+
+@pytest.mark.asyncio
+async def test_redo_does_not_claim_success_when_restore_failed(tmp_path):
+    """r17 swallowed restore failures and printed "已恢复上一回合" regardless."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+    await loop.process_input(session, "TURN")
+
+    async def _boom(*args, **kwargs):
+        raise OSError("git exploded")
+
+    loop.snapshots.restore = _boom
+    await loop.undo_last_turn(session)
+    report = await loop.redo_last_turn(session)
+
+    assert report["ok"] is False or report.get("restored") is not None, report
+
+
+@pytest.mark.asyncio
+async def test_capture_returns_none_when_the_ref_write_fails(tmp_path):
+    """r17/F6 was a two-part failure: the baseline ref was best-effort while the
+    undo ref was not, so a partial capture looked like a good one and the undo
+    went on to delete things.  The baseline is gone; this pins that the one
+    remaining ref is all-or-nothing -- no ref, no snapshot."""
+    root = _repo(tmp_path)
+    # an invalid ref name makes update-ref fail, which is the shape of the
+    # failure being pinned (disk full, ref locked, permissions)
+    store = SnapshotStore(root, base_ref="refs/ai-coding/undo/bad..name")
+
+    assert await store.capture("s/1") is None
+    assert await store.exists("s/1") is False
 
 
 # ------------------------------------------------------------- T4: mentions

@@ -636,28 +636,192 @@ write/edit ──► ToolResult.artifacts ──► TurnCloser.artifacts ──�
 5. 老的 session 文件（tool 消息无 `artifacts` 键）→ 读回 `()` → undo 只还原 tracked、不删任何东西 → **向后兼容，且方向是保守的**。
 6. 模型写了 `.ai-coding/` 里的东西？write/edit 的 `Sandbox.resolve` 允许 workspace 内任意路径 → artifact path 会指向它 → undo 会删掉自己刚写的附件。**这是可接受的**（它确实是本轮产生的），但值得在文档写一句。
 
-## 6. F5 — redo 失效 + 跨会话隔离
+## 6. F5–F8 — undo 链收尾：redo 失效 / 跨会话隔离 / 忙时拒绝 / 告知原因
 
-### 影响面
-| 文件 | 改动 |
-|---|---|
-| `core/agent_loop.py:229` | `_undo_tail: list` → `dict[str, list[ChatMessage]]`（按 session_id） |
-| `core/agent_loop.py:226` | `last_undo: dict` → `dict[str, dict]`（按 session_id） |
-| `core/agent_loop.py:1297` `_capture_snapshot` | 开头 `_undo_tail.pop(session_id, None)` + 删 `<sid>/redo` 两个 ref |
-| `core/server/handlers.py:415` | `loop.last_undo.get(session.id)` |
-| `core/snapshots.py` | 新增 `forget(key)`（删 undo+baseline ref 两条命名空间的同一 key） |
+> 这四条都在 undo 这条链上，共用同一批代码，一起做。
 
-### 为什么在 `_capture_snapshot` 里清
-OC 文档：*"Sending a new prompt while an undo is staged **commits the revert**"*。而 `_capture_snapshot` 是 `_run_turn` 的第一行，正好是"新回合开始"的唯一钩子——不需要新状态机。
+### 6.0 先说两个核实结果（其中一条已不用做）
 
-### RIPR 用例
-- **Red**：绊线 `test_redo_after_a_new_turn_must_not_duplicate_history` 去 xfail。
-- **Red（新增）**：`test_undo_in_session_a_does_not_leak_into_session_b`——A undo → B redo 报 `nothing to redo`（当前会把 A 的尾巴塞进 B）。
-- **Red（新增）**：`test_last_undo_is_scoped_to_the_session_that_asked`。
+**F6 已经完成**——F4 重写 `capture` 时删掉了基线，它现在天然是 all-or-nothing：
+```python
+if (await git(self._root, "update-ref", ref, sha, timeout=...))[0] != 0:
+    return None          # ← 写不成就等于没有快照，调用方不会去还原
+```
+> r17 的 F6 是「基线 ref 写失败仍返回 undo ref」的复合故障，基线删除后该分支不存在了。
+**所以 F6 不再改代码，只补一条测试把这条不变量钉住**（否则将来有人"顺手"改成吞掉错误，会静默退化）。
 
----
+**跨会话泄漏是真的**，不是推测：
+- `world.py:135` 只造**一个** loop；TUI 切 session 复用它。
+- `_undo_tail`（`agent_loop.py:229`）是单槽 list，`redo_last_turn` 不检查属于哪个会话。
+- `handlers.py:415` 把 `loop.last_undo` 直接发给**刚执行命令的那个 client**。
 
-## 7. F6+F7+F8 — 快照基线 all-or-nothing / 回合锁 / 告知字段
+实测（缺陷绊线已复现）：
+```
+undo(A) → undo(B) → _undo_tail 里是 B
+redo(A) → session A 的历史被塞进 ['B SECRET MESSAGE', 'B reply']
+```
+
+### 6.1 F5 病灶与两个设计岔路
+
+**病灶一：新回合不使 redo 失效**。`_undo_tail` 与 git 侧的 `<sid>/redo` ref 都没有在新回合开始时被清。于是：
+```
+undo → 发新消息 → redo
+  → 历史变成 ['TURN TWO', 'TURN TWO 的回答', 'TURN ONE', 'TURN ONE 的回答']（重复）
+  → 工作区被回滚到「TURN ONE 当时」的状态（TURN TWO 的改动消失）
+  → 报告 ok: True
+```
+OC 的规则是 *"Sending a new prompt while an undo is staged **commits the revert**"*。我们不需要新状态机：**`_capture_snapshot` 是 `_run_turn` 的第一行**，正好是"新回合开始"的唯一钩子。
+
+**病灶二：状态是 loop 级而非 session 级**（上面的实测）。
+
+**岔路：undo 连续按两次的语义**。现状是单槽——第二次 undo 覆盖第一次，所以只能 redo 最后一次。OC 是「合并成一个更宽的暂存回退」。
+
+### 6.2 影响面
+
+| 文件 | 现状 | 改动 |
+|---|---|---|
+| `core/agent_loop.py:226` | `last_undo: dict \| None` | 改为按 session_id 取（见下方决策） |
+| `core/agent_loop.py:229` | `_undo_tail: list` | 同上 |
+| `core/agent_loop.py:1297` `_capture_snapshot` | 只 capture + prune | **开头**作废本会话的 redo |
+| `core/agent_loop.py:1357/1369` | 写单槽 | 按 session 写 |
+| `core/agent_loop.py:1380-1392` `redo_last_turn` | 不看 session | 取本会话的；没有则 `nothing to redo` |
+| `core/agent_loop.py:1312/1378` | 无锁 | 加忙时判定（见下方决策） |
+| `core/snapshots.py` | 无 `forget` | 新增 `forget(key)`：删 `<sid>/redo` 一条 ref（capture 的旧 ref 由 prune 管） |
+| `server/handlers.py:415` | `getattr(world.loop, "last_undo", None)` | 改按 `state.session_id` 取 |
+| `app/commands.py:150-170` | 固定文案 | 按 `reason` 打印（见 F8） |
+
+### 6.3 复用的契约（不造轮子）
+
+| 复用 | 位置 | 用法 |
+|---|---|---|
+| `_capture_snapshot` | `agent_loop.py:1297` | 已是"新回合唯一钩子"，不新增生命周期状态 |
+| `_turn_lock` | `agent_loop.py:279` | `process_input` 已用它串行化回合；undo 只需读它的 `locked()` |
+| `SnapshotStore.prune` 的 ref 删除形状 | `snapshots.py` | `forget` 与它同一形状（`update-ref -d`），不新造删除机制 |
+| `handlers.py:415` 的 `reload_in_place` 判定 | 既有 | undo/redo 载荷本来就只在该分支发 |
+
+### 6.4 每文件每步
+
+**Step 1 — `_capture_snapshot` 开头作废 redo**
+```python
+async def _capture_snapshot(self, session):
+    self._forget_redo(session)          # ← 新回合作废上一次的暂存回退（OC 同规则）
+    if self.snapshots is None: return
+    ...（原有 capture / prune）
+```
+`_forget_redo` 丢弃内存尾巴 + `await snapshots.forget(f"{sid}/redo")`（best effort）。
+
+**Step 2 — 状态按会话隔离**
+```python
+self.last_undo: dict[str, dict[str, Any]] = {}      # session_id -> report
+self._undo_tail: dict[str, list[ChatMessage]] = {}   # session_id -> 尾巴
+```
+对外读取加一个具名方法，handlers 不再直接摸属性（避免第二个读者各自 `.get`）：
+```python
+def last_undo_for(self, session_id: str) -> dict[str, Any] | None:
+    return self.last_undo.get(session_id)
+```
+
+**Step 3 — `redo_last_turn` 只认本会话**
+
+**Step 4 — 忙时判定**（undo 与 redo 各自入口第一行）
+```python
+if self._turn_lock.locked():
+    return {"ok": False, "reason": "a turn is running"}
+```
+
+**Step 5 — `SnapshotStore.forget`**
+```python
+async def forget(self, key: str) -> None:
+    """Drop one snapshot ref (the redo slot). Best effort."""
+    await git(self._root, "update-ref", "-d", self._ref(key), timeout=self._timeout)
+```
+
+**Step 6 — `reason` 字段与文案**
+
+`undo_last_turn` 的报告增加 `reason`：
+| reason | 何时 | TUI 文案 |
+|---|---|---|
+| 不出现（ok） | 文件已还原 | `[undo] 6 → 4 条，还原 2 个文件` |
+| `not-a-repo` | 工作区不是 git 仓库 | `[undo] 回退 6 → 4 条；该工作区不是 git 仓库，文件未还原` |
+| `no-snapshot` | 捕获时没拿到 ref（`exists()` 落空） | `[undo] 回退 6 → 4 条；本回合没有可用快照，文件未还原` |
+| `restore-failed` | `restore` 抛错 | `[undo] 回退 6 → 4 条；快照还原失败（…），文件可能仍是改动后的状态` |
+| `nothing to undo` | 历史里没有真人消息 | 现有文案不变 |
+| `nothing to redo` / `a turn is running` | — | 现有文案 |
+
+`/redo` 的文案改为**依赖 restore 是否真的跑了**，而不是无条件「已恢复上一回合」（现状会撒谎：`redo` 把 restore 异常吞成 `pass`）。
+
+### 6.5 数据流影响
+
+```
+新回合 ──► _capture_snapshot ──► _forget_redo（内存尾巴 + git redo ref）✦新增
+                                    ↓
+undo(A) ──► _undo_tail[A] = 尾巴          （不再共用一个槽）
+undo(B) ──► _undo_tail[B] = 尾巴
+redo(A) ──► 只读 _undo_tail[A]  ✦隔离      （改前会把 B 的尾巴塞进 A）
+handlers ─► loop.last_undo_for(state.session_id)  ✦按会话取
+commands ─► 按 report['reason'] 选文案       ✦
+```
+
+### 6.6 完成后效果
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| undo → 发新消息 → redo | 历史重复 + 工作区回滚到旧状态，报 ok | redo 报 `nothing to redo`（新回合已提交回退） |
+| A、B 会话交替 undo/redo | B 的历史被塞进 A | 互不干扰 |
+| 非 git 工作区 undo | 「还原 0 个文件」（与"没变化"无法区分） | 明说「不是 git 仓库，文件未还原」 |
+| 回合进行中 `/undo` | 与运行中的回合同时改 messages（竞态） | 按决策：等待或明说「回合进行中」 |
+| `/redo` 但 restore 失败 | 谎报「已恢复上一回合」 | 按 reason 说清 |
+
+### 6.7 你已拍板的两处
+
+| 决策 | 结论 | 实现要点 |
+|---|---|---|
+| undo/redo 暂存状态 | **按会话分槽** | `_undo_tail: dict[str, list[ChatMessage]]`、`last_undo: dict[str, dict[str, Any]]`，键为 `session_id`；`redo_last_turn` 只取本会话；条目在 redo 或该会话新回合时 pop（见 Step 1/3），不无限增长 |
+| 回合进行中敲 undo/redo | **直接拒绝并明说** | `if self._turn_lock.locked(): return {"ok": False, "reason": "a turn is running"}`——非阻塞检查后再 acquire（asyncio 的 `Lock.acquire` 在未锁时不会挂起，中间没有让出点，检查+加锁实际是原子的）。对齐 OC `assertNotBusy` |
+
+### 6.8 RIPR 用例
+
+- **Red（摘 1 条既有绊线）**：`test_redo_after_a_new_turn_must_not_duplicate_history`
+- **Red（新增 6 条）**
+  1. `test_undo_in_one_session_does_not_leak_into_another`：A undo → B redo → `nothing to redo`，且 A 的历史为空
+  2. `test_the_undo_report_reaches_the_session_that_asked`：`last_undo` 取值按 session_id，A 的报告不会发给 B
+  3. `test_redo_ref_does_not_survive_a_new_turn`：新回合后 `snapshots.exists(f"{sid}/redo")` 为 False
+  4. `test_undo_says_why_no_file_was_restored`：非 git 仓 → `reason == "not-a-repo"`，且文案含「未还原」
+  5. `test_redo_does_not_claim_success_when_restore_failed`：restore 抛错 → report 里带失败原因，命令文案不含「已恢复」
+  6. `test_capture_returns_none_when_the_ref_write_fails`：锁住 6.0 的 F6 不变量
+- **Pass**：`tests/test_undo_command.py`、`tests/test_snapshots.py` 保持绿
+- **Refactor**：`forget()` 与 `prune()` 的 ref 删除形状各测一次
+
+### 6.9 架构图（F5–F8 后）
+
+```
+                        新回合开始
+                            │
+                 _capture_snapshot ──► _forget_redo(session)
+                            │            ├ 内存尾巴 pop
+                    capture(sid/N)        └ update-ref -d refs/ai-coding/undo/<sid>/redo
+                            │
+  /undo ──► [忙? 按决策] ──► 定位最后一条真人消息
+            │                  key = turn_count
+            │                  created = 该回合 artifacts
+            ├───────────────► _undo_tail[sid] = 尾巴 ; last_undo[sid] = report(含 reason)
+            └───────────────► restore(key, created)
+  /redo ──► [忙?] ──► _undo_tail.get(sid)? ──无─► "nothing to redo"
+                          └─有─► restore(redo ref) → 尾巴写回 → pop
+                                    │
+ handlers ──► last_undo_for(state.session_id)   （不再全局单槽）
+ commands ─► report['reason'] → 对应人话
+```
+
+### 6.10 最终形态自检
+
+1. undo → 发新消息 → `/redo` → TUI 说「已无可恢复」；工作区保持新回合的结果。
+2. A 会话 undo → 切到 B 会话 redo → B 说「nothing to redo」；A 的历史仍是撤销后的样子。
+3. 在非 git 目录 undo → 历史回退，composer 回填原话，并明说「该工作区不是 git 仓库，文件未还原」。
+4. 回合跑到一半敲 `/undo` → 按决策：等待，或立刻明说「回合进行中」（不会出现两个协程同时改 messages）。
+5. 老 session（没有 artifacts、没有 synthetic）→ 全部走保守分支 → 不崩、不误删。
+
+## 7. （原 F6+F7+F8 已并入 §6）
 
 | 编号 | 文件 | 改动 | 用例（Red） |
 |---|---|---|---|
@@ -795,10 +959,10 @@ OC 文档：*"Sending a new prompt while an undo is staged **commits the revert*
 ### undo 正确性
 - [x] **F3** `synthetic` 标记（4 处注入点 + 落盘）+ 回合键改 `turn_count` + undo 回退 `turn_count` 并裁 digest
 - [x] **F4** `ToolArtifact` 接线：write/edit 产出 → 落盘 → `restore(created=…)`，删掉基线推断
-- [ ] **F5** 新回合作废 redo + `_undo_tail`/`last_undo` 按 session 隔离
-- [ ] **F6** `capture` all-or-nothing（写失败即回滚并返回 None）
-- [ ] **F7** undo/redo 走 `_turn_lock`
-- [ ] **F8** `report.reason` + `commands.py` 按 reason 打印
+- [x] **F5** 新回合作废 redo + `_undo_tail`/`last_undo` 按 session 隔离
+- [x] **F6** `capture` all-or-nothing（写失败即回滚并返回 None）
+- [x] **F7** undo/redo 走 `_turn_lock`
+- [x] **F8** `report.reason` + `commands.py` 按 reason 打印
 
 ### 工具正确性
 - [ ] **F9** grep runner 失败不再报 `(no matches)`；兜底 `to_thread`

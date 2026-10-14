@@ -36,9 +36,9 @@ from ai_coding.ai.llm_helpers import (
 )
 from ai_coding.config.models import AIConfig
 from ai_coding.core.context_compression import (
-    snip_middle,
     CHECKPOINT_MARK,
     ContextManager,
+    snip_middle,
     split_checkpoint,
 )
 from ai_coding.domain.message import ChatMessage

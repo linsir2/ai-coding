@@ -14,15 +14,14 @@ round trip.
 
 import asyncio
 
-from ai_coding.core.turn_books import TurnBooks
-from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
 from ai_coding.core.request_assembly import RequestAssembler
 from ai_coding.core.sop_router import SOPRouter
+from ai_coding.core.turn_books import TurnBooks
+from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
-from ai_coding.skills.registry import Skill, SkillRegistry, resolve_mentions
-from ai_coding.skills.registry import SkillTriggers
+from ai_coding.skills.registry import SkillRegistry, resolve_mentions
 
 
 def _write_skill(root, name, *, alias=None, status=None):
@@ -31,7 +30,7 @@ def _write_skill(root, name, *, alias=None, status=None):
     if status:
         lines.append(f"status: {status}")
     (root / name / "SKILL.md").write_text(
-        f"---\n" + "\n".join(lines) + f"\n---\n{name} 的正文\n", encoding="utf-8"
+        "---\n" + "\n".join(lines) + f"\n---\n{name} 的正文\n", encoding="utf-8"
     )
 
 

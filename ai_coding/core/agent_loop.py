@@ -221,12 +221,15 @@ class AgentLoop:
         # ``None`` (every sub-agent, and every caller that did not wire one)
         # means undo has no files to restore — the history half still works.
         self.snapshots = snapshots
-        # What the last ``undo_last_turn`` reported, for the IPC layer to hand
-        # the client with its reload (the composer gets the text back).
-        self.last_undo: dict[str, Any] | None = None
-        # The messages undo removed, held for /redo.  In-process only: a restart
-        # loses redo, which is the honest cost of not writing it to the session.
-        self._undo_tail: list[ChatMessage] = []
+        # r18/F5: one loop serves every session the TUI switches between, so
+        # the staged undo state is keyed by session rather than held in one
+        # slot -- otherwise /redo in one session replays another's turn.
+        # Read it through ``last_undo_for`` rather than reaching in here.
+        self.last_undo: dict[str, dict[str, Any]] = {}
+        # The messages undo removed, held for /redo, per session.  In-process
+        # only: a restart loses redo, which is the honest cost of not writing it
+        # to the session file.
+        self._undo_tail: dict[str, list[ChatMessage]] = {}
         self.settings = settings or AIConfig()
         # The model table lives on ``AppConfig``, not on ``AIConfig``: it is a
         # catalogue of connections, not a behaviour knob, and ``AIConfig`` is
@@ -1299,6 +1302,25 @@ class AgentLoop:
         """
         return load_image(self.workspace, ref)
 
+    def last_undo_for(self, session_id: str) -> dict[str, Any] | None:
+        """What ``/undo`` last reported *for this session*, for the IPC layer."""
+        return self.last_undo.get(session_id)
+
+    async def _forget_redo(self, session: SessionData) -> None:
+        """Commit a staged revert: a new turn ends the one before it.
+
+        OpenCode's rule (docs/snapshots): "Sending a new prompt while an undo is
+        staged commits the revert."  Without it, /redo after a fresh turn replays
+        a stale tail on top of live history and rolls the worktree back under it.
+        """
+        self._undo_tail.pop(session.session_id, None)
+        self.last_undo.pop(session.session_id, None)
+        if self.snapshots is not None:
+            try:
+                await self.snapshots.forget(f"{session.session_id}/redo")
+            except (OSError, TimeoutError, ValueError):
+                pass  # best effort: a stale ref costs one undo target, not a turn
+
     async def _capture_snapshot(self, session: SessionData) -> None:
         """Pin the pre-turn workspace state under refs/ai-coding/undo.
 
@@ -1310,6 +1332,7 @@ class AgentLoop:
         Best effort by design: undo is a safety net, not a turn prerequisite, so
         a missing git (or a git that overran its timeout) must not fail the turn.
         """
+        await self._forget_redo(session)
         if self.snapshots is None:
             return
         try:
@@ -1321,10 +1344,16 @@ class AgentLoop:
     async def undo_last_turn(self, session: SessionData) -> dict[str, Any]:
         """Roll the last user turn back: files to the snapshot, history to before it.
 
-        The text is handed back so the client can put it in the composer (the
-        ``/undo`` gesture the old TUI had).  ``redo_last_turn`` is the inverse,
-        held in process memory — restarting after an undo loses redo.
+        Refused while a turn is running rather than queued behind it: the client
+        gets an answer either way, and OpenCode makes the same call
+        (``assertNotBusy``).  The text is handed back so the client can put it in
+        the composer.  ``redo_last_turn`` is the inverse, held in process memory.
+
+        ``reason`` says why no file moved — "nothing changed" and "this is not a
+        git repository" must not look alike to the user (the r17 defect).
         """
+        if self._turn_lock.locked():
+            return {"ok": False, "reason": "a turn is running"}
         index = next(
             (
                 i
@@ -1344,6 +1373,10 @@ class AgentLoop:
             for message in session.messages[index:]
             for artifact in message.artifacts
         }
+        # One reason for both ways a snapshot can be absent -- not a git
+        # repository, or the ref write failed.  capture() cannot tell them apart
+        # and inventing a distinction the code cannot support would be a lie.
+        reason = "no-snapshot" if self.snapshots is None else ""
         restored: list[str] = []
         if self.snapshots is not None:
             key = self._turn_key(session, max(0, session.turn_count - 1))
@@ -1352,9 +1385,12 @@ class AgentLoop:
                     # remember the state we are about to leave, so /redo can return to it
                     await self.snapshots.capture(f"{session.session_id}/redo")
                     restored = await self.snapshots.restore(key, created=created)
-            except (OSError, TimeoutError, ValueError):
+                else:
+                    reason = "no-snapshot"
+            except (OSError, TimeoutError, ValueError) as exc:
                 restored = []
-        self._undo_tail = list(session.messages[index:])
+                reason = f"restore-failed: {exc}"
+        self._undo_tail[session.session_id] = list(session.messages[index:])
         session.messages = list(session.messages[:index])
         # Taking the turn back includes the state that turn produced: the counter
         # (so the next message is this turn again, not the next one) and its
@@ -1366,31 +1402,47 @@ class AgentLoop:
             digest for digest in session.turn_digests if digest.turn <= session.turn_count
         ]
         self.closer.save(session)
-        self.last_undo = {
+        report = {
             "ok": True,
             "text": text,
             "files": restored,
-            "messages_before": index + len(self._undo_tail),
+            "reason": reason,
+            "messages_before": index + len(self._undo_tail[session.session_id]),
             "messages_after": index,
         }
-        return self.last_undo
+        self.last_undo[session.session_id] = report
+        return report
 
     async def redo_last_turn(self, session: SessionData) -> dict[str, Any]:
         """Put back the turn ``undo_last_turn`` removed (files and history)."""
-        if not self._undo_tail:
+        if self._turn_lock.locked():
+            return {"ok": False, "reason": "a turn is running"}
+        tail = self._undo_tail.get(session.session_id)
+        if not tail:
             return {"ok": False, "reason": "nothing to redo"}
+        reason = ""
+        restored: list[str] = []
         if self.snapshots is not None:
             try:
                 key = f"{session.session_id}/redo"
                 if await self.snapshots.exists(key):
-                    await self.snapshots.restore(key)
-            except (OSError, TimeoutError, ValueError):
-                pass
-        session.messages = list(session.messages) + self._undo_tail
-        self._undo_tail = []
+                    restored = await self.snapshots.restore(key)
+                else:
+                    reason = "no-snapshot"
+            except (OSError, TimeoutError, ValueError) as exc:
+                # r17 reported success here whatever happened, so the TUI said
+                # "restored" for a restore that never ran.
+                reason = f"restore-failed: {exc}"
+        session.messages = list(session.messages) + tail
+        self._undo_tail.pop(session.session_id, None)
+        self.last_undo.pop(session.session_id, None)
         self.closer.save(session)
-        self.last_undo = None
-        return {"ok": True, "messages": len(session.messages)}
+        return {
+            "ok": not reason,
+            "reason": reason,
+            "files": restored,
+            "messages": len(session.messages),
+        }
 
     # ---- request assembly -------------------------------------------------
 
