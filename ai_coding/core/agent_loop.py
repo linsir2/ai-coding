@@ -1337,6 +1337,13 @@ class AgentLoop:
         if index is None:
             return {"ok": False, "reason": "nothing to undo"}
         text = session.messages[index].content or ""
+        # What this turn wrote, as its tools reported it -- read before the
+        # truncation below takes the messages away (r18/F4).
+        created = {
+            artifact.path
+            for message in session.messages[index:]
+            for artifact in message.artifacts
+        }
         restored: list[str] = []
         if self.snapshots is not None:
             key = self._turn_key(session, max(0, session.turn_count - 1))
@@ -1344,7 +1351,7 @@ class AgentLoop:
                 if await self.snapshots.exists(key):
                     # remember the state we are about to leave, so /redo can return to it
                     await self.snapshots.capture(f"{session.session_id}/redo")
-                    restored = await self.snapshots.restore(key)
+                    restored = await self.snapshots.restore(key, created=created)
             except (OSError, TimeoutError, ValueError):
                 restored = []
         self._undo_tail = list(session.messages[index:])

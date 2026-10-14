@@ -53,7 +53,9 @@ async def test_capture_then_restore_brings_back_the_pre_turn_content(tmp_path):
     (root / "a.txt").write_text("broken\n", encoding="utf-8")
     (root / "new.txt").write_text("new\n", encoding="utf-8")
 
-    restored = await store.restore("s/1")
+    # r18/F4: the turn tells us it created new.txt; the tracked edit needs no
+    # such hint -- git already knows a.txt changed since the snapshot.
+    restored = await store.restore("s/1", created={"new.txt"})
 
     assert (root / "a.txt").read_text(encoding="utf-8") == "v1\n"
     assert not (root / "new.txt").exists(), "a file the snapshot never knew is removed"
@@ -96,9 +98,13 @@ async def test_prune_keeps_the_newest_refs_only(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_file_that_was_already_untracked_survives(tmp_path):
-    """The untracked baseline: a user file the snapshot never tracked must not
-    be swept away as if the turn had created it."""
+async def test_only_the_files_the_turn_reported_are_deleted(tmp_path):
+    """r18/F4 replaced the untracked baseline with the turn's own report.
+
+    A file the human created -- before the turn or while it ran -- is not in that
+    report, so it stays.  This is the rule that a baseline could not express:
+    "untracked now" is the same for a file the model wrote and one the user did.
+    """
     root = _repo(tmp_path)
     (root / "user-draft.txt").write_text("mine\n", encoding="utf-8")  # untracked before the turn
     store = SnapshotStore(root)
@@ -106,9 +112,13 @@ async def test_a_file_that_was_already_untracked_survives(tmp_path):
     await store.capture("s/1")
     (root / "a.txt").write_text("broken\n", encoding="utf-8")
     (root / "created.txt").write_text("agent\n", encoding="utf-8")
+    (root / "typed-mid-turn.txt").write_text("mine too\n", encoding="utf-8")
 
-    restored = await store.restore("s/1")
+    restored = await store.restore("s/1", created={"created.txt"})
 
     assert (root / "user-draft.txt").exists(), "the user's own untracked file is untouched"
-    assert not (root / "created.txt").exists()
+    assert (root / "typed-mid-turn.txt").exists(), (
+        "restore deleted a file the turn never reported writing"
+    )
+    assert not (root / "created.txt").exists(), "the file the turn did report is gone"
     assert sorted(restored) == ["a.txt", "created.txt"]

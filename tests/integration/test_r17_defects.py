@@ -18,10 +18,13 @@ from pathlib import Path
 
 import pytest
 
+from ai_coding.ai.engine import ChatEngine
 from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.snapshots import SnapshotStore
 from ai_coding.domain.message import ChatMessage, ImageRef
 from ai_coding.domain.run import user_message
+from ai_coding.security.file_state_tracker import FileStateTracker
+from ai_coding.security.permission_gate import PermissionGate
 from ai_coding.security.sandbox import Sandbox
 from ai_coding.service.session_service import SessionService
 from ai_coding.tools.grep_tool import GrepTool
@@ -29,6 +32,7 @@ from ai_coding.tools.htmltext import html_to_text
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.webfetch_tool import FetchRefused, WebfetchTool, _is_public_url
 from ai_coding.tools.websearch_tool import WebsearchTool
+from ai_coding.tools.write_tool import WriteTool
 
 # --------------------------------------------------------------- T3: SSRF
 
@@ -377,11 +381,6 @@ async def test_redo_after_a_new_turn_must_not_duplicate_history(tmp_path):
     assert (root / "a.txt").read_text(encoding="utf-8") == "AFTER TURN TWO\n"
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: the baseline cannot tell turn-created from user-created "
-    "(snapshots.py:134-147)",
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_undo_must_not_delete_a_file_the_user_created(tmp_path):
     """The baseline is 'untracked at capture time'; it has no notion of who wrote
@@ -399,31 +398,22 @@ async def test_undo_must_not_delete_a_file_the_user_created(tmp_path):
     assert (root / "draft.txt").exists(), "undo deleted a file the user created"
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: an absent baseline reads as an empty one "
-    "(snapshots.py:87-95,111-115)",
-    strict=False,
-)
 @pytest.mark.asyncio
-async def test_a_missing_baseline_must_not_delete_every_untracked_file(tmp_path):
-    """``capture`` returns the undo ref even when the baseline ref write fails,
-    and ``_baseline_paths`` cannot tell 'absent' from 'empty' -- so the deletion
-    pass treats every untracked file as turn-created."""
+async def test_restore_without_a_report_deletes_nothing(tmp_path):
+    """The r17 defect was that restore *inferred* what the turn created, so a
+    missing baseline made it delete every untracked file in the workspace.  With
+    no report there is nothing to delete, by construction."""
     root = _repo(tmp_path)
     (root / "old_notes.md").write_text("mine for months\n", encoding="utf-8")
     store = SnapshotStore(root)
     await store.capture("s/1")
-    subprocess.run(
-        ["git", "update-ref", "-d", "refs/ai-coding/untracked/s/1"],
-        cwd=root,
-        capture_output=True,
-        check=False,
-    )
     (root / "created.md").write_text("agent\n", encoding="utf-8")
 
-    await store.restore("s/1")
+    restored = await store.restore("s/1")
 
     assert (root / "old_notes.md").exists(), "restore wiped a pre-snapshot file"
+    assert (root / "created.md").exists(), "restore deleted a file nobody reported"
+    assert "old_notes.md" not in restored and "created.md" not in restored
 
 
 @pytest.mark.asyncio
@@ -439,6 +429,120 @@ async def test_undo_must_rewind_the_session_turn_counter(tmp_path):
     await loop.undo_last_turn(session)
 
     assert session.turn_count < after_turn
+
+
+@pytest.mark.asyncio
+async def test_undo_deletes_the_file_the_turn_created(tmp_path):
+    """The capability itself must survive the safety fix: a file the turn's own
+    write tool created is still removed."""
+    from ai_coding.domain.loop import StepResult
+    from ai_coding.domain.message import ToolCallRef
+
+    root = _repo(tmp_path)
+    from ai_coding.security.sandbox import Sandbox
+
+    class _WriterEngine(ChatEngine):
+        def __init__(self):
+            self.served = False
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None, **kw):
+            if not self.served:
+                self.served = True
+                return StepResult(tool_calls=[ToolCallRef(
+                    id="c1", name="write",
+                    arguments=json.dumps({"path": "created.txt", "content": "agent\n"}))])
+            return StepResult(text="写好了")
+
+    sessions = SessionService(tmp_path / "sessions")
+    tools = ToolRegistry()
+    tools.register(WriteTool(Sandbox(root), FileStateTracker()))
+    loop = AgentLoop(
+        _WriterEngine(), sessions, tools, workspace=str(root), snapshots=SnapshotStore(root),
+        gate=PermissionGate(allowed_tools=("write",)),
+    )
+    session = sessions.create()
+
+    await loop.process_input(session, "建个文件")
+    assert (root / "created.txt").exists(), "the write tool did not run"
+
+    await loop.undo_last_turn(session)
+
+    assert not (root / "created.txt").exists(), "the turn's own file was not removed"
+
+
+@pytest.mark.asyncio
+async def test_a_file_the_human_typed_during_the_turn_is_left_alone(tmp_path):
+    """The same turn, same moment: a file the *human* created mid-turn stays."""
+    from ai_coding.domain.loop import StepResult
+    from ai_coding.domain.message import ToolCallRef
+    from ai_coding.security.sandbox import Sandbox
+
+    root = _repo(tmp_path)
+
+    class _WriterEngine(ChatEngine):
+        def __init__(self):
+            self.served = False
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None, **kw):
+            if not self.served:
+                self.served = True
+                return StepResult(tool_calls=[ToolCallRef(
+                    id="c1", name="write",
+                    arguments=json.dumps({"path": "agent.txt", "content": "agent\n"}))])
+            return StepResult(text="写好了")
+
+    sessions = SessionService(tmp_path / "sessions")
+    tools = ToolRegistry()
+    tools.register(WriteTool(Sandbox(root), FileStateTracker()))
+    loop = AgentLoop(
+        _WriterEngine(), sessions, tools, workspace=str(root), snapshots=SnapshotStore(root),
+        gate=PermissionGate(allowed_tools=("write",)),
+    )
+    session = sessions.create()
+
+    await loop.process_input(session, "建个文件")
+    (root / "typed-mid-turn.txt").write_text("mine\n", encoding="utf-8")
+
+    await loop.undo_last_turn(session)
+
+    assert (root / "typed-mid-turn.txt").exists(), "undo deleted the human's own file"
+    assert not (root / "agent.txt").exists(), "the agent's file should still go"
+
+
+@pytest.mark.asyncio
+async def test_artifacts_survive_a_restart(tmp_path):
+    """A safety net that stops working after a restart is not a safety net."""
+    from ai_coding.domain.message import ToolArtifact
+
+    loop, sessions = _loop(tmp_path, _repo(tmp_path))
+    session = sessions.create()
+    session.add_message(
+        ChatMessage(role="tool", content="<tool_output/>", timestamp="t",
+                    tool_call_id="c1", tool_name="write",
+                    artifacts=(ToolArtifact(path="created.txt", kind="file"),))
+    )
+    sessions.save(session)
+
+    reloaded = sessions.load(session.session_id)
+    tool_msg = [m for m in reloaded.messages if m.role == "tool"][0]
+
+    assert [a.path for a in tool_msg.artifacts] == ["created.txt"], (
+        "the report of what the turn wrote did not survive the restart"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_write_tool_reports_a_workspace_relative_path(tmp_path):
+    """Not the model's spelling: ``./a/../a.txt`` must not become the key undo
+    compares against the filesystem with."""
+    from ai_coding.security.sandbox import Sandbox
+
+    (tmp_path / "a").mkdir()
+    tool = WriteTool(Sandbox(tmp_path), FileStateTracker())
+
+    result = await tool.execute({"path": "./a/../b.txt", "content": "x"})
+
+    assert result.success and [a.path for a in result.artifacts] == ["b.txt"]
 
 
 # ------------------------------------------------------------- T4: mentions

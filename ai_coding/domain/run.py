@@ -86,6 +86,7 @@ def tool_message(out: ToolOutput, timestamp: str) -> ChatMessage:
         timestamp=timestamp,
         tool_call_id=out.call_id,
         tool_name=out.tool_name,
+        artifacts=out.artifacts,
     )
 
 

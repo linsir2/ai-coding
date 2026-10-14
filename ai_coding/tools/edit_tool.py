@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ai_coding.domain.message import ToolResult
+from ai_coding.domain.message import ToolArtifact, ToolResult
 from ai_coding.security.file_state_tracker import FileState, FileStateTracker
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
 from ai_coding.tools.base import BaseTool, ToolContext
@@ -117,7 +117,13 @@ class EditTool(BaseTool):
 
         self._tracker.record(target)
         replaced = count if replace_all else 1
-        return ToolResult(success=True, output=f"replaced {replaced} occurrence(s) in {path_str}")
+        return ToolResult(
+            success=True,
+            output=f"replaced {replaced} occurrence(s) in {path_str}",
+            artifacts=(  # r18/F4: see write_tool -- undo replays this list
+                ToolArtifact(path=target.relative_to(self._sandbox.workspace).as_posix()),
+            ),
+        )
 
 
 __all__ = ["EditTool"]

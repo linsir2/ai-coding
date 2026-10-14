@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .acceptance import AcceptanceItem
-from .message import ChatMessage, ImageRef, ToolCallRef, tool_call_from_ref
+from .message import ChatMessage, ImageRef, ToolArtifact, ToolCallRef, tool_call_from_ref
 from .plan_delivery import StepDelivery
 from .task import TaskState
 from .turn_digest import TurnDigest
@@ -45,8 +45,18 @@ def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
         tool_calls=tool_calls,
         reasoning=data.get("reasoning"),
         synthetic=bool(data.get("synthetic", False)),
+        artifacts=tuple(
+            ToolArtifact.from_dict(item)
+            for item in _artifact_rows(data.get("artifacts"))
+            if item.get("path")
+        ),
         images=images,
     )
+
+
+def _artifact_rows(value: Any) -> list[dict[str, Any]]:
+    """The ``artifacts`` list of a stored message, or none when it has none."""
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _message_to_dict(msg: ChatMessage) -> dict[str, Any]:
@@ -77,6 +87,11 @@ def _message_to_dict(msg: ChatMessage) -> dict[str, Any]:
     # as all-human, which is exactly what it was.
     if msg.synthetic:
         data["synthetic"] = True
+    # r18/F4: same rule -- a session written before tools reported their side
+    # effects reads back as "this step touched nothing", which is the safe
+    # direction for /undo.
+    if msg.artifacts:
+        data["artifacts"] = [artifact.to_dict() for artifact in msg.artifacts]
     return data
 
 

@@ -185,6 +185,9 @@ async def test_a_real_turn_is_undoable_all_the_way_down_to_the_file(tmp_path, re
 
     await loop.process_input(session, "改一下 a.txt")
     (repo / "a.txt").write_text("broken\n", encoding="utf-8")
+    # r18/F4: a file nothing reported writing is left alone -- it could be the
+    # human's own.  The turn's own files are covered in test_r17_defects.py,
+    # where a real write tool creates them.
     (repo / "created.txt").write_text("new\n", encoding="utf-8")
 
     report = await loop.undo_last_turn(session)
@@ -192,8 +195,8 @@ async def test_a_real_turn_is_undoable_all_the_way_down_to_the_file(tmp_path, re
     assert report["ok"] is True
     assert report["text"] == "改一下 a.txt", "the composer gets the user's own words back"
     assert (repo / "a.txt").read_text(encoding="utf-8") == "v1\n", "the file came back"
-    assert not (repo / "created.txt").exists(), "a file the turn created is gone"
-    assert report["files"] == ["a.txt", "created.txt"]
+    assert (repo / "created.txt").exists(), "restore deleted a file nobody reported"
+    assert report["files"] == ["a.txt"]
     assert [m.role for m in session.messages] == [], "history unrolled to the start"
 
 

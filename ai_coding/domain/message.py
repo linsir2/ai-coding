@@ -178,6 +178,10 @@ class ChatMessage:
     #: Without it, undo picks the nudge as the turn to take back, and the
     #: volatile mention blocks rebuild from a system string.
     synthetic: bool = False
+    #: r18/F4: the side effects this step produced, as the tools reported them.
+    #: Written to the session so ``/undo`` knows which files the turn created --
+    #: git cannot tell those from files the human made while the turn ran.
+    artifacts: tuple[ToolArtifact, ...] = ()
 
     def __post_init__(self) -> None:
         if self.role == "tool" and not self.tool_call_id:

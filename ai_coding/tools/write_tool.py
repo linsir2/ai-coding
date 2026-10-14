@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ai_coding.domain.message import ToolResult
+from ai_coding.domain.message import ToolArtifact, ToolResult
 from ai_coding.security.file_state_tracker import FileState, FileStateTracker
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
 from ai_coding.tools.base import BaseTool, ToolContext
@@ -105,7 +105,21 @@ class WriteTool(BaseTool):
             return ToolResult(success=False, output=f"write error: {exc}")
 
         self._tracker.record(target)
-        return ToolResult(success=True, output=f"wrote {len(content)} chars to {path_str}")
+        return ToolResult(
+            success=True,
+            output=f"wrote {len(content)} chars to {path_str}",
+            # r18/F4: the path we actually wrote, normalised to the workspace.
+            # Undo needs the list of files a turn created, and this is the only
+            # place that knows it -- git cannot tell "the model wrote this" from
+            # "the human did, while the turn was running".
+            artifacts=(
+                ToolArtifact(
+                    path=target.relative_to(self._sandbox.workspace).as_posix(),
+                    kind="file",
+                    bytes=target.stat().st_size,
+                ),
+            ),
+        )
 
 
 __all__ = ["WriteTool"]

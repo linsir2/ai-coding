@@ -475,41 +475,166 @@ harness  ──► user_message(synthetic=True)  ──► session.messages
 5. 回合在 `_begin_turn` 前崩掉 → `turn_count` 未增 → undo 取到上一轮真人消息的键 → 语义正确，多余 ref 交给 `prune`。
 6. `turn_count=0` 时 undo → `max(0, -1)=0` → 键 `sid/1`；若无该 ref → `exists()` 落空 → 不还原（且 F8 会说明原因）。
 
-## 5. F4 — ToolArtifact 接线（undo 只动模型写过的文件）
+## 5. F4 — ToolArtifact 接线：undo 只动模型写过的文件
 
-### 影响面
+### 5.1 病灶：一份悬空的契约
+
+`ToolArtifact`（`domain/message.py:45`）的文档写着 *"a created/changed file … lets the runtime, UI and session records describe what a tool actually did without parsing prose"*。它甚至**自带 `to_dict` / `from_dict` 往返**（`:57-72`）——往返契约都写好了。
+
+但全仓：
+
+| 环节 | 状态 |
+|---|---|
+| `ToolArtifact` + `to_dict`/`from_dict` | ✅ 存在 |
+| `ToolResult.artifacts` | ✅ 存在（`message.py:87`） |
+| `ToolOutput.artifacts` | ✅ 存在（`message.py:104`） |
+| `TurnCloser.artifacts` 收集 | ✅ 存在（`turn_close.py:169`） |
+| `subagent.py:98` 落盘 | ✅ 存在（**持久化先例**） |
+| `ToolArtifact.from_dict` 的调用方 | ❌ **零** |
+| **谁产出 `ToolResult.artifacts`** | ❌ **零个工具**（`write_tool.py:108` / `edit_tool.py:120` 都不填） |
+| `tool_message()` 把它放进 `ChatMessage` | ❌ **丢弃**（`run.py`） |
+| session `_message_to_dict` | ❌ 不落盘 |
+
+于是 undo 只能靠 git 推断「本轮新建了哪些文件」：untracked 且不在基线里 ⇒ 删。
+**而 git 分不出「模型建的」和「你手打的」** → H3（删用户文件）；**基线 ref 写失败时连兜底都没有** → H4（清空所有 untracked）。
+
+> OpenCode 的做法（`revert.ts` + 官方文档："only paths attributed to cleanly completed assistant steps"）是**用会话自己记录的 patch 路径**，不用 git 推断。我们正好有这份契约——只是没人产出。
+
+### 5.2 影响面（执行范围）
+
 | 文件 | 现状 | 改动 |
 |---|---|---|
-| `tools/write_tool.py:108` | `ToolResult(success=True, output=...)` | 加 `artifacts=(ToolArtifact(path=rel, kind="file", bytes=len(content)),)` |
-| `tools/edit_tool.py:120` | 同上 | 加 `artifacts=(ToolArtifact(path=rel, kind="file"),)` |
-| `domain/run.py:64` `tool_message()` | 丢弃 artifacts | 带上（写入 `ChatMessage.artifacts`） |
-| `domain/message.py` | 无 `artifacts` | 加 `artifacts: tuple[ToolArtifact, ...] = ()`（与 images 同款） |
-| `domain/session.py` | 未序列化 | 只在非空时写 `artifacts` 键 |
-| `core/agent_loop.py` `undo_last_turn` | `restore(key)` 全量删除推断 | 改为按 artifact 路径还原 |
-| `core/snapshots.py:117` `restore` | `ls-files --others` 推断删除 | 改签名 `restore(key, *, created: set[str])`，**只删这个集合** |
+| `tools/write_tool.py:108` | `ToolResult(success=True, output=…)` | 追加 `artifacts=(ToolArtifact(path=rel, kind="file", bytes=len(content)),)` |
+| `tools/edit_tool.py:120` | 同上 | 追加 `artifacts=(ToolArtifact(path=rel, kind="file"),)` |
+| `domain/message.py` | `ChatMessage` 有 images/synthetic | 加 `artifacts: tuple[ToolArtifact, ...] = ()` |
+| `domain/run.py` `tool_message()` | **丢弃** artifacts | 带上 |
+| `domain/session.py` | 不落盘 | 只在非空时写 `artifacts` 键；读回用**已有的** `ToolArtifact.from_dict` |
+| `core/agent_loop.py` `undo_last_turn` | `restore(key)` 全量推断删除 | `restore(key, created=该回合 artifact 路径)` |
+| `core/snapshots.py` | 基线 blob 整套 | **删除**（`baseline_ref` 参数、capture 的 ls-files/hash-object/update-ref、`_baseline_paths`、restore 的删除推断、prune 的第二命名空间） |
+| `tests/test_snapshots.py:99` | `test_a_file_that_was_already_untracked_survives`（测基线机制） | 同一意图、新机制：不删除任何未列入 artifacts 的 untracked。**该用例针对的机制被有意删除，属"用例失效"例外** |
 
-### 还原语义（三分法，与 OC 一致）
+**顺带删掉的死代码**：基线 blob 机制整块。`restore` 的签名从「全量推断」变成「你告诉我删什么」——更小的模块、更少的 git 调用（capture 从 4 次 git 降到 1 次）。
+
+### 5.3 复用契约（不造轮子）
+
+| 复用 | 位置 |
+|---|---|
+| `ToolArtifact` / `to_dict` / `from_dict` | `domain/message.py:45-72`（往返已实现，接上即可） |
+| `ToolResult.artifacts` | `domain/message.py:87` |
+| `TurnCloser.artifacts` | `turn_close.py:154-169`（digest/handoff 已在用，接上后 undo 也能用） |
+| `subagent.py:98` 的落盘形状 | 「artifacts 只在有值时写」的既有先例 |
+| `_message_to_dict`「只在非空时写键」 | 与 images/reasoning/synthetic 同款 |
+| `Sandbox.resolve` | write/edit 已有 `target`，取相对路径零成本 |
+
+### 5.4 还原语义：三分法（与 OC 一致）
+
 | 文件来源 | 处理 | 依据 |
 |---|---|---|
-| 已跟踪文件被改（含 bash 改的） | `git checkout <ref> -- path` | 快照里**确实有**该文件 → 还原 |
-| 模型 write/edit 新建的 untracked | 删除 | `artifacts` 里有它，且快照里没有 |
+| 已跟踪文件被改（**含 bash 改的**） | `git checkout <ref> -- path` | 快照里确实有它 → 还原。**这条覆盖绝大多数真实价值，且完全不依赖 artifacts** |
+| 模型 write/edit 新建的 untracked | 删除 | artifacts 里有它，且快照里没有 |
 | 用户自己新建的 untracked | **保留** | artifacts 里没有它 |
-| bash 新建的 untracked | **保留** | 保守默认；OC 同样不追踪 bash |
+| bash 新建的 untracked | **保留**（保守） | OC 同样不追踪 bash；已列为已知限制 |
 
-### 为什么删掉「基线推断删除」
-`baseline`（`refs/ai-coding/untracked/<key>`）原本只为区分"回合建的 vs 用户原有的"。有了 artifacts，这个区分由**写入记录**直接给出，基线 blob 的推断既多余又是 H3/H4 两个缺陷的根源。**基线整套删除**（含 `snapshots.py:75-95,111-115,134-147` 与 F6 的一半）——这就是本轮要砍的冗余。
+### 5.5 每文件每步
 
-### 数据流影响
-`write/edit → ToolResult.artifacts → TurnCloser.artifacts（既有）→ tool_message → ChatMessage.artifacts → 落盘 → undo 扫描尾巴 → restore(created=…)`。新增一个字段，链路每一环都已存在。
+**Step 1 — 两个写入工具产出 artifact**（路径用 `target.relative_to(sandbox.workspace)` 归一，不直接用模型给的拼写）
+```python
+return ToolResult(
+    success=True, output=f"wrote {len(content)} chars to {path_str}",
+    artifacts=(ToolArtifact(path=rel, kind="file", bytes=len(content.encode())),),
+)
+```
 
-### RIPR 用例
-- **Red**：绊线 `test_undo_must_not_delete_a_file_the_user_created` 去 xfail。
-- **Red（新增）**：`test_undo_deletes_a_file_the_turn_created`——write 工具建文件后 undo，文件消失（证明能力没被砍掉）。
-- **Red（新增）**：`test_artifacts_survive_a_restart`——artifacts 落盘重载后仍可读（undo 跨重启可用）。
-- **Red（新增）**：`test_a_bash_created_file_is_left_alone`——bash 建文件后 undo，文件保留（保守默认被守住）。
-- **Refactor**：`SnapshotStore.baseline_ref` 参数与其全部方法一并删除。
+**Step 2 — `ChatMessage.artifacts` + `tool_message()` 带上**
 
----
+**Step 3 — 落盘/读回**（`_message_to_dict` 非空才写；`_message_from_dict` 用 `ToolArtifact.from_dict`）
+
+**Step 4 — `undo_last_turn` 收集被撤回合的 artifact 路径**
+```python
+created = {a.path for m in session.messages[index:] for a in m.artifacts}
+...
+restored = await self.snapshots.restore(key, created=created)
+```
+注意：**必须在截断之前**从 `messages[index:]` 取（截断后就拿不到了）。
+
+**Step 5 — `SnapshotStore.restore(key, *, created: set[str])`**
+- `git diff --name-only <ref>` 的结果：快照里有 → checkout 还原；没有 → **只有当它在 `created` 里**才删。
+- `created` 里但 diff 没列出的（新建的 untracked 本来就不出现在 diff 里）→ 显式删。
+- 其余一律不动。
+- **删除基线相关全部代码**。
+
+**Step 6 — `prune` 只剩一个命名空间**（删 baseline 那一半循环）
+
+### 5.6 数据流影响
+
+```
+write/edit ──► ToolResult.artifacts ──► TurnCloser.artifacts ──► tool_message()
+   （新增）        （已有收集）              （已有，digest 在用）
+                                          │
+                                    ChatMessage.artifacts   ✦新增
+                                          │
+                                    session.json artifacts  ✦新增（只在非空时）
+                                          │
+/undo ──► 读被撤回合的 tool 消息 ──► created 集合
+   ──► restore(key, created=…)
+       ├ diff 命中 & 快照有 ──► git checkout 还原
+       ├ diff 命中 & 快照无 & ∈created ──► 删
+       └ 其余 ──► 不动（用户的、bash 的）
+```
+
+### 5.7 完成后效果
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| 回合用 write 建了 `new.py`，undo | 删 ✅ | 删 ✅（能力没丢） |
+| 回合运行中你手打了 `draft.txt`，undo | **删 ❌** | **保留 ✅** |
+| 回合用 bash 建了 `x.sh`，undo | 删 ❌ | 保留（保守，OC 同） |
+| 基线 ref 写失败 | **清空所有 untracked ❌** | 基线已不存在，无此路径 |
+| capture 的 git 调用次数 | 4 次 | **1 次**（capture 变便宜） |
+| undo 后重启再 undo | — | artifacts 从 session 读回，**仍然可用** |
+
+### 5.8 RIPR 用例
+
+- **Red（摘既有绊线）**：`test_undo_must_not_delete_a_file_the_user_created`
+- **Red（重写 `test_snapshots.py:99`）**：`test_a_file_that_was_already_untracked_survives` → 断言 restore 在**不带 created 集合**时不动任何 untracked
+- **Red（新增 5 条）**
+  1. `test_undo_deletes_a_file_the_turn_created`：真实 write 工具建文件 → undo 后消失（**证明能力没被砍**）
+  2. `test_a_bash_created_file_is_left_alone`：bash 建文件 → undo 保留（保守默认被守住）
+  3. `test_artifacts_survive_a_restart`：tool 消息落盘重载后 artifacts 仍可读 → undo 跨重启仍生效
+  4. `test_restore_deletes_only_what_it_is_told_to`：直接对 `SnapshotStore.restore` 断言——传 `created={"a.md"}` 只删 a.md，旁边另一个 untracked 不动
+  5. `test_write_tool_reports_the_path_it_wrote`：`write` 的 ToolResult 里 artifacts[0].path 是 **workspace 相对路径**（不是模型给的拼写）
+- **Pass**：`tests/test_snapshots.py` 其余 4 条 + `tests/test_write_tool.py` / `test_edit_tool.py` 保持绿
+- **Refactor**：capture 路径上不再需要 `shutil`？——检查（`restore` 仍需 `shutil.rmtree` 删目录）
+
+### 5.9 架构图（F4 后）
+
+```
+ write/edit ──┐
+              ├─► ToolResult.artifacts ─► TurnCloser.artifacts ─► tool_message()
+ bash ────────┘        （新）                    （已有）              │
+              （不产出）                                          ChatMessage.artifacts ✦
+                                                                    │
+                                                          session.json ✦（非空才写）
+ capture（1 次 git）                                              │
+   git stash create ─► refs/ai-coding/undo/<sid>/N     undo 读回 ┘
+   ✦ 基线 blob 机制整块删除
+                                                                    │
+                                              undo: created = 被撤回合的 artifact 路径
+                                                     │
+                                              restore(key, created=…)
+                                          ┌─────────┴─────────┐
+                                    快照里有该文件        快照里没有
+                                    git checkout 还原    ∈created ? 删 : 保留
+```
+
+### 5.10 最终形态自检
+
+1. 模型 `write("notes.md")` → 你 `/undo` → `notes.md` 消失，`a.py` 的改动还原 → 与 OC 一致。
+2. 模型 `write` 的同时你在编辑器手建 `scratch.txt` → `/undo` → `scratch.txt` **还在**（本轮的核心修复）。
+3. 模型全程用 bash 改文件 → `/undo` → 已跟踪文件还原（走 git diff，不依赖 artifacts）；bash 新建的 `.log` 保留 → 保守且可解释。
+4. 回合结束后**重启进程**再 `/undo` → artifacts 从 session 读回 → 新建文件仍会被删 → 安全网不会因重启失效。
+5. 老的 session 文件（tool 消息无 `artifacts` 键）→ 读回 `()` → undo 只还原 tracked、不删任何东西 → **向后兼容，且方向是保守的**。
+6. 模型写了 `.ai-coding/` 里的东西？write/edit 的 `Sandbox.resolve` 允许 workspace 内任意路径 → artifact path 会指向它 → undo 会删掉自己刚写的附件。**这是可接受的**（它确实是本轮产生的），但值得在文档写一句。
 
 ## 6. F5 — redo 失效 + 跨会话隔离
 
@@ -669,7 +794,7 @@ OC 文档：*"Sending a new prompt while an undo is staged **commits the revert*
 
 ### undo 正确性
 - [x] **F3** `synthetic` 标记（4 处注入点 + 落盘）+ 回合键改 `turn_count` + undo 回退 `turn_count` 并裁 digest
-- [ ] **F4** `ToolArtifact` 接线：write/edit 产出 → 落盘 → `restore(created=…)`，删掉基线推断
+- [x] **F4** `ToolArtifact` 接线：write/edit 产出 → 落盘 → `restore(created=…)`，删掉基线推断
 - [ ] **F5** 新回合作废 redo + `_undo_tail`/`last_undo` 按 session 隔离
 - [ ] **F6** `capture` all-or-nothing（写失败即回滚并返回 None）
 - [ ] **F7** undo/redo 走 `_turn_lock`
