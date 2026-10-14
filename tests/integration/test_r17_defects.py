@@ -728,6 +728,208 @@ async def test_the_redo_ref_does_not_survive_a_new_turn(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_redo_puts_back_a_file_the_turn_created(tmp_path):
+    """r20/F9.  A stash never holds untracked files, so the file a turn created
+    was in no snapshot: undo removed it correctly, and redo had nothing to put
+    it back from.  The report said ``files: []``, which reads as "nothing
+    needed restoring" -- so the user undid a turn, redid it, and quietly lost
+    the file, with no signal anywhere that it was gone."""
+    from ai_coding.domain.loop import StepResult
+    from ai_coding.domain.message import ToolCallRef
+
+    root = _repo(tmp_path)
+
+    class _WriterEngine(ChatEngine):
+        def __init__(self):
+            self.served = False
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None, **kw):
+            if not self.served:
+                self.served = True
+                return StepResult(tool_calls=[ToolCallRef(
+                    id="c1", name="write",
+                    arguments=json.dumps({"path": "created.txt", "content": "agent\n"}))])
+            return StepResult(text="写好了")
+
+    sessions = SessionService(tmp_path / "sessions")
+    tools = ToolRegistry()
+    tools.register(WriteTool(Sandbox(root), FileStateTracker()))
+    loop = AgentLoop(
+        _WriterEngine(), sessions, tools, workspace=str(root), snapshots=SnapshotStore(root),
+        gate=PermissionGate(allowed_tools=("write",)),
+    )
+    session = sessions.create()
+    await loop.process_input(session, "建个文件")
+
+    await loop.undo_last_turn(session)
+    assert not (root / "created.txt").exists(), "undo did not remove it in the first place"
+
+    report = await loop.redo_last_turn(session)
+
+    assert (root / "created.txt").read_text(encoding="utf-8") == "agent\n", (
+        f"redo could not put the turn's own file back: {report}"
+    )
+    assert "created.txt" in report["files"], (
+        f"redo restored the file but did not say so: {report}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_undos_then_one_redo_restores_everything(tmp_path):
+    """r20/F2.  OpenCode's rule (docs/snapshots): "repeated undos form one wider
+    staged revert rather than a redo stack."  r17 overwrote the redo slot on
+    every undo, so the second undo made the first one's turn unreachable --
+    messages and files alike -- with no warning that anything had been lost."""
+    from ai_coding.domain.loop import StepResult
+    from ai_coding.domain.message import ToolCallRef
+
+    root = _repo(tmp_path)
+
+    class _TwoWriterEngine(ChatEngine):
+        def __init__(self):
+            self.served = 0
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None, **kw):
+            self.served += 1
+            if self.served in (1, 3):
+                return StepResult(tool_calls=[ToolCallRef(
+                    id=f"c{self.served}", name="write",
+                    arguments=json.dumps({
+                        "path": f"turn{self.served}.txt", "content": "x\n"}))])
+            return StepResult(text="好了")
+
+    sessions = SessionService(tmp_path / "sessions")
+    tools = ToolRegistry()
+    tools.register(WriteTool(Sandbox(root), FileStateTracker()))
+    loop = AgentLoop(
+        _TwoWriterEngine(), sessions, tools, workspace=str(root), snapshots=SnapshotStore(root),
+        gate=PermissionGate(allowed_tools=("write",)),
+    )
+    session = sessions.create()
+    await loop.process_input(session, "第一回合")
+    await loop.process_input(session, "第二回合")
+    turns_before = session.turn_count
+
+    await loop.undo_last_turn(session)
+    await loop.undo_last_turn(session)
+    assert [m.content for m in session.messages if m.role == "user"] == [], (
+        "two undos should have removed both turns"
+    )
+
+    await loop.redo_last_turn(session)
+
+    assert [m.content for m in session.messages if m.role == "user"] == ["第一回合", "第二回合"], (
+        "one redo must restore the whole staged revert, not just the last undo"
+    )
+    assert session.turn_count == turns_before, "the turn counter did not come back"
+    assert (root / "turn1.txt").exists() and (root / "turn3.txt").exists(), (
+        "both turns' files must come back with them"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_redo_baseline_is_taken_once_per_staged_revert(tmp_path):
+    """Re-shooting the baseline on the second undo would capture the state the
+    second undo is standing on -- half-undone -- so /redo would return the user
+    to a workspace that never existed rather than to the one they left."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+    await loop.process_input(session, "第一回合")
+    await loop.process_input(session, "第二回合")
+
+    shots: list[str] = []
+    original_capture = loop.snapshots.capture
+
+    async def counting_capture(key, *args, **kwargs):
+        shots.append(key)
+        return await original_capture(key, *args, **kwargs)
+
+    loop.snapshots.capture = counting_capture
+    await loop.undo_last_turn(session)
+    await loop.undo_last_turn(session)
+
+    assert shots.count(f"{session.session_id}/redo") == 1, (
+        f"the redo baseline was re-taken for a widening revert: {shots}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_new_turn_commits_the_whole_staged_revert(tmp_path):
+    """OpenCode's rule: "sending a new prompt while an undo is staged commits
+    the revert."  With three holders for one staged revert, clearing only the
+    messages would leave the counter, the digests and the saved file contents
+    behind for a /redo that should have nothing to do."""
+    from ai_coding.domain.loop import StepResult
+    from ai_coding.domain.message import ToolCallRef
+
+    root = _repo(tmp_path)
+
+    class _WriterEngine(ChatEngine):
+        def __init__(self):
+            self.served = 0
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None, **kw):
+            self.served += 1
+            if self.served == 1:
+                return StepResult(tool_calls=[ToolCallRef(
+                    id="c1", name="write",
+                    arguments=json.dumps({"path": "staged.txt", "content": "x\n"}))])
+            return StepResult(text="好了")
+
+    sessions = SessionService(tmp_path / "sessions")
+    tools = ToolRegistry()
+    tools.register(WriteTool(Sandbox(root), FileStateTracker()))
+    loop = AgentLoop(
+        _WriterEngine(), sessions, tools, workspace=str(root), snapshots=SnapshotStore(root),
+        gate=PermissionGate(allowed_tools=("write",)),
+    )
+    session = sessions.create()
+    await loop.process_input(session, "第一回合")
+    await loop.undo_last_turn(session)
+    assert not (root / "staged.txt").exists()
+
+    await loop.process_input(session, "换个话题")
+    report = await loop.redo_last_turn(session)
+
+    assert report["reason"] == "nothing to redo", report
+    assert not (root / "staged.txt").exists(), (
+        "a committed revert must not resurrect the file it had removed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_redo_restores_the_digest_lines_undo_trimmed(tmp_path):
+    """r20/F2.  Undo trims the digest of the turn it removes, because the ring
+    must not summarise a turn that is gone.  Trimming destroys it, so a redo
+    that restored only the messages would bring the turns back into the
+    transcript with the working memory never having heard of them."""
+    from ai_coding.domain.turn_digest import TurnDigest
+
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+    await loop.process_input(session, "第一回合")
+    session.turn_digests.append(
+        TurnDigest(turn=session.turn_count, request="第一回合", outcome="done"))
+    await loop.process_input(session, "第二回合")
+    session.turn_digests.append(
+        TurnDigest(turn=session.turn_count, request="第二回合", outcome="done"))
+    kept = [d.turn for d in session.turn_digests]
+
+    await loop.undo_last_turn(session)
+    await loop.undo_last_turn(session)
+    assert session.turn_digests == [], "the fixture did not stage anything"
+
+    await loop.redo_last_turn(session)
+
+    assert [d.turn for d in session.turn_digests] == kept, (
+        f"the digest ring did not come back: {[d.turn for d in session.turn_digests]} "
+        f"!= {kept}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_undo_says_why_no_file_was_restored(tmp_path):
     """The contract said "明说"; r17 reported an empty file list, which reads
     the same as "nothing had changed"."""

@@ -46,7 +46,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -112,6 +112,7 @@ from ai_coding.domain.model_config import ModelConfig
 from ai_coding.domain.run import assistant_message, user_message
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
+from ai_coding.domain.turn_digest import TurnDigest
 from ai_coding.infra.deadline import (
     Deadline,
     DeadlineExpired,
@@ -176,6 +177,21 @@ def _tools_by_origin(registry: ToolRegistry) -> dict[str, int]:
     return dict(sorted(sizes.items(), key=lambda item: (-item[1], item[0])))
 
 
+@dataclass(frozen=True)
+class _Staged:
+    """What a staged revert has to put back, beyond the messages.
+
+    ``turn_digests`` is the reason this exists: undo trims the digest lines of
+    the turns it removes, and trimming destroys them.  A /redo with only the
+    message tail would bring the turns back with their summaries missing, so
+    the working-memory ring would never mention work the transcript shows.
+    """
+
+    turns: int
+    turn_count: int
+    digests: tuple[TurnDigest, ...]
+
+
 class AgentLoop:
     """Owns a conversation turn: iteration, stop policy, tools, persistence."""
 
@@ -230,6 +246,15 @@ class AgentLoop:
         # only: a restart loses redo, which is the honest cost of not writing it
         # to the session file.
         self._undo_tail: dict[str, list[ChatMessage]] = {}
+        # r20/F2: one staged revert per session rather than one per keystroke.
+        # ``_Staged`` carries what undo takes away and cannot get back on its own
+        # -- the counter and the digests it trims -- so that a later /redo has
+        # something to restore them from.
+        self._undo_state: dict[str, _Staged] = {}
+        # The content of files a turn created, read before undo removed them.
+        # A git stash holds tracked files only, so this is the only copy that
+        # exists (r20/F9).
+        self._undo_files: dict[str, dict[str, bytes]] = {}
         self.settings = settings or AIConfig()
         # The model table lives on ``AppConfig``, not on ``AIConfig``: it is a
         # catalogue of connections, not a behaviour knob, and ``AIConfig`` is
@@ -1323,6 +1348,12 @@ class AgentLoop:
         a stale tail on top of live history and rolls the worktree back under it.
         """
         self._undo_tail.pop(session.session_id, None)
+        # r20/F2: the staged revert is one thing spread over three holders.  If
+        # a new turn cleared only the messages, the next /redo would still find a
+        # counter, a digest ring and a set of file contents to restore -- a
+        # baseline from a run the user has already committed by moving on.
+        self._undo_state.pop(session.session_id, None)
+        self._undo_files.pop(session.session_id, None)
         self.last_undo.pop(session.session_id, None)
         if self.snapshots is not None:
             try:
@@ -1392,10 +1423,21 @@ class AgentLoop:
             key = self._turn_key(session, max(0, session.turn_count - 1))
             try:
                 if await self.snapshots.exists(key):
-                    # remember the state we are about to leave, so /redo can return to it
-                    await self.snapshots.capture(f"{session.session_id}/redo")
+                    # r20/F2: the baseline is the state from before the *first*
+                    # undo of this run.  Re-shooting it here would capture the
+                    # half-undone state the second undo is standing on, so /redo
+                    # would land somewhere the user was never in.
+                    if self._undo_state.get(session.session_id) is None:
+                        await self.snapshots.capture(f"{session.session_id}/redo")
                     report = await self.snapshots.restore(key, created=created)
                     restored, failed = report.restored, report.failed
+                    # r20/F9: the content of files the turn created, read before
+                    # they were removed.  A redo restores the baseline commit,
+                    # which cannot mention an untracked file -- without these
+                    # bytes the file is simply gone after a redo.
+                    if report.saved:
+                        held = self._undo_files.setdefault(session.session_id, {})
+                        held.update(report.saved)
                     if failed:
                         # r20/F1: the history is still truncated.  The files that
                         # did come back cannot be un-restored, so keeping the
@@ -1410,13 +1452,28 @@ class AgentLoop:
             except (OSError, TimeoutError, ValueError) as exc:
                 restored = []
                 reason = f"restore-failed: {exc}"
-        self._undo_tail[session.session_id] = list(session.messages[index:])
+        self._undo_tail[session.session_id] = (
+            list(session.messages[index:]) + self._undo_tail.get(session.session_id, [])
+        )
+        # r20/F2: a second /undo widens the staged revert instead of replacing
+        # it, so this run's messages go in front of the ones already held.
         session.messages = list(session.messages[:index])
         # Taking the turn back includes the state that turn produced: the counter
         # (so the next message is this turn again, not the next one) and its
         # digest line (or the working memory would summarise a turn that is gone).
         # ``last_compacted_turn`` and ``turn_usages`` stay: the first is a fact
         # about what was rewritten, the second is money already spent.
+        staged = self._undo_state.get(session.session_id)
+        self._undo_state[session.session_id] = _Staged(
+            turns=(staged.turns + 1) if staged else 1,
+            # The counter and the digest ring are recorded as they stood before
+            # the *first* undo and left alone after that.  Each undo only trims
+            # them from the tail, so re-reading the trimmed list would duplicate
+            # what survived and adding to the count would invent turns that never
+            # ran.
+            turn_count=staged.turn_count if staged else session.turn_count,
+            digests=staged.digests if staged else tuple(session.turn_digests),
+        )
         session.turn_count = max(0, session.turn_count - 1)
         session.turn_digests = [
             digest for digest in session.turn_digests if digest.turn <= session.turn_count
@@ -1443,9 +1500,10 @@ class AgentLoop:
         reason = ""
         restored: list[str] = []
         failed: list[str] = []
+        session_id = session.session_id
         if self.snapshots is not None:
             try:
-                key = f"{session.session_id}/redo"
+                key = f"{session_id}/redo"
                 if await self.snapshots.exists(key):
                     report = await self.snapshots.restore(key)
                     restored, failed = report.restored, report.failed
@@ -1459,14 +1517,40 @@ class AgentLoop:
                 # r17 reported success here whatever happened, so the TUI said
                 # "restored" for a restore that never ran.
                 reason = f"restore-failed: {exc}"
+        # r20/F9: the baseline commit is tracked files only, so the created ones
+        # are written back from what undo kept.  A path that cannot be written
+        # is named rather than swallowed -- it is the same "redo looked fine"
+        # lie r20/F1 removed from the other half.
+        held = self._undo_files.pop(session_id, {})
+        for rel in sorted(held):
+            target = Path(self.workspace) / rel
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(held[rel])
+            except OSError:
+                failed.append(rel)
+            else:
+                restored.append(rel)
+        if failed:
+            reason = "restore-partial: " + ", ".join(failed[:3]) + (
+                f" (+{len(failed) - 3} more)" if len(failed) > 3 else ""
+            )
         session.messages = list(session.messages) + tail
-        self._undo_tail.pop(session.session_id, None)
-        self.last_undo.pop(session.session_id, None)
+        # r20/F2: restore the counter and the digest lines undo trimmed.  Without
+        # them the turns would be back in the transcript but missing from the
+        # working-memory ring, and the next turn would be numbered as if they
+        # had never run.
+        staged = self._undo_state.pop(session_id, None)
+        if staged is not None:
+            session.turn_count = staged.turn_count
+            session.turn_digests = list(staged.digests)
+        self._undo_tail.pop(session_id, None)
+        self.last_undo.pop(session_id, None)
         self.closer.save(session)
         return {
             "ok": not reason,
             "reason": reason,
-            "files": restored,
+            "files": sorted(set(restored)),
             "messages": len(session.messages),
         }
 
