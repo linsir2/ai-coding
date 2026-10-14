@@ -27,6 +27,7 @@ import { useBindings, useKeymap } from "@opentui/keymap/solid"
 import { For, Show, createEffect, createSignal, onMount } from "solid-js"
 import { theme } from "../theme/tokens"
 import { type PasteOutcome, type PromptImage, hostClipboard, interpretPaste } from "../util/attachment"
+import { readClipboardImage } from "../util/clipboard"
 import { moveSelection } from "../util/dialog-select"
 import type { MentionOption } from "../util/mention"
 import { filterMentions, mentionQuery, replaceMentionToken } from "../util/mention"
@@ -91,31 +92,43 @@ export function Prompt(props: PromptProps) {
   const clipboard = hostClipboard()
 
   const paste = async () => {
-    let outcome: PasteOutcome
+    // r21: the host clipboard library comes first because it is the library's
+    // own path and needs no subprocess -- but it cannot reach a clipboard over
+    // SSH and has no fallback when this session has no display server, which is
+    // why ctrl+v did nothing on a desktop where OpenCode worked.  OpenCode's
+    // own answer (run wl-paste / xclip / osascript / powershell in turn) is the
+    // second try, and the message says which path answered.
+    const native = await readNativeClipboard()
+    if (native.kind === "image") {
+      setImages((all) => [...all, { name: `image-${all.length + 1}`, dataUrl: native.dataUrl }])
+      setHint("")
+      return
+    }
+    if (native.kind === "text") {
+      input?.insertText(native.text)
+      setHint("")
+      return
+    }
+    const fallback = await readClipboardImage()
+    if ("dataUrl" in fallback) {
+      setImages((all) => [...all, { name: `image-${all.length + 1}`, dataUrl: fallback.dataUrl }])
+      setHint("")
+      return
+    }
+    setHint(`${native.kind === "failed" ? native.message : ""}${fallback.error}`)
+  }
+
+  const readNativeClipboard = async (): Promise<PasteOutcome> => {
     try {
       const result = await clipboard.read({
         preferredTypes: ["image/png", "text/plain"],
         selection: "clipboard",
         signal: AbortSignal.timeout(2000),
       })
-      outcome = interpretPaste(result)
+      return interpretPaste(result)
     } catch (error) {
-      outcome = interpretPaste(null, error instanceof Error ? error : new Error(String(error)))
+      return interpretPaste(null, error instanceof Error ? error : new Error(String(error)))
     }
-    if (outcome.kind === "image") {
-      setImages((all) => [...all, { name: `image-${all.length + 1}`, dataUrl: outcome.dataUrl }])
-      setHint("")
-      return
-    }
-    if (outcome.kind === "text") {
-      input?.insertText(outcome.text)
-      setHint("")
-      return
-    }
-    // r21: every refusal used to `return` silently, so pressing ctrl+v on a
-    // machine whose clipboard this process cannot reach looked identical to the
-    // key not being bound at all.  Say which of the six reasons it was.
-    setHint(outcome.message)
   }
 
   const slashSuggestion = (entry: SlashCommand): Suggestion => ({
