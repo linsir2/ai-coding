@@ -1387,13 +1387,24 @@ class AgentLoop:
         # and inventing a distinction the code cannot support would be a lie.
         reason = "no-snapshot" if self.snapshots is None else ""
         restored: list[str] = []
+        failed: list[str] = []
         if self.snapshots is not None:
             key = self._turn_key(session, max(0, session.turn_count - 1))
             try:
                 if await self.snapshots.exists(key):
                     # remember the state we are about to leave, so /redo can return to it
                     await self.snapshots.capture(f"{session.session_id}/redo")
-                    restored = await self.snapshots.restore(key, created=created)
+                    report = await self.snapshots.restore(key, created=created)
+                    restored, failed = report.restored, report.failed
+                    if failed:
+                        # r20/F1: the history is still truncated.  The files that
+                        # did come back cannot be un-restored, so keeping the
+                        # messages would leave a state where the transcript and
+                        # the tree disagree about the same turn.  Say which paths
+                        # did not move instead of implying a clean rewind.
+                        reason = "restore-partial: " + ", ".join(failed[:3]) + (
+                            f" (+{len(failed) - 3} more)" if len(failed) > 3 else ""
+                        )
                 else:
                     reason = "no-snapshot"
             except (OSError, TimeoutError, ValueError) as exc:
@@ -1431,11 +1442,17 @@ class AgentLoop:
             return {"ok": False, "reason": "nothing to redo"}
         reason = ""
         restored: list[str] = []
+        failed: list[str] = []
         if self.snapshots is not None:
             try:
                 key = f"{session.session_id}/redo"
                 if await self.snapshots.exists(key):
-                    restored = await self.snapshots.restore(key)
+                    report = await self.snapshots.restore(key)
+                    restored, failed = report.restored, report.failed
+                    if failed:
+                        reason = "restore-partial: " + ", ".join(failed[:3]) + (
+                            f" (+{len(failed) - 3} more)" if len(failed) > 3 else ""
+                        )
                 else:
                     reason = "no-snapshot"
             except (OSError, TimeoutError, ValueError) as exc:

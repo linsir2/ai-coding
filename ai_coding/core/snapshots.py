@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ai_coding.core.gitcmd import git
@@ -27,6 +28,26 @@ from ai_coding.core.gitcmd import git
 #: ``<session_id>/<turn>`` (turn refs) or ``<session_id>/redo`` (the one redo
 #: slot a session keeps).  Session ids are uuid hex; turns are decimal.
 _KEY = re.compile(r"^[A-Za-z0-9_-]+/(?:[0-9]+|redo)$")
+
+
+@dataclass(frozen=True)
+class RestoreReport:
+    """What a restore actually did, as distinct from what it set out to do.
+
+    ``restored`` and ``failed`` are both evidence.  Reporting a path that git
+    refused to check out -- or that could not be deleted -- as restored is how
+    undo came to tell the user it had rewound a tree it had only half rewound,
+    and why the redo baseline it then captured described a state that never
+    existed (r20/F1).
+
+    ``saved`` is the content of the files the turn created, read before they
+    were removed.  A stash never held untracked files, so without this a redo
+    could not put them back (r20/F9).
+    """
+
+    restored: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    saved: dict[str, bytes] = field(default_factory=dict)
 
 
 class SnapshotStore:
@@ -88,33 +109,60 @@ class SnapshotStore:
             return False
         return code == 0
 
-    async def restore(self, key: str, *, created: set[str] | None = None) -> list[str]:
+    async def restore(
+        self, key: str, *, created: set[str] | None = None
+    ) -> RestoreReport:
         """Bring every path that differs from the snapshot back to it.
 
         ``created`` names the files the turn created; those are removed when the
         snapshot never knew them.  Anything untracked that the turn did not
         report writing is left alone -- it may be the human's own work.
+
+        A path that cannot be handled is collected into ``failed`` rather than
+        raised: a restore that stops at the first unreadable file leaves the
+        ones before it undone and the ones after it untouched, and the caller
+        cannot tell that from a clean one unless the partial outcome is handed
+        back explicitly (r20/F1).
         """
         ref = self._ref(key)
         code, out = await git(self._root, "diff", "--name-only", ref, timeout=self._timeout)
         if code != 0:
-            return []
+            return RestoreReport()
         paths = {line.strip() for line in out.splitlines() if line.strip()}
-        restored: set[str] = set()
+        restored: list[str] = []
+        failed: list[str] = []
+        saved: dict[str, bytes] = {}
         for rel in sorted(paths):
             target = self._root / rel
             code, _ = await git(self._root, "cat-file", "-e", f"{ref}:{rel}", timeout=self._timeout)
             if code == 0:
-                await git(self._root, "checkout", ref, "--", rel, timeout=self._timeout)
+                code, _ = await git(
+                    self._root, "checkout", ref, "--", rel, timeout=self._timeout
+                )
+                if code != 0:
+                    failed.append(rel)
+                    continue
             elif rel in (created or set()):
-                _remove(target)
-            restored.add(rel)
+                # The snapshot never knew this path, so git has nothing to say
+                # about it; the turn's own report is the only reason to remove
+                # it.  Keep the content first -- redo has no other copy.
+                if target.is_file():
+                    saved[rel] = target.read_bytes()
+                if not _remove(target):
+                    failed.append(rel)
+                    continue
+            restored.append(rel)
         # Files the turn created never appear in ``git diff`` (git does not track
         # them), so they are cleaned from the set the tools reported.
         for rel in sorted((created or set()) - paths):
-            _remove(self._root / rel)
-            restored.add(rel)
-        return sorted(restored)
+            target = self._root / rel
+            if target.is_file():
+                saved[rel] = target.read_bytes()
+            if _remove(target):
+                restored.append(rel)
+            else:
+                failed.append(rel)
+        return RestoreReport(restored=restored, failed=failed, saved=saved)
 
     async def forget(self, key: str) -> None:
         """Drop one snapshot -- the redo slot -- without touching anything else."""
@@ -143,11 +191,22 @@ class SnapshotStore:
             await git(self._root, "update-ref", "-d", ref, timeout=self._timeout)
 
 
-def _remove(target: Path) -> None:
-    if target.is_dir():
-        shutil.rmtree(target, ignore_errors=True)
-    else:
-        target.unlink(missing_ok=True)
+def _remove(target: Path) -> bool:
+    """Delete ``target`` if it is there.  ``False`` means it is still there.
+
+    ``rmtree(ignore_errors=True)`` swallows everything and ``unlink`` raises,
+    so a directory that is read-only or owned by another user used to abort the
+    whole restore halfway through, leaving the caller with no way to tell a
+    partial rewind from a complete one (r20/F1).
+    """
+    try:
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=False)
+        else:
+            target.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return not target.exists()
 
 
-__all__ = ["SnapshotStore"]
+__all__ = ["RestoreReport", "SnapshotStore"]

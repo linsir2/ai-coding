@@ -540,11 +540,11 @@ async def test_restore_without_a_report_deletes_nothing(tmp_path):
     await store.capture("s/1")
     (root / "created.md").write_text("agent\n", encoding="utf-8")
 
-    restored = await store.restore("s/1")
+    report = await store.restore("s/1")
 
     assert (root / "old_notes.md").exists(), "restore wiped a pre-snapshot file"
     assert (root / "created.md").exists(), "restore deleted a file nobody reported"
-    assert "old_notes.md" not in restored and "created.md" not in restored
+    assert "old_notes.md" not in report.restored and "created.md" not in report.restored
 
 
 @pytest.mark.asyncio
@@ -742,6 +742,58 @@ async def test_undo_says_why_no_file_was_restored(tmp_path):
     assert report["ok"] is True, "the conversation half still unrolls without git"
     assert report["reason"] == "no-snapshot", report
     assert report["files"] == [], "no file moved, and the report must say so"
+
+
+@pytest.mark.asyncio
+async def test_undo_names_the_files_it_could_not_restore(tmp_path):
+    """r20/F1: a restore that stops halfway used to be reported as a clean
+    rewind -- the paths that had already been undone were counted as restored
+    and the one that refused was counted too, so the user saw a tidy list and
+    an empty reason.  The report is the only evidence undo has, so it has to
+    carry the failure."""
+    import os
+
+    from ai_coding.domain.loop import StepResult
+    from ai_coding.domain.message import ToolCallRef
+
+    root = _repo(tmp_path)
+    locked = root / "ro"
+    locked.mkdir()          # the turn writes here; the directory is sealed afterwards
+
+    class _WriterEngine(ChatEngine):
+        def __init__(self):
+            self.served = False
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None, **kw):
+            if not self.served:
+                self.served = True
+                return StepResult(tool_calls=[ToolCallRef(
+                    id="c1", name="write",
+                    arguments=json.dumps({"path": "ro/stuck.txt", "content": "agent\n"}))])
+            return StepResult(text="写好了")
+
+    from ai_coding.security.sandbox import Sandbox
+
+    sessions = SessionService(tmp_path / "sessions")
+    tools = ToolRegistry()
+    tools.register(WriteTool(Sandbox(root), FileStateTracker()))
+    loop = AgentLoop(
+        _WriterEngine(), sessions, tools, workspace=str(root), snapshots=SnapshotStore(root),
+        gate=PermissionGate(allowed_tools=("write",)),
+    )
+    session = sessions.create()
+    await loop.process_input(session, "建个文件")
+    assert (locked / "stuck.txt").exists(), "the turn did not create the file"
+    os.chmod(locked, 0o555)
+    try:
+        report = await loop.undo_last_turn(session)
+    finally:
+        os.chmod(locked, 0o755)
+
+    assert "ro/stuck.txt" in report["reason"], (
+        f"undo hid a partial rewind behind a clean report: {report}"
+    )
+    assert report["ok"] is True, "the conversation half still unrolls"
 
 
 @pytest.mark.asyncio
