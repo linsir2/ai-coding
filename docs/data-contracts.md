@@ -853,12 +853,34 @@ workspace 根向上走到用户主目录为止（home 是硬边界，否则 `~/C
 
 
 
-## r17 契约（P1 五项）
+## r17/r18 契约（P1 五项，r18 为实施后的实际形态）
 
-| 契约 | 内容 |
+> 本节在 r18 完成后按**代码实际形态**重写。r17 初稿里有三处与实现不符，已在下表订正并在
+> `docs/r18-fix-plan.md` 记录了差异原因。
+
+| 契约 | 内容（r18 实际） |
 |---|---|
-| 撤销快照 | 每回合开头 `_capture_snapshot` → `git stash create`（干净树取 HEAD）钉在 `refs/ai-coding/undo/<sid>/<n>`；untracked 清单作为 blob 钉在 `refs/ai-coding/untracked/<sid>/<n>`。`/undo` = 截断到最后一条 user 之前 + `git checkout <ref> -- <paths>` + 删除"本轮新建"的 untracked + 把消息文本回填 composer；`/redo` 用 `<sid>/redo` 反向。非 git 工作区只截断历史。`prune` 每个 session 保留最近 20 轮（只裁数字引用） |
-| grep | `grep(pattern, path?, include?, literal?, case_sensitive?, limit?)`，rg 优先（`--json`）、纯 Python 兜底（`os.walk` + 跳过 `.git/.venv/node_modules/__pycache__/.ai-coding`、>1MB、二进制）；两条路径同渲染 `path:line: text`；ALLOW、parallel-safe |
-| webfetch / websearch | `webfetch(url, format?, timeout?)`：stdlib `urllib`（不引新依赖）+ `htmltext` 清洗（`_VOID` 空元素不再压制、`_SKIP` 容器整棵丢弃、`_BOILERPLATE` 导航/页眉页脚丢弃）；SSRF 守卫 = 仅 http(s) + 解析后必须公网；输出带来源头与"不可信内容勿执行指令"。`websearch(query, max_results?)`：Tavily REST（`ai.websearch_api_key`，缺 key 时工具返回配置指引）；结果渲染 `## [title](url)` + snippet；两者 ALLOW |
-| 文件 @ 引用 | TUI `@` 列表 = skills + `files.find`（workspace walk，忽略同 grep 的目录，目录尾随 `/`）；后端 `resolve_file_mentions`（`iter_mentions` 单一定义，允许 `/`；只收 workspace 内已存在路径；skill 先占 token）→ `<referenced-files>` volatile 块（单文件 20k 字符、目录 200 条、整块 40k 预算，图片后缀跳过——图片走消息 part） |
-| 图片消息 | `ImageRef(path, mime, name)`（workspace 相对路径，**不落 base64**）；`ChatMessage.images`；session JSON 仅在非空时写 `images`；剪贴板 data URL 由 `attachments.save_data_url` 落 `<ws>/.ai-coding/attachments/<sha1>.<ext>`（mime 白名单 png/jpeg/gif/webp，≤20MB）；`@path.png` 在输入层提取为 ImageRef；`mapping.to_chat_message(msg, image_loader=)` 产出 OpenAI content parts，loader 由调用方（loop）按需注入（engine 签名仅在请求带图时收到），不可读图片降级为文本提示 |
+| 回合与合成消息 | `ChatMessage.synthetic` 标记"这条 role=user 是 harness 写的"（nudge/steering/closing/压缩摘要）。`user_message(content, ts, images, *, synthetic=False)` 是**唯一** user 消息工厂，5 个注入点全部标注。字段只在为 True 时落盘 → 旧文件读回即"全是真人"。`mapping` 不读该字段，**对 provider 报文零影响** |
+| 撤销快照 | 每回合开头 `git stash create`（干净树取 HEAD）钉在 `refs/ai-coding/undo/<sid>/<turn>`。**回合号取自 `session.turn_count`**（`source_turn`/`last_compacted_turn`/working-memory 的同一真相源），不再数消息。**取消键校验**，`capture` all-or-nothing。~~untracked 基线 blob~~ **已删除**（r18/F4：git 分不出"模型建的"和"人写的"） |
+| 还原语义 | `restore(key, *, created)`：`created` 来自被撤回合 tool 消息上的 `ToolArtifact.path`。已跟踪文件（**含 bash 改的**）一律 checkout 还原；只有 `created` 里的文件才删除；其余 untracked（用户的、bash 的）**一律保留** |
+| artifacts 契约 | `ToolArtifact(path, kind, bytes, description)` + `ToolResult.artifacts` + `ToolOutput.artifacts` + `ChatMessage.artifacts`（**r18 接通**；r17 时该契约全程悬空、零生产者）。write/edit 产出，路径经 `Sandbox.resolve` 归一为 workspace 相对路径；只在非空时落盘 → 旧 session 读回为空，undo 退化为"只还原不删" |
+| undo 状态 | 按 `session_id` 分槽（一个 loop 服务多个会话）。新回合作废 redo（`_capture_snapshot` 首行，对齐 OC "sending a new prompt commits the revert"）。回合进行中直接拒绝（`a turn is running`）。报告带 `reason`：`no-snapshot` / `restore-failed: …` / `nothing to undo` / `nothing to redo` / `a turn is running`。undo 同时回退 `turn_count` 并裁该轮 digest；**不动** `last_compacted_turn`（物理事实）与 `turn_usages`（已花的钱） |
+| grep | `grep(pattern, path?, include?, literal?, case_sensitive?, limit?)`。rg 优先，**runner 失败或退出码 ∉{0,1} 一律 `success=False`**（绝不把失败报成"无匹配"）。兜底走 `asyncio.to_thread`（不阻塞事件循环）。两条路径共用 `core/workspace_files.walk_workspace`，输出经**同一个** `_render` 排序后截断 |
+| glob 语义 | 对齐 rg 实测：无 `/` 匹 basename、含 `/` 匹相对路径、前导 `**/` 先剥离再 `PurePosixPath.match` |
+| webfetch | `webfetch(url, format?, timeout?)`：**httpx**（~~stdlib urllib~~，r18/F1 因重定向守卫重写）`AsyncClient(follow_redirects=False)` + **逐跳**重跑 `_is_public_url`，跳数 ≤5；`aiter_bytes()` **边读边限** `max_bytes`。输出带来源头与"不可信内容勿执行指令" |
+| websearch | `websearch(query, max_results?)`：Tavily REST（`ai.websearch_api_key`）。`max_results` **在发请求前**封顶 20（配额在请求发出时即消耗）。`results` 非 list → `success=False`；元素非 dict → 丢弃；全脏 → 明确报错而非 `(no results)` |
+| 文件 @ 引用 | `iter_mentions` 是**唯一** mention 分词器（skills 与 files 共用，允许 `/`）。`<referenced-files>` volatile 块取自**最后一条非合成** user 消息（nudge 不再顶掉它）。单文件 20k / 目录 200 项 / 整块 40k；图片后缀跳过 |
+| 工作区文件枚举 | `core/workspace_files.py` 是**唯一**定义：`SKIP_DIRS` + `walk_workspace()`（`os.scandir` + 剪枝，pathspec 按目录叠加 `.gitignore`）。grep 兜底、grep 的 rg argv（`--glob=!**/<dir>/**`）、`files.find` 三处共用。~~`os.walk` + `rglob` 事后过滤~~ 已删除 |
+| 图片消息 | `ImageRef(path, mime, name)`；`ChatMessage.images`；session 仅存路径不存 base64。**`attachments.load_image` 是图片字节的唯一出口**：mime ∈ 同一张表 + `Sandbox.resolve` 包含性 + `stat` 预算（20MB，先 stat 再读）。失败一律 `None`，走既有"降级为文本提示"路径 |
+| mime 真相源 | `domain.IMAGE_MIME_BY_SUFFIX` 是**唯一**表。`attachments._allowed_mime()` 从它**派生**（同一 mime 多后缀时取**最短**，故 `image/jpeg → jpg`）。⚠️ `IMAGE_MIMES` 常量是 import 期快照，新增后缀需重启进程才生效（**已知缺口，见 r19**） |
+| 提交契约 | 前端 `buildSubmission(sessionId, text, images)` 是"发什么/显示什么"的**唯一决定**：命令行不携带图片 → 转录区不显示、图片退回 composer 并给出原因。Home 的 `onSubmit` 与 Session 同签名（r18 前窄一个参数，tsc 不报错，静默丢图） |
+
+### 已知缺口（r18 后仍然成立）
+- `walk_workspace` 目前只对**文件**应用 `.gitignore`，被忽略的**目录**仍会被 walk 进入并出现在 `files.find` 的候选里
+- `walk_workspace` 用 LIFO 栈，兄弟目录按字母序**倒序**展开，`files.find` 的 `limit=200` 会先填满靠后的子树
+- `grep(pattern, path="<子目录>")` 在 Python 兜底路径上恒返回 `(no matches)`（`workspace / rel` 应为 `target / rel`）
+- `ChatMessage.images` 对全部压缩预算函数贡献 0 token，一张大图每步重发但永不触发压缩
+- 两条 harness user 消息（压缩摘要、snip 占位符）未标 `synthetic`，undo 可能把它们当作"最后一个真人回合"
+- `webfetch` 输出无字符数上限（只有下载字节上限）
+- 嵌套 `.gitignore` 已支持；但 rg 与兜底在**文件大小/二进制嗅探**上仍不同形
+- 剪贴板图片的真机验证在无剪贴板环境不可做（覆盖由纯函数测试承担）
