@@ -188,9 +188,15 @@ function hasTool(tool: string): boolean {
  * than returning nothing, and the next entry is what actually answers.  Only a
  * real PNG signature ends the walk, because `xclip` writes its error to stdout
  * on some builds.
+ *
+ * The default timeout is generous on purpose.  Spawning powershell.exe and
+ * loading System.Windows.Forms costs about 1.9 s on a cold WSL host -- a 2 s
+ * deadline sat right on top of it, so the same paste worked or silently did
+ * nothing depending on the day.  A paste is something the user asked for and is
+ * waiting on; failing it to save eight seconds helps nobody.
  */
 export async function readClipboardImage(
-  timeoutMs = 2000,
+  timeoutMs = 10_000,
 ): Promise<{ dataUrl: string } | { error: string }> {
   const commands = imageCommands({
     platform: process.platform,

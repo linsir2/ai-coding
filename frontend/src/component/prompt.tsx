@@ -91,6 +91,24 @@ export function Prompt(props: PromptProps) {
   const [hint, setHint] = createSignal("")
   const clipboard = hostClipboard()
 
+  // r21: the one place an image joins the list.  The host read takes about two
+  // seconds on WSL (it spawns powershell.exe), so the hint says so while it
+  // runs -- otherwise a paste looks like it did nothing until the chip appears
+  // "by itself" a moment later.
+  const attach = (dataUrl: string) => {
+    setImages((all) => [...all, { name: `image-${all.length + 1}`, dataUrl }])
+    setHint("")
+  }
+  const attachFromHost = async (source: "key" | "paste") => {
+    if (source === "key") setHint("正在读取剪贴板…")
+    const found = await readClipboardImage()
+    if ("dataUrl" in found) {
+      attach(found.dataUrl)
+      return
+    }
+    setHint(found.error)
+  }
+
   const paste = async () => {
     // r21: the host clipboard library comes first because it is the library's
     // own path and needs no subprocess -- but it cannot reach a clipboard over
@@ -100,8 +118,7 @@ export function Prompt(props: PromptProps) {
     // second try, and the message says which path answered.
     const native = await readNativeClipboard()
     if (native.kind === "image") {
-      setImages((all) => [...all, { name: `image-${all.length + 1}`, dataUrl: native.dataUrl }])
-      setHint("")
+      attach(native.dataUrl)
       return
     }
     if (native.kind === "text") {
@@ -109,13 +126,7 @@ export function Prompt(props: PromptProps) {
       setHint("")
       return
     }
-    const fallback = await readClipboardImage()
-    if ("dataUrl" in fallback) {
-      setImages((all) => [...all, { name: `image-${all.length + 1}`, dataUrl: fallback.dataUrl }])
-      setHint("")
-      return
-    }
-    setHint(`${native.kind === "failed" ? native.message : ""}${fallback.error}`)
+    await attachFromHost("key")
   }
 
   const readNativeClipboard = async (): Promise<PasteOutcome> => {
@@ -229,6 +240,25 @@ export function Prompt(props: PromptProps) {
   }))
 
   useBindings(() => ({
+    // r21: an attached image had no way out -- paste a screenshot by mistake
+    // and it rode along on every message until the turn was sent.  With the
+    // composer empty, backspace removes the most recent one, which is the
+    // gesture every chat UI already uses and needs no new key to learn.  The
+    // layer only exists while there is an image and no text, so an ordinary
+    // backspace inside a sentence is untouched.
+    enabled: images().length > 0 && (input?.plainText ?? "").length === 0,
+    target: () => input,
+    commands: [
+      {
+        name: "prompt.dropImage",
+        desc: "Remove the last attached image",
+        run: () => setImages((all) => all.slice(0, -1)),
+      },
+    ],
+    bindings: [{ key: "backspace", cmd: "prompt.dropImage" }],
+  }))
+
+  useBindings(() => ({
     enabled: visible(),
     target: () => input,
     commands: [
@@ -284,8 +314,9 @@ export function Prompt(props: PromptProps) {
             <Show when={images().length > 0}>
               <text fg={theme.textMuted}>
                 {images()
-                  .map((image) => `[Image: ${image.name}]`)
+                  .map((_image, index) => `[Image ${index + 1}]`)
                   .join(" ")}
+                {"   ⌫ 删除"}
               </text>
             </Show>
             <Show when={hint()}>
@@ -320,22 +351,11 @@ export function Prompt(props: PromptProps) {
             if (outcome.kind === "text") return
             event.preventDefault()
             if (outcome.kind === "image") {
-              setImages((all) => [...all, { name: `image-${all.length + 1}`, dataUrl: outcome.dataUrl }])
-              setHint("")
+              attach(outcome.dataUrl)
               return
             }
             // "clipboard": the terminal had nothing to forward, so ask the host.
-            void readClipboardImage().then((fallback) => {
-              if ("dataUrl" in fallback) {
-                setImages((all) => [
-                  ...all,
-                  { name: `image-${all.length + 1}`, dataUrl: fallback.dataUrl },
-                ])
-                setHint("")
-                return
-              }
-              setHint(fallback.error)
-            })
+            void attachFromHost("paste")
           }}
           placeholder={props.placeholder}
           placeholderColor={theme.textMuted}
