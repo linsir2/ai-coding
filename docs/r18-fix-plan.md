@@ -1041,19 +1041,189 @@ limit = min(max(1, limit), 20)       # Tavily 自身上限
 4. Tavily 改接口 → 工具明确报"provider 没有 results 列表"，模型知道这是上游问题而不是"网上没有"。
 5. 模型传 `max_results=10000` → 实际最多 20 条，不浪费配额也不被 provider 拒绝。
 
-## 9. F11–F14 — 清洗、websearch、前端
+## 9. F10 + F15 — 工作区文件枚举的单一真相源 + grep 两路同形
 
-| 编号 | 文件 | 改动 | 用例（Red） |
-|---|---|---|---|
-| F11 | `htmltext.py:22` | `_VOID` 增加 `embed`（它是 void 元素却在 `_SKIP`，抑制计数器永不归零） | 绊线去 xfail |
-| F12a | `websearch_tool.py:125` | `results` 非 list / 元素非 dict → `success=False` + 明确原因 | 绊线去 xfail |
-| F12b | `websearch_tool.py:92` | `limit = min(max(1, limit), 20)` | 绊线去 xfail |
-| F13 | `app.tsx:290` `home.tsx:43` `session.tsx` | `startSession(text, images)`；`pendingPrompt` 改 `{text, images}`；会话路由消费后清空（与现有 pendingPrompt 生命周期合并） | 前端：Home 提交带 images → `startSession` 收到 images（`frontend/test/`） |
-| F14 | `session.tsx:150` | `method` 先算，`apply({kind:"submitted", text, images})` 只在 payload 真带 images 时传 images —— **所见即所发** | 前端：slash 提交不渲染 image part |
+> 必须一起做：F10 的兜底要读 `.gitignore`，而"哪些目录跳过、哪些文件被忽略"的定义在 F15 收成一处。本轮**装了临时 rg 15.1.0 实测它的每一个行为**（装完即卸），否则"同形"只是猜测。
 
-**F13 的生命周期**：`pendingPrompt` 目前是 `createSignal<string|null>`。改成对象后，`session.tsx` 现有"消费后清空"的代码路径不动，只是取值方式变 `pending().text` / `pending().images`。
+### 9.1 F15 病灶：同一件事被写了两遍，且两遍都慢
 
----
+| | `grep_tool._walk:269` | `handlers.files_find:506` |
+|---|---|---|
+| 遍历 | `sorted(root.rglob("*"))` | `sorted(root.rglob("*"))` |
+| 跳过 | `if any(part in _SKIP_DIRS …)` | `skip = {".git",".venv","venv","node_modules","__pycache__",".ai-coding"}` ← **逐字副本** |
+| 剪枝 | **无**（rglob 先把 `.git`/`node_modules` 全走完，再逐条过滤） | **无**，且 `sorted()` 先全量物化，20k 上限在过滤之后才生效 |
+| 预算 | 无 | `scanned > 20_000` 在 `found` 之前 break |
+
+> **更正**：r17 审核报告说"grep 的 `_walk` 已用 `os.walk` + `dirs[:]` 正确剪枝"，我未核实就写进了方案。实际两处**都是** `rglob` 无剪枝。在一个 8k 文件的树上实测：`files.find` 枚举了 8068 条才让计数器走到 228 —— 也就是说 20k 预算大部分被垃圾路径吃掉，真正能进 `@` 补全的文件远不到 200 条。
+
+### 9.2 F10 病灶：三条分歧，全部实测确认（本轮装了 rg 15.1.0 对照）
+
+**分歧一：`.gitignore` 只有 rg 认**
+```
+有 .git 的仓库：rg → ./a.py ./deep/nested/x.py ./sub/c.txt          （x.log、sub/b.py 被忽略）
+无 .git 的目录：rg → 上面三个 + ./sub/b.py + ./x.log                （不认 .gitignore）
+```
+Python 兜底**从不**读 `.gitignore` → 在**任何**情况下都会命中 `x.log` / `sub/b.py`。
+
+**分歧二：`node_modules` 只有兜底跳**
+```
+.gitignore 清空、无任何忽略规则 → rg 搜到了 ./node_modules/dep.js
+```
+rg 只按 `.gitignore` 跳，**没有内建忽略**。我们硬编码 `_SKIP_DIRS` 里的 `node_modules`/`venv` 对 rg 路径完全无效 → 同一棵树，两路结果不同。
+（当前 rg 的 argv 只有 `--glob=!**/.git/**`。）
+
+**分歧三：`include` 的 glob 语义两路不同**
+| pattern | rg 实测 | Python `fnmatch(path.name, …)` |
+|---|---|---|
+| `*.py` | a.py, deep/nested/x.py, **sub/b.py** | 同 ✅（rg 无 `/` 的 glob 匹 basename） |
+| `sub/*.py` | **sub/b.py** | ❌ 空（`fnmatch('b.py','sub/*.py')` 为假） |
+| `**/*.py` | a.py, deep/nested/x.py, sub/b.py | ❌ 空 |
+
+rg 的规则：**glob 不含 `/` → 匹 basename；含 `/` → 匹相对 cwd 的路径**。
+
+**分歧四：输出顺序与 `limit` 截断的子集不同**
+rg 的 `--json` 行按并行 walk 完成顺序到达（代码原样保序）；兜底按 `sorted()` 保序。于是 `limit=2` 时两路**截到不同的两条**，尾注里的 total 也跟着撒谎。
+
+### 9.3 rg glob 与 `PurePosixPath.match` 的对齐（含 `**/` 陷阱）
+
+```
+a.py           match *.py   -> True    rg: True   ✅
+sub/b.py       match *.py   -> True    rg: True   ✅   （从右匹配 = basename 语义）
+deep/nested/x.py match *.py -> True    rg: True   ✅
+sub/b.py       match sub/*.py -> True  rg: True   ✅
+a.py           match sub/*.py -> False  rg: False  ✅
+a.py           match **/*.py -> False  rg: True   ❌ 分歧
+```
+`PurePath.match` 把 `**` 当普通 `*`，所以 `**/*.py` 要求路径有 2 段，而 rg 的 `**/` 表示"任意深度含零层"。
+**修法（已实测 4 例全中）**：模式以 `**/` 开头时先剥掉那 3 个字符，再交给 `match`——
+```
+strip('**/') 后：a.py→True  sub/b.py→True  deep/nested/x.py→True  sub/c.txt→False   与 rg 完全一致 ✅
+```
+
+### 9.4 pathspec 的 gitwildmatch 语义（实测）
+
+```
+'*.log' + '!keep.log'  →  x.log=True  keep.log=False  sub/x.log=True      ✅ 否定规则
+'node_modules/'        →  node_modules/dep.js=True  node_modules=False   ✅ 目录模式
+```
+`pathspec.PathSpec.from_lines('gitwildmatch', lines)` 正好是 gitignore 语义。
+
+### 9.5 影响面（执行范围）
+
+| 文件 | 现状 | 改动 |
+|---|---|---|
+| **新增** `ai_coding/core/workspace_files.py` | 无 | `SKIP_DIRS` + `walk_workspace(root, *, respect_gitignore=True)` |
+| `tools/grep_tool.py` | `_SKIP_DIRS` 私有副本 + `_walk` rglob | 删两者，改调 `walk_workspace` |
+| `server/handlers.py` | `skip` 逐字副本 + rglob | 删，改调 `walk_workspace` |
+| `tools/grep_tool.py` argv | 只有 `--glob=!**/.git/**` | 追加每个 SKIP_DIR 的 `--glob=!**/<dir>/**`（见 9.7 第 2 题） |
+| `tools/grep_tool.py` 渲染 | rg 原序、兜底 sorted | 两路都按 `(rel, line)` 排序**后**再套 limit |
+| `pyproject.toml` | — | 加 `pathspec>=0.12`（月下载 5.05 亿） |
+
+### 9.6 新模块的形状（**说明它凭什么不是造轮子**）
+
+```python
+# ai_coding/core/workspace_files.py
+SKIP_DIRS = frozenset({".git", ".venv", "venv", "node_modules", "__pycache__", ".ai-coding"})
+
+def walk_workspace(root, *, respect_gitignore=True, max_entries=20_000):
+    """(rel_posix, is_dir) for everything under ``root`` that is not skipped.
+
+    os.walk with ``dirs[:]`` pruning — the ignored directories are never
+    entered, which rglob could not do.  ``respect_gitignore`` layers the
+    .gitignore files git would apply (root, plus any found while descending --
+    see 9.7 Q1).  One definition, two callers: grep's fallback and the
+    composer's file list, which must not disagree about what exists.
+    """
+```
+- 不是新概念：`os.walk` 剪枝 + pathspec 都是标准做法，`pathspec` 是成熟库。
+- 存在的理由是**两个调用方已经各自写了一份**，而且写错（无剪枝）。合并本身就是消除真相源漂移。
+
+### 9.7 需要你拍板的三处
+
+见问卷。
+
+### 9.8 数据流影响
+
+```
+                    ┌────────────── core/workspace_files.py ──────────────┐
+                    │ SKIP_DIRS（唯一）+ walk_workspace（os.walk 剪枝）  │
+                    │ pathspec：.gitignore 规则（按目录叠加）             │
+                    └───┬──────────────────────────────┬──────────────────┘
+                        │                              │
+        grep_tool._grep_with_python              handlers.files_find
+        （文件，rel 路径）                        （文件+目录，rel + '/'）
+                        │                              │
+              include 过滤：PurePosixPath.match       query 子串过滤（保持现状）
+                        │                              │
+                        └──────► 两路同一批文件 ◄───────┘
+
+  rg 分支：argv 追加每个 SKIP_DIR 的 --glob=!**/<dir>/**   （让 rg 也跳）
+           解析后按 (rel, line) 排序 → 截断 → 渲染
+```
+
+### 9.9 完成后效果
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| `.gitignore` 写了 `*.log` | rg 跳、兜底不跳 | 两路都跳 |
+| 无 git 的目录里 `.gitignore` 写了 `*.log` | 两路都不跳 | 两路都跳（rg 侧加 `--no-require-git`，见 Q3） |
+| `node_modules` 未被 ignore | rg 搜进去、兜底跳 | 两路都跳 |
+| `include='sub/*.py'` / `'**/*.py'` | 兜底返回空 | 两路一致 |
+| `limit=2` | 两路截到不同两条 | 两路截到**同样**的两条（按 `(rel,line)` 排序后） |
+| 8k 树的 `files.find` | 枚举 8068 条才走 228 | 剪枝后只走真实文件；20k 预算用在该用的地方 |
+| `files.find` 第 200 条之后 | 选不到（`limit` 在排序后截断） | 行为不变（客户端仍需传 query）——**本次不改**，见下 |
+
+> `files.find` 的 `limit=200` 截断是 r17 已知的取舍（客户端从不传 query，所以只有排序后的前 200 个可选）。本轮**不动**：客户端侧 fuzzysort 过滤 + `files.find` 全量返回需要一起改，属 F13 的范围，单独评估。
+
+### 9.10 RIPR 用例
+
+- **Red（既有绊线 3 条）**：grep 两路同形相关（摘 xfail 标注）
+- **Red（新增 7 条）**
+  1. `test_both_runners_answer_the_same_question` —— `@pytest.mark.skipif(not shutil.which("rg"))`，同一棵树两路各跑一次，断言输出**逐行相同**（装了 rg 的机器上才跑；本机跳过）
+  2. `test_the_fallback_respects_gitignore`（无 rg 也能验）：`.gitignore` 写 `*.log` → 两路都不命中 `x.log`
+  3. `test_include_globs_match_what_rg_matches`：参数化 `*.py` / `sub/*.py` / `**/*.py` 三个 pattern，各自断言期望文件集（**用 9.3 实测出的 rg 真值当期望**）
+  4. `test_the_ignore_list_has_one_home`：`SKIP_DIRS` 只在 `workspace_files` 定义；grep_tool 与 handlers 都不再自带副本（import 即约束）
+  5. `test_the_walk_prunes_instead_of_filtering`：建一棵含 5k 个 `.git` 内文件的树，断言枚举条数 < 100（证明是剪枝不是事后过滤）
+  6. `test_limit_selects_the_same_rows_on_both_paths`：用注入 runner 的 rg 路径与兜底，对同一份数据断言 `limit=2` 截到同样两行且 total 一致
+  7. `test_a_nested_gitignore_is_applied`（取决于 Q1）
+- **Pass**：`tests/test_grep_tool.py`、`test_webtools.py` 保持绿；`files.find` 的既有前端测试保持绿
+- **Refactor**：删掉 `grep_tool._SKIP_DIRS` 与 `handlers` 的 `skip`（用 ruff/grep 确认无残留引用）
+
+### 9.11 架构图
+
+```
+                       真相源：core/workspace_files.py
+                       ┌──────────────────────────────────────────┐
+                       │ SKIP_DIRS = {.git,.venv,venv,            │
+                       │   node_modules,__pycache__,.ai-coding}  │
+                       │ walk_workspace():                         │
+                       │   os.walk + dirs[:] 剪枝（不进入）        │
+                       │   pathspec: .gitignore（按目录叠加）     │
+                       └───────┬───────────────────────┬──────────┘
+                               │                       │
+              ┌────────────────┘                       └──────────────┐
+              ▼                                                       ▼
+   grep 兜底                                          files.find（@ 补全）
+   只取 is_dir=False                                  文件 + 目录（rel + "/"）
+   include: match(rel, strip('**/'))                  query 子串过滤（不变）
+              │                                                       │
+              └──────────► 同一批文件 ◄────────────────────────────────┘
+                                    │
+   rg 分支：argv 也带 --glob=!**/<每个 SKIP_DIR>/** + --no-require-git
+            解析 → 按 (rel, line) 排序 → limit → 渲染
+                                    │
+                                    ▼
+                    两条路径产出同一形状：path:line: text
+```
+
+### 9.12 最终形态自检
+
+1. 装了 rg 的机器跑 `grep(pattern, include='**/*.py')` → 命中根目录与深层目录的 .py；不装 rg 的机器 → **同样的行**。
+2. 仓库根有 `.gitignore` 写 `dist/` → 两路都不搜 dist。
+3. 一个 50k 文件的仓库（.git 里就有 40k）→ `files.find` 在几百毫秒内返回，且 20k 预算花在真实文件上。
+4. `node_modules` 没被 ignore → 两路都不搜它（这是有意的：vendored 依赖不是搜索目标）。
+5. `limit=5` 在两台机器上截到同样 5 行，尾注的 total 也一样。
+6. 没有 `.gitignore` 的目录 → 行为退化为"只看 SKIP_DIRS"，两路一致。
 
 ## 10. F15+F16 — 真相源收敛
 
@@ -1145,14 +1315,14 @@ limit = min(max(1, limit), 20)       # Tavily 自身上限
 
 ### 工具正确性
 - [x] **F9** grep runner 失败不再报 `(no matches)`；兜底 `to_thread`
-- [ ] **F10** grep 两路同形：pathspec + `PurePosixPath.match` + 排序后截断 + 双跑一致性测试
+- [x] **F10** grep 两路同形：pathspec + `PurePosixPath.match` + 排序后截断 + 双跑一致性测试
 - [x] **F11** `_VOID` 加 `embed`
 - [x] **F12** websearch 形状校验 + `max_results ≤ 20`
 
 ### 前端与真相源
 - [ ] **F13** Home 附件透传（`pendingPrompt` 带 images）
 - [ ] **F14** slash 命令不渲染未发送的 image part
-- [ ] **F15** `core/workspace_files.py` 单一真相源，`files.find` 换 `os.walk`
+- [x] **F15** `core/workspace_files.py` 单一真相源，`files.find` 换 `os.walk`
 - [ ] **F16** mime 白名单从 `IMAGE_MIME_BY_SUFFIX` 派生
 
 ### 收尾

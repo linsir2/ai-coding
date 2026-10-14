@@ -259,30 +259,42 @@ async def test_an_unusable_rg_must_not_be_reported_as_no_matches(tmp_path):
 
 
 def test_the_fallback_does_not_block_the_event_loop(tmp_path):
-    """``grep_tool.py:140`` returns ``self._grep_with_python(...)`` without
-    ``await``, so the whole os.walk runs on the event loop -- the SSE bridge and
-    the TUI stop for its duration."""
+    """``grep_tool`` returns the sync fallback without awaiting it, so the whole
+    os.walk ran on the event loop and the SSE bridge stopped for its duration.
+
+    The discriminator is deliberately not a clock: a 5ms ticker against a scan
+    that takes ~10ms sits on the boundary and fails or passes by luck (this
+    test was written that way once and duly flaked).  ``sleep(0)`` yields
+    without waiting, so the only question is whether the loop got control at
+    all -- which is exactly what blocking it would prevent.
+    """
     import asyncio
 
     (tmp_path / "many").mkdir()
-    for i in range(200):
-        (tmp_path / "many" / f"f{i}.py").write_text("target\n" * 20, encoding="utf-8")
+    for i in range(400):
+        (tmp_path / "many" / f"f{i}.py").write_text("target\n" * 40, encoding="utf-8")
     tool = GrepTool(Sandbox(tmp_path), use_ripgrep=False)
     ticks = 0
 
-    async def ticker():
+    async def spin():
         nonlocal ticks
         while True:
-            await asyncio.sleep(0.005)
+            await asyncio.sleep(0)  # yield to the loop, no clock involved
             ticks += 1
 
     async def main():
-        background = asyncio.create_task(ticker())
-        await tool.execute({"pattern": "target"})
+        background = asyncio.create_task(spin())
+        result = await tool.execute({"pattern": "target"})
         background.cancel()
+        return result
 
-    asyncio.run(main())
-    assert ticks >= 3, f"the event loop was blocked: {ticks} ticks in the whole scan"
+    result = asyncio.run(main())
+
+    assert result.success
+    assert ticks >= 10, (
+        f"the loop got control {ticks} times during a synchronous scan -- "
+        "the fallback is still blocking it"
+    )
 
 
 # -------------------------------------------------------------- T1: undo/redo

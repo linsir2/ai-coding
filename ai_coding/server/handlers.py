@@ -508,30 +508,17 @@ def make_handlers(
         list the user picks from and the tree the tools see agree.  Directories
         end with '/'; the client fuzz-sorts (it already ships fuzzysort).
         """
-        from pathlib import Path as _Path
 
         query = str(params.get("query", "") or "").strip().casefold()
         try:
             limit = int(params.get("limit", 200) or 200)
         except (TypeError, ValueError):
             limit = 200
-        skip = {".git", ".venv", "venv", "node_modules", "__pycache__", ".ai-coding"}
-        root = _Path(world.workspace)
+        from ai_coding.core.workspace_files import walk_workspace
+
         found: list[str] = []
-        scanned = 0
-        for path in sorted(root.rglob("*")):
-            scanned += 1
-            if scanned > 20_000:
-                break
-            rel = path.relative_to(root)
-            if any(part in skip for part in rel.parts):
-                continue
-            if path.is_dir():
-                name = rel.as_posix() + "/"
-            elif path.is_file():
-                name = rel.as_posix()
-            else:
-                continue
+        for rel, is_dir in walk_workspace(world.workspace):
+            name = rel.as_posix() + "/" if is_dir else rel.as_posix()
             if query and query not in name.casefold():
                 continue
             found.append(name)

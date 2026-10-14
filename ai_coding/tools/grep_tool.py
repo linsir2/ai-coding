@@ -12,14 +12,14 @@ downloading is a packaging decision we deliberately do not take here.
 from __future__ import annotations
 
 import asyncio
-import fnmatch
 import json
 import re
 import shutil
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+from ai_coding.core.workspace_files import SKIP_DIRS, walk_workspace
 from ai_coding.domain.message import ToolResult
 from ai_coding.infra.subprocess_runner import run_process_async
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
@@ -27,13 +27,21 @@ from ai_coding.tools.base import BaseTool, ToolContext
 
 _DEFAULT_MAX_MATCHES = 100
 _DEFAULT_TIMEOUT = 30.0
-#: Directories a search never walks in the Python fallback.  ``rg`` gets the
-#: same effect from .gitignore; parity here is what keeps the two paths'
-#: answers comparable (they cannot be byte-identical -- rg has no index).
-_SKIP_DIRS = frozenset({".git", ".venv", "venv", "node_modules", "__pycache__", ".ai-coding"})
 _MAX_FILE_BYTES = 1_000_000
 _TEXT_SNIFF_BYTES = 4_096
 _MAX_LINE_CHARS = 300
+
+
+def _include_matches(rel: PurePosixPath, include: str) -> bool:
+    """Whether ``include`` selects ``rel`` -- ripgrep's rule, not fnmatch's.
+
+    Measured against rg 15.1.0: a pattern with no ``/`` matches the basename at
+    any depth, a pattern with ``/`` matches the path relative to the search
+    root, and a leading ``**/`` means "any depth including none" -- which
+    ``PurePath.match`` does not do, since it reads ``**`` as one segment.
+    """
+    pattern = include[3:] if include.startswith("**/") else include
+    return rel.match(pattern)
 
 
 class GrepTool(BaseTool):
@@ -159,12 +167,23 @@ class GrepTool(BaseTool):
 
     # ---- rendering ---------------------------------------------------------
 
-    def _render(self, lines: list[str], *, total: int) -> ToolResult:
-        if not lines:
+    def _render(
+        self, hits: list[tuple[str, int, str]], limit: int, *, total: int | None = None
+    ) -> ToolResult:
+        """The one place hits become output (r18/F10).
+
+        Both runners hand over ``(path, line, text)`` rows; sorting and
+        truncating happen here, once.  ripgrep emits rows in parallel-walk
+        completion order, so before this the two paths cut the list at
+        different rows and reported a ``total`` that described neither.
+        """
+        total = len(hits) if total is None else total
+        rows = sorted(hits)[:limit]
+        if not rows:
             return ToolResult(success=True, output="(no matches)")
-        output = "\n".join(lines)
-        if total > len(lines):
-            output += f"\n... [showing {len(lines)} of {total} matches]"
+        output = "\n".join(f"{path}:{number}: {text}" for path, number, text in rows)
+        if total > len(rows):
+            output += f"\n... [showing {len(rows)} of {total} matches]"
         return ToolResult(success=True, output=output)
 
     @staticmethod
@@ -180,14 +199,22 @@ class GrepTool(BaseTool):
         self, target: Path, pattern: str, *, include: str, literal: bool,
         case_sensitive: bool, limit: int,
     ) -> ToolResult:
-        argv: list[str] = [self._rg or "rg", "--json", "--hidden", "--no-messages"]
+        argv: list[str] = [
+            self._rg or "rg", "--json", "--hidden", "--no-messages",
+            # r18/F10: rg follows .gitignore only inside a repository; we follow
+            # it everywhere, so tell it not to insist on a repo.
+            "--no-require-git",
+        ]
         if literal:
             argv.append("--fixed-strings")
         if not case_sensitive:
             argv.append("--ignore-case")
         if include:
             argv.append(f"--glob={include}")
-        argv += ["--glob=!**/.git/**", "--", pattern, str(target)]
+        # The same directories the fallback prunes.  rg has no built-in ignore,
+        # so without these the two runners disagreed about node_modules (F15).
+        argv += [f"--glob=!**/{name}/**" for name in sorted(SKIP_DIRS)]
+        argv += ["--", pattern, str(target)]
         outcome = await self._runner(argv, cwd=str(self._sandbox.workspace), timeout=self._timeout)
         if outcome.timed_out:
             raise TimeoutError
@@ -208,8 +235,7 @@ class GrepTool(BaseTool):
                 output=f"grep failed (rg exit {outcome.returncode}): "
                 f"{(outcome.stderr or '').strip()[:200]}",
             )
-        lines: list[str] = []
-        total = 0
+        hits: list[tuple[str, int, str]] = []
         for raw in (outcome.stdout or "").splitlines():
             try:
                 record = json.loads(raw)
@@ -217,19 +243,20 @@ class GrepTool(BaseTool):
                 continue
             if record.get("type") != "match":
                 continue
-            total += 1
-            if len(lines) >= limit:
-                continue
             data = record.get("data", {})
             path = str(data.get("path", {}).get("text", ""))
-            number = data.get("line_number", 0)
-            text = self._clip(str(data.get("lines", {}).get("text", "")))
             try:
                 path = str(Path(path).resolve().relative_to(self._sandbox.workspace))
             except (OSError, ValueError):
                 pass
-            lines.append(f"{path}:{number}: {text}")
-        return self._render(lines, total=total)
+            hits.append(
+                (
+                    PurePosixPath(path).as_posix(),
+                    int(data.get("line_number", 0)),
+                    self._clip(str(data.get("lines", {}).get("text", ""))),
+                )
+            )
+        return self._render(hits, limit)
 
     # ---- pure Python fallback ---------------------------------------------
 
@@ -240,11 +267,14 @@ class GrepTool(BaseTool):
         flags = 0 if case_sensitive else re.IGNORECASE
         needle = re.escape(pattern) if literal else pattern
         matcher = re.compile(needle, flags)
-        files: Sequence[Path] = [target] if target.is_file() else self._walk(target)
-        lines: list[str] = []
-        total = 0
-        for path in files:
-            if include and not fnmatch.fnmatch(path.name, include):
+        files: Sequence[tuple[Path, PurePosixPath]] = (
+            [(target, PurePosixPath(target.name))]
+            if target.is_file()
+            else self._walk(target)
+        )
+        hits: list[tuple[str, int, str]] = []
+        for path, rel in files:
+            if include and not _include_matches(rel, include):
                 continue
             try:
                 if path.stat().st_size > _MAX_FILE_BYTES:
@@ -255,30 +285,18 @@ class GrepTool(BaseTool):
             if b"\x00" in raw[:_TEXT_SNIFF_BYTES]:
                 continue  # binary
             text = raw.decode("utf-8", errors="replace")
-            try:
-                rel = str(path.relative_to(self._sandbox.workspace))
-            except ValueError:
-                rel = str(path)
             for number, line in enumerate(text.splitlines(), start=1):
                 if matcher.search(line):
-                    total += 1
-                    if len(lines) < limit:
-                        lines.append(f"{rel}:{number}: {self._clip(line)}")
-        return self._render(lines, total=total)
+                    hits.append((rel.as_posix(), number, self._clip(line)))
+        return self._render(hits, limit)
 
-    def _walk(self, root: Path) -> list[Path]:
-        found: list[Path] = []
-        for path in sorted(root.rglob("*")):
-            if not path.is_file():
-                continue
-            if any(part in _SKIP_DIRS for part in path.relative_to(root).parts):
-                continue
-            try:
-                path.resolve().relative_to(self._sandbox.workspace)
-            except (OSError, ValueError):
-                continue
-            found.append(path)
-        return found
+    def _walk(self, root: Path) -> list[tuple[Path, PurePosixPath]]:
+        """The files under ``root``, through the shared workspace walk (r18/F15)."""
+        return [
+            (self._sandbox.workspace / rel, rel)
+            for rel, is_dir in walk_workspace(root)
+            if not is_dir
+        ]
 
 
 __all__ = ["GrepTool"]

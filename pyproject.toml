@@ -16,6 +16,10 @@ dependencies = [
     # redirects manually, so the SSRF guard can re-run on every hop -- the
     # stdlib opener followed 302s on its own, which is the defect F1 closed.
     "httpx>=0.27",
+    # Gitignore semantics for the workspace walk (r18/F15).  Hand-rolling this
+    # is how the fallback and ripgrep came to disagree; pathspec is what git
+    # itself uses, and ripgrep already agrees with it.
+    "pathspec>=0.12.1",
     # TUI IPC (plan B, M0.5): the Python port of vscode-jsonrpc, maintained by
     # the python-lsp team; the TS side pairs with vscode-jsonrpc itself.
     "python-lsp-jsonrpc>=1.1.2",
