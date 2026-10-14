@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from ai_coding.ai.engine import ChatEngine  # noqa: E402
-from ai_coding.attachments import _allowed_mime, save_data_url  # noqa: E402
+from ai_coding.attachments import allowed_mime, save_data_url  # noqa: E402
 from ai_coding.core.agent_loop import AgentLoop  # noqa: E402
 from ai_coding.core.snapshots import SnapshotStore  # noqa: E402
 from ai_coding.core.workspace_files import SKIP_DIRS, walk_workspace  # noqa: E402
@@ -280,7 +280,7 @@ def section_contracts() -> None:
     print("\n6. contracts — one table, one spelling")
     from ai_coding.domain.message import IMAGE_MIME_BY_SUFFIX
 
-    derived = _allowed_mime()
+    derived = allowed_mime()
     check("the paste whitelist is derived from the suffix table",
           set(derived) == set(IMAGE_MIME_BY_SUFFIX.values()), f"{sorted(derived)}")
     check("pasted jpegs keep their name", derived.get("image/jpeg") == "jpg",

@@ -32,6 +32,7 @@ def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
             path=str(item.get("path", "")),
             mime=str(item.get("mime", "")),
             name=str(item.get("name", "")),
+            bytes=int(item.get("bytes", 0) or 0),
         )
         for item in (raw_images if isinstance(raw_images, list) else [])
         if isinstance(item, dict) and item.get("path")
@@ -73,7 +74,13 @@ def _message_to_dict(msg: ChatMessage) -> dict[str, Any]:
     # see the key, same rule as `reasoning`.
     if msg.images:
         data["images"] = [
-            {"path": ref.path, "mime": ref.mime, "name": ref.name} for ref in msg.images
+            {
+                "path": ref.path,
+                "mime": ref.mime,
+                "name": ref.name,
+                **({"bytes": ref.bytes} if ref.bytes else {}),
+            }
+            for ref in msg.images
         ]
     if msg.tool_calls:
         data["toolCalls"] = [

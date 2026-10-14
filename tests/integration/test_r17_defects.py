@@ -11,6 +11,7 @@ Each xfail reason names the file:line that owns the fix.
 
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 from collections.abc import AsyncIterator
@@ -227,6 +228,81 @@ def test_an_image_over_the_budget_is_refused_before_the_bytes_are_read(tmp_path)
     assert DEFAULT_MAX_BYTES == 20 * 1024 * 1024, "the paste budget moved"
 
 
+# ------------------------------------------- T5: what an image costs (r19/F3)
+
+
+def test_a_large_image_is_not_free_in_the_context_budget():
+    """The provider receives the bytes again on every step; a budget that counts
+    only text cannot see that, so a 5MB screenshot is re-sent 28MB at a time and
+    nothing ever triggers compaction."""
+    from ai_coding.core.context_compression import estimate_tokens, image_tokens
+
+    message = ChatMessage(
+        role="user", content="看这个", timestamp="t",
+        images=(ImageRef(path="shot.png", mime="image/png", name="s", bytes=5_000_000),),
+    )
+
+    charged = image_tokens([message])
+    assert charged >= 1_250_000, charged
+    assert estimate_tokens(message.content or "") < 100, "text-only cost must not move"
+
+
+def test_a_text_only_message_costs_exactly_what_it_did():
+    from ai_coding.core.context_compression import image_tokens
+
+    messages = [ChatMessage(role="user", content="一", timestamp="t")]
+
+    assert image_tokens(messages) == 0
+
+
+def test_an_image_from_an_older_session_is_not_charged():
+    """Old sessions have no ``bytes``; they must keep behaving as they did, not
+    start costing a fortune for a screenshot nobody measured."""
+    from ai_coding.ai.mapping import history_to_chat_messages
+    from ai_coding.core.context_compression import image_tokens
+    from ai_coding.domain.session import _message_from_dict
+
+    stored = _message_from_dict(
+        {"role": "user", "content": "旧", "timestamp": "t",
+         "images": [{"path": "old.png", "mime": "image/png", "name": "old"}]}
+    )
+
+    assert stored.images[0].bytes == 0
+    assert image_tokens([stored]) == 0, "an unmeasured image must not cost anything"
+    # The reference still travels (degrading to a note when no loader is given);
+    # what it must not do is invent a size it never learned.
+    parts = history_to_chat_messages([stored])[0]["content"]
+    assert isinstance(parts, list) and any("old" in str(p.get("text", "")) for p in parts)
+
+
+@pytest.mark.asyncio
+async def test_both_ways_of_attaching_an_image_record_its_size(tmp_path):
+    """``save_data_url`` already holds the bytes and the @path extractor already
+    stats the file; recording the size there costs nothing, while reading it in
+    the budget path would mean filesystem I/O per estimate."""
+    from ai_coding.attachments import save_data_url
+
+    pasted = save_data_url(
+        tmp_path, "clip", "data:image/png;base64," + base64.b64encode(_png_b64()).decode()
+    )
+    assert pasted is not None and pasted.bytes == len(_png_b64())
+
+    (tmp_path / "shot.png").write_bytes(_png_b64())
+    loop = AgentLoop.__new__(AgentLoop)
+    loop.workspace = str(tmp_path)
+    extracted = loop._extract_image_mentions("@shot.png")
+
+    assert len(extracted) == 1
+    assert extracted[0].bytes == len(_png_b64()), extracted[0]
+
+
+def _png_b64() -> bytes:
+    return base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQ"
+        "AAAABJRU5ErkJggg=="
+    )
+
+
 # ------------------------------------------------------- T5: the mime tables
 
 
@@ -234,18 +310,25 @@ def test_the_paste_whitelist_is_derived_from_the_suffix_table():
     """r17 kept two hand-written tables that happened to agree.  Add ``.bmp`` to
     one and the paste whitelist refuses it while ``@file.bmp`` is extracted --
     and the provider then rejects the whole request (r18/F16)."""
-    from ai_coding.attachments import _allowed_mime
+    from ai_coding.attachments import allowed_mime
     from ai_coding.domain.message import IMAGE_MIME_BY_SUFFIX
 
-    assert set(_allowed_mime()) == set(IMAGE_MIME_BY_SUFFIX.values()), (
+    assert set(allowed_mime()) == set(IMAGE_MIME_BY_SUFFIX.values()), (
         "the paste whitelist and the suffix table have drifted apart"
     )
-    assert _allowed_mime()["image/jpeg"] == "jpg", "pasted jpegs must keep their name"
+    assert allowed_mime()["image/jpeg"] == "jpg", "pasted jpegs must keep their name"
 
 
-def test_a_new_suffix_reaches_the_paste_whitelist(monkeypatch):
-    """Derived, not copied: patching the one table has to move the other."""
+def test_a_new_suffix_reaches_the_paste_whitelist(tmp_path, monkeypatch):
+    """Derived, not copied: patching the one table must move every reader.
+
+    r18 fixed the write path (``_allowed_mime`` reads the table per call) but
+    left ``load_image`` reading a constant frozen at import -- so a suffix added
+    to the table was accepted by a paste and then refused on the way out, with
+    nothing saying so.  Both paths have to follow the same table.
+    """
     from ai_coding import attachments
+    from ai_coding.attachments import load_image
     from ai_coding.domain import message
 
     monkeypatch.setattr(
@@ -253,11 +336,31 @@ def test_a_new_suffix_reaches_the_paste_whitelist(monkeypatch):
         "IMAGE_MIME_BY_SUFFIX",
         {**message.IMAGE_MIME_BY_SUFFIX, ".bmp": "image/bmp"},
     )
+    (tmp_path / "d.bmp").write_bytes(b"BM fake bitmap")
 
-    derived = attachments._allowed_mime()
+    assert attachments.allowed_mime()["image/bmp"] == "bmp"
+    assert load_image(tmp_path, ImageRef(path="d.bmp", mime="image/bmp", name="d")) is not None, (
+        "the read path refused a mime the paste path just accepted"
+    )
 
-    assert derived["image/bmp"] == "bmp", derived
-    assert attachments.IMAGE_MIMES <= set(message.IMAGE_MIME_BY_SUFFIX.values())
+
+def test_the_image_mime_set_is_written_down_once():
+    """One table decides which suffixes are images.
+
+    Modules that *read* ``IMAGE_MIME_BY_SUFFIX`` are fine and expected; what
+    must not exist anywhere else is a spelled-out mime -- that is how the paste
+    path and the read path came to accept different sets.
+    """
+    owners = [
+        str(path)
+        for path in Path("ai_coding").rglob("*.py")
+        if any(f'"{mime}"' in path.read_text(encoding="utf-8")
+               for mime in ("image/png", "image/jpeg", "image/gif", "image/webp"))
+    ]
+
+    assert owners == ["ai_coding/domain/message.py"], (
+        f"an image mime is spelled out outside the one table: {owners}"
+    )
 
 
 # ------------------------------------------------------------- T3: htmltext

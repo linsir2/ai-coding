@@ -181,8 +181,8 @@ def _image_tokens(messages: list[ChatMessage]) -> int:
 ## 6. 打勾清单
 
 - [x] **F1** grep 两条路径的路径归一（兜底 + rg），补 `path=` 用例；验收脚本 32/32
-- [ ] **F2** 删 `IMAGE_MIMES`，`load_image` 直接用 `_allowed_mime()`；同步契约文档
-- [ ] **F3** `ImageRef.bytes` + 压缩预算按体积计（含旧 session 兼容）
+- [x] **F2** 删 `IMAGE_MIMES`，`load_image` 直接用 `_allowed_mime()`；同步契约文档
+- [x] **F3** `ImageRef.bytes` + 压缩预算按体积计（含旧 session 兼容）
 - [ ] **F4** ~~两条 harness user 消息~~ —— **已证伪，不改**（见 §0）
 - [ ] **F5** `slash.list` IPC + 前端不猜（删除前端手写词汇表）
 - [ ] `scripts/r18_acceptance.py` 全绿

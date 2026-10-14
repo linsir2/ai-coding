@@ -146,6 +146,13 @@ class ImageRef:
     path: str
     mime: str
     name: str
+    #: The file's size, recorded where it was already known -- the bytes of a
+    #: paste, or a stat at the moment ``@path`` is extracted (r19/F3).  The
+    #: context budget charges images by it, so the alternative is reading the
+    #: file every time the history is measured.  Zero for a reference written
+    #: before this field existed, which keeps those sessions costing what they
+    #: always did.
+    bytes: int = 0
 
 
 @dataclass

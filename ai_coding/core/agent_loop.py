@@ -1291,7 +1291,16 @@ class AgentLoop:
                 continue
             if resolved.is_file():
                 seen.add(token)
-                refs.append(ImageRef(path=token, mime=mime, name=Path(token).name))
+                # r19/F3: the size is taken here, where the file was resolved
+                # anyway, so the context budget never has to stat it.
+                refs.append(
+                    ImageRef(
+                        path=token,
+                        mime=mime,
+                        name=Path(token).name,
+                        bytes=resolved.stat().st_size,
+                    )
+                )
         return tuple(refs)
 
     def _load_image(self, ref: ImageRef) -> str | None:

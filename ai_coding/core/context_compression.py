@@ -341,6 +341,24 @@ def sanitize_pairs(messages: list[ChatMessage]) -> list[ChatMessage]:
     return out
 
 
+def _history_tokens(messages: list[ChatMessage]) -> int:
+    """Text plus the images, for every threshold that decides about compressing."""
+    return estimate_tokens(_joined_history_text(messages)) + image_tokens(messages)
+
+
+def image_tokens(messages: list[ChatMessage]) -> int:
+    """What the images a request carries cost it (r19/F3).
+
+    ``ImageRef.bytes`` is what the wire carries: the base64 encoding runs about
+    four characters per three bytes, so a quarter of the file size is a close
+    lower bound on the request weight.  Charging it here is what lets a
+    screenshot stop being invisible -- before this a 5 MB image was re-sent on
+    every step while the budget, reading only text, stayed at zero and nothing
+    ever compacted.
+    """
+    return sum(ref.bytes // 4 for message in messages for ref in message.images)
+
+
 def _joined_history_text(messages: list[ChatMessage]) -> str:
     """Flatten messages into a single text block for token estimation / summarization."""
     parts: list[str] = []
@@ -524,7 +542,7 @@ class ContextManager:
                 out, head_text=l4_head, on_summary=on_summary, on_delta=on_delta
             )
 
-        if estimate_tokens(_joined_history_text(out)) > self._max_context_tokens:
+        if _history_tokens(out) > self._max_context_tokens:
             out = hard_trim(out, HARD_TRIM_KEEP_TAIL)
 
         out = _ensure_pinned(out, pinned)
@@ -548,7 +566,7 @@ class ContextManager:
         pre-existing estimate-only behaviour there.
         """
         ceiling = compaction_ceiling(self._max_context_tokens)
-        observed = max(int(observed_tokens or 0), estimate_tokens(_joined_history_text(messages)))
+        observed = max(int(observed_tokens or 0), _history_tokens(messages))
         return observed >= ceiling
 
     async def compress_if_needed(
@@ -575,7 +593,7 @@ class ContextManager:
         target = int(self._max_context_tokens * self._compress_target_ratio)
         guard = 0
         while (
-            estimate_tokens(_joined_history_text(out)) > target
+            _history_tokens(out) > target
             and len(out) > _MIN_PAGE_MESSAGES
             and guard < 4
         ):
@@ -608,7 +626,7 @@ class ContextManager:
         tail: list[ChatMessage] = []
         used = 0
         for message in reversed(messages):
-            cost = estimate_tokens(message.content or "")
+            cost = estimate_tokens(message.content or "") + image_tokens([message])
             if tail and used + cost > budget:
                 break
             tail.append(message)

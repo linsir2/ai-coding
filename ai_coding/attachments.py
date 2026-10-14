@@ -26,14 +26,8 @@ from ai_coding.domain import message as _message
 from ai_coding.domain.message import ImageRef
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
 
-#: The same set, read from the table the loop and request assembly already use --
-#: one truth source for "is this an image", two projections of it (extensions
-#: for naming files, mimes for checking them).  The module is imported rather
-#: than the name, so there is only ever one binding of that table in this file.
-IMAGE_MIMES = frozenset(_message.IMAGE_MIME_BY_SUFFIX.values())
 
-
-def _allowed_mime() -> dict[str, str]:
+def allowed_mime() -> dict[str, str]:
     """``{mime: file extension}`` for the images the model can be shown.
 
     Derived from ``IMAGE_MIME_BY_SUFFIX`` rather than written out (r18/F16): two
@@ -41,6 +35,11 @@ def _allowed_mime() -> dict[str, str]:
     while the paste path still rejected it -- and the provider then refused the
     whole turn.  Where a mime has several suffixes the shortest names the file,
     which is also what the table was written to produce.
+
+    Read per call rather than frozen at import (r19/F2): a frozen copy is the
+    same drift wearing a different hat -- the paste path would have followed
+    the table while ``load_image`` refused what it had just accepted.  At ~2.5us
+    and a handful of calls per turn, deriving it each time is free.
     """
     table = _message.IMAGE_MIME_BY_SUFFIX
     return {
@@ -72,7 +71,7 @@ def save_data_url(
     if match is None:
         return None
     mime = match.group("mime").lower()
-    extensions = _allowed_mime()
+    extensions = allowed_mime()
     if mime not in extensions:
         return None
     try:
@@ -89,7 +88,7 @@ def save_data_url(
             target.write_bytes(raw)
     except OSError:
         return None
-    return ImageRef(path=relative, mime=mime, name=name or target.stem)
+    return ImageRef(path=relative, mime=mime, name=name or target.stem, bytes=len(raw))
 
 
 def load_image(
@@ -107,7 +106,7 @@ def load_image(
     note" -- the caller already has that path, and a refused image must not fail
     the turn.
     """
-    if ref.mime not in IMAGE_MIMES:
+    if ref.mime not in allowed_mime():
         return None
     try:
         target = Sandbox(workspace).resolve(ref.path)
@@ -120,4 +119,4 @@ def load_image(
     return f"data:{ref.mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
-__all__ = ["DEFAULT_MAX_BYTES", "IMAGE_MIMES", "load_image", "save_data_url"]
+__all__ = ["DEFAULT_MAX_BYTES", "allowed_mime", "load_image", "save_data_url"]
