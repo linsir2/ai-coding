@@ -29,6 +29,7 @@ import { theme } from "../theme/tokens"
 import {
   type PasteOutcome,
   type PromptImage,
+  dropToken,
   extractImages,
   hostClipboard,
   imageToken,
@@ -121,6 +122,37 @@ export function Prompt(props: PromptProps) {
       return
     }
     setHint(found.error)
+  }
+
+  // r22: one keypress should take a whole placeholder, not one character of it.
+  // The token is real text, so without this a backspace left "[Imag" behind.
+  //
+  // Deliberately not opentui's extmarks: that mechanism handles ASCII and
+  // corrupts Chinese (verified), and this composer is used in Chinese.
+  //
+  // The fallback is the textarea's own delete, which was measured byte-for-byte
+  // identical to the default key for CJK, ASCII and mixed text -- so intercepting
+  // the key costs ordinary editing nothing.
+  const dropOne = (direction: "before" | "after") => {
+    const fallback = () =>
+      direction === "before" ? input?.deleteCharBackward() : input?.deleteChar()
+    // A selection is the user's own range; removing it is what they asked for.
+    if (input?.editorView?.hasSelection?.()) {
+      fallback()
+      return
+    }
+    const result = dropToken(
+      input?.plainText ?? "",
+      input?.cursorOffset ?? 0,
+      new Set(Object.keys(imagesByToken())),
+      direction,
+    )
+    if (!result.dropped) {
+      fallback()
+      return
+    }
+    input?.setText(result.text)
+    if (input) input.cursorOffset = result.offset
   }
 
   const paste = async () => {
@@ -253,6 +285,22 @@ export function Prompt(props: PromptProps) {
     target: () => input,
     commands: [{ name: "prompt.paste", desc: "Paste from the clipboard", run: () => void paste() }],
     bindings: [{ key: "ctrl+v", cmd: "prompt.paste" }],
+  }))
+
+  useBindings(() => ({
+    // r22: backspace and delete take a whole [Image N] when the cursor is
+    // against one, and are otherwise the textarea's own delete (measured
+    // identical).  Scoped to focus so the keys are untouched everywhere else.
+    target: () => input,
+    targetMode: "focus",
+    commands: [
+      { name: "prompt.backspace", desc: "Delete back", run: () => dropOne("before") },
+      { name: "prompt.delete", desc: "Delete forward", run: () => dropOne("after") },
+    ],
+    bindings: [
+      { key: "backspace", cmd: "prompt.backspace" },
+      { key: "delete", cmd: "prompt.delete" },
+    ],
   }))
 
   useBindings(() => ({

@@ -33,6 +33,44 @@ export function imageToken(sequence: number): string {
 const TOKEN = /\[Image (\d+)\]/g
 
 /**
+ * Remove a whole placeholder when the cursor is against one.
+ *
+ * The token is real text, so without this a backspace ate it a character at a
+ * time and left `[Imag` behind -- the picture was dropped, but so was any hope
+ * of reading the message.  OpenCode treats the chip as one unit and so does
+ * this.
+ *
+ * Deliberately hand-rolled rather than using opentui's extmarks: that
+ * mechanism handles ASCII and corrupts Chinese (verified -- "看看 [Image 1]
+ * 对吗" came back as "看 1] 对吗"), and this composer is used in Chinese.
+ *
+ * ``before`` is backspace, ``after`` is the delete key.  A cursor *inside* a
+ * token is not a request to remove it, so nothing happens and the caller's
+ * default one-character delete runs instead.
+ */
+export function dropToken(
+  text: string,
+  offset: number,
+  tokens: ReadonlySet<string>,
+  direction: "before" | "after",
+): { text: string; offset: number; dropped: boolean } {
+  for (const token of tokens) {
+    const start = direction === "before" ? offset - token.length : offset
+    const end = direction === "before" ? offset : offset + token.length
+    if (start < 0 || end > text.length) continue
+    if (text.slice(start, end) !== token) continue
+    return {
+      text: text.slice(0, start) + text.slice(end),
+      // Backspace pulls the cursor back with the text; delete leaves it where
+      // it was, because everything it removed was in front of it.
+      offset: direction === "before" ? start : offset,
+      dropped: true,
+    }
+  }
+  return { text, offset, dropped: false }
+}
+
+/**
  * Split the composer's text into the message and the images it still refers to.
  *
  * The text is the truth: a token the map knows is an image, and a token the map

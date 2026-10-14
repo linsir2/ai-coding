@@ -6,7 +6,13 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { extractImages, imageDataUrl, interpretPaste, imageToken } from "../src/util/attachment"
+import {
+  dropToken,
+  extractImages,
+  imageDataUrl,
+  interpretPaste,
+  imageToken,
+} from "../src/util/attachment"
 
 /** The clipboard result shapes the host backend can hand back. */
 function read(status: string, extra: Record<string, unknown> = {}) {
@@ -62,6 +68,91 @@ describe("inline image placeholders", () => {
 
     expect(images).toEqual([])
     expect(text).toBe("删掉了")
+  })
+})
+
+describe("dropping a token with one keypress", () => {
+  // The whole reason this exists: the placeholder is real text, so a plain
+  // backspace ate it a character at a time and left "[Imag" behind.  These
+  // cases are all CJK on purpose -- opentui's own extmarks mechanism handles
+  // ASCII and corrupts Chinese, which is why this is done by hand.
+  const token = imageToken(1)
+  const tokens = new Set([token])
+
+  test("backspace at the end of a token takes the whole thing", () => {
+    const text = `看看 ${token} 对吗`
+    const offset = text.indexOf(token) + token.length
+
+    expect(dropToken(text, offset, tokens, "before")).toEqual({
+      text: "看看  对吗",
+      offset: 3,
+      dropped: true,
+    })
+  })
+
+  test("delete at the start of a token takes the whole thing", () => {
+    const text = `看看 ${token} 对吗`
+    const offset = text.indexOf(token)
+
+    expect(dropToken(text, offset, tokens, "after")).toEqual({
+      text: "看看  对吗",
+      offset: 3,
+      dropped: true,
+    })
+  })
+
+  // A cursor inside the token means the user is editing it, not removing it.
+  test("backspace in the middle of a token leaves it alone", () => {
+    const text = `看看 ${token} 对吗`
+    const offset = text.indexOf(token) + 3
+
+    expect(dropToken(text, offset, tokens, "before").dropped).toBe(false)
+  })
+
+  test("delete in the middle of a token leaves it alone", () => {
+    const text = `看看 ${token} 对吗`
+    const offset = text.indexOf(token) + 3
+
+    expect(dropToken(text, offset, tokens, "after").dropped).toBe(false)
+  })
+
+  test("ordinary text is untouched", () => {
+    expect(dropToken("看看这个", 2, tokens, "before")).toEqual({
+      text: "看看这个",
+      offset: 2,
+      dropped: false,
+    })
+  })
+
+  // Only the token the cursor is against comes out.
+  test("two tokens side by side: only the one at the cursor", () => {
+    const second = imageToken(2)
+    const text = `${token}${second}`
+    const offset = text.length
+
+    expect(dropToken(text, offset, new Set([token, second]), "before")).toEqual({
+      text: token,
+      offset: token.length,
+      dropped: true,
+    })
+  })
+
+  test("a token at the very start has nothing before it", () => {
+    expect(dropToken(`${token} 后面`, 0, tokens, "before").dropped).toBe(false)
+  })
+
+  test("a token at the very end has nothing after it", () => {
+    const text = `前面 ${token}`
+    expect(dropToken(text, text.length, tokens, "after").dropped).toBe(false)
+  })
+
+  // The map is the record of what was pasted; a token it does not know is
+  // ordinary text (typed by hand, or a token whose image was already dropped).
+  test("a token the map does not know is not special", () => {
+    const text = `看看 ${token} 对吗`
+    const offset = text.indexOf(token) + token.length
+
+    expect(dropToken(text, offset, new Set(), "before").dropped).toBe(false)
   })
 })
 
