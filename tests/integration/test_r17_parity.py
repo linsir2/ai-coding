@@ -221,6 +221,66 @@ async def test_the_fallback_searches_the_directory_it_was_pointed_at(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_gitignored_directory_is_not_offered(tmp_path):
+    """r20/F3.  ``.gitignore`` rules were applied to files only, so a directory
+    the user had chosen to ignore still reached the ``@`` completer.  Selecting
+    it offered a listing of nothing, because the files inside it *were* ignored
+    -- the directory was offered and its contents were not."""
+    from ai_coding.core.workspace_files import walk_workspace
+
+    root = _tree(tmp_path / "ws")
+    build = root / "build"
+    build.mkdir()
+    (build / "out.js").write_text("target\n", encoding="utf-8")
+    (root / ".gitignore").write_text("*.log\nbuild/\n", encoding="utf-8")
+
+    entries = list(walk_workspace(root))
+
+    assert "build" not in {rel.as_posix() for rel, _ in entries}, (
+        "an ignored directory is still offered for completion"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_gitignored_directory_is_never_entered(tmp_path):
+    """The docstring promises pruning, and the budget depends on it: a hidden
+    directory's files must cost nothing.  Ignoring the files inside still
+    walked every one of them, so the 20k entry ceiling could be spent entirely
+    on a tree the user had said not to look at."""
+    from ai_coding.core.workspace_files import walk_workspace
+
+    root = _tree(tmp_path / "ws")
+    build = root / "build"
+    build.mkdir()
+    for i in range(2000):
+        (build / f"{i}.js").write_text("x", encoding="utf-8")
+    (root / ".gitignore").write_text("build/\n", encoding="utf-8")
+
+    entries = list(walk_workspace(root))
+
+    assert len(entries) < 30, f"walked {len(entries)} entries inside an ignored directory"
+
+
+@pytest.mark.asyncio
+async def test_siblings_are_walked_in_alphabetical_order(tmp_path):
+    """``files.find`` hands out a fixed number of entries, and the directory is
+    popped LIFO, so the budget went to whichever subtree happened to be pushed
+    last.  ``z_dir``'s files were listed before ``a_dir``'s -- the listing
+    started at the end of the alphabet."""
+    from ai_coding.core.workspace_files import walk_workspace
+
+    root = tmp_path / "ws"
+    for name in ("a_dir", "z_dir", "m_dir"):
+        (root / name).mkdir(parents=True)
+        (root / name / "f.txt").write_text("x", encoding="utf-8")
+
+    names = [rel.as_posix() for rel, _ in walk_workspace(root)]
+    files = [n for n in names if n.endswith("f.txt")]
+
+    assert files == ["a_dir/f.txt", "m_dir/f.txt", "z_dir/f.txt"], files
+
+
+@pytest.mark.asyncio
 async def test_a_scoped_search_reports_workspace_relative_paths(tmp_path):
     """Whatever the search was pointed at, the model is told where the file is
     in the *workspace* -- that is the only frame it can act on."""

@@ -61,6 +61,10 @@ def walk_workspace(
     Directories are yielded before their contents.  Skipped directories are
     pruned, not filtered, and ``.gitignore`` rules stack the way git stacks
     them: a nested file adds to the ones above it for its own subtree.
+
+    Breadth-first, so that a caller with a fixed number of entries to hand out
+    spends them from the top of the tree downwards rather than descending into
+    whichever subtree was pushed last (r20/F3).
     """
     base = Path(root).expanduser().resolve()
     if not base.is_dir():
@@ -68,7 +72,7 @@ def walk_workspace(
     pending: list[tuple[Path, list[pathspec.PathSpec[pathspec.Pattern]]]] = [(base, [])]
     seen = 0
     while pending:
-        directory, inherited = pending.pop()
+        directory, inherited = pending.pop(0)
         specs = list(inherited)
         if respect_gitignore:
             specs += _specs_for(directory)
@@ -82,9 +86,16 @@ def walk_workspace(
             here = Path(entry.path)
             rel = PurePosixPath(here.relative_to(base).as_posix())
             is_dir = entry.is_dir(follow_symlinks=False)
-            if respect_gitignore and specs and not is_dir:
-                if any(spec.match_file(rel) for spec in specs):
-                    continue
+            if respect_gitignore and specs:
+                # A gitignore rule about a directory is written with a trailing
+                # slash (``build/``) and pathspec only matches it when the probe
+                # carries one -- and only when it is a str: match_file
+                # normalises with os.sep, which a PurePosixPath has already
+                # stripped.  Checking files alone left the ignored directory
+                # itself offered for completion -- with nothing inside it.
+                probe = rel.as_posix() + "/" if is_dir else rel.as_posix()
+                if any(spec.match_file(probe) for spec in specs):
+                    continue  # pruned: never opened
             seen += 1
             if seen > max_entries:
                 return
