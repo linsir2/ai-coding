@@ -182,6 +182,28 @@ async def test_the_limit_picks_the_same_rows_either_way(tmp_path):
 
 @pytest.mark.skipif(not shutil.which("rg"), reason="ripgrep is not installed")
 @pytest.mark.asyncio
+async def test_both_runners_skip_a_file_over_the_size_budget(tmp_path):
+    """r20/F6.  The fallback refuses a file over 1 MB and ripgrep did not, so
+    the same search answered differently depending on whether rg happened to be
+    installed -- and a repository with a large data file returned a hundred
+    matches out of it on one machine and none on the next.
+
+    rg takes ``--max-filesize`` in the same units it prints, so the byte count
+    is spelled rather than converted.
+    """
+    root = _tree(tmp_path / "ws")
+    (root / "big.py").write_text("target\n" + "x\n" * 600_000, encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+
+    for tool in (_fallback(root), GrepTool(Sandbox(root))):
+        found = await _matches(tool)
+        assert "big.py" not in found, (
+            f"a 1.2 MB file was searched by {tool!r}"
+        )
+        assert "a.py" in found, "the budget swallowed the whole tree"
+
+
+@pytest.mark.asyncio
 async def test_both_runners_answer_the_same_question(tmp_path):
     """The real comparison: one tree, two genuinely different search engines."""
     root = _tree(tmp_path / "ws")

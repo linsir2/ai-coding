@@ -306,6 +306,7 @@ async def section_parity() -> None:
     (base / "sub").mkdir(parents=True)
     (base / "a.py").write_text("target\n", encoding="utf-8")
     (base / "sub" / "c.txt").write_text("target\n", encoding="utf-8")
+    (base / "big.py").write_text("target\n" + "x\n" * 600_000, encoding="utf-8")
     (base / ".gitignore").write_text("*.log\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=base, check=True)
     for params in ({"pattern": "target"}, {"pattern": "target", "path": "sub"}):
@@ -315,6 +316,9 @@ async def section_parity() -> None:
               f"rg={real.output!r} py={fallback.output!r}")
         check(f"no absolute path reaches the model for {params}",
               str(base) not in real.output, real.output[:60])
+    big = await GrepTool(Sandbox(base)).execute({"pattern": "target"})
+    check("a file over the per-file budget is searched by neither runner",
+          "big.py" not in big.output, big.output[:80].replace("\n", " | "))
 
 
 async def main(live: bool) -> int:

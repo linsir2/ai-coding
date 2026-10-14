@@ -204,6 +204,11 @@ class GrepTool(BaseTool):
             # r18/F10: rg follows .gitignore only inside a repository; we follow
             # it everywhere, so tell it not to insist on a repo.
             "--no-require-git",
+            # r20/F6: the fallback refuses a file over _MAX_FILE_BYTES and rg
+            # did not, so the same question got two answers depending on whether
+            # rg was installed.  grep searches; reading one big file is
+            # read_tool's job, and that cap is 10 MB.
+            f"--max-filesize={_MAX_FILE_BYTES}",
         ]
         if literal:
             argv.append("--fixed-strings")
