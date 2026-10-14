@@ -304,9 +304,21 @@ class GrepTool(BaseTool):
         return [(root / rel, rel) for rel, is_dir in walk_workspace(root) if not is_dir]
 
     def _workspace_relative(self, target: Path, from_target: str) -> PurePosixPath:
-        """Re-anchor a path the search root produced onto the workspace."""
-        prefix = PurePosixPath(target.relative_to(self._sandbox.workspace).as_posix())
+        """Re-anchor a path the search root produced onto the workspace.
+
+        ripgrep echoes the search argument it was handed, and we always hand it
+        an absolute one, so its matches come back absolute.  ``PurePosixPath``
+        returns an absolute right operand unchanged, so joining first let
+        ``/home/me/ws/sub/c.txt`` straight through -- the model saw a
+        machine-specific path while the Python fallback, searching the same
+        file, said ``sub/c.txt``.  Strip the absolute form back to ``target``
+        first, then anchor; a relative result is already workspace-relative
+        because the runner's cwd is the workspace.
+        """
         tail = PurePosixPath(from_target)
+        prefix = PurePosixPath(target.relative_to(self._sandbox.workspace).as_posix())
+        if tail.is_absolute():
+            tail = tail.relative_to(PurePosixPath(target.as_posix()))
         return tail if prefix == PurePosixPath(".") else prefix / tail
 
 

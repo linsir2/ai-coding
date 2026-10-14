@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -291,6 +292,31 @@ def section_contracts() -> None:
           "node_modules" not in handlers, "handlers.py delegates to workspace_files")
 
 
+async def section_parity() -> None:
+    print("\n7. grep parity — rg and the fallback must answer identically")
+    # r19/F1 shipped a re-anchoring that leaked absolute paths to the model on
+    # the rg branch only, and the suite that catches it skips when rg is
+    # absent.  "Both sides ran the fallback" must never be reported as green.
+    if shutil.which("rg") is None:
+        print("    NOTE  ripgrep is NOT installed: parity is UNVERIFIED in this run --"
+              " both sides below would have been the Python fallback. "
+              "`pip install ripgrep` and re-run before trusting parity.")
+        return
+    base = Path(tempfile.mkdtemp()) / "ws"
+    (base / "sub").mkdir(parents=True)
+    (base / "a.py").write_text("target\n", encoding="utf-8")
+    (base / "sub" / "c.txt").write_text("target\n", encoding="utf-8")
+    (base / ".gitignore").write_text("*.log\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+    for params in ({"pattern": "target"}, {"pattern": "target", "path": "sub"}):
+        fallback = await GrepTool(Sandbox(base), use_ripgrep=False).execute(params)
+        real = await GrepTool(Sandbox(base)).execute(params)
+        check(f"rg and the fallback agree on {params}", fallback.output == real.output,
+              f"rg={real.output!r} py={fallback.output!r}")
+        check(f"no absolute path reaches the model for {params}",
+              str(base) not in real.output, real.output[:60])
+
+
 async def main(live: bool) -> int:
     print("=" * 68)
     print("r17/r18 acceptance — undo · artifacts · images · files · tools")
@@ -301,8 +327,9 @@ async def main(live: bool) -> int:
     await section_workspace_files()
     await section_tools()
     section_contracts()
+    await section_parity()
     if live:
-        print("\n7. live provider — the image pipeline end to end")
+        print("\n8. live provider — the image pipeline end to end")
         try:
             fetched = await WebfetchTool().execute({"url": "https://example.com"})
             check("webfetch reaches the real internet", fetched.success,

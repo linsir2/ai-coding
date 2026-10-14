@@ -246,6 +246,41 @@ async def test_a_scoped_search_reports_workspace_relative_paths(tmp_path):
     )
 
 
+@pytest.mark.asyncio
+async def test_a_runner_returning_absolute_paths_is_anchored(tmp_path):
+    """ripgrep echoes the search argument it was handed, and we always hand it
+    an absolute one -- so its matches come back absolute, not ``c.txt``.
+
+    The re-anchoring joins with ``/``, and pathlib's ``/`` returns an absolute
+    right operand unchanged, so the absolute path used to reach the model whole
+    while the Python fallback said ``sub/c.txt`` for the very same file.  The
+    two runners were pinned to agree, but the real-rg tests skip when rg is not
+    installed, so this went unnoticed until the parity suite ran with rg.
+    """
+    root = _tree(tmp_path / "ws")
+    payload = json.dumps(
+        {
+            "type": "match",
+            "data": {"path": {"text": str(root / "sub" / "c.txt")}, "line_number": 1,
+                     "lines": {"text": "target\n"}},
+        }
+    )
+
+    async def runner(argv, *, cwd, timeout):  # noqa: ARG001
+        return SimpleNamespace(returncode=0, stdout=payload, stderr="",
+                               timed_out=False, error=None)
+
+    tool = GrepTool(Sandbox(root), use_ripgrep=True, rg_path="/bin/rg", runner=runner)
+
+    result = await tool.execute({"pattern": "target", "path": "sub"})
+
+    # Exactly, not by substring: the absolute path *contains* "sub/c.txt", so a
+    # membership check would pass on the very output this test exists to reject.
+    assert result.output.splitlines() == ["sub/c.txt:1: target"], (
+        f"an absolute match reached the model un-anchored: {result.output!r}"
+    )
+
+
 @pytest.mark.skipif(not shutil.which("rg"), reason="ripgrep is not installed")
 @pytest.mark.asyncio
 async def test_both_runners_agree_on_a_scoped_search(tmp_path):
