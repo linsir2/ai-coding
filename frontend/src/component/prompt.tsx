@@ -27,7 +27,7 @@ import { useBindings, useKeymap } from "@opentui/keymap/solid"
 import { For, Show, createEffect, createSignal, onMount } from "solid-js"
 import { theme } from "../theme/tokens"
 import { type PasteOutcome, type PromptImage, hostClipboard, interpretPaste } from "../util/attachment"
-import { readClipboardImage } from "../util/clipboard"
+import { pasteEventOutcome, readClipboardImage } from "../util/clipboard"
 import { moveSelection } from "../util/dialog-select"
 import type { MentionOption } from "../util/mention"
 import { filterMentions, mentionQuery, replaceMentionToken } from "../util/mention"
@@ -312,6 +312,22 @@ export function Prompt(props: PromptProps) {
         </Show>
         <textarea
           ref={(element: TextareaRenderable) => (input = element)}
+          onPaste={(event) => {
+            // r21: with bracketed paste on, the terminal eats ctrl+v and hands
+            // the app a paste event instead of a keypress -- so the ctrl+v
+            // binding below never fires, which is why nothing happened at all.
+            // Only an image mime is taken over; everything else falls through to
+            // the Textarea's own text insert.
+            const outcome = pasteEventOutcome(event.metadata, event.bytes)
+            if (outcome.kind === "text") return
+            event.preventDefault()
+            if (outcome.kind === "failed") {
+              setHint(outcome.message)
+              return
+            }
+            setImages((all) => [...all, { name: `image-${all.length + 1}`, dataUrl: outcome.dataUrl }])
+            setHint("")
+          }}
           placeholder={props.placeholder}
           placeholderColor={theme.textMuted}
           textColor={theme.textBase}

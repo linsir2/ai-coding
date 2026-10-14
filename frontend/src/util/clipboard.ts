@@ -113,6 +113,34 @@ export function isPng(bytes: Uint8Array): boolean {
   return bytes.length > signature.length && signature.every((byte, index) => bytes[index] === byte)
 }
 
+/** The metadata the terminal attaches to a paste, if any. */
+export interface PasteMetadataLike {
+  mimeType?: string
+  kind?: "text" | "binary" | "unknown"
+}
+
+/**
+ * Decide what a terminal-delivered paste is.
+ *
+ * A terminal with bracketed paste enabled consumes ctrl+v itself and sends the
+ * clipboard wrapped in paste markers, so the keybinding never runs -- this is
+ * the path that actually fires, and nothing was listening on it.  Text is
+ * reported as text so the Textarea's own insert still runs; only a genuine
+ * image mime is taken over here.
+ */
+export function pasteEventOutcome(
+  metadata: PasteMetadataLike | undefined,
+  bytes: Uint8Array,
+): { kind: "image"; dataUrl: string } | { kind: "text" } | { kind: "failed"; message: string } {
+  const mime = (metadata?.mimeType ?? "").split(";")[0]!.trim().toLowerCase()
+  if (!mime.startsWith("image/")) return { kind: "text" }
+  if (bytes.length === 0) {
+    return { kind: "failed", message: `终端发来的 ${mime} 粘贴是空的` }
+  }
+  const dataUrl = `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`
+  return { kind: "image", dataUrl }
+}
+
 /** Run one command and collect stdout.  Never throws: a tool that is missing,
  *  hangs, or exits non-zero is a tool that does not answer. */
 async function capture(argv: string[], timeoutMs: number): Promise<Uint8Array | null> {

@@ -6,11 +6,49 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { imageCommands, isPng, looksLikeWSL } from "../src/util/clipboard"
+import { imageCommands, isPng, looksLikeWSL, pasteEventOutcome } from "../src/util/clipboard"
 
 function probe(platform: string, installed: string[], isWSL = false) {
   return { platform, isWSL, has: (tool: string) => installed.includes(tool) }
 }
+
+describe("pasteEventOutcome", () => {
+  // When the terminal has bracketed paste on, it eats the ctrl+v and hands the
+  // app a paste event instead of a keypress -- so a keybinding for ctrl+v never
+  // runs.  This is the path that actually fires, and it was not being listened
+  // for at all.
+  test("an image paste event carries its bytes through", () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1])
+    const outcome = pasteEventOutcome({ mimeType: "image/png", kind: "binary" }, png)
+
+    expect(outcome).toEqual({ kind: "image", dataUrl: `data:image/png;base64,${Buffer.from(png).toString("base64")}` })
+  })
+
+  test("a mime with parameters is still an image", () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1])
+    const outcome = pasteEventOutcome({ mimeType: "image/png; charset=binary" }, png)
+
+    expect(outcome.kind).toBe("image")
+  })
+
+  test("text stays text so the default insert still happens", () => {
+    const outcome = pasteEventOutcome({ mimeType: "text/plain" }, new Uint8Array([104, 105]))
+
+    expect(outcome).toEqual({ kind: "text" })
+  })
+
+  // A terminal that sends text while the clipboard holds an image must not make
+  // the app paste a stray line -- that is the clipboard reader's job, not this.
+  test("an event with no metadata is left to the default", () => {
+    expect(pasteEventOutcome(undefined, new Uint8Array([104, 105]))).toEqual({ kind: "text" })
+  })
+
+  test("an image event with no bytes says so rather than pasting nothing", () => {
+    const outcome = pasteEventOutcome({ mimeType: "image/png" }, new Uint8Array([]))
+
+    expect(outcome.kind).toBe("failed")
+  })
+})
 
 describe("imageCommands", () => {
   // The order is the fallback.  A Wayland box has wl-paste and no xclip; an X11
