@@ -230,10 +230,6 @@ def test_an_image_over_the_budget_is_refused_before_the_bytes_are_read(tmp_path)
 # ------------------------------------------------------------- T3: htmltext
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: embed is in _SKIP but not _VOID (htmltext.py:22-26)",
-    strict=False,
-)
 def test_a_void_element_must_not_swallow_the_whole_document():
     """``_SKIP`` holds ``embed`` (htmltext.py:24) but ``_VOID`` does not
     (htmltext.py:22), and ``<embed>`` never closes -- so the suppression counter
@@ -247,10 +243,6 @@ def test_a_void_element_must_not_swallow_the_whole_document():
 # ------------------------------------------------------------------ T2: grep
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: runner errors are ignored (grep_tool.py:186)",
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_an_unusable_rg_must_not_be_reported_as_no_matches(tmp_path):
     """``grep_tool.py:186`` never inspects ``outcome.error`` /
@@ -266,10 +258,6 @@ async def test_an_unusable_rg_must_not_be_reported_as_no_matches(tmp_path):
     )
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: the sync fallback returns without await (grep_tool.py:140)",
-    strict=False,
-)
 def test_the_fallback_does_not_block_the_event_loop(tmp_path):
     """``grep_tool.py:140`` returns ``self._grep_with_python(...)`` without
     ``await``, so the whole os.walk runs on the event loop -- the SSE bridge and
@@ -659,6 +647,77 @@ async def test_capture_returns_none_when_the_ref_write_fails(tmp_path):
     assert await store.exists("s/1") is False
 
 
+@pytest.mark.asyncio
+async def test_a_broken_rg_binary_does_not_answer_no_matches(tmp_path):
+    """``run_process_async`` reports a failed spawn as ``returncode=None`` with
+    an ``error``; r17 never looked, and empty stdout rendered as "(no matches)"."""
+    from types import SimpleNamespace
+
+    async def runner(argv, *, cwd, timeout):  # noqa: ARG001
+        return SimpleNamespace(
+            returncode=None, stdout="", stderr="", timed_out=False,
+            error="FileNotFoundError: rg",
+        )
+
+    tool = GrepTool(Sandbox(tmp_path), use_ripgrep=True, rg_path="/nope/rg", runner=runner)
+    (tmp_path / "a.py").write_text("target\n", encoding="utf-8")
+
+    result = await tool.execute({"pattern": "target"})
+
+    assert result.success is False, f"a broken binary answered {result.output!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_rg_error_exit_code_is_not_an_empty_result(tmp_path):
+    """rg exits 2 for errors (permissions, bad regex, vanished path); r17 only
+    special-cased the parse error and read every other non-zero as "no hits"."""
+    from types import SimpleNamespace
+
+    async def runner(argv, *, cwd, timeout):  # noqa: ARG001
+        return SimpleNamespace(returncode=2, stdout="", stderr="Permission denied",
+                               timed_out=False, error=None)
+
+    tool = GrepTool(Sandbox(tmp_path), use_ripgrep=True, rg_path="/bin/rg", runner=runner)
+
+    result = await tool.execute({"pattern": "target"})
+
+    assert result.success is False, f"an error exit answered {result.output!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_void_tag_in_the_skip_set_would_swallow_the_page():
+    """A void element in the suppression set never decrements the counter, so
+    everything after it is dropped.  r17 fixed this for meta/link and left
+    ``embed``; this walks the whole void-element list so the next one cannot
+    arrive with the same bug."""
+    from ai_coding.tools.htmltext import _SKIP, _VOID
+
+    void_elements = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+        "meta", "param", "source", "track", "wbr",
+    }
+
+    overlap = void_elements & _SKIP
+    assert not overlap, f"void tags in the skip set: {sorted(overlap)}"
+    assert {"meta", "link", "embed"} <= _VOID, _VOID
+
+
+@pytest.mark.asyncio
+async def test_websearch_keeps_the_good_entries_and_drops_the_malformed():
+    """r17 raised out of execute on a non-dict entry; dispatch caught it and the
+    Python error text went into the model's context."""
+    def opener(url, timeout, data):  # noqa: ARG001
+        return "application/json", json.dumps(
+            {"results": [None, "not a dict", {"title": "T", "url": "https://e"}]}
+        ).encode()
+
+    result = await WebsearchTool(api_key="k", opener=opener).execute({"query": "q"})
+
+    assert result.success is True, result.output
+    assert "[T](https://e)" in result.output, result.output
+    assert "not a dict" not in result.output, result.output
+
+
 # ------------------------------------------------------------- T4: mentions
 
 
@@ -793,11 +852,6 @@ def test_compaction_anchors_its_tail_on_a_real_user_message(tmp_path):
 # ------------------------------------------------------------ T3: websearch
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: the provider payload shape is unvalidated "
-    "(websearch_tool.py:125)",
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_websearch_must_not_crash_on_an_unexpected_payload_shape():
     """``websearch_tool.py:125`` assumes a list of dicts; anything else raises
@@ -811,11 +865,6 @@ async def test_websearch_must_not_crash_on_an_unexpected_payload_shape():
     assert result.success is False, f"a malformed payload raised instead: {result.output!r}"
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: a missing results key reads as 'no results' "
-    "(websearch_tool.py:121)",
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_websearch_must_say_when_the_payload_had_no_results_field():
     """A provider contract change is currently indistinguishable from 'nothing
@@ -829,10 +878,6 @@ async def test_websearch_must_say_when_the_payload_had_no_results_field():
     assert result.success is False, "a shape change was reported as 'no results'"
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: max_results has no ceiling (websearch_tool.py:92)",
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_websearch_must_cap_the_result_count():
     """``max(1, limit)`` has no ceiling, so the model can ask the provider for an

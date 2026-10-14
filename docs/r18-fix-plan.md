@@ -838,29 +838,208 @@ commands ─► 按 report['reason'] 选文案       ✦
 
 ---
 
-## 8. F9+F10 — grep：先修假答案与阻塞，再对齐两路
+## 8. F9 + F11 + F12 — 三个独立的"工具给了自信的错答案"
 
-| 编号 | 文件 | 改动 |
+> 这三条互不依赖，各自独立可验。F10（grep 两路同形）与 F15（文件枚举单一真相源）另起一轮，因为它们共用同一个新模块。
+
+### 8.1 F9 病灶：rg 路径从不检查 runner 是否真的跑起来了
+
+```python
+# grep_tool.py:186-191 现状
+outcome = await self._runner(argv, cwd=..., timeout=...)
+if outcome.timed_out:
+    raise TimeoutError
+parse_error = "regex parse error" in (outcome.stderr or "").lower()
+if outcome.returncode not in (0, 1) and parse_error:
+    raise re.error(...)
+# ← 没有检查 outcome.error / returncode is None
+```
+`infra/subprocess_runner.py:139-144`：Popen 失败时返回 `ProcessOutcome(returncode=None, error="FileNotFoundError: ...")`，`stdout=""`。
+于是流程直落：解析空 stdout → 零命中 → `_render([], total=0)` → **`success=True, "(no matches)"`**。
+
+实测（本机无 rg，显式 `use_ripgrep=True`）：
+```
+[basic]       RG ok=True: (no matches)
+[include=*.py] RG ok=True: (no matches)
+[limit=1]     RG ok=True: (no matches)
+```
+模型收到"没有匹配"，据此得出错误结论继续往下走。**这是比"报错"更坏的一种失败：它看起来像答案。**
+
+> 注意：`use_ripgrep=None`（autodetect）走 `shutil.which`，不会到这里。出问题的是显式 `use_ripgrep=True` 或 `rg_path=` 这两条公开入口。
+
+### 8.2 F9 病灶之二：兜底路径同步跑在事件循环上
+
+```python
+# grep_tool.py:140 现状
+return self._grep_with_python(...)     # ← 没有 await，也没 to_thread
+```
+`_grep_with_python` 是同步的（`os.walk` + `read_bytes` + 正则）。整个扫描期间 SSE bridge 与 TUI 渲染完全停摆。
+实测（403 个文件）：`gather()` 里 grep 与一个 10ms ticker 并发，ticker 的第一次 tick 在 **107ms** 才出现（应为 ~10ms）。
+
+对照：`read_tool` 的同类操作走 `asyncio.to_thread`（既有约定）。
+
+### 8.3 F11 病灶：`<embed>` 是 void 元素，却在 `_SKIP` 里
+
+```python
+# htmltext.py:20-26 现状
+_VOID = frozenset({"meta", "link", "base"})          # 空元素：不进抑制计数器
+_SKIP = frozenset({"script","style","noscript","iframe","object","embed","template","svg"})
+```
+`_SKIP` 的容器会 `self._suppressed += 1`，靠闭合标签减回来。`<embed>` **没有结束标签**，于是计数器永不归零，后面全部正文被丢弃。
+
+实测：`html_to_text('<body><embed src=x.pdf><p>REAL</p></body>')` → `''`；对照组 `<meta>` → `'REAL'`。
+
+**这正是 r17 已修过的 meta/link bug，同一个病，换了个标签还活着。** 一个正常的 PDF/插件页面就以 `<embed>` 开头。
+
+核对 HTML void 元素全集（area, base, br, col, embed, hr, img, input, link, meta, param, source, track, wbr）：`_SKIP` 里**只有 `embed` 一个**是 void，所以这是一处的孤例，不是系统性遗漏。
+
+### 8.4 F12 病灶：provider 返回什么都往渲染器里塞
+
+```python
+# websearch_tool.py:121-126 现状
+results = data.get("results") if isinstance(data, dict) else None
+if not results:
+    return ToolResult(success=True, output="(no results)")
+for item in results[: max(1, limit)]:
+    title = str(item.get("title") or ...)      # ← 假设每个元素都是 dict
+```
+实测：`{"results": ["不是 dict"]}` → `AttributeError: 'str' object has no attribute 'get'` 逃出 `execute`。dispatch 会兜住，但**Python 的内部报错文本会进模型上下文**。
+
+且 `if not results` 把两种情况混为一谈：
+- `results: []` → 真的没搜到 → `success=True` 正确
+- `{"answer": "x"}`（没有 results 键）→ **provider 改了契约**，却被报告成"搜不到" → 模型据此断言"网上没有答案"
+
+`max_results` 也没有上限（`max(1, limit)`），模型可以传 10000 给 Tavily。
+
+### 8.5 影响面（执行范围）
+
+| 文件 | 现状 | 改动 |
 |---|---|---|
-| F9a | `tools/grep_tool.py:186` | 检查 `outcome.error` / `returncode is None`：runner 不可用 → **回落到 Python 兜底**（不是失败，因为兜底本就完整），两条都不行才失败 |
-| F9b | `tools/grep_tool.py:140` | `return await asyncio.to_thread(self._grep_with_python, ...)` |
-| F10a | 新模块 `core/workspace_files.py` | `iter_workspace_files(root) -> Iterator[Path]`：`os.walk` + `dirs[:]` 剪枝 + `pathspec` 读根 `.gitignore`。**grep 兜底与 `files.find` 共用**（F15） |
-| F10b | `grep_tool.py:228` | `include` 改：`PurePosixPath(rel).match(include)`（`*` 不跨 `/`，对齐 rg） |
-| F10c | `grep_tool.py` 渲染前 | 两个分支的命中都 `sort(key=(path, line))` **再**套 `limit`；尾注的 total 用排序后总数 |
+| `tools/grep_tool.py:186-191` | 不看 `error`/`returncode is None` | 检出后按下方决策处理 |
+| `tools/grep_tool.py:140` | 同步调用 | `await asyncio.to_thread(...)` |
+| `tools/htmltext.py:22` | `_VOID = {meta, link, base}` | 加 `embed` |
+| `tools/websearch_tool.py:121-137` | 形状不校验、无上限 | 校验形状 + `min(..., 20)` |
 
-### 明确不做的（避免过度）
-- **嵌套 `.gitignore`**：只读搜索根一份，写进文档。rg 支持多层，自研会引入语义漂移。
-- **rg 加 `--max-count`**：rg 的 `-m` 是 per-file 语义，与全局 limit 不同义，硬套会错。排序后截断即可保证两路同形。
+**明确不动**：`grep._walk` 的 `rglob` 无剪枝（属于 F15，和 `files.find` 一起改成共享枚举器）；`grep` 的 `precheck` 缺失（MEDIUM，另议）；F10 的三路同形。
 
-### pyproject
-加 `pathspec>=0.12`（环境已有，PyPI 月下载 5.05 亿）。
+### 8.6 复用的契约
 
-### RIPR 用例
-- **Red**：绊线 2 条（假 `(no matches)`、阻塞事件循环）去 xfail。
-- **Red（新增，双跑一致性）**：`test_both_runners_answer_the_same_question`——`@pytest.mark.skipif(not shutil.which("rg"))`，同一棵树分别跑两路，断言**输出逐行相同**。本机无 rg 时自动 skip，装了 rg 的机器上会真的抓住分歧。
-- **Red（新增）**：`test_gitignored_files_are_not_searched`——`.gitignore` 写 `*.log`，两路都不得命中 `x.log`。
+| 复用 | 位置 |
+|---|---|
+| `run_process_async` 的 `ProcessOutcome`（`error`/`timed_out`/`returncode`） | `infra/subprocess_runner.py` |
+| `asyncio.to_thread` | `read_tool.py` 既有做法 |
+| `_VOID` / `_SKIP` 两张表 | `htmltext.py:20-26`，只动 `_VOID` 一处 |
+| `_MAX_SNIPPET_CHARS` 等既有常量 | `websearch_tool.py` |
+| Tavily 自身上限 20 | provider 契约，取上限不拍脑袋 |
 
----
+### 8.7 每文件每步
+
+**Step 1 — grep：runner 没跑起来就说出来**
+```python
+if outcome.error or outcome.returncode is None:
+    → 按决策（见问卷）
+if outcome.returncode not in (0, 1):   # 现有 parse_error 分支之后
+    → 非 0/1 视为失败而非"无匹配"
+```
+> 注意 `returncode` 语义：rg 的 0=有命中、1=无命中、2=错误。现有代码只对 `parse_error` 做了处理，`2`（其它错误，如权限）会被当成"无命中"。
+
+**Step 2 — grep：兜底进线程**
+```python
+return await asyncio.to_thread(
+    self._grep_with_python, target, pattern,
+    include=include, literal=literal, case_sensitive=case_sensitive, limit=limit,
+)
+```
+
+**Step 3 — htmltext**：`embed` 进 `_VOID`
+
+**Step 4 — websearch**：
+```python
+results = data.get("results") if isinstance(data, dict) else None
+if not isinstance(results, list):
+    return ToolResult(success=False, output="search failed: provider response had no 'results' list")
+items = [item for item in results if isinstance(item, dict)]   # 形状净化
+if not items:
+    return ToolResult(success=True, output="(no results)")
+limit = min(max(1, limit), 20)       # Tavily 自身上限
+```
+
+### 8.8 数据流影响
+
+```
+模型 → grep.execute
+         ├ rg 分支：runner 失败/returncode=2 ──► 【新增】说清，而不是 "(no matches)"
+         └ 兜底分支：os.walk+read ──►【新增】to_thread（事件循环不再停摆）
+
+模型 → webfetch(html) → htmltext：<embed> 不再吞掉整篇正文
+
+模型 → websearch → Tavily
+         ├ 无 results 键 ──►【新增】success=False（契约变了，不是搜不到）
+         ├ 元素非 dict ──►【新增】跳过脏元素
+         └ max_results ──►【新增】封顶 20
+```
+
+### 8.9 完成后效果
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| rg 缺失/损坏，rg 路径 | `success=True "(no matches)"` | 见问卷决策 |
+| rg 返回码 2（权限等错误） | 同上假"无匹配" | `success=False` + 原因 |
+| 大仓 grep | 事件循环停 100ms+ | 并发任务正常推进 |
+| 含 `<embed>` 的网页 | 正文全空 | 正文正常 |
+| Tavily 改了响应结构 | `"(no results)"` | `success=False`「provider 无 results 列表」 |
+| results 里有脏元素 | AttributeError 进上下文 | 跳过脏元素 |
+| `max_results=10000` | 真的请求 10000 条 | 最多 20 |
+
+### 8.10 RIPR 用例
+
+- **Red（摘 3 条既有绊线）**：grep 假 `(no matches)`、grep 阻塞事件循环、websearch 形状崩溃
+- **Red（改 1 条既有绊线）**：websearch 无 results 键（现状报 success=True）
+- **Red（新增 6 条）**
+  1. `test_a_broken_rg_binary_does_not_answer_no_matches`
+  2. `test_a_rg_error_exit_code_is_not_an_empty_result`：runner 返回 `returncode=2` → `success=False`
+  3. `test_a_search_over_a_large_tree_does_not_stall_the_loop`（10ms ticker ≥3 次）
+  4. `test_a_void_tag_in_the_skip_set_does_not_swallow_the_page`：遍历 HTML void 元素全集，断言与 `_SKIP` 无交集（**防同类 bug 复发的结构性守卫**）
+  5. `test_websearch_skips_malformed_entries_but_keeps_the_good_ones`：`{"results":[None,"x",{"title":"T"}]}` → 只渲染 T
+  6. `test_websearch_never_asks_the_provider_for_more_than_it_can_return`
+- **Pass**：`tests/test_grep_tool.py`、`test_webtools.py`、`test_htmltext.py` 保持绿
+- **Refactor**：`_SKIP`/`_VOID` 的不变量用一条测试表达，而不是每次靠人记得
+
+### 8.11 需要你拍板
+
+见问卷（rg 失败时是回落还是报错）。
+
+### 8.12 架构图（F9+F11+F12 后）
+
+```
+                     ┌──────────────────────────────────────────┐
+模型 ──grep(pattern)─►│ execute：校验参数 / 沙箱解析 target      │
+                     └───────────────┬──────────────────────────┘
+                                     │
+                    ┌────────────────┴────────────────┐
+                    ▼                                 ▼
+        ┌─── rg 分支（await runner）───┐    ┌── 兜底分支（await to_thread）──┐
+        │ ✦ runner 失败 / returncode=2  │    │     os.walk + read + regex     │
+        │   → success=False + 原因     │    │   （事件循环不阻塞）            │
+        │ （改前：一律 "(no matches)"） │    │                                │
+        └──────────────┬───────────────┘    └───────────────┬────────────────┘
+                       └──────────────┬─────────────────────┘
+                                      ▼
+                          _render：path:line: text（两路同形）
+
+模型 ──webfetch──► htmltext：_VOID 含 embed → 正文不再被吞
+
+模型 ──websearch─► Tavily ──► ✦ 形状校验（results 是 list / 元素是 dict）
+                                ✦ max_results 封顶 20（provider 契约）
+```
+
+### 8.13 最终形态自检
+
+1. 装 rg 的机器上 rg 崩了 → 工具说清崩了，模型知道要换策略，而不是继续"搜不到"的错误前提往下走。
+2. 不装 rg 的机器（当前）→ 走兜底，全程异步，大仓搜索时 TUI 不冻结。
+3. 抓一个以 `<embed>` 开头的 PDF 页面 → 拿到正文而不是空字符串。
+4. Tavily 改接口 → 工具明确报"provider 没有 results 列表"，模型知道这是上游问题而不是"网上没有"。
+5. 模型传 `max_results=10000` → 实际最多 20 条，不浪费配额也不被 provider 拒绝。
 
 ## 9. F11–F14 — 清洗、websearch、前端
 
@@ -965,10 +1144,10 @@ commands ─► 按 report['reason'] 选文案       ✦
 - [x] **F8** `report.reason` + `commands.py` 按 reason 打印
 
 ### 工具正确性
-- [ ] **F9** grep runner 失败不再报 `(no matches)`；兜底 `to_thread`
+- [x] **F9** grep runner 失败不再报 `(no matches)`；兜底 `to_thread`
 - [ ] **F10** grep 两路同形：pathspec + `PurePosixPath.match` + 排序后截断 + 双跑一致性测试
-- [ ] **F11** `_VOID` 加 `embed`
-- [ ] **F12** websearch 形状校验 + `max_results ≤ 20`
+- [x] **F11** `_VOID` 加 `embed`
+- [x] **F12** websearch 形状校验 + `max_results ≤ 20`
 
 ### 前端与真相源
 - [ ] **F13** Home 附件透传（`pendingPrompt` 带 images）

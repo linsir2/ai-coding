@@ -11,6 +11,7 @@ downloading is a packaging decision we deliberately do not take here.
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import json
 import re
@@ -137,7 +138,11 @@ class GrepTool(BaseTool):
                     case_sensitive=case_sensitive,
                     limit=limit,
                 )
-            return self._grep_with_python(
+            # The fallback walks and reads the tree; on a real repository that is
+            # seconds of blocking work.  read_tool does the same thing in a thread
+            # (r18/F9) and the SSE bridge has to keep ticking while it runs.
+            return await asyncio.to_thread(
+                self._grep_with_python,
                 target,
                 pattern,
                 include=include,
@@ -186,9 +191,23 @@ class GrepTool(BaseTool):
         outcome = await self._runner(argv, cwd=str(self._sandbox.workspace), timeout=self._timeout)
         if outcome.timed_out:
             raise TimeoutError
+        # A runner that never started (returncode None + error) and an exit code
+        # outside 0/1 are both failures.  Reading them as "no hits" is the worst
+        # outcome this tool can produce: the model keeps reasoning from a false
+        # premise (r18/F9).  rg exits 0 on a hit, 1 on none, 2 on an error.
+        if outcome.error or outcome.returncode is None:
+            return ToolResult(
+                success=False, output=f"grep runner failed: {outcome.error or 'no exit status'}"
+            )
         parse_error = "regex parse error" in (outcome.stderr or "").lower()
-        if outcome.returncode not in (0, 1) and parse_error:
-            raise re.error((outcome.stderr or "").strip()[:200])
+        if outcome.returncode not in (0, 1):
+            if parse_error:
+                raise re.error((outcome.stderr or "").strip()[:200])
+            return ToolResult(
+                success=False,
+                output=f"grep failed (rg exit {outcome.returncode}): "
+                f"{(outcome.stderr or '').strip()[:200]}",
+            )
         lines: list[str] = []
         total = 0
         for raw in (outcome.stdout or "").splitlines():

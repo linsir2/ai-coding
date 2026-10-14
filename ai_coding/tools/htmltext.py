@@ -19,10 +19,12 @@ from html.parser import HTMLParser
 #: Void elements that carry no text and have no end tag: dropping them must not
 #: enter the suppression counter, or everything after them is suppressed forever
 #: (a real example.com fetch found exactly that).
-_VOID = frozenset({"meta", "link", "base"})
+#: ``embed`` belongs here, not in _SKIP (r18/F11): a void element never emits an
+#: end tag, so counting it as suppression would swallow the rest of the page.
+_VOID = frozenset({"meta", "link", "base", "embed"})
 #: Container tags whose whole subtree never contributes text.
 _SKIP = frozenset(
-    {"script", "style", "noscript", "iframe", "object", "embed", "template", "svg"}
+    {"script", "style", "noscript", "iframe", "object", "template", "svg"}
 )
 #: Chrome: dropped with its subtree rather than line-broken.
 _BOILERPLATE = frozenset({"nav", "header", "footer", "aside", "form"})

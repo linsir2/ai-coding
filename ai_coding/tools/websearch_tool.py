@@ -23,6 +23,9 @@ from ai_coding.tools.base import BaseTool, ToolContext
 _SEARCH_URL = "https://api.tavily.com/search"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 _MAX_SNIPPET_CHARS = 1_000
+#: Tavily's own ceiling for one query (r18/F12) -- asking for more only
+#: spends quota to be refused.
+_MAX_RESULTS = 20
 
 
 def _urllib_post(url: str, timeout: float, data: bytes) -> tuple[str, bytes]:
@@ -92,8 +95,11 @@ class WebsearchTool(BaseTool):
             limit = int(params.get("max_results", self._max_results) or self._max_results)
         except (TypeError, ValueError):
             limit = self._max_results
+        # Cap before the request, not after it: quota is spent when the call
+        # goes out (r18/F12).
+        limit = min(max(1, limit), _MAX_RESULTS)
         payload = json.dumps(
-            {"api_key": self._api_key, "query": query, "max_results": max(1, limit)}
+            {"api_key": self._api_key, "query": query, "max_results": limit}
         ).encode("utf-8")
         try:
             _content_type, body = await asyncio.to_thread(
@@ -118,11 +124,24 @@ class WebsearchTool(BaseTool):
             )
         if isinstance(data, dict) and data.get("error"):
             return ToolResult(success=False, output=f"search failed: {data['error']}")
+        # A provider that changes its contract is not "nothing found": r17
+        # reported both as "(no results)", so the model concluded the web had no
+        # answer (r18/F12).
         results = data.get("results") if isinstance(data, dict) else None
-        if not results:
-            return ToolResult(success=True, output="(no results)")
+        if not isinstance(results, list):
+            return ToolResult(
+                success=False,
+                output="search failed: provider response had no 'results' list",
+            )
+        items = [item for item in results if isinstance(item, dict)]
+        if not items:
+            return ToolResult(
+                success=False,
+                output=f"search failed: provider returned {len(results)} entries "
+                "in an unexpected shape (no objects)",
+            )
         lines = [f"Search results for: {query}"]
-        for item in results[: max(1, limit)]:
+        for item in items[:limit]:
             title = str(item.get("title") or item.get("url") or "")
             url = str(item.get("url") or "")
             snippet = str(item.get("content") or "").strip()
@@ -134,7 +153,7 @@ class WebsearchTool(BaseTool):
                 lines.append(f"({published})")
             if snippet:
                 lines.append(snippet)
-        return ToolResult(success=True, output="\n".join(lines), data={"results": results})
+        return ToolResult(success=True, output="\n".join(lines), data={"results": items})
 
 
 __all__ = ["WebsearchTool"]
