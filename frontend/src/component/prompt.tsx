@@ -315,18 +315,27 @@ export function Prompt(props: PromptProps) {
           onPaste={(event) => {
             // r21: with bracketed paste on, the terminal eats ctrl+v and hands
             // the app a paste event instead of a keypress -- so the ctrl+v
-            // binding below never fires, which is why nothing happened at all.
-            // Only an image mime is taken over; everything else falls through to
-            // the Textarea's own text insert.
+            // binding below never fires on the terminals most people use.
             const outcome = pasteEventOutcome(event.metadata, event.bytes)
             if (outcome.kind === "text") return
             event.preventDefault()
-            if (outcome.kind === "failed") {
-              setHint(outcome.message)
+            if (outcome.kind === "image") {
+              setImages((all) => [...all, { name: `image-${all.length + 1}`, dataUrl: outcome.dataUrl }])
+              setHint("")
               return
             }
-            setImages((all) => [...all, { name: `image-${all.length + 1}`, dataUrl: outcome.dataUrl }])
-            setHint("")
+            // "clipboard": the terminal had nothing to forward, so ask the host.
+            void readClipboardImage().then((fallback) => {
+              if ("dataUrl" in fallback) {
+                setImages((all) => [
+                  ...all,
+                  { name: `image-${all.length + 1}`, dataUrl: fallback.dataUrl },
+                ])
+                setHint("")
+                return
+              }
+              setHint(fallback.error)
+            })
           }}
           placeholder={props.placeholder}
           placeholderColor={theme.textMuted}

@@ -37,16 +37,24 @@ describe("pasteEventOutcome", () => {
     expect(outcome).toEqual({ kind: "text" })
   })
 
-  // A terminal that sends text while the clipboard holds an image must not make
-  // the app paste a stray line -- that is the clipboard reader's job, not this.
-  test("an event with no metadata is left to the default", () => {
-    expect(pasteEventOutcome(undefined, new Uint8Array([104, 105]))).toEqual({ kind: "text" })
+  // A terminal with no image transport sends an EMPTY paste when the clipboard
+  // holds a picture and no text -- it has nothing to forward.  That empty paste
+  // is the cue to go and read the host clipboard, and it is the only signal
+  // this environment ever gives.
+  test("an empty paste is the cue to read the host clipboard", () => {
+    expect(pasteEventOutcome(undefined, new Uint8Array([]))).toEqual({ kind: "clipboard" })
   })
 
-  test("an image event with no bytes says so rather than pasting nothing", () => {
-    const outcome = pasteEventOutcome({ mimeType: "image/png" }, new Uint8Array([]))
+  test("an image mime with no bytes also means the clipboard", () => {
+    expect(pasteEventOutcome({ mimeType: "image/png" }, new Uint8Array([]))).toEqual({
+      kind: "clipboard",
+    })
+  })
 
-    expect(outcome.kind).toBe("failed")
+  // A terminal that sends text while the clipboard holds an image must not make
+  // the app paste a stray line -- that is the clipboard reader's job, not this.
+  test("an event with no metadata and no bytes still means the clipboard", () => {
+    expect(pasteEventOutcome(undefined, new Uint8Array([]))).toEqual({ kind: "clipboard" })
   })
 })
 

@@ -131,14 +131,17 @@ export interface PasteMetadataLike {
 export function pasteEventOutcome(
   metadata: PasteMetadataLike | undefined,
   bytes: Uint8Array,
-): { kind: "image"; dataUrl: string } | { kind: "text" } | { kind: "failed"; message: string } {
+): { kind: "image"; dataUrl: string } | { kind: "text" } | { kind: "clipboard" } {
   const mime = (metadata?.mimeType ?? "").split(";")[0]!.trim().toLowerCase()
-  if (!mime.startsWith("image/")) return { kind: "text" }
-  if (bytes.length === 0) {
-    return { kind: "failed", message: `终端发来的 ${mime} 粘贴是空的` }
+  if (mime.startsWith("image/") && bytes.length > 0) {
+    return { kind: "image", dataUrl: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}` }
   }
-  const dataUrl = `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`
-  return { kind: "image", dataUrl }
+  // An empty paste is the only signal a terminal can give for a clipboard that
+  // holds a picture and no text: it has nothing to forward, so it forwards
+  // nothing.  Real text always has bytes, so this cannot swallow an ordinary
+  // paste; it is the cue to consult the host clipboard instead.
+  if (bytes.length === 0) return { kind: "clipboard" }
+  return { kind: "text" }
 }
 
 /** Run one command and collect stdout.  Never throws: a tool that is missing,
