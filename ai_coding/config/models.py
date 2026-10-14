@@ -84,10 +84,14 @@ class AIConfig(BaseModel):
     # what Anthropic's sub-agent guidance describes - and it means the parent MUST
     # put every fact the child needs into the task text (docs/r7e-analysis.md 3.4).
     subagent_context_mode: Literal["full", "task_only"] = "full"
-    # R7e-3: warn once per loop when the serialised tool schemas cost more than
-    # this.  0 disables.  Advisory only: the request is byte-identical either way
-    # (measured: 4,280 chars without MCP, 13,301 with a 13-tool server).
-    tools_chars_warn: int = 12_000
+    # R7e-3, recalibrated by r22: warn once per loop when the MCP part of the
+    # tool surface costs more than this.  0 disables.
+    #
+    # It used to gate the *whole* surface at 12,000, a number picked when the
+    # built-in tools serialised to 4,280 chars.  They are 12,760 now, so the
+    # ceiling sat below the floor and every session warned about a cost the user
+    # cannot change.  The built-in tools are not configurable; MCP servers are.
+    mcp_chars_warn: int = 2_000
     # R7e-2: what one turn may absorb from a user who keeps typing (docs §12 Q6).
     steering_max_messages: int = 5
     steering_max_chars: int = 2_000

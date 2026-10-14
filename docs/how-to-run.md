@@ -194,7 +194,7 @@ mcp:
 | ~~`ui.steering`~~ | — | **已删除**（随旧 Textual UI）：回合中输入排队/中断由前端负责（见 M5 交互） |
 | `ai.steering_max_messages` | 5 | 一次抽干最多吸收几条（多出来的留在队列，下一轮/下一回合继续） |
 | `ai.steering_max_chars` | 2000 | 单条上限，超出截断 |
-| `ai.tools_chars_warn` | 12000 | 工具面超此值发一次 `[tools] …` 提示；0 关闭 |
+| `ai.mcp_chars_warn` | 2000 | **MCP 工具面**超此值发一次 `[tools] …` 提示；0 关闭（r22：只算 MCP，内置工具不计） |
 | `ai.subagent_context_mode` | `full` | `task_only` 让子智能体用干净窗口（省每一步的上下文，但要求你把背景写进 `task`） |
 
 **四件事怎么用**：

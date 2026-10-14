@@ -226,12 +226,16 @@ const notices: Record<string, (data: Record<string, unknown>) => string> = {
   "tools.warning": (data) => {
     const origins = Array.isArray(data["origins"]) ? data["origins"] : []
     const top = origins
+      .filter((pair) => Array.isArray(pair) && pair[0] !== "local")
       .slice(0, 3)
       .map((pair) => (Array.isArray(pair) ? `${pair[0]}=${pair[1]}` : ""))
       .filter(Boolean)
       .join(" · ")
     const suffix = top ? `  ${top}` : ""
-    return `[tools] ${num(data["toolsChars"])} 字符（阈值 ${num(data["threshold"])}）${suffix}`
+    // r22: the judged number is the MCP part -- the built-in tools are a fixed
+    // cost the reader cannot change, so quoting it was a warning nobody could
+    // act on.  The total stays visible for diagnosis.
+    return `[tools] MCP schema ${num(data["mcpChars"])} 字符（阈值 ${num(data["threshold"])}，总计 ${num(data["toolsChars"])}）${suffix}`
   },
   "context.compacted": (data) =>
     `[context] 上下文已压缩 ${num(data["beforeMessages"])}→${num(data["afterMessages"])} 条消息`,

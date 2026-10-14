@@ -281,7 +281,7 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 |---|---|---|
 | `ModelStepFinished` | `index`、`finish_reason`、`text_chars`、`tool_call_count`、`usage`、`cached_tokens`、`cache_write_tokens`、`latency_ms` | 一次模型步的**真实**用量与延迟；`cached_tokens` 是 provider 报的缓存命中（不是估算） |
 | `ContextAssembled` | `iteration`、`system_chars`、`tools_chars`、`history_messages`、`history_chars`、`tail_blocks`、`estimated_tokens`、`prefix_shared_chars`、`prefix_shared_ratio`、`digest` | 请求由什么拼成；`tools_chars` 计入估算（工具 schema 也是 prompt 的一部分，实测约 5k 字符） |
-| `ToolSurfaceWarning`（R7e-3） | `tools_chars`、`threshold`、`origins`、`hint` | 工具面超阈值时**每个 loop 一次**的成本提示（纯观测，不改请求） |
+| `ToolSurfaceWarning`（R7e-3，r22 重校） | `tools_chars`（总量）、`mcp_chars`（判据）、`threshold`、`origins`、`hint` | **MCP 部分**超阈值时**每个 loop 一次**的成本提示（纯观测，不改请求）。r22 前判据是总量，而内置工具已涨到 12,760 > 旧阈值 12,000，导致每个会话必报一条用户改不了的噪音 |
 | `InputSteered`（R7e-2） | `text_chars`、`iteration`、`total` | 用户回合中途补的那句话已经变成指令 |
 | `Degraded` | `component`、`reason`、`fallback` | 增强组件静默降级**可见化**（压缩/记忆/落盘/隔离/观察者） |
 | `ScopedEvent` | `scope`、`parent`、`event` | 子智能体事件带父子归属扇出到父观察者 |
@@ -466,7 +466,7 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 | 配置 | 默认 | 作用 |
 |---|---|---|
 | `subagent_context_mode` | `full` | 子智能体起始上下文：`full`（父回合请求视图 + 父系统提示）或 `task_only`（干净窗口 + 组合根基础提示） |
-| `tools_chars_warn` | `12000` | 工具面超此阈值时发一次 `ToolSurfaceWarning`；0 = 关闭 |
+| `mcp_chars_warn` | `2000` | **MCP 部分**超此阈值时发一次 `ToolSurfaceWarning`；0 = 关闭。~~`tools_chars_warn`（12000，按总量）~~ r22 改名并改语义：内置工具用户改不了，对它告警没有行动价值 |
 | `steering_max_messages` | `5` | 一次抽干最多吸收几条转向输入；多出来的留在队列 |
 | `steering_max_chars` | `2000` | 单条转向输入的字符上限（超出截断并加省略号） |
 

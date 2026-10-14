@@ -199,6 +199,7 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
             "type": "tools.warning",
             "data": {
                 "toolsChars": event.tools_chars,
+                "mcpChars": event.mcp_chars,
                 "threshold": event.threshold,
                 "origins": [list(pair) for pair in event.origins],
             },

@@ -174,11 +174,21 @@ def test_provider_retried_and_fallback() -> None:
 
 def test_tools_warning_origins_become_pairs() -> None:
     wire = to_wire(
-        ToolSurfaceWarning(tools_chars=900, threshold=800, origins=(("mcp", 500), ("builtin", 400)))
+        ToolSurfaceWarning(
+            tools_chars=900,
+            mcp_chars=500,
+            threshold=800,
+            origins=(("mcp", 500), ("builtin", 400)),
+        )
     )
     assert wire == {
         "type": "tools.warning",
-        "data": {"toolsChars": 900, "threshold": 800, "origins": [["mcp", 500], ["builtin", 400]]},
+        "data": {
+            "toolsChars": 900,
+            "mcpChars": 500,
+            "threshold": 800,
+            "origins": [["mcp", 500], ["builtin", 400]],
+        },
     }
 
 

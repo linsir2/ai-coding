@@ -91,6 +91,41 @@ def _session() -> SessionData:
 
 
 @pytest.mark.asyncio
+async def test_the_local_tool_surface_alone_never_warns():
+    """r22: the built-in tools serialise to 12,760 chars -- past the 12,000
+    ceiling R7e-3 picked when they were 4,280 -- so every session announced a
+    cost the user cannot change.  Only the MCP part is theirs to configure, so
+    only that part is worth a warning.
+    """
+    loop, _engine, observer = _loop(_Tool("fat", "y" * 30_000), mcp_chars_warn=2_000)
+    await loop.process_input(_session(), "一")
+
+    assert observer.of_type(ToolSurfaceWarning) == [], (
+        "a tool surface the user cannot shrink is not a warning, it is noise"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_mcp_surface_over_its_own_ceiling_warns():
+    """The warning keeps its job: it is the MCP server that costs, and the hint
+    still names it.  The total stays on the event so the diagnosis is complete.
+    """
+    loop, _engine, observer = _loop(
+        _Tool("local_one", "z" * 400),
+        _Tool("remote", "z" * 3_000, origin="mcp"),
+        mcp_chars_warn=2_000,
+    )
+    await loop.process_input(_session(), "一")
+
+    warnings = observer.of_type(ToolSurfaceWarning)
+    assert len(warnings) == 1
+    assert warnings[0].mcp_chars > warnings[0].threshold == 2_000
+    assert warnings[0].tools_chars > warnings[0].mcp_chars, (
+        "the total is still reported, so the reader can see how much is built in"
+    )
+
+
+@pytest.mark.asyncio
 async def test_no_warning_below_the_threshold():
     loop, _engine, observer = _loop(_Tool("tiny", "x"))
     await loop.process_input(_session(), "一")
@@ -99,16 +134,20 @@ async def test_no_warning_below_the_threshold():
 
 @pytest.mark.asyncio
 async def test_one_warning_above_the_threshold():
-    loop, _engine, observer = _loop(_Tool("fat", "y" * 3000), tools_chars_warn=100)
+    loop, _engine, observer = _loop(
+        _Tool("remote", "y" * 3000, origin="mcp"), mcp_chars_warn=100
+    )
     await loop.process_input(_session(), "一")
     warnings = observer.of_type(ToolSurfaceWarning)
     assert len(warnings) == 1
-    assert warnings[0].tools_chars > warnings[0].threshold == 100
+    assert warnings[0].mcp_chars > warnings[0].threshold == 100
 
 
 @pytest.mark.asyncio
 async def test_the_warning_is_emitted_once_per_loop():
-    loop, _engine, observer = _loop(_Tool("fat", "y" * 3000), tools_chars_warn=100)
+    loop, _engine, observer = _loop(
+        _Tool("remote", "y" * 3000, origin="mcp"), mcp_chars_warn=100
+    )
     session = _session()
     await loop.process_input(session, "一")
     await loop.process_input(session, "二")
@@ -117,7 +156,9 @@ async def test_the_warning_is_emitted_once_per_loop():
 
 @pytest.mark.asyncio
 async def test_zero_disables_the_warning():
-    loop, _engine, observer = _loop(_Tool("fat", "y" * 3000), tools_chars_warn=0)
+    loop, _engine, observer = _loop(
+        _Tool("remote", "y" * 3000, origin="mcp"), mcp_chars_warn=0
+    )
     await loop.process_input(_session(), "一")
     assert observer.of_type(ToolSurfaceWarning) == []
 
@@ -128,7 +169,7 @@ async def test_the_origins_add_up_to_the_tool_surface():
         _Tool("local_one", "z" * 400),
         _Tool("mcp_one", "z" * 400, origin="many"),
         _Tool("mcp_two", "z" * 400, origin="many"),
-        tools_chars_warn=100,
+        mcp_chars_warn=100,
     )
     await loop.process_input(_session(), "一")
     warning = observer.of_type(ToolSurfaceWarning)[0]
@@ -142,7 +183,7 @@ async def test_the_hint_names_the_most_expensive_origin():
     loop, _engine, observer = _loop(
         _Tool("local_one", "z" * 20),
         _Tool("mcp_one", "z" * 3000, origin="everything"),
-        tools_chars_warn=100,
+        mcp_chars_warn=100,
     )
     await loop.process_input(_session(), "一")
     warning = observer.of_type(ToolSurfaceWarning)[0]
@@ -153,8 +194,12 @@ async def test_the_hint_names_the_most_expensive_origin():
 @pytest.mark.asyncio
 async def test_the_warning_never_changes_the_request():
     """R4 的纪律：观测只写不改。开不开告警，请求逐字节相同。"""
-    quiet, quiet_engine, quiet_events = _loop(_Tool("fat", "y" * 3000), tools_chars_warn=0)
-    loud, loud_engine, loud_events = _loop(_Tool("fat", "y" * 3000), tools_chars_warn=100)
+    quiet, quiet_engine, quiet_events = _loop(
+        _Tool("remote", "y" * 3000, origin="mcp"), mcp_chars_warn=0
+    )
+    loud, loud_engine, loud_events = _loop(
+        _Tool("remote", "y" * 3000, origin="mcp"), mcp_chars_warn=100
+    )
     await quiet.process_input(_session(), "一")
     await loud.process_input(_session(), "一")
     assert [m.content for m in quiet_engine.requests[-1]] == [

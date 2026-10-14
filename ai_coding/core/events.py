@@ -295,18 +295,25 @@ class ProviderFallback:
 
 @dataclass(frozen=True)
 class ToolSurfaceWarning:
-    """The serialised tool schemas cost more than the configured ceiling (R7e-3).
+    """The MCP part of the tool surface costs more than the configured ceiling.
 
-    Advisory and write-only: it is emitted once per loop, it is never assembled into
-    a request, and the request is byte-identical whether or not anyone listens.
-    ``origins`` is ``((origin, chars), ...)`` biggest-first, so the reader can see
-    which MCP server to trim instead of one number nobody can act on.
+    R7e-3, recalibrated by r22.  Advisory and write-only: it is emitted once per
+    loop, it is never assembled into a request, and the request is byte-identical
+    whether or not anyone listens.
+
+    ``tools_chars`` is the whole surface and ``mcp_chars`` the part the warning
+    actually judged -- the built-in tools are not something the user can shrink,
+    so only the MCP servers are worth telling them about, and the total stays on
+    the event so the diagnosis is complete.  ``origins`` is
+    ``((origin, chars), ...)`` biggest-first, so the reader can see which server
+    to trim instead of one number nobody can act on.
     """
 
     tools_chars: int
     threshold: int
     origins: tuple[tuple[str, int], ...] = ()
     hint: str = ""
+    mcp_chars: int = 0
 
 
 @dataclass(frozen=True)

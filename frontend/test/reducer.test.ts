@@ -350,12 +350,19 @@ describe("notices", () => {
       initialState(),
       wire("provider.retried", { kind: "timeout", attempt: 2, delaySeconds: 1.5, reason: "slow" }),
       wire("provider.fallback", { fromModel: "a", toModel: "b", kind: "error", reason: "" }),
-      wire("tools.warning", { toolsChars: 900, threshold: 800, origins: [["mcp", 500]] }),
+      wire("tools.warning", {
+        toolsChars: 900,
+        mcpChars: 500,
+        threshold: 800,
+        origins: [["mcp", 500], ["local", 400]],
+      }),
     )
     expect(lastAssistant(state).parts.map((part) => (part as { text: string }).text)).toEqual([
       "⤷ 重试 [timeout] 第 2 次，等 1.5s：slow",
       "⤬ 降级 a → b（error）",
-      "[tools] 900 字符（阈值 800）  mcp=500",
+      // r22: the judged number is the MCP part; the total stays for diagnosis,
+      // and the built-in "local" origin is not worth naming to the reader.
+      "[tools] MCP schema 500 字符（阈值 800，总计 900）  mcp=500",
     ])
   })
 

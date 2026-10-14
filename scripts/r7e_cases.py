@@ -155,14 +155,18 @@ async def case_tools_chars_warning_fires_once(root: Path) -> tuple[bool, str]:
         def description(self) -> str:
             return "y" * 3000
 
+        @property
+        def origin(self) -> str:
+            return "mcp"  # r22: only the MCP part is judged
+
     observer = RecordingObserver()
-    loop = _loop(_Engine(), observer=observer, tools=(_Fat(),), tools_chars_warn=100)
+    loop = _loop(_Engine(), observer=observer, tools=(_Fat(),), mcp_chars_warn=100)
     session = _session()
     await loop.process_input(session, "一")
     await loop.process_input(session, "二")
     warnings = observer.of_type(ToolSurfaceWarning)
-    ok = len(warnings) == 1 and warnings[0].tools_chars > warnings[0].threshold
-    return ok, f"warnings={len(warnings)} tools_chars={warnings[0].tools_chars if warnings else 0}"
+    ok = len(warnings) == 1 and warnings[0].mcp_chars > warnings[0].threshold
+    return ok, f"warnings={len(warnings)} mcp_chars={warnings[0].mcp_chars if warnings else 0}"
 
 
 async def case_tools_chars_warning_keeps_the_request_identical(root: Path) -> tuple[bool, str]:
@@ -171,9 +175,13 @@ async def case_tools_chars_warning_keeps_the_request_identical(root: Path) -> tu
         def description(self) -> str:
             return "y" * 3000
 
+        @property
+        def origin(self) -> str:
+            return "mcp"  # r22: only the MCP part is judged
+
     quiet_engine, loud_engine = _Engine(), _Engine()
-    await _loop(quiet_engine, tools=(_Fat(),), tools_chars_warn=0).process_input(_session(), "一")
-    await _loop(loud_engine, tools=(_Fat(),), tools_chars_warn=100).process_input(_session(), "一")
+    await _loop(quiet_engine, tools=(_Fat(),), mcp_chars_warn=0).process_input(_session(), "一")
+    await _loop(loud_engine, tools=(_Fat(),), mcp_chars_warn=100).process_input(_session(), "一")
     ok = [m.content for m in quiet_engine.requests[-1]["messages"]] == [
         m.content for m in loud_engine.requests[-1]["messages"]
     ]

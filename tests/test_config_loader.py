@@ -261,7 +261,7 @@ def test_a_config_without_the_new_blocks_still_loads(tmp_path):
 def test_r7e_defaults_keep_every_behaviour_unchanged():
     ai = AIConfig()
     assert ai.subagent_context_mode == "full"  # Q8: 今天的行为
-    assert ai.tools_chars_warn == 12_000  # Q7
+    assert ai.mcp_chars_warn == 2_000  # r22: 只对 MCP 计费，本地工具用户改不了
     assert ai.steering_max_messages == 5  # Q6
     assert ai.steering_max_chars == 2_000  # Q6
 
