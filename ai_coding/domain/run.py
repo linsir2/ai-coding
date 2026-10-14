@@ -18,9 +18,21 @@ from .message import ChatMessage, ImageRef, ToolOutput
 
 
 def user_message(
-    content: str, timestamp: str, images: tuple[ImageRef, ...] = ()
+    content: str,
+    timestamp: str,
+    images: tuple[ImageRef, ...] = (),
+    *,
+    synthetic: bool = False,
 ) -> ChatMessage:
-    return ChatMessage(role="user", content=content, timestamp=timestamp, images=images)
+    """A ``role="user"`` message.
+
+    ``synthetic`` marks the ones the harness writes into the user's own voice
+    (r18/F3).  It is the single factory every user message goes through, so this
+    one keyword is what lets the runtime tell the two apart.
+    """
+    return ChatMessage(
+        role="user", content=content, timestamp=timestamp, images=images, synthetic=synthetic
+    )
 
 
 def assistant_message(step: StepResult, timestamp: str) -> ChatMessage:

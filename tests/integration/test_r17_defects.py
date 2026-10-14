@@ -21,6 +21,7 @@ import pytest
 from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.snapshots import SnapshotStore
 from ai_coding.domain.message import ChatMessage, ImageRef
+from ai_coding.domain.run import user_message
 from ai_coding.security.sandbox import Sandbox
 from ai_coding.service.session_service import SessionService
 from ai_coding.tools.grep_tool import GrepTool
@@ -326,11 +327,6 @@ def _loop(tmp_path: Path, root: Path) -> tuple[AgentLoop, SessionService]:
     return loop, sessions
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: the turn key counts synthetic user messages "
-    "(agent_loop.py:1305/1332)",
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_undo_must_work_after_a_nudge_was_injected(tmp_path):
     """Auto-continuation, fatigue nudges and steering all write role="user"
@@ -343,8 +339,10 @@ async def test_undo_must_work_after_a_nudge_was_injected(tmp_path):
 
     await loop.process_input(session, "REAL USER TURN")
     (root / "a.txt").write_text("TURN CHANGED IT\n", encoding="utf-8")
+    # Mirrors what the loop writes at agent_loop.py:486 -- a harness message in
+    # the user's voice, which is exactly what the flag is for.
     session.add_message(
-        ChatMessage(role="user", content="[系统] 还有未完成的任务项，请继续。", timestamp="t")
+        user_message("[系统] 还有未完成的任务项，请继续。", "t", synthetic=True)
     )
 
     report = await loop.undo_last_turn(session)
@@ -428,11 +426,6 @@ async def test_a_missing_baseline_must_not_delete_every_untracked_file(tmp_path)
     assert (root / "old_notes.md").exists(), "restore wiped a pre-snapshot file"
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: undo truncates messages but not session.turn_count "
-    "(agent_loop.py:1312)",
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_undo_must_rewind_the_session_turn_counter(tmp_path):
     """turn_count drives working memory, source_turn and last_compacted_turn;
@@ -451,11 +444,6 @@ async def test_undo_must_rewind_the_session_turn_counter(tmp_path):
 # ------------------------------------------------------------- T4: mentions
 
 
-@pytest.mark.xfail(
-    reason="r17 defect: _extract_user_input takes the last user message of any "
-    "origin (request_assembly.py:384)",
-    strict=False,
-)
 @pytest.mark.asyncio
 async def test_the_referenced_file_must_survive_a_nudge_in_the_same_turn(tmp_path):
     """The block is rebuilt from the last role="user" message; a nudge or
@@ -467,8 +455,10 @@ async def test_the_referenced_file_must_survive_a_nudge_in_the_same_turn(tmp_pat
     session = sessions.create()
 
     await loop.process_input(session, "@notes.txt")
+    # Mirrors what the loop writes at agent_loop.py:486 -- a harness message in
+    # the user's voice, which is exactly what the flag is for.
     session.add_message(
-        ChatMessage(role="user", content="[系统] 还有未完成的任务项，请继续。", timestamp="t")
+        user_message("[系统] 还有未完成的任务项，请继续。", "t", synthetic=True)
     )
     assembler = loop.assembler
     from ai_coding.core.request_assembly import RequestAssembler
@@ -477,6 +467,109 @@ async def test_the_referenced_file_must_survive_a_nudge_in_the_same_turn(tmp_pat
     block = assembler._referenced_files_block(current)
 
     assert "unique-payload-42" in block, f"the file vanished after a nudge: {block!r}"
+
+
+@pytest.mark.asyncio
+async def test_steering_does_not_become_the_undo_subject(tmp_path):
+    """A steering line is the harness talking (``agent_loop.py:745``), so ``/undo``
+    must not hand it back to the composer as if the user had typed it."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+
+    await loop.process_input(session, "REAL USER TURN")
+    (root / "a.txt").write_text("TURN CHANGED IT\n", encoding="utf-8")
+    session.add_message(
+        ChatMessage(role="user", content="[steering] actually use pytest", timestamp="t",
+                    synthetic=True)
+    )
+
+    report = await loop.undo_last_turn(session)
+
+    assert report["text"] == "REAL USER TURN"
+    assert (root / "a.txt").read_text(encoding="utf-8") == "v1\n"
+    assert report["files"] == ["a.txt"]
+
+
+def test_a_synthetic_flag_survives_a_restart(tmp_path):
+    """If the flag were memory-only, a resumed session would hand a nudge back
+    to the composer and rebuild mentions from it."""
+    from ai_coding.domain.session import _message_from_dict, _message_to_dict
+
+    real = ChatMessage(role="user", content="human words", timestamp="t")
+    harness = ChatMessage(role="user", content="[系统] 继续。", timestamp="t", synthetic=True)
+
+    assert _message_from_dict(_message_to_dict(real)).synthetic is False
+    assert _message_from_dict(_message_to_dict(harness)).synthetic is True
+
+
+def test_an_old_session_file_reads_every_user_message_as_human():
+    """Backward compatibility: files written before the flag existed must still
+    load, and their user messages must stay undo subjects."""
+    from ai_coding.domain.session import _message_from_dict
+
+    old = _message_from_dict({"role": "user", "content": "from r17", "timestamp": "t"})
+
+    assert old.synthetic is False
+
+
+@pytest.mark.asyncio
+async def test_undo_trims_the_digest_of_the_undone_turn(tmp_path):
+    """Otherwise the working-memory ring keeps a line for a turn that no longer
+    exists, and the next turn at the same number would appear twice."""
+    from ai_coding.domain.turn_digest import TurnDigest
+
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+    await loop.process_input(session, "TURN")
+    session.turn_digests.append(TurnDigest(turn=session.turn_count, request="TURN", outcome="done"))
+
+    await loop.undo_last_turn(session)
+
+    assert [d.turn for d in session.turn_digests] == [], "the undone turn kept its digest"
+
+
+@pytest.mark.asyncio
+async def test_the_model_never_sees_the_synthetic_flag(tmp_path):
+    """The flag exists for the runtime, not the provider: the wire format must be
+    byte-identical to r17."""
+    from ai_coding.ai.mapping import history_to_chat_messages
+
+    history = [
+        ChatMessage(role="user", content="说点什么", timestamp="t", synthetic=True),
+        ChatMessage(role="assistant", content="好", timestamp="t"),
+    ]
+
+    for message in history_to_chat_messages(history):
+        assert "synthetic" not in message, f"the flag leaked to the provider: {message}"
+
+
+def test_compaction_anchors_its_tail_on_a_real_user_message(tmp_path):
+    """``split_tail`` keeps the most recent exchange verbatim, starting at a user
+    boundary.  A trailing nudge would make that boundary the *harness's* line,
+    pushing the human's own instruction into the summary (r18/F3)."""
+    from ai_coding.core.context_compression import ContextManager
+
+    compressor = ContextManager.__new__(ContextManager)
+    compressor._max_context_tokens = 100_000
+    compressor._l4_tail_tokens = 4_000
+
+    messages = [
+        ChatMessage(role="user", content="真正的问题", timestamp="t"),
+        ChatMessage(role="assistant", content="答", timestamp="t"),
+        ChatMessage(
+            role="user", content="[系统] 还有未完成的任务项，请继续。", timestamp="t",
+            synthetic=True,
+        ),
+    ]
+
+    head, tail = compressor.split_tail(messages)
+
+    assert tail, "the compressor must never return an empty tail"
+    assert tail[0].content == "真正的问题", (
+        f"the verbatim tail starts at {tail[0].content!r}, not the human message"
+    )
 
 
 # ------------------------------------------------------------ T3: websearch

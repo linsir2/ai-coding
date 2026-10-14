@@ -382,9 +382,16 @@ class RequestAssembler:
 
     @staticmethod
     def _extract_user_input(session: SessionData) -> str:
-        """Get the last user message content."""
+        """The last message a *human* wrote, which is what the mention blocks are
+        rebuilt from.
+
+        Synthetic messages (r18/F3 -- a nudge, a steering line) are written as
+        ``role="user"`` too, and taking the last of those would rebuild
+        ``<referenced-files>`` from a system string the user never typed, losing
+        the file they attached for the rest of the turn.
+        """
         for m in reversed(session.messages):
-            if m.role == "user":
+            if m.role == "user" and not m.synthetic:
                 return (m.content or "").strip()
         return ""
 

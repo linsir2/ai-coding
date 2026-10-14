@@ -170,6 +170,14 @@ class ChatMessage:
     #: r17/T5: images the user attached (clipboard paste or an @path.png).  Empty
     #: for every message that predates them, so nothing downstream changed.
     images: tuple[ImageRef, ...] = ()
+    #: r18/F3: True when the *loop* wrote this "user" message — a todo nudge, a
+    #: fatigue retry, a steering line, the closing prompt — rather than a human
+    #: typing.  Nothing on the wire reads it (``mapping`` never copies it, so the
+    #: provider request is byte-identical); the runtime reads it to tell "which
+    #: turn did the human start" apart from "what did the harness say during it".
+    #: Without it, undo picks the nudge as the turn to take back, and the
+    #: volatile mention blocks rebuild from a system string.
+    synthetic: bool = False
 
     def __post_init__(self) -> None:
         if self.role == "tool" and not self.tool_call_id:

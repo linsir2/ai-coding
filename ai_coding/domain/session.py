@@ -44,6 +44,7 @@ def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
         tool_name=data.get("toolName"),
         tool_calls=tool_calls,
         reasoning=data.get("reasoning"),
+        synthetic=bool(data.get("synthetic", False)),
         images=images,
     )
 
@@ -72,6 +73,10 @@ def _message_to_dict(msg: ChatMessage) -> dict[str, Any]:
     # files (and the Java reader) never see the key.
     if msg.reasoning:
         data["reasoning"] = msg.reasoning
+    # r18/F3: same rule — a session written before the flag existed reads back
+    # as all-human, which is exactly what it was.
+    if msg.synthetic:
+        data["synthetic"] = True
     return data
 
 

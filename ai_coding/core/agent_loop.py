@@ -482,7 +482,9 @@ class AgentLoop:
                             books.note_fatigue_nudge()
                         else:
                             books.note_strategy_nudge()
-                    session.add_message(user_message(decision.inject or "", now_utc()))
+                    session.add_message(
+                        user_message(decision.inject or "", now_utc(), synthetic=True)
+                    )
                     self.closer.checkpoint(session, index)
                     if restart:
                         index = 0
@@ -550,6 +552,7 @@ class AgentLoop:
                             "你刚才只输出了思考内容，没有给出最终答案。"
                             "请直接给出最终答案。",
                             now_utc(),
+                            synthetic=True,
                         )
                     )
                     self.closer.checkpoint(session, index)
@@ -607,7 +610,9 @@ class AgentLoop:
                         books.note_acceptance_nudge()
                     else:
                         books.note_nudge()
-                    session.add_message(user_message(decision.inject or "", now_utc()))
+                    session.add_message(
+                        user_message(decision.inject or "", now_utc(), synthetic=True)
+                    )
                     self.closer.checkpoint(session, index)
                     continue
 
@@ -742,7 +747,7 @@ class AgentLoop:
         if not lines:
             return
         for line in lines:
-            session.add_message(user_message(f"[steering] {line}", now_utc()))
+            session.add_message(user_message(f"[steering] {line}", now_utc(), synthetic=True))
         books.note_steering(len(lines))
         self.closer.checkpoint(session, index)
         self._emit(
@@ -1111,7 +1116,7 @@ class AgentLoop:
             )
             request = [
                 *assembled.request,
-                user_message(_CLOSING_PROMPT, now_utc()),
+                user_message(_CLOSING_PROMPT, now_utc(), synthetic=True),
             ]
             step = await run_with_deadline(
                 self.engine.step(
@@ -1297,14 +1302,18 @@ class AgentLoop:
     async def _capture_snapshot(self, session: SessionData) -> None:
         """Pin the pre-turn workspace state under refs/ai-coding/undo.
 
+        The key is ``turn_count`` -- the session's own counter, already the truth
+        source for ``source_turn`` and the working-memory header (r18/F3).  It was
+        previously "how many user messages exist", which counts the harness's
+        own nudges and so missed the snapshot whenever a turn injected one.
+
         Best effort by design: undo is a safety net, not a turn prerequisite, so
         a missing git (or a git that overran its timeout) must not fail the turn.
         """
         if self.snapshots is None:
             return
-        turn = sum(1 for m in session.messages if m.role == "user")
         try:
-            await self.snapshots.capture(self._turn_key(session, turn))
+            await self.snapshots.capture(self._turn_key(session, session.turn_count))
             await self.snapshots.prune(session.session_id)
         except (OSError, TimeoutError, ValueError):
             pass
@@ -1321,6 +1330,7 @@ class AgentLoop:
                 i
                 for i in range(len(session.messages) - 1, -1, -1)
                 if session.messages[i].role == "user"
+                and not session.messages[i].synthetic
             ),
             None,
         )
@@ -1329,8 +1339,7 @@ class AgentLoop:
         text = session.messages[index].content or ""
         restored: list[str] = []
         if self.snapshots is not None:
-            before = sum(1 for m in session.messages[:index] if m.role == "user")
-            key = self._turn_key(session, before)
+            key = self._turn_key(session, max(0, session.turn_count - 1))
             try:
                 if await self.snapshots.exists(key):
                     # remember the state we are about to leave, so /redo can return to it
@@ -1340,6 +1349,15 @@ class AgentLoop:
                 restored = []
         self._undo_tail = list(session.messages[index:])
         session.messages = list(session.messages[:index])
+        # Taking the turn back includes the state that turn produced: the counter
+        # (so the next message is this turn again, not the next one) and its
+        # digest line (or the working memory would summarise a turn that is gone).
+        # ``last_compacted_turn`` and ``turn_usages`` stay: the first is a fact
+        # about what was rewritten, the second is money already spent.
+        session.turn_count = max(0, session.turn_count - 1)
+        session.turn_digests = [
+            digest for digest in session.turn_digests if digest.turn <= session.turn_count
+        ]
         self.closer.save(session)
         self.last_undo = {
             "ok": True,

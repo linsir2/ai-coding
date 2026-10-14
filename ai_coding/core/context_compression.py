@@ -614,7 +614,7 @@ class ContextManager:
             tail.append(message)
             used += cost
         tail.reverse()
-        while len(tail) > 1 and tail[0].role != "user":
+        while len(tail) > 1 and (tail[0].role != "user" or tail[0].synthetic):
             tail.pop(0)
         head = messages[: len(messages) - len(tail)] if tail else list(messages)
         if not head and len(messages) > 1:
@@ -622,8 +622,15 @@ class ContextManager:
             # verbatim and summarize the rest (OpenCode parity).  Without
             # this a small /compact installs a summary of an empty input
             # beside a full verbatim tail — cost with zero information.
+            # r18/F3: anchor on a message the human wrote.  A trailing synthetic
+            # message would otherwise start the verbatim tail, sending the
+            # user's own instruction into the summary.
             latest = max(
-                (index for index, m in enumerate(messages) if m.role == "user"),
+                (
+                    index
+                    for index, m in enumerate(messages)
+                    if m.role == "user" and not m.synthetic
+                ),
                 default=len(messages) - 1,
             )
             tail = messages[latest:]

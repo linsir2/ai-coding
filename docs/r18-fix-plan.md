@@ -260,53 +260,220 @@ mapping.to_chat_message  （loader 返回 None → 文本 part「（图片 X 无
 5. 集成闭环里那张 1×1 PNG（68 字节）远小于预算 → 不受影响，正常产出 image part。
 6. `_load_image` 变成一行委派后，`base64` 是否还在 `agent_loop.py` 别处使用？→ ruff 兜底，不留死导入。
 
-## 4. F3 — 合成消息标记 + 回合键改用 turn_count（根因修复）
+## 4. F3 — 合成消息标记 + 回合键改用 turn_count（根因）
 
-> 这一条一次修掉 4 个症状：undo 键错位、composer 拿到系统串、`<referenced-files>` 被 nudge 顶掉、`turn_count` 不回退。
+> 这一条一次修掉四个症状：undo 键错位、composer 拿到系统串、`<referenced-files>` 被顶掉、`turn_count` 不回退。
 
-### 影响面
+### 4.1 病灶：两个真相源在打架
+
+`session.messages` 里，`role="user"` 同时意味着两种东西：
+
+```
+① 人在说话            703: user_message(user_input, …, images)
+② harness 自己注入    485: decision.inject        （todo/acceptance 补问）
+                      549: "只输出了思考内容…"     （thinking-only 重试）
+                      610: decision.inject        （fatigue/strategy 补问）
+                      745: "[steering] …"        （运行中插话）
+                      1114: _CLOSING_PROMPT       （收尾用，从不落盘）
+```
+
+而**三处代码都假设 ①**：
+
+| 读者 | 现状 | 后果 |
+|---|---|---|
+| `agent_loop.py:1305` | `turn = sum(1 for m in messages if m.role=="user")` | 回合号被合成消息撑大 |
+| `agent_loop.py:1323/1332` | 取最后一条 `role=="user"` 当"这一回合" | 拿到的是 nudge；`before` 也被撑大 → **键错位 → `exists()` 落空 → 零文件还原却报 ok** |
+| `request_assembly.py:387` | 同上 | `<requested-skills>` 与 `<referenced-files>` 在 nudge 之后消失 |
+
+实测证据（`tests/integration/test_r17_defects.py`）：
+```
+无 nudge : files=['a.txt']  content='v1\n'          ✅
+有 nudge : files=[]         content='TURN CHANGED IT' ❌  composer='[系统] 还有未完成的任务项，请继续。'
+```
+
+### 4.2 为什么回合键改用 `turn_count`（而不是"数真人消息"）
+
+`session.turn_count`（`domain/session.py:137`）**已经是**回合语义的真相源：`source_turn`、`last_compacted_turn`、`<working-memory>` 表头、router 的 `record_load` 全读它。再数一遍消息就是**第二份真相源**——正是本轮要消灭的东西。
+
+时序（`agent_loop.py:377` → `:703` → `:710`，中间无 `await`，原子）：
+
+```
+第 N 回合开始   _run_turn 第一行 _capture_snapshot   turn_count == N-1
+               key = _turn_key(session, turn_count)  →  "<sid>/N"      ★capture
+_begin_turn    add_message(真人) → turn_count += 1    turn_count == N
+undo 时         最后一条真人消息属于第 N 回合
+               key = _turn_key(session, turn_count-1) → "<sid>/N"      ★undo  对齐
+```
+
+`synthetic` 标记**只用于定位截断点与提及来源**，不参与算回合号——职责单一。
+
+### 4.3 影响面（执行范围）
+
 | 文件 | 现状 | 改动 |
 |---|---|---|
-| `domain/message.py` | `ChatMessage` 有 `images` | 加 `synthetic: bool = False` |
-| `domain/run.py:20` | `user_message(content, ts, images)` | 加关键字参数 `synthetic: bool = False` |
-| `core/agent_loop.py:485,549,610,745` | 4 处注入合成 user 消息 | 传 `synthetic=True`（`:703` 是真人输入，**不动**；`:1114` 的 closing prompt 不落 session，**不动**） |
-| `core/agent_loop.py:1305,1332` | `sum(role=="user")` 数回合 | 改用 `session.turn_count` |
-| `core/agent_loop.py:1319-1326,1341` | 取最后一条 user | 跳过 `synthetic` |
-| `core/request_assembly.py:384` `_extract_user_input` | 取最后 user | 跳过 `synthetic` |
-| `domain/session.py` `_message_to_dict/_from_dict` | — | `synthetic` 只在 True 时写键 |
+| `domain/message.py` | `ChatMessage` 有 `images` | 加 `synthetic: bool = False`（同款位置） |
+| `domain/run.py:20` | `user_message(content, ts, images)` | 加**关键字参数** `synthetic: bool = False` |
+| `domain/session.py` | images/reasoning "只在非空时写键" | `synthetic` 只在 True 时写键 |
+| `core/agent_loop.py` | 5 处合成注入均无标记 | 逐处标 `synthetic=True`（703 真人不动） |
+| `core/agent_loop.py:1305` | 数 user 消息 | 删，改 `turn_count` |
+| `core/agent_loop.py:1319-1333` | 取最后 user / 数 before | 跳过 synthetic；键改 `turn_count` |
+| `core/agent_loop.py:1341-1350` | 只截 messages | 追加回退 `turn_count` + 裁 digest |
+| `core/request_assembly.py:386-390` | 取最后 user | 跳过 synthetic |
+| `core/context_compression.py:626` | 取最后 user 当 verbatim 尾部锚点 | 跳过 synthetic（你已拍板：同一类病，一次统住） |
 
-### 回合键推导（关键，必须先验算）
-```
-turn N 开始时  _run_turn 先调 _capture_snapshot，此时 turn_count == N-1
-             → key = _turn_key(session, turn_count) = "<sid>/N"
-_begin_turn    之后 turn_count == N
-undo 时         最后一条真人 user 消息属于第 N 轮
-             → key = _turn_key(session, session.turn_count - 1) = "<sid>/N"   ✓ 对齐
-```
-- 回合在 `_begin_turn` 之前崩掉：`turn_count` 未增，undo 拿到的是上一轮真人消息的键 → 语义正确，多出的 ref 交给 `prune`。
+**明确不动**：`ai/mapping.py`（不读该字段 → **对发给 provider 的报文零影响**）、`memory_search_tool.py:456`（你已拍板：harness 文本进记忆索引属召回质量，留作后续）。
 
-### 为什么不用"数真人消息"
-`turn_count` 已是 `source_turn` / `last_compacted_turn` / working-memory 表头的真相源；再数一遍消息就是第二份真相源（本轮要消灭的正是这类）。`synthetic` 只用于**定位截断点**与**@提及的来源消息**，职责单一。
+### 4.4 复用契约（不造轮子）
 
-### undo 同时回退的状态（F3 第二半）
+| 复用 | 位置 | 用法 |
+|---|---|---|
+| `user_message()` 工厂 | `domain/run.py:20` | 全仓唯一的 user 消息入口（6 处调用），加一个关键字参数即覆盖全部注入点，**不新增第二个工厂** |
+| `AgentLoop._turn_key` | `agent_loop.py:1260` | 已存在的键拼装（`f"{sid}/{n+1}"`），capture/undo 共用，不改签名 |
+| `SessionData.turn_count` | `domain/session.py:137` | 回合真相源 |
+| `SessionData.turn_digests` | `domain/session.py:138` | 有界环，直接按 `turn` 过滤 |
+| `_message_to_dict` 惯例 | `domain/session.py:51-75` | "只在非空时写键"（images/reasoning 同款） |
+
+### 4.5 每文件每步
+
+**Step 1 — `domain/message.py`**：`ChatMessage` 末尾加
 ```python
-# 截断 messages 后，与该轮绑定的回合状态一起收回：
-session.turn_count = max(0, session.turn_count - 1)
-session.turn_digests = [d for d in session.turn_digests if d.turn < session.turn_count + 1]
+#: r18/F3: True when the loop injected this "user" message (a nudge, a steering
+#: line, the closing prompt) rather than the human typing.  Nothing on the wire
+#: reads it; the runtime does, to tell "which turn did the user start" apart
+#: from "what did the harness say during it".
+synthetic: bool = False
 ```
-- **回退 `turn_count`**：下一条消息重新是第 N 轮（"收回"语义）。
-- **裁 digest**：否则工作记忆里会留下已被收回的那一行。`last_compacted_turn` **不动**——压缩边界是物理事实（历史确实被重写过），动它会让压缩逻辑算错。
 
-### 数据流影响
-`合成消息 → 带 synthetic=True → 落盘 → 历史扫描点跳过`。模型侧零影响：`to_chat_message` 不读该字段。
+**Step 2 — `domain/run.py`**：
+```python
+def user_message(content, timestamp, images=(), *, synthetic: bool = False) -> ChatMessage:
+    return ChatMessage(role="user", content=content, timestamp=timestamp,
+                       images=images, synthetic=synthetic)
+```
 
-### RIPR 用例
-- **Red**：绊线 3 条（nudge 后 undo / turn_count 回退 / mentioned file 撑过 nudge）去 xfail。
-- **Red（新增）**：`test_a_synthetic_message_never_becomes_the_undo_subject`——注入 nudge 后断言 `report["text"] == "REAL USER TURN"`。
-- **Red（新增）**：`test_synthetic_survives_a_restart`——落盘重载后 `_extract_user_input` 仍拿到真人消息（验证 `synthetic` 真的持久化了）。
-- **Refactor**：`synthetic` 为 True 的消息不计入 `working_memory` 的回合语义（已是现状，回归守住）。
+**Step 3 — `core/agent_loop.py` 五处注入点**加 `synthetic=True`（485 / 549 / 610 / 745 / 1114）。
 
----
+**Step 4 — 回合键**：
+```python
+async def _capture_snapshot(self, session):
+    if self._snapshots is None: return
+    try:
+        await self.snapshots.capture(self._turn_key(session, session.turn_count))
+        await self.snapshots.prune(session.session_id)
+    except (OSError, TimeoutError, ValueError): pass
+
+async def undo_last_turn(self, session):
+    index = next((i for i in range(len(session.messages) - 1, -1, -1)
+                  if session.messages[i].role == "user"
+                  and not session.messages[i].synthetic), None)
+    ...
+    key = self._turn_key(session, max(0, session.turn_count - 1))
+```
+
+**Step 5 — undo 收回回合状态**：
+```python
+    session.messages = list(session.messages[:index])
+    session.turn_count = max(0, session.turn_count - 1)
+    session.turn_digests = [d for d in session.turn_digests if d.turn <= session.turn_count]
+```
+
+**Step 6 — 两个「最后一条 user」读者**跳过 synthetic：
+```python
+# request_assembly.py:386
+for m in reversed(session.messages):
+    if m.role == "user" and not m.synthetic:
+        return (m.content or "").strip()
+
+# context_compression.py:625
+latest = max((index for index, m in enumerate(messages)
+              if m.role == "user" and not m.synthetic),
+             default=len(messages) - 1)          # 无真人消息时回落不变
+```
+
+### 4.6 为什么 `turn_count` 回退、`last_compacted_turn` 不动
+
+| 状态 | 动作 | 理由 |
+|---|---|---|
+| `turn_count` | 回退 | "收回"语义：undo 掉第 N 轮后，下一条仍是第 N 轮。否则编号永久空洞，工作记忆说"第 N 轮"而实际是第 N+1 轮 |
+| `turn_digests` | 裁掉该轮 | 否则工作记忆里留着已收回那轮的一行（你已拍板） |
+| `last_compacted_turn` | **不动** | 压缩边界是物理事实（历史确实被重写过）；动它会让 `live_prompt_tokens()` 的"未压缩部分"算错 |
+| `turn_usages` | **不动** | 成本账：钱已经花了，删行等于抹掉真实支出 |
+
+### 4.7 数据流影响
+
+```
+用户输入 ──► user_message(synthetic=False) ──► session.messages
+harness  ──► user_message(synthetic=True)  ──► session.messages
+                                              │
+                    ┌─────────────────────────┼──────────────────────────┐
+                    ▼                         ▼                          ▼
+        _extract_user_input            undo_last_turn            turn_count(=N)
+        跳过 synthetic                 跳过 synthetic              不数消息
+             │                              │                          │
+      <referenced-files>            "这一回合"+ composer 文本     capture/undo 键
+      <requested-skills>            文件还原
+```
+报文形态**不变**（`mapping` 不读该字段）；变的只是运行时"哪条是人在说话"的判断。
+
+### 4.8 完成后效果
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| 回合触发 nudge 后 `/undo` | 文件零还原，composer 拿到「[系统] 还有未完成的任务项，请继续。」 | 文件还原，composer 拿回真人原话 |
+| nudge 后本轮继续迭代 | `<referenced-files>` 消失 | 仍在（直到下一条真人消息） |
+| undo 后再发消息 | 编号继续涨（空洞） | 重新是第 N 轮 |
+| undo 后工作记忆 | 留着已收回那轮 | 该轮摘要被裁 |
+| 真人消息 | 不变 | 不变 |
+
+### 4.9 RIPR 用例
+
+- **Red（摘 3 条既有绊线）**
+  - `test_undo_must_work_after_a_nudge_was_injected`（同时断言 `files`、`a.txt` 内容、`text` 三项）
+  - `test_undo_must_rewind_the_session_turn_counter`
+  - `test_the_referenced_file_must_survive_a_nudge_in_the_same_turn`
+- **Red（新增 4 条）**
+  1. `test_steering_does_not_become_the_undo_subject`：注入 `[steering] …` 后 undo，composer 拿回真人原话。
+  2. `test_synthetic_survives_a_restart`：落盘重载后 `_extract_user_input` 仍返回真人消息（证明 `synthetic` 真持久化了，而不是只在内存里有效）。
+  3. `test_undo_trims_the_digest_of_the_undone_turn`：回合后 `turn_digests` 有第 N 行 → undo 后没有。
+  4. `test_the_model_never_sees_the_synthetic_flag`：断言发给 provider 的 message dict 里没有 `synthetic` 键（证明零报文影响）。
+  5. `test_compaction_tail_anchors_on_a_real_user_message`：nudge 在最后时，verbatim 尾部仍从真人消息开始（`context_compression.py:626`）。
+- **Pass**：既有 `test_skill_reference.py`、`test_request_assembly.py`、集成闭环 `test_a_typed_mention_reaches_the_provider_without_a_tool_call` 保持绿。
+- **Refactor**：`_turn_key(session, 0)` 与 `max(0, …)` 的边界各测一次（turn_count=0 时 undo 不得生成 `-1` 键）。
+
+### 4.10 架构图（F3 后）
+
+```
+                    ┌──────────── AgentLoop ────────────┐
+ 真人输入 ──────────► _begin_turn: user_message(synthetic=False)
+                    │                turn_count += 1        ← 回合号唯一真相源
+                    │                     │
+                    ├─► nudge/steering ──► user_message(synthetic=True)  ✦新增
+                    │                     │
+                    │  ┌──────────────────┴───────────────────┐
+                    │  ▼                                      ▼
+                    │ _capture_snapshot                  _extract_user_input()
+                    │  key=turn_count+1                  最后一条 non-synthetic
+                    │  → refs/ai-coding/undo/<sid>/N       → <referenced-files>
+                    │                                      → <requested-skills>
+                    │ /undo
+                    │  截断点 = 最后一条 non-synthetic user
+                    │  key=turn_count → 还原文件
+                    │  turn_count -= 1 ; 裁该轮 digest      ✦新增
+                    └──────────────────────────────────────┘
+                              │ 不读 synthetic
+                    mapping.to_chat_message → provider
+                    （报文形态与 r17 完全一致，零变化）
+```
+
+### 4.11 最终形态自检
+
+1. 用户发消息 → 模型跑 5 轮工具 → 触发 todo nudge → 用户 `/undo`：
+   → 截断到最后一条**真人**消息；键 = `turn_count`；文件还原；composer 拿回用户原话；`turn_count` 回到上一轮；该轮 digest 消失。
+2. undo 后用户改个措辞重发 → 新回合仍是同一个编号 → 工作记忆里只有一行该编号 → **不重复**。
+3. 回合无任何注入 → 与 r17 行为逐字节一致（回归守住）。
+4. 老 session 文件（无 `synthetic` 键）→ `_message_from_dict` 走 `.get` 默认 False → 历史里所有 user 消息都被当真人 → **undo 退化为 r17 的行为，不崩**。这是向后兼容的关键。
+5. 回合在 `_begin_turn` 前崩掉 → `turn_count` 未增 → undo 取到上一轮真人消息的键 → 语义正确，多余 ref 交给 `prune`。
+6. `turn_count=0` 时 undo → `max(0, -1)=0` → 键 `sid/1`；若无该 ref → `exists()` 落空 → 不还原（且 F8 会说明原因）。
 
 ## 5. F4 — ToolArtifact 接线（undo 只动模型写过的文件）
 
@@ -501,7 +668,7 @@ OC 文档：*"Sending a new prompt while an undo is staged **commits the revert*
 - [x] **F2** `_load_image` 复用 `Sandbox.resolve` + mime 白名单 + 尺寸上限
 
 ### undo 正确性
-- [ ] **F3** `synthetic` 标记（4 处注入点 + 落盘）+ 回合键改 `turn_count` + undo 回退 `turn_count` 并裁 digest
+- [x] **F3** `synthetic` 标记（4 处注入点 + 落盘）+ 回合键改 `turn_count` + undo 回退 `turn_count` 并裁 digest
 - [ ] **F4** `ToolArtifact` 接线：write/edit 产出 → 落盘 → `restore(created=…)`，删掉基线推断
 - [ ] **F5** 新回合作废 redo + `_undo_tail`/`last_undo` 按 session 隔离
 - [ ] **F6** `capture` all-or-nothing（写失败即回滚并返回 None）
