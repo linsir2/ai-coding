@@ -232,9 +232,16 @@ def test_an_image_over_the_budget_is_refused_before_the_bytes_are_read(tmp_path)
 
 
 def test_a_large_image_is_not_free_in_the_context_budget():
-    """The provider receives the bytes again on every step; a budget that counts
-    only text cannot see that, so a 5MB screenshot is re-sent 28MB at a time and
-    nothing ever triggers compaction."""
+    """The provider receives the bytes again on every step, and a budget that
+    counts only text cannot see that.
+
+    r19/F3 charged ``bytes // 4`` to make the image visible.  That number was
+    the base64 length, not the token count, and it was two orders of magnitude
+    out -- enough that one 1 MB screenshot looked like a full 256k context and
+    opened the compaction gate on a single-turn session (r21).  The intent
+    stands, the amount does not: an image must cost something, and must not be
+    able to look like a whole window on its own.
+    """
     from ai_coding.core.context_compression import estimate_tokens, image_tokens
 
     message = ChatMessage(
@@ -243,7 +250,8 @@ def test_a_large_image_is_not_free_in_the_context_budget():
     )
 
     charged = image_tokens([message])
-    assert charged >= 1_250_000, charged
+    assert charged > 0, "an image must not be free"
+    assert charged < 10_000, f"one image cannot approach a whole context window: {charged}"
     assert estimate_tokens(message.content or "") < 100, "text-only cost must not move"
 
 

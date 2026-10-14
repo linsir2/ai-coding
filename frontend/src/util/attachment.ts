@@ -20,6 +20,40 @@ export function imageDataUrl(mimeType: string, bytes: Uint8Array): string | null
   return `data:${mimeType};base64,${Buffer.from(bytes).toString("base64")}`
 }
 
+/** The token an attached image is written as, in the composer's own text.
+ *
+ * OpenCode's shape: the picture sits where it was pasted, so backspace removes
+ * it like any other character and there is no second place it can hide.  The
+ * number only has to be unique within one message.
+ */
+export function imageToken(sequence: number): string {
+  return `[Image ${sequence}]`
+}
+
+const TOKEN = /\[Image (\d+)\]/g
+
+/**
+ * Split the composer's text into the message and the images it still refers to.
+ *
+ * The text is the truth: a token the map knows is an image, and a token the map
+ * does not know -- deleted, or typed by hand -- is ordinary text.  That is what
+ * makes deletion work without a keybinding of its own, and it is why the map can
+ * keep an entry for a picture the user has already removed.
+ */
+export function extractImages(
+  raw: string,
+  imagesByToken: Record<string, string>,
+): { text: string; images: PromptImage[] } {
+  const images: PromptImage[] = []
+  const text = raw.replace(TOKEN, (match) => {
+    const dataUrl = imagesByToken[match]
+    if (dataUrl === undefined) return match
+    images.push({ name: `image-${images.length + 1}`, dataUrl })
+    return ""
+  })
+  return { text, images }
+}
+
 export type PasteOutcome =
   | { kind: "image"; dataUrl: string }
   | { kind: "text"; text: string }

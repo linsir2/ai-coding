@@ -75,6 +75,32 @@ def test_ceiling_leaves_a_reserve(window: int, expected: int) -> None:
     assert compaction_ceiling(window) == expected
 
 
+def test_a_pasted_screenshot_does_not_open_the_gate(tmp_path) -> None:
+    """r21: one image must not look like a full context.
+
+    A 1 MB screenshot is billed by a vision model at roughly 1,500 tokens.  It
+    was charged ``bytes // 4`` = 262,144, which is past the 230,400 ceiling of a
+    256k window -- so pasting a single screenshot opened the gate on a session
+    holding one turn.  Compaction then found nothing worth summarising, and
+    every iteration announced "无可压缩内容".
+    """
+    from ai_coding.domain.message import ImageRef
+
+    manager = ContextManager(_settings(max_context_tokens=256_000), transcripts_root=tmp_path)
+    history = [
+        ChatMessage(
+            role="user",
+            content="看看这个界面",
+            timestamp="",
+            images=(ImageRef(path="shot.png", mime="image/png", name="s", bytes=1_048_576),),
+        )
+    ]
+
+    assert manager.should_compact(history) is False, (
+        "one pasted screenshot was enough to look like a full context"
+    )
+
+
 def test_should_compact_fires_at_the_ceiling(tmp_path) -> None:
     manager = ContextManager(_settings(max_context_tokens=400), transcripts_root=tmp_path)
 

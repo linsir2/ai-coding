@@ -346,17 +346,34 @@ def _history_tokens(messages: list[ChatMessage]) -> int:
     return estimate_tokens(_joined_history_text(messages)) + image_tokens(messages)
 
 
-def image_tokens(messages: list[ChatMessage]) -> int:
-    """What the images a request carries cost it (r19/F3).
+#: What one image costs the model's context (r21).
+#:
+#: This used to be ``bytes // 4`` -- the base64 character count.  That is the
+#: request's *byte* weight, not the model's token count, and the two differ by
+#: two orders of magnitude: a 1 MB screenshot is billed at roughly 1,500 tokens
+#: but was charged 262,144, which is past the 230,400 ceiling of a 256k window.
+#: One pasted screenshot therefore opened the compaction gate on a session with
+#: a single turn; compaction found nothing worth summarising and every iteration
+#: announced "无可压缩内容".
+#:
+#: Vision APIs downscale an image before tokenising it and cap the result, so
+#: the cost is dominated by resolution and saturates -- a bigger file is not a
+#: proportionally bigger request.  A flat, documented estimate is closer to the
+#: truth than a size-proportional one, and it still keeps an image visible to
+#: the budget, which is what r19/F3 set out to do.
+_IMAGE_TOKENS = 1_600
 
-    ``ImageRef.bytes`` is what the wire carries: the base64 encoding runs about
-    four characters per three bytes, so a quarter of the file size is a close
-    lower bound on the request weight.  Charging it here is what lets a
-    screenshot stop being invisible -- before this a 5 MB image was re-sent on
-    every step while the budget, reading only text, stayed at zero and nothing
-    ever compacted.
+
+def image_tokens(messages: list[ChatMessage]) -> int:
+    """What the images a request carries cost it (r19/F3, corrected by r21).
+
+    ``ImageRef.bytes`` being present is what says the image was measured; an
+    older session without it keeps costing nothing rather than being invented a
+    size.  What changed is the *amount*: the base64 length is not the token
+    count, and charging it made one screenshot look like a full context.
     """
-    return sum(ref.bytes // 4 for message in messages for ref in message.images)
+    count = sum(1 for message in messages for ref in message.images if ref.bytes > 0)
+    return _IMAGE_TOKENS * count
 
 
 def _joined_history_text(messages: list[ChatMessage]) -> str:

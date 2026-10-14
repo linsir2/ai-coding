@@ -26,7 +26,14 @@ import { TextAttributes } from "@opentui/core"
 import { useBindings, useKeymap } from "@opentui/keymap/solid"
 import { For, Show, createEffect, createSignal, onMount } from "solid-js"
 import { theme } from "../theme/tokens"
-import { type PasteOutcome, type PromptImage, hostClipboard, interpretPaste } from "../util/attachment"
+import {
+  type PasteOutcome,
+  type PromptImage,
+  extractImages,
+  hostClipboard,
+  imageToken,
+  interpretPaste,
+} from "../util/attachment"
 import { pasteEventOutcome, readClipboardImage } from "../util/clipboard"
 import { moveSelection } from "../util/dialog-select"
 import type { MentionOption } from "../util/mention"
@@ -86,17 +93,24 @@ export function Prompt(props: PromptProps) {
   const [suggestions, setSuggestions] = createSignal<Suggestion[]>([])
   const [selected, setSelected] = createSignal(0)
   const visible = () => suggestions().length > 0
-  // r17/T5: pasted images wait here until the message is sent.
-  const [images, setImages] = createSignal<PromptImage[]>([])
+  // r17/T5, r21: an attached image is a token in the composer's own text, the
+  // way OpenCode shows it -- so it sits where it was pasted and backspace
+  // removes it like any other character.  This map is only what a token means;
+  // the text decides whether it is still attached.
+  const [imagesByToken, setImagesByToken] = createSignal<Record<string, string>>({})
+  let imageSequence = 0
   const [hint, setHint] = createSignal("")
   const clipboard = hostClipboard()
 
-  // r21: the one place an image joins the list.  The host read takes about two
-  // seconds on WSL (it spawns powershell.exe), so the hint says so while it
-  // runs -- otherwise a paste looks like it did nothing until the chip appears
-  // "by itself" a moment later.
+  // r21: the one place an image joins the message.  The host read takes about
+  // two seconds on WSL (it spawns powershell.exe), so the key path says so while
+  // it runs -- otherwise a paste looks like it did nothing until the token
+  // appears "by itself" a moment later.
   const attach = (dataUrl: string) => {
-    setImages((all) => [...all, { name: `image-${all.length + 1}`, dataUrl }])
+    imageSequence += 1
+    const token = imageToken(imageSequence)
+    setImagesByToken((map) => ({ ...map, [token]: dataUrl }))
+    input?.insertText(token)
     setHint("")
   }
   const attachFromHost = async (source: "key" | "paste") => {
@@ -146,12 +160,14 @@ export function Prompt(props: PromptProps) {
     label: `/${entry.name}`,
     description: entry.description,
     run: () => {
+      // Read the attachments before the text goes: they live in the text now.
+      const { images } = extractImages(input?.plainText ?? "", imagesByToken())
       input?.setText("")
       // A text entry (no keymap command) is submitted verbatim: the backend's
       // dispatcher owns what a slash line means (A2.3, SlashCommand's contract).
       const text = slashSelectionText(entry)
       if (text !== undefined) {
-        props.onSubmit(text, images())
+        props.onSubmit(text, images)
         return
       }
       keymap.runCommand(entry.command!)
@@ -240,25 +256,6 @@ export function Prompt(props: PromptProps) {
   }))
 
   useBindings(() => ({
-    // r21: an attached image had no way out -- paste a screenshot by mistake
-    // and it rode along on every message until the turn was sent.  With the
-    // composer empty, backspace removes the most recent one, which is the
-    // gesture every chat UI already uses and needs no new key to learn.  The
-    // layer only exists while there is an image and no text, so an ordinary
-    // backspace inside a sentence is untouched.
-    enabled: images().length > 0 && (input?.plainText ?? "").length === 0,
-    target: () => input,
-    commands: [
-      {
-        name: "prompt.dropImage",
-        desc: "Remove the last attached image",
-        run: () => setImages((all) => all.slice(0, -1)),
-      },
-    ],
-    bindings: [{ key: "backspace", cmd: "prompt.dropImage" }],
-  }))
-
-  useBindings(() => ({
     enabled: visible(),
     target: () => input,
     commands: [
@@ -281,18 +278,22 @@ export function Prompt(props: PromptProps) {
   }))
 
   const submit = () => {
-    const text = (input?.plainText ?? "").trim()
-    if (!text && images().length === 0) return
+    const raw = input?.plainText ?? ""
+    // r21: the text is the truth.  A token the map knows is an image; one the
+    // user deleted (or typed by hand) is just text.
+    const { text: messageText, images } = extractImages(raw, imagesByToken())
+    const text = messageText.trim()
+    if (!text && images.length === 0) return
     setSuggestions([])
     // A string is a refusal with a reason (r18/F14: a command sent no images,
     // so the composer keeps them and says so); false is the busy refusal.
-    const refused = props.onSubmit(text, images())
+    const refused = props.onSubmit(text, images)
     if (refused === false || typeof refused === "string") {
       if (typeof refused === "string") setHint(refused)
-      else if (images().length > 0) setHint("回合进行中：图片不能排队，等这轮结束后再发送")
+      else if (images.length > 0) setHint("回合进行中：图片不能排队，等这轮结束后再发送")
       return
     }
-    setImages([])
+    setImagesByToken({})
     setHint("")
     input?.setText("")
   }
@@ -309,19 +310,9 @@ export function Prompt(props: PromptProps) {
       paddingTop={1}
     >
       <box flexDirection="column" width="100%">
-        <Show when={images().length > 0 || hint()}>
+        <Show when={hint()}>
           <box flexDirection="column" width="100%">
-            <Show when={images().length > 0}>
-              <text fg={theme.textMuted}>
-                {images()
-                  .map((_image, index) => `[Image ${index + 1}]`)
-                  .join(" ")}
-                {"   ⌫ 删除"}
-              </text>
-            </Show>
-            <Show when={hint()}>
-              <text fg={theme.textMuted}>{hint()}</text>
-            </Show>
+            <text fg={theme.textMuted}>{hint()}</text>
           </box>
         </Show>
         <Show when={visible()}>

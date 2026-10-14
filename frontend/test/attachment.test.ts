@@ -6,12 +6,64 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { imageDataUrl, interpretPaste } from "../src/util/attachment"
+import { extractImages, imageDataUrl, interpretPaste, imageToken } from "../src/util/attachment"
 
 /** The clipboard result shapes the host backend can hand back. */
 function read(status: string, extra: Record<string, unknown> = {}) {
   return { status, ...extra } as never
 }
+
+describe("inline image placeholders", () => {
+  // OpenCode's shape: the picture is a token in the text, so it sits where it
+  // was pasted and backspace removes it like any other character.  Nothing has
+  // to be learned and nothing can be forgotten.
+  test("a token in the text becomes an image and leaves the message clean", () => {
+    const token = imageToken(1)
+    const { text, images } = extractImages(`看看这个 ${token} 对吗`, { [token]: "data:image/png;base64,AAA" })
+
+    expect(images).toEqual([{ name: "image-1", dataUrl: "data:image/png;base64,AAA" }])
+    expect(text).toBe("看看这个  对吗")
+  })
+
+  test("several tokens keep the order they were written in", () => {
+    const first = imageToken(1)
+    const second = imageToken(2)
+    const map = { [first]: "data:image/png;base64,ONE", [second]: "data:image/png;base64,TWO" }
+
+    const { images } = extractImages(`${first} 和 ${second}`, map)
+
+    expect(images.map((image) => image.dataUrl)).toEqual([
+      "data:image/png;base64,ONE",
+      "data:image/png;base64,TWO",
+    ])
+  })
+
+  // Deleting the token is how a picture is removed, so a token the map does not
+  // know -- deleted, or typed by hand -- must not resurrect anything.
+  test("a token with no image behind it is left as ordinary text", () => {
+    const { text, images } = extractImages("这是 [Image 9] 手打的", {})
+
+    expect(images).toEqual([])
+    expect(text).toBe("这是 [Image 9] 手打的")
+  })
+
+  test("a message with no token has no images and its text is untouched", () => {
+    const { text, images } = extractImages("普通的一句话", {})
+
+    expect(images).toEqual([])
+    expect(text).toBe("普通的一句话")
+  })
+
+  test("a deleted token drops its image even though the map still holds it", () => {
+    const token = imageToken(1)
+    // The map is the record of what was pasted; the text is the truth of what
+    // the user still wants.  Removing the token removes the picture.
+    const { text, images } = extractImages("删掉了", { [token]: "data:image/png;base64,AAA" })
+
+    expect(images).toEqual([])
+    expect(text).toBe("删掉了")
+  })
+})
 
 describe("interpretPaste", () => {
   test("an image comes back as a data URL", () => {
