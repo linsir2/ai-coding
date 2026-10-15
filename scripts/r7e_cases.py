@@ -97,6 +97,11 @@ class _Sessions:
     def save(self, session: SessionData) -> None:
         return None
 
+    def mark_pending_approval(self, session_id: str, request: object) -> None:
+        """P3: the real SessionService writes this marker beside the session
+        file; these cases never touch disk."""
+        return None
+
 
 def _session() -> SessionData:
     return SessionData(session_id="r7e", title="", created_time="t", last_access_time="t")
