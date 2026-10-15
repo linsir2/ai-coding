@@ -7,6 +7,7 @@ with the Java ``sessions/*.json`` format.
 from __future__ import annotations
 
 import os
+import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,12 @@ def _access_rank(value: Any) -> tuple[int, str]:
 #: Subdirectory holding the pending-approval markers (P3).  Separate so the
 #: ``*.json`` session scan cannot read one as a session.
 _PENDING_DIR = "pending"
+
+#: Sibling directory holding the undo file-bytes sidecars (P4).  Mirrors the
+#: root ``AgentLoop`` builds its ``UndoFileStore`` on
+#: (``<workspace>/.ai-coding/undo``); named here so ``delete`` can take a
+#: session's sidecar with it instead of orphaning redo bytes.
+_UNDO_DIR = "undo"
 
 
 #: A preview is one line by definition; measured on the compaction checkpoint,
@@ -207,6 +214,9 @@ class SessionService:
         # P3: an orphan marker would keep reporting a pending approval for a
         # session that no longer exists.
         self._pending_path(session_id).unlink(missing_ok=True)
+        # P4: same orphan class for the undo file-bytes sidecar — redo bytes
+        # for a deleted session are unreachable, so drop the directory.
+        shutil.rmtree(self.root.parent / _UNDO_DIR / session_id, ignore_errors=True)
         return True
 
 

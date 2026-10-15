@@ -388,3 +388,19 @@ def test_deleting_a_session_takes_its_marker_with_it(tmp_path):
 
     assert service.load(session.session_id) is None
     assert not (tmp_path / "sessions" / "pending" / f"{session.session_id}.json").exists()
+
+
+def test_deleting_a_session_takes_its_undo_sidecar_with_it(tmp_path):
+    """Same orphan class as the pending marker: deleting a session that has an
+    undo sidecar must not leave ``.ai-coding/undo/<id>/`` behind."""
+    root = tmp_path / ".ai-coding" / "sessions"
+    service = SessionService(root=root)
+    session = service.create(title="doomed")
+    service.save(session)
+    sidecar = root.parent / "undo" / session.session_id
+    sidecar.mkdir(parents=True)
+    (sidecar / "created.txt").write_bytes(b"redo bytes")
+
+    assert service.delete(session.session_id) is True
+
+    assert not sidecar.exists()
