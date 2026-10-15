@@ -66,6 +66,11 @@ class _Sessions:
     def save(self, session: SessionData) -> None:
         return None
 
+    def mark_pending_approval(self, session_id: str, request: object) -> None:
+        """P3: stand-in for the marker the real SessionService writes beside
+        the session file; this fake keeps nothing on disk."""
+        return None
+
 
 def _loop(
     *tools: BaseTool, observer: RecordingObserver | None = None, **overrides: Any

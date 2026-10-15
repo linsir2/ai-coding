@@ -38,6 +38,11 @@ class _Sessions:
             raise OSError("disk on fire")
         self.saved.append(len(session.messages))
 
+    def mark_pending_approval(self, session_id: str, request: object) -> None:
+        """P3: stand-in for the marker the real SessionService writes beside
+        the session file; this fake keeps nothing on disk."""
+        return None
+
 
 class _Reporter:
     """Stands in for TurnReporter: records the finish, keeps the damage report."""

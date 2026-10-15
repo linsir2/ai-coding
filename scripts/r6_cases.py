@@ -124,6 +124,11 @@ class _Sessions:
     def save(self, session: SessionData) -> None:
         self.saved.append(session)
 
+    def mark_pending_approval(self, session_id: str, request: object) -> None:
+        """P3: the real SessionService writes this marker beside the session
+        file; these cases never touch disk."""
+        return None
+
 
 class _Context:
     """Stand-in compaction: rewrite the history, or hand it back untouched."""

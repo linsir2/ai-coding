@@ -163,7 +163,8 @@ export interface RecoveryFacts {
  * A pending approval is a *notice*, not a re-issued approval panel: the panel
  * belongs to the turn that died, and with no live turn to receive an answer,
  * asking again would collect a reply that goes nowhere.  Continuing is the
- * user's move -- resending the message makes the model ask again by itself.
+ * user's move -- the notice carries the resume key (08), so one keypress
+ * walks the same turn on from the persisted history.
  *
  * 08: the notice now carries the resume action -- the session route binds it
  * to ``ctrl+x r`` (this TUI is keyboard-driven; there is no mouse to click

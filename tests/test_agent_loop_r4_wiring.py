@@ -249,6 +249,10 @@ async def test_a_failed_persist_is_visible_but_does_not_end_the_turn(tmp_path):
         def save(self, session):  # type: ignore[no-untyped-def]
             raise OSError("disk full")
 
+        def mark_pending_approval(self, session_id, request):  # type: ignore[no-untyped-def]
+            """P3: the marker is best-effort too -- a full disk skips it."""
+            return None
+
     observer = RecordingObserver()
     loop = AgentLoop(
         _Engine([StepResult(text="done", finish_reason="stop")]),
