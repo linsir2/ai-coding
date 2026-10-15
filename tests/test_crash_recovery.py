@@ -240,3 +240,120 @@ def test_pending_approval_is_read_back_from_the_marker(tmp_path):
     service.mark_pending_approval("crashed", None)
     cleared = service.load("crashed")
     assert cleared is not None and cleared.pending_approval is None
+
+
+# ---- P4: the undo history and the created-file bytes survive a restart --------
+
+
+class _NoopEngine(ChatEngine):
+    """Never called: these tests drive undo/redo directly."""
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        return StepResult(text="ok")
+
+
+class _RecordingSessions(SessionService):
+    def __init__(self, root) -> None:
+        super().__init__(root)
+        self.saves = 0
+
+    def save(self, session) -> None:
+        self.saves += 1
+        super().save(session)
+
+
+def _git_repo(tmp_path):
+    import subprocess
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(
+        [
+            "git", "-c", "user.email=t@t", "-c", "user.name=t",
+            "commit", "-qm", "init", "--allow-empty",
+        ],
+        cwd=root, check=True,
+    )
+    return root
+
+
+@pytest.mark.asyncio
+async def test_undo_state_reaches_the_session_and_redo_works_after_a_restart(tmp_path):
+    """``/redo`` used to die with the process: the removed messages lived in a
+    loop-local dict.  They belong to the session, so a fresh loop can finish
+    what an older one started."""
+    from ai_coding.domain.message import ChatMessage
+
+    sessions = SessionService(root=tmp_path / "sessions")
+    loop = AgentLoop(_NoopEngine(), sessions, ToolRegistry(), workspace=str(tmp_path))
+    session = sessions.create()
+    session.add_message(ChatMessage(role="user", content="do it", timestamp="t"))
+    session.turn_count = 1
+    session.add_message(ChatMessage(role="assistant", content="done", timestamp="t"))
+
+    report = await loop.undo_last_turn(session)
+    assert report["ok"] is True
+    assert session.messages == []
+    assert session.undo_state is not None, "the undo state was not put on the session"
+
+    # A restart: new service, new loop, session read back from disk.
+    sessions2 = SessionService(root=tmp_path / "sessions")
+    reloaded = sessions2.load(session.session_id)
+    assert reloaded is not None
+    assert reloaded.undo_state is not None, "the undo state did not reach the file"
+
+    fresh_loop = AgentLoop(_NoopEngine(), sessions2, ToolRegistry(), workspace=str(tmp_path))
+    redone = await fresh_loop.redo_last_turn(reloaded)
+
+    assert redone["ok"] is True
+    assert [m.content for m in reloaded.messages] == ["do it", "done"]
+    assert reloaded.turn_count == 1
+    assert reloaded.undo_state is None, "the redo left the staged state behind"
+
+
+@pytest.mark.asyncio
+async def test_created_file_bytes_survive_in_the_undo_sidecar(tmp_path):
+    """A redo cannot rebuild a file the turn created from git -- a stash never
+    held untracked files.  Undo keeps the bytes; they must outlive the process
+    just like the messages do."""
+    from ai_coding.core.snapshots import SnapshotStore
+    from ai_coding.domain.message import ChatMessage, ToolArtifact
+
+    root = _git_repo(tmp_path)
+    sessions = _RecordingSessions(tmp_path / "sessions")
+    loop = AgentLoop(
+        _NoopEngine(), sessions, ToolRegistry(),
+        snapshots=SnapshotStore(root), workspace=str(root),
+    )
+    session = sessions.create()
+    await loop._capture_snapshot(session)  # the pre-turn snapshot
+    session.add_message(ChatMessage(role="user", content="造一个文件", timestamp="t"))
+    session.turn_count = 1
+    made = root / "made.txt"
+    made.write_text("content\n", encoding="utf-8")
+    session.add_message(
+        ChatMessage(
+            role="assistant",
+            content="done",
+            timestamp="t",
+            artifacts=(ToolArtifact(path="made.txt", kind="file"),),
+        )
+    )
+
+    await loop.undo_last_turn(session)
+    assert not made.exists(), "undo did not remove the file the turn created"
+
+    # A restart: the bytes have to come from disk, not from process memory.
+    sessions2 = SessionService(root=tmp_path / "sessions")
+    reloaded = sessions2.load(session.session_id)
+    assert reloaded is not None
+    fresh_loop = AgentLoop(
+        _NoopEngine(), sessions2, ToolRegistry(),
+        snapshots=SnapshotStore(root), workspace=str(root),
+    )
+    redone = await fresh_loop.redo_last_turn(reloaded)
+
+    assert redone["ok"] is True
+    assert made.is_file(), "redo could not put the created file back"
+    assert made.read_text(encoding="utf-8") == "content\n"

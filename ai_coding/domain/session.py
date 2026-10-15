@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -151,6 +152,23 @@ class TurnUsage:
         )
 
 
+@dataclass(frozen=True)
+class StagedUndo:
+    """What ``/undo`` took away, in a form that outlives the process (P4).
+
+    ``removed`` is the message tail it cut.  ``turns``/``turn_count``/``digests``
+    are the counter state as it stood before the *first* undo of the run: a
+    second undo only widens the staged revert (r20/F2), so re-reading the
+    trimmed list would duplicate what survived and adding to the count would
+    invent turns that never ran.
+    """
+
+    removed: tuple[ChatMessage, ...] = ()
+    turns: int = 0
+    turn_count: int = 0
+    digests: tuple[TurnDigest, ...] = ()
+
+
 @dataclass
 class SessionData:
     """A persisted conversation session."""
@@ -290,6 +308,56 @@ class SessionData:
 
     def add_message(self, message: ChatMessage) -> None:
         self.messages.append(message)
+
+    def stage_undo(
+        self,
+        removed: Sequence[ChatMessage],
+        *,
+        turns: int,
+        turn_count: int,
+        digests: Sequence[TurnDigest],
+    ) -> None:
+        """Record the staged revert on the session so ``/redo`` outlives the
+        process (P4).
+
+        The message and digest payloads use the session file's own
+        (de)serialization, so a reload rebuilds identical values rather than a
+        lookalike; the loop keeps its process-local copies only as a cache.
+        """
+        self.undo_state = {
+            "removed": [_message_to_dict(m) for m in removed],
+            "turns": int(turns),
+            "turnCount": int(turn_count),
+            "digests": [d.to_dict() for d in digests],
+        }
+
+    def staged_undo(self) -> StagedUndo | None:
+        """Read the staged revert back, or ``None`` when nothing is staged."""
+        state = self.undo_state
+        if not isinstance(state, dict):
+            return None
+        rows = state.get("removed")
+        removed = tuple(
+            _message_from_dict(row)
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict)
+        )
+        digest_rows = state.get("digests")
+        digests = tuple(
+            digest
+            for digest in (
+                TurnDigest.from_dict(row)
+                for row in (digest_rows if isinstance(digest_rows, list) else [])
+                if isinstance(row, dict)
+            )
+            if digest is not None
+        )
+        return StagedUndo(
+            removed=removed,
+            turns=int(state.get("turns", 0) or 0),
+            turn_count=int(state.get("turnCount", 0) or 0),
+            digests=digests,
+        )
 
     def live_prompt_tokens(self) -> int:
         """The newest turn's prompt tokens that still describe the live context.
@@ -452,4 +520,4 @@ class SessionData:
 
 
 # Re-export helper for callers that need to resolve references.
-__all__ = ["SessionData", "TurnUsage", "tool_call_from_ref"]
+__all__ = ["SessionData", "StagedUndo", "TurnUsage", "tool_call_from_ref"]

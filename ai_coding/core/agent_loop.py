@@ -93,6 +93,7 @@ from ai_coding.core.turn_policy import (
     TurnPolicyConfig,
 )
 from ai_coding.core.turn_report import TurnReporter
+from ai_coding.core.undo_store import UndoFileStore
 from ai_coding.domain.acceptance import acceptance_states, pending_items
 from ai_coding.domain.ledger import ledger_signature
 from ai_coding.domain.loop import (
@@ -266,6 +267,11 @@ class AgentLoop:
         self._current_instruction: ChatMessage | None = None
         self.default_model = default_model
         self.workspace = workspace
+        # P4 (补充式方案 06): where /undo keeps the bytes of files the turn
+        # created, so /redo survives a restart (a stash never held them).
+        self._undo_files_store = UndoFileStore(
+            Path(workspace) / ".ai-coding" / "undo"
+        )
         self._base_observer: LoopObserver = observer or NullObserver()
         self.observer: LoopObserver = SafeObserver(self._base_observer)
         # R4a: an optional trace recorder.  It arrives as part of the observer
@@ -1397,6 +1403,12 @@ class AgentLoop:
         self._undo_state.pop(session.session_id, None)
         self._undo_files.pop(session.session_id, None)
         self.last_undo.pop(session.session_id, None)
+        # P4: the staged revert is durable now, so committing it must clear the
+        # session copy and the sidecar too -- otherwise a later /redo would
+        # resurrect a run the user already moved past.  The next save carries
+        # the cleared value.
+        session.undo_state = None
+        self._undo_files_store.clear(session.session_id)
         if self.snapshots is not None:
             try:
                 await self.snapshots.forget(f"{session.session_id}/redo")
@@ -1422,6 +1434,27 @@ class AgentLoop:
             await self.snapshots.prune(session.session_id)
         except (OSError, TimeoutError, ValueError):
             pass
+
+    def _hydrate_undo(self, session: SessionData) -> None:
+        """Rebuild the process-local undo state from the session (P4).
+
+        ``/undo`` writes the staged revert onto the session so ``/redo``
+        outlives the process; these dicts are only its cache.  A live run that
+        already holds them is left alone -- a second undo widens the staged
+        revert, and re-reading the trimmed session would lose that.
+        """
+        sid = session.session_id
+        if self._undo_tail.get(sid) is not None:
+            return
+        staged = session.staged_undo()
+        if staged is None:
+            return
+        self._undo_tail[sid] = list(staged.removed)
+        self._undo_state[sid] = _Staged(
+            turns=staged.turns,
+            turn_count=staged.turn_count,
+            digests=staged.digests,
+        )
 
     async def undo_last_turn(self, session: SessionData) -> dict[str, Any]:
         """Roll the last user turn back: files to the snapshot, history to before it.
@@ -1480,6 +1513,9 @@ class AgentLoop:
                     if report.saved:
                         held = self._undo_files.setdefault(session.session_id, {})
                         held.update(report.saved)
+                        # P4: the same bytes go to the sidecar, so a redo after
+                        # a restart has something to write back.
+                        self._undo_files_store.save(session.session_id, report.saved)
                     if failed:
                         # r20/F1: the history is still truncated.  The files that
                         # did come back cannot be un-restored, so keeping the
@@ -1520,6 +1556,14 @@ class AgentLoop:
         session.turn_digests = [
             digest for digest in session.turn_digests if digest.turn <= session.turn_count
         ]
+        # P4: the staged revert belongs to the session, not to this process.
+        staged = self._undo_state[session.session_id]
+        session.stage_undo(
+            list(self._undo_tail[session.session_id]),
+            turns=staged.turns,
+            turn_count=staged.turn_count,
+            digests=staged.digests,
+        )
         self.closer.save(session)
         report = {
             "ok": True,
@@ -1536,6 +1580,9 @@ class AgentLoop:
         """Put back the turn ``undo_last_turn`` removed (files and history)."""
         if self._turn_lock.locked():
             return {"ok": False, "reason": "a turn is running"}
+        # P4: a fresh process has no process-local undo state, so rebuild it
+        # from the session before reading anything.
+        self._hydrate_undo(session)
         tail = self._undo_tail.get(session.session_id)
         if not tail:
             return {"ok": False, "reason": "nothing to redo"}
@@ -1563,7 +1610,11 @@ class AgentLoop:
         # are written back from what undo kept.  A path that cannot be written
         # is named rather than swallowed -- it is the same "redo looked fine"
         # lie r20/F1 removed from the other half.
-        held = self._undo_files.pop(session_id, {})
+        held = self._undo_files.pop(session_id, None)
+        if held is None:
+            # P4: the bytes may only exist in the sidecar (an earlier process
+            # read them before undo removed the files).
+            held = self._undo_files_store.load(session_id)
         for rel in sorted(held):
             target = Path(self.workspace) / rel
             try:
@@ -1588,6 +1639,9 @@ class AgentLoop:
             session.turn_digests = list(staged.digests)
         self._undo_tail.pop(session_id, None)
         self.last_undo.pop(session_id, None)
+        # P4: the staged revert is finished; drop it from both stores.
+        session.undo_state = None
+        self._undo_files_store.clear(session_id)
         self.closer.save(session)
         return {
             "ok": not reason,
