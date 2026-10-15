@@ -6,6 +6,9 @@ was pending, and what ``/undo`` removed.  These tests pin the facts and the
 behaviour that reads them -- each written Red before the implementation.
 """
 
+import json
+from pathlib import Path
+
 import pytest
 
 from ai_coding.ai.engine import ChatEngine
@@ -539,3 +542,42 @@ def test_load_by_prefix_returns_complete_messages_not_a_list_row(tmp_path):
 
     assert loaded is not None
     assert [m.content for m in loaded.messages] == ["keep me"]
+
+
+class _DiskCheckingEngine(ChatEngine):
+    """Reads the session *file* when the resumed turn's first step runs.
+
+    The [resume] note must already be durable then: the marker was deleted
+    synchronously, so a crash between resume-start and the first checkpoint
+    would otherwise lose the pending question with no trace (M1).
+    """
+
+    def __init__(self, sessions_root: Path, session_id: str) -> None:
+        self._root = sessions_root
+        self._session_id = session_id
+        self.checked = False
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        raw = json.loads((self._root / f"{self._session_id}.json").read_text())
+        bodies = [m.get("content") or "" for m in raw["messages"]]
+        assert any("[resume]" in body for body in bodies), (
+            "the [resume] note was still memory-only when the turn started"
+        )
+        assert not (self._root / "pending" / f"{self._session_id}.json").exists()
+        self.checked = True
+        return StepResult(text="resumed", finish_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_resume_persists_the_note_before_the_turn_runs(tmp_path):
+    service = SessionService(root=tmp_path / "sessions")
+    session = _crashed_session(service)
+    engine = _DiskCheckingEngine(tmp_path / "sessions", session.session_id)
+    loop = AgentLoop(
+        engine, service, ToolRegistry(),
+        settings=AIConfig(stop_policy="natural"), workspace=str(tmp_path),
+    )
+
+    await loop.resume_turn(session)
+
+    assert engine.checked

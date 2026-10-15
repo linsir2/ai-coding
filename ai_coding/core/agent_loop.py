@@ -439,6 +439,13 @@ class AgentLoop:
                         synthetic=True,
                     )
                 )
+                # M1: the marker above was deleted durably, but the note is
+                # still memory-only -- a crash before the turn's first
+                # checkpoint would lose the pending question with no trace.
+                # Persist it before the turn runs.  One save on an exceptional
+                # path, so the per-turn save rhythm the golden tests pin is
+                # untouched.
+                self.closer.save(session)
             return await self._run_turn(
                 session, "", on_delta, observer, (), append_user=False
             )
