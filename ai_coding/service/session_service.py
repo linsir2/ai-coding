@@ -93,7 +93,12 @@ class SessionService:
     def load(self, session_id: str) -> SessionData | None:
         target = self._path(session_id)
         if target.is_file():
-            return SessionData.from_dict(from_json_file(target))
+            session = SessionData.from_dict(from_json_file(target))
+            # P2 (补充式方案 06): a file that says a turn is open is the crash
+            # signal.  Derived on load, not stored: it describes this read, and
+            # the next turn clears ``open_turn`` (and with it this notice).
+            session.recovered_interrupted = session.open_turn is not None
+            return session
         # Not an exact id: fall back to a prefix, but only when it is unique.
         # Resuming the first of several matches would silently open the wrong
         # conversation, so an ambiguous prefix is a miss.

@@ -752,6 +752,12 @@ class AgentLoop:
         self.dispatcher.guards.reset()
         self.reporter.begin_turn(self.observer)
         self._warn_tools_chars_once()
+        # P2 (补充式方案 06): mark this turn open.  Persisted by the *next*
+        # existing save -- the first checkpoint, or the close -- rather than by a
+        # save of its own: a crash before that first save has no output to lose
+        # (the same window the snapshot already had), while every crash after it
+        # leaves the marker on disk.  ``_close_turn`` clears it on every exit.
+        session.open_turn = session.turn_count
         hook_context = await self.turn_hooks.context(session)
         turn_timeout = float(getattr(self.settings, "turn_timeout_seconds", 0.0) or 0.0)
         return TurnFrame(
@@ -957,6 +963,10 @@ class AgentLoop:
         outcome = replace(
             outcome, truncated_by_length=(books.last_finish_reason == "length")
         )
+        # P2 (补充式方案 06): every exit funnels through here, so this is where
+        # the open marker is cleared -- the close below persists both the
+        # outcome and the cleared marker in one write.
+        session.open_turn = None
         return self.closer.close(
             session,
             user_input=user_input,
