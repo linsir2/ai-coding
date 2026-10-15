@@ -136,3 +136,21 @@ export async function loadSession(client, id): Promise<SessionState> {
 - **不做"重发审批面板"**：没有活着的回合接收答案（§3.2）。
 - **不动 `bridge.py`**：恢复事实是 `session.load` 的响应，不是 live 事件。
 - **不加 `session.recovery` 之类的 IPC**：一个响应字段就够。
+
+---
+
+## 10. tmux 验证结果（已执行）
+
+真 SIGKILL 造现场 → 真 TUI → `tmux capture-pane` 截图：
+
+| 情形 | 截图里的那一行 | 结果 |
+|---|---|---|
+| 崩过 + 有待决审批 | `上一步在等审批：bash {"command":"echo hi"}（该回合已中断）` | ✅ 画出 |
+| 只崩过（无待决审批） | `上次回合未完成（turn 5）——重发消息即可继续` | ✅ 画出 |
+| 干净会话（对照） | （无任何 notice） | ✅ 零输出 |
+
+### 验证中发现并修掉的一个真 bug（P3 引入）
+
+marker 原先写在 `<sessions>/<id>.pending.json`，与会话文件同目录，而 `list_sessions` 扫 `*.json` —— **`/resume` 面板会列出一个幽灵空会话**。这不是单元测试发现的（它们直接调 `load`），是**真机验证**发现的。
+
+**修法**：marker 移进 `<sessions>/pending/<id>.json` —— 子目录，`*.json` 扫不到，**结构上不可能被误读**；`delete(session)` 一并删 marker（否则孤儿 marker 会为一个不存在的会话继续报待决审批）。

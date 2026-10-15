@@ -35,6 +35,11 @@ def _access_rank(value: Any) -> tuple[int, str]:
     return (1, "")
 
 
+#: Subdirectory holding the pending-approval markers (P3).  Separate so the
+#: ``*.json`` session scan cannot read one as a session.
+_PENDING_DIR = "pending"
+
+
 #: A preview is one line by definition; measured on the compaction checkpoint,
 #: an unbounded preview rendered the whole summary single-lined in the header.
 _PREVIEW_CHARS = 80
@@ -85,7 +90,11 @@ class SessionService:
     # cadence every other test pins does not change.
 
     def _pending_path(self, session_id: str) -> Path:
-        return self.root / f"{session_id}.pending.json"
+        # Its own directory, not ``<id>.pending.json`` beside the sessions: the
+        # session scan globs ``*.json``, so a sibling marker was listed by
+        # ``list_sessions`` as a phantom empty session (caught by real-chain
+        # verification, not by a unit test).
+        return self.root / _PENDING_DIR / f"{session_id}.json"
 
     def mark_pending_approval(self, session_id: str, request: dict[str, Any] | None) -> None:
         """Record (or clear) the approval one session is waiting on.
@@ -98,7 +107,7 @@ class SessionService:
             if request is None:
                 path.unlink(missing_ok=True)
                 return
-            self.root.mkdir(parents=True, exist_ok=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
             tmp.write_text(to_json_pretty(dict(request)), encoding="utf-8")
             os.replace(tmp, path)
@@ -195,6 +204,9 @@ class SessionService:
         if not target.is_file():
             return False
         target.unlink()
+        # P3: an orphan marker would keep reporting a pending approval for a
+        # session that no longer exists.
+        self._pending_path(session_id).unlink(missing_ok=True)
         return True
 
 

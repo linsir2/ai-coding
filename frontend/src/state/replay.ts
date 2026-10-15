@@ -151,8 +151,50 @@ export function messagesToState(messages: WireMessage[]): SessionState {
   }
 }
 
+/** The recovery facts ``session.load`` carries beside the transcript (P5). */
+export interface RecoveryFacts {
+  recoveredInterrupted?: boolean
+  openTurn?: number
+  pendingApproval?: { toolName?: string; params?: Record<string, unknown> } | null
+}
+
+/** What to tell the user about a session that came back from a crash (P5).
+ *
+ * A pending approval is a *notice*, not a re-issued approval panel: the panel
+ * belongs to the turn that died, and with no live turn to receive an answer,
+ * asking again would collect a reply that goes nowhere.  Continuing is the
+ * user's move -- resending the message makes the model ask again by itself.
+ *
+ * Returns ``null`` for an ordinary session, so replay is unchanged for one.
+ */
+export function recoveryNotice(data: RecoveryFacts): Part | null {
+  const pending = data.pendingApproval
+  if (pending && typeof pending === "object" && pending.toolName) {
+    const target = pending.params ? shorten(JSON.stringify(pending.params), 80) : ""
+    return {
+      kind: "notice",
+      tone: "error",
+      text: `上一步在等审批：${pending.toolName}${target ? " " + target : ""}（该回合已中断）`,
+    }
+  }
+  if (data.recoveredInterrupted) {
+    const turn = data.openTurn ? `（turn ${data.openTurn}）` : ""
+    return {
+      kind: "notice",
+      tone: "error",
+      text: `上次回合未完成${turn}——重发消息即可继续`,
+    }
+  }
+  return null
+}
+
 /** Load a persisted session and replay it — shared by the dialog and the tabs. */
 export async function loadSession(client: IpcClient, id: string): Promise<SessionState> {
-  const data = (await client.request("session.load", { id })) as { messages?: WireMessage[] }
-  return messagesToState(data.messages ?? [])
+  const data = (await client.request("session.load", { id })) as {
+    messages?: WireMessage[]
+  } & RecoveryFacts
+  const state = messagesToState(data.messages ?? [])
+  const note = recoveryNotice(data)
+  if (note) state.messages.unshift({ role: "assistant", parts: [note] })
+  return state
 }

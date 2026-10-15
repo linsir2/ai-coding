@@ -357,3 +357,34 @@ async def test_created_file_bytes_survive_in_the_undo_sidecar(tmp_path):
     assert redone["ok"] is True
     assert made.is_file(), "redo could not put the created file back"
     assert made.read_text(encoding="utf-8") == "content\n"
+
+
+def test_the_pending_marker_is_not_mistaken_for_a_session(tmp_path):
+    """Real-chain verification caught this: the marker sat next to the session
+    files, and ``list_sessions`` globs ``*.json`` -- so /resume listed a phantom
+    empty session.  It now lives in its own directory, where the scan cannot
+    reach it."""
+    service = SessionService(root=tmp_path / "sessions")
+    session = service.create(title="real")
+    service.save(session)
+    service.mark_pending_approval(
+        session.session_id, {"callId": "c1", "toolName": "bash"}
+    )
+
+    listed = service.list_sessions()
+
+    assert [s.session_id for s in listed] == [session.session_id]
+
+
+def test_deleting_a_session_takes_its_marker_with_it(tmp_path):
+    """An orphan marker would keep reporting a pending approval for a session
+    that no longer exists."""
+    service = SessionService(root=tmp_path / "sessions")
+    session = service.create(title="doomed")
+    service.save(session)
+    service.mark_pending_approval(session.session_id, {"callId": "c1", "toolName": "bash"})
+
+    assert service.delete(session.session_id) is True
+
+    assert service.load(session.session_id) is None
+    assert not (tmp_path / "sessions" / "pending" / f"{session.session_id}.json").exists()

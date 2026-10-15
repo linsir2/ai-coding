@@ -9,8 +9,9 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import type { WireMessage } from "../src/state/replay"
-import { messagesToState } from "../src/state/replay"
+import type { RecoveryFacts, WireMessage } from "../src/state/replay"
+import type { Part } from "../src/state/session"
+import { loadSession, messagesToState, recoveryNotice } from "../src/state/replay"
 
 // The real envelope (ai_coding/domain/run.py::wrap_tool_output): the <data>
 // block is on its own lines, so _strip_envelope's exact-line checks apply.
@@ -158,5 +159,81 @@ describe("replay retirement (P3-4)", () => {
       role: "user",
       parts: [{ kind: "text", text: "old-50", streaming: false }],
     })
+  })
+})
+
+
+// ---- P5: the recovery facts become a notice ---------------------------------
+//
+// The channels already exist -- a ``notice`` part is already rendered, and
+// ``session.load`` already returns a payload the client awaits -- so the whole
+// change is one pure function plus one unshift.
+
+const asNotice = (part: Part | null): Extract<Part, { kind: "notice" }> => {
+  expect(part?.kind).toBe("notice")
+  return part as Extract<Part, { kind: "notice" }>
+}
+
+describe("recoveryNotice", () => {
+  test("a recovered crash names the turn and says what to do", () => {
+    const note = asNotice(recoveryNotice({ recoveredInterrupted: true, openTurn: 3 }))
+    expect(note.tone).toBe("error")
+    expect(note.text).toContain("3")
+    expect(note.text).toContain("未完成")
+  })
+
+  test("a pending approval names the tool and its target", () => {
+    const note = asNotice(
+      recoveryNotice({ pendingApproval: { toolName: "bash", params: { command: "echo hi" } } }),
+    )
+    expect(note.tone).toBe("error")
+    expect(note.text).toContain("bash")
+    expect(note.text).toContain("echo hi")
+  })
+
+  test("both facts produce one notice, not two overlapping stories", () => {
+    const note = asNotice(
+      recoveryNotice({
+        recoveredInterrupted: true,
+        openTurn: 1,
+        pendingApproval: { toolName: "bash", params: { command: "x" } },
+      }),
+    )
+    expect(note.text).toContain("bash")
+  })
+
+  test("a clean session gets nothing at all", () => {
+    expect(recoveryNotice({})).toBeNull()
+    expect(
+      recoveryNotice({ recoveredInterrupted: false, openTurn: 0, pendingApproval: {} }),
+    ).toBeNull()
+  })
+})
+
+describe("loadSession", () => {
+  const client = (payload: object) =>
+    ({ request: async () => payload }) as unknown as Parameters<typeof loadSession>[0]
+
+  test("puts the notice in front of the transcript", async () => {
+    const state = await loadSession(
+      client({
+        messages: [{ role: "user", content: "hi" }],
+        recoveredInterrupted: true,
+        openTurn: 2,
+      }),
+      "s1",
+    )
+    expect(state.messages[0]!.parts[0]!.kind).toBe("notice")
+    expect(state.messages[1]!.parts[0]).toEqual({
+      kind: "text",
+      text: "hi",
+      streaming: false,
+    })
+  })
+
+  test("a clean session replays exactly as before", async () => {
+    const state = await loadSession(client({ messages: [{ role: "user", content: "hi" }] }), "s1")
+    expect(state.messages).toHaveLength(1)
+    expect(state.messages[0]!.parts[0]!.kind).toBe("text")
   })
 })

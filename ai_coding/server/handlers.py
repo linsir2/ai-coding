@@ -240,10 +240,16 @@ def make_handlers(
             raise ValueError(f"session not found: {session_id}")
         state.session = session
         state.session_id = session.session_id
+        # P5: ``load`` already derived the two recovery facts; until now they
+        # were read and thrown away.  They ride this response rather than a new
+        # event, the same way ``rejected`` rides ``session.prompt``'s.
         return {
             "id": session.session_id,
             "title": session.title,
             "messages": [_message_to_dict(m) for m in session.messages],
+            "recoveredInterrupted": bool(session.recovered_interrupted),
+            "openTurn": int(session.open_turn or 0),
+            "pendingApproval": dict(session.pending_approval or {}),
         }
 
     def session_prompt(params: dict[str, Any]) -> dict[str, Any]:

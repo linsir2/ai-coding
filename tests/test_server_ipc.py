@@ -1217,3 +1217,53 @@ async def test_approving_an_unknown_pending_skill_is_not_ok(ipc, tmp_path):
     world.loop.skills = SkillRegistry(tmp_path)
 
     assert client.request("skill.pending.approve", {"name": "nothing"})["ok"] is False
+
+
+# ---- P5: the recovery facts reach the client through session.load ------------
+
+
+@pytest.mark.asyncio
+async def test_session_load_reports_a_recovered_crash(ipc):
+    """A file that says a turn was open is the crash signal; the client has to
+    be told, or the notice would exist only in the log."""
+    world, _service, client = ipc
+    session = world.sessions.create()
+    session.open_turn = 3
+    world.sessions.save(session)
+
+    result = client.request("session.load", {"id": session.session_id})
+
+    assert result["recoveredInterrupted"] is True
+    assert result["openTurn"] == 3
+
+
+@pytest.mark.asyncio
+async def test_session_load_reports_a_pending_approval(ipc):
+    """A crash during the wait leaves the marker behind; the client is told
+    which call was being asked about."""
+    world, _service, client = ipc
+    session = world.sessions.create()
+    world.sessions.save(session)
+    world.sessions.mark_pending_approval(
+        session.session_id,
+        {"callId": "c9", "toolName": "bash", "params": {"command": "x"}, "reason": "r"},
+    )
+
+    result = client.request("session.load", {"id": session.session_id})
+
+    assert result["pendingApproval"]["toolName"] == "bash"
+    assert result["pendingApproval"]["callId"] == "c9"
+
+
+@pytest.mark.asyncio
+async def test_session_load_of_a_clean_session_says_nothing(ipc):
+    """The regression guard: an ordinary session must look exactly as before."""
+    world, _service, client = ipc
+    session = world.sessions.create(title="clean")
+    world.sessions.save(session)
+
+    result = client.request("session.load", {"id": session.session_id})
+
+    assert result["recoveredInterrupted"] is False
+    assert result["openTurn"] == 0
+    assert result["pendingApproval"] == {}
