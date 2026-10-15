@@ -253,6 +253,9 @@ async def test_the_composition_root_registers_memory_write(tmp_path: Path):
         def save(self, session) -> None:
             return None
 
+        def mark_pending_approval(self, session_id, request) -> None:
+            return None
+
     cfg = AppConfig()
     registry = _build_tool_registry(cfg, str(tmp_path), None)
     _build_loop(_Engine(), _Sessions(), registry, cfg, str(tmp_path), None)

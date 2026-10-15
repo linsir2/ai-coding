@@ -190,18 +190,22 @@ def test_session_persists_new_fields():
 
     s = SD("s1", "title", "c", "l")
     s.open_turn = 4
-    s.pending_approval = {"requestId": "r1", "toolName": "bash", "params": {"x": 1}}
     s.undo_state = {"removed": [{"role": "user"}], "turnCount": 3, "digests": []}
 
     d = s.to_dict()
     assert d["openTurn"] == 4
-    assert d["pendingApproval"]["requestId"] == "r1"
     assert d["undoState"]["turnCount"] == 3
+
+    # P3: the pending approval is marker-backed, never in the session JSON --
+    # a mid-batch session save would run ``ensure_tool_pairing`` over the
+    # still-unpaired call and drop it.
+    s.pending_approval = {"callId": "c1", "toolName": "bash"}
+    assert "pendingApproval" not in s.to_dict()
 
     restored = SD.from_dict(d)
     assert restored.open_turn == 4
-    assert restored.pending_approval["toolName"] == "bash"
     assert restored.undo_state["removed"] == [{"role": "user"}]
+    assert restored.pending_approval is None  # only ``load`` fills it
 
 
 def test_session_new_fields_absent_when_none():

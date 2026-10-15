@@ -152,6 +152,9 @@ async def test_plan_command_plans_and_executes_in_one_command():
         def save(self, session):
             return None
 
+        def mark_pending_approval(self, session_id, request) -> None:
+            return None
+
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
     loop = _TwoPhaseLoop()
     action, _ = await handle_input(
@@ -337,6 +340,9 @@ async def test_planning_failure_does_not_execute():
             self.items = [session]
 
         def save(self, session):
+            return None
+
+        def mark_pending_approval(self, session_id, request) -> None:
             return None
 
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")

@@ -87,6 +87,13 @@ class _NullSessions:
     def save(self, session: SessionData) -> None:
         return None
 
+    def mark_pending_approval(
+        self, session_id: str, request: dict[str, Any] | None
+    ) -> None:
+        """P3: a sub-agent has no session file to mark, and nobody to ask
+        anyway -- its approval callback is the auto-approver."""
+        return None
+
 
 class SubAgentRunner:
     """Run one sub-agent task, optionally inside a git worktree sandbox."""

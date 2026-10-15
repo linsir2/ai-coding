@@ -43,6 +43,9 @@ async def test_plan_topic_clears_the_receipt_book_behaviourally():
         def save(self, session):
             return None
 
+        def mark_pending_approval(self, session_id, request) -> None:
+            return None
+
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
     session.step_deliveries = [
         StepDelivery(step_id="1", statement="old one", status="completed")]

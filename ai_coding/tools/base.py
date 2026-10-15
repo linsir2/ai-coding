@@ -50,6 +50,12 @@ class ToolContext:
     # R8a: how a tool tells the running turn "remember this line for later"
     # (``checkpoint_write``).  ``None`` outside a loop that owns a turn book.
     note_checkpoint: Callable[[str], None] | None = None
+    # P3 (补充式方案 06): how the dispatcher tells the running turn that an
+    # approval question is about to be asked (or has been answered).  The loop
+    # writes a small marker beside the session file so a crash during the wait
+    # does not lose the pending call -- the one place the snapshot was wrong.
+    # ``None`` outside a loop that owns a session.
+    note_approval: Callable[[dict[str, Any] | None], None] | None = None
     # R8c: a thread-safe "stop" flag for tools that own a subprocess (bash hands
     # it to the process runner).  The dispatcher sets it when the user cancels, so
     # the child dies even though the awaiting task was abandoned.

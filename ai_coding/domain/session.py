@@ -232,9 +232,11 @@ class SessionData:
     #: non-``None`` value after ``load`` means the process died mid-turn
     #: (scenario ①: crash-resume).
     open_turn: int | None = None
-    #: The approval request currently awaiting an answer.  Written *before* the
-    #: dispatcher awaits it, so a crash during the wait leaves it durable
-    #: (scenario ③: approval suspend).
+    #: The approval request currently awaiting an answer (scenario ③).  Loaded
+    #: from the pending-approval marker beside the session file, never written
+    #: to it: persisting it mid-batch would put an unpaired tool call through
+    #: ``ensure_tool_pairing``, which drops the carrier and with it the pending
+    #: call (verified).  The marker is written by the loop and read on load.
     pending_approval: dict[str, Any] | None = None
     #: What ``/undo`` removed, kept so ``/redo`` survives a restart
     #: (scenario ④).  The message half lives here; the bytes of files the turn
@@ -390,8 +392,6 @@ class SessionData:
         # P1: the three recovery facts, each only when set, same rule again.
         if self.open_turn is not None:
             data["openTurn"] = int(self.open_turn)
-        if self.pending_approval is not None:
-            data["pendingApproval"] = dict(self.pending_approval)
         if self.undo_state is not None:
             data["undoState"] = dict(self.undo_state)
         return data
@@ -431,7 +431,6 @@ class SessionData:
             if isinstance(row, dict)
         ]
         raw_open_turn = data.get("openTurn")
-        raw_pending = data.get("pendingApproval")
         raw_undo = data.get("undoState")
         return cls(
             session_id=data.get("sessionId", ""),
@@ -448,7 +447,6 @@ class SessionData:
             acceptance=acceptance,
             step_deliveries=step_deliveries,
             open_turn=int(raw_open_turn) if isinstance(raw_open_turn, int) else None,
-            pending_approval=dict(raw_pending) if isinstance(raw_pending, dict) else None,
             undo_state=dict(raw_undo) if isinstance(raw_undo, dict) else None,
         )
 

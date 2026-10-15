@@ -1039,6 +1039,20 @@ class AgentLoop:
         path = getattr(self.trace, "current_path", None)
         return str(path) if path else ""
 
+    def _note_approval(
+        self, session: SessionData, pending: dict[str, Any] | None
+    ) -> None:
+        """P3 (补充式方案 06): mirror a pending approval into its own marker.
+
+        Deliberately not a session save: the wait sits inside the tool batch,
+        ahead of any checkpoint, and ``TurnCloser.save`` normalizes tool pairing
+        -- which drops an assistant carrier whose result has not been written
+        back yet, destroying the pending call (verified).  A marker file keeps
+        the session untouched, so nothing about the saved history changes.
+        """
+        session.pending_approval = pending
+        self.sessions.mark_pending_approval(session.session_id, pending)
+
     async def _run_tools(
         self,
         step: StepResult,
@@ -1076,6 +1090,10 @@ class AgentLoop:
                 # R8a: the only channel a tool has to leave something in the
                 # turn's book (checkpoint_write uses it).
                 note_checkpoint=lambda text: books.note_checkpoint(text, limit=limit),
+                # P3 (补充式方案 06): the dispatcher announces a pending approval
+                # here and clears it when answered; the loop mirrors it into a
+                # marker beside the session file, never into the session itself.
+                note_approval=lambda pending: self._note_approval(session, pending),
             ),
             deadline=deadline,
             iteration=index,

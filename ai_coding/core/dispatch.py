@@ -349,9 +349,25 @@ class ToolDispatcher:
         if verdict is PermissionDecision.WARN:
             if self.approval is None:
                 return self._not_approved(call, "no approval callback"), True, False
-            verdict_from_user = await self._ask(
-                call, reason, deadline, _authorized_name(tool, call)
-            )
+            named = _authorized_name(tool, call)
+            # P3 (补充式方案 06): make the question durable *before* anyone waits
+            # on it, and clear it once answered.  The wait sits inside the tool
+            # batch, ahead of the next checkpoint, so a crash during it used to
+            # lose the pending call entirely -- the one real defect the snapshot
+            # had.  The turn writes this to a marker file, never to the session
+            # (a mid-batch session save would normalize the unpaired call away).
+            if ctx.note_approval is not None:
+                ctx.note_approval({
+                    "callId": call.id,
+                    "toolName": named,
+                    "params": dict(call.params),
+                    "reason": reason,
+                })
+            try:
+                verdict_from_user = await self._ask(call, reason, deadline, named)
+            finally:
+                if ctx.note_approval is not None:
+                    ctx.note_approval(None)
             if verdict_from_user is ApprovalVerdict.STOPPED:
                 return self._stopped(call), True, True
             if verdict_from_user is ApprovalVerdict.TIMED_OUT:

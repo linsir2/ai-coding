@@ -74,6 +74,47 @@ class SessionService:
     def _path(self, session_id: str) -> Path:
         return self.root / f"{session_id}.json"
 
+    # ---- pending-approval marker (P3) --------------------------------------
+    #
+    # Why a sidecar and not a session field: the approval wait sits inside the
+    # tool batch, ahead of any checkpoint, so writing it to the session means
+    # saving mid-batch -- and ``TurnCloser.save`` normalizes tool pairing,
+    # which drops an assistant carrier whose result has not been written back
+    # yet.  That destroys the very call the marker exists to preserve
+    # (verified).  A small file keeps the session file untouched, so the save
+    # cadence every other test pins does not change.
+
+    def _pending_path(self, session_id: str) -> Path:
+        return self.root / f"{session_id}.pending.json"
+
+    def mark_pending_approval(self, session_id: str, request: dict[str, Any] | None) -> None:
+        """Record (or clear) the approval one session is waiting on.
+
+        Best-effort like ``save``: a failure to record must not end the turn,
+        and a failure to clear only costs a spurious re-ask after a crash.
+        """
+        path = self._pending_path(session_id)
+        try:
+            if request is None:
+                path.unlink(missing_ok=True)
+                return
+            self.root.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(to_json_pretty(dict(request)), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass  # the turn's own answer still stands; only durability is lost
+
+    def _read_pending_approval(self, session_id: str) -> dict[str, Any] | None:
+        path = self._pending_path(session_id)
+        if not path.is_file():
+            return None
+        try:
+            data = from_json_file(path)
+        except (ValueError, OSError):
+            return None
+        return data if isinstance(data, dict) else None
+
     def create(self, title: str = "") -> SessionData:
         ts = now_utc()
         return SessionData(
@@ -98,6 +139,9 @@ class SessionService:
             # signal.  Derived on load, not stored: it describes this read, and
             # the next turn clears ``open_turn`` (and with it this notice).
             session.recovered_interrupted = session.open_turn is not None
+            # P3: the approval the session was waiting on, if the marker is
+            # still there -- i.e. the process died mid-wait.
+            session.pending_approval = self._read_pending_approval(session_id)
             return session
         # Not an exact id: fall back to a prefix, but only when it is unique.
         # Resuming the first of several matches would silently open the wrong

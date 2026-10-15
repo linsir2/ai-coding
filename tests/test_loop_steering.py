@@ -70,6 +70,13 @@ class _Sessions:
     def save(self, session: SessionData) -> None:
         return None
 
+    def mark_pending_approval(
+        self, session_id: str, request: dict[str, Any] | None
+    ) -> None:
+        """Stands in for the marker the real SessionService writes beside the
+        session file (P3); this fake keeps nothing on disk."""
+        return None
+
 
 def _loop(
     queue: SteeringQueue | None,

@@ -157,6 +157,11 @@ class _Sessions:
     def save(self, session: SessionData) -> None:
         self.saved.append(session)
 
+    def mark_pending_approval(self, session_id: str, request) -> None:
+        """P3: stand-in for the marker the real SessionService writes beside
+        the session file; this fake keeps nothing on disk."""
+        return None
+
 
 def _session(scenario: str) -> SessionData:
     session = SessionData(
