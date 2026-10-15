@@ -395,7 +395,7 @@ async def test_stop_policy_natural_ignores_open_todos(tmp_path):
 
 @pytest.mark.asyncio
 async def test_todo_aware_nudges_when_open_items_remain(tmp_path):
-    engine = ScriptedEngine([_text("a"), _text("b"), _text("c")])
+    engine = ScriptedEngine([_text("a"), _text("b"), _text("c"), _text("d")])
     sessions = SessionService(tmp_path / "sessions")
     loop = _loop(
         engine,
@@ -408,15 +408,20 @@ async def test_todo_aware_nudges_when_open_items_remain(tmp_path):
 
     await loop.process_input(session, "go")
 
-    assert len(engine.requests) == 3  # two nudges, then the cap is reached
+    # 13 §2.1: two L1 nudges, then the ask level (L2); an ignored ask is the
+    # ladder's stop (the 4th model step sees it).
+    assert len(engine.requests) == 4
     nudges = [m for m in session.messages if "[task-gate]" in (m.content or "")]
-    assert len(nudges) == 2
+    assert len(nudges) == 3
     assert nudges[0].role == "user"
+    assert "ask_user" in (nudges[-1].content or "")   # L2 asks the user
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.reason == "todo ladder exhausted"
 
 
 @pytest.mark.asyncio
 async def test_todo_aware_gives_up_after_max_nudges(tmp_path):
-    engine = ScriptedEngine([_text("a"), _text("b")])
+    engine = ScriptedEngine([_text("a"), _text("b"), _text("c")])
     sessions = SessionService(tmp_path / "sessions")
     loop = _loop(
         engine,
@@ -429,9 +434,11 @@ async def test_todo_aware_gives_up_after_max_nudges(tmp_path):
 
     await loop.process_input(session, "go")
 
-    assert len(engine.requests) == 2
+    # 13 §2.1: L1 ×1 → L2 ask ×1 → an ignored ask ends the ladder.
+    assert len(engine.requests) == 3
     assert loop.last_outcome is not None
     assert loop.last_outcome.status is TurnStatus.COMPLETED
+    assert loop.last_outcome.reason == "todo ladder exhausted"
 
 
 @pytest.mark.asyncio
@@ -1083,3 +1090,151 @@ async def test_a_failed_closing_call_does_not_fail_the_turn(tmp_path):
 
     assert "[回合未完成" in text
     assert "provider exploded" not in text
+
+
+# ---- 13 §2.5 (B): a broken stream continues from where it stopped -----------
+
+
+class _BrokenMidStream(ChatEngine):
+    """First ``breaks`` calls: half an answer, then kill the stream."""
+
+    def __init__(self, breaks: int = 1) -> None:
+        self.breaks = breaks
+        self.requests: list[dict] = []
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        self.requests.append({"messages": list(messages), "tools": list(tools)})
+        if self.breaks > 0:
+            self.breaks -= 1
+            if on_delta is not None:
+                on_delta("half an answer")
+            # What openai_engine._stream raises once text has left the building.
+            raise EngineError("stream failed after 1 text chunk(s): boom")
+        return StepResult(text="done", finish_reason="stop")
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_interrupted_stream_is_continued_once_with_a_persisted_note(tmp_path):
+    engine = _BrokenMidStream()
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+    session = sessions.create()
+
+    text = await loop.process_input(session, "go")
+
+    assert len(engine.requests) == 2, "first step broke; the continuation is the second"
+    assert text == "done"
+    assert any(
+        "[stream-interrupted]" in (m.content or "") for m in session.messages
+    ), "the synthetic note must be persisted (same discipline as the gate nudges)"
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.status is TurnStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_a_second_interruption_stays_a_failure(tmp_path):
+    engine = _BrokenMidStream(breaks=2)
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+    session = sessions.create()
+
+    await loop.process_input(session, "go")
+
+    notes = [
+        m for m in session.messages if "[stream-interrupted]" in (m.content or "")
+    ]
+    assert len(notes) == 1, "the continuation is bounded to once per turn"
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.status is TurnStatus.ERROR
+
+
+@pytest.mark.asyncio
+async def test_an_interruption_with_no_output_is_not_continued(tmp_path):
+    class _DeadPipe(ChatEngine):
+        """A typed failure before any delta: the ordinary failure semantics."""
+
+        def __init__(self) -> None:
+            self.requests = 0
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None):
+            self.requests += 1
+            raise EngineError("transport died", kind="transport")
+
+    engine = _DeadPipe()
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+    session = sessions.create()
+
+    await loop.process_input(session, "go")
+
+    assert engine.requests == 1
+    assert not any(
+        "[stream-interrupted]" in (m.content or "") for m in session.messages
+    )
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.status is TurnStatus.ERROR
+
+
+# ---- 13 §2.7 (G/H): the closing step and the empty step ---------------------
+
+
+@pytest.mark.asyncio
+async def test_the_closing_step_offers_no_tools(tmp_path):
+    """G (13 §2.7): a closing step has no next iteration to execute tools in,
+    so the request must not offer any (probe P4: calls were silently dropped)."""
+    engine = ScriptedEngine(
+        [
+            _calls(_ref("c1", "read")),
+            _calls(_ref("c2", "read")),
+            _text("收尾词。"),
+        ]
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, settings=_settings(max_tool_iterations=2))
+
+    await loop.process_input(sessions.create(), "go")
+
+    assert len(engine.requests) == 3
+    assert engine.requests[-1]["tools"] == [], "the closing call offers no tools"
+    assert engine.requests[0]["tools"], "ordinary steps still carry the catalog"
+
+
+@pytest.mark.asyncio
+async def test_a_single_empty_step_is_retried_once(tmp_path):
+    """H (13 §2.7): a three-way-empty step earns one retry of the same request
+    (dsh EMPTY_RESPONSE parity, conservative bound of 1)."""
+    empty = StepResult(
+        text=None, tool_calls=(), finish_reason="stop", usage=None, reasoning=None
+    )
+    engine = ScriptedEngine([empty, _text("done")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+
+    text = await loop.process_input(sessions.create(), "go")
+
+    assert text == "done"
+    assert len(engine.requests) == 2
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.status is TurnStatus.COMPLETED
+    # No injected message: the retry is the same request (dsh llm-retry parity).
+    assert engine.requests[0]["messages"] == engine.requests[1]["messages"]
+
+
+@pytest.mark.asyncio
+async def test_two_empty_steps_keep_the_failure_semantics(tmp_path):
+    empty = StepResult(
+        text=None, tool_calls=(), finish_reason="stop", usage=None, reasoning=None
+    )
+    engine = ScriptedEngine([empty, empty])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+
+    await loop.process_input(sessions.create(), "go")
+
+    assert len(engine.requests) == 2
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.status is TurnStatus.ERROR
+    assert "没有回答" in loop.last_outcome.reason

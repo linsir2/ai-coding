@@ -1,9 +1,9 @@
-"""Escalation in the pure policy (R6b): change strategy, then stop and report.
+"""Escalation in the pure policy (R6b → 13 §2.1): the ladder owns repetition.
 
-The three tiers are: a repeated call is refused by the R4b duplicate guard (not
-here), repeated failures get one "change strategy" nudge, and a turn in which
-nothing has ever succeeded stops early so the handoff (R6a) can report it
-(docs/r6-analysis.md 2.2).
+The tiers now live in the ladder: a repeated call is refused by the R4b
+duplicate guard (not here), repeated failures climb strategy L1→L2→L3 with an
+observation window each, and only a ladder that ran out stops the turn so the
+handoff (R6a) can report it.
 """
 
 from __future__ import annotations
@@ -30,25 +30,38 @@ def test_repeated_failures_ask_for_a_strategy_change():
     assert "ask_user" in (decision.inject or "")
 
 
-def test_the_strategy_nudge_is_given_once_per_turn():
+def test_the_strategy_nudge_observes_before_firing_again():
+    """13 §2.1: an open window keeps observing — no second injection yet."""
     decision = _policy().decide_next_iteration(
-        TurnSnapshot(iteration=4, failed_streak=5, successful_calls=1, strategy_nudges=1)
+        TurnSnapshot(
+            iteration=4,
+            failed_streak=5,
+            successful_calls=1,
+            intervention_ledger={
+                "strategy": {"level": 1, "at": [3, 5], "outcome": "pending",
+                             "fires": 1, "ref": {}}
+            },
+        )
     )
     assert decision.action is TurnAction.ITERATE
 
 
-def test_a_turn_with_no_success_stops_before_the_iteration_budget():
+def test_a_turn_with_no_success_that_exhausts_the_ladder_stops_with_no_progress():
+    """Sanctioned change ①: the early stop moved from "first stall" to the
+    ladder's L4 — a failed L3 window is what earns the finish (13 §2.1)."""
     decision = _policy().decide_next_iteration(
         TurnSnapshot(
-            iteration=4,
+            iteration=8,
             failed_streak=3,
             attempted_calls=3,
             successful_calls=0,
-            strategy_nudges=1,
+            intervention_ledger={
+                "strategy": {"level": 3, "at": [6, 8], "outcome": "failed",
+                             "fires": 1, "ref": {}}
+            },
         )
     )
     assert decision.action is TurnAction.FINISH
-    assert "no progress" in decision.reason
     assert decision.reason.startswith("no progress")
 
 

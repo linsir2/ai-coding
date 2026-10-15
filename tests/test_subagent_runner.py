@@ -177,7 +177,9 @@ async def test_subagent_receives_parent_messages(tmp_path):
 async def test_subagent_receives_parent_instructions(tmp_path):
     engine = _Engine()
     await _runner(engine).run("t", parent=_parent())
-    assert engine.requests[0]["instructions"] == "PARENT INSTRUCTIONS"
+    # 13 §2.3: the parent's prompt plus the methods section (shared on purpose).
+    assert engine.requests[0]["instructions"].startswith("PARENT INSTRUCTIONS")
+    assert "<methods>" in engine.requests[0]["instructions"]
 
 
 @pytest.mark.asyncio

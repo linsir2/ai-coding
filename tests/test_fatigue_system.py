@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from ai_coding.core import interventions as iv
 from ai_coding.core.dispatch import DispatchOutcome
+from ai_coding.core.interventions import TASK_GATE_LEAD
 from ai_coding.core.turn_books import TurnBooks
 from ai_coding.core.turn_policy import (
-    TASK_GATE_LEAD,
     TurnAction,
     TurnPolicy,
     TurnPolicyConfig,
@@ -167,24 +168,35 @@ class TestFatigueGate:
         decision = policy.decide_next_iteration(snapshot)
         assert decision.action is TurnAction.NUDGE
 
-    def test_fatigue_nudge_only_once(self):
-        """Fatigue nudge only injected once per turn."""
+    def test_fatigue_l1_does_not_refire_inside_its_window(self):
+        """13 §2.1: the one-shot counter became a window — once L1 fires, the
+        ladder observes instead of firing again."""
         policy = TurnPolicy(_config())
-        snapshot = TurnSnapshot(iteration=1, fatigue_index=35.0, fatigue_nudges=1)
+        snapshot = TurnSnapshot(
+            iteration=1,
+            fatigue_index=35.0,
+            fatigue_nudges=1,
+            intervention_ledger={
+                "fatigue": {"level": 1, "at": [1, 3], "outcome": "pending",
+                            "fires": 1, "ref": {}}
+            },
+        )
         decision = policy.decide_next_iteration(snapshot)
-        # Already nudged once → fatigue gate should NOT fire again
         assert decision.action is not TurnAction.NUDGE
 
     def test_fatigue_message_content(self):
         """Fatigue message tells model to change approach or summarize."""
-        policy = TurnPolicy(_config())
-        msg = policy.fatigue_message(10.0)
+        decision = iv.select(
+            TurnSnapshot(iteration=1, fatigue_index=35.0),
+            phase=iv.PRE, limits=iv.LadderLimits(),
+        )
+        msg = decision.text
         assert "fatigue" in msg.lower() or "疲劳" in msg
 
-    def test_fatigue_gate_before_failed_streak(self):
-        """Fatigue gate fires before failed_streak gate."""
+    def test_strategy_takes_precedence_over_fatigue(self):
+        """Sanctioned (13 §2.1, 14 MEDIUM-3): the trigger priority is
+        strategy > fatigue — this used to pin the opposite order."""
         policy = TurnPolicy(_config())
-        # Both fatigue and failed_streak are high
         snapshot = TurnSnapshot(
             iteration=3,
             fatigue_index=35.0,
@@ -194,8 +206,8 @@ class TestFatigueGate:
             successful_calls=0,
         )
         decision = policy.decide_next_iteration(snapshot)
-        # Should be NUDGE with fatigue reason
         assert decision.action is TurnAction.NUDGE
+        assert decision.intervention == "strategy"
 
     def test_fatigue_zero_allows_iterate(self):
         """No fatigue → normal iteration."""
@@ -204,8 +216,9 @@ class TestFatigueGate:
         decision = policy.decide_next_iteration(snapshot)
         assert decision.action is TurnAction.ITERATE
 
-    def test_fatigue_with_stall(self):
-        """Stall (no progress) takes precedence over fatigue."""
+    def test_stall_starts_the_strategy_ladder(self):
+        """Sanctioned change ① (13 §2.1): stall used to stop the turn; it now
+        starts the ladder at L1 — stall still outranks fatigue."""
         policy = TurnPolicy(_config(stall_iterations=3))
         snapshot = TurnSnapshot(
             iteration=5,
@@ -214,9 +227,8 @@ class TestFatigueGate:
             successful_calls=0,
         )
         decision = policy.decide_next_iteration(snapshot)
-        # Stall should fire (no successful calls in 5 iterations)
-        assert decision.action is TurnAction.FINISH
-        assert "no progress" in decision.reason
+        assert decision.action is TurnAction.NUDGE
+        assert decision.intervention == "strategy"
 
 
 # ---------------------------------------------------------------------------

@@ -114,8 +114,9 @@ async def test_injected_context_rides_in_the_tail_not_the_system_prompt(tmp_path
     assert all("<hook-context>" not in (m.content or "") for m in request[:-1])
     assert "<hook-context>" in (request[-1].content or "")
     assert "use uv, not pip" in (request[-1].content or "")
-    # the system prompt is unchanged: the cache prefix is intact
-    assert engine.systems[0] == "SYS" * 40
+    # the system prompt is unchanged by the hook: the cache prefix is intact
+    # (13 §2.3: compare against what the builder produces, methods included)
+    assert engine.systems[0] == PromptAssembler("SYS" * 40).build()
 
 
 @pytest.mark.asyncio

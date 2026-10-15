@@ -260,6 +260,14 @@ class SessionData:
     #: (scenario ④).  The message half lives here; the bytes of files the turn
     #: created live in the undo sidecar (``core/undo_store.py``).
     undo_state: dict[str, Any] | None = None
+    #: 13 §2.1: the intervention ladder ledger ({gate: {level, at, outcome,
+    #: fires, ref}}).  Written only when non-empty; cleared by a new plan and
+    #: by task completion — the ladder is per task, not per session.
+    intervention_state: dict[str, Any] | None = None
+    #: 13 §2.4 (F): the workspace's git branch, refreshed once per turn by the
+    #: loop (``infra.vcs.git_branch`` never raises).  Runtime only — the
+    #: whitelist ``to_dict`` deliberately leaves it out of the file.
+    git_branch: str = ""
     # M3: in-process only — tool call observations for SOP routing.
     # Recorded by ToolObserver, consumed by SOPRouter for failure_pattern matching.
     # Not persisted (to_dict is a whitelist); keeps last 50 entries.
@@ -304,6 +312,8 @@ class SessionData:
         """
         self.task = TaskState(goal=goal)
         self.step_deliveries = []
+        # 13 §2.1 (Q2 拍板): a new plan starts on a clean ladder.
+        self.intervention_state = None
         return self.task
 
     def add_message(self, message: ChatMessage) -> None:
@@ -462,6 +472,9 @@ class SessionData:
             data["openTurn"] = int(self.open_turn)
         if self.undo_state is not None:
             data["undoState"] = dict(self.undo_state)
+        # Same rule again: a session that never hit a ladder gains no key.
+        if self.intervention_state:
+            data["interventionState"] = dict(self.intervention_state)
         return data
 
     @classmethod
@@ -500,6 +513,7 @@ class SessionData:
         ]
         raw_open_turn = data.get("openTurn")
         raw_undo = data.get("undoState")
+        raw_intervention = data.get("interventionState")
         return cls(
             session_id=data.get("sessionId", ""),
             title=data.get("title", ""),
@@ -518,6 +532,9 @@ class SessionData:
             if isinstance(raw_open_turn, int) and not isinstance(raw_open_turn, bool)
             else None,
             undo_state=dict(raw_undo) if isinstance(raw_undo, dict) else None,
+            intervention_state=(
+                dict(raw_intervention) if isinstance(raw_intervention, dict) else None
+            ),
         )
 
 

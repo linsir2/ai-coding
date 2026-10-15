@@ -14,8 +14,10 @@ it delivered in ``text_parts`` / ``acc``, and on any later failure raises an
                            chunk(s) ... had already been delivered")
 
 An untyped failure never matches ``exc.kind == "context_overflow"`` in the
-loop, so a post-output rejection already ends the turn instead of retrying —
-the exact rule the debt item asked for, enforced where the text actually is.
+loop, so a post-output rejection cannot slip into the overflow path.  13 §2.5
+(B) gives it its own response instead: one continuation carrying the
+``[stream-interrupted]`` note — a blind retry would duplicate the text the
+operator already saw — and the ordinary failure semantics after that.
 
 A scripted engine can of course call ``on_delta`` and then raise a *typed*
 overflow, and the loop would retry it.  No engine in this repository can: the
@@ -25,9 +27,9 @@ copy of a rule the engine already owns, on a path nothing takes — so it is not
 written, and the test that would have demanded it is not kept.
 
 What is left is the behaviour that must not regress: a rejection *before* any
-output still compacts and retries, and the real engine blocks the retry after
-output.  The last test drives the real ``OpenAIChatEngine._stream`` rather than
-a stand-in, because that is the layer that owns the rule.
+output still compacts and retries, and after output the request is never
+re-issued blind — the real engine test drives ``OpenAIChatEngine._stream`` to
+pin both the delta path and the continuation's exact request.
 """
 
 import pytest
@@ -203,14 +205,17 @@ async def test_a_normal_turn_with_a_sink_completes(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_the_real_engine_streaming_first_blocks_the_retry(tmp_path):
+async def test_the_real_engine_streaming_first_earns_one_continuation(tmp_path):
     """The one test that is not a stand-in for the thing it checks.
 
     Every test above scripts a fake engine whose ``step`` calls ``on_delta``.
     This one drives the real ``OpenAIChatEngine._stream`` — the code that owns
     the ``on_delta`` call — against a client that yields a content chunk and
-    only *then* rejects the request. If the tracker sat anywhere other than on
-    the path the engine really uses, this is where it would show.
+    only *then* rejects the request.  13 §2.5: the delta reaching the operator
+    through the real engine is what earns the single continuation; the request
+    is never re-issued *blind* (the continuation carries the
+    ``[stream-interrupted]`` note), and a second failure keeps the ordinary
+    error semantics.
     """
     from types import SimpleNamespace
 
@@ -263,12 +268,14 @@ async def test_the_real_engine_streaming_first_blocks_the_retry(tmp_path):
     class _Client:
         def __init__(self) -> None:
             self.calls = 0
+            self.last_messages: list = []
             self.chat = SimpleNamespace(
                 completions=SimpleNamespace(create=self._create)
             )
 
         async def _create(self, **kwargs):
             self.calls += 1
+            self.last_messages = list(kwargs.get("messages") or [])
             return _MidStreamFailure()
 
         async def close(self) -> None:
@@ -284,8 +291,15 @@ async def test_the_real_engine_streaming_first_blocks_the_retry(tmp_path):
 
     result = await loop.process_input(session, "接着做")
 
-    assert engine._client.calls == 1, (
-        "the delta reached the operator through the real engine, so a retry "
-        "would put a second answer next to the first"
+    assert engine._client.calls == 2, (
+        "one broken stream plus its one continuation: the delta reached the "
+        "operator through the real engine (13 §2.5), and a blind re-send would "
+        "duplicate the text they already saw"
+    )
+    rendered = "\n".join(
+        str(m.get("content") or "") for m in engine._client.last_messages
+    )
+    assert "[stream-interrupted]" in rendered, (
+        "the second request must carry the continuation note, not repeat the ask"
     )
     assert "maximum context length" in result

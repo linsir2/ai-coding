@@ -40,12 +40,16 @@ class _OneCallEngine:
 
     def __init__(self, call: ToolCallRef) -> None:
         self._call = call
+        # Count our own passes: the message-count heuristic ("< 3 means first
+        # pass") broke the day a tail block was added (13 §2.4 environment).
+        self._passes = 0
         self.model_config = ModelConfig(name="m", base_url="https://x/v1", api_key="k")
         self.on_retry = None
         self.on_fallback = None
 
     async def step(self, messages, *, tools, instructions=None, on_delta=None):
-        if len(messages) < 3:  # user turn only, on the first pass
+        self._passes += 1
+        if self._passes == 1:
             return StepResult(
                 text=None,
                 tool_calls=(self._call,),
@@ -255,16 +259,20 @@ def test_build_guards_reads_the_same_config_the_parent_uses():
     )
 
     assert chain is not None
-    assert set(chain.names) == {"duplicate_call", "bash_policy", "path_escape"}
+    # 13 §2.2: the failed-repeat guard is a permanent first member now.
+    assert set(chain.names) == {
+        "failed_repeat", "duplicate_call", "bash_policy", "path_escape",
+    }
 
 
-def test_build_guards_returns_none_when_nothing_is_enabled():
-    """``None`` is the honest answer for "no guards configured"; the dispatcher
-    turning it into an empty chain is what made this bug invisible.  Every
-    switch has to be off explicitly -- ``duplicate_threshold`` defaults to 2."""
+def test_build_guards_seeds_only_the_dormant_failed_repeat_guard():
+    """13 §2.2: the chain is never ``None`` and never empty — the failed-repeat
+    guard is a permanent first member, dormant until the ladder's L2 arms it.
+    Every other switch has to be off explicitly (``duplicate_threshold``
+    defaults to 2)."""
     cfg = AppConfig(default_model="m", models={}, guard=GuardConfig(duplicate_threshold=0))
 
-    assert build_guards(cfg) is None
+    assert build_guards(cfg).names == ("failed_repeat",)
 
 
 def test_the_default_config_still_enables_the_duplicate_guard():
@@ -275,7 +283,7 @@ def test_the_default_config_still_enables_the_duplicate_guard():
     chain = build_guards(cfg)
 
     assert chain is not None
-    assert chain.names == ("duplicate_call",)
+    assert chain.names == ("failed_repeat", "duplicate_call")
 
 
 def test_every_subagent_gets_its_own_duplicate_call_budget():
@@ -286,9 +294,13 @@ def test_every_subagent_gets_its_own_duplicate_call_budget():
     a = build_guards(cfg)
     b = build_guards(cfg)
 
-    a._guards[0]._counts["x"] = 9
+    # 13 §2.2: index 0 is the (also fresh) failed-repeat guard now; address the
+    # duplicate counter by name so chain order can never hide a shared budget.
+    dup_a = next(g for g in a._guards if getattr(g, "name", "") == "duplicate_call")
+    dup_b = next(g for g in b._guards if getattr(g, "name", "") == "duplicate_call")
+    dup_a._counts["x"] = 9
 
-    assert not b._guards[0]._counts.get("x")
+    assert not dup_b._counts.get("x")
 
 
 def test_a_runner_assembles_its_chain_at_construction():

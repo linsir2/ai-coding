@@ -225,7 +225,8 @@ async def case_exhausted_turn_reports(root: Path) -> tuple[bool, str]:
     return ok, f"{len(answer)} chars of handoff, outcome.text={text!r}"
 
 
-async def case_one_strategy_nudge(root: Path) -> tuple[bool, str]:
+async def case_strategy_ladder_climbs_to_l2(root: Path) -> tuple[bool, str]:
+    """13 §2.1: repeated failures climb L1 → L2 (armed) inside one turn."""
     engine = _Engine(tool_name="flaky")
     loop = _loop(
         engine,
@@ -236,16 +237,23 @@ async def case_one_strategy_nudge(root: Path) -> tuple[bool, str]:
     session = _session()
     await loop.process_input(session, "修好它")
     gates = [
-        message
+        message.content or ""
         for message in session.messages
         if message.role == "user" and "[strategy-gate]" in (message.content or "")
     ]
-    return len(gates) == 1, f"{len(gates)} strategy gate(s), the model gets one"
+    ok = (
+        len(gates) == 2
+        and "不要重复同样的做法" in gates[0]
+        and "直接拦截" in gates[1]
+    )
+    return ok, f"{len(gates)} strategy gate(s): L1 then L2 (budget spent at 6)"
 
 
-async def case_stalled_turn_stops_early(root: Path) -> tuple[bool, str]:
+async def case_stalled_turn_runs_the_ladder(root: Path) -> tuple[bool, str]:
+    """Sanctioned ①: the early stop moved to L4 — a stalled turn now lives
+    through the L1→L2→L3 windows before it hands off."""
     engine = _Engine(tool_name="flaky")
-    loop = _loop(engine, max_tool_iterations=8, stall_iterations=3)
+    loop = _loop(engine, max_tool_iterations=12, stall_iterations=3)
     session = _session()
     answer = await loop.process_input(session, "修好它")
     outcome = loop.last_outcome
@@ -255,11 +263,11 @@ async def case_stalled_turn_stops_early(root: Path) -> tuple[bool, str]:
         outcome is not None
         and "no progress" in reason
         and iterations is not None
-        and iterations < 8
+        and iterations < 12
         and "[回合未完成" in answer
         and "最近一次失败: flaky → nonzero_exit" in answer
     )
-    return ok, f"{iterations} iterations (budget 8), reason={reason!r}"
+    return ok, f"{iterations} iterations (budget 12), reason={reason!r}"
 
 
 async def case_ask_user_without_a_human(root: Path) -> tuple[bool, str]:
@@ -311,8 +319,8 @@ OFFLINE: list[tuple[str, CaseFn]] = [
     ("ring_absent_without_compaction", case_ring_absent_without_compaction),
     ("ring_present_after_compaction", case_ring_present_after_compaction),
     ("exhausted_turn_reports", case_exhausted_turn_reports),
-    ("one_strategy_nudge", case_one_strategy_nudge),
-    ("stalled_turn_stops_early", case_stalled_turn_stops_early),
+    ("strategy_ladder_climbs_to_l2", case_strategy_ladder_climbs_to_l2),
+    ("stalled_turn_runs_the_ladder", case_stalled_turn_runs_the_ladder),
     ("ask_user_without_a_human", case_ask_user_without_a_human),
     ("ask_user_with_a_human", case_ask_user_with_a_human),
     ("evidence_and_index", case_evidence_and_index),

@@ -180,8 +180,9 @@ class TestFatigueSystemE2E:
         books2 = TurnBooks()
         assert books2.fatigue_index == 0.0
 
-    def test_fatigue_gate_only_fires_once(self):
-        """Fatigue nudge only injected once per turn."""
+    def test_fatigue_l1_does_not_refire_while_its_window_is_open(self):
+        """13 §2.1: the one-shot counter became a window — while L1's window
+        is open the ladder observes instead of firing again."""
         policy = TurnPolicy(TurnPolicyConfig(
             max_iterations=10,
             failed_streak_threshold=5,
@@ -190,7 +191,11 @@ class TestFatigueSystemE2E:
         snapshot = TurnSnapshot(
             iteration=1,
             fatigue_index=35.0,
-            fatigue_nudges=1,  # already nudged
+            fatigue_nudges=1,  # the counter is reporting-only now
+            intervention_ledger={
+                "fatigue": {"level": 1, "at": [1, 3], "outcome": "pending",
+                            "fires": 1, "ref": {}}
+            },
         )
         decision = policy.decide_next_iteration(snapshot)
         # Should NOT fire fatigue again

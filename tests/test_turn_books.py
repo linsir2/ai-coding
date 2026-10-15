@@ -168,7 +168,10 @@ def test_snapshot_is_the_same_decision_the_policy_makes_by_hand():
         strategy_nudges=0,
     )
     assert policy.decide_next_iteration(built) == policy.decide_next_iteration(by_hand)
-    assert policy.decide_next_iteration(built).action is TurnAction.FINISH  # the stall ladder
+    # 13 §2.1 (sanctioned ①): stall now starts the strategy ladder at L1.
+    decision = policy.decide_next_iteration(built)
+    assert decision.action is TurnAction.NUDGE
+    assert decision.intervention == "strategy"
 
 
 def test_snapshot_passes_open_items_and_final_text_through():

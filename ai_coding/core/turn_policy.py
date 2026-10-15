@@ -11,27 +11,26 @@ unit answers two questions:
 * **may another iteration start**, given the iteration budget and the turn clock?
 * **how does a finished model step end**, given the task list and the nudge budget?
 
-It also owns the two pieces of prompt text the task list needs: the volatile
-``<task-state>`` block that is attached to a request only (never persisted) and
-the persisted ``[task-gate]`` nudge (docs/r1a-4-analysis.md D1).
+It also owns the volatile ``<task-state>`` block for the task list (attached to
+a request only, never persisted) and the C3 continuation text; the four gate
+ladders and their texts live in ``core/interventions.py`` (13 §2.1).
 """
 
 from __future__ import annotations
 
 import enum
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
+from ai_coding.core import interventions
+from ai_coding.core.interventions import NUDGE_ITEM_LIMIT
 from ai_coding.domain.acceptance import AcceptanceState
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.task import TaskState, TodoItem
 
 __all__ = [
     "NUDGE_ITEM_LIMIT",
-    "STRATEGY_GATE_LEAD",
-    "TASK_GATE_LEAD",
-    "TASK_GATE_TAIL",
     "TASK_MESSAGE_LEAD",
     "TaskInjection",
     "TurnAction",
@@ -42,24 +41,12 @@ __all__ = [
 ]
 
 TASK_MESSAGE_LEAD = "以下是你自己的任务清单状态（系统注入，不是用户发言）："
-TASK_GATE_LEAD = "[task-gate] 你还有未完成的任务项："
-TASK_GATE_TAIL = "请继续推进，或把不再需要的条目用 todo_write 标记为 dropped 并说明原因。"
-STRATEGY_GATE_LEAD = "[strategy-gate]"
-#: The acceptance gate's marker (R0-1): failing proof commands, persisted
-#: like the other gates because they changed what the model did next.
-ACCEPTANCE_GATE_LEAD = "[acceptance-gate]"
-NUDGE_ITEM_LIMIT = 10
 #: G8-1: the marker for the one block that tells the model its budget is nearly
 #: gone.  Volatile (never persisted) like the memory and task blocks -- it
 #: describes a counter, not a fact about the work.
 BUDGET_PRESSURE_LEAD = "[budget] 本轮预算快用完了"
 #: How much of a budget may remain before the warning appears.
 PRESSURE_RATIO = 0.2
-#: F2: fatigue gate marker.
-FATIGUE_GATE_LEAD = "[fatigue-gate]"
-#: F2: Paris' Law fatigue threshold — accumulated error damage that triggers
-#: the fatigue gate.
-FATIGUE_THRESHOLD = 30.0
 
 
 @dataclass(frozen=True)
@@ -121,6 +108,9 @@ class TurnDecision:
     action: TurnAction
     reason: str = ""
     inject: str | None = None
+    #: 13 §2.1: which ladder fired, and at what level — the loop records it.
+    intervention: str = ""
+    level: int = 0
 
 
 @dataclass(frozen=True)
@@ -153,6 +143,13 @@ class TurnSnapshot:
     fatigue_index: float = 0.0
     # F2: fatigue nudges already injected this turn.
     fatigue_nudges: int = 0
+    #: 13 §2.1: the per-gate ledger (see ``core/interventions.py`` for the shape
+    #: and rules).  A mapping because it round-trips through JSON; empty = no
+    #: gate has fired yet.
+    intervention_ledger: Mapping[str, Any] = field(default_factory=dict)
+    #: 13 §2.1: successful ``ask_user`` calls this turn — the helped signal of
+    #: the ask levels (L3 for strategy/fatigue, L2 for task/acceptance).
+    ask_user_calls: int = 0
 
 
 @dataclass(frozen=True)
@@ -168,6 +165,20 @@ class TurnPolicy:
 
     def __init__(self, config: TurnPolicyConfig | None = None) -> None:
         self.config = config or TurnPolicyConfig()
+        # 13 §2.1: the ladder reads these; strict = "never give up early", so
+        # its task budget is unbounded (docs/r1-analysis.md D5 keeps meaning).
+        self._limits = interventions.LadderLimits(
+            fail_streak_threshold=self.config.failed_streak_threshold,
+            stall_iterations=self.config.stall_iterations,
+            strategy_l1=self.config.max_strategy_nudges,
+            fatigue_l1=1,
+            task_l1=(
+                10**9
+                if self.config.stop_policy == "strict"
+                else self.config.max_todo_nudges
+            ),
+            acceptance_l1=self.config.max_acceptance_nudges,
+        )
 
     # ---- budget ------------------------------------------------------------
 
@@ -214,81 +225,21 @@ class TurnPolicy:
             return TurnDecision(TurnAction.FINISH, "iteration budget exhausted")
         if token_gate:
             return TurnDecision(TurnAction.FINISH, "turn token budget exhausted")
-        # R6b tier 3: the turn keeps *calling tools* and none of them ever works,
-        # so another round is not going to start working — stop while there is
-        # budget left to report (the handoff is what the user gets instead of
-        # silence: docs/r6-analysis.md 1.3).  ``attempted_calls`` is what keeps
-        # this from firing on a turn that simply talks: a model that never calls a
-        # tool is governed by the stop policy, not by this ladder — the `strict`
-        # todo policy relies on exactly that (tests/test_agent_loop_react.py).
-        stall = self.config.stall_iterations
-        if (
-            stall
-            and snapshot.iteration > stall
-            and snapshot.attempted_calls
-            and snapshot.successful_calls == 0
-        ):
-            return TurnDecision(
-                TurnAction.FINISH,
-                f"no progress: no tool call has succeeded in "
-                f"{snapshot.iteration - 1} iterations",
-            )
-        # F2: fatigue gate — accumulated errors beyond threshold buy one chance
-        # to change approach or summarize progress.
-        if (
-            snapshot.fatigue_index >= FATIGUE_THRESHOLD
-            and snapshot.fatigue_nudges < 1
-        ):
-            return TurnDecision(
-                TurnAction.NUDGE,
-                "accumulated errors (fatigue)",
-                inject=self.fatigue_message(snapshot.fatigue_index),
-            )
-        # R6b tier 2: repeated failures buy one chance to change approach.
-        threshold = self.config.failed_streak_threshold
-        if (
-            threshold
-            and snapshot.failed_streak >= threshold
-            and snapshot.strategy_nudges < self.config.max_strategy_nudges
-        ):
-            return TurnDecision(
-                TurnAction.NUDGE,
-                "repeated tool failures",
-                inject=self.strategy_message(snapshot.failed_streak),
-            )
+        # R6b tiers 2-3 and F2 now live in the ladder (13 §2.1): one gate fires
+        # per iteration, in trigger-priority order, with memory of what the last
+        # injection achieved.  The death gates and C3 above stay exactly as they
+        # were — they have no ladder to climb.
+        gate = interventions.select(
+            snapshot, phase=interventions.PRE, limits=self._limits
+        )
+        if gate is not None:
+            return self._as_turn_decision(gate)
         return TurnDecision(TurnAction.ITERATE, "within budget")
-
-    @staticmethod
-    def strategy_message(failed_streak: int) -> str:
-        """The one nudge a failing turn gets before it is allowed to stop (R6b)."""
-        return "\n".join(
-            [
-                f"{STRATEGY_GATE_LEAD} 最近 {failed_streak} 轮的工具调用全部失败。"
-                "不要重复同样的做法：",
-                "1) 先读错误输出，说清直接原因，不要猜；",
-                "2) 换手段或把目标切小（换工具、换路径、先写最小复现）；",
-                "3) 若确实缺信息或需要人拍板，用 ask_user 提问；"
-                "没有人回答时就给出结论与假设后收尾。",
-            ]
-        )
-
-    @staticmethod
-    def fatigue_message(fatigue_index: float) -> str:
-        """The nudge when accumulated errors cross the fatigue threshold."""
-        return "\n".join(
-            [
-                f"{FATIGUE_GATE_LEAD} 错误累积过高（fatigue index: {fatigue_index:.1f}）。"
-                "不要继续当前路径：",
-                "1) 停下来，总结你当前的理解和已取得的进展；",
-                "2) 换一种完全不同的方法；",
-                "3) 如果确实需要更多信息，用 ask_user 提问。",
-            ]
-        )
 
     # ---- stopping ----------------------------------------------------------
 
     def decide_after_step(self, snapshot: TurnSnapshot) -> TurnDecision:
-        """The model stopped asking for tools: finish, or gate on open items?"""
+        """The model stopped asking for tools: finish, or run the gate ladders?"""
         if snapshot.acceptance:
             # R0-1: a turn with contracts does not end on the model's word.
             # Unchecked items fail closed (the loop verifies before asking, so
@@ -296,28 +247,33 @@ class TurnPolicy:
             failed = [a for a in snapshot.acceptance if a.passed is not True]
             if not failed:
                 return TurnDecision(TurnAction.FINISH, "acceptance verified")
-            if snapshot.acceptance_nudges >= self.config.max_acceptance_nudges:
-                return TurnDecision(
-                    TurnAction.FINISH, "acceptance nudge budget exhausted"
-                )
-            return TurnDecision(
-                TurnAction.NUDGE,
-                "acceptance checks failing",
-                inject=self.acceptance_message(snapshot.acceptance),
+            # 13 §2.1（Q1 拍板）: the acceptance branch is exclusive — the task
+            # gate never competes while contracts exist (plan-runner parity).
+            gate = interventions.select(
+                snapshot, phase=interventions.POST, limits=self._limits
             )
+            if gate is not None:
+                return self._as_turn_decision(gate)
+            return TurnDecision(TurnAction.FINISH, "acceptance ladder exhausted")
         if not snapshot.open_items or self.config.stop_policy == "natural":
             return TurnDecision(TurnAction.FINISH, "model finished")
-        if (
-            self.config.stop_policy != "strict"
-            and snapshot.nudges >= self.config.max_todo_nudges
-        ):
-            # "strict" never gives up early: the iteration/clock budget is its
-            # only bound (docs/r1-analysis.md D5).
-            return TurnDecision(TurnAction.FINISH, "todo nudge budget exhausted")
+        gate = interventions.select(
+            snapshot, phase=interventions.POST, limits=self._limits
+        )
+        if gate is not None:
+            return self._as_turn_decision(gate)
+        return TurnDecision(TurnAction.FINISH, "model finished")
+
+    @staticmethod
+    def _as_turn_decision(gate: interventions.InterventionDecision) -> TurnDecision:
+        """One ladder verdict, mapped onto the loop's decision type."""
+        action = TurnAction.FINISH if gate.kind == "finish" else TurnAction.NUDGE
         return TurnDecision(
-            TurnAction.NUDGE,
-            "open todo items remain",
-            inject=self.nudge_message(snapshot.open_items),
+            action,
+            gate.reason,
+            inject=gate.text or None,
+            intervention=gate.gate,
+            level=gate.level,
         )
 
     # ---- task text ---------------------------------------------------------
@@ -373,8 +329,7 @@ class TurnPolicy:
         """C3's continuation prompt: the budget died, the work did not.
 
         Names what is still open so the next round knows exactly what to pick
-        up, and says not to redo finished work — the same discipline as the
-        ledger gate's nudge.
+        up, and says not to redo finished work.
         """
         lines = [
             "[continue] 上一轮预算耗尽，但还有未完成的任务项："
@@ -383,29 +338,4 @@ class TurnPolicy:
             f"- {item.id}. {item.content}" for item in open_items[:NUDGE_ITEM_LIMIT]
         )
         lines.append("继续未完成的工作，不要重复已完成的部分。")
-        return "\n".join(lines)
-
-    @staticmethod
-    def nudge_message(open_items: Sequence[TodoItem]) -> str:
-        lines = [TASK_GATE_LEAD]
-        lines.extend(
-            f"- {item.id}. {item.content}" for item in open_items[:NUDGE_ITEM_LIMIT]
-        )
-        lines.append(TASK_GATE_TAIL)
-        return "\n".join(lines)
-
-    @staticmethod
-    def acceptance_message(states: Sequence[AcceptanceState]) -> str:
-        """The acceptance gate's nudge: which checks failed, and their output.
-
-        Quoting the tails is what keeps the next iteration from re-running the
-        suite blind — the evidence travels with the verdict.
-        """
-        lines = [f"{ACCEPTANCE_GATE_LEAD} 以下验收项未通过："]
-        for state in states[:NUDGE_ITEM_LIMIT]:
-            mark = "未检查" if state.passed is None else "未通过"
-            lines.append(f"- {state.id}（{mark}）")
-            if state.output:
-                lines.append(f"  输出：{state.output}")
-        lines.append("请继续推进；修正后验收会自动重跑，无需手动重验。")
         return "\n".join(lines)

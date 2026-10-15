@@ -26,10 +26,10 @@ from typing import Any
 from ai_coding.attachments import save_data_url
 from ai_coding.config.models import resolve_context_window
 from ai_coding.domain.session import _message_to_dict
+from ai_coding.infra.vcs import git_branch
 from ai_coding.server.bridge import EventBridge, Notify
 from ai_coding.server.display import provider_from_base_url
 from ai_coding.server.service import IpcService
-from ai_coding.server.vcs import git_branch
 from ai_coding.server.world import AppWorld
 
 _log = logging.getLogger(__name__)

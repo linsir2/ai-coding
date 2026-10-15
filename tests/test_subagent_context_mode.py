@@ -54,7 +54,9 @@ async def test_the_default_mode_is_full():
     result = await _runner(engine).run("do it", parent=_parent())
     contents = [m.content or "" for m in engine.requests[0]["messages"]]
     assert any("parent-said-this" in content for content in contents)
-    assert engine.requests[0]["instructions"] == "PARENT INSTRUCTIONS"
+    # 13 §2.3: the child inherits the parent's prompt *plus* the methods section.
+    assert engine.requests[0]["instructions"].startswith("PARENT INSTRUCTIONS")
+    assert "<methods>" in engine.requests[0]["instructions"]
     assert result.context_mode == "full"
 
 
@@ -71,7 +73,9 @@ async def test_task_only_starts_with_an_empty_history():
 async def test_task_only_uses_the_base_instructions():
     engine = _Engine()
     await _runner(engine, subagent_context_mode="task_only").run("do it", parent=_parent())
-    assert engine.requests[0]["instructions"] == "BASE INSTRUCTIONS"
+    instructions = engine.requests[0]["instructions"]
+    assert instructions.startswith("BASE INSTRUCTIONS")
+    assert "<methods>" in instructions  # 13 §2.3: 子代理同享（有意）
 
 
 @pytest.mark.asyncio
@@ -105,11 +109,11 @@ async def test_full_mode_still_inherits_the_parent_instructions():
     runner = _runner(engine)
     assert runner.context_mode == "full"
     await runner.run("t", parent=_parent())
-    assert engine.requests[0]["instructions"] == "PARENT INSTRUCTIONS"
+    assert engine.requests[0]["instructions"].startswith("PARENT INSTRUCTIONS")
 
 
 @pytest.mark.asyncio
 async def test_task_only_without_a_parent_uses_the_base_instructions():
     engine = _Engine()
     await _runner(engine, subagent_context_mode="task_only").run("t")
-    assert engine.requests[0]["instructions"] == "BASE INSTRUCTIONS"
+    assert engine.requests[0]["instructions"].startswith("BASE INSTRUCTIONS")

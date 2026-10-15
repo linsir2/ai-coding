@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Any
 from ai_coding.ai.engine import ChatEngine, EngineError
 from ai_coding.attachments import load_image
 from ai_coding.config.models import AIConfig
+from ai_coding.core import interventions
 from ai_coding.core.acceptance import verify_items
 from ai_coding.core.compaction import Compactor
 from ai_coding.core.dispatch import DispatchOutcome, ToolDispatcher
@@ -89,8 +90,10 @@ from ai_coding.core.turn_close import (
 from ai_coding.core.turn_hooks import TurnHooks
 from ai_coding.core.turn_policy import (
     TurnAction,
+    TurnDecision,
     TurnPolicy,
     TurnPolicyConfig,
+    TurnSnapshot,
 )
 from ai_coding.core.turn_report import TurnReporter
 from ai_coding.core.undo_store import UndoFileStore
@@ -121,6 +124,7 @@ from ai_coding.infra.deadline import (
     run_with_deadline,
 )
 from ai_coding.infra.time_utils import now_utc
+from ai_coding.infra.vcs import git_branch
 from ai_coding.security.approval import ApprovalCallback
 from ai_coding.security.permission_gate import PermissionGate
 from ai_coding.service.session_service import SessionService
@@ -159,6 +163,13 @@ _ITERATION_BUDGET = "iteration budget exhausted"
 _CLOSING_PROMPT = (
     "本轮步数预算已用完，请用一段话收尾：说明已经完成了什么、还差什么、"
     "下一步该做什么。不要再调用任何工具。"
+)
+
+#: 13 §2.5 (B): the synthetic line that resumes a broken stream.  Persisted like
+#: a gate nudge -- it changed what the model did next (opencode parity).
+_STREAM_CONTINUE = (
+    "[stream-interrupted] 上一条回复在传输中中断，从未完成处继续，"
+    "不要重复已完成的内容。"
 )
 
 #: How long a reactive compaction may take when the turn has no deadline left
@@ -500,17 +511,29 @@ class AgentLoop:
                 # One call site per round (here, not after every branch), so a
                 # flat round counts exactly once.
                 self._refresh_ledger(books)
-                decision = self.policy.decide_next_iteration(
-                    books.snapshot(
-                        iteration=index, tokens_spent=self.reporter.tokens_spent(),
-                        # C3 reads the open set to decide whether the budget
-                        # died with work unfinished.  The old ladder never
-                        # needed it; without it the continuation never fires.
-                        open_items=task.open_items(),
-                        continuations=session.continuations,
-                    ),
-                    budget_expired=budget_expired,
+                snapshot = books.snapshot(
+                    iteration=index, tokens_spent=self.reporter.tokens_spent(),
+                    # C3 reads the open set to decide whether the budget died
+                    # with work unfinished.  The old ladder never needed it;
+                    # without it the continuation never fires.
+                    open_items=task.open_items(),
+                    # settle evaluates every gate's window at both decision
+                    # points; an acceptance window must see its real signature
+                    # here too — with the default () it would compare empty vs
+                    # ref and be mis-marked "helped" at the very next iteration.
+                    acceptance=acceptance_states(session.acceptance),
+                    continuations=session.continuations,
                 )
+                snapshot = replace(
+                    snapshot,
+                    intervention_ledger=self._settled_interventions(
+                        session, task, snapshot
+                    ),
+                )
+                decision = self.policy.decide_next_iteration(
+                    snapshot, budget_expired=budget_expired,
+                )
+                self._note_intervention(session, decision, snapshot)
                 if decision.action is TurnAction.FINISH:
                     # R0-1 (H1-01): a budget stop is not proof the work is
                     # undone.  When contracts exist and the clock still has
@@ -568,11 +591,10 @@ class AgentLoop:
                         # never called again (the cap burns for zero work).
                         session.continuations += 1
                         restart = True
-                    else:
-                        if "fatigue" in decision.reason:
-                            books.note_fatigue_nudge()
-                        else:
-                            books.note_strategy_nudge()
+                    elif decision.intervention == "fatigue":
+                        books.note_fatigue_nudge()
+                    elif decision.intervention == "strategy":
+                        books.note_strategy_nudge()
                     session.add_message(
                         user_message(decision.inject or "", now_utc(), synthetic=True)
                     )
@@ -648,30 +670,58 @@ class AgentLoop:
                     )
                     self.closer.checkpoint(session, index)
                     continue
-                except EngineError as exc:
-                    if reactive_compacted or exc.kind != _CONTEXT_OVERFLOW:
+                except EmptyStepError:
+                    # H (13 §2.7): one silent retry before the turn fails -- the
+                    # same request, no injected message (dsh llm-retry parity,
+                    # conservative bound of 1).  The second empty step keeps the
+                    # failure semantics exactly as before.
+                    if books.empty_retries >= 1:
                         raise
-                    reactive_compacted = True
-                    report = await self.compactor.compact_now(
-                        session,
-                        timeout=self._remaining(frame.deadline) or _REACTIVE_COMPACT_SECONDS,
-                        reason="overflow",
-                    )
-                    if not report["removed"]:
-                        # Nothing shrank: the history is already as small as this
-                        # pipeline can make it, so the rejection is the truth and
-                        # a second attempt would earn the same answer.
-                        raise
+                    books.note_empty_retry()
                     self.reporter.report_degraded(
                         "model_step",
-                        "provider rejected the request as too long",
-                        "compacted the history and retried the step",
+                        "the model returned an empty step (no text, tools, or reasoning)",
+                        "retried the same request once",
                     )
-                    # Re-run the iteration so the retry goes through the normal
-                    # path: a fresh assembly (new tail blocks, new estimates) over
-                    # the history that was just rewritten.  Inlining the retry
-                    # here would mean assembling a request by hand.
                     continue
+                except EngineError as exc:
+                    if exc.kind == _CONTEXT_OVERFLOW and not reactive_compacted:
+                        reactive_compacted = True
+                        report = await self.compactor.compact_now(
+                            session,
+                            timeout=self._remaining(frame.deadline) or _REACTIVE_COMPACT_SECONDS,
+                            reason="overflow",
+                        )
+                        if not report["removed"]:
+                            # Nothing shrank: the history is already as small as this
+                            # pipeline can make it, so the rejection is the truth and
+                            # a second attempt would earn the same answer.
+                            raise
+                        self.reporter.report_degraded(
+                            "model_step",
+                            "provider rejected the request as too long",
+                            "compacted the history and retried the step",
+                        )
+                        # Re-run the iteration so the retry goes through the normal
+                        # path: a fresh assembly (new tail blocks, new estimates) over
+                        # the history that was just rewritten.  Inlining the retry
+                        # here would mean assembling a request by hand.
+                        continue
+                    if (
+                        exc.kind != _CONTEXT_OVERFLOW
+                        and books.stream_deltas > 0
+                        and books.stream_continued == 0
+                    ):
+                        # 13 §2.5 (B): text was already on screen, so a full retry
+                        # would duplicate it and a failure would drop the half the
+                        # operator saw.  Ask for the continuation instead -- once.
+                        books.note_stream_continue()
+                        session.add_message(
+                            user_message(_STREAM_CONTINUE, now_utc(), synthetic=True)
+                        )
+                        self.closer.checkpoint(session, index)
+                        continue
+                    raise
 
                 if not step.tool_calls:
                     # R0-1: a turn with contracts does not end on the model's
@@ -679,16 +729,22 @@ class AgentLoop:
                     # only their verdicts (its purity is what keeps the stop
                     # decision table-testable).
                     await self._verify_acceptance(session, books)
-                    decision = self.policy.decide_after_step(
-                        books.snapshot(
-                            iteration=index,
-                            tokens_spent=self.reporter.tokens_spent(),
-                            open_items=task.open_items(),
-                            final_text=step.text,
-                            acceptance=acceptance_states(session.acceptance),
-                            continuations=session.continuations,
-                        )
+                    snapshot = books.snapshot(
+                        iteration=index,
+                        tokens_spent=self.reporter.tokens_spent(),
+                        open_items=task.open_items(),
+                        final_text=step.text,
+                        acceptance=acceptance_states(session.acceptance),
+                        continuations=session.continuations,
                     )
+                    snapshot = replace(
+                        snapshot,
+                        intervention_ledger=self._settled_interventions(
+                            session, task, snapshot
+                        ),
+                    )
+                    decision = self.policy.decide_after_step(snapshot)
+                    self._note_intervention(session, decision, snapshot)
                     if decision.action is TurnAction.FINISH:
                         outcome = TurnOutcome(
                             status=TurnStatus.COMPLETED,
@@ -697,7 +753,7 @@ class AgentLoop:
                             reason=decision.reason,
                         )
                         break
-                    if decision.reason == "acceptance checks failing":
+                    if decision.intervention == "acceptance":
                         books.note_acceptance_nudge()
                     else:
                         books.note_nudge()
@@ -853,6 +909,8 @@ class AgentLoop:
         # (the same window the snapshot already had), while every crash after it
         # leaves the marker on disk.  ``_close_turn`` clears it on every exit.
         session.open_turn = session.turn_count
+        # F (13 §2.4): one subprocess per turn; never raises (see infra.vcs).
+        session.git_branch = git_branch(self.workspace)
         hook_context = await self.turn_hooks.context(session)
         turn_timeout = float(getattr(self.settings, "turn_timeout_seconds", 0.0) or 0.0)
         return TurnFrame(
@@ -1062,6 +1120,18 @@ class AgentLoop:
         # the open marker is cleared -- the close below persists both the
         # outcome and the cleared marker in one write.
         session.open_turn = None
+        # 13 §2.1 (D5): the turn boundary settles what it cut short — a pending
+        # window becomes unfinished, so the next turn retries the same level.
+        self._settled_interventions(
+            session,
+            task,
+            books.snapshot(
+                iteration=books.iterations,
+                tokens_spent=0,
+                open_items=task.open_items(),
+            ),
+            turn_end=True,
+        )
         return self.closer.close(
             session,
             user_input=user_input,
@@ -1196,6 +1266,9 @@ class AgentLoop:
                 iteration=index,
                 tokens_spent=self.reporter.tokens_spent(),
                 task_open=len(task.open_items()),
+                # 13 §2.2: the L2 window is the guard's arming — the ledger is
+                # the single source of "is the ladder's refusal phase open".
+                strict_repeats=interventions.armed(session.intervention_state),
             ),
         )
         self.closer.write_back(session, outcomes)
@@ -1215,6 +1288,41 @@ class AgentLoop:
         )
         if books.note_ledger(ledger_signature(items)) and items:
             self._emit(LedgerUpdated(items=tuple(items)))
+
+    def _settled_interventions(
+        self,
+        session: SessionData,
+        task: TaskState,
+        snapshot: TurnSnapshot,
+        *,
+        turn_end: bool = False,
+    ) -> dict[str, Any]:
+        """Advance ladder windows and put the ledger back on the session (13 §2.1).
+
+        Two reset boundaries live here because they need the task object: a
+        finished task (items exist and are all terminal) starts the next task
+        from a clean ledger; everything else rides the existing save rhythm —
+        this method never saves on its own.
+        """
+        if task.items and task.is_complete():
+            session.intervention_state = None
+            return {}
+        ledger = interventions.settle(
+            session.intervention_state or {}, snapshot, turn_end=turn_end
+        )
+        session.intervention_state = ledger or None
+        return ledger
+
+    @staticmethod
+    def _note_intervention(
+        session: SessionData, decision: TurnDecision, snapshot: TurnSnapshot
+    ) -> None:
+        """Persist one fired decision (搭 checkpoint/close 的车落盘)."""
+        if not decision.intervention:
+            return
+        session.intervention_state = interventions.record(
+            session.intervention_state or {}, decision, snapshot
+        )
 
     async def _verify_acceptance(self, session: SessionData, books: TurnBooks) -> None:
         """Run the proof commands for unchecked acceptance items (R0-1).
@@ -1286,7 +1394,11 @@ class AgentLoop:
             step = await run_with_deadline(
                 self.engine.step(
                     request,
-                    tools=self._tool_schemas,
+                    # G (13 §2.7): a closing step has no next iteration to run
+                    # tools in, so offering them meant silently dropping any call
+                    # (probe P4).  The engine's contract: empty list = none
+                    # offered (ai/engine.py), matching opencode's toolChoice:none.
+                    tools=[],
                     instructions=assembled.instructions,
                     on_delta=on_delta,
                     # r17/T5 offered only when the request actually carries
@@ -1331,13 +1443,21 @@ class AgentLoop:
         "decide → ask → act" without the bookkeeping in between.
         """
         started = time.monotonic()
+
+        def counted_delta(text: str) -> None:
+            # 13 §2.5 (B): count even when there is no sink -- "did the operator
+            # see part of the answer" is a fact about the stream, not the UI.
+            books.note_delta()
+            if on_delta is not None:
+                on_delta(text)
+
         try:
             step = await run_with_deadline(
                 self.engine.step(
                     request,
                     tools=self._tool_schemas,
                     instructions=instructions,
-                    on_delta=on_delta,
+                    on_delta=counted_delta,
                     **(
                         {"image_loader": self._load_image}
                         if any(m.images for m in request)

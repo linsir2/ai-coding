@@ -31,6 +31,7 @@ from ai_coding.tools.base import ToolContext
 __all__ = [
     "BashPolicyGuard",
     "DuplicateCallGuard",
+    "FailedRepeatGuard",
     "Guard",
     "GuardChain",
     "GuardDecision",
@@ -43,36 +44,36 @@ __all__ = [
 ]
 
 
-def build_guards(app_config: Any) -> GuardChain | None:
-    """Build the guard chain from config, or ``None`` when nothing is enabled.
+def build_guards(app_config: Any) -> GuardChain:
+    """Build the guard chain; ``FailedRepeatGuard`` is always its first member.
 
     Lives here rather than in ``cli.py`` because three call sites need it -- the
     REPL loop, the TUI loop, and every sub-agent -- and a policy that only one of
-    them can assemble is a policy the other two silently lack.  ``None`` is the
-    honest answer for "nothing configured"; the dispatcher turns it into an empty
-    chain, which is why nothing may default to it.
+    them can assemble is a policy the other two silently lack.  The failed-repeat
+    guard is a permanent member (13 §2.2): its counting is free while dormant,
+    and the refusal only engages through ``TurnView.strict_repeats``, which the
+    strategy/fatigue ladder sets while an L2 window is open.  Every other switch
+    stays config-driven.
 
     Returns a *fresh* chain per call: ``DuplicateCallGuard`` counts calls within a
     turn, and a sub-agent sharing the parent's counter would be refused for calls
     it never made.
     """
+    guards: list[Guard] = [FailedRepeatGuard()]
     guard_cfg = getattr(app_config, "guard", None)
-    if guard_cfg is None:
-        return None
-
-    guards: list[Guard] = []
-    threshold = int(getattr(guard_cfg, "duplicate_threshold", 2) or 0)
-    if threshold > 0:
-        guards.append(DuplicateCallGuard(threshold=threshold))
-    deny = list(getattr(guard_cfg, "bash_deny", []) or [])
-    confirm = list(getattr(guard_cfg, "bash_confirm", []) or [])
-    if deny or confirm:
-        guards.append(BashPolicyGuard(deny=deny, confirm=confirm))
-    if bool(getattr(guard_cfg, "strict_paths", False)):
-        guards.append(PathEscapeGuard(strict=True))
-    if bool(getattr(guard_cfg, "redact_history", False)):
-        guards.append(SecretGuard(redact_history=True))
-    return GuardChain(guards) if guards else None
+    if guard_cfg is not None:
+        threshold = int(getattr(guard_cfg, "duplicate_threshold", 2) or 0)
+        if threshold > 0:
+            guards.append(DuplicateCallGuard(threshold=threshold))
+        deny = list(getattr(guard_cfg, "bash_deny", []) or [])
+        confirm = list(getattr(guard_cfg, "bash_confirm", []) or [])
+        if deny or confirm:
+            guards.append(BashPolicyGuard(deny=deny, confirm=confirm))
+        if bool(getattr(guard_cfg, "strict_paths", False)):
+            guards.append(PathEscapeGuard(strict=True))
+        if bool(getattr(guard_cfg, "redact_history", False)):
+            guards.append(SecretGuard(redact_history=True))
+    return GuardChain(guards)
 
 
 class GuardVerdict(enum.Enum):
@@ -100,6 +101,9 @@ class TurnView:
     iteration: int = 0
     tokens_spent: int = 0
     task_open: int = 0
+    #: 13 §2.2: True while a strategy/fatigue L2 window is open.  The
+    #: ``FailedRepeatGuard`` stays dormant while this is False.
+    strict_repeats: bool = False
 
 
 def call_fingerprint(call: ToolCall) -> str:
@@ -213,6 +217,56 @@ class DuplicateCallGuard:
         self._counts[fingerprint] += 1
         self._first_call.setdefault(fingerprint, call.id)
         return GuardDecision(GuardVerdict.ALLOW)
+
+
+class FailedRepeatGuard:
+    """Refuse repeating a call that already failed too often this turn.
+
+    Dormant until the strategy/fatigue ladder arms it through
+    ``TurnView.strict_repeats``: the L2 response is a *structural* refusal, not
+    another nudge (13 §2.2).  Counting runs even while dormant -- the failures
+    that justify an L2 refusal happened before it armed -- and any success
+    deletes the fingerprint's count, so a call that has worked once (the
+    "fix, then rerun the same command" flow) is never blocked by its earlier
+    failures.
+    """
+
+    name = "failed_repeat"
+
+    def __init__(self, threshold: int = 2) -> None:
+        self.threshold = max(1, int(threshold))
+        self.reset()
+
+    def reset(self) -> None:
+        self._failures: Counter[str] = Counter()
+
+    def check(self, call: ToolCall, ctx: ToolContext, view: TurnView) -> GuardDecision:
+        del ctx
+        if not view.strict_repeats:
+            return GuardDecision(GuardVerdict.ALLOW)
+        fingerprint = call_fingerprint(call)
+        failures = self._failures[fingerprint]
+        if failures >= self.threshold:
+            return GuardDecision(
+                GuardVerdict.DENY,
+                reason=(
+                    f"'{call.name}' already failed {failures} time(s) this turn with "
+                    "the same arguments; read the error and change approach, or ask the user"
+                ),
+                guard=self.name,
+            )
+        return GuardDecision(GuardVerdict.ALLOW)
+
+    def after(
+        self, call: ToolCall, result: ToolResult, ctx: ToolContext, view: TurnView
+    ) -> ToolResult:
+        del ctx, view
+        fingerprint = call_fingerprint(call)
+        if result.success:
+            self._failures.pop(fingerprint, None)
+        else:
+            self._failures[fingerprint] += 1
+        return result
 
 
 class BashPolicyGuard:

@@ -179,9 +179,14 @@ def _script(scenario: str) -> list[tuple[str, str]]:
     if scenario == "normal":
         return [("text", "做完了")]
     if scenario == "todo_nudge":
-        # First a silent-looking stop with an open item → the gate nudges; then a
-        # second stop with the budget spent → the turn finishes as COMPLETED.
-        return [("text", "我先停一下"), ("text", "好了，真的做完了")]
+        # 13 §2.1: a stop with an open item buys L1; a second stop escalates to
+        # the ask (L2); a third stop is the ladder's end → COMPLETED with the
+        # model's own last words.
+        return [
+            ("text", "我先停一下"),
+            ("text", "再停一下"),
+            ("text", "好了，真的做完了"),
+        ]
     return [("tool", "poke")] * 5  # never finishes on its own
 
 
@@ -197,7 +202,14 @@ async def _run(scenario: str) -> tuple[list[dict[str, Any]], dict[str, Any], Ses
         sessions,  # type: ignore[arg-type] — only save() is used
         registry,
         approval=AutoApproveCallback(),
-        settings=AIConfig(max_tool_iterations=2, stop_policy="todo_aware", max_todo_nudges=1),
+        settings=AIConfig(
+            # 13 §2.1: the ladder needs L1 nudge → L2 ask → the stop, i.e. three
+            # model steps; the other scenarios keep the tighter 2-step budget
+            # so their recordings stay byte-identical.
+            max_tool_iterations=4 if scenario == "todo_nudge" else 2,
+            stop_policy="todo_aware",
+            max_todo_nudges=1,
+        ),
         observer=observer,
     )
     answer = await loop.process_input(session, "开始")

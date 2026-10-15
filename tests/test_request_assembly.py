@@ -87,6 +87,7 @@ def _assembler(
     instructions: str | None = None,
     catalog: str = "",
     auto_compact: bool = True,
+    workspace: str = "",
 ) -> tuple[RequestAssembler, dict[str, Any]]:
     reporter = _Reporter()
     parts: dict[str, Any] = {
@@ -110,6 +111,7 @@ def _assembler(
         settings=_Settings(auto_compact=auto_compact),
         emit=parts["events"].append,
         catalog_builder=_catalog,
+        workspace=workspace,
     )
     return assembler, parts
 
@@ -158,12 +160,53 @@ async def test_blocks_keep_the_declared_order():
     assert "<working-memory>" in contents[-1]
 
 
+# ------------------------------------------------------- environment (13 §2.4)
+
+
+async def test_the_environment_block_leads_the_tail():
+    assembler, parts = _assembler(workspace="/tmp/ws")
+    session = _session([_digest()])
+    session.git_branch = "feature/x"
+
+    assembled = await _assemble(assembler, session=session)
+
+    env = next(
+        m.content or ""
+        for m in assembled.request
+        if (m.content or "").startswith("<environment>")
+    )
+    assert "工作区: /tmp/ws" in env
+    assert "分支: feature/x" in env
+    assert "日期:" in env
+    names = [name for name, _size in parts["reporter"].calls[-1]["tail_blocks"]]
+    assert names[0] == "environment"
+
+
+async def test_no_branch_line_when_git_says_nothing():
+    assembler, _parts = _assembler(workspace="/tmp/ws")
+
+    assembled = await _assemble(assembler, session=_session([_digest()]))
+
+    env = next(
+        m.content or ""
+        for m in assembled.request
+        if (m.content or "").startswith("<environment>")
+    )
+    assert "工作区: /tmp/ws" in env
+    assert "分支:" not in env
+    assert "日期:" in env
+
+
 async def test_an_empty_block_is_not_a_message():
     assembler, _parts = _assembler()
     assembled = await _assemble(assembler, session=_session([]))  # no digests → no ring
-    # the history (one message, plus the rewrite the fake compactor made) and the
-    # task block — memory, hook and digest each contributed nothing
-    assert [message.role for message in assembled.request] == ["user", "user", "user"]
+    # the history (one message, plus the rewrite the fake compactor made), the
+    # environment block and the task block — memory, hook and digest each
+    # contributed nothing (13 §2.4: environment is never empty).
+    assert [message.role for message in assembled.request] == [
+        "user", "user", "user", "user",
+    ]
+    assert "<environment>" in assembled.request[-2].content
     assert "task-state" in assembled.request[-1].content
     assert "working-memory" not in assembled.request[-1].content
 

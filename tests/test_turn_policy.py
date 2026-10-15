@@ -8,8 +8,9 @@ unchanged: the existing loop tests must keep passing untouched.
 import pytest
 
 from ai_coding.config.models import AIConfig
+from ai_coding.core import interventions
+from ai_coding.core.interventions import TASK_GATE_LEAD
 from ai_coding.core.turn_policy import (
-    TASK_GATE_LEAD,
     TASK_MESSAGE_LEAD,
     TaskInjection,
     TurnAction,
@@ -72,8 +73,9 @@ def test_next_iteration_finishes_when_the_turn_budget_is_gone():
         ("todo_aware", (_item("1"),), 0, TurnAction.NUDGE),
         ("todo_aware", (_item("1"),), 1, TurnAction.NUDGE),
         ("strict", (_item("1"),), 99, TurnAction.NUDGE),  # strict ignores the cap
-        # open items but the nudge budget is spent -> stop
-        ("todo_aware", (_item("1"),), 2, TurnAction.FINISH),
+        # 13 (sanctioned ②): a spent budget now escalates to the ask level (L2);
+        # where the ladder stops is test_interventions.py's business.
+        ("todo_aware", (_item("1"),), 2, TurnAction.NUDGE),
     ],
 )
 def test_after_step_decision_table(stop_policy, open_items, nudges, expected):
@@ -143,10 +145,14 @@ def test_inject_task_system_mode_without_instructions_uses_the_block_alone():
 
 
 def test_nudge_message_lists_at_most_ten_items():
-    policy = TurnPolicy(_config())
     items = tuple(_item(str(index)) for index in range(1, 13))
 
-    message = policy.nudge_message(items)
+    decision = interventions.select(
+        TurnSnapshot(iteration=1, open_items=items),
+        phase=interventions.POST,
+        limits=interventions.LadderLimits(),
+    )
+    message = decision.text
 
     assert "1. do 1" in message
     assert "10. do 10" in message
@@ -217,3 +223,47 @@ def test_the_last_iteration_is_not_announced_as_available():
 
     assert policy.budget_pressure(iteration=10, tokens_spent=0) is not None
     assert policy.budget_pressure(iteration=11, tokens_spent=0) is None
+
+
+# ---- 13 §2.1: the four gates now run through the ladder (select) -----------
+
+
+def test_next_iteration_runs_the_ladder_instead_of_finishing_on_stall():
+    """Sanctioned change ①: stall used to FINISH immediately; it now starts the
+    strategy ladder at L1 (13 §2.1)."""
+    policy = TurnPolicy(_config(stall_iterations=3))
+    snap = TurnSnapshot(iteration=5, attempted_calls=5, successful_calls=0)
+
+    decision = policy.decide_next_iteration(snap)
+
+    assert decision.action is TurnAction.NUDGE
+    assert (decision.intervention, decision.level) == ("strategy", 1)
+
+
+def test_after_step_escalates_to_the_ask_level_when_the_budget_is_spent():
+    policy = TurnPolicy(_config(max_todo_nudges=2))
+    snap = TurnSnapshot(
+        iteration=4, open_items=(_item("1"),), nudges=2,
+        intervention_ledger={"task": {"level": 1, "at": [2, 4], "outcome": "pending",
+                                      "fires": 2, "ref": {}}},
+    )
+
+    decision = policy.decide_after_step(snap)
+
+    assert decision.action is TurnAction.NUDGE
+    assert (decision.intervention, decision.level) == ("task", 2)
+
+
+def test_after_step_finishes_when_the_ask_was_ignored():
+    policy = TurnPolicy(_config())
+    snap = TurnSnapshot(
+        iteration=6, open_items=(_item("1"),),
+        intervention_ledger={"task": {"level": 2, "at": [4, 6], "outcome": "pending",
+                                      "fires": 1, "ref": {}}},
+    )
+
+    decision = policy.decide_after_step(snap)
+
+    assert (decision.action, decision.reason) == (
+        TurnAction.FINISH, "todo ladder exhausted"
+    )

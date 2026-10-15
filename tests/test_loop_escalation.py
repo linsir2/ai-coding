@@ -104,25 +104,31 @@ def _strategy_gates(session: SessionData) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_failed_iterations_produce_one_strategy_nudge_in_the_session():
+async def test_failed_iterations_climb_the_strategy_ladder_in_the_session():
+    """13 §2.1: one injected nudge per ladder level, L1 then L2 (armed)."""
     loop = _loop(
         _Engine(), _Flaky(), max_tool_iterations=6, stall_iterations=0, failed_streak_threshold=2
     )
     session = _session()
     await loop.process_input(session, "修好它")
-    assert len(_strategy_gates(session)) == 1
+    gates = _strategy_gates(session)
+    assert len(gates) == 2                       # L1 → L2, not one-shot anymore
+    assert "不要重复同样的做法" in gates[0]
+    assert "直接拦截" in gates[1]
     assert loop.last_outcome is not None
     assert loop.last_outcome.status is TurnStatus.MAX_ITERATIONS
 
 
 @pytest.mark.asyncio
-async def test_a_stalled_turn_finishes_with_a_handoff():
-    loop = _loop(_Engine(), _Flaky(), max_tool_iterations=8, stall_iterations=3)
+async def test_a_stalled_turn_runs_the_ladder_then_hands_off():
+    """Sanctioned change ①: the turn now lives through L1→L2→L3 windows and
+    stops at L4 (no progress) instead of dying at the first stall."""
+    loop = _loop(_Engine(), _Flaky(), max_tool_iterations=12, stall_iterations=3)
     session = _session()
     answer = await loop.process_input(session, "修好它")
     assert loop.last_outcome is not None
     assert "no progress" in loop.last_outcome.reason
-    assert loop.last_outcome.iterations < 8
+    assert loop.last_outcome.iterations < 12
     assert "[回合未完成" in answer
     assert "最近一次失败: flaky → nonzero_exit" in answer
     assert "零进展" in answer  # 提前收尾不是「预算用尽」，报告不许说谎

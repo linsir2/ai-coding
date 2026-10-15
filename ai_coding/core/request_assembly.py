@@ -36,6 +36,7 @@ from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
 from ai_coding.domain.turn_digest import render_working_memory
 from ai_coding.infra.deadline import Deadline
+from ai_coding.infra.time_utils import now_utc
 from ai_coding.skills.policy import denied_skill_ids
 from ai_coding.skills.registry import SkillRegistry, iter_mentions, resolve_mentions
 from ai_coding.skills.render import render_skill_content
@@ -256,8 +257,10 @@ class RequestAssembler:
         # M2: the catalog sits with the other state to read, before the
         # instructions — it is reference data, not an instruction.
         catalog = self._catalog_builder() if self._catalog_builder is not None else ""
+        environment_text = self._environment_block(session)
         tail, tail_blocks = build_tail(
             [
+                volatile_block("environment", environment_text),
                 volatile_block("memory", memory_block),
                 volatile_block("mcp_catalog", catalog),
                 volatile_block("task", content_of(injection.message)),
@@ -287,6 +290,20 @@ class RequestAssembler:
         )
 
     # ---- helpers (M2) -------------------------------------------------------
+
+    def _environment_block(self, session: SessionData) -> str:
+        """F (13 §2.4): the hard facts every thought must be grounded in.
+
+        Volatile like the other tail blocks -- rebuilt from the session every
+        iteration, never persisted.  The workspace line is always present; the
+        branch line is omitted when git has nothing to say.
+        """
+        lines = [f"工作区: {self._workspace}"]
+        branch = getattr(session, "git_branch", "")
+        if branch:
+            lines.append(f"分支: {branch}")
+        lines.append(f"日期: {now_utc()[:10]}")
+        return "<environment>\n" + "\n".join(lines) + "\n</environment>"
 
     def _referenced_files_block(self, user_input: str) -> str:
         """The user's ``@path`` references: file content, or a directory listing.

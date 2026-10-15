@@ -78,7 +78,7 @@ def test_policy_never_nudges_on_a_flat_ledger():
     assert decision.inject is None
 
 
-def test_policy_acceptance_gate_nudges_then_finishes():
+def test_policy_acceptance_gate_nudges_then_asks_then_finishes():
     from ai_coding.domain.acceptance import AcceptanceState
 
     policy = TurnPolicy(TurnPolicyConfig(max_acceptance_nudges=1))
@@ -86,10 +86,26 @@ def test_policy_acceptance_gate_nudges_then_finishes():
     first = policy.decide_after_step(TurnSnapshot(iteration=2, acceptance=failing))
     assert first.action.name == "NUDGE"
     assert "[acceptance-gate]" in (first.inject or "")
+    # 13 §2.1: a spent L1 budget escalates to the ask level, not to a stop.
     spent = policy.decide_after_step(
-        TurnSnapshot(iteration=3, acceptance=failing, acceptance_nudges=1)
+        TurnSnapshot(
+            iteration=3, acceptance=failing, acceptance_nudges=1,
+            intervention_ledger={"acceptance": {"level": 1, "at": [2, 4],
+                                 "outcome": "pending", "fires": 1, "ref": {}}},
+        )
     )
-    assert spent.action.name == "FINISH"
+    assert spent.action.name == "NUDGE"
+    assert (spent.intervention, spent.level) == ("acceptance", 2)
+    # An ignored ask is where the ladder ends.
+    ignored = policy.decide_after_step(
+        TurnSnapshot(
+            iteration=5, acceptance=failing,
+            intervention_ledger={"acceptance": {"level": 2, "at": [3, 5],
+                                 "outcome": "pending", "fires": 1, "ref": {}}},
+        )
+    )
+    assert ignored.action.name == "FINISH"
+    assert ignored.reason == "acceptance ladder exhausted"
     passing = (AcceptanceState(id="AC-1", passed=True),)
     done = policy.decide_after_step(TurnSnapshot(iteration=2, acceptance=passing))
     assert done.action.name == "FINISH" and "acceptance verified" in done.reason

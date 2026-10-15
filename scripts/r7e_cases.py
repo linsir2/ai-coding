@@ -256,7 +256,9 @@ async def case_subagent_task_only_has_a_clean_window(root: Path) -> tuple[bool, 
     contents = [m.content or "" for m in engine.requests[0]["messages"]]
     ok = (
         not any("parent-said-this" in c for c in contents)
-        and engine.requests[0]["instructions"] == "BASE"
+        # 13 §2.3: the base instructions plus the methods section (shared).
+        and engine.requests[0]["instructions"].startswith("BASE")
+        and "<methods>" in engine.requests[0]["instructions"]
         and result.context_mode == "task_only"
     )
     leaked = any("parent-said-this" in c for c in contents)
@@ -283,10 +285,124 @@ async def case_subagent_full_still_inherits_the_parent(root: Path) -> tuple[bool
     contents = [m.content or "" for m in engine.requests[0]["messages"]]
     ok = (
         any("parent-said-this" in c for c in contents)
-        and engine.requests[0]["instructions"] == "PARENT"
+        # 13 §2.3: the parent's prompt plus the methods section (shared).
+        and engine.requests[0]["instructions"].startswith("PARENT")
+        and "<methods>" in engine.requests[0]["instructions"]
     )
     visible = any("parent-said-this" in c for c in contents)
     return ok, f"mode={runner.context_mode} parent_visible={visible}"
+
+
+async def case_intervention_ladder_is_visible(root: Path) -> tuple[bool, str]:
+    """13 §2.1/§2.2 end to end: L1 nudge → L2 armed refusal → ask, persisted.
+
+    A real ``AgentLoop`` + real dispatcher + a scripted engine that keeps asking
+    for the same failing call.  The interesting moment is the 4th identical
+    call: the L2 window is open, the fingerprint has already failed twice, and
+    the guard must refuse it *before it runs* -- with a reason the model can act
+    on, not a silent pass.
+    """
+    from ai_coding.core.events import ToolFinished
+    from ai_coding.domain.message import ToolCallRef, ToolResult
+    from ai_coding.service.session_service import SessionService
+
+    class _ScriptedEngine(ChatEngine):
+        """Four identical calls, then the change of approach."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None):
+            self.calls += 1
+            if self.calls <= 4:
+                return StepResult(
+                    text=None,
+                    tool_calls=[
+                        ToolCallRef(id=f"c{self.calls}", name="flaky", arguments="{}")
+                    ],
+                    finish_reason="tool_calls",
+                )
+            return StepResult(text="换了方法，重新读过配置", tool_calls=[], finish_reason="stop")
+
+    class _Flaky(BaseTool):
+        parallel_safe = True
+
+        def __init__(self) -> None:
+            self.executions = 0
+
+        @property
+        def name(self) -> str:
+            return "flaky"
+
+        @property
+        def description(self) -> str:
+            return "a tool that always fails"
+
+        @property
+        def params_json_schema(self) -> dict[str, Any]:
+            return {"type": "object", "properties": {}}
+
+        async def execute(self, params, ctx: ToolContext | None = None) -> ToolResult:
+            self.executions += 1
+            return ToolResult(success=False, output="boom", error="nonzero_exit")
+
+    tool = _Flaky()
+    registry = ToolRegistry()
+    registry.register(tool)
+    sessions = SessionService(root / "sessions")
+    session = sessions.create()
+    observer = RecordingObserver()
+    # The real composition path (cli._build_loop) hands the loop a seeded
+    # chain; duplicate is off so the *ladder's* refusal is the one on show.
+    from ai_coding.config.models import GuardConfig
+    from ai_coding.core.guard import build_guards as _build_guards
+
+    guards = _build_guards(
+        AppConfig(
+            default_model="m",
+            models={},
+            guard=GuardConfig(duplicate_threshold=0),
+        )
+    )
+    loop = AgentLoop(
+        _ScriptedEngine(),
+        sessions,
+        registry,
+        approval=AutoApproveCallback(),
+        settings=AIConfig(max_tool_iterations=10),
+        observer=observer,
+        guards=guards,
+        workspace=str(root),
+    )
+
+    answer = await loop.process_input(session, "修好它")
+
+    gates = [
+        message.content or ""
+        for message in session.messages
+        if "[strategy-gate]" in (message.content or "")
+    ]
+    refusals = [
+        event
+        for event in observer.events
+        if isinstance(event, ToolFinished) and event.tool_name == "flaky" and not event.success
+    ]
+    outcome = loop.last_outcome
+    persisted = sessions.load(session.session_id)
+    state = persisted.intervention_state if persisted is not None else None
+    ok = (
+        len(gates) == 3                                       # L1 → L2 → L3(ask)
+        and "直接拦截" in (gates[1] if len(gates) > 1 else "")  # L2 is the armed level
+        and any("change approach" in (event.output_preview or "") for event in refusals)
+        and tool.executions == 3                               # the refused call never ran
+        and outcome is not None
+        and outcome.text == "换了方法，重新读过配置"
+        and bool(state) and bool(state.get("strategy"))
+    )
+    return ok, (
+        f"gates={len(gates)} refusals={len(refusals)} "
+        f"executions={tool.executions} answer={answer[:28]!r}"
+    )
 
 
 OFFLINE: dict[str, CaseFn] = {
@@ -301,6 +417,7 @@ OFFLINE: dict[str, CaseFn] = {
     "steering_resets_the_streak_only": case_steering_resets_the_streak_only,
     "subagent_task_only_has_a_clean_window": case_subagent_task_only_has_a_clean_window,
     "subagent_full_still_inherits_the_parent": case_subagent_full_still_inherits_the_parent,
+    "intervention_ladder_is_visible": case_intervention_ladder_is_visible,
 }
 
 

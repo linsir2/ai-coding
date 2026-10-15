@@ -151,6 +151,16 @@ class TurnBooks:
     fatigue_index: float = 0.0
     #: F2: fatigue nudges already injected this turn.
     fatigue_nudges: int = 0
+    #: 13 §2.1: successful ``ask_user`` calls this turn — the helped signal of
+    #: the ladder's ask levels (L3 for strategy/fatigue, L2 for task/acceptance).
+    ask_user_calls: int = 0
+    #: 13 §2.5 (B): text deltas delivered this turn.  "The operator already saw
+    #: part of the answer" is what earns a continuation instead of a failure.
+    stream_deltas: int = 0
+    #: 13 §2.5 (B): stream continuations spent this turn (bounded to 1).
+    stream_continued: int = 0
+    #: 13 §2.7 (H): retries spent on three-way-empty model steps (bounded to 1).
+    empty_retries: int = 0
 
     # ---- notifications ----------------------------------------------------
 
@@ -176,6 +186,18 @@ class TurnBooks:
     def note_fatigue_nudge(self) -> None:
         """The fatigue gate injected a reminder and will iterate again."""
         self.fatigue_nudges += 1
+
+    def note_delta(self) -> None:
+        """One text delta reached the caller (the stream-continuation signal)."""
+        self.stream_deltas += 1
+
+    def note_stream_continue(self) -> None:
+        """The turn spent its one continuation on a broken stream (13 §2.5)."""
+        self.stream_continued += 1
+
+    def note_empty_retry(self) -> None:
+        """The turn spent its one retry on an empty model step (13 §2.7)."""
+        self.empty_retries += 1
 
     @property
     def ledger_open(self) -> int:
@@ -270,6 +292,11 @@ class TurnBooks:
         succeeded = [item for item in outcomes if item.result.success]
         self.successful_calls += len(succeeded)
         self.tool_success.update(item.call.name for item in succeeded)
+        # 13 §2.1: the ladder's ask helped-signal counts only what actually
+        # reached the user (a denied call never did).
+        self.ask_user_calls += sum(
+            1 for item in succeeded if item.call.name == "ask_user"
+        )
         self.evidence_calls += sum(
             1 for item in succeeded if item.call.name not in STATE_ONLY_TOOLS
         )
@@ -336,4 +363,5 @@ class TurnBooks:
             continuations=continuations,
             fatigue_index=self.fatigue_index,
             fatigue_nudges=self.fatigue_nudges,
+            ask_user_calls=self.ask_user_calls,
         )

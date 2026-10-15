@@ -14,6 +14,10 @@
       "history_chars": 2,
       "tail_blocks": [
         [
+          "environment",
+          83
+        ],
+        [
           "task",
           68
         ],
@@ -22,7 +26,7 @@
           57
         ]
       ],
-      "estimated_tokens": 86
+      "estimated_tokens": 111
     },
     {
       "type": "ModelStepFinished",

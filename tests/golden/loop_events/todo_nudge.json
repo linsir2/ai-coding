@@ -3,7 +3,7 @@
     {
       "type": "IterationStarted",
       "index": 1,
-      "max_iterations": 2
+      "max_iterations": 4
     },
     {
       "type": "ContextAssembled",
@@ -14,15 +14,15 @@
       "history_chars": 2,
       "tail_blocks": [
         [
-          "task",
-          103
+          "environment",
+          83
         ],
         [
-          "budget",
-          57
+          "task",
+          103
         ]
       ],
-      "estimated_tokens": 100
+      "estimated_tokens": 99
     },
     {
       "type": "ModelStepFinished",
@@ -39,7 +39,7 @@
     {
       "type": "IterationStarted",
       "index": 2,
-      "max_iterations": 2
+      "max_iterations": 4
     },
     {
       "type": "ContextAssembled",
@@ -50,6 +50,46 @@
       "history_chars": 91,
       "tail_blocks": [
         [
+          "environment",
+          83
+        ],
+        [
+          "task",
+          103
+        ]
+      ],
+      "estimated_tokens": 138
+    },
+    {
+      "type": "ModelStepFinished",
+      "index": 2,
+      "finish_reason": "stop",
+      "text_chars": 4,
+      "tool_call_count": 0
+    },
+    {
+      "type": "AssistantMessage",
+      "text": "再停一下",
+      "tool_calls": []
+    },
+    {
+      "type": "IterationStarted",
+      "index": 3,
+      "max_iterations": 4
+    },
+    {
+      "type": "ContextAssembled",
+      "iteration": 3,
+      "system_chars": 0,
+      "tools_chars": 116,
+      "history_messages": 5,
+      "history_chars": 183,
+      "tail_blocks": [
+        [
+          "environment",
+          83
+        ],
+        [
           "task",
           103
         ],
@@ -58,11 +98,11 @@
           57
         ]
       ],
-      "estimated_tokens": 139
+      "estimated_tokens": 206
     },
     {
       "type": "ModelStepFinished",
-      "index": 2,
+      "index": 3,
       "finish_reason": "stop",
       "text_chars": 8,
       "tool_call_count": 0
@@ -78,8 +118,8 @@
         "status": "completed",
         "text": "好了，真的做完了",
         "handoff": "",
-        "iterations": 2,
-        "reason": "todo nudge budget exhausted"
+        "iterations": 3,
+        "reason": "todo ladder exhausted"
       }
     }
   ],
@@ -89,10 +129,12 @@
       "status": "completed",
       "text": "好了，真的做完了",
       "handoff": "",
-      "iterations": 2,
-      "reason": "todo nudge budget exhausted"
+      "iterations": 3,
+      "reason": "todo ladder exhausted"
     },
     "messages": [
+      "user",
+      "assistant",
       "user",
       "assistant",
       "user",
@@ -101,6 +143,6 @@
     "digests": [
       1
     ],
-    "saves": 2
+    "saves": 3
   }
 }

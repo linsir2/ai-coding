@@ -14,6 +14,10 @@
       "history_chars": 2,
       "tail_blocks": [
         [
+          "environment",
+          83
+        ],
+        [
           "task",
           68
         ],
@@ -22,7 +26,7 @@
           57
         ]
       ],
-      "estimated_tokens": 86
+      "estimated_tokens": 111
     },
     {
       "type": "ModelStepFinished",
@@ -75,6 +79,10 @@
       "history_chars": 48,
       "tail_blocks": [
         [
+          "environment",
+          83
+        ],
+        [
           "task",
           68
         ],
@@ -83,7 +91,7 @@
           57
         ]
       ],
-      "estimated_tokens": 106
+      "estimated_tokens": 131
     },
     {
       "type": "ModelStepFinished",
@@ -131,11 +139,15 @@
       "history_chars": 94,
       "tail_blocks": [
         [
+          "environment",
+          83
+        ],
+        [
           "task",
           68
         ]
       ],
-      "estimated_tokens": 101
+      "estimated_tokens": 125
     },
     {
       "type": "ModelStepFinished",

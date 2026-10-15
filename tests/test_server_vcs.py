@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_coding.server.vcs import git_branch
+from ai_coding.infra.vcs import git_branch
 
 _GIT = shutil.which("git")
 pytestmark = pytest.mark.skipif(_GIT is None, reason="git is not installed")
@@ -56,7 +56,7 @@ def test_git_missing_returns_empty(tmp_path: Path, monkeypatch):
     def boom(*_args, **_kwargs):
         raise FileNotFoundError("git")
 
-    monkeypatch.setattr("ai_coding.server.vcs.subprocess.run", boom)
+    monkeypatch.setattr("ai_coding.infra.vcs.subprocess.run", boom)
     assert git_branch(tmp_path) == ""
 
 
@@ -64,5 +64,5 @@ def test_timeout_returns_empty(tmp_path: Path, monkeypatch):
     def slow(*_args, **_kwargs):
         raise subprocess.TimeoutExpired(cmd="git", timeout=3.0)
 
-    monkeypatch.setattr("ai_coding.server.vcs.subprocess.run", slow)
+    monkeypatch.setattr("ai_coding.infra.vcs.subprocess.run", slow)
     assert git_branch(tmp_path) == ""
