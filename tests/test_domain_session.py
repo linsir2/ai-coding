@@ -159,3 +159,64 @@ def test_begin_plan_keeps_messages_and_acceptance():
 
     assert len(s.messages) == 1
     assert [a.id for a in s.acceptance] == ["AC-1"]
+
+
+# ---- P1/R1+R2: message id and the three durable recovery fields ---------------
+
+
+def test_session_message_id_roundtrip():
+    s = SessionData("s1", "title", "c", "l")
+    s.add_message(_user("hi"))
+    mid = s.messages[0].id
+    assert mid
+    restored = SessionData.from_dict(s.to_dict())
+    assert restored.messages[0].id == mid
+
+
+def test_session_from_dict_backfills_missing_message_id():
+    java_json = {
+        "sessionId": "abc",
+        "title": "",
+        "createdTime": "t0",
+        "lastAccessTime": "t0",
+        "messages": [{"role": "user", "content": "hi", "timestamp": "t0"}],
+    }
+    s = SessionData.from_dict(java_json)
+    assert s.messages[0].id
+
+
+def test_session_persists_new_fields():
+    from ai_coding.domain.session import SessionData as SD
+
+    s = SD("s1", "title", "c", "l")
+    s.open_turn = 4
+    s.pending_approval = {"requestId": "r1", "toolName": "bash", "params": {"x": 1}}
+    s.undo_state = {"removed": [{"role": "user"}], "turnCount": 3, "digests": []}
+
+    d = s.to_dict()
+    assert d["openTurn"] == 4
+    assert d["pendingApproval"]["requestId"] == "r1"
+    assert d["undoState"]["turnCount"] == 3
+
+    restored = SD.from_dict(d)
+    assert restored.open_turn == 4
+    assert restored.pending_approval["toolName"] == "bash"
+    assert restored.undo_state["removed"] == [{"role": "user"}]
+
+
+def test_session_new_fields_absent_when_none():
+    s = SessionData("s1", "title", "c", "l")
+    d = s.to_dict()
+    assert "openTurn" not in d
+    assert "pendingApproval" not in d
+    assert "undoState" not in d
+    restored = SessionData.from_dict(d)
+    assert restored.open_turn is None
+    assert restored.pending_approval is None
+    assert restored.undo_state is None
+
+
+def test_session_recovered_interrupted_not_persisted():
+    s = SessionData("s1", "title", "c", "l")
+    s.recovered_interrupted = True
+    assert "recoveredInterrupted" not in s.to_dict()

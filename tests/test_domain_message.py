@@ -79,3 +79,19 @@ def test_tool_result_success_error():
     err = ToolResult(success=False, output="boom")
     assert err.success is False
     assert err.output == "boom"
+
+
+# ---- P1/R1: every message carries a stable id (minted at creation) ----------
+
+
+def test_chat_message_mints_id():
+    a = ChatMessage(role="user", content="hi", timestamp="t0")
+    b = ChatMessage(role="user", content="hi", timestamp="t0")
+    assert a.id
+    assert b.id
+    assert a.id != b.id
+
+
+def test_chat_message_preserves_given_id():
+    msg = ChatMessage(role="user", content="hi", timestamp="t0", id="fixed-1")
+    assert msg.id == "fixed-1"

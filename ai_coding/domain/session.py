@@ -52,6 +52,9 @@ def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
             if item.get("path")
         ),
         images=images,
+        # P1: an older file has no ``id``; ``ChatMessage.__post_init__`` mints
+        # one, which is the backfill.  A stored id is kept verbatim.
+        id=str(data.get("id", "")),
     )
 
 
@@ -66,6 +69,11 @@ def _message_to_dict(msg: ChatMessage) -> dict[str, Any]:
         "content": msg.content,
         "timestamp": msg.timestamp,
     }
+    # P1: the stable identity travels with every stored message.  It is always
+    # minted, so this key is unconditional — an old file simply gains one on
+    # its next save.
+    if msg.id:
+        data["id"] = msg.id
     if msg.tool_call_id is not None:
         data["toolCallId"] = msg.tool_call_id
     if msg.tool_name is not None:
@@ -217,6 +225,21 @@ class SessionData:
     # resume replay reads these to rebuild the step timeline; persisted only
     # when non-empty, same rule as above.
     step_deliveries: list[StepDelivery] = field(default_factory=list)
+    # ---- P1 (补充式方案 06): the three facts recovery was missing ----------
+    # Each is written only when set (same rule as ``task``), so an ordinary
+    # session file gains no keys until one of these situations actually arises.
+    #: The turn number whose turn is open right now.  ``None`` between turns; a
+    #: non-``None`` value after ``load`` means the process died mid-turn
+    #: (scenario ①: crash-resume).
+    open_turn: int | None = None
+    #: The approval request currently awaiting an answer.  Written *before* the
+    #: dispatcher awaits it, so a crash during the wait leaves it durable
+    #: (scenario ③: approval suspend).
+    pending_approval: dict[str, Any] | None = None
+    #: What ``/undo`` removed, kept so ``/redo`` survives a restart
+    #: (scenario ④).  The message half lives here; the bytes of files the turn
+    #: created live in the undo sidecar (``core/undo_store.py``).
+    undo_state: dict[str, Any] | None = None
     # M3: in-process only — tool call observations for SOP routing.
     # Recorded by ToolObserver, consumed by SOPRouter for failure_pattern matching.
     # Not persisted (to_dict is a whitelist); keeps last 50 entries.
@@ -244,6 +267,10 @@ class SessionData:
     # F1: in-process only — name of skill loaded this turn (for outcome tracking).
     # Not persisted (to_dict is a whitelist).
     loaded_skill: str = ""
+    # P1: NOT persisted (to_dict is a whitelist).  True when ``load`` found an
+    # open turn, so the server can tell the user "the last turn did not finish"
+    # once; the next turn clears ``open_turn`` and with it this notice.
+    recovered_interrupted: bool = False
 
     def begin_plan(self, goal: str) -> TaskState:
         """Start a new plan: fresh goal, no items, no step receipts (R1-5b).
@@ -360,6 +387,13 @@ class SessionData:
         # Same rule again: sessions never plan-run write no key.
         if self.step_deliveries:
             data["stepDeliveries"] = [entry.to_dict() for entry in self.step_deliveries]
+        # P1: the three recovery facts, each only when set, same rule again.
+        if self.open_turn is not None:
+            data["openTurn"] = int(self.open_turn)
+        if self.pending_approval is not None:
+            data["pendingApproval"] = dict(self.pending_approval)
+        if self.undo_state is not None:
+            data["undoState"] = dict(self.undo_state)
         return data
 
     @classmethod
@@ -396,6 +430,9 @@ class SessionData:
             StepDelivery.from_dict(row) for row in delivery_rows
             if isinstance(row, dict)
         ]
+        raw_open_turn = data.get("openTurn")
+        raw_pending = data.get("pendingApproval")
+        raw_undo = data.get("undoState")
         return cls(
             session_id=data.get("sessionId", ""),
             title=data.get("title", ""),
@@ -410,6 +447,9 @@ class SessionData:
             last_compacted_turn=int(data.get("lastCompactedTurn", 0) or 0),
             acceptance=acceptance,
             step_deliveries=step_deliveries,
+            open_turn=int(raw_open_turn) if isinstance(raw_open_turn, int) else None,
+            pending_approval=dict(raw_pending) if isinstance(raw_pending, dict) else None,
+            undo_state=dict(raw_undo) if isinstance(raw_undo, dict) else None,
         )
 
 

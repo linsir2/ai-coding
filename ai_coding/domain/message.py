@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from uuid import uuid4
 
 Role = Literal["user", "assistant", "tool", "system"]
 
@@ -189,9 +190,23 @@ class ChatMessage:
     #: Written to the session so ``/undo`` knows which files the turn created --
     #: git cannot tell those from files the human made while the turn ran.
     artifacts: tuple[ToolArtifact, ...] = ()
+    #: P1 (补充式方案 06): a stable identity minted at creation.  Two readers
+    #: need it to name one message across representations -- the undo record
+    #: (which stores the removed messages verbatim and puts them back on redo)
+    #: and any future audit.  Empty means "not yet minted"; ``__post_init__``
+    #: fills it, so the fifteen construction sites need no change, and a
+    #: ``from_dict`` that carries a persisted id keeps it.
+    #:
+    #: ``compare=False``: equality stays **content-based**, which is the
+    #: contract every existing reader already relies on (``_ensure_pinned``,
+    #: the compaction tests).  The id names a message; it does not define what
+    #: the message says, and two equal bodies are still equal.
+    id: str = field(default="", compare=False)
 
     def __post_init__(self) -> None:
         if self.role == "tool" and not self.tool_call_id:
             raise ValueError("role='tool' messages must carry a tool_call_id")
         if self.role == "assistant" and not self.content and not self.tool_calls:
             raise ValueError("assistant messages must carry content or tool_calls")
+        if not self.id:
+            self.id = uuid4().hex
