@@ -404,3 +404,138 @@ def test_deleting_a_session_takes_its_undo_sidecar_with_it(tmp_path):
     assert service.delete(session.session_id) is True
 
     assert not sidecar.exists()
+
+
+class _AnsweringEngine(ChatEngine):
+    """Answers in one step, no tools.  A resumed turn over a persisted history
+    should need nothing more than this to finish the interrupted turn."""
+
+    def __init__(self, text: str = "resumed answer") -> None:
+        self.text = text
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        return StepResult(text=self.text, finish_reason="stop")
+
+
+def _crashed_session(service: SessionService, session_id: str = "s"):
+    """A session as a crash leaves it: user message asked, turn 4 open, the
+    approval question in the marker, everything checkpointed to disk."""
+    from ai_coding.domain.run import user_message
+    from ai_coding.domain.task import TaskState
+
+    session = service.create(title="crashed")
+    session.add_message(user_message("half-written", "t"))
+    session.turn_count = 4
+    session.open_turn = 4
+    session.task = TaskState(goal="half-written")
+    service.save(session)
+    service.mark_pending_approval(
+        session.session_id,
+        {"callId": "c9", "toolName": "bash", "params": {"command": "echo hi"}},
+    )
+    return service.load(session.session_id)
+
+
+@pytest.mark.asyncio
+async def test_resume_turn_continues_without_appending_a_user_message(tmp_path):
+    """Q1/Q2 (08): resume is the same turn continued, not a new one -- no
+    duplicate user message, no counter bump; the open marker clears on close."""
+    service = SessionService(root=tmp_path / "sessions")
+    session = _crashed_session(service)
+    loop = AgentLoop(
+        _AnsweringEngine(), service, ToolRegistry(),
+        settings=AIConfig(stop_policy="natural"), workspace=str(tmp_path),
+    )
+
+    text = await loop.resume_turn(session)
+
+    assert text == "resumed answer"
+    # The dead turn's pending question stays in the history, in the open --
+    # 08/addendum: without it a resumed turn that walks a different path drops
+    # the plan silently (proven on screen, not in a unit test).
+    assert [m.role for m in session.messages] == ["user", "user", "assistant"]
+    assert session.messages[0].content == "half-written"
+    assert "[resume]" in (session.messages[1].content or "")
+    assert "bash" in (session.messages[1].content or "")
+    assert session.messages[1].synthetic is True
+    assert session.messages[2].content == "resumed answer"
+    assert session.turn_count == 4
+    assert session.open_turn is None
+    assert service.load(session.session_id).open_turn is None
+    # The bare-goal task never reaches the file (dropped as noise), so resume
+    # rebuilds it from the history -- the turn runs on the dead turn's goal.
+    assert session.task is not None and session.task.goal == "half-written"
+
+
+@pytest.mark.asyncio
+async def test_resume_without_a_marker_adds_no_note(tmp_path):
+    """Case A stays quiet: with no pending question there is nothing to
+    re-decide, so resume appends nothing before the model's answer."""
+    from ai_coding.domain.run import user_message
+    from ai_coding.domain.task import TaskState
+
+    service = SessionService(root=tmp_path / "sessions")
+    session = service.create(title="crashed-clean")
+    session.add_message(user_message("half-written", "t"))
+    session.turn_count = 4
+    session.open_turn = 4
+    session.task = TaskState(goal="half-written")
+    service.save(session)
+    session = service.load(session.session_id)
+    loop = AgentLoop(
+        _AnsweringEngine(), service, ToolRegistry(),
+        settings=AIConfig(stop_policy="natural"), workspace=str(tmp_path),
+    )
+
+    await loop.resume_turn(session)
+
+    assert [m.content for m in session.messages] == ["half-written", "resumed answer"]
+
+
+@pytest.mark.asyncio
+async def test_resume_turn_clears_the_dead_turn_marker(tmp_path):
+    """Q3 (08): the dead turn's question dies with it -- a live turn re-asks,
+    so resume drops the stale marker instead of carrying it along."""
+    service = SessionService(root=tmp_path / "sessions")
+    session = _crashed_session(service)
+    loop = AgentLoop(
+        _AnsweringEngine(), service, ToolRegistry(),
+        settings=AIConfig(stop_policy="natural"), workspace=str(tmp_path),
+    )
+
+    await loop.resume_turn(session)
+
+    assert session.pending_approval is None
+    assert service.load(session.session_id).pending_approval is None
+
+
+@pytest.mark.asyncio
+async def test_resume_refuses_a_session_with_nothing_open(tmp_path):
+    """A resume with no open turn is a model turn over stale history with an
+    empty prompt -- refuse honestly instead of running it."""
+    service = SessionService(root=tmp_path / "sessions")
+    session = service.create(title="clean")
+    loop = AgentLoop(
+        _AnsweringEngine(), service, ToolRegistry(),
+        settings=AIConfig(stop_policy="natural"), workspace=str(tmp_path),
+    )
+
+    with pytest.raises(ValueError, match="nothing to resume"):
+        await loop.resume_turn(session)
+
+
+def test_load_by_prefix_returns_complete_messages_not_a_list_row(tmp_path):
+    """Caught by a self-inflicted wound: ``load`` with a short prefix returned
+    the message-gutted list row, and saving that object wiped the history.
+    The fallback now reloads by full id, so a prefix load is a real load."""
+    service = SessionService(root=tmp_path / "sessions")
+    session = service.create(title="full")
+    from ai_coding.domain.run import user_message
+
+    session.add_message(user_message("keep me", "t"))
+    service.save(session)
+
+    loaded = service.load(session.session_id[:8])
+
+    assert loaded is not None
+    assert [m.content for m in loaded.messages] == ["keep me"]

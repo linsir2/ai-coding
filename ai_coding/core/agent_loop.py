@@ -397,6 +397,52 @@ class AgentLoop:
         async with self._turn_lock:
             return await self._run_turn(session, user_input, on_delta, observer, images)
 
+    async def resume_turn(
+        self,
+        session: SessionData,
+        on_delta: DeltaSink | None = None,
+        observer: LoopObserver | None = None,
+    ) -> str:
+        """Continue the interrupted turn (08): the history already ends at the
+        last completed tool result (the crash's batch never checkpointed, and
+        the approval wait only wrote the marker), so the model walks on from
+        there -- no duplicate user message, no counter bump.  A WARN call met
+        again re-asks through the *live* approval provider by itself, which is
+        why resume needs no approval-reconstruction machinery.
+
+        Refuses a session with nothing open: that would be a model turn over
+        stale history with an empty prompt.
+        """
+        if session.open_turn is None:
+            raise ValueError("nothing to resume")
+        async with self._turn_lock:
+            # Q3 (08): the dead turn's question dies with it.  A live turn that
+            # meets the call again writes a fresh marker; carrying the stale one
+            # along would report a question nobody is asking any more.
+            pending = session.pending_approval
+            session.pending_approval = None
+            self.sessions.mark_pending_approval(session.session_id, None)
+            if isinstance(pending, dict) and pending.get("toolName"):
+                # 08/addendum (tmux proved it): the resumed turn may walk a
+                # different path and never re-ask -- the dead plan would then
+                # vanish silently.  Leave its question in the history, in the
+                # open, so the model explicitly re-decides it.  Synthetic like
+                # the steering lines: the harness speaking, not the human.
+                params = pending.get("params")
+                target = f" {short_json(params)[:80]}" if params else ""
+                session.add_message(
+                    user_message(
+                        "[resume] 上一步在等审批："
+                        f"{pending.get('toolName')}{target}（已中断）；"
+                        "如仍需要，重新发起",
+                        now_utc(),
+                        synthetic=True,
+                    )
+                )
+            return await self._run_turn(
+                session, "", on_delta, observer, (), append_user=False
+            )
+
     async def _run_turn(
         self,
         session: SessionData,
@@ -404,6 +450,8 @@ class AgentLoop:
         on_delta: DeltaSink | None = None,
         observer: LoopObserver | None = None,
         images: tuple[ImageRef, ...] = (),
+        *,
+        append_user: bool = True,
     ) -> str:
         """One turn, ungated.  The body below is ``process_input`` unchanged:
         splitting it out keeps the re-entry guard a two-line diff instead of a
@@ -415,7 +463,9 @@ class AgentLoop:
             ref for ref in self._extract_image_mentions(user_input)
             if ref.path not in {existing.path for existing in images}
         )
-        frame = await self._begin_turn(session, user_input, observer, attached)
+        frame = await self._begin_turn(
+            session, user_input, observer, attached, append_user=append_user
+        )
         task = frame.task
         # R7a: everything the turn counts about itself lives in one object, so a
         # new rule is a method on the books rather than a tenth local variable.
@@ -714,6 +764,8 @@ class AgentLoop:
         user_input: str,
         observer: LoopObserver | None,
         images: tuple[ImageRef, ...] = (),
+        *,
+        append_user: bool = True,
     ) -> TurnFrame:
         """Everything that must happen before the first iteration.
 
@@ -739,17 +791,47 @@ class AgentLoop:
                 _router.record_load(name, _session.turn_count, _session.skill_stats)
                 _session.loaded_skill = name
             skill_tool.set_on_loaded(_on_skill_loaded)
-        session.add_message(user_message(user_input, now_utc(), images))
+        # Q1 (08): resume reuses the persisted history -- appending the prompt
+        # again would duplicate the user's line and start a new turn over it.
+        if append_user:
+            session.add_message(user_message(user_input, now_utc(), images))
         # T5: remember this request's instruction so compaction can keep it in
         # the history (hotel audit root cause R5: the instruction at index 80 fell
         # out of the L1 tail window and the model re-anchored on old content).
-        self._current_instruction = session.messages[-1]
+        # A resumed turn appends nothing, so the anchor is the last thing the
+        # human actually typed -- not messages[-1] (a tool result), and not a
+        # synthetic harness line in the model's own voice.
+        anchor: ChatMessage | None = None
+        if append_user:
+            self._current_instruction = session.messages[-1]
+        else:
+            anchor = next(
+                (
+                    message
+                    for message in reversed(session.messages)
+                    if message.role == "user" and not message.synthetic
+                ),
+                None,
+            )
+            self._current_instruction = anchor
         # R6a: the session-level turn counter.  It is what `source_turn` and the
         # <working-memory> header mean by "turn N" (docs/r6-analysis.md 2.4).
-        session.turn_count = int(getattr(session, "turn_count", 0) or 0) + 1
+        # A resumed turn is the *same* turn continued (08/Q2), so the counter
+        # -- and with it open_turn below -- stays put.
+        if append_user:
+            session.turn_count = int(getattr(session, "turn_count", 0) or 0) + 1
         self.closer.begin_turn()
         if session.task is None:
-            session.task = TaskState(goal=user_input)
+            if append_user:
+                session.task = TaskState(goal=user_input)
+            else:
+                # A bare-goal task never reaches the file -- to_dict drops it
+                # as noise (domain/session.py) -- so a session that crashed
+                # before any todo item loads with task None.  Rebuild the goal
+                # from the anchor above: it is the object the dead turn had.
+                session.task = TaskState(
+                    goal=anchor.content if anchor and anchor.content else ""
+                )
         task = session.task
         # C3: the continuation allowance is per user turn — a new message
         # starts with a fresh budget, not the previous turn's leftovers.

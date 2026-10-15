@@ -165,16 +165,29 @@ export interface RecoveryFacts {
  * asking again would collect a reply that goes nowhere.  Continuing is the
  * user's move -- resending the message makes the model ask again by itself.
  *
+ * 08: the notice now carries the resume action -- the session route binds it
+ * to ``ctrl+x r`` (this TUI is keyboard-driven; there is no mouse to click
+ * with), so the key hint rides the copy and the renderer stays untouched.
+ *
  * Returns ``null`` for an ordinary session, so replay is unchanged for one.
  */
 export function recoveryNotice(data: RecoveryFacts): Part | null {
+  // 08/addendum-2: the key is only promised when the turn itself survived to
+  // disk.  A crash before the first checkpoint leaves the marker but no
+  // open turn -- not even the user message reached the file (P2 rides the
+  // next save by design) -- so there is nothing to continue from and the
+  // backend refuses.  Offering resume there would advertise what the backend
+  // then rejects; the notice stays, the action does not.
+  const resumable = !!data.recoveredInterrupted
+  const keyHint = resumable ? "——按 ctrl+x r 续跑" : ""
   const pending = data.pendingApproval
   if (pending && typeof pending === "object" && pending.toolName) {
     const target = pending.params ? shorten(JSON.stringify(pending.params), 80) : ""
     return {
       kind: "notice",
       tone: "error",
-      text: `上一步在等审批：${pending.toolName}${target ? " " + target : ""}（该回合已中断）`,
+      ...(resumable ? { action: "resume" as const } : {}),
+      text: `上一步在等审批：${pending.toolName}${target ? " " + target : ""}（该回合已中断）${keyHint}`,
     }
   }
   if (data.recoveredInterrupted) {
@@ -182,7 +195,8 @@ export function recoveryNotice(data: RecoveryFacts): Part | null {
     return {
       kind: "notice",
       tone: "error",
-      text: `上次回合未完成${turn}——重发消息即可继续`,
+      action: "resume",
+      text: `上次回合未完成${turn}——按 ctrl+x r 续跑`,
     }
   }
   return null
@@ -197,4 +211,17 @@ export async function loadSession(client: IpcClient, id: string): Promise<Sessio
   const note = recoveryNotice(data)
   if (note) state.messages.unshift({ role: "assistant", parts: [note] })
   return state
+}
+
+/** Ask the backend to continue the interrupted turn (08) — no prompt text
+ * rides along, so unlike ``session.prompt`` nothing is echoed.  The turn's
+ * wire events stream back the same way a prompted turn's do. */
+export async function resumeSession(
+  client: IpcClient,
+  id: string,
+): Promise<{ turnId: number; sessionId: string }> {
+  return (await client.request("session.resume", { id })) as {
+    turnId: number
+    sessionId: string
+  }
 }

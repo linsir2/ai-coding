@@ -1016,3 +1016,11 @@ describe("image attachments (r17/T5)", () => {
     expect(state.messages[0]!.parts).toEqual([{ kind: "image", name: "shot" }])
   })
 })
+
+describe("resume", () => {
+  test("resumed marks the session busy without echoing a user message", () => {
+    const state = feed(initialState(), { kind: "resumed" })
+    expect(state.busy).toBe(true)
+    expect(state.messages).toEqual([])
+  })
+})

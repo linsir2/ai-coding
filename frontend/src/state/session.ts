@@ -40,7 +40,7 @@ export type Part =
       durationMs: number
     }
   | { kind: "plan"; title: string; body: string }
-  | { kind: "notice"; tone: Tone; text: string }
+  | { kind: "notice"; tone: Tone; text: string; action?: "resume" }
   | { kind: "image"; name: string }
   | { kind: "turn-end"; tone: "error"; text: string }
   | {
@@ -71,6 +71,9 @@ export interface SessionState {
 
 export type Action =
   | { kind: "submitted"; text: string; images?: PromptImage[] }
+  // 08: a resumed turn carries no prompt -- busy with no echo.  Reusing
+  // "submitted" with an empty text would draw an empty user bubble.
+  | { kind: "resumed" }
   | { kind: "queued"; text: string }
   | { kind: "queued-dispatched" }
   | { kind: "submit-failed"; reason: string }
@@ -644,6 +647,8 @@ export function reduce(state: SessionState, action: Action): SessionState {
         ),
         busy: true,
       }
+    case "resumed":
+      return { ...state, busy: true }
     case "queued":
       // The user message lands now (the retired Textual UI appended at submit
       // too); the turn itself starts when the running one ends.

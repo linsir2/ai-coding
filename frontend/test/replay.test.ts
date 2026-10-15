@@ -11,7 +11,7 @@
 import { describe, expect, test } from "bun:test"
 import type { RecoveryFacts, WireMessage } from "../src/state/replay"
 import type { Part } from "../src/state/session"
-import { loadSession, messagesToState, recoveryNotice } from "../src/state/replay"
+import { loadSession, messagesToState, recoveryNotice, resumeSession } from "../src/state/replay"
 
 // The real envelope (ai_coding/domain/run.py::wrap_tool_output): the <data>
 // block is on its own lines, so _strip_envelope's exact-line checks apply.
@@ -235,5 +235,47 @@ describe("loadSession", () => {
     const state = await loadSession(client({ messages: [{ role: "user", content: "hi" }] }), "s1")
     expect(state.messages).toHaveLength(1)
     expect(state.messages[0]!.parts[0]!.kind).toBe("text")
+  })
+})
+
+describe("resume", () => {
+  test("a recoverable notice carries the resume action and its key", () => {
+    const crashed = asNotice(recoveryNotice({ recoveredInterrupted: true, openTurn: 3 }))
+    expect(crashed.action).toBe("resume")
+    expect(crashed.text).toContain("ctrl+x r")
+
+    const pending = asNotice(
+      recoveryNotice({
+        recoveredInterrupted: true,
+        openTurn: 1,
+        pendingApproval: { toolName: "bash", params: { command: "echo hi" } },
+      }),
+    )
+    expect(pending.action).toBe("resume")
+    expect(pending.text).toContain("ctrl+x r")
+  })
+
+  test("a marker without an open turn promises no key (08/addendum-2)", () => {
+    // Crashed before the first checkpoint: the user message never reached the
+    // file, so the backend would refuse -- the notice informs, it does not
+    // offer what cannot run.
+    const note = asNotice(
+      recoveryNotice({ pendingApproval: { toolName: "bash", params: { command: "echo hi" } } }),
+    )
+    expect(note.action).toBeUndefined()
+    expect(note.text).not.toContain("ctrl+x r")
+  })
+
+  test("resumeSession asks the backend to continue without a prompt", async () => {
+    const seen: Array<{ method: string; params: unknown }> = []
+    const client = {
+      request: (method: string, params: unknown) => {
+        seen.push({ method, params })
+        return Promise.resolve({ turnId: 7, sessionId: "s" })
+      },
+    } as unknown as Parameters<typeof resumeSession>[0]
+    const ack = await resumeSession(client, "s")
+    expect(seen).toEqual([{ method: "session.resume", params: { id: "s" } }])
+    expect(ack.turnId).toBe(7)
   })
 })

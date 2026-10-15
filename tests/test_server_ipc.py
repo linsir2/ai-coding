@@ -95,6 +95,20 @@ class _FakeLoop:
         session.messages = list(session.messages)[-1:]
         return {"messages": before, "after": len(session.messages), "removed": before - 1}
 
+    async def resume_turn(self, session, on_delta=None, observer=None):
+        """Mirror the real contract (08/Q1): a resumed turn appends no user
+        message -- only the model's answer lands in the history."""
+        self.calls.append(
+            {"session": session, "resumed": True, "on_delta": on_delta, "observer": observer}
+        )
+        for step in self.script:
+            step(observer, on_delta)
+        from ai_coding.domain.run import assistant_message
+
+        stamp = "2026-01-01T00:00:00Z"
+        session.add_message(assistant_message(StepResult(text="done"), stamp))
+        return "done"
+
 
 class _SlowLoop(_FakeLoop):
     """A turn that hangs until cancelled, honouring the loop's cancel contract."""
@@ -1267,3 +1281,26 @@ async def test_session_load_of_a_clean_session_says_nothing(ipc):
     assert result["recoveredInterrupted"] is False
     assert result["openTurn"] == 0
     assert result["pendingApproval"] == {}
+
+
+@pytest.mark.asyncio
+async def test_session_resume_continues_without_a_new_prompt(ipc):
+    """08/Q1: resume carries no text -- the fake records how it was called, so
+    the test sees the turn arrived without a prompt behind it."""
+    world, _service, client = ipc
+    hello = client.request("initialize")
+    session_id = hello["sessionId"]
+    world.loop.script = [
+        lambda obs, _delta: obs.on_event(
+            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="done"))
+        ),
+    ]
+    ack = client.request("session.resume", {"id": session_id})
+    assert ack["turnId"] == 1
+    assert ack["sessionId"] == session_id
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+    call = world.loop.calls[-1]
+    assert call.get("resumed") is True
+    assert "text" not in call
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert client.events[-1]["data"]["status"] == "completed"

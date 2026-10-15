@@ -33,7 +33,7 @@ import { initialState, reduce } from "../state/session"
 import { useToast } from "../component/toast"
 import { theme } from "../theme/tokens"
 import { escStep } from "../util/esc"
-import { loadSession } from "../state/replay"
+import { loadSession, resumeSession } from "../state/replay"
 import type { AskRequest } from "../util/ask"
 import type { PermissionDecision } from "../util/permission"
 
@@ -192,6 +192,31 @@ export function Session(props: SessionProps) {
         run: () => setAlwaysThinking((value) => !value),
       },
       {
+        name: "session.resume",
+        title: "Resume interrupted turn",
+        group: "Session",
+        desc: "Continue the crashed turn from the persisted history",
+        palette: true,
+        // 08/Q4: the recovery notice names this key, so the transcript tells
+        // the user exactly how to continue.  The notice is the only thing that
+        // can ask for this -- without one there is no interrupted turn, and
+        // the backend refuses anyway -- so a stray keypress is a no-op.
+        run: () => {
+          if (state.busy) return
+          const resumable = state.messages.some((message) =>
+            message.parts.some((part) => part.kind === "notice" && part.action === "resume"),
+          )
+          if (!resumable) return
+          apply({ kind: "resumed" })
+          // The turn's wire events stream back like a prompted turn's; a
+          // refusal (stale keypress) surfaces the same way a failed submit
+          // does, which also releases `busy`.
+          void resumeSession(props.client, props.sessionId).catch((error) =>
+            apply({ kind: "submit-failed", reason: String(error) }),
+          )
+        },
+      },
+      {
         name: "session.plan",
         title: "Plan",
         group: "Session",
@@ -239,6 +264,7 @@ export function Session(props: SessionProps) {
     bindings: [
       { key: "escape", cmd: "session.interrupt" },
       { key: "ctrl+t", cmd: "session.toggle.thinking" },
+      { key: "<leader>r", cmd: "session.resume" },
     ],
   }))
 

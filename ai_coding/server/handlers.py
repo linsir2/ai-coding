@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 from typing import Any
 
@@ -252,6 +252,45 @@ def make_handlers(
             "pendingApproval": dict(session.pending_approval or {}),
         }
 
+    def _launch_turn(run: Callable[[], Coroutine[Any, Any, None]]) -> int:
+        """Spawn a turn coroutine and track it (08).
+
+        Shared by ``session.prompt`` and ``session.resume``: the guarded shape
+        -- cancellation passes through, an outside failure becomes the
+        ``turn.finished`` error event -- is the contract both callers need, and
+        writing it twice is how the two drift apart.
+        """
+        async def guarded() -> None:
+            try:
+                await run()
+            except asyncio.CancelledError:
+                # The loop already persisted the partial turn and emitted
+                # TurnFinished(ABORTED) before re-raising (core/agent_loop.py:570);
+                # this coroutine is the task's top, so there is nothing above
+                # to observe the cancellation.
+                pass
+            except Exception as exc:  # noqa: BLE001 — a bug must not hang the UI
+                _log.exception("turn runner failed outside the loop")
+                service.notify(
+                    "event",
+                    {
+                        "type": "turn.finished",
+                        "data": {
+                            "status": "error",
+                            "reason": f"{type(exc).__name__}: {exc}"[:300],
+                            "iterations": 0,
+                            "truncatedByLength": False,
+                            "handoff": "",
+                        },
+                    },
+                )
+
+        state.turn_id += 1
+        future = service.spawn(guarded())
+        state.turn_futures.add(future)
+        future.add_done_callback(state.turn_futures.discard)
+        return state.turn_id
+
     def session_prompt(params: dict[str, Any]) -> dict[str, Any]:
         """Start a real turn; events reach the client through the bridge."""
         text = str(params.get("text", "") or "")
@@ -285,49 +324,44 @@ def make_handlers(
                 rejected.append(
                     {"name": str(item.get("name", "") or "图片"), "reason": saved.reason}
                 )
-        state.turn_id += 1
-        turn_id = state.turn_id
-
         async def run_turn() -> None:
-            try:
-                await world.loop.process_input(
-                    session,
-                    text,
-                    on_delta=bridge.on_delta,
-                    observer=bridge,
-                    # offered only when there is something to offer, so loop
-                    # doubles that predate r17/T5 stay callable for text turns
-                    **({"images": tuple(images)} if images else {}),
-                )
-            except asyncio.CancelledError:
-                # The loop already persisted the partial turn and emitted
-                # TurnFinished(ABORTED) before re-raising (core/agent_loop.py:570);
-                # this coroutine is the task's top, so there is nothing above
-                # to observe the cancellation.
-                pass
-            except Exception as exc:  # noqa: BLE001 — a bug must not hang the UI
-                _log.exception("turn runner failed outside the loop")
-                service.notify(
-                    "event",
-                    {
-                        "type": "turn.finished",
-                        "data": {
-                            "status": "error",
-                            "reason": f"{type(exc).__name__}: {exc}"[:300],
-                            "iterations": 0,
-                            "truncatedByLength": False,
-                            "handoff": "",
-                        },
-                    },
-                )
+            await world.loop.process_input(
+                session,
+                text,
+                on_delta=bridge.on_delta,
+                observer=bridge,
+                # offered only when there is something to offer, so loop
+                # doubles that predate r17/T5 stay callable for text turns
+                **({"images": tuple(images)} if images else {}),
+            )
 
-        future = service.spawn(run_turn())
-        state.turn_futures.add(future)
-        future.add_done_callback(state.turn_futures.discard)
+        turn_id = _launch_turn(run_turn)
         # ``rejected`` rides the response the client already awaits, so no new
         # IPC call and no new event type is needed to tell the user a paste did
         # not make it.
         return {"turnId": turn_id, "sessionId": session_id, "rejected": rejected}
+
+    def session_resume(params: dict[str, Any]) -> dict[str, Any]:
+        """Continue the interrupted turn (08); events reach the client through
+        the bridge, same as a prompted turn."""
+        session_id = str(params.get("id", "") or state.session_id)
+        session = state.session
+        if session is None:
+            raise ValueError("no session initialized")
+        if session_id != state.session_id:
+            # Same rule as session_prompt: running the *current* session under
+            # a foreign id would be silent data loss.
+            raise ValueError(f"session not loaded: {session_id}")
+
+        async def run_resumed() -> None:
+            await world.loop.resume_turn(
+                session,
+                on_delta=bridge.on_delta,
+                observer=bridge,
+            )
+
+        turn_id = _launch_turn(run_resumed)
+        return {"turnId": turn_id, "sessionId": session_id}
 
     def session_interrupt(params: dict[str, Any]) -> dict[str, Any]:
         # Two layers, both needed (ported from ui/textual_app.py::
@@ -872,6 +906,7 @@ def make_handlers(
         "session.list": session_list,
         "session.load": session_load,
         "session.prompt": session_prompt,
+        "session.resume": session_resume,
         "session.interrupt": session_interrupt,
         "session.command": session_command,
         "session.delete": session_delete,
