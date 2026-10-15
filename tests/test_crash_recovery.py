@@ -14,6 +14,7 @@ import pytest
 from ai_coding.ai.engine import ChatEngine
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
+from ai_coding.core.undo_store import UndoFileStore
 from ai_coding.domain.loop import StepResult
 from ai_coding.domain.message import ToolCallRef
 from ai_coding.domain.session import SessionData
@@ -581,3 +582,23 @@ async def test_resume_persists_the_note_before_the_turn_runs(tmp_path):
     await loop.resume_turn(session)
 
     assert engine.checked
+
+
+def test_sidecar_write_is_atomic_under_failure(tmp_path, monkeypatch):
+    """A write that dies mid-way must leave the previous generation intact --
+    never a truncated file that redo would restore as if whole (M2)."""
+    store = UndoFileStore(tmp_path / "undo")
+    store.save("s", {"f.txt": b"v1-bytes-0123456789"})
+
+    orig = Path.write_bytes
+
+    def flaky(self, data, *args, **kwargs):
+        chunk = data[: len(data) // 2] if isinstance(data, (bytes, bytearray)) else data
+        orig(self, bytes(chunk))
+        raise OSError("injected mid-write")
+
+    monkeypatch.setattr(Path, "write_bytes", flaky)
+    store.save("s", {"f.txt": b"v2-bytes-0123456789abcdef"})
+
+    assert (tmp_path / "undo" / "s" / "f.txt").read_bytes() == b"v1-bytes-0123456789"
+    assert store.load("s") == {"f.txt": b"v1-bytes-0123456789"}

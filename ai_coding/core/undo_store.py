@@ -13,7 +13,9 @@ conversation *is*, and small independent payloads get their own place.
 
 from __future__ import annotations
 
+import os
 import shutil
+import tempfile
 from pathlib import Path
 
 __all__ = ["UndoFileStore"]
@@ -48,15 +50,34 @@ class UndoFileStore:
 
         Best effort: undo has already happened, and failing to keep a copy for
         a later redo must not turn that into an error the user sees.
+
+        Each file lands atomically (M2): a crash mid-write must leave the
+        previous generation intact, never a truncated file that redo would
+        restore as if whole.  The tmp file lives in the store root -- the
+        session subdirectories are all ``load`` reads, so a leftover tmp is
+        invisible by construction (same shape as the pending-approval marker's
+        ``<id>.tmp``).
         """
+        self._root.mkdir(parents=True, exist_ok=True)
         for rel, data in files.items():
             target = self._resolve(session_id, rel)
             if target is None:
                 continue
+            tmp_name = ""
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(data)
+                with tempfile.NamedTemporaryFile(
+                    dir=self._root, prefix=".partial-", delete=False
+                ) as tmp:
+                    tmp_name = tmp.name
+                Path(tmp_name).write_bytes(data)
+                os.replace(tmp_name, target)
             except OSError:
+                if tmp_name:
+                    try:
+                        os.unlink(tmp_name)
+                    except OSError:
+                        pass
                 continue
 
     def load(self, session_id: str) -> dict[str, bytes]:
