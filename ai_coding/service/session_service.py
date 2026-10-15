@@ -163,7 +163,13 @@ class SessionService:
         # Resuming the first of several matches would silently open the wrong
         # conversation, so an ambiguous prefix is a miss.
         matches = self.resolve(session_id)
-        return matches[0] if len(matches) == 1 else None
+        if len(matches) != 1:
+            return None
+        # The rows ``resolve`` returns are the list view: message bodies are
+        # dropped (see ``list_sessions``).  Handing one out as a loaded session
+        # would let any later save silently wipe the history -- reload by full
+        # id so a prefix load is a real load.
+        return self.load(matches[0].session_id)
 
     def resolve(self, prefix: str) -> list[SessionData]:
         """Every saved session whose id starts with ``prefix``.
