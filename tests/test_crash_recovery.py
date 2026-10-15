@@ -602,3 +602,62 @@ def test_sidecar_write_is_atomic_under_failure(tmp_path, monkeypatch):
 
     assert (tmp_path / "undo" / "s" / "f.txt").read_bytes() == b"v1-bytes-0123456789"
     assert store.load("s") == {"f.txt": b"v1-bytes-0123456789"}
+
+
+@pytest.mark.asyncio
+async def test_redo_with_a_corrupt_staged_state_reports_nothing_to_redo(tmp_path):
+    """L4: a hand-tampered undoState must not break redo with a traceback --
+    it reports nothing to redo, like an empty stage."""
+    sessions = SessionService(root=tmp_path / "sessions")
+    loop = AgentLoop(_NoopEngine(), sessions, ToolRegistry(), workspace=str(tmp_path))
+    session = sessions.create()
+    session.undo_state = {
+        "removed": [{"role": "assistant", "content": None, "timestamp": "t"}],
+        "turns": 1,
+        "turnCount": 1,
+        "digests": [],
+    }
+    sessions.save(session)
+
+    report = await loop.redo_last_turn(session)
+
+    assert report["ok"] is False and report["reason"] == "nothing to redo"
+
+
+@pytest.mark.asyncio
+async def test_forget_redo_clears_the_staged_state_on_disk(tmp_path):
+    """L5: committing the revert must be durable, not memory-only -- a crash
+    before the next save must not resurrect a moved-past run."""
+    from ai_coding.core.undo_store import UndoFileStore
+
+    sessions = _RecordingSessions(root=tmp_path / "sessions")
+    loop = AgentLoop(_NoopEngine(), sessions, ToolRegistry(), workspace=str(tmp_path))
+    session = sessions.create()
+    session.undo_state = {"removed": [], "turns": 1, "turnCount": 1, "digests": []}
+    sessions.save(session)
+    UndoFileStore(tmp_path / ".ai-coding" / "undo").save(
+        session.session_id, {"f.txt": b"x"}
+    )
+    sessions.saves = 0
+
+    await loop._forget_redo(session)
+
+    assert sessions.saves == 1, "committing must cost exactly one save"
+    reloaded = SessionService(root=tmp_path / "sessions").load(session.session_id)
+    assert reloaded is not None and reloaded.undo_state is None
+    assert not (tmp_path / ".ai-coding" / "undo" / session.session_id).exists()
+
+
+@pytest.mark.asyncio
+async def test_forget_redo_without_staged_state_saves_nothing(tmp_path):
+    """The other half of L5: clean turns pay no save (save-rhythm discipline).
+    This pins the constraint, not the fix -- it is green before and after."""
+    sessions = _RecordingSessions(root=tmp_path / "sessions")
+    loop = AgentLoop(_NoopEngine(), sessions, ToolRegistry(), workspace=str(tmp_path))
+    session = sessions.create()
+    sessions.save(session)
+    sessions.saves = 0
+
+    await loop._forget_redo(session)
+
+    assert sessions.saves == 0

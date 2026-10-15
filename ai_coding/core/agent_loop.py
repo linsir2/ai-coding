@@ -1484,20 +1484,28 @@ class AgentLoop:
         staged commits the revert."  Without it, /redo after a fresh turn replays
         a stale tail on top of live history and rolls the worktree back under it.
         """
-        self._undo_tail.pop(session.session_id, None)
-        # r20/F2: the staged revert is one thing spread over three holders.  If
-        # a new turn cleared only the messages, the next /redo would still find a
-        # counter, a digest ring and a set of file contents to restore -- a
-        # baseline from a run the user has already committed by moving on.
-        self._undo_state.pop(session.session_id, None)
-        self._undo_files.pop(session.session_id, None)
-        self.last_undo.pop(session.session_id, None)
+        # r20/F2: the staged revert is one thing spread over three holders (plus
+        # one durable copy).  If a new turn cleared only the messages, the next
+        # /redo would still find a counter, a digest ring and file contents to
+        # restore -- a baseline from a run the user already moved past.
+        # L5: committing must be durable, not memory-only -- a crash before the
+        # next save would otherwise resurrect that moved-past run on restart.
+        # The save runs only when something was actually staged, so clean turns
+        # pay nothing (the per-turn save rhythm stays untouched).
+        had_staged = (
+            self._undo_tail.pop(session.session_id, None) is not None
+            or self._undo_state.pop(session.session_id, None) is not None
+            or self._undo_files.pop(session.session_id, None) is not None
+            or self.last_undo.pop(session.session_id, None) is not None
+            or session.undo_state is not None
+        )
         # P4: the staged revert is durable now, so committing it must clear the
         # session copy and the sidecar too -- otherwise a later /redo would
-        # resurrect a run the user already moved past.  The next save carries
-        # the cleared value.
+        # resurrect a run the user already moved past.
         session.undo_state = None
         self._undo_files_store.clear(session.session_id)
+        if had_staged:
+            self.closer.save(session)
         if self.snapshots is not None:
             try:
                 await self.snapshots.forget(f"{session.session_id}/redo")
@@ -1535,7 +1543,15 @@ class AgentLoop:
         sid = session.session_id
         if self._undo_tail.get(sid) is not None:
             return
-        staged = session.staged_undo()
+        try:
+            staged = session.staged_undo()
+        except Exception:  # noqa: BLE001 -- L4: a hand-tampered undoState must
+            # not break redo with a traceback.  Nothing staged is recoverable
+            # from a corrupt record, so this is nothing to redo -- same verdict
+            # as an empty stage, debug-logged like the memory harvest's
+            # best-effort failures.
+            _log.debug("staged undo unreadable", exc_info=True)
+            return
         if staged is None:
             return
         self._undo_tail[sid] = list(staged.removed)
