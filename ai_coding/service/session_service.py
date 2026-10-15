@@ -36,6 +36,18 @@ def _access_rank(value: Any) -> tuple[int, str]:
     return (1, "")
 
 
+def _check_id(session_id: str) -> None:
+    """Refuse ids that could escape the sessions directory (L3).
+
+    Session ids are minted hex (or short test words); nothing legitimate ever
+    carries a separator.  Loud, because a traversal attempt must never look
+    like an ordinary miss.  Empty strings pass through untouched to preserve
+    the current ``delete("") is False`` / ``load("") is None`` behaviour.
+    """
+    if any(part in session_id for part in ("/", "\\", "\x00")) or ".." in session_id:
+        raise ValueError(f"invalid session id: {session_id!r}")
+
+
 #: Subdirectory holding the pending-approval markers (P3).  Separate so the
 #: ``*.json`` session scan cannot read one as a session.
 _PENDING_DIR = "pending"
@@ -84,6 +96,7 @@ class SessionService:
         self.root = Path(root)
 
     def _path(self, session_id: str) -> Path:
+        _check_id(session_id)
         return self.root / f"{session_id}.json"
 
     # ---- pending-approval marker (P3) --------------------------------------
@@ -97,6 +110,7 @@ class SessionService:
     # cadence every other test pins does not change.
 
     def _pending_path(self, session_id: str) -> Path:
+        _check_id(session_id)
         # Its own directory, not ``<id>.pending.json`` beside the sessions: the
         # session scan globs ``*.json``, so a sibling marker was listed by
         # ``list_sessions`` as a phantom empty session (caught by real-chain
@@ -165,11 +179,12 @@ class SessionService:
         matches = self.resolve(session_id)
         if len(matches) != 1:
             return None
-        # The rows ``resolve`` returns are the list view: message bodies are
-        # dropped (see ``list_sessions``).  Handing one out as a loaded session
-        # would let any later save silently wipe the history -- reload by full
-        # id so a prefix load is a real load.
-        return self.load(matches[0].session_id)
+        # L1: ``resolve`` rows are the message-gutted list view; a file whose
+        # name and sessionId field disagree would resolve to itself forever.
+        # Reloading by a *different* id terminates (exact hit or clean miss);
+        # a self-match is an honest miss, not a session.
+        matched = matches[0].session_id
+        return self.load(matched) if matched != session_id else None
 
     def resolve(self, prefix: str) -> list[SessionData]:
         """Every saved session whose id starts with ``prefix``.

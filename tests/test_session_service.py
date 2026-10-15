@@ -304,3 +304,28 @@ def test_list_sessions_sorts_newest_first(tmp_path):
     assert [s.session_id for s in svc.list_sessions()] == [
         new.session_id, old.session_id, timeless.session_id
     ]
+
+
+def test_load_with_mismatched_filename_and_field_id_returns_none(tmp_path):
+    """L1: a file whose name and sessionId field disagree must be an honest
+    miss, not a load resolving itself forever."""
+    root = tmp_path / "sessions"
+    root.mkdir(parents=True)
+    (root / "aa.json").write_text(
+        '{"sessionId": "bb", "title": "", "createdTime": "",'
+        ' "lastAccessTime": "", "messages": []}',
+        encoding="utf-8",
+    )
+    assert _svc(root).load("bb") is None
+
+
+def test_hostile_session_ids_are_refused_loudly(tmp_path):
+    """L3: path separators must never reach the filesystem -- a loud error,
+    not a miss that a caller could mistake for absent."""
+    import pytest
+
+    svc = _svc(tmp_path / "sessions")
+    with pytest.raises(ValueError):
+        svc.load("../../x")
+    with pytest.raises(ValueError):
+        svc.delete("../../x")

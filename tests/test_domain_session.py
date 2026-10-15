@@ -224,3 +224,16 @@ def test_session_recovered_interrupted_not_persisted():
     s = SessionData("s1", "title", "c", "l")
     s.recovered_interrupted = True
     assert "recoveredInterrupted" not in s.to_dict()
+
+
+def test_open_turn_rejects_bool():
+    """L2: JSON true is an int instance in Python, but it is not a turn."""
+    data = {
+        "sessionId": "s",
+        "title": "",
+        "createdTime": "",
+        "lastAccessTime": "",
+        "messages": [],
+        "openTurn": True,
+    }
+    assert SessionData.from_dict(data).open_turn is None

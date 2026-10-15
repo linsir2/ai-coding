@@ -514,7 +514,9 @@ class SessionData:
             last_compacted_turn=int(data.get("lastCompactedTurn", 0) or 0),
             acceptance=acceptance,
             step_deliveries=step_deliveries,
-            open_turn=int(raw_open_turn) if isinstance(raw_open_turn, int) else None,
+            open_turn=int(raw_open_turn)
+            if isinstance(raw_open_turn, int) and not isinstance(raw_open_turn, bool)
+            else None,
             undo_state=dict(raw_undo) if isinstance(raw_undo, dict) else None,
         )
 
