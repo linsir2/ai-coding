@@ -895,6 +895,13 @@ class AgentLoop:
                 session.task = TaskState(
                     goal=anchor.content if anchor and anchor.content else ""
                 )
+        elif append_user and not session.task.items:
+            # The bare goal tracks the turn's own instruction.  Measured
+            # (session d68080eb): the opening "你好" froze here and rode every
+            # later request's <task-state> tail block; after a long tool chain
+            # the model anchored on that tail and answered the greeting again.
+            # A list with items keeps its goal -- it names what the items are for.
+            session.task.goal = user_input
         task = session.task
         # C3: the continuation allowance is per user turn — a new message
         # starts with a fresh budget, not the previous turn's leftovers.

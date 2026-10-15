@@ -22,6 +22,7 @@ from ai_coding.core.events import (
     ToolStarted,
     TurnFinished,
 )
+from ai_coding.core.turn_policy import TASK_MESSAGE_LEAD
 from ai_coding.domain.loop import StepResult, TurnStatus
 from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolResult
 from ai_coding.domain.session import SessionData
@@ -1238,3 +1239,51 @@ async def test_two_empty_steps_keep_the_failure_semantics(tmp_path):
     assert loop.last_outcome is not None
     assert loop.last_outcome.status is TurnStatus.ERROR
     assert "没有回答" in loop.last_outcome.reason
+
+
+def _task_blocks(engine, index: int = -1) -> list[str]:
+    return [
+        message.content or ""
+        for message in engine.requests[index]["messages"]
+        if TASK_MESSAGE_LEAD in (message.content or "")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_bare_goal_tracks_the_current_turn_not_the_opening_message(tmp_path):
+    """Measured (session d68080eb, 2026-10-15): the opening message "你好"
+    froze ``TaskState.goal``, every later request's <task-state> tail block kept
+    advertising it, and after a long tool chain the model anchored on the tail
+    and answered the greeting again.  A bare goal (no items) must refresh to
+    the turn's own instruction."""
+    engine = ScriptedEngine([_text("你好呀"), _text("这是回答")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+    session = sessions.create()
+
+    await loop.process_input(session, "你好")
+    await loop.process_input(session, "你的编排层怎么设计的")
+
+    first, last = _task_blocks(engine, 0), _task_blocks(engine)
+    assert "目标: 你好" in first[0]
+    assert len(last) == 1
+    assert "目标: 你的编排层怎么设计的" in last[0]
+    assert "目标: 你好" not in last[0]
+
+
+@pytest.mark.asyncio
+async def test_a_goal_with_items_survives_a_follow_up_message(tmp_path):
+    """A real list names what its items are for: a follow-up question while a
+    plan is on the books must not rewrite the goal."""
+    engine = ScriptedEngine([_text("ok")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+    session = sessions.create()
+    session.task = TaskState(goal="让 make test 通过")
+    session.task.add("修失败用例")
+
+    await loop.process_input(session, "顺便问下，覆盖率怎么算的")
+
+    blocks = _task_blocks(engine)
+    assert "目标: 让 make test 通过" in blocks[0]
+    assert "覆盖率" not in blocks[0]
