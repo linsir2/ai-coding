@@ -114,6 +114,7 @@ def _build_loop(
     guards: Any | None = None,
     hooks: Any | None = None,
     steering: Any | None = None,
+    notices: Any | None = None,
     cancel: Any | None = None,
     # M2: per-step MCP catalog text; ``None`` in paths without an MCP manager
     # (the bare CLI), where there is nothing to catalog.
@@ -202,6 +203,7 @@ def _build_loop(
         guards=guards if guards is not None else build_guards(app_cfg),
         hooks=hooks,
         steering=steering,
+        notices=notices,
         cancel=cancel,
     )
 
@@ -329,6 +331,7 @@ def _build_tool_registry(
     *,
     user_prompt: Any | None = None,
     base_instructions: str = "",
+    notices: Any | None = None,
 ) -> Any:
     """Build the domain tool registry the self-owned loop dispatches through."""
     from ai_coding.tools.builder import build_tool_registry
@@ -340,6 +343,7 @@ def _build_tool_registry(
         include_subagent=True,
         user_prompt=user_prompt,
         base_instructions=base_instructions,
+        notices=notices,
     )
 
 

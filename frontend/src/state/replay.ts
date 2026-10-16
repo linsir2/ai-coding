@@ -37,6 +37,14 @@ const CHECKPOINT_MARK = "[以下为早期对话摘要]"
 /** steering 前端化: written by the loop into history (agent_loop::_take_steering). */
 const STEERING_MARK = "[steering] "
 
+/**
+ * P0-2: a fact the harness learned about the run (agent_loop::_take_notices) --
+ * a background sub-agent settling. It is stored user-role because that is how
+ * every harness message reaches the model, and it is *not* the operator's
+ * words, so it replays as a muted notice instead of a user bubble.
+ */
+const NOTICE_MARK = "[notice] "
+
 /** Drop the ``<tool_output>`` wrapper and its machine ``<data>`` block. */
 export function stripEnvelope(content: string): string {
   const kept: string[] = []
@@ -75,6 +83,24 @@ function parseArguments(argumentsText: string): Record<string, unknown> {
 export function messagesToState(messages: WireMessage[]): SessionState {
   const out: ChatMessage[] = []
   for (const message of messages) {
+    if (
+      message.role === "user" &&
+      (message.content ?? "").startsWith(NOTICE_MARK)
+    ) {
+      // P0-2: the harness wrote this about the run; it belongs beside the
+      // answer, not in the operator's column.
+      out.push({
+        role: "assistant",
+        parts: [
+          {
+            kind: "notice",
+            tone: "muted",
+            text: (message.content ?? "").slice(NOTICE_MARK.length),
+          },
+        ],
+      })
+      continue
+    }
     if (message.role === "user" && !(message.content ?? "").startsWith(CHECKPOINT_MARK)) {
       // steering 前端化: "[steering] " is the harness marker the model reads;
       // the operator typed the rest, so a replay shows their own words.

@@ -294,6 +294,30 @@ describe("[steering] replay (steering 前端化批次)", () => {
     })
   })
 
+  test("a background fact replays as a notice, never as the user's words", () => {
+    // P0-2: "[notice] " is the harness speaking ABOUT the run. The steering
+    // branch below would render it as something the operator typed, which is
+    // a lie in the permanent record -- the same reason it strips that marker.
+    const state = messagesToState([
+      { role: "user", content: "[notice] [子任务完成] probe（abc123）：跑完了" },
+      { role: "assistant", content: "收到" },
+    ])
+    // Replay folds everything after a user message into one assistant message,
+    // so the fact and the answer that follows share it -- which is the point:
+    // it renders on the assistant's side of the transcript.
+    expect(state.messages).toHaveLength(1)
+    const parts = state.messages[0]?.parts ?? []
+    expect(state.messages[0]?.role).toBe("assistant")
+    expect(parts[0]).toEqual({
+      kind: "notice",
+      tone: "muted",
+      text: "[子任务完成] probe（abc123）：跑完了",
+    })
+    expect(parts.some((part) => part.kind === "text" && String(part.text).includes("收到"))).toBe(
+      true,
+    )
+  })
+
   test("text that merely starts with a bracket is untouched", () => {
     const state = messagesToState([{ role: "user", content: "[note] 保持" }])
     expect(state.messages[0]?.parts).toEqual([

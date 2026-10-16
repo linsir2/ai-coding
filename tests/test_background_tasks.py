@@ -95,6 +95,63 @@ async def test_completion_lands_as_event_with_summary():
 
 
 @pytest.mark.asyncio
+async def test_a_completion_is_queued_where_the_model_can_read_it():
+    """P0-2: the event reaches the operator, but the model had no sink at all --
+    the tool result tells it "check /tasks", which is a human command.  The same
+    settlement therefore puts a line on the harness lane."""
+    from ai_coding.core.steering import SteeringQueue
+
+    notices = SteeringQueue()
+    runner = _runner(_Engine(text="all green"), notices=notices)
+    run_id = runner.spawn_background("do it", name="probe", emit=lambda _event: None)
+    for _ in range(200):
+        if runner.task_list() and runner.task_list()[0].status != "running":
+            break
+        await asyncio.sleep(0.02)
+
+    lines = notices.drain()
+    assert len(lines) == 1
+    line = lines[0]
+    assert "[子任务完成]" in line
+    assert "probe" in line
+    assert run_id[:12] in line
+    assert "all green" in line
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_before_start_run_is_announced_too():
+    """``_reap`` is the other settlement path (a task cancelled before its first
+    step never runs the supervised body): the model must learn about it on the
+    same lane, or it waits forever for a run that will never speak."""
+    from ai_coding.core.steering import SteeringQueue
+
+    notices = SteeringQueue()
+    runner = _runner(_Engine(hang=True), notices=notices)
+    run_id = runner.spawn_background("do it", name="probe", emit=lambda _event: None)
+    assert runner.cancel(run_id) is True
+    for _ in range(200):
+        if notices.pending:
+            break
+        await asyncio.sleep(0.02)
+
+    assert "[子任务" in notices.drain()[0]
+
+
+@pytest.mark.asyncio
+async def test_no_notice_lane_is_not_an_error():
+    """The CLI and the tests build runners without a world: the queue is
+    optional, and a completion must still settle."""
+    runner = _runner(_Engine(text="all green"))
+    runner.spawn_background("do it", name="probe", emit=lambda _event: None)
+    for _ in range(200):
+        if runner.task_list() and runner.task_list()[0].status != "running":
+            break
+        await asyncio.sleep(0.02)
+
+    assert runner.task_list()[0].status == "completed"
+
+
+@pytest.mark.asyncio
 async def test_child_spend_is_recorded_on_the_row():
     seen: list = []
     usage = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}

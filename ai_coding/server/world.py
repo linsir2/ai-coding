@@ -37,6 +37,7 @@ class AppWorld:
     skills: str | None
     cancel: asyncio.Event
     steering: Any
+    notices: Any
     #: The WARN-tier approval callback; the IPC layer installs its provider
     # (handlers.py::_install_providers) so the panel can answer it (M5), and
     approval: Any
@@ -129,9 +130,15 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     skill_registry = SkillRegistry(roots)
     for name, scope in skill_registry.shadowed():
         _log.warning("skill %r at %s is shadowed (project scope wins)", name, scope)
+    # P0-2: the harness lane, built before the registry because the sub-agent
+    # runner is constructed *inside* it -- a queue nobody holds is a queue
+    # nobody writes to, which is how a background completion used to reach the
+    # operator and nobody else.
+    notices = SteeringQueue()
     registry = _build_tool_registry(
         app_cfg, workspace, skill_registry,
         user_prompt=user_prompt, base_instructions=BASE_INSTRUCTIONS,
+        notices=notices,
     )
 
     steering = SteeringQueue()
@@ -173,6 +180,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         guards=build_guards(app_cfg),
         hooks=_make_hooks(app_cfg, str(paths.workspace)),
         steering=steering,
+        notices=notices,
         cancel=cancel,
     )
     pending = find_armed_session(sessions)
@@ -190,6 +198,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         skills=skills,
         cancel=cancel,
         steering=steering,
+        notices=notices,
         approval=approval,
         user_prompt=user_prompt,
         pending_resume=pending,

@@ -23,6 +23,7 @@ def build_subagent_runner(
     skills: SkillRegistry | None,
     *,
     base_instructions: str = "",
+    notices: Any | None = None,
 ) -> Any:
     """Build a :class:`SubAgentRunner` bound to the given workspace.
 
@@ -58,6 +59,8 @@ def build_subagent_runner(
         workspace=main_ws,
         # R7e-4: a task_only child gets this instead of the parent's prompt.
         base_instructions=base_instructions,
+        # P0-2: the lane a settled background run uses to reach the model.
+        notices=notices,
     )
 
 
@@ -69,6 +72,7 @@ def build_tool_registry(
     include_subagent: bool = True,
     user_prompt: Any | None = None,
     base_instructions: str = "",
+    notices: Any | None = None,
 ) -> Any:
     """Build the *domain* tool registry used by the self-owned loop (R1a-4).
 
@@ -80,7 +84,7 @@ def build_tool_registry(
     means there is nobody to ask, so the tool list must not pretend otherwise.
     """
     registry, _gate = _assemble_registry(
-        app_cfg, workspace, skills, include_subagent, user_prompt, base_instructions
+        app_cfg, workspace, skills, include_subagent, user_prompt, base_instructions, notices
     )
     return registry
 
@@ -92,6 +96,7 @@ def _assemble_registry(
     include_subagent: bool,
     user_prompt: Any | None = None,
     base_instructions: str = "",
+    notices: Any | None = None,
 ) -> tuple[Any, Any]:
     """Create the sandbox/gate/registry triple shared by both builders."""
 
@@ -184,7 +189,11 @@ def _assemble_registry(
     if include_subagent:
         # Real sub-agent delegation, isolated in a git worktree when enabled.
         runner = build_subagent_runner(
-            app_cfg, workspace, skills, base_instructions=base_instructions
+            app_cfg,
+            workspace,
+            skills,
+            base_instructions=base_instructions,
+            notices=notices,
         )
         manager = WorktreeManager(workspace)
         isolate = bool(getattr(app_cfg.ai, "subagent_worktree_isolation", True))

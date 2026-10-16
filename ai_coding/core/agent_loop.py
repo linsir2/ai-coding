@@ -241,6 +241,9 @@ class AgentLoop:
         guards: GuardChain | None = None,
         hooks: Any | None = None,
         steering: Any | None = None,
+        # P0-2: the harness lane -- a background run settles long after the turn
+        # that started it, and its event reaches the operator but not the model.
+        notices: Any | None = None,
         cancel: asyncio.Event | None = None,
         snapshots: Any | None = None,
     ) -> None:
@@ -306,6 +309,9 @@ class AgentLoop:
         # R7e-2: where lines typed mid-turn wait.  None = today's behaviour, and the
         # loop then never looks at a queue at all.
         self.steering = steering
+        # P0-2: same queue shape, different speaker.  None = today's behaviour,
+        # and the loop then never looks at it.
+        self.notices = notices
         # R8c: what the Esc key sets.  The loop clears it before every batch so one
         # key press drops one batch, never the rest of the turn (D-7).
         self.cancel = cancel
@@ -689,6 +695,7 @@ class AgentLoop:
 
                 books.note_iteration(index)
                 self._take_steering(session, books, index)
+                self._take_notices(session, index)
                 self._emit(
                     IterationStarted(
                         index=index, max_iterations=self.policy.config.max_iterations
@@ -1032,6 +1039,29 @@ class AgentLoop:
             hook_context=hook_context,
             deadline=Deadline.after(turn_timeout) if turn_timeout > 0 else None,
         )
+
+    def _take_notices(self, session: SessionData, index: int) -> None:
+        """Absorb what the harness learned about this run, at the same boundary.
+
+        The sibling of ``_take_steering`` with three deliberate differences: the
+        marker is ``[notice]`` (the replay renders a ``[steering]`` line as the
+        operator's own words, and a settled background task is not), the stall
+        ladder is left alone (a finished task is not user intervention), and no
+        event is emitted (the operator already has ``BackgroundTaskDone``, and a
+        second notice would say the same thing twice).
+
+        The lines are persisted like every other harness message, so a notice
+        that lands while no turn is running waits for the next turn rather than
+        being lost.
+        """
+        if self.notices is None:
+            return
+        lines = self.notices.drain()
+        if not lines:
+            return
+        for line in lines:
+            session.add_message(user_message(f"[notice] {line}", now_utc(), synthetic=True))
+        self.closer.checkpoint(session, index)
 
     def _take_steering(self, session: SessionData, books: TurnBooks, index: int) -> None:
         """Absorb whatever the user typed, right before this request is assembled.

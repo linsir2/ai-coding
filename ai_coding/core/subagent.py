@@ -33,6 +33,7 @@ from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.events import BackgroundTaskDone
 from ai_coding.core.guard import build_guards
 from ai_coding.core.observers import ScopedObserver
+from ai_coding.core.steering import SteeringQueue
 from ai_coding.core.turn_report import report_degraded
 from ai_coding.core.worktree import WorktreeError
 from ai_coding.domain.message import ChatMessage
@@ -113,6 +114,7 @@ class SubAgentRunner:
         observer: Any | None = None,
         base_instructions: str = "",
         skills: SkillRegistry | None = None,
+        notices: SteeringQueue | None = None,
     ) -> None:
         self._app_config = app_config
         self._skills = skills
@@ -139,6 +141,11 @@ class SubAgentRunner:
         self._observer = observer
         # R7e-4: what a ``task_only`` child gets instead of the parent's prompt.
         self._base_instructions = str(base_instructions or "")
+        # P0-2: where a completion goes so the *model* can read it.  The event
+        # already reaches the operator; the tool result points at ``/tasks``,
+        # which is a human command, so without this lane a background run is a
+        # one-way door for the model that started it.
+        self._notices = notices
         self._max_concurrent_n = max(1, int(max_concurrent))
         self._semaphore = asyncio.Semaphore(self._max_concurrent_n)
         # R1-2: background runs tracked across turns: run id -> row, plus the
@@ -389,6 +396,9 @@ class SubAgentRunner:
         summary = (result.conclusion or result.error or "").strip().replace("\n", " ")
         if len(summary) > _SUMMARY_TAIL:
             summary = summary[:_SUMMARY_TAIL] + "…"
+        self._announce_to_model(
+            run_id, row.name, result.status, summary, result.ledger_path
+        )
         try:
             emit(BackgroundTaskDone(
                 run_id=run_id, name=row.name, status=result.status,
@@ -401,6 +411,22 @@ class SubAgentRunner:
             ))
         except Exception:  # noqa: BLE001 — observation must not break settlement
             _log.debug("background announce failed for %s", run_id, exc_info=True)
+
+    def _announce_to_model(
+        self, run_id: str, name: str, status: str, summary: str, ledger_path: str | None
+    ) -> None:
+        """Hand the settlement to the parent's loop (P0-2).
+
+        Separate from the event on purpose: the event is an observation the
+        operator may miss, and a failed ``put`` must never disturb a settlement
+        that has already been recorded on the row.
+        """
+        if self._notices is None:
+            return
+        try:
+            self._notices.put(_notice_text(run_id, name, status, summary, ledger_path))
+        except Exception:  # noqa: BLE001 — same reason as the event above
+            _log.debug("background notice failed for %s", run_id, exc_info=True)
 
     def _reap(self, run_id: str, _task: asyncio.Task[None] | None = None) -> None:
         """Settle a row whose task died without going through ``_finish``.
@@ -424,6 +450,9 @@ class SubAgentRunner:
         emit, origin_session, name = announce
         if emit is None:
             return
+        self._announce_to_model(
+            run_id, name, "cancelled", "cancelled before start", None
+        )
         try:
             emit(BackgroundTaskDone(
                 run_id=run_id, name=name, status="cancelled",
@@ -762,6 +791,37 @@ def _enforce_trace_limit(trace_file: Path) -> None:
         # Keep the last N entries
         kept = entries[-MAX_TRACE_ENTRIES:]
         trace_file.write_text("\n---\n".join(kept) + "\n", encoding="utf-8")
+
+
+#: The four settlements ``BackgroundTaskDone`` can carry, in the operator's
+#: language rather than the event's enum value.
+_NOTICE_STATUS = {
+    "completed": "完成",
+    "timeout": "超时",
+    "error": "失败",
+    "cancelled": "已取消",
+}
+
+
+def _notice_text(
+    run_id: str, name: str, status: str, summary: str, ledger_path: str | None
+) -> str:
+    """One harness line for a background run that settled.
+
+    It is written for the model's next request, and it must survive
+    ``SteeringQueue.put``'s two rules: never empty, never starting with ``/``
+    (a command is the caller's to place).  A fixed marker prefix buys both, and
+    the ledger pointer is what makes a 200-character summary enough -- the file
+    is inside the workspace, so the model can read the whole packet.
+    """
+    word = _NOTICE_STATUS.get(status, status)
+    line = f"[子任务{word}] {name}（{run_id[:12]}）"
+    body = " ".join(str(summary or "").split())
+    if body:
+        line += f"：{body}"
+    if ledger_path:
+        line += f" · 完整回包 {ledger_path}"
+    return line
 
 
 _UNCERTAINTY_PROTOCOL = (
