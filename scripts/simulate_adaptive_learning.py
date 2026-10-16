@@ -9,7 +9,6 @@ from __future__ import annotations
 import random
 import sys
 import tempfile
-from collections import defaultdict
 from pathlib import Path
 
 # Add project root to path

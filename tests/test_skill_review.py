@@ -568,10 +568,15 @@ def test_rejecting_a_pending_skill_removes_it(tmp_path):
 def test_pending_skills_can_be_listed_with_their_reason(tmp_path):
     from ai_coding.core.skill_review import list_pending, stage_skill
 
-    stage_skill(tmp_path, "one", "---\nname: one\ndescription: d\n---\nb\n", reason="因为重复出现三次")
+    stage_skill(
+        tmp_path,
+        "one",
+        "---\nname: one\ndescription: d\n---\nb\n",
+        reason="因为重复出现三次"
+    )
     stage_skill(tmp_path, "two", "---\nname: two\ndescription: d\n---\nb\n", reason="因为踩坑")
 
-    pending = {name: reason for name, reason in list_pending(tmp_path)}
+    pending = dict(list_pending(tmp_path))
 
     assert set(pending) == {"one", "two"}
     assert "踩坑" in pending["two"]

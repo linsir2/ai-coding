@@ -250,7 +250,9 @@ def test_the_merged_prompt_names_both_halves_and_the_merge_rules():
     helpers._chat = fake_chat
     try:
         summarize = build_summarizer(object())
-        asyncio.run(summarize("<previous-checkpoint>\n旧结论\n</previous-checkpoint>", previous="旧结论"))
+        asyncio.run(
+            summarize("<previous-checkpoint>\n旧结论\n</previous-checkpoint>", previous="旧结论")
+        )
     finally:
         helpers._chat = original
 

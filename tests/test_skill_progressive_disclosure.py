@@ -100,7 +100,9 @@ class TestCatalogTextWithTriggers:
         text = build_catalog(reg.all())
         lines = text.split("\n")
         # Find the with-triggers section
-        with_triggers_idx = next(i for i, l in enumerate(lines) if "with-triggers" in l)
+        with_triggers_idx = next(
+            i for i, line in enumerate(lines) if "with-triggers" in line
+        )
         # Next line should contain "Triggers:"
         assert "Triggers:" in lines[with_triggers_idx + 1]
 
@@ -253,7 +255,6 @@ class TestSkillToolLoadTracking:
 
     def test_load_callback_called(self, tmp_path):
         _write_skill(tmp_path, "test-skill", "name: test-skill\ndescription: test\n")
-        reg = SkillRegistry(tmp_path)
         loaded_names = []
 
         # Simulate what SkillTool does

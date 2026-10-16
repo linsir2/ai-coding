@@ -205,7 +205,9 @@ def test_a_merger_still_recognises_a_note_written_before_this_change():
     semantics."""
     legacy = _note(PREAMBLE + GOOD)
 
-    checkpoint, rest = split_checkpoint([legacy, ChatMessage(role="user", content="之后的", timestamp="")])
+    checkpoint, rest = split_checkpoint(
+        [legacy, ChatMessage(role="user", content="之后的", timestamp="")]
+    )
 
     assert checkpoint == GOOD
     assert len(rest) == 1

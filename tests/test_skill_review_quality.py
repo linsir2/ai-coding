@@ -36,19 +36,70 @@ def _sandbox_workaround_conversation() -> list[ChatMessage]:
     return [
         ChatMessage(role="user", content="创建 hotel 项目的 database.py 文件", timestamp="t1"),
         ChatMessage(role="assistant", content="我来创建 database.py", timestamp="t2"),
-        ChatMessage(role="tool", content="Error: path resolves outside workspace", timestamp="t3", tool_call_id="c1"),
-        ChatMessage(role="assistant", content="write 失败了，让我试试 read 确认路径", timestamp="t4"),
-        ChatMessage(role="tool", content="Error: path resolves outside workspace", timestamp="t5", tool_call_id="c2"),
-        ChatMessage(role="assistant", content="read 也不行。让我用 bash heredoc 来写", timestamp="t6"),
-        ChatMessage(role="tool", content="File created successfully via heredoc", timestamp="t7", tool_call_id="c3"),
-        ChatMessage(role="assistant", content="database.py 创建成功。接下来创建 models.py", timestamp="t8"),
-        ChatMessage(role="tool", content="Error: path resolves outside workspace", timestamp="t9", tool_call_id="c4"),
+        ChatMessage(
+            role="tool",
+            content="Error: path resolves outside workspace",
+            timestamp="t3",
+            tool_call_id="c1"
+        ),
+        ChatMessage(
+            role="assistant",
+            content="write 失败了，让我试试 read 确认路径",
+            timestamp="t4"
+        ),
+        ChatMessage(
+            role="tool",
+            content="Error: path resolves outside workspace",
+            timestamp="t5",
+            tool_call_id="c2"
+        ),
+        ChatMessage(
+            role="assistant",
+            content="read 也不行。让我用 bash heredoc 来写",
+            timestamp="t6"
+        ),
+        ChatMessage(
+            role="tool",
+            content="File created successfully via heredoc",
+            timestamp="t7",
+            tool_call_id="c3"
+        ),
+        ChatMessage(
+            role="assistant",
+            content="database.py 创建成功。接下来创建 models.py",
+            timestamp="t8"
+        ),
+        ChatMessage(
+            role="tool",
+            content="Error: path resolves outside workspace",
+            timestamp="t9",
+            tool_call_id="c4"
+        ),
         ChatMessage(role="assistant", content="write 又失败了，继续用 heredoc", timestamp="t10"),
-        ChatMessage(role="tool", content="models.py created via heredoc", timestamp="t11", tool_call_id="c5"),
-        ChatMessage(role="assistant", content="models.py 创建成功。继续创建 schemas.py", timestamp="t12"),
-        ChatMessage(role="tool", content="Error: path resolves outside workspace", timestamp="t13", tool_call_id="c6"),
+        ChatMessage(
+            role="tool",
+            content="models.py created via heredoc",
+            timestamp="t11",
+            tool_call_id="c5"
+        ),
+        ChatMessage(
+            role="assistant",
+            content="models.py 创建成功。继续创建 schemas.py",
+            timestamp="t12"
+        ),
+        ChatMessage(
+            role="tool",
+            content="Error: path resolves outside workspace",
+            timestamp="t13",
+            tool_call_id="c6"
+        ),
         ChatMessage(role="assistant", content="再次用 heredoc 写 schemas.py", timestamp="t14"),
-        ChatMessage(role="tool", content="schemas.py created via heredoc", timestamp="t15", tool_call_id="c7"),
+        ChatMessage(
+            role="tool",
+            content="schemas.py created via heredoc",
+            timestamp="t15",
+            tool_call_id="c7"
+        ),
         ChatMessage(role="assistant", content="所有模型文件创建完成", timestamp="t16"),
     ]
 
@@ -60,17 +111,52 @@ def _task_template_conversation() -> list[ChatMessage]:
     burning 40.9% of the session's total tokens.
     """
     return [
-        ChatMessage(role="user", content="Create a detailed implementation plan for a hotel management system, then start implementing", timestamp="t1"),
-        ChatMessage(role="assistant", content="I'll create a 12-step plan and start implementing", timestamp="t2"),
-        ChatMessage(role="tool", content="todo_write: 12 items created", timestamp="t3", tool_call_id="c1"),
-        ChatMessage(role="assistant", content="Step 1: Create project skeleton and venv", timestamp="t4"),
-        ChatMessage(role="tool", content="mkdir -p hotel/app && python -m venv hotel/.venv", timestamp="t5", tool_call_id="c2"),
+        ChatMessage(
+            role="user",
+            content="Create a detailed implementation plan for a hotel management "
+            "system, then start implementing",
+            timestamp="t1",
+        ),
+        ChatMessage(
+            role="assistant",
+            content="I'll create a 12-step plan and start implementing",
+            timestamp="t2"
+        ),
+        ChatMessage(
+            role="tool",
+            content="todo_write: 12 items created",
+            timestamp="t3",
+            tool_call_id="c1"
+        ),
+        ChatMessage(
+            role="assistant",
+            content="Step 1: Create project skeleton and venv",
+            timestamp="t4"
+        ),
+        ChatMessage(
+            role="tool",
+            content="mkdir -p hotel/app && python -m venv hotel/.venv",
+            timestamp="t5",
+            tool_call_id="c2"
+        ),
         ChatMessage(role="tool", content="Created .venv", timestamp="t6", tool_call_id="c3"),
-        ChatMessage(role="assistant", content="Step 2: Create database.py with SQLite schema", timestamp="t7"),
+        ChatMessage(
+            role="assistant",
+            content="Step 2: Create database.py with SQLite schema",
+            timestamp="t7"
+        ),
         ChatMessage(role="tool", content="database.py created", timestamp="t8", tool_call_id="c4"),
-        ChatMessage(role="assistant", content="Step 3: Create models.py with Pydantic models", timestamp="t9"),
+        ChatMessage(
+            role="assistant",
+            content="Step 3: Create models.py with Pydantic models",
+            timestamp="t9"
+        ),
         ChatMessage(role="tool", content="models.py created", timestamp="t10", tool_call_id="c5"),
-        ChatMessage(role="assistant", content="Steps 1-3 done. Budget running low, let me quickly finish...", timestamp="t11"),
+        ChatMessage(
+            role="assistant",
+            content="Steps 1-3 done. Budget running low, let me quickly finish...",
+            timestamp="t11"
+        ),
     ]
 
 
@@ -81,13 +167,44 @@ def _step_by_step_conversation() -> list[ChatMessage]:
     The model re-reads database.py 5-7 times across turns.
     """
     return [
-        ChatMessage(role="user", content="只做这一步：创建 schemas.py（这是计划步骤 4，做完停下等验收）", timestamp="t1"),
-        ChatMessage(role="assistant", content="Let me first check the existing models to understand the schema", timestamp="t2"),
-        ChatMessage(role="tool", content="from database.py: Base = declarative_base()", timestamp="t3", tool_call_id="c1"),
-        ChatMessage(role="tool", content="from models.py: class Room(Base): ...", timestamp="t4", tool_call_id="c2"),
-        ChatMessage(role="assistant", content="Now I'll create schemas.py with Pydantic models", timestamp="t5"),
-        ChatMessage(role="tool", content="schemas.py created with RoomSchema, GuestSchema, BookingSchema", timestamp="t6", tool_call_id="c3"),
-        ChatMessage(role="assistant", content="schemas.py 创建完成，包含 3 个 Pydantic schema", timestamp="t7"),
+        ChatMessage(
+            role="user",
+            content="只做这一步：创建 schemas.py（这是计划步骤 4，做完停下等验收）",
+            timestamp="t1"
+        ),
+        ChatMessage(
+            role="assistant",
+            content="Let me first check the existing models to understand the schema",
+            timestamp="t2"
+        ),
+        ChatMessage(
+            role="tool",
+            content="from database.py: Base = declarative_base()",
+            timestamp="t3",
+            tool_call_id="c1"
+        ),
+        ChatMessage(
+            role="tool",
+            content="from models.py: class Room(Base): ...",
+            timestamp="t4",
+            tool_call_id="c2"
+        ),
+        ChatMessage(
+            role="assistant",
+            content="Now I'll create schemas.py with Pydantic models",
+            timestamp="t5"
+        ),
+        ChatMessage(
+            role="tool",
+            content="schemas.py created with RoomSchema, GuestSchema, BookingSchema",
+            timestamp="t6",
+            tool_call_id="c3"
+        ),
+        ChatMessage(
+            role="assistant",
+            content="schemas.py 创建完成，包含 3 个 Pydantic schema",
+            timestamp="t7"
+        ),
     ]
 
 
@@ -100,16 +217,62 @@ def _review_turn_conversation() -> list[ChatMessage]:
     return [
         ChatMessage(role="user", content="你给我审查一下你做成的这个项目", timestamp="t1"),
         ChatMessage(role="assistant", content="我来审查整个项目", timestamp="t2"),
-        ChatMessage(role="tool", content="cat hotel/app/models.py\ncat hotel/app/schemas.py\ncat hotel/app/routers/rooms.py", timestamp="t3", tool_call_id="c1"),
-        ChatMessage(role="tool", content="cat hotel/app/routers/guests.py\ncat hotel/app/routers/bookings.py\ncat hotel/app/database.py", timestamp="t4", tool_call_id="c2"),
-        ChatMessage(role="tool", content="cat hotel/tests/test_api.py", timestamp="t5", tool_call_id="c3"),
-        ChatMessage(role="tool", content="pytest: 10 passed, 1 warning", timestamp="t6", tool_call_id="c4"),
-        ChatMessage(role="assistant", content="Found 3 HIGH issues: 1) Deleting room with bookings → 500. 2) price: Infinity poisons GET /rooms. 3) PUT null → misleading errors", timestamp="t7"),
+        ChatMessage(
+            role="tool",
+            content="cat hotel/app/models.py\ncat hotel/app/schemas.py\n"
+            "cat hotel/app/routers/rooms.py",
+            timestamp="t3",
+            tool_call_id="c1",
+        ),
+        ChatMessage(
+            role="tool",
+            content="cat hotel/app/routers/guests.py\n"
+            "cat hotel/app/routers/bookings.py\ncat hotel/app/database.py",
+            timestamp="t4",
+            tool_call_id="c2",
+        ),
+        ChatMessage(
+            role="tool",
+            content="cat hotel/tests/test_api.py",
+            timestamp="t5",
+            tool_call_id="c3"
+        ),
+        ChatMessage(
+            role="tool",
+            content="pytest: 10 passed, 1 warning",
+            timestamp="t6",
+            tool_call_id="c4"
+        ),
+        ChatMessage(
+            role="assistant",
+content="Found 3 HIGH issues: 1) Deleting room with bookings → 500. 2) price: Infinity pois"
+            "ons GET /rooms. 3) PUT null → misleading errors",
+            timestamp="t7"
+        ),
         ChatMessage(role="assistant", content="Let me try to fix the first issue", timestamp="t8"),
-        ChatMessage(role="tool", content="Error: path resolves outside workspace", timestamp="t9", tool_call_id="c5"),
-        ChatMessage(role="tool", content="Error: path resolves outside workspace", timestamp="t10", tool_call_id="c6"),
-        ChatMessage(role="tool", content="Error: path resolves outside workspace", timestamp="t11", tool_call_id="c7"),
-        ChatMessage(role="assistant", content="Can't read the files to fix. The issues are documented in the report.", timestamp="t12"),
+        ChatMessage(
+            role="tool",
+            content="Error: path resolves outside workspace",
+            timestamp="t9",
+            tool_call_id="c5"
+        ),
+        ChatMessage(
+            role="tool",
+            content="Error: path resolves outside workspace",
+            timestamp="t10",
+            tool_call_id="c6"
+        ),
+        ChatMessage(
+            role="tool",
+            content="Error: path resolves outside workspace",
+            timestamp="t11",
+            tool_call_id="c7"
+        ),
+        ChatMessage(
+            role="assistant",
+            content="Can't read the files to fix. The issues are documented in the report.",
+            timestamp="t12"
+        ),
     ]
 
 
@@ -121,20 +284,79 @@ def _acceptance_criteria_conversation() -> list[ChatMessage]:
     reading source code to find a solution.
     """
     return [
-        ChatMessage(role="user", content="实现 rooms 路由，确保 GET /rooms 返回房间列表", timestamp="t1"),
+        ChatMessage(
+            role="user",
+            content="实现 rooms 路由，确保 GET /rooms 返回房间列表",
+            timestamp="t1"
+        ),
         ChatMessage(role="assistant", content="我来实现 rooms 路由", timestamp="t2"),
-        ChatMessage(role="tool", content="rooms.py created with @app.get('/rooms')", timestamp="t3", tool_call_id="c1"),
-        ChatMessage(role="assistant", content="Now let me verify: {r.path for r in app.routes} should include '/rooms'", timestamp="t4"),
-        ChatMessage(role="tool", content="Error: '_IncludedRouter' object has no attribute 'path'", timestamp="t5", tool_call_id="c2"),
-        ChatMessage(role="assistant", content="Let me check the FastAPI source to understand include_router", timestamp="t6"),
-        ChatMessage(role="tool", content="starlette/routing.py: class Router: def include_router...", timestamp="t7", tool_call_id="c3"),
-        ChatMessage(role="tool", content="fastapi/routing.py: class APIRouter(Router): ...", timestamp="t8", tool_call_id="c4"),
-        ChatMessage(role="assistant", content="The routes are lazily mounted. Let me check if there's an eager option", timestamp="t9"),
-        ChatMessage(role="tool", content="fastapi/routing.py line 432: _IncludedRouter wraps routes", timestamp="t10", tool_call_id="c5"),
-        ChatMessage(role="assistant", content="No eager option. Let me try downgrading FastAPI to 0.115.12", timestamp="t11"),
-        ChatMessage(role="tool", content="pip install fastapi==0.115.12: success", timestamp="t12", tool_call_id="c6"),
-        ChatMessage(role="tool", content="Verification passed: routes now include '/rooms'", timestamp="t13", tool_call_id="c7"),
-        ChatMessage(role="assistant", content="rooms 路由实现完成，通过降级 FastAPI 解决", timestamp="t14"),
+        ChatMessage(
+            role="tool",
+            content="rooms.py created with @app.get('/rooms')",
+            timestamp="t3",
+            tool_call_id="c1"
+        ),
+        ChatMessage(
+            role="assistant",
+            content="Now let me verify: {r.path for r in app.routes} should include '/rooms'",
+            timestamp="t4"
+        ),
+        ChatMessage(
+            role="tool",
+            content="Error: '_IncludedRouter' object has no attribute 'path'",
+            timestamp="t5",
+            tool_call_id="c2"
+        ),
+        ChatMessage(
+            role="assistant",
+            content="Let me check the FastAPI source to understand include_router",
+            timestamp="t6"
+        ),
+        ChatMessage(
+            role="tool",
+            content="starlette/routing.py: class Router: def include_router...",
+            timestamp="t7",
+            tool_call_id="c3"
+        ),
+        ChatMessage(
+            role="tool",
+            content="fastapi/routing.py: class APIRouter(Router): ...",
+            timestamp="t8",
+            tool_call_id="c4"
+        ),
+        ChatMessage(
+            role="assistant",
+            content="The routes are lazily mounted. Let me check if there's an eager option",
+            timestamp="t9"
+        ),
+        ChatMessage(
+            role="tool",
+            content="fastapi/routing.py line 432: _IncludedRouter wraps routes",
+            timestamp="t10",
+            tool_call_id="c5"
+        ),
+        ChatMessage(
+            role="assistant",
+            content="No eager option. Let me try downgrading FastAPI to 0.115.12",
+            timestamp="t11"
+        ),
+        ChatMessage(
+            role="tool",
+            content="pip install fastapi==0.115.12: success",
+            timestamp="t12",
+            tool_call_id="c6"
+        ),
+        ChatMessage(
+            role="tool",
+            content="Verification passed: routes now include '/rooms'",
+            timestamp="t13",
+            tool_call_id="c7"
+        ),
+        ChatMessage(
+            role="assistant",
+            content="rooms 路由实现完成，通过降级 FastAPI 解决",
+            timestamp="t14"
+        ),
     ]
 
 
@@ -147,12 +369,38 @@ def _cross_turn_duplicate_read_conversation() -> list[ChatMessage]:
     messages = []
     for turn in range(1, 6):
         messages.extend([
-            ChatMessage(role="user", content=f"只做这一步：实现第 {turn} 个模块", timestamp=f"t{turn}_1"),
-            ChatMessage(role="assistant", content="先看看 database.py 确认表结构", timestamp=f"t{turn}_2"),
-            ChatMessage(role="tool", content="from database.py: Base = declarative_base()...", timestamp=f"t{turn}_3", tool_call_id=f"c{turn}_1"),
-            ChatMessage(role="assistant", content="再看看 models.py 确认字段", timestamp=f"t{turn}_4"),
-            ChatMessage(role="tool", content="from models.py: class Room(Base): ...", timestamp=f"t{turn}_5", tool_call_id=f"c{turn}_2"),
-            ChatMessage(role="assistant", content=f"第 {turn} 个模块实现完成", timestamp=f"t{turn}_6"),
+            ChatMessage(
+                role="user",
+                content=f"只做这一步：实现第 {turn} 个模块",
+                timestamp=f"t{turn}_1"
+            ),
+            ChatMessage(
+                role="assistant",
+                content="先看看 database.py 确认表结构",
+                timestamp=f"t{turn}_2"
+            ),
+            ChatMessage(
+                role="tool",
+                content="from database.py: Base = declarative_base()...",
+                timestamp=f"t{turn}_3",
+                tool_call_id=f"c{turn}_1"
+            ),
+            ChatMessage(
+                role="assistant",
+                content="再看看 models.py 确认字段",
+                timestamp=f"t{turn}_4"
+            ),
+            ChatMessage(
+                role="tool",
+                content="from models.py: class Room(Base): ...",
+                timestamp=f"t{turn}_5",
+                tool_call_id=f"c{turn}_2"
+            ),
+            ChatMessage(
+                role="assistant",
+                content=f"第 {turn} 个模块实现完成",
+                timestamp=f"t{turn}_6"
+            ),
         ])
     return messages
 
@@ -254,7 +502,8 @@ async def test_review_captures_pattern(pattern_name, tmp_path, monkeypatch):
                     "## Verification\n"
                     "Review completes without re-reading the entire history\n"
                 ),
-                "reason": "Full re-read burns 20%+ of session tokens and causes instruction loss after compaction",
+                "reason": "Full re-read burns 20%+ of session tokens and causes "
+                "instruction loss after compaction",
             }),
             "acceptance_criteria_brittle": json.dumps({
                 "create": True,
@@ -276,11 +525,13 @@ async def test_review_captures_pattern(pattern_name, tmp_path, monkeypatch):
                     "## Verification\n"
                     "Verify command passes without reading framework source code\n"
                 ),
-                "reason": "Internal assertions cause framework archaeology (134K tokens in one case)",
+                "reason": "Internal assertions cause framework archaeology "
+                "(134K tokens in one case)",
             }),
             "cross_turn_duplicate_read": json.dumps({
                 "create": False,
-                "reason": "This is a harness limitation (no cross-turn read dedup), not a user-facing workflow",
+                "reason": "This is a harness limitation (no cross-turn read dedup), "
+                "not a user-facing workflow",
             }),
         }
         return responses.get(pattern_name, json.dumps({"create": False, "reason": "unknown"}))
@@ -349,4 +600,6 @@ def test_max_review_messages_constant_is_reasonable():
     from ai_coding.core.skill_review import MAX_REVIEW_MESSAGES
 
     # Should be between 10 and 100
-    assert 10 <= MAX_REVIEW_MESSAGES <= 100, f"MAX_REVIEW_MESSAGES={MAX_REVIEW_MESSAGES} out of range"
+    assert (
+        10 <= MAX_REVIEW_MESSAGES <= 100
+    ), f"MAX_REVIEW_MESSAGES={MAX_REVIEW_MESSAGES} out of range"

@@ -59,7 +59,8 @@ class TestIntervene:
             skill_dir = tmp_path / name
             skill_dir.mkdir(parents=True, exist_ok=True)
             (skill_dir / "SKILL.md").write_text(
-                f"---\n{frontmatter}\n---\n\n# {name}\n## 使用场景\n...\n## 步骤\n1. ...\n## 验证\n...\n"
+                f"---\n{frontmatter}\n---\n"
+                f"\n# {name}\n## 使用场景\n...\n## 步骤\n1. ...\n## 验证\n...\n"
             )
         return SkillRegistry(tmp_path)
 

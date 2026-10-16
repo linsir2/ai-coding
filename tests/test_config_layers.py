@@ -35,7 +35,8 @@ def test_a_global_config_alone_is_enough_to_start(home):
     _write(
         paths.user_config,
         "default_model: my-global-model\n"
-        "models:\n  gpt-x:\n    name: gpt-x\n    base_url: https://example.test\n    api_key: sk-global\n",
+        "models:\n  gpt-x:\n    name: gpt-x\n    base_url: https://example.test\n"
+        "    api_key: sk-global\n",
     )
 
     app = ConfigLoader.load_layers(paths)
@@ -49,7 +50,8 @@ def test_the_project_overlays_the_global_one(home):
     _write(
         paths.user_config,
         "default_model: global\n"
-        "models:\n  gpt-x:\n    name: gpt-x\n    base_url: https://example.test\n    api_key: sk-global\n",
+        "models:\n  gpt-x:\n    name: gpt-x\n    base_url: https://example.test\n"
+        "    api_key: sk-global\n",
     )
     _write(paths.workspace / "config.local.yaml", "default_model: project-model\n")
 

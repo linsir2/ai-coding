@@ -26,7 +26,11 @@ class TestPromptQuality:
         """Prompt should show what a GOOD skill looks like."""
         from ai_coding.core.skill_review import _REVIEW_SYSTEM_PROMPT
         # Must have at least one concrete positive example
-        assert "例如" in _REVIEW_SYSTEM_PROMPT or "例如" in _REVIEW_SYSTEM_PROMPT or "example" in _REVIEW_SYSTEM_PROMPT.lower()
+        assert (
+            "例如" in _REVIEW_SYSTEM_PROMPT
+            or "例如" in _REVIEW_SYSTEM_PROMPT
+            or "example" in _REVIEW_SYSTEM_PROMPT.lower()
+        )
 
     def test_prompt_has_negative_examples(self):
         """Prompt should show what a BAD skill looks like."""
@@ -171,7 +175,12 @@ class TestMessageFiltering:
         from ai_coding.core.skill_review import _filter_messages
         messages = [
             ChatMessage(role="user", content="读取项目的 models.py 文件", timestamp="t1"),
-            ChatMessage(role="tool", content="def hello():\n    print('hello')", timestamp="t2", tool_call_id="c1"),
+            ChatMessage(
+                role="tool",
+                content="def hello():\n    print('hello')",
+                timestamp="t2",
+                tool_call_id="c1"
+            ),
             ChatMessage(role="assistant", content="这是一个 Python 函数定义", timestamp="t3"),
         ]
         filtered = _filter_messages(messages)
@@ -229,7 +238,11 @@ class TestImprovedRunSkillReview:
         monkeypatch.setattr("ai_coding.core.skill_review._chat", fake_chat)
         from ai_coding.core.skill_review import run_skill_review
         messages = [
-            ChatMessage(role="user", content="请帮我调试一个复杂的 pytest 失败问题", timestamp="t1"),
+            ChatMessage(
+                role="user",
+                content="请帮我调试一个复杂的 pytest 失败问题",
+                timestamp="t1"
+            ),
             ChatMessage(role="assistant", content="好的，我来排查问题", timestamp="t2"),
             ChatMessage(role="tool", content="test output...", timestamp="t3", tool_call_id="c1"),
             ChatMessage(role="assistant", content="问题已修复", timestamp="t4"),

@@ -109,7 +109,12 @@ def test_a_history_short_enough_to_keep_never_asks_the_model(tmp_path):
 
 
 def _usage_row(turn: int, prompt: int) -> TurnUsage:
-    return TurnUsage(turn=turn, prompt_tokens=prompt, completion_tokens=10, total_tokens=prompt + 10)
+    return TurnUsage(
+        turn=turn,
+        prompt_tokens=prompt,
+        completion_tokens=10,
+        total_tokens=prompt + 10
+    )
 
 
 def test_the_meter_ignores_usage_measured_before_the_last_compaction():

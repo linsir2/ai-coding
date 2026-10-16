@@ -1,4 +1,6 @@
-"""TDD: Intent integrity closure — constraint injection, cross-turn detection, anchor verification."""
+"""TDD: Intent integrity closure — constraint injection, cross-turn detection,
+anchor verification.
+"""
 
 from __future__ import annotations
 
