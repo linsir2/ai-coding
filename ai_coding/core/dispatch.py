@@ -532,13 +532,15 @@ class ToolDispatcher:
 
     @staticmethod
     def _readonly_denied(call: ToolCall) -> ToolResult:
-        """18 §10.1: a read-only session refuses mutations, and says how out."""
+        """18 §10.1: a read-only session refuses mutations, and points at the
+        tools that still work (内化批次: the old text taught the /plan family;
+        the model -- and the transcript -- are steered to read/grep/glob and
+        the review channel instead)."""
         return ToolResult(
             success=False,
             output=(
                 "error: 只读已开启——该工具会改变工作区或状态，已拒绝。"
-                "读文件、搜索、写计划仍可用；关闭：/readonly off 或 /plan off；"
-                "执行计划：/plan run。"
+                "请改用 read/grep/glob 探索；计划完成后用 present_plan 提交评审。"
             ),
             error="readonly_denied",
             data={

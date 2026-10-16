@@ -104,6 +104,47 @@ async def test_bare_plan_while_already_on_is_a_notice_only():
 
 
 @pytest.mark.asyncio
+async def test_plan_notices_teach_the_mode_not_slash_commands():
+    """内化批次: the notices speak the mode's own verbs (review card,
+    shift+tab) -- the /plan family stays an internal interface and is not
+    advertised anywhere the user reads."""
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    dc, c = _console()
+
+    await handle_input(loop, "/plan", session, sessions, dc)
+    out = c.export_text()
+    assert "已进入计划模式（只读）" in out
+    assert "评审卡" in out and "shift+tab" in out
+    assert "/plan" not in out
+    assert "/readonly" not in out
+
+    dc2, c2 = _console()
+    await handle_input(loop, "/plan", session, sessions, dc2)
+    out2 = c2.export_text()
+    assert "已在计划模式" in out2 and "评审卡" in out2
+    assert "/plan" not in out2
+
+
+@pytest.mark.asyncio
+async def test_help_no_longer_lists_the_plan_family():
+    """内化批次: /help dropped the four internal lines (plan x3, readonly);
+    the frontend catalogue was cleaned in stage 3, the backend help was not."""
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    dc, c = _console()
+
+    await handle_input(loop, "/help", session, sessions, dc)
+
+    out = c.export_text()
+    assert "direct commands" in out
+    assert "/plan" not in out
+    assert "/readonly" not in out
+
+
+@pytest.mark.asyncio
 async def test_plan_topic_clears_the_receipt_book_behaviourally():
     """The collision bug, end to end: a new plan must not inherit receipts."""
     from ai_coding.domain.plan_delivery import StepDelivery
@@ -167,7 +208,7 @@ async def test_the_planning_turn_sees_c3_disabled(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_plan_off_double_disarms_and_hints_run():
+async def test_plan_off_double_disarms_and_keeps_the_hint_slash_free():
     loop = _Loop()
     sessions = _Sessions()
     session = _session()
@@ -183,7 +224,10 @@ async def test_plan_off_double_disarms_and_hints_run():
     assert (session.mode, session.readonly) == ("normal", False)
     assert sessions.saved == [session]
     out = c.export_text()
-    assert "已退出计划模式" in out and "/plan run" in out and "1 项" in out
+    # 内化批次: the open-items hint used to teach "/plan run"; it now points
+    # back at the mode itself.
+    assert "已退出计划模式" in out and "1 项" in out
+    assert "/plan" not in out
 
 
 @pytest.mark.asyncio

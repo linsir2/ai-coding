@@ -115,6 +115,9 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   missing_plan: { label: "计划内容为空", tone: "denied" },
   no_user: { label: "无人评审", tone: "denied" },
   user_prompt_error: { label: "评审通道异常", tone: "failed" },
+  // 内化批次: the readonly gate's own code was the last live 未知原因
+  // (7ad86804's transcript).
+  readonly_denied: { label: "只读拒绝", tone: "denied" },
 }
 
 export function toolFailure(error: string): { label: string; tone: FailureTone } {

@@ -97,7 +97,9 @@ def _levenshtein(a: str, b: str) -> int:
 #: model turn instead of an answer.  Keys are the full token, values the
 #: replacement **as it must be typed** (the caller renders ``/{value}``).
 #: Kept (not deleted) because help text, docs and habits outlive the rename.
-_DEPRECATED: dict[str, str] = {"/plan-run": "/plan run"}
+#: 内化批次: the value lands on the bare enter command -- "run" left every
+#: surface the user reads.
+_DEPRECATED: dict[str, str] = {"/plan-run": "plan"}
 
 
 def suggest_command(token: str) -> str | None:

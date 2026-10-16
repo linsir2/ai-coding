@@ -117,6 +117,9 @@ describe("toolFailure", () => {
       ["no_plan_items", "计划尚未写成条目"],
       ["missing_plan", "计划内容为空"],
       ["no_user", "无人评审"],
+      // 内化批次: the readonly gate's own code was the last live 未知原因
+      // (found in session 7ad86804's transcript).
+      ["readonly_denied", "只读拒绝"],
     ]
     for (const [code, label] of denied) {
       expect(toolFailure(code)).toEqual({ label, tone: "denied" })

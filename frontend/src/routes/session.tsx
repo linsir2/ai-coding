@@ -232,14 +232,15 @@ export function Session(props: SessionProps) {
         palette: true,
         // 19 §3.1: the mode row's one action.  Mid-turn it queues like
         // /review does — the backend's posture queue lands the flip at the
-        // turn's close either way.
+        // turn's close either way.  内化批次: an idle flip dispatches silently
+        // — the backend notice tells the story; the transcript must not
+        // dress an internal command as a user line.
         run: () => {
           const next = stats().mode === "plan" ? "/plan off" : "/plan"
           if (state.busy) {
             apply({ kind: "queued", text: next })
             return
           }
-          apply({ kind: "submitted", text: next })
           dispatch(next)
         },
       },
@@ -344,7 +345,8 @@ export function Session(props: SessionProps) {
         if (pendingPlanRun) {
           pendingPlanRun = false
           ranPlanRun = true
-          apply({ kind: "submitted", text: "/plan run" })
+          // 内化批次: silent — the run's own receipts and the posture notice
+          // are the story; no "┃ /plan run" line dresses it as user input.
           dispatch("/plan run")
         }
         // One queued line per finished turn (deferred when the plan run won
@@ -394,7 +396,9 @@ export function Session(props: SessionProps) {
       // command face, so the transcript says what the wire did.
       const prelude = planPrelude(prompt, props.commands ?? [], props.sessionId)
       if (prelude) {
-        apply({ kind: "submitted", text: prelude.payload.text, images: [] })
+        // 内化批次: the posture lands silently; the "已进入计划模式" notice
+        // is the transcript's account of it (a "┃ /plan" echo dressed the
+        // internal command as the user's own line).
         void props.client
           .request(prelude.method, prelude.payload)
           .finally(() => submit(prompt.text, prompt.images))

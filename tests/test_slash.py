@@ -108,7 +108,7 @@ def test_tasks():
 
 
 def test_absorbed_command_points_at_its_replacement():
-    """/plan-run's tombstone now points at the typed replacement, /plan run.
+    """/plan-run's tombstone now points at the mode's entry action, /plan.
 
     Four commits of docs, help text and commit messages still say /plan-run,
     and it is four edits away from "plan", so the near-miss rule (edit
@@ -116,8 +116,10 @@ def test_absorbed_command_points_at_its_replacement():
     suggest_command, and became a literal user turn.  A tombstone answers
     exactly, for every UI at once, because both front-ends route unknown
     /commands through suggest_command.  The suggestion is rendered as
-    ``/{suggestion}``, so the value carries the subcommand too.
+    ``/{suggestion}``; the internalization batch (stage 4) retired the
+    "plan run" spelling from everything the user reads, so the tombstone
+    lands on the bare enter command instead.
     """
-    assert suggest_command("/plan-run") == "plan run"
+    assert suggest_command("/plan-run") == "plan"
     # still not a command: parse_slash must keep letting paths through
     assert parse_slash("/plan-run") is None

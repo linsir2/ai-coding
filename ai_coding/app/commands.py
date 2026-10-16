@@ -26,10 +26,6 @@ HELP_TEXT = (
     "  /todo           show current task list\n"
     "  /tasks          list background sub-agent runs\n"
     "  /skills         list available skills\n"
-    "  /plan [topic]   enter read-only plan mode; with a topic, plan it\n"
-    "  /plan run       execute the open plan\n"
-    "  /plan off       leave plan mode\n"
-    "  /readonly on|off  read-only session (writes refused)\n"
     "  /review        review current changes\n"
     "  /config         show effective configuration\n"
     "  /compact        compact conversation history\n"
@@ -305,7 +301,7 @@ async def _handle_plan(
             msg = "[plan] 本就不在计划模式；只读开关也确认关闭。"
         open_n = len(session.task.open_items()) if getattr(session, "task", None) else 0
         if open_n:
-            msg += f" 还有 {open_n} 项未执行：/plan run 可继续执行。"
+            msg += f" 还有 {open_n} 项未执行（重新进入 Plan 模式可以继续）。"
         console.info(msg)
         return REPLAction.CONTINUE, session
 
@@ -337,16 +333,16 @@ async def _handle_plan(
         _save_session(sessions, session)
         console.info(
             "[plan] 已进入计划模式（只读）。继续对话写计划；"
-            "/plan run 执行，/plan off 退出。"
+            "模型完成规划后会弹出评审卡，批准即自动执行；shift+tab 返回 Build。"
         )
     if not rest:
         if already:
-            console.info("[plan] 已在计划模式（只读）。/plan run 执行，/plan off 退出。")
+            console.info(
+                "[plan] 已在计划模式（只读）。继续对话写计划；评审卡批准后自动执行。"
+            )
         return REPLAction.CONTINUE, session
     if already and loop.turn_running:
-        console.info(
-            "[plan] 已在计划模式；回合结束后直接描述主题即可（或再次 /plan <主题> 重规划）。"
-        )
+        console.info("[plan] 已在计划模式；回合结束后直接描述主题即可。")
         return REPLAction.CONTINUE, session
 
     report = await plan_only(

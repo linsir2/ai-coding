@@ -383,10 +383,13 @@ async def test_help_includes_new_commands():
     out = _session_text(c)
     expected = (
         "/model", "/resume", "/permissions", "/todo",
-        "/skills", "/plan", "/review", "/config",
+        "/skills", "/review", "/config",
     )
     for cmd in expected:
         assert cmd in out
+    # 内化批次: the plan family left the help surface (internal interface).
+    assert "/plan" not in out
+    assert "/readonly" not in out
 
 
 class _FakeTrace:
@@ -544,9 +547,11 @@ async def test_unknown_command_at_distance_two_gets_a_suggestion():
 async def test_absorbed_command_is_answered_instead_of_becoming_a_model_turn():
     """The end-to-end half: a tombstone suggestion must stop the turn.
 
-    suggest_command returning "plan run" is only half the fix — if the caller
-    then forwards the token anyway, the user still gets a model turn, which is
-    the behaviour this replaces.
+    suggest_command returning the absorbed target is only half the fix — if
+    the caller then forwards the token anyway, the user still gets a model
+    turn, which is the behaviour this replaces.  内化批次: the tombstone now
+    lands on the bare enter command (the "run" spelling retired from every
+    surface the user reads).
     """
     loop = _FakeLoop()
     sessions = _FakeSessions()
@@ -557,7 +562,8 @@ async def test_absorbed_command_is_answered_instead_of_becoming_a_model_turn():
     assert action is REPLAction.CONTINUE
     assert loop.calls == []
     out = _session_text(c)
-    assert "did you mean" in out and "/plan run" in out
+    assert "did you mean" in out and "/plan" in out
+    assert "/plan run" not in out
 
 
 async def test_plan_run_without_open_items_says_so():

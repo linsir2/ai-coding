@@ -59,11 +59,13 @@ def test_methods_section_rides_even_a_base_only_prompt():
 # ---- 18 §10.5 (P2): the posture rides build(mode=) ---------------------------
 
 PLAN_SEGMENT = (
-    "<plan-mode>You are in plan mode: analyse and produce a step-by-step "
-    "plan. Do not edit files or run side-effecting tools. Write the steps as "
-    "todo items with todo_write (each with its verify command), then call "
-    "present_plan with a concise markdown summary — approval starts execution "
-    "automatically.</plan-mode>"
+    "<plan-mode>You are in plan mode. Every request is answered with a plan, "
+    "never with the finished work: explore only enough to plan, write the "
+    "steps as todo items with todo_write (each with its verify command), then "
+    "call present_plan with a concise markdown summary — approval starts "
+    "execution automatically. Do not write the analysis, research or files as "
+    "your final answer, and do not mark items completed — the execution phase "
+    "does the reading and the work.</plan-mode>"
 )
 
 
