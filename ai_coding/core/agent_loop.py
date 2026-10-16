@@ -992,12 +992,17 @@ class AgentLoop:
         self.dispatcher.guards.reset()
         self.reporter.begin_turn(self.observer)
         self._warn_tools_chars_once()
-        # P2 (补充式方案 06): mark this turn open.  Persisted by the *next*
-        # existing save -- the first checkpoint, or the close -- rather than by a
-        # save of its own: a crash before that first save has no output to lose
-        # (the same window the snapshot already had), while every crash after it
-        # leaves the marker on disk.  ``_close_turn`` clears it on every exit.
+        # P2 (补充式方案 06) mark this turn open; 11-spec §7.1 makes it
+        # durable immediately.  The old design rode the *next* save ("a crash
+        # before that first save has no output to lose") -- true for outputs,
+        # false for the window we care about now: it contains the USER's
+        # message, and an armed task must see both the input and the open
+        # marker after a crash.  One save, only for real user turns; resume's
+        # own save covers its path; ephemeral sessions are skipped by the
+        # closer itself.  ``_close_turn`` clears the marker on every exit.
         session.open_turn = session.turn_count
+        if append_user:
+            self.closer.save(session)
         # F (13 §2.4): one subprocess per turn; never raises (see infra.vcs).
         session.git_branch = git_branch(self.workspace)
         hook_context = await self.turn_hooks.context(session)

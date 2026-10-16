@@ -661,3 +661,37 @@ async def test_forget_redo_without_staged_state_saves_nothing(tmp_path):
     await loop._forget_redo(session)
 
     assert sessions.saves == 0
+
+
+class _InputDiskProbe(ChatEngine):
+    """Reads the file on the first model step: the user message AND openTurn
+    must already be durable there (11-spec §7.1).  Before the fix the file did
+    not exist yet -- nothing is written before the first checkpoint."""
+
+    def __init__(self, root: Path, session_id: str) -> None:
+        self._root = root
+        self._sid = session_id
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        raw = json.loads((self._root / f"{self._sid}.json").read_text(encoding="utf-8"))
+        texts = [m.get("content") or "" for m in raw["messages"]]
+        assert any("落盘探测" in text for text in texts), "the user message was not durable"
+        assert raw.get("openTurn") == 1, "the open marker was not durable"
+        return StepResult(text="done", finish_reason="stop")
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_the_user_message_is_durable_before_the_first_model_step(tmp_path):
+    service = SessionService(root=tmp_path / "sessions")
+    session = service.create(title="durable-input")
+    loop = AgentLoop(
+        _InputDiskProbe(tmp_path / "sessions", session.session_id),
+        service, ToolRegistry(),
+        settings=AIConfig(stop_policy="natural"), workspace=str(tmp_path),
+    )
+
+    await loop.process_input(session, "落盘探测：这句话必须在首个模型步前在盘上")
+    await loop.aclose()

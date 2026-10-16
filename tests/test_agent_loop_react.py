@@ -318,7 +318,8 @@ async def test_loop_persists_after_each_iteration(tmp_path):
     await loop.process_input(sessions.create(), "go")
 
     # two checkpoints (short session: one per iteration) plus the final save
-    assert sessions.saves == 3
+    # (11-plan T5: plus the entry save that makes the user message durable)
+    assert sessions.saves == 4
 
 
 @pytest.mark.asyncio
@@ -338,8 +339,9 @@ async def test_checkpoint_throttling_on_long_sessions(tmp_path):
 
     await loop.process_input(session, "go")
 
-    # long session: no per-iteration checkpoint at index 1, only the final save
-    assert sessions.saves == 1
+    # long session: no per-iteration checkpoint at index 1, only the final
+    # save (11-plan T5: plus the entry save that makes the user message durable)
+    assert sessions.saves == 2
 
 
 # ---- stop conditions -------------------------------------------------------
