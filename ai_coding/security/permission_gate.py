@@ -191,6 +191,12 @@ class PermissionGate:
             # R8a: writing one line into the turn's own book touches neither the
             # repo nor the durable memory (docs/r8-analysis.md 3.1, step 5).
             "checkpoint_write",
+            # 19 §3.2: presenting the plan only occupies the question channel,
+            # like ask_user above -- the plan becomes action through ``/plan
+            # run``, whose tools are gated on their own.  WARN made the review
+            # card arrive behind an "unknown tool 'present_plan' requires
+            # confirmation" prompt: two approvals for one plan (tmux, measured).
+            "present_plan",
             # M2: the MCP dispatcher is a vessel, not an action — what it carries
             # is authorized as ``server__tool`` (BaseTool.permission_name), which
             # is what the gate actually judges.  The only calls that reach it

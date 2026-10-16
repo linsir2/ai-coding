@@ -13,6 +13,7 @@ from typing import Any
 
 from ai_coding.app.console import ConsoleSink
 from ai_coding.app.slash import parse_slash, suggest_command
+from ai_coding.domain.loop import TurnStatus
 from ai_coding.skills.catalog import build_catalog
 
 HELP_TEXT = (
@@ -354,8 +355,14 @@ async def _handle_plan(
     if report.stopped:
         console.error(f"[plan] {report.stopped}")
         return REPLAction.CONTINUE, session
-    n = len(session.task.items) if getattr(session, "task", None) else 0
-    console.info(f"[plan] 计划就绪：{n} 项。可继续对话补充；/plan run 执行，/plan off 退出。")
+    # 19 §3.5: readiness belongs to present_plan's review card now.  A planning
+    # turn that ran out of iterations is NOT a ready plan (measured: a dead
+    # round printed "计划就绪：1 项" over a half-written list).
+    outcome = getattr(loop, "last_outcome", None)
+    if getattr(outcome, "status", None) is TurnStatus.MAX_ITERATIONS:
+        console.info(
+            "[plan] 规划未完成（预算耗尽）：可继续对话补充，或重新描述需求后再次规划。"
+        )
     return REPLAction.CONTINUE, session
 
 

@@ -1,0 +1,162 @@
+"""``present_plan`` — the model's plan, submitted for a human review (19 §3.2).
+
+The review blocks *inside the tool*, exactly like ``ask_user``: the answer is
+the tool result, so the assistant message and its ``tool`` result stay paired
+(the same reason ``user_prompt.py`` exists at all).  The card on the other
+side is chosen by ``intent="plan_review"`` — an intent changes presentation,
+never the protocol (dsh's lesson).  Answers are a JSON string
+``{"choice": "approve" | "keep", "feedback": str}``; plain words like
+"开始执行" stay acceptable so the CLI path works without the card.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from ai_coding.domain.message import ToolResult
+from ai_coding.security.user_prompt import UserPromptCallback
+from ai_coding.tools.base import BaseTool, ToolContext
+
+__all__ = ["PresentPlanTool"]
+
+# Room above the wait for the review to be rendered and answered, matching
+# ask_user (the dispatcher takes min(this, what is left of the turn)).
+_TIMEOUT_GRACE = 15.0
+
+_APPROVED = (
+    "计划已批准：执行由系统接管（前端将自动开始执行）。请简短收尾，不要开始执行。"
+)
+_KEEP = "用户选择继续规划。反馈：{feedback}。修改计划后再次调用 present_plan。"
+_KEEP_NO_FEEDBACK = (
+    "用户选择继续规划，未给出反馈：请询问要修改什么，或先修订后再次调用 present_plan。"
+)
+_HOLD = (
+    "用户搁置了这次评审：保持计划模式，简要向用户说明计划，然后停下等待进一步指示。"
+)
+_NO_CHANNEL = (
+    "当前没有人工可评审这份计划。保持计划模式，简要收尾并说明计划，等待用户指示。"
+)
+
+
+class PresentPlanTool(BaseTool):
+    """Submit the plan for review; the answer decides approve / keep planning."""
+
+    parallel_safe = False
+    mutates_world = False
+
+    def __init__(self, prompt: UserPromptCallback, timeout_seconds: float = 300.0) -> None:
+        self._prompt = prompt
+        self.timeout_seconds = float(timeout_seconds)
+
+    @property
+    def name(self) -> str:
+        return "present_plan"
+
+    @property
+    def max_duration_seconds(self) -> float | None:
+        """Per-call ceiling for the dispatcher (R2a)."""
+        return self.timeout_seconds + _TIMEOUT_GRACE
+
+    @property
+    def description(self) -> str:
+        return (
+            "Present your plan for the user's review and, on approval, hand execution to "
+            "the runner. Use it at the end of planning, after writing every step with "
+            "todo_write. Provide 'plan' as a concise markdown summary (a title first). "
+            "The review blocks until the user answers: approval makes the system execute "
+            "the plan automatically — do not execute it yourself; 'keep planning' brings "
+            "their feedback back, so revise and call this tool again."
+        )
+
+    @property
+    def params_json_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "plan": {
+                    "type": "string",
+                    "description": "The plan as markdown: a title and a concise summary.",
+                },
+            },
+            "required": ["plan"],
+        }
+
+    async def execute(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> ToolResult:
+        plan = str(params.get("plan", "") or "").strip()
+        if not plan:
+            return ToolResult(
+                success=False,
+                output="error: 'plan' is required",
+                error="missing_plan",
+            )
+        # The runner executes todo items, not prose: refuse a plan the engine
+        # could not run and say what to do about it (19 §3.2).
+        items = len(ctx.task.open_items()) if ctx is not None else 0
+        if items == 0:
+            return ToolResult(
+                success=False,
+                output=(
+                    "计划尚未写成条目：请先用 todo_write 写出全部可执行步骤"
+                    "（每步一条，含 verify 命令），然后再次调用 present_plan。"
+                ),
+                error="no_plan_items",
+            )
+        try:
+            answer = await self._prompt.ask(
+                "批准这个计划并开始执行？",
+                ("开始执行", "继续规划"),
+                detail=plan,
+                intent="plan_review",
+            )
+        except Exception as exc:  # noqa: BLE001 — a tool boundary must not leak
+            return ToolResult(
+                success=False,
+                output=f"error: could not ask the user: {exc}. {_NO_CHANNEL}",
+                error="user_prompt_error",
+                data={"reason": str(exc)},
+            )
+        if str(answer.reason) == "no_user":
+            return ToolResult(
+                success=False,
+                output=_NO_CHANNEL,
+                error="no_user",
+                data={"approved": False, "reason": answer.reason},
+            )
+        if not answer.answered:
+            # Dismissed (esc / empty): information for the model, not a retryable error.
+            return ToolResult(
+                success=True,
+                output=_HOLD,
+                data={"approved": False, "dismissed": True},
+            )
+
+        choice, feedback = _parse_answer(answer.text)
+        if choice == "approve":
+            return ToolResult(success=True, output=_APPROVED, data={"approved": True})
+        if feedback:
+            return ToolResult(
+                success=True,
+                output=_KEEP.format(feedback=feedback),
+                data={"approved": False},
+            )
+        return ToolResult(success=True, output=_KEEP_NO_FEEDBACK, data={"approved": False})
+
+
+def _parse_answer(text: str) -> tuple[str, str]:
+    """(choice, feedback): JSON first, plain words as the fallback (CLI path)."""
+    raw = text.strip()
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+            choice = str(data.get("choice", "") or "")
+            feedback = str(data.get("feedback", "") or "").strip()
+            if choice in ("approve", "keep"):
+                return choice, feedback
+        except ValueError:
+            pass
+    if raw == "开始执行":
+        return "approve", ""
+    return "keep", raw

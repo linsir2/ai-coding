@@ -72,7 +72,9 @@ async def test_turn_usage_persisted_to_session_file(tmp_path):
     await loop.process_input(session, "hi")
     data = json.load(open(root / f"{session.session_id}.json"))
     assert data["turnUsages"] == [
-        {"turn": 1, "promptTokens": 10, "completionTokens": 5, "totalTokens": 15}
+        # 19 §3.5: the row carries the window reading (last step's prompt).
+        {"turn": 1, "promptTokens": 10, "completionTokens": 5,
+         "totalTokens": 15, "contextTokens": 10}
     ]
 
 

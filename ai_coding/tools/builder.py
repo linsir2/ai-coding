@@ -174,6 +174,13 @@ def _assemble_registry(
             )
         )
 
+    # 19 §3.2: the plan review needs a human — same gate as ask_user minus the
+    # config switch: leaving plan mode is a core interaction, not a setting.
+    if include_subagent and user_prompt is not None:
+        from ai_coding.tools.present_plan_tool import PresentPlanTool
+
+        registry.register(PresentPlanTool(user_prompt))
+
     if include_subagent:
         # Real sub-agent delegation, isolated in a git worktree when enabled.
         runner = build_subagent_runner(

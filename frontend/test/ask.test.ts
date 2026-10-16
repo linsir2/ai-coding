@@ -8,14 +8,34 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { parseAskRequest, answerForSelection, ASK_SKIP } from "../src/util/ask"
+import { parseAskRequest, answerForSelection, ASK_SKIP, planReviewAnswer, isPlanApproval } from "../src/util/ask"
 
 describe("parseAskRequest", () => {
   test("reads the question and the options", () => {
     expect(parseAskRequest({ question: "哪个文件？", options: ["a.py", "b.py"] })).toEqual({
       question: "哪个文件？",
       options: ["a.py", "b.py"],
+      // 19 §3.2: the plan review's payload keys, always explicit.
+      detail: "",
+      intent: "",
     })
+  })
+
+  test("the plan review's detail and intent survive parsing", () => {
+    const request = parseAskRequest({
+      question: "批准这个计划并开始执行？",
+      options: ["开始执行", "继续规划"],
+      detail: "# 计划\n正文",
+      intent: "plan_review",
+    })
+    expect(request.detail).toBe("# 计划\n正文")
+    expect(request.intent).toBe("plan_review")
+  })
+
+  test("shapeless detail and intent are dropped", () => {
+    const request = parseAskRequest({ question: "q", detail: 3, intent: ["x"] })
+    expect(request.detail).toBe("")
+    expect(request.intent).toBe("")
   })
 
   test("a missing or shapeless options list means no options", () => {
@@ -50,5 +70,25 @@ describe("answerForSelection", () => {
 
   test("no options at all: only a typed answer can come back", () => {
     expect(answerForSelection([], 0)).toBe(ASK_SKIP)
+  })
+})
+
+// ---- 19 §3.3: the plan review's answer codec --------------------------------
+
+
+describe("the plan review's answer codec", () => {
+  test("approve and keep encode as the JSON the tool parses", () => {
+    expect(planReviewAnswer("approve")).toBe('{"choice":"approve"}')
+    expect(planReviewAnswer("keep", "第 3 步拆细")).toBe(
+      '{"choice":"keep","feedback":"第 3 步拆细"}',
+    )
+    expect(planReviewAnswer("keep")).toBe('{"choice":"keep"}')
+  })
+
+  test("only the approve choice arms the auto-run", () => {
+    expect(isPlanApproval(planReviewAnswer("approve"))).toBe(true)
+    expect(isPlanApproval(planReviewAnswer("keep", "x"))).toBe(false)
+    expect(isPlanApproval("")).toBe(false)
+    expect(isPlanApproval("开始执行")).toBe(false) // the card always sends JSON
   })
 })

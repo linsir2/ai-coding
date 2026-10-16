@@ -107,12 +107,14 @@ describe("the command catalogue (A2.3)", () => {
     }
   })
 
-  test("/readonly rides the catalogue as a text command", () => {
-    // P5 (18 §10.1): the enforcement axis on its own — submitted verbatim,
-    // dispatched by the backend like the other text commands.
-    const entry = SLASH_COMMANDS.find((command) => command.name === "readonly")
-    expect(entry).toBeDefined()
-    expect(entry!.command).toBeUndefined()
+  test("plan and readonly are not advertised as slash entries (19 Q1=A)", () => {
+    // The composer's mode row owns plan entry now; the backend commands stay
+    // as internal interfaces (typing them still works — categorization reads
+    // the backend's list, not this catalogue).  This pins the removal so a
+    // future edit cannot quietly re-advertise them.
+    const names = SLASH_COMMANDS.map((entry) => entry.name)
+    expect(names).not.toContain("plan")
+    expect(names).not.toContain("readonly")
   })
 
   test("/memory opens the panel instead of printing a line of counts", () => {

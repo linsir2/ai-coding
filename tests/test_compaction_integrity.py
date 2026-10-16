@@ -352,3 +352,17 @@ def test_the_rule_lives_on_the_session_so_it_cannot_drift_again():
 
     assert session.live_prompt_tokens() == context_tokens(session) == 0
     assert session.live_prompt_tokens() == 0
+
+
+def test_the_context_reading_prefers_the_window_measure():
+    """19 §3.5: rows written by new code carry the last step's prompt as
+    ``contextTokens``; the meter and the gate read that, not the summed spend."""
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.record_turn_usage(1, {"prompt_tokens": 279_045, "context_tokens": 45_000})
+    assert session.live_prompt_tokens() == 45_000
+
+
+def test_rows_without_a_context_reading_keep_the_legacy_answer():
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.record_turn_usage(1, {"prompt_tokens": 4_450})
+    assert session.live_prompt_tokens() == 4_450

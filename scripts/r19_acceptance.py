@@ -20,11 +20,13 @@ asserted:
   4. closing — a tool use with ``max_tool_iterations=1`` forces the iteration-
                budget ending.  Asserts the closing call carries the closing
                prompt and offers no tools (G).
-  5. plan_mode — drives the command layer for real: ``/plan <topic>`` enters
-               the read-only posture and plans, a forced ``write`` attempt is
-               refused on the wire, ``/plan run`` disarms and executes the
-               plan through the runner.  Asserts the posture both live and
-               persisted (P2/P3/P4/P5 of doc 18).
+  5. plan_mode — drives the command layer for real (19 §3.2/§3.3): `/plan
+               <topic>` enters the read-only posture and plans, the model
+               submits through the real ``present_plan`` tool whose review
+               channel is answered by a scripted approver, and the run is
+               dispatched after the command returns (the frontend's terminal
+               mirror).  Asserts posture, review, approval on the wire and the
+               executed steps.
 
 Usage:
 
@@ -60,6 +62,7 @@ from ai_coding.cli import _build_loop, _build_tool_registry  # noqa: E402
 from ai_coding.config.loader import ConfigLoader  # noqa: E402
 from ai_coding.core.agent_loop import _CLOSING_PROMPT  # noqa: E402
 from ai_coding.domain.message import ToolResult  # noqa: E402
+from ai_coding.security.user_prompt import UserAnswer  # noqa: E402
 from ai_coding.service.session_service import SessionService  # noqa: E402
 from ai_coding.tools.base import BaseTool, ToolContext  # noqa: E402
 
@@ -214,6 +217,23 @@ async def _run_scenario(
     }
 
 
+class _AutoReview:
+    """Stands in for the review card: approves any plan review instantly.
+
+    The real channel is ``user_prompt.ask`` with ``intent="plan_review"``;
+    answering it IS the tool result (19 §3.2), so a scripted approver is the
+    headless frontend."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    async def ask(self, question, options=(), *, detail="", intent=""):
+        self.calls.append((question, tuple(options), detail, intent))
+        if intent == "plan_review":
+            return UserAnswer(answered=True, text='{"choice":"approve"}')
+        return UserAnswer(answered=False, reason="not_applicable")
+
+
 class _RecordingConsole:
     """The console surface ``handle_input`` writes through, offline."""
 
@@ -254,11 +274,14 @@ async def _run_plan_scenario(
     config_path = run_dir / "config.yaml"
     _temp_config(config_path, model, port, model["base_url"], 12)
     console = _RecordingConsole()
+    review = _AutoReview()
     try:
         app_cfg = ConfigLoader.load_app(str(config_path))
         _redact_api_key(config_path, model["api_key"])
-        registry = _build_tool_registry(app_cfg, str(ws), None)
-        registry.register(_AskUser())
+        # The real registry with a scripted human: present_plan (and the real
+        # ask_user) register only when a user_prompt exists (builder), and the
+        # review rides that channel — no stub in the way.
+        registry = _build_tool_registry(app_cfg, str(ws), None, user_prompt=review)
         engine = build_engine_from_config(app_cfg)
         sessions = SessionService(ws / "sessions")
         loop = _build_loop(engine, sessions, registry, app_cfg, str(ws), None)
@@ -268,13 +291,10 @@ async def _run_plan_scenario(
         await handle_input(loop, f"/plan {topic}", session, sessions, console)
         planning_mode = (session.mode, session.readonly)
         items = len(session.task.items) if session.task else 0
+        review_questions = [call for call in review.calls if call[3] == "plan_review"]
 
-        await loop.process_input(
-            session,
-            "立刻调用 write 工具创建 plan_probe.txt（内容随意）。"
-            "直接调用工具，不要用 bash，不要拒绝。",
-        )
-
+        # The frontend dispatches the run at the terminal turn.finished once the
+        # card answered approve; headless, that moment is right here.
         await handle_input(loop, "/plan run", session, sessions, console)
         elapsed = round(time.monotonic() - started, 1)
         after_run = (session.mode, session.readonly)
@@ -298,6 +318,7 @@ async def _run_plan_scenario(
         "entries": entries,
         "ledger": persisted.intervention_state,
         "console": list(console.lines),
+        "review_questions": review_questions,
         "planning_mode": planning_mode,
         "items": items,
         "after_run": after_run,
@@ -312,13 +333,25 @@ def _check_plan_mode(result: dict[str, Any]) -> list[str]:
     # P2: the planning turn's system prompt carries the posture segment.
     if not any("<plan-mode>" in _messages(e)[0]["content"] for e in conv):
         problems.append("no request carried the <plan-mode> segment")
-    # P1/P4: the forced write attempt must have been refused, visibly, on the wire.
-    if "只读已开启" not in "".join(_flat(e) for e in conv):
-        problems.append("the forced write attempt was never refused (readonly_denied)")
     if result["planning_mode"] != ("plan", True):
         problems.append(f"planning posture was never set: {result['planning_mode']}")
     if result["items"] < 1:
         problems.append("the planning turn wrote no todo items")
+    # 19 §3.2: the plan went through the real review channel…
+    if not result.get("review_questions"):
+        problems.append("present_plan never reached the review channel")
+    else:
+        question, options, detail, _intent = result["review_questions"][-1]
+        if "批准" not in question or "开始执行" not in options:
+            problems.append(f"the review prompt looks wrong: {question!r} {options!r}")
+        if not detail.strip():
+            problems.append("the review carried no plan markdown")
+    # …the approval came back as the tool result (on the wire)…
+    if "计划已批准" not in "".join(_flat(e) for e in conv):
+        problems.append("the approved tool result never appeared on the wire")
+    # …and the removed "计划就绪" claim stayed removed (19 §3.5).
+    if any("计划就绪" in line for line in result.get("console", [])):
+        problems.append("the retired '计划就绪' notice is back")
     # P4: /plan run disarms and executes through the runner.
     if result["after_run"] != ("normal", False):
         problems.append(f"/plan run did not disarm: {result['after_run']}")

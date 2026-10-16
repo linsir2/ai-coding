@@ -38,6 +38,7 @@ import {
 import { pasteEventOutcome, readClipboardImage } from "../util/clipboard"
 import { moveSelection } from "../util/dialog-select"
 import type { MentionOption } from "../util/mention"
+import { ComposerMeta } from "./composer-meta"
 import { filterMentions, mentionQuery, replaceMentionToken } from "../util/mention"
 import type { SlashCommand } from "../util/slash"
 import { filterSlashCommands, slashQuery, slashSelectionText } from "../util/slash"
@@ -67,6 +68,8 @@ export const PROMPT_BORDER = {
 export interface PromptProps {
   placeholder: string
   metadata: string
+  /** 19 §3.1: the session's posture — leads the metadata line. */
+  mode?: "normal" | "plan"
   /**
    * Submit handler.  Returning ``false`` rejects the submission and keeps the
    * text in the box (busy turns: docs/opencode-gui-m2-plan.md §1).
@@ -77,9 +80,8 @@ export interface PromptProps {
   /** True while the slash list is up — the session mutes its own bindings. */
   onOverlay?: (visible: boolean) => void
   /**
-   * Text to drop into the composer (then clear).  The slash list's ``/plan``
-   * pre-fills "/plan " so a topic can be typed right after it; submitting the
-   * bare line just enters plan mode.
+   * Text to drop into the composer (then clear), e.g. the ``@skill`` seeds
+   * the skill/mention lists leave behind.
    */
   seed?: string
   onSeedDone?: () => void
@@ -421,8 +423,7 @@ export function Prompt(props: PromptProps) {
             setTimeout(() => setTimeout(submit, 0), 0)
           }}
         />
-        <text fg={theme.textMuted}> </text>
-        <text fg={theme.textMuted}>{props.metadata}</text>
+        <ComposerMeta mode={props.mode} metadata={props.metadata} />
       </box>
     </box>
   )

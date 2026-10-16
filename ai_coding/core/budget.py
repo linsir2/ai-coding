@@ -71,6 +71,9 @@ class BudgetLedger:
         self._by_model: dict[str, dict[str, int]] = {}
         self._prompt = 0
         self._completion = 0
+        #: 19 §3.5: the window's occupancy — the LAST reporting step's prompt
+        #: tokens, overwritten per step (not summed like the totals above).
+        self._context = 0
         self._cached = 0
         self._cached_reported = False
         self._steps = 0
@@ -120,6 +123,10 @@ class BudgetLedger:
             return
         self._prompt += int(_as_int(usage.get("prompt_tokens")) or 0)
         self._completion += int(_as_int(usage.get("completion_tokens")) or 0)
+        # 19 §3.5: both readers of the context number (footer meter, compaction
+        # gate) mean "how full is the window now" — that is this step's prompt,
+        # not the turn's running total.  Last reporting step wins.
+        self._context = int(_as_int(usage.get("prompt_tokens")) or 0)
         derived_cached, _ = cache_from_usage(usage)
         effective = cached if cached is not None else derived_cached
         if effective is not None:
@@ -206,4 +213,6 @@ class BudgetLedger:
         }
         if self._cached_reported:
             out["cached_tokens"] = totals.cached_tokens
+        if self._context:
+            out["context_tokens"] = self._context
         return out

@@ -104,7 +104,9 @@ async def test_child_spend_is_recorded_on_the_row():
         if runner.task_list()[0].status != "running":
             break
         await asyncio.sleep(0.02)
-    assert runner.task_list()[0].usage == usage
+    # 19 §3.5: the ledger adds the window reading (last step's prompt) beside
+    # the provider numbers; the row carries it too.
+    assert runner.task_list()[0].usage == {**usage, "context_tokens": 100}
 
 
 @pytest.mark.asyncio

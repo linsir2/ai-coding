@@ -60,7 +60,10 @@ def test_methods_section_rides_even_a_base_only_prompt():
 
 PLAN_SEGMENT = (
     "<plan-mode>You are in plan mode: analyse and produce a step-by-step "
-    "plan. Do not edit files or run side-effecting tools.</plan-mode>"
+    "plan. Do not edit files or run side-effecting tools. Write the steps as "
+    "todo items with todo_write (each with its verify command), then call "
+    "present_plan with a concise markdown summary — approval starts execution "
+    "automatically.</plan-mode>"
 )
 
 

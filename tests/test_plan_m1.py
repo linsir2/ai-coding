@@ -27,6 +27,7 @@ import pytest
 
 from ai_coding.core.plan_runner import STEP_HEAD, PlanRunner
 from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
+from ai_coding.domain.loop import TurnStatus
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
@@ -179,7 +180,8 @@ async def test_plan_command_plans_and_plan_run_executes():
     assert session.task.done_count == 0
     assert (session.mode, session.readonly) == ("plan", True)
     assert sessions.saved == [session]
-    assert "计划就绪：2 项" in rich_console.export_text()
+    # 19 §3.5: no command-layer "ready" claim anymore.
+    assert "计划就绪" not in rich_console.export_text()
 
     await handle_input(loop, "/plan run", session, sessions, console)
 
@@ -337,7 +339,8 @@ async def test_no_step_reads_an_earlier_step_s_output():
 
 @pytest.mark.asyncio
 async def test_planning_failure_does_not_execute():
-    """No todos from the plan turn -> no execution, a clear message."""
+    """No todos from the plan turn -> no execution and no 'ready' claim; the
+    refusal lives in present_plan's tool result now (19 §3.5)."""
     from rich.console import Console
 
     from ai_coding.app.commands import handle_input
@@ -380,7 +383,7 @@ async def test_planning_failure_does_not_execute():
 
     assert len(loop.calls) == 1  # only the planning turn
     # 18 §10.1: execution now lives behind /plan run; an empty plan says so.
-    assert "计划就绪：0 项" in c.export_text()
+    assert "计划就绪" not in c.export_text()
 
 
 @pytest.mark.asyncio
@@ -835,3 +838,109 @@ async def test_a_console_without_step_support_still_runs():
     report = await PlanRunner(_StubLoop(["complete"])).run(session, None)
 
     assert [entry.status for entry in report.deliveries] == ["completed"]
+
+
+# ---- 19 §3.4: executor resilience (budget continuation / stall skip / retry note) --
+
+
+class _StatusLoop(_StubLoop):
+    """_StubLoop plus the per-turn outcome status (the budget-death trigger).
+
+    ``statuses`` is popped once per ``process_input`` call; ``None`` means a
+    normal ending.  The real loop reports ``TurnStatus`` on ``last_outcome``;
+    this mirrors that surface without a real turn.
+    """
+
+    def __init__(self, script, statuses):
+        super().__init__(script)
+        self._statuses = list(statuses)
+        self._last_status = None
+
+    async def process_input(self, session, text, on_delta=None, observer=None):
+        self._last_status = self._statuses.pop(0) if self._statuses else None
+        return await super().process_input(
+            session, text, on_delta=on_delta, observer=observer
+        )
+
+    @property
+    def last_outcome(self):
+        return SimpleNamespace(usage=None, status=self._last_status)
+
+
+@pytest.mark.asyncio
+async def test_a_budget_dead_step_gets_one_continuation():
+    """19 §3.4-2: cut mid-work (MAX_ITERATIONS) != out of ideas — continue once."""
+    session = _session_with("read the big file")
+    loop = _StatusLoop(["ignore", "complete"], [TurnStatus.MAX_ITERATIONS, TurnStatus.COMPLETED])
+
+    report = await PlanRunner(loop).run(session)
+
+    assert len(loop.calls) == 2          # turn 1 + the continuation
+    assert report.completed == ["1"]
+    assert report.stalled == []
+    assert report.deliveries[0].attempts == 2
+    assert report.turns_used == 2
+
+
+@pytest.mark.asyncio
+async def test_the_continuation_allowance_is_one():
+    """Still cut after the continuation: settle as stalled, no third turn."""
+    session = _session_with("read the endless file")
+    loop = _StatusLoop(
+        ["ignore", "ignore"],
+        [TurnStatus.MAX_ITERATIONS, TurnStatus.MAX_ITERATIONS],
+    )
+
+    report = await PlanRunner(loop).run(session)
+
+    assert len(loop.calls) == 2
+    assert report.stalled == ["1"]
+    assert report.deliveries[0].attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_a_verify_failure_still_takes_the_repair_path():
+    """The repair branch wins: a budget-dead turn that also failed its proof
+    gets the failure-targeted prompt, never both extra turns (19 §3.4-2)."""
+    session = _session_with("fix it", verifies=["pytest tests/ -q"])
+    loop = _StatusLoop(
+        ["verify-fail", "verify-pass"],
+        [TurnStatus.MAX_ITERATIONS, TurnStatus.COMPLETED],
+    )
+
+    report = await PlanRunner(loop).run(session)
+
+    assert report.completed == ["1"]
+    assert len(loop.calls) == 2
+    assert "只修复失败点" in loop.calls[1][0]   # the repair prompt, not the continue one
+    assert "从停下的地方继续" not in loop.calls[1][0]
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_step_does_not_stop_the_run():
+    """19 §3.4-3 (Q5=A): record the stall, keep going; the report lists it."""
+    session = _session_with("write docs", "next step")
+    loop = _StubLoop(["ignore", "complete-all"])
+
+    report = await PlanRunner(loop).run(session)
+
+    assert len(loop.calls) == 2                 # the next step ran anyway
+    assert report.stalled == ["1"]
+    assert report.completed == ["2"]
+    assert report.stopped is None
+
+
+@pytest.mark.asyncio
+async def test_a_retry_seed_carries_the_previous_attempt():
+    """19 §3.4-4: the second run's seed says what the first attempt reached."""
+    session = _session_with("one")
+    loop = _StubLoop(["ignore", "complete"])
+
+    first = await PlanRunner(loop).run(session)
+    assert first.stalled == ["1"]
+
+    await PlanRunner(loop).run(session)
+
+    seed = loop.step_sessions[-1].messages[0].content or ""
+    assert "[本步历史] 此前已尝试 1 次" in seed
+    assert "不要从头再来" in seed

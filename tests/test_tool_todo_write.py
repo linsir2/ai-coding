@@ -221,3 +221,34 @@ async def test_r9_the_gate_can_be_switched_off(ctx):
     await tool.execute({"action": "add", "content": "next", "depends_on": ["1"]}, ctx)
     r = await tool.execute({"action": "update", "id": "2", "status": "completed"}, ctx)
     assert r.success is True  # today's behaviour
+
+
+# ---- 19 §3.5 (Q6): completion is the execution stage's mark ------------------
+
+
+@pytest.fixture
+def readonly_ctx():
+    task = TaskState(goal="goal")
+    task.add("step")
+    return ToolContext(task=task, workspace="/tmp/ws", session_id="sid", readonly=True)
+
+
+@pytest.mark.asyncio
+async def test_readonly_refuses_marking_an_item_completed(tool, readonly_ctx):
+    """The planning posture may author the list, not finish it (19 Q6)."""
+    r = await tool.execute(
+        {"action": "update", "id": "1", "status": "completed"}, readonly_ctx
+    )
+    assert r.success is False
+    assert r.error == "readonly_completion"
+    assert readonly_ctx.task.get("1").status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_readonly_still_allows_planning_mutations(tool, readonly_ctx):
+    added = await tool.execute({"action": "add", "content": "next"}, readonly_ctx)
+    assert added.success is True
+    progress = await tool.execute(
+        {"action": "update", "id": "1", "status": "in_progress"}, readonly_ctx
+    )
+    assert progress.success is True

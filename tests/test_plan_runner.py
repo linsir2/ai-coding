@@ -150,16 +150,18 @@ async def test_items_without_verify_trust_a_completed_turn():
 
 
 @pytest.mark.asyncio
-async def test_unfinished_unverifiable_step_stays_open_and_stops_the_run():
+async def test_unfinished_unverifiable_step_stays_open_and_the_run_moves_on():
     """No verify command, model marked nothing: leave it open (retryable next
-    run) and stop — never loop on the same item inside one run."""
+    run) — and since 19 §3.4-3 (Q5=A) the run records the stall and continues
+    to the next ready item instead of stopping the whole run."""
     session = _session_with("write docs", "next step")
-    loop = _StubLoop(["ignore"])
+    loop = _StubLoop(["ignore", "ignore"])
     report = await PlanRunner(loop).run(session)
 
     assert session.task.items[0].status == "pending"
-    assert report.stalled == ["1"]
-    assert len(loop.calls) == 1  # second item never started
+    assert report.stalled == ["1", "2"]
+    assert len(loop.calls) == 2  # the next ready step ran anyway
+    assert report.stopped is None
 
 
 @pytest.mark.asyncio

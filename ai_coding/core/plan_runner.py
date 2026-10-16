@@ -32,6 +32,7 @@ from typing import Any
 
 from ai_coding.core.turn_policy import TurnPolicy
 from ai_coding.domain.acceptance import AcceptanceItem
+from ai_coding.domain.loop import TurnStatus
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.plan_delivery import StepDelivery
 from ai_coding.domain.session import SessionData
@@ -42,6 +43,13 @@ from ai_coding.security.sandbox import Sandbox, SandboxViolation
 #: to rebuild step headers — turn numbers do not survive compaction, but the
 #: prompt text travels inside the persisted user message.
 STEP_HEAD = "只做这一步，不要做别的："
+
+#: 19 §3.4-1: the planning round's own iteration ceiling.  It used to share
+#: ``max_tool_iterations`` and died mid-plan (measured twice: 15 iterations
+#: eaten by large reads, a half-written plan reported as ready).  The ceiling
+#: is headroom; the prompt guidance ("skeleton first, no whole-file reads")
+#: is the actual fix.
+PLANNING_MAX_ITERATIONS = 30
 
 #: Cap on the failure output quoted into a repair prompt (same 500-char
 #: preview discipline as the acceptance evidence tails).
@@ -66,7 +74,14 @@ PLAN_PROMPT = (
     "the work and do not mark items completed during planning. "
     "State each step's goal and its verifiable success criteria, "
     "and make the plan decision-complete: another engineer should be "
-    "able to implement it without making further design decisions."
+    "able to implement it without making further design decisions. "
+    "Write the full skeleton of items first (one line plus its verify for "
+    "each) and refine afterwards; use grep/glob to look at code selectively "
+    "— do not read whole large files just to write the plan. "
+    "When the plan is ready, call present_plan with a concise markdown "
+    "summary (a title first) as your final tool call: it presents the plan "
+    "for the user's review, and approval starts execution automatically — "
+    "do not execute it yourself."
 )
 
 
@@ -131,7 +146,7 @@ async def plan_only(
     begin = getattr(session, "begin_plan", None)
     if begin is not None:
         begin(topic)
-    with continuations_disabled(loop):
+    with continuations_disabled(loop, max_iterations=PLANNING_MAX_ITERATIONS):
         await loop.process_input(
             session, PLAN_PROMPT.format(topic=topic),
             on_delta=on_delta, observer=observer,
@@ -144,8 +159,14 @@ async def plan_only(
 
 
 @contextmanager
-def continuations_disabled(loop: Any) -> Iterator[None]:
+def continuations_disabled(
+    loop: Any, *, max_iterations: int | None = None
+) -> Iterator[None]:
     """Run a block with C3 (auto-continuation) off, then restore the policy.
+
+    ``max_iterations`` optionally swaps in a different iteration ceiling for
+    the block — the planning round passes its own budget (19 §3.4-1); steps
+    keep the shared ceiling untouched.
 
     C3 pays off when the model is finishing *its own* work and stopped only
     because the iteration budget ran out.  It does not pay off when something
@@ -164,7 +185,10 @@ def continuations_disabled(loop: Any) -> Iterator[None]:
     the turn this exists to disarm.
     """
     original = loop.policy
-    loop.policy = TurnPolicy(replace(original.config, max_auto_continuations=0))
+    overrides: dict[str, Any] = {"max_auto_continuations": 0}
+    if max_iterations is not None:
+        overrides["max_iterations"] = int(max_iterations)
+    loop.policy = TurnPolicy(replace(original.config, **overrides))
     try:
         yield
     finally:
@@ -262,7 +286,15 @@ class PlanRunner:
             self._backfill_fiat(task, session, report, receipted)
             item = self._next_ready(task, attempted)
             if item is None:
-                if task.open_items():
+                # 19 §3.4-3: a deadlock is "an open item we never even tried,
+                # and it cannot run" (missing dependency or cycle).  Open items
+                # we already attempted are stalls/blocks — the report carries
+                # them, and reporting "deadlock" there would be a lie.
+                never_attempted = [
+                    entry for entry in task.open_items()
+                    if entry.id not in attempted
+                ]
+                if never_attempted:
                     report.stopped = (
                         "deadlock: open items remain but none is ready "
                         "(missing dependency or cycle)"
@@ -283,8 +315,10 @@ class PlanRunner:
             await self._run_step(session, task, item, report, console,
                                  on_delta=on_delta, observer=observer)
             receipted.add(item.id)  # settled (or runner-blocked) above
-            if report.stalled:
-                break
+            # 19 §3.4-3 (Q5=A): a stalled step is recorded, not fatal — the run
+            # moves to the next ready item and the report lists the stalls for
+            # a re-run.  Blocked stays fatal for the item at hand: a failed
+            # proof is the decision point this runner exists to surface.
             if report.blocked and report.blocked[-1] == item.id:
                 break
         self._persist(session)
@@ -377,7 +411,9 @@ class PlanRunner:
         settings = getattr(self._loop, "settings", None)
         return int(getattr(settings, "plan_step_max_iterations", 8) or 8)
 
-    def _make_step_session(self, task: Any, item: Any, report: PlanReport) -> SessionData:
+    def _make_step_session(
+        self, session: Any, task: Any, item: Any, report: PlanReport
+    ) -> SessionData:
         """A fresh session for one step — the short conversation (M1-B).
 
         Borrowed from the sub-agent runner (``core/subagent.py:_run_in``): a
@@ -400,11 +436,15 @@ class PlanRunner:
         # Shared, not copied: a step marking its item done moves the plan.
         step.task = task
         step.messages = [
-            ChatMessage(role="user", content=self._seed(task, item, report), timestamp="")
+            ChatMessage(
+                role="user",
+                content=self._seed(session, task, item, report),
+                timestamp="",
+            )
         ]
         return step
 
-    def _seed(self, task: Any, item: Any, report: PlanReport) -> str:
+    def _seed(self, session: Any, task: Any, item: Any, report: PlanReport) -> str:
         """The step's opening context: goal + the plan's current state.
 
         Only open items are listed — Hermes's rule that re-showing completed
@@ -430,6 +470,23 @@ class PlanRunner:
             lines.append(f"{entry.id}. [{entry.status}] {entry.content}{marker}")
         if item.verify:
             lines += ["", f"[本步验收] {item.verify}"]
+        prior = [
+            entry for entry in getattr(session, "step_deliveries", [])
+            if entry.statement == item.content
+            and entry.status in ("stalled", "blocked")
+        ]
+        if prior:
+            # 19 §3.4-4: a retry must not replay the whole attempt — say where
+            # the last one stopped (the receipt's own summary) and forbid a
+            # restart from zero (measured: two runs of the same step re-read
+            # the same file from offset 0).
+            last = prior[-1]
+            lines += [
+                "",
+                f"[本步历史] 此前已尝试 {len(prior)} 次；"
+                f"上次结果（{last.status}）：{last.summary}",
+                "从上次停下的地方继续，不要从头再来。",
+            ]
         return "\n".join(lines)
 
     def _run_budget(self) -> int:
@@ -491,7 +548,7 @@ class PlanRunner:
         # M1-B: the step runs in its own short conversation, not the parent's
         # ever-growing history.  The parent keeps only the prompt (replay
         # marker) and a one-line summary.
-        step_session = self._make_step_session(task, item, report)
+        step_session = self._make_step_session(session, task, item, report)
         seed = step_session.messages[0].content or ""
         contracts = (
             [AcceptanceItem(
@@ -527,20 +584,25 @@ class PlanRunner:
             attempts = 1
             # R1-4: every returned turn costs budget, and its spend is read
             # off the loop while it is still "the last turn".
-            report.turns_used += 1
-            turn_usage = self._turn_usage()
-            step_usage = self._merge_usage(step_usage, turn_usage)
-            report.tokens_used = self._merge_usage(report.tokens_used, turn_usage)
+            step_usage = self._charge_turn(report, step_usage)
             if contracts and not self._contracts_passed(step_session):
                 text = await self._loop.process_input(
                     step_session, self._repair_prompt(item, step_session),
                     on_delta=step_delta, observer=observer,
                 )
                 attempts = 2
-                report.turns_used += 1
-                turn_usage = self._turn_usage()
-                step_usage = self._merge_usage(step_usage, turn_usage)
-                report.tokens_used = self._merge_usage(report.tokens_used, turn_usage)
+                step_usage = self._charge_turn(report, step_usage)
+            elif self._budget_died() and not self._model_claimed_done(task, item):
+                # 19 §3.4-2: the budget cut this step mid-work (the model was
+                # still going — "继续精读…" in the measured run), so it gets one
+                # bounded continuation.  Shares the single repair allowance
+                # with the verify path above; the two never stack.
+                text = await self._loop.process_input(
+                    step_session, self._continue_prompt(item),
+                    on_delta=step_delta, observer=observer,
+                )
+                attempts = 2
+                step_usage = self._charge_turn(report, step_usage)
             end_turn = int(getattr(step_session, "turn_count", 0) or 0)
             delivery = self._settle(step_session, session, task, item, report, text,
                                    attempts, (start_turn, end_turn), step_usage,
@@ -672,6 +734,31 @@ class PlanRunner:
         return (
             f"{STEP_HEAD}{item.content}\n"
             f"（这是计划步骤 {item.id}，做完停下等验收，不要展开做别的。）"
+        )
+
+    def _charge_turn(
+        self, report: PlanReport, step_usage: dict[str, int] | None
+    ) -> dict[str, int] | None:
+        """Count one returned turn onto the run and onto the step (R1-4)."""
+        report.turns_used += 1
+        turn_usage = self._turn_usage()
+        report.tokens_used = self._merge_usage(report.tokens_used, turn_usage)
+        return self._merge_usage(step_usage, turn_usage)
+
+    def _budget_died(self) -> bool:
+        """True when the last step turn was cut by the iteration budget (19 §3.4-2).
+
+        ``TurnStatus``, not a reason string: the enum is what the loop reports
+        against.  Stubs without the field read as "no" — fail-open to the old
+        stall semantics.
+        """
+        outcome = getattr(self._loop, "last_outcome", None)
+        return getattr(outcome, "status", None) is TurnStatus.MAX_ITERATIONS
+
+    def _continue_prompt(self, item: Any) -> str:
+        return (
+            f"{STEP_HEAD}{item.content}\n"
+            f"上一步预算用尽但本步未完成：从停下的地方继续，只做这一步；完成后简要汇报。"
         )
 
     def _repair_prompt(self, item: Any, step_session: Any) -> str:

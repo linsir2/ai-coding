@@ -90,6 +90,18 @@ def test_ask_user_allow():
     assert gate.check("ask_user", {"question": "改哪个？"}) == PermissionDecision.ALLOW
 
 
+def test_present_plan_allow():
+    """19 §3.2: presenting a plan is asking, not doing.
+
+    WARN here meant the review card arrived behind an "unknown tool
+    'present_plan' requires confirmation" prompt — approval asked for twice,
+    the first time about the pen rather than the plan (seen in the tmux pass:
+    the model even retried the tool around the prompt).
+    """
+    gate = _gate()
+    assert gate.check("present_plan", {}) == PermissionDecision.ALLOW
+
+
 def test_mcp_tool_names_are_still_warned():
     """The fail-closed rule for genuinely unknown tools is unchanged."""
     gate = _gate()

@@ -108,9 +108,10 @@ async def test_stalled_run_still_receipts_fiat_siblings():
     loop = _StubLoop(["ignore"])
     report = await PlanRunner(loop).run(session)
 
-    assert report.stalled == ["1"]  # the stop still fires…
+    assert report.stalled == ["1"]  # the stall is recorded (19 §3.4-3: the
+    # run no longer stops — there is simply nothing else ready here)…
     by_id = {d.step_id: d for d in report.deliveries}
-    assert by_id["2"].attested is False  # …but the fiat receipt lands first
+    assert by_id["2"].attested is False  # …and the fiat receipt lands first
 
 
 @pytest.mark.asyncio

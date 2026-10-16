@@ -32,7 +32,7 @@ import { Session } from "./routes/session"
 import { loadSession } from "./state/replay"
 import { initialState, type SessionState } from "./state/session"
 import { theme } from "./theme/tokens"
-import type { AskRequest } from "./util/ask"
+import { parseAskRequest, type AskRequest } from "./util/ask"
 import { quitSequence } from "./util/exit"
 import type { PermissionDecision } from "./util/permission"
 import type { PromptImage } from "./util/attachment"
@@ -265,12 +265,9 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
       resolveAsk?.("")
       return new Promise<string>((resolve) => {
         resolveAsk = resolve
-        setAsk({
-          question: String(params["question"] ?? ""),
-          options: Array.isArray(params["options"])
-            ? params["options"].filter((option): option is string => typeof option === "string")
-            : [],
-        })
+        // 19 §3.2: one parser for every ask — the plan review's detail/intent
+        // ride the same payload the generic panel ignores.
+        setAsk(parseAskRequest(params))
       })
     })
     // A finished turn settles any pending approval or question; the backend
@@ -403,19 +400,12 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         run: () => void onNewSession(),
       },
       {
-        // The session route registers its own (closer) versions of these two,
-        // which run them in the live session.  On Home there is no session
+        // The session route registers its own (closer) version of /review,
+        // which runs it in the live session.  On Home there is no session
         // layer: start one with the command as its first prompt — the
         // session's dispatch routes a "/"-prefixed line to session.command,
-        // the backend's command dispatcher.
-        name: "session.plan",
-        title: "Plan",
-        group: "Session",
-        desc: "Enter read-only plan mode (add a topic to plan it)",
-        palette: true,
-        run: () => startSession("/plan "),
-      },
-      {
+        // the backend's command dispatcher.  (Plan entry lives only in the
+        // session now: 19 Q1=A keeps it un-advertised until a session exists.)
         name: "session.review",
         title: "Review",
         group: "Session",

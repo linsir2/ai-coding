@@ -237,3 +237,21 @@ def test_open_turn_rejects_bool():
         "openTurn": True,
     }
     assert SessionData.from_dict(data).open_turn is None
+
+
+def test_turn_usage_round_trips_the_context_reading():
+    from ai_coding.domain.session import TurnUsage
+
+    row = TurnUsage(
+        turn=3,
+        prompt_tokens=350,
+        completion_tokens=12,
+        total_tokens=362,
+        context_tokens=250,
+    )
+    data = row.to_dict()
+    assert data["contextTokens"] == 250
+    assert TurnUsage.from_dict(data) == row
+    # Old rows (no key) read as 0; the legacy fallback lives in the session rule.
+    del data["contextTokens"]
+    assert TurnUsage.from_dict(data).context_tokens == 0

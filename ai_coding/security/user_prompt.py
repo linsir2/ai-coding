@@ -46,11 +46,20 @@ class UserAnswer:
 class UserPromptCallback(Protocol):
     """Anything that can put a question in front of a human."""
 
-    async def ask(self, question: str, options: Sequence[str] = ()) -> UserAnswer: ...
+    async def ask(
+        self,
+        question: str,
+        options: Sequence[str] = (),
+        *,
+        detail: str = "",
+        intent: str = "",
+    ) -> UserAnswer: ...
 
 
-def _format_prompt(question: str, options: Sequence[str]) -> str:
+def _format_prompt(question: str, options: Sequence[str], detail: str = "") -> str:
     lines = [question]
+    if detail:
+        lines.append(detail)
     if options:
         lines.append("（可选：" + " / ".join(str(option) for option in options) + "）")
     lines.append("> ")
@@ -62,8 +71,9 @@ class CLIUserPromptCallback:
 
     def __init__(self, input_fn: Callable[[str], str] | None = None) -> None:
         self._read: Callable[[str], str] = input_fn or (lambda prompt: input(prompt))
-        # Two parameters, not one: the TUI renders ``options`` as a list under the
-        # question, which a flattened string cannot produce.  Same shape the
+        # Four parameters since 19 §3.2: question and options apart (the TUI
+        # renders options as a list), plus the plan-review ``detail`` (markdown
+        # body) and its ``intent`` (which card to render).  Same shape the
         # approval channel already uses (``approval.py`` passes tool/params/reason).
         self._provider: Callable[..., Any] | None = None
 
@@ -71,17 +81,24 @@ class CLIUserPromptCallback:
         """Use an async provider instead of stdin (TUI mode)."""
         self._provider = provider
 
-    async def ask(self, question: str, options: Sequence[str] = ()) -> UserAnswer:
+    async def ask(
+        self,
+        question: str,
+        options: Sequence[str] = (),
+        *,
+        detail: str = "",
+        intent: str = "",
+    ) -> UserAnswer:
         if self._provider is not None:
             try:
-                raw = await self._provider(question, list(options))
+                raw = await self._provider(question, list(options), detail, intent)
                 text = str(raw or "").strip()
                 if not text:
                     return UserAnswer(answered=False, reason="empty")
                 return UserAnswer(answered=True, text=text)
             except Exception:  # noqa: BLE001 — the channel must never break a turn
                 return UserAnswer(answered=False, reason="no_user")
-        prompt = _format_prompt(question, options)
+        prompt = _format_prompt(question, options, detail)
         try:
             raw = await asyncio.to_thread(self._read, prompt)
         except EOFError:
@@ -97,5 +114,12 @@ class CLIUserPromptCallback:
 class UnavailableUserPromptCallback:
     """Nobody is there (``ask``, a sub-agent, CI): say so at once."""
 
-    async def ask(self, question: str, options: Sequence[str] = ()) -> UserAnswer:
+    async def ask(
+        self,
+        question: str,
+        options: Sequence[str] = (),
+        *,
+        detail: str = "",
+        intent: str = "",
+    ) -> UserAnswer:
         return UserAnswer(answered=False, reason="no_user")

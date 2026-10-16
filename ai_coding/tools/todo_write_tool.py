@@ -97,6 +97,24 @@ class TodoWriteTool(BaseTool):
         if action == "add":
             return self._add(params, task)
         if action == "update":
+            # 19 §3.5 (Q6): completion is the execution stage's mark — the
+            # planning posture may author the list, not finish it.  Measured
+            # (session 13e303d4): the model marked item 1 completed mid-planning
+            # and the run report then counted it as work "done outside the run".
+            if (
+                ctx is not None
+                and ctx.readonly
+                and str(params.get("status", "")).strip().lower() == "completed"
+            ):
+                return ToolResult(
+                    success=False,
+                    output=(
+                        "error: 只读/规划阶段不能把条目标记为 completed——完成标记由执行阶段产生。"
+                        "请保持 pending，用 present_plan 提交计划；执行交给运行器。"
+                    ),
+                    error="readonly_completion",
+                    data={"action": "update", "reason": "readonly_session"},
+                )
             return self._update(params, task)
         if action == "list":
             return self._ok(task, "list")

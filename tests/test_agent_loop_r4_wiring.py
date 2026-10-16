@@ -193,6 +193,8 @@ async def test_turn_outcome_carries_the_spend(tmp_path):
         "prompt_tokens": 300,
         "completion_tokens": 30,
         "total_tokens": 330,
+        # 19 §3.5: the window reading is the LAST step's prompt (200), not the sum.
+        "context_tokens": 200,
     }
 
 

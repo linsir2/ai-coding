@@ -123,7 +123,10 @@ async def test_plan_topic_clears_the_receipt_book_behaviourally():
     assert session.step_deliveries == []
     assert (session.mode, session.readonly) == ("plan", True)
     assert sessions.saved == [session]
-    assert "计划就绪" in c.export_text()
+    # 19 §3.5: readiness is announced by present_plan's review card now — a
+    # finished planning turn no longer auto-claims "计划就绪" (measured: a
+    # budget-dead half-plan said it anyway).
+    assert "计划就绪" not in c.export_text()
 
 
 @pytest.mark.asyncio
@@ -329,3 +332,74 @@ async def test_a_mid_turn_plan_topic_queues_the_posture_only():
     assert session.pending_posture == {"mode": "plan", "readonly": True}
     out = c.export_text()
     assert "直接描述计划主题" in out and "将在当前回合结束后生效" in out
+
+
+# ---- 19 §3.4-1: the planning round gets its own budget ------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_planning_turn_runs_with_the_planning_budget():
+    """The planning round used to share max_tool_iterations (measured: dead at
+    15 while still reading files).  It now swaps in its own budget, restored
+    afterwards like the C3 swap (19 §3.4-1)."""
+    seen: list[tuple[int, int]] = []
+
+    class _RecordingLoop(_Loop):
+        async def process_input(self, session, text, on_delta=None, observer=None):
+            self.calls.append(text)
+            seen.append(
+                (
+                    self.policy.config.max_iterations,
+                    self.policy.config.max_auto_continuations,
+                )
+            )
+            return "planned"
+
+    loop = _RecordingLoop()
+    original = loop.policy.config.max_iterations
+    dc, _ = _console()
+
+    await handle_input(loop, "/plan 新计划", _session(), _Sessions(), dc)
+
+    assert seen == [(30, 0)]
+    assert loop.policy.config.max_iterations == original  # swap restored
+
+
+def test_the_plan_prompt_starts_with_a_skeleton_and_bans_whole_file_reads():
+    """19 §3.4-1: the budget is headroom; the guidance is the fix."""
+    from ai_coding.core.plan_runner import PLAN_PROMPT
+
+    lowered = PLAN_PROMPT.lower()
+    assert "skeleton" in lowered
+    assert "grep/glob" in lowered
+
+
+@pytest.mark.asyncio
+async def test_a_budget_dead_planning_round_says_so():
+    """19 §3.5: a planning turn cut by the iteration budget gets an honest
+    notice — it used to print "计划就绪：N 项" over a half-written plan."""
+    from types import SimpleNamespace
+
+    from ai_coding.domain.loop import TurnStatus
+
+    class _DeadLoop(_Loop):
+        @property
+        def last_outcome(self):
+            return SimpleNamespace(status=TurnStatus.MAX_ITERATIONS, usage=None)
+
+    dc, c = _console()
+
+    await handle_input(_DeadLoop(), "/plan 新计划", _session(), _Sessions(), dc)
+
+    out = c.export_text()
+    assert "规划未完成" in out
+    assert "计划就绪" not in out
+
+
+def test_the_plan_prompt_submits_through_present_plan():
+    """19 §3.2: the model must be told to hand the plan over — the review card
+    is the only readiness signal, and dsh's guidance says the same thing
+    (exit_plan_mode as the final call)."""
+    from ai_coding.core.plan_runner import PLAN_PROMPT
+
+    assert "present_plan" in PLAN_PROMPT

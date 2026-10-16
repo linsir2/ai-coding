@@ -129,6 +129,10 @@ class TurnUsage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    #: 19 §3.5: the window's occupancy — the turn's LAST step's prompt tokens,
+    #: not the summed spend above.  Older rows carry 0 and the session's rule
+    #: falls back to ``prompt_tokens`` for them.
+    context_tokens: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -136,6 +140,7 @@ class TurnUsage:
             "promptTokens": int(self.prompt_tokens),
             "completionTokens": int(self.completion_tokens),
             "totalTokens": int(self.total_tokens),
+            "contextTokens": int(self.context_tokens),
         }
 
     @classmethod
@@ -153,6 +158,7 @@ class TurnUsage:
             prompt_tokens=int(data.get("promptTokens", 0) or 0),
             completion_tokens=int(data.get("completionTokens", 0) or 0),
             total_tokens=int(data.get("totalTokens", 0) or 0),
+            context_tokens=int(data.get("contextTokens", 0) or 0),
         )
 
 
@@ -405,7 +411,11 @@ class SessionData:
         live = [row for row in self.turn_usages if int(row.turn) > self.last_compacted_turn]
         if not live:
             return 0
-        return int(live[-1].prompt_tokens or 0)
+        row = live[-1]
+        # 19 §3.5: the row's prompt total is the turn's *spend* (forensics,
+        # /budget); the window's occupancy is the last step's prompt, recorded
+        # beside it.  Rows written before the reading existed fall back.
+        return int(row.context_tokens or row.prompt_tokens or 0)
 
     def record_turn_usage(self, turn: int, usage: dict[str, int] | None) -> None:
         """Append one usage row; absent or all-zero usage writes no row."""
@@ -417,6 +427,7 @@ class SessionData:
                 prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
                 completion_tokens=int(usage.get("completion_tokens", 0) or 0),
                 total_tokens=int(usage.get("total_tokens", 0) or 0),
+                context_tokens=int(usage.get("context_tokens", 0) or 0),
             )
         )
 

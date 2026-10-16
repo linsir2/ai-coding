@@ -92,7 +92,27 @@ async def test_the_provider_receives_the_question_and_the_options_apart():
 
     assert answer.answered is True
     assert answer.text == "answer"
-    assert seen == [("改 A 还是 B？", ["A", "B"])]
+    # 19 §3.2: the provider call widened to carry detail/intent; absent means "".
+    assert seen == [("改 A 还是 B？", ["A", "B"], "", "")]
+
+
+@pytest.mark.asyncio
+async def test_detail_and_intent_reach_the_provider():
+    """19 §3.2: the plan review needs its markdown body and its kind on the wire."""
+    seen: list[tuple[object, ...]] = []
+
+    async def provider(*args: object) -> str:
+        seen.append(args)
+        return '{"choice":"approve"}'
+
+    callback = CLIUserPromptCallback()
+    callback.set_provider(provider)  # type: ignore[arg-type]
+    answer = await callback.ask(
+        "批准？", options=["开始执行"], detail="# 计划", intent="plan_review"
+    )
+
+    assert answer.answered is True
+    assert seen == [("批准？", ["开始执行"], "# 计划", "plan_review")]
 
 
 @pytest.mark.asyncio

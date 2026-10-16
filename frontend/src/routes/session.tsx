@@ -18,6 +18,7 @@ import { createStore } from "solid-js/store"
 import { MessageView } from "../component/message"
 import { DialogSkills } from "../component/dialog-skills"
 import { AskPanel } from "../component/ask"
+import { PlanReviewPanel } from "../component/plan-review"
 import { PermissionPanel, type PermissionRequest } from "../component/permission"
 import { Prompt } from "../component/prompt"
 import { buildSubmission, type PendingPrompt } from "../util/submission"
@@ -34,7 +35,7 @@ import { useToast } from "../component/toast"
 import { theme } from "../theme/tokens"
 import { escStep } from "../util/esc"
 import { loadSession, resumeSession } from "../state/replay"
-import type { AskRequest } from "../util/ask"
+import { isPlanApproval, type AskRequest } from "../util/ask"
 import type { PermissionDecision } from "../util/permission"
 
 export interface SessionProps {
@@ -90,6 +91,10 @@ export function Session(props: SessionProps) {
   const [suggesting, setSuggesting] = createSignal(false)
   let transcript: ScrollBoxRenderable | undefined
   let interruptTimer: ReturnType<typeof setTimeout> | undefined
+  // 19 §3.3: set when the review card answers approve; the run dispatches at
+  // the next terminal turn.finished (the review tool blocks until the answer,
+  // so that event is the first moment the runner can legally start).
+  let pendingPlanRun = false
 
   const disarmInterrupt = () => {
     if (interruptTimer !== undefined) {
@@ -220,14 +225,23 @@ export function Session(props: SessionProps) {
         },
       },
       {
-        name: "session.plan",
-        title: "Plan",
+        name: "session.mode.cycle",
+        title: "Toggle plan mode",
         group: "Session",
-        desc: "Enter read-only plan mode (add a topic to plan it)",
+        desc: "Switch between Build and read-only Plan mode",
         palette: true,
-        // P5/18 §10.1: seed a ready topic slot; submitting the bare "/plan "
-        // simply enters plan mode — no topic is required anymore.
-        run: () => setPromptSeed("/plan "),
+        // 19 §3.1: the mode row's one action.  Mid-turn it queues like
+        // /review does — the backend's posture queue lands the flip at the
+        // turn's close either way.
+        run: () => {
+          const next = stats().mode === "plan" ? "/plan off" : "/plan"
+          if (state.busy) {
+            apply({ kind: "queued", text: next })
+            return
+          }
+          apply({ kind: "submitted", text: next })
+          dispatch(next)
+        },
       },
       {
         name: "session.review",
@@ -266,12 +280,13 @@ export function Session(props: SessionProps) {
     bindings: [
       { key: "escape", cmd: "session.interrupt" },
       { key: "ctrl+t", cmd: "session.toggle.thinking" },
+      { key: "shift+tab", cmd: "session.mode.cycle" },
       { key: "<leader>r", cmd: "session.resume" },
     ],
   }))
 
-  // The slash list's /plan pre-fills the composer with a topic slot; the
-  // seed lands the text in the textarea and focuses it.
+  // The suggestion lists seed the composer (e.g. ``@skill``); the seed lands
+  // the text in the textarea and focuses it.
   const [promptSeed, setPromptSeed] = createSignal("")
 
   onMount(() => {
@@ -322,8 +337,19 @@ export function Session(props: SessionProps) {
             void refreshStats()
           }
         }
-        // One queued line per finished turn.
-        const next = state.queued[0]
+        // 19 §3.3: an approved plan starts executing here — the mode disarm
+        // already landed with the turn's close, so the internal run command
+        // finds an idle loop.  The echo line mirrors the /review dispatch.
+        let ranPlanRun = false
+        if (pendingPlanRun) {
+          pendingPlanRun = false
+          ranPlanRun = true
+          apply({ kind: "submitted", text: "/plan run" })
+          dispatch("/plan run")
+        }
+        // One queued line per finished turn (deferred when the plan run won
+        // this end-of-turn slot).
+        const next = ranPlanRun ? undefined : state.queued[0]
         if (next !== undefined) {
           apply({ kind: "queued-dispatched" })
           dispatch(next)
@@ -412,7 +438,20 @@ export function Session(props: SessionProps) {
             )}
           </Show>
           <Show when={props.ask}>
-            {(request) => <AskPanel request={request()} onAnswer={props.onAskAnswer} />}
+            {(request) => (
+              <Show
+                when={request().intent === "plan_review"}
+                fallback={<AskPanel request={request()} onAnswer={props.onAskAnswer} />}
+              >
+                <PlanReviewPanel
+                  request={request()}
+                  onAnswer={(answer) => {
+                    if (isPlanApproval(answer)) pendingPlanRun = true
+                    props.onAskAnswer(answer)
+                  }}
+                />
+              </Show>
+            )}
           </Show>
           <Show
             when={props.permission === null && props.ask === null}
@@ -425,6 +464,7 @@ export function Session(props: SessionProps) {
               <Prompt
                 placeholder={state.busy ? "Working…" : "Ask anything…"}
                 metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
+                mode={stats().mode}
                 onSubmit={submit}
                 onOverlay={setSuggesting}
                 seed={promptSeed()}

@@ -223,3 +223,24 @@ def test_cached_tokens_are_bucketed_too():
 
 def test_an_empty_ledger_has_no_models():
     assert BudgetLedger().by_model() == {}
+
+
+def test_the_context_reading_is_the_last_step_not_the_sum():
+    """19 §3.5: the prompt total is the turn's spend; the window's occupancy is
+    the LAST step's prompt.  The footer and the compaction gate both mean the
+    latter, and the summed value over-read long tool turns (measured: 279,045
+    (581%) for a turn whose true window held ~45k)."""
+    ledger = BudgetLedger()
+    ledger.record_step({"prompt_tokens": 100, "completion_tokens": 5}, model="m")
+    ledger.record_step({"prompt_tokens": 250, "completion_tokens": 7}, model="m")
+
+    usage = ledger.usage_dict()
+
+    assert usage["prompt_tokens"] == 350
+    assert usage["context_tokens"] == 250
+
+
+def test_nobody_reporting_means_no_context_claim():
+    ledger = BudgetLedger()
+    ledger.record_step(None, model="m")
+    assert "context_tokens" not in ledger.usage_dict()

@@ -186,7 +186,12 @@ def test_finish_turn_attaches_the_usage_and_emits_last():
         TurnOutcome(status=TurnStatus.COMPLETED, text="done"), observer
     )
 
-    assert outcome.usage == {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+    # 19 §3.5: the usage dict also carries the window reading (last step's
+    # prompt), always when a step reported numbers.
+    assert outcome.usage == {
+        "prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10,
+        "context_tokens": 7,
+    }
     assert isinstance(sink.events[-1], TurnFinished)
     assert sink.of_type(TurnFinished)[0].outcome.usage == outcome.usage
 
@@ -255,5 +260,8 @@ def test_begin_turn_resets_the_ledger_so_usage_is_per_turn():
     )
     second = reporter.finish_turn(TurnOutcome(status=TurnStatus.COMPLETED), observer)
 
-    assert second.usage == {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+    assert second.usage == {
+        "prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10,
+        "context_tokens": 7,
+    }
     assert reporter.tokens_spent() == 10

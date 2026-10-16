@@ -78,9 +78,18 @@ def _install_providers(world: AppWorld, service: IpcService) -> None:
     set_prompt_provider = getattr(prompt, "set_provider", None)
     if set_prompt_provider is not None:
 
-        async def question_provider(question: str, options: list[str]) -> str:
+        async def question_provider(
+            question: str, options: list[str], detail: str = "", intent: str = ""
+        ) -> str:
             raw = await service.call(
-                "user_prompt.ask", {"question": question, "options": list(options)}
+                "user_prompt.ask",
+                {
+                    "question": question,
+                    "options": list(options),
+                    # 19 §3.2: always explicit; plain readers ignore the keys.
+                    "detail": detail,
+                    "intent": intent,
+                },
             )
             return str(raw or "")
 
