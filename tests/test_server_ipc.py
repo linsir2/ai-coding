@@ -70,6 +70,11 @@ class _FakeLoop:
         self.model = ""
         self.script = list(script or [])
         self.calls: list[dict] = []
+        # 11-plan T9 (sanctioned double extension): the boot-resume path hands
+        # this loop to PlanRunner, whose policy swap reads loop.policy.
+        from ai_coding.core.turn_policy import TurnPolicy
+
+        self.policy = TurnPolicy()
 
     def set_model(self, name: str) -> None:
         self.model = name
@@ -1391,4 +1396,54 @@ async def test_interrupt_disarms_an_armed_task(ipc):
     client.request("session.interrupt")
 
     reloaded = world.sessions.load(session_id)
+    assert reloaded.task.armed is False
+
+
+@pytest.mark.asyncio
+async def test_initialize_consumes_an_armed_session_once(ipc):
+    """11-spec §7.2: the boot candidate is loaded as live and resumed; the
+    second initialize goes back to a fresh session."""
+    world, _service, client = ipc
+    from ai_coding.domain.task import TaskState
+
+    armed = world.sessions.create(title="armed")
+    task = TaskState(goal="g")
+    task.add("step")
+    task.armed = True
+    task.armed_profile = "plan"
+    armed.task = task
+    world.sessions.save(armed)
+    world.pending_resume = world.sessions.load(armed.session_id)
+
+    hello = client.request("initialize")
+
+    assert hello["sessionId"] == armed.session_id
+    assert world.pending_resume is None
+    again = client.request("initialize")
+    assert again["sessionId"] != armed.session_id
+
+
+@pytest.mark.asyncio
+async def test_boot_resume_breaker_disarms_past_the_cap(ipc):
+    """11-spec §7.2 + audit fix: past the cap the RELOADED task is disarmed
+    (the old sketch mutated the pre-load object and the disk copy stayed
+    armed) with a notice."""
+    world, _service, client = ipc
+    from ai_coding.domain.task import TaskState
+
+    armed = world.sessions.create(title="flapping")
+    task = TaskState(goal="g")
+    task.add("step")
+    task.armed = True
+    task.armed_profile = "plan"
+    task.resume_count = 5
+    armed.task = task
+    world.sessions.save(armed)
+    world.pending_resume = world.sessions.load(armed.session_id)
+
+    hello = client.request("initialize")
+
+    assert hello["sessionId"] == armed.session_id
+    assert await client.wait_for(lambda: any("自动续跑" in str(e) for e in client.events))
+    reloaded = world.sessions.load(armed.session_id)
     assert reloaded.task.armed is False

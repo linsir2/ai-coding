@@ -149,6 +149,11 @@ class _WorldState:
         self.turn_futures: set[Future[Any]] = set()
 
 
+#: 11-spec §7.2: boot auto-resumes are capped; past this the task is disarmed
+#: with a notice instead of flapping forever (OpenCode's countResume shape).
+_MAX_BOOT_RESUMES = 5
+
+
 def _persist_session(world: Any, session: Any) -> None:
     """Best-effort durable save (11-spec §7): the loop's closer when it has
     one (tool pairing + degraded reporting), plain service save otherwise."""
@@ -209,9 +214,51 @@ def make_handlers(
     def initialize(params: dict[str, Any]) -> dict[str, Any]:
         from ai_coding import __version__
 
-        session = world.sessions.create()
-        state.session = session
-        state.session_id = session.session_id
+        # 11-spec §7.2: consume the boot candidate exactly once.  An armed
+        # task is the user's standing consent to keep working, so it is
+        # loaded live and its driver resumes -- unless the breaker says stop.
+        # (Audit fix: every mutation below goes through the RELOADED session;
+        # the pre-load object is a different instance and saving it would
+        # leave the disk copy armed.)
+        pending = getattr(world, "pending_resume", None)
+        world.pending_resume = None
+        boot_session = None
+        if pending is not None:
+            candidate = world.sessions.load(pending.session_id) or pending
+            candidate_task = getattr(candidate, "task", None)
+            if (
+                candidate_task is not None
+                and getattr(candidate_task, "armed", False)
+                and getattr(candidate_task, "armed_profile", "") == "plan"
+            ):
+                boot_session = candidate
+        if boot_session is not None:
+            session = boot_session
+            state.session = session
+            state.session_id = session.session_id
+            task = session.task
+            if int(getattr(task, "resume_count", 0) or 0) >= _MAX_BOOT_RESUMES:
+                task.armed = False
+                _persist_session(world, session)
+                service.notify(
+                    "event",
+                    {
+                        "type": "console.line",
+                        "data": {
+                            "tone": "error",
+                            "text": (
+                                f"[plan] 自动续跑已达上限（{_MAX_BOOT_RESUMES} 次），"
+                                "任务已暂停；检查后继续对话或重新进入 Plan 模式。"
+                            ),
+                        },
+                    },
+                )
+            else:
+                _launch_boot_resume(session)
+        else:
+            session = world.sessions.create()
+            state.session = session
+            state.session_id = session.session_id
         model = getattr(world.engine, "model_config", None)
         models = [
             {"name": str(getattr(cfg, "name", "") or key), "key": key}
@@ -313,6 +360,39 @@ def make_handlers(
         state.turn_futures.add(future)
         future.add_done_callback(state.turn_futures.discard)
         return state.turn_id
+
+    def _launch_boot_resume(session: Any) -> None:
+        """Resume an armed task after a restart (11-spec §7.2): the interrupted
+        round first (when one is open), then the plan run itself.
+
+        The run goes through ``PlanRunner.run``, not the driver directly --
+        that entry carries the whole armed lifecycle (arm / roundsRun /
+        disarm persistence), which a bare driver call would bypass.
+        """
+
+        async def run_resume() -> None:
+            from ai_coding.core.plan_runner import PlanRunner
+
+            task = getattr(session, "task", None)
+            # Count BEFORE resuming: if this resume crashes too, the count is
+            # already on disk and the breaker keeps converging.
+            if task is not None:
+                task.resume_count = int(getattr(task, "resume_count", 0) or 0) + 1
+                _persist_session(world, session)
+            if session.open_turn is not None:
+                await world.loop.resume_turn(
+                    session, on_delta=bridge.on_delta, observer=bridge
+                )
+            if not getattr(task, "armed", False):
+                return
+            console = IpcConsole(
+                lambda method, message: service.notify(method, message), bridge.on_delta
+            )
+            await PlanRunner(world.loop).run(
+                session, console, on_delta=bridge.on_delta, observer=bridge
+            )
+
+        _launch_turn(run_resume)
 
     def session_prompt(params: dict[str, Any]) -> dict[str, Any]:
         """Start a real turn; events reach the client through the bridge."""
