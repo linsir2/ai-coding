@@ -14,16 +14,10 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { For, Show, createSignal } from "solid-js"
 import { theme } from "../theme/tokens"
 import { moveSelection } from "../util/dialog-select"
-import type { PermissionDecision } from "../util/permission"
-import { PERMISSION_OPTIONS, permissionPayload } from "../util/permission"
+import type { PermissionDecision, PermissionRequest } from "../util/permission"
+import { NO_GRANT_NOTE, permissionOptions, permissionPayload } from "../util/permission"
 import { toolTarget, toolVerb } from "../util/toolmeta"
 import { PROMPT_BORDER } from "./prompt"
-
-export interface PermissionRequest {
-  toolName: string
-  params: Record<string, unknown>
-  reason: string
-}
 
 export function PermissionPanel(props: {
   request: PermissionRequest
@@ -31,12 +25,18 @@ export function PermissionPanel(props: {
 }) {
   const dimensions = useTerminalDimensions()
   const [selected, setSelected] = createSignal(0)
+  // P0-4A: the table shrinks when the gate could not remember the call, so the
+  // index, the arrow wrap and the rendered row all read the same list.
+  const options = () => permissionOptions(props.request)
   const move = (delta: number) =>
-    setSelected((current) => moveSelection(current, delta, PERMISSION_OPTIONS.length))
+    setSelected((current) => moveSelection(current, delta, options().length))
   const confirm = () => {
-    const option = PERMISSION_OPTIONS[selected()]
+    // A new request can arrive while the panel is open (app.tsx supersedes a
+    // stale one), and the index may then point past the shorter table.
+    const option = options()[selected()] ?? options()[options().length - 1]
     if (option) props.onDecide(option.decision)
   }
+  const grantable = () => props.request.grantable !== false
 
   useBindings(() => ({
     enabled: true,
@@ -45,8 +45,18 @@ export function PermissionPanel(props: {
       { name: "permission.next", desc: "Next option", run: () => move(1) },
       { name: "permission.confirm", desc: "Confirm the selected option", run: confirm },
       { name: "permission.once", desc: "Allow this call", run: () => props.onDecide("yes") },
-      { name: "permission.always", desc: "Allow and remember", run: () => props.onDecide("always") },
       { name: "permission.reject", desc: "Reject this call", run: () => props.onDecide("no") },
+      // Only reachable while the option is on screen: a keymap that still binds
+      // this command must not manufacture the decision the panel just hid.
+      ...(grantable()
+        ? [
+            {
+              name: "permission.always",
+              desc: "Allow and remember",
+              run: () => props.onDecide("always"),
+            },
+          ]
+        : []),
     ],
     bindings: [
       { key: "left", cmd: "permission.prev" },
@@ -56,9 +66,9 @@ export function PermissionPanel(props: {
       { key: "tab", cmd: "permission.next" },
       { key: "return", cmd: "permission.confirm" },
       { key: "y", cmd: "permission.once" },
-      { key: "a", cmd: "permission.always" },
       { key: "n", cmd: "permission.reject" },
       { key: "escape", cmd: "permission.reject" },
+      ...(grantable() ? [{ key: "a", cmd: "permission.always" }] : []),
     ],
   }))
 
@@ -101,8 +111,18 @@ export function PermissionPanel(props: {
       <Show when={props.request.reason}>
         <text fg={theme.textMuted}>{props.request.reason}</text>
       </Show>
+      {/* P0-4A: say why the remembered option is absent rather than silently
+          showing fewer choices -- an operator who cannot tell "bash is never
+          remembered" from "the panel lost an option" will press the wrong key. */}
+      <Show when={!grantable()}>
+        <text fg={theme.textMuted}>
+          {NO_GRANT_NOTE.length > panelWidth() - 4
+            ? `${NO_GRANT_NOTE.slice(0, panelWidth() - 7)}…`
+            : NO_GRANT_NOTE}
+        </text>
+      </Show>
       <box flexDirection="row" gap={2} marginTop={1}>
-        <For each={PERMISSION_OPTIONS}>
+        <For each={options()}>
           {(option, index) => (
             <box
               paddingLeft={1}

@@ -21,6 +21,55 @@ export const PERMISSION_OPTIONS: PermissionOption[] = [
   { key: "reject", label: "Reject", decision: "no" },
 ]
 
+/**
+ * The options this call can actually honour (P0-4A).
+ *
+ * "Always allow" writes down whatever `grant_key` names, and that returns
+ * `None` for bash (a policy exclusion) and for any call whose arguments name no
+ * single resource. Offering it anyway is a promise the gate keeps breaking: the
+ * call runs once and the next identical call asks again, with the same button.
+ *
+ * The answer arrives with the request (`grantable`), so this rule stays in one
+ * place -- the gate's. A request without the field predates the payload and gets
+ * the full table, which is the honest default for a call that can be named.
+ */
+export function permissionOptions(request: { grantable?: boolean }): PermissionOption[] {
+  if (request.grantable !== false) return PERMISSION_OPTIONS
+  return PERMISSION_OPTIONS.filter((option) => option.decision !== "always")
+}
+
+/** Why the remembered option is missing, in the panel's own voice. */
+export const NO_GRANT_NOTE =
+  "Not remembered for this call — it names no single resource (or policy excludes it), so it is asked every time."
+
+/** What the panel is asked about: the wire payload, in panel terms. */
+export interface PermissionRequest {
+  toolName: string
+  params: Record<string, unknown>
+  reason: string
+  /** Whether an "always" would be remembered (handlers.py sends the gate's own
+   *  `grant_key` answer).  Absent means predates the payload: offer everything. */
+  grantable?: boolean
+}
+
+/**
+ * `approval.request` params -> the panel's request (P0-4A).
+ *
+ * The mapper is the whole reason `grantable` works: a field the panel needs but
+ * nobody copies is a field the panel never sees, and the option silently comes
+ * back. Keeping it here means the wiring is testable without a socket.
+ */
+export function permissionRequest(params: Record<string, unknown>): PermissionRequest {
+  return {
+    toolName: String(params["toolName"] ?? ""),
+    params: (params["params"] as Record<string, unknown> | undefined) ?? {},
+    reason: String(params["reason"] ?? ""),
+    // `undefined` must survive as undefined: an older backend sends nothing, and
+    // that means "offer everything", not "nothing can be remembered".
+    grantable: typeof params["grantable"] === "boolean" ? params["grantable"] : undefined,
+  }
+}
+
 /** How much of one argument the panel will print. */
 const VALUE_LIMIT = 160
 /** How many lines the whole block may take, so a big payload cannot scroll

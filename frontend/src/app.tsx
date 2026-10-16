@@ -21,7 +21,7 @@ import { DialogSessions } from "./component/dialog-sessions"
 import { DialogSkillPending } from "./component/dialog-skill-pending"
 import { DialogPermissions } from "./component/dialog-permissions"
 import { DialogStatus } from "./component/dialog-status"
-import { type PermissionRequest } from "./component/permission"
+
 
 import { ToastProvider } from "./component/toast"
 import { DialogProvider, useDialog } from "./dialog/context"
@@ -35,7 +35,8 @@ import { initialState, type SessionState } from "./state/session"
 import { theme } from "./theme/tokens"
 import { parseAskRequest, type AskRequest } from "./util/ask"
 import { quitSequence } from "./util/exit"
-import type { PermissionDecision } from "./util/permission"
+import type { PermissionDecision, PermissionRequest } from "./util/permission"
+import { permissionRequest } from "./util/permission"
 import type { PromptImage } from "./util/attachment"
 import type { PendingPrompt } from "./util/submission"
 
@@ -270,11 +271,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
       resolvePermission?.("no")
       return new Promise<PermissionDecision>((resolve) => {
         resolvePermission = resolve
-        setPermission({
-          toolName: String(params["toolName"] ?? ""),
-          params: (params["params"] as Record<string, unknown> | undefined) ?? {},
-          reason: String(params["reason"] ?? ""),
-        })
+        setPermission(permissionRequest(params))
       })
     })
     // The other direction: the model's own question (ask_user tool).

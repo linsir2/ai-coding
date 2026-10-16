@@ -19,7 +19,7 @@ import { MessageView } from "../component/message"
 import { DialogSkills } from "../component/dialog-skills"
 import { AskPanel } from "../component/ask"
 import { PlanReviewPanel } from "../component/plan-review"
-import { PermissionPanel, type PermissionRequest } from "../component/permission"
+import { PermissionPanel } from "../component/permission"
 import { Prompt } from "../component/prompt"
 import { buildSubmission, commandName, planPrelude, type PendingPrompt } from "../util/submission"
 import { SessionHeader } from "../component/session-header"
@@ -36,7 +36,7 @@ import { theme } from "../theme/tokens"
 import { escStep } from "../util/esc"
 import { loadSession, resumeSession } from "../state/replay"
 import { isPlanApproval, type AskRequest } from "../util/ask"
-import type { PermissionDecision } from "../util/permission"
+import type { PermissionDecision, PermissionRequest } from "../util/permission"
 
 export interface SessionProps {
   client: IpcClient

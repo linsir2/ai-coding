@@ -65,10 +65,23 @@ def _install_providers(world: AppWorld, service: IpcService) -> None:
     if set_approval_provider is not None:
 
         async def approval_provider(tool_name: str, params: dict[str, Any], reason: str) -> str:
+            from ai_coding.security.permission_gate import grant_key
+
             return str(
                 await service.call(
                     "approval.request",
-                    {"toolName": tool_name, "params": params, "reason": reason},
+                    {
+                        "toolName": tool_name,
+                        "params": params,
+                        "reason": reason,
+                        # P0-4A: whether an "always" would be remembered at all.
+                        # ``grant_key`` is the recorder's own rule -- the same call
+                        # ``PermissionGate.grant`` makes -- so the answer travels
+                        # instead of the panel re-implementing a security rule in
+                        # TypeScript.  ``None`` means policy excludes the tool or
+                        # the arguments name no single resource.
+                        "grantable": grant_key(tool_name, params) is not None,
+                    },
                 )
             )
 

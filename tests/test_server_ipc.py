@@ -885,6 +885,37 @@ async def test_interrupt_with_no_turn_is_a_noop(ipc):
 
 
 @pytest.mark.asyncio
+async def test_the_approval_request_says_whether_an_always_can_be_remembered(ipc):
+    """P0-4A: an "always" the gate cannot record is a promise it keeps breaking.
+
+    ``grant_key`` is the recorder's own rule (``PermissionGate.grant`` calls it
+    and writes nothing when it returns None): bash is excluded by policy, and so
+    is any call whose arguments name no single resource.  The answer therefore
+    travels with the request -- the panel must not re-implement the rule.
+    """
+    world, _service, client = ipc
+    client.approval_answer = "yes"
+
+    await world.approval.approve("bash", {"command": "ls"}, "warn tier")
+    assert client.approval_requests[-1]["grantable"] is False
+
+    await world.approval.approve("write", {"path": "a.py"}, "warn tier")
+    assert client.approval_requests[-1]["grantable"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_mcp_answer_still_declares_itself_rememberable(ipc):
+    """A remote tool is remembered by name (``grant_key`` splits on ``__``), so
+    the M2 shape stays an offer rather than a silent once."""
+    world, _service, client = ipc
+    client.approval_answer = "yes"
+
+    await world.approval.approve("fs__write_file", {"server": "fs"}, "warn tier")
+
+    assert client.approval_requests[-1]["grantable"] is True
+
+
+@pytest.mark.asyncio
 async def test_approval_round_trip_over_the_wire(ipc):
     """M5: a WARN call's prompt travels as a server-initiated JSON-RPC request.
 
@@ -899,6 +930,9 @@ async def test_approval_round_trip_over_the_wire(ipc):
         "toolName": "write",
         "params": {"path": "a.py"},
         "reason": "warn tier",
+        # P0-4A migration: the payload gained the gate's own grantable answer
+        # (sanctioned -- the round trip and its vocabulary are what this pins).
+        "grantable": True,
     }
 
 

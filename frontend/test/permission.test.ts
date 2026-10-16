@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { PERMISSION_OPTIONS, permissionPayload } from "../src/util/permission"
+import { PERMISSION_OPTIONS, permissionOptions, permissionPayload, permissionRequest } from "../src/util/permission"
 
 describe("permission options", () => {
   test("offers once, always and reject with OpenCode's labels", () => {
@@ -16,6 +16,48 @@ describe("permission options", () => {
       "Always allow",
       "Reject",
     ])
+  })
+
+  test("an always the gate cannot remember is not offered at all", () => {
+    // grant_key is the recorder's own rule; for bash (and any call naming no
+    // single resource) it returns None, so "always" would approve once and
+    // forget -- an empty promise the panel must not make.
+    expect(permissionOptions({ grantable: false }).map((option) => option.decision)).toEqual([
+      "yes",
+      "no",
+    ])
+  })
+
+  test("a rememberable call keeps the shared option table", () => {
+    expect(permissionOptions({})).toBe(PERMISSION_OPTIONS)
+    expect(permissionOptions({ grantable: true })).toBe(PERMISSION_OPTIONS)
+  })
+
+  test("the wire payload keeps the gate's answer, and a missing one stays missing", () => {
+    // Found live: the field reached the wire and the panel still offered
+    // "always", because nobody copied it into the request. The mapper is the fix
+    // and the reason it is a function.
+    const notRememberable = permissionRequest({
+      toolName: "bash",
+      params: { command: "ls" },
+      reason: "warn",
+      grantable: false,
+    })
+    expect(notRememberable.grantable).toBe(false)
+    expect(permissionOptions(notRememberable).map((o) => o.decision)).toEqual(["yes", "no"])
+
+    const rememberable = permissionRequest({
+      toolName: "write",
+      params: { path: "a.py" },
+      reason: "warn",
+      grantable: true,
+    })
+    expect(rememberable.grantable).toBe(true)
+    expect(permissionOptions(rememberable)).toBe(PERMISSION_OPTIONS)
+
+    // An older backend sends nothing, which means "offer everything" -- not
+    // "nothing can be remembered".
+    expect(permissionRequest({ toolName: "bash", reason: "warn" }).grantable).toBeUndefined()
   })
 
   test("every option decodes to a decision the backend parser accepts", () => {
