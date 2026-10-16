@@ -183,10 +183,13 @@ class BashTool(BaseTool):
         if outcome.timed_out:
             # Partial output is kept: it often says where the command got stuck.
             # The note teaches the exit: widen and retry while headroom
-            # remains, split or background once the ceiling is reached.  This
-            # text is the loop's only way out, so it names both the knob and
-            # the number — a bare "timed out" is what the model used to poll
-            # against until the iteration budget died.
+            # remains, split once the ceiling is reached.  This text is the
+            # loop's only way out, so it names both the knob and the number — a
+            # bare "timed out" is what the model used to poll against until the
+            # iteration budget died.  It used to end with "run it in the
+            # background and poll", which this harness cannot do: there is no
+            # background job, no job id, and nothing to poll.  Advice the model
+            # cannot follow is how a stall turns into a budget death (Q2).
             if effective < self._max_timeout:
                 note = (
                     f"timeout: command exceeded {effective}s limit; retry with "
@@ -195,8 +198,9 @@ class BashTool(BaseTool):
             else:
                 note = (
                     f"timeout: command exceeded {effective}s limit (already at "
-                    f"the {self._max_timeout}s ceiling); split the command, "
-                    "narrow its scope, or run it in the background and poll"
+                    f"the {self._max_timeout}s ceiling); split the command into "
+                    "smaller steps or narrow its scope — there is no "
+                    "background-job mechanism here to run it in and poll"
                 )
             return ToolResult(
                 success=False,

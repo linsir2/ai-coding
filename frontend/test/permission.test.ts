@@ -7,7 +7,13 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { PERMISSION_OPTIONS, permissionOptions, permissionPayload, permissionRequest } from "../src/util/permission"
+import {
+  PERMISSION_OPTIONS,
+  permissionAnswer,
+  permissionOptions,
+  permissionPayload,
+  permissionRequest,
+} from "../src/util/permission"
 
 describe("permission options", () => {
   test("offers once, always, reject and stop with OpenCode's labels", () => {
@@ -44,6 +50,27 @@ describe("permission options", () => {
   test("a rememberable call keeps the shared option table", () => {
     expect(permissionOptions({})).toBe(PERMISSION_OPTIONS)
     expect(permissionOptions({ grantable: true })).toBe(PERMISSION_OPTIONS)
+  })
+
+  test("a refusal carries the operator's own words; an approval carries none", () => {
+    // C-3: the note rides on the answer so it cannot be lost to a second
+    // round-trip. The backend lifts it off before the shared parser sees the
+    // string, and puts it on the user lane.
+    expect(permissionAnswer("no", "  改用 ls -la 看清楚  ")).toBe("no::改用 ls -la 看清楚")
+    // Empty or whitespace-only notes are not sent at all: "no::" would make the
+    // operator look like they had said something when they had not.
+    expect(permissionAnswer("no", "")).toBe("no")
+    expect(permissionAnswer("no", "   ")).toBe("no")
+    expect(permissionAnswer("yes", "改用 ls")).toBe("yes::改用 ls")
+  })
+
+  test("the answer a bare decision produces is still the CLI vocabulary", () => {
+    // The parser recognizes exactly these words and fails closed on anything
+    // else, so the note must be the only thing a decision ever grows.
+    const accepted = new Set(["yes", "always", "no", "stop"])
+    for (const decision of ["yes", "always", "no", "stop"] as const) {
+      expect(accepted.has(permissionAnswer(decision))).toBe(true)
+    }
   })
 
   test("the wire payload keeps the gate's answer, and a missing one stays missing", () => {

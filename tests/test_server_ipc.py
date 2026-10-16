@@ -921,6 +921,57 @@ async def test_the_approval_request_says_whether_an_always_can_be_remembered(ipc
 
 
 @pytest.mark.asyncio
+async def test_a_rejection_can_carry_what_the_operator_would_accept_instead(ipc):
+    """C-3: "no" tells the model nothing it can act on.
+
+    The note is the operator *speaking*, so it goes on the user lane -- the same
+    SteeringQueue the composer writes to -- and lands in the very next request,
+    right after the refusal it answers.  It is lifted off here, in the one place
+    that sees both the raw front-end string and the world, which is why the
+    shared parser and ``ApprovalResult`` stay exactly as they are (the REPL's
+    vocabulary and its pinned call sites included).
+    """
+    world, _service, client = ipc
+    client.approval_answer = "no::改用 ls -la 看清楚"
+
+    result = await world.approval.approve("bash", {"command": "rm -rf build"}, "warn tier")
+
+    assert result is ApprovalResult.NO
+    assert world.steering.drain() == ["改用 ls -la 看清楚"]
+
+
+@pytest.mark.asyncio
+async def test_a_bare_answer_still_carries_nothing(ipc):
+    """The regression half: an answer with no note must leave the user lane
+    untouched, or every refusal would inject a phantom instruction."""
+    world, _service, client = ipc
+    client.approval_answer = "always"
+
+    result = await world.approval.approve("write", {"path": "a.py"}, "warn tier")
+
+    assert result is ApprovalResult.ALWAYS
+    assert world.steering.pending == 0
+
+
+@pytest.mark.asyncio
+async def test_a_note_the_queue_refuses_is_logged_not_rewritten(ipc, caplog):
+    """The queue refuses a line starting with ``/`` (that is a command). The
+    operator's words are not ours to rewrite, so the note is dropped with a log
+    line rather than silently mangled into something else."""
+    import logging
+
+    world, _service, client = ipc
+    client.approval_answer = "no::/usr/bin/rm -rf build"
+    caplog.set_level(logging.INFO, logger="ai_coding.server.handlers")
+
+    result = await world.approval.approve("bash", {"command": "rm -rf build"}, "warn tier")
+
+    assert result is ApprovalResult.NO
+    assert world.steering.pending == 0
+    assert "looks like a command" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_the_mcp_answer_still_declares_itself_rememberable(ipc):
     """A remote tool is remembered by name (``grant_key`` splits on ``__``), so
     the M2 shape stays an offer rather than a silent once."""

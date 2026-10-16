@@ -16,6 +16,7 @@ const render = async (request: {
   toolName: string
   params: Record<string, unknown>
   reason: string
+  grantable?: boolean
 }) => {
   const base = await createTestRenderer({ width: 80, height: 20 })
   const setup = await testRender(
@@ -36,6 +37,19 @@ const render = async (request: {
 const textOf = (frame: string): string => frame.split("\n").join(" ")
 
 describe("PermissionPanel", () => {
+  test("the note row is not there until a refusal is selected (C-3)", async () => {
+    // The panel's quick keys are letters (y/a/n/s). A focused input does NOT
+    // swallow them -- measured live on the plan-review card, where pressing "1"
+    // with the input focused still ran plan-review.approve -- so a note row that
+    // appeared unconditionally would turn "sleep" into "stop this turn". It
+    // appears for the refusal option only, where those keys are unregistered.
+    const frame = textOf(
+      await render({ toolName: "bash", params: { command: "ls" }, reason: "warn" }),
+    )
+    expect(frame).not.toContain("改做什么")
+    expect(frame).not.toContain("为什么拒绝")
+  })
+
   test("an MCP approval shows the arguments it is about to run", async () => {
     const frame = textOf(
       await render({

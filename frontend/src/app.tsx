@@ -36,7 +36,7 @@ import { theme } from "./theme/tokens"
 import { parseAskRequest, type AskRequest } from "./util/ask"
 import { quitSequence } from "./util/exit"
 import type { PermissionDecision, PermissionRequest } from "./util/permission"
-import { permissionRequest } from "./util/permission"
+import { permissionAnswer, permissionRequest } from "./util/permission"
 import type { PromptImage } from "./util/attachment"
 import type { PendingPrompt } from "./util/submission"
 
@@ -96,7 +96,12 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
   const [sessions, setSessions] = createSignal<SessionRow[]>([])
   const [permission, setPermission] = createSignal<PermissionRequest | null>(null)
   // The pending ``approval.request``'s resolver; the panel's answer resolves it.
-  let resolvePermission: ((decision: PermissionDecision) => void) | null = null
+  // C-3: a refusal may arrive with the operator's own words, so the resolved
+  // value is the *answer string* (what the backend's parser reads), not the
+  // decision word alone -- ``PermissionDecision`` was always the narrower half
+  // of it and only looked like the whole. ``permissionAnswer`` is the one place
+  // that builds the string.
+  let resolvePermission: ((answer: string) => void) | null = null
 
   // One dialog shows at a time and opening replaces what is there, so the
   // wizard hands the panel back rather than closing to the composer: the row
@@ -118,11 +123,11 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
       "large",
     )
 
-  const decidePermission = (decision: PermissionDecision) => {
+  const decidePermission = (decision: PermissionDecision, note?: string) => {
     const resolve = resolvePermission
     resolvePermission = null
     setPermission(null)
-    resolve?.(decision)
+    resolve?.(permissionAnswer(decision, note))
   }
 
   const [ask, setAsk] = createSignal<AskRequest | null>(null)
@@ -276,7 +281,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
       // A newer request supersedes a stale panel (a timed-out one whose
       // backend already moved on): resolve the old waiter fail-closed.
       resolvePermission?.("no")
-      return new Promise<PermissionDecision>((resolve) => {
+      return new Promise<string>((resolve) => {
         resolvePermission = resolve
         setPermission(permissionRequest(params))
       })

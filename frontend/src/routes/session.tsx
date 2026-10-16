@@ -55,7 +55,7 @@ export interface SessionProps {
   version: string
   /** A pending WARN-tier approval; replaces the prompt while non-null (M5). */
   permission: PermissionRequest | null
-  onPermissionDecide: (decision: PermissionDecision) => void
+  onPermissionDecide: (decision: PermissionDecision, note?: string) => void
   ask: AskRequest | null
   onAskAnswer: (answer: string) => void
   /** Leave through the shell's exit sequence (a command's `/quit`, I5). */

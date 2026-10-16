@@ -21,7 +21,9 @@ import { PROMPT_BORDER } from "./prompt"
 
 export function PermissionPanel(props: {
   request: PermissionRequest
-  onDecide: (decision: PermissionDecision) => void
+  /** `note` rides only with a refusal: it is what the operator would accept
+   *  instead (C-3). The panel owns that rule, so the backend never has to. */
+  onDecide: (decision: PermissionDecision, note?: string) => void
 }) {
   const dimensions = useTerminalDimensions()
   const [selected, setSelected] = createSignal(0)
@@ -34,9 +36,19 @@ export function PermissionPanel(props: {
     // A new request can arrive while the panel is open (app.tsx supersedes a
     // stale one), and the index may then point past the shorter table.
     const option = options()[selected()] ?? options()[options().length - 1]
-    if (option) props.onDecide(option.decision)
+    if (!option) return
+    // The note belongs to the refusal the operator just typed it into; every
+    // other answer is a decision about this call, not a sentence about the next.
+    props.onDecide(option.decision, refusalSelected() ? note() : undefined)
   }
   const grantable = () => props.request.grantable !== false
+  // C-3: the note row belongs to the refusal option. It is not decoration on
+  // top of the panel: a focused <input> does NOT swallow letter keys (measured
+  // live -- with plan-review's input focused, "1" still ran its approve
+  // command), so a row that appeared unconditionally would turn "sleep" into
+  // "stop this turn" and "no thanks" into an immediate refusal.
+  const [note, setNote] = createSignal("")
+  const refusalSelected = () => options()[selected()]?.decision === "no"
 
   useBindings(() => ({
     enabled: true,
@@ -59,19 +71,29 @@ export function PermissionPanel(props: {
           ]
         : []),
     ],
-    bindings: [
-      { key: "left", cmd: "permission.prev" },
-      { key: "h", cmd: "permission.prev" },
-      { key: "right", cmd: "permission.next" },
-      { key: "l", cmd: "permission.next" },
-      { key: "tab", cmd: "permission.next" },
-      { key: "return", cmd: "permission.confirm" },
-      { key: "y", cmd: "permission.once" },
-      { key: "n", cmd: "permission.reject" },
-      { key: "s", cmd: "permission.stop" },
-      { key: "escape", cmd: "permission.reject" },
-      ...(grantable() ? [{ key: "a", cmd: "permission.always" }] : []),
-    ],
+    bindings: refusalSelected()
+      ? // The note row is up: the keyboard belongs to the text. Only the
+        // navigation keys and the fail-closed escape stay -- arrows move the
+        // selection (and therefore close the row), escape still refuses.
+        [
+          { key: "left", cmd: "permission.prev" },
+          { key: "right", cmd: "permission.next" },
+          { key: "tab", cmd: "permission.next" },
+          { key: "escape", cmd: "permission.reject" },
+        ]
+      : [
+          { key: "left", cmd: "permission.prev" },
+          { key: "h", cmd: "permission.prev" },
+          { key: "right", cmd: "permission.next" },
+          { key: "l", cmd: "permission.next" },
+          { key: "tab", cmd: "permission.next" },
+          { key: "return", cmd: "permission.confirm" },
+          { key: "y", cmd: "permission.once" },
+          { key: "n", cmd: "permission.reject" },
+          { key: "s", cmd: "permission.stop" },
+          { key: "escape", cmd: "permission.reject" },
+          ...(grantable() ? [{ key: "a", cmd: "permission.always" }] : []),
+        ],
   }))
 
   const target = () => toolTarget(props.request.toolName, props.request.params)
@@ -123,6 +145,20 @@ export function PermissionPanel(props: {
             : NO_GRANT_NOTE}
         </text>
       </Show>
+      {/* C-3: the note row. Same shape as plan-review's feedback input (the
+          repo's one precedent for a human typing into a card), reached by
+          selecting the refusal instead of pressing its quick key. */}
+      <Show when={refusalSelected()}>
+        <box flexDirection="row" marginTop={1}>
+          <text fg={theme.textMuted}>{"› "}</text>
+          <input
+            focused
+            placeholder="为什么拒绝？改做什么也行，enter 提交（可留空）"
+            onInput={(value: string) => setNote(value)}
+            onSubmit={confirm}
+          />
+        </box>
+      </Show>
       <box flexDirection="row" gap={2} marginTop={1}>
         <For each={options()}>
           {(option, index) => (
@@ -143,7 +179,11 @@ export function PermissionPanel(props: {
           )}
         </For>
       </box>
-      <text fg={theme.textMuted}>←/→ select · enter confirm · s stop · esc reject</text>
+      <text fg={theme.textMuted}>
+        {refusalSelected()
+          ? "enter 附言拒绝 · ←/→ 换个选项 · esc 直接拒绝"
+          : "←/→ select · enter confirm · s stop · esc reject · 选中 Reject 可附一句"}
+      </text>
     </box>
   )
 }

@@ -204,15 +204,25 @@ async def test_bash_timeout_result_teaches_self_widening():
 
 @pytest.mark.asyncio
 async def test_bash_timeout_at_ceiling_suggests_splitting():
-    """已经到顶（max=2s 的构造，sleep 3 真超时）就别再劝加宽，
-    改劝拆分/缩小范围/后台跑。"""
+    """已经到顶（max=2s 的构造，sleep 3 真超时）就别再劝加宽，改劝拆分。
+
+    Q2 迁移: the advice used to end with "run it in the background and poll",
+    and this harness has no such mechanism -- the model was told to do something
+    it cannot do, and would then sit out the iteration budget trying. The text
+    now says so, and the assertion follows the text.
+    """
     tool = BashTool(timeout_seconds=1, max_timeout_seconds=2)
     result = await tool.execute({"command": "sleep 3", "timeout_seconds": 999})
     assert result.success is False
     assert result.error == "timeout"
     lowered = result.output.lower()
     assert "ceiling" in lowered
-    assert "background" in lowered
+    assert "split" in lowered
+    # The old tail was advice the model could not follow; the replacement both
+    # drops it and says why (the word itself must stay -- it is the mechanism
+    # that is missing, not the sentence).
+    assert "run it in the background and poll" not in lowered
+    assert "no background-job mechanism" in lowered
 
 
 @pytest.mark.asyncio

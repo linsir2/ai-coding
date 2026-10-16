@@ -44,6 +44,24 @@ export function permissionOptions(request: { grantable?: boolean }): PermissionO
   return PERMISSION_OPTIONS.filter((option) => option.decision !== "always")
 }
 
+/** How a refusal carries the operator's own words ("no::改用 ls -la"). */
+export const NOTE_SEPARATOR = "::"
+
+/**
+ * The answer, with the operator's note when they wrote one (C-3).
+ *
+ * The note rides on the answer rather than in a second request: the backend
+ * lifts it off before the shared parser sees the string (that parser serves
+ * two front ends and speaks only the CLI vocabulary), and puts it on the user
+ * lane, so it lands in the same request as the refusal it answers. A
+ * whitespace-only note is dropped -- "no::" would make the operator look like
+ * they had said something when they had not.
+ */
+export function permissionAnswer(decision: PermissionDecision, note = ""): string {
+  const text = note.trim()
+  return text ? `${decision}${NOTE_SEPARATOR}${text}` : decision
+}
+
 /** Why the remembered option is missing, in the panel's own voice. */
 export const NO_GRANT_NOTE =
   "Not remembered for this call — it names no single resource (or policy excludes it), so it is asked every time."

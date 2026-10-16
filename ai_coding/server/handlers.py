@@ -67,7 +67,7 @@ def _install_providers(world: AppWorld, service: IpcService) -> None:
         async def approval_provider(tool_name: str, params: dict[str, Any], reason: str) -> str:
             from ai_coding.security.permission_gate import grant_key
 
-            return str(
+            answer = str(
                 await service.call(
                     "approval.request",
                     {
@@ -84,6 +84,22 @@ def _install_providers(world: AppWorld, service: IpcService) -> None:
                     },
                 )
             )
+            # C-3: a refusal may carry the operator's own words.  They are not
+            # metadata on the call -- they are the user speaking, so they go on
+            # the user lane (the queue the composer writes to) and the loop
+            # delivers them at the next iteration boundary, in the same request
+            # as the refusal they answer: this runs before the dispatcher
+            # resumes.  Only the decision token goes on to the shared parser,
+            # which is why ``ApprovalCallback``, ``ApprovalResult`` and the
+            # REPL's vocabulary are untouched.  A note the queue refuses (a line
+            # starting with "/") is logged rather than rewritten -- these words
+            # are the operator's, not ours to edit.
+            decision, separator, note = answer.partition(NOTE_SEPARATOR)
+            if separator and note.strip():
+                queue = getattr(world, "steering", None)
+                if queue is not None and not queue.put(note.strip()):
+                    _log.info("approval note not queued (looks like a command): %r", note[:80])
+            return decision
 
         set_approval_provider(approval_provider)
 
@@ -165,6 +181,12 @@ class _WorldState:
 #: 11-spec §7.2: boot auto-resumes are capped; past this the task is disarmed
 #: with a notice instead of flapping forever (OpenCode's countResume shape).
 _MAX_BOOT_RESUMES = 5
+
+#: C-3: how a refusal carries the operator's own words ("no::改用 ls -la").
+#: The panel builds it (util/permission.ts), and it is lifted back off here --
+#: before the shared parser sees anything, because that parser serves two front
+#: ends and speaks only the CLI vocabulary.  Two literals, one protocol.
+NOTE_SEPARATOR = "::"
 
 
 def _persist_session(world: Any, session: Any) -> None:
