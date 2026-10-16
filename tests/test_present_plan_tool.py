@@ -118,3 +118,29 @@ def test_it_is_a_sleeping_readonly_tool():
     read-only plan gate must keep it callable (whitelist member)."""
     assert PresentPlanTool.parallel_safe is False
     assert PresentPlanTool.mutates_world is False
+
+
+@pytest.mark.asyncio
+async def test_approval_arms_the_task_for_boot_resume():
+    """11-plan T4 (Q1=A): approval is the consent — the live task is armed
+    right here, so the closing turn's own save carries it to disk and a
+    crash before the run dispatch still auto-resumes."""
+    tool, _ = _tool(UserAnswer(answered=True, text='{"choice":"approve"}'))
+    ctx = _ctx()
+    r = await tool.execute({"plan": "# 计划"}, ctx)
+    assert r.success is True and r.data == {"approved": True}
+    assert ctx.task is not None
+    assert ctx.task.armed is True and ctx.task.armed_profile == "plan"
+
+
+@pytest.mark.asyncio
+async def test_keep_and_dismiss_leave_the_task_unarmed():
+    tool, _ = _tool(UserAnswer(answered=True, text='{"choice":"keep","feedback":"改"}'))
+    ctx = _ctx()
+    await tool.execute({"plan": "# 计划"}, ctx)
+    assert ctx.task.armed is False
+
+    tool2, _ = _tool(UserAnswer(answered=False, text=""))
+    ctx2 = _ctx()
+    await tool2.execute({"plan": "# 计划"}, ctx2)
+    assert ctx2.task.armed is False

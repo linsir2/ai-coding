@@ -135,6 +135,12 @@ class PresentPlanTool(BaseTool):
 
         choice, feedback = _parse_answer(answer.text)
         if choice == "approve":
+            # 11-plan T4 (Q1=A): approval IS the consent — arm the live task
+            # here so the closing turn's own save carries it to disk and a
+            # crash before the run dispatch still auto-resumes on boot.
+            if ctx is not None and getattr(ctx, "task", None) is not None:
+                ctx.task.armed = True
+                ctx.task.armed_profile = "plan"
             return ToolResult(success=True, output=_APPROVED, data={"approved": True})
         if feedback:
             return ToolResult(

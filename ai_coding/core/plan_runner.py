@@ -284,10 +284,24 @@ class PlanRunner:
         if task is not None:
             task.armed = True
             task.armed_profile = "plan"
-        report: PlanReport = await TaskDriver(self._loop).run(
-            session, self, console, on_delta=on_delta, observer=observer
-        )
-        return report
+            # 11-spec §4.2: arm is durable before any round runs (crash
+            # point ①: a crash mid-run must leave the task resumable).  A
+            # fiat-only run (all items already done) arms too — its single
+            # loop pass is the backfill — and disarms on the way out.
+            self._persist(session)
+        try:
+            report: PlanReport = await TaskDriver(self._loop).run(
+                session, self, console, on_delta=on_delta, observer=observer
+            )
+            return report
+        finally:
+            # 11-spec §4.2: every exit disarms — completion, a failing round,
+            # the round cap, cancellation, or a mid-air Esc (whose own handler
+            # disarmed already; the shared object makes both writes benign).
+            # The driver disarms on its normal paths; this covers cancellation.
+            if task is not None and getattr(task, "armed", False):
+                task.armed = False
+                self._persist(session)
 
     # ---- RoundProfile (11-plan §5.2): one hook per pre-T3 run-body piece --
 
@@ -372,9 +386,11 @@ class PlanRunner:
         )
 
     def after_round(self, session: Any, task: Any, report: PlanReport) -> None:
-        """Nothing beyond the driver's own receipt note (the old body had
-        only `receipted.add(item.id)` here); the blocked check is
-        ``should_stop``'s business."""
+        """11-spec §5.1: count the round and persist (crash point ②: a crash
+        between rounds leaves ``armed`` + ``roundsRun`` on disk, so the boot
+        scan sees the task and the breaker counts correctly)."""
+        task.rounds_run = int(getattr(task, "rounds_run", 0) or 0) + 1
+        self._persist(session)
 
     def should_stop(self, report: PlanReport, item: Any) -> bool:
         """19 §3.4-3 (Q5=A): a stalled step is recorded, not fatal — the run

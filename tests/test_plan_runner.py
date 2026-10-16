@@ -30,6 +30,17 @@ def _session_with(*contents, verifies=()):
     return session
 
 
+class _RecordingCloser:
+    """Records the armed flag at every parent save (11-plan T4 durability)."""
+
+    def __init__(self) -> None:
+        self.armed_at_save: list[bool] = []
+
+    def save(self, session) -> None:
+        task = getattr(session, "task", None)
+        self.armed_at_save.append(bool(getattr(task, "armed", False)))
+
+
 class _StubLoop:
     """Stands in for AgentLoop: records prompts, plays a script per call."""
 
@@ -44,6 +55,7 @@ class _StubLoop:
         self.calls = []  # (text, policy_max_iterations_at_call)
         self.step_sessions: list = []
         self.restored = True
+        self.closer = _RecordingCloser()
 
     async def process_input(self, session, text, on_delta=None, observer=None):
         session.turn_count += 1
@@ -240,3 +252,42 @@ async def test_a_failed_step_still_leaves_a_replay_marker():
     bubbles = [m for m in session.messages if m.role == "user"]
     assert len(bubbles) == 1 and bubbles[0].content.startswith(STEP_HEAD)
     assert "engine exploded" in session.messages[-1].content
+
+
+@pytest.mark.asyncio
+async def test_arm_is_durable_before_rounds_and_cleared_after():
+    """11-plan T4 (audit addendum): the run arms the task and persists it
+    BEFORE the first round (crash point ①), counts the round, and the
+    disarm is persisted on the way out (crash point ②/§4.2)."""
+    from ai_coding.core.plan_runner import PlanRunner
+
+    loop = _StubLoop(["complete"])
+    session = _session_with("实现某功能")
+
+    report = await PlanRunner(loop).run(session)
+
+    saves = loop.closer.armed_at_save
+    assert saves[0] is True, "task must be armed on disk before the first round"
+    assert saves[-1] is False, "disarm must be persisted on the way out"
+    assert session.task.rounds_run == 1
+    assert report.completed == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_a_fiat_only_run_still_backfills_and_leaves_no_arm():
+    """The screenshot case stays whole through the driver: everything is
+    already done, the loop's last pass backfills receipts, and the task is
+    not left armed."""
+    from ai_coding.core.plan_runner import PlanRunner
+
+    loop = _StubLoop([])
+    session = _session_with("one", "two")
+    session.task.items[0].status = "completed"
+    session.task.items[1].status = "completed"
+
+    report = await PlanRunner(loop).run(session)
+
+    assert loop.calls == []
+    assert len(report.deliveries) == 2
+    assert loop.closer.armed_at_save[-1] is False
+    assert session.task.armed is False
