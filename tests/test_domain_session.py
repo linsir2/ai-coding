@@ -255,3 +255,48 @@ def test_turn_usage_round_trips_the_context_reading():
     # Old rows (no key) read as 0; the legacy fallback lives in the session rule.
     del data["contextTokens"]
     assert TurnUsage.from_dict(data).context_tokens == 0
+
+
+# ------------------- 11 T1: task lifecycle fields ----------------------------
+
+
+def test_task_lifecycle_fields_round_trip():
+    from ai_coding.domain.task import TaskState
+
+    task = TaskState(goal="g")
+    task.add("step")
+    task.armed = True
+    task.armed_profile = "plan"
+    task.rounds_run = 3
+    task.resume_count = 1
+
+    data = task.to_dict()
+
+    assert data["armed"] is True
+    assert data["armedProfile"] == "plan"
+    assert data["roundsRun"] == 3
+    assert data["resumeCount"] == 1
+    back = TaskState.from_dict(data)
+    assert back.armed is True and back.armed_profile == "plan"
+    assert back.rounds_run == 3 and back.resume_count == 1
+
+
+def test_task_lifecycle_defaults_write_no_keys():
+    from ai_coding.domain.task import TaskState
+
+    task = TaskState(goal="g")
+    task.add("step")
+
+    data = task.to_dict()
+
+    for key in ("armed", "armedProfile", "roundsRun", "resumeCount"):
+        assert key not in data
+
+
+def test_task_lifecycle_reads_old_files_without_the_keys():
+    from ai_coding.domain.task import TaskState
+
+    task = TaskState.from_dict({"goal": "", "items": []})
+
+    assert task.armed is False and task.armed_profile == ""
+    assert task.rounds_run == 0 and task.resume_count == 0

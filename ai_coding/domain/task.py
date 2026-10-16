@@ -114,6 +114,18 @@ class TaskState:
     goal: str = ""
     items: list[TodoItem] = field(default_factory=list)
 
+    # ---- 11-spec §4: task lifecycle (armed tasks drive themselves) --------
+    #: True while TaskDriver drives this task (explicit `/plan` arm or a boot
+    #: resume).  Persisted so a crash between rounds leaves it resumable;
+    #: written only when True (same discipline as every optional key).
+    armed: bool = False
+    #: Driver profile name; "plan" is the only one today.
+    armed_profile: str = ""
+    #: Rounds the driver has opened (audit / future caps), across crashes.
+    rounds_run: int = 0
+    #: Boot auto-resumes spent; the breaker disarms past the cap.
+    resume_count: int = 0
+
     # ---- mutations --------------------------------------------------------
 
     def add(
@@ -329,7 +341,19 @@ class TaskState:
     # ---- serialization ----------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
-        return {"goal": self.goal, "items": [item.to_dict() for item in self.items]}
+        data: dict[str, Any] = {
+            "goal": self.goal,
+            "items": [item.to_dict() for item in self.items],
+        }
+        if self.armed:
+            data["armed"] = True
+        if self.armed_profile:
+            data["armedProfile"] = self.armed_profile
+        if self.rounds_run:
+            data["roundsRun"] = int(self.rounds_run)
+        if self.resume_count:
+            data["resumeCount"] = int(self.resume_count)
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TaskState:
@@ -339,7 +363,14 @@ class TaskState:
             for entry in raw_items
             if isinstance(entry, dict) and entry.get("id")
         ]
-        return cls(goal=str(data.get("goal", "")), items=items)
+        return cls(
+            goal=str(data.get("goal", "")),
+            items=items,
+            armed=bool(data.get("armed", False)),
+            armed_profile=str(data.get("armedProfile", "") or ""),
+            rounds_run=int(data.get("roundsRun", 0) or 0),
+            resume_count=int(data.get("resumeCount", 0) or 0),
+        )
 
 
 __all__ = [
