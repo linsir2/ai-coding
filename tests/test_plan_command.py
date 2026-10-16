@@ -403,3 +403,14 @@ def test_the_plan_prompt_submits_through_present_plan():
     from ai_coding.core.plan_runner import PLAN_PROMPT
 
     assert "present_plan" in PLAN_PROMPT
+
+
+def test_the_plan_prompt_bans_clear_rewrites():
+    """20 §批次3: the measured thrash (add -> clear -> add -> clear) emptied
+    the list right before present_plan (24d7109b turn 4); revisions go through
+    update, not clear."""
+    from ai_coding.core.plan_runner import PLAN_PROMPT
+
+    lowered = PLAN_PROMPT.lower()
+    assert "update" in lowered
+    assert "clear" in lowered

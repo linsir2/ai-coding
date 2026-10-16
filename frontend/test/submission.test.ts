@@ -16,7 +16,7 @@ import { describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import type { PromptImage } from "../src/util/attachment"
-import { buildSubmission, commandName } from "../src/util/submission"
+import { buildSubmission, commandName, planPrelude } from "../src/util/submission"
 
 /** The dispatcher's vocabulary, as slash.list would deliver it. */
 const COMMANDS = ["help", "undo", "redo", "compact", "stats"]
@@ -76,11 +76,35 @@ describe("the Home route's signature (r18/F13)", () => {
     "utf8",
   )
 
-  test("onSubmit accepts the images Prompt passes it", () => {
-    expect(src).toMatch(/onSubmit:\s*\(text:\s*string,\s*images:\s*PromptImage\[\]\)/)
+  test("onSubmit accepts the images Prompt passes it, plus the mode (20 §批次1)", () => {
+    expect(src).toMatch(
+      /onSubmit:\s*\(text:\s*string,\s*images:\s*PromptImage\[\],\s*mode:\s*"normal"\s*\|\s*"plan"\)/,
+    )
   })
 
   test("PromptImage is the type it imports", () => {
     expect(src).toMatch(/import[^\n]*PromptImage[^\n]*from "\.\.\/util\/attachment"/)
+  })
+})
+
+describe("planPrelude (20 §批次1)", () => {
+  test("normal mode sends nothing ahead of the prompt", () => {
+    expect(planPrelude({ text: "看这个", images: [] }, COMMANDS, "s1")).toBeNull()
+    expect(planPrelude({ text: "看这个", images: [], mode: "normal" }, COMMANDS, "s1")).toBeNull()
+  })
+
+  test("plan mode enters the posture first, over the same command channel", () => {
+    const prelude = planPrelude(
+      { text: "探索一下你的计划层", images: [], mode: "plan" },
+      COMMANDS,
+      "s1",
+    )
+    expect(prelude?.method).toBe("session.command")
+    expect(prelude?.payload).toEqual({ id: "s1", text: "/plan" })
+  })
+
+  test("a submission that is itself a command skips the prelude", () => {
+    // `/help` is in COMMANDS above; with PLAN armed the command is the work.
+    expect(planPrelude({ text: "/help", images: [], mode: "plan" }, COMMANDS, "s1")).toBeNull()
   })
 })

@@ -123,4 +123,35 @@ describe("ToolCard", () => {
     expect(setup.captureCharFrame()).toContain("截断")
     setup.renderer.destroy()
   })
+
+  // 20 §批次2: the todo card was the raw-task-state wall.  The plan part is
+  // the single place the list lives now -- a settled call draws nothing, a
+  // failure still draws (it is the only place that reaches the operator).
+  test("a settled todo_write draws nothing at all", async () => {
+    const setup = await render(
+      part({
+        toolName: "todo_write",
+        verb: "更新计划",
+        target: "",
+        status: "ok",
+        preview: "<task-state>\n(无任务项)\n</task-state>",
+      }),
+    )
+    // An empty frame still carries the renderer's filler glyphs, so emptiness
+    // is asserted on the content that used to draw, not on whitespace.
+    const frame = setup.captureCharFrame()
+    expect(frame).not.toContain("更新计划")
+    expect(frame).not.toContain("<task-state>")
+    setup.renderer.destroy()
+  })
+
+  test("a failed todo_write still draws its card", async () => {
+    const setup = await render(
+      part({ toolName: "todo_write", verb: "更新计划", target: "", error: "guard_denied" }),
+    )
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("更新计划")
+    expect(frame).toContain("门卫拦截")
+    setup.renderer.destroy()
+  })
 })

@@ -322,11 +322,32 @@ describe("tools", () => {
 
 describe("plan and ledger", () => {
   test("plan.updated appends once and replaces in place on refresh", () => {
-    const first = wire("plan.updated", { display: "- one", done: 0, total: 1 })
-    const second = wire("plan.updated", { display: "✓ one", done: 1, total: 1 })
+    const first = wire("plan.updated", {
+      goal: "g",
+      items: [{ id: "1", content: "one", status: "pending" }],
+    })
+    const second = wire("plan.updated", {
+      goal: "g",
+      items: [{ id: "1", content: "one", status: "completed" }],
+    })
     const state = feed(initialState(), delta("x"), first, second)
     const plans = lastAssistant(state).parts.filter((part) => part.kind === "plan")
-    expect(plans).toEqual([{ kind: "plan", title: "计划 1/1", body: "✓ one" }])
+    expect(plans).toEqual([
+      { kind: "plan", goal: "g", items: [{ id: "1", content: "one", status: "completed" }] },
+    ])
+  })
+
+  test("an emptied plan leaves the transcript", () => {
+    // 20 §批次2: a clear used to leave an "(无任务项)" card behind; empty is
+    // not a plan, so the card goes the way it came.
+    const state = feed(
+      initialState(),
+      delta("x"),
+      wire("plan.updated", { goal: "g", items: [{ id: "1", content: "one", status: "pending" }] }),
+      wire("plan.updated", { goal: "", items: [] }),
+    )
+    const plans = lastAssistant(state).parts.filter((part) => part.kind === "plan")
+    expect(plans).toEqual([])
   })
 
   test("ledger.updated renders level, question and evidence lines", () => {

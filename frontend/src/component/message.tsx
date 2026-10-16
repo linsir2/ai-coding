@@ -16,7 +16,7 @@
  * reactive without remounting.
  */
 
-import { Index, Match, Switch } from "solid-js"
+import { For, Index, Match, Switch, Show } from "solid-js"
 import type { ChatMessage, Part } from "../state/session"
 import { theme } from "../theme/tokens"
 import { markdownSyntax } from "../theme/syntax"
@@ -71,12 +71,46 @@ function PartView(props: { part: Part; alwaysOpen: boolean }) {
         {(part) => <ToolCard part={part() as Extract<Part, { kind: "tool" }>} />}
       </Match>
       <Match when={props.part.kind === "plan" && props.part}>
-        {(part) => (
-          <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
-            <text fg={theme.textMuted}>{(part() as Extract<Part, { kind: "plan" }>).title}</text>
-            <text fg={theme.textMuted}>{(part() as Extract<Part, { kind: "plan" }>).body}</text>
-          </box>
-        )}
+        {(part) => {
+          // 20 §批次2: one in-place card, OpenCode's checkbox grammar. The
+          // markers live here (not task.py's `_MARKERS`) because that table
+          // is prompt format; the UI's job is the glyph a reader scans.
+          const plan = () => part() as Extract<Part, { kind: "plan" }>
+          const done = () => plan().items.filter((item) => item.status === "completed").length
+          const marker = (status: string) =>
+            status === "completed"
+              ? "[✓]"
+              : status === "in_progress"
+                ? "[•]"
+                : status === "blocked"
+                  ? "[!]"
+                  : status === "dropped"
+                    ? "[−]"
+                    : "[ ]"
+          const tone = (status: string) =>
+            status === "completed" || status === "dropped"
+              ? theme.textMuted
+              : status === "in_progress"
+                ? theme.feedbackWarning
+                : status === "blocked"
+                  ? theme.feedbackError
+                  : theme.textBase
+          return (
+            <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
+              <text fg={theme.textMuted}>{`# Todos ${done()}/${plan().items.length}`}</text>
+              <Show when={plan().goal}>
+                <text fg={theme.textMuted}>{`目标: ${plan().goal}`}</text>
+              </Show>
+              <For each={plan().items}>
+                {(item) => (
+                  <text fg={tone(item.status)}>
+                    {`${marker(item.status)} ${item.id}. ${item.content}`}
+                  </text>
+                )}
+              </For>
+            </box>
+          )
+        }}
       </Match>
       <Match when={props.part.kind === "notice" && props.part}>
         {(part) => {

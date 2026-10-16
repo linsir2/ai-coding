@@ -128,3 +128,93 @@ async def test_completing_the_task_clears_the_ledger(tmp_path):
     assert session.intervention_state is None       # items 全终态 → 账本清空
     persisted = sessions.load(session.session_id)
     assert persisted.intervention_state is None     # 条件写：清空后文件里没有键
+
+
+# ---------------- 20 §批次3: a validation refusal is not a failure
+
+
+class _Ok(BaseTool):
+    """One success, so the stall clause (successful_calls == 0) stays out."""
+
+    name = "ok"
+    parallel_safe = True
+
+    @property
+    def description(self) -> str:
+        return "a tool that works"
+
+    @property
+    def params_json_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, params, ctx=None) -> ToolResult:
+        return ToolResult(success=True, output="fine")
+
+
+class _Refuser(BaseTool):
+    """present_plan's verdict class: refuse until the list is written."""
+
+    name = "present_plan"
+    parallel_safe = False
+
+    @property
+    def description(self) -> str:
+        return "refuses to present an empty plan"
+
+    @property
+    def params_json_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, params, ctx=None) -> ToolResult:
+        return ToolResult(success=False, output="计划尚未写成条目", error="no_plan_items")
+
+
+def _call_named(call_id: str, name: str) -> StepResult:
+    return StepResult(
+        text=None,
+        tool_calls=[ToolCallRef(id=call_id, name=name, arguments="{}")],
+        finish_reason="tool_calls",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_validation_refusal_does_not_escalate_the_l1_window(tmp_path):
+    """24d7109b replay: two real failures armed L1; the refusal round (a
+    no_plan_items verdict) used to keep the burn alive, so the closed window
+    read "failed" and L2 ordered a second nudge the model spent on a duplicate
+    report.  A refusal resets the streak (turn_books), the window closes
+    "helped", and the turn carries on."""
+    engine = _ScriptedEngine([
+        _call_named("c1", "ok"),            # a success somewhere in the turn
+        _call_named("c2", "flaky"),         # all-fail 1
+        _call_named("c3", "flaky"),         # all-fail 2 -> L1 fires
+        _call_named("c4", "present_plan"),  # the validation refusal
+        _text("继续修"),
+    ])
+    sessions = SessionService(tmp_path / "sessions")
+    registry = ToolRegistry()
+    registry.register(_Flaky())
+    registry.register(_Ok())
+    registry.register(_Refuser())
+    loop = AgentLoop(
+        engine,
+        sessions,
+        registry,
+        approval=AutoApproveCallback(),
+        settings=AIConfig(),
+        workspace=".",
+    )
+    session = sessions.create()
+
+    await loop.process_input(session, "go")
+
+    strategy = session.intervention_state["strategy"]
+    assert strategy["outcome"] == "helped"
+    assert strategy["level"] == 1
+    nudges = [
+        m.content or ""
+        for m in session.messages
+        if m.synthetic and "strategy-gate" in (m.content or "")
+    ]
+    assert len(nudges) == 1
+    assert "直接拦截" not in nudges[0]  # L2's armed text never lands

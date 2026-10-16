@@ -140,12 +140,17 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
         }
     if isinstance(event, TaskUpdated):
         task = event.task
+        # 20 §批次2: the list itself, not a pre-rendered display -- the UI
+        # draws checkboxes from items (the model-facing rendering stays in
+        # TaskState.render).
         return {
             "type": "plan.updated",
             "data": {
-                "display": task.render_display(),
-                "done": task.done_count,
-                "total": task.total,
+                "goal": task.goal,
+                "items": [
+                    {"id": item.id, "content": item.content, "status": item.status}
+                    for item in task.items
+                ],
             },
         }
     if isinstance(event, LedgerUpdated):

@@ -178,6 +178,14 @@ R1 新增/变更的契约集中在四处。
 各拒绝路径有固定 `error` 码：`denied` / `not_approved` / `stopped` / `skipped` /
 `unknown_tool` / `tool_error` / `mcp_error` / `subagent_error`。
 
+20 §批次2 补 `present_plan` 的四个码（19 §3.2 的评判通道）：
+
+| 新增 | 取值 | 含义 |
+|---|---|---|
+| `ToolResult.error` | `no_plan_items` / `missing_plan` | 计划校验拒绝：条目未写成 / plan 文本为空。是回给模型的**指令**而非故障——`turn_books` 不计入失败链（20 §批次3） |
+| `ToolResult.error` | `user_prompt_error` | 评审问答通道异常（真故障，照常计数） |
+| `ToolResult.error` | `no_user` | 没有可评审的人（fail-closed，照常计数） |
+
 R2 补两个码与一个字段：
 
 | 新增 | 取值 | 含义 |

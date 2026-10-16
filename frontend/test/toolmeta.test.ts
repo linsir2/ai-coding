@@ -26,6 +26,8 @@ describe("toolVerb", () => {
     expect(toolVerb("read")).toBe("读取文件")
     expect(toolVerb("edit")).toBe("编辑文件")
     expect(toolVerb("todo_write")).toBe("更新计划")
+    // 20 §批次2: grep had no verb, so every search drew as 运行工具.
+    expect(toolVerb("grep")).toBe("搜索内容")
   })
 
   test("unknown tools (MCP included) fall back to 运行工具", () => {
@@ -110,6 +112,11 @@ describe("toolFailure", () => {
       ["approval_timeout", "审批超时"],
       ["stopped", "已停止"],
       ["skipped", "已跳过"],
+      // 20 §批次2: present_plan's verdicts are refusals, not breakage --
+      // they must not surface as 未知原因 in the middle of the planning flow.
+      ["no_plan_items", "计划尚未写成条目"],
+      ["missing_plan", "计划内容为空"],
+      ["no_user", "无人评审"],
     ]
     for (const [code, label] of denied) {
       expect(toolFailure(code)).toEqual({ label, tone: "denied" })
@@ -123,6 +130,7 @@ describe("toolFailure", () => {
       ["unknown_tool", "未知工具"],
       ["mcp_error", "MCP 调用失败"],
       ["subagent_error", "子代理失败"],
+      ["user_prompt_error", "评审通道异常"],
     ]
     for (const [code, label] of failed) {
       expect(toolFailure(code)).toEqual({ label, tone: "failed" })

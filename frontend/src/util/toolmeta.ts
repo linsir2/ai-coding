@@ -19,6 +19,7 @@ const TOOL_VERBS: Record<string, string> = {
   edit: "编辑文件",
   write: "写入文件",
   glob: "查找文件",
+  grep: "搜索内容",
   todo_write: "更新计划",
   subAgent: "委派子任务",
   skill: "读取技能",
@@ -107,6 +108,13 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   unknown_tool: { label: "未知工具", tone: "failed" },
   mcp_error: { label: "MCP 调用失败", tone: "failed" },
   subagent_error: { label: "子代理失败", tone: "failed" },
+  // 20 §批次2: present_plan's verdicts are refusals (the plan is not ready),
+  // not breakage; the old fallback drew them as 未知原因 in the middle of the
+  // planning flow.
+  no_plan_items: { label: "计划尚未写成条目", tone: "denied" },
+  missing_plan: { label: "计划内容为空", tone: "denied" },
+  no_user: { label: "无人评审", tone: "denied" },
+  user_prompt_error: { label: "评审通道异常", tone: "failed" },
 }
 
 export function toolFailure(error: string): { label: string; tone: FailureTone } {

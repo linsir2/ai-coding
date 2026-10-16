@@ -39,7 +39,7 @@ export type Part =
       /** What the wire measured; 0 when the event carried none. */
       durationMs: number
     }
-  | { kind: "plan"; title: string; body: string }
+  | { kind: "plan"; goal: string; items: PlanItem[] }
   | { kind: "notice"; tone: Tone; text: string; action?: "resume" }
   | { kind: "image"; name: string }
   | { kind: "turn-end"; tone: "error"; text: string }
@@ -59,6 +59,13 @@ export type Part =
 export interface ChatMessage {
   role: "user" | "assistant"
   parts: Part[]
+}
+
+/** One todo entry on the plan card (20 §批次2) — live off ``plan.updated``. */
+export interface PlanItem {
+  id: string
+  content: string
+  status: string
 }
 
 export interface SessionState {
@@ -441,13 +448,26 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
       })
     }
     case "plan.updated": {
-      const plan: Part = {
-        kind: "plan",
-        title: `计划 ${num(data["done"])}/${num(data["total"])}`,
-        body: str(data["display"]),
-      }
+      // 20 §批次2: the wire now carries the list itself; an empty update is
+      // the plan being dropped, so the card leaves instead of lingering as
+      // "(无任务项)".
+      const goal = str(data["goal"])
+      const items: PlanItem[] = Array.isArray(data["items"])
+        ? data["items"].map((raw) => {
+            const item = obj(raw)
+            return {
+              id: str(item["id"]),
+              content: str(item["content"]),
+              status: str(item["status"]),
+            }
+          })
+        : []
       return updateAssistant(state, (parts) => {
         const index = parts.findIndex((part) => part.kind === "plan")
+        if (!goal && items.length === 0) {
+          return index < 0 ? parts : parts.filter((part) => part.kind !== "plan")
+        }
+        const plan: Part = { kind: "plan", goal, items }
         if (index < 0) return [...parts, plan]
         const next = parts.slice()
         next[index] = plan

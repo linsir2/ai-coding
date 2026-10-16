@@ -107,7 +107,13 @@ def test_approval_requested_stays_off_the_event_stream() -> None:
     assert to_wire(event) is None
 
 
-def test_plan_updated_renders_display_and_counts() -> None:
+def test_plan_updated_carries_the_structured_list() -> None:
+    """20 §批次2: the wire carries the list, not a pre-rendered display.
+
+    The old payload (display/done/total) made the UI render small-task-state
+    prose; the structured items are what the composer's checkboxes draw from,
+    and the model-facing rendering stays backend-side (`TaskState.render`).
+    """
     task = TaskState(goal="g")
     task.add("step one")
     task.add("step two")
@@ -115,9 +121,13 @@ def test_plan_updated_renders_display_and_counts() -> None:
     wire = to_wire(TaskUpdated(task=task))
     assert wire is not None
     assert wire["type"] == "plan.updated"
-    assert wire["data"]["display"] == task.render_display()
-    assert wire["data"]["done"] == 1
-    assert wire["data"]["total"] == 2
+    assert wire["data"] == {
+        "goal": "g",
+        "items": [
+            {"id": "1", "content": "step one", "status": "completed"},
+            {"id": "2", "content": "step two", "status": "pending"},
+        ],
+    }
 
 
 def test_ledger_updated_items() -> None:

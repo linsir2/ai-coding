@@ -50,6 +50,14 @@ Failure = tuple[str, str, str]
 #: a "model" turn as far as the harvest's provenance is concerned.
 STATE_ONLY_TOOLS = frozenset({"checkpoint_write"})
 
+#: Errors that are verdicts rather than breakage (R8c D-11 cancel; 20 §批次3
+#: plan-validation refusals).  A round whose calls all carry these is not
+#: evidence of failure: it neither records a failure nor keeps the burn --
+#: the strategy window's helped-signal is ``failed_streak == 0``, so an
+#: all-neutral round must reset (24d7109b: a parked ``no_plan_items`` refusal
+#: kept the L1 window "failed" and L2 spent its nudge on a duplicate report).
+_NOT_EVIDENCE_ERRORS = frozenset({CANCELLED_BY_USER, "no_plan_items", "missing_plan"})
+
 # F2: Paris' Law fatigue tracking — accumulated error damage.
 _FATIGUE_C = 1.0
 _FATIGUE_M = 2.0
@@ -300,12 +308,16 @@ class TurnBooks:
         self.evidence_calls += sum(
             1 for item in succeeded if item.call.name not in STATE_ONLY_TOOLS
         )
-        # R8c D-11: a call the *user* cancelled is not evidence either way - it is
-        # not a failure to fix, so it must not push the escalation ladder (two of
-        # them would inject a persisted strategy nudge, and the turn is supposed
-        # to carry on after an Escape).
-        counted = [item for item in outcomes if item.result.error != CANCELLED_BY_USER]
+        # R8c D-11 + 20 §批次3: a call the *user* cancelled, or one whose
+        # result is a plan-validation refusal, is not a failure to fix -- it
+        # must not push the escalation ladder (two cancels would inject a
+        # persisted strategy nudge, and the turn is supposed to carry on after
+        # an Escape).  An all-neutral round now also resets the burn: the
+        # strategy window closes "helped" exactly when the streak is 0, so
+        # parking it here would read a working loop as a failing one.
+        counted = [item for item in outcomes if item.result.error not in _NOT_EVIDENCE_ERRORS]
         if not counted:
+            self.failed_streak = 0
             return
         self.failed_streak = 0 if succeeded else self.failed_streak + 1
         for item in counted:

@@ -298,3 +298,44 @@ def test_r8_a_cancelled_call_does_not_hide_a_real_failure():
     assert books.failed_streak == 1
     assert [tool for tool, _reason, _preview in books.failures] == ["bash"]
     assert books.failures[0][1] == "timeout"
+
+
+# ------------------- 20 §批次3: a validation refusal is not a failure
+
+
+def test_a_plan_validation_refusal_is_not_a_failure():
+    """Measured in 24d7109b turn 4: a ``no_plan_items`` refusal kept the burn
+    alive past the L1 window, the window closed "failed", and the ladder's
+    answer (L2) was a nudge the model spent on a duplicate report.  A refusal
+    is an instruction, not a breakage -- and the window's helped-signal is
+    ``failed_streak == 0``, so an all-neutral round resets instead of parking.
+    """
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", success=False, error="timeout")])
+    assert books.failed_streak == 1
+    books.note_outcomes([_outcome("present_plan", success=False, error="no_plan_items")])
+    assert books.failed_streak == 0
+    assert [tool for tool, _reason, _preview in books.failures] == ["bash"]
+
+
+def test_a_refusal_does_not_hide_a_real_failure():
+    books = TurnBooks()
+    books.note_outcomes(
+        [
+            _outcome("present_plan", success=False, error="no_plan_items"),
+            _outcome("bash", success=False, error="timeout"),
+        ]
+    )
+    assert books.failed_streak == 1
+    assert [tool for tool, _reason, _preview in books.failures] == ["bash"]
+
+
+def test_a_cancelled_only_round_stops_the_burn_too():
+    """Same reset as a refusal: the user pressing Escape *is* the intervention,
+    so the ladder's helped-signal must see it.  R8c's "not evidence" still
+    holds -- the round never *adds* a burn; it just no longer parks one."""
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", success=False, error="timeout")])
+    assert books.failed_streak == 1
+    books.note_outcomes([_outcome("bash", success=False, error=CANCELLED_BY_USER)])
+    assert books.failed_streak == 0

@@ -26,6 +26,12 @@ import {
 type ToolPart = Extract<Part, { kind: "tool" }>
 
 export function ToolCard(props: { part: ToolPart }) {
+  // 20 §批次2: a settled todo_write is the plan card's event, not a card of
+  // its own -- the raw `<task-state>` preview it used to print was half the
+  // wall the user saw.  A failure still draws: the card is the only place a
+  // refusal reaches the operator.
+  if (props.part.toolName === "todo_write" && props.part.status !== "failed") return null
+
   // Per-card fold, like the reasoning block (A4 §3): view state, never state.
   const [expanded, setExpanded] = createSignal(false)
   const toggle = () => setExpanded((value) => !value)

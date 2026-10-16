@@ -19,6 +19,8 @@ import type { PromptImage } from "./attachment"
 export interface PendingPrompt {
   text: string
   images: PromptImage[]
+  /** 20 §批次1: the posture the Home row showed when this was submitted. */
+  mode?: "normal" | "plan"
 }
 
 /** What the composer keeps: images the wire did not take, and why. */
@@ -82,6 +84,33 @@ export function buildSubmission(
       text,
       images: images.map((image) => ({ name: image.name, data_url: image.dataUrl })),
     },
+    kept: [],
+    withheldReason: "",
+  }
+}
+
+/**
+ * The wire entry that must land before a Home submission (20 §批次1).
+ *
+ * The Session route mounts on the first submission, so its shift+tab binding
+ * cannot pre-arm the posture at cold start; Home carries the toggle instead,
+ * and the posture has to be in place before the prompt runs.  ``/plan`` is
+ * built here rather than through ``buildSubmission``: it is an internal
+ * command (19 §3.6), not a user line subject to the ``slash.list``
+ * vocabulary, and a bare ``/plan`` is synchronous on the backend
+ * (``commands.py::_handle_plan``, no model call).  A submission that is
+ * itself a command is that command, not plan material, so it goes alone.
+ */
+export function planPrelude(
+  prompt: PendingPrompt,
+  commands: readonly string[],
+  sessionId: string,
+): WireSubmission | null {
+  if (prompt.mode !== "plan") return null
+  if (commandName(commands, prompt.text)) return null
+  return {
+    method: "session.command",
+    payload: { id: sessionId, text: "/plan" },
     kept: [],
     withheldReason: "",
   }

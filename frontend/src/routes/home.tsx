@@ -41,7 +41,7 @@ export interface HomeProps {
   model: string
   provider: string
   branch: string
-  onSubmit: (text: string, images: PromptImage[]) => void
+  onSubmit: (text: string, images: PromptImage[], mode: "normal" | "plan") => void
   client: IpcClient
   /** The registry's skills, for the composer's `@` suggestions (r16/E-2). */
   skills: MentionOption[]
@@ -57,11 +57,15 @@ export function Home(props: HomeProps) {
   const height = () => dimensions().height
   const dialog = useDialog()
   const [promptSeed, setPromptSeed] = createSignal("")
+  // 20 §批次1: the same two gears the session row shows, pre-armable before
+  // the Session route (and its keymap layer) exists at all.
+  const [mode, setMode] = createSignal<"normal" | "plan">("normal")
 
   // r16/E-1: Home has a composer too — the old app-layer registration called
   // this panel read-only on the belief that it did not. Selecting a skill
   // seeds `@name`, so a session can start on a skill, not only during one.
   useBindings(() => ({
+    enabled: !dialog.isOpen(),
     commands: [
       {
         name: "dialog.skills.show",
@@ -80,7 +84,19 @@ export function Home(props: HomeProps) {
             "large",
           ),
       },
+      {
+        // 20 §批次1: the Toggle lives at both layers because the two routes
+        // never mount together; the palette shows exactly one. The carry into
+        // the session is `planPrelude` (util/submission), not this command.
+        name: "home.mode.cycle",
+        title: "Toggle plan mode",
+        group: "Session",
+        desc: "Switch between Build and read-only Plan mode",
+        palette: true,
+        run: () => setMode((value) => (value === "plan" ? "normal" : "plan")),
+      },
     ],
+    bindings: [{ key: "shift+tab", cmd: "home.mode.cycle" }],
   }))
 
   const placeholder = () =>
@@ -108,7 +124,8 @@ export function Home(props: HomeProps) {
         <Prompt
           placeholder={placeholder()}
           metadata={metadata()}
-          onSubmit={props.onSubmit}
+          mode={mode()}
+          onSubmit={(text, images) => props.onSubmit(text, images, mode())}
           seed={promptSeed()}
           onSeedDone={() => setPromptSeed("")}
           skills={props.skills}

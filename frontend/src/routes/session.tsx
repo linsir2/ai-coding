@@ -21,7 +21,7 @@ import { AskPanel } from "../component/ask"
 import { PlanReviewPanel } from "../component/plan-review"
 import { PermissionPanel, type PermissionRequest } from "../component/permission"
 import { Prompt } from "../component/prompt"
-import { buildSubmission, type PendingPrompt } from "../util/submission"
+import { buildSubmission, planPrelude, type PendingPrompt } from "../util/submission"
 import { SessionHeader } from "../component/session-header"
 import { Sidebar } from "../component/sidebar"
 import { StatusBar } from "../component/status-bar"
@@ -387,7 +387,20 @@ export function Session(props: SessionProps) {
     onCleanup(unsubscribe)
     void refreshStats()
     if (props.initialPrompt) {
-      submit(props.initialPrompt.text, props.initialPrompt.images)
+      const prompt = props.initialPrompt
+      // 20 §批次1: a Home submission made with PLAN armed lands the posture
+      // first over the internal command channel; the prompt waits for it
+      // (bare /plan is synchronous, no model call). The echo matches the
+      // command face, so the transcript says what the wire did.
+      const prelude = planPrelude(prompt, props.commands ?? [], props.sessionId)
+      if (prelude) {
+        apply({ kind: "submitted", text: prelude.payload.text, images: [] })
+        void props.client
+          .request(prelude.method, prelude.payload)
+          .finally(() => submit(prompt.text, prompt.images))
+      } else {
+        submit(prompt.text, prompt.images)
+      }
     }
   })
 
