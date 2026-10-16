@@ -24,6 +24,7 @@ const TOOL_VERBS: Record<string, string> = {
   subAgent: "委派子任务",
   skill: "读取技能",
   memory_search: "搜索记忆",
+  history_search: "回忆历史",
   memory_write: "记录记忆",
   checkpoint_write: "记录检查点",
   ask_user: "询问用户",

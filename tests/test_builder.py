@@ -59,6 +59,19 @@ def test_registry_builder_adds_skill_tool_only_for_a_real_directory(tmp_path):
     assert "skill" in registry.list_names()
 
 
+def test_history_search_is_a_main_session_tool_only(tmp_path):
+    """A sub-agent runs on a throwaway session (plan_runner / subagent both
+    build a fresh SessionData), so its own transcript is three messages long and
+    a recall tool over it can only ever answer "you just said that". The schema
+    is not free either -- this repo measures every wasted character per step.
+    """
+    inner = build_subagent_runner(_cfg(str(tmp_path)), str(tmp_path), None)._build_tools(None)
+    assert "history_search" not in set(inner.list_names())
+
+    main = build_tool_registry(_cfg(str(tmp_path)), str(tmp_path), None)
+    assert "history_search" in main.list_names()
+
+
 def test_subagent_runner_inner_stack_has_no_nested_subagent(tmp_path):
     runner = build_subagent_runner(_cfg(str(tmp_path)), str(tmp_path), None)
     inner = runner._build_tools(None)  # the sub-agent's own tools (main workdir)

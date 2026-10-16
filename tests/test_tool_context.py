@@ -61,6 +61,8 @@ def test_tool_context_carries_the_turn_number():
         session_id = "s1"
         # 18 §10.1: the double follows the widened interface.
         readonly = False
+        # C-1: the factory now also reads the session's transcript.
+        messages: list = []
 
     ctx = tool_context(
         task=TaskState(goal="g"),

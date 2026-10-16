@@ -28,6 +28,9 @@ describe("toolVerb", () => {
     expect(toolVerb("todo_write")).toBe("更新计划")
     // 20 §批次2: grep had no verb, so every search drew as 运行工具.
     expect(toolVerb("grep")).toBe("搜索内容")
+    // C-1: without a verb the recall call draws as 运行工具, which says
+    // nothing about what was searched.
+    expect(toolVerb("history_search")).toBe("回忆历史")
   })
 
   test("unknown tools (MCP included) fall back to 运行工具", () => {

@@ -36,7 +36,17 @@ class ToolContext:
     task: TaskState = field(default_factory=TaskState)
     workspace: str = "."
     session_id: str = ""
+    #: THIS request's view of the history -- already rewritten by compaction, so
+    #: it is by construction the part the model can see.  Kept as-is for the
+    #: tools that need it (memory_search falls back to the last user line);
+    #: anything that must read what compaction dropped needs
+    #: :attr:`session_messages` instead.
     messages: tuple[ChatMessage, ...] = ()
+    #: The session's own transcript, uncompacted.  ``Compactor`` works on a copy
+    #: (``context_compression.py``: "never mutate the caller's history"), so the
+    #: bytes a summary dropped are still here -- and before C-1 nothing could
+    #: read them (dsh 08 §8-2 and oc 06 §10 both declare the same gap).
+    session_messages: tuple[ChatMessage, ...] = ()
     instructions: str | None = None
     #: 18 §10.1: the session's enforcement switch; the dispatcher's gate
     #: refuses mutating tools while this is True.  The prompt-side ``mode`` is

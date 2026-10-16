@@ -22,6 +22,8 @@ class _Session:
         # 18 §10.1: the double follows the widened interface (tool_context
         # reads the read-only switch off the session).
         self.readonly = False
+        # C-1: the factory reads the session's transcript too.
+        self.messages: list = []
 
 
 def _block(name: str, content: str) -> TailBlock:

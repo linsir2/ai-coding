@@ -187,6 +187,14 @@ def _assemble_registry(
         registry.register(PresentPlanTool(user_prompt))
 
     if include_subagent:
+        # C-1: read back what compaction dropped. Main-session only -- a
+        # sub-agent runs on a throwaway SessionData, so its transcript is the
+        # three messages it just produced (see test_builder).
+        from ai_coding.tools.history_search_tool import HistorySearchTool
+
+        registry.register(HistorySearchTool())
+
+    if include_subagent:
         # Real sub-agent delegation, isolated in a git worktree when enabled.
         runner = build_subagent_runner(
             app_cfg,

@@ -97,6 +97,9 @@ def tool_context(
         workspace=workspace,
         session_id=session.session_id,
         messages=tuple(history),
+        # The uncompacted transcript, for the tools that must read past the
+        # summary (history_search).  ``history`` above is this request's view.
+        session_messages=tuple(session.messages),
         instructions=instructions,
         # 18 §10.1: the switch rides the one shared factory.
         readonly=session.readonly,

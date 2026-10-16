@@ -179,6 +179,10 @@ class PermissionGate:
             "skill",
             "subagent",
             "memory_search",  # read-only recall (R3b)
+            # C-1: reading this conversation's own transcript. It touches nothing
+            # outside the process, and it is most needed in plan mode, where a
+            # WARN tier would put an approval panel in front of a lookup.
+            "history_search",
             # R7e-1: durable, but not a side effect on the repo, and the harness
             # harvests notes without asking anyway (docs/r7e-analysis.md Q1).
             "memory_write",
