@@ -10,11 +10,25 @@ import { describe, expect, test } from "bun:test"
 import { PERMISSION_OPTIONS, permissionOptions, permissionPayload, permissionRequest } from "../src/util/permission"
 
 describe("permission options", () => {
-  test("offers once, always and reject with OpenCode's labels", () => {
+  test("offers once, always, reject and stop with OpenCode's labels", () => {
+    // Migration (P0-4B): the fourth option is new; the first three are
+    // untouched, which is what this assertion is here to notice.
     expect(PERMISSION_OPTIONS.map((option) => option.label)).toEqual([
       "Allow once",
       "Always allow",
       "Reject",
+      "Stop this turn",
+    ])
+  })
+
+  test("stopping the turn survives an unrememberable call", () => {
+    // "stop" is not about remembering anything, so the grantable filter must
+    // not take it away -- otherwise the operator loses the precise answer
+    // exactly on the calls that are asked most often.
+    expect(permissionOptions({ grantable: false }).map((option) => option.decision)).toEqual([
+      "yes",
+      "no",
+      "stop",
     ])
   })
 
@@ -22,10 +36,9 @@ describe("permission options", () => {
     // grant_key is the recorder's own rule; for bash (and any call naming no
     // single resource) it returns None, so "always" would approve once and
     // forget -- an empty promise the panel must not make.
-    expect(permissionOptions({ grantable: false }).map((option) => option.decision)).toEqual([
-      "yes",
+    expect(permissionOptions({ grantable: false }).map((option) => option.decision)).toContain(
       "no",
-    ])
+    )
   })
 
   test("a rememberable call keeps the shared option table", () => {
@@ -44,7 +57,13 @@ describe("permission options", () => {
       grantable: false,
     })
     expect(notRememberable.grantable).toBe(false)
-    expect(permissionOptions(notRememberable).map((o) => o.decision)).toEqual(["yes", "no"])
+    // Migration (P0-4B): "always" is what drops out; "stop" is not about
+    // remembering anything, so it stays.
+    expect(permissionOptions(notRememberable).map((o) => o.decision)).toEqual([
+      "yes",
+      "no",
+      "stop",
+    ])
 
     const rememberable = permissionRequest({
       toolName: "write",

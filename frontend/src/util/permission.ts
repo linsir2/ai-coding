@@ -6,10 +6,10 @@
  * already understands, so "once" maps to ``yes``, not to its own token.
  */
 
-export type PermissionDecision = "yes" | "always" | "no"
+export type PermissionDecision = "yes" | "always" | "no" | "stop"
 
 export interface PermissionOption {
-  key: "once" | "always" | "reject"
+  key: "once" | "always" | "reject" | "stop"
   label: string
   decision: PermissionDecision
 }
@@ -19,6 +19,12 @@ export const PERMISSION_OPTIONS: PermissionOption[] = [
   { key: "once", label: "Allow once", decision: "yes" },
   { key: "always", label: "Always allow", decision: "always" },
   { key: "reject", label: "Reject", decision: "no" },
+  // P0-4B: the fourth answer the backend has always understood -- the CLI has
+  // advertised `s` since approval.py's prompt was written -- and the TUI could
+  // not give. It refuses this call *and* ends the turn here, which is not what
+  // esc does (esc cancels the run and leaves the turn unfinished), so it is a
+  // distinct answer rather than a variant of "no".
+  { key: "stop", label: "Stop this turn", decision: "stop" },
 ]
 
 /**

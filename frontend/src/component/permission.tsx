@@ -46,6 +46,7 @@ export function PermissionPanel(props: {
       { name: "permission.confirm", desc: "Confirm the selected option", run: confirm },
       { name: "permission.once", desc: "Allow this call", run: () => props.onDecide("yes") },
       { name: "permission.reject", desc: "Reject this call", run: () => props.onDecide("no") },
+      { name: "permission.stop", desc: "Reject and end this turn", run: () => props.onDecide("stop") },
       // Only reachable while the option is on screen: a keymap that still binds
       // this command must not manufacture the decision the panel just hid.
       ...(grantable()
@@ -67,6 +68,7 @@ export function PermissionPanel(props: {
       { key: "return", cmd: "permission.confirm" },
       { key: "y", cmd: "permission.once" },
       { key: "n", cmd: "permission.reject" },
+      { key: "s", cmd: "permission.stop" },
       { key: "escape", cmd: "permission.reject" },
       ...(grantable() ? [{ key: "a", cmd: "permission.always" }] : []),
     ],
@@ -141,7 +143,7 @@ export function PermissionPanel(props: {
           )}
         </For>
       </box>
-      <text fg={theme.textMuted}>←/→ select · enter confirm · esc reject</text>
+      <text fg={theme.textMuted}>←/→ select · enter confirm · s stop · esc reject</text>
     </box>
   )
 }
