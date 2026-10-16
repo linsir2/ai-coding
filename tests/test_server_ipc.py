@@ -1418,9 +1418,16 @@ async def test_initialize_consumes_an_armed_session_once(ipc):
     hello = client.request("initialize")
 
     assert hello["sessionId"] == armed.session_id
+    # 可达+有痕批次: the response tells the shell to open the session and
+    # carries the one note the operator must see (race-free, unlike a
+    # console.line emitted while the route is still Home).
+    assert hello.get("resumed") is True
+    assert "自动续跑" in str(hello.get("resumeNote") or "")
     assert world.pending_resume is None
     again = client.request("initialize")
     assert again["sessionId"] != armed.session_id
+    assert again.get("resumed") is False
+    assert not again.get("resumeNote")
 
 
 @pytest.mark.asyncio
@@ -1444,6 +1451,9 @@ async def test_boot_resume_breaker_disarms_past_the_cap(ipc):
     hello = client.request("initialize")
 
     assert hello["sessionId"] == armed.session_id
-    assert await client.wait_for(lambda: any("自动续跑" in str(e) for e in client.events))
+    # The breaker's notice rides the same response field (guaranteed visible
+    # before the session route mounts).
+    assert hello.get("resumed") is True
+    assert "上限" in str(hello.get("resumeNote") or "")
     reloaded = world.sessions.load(armed.session_id)
     assert reloaded.task.armed is False

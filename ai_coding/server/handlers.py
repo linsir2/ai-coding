@@ -223,6 +223,7 @@ def make_handlers(
         pending = getattr(world, "pending_resume", None)
         world.pending_resume = None
         boot_session = None
+        resume_note = ""
         if pending is not None:
             candidate = world.sessions.load(pending.session_id) or pending
             candidate_task = getattr(candidate, "task", None)
@@ -240,20 +241,19 @@ def make_handlers(
             if int(getattr(task, "resume_count", 0) or 0) >= _MAX_BOOT_RESUMES:
                 task.armed = False
                 _persist_session(world, session)
-                service.notify(
-                    "event",
-                    {
-                        "type": "console.line",
-                        "data": {
-                            "tone": "error",
-                            "text": (
-                                f"[plan] 自动续跑已达上限（{_MAX_BOOT_RESUMES} 次），"
-                                "任务已暂停；检查后继续对话或重新进入 Plan 模式。"
-                            ),
-                        },
-                    },
+                resume_note = (
+                    f"[plan] 自动续跑已达上限（{_MAX_BOOT_RESUMES} 次），"
+                    "任务已暂停；检查后继续对话或重新进入 Plan 模式。"
                 )
             else:
+                # 可达+有痕批次: the note rides the initialize response, not a
+                # console.line -- events emitted while the shell is still on
+                # Home are lost, and this one must be seen.
+                resume_note = (
+                    "[plan] 应用重启：自动续跑未完成的计划任务"
+                    f"（第 {int(getattr(task, 'resume_count', 0) or 0) + 1} 次）。"
+                    "执行过程会实时显示在本会话；停止请按 esc。"
+                )
                 _launch_boot_resume(session)
         else:
             session = world.sessions.create()
@@ -274,6 +274,10 @@ def make_handlers(
             "models": models,
             "sessionId": session.session_id,
             "sessionTitle": session.title,
+            # 可达+有痕批次: the shell opens the resumed session and renders
+            # the note (approvals and the live run become reachable there).
+            "resumed": boot_session is not None,
+            "resumeNote": resume_note,
         }
 
     def session_create(params: dict[str, Any]) -> dict[str, Any]:

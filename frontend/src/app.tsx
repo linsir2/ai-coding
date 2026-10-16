@@ -30,6 +30,7 @@ import type { IpcClient } from "./ipc"
 import { Home } from "./routes/home"
 import { Session } from "./routes/session"
 import { loadSession } from "./state/replay"
+import { initialRoute, resumeNotice, withResumeNotice } from "./util/boot"
 import { initialState, type SessionState } from "./state/session"
 import { theme } from "./theme/tokens"
 import { parseAskRequest, type AskRequest } from "./util/ask"
@@ -48,6 +49,10 @@ export interface Hello {
   sessionId: string
   sessionTitle: string
   models: ModelRow[]
+  /** 可达+有痕批次: the backend consumed an armed session at startup. */
+  resumed?: boolean
+  /** The one note the operator must see about that resume (race-free). */
+  resumeNote?: string
 }
 
 /** The session.list row, trimmed to what this shell reads off it. */
@@ -242,6 +247,21 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
   onMount(() => {
     void refreshSessions()
     void refreshSkills()
+    // 可达+有痕批次: land on the resumed session.  The boot resume runs in
+    // the backend; its approvals and transcript live in the session route,
+    // so the shell opens it and renders the note the response carried --
+    // with the session mounted, the run's live turns stream in as they did
+    // before the restart.
+    if (initialRoute(props.hello) === "session") {
+      void (async () => {
+        try {
+          const state = await loadSession(props.client, props.hello.sessionId)
+          switchTo(props.hello.sessionId, withResumeNotice(state, resumeNotice(props.hello)))
+        } catch {
+          /* an unloadable resume leaves the shell on Home */
+        }
+      })()
+    }
     // M5: the backend asks WARN-tier approvals as a server-initiated request;
     // answering it IS the JSON-RPC response, so the panel just resolves this.
     props.client.onRequest("approval.request", (params) => {
