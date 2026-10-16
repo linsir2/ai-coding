@@ -237,6 +237,10 @@ def make_handlers(
         world.pending_resume = None
         boot_session = None
         resume_note = ""
+        # P0-3: whether a run actually starts.  ``resumed`` alone cannot say so:
+        # the breaker branch answers it too and starts nothing, and a shell that
+        # sat busy over a run nobody launched would wait forever.
+        resuming = False
         if pending is not None:
             candidate = world.sessions.load(pending.session_id) or pending
             candidate_task = getattr(candidate, "task", None)
@@ -268,6 +272,7 @@ def make_handlers(
                     "执行过程会实时显示在本会话；停止请按 esc。"
                 )
                 _launch_boot_resume(session)
+                resuming = True
         else:
             session = world.sessions.create()
             state.session = session
@@ -291,6 +296,7 @@ def make_handlers(
             # the note (approvals and the live run become reachable there).
             "resumed": boot_session is not None,
             "resumeNote": resume_note,
+            "resuming": resuming,
         }
 
     def session_create(params: dict[str, Any]) -> dict[str, Any]:
@@ -378,6 +384,64 @@ def make_handlers(
         future.add_done_callback(state.turn_futures.discard)
         return state.turn_id
 
+    def _notify_terminal_turn(
+        session: Any,
+        *,
+        status: str,
+        reason: str,
+        action: str,
+        history_before: int,
+        reload_in_place: bool = False,
+    ) -> None:
+        """The one end a multi-turn runner owes the client (P0-3).
+
+        ``session_command`` has always emitted its own terminal event after
+        ``handle_input`` returns, because every inner turn left its
+        ``TurnFinished`` on the wire as a *step*.  A boot resume has the same
+        shape (a resumed round plus one turn per plan step) and owed the client
+        nothing: it borrowed ``_launch_turn``'s wrapper, which only reports an
+        unhandled exception, so a run that finished normally left ``busy`` set
+        forever.  One event, one definition -- the fields below are exactly the
+        ones the command path has always sent.
+        """
+        after = len(getattr(session, "messages", ()) or ())
+        service.notify(
+            "event",
+            {
+                "type": "turn.finished",
+                "data": {
+                    "status": status,
+                    "reason": reason,
+                    "iterations": 0,
+                    "truncatedByLength": False,
+                    "handoff": "",
+                    "action": action,
+                    # the live session after the run (a NEW_SESSION action has
+                    # switched it)
+                    "sessionId": state.session_id,
+                    # A switched session must re-project; a same-session rewrite
+                    # (/compact) only reports the fact — except /undo and /redo,
+                    # which *rewrite the history in place* and therefore do need
+                    # the client to re-project (r17/T1).  The text rides along so
+                    # the composer can get the undone user message back.
+                    "reload": state.session is not session or reload_in_place,
+                    "undo": (
+                        world.loop.last_undo_for(state.session_id)
+                        if reload_in_place
+                        else None
+                    ),
+                    "messagesBefore": history_before,
+                    "messagesAfter": after,
+                    "compacted": (
+                        {"before": history_before, "after": after}
+                        if state.session is session
+                        and after < history_before
+                        else None
+                    ),
+                },
+            },
+        )
+
     def _launch_boot_resume(session: Any) -> None:
         """Resume an armed task after a restart (11-spec §7.2): the interrupted
         round first (when one is open), then the plan run itself.
@@ -396,17 +460,42 @@ def make_handlers(
             if task is not None:
                 task.resume_count = int(getattr(task, "resume_count", 0) or 0) + 1
                 _persist_session(world, session)
-            if session.open_turn is not None:
-                await world.loop.resume_turn(
-                    session, on_delta=bridge.on_delta, observer=bridge
-                )
-            if not getattr(task, "armed", False):
-                return
+            history_before = len(getattr(session, "messages", ()) or ())
             console = IpcConsole(
                 lambda method, message: service.notify(method, message), bridge.on_delta
             )
-            await PlanRunner(world.loop).run(
-                session, console, on_delta=bridge.on_delta, observer=bridge
+            # P0-3: the same envelope ``session_command`` uses.  Every inner turn
+            # here is a *step* of one run -- the resumed round plus one turn per
+            # plan step -- so the bridge rewrites their TurnFinished to
+            # ``turn.step`` and the run itself ends once, below.  The status is
+            # settled here rather than in ``_launch_turn``'s wrapper so the run
+            # emits exactly one terminal event on every path: an exception that
+            # escaped would arrive as that wrapper's event with ``command_run``
+            # already reset, i.e. as a second end.
+            bridge.command_run = True
+            status, reason = "completed", ""
+            try:
+                if session.open_turn is not None:
+                    await world.loop.resume_turn(
+                        session, on_delta=bridge.on_delta, observer=bridge
+                    )
+                if getattr(task, "armed", False):
+                    await PlanRunner(world.loop).run(
+                        session, console, on_delta=bridge.on_delta, observer=bridge
+                    )
+            except asyncio.CancelledError:
+                status, reason = "aborted", "interrupted"
+            except Exception as exc:  # noqa: BLE001 — a bug must not hang the UI
+                _log.exception("boot resume failed outside the dispatcher")
+                status, reason = "error", f"{type(exc).__name__}: {exc}"[:300]
+            finally:
+                bridge.command_run = False
+            _notify_terminal_turn(
+                session,
+                status=status,
+                reason=reason,
+                action="continue",
+                history_before=history_before,
             )
 
         _launch_turn(run_resume)
@@ -583,46 +672,13 @@ def make_handlers(
                 # confirm installs a fresh, unprovided one) — re-arm before the
                 # next turn can ask anything (I1/I2).
                 _install_providers(world, service)
-            service.notify(
-                "event",
-                {
-                    "type": "turn.finished",
-                    "data": {
-                        "status": status,
-                        "reason": reason,
-                        "iterations": 0,
-                        "truncatedByLength": False,
-                        "handoff": "",
-                        "action": action_name,
-                        # the live session after the command (a NEW_SESSION
-                        # action has switched it)
-                        "sessionId": state.session_id,
-                        # A switched session must re-project; a same-session
-                        # rewrite (/compact) only reports the fact — except
-                        # /undo and /redo, which *rewrite the history in place*
-                        # and therefore do need the client to re-project
-                        # (r17/T1).  The text rides along so the composer can
-                        # get the undone user message back.
-                        "reload": state.session is not session or reload_in_place,
-                        "undo": (
-                            world.loop.last_undo_for(state.session_id)
-                            if reload_in_place
-                            else None
-                        ),
-                        "messagesBefore": history_before,
-                        "messagesAfter": len(getattr(session, "messages", ()) or ()),
-                        "compacted": (
-                            {
-                                "before": history_before,
-                                "after": len(getattr(session, "messages", ()) or ()),
-                            }
-                            if state.session is session
-                            and len(getattr(session, "messages", ()) or ())
-                            < history_before
-                            else None
-                        ),
-                    },
-                },
+            _notify_terminal_turn(
+                session,
+                status=status,
+                reason=reason,
+                action=action_name,
+                history_before=history_before,
+                reload_in_place=reload_in_place,
             )
             if action_name == "quit" and shutdown is not None:
                 shutdown()

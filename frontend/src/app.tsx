@@ -30,7 +30,7 @@ import type { IpcClient } from "./ipc"
 import { Home } from "./routes/home"
 import { Session } from "./routes/session"
 import { loadSession } from "./state/replay"
-import { initialRoute, resumeNotice, withResumeNotice } from "./util/boot"
+import { initialRoute, resumeNotice, resumingNow, withResumeNotice } from "./util/boot"
 import { initialState, type SessionState } from "./state/session"
 import { theme } from "./theme/tokens"
 import { parseAskRequest, type AskRequest } from "./util/ask"
@@ -257,7 +257,14 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
       void (async () => {
         try {
           const state = await loadSession(props.client, props.hello.sessionId)
-          switchTo(props.hello.sessionId, withResumeNotice(state, resumeNotice(props.hello)))
+          switchTo(
+            props.hello.sessionId,
+            withResumeNotice(
+              state,
+              resumeNotice(props.hello),
+              resumingNow(props.hello),
+            ),
+          )
         } catch {
           /* an unloadable resume leaves the shell on Home */
         }

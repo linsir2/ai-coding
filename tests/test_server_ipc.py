@@ -16,6 +16,7 @@ import socket
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -113,6 +114,22 @@ class _FakeLoop:
         stamp = "2026-01-01T00:00:00Z"
         session.add_message(assistant_message(StepResult(text="done"), stamp))
         return "done"
+
+
+class _SavingCloser:
+    """The one method ``PlanRunner._persist`` uses on a loop's closer.
+
+    P0-3 (sanctioned double extension): the boot path drives a real PlanRunner
+    over the scripted loop, and that runner persists through ``loop.closer`` --
+    a stand-in the fake loop never had, which is why a resumed run used to die
+    on ``AttributeError`` inside the handler instead of being observed.
+    """
+
+    def __init__(self, sessions: Any) -> None:
+        self._sessions = sessions
+
+    def save(self, session: Any) -> None:
+        self._sessions.save(session)
 
 
 class _SlowLoop(_FakeLoop):
@@ -1467,6 +1484,93 @@ async def test_initialize_consumes_an_armed_session_once(ipc):
     assert again["sessionId"] != armed.session_id
     assert again.get("resumed") is False
     assert not again.get("resumeNote")
+
+
+@pytest.mark.asyncio
+async def test_boot_resume_steps_are_steps_and_the_run_ends_once(ipc):
+    """P0-3: a resumed run owes the client the same shape a command run does.
+
+    ``command_run`` is what tells the bridge that the loop's ``TurnFinished`` is
+    an inner *step* rather than the end of the run; the boot path never set it,
+    so each plan step arrived as ``turn.finished`` -- which released ``busy``,
+    drew a red turn-end marker and dispatched one queued line per step.  It also
+    emitted no terminal event of its own (the shared ``_launch_turn`` wrapper
+    only reports unhandled exceptions), so nothing ever closed the run.
+    """
+    world, _service, client = ipc
+    from ai_coding.domain.task import TaskState
+
+    armed = world.sessions.create(title="armed")
+    task = TaskState(goal="g")
+    task.add("step")
+    task.armed = True
+    task.armed_profile = "plan"
+    armed.task = task
+    armed.open_turn = 1
+    world.sessions.save(armed)
+    world.pending_resume = world.sessions.load(armed.session_id)
+
+    # One script entry per turn: the fake replays the whole script on every
+    # call, and the resumed round plus the plan step are two turns.
+    world.loop.script = [
+        lambda obs, _delta: obs.on_event(
+            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="step done"))
+        )
+    ]
+    world.loop.closer = _SavingCloser(world.sessions)
+
+    hello = client.request("initialize")
+
+    assert hello["sessionId"] == armed.session_id
+    # The shell has to know a run is actually starting: the breaker branch also
+    # answers `resumed`, and it starts nothing (nothing would release `busy`).
+    assert hello.get("resuming") is True
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    types = [event["type"] for event in client.events]
+    assert types.count("turn.step") == 2, types
+    assert types.count("turn.finished") == 1, types
+    assert types[-1] == "turn.finished"
+    assert client.events[-1]["data"]["status"] == "completed"
+    # The task disarmed itself when the run finished (PlanRunner's finally).
+    assert world.sessions.load(armed.session_id).task.armed is False
+
+
+@pytest.mark.asyncio
+async def test_a_breaker_resume_starts_no_run(ipc):
+    """The other branch of the same field: past the cap the task is disarmed and
+    **no** run begins, so the shell must not sit busy over a run that will never
+    announce an end."""
+    world, _service, client = ipc
+    from ai_coding.domain.task import TaskState
+
+    armed = world.sessions.create(title="flapping")
+    task = TaskState(goal="g")
+    task.add("step")
+    task.armed = True
+    task.armed_profile = "plan"
+    task.resume_count = 5
+    armed.task = task
+    world.sessions.save(armed)
+    world.pending_resume = world.sessions.load(armed.session_id)
+
+    hello = client.request("initialize")
+
+    assert hello.get("resumed") is True
+    assert hello.get("resuming") is False
+    assert world.sessions.load(armed.session_id).task.armed is False
+
+
+@pytest.mark.asyncio
+async def test_a_plain_boot_resumes_nothing(ipc):
+    """No armed task: the shell lands on Home and the field stays false, so the
+    busy flag is never set for a session that is not running."""
+    world, _service, client = ipc
+
+    hello = client.request("initialize")
+
+    assert hello.get("resumed") is False
+    assert hello.get("resuming") is False
 
 
 @pytest.mark.asyncio

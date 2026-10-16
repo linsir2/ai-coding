@@ -11,6 +11,9 @@ import type { SessionState } from "../state/session"
 export interface ResumableHello {
   resumed?: boolean
   resumeNote?: string
+  /** Whether a run is actually starting (P0-3).  `resumed` cannot say so: the
+   *  breaker branch answers it too and launches nothing. */
+  resuming?: boolean
 }
 
 export function initialRoute(hello: ResumableHello): "home" | "session" {
@@ -21,13 +24,31 @@ export function resumeNotice(hello: ResumableHello): string {
   return (hello.resumeNote ?? "").trim()
 }
 
-export function withResumeNotice(state: SessionState, note: string): SessionState {
-  if (!note) return state
+export function resumingNow(hello: ResumableHello): boolean {
+  return hello.resuming === true
+}
+
+/**
+ * The landing transform: the operator's note on top, and — when a run is
+ * starting — the session already busy.
+ *
+ * Busy matters because the composer reads it to decide between `session.prompt`
+ * and the busy paths (steer / queue).  A resumed run that lands idle takes
+ * ordinary prompts, which the loop serialises as *turns* and therefore
+ * interleaves between plan steps.
+ */
+export function withResumeNotice(
+  state: SessionState,
+  note: string,
+  resuming = false,
+): SessionState {
+  const landed: SessionState = resuming ? { ...state, busy: true } : state
+  if (!note) return landed
   return {
-    ...state,
+    ...landed,
     messages: [
       { role: "assistant", parts: [{ kind: "notice", tone: "muted", text: note }] },
-      ...state.messages,
+      ...landed.messages,
     ],
   }
 }
