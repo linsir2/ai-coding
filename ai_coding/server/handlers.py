@@ -149,6 +149,16 @@ class _WorldState:
         self.turn_futures: set[Future[Any]] = set()
 
 
+def _persist_session(world: Any, session: Any) -> None:
+    """Best-effort durable save (11-spec §7): the loop's closer when it has
+    one (tool pairing + degraded reporting), plain service save otherwise."""
+    save = getattr(getattr(world.loop, "closer", None), "save", None)
+    if save is None:
+        save = getattr(world.sessions, "save", None)
+    if save is not None:
+        save(session)
+
+
 def context_tokens(session: Any) -> int:
     """The newest turn's prompt tokens that still describe the live context.
 
@@ -377,6 +387,15 @@ def make_handlers(
         return {"turnId": turn_id, "sessionId": session_id}
 
     def session_interrupt(params: dict[str, Any]) -> dict[str, Any]:
+        # 11-spec §8: disarm BEFORE cancelling — the driver loop re-checks
+        # task.armed between rounds and must not open the next one after this
+        # round unwinds.  Best-effort: the round's own close save carries the
+        # same in-memory object, so both writes agree.
+        session = getattr(state, "session", None)
+        task = getattr(session, "task", None) if session is not None else None
+        if task is not None and getattr(task, "armed", False):
+            task.armed = False
+            _persist_session(world, session)
         # Two layers, both needed (ported from ui/textual_app.py::
         # action_cancel_turn): the event is the tool batch's fast path (the
         # loop clears it before each batch), the future cancellation reaches

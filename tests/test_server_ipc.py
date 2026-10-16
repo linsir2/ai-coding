@@ -1369,3 +1369,26 @@ async def test_session_resume_continues_without_a_new_prompt(ipc):
     assert "text" not in call
     assert await client.wait_for(client.turn_finished.is_set)
     assert client.events[-1]["data"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_interrupt_disarms_an_armed_task(ipc):
+    """11-spec §8: Esc stops the whole armed run, not only the round."""
+    world, _service, client = ipc
+    created = client.request("session.create", {"title": "armed"})
+    session_id = created["id"]
+    from ai_coding.domain.task import TaskState
+
+    session = world.sessions.load(session_id)
+    task = TaskState(goal="g")
+    task.add("step")
+    task.armed = True
+    task.armed_profile = "plan"
+    session.task = task
+    world.sessions.save(session)
+    client.request("session.load", {"id": session_id})  # live object = the armed one
+
+    client.request("session.interrupt")
+
+    reloaded = world.sessions.load(session_id)
+    assert reloaded.task.armed is False
