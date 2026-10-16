@@ -445,25 +445,32 @@ class SubAgentRunner:
             inner=inner,
         )
 
-    def _skill_gate(self) -> Any | None:
-        """The operator's skill policy for a child that cannot prompt (E-5).
+    def _child_gate(self) -> Any:
+        """The operator's own policy, for a child that cannot prompt (E-5, P0-1).
 
-        Only the skill rule travels — a child's MCP surface is not this
-        task's to change. ``ask`` degrades the way every WARN does for a
-        child (``AutoApproveCallback``); ``deny`` still blocks.
+        Built by the same factory as the parent's gate
+        (``PermissionGate.from_config``) and for the same reason the guard chain
+        above is rebuilt here: a child inherits the *policy*, never a copy of the
+        parent's mutable counters.  The tier that buys is the one that can still
+        bite without a human -- ``permissions.deny`` is a hard DENY checked
+        before grants (``PermissionGate.check`` 1.5) -- because every WARN tier
+        degrades to "yes" here (``AutoApproveCallback``).  A gate carrying only
+        the skill rule therefore turned the operator's config refusal into an
+        execution, which is the whole difference this method exists to close.
         """
         from ai_coding.security.permission_gate import PermissionGate
 
-        raw = getattr(getattr(self._app_config, "ai", None), "skill_permissions", None) or {}
-        if not raw:
-            return None
         skills = self._skills
 
         def resolve(name: str) -> str | None:
             skill = skills.resolve(name) if skills is not None else None
             return skill.id if skill is not None else None
 
-        return PermissionGate(skill_permissions=raw, skill_resolver=resolve)
+        # The main workspace, not the worktree: grants are keyed by the path the
+        # operator was asked about, and the child has the same authority there.
+        return PermissionGate.from_config(
+            self._app_config, workspace=self._workspace, skill_resolver=resolve
+        )
 
     async def _run_in(
         self,
@@ -510,7 +517,7 @@ class SubAgentRunner:
             _NullSessions(),  # type: ignore[arg-type]
             registry,
             approval=self._approval,
-            gate=self._skill_gate(),
+            gate=self._child_gate(),
             prompt=prompt,
             # The same registry the parent uses, so the child reads live skills
             # rather than the frozen copy in the parent's instructions. It used

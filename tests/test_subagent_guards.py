@@ -14,11 +14,19 @@ guards, and that cannot be observed by inspecting objects.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
 
-from ai_coding.config.models import AppConfig, GuardConfig
+from ai_coding.config.models import (
+    AIConfig,
+    AppConfig,
+    GuardConfig,
+    MCPConfig,
+    MCPServerConfig,
+    MCPToolRules,
+)
 from ai_coding.core.guard import build_guards
 from ai_coding.core.subagent import SubAgentRunner
 from ai_coding.domain.loop import StepResult
@@ -242,6 +250,128 @@ async def test_the_default_config_still_gives_the_child_its_duplicate_budget(tmp
     await runner.run("loop forever", name="t")
 
     assert len(read.calls) < 5, f"duplicate guard did not engage: {len(read.calls)} calls"
+
+
+# ---- the permission gate --------------------------------------------------
+#
+# The gate is the other half of the same promise: a sub-agent inherits the
+# operator's *policy*, not a copy of the parent's turn counters.  A sub-agent
+# cannot ask (``AutoApproveCallback``), so every tier that reaches a human in
+# the parent degrades to "approved" in the child -- which makes the hard DENY
+# tier the only one that can still bite there.
+
+
+def _runner_for(app: AppConfig, tool: BaseTool, call: ToolCallRef) -> SubAgentRunner:
+    def build_tools(workdir: str | None) -> ToolRegistry:
+        registry = ToolRegistry()
+        registry.register(tool)
+        return registry
+
+    return SubAgentRunner(
+        app,
+        engine_factory=lambda: _OneCallEngine(call),
+        build_tools=build_tools,
+        workspace="/ws",
+    )
+
+
+def _mcp_app(*, deny: list[str]) -> AppConfig:
+    return AppConfig(
+        default_model="m",
+        models={"m": ModelConfig(name="m", base_url="https://x/v1", api_key="k")},
+        mcp=MCPConfig(
+            servers=[MCPServerConfig(name="srv", permissions=MCPToolRules(deny=deny))]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_config_denied_server_tool_never_runs_in_the_subagent(tmp_path):
+    """The gate test.  Read it as a property of the *gate*, not as an incident
+    report: ``test_the_child_tool_surface_cannot_reach_an_mcp_tool_today`` below
+    pins that a sub-agent cannot call a server tool at all yet, so the tier this
+    exercises is dormant rather than breached.  It stays because the day MCP
+    reaches a child, this must already hold -- and because the gate the child used
+    to get was a *partial* copy of the operator's, which is a trap that waits for
+    exactly that day."""
+    danger = _RecordingTool("srv__danger")
+    runner = _runner_for(_mcp_app(deny=["danger"]), danger, _ref("c1", "srv__danger"))
+
+    packet = await runner.run("do the thing", name="t")
+
+    assert danger.calls == [], "the operator's config refusal must survive into the child"
+    # And the model has to read *why*: a bare non-execution looks like a flake
+    # and the child would simply try the same call again.
+    assert "denied by configuration" in str(packet)
+
+
+@pytest.mark.asyncio
+async def test_a_server_tool_the_config_does_not_deny_still_runs_in_the_subagent(
+    tmp_path,
+):
+    """The other half: inheriting the policy must not turn into refusing
+    everything.  An unlisted tool is WARN everywhere, and WARN is what a child
+    answers with "yes"."""
+    safe = _RecordingTool("srv__safe")
+    runner = _runner_for(_mcp_app(deny=["danger"]), safe, _ref("c1", "srv__safe"))
+
+    await runner.run("do the thing", name="t")
+
+    assert safe.calls == [{}]
+
+
+@pytest.mark.asyncio
+async def test_the_skill_policy_still_reaches_the_subagent(tmp_path):
+    """Regression guard for the rule the old ``_skill_gate`` existed for: a
+    per-skill ``deny`` must still block, now because the whole operator policy
+    travels rather than because one field was copied by hand."""
+    skill = _RecordingTool("skill")
+    app = AppConfig(
+        default_model="m",
+        models={"m": ModelConfig(name="m", base_url="https://x/v1", api_key="k")},
+        ai=AIConfig(skill_permissions={"probe": "deny"}),
+    )
+    runner = _runner_for(
+        app,
+        skill,
+        # ``_ref``'s own parameter is called ``name``, so the skill's ``name``
+        # argument cannot go through its kwargs; the call is spelled out here.
+        ToolCallRef(
+            id="c1",
+            name="skill",
+            arguments=json.dumps({"action": "read", "name": "probe"}),
+        ),
+    )
+
+    packet = await runner.run("read the skill", name="t")
+
+    assert skill.calls == []
+    assert "denied by configuration" in str(packet)
+
+
+def test_the_child_tool_surface_cannot_reach_an_mcp_tool_today(tmp_path):
+    """The tripwire for the test above, and the honest scope of this fix.
+
+    ``mcp_call`` is registered on the parent's registry after the registry is
+    built (``world.build_world``), and a child's stack comes from its own
+    ``build_tool_registry(..., include_subagent=False)`` -- so ``server__tool``
+    is not callable from a sub-agent today, and the config-deny tier is dormant
+    there rather than breached.  If this ever fails, the tier becomes reachable
+    in the child, which is why the gate inherits the operator's whole policy now
+    instead of on the day someone notices."""
+    from ai_coding.tools.builder import build_subagent_runner
+
+    app = AppConfig(
+        default_model="m",
+        models={"m": ModelConfig(name="m", base_url="https://x/v1", api_key="k")},
+        mcp=MCPConfig(
+            enabled=True, servers=[MCPServerConfig(name="srv", command=["x"])]
+        ),
+    )
+
+    child_tools = build_subagent_runner(app, str(tmp_path), None)._build_tools(None)
+
+    assert "mcp_call" not in child_tools.list_names()
 
 
 # ---- build_guards itself ---------------------------------------------------
