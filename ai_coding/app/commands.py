@@ -306,17 +306,41 @@ async def _handle_plan(
         return REPLAction.CONTINUE, session
 
     if sub == "run":
-        if session.mode == "plan" or session.readonly:
+        needs_exit = session.mode == "plan" or session.readonly
+        if needs_exit:
             if loop.request_posture(session, mode="normal", readonly=False):
                 _save_session(sessions, session)
                 console.info("[plan] 已退出计划模式（只读已关闭）；开始执行计划。")
             else:
-                console.info(
-                    f"[plan] 退出计划模式已排队{_QUEUED}；当前回合结束后将自动开始执行。"
-                )
-        await PlanRunner(loop).run(
-            session, console, on_delta=console.delta, observer=observer
-        )
+                # stage 4 r2: the dispatch often lands inside the closing
+                # turn's lock, so the flip queues onto the MAIN session --
+                # but the run drives fresh step sessions, and the queue would
+                # sit until the next user turn (measured: mode stayed plan on
+                # disk, c41e461's tmux run).  The finally below lands it; the
+                # receipt says what will happen rather than the old
+                # "当前回合结束后生效" (that turn was already over).
+                console.info("[plan] 开始执行计划；执行完成后退出计划模式（只读）。")
+        try:
+            await PlanRunner(loop).run(
+                session, console, on_delta=console.delta, observer=observer
+            )
+        finally:
+            # stage 4 r2, boundary semantics (dsh's onBoundary): the run's
+            # end IS the boundary, so the flip lands here directly instead of
+            # racing request_posture's queue.  The queue measured broken for
+            # this caller: when the dispatch arrives inside the closing
+            # turn's lock the flip parks on the MAIN session, the run only
+            # drives fresh step sessions, and if no later user turn ever
+            # comes the queue never lands (c41e461: mode stayed plan on
+            # disk; the probe run confirmed the parked queue only lands at
+            # the NEXT turn's entry).  Writing through is safe by intent --
+            # approval promised the exit, and a concurrently running turn
+            # (a rare user message in the same instant) reads postures only
+            # at assembly/dispatch time anyway.
+            if needs_exit:
+                session.pending_posture = None
+                session.mode, session.readonly = "normal", False
+                _save_session(sessions, session)
         return REPLAction.CONTINUE, session
 
     already = session.mode == "plan" and session.readonly

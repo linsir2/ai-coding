@@ -105,6 +105,10 @@ class TurnOutcome:
     # reads ``text is None`` as "this turn concluded nothing", and a sub-agent's
     # conclusion is the model's own words (docs/r6-analysis.md 2.1, D-R6-4).
     handoff: str = ""
+    # stage 4 r2: the harness's own line for the operator when a plan-posture
+    # turn ends without a submission -- same shape as ``handoff`` (a status,
+    # not an answer); the transcript draws it as a muted notice.
+    note: str = ""
 
 
 __all__ = ["EmptyStepError", "ThinkingOnlyStepError", "TurnStatus", "StepResult", "TurnOutcome"]

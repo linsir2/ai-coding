@@ -625,12 +625,16 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
     }
     case "turn.finished": {
       const handoff = str(data["handoff"])
+      // stage 4 r2: the plan guard's terminal line (a muted notice, not the
+      // red turn-end marker -- the turn itself completed fine).
+      const note = str(data["note"])
       const marker = turnEndMarker(data)
       const updated = updateAssistant(state, (parts) => {
         let next = mapParts(parts, (part) =>
           part.kind === "text" && part.streaming ? { ...part, streaming: false } : part,
         )
         if (handoff) next = [...next, { kind: "text", text: handoff, streaming: false }]
+        if (note) next = appendNotice(next, note)
         if (marker) next = [...next, { kind: "turn-end", tone: "error", text: marker }]
         return next
       })

@@ -1292,8 +1292,11 @@ async def test_a_goal_with_items_survives_a_follow_up_message(tmp_path):
 @pytest.mark.asyncio
 async def test_plan_mode_finishes_without_nudging_open_items(tmp_path):
     """18 §10.5 (R4): the execution gates are silent under a posture — the
-    snapshot carries ``mode`` off the session, so this must hold end-to-end."""
-    engine = ScriptedEngine([_text("done")])
+    snapshot carries ``mode`` off the session, so this must hold end-to-end.
+    stage 4 r2: the plan SUBMISSION guard is not an execution gate — no plan
+    was ever submitted, so it spends its one remedy and then finishes with
+    the guarded reason; the task gate still never speaks."""
+    engine = ScriptedEngine([_text("done"), _text("done again")])
     sessions = SessionService(tmp_path / "sessions")
     loop = _loop(engine, sessions, settings=_settings(stop_policy="todo_aware"))
     session = sessions.create()
@@ -1303,17 +1306,27 @@ async def test_plan_mode_finishes_without_nudging_open_items(tmp_path):
 
     await loop.process_input(session, "go")
 
-    assert len(engine.requests) == 1
+    assert len(engine.requests) == 2  # the remedy round
     assert not [m for m in session.messages if "[task-gate]" in (m.content or "")]
+    reminders = [
+        m
+        for m in session.messages
+        if m.synthetic and "present_plan" in (m.content or "")
+    ]
+    assert len(reminders) == 1
     assert loop.last_outcome is not None
-    assert loop.last_outcome.reason == "model finished"
+    assert loop.last_outcome.reason == "plan unsubmitted"
 
 
 @pytest.mark.asyncio
 async def test_plan_mode_does_not_refresh_a_bare_goal(tmp_path):
     """18 §10.5 (R5): the goal topic belongs to the planning axis — a new turn
-    in plan mode must not steal it with its own instruction."""
-    engine = ScriptedEngine([_text("你好呀"), _text("这是回答")])
+    in plan mode must not steal it with its own instruction.  stage 4 r2:
+    each bare-text ending spends the guard's one remedy, so the script gets
+    a second step per turn (the remedy round)."""
+    engine = ScriptedEngine(
+        [_text("你好呀"), _text("好的"), _text("这是回答"), _text("收到")]
+    )
     sessions = SessionService(tmp_path / "sessions")
     loop = _loop(engine, sessions)
     session = sessions.create()

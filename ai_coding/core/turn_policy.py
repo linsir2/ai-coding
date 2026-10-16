@@ -41,6 +41,19 @@ __all__ = [
 ]
 
 TASK_MESSAGE_LEAD = "以下是你自己的任务清单状态（系统注入，不是用户发言）："
+
+#: stage 4 r2: the plan submission guard's two texts, beside the rules they
+#: serve.  The nudge is the one remedy a plan-posture turn gets before it is
+#: allowed to end without a submission (dsh's turn-stopping idea); the note
+#: rides the outcome to the transcript when even the remedy is refused.
+#: Measured silent-completion twice: sessions 7ad86804 and 1fd3be1e.
+PLAN_NUDGE = (
+    "[plan] 尚未提交计划：计划模式要求用 todo_write 写好条目（含 verify），"
+    "并以 present_plan 提交评审，不能以纯文本收尾。请立即补交。"
+)
+PLAN_UNSUBMITTED_NOTE = (
+    "[plan] 本回合未提交计划（未调用 present_plan）；可继续对话让它提交。"
+)
 #: G8-1: the marker for the one block that tells the model its budget is nearly
 #: gone.  Volatile (never persisted) like the memory and task blocks -- it
 #: describes a counter, not a fact about the work.
@@ -155,6 +168,11 @@ class TurnSnapshot:
     #: pre-posture construction (and test) byte-identical.
     mode: str = "normal"
     readonly: bool = False
+    #: stage 4 r2: the plan submission guard's view -- a plan has been
+    #: submitted this turn (``present_plan`` succeeded), and the one remedy
+    #: nudge has been spent.  Defaults keep earlier constructions identical.
+    plan_submitted: bool = False
+    plan_nudged: bool = False
 
 
 @dataclass(frozen=True)
@@ -249,6 +267,17 @@ class TurnPolicy:
         # nagging a planning or read-only session to run tools is absurd.
         # Strategy/fatigue live at the PRE point and are untouched.
         if snapshot.mode == "plan" or snapshot.readonly:
+            # stage 4 r2: the submission guard before the quiet finish.  A
+            # posture turn that never submitted a plan gets one remedy
+            # nudge; refusing it too ends with the terminal note instead of
+            # a silent COMPLETED (7ad86804 / 1fd3be1e measured the silent
+            # case twice — a bare analysis, no card, no execution).
+            if not snapshot.plan_submitted:
+                if not snapshot.plan_nudged:
+                    return TurnDecision(
+                        TurnAction.NUDGE, "plan unsubmitted", inject=PLAN_NUDGE
+                    )
+                return TurnDecision(TurnAction.FINISH, "plan unsubmitted")
             return TurnDecision(TurnAction.FINISH, "model finished")
         if snapshot.acceptance:
             # R0-1: a turn with contracts does not end on the model's word.

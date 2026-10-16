@@ -105,9 +105,16 @@ def test_finish_reason_for_a_completed_step_is_stable():
 
 
 @pytest.mark.parametrize("posture", [{"mode": "plan"}, {"readonly": True}])
-def test_after_step_finishes_quietly_under_a_posture(posture):
+def test_after_step_finishes_quietly_under_a_posture_once_the_plan_is_in(posture):
+    """18 §10.5 的"执行门静默"保持：计划已提交时 posture 下照旧安静收尾。
+
+    未提交的路径由 plan 提交守卫接管（下方三个用例）——守卫不是执行门：
+    它不进干预账本（intervention 为空），只为"裸文本收尾、零提交"补一次
+    补救与一行终局通知（7ad86804 / 1fd3be1e 两次实测）。"""
     decision = TurnPolicy(_config()).decide_after_step(
-        TurnSnapshot(iteration=1, open_items=(_item("1"),), **posture)
+        TurnSnapshot(
+            iteration=1, open_items=(_item("1"),), plan_submitted=True, **posture
+        )
     )
     assert (
         decision.action,
@@ -117,13 +124,44 @@ def test_after_step_finishes_quietly_under_a_posture(posture):
     ) == (TurnAction.FINISH, "model finished", None, "")
 
 
+# ---- plan 提交守卫（stage 4 r2）: 裸文本收尾 → 一次补救 → 终局通知 ----------
+
+
+@pytest.mark.parametrize("posture", [{"mode": "plan"}, {"readonly": True}])
+def test_after_step_asks_for_the_plan_it_never_got(posture):
+    decision = TurnPolicy(_config()).decide_after_step(
+        TurnSnapshot(iteration=1, open_items=(_item("1"),), **posture)
+    )
+    assert (decision.action, decision.reason) == (TurnAction.NUDGE, "plan unsubmitted")
+    assert decision.inject is not None and "present_plan" in decision.inject
+    assert decision.intervention == ""  # 不是 ladder 家族，不进干预账本
+
+
+@pytest.mark.parametrize("posture", [{"mode": "plan"}, {"readonly": True}])
+def test_after_step_stops_asking_after_one_remedy(posture):
+    decision = TurnPolicy(_config()).decide_after_step(
+        TurnSnapshot(
+            iteration=1, open_items=(_item("1"),), plan_nudged=True, **posture
+        )
+    )
+    assert (decision.action, decision.reason) == (TurnAction.FINISH, "plan unsubmitted")
+
+
+def test_a_plain_turn_never_asks_for_a_plan():
+    decision = TurnPolicy(_config()).decide_after_step(TurnSnapshot(iteration=1))
+    assert (decision.action, decision.reason) == (TurnAction.FINISH, "model finished")
+
+
 @pytest.mark.parametrize("posture", [{"mode": "plan"}, {"readonly": True}])
 def test_after_step_silences_the_acceptance_gate_under_a_posture(posture):
     from ai_coding.domain.acceptance import AcceptanceState
 
     failing = (AcceptanceState(id="AC-1", passed=False),)
     decision = TurnPolicy(_config()).decide_after_step(
-        TurnSnapshot(iteration=2, acceptance=failing, **posture)
+        # stage 4 r2: with a plan already in, the acceptance ladder stays
+        # silent under the posture (the original intent); an unsubmitted
+        # plan is the guard's business, not the acceptance gate's.
+        TurnSnapshot(iteration=2, acceptance=failing, plan_submitted=True, **posture)
     )
     assert (decision.action, decision.reason) == (TurnAction.FINISH, "model finished")
 

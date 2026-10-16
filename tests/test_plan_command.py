@@ -458,3 +458,34 @@ def test_the_plan_prompt_bans_clear_rewrites():
     lowered = PLAN_PROMPT.lower()
     assert "update" in lowered
     assert "clear" in lowered
+
+
+@pytest.mark.asyncio
+async def test_plan_run_exits_the_posture_even_when_the_flip_had_to_queue():
+    """竞态实锤（c41e461 的 tmux 运行）：/plan run 派发落在回合锁内 → 退出
+    被排队到主会话，而 run 只跑步会话（fresh，自带 normal）→ 队列没人消费，
+    主会话残留 plan/readonly=True（磁盘同残，重启复活）。收尾兜底把翻转
+    落在 run 之后：即时/排队两态归一，且入盘。"""
+
+    class _BusyThenFreeLoop(_Loop):
+        async def process_input(self, session, text, on_delta=None, observer=None):
+            self.calls.append(text)
+            self.busy = False  # the lock is long gone by the time the run ends
+            return "step done"
+
+    from ai_coding.domain.task import TaskState
+
+    loop = _BusyThenFreeLoop(busy=True)
+    sessions = _Sessions()
+    session = _session()
+    session.mode, session.readonly = "plan", True
+    session.task = TaskState(goal="g")
+    session.task.add("still open")  # a real step: the stub's process_input runs
+    dc, c = _console()
+
+    await handle_input(loop, "/plan run", session, sessions, dc)
+
+    assert (session.mode, session.readonly) == ("normal", False)
+    assert sessions.saved and sessions.saved[-1] is session
+    out = c.export_text()
+    assert "执行完成后退出计划模式" in out

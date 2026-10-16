@@ -182,7 +182,10 @@ async def test_a_readonly_session_never_runs_the_proof_commands(tmp_path):
     assert not (tmp_path / "verified.marker").exists()
     assert session.acceptance[0].passed is None
     assert loop.last_outcome is not None
-    assert loop.last_outcome.reason == "model finished"
+    # stage 4 r2: the readonly posture also runs the plan submission guard --
+    # the bare text gets its one remedy, then the guarded finish.  The hole
+    # this test pins (proof commands must never run here) is unchanged.
+    assert loop.last_outcome.reason == "plan unsubmitted"
     await loop.aclose()
 
 

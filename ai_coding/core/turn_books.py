@@ -103,6 +103,10 @@ class TurnBooks:
     failed_streak: int = 0
     #: Strategy nudges injected (``[strategy-gate]``).
     strategy_nudges: int = 0
+    #: stage 4 r2: the plan submission guard spent its one remedy nudge.
+    #: ``plan_submitted`` itself needs no field -- ``tool_success`` already
+    #: remembers that present_plan succeeded.
+    plan_nudged: bool = False
     #: What failed, newest last — the handoff names the most recent one.
     failures: list[Failure] = field(default_factory=list)
     #: The latest thing the model said (``None`` when it said nothing at all).
@@ -186,6 +190,11 @@ class TurnBooks:
     def note_nudge(self) -> None:
         """The task gate injected a reminder and will iterate again."""
         self.nudges += 1
+
+    def note_plan_nudge(self) -> None:
+        """stage 4 r2: the plan submission guard spent its one remedy."""
+        self.nudges += 1
+        self.plan_nudged = True
 
     def note_acceptance_nudge(self) -> None:
         """The acceptance gate injected a reminder and will iterate again."""
@@ -376,4 +385,6 @@ class TurnBooks:
             fatigue_index=self.fatigue_index,
             fatigue_nudges=self.fatigue_nudges,
             ask_user_calls=self.ask_user_calls,
+            plan_submitted="present_plan" in self.tool_success,
+            plan_nudged=self.plan_nudged,
         )

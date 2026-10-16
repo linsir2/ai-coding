@@ -339,3 +339,24 @@ def test_a_cancelled_only_round_stops_the_burn_too():
     assert books.failed_streak == 1
     books.note_outcomes([_outcome("bash", success=False, error=CANCELLED_BY_USER)])
     assert books.failed_streak == 0
+
+
+# ------------------- plan 提交守卫（stage 4 r2）-----------------------------
+
+
+def test_plan_nudge_is_counted_and_remembered():
+    books = TurnBooks()
+    books.note_plan_nudge()
+    assert books.nudges == 1
+    assert books.plan_nudged is True
+
+
+def test_snapshot_carries_the_plan_submission_state():
+    books = TurnBooks()
+    snap = books.snapshot(iteration=1, tokens_spent=0)
+    assert (snap.plan_submitted, snap.plan_nudged) == (False, False)
+    books.note_outcomes([_outcome("present_plan", success=True)])
+    snap2 = books.snapshot(iteration=1, tokens_spent=0)
+    assert snap2.plan_submitted is True
+    books.note_plan_nudge()
+    assert books.snapshot(iteration=1, tokens_spent=0).plan_nudged is True

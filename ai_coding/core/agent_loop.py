@@ -89,6 +89,7 @@ from ai_coding.core.turn_close import (
 )
 from ai_coding.core.turn_hooks import TurnHooks
 from ai_coding.core.turn_policy import (
+    PLAN_UNSUBMITTED_NOTE,
     TurnAction,
     TurnDecision,
     TurnPolicy,
@@ -820,10 +821,20 @@ class AgentLoop:
                             text=step.text,
                             iterations=books.total_iterations,
                             reason=decision.reason,
+                            # stage 4 r2: the plan guard's terminal line.
+                            note=(
+                                PLAN_UNSUBMITTED_NOTE
+                                if decision.reason == "plan unsubmitted"
+                                else ""
+                            ),
                         )
                         break
                     if decision.intervention == "acceptance":
                         books.note_acceptance_nudge()
+                    elif decision.reason == "plan unsubmitted":
+                        # stage 4 r2: the guard's one remedy, counted so the
+                        # snapshot stops offering it next time.
+                        books.note_plan_nudge()
                     else:
                         books.note_nudge()
                     session.add_message(

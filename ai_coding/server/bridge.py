@@ -177,6 +177,7 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
                 "iterations": outcome.iterations,
                 "truncatedByLength": outcome.truncated_by_length,
                 "handoff": outcome.handoff,
+                "note": outcome.note,
             },
         }
     if isinstance(event, ProviderRetried):

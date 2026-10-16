@@ -1045,3 +1045,35 @@ describe("resume", () => {
     expect(state.messages).toEqual([])
   })
 })
+
+describe("the plan guard's terminal note (stage 4 r2)", () => {
+  test("turn.finished renders the note as a muted line", () => {
+    const state = feed(
+      initialState(),
+      delta("分析完毕。"),
+      wire("turn.finished", {
+        status: "completed",
+        reason: "plan unsubmitted",
+        note: "[plan] 本回合未提交计划（未调用 present_plan）；可继续对话让它提交。",
+      }),
+    )
+    const notices = lastAssistant(state).parts.filter((part) => part.kind === "notice")
+    expect(notices).toEqual([
+      {
+        kind: "notice",
+        tone: "muted",
+        text: "[plan] 本回合未提交计划（未调用 present_plan）；可继续对话让它提交。",
+      },
+    ])
+  })
+
+  test("a turn without a note adds no line", () => {
+    const state = feed(
+      initialState(),
+      delta("好的。"),
+      wire("turn.finished", { status: "completed", reason: "model finished" }),
+    )
+    const notices = lastAssistant(state).parts.filter((part) => part.kind === "notice")
+    expect(notices).toEqual([])
+  })
+})

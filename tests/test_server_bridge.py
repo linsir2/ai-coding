@@ -155,8 +155,21 @@ def test_turn_finished_serialises_status_and_handoff() -> None:
             "iterations": 3,
             "truncatedByLength": False,
             "handoff": "报告",
+            "note": "",
         },
     }
+
+
+def test_turn_finished_carries_the_plan_note() -> None:
+    """stage 4 r2: the plan guard's terminal line rides the outcome."""
+    outcome = TurnOutcome(
+        status=TurnStatus.COMPLETED,
+        reason="plan unsubmitted",
+        note="[plan] 本回合未提交计划（未调用 present_plan）；可继续对话让它提交。",
+    )
+    wire = to_wire(TurnFinished(outcome=outcome))
+    assert wire is not None
+    assert wire["data"]["note"].startswith("[plan] 本回合未提交计划")
 
 
 def test_turn_finished_completed_truncated() -> None:
