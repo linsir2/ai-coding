@@ -488,6 +488,17 @@ def make_handlers(
         interrupted = sum(1 for future in list(state.turn_futures) if future.cancel())
         return {"ok": True, "interrupted": interrupted}
 
+    def session_steer(params: dict[str, Any]) -> dict[str, Any]:
+        """steering 前端化: a line typed mid-turn goes to the run, not the queue.
+
+        The bounded FIFO is the loop's own seam (R7e-2, drained at each
+        iteration boundary); this endpoint is the only missing wire between
+        the composer and it.  Commands and blank lines are refused by the
+        queue's own rule -- the caller keeps those on its queue path.
+        """
+        accepted = bool(world.steering.put(str(params.get("text", "") or "")))
+        return {"accepted": accepted, "pending": int(world.steering.pending)}
+
     def session_command(params: dict[str, Any]) -> dict[str, Any]:
         """Run a slash command through the REPL dispatcher (A1).
 
@@ -1030,6 +1041,7 @@ def make_handlers(
         "session.prompt": session_prompt,
         "session.resume": session_resume,
         "session.interrupt": session_interrupt,
+        "session.steer": session_steer,
         "session.command": session_command,
         "session.delete": session_delete,
         "model.set": model_set,

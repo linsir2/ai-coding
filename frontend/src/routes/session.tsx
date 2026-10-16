@@ -21,7 +21,7 @@ import { AskPanel } from "../component/ask"
 import { PlanReviewPanel } from "../component/plan-review"
 import { PermissionPanel, type PermissionRequest } from "../component/permission"
 import { Prompt } from "../component/prompt"
-import { buildSubmission, planPrelude, type PendingPrompt } from "../util/submission"
+import { buildSubmission, commandName, planPrelude, type PendingPrompt } from "../util/submission"
 import { SessionHeader } from "../component/session-header"
 import { Sidebar } from "../component/sidebar"
 import { StatusBar } from "../component/status-bar"
@@ -157,7 +157,23 @@ export function Session(props: SessionProps) {
     // them and says why) rather than silently dropped.
     if (state.busy) {
       if (images.length > 0) return false
-      apply({ kind: "queued", text })
+      // steering 前端化: plain text typed mid-turn goes INTO the run -- the
+      // loop drains the FIFO at its next iteration boundary (R7e-2) -- while
+      // commands still queue (command semantics) and images queue too (no
+      // steer path for them).  Echo lands when the backend accepts; a
+      // refusal or a dead socket falls back to the queue, never a drop.
+      if (commandName(props.commands ?? [], text)) {
+        apply({ kind: "queued", text })
+        return true
+      }
+      void props.client
+        .request("session.steer", { text })
+        .then((ack: unknown) => {
+          const accepted = (ack as { accepted?: boolean }).accepted !== false
+          if (accepted) apply({ kind: "submitted", text, images: [] })
+          else apply({ kind: "queued", text })
+        })
+        .catch(() => apply({ kind: "queued", text }))
       return true
     }
     // r18/F14: a command sends no images, so it shows none either and hands

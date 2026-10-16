@@ -82,6 +82,8 @@ PLAN_PROMPT = (
     "Revise items with todo_write update (content/status); never clear the "
     "list to rewrite it — clearing empties the list and present_plan will "
     "refuse. "
+    "bash/write/edit are unavailable in plan mode — explore with "
+    "read/grep/glob instead. "
     "When the plan is ready, call present_plan with a concise markdown "
     "summary (a title first) as your final tool call: it presents the plan "
     "for the user's review, and approval starts execution automatically — "

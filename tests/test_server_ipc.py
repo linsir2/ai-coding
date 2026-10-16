@@ -149,9 +149,14 @@ def _fake_world(tmp_path: Path) -> SimpleNamespace:
     approval = CLIApprovalCallback()
     loop = _FakeLoop()
     loop.dispatcher = SimpleNamespace(approval=approval, gate=None)
+    from ai_coding.core.steering import SteeringQueue
+
     return SimpleNamespace(
         sessions=SessionService(tmp_path / "sessions"),
         engine=_FakeEngine(),
+        # steering 前端化: the real world builds one and hands it to the loop;
+        # the double follows the interface (sanctioned extension).
+        steering=SteeringQueue(),
         config=SimpleNamespace(
             models={"fake": SimpleNamespace(name="fake-model")},
             ai=SimpleNamespace(
@@ -1457,3 +1462,21 @@ async def test_boot_resume_breaker_disarms_past_the_cap(ipc):
     assert "上限" in str(hello.get("resumeNote") or "")
     reloaded = world.sessions.load(armed.session_id)
     assert reloaded.task.armed is False
+
+
+@pytest.mark.asyncio
+async def test_session_steer_lands_in_the_queue_and_refuses_commands(ipc):
+    """steering 前端化: the endpoint a busy composer calls; commands ride the
+    queue, not the running turn (the queue refuses '/' by its own rule)."""
+    world, _service, client = ipc
+    client.request("initialize")
+
+    ok = client.request("session.steer", {"text": "改个方向：先看测试"})
+    assert ok["accepted"] is True and ok["pending"] == 1
+
+    refused = client.request("session.steer", {"text": "/help"})
+    assert refused["accepted"] is False and refused["pending"] == 1
+
+    empty = client.request("session.steer", {"text": "   "})
+    assert empty["accepted"] is False and empty["pending"] == 1
+    assert world.steering.pending == 1

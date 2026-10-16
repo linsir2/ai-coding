@@ -132,7 +132,7 @@ from ai_coding.service.session_service import SessionService
 from ai_coding.skills.catalog import build_catalog, superseded_note
 from ai_coding.skills.policy import denied_skill_ids
 from ai_coding.tools.registry import ToolRegistry
-from ai_coding.tools.schema import tool_schema, tool_schemas
+from ai_coding.tools.schema import tool_schema, tool_schemas, tool_schemas_from_tools
 
 if TYPE_CHECKING:
     from ai_coding.ai.prompt import PromptAssembler
@@ -331,6 +331,13 @@ class AgentLoop:
         # answers a different question (whether the box should accept input).
         self._turn_lock = asyncio.Lock()
         self._tool_schemas = tool_schemas(tools)
+        # 只读探索批次: the schema list mirrors the dispatch gate's own
+        # predicate -- what `ctx.readonly` refuses is never advertised, so a
+        # read-only model has nothing to walk into (measured before: 3-4 bash
+        # collisions per planning turn).  Same predicate, one source of truth.
+        self._readonly_schemas = tool_schemas_from_tools(
+            [tool for tool in tools.all_tools if not tool.mutates_world]
+        )
         # R4a: the tool schemas are part of every prompt, so their size belongs in
         # the attribution (docs/r4-analysis.md 4.3).
         self._tools_text = short_json(self._tool_schemas)
@@ -1570,7 +1577,7 @@ class AgentLoop:
             step = await run_with_deadline(
                 self.engine.step(
                     request,
-                    tools=self._tool_schemas,
+                    tools=(self._readonly_schemas if session.readonly else self._tool_schemas),
                     instructions=instructions,
                     on_delta=counted_delta,
                     **(

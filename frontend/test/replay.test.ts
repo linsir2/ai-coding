@@ -279,3 +279,25 @@ describe("resume", () => {
     expect(ack.turnId).toBe(7)
   })
 })
+
+describe("[steering] replay (steering 前端化批次)", () => {
+  test("a mid-turn line replays as the user's own words", () => {
+    // The prefix is the harness speaking TO THE MODEL; the operator typed the
+    // rest, and a reloaded transcript must read it that way.
+    const state = messagesToState([
+      { role: "user", content: "[steering] 先看测试" },
+      { role: "assistant", content: "好" },
+    ])
+    expect(state.messages[0]).toEqual({
+      role: "user",
+      parts: [{ kind: "text", text: "先看测试", streaming: false }],
+    })
+  })
+
+  test("text that merely starts with a bracket is untouched", () => {
+    const state = messagesToState([{ role: "user", content: "[note] 保持" }])
+    expect(state.messages[0]?.parts).toEqual([
+      { kind: "text", text: "[note] 保持", streaming: false },
+    ])
+  })
+})

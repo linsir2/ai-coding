@@ -49,11 +49,22 @@ def _calls(*refs: ToolCallRef, text: str | None = None) -> StepResult:
 class _Tool(BaseTool):
     """Minimal registry entry; records the params it was called with."""
 
-    def __init__(self, name: str, *, result: ToolResult | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        result: ToolResult | None = None,
+        mutates_world: bool = True,
+    ) -> None:
         self._name = name
         self._result = result or ToolResult(success=True, output=f"{name} ok")
+        self._mutates_world = mutates_world
         self.calls: list[dict] = []
         self.contexts: list = []
+
+    @property
+    def mutates_world(self) -> bool:
+        return self._mutates_world
 
     @property
     def name(self) -> str:
@@ -152,7 +163,9 @@ def _registry(*extra: BaseTool) -> ToolRegistry:
     registry = ToolRegistry()
     provided = {tool.name for tool in extra}
     if "read" not in provided:
-        registry.register(_Tool("read"))
+        # The real ReadTool is mutates_world=False (read_tool.py:64); the
+        # double follows the interface (sanctioned extension).
+        registry.register(_Tool("read", mutates_world=False))
     if "todo_write" not in provided:
         registry.register(TodoWriteTool())
     for tool in extra:
@@ -1341,3 +1354,36 @@ async def test_plan_mode_does_not_refresh_a_bare_goal(tmp_path):
     assert len(last) == 1
     assert "目标: 你好" in last[0]
     assert "你的编排层怎么设计的" not in last[0]
+
+
+@pytest.mark.asyncio
+async def test_readonly_hides_mutating_tools_from_the_request(tmp_path):
+    """只读探索批次: the schema list mirrors the dispatch gate's own predicate
+    (``mutates_world``) -- what the gate would refuse is never advertised, so
+    the model has nothing to walk into.  Reading tools stay."""
+    # Two steps: the readonly posture also runs the plan guard, which spends
+    # its one remedy round before the guarded finish.
+    engine = ScriptedEngine([_text("done"), _text("done")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, registry=_registry(_Tool("bash")))
+    session = sessions.create()
+    session.readonly = True
+
+    await loop.process_input(session, "go")
+
+    names = {tool["function"]["name"] for tool in _last_request(engine)["tools"]}
+    assert "bash" not in names
+    assert {"read", "todo_write"} <= names
+
+
+@pytest.mark.asyncio
+async def test_a_writable_turn_keeps_the_full_tool_surface(tmp_path):
+    engine = ScriptedEngine([_text("done")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, registry=_registry(_Tool("bash")))
+    session = sessions.create()
+
+    await loop.process_input(session, "go")
+
+    names = {tool["function"]["name"] for tool in _last_request(engine)["tools"]}
+    assert "bash" in names

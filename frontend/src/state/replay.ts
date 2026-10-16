@@ -34,6 +34,9 @@ const PREVIEW_CHARS = 120
  */
 const CHECKPOINT_MARK = "[以下为早期对话摘要]"
 
+/** steering 前端化: written by the loop into history (agent_loop::_take_steering). */
+const STEERING_MARK = "[steering] "
+
 /** Drop the ``<tool_output>`` wrapper and its machine ``<data>`` block. */
 export function stripEnvelope(content: string): string {
   const kept: string[] = []
@@ -73,9 +76,13 @@ export function messagesToState(messages: WireMessage[]): SessionState {
   const out: ChatMessage[] = []
   for (const message of messages) {
     if (message.role === "user" && !(message.content ?? "").startsWith(CHECKPOINT_MARK)) {
+      // steering 前端化: "[steering] " is the harness marker the model reads;
+      // the operator typed the rest, so a replay shows their own words.
+      const raw = message.content ?? ""
+      const text = raw.startsWith(STEERING_MARK) ? raw.slice(STEERING_MARK.length) : raw
       out.push({
         role: "user",
-        parts: [{ kind: "text", text: message.content ?? "", streaming: false }],
+        parts: [{ kind: "text", text, streaming: false }],
       })
       continue
     }

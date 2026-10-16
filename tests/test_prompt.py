@@ -65,7 +65,8 @@ PLAN_SEGMENT = (
     "call present_plan with a concise markdown summary — approval starts "
     "execution automatically. Do not write the analysis, research or files as "
     "your final answer, and do not mark items completed — the execution phase "
-    "does the reading and the work.</plan-mode>"
+    "does the reading and the work. bash/write/edit are unavailable here — "
+    "explore with read/grep/glob instead.</plan-mode>"
 )
 
 

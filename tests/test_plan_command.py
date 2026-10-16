@@ -489,3 +489,14 @@ async def test_plan_run_exits_the_posture_even_when_the_flip_had_to_queue():
     assert sessions.saved and sessions.saved[-1] is session
     out = c.export_text()
     assert "执行完成后退出计划模式" in out
+
+
+def test_the_plan_prompt_says_the_mutating_tools_are_unavailable():
+    """只读探索批次: plan mode hides bash/write/edit (the same mutates_world
+    predicate the gate refuses with); the prompt says so, because a model that
+    never sees the tool will still call it from memory."""
+    from ai_coding.core.plan_runner import PLAN_PROMPT
+
+    lowered = PLAN_PROMPT.lower()
+    assert "unavailable" in lowered
+    assert "read/grep/glob" in lowered
