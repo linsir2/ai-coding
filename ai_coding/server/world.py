@@ -9,6 +9,7 @@ itself (its module tree under ``ai_coding/ui/`` is gone).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,9 @@ class AppWorld:
     #: is re-armed after every command that may swap it (I1).  The
     #: model's question channel is installed the same way.
     user_prompt: Any
+    #: 11-spec §7.2: the newest armed session, found at boot; ``initialize``
+    #: consumes it exactly once (loading it as live and resuming its driver).
+    pending_resume: Any = None
 
     async def aclose(self) -> None:
         for closer in (
@@ -54,6 +58,34 @@ class AppWorld:
                 await closer()
             except Exception:  # noqa: BLE001 — shutdown is best-effort
                 _log.debug("world close failed", exc_info=True)
+
+
+def find_armed_session(sessions: Any) -> Any | None:
+    """The newest persisted session whose task is armed (11-spec §7.2).
+
+    Scanned from the raw JSON keys, not ``list_sessions`` -- this runs before
+    any session UI, and the message bodies are not needed to pick a winner.
+    ``openTurn`` is deliberately NOT part of the filter: a clean close clears
+    it, and a crash between rounds leaves exactly that state.
+    """
+    root = Path(getattr(sessions, "root", "") or "")
+    if not root.is_dir():
+        return None
+    best: tuple[str, str] | None = None
+    for path in root.glob("*.json"):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        task = raw.get("task")
+        if not isinstance(task, dict) or task.get("armed") is not True:
+            continue
+        stamp = str(raw.get("lastAccessTime", "") or "")
+        if best is None or stamp > best[0]:
+            best = (stamp, path.stem)
+    if best is None:
+        return None
+    return sessions.load(best[1])
 
 
 async def build_world(path: str | None, workspace: str, skills: str | None) -> AppWorld:
@@ -143,6 +175,9 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         steering=steering,
         cancel=cancel,
     )
+    pending = find_armed_session(sessions)
+    if pending is not None:
+        _log.info("boot resume candidate: %s", pending.session_id)
     return AppWorld(
         config=app_cfg,
         config_path=str(path) if path else None,
@@ -157,4 +192,5 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         steering=steering,
         approval=approval,
         user_prompt=user_prompt,
+        pending_resume=pending,
     )
