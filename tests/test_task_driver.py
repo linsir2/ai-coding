@@ -147,3 +147,17 @@ async def test_a_disarm_between_rounds_stops_the_loop():
 
     assert "round:1" in profile.log and "round:2" not in profile.log
     assert profile.log[-2:] == ["persist", "finish"]
+
+
+@pytest.mark.asyncio
+async def test_the_driver_disarms_on_every_stop_path():
+    """11-spec §5.3: finished/capped/disarmed all end armed=False for the
+    profile's persist to carry."""
+    from types import SimpleNamespace
+
+    task = SimpleNamespace(armed=True)
+    profile = _Profile([_Item("1")])
+
+    await TaskDriver(None).run(_session(task), profile)
+
+    assert task.armed is False

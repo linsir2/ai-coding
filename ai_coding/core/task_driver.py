@@ -101,12 +101,15 @@ class TaskDriver:
             # fake-profile tests can drive a bare object.
             if not getattr(task, "armed", True):
                 break
-            if 0 < cap <= profile.rounds_used(report):
-                profile.budget_stop(report, cap)
-                break
             item = profile.next_item(task, attempted)
             if item is None:
                 profile.no_item(task, report)
+                break
+            # R1-4 parity: the ceiling is checked only while work remains — a
+            # run that spends exactly the cap finishing is a clean end, not
+            # an alarm (the plan suite pins this).
+            if 0 < cap <= profile.rounds_used(report):
+                profile.budget_stop(report, cap)
                 break
             profile.before_round(task, session, report, receipted)
             attempted.add(item.id)
@@ -123,6 +126,11 @@ class TaskDriver:
             profile.after_round(session, task, report)
             if profile.should_stop(report, item):
                 break
+        # 11-spec §5.3: every stop path disarms; the profile's persist then
+        # carries it to disk.  Guarded so the fake-profile tests can drive a
+        # bare object.
+        if hasattr(task, "armed"):
+            task.armed = False
         profile.persist(session)
         profile.finish(console, report)
         return report

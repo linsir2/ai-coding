@@ -30,6 +30,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from ai_coding.core.task_driver import TaskDriver
 from ai_coding.core.turn_policy import TurnPolicy
 from ai_coding.domain.acceptance import AcceptanceItem
 from ai_coding.domain.loop import TurnStatus
@@ -245,10 +246,24 @@ class PlanReport:
 
 
 class PlanRunner:
-    """Execute a session's todo plan step by step through a loop."""
+    """Execute a session's todo plan step by step through a loop.
+
+    （11-plan T3）The round loop itself now lives in the kernel
+    :class:`~ai_coding.core.task_driver.TaskDriver`; this class is the
+    ``plan`` RoundProfile.  Every hook below is a verbatim wrapper of the
+    piece the pre-T3 ``run`` body had, so the plan suites are the
+    equivalence proof and nothing here may drift from those semantics.
+    """
 
     def __init__(self, loop: Any) -> None:
         self._loop = loop
+        #: T3: protocol signatures (`no_item`, `taskless`) cannot carry the
+        #: session/receipt set that the old loop-top `_backfill_fiat` needed;
+        #: `prepare` stashes them for that one call.  Safe because a runner
+        #: instance serves exactly one run.
+        self._run_session: Any = None
+        self._run_receipted: set[str] = set()
+        self._run_attempted: set[str] = set()
 
     async def run(
         self,
@@ -258,75 +273,128 @@ class PlanRunner:
         on_delta: Any = None,
         observer: Any = None,
     ) -> PlanReport:
-        """Run every ready todo item; return what happened."""
-        report = PlanReport()
+        """Run every ready todo item; return what happened (11-plan T3).
+
+        The command-driven run arms the task for its duration (the driver's
+        loop only drives armed tasks; boot-resume sessions arrive armed) and
+        the driver disarms on every stop path — one lifecycle, whether the
+        run came from the command, a boot resume, or a direct caller.
+        """
         task = getattr(session, "task", None)
-        if task is None:
-            # No task at all (a bare /plan on a session that never had one):
-            # same verdict as an empty plan — "nothing to do", not "run /plan
-            # first", which would be absurd right after planning.
-            report.stopped = "no-open-items"
-            self._say(console, "[plan] 完成 0 步 · 用了 0 回合（无任务项）")
-            return report
-        attempted: set[str] = set()
-        cap = self._run_budget()
-        # R1-5: ids that already have a receipt — this run's settlements plus
-        # whatever the session still remembers about *this* list.  Anything
-        # completed without one is a fiat completion the runner never settled:
-        # receipt it, don't re-run it.
-        #
-        # Receipts are keyed by step id and ids restart at 1 for every list, so
-        # a list replaced mid-turn (the model does todo_write(clear) and writes
-        # a new one) leaves receipts whose ids collide with the new list's.  A
-        # receipt describes the statement it settled, so anything whose
-        # statement is no longer on the list belongs to a plan that is gone —
-        # dropped here, before they can stand in for the new plan's steps.
+        if task is not None:
+            task.armed = True
+            task.armed_profile = "plan"
+        report: PlanReport = await TaskDriver(self._loop).run(
+            session, self, console, on_delta=on_delta, observer=observer
+        )
+        return report
+
+    # ---- RoundProfile (11-plan §5.2): one hook per pre-T3 run-body piece --
+
+    def new_report(self) -> PlanReport:
+        return PlanReport()
+
+    def max_rounds(self) -> int:
+        """R1-4: the run's own step-turn ceiling (0 disables)."""
+        return self._run_budget()
+
+    def prepare(self, session: Any, task: Any) -> set[str]:
+        """R1-5 receipts: drop foreign ones, hand back the session's own set.
+
+        Receipts are keyed by step id and ids restart at 1 for every list, so
+        a list replaced mid-turn (the model does todo_write(clear) and writes
+        a new one) leaves receipts whose ids collide with the new list's.  A
+        receipt describes the statement it settled, so anything whose
+        statement is no longer on the list belongs to a plan that is gone --
+        dropped here, before they can stand in for the new plan's steps.
+        """
+        self._run_session = session
         self._drop_foreign_receipts(session, task)
-        receipted: set[str] = {
+        self._run_receipted = {
             entry.step_id for entry in getattr(session, "step_deliveries", [])
         }
-        while True:
-            self._backfill_fiat(task, session, report, receipted)
-            item = self._next_ready(task, attempted)
-            if item is None:
-                # 19 §3.4-3: a deadlock is "an open item we never even tried,
-                # and it cannot run" (missing dependency or cycle).  Open items
-                # we already attempted are stalls/blocks — the report carries
-                # them, and reporting "deadlock" there would be a lie.
-                never_attempted = [
-                    entry for entry in task.open_items()
-                    if entry.id not in attempted
-                ]
-                if never_attempted:
-                    report.stopped = (
-                        "deadlock: open items remain but none is ready "
-                        "(missing dependency or cycle)"
-                    )
-                break
-            # R1-4: the run's own ceiling, checked only while work remains —
-            # a run that spends exactly the cap finishing is a clean end,
-            # not an alarm.  Finished steps persist on the task; the remaining
-            # open items survive as the plan's state.
-            if 0 < cap <= report.turns_used:
-                report.stopped = (
-                    f"budget: plan turn budget exhausted "
-                    f"({report.turns_used}/{cap} step-turns); "
-                    "remaining steps stay open"
-                )
-                break
-            attempted.add(item.id)
-            await self._run_step(session, task, item, report, console,
-                                 on_delta=on_delta, observer=observer)
-            receipted.add(item.id)  # settled (or runner-blocked) above
-            # 19 §3.4-3 (Q5=A): a stalled step is recorded, not fatal — the run
-            # moves to the next ready item and the report lists the stalls for
-            # a re-run.  Blocked stays fatal for the item at hand: a failed
-            # proof is the decision point this runner exists to surface.
-            if report.blocked and report.blocked[-1] == item.id:
-                break
+        return self._run_receipted
+
+    def next_item(self, task: Any, attempted: set[str]) -> Any:
+        # The driver mutates this set in place; keep the reference so
+        # `no_item` can apply the same this-run rule the old loop used.
+        self._run_attempted = attempted
+        return self._next_ready(task, attempted)
+
+    def before_round(
+        self, task: Any, session: Any, report: PlanReport, receipted: set[str]
+    ) -> None:
+        """The old loop top's fiat backfill (R1-5)."""
+        self._backfill_fiat(task, session, report, receipted)
+
+    def no_item(self, task: Any, report: PlanReport) -> None:
+        """The old loop top's last pass: backfill, then the deadlock rule.
+
+        19 §3.4-3: a deadlock is "an open item we never even tried, and it
+        cannot run" (missing dependency or cycle).  Open items we already
+        attempted are stalls/blocks — the report carries them, and reporting
+        "deadlock" there would be a lie.
+        """
+        self._backfill_fiat(task, self._run_session, report, self._run_receipted)
+        never_attempted = [
+            entry for entry in task.open_items() if entry.id not in self._run_attempted
+        ]
+        if never_attempted:
+            report.stopped = (
+                "deadlock: open items remain but none is ready "
+                "(missing dependency or cycle)"
+            )
+
+    def rounds_used(self, report: PlanReport) -> int:
+        return report.turns_used
+
+    def budget_stop(self, report: PlanReport, cap: int) -> None:
+        """R1-4: the ceiling was reached with work left — not a clean end."""
+        report.stopped = (
+            f"budget: plan turn budget exhausted "
+            f"({report.turns_used}/{cap} step-turns); "
+            "remaining steps stay open"
+        )
+
+    async def run_round(
+        self,
+        session: Any,
+        task: Any,
+        item: Any,
+        report: PlanReport,
+        console: Any,
+        *,
+        on_delta: Any,
+        observer: Any,
+    ) -> None:
+        await self._run_step(
+            session, task, item, report, console, on_delta=on_delta, observer=observer
+        )
+
+    def after_round(self, session: Any, task: Any, report: PlanReport) -> None:
+        """Nothing beyond the driver's own receipt note (the old body had
+        only `receipted.add(item.id)` here); the blocked check is
+        ``should_stop``'s business."""
+
+    def should_stop(self, report: PlanReport, item: Any) -> bool:
+        """19 §3.4-3 (Q5=A): a stalled step is recorded, not fatal — the run
+        moves to the next ready item and the report lists the stalls for a
+        re-run.  Blocked stays fatal for the item at hand: a failed proof is
+        the decision point this runner exists to surface."""
+        return bool(report.blocked) and report.blocked[-1] == item.id
+
+    def taskless(self, report: PlanReport, console: Any) -> None:
+        """No task at all (a bare /plan on a session that never had one):
+        same verdict as an empty plan — "nothing to do", not "run /plan
+        first", which would be absurd right after planning."""
+        report.stopped = "no-open-items"
+        self._say(console, "[plan] 完成 0 步 · 用了 0 回合（无任务项）")
+
+    def persist(self, session: Any) -> None:
         self._persist(session)
+
+    def finish(self, console: Any, report: PlanReport) -> None:
         self._say(console, report.render())
-        return report
 
     # ---- internals ------------------------------------------------------
 
