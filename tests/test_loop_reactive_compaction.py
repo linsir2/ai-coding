@@ -173,10 +173,13 @@ async def test_the_compacted_history_is_written_back_to_the_session(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_it_compacts_at_most_once_per_turn(tmp_path):
-    """Compaction rewrites the operator's history.  A session that cannot fit
-    even after one pass must fail honestly rather than be shredded turn by turn
-    into a summary of a summary."""
+async def test_it_attempts_at_most_twice_per_turn(tmp_path):
+    """11-spec §7.3 (sanctioned rewrite): the wall is two rescue passes, not
+    one.  Here the first pass shrinks and the retry is issued; the second
+    pass finds nothing left to remove, so ``removed == 0`` ends the turn
+    honestly -- two histories, not a third attempt at a summary of a
+    summary.  (The companion pin in test_overflow_safety drives a trimmer
+    that always shrinks and shows the third rejection is the truth.)"""
     client = _SequencedClient([_overflow_error(), _overflow_error(), _overflow_error()])
     engine = _CountingEngine(client)
     loop = _loop(tmp_path, engine)
@@ -188,7 +191,7 @@ async def test_it_compacts_at_most_once_per_turn(tmp_path):
     text = await loop.process_input(session, "继续")
 
     assert "错误" in text or "error" in text.lower(), text
-    assert len(engine.histories) == 2, f"compacted more than once: {len(engine.histories)} calls"
+    assert len(engine.histories) == 2, f"compacted more than twice: {len(engine.histories)} calls"
 
 
 @pytest.mark.asyncio

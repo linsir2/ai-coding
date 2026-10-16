@@ -95,6 +95,30 @@ def _compactable(tmp_path) -> ContextManager:
     )
 
 
+class _OnePassTrimmer:
+    """A context double that removes one message per forced compaction pass.
+
+    ``should_compact`` is False so only the rescue path (force=True) trims;
+    the preventive path in ``assemble`` must not spend passes of its own.
+    ``on_summary`` is accepted because the compactor passes it unconditionally
+    (audit addendum: the doc's original signature would raise TypeError and
+    the tests would fail as "the rescue never happened").
+    """
+
+    last_summary_usage: dict[str, int] | None = None
+    last_summary_attempted = False
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def should_compact(self, messages, observed_tokens: int = 0) -> bool:
+        return False
+
+    async def compress_if_needed(self, messages, *, force: bool = False, on_summary=None):
+        self.calls += 1
+        return list(messages[1:])
+
+
 @pytest.mark.asyncio
 async def test_an_overflow_before_any_output_still_compacts_and_retries(tmp_path):
     """The I case that must not move.  Nothing reached the user, the history is
@@ -162,24 +186,28 @@ async def test_a_failure_that_is_not_an_overflow_is_untouched(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_second_overflow_is_still_refused_once_compaction_was_tried(tmp_path):
-    """`reactive_compacted` already makes compaction once per turn.  That guard
-    must survive: this is a second compaction, not a first."""
+async def test_a_third_overflow_after_two_rescues_is_refused(tmp_path):
+    """11-spec §7.3 (sanctioned rewrite): the wall is now two rescue passes.
+    With a trimmer that always shrinks, the third rejection is the truth --
+    the turn ends with the error text, not a third attempt."""
     engine = ScriptedEngine(
         [
             EngineError("maximum context length exceeded", kind="context_overflow"),
             EngineError("maximum context length exceeded", kind="context_overflow"),
+            EngineError("maximum context length exceeded", kind="context_overflow"),
         ]
     )
+    trimmer = _OnePassTrimmer()
     sessions = SessionService(tmp_path / "sessions")
-    loop = _loop(engine, sessions, context=_compactable(tmp_path))
+    loop = _loop(engine, sessions, context=trimmer)
     session = _session(sessions)
     _fill(session)
 
     result = await loop.process_input(session, "说点什么")
 
     assert "maximum context length" in result
-    assert len(engine.requests) == 2
+    assert len(engine.requests) == 3  # initial + two rescues; the third is truth
+    assert trimmer.calls == 2
 
 
 # ---- P: the ordinary paths still work ------------------------------------
@@ -303,3 +331,26 @@ async def test_the_real_engine_streaming_first_earns_one_continuation(tmp_path):
         "the second request must carry the continuation note, not repeat the ask"
     )
     assert "maximum context length" in result
+
+
+@pytest.mark.asyncio
+async def test_a_second_rescue_compaction_can_save_the_turn(tmp_path):
+    """11-spec §7.3: the old one-pass wall predated checkpoint merging.  A
+    second rescue now runs, and when it shrinks the history the step retries."""
+    engine = ScriptedEngine(
+        [
+            EngineError("maximum context length exceeded", kind="context_overflow"),
+            EngineError("maximum context length exceeded", kind="context_overflow"),
+            _text("第二次压缩后成功"),
+        ]
+    )
+    trimmer = _OnePassTrimmer()
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, context=trimmer)
+    session = _session(sessions)
+    _fill(session)  # two passes need history to remove, pass by pass
+
+    text = await loop.process_input(session, "继续")
+
+    assert "第二次压缩后成功" in text
+    assert trimmer.calls == 2

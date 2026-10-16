@@ -177,6 +177,13 @@ _STREAM_CONTINUE = (
 #: to divide.  Matches the floor ``compact_now`` already applies to ``/compact``.
 _REACTIVE_COMPACT_SECONDS = 60.0
 
+#: Rescue compactions one turn may spend on provider context-overflow
+#: rejections (11-spec §7.3).  The old one-pass wall predated checkpoint
+#: merging; a second pass now UPDATES the checkpoint instead of shredding a
+#: summary of a summary, and a pass that removes nothing still ends the turn
+#: honestly (the ``removed == 0`` guard in the catch block).
+_MAX_OVERFLOW_COMPACTS = 2
+
 
 def _tools_by_origin(registry: ToolRegistry) -> dict[str, int]:
     """Serialised schema chars per origin, biggest first (R7e-3).
@@ -560,10 +567,12 @@ class AgentLoop:
         outcome = TurnOutcome(
             status=TurnStatus.MAX_ITERATIONS, reason="iteration budget exhausted"
         )
-        # G5-1: one compaction per turn, not per iteration.  Compaction rewrites
-        # the stored history, so a session that still does not fit must fail
-        # honestly rather than be shredded into a summary of a summary.
-        reactive_compacted = False
+        # G5-1 revised (11-spec §7.3): up to _MAX_OVERFLOW_COMPACTS rescue
+        # compactions per turn, each a fresh pass over the history.  The old
+        # one-pass wall predated checkpoint merging; two passes stay honest
+        # because the second UPDATES the checkpoint and a pass that removes
+        # nothing still ends the turn (the removed==0 guard below).
+        overflow_compacts = 0
         #: G8-2: the model's own wrap-up, if it was asked for one.  Kept off
         #: ``outcome.text`` on purpose -- see ``render_handoff``.
         closing = ""
@@ -753,8 +762,11 @@ class AgentLoop:
                     )
                     continue
                 except EngineError as exc:
-                    if exc.kind == _CONTEXT_OVERFLOW and not reactive_compacted:
-                        reactive_compacted = True
+                    if (
+                        exc.kind == _CONTEXT_OVERFLOW
+                        and overflow_compacts < _MAX_OVERFLOW_COMPACTS
+                    ):
+                        overflow_compacts += 1
                         report = await self.compactor.compact_now(
                             session,
                             timeout=self._remaining(frame.deadline) or _REACTIVE_COMPACT_SECONDS,
@@ -763,7 +775,7 @@ class AgentLoop:
                         if not report["removed"]:
                             # Nothing shrank: the history is already as small as this
                             # pipeline can make it, so the rejection is the truth and
-                            # a second attempt would earn the same answer.
+                            # another attempt would earn the same answer.
                             raise
                         self.reporter.report_degraded(
                             "model_step",
