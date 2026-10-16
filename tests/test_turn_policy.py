@@ -101,6 +101,43 @@ def test_finish_reason_for_a_completed_step_is_stable():
     assert decision.reason == "model finished"
 
 
+# ---- 18 §10.5: the two posture axes silence the execution gates (POST only) --
+
+
+@pytest.mark.parametrize("posture", [{"mode": "plan"}, {"readonly": True}])
+def test_after_step_finishes_quietly_under_a_posture(posture):
+    decision = TurnPolicy(_config()).decide_after_step(
+        TurnSnapshot(iteration=1, open_items=(_item("1"),), **posture)
+    )
+    assert (
+        decision.action,
+        decision.reason,
+        decision.inject,
+        decision.intervention,
+    ) == (TurnAction.FINISH, "model finished", None, "")
+
+
+@pytest.mark.parametrize("posture", [{"mode": "plan"}, {"readonly": True}])
+def test_after_step_silences_the_acceptance_gate_under_a_posture(posture):
+    from ai_coding.domain.acceptance import AcceptanceState
+
+    failing = (AcceptanceState(id="AC-1", passed=False),)
+    decision = TurnPolicy(_config()).decide_after_step(
+        TurnSnapshot(iteration=2, acceptance=failing, **posture)
+    )
+    assert (decision.action, decision.reason) == (TurnAction.FINISH, "model finished")
+
+
+def test_the_strategy_ladder_still_fires_under_plan_mode():
+    """Strategy/fatigue are PRE gates — the POST early exit cannot reach them."""
+    policy = TurnPolicy(_config(stall_iterations=3))
+    decision = policy.decide_next_iteration(
+        TurnSnapshot(iteration=5, attempted_calls=5, successful_calls=0, mode="plan")
+    )
+    assert decision.action is TurnAction.NUDGE
+    assert (decision.intervention, decision.level) == ("strategy", 1)
+
+
 # ---- task injection --------------------------------------------------------
 
 

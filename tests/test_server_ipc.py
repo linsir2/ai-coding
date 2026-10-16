@@ -317,7 +317,7 @@ async def test_session_command_routes_through_handle_input(ipc):
 
 @pytest.mark.asyncio
 async def test_session_command_inner_turns_are_steps_not_endings(ipc):
-    """A command that runs turns (/review, /plan steps) drives one run.
+    """A command that runs turns (/review, /plan run steps) drives one run.
 
     The loop's inner ``TurnFinished`` is a *step* of the command — the same
     assistant block the old TUI kept open — and the run's single terminal
@@ -953,7 +953,12 @@ async def test_config_summary(ipc):
 async def test_session_stats_without_usage(ipc):
     _world, _service, client = ipc
     client.request("initialize")
-    assert client.request("session.stats") == {"tokens": 0, "maxContextTokens": 48000}
+    assert client.request("session.stats") == {
+        "tokens": 0,
+        "maxContextTokens": 48000,
+        "mode": "normal",
+        "readonly": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -966,7 +971,42 @@ async def test_session_stats_reports_last_turn_prompt_tokens(ipc):
     session.turn_usages.append(
         TurnUsage(turn=1, prompt_tokens=1234, completion_tokens=56, total_tokens=1290)
     )
-    assert client.request("session.stats") == {"tokens": 1234, "maxContextTokens": 48000}
+    assert client.request("session.stats") == {
+        "tokens": 1234,
+        "maxContextTokens": 48000,
+        "mode": "normal",
+        "readonly": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_stats_reports_the_posture(ipc):
+    """P5 (18 §10.5): both posture axes ride the stats payload, always."""
+    world, _service, client = ipc
+    session = world.sessions.create()
+    session.mode, session.readonly = "plan", True
+    world.sessions.save(session)
+    client.request("session.load", {"id": session.session_id})
+
+    assert client.request("session.stats") == {
+        "tokens": 0,
+        "maxContextTokens": 48000,
+        "mode": "plan",
+        "readonly": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_load_reports_the_posture(ipc):
+    """P5 (18 §10.5): the load payload carries the same two keys."""
+    world, _service, client = ipc
+    session = world.sessions.create()
+    session.mode, session.readonly = "plan", True
+    world.sessions.save(session)
+
+    result = client.request("session.load", {"id": session.session_id})
+
+    assert (result["mode"], result["readonly"]) == ("plan", True)
 
 @pytest.mark.asyncio
 async def test_model_set_routes_to_loop(ipc):

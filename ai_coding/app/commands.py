@@ -6,7 +6,6 @@ stays import-light and offline; the OpenTUI frontend drives it over IPC.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from enum import Enum
 from pathlib import Path
@@ -26,7 +25,10 @@ HELP_TEXT = (
     "  /todo           show current task list\n"
     "  /tasks          list background sub-agent runs\n"
     "  /skills         list available skills\n"
-    "  /plan           generate and execute an implementation plan\n"
+    "  /plan [topic]   enter read-only plan mode; with a topic, plan it\n"
+    "  /plan run       execute the open plan\n"
+    "  /plan off       leave plan mode\n"
+    "  /readonly on|off  read-only session (writes refused)\n"
     "  /review        review current changes\n"
     "  /config         show effective configuration\n"
     "  /compact        compact conversation history\n"
@@ -51,14 +53,6 @@ class REPLAction(Enum):
     #: client must re-project it.  Distinct from NEW_SESSION, where the live
     #: session itself was switched.
     RELOAD = "reload"
-
-
-async def _ask_topic(console: Any) -> str | None:
-    """Ask for a plan topic on the terminal (the TUI uses a modal instead)."""
-    ask = getattr(console, "ask", None)
-    if ask is None:            # a console that cannot ask (test stubs)
-        return None
-    return await asyncio.to_thread(ask, "What should I plan?")
 
 
 #: Why an undo or redo moved nothing, in the words the user gets.  r17 reported
@@ -233,25 +227,9 @@ async def handle_input(
             console.info("[skills] no skills found")
         return REPLAction.CONTINUE, session
     if cmd.name == "plan":
-        # M1-A: /plan plans AND executes.  The two-command handoff let the
-        # plan go stale between /plan and /plan-run (measured: a run that
-        # executed 0 turns against a list from a prior turn).
-        #
-        # M4-a: the workflow is plan_runner.plan_and_run, shared with the
-        # Textual front-end.  This copy used to send the literal string
-        # "the current task" as the topic and skipped begin_plan when no topic
-        # was typed — unreachable in the shipped app, which is exactly why it
-        # drifted.  A bare /plan now asks, on either front-end.
-        from ai_coding.core.plan_runner import plan_and_run
-
-        await plan_and_run(
-            loop, session, console,
-            topic=cmd.raw[len("/plan"):].strip() or None,
-            ask_topic=lambda: _ask_topic(console),
-            on_delta=console.delta,
-            observer=observer,
-        )
-        return REPLAction.CONTINUE, session
+        return await _handle_plan(loop, session, sessions, cmd.raw, console, observer)
+    if cmd.name == "readonly":
+        return _handle_readonly(loop, session, sessions, cmd.raw, console)
     if cmd.name == "review":
         console.info("[review] reviewing current changes...")
         await loop.process_input(
@@ -280,6 +258,126 @@ def _handle_config(loop: Any, session: Any, console: ConsoleSink) -> tuple[REPLA
         f"  turn_timeout: {getattr(settings, 'turn_timeout_seconds', '?')}s",
     ]
     console.info("\n".join(lines))
+    return REPLAction.CONTINUE, session
+
+
+#: 18 §10.2: every posture receipt written during a running turn ends with this.
+_QUEUED = "（将在当前回合结束后生效）"
+
+
+def _save_session(sessions: Any, session: Any) -> None:
+    """Persist a posture flip; a ``sessions`` without ``save`` (stubs) is fine."""
+    save = getattr(sessions, "save", None)
+    if save is not None:
+        save(session)
+
+
+async def _handle_plan(
+    loop: Any, session: Any, sessions: Any, raw: str,
+    console: ConsoleSink, observer: Any,
+) -> tuple[REPLAction, Any]:
+    """``/plan [topic|off|run]`` — the command matrix of 18 §10.1.
+
+    Bare enters (mode=plan + readonly), a topic plans through ``plan_only``,
+    ``off`` double-disarms, ``run`` double-disarms when needed and executes
+    through ``PlanRunner`` (step sessions are fresh SessionData — normal and
+    writable by construction).  A flip requested mid-turn is queued by
+    ``loop.request_posture`` and the receipt says so (18 §10.2); a mid-turn
+    topic never starts a planning turn.
+    """
+    from ai_coding.core.plan_runner import PlanRunner, plan_only
+
+    rest = raw[len("/plan"):].strip()
+    sub = rest.lower()
+
+    if sub == "off":
+        was_plan, was_readonly = session.mode == "plan", bool(session.readonly)
+        if not loop.request_posture(session, mode="normal", readonly=False):
+            console.info(f"[plan] 退出计划模式已排队{_QUEUED}。")
+            return REPLAction.CONTINUE, session
+        _save_session(sessions, session)
+        if was_plan:
+            msg = "[plan] 已退出计划模式（只读已关闭）。"
+        elif was_readonly:
+            msg = "[plan] 只读已关闭（本就不在计划模式）。"
+        else:
+            msg = "[plan] 本就不在计划模式；只读开关也确认关闭。"
+        open_n = len(session.task.open_items()) if getattr(session, "task", None) else 0
+        if open_n:
+            msg += f" 还有 {open_n} 项未执行：/plan run 可继续执行。"
+        console.info(msg)
+        return REPLAction.CONTINUE, session
+
+    if sub == "run":
+        if session.mode == "plan" or session.readonly:
+            if loop.request_posture(session, mode="normal", readonly=False):
+                _save_session(sessions, session)
+                console.info("[plan] 已退出计划模式（只读已关闭）；开始执行计划。")
+            else:
+                console.info(
+                    f"[plan] 退出计划模式已排队{_QUEUED}；当前回合结束后将自动开始执行。"
+                )
+        await PlanRunner(loop).run(
+            session, console, on_delta=console.delta, observer=observer
+        )
+        return REPLAction.CONTINUE, session
+
+    already = session.mode == "plan" and session.readonly
+    if not already:
+        if not loop.request_posture(session, mode="plan", readonly=True):
+            if rest:
+                console.info(
+                    f"[plan] 进入计划模式（只读）已排队{_QUEUED}；"
+                    "回合结束后直接描述计划主题即可。"
+                )
+            else:
+                console.info(f"[plan] 进入计划模式（只读）已排队{_QUEUED}。")
+            return REPLAction.CONTINUE, session
+        _save_session(sessions, session)
+        console.info(
+            "[plan] 已进入计划模式（只读）。继续对话写计划；"
+            "/plan run 执行，/plan off 退出。"
+        )
+    if not rest:
+        if already:
+            console.info("[plan] 已在计划模式（只读）。/plan run 执行，/plan off 退出。")
+        return REPLAction.CONTINUE, session
+    if already and loop.turn_running:
+        console.info(
+            "[plan] 已在计划模式；回合结束后直接描述主题即可（或再次 /plan <主题> 重规划）。"
+        )
+        return REPLAction.CONTINUE, session
+
+    report = await plan_only(
+        loop, session, topic=rest, on_delta=console.delta, observer=observer
+    )
+    if report.stopped:
+        console.error(f"[plan] {report.stopped}")
+        return REPLAction.CONTINUE, session
+    n = len(session.task.items) if getattr(session, "task", None) else 0
+    console.info(f"[plan] 计划就绪：{n} 项。可继续对话补充；/plan run 执行，/plan off 退出。")
+    return REPLAction.CONTINUE, session
+
+
+def _handle_readonly(
+    loop: Any, session: Any, sessions: Any, raw: str, console: ConsoleSink
+) -> tuple[REPLAction, Any]:
+    """``/readonly on|off`` — the enforcement axis alone (18 §10.1)."""
+    arg = raw[len("/readonly"):].strip().lower()
+    if arg not in ("on", "off"):
+        state = "开" if session.readonly else "关"
+        line = f"[readonly] 用法：/readonly on|off（当前：{state}）"
+        (console.error if arg else console.info)(line)
+        return REPLAction.CONTINUE, session
+    value = arg == "on"
+    if not loop.request_posture(session, readonly=value):
+        console.info(f"[readonly] {'开启' if value else '关闭'}已排队{_QUEUED}。")
+        return REPLAction.CONTINUE, session
+    _save_session(sessions, session)
+    if value:
+        console.info("[readonly] 只读已开启：写/执行类工具将被拒绝；关闭：/readonly off。")
+    else:
+        console.info("[readonly] 只读已关闭。")
     return REPLAction.CONTINUE, session
 
 

@@ -137,3 +137,69 @@ async def test_budget_stop_with_green_suite_is_completed_not_max(tmp_path):
     assert outcome.status is TurnStatus.COMPLETED
     assert outcome.reason == "acceptance verified (post-budget)"
     await loop.aclose()
+
+
+# ---- 18 §10.5 (R4b): a read-only session never runs the proof shell ----------
+
+
+def _acceptance_loop(tmp_path):
+    from ai_coding.ai.engine import ChatEngine
+    from ai_coding.config.models import AIConfig
+    from ai_coding.core.agent_loop import AgentLoop
+    from ai_coding.domain.loop import StepResult
+    from ai_coding.service.session_service import SessionService
+    from ai_coding.tools.registry import ToolRegistry
+
+    class _Text(ChatEngine):
+        async def step(self, messages, *, tools, instructions=None, on_delta=None):
+            return StepResult(text="done", finish_reason="stop")
+
+    return AgentLoop(
+        _Text(),
+        SessionService(root=tmp_path / "sessions"),
+        ToolRegistry(),
+        settings=AIConfig(stop_policy="natural"),
+        workspace=str(tmp_path),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_readonly_session_never_runs_the_proof_commands(tmp_path):
+    """``verify_items`` runs ``shell=True`` and bypasses the dispatch gate — a
+    read-only session must not execute it at turn end (17 missed this hole)."""
+    loop = _acceptance_loop(tmp_path)
+    session = SessionData(
+        session_id="s",
+        title="",
+        created_time="t",
+        last_access_time="t",
+        readonly=True,
+        acceptance=[_item(verify="touch verified.marker")],
+    )
+
+    await loop.process_input(session, "go")
+
+    assert not (tmp_path / "verified.marker").exists()
+    assert session.acceptance[0].passed is None
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.reason == "model finished"
+    await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_writable_session_still_runs_the_proof_commands(tmp_path):
+    """The guard must not over-suppress: a writable session still proves."""
+    loop = _acceptance_loop(tmp_path)
+    session = SessionData(
+        session_id="s",
+        title="",
+        created_time="t",
+        last_access_time="t",
+        acceptance=[_item(verify="touch verified.marker")],
+    )
+
+    await loop.process_input(session, "go")
+
+    assert (tmp_path / "verified.marker").exists()
+    assert session.acceptance[0].passed is True
+    await loop.aclose()

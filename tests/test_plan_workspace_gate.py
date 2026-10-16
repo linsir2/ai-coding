@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ai_coding.core.plan_runner import outside_workspace_paths, plan_and_run
+from ai_coding.core.plan_runner import outside_workspace_paths, plan_only
 from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
 from ai_coding.domain.session import SessionData
 
@@ -42,10 +42,6 @@ class _StubLoop:
         return "planned"
 
 
-async def _never_asked():
-    raise AssertionError("topic was given; ask_topic must not run")
-
-
 def _session():
     return SessionData(session_id="s", title="", created_time="t", last_access_time="t")
 
@@ -53,9 +49,7 @@ def _session():
 @pytest.mark.asyncio
 async def test_outside_topic_stops_before_any_planning(tmp_path):
     loop = _StubLoop(str(tmp_path))
-    report = await plan_and_run(
-        loop, _session(), None, topic="把项目建到 /home/x/y", ask_topic=_never_asked
-    )
+    report = await plan_only(loop, _session(), topic="把项目建到 /home/x/y")
     assert report.stopped is not None and "/home/x/y" in report.stopped
     assert loop.calls == []
 
@@ -63,8 +57,6 @@ async def test_outside_topic_stops_before_any_planning(tmp_path):
 @pytest.mark.asyncio
 async def test_outside_plan_item_stops_before_execution(tmp_path):
     loop = _StubLoop(str(tmp_path), items=("写代码到 /home/x/y/app.py",))
-    report = await plan_and_run(
-        loop, _session(), None, topic="实现一个小系统", ask_topic=_never_asked
-    )
+    report = await plan_only(loop, _session(), topic="实现一个小系统")
     assert report.stopped is not None and "/home/x/y/app.py" in report.stopped
-    assert len(loop.calls) == 1  # planned once, execution never started
+    assert len(loop.calls) == 1  # planned once; the caller never runs it

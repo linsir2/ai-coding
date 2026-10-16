@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """R19 live acceptance — stage 1 takes over the wire (13/15), against the real model.
 
-Three scenarios, each behind ``scripts/recording_proxy.py`` with a fresh temp
+Five scenarios, each behind ``scripts/recording_proxy.py`` with a fresh temp
 workspace, so every byte of request/response traffic is on disk before it is
 asserted:
 
@@ -20,6 +20,11 @@ asserted:
   4. closing — a tool use with ``max_tool_iterations=1`` forces the iteration-
                budget ending.  Asserts the closing call carries the closing
                prompt and offers no tools (G).
+  5. plan_mode — drives the command layer for real: ``/plan <topic>`` enters
+               the read-only posture and plans, a forced ``write`` attempt is
+               refused on the wire, ``/plan run`` disarms and executes the
+               plan through the runner.  Asserts the posture both live and
+               persisted (P2/P3/P4/P5 of doc 18).
 
 Usage:
 
@@ -50,6 +55,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from recording_proxy import serve, start  # noqa: E402
 
 from ai_coding.ai.factory import build_engine_from_config  # noqa: E402
+from ai_coding.app.commands import handle_input  # noqa: E402
 from ai_coding.cli import _build_loop, _build_tool_registry  # noqa: E402
 from ai_coding.config.loader import ConfigLoader  # noqa: E402
 from ai_coding.core.agent_loop import _CLOSING_PROMPT  # noqa: E402
@@ -208,6 +214,121 @@ async def _run_scenario(
     }
 
 
+class _RecordingConsole:
+    """The console surface ``handle_input`` writes through, offline."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def delta(self, token: str) -> None:
+        return None
+
+    def info(self, message: str) -> None:
+        self.lines.append(message)
+
+    def error(self, message: str) -> None:
+        self.lines.append(message)
+
+    def rule(self, title: str = "") -> None:
+        return None
+
+    def step(self, title: str) -> Any:
+        return None
+
+
+async def _run_plan_scenario(
+    *, name: str, topic: str, model: dict[str, Any], out_root: Path
+) -> dict[str, Any]:
+    """Drive /plan → forced write attempt → /plan run, recording the wire."""
+    run_dir = out_root / name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ws = run_dir / "ws"
+    ws.mkdir(exist_ok=True)
+    _git_workspace(ws)
+
+    wire = run_dir / "wire.jsonl"
+    server = serve(upstream=model["base_url"], port=0, out_path=wire, cut_first=0)
+    start(server)
+    port = server.server_address[1]
+
+    config_path = run_dir / "config.yaml"
+    _temp_config(config_path, model, port, model["base_url"], 12)
+    console = _RecordingConsole()
+    try:
+        app_cfg = ConfigLoader.load_app(str(config_path))
+        _redact_api_key(config_path, model["api_key"])
+        registry = _build_tool_registry(app_cfg, str(ws), None)
+        registry.register(_AskUser())
+        engine = build_engine_from_config(app_cfg)
+        sessions = SessionService(ws / "sessions")
+        loop = _build_loop(engine, sessions, registry, app_cfg, str(ws), None)
+        session = sessions.create()
+        started = time.monotonic()
+
+        await handle_input(loop, f"/plan {topic}", session, sessions, console)
+        planning_mode = (session.mode, session.readonly)
+        items = len(session.task.items) if session.task else 0
+
+        await loop.process_input(
+            session,
+            "立刻调用 write 工具创建 plan_probe.txt（内容随意）。"
+            "直接调用工具，不要用 bash，不要拒绝。",
+        )
+
+        await handle_input(loop, "/plan run", session, sessions, console)
+        elapsed = round(time.monotonic() - started, 1)
+        after_run = (session.mode, session.readonly)
+        receipts = len(session.step_deliveries)
+        await loop.aclose()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    entries = [json.loads(line) for line in wire.read_text(encoding="utf-8").splitlines()]
+    persisted = sessions.load(session.session_id)
+    shutil.copy(ws / "sessions" / f"{session.session_id}.json", run_dir / "session.json")
+    return {
+        "name": name,
+        "run_dir": str(run_dir),
+        "reply": (
+            f"planning={planning_mode} items={items} "
+            f"after_run={after_run} receipts={receipts}"
+        ),
+        "elapsed": elapsed,
+        "entries": entries,
+        "ledger": persisted.intervention_state,
+        "console": list(console.lines),
+        "planning_mode": planning_mode,
+        "items": items,
+        "after_run": after_run,
+        "receipts": receipts,
+        "persisted": (persisted.mode, persisted.readonly),
+    }
+
+
+def _check_plan_mode(result: dict[str, Any]) -> list[str]:
+    problems = _check_simple(result)
+    conv = _conversation(result["entries"])
+    # P2: the planning turn's system prompt carries the posture segment.
+    if not any("<plan-mode>" in _messages(e)[0]["content"] for e in conv):
+        problems.append("no request carried the <plan-mode> segment")
+    # P1/P4: the forced write attempt must have been refused, visibly, on the wire.
+    if "只读已开启" not in "".join(_flat(e) for e in conv):
+        problems.append("the forced write attempt was never refused (readonly_denied)")
+    if result["planning_mode"] != ("plan", True):
+        problems.append(f"planning posture was never set: {result['planning_mode']}")
+    if result["items"] < 1:
+        problems.append("the planning turn wrote no todo items")
+    # P4: /plan run disarms and executes through the runner.
+    if result["after_run"] != ("normal", False):
+        problems.append(f"/plan run did not disarm: {result['after_run']}")
+    if result["persisted"] != ("normal", False):
+        problems.append(f"the file does not read back disarmed: {result['persisted']}")
+    if not any("只做这一步" in _flat(e) for e in conv):
+        problems.append("no plan step ran through the engine")
+    return problems
+
+
 def _check_simple(result: dict[str, Any]) -> list[str]:
     problems: list[str] = []
     conv = _conversation(result["entries"])
@@ -293,6 +414,15 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         "cut_first": 0,
         "max_iterations": 1,  # any tool use exhausts the budget -> closing call
     },
+    "plan_mode": {
+        "prompt": (
+            "新增 PLAN_DEMO.md：写明本仓库的一句话用途；"
+            "验收方式为文件存在（verify 用 test -f PLAN_DEMO.md）"
+        ),
+        "check": _check_plan_mode,
+        "cut_first": 0,
+        "driver": "plan",  # handled by _run_plan_scenario (command layer)
+    },
 }
 
 
@@ -320,14 +450,19 @@ async def main(args: argparse.Namespace) -> int:
         spec = SCENARIOS[name]
         print(SEP)
         print(f"[{name}] {spec['prompt'][:60]}...")
-        result = await _run_scenario(
-            name=name,
-            prompt=spec["prompt"],
-            model=model,
-            out_root=out_root,
-            cut_first=spec["cut_first"],
-            max_iterations=spec.get("max_iterations", 12),
-        )
+        if spec.get("driver") == "plan":
+            result = await _run_plan_scenario(
+                name=name, topic=spec["prompt"], model=model, out_root=out_root
+            )
+        else:
+            result = await _run_scenario(
+                name=name,
+                prompt=spec["prompt"],
+                model=model,
+                out_root=out_root,
+                cut_first=spec["cut_first"],
+                max_iterations=spec.get("max_iterations", 12),
+            )
         problems = spec["check"](result)
         conv = _conversation(result["entries"])
         gate = sum(_flat(e).count("[strategy-gate]") for e in conv)

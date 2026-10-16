@@ -61,6 +61,7 @@ class ReadTool(BaseTool):
 
     # Read-only: safe to run alongside sibling calls in the same message.
     parallel_safe = True
+    mutates_world = False
 
     def precheck(self, params: dict[str, Any]) -> ToolResult | None:
         path_str = str(params.get("path", ""))

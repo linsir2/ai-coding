@@ -107,6 +107,14 @@ describe("the command catalogue (A2.3)", () => {
     }
   })
 
+  test("/readonly rides the catalogue as a text command", () => {
+    // P5 (18 §10.1): the enforcement axis on its own — submitted verbatim,
+    // dispatched by the backend like the other text commands.
+    const entry = SLASH_COMMANDS.find((command) => command.name === "readonly")
+    expect(entry).toBeDefined()
+    expect(entry!.command).toBeUndefined()
+  })
+
   test("/memory opens the panel instead of printing a line of counts", () => {
     // M7. The name stays reachable — but as a keymap command, because the text
     // form answered "43 notes, 33 scenes" and nothing you could read, pin or

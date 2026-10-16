@@ -411,7 +411,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         name: "session.plan",
         title: "Plan",
         group: "Session",
-        desc: "Plan a topic and execute it step by step",
+        desc: "Enter read-only plan mode (add a topic to plan it)",
         palette: true,
         run: () => startSession("/plan "),
       },

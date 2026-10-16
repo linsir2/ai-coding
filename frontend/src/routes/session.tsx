@@ -74,6 +74,9 @@ export interface SessionProps {
 interface Stats {
   tokens: number
   maxContextTokens: number
+  /** P5 (18 §10.5): posture payload; absent key = old backend -> no marker. */
+  mode?: "normal" | "plan"
+  readonly?: boolean
 }
 
 export function Session(props: SessionProps) {
@@ -220,11 +223,10 @@ export function Session(props: SessionProps) {
         name: "session.plan",
         title: "Plan",
         group: "Session",
-        desc: "Plan a topic and execute it step by step",
+        desc: "Enter read-only plan mode (add a topic to plan it)",
         palette: true,
-        // Bare /plan needs a topic: pre-fill it and let the user type one.
-        // The old TUI asked in a modal; asking in the composer keeps the
-        // slash-list selection a single keystroke.
+        // P5/18 §10.1: seed a ready topic slot; submitting the bare "/plan "
+        // simply enters plan mode — no topic is required anymore.
         run: () => setPromptSeed("/plan "),
       },
       {
@@ -268,8 +270,8 @@ export function Session(props: SessionProps) {
     ],
   }))
 
-  // The slash list's /plan pre-fills the composer (bare /plan asks for a
-  // topic); the seed lands the text in the textarea and focuses it.
+  // The slash list's /plan pre-fills the composer with a topic slot; the
+  // seed lands the text in the textarea and focuses it.
   const [promptSeed, setPromptSeed] = createSignal("")
 
   onMount(() => {
@@ -451,6 +453,8 @@ export function Session(props: SessionProps) {
         maxContextTokens={stats().maxContextTokens}
         version={props.version}
         interruptArmed={interruptArmed()}
+        mode={stats().mode}
+        readonly={stats().readonly}
       />
     </box>
   )

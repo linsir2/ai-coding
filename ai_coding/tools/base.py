@@ -38,6 +38,10 @@ class ToolContext:
     session_id: str = ""
     messages: tuple[ChatMessage, ...] = ()
     instructions: str | None = None
+    #: 18 §10.1: the session's enforcement switch; the dispatcher's gate
+    #: refuses mutating tools while this is True.  The prompt-side ``mode`` is
+    #: deliberately not mirrored here — the gate has one input.
+    readonly: bool = False
     emit: Callable[[Any], None] = _noop_emit
     # R4a: the id of the call this execution belongs to.  The dispatcher stamps
     # one context per call (the batch shares everything else), which is what lets
@@ -78,6 +82,11 @@ class BaseTool(ABC):
     # Conservative default: NOT safe to run concurrently with sibling calls in
     # the same assistant message.  Read-only tools opt in by setting True.
     parallel_safe: bool = False
+    #: 17 §4-P1: may this tool change the world (workspace, processes, remote
+    #: state)?  Plan mode refuses every ``mutates_world`` tool structurally.
+    #: Fail-closed default like ``parallel_safe``'s False; the two are
+    #: orthogonal — ``subAgent`` runs arbitrary work yet is parallel-safe.
+    mutates_world: bool = True
 
     @property
     def origin(self) -> str:

@@ -42,6 +42,7 @@ class AskUserTool(BaseTool):
 
     # One human, one question at a time: never run this beside another tool.
     parallel_safe = False
+    mutates_world = False
 
     def __init__(self, prompt: UserPromptCallback, timeout_seconds: float = 300.0) -> None:
         self._prompt = prompt

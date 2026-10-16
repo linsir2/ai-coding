@@ -24,6 +24,7 @@ class MemorySearchTool(BaseTool):
     """Search the durable memory store and return structured notes."""
 
     parallel_safe = True
+    mutates_world = False
 
     def __init__(self, memory: Any) -> None:
         self._memory = memory

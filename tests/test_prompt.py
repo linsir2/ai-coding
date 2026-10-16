@@ -1,10 +1,10 @@
 """TDD (M3-3): PromptAssembler — section ordering and conditional joins."""
 
-from ai_coding.ai.prompt import PromptAssembler
+from ai_coding.ai.prompt import METHODS_SECTION, PromptAssembler
 
 
-def _assembler(plan_mode=False):
-    return PromptAssembler("you are a coding assistant.", plan_mode=plan_mode)
+def _assembler() -> PromptAssembler:
+    return PromptAssembler("you are a coding assistant.")
 
 
 def test_base_only():
@@ -25,13 +25,6 @@ def test_appends_project_and_skills_sections():
     assert "- bash: run a shell" in out
     # section order: base(skill block) after project block
     assert out.index("<system-reminder>") < out.index("<skills>")
-
-
-def test_plan_mode_segment():
-    out = _assembler(plan_mode=True).build()
-    assert "<plan-mode>" in out
-    plain = _assembler(plan_mode=False).build()
-    assert "<plan-mode>" not in plain
 
 
 def test_blank_optional_sections_omitted():
@@ -63,8 +56,41 @@ def test_methods_section_rides_even_a_base_only_prompt():
     assert "<methods>" in _assembler().build()
 
 
+# ---- 18 §10.5 (P2): the posture rides build(mode=) ---------------------------
+
+PLAN_SEGMENT = (
+    "<plan-mode>You are in plan mode: analyse and produce a step-by-step "
+    "plan. Do not edit files or run side-effecting tools.</plan-mode>"
+)
+
+
+def test_plan_mode_segment():
+    out = _assembler().build(mode="plan")
+    assert "<plan-mode>" in out
+    assert "<plan-mode>" not in _assembler().build()
+
+
+def test_normal_output_is_byte_identical():
+    """18 §10.5: the mode parameter must not move a single byte of normal output."""
+    expected = "you are a coding assistant.\n\n" + METHODS_SECTION
+    assert _assembler().build() == expected
+    assert _assembler().build(mode="normal") == expected
+
+
+def test_plan_segment_is_verbatim_and_sits_after_methods():
+    expected = (
+        "you are a coding assistant.\n\n" + METHODS_SECTION + "\n\n" + PLAN_SEGMENT
+    )
+    assert _assembler().build(mode="plan") == expected
+
+
+def test_an_unknown_mode_reads_as_normal():
+    """Fail-safe: only "plan" changes the prompt (persistence filters too)."""
+    assert _assembler().build(mode="weird") == _assembler().build()
+
+
 def test_methods_section_sits_before_the_plan_mode_segment():
-    out = _assembler(plan_mode=True).build(
-        project_instructions="p", skills_catalog="s"
+    out = _assembler().build(
+        project_instructions="p", skills_catalog="s", mode="plan"
     )
     assert out.index("<methods>") < out.index("<plan-mode>") < out.index("<skills>")

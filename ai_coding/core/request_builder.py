@@ -98,6 +98,8 @@ def tool_context(
         session_id=session.session_id,
         messages=tuple(history),
         instructions=instructions,
+        # 18 §10.1: the switch rides the one shared factory.
+        readonly=session.readonly,
         emit=emit,
         turn=int(turn),
         note_checkpoint=note_checkpoint,

@@ -293,6 +293,13 @@ class ToolDispatcher:
         if item.tool is None:
             return self._unknown(call), True, False
 
+        # 18 §10.1: a read-only session refuses mutating calls structurally.
+        # The refusal sits before the permission gate on purpose: an approval
+        # must not be spent on a call the session refuses anyway, and the model
+        # sees the reason.
+        if ctx.readonly and item.tool.mutates_world:
+            return self._readonly_denied(call), True, False
+
         verdict = _verdict(item.decision)
         reason = _reason(item.decision)
 
@@ -521,6 +528,24 @@ class ToolDispatcher:
             output=f"error: unknown tool '{call.name}'",
             error="unknown_tool",
             data={"tool": call.name},
+        )
+
+    @staticmethod
+    def _readonly_denied(call: ToolCall) -> ToolResult:
+        """18 §10.1: a read-only session refuses mutations, and says how out."""
+        return ToolResult(
+            success=False,
+            output=(
+                "error: 只读已开启——该工具会改变工作区或状态，已拒绝。"
+                "读文件、搜索、写计划仍可用；关闭：/readonly off 或 /plan off；"
+                "执行计划：/plan run。"
+            ),
+            error="readonly_denied",
+            data={
+                "decision": "deny",
+                "reason": "read-only session",
+                "readonly": True,
+            },
         )
 
     @staticmethod

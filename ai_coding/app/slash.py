@@ -42,6 +42,7 @@ _ALIASES: dict[str, str] = {
     "/tasks": "tasks",
     "/skills": "skills",
     "/plan": "plan",
+    "/readonly": "readonly",
     "/review": "review",
     "/config": "config",
 }
@@ -94,9 +95,9 @@ def _levenshtein(a: str, b: str) -> int:
 #: the edit-distance rule: "/plan-run" is four edits from "plan", so the
 #: near-miss logic below would never fire, and the user who typed it got a
 #: model turn instead of an answer.  Keys are the full token, values the
-#: command that replaced it.  Kept (not deleted) because help text, docs and
-#: habits outlive the rename.
-_DEPRECATED: dict[str, str] = {"/plan-run": "/plan"}
+#: replacement **as it must be typed** (the caller renders ``/{value}``).
+#: Kept (not deleted) because help text, docs and habits outlive the rename.
+_DEPRECATED: dict[str, str] = {"/plan-run": "/plan run"}
 
 
 def suggest_command(token: str) -> str | None:

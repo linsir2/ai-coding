@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -63,7 +63,10 @@ PLAN_PROMPT = (
     "'verify' (a shell command), so the plan can be executed and "
     "verified step by step. "
     "Write the items as pending/open steps only — do not execute "
-    "the work and do not mark items completed during planning."
+    "the work and do not mark items completed during planning. "
+    "State each step's goal and its verifiable success criteria, "
+    "and make the plan decision-complete: another engineer should be "
+    "able to implement it without making further design decisions."
 )
 
 
@@ -100,33 +103,25 @@ def _outside_workspace_message(paths: Sequence[str]) -> str:
     )
 
 
-async def plan_and_run(
+async def plan_only(
     loop: Any,
     session: Any,
-    console: Any,
     *,
-    topic: str | None,
-    ask_topic: Callable[[], Awaitable[str | None]],
+    topic: str,
     on_delta: Any = None,
     observer: Any = None,
 ) -> PlanReport:
-    """``/plan``: plan the topic, then execute the plan.  One workflow.
+    """``/plan <topic>``: plan the topic and stop — the planning half.
 
-    Both front-ends go through here, which is the point.  The Textual app
-    intercepted ``/plan`` before the generic slash handler ever saw it, so the
-    REPL's own copy of this workflow was unreachable in the shipped app — and
-    the two copies had already drifted: the REPL one sent the literal string
-    "the current task" as the topic and, without a typed topic, never reopened
-    the plan at all (no fresh goal, no cleared receipts).
+    The old one-shot ``plan_and_run`` is gone (18 §10.1): the command layer
+    composes the halves explicitly (entry/exit notices and ``/plan run`` live
+    in ``app/commands.py``).  ``topic`` is required — a bare ``/plan`` only
+    flips the posture, so there is nothing to ask and no asking path to keep.
 
-    ``ask_topic`` is injected because only the front-end knows how to ask: the
-    Textual app pushes a modal, the REPL prompts on the terminal.  Returning
-    empty (or None) means the user cancelled, and nothing is planned or run.
+    Two workspace gates kept from the old workflow: #1 refuses a target
+    outside the workspace before any model call, #2 refuses a written plan
+    that names unreachable paths (the caller shows ``report.stopped``).
     """
-    if topic is None:
-        topic = await ask_topic()
-        if not topic:
-            return PlanReport()
     workspace = str(getattr(loop, "workspace", "") or ".")
     offenders = outside_workspace_paths([topic], workspace)
     if offenders:
@@ -137,14 +132,15 @@ async def plan_and_run(
     if begin is not None:
         begin(topic)
     with continuations_disabled(loop):
-        await loop.process_input(session, PLAN_PROMPT.format(topic=topic),
-                                 on_delta=on_delta, observer=observer)
+        await loop.process_input(
+            session, PLAN_PROMPT.format(topic=topic),
+            on_delta=on_delta, observer=observer,
+        )
     items = getattr(getattr(session, "task", None), "items", ())
     offenders = outside_workspace_paths([item.content for item in items], workspace)
     if offenders:
         return PlanReport(stopped=_outside_workspace_message(offenders))
-    return await PlanRunner(loop).run(session, console,
-                                      on_delta=on_delta, observer=observer)
+    return PlanReport()
 
 
 @contextmanager
@@ -692,4 +688,4 @@ class PlanRunner:
 
 
 __all__ = ["PLAN_PROMPT", "PlanReport", "PlanRunner", "STEP_HEAD",
-           "continuations_disabled", "plan_and_run"]
+           "continuations_disabled", "plan_only"]

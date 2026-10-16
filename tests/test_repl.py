@@ -30,11 +30,32 @@ class _FakeLoop:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
         self.reply = "assistant answer"
+        self.busy = False
         # M1: the runner swaps the loop's policy per step, so a stub needs one.
         self.settings = SimpleNamespace(
             plan_step_max_iterations=8, plan_max_step_turns=20, stop_policy="natural"
         )
         self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
+
+    @property
+    def turn_running(self) -> bool:
+        return self.busy
+
+    def request_posture(self, session, *, mode=None, readonly=None):
+        """18 §10.1: the immediate half of AgentLoop.request_posture."""
+        if self.busy:
+            pending = dict(session.pending_posture or {})
+            if mode is not None:
+                pending["mode"] = mode
+            if readonly is not None:
+                pending["readonly"] = bool(readonly)
+            session.pending_posture = pending
+            return False
+        if mode is not None:
+            session.mode = mode
+        if readonly is not None:
+            session.readonly = bool(readonly)
+        return True
 
     async def process_input(self, session, text, on_delta=None, observer=None):
         self.calls.append((text, on_delta, observer))
@@ -306,25 +327,24 @@ async def test_handle_skills_lists_catalog(tmp_path):
     assert "test-skill" in out
 
 
-async def test_handle_plan_sends_prompt(monkeypatch):
-    """Bare /plan asks for the topic first (M4-a), then plans it.
+async def test_bare_plan_enters_mode_without_sending_a_prompt():
+    """18 §10.1: bare /plan flips the two switches — no topic ask, no turn.
 
-    It used to send the literal string "the current task" as the topic.  That
-    branch was unreachable in the shipped app — the Textual router intercepts
-    /plan and asks with a modal — which is exactly how the two front-ends
-    drifted apart.  Both now share plan_runner.plan_and_run and both ask.
+    The old contract asked for a topic (M4-a) and then planned and executed
+    it; the mode redesign replaced that with a posture flip you can follow
+    with ordinary conversation.  (The ask path itself is gone from the
+    console surface — 18-P5 deleted ``DialogueConsole.ask``.)
     """
     loop = _FakeLoop()
     sessions = _FakeSessions()
-    dc, _ = _console_capture()
-    monkeypatch.setattr(dc, "ask", lambda _prompt: "改一下 loader")
+    dc, c = _console_capture()
 
     action, _ = await handle_input(loop, "/plan", sessions.items[0], sessions, dc)
 
     assert action is REPLAction.CONTINUE
-    assert len(loop.calls) == 1
-    assert "改一下 loader" in loop.calls[0][0]
-    assert sessions.items[0].task.goal == "改一下 loader"
+    assert loop.calls == []
+    assert (sessions.items[0].mode, sessions.items[0].readonly) == ("plan", True)
+    assert "已进入计划模式" in _session_text(c)
 
 
 async def test_handle_review_sends_prompt():
@@ -524,9 +544,9 @@ async def test_unknown_command_at_distance_two_gets_a_suggestion():
 async def test_absorbed_command_is_answered_instead_of_becoming_a_model_turn():
     """The end-to-end half: a tombstone suggestion must stop the turn.
 
-    suggest_command returning "plan" is only half the fix — if the caller then
-    forwards the token anyway, the user still gets a model turn, which is the
-    behaviour this replaces.
+    suggest_command returning "plan run" is only half the fix — if the caller
+    then forwards the token anyway, the user still gets a model turn, which is
+    the behaviour this replaces.
     """
     loop = _FakeLoop()
     sessions = _FakeSessions()
@@ -537,10 +557,10 @@ async def test_absorbed_command_is_answered_instead_of_becoming_a_model_turn():
     assert action is REPLAction.CONTINUE
     assert loop.calls == []
     out = _session_text(c)
-    assert "did you mean" in out and "/plan" in out
+    assert "did you mean" in out and "/plan run" in out
 
 
-async def test_handle_plan_with_no_open_items_says_so(monkeypatch):
+async def test_plan_run_without_open_items_says_so():
     """No todos, no execution: the runner says so instead of calling the model."""
     from ai_coding.domain.session import SessionData
 
@@ -548,17 +568,17 @@ async def test_handle_plan_with_no_open_items_says_so(monkeypatch):
     sessions = _FakeSessions()
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
     dc, c = _console_capture()
-    monkeypatch.setattr(dc, "ask", lambda _prompt: "改一下 loader")
 
-    action, _ = await handle_input(loop, "/plan", session, sessions, dc)
+    action, _ = await handle_input(loop, "/plan run", session, sessions, dc)
 
     assert action is REPLAction.CONTINUE
-    assert len(loop.calls) == 1  # only the planning turn
-    assert "完成 0 步" in _session_text(c)
+    assert loop.calls == []
+    out = _session_text(c)
+    assert "无任务项" in out or "完成 0 步" in out
 
 
-async def test_handle_plan_executes_open_todos():
-    """M1-A: /plan plans AND executes — each open item gets its own turn."""
+async def test_plan_then_plan_run_executes_open_todos():
+    """18 §10.1: /plan <topic> plans only; /plan run executes each open item."""
     from types import SimpleNamespace
 
     from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
@@ -589,14 +609,20 @@ async def test_handle_plan_executes_open_todos():
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
     sessions = _FakeSessions()
     dc, c = _console_capture()
+    loop = _PlanLoop()
 
-    action, _ = await handle_input(_PlanLoop(), "/plan 修 bug", session, sessions, dc)
+    await handle_input(loop, "/plan 修 bug", session, sessions, dc)
+
+    assert sum("只做这一步" in call[0] for call in loop.calls) == 0
+    assert session.task.done_count == 0
+
+    action, _ = await handle_input(loop, "/plan run", session, sessions, dc)
 
     assert action is REPLAction.CONTINUE
     out = _session_text(c)
     # H3 audit fix: the deleted /plan-run must not appear anywhere, and the
-    # runner now reports under [plan].  The old assertion "plan-run in out"
-    # could not catch this: "[plan]" is a substring of "[plan-run]".
+    # runner reports under [plan].  The old assertion "plan-run in out" could
+    # not catch this: "[plan]" is a substring of "[plan-run]".
     assert "[plan-run]" not in out
     assert "[plan]" in out and "已完成" in out
     assert session.task.items[0].status == "completed"
@@ -713,46 +739,8 @@ async def test_handle_plan_with_topic_uses_it_and_resets_task():
     assert session.task.items == []
     # Planning writes the list; it must not execute it.
     assert "pending" in loop.calls[0][0].lower() or "do not execute" in loop.calls[0][0].lower()
-
-
-async def test_handle_plan_bare_asks_and_reopens_the_plan(monkeypatch):
-    """Bare /plan opens a *new* plan on the topic it was given (M4-a).
-
-    This test used to pin the opposite: that bare /plan "refines the current
-    list instead of wiping it", keeping the old goal and the old items.  That
-    was the divergence — a typed topic reopened the plan while a bare one
-    refined whatever was left, so the plan the user was looking at was not the
-    plan being executed.  Both paths now reopen, which is what makes step ids
-    line up with the receipts (they restart at 1 per list).
-    """
-    from ai_coding.domain.task import TaskState
-
-    loop = _FakeLoop()
-    sessions = _FakeSessions()
-    session = sessions.items[0]
-    session.task = TaskState(goal="old goal")
-    session.task.add("keep me")
-    dc, _ = _console_capture()
-    monkeypatch.setattr(dc, "ask", lambda _prompt: "新计划")
-
-    await handle_input(loop, "/plan", session, sessions, dc)
-
-    assert session.task.goal == "新计划"
-    assert [i.content for i in session.task.items] == []
-
-
-async def test_handle_plan_bare_cancelled_plans_nothing(monkeypatch):
-    """An empty answer at the topic prompt plans nothing and runs nothing."""
-    loop = _FakeLoop()
-    sessions = _FakeSessions()
-    session = sessions.items[0]
-    dc, _ = _console_capture()
-    monkeypatch.setattr(dc, "ask", lambda _prompt: None)
-
-    action, _ = await handle_input(loop, "/plan", session, sessions, dc)
-
-    assert action is REPLAction.CONTINUE
-    assert loop.calls == []
+    # 18 §10.1: the planning path also raises the two switches.
+    assert (session.mode, session.readonly) == ("plan", True)
 
 
 def test_budget_shows_money_when_the_recorder_knows_the_price(tmp_path):
@@ -838,18 +826,17 @@ async def test_handle_input_threads_the_observer_to_the_loop():
     assert loop.calls[-1][2] is marker
 
 
-async def test_handle_input_threads_the_observer_into_plan_and_run(monkeypatch):
-    """The plan workflow's step turns must reach the same observer."""
+async def test_handle_input_threads_the_observer_into_the_planning_half(monkeypatch):
+    """18 §10.1: /plan <topic> threads topic/observer/on_delta into plan_only."""
     from ai_coding.core import plan_runner as plan_runner_mod
 
     seen: dict = {}
 
-    async def fake_plan_and_run(loop, session, console, *, topic, ask_topic,
-                                on_delta=None, observer=None):
+    async def fake_plan_only(loop, session, *, topic, on_delta=None, observer=None):
         seen.update(topic=topic, observer=observer, on_delta=on_delta)
-        return None
+        return plan_runner_mod.PlanReport()
 
-    monkeypatch.setattr(plan_runner_mod, "plan_and_run", fake_plan_and_run)
+    monkeypatch.setattr(plan_runner_mod, "plan_only", fake_plan_only)
     loop = _FakeLoop()
     sessions = _FakeSessions()
     dc, _ = _console_capture()

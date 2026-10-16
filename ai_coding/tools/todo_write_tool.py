@@ -22,6 +22,7 @@ class TodoWriteTool(BaseTool):
     """Maintain the session task list (add / update / list / clear)."""
 
     parallel_safe = True
+    mutates_world = False
 
     def __init__(self, *, enforce_dependencies: bool = True) -> None:
         #: R9a: refuse to start/finish an item whose dependencies are unmet, and

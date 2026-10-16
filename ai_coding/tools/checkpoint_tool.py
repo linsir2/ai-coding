@@ -29,6 +29,7 @@ class CheckpointTool(BaseTool):
 
     #: It only touches the turn's own book: no file, no process, no shared state.
     parallel_safe = True
+    mutates_world = False
 
     @property
     def name(self) -> str:

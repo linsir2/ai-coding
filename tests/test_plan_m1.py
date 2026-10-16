@@ -123,6 +123,14 @@ class _TwoPhaseLoop:
         )
         self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
 
+    def request_posture(self, session, *, mode=None, readonly=None):
+        """18 §10.1: the immediate half of AgentLoop.request_posture."""
+        if mode is not None:
+            session.mode = mode
+        if readonly is not None:
+            session.readonly = bool(readonly)
+        return True
+
     async def process_input(self, session, text, on_delta=None, observer=None):
         self.calls.append(text)
         if "implementation plan" in text:
@@ -138,34 +146,46 @@ class _TwoPhaseLoop:
 
 
 @pytest.mark.asyncio
-async def test_plan_command_plans_and_executes_in_one_command():
-    """'/plan <topic>' must not stop at the plan — it executes it (M1-A)."""
+async def test_plan_command_plans_and_plan_run_executes():
+    """18 §10.1: '/plan <topic>' only plans; '/plan run' executes the plan."""
     from rich.console import Console
 
     from ai_coding.app.commands import REPLAction, handle_input
     from ai_coding.app.console import DialogueConsole
 
     class _Sessions:
-        def __init__(self, session):
-            self.items = [session]
+        def __init__(self):
+            self.saved = []
 
         def save(self, session):
-            return None
+            self.saved.append(session)
 
         def mark_pending_approval(self, session_id, request) -> None:
             return None
 
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
     loop = _TwoPhaseLoop()
+    sessions = _Sessions()
+    rich_console = Console(record=True, width=80)
+    console = DialogueConsole(rich_console)
+
     action, _ = await handle_input(
-        loop, "/plan 给 tasks 加 show", session, _Sessions(session),
-        DialogueConsole(Console(record=True, width=80)),
+        loop, "/plan 给 tasks 加 show", session, sessions, console
     )
 
     assert action is REPLAction.CONTINUE
-    assert any("implementation plan" in c for c in loop.calls)      # phase 1
-    assert sum(STEP_HEAD in c for c in loop.calls) == 2            # phase 2
+    assert any("implementation plan" in c for c in loop.calls)      # planned
+    assert sum(STEP_HEAD in c for c in loop.calls) == 0             # not executed
+    assert session.task.done_count == 0
+    assert (session.mode, session.readonly) == ("plan", True)
+    assert sessions.saved == [session]
+    assert "计划就绪：2 项" in rich_console.export_text()
+
+    await handle_input(loop, "/plan run", session, sessions, console)
+
+    assert sum(STEP_HEAD in c for c in loop.calls) == 2             # both steps ran
     assert session.task.done_count == 2
+    assert (session.mode, session.readonly) == ("normal", False)
 
 
 @pytest.mark.asyncio
@@ -331,6 +351,14 @@ async def test_planning_failure_does_not_execute():
             )
             self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
 
+        def request_posture(self, session, *, mode=None, readonly=None):
+            """18 §10.1: the immediate half of AgentLoop.request_posture."""
+            if mode is not None:
+                session.mode = mode
+            if readonly is not None:
+                session.readonly = bool(readonly)
+            return True
+
         async def process_input(self, session, text, on_delta=None, observer=None):
             self.calls.append(text)
             return "nothing to plan"
@@ -351,7 +379,8 @@ async def test_planning_failure_does_not_execute():
     await handle_input(loop, "/plan 没事做", session, _Sessions(session), DialogueConsole(c))
 
     assert len(loop.calls) == 1  # only the planning turn
-    assert "完成 0 步" in c.export_text()
+    # 18 §10.1: execution now lives behind /plan run; an empty plan says so.
+    assert "计划就绪：0 项" in c.export_text()
 
 
 @pytest.mark.asyncio
@@ -379,7 +408,7 @@ async def test_usage_still_summed_across_steps():
     }
 
 
-def _real_loop(tmp_path, *, trace=None, **overrides):
+def _real_loop(tmp_path, *, trace=None, engine=None, **overrides):
     """A real AgentLoop on a real SessionService, with a text-only engine."""
     from ai_coding.config.models import AIConfig
     from ai_coding.core.agent_loop import AgentLoop
@@ -401,9 +430,137 @@ def _real_loop(tmp_path, *, trace=None, **overrides):
     settings = {"stop_policy": "natural", "max_tool_iterations": 4,
                 "plan_step_max_iterations": 2}
     settings.update(overrides)
-    loop = AgentLoop(_TextEngine(), sessions, registry, settings=AIConfig(**settings),
+    loop = AgentLoop(engine or _TextEngine(), sessions, registry,
+                     settings=AIConfig(**settings),
                      workspace=str(tmp_path / "ws"), trace=trace)
     return loop, sessions
+
+
+# ---- 18 §10.2: posture flips queue while a turn is running -------------------
+
+
+@pytest.mark.asyncio
+async def test_an_immediate_flip_supersedes_the_same_key_already_queued(tmp_path):
+    """A stale queued value must not resurrect at the next drain and undo a
+    newer immediate command (18 §10.2)."""
+    loop, _sessions = _real_loop(tmp_path)
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.pending_posture = {"readonly": True}
+
+    applied = loop.request_posture(session, readonly=False)
+
+    assert applied is True
+    assert session.readonly is False
+    assert session.pending_posture is None
+    await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_leftover_pending_flip_lands_at_the_next_turn(tmp_path):
+    """The harvest-window fallback: a flip queued after the close ran still
+    lands at the next turn's entry (18 §10.2)."""
+    loop, _sessions = _real_loop(tmp_path)
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.pending_posture = {"mode": "plan"}
+
+    await loop.process_input(session, "go")
+
+    assert session.mode == "plan"
+    assert session.pending_posture is None
+    await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_flip_queued_mid_turn_lands_at_close_and_reads_back(tmp_path):
+    """The real path (18 §10.2): while a turn holds the lock, request_posture
+    queues instead of writing; the turn's own close applies the flip and the
+    close's save persists it — verified by loading the file back."""
+    import asyncio
+
+    from ai_coding.domain.loop import StepResult
+
+    class _BlockingEngine:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None):
+            self.started.set()
+            await self.release.wait()
+            return StepResult(text="done", finish_reason="stop")
+
+        async def aclose(self):
+            return None
+
+    engine = _BlockingEngine()
+    loop, sessions = _real_loop(tmp_path, engine=engine)
+    session = sessions.create()
+
+    turn = asyncio.create_task(loop.process_input(session, "go"))
+    await asyncio.wait_for(engine.started.wait(), timeout=5)
+
+    applied = loop.request_posture(session, mode="plan", readonly=True)
+    assert applied is False
+    assert (session.mode, session.readonly) == ("normal", False)
+    assert session.pending_posture == {"mode": "plan", "readonly": True}
+
+    engine.release.set()
+    await asyncio.wait_for(turn, timeout=5)
+
+    assert (session.mode, session.readonly) == ("plan", True)
+    loaded = sessions.load(session.session_id)
+    assert (loaded.mode, loaded.readonly) == ("plan", True)
+    await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_command_flip_queued_mid_turn_lands_at_close_and_reads_back(tmp_path):
+    """The full chain of 18 §10.2: handle_input → request_posture (queued,
+    receipt says so) → the turn's close applies it → the file reads back
+    flipped.  Mechanism and command layers, wired for real."""
+    import asyncio
+
+    from rich.console import Console
+
+    from ai_coding.app.commands import handle_input
+    from ai_coding.app.console import DialogueConsole
+    from ai_coding.domain.loop import StepResult
+
+    class _BlockingEngine:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None):
+            self.started.set()
+            await self.release.wait()
+            return StepResult(text="done", finish_reason="stop")
+
+        async def aclose(self):
+            return None
+
+    engine = _BlockingEngine()
+    loop, sessions = _real_loop(tmp_path, engine=engine)
+    session = sessions.create()
+    rc = Console(record=True, width=80)
+    console = DialogueConsole(rc)
+
+    turn = asyncio.create_task(loop.process_input(session, "go"))
+    await asyncio.wait_for(engine.started.wait(), timeout=5)
+    try:
+        await handle_input(loop, "/plan", session, sessions, console)
+
+        assert session.pending_posture == {"mode": "plan", "readonly": True}
+        assert (session.mode, session.readonly) == ("normal", False)
+        assert "将在当前回合结束后生效" in rc.export_text()
+    finally:
+        engine.release.set()
+        await asyncio.wait_for(turn, timeout=5)
+
+    assert (session.mode, session.readonly) == ("plan", True)
+    loaded = sessions.load(session.session_id)
+    assert (loaded.mode, loaded.readonly) == ("plan", True)
+    await loop.aclose()
 
 
 @pytest.mark.asyncio

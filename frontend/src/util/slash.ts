@@ -85,7 +85,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     name: "plan",
     command: "session.plan",
     title: "Plan",
-    description: "Plan a topic and execute it step by step",
+    description: "Enter read-only plan mode (add a topic to plan it)",
   },
   {
     name: "review",
@@ -113,6 +113,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "compact", title: "Compact", description: "Compact this session's history now" },
   { name: "undo", title: "Undo", description: "Roll the last turn back (history + files)" },
   { name: "redo", title: "Redo", description: "Put back the turn /undo removed" },
+  {
+    // P5 (18 §10.1): the enforcement axis on its own; the plan entry composes it.
+    name: "readonly",
+    title: "Read-only",
+    description: "Toggle a read-only session (writes refused; add: on|off)",
+  },
   {
     name: "permissions",
     command: "session.permissions",

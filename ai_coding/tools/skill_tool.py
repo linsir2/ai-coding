@@ -73,6 +73,7 @@ class SkillTool(BaseTool):
 
     # Read-only: safe to run alongside sibling calls in the same message.
     parallel_safe = True
+    mutates_world = False
 
     async def execute(
         self, params: dict[str, Any], ctx: ToolContext | None = None

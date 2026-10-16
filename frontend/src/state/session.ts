@@ -430,7 +430,7 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
     }
     case "turn.step": {
       // A command's inner turn (session.command runs /review and each /plan
-      // step as its own loop turn): settle what is streaming, keep the run
+      // run step as its own loop turn): settle what is streaming, keep the run
       // busy — the command's own terminal turn.finished ends it.
       const handoff = str(data["handoff"])
       return updateAssistant(state, (parts) => {

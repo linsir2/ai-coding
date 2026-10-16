@@ -150,6 +150,11 @@ class TurnSnapshot:
     #: 13 §2.1: successful ``ask_user`` calls this turn — the helped signal of
     #: the ask levels (L3 for strategy/fatigue, L2 for task/acceptance).
     ask_user_calls: int = 0
+    #: 18 §10.5: the two posture axes, read off the session by the loop.  They
+    #: ride the snapshot so the decision stays pure; the defaults keep every
+    #: pre-posture construction (and test) byte-identical.
+    mode: str = "normal"
+    readonly: bool = False
 
 
 @dataclass(frozen=True)
@@ -240,6 +245,11 @@ class TurnPolicy:
 
     def decide_after_step(self, snapshot: TurnSnapshot) -> TurnDecision:
         """The model stopped asking for tools: finish, or run the gate ladders?"""
+        # 18 §10.5: under either posture the execution gates are silent —
+        # nagging a planning or read-only session to run tools is absurd.
+        # Strategy/fatigue live at the PRE point and are untouched.
+        if snapshot.mode == "plan" or snapshot.readonly:
+            return TurnDecision(TurnAction.FINISH, "model finished")
         if snapshot.acceptance:
             # R0-1: a turn with contracts does not end on the model's word.
             # Unchecked items fail closed (the loop verifies before asking, so

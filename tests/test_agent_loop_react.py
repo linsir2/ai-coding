@@ -1287,3 +1287,42 @@ async def test_a_goal_with_items_survives_a_follow_up_message(tmp_path):
     blocks = _task_blocks(engine)
     assert "目标: 让 make test 通过" in blocks[0]
     assert "覆盖率" not in blocks[0]
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_finishes_without_nudging_open_items(tmp_path):
+    """18 §10.5 (R4): the execution gates are silent under a posture — the
+    snapshot carries ``mode`` off the session, so this must hold end-to-end."""
+    engine = ScriptedEngine([_text("done")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, settings=_settings(stop_policy="todo_aware"))
+    session = sessions.create()
+    session.mode = "plan"
+    session.task = TaskState(goal="g")
+    session.task.add("still open")
+
+    await loop.process_input(session, "go")
+
+    assert len(engine.requests) == 1
+    assert not [m for m in session.messages if "[task-gate]" in (m.content or "")]
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.reason == "model finished"
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_does_not_refresh_a_bare_goal(tmp_path):
+    """18 §10.5 (R5): the goal topic belongs to the planning axis — a new turn
+    in plan mode must not steal it with its own instruction."""
+    engine = ScriptedEngine([_text("你好呀"), _text("这是回答")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+    session = sessions.create()
+    session.mode = "plan"
+
+    await loop.process_input(session, "你好")
+    await loop.process_input(session, "你的编排层怎么设计的")
+
+    last = _task_blocks(engine)
+    assert len(last) == 1
+    assert "目标: 你好" in last[0]
+    assert "你的编排层怎么设计的" not in last[0]

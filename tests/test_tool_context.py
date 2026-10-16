@@ -59,6 +59,8 @@ def test_tool_context_carries_the_turn_number():
 
     class _Session:
         session_id = "s1"
+        # 18 §10.1: the double follows the widened interface.
+        readonly = False
 
     ctx = tool_context(
         task=TaskState(goal="g"),

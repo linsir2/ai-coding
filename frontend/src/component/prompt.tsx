@@ -77,8 +77,9 @@ export interface PromptProps {
   /** True while the slash list is up — the session mutes its own bindings. */
   onOverlay?: (visible: boolean) => void
   /**
-   * Text to drop into the composer (then clear).  The slash list's bare
-   * ``/plan`` pre-fills "/plan " so the user types the topic and submits.
+   * Text to drop into the composer (then clear).  The slash list's ``/plan``
+   * pre-fills "/plan " so a topic can be typed right after it; submitting the
+   * bare line just enters plan mode.
    */
   seed?: string
   onSeedDone?: () => void

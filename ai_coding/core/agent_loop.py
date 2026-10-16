@@ -388,6 +388,68 @@ class AgentLoop:
             raise ValueError(f"Unknown model: {name} (available: {available})")
         self.engine.model_config = self.models[name]
 
+    # ---- posture (18 §10.2) ------------------------------------------------
+
+    @property
+    def turn_running(self) -> bool:
+        """True while a turn (or a resume) holds the single-turn lock."""
+        return self._turn_lock.locked()
+
+    def request_posture(
+        self,
+        session: SessionData,
+        *,
+        mode: str | None = None,
+        readonly: bool | None = None,
+    ) -> bool:
+        """Apply a posture flip now, or queue it for the running turn's close.
+
+        Returns True when it landed immediately (the caller persists: the
+        command layer saves, so the immediate path writes only fields); False
+        when the loop is mid-turn and the flip was merged into
+        ``session.pending_posture`` (same key: the later request wins).  An
+        immediate write also clears the same keys already queued — otherwise a
+        stale pending value would resurrect at the next drain and undo the
+        newer command.  No ``await`` between check and write, so a turn cannot
+        start inside the gap.
+        """
+        if self.turn_running:
+            pending = dict(session.pending_posture or {})
+            if mode is not None:
+                pending["mode"] = mode
+            if readonly is not None:
+                pending["readonly"] = bool(readonly)
+            session.pending_posture = pending
+            return False
+        if mode is not None:
+            session.mode = mode
+        if readonly is not None:
+            session.readonly = bool(readonly)
+        if session.pending_posture:
+            for key, value in (("mode", mode), ("readonly", readonly)):
+                if value is not None:
+                    session.pending_posture.pop(key, None)
+            if not session.pending_posture:
+                session.pending_posture = None
+        return True
+
+    def _apply_pending_posture(self, session: SessionData) -> None:
+        """Land a flip queued while a turn ran (18 §10.2).
+
+        Called at the turn's close (before ``TurnCloser.close``, so the close's
+        own save carries it to disk with zero new save points) and at the next
+        turn's entry (the harvest-window fallback: a flip queued after the
+        close ran but before the lock released).
+        """
+        pending = session.pending_posture
+        if not pending:
+            return
+        session.pending_posture = None
+        if pending.get("mode") is not None:
+            session.mode = str(pending["mode"])
+        if pending.get("readonly") is not None:
+            session.readonly = bool(pending["readonly"])
+
     # ---- the turn ---------------------------------------------------------
 
     async def process_input(
@@ -474,6 +536,9 @@ class AgentLoop:
         """One turn, ungated.  The body below is ``process_input`` unchanged:
         splitting it out keeps the re-entry guard a two-line diff instead of a
         re-indent of the whole turn."""
+        # 18 §10.2: harvest-window fallback — a flip queued after the close ran
+        # (but before the lock released) lands here, before anything reads it.
+        self._apply_pending_posture(session)
         await self._capture_snapshot(session)
         # r17/T5: clipboard images plus any @path.png in the text ride the user
         # message as parts; a token is claimed once, first spelling wins.
@@ -526,6 +591,8 @@ class AgentLoop:
                 )
                 snapshot = replace(
                     snapshot,
+                    mode=session.mode,
+                    readonly=session.readonly,
                     intervention_ledger=self._settled_interventions(
                         session, task, snapshot
                     ),
@@ -739,6 +806,8 @@ class AgentLoop:
                     )
                     snapshot = replace(
                         snapshot,
+                        mode=session.mode,
+                        readonly=session.readonly,
                         intervention_ledger=self._settled_interventions(
                             session, task, snapshot
                         ),
@@ -895,12 +964,14 @@ class AgentLoop:
                 session.task = TaskState(
                     goal=anchor.content if anchor and anchor.content else ""
                 )
-        elif append_user and not session.task.items:
+        elif append_user and not session.task.items and session.mode != "plan":
             # The bare goal tracks the turn's own instruction.  Measured
             # (session d68080eb): the opening "你好" froze here and rode every
             # later request's <task-state> tail block; after a long tool chain
             # the model anchored on that tail and answered the greeting again.
             # A list with items keeps its goal -- it names what the items are for.
+            # 18 §10.5: nor does it change in plan mode — the goal topic belongs
+            # to the planning axis and a new turn must not steal it.
             session.task.goal = user_input
         task = session.task
         # C3: the continuation allowance is per user turn — a new message
@@ -1139,6 +1210,9 @@ class AgentLoop:
             ),
             turn_end=True,
         )
+        # 18 §10.2: a flip queued while this turn ran lands here, so the close's
+        # own save carries it to disk (zero new save points).
+        self._apply_pending_posture(session)
         return self.closer.close(
             session,
             user_input=user_input,
@@ -1339,6 +1413,12 @@ class AgentLoop:
         by the normal save) and in the books (for the policy snapshot and the
         uncertainty ledger) — the policy itself never touches a shell.
         """
+        # 18 §10.5: a read-only session promised not to run anything — the
+        # proof commands are shell and bypass the dispatch gate, so they stop
+        # here.  Items stay pending (fail-closed downstream) until a writable
+        # turn verifies them.
+        if session.readonly:
+            return
         pending = pending_items(session.acceptance)
         if not pending:
             return
@@ -1917,9 +1997,15 @@ class AgentLoop:
                 if change:
                     catalog = f"{catalog}\n{change}" if catalog else change
                 session.listed_skill_ids = tuple(skill.id for skill in current)
+        # 18 §10.5 (P2): the prompt posture rides the one build call; the
+        # session may be None on defensive paths — normal is the fail-safe.
+        mode = "normal"
+        if session is not None:
+            mode = getattr(session, "mode", "normal") or "normal"
         return self.prompt.build(
             project_instructions=project_text,
             skills_catalog=catalog,
+            mode=mode,
         )
 
     # ---- memory -----------------------------------------------------------

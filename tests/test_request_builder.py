@@ -19,6 +19,9 @@ from ai_coding.domain.task import TaskState
 class _Session:
     def __init__(self, session_id: str = "s1") -> None:
         self.session_id = session_id
+        # 18 §10.1: the double follows the widened interface (tool_context
+        # reads the read-only switch off the session).
+        self.readonly = False
 
 
 def _block(name: str, content: str) -> TailBlock:

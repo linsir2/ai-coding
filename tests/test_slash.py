@@ -81,6 +81,11 @@ def test_plan():
     assert cmd is not None and cmd.name == "plan"
 
 
+def test_readonly():
+    cmd = parse_slash("/readonly on")
+    assert cmd is not None and cmd.name == "readonly"
+
+
 def test_review():
     cmd = parse_slash("/review")
     assert cmd is not None and cmd.name == "review"
@@ -92,7 +97,7 @@ def test_config():
 
 
 def test_plan_run_was_absorbed_into_plan():
-    """M1-A: /plan-run no longer exists — /plan plans and executes."""
+    """18 §10.1: /plan-run is not a command — /plan run is."""
     assert parse_slash("/plan-run") is None
     assert parse_slash("/plan").name == "plan"
 
@@ -103,16 +108,16 @@ def test_tasks():
 
 
 def test_absorbed_command_points_at_its_replacement():
-    """/plan-run was absorbed into /plan; muscle memory deserves an answer.
+    """/plan-run's tombstone now points at the typed replacement, /plan run.
 
     Four commits of docs, help text and commit messages still say /plan-run,
     and it is four edits away from "plan", so the near-miss rule (edit
     distance <= 2) never fires: the token fell through parse_slash, past
-    suggest_command, and became a literal user turn — the model was asked to
-    plan a command that no longer exists.  A tombstone answers exactly, for
-    every UI at once, because both front-ends route unknown /commands
-    through suggest_command.
+    suggest_command, and became a literal user turn.  A tombstone answers
+    exactly, for every UI at once, because both front-ends route unknown
+    /commands through suggest_command.  The suggestion is rendered as
+    ``/{suggestion}``, so the value carries the subcommand too.
     """
-    assert suggest_command("/plan-run") == "plan"
+    assert suggest_command("/plan-run") == "plan run"
     # still not a command: parse_slash must keep letting paths through
     assert parse_slash("/plan-run") is None

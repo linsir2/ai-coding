@@ -42,14 +42,16 @@ class PromptAssembler:
     separated by a blank line; ``methods`` is never empty.
     """
 
-    def __init__(self, base_instructions: str, plan_mode: bool = False) -> None:
+    def __init__(self, base_instructions: str) -> None:
         self._base = base_instructions
-        self._plan_mode = plan_mode
 
     def build(
         self,
         project_instructions: str = "",
         skills_catalog: str = "",
+        #: 18 §10.5 (P2): the session's prompt posture, "normal" | "plan".
+        #: Unknown values read as normal (fail-safe, same rule as persistence).
+        mode: str = "normal",
     ) -> str:
         sections: list[str] = [self._base.strip()]
         if project_instructions.strip():
@@ -58,7 +60,7 @@ class PromptAssembler:
                 f"{project_instructions.strip()}\n</system-reminder>"
             )
         sections.append(METHODS_SECTION)
-        if self._plan_mode:
+        if mode == "plan":
             sections.append(
                 "<plan-mode>You are in plan mode: analyse and produce a step-by-step "
                 "plan. Do not edit files or run side-effecting tools.</plan-mode>"

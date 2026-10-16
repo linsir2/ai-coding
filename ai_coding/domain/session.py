@@ -12,6 +12,10 @@ from .plan_delivery import StepDelivery
 from .task import TaskState
 from .turn_digest import TurnDigest
 
+#: 17 §4-P0: the fail-safe vocabulary for the persisted ``mode`` key — anything
+#: unknown reads back as "normal" rather than re-entering as an unknown posture.
+KNOWN_MODES: tuple[str, ...] = ("normal", "plan")
+
 
 def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
     """Rebuild a ChatMessage from a persisted JSON dict (Java-compatible shape)."""
@@ -264,6 +268,20 @@ class SessionData:
     #: fires, ref}}).  Written only when non-empty; cleared by a new plan and
     #: by task completion — the ladder is per task, not per session.
     intervention_state: dict[str, Any] | None = None
+    #: 17 §4-P0: the cognition posture ("normal" | "plan").  Written only when
+    #: not normal — same rule as ``task``; unknown values read back as normal.
+    mode: str = "normal"
+    #: 18 §10.1: the enforcement switch.  A read-only session refuses every
+    #: ``mutates_world`` tool at the dispatch gate; written only when True
+    #: (same rule again).  Orthogonal to ``mode`` on purpose — ``/plan``
+    #: composes the two at the command layer.
+    readonly: bool = False
+    #: 18 §10.2: a posture flip requested while a turn is running waits here
+    #: until that turn closes (``AgentLoop._apply_pending_posture``) instead of
+    #: changing ``mode``/``readonly`` under a live turn.  Runtime only — a
+    #: crash drops a still-queued flip (the in-process limit dsh documents);
+    #: shape ``{"mode": str | None, "readonly": bool | None}``, later wins.
+    pending_posture: dict[str, Any] | None = None
     #: 13 §2.4 (F): the workspace's git branch, refreshed once per turn by the
     #: loop (``infra.vcs.git_branch`` never raises).  Runtime only — the
     #: whitelist ``to_dict`` deliberately leaves it out of the file.
@@ -475,6 +493,12 @@ class SessionData:
         # Same rule again: a session that never hit a ladder gains no key.
         if self.intervention_state:
             data["interventionState"] = dict(self.intervention_state)
+        # Same rule again (17 §4-P0): a normal session gains no key either.
+        if self.mode and self.mode != "normal":
+            data["mode"] = self.mode
+        # Same rule again (18 §10.1): a writable session gains no key.
+        if self.readonly:
+            data["readonly"] = True
         return data
 
     @classmethod
@@ -514,6 +538,7 @@ class SessionData:
         raw_open_turn = data.get("openTurn")
         raw_undo = data.get("undoState")
         raw_intervention = data.get("interventionState")
+        raw_mode = str(data.get("mode") or "normal")
         return cls(
             session_id=data.get("sessionId", ""),
             title=data.get("title", ""),
@@ -535,8 +560,11 @@ class SessionData:
             intervention_state=(
                 dict(raw_intervention) if isinstance(raw_intervention, dict) else None
             ),
+            mode=raw_mode if raw_mode in KNOWN_MODES else "normal",
+            # Truthy garbage coerces to the *restrictive* value: fail-closed.
+            readonly=bool(data.get("readonly")),
         )
 
 
 # Re-export helper for callers that need to resolve references.
-__all__ = ["SessionData", "StagedUndo", "TurnUsage", "tool_call_from_ref"]
+__all__ = ["KNOWN_MODES", "SessionData", "StagedUndo", "TurnUsage", "tool_call_from_ref"]

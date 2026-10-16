@@ -93,9 +93,10 @@ class IpcConsole:
     ``delta`` rides the bridge — the same ``text.delta`` event a live turn
     sends.  ``info``/``error``/``rule`` become ``console.line`` events the
     frontend renders as dim lines: the port of the old Textual UI's
-    ``Block("info")``.  There is deliberately no ``ask``: a bare ``/plan``'s
-    topic is collected by the frontend (it pre-fills "/plan ") before the
-    command is sent, and the stdin prompt the REPL uses does not exist here.
+    ``Block("info")``.  There is deliberately no ``ask``: the command surface
+    never asks — a bare ``/plan`` enters read-only plan mode and the topic
+    rides the command line (``/plan <topic>``), so the stdin prompt the REPL
+    uses has no IPC counterpart to build.
     """
 
     def __init__(self, notify: Notify, on_delta: Callable[[str], None]) -> None:
@@ -250,6 +251,9 @@ def make_handlers(
             "recoveredInterrupted": bool(session.recovered_interrupted),
             "openTurn": int(session.open_turn or 0),
             "pendingApproval": dict(session.pending_approval or {}),
+            # P5 (18 §10.5): same two posture keys as session.stats, always.
+            "mode": str(getattr(session, "mode", "normal") or "normal"),
+            "readonly": bool(getattr(session, "readonly", False)),
         }
 
     def _launch_turn(run: Callable[[], Coroutine[Any, Any, None]]) -> int:
@@ -738,6 +742,12 @@ def make_handlers(
         return {
             "tokens": tokens,
             "maxContextTokens": resolve_context_window(world.config),
+            # P5 (18 §10.5): the posture axes ride the stats too, always
+            # explicit — the frontend casts blindly and treats a missing key
+            # as "old backend", so an always-present shape keeps the two
+            # sides from drifting on what "absent" means.
+            "mode": str(getattr(session, "mode", "normal") or "normal"),
+            "readonly": bool(getattr(session, "readonly", False)),
         }
 
     def mcp_connect(params: dict[str, Any]) -> dict[str, Any]:
