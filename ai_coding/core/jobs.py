@@ -36,6 +36,7 @@ Two things this file refuses to do quietly:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -45,7 +46,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +93,8 @@ LIST_TAIL_LINES = 3
 
 #: Grace between asking a job to stop and insisting.
 _KILL_GRACE_SECONDS = 2.0
+#: How often a foreground wait checks its clock and the Esc flag.
+_WAIT_TICK = 0.2
 _TAIL_LINE_CHARS = 200
 _LIST_SETTLED_ROWS = 20
 
@@ -139,6 +142,15 @@ class Job:
     identity_unverifiable: bool = False
     proc: subprocess.Popen[bytes] | None = None
     settled: bool = False
+    #: Set at settlement.  A foreground call waits on this instead of on the
+    #: process, which is what makes a promoted command the same object either way.
+    done: threading.Event = field(default_factory=threading.Event)
+    #: Whether a settlement has to travel anywhere.  A foreground call that
+    #: answers inside its wait already put the result in the ToolResult, so its
+    #: notice would be the same command twice; the flag flips on at promotion,
+    #: which is the moment nobody holds the result any more.
+    announce: bool = True
+    announced: bool = False
 
     def view(self) -> dict[str, Any]:
         """What the ledger and the tools both read: the process handle stays out."""
@@ -207,6 +219,7 @@ class JobRegistry:
         cwd: str,
         session_id: str,
         emit: Callable[[Any], None] | None = None,
+        announce: bool = True,
     ) -> Job:
         """Spawn ``command`` and return immediately; the caller does not wait.
 
@@ -247,6 +260,7 @@ class JobRegistry:
             origin_session=session_id,
             start_ticks=_process_start_ticks(proc.pid),
             proc=proc,
+            announce=announce,
         )
         with self._lock:
             self._jobs[job_id] = job
@@ -326,9 +340,16 @@ class JobRegistry:
             else:
                 job.status = STATUS_FAILED
         job.finished_at = now_utc()
+        job.done.set()
         self._write_ledger(job)
 
         summary = f"{job.command.strip()[:60]} · {job.detail or job.status}"
+        if job.announce and not job.announced:
+            job.announced = True
+            self._announce(job, summary, emit)
+
+    def _announce(self, job: Job, summary: str, emit: Callable[[Any], None] | None) -> None:
+        """Put the ending where the model and the operator will both see it."""
         self._notice(job, summary)
         if emit is not None:
             try:
@@ -448,6 +469,81 @@ class JobRegistry:
         # watcher's own later call a no-op, so nobody speaks twice.
         self._settle(job)
         return job
+
+    async def wait(
+        self,
+        job: Job,
+        *,
+        timeout: float,
+        cancel: threading.Event | None = None,
+        tick: float = _WAIT_TICK,
+    ) -> bool:
+        """Wait for ``job`` to settle; ``False`` means the wait ran out.
+
+        A wait that times out does not stop anything -- that is the promotion
+        path.  ``cancel`` is the dispatcher's Esc flag, polled on the same tick
+        the subprocess runner uses, so the two paths agree on when they notice.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return job.done.is_set()
+            if cancel is not None and cancel.is_set():
+                self.kill(job.id, reason="cancelled by the user")
+                return True
+            if job.done.wait(timeout=min(tick, remaining)):
+                return True
+            await asyncio.sleep(0)
+
+    def announce(self, job_id: str, *, emit: Callable[[Any], None] | None = None) -> None:
+        """Start announcing ``job_id``: from now on nobody holds its result.
+
+        Called at promotion.  A job that settled in the instant between the wait
+        timing out and this call would otherwise end up announced to nobody --
+        the flag is checked once, so the flip has to close that window itself.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None or job.announced:
+            return
+        job.announce = True
+        if job.settled:
+            job.announced = True
+            self._announce(job, f"{job.command.strip()[:60]} · {job.detail or job.status}", emit)
+            self._write_ledger(job)
+
+    def discard(self, job_id: str) -> None:
+        """Forget a job whose result the caller already has, log and all.
+
+        This is the foreground path's exit: a command that finished inside its
+        own wait leaves nothing behind, exactly as it left nothing behind before
+        jobs existed.  dsh does the same when a foreground call settles before
+        the wait ends (``registry.remove``).
+        """
+        with self._lock:
+            job = self._jobs.pop(job_id, None)
+        if job is None:
+            return
+        for path in (job.log_path, self._root / f"{job.id}.json"):
+            try:
+                Path(path).unlink()
+            except OSError:
+                pass
+
+    def read_head(self, job: Job, limit: int) -> tuple[str, int]:
+        """The first ``limit`` characters of a log, and its real length.
+
+        Head, not tail: that is what the subprocess runner returned, and a build
+        log's head is where the error usually is.
+        """
+        try:
+            with open(job.log_path, "rb") as handle:
+                blob = handle.read(limit + 1)
+        except OSError:
+            return "", 0
+        text = blob[:limit].decode("utf-8", errors="replace")
+        return text, len(blob)
 
     def forget(self, job_id: str) -> None:
         """Drop an in-process handle without touching the process.

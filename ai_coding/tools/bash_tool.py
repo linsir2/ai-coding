@@ -10,7 +10,10 @@ a sub-agent's shell writes into the parent's tree.
 
 from __future__ import annotations
 
+import asyncio
 import itertools
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +33,69 @@ _MAX_TIMEOUT_SECONDS = 600
 # The dispatcher's per-call ceiling sits above the command timeout so the runner
 # (not the budget watchdog) is what normally stops a runaway command.
 _TIMEOUT_GRACE = 15.0
+
+
+class _LogTail:
+    """Replays a running job's log as ``tool.chunk`` events.
+
+    R8c's live output used to come from the subprocess runner reading pipes. A
+    job writes to a file instead, so without this the TUI would show nothing
+    until the command finished -- the one thing the stream exists to prevent.
+
+    The stream label is "stdout" because a job merges both streams into one
+    file; the frontend renders that as ordinary output, which is what a merged
+    log is.
+    """
+
+    def __init__(self, job: Any, emit: Any, call_id: str) -> None:
+        self._job = job
+        self._emit = emit
+        self._call_id = call_id
+        self._offset = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run, name=f"{self._job.id}-tail", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        seq = itertools.count()
+        while not self._stop.is_set():
+            try:
+                with open(self._job.log_path, "rb") as handle:
+                    handle.seek(self._offset)
+                    blob = handle.read(65536)
+            except OSError:
+                blob = b""
+            if blob:
+                self._offset += len(blob)
+                self._publish(blob.decode("utf-8", errors="replace"), next(seq))
+            else:
+                self._stop.wait(0.2)
+
+    def _publish(self, text: str, seq: int) -> None:
+        from ai_coding.core.events import ToolChunk
+
+        try:
+            self._emit(
+                ToolChunk(
+                    call_id=self._call_id,
+                    tool_name="bash",
+                    stream="stdout",
+                    text=text,
+                    seq=seq,
+                )
+            )
+        except Exception:  # noqa: BLE001 - observation never breaks the command
+            pass
 
 
 class BashTool(BaseTool):
@@ -150,6 +216,116 @@ class BashTool(BaseTool):
             data={"job_id": job.id, "pid": job.pid, "log": job.log_path},
         )
 
+    async def _run_as_job(
+        self,
+        command: str,
+        effective: int,
+        ctx: ToolContext | None,
+        registry: Any,
+    ) -> ToolResult:
+        """One command as one job, waited on for ``effective`` seconds.
+
+        Three endings, and each one says which it is:
+
+        * settled in time -- projected into the same ToolResult shape the
+          foreground path has always produced, then discarded: a command that
+          answered does not leave a job behind;
+        * the wait ran out -- **promoted**. The command keeps running and the
+          model gets the id. dsh's default (``promoteOnTimeout``); the older
+          text here told the model to retry with a larger timeout, which after
+          this change would send it around the same build again;
+        * the user cancelled -- killed and reported as cancelled, which the
+          pipe-based path never managed to say (it reported "exited with code
+          None").
+        """
+        context = resolve_ctx(ctx)
+        job = registry.start(
+            command,
+            cwd=self._workspace_dir(ctx) or ".",
+            session_id=context.session_id,
+            emit=context.emit,
+            # Silent while the caller is still waiting: the ToolResult carries
+            # the outcome.  Promotion turns it on, because from that moment the
+            # result has nobody but a notice to reach the model through.
+            announce=False,
+        )
+        pump = _LogTail(job, context.emit, context.call_id)
+        pump.start()
+        started = time.monotonic()
+        try:
+            settled = await registry.wait(job, timeout=effective, cancel=context.kill_event)
+        except asyncio.CancelledError:
+            # Esc abandons the awaiting task as well as setting the flag; the
+            # command has to go with it, or a promoted job outlives the turn the
+            # user cancelled.
+            registry.kill(job.id, reason="cancelled by the user")
+            pump.stop()
+            raise
+        duration = time.monotonic() - started
+        text, size = registry.read_head(job, self._max_output)
+        if settled:
+            pump.stop()
+            # The result is in hand and the model's answer is about to be built;
+            # a record of a command that already answered would be litter.
+            registry.discard(job.id)
+            return self._settled_result(job, text, size, effective, duration)
+        # Promotion: the pump keeps reading, because the model may still be
+        # watching this command in the UI when it finally ends.
+        registry.announce(job.id, emit=context.emit)
+        return ToolResult(
+            success=True,
+            output=(
+                f"still running after {effective}s as job {job.id} "
+                f"(pid {job.pid}); it was NOT killed. Its output so far is at "
+                f"{job.log_path} and keeps growing. You will be notified when "
+                f"it finishes -- do not poll, do not sleep, and do not start it "
+                f"again; carry on with independent work or stop it with job_kill."
+            ),
+            data={
+                "promoted": True,
+                "job_id": job.id,
+                "pid": job.pid,
+                "log": job.log_path,
+                "timeout_seconds": effective,
+                "duration_seconds": round(duration, 3),
+            },
+        )
+
+    def _settled_result(
+        self,
+        job: Any,
+        text: str,
+        size: int,
+        effective: int,
+        duration: float,
+    ) -> ToolResult:
+        """Project a finished job into the ToolResult the model has always seen."""
+        output = text
+        if size > self._max_output:
+            output = output + f"\n... [truncated, total {size} chars]"
+        data: dict[str, Any] = {
+            "exit_code": job.exit_code,
+            "timed_out": False,
+            "duration_seconds": round(duration, 3),
+            "timeout_seconds": effective,
+        }
+        if job.stop_reason:
+            cancelled = "cancelled" in job.stop_reason or "停止" in job.stop_reason
+            return ToolResult(
+                success=False,
+                output=f"{job.stop_reason}\n{output}" if output else job.stop_reason,
+                error="cancelled" if cancelled else "killed",
+                data=data,
+            )
+        if job.exit_code == 0:
+            return ToolResult(success=True, output=output, data=data)
+        return ToolResult(
+            success=False,
+            output=output or f"command exited with code {job.exit_code}",
+            error="nonzero_exit",
+            data=data,
+        )
+
     @property
     def max_duration_seconds(self) -> float:
         """Per-call ceiling for the dispatcher (R2a): the *widest* timeout the
@@ -193,6 +369,15 @@ class BashTool(BaseTool):
             )
         else:
             effective = min(requested, self._max_timeout)
+
+        # D-1b: with a registry, every call is a job and this one waits on its
+        # own -- dsh's shape, and the only shape in which a command that outruns
+        # its timeout is still running afterwards.  Without one the pipe-based
+        # runner below stays, which is the seam dsh keeps too ("Without a
+        # registry the tool is foreground-only").
+        registry = getattr(resolve_ctx(ctx), "jobs", None)
+        if registry is not None:
+            return await self._run_as_job(command, effective, ctx, registry)
 
         # R8c: stream what the command says while it says it.  Chunks are
         # observation only - the ToolResult below is what the model ever sees.

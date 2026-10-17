@@ -1,5 +1,6 @@
 """TDD (M2-1): bash tool."""
 
+import os
 import time
 from pathlib import Path
 
@@ -317,3 +318,232 @@ async def test_a_background_call_without_a_registry_says_so_rather_than_blocking
     assert result.success is False
     assert result.error == "no_jobs"
     assert "foreground" in result.output, "the model needs to know what to do instead"
+
+
+# ---- D-1b: every bash call is a job (dsh's shape) -------------------------
+#
+# dsh registers every call as a job and the foreground call merely waits on its
+# own; when the wait runs out the job stays alive and the model gets the id. That
+# is only cheap there because the job *is* the executor. The payoff here is the
+# same one they bought it for: a 9-minute build that hits the timeout is not
+# thrown away.
+
+
+def _jobs(tmp_path: Path):
+    from ai_coding.core.jobs import JobRegistry
+
+    return JobRegistry(root=tmp_path / "jobs")
+
+
+def _ctx_with_jobs(tmp_path: Path, registry, kill_event=None):
+    return ToolContext(
+        jobs=registry, workspace=str(tmp_path), kill_event=kill_event, call_id="c1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_command_that_finishes_in_time_leaves_no_ledger_and_no_log(tmp_path):
+    """dsh removes the record when a foreground call settles before its wait ends
+    (``tool-bash/src/index.ts``). One `ls` per keystroke must not leave a file
+    behind, and job_list must not become a second transcript."""
+    registry = _jobs(tmp_path)
+    ctx = _ctx_with_jobs(tmp_path, registry)
+
+    result = await BashTool().execute({"command": "echo quick"}, ctx)
+
+    assert result.success is True
+    assert "quick" in result.output
+    assert registry.list() == []
+    assert not list((tmp_path / "jobs").glob("job_*"))
+
+
+@pytest.mark.asyncio
+async def test_a_command_that_times_out_is_promoted_and_keeps_running(tmp_path):
+    """The whole point: the timeout stops waiting, not the work."""
+    registry = _jobs(tmp_path)
+    ctx = _ctx_with_jobs(tmp_path, registry)
+
+    result = await BashTool(timeout_seconds=1).execute({"command": "sleep 30"}, ctx)
+
+    assert result.success is True, "a promoted job is not a failure"
+    job_id = result.data["job_id"]
+    running = [job for job in registry.list() if job.id == job_id]
+    assert running and running[0].status == "running"
+    try:
+        os.kill(running[0].pid, 0)
+    except (ProcessLookupError, PermissionError):
+        raise AssertionError("the command was killed instead of promoted") from None
+    registry.kill(job_id, reason="test over")
+
+
+@pytest.mark.asyncio
+async def test_a_promoted_command_names_the_job_instead_of_advising_a_retry(tmp_path):
+    """The old text taught "retry with a larger timeout", which is advice for a
+    harness that has no background jobs. This one has them now, so the advice
+    would be worse than useless: it sends the model around the same build again."""
+    registry = _jobs(tmp_path)
+
+    result = await BashTool(timeout_seconds=1).execute(
+        {"command": "sleep 30"}, _ctx_with_jobs(tmp_path, registry)
+    )
+
+    assert result.data["job_id"] in result.output
+    assert "notified" in result.output or "still running" in result.output
+    assert "retry with a larger timeout" not in result.output
+    registry.kill(result.data["job_id"], reason="test over")
+
+
+@pytest.mark.asyncio
+async def test_the_foreground_result_keeps_its_exit_code_under_the_job_path(tmp_path):
+    registry = _jobs(tmp_path)
+
+    result = await BashTool().execute(
+        {"command": "exit 7"}, _ctx_with_jobs(tmp_path, registry)
+    )
+
+    assert result.success is False
+    assert result.error == "nonzero_exit"
+    assert result.data["exit_code"] == 7
+
+
+@pytest.mark.asyncio
+async def test_stderr_still_reaches_the_model_under_the_job_path(tmp_path):
+    registry = _jobs(tmp_path)
+
+    result = await BashTool().execute(
+        {"command": "echo oops 1>&2"}, _ctx_with_jobs(tmp_path, registry)
+    )
+
+    assert "oops" in result.output
+
+
+@pytest.mark.asyncio
+async def test_output_is_truncated_at_the_same_limit_as_before(tmp_path):
+    """Max output is a context guard; moving the bytes to a file must not turn it
+    into "however much the command printed"."""
+    registry = _jobs(tmp_path)
+    tool = BashTool(max_output_chars=200)
+
+    result = await tool.execute(
+        {"command": "seq 1 5000"}, _ctx_with_jobs(tmp_path, registry)
+    )
+
+    assert "truncated" in result.output
+    assert len(result.output) < 400
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_foreground_command_ends_the_job_and_says_so(tmp_path):
+    """Esc must still stop the command. Promotion makes that more important, not
+    less: an uncancelled promoted command outlives the turn by design."""
+    import threading
+
+    registry = _jobs(tmp_path)
+    cancel = threading.Event()
+    cancel.set()  # the user hit Esc before the command produced anything
+
+    result = await BashTool(timeout_seconds=30).execute(
+        {"command": "sleep 30"}, _ctx_with_jobs(tmp_path, registry, cancel)
+    )
+
+    assert result.success is False
+    assert "cancel" in result.output.lower()
+    assert all(job.status != "running" for job in registry.list())
+
+
+@pytest.mark.asyncio
+async def test_output_streams_to_the_model_while_the_command_runs(tmp_path):
+    """R8c's live tail is what the TUI shows during a long command. Writing to a
+    file would silently delete it, so the tool reads its own log back out."""
+    registry = _jobs(tmp_path)
+    seen: list[str] = []
+    ctx = ToolContext(
+        jobs=registry,
+        workspace=str(tmp_path),
+        call_id="c1",
+        emit=lambda event: seen.append(getattr(event, "text", "")),
+    )
+
+    await BashTool(timeout_seconds=30).execute(
+        {"command": "echo streamed; sleep 20"}, ctx
+    )
+
+    assert any("streamed" in text for text in seen), seen
+
+
+@pytest.mark.asyncio
+async def test_bash_without_a_registry_keeps_the_pipe_based_foreground_path(tmp_path):
+    """The seam dsh keeps too (``tool-bash/src/index.ts``: "Without a registry the
+    tool is foreground-only"). A loop built without jobs must still run commands,
+    and its timeout must still kill rather than promote -- there is nowhere to
+    promote to."""
+    cancel_free = ToolContext(workspace=str(tmp_path))
+    started = time.monotonic()
+
+    result = await BashTool(timeout_seconds=1).execute({"command": "sleep 30"}, cancel_free)
+
+    assert result.success is False
+    assert result.error == "timeout"
+    assert time.monotonic() - started < 8.0
+
+
+class _Notices:
+    """The P0 notice queue, so a test can see what would reach the model."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def put(self, text: str) -> bool:
+        self.lines.append(text)
+        return True
+
+    def pending(self) -> int:
+        return len(self.lines)
+
+    def drain(self) -> list[str]:
+        taken, self.lines = self.lines, []
+        return taken
+
+
+@pytest.mark.asyncio
+async def test_a_foreground_command_that_finishes_in_wait_sends_no_notice(tmp_path):
+    """Found live: a foreground command that answered inside its wait produced
+    both a ToolResult and a `[notice]` about the same command. The model read the
+    same exit code twice, and every long foreground command would train it to
+    distrust notices."""
+    from ai_coding.core.jobs import JobRegistry
+
+    notices = _Notices()
+    registry = JobRegistry(root=tmp_path / "jobs", notices=notices)
+    ctx = ToolContext(jobs=registry, workspace=str(tmp_path), call_id="c1")
+
+    result = await BashTool(timeout_seconds=30).execute(
+        {"command": "echo answered"}, ctx
+    )
+
+    assert "answered" in result.output
+    assert notices.pending() == 0, notices.lines
+
+
+@pytest.mark.asyncio
+async def test_a_promoted_command_does_send_its_notice(tmp_path):
+    """Promotion is the moment the result stops being in anyone's hands, so the
+    notice has to start there -- not before, and not never."""
+    from ai_coding.core.jobs import JobRegistry
+
+    notices = _Notices()
+    registry = JobRegistry(root=tmp_path / "jobs", notices=notices)
+    ctx = ToolContext(jobs=registry, workspace=str(tmp_path), call_id="c1")
+
+    result = await BashTool(timeout_seconds=1).execute({"command": "sleep 5"}, ctx)
+    job_id = result.data["job_id"]
+
+    import asyncio
+    import time as _time
+
+    deadline = _time.monotonic() + 15
+    while notices.pending() == 0 and _time.monotonic() < deadline:
+        await asyncio.sleep(0.2)
+
+    assert notices.pending() == 1, "a promoted command must announce its ending"
+    assert job_id in notices.lines[0]
