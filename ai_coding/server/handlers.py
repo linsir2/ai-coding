@@ -638,11 +638,13 @@ def make_handlers(
         turn_id = _launch_turn(run_resumed)
         return {"turnId": turn_id, "sessionId": session_id}
 
-    def session_interrupt(params: dict[str, Any]) -> dict[str, Any]:
-        # 11-spec §8: disarm BEFORE cancelling — the driver loop re-checks
-        # task.armed between rounds and must not open the next one after this
-        # round unwinds.  Best-effort: the round's own close save carries the
-        # same in-memory object, so both writes agree.
+    def _interrupt_running_turns() -> int:
+        """Stop whatever turn is in flight, and say how many that was.
+
+        Shared by Esc and by promote: two spellings of "stop what is running"
+        must not drift into two behaviours.  The disarm comes first (11-spec
+        §8) so an armed plan does not reopen after this round unwinds.
+        """
         session = getattr(state, "session", None)
         task = getattr(session, "task", None) if session is not None else None
         if task is not None and getattr(task, "armed", False):
@@ -653,8 +655,14 @@ def make_handlers(
         # loop clears it before each batch), the future cancellation reaches
         # a model call.
         world.cancel.set()
-        interrupted = sum(1 for future in list(state.turn_futures) if future.cancel())
-        return {"ok": True, "interrupted": interrupted}
+        return sum(1 for future in list(state.turn_futures) if future.cancel())
+
+    def session_interrupt(params: dict[str, Any]) -> dict[str, Any]:
+        # 11-spec §8: disarm BEFORE cancelling — the driver loop re-checks
+        # task.armed between rounds and must not open the next one after this
+        # round unwinds.  Best-effort: the round's own close save carries the
+        # same in-memory object, so both writes agree.
+        return {"ok": True, "interrupted": _interrupt_running_turns()}
 
     def _next_step_count(session: Any) -> int:
         """How many next-step rows are still waiting -- what the old FIFO's
@@ -1043,16 +1051,22 @@ def make_handlers(
             return {"ok": True, "id": item.id}
         if op == "promote":
             # oc's projectDeliveryChanged in miniature: only the target moves,
-            # never the text.  Interrupting the running turn to honor it is
-            # Phase 3; until then the row waits like any next-step row, and the
-            # flip itself is durable the moment it happens.
+            # never the text.  Then, because a cancelled turn is a dead turn in
+            # this harness (CancelledError -> _close_turn), the flip alone would
+            # leave its own row waiting for the next human message -- the exact
+            # opposite of what the button means.  So a promote also stops what
+            # is running and chains a wake that consumes the row, on the shared
+            # budget: an interrupt without the wake strands the intent, and a
+            # wake without the interrupt talks over a turn that is still going.
             row_id = str(params.get("id", "") or "").strip()
             row = next((item for item in session.inbox if item.id == row_id), None)
             if row is None:
                 return {"ok": False, "reason": f"no inbox row {row_id!r}"}
             row.target = "next-step"
             _persist_session(world, session)
-            return {"ok": True, "id": row.id}
+            interrupted = _interrupt_running_turns()
+            woke = _open_promote_wake(row.text)
+            return {"ok": True, "id": row.id, "interrupted": interrupted, "woke": woke}
         if op in ("edit", "delete"):
             row_id = str(params.get("id", "") or "").strip()
             row = next((item for item in session.inbox if item.id == row_id), None)
@@ -1263,29 +1277,71 @@ def make_handlers(
     # ---- D-1c: a finished job may open a turn ------------------------------
     wake_left = {"left": WAKE_BUDGET}
 
-    async def _wake_turn(session: Any) -> None:
-        """The turn a finished job opens, when nobody is looking.
+    async def _wake_turn(session: Any, text: str) -> None:
+        """The turn nobody asked for, opened because something finished.
 
-        The prompt is deliberately generic: the notice itself is already in the
-        queue and the turn's own iteration boundary drains it, so this line only
-        has to give the model a reason to look.  Phrasing the outcome here would
-        state it twice, and the second statement is the one that could drift.
+        The prompt is deliberately generic: the notice (or the promoted row)
+        is already queued and the turn's own iteration boundary drains it, so
+        this line only has to give the model a reason to look.  Phrasing the
+        outcome here would state it twice, and the second statement is the one
+        that could drift.
         """
         try:
-            await world.loop.process_input(
-                session, "[notice] 后台任务的结果到了——查看并继续。"
-            )
+            await world.loop.process_input(session, text)
         except Exception:  # noqa: BLE001 — a wake that fails is not a crashed app
-            _log.exception("job wake turn failed")
+            _log.exception("wake turn failed")
+
+    def _request_wake(prompt: str) -> bool:
+        """Open a wake turn if the budget allows; True when one was opened.
+
+        Shared by job completions and promote: a wake is a wake no matter who
+        asked for it, so they spend the same budget.  The caller decides the
+        prompt; the budget decides whether it may run.
+        """
+        if state.session is None:
+            return False
+        if not wake_decision(wake_left["left"], len(state.turn_futures)):
+            return False
+        wake_left["left"] -= 1
+        _launch_turn(lambda: _wake_turn(state.session, prompt))
+        return True
+
+    def _open_promote_wake(row_text: str) -> bool:
+        """Wake for a promoted row: now if idle, after the dying turn if not.
+
+        Returns True only when a wake turn was opened by this call.  A running
+        turn cannot be joined -- its session object is being closed underneath
+        -- so the waiter polls for an empty future set (bounded: a turn that
+        will not die in thirty seconds is not going to, and a second turn on
+        the same session would interleave reads and writes).  Giving up is
+        logged, not silent: the row stays flipped and durable either way.
+        """
+        clipped = " ".join(str(row_text).split())
+        if len(clipped) > 60:
+            clipped = clipped[:60] + "…"
+        prompt = f"[notice] 你把这一条提前了——查看并继续：{clipped}"
+        if not state.turn_futures:
+            return _request_wake(prompt)
+
+        async def _wait_settle_then_wake() -> None:
+            for _ in range(300):
+                if not state.turn_futures:
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                _log.warning("promote wake gave up waiting for the dying turn")
+                return
+            _request_wake(prompt)
+
+        try:
+            service.spawn(_wait_settle_then_wake())
+        except RuntimeError:  # pragma: no cover - the loop is already closed
+            return False
+        return False
 
     def _maybe_wake() -> None:
         # Runs on the loop (hopped from the job watcher thread).
-        if state.session is None:
-            return
-        if not wake_decision(wake_left["left"], len(state.turn_futures)):
-            return
-        wake_left["left"] -= 1
-        _launch_turn(lambda: _wake_turn(state.session))
+        _request_wake("[notice] 后台任务的结果到了——查看并继续。")
 
     def _notice_arrived(_text: str) -> None:
         """From the job watcher thread: hop onto the loop and consider a wake."""

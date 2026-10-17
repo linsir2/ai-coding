@@ -1941,3 +1941,87 @@ async def test_inbox_promote_of_an_unknown_id_says_so(ipc):
     result = client.request("session.inbox", {"op": "promote", "id": "nope"})
 
     assert result["ok"] is False
+
+
+# ---- D-2 Phase 3: promote interrupts and wakes --------------------------------
+#
+# dsh's steer() always wakes and oc resumes on interrupt; ours kills the turn
+# outright (CancelledError -> _close_turn), so a promote that did not chain a
+# wake would leave its own row waiting for the next human message -- the exact
+# opposite of what the operator pressed the button for.  The chain shares the
+# D-1c budget: a wake is a wake no matter who asked for it.
+
+
+async def _add_row(client, text: str = "先看日志", target: str = "next-turn") -> str:
+    added = client.request("session.inbox", {"op": "add", "text": text, "target": target})
+    assert added["ok"] is True
+    return added["id"]
+
+
+@pytest.mark.asyncio
+async def test_promote_while_idle_flips_and_wakes(ipc, tmp_path):
+    """dsh's steer() always wakes: the operator pressed promote, which is
+    consent to spend a turn.  No turn is running, so nothing is interrupted."""
+    _world, _service, client = ipc
+    client.request("initialize")
+    world_loop = _world.loop
+    row_id = await _add_row(client)
+    before = len(world_loop.calls)
+
+    result = client.request("session.inbox", {"op": "promote", "id": row_id})
+
+    assert result == {"ok": True, "id": row_id, "interrupted": 0, "woke": True}
+    for _ in range(100):
+        if len(world_loop.calls) > before:
+            break
+        await asyncio.sleep(0.05)
+    assert len(world_loop.calls) == before + 1, "an idle promote must open a turn"
+    assert "notice" in str(world_loop.calls[-1]["text"]).lower() or "steer" in str(
+        world_loop.calls[-1]["text"]
+    ).lower() or len(world_loop.calls[-1]["text"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_promote_while_running_interrupts_then_wakes_after_settle(ipc, tmp_path):
+    """The full chain: the running turn dies (aborted, like Esc), and only once
+    it has settled does the wake turn open -- overlapping turns would read and
+    write the same session object interleaved."""
+    _world, _service, client = ipc
+    client.request("initialize")
+    _world.loop = _SlowLoop()
+    client.request("session.prompt", {"text": "slow"})
+    assert await client.wait_for(lambda: bool(_world.loop.calls))
+    row_id = await _add_row(client, text="停下，先看这个")
+    before = len(_world.loop.calls)
+
+    result = client.request("session.inbox", {"op": "promote", "id": row_id})
+
+    assert result["ok"] is True and result["interrupted"] == 1
+    assert await client.wait_for(client.turn_finished.is_set)
+    for _ in range(200):
+        if len(_world.loop.calls) > before:
+            break
+        await asyncio.sleep(0.05)
+    assert len(_world.loop.calls) == before + 1, "the wake must wait for the settle"
+    rows = client.request("session.inbox", {"op": "list"})["rows"]
+    assert [row["target"] for row in rows if row["id"] == row_id] == ["next-step"]
+
+
+@pytest.mark.asyncio
+async def test_promote_with_no_budget_left_only_flips(ipc, tmp_path):
+    """The budget is shared with job wakes (D-1c): a wake is a wake.  When it is
+    spent, promote degrades to a flip and says so -- silently dropping the row
+    would be worse, and waking anyway would uncap the meter."""
+    _world, _service, client = ipc
+    client.request("initialize")
+    # Spend the shared budget for real: three promotes, three wakes.
+    for _ in range(3):
+        row_id = await _add_row(client)
+        assert client.request("session.inbox", {"op": "promote", "id": row_id})["woke"] is True
+    row_id = await _add_row(client, text="预算用完了")
+
+    result = client.request("session.inbox", {"op": "promote", "id": row_id})
+
+    assert result["ok"] is True and result["woke"] is False
+    rows = client.request("session.inbox", {"op": "list"})["rows"]
+    assert [row["target"] for row in rows if row["id"] == row_id] == ["next-step"]

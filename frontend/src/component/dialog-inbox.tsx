@@ -105,11 +105,31 @@ export function DialogInbox(props: {
     }
   }
 
+  const promote = async (option: SelectOption) => {
+    const row = liveRows().find((entry) => entry.id === option.value)
+    if (!row) return
+    // The row stays: promote flips its target, it does not consume it.  A
+    // refresh would show the same list, so only failures surface.
+    await call("promote", { id: row.id })
+  }
+
   const actions = (): readonly SelectAction[] => [
     {
       key: "ctrl+d",
       title: "delete",
       onTrigger: (option) => option && void remove(option),
+    },
+    // Promote flips the row to next-step and, when a turn is running, stops
+    // it and opens a wake turn to consume the row (D-2 Phase 3).  No arming:
+    // the operator pressed it on purpose, and an interrupted turn persists
+    // its work before dying, so nothing is lost that cannot be resumed.
+    // ctrl+g, like the memory panel's promote -- one key for "move it up"
+    // everywhere, since ctrl+s is XOFF flow control in too many terminals
+    // to trust with a button.
+    {
+      key: "ctrl+g",
+      title: "promote to steer",
+      onTrigger: (option) => option && void promote(option),
     },
   ]
 
@@ -129,8 +149,8 @@ export function DialogInbox(props: {
           error(),
           liveRows().length === 0 ? "没有排队输入" : "",
           props.onSelectRow === undefined
-            ? "ctrl+d 删除 · esc close"
-            : "enter 编辑 · ctrl+d 删除 · esc close",
+            ? "ctrl+d 删除 · ctrl+g 提前 · esc close"
+            : "enter 编辑 · ctrl+d 删除 · ctrl+g 提前 · esc close",
         ]
           .filter(Boolean)
           .join(" · ") || undefined
