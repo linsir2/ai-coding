@@ -129,6 +129,24 @@ def _is_snip_placeholder(message: ChatMessage) -> bool:
 _SNIP_PLACEHOLDER_RE = re.compile(r"\[snipped \d+ messages\]")
 
 
+def _is_background_notice(message: ChatMessage) -> bool:
+    """True for harness operations, not conversation (D-1 gap 5, oc parity:
+    `compaction.ts:784` strips `metadata.background` from summary input).
+
+    `[notice]` lines (background completions) are transient: the durable
+    record is the job ledger and log on disk, recoverable through `job_list`.
+    All three conditions are required -- `[steering]`, gate injections and
+    stream continuations are synthetic too and stay in the summary, because
+    they *are* what the turn did or was told, and a user-typed line that
+    merely starts with the prefix is conversation, not operations.
+    """
+    return (
+        message.role == "user"
+        and bool(message.synthetic)
+        and (message.content or "").startswith("[notice] ")
+    )
+
+
 # ---------------------------------------------------------------- stage 2 (L2)
 
 
@@ -740,7 +758,9 @@ class ContextManager:
         head = [
             message
             for message in full
-            if id(message) not in kept and not _is_snip_placeholder(message)
+            if id(message) not in kept
+            and not _is_snip_placeholder(message)
+            and not _is_background_notice(message)
         ]
         checkpoint, rest = split_checkpoint(head)
         body = _joined_history_text(rest)

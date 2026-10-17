@@ -29,6 +29,10 @@ def _user(content: str) -> ChatMessage:
     return ChatMessage(role="user", content=content, timestamp="t")
 
 
+def _synthetic(content: str) -> ChatMessage:
+    return ChatMessage(role="user", content=content, timestamp="t", synthetic=True)
+
+
 async def _none(**_: object) -> str | None:
     return None
 
@@ -171,3 +175,47 @@ async def test_l4_persists_audit_copy(tmp_path):
     cm = ContextManager(_settings(max_context_tokens=5), tmp_path, summarizer=fake)
     await cm.compress(_msgs(8))
     assert list((tmp_path / "transcripts").glob("summary_*.txt"))
+
+
+@pytest.mark.asyncio
+async def test_l4_summary_input_drops_background_notices_but_keeps_the_rest(tmp_path):
+    """D-1 gap 5 (oc parity: `compaction.ts:784` strips `metadata.background`):
+    a `[notice]` line is harness operations, not conversation -- it must not
+    spend summary budget.  Steering, gate injections and ordinary messages
+    stay: only the `[notice]` prefix is background, not `synthetic` as such."""
+    fake = _Fake(["digested"])
+    cm = ContextManager(_settings(max_context_tokens=5), tmp_path, summarizer=fake)
+    notice = "[notice] 后台任务 job-7 完成了，输出 3 行"
+    msgs = [
+        _user("do the thing"),
+        _synthetic(notice),
+        _synthetic("[steering] 等等，先别提交"),
+        _user("keep working"),
+        _user("latest question"),
+    ]
+
+    await cm.compress(msgs)
+
+    assert len(fake.calls) == 1
+    head_text = fake.calls[0]
+    assert "[notice]" not in head_text and "job-7" not in head_text
+    assert "[steering] 等等，先别提交" in head_text
+    assert "do the thing" in head_text
+
+
+@pytest.mark.asyncio
+async def test_archive_transcript_still_keeps_background_notices(tmp_path):
+    """D-6 untouched: the archive is the durable record (humans and
+    `history_search` read it); the L4 filter only narrows the *summary input*,
+    never what gets written down."""
+    cm = ContextManager(_settings(), tmp_path)
+    notice = "[notice] 后台任务 job-7 完成了，输出 3 行"
+    msgs = [
+        _user("do the thing"),
+        _synthetic(notice),
+    ]
+
+    cm.archive_transcript(msgs)
+
+    archived = sorted((tmp_path / "transcripts" / "archive").glob("*.md"))
+    assert archived and notice in archived[-1].read_text(encoding="utf-8")
