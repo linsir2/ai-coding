@@ -58,7 +58,10 @@ class BashTool(BaseTool):
             "The command runs in the workspace directory. "
             f"Timeout is {self._timeout}s by default; pass timeout_seconds "
             f"(up to {self._max_timeout}s) to widen it for one slow call. "
-            f"Output is truncated after {self._max_output} characters."
+            f"Output is truncated after {self._max_output} characters. "
+            "A command that outlives the turn should go to the background "
+            "(run_in_background), where you are notified when it finishes -- "
+            "do not poll it and do not sleep waiting for it."
         )
 
     @property
@@ -76,6 +79,19 @@ class BashTool(BaseTool):
                 # the description above, and guess short).  A new value is a
                 # new guard fingerprint, so widening retries are not denied as
                 # duplicate calls.
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": (
+                        "Run the command in the background and return "
+                        "immediately -- for builds, test suites and dev servers "
+                        "that outlive a turn. You do not need to end the command "
+                        "with '&'. You will be notified when it finishes; do not "
+                        "poll and do not sleep waiting for it, and do not start a "
+                        "second copy of a job that is already running. "
+                        "timeout_seconds does not apply to a background command; "
+                        "job_list shows what is running and job_kill stops it."
+                    ),
+                },
                 "timeout_seconds": {
                     "type": "integer",
                     "description": (
@@ -91,6 +107,49 @@ class BashTool(BaseTool):
             "required": ["command"],
         }
 
+    def _start_background(
+        self, command: str, params: dict[str, Any], ctx: ToolContext | None
+    ) -> ToolResult:
+        """Hand the command to the job table and return its id at once.
+
+        Falls back to the foreground path when no registry is attached (the bare
+        CLI, a sub-agent stack): running it in the foreground and saying so is
+        better than pretending the switch worked.
+        """
+        context = resolve_ctx(ctx)
+        registry = getattr(context, "jobs", None)
+        if registry is None:
+            return ToolResult(
+                success=False,
+                output=(
+                    "error: run_in_background is not available here (no job "
+                    "registry on this tool stack); run the command in the "
+                    "foreground, or set a larger timeout_seconds"
+                ),
+                error="no_jobs",
+            )
+        from ai_coding.core.jobs import JobLimitReached
+
+        try:
+            job = registry.start(
+                command,
+                cwd=context.workspace or ".",
+                session_id=context.session_id,
+                emit=context.emit,
+            )
+        except JobLimitReached as exc:
+            return ToolResult(success=False, output=f"error: {exc}", error="job_limit")
+        return ToolResult(
+            success=True,
+            output=(
+                f"job {job.id} started in the background (pid {job.pid}). "
+                f"You will be notified when it finishes -- do not poll and do "
+                f"not sleep waiting for it; keep working on independent steps. "
+                f"Its output streams to: {job.log_path}"
+            ),
+            data={"job_id": job.id, "pid": job.pid, "log": job.log_path},
+        )
+
     @property
     def max_duration_seconds(self) -> float:
         """Per-call ceiling for the dispatcher (R2a): the *widest* timeout the
@@ -105,6 +164,11 @@ class BashTool(BaseTool):
         command = str(params.get("command", ""))
         if not command.strip():
             return ToolResult(success=False, output="error: empty command")
+
+        # D-1: the same command without the waiting. Everything below this branch
+        # is the foreground path, untouched.
+        if params.get("run_in_background") is True:
+            return self._start_background(command, params, ctx)
 
         # Self-widening: the model names its own budget per call.  Strict on
         # purpose — a bool, a string or a non-positive number is a contract

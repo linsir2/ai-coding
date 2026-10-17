@@ -24,6 +24,7 @@ def build_subagent_runner(
     *,
     base_instructions: str = "",
     notices: Any | None = None,
+    jobs: Any = None,
 ) -> Any:
     """Build a :class:`SubAgentRunner` bound to the given workspace.
 
@@ -73,6 +74,7 @@ def build_tool_registry(
     user_prompt: Any | None = None,
     base_instructions: str = "",
     notices: Any | None = None,
+    jobs: Any = None,
 ) -> Any:
     """Build the *domain* tool registry used by the self-owned loop (R1a-4).
 
@@ -84,7 +86,7 @@ def build_tool_registry(
     means there is nobody to ask, so the tool list must not pretend otherwise.
     """
     registry, _gate = _assemble_registry(
-        app_cfg, workspace, skills, include_subagent, user_prompt, base_instructions, notices
+        app_cfg, workspace, skills, include_subagent, user_prompt, base_instructions, notices, jobs
     )
     return registry
 
@@ -97,6 +99,7 @@ def _assemble_registry(
     user_prompt: Any | None = None,
     base_instructions: str = "",
     notices: Any | None = None,
+    jobs: Any = None,
 ) -> tuple[Any, Any]:
     """Create the sandbox/gate/registry triple shared by both builders."""
 
@@ -193,6 +196,15 @@ def _assemble_registry(
         from ai_coding.tools.history_search_tool import HistorySearchTool
 
         registry.register(HistorySearchTool())
+
+    if include_subagent and jobs is not None:
+        # D-1: a job outlives the session that started it, so it belongs to the
+        # workspace and to whoever holds the registry -- which is the main
+        # session.  A sub-agent stack gets neither, exactly like history_search.
+        from ai_coding.tools.job_tools import JobKillTool, JobListTool
+
+        registry.register(JobListTool())
+        registry.register(JobKillTool())
 
     if include_subagent:
         # Real sub-agent delegation, isolated in a git worktree when enabled.

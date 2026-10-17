@@ -241,3 +241,79 @@ def test_bash_schema_advertises_per_call_timeout():
     schema = BashTool().params_json_schema
     assert "timeout_seconds" in schema["properties"]
     assert "timeout_seconds" not in schema.get("required", [])
+
+
+# ---- D-1: the same command, without waiting for it -------------------------
+
+
+def test_bash_schema_advertises_the_background_switch():
+    """An unwritten knob is a knob the model cannot find."""
+    schema = BashTool().params_json_schema
+    assert "run_in_background" in schema["properties"]
+    assert "run_in_background" not in schema.get("required", [])
+
+
+def test_bash_description_says_it_will_be_notified_and_not_to_poll():
+    """Every reference harness spends a sentence on this, and Claude Code learned
+    it the hard way: a model that polls a job is a model that lies about waiting."""
+    description = BashTool().description
+    assert "notified" in description
+    assert "poll" in description
+
+
+@pytest.mark.asyncio
+async def test_a_background_call_returns_an_id_and_a_log_path_at_once(tmp_path):
+    """The whole contract: it returns while the command is still running."""
+    from ai_coding.core.jobs import JobRegistry
+
+    registry = JobRegistry(root=tmp_path / "jobs")
+    ctx = ToolContext(jobs=registry, workspace=str(tmp_path))
+
+    result = await BashTool().execute(
+        {"command": "sleep 30", "run_in_background": True}, ctx
+    )
+
+    assert result.success is True
+    assert result.data["job_id"].startswith("job_")
+    assert str(tmp_path / "jobs") in result.output
+    assert "notified" in result.output or "notify" in result.output
+    registry.kill(result.data["job_id"], reason="test over")
+
+
+@pytest.mark.asyncio
+async def test_the_timeout_knob_does_not_apply_to_a_background_command(tmp_path):
+    """A background call that inherited the 60s foreground default would be the
+    quietest bug in this feature: the model asked for a job and got a kill."""
+    from ai_coding.core.jobs import JobRegistry
+
+    registry = JobRegistry(root=tmp_path / "jobs")
+    ctx = ToolContext(jobs=registry, workspace=str(tmp_path))
+
+    result = await BashTool().execute(
+        {"command": "sleep 5", "run_in_background": True, "timeout_seconds": 1}, ctx
+    )
+
+    import time
+
+    time.sleep(1.5)
+    job = next(row for row in registry.list() if row.id == result.data["job_id"])
+    try:
+        assert job.status == "running", "the per-call timeout must not reach a background job"
+    finally:
+        registry.kill(job.id, reason="test over")
+
+
+@pytest.mark.asyncio
+async def test_a_background_call_without_a_registry_says_so_rather_than_blocking(tmp_path):
+    """No registry means no background. Running it in the foreground anyway
+    would be the quiet version of the bug this project keeps refusing: the model
+    asked for a job, believes it has one, and is actually blocking a turn on it."""
+    ctx = ToolContext(workspace=str(tmp_path))
+
+    result = await BashTool().execute(
+        {"command": "echo foreground-fallback", "run_in_background": True}, ctx
+    )
+
+    assert result.success is False
+    assert result.error == "no_jobs"
+    assert "foreground" in result.output, "the model needs to know what to do instead"

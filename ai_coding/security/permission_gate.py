@@ -183,6 +183,12 @@ class PermissionGate:
             # outside the process, and it is most needed in plan mode, where a
             # WARN tier would put an approval panel in front of a lookup.
             "history_search",
+            # D-1: reading and stopping the workspace's background jobs. The blast
+            # radius is the processes this workspace's own model started -- a
+            # WARN tier would put an approval panel in front of stopping your own
+            # test run.
+            "job_list",
+            "job_kill",
             # R7e-1: durable, but not a side effect on the repo, and the harness
             # harvests notes without asking anyway (docs/r7e-analysis.md Q1).
             "memory_write",

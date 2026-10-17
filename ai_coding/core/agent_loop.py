@@ -244,6 +244,7 @@ class AgentLoop:
         # P0-2: the harness lane -- a background run settles long after the turn
         # that started it, and its event reaches the operator but not the model.
         notices: Any | None = None,
+        jobs: Any | None = None,
         cancel: asyncio.Event | None = None,
         snapshots: Any | None = None,
     ) -> None:
@@ -312,6 +313,9 @@ class AgentLoop:
         # P0-2: same queue shape, different speaker.  None = today's behaviour,
         # and the loop then never looks at it.
         self.notices = notices
+        # D-1: background jobs.  Kept beside notices because the two travel
+        # together -- a job that finishes writes into that same queue.
+        self.jobs = jobs
         # R8c: what the Esc key sets.  The loop clears it before every batch so one
         # key press drops one batch, never the rest of the turn (D-7).
         self.cancel = cancel
@@ -1398,6 +1402,7 @@ class AgentLoop:
                 instructions=instructions,
                 emit=self._emit,
                 turn=turn,
+                jobs=self.jobs,
                 # R8a: the only channel a tool has to leave something in the
                 # turn's book (checkpoint_write uses it).
                 note_checkpoint=lambda text: books.note_checkpoint(text, limit=limit),

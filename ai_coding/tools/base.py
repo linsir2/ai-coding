@@ -74,6 +74,13 @@ class ToolContext:
     # it to the process runner).  The dispatcher sets it when the user cancels, so
     # the child dies even though the awaiting task was abandoned.
     kill_event: threading.Event | None = None
+    # D-1: the workspace's background-job table, for `bash
+    # run_in_background`, `job_list` and `job_kill`.  `None` in a stack built
+    # without one (the bare CLI, a sub-agent), where a tool that needs jobs says
+    # so rather than answering "nothing is running".  Typed `Any` like
+    # `emit`/`notice_checkpoint`: the registry lives in ``core`` and the tools
+    # package importing it would drag the loop's world in behind it.
+    jobs: Any = None
 
 
 def resolve_ctx(ctx: ToolContext | None) -> ToolContext:

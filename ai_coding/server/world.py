@@ -94,6 +94,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     from ai_coding.cli import _build_loop, _build_tool_registry, _make_hooks, _make_recorder
     from ai_coding.config.loader import ConfigLoader
     from ai_coding.core.guard import build_guards
+    from ai_coding.core.jobs import JobRegistry
     from ai_coding.core.mcp import MCPManager, build_mcp_catalog
     from ai_coding.core.steering import SteeringQueue
     from ai_coding.paths import Paths
@@ -135,10 +136,14 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     # nobody writes to, which is how a background completion used to reach the
     # operator and nobody else.
     notices = SteeringQueue()
+    # D-1: one job table per workspace, beside the sessions and traces rather
+    # than inside either -- a background command outlives the session that
+    # started it, and the ledger that says so has to outlive it too.
+    jobs = JobRegistry(root=Path(workspace) / ".ai-coding" / "jobs", notices=notices)
     registry = _build_tool_registry(
         app_cfg, workspace, skill_registry,
         user_prompt=user_prompt, base_instructions=BASE_INSTRUCTIONS,
-        notices=notices,
+        notices=notices, jobs=jobs,
     )
 
     steering = SteeringQueue()
@@ -181,6 +186,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         hooks=_make_hooks(app_cfg, str(paths.workspace)),
         steering=steering,
         notices=notices,
+        jobs=jobs,
         cancel=cancel,
     )
     pending = find_armed_session(sessions)
