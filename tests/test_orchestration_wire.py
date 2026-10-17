@@ -245,7 +245,7 @@ def _env_check(body: dict) -> None:
     assert len(envs) == 1
     env_body = envs[0]["content"]
     assert env_body.startswith("<environment>\n工作区: ")
-    assert "日期: " in env_body
+    assert "时间: " in env_body
     env_at = messages.index(envs[0])
     tasks = [
         at

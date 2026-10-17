@@ -36,7 +36,7 @@ from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
 from ai_coding.domain.turn_digest import render_working_memory
 from ai_coding.infra.deadline import Deadline
-from ai_coding.infra.time_utils import now_utc
+from ai_coding.infra.time_utils import now_local
 from ai_coding.skills.policy import denied_skill_ids
 from ai_coding.skills.registry import SkillRegistry, iter_mentions, resolve_mentions
 from ai_coding.skills.render import render_skill_content
@@ -296,13 +296,16 @@ class RequestAssembler:
 
         Volatile like the other tail blocks -- rebuilt from the session every
         iteration, never persisted.  The workspace line is always present; the
-        branch line is omitted when git has nothing to say.
+        branch line is omitted when git has nothing to say; the moment line
+        (C-4) carries the local time *with its offset* and needs no cache
+        throttling, because the tail sits after the history and never enters
+        it -- the cached prefix is unchanged by a clock that ticks.
         """
         lines = [f"工作区: {self._workspace}"]
         branch = getattr(session, "git_branch", "")
         if branch:
             lines.append(f"分支: {branch}")
-        lines.append(f"日期: {now_utc()[:10]}")
+        lines.append(f"时间: {now_local()}")
         return "<environment>\n" + "\n".join(lines) + "\n</environment>"
 
     def _referenced_files_block(self, user_input: str) -> str:

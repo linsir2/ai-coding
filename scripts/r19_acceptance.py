@@ -162,7 +162,7 @@ def _env_ok(entry: dict) -> bool:
     if len(envs) != 1:
         return False
     body = envs[0]["content"]
-    return "工作区: " in body and "日期: " in body
+    return "工作区: " in body and "时间: " in body
 
 
 async def _run_scenario(

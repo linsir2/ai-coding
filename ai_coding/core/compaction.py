@@ -331,6 +331,16 @@ class Compactor:
                 return report
             if result == list(session.messages):
                 return report  # nothing changed; do not pretend it did
+            # D-6: this is the only writer of `session.messages` in the codebase,
+            # and it is the lossy one -- the summary replaces the file. The snip
+            # stage archives the middle it drops, but only when the history is
+            # long enough to trip max_messages, so on a short session nothing was
+            # written and the original left the disk with this line. Archive it
+            # while it still exists. Probed like the other delegate capabilities
+            # above: a pre-archiving context object simply has no such method.
+            archive = getattr(self._context, "archive_transcript", None)
+            if callable(archive):
+                archive(list(session.messages))
             session.messages = list(result)
             after = len(session.messages)
             return {"messages": before, "after": after, "removed": before - after}

@@ -8,6 +8,7 @@ loop body only names the step (docs/r7-analysis.md 3.1).
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -162,6 +163,10 @@ async def test_blocks_keep_the_declared_order():
 
 # ------------------------------------------------------- environment (13 §2.4)
 
+#: What C-4 promises the model: one line carrying the moment *with its offset*,
+#: so "本地时间" is a fact rather than an assumption (infra/time_utils.now_local).
+_ISO_WITH_OFFSET = re.compile(r"时间: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}")
+
 
 async def test_the_environment_block_leads_the_tail():
     assembler, parts = _assembler(workspace="/tmp/ws")
@@ -177,7 +182,9 @@ async def test_the_environment_block_leads_the_tail():
     )
     assert "工作区: /tmp/ws" in env
     assert "分支: feature/x" in env
-    assert "日期:" in env
+    assert _ISO_WITH_OFFSET.search(env), "the block carries the moment, not just the day"
+    # The moment includes the day; a second date line would be the same fact twice.
+    assert "日期:" not in env
     names = [name for name, _size in parts["reporter"].calls[-1]["tail_blocks"]]
     assert names[0] == "environment"
 
@@ -194,7 +201,7 @@ async def test_no_branch_line_when_git_says_nothing():
     )
     assert "工作区: /tmp/ws" in env
     assert "分支:" not in env
-    assert "日期:" in env
+    assert _ISO_WITH_OFFSET.search(env)
 
 
 async def test_an_empty_block_is_not_a_message():

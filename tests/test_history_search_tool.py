@@ -15,6 +15,7 @@ pinned without a model in the loop.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -27,6 +28,7 @@ from ai_coding.domain.message import ToolCallRef
 from ai_coding.domain.session import SessionData
 from ai_coding.security.approval import AutoApproveCallback
 from ai_coding.service.session_service import SessionService
+from ai_coding.tools import history_search_tool as history_search_module
 from ai_coding.tools.base import ToolContext
 from ai_coding.tools.history_search_tool import HistorySearchTool, search_history
 from ai_coding.tools.registry import ToolRegistry
@@ -234,3 +236,148 @@ class _AsksHistoryThenAnswers(ChatEngine):
                 reasoning=None,
             )
         return StepResult(text="done", finish_reason="stop", usage=None, reasoning=None)
+
+
+# ---- D-6: the second corpus -- what /compact replaced ----------------------
+#
+# ``transcripts/archive/`` is workspace-shared (ContextManager has no session
+# concept), so an archive hit is *not* "this conversation": every hit says which
+# file it came from. Output wording is English like every other tool's.
+
+_CANARY = "HOKKA-7734"
+
+
+def _archive(workspace, stem: str, body: str) -> None:
+    root = Path(workspace) / "transcripts" / "archive"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f"{stem}.md").write_text(body, encoding="utf-8")
+
+
+def _ws_ctx(messages: list, workspace) -> ToolContext:
+    from ai_coding.domain.task import TaskState
+
+    return ToolContext(task=TaskState(), session_messages=tuple(messages), workspace=str(workspace))
+
+
+@pytest.mark.asyncio
+async def test_it_finds_a_phrase_that_only_the_archive_holds(tmp_path) -> None:
+    """The gap D-6 closes: /compact replaces session.messages with a summary, so
+    before this the words were on disk and unreachable by the model. The body is
+    two lines because that is what a real one looks like -- a reader that split
+    on newlines would report half a sentence."""
+    _archive(tmp_path, "20261017-081203-a1b2c3d4", f"[user] 部署口令是 {_CANARY}\n第二行也要在")
+
+    result = await HistorySearchTool().execute(
+        {"query": "HOKKA"}, _ws_ctx([_message("assistant", "done")], tmp_path)
+    )
+
+    assert result.success is True
+    assert _CANARY in result.output
+    assert "第二行也要在" in result.output, "the whole record comes back, not its first line"
+
+
+@pytest.mark.asyncio
+async def test_the_hit_line_says_which_file_it_came_from(tmp_path) -> None:
+    _archive(tmp_path, "20261017-081203-a1b2c3d4", f"[user] 口令 {_CANARY}")
+
+    output = (
+        await HistorySearchTool().execute({"query": "HOKKA"}, _ws_ctx([], tmp_path))
+    ).output
+
+    assert any(line.startswith("20261017-081203-a1b2c3d4") for line in output.splitlines()), output
+
+
+@pytest.mark.asyncio
+async def test_a_session_hit_is_still_labelled_as_this_session(tmp_path) -> None:
+    """Source is not decoration: an archive belongs to the workspace and may
+    come from another conversation, so a hit that does not say which is worse
+    than no hit."""
+    output = (
+        await HistorySearchTool().execute(
+            {"query": "8080"}, _ws_ctx([_message("user", "端口是 8080")], tmp_path)
+        )
+    ).output
+
+    assert any(line.startswith("session") for line in output.splitlines()), output
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_archive_is_skipped_and_says_so(tmp_path) -> None:
+    """A megabyte of history in one file is not worth the read, and the model has
+    to be told the difference between 'not there' and 'not looked at'."""
+    _archive(tmp_path, "20261017-081203-a1b2c3d4", f"[user] {_CANARY}\n" + "x" * 1_100_000)
+    live = [_message("user", "端口是 8080")]
+
+    result = await HistorySearchTool().execute({"query": "HOKKA"}, _ws_ctx(live, tmp_path))
+
+    assert _CANARY not in result.output
+    assert "over size limit" in result.output, result.output
+
+
+@pytest.mark.asyncio
+async def test_the_newest_archives_win_the_slots(tmp_path) -> None:
+    """Filenames lead with a zero-padded stamp, so sorting descending by name is
+    sorting by time -- the newest conversation is the one being recalled."""
+    for index in range(24):
+        _archive(
+            tmp_path, f"202610{index + 1:02d}-000000-{index:08x}", f"[user] 第{index}条无关内容"
+        )
+    _archive(tmp_path, "20261231-235959-deadbeef", f"[user] 最新里的 {_CANARY}")
+
+    output = (
+        await HistorySearchTool().execute({"query": "HOKKA"}, _ws_ctx([], tmp_path))
+    ).output
+
+    assert _CANARY in output
+
+
+@pytest.mark.asyncio
+async def test_the_scan_reports_how_many_files_it_skipped(tmp_path, monkeypatch) -> None:
+    """Twenty files is the cap. Hitting it is fine; hiding it is not."""
+    for index in range(23):
+        _archive(tmp_path, f"20261017-0000{index:02d}-{index:08x}", f"[user] 第{index}条无关内容")
+
+    reads: list[str] = []
+    real = history_search_module.search_archived_text
+
+    def spy(text, stamp, query, *, limit):
+        reads.append(stamp)
+        return real(text, stamp, query, limit=limit)
+
+    monkeypatch.setattr(history_search_module, "search_archived_text", spy)
+
+    live = [_message("user", "端口是 8080")]
+    result = await HistorySearchTool().execute({"query": "HOKKA"}, _ws_ctx(live, tmp_path))
+
+    assert len(reads) <= 20, f"read {len(reads)} files, the cap is 20"
+    assert "23" in result.output, result.output
+
+
+@pytest.mark.asyncio
+async def test_session_hits_that_fill_the_limit_skip_the_archives(tmp_path) -> None:
+    """If this conversation already answers the question, reading other people's
+    history is cost for nothing -- but the model must be told that is why."""
+    _archive(tmp_path, "20261017-081203-a1b2c3d4", f"[user] 归档里的 {_CANARY}")
+    messages = [_message("user", f"8080 出现在第{n}条") for n in range(10)]
+
+    result = await HistorySearchTool().execute(
+        {"query": "8080", "limit": 3}, _ws_ctx(messages, tmp_path)
+    )
+
+    assert _CANARY not in result.output
+    assert "archives not scanned" in result.output, result.output
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_without_archives_behaves_exactly_as_before(tmp_path) -> None:
+    """Most sessions have never been compacted by hand. Nothing may change for
+    them, including the wording of a plain no-match."""
+    result = await HistorySearchTool().execute(
+        {"query": "HOKKA"}, _ws_ctx([_message("user", "端口是 8080")], tmp_path)
+    )
+
+    assert result.success is True
+    assert result.output == "no match for 'HOKKA' in 1 messages of this session", (
+        "no second corpus, no new words -- this is the output C-1 shipped"
+    )
+    assert result.data["matches"] == 0

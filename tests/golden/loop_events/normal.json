@@ -15,7 +15,7 @@
       "tail_blocks": [
         [
           "environment",
-          83
+          98
         ],
         [
           "task",
@@ -26,7 +26,7 @@
           57
         ]
       ],
-      "estimated_tokens": 111
+      "estimated_tokens": 115
     },
     {
       "type": "ModelStepFinished",

@@ -23,7 +23,7 @@ from pathlib import Path
 
 from ai_coding.config.models import AIConfig, AppConfig, resolve_context_window
 from ai_coding.core.compaction import Compactor
-from ai_coding.core.context_compression import ContextManager
+from ai_coding.core.context_compression import ContextManager, iter_archived_records
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.model_config import ModelConfig
 from ai_coding.domain.session import SessionData
@@ -278,6 +278,103 @@ def test_the_archive_names_the_turn_it_was_taken_from(tmp_path):
 
     names = [p.name for p in (tmp_path / "transcripts" / "archive").glob("*.md")]
     assert names and names[-1][:8].isdigit(), f"expected a leading date stamp, got {names}"
+
+
+# ---- 5b. /compact replaces the session; that makes it the lossy path -------
+
+
+def _session_with(messages) -> SessionData:
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.messages = messages
+    return session
+
+
+#: Below ``snip_middle``'s threshold (max_messages=50), so the snip stage drops
+#: nothing and its archive -- which has worked since r5 -- never runs. This is
+#: the shape a short live session has, and the shape that lost its transcript.
+def _short_session_with_a_canary() -> list[ChatMessage]:
+    messages = _messages(10)
+    messages[3] = ChatMessage(
+        role="user", content=f"部署口令是 {SECRET}，不要写进日志", timestamp=""
+    )
+    return messages
+
+
+def test_a_manual_compaction_leaves_the_transcript_it_replaced_on_disk(tmp_path):
+    """The budget path never mutates the session, so what it drops survives in
+    ``session.json`` and the archive is a convenience. ``/compact`` is different:
+    ``session.messages = result`` overwrites the file. On a long history the
+    snip stage happens to archive first, which is why this went unnoticed -- on
+    a short one (below max_messages) nothing was archived and the only copy of
+    those words was the memory of a process about to exit. Measured live before
+    the fix: a 14-message session, one ``/compact``, ``transcripts/archive/``
+    still empty."""
+    manager = _manager(summarizer=_collector([]), root=tmp_path)
+    session = _session_with(_short_session_with_a_canary())
+    compactor = Compactor(manager, emit=lambda event: None)
+
+    report = asyncio.run(compactor.compact_now(session, timeout=10.0))
+
+    assert report["after"] < report["messages"], "the rewrite must actually have happened"
+    assert not any(SECRET in (m.content or "") for m in session.messages), (
+        "precondition: the words are gone from the session itself"
+    )
+    archives = sorted((tmp_path / "transcripts" / "archive").glob("*.md"))
+    assert archives, "what the rewrite removed must land somewhere a tool can read"
+    assert any(SECRET in p.read_text(encoding="utf-8") for p in archives)
+
+
+def test_a_manual_compaction_that_changes_nothing_writes_no_archive(tmp_path):
+    """The same rule the untouched-history archive test states, on this path: a
+    file per ``/compact`` that found nothing to do would fill the directory with
+    copies of the live transcript."""
+    manager = _manager(summarizer=None, root=tmp_path, max_messages=400)
+    session = _session_with(_messages(10))
+
+    report = asyncio.run(Compactor(manager, emit=lambda e: None).compact_now(session, timeout=10.0))
+
+    assert report["after"] == report["messages"], "precondition: nothing was removed"
+    assert not (tmp_path / "transcripts" / "archive").exists()
+
+
+def test_an_unwritable_archive_never_fails_a_compaction(tmp_path):
+    """Best-effort means best-effort: ``/compact`` is a REPL command, and a
+    transcript nobody can keep must not cost the user their command."""
+    manager = _manager(summarizer=_collector([]), root=tmp_path)
+    (tmp_path / "transcripts").write_text("i am a file, not a directory", encoding="utf-8")
+    session = _session_with(_with_a_canary())
+
+    report = asyncio.run(Compactor(manager, emit=lambda e: None).compact_now(session, timeout=10.0))
+
+    assert report["after"] < report["messages"], "the compaction itself must still have run"
+
+
+# ---- 5c. the archive is a file something has to be able to read back -------
+
+
+def test_a_archived_record_keeps_the_body_lines_that_follow_it():
+    """``_joined_history_text`` writes ``[role] body`` and a body may span lines.
+    A reader that split on every line would hand back half a sentence -- and half
+    a sentence is what a search tool must not report as what was said."""
+    text = "[user] 部署口令是 HOKKA-7734\n第二行也要在\n[assistant] 收到"
+
+    records = list(iter_archived_records(text))
+
+    assert records == [
+        ("user", "部署口令是 HOKKA-7734\n第二行也要在"),
+        ("assistant", "收到"),
+    ]
+
+
+def test_a_body_line_that_looks_like_a_role_head_starts_a_new_record():
+    """The known limit of the format, pinned as a test rather than a comment: the
+    archive escapes nothing, so a body line beginning ``[user] `` opens a new
+    record. Callers are told which one this is, and the alternative (inventing an
+    escaping scheme for a file that already existed) would break every archive
+    written before it."""
+    text = "[user] 看这个:\n[user] 其实是另一条"
+
+    assert list(iter_archived_records(text)) == [("user", "看这个:"), ("user", "其实是另一条")]
 
 
 def test_the_compaction_boundary_survives_being_written_to_disk():

@@ -16,7 +16,7 @@ import inspect
 import math
 import re
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -387,6 +387,36 @@ def _joined_history_text(messages: list[ChatMessage]) -> str:
     return "\n".join(parts)
 
 
+#: The head of one archived record -- exactly what :func:`_joined_history_text`
+#: writes, which is why this lives beside it rather than beside its reader.
+_ARCHIVE_HEAD = re.compile(r"^\[(user|assistant|tool|system)\] ?(.*)$")
+
+
+def iter_archived_records(text: str) -> Iterator[tuple[str, str]]:
+    """Read back what :meth:`ContextManager.archive_transcript` wrote, as
+    ``(role, body)`` in the order it was written.
+
+    The inverse of :func:`_joined_history_text`, and lossy in the one place the
+    format is lossy: nothing is escaped, so a body line that itself starts with
+    ``[user] `` opens a new record. Bodies may span lines -- the writer joins
+    them with newlines -- so any line that is not a head continues the record
+    above it.
+    """
+    role: str | None = None
+    body: list[str] = []
+    for line in text.splitlines():
+        head = _ARCHIVE_HEAD.match(line)
+        if head:
+            if role is not None:
+                yield role, "\n".join(body).strip()
+            role, first = head.group(1), head.group(2)
+            body = [first]
+        elif role is not None:
+            body.append(line)
+    if role is not None:
+        yield role, "\n".join(body).strip()
+
+
 def split_checkpoint(
     messages: Sequence[ChatMessage],
 ) -> tuple[str, list[ChatMessage]]:
@@ -536,7 +566,7 @@ class ContextManager:
         snipped = snip_middle(out, self._max_messages, self._keep_head, self._keep_tail)
         dropped = len(snipped) < len(out)
         if dropped:
-            self._archive_dropped_history(out)
+            self.archive_transcript(out)
         out = snipped
         out = placeholder_old_results(
             out,
@@ -798,15 +828,21 @@ class ContextManager:
         tail = [message for message in tail if not _is_snip_placeholder(message)]
         return [note, *tail]
 
-    def _archive_dropped_history(self, messages: list[ChatMessage]) -> None:
-        """The messages a compaction is about to remove, kept where a human can read them.
+    def archive_transcript(self, messages: list[ChatMessage]) -> None:
+        """The messages a compaction is about to remove, kept where a human -- and
+        ``history_search`` -- can read them.
 
         Compression answers "what does the model still see". It does not answer
         "what did we say", and the transcript pane goes on rendering the
-        compacted history — so without this the only record of those messages is
-        a content-hashed audit file nobody can locate. The file is dated so the
-        newest is obvious on disk, and it lives outside the context: the model
-        never reads it unless something asks it to.
+        compacted history — so without this the only record of those messages
+        is a content-hashed audit file nobody can locate. The file is dated so
+        the newest is obvious on disk, and it lives outside the context: the
+        model never reads it unless something asks it to.
+
+        Public because ``/compact`` has the same need from the other side. The
+        budget path drops messages from the *model's view* and leaves the
+        session file whole; ``compact_now`` replaces ``session.messages`` with a
+        summary, and this is the last moment the original words exist anywhere.
         """
         text = _joined_history_text(messages)
         try:
@@ -839,6 +875,7 @@ __all__ = [
     "compaction_ceiling",
     "elide_and_persist",
     "estimate_tokens",
+    "iter_archived_records",
     "previous_result_note",
     "snip_middle",
     "split_checkpoint",
