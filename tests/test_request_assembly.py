@@ -325,3 +325,40 @@ async def test_the_mcp_catalog_rides_the_volatile_tail():
     # what ends up in ContextAssembled — so the trace shows what the catalog cost.
     block = ("mcp_catalog", len("fs\n  read_file: reads"))
     assert block in parts["reporter"].calls[-1]["tail_blocks"]
+
+
+# ---- D-7: a recall hint, only where there is something to recall -------------
+
+
+def _env_of(assembled) -> str:
+    return next(
+        m.content or ""
+        for m in assembled.request
+        if (m.content or "").startswith("<environment>")
+    )
+
+
+async def test_no_recall_hint_in_a_session_that_was_never_compacted():
+    """The hint costs bytes every iteration; a session whose history was never
+    rewritten has nothing to recall, so it pays nothing."""
+    assembler, _parts = _assembler(workspace="/tmp/ws")
+
+    assembled = await _assemble(assembler, session=_session([_digest()]))
+
+    assert "history_search" not in _env_of(assembled)
+
+
+async def test_a_compacted_session_is_told_where_its_words_went():
+    """D-7B: after a compaction replaced the transcript with a summary, the
+    model is told -- once per request, in the volatile tail -- that exact
+    wording lives behind history_search. The condition is last_compacted_turn,
+    which the funnel already maintains; no new state is invented for this."""
+    assembler, _parts = _assembler(workspace="/tmp/ws")
+    session = _session([_digest()])
+    session.last_compacted_turn = 3
+
+    assembled = await _assemble(assembler, session=session)
+
+    env = _env_of(assembled)
+    assert "history_search" in env
+    assert "压缩" in env, "the line must say what happened, not just name a tool"

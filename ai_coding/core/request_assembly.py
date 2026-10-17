@@ -306,6 +306,15 @@ class RequestAssembler:
         if branch:
             lines.append(f"分支: {branch}")
         lines.append(f"时间: {now_local()}")
+        # D-7: one line, and only where there is something to recall.  A session
+        # whose history was never rewritten pays nothing for this; a compacted
+        # one is told where its exact wording went, every request, in the
+        # volatile tail -- never persisted, never in the history.
+        if getattr(session, "last_compacted_turn", 0):
+            lines.append(
+                "历史: 早期对话已被压缩为摘要；需要原文措辞、路径或数字时，"
+                "用 history_search 取回。"
+            )
         return "<environment>\n" + "\n".join(lines) + "\n</environment>"
 
     def _referenced_files_block(self, user_input: str) -> str:
