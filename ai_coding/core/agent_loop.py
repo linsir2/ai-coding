@@ -1001,7 +1001,15 @@ class AgentLoop:
                 session.task = TaskState(
                     goal=anchor.content if anchor and anchor.content else ""
                 )
-        elif append_user and not session.task.items and session.mode != "plan":
+        elif (
+            append_user
+            and not session.task.items
+            and session.mode != "plan"
+            # D-4: an armed task owns its goal field -- a goal round's prompt
+            # is an instruction *about* the goal, and letting it overwrite the
+            # objective would erase what every later round is measured against.
+            and not getattr(session.task, "armed", False)
+        ):
             # The bare goal tracks the turn's own instruction.  Measured
             # (session d68080eb): the opening "你好" froze here and rode every
             # later request's <task-state> tail block; after a long tool chain
@@ -1424,7 +1432,10 @@ class AgentLoop:
             ),
         )
         self.closer.write_back(session, outcomes)
-        if any(item.call.name == "todo_write" for item in outcomes):
+        if any(
+            item.call.name in ("todo_write", "start_goal", "update_goal")
+            for item in outcomes
+        ):
             self._emit(TaskUpdated(task=task))
         self.closer.checkpoint(session, index)
         return outcomes

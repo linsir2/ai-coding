@@ -24,6 +24,7 @@ HELP_TEXT = (
     "  /resume [id]    list or resume saved sessions\n"
     "  /permissions   view or change approval policy\n"
     "  /todo           show current task list\n"
+    "  /goal [obj|off] start/stop a self-driving goal (esp. /goal off to stop)\n"
     "  /tasks          list background sub-agent runs\n"
     "  /skills         list available skills\n"
     "  /review        review current changes\n"
@@ -225,6 +226,8 @@ async def handle_input(
         return REPLAction.CONTINUE, session
     if cmd.name == "plan":
         return await _handle_plan(loop, session, sessions, cmd.raw, console, observer)
+    if cmd.name == "goal":
+        return await _handle_goal(loop, session, sessions, cmd.raw, console, observer)
     if cmd.name == "readonly":
         return _handle_readonly(loop, session, sessions, cmd.raw, console)
     if cmd.name == "review":
@@ -267,6 +270,68 @@ def _save_session(sessions: Any, session: Any) -> None:
     save = getattr(sessions, "save", None)
     if save is not None:
         save(session)
+
+
+async def _handle_goal(
+    loop: Any, session: Any, sessions: Any, raw: str,
+    console: ConsoleSink, observer: Any,
+) -> tuple[REPLAction, Any]:
+    """``/goal [objective|off]`` — the human entry to a self-driving goal (D-4).
+
+    ``/goal <objective>`` is the human spelling of ``start_goal``: it arms the
+    same episode (one place: ``TaskState.arm_goal``) and drives the same
+    ``GoalRunner`` — no planning gate, so it works even when the model never
+    proposed one.  ``off`` disarms (the same seam as esc); a bare ``/goal``
+    reports status.  The run blocks here like ``/plan run`` does, so a command
+    turn is one envelope with a single end.
+    """
+    from ai_coding.core.goal_runner import GoalRunner
+    from ai_coding.domain.task import TaskState
+
+    task = getattr(session, "task", None)
+    rest = raw[len("/goal"):].strip()
+
+    if rest.lower() == "off":
+        if task is not None and getattr(task, "armed", False):
+            task.armed = False
+            _save_session(sessions, session)
+            console.info(
+                "[goal] 已停止；目标与清单留在会话里（再立案：/goal <objective>）。"
+            )
+        else:
+            console.info("[goal] 当前没有在跑的任务。")
+        return REPLAction.CONTINUE, session
+
+    if not rest:
+        if task is None or not (task.goal or task.armed):
+            console.info("[goal] 未立案。用法：/goal <objective> 立案；/goal off 停止。")
+        else:
+            console.info(
+                f"[goal] goal={task.goal!r} · armed={task.armed} · "
+                f"profile={task.armed_profile or '-'} · rounds={task.rounds_run} · "
+                f"phase={task.goal_phase or '-'}"
+            )
+        return REPLAction.CONTINUE, session
+
+    if session.mode == "plan" or getattr(session, "readonly", False):
+        console.info("[goal] 计划模式（只读）中不能立案——先 /plan off 再试。")
+        return REPLAction.CONTINUE, session
+    if task is not None and getattr(task, "armed", False):
+        console.info(
+            f"[goal] 已有在跑的任务（profile={task.armed_profile or '?'}）；"
+            "先停止（esc / /goal off）。"
+        )
+        return REPLAction.CONTINUE, session
+    if task is None:
+        session.task = TaskState()
+        task = session.task
+    task.arm_goal(rest)
+    _save_session(sessions, session)
+    console.info(f"[goal] 已立案：{rest}（每轮自动续跑；停止：esc / /goal off）。")
+    await GoalRunner(loop).run(
+        session, console, on_delta=console.delta, observer=observer
+    )
+    return REPLAction.CONTINUE, session
 
 
 async def _handle_plan(

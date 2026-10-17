@@ -2025,3 +2025,119 @@ async def test_promote_with_no_budget_left_only_flips(ipc, tmp_path):
     assert result["ok"] is True and result["woke"] is False
     rows = client.request("session.inbox", {"op": "list"})["rows"]
     assert [row["target"] for row in rows if row["id"] == row_id] == ["next-step"]
+
+
+@pytest.mark.asyncio
+async def test_an_armed_goal_is_driven_after_the_turn_that_armed_it(ipc):
+    """D-4: ``start_goal`` arms mid-turn; the run starts at that turn's boundary.
+
+    The plan's approval path dispatches ``/plan run`` from the frontend (a UI
+    event); a model's own arming has no UI event, so the dispatch lives in the
+    prompt turn's wrapper.  Pinned here: the goal round opens on the *main*
+    session as a ``[goal] 第 1/…`` turn, the whole run is one envelope (inner
+    turn -> ``turn.step``, exactly one terminal ``turn.finished``), and the
+    run disarms on its way out."""
+    world, _service, client = ipc
+    from ai_coding.domain.task import TaskState
+
+    world.loop.closer = _SavingCloser(world.sessions)
+    session_id = client.request("session.create", {"title": "goal"})["id"]
+    # Arm on disk first, then load: the live object is the loaded one (the
+    # same order test_interrupt_disarms_an_armed_task uses).
+    session = world.sessions.load(session_id)
+    session.task = TaskState(goal="迁移 X")
+    session.task.armed = True
+    session.task.armed_profile = "goal"
+    world.sessions.save(session)
+    client.request("session.load", {"id": session_id})
+
+    def finish(observer, _delta) -> None:
+        observer.on_event(
+            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="done"))
+        )
+
+    world.loop.script = [finish]
+    client.request("session.prompt", {"text": "把 jest 迁到 vitest", "id": session_id})
+
+    assert await client.wait_for(
+        lambda: any(c["text"].startswith("[goal] 第 1/") for c in world.loop.calls)
+    )
+    assert await client.wait_for(client.turn_finished.is_set)
+    texts = [call["text"] for call in world.loop.calls]
+    assert texts[0] == "把 jest 迁到 vitest"
+    assert texts[1].startswith("[goal] 第 1/20 轮")
+    assert "迁移 X" in texts[1]
+    # Every exit disarms; a finished goal with no items and no phase claim
+    # evaporates from the file (the bare-goal noise rule) -- read it defensively.
+    live = world.sessions.load(session_id)
+    assert getattr(live.task, "armed", False) is False
+
+
+@pytest.mark.asyncio
+async def test_boot_resume_drives_a_goal_task_and_the_note_names_goal(ipc):
+    """D-4: the boot scan recognises a ``goal``-armed task; the note says what
+    was interrupted, the GoalRunner opens its round, and the breaker field is
+    the same one the plan path uses."""
+    world, _service, client = ipc
+    from ai_coding.domain.task import TaskState
+
+    armed = world.sessions.create(title="goal")
+    task = TaskState(goal="迁移 X")
+    task.armed = True
+    task.armed_profile = "goal"
+    armed.task = task
+    world.sessions.save(armed)
+    world.pending_resume = world.sessions.load(armed.session_id)
+    world.loop.script = [
+        lambda obs, _delta: obs.on_event(
+            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="done"))
+        )
+    ]
+    world.loop.closer = _SavingCloser(world.sessions)
+
+    hello = client.request("initialize")
+
+    assert hello["sessionId"] == armed.session_id
+    assert hello.get("resumed") is True and hello.get("resuming") is True
+    note = str(hello.get("resumeNote") or "")
+    assert "[goal]" in note and "目标任务" in note
+    assert await client.wait_for(
+        lambda: any(c["text"].startswith("[goal] 第 1/") for c in world.loop.calls)
+    )
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert await client.wait_for(
+        lambda: getattr(world.sessions.load(armed.session_id).task, "armed", False)
+        is False
+    )
+    # The itemless episode evaporates from the file once it stops (no items,
+    # no armed, no phase claim -> the bare-goal noise rule); its trace is the
+    # resume note and the round prompts in the transcript, by design.
+    assert world.sessions.load(armed.session_id).task is None
+
+
+@pytest.mark.asyncio
+async def test_a_goal_breaker_resume_names_the_goal_and_starts_no_run(ipc):
+    """D-4: the breaker branch is shared with the plan path; what differs for
+    goals is the note (it must name the thing it paused) -- and, like the plan
+    path, it must start nothing (a shell waiting on a run that never comes
+    would sit busy forever)."""
+    world, _service, client = ipc
+    from ai_coding.domain.task import TaskState
+
+    armed = world.sessions.create(title="goal")
+    task = TaskState(goal="迁移 X")
+    task.armed = True
+    task.armed_profile = "goal"
+    task.resume_count = 5
+    armed.task = task
+    world.sessions.save(armed)
+    world.pending_resume = world.sessions.load(armed.session_id)
+
+    hello = client.request("initialize")
+
+    assert hello.get("resumed") is True and hello.get("resuming") is False
+    note = str(hello.get("resumeNote") or "")
+    assert "[goal]" in note and "目标任务" in note and "上限" in note
+    assert world.loop.calls == []  # nothing started
+    # The breaker disarmed it; an itemless episode then evaporates by design.
+    assert getattr(world.sessions.load(armed.session_id).task, "armed", False) is False

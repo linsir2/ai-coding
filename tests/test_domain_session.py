@@ -349,3 +349,29 @@ def test_inbox_item_from_dict_rejects_bad_rows():
     assert InboxItem.from_dict({"id": "a1", "text": "x", "target": "someday"}) is None
     row = InboxItem.from_dict({"id": "a1", "text": "x"})
     assert row is not None and row.target == "next-turn"
+
+
+def test_an_armed_goal_without_items_still_reaches_the_file():
+    """D-4: a goal is normal without a todo list, and ``armed`` is the boot
+    scan's whole input (world.find_armed_session reads the raw key).  The
+    "bare goal is noise" rule must not swallow it."""
+    from ai_coding.domain.task import TaskState
+
+    session = SessionData(
+        session_id="s1", title="t", created_time="", last_access_time="",
+        task=TaskState(goal="迁移 X"),
+    )
+    assert "task" not in session.to_dict()  # a bare goal stays noise
+
+    session.task.armed = True
+    session.task.armed_profile = "goal"
+    data = session.to_dict()
+    assert data["task"]["armed"] is True
+    assert data["task"]["goal"] == "迁移 X"
+    reloaded = SessionData.from_dict(data)
+    assert reloaded.task is not None and reloaded.task.armed is True
+
+    # A phase claim is durable for the same reason (the report/UI read it back).
+    session.task.armed = False
+    session.task.goal_phase = "complete"
+    assert session.to_dict()["task"]["goalPhase"] == "complete"

@@ -171,3 +171,13 @@ def test_job_output_is_allowed_without_a_confirmation():
     gate = _gate()
 
     assert gate.check("job_output", {"job_id": "job_1"}) == PermissionDecision.ALLOW
+
+
+def test_start_goal_and_update_goal_are_allowed_without_a_confirmation():
+    """D-4 (Q2 拍板): the model's own taskification is an orchestration switch
+    on this session; the tool-level guards (readonly / already-armed / blocked
+    threshold) are the authority rule.  WARN would ask the user to approve the
+    model's judgement about its own work."""
+    gate = PermissionGate()
+    assert gate.check("start_goal", {"objective": "x"}) == PermissionDecision.ALLOW
+    assert gate.check("update_goal", {"status": "complete"}) == PermissionDecision.ALLOW

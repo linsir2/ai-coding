@@ -211,6 +211,16 @@ class PermissionGate:
             # card arrive behind an "unknown tool 'present_plan' requires
             # confirmation" prompt: two approvals for one plan (tmux, measured).
             "present_plan",
+            # D-4: starting/updating this session's own goal — an orchestration
+            # switch with the blast radius of the session itself (like job_*
+            # above): the armed task runs on this workspace's loop, the driver
+            # re-checks the disarm at every round boundary, and Esc always
+            # stops it.  WARN would put an approval panel in front of the
+            # model's own "this needs a goal" judgement, which is the one
+            # moment the user does not need to be asked (Q2 拍板: 非自主轮即可
+            # — the tool-level guards are the authority rule).
+            "start_goal",
+            "update_goal",
             # M2: the MCP dispatcher is a vessel, not an action — what it carries
             # is authorized as ``server__tool`` (BaseTool.permission_name), which
             # is what the gate actually judges.  The only calls that reach it

@@ -516,10 +516,15 @@ class SessionData:
             "lastAccessTime": self.last_access_time,
             "messages": [_message_to_dict(m) for m in self.messages],
         }
-        # Only persist the task list when it actually holds items: a bare goal is
-        # already recoverable from the first user message, so writing it would be
-        # noise in every session file.
-        if self.task is not None and self.task.items:
+        # Persist the task when it holds items *or* carries orchestration
+        # state.  A bare goal is already recoverable from the first user
+        # message so writing it would be noise -- but an armed task (or a
+        # goal-phase claim) is the boot scan's whole input (D-4 found this:
+        # a goal without items is normal, and ``find_armed_session`` reads
+        # these raw keys), not noise.
+        if self.task is not None and (
+            self.task.items or self.task.armed or self.task.goal_phase
+        ):
             data["task"] = self.task.to_dict()
         if self.harvested_messages:
             data["harvestedMessages"] = self.harvested_messages

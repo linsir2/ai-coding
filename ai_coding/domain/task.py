@@ -125,8 +125,28 @@ class TaskState:
     rounds_run: int = 0
     #: Boot auto-resumes spent; the breaker disarms past the cap.
     resume_count: int = 0
+    #: D-4: the model's goal-state claim while a ``goal``-profile task runs:
+    #: "" (pursuing) | "complete" | "blocked" (``update_goal``).  The goal
+    #: driver reads it after each round and stops on a claim; written only when
+    #: non-empty (same discipline as every optional key).
+    goal_phase: str = ""
 
     # ---- mutations --------------------------------------------------------
+
+    def arm_goal(self, objective: str) -> None:
+        """D-4: the one place a goal episode starts (``start_goal`` / ``/goal``).
+
+        A new episode resets the counters: the blocked threshold and the boot
+        breaker both count *within* an episode, and an earlier episode's
+        numbers are not evidence about this one.  The item list is kept --
+        it is the model's own working context, not the episode's identity.
+        """
+        self.goal = objective
+        self.goal_phase = ""
+        self.rounds_run = 0
+        self.resume_count = 0
+        self.armed = True
+        self.armed_profile = "goal"
 
     def add(
         self,
@@ -353,6 +373,8 @@ class TaskState:
             data["roundsRun"] = int(self.rounds_run)
         if self.resume_count:
             data["resumeCount"] = int(self.resume_count)
+        if self.goal_phase:
+            data["goalPhase"] = self.goal_phase
         return data
 
     @classmethod
@@ -370,6 +392,7 @@ class TaskState:
             armed_profile=str(data.get("armedProfile", "") or ""),
             rounds_run=int(data.get("roundsRun", 0) or 0),
             resume_count=int(data.get("resumeCount", 0) or 0),
+            goal_phase=str(data.get("goalPhase", "") or ""),
         )
 
 

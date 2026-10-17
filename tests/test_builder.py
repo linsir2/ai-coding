@@ -102,3 +102,18 @@ def test_r9_the_dependency_gate_is_on_by_default_and_configurable(tmp_path):
     off = _cfg(str(tmp_path))
     off.ai.enforce_dependencies = False
     assert build_tool_registry(off, str(tmp_path), None).get("todo_write")._enforce is False
+
+
+def test_goal_tools_are_main_stack_only(tmp_path):
+    """D-4: the goal run is dispatched on the MAIN session; a sub-agent stack
+    gets no start_goal/update_goal (arming a throwaway session's task would
+    drive nothing)."""
+    main = build_tool_registry(_cfg(str(tmp_path)), str(tmp_path), None)
+    names = set(main.list_names())
+    assert {"start_goal", "update_goal"} <= names
+
+    sub = build_tool_registry(
+        _cfg(str(tmp_path)), str(tmp_path), None, include_subagent=False
+    )
+    sub_names = set(sub.list_names())
+    assert "start_goal" not in sub_names and "update_goal" not in sub_names

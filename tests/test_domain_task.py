@@ -268,3 +268,21 @@ def test_render_display_strips_only_the_envelope():
     assert "<task-state>" not in shown
     assert "[ ] 1. 读通 agent_loop.py" in shown
     assert "[>] 2. 重写循环" in shown
+
+
+def test_goal_phase_round_trips_only_when_set():
+    """D-4: the model's completion/blocked claim rides the task file.
+
+    Same optional-key discipline as armed/roundsRun: empty means the key is
+    not written, so every pre-D-4 session file reads back byte-identically.
+    """
+    task = TaskState(goal="把 jest 迁到 vitest")
+    task.add("步骤")
+    task.goal_phase = "complete"
+
+    data = task.to_dict()
+    assert data["goalPhase"] == "complete"
+    assert TaskState.from_dict(data).goal_phase == "complete"
+
+    assert "goalPhase" not in TaskState(goal="g").to_dict()
+    assert TaskState.from_dict({"goal": "g", "items": []}).goal_phase == ""

@@ -1417,3 +1417,47 @@ async def test_a_writable_turn_keeps_the_full_tool_surface(tmp_path):
 
     names = {tool["function"]["name"] for tool in _last_request(engine)["tools"]}
     assert "bash" in names
+
+
+@pytest.mark.asyncio
+async def test_start_goal_emits_task_updated_and_arms(tmp_path):
+    """D-4: starting a goal is a task mutation like todo_write -- the panel
+    hears about it the same way, and the loop carries the arm to disk with
+    the turn's own close (no separate save path)."""
+    from ai_coding.tools.goal_tools import StartGoalTool
+
+    engine = ScriptedEngine(
+        [
+            _calls(_ref("c1", "start_goal", '{"objective":"迁移 X"}')),
+            _text("done"),
+        ]
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    observer = RecordingObserver()
+    loop = _loop(engine, sessions, _registry(StartGoalTool()), observer=observer)
+
+    session = sessions.create()
+    await loop.process_input(session, "go")
+
+    updated = observer.of_type(TaskUpdated)
+    assert len(updated) == 1
+    assert session.task.armed is True
+    assert session.task.armed_profile == "goal"
+    assert session.task.goal == "迁移 X"
+
+
+@pytest.mark.asyncio
+async def test_an_armed_goal_keeps_its_objective_through_a_turn(tmp_path):
+    """D-4: the bare-goal tracker ("goal = this turn's instruction") must not
+    steal the objective while an armed task owns the goal field -- a goal
+    round's prompt is an instruction *about* the goal, not a new goal."""
+    task = TaskState(goal="迁移 X", armed=True, armed_profile="goal")
+    engine = ScriptedEngine([_text("done")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+    session = sessions.create()
+    session.task = task
+
+    await loop.process_input(session, "[goal] 第 1/20 轮 · 目标：迁移 X")
+
+    assert session.task.goal == "迁移 X"

@@ -190,6 +190,16 @@ def _assemble_registry(
         registry.register(PresentPlanTool(user_prompt))
 
     if include_subagent:
+        # D-4: the model's own taskification (start_goal / update_goal).  Main
+        # session only, like present_plan: the goal run is dispatched by the
+        # server on the MAIN session, and a sub-agent arming its throwaway
+        # session's task would drive nothing.
+        from ai_coding.tools.goal_tools import StartGoalTool, UpdateGoalTool
+
+        registry.register(StartGoalTool())
+        registry.register(UpdateGoalTool())
+
+    if include_subagent:
         # C-1: read back what compaction dropped. Main-session only -- a
         # sub-agent runs on a throwaway SessionData, so its transcript is the
         # three messages it just produced (see test_builder).

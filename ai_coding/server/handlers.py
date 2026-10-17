@@ -309,7 +309,7 @@ def make_handlers(
             if (
                 candidate_task is not None
                 and getattr(candidate_task, "armed", False)
-                and getattr(candidate_task, "armed_profile", "") == "plan"
+                and getattr(candidate_task, "armed_profile", "") in ("plan", "goal")
             ):
                 boot_session = candidate
         if boot_session is not None:
@@ -317,19 +317,25 @@ def make_handlers(
             state.session = session
             state.session_id = session.session_id
             task = session.task
+            # D-4: the note names what was actually interrupted; "plan" and
+            # "goal" are different tasks to the person reading it.
+            profile = str(getattr(task, "armed_profile", "") or "plan")
+            label = "目标" if profile == "goal" else "计划"
             if int(getattr(task, "resume_count", 0) or 0) >= _MAX_BOOT_RESUMES:
                 task.armed = False
                 _persist_session(world, session)
                 resume_note = (
-                    f"[plan] 自动续跑已达上限（{_MAX_BOOT_RESUMES} 次），"
-                    "任务已暂停；检查后继续对话或重新进入 Plan 模式。"
+                    f"[{profile}] 自动续跑已达上限（{_MAX_BOOT_RESUMES} 次），"
+                    f"{label}任务已暂停；检查后继续对话"
+                    + ("或重新立案（/goal 或让模型 start_goal）。" if profile == "goal"
+                       else "或重新进入 Plan 模式。")
                 )
             else:
                 # 可达+有痕批次: the note rides the initialize response, not a
                 # console.line -- events emitted while the shell is still on
                 # Home are lost, and this one must be seen.
                 resume_note = (
-                    "[plan] 应用重启：自动续跑未完成的计划任务"
+                    f"[{profile}] 应用重启：自动续跑未完成的{label}任务"
                     f"（第 {int(getattr(task, 'resume_count', 0) or 0) + 1} 次）。"
                     "执行过程会实时显示在本会话；停止请按 esc。"
                 )
@@ -505,21 +511,46 @@ def make_handlers(
         )
 
     def _launch_boot_resume(session: Any) -> None:
-        """Resume an armed task after a restart (11-spec §7.2): the interrupted
-        round first (when one is open), then the plan run itself.
+        _launch_armed_run(session, boot=True)
 
-        The run goes through ``PlanRunner.run``, not the driver directly --
-        that entry carries the whole armed lifecycle (arm / roundsRun /
-        disarm persistence), which a bare driver call would bypass.
+    def _maybe_launch_goal_run(session: Any) -> None:
+        """D-4: a ``start_goal`` call armed the task mid-turn; its run starts now.
+
+        The plan's approval path dispatches ``/plan run`` from the frontend
+        (the approval click is a UI event); a model's own arming has no UI
+        event, so the dispatch lives at this turn boundary.  Esc disarms
+        before cancelling (``_interrupt_running_turns``), so an interrupted
+        arming turn never starts a run, and a bare user turn after a stopped
+        goal re-arms nothing by itself.
+        """
+        task = getattr(session, "task", None)
+        if task is None or not getattr(task, "armed", False):
+            return
+        if str(getattr(task, "armed_profile", "") or "") != "goal":
+            return
+        if bridge.command_run:
+            return
+        _launch_armed_run(session, boot=False)
+
+    def _launch_armed_run(session: Any, *, boot: bool) -> None:
+        """Drive an armed task with its profile's runner (11-spec §7.2, D-4).
+
+        ``boot=True`` is the restart path: the interrupted round first (when
+        one is open), the resume counted before anything runs.  ``boot=False``
+        is the post-turn dispatch for a goal the model just started (a
+        ``start_goal`` call arms mid-turn; its run starts after that turn).
+
+        The run goes through ``PlanRunner.run`` / ``GoalRunner.run``, not the
+        driver directly -- those entries carry the whole armed lifecycle (arm /
+        roundsRun / disarm persistence), which a bare driver call would
+        bypass.
         """
 
         async def run_resume() -> None:
-            from ai_coding.core.plan_runner import PlanRunner
-
             task = getattr(session, "task", None)
             # Count BEFORE resuming: if this resume crashes too, the count is
             # already on disk and the breaker keeps converging.
-            if task is not None:
+            if boot and task is not None:
                 task.resume_count = int(getattr(task, "resume_count", 0) or 0) + 1
                 _persist_session(world, session)
             history_before = len(getattr(session, "messages", ()) or ())
@@ -537,14 +568,27 @@ def make_handlers(
             bridge.command_run = True
             status, reason = "completed", ""
             try:
-                if session.open_turn is not None:
+                if boot and session.open_turn is not None:
                     await world.loop.resume_turn(
                         session, on_delta=bridge.on_delta, observer=bridge
                     )
                 if getattr(task, "armed", False):
-                    await PlanRunner(world.loop).run(
-                        session, console, on_delta=bridge.on_delta, observer=bridge
-                    )
+                    # D-4: the profile decides the runner.  "plan" is the
+                    # human-approved plan run; "goal" is the model's own
+                    # objective, one ordinary turn per round.
+                    profile = str(getattr(task, "armed_profile", "") or "plan")
+                    if profile == "goal":
+                        from ai_coding.core.goal_runner import GoalRunner
+
+                        await GoalRunner(world.loop).run(
+                            session, console, on_delta=bridge.on_delta, observer=bridge
+                        )
+                    else:
+                        from ai_coding.core.plan_runner import PlanRunner
+
+                        await PlanRunner(world.loop).run(
+                            session, console, on_delta=bridge.on_delta, observer=bridge
+                        )
             except asyncio.CancelledError:
                 status, reason = "aborted", "interrupted"
             except Exception as exc:  # noqa: BLE001 — a bug must not hang the UI
@@ -609,6 +653,8 @@ def make_handlers(
                 # doubles that predate r17/T5 stay callable for text turns
                 **({"images": tuple(images)} if images else {}),
             )
+            # D-4: the model may have armed a goal in this turn (start_goal).
+            _maybe_launch_goal_run(session)
 
         turn_id = _launch_turn(run_turn)
         # ``rejected`` rides the response the client already awaits, so no new
