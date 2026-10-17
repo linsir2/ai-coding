@@ -41,7 +41,6 @@ class ProjectInstructionsLoader:
         max_bytes: int = 65_536,
     ) -> None:
         self._root = Path(root)
-        self._paths: list[Path] | None = None
         self._names = names
         self._max_bytes = max_bytes
 

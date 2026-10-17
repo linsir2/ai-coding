@@ -2,9 +2,10 @@
 
 Design (m3-analysis §4.6): :class:`PromptAssembler` joins the base system prompt
 with the optional project instructions, the methods section, plan-mode segment,
-skills catalog, and memory catalog into a single string handed to the AI engine
-each turn (output of ``build`` is the ``instructions`` parameter of
-``execute_turn``).
+and skills catalog into a single string handed to the AI engine each turn
+(output of ``build`` is the ``instructions`` parameter of ``execute_turn``).  The
+memory block is not a section here: it rides the volatile tail
+(``core/request_assembly.py``), like every other per-iteration block.
 """
 
 from __future__ import annotations

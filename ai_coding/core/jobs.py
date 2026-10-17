@@ -361,7 +361,6 @@ class JobRegistry:
             else:
                 job.status = STATUS_FAILED
         job.finished_at = now_utc()
-        job.done.set()
         self._write_ledger(job)
 
         summary = f"{job.command.strip()[:60]} · {job.detail or job.status}"
@@ -369,6 +368,12 @@ class JobRegistry:
             job.announced = True
             self._announce(job, summary, emit)
         self._publish(emit=emit if emit is not None else job.emit)
+        # Last, on purpose: a waiter that wakes on this may discard the row the
+        # instant it does.  Setting it before the ledger write let the watcher
+        # recreate the file the discard had just removed -- a phantom completed
+        # row for a command the foreground call had already consumed (found as
+        # a rare full-suite failure, pinned by the settle-before-wake test).
+        job.done.set()
 
     def _announce(self, job: Job, summary: str, emit: Callable[[Any], None] | None) -> None:
         """Put the ending where the model and the operator will both see it."""

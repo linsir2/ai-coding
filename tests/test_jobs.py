@@ -465,3 +465,29 @@ def test_a_settled_foreground_job_publishes_its_ending_and_its_absence(tmp_path)
     assert starts, f"the start publish is missing: {seen}"
     empties = [rows for kind, rows in seen if kind == "JobChanged" and rows == []]
     assert empties, f"the empty publish after discard is missing: {seen}"
+
+
+def test_the_settlement_is_complete_before_a_waiter_can_wake(tmp_path, monkeypatch):
+    """The intermittent this pins: `_settle` set `done` *before* writing the
+    ledger, so a foreground waiter could wake, discard the row (unlink the
+    ledger), and then watch the watcher recreate it -- a phantom `completed`
+    row left on disk for a command the foreground call had already consumed.
+    Every ledger write must happen while the waiter still cannot wake."""
+    observed: list[tuple[str, bool]] = []
+    real = JobRegistry._write_ledger
+
+    def spy(self, job):
+        observed.append((job.id, job.done.is_set()))
+        return real(self, job)
+
+    monkeypatch.setattr(JobRegistry, "_write_ledger", spy)
+    registry = _registry(tmp_path)
+    job = registry.start("exit 0", cwd=str(tmp_path), session_id="s", emit=lambda e: None)
+    _wait_until(lambda: job.done.is_set(), what="settlement")
+    _wait_until(lambda: len(observed) >= 2, what="the settle write")
+
+    settle_writes = [done for job_id, done in observed if job_id == job.id][1:]
+    assert settle_writes and not any(settle_writes), (
+        "a ledger write ran after the waiter was already wakeable: "
+        f"{observed}"
+    )

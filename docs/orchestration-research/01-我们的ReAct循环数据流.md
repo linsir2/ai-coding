@@ -39,7 +39,7 @@ TUI/CLI ──IPC──▶ session_prompt (server/handlers.py:294)
 
 ### 1.2 与另两家的入口模型差异（细节见 04）
 
-我们没有 durable inbox：prompt 直接 spawn 到 loop；用户消息在 `_begin_turn` 进内存 history（:804），**首个 checkpoint 才落盘**（P2 接受的窗口，见 06-补充式方案 §5.3）。dsh/opencode 都是"先 durable 入队、再唤醒"（崩溃可恢复）。我们靠 `open_turn` marker + `resume_turn` 覆盖同场景。
+我们没有 durable inbox：prompt 直接 spawn 到 loop；用户消息在 `_begin_turn` 进内存 history（:804），**首个 checkpoint 才落盘**（P2 接受的窗口，见 06-补充式方案 §5.3）（**回戳 2026-10-17**：窗口已关——`_begin_turn` 入口即 save，`agent_loop.py:1022-1024`，11-plan T5；20 §A）。dsh/opencode 都是"先 durable 入队、再唤醒"（崩溃可恢复）。我们靠 `open_turn` marker + `resume_turn` 覆盖同场景。
 
 ---
 
