@@ -17,6 +17,7 @@ import { DialogMcp } from "./component/dialog-mcp"
 import { DialogMcpAdd } from "./component/dialog-mcp-add"
 import { DialogMemory } from "./component/dialog-memory"
 import { DialogJobs } from "./component/dialog-jobs"
+import { DialogInbox } from "./component/dialog-inbox"
 import { DialogModels, type ModelRow } from "./component/dialog-models"
 import { DialogSessions } from "./component/dialog-sessions"
 import { DialogSkillPending } from "./component/dialog-skill-pending"
@@ -410,6 +411,21 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         run: () => dialog.open(() => <DialogJobs client={props.client} sessionId={sessionId()} />, "large"),
       },
       {
+        // D-2: palette twin of the session route's dialog.inbox.show (same
+        // reason as home.mode.cycle). Self-contained: it reads the table
+        // itself because this tree cannot reach session state.
+        name: "dialog.inbox.show",
+        title: "Queued input",
+        group: "Session",
+        desc: "View or delete queued input",
+        palette: true,
+        run: () =>
+          dialog.open(
+            () => <DialogInbox client={props.client} sessionId={sessionId()} />,
+            "large",
+          ),
+      },
+      {
         name: "dialog.status.show",
         title: "Status",
         group: "System",
@@ -490,6 +506,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
       // binding lives here with the other dialog shortcuts rather than in a
       // route that may not be mounted.
       { key: "<leader>j", cmd: "dialog.jobs.show" },
+      { key: "<leader>i", cmd: "dialog.inbox.show" },
       { key: "<leader>s", cmd: "dialog.status.show" },
       { key: "<leader>q", cmd: "app.exit" },
     ],

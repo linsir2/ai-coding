@@ -115,6 +115,49 @@ def _message_to_dict(msg: ChatMessage) -> dict[str, Any]:
     return data
 
 
+@dataclass
+class InboxItem:
+    """One queued line of operator input, and where it goes (D-2).
+
+    dsh's inbox has the same two targets: ``next-turn`` runs after this turn,
+    ``next-step`` joins it (``agent-loop/src/agent.ts``: ``followup`` /
+    ``steer``).  oc's table calls them queue/steer deliveries.  The id is
+    stable across edits so the panel can address a row; the text is what the
+    operator typed, verbatim.
+    """
+
+    id: str
+    text: str
+    target: str = "next-turn"
+    created_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "text": str(self.text),
+            "target": str(self.target),
+            "createdAt": str(self.created_at),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> InboxItem | None:
+        if not isinstance(data, dict):
+            return None
+        text = data.get("text")
+        if not isinstance(data.get("id"), str) or not isinstance(text, str):
+            return None
+        target = data.get("target", "next-turn")
+        if target not in ("next-turn", "next-step"):
+            return None
+        created = data.get("createdAt", "")
+        return cls(
+            id=data["id"],
+            text=text,
+            target=target,
+            created_at=created if isinstance(created, str) else "",
+        )
+
+
 @dataclass(frozen=True)
 class TurnUsage:
     """One turn's token spend, for post-hoc forensics (was memory-only).
@@ -202,6 +245,11 @@ class SessionData:
     # Per-turn token spend (see TurnUsage).  Sessions written before this
     # existed simply have no key; the file stays readable everywhere.
     turn_usages: list[TurnUsage] = field(default_factory=list)
+    # D-2: the operator's queued input, both targets in one table (dsh's
+    # next-turn/next-step, oc's queue/steer).  Lives on the session so a restart
+    # keeps what the operator meant to ask next; the loop drains next-step rows
+    # into a running turn and the next finished turn picks up next-turn rows.
+    inbox: list[InboxItem] = field(default_factory=list)
     # M11: the turn the last compaction happened in. Usage rows at or before it
     # measured a context that no longer exists, so the context meter ignores them
     # (see `server.handlers.context_tokens`). 0 means "never compacted", which
@@ -484,6 +532,9 @@ class SessionData:
         # idle sessions never grow this key at all.
         if self.turn_usages:
             data["turnUsages"] = [row.to_dict() for row in self.turn_usages]
+        # Same rule again: sessions that never queued input gain no key.
+        if self.inbox:
+            data["inbox"] = [item.to_dict() for item in self.inbox]
         # Same rule again.  Without this the boundary survives only in memory:
         # reloading a compacted session brought back the usage rows the
         # compaction had already invalidated, and the meter read them again.
@@ -534,6 +585,13 @@ class SessionData:
             for row in (TurnUsage.from_dict(item) for item in usage_rows)
             if row is not None
         ]
+        raw_inbox = data.get("inbox")
+        inbox_rows = raw_inbox if isinstance(raw_inbox, list) else []
+        inbox = [
+            item
+            for item in (InboxItem.from_dict(row) for row in inbox_rows)
+            if item is not None
+        ]
         raw_acceptance = data.get("acceptance")
         acceptance_rows = raw_acceptance if isinstance(raw_acceptance, list) else []
         acceptance = [
@@ -561,6 +619,7 @@ class SessionData:
             turn_count=int(data.get("turnCount", 0) or 0),
             turn_digests=digests,
             turn_usages=usages,
+            inbox=inbox,
             last_compacted_turn=int(data.get("lastCompactedTurn", 0) or 0),
             acceptance=acceptance,
             step_deliveries=step_deliveries,

@@ -19,13 +19,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 from typing import Any
 
 from ai_coding.attachments import save_data_url
 from ai_coding.config.models import resolve_context_window
-from ai_coding.domain.session import _message_to_dict
+from ai_coding.domain.session import InboxItem, _message_to_dict
+from ai_coding.infra.time_utils import now_utc
 from ai_coding.infra.vcs import git_branch
 from ai_coding.server.bridge import EventBridge, Notify
 from ai_coding.server.display import provider_from_base_url
@@ -976,6 +978,50 @@ def make_handlers(
             "stopPolicy": str(getattr(ai_cfg, "stop_policy", "") or ""),
         }
 
+    def session_inbox(params: dict[str, Any]) -> dict[str, Any]:
+        """The operator's queued input as data, not as composer state (D-2).
+
+        One table with two targets -- ``next-turn`` runs after this turn,
+        ``next-step`` joins it -- instead of the two in-memory queues that agreed
+        on nothing and survived nothing.  Every mutation persists through the
+        session save, so a restart keeps what the operator meant to ask next.
+        """
+        session = state.session
+        if session is None:
+            raise ValueError("no session initialized")
+        op = str(params.get("op", "list") or "list")
+        if op == "list":
+            return {"ok": True, "rows": [item.to_dict() for item in session.inbox]}
+        if op == "add":
+            text = str(params.get("text", "") or "").strip()
+            if not text:
+                return {"ok": False, "reason": "empty text is not a queued line"}
+            target = str(params.get("target", "next-turn") or "next-turn")
+            if target not in ("next-turn", "next-step"):
+                return {"ok": False, "reason": f"unknown target {target!r}"}
+            item = InboxItem(
+                id=uuid.uuid4().hex[:8], text=text, target=target,
+                created_at=now_utc(),
+            )
+            session.inbox.append(item)
+            _persist_session(world, session)
+            return {"ok": True, "id": item.id}
+        if op in ("edit", "delete"):
+            row_id = str(params.get("id", "") or "").strip()
+            row = next((item for item in session.inbox if item.id == row_id), None)
+            if row is None:
+                return {"ok": False, "reason": f"no inbox row {row_id!r}"}
+            if op == "delete":
+                session.inbox = [item for item in session.inbox if item.id != row_id]
+            else:
+                text = str(params.get("text", "") or "").strip()
+                if not text:
+                    return {"ok": False, "reason": "empty text is not a queued line"}
+                row.text = text
+            _persist_session(world, session)
+            return {"ok": True, "id": row.id}
+        return {"ok": False, "reason": f"unknown op {op!r}"}
+
     def session_jobs(params: dict[str, Any]) -> dict[str, Any]:
         """The workspace's background jobs, for the panel (D-1b).
 
@@ -1228,6 +1274,7 @@ def make_handlers(
         "skill.pending.approve": skill_pending_approve,
         "skill.pending.reject": skill_pending_reject,
         "config.summary": config_summary,
+        "session.inbox": session_inbox,
         "session.jobs": session_jobs,
         "session.stats": session_stats,
         "mcp.list": mcp_list,

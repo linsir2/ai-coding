@@ -288,7 +288,7 @@ class JobRegistry:
         threading.Thread(
             target=self._watch, args=(job, emit), name=f"{job_id}-watch", daemon=True
         ).start()
-        self._publish()
+        self._publish(emit=emit)
         return job
 
     # ---- the watcher -------------------------------------------------------
@@ -368,7 +368,7 @@ class JobRegistry:
         if job.announce and not job.announced:
             job.announced = True
             self._announce(job, summary, emit)
-        self._publish()
+        self._publish(emit=emit if emit is not None else job.emit)
 
     def _announce(self, job: Job, summary: str, emit: Callable[[Any], None] | None) -> None:
         """Put the ending where the model and the operator will both see it."""
@@ -422,18 +422,25 @@ class JobRegistry:
             for job in self.list()
         ]
 
-    def _publish(self) -> None:
+    def _publish(self, *, emit: Callable[[Any], None] | None = None) -> None:
         """Tell whoever is watching the panel.  Best-effort like every event here:
-        a failure to render must not stop a command."""
-        # One event per change, through whichever turn's sink this workspace
-        # has: a panel wants the whole list, and three sinks would mean three
-        # copies.  One critical section for the read and the scan, or the event
-        # could name a job that arrived after the rows were copied.
+        a failure to render must not stop a command.
+
+        The sink travels as an argument, never read out of the live table: the
+        waiter discards a foreground row between ``done.set()`` and this call,
+        so a lookup here would find an empty table exactly when there is the
+        most to say.  Callers without a sink to name fall back to whichever
+        turn's sink the table still holds.  One critical section for the read
+        and the scan, or the event could name a job that arrived after the rows
+        were copied.
+        """
         with self._lock:
             rows = tuple(self.snapshot())
-            emit = next(
-                (job.emit for job in self._jobs.values() if job.emit is not None), None
-            )
+            if emit is None:
+                emit = next(
+                    (job.emit for job in self._jobs.values() if job.emit is not None),
+                    None,
+                )
         if emit is None:
             return
         try:
@@ -603,7 +610,7 @@ class JobRegistry:
                 Path(path).unlink()
             except OSError:
                 pass
-        self._publish()
+        self._publish(emit=job.emit)
 
     def read_head(self, job: Job, limit: int) -> tuple[str, int]:
         """The first ``limit`` characters of a log, and its real length.

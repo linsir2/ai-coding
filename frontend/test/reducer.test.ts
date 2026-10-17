@@ -574,9 +574,9 @@ describe("input queue", () => {
 
   test("submitting while busy queues the line and shows it as a user message", () => {
     const running = feed(initialState(), { kind: "submitted", text: "first" })
-    const queued = feed(running, { kind: "queued", text: "second" })
+    const queued = feed(running, { kind: "queued", id: "q-second", text: "second" })
     expect(queued.busy).toBe(true)
-    expect(queued.queued).toEqual(["second"])
+    expect(queued.queued).toEqual([{ id: "q-second", text: "second" }])
     expect(queued.messages.map((message) => message.role)).toEqual(["user", "user"])
   })
 
@@ -584,24 +584,24 @@ describe("input queue", () => {
     const queued = feed(
       initialState(),
       { kind: "submitted", text: "a" },
-      { kind: "queued", text: "b" },
+      { kind: "queued", id: "q-b", text: "b" },
       finished,
     )
     expect(queued.busy).toBe(false)
-    expect(queued.queued).toEqual(["b"])
+    expect(queued.queued).toEqual([{ id: "q-b", text: "b" }])
   })
 
   test("queued-dispatched pops the first line, stays busy, and does not re-append it", () => {
     const queued = feed(
       initialState(),
       { kind: "submitted", text: "a" },
-      { kind: "queued", text: "b" },
-      { kind: "queued", text: "c" },
+      { kind: "queued", id: "q-b", text: "b" },
+      { kind: "queued", id: "q-c", text: "c" },
       finished,
     )
     const dispatched = feed(queued, { kind: "queued-dispatched" })
     expect(dispatched.busy).toBe(true)
-    expect(dispatched.queued).toEqual(["c"])
+    expect(dispatched.queued).toEqual([{ id: "q-c", text: "c" }])
     expect(dispatched.messages.filter((message) => message.role === "user")).toHaveLength(3)
   })
 
@@ -629,9 +629,9 @@ describe("input queue", () => {
   })
 
   test("submit-failed keeps whatever is still queued", () => {
-    const queued = feed(initialState(), { kind: "queued", text: "b" })
+    const queued = feed(initialState(), { kind: "queued", id: "q-b", text: "b" })
     const failed = feed(queued, { kind: "submit-failed", reason: "boom" })
-    expect(failed.queued).toEqual(["b"])
+    expect(failed.queued).toEqual([{ id: "q-b", text: "b" }])
     expect(failed.busy).toBe(false)
   })
 })
@@ -980,7 +980,7 @@ describe("compaction cards survive interleaved input (P3-4)", () => {
       initialState(),
       { kind: "submitted", text: "/compact" },
       wire("compaction.started", { reason: "manual" }),
-      { kind: "queued", text: "别停" },
+      { kind: "queued", id: "q-别停", text: "别停" },
       wire("compaction.delta", { text: "## 目标\n" }),
     )
     const cards = state.messages.flatMap((m) => m.parts).filter((p) => p.kind === "compaction")
@@ -995,7 +995,7 @@ describe("compaction cards survive interleaved input (P3-4)", () => {
       initialState(),
       { kind: "submitted", text: "/compact" },
       wire("compaction.started", { reason: "manual" }),
-      { kind: "queued", text: "别停" },
+      { kind: "queued", id: "q-别停", text: "别停" },
       wire("compaction.ended", {
         reason: "manual",
         beforeMessages: 29,

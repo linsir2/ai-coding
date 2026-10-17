@@ -1820,3 +1820,76 @@ async def test_the_wake_budget_runs_out_after_three_and_a_user_turn_resets_it(ip
         await asyncio.sleep(0.05)
     await asyncio.sleep(0.3)
     assert len(world_loop.calls) > capped + 1, "a user turn must refill the budget"
+
+
+# ---- D-2 Phase 1: the inbox table -------------------------------------------
+#
+# dsh keeps one event-sourced inbox with next-turn/next-step targets and oc one
+# SQLite table with steer/queue deliveries; we had two in-memory queues that
+# agreed on nothing and survived nothing.  The table lives on the session so
+# restart survival comes from the session file, under the same rule every other
+# key follows: absent when empty.
+
+
+def _inbox(ipc_client, op: str, **params):
+    return ipc_client.request("session.inbox", {"op": op, **params})
+
+
+@pytest.mark.asyncio
+async def test_inbox_add_returns_an_id_and_lists_it_back(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+
+    added = _inbox(client, "add", text="先查日志", target="next-turn")
+    rows = _inbox(client, "list")["rows"]
+
+    assert added["ok"] is True and added["id"]
+    assert [row["id"] for row in rows] == [added["id"]]
+    assert rows[0]["text"] == "先查日志" and rows[0]["target"] == "next-turn"
+
+
+@pytest.mark.asyncio
+async def test_inbox_rows_survive_a_reload(ipc, tmp_path):
+    """The whole point of putting the table on the session: what the operator
+    queued is still there after a restart."""
+    _world, _service, client = ipc
+    client.request("initialize")
+    added = _inbox(client, "add", text="重启后还在吗")
+
+    reloaded = _world.sessions.load(_world.sessions.list_sessions()[0].session_id)
+
+    assert [row.text for row in reloaded.inbox] == ["重启后还在吗"]
+    assert reloaded.inbox[0].id == added["id"]
+
+
+@pytest.mark.asyncio
+async def test_inbox_edit_changes_text_and_keeps_the_id(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+    added = _inbox(client, "add", text="错别字在这里")
+
+    edited = _inbox(client, "edit", id=added["id"], text="改对了")
+
+    assert edited["ok"] is True
+    assert _inbox(client, "list")["rows"][0]["text"] == "改对了"
+    assert _inbox(client, "list")["rows"][0]["id"] == added["id"]
+
+
+@pytest.mark.asyncio
+async def test_inbox_delete_removes_the_row(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+    added = _inbox(client, "add", text="不要了")
+
+    assert _inbox(client, "delete", id=added["id"])["ok"] is True
+    assert _inbox(client, "list")["rows"] == []
+
+
+@pytest.mark.asyncio
+async def test_inbox_refuses_blank_text_and_unknown_ids(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+
+    assert _inbox(client, "add", text="   ")["ok"] is False
+    assert _inbox(client, "edit", id="nope", text="x")["ok"] is False
+    assert _inbox(client, "delete", id="nope")["ok"] is False

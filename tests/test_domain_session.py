@@ -300,3 +300,52 @@ def test_task_lifecycle_reads_old_files_without_the_keys():
 
     assert task.armed is False and task.armed_profile == ""
     assert task.rounds_run == 0 and task.resume_count == 0
+
+
+# ---- D-2: one inbox table for queued input -----------------------------------
+#
+# dsh keeps a single event-sourced inbox with two targets (`next-turn` for what
+# runs after this turn, `next-step` for what joins it) and oc keeps one table
+# with steer/queue deliveries; we had two in-memory queues that agreed on
+# nothing and survived nothing.  The table lives on the session so restart
+# survival comes from the session file, under the same rule every other key
+# follows: absent when empty, so old files read byte-identically.
+
+
+def test_inbox_roundtrips_through_dict():
+    from ai_coding.domain.session import InboxItem
+
+    s = SessionData("s1", "title", "c", "l")
+    s.inbox.append(InboxItem(id="a1", text="先查日志", target="next-turn", created_at="t"))
+    s.inbox.append(InboxItem(id="b2", text="等等，先停下", target="next-step", created_at="t"))
+
+    restored = SessionData.from_dict(s.to_dict())
+
+    assert restored.inbox == s.inbox
+    assert restored.inbox[0].target == "next-turn"
+    assert restored.inbox[1].target == "next-step"
+
+
+def test_empty_inbox_writes_no_key():
+    s = SessionData("s1", "title", "c", "l")
+
+    assert s.inbox == []
+    assert "inbox" not in s.to_dict()
+
+
+def test_old_session_without_inbox_loads_empty():
+    s = SessionData.from_dict({"sessionId": "old", "messages": []})
+
+    assert s.inbox == []
+    assert "inbox" not in s.to_dict()
+
+
+def test_inbox_item_from_dict_rejects_bad_rows():
+    from ai_coding.domain.session import InboxItem
+
+    assert InboxItem.from_dict(None) is None
+    assert InboxItem.from_dict({"id": "a1"}) is None
+    assert InboxItem.from_dict({"id": "a1", "text": 123}) is None
+    assert InboxItem.from_dict({"id": "a1", "text": "x", "target": "someday"}) is None
+    row = InboxItem.from_dict({"id": "a1", "text": "x"})
+    assert row is not None and row.target == "next-turn"

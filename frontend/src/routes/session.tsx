@@ -23,6 +23,7 @@ import { PermissionPanel } from "../component/permission"
 import { Prompt } from "../component/prompt"
 import { buildSubmission, commandName, planPrelude, type PendingPrompt } from "../util/submission"
 import { SessionHeader } from "../component/session-header"
+import { DialogInbox } from "../component/dialog-inbox"
 import { Sidebar } from "../component/sidebar"
 import { StatusBar } from "../component/status-bar"
 import { useDialog } from "../dialog/context"
@@ -150,8 +151,75 @@ export function Session(props: SessionProps) {
       })
   }
 
+  /** Local ids for rows the socket was too dead to persist (D-2). */
+  let localSeq = 0
+  const localId = (): string => `local-${(localSeq += 1)}-${Date.now() % 100000}`
+
+  /**
+   * Queue one line through the backend table (D-2).  The echo lands with the
+   * id the server returns; when the socket is dead the row lives only here
+   * (same fallback the steer path has always had) and dispatch deletes it
+   * best-effort.  Either way the text is never dropped.
+   */
+  const queueText = (text: string): void => {
+    void props.client
+      .request("session.inbox", { op: "add", text })
+      .then((ack: unknown) => {
+        const data = ack as { ok?: boolean; id?: string };
+        if (data?.ok === true && typeof data.id === "string" && data.id) {
+          apply({ kind: "queued", id: data.id, text });
+        } else {
+          apply({ kind: "queued", id: localId(), text });
+        }
+      })
+      .catch(() => apply({ kind: "queued", id: localId(), text }));
+  }
+
+  /** Read the backend's rows into state (mount, reload, panel refresh). */
+  const loadInbox = (): void => {
+    void props.client
+      .request("session.inbox", { op: "list" })
+      .then((data: unknown) => {
+        const rows = (data as { rows?: unknown })?.rows;
+        if (!Array.isArray(rows)) return;
+        apply({
+          kind: "queued-loaded",
+          rows: rows
+            .map((row) => {
+              const record = row as Record<string, unknown>;
+              if (typeof record["id"] !== "string" || typeof record["text"] !== "string") return null;
+              return { id: record["id"] as string, text: record["text"] as string };
+            })
+            .filter((row): row is { id: string; text: string } => row !== null),
+        });
+      })
+      .catch(() => {
+        /* the panel stays as it was; a later turn's refresh will fill it */
+      });
+  }
+
+  /**
+   * The inbox row being edited, if the composer currently holds one (D-2).
+   * Submitting while set updates the row instead of starting anything -- the
+   * row was queued for later, and editing it must not spend a turn.
+   */
+  const [editingInboxId, setEditingInboxId] = createSignal<string | null>(null)
+
   const submit = (text: string, images: PromptImage[] = []): boolean | string => {
-    // The retired Textual UI queued a submit that arrived mid-turn and ran it
+    const editing = editingInboxId()
+    if (editing !== null) {
+      setEditingInboxId(null)
+      void props.client
+        .request("session.inbox", { op: "edit", id: editing, text })
+        .then((ack: unknown) => {
+          const data = ack as { ok?: boolean };
+          if (data?.ok === true) apply({ kind: "queued-edited", id: editing, text });
+        })
+        .catch(() => {
+          /* the row keeps its old text locally; the panel still shows it */
+        })
+      return true
+    }    // The retired Textual UI queued a submit that arrived mid-turn and ran it
     // when the turn ended; replicate that here.  The queue holds text only, so
     // a submission carrying images is refused while busy (the composer keeps
     // them and says why) rather than silently dropped.
@@ -163,7 +231,7 @@ export function Session(props: SessionProps) {
       // steer path for them).  Echo lands when the backend accepts; a
       // refusal or a dead socket falls back to the queue, never a drop.
       if (commandName(props.commands ?? [], text)) {
-        apply({ kind: "queued", text })
+        queueText(text)
         return true
       }
       void props.client
@@ -171,9 +239,9 @@ export function Session(props: SessionProps) {
         .then((ack: unknown) => {
           const accepted = (ack as { accepted?: boolean }).accepted !== false
           if (accepted) apply({ kind: "submitted", text, images: [] })
-          else apply({ kind: "queued", text })
+          else queueText(text)
         })
-        .catch(() => apply({ kind: "queued", text }))
+        .catch(() => queueText(text))
       return true
     }
     // r18/F14: a command sends no images, so it shows none either and hands
@@ -241,6 +309,35 @@ export function Session(props: SessionProps) {
         },
       },
       {
+        // D-2: the queued-input panel. Route-integrated: rows come from state,
+        // edits land in the composer, mutations report back through actions.
+        // An app-level twin exists for palette discovery (the two routes never
+        // mount together); it runs self-contained instead.
+        name: "dialog.inbox.show",
+        title: "Queued input",
+        group: "Session",
+        desc: "View, edit, or delete queued input",
+        palette: true,
+        run: () =>
+          dialog.open(
+            () => (
+              <DialogInbox
+                client={props.client}
+                sessionId={props.sessionId}
+                rows={() => state.queued}
+                onEdited={(id, text) => apply({ kind: "queued-edited", id, text })}
+                onDeleted={(id) => apply({ kind: "queued-deleted", id })}
+                onSelectRow={(row) => {
+                  dialog.close()
+                  setPromptSeed(row.text)
+                  setEditingInboxId(row.id)
+                }}
+              />
+            ),
+            "large",
+          ),
+      },
+      {
         name: "session.mode.cycle",
         title: "Toggle plan mode",
         group: "Session",
@@ -254,7 +351,7 @@ export function Session(props: SessionProps) {
         run: () => {
           const next = stats().mode === "plan" ? "/plan off" : "/plan"
           if (state.busy) {
-            apply({ kind: "queued", text: next })
+            queueText(next)
             return
           }
           dispatch(next)
@@ -268,7 +365,7 @@ export function Session(props: SessionProps) {
         palette: true,
         run: () => {
           if (state.busy) {
-            apply({ kind: "queued", text: "/review" })
+            queueText("/review")
             return
           }
           apply({ kind: "submitted", text: "/review" })
@@ -299,6 +396,7 @@ export function Session(props: SessionProps) {
       { key: "ctrl+t", cmd: "session.toggle.thinking" },
       { key: "shift+tab", cmd: "session.mode.cycle" },
       { key: "<leader>r", cmd: "session.resume" },
+      { key: "<leader>i", cmd: "dialog.inbox.show" },
     ],
   }))
 
@@ -307,6 +405,9 @@ export function Session(props: SessionProps) {
   const [promptSeed, setPromptSeed] = createSignal("")
 
   onMount(() => {
+    // A restart must bring back what the operator queued: the table survived
+    // on disk, but this process never saw it.
+    loadInbox()
     // The snapshot first: a job that started before this client connected has
     // no job.changed history to replay, and a panel that only ever shows new
     // jobs is worse than none.
@@ -338,7 +439,21 @@ export function Session(props: SessionProps) {
           // rewrote this session's history in place (r17/T1): re-project.
           void (async () => {
             const loaded = await loadSession(props.client, props.sessionId)
-            setState({ ...loaded, queued: state.queued })
+            // Carry the queue across the switch the way the old in-memory list
+            // did: rows that only ever lived here are persisted into the fresh
+            // session first, then the server's list -- which now includes them
+            // -- becomes the list.  A reload implies a live socket (the load
+            // just succeeded over it), so the flush cannot strand them.
+            for (const row of state.queued) {
+              if (!row.id.startsWith("local-")) continue
+              try {
+                await props.client.request("session.inbox", { op: "add", text: row.text })
+              } catch {
+                break
+              }
+            }
+            setState({ ...loaded, queued: [] })
+            loadInbox()
             void refreshStats()
           })()
         }
@@ -378,11 +493,18 @@ export function Session(props: SessionProps) {
           dispatch("/plan run")
         }
         // One queued line per finished turn (deferred when the plan run won
-        // this end-of-turn slot).
+        // this end-of-turn slot).  The server row goes with it, best-effort:
+        // a local-only row has nothing to delete and the server ignores ids
+        // it never saw, so both kinds dispatch exactly the same way.
         const next = ranPlanRun ? undefined : state.queued[0]
         if (next !== undefined) {
           apply({ kind: "queued-dispatched" })
-          dispatch(next)
+          void props.client
+            .request("session.inbox", { op: "delete", id: next.id })
+            .catch(() => {
+              /* the row is already out of local state; nothing to reconcile */
+            });
+          dispatch(next.text)
         }
       }
       if (event.type === "provider.retried") {
@@ -513,7 +635,13 @@ export function Session(props: SessionProps) {
                 <text fg={theme.textMuted}>{`${state.queued.length} queued`}</text>
               </Show>
               <Prompt
-                placeholder={state.busy ? "Working…" : "Ask anything…"}
+                placeholder={
+                  editingInboxId() !== null
+                    ? "编辑排队输入…（回车保存）"
+                    : state.busy
+                      ? "Working…"
+                      : "Ask anything…"
+                }
                 metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
                 mode={stats().mode}
                 onSubmit={submit}

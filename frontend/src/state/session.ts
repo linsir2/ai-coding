@@ -79,12 +79,23 @@ export interface JobRow {
   adopted: boolean
 }
 
+/** One queued line of operator input (D-2).  The id is the inbox row's
+ * id on the backend, or a `local-` id when the socket was dead at submit time
+ * and the row lives only here.  Dispatch deletes by id, best-effort: the
+ * server ignores ids it never saw, so a local-only row dispatches exactly
+ * like a persisted one and simply leaves nothing to delete.
+ */
+export interface QueuedLine {
+  id: string
+  text: string
+}
+
 export interface SessionState {
   messages: ChatMessage[]
   /** True from submit until the turn's finish event; gates the prompt. */
   busy: boolean
   /** Lines typed while a turn was running; one is dispatched per finished turn. */
-  queued: string[]
+  queued: QueuedLine[]
   /**
    * The workspace's background jobs (D-1b).  Deliberately NOT a transcript
    * line: a running command is not something the user said, and folding it into
@@ -98,8 +109,12 @@ export type Action =
   // 08: a resumed turn carries no prompt -- busy with no echo.  Reusing
   // "submitted" with an empty text would draw an empty user bubble.
   | { kind: "resumed" }
-  | { kind: "queued"; text: string }
+  | { kind: "queued"; id: string; text: string }
   | { kind: "queued-dispatched" }
+  /** Replace the list with the backend's rows (mount, reload, panel edits). */
+  | { kind: "queued-loaded"; rows: QueuedLine[] }
+  | { kind: "queued-edited"; id: string; text: string }
+  | { kind: "queued-deleted"; id: string }
   | { kind: "submit-failed"; reason: string }
   // r20/F5: a paste the backend refused.  Not a failed submit -- the turn runs,
   // just without the picture -- so `busy` is left alone and the notice lands on
@@ -731,10 +746,21 @@ export function reduce(state: SessionState, action: Action): SessionState {
           ],
           false,
         ),
-        queued: [...state.queued, action.text],
+        queued: [...state.queued, { id: action.id, text: action.text }],
       }
     case "queued-dispatched":
       return { ...state, busy: true, queued: state.queued.slice(1) }
+    case "queued-loaded":
+      return { ...state, queued: action.rows }
+    case "queued-edited":
+      return {
+        ...state,
+        queued: state.queued.map((row) =>
+          row.id === action.id ? { ...row, text: action.text } : row,
+        ),
+      }
+    case "queued-deleted":
+      return { ...state, queued: state.queued.filter((row) => row.id !== action.id) }
     case "jobs":
       return { ...state, jobs: action.jobs }
     case "submit-failed": {

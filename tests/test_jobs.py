@@ -427,3 +427,38 @@ def test_concurrent_reads_and_mutations_never_raise(tmp_path):
         thread.join(timeout=30)
     sys.setswitchinterval(old_interval)
     assert not errors, f"concurrent access raised: {errors!r}"
+
+
+def test_a_settled_foreground_job_publishes_its_ending_and_its_absence(tmp_path):
+    """The panel bug, pinned: a foreground command that answers inside its wait
+    produced exactly one JobChanged (the start) and then silence.  The settle
+    publish read its emit out of the live table, but the waiter discards the
+    row between `done.set()` and the publish -- and the discard's own publish
+    found an empty table, so it said nothing either.  The panel read "1
+    running" forever for a command that had finished."""
+    seen: list[tuple[str, list[tuple[str | None, str | None]]]] = []
+
+    def rec(event: object) -> None:
+        rows = getattr(event, "jobs", None) or ()
+        seen.append(
+            (
+                type(event).__name__,
+                [(row.get("id"), row.get("status")) for row in rows],
+            )
+        )
+
+    registry = _registry(tmp_path)
+    job = registry.start(
+        "echo done-quick", cwd=str(tmp_path), session_id="s", emit=rec,
+    )
+    _wait_until(lambda: job.status != "running", what="settlement")
+
+    registry.discard(job.id)
+
+    starts = [
+        rows for kind, rows in seen
+        if kind == "JobChanged" and any(status == "running" for _, status in rows)
+    ]
+    assert starts, f"the start publish is missing: {seen}"
+    empties = [rows for kind, rows in seen if kind == "JobChanged" and rows == []]
+    assert empties, f"the empty publish after discard is missing: {seen}"
