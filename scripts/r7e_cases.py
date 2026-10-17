@@ -34,7 +34,6 @@ from ai_coding.ai.engine import ChatEngine  # noqa: E402
 from ai_coding.config.models import AIConfig, AppConfig  # noqa: E402
 from ai_coding.core.agent_loop import AgentLoop  # noqa: E402
 from ai_coding.core.events import RecordingObserver, ToolSurfaceWarning  # noqa: E402
-from ai_coding.core.steering import SteeringQueue  # noqa: E402
 from ai_coding.core.subagent import SubAgentRunner  # noqa: E402
 from ai_coding.domain.loop import StepResult  # noqa: E402
 from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolResult  # noqa: E402
@@ -110,7 +109,6 @@ def _session() -> SessionData:
 def _loop(
     engine: ChatEngine,
     *,
-    steering: SteeringQueue | None = None,
     observer: RecordingObserver | None = None,
     tools: tuple[BaseTool, ...] = (_Poke(),),
     **overrides: Any,
@@ -125,7 +123,6 @@ def _loop(
         approval=AutoApproveCallback(),
         settings=AIConfig(max_tool_iterations=3, stop_policy="natural", **overrides),
         observer=observer,
-        steering=steering,
     )
 
 
@@ -194,11 +191,12 @@ async def case_tools_chars_warning_keeps_the_request_identical(root: Path) -> tu
 
 
 async def case_steering_line_becomes_an_instruction(root: Path) -> tuple[bool, str]:
-    queue = SteeringQueue()
-    queue.put("改用 uv")
+    from ai_coding.domain.session import InboxItem
+
     engine = _Engine()
     session = _session()
-    await _loop(engine, steering=queue).process_input(session, "改构建")
+    session.inbox.append(InboxItem(id="r1", text="改用 uv", target="next-step", created_at="t"))
+    await _loop(engine).process_input(session, "改构建")
     persisted = [m.content or "" for m in session.messages]
     seen = [m.content or "" for m in engine.requests[1]["messages"]]
     ok = any("[steering] 改用 uv" in text for text in persisted) and any(
@@ -209,12 +207,18 @@ async def case_steering_line_becomes_an_instruction(root: Path) -> tuple[bool, s
 
 
 async def case_steering_keeps_the_rest_queued(root: Path) -> tuple[bool, str]:
-    queue = SteeringQueue(max_messages=1)
-    queue.put("第一条")
-    queue.put("第二条")
-    await _loop(_Engine(tool=None), steering=queue).process_input(_session(), "一")
-    ok = queue.pending == 1
-    return ok, f"leftover in queue: {queue.pending}"
+    # D-2 Phase 2: the table has no intake cap, so one iteration drains every
+    # next-step row; the old max_messages=1 leftover semantic is gone with the
+    # FIFO that owned it.
+    from ai_coding.domain.session import InboxItem
+
+    session = _session()
+    session.inbox.append(InboxItem(id="r1", text="第一条", target="next-step", created_at="t"))
+    session.inbox.append(InboxItem(id="r2", text="第二条", target="next-step", created_at="t"))
+    await _loop(_Engine(tool=None)).process_input(session, "一")
+    left = [item for item in session.inbox if item.target == "next-step"]
+    ok = not left
+    return ok, f"leftover next-step rows: {len(left)}"
 
 
 async def case_steering_resets_the_streak_only(root: Path) -> tuple[bool, str]:

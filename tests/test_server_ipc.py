@@ -171,9 +171,6 @@ def _fake_world(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         sessions=SessionService(tmp_path / "sessions"),
         engine=_FakeEngine(),
-        # steering 前端化: the real world builds one and hands it to the loop;
-        # the double follows the interface (sanctioned extension).
-        steering=SteeringQueue(),
         # D-1c: the real world builds one and hands it to the sub-agent runner
         # and the loop; the double follows the interface (sanctioned extension).
         notices=SteeringQueue(),
@@ -927,20 +924,23 @@ async def test_the_approval_request_says_whether_an_always_can_be_remembered(ipc
 async def test_a_rejection_can_carry_what_the_operator_would_accept_instead(ipc):
     """C-3: "no" tells the model nothing it can act on.
 
-    The note is the operator *speaking*, so it goes on the user lane -- the same
-    SteeringQueue the composer writes to -- and lands in the very next request,
-    right after the refusal it answers.  It is lifted off here, in the one place
+    The note is the operator *speaking*, so it goes on the user lane -- a
+    next-step row in the session's inbox table -- and lands in the very next
+    request, right after the refusal it answers.  It is lifted off here, in the
+    one place
     that sees both the raw front-end string and the world, which is why the
     shared parser and ``ApprovalResult`` stay exactly as they are (the REPL's
     vocabulary and its pinned call sites included).
     """
     world, _service, client = ipc
+    client.request("initialize")
     client.approval_answer = "no::改用 ls -la 看清楚"
 
     result = await world.approval.approve("bash", {"command": "rm -rf build"}, "warn tier")
 
     assert result is ApprovalResult.NO
-    assert world.steering.drain() == ["改用 ls -la 看清楚"]
+    rows = client.request("session.inbox", {"op": "list"})["rows"]
+    assert [(row["text"], row["target"]) for row in rows] == [("改用 ls -la 看清楚", "next-step")]
 
 
 @pytest.mark.asyncio
@@ -948,12 +948,13 @@ async def test_a_bare_answer_still_carries_nothing(ipc):
     """The regression half: an answer with no note must leave the user lane
     untouched, or every refusal would inject a phantom instruction."""
     world, _service, client = ipc
+    client.request("initialize")
     client.approval_answer = "always"
 
     result = await world.approval.approve("write", {"path": "a.py"}, "warn tier")
 
     assert result is ApprovalResult.ALWAYS
-    assert world.steering.pending == 0
+    assert client.request("session.inbox", {"op": "list"})["rows"] == []
 
 
 @pytest.mark.asyncio
@@ -964,13 +965,14 @@ async def test_a_note_the_queue_refuses_is_logged_not_rewritten(ipc, caplog):
     import logging
 
     world, _service, client = ipc
+    client.request("initialize")
     client.approval_answer = "no::/usr/bin/rm -rf build"
     caplog.set_level(logging.INFO, logger="ai_coding.server.handlers")
 
     result = await world.approval.approve("bash", {"command": "rm -rf build"}, "warn tier")
 
     assert result is ApprovalResult.NO
-    assert world.steering.pending == 0
+    assert client.request("session.inbox", {"op": "list"})["rows"] == []
     assert "looks like a command" in caplog.text
 
 
@@ -1657,23 +1659,6 @@ async def test_boot_resume_breaker_disarms_past_the_cap(ipc):
 
 
 @pytest.mark.asyncio
-async def test_session_steer_lands_in_the_queue_and_refuses_commands(ipc):
-    """steering 前端化: the endpoint a busy composer calls; commands ride the
-    queue, not the running turn (the queue refuses '/' by its own rule)."""
-    world, _service, client = ipc
-    client.request("initialize")
-
-    ok = client.request("session.steer", {"text": "改个方向：先看测试"})
-    assert ok["accepted"] is True and ok["pending"] == 1
-
-    refused = client.request("session.steer", {"text": "/help"})
-    assert refused["accepted"] is False and refused["pending"] == 1
-
-    empty = client.request("session.steer", {"text": "   "})
-    assert empty["accepted"] is False and empty["pending"] == 1
-    assert world.steering.pending == 1
-
-
 # ---- D-1b: the panel's snapshot --------------------------------------------
 
 
@@ -1893,3 +1878,66 @@ async def test_inbox_refuses_blank_text_and_unknown_ids(ipc):
     assert _inbox(client, "add", text="   ")["ok"] is False
     assert _inbox(client, "edit", id="nope", text="x")["ok"] is False
     assert _inbox(client, "delete", id="nope")["ok"] is False
+
+
+# ---- D-2 Phase 2: the backend reads the same table --------------------------
+#
+# dsh's loop claims next-turn rows for a turn's first step and next-step rows
+# after that (agent.ts:313/366); oc's nextPromotable takes a steer row before a
+# queued one, and a steer-scoped drain never promotes queued rows
+# (execution.ts:157-159).  Ours was two mechanisms: the composer's steer line
+# went to an in-memory FIFO while the panel wrote a table.  Now both write the
+# table, and the loop drains next-step rows from it.
+
+
+def _inbox_rows(ipc_client):
+    return ipc_client.request("session.inbox", {"op": "list"})["rows"]
+
+
+@pytest.mark.asyncio
+async def test_session_steer_writes_a_next_step_row_and_refuses_commands(ipc):
+    """Same contract as the old FIFO endpoint -- text accepted, '/' and blanks
+    refused, pending counts what is waiting -- but the row lands in the session
+    table where the panel and a restart can see it."""
+    _world, _service, client = ipc
+    client.request("initialize")
+
+    ok = client.request("session.steer", {"text": "改个方向：先看测试"})
+    assert ok["accepted"] is True and ok["pending"] == 1
+
+    refused = client.request("session.steer", {"text": "/help"})
+    assert refused["accepted"] is False and refused["pending"] == 1
+
+    empty = client.request("session.steer", {"text": "   "})
+    assert empty["accepted"] is False and empty["pending"] == 1
+
+    rows = _inbox_rows(client)
+    assert len(rows) == 1 and rows[0]["target"] == "next-step"
+    assert rows[0]["text"] == "改个方向：先看测试"
+
+
+@pytest.mark.asyncio
+async def test_inbox_promote_flips_a_row_to_next_step_and_persists(ipc):
+    """oc's projectDeliveryChanged in miniature: only the target moves, never
+    the text.  Interrupting the running turn to honor it is Phase 3; this step
+    only records the intent, durably."""
+    _world, _service, client = ipc
+    client.request("initialize")
+    added = client.request("session.inbox", {"op": "add", "text": "等下再说"})
+
+    promoted = client.request("session.inbox", {"op": "promote", "id": added["id"]})
+
+    assert promoted["ok"] is True
+    rows = _inbox_rows(client)
+    assert rows[0]["target"] == "next-step" and rows[0]["text"] == "等下再说"
+    assert rows[0]["id"] == added["id"]
+
+
+@pytest.mark.asyncio
+async def test_inbox_promote_of_an_unknown_id_says_so(ipc):
+    _world, _service, client = ipc
+    client.request("initialize")
+
+    result = client.request("session.inbox", {"op": "promote", "id": "nope"})
+
+    assert result["ok"] is False

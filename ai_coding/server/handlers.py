@@ -42,7 +42,12 @@ __all__ = ["HandlerTable", "make_handlers"]
 HandlerTable = dict[str, Callable[[dict[str, Any]], Any]]
 
 
-def _install_providers(world: AppWorld, service: IpcService) -> None:
+def _install_providers(
+    world: AppWorld,
+    service: IpcService,
+    *,
+    get_session: Callable[[], Any] | None = None,
+) -> None:
     """Route both question channels to the client as JSON-RPC requests.
 
     Called twice on purpose, and idempotent: once when the handler table is
@@ -88,19 +93,30 @@ def _install_providers(world: AppWorld, service: IpcService) -> None:
             )
             # C-3: a refusal may carry the operator's own words.  They are not
             # metadata on the call -- they are the user speaking, so they go on
-            # the user lane (the queue the composer writes to) and the loop
-            # delivers them at the next iteration boundary, in the same request
-            # as the refusal they answer: this runs before the dispatcher
+            # the user lane (a next-step row in the session's inbox table) and
+            # the loop delivers them at the next iteration boundary, in the same
+            # request as the refusal they answer: this runs before the dispatcher
             # resumes.  Only the decision token goes on to the shared parser,
             # which is why ``ApprovalCallback``, ``ApprovalResult`` and the
-            # REPL's vocabulary are untouched.  A note the queue refuses (a line
+            # REPL's vocabulary are untouched.  A note the table refuses (a line
             # starting with "/") is logged rather than rewritten -- these words
             # are the operator's, not ours to edit.
             decision, separator, note = answer.partition(NOTE_SEPARATOR)
             if separator and note.strip():
-                queue = getattr(world, "steering", None)
-                if queue is not None and not queue.put(note.strip()):
+                if note.strip().startswith("/"):
                     _log.info("approval note not queued (looks like a command): %r", note[:80])
+                else:
+                    session = get_session() if get_session is not None else None
+                    if session is None:
+                        _log.info("approval note dropped (no live session): %r", note[:80])
+                    else:
+                        session.inbox.append(
+                            InboxItem(
+                                id=uuid.uuid4().hex[:8], text=note.strip(),
+                                target="next-step", created_at=now_utc(),
+                            )
+                        )
+                        _persist_session(world, session)
             return decision
 
         set_approval_provider(approval_provider)
@@ -253,7 +269,7 @@ def make_handlers(
     """Build the request table bound to one world + one service."""
     state = _WorldState()
     bridge = EventBridge(lambda method, params: service.notify(method, params))
-    _install_providers(world, service)
+    _install_providers(world, service, get_session=lambda: state.session)
     # M3: MCP state changes are wire events too, so the dialog does not have to
     # poll a manager that reconnects on its own.  Attached here because this is
     # where the service exists; events published before it can have no listener,
@@ -640,16 +656,35 @@ def make_handlers(
         interrupted = sum(1 for future in list(state.turn_futures) if future.cancel())
         return {"ok": True, "interrupted": interrupted}
 
+    def _next_step_count(session: Any) -> int:
+        """How many next-step rows are still waiting -- what the old FIFO's
+        length meant to the composer."""
+        return sum(1 for item in session.inbox if item.target == "next-step")
+
     def session_steer(params: dict[str, Any]) -> dict[str, Any]:
         """steering 前端化: a line typed mid-turn goes to the run, not the queue.
 
-        The bounded FIFO is the loop's own seam (R7e-2, drained at each
-        iteration boundary); this endpoint is the only missing wire between
-        the composer and it.  Commands and blank lines are refused by the
-        queue's own rule -- the caller keeps those on its queue path.
+        It lands in the session's inbox table as a next-step row (D-2 Phase 2),
+        where the loop drains it at its next iteration boundary (R7e-2) -- the
+        same place the old in-memory FIFO used to feed.  Commands and blank
+        lines are refused by the same rule as before; the caller keeps those
+        on its queue path.  ``pending`` counts the next-step rows still
+        waiting, which is what the old queue length meant.
         """
-        accepted = bool(world.steering.put(str(params.get("text", "") or "")))
-        return {"accepted": accepted, "pending": int(world.steering.pending)}
+        session = state.session
+        if session is None:
+            raise ValueError("no session initialized")
+        text = str(params.get("text", "") or "").strip()
+        if not text or text.startswith("/"):
+            return {"accepted": False, "pending": _next_step_count(session)}
+        session.inbox.append(
+            InboxItem(
+                id=uuid.uuid4().hex[:8], text=text, target="next-step",
+                created_at=now_utc(),
+            )
+        )
+        _persist_session(world, session)
+        return {"accepted": True, "pending": _next_step_count(session)}
 
     def session_command(params: dict[str, Any]) -> dict[str, Any]:
         """Run a slash command through the REPL dispatcher (A1).
@@ -725,7 +760,7 @@ def make_handlers(
                 # A command may have swapped the callbacks (/permissions
                 # confirm installs a fresh, unprovided one) — re-arm before the
                 # next turn can ask anything (I1/I2).
-                _install_providers(world, service)
+                _install_providers(world, service, get_session=lambda: state.session)
             _notify_terminal_turn(
                 session,
                 status=status,
@@ -1006,6 +1041,18 @@ def make_handlers(
             session.inbox.append(item)
             _persist_session(world, session)
             return {"ok": True, "id": item.id}
+        if op == "promote":
+            # oc's projectDeliveryChanged in miniature: only the target moves,
+            # never the text.  Interrupting the running turn to honor it is
+            # Phase 3; until then the row waits like any next-step row, and the
+            # flip itself is durable the moment it happens.
+            row_id = str(params.get("id", "") or "").strip()
+            row = next((item for item in session.inbox if item.id == row_id), None)
+            if row is None:
+                return {"ok": False, "reason": f"no inbox row {row_id!r}"}
+            row.target = "next-step"
+            _persist_session(world, session)
+            return {"ok": True, "id": row.id}
         if op in ("edit", "delete"):
             row_id = str(params.get("id", "") or "").strip()
             row = next((item for item in session.inbox if item.id == row_id), None)

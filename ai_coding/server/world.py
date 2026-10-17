@@ -36,7 +36,6 @@ class AppWorld:
     workspace: str
     skills: str | None
     cancel: asyncio.Event
-    steering: Any
     notices: Any
     #: D-1b: the workspace's background jobs.  The IPC layer answers
     #: ``session.jobs`` from it, and the panel renders what it returns.
@@ -150,7 +149,6 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         jobs=jobs,
     )
 
-    steering = SteeringQueue()
     # Per-workspace state lives under the workspace, beside the traces
     # (cli.py::_make_recorder resolves the same ``.ai-coding/<kind>`` shape).
     # The service's default is relative, which resolved against whatever
@@ -188,7 +186,6 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         trace=recorder,
         guards=build_guards(app_cfg),
         hooks=_make_hooks(app_cfg, str(paths.workspace)),
-        steering=steering,
         notices=notices,
         jobs=jobs,
         cancel=cancel,
@@ -208,7 +205,6 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         workspace=str(paths.workspace),
         skills=skills,
         cancel=cancel,
-        steering=steering,
         notices=notices,
         approval=approval,
         user_prompt=user_prompt,

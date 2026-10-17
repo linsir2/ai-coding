@@ -23,7 +23,14 @@ _TRUNCATION = "…"
 
 
 class SteeringQueue:
-    """A bounded FIFO of lines the user typed while the turn was running."""
+    """A bounded FIFO of lines, thread-safe on put and drain.
+
+    It used to hold lines the user typed mid-turn; those now live in the
+    session's inbox table (D-2).  What remains is the notices lane -- harness
+    lines (background completions) drained at iteration boundaries -- which
+    teams the same shape for a different speaker, so the class stays and only
+    the user-input half of its story left.
+    """
 
     #: Called (from whatever thread queued the line) when a line was put with
     #: ``wake=True``.  The IPC layer installs it; nothing here calls the loop.

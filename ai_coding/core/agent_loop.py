@@ -240,7 +240,6 @@ class AgentLoop:
         trace: Any | None = None,
         guards: GuardChain | None = None,
         hooks: Any | None = None,
-        steering: Any | None = None,
         # P0-2: the harness lane -- a background run settles long after the turn
         # that started it, and its event reaches the operator but not the model.
         notices: Any | None = None,
@@ -307,9 +306,6 @@ class AgentLoop:
         # calls a turn makes live in their own unit.
         self.hooks = hooks
         self.turn_hooks = TurnHooks(hooks, workspace=self.workspace)
-        # R7e-2: where lines typed mid-turn wait.  None = today's behaviour, and the
-        # loop then never looks at a queue at all.
-        self.steering = steering
         # P0-2: same queue shape, different speaker.  None = today's behaviour,
         # and the loop then never looks at it.
         self.notices = notices
@@ -1074,12 +1070,17 @@ class AgentLoop:
         which is what Claude Code documents ("as soon as those tool calls finish,
         within the same turn", docs/r7e-analysis.md 2.1b).  The lines are persisted
         (Q4), and they consume neither an iteration nor a nudge.
+
+        Reads the session's inbox table, next-step rows only (D-2 Phase 2): the
+        old in-memory FIFO and this table agreed on nothing, and only one of
+        them survived a restart.  Next-turn rows stay parked -- a steer-scoped
+        drain never promotes them (oc's execution.ts draws the same line).
         """
-        if self.steering is None:
+        rows = [item for item in session.inbox if item.target == "next-step"]
+        if not rows:
             return
-        lines = self.steering.drain()
-        if not lines:
-            return
+        session.inbox = [item for item in session.inbox if item.target != "next-step"]
+        lines = [row.text for row in rows]
         for line in lines:
             session.add_message(user_message(f"[steering] {line}", now_utc(), synthetic=True))
         books.note_steering(len(lines))

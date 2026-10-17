@@ -197,7 +197,10 @@ def test_settlement_is_idempotent(tmp_path):
     notices = _Clock()
     registry = _registry(tmp_path, notices)
     job = registry.start("exit 0", cwd=str(tmp_path), session_id="s1", emit=lambda e: None)
-    _wait_until(lambda: job.status != "running", what="settlement")
+    # Wait for the notice, not just the status: _settle writes the status
+    # before it queues the notice, and under load the poll can land between
+    # the two.  Waiting on the status alone made this test a race.
+    _wait_until(lambda: notices.pending() == 1, what="the notice")
 
     registry._settle(job, emit=lambda e: None)  # the late watcher callback
     registry._settle(job, emit=lambda e: None)
