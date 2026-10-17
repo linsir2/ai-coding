@@ -16,6 +16,7 @@ import { DialogHelp } from "./component/dialog-help"
 import { DialogMcp } from "./component/dialog-mcp"
 import { DialogMcpAdd } from "./component/dialog-mcp-add"
 import { DialogMemory } from "./component/dialog-memory"
+import { DialogJobs } from "./component/dialog-jobs"
 import { DialogModels, type ModelRow } from "./component/dialog-models"
 import { DialogSessions } from "./component/dialog-sessions"
 import { DialogSkillPending } from "./component/dialog-skill-pending"
@@ -397,6 +398,18 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         run: () => dialog.open(() => <DialogMemory client={props.client} />, "large"),
       },
       {
+        // D-1b: the jobs panel lives at both layers because the two routes
+        // never mount together (the same comment sits on home.mode.cycle);
+        // the palette shows exactly one. Session-side lookup lives in
+        // routes/session.tsx next to the <leader>j binding.
+        name: "dialog.jobs.show",
+        title: "Background jobs",
+        group: "Session",
+        desc: "List background shell jobs, and stop one",
+        palette: true,
+        run: () => dialog.open(() => <DialogJobs client={props.client} sessionId={sessionId()} />, "large"),
+      },
+      {
         name: "dialog.status.show",
         title: "Status",
         group: "System",
@@ -473,6 +486,10 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
       { key: "<leader>m", cmd: "dialog.models.show" },
       { key: "<leader>l", cmd: "dialog.sessions.show" },
       { key: "<leader>n", cmd: "session.new" },
+      // D-1b: the jobs panel is workspace-global like the memory one, so its
+      // binding lives here with the other dialog shortcuts rather than in a
+      // route that may not be mounted.
+      { key: "<leader>j", cmd: "dialog.jobs.show" },
       { key: "<leader>s", cmd: "dialog.status.show" },
       { key: "<leader>q", cmd: "app.exit" },
     ],

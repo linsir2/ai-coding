@@ -47,7 +47,7 @@ export function jobRowLine(job: JobRow): { title: string; description: string } 
   }
 }
 
-export function DialogJobs(props: { client: IpcClient }) {
+export function DialogJobs(props: { client: IpcClient; sessionId: string }) {
   const [rows, setRows] = createSignal<JobRow[]>([])
   const [error, setError] = createSignal("")
   const [armed, setArmed] = createSignal(CONFIRM_NONE)
@@ -80,7 +80,7 @@ export function DialogJobs(props: { client: IpcClient }) {
       const row = jobRowLine(job)
       const pending = armed() === job.id
       return {
-        title: pending ? `再按一次回车停止 ${job.id}` : row.title,
+        title: pending ? `再按 ctrl+d 停止 ${job.id}` : row.title,
         value: job.id,
         description: pending ? undefined : row.description,
         category: job.status === "running" ? "运行中" : "已结束",
@@ -88,7 +88,18 @@ export function DialogJobs(props: { client: IpcClient }) {
       }
     })
 
-  /** Stop, armed: the first Enter arms the row, the second one fires. */
+  /**
+   * Select arms, and only ctrl+d fires.  Enter-then-Enter was tried first and
+   * broke live: re-rendering the armed row moves focus out of the dialog, so
+   * the second Enter lands in the composer and opens a turn instead of stopping
+   * a job.  The memory and sessions panels arm and fire on ctrl+d for exactly
+   * this reason -- a destructive key that the composer never claims.
+   */
+  const select = (option: SelectOption) => {
+    setArmed(armed() === option.value ? CONFIRM_NONE : option.value)
+  }
+
+  /** Stop, armed: ctrl+d on an unarmed row arms it, on an armed row fires. */
   const stop = async (option: SelectOption) => {
     if (armDecision(armed(), option.value) === "arm") {
       setArmed(option.value)
@@ -96,7 +107,13 @@ export function DialogJobs(props: { client: IpcClient }) {
     }
     setArmed(CONFIRM_NONE)
     try {
-      await props.client.request("session.command", { command: `/tasks stop ${option.value}` })
+      // The payload shape is the composer's (util/submission.ts): {id, text}.
+      // Sending anything else runs an empty command and reports nothing --
+      // a silent no-op is exactly what a failed stop must never be.
+      await props.client.request("session.command", {
+        id: props.sessionId,
+        text: `/tasks stop ${option.value}`,
+      })
       setError("")
     } catch (cause) {
       setError(String(cause))
@@ -116,13 +133,13 @@ export function DialogJobs(props: { client: IpcClient }) {
     <DialogSelect
       title="后台任务"
       options={options()}
-      onSelect={(option) => void stop(option)}
+      onSelect={select}
       actions={actions()}
       footer={
         [
           error(),
           rows().length === 0 ? "没有后台任务" : "",
-          "enter 停止（再按一次确认） · ctrl+d stop · esc close",
+          "enter 选择 · ctrl+d 停止（选中后再按一次） · esc close",
         ]
           .filter(Boolean)
           .join(" · ") || undefined

@@ -24,7 +24,7 @@ export function jobLine(jobs: readonly JobRow[]): string {
   return parts.join(" · ")
 }
 
-export const JOB_HINT = "<leader>j 查看 / 回车停止"
+export const JOB_HINT = "<leader>j 查看 / ctrl+d 停止"
 
 export function Sidebar(props: {
   title: string

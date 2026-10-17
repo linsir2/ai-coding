@@ -23,7 +23,6 @@ import { PermissionPanel } from "../component/permission"
 import { Prompt } from "../component/prompt"
 import { buildSubmission, commandName, planPrelude, type PendingPrompt } from "../util/submission"
 import { SessionHeader } from "../component/session-header"
-import { DialogJobs } from "../component/dialog-jobs"
 import { Sidebar } from "../component/sidebar"
 import { StatusBar } from "../component/status-bar"
 import { useDialog } from "../dialog/context"
@@ -242,17 +241,6 @@ export function Session(props: SessionProps) {
         },
       },
       {
-        // D-1b: the jobs panel. Same shape as the memory one -- a row in the
-        // palette and a key, because a running dev server is something you look
-        // for on purpose, not something that should interrupt.
-        name: "dialog.jobs.show",
-        title: "Background jobs",
-        group: "Session",
-        desc: "List background shell jobs, and stop one",
-        palette: true,
-        run: () => dialog.open(() => <DialogJobs client={props.client} />, "large"),
-      },
-      {
         name: "session.mode.cycle",
         title: "Toggle plan mode",
         group: "Session",
@@ -311,7 +299,6 @@ export function Session(props: SessionProps) {
       { key: "ctrl+t", cmd: "session.toggle.thinking" },
       { key: "shift+tab", cmd: "session.mode.cycle" },
       { key: "<leader>r", cmd: "session.resume" },
-      { key: "<leader>j", cmd: "dialog.jobs.show" },
     ],
   }))
 
