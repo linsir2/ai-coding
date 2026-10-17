@@ -449,7 +449,7 @@ def make_handlers(
         state.turn_id += 1
         future = service.spawn(guarded())
         state.turn_futures.add(future)
-        future.add_done_callback(state.turn_futures.discard)
+        future.add_done_callback(_watch_turn)
         return state.turn_id
 
     def _notify_terminal_turn(
@@ -696,6 +696,11 @@ def make_handlers(
         if task is not None and getattr(task, "armed", False):
             task.armed = False
             _persist_session(world, session)
+        # A stop is not a latch's business (2026-10-17): a wake waiting for the
+        # runway must not open a turn right after the user hit Esc -- dsh
+        # clears its latch on cancel for the same reason.  The queued content
+        # stays durable and rides the next human turn.
+        wake_pending["prompt"] = None
         # Two layers, both needed (ported from ui/textual_app.py::
         # action_cancel_turn): the event is the tool batch's fast path (the
         # loop clears it before each batch), the future cancellation reaches
@@ -828,7 +833,7 @@ def make_handlers(
 
         future = service.spawn(run_command())
         state.turn_futures.add(future)
-        future.add_done_callback(state.turn_futures.discard)
+        future.add_done_callback(_watch_turn)
         return {"turnId": turn_id, "sessionId": session_id}
 
     def session_delete(params: dict[str, Any]) -> dict[str, Any]:
@@ -1322,6 +1327,11 @@ def make_handlers(
 
     # ---- D-1c: a finished job may open a turn ------------------------------
     wake_left = {"left": WAKE_BUDGET}
+    #: The latch for a wake refused while a turn was in flight (2026-10-17).
+    #: One slot on purpose: the content lives in the queues and the prompt
+    #: only says to look, so a later request replaces an earlier one and the
+    #: replay opens one turn either way (dsh's latch is one bit, same reason).
+    wake_pending: dict[str, Any] = {"prompt": None}
 
     async def _wake_turn(session: Any, text: str) -> None:
         """The turn nobody asked for, opened because something finished.
@@ -1343,14 +1353,65 @@ def make_handlers(
         Shared by job completions and promote: a wake is a wake no matter who
         asked for it, so they spend the same budget.  The caller decides the
         prompt; the budget decides whether it may run.
+
+        Refusal is not always a loss (2026-10-17): a turn in flight may be
+        past its last drain boundary -- its tail, where the memory harvest
+        runs for seconds -- and then nobody will ever read the queue this
+        wake was for.  That refusal latches the wake for replay at the runway
+        (``_replay_pending_wake``); an exhausted budget is the chain breaker
+        and latches nothing.
         """
         if state.session is None:
             return False
-        if not wake_decision(wake_left["left"], len(state.turn_futures)):
-            return False
-        wake_left["left"] -= 1
-        _launch_turn(lambda: _wake_turn(state.session, prompt))
-        return True
+        if wake_decision(wake_left["left"], len(state.turn_futures)):
+            wake_pending["prompt"] = None
+            wake_left["left"] -= 1
+            _launch_turn(lambda: _wake_turn(state.session, prompt))
+            return True
+        wake_pending["prompt"] = (
+            prompt if (state.turn_futures and wake_left["left"] > 0) else None
+        )
+        return False
+
+    def _wake_has_deliverable() -> bool:
+        """Is there anything a woken turn would actually see?
+
+        dsh's ``inbox.hasPending`` guard, spelled for our two queues: the
+        notice lane and the session inbox's next-step rows.  A replay for an
+        already-drained queue would spend a model call saying "look" at
+        nothing.
+        """
+        if world.notices is not None and world.notices.pending > 0:
+            return True
+        session = state.session
+        return bool(
+            session is not None
+            and any(item.target == "next-step" for item in session.inbox)
+        )
+
+    def _replay_pending_wake() -> None:
+        """Give a latched wake its turn, now that no turn is in flight.
+
+        Called from every turn's done callback (``_watch_turn``), which is the
+        one moment the runway is empty -- event-driven on purpose; polling is
+        what ``_open_promote_wake`` already does for its own, narrower case,
+        and the two must not merge into one waiter.
+        """
+        prompt = wake_pending["prompt"]
+        if prompt is None or state.turn_futures or state.session is None:
+            return
+        if not _wake_has_deliverable():
+            wake_pending["prompt"] = None
+            return
+        _request_wake(prompt)
+
+    def _watch_turn(future: Future[Any]) -> None:
+        """Drop a finished turn; then the runway is empty -- replay if latched."""
+        state.turn_futures.discard(future)
+        try:
+            _replay_pending_wake()
+        except Exception:  # noqa: BLE001 — a callback must not eat the loop's log
+            _log.debug("latched wake replay failed", exc_info=True)
 
     def _open_promote_wake(row_text: str) -> bool:
         """Wake for a promoted row: now if idle, after the dying turn if not.

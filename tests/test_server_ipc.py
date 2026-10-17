@@ -1807,6 +1807,114 @@ async def test_the_wake_budget_runs_out_after_three_and_a_user_turn_resets_it(ip
     assert len(world_loop.calls) > capped + 1, "a user turn must refill the budget"
 
 
+# ---- 2026-10-17: a refused wake is latched and replayed at the runway -------
+#
+# Live-found gap: a job settling during a turn's *tail* -- after its last
+# iteration boundary (the real tail includes the multi-second memory harvest)
+# -- had its wake refused for "turn in flight" and then dropped: the notice sat
+# in the queue until the next human message.  dsh latches a wake it cannot
+# deliver and replays it at convergence, with a hasPending guard; this is that
+# shape at the server layer, where the budget lives.
+
+
+def _park_loop(world):
+    """Make the fake loop's next turns park inside process_input.
+
+    The call is recorded by the fake only after release, so the call list says
+    "this turn finished"; ``entered`` proves the turn is in flight.
+    """
+    original = world.loop.process_input
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def park(session, text, on_delta=None, observer=None):
+        entered.set()
+        await release.wait()
+        return await original(session, text, on_delta=on_delta, observer=observer)
+
+    world.loop.process_input = park
+    return entered, release
+
+
+async def _wait_until(check, attempts: int = 100) -> bool:
+    for _ in range(attempts):
+        if check():
+            return True
+        await asyncio.sleep(0.05)
+    return check()
+
+
+@pytest.mark.asyncio
+async def test_a_wake_refused_mid_turn_is_latched_and_replayed_at_the_runway(ipc):
+    """The bug this fixes: the wake is refused because a turn is in flight, but
+    that turn may be past its last drain boundary -- the notice belongs to the
+    *next* runway, not to a dropped call."""
+    world, _service, client = ipc
+    client.request("initialize")
+    entered, release = _park_loop(world)
+
+    client.request("session.prompt", {"text": "长回合"})
+    assert await _wait_until(entered.is_set), "precondition: the turn is in flight"
+
+    # The job settles now.  Refused (correctly), and latched instead of lost.
+    world.notices.put("[notice] job done", wake=True)
+    await asyncio.sleep(0.3)
+    assert "长回合" not in [c["text"] for c in world.loop.calls], (
+        "precondition: the parked turn has not recorded yet"
+    )
+
+    release.set()
+    assert await _wait_until(lambda: len(world.loop.calls) >= 2), (
+        "the latched wake must open a turn once the runway clears"
+    )
+    texts = [c["text"] for c in world.loop.calls]
+    assert texts[0] == "长回合"
+    assert "notice" in texts[1], f"the replay keeps the wake prompt: {texts}"
+
+
+@pytest.mark.asyncio
+async def test_a_latched_wake_is_suppressed_when_the_queue_was_already_drained(ipc):
+    """dsh's hasPending guard: a latched replay is suppressed when the queue no
+    longer holds the wake -- the dying turn's own boundary drained it, and a
+    replay would open a turn with nothing to look at."""
+    world, _service, client = ipc
+    client.request("initialize")
+    entered, release = _park_loop(world)
+
+    client.request("session.prompt", {"text": "长回合"})
+    assert await _wait_until(entered.is_set)
+
+    world.notices.put("[notice] job done", wake=True)  # refused -> latched
+    await asyncio.sleep(0.3)
+    assert world.notices.drain() == ["[notice] job done"], (
+        "simulate the in-flight turn's own iteration boundary draining it"
+    )
+
+    release.set()
+    await asyncio.sleep(0.5)
+    texts = [c["text"] for c in world.loop.calls]
+    assert texts == ["长回合"], f"no spurious wake for an empty queue: {texts}"
+
+
+@pytest.mark.asyncio
+async def test_an_interrupt_drops_a_latched_wake(ipc):
+    """Esc stops everything, a pending replay included (dsh clears the latch on
+    cancel): the notice stays durable in the queue and rides the next human
+    turn -- what Esc means, nothing more."""
+    world, _service, client = ipc
+    client.request("initialize")
+    entered, _release = _park_loop(world)
+
+    client.request("session.prompt", {"text": "长回合"})
+    assert await _wait_until(entered.is_set)
+    world.notices.put("[notice] job done", wake=True)  # refused -> latched
+    await asyncio.sleep(0.3)
+
+    client.request("session.interrupt")
+    await asyncio.sleep(0.5)
+    assert world.loop.calls == [], "the parked turn was cancelled before recording"
+    assert world.notices.pending == 1, "the notice itself is durable, Esc or not"
+
+
 # ---- D-2 Phase 1: the inbox table -------------------------------------------
 #
 # dsh keeps one event-sourced inbox with next-turn/next-step targets and oc one
