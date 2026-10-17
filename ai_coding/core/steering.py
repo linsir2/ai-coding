@@ -15,6 +15,7 @@ it for the REPL, which is what Claude Code documents for commands (docs §2.1b).
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 
 __all__ = ["SteeringQueue"]
 
@@ -24,20 +25,34 @@ _TRUNCATION = "…"
 class SteeringQueue:
     """A bounded FIFO of lines the user typed while the turn was running."""
 
+    #: Called (from whatever thread queued the line) when a line was put with
+    #: ``wake=True``.  The IPC layer installs it; nothing here calls the loop.
+    on_put: Callable[[str], None] | None = None
+
     def __init__(self, *, max_messages: int = 5, max_chars: int = 2_000) -> None:
         self._lines: deque[str] = deque()
         self._max_messages = max(1, int(max_messages))
         self._max_chars = max(1, int(max_chars))
 
-    def put(self, text: str) -> bool:
+    def put(self, text: str, *, wake: bool = False) -> bool:
         """Queue one line; return ``False`` when it is a command, not an instruction.
 
         Safe from any thread: ``deque.append`` is atomic.
+
+        ``wake`` (D-1c) marks a line that is worth starting a turn for when the
+        session is idle -- a background job ending, not a sub-agent's report,
+        which has always waited for the next human message.  The queue itself
+        never wakes anything; it tells whoever registered :attr:`on_put`.
         """
         body = str(text or "").strip()
         if not body or body.startswith("/"):
             return False
         self._lines.append(body)
+        if wake and self.on_put is not None:
+            try:
+                self.on_put(body)
+            except Exception:  # noqa: BLE001 — a listener must not lose the line
+                pass
         return True
 
     @property

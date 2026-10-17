@@ -174,6 +174,9 @@ def _fake_world(tmp_path: Path) -> SimpleNamespace:
         # steering 前端化: the real world builds one and hands it to the loop;
         # the double follows the interface (sanctioned extension).
         steering=SteeringQueue(),
+        # D-1c: the real world builds one and hands it to the sub-agent runner
+        # and the loop; the double follows the interface (sanctioned extension).
+        notices=SteeringQueue(),
         config=SimpleNamespace(
             models={"fake": SimpleNamespace(name="fake-model")},
             ai=SimpleNamespace(
@@ -1707,3 +1710,113 @@ async def test_session_jobs_on_a_world_without_jobs_says_it_is_unavailable(ipc):
     client.request("initialize")
 
     assert client.request("session.jobs") == {"jobs": [], "available": False}
+
+
+# ---- D-1c: a finished job wakes an idle session, three times at most --------
+#
+# dsh delivers a completion as `wakeup` by default (its `quiet` opt-out) and oc's
+# `sessions.synthetic` resumes unless told not to; ours used to wait for the next
+# human message. The budget is the part both harnesses needed: a woken turn can
+# start the job whose completion wakes it again, and without a ceiling that chain
+# spends money while nobody is watching. dsh leaves it uncapped by default; we cap
+# at three, which is the conservative reading of the same design.
+
+
+async def _settle_a_job(world, tmp_path):
+    """A job that finishes for real, as the notice path sees it."""
+    from ai_coding.core.jobs import JobRegistry
+
+    registry = JobRegistry(root=tmp_path / "jobs", notices=world.notices)
+    _world_jobs = registry
+    world.jobs = registry
+    job = registry.start("exit 0", cwd=str(tmp_path), session_id="s", emit=lambda e: None)
+    for _ in range(100):
+        if job.status != "running":
+            break
+        await asyncio.sleep(0.05)
+    return registry, job
+
+
+@pytest.mark.asyncio
+async def test_a_finished_job_wakes_an_idle_session(ipc, tmp_path):
+    _world, service, client = ipc
+    client.request("initialize")
+    world_loop = _world.loop
+    before = len(world_loop.calls)
+
+    await _settle_a_job(_world, tmp_path)
+    for _ in range(100):  # the wake rides call_soon_threadsafe
+        if len(world_loop.calls) > before:
+            break
+        await asyncio.sleep(0.05)
+
+    assert len(world_loop.calls) == before + 1, "an idle session must be woken"
+    assert "notice" in str(world_loop.calls[-1]["text"])
+
+
+@pytest.mark.asyncio
+def test_the_wake_decision_refuses_when_a_turn_is_already_running() -> None:
+    """The guard, as a decision (the key path in this harness cannot hold a turn
+    open -- the fake loop never yields -- so the integration test above covers
+    the wake itself and this covers the refusals)."""
+    from ai_coding.server.handlers import wake_decision
+
+    assert wake_decision(budget_left=3, turns_in_flight=0) is True
+    assert wake_decision(budget_left=3, turns_in_flight=1) is False, (
+        "a turn in flight drains the notice itself"
+    )
+    assert wake_decision(budget_left=0, turns_in_flight=0) is False, "the budget must hold"
+
+
+@pytest.mark.asyncio
+async def test_the_wake_budget_runs_out_after_three_and_a_user_turn_resets_it(ipc, tmp_path):
+    """dsh's rule: the budget counts turns opened since the human last spoke."""
+    from ai_coding.server.handlers import WAKE_BUDGET
+
+    _world, service, client = ipc
+    client.request("initialize")
+    world_loop = _world.loop
+    # The first completion spends one of the budget's three.
+    registry, _job = await _settle_a_job(_world, tmp_path)
+    await asyncio.sleep(0.3)
+
+    # Keep finishing jobs until the budget is spent: three wakes in total, then
+    # silence. (The count is total-since-the-human-spoke, not "three more".)
+    for _ in range(WAKE_BUDGET + 2):
+        job = registry.start("exit 0", cwd=str(tmp_path), session_id="s", emit=lambda e: None)
+        for _ in range(100):
+            if job.status != "running":
+                break
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.2)
+        registry.discard(job.id)
+    # Let the count settle before reading it: the wake rides a thread hop, and a
+    # loaded machine can deliver it a beat late.  Stability, not a fixed sleep,
+    # is what makes the assertion mean "the budget ended", not "the box was slow".
+    capped = len(world_loop.calls)
+    for _ in range(20):
+        await asyncio.sleep(0.1)
+        if len(world_loop.calls) == capped:
+            break
+        capped = len(world_loop.calls)
+    assert capped == WAKE_BUDGET, f"expected {WAKE_BUDGET} wakes in total, got {capped}"
+
+    # One more completion: quiet now.
+    job = registry.start("exit 0", cwd=str(tmp_path), session_id="s", emit=lambda e: None)
+    for _ in range(100):
+        if job.status != "running":
+            break
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.3)
+    assert len(world_loop.calls) == capped, "the budget must hold"
+
+    # The human speaks: the budget refills.
+    client.request("session.prompt", {"text": "hello"})
+    await asyncio.sleep(0.3)
+    job = registry.start("exit 0", cwd=str(tmp_path), session_id="s", emit=lambda e: None)
+    for _ in range(100):
+        if job.status != "running":
+            break
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.3)
+    assert len(world_loop.calls) > capped + 1, "a user turn must refill the budget"

@@ -220,6 +220,28 @@ def context_tokens(session: Any) -> int:
     return int(session.live_prompt_tokens())
 
 
+#: How many turns a finished background job may open on its own before the
+#: harness goes quiet and waits for the human (D-1c).  dsh ships this budget
+#: uncapped by default and oc always resumes; three is the conservative reading
+#: of the same design, because a woken turn can start the job that wakes it
+#: again and nobody is watching the meter.
+WAKE_BUDGET = 3
+
+
+def wake_decision(budget_left: int, turns_in_flight: int) -> bool:
+    """Whether a finished job may open a turn of its own (D-1c).
+
+    Two refusals, and each has its own reason:
+
+    * no budget left -- a woken turn can start the job whose completion wakes it
+      again, so the chain has to end somewhere;
+    * a turn is already running -- it drains the notice at its own iteration
+      boundary, and waking it again would put the same line in the context twice
+      while spending a turn to do it.
+    """
+    return budget_left > 0 and turns_in_flight == 0
+
+
 def make_handlers(
     world: AppWorld,
     service: IpcService,
@@ -524,6 +546,10 @@ def make_handlers(
 
     def session_prompt(params: dict[str, Any]) -> dict[str, Any]:
         """Start a real turn; events reach the client through the bridge."""
+        # The human spoke: a job that ends from here on may wake the session
+        # again (dsh's rule -- the budget counts turns opened *since* the last
+        # human input).
+        wake_left["left"] = WAKE_BUDGET
         text = str(params.get("text", "") or "")
         session_id = str(params.get("id", "") or state.session_id)
         session = state.session
@@ -1136,6 +1162,43 @@ def make_handlers(
         if shutdown is not None:
             shutdown()
         return {"ok": True}
+
+    # ---- D-1c: a finished job may open a turn ------------------------------
+    wake_left = {"left": WAKE_BUDGET}
+
+    async def _wake_turn(session: Any) -> None:
+        """The turn a finished job opens, when nobody is looking.
+
+        The prompt is deliberately generic: the notice itself is already in the
+        queue and the turn's own iteration boundary drains it, so this line only
+        has to give the model a reason to look.  Phrasing the outcome here would
+        state it twice, and the second statement is the one that could drift.
+        """
+        try:
+            await world.loop.process_input(
+                session, "[notice] 后台任务的结果到了——查看并继续。"
+            )
+        except Exception:  # noqa: BLE001 — a wake that fails is not a crashed app
+            _log.exception("job wake turn failed")
+
+    def _maybe_wake() -> None:
+        # Runs on the loop (hopped from the job watcher thread).
+        if state.session is None:
+            return
+        if not wake_decision(wake_left["left"], len(state.turn_futures)):
+            return
+        wake_left["left"] -= 1
+        _launch_turn(lambda: _wake_turn(state.session))
+
+    def _notice_arrived(_text: str) -> None:
+        """From the job watcher thread: hop onto the loop and consider a wake."""
+        try:
+            service._loop.call_soon_threadsafe(_maybe_wake)
+        except RuntimeError:  # pragma: no cover - the loop is already closed
+            pass
+
+    if world.notices is not None:
+        world.notices.on_put = _notice_arrived
 
     return {
         "initialize": initialize,

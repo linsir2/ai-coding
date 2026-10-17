@@ -393,7 +393,8 @@ class JobRegistry:
         if tail:
             line += "\n" + tail
         try:
-            self._notices.put(line)
+            # wake=True: an idle session should look at this on its own (D-1c).
+            self._notices.put(line, wake=True)
         except Exception:  # noqa: BLE001 - a settlement already recorded must stand
             _log.debug("background job notice failed for %s", job.id, exc_info=True)
 

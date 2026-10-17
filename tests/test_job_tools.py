@@ -29,7 +29,9 @@ class _Notices:
     def __init__(self) -> None:
         self.lines: list[str] = []
 
-    def put(self, text: str) -> bool:
+    def put(self, text: str, *, wake: bool = False) -> bool:
+        # `wake` is ignored here: this double stands in for the queue, not for
+        # the UI that wakes a session (D-1c).
         self.lines.append(text)
         return True
 
