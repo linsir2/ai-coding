@@ -224,6 +224,7 @@ async def test_a_failing_memory_block_is_visible_not_silent(tmp_path):
     )
 
     await loop.process_input(_session(), "hi")
+    await loop.flush_harvest()  # settle the scheduled harvest before the loop dies
 
     components = [event.component for event in observer.of_type(Degraded)]
     assert "memory_block" in components

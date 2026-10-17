@@ -108,6 +108,7 @@ async def test_system_prompt_is_byte_identical_across_turns(tmp_path):
 
     await loop.process_input(session, "第一轮")
     await loop.process_input(session, "第二轮：项目用什么管依赖")
+    await loop.flush_harvest()
 
     assert store.count >= 1  # memory really changed between the two turns
     assert engine.requests[0]["instructions"] == engine.requests[1]["instructions"]
@@ -169,15 +170,22 @@ async def test_harvest_sees_only_the_turn_delta(tmp_path):
     await loop.process_input(session, "第一轮：记住用 uv")
     await loop.process_input(session, "第二轮：继续")
     await loop.process_input(session, "第三轮：再说一句")
+    await loop.flush_harvest()
 
-    contents = [[message.content for message in batch] for batch in extractor.seen]
-    assert len(contents) == 3
+    batches = ["\n".join(m.content or "" for m in batch) for batch in extractor.seen]
     # A delta is "the messages added since the last harvest" — user *and* the
-    # assistant's answer (its conclusion can carry the fact) — but never a repeat.
-    assert any("第一轮：记住用 uv" in (c or "") for c in contents[0])
-    assert not any("第一轮" in (c or "") for c in contents[1])
-    assert any("第二轮：继续" in (c or "") for c in contents[1])
-    assert not any("第二轮" in (c or "") for c in contents[2])
+    # assistant's answer (its conclusion can carry the fact) — but never a
+    # repeat.  Since the harvest is scheduled (2026-10-17) rapid turns may
+    # coalesce into one delta; what must hold under any interleaving is that
+    # every turn's words go to the extractor exactly once, in order.
+    for keyword in ("第一轮：记住用 uv", "第二轮：继续", "第三轮：再说一句"):
+        total = sum(keyword in batch for batch in batches)
+        assert total == 1, f"{keyword} appeared {total} times across {len(batches)} batches"
+    order = [
+        next(i for i, batch in enumerate(batches) if keyword in batch)
+        for keyword in ("第一轮：记住用 uv", "第二轮：继续", "第三轮：再说一句")
+    ]
+    assert order == sorted(order), order
 
 
 @pytest.mark.asyncio
@@ -188,11 +196,15 @@ async def test_the_harvest_cursor_survives_a_new_loop_on_the_same_session(tmp_pa
     sessions = SessionService(tmp_path / "sessions")
     session = sessions.create()
 
-    await _loop(_Engine(), sessions, memory).process_input(session, "第一轮")
+    first_loop = _loop(_Engine(), sessions, memory)
+    await first_loop.process_input(session, "第一轮")
+    await first_loop.flush_harvest()
     reloaded = sessions.load(session.session_id)
     assert reloaded is not None and reloaded.harvested_messages > 0
 
-    await _loop(_Engine(), sessions, memory).process_input(session, "第二轮")
+    second_loop = _loop(_Engine(), sessions, memory)
+    await second_loop.process_input(session, "第二轮")
+    await second_loop.flush_harvest()
 
     second = [message.content for message in extractor.seen[1]]
     assert any("第二轮" in (content or "") for content in second)
@@ -211,6 +223,7 @@ async def test_harvest_stores_what_the_extractor_returns(tmp_path):
     loop.observer = observer
 
     await loop.process_input(sessions.create(), "记住：项目用 uv 管理依赖")
+    await loop.flush_harvest()
 
     assert memory.store.count == 1
     assert memory.store.all()[0].kind is NoteKind.DECISION
@@ -256,6 +269,7 @@ async def test_l4_summary_reaches_the_harvest(tmp_path):
 
     await loop.process_input(session, "第一轮" * 20)
     await loop.process_input(session, "第二轮" * 20)
+    await loop.flush_harvest()
 
     summaries = [
         message.content
@@ -283,6 +297,7 @@ async def test_a_broken_memory_service_never_breaks_the_turn(tmp_path):
     loop = _loop(_Engine("answer"), sessions, _Broken(MemoryStore(tmp_path / "m.json")))
 
     text = await loop.process_input(sessions.create(), "go")
+    await loop.flush_harvest()  # the broken harvest must not surface here
 
     assert text == "answer"
     assert loop.last_outcome is not None
@@ -355,9 +370,137 @@ async def test_r8_a_turn_that_only_wrote_a_checkpoint_is_not_tool_evidence(tmp_p
     )
 
     await loop.process_input(sessions.create(), "先记一行再干别的")
+    await loop.flush_harvest()
 
     harvested = [note for note in store.all() if "uv" in note.text]
     assert harvested, "the harvest must still run"
     assert harvested[-1].evidence == "model", (
         "a checkpoint call is the turn writing to itself, not tool evidence (D-14)"
     )
+
+
+# ---- 2026-10-17: the harvest is fire-and-forget (tail = one LLM call) -------
+#
+# Measured live: the turn's future stayed open 0-22s after ``turn.finished``,
+# all of it ``await turn_memory.harvest`` -- one extractor LLM call.  Every
+# waiter downstream (the wake latch's runway, promote's settle-wait) paid it.
+# The harvest now runs after the response, like the skill review already does;
+# the cursor only advances over what the extractor was actually shown.
+
+
+class _GatedExtractor:
+    """Parks inside the call until the gate opens; records every batch."""
+
+    def __init__(self, gate) -> None:
+        self.gate = gate
+        self.seen: list[list[ChatMessage]] = []
+
+    async def __call__(self, messages, conclusion):
+        self.seen.append(list(messages))
+        await self.gate.wait()
+        return []
+
+
+@pytest.mark.asyncio
+async def test_process_input_returns_before_a_slow_harvest_finishes(tmp_path):
+    import asyncio
+    import time
+
+    gate = asyncio.Event()
+    extractor = _GatedExtractor(gate)
+    memory = _memory(tmp_path, extractor)
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(_Engine(), sessions, memory)
+    session = sessions.create()
+
+    started = time.monotonic()
+    text = await asyncio.wait_for(loop.process_input(session, "第一轮"), timeout=1.0)
+    elapsed = time.monotonic() - started
+
+    assert text == "好的"
+    assert elapsed < 0.5, "the extractor is parked on the gate; the turn must not wait"
+    for _ in range(100):  # the scheduled task needs a few ticks to reach the call
+        if extractor.seen:
+            break
+        await asyncio.sleep(0.01)
+    assert extractor.seen, "the harvest did start in the background"
+
+    gate.set()
+    await loop.flush_harvest()
+    assert session.harvested_messages > 0, "the flushed harvest advanced the cursor"
+
+
+@pytest.mark.asyncio
+async def test_a_later_harvest_chains_behind_a_slow_one_without_repeating(tmp_path):
+    import asyncio
+    import time
+
+    gate = asyncio.Event()
+    extractor = _GatedExtractor(gate)
+    memory = _memory(tmp_path, extractor)
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(_Engine(), sessions, memory)
+    session = sessions.create()
+
+    started = time.monotonic()
+
+    async def three_turns():
+        await loop.process_input(session, "第一轮关键字")
+        await loop.process_input(session, "第二轮关键字")
+        await loop.process_input(session, "第三轮关键字")
+
+    await asyncio.wait_for(three_turns(), timeout=1.0)
+    assert time.monotonic() - started < 1.0, "turns must not wait on parked harvests"
+
+    gate.set()
+    await loop.flush_harvest()
+
+    batches = ["\n".join(m.content or "" for m in batch) for batch in extractor.seen]
+    # Deltas may coalesce when turns outrun extraction (by design), but a
+    # message is shown to the extractor exactly once, and order is preserved.
+    for keyword in ("第一轮关键字", "第二轮关键字", "第三轮关键字"):
+        total = sum(keyword in batch for batch in batches)
+        assert total == 1, f"{keyword} appeared {total} times across {len(batches)} batches"
+    first_batch_of = {
+        keyword: next(i for i, batch in enumerate(batches) if keyword in batch)
+        for keyword in ("第一轮关键字", "第二轮关键字", "第三轮关键字")
+    }
+    assert (
+        first_batch_of["第一轮关键字"]
+        <= first_batch_of["第二轮关键字"]
+        <= first_batch_of["第三轮关键字"]
+    ), first_batch_of
+
+
+@pytest.mark.asyncio
+async def test_the_cursor_advances_over_what_the_extractor_saw_not_what_exists_now(tmp_path):
+    """The offset race the async schedule would otherwise open: a later turn
+    appends while the extractor runs; advancing to ``len(session.messages)``
+    would silently mark those messages harvested without ever showing them."""
+    import asyncio
+
+    gate = asyncio.Event()
+    extractor = _GatedExtractor(gate)
+    memory = _memory(tmp_path, extractor)
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(_Engine(), sessions, memory)
+    session = sessions.create()
+
+    await loop.process_input(session, "第一轮")
+    for _ in range(100):  # the task chain needs a few ticks to reach the call
+        if extractor.seen:
+            break
+        await asyncio.sleep(0.01)
+    assert extractor.seen, "precondition: the harvest froze its delta"
+    captured = len(session.messages)
+    session.messages.append(
+        ChatMessage(role="user", content="下一回合才该被看见的消息", timestamp="")
+    )
+
+    gate.set()
+    await loop.flush_harvest()
+
+    assert session.harvested_messages == captured, (
+        "the cursor marks what the extractor was shown, not what exists now"
+    )
+    assert session.harvested_messages < len(session.messages)

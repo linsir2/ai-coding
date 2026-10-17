@@ -46,6 +46,16 @@ class TurnMemory:
         self._emit = emit
         self._save = save
 
+    @property
+    def enabled(self) -> bool:
+        """Whether a harvest would do anything (the loop's schedule gate).
+
+        ``None`` memory is the "no memory configured" shape every loop test
+        uses; the property lets the loop skip scheduling a task that would be
+        a no-op, without reaching into ``_memory`` itself.
+        """
+        return self._memory is not None and bool(getattr(self._memory, "enabled", True))
+
     # ---- reading -----------------------------------------------------------
 
     def block(self) -> tuple[str, tuple[str, ...]]:
@@ -158,6 +168,9 @@ class TurnMemory:
         if self._memory is None:
             return
         start = int(getattr(session, "harvested_messages", 0) or 0)
+        # The delta is captured here, synchronously -- the extractor call below
+        # may run long after this method's caller returned (the loop schedules
+        # the harvest), and what the extractor is shown is this frozen slice.
         delta = session.messages[start:]
         if not delta:
             return
@@ -177,7 +190,12 @@ class TurnMemory:
                 timeout=remaining_of(deadline),
                 label="memory_harvest",
             )
-            session.harvested_messages = len(session.messages)
+            # The cursor advances over what was shown to the extractor, never
+            # over "everything that exists now": a later turn can append while
+            # the extractor runs, and ``len(session.messages)`` would silently
+            # skip those messages forever (the async schedule made this a real
+            # race; the fix is the same line in both worlds).
+            session.harvested_messages = start + len(delta)
             self._save(session)
             if (
                 report.added

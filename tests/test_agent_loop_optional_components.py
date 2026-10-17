@@ -163,6 +163,7 @@ async def test_memory_is_injected_at_the_tail_and_harvested(tmp_path):
     )
 
     await loop.process_input(sessions.create(), "go")
+    await loop.flush_harvest()  # the harvest is scheduled now (2026-10-17)
 
     assert memory.recalled  # the constraint block was built
     assert "prior note" not in (engine.requests[0]["instructions"] or "")

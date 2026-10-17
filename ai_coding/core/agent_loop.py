@@ -375,6 +375,11 @@ class AgentLoop:
         self.closer = TurnCloser(sessions, self.reporter, self.settings)
         # R5: the memory-facing half of a turn (block / harvest / status).
         self.turn_memory = TurnMemory(memory, emit=self._emit, save=self.closer.save)
+        #: 2026-10-17: the fire-and-forget harvest chain.  The harvest no longer
+        #: holds the turn's future open (it used to: 0-22s measured, one
+        #: extractor call); each finished turn chains its harvest behind the
+        #: previous one so the extractor never sees a delta twice.
+        self._harvest_task: asyncio.Task[None] | None = None
         # R5: history compaction (budget-driven for turns, forced for /compact).
         self.compactor = Compactor(context, emit=self._emit)
         # R7a: one request per iteration, assembled in its own unit (the
@@ -1185,19 +1190,11 @@ class AgentLoop:
             outcome=outcome,
             closing=closing,
         )
-        await self.turn_memory.harvest(
-            session,
-            deadline=frame.deadline,
-            summaries=books.summaries,
-            outcome=outcome,
-            # R6d: the turn's provenance for whatever it wrote — a fact the loop
-            # already has, so memory can record where a note came from without
-            # asking the model (and without filtering on it: D-R6-10).
-            turn=frame.turn_number,
-            # R8a D-14: what counts is evidence about the world, and a checkpoint
-            # write is the turn talking about itself.
-            evidence="tool" if books.evidence_calls else "model",
-        )
+        # 2026-10-17: the harvest runs after the response now, not inside the
+        # turn's future.  Scheduled here -- right where it used to be awaited --
+        # so the delta's provenance (turn number, evidence flag, summaries)
+        # still comes from this turn's books.
+        self._schedule_harvest(session, frame=frame, books=books, outcome=outcome)
         await self.turn_hooks.fire(HookPoint.TURN_END, session)
         # M1: schedule a background skill review if the interval has been reached.
         self._maybe_schedule_skill_review(session)
@@ -1205,6 +1202,74 @@ class AgentLoop:
         return outcome.text or outcome.handoff
 
     # ---- skill review (M1) --------------------------------------------------
+
+    def _schedule_harvest(
+        self,
+        session: SessionData,
+        *,
+        frame: TurnFrame,
+        books: TurnBooks,
+        outcome: TurnOutcome,
+    ) -> None:
+        """Run this turn's memory harvest after the response (2026-10-17).
+
+        The harvest used to sit in ``_finish_turn`` and hold the turn's future
+        open for as long as the extractor took -- measured live at 0-22s, and
+        that whole window was one LLM call.  Every waiter downstream (the wake
+        latch's runway, promote's settle-wait) was paying it.  The fix follows
+        the skill review's existing pattern: schedule, don't await -- "the
+        review runs after the user has received its response" is the same
+        sentence here.
+
+        Chained on purpose: the harvest captures its delta lazily (everything
+        since the cursor), so two overlapping harvests would show the same
+        messages to the extractor twice.  The chain also coalesces deltas when
+        turns outrun extraction -- by design: the cursor only advances over
+        what the extractor was shown, so nothing is ever skipped, and a retry
+        after a failure naturally includes everything since the last success.
+        """
+        if not self.turn_memory.enabled:
+            return
+        previous = self._harvest_task
+
+        async def run_harvest() -> None:
+            if previous is not None:
+                try:
+                    await previous
+                except Exception:  # noqa: BLE001 — a chain link must not break the next
+                    pass
+            await self.turn_memory.harvest(
+                session,
+                deadline=frame.deadline,
+                summaries=books.summaries,
+                outcome=outcome,
+                # R6d: the turn's provenance for whatever it wrote — a fact the loop
+                # already has, so memory can record where a note came from without
+                # asking the model (and without filtering on it: D-R6-10).
+                turn=frame.turn_number,
+                # R8a D-14: what counts is evidence about the world, and a checkpoint
+                # write is the turn talking about itself.
+                evidence="tool" if books.evidence_calls else "model",
+            )
+
+        self._harvest_task = asyncio.create_task(
+            run_harvest(), name=f"memory-harvest:{session.session_id}"
+        )
+
+    async def flush_harvest(self) -> None:
+        """Await the pending harvest chain (tests; ``aclose`` bounds it).
+
+        Never raises: the harvest is best-effort by contract, and a waiter
+        must not resurrect a failure the harvest already swallowed.
+        """
+        while True:
+            task = self._harvest_task
+            if task is None or task.done():
+                return
+            try:
+                await task
+            except Exception:  # noqa: BLE001 — see above
+                return
 
     def _maybe_schedule_skill_review(self, session: SessionData) -> None:
         """Schedule a background skill review when the interval is reached.
@@ -1692,7 +1757,18 @@ class AgentLoop:
         return step
 
     async def aclose(self) -> None:
-        """Release engine resources (the loop owns nothing else)."""
+        """Release engine resources (the loop owns nothing else).
+
+        A pending background harvest gets a bounded chance to finish first
+        (2026-10-17): the extractor needs the engine that is about to close,
+        and a graceful exit should not throw away the last turn's memory.
+        Five seconds is the ceiling -- a slow provider must not hold up
+        shutdown; past it the loss is what a crash would cost anyway.
+        """
+        try:
+            await asyncio.wait_for(self.flush_harvest(), timeout=5.0)
+        except Exception:  # noqa: BLE001 — shutdown is best-effort
+            _log.debug("harvest flush on close failed or timed out", exc_info=True)
         await self.engine.aclose()
 
     def memory_status(self) -> dict[str, Any]:
