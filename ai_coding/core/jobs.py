@@ -55,6 +55,9 @@ from ai_coding.infra.time_utils import now_utc
 
 __all__ = [
     "MAX_JOB_LOG_BYTES",
+    "WAIT_CANCELLED",
+    "WAIT_SETTLED",
+    "WAIT_TIMEOUT",
     "MAX_RUNNING_JOBS",
     "NOTICE_TAIL_LINES",
     "Job",
@@ -105,6 +108,13 @@ STATUS_KILLED = "killed"
 #: Only ever produced by a rescan: the process is gone and nobody recorded how
 #: it ended.  Guessing "completed" would be a lie, so the vocabulary says so.
 STATUS_UNKNOWN = "unknown"
+
+#: How a wait ended.  Three outcomes, not two: conflating "cancelled" with
+#: "timed out" made a cancelled foreground call report itself as promoted --
+#: telling the model a command it had just killed was "still running".
+WAIT_SETTLED = "settled"
+WAIT_TIMEOUT = "timeout"
+WAIT_CANCELLED = "cancelled"
 
 
 class JobLimitReached(RuntimeError):
@@ -382,6 +392,11 @@ class JobRegistry:
 
     # ---- reading -----------------------------------------------------------
 
+    def get(self, job_id: str) -> Job | None:
+        """One job by id, or ``None`` when this workspace has no such job."""
+        with self._lock:
+            return self._jobs.get(job_id)
+
     def list(self) -> list[Job]:
         """Running first (oldest first), then settled newest first."""
         with self._lock:
@@ -422,8 +437,7 @@ class JobRegistry:
         Idempotent in the way a caller needs: killing a job that already ended
         returns its real ending instead of claiming a kill that did not happen.
         """
-        with self._lock:
-            job = self._jobs.get(job_id)
+        job = self.get(job_id)
         if job is None:
             raise KeyError(job_id)
         if job.status != STATUS_RUNNING:
@@ -476,24 +490,34 @@ class JobRegistry:
         *,
         timeout: float,
         cancel: threading.Event | None = None,
+        kill_on_cancel: bool = True,
         tick: float = _WAIT_TICK,
-    ) -> bool:
-        """Wait for ``job`` to settle; ``False`` means the wait ran out.
+    ) -> str:
+        """Wait for ``job``: :data:`WAIT_SETTLED`, :data:`WAIT_TIMEOUT` or
+        :data:`WAIT_CANCELLED`.
 
         A wait that times out does not stop anything -- that is the promotion
         path.  ``cancel`` is the dispatcher's Esc flag, polled on the same tick
         the subprocess runner uses, so the two paths agree on when they notice.
+
+        ``kill_on_cancel`` separates the two callers.  A foreground bash call
+        owns its command and Esc is meant to stop it; ``job_output`` only asked
+        to wait, and a job belongs to the workspace, so Esc there stops the
+        waiting and leaves the command alone.
         """
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
+            if job.done.is_set():
+                return WAIT_SETTLED
             if remaining <= 0:
-                return job.done.is_set()
+                return WAIT_TIMEOUT
             if cancel is not None and cancel.is_set():
-                self.kill(job.id, reason="cancelled by the user")
-                return True
+                if kill_on_cancel:
+                    self.kill(job.id, reason="cancelled by the user")
+                return WAIT_CANCELLED
             if job.done.wait(timeout=min(tick, remaining)):
-                return True
+                return WAIT_SETTLED
             await asyncio.sleep(0)
 
     def announce(self, job_id: str, *, emit: Callable[[Any], None] | None = None) -> None:

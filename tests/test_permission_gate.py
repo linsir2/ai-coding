@@ -163,3 +163,11 @@ def test_listing_and_unlisted_skills_are_untouched():
 
     assert gate.check("skill", {"action": "list"}) == PermissionDecision.ALLOW
     assert gate.check("skill", {"action": "read", "name": "plain"}) == PermissionDecision.ALLOW
+
+
+def test_job_output_is_allowed_without_a_confirmation():
+    """Waiting on a job spends the turn, not the user's patience: it reads and
+    blocks, and touches nothing outside this process."""
+    gate = _gate()
+
+    assert gate.check("job_output", {"job_id": "job_1"}) == PermissionDecision.ALLOW

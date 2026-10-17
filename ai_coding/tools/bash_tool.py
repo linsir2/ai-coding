@@ -253,7 +253,7 @@ class BashTool(BaseTool):
         pump.start()
         started = time.monotonic()
         try:
-            settled = await registry.wait(job, timeout=effective, cancel=context.kill_event)
+            outcome = await registry.wait(job, timeout=effective, cancel=context.kill_event)
         except asyncio.CancelledError:
             # Esc abandons the awaiting task as well as setting the flag; the
             # command has to go with it, or a promoted job outlives the turn the
@@ -263,7 +263,9 @@ class BashTool(BaseTool):
             raise
         duration = time.monotonic() - started
         text, size = registry.read_head(job, self._max_output)
-        if settled:
+        # Cancelled counts as settled: the job is already killed and settled, and
+        # reporting a timeout here would promote a dead command.
+        if outcome in ("settled", "cancelled"):
             pump.stop()
             # The result is in hand and the model's answer is about to be built;
             # a record of a command that already answered would be litter.

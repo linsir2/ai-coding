@@ -201,9 +201,10 @@ def _assemble_registry(
         # D-1: a job outlives the session that started it, so it belongs to the
         # workspace and to whoever holds the registry -- which is the main
         # session.  A sub-agent stack gets neither, exactly like history_search.
-        from ai_coding.tools.job_tools import JobKillTool, JobListTool
+        from ai_coding.tools.job_tools import JobKillTool, JobListTool, JobOutputTool
 
         registry.register(JobListTool())
+        registry.register(JobOutputTool())
         registry.register(JobKillTool())
 
     if include_subagent:

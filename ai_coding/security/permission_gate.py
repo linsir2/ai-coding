@@ -189,6 +189,10 @@ class PermissionGate:
             # test run.
             "job_list",
             "job_kill",
+            # D-1b: reading a job, waiting included. A wait spends the turn; it
+            # changes nothing outside the process, which is what the WARN tier is
+            # for.
+            "job_output",
             # R7e-1: durable, but not a side effect on the repo, and the harness
             # harvests notes without asking anyway (docs/r7e-analysis.md Q1).
             "memory_write",

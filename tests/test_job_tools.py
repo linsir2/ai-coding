@@ -22,7 +22,7 @@ import pytest
 
 from ai_coding.core.jobs import JobRegistry
 from ai_coding.tools.base import ToolContext
-from ai_coding.tools.job_tools import JobKillTool, JobListTool
+from ai_coding.tools.job_tools import JobKillTool, JobListTool, JobOutputTool
 
 
 class _Notices:
@@ -237,6 +237,193 @@ async def test_killing_a_job_this_platform_cannot_verify_is_refused_outright(tmp
 @pytest.mark.asyncio
 async def test_killing_without_a_registry_is_an_error_not_a_no_op(tmp_path):
     result = await JobKillTool().execute({"job_id": "job_x"}, _ctx(tmp_path, None))
+
+    assert result.success is False
+    assert result.error == "no_jobs"
+
+
+# ---- job_output: waiting for a result without a cursor ---------------------
+#
+# dsh's job_output carries a byte cursor and a blocking wait; oc and Claude Code
+# have no blocking read at all (Claude Code deprecated TaskOutput for
+# notifications). The wait is the part worth having -- "start the tests in the
+# background, then report the result" needs it. The cursor is not: this harness
+# writes every job's output to a file, so `read` already answers "what did it
+# print" and a second offset scheme would be a second truth about the same bytes.
+
+
+def _start(registry, tmp_path, command, session_id="s1"):
+    return registry.start(
+        command, cwd=str(tmp_path), session_id=session_id, emit=lambda e: None
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_peek_reports_the_status_and_the_tail_without_waiting(tmp_path):
+    """The default: look, do not block. A model checking on three jobs must not
+    spend three waits doing it."""
+    import time as _time
+
+    registry = JobRegistry(root=tmp_path / "jobs")
+    job = _start(registry, tmp_path, "echo peeked; sleep 30")
+    started = _time.monotonic()
+
+    try:
+        result = await JobOutputTool().execute({"job_id": job.id}, _ctx(tmp_path, registry))
+
+        assert result.success is True
+        assert "running" in result.output
+        assert "peeked" in result.output, "the tail, so a peek is also a read"
+        assert _time.monotonic() - started < 1.0, "a peek must not wait"
+    finally:
+        registry.kill(job.id, reason="test over")
+
+
+@pytest.mark.asyncio
+async def test_waiting_returns_as_soon_as_the_job_settles(tmp_path):
+    """The whole reason this tool exists: the model can hold a turn while the
+    answer arrives, instead of ending the turn and waiting to be spoken to."""
+    registry = JobRegistry(root=tmp_path / "jobs")
+    job = _start(registry, tmp_path, "sleep 1; echo WAITED")
+
+    result = await JobOutputTool().execute(
+        {"job_id": job.id, "wait": True, "timeout_seconds": 30}, _ctx(tmp_path, registry)
+    )
+
+    assert result.success is True
+    assert "WAITED" in result.output
+    assert "completed" in result.output
+
+
+@pytest.mark.asyncio
+async def test_a_wait_that_times_out_leaves_the_job_running_and_says_so(tmp_path):
+    """dsh's rule (``tool-jobs``): a wait that runs out does not stop anything.
+    Silently killing here would be the worst possible answer -- the model asked
+    to wait, not to stop, and would report a build it never saw finish."""
+    registry = JobRegistry(root=tmp_path / "jobs")
+    job = _start(registry, tmp_path, "sleep 30")
+
+    try:
+        result = await JobOutputTool().execute(
+            {"job_id": job.id, "wait": True, "timeout_seconds": 1}, _ctx(tmp_path, registry)
+        )
+
+        assert result.success is True
+        assert "still running" in result.output.lower()
+        assert "not killed" in result.output.lower()
+        assert next(row for row in registry.list() if row.id == job.id).status == "running"
+    finally:
+        registry.kill(job.id, reason="test over")
+
+
+@pytest.mark.asyncio
+async def test_waiting_on_an_unknown_id_is_an_error_not_an_empty_read(tmp_path):
+    registry = JobRegistry(root=tmp_path / "jobs")
+
+    result = await JobOutputTool().execute(
+        {"job_id": "job_nope", "wait": True}, _ctx(tmp_path, registry)
+    )
+
+    assert result.success is False
+    assert result.error == "unknown_job"
+
+
+@pytest.mark.asyncio
+async def test_waiting_on_an_inherited_job_is_refused_because_nothing_will_wake_it(tmp_path):
+    """An adopted job has no watcher in this process -- nothing here would ever
+    set its ``done``, so waiting would burn the whole timeout to learn nothing."""
+    first = JobRegistry(root=tmp_path / "jobs")
+    job = _start(first, tmp_path, "sleep 30", session_id="old")
+    first.forget(job.id)
+
+    second = JobRegistry(root=tmp_path / "jobs")
+    try:
+        result = await JobOutputTool().execute(
+            {"job_id": job.id, "wait": True}, _ctx(tmp_path, second)
+        )
+
+        assert result.success is False
+        assert result.error == "adopted_job"
+        assert "earlier run" in result.output
+    finally:
+        _killpid(job.pid)
+
+
+@pytest.mark.asyncio
+async def test_an_inherited_job_can_still_be_peeked_at(tmp_path):
+    """Refusing the wait must not cost the model the ability to look: the log
+    file outlived the process that wrote it."""
+    first = JobRegistry(root=tmp_path / "jobs")
+    job = _start(first, tmp_path, "echo inherited-output; sleep 30", session_id="old")
+    first.forget(job.id)
+
+    second = JobRegistry(root=tmp_path / "jobs")
+    try:
+        result = await JobOutputTool().execute({"job_id": job.id}, _ctx(tmp_path, second))
+
+        assert result.success is True
+        assert "inherited-output" in result.output
+    finally:
+        _killpid(job.pid)
+
+
+@pytest.mark.asyncio
+async def test_the_wait_is_capped_and_reports_the_value_it_used(tmp_path):
+    """One tool call may not hold a turn for as long as it likes. dsh caps the
+    wait at ten minutes and clamps the model's request down to it; we report the
+    effective number so the ceiling is visible rather than surprising."""
+    from ai_coding.tools.job_tools import MAX_JOB_WAIT_SECONDS
+
+    registry = JobRegistry(root=tmp_path / "jobs")
+    job = _start(registry, tmp_path, "exit 0")
+
+    result = await JobOutputTool().execute(
+        {"job_id": job.id, "wait": True, "timeout_seconds": 1_000_000},
+        _ctx(tmp_path, registry),
+    )
+
+    assert result.data["timeout_seconds"] == MAX_JOB_WAIT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_escape_stops_the_wait_without_killing_the_job(tmp_path):
+    """Esc means "stop waiting". It does not mean "stop that build" -- the job
+    belongs to the workspace and something else may be waiting on it too."""
+    import threading
+
+    registry = JobRegistry(root=tmp_path / "jobs")
+    job = _start(registry, tmp_path, "sleep 30")
+    cancel = threading.Event()
+    ctx = ToolContext(
+        jobs=registry, workspace=str(tmp_path), kill_event=cancel, session_id="s1"
+    )
+
+    async def press_escape() -> None:
+        import asyncio
+
+        await asyncio.sleep(0.3)
+        cancel.set()
+
+    import asyncio
+
+    pressing = asyncio.ensure_future(press_escape())
+    try:
+        result = await JobOutputTool().execute(
+            {"job_id": job.id, "wait": True, "timeout_seconds": 30}, ctx
+        )
+        await pressing
+        assert result.success is False
+        assert "cancel" in result.output.lower()
+        assert next(row for row in registry.list() if row.id == job.id).status == "running", (
+            "Esc must not have killed a job the model only asked to wait for"
+        )
+    finally:
+        _killpid(job.pid)
+
+
+@pytest.mark.asyncio
+async def test_job_output_without_a_registry_says_so(tmp_path):
+    result = await JobOutputTool().execute({"job_id": "job_x"}, _ctx(tmp_path, None))
 
     assert result.success is False
     assert result.error == "no_jobs"

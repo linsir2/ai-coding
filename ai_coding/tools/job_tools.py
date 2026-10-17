@@ -26,16 +26,20 @@ from typing import Any
 
 from ai_coding.core.jobs import (
     LIST_TAIL_LINES,
+    NOTICE_TAIL_LINES,
     STATUS_RUNNING,
+    WAIT_CANCELLED,
+    WAIT_TIMEOUT,
     JobIdentityUnverifiable,
     JobRegistry,
 )
 from ai_coding.domain.message import ToolResult
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
-__all__ = ["JobListTool", "JobKillTool"]
+__all__ = ["JobListTool", "JobKillTool", "JobOutputTool"]
 
 #: Settled rows in one listing. The listing is a status board, not a log.
+_TIMEOUT_GRACE = 5.0
 _SETTLED_ROWS = 20
 _ROW_CHARS = 160
 _TAIL_CHARS = 120
@@ -227,4 +231,170 @@ class JobKillTool(BaseTool):
             success=True,
             output=f"job {job_id} stopped · {job.detail} · log: {job.log_path}",
             data={"job_id": job_id, "status": job.status, "reason": reason},
+        )
+
+
+#: Ceiling on one wait, matching the turn clock: a tool call that may hold a
+#: turn may not hold it forever.  dsh caps at ten minutes too
+#: (``maxWaitTimeoutMs``, tool-jobs/src/index.ts:61).
+MAX_JOB_WAIT_SECONDS = 600
+#: dsh's default wait (``waitTimeoutMs``): long enough for a test suite, short
+#: enough that the model does not sit on a turn for a whole build.
+DEFAULT_JOB_WAIT_SECONDS = 30
+#: A peek reads a bounded tail and returns; the dispatcher only needs a ceiling.
+_PEEK_SECONDS = 5.0
+
+
+class JobOutputTool(BaseTool):
+    """Read a job's output, and optionally hold the turn until it ends."""
+
+    parallel_safe = True
+    #: Reading is not a side effect; ``wait`` blocks, it does not act.
+    mutates_world = False
+
+    @property
+    def name(self) -> str:
+        return "job_output"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Read one background job: its status, its exit code, and the tail of "
+            "its output. Pass wait: true to hold this turn until the job ends or "
+            "your timeout runs out -- use it only when you genuinely cannot "
+            "continue without the result, because it spends the turn. A wait that "
+            "times out leaves the job running; it never stops it. For more than "
+            "the last few lines, read the log path with the read tool."
+        )
+
+    @property
+    def params_json_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string", "description": "The job id, as job_list reports it."},
+                "wait": {
+                    "type": "boolean",
+                    "description": (
+                        "Hold this turn until the job finishes or the timeout "
+                        "expires. Defaults to false."
+                    ),
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": (
+                        f"How long to wait, default {DEFAULT_JOB_WAIT_SECONDS}s, "
+                        f"capped at {MAX_JOB_WAIT_SECONDS}s."
+                    ),
+                },
+            },
+            "required": ["job_id"],
+        }
+
+    @property
+    def max_duration_seconds(self) -> float:
+        """The widest wait this tool will honour, so the dispatcher cannot cut
+        the model's wait short and call it a timeout."""
+        return float(MAX_JOB_WAIT_SECONDS) + _TIMEOUT_GRACE
+
+    async def execute(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> ToolResult:
+        registry = _registry(ctx)
+        if registry is None:
+            return _no_registry(self.name)
+        context = resolve_ctx(ctx)
+        job_id = str(params.get("job_id", "") or "").strip()
+        if not job_id:
+            return ToolResult(
+                success=False,
+                output="error: 'job_id' is required (job_list shows the ids)",
+                error="empty_job_id",
+            )
+        job = registry.get(job_id)
+        if job is None:
+            return ToolResult(
+                success=False,
+                output=f"error: no background job {job_id!r} in this workspace",
+                error="unknown_job",
+            )
+
+        wait = params.get("wait") is True
+        lines = [f"{job.id} {job.status} pid {job.pid} · {_one_line(job.command)}"]
+        if job.detail:
+            lines.append(f"    {job.detail}")
+        tail = registry.read_tail(job, NOTICE_TAIL_LINES)
+        if tail:
+            lines.extend(f"    | {row}" for row in tail.splitlines())
+        body = "\n".join(lines)
+
+        if not wait:
+            return ToolResult(
+                success=True,
+                output=body + f"\n    (not waiting; log: {job.log_path})",
+                data={"job_id": job.id, "status": job.status, "waited": False},
+            )
+
+        if job.adopted:
+            # Nothing in this process watches an inherited job, so its `done` can
+            # never be set here: waiting would burn the full timeout to learn
+            # nothing. Saying so beats a wait that always times out.
+            return ToolResult(
+                success=False,
+                output=(
+                    f"error: job {job_id} was started by an earlier run and this "
+                    f"process does not watch it, so waiting here would never be "
+                    f"woken. Its status is above; re-check with job_list, or read "
+                    f"the log directly."
+                ),
+                error="adopted_job",
+            )
+
+        effective = DEFAULT_JOB_WAIT_SECONDS
+        if params.get("timeout_seconds") is not None:
+            try:
+                effective = min(
+                    max(1, int(params["timeout_seconds"])), MAX_JOB_WAIT_SECONDS
+                )
+            except (TypeError, ValueError):
+                effective = DEFAULT_JOB_WAIT_SECONDS
+        outcome = await registry.wait(
+            job, timeout=effective, cancel=context.kill_event, kill_on_cancel=False
+        )
+        data = {
+            "job_id": job.id,
+            "status": job.status,
+            "waited": True,
+            "timeout_seconds": effective,
+        }
+        if outcome == WAIT_CANCELLED:
+            return ToolResult(
+                success=False,
+                output=(
+                    "stopped waiting (cancelled by the user); the job was NOT "
+                    "killed and is still running"
+                ),
+                error="cancelled",
+                data=data,
+            )
+        if outcome == WAIT_TIMEOUT:
+            return ToolResult(
+                success=True,
+                output=(
+                    f"{body}\n    still running after waiting {effective}s -- it "
+                    f"was NOT killed. Keep working on something else, or stop it "
+                    f"with job_kill."
+                ),
+                data={**data, "still_running": True},
+            )
+        settled_tail = registry.read_tail(job, NOTICE_TAIL_LINES)
+        settled_lines = [f"{job.id} {job.status} pid {job.pid} · {_one_line(job.command)}"]
+        if job.detail:
+            settled_lines.append(f"    {job.detail}")
+        if settled_tail:
+            settled_lines.extend(f"    | {row}" for row in settled_tail.splitlines())
+        return ToolResult(
+            success=True,
+            output="\n".join(settled_lines) + f"\n    (log: {job.log_path})",
+            data={**data, "exit_code": job.exit_code},
         )
