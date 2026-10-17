@@ -434,3 +434,22 @@ def test_job_changed_carries_the_panel_rows() -> None:
             ]
         },
     }
+
+
+def test_plan_step_receipt_maps_to_the_wire() -> None:
+    """E2: the receipt the plan runner appends to the parent transcript now has
+    a wire shape; without it a connected TUI only saw the bubbles after a
+    reload, while the replay showed them -- live and replay disagreed."""
+    from ai_coding.core.events import PlanStepReceipt
+
+    wire = to_wire(
+        PlanStepReceipt(prompt="只做这一步，不要做别的：fix bug", summary="[plan] 步骤 1 完成")
+    )
+
+    assert wire == {
+        "type": "plan.receipt",
+        "data": {
+            "prompt": "只做这一步，不要做别的：fix bug",
+            "summary": "[plan] 步骤 1 完成",
+        },
+    }

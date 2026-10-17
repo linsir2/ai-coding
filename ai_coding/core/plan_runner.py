@@ -30,6 +30,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from ai_coding.core.events import PlanStepReceipt
 from ai_coding.core.task_driver import TaskDriver
 from ai_coding.core.turn_policy import TurnPolicy
 from ai_coding.domain.acceptance import AcceptanceItem
@@ -697,7 +698,7 @@ class PlanRunner:
                                    attempts, (start_turn, end_turn), step_usage,
                                    len(seed))
             step_summary = delivery.summary
-            self._record_on_parent(session, step_prompt, step_summary)
+            self._record_on_parent(session, step_prompt, step_summary, observer)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — one bad step must not kill the run
@@ -715,15 +716,17 @@ class PlanRunner:
             report.deliveries.append(delivery)
             session.step_deliveries.append(delivery)
             step_summary = delivery.summary
-            self._record_on_parent(session, step_prompt, step_summary)
+            self._record_on_parent(session, step_prompt, step_summary, observer)
         finally:
             self._loop.policy = original_policy
             if step_view is not None:
                 step_view.end(step_summary)
 
     @staticmethod
-    def _record_on_parent(session: Any, prompt: str, summary: str) -> None:
-        """Leave the parent's two-bubble trace of one step.
+    def _record_on_parent(
+        session: Any, prompt: str, summary: str, observer: Any = None
+    ) -> None:
+        """Leave the parent's two-bubble trace of one step, and say so (E2).
 
         The prompt is the replay marker (``STEP_HEAD``); the summary is the
         one line the user reads instead of the step's tools.  The step's own
@@ -740,6 +743,13 @@ class PlanRunner:
         now = now_utc()
         session.add_message(ChatMessage(role="user", content=prompt, timestamp=now))
         session.add_message(ChatMessage(role="assistant", content=summary, timestamp=now))
+        if observer is not None:
+            # Observation only: a client that cannot render this must not cost
+            # the step its receipt (the bubbles are already written).
+            try:
+                observer(PlanStepReceipt(prompt=prompt, summary=summary))
+            except Exception:  # noqa: BLE001 — see above
+                pass
 
     @staticmethod
     def _open_step_view(console: Any, item: Any, total: int) -> Any:

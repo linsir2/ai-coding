@@ -42,6 +42,7 @@ from ai_coding.core.events import (
     JobChanged,
     LedgerUpdated,
     LoopEvent,
+    PlanStepReceipt,
     ProviderFallback,
     ProviderRetried,
     ScopedEvent,
@@ -210,6 +211,11 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
                 "threshold": event.threshold,
                 "origins": [list(pair) for pair in event.origins],
             },
+        }
+    if isinstance(event, PlanStepReceipt):
+        return {
+            "type": "plan.receipt",
+            "data": {"prompt": event.prompt, "summary": event.summary},
         }
     if isinstance(event, JobChanged):
         return {"type": "job.changed", "data": {"jobs": [dict(row) for row in event.jobs]}}

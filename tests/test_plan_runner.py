@@ -291,3 +291,58 @@ async def test_a_fiat_only_run_still_backfills_and_leaves_no_arm():
     assert len(report.deliveries) == 2
     assert loop.closer.armed_at_save[-1] is False
     assert session.task.armed is False
+
+
+# ---- E2: the receipt bubbles travel on the wire too --------------------------
+#
+# The runner appends two bubbles to the parent session (the step head and the
+# one-line summary) so /resume can replay them.  Until now nothing on the wire
+# carried them: a connected TUI only learned of them after reopening the
+# session, while a reloaded view showed them -- live and replay disagreed.
+# A reload at run end is not the fix (handlers.py:733: the transcript is
+# cumulative, and a reload would wipe the step's own streamed rows); the
+# receipt travels as its own event.
+
+
+@pytest.mark.asyncio
+async def test_a_step_receipt_reaches_a_wired_observer():
+    from ai_coding.core.events import PlanStepReceipt
+
+    session = _session_with("fix bug", "add tests")
+    loop = _StubLoop(["complete", "complete"])
+    seen: list[object] = []
+
+    await PlanRunner(loop).run(session, observer=seen.append)
+
+    receipts = [event for event in seen if isinstance(event, PlanStepReceipt)]
+    assert len(receipts) == 2, f"one receipt per step, got {len(receipts)}"
+    assert "fix bug" in receipts[0].prompt and "fix bug" in receipts[0].summary
+    # The event carries exactly the two bubbles the replay will show.
+    bubbles = [m.content for m in session.messages if m.role == "user"]
+    assert any(receipts[0].prompt == text for text in bubbles)
+
+
+@pytest.mark.asyncio
+async def test_a_crashed_step_receipts_on_the_wire_too():
+    from ai_coding.core.events import PlanStepReceipt
+
+    session = _session_with("explode")
+    loop = _StubLoop(["explode"])
+    seen: list[object] = []
+
+    await PlanRunner(loop).run(session, observer=seen.append)
+
+    assert any(isinstance(event, PlanStepReceipt) for event in seen), (
+        "the failed path writes the same two bubbles; the wire must see them too"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_runner_without_an_observer_records_as_before():
+    session = _session_with("fix bug")
+    loop = _StubLoop(["complete"])
+
+    report = await PlanRunner(loop).run(session)
+
+    assert report.deliveries[0].status == "completed"
+    assert any("只做这一步" in (m.content or "") for m in session.messages)

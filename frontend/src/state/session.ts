@@ -350,7 +350,7 @@ function turnEndMarker(data: Record<string, unknown>): string {
   // used to fall through to the empty string, so the turn ended and the
   // transcript said nothing (A8).
   if (status === "budget") return `[turn] 预算用完（${reason || "turn's token ceiling"}），输入「继续」可接上`
-  if (status === "stopped") return "[turn] 已停止（operator asked to stop）"
+  if (status === "stopped") return "[turn] 已停止（你在审批时选择了停止）"
   if (data["truncatedByLength"] === true) {
     return "[turn] 回答因长度上限被截断：输入「继续」可接上"
   }
@@ -507,6 +507,28 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
         )
         return handoff ? [...settled, { kind: "text", text: handoff, streaming: false }] : settled
       })
+    }
+    case "plan.receipt": {
+      // E2: the runner's two parent bubbles (step head + summary) travel as
+      // their own event now, so the live transcript matches what a reload
+      // would show -- they used to appear only after reopening the session.
+      const prompt = str(data["prompt"])
+      const summary = str(data["summary"])
+      if (!prompt && !summary) return state
+      return {
+        ...state,
+        messages: retireOldest(
+          [
+            ...state.messages,
+            { role: "user" as const, parts: [{ kind: "text" as const, text: prompt, streaming: false }] },
+            {
+              role: "assistant" as const,
+              parts: [{ kind: "text" as const, text: summary, streaming: false }],
+            },
+          ],
+          false,
+        ),
+      }
     }
     case "plan.updated": {
       // 20 §批次2: the wire now carries the list itself; an empty update is

@@ -345,6 +345,22 @@ class ScopedEvent:
 
 
 @dataclass(frozen=True)
+class PlanStepReceipt:
+    """One plan step's parent-transcript bubbles, on the wire (E2).
+
+    The runner writes two bubbles to the parent session per step -- the step
+    head (the replay marker) and the one-line summary -- so a later ``/resume``
+    can rebuild the step timeline.  Nothing carried them to a connected client:
+    they appeared only after reopening the session, while the replay showed
+    them, so live and replay disagreed.  This event carries exactly the two
+    texts, and the client appends them the way the replay would.
+    """
+
+    prompt: str
+    summary: str
+
+
+@dataclass(frozen=True)
 class TaskUpdated:
     """The task list changed (emitted after a todo_write call)."""
 
@@ -480,6 +496,7 @@ LoopEvent = (
     | ScopedEvent
     | TaskUpdated
     | BackgroundTaskDone
+    | PlanStepReceipt
     | JobChanged
     | LedgerUpdated
     | TurnFinished
@@ -554,6 +571,7 @@ __all__ = [
     "InputSteered",
     "TaskUpdated",
     "BackgroundTaskDone",
+    "PlanStepReceipt",
     "JobChanged",
     "TurnFinished",
     "MemoryInjected",

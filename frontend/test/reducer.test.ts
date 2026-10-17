@@ -504,7 +504,7 @@ describe("turn lifecycle", () => {
       ],
       [
         { status: "stopped", reason: "", iterations: 3, truncatedByLength: false, handoff: "" },
-        "[turn] 已停止（operator asked to stop）",
+        "[turn] 已停止（你在审批时选择了停止）",
       ],
       [
         { status: "completed", reason: "", iterations: 2, truncatedByLength: true, handoff: "" },
@@ -1075,5 +1075,22 @@ describe("the plan guard's terminal note (stage 4 r2)", () => {
     )
     const notices = lastAssistant(state).parts.filter((part) => part.kind === "notice")
     expect(notices).toEqual([])
+  })
+})
+
+
+describe("plan.receipt (E2)", () => {
+  test("a receipt appends the step head and its summary as two bubbles", () => {
+    const after = feed(initialState(), {
+      kind: "wire",
+      event: {
+        type: "plan.receipt",
+        data: { prompt: "只做这一步，不要做别的：fix bug", summary: "步骤 1 完成" },
+      } as never,
+    })
+
+    expect(after.messages.map((m) => m.role)).toEqual(["user", "assistant"])
+    expect(JSON.stringify(after.messages[0]?.parts)).toContain("只做这一步")
+    expect(JSON.stringify(after.messages[1]?.parts)).toContain("步骤 1 完成")
   })
 })
