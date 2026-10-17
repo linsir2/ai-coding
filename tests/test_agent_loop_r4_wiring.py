@@ -104,7 +104,9 @@ async def test_context_assembled_reports_composition(tmp_path):
     assert event.iteration == 1
     # 13 §2.3: the reporter counts the assembled system prompt — compare
     # against what the builder produces (methods included), not the raw base.
-    assert event.system_chars == len(PromptAssembler("SYS" * 50).build())
+    # C-2: the baseline carries the request's tool surface (this loop's
+    # registry holds one tool, "read").
+    assert event.system_chars == len(PromptAssembler("SYS" * 50).build(tools=("read",)))
     assert event.tools_chars > 0  # the tool schema is part of the prompt
     assert event.history_messages >= 1
     assert event.history_chars > 0

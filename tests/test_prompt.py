@@ -100,3 +100,66 @@ def test_methods_section_sits_before_the_plan_mode_segment():
         project_instructions="p", skills_catalog="s", mode="plan"
     )
     assert out.index("<methods>") < out.index("<plan-mode>") < out.index("<skills>")
+
+
+# ---- C-2: the methods section follows the tools the request actually carries ---
+
+
+def test_a_read_only_surface_drops_what_it_cannot_do():
+    """The two reference harnesses both prune guidance by the tool surface
+    (dsh: `ctx.tools.get(name, scope) === undefined ? '' : '...'`;
+    opencode: `${OPENCODE_TOOL_GUIDANCE}` rendered from the request's own tool
+    names). Ours has a sharper signal still -- under a read-only posture the
+    surface itself is filtered -- so the prompt must not teach bash habits to a
+    model that cannot call bash."""
+    out = _assembler().build(tools=("read", "grep", "glob"))
+
+    assert "not shell commands like cat" in out
+    assert "exit status" not in out
+    assert "Write replaces a whole file" not in out
+
+
+def test_the_unpruned_text_still_carries_every_tool_row():
+    """A regression guard for a reversal this table once had: `None` means "the
+    caller does not know its surface", so it must render *everything* -- the
+    first version rendered only the general rows and made the unpruned prompt
+    shorter than a read-only one, which is backwards."""
+    for marker in ("exit status", "not shell commands like cat", "not shell find"):
+        assert marker in _assembler().build(), marker
+
+
+def test_no_tool_list_means_no_pruning():
+    """Sub-agents and defensive paths do not know their surface at build time;
+    they must keep the full text rather than silently lose discipline."""
+    assert _assembler().build() == "you are a coding assistant.\n\n" + METHODS_SECTION
+
+
+def test_a_surface_of_nothing_still_keeps_the_general_discipline():
+    """Guidance that is not about a tool cannot be pruned by a tool surface."""
+    out = _assembler().build(tools=())
+
+    assert "Read before write" in out
+    assert "Verify the change" in out
+
+
+def test_tool_guidance_never_repeats_a_tool_description():
+    """dsh's ownership rule: per-tool semantics stay in the description, and a
+    prompt section carries only cross-call habits. 'oldString' is what edit's
+    schema description already says; repeating it here is the drift the rule
+    exists to prevent."""
+    assert "oldString" not in METHODS_SECTION
+
+
+def test_the_methods_section_stays_inside_its_budget():
+    """Neither harness measures this (dsh has no counter at all; opencode has no
+    cap), but this repo has already paid for a 556-character schema advertising
+    a tool that was not connected. The section is ~2x today; the test is the
+    tripwire that stops it becoming an order of magnitude."""
+    assert len(METHODS_SECTION) <= 900, len(METHODS_SECTION)
+
+
+def test_a_subagent_surface_keeps_its_own_habits():
+    """subAgent is only in the main session's registry; a child never spawns one,
+    so the paragraph must not be in the child's prompt."""
+    assert "do not sleep or poll" in _assembler().build(tools=("bash", "subAgent"))
+    assert "do not sleep or poll" not in _assembler().build(tools=("bash",))

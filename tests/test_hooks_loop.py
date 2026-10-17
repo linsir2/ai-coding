@@ -116,7 +116,9 @@ async def test_injected_context_rides_in_the_tail_not_the_system_prompt(tmp_path
     assert "use uv, not pip" in (request[-1].content or "")
     # the system prompt is unchanged by the hook: the cache prefix is intact
     # (13 §2.3: compare against what the builder produces, methods included)
-    assert engine.systems[0] == PromptAssembler("SYS" * 40).build()
+    # C-2: the builder now takes the request's tool surface, so the baseline
+    # carries it too -- this loop's registry holds exactly one tool named "read".
+    assert engine.systems[0] == PromptAssembler("SYS" * 40).build(tools=("read",))
 
 
 @pytest.mark.asyncio

@@ -2065,12 +2065,30 @@ class AgentLoop:
         # 18 §10.5 (P2): the prompt posture rides the one build call; the
         # session may be None on defensive paths — normal is the fail-safe.
         mode = "normal"
+        readonly = False
         if session is not None:
             mode = getattr(session, "mode", "normal") or "normal"
+            readonly = bool(getattr(session, "readonly", False))
         return self.prompt.build(
             project_instructions=project_text,
             skills_catalog=catalog,
             mode=mode,
+            # C-2: the same fact the step picks its schemas from (agent_loop.py:
+            # `self._readonly_schemas if session.readonly else ...`), so the
+            # prompt never teaches a tool the request cannot carry. One rule,
+            # read twice; no second surface to keep in sync.
+            tools=self._prompt_tools(readonly),
+        )
+
+    def _prompt_tools(self, readonly: bool) -> tuple[str, ...]:
+        """The tool names the methods section should speak for.
+
+        Read-only drops the mutating tools, which is what makes the guidance
+        shorter in plan mode rather than merely different.
+        """
+        return tuple(
+            tool.name for tool in self.tools.all_tools
+            if not (readonly and tool.mutates_world)
         )
 
     # ---- memory -----------------------------------------------------------

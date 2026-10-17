@@ -13,6 +13,7 @@ import time
 import pytest
 
 from ai_coding.ai.engine import ChatEngine, EngineError
+from ai_coding.ai.prompt import PromptAssembler
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.events import (
@@ -631,6 +632,35 @@ async def test_tool_context_carries_request_view(tmp_path):
     assert ctx.session_id == session.session_id
     assert ctx.task is session.task
     assert ctx.messages  # the request view, not empty
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_turn_drops_the_methods_it_cannot_use(tmp_path):
+    """C-2, end of the chain: under a read-only posture the schemas are filtered
+    (the plan-mode work), and the prompt has to lose the same rows -- otherwise
+    the model is told how to use bash on a turn that cannot call it."""
+    reader = _Tool("read", mutates_world=False)
+    # Two steps: a read-only turn finishes through the plan-posture ladder, so
+    # the first stop is a nudge and the second is the end (same shape as the
+    # plan-guard tests).
+    engine = ScriptedEngine([_text("first"), _text("done")])
+    sessions = SessionService(tmp_path / "sessions")
+    # This loop needs the assembler: the claim is about what the prompt says.
+    loop = _loop(
+        engine,
+        sessions,
+        _registry(reader),
+        prompt=PromptAssembler("you are an AI coding assistant."),
+    )
+    session = sessions.create()
+    session.readonly = True
+
+    await loop.process_input(session, "look around")
+
+    instructions = str(engine.requests[-1]["instructions"])
+    assert "not shell commands like cat" in instructions, "the read row must stay"
+    assert "exit status" not in instructions, "bash guidance must not reach plan mode"
+    assert "Write replaces a whole file" not in instructions
 
 
 @pytest.mark.asyncio
