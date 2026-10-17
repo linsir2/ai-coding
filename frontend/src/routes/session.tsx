@@ -405,9 +405,6 @@ export function Session(props: SessionProps) {
   const [promptSeed, setPromptSeed] = createSignal("")
 
   onMount(() => {
-    // A restart must bring back what the operator queued: the table survived
-    // on disk, but this process never saw it.
-    loadInbox()
     // The snapshot first: a job that started before this client connected has
     // no job.changed history to replay, and a panel that only ever shows new
     // jobs is worse than none.
@@ -572,6 +569,10 @@ export function Session(props: SessionProps) {
       (hydrated) => {
         if (hydrated && hydrated.key === props.sessionId) {
           setState(hydrated.state)
+          // The inbox table survived on disk, but this process never saw it:
+          // read it once the session is actually here, not on mount (the
+          // server has no session yet then, and the call fails silently).
+          loadInbox()
           void refreshStats()
         }
       },
