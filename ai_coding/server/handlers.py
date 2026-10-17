@@ -670,6 +670,10 @@ def make_handlers(
             raise ValueError("no session initialized")
         if session_id != state.session_id:
             raise ValueError(f"session not loaded: {session_id}")
+        # A slash command is the human speaking too (the panel's /tasks stop
+        # included): the wake budget counts turns opened *since* the human last
+        # spoke, whatever entry they used.
+        wake_left["left"] = WAKE_BUDGET
         state.turn_id += 1
         turn_id = state.turn_id
         console = IpcConsole(

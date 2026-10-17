@@ -11,8 +11,9 @@ differences decided its shape:
 * opencode streams background output into a **file** and hands the model the
   path (``tool/plugin/shell.ts:95-97``); its foreground timeout kills.
 * Claude Code shipped a completion notification late (#21191) and shipped
-  silent backgrounding as a bug (#31518), which is why there is no promotion
-  here: a call that was not asked to outlive the turn does not outlive it.
+  silent backgrounding as a bug (#31518).  There is no *silent* promotion here:
+  a foreground call that outruns its wait keeps running, and the very sentence
+  that hands the model the id says so ("it was NOT killed").
 
 Why not ``infra/subprocess_runner.run_process``: that one owns the pipes.  A
 parent that exits takes the read end with it, so the child's next write gets
@@ -60,6 +61,7 @@ __all__ = [
     "WAIT_TIMEOUT",
     "MAX_RUNNING_JOBS",
     "NOTICE_TAIL_LINES",
+    "LIST_TAIL_LINES",
     "Job",
     "JobIdentityUnverifiable",
     "JobLimitReached",
@@ -99,7 +101,6 @@ _KILL_GRACE_SECONDS = 2.0
 #: How often a foreground wait checks its clock and the Esc flag.
 _WAIT_TICK = 0.2
 _TAIL_LINE_CHARS = 200
-_LIST_SETTLED_ROWS = 20
 
 STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
@@ -221,7 +222,11 @@ class JobRegistry:
         self._root = Path(root)
         self._notices = notices
         self._jobs: dict[str, Job] = {}
-        self._lock = threading.Lock()
+        # Reentrant on purpose: _publish holds it across a snapshot *and* the
+        # emit scan so one event is one atomic view of the table, and snapshot()
+        # takes the same lock on the way through.  A plain Lock would deadlock
+        # the moment a publish called a reader.
+        self._lock = threading.RLock()
         self._rescan()
 
     # ---- starting ----------------------------------------------------------
@@ -420,10 +425,15 @@ class JobRegistry:
     def _publish(self) -> None:
         """Tell whoever is watching the panel.  Best-effort like every event here:
         a failure to render must not stop a command."""
-        rows = tuple(self.snapshot())
-        # One event per change, through whichever turn's sink this workspace has:
-        # a panel wants the whole list, and three sinks would mean three copies.
-        emit = next((job.emit for job in self._jobs.values() if job.emit is not None), None)
+        # One event per change, through whichever turn's sink this workspace
+        # has: a panel wants the whole list, and three sinks would mean three
+        # copies.  One critical section for the read and the scan, or the event
+        # could name a job that arrived after the rows were copied.
+        with self._lock:
+            rows = tuple(self.snapshot())
+            emit = next(
+                (job.emit for job in self._jobs.values() if job.emit is not None), None
+            )
         if emit is None:
             return
         try:
@@ -602,12 +612,13 @@ class JobRegistry:
         log's head is where the error usually is.
         """
         try:
+            size = Path(job.log_path).stat().st_size
             with open(job.log_path, "rb") as handle:
                 blob = handle.read(limit + 1)
         except OSError:
             return "", 0
         text = blob[:limit].decode("utf-8", errors="replace")
-        return text, len(blob)
+        return text, size
 
     def forget(self, job_id: str) -> None:
         """Drop an in-process handle without touching the process.

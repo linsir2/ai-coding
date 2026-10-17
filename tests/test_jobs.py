@@ -352,3 +352,78 @@ def _kill_pid(pid: int) -> None:
         os.killpg(os.getpgid(pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
         pass
+
+
+# ---- audit: the registry under concurrency and big files --------------------
+
+
+def test_read_head_reports_the_real_length_even_when_it_trims(tmp_path):
+    """The truncation marker says "total N chars"; N has to be the file, not the
+    window we happened to read.  Audited: it used to be the window."""
+    registry = _registry(tmp_path)
+    job = registry.start("echo hi", cwd=str(tmp_path), session_id="s", emit=lambda e: None)
+    _wait_until(lambda: job.status != "running", what="settlement")
+
+    import pathlib as _pathlib
+
+    _pathlib.Path(job.log_path).write_bytes(b"x" * 5000)
+    text, size = registry.read_head(job, 100)
+
+    assert size == 5000, f"the total must be the file, got {size}"
+    assert len(text) == 100
+    registry.discard(job.id)
+
+
+def test_concurrent_reads_and_mutations_never_raise(tmp_path):
+    """_publish runs on watcher threads while the table mutates elsewhere;
+    iterating it unguarded hands the caller a RuntimeError ("dictionary changed
+    size during iteration") instead of a panel.
+
+    No processes involved: the race is in the dict, so the test mutates the
+    dict straight from this thread while publishers spin beside it.  Thousands
+    of overlaps in about a second -- the guarded code cannot fail it.
+    """
+    import sys
+    import threading
+
+    from ai_coding.core.jobs import Job
+
+    registry = _registry(tmp_path)
+    # Shrink the GIL switch window so a mutation is likely to land inside one
+    # publish pass.  Pure dict work, no spawns: nothing here can starve.
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(0.0001)
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def publish_loop() -> None:
+        try:
+            while not stop.is_set():
+                registry._publish()
+        except BaseException as exc:  # noqa: BLE001 - collected, asserted below
+            errors.append(exc)
+
+    def seed(index: int) -> Job:
+        return Job(
+            id=f"job_x{index:05d}", command="seed", pid=0, log_path="",
+            started_at="", emit=None,
+        )
+
+    threads = [threading.Thread(target=publish_loop) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    try:
+        # Every mutation takes the lock, exactly like every production path
+        # (start/discard/kill/rescan): the lock serializes lock-holders, and a
+        # thread that skips it is not a race, it is a bug in the test.
+        for index in range(2000):
+            with registry._lock:
+                registry._jobs[f"job_x{index:05d}"] = seed(index)
+                if index % 2:
+                    registry._jobs.pop(f"job_x{index - 1:05d}", None)
+    finally:
+        stop.set()
+    for thread in threads:
+        thread.join(timeout=30)
+    sys.setswitchinterval(old_interval)
+    assert not errors, f"concurrent access raised: {errors!r}"

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_coding.core.events import ToolChunk
+from ai_coding.core.jobs import WAIT_CANCELLED, WAIT_SETTLED
 from ai_coding.domain.message import ToolResult
 from ai_coding.infra.subprocess_runner import run_process_async
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
@@ -265,7 +266,7 @@ class BashTool(BaseTool):
         text, size = registry.read_head(job, self._max_output)
         # Cancelled counts as settled: the job is already killed and settled, and
         # reporting a timeout here would promote a dead command.
-        if outcome in ("settled", "cancelled"):
+        if outcome in (WAIT_SETTLED, WAIT_CANCELLED):
             pump.stop()
             # The result is in hand and the model's answer is about to be built;
             # a record of a command that already answered would be litter.
