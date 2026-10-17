@@ -965,3 +965,68 @@ async def test_export_needs_a_known_format(tmp_path):
     said = _session_text(c)  # one read: the recorder drains on export
     assert "html" in said and "otlp" in said
 
+
+
+# ---- D-1b: /tasks also answers for background shell jobs -------------------
+
+
+class _JobLoop:
+    """A loop with jobs and no sub-agent runner: the panel's stop path."""
+
+    def __init__(self, registry) -> None:
+        from ai_coding.tools.registry import ToolRegistry
+
+        self.jobs = registry
+        self.dispatcher = SimpleNamespace(registry=ToolRegistry())
+
+
+async def test_handle_tasks_lists_background_shell_jobs(tmp_path):
+    from ai_coding.core.jobs import JobRegistry
+
+    registry = JobRegistry(root=tmp_path / "jobs")
+    job = registry.start("sleep 30", cwd=str(tmp_path), session_id="s", emit=lambda e: None)
+    try:
+        dc, c = _console_capture()
+
+        action, _ = await handle_input(
+            _JobLoop(registry), "/tasks", _FakeSessions().items[0], _FakeSessions(), dc
+        )
+
+        out = _session_text(c)
+        assert action is REPLAction.CONTINUE
+        assert job.id in out and "sleep 30" in out
+    finally:
+        registry.kill(job.id, reason="test over")
+
+
+async def test_tasks_stop_kills_a_background_job_and_says_what_happened(tmp_path):
+    """The panel stops jobs through this path, so it has to reach the same guard
+    and the same truthful wording the model's job_kill does."""
+    from ai_coding.core.jobs import JobRegistry
+
+    registry = JobRegistry(root=tmp_path / "jobs")
+    job = registry.start("sleep 30", cwd=str(tmp_path), session_id="s", emit=lambda e: None)
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(
+        _JobLoop(registry), f"/tasks stop {job.id}", _FakeSessions().items[0],
+        _FakeSessions(), dc,
+    )
+
+    assert action is REPLAction.CONTINUE
+    assert "killed" in _session_text(c)
+    assert next(row for row in registry.list() if row.id == job.id).status == "killed"
+
+
+async def test_tasks_stop_of_an_unknown_job_says_so(tmp_path):
+    from ai_coding.core.jobs import JobRegistry
+
+    registry = JobRegistry(root=tmp_path / "jobs")
+    dc, c = _console_capture()
+
+    await handle_input(
+        _JobLoop(registry), "/tasks stop job_nope", _FakeSessions().items[0],
+        _FakeSessions(), dc,
+    )
+
+    assert "no background job" in _session_text(c)

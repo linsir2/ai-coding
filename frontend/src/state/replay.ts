@@ -181,6 +181,10 @@ export function messagesToState(messages: WireMessage[]): SessionState {
     messages: capped.filter((message) => message.role === "user" || message.parts.length > 0),
     busy: false,
     queued: [],
+    // Replayed history has no live jobs: the panel fills this from
+    // session.jobs on mount, and a job from an earlier run arrives as
+    // adopted then -- not as a row invented here.
+    jobs: [],
   }
 }
 

@@ -1669,3 +1669,41 @@ async def test_session_steer_lands_in_the_queue_and_refuses_commands(ipc):
     empty = client.request("session.steer", {"text": "   "})
     assert empty["accepted"] is False and empty["pending"] == 1
     assert world.steering.pending == 1
+
+
+# ---- D-1b: the panel's snapshot --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_jobs_reports_the_workspace_jobs(ipc, tmp_path):
+    """The panel needs a snapshot for the client that connected after a job
+    started; job.changed only carries what happens from here on."""
+    _world, _service, client = ipc
+    from ai_coding.core.jobs import JobRegistry
+
+    workspace = getattr(_world, "workspace", None) or str(tmp_path)
+    registry = JobRegistry(root=Path(workspace) / "jobs")
+    job = registry.start("sleep 30", cwd=workspace, session_id="s", emit=lambda e: None)
+    _world.jobs = registry
+    try:
+        client.request("initialize")
+        response = client.request("session.jobs")
+
+        assert response["available"] is True
+        assert [row["id"] for row in response["jobs"]] == [job.id]
+        assert response["jobs"][0]["status"] == "running"
+        assert "sleep 30" in response["jobs"][0]["command"]
+    finally:
+        registry.kill(job.id, reason="test over")
+
+
+@pytest.mark.asyncio
+async def test_session_jobs_on_a_world_without_jobs_says_it_is_unavailable(ipc):
+    """Absence of a registry is not the same as an empty list, and the frontend
+    casts on this key."""
+    _world, _service, client = ipc
+    _world.jobs = None
+
+    client.request("initialize")
+
+    assert client.request("session.jobs") == {"jobs": [], "available": False}

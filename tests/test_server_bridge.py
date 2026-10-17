@@ -390,3 +390,47 @@ def test_bridge_throttle_is_per_call() -> None:
     clock.now += 0.01
     bridge.on_event(ToolChunk(call_id="c2", tool_name="bash", stream="stdout", text="b"))
     assert [params["data"]["text"] for _method, params in sent] == ["a", "b"]
+
+
+def test_job_changed_carries_the_panel_rows() -> None:
+    """D-1b: the panel's channel. The snapshot travels whole -- the frontend
+    replaces its rows rather than replaying deltas, so a dropped event can only
+    ever leave it one refresh behind, never half-updated."""
+    from ai_coding.core.events import JobChanged
+
+    wire = to_wire(
+        JobChanged(
+            jobs=(
+                {
+                    "id": "job_1",
+                    "command": "sleep 30",
+                    "status": "running",
+                    "pid": 42,
+                    "log_path": "/tmp/job_1.log",
+                    "detail": "",
+                    "originSession": "s1",
+                    "adopted": False,
+                    "startedAt": "2026-10-17T00:00:00Z",
+                },
+            )
+        )
+    )
+
+    assert wire == {
+        "type": "job.changed",
+        "data": {
+            "jobs": [
+                {
+                    "id": "job_1",
+                    "command": "sleep 30",
+                    "status": "running",
+                    "pid": 42,
+                    "log_path": "/tmp/job_1.log",
+                    "detail": "",
+                    "originSession": "s1",
+                    "adopted": False,
+                    "startedAt": "2026-10-17T00:00:00Z",
+                }
+            ]
+        },
+    }

@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ai_coding.core.events import BackgroundTaskDone
+from ai_coding.core.events import BackgroundTaskDone, JobChanged
 from ai_coding.infra.time_utils import now_utc
 
 __all__ = [
@@ -161,6 +161,10 @@ class Job:
     #: which is the moment nobody holds the result any more.
     announce: bool = True
     announced: bool = False
+    #: The emitter this job was started with.  Kept because a job outlives the
+    #: turn that started it, and the panel has to hear about it settling after
+    #: that turn is over -- the same reason sub-agents keep their parent's emit.
+    emit: Callable[[Any], None] | None = None
 
     def view(self) -> dict[str, Any]:
         """What the ledger and the tools both read: the process handle stays out."""
@@ -271,6 +275,7 @@ class JobRegistry:
             start_ticks=_process_start_ticks(proc.pid),
             proc=proc,
             announce=announce,
+            emit=emit,
         )
         with self._lock:
             self._jobs[job_id] = job
@@ -278,6 +283,7 @@ class JobRegistry:
         threading.Thread(
             target=self._watch, args=(job, emit), name=f"{job_id}-watch", daemon=True
         ).start()
+        self._publish()
         return job
 
     # ---- the watcher -------------------------------------------------------
@@ -357,6 +363,7 @@ class JobRegistry:
         if job.announce and not job.announced:
             job.announced = True
             self._announce(job, summary, emit)
+        self._publish()
 
     def _announce(self, job: Job, summary: str, emit: Callable[[Any], None] | None) -> None:
         """Put the ending where the model and the operator will both see it."""
@@ -391,6 +398,37 @@ class JobRegistry:
             _log.debug("background job notice failed for %s", job.id, exc_info=True)
 
     # ---- reading -----------------------------------------------------------
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        """The rows a panel renders: what ``job_list`` prints, minus the prose."""
+        return [
+            {
+                "id": job.id,
+                "command": job.command,
+                "status": job.status,
+                "pid": job.pid,
+                "log_path": job.log_path,
+                "detail": job.detail,
+                "originSession": job.origin_session,
+                "adopted": job.adopted,
+                "startedAt": job.started_at,
+            }
+            for job in self.list()
+        ]
+
+    def _publish(self) -> None:
+        """Tell whoever is watching the panel.  Best-effort like every event here:
+        a failure to render must not stop a command."""
+        rows = tuple(self.snapshot())
+        # One event per change, through whichever turn's sink this workspace has:
+        # a panel wants the whole list, and three sinks would mean three copies.
+        emit = next((job.emit for job in self._jobs.values() if job.emit is not None), None)
+        if emit is None:
+            return
+        try:
+            emit(JobChanged(jobs=rows))
+        except Exception:  # noqa: BLE001 — observation never breaks a job
+            _log.debug("job.changed emit failed", exc_info=True)
 
     def get(self, job_id: str) -> Job | None:
         """One job by id, or ``None`` when this workspace has no such job."""
@@ -554,6 +592,7 @@ class JobRegistry:
                 Path(path).unlink()
             except OSError:
                 pass
+        self._publish()
 
     def read_head(self, job: Job, limit: int) -> tuple[str, int]:
         """The first ``limit`` characters of a log, and its real length.

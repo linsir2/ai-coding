@@ -38,6 +38,9 @@ class AppWorld:
     cancel: asyncio.Event
     steering: Any
     notices: Any
+    #: D-1b: the workspace's background jobs.  The IPC layer answers
+    #: ``session.jobs`` from it, and the panel renders what it returns.
+    jobs: Any
     #: The WARN-tier approval callback; the IPC layer installs its provider
     # (handlers.py::_install_providers) so the panel can answer it (M5), and
     approval: Any
@@ -143,7 +146,8 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     registry = _build_tool_registry(
         app_cfg, workspace, skill_registry,
         user_prompt=user_prompt, base_instructions=BASE_INSTRUCTIONS,
-        notices=notices, jobs=jobs,
+        notices=notices,
+        jobs=jobs,
     )
 
     steering = SteeringQueue()
@@ -199,6 +203,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         registry=registry,
         sessions=sessions,
         loop=loop,
+        jobs=jobs,
         mcp=mcp_manager,
         workspace=str(paths.workspace),
         skills=skills,

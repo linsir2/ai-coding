@@ -352,6 +352,19 @@ class TaskUpdated:
 
 
 @dataclass(frozen=True)
+class JobChanged:
+    """The workspace's background jobs, as they are right now (D-1b).
+
+    A snapshot rather than a delta: the panel is three rows and every consumer
+    of a delta would end up rebuilding it anyway.  Emitted on start, settlement
+    and discard, so a client that connects later asks ``session.jobs`` once and
+    then follows this.
+    """
+
+    jobs: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
 class BackgroundTaskDone:
     """A background sub-agent finished, failed, timed out or was cancelled.
 
@@ -467,6 +480,7 @@ LoopEvent = (
     | ScopedEvent
     | TaskUpdated
     | BackgroundTaskDone
+    | JobChanged
     | LedgerUpdated
     | TurnFinished
     | MemoryInjected
@@ -540,6 +554,7 @@ __all__ = [
     "InputSteered",
     "TaskUpdated",
     "BackgroundTaskDone",
+    "JobChanged",
     "TurnFinished",
     "MemoryInjected",
     "MemoryRecalled",

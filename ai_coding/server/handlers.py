@@ -946,6 +946,19 @@ def make_handlers(
             "stopPolicy": str(getattr(ai_cfg, "stop_policy", "") or ""),
         }
 
+    def session_jobs(params: dict[str, Any]) -> dict[str, Any]:
+        """The workspace's background jobs, for the panel (D-1b).
+
+        A snapshot, not a subscription: ``job.changed`` carries every later
+        change, and this covers the client that connected after one -- which is
+        the same contract oc's shell list uses, and one fewer thing for the
+        frontend to keep in sync.
+        """
+        registry = getattr(world, "jobs", None)
+        if registry is None:  # a world built without jobs says so
+            return {"jobs": [], "available": False}
+        return {"jobs": registry.snapshot(), "available": True}
+
     def session_stats(params: dict[str, Any]) -> dict[str, Any]:
         """Token usage for the sidebar/status bar (M4).
 
@@ -1148,6 +1161,7 @@ def make_handlers(
         "skill.pending.approve": skill_pending_approve,
         "skill.pending.reject": skill_pending_reject,
         "config.summary": config_summary,
+        "session.jobs": session_jobs,
         "session.stats": session_stats,
         "mcp.list": mcp_list,
         "mcp.connect": mcp_connect,

@@ -23,6 +23,7 @@ import { PermissionPanel } from "../component/permission"
 import { Prompt } from "../component/prompt"
 import { buildSubmission, commandName, planPrelude, type PendingPrompt } from "../util/submission"
 import { SessionHeader } from "../component/session-header"
+import { DialogJobs } from "../component/dialog-jobs"
 import { Sidebar } from "../component/sidebar"
 import { StatusBar } from "../component/status-bar"
 import { useDialog } from "../dialog/context"
@@ -30,7 +31,7 @@ import type { IpcClient } from "../ipc"
 import type { PromptImage } from "../util/attachment"
 import type { MentionOption } from "../util/mention"
 import type { Action, SessionState } from "../state/session"
-import { initialState, reduce } from "../state/session"
+import { initialState, jobsFromEvent, reduce } from "../state/session"
 import { useToast } from "../component/toast"
 import { theme } from "../theme/tokens"
 import { escStep } from "../util/esc"
@@ -241,6 +242,17 @@ export function Session(props: SessionProps) {
         },
       },
       {
+        // D-1b: the jobs panel. Same shape as the memory one -- a row in the
+        // palette and a key, because a running dev server is something you look
+        // for on purpose, not something that should interrupt.
+        name: "dialog.jobs.show",
+        title: "Background jobs",
+        group: "Session",
+        desc: "List background shell jobs, and stop one",
+        palette: true,
+        run: () => dialog.open(() => <DialogJobs client={props.client} />, "large"),
+      },
+      {
         name: "session.mode.cycle",
         title: "Toggle plan mode",
         group: "Session",
@@ -299,6 +311,7 @@ export function Session(props: SessionProps) {
       { key: "ctrl+t", cmd: "session.toggle.thinking" },
       { key: "shift+tab", cmd: "session.mode.cycle" },
       { key: "<leader>r", cmd: "session.resume" },
+      { key: "<leader>j", cmd: "dialog.jobs.show" },
     ],
   }))
 
@@ -307,6 +320,18 @@ export function Session(props: SessionProps) {
   const [promptSeed, setPromptSeed] = createSignal("")
 
   onMount(() => {
+    // The snapshot first: a job that started before this client connected has
+    // no job.changed history to replay, and a panel that only ever shows new
+    // jobs is worse than none.
+    void props.client
+      .request("session.jobs")
+      .then((data: unknown) => {
+        const rows = jobsFromEvent(data as Record<string, unknown>)
+        if (rows !== null) apply({ kind: "jobs", jobs: rows })
+      })
+      .catch(() => {
+        /* the panel just stays empty; a turn's job.changed will fill it */
+      })
     const unsubscribe = props.client.onEvent((event) => {
       apply({ kind: "wire", event })
       if (event.type === "turn.finished") {
@@ -386,6 +411,12 @@ export function Session(props: SessionProps) {
           message: `${String(event.data["fromModel"] ?? "")} → ${String(event.data["toModel"] ?? "")}`,
           variant: "warning",
         })
+      }
+      if (event.type === "job.changed") {
+        // D-1b: the panel's rows. Folded into state (not the transcript) so the
+        // sidebar line and the dialog read the same array.
+        const rows = jobsFromEvent(event.data)
+        if (rows !== null) apply({ kind: "jobs", jobs: rows })
       }
       if (event.type === "background.done") {
         toast.show({
@@ -516,6 +547,7 @@ export function Session(props: SessionProps) {
             maxContextTokens={stats().maxContextTokens}
             workspace={props.workspace}
             branch={props.branch}
+            jobs={state.jobs}
           />
         </Show>
       </box>

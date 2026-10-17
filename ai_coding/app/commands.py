@@ -517,15 +517,62 @@ def _runner_of(loop: Any) -> Any | None:
     return getattr(tool, "runner", None)
 
 
+def _print_jobs(loop: Any, console: ConsoleSink) -> None:
+    """The workspace's background shell jobs, in the same table shape.
+
+    Same rows ``job_list`` gives the model, so what the operator sees and what
+    the model reads cannot drift into two vocabularies.
+    """
+    registry = getattr(loop, "jobs", None)
+    if registry is None:
+        return
+    rows = registry.snapshot()
+    if not rows:
+        console.info("[tasks] no background shell jobs")
+        return
+    lines = ["[tasks] background shell jobs:"]
+    for row in rows:
+        origin = "inherited" if row["adopted"] else "this session"
+        detail = f" · {row['detail']}" if row["detail"] else ""
+        lines.append(
+            f"  {row['id']}  {row['status']:<9} pid {row['pid']}  [{origin}]{detail}"
+            f"\n      {row['command']}"
+        )
+    console.info("\n".join(lines))
+
+
 def _handle_tasks(
     loop: Any, raw: str, session: Any, console: ConsoleSink
 ) -> tuple[REPLAction, Any]:
-    """List background sub-agent runs, or stop one (R1-2)."""
+    """List background work, or stop one piece of it (R1-2, D-1b).
+
+    Two kinds share the command because they share the question: sub-agent runs
+    and background shell jobs.  A job id is tried first -- ``job_`` cannot be
+    confused with a run id, and the panel stops jobs through this same path so
+    there is one way to stop a thing rather than two.
+    """
+    parts = raw.split()
+    if len(parts) >= 3 and parts[1] == "stop":
+        jobs = getattr(loop, "jobs", None)
+        if jobs is not None and parts[2].startswith("job_"):
+            try:
+                job = jobs.kill(parts[2], reason="stopped from /tasks")
+            except KeyError:
+                console.info(f"[tasks] no background job '{parts[2]}'")
+                return REPLAction.CONTINUE, session
+            except Exception as exc:  # noqa: BLE001 - a refusal must say so
+                console.error(f"[tasks] {exc}")
+                return REPLAction.CONTINUE, session
+            console.info(
+                f"[tasks] job {job.id} is {job.status}"
+                f"{f' ({job.detail})' if job.detail else ''}"
+            )
+            return REPLAction.CONTINUE, session
     runner = _runner_of(loop)
     if runner is None:
+        _print_jobs(loop, console)
         console.info("[tasks] no sub-agent runner in this session")
         return REPLAction.CONTINUE, session
-    parts = raw.split()
     if len(parts) >= 3 and parts[1] == "stop":
         given = parts[2]
         # The listing prints run_id[:12]; accept what was actually copyable.
@@ -546,6 +593,7 @@ def _handle_tasks(
     rows = runner.task_list()
     if not rows:
         console.info("[tasks] no background runs")
+        _print_jobs(loop, console)
         return REPLAction.CONTINUE, session
     now = time.monotonic()
     lines = ["[tasks] background sub-agents:"]
@@ -563,6 +611,7 @@ def _handle_tasks(
             f"  {row.run_id[:12]} {row.name} {row.status} {elapsed:.0f}s{tokens}"
         )
     console.info("\n".join(lines))
+    _print_jobs(loop, console)
     return REPLAction.CONTINUE, session
 
 

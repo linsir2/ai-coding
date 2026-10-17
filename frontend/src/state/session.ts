@@ -68,12 +68,29 @@ export interface PlanItem {
   status: string
 }
 
+/** One background shell job, as the panel renders it (D-1b). */
+export interface JobRow {
+  id: string
+  command: string
+  status: string
+  pid: number
+  logPath: string
+  detail: string
+  adopted: boolean
+}
+
 export interface SessionState {
   messages: ChatMessage[]
   /** True from submit until the turn's finish event; gates the prompt. */
   busy: boolean
   /** Lines typed while a turn was running; one is dispatched per finished turn. */
   queued: string[]
+  /**
+   * The workspace's background jobs (D-1b).  Deliberately NOT a transcript
+   * line: a running command is not something the user said, and folding it into
+   * the scrollback would put words in their conversation.
+   */
+  jobs: JobRow[]
 }
 
 export type Action =
@@ -89,9 +106,32 @@ export type Action =
   // the user message that drew the image.
   | { kind: "attachment-rejected"; items: { name: string; reason: string }[] }
   | { kind: "wire"; event: EventMessage }
+  /** The panel's rows, from job.changed or the session.jobs snapshot. */
+  | { kind: "jobs"; jobs: JobRow[] }
 
 export function initialState(): SessionState {
-  return { messages: [], busy: false, queued: [] }
+  return { messages: [], busy: false, queued: [], jobs: [] }
+}
+
+/** Narrow one wire row into the shape the panel draws. */
+export function toJobRow(value: unknown): JobRow {
+  const row = obj(value)
+  return {
+    id: str(row["id"]),
+    command: str(row["command"]),
+    status: str(row["status"]),
+    pid: num(row["pid"]),
+    logPath: str(row["log_path"]),
+    detail: str(row["detail"]),
+    adopted: row["adopted"] === true,
+  }
+}
+
+/** The rows behind a job.changed event, or the ones already in state. */
+export function jobsFromEvent(data: Record<string, unknown>): JobRow[] | null {
+  const raw = data["jobs"]
+  if (!Array.isArray(raw)) return null
+  return raw.map(toJobRow)
 }
 
 // ---- data narrowing (wire values arrive as unknown) ------------------------
@@ -309,6 +349,12 @@ function turnEndMarker(data: Record<string, unknown>): string {
 function reduceWire(state: SessionState, event: EventMessage): SessionState {
   const data = event.data
   switch (event.type) {
+    case "job.changed": {
+      // The panel's own channel (D-1b): rows replace the rows, and nothing is
+      // written into the transcript -- a running command is not conversation.
+      const rows = jobsFromEvent(data)
+      return rows === null ? state : { ...state, jobs: rows }
+    }
     case "text.delta": {
       const text = str(data["text"])
       if (!text) return state
@@ -689,6 +735,8 @@ export function reduce(state: SessionState, action: Action): SessionState {
       }
     case "queued-dispatched":
       return { ...state, busy: true, queued: state.queued.slice(1) }
+    case "jobs":
+      return { ...state, jobs: action.jobs }
     case "submit-failed": {
       const quiet = { ...state, busy: false }
       return {

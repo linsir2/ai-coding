@@ -39,6 +39,7 @@ from ai_coding.core.events import (
     CompactionSkipped,
     CompactionStarted,
     ContextCompacted,
+    JobChanged,
     LedgerUpdated,
     LoopEvent,
     ProviderFallback,
@@ -210,6 +211,8 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
                 "origins": [list(pair) for pair in event.origins],
             },
         }
+    if isinstance(event, JobChanged):
+        return {"type": "job.changed", "data": {"jobs": [dict(row) for row in event.jobs]}}
     if isinstance(event, BackgroundTaskDone):
         return {
             "type": "background.done",
