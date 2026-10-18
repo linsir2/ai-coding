@@ -264,8 +264,8 @@ async def test_the_ladder_closes_its_loop_on_the_wire(tmp_path: Path) -> None:
     server.script(
         _respond(*_tool_call("read", READ_MISSING)),   # r1: executed failure
         _respond(*_tool_call("read", READ_MISSING)),   # r2: executed failure -> L1 fires
-        _respond(*_tool_call("read", READ_MISSING)),   # r3: duplicate_call denies
-        _respond(*_tool_call("read", READ_MISSING)),   # r4: failed_repeat denies -> L2
+        _respond(*_tool_call("read", READ_MISSING)),   # r3: still executes (D1-a)
+        _respond(*_tool_call("read", READ_MISSING)),   # r4: failed_repeat denies -> L2 armed
         _respond(*_tool_call("ask_user", '{"question": "怎么办"}')),  # r5: after L3
         _respond(*_text("完成")),                       # r6: post -> model finished
     )
@@ -287,12 +287,15 @@ async def test_the_ladder_closes_its_loop_on_the_wire(tmp_path: Path) -> None:
     # D: the ladder is visible in the request sequence, level by level.
     assert "[strategy-gate] 最近 2 轮" in _flat(conv[2])   # r3 carries L1
     assert "直接拦截" in _flat(conv[3])                     # r4 carries L2
-    assert "reuse the earlier result" in _flat(conv[3])    # r3's duplicate denial
     assert "change approach" in _flat(conv[4])             # r4's armed refusal
     assert "必须用 ask_user 提问" in _flat(conv[4])         # r5 carries L3
 
-    # The two denied calls never executed: only two real read results exist.
-    assert _flat(conv[5]).count("refused by runtime guard") == 2
+    # hotel D1-a: the repeated call is a *failed* one, so it has no result worth
+    # reusing and duplicate_call must stay out of it -- "reuse the earlier
+    # result" on a call that only ever errored teaches the model to stop asking.
+    # The refusal that ends this loop is failed_repeat's, which is its own job.
+    assert "reuse the earlier result" not in _flat(conv[3])
+    assert _flat(conv[4]).count("refused by runtime guard") >= 1
     assert "change approach" in _flat(conv[5])
 
     # This ending is the model's own text, not a budget handoff: no closing call,

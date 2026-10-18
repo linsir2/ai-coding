@@ -16,7 +16,7 @@ from ai_coding.core.guard import (
     TurnView,
     call_fingerprint,
 )
-from ai_coding.domain.message import ToolCall
+from ai_coding.domain.message import ToolCall, ToolResult
 from ai_coding.tools.base import ToolContext
 
 
@@ -78,13 +78,23 @@ def test_fingerprint_ignores_parameter_order_but_not_values():
 
 
 def test_duplicate_guard_allows_a_retry_then_refuses():
+    """A call that *succeeded* twice is refused the third time.
+
+    The counting moved from ``check`` to ``after`` (hotel D1-a): a failure is
+    not a result worth reusing, so only successes enter the budget.  The
+    protection this guard was written for is unchanged -- see
+    ``test_duplicate_guard_does_not_refuse_a_retry_that_failed`` for the other
+    half of the new contract.
+    """
     guard = DuplicateCallGuard(threshold=2)
     view = TurnView()
     call = _call("read", path="a.txt")
     ctx = ToolContext()
 
     assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
+    guard.after(call, ToolResult(success=True, output="ok"), ctx, view)
     assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW  # one retry is fine
+    guard.after(call, ToolResult(success=True, output="ok"), ctx, view)
     third = guard.check(call, ctx, view)
     assert third.verdict is GuardVerdict.DENY
     assert third.guard == "duplicate_call"
@@ -94,14 +104,16 @@ def test_duplicate_guard_allows_a_retry_then_refuses():
 
 def test_duplicate_guard_resets_between_turns():
     guard = DuplicateCallGuard(threshold=1)
+    view = TurnView()
     ctx = ToolContext()
     call = _call("read", path="a.txt")
-    guard.check(call, ctx, TurnView())
-    assert guard.check(call, ctx, TurnView()).verdict is GuardVerdict.DENY
+    guard.check(call, ctx, view)
+    guard.after(call, ToolResult(success=True, output="ok"), ctx, view)
+    assert guard.check(call, ctx, view).verdict is GuardVerdict.DENY
 
     guard.reset()
 
-    assert guard.check(call, ctx, TurnView()).verdict is GuardVerdict.ALLOW
+    assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
 
 
 def test_duplicate_guard_does_not_touch_different_parameters():
@@ -121,6 +133,68 @@ def test_duplicate_guard_is_off_at_threshold_zero():
     call = _call("bash", command="ls")
     for _ in range(5):
         assert guard.check(call, ctx, TurnView()).verdict is GuardVerdict.ALLOW
+
+
+# ---- hotel D1-a: a failure is not a result worth reusing
+
+
+def _fail() -> ToolResult:
+    return ToolResult(success=False, output="boom", error="tool_error")
+
+
+def _ok() -> ToolResult:
+    return ToolResult(success=True, output="fine")
+
+
+def test_duplicate_guard_does_not_refuse_a_retry_that_failed():
+    """Measured in 7e48aeef turn 1: the model asked for the same unreadable
+    path three times -- a correct response to a wrong path -- and the third was
+    refused with "reuse the earlier result", naming a call that had produced an
+    error, not a result.  There is nothing to reuse, so the refusal only taught
+    the model to stop asking.  A failure must not count toward the duplicate
+    budget; the retry is the fix.
+    """
+    guard = DuplicateCallGuard(threshold=2)
+    view, ctx = TurnView(), ToolContext()
+    call = _call("read", path="/outside/requirements.txt")
+    for _ in range(4):
+        decision = guard.check(call, ctx, view)
+        assert decision.verdict is GuardVerdict.ALLOW
+        guard.after(call, _fail(), ctx, view)
+
+
+def test_duplicate_guard_still_refuses_a_third_successful_repeat():
+    """The protection itself is unchanged: a call that worked twice has a result
+    worth reusing, and that is exactly when the refusal is the useful message."""
+    guard = DuplicateCallGuard(threshold=2)
+    view, ctx = TurnView(), ToolContext()
+    call = _call("read", path="a.txt")
+    for _ in range(2):
+        assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
+        guard.after(call, _ok(), ctx, view)
+    third = guard.check(call, ctx, view)
+    assert third.verdict is GuardVerdict.DENY
+    assert "reuse the earlier result" in third.reason
+
+
+def test_duplicate_guard_names_no_call_when_every_attempt_failed():
+    """The refusal points at the earlier call so the model can reuse it.  With
+    only failures on record there is no such call, and naming one would send the
+    model back to an error."""
+    guard = DuplicateCallGuard(threshold=1)
+    view, ctx = TurnView(), ToolContext()
+    call = _call("read", path="a.txt")
+    guard.check(call, ctx, view)
+    guard.after(call, _fail(), ctx, view)
+    assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
+    # force the count up so a refusal is possible at all, and it names nothing
+    guard.check(call, ctx, view)
+    guard.after(call, _ok(), ctx, view)
+    guard.check(call, ctx, view)
+    guard.after(call, _ok(), ctx, view)
+    refused = guard.check(call, ctx, view)
+    assert refused.verdict is GuardVerdict.DENY
+    assert "(call " in refused.reason  # the successes gave it something to name
 
 
 # ---- BashPolicyGuard -------------------------------------------------------

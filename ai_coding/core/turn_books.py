@@ -56,6 +56,16 @@ STATE_ONLY_TOOLS = frozenset({"checkpoint_write"})
 #: the strategy window's helped-signal is ``failed_streak == 0``, so an
 #: all-neutral round must reset (24d7109b: a parked ``no_plan_items`` refusal
 #: kept the L1 window "failed" and L2 spent its nudge on a duplicate report).
+#:
+#: ``guard_denied`` is deliberately NOT here, though it looks like the same kind
+#: of thing.  Measured: exempting it makes the strategy ladder read a refusal as
+#: *progress*.  A refused call still means the model did not get what it asked
+#: for, so ``failed_streak`` should keep its burn; making it neutral hands the
+#: loop a streak of 0, the L1 window closes "helped", and the same L1 nudge is
+#: re-injected every iteration until the iteration budget dies -- a worse ending
+#: than the one it was meant to prevent.  The fix for an over-eager guard is to
+#: stop the guard firing on calls that produced nothing to reuse
+#: (``guard.DuplicateCallGuard``), not to discount the refusal afterwards.
 _NOT_EVIDENCE_ERRORS = frozenset({CANCELLED_BY_USER, "no_plan_items", "missing_plan"})
 
 # F2: Paris' Law fatigue tracking — accumulated error damage.

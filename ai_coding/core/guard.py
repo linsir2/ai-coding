@@ -185,6 +185,19 @@ class DuplicateCallGuard:
     The classic ReAct failure is the model asking for the same ``read``/``bash``
     over and over; the refusal names the earlier call so it can reuse that result
     instead of re-deriving it (docs/r4-analysis.md 5.2).
+
+    **What counts is the success, not the attempt.**  A failed call produced no
+    result to reuse, so telling the model to reuse it teaches it to stop asking
+    -- exactly backwards when the failure was its own wrong argument.  Measured
+    in 7e48aeef turn 1: three attempts at one unreadable path, the third refused
+    with "reuse the earlier result" naming a call that had only ever errored.
+    So ``check`` no longer counts; ``after`` does, and only on success.  The
+    protection is unchanged for what it was written for: a call that *worked*
+    twice has a result worth reusing, and those calls are counted.
+
+    The two are the same shape as :meth:`FailedRepeatGuard.after` on purpose --
+    one guard counts successes, the other failures, and between them a call's
+    outcome decides which budget it lands in.
     """
 
     name = "duplicate_call"
@@ -208,15 +221,34 @@ class DuplicateCallGuard:
             return GuardDecision(
                 GuardVerdict.DENY,
                 reason=(
-                    f"'{call.name}' was already called {previous} time(s) this turn "
+                    f"'{call.name}' already succeeded {previous} time(s) this turn "
                     f"with the same arguments; reuse the earlier result"
                     + (f" (call {earlier})" if earlier else "")
                 ),
                 guard=self.name,
             )
-        self._counts[fingerprint] += 1
-        self._first_call.setdefault(fingerprint, call.id)
         return GuardDecision(GuardVerdict.ALLOW)
+
+    def after(
+        self, call: ToolCall, result: ToolResult, ctx: ToolContext, view: TurnView
+    ) -> ToolResult:
+        """Count a call that worked; forget one that didn't.
+
+        A failure deletes the fingerprint instead of adding to it, so a model
+        that fixes its arguments and retries pays nothing for the attempt that
+        taught it the fix.
+        """
+        del ctx, view
+        if self.threshold <= 0:
+            return result
+        fingerprint = call_fingerprint(call)
+        if result.success:
+            self._counts[fingerprint] += 1
+            self._first_call.setdefault(fingerprint, call.id)
+        else:
+            self._counts.pop(fingerprint, None)
+            self._first_call.pop(fingerprint, None)
+        return result
 
 
 class FailedRepeatGuard:
