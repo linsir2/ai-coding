@@ -6,9 +6,9 @@ refused — and the only place that turns all of that into a ``ToolResult`` the
 model can reason about.
 
 Design notes (docs/r1a-3-analysis.md §3.3):
-  - a batch runs concurrently only when **every** call is ALLOW tier *and*
-    ``parallel_safe``; otherwise the whole batch is sequential, so approval
-    prompts can never interleave and DENY/STOP abort cleanly;
+  - consecutive ALLOW-tier ``parallel_safe`` calls form one concurrent group
+    (dsh's runGroup); any other call is a barrier that runs alone, so approval
+    prompts can never interleave and DENY/STOP abort cleanly at group edges;
   - an unknown tool name is never executed and never prompts (the tool list is
     ours, so an unknown name means the model hallucinated one);
   - refusals are structured (``error`` + ``data``), not just prose;
@@ -199,28 +199,35 @@ class ToolDispatcher:
             self._prepare(tool_call_from_ref(ref), iteration=iteration) for ref in calls
         ]
 
-        if self._can_run_parallel(prepared):
-            semaphore = asyncio.Semaphore(self.max_parallel)
-
-            async def run(item: _Prepared) -> DispatchOutcome:
-                async with semaphore:
-                    return await self._handle(item, ctx, deadline, view)
-
-            return list(await asyncio.gather(*(run(item) for item in prepared)))
-
         outcomes: list[DispatchOutcome] = []
         halted = False
-        for item in prepared:
+        for group in self._concurrent_groups(prepared):
             if halted:
-                outcomes.append(
+                outcomes.extend(
                     DispatchOutcome(
                         call=item.call, result=self._skipped(item.call), denied=True
                     )
+                    for item in group
                 )
                 continue
-            outcome = await self._handle(item, ctx, deadline, view)
-            outcomes.append(outcome)
-            halted = outcome.halted
+            if len(group) == 1:
+                outcome = await self._handle(group[0], ctx, deadline, view)
+                outcomes.append(outcome)
+                halted = outcome.halted
+                continue
+            semaphore = asyncio.Semaphore(self.max_parallel)
+
+            async def run(item: _Prepared, gate: asyncio.Semaphore) -> DispatchOutcome:
+                async with gate:
+                    return await self._handle(item, ctx, deadline, view)
+
+            ran = list(await asyncio.gather(*(run(item, semaphore) for item in group)))
+            outcomes.extend(ran)
+            # A group is ALLOW-tier and parallel-safe by construction, and the
+            # stop verdict only exists on the WARN approval path -- nothing in
+            # a group can halt today.  The check keeps the invariant honest if
+            # that ever changes: the group drains, then the rest is skipped.
+            halted = any(outcome.halted for outcome in ran)
         return outcomes
 
     # ---- preparation ------------------------------------------------------
@@ -233,14 +240,30 @@ class ToolDispatcher:
         )
         return _Prepared(call=call, tool=tool, decision=decision, iteration=iteration)
 
-    def _can_run_parallel(self, prepared: list[_Prepared]) -> bool:
-        """Concurrency requires *every* call to be an ALLOW-tier safe tool."""
+    def _concurrent_groups(self, prepared: list[_Prepared]) -> list[list[_Prepared]]:
+        """Split the batch into concurrent runs and single-call barriers.
+
+        Consecutive calls that are ALLOW-tier and ``parallel_safe`` form one
+        group and run concurrently (bounded by ``max_parallel``); every other
+        call is its own group.  Groups run in declared order — results stay in
+        the model's order for free — and a WARN call's approval can never
+        interleave with anything else, which is the guarantee the old
+        batch-wide rule bought by serialising the whole batch.
+        """
+        groups: list[list[_Prepared]] = []
+        last_concurrent = False
         for item in prepared:
-            if item.tool is None or not item.tool.parallel_safe:
-                return False
-            if _verdict(item.decision) is not PermissionDecision.ALLOW:
-                return False
-        return True
+            concurrent = (
+                item.tool is not None
+                and item.tool.parallel_safe
+                and _verdict(item.decision) is PermissionDecision.ALLOW
+            )
+            if concurrent and last_concurrent:
+                groups[-1].append(item)
+            else:
+                groups.append([item])
+            last_concurrent = concurrent
+        return groups
 
     # ---- one call ---------------------------------------------------------
 

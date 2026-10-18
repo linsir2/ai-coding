@@ -387,6 +387,70 @@ async def test_batch_containing_warn_tool_runs_serial():
 
 
 @pytest.mark.asyncio
+async def test_safe_calls_batch_on_both_sides_of_a_barrier():
+    """Consecutive ALLOW+safe calls form one concurrent group each side of a
+    barrier (dsh's runGroup); the barrier itself overlaps neither side."""
+    from ai_coding.core.dispatch import ToolDispatcher
+    from ai_coding.security.permission_gate import Decision, PermissionDecision
+
+    probe = _ConcurrencyProbe()
+    tools = [
+        _FakeTool("read0", parallel_safe=True, on_execute=probe.enter),
+        _FakeTool("read1", parallel_safe=True, on_execute=probe.enter),
+        _FakeTool("barrier", parallel_safe=False, on_execute=probe.enter),
+        _FakeTool("read2", parallel_safe=True, on_execute=probe.enter),
+        _FakeTool("read3", parallel_safe=True, on_execute=probe.enter),
+    ]
+    registry = ToolRegistry()
+    for tool in tools:
+        registry.register(tool)
+
+    class _AllowAll(PermissionGate):
+        def check(self, tool_name, params):
+            return Decision(PermissionDecision.ALLOW, "")
+
+    outcomes = await ToolDispatcher(registry, _AllowAll()).dispatch_batch(
+        [
+            _ref("c1", "read0"),
+            _ref("c2", "read1"),
+            _ref("c3", "barrier"),
+            _ref("c4", "read2"),
+            _ref("c5", "read3"),
+        ],
+        _ctx(),
+    )
+    assert probe.peak == 2
+    assert [o.call.id for o in outcomes] == ["c1", "c2", "c3", "c4", "c5"]
+
+
+@pytest.mark.asyncio
+async def test_a_halt_stops_the_batch_at_its_group_boundary():
+    """A STOP on a WARN call halts the batch; the safe run before it already
+    finished together, and the call after it is skipped, not run."""
+    probe = _ConcurrencyProbe()
+    a = _FakeTool("read", parallel_safe=True, on_execute=probe.enter)
+    b = _FakeTool("glob", parallel_safe=True, on_execute=probe.enter)
+    write = _FakeTool("write")
+    tail = _FakeTool("grep", parallel_safe=True, on_execute=probe.enter)
+    outcomes = await _dispatcher(
+        [a, b, write, tail], approval=_Approval(ApprovalResult.STOP)
+    ).dispatch_batch(
+        [
+            _ref("c1", "read"),
+            _ref("c2", "glob"),
+            _ref("c3", "write"),
+            _ref("c4", "grep"),
+        ],
+        _ctx(),
+    )
+    assert probe.peak == 2
+    assert [o.call.id for o in outcomes] == ["c1", "c2", "c3", "c4"]
+    assert outcomes[2].halted is True
+    assert outcomes[3].result.error == "skipped"
+    assert not tail.executed
+
+
+@pytest.mark.asyncio
 async def test_parallelism_bounded_by_max_parallel():
     probe = _ConcurrencyProbe()
     tools = [
