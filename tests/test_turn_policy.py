@@ -14,6 +14,7 @@ from ai_coding.core.turn_policy import (
     TASK_MESSAGE_LEAD,
     TaskInjection,
     TurnAction,
+    TurnDecision,
     TurnPolicy,
     TurnPolicyConfig,
     TurnSnapshot,
@@ -150,6 +151,55 @@ def test_after_step_stops_asking_after_one_remedy(posture):
 def test_a_plain_turn_never_asks_for_a_plan():
     decision = TurnPolicy(_config()).decide_after_step(TurnSnapshot(iteration=1))
     assert (decision.action, decision.reason) == (TurnAction.FINISH, "model finished")
+
+
+# ---- the stop seam (dsh turn-stopping): guards in order, first verdict wins ----
+
+
+class _ScriptedGuard:
+    """A stop guard scripted for the seam test; records that it was asked."""
+
+    def __init__(self, name: str, verdict: TurnDecision | None, asked: list[str]):
+        self._name = name
+        self._verdict = verdict
+        self._asked = asked
+
+    def on_stop(self, snapshot: TurnSnapshot) -> TurnDecision | None:
+        self._asked.append(self._name)
+        return self._verdict
+
+
+def test_stop_guards_run_in_order_and_short_circuit():
+    asked: list[str] = []
+    passing = _ScriptedGuard("first", None, asked)
+    speaking = _ScriptedGuard(
+        "second", TurnDecision(TurnAction.NUDGE, "second spoke", inject="补交"), asked
+    )
+    never = _ScriptedGuard("third", TurnDecision(TurnAction.FINISH, "third spoke"), asked)
+
+    decision = TurnPolicy(
+        _config(), stop_guards=(passing, speaking, never)
+    ).decide_after_step(TurnSnapshot(iteration=1, mode="plan"))
+
+    assert (decision.action, decision.reason, decision.inject) == (
+        TurnAction.NUDGE,
+        "second spoke",
+        "补交",
+    )
+    assert asked == ["first", "second"]  # the first verdict wins; the third never runs
+
+
+def test_custom_stop_guards_replace_the_plan_submission_rule():
+    asked: list[str] = []
+    guard = _ScriptedGuard(
+        "only", TurnDecision(TurnAction.FINISH, "custom verdict"), asked
+    )
+    decision = TurnPolicy(_config(), stop_guards=(guard,)).decide_after_step(
+        # plan_submitted stays False: the default rule would nudge here.
+        TurnSnapshot(iteration=1, mode="plan")
+    )
+    assert (decision.action, decision.reason) == (TurnAction.FINISH, "custom verdict")
+    assert asked == ["only"]
 
 
 @pytest.mark.parametrize("posture", [{"mode": "plan"}, {"readonly": True}])

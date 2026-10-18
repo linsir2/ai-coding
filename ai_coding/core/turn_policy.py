@@ -21,7 +21,7 @@ from __future__ import annotations
 import enum
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from ai_coding.core import interventions
 from ai_coding.core.interventions import NUDGE_ITEM_LIMIT
@@ -32,6 +32,8 @@ from ai_coding.domain.task import TaskState, TodoItem
 __all__ = [
     "NUDGE_ITEM_LIMIT",
     "TASK_MESSAGE_LEAD",
+    "PlanSubmissionGuard",
+    "StopGuard",
     "TaskInjection",
     "TurnAction",
     "TurnDecision",
@@ -183,11 +185,52 @@ class TaskInjection:
     message: ChatMessage | None = None
 
 
+class StopGuard(Protocol):
+    """One rule consulted before a posture turn is allowed to end.
+
+    dsh's ``agent/turn-stopping`` at our post-step seam: the guards run in
+    order, the first verdict wins, and ``None`` passes to the next.  The
+    default list holds exactly one rule — the plan submission guard below —
+    because that is the only stop interceptor this harness has today; a
+    second one is the trigger to add another entry, not to widen this one.
+    """
+
+    def on_stop(self, snapshot: TurnSnapshot) -> TurnDecision | None: ...
+
+
+class PlanSubmissionGuard:
+    """stage 4 r2: one remedy before a plan-posture turn ends unsubmitted.
+
+    A posture turn that never submitted a plan gets one nudge; refusing it
+    too ends with the terminal note instead of a silent COMPLETED (7ad86804
+    / 1fd3be1e measured the silent case twice — a bare analysis, no card, no
+    execution).  The two texts live beside this rule, above.
+    """
+
+    def on_stop(self, snapshot: TurnSnapshot) -> TurnDecision | None:
+        if snapshot.plan_submitted:
+            return None
+        if not snapshot.plan_nudged:
+            return TurnDecision(TurnAction.NUDGE, "plan unsubmitted", inject=PLAN_NUDGE)
+        return TurnDecision(TurnAction.FINISH, "plan unsubmitted")
+
+
 class TurnPolicy:
     """Pure decision unit: budgets in, action out."""
 
-    def __init__(self, config: TurnPolicyConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: TurnPolicyConfig | None = None,
+        *,
+        stop_guards: tuple[StopGuard, ...] | None = None,
+    ) -> None:
         self.config = config or TurnPolicyConfig()
+        # The seam's rule list.  ``None`` means the default; an explicit tuple
+        # replaces it (tests, and any future second rule), so the plan guard
+        # is a voter, not the ballot box.
+        self._stop_guards = (
+            stop_guards if stop_guards is not None else (PlanSubmissionGuard(),)
+        )
         # 13 §2.1: the ladder reads these; strict = "never give up early", so
         # its task budget is unbounded (docs/r1-analysis.md D5 keeps meaning).
         self._limits = interventions.LadderLimits(
@@ -267,17 +310,14 @@ class TurnPolicy:
         # nagging a planning or read-only session to run tools is absurd.
         # Strategy/fatigue live at the PRE point and are untouched.
         if snapshot.mode == "plan" or snapshot.readonly:
-            # stage 4 r2: the submission guard before the quiet finish.  A
-            # posture turn that never submitted a plan gets one remedy
-            # nudge; refusing it too ends with the terminal note instead of
-            # a silent COMPLETED (7ad86804 / 1fd3be1e measured the silent
-            # case twice — a bare analysis, no card, no execution).
-            if not snapshot.plan_submitted:
-                if not snapshot.plan_nudged:
-                    return TurnDecision(
-                        TurnAction.NUDGE, "plan unsubmitted", inject=PLAN_NUDGE
-                    )
-                return TurnDecision(TurnAction.FINISH, "plan unsubmitted")
+            # dsh's turn-stopping at our post-step seam: the stop guards run
+            # in order, the first verdict owns the decision.  Today's list is
+            # the plan submission guard (its silent-COMPLETED measurements
+            # 7ad86804 / 1fd3be1e are recorded beside its texts).
+            for guard in self._stop_guards:
+                verdict = guard.on_stop(snapshot)
+                if verdict is not None:
+                    return verdict
             return TurnDecision(TurnAction.FINISH, "model finished")
         if snapshot.acceptance:
             # R0-1: a turn with contracts does not end on the model's word.
