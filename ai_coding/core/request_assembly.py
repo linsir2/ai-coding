@@ -27,7 +27,7 @@ from typing import Any
 
 from ai_coding.core.compaction import Compactor
 from ai_coding.core.events import ContextCompacted, LoopEvent, MemoryInjected
-from ai_coding.core.file_mentions import resolve_file_mentions
+from ai_coding.core.file_mentions import resolve_bare_paths, resolve_file_mentions
 from ai_coding.core.plan_runner import outside_workspace_paths
 from ai_coding.core.request_builder import build_tail, content_of, volatile_block
 from ai_coding.core.sop_router import SOPRouter
@@ -48,6 +48,28 @@ __all__ = ["Assembled", "RequestAssembler"]
 _FILE_CHARS = 20_000
 _DIR_ENTRIES = 200
 _FILES_BLOCK_BUDGET = 40_000
+
+
+def _file_tag(rel: str) -> str:
+    """The opening tag of a file block, for measuring whether one can still fit."""
+    return f'<file path="{rel}">\n'
+
+
+def _file_content(rel: str, target: Path, *, limit: int = _FILE_CHARS) -> str:
+    """One file's text, wrapped, truncated to ``limit``.
+
+    ``limit`` is whichever ceiling is tighter: the per-file cap, or what is
+    left of the block budget.  The truncation note always says the real total,
+    so the model can ask for the rest rather than believe it read the whole
+    thing (D5).
+    """
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f'<file path="{rel}">[unreadable: {exc}]</file>'
+    if len(text) > limit:
+        text = text[:limit] + f"\n[truncated: {len(text)} chars total]"
+    return f'<file path="{rel}">\n{text}\n</file>'
 
 
 def _observed_prompt_tokens(session: SessionData) -> int:
@@ -98,6 +120,7 @@ class RequestAssembler:
         emit: Callable[[LoopEvent], None],
         skills: SkillRegistry | None = None,
         workspace: str = "",
+        extra_workspace_roots: Sequence[str] = (),
     ) -> None:
         self._compactor = compactor
         self._policy = policy
@@ -118,6 +141,11 @@ class RequestAssembler:
         # r17/T4: where @path references resolve.  Empty means the feature is
         # off for this assembler (old constructors, tests) -- never an error.
         self._workspace = workspace
+        # B/D5-c: the roots the operator declared (``tools.extra_workspace_roots``),
+        # already expanded by the composition root.  Passed in rather than read
+        # off ``settings`` because ``AIConfig`` is not ``ToolsConfig``: reaching
+        # across the two would be a lookup by accident.
+        self._extra_roots = tuple(extra_workspace_roots)
 
     async def assemble(
         self,
@@ -313,7 +341,9 @@ class RequestAssembler:
         if self._workspace:
             user_input = self._extract_user_input(session)
             if user_input:
-                offenders = outside_workspace_paths([user_input], self._workspace)
+                offenders = outside_workspace_paths(
+                    [user_input], self._workspace, extra_roots=self._extra_roots
+                )
                 if offenders:
                     shown = "、".join(offenders[:3])
                     lines.append(
@@ -332,12 +362,18 @@ class RequestAssembler:
         return "<environment>\n" + "\n".join(lines) + "\n</environment>"
 
     def _referenced_files_block(self, user_input: str) -> str:
-        """The user's ``@path`` references: file content, or a directory listing.
+        """The user's file references: ``@path`` tokens, and paths they pasted.
 
         Volatile, like the skills mention: rebuilt from the last user message
         every iteration, gone with the next message.  A token a skill already
         claimed is left to the skill path (instructions win over a file that
-        shares the name).
+        shares a name).
+
+        Both resolvers return workspace-relative paths, so the rest of this
+        method stays one code path for both -- one budget, one truncation rule,
+        one directory listing.  Two blocks would duplicate all three and let
+        them drift, which is why a pasted path shares this method with ``@``
+        instead of getting its own.
         """
         if not self._workspace:
             return ""
@@ -348,11 +384,21 @@ class RequestAssembler:
                 for token in iter_mentions(user_input)
                 if self._skills.resolve(token) is not None
             }
-        paths = resolve_file_mentions(user_input, self._workspace, exclude=claimed)
+        paths = list(
+            dict.fromkeys(
+                [
+                    *resolve_file_mentions(user_input, self._workspace, exclude=claimed),
+                    *resolve_bare_paths(user_input, self._workspace, exclude=claimed),
+                ]
+            )
+        )
         if not paths:
             return ""
         root = Path(self._workspace).expanduser().resolve()
-        lines = ["<referenced-files>", "用户用 @ 引用了以下文件/目录，内容如下："]
+        lines = [
+            "<referenced-files>",
+            "用户引用了以下文件/目录（@ 提及或直接粘贴路径），内容如下：",
+        ]
         used = 0
         for rel in paths:
             # r17/T5: an image mention rides as a message part (the loop reads
@@ -360,28 +406,27 @@ class RequestAssembler:
             if Path(rel).suffix.lower() in IMAGE_MIME_BY_SUFFIX:
                 continue
             target = root / rel
-            block = (
-                self._directory_listing(rel, target)
-                if target.is_dir()
-                else self._file_content(rel, target)
-            )
-            if used + len(block) > _FILES_BLOCK_BUDGET:
-                lines.append(f"- {rel}: [budget exhausted, not included]")
-                continue
+            if target.is_dir():
+                block = self._directory_listing(rel, target)
+            else:
+                room = _FILES_BLOCK_BUDGET - used
+                if len(_file_tag(rel)) >= room:
+                    # D5: a file the user named is asked for, so the budget
+                    # decides how much of it the model reads -- never whether it
+                    # reads it.  Dropping it whole (the old
+                    # ``[budget exhausted, not included]``) meant a third paste
+                    # arrived with nothing in it but a note that it had been
+                    # left out, which is the opposite of what pasting means.
+                    lines.append(
+                        f"- {rel}: [no room left in this request's file budget; "
+                        "read it with the read tool instead]"
+                    )
+                    continue
+                block = _file_content(rel, target, limit=room)
             used += len(block)
             lines.append(block)
         lines.append("</referenced-files>")
         return "\n".join(lines)
-
-    @staticmethod
-    def _file_content(rel: str, target: Path) -> str:
-        try:
-            text = target.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            return f'<file path="{rel}">[unreadable: {exc}]</file>'
-        if len(text) > _FILE_CHARS:
-            text = text[:_FILE_CHARS] + f"\n[truncated: {len(text)} chars total]"
-        return f'<file path="{rel}">\n{text}\n</file>'
 
     @staticmethod
     def _directory_listing(rel: str, target: Path) -> str:

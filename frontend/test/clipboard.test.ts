@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { imageCommands, isPng, looksLikeWSL, pasteEventOutcome } from "../src/util/clipboard"
+import { capture, imageCommands, isPng, looksLikeWSL, pasteEventOutcome } from "../src/util/clipboard"
 
 function probe(platform: string, installed: string[], isWSL = false) {
   return { platform, isWSL, has: (tool: string) => installed.includes(tool) }
@@ -132,5 +132,43 @@ describe("isPng", () => {
 
   test("rejects an empty payload", () => {
     expect(isPng(new Uint8Array([]))).toBe(false)
+  })
+})
+/**
+ * D6: `capture` must have a hard upper bound.
+ *
+ * Measured before this: a clipboard command that ignores SIGTERM left the read
+ * awaiting forever, so the TUI's hint stayed on "正在读取剪贴板…" and every
+ * retry leaked another process.  Two waits were unbounded, not one --
+ * `child.exited` *and* `for await (child.stdout)`, the second because a
+ * surviving grandchild still holds the pipe's write end.
+ *
+ * The command is a real `sh` (which clipboard.ts already assumes exists) with a
+ * real short budget, so the assertions are about the bound, never about exact
+ * milliseconds: that is the only thing here that could be flaky.
+ */
+describe("capture has a hard upper bound", () => {
+  test("a command that ignores SIGTERM still returns", async () => {
+    const started = Date.now()
+    const bytes = await capture(["sh", "-c", "trap '' TERM; sleep 30"], 300)
+    expect(Date.now() - started).toBeLessThan(5000)
+    // Nothing to paste, not an error: killing the group closes the pipe, so
+    // the read finishes with zero bytes.  `isPng` rejects that, which is the
+    // contract the caller actually relies on.
+    expect(bytes === null || bytes.length === 0).toBe(true)
+  })
+
+  test("a surviving grandchild does not hold the read open", async () => {
+    // The parent's death is not the end of the pipe: this grandchild keeps the
+    // write end, so a fix that only bounded `child.exited` still hangs here.
+    const started = Date.now()
+    const bytes = await capture(["sh", "-c", "sleep 30 & trap '' TERM; sleep 30"], 300)
+    expect(Date.now() - started).toBeLessThan(5000)
+    expect(bytes === null || bytes.length === 0).toBe(true)
+  })
+
+  test("a command that finishes is not cut short", async () => {
+    const bytes = await capture(["sh", "-c", "printf hello"], 5000)
+    expect(new TextDecoder().decode(bytes ?? new Uint8Array())).toBe("hello")
   })
 })

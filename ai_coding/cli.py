@@ -84,6 +84,19 @@ def main(
         typer.echo("bye", err=True)
 
 
+def _extra_roots(app_cfg: Any, workspace: str) -> tuple[str, ...]:
+    """The operator's declared roots, expanded (B/D5-c).
+
+    Shared with the tool stack so the sandbox that enforces a path and the
+    warning that describes one are looking at the same set -- they used to
+    disagree, and the warning was the half that was wrong.
+    """
+    from ai_coding.tools.builder import expand_root_patterns
+
+    configured = getattr(getattr(app_cfg, "tools", None), "extra_workspace_roots", ())
+    return tuple(str(path) for path in expand_root_patterns(configured))
+
+
 def _build_gate(app_cfg: Any, workspace: str, skills: SkillRegistry) -> PermissionGate:
     """The permission gate with the skill policy wired (E-5).
 
@@ -205,6 +218,7 @@ def _build_loop(
         notices=notices,
         jobs=jobs,
         cancel=cancel,
+        extra_workspace_roots=_extra_roots(app_cfg, str(ws)),
     )
 
 

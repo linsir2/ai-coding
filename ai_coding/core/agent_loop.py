@@ -45,7 +45,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -246,6 +246,11 @@ class AgentLoop:
         jobs: Any | None = None,
         cancel: asyncio.Event | None = None,
         snapshots: Any | None = None,
+        # B/D5-c: the roots ``tools.extra_workspace_roots`` declared, already
+        # expanded by the composition root.  Passed in because ``settings`` here
+        # is ``AIConfig`` and the list lives on ``ToolsConfig``; the loop is not
+        # the place that would go looking for it.
+        extra_workspace_roots: Sequence[str] = (),
     ) -> None:
         self.engine = engine
         self.sessions = sessions
@@ -398,6 +403,7 @@ class AgentLoop:
             emit=self._emit,
             skills=self.skills,
             workspace=workspace,
+            extra_workspace_roots=extra_workspace_roots,
         )
 
     def set_model(self, name: str) -> None:

@@ -101,9 +101,22 @@ _OUTSIDE_PATH_RE = re.compile(
 )
 
 
-def outside_workspace_paths(texts: Iterable[str], workspace: str) -> list[str]:
-    """Absolute filesystem paths in ``texts`` that file tools cannot reach."""
-    sandbox = Sandbox(workspace or ".")
+def outside_workspace_paths(
+    texts: Iterable[str],
+    workspace: str,
+    *,
+    extra_roots: Sequence[str] = (),
+) -> list[str]:
+    """Absolute filesystem paths in ``texts`` that file tools cannot reach.
+
+    ``extra_roots`` are the directories the operator declared
+    (``tools.extra_workspace_roots``).  Without them this function answered
+    "can a file tool reach this?" with a :class:`Sandbox` built from the
+    workspace alone, so a directory the operator had already authorized was
+    reported as unreachable -- and the message tells the model to switch
+    workspaces for a path that already works.
+    """
+    sandbox = Sandbox(workspace or ".", extra_roots=tuple(extra_roots))
     offenders: list[str] = []
     for text in texts:
         for raw in _OUTSIDE_PATH_RE.findall(str(text or "")):

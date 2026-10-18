@@ -144,20 +144,53 @@ export function pasteEventOutcome(
   return { kind: "text" }
 }
 
-/** Run one command and collect stdout.  Never throws: a tool that is missing,
- *  hangs, or exits non-zero is a tool that does not answer. */
-async function capture(argv: string[], timeoutMs: number): Promise<Uint8Array | null> {
-  const child = Bun.spawn(argv, { stdout: "pipe", stderr: "ignore", stdin: "ignore" })
-  const timer = setTimeout(() => child.kill(), timeoutMs)
+/** Run one command and collect stdout.  Never throws, and never waits forever:
+ *  a tool that is missing, hangs, or exits non-zero is a tool that does not
+ *  answer.
+ *
+ *  The bound takes three layers, and one is not enough.  `child.kill()` sends
+ *  SIGTERM, which a stuck process may ignore -- measured here: a `sh` with
+ *  `trap '' TERM` left the old version awaiting past four seconds, twice over
+ *  once the native `timeout` option was tried as well.  And `child.exited` is
+ *  only *half* the wait: `for await (child.stdout)` is a second one, held open
+ *  by any surviving grandchild that inherited the pipe.  So the child gets its
+ *  own process group and the group is killed, and the race underneath is the
+ *  last resort for the case SIGKILL cannot reach either.
+ */
+export async function capture(argv: string[], timeoutMs: number): Promise<Uint8Array | null> {
+  // detached: the child leads its own process group, so `-child.pid` reaches
+  // the helpers it spawned and not just the process we asked for.
+  const child = Bun.spawn(argv, {
+    stdout: "pipe",
+    stderr: "ignore",
+    stdin: "ignore",
+    detached: true,
+  })
+  const killer = setTimeout(() => {
+    // Best effort by design: the process may already be gone, and the race
+    // below is what guarantees the caller returns either way.
+    try {
+      process.kill(-child.pid, "SIGKILL")
+    } catch {
+      /* already dead, or no group to signal */
+    }
+  }, timeoutMs)
+  const read = (async () => {
+    try {
+      await child.exited
+      const chunks: Uint8Array[] = []
+      for await (const chunk of child.stdout) chunks.push(chunk)
+      return new Uint8Array(Buffer.concat(chunks))
+    } catch {
+      return null
+    } finally {
+      child.unref()
+    }
+  })()
   try {
-    await child.exited
-    const chunks: Uint8Array[] = []
-    for await (const chunk of child.stdout) chunks.push(chunk)
-    return new Uint8Array(Buffer.concat(chunks))
-  } catch {
-    return null
+    return await Promise.race([read, Bun.sleep(timeoutMs + 300).then(() => null)])
   } finally {
-    clearTimeout(timer)
+    clearTimeout(killer)
   }
 }
 

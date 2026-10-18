@@ -60,3 +60,16 @@ async def test_outside_plan_item_stops_before_execution(tmp_path):
     report = await plan_only(loop, _session(), topic="实现一个小系统")
     assert report.stopped is not None and "/home/x/y/app.py" in report.stopped
     assert len(loop.calls) == 1  # planned once; the caller never runs it
+
+
+def test_a_configured_extra_root_is_not_reported_as_outside(tmp_path):
+    """Regression (B, found while adding D5): the warning asked "can the file
+    tools reach this?", and answered with a Sandbox built from the workspace
+    alone.  A directory the operator declared in ``tools.extra_workspace_roots``
+    is reachable, so reporting it as unreachable told the model to switch
+    workspaces for a path that already works."""
+    other = tmp_path / "sibling"
+    other.mkdir()
+    text = f"看下 {other}/app.py"
+
+    assert outside_workspace_paths([text], str(tmp_path), extra_roots=(other,)) == []

@@ -91,38 +91,43 @@ once/always/reject（`03:180`）；dsh 是 OS 级沙箱三档
    这类**工具自己的**拒绝不该因此多一次弹窗。改为按错误码区分——只有
    `sandbox_violation` 走审批，其余仍在审批前短路。
 
+### 第四轮（D5 粘贴路径 + D6 剪贴板挂起）
+
+**D5**：粘贴的路径没有任何消费者——`registry.py:464 _MENTION` 要求 `@` 前缀，
+裸路径永不命中，`_referenced_files_block` 不生成，模型只拿到一串它读不到的
+字符。opencode 在入队前物化粘贴的文件（`03-opencode编排数据流.md:37,42`）。
+
+* `core/file_mentions.py::resolve_bare_paths` — 行内识别（用户选了行内而非
+  整行，因为粘贴路径本就出现在句子中间）。三类误判各有其挡：URL 由
+  `_URL_PREFIX` 回看挡掉（否则 `https://x.com/a/b.py` 会产出 `com/a/b.py`）；
+  `3/4`、`1.2/3.4`、`e.g.` 由扩展名白名单挡掉；剩下的交给存在性。
+  单段文件名（`main.py`）也要能匹配，所以扩展名是白名单而非"必须含 `/`"。
+* 与 `@` 共用 `_referenced_files_block` 一条代码路径——两个 resolver 都返回
+  工作区相对路径，预算、截断、目录列举因此只有一份。
+* 区外路径**不注入**：该 block 走 `read_text` 且不过 `Sandbox`，注入等于绕过
+  B 刚建立的审批门。区外仍归 `read` 工具。
+* 预算降级从**丢弃**改为**截断**（`_file_content(limit=)`）。实测三个 15k 文件
+  时第三个原本是 `[budget exhausted, not included]` 零内容——用户粘贴正是
+  "明确要求读它"。
+* 顺带修 B 引入的回归：`outside_workspace_paths` 用带 `extra_workspace_roots`
+  的 sandbox，否则用户已授权的目录被环境警告误报为"工作区外"。
+
+**D6**：`clipboard.ts::capture` 只发 SIGTERM、无 SIGKILL 升级，且
+`for await (child.stdout)` 是**第二个**无界等待（孙进程持管道写端）。实测一个
+`trap '' TERM` 的进程让旧实现挂过 4 秒；**原生 `timeout` + `killSignal` 也
+无效**（实测仍 HUNG 4336ms）。最终方案：`detached` 进程组 + `kill(-pid,
+SIGKILL)` + 外层 `Promise.race`，实测 545ms settle。
+
+### 第四轮中被实测推翻的方案（留档）
+
+1. **D6 用 Bun 原生 `timeout` + `killSignal: "SIGKILL"`**（调研子代理的推荐）
+   —— 实测 HUNG 4336ms，与旧实现无差别。原生 timeout 只解决第一个 await，
+   孙进程持有的管道让第二个 await 永远不落定。
+2. **D6 断言超时返回 `null`** —— 实际杀进程组后管道正常关闭，`capture` 返回
+   `Uint8Array(0)`。上层 `isPng` 对空数组返回 false，语义无误，是测试断言
+   过严。
+
 ## 未做
-
-### D5. 粘贴裸路径没有任何消费者（已确认，未做）
-
-后端全链路核实（`handlers.py:615` → `request_assembly.py:351`）：
-
-```
-粘贴 "/home/.../file.py"（无 @）
- → 文本原样进 messages（synthetic=False，不会被跳过）
- → resolve_file_mentions → registry.py:464 正则只认 "@"
- → 返回 [] → 不注入 <referenced-files>
-```
-
-全仓**无任何"绝对路径 → 文件引用"的自动识别**。对比：opencode 在
-`SessionPrompt.prepare` 入队前物化文件附件（`03-opencode编排数据流.md:37,42`）；
-dsh 只是 UI seam，同样靠模型自己 read。我们只有 `@路径` 自动注入全文——比两者
-都激进，但必须手打 `@`。
-
-未做理由：B 落地后，模型拿到路径调 `read` 就能读到（越界问一次），摩擦已消除
-大半；自动注入是"省一次工具调用"的优化，不是可用性问题。若仍嫌那次审批，把
-仓库列进 `tools.extra_workspace_roots` 即可零摩擦。
-
-### D6. clipboard 的 `capture()` 只发 SIGTERM（未做）
-
-`frontend/src/util/clipboard.ts:149-162`：`setTimeout(() => child.kill())`
-只发 SIGTERM，无 `Promise.race`、无 SIGKILL 升级。实测复刻该函数，对忽略
-SIGTERM 的进程 **8 秒仍未 settle**。本机是 WSL2（`WSL_DISTRO_NAME=Ubuntu`），
-无 wl-paste/xclip → 每次图片粘贴必走 powershell.exe，interop 桥卡住即永久
-等待（实测正常时 770ms）。
-
-未做理由：与本轮问题（被 sandbox 拦截）无关，是独立的粘贴卡死隐患；改动
-跨前端语言，需单独一轮 TDD。
 
 ### D3「预算早耗尽」—— 实测推翻，不做
 
