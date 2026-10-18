@@ -271,21 +271,78 @@ def _model_rows(
     return rows or None
 
 
-def _estimate(
+def _money_number(
     prompt: int, completion: int, cached: int, price: Any | None
-) -> str | None:
-    """``≈ $x`` for a priced session, or ``None`` when the price is unknown."""
+) -> float | None:
+    """Money for one model's spend, or ``None`` when the price is unknown."""
     if price is None or not getattr(price, "configured", False):
         return None
     cached = min(cached, prompt)
     fresh = max(prompt - cached, 0)
     cached_rate = getattr(price, "cached_per_1k", 0.0) or price.input_per_1k
-    money = (
+    return float(
         fresh / 1000 * price.input_per_1k
         + cached / 1000 * cached_rate
         + completion / 1000 * price.output_per_1k
     )
+
+
+def _estimate(
+    prompt: int, completion: int, cached: int, price: Any | None
+) -> str | None:
+    """``≈ ¥x`` for a priced session, or ``None`` when the price is unknown."""
+    money = _money_number(prompt, completion, cached, price)
+    if money is None:
+        return None
     return f"≈ ¥{money:.4f}"
+
+
+def budget_figures(
+    summary: Mapping[str, Any],
+    *,
+    price: Any | None = None,
+    prices: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The numbers behind ``render_budget``, for consumers that are not prose.
+
+    The sidebar's session card is the second reader of the same summary (M4b);
+    without this it would grow its own copy of the cost formula.  ``cost`` is
+    ``None`` when no price is known (R4a: no fake 0.0), and ``cachedPercent``
+    is ``None`` when the provider never reported cached tokens.
+    """
+    prompt = int(summary.get("prompt_tokens", 0) or 0)
+    completion = int(summary.get("completion_tokens", 0) or 0)
+    cached = int(summary.get("cached_tokens", 0) or 0)
+
+    cost: float | None = None
+    by_model = summary.get("by_model")
+    if isinstance(by_model, dict) and prices:
+        total = 0.0
+        priced = False
+        for model_name, spend in by_model.items():
+            if not isinstance(spend, dict):
+                continue
+            money = _money_number(
+                int(spend.get("prompt_tokens", 0) or 0),
+                int(spend.get("completion_tokens", 0) or 0),
+                int(spend.get("cached_tokens", 0) or 0),
+                prices.get(str(model_name)),
+            )
+            if money is not None:
+                total += money
+                priced = True
+        if priced:
+            cost = total
+    if cost is None:
+        cost = _money_number(prompt, completion, cached, price)
+
+    return {
+        "tokens": prompt + completion,
+        "cost": cost,
+        "cachedPercent": (
+            int(round(cached / prompt * 100)) if cached and prompt > 0 else None
+        ),
+    }
 
 
 def render_overview(report: AggregateReport) -> str:

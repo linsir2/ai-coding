@@ -31,7 +31,7 @@ import type { IpcClient } from "../ipc"
 import type { PromptImage } from "../util/attachment"
 import type { MentionOption } from "../util/mention"
 import type { Action, SessionState } from "../state/session"
-import { initialState, jobsFromEvent, reduce } from "../state/session"
+import { type BudgetFigures, initialState, jobsFromEvent, reduce } from "../state/session"
 import { useToast } from "../component/toast"
 import { theme } from "../theme/tokens"
 import { escStep } from "../util/esc"
@@ -79,6 +79,10 @@ interface Stats {
   /** P5 (18 §10.5): posture payload; absent key = old backend -> no marker. */
   mode?: "normal" | "plan"
   readonly?: boolean
+  /** M4b: the session card's facts; absent keys = old backend -> lines hide. */
+  turnCount?: number
+  createdTime?: string
+  budget?: BudgetFigures | null
 }
 
 export function Session(props: SessionProps) {
@@ -661,8 +665,10 @@ export function Session(props: SessionProps) {
             title={props.title}
             tokens={stats().tokens}
             maxContextTokens={stats().maxContextTokens}
-            workspace={props.workspace}
-            branch={props.branch}
+            turns={stats().turnCount ?? 0}
+            messages={state.messages.length}
+            createdAt={stats().createdTime ?? ""}
+            budget={stats().budget ?? null}
             jobs={state.jobs}
             goal={state.goal}
           />

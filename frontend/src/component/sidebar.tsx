@@ -1,34 +1,89 @@
 /**
- * Session sidebar (M4) — the right column, a reduced OpenCode sidebar:
- * the session title, a Context card (real token usage), and the working
- * directory footer.  The MCP section is deferred (no MCP servers configured;
- * docs/opencode-gui-m4-plan.md §1).
+ * Session sidebar (M4) — the right column, a reduced OpenCode sidebar: the
+ * session title, a Context card (real token usage), and (M4b) a session card
+ * carrying the facts the transcript never shows: turns, message rows, when
+ * the session began, and the session budget.  The job block lists only what
+ * is running; settled rows are the panel's business.
+ *
+ * What the sidebar does NOT show (2026-10-18, operator feedback): the working
+ * directory and branch — the status bar already renders them — and anything
+ * else the footer/composer already say.  One fact, one home.
  */
 
 import { TextAttributes } from "@opentui/core"
-import { Show } from "solid-js"
-import type { GoalStatus } from "../state/session"
+import { For, Show } from "solid-js"
+import type { BudgetFigures, GoalStatus } from "../state/session"
 import { type JobRow } from "../state/session"
 import { theme } from "../theme/tokens"
-import { abbreviateHome, formatLocation, truncatePath } from "../util/location"
 import { formatTokens, percentUsed } from "../util/stats"
 
-/**
- * The one line the sidebar spends on jobs.  Running first: a finished job is
- * history the panel keeps, not something the operator has to act on.
- */
-export function jobLine(jobs: readonly JobRow[]): string {
-  const running = jobs.filter((job) => job.status === "running").length
-  const others = jobs.length - running
-  const parts = [`${running} 个后台任务运行中`]
-  if (others > 0) parts.push(`${others} 个已结束`)
-  return parts.join(" · ")
+/** M4b: turns and message rows, the session card's first line. */
+export function sessionLine(turns: number, messages: number): string {
+  return turns > 0 ? `${turns} 轮 · ${messages} 条消息` : `尚无回合 · ${messages} 条消息`
 }
 
+/** Local-clock HH:MM of an ISO stamp; ``""`` when unparseable. */
+function clockOf(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ""
+  const hours = String(date.getHours()).padStart(2, "0")
+  const minutes = String(date.getMinutes()).padStart(2, "0")
+  return `${hours}:${minutes}`
+}
+
+/** ``13:45 起 · 已 26 分钟``; ``""`` when the stamp is unusable. */
+export function startedLine(createdIso: string, now: Date): string {
+  const clock = clockOf(createdIso)
+  if (!clock) return ""
+  const created = new Date(createdIso)
+  const minutes = Math.max(0, Math.floor((now.getTime() - created.getTime()) / 60000))
+  if (minutes < 1) return `${clock} 起 · 刚刚开始`
+  if (minutes < 60) return `${clock} 起 · 已 ${minutes} 分钟`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest > 0 ? `${clock} 起 · 已 ${hours} 小时 ${rest} 分` : `${clock} 起 · 已 ${hours} 小时`
+}
+
+/** ``¥0.42 · 缓存 76%``; ``null`` (the line hides) when no price is known. */
+export function budgetLine(budget: BudgetFigures | null | undefined): string | null {
+  if (!budget || typeof budget.cost !== "number") return null
+  const money = `¥${budget.cost.toFixed(2)}`
+  return typeof budget.cachedPercent === "number"
+    ? `${money} · 缓存 ${budget.cachedPercent}%`
+    : money
+}
+
+export const JOBS_HEADING = "后台任务"
 export const JOB_HINT = "<leader>j 查看 / ctrl+d 停止"
+/** More running rows than this collapse into a count (the panel has them all). */
+export const MAX_JOB_ROWS = 3
+const JOB_COMMAND_CHARS = 16
 
 /**
- * G2: the one line a running goal gets.  Same rule as jobLine -- the line
+ * The job block's rows: running jobs only, one per line, with their start
+ * clock (static — the block refreshes on job events, not on a timer).
+ * Settled rows live in the panel; a permanent line counting them was the
+ * furniture this replaced (2026-10-18).
+ */
+export function jobLines(jobs: readonly JobRow[]): string[] {
+  const running = jobs.filter((job) => job.status === "running")
+  if (running.length === 0) return []
+  const lines = running.slice(0, MAX_JOB_ROWS).map((job) => {
+    const command =
+      job.command.length > JOB_COMMAND_CHARS
+        ? `${job.command.slice(0, JOB_COMMAND_CHARS)}…`
+        : job.command
+    const started = clockOf(job.startedAt)
+    return `${job.id.slice(0, 12)} ${command}${started ? ` · 起于 ${started}` : ""}`
+  })
+  if (running.length > MAX_JOB_ROWS) {
+    lines.push(`…还有 ${running.length - MAX_JOB_ROWS} 个运行中`)
+  }
+  return lines
+}
+
+/**
+ * G2: the one line a running goal gets.  Same rule as jobLines -- the line
  * only exists while it has something true to say (here: while armed), so it
  * never turns into furniture.
  */
@@ -42,21 +97,19 @@ export function Sidebar(props: {
   title: string
   tokens: number
   maxContextTokens: number
-  workspace: string
-  branch: string
-  /**
-   * Background jobs (D-1b).  One line, and only when there is something to
-   * say: a sidebar that always reserves the row would teach the eye to stop
-   * reading it, which is the opposite of what a running dev server needs.
-   */
+  /** M4b: the session card's facts (stats + the client's own message count). */
+  turns: number
+  messages: number
+  createdAt: string
+  budget?: BudgetFigures | null
+  /** Background jobs (D-1b): running rows only, hidden when none run. */
   jobs?: JobRow[]
   /** G2: the goal episode's live status; the line shows only while armed. */
   goal?: GoalStatus | null
 }) {
-  const location = () => {
-    const label = formatLocation(abbreviateHome(props.workspace, process.env.HOME ?? ""), props.branch)
-    return truncatePath(label, 38)
-  }
+  const started = () => startedLine(props.createdAt, new Date())
+  const money = () => budgetLine(props.budget)
+  const jobRows = () => jobLines(props.jobs ?? [])
 
   return (
     <box
@@ -82,17 +135,31 @@ export function Sidebar(props: {
           <text fg={theme.textMuted}>{`${percentUsed(props.tokens, props.maxContextTokens)}% used`}</text>
         </Show>
       </box>
-      <box flexGrow={1} />
-      <Show when={(props.jobs ?? []).length > 0}>
-        <text fg={theme.textBase}>{jobLine(props.jobs ?? [])}</text>
-        <text fg={theme.textMuted}>{JOB_HINT}</text>
-      </Show>
+      <box flexDirection="column" paddingTop={1}>
+        <text fg={theme.textBase} attributes={TextAttributes.BOLD}>
+          本次会话
+        </text>
+        <text fg={theme.textMuted}>{sessionLine(props.turns, props.messages)}</text>
+        <Show when={started()}>
+          <text fg={theme.textMuted}>{started()}</text>
+        </Show>
+        <Show when={money()}>
+          <text fg={theme.textMuted}>{money()}</text>
+        </Show>
+      </box>
       <Show when={props.goal?.armed ? props.goal : undefined}>
         {(goal) => <text fg={theme.textBase}>{goalLine(goal())}</text>}
       </Show>
-      <text wrapMode="none" fg={theme.textMuted}>
-        {location()}
-      </text>
+      <Show when={jobRows().length > 0}>
+        <box flexDirection="column" paddingTop={1}>
+          <text fg={theme.textBase} attributes={TextAttributes.BOLD}>
+            {JOBS_HEADING}
+          </text>
+          <For each={jobRows()}>{(line) => <text fg={theme.textBase}>{line}</text>}</For>
+          <text fg={theme.textMuted}>{JOB_HINT}</text>
+        </box>
+      </Show>
+      <box flexGrow={1} />
     </box>
   )
 }

@@ -1147,10 +1147,39 @@ def make_handlers(
             return {"jobs": [], "available": False}
         return {"jobs": registry.snapshot(), "available": True}
 
+    def _session_budget(session: Any) -> dict[str, Any] | None:
+        """The session-level budget for the sidebar's session card (M4b).
+
+        Same source and same boundary as ``/budget``: the trace summary plus
+        the recorder's prices.  Without a recorder (tracing off), before any
+        turn ran, or with nothing recorded, there is nothing honest to show
+        and the card hides the line.
+        """
+        from ai_coding.app.trace_text import budget_figures
+
+        recorder = getattr(world.loop, "trace", None)
+        store = getattr(recorder, "store", None)
+        session_id = str(getattr(session, "session_id", "") or "")
+        if store is None or not session_id:
+            return None
+        if not store.summary_path(session_id).is_file():
+            return None
+        figures = budget_figures(
+            store.read_summary(session_id),
+            price=getattr(recorder, "pricing", None),
+            prices=getattr(recorder, "pricings", None),
+        )
+        if not figures["tokens"] and figures["cost"] is None:
+            return None
+        return figures
+
     def session_stats(params: dict[str, Any]) -> dict[str, Any]:
         """Token usage for the sidebar/status bar (M4).
 
         ``context_tokens`` explains why a compaction zeroes the reading.
+        M4b (2026-10-18): the sidebar's session card also reads the facts the
+        transcript never shows -- how many turns ran, when the session began,
+        and the session budget from the same figures ``/budget`` renders.
         """
         session = state.session
         tokens = context_tokens(session)
@@ -1163,6 +1192,9 @@ def make_handlers(
             # sides from drifting on what "absent" means.
             "mode": str(getattr(session, "mode", "normal") or "normal"),
             "readonly": bool(getattr(session, "readonly", False)),
+            "turnCount": int(getattr(session, "turn_count", 0) or 0),
+            "createdTime": str(getattr(session, "created_time", "") or ""),
+            "budget": _session_budget(session),
         }
 
     def mcp_connect(params: dict[str, Any]) -> dict[str, Any]:

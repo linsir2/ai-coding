@@ -7,6 +7,8 @@ much / what degraded" without opening the JSONL by hand
 
 import json
 
+import pytest
+
 from ai_coding.app.trace_text import render_budget, render_turn, summarize_turn
 
 
@@ -111,6 +113,58 @@ def test_render_budget_reports_session_totals():
     assert "3 turns" in text
     assert "10,500" in text or "10500" in text
     assert "cache 80%" in text
+
+
+def test_budget_figures_report_totals_money_and_cache():
+    """The sidebar's one-line budget reads the same numbers /budget renders.
+
+    Extracted so the second consumer cannot grow a second cost formula: the
+    split (fresh vs cached input) and the money math live in one place.
+    """
+    from ai_coding.app.trace_text import budget_figures
+    from ai_coding.core.budget import Pricing
+
+    plan = Pricing(input_per_1k=1.0, output_per_1k=2.0, cached_per_1k=0.1)
+    figures = budget_figures(
+        {"prompt_tokens": 2000, "completion_tokens": 500, "cached_tokens": 1000},
+        price=plan,
+    )
+    assert figures["tokens"] == 2500
+    assert figures["cost"] == pytest.approx(2.1)  # 1.0 fresh + 0.1 cached + 1.0 out
+    assert figures["cachedPercent"] == 50
+
+
+def test_budget_figures_leave_cost_none_without_a_price():
+    from ai_coding.app.trace_text import budget_figures
+
+    figures = budget_figures({"prompt_tokens": 10, "completion_tokens": 5})
+    assert figures["tokens"] == 15
+    assert figures["cost"] is None
+    assert figures["cachedPercent"] is None
+
+
+def test_budget_figures_sum_the_per_model_breakdown():
+    from ai_coding.app.trace_text import budget_figures
+    from ai_coding.core.budget import Pricing
+
+    prices = {
+        "cheap": Pricing(input_per_1k=1.0, output_per_1k=1.0),
+        "pricey": Pricing(input_per_1k=2.0, output_per_1k=2.0),
+    }
+    figures = budget_figures(
+        {
+            "prompt_tokens": 2000,
+            "completion_tokens": 0,
+            "cached_tokens": 0,
+            "by_model": {
+                "cheap": {"prompt_tokens": 1000, "completion_tokens": 0, "cached_tokens": 0},
+                "pricey": {"prompt_tokens": 1000, "completion_tokens": 0, "cached_tokens": 0},
+            },
+        },
+        prices=prices,
+    )
+    assert figures["cost"] == pytest.approx(3.0)  # 1.0 + 2.0
+    assert figures["cachedPercent"] is None
 
 
 def test_render_budget_handles_an_empty_summary():

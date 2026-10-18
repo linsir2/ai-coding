@@ -77,6 +77,15 @@ export interface JobRow {
   logPath: string
   detail: string
   adopted: boolean
+  /** M4b: the sidebar's job rows show when a run began (wire ``startedAt``). */
+  startedAt: string
+}
+
+/** M4b: the session card's budget figures (same numbers ``/budget`` renders). */
+export interface BudgetFigures {
+  tokens: number
+  cost: number | null
+  cachedPercent: number | null
 }
 
 /** One queued line of operator input (D-2).  The id is the inbox row's
@@ -155,6 +164,7 @@ export function toJobRow(value: unknown): JobRow {
     logPath: str(row["log_path"]),
     detail: str(row["detail"]),
     adopted: row["adopted"] === true,
+    startedAt: str(row["startedAt"]),
   }
 }
 

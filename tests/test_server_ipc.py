@@ -1095,11 +1095,16 @@ async def test_config_summary(ipc):
 async def test_session_stats_without_usage(ipc):
     _world, _service, client = ipc
     client.request("initialize")
-    assert client.request("session.stats") == {
+    result = client.request("session.stats")
+    created = result.pop("createdTime")  # a live ISO stamp; equality below
+    assert created
+    assert result == {
         "tokens": 0,
         "maxContextTokens": 48000,
         "mode": "normal",
         "readonly": False,
+        "turnCount": 0,
+        "budget": None,  # no recorder in this world: tracing is off
     }
 
 
@@ -1113,12 +1118,69 @@ async def test_session_stats_reports_last_turn_prompt_tokens(ipc):
     session.turn_usages.append(
         TurnUsage(turn=1, prompt_tokens=1234, completion_tokens=56, total_tokens=1290)
     )
-    assert client.request("session.stats") == {
+    result = client.request("session.stats")
+    created = result.pop("createdTime")
+    assert created
+    assert result == {
         "tokens": 1234,
         "maxContextTokens": 48000,
         "mode": "normal",
         "readonly": False,
+        "turnCount": 0,
+        "budget": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_session_stats_carry_turn_count_and_created_time(ipc):
+    """The sidebar's session card reads facts the transcript never shows."""
+    world, _service, client = ipc
+    session = world.sessions.create()
+    session.turn_count = 7
+    session.created_time = "2026-01-01T10:00:00Z"
+    world.sessions.save(session)
+    client.request("session.load", {"id": session.session_id})
+
+    result = client.request("session.stats")
+    assert result["turnCount"] == 7
+    assert result["createdTime"] == "2026-01-01T10:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_session_stats_carry_the_budget_when_a_summary_exists(ipc, tmp_path):
+    """Same numbers /budget renders -- one cost formula, two consumers."""
+    import json as _json
+
+    from ai_coding.core.budget import Pricing
+
+    world, _service, client = ipc
+    summary_file = tmp_path / "summary.json"
+    summary_file.write_text(
+        _json.dumps(
+            {"prompt_tokens": 2000, "completion_tokens": 500, "cached_tokens": 1000}
+        ),
+        encoding="utf-8",
+    )
+
+    class _Store:
+        def summary_path(self, session_id):
+            return summary_file
+
+        def read_summary(self, session_id):
+            return _json.loads(summary_file.read_text(encoding="utf-8"))
+
+    class _Recorder:
+        store = _Store()
+        pricing = Pricing(input_per_1k=1.0, output_per_1k=2.0, cached_per_1k=0.1)
+        pricings = None
+
+    world.loop.trace = _Recorder()
+    client.request("initialize")
+
+    budget = client.request("session.stats")["budget"]
+    assert budget["tokens"] == 2500
+    assert abs(budget["cost"] - 2.1) < 1e-9
+    assert budget["cachedPercent"] == 50
 
 
 @pytest.mark.asyncio
@@ -1130,11 +1192,16 @@ async def test_session_stats_reports_the_posture(ipc):
     world.sessions.save(session)
     client.request("session.load", {"id": session.session_id})
 
-    assert client.request("session.stats") == {
+    result = client.request("session.stats")
+    created = result.pop("createdTime")
+    assert created
+    assert result == {
         "tokens": 0,
         "maxContextTokens": 48000,
         "mode": "plan",
         "readonly": True,
+        "turnCount": 0,
+        "budget": None,
     }
 
 

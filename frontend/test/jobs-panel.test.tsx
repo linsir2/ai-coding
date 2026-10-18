@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { armDecision, jobRowLine } from "../src/component/dialog-jobs"
-import { JOB_HINT, jobLine } from "../src/component/sidebar"
+import { JOB_HINT, jobLines } from "../src/component/sidebar"
 import { initialState, jobsFromEvent, reduce, toJobRow } from "../src/state/session"
 
 /**
@@ -48,15 +48,15 @@ describe("job.changed", () => {
 })
 
 describe("the sidebar line", () => {
-  test("counts running and finished separately", () => {
-    expect(jobLine([toJobRow(ROW), toJobRow({ ...ROW, id: "job_2", status: "completed" })])).toBe(
-      "1 个后台任务运行中 · 1 个已结束",
-    )
+  test("lists only what is running -- settled rows are the panel's business", () => {
+    // M4b (2026-10-18): the old line counted settled rows too ("1 运行中 · 1
+    // 已结束" and, with nothing at all, "0 运行中" -- furniture).  The block
+    // now renders from jobLines() and disappears when nothing is running;
+    // sidebar-lines.test.ts holds the rendering contract.
+    expect(jobLines([toJobRow(ROW), toJobRow({ ...ROW, id: "job_2", status: "completed" })])).toHaveLength(1)
   })
 
-  test("does not exist when nothing is running", () => {
-    // The render side checks the length; this is the contract it checks.
-    expect(jobLine([])).toBe("0 个后台任务运行中")
+  test("the hint survives the rewrite", () => {
     expect(JOB_HINT).toContain("停止")
   })
 })
