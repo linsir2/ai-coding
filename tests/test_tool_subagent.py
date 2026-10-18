@@ -61,6 +61,27 @@ async def test_subagent_tool_passes_parent_context():
     assert [m.content for m in call["parent"].messages] == ["parent view"]
 
 
+class _SpawnRunner:
+    """Only the background path: spawn returns an id; nothing else is touched."""
+
+    def spawn_background(self, task, name, **kwargs):
+        return "run_1234567890ab"
+
+
+@pytest.mark.asyncio
+async def test_the_start_message_points_at_the_list_tool_not_a_human_command():
+    """C-3b: the old handle said "check /tasks" -- a command the model cannot
+    run.  It now names the lane that exists for it: results arrive on their
+    own, and subagent_list answers "what is still running"."""
+    tool = SubAgentTool(runner=_SpawnRunner())
+
+    result = await tool.execute({"task": "do it", "background": True}, _ctx())
+
+    assert result.success is True
+    assert "subagent_list" in result.output
+    assert "/tasks" not in result.output
+
+
 @pytest.mark.asyncio
 async def test_subagent_tool_returns_structured_data():
     runner = _FakeRunner(

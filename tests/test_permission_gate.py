@@ -173,6 +173,15 @@ def test_job_output_is_allowed_without_a_confirmation():
     assert gate.check("job_output", {"job_id": "job_1"}) == PermissionDecision.ALLOW
 
 
+def test_subagent_list_is_allowed_without_a_confirmation():
+    """C-3b: reading the background sub-agent table is a lookup; the table's
+    writer is this process, and WARN would put an approval panel in front of
+    the model checking its own delegated work."""
+    gate = _gate()
+
+    assert gate.check("subagent_list", {}) == PermissionDecision.ALLOW
+
+
 def test_start_goal_and_update_goal_are_allowed_without_a_confirmation():
     """D-4 (Q2 拍板): the model's own taskification is an orchestration switch
     on this session; the tool-level guards (readonly / already-armed / blocked

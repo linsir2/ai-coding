@@ -230,6 +230,10 @@ class BackgroundTask:
     ended: float | None = None
     error: str | None = None
     usage: dict[str, int] | None = None
+    #: C-3b: where the settled run's full packet was written, so a listing can
+    #: hand the model a pointer the ``read`` tool can follow.  None while the
+    #: run is live, and for rows that never wrote one (rejected at spawn).
+    ledger_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -241,6 +245,7 @@ class BackgroundTask:
             "ended": self.ended,
             "error": self.error,
             "usage": dict(self.usage) if self.usage is not None else None,
+            "ledgerPath": self.ledger_path,
         }
 
     @classmethod
@@ -255,4 +260,7 @@ class BackgroundTask:
             ended=data.get("ended"),
             error=data.get("error"),
             usage=dict(usage) if isinstance(usage, dict) else None,
+            ledger_path=(
+                str(data["ledgerPath"]) if data.get("ledgerPath") is not None else None
+            ),
         )

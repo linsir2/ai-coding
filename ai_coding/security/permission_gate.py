@@ -193,6 +193,10 @@ class PermissionGate:
             # changes nothing outside the process, which is what the WARN tier is
             # for.
             "job_output",
+            # C-3b: reading the background sub-agent table. The table's writer
+            # is this process; WARN would put an approval panel in front of the
+            # model checking its own delegated work.
+            "subagent_list",
             # R7e-1: durable, but not a side effect on the repo, and the harness
             # harvests notes without asking anyway (docs/r7e-analysis.md Q1).
             "memory_write",

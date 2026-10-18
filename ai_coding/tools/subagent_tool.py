@@ -9,6 +9,7 @@ machine-readable ``data``.  The sub-agent's reasoning is not returned.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from ai_coding.core.observers import EmitObserver
@@ -181,7 +182,7 @@ class SubAgentTool(BaseTool):
                     "description": (
                         "Run without waiting: returns a run id at once, the "
                         "child runs on, and its completion lands as an event "
-                        "plus a /tasks table row. For long work the parent "
+                        "plus a subagent_list row. For long work the parent "
                         "would otherwise wait out its whole turn budget."
                     ),
                 },
@@ -309,8 +310,9 @@ class SubAgentTool(BaseTool):
         return ToolResult(
             success=True,
             output=(
-                f"[{name}] started in background as {run_id} — "
-                "check /tasks for completion"
+                f"[{name}] started in background as {run_id} — the result "
+                "arrives on its own when it settles; subagent_list shows what "
+                "is still running"
             ),
             data={"run_id": run_id, "background": True, "status": "running"},
         )
@@ -321,4 +323,94 @@ class SubAgentTool(BaseTool):
         return self._runner
 
 
-__all__ = ["SubAgentTool"]
+#: C-3b: how many settled rows a listing shows before it collapses the rest
+#: into a count line (job_list's rule, same number).
+_SETTLED_ROWS = 20
+
+
+class SubAgentListTool(BaseTool):
+    """What background runs exist: still running, settled, and where the
+    settled ones' full packets live."""
+
+    #: Reading a status board changes nothing.
+    parallel_safe = True
+    mutates_world = False
+
+    def __init__(self, runner: Any) -> None:
+        self._runner = runner
+
+    @property
+    def name(self) -> str:
+        return "subagent_list"
+
+    @property
+    def description(self) -> str:
+        return (
+            "List the background sub-agent runs started in this process: id, "
+            "name, status, how long, token spend, the error if one settled "
+            "badly, and the ledger path holding a settled run's full packet. "
+            "Use it to see what is still running and to find the id or the "
+            "packet of a run whose completion notice you no longer have — a "
+            "settled run's result also arrives on its own. The table lives in "
+            "memory and does not survive a restart."
+        )
+
+    @property
+    def params_json_schema(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {}}
+
+    async def execute(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> ToolResult:
+        rows = self._runner.task_list()
+        if not rows:
+            return ToolResult(success=True, output="no background sub-agent run")
+
+        now = time.monotonic()
+        running = [row for row in rows if row.status == "running"]
+        # task_list() is oldest-first; a reader looking for "what happened"
+        # wants the newest settled rows first (job_list's shape).
+        settled = [row for row in reversed(rows) if row.status != "running"]
+        older = max(0, len(settled) - _SETTLED_ROWS)
+        shown = running + settled[: _SETTLED_ROWS]
+
+        lines: list[str] = []
+        for row in shown:
+            elapsed = (row.ended if row.ended is not None else now) - row.started
+            line = f"{row.run_id[:12]} {row.name} {row.status} {elapsed:.0f}s"
+            if row.usage:
+                total = int(row.usage.get("total_tokens", 0) or 0)
+                if not total:
+                    total = int(row.usage.get("prompt_tokens", 0) or 0) + int(
+                        row.usage.get("completion_tokens", 0) or 0
+                    )
+                if total:
+                    line += f" · {total} tok"
+            if row.error:
+                line += f" · {row.error}"
+            if row.ledger_path:
+                line += f" · 完整回包 {row.ledger_path}"
+            lines.append(line)
+        if older:
+            lines.append(f"(还有 {older} 条更早的已结算 run 未显示)")
+
+        return ToolResult(
+            success=True,
+            output="\n".join(lines),
+            data={
+                "runs": [
+                    {
+                        "id": row.run_id,
+                        "name": row.name,
+                        "status": row.status,
+                        "ledger_path": row.ledger_path,
+                    }
+                    for row in shown
+                ],
+                "shown": len(shown),
+                "older_settled": older,
+            },
+        )
+
+
+__all__ = ["SubAgentListTool", "SubAgentTool"]

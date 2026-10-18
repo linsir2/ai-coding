@@ -388,6 +388,9 @@ class SubAgentRunner:
         self._background[run_id] = replace(
             row, status=result.status, ended=time.monotonic(),
             error=result.error, usage=result.usage,
+            # C-3b: the pointer subagent_list hands out once the notice may be
+            # gone (the ledger file itself was written by ``_with_ledger``).
+            ledger_path=result.ledger_path,
         )
         if emit is None:
             return

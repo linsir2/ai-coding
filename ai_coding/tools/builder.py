@@ -14,7 +14,7 @@ from typing import Any
 from ai_coding.config.models import AIConfig
 from ai_coding.core.worktree import WorktreeManager
 from ai_coding.skills.registry import SkillRegistry
-from ai_coding.tools.subagent_tool import SubAgentTool
+from ai_coding.tools.subagent_tool import SubAgentListTool, SubAgentTool
 
 
 def build_subagent_runner(
@@ -231,6 +231,8 @@ def _assemble_registry(
         registry.register(
             SubAgentTool(runner=runner, worktree_manager=manager, isolate=isolate)
         )
+        # C-3b: the model's own view of the table /tasks reads.
+        registry.register(SubAgentListTool(runner=runner))
 
     return registry, gate
 
