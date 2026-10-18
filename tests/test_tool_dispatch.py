@@ -752,18 +752,24 @@ async def test_r8_a_cancelled_call_does_not_disturb_its_siblings():
 # ---- T1: precheck refusal happens before approval ---------------------------
 
 
-class _SandboxedWrite(_FakeTool):
-    """A write-shaped fake whose precheck refuses before the WARN approval runs."""
+class _PrecheckedWrite(_FakeTool):
+    """A write-shaped fake whose precheck refuses on its own account.
+
+    B gave ``sandbox_violation`` a new meaning -- an operator question, not a
+    wall -- so it is no longer what this fake reports.  What is left of the rule
+    is the part that still holds: a refusal the *tool* owns (an empty write, a
+    stale read) is not the operator's to decide, so it must not grow a prompt.
+    The sandbox's own refusal is covered by
+    ``tests/test_outside_read_approval_flow.py``.
+    """
 
     def precheck(self, params):
-        return ToolResult(
-            success=False, output="outside workspace; use bash", error="sandbox_violation"
-        )
+        return ToolResult(success=False, output="nothing to write", error="tool_error")
 
 
 @pytest.mark.asyncio
 async def test_precheck_refusal_skips_approval_and_execution():
-    tool = _SandboxedWrite("write")
+    tool = _PrecheckedWrite("write")
     approval = _NeverAsked()
     dispatcher = _dispatcher([tool], approval=approval)
 
@@ -771,7 +777,7 @@ async def test_precheck_refusal_skips_approval_and_execution():
         [_ref("c1", "write", '{"path": "/outside/x.py"}')], _ctx()
     )
 
-    assert outcomes[0].result.error == "sandbox_violation"
+    assert outcomes[0].result.error == "tool_error"
     assert outcomes[0].denied is True
     assert tool.executed is False
 

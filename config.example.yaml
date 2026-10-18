@@ -101,6 +101,16 @@ tools:
     enabled: true
   glob:
     enabled: true
+  # Directories the file tools may touch without asking, beyond the workspace
+  # itself.  A standing answer, so it belongs here rather than in the grant
+  # store: declare a tree once and every session reads it.  Patterns are
+  # expanded at startup; empty = the workspace only.
+  #
+  # A path that is NOT listed is not refused either -- it asks you, once, and
+  # "always" remembers that directory (opencode's external-directory ask).
+  extra_workspace_roots: []
+  #   - /home/me/projects/*
+  #   - /srv/shared/datasets
   grep:
     enabled: true
 

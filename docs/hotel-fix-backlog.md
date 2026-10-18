@@ -53,7 +53,76 @@ helped 信号（`failed_streak == 0`）判为"有进展"→ 同一个 L1 nudge �
   `failed_repeat`（其本职）。ladder 仍完整走通：6 次请求、L1→L2→L3、账本
   `level 3 / helped` 不变。
 
+### 第三轮（B，工作区外文件 + bash 红线）
+
+调研依据（本仓库 docs，非推断）：opencode 对 cwd 外是 **ask**
+（`06-opencode长任务机制.md:20`，外部目录 ask + `.env` 读 ask），
+拦截点在 `permission.assert`（`03-opencode编排数据流.md:179`，
+`file-access.ts:135,154`），授权粒度是 `(action, resource)` 且 resource 是
+**类别**（`18-阶段二重头分析-…md:43` 的 `external_directory`），回复支持
+once/always/reject（`03:180`）；dsh 是 OS 级沙箱三档
+（`dsh-notes/03-子系统.md:117`），越界走 `approveEscalation`。
+我们是硬拒，且**硬拒本身没守住**——审计已判定
+（`2026-10-08-hotel-session-audit.md:90`）"write 沙箱边界实际被 bash 绕过，
+边界形同虚设，只制造摩擦力"。
+
+* **bash 红线收紧**（`security/permission_gate.py::bash_denied`）— 旧表是纯
+  子串匹配，实测 `rm  -rf /`、`rm -r -f /`、`RM -RF /`、`chmod  777`、
+  `sudo` 全部绕过；且 `cat ~/.ssh/id_rsa`、`cat .env`、`cat /etc/shadow`、
+  `cat *.pem` 一律只到 ask。改为：空白归一 + 按词判定（`rm` 的 flag 集合、
+  `chmod` 的八进制写法），新增凭据路径表。匹配的是**路径形状**而非词，所以
+  `.env.example`、`grep password src/` 仍然只是 ask。
+* **file tools 越界可审批**（`sandbox.py` / `permission_gate.py` /
+  `core/dispatch.py`）— `read` 进 `_PATH_TOOLS`，gate 拿到 workspace 后能
+  区分区内/区外；`Sandbox` 接受 `extra_roots` 与 `grantor`，`precheck` 的
+  `sandbox_violation` 不再抢在审批之前；`grant_key` 对 read 取**父目录**
+  （opencode 的 external_directory 粒度），"总是"记目录不记文件。
+* **`tools.extra_workspace_roots`**（config，支持通配）— 声明式常驻授权，
+  启动时由 `builder.expand_root_patterns` 展开。
+
+### 第三轮中被自己推翻的中间设计（留档）
+
+1. **`allow_once` 一开始写进了 `grants`** — `test_dispatch_grants.py::
+   test_answering_yes_records_nothing` 立刻红了：那个集合就是"总是"的语义，
+   `/permissions` 会把它当常驻授权打印。改为独立的 `_once_grants`，
+   会话内、不持久、`revoke_all` 一并清空。
+2. **`precheck` 一开始整体挪到审批之后** — `test_tool_dispatch.py::
+   test_precheck_refusal_skips_approval_and_execution` 红了：空写入、陈旧读
+   这类**工具自己的**拒绝不该因此多一次弹窗。改为按错误码区分——只有
+   `sandbox_violation` 走审批，其余仍在审批前短路。
+
 ## 未做
+
+### D5. 粘贴裸路径没有任何消费者（已确认，未做）
+
+后端全链路核实（`handlers.py:615` → `request_assembly.py:351`）：
+
+```
+粘贴 "/home/.../file.py"（无 @）
+ → 文本原样进 messages（synthetic=False，不会被跳过）
+ → resolve_file_mentions → registry.py:464 正则只认 "@"
+ → 返回 [] → 不注入 <referenced-files>
+```
+
+全仓**无任何"绝对路径 → 文件引用"的自动识别**。对比：opencode 在
+`SessionPrompt.prepare` 入队前物化文件附件（`03-opencode编排数据流.md:37,42`）；
+dsh 只是 UI seam，同样靠模型自己 read。我们只有 `@路径` 自动注入全文——比两者
+都激进，但必须手打 `@`。
+
+未做理由：B 落地后，模型拿到路径调 `read` 就能读到（越界问一次），摩擦已消除
+大半；自动注入是"省一次工具调用"的优化，不是可用性问题。若仍嫌那次审批，把
+仓库列进 `tools.extra_workspace_roots` 即可零摩擦。
+
+### D6. clipboard 的 `capture()` 只发 SIGTERM（未做）
+
+`frontend/src/util/clipboard.ts:149-162`：`setTimeout(() => child.kill())`
+只发 SIGTERM，无 `Promise.race`、无 SIGKILL 升级。实测复刻该函数，对忽略
+SIGTERM 的进程 **8 秒仍未 settle**。本机是 WSL2（`WSL_DISTRO_NAME=Ubuntu`），
+无 wl-paste/xclip → 每次图片粘贴必走 powershell.exe，interop 桥卡住即永久
+等待（实测正常时 770ms）。
+
+未做理由：与本轮问题（被 sandbox 拦截）无关，是独立的粘贴卡死隐患；改动
+跨前端语言，需单独一轮 TDD。
 
 ### D3「预算早耗尽」—— 实测推翻，不做
 
@@ -73,24 +142,28 @@ helped 信号（`failed_streak == 0`）判为"有进展"→ 同一个 L1 nudge �
 "感觉没跑多久"的真因是**前 11 步都在试路径**（第 1 步绝对 glob，第 3/4/5 步
 连试三种越界写法），有效工作从第 9 步才开始 —— 正是第一轮 P0 修掉的东西。
 
-### D2. Thought 英文与回答脱节
+### D2. Thought 英文与回答脱节 —— 已拍板不做
 
 * 位置：`ai/prompt.py:16 BASE_INSTRUCTIONS`（只约束回答语言）、
   `ai/openai_engine.py:382 reasoning_content` 直通、`server/bridge.py:102`
   透传。
-* 未做理由：与失败链无因果；改 prompt 影响全量请求前缀缓存
-  （`docs/r3-analysis.md` 实测 prefix 92%），需单独评估。
-* 入口：`METHODS_SECTION` 加"思考与回答同语言"一句 + 前端 Thought 默认折叠；
-  先测缓存命中变化。
+* 结论：与失败链无因果；改 prompt 影响全量请求前缀缓存
+  （`docs/r3-analysis.md` 实测 prefix 92%），收益不抵风险。
 
-### D4. 跨仓库 `-w` 一键切换（TUI/IPC 契约改动）
+### D4. 跨仓库 `-w` 一键切换（TUI/IPC 契约改动）—— 优先级下降
 
 * 位置：`server/handlers.py:session.create`、`server/world.py`、前端
   `session.ts`。
-* 未做理由：P0 文案已指引 `-w` 重启；真一键切要改 IPC 契约，超最小范围。
+* 未做理由：第三轮之后这条路的必要性大降——`tools.extra_workspace_roots`
+  让"我在另一个仓库工作"零摩擦地成为配置，审批通道也能临时放行；真要在会话
+  中途切 workspace 才需要改 IPC 契约。
 * 入口：`session.create` 加 `workspace` 参数 + `files.find` 复用，前后端同步。
 
 ## 观察项
+
+第三轮之后若 trace 里出现大量 `error=not_approved` 且 `data.reason` 是
+"targets ... outside workspace"，说明有人在反复碰同一个外部路径——这时该把
+那个目录写进 `tools.extra_workspace_roots`，而不是调低任何阈值。
 
 D1-a 上线后若 trace 仍出现 `error=guard_denied` 且 `data.guard=duplicate_call`，
 **先确认该调用此前是否成功过**：成功过就是本守卫的正常职责（结果可复用），

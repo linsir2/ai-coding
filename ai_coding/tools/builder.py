@@ -8,6 +8,7 @@ callback belong to the ``ToolDispatcher`` the loop builds.
 
 from __future__ import annotations
 
+import glob as _glob
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,43 @@ from ai_coding.config.models import AIConfig
 from ai_coding.core.worktree import WorktreeManager
 from ai_coding.skills.registry import SkillRegistry
 from ai_coding.tools.subagent_tool import SubAgentListTool, SubAgentTool
+
+#: The characters that make a configured root a pattern rather than a path.
+_WILDCARDS = "*?["
+
+
+def expand_root_patterns(patterns: Any) -> tuple[Path, ...]:
+    """Turn the configured extra roots into concrete directories (B).
+
+    A root is a standing "always", so it must never re-ask.  Patterns are
+    supported because the useful shape is a sibling repo tree
+    (``/home/me/projects/*``), not one directory; only the *directory* part of a
+    match is kept, because a file is not somewhere to run a search from.
+
+    Three rules make this safe to feed a path into: an entry without a wildcard
+    is resolved as-is (so ``~`` and relative paths still work), a pattern that
+    matches nothing yields nothing rather than an error, and every result is
+    resolved, so a symlinked root cannot smuggle in a path the sandbox would
+    later refuse.
+    """
+    roots: list[Path] = []
+    for raw in patterns or ():
+        entry = str(raw or "").strip()
+        if not entry:
+            continue
+        expanded = Path(entry).expanduser()
+        if not any(char in entry for char in _WILDCARDS):
+            candidates: list[Path] = [expanded]
+        else:
+            candidates = [Path(match) for match in sorted(_glob.glob(str(expanded)))]
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved.is_dir() and resolved not in roots:
+                roots.append(resolved)
+    return tuple(roots)
 
 
 def build_subagent_runner(
@@ -118,12 +156,21 @@ def _assemble_registry(
     from ai_coding.tools.websearch_tool import WebsearchTool
     from ai_coding.tools.write_tool import WriteTool
 
-    sandbox = Sandbox(workspace)
-    fst = FileStateTracker()
-    gate = PermissionGate()
-    registry = ToolRegistry()
-
+    # B: the gate is built first and both halves of the boundary share it.  The
+    # gate asks ("may this path, right now?") and the sandbox enforces, so an
+    # approval the operator gave has to reach the tool -- a sandbox holding its
+    # own copy of the answer would make "always" a promise nothing keeps.
     tools_cfg = app_cfg.tools
+    gate = PermissionGate.from_config(app_cfg, workspace=workspace)
+    sandbox = Sandbox(
+        workspace,
+        extra_roots=expand_root_patterns(
+            getattr(tools_cfg, "extra_workspace_roots", ())
+        ),
+        grantor=gate,
+    )
+    fst = FileStateTracker()
+    registry = ToolRegistry()
 
     if tools_cfg.bash.enabled:
         registry.register(BashTool(timeout_seconds=tools_cfg.bash.timeout_seconds))

@@ -50,8 +50,23 @@ def test_sandbox_violation_message(tmp_path):
         sb.resolve("/tmp/evil")
 
 
-def test_sandbox_violation_message_points_to_bash(tmp_path):
+def test_sandbox_violation_message_points_to_approval(tmp_path):
+    """The old text said "use bash instead".  That advice walked the model
+    around the gate: bash is never grantable and only the hard-deny list says no
+    to it, so refusing ``read`` and pointing at ``bash`` was a speed bump with an
+    exit sign (``docs/orchestration-explore/2026-10-08-hotel-session-audit.md``:
+    边界形同虚设, 只制造摩擦力).  The way out is now the operator's own answer."""
     sb = Sandbox(tmp_path)
     with pytest.raises(SandboxViolation) as exc:
         sb.resolve("/tmp/evil")
-    assert "use bash instead" in str(exc.value)
+    assert "approval" in str(exc.value)
+    assert "bash" not in str(exc.value)
+
+
+def test_an_extra_root_needs_no_question(tmp_path):
+    """A root the operator configured is not a request -- it is an answer."""
+    other = tmp_path / "other"
+    other.mkdir()
+    sb = Sandbox(tmp_path / "ws", extra_roots=(other,))
+    assert sb.resolve(str(other / "x.py")) == other / "x.py"
+    assert sb.workspace not in sb.roots[1:]

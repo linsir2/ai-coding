@@ -33,6 +33,13 @@ class ToolsConfig(BaseModel):
     ask_user: ToolConfig = Field(
         default_factory=lambda: ToolConfig(timeout_seconds=300)
     )
+    # B: directories the file tools may touch without asking, beyond the
+    # workspace itself.  A standing answer, so it belongs here rather than in
+    # the grant store: the operator declares a tree once and every session in
+    # this workspace reads it.  Patterns are expanded at startup
+    # (``tools/builder.py::expand_root_patterns``); empty = the workspace only,
+    # which is the pre-B behaviour.  An unlisted path is not refused, it asks.
+    extra_workspace_roots: list[str] = Field(default_factory=list)
 
 
 class AIConfig(BaseModel):

@@ -1,5 +1,7 @@
 """TDD (M2-2): PermissionGate — ALLOW/WARN/DENY decisions."""
 
+import pytest
+
 from ai_coding.security.permission_gate import PermissionDecision, PermissionGate
 
 
@@ -59,6 +61,87 @@ def test_bash_shutdown_deny():
     gate = _gate()
     d = gate.check("bash", {"command": "shutdown now"})
     assert d == PermissionDecision.DENY
+
+
+# ---- the red lines are matched as commands, not as substrings
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm  -rf  /",           # extra spaces
+        "rm -r -f /",           # flags reordered
+        "RM -RF /",             # different case
+        "rm -fr /",             # flags reordered again
+        "chmod  777 /tmp/x",    # extra space
+        "sudo  ls",             # two spaces after sudo
+    ],
+)
+def test_bash_red_lines_survive_a_respelled_command(command: str):
+    """Measured: every one of these slipped past the old substring table.  A red
+    line that a space defeats is not a red line -- and a model that gets refused
+    once learns the spelling that works, so the gap is self-teaching."""
+    gate = _gate()
+    assert gate.check("bash", {"command": command}) == PermissionDecision.DENY
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls -la",
+        "rm -rf ./build",              # recursive, but scoped to the workspace
+        "grep -r TODO src/",
+        "git push origin main",        # a normal push
+        "chmod 644 script.sh",         # not world-writable
+    ],
+)
+def test_bash_ordinary_work_still_only_warns(command: str):
+    """Tokenizing must not widen the net: the ordinary commands a coding turn
+    runs all day are asked about, not refused."""
+    gate = _gate()
+    assert gate.check("bash", {"command": command}) == PermissionDecision.WARN
+
+
+# ---- credentials are not ordinary reading (opencode's ".env read ask" is a deny here)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat ~/.ssh/id_rsa",
+        "cat /home/linsir365/.ssh/id_ed25519",
+        "cat ~/.aws/credentials",
+        "cat ~/.config/gh/hosts.yml",
+        "cat ~/.npmrc",
+        "cat .env",
+        "cat /etc/shadow",
+        "cat server.pem",
+        "cp ~/.ssh/id_rsa /tmp/x",
+    ],
+)
+def test_bash_reading_a_credential_is_denied(command: str):
+    """The file tools answer this by asking; bash could answer it by not being
+    asked, because ``bash`` is never grantable and only the hard-deny list ever
+    says no.  Measured before this table: every one of these returned WARN, so
+    the boundary the file tools enforced was a speed bump."""
+    gate = _gate()
+    assert gate.check("bash", {"command": command}) == PermissionDecision.DENY
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat README.md",
+        "cat .env.example",          # a template, not a secret
+        "cat src/config.py",
+        "grep -r password src/ tests/",
+    ],
+)
+def test_bash_reading_ordinary_files_still_warns(command: str):
+    """The credential table matches a *path shape*, not the word: `.env.example`
+    is documentation and `grep password` is how you audit for one."""
+    gate = _gate()
+    assert gate.check("bash", {"command": command}) == PermissionDecision.WARN
 
 
 def test_unknown_tool_warn():

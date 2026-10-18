@@ -348,7 +348,7 @@ class ToolDispatcher:
                 # anyone to ask, refuse rather than silently run it.
                 return self._not_approved(call, "rewritten call needs approval"), True, False
 
-        # ---- A4: user hooks may also block or rewrite ------------------------
+        # A4: user hooks may also block or rewrite ------------------------
         hook_rewriter = ""
         hook_decision = await self._run_hooks(
             HookPoint.TOOL_BEFORE,
@@ -368,13 +368,19 @@ class ToolDispatcher:
             if _verdict(recheck) is PermissionDecision.DENY:
                 return self._denied(call, _reason(recheck), rewritten=True), True, False
 
-        # T1: a call that cannot execute must not be offered for approval.
         tool = item.tool
         if tool is None:  # pragma: no cover - checked at the top of _decide
             return self._unknown(call), True, False
-        blocked = tool.precheck(call.params)
-        if blocked is not None:
-            return blocked, True, False
+
+        # B: an outside-workspace path is a *question*, so it must not be
+        # refused before the operator is asked.  Every other precheck reason
+        # (an empty write, a stale read) is not the operator's to decide and
+        # still short-circuits here, so those calls do not grow a prompt they
+        # never had.  The distinction is the error code the tool reports, which
+        # is why this checks the result instead of calling precheck twice.
+        early = tool.precheck(call.params)
+        if early is not None and early.error != "sandbox_violation":
+            return early, True, False
 
         if verdict is PermissionDecision.WARN:
             if self.approval is None:
@@ -405,6 +411,14 @@ class ToolDispatcher:
                 return self._approval_timeout(call, waited), True, False
             if verdict_from_user is not ApprovalVerdict.APPROVED:
                 return self._not_approved(call, "user declined"), True, False
+
+        # The call is allowed to run.  ``precheck`` decides whether it *can*,
+        # and it can only know that now: the operator's answer is what may have
+        # opened an outside path (B), and until it is recorded the sandbox still
+        # refuses it.
+        blocked = tool.precheck(call.params)
+        if blocked is not None:
+            return blocked, True, False
 
         tool = item.tool
         if tool is None:  # pragma: no cover - guarded above
@@ -497,6 +511,14 @@ class ToolDispatcher:
             self.gate.grant(named, call.params)
             return ApprovalVerdict.APPROVED
         if answer is ApprovalResult.YES:
+            # B: a one-off "yes" is still an answer, so the tool has to be able
+            # to see it.  The sandbox asks the gate before refusing, and it did
+            # not hear the answer -- this session's grant is what carries it
+            # through to ``precheck``.  Session-scoped on purpose: it dies with
+            # the process, where "always" is the one written to disk.
+            allow = getattr(self.gate, "allow_once", None)
+            if callable(allow):
+                allow(named, call.params)
             return ApprovalVerdict.APPROVED
         if answer is ApprovalResult.STOP:
             return ApprovalVerdict.STOPPED
