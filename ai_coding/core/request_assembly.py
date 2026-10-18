@@ -28,6 +28,7 @@ from typing import Any
 from ai_coding.core.compaction import Compactor
 from ai_coding.core.events import ContextCompacted, LoopEvent, MemoryInjected
 from ai_coding.core.file_mentions import resolve_file_mentions
+from ai_coding.core.plan_runner import outside_workspace_paths
 from ai_coding.core.request_builder import build_tail, content_of, volatile_block
 from ai_coding.core.sop_router import SOPRouter
 from ai_coding.core.turn_books import TurnBooks
@@ -306,6 +307,19 @@ class RequestAssembler:
         if branch:
             lines.append(f"分支: {branch}")
         lines.append(f"时间: {now_local()}")
+        # hotel-fix P0-1 Build补洞：用户首轮提到工作区外绝对路径时警告
+        # （只读提示，不拒绝；复用 plan_runner.outside_workspace_paths，
+        # 不复制正则；synthetic 消息由 _extract_user_input 跳过）。
+        if self._workspace:
+            user_input = self._extract_user_input(session)
+            if user_input:
+                offenders = outside_workspace_paths([user_input], self._workspace)
+                if offenders:
+                    shown = "、".join(offenders[:3])
+                    lines.append(
+                        f"注意: {shown} 在工作区外，文件工具无法访问；"
+                        "请用 -w 切换到目标仓库，或把需求改为工作区内相对路径。"
+                    )
         # D-7: one line, and only where there is something to recall.  A session
         # whose history was never rewritten pays nothing for this; a compacted
         # one is told where its exact wording went, every request, in the

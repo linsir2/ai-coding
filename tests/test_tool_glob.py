@@ -70,3 +70,42 @@ async def test_glob_outside_sandbox_denied(setup):
     tmp_path, sb, tool = setup
     result = await tool.execute({"pattern": "../*"})
     assert result.success is False
+
+
+@pytest.mark.asyncio
+async def test_glob_absolute_inside_workspace_relativized(setup):
+    tmp_path, sb, tool = setup
+    (tmp_path / "a.py").write_text("")
+    abs_pattern = str(tmp_path / "*.py")
+    result = await tool.execute({"pattern": abs_pattern})
+    assert result.success is True
+    assert "a.py" in result.output
+
+
+@pytest.mark.asyncio
+async def test_glob_absolute_outside_workspace_structured(setup):
+    tmp_path, sb, tool = setup
+    result = await tool.execute({"pattern": "/etc/*.py"})
+    assert result.success is False
+    assert result.error == "workspace_escape"
+    assert str(sb.workspace) in result.output
+
+
+@pytest.mark.asyncio
+async def test_glob_absolute_never_raises(setup):
+    from ai_coding.domain.message import ToolResult
+
+    tmp_path, sb, tool = setup
+    result = await tool.execute(
+        {"pattern": "/home/linsir365/projects/awesome-tool-kit/hotel/**/*"}
+    )
+    assert isinstance(result, ToolResult)
+    assert result.success in (True, False)
+
+
+@pytest.mark.asyncio
+async def test_glob_dotdot_still_blocked(setup):
+    tmp_path, sb, tool = setup
+    result = await tool.execute({"pattern": "../*"})
+    assert result.success is False
+    assert "workspace escape" in result.output

@@ -209,7 +209,14 @@ async def handle_input(
         if task is None:
             console.info("[todo] no task list for this session")
         else:
-            console.info(task.render())
+            if observer is not None:
+                from ai_coding.core.events import TaskUpdated
+
+                try:
+                    observer.on_event(TaskUpdated(task=task))
+                except Exception:  # noqa: BLE001 — observation only
+                    pass
+            console.info(task.render_display())
         return REPLAction.CONTINUE, session
     if cmd.name == "tasks":
         return _handle_tasks(loop, cmd.raw, session, console)

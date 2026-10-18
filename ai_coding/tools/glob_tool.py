@@ -75,6 +75,26 @@ class GlobTool(BaseTool):
                 output="glob pattern must not contain '..' (workspace escape blocked)",
             )
 
+        # P0-1: absolute patterns are relativized when inside the workspace,
+        # so a pasted absolute path still works; outside stays a structured
+        # refusal with the workspace named (reuses Sandbox boundary, no new rule).
+        if Path(pattern).is_absolute():
+            try:
+                pattern = (
+                    Path(pattern).resolve().relative_to(self._sandbox.workspace).as_posix()
+                )
+            except (ValueError, OSError):
+                return ToolResult(
+                    success=False,
+                    output=(
+                        f"glob pattern resolves outside workspace '{self._sandbox.workspace}'"
+                        " — 当前工作区内请用相对路径（如 **/*.py），"
+                        "跨仓库请先 -w 切换工作区；或用 bash 查看"
+                    ),
+                    error="workspace_escape",
+                    data={"workspace": str(self._sandbox.workspace)},
+                )
+
         try:
             # resolve the pattern's starting directory to ensure it's inside sandbox
             # For simple patterns like "*.py" the start is workspace itself.
@@ -84,7 +104,7 @@ class GlobTool(BaseTool):
             matches: list[Path] = list(start.glob(pattern))
         except SandboxViolation as exc:
             return ToolResult(success=False, output=str(exc))
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, NotImplementedError) as exc:
             return ToolResult(success=False, output=f"glob error: {exc}")
 
         # Filter: only files, only inside workspace (defense in depth)
