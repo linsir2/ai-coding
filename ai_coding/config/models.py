@@ -114,6 +114,15 @@ class AIConfig(BaseModel):
     # bounds all three: turns directly, tokens via turns x step-iterations x
     # max_tokens, wall-clock via turns x turn_timeout_seconds.  0 disables.
     plan_max_step_turns: int = 20
+    # D-4: episode-wide round ceiling for one armed goal; 0 disables.  Was a
+    # phantom until 2026-10-17: the runner read it duck-typed while this class
+    # had no such field, and `extra="ignore"` swallowed any yaml key for it.
+    goal_max_rounds: int = 20
+    # D-4 v2: episode-wide token ceiling for one armed goal, counted from the
+    # provider's usage (GoalRunner.after_round).  0 disables.  The round cap
+    # already bounds the worst case; this bounds the one the user actually
+    # pays for.  Unknown usage is not charged (fail-open).
+    goal_token_budget: int = 0
     max_result_data_bytes: int = 8_000
     max_subagent_conclusion_chars: int = 4_000
     # Ask the endpoint to emit a final usage frame (stream_options.include_usage).

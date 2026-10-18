@@ -45,7 +45,9 @@ GOAL_ROUND_HEAD = "[goal] 第"
 DEFAULT_MAX_ROUNDS = 20
 
 
-def goal_round_prompt(objective: str, number: int, cap: int) -> str:
+def goal_round_prompt(
+    objective: str, number: int, cap: int, *, spent: int = 0, budget: int = 0
+) -> str:
     """One round's opening message: objective, round, and the doctrine.
 
     The three sentences are the two reference harnesses' continuation doctrine
@@ -53,13 +55,25 @@ def goal_round_prompt(objective: str, number: int, cap: int) -> str:
     evidence before claiming completion; Codex ``continuation.md``: keep the
     full objective intact, never redefine success smaller, only claim what the
     evidence proves).
+
+    ``spent``/``budget`` (G1) add one line only when a token budget exists:
+    Codex's continuation prompt tracks remaining budget every round so the
+    model can wind down instead of being cut mid-work; this is that idea with
+    one number.
     """
+    budget_line = ""
+    if budget > 0:
+        budget_line = (
+            f"token 预算：已用 {spent:,}/{budget:,}；"
+            "接近上限时用本轮收尾（说清已完成与还差的），不要开新工作。\n"
+        )
     return (
         f"{GOAL_ROUND_HEAD} {number}/{cap} 轮 · 目标：{objective}\n"
         "以工作区现状、工具结果与会话状态为准（不要拿早先的叙述当现状）。\n"
         "本轮继续推进真实目标；允许调整做法，不得把目标缩小或换成更省事的版本。"
         "需要时用 todo_write 维护你的步骤清单。\n"
-        "结束前自检：完成了吗？只有当前证据逐条满足目标才可 update_goal(complete)；"
+        + budget_line
+        + "结束前自检：完成了吗？只有当前证据逐条满足目标才可 update_goal(complete)；"
         "同一阻塞连续出现 ≥3 轮才可 update_goal(blocked, note)；"
         "否则直接结束本轮，并在回复里说明进展与下一步。"
     )
@@ -78,6 +92,12 @@ class GoalReport:
     """What one goal run did, for the console and the caller."""
 
     rounds: int = 0
+    #: G1: the episode's account at the last completed round (episode-wide,
+    #: so a resume continues the same number), 0 when the provider reported
+    #: nothing -- hence "已用" only when non-zero.
+    tokens_used: int = 0
+    #: G1: the configured cap, filled when the token stop fires.
+    token_budget: int = 0
     #: None only before the first verdict; every driver exit fills one.
     stop: str | None = field(default=None)
 
@@ -92,7 +112,14 @@ class GoalReport:
 
     def render(self) -> str:
         head = f"[goal] 共 {self.rounds} 轮"
-        text = self._STOP_TEXT.get(self.stop or "", self.stop or "")
+        if self.tokens_used:
+            head += f" · 已用 {self.tokens_used:,} tokens"
+        if self.stop == "token-budget":
+            text = (
+                f"token 预算用尽（{self.tokens_used:,}/{self.token_budget:,}）"
+            )
+        else:
+            text = self._STOP_TEXT.get(self.stop or "", self.stop or "")
         return f"{head} · 止于：{text}"
 
 
@@ -105,6 +132,8 @@ class GoalRunner:
         #: cannot carry the task (same trick as the plan runner's receipt set).
         self._task: Any = None
         self._cap = DEFAULT_MAX_ROUNDS
+        #: G1: the episode's token ceiling for this run (0 = no ceiling).
+        self._token_budget = 0
         #: Did the round's turn move anything (any tool call at all)?
         self._round_moved = False
 
@@ -142,16 +171,21 @@ class GoalRunner:
         return GoalReport()
 
     def max_rounds(self) -> int:
+        return self._setting_int("goal_max_rounds", DEFAULT_MAX_ROUNDS)
+
+    def _setting_int(self, name: str, default: int) -> int:
+        """One read rule for both caps (duck-typed: fakes in tests work too)."""
         settings = getattr(self._loop, "settings", None)
-        value = getattr(settings, "goal_max_rounds", DEFAULT_MAX_ROUNDS)
+        value = getattr(settings, name, default)
         try:
             return max(int(value), 0)
         except (TypeError, ValueError):
-            return DEFAULT_MAX_ROUNDS
+            return default
 
     def prepare(self, session: Any, task: Any) -> set[str]:
         self._task = task
         self._cap = self.max_rounds()
+        self._token_budget = self._setting_int("goal_token_budget", 0)
         return set()
 
     def next_item(self, task: Any, attempted: set[str]) -> Any:
@@ -191,6 +225,7 @@ class GoalRunner:
     ) -> None:
         goal = str(getattr(task, "goal", "") or "")
         self._say(console, f"[goal] 第 {item.number}/{self._cap} 轮 · {goal}")
+        spent = int(getattr(task, "tokens_used", 0) or 0)
         before = self._tool_calls(session)
         original_policy = self._loop.policy
         # C3 off for the round: cross-round continuation is the driver's job,
@@ -203,7 +238,10 @@ class GoalRunner:
         try:
             await self._loop.process_input(
                 session,
-                goal_round_prompt(goal, item.number, self._cap),
+                goal_round_prompt(
+                    goal, item.number, self._cap,
+                    spent=spent, budget=self._token_budget,
+                ),
                 on_delta=on_delta,
                 observer=observer,
             )
@@ -213,10 +251,28 @@ class GoalRunner:
 
     def after_round(self, session: Any, task: Any, report: GoalReport) -> None:
         task.rounds_run = int(getattr(task, "rounds_run", 0) or 0) + 1
+        task.tokens_used = int(getattr(task, "tokens_used", 0) or 0) + self._round_tokens()
         report.rounds += 1
-        # Crash point ②: the round number and statuses are on disk before the
-        # next round opens.
+        report.tokens_used = int(task.tokens_used)
+        # Crash point ②: the round number, the token account and statuses are
+        # on disk before the next round opens.
         self._persist(session)
+
+    def _round_tokens(self) -> int:
+        """The round's provider-reported total; 0 when nothing was reported.
+
+        Fail-open on purpose: a loop without usage (fakes, providers that
+        omit it) must not freeze the account and must not trip the cap -- the
+        cap can only fire on spend it can see.
+        """
+        outcome = getattr(self._loop, "last_outcome", None)
+        usage = getattr(outcome, "usage", None)
+        if not isinstance(usage, dict):
+            return 0
+        try:
+            return max(int(usage.get("total_tokens", 0) or 0), 0)
+        except (TypeError, ValueError):
+            return 0
 
     def should_stop(self, report: GoalReport, item: _Round) -> bool:
         phase = str(getattr(self._task, "goal_phase", "") or "")
@@ -229,6 +285,15 @@ class GoalRunner:
         if not self._round_moved:
             report.stop = "no-progress"
             return True
+        # G1, post-round on purpose: the spend is only known after the round,
+        # and a pre-round check would kill a resume of an already-over-budget
+        # episode at zero rounds -- one bounded overshoot beats a dead resume.
+        if self._token_budget > 0:
+            spent = int(getattr(self._task, "tokens_used", 0) or 0)
+            if spent >= self._token_budget:
+                report.token_budget = self._token_budget
+                report.stop = "token-budget"
+                return True
         return False
 
     def taskless(self, report: GoalReport, console: Any) -> None:

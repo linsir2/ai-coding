@@ -32,13 +32,19 @@ class _FakeLoop:
         effects: list[Any] | None = None,
         tools: bool = True,
         cap: int = 20,
+        budget: int = 0,
+        usage: dict | None = None,
     ) -> None:
         self.policy = TurnPolicy()
         self.closer = _Closer()
-        self.settings = SimpleNamespace(goal_max_rounds=cap)
+        self.settings = SimpleNamespace(goal_max_rounds=cap, goal_token_budget=budget)
         self.calls: list[str] = []
         self.effects = list(effects or [])
         self.tools = tools
+        #: What the provider "reported" for each round's turn; None = no report
+        #: (the fail-open case).  Set as ``last_outcome.usage`` after the turn,
+        #: exactly where the real loop leaves it (turn_close.py:218).
+        self.usage = usage
         #: C3's budget as each round's turn saw it (must be 0).
         self.policies_seen: list[int] = []
 
@@ -57,6 +63,8 @@ class _FakeLoop:
         session.messages.append(ChatMessage(role="assistant", content="done", timestamp=stamp))
         if index < len(self.effects) and self.effects[index] is not None:
             self.effects[index](session, session.task)
+        if self.usage is not None:
+            self.last_outcome = SimpleNamespace(usage=dict(self.usage))
         return "done"
 
 
@@ -187,3 +195,79 @@ def test_the_round_prompt_carries_the_objective_round_and_claim_rules():
     assert "迁移 X" in text
     assert "update_goal(complete)" in text
     assert "update_goal(blocked" in text
+
+
+# ---- G1: the episode's token budget (2026-10-17) -----------------------------
+#
+# Codex tracks tokens per goal and stops at the budget; our v1 filed this for
+# v2 with the reason on record.  The accounting is episode-wide and persisted
+# (the same shape as roundsRun): a crash-resume continues the same budget
+# instead of letting the breaker (x5 resumes) multiply it.
+
+
+@pytest.mark.asyncio
+async def test_the_token_budget_stops_after_the_round_that_crosses_it():
+    task = TaskState(goal="g")
+    loop = _FakeLoop(cap=5, budget=1000, usage={"total_tokens": 600})
+
+    report = await GoalRunner(loop).run(_session(task))
+
+    assert report.rounds == 2, "600 < 1000 after round 1; 1200 crosses it in round 2"
+    assert report.stop == "token-budget"
+    assert task.tokens_used == 1200, "the episode's account, on the task"
+    assert task.armed is False
+    text = report.render()
+    assert "已用 1,200 tokens" in text
+    assert "token 预算用尽（1,200/1,000）" in text
+
+
+@pytest.mark.asyncio
+async def test_a_token_budget_of_zero_never_fires():
+    task = TaskState(goal="g")
+    loop = _FakeLoop(
+        cap=3, effects=[None, _claim("complete")], budget=0,
+        usage={"total_tokens": 10_000_000},
+    )
+
+    report = await GoalRunner(loop).run(_session(task))
+
+    assert report.stop == "model-complete"
+    assert task.tokens_used == 20_000_000, "the counter runs even with the cap off"
+    assert "token 预算" not in report.render()
+
+
+@pytest.mark.asyncio
+async def test_unknown_usage_is_not_charged():
+    task = TaskState(goal="g")
+    loop = _FakeLoop(cap=3, effects=[None, _claim("complete")], budget=10, usage=None)
+
+    report = await GoalRunner(loop).run(_session(task))
+
+    assert report.stop == "model-complete", "an unreported turn must not trip the cap"
+    assert task.tokens_used == 0
+    assert "已用" not in report.render()
+
+
+@pytest.mark.asyncio
+async def test_the_round_prompt_carries_the_budget_line_only_when_set():
+    task = TaskState(goal="g")
+    loop = _FakeLoop(cap=5, budget=1000, usage={"total_tokens": 600})
+    await GoalRunner(loop).run(_session(task))
+    assert "token 预算：已用 0/1,000" in loop.calls[0]
+    assert "token 预算：已用 600/1,000" in loop.calls[1]
+
+    other = _FakeLoop(cap=3, effects=[None, _claim("complete")], budget=0)
+    await GoalRunner(other).run(_session(TaskState(goal="g")))
+    assert all("token 预算" not in call for call in other.calls)
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_episode_keeps_counting_tokens_toward_the_budget():
+    task = TaskState(goal="g", tokens_used=1500)
+    loop = _FakeLoop(cap=5, budget=1000, usage={"total_tokens": 600})
+
+    report = await GoalRunner(loop).run(_session(task))
+
+    assert report.rounds == 1, "the resume runs one round, then the account stops it"
+    assert report.stop == "token-budget"
+    assert task.tokens_used == 2100

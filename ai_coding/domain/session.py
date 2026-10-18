@@ -521,9 +521,12 @@ class SessionData:
         # message so writing it would be noise -- but an armed task (or a
         # goal-phase claim) is the boot scan's whole input (D-4 found this:
         # a goal without items is normal, and ``find_armed_session`` reads
-        # these raw keys), not noise.
+        # these raw keys), not noise.  A token account (G1) joins the same
+        # list: it is a ledger of spend, and the live run proved the stop
+        # path would otherwise drop it with the rest of the block.
         if self.task is not None and (
             self.task.items or self.task.armed or self.task.goal_phase
+            or self.task.tokens_used
         ):
             data["task"] = self.task.to_dict()
         if self.harvested_messages:

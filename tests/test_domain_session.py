@@ -375,3 +375,21 @@ def test_an_armed_goal_without_items_still_reaches_the_file():
     session.task.armed = False
     session.task.goal_phase = "complete"
     assert session.to_dict()["task"]["goalPhase"] == "complete"
+
+
+def test_a_token_account_alone_keeps_the_task_in_the_file():
+    """G1: a spend account is a ledger, not the bare-goal noise the rule
+    drops -- the live budget-stop run was the proof (the whole block,
+    account included, evaporated with the disarm because items were empty)."""
+    from ai_coding.domain.task import TaskState
+
+    session = SessionData(
+        session_id="s1", title="t", created_time="", last_access_time="",
+        task=TaskState(goal="g"),
+    )
+    session.task.tokens_used = 17_431
+    data = session.to_dict()
+    assert data["task"]["tokensUsed"] == 17_431
+
+    session.task.tokens_used = 0
+    assert "task" not in session.to_dict()  # still noise without any state

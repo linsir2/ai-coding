@@ -286,3 +286,21 @@ def test_goal_phase_round_trips_only_when_set():
 
     assert "goalPhase" not in TaskState(goal="g").to_dict()
     assert TaskState.from_dict({"goal": "g", "items": []}).goal_phase == ""
+
+
+def test_tokens_used_round_trips_and_arm_goal_resets_it():
+    """G1: the episode's token account — same discipline as roundsRun (written
+    only when non-zero; a new episode starts a fresh account)."""
+    task = TaskState(goal="g")
+    task.rounds_run = 3
+    task.resume_count = 2
+    task.tokens_used = 12_345
+
+    data = task.to_dict()
+    assert data["tokensUsed"] == 12_345
+    assert TaskState.from_dict(data).tokens_used == 12_345
+    assert "tokensUsed" not in TaskState(goal="g").to_dict()
+
+    task.arm_goal("新目标")
+    assert task.tokens_used == 0
+    assert task.rounds_run == 0 and task.resume_count == 0

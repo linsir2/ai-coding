@@ -125,6 +125,12 @@ class TaskState:
     rounds_run: int = 0
     #: Boot auto-resumes spent; the breaker disarms past the cap.
     resume_count: int = 0
+    #: D-4 v2: provider-reported tokens this goal episode has spent.  Same
+    #: episode-wide accounting as ``rounds_run`` (``arm_goal`` resets it, the
+    #: driver accumulates per round) — a crash-resume continues the same
+    #: budget instead of letting the breaker multiply it.  Written only when
+    #: non-zero (same discipline as every optional key).
+    tokens_used: int = 0
     #: D-4: the model's goal-state claim while a ``goal``-profile task runs:
     #: "" (pursuing) | "complete" | "blocked" (``update_goal``).  The goal
     #: driver reads it after each round and stops on a claim; written only when
@@ -145,6 +151,7 @@ class TaskState:
         self.goal_phase = ""
         self.rounds_run = 0
         self.resume_count = 0
+        self.tokens_used = 0
         self.armed = True
         self.armed_profile = "goal"
 
@@ -373,6 +380,8 @@ class TaskState:
             data["roundsRun"] = int(self.rounds_run)
         if self.resume_count:
             data["resumeCount"] = int(self.resume_count)
+        if self.tokens_used:
+            data["tokensUsed"] = int(self.tokens_used)
         if self.goal_phase:
             data["goalPhase"] = self.goal_phase
         return data
@@ -392,6 +401,7 @@ class TaskState:
             armed_profile=str(data.get("armedProfile", "") or ""),
             rounds_run=int(data.get("roundsRun", 0) or 0),
             resume_count=int(data.get("resumeCount", 0) or 0),
+            tokens_used=int(data.get("tokensUsed", 0) or 0),
             goal_phase=str(data.get("goalPhase", "") or ""),
         )
 
