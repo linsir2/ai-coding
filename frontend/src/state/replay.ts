@@ -185,6 +185,9 @@ export function messagesToState(messages: WireMessage[]): SessionState {
     // session.jobs on mount, and a job from an earlier run arrives as
     // adopted then -- not as a row invented here.
     jobs: [],
+    // G2: no live goal in a replay either; the status line is a live
+    // indicator fed by plan.updated while a goal runs.
+    goal: null,
   }
 }
 

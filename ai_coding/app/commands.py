@@ -24,7 +24,7 @@ HELP_TEXT = (
     "  /resume [id]    list or resume saved sessions\n"
     "  /permissions   view or change approval policy\n"
     "  /todo           show current task list\n"
-    "  /goal [obj|off] start/stop a self-driving goal (esp. /goal off to stop)\n"
+    "  /goal [obj|resume|off] self-driving goal (resume=continue same goal, off=stop)\n"
     "  /tasks          list background sub-agent runs\n"
     "  /skills         list available skills\n"
     "  /review        review current changes\n"
@@ -272,18 +272,54 @@ def _save_session(sessions: Any, session: Any) -> None:
         save(session)
 
 
+def _goal_budget_warning(loop: Any, task: Any) -> str:
+    """One honest line when the episode's budgets are already spent (G1/G2).
+
+    Resume still runs -- the user asked, and one bounded round is theirs to
+    spend -- but the run will stop again almost immediately, and saying so
+    before the round is cheaper than the report after it.
+    """
+    settings = getattr(loop, "settings", None)
+
+    def _int(name: str, default: int) -> int:
+        try:
+            return int(getattr(settings, name, default) or default)
+        except (TypeError, ValueError):
+            return default
+
+    spent: list[str] = []
+    rounds, tokens = int(getattr(task, "rounds_run", 0) or 0), int(
+        getattr(task, "tokens_used", 0) or 0
+    )
+    cap = _int("goal_max_rounds", 20)
+    budget = _int("goal_token_budget", 0)
+    if 0 < cap <= rounds:
+        spent.append(f"轮数 {rounds}/{cap}")
+    if budget > 0 and tokens >= budget:
+        spent.append(f"token {tokens:,}/{budget:,}")
+    if not spent:
+        return ""
+    return (
+        f"[goal] 注意：{'、'.join(spent)} 已用尽——本次继续会立刻/一轮后停下；"
+        "调大配置后再来。"
+    )
+
+
 async def _handle_goal(
     loop: Any, session: Any, sessions: Any, raw: str,
     console: ConsoleSink, observer: Any,
 ) -> tuple[REPLAction, Any]:
-    """``/goal [objective|off]`` — the human entry to a self-driving goal (D-4).
+    """``/goal [objective|resume|off]`` — the human entry to a self-driving goal (D-4/G2).
 
     ``/goal <objective>`` is the human spelling of ``start_goal``: it arms the
     same episode (one place: ``TaskState.arm_goal``) and drives the same
     ``GoalRunner`` — no planning gate, so it works even when the model never
-    proposed one.  ``off`` disarms (the same seam as esc); a bare ``/goal``
-    reports status.  The run blocks here like ``/plan run`` does, so a command
-    turn is one envelope with a single end.
+    proposed one.  ``resume`` continues the same episode (counters kept; a
+    completed goal is terminal and refused); ``off`` disarms (the same seam
+    as esc); ``pause/clear/status`` are reserved redirects so a control word
+    can never silently become an objective.  A bare ``/goal`` reports status.
+    The run blocks here like ``/plan run`` does, so a command turn is one
+    envelope with a single end.
     """
     from ai_coding.core.goal_runner import GoalRunner
     from ai_coding.domain.task import TaskState
@@ -295,11 +331,65 @@ async def _handle_goal(
         if task is not None and getattr(task, "armed", False):
             task.armed = False
             _save_session(sessions, session)
+            # G2: the off path emits too -- an idle stop must clear the
+            # sidebar's goal line without waiting for another run's arm.
+            if observer is not None:
+                from ai_coding.core.events import TaskUpdated
+
+                try:
+                    observer.on_event(TaskUpdated(task=task))
+                except Exception:  # noqa: BLE001 — observation only
+                    pass
             console.info(
-                "[goal] 已停止；目标与清单留在会话里（再立案：/goal <objective>）。"
+                "[goal] 已停止；目标与账目留在会话里——继续：/goal resume；"
+                "换目标：/goal <objective>。"
             )
         else:
             console.info("[goal] 当前没有在跑的任务。")
+        return REPLAction.CONTINUE, session
+
+    if rest.lower() == "resume":
+        # G2: continue the SAME episode -- counters (rounds/account/resumes)
+        # are not touched; that is the whole difference from /goal <objective>.
+        if task is None or not getattr(task, "goal", ""):
+            console.info("[goal] 没有可续跑的目标（未立案）。立案：/goal <objective>。")
+            return REPLAction.CONTINUE, session
+        if getattr(task, "armed", False):
+            console.info(
+                f"[goal] 已在跑（profile={task.armed_profile or '?'}）；"
+                "停止用 esc / /goal off。"
+            )
+            return REPLAction.CONTINUE, session
+        if session.mode == "plan" or getattr(session, "readonly", False):
+            console.info("[goal] 计划模式（只读）中不能续跑——先 /plan off 再试。")
+            return REPLAction.CONTINUE, session
+        if str(getattr(task, "goal_phase", "")) == "complete":
+            console.info(
+                "[goal] 目标已申报完成（终态，不可续跑）；重新立案用 /goal <objective>。"
+            )
+            return REPLAction.CONTINUE, session
+        # A blocked claim resumes as a fresh attempt; leaving it in place
+        # would stop the first round the moment it ends (should_stop reads
+        # the stale phase).
+        task.goal_phase = ""
+        warning = _goal_budget_warning(loop, task)
+        if warning:
+            console.info(warning)
+        console.info("[goal] 继续本目标（不重置轮数与账目）。")
+        await GoalRunner(loop).run(
+            session, console, on_delta=console.delta, observer=observer
+        )
+        return REPLAction.CONTINUE, session
+
+    if rest.lower() in ("pause", "clear", "status"):
+        # Reserved so a control word can never silently become an objective
+        # (the parse below arms a goal from any other non-empty rest).
+        hint = {
+            "pause": "停止用 /goal off（之后可 /goal resume 继续）。",
+            "clear": "没有 clear 子命令——重新立案（/goal <objective>）会换成新目标。",
+            "status": "直接输入 /goal 查看状态。",
+        }[rest.lower()]
+        console.info(f"[goal] {hint}")
         return REPLAction.CONTINUE, session
 
     if not rest:
@@ -309,7 +399,7 @@ async def _handle_goal(
             console.info(
                 f"[goal] goal={task.goal!r} · armed={task.armed} · "
                 f"profile={task.armed_profile or '-'} · rounds={task.rounds_run} · "
-                f"phase={task.goal_phase or '-'}"
+                f"tokens={task.tokens_used} · phase={task.goal_phase or '-'}"
             )
         return REPLAction.CONTINUE, session
 

@@ -664,6 +664,7 @@ export function Session(props: SessionProps) {
             workspace={props.workspace}
             branch={props.branch}
             jobs={state.jobs}
+            goal={state.goal}
           />
         </Show>
       </box>

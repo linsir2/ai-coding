@@ -149,6 +149,13 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
             "type": "plan.updated",
             "data": {
                 "goal": task.goal,
+                # G2: the orchestration fields ride along raw -- the sidebar's
+                # goal line reads them; the UI decides the presentation.
+                "armed": bool(task.armed),
+                "armedProfile": task.armed_profile,
+                "roundsRun": int(task.rounds_run),
+                "tokensUsed": int(task.tokens_used),
+                "goalPhase": task.goal_phase,
                 "items": [
                     {"id": item.id, "content": item.content, "status": item.status}
                     for item in task.items

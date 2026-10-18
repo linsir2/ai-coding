@@ -746,8 +746,17 @@ class PlanRunner:
         if observer is not None:
             # Observation only: a client that cannot render this must not cost
             # the step its receipt (the bubbles are already written).
+            #
+            # ``on_event`` -- the LoopObserver protocol -- not a bare call:
+            # the callable spelling this used to have raised TypeError against
+            # the real bridge (it has on_event, no __call__) and the except
+            # below swallowed it, so the receipt was dead in production while
+            # the runner tests, which passed a list.append, stayed green
+            # (found 2026-10-17 while wiring G2's task emissions through the
+            # same seam; pinned by the boot-resume IPC test's plan.receipt
+            # count).
             try:
-                observer(PlanStepReceipt(prompt=prompt, summary=summary))
+                observer.on_event(PlanStepReceipt(prompt=prompt, summary=summary))
             except Exception:  # noqa: BLE001 — see above
                 pass
 

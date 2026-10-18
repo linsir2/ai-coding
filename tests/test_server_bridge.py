@@ -118,11 +118,22 @@ def test_plan_updated_carries_the_structured_list() -> None:
     task.add("step one")
     task.add("step two")
     task.items[0].status = "completed"
+    task.armed = True
+    task.armed_profile = "goal"
+    task.rounds_run = 2
+    task.tokens_used = 1234
     wire = to_wire(TaskUpdated(task=task))
     assert wire is not None
     assert wire["type"] == "plan.updated"
+    # G2: the orchestration fields ride along raw -- the sidebar's goal line
+    # reads them, the UI decides the presentation.
     assert wire["data"] == {
         "goal": "g",
+        "armed": True,
+        "armedProfile": "goal",
+        "roundsRun": 2,
+        "tokensUsed": 1234,
+        "goalPhase": "",
         "items": [
             {"id": "1", "content": "step one", "status": "completed"},
             {"id": "2", "content": "step two", "status": "pending"},

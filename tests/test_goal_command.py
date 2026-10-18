@@ -19,9 +19,11 @@ from ai_coding.domain.task import TaskState
 class _Loop:
     """The stub the plan-command tests use: policy + recorded turns."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, settings: object = None) -> None:
         self.calls: list[str] = []
         self.policy = TurnPolicy(TurnPolicyConfig(max_auto_continuations=3))
+        if settings is not None:
+            self.settings = settings
 
     async def process_input(self, session, text, on_delta=None, observer=None):
         self.calls.append(text)
@@ -137,3 +139,184 @@ async def test_goal_refuses_in_plan_mode_and_while_another_task_is_armed():
     assert "先停止" in c2.export_text()
     assert loop.calls == [] and sessions.saved == []
     assert session.task.armed is True  # untouched
+
+
+# ---- G2: /goal resume continues the same episode (2026-10-17) ---------------
+
+
+@pytest.mark.asyncio
+async def test_goal_resume_rearms_the_same_episode_without_resetting_counters():
+    from types import SimpleNamespace
+
+    loop = _Loop(settings=SimpleNamespace(goal_max_rounds=20, goal_token_budget=0))
+    sessions = _Sessions()
+    session = _session()
+    session.task = TaskState(
+        goal="迁移 X", armed=False, armed_profile="goal",
+        rounds_run=3, tokens_used=500,
+    )
+    dc, c = _console()
+
+    await handle_input(loop, "/goal resume", session, sessions, dc)
+
+    assert loop.calls and loop.calls[0].startswith("[goal] 第 4/20 轮"), (
+        "resume continues the episode's round numbering"
+    )
+    assert session.task.rounds_run == 4, "run from 3, not from 0"
+    assert session.task.tokens_used == 500, "the episode's account is kept"
+    assert session.task.armed is False  # the run stopped (no-progress) and disarmed
+
+
+@pytest.mark.asyncio
+async def test_goal_resume_is_refused_without_a_goal():
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    dc, c = _console()
+
+    await handle_input(loop, "/goal resume", session, sessions, dc)
+
+    assert loop.calls == [] and sessions.saved == []
+    assert "没有可续跑的目标" in c.export_text()
+
+
+@pytest.mark.asyncio
+async def test_goal_resume_is_refused_while_armed():
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.task = TaskState(goal="迁移 X", armed=True, armed_profile="goal")
+    dc, c = _console()
+
+    await handle_input(loop, "/goal resume", session, sessions, dc)
+
+    assert loop.calls == []
+    assert "已在跑" in c.export_text()
+
+
+@pytest.mark.asyncio
+async def test_goal_resume_is_refused_in_plan_mode():
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.mode, session.readonly = "plan", True
+    session.task = TaskState(goal="迁移 X", armed=False)
+    dc, c = _console()
+
+    await handle_input(loop, "/goal resume", session, sessions, dc)
+
+    assert loop.calls == []
+    assert "计划模式" in c.export_text()
+
+
+@pytest.mark.asyncio
+async def test_goal_resume_is_refused_after_completion():
+    """dsh parity: a completed goal is terminal -- resume must not reopen it."""
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.task = TaskState(goal="迁移 X", armed=False, armed_profile="goal",
+                             goal_phase="complete", rounds_run=2)
+    dc, c = _console()
+
+    await handle_input(loop, "/goal resume", session, sessions, dc)
+
+    assert loop.calls == []
+    assert session.task.goal_phase == "complete", "the terminal claim is untouched"
+    assert "终态" in c.export_text()
+
+
+@pytest.mark.asyncio
+async def test_goal_resume_clears_a_blocked_phase_so_the_first_round_runs():
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.task = TaskState(goal="迁移 X", armed=False, armed_profile="goal",
+                             goal_phase="blocked", rounds_run=4)
+    dc, c = _console()
+
+    await handle_input(loop, "/goal resume", session, sessions, dc)
+
+    assert session.task.goal_phase == "", "a stale claim must not stop round one"
+    assert loop.calls, "the resumed run actually ran"
+
+
+@pytest.mark.asyncio
+async def test_goal_resume_warns_when_the_budgets_are_already_spent():
+    from types import SimpleNamespace
+
+    loop = _Loop(settings=SimpleNamespace(goal_max_rounds=20, goal_token_budget=100))
+    sessions = _Sessions()
+    session = _session()
+    session.task = TaskState(goal="迁移 X", armed=False, armed_profile="goal",
+                             rounds_run=1, tokens_used=100)
+    dc, c = _console()
+
+    await handle_input(loop, "/goal resume", session, sessions, dc)
+
+    text = c.export_text()
+    assert "已用尽" in text, "the user is told the run will stop again immediately"
+    assert loop.calls, "the warning does not refuse -- the run still happens"
+
+
+@pytest.mark.asyncio
+async def test_goal_pause_redirects_to_off_and_never_arms():
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    dc, c = _console()
+
+    await handle_input(loop, "/goal pause", session, sessions, dc)
+
+    text = c.export_text()
+    assert "/goal off" in text
+    assert session.task is None or not session.task.goal, (
+        "a control word must not become an objective"
+    )
+    assert loop.calls == []
+
+
+@pytest.mark.asyncio
+async def test_goal_off_notice_points_at_resume():
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.task = TaskState(goal="迁移 X", armed=True, armed_profile="goal")
+    dc, c = _console()
+
+    await handle_input(loop, "/goal off", session, sessions, dc)
+
+    assert "/goal resume" in c.export_text()
+
+
+@pytest.mark.asyncio
+async def test_bare_goal_status_shows_the_token_account():
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.task = TaskState(goal="迁移 X", armed=False, armed_profile="goal",
+                             rounds_run=3, tokens_used=24_077)
+    dc, c = _console()
+
+    await handle_input(loop, "/goal", session, sessions, dc)
+
+    assert "tokens=24077" in c.export_text()
+
+
+@pytest.mark.asyncio
+async def test_goal_off_emits_a_task_updated_so_an_idle_stop_is_seen():
+    """G2: the off path tells the wire too -- the goal line must leave when
+    the user stops an idle goal, without waiting for another run's arm."""
+    from ai_coding.core.events import RecordingObserver, TaskUpdated
+
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.task = TaskState(goal="迁移 X", armed=True, armed_profile="goal")
+    dc, _c = _console()
+    observer = RecordingObserver()
+
+    await handle_input(loop, "/goal off", session, sessions, dc, observer=observer)
+
+    events = observer.of_type(TaskUpdated)
+    assert len(events) == 1 and events[0].task.armed is False

@@ -153,7 +153,9 @@ def test_a_nonzero_exit_is_reported_not_failed(tmp_path):
     registry = _registry(tmp_path)
 
     job = registry.start("exit 3", cwd=str(tmp_path), session_id="s1", emit=lambda e: None)
-    _wait_until(lambda: job.status != "running", what="settlement")
+    # Status and detail are two stores, not one -- wait on the second so the
+    # assertions below cannot read the seam between them.
+    _wait_until(lambda: bool(job.detail), what="the settlement detail")
 
     assert job.status == "completed"
     assert "3" in job.detail
@@ -186,7 +188,14 @@ def test_the_operator_sees_the_same_settlement_as_an_event(tmp_path):
     registry = _registry(tmp_path)
 
     job = registry.start("exit 0", cwd=str(tmp_path), session_id="s1", emit=seen.append)
-    _wait_until(lambda: job.status != "running", what="settlement")
+    # Wait on the event, not the status: _settle flips the status before it
+    # announces, so a poll on the status can land in between and this test
+    # flakes under load (caught once in a full run, 2026-10-17 -- the same
+    # class the idempotence test below documents).
+    _wait_until(
+        lambda: any(isinstance(event, BackgroundTaskDone) for event in seen),
+        what="the wire event",
+    )
 
     done = [event for event in seen if isinstance(event, BackgroundTaskDone)]
     assert done and done[0].name == "bash" and done[0].run_id == job.id
@@ -451,20 +460,42 @@ def test_a_settled_foreground_job_publishes_its_ending_and_its_absence(tmp_path)
         )
 
     registry = _registry(tmp_path)
+    # A moment, not instant (2026-10-18, caught intermittently): the watchdog
+    # can settle an instantly-finished command *before* ``start()`` runs its
+    # own publish, and since a publish is a state snapshot (not an event log)
+    # the "running" row is then simply skipped.  200ms lets the contract be
+    # what this test says it is; every wait below is still on an event, never
+    # a sleep.
     job = registry.start(
-        "echo done-quick", cwd=str(tmp_path), session_id="s", emit=rec,
+        "sleep 0.2 && echo done-quick", cwd=str(tmp_path), session_id="s", emit=rec,
+    )
+    _wait_until(
+        lambda: any(
+            kind == "JobChanged" and any(status == "running" for _, status in rows)
+            for kind, rows in seen
+        ),
+        what="the start publish",
     )
     _wait_until(lambda: job.status != "running", what="settlement")
+    _wait_until(
+        lambda: any(
+            kind == "JobChanged" and any(status == "completed" for _, status in rows)
+            for kind, rows in seen
+        ),
+        what="the settle publish",
+    )
 
     registry.discard(job.id)
+    _wait_until(
+        lambda: any(kind == "JobChanged" and rows == [] for kind, rows in seen),
+        what="the empty publish after discard",
+    )
 
-    starts = [
-        rows for kind, rows in seen
-        if kind == "JobChanged" and any(status == "running" for _, status in rows)
-    ]
-    assert starts, f"the start publish is missing: {seen}"
-    empties = [rows for kind, rows in seen if kind == "JobChanged" and rows == []]
-    assert empties, f"the empty publish after discard is missing: {seen}"
+    changes = [(kind, rows) for kind, rows in seen if kind == "JobChanged"]
+    assert any(any(status == "running" for _, status in rows) for _kind, rows in changes), (
+        f"the start publish is missing: {seen}"
+    )
+    assert changes[-1][1] == [], f"the absence must be the last word: {seen}"
 
 
 def test_the_settlement_is_complete_before_a_waiter_can_wake(tmp_path, monkeypatch):

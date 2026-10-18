@@ -337,6 +337,31 @@ describe("plan and ledger", () => {
     ])
   })
 
+  test("plan.updated also feeds the goal status (G2)", () => {
+    const armed = feed(
+      initialState(),
+      wire("plan.updated", {
+        goal: "迁移 X",
+        items: [],
+        armed: true,
+        armedProfile: "goal",
+        roundsRun: 2,
+        tokensUsed: 1234,
+        goalPhase: "",
+      }),
+    )
+    expect(armed.goal).toEqual({
+      goal: "迁移 X",
+      armed: true,
+      roundsRun: 2,
+      tokensUsed: 1234,
+      phase: "",
+    })
+
+    const cleared = feed(armed, wire("plan.updated", { goal: "", items: [] }))
+    expect(cleared.goal).toBeNull()
+  })
+
   test("an emptied plan leaves the transcript", () => {
     // 20 §批次2: a clear used to leave an "(无任务项)" card behind; empty is
     // not a plan, so the card goes the way it came.

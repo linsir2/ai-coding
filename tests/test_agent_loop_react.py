@@ -1249,7 +1249,7 @@ async def test_the_closing_step_offers_no_tools(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_single_empty_step_is_retried_once(tmp_path):
+async def test_a_single_empty_step_is_retried_once(tmp_path, monkeypatch):
     """H (13 §2.7): a three-way-empty step earns one retry of the same request
     (dsh EMPTY_RESPONSE parity, conservative bound of 1)."""
     empty = StepResult(
@@ -1266,6 +1266,11 @@ async def test_a_single_empty_step_is_retried_once(tmp_path):
     assert loop.last_outcome is not None
     assert loop.last_outcome.status is TurnStatus.COMPLETED
     # No injected message: the retry is the same request (dsh llm-retry parity).
+    # The environment block carries the wall clock (C-4); two builds compared
+    # byte-for-byte must not straddle a second boundary.
+    monkeypatch.setattr(
+        "ai_coding.core.request_assembly.now_local", lambda: "2026-01-01T00:00:00+08:00"
+    )
     assert engine.requests[0]["messages"] == engine.requests[1]["messages"]
 
 

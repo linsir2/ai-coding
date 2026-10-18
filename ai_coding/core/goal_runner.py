@@ -31,6 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar
 
+from ai_coding.core.events import TaskUpdated
 from ai_coding.core.task_driver import TaskDriver
 
 __all__ = ["GOAL_ROUND_HEAD", "GoalReport", "GoalRunner", "goal_round_prompt"]
@@ -131,6 +132,9 @@ class GoalRunner:
         #: Stashed by ``prepare`` for ``should_stop``, whose protocol signature
         #: cannot carry the task (same trick as the plan runner's receipt set).
         self._task: Any = None
+        #: G2: the run's observer, stashed for the TaskUpdated emissions (arm /
+        #: per round / disarm) the sidebar's goal line rides.
+        self._observer: Any = None
         self._cap = DEFAULT_MAX_ROUNDS
         #: G1: the episode's token ceiling for this run (0 = no ceiling).
         self._token_budget = 0
@@ -145,6 +149,7 @@ class GoalRunner:
         on_delta: Any = None,
         observer: Any = None,
     ) -> GoalReport:
+        self._observer = observer
         task = getattr(session, "task", None)
         if task is not None:
             task.armed = True
@@ -152,14 +157,19 @@ class GoalRunner:
             # Crash point ①: armed is durable before any round runs, exactly
             # like the plan run — the boot scan finds it, the breaker counts.
             self._persist(session)
+            self._emit_task(task)  # the goal line appears at arm
         try:
             report: GoalReport = await TaskDriver(self._loop).run(
                 session, self, console, on_delta=on_delta, observer=observer
             )
         finally:
-            if task is not None and getattr(task, "armed", False):
-                task.armed = False
-                self._persist(session)
+            if task is not None:
+                if getattr(task, "armed", False):
+                    task.armed = False
+                    self._persist(session)
+                # Driver-path stops disarm inside TaskDriver; this emission
+                # covers every exit, cancellation included.
+                self._emit_task(task)
         # The driver's armed-break path carries no verdict of its own.
         if report.stop is None:
             report.stop = "disarmed"
@@ -257,6 +267,7 @@ class GoalRunner:
         # Crash point ②: the round number, the token account and statuses are
         # on disk before the next round opens.
         self._persist(session)
+        self._emit_task(task)  # G2: the goal line counts rounds live
 
     def _round_tokens(self) -> int:
         """The round's provider-reported total; 0 when nothing was reported.
@@ -307,6 +318,23 @@ class GoalRunner:
         self._say(console, report.render())
 
     # ---- internals -------------------------------------------------------
+
+    def _emit_task(self, task: Any) -> None:
+        """Say the task changed, on the event ``todo_write`` already uses (G2).
+
+        Arm, every round's numbers, and the disarm are real task changes; the
+        sidebar's goal line rides them, and reusing the event keeps the wire
+        type, the bridge mapping and the frontend case untouched.  Observation
+        only: a client that cannot take it must not cost the round (same
+        discipline as PlanRunner's receipt -- both go through the LoopObserver
+        protocol, ``on_event``, which is what the real bridge implements).
+        """
+        if self._observer is None:
+            return
+        try:
+            self._observer.on_event(TaskUpdated(task=task))
+        except Exception:  # noqa: BLE001 — see above
+            pass
 
     def _persist(self, session: Any) -> None:
         save = getattr(getattr(self._loop, "closer", None), "save", None)

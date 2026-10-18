@@ -201,8 +201,13 @@ async def test_leftovers_stay_queued_when_a_turn_only_drains_once():
 
 
 @pytest.mark.asyncio
-async def test_no_source_means_no_behaviour_change():
+async def test_no_source_means_no_behaviour_change(monkeypatch):
     plain, queued = _Engine(), _Engine()
+    # The environment block carries the wall clock (C-4); two builds compared
+    # byte-for-byte must not straddle a second boundary.
+    monkeypatch.setattr(
+        "ai_coding.core.request_assembly.now_local", lambda: "2026-01-01T00:00:00+08:00"
+    )
 
     await _loop(None, plain).process_input(_session(), "派个后台任务")
     await _loop(SteeringQueue(), queued).process_input(_session(), "派个后台任务")

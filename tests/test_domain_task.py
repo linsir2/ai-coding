@@ -304,3 +304,20 @@ def test_tokens_used_round_trips_and_arm_goal_resets_it():
     task.arm_goal("新目标")
     assert task.tokens_used == 0
     assert task.rounds_run == 0 and task.resume_count == 0
+
+
+def test_clear_keeps_the_goal_while_an_episode_is_armed():
+    """G2 live found this: a goal round calling todo_write(clear) wiped the
+    episode's objective -- the round prompts after it read ``目标：`` empty,
+    and /goal resume would have refused with "没有可续跑的目标" for a goal
+    that was still running.  While armed, the goal is the episode's, not the
+    list's title (R1-5b's rule still holds for a bare, unarmed list)."""
+    task = TaskState(goal="迁移 X")
+    task.add("step")
+    task.arm_goal("迁移 X")
+
+    task.clear()
+
+    assert task.items == []
+    assert task.goal == "迁移 X", "the armed episode keeps its objective"
+    assert task.armed is True

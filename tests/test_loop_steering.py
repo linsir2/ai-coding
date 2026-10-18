@@ -166,10 +166,15 @@ async def test_steering_does_not_count_as_an_iteration():
 
 
 @pytest.mark.asyncio
-async def test_no_source_means_no_behaviour_change():
+async def test_no_source_means_no_behaviour_change(monkeypatch):
     # Empty table behaves like no table; and next-turn rows stay parked -- a
     # steer-scoped drain never promotes them (oc draws the same line in
     # execution.ts).  Both runs must show the model exactly the same request.
+    # The environment block carries the wall clock (C-4); two builds compared
+    # byte-for-byte must not straddle a second boundary.
+    monkeypatch.setattr(
+        "ai_coding.core.request_assembly.now_local", lambda: "2026-01-01T00:00:00+08:00"
+    )
     plain_engine = _Engine()
     parked_engine = _Engine()
     parked = _session()

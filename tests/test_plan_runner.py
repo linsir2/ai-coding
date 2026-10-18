@@ -306,15 +306,18 @@ async def test_a_fiat_only_run_still_backfills_and_leaves_no_arm():
 
 @pytest.mark.asyncio
 async def test_a_step_receipt_reaches_a_wired_observer():
-    from ai_coding.core.events import PlanStepReceipt
+    from ai_coding.core.events import PlanStepReceipt, RecordingObserver
 
     session = _session_with("fix bug", "add tests")
     loop = _StubLoop(["complete", "complete"])
-    seen: list[object] = []
+    # A loop-shaped observer (on_event), not a bare callable: the callable
+    # shape these tests used to pass was exactly how the production wiring
+    # stayed dead -- the real bridge has on_event and no __call__.
+    observer = RecordingObserver()
 
-    await PlanRunner(loop).run(session, observer=seen.append)
+    await PlanRunner(loop).run(session, observer=observer)
 
-    receipts = [event for event in seen if isinstance(event, PlanStepReceipt)]
+    receipts = observer.of_type(PlanStepReceipt)
     assert len(receipts) == 2, f"one receipt per step, got {len(receipts)}"
     assert "fix bug" in receipts[0].prompt and "fix bug" in receipts[0].summary
     # The event carries exactly the two bubbles the replay will show.
@@ -324,15 +327,15 @@ async def test_a_step_receipt_reaches_a_wired_observer():
 
 @pytest.mark.asyncio
 async def test_a_crashed_step_receipts_on_the_wire_too():
-    from ai_coding.core.events import PlanStepReceipt
+    from ai_coding.core.events import PlanStepReceipt, RecordingObserver
 
     session = _session_with("explode")
     loop = _StubLoop(["explode"])
-    seen: list[object] = []
+    observer = RecordingObserver()
 
-    await PlanRunner(loop).run(session, observer=seen.append)
+    await PlanRunner(loop).run(session, observer=observer)
 
-    assert any(isinstance(event, PlanStepReceipt) for event in seen), (
+    assert observer.of_type(PlanStepReceipt), (
         "the failed path writes the same two bubbles; the wire must see them too"
     )
 

@@ -102,6 +102,22 @@ export interface SessionState {
    * the scrollback would put words in their conversation.
    */
   jobs: JobRow[]
+  /**
+   * The goal episode's live status (G2), fed by plan.updated's orchestration
+   * fields; the sidebar's goal line reads it.  Null until a task event says
+   * otherwise -- a live indicator, not a snapshot (the sidebar line only
+   * shows while armed).
+   */
+  goal: GoalStatus | null
+}
+
+/** The goal episode as the wire reports it (plan.updated, G2). */
+export interface GoalStatus {
+  goal: string
+  armed: boolean
+  roundsRun: number
+  tokensUsed: number
+  phase: string
 }
 
 export type Action =
@@ -125,7 +141,7 @@ export type Action =
   | { kind: "jobs"; jobs: JobRow[] }
 
 export function initialState(): SessionState {
-  return { messages: [], busy: false, queued: [], jobs: [] }
+  return { messages: [], busy: false, queued: [], jobs: [], goal: null }
 }
 
 /** Narrow one wire row into the shape the panel draws. */
@@ -545,7 +561,7 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
             }
           })
         : []
-      return updateAssistant(state, (parts) => {
+      const next = updateAssistant(state, (parts) => {
         const index = parts.findIndex((part) => part.kind === "plan")
         if (!goal && items.length === 0) {
           return index < 0 ? parts : parts.filter((part) => part.kind !== "plan")
@@ -556,6 +572,19 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
         next[index] = plan
         return next
       })
+      // G2: the same event feeds the sidebar's goal line.  Empty goal+items
+      // is the task being dropped, so the status clears with the card.
+      const status: GoalStatus | null =
+        goal || items.length > 0
+          ? {
+              goal,
+              armed: data["armed"] === true,
+              roundsRun: num(data["roundsRun"]),
+              tokensUsed: num(data["tokensUsed"]),
+              phase: str(data["goalPhase"]),
+            }
+          : null
+      return { ...next, goal: status }
     }
     case "ledger.updated": {
       const items = Array.isArray(data["items"]) ? data["items"] : []

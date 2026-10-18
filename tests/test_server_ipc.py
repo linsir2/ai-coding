@@ -1586,6 +1586,12 @@ async def test_boot_resume_steps_are_steps_and_the_run_ends_once(ipc):
     types = [event["type"] for event in client.events]
     assert types.count("turn.step") == 2, types
     assert types.count("turn.finished") == 1, types
+    # 2026-10-17: the wall the receipt used to die on.  The runner's observer
+    # here is the REAL bridge (on_event, no __call__); the runner tests passed
+    # a bare callable, so the two layers were each green while the wiring
+    # between them emitted nothing.  One real step == one receipt, counted
+    # here through the whole chain.
+    assert types.count("plan.receipt") == 1, types
     assert types[-1] == "turn.finished"
     assert client.events[-1]["data"]["status"] == "completed"
     # The task disarmed itself when the run finished (PlanRunner's finally).

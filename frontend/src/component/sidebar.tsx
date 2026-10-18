@@ -7,6 +7,7 @@
 
 import { TextAttributes } from "@opentui/core"
 import { Show } from "solid-js"
+import type { GoalStatus } from "../state/session"
 import { type JobRow } from "../state/session"
 import { theme } from "../theme/tokens"
 import { abbreviateHome, formatLocation, truncatePath } from "../util/location"
@@ -26,6 +27,17 @@ export function jobLine(jobs: readonly JobRow[]): string {
 
 export const JOB_HINT = "<leader>j 查看 / ctrl+d 停止"
 
+/**
+ * G2: the one line a running goal gets.  Same rule as jobLine -- the line
+ * only exists while it has something true to say (here: while armed), so it
+ * never turns into furniture.
+ */
+export function goalLine(goal: GoalStatus): string {
+  const round = goal.roundsRun > 0 ? `第 ${goal.roundsRun} 轮` : "进行中"
+  const spent = goal.tokensUsed > 0 ? ` · ${formatTokens(goal.tokensUsed)} tokens` : ""
+  return `目标：${round}${spent}`
+}
+
 export function Sidebar(props: {
   title: string
   tokens: number
@@ -38,6 +50,8 @@ export function Sidebar(props: {
    * reading it, which is the opposite of what a running dev server needs.
    */
   jobs?: JobRow[]
+  /** G2: the goal episode's live status; the line shows only while armed. */
+  goal?: GoalStatus | null
 }) {
   const location = () => {
     const label = formatLocation(abbreviateHome(props.workspace, process.env.HOME ?? ""), props.branch)
@@ -72,6 +86,9 @@ export function Sidebar(props: {
       <Show when={(props.jobs ?? []).length > 0}>
         <text fg={theme.textBase}>{jobLine(props.jobs ?? [])}</text>
         <text fg={theme.textMuted}>{JOB_HINT}</text>
+      </Show>
+      <Show when={props.goal?.armed ? props.goal : undefined}>
+        {(goal) => <text fg={theme.textBase}>{goalLine(goal())}</text>}
       </Show>
       <text wrapMode="none" fg={theme.textMuted}>
         {location()}

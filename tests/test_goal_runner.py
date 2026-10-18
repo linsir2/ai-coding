@@ -271,3 +271,39 @@ async def test_a_resumed_episode_keeps_counting_tokens_toward_the_budget():
     assert report.rounds == 1, "the resume runs one round, then the account stops it"
     assert report.stop == "token-budget"
     assert task.tokens_used == 2100
+
+
+@pytest.mark.asyncio
+async def test_a_goal_run_emits_task_updated_on_arm_rounds_and_disarm():
+    """G2: the sidebar's goal line rides TaskUpdated -- arm, every round, and
+    the disarm, all on the event todo_write already uses.
+
+    The event carries the live task object (the loop's own convention; the
+    bridge consumes it synchronously), so this double snapshots the fields at
+    call time instead of holding the reference.
+    """
+    from ai_coding.core.events import TaskUpdated
+
+    class _Snapshot:
+        def __init__(self) -> None:
+            self.states: list[tuple[bool, int, int]] = []
+
+        def on_event(self, event) -> None:
+            if isinstance(event, TaskUpdated):
+                self.states.append(
+                    (event.task.armed, event.task.rounds_run, event.task.tokens_used)
+                )
+
+    task = TaskState(goal="g")
+    loop = _FakeLoop(cap=3, usage={"total_tokens": 600})
+    observer = _Snapshot()
+
+    report = await GoalRunner(loop).run(_session(task), observer=observer)
+
+    assert len(observer.states) >= 3, f"arm + rounds + disarm, got {len(observer.states)}"
+    assert observer.states[0][0] is True, "the arm emission says armed"
+    assert observer.states[-1][0] is False, "the last emission says disarmed"
+    rounds = [state[1] for state in observer.states]
+    assert rounds == sorted(rounds), "the numbers only grow"
+    assert rounds[-1] == report.rounds
+    assert observer.states[-1][2] == report.tokens_used
