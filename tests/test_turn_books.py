@@ -341,6 +341,18 @@ def test_a_cancelled_only_round_stops_the_burn_too():
     assert books.failed_streak == 0
 
 
+def test_an_invalid_plan_submission_is_a_verdict_too():
+    """P1's ``invalid_items`` — a submission the tool refused because an entry
+    had no content — is the same class of verdict as ``no_plan_items``: the
+    harness telling the model to fix its call, not breakage of the world.  It
+    must not push the escalation ladder (two of these would arm L1)."""
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", success=False, error="timeout")])
+    assert books.failed_streak == 1
+    books.note_outcomes([_outcome("present_plan", success=False, error="invalid_items")])
+    assert books.failed_streak == 0
+
+
 # ------------------- plan 提交守卫（stage 4 r2）-----------------------------
 
 

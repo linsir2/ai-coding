@@ -138,6 +138,36 @@ def test_after_step_asks_for_the_plan_it_never_got(posture):
     assert decision.intervention == ""  # 不是 ladder 家族，不进干预账本
 
 
+def test_the_plan_gate_asks_even_with_an_empty_list():
+    """P2 verification: planning no longer writes todo items, so the guard
+    that asks for a submission must not depend on them.  It keys on
+    ``plan_submitted`` (the tool_success record), never on ``open_items`` —
+    this pins that, because the old workflow made the two look equivalent."""
+    decision = TurnPolicy(_config()).decide_after_step(
+        TurnSnapshot(iteration=1, mode="plan")  # no items, nothing submitted
+    )
+    assert (decision.action, decision.reason) == (TurnAction.NUDGE, "plan unsubmitted")
+
+    submitted = TurnPolicy(_config()).decide_after_step(
+        TurnSnapshot(iteration=1, mode="plan", plan_submitted=True)
+    )
+    assert (submitted.action, submitted.reason) == (TurnAction.FINISH, "model finished")
+
+
+def test_the_plan_nudge_sends_the_steps_through_present_plan():
+    """P1: the remedy text used to say "write the items with todo_write", which
+    is the workflow the redesign removed (trace ec89d5ee: 8 steps, 8
+    iterations, plus an add/clear loop).  The nudge now points at the items
+    array on the same call."""
+    decision = TurnPolicy(_config()).decide_after_step(
+        TurnSnapshot(iteration=1, mode="plan")
+    )
+    assert decision.inject is not None
+    assert "present_plan" in decision.inject
+    assert "items" in decision.inject
+    assert "todo_write" not in decision.inject
+
+
 @pytest.mark.parametrize("posture", [{"mode": "plan"}, {"readonly": True}])
 def test_after_step_stops_asking_after_one_remedy(posture):
     decision = TurnPolicy(_config()).decide_after_step(

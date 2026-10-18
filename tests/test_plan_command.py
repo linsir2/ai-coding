@@ -449,15 +449,18 @@ def test_the_plan_prompt_submits_through_present_plan():
     assert "present_plan" in PLAN_PROMPT
 
 
-def test_the_plan_prompt_bans_clear_rewrites():
-    """20 §批次3: the measured thrash (add -> clear -> add -> clear) emptied
-    the list right before present_plan (24d7109b turn 4); revisions go through
-    update, not clear."""
+def test_the_plan_prompt_sends_the_steps_through_present_plan():
+    """P1 (trace ec89d5ee): the prompt taught a todo_write workflow whose
+    measured cost was 8 iterations for 8 steps plus an add/clear loop.  The
+    steps ride present_plan's own call now, with verify on each item."""
     from ai_coding.core.plan_runner import PLAN_PROMPT
 
     lowered = PLAN_PROMPT.lower()
-    assert "update" in lowered
-    assert "clear" in lowered
+    assert "present_plan" in lowered
+    assert "items" in lowered
+    assert "verify" in lowered
+    assert "todo items with todo_write" not in lowered  # the old teaching is gone
+    assert "do not track the planning with todo_write" in lowered
 
 
 @pytest.mark.asyncio

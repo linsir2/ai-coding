@@ -60,13 +60,14 @@ def test_methods_section_rides_even_a_base_only_prompt():
 
 PLAN_SEGMENT = (
     "<plan-mode>You are in plan mode. Every request is answered with a plan, "
-    "never with the finished work: explore only enough to plan, write the "
-    "steps as todo items with todo_write (each with its verify command), then "
-    "call present_plan with a concise markdown summary — approval starts "
-    "execution automatically. Do not write the analysis, research or files as "
-    "your final answer, and do not mark items completed — the execution phase "
-    "does the reading and the work. bash/write/edit are unavailable here — "
-    "explore with read/grep/glob instead.</plan-mode>"
+    "never with the finished work: explore only enough to plan, then submit it "
+    "with present_plan — a concise markdown summary, and in its items array "
+    "every executable step with its verify command. Approval writes those "
+    "items and starts execution automatically; do not track the planning with "
+    "todo_write, do not write the analysis or files as your final answer, and "
+    "do not mark items completed — the execution phase does the reading and "
+    "the work. bash/write/edit are unavailable here — explore with "
+    "read/grep/glob instead.</plan-mode>"
 )
 
 
@@ -163,3 +164,15 @@ def test_a_subagent_surface_keeps_its_own_habits():
     so the paragraph must not be in the child's prompt."""
     assert "do not sleep or poll" in _assembler().build(tools=("bash", "subAgent"))
     assert "do not sleep or poll" not in _assembler().build(tools=("bash",))
+
+
+def test_plan_segment_sends_the_steps_through_present_plan():
+    """P1 (trace ec89d5ee): the segment taught a ``todo_write`` workflow whose
+    measured cost was one iteration per step plus an add/clear loop.  The
+    steps now ride ``present_plan``'s own call, and the planning phase is told
+    not to track itself with todo_write (dsh's rule, standard.patch.yml:59)."""
+    out = _assembler().build(mode="plan")
+    assert "present_plan" in out
+    assert "items" in out
+    assert "todo items with todo_write" not in out  # the old teaching is gone
+    assert "do not track the planning with todo_write" in out

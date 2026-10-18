@@ -259,3 +259,54 @@ def test_path_escape_guard_ignores_relative_commands():
         ).verdict
         is GuardVerdict.ALLOW
     )
+
+
+# ---- Q4: the refusal names the right next move, per tool --------------------
+#
+# "reuse the earlier result" is exactly right for a read and meaningless for an
+# ask (the result is the human's answer, not a value to reuse) or a write (the
+# side effect is already done).  Measured in trace ec89d5ee: the model read a
+# refusal that did not match its call and retried with reworded arguments.
+
+
+def _succeed_once(guard, call, ctx, view):
+    assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
+    guard.after(call, ToolResult(success=True, output="ok"), ctx, view)
+
+
+def test_a_repeated_read_still_says_reuse_the_result():
+    guard = DuplicateCallGuard(threshold=1)
+    view, ctx = TurnView(), ToolContext()
+    call = _call("read", path="a.txt")
+    _succeed_once(guard, call, ctx, view)
+    assert "reuse the earlier result" in guard.check(call, ctx, view).reason
+
+
+def test_a_repeated_ask_user_says_the_question_was_already_answered():
+    guard = DuplicateCallGuard(threshold=1)
+    view, ctx = TurnView(), ToolContext()
+    call = _call("ask_user", question="怎么办？")
+    _succeed_once(guard, call, ctx, view)
+    reason = guard.check(call, ctx, view).reason
+    assert "reuse the earlier result" not in reason
+    assert "answer" in reason
+
+
+def test_a_repeated_write_names_the_write_not_a_result():
+    guard = DuplicateCallGuard(threshold=1)
+    view, ctx = TurnView(), ToolContext()
+    call = _call("write", path="a.py", content="x")
+    _succeed_once(guard, call, ctx, view)
+    reason = guard.check(call, ctx, view).reason
+    assert "reuse the earlier result" not in reason
+    assert "file" in reason
+
+
+def test_a_repeated_edit_says_the_file_already_reflects_it():
+    guard = DuplicateCallGuard(threshold=1)
+    view, ctx = TurnView(), ToolContext()
+    call = _call("edit", path="a.py")
+    _succeed_once(guard, call, ctx, view)
+    reason = guard.check(call, ctx, view).reason
+    assert "reuse the earlier result" not in reason
+    assert "file" in reason

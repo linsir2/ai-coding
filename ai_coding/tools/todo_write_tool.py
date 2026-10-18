@@ -43,7 +43,7 @@ class TodoWriteTool(BaseTool):
             "Actions: add (content, optional depends_on) appends a pending item; "
             "update (id, optional status/evidence/content) patches an item, where "
             "status is one of pending/in_progress/completed/blocked/dropped; "
-            "list shows the current list; clear drops all items. "
+            "list shows the current list. "
             "Keep items small and actionable, and mark an item completed only with "
             "evidence (the file, command or finding that proves it)."
         )
@@ -55,7 +55,7 @@ class TodoWriteTool(BaseTool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["add", "update", "list", "clear"],
+                    "enum": ["add", "update", "list"],
                     "description": "The action to perform.",
                 },
                 "content": {"type": "string", "description": "Item text (for 'add')."},
@@ -118,12 +118,9 @@ class TodoWriteTool(BaseTool):
             return self._update(params, task)
         if action == "list":
             return self._ok(task, "list")
-        if action == "clear":
-            task.clear()
-            return self._ok(task, "clear")
         return ToolResult(
             success=False,
-            output=f"error: unknown action '{action}' (valid: add, update, list, clear)",
+            output=f"error: unknown action '{action}' (valid: add, update, list)",
             error="unknown_action",
         )
 

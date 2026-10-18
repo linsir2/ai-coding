@@ -50,8 +50,8 @@ TASK_MESSAGE_LEAD = "以下是你自己的任务清单状态（系统注入，�
 #: rides the outcome to the transcript when even the remedy is refused.
 #: Measured silent-completion twice: sessions 7ad86804 and 1fd3be1e.
 PLAN_NUDGE = (
-    "[plan] 尚未提交计划：计划模式要求用 todo_write 写好条目（含 verify），"
-    "并以 present_plan 提交评审，不能以纯文本收尾。请立即补交。"
+    "[plan] 尚未提交计划：把全部可执行步骤放进 present_plan 的 items 数组"
+    "（每步一条，含 verify 命令）提交评审，不能以纯文本收尾。请立即补交。"
 )
 PLAN_UNSUBMITTED_NOTE = (
     "[plan] 本回合未提交计划（未调用 present_plan）；可继续对话让它提交。"

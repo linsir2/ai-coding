@@ -1504,7 +1504,12 @@ class AgentLoop:
         )
         self.closer.write_back(session, outcomes)
         if any(
-            item.call.name in ("todo_write", "start_goal", "update_goal")
+            # ``present_plan`` joined the list with P1: approval is what writes
+            # the submitted items into the task, and the plan card is driven by
+            # this event -- a write the frontend never hears about is a plan it
+            # never shows.  (During planning, todo_write is prompt-banned, so
+            # nothing else would emit it either.)
+            item.call.name in ("todo_write", "start_goal", "update_goal", "present_plan")
             for item in outcomes
         ):
             self._emit(TaskUpdated(task=task))

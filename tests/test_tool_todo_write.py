@@ -68,11 +68,25 @@ async def test_list_returns_rendered_task(tool, ctx):
 
 
 @pytest.mark.asyncio
-async def test_clear_empties_task(tool, ctx):
+async def test_clear_is_refused(tool, ctx):
+    """`clear` is gone (plan-mode redesign, 2026-10-18).
+
+    Measured in trace ``ec89d5ee``: the model ran ``add -> clear -> add ->
+    clear`` for 25 iterations and finished with "无实质性工作" — each clear
+    wiped the plan the previous add had written, two clears returned the
+    identical ``(无任务项)`` so the model could not tell it had made no
+    progress, and the third was refused by ``duplicate_call`` with a message
+    ("reuse the earlier result") that is meaningless for an idempotent wipe.
+
+    dsh has no clear either — its ``todo_write`` replaces the whole list
+    (``packages/todo/tool-todo/src/index.ts:80``) — and revisions belong to
+    ``update``, which the plan prompt already says.
+    """
     await tool.execute({"action": "add", "content": "a"}, ctx)
     r = await tool.execute({"action": "clear"}, ctx)
-    assert r.success is True
-    assert ctx.task.total == 0
+    assert r.success is False
+    assert r.error == "unknown_action"
+    assert ctx.task.total == 1  # the list was not touched
 
 
 @pytest.mark.asyncio

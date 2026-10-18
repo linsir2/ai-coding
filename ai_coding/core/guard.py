@@ -179,6 +179,24 @@ class GuardChain:
         return current
 
 
+#: What the model should do when it repeats a call that already succeeded.
+#:
+#: One sentence cannot fit every tool: "reuse the earlier result" is exactly
+#: right for a read, meaningless for an ask (the result is a human's answer,
+#: not a value to reuse) and for a write (the side effect is already done).
+#: The refusal is a teaching moment, so it names the right next move -- a
+#: generic wording sent the model back to reword its arguments and retry
+#: (measured in trace ec89d5ee, before the clear action was removed).
+_DUPLICATE_GUIDANCE: dict[str, str] = {
+    "ask_user": "the answer is already in the transcript — act on it, or ask something different",
+    "write": "the file already holds that write — no second call is needed",
+    "edit": "the file already reflects that edit — no second call is needed",
+    "todo_write": "the list already reflects that call — read the latest task-state rendering",
+}
+
+_DUPLICATE_GUIDANCE_DEFAULT = "reuse the earlier result"
+
+
 class DuplicateCallGuard:
     """Refuse a call that repeats one this turn has already made too often.
 
@@ -218,11 +236,14 @@ class DuplicateCallGuard:
         previous = self._counts[fingerprint]
         if previous >= self.threshold:
             earlier = self._first_call.get(fingerprint, "")
+            guidance = _DUPLICATE_GUIDANCE.get(
+                call.name.lower(), _DUPLICATE_GUIDANCE_DEFAULT
+            )
             return GuardDecision(
                 GuardVerdict.DENY,
                 reason=(
                     f"'{call.name}' already succeeded {previous} time(s) this turn "
-                    f"with the same arguments; reuse the earlier result"
+                    f"with the same arguments; {guidance}"
                     + (f" (call {earlier})" if earlier else "")
                 ),
                 guard=self.name,

@@ -18,7 +18,7 @@ def test_schema_wraps_name_description_parameters():
 def test_schema_preserves_params_json_schema():
     tool = TodoWriteTool()
     params = tool_schema(tool)["function"]["parameters"]
-    assert params["properties"]["action"]["enum"] == ["add", "update", "list", "clear"]
+    assert params["properties"]["action"]["enum"] == ["add", "update", "list"]
     assert params["required"] == ["action"]
 
 

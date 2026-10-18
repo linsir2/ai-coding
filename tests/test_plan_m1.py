@@ -669,10 +669,11 @@ async def test_a_replaced_list_does_not_inherit_the_previous_plan_s_receipts():
     """Step ids restart at 1 for every list, so old receipts must be dropped.
 
     ``/plan <topic>`` resets goal, items and receipts together
-    (``SessionData.begin_plan``).  The path nobody covered is the model
-    replacing the list mid-turn — ``todo_write(clear)`` then re-adding items,
-    which restarts ids at 1 while the previous plan's receipts stay in the
-    session.  Then step id "1" is ambiguous: the runner's ``receipted`` set
+    (``SessionData.begin_plan``).  The path nobody covered is the list being
+    replaced mid-turn — ``present_plan`` approval replaces it now, and
+    sessions written before ``todo_write(clear)`` was removed could do the
+    same — which restarts ids at 1 while the previous plan's receipts stay in
+    the session.  Then step id "1" is ambiguous: the runner's ``receipted`` set
     matched on the id alone, so the new plan's step 1 was treated as already
     accounted for and its out-of-band completion was never receipted.
 
@@ -688,9 +689,10 @@ async def test_a_replaced_list_does_not_inherit_the_previous_plan_s_receipts():
         StepDelivery(step_id="2", statement="A 的第二步", status="completed",
                      ac=[], summary="A2"),
     ]
-    # the model wiped the list mid-turn and wrote a different plan; ids restart
-    session.task.clear()
-    session.task.goal = "B 的目标"
+    # the list was replaced and a different plan written; ids restart (the
+    # session was loaded from disk, or written before todo_write(clear) was
+    # removed -- either way the data shape is a fresh list)
+    session.task = TaskState(goal="B 的目标")
     out_of_band = session.task.add("B 的第一步")
     session.task.add("B 的第二步")
     out_of_band.status = "completed"   # marked done outside any step turn

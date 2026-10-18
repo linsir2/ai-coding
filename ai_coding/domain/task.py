@@ -206,24 +206,6 @@ class TaskState:
         item.updated_at = ts
         return item
 
-    def clear(self) -> None:
-        """Empty the list; the goal goes with it unless an episode owns it.
-
-        R1-5b: for a bare list the goal is the objective *of this list*, and
-        keeping it after the list is gone makes ``<task-state>`` advertise the
-        session's opening question as the objective of a plan that no longer
-        exists (measured: a plan turn ending in ``todo_write(clear)``).
-
-        Armed is the exception the G2 live run found: during a goal episode
-        the objective belongs to the episode, not the list -- a round calling
-        ``todo_write(clear)`` (the model does this to "reset" its checklist)
-        used to blank it, after which the round prompts read ``目标：`` empty
-        and ``/goal resume`` refused a goal that was still running.
-        """
-        self.items.clear()
-        if not self.armed:
-            self.goal = ""
-
     def next_id(self) -> str:
         """The id ``add`` would assign next (public: the tool layer needs it, R9a)."""
         candidate = len(self.items) + 1

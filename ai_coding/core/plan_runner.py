@@ -68,10 +68,11 @@ def _tail(text: str | None) -> str:
 PLAN_PROMPT = (
     "Create a detailed implementation plan for: {topic}. "
     "Break it down into specific, actionable steps. "
-    "Write the plan as todo items with todo_write; every step with "
-    "a machine-checkable outcome must carry its proof command in "
-    "'verify' (a shell command), so the plan can be executed and "
-    "verified step by step. "
+    "Submit the plan with present_plan: a concise markdown summary (a title "
+    "first) and, in its items array, every step — each item carries its proof "
+    "command in 'verify' (a shell command) when the outcome is "
+    "machine-checkable, so the plan can be executed and verified step by "
+    "step. Do not track the planning with todo_write. "
     "Write the items as pending/open steps only — do not execute "
     "the work and do not mark items completed during planning. "
     "State each step's goal and its verifiable success criteria, "
@@ -80,15 +81,10 @@ PLAN_PROMPT = (
     "Write the full skeleton of items first (one line plus its verify for "
     "each) and refine afterwards; use grep/glob to look at code selectively "
     "— do not read whole large files just to write the plan. "
-    "Revise items with todo_write update (content/status); never clear the "
-    "list to rewrite it — clearing empties the list and present_plan will "
-    "refuse. "
     "bash/write/edit are unavailable in plan mode — explore with "
     "read/grep/glob instead. "
-    "When the plan is ready, call present_plan with a concise markdown "
-    "summary (a title first) as your final tool call: it presents the plan "
-    "for the user's review, and approval starts execution automatically — "
-    "do not execute it yourself."
+    "present_plan presents the plan for the user's review, and approval "
+    "starts execution automatically — do not execute it yourself."
 )
 
 
@@ -332,8 +328,9 @@ class PlanRunner:
         """R1-5 receipts: drop foreign ones, hand back the session's own set.
 
         Receipts are keyed by step id and ids restart at 1 for every list, so
-        a list replaced mid-turn (the model does todo_write(clear) and writes
-        a new one) leaves receipts whose ids collide with the new list's.  A
+        a list replaced mid-turn (``present_plan`` approval replaces the list;
+        sessions written before ``todo_write(clear)`` was removed could do the
+        same) leaves receipts whose ids collide with the new list's.  A
         receipt describes the statement it settled, so anything whose
         statement is no longer on the list belongs to a plan that is gone --
         dropped here, before they can stand in for the new plan's steps.

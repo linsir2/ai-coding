@@ -618,6 +618,45 @@ async def test_task_updated_event_emitted(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_present_plan_emits_task_updated_with_the_approved_items(tmp_path):
+    """P1/P2 (trace ec89d5ee): approval writes the submitted items into the
+    task, and the frontend's plan card is driven by TaskUpdated — a write the
+    card never hears about is a plan it never shows."""
+    from ai_coding.security.user_prompt import UserAnswer
+    from ai_coding.tools.present_plan_tool import PresentPlanTool
+
+    class _Approve:
+        async def ask(self, question, options=(), *, detail="", intent=""):
+            return UserAnswer(answered=True, text='{"choice":"approve"}')
+
+    engine = ScriptedEngine(
+        [
+            _calls(
+                _ref(
+                    "c1",
+                    "present_plan",
+                    '{"plan":"# p","items":[{"content":"建目录","verify":"true"}]}',
+                )
+            ),
+            _text("done"),
+        ]
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    observer = RecordingObserver()
+    loop = _loop(engine, sessions, _registry(PresentPlanTool(_Approve())), observer=observer)
+
+    session = sessions.create()
+    session.mode = "plan"
+    session.readonly = True
+    await loop.process_input(session, "go")
+
+    updated = observer.of_type(TaskUpdated)
+    assert len(updated) == 1
+    assert [item.content for item in updated[0].task.items] == ["建目录"]
+    assert updated[0].task.items[0].verify == "true"
+
+
+@pytest.mark.asyncio
 async def test_tool_context_carries_request_view(tmp_path):
     reader = _Tool("read")
     engine = ScriptedEngine([_calls(_ref("c1", "read")), _text("done")])

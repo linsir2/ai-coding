@@ -117,6 +117,46 @@ async def test_run_executes_each_step_in_its_own_bounded_turn():
 
 
 @pytest.mark.asyncio
+async def test_items_approved_through_present_plan_run_to_completion():
+    """P1 end to end: the data flow that replaced the planning-phase todo list.
+
+    Approval writes the submitted items onto the task; the runner consumes
+    exactly those, and an item's ``verify`` becomes its acceptance contract
+    (item 1 passes through the contract, item 2 through the model's claim).
+    """
+    from ai_coding.security.user_prompt import UserAnswer
+    from ai_coding.tools.base import ToolContext
+    from ai_coding.tools.present_plan_tool import PresentPlanTool
+
+    class _Approve:
+        async def ask(self, question, options=(), *, detail="", intent=""):
+            return UserAnswer(answered=True, text='{"choice":"approve"}')
+
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.task = TaskState(goal="设计酒店系统")  # begin_plan's shape: goal, no items
+
+    result = await PresentPlanTool(_Approve()).execute(
+        {
+            "plan": "# 计划",
+            "items": [
+                {"content": "建目录", "verify": "true"},
+                {"content": "写 db.py"},
+            ],
+        },
+        ToolContext(task=session.task, workspace="/tmp/ws", session_id="s"),
+    )
+    assert result.data == {"approved": True}
+
+    loop = _StubLoop(["verify-pass", "complete"])
+    report = await PlanRunner(loop).run(session)
+
+    assert [d.step_id for d in report.deliveries] == ["1", "2"]
+    assert all(d.status == "completed" for d in report.deliveries)
+    assert [item.content for item in session.task.items] == ["建目录", "写 db.py"]
+    assert all(item.status == "completed" for item in session.task.items)
+
+
+@pytest.mark.asyncio
 async def test_run_respects_dependency_order():
     session = _session_with("first", "second needs first")
     session.task.items[1].depends_on = ["1"]
