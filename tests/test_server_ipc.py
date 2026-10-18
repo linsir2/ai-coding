@@ -1746,6 +1746,31 @@ async def test_a_finished_job_wakes_an_idle_session(ipc, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_the_wake_turn_reaches_the_wire_like_any_other_turn(ipc, tmp_path):
+    """2026-10-18: ``_wake_turn`` called ``process_input(session, text)`` with
+    no observer, and with tracing on ``_bind_observer(None)`` recomposed the
+    braid off the construction-time base (Null) -- the bridge was dropped, so
+    the wake turn streamed to nobody and every background event until the next
+    human turn went nowhere the operator could see.  A wake is a turn like any
+    other: it hands the bridge to both channels."""
+    _world, _service, client = ipc
+    client.request("initialize")
+    world_loop = _world.loop
+    before = len(world_loop.calls)
+
+    await _settle_a_job(_world, tmp_path)
+    for _ in range(100):
+        if len(world_loop.calls) > before:
+            break
+        await asyncio.sleep(0.05)
+
+    wake = world_loop.calls[-1]
+    assert "notice" in str(wake["text"]), "the extra call is the wake turn"
+    assert wake["observer"] is not None, "the wake turn must carry the bridge"
+    assert wake["on_delta"] is not None, "and the streaming channel with it"
+
+
+@pytest.mark.asyncio
 def test_the_wake_decision_refuses_when_a_turn_is_already_running() -> None:
     """The guard, as a decision (the key path in this harness cannot hold a turn
     open -- the fake loop never yields -- so the integration test above covers

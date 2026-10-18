@@ -39,6 +39,19 @@ export class IpcClient {
       new rpc.StreamMessageWriter(socket),
     )
     this.connection = connection
+    // ONE connection-level handler, fanning out to the subscriber set.
+    // vscode-jsonrpc keys notification handlers by method in a Map -- last
+    // registration wins (connection.js onNotification) -- so registering one
+    // connection handler per onEvent() would let a dialog's subscription
+    // silently replace the session route's: measured live 2026-10-18 on the
+    // jobs panel (the stop refreshed the dialog's own rows while the sidebar
+    // stayed on the start snapshot, and after the dialog closed nobody
+    // received events at all).  The dispatcher is registered once, here.
+    connection.onNotification("event", (params) => {
+      for (const listener of [...this.eventListeners]) {
+        listener(params as EventMessage)
+      }
+    })
     connection.onClose(() => {
       if (this.closed) return
       // Surface the drop as an app-level event; the UI decides what to show.
@@ -57,15 +70,15 @@ export class IpcClient {
     return this.connection.sendRequest(method, params)
   }
 
-  /** Subscribe to server event pushes; returns an unsubscribe function. */
+  /** Subscribe to server event pushes; returns an unsubscribe function.
+   *
+   * Subscribers form a set this client fans out to from its one connection
+   * handler (see ``connect``): registration order never matters and no
+   * subscriber can displace another. */
   onEvent(listener: EventListener): () => void {
     this.eventListeners.add(listener)
-    const disposable = this.connection?.onNotification("event", (params) =>
-      listener(params as EventMessage),
-    )
     return () => {
       this.eventListeners.delete(listener)
-      disposable?.dispose()
     }
   }
 

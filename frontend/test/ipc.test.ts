@@ -130,6 +130,47 @@ describe("IpcClient", () => {
     expect(listener).toHaveBeenCalledTimes(1)
   })
 
+  // Live defect (2026-10-18, the jobs panel): vscode-jsonrpc keys notification
+  // handlers by method -- a Map, last registration wins.  The old onEvent
+  // registered one connection handler *per listener*, so opening a dialog
+  // silently replaced the session route's subscription: the stop refreshed the
+  // dialog's own rows while the sidebar stayed on the start snapshot, and
+  // after the dialog closed nobody received events at all.  One dispatcher,
+  // registered at connect, fans out to the subscriber set instead.
+
+  test("two event subscribers both receive every notification", async () => {
+    const client = new IpcClient()
+    const promise = client.connect("/tmp/test.sock")
+    socket.emit("connect")
+    await promise
+    const first = mock(() => {})
+    const second = mock(() => {})
+    client.onEvent(first)
+    client.onEvent(second)
+
+    connection._listeners.get("notification:event")?.({ type: "job.changed", data: {} })
+
+    expect(first).toHaveBeenCalledTimes(1)
+    expect(second).toHaveBeenCalledTimes(1)
+  })
+
+  test("an unsubscribed subscriber stops receiving while the rest carry on", async () => {
+    const client = new IpcClient()
+    const promise = client.connect("/tmp/test.sock")
+    socket.emit("connect")
+    await promise
+    const stays = mock(() => {})
+    const leaves = mock(() => {})
+    const unsub = client.onEvent(leaves)
+    client.onEvent(stays)
+
+    unsub()
+    connection._listeners.get("notification:event")?.({ type: "job.changed", data: {} })
+
+    expect(leaves).not.toHaveBeenCalled()
+    expect(stays).toHaveBeenCalledTimes(1)
+  })
+
   test("onRequest registers a handler", async () => {
     const client = new IpcClient()
     const promise = client.connect("/tmp/test.sock")

@@ -1341,9 +1341,17 @@ def make_handlers(
         this line only has to give the model a reason to look.  Phrasing the
         outcome here would state it twice, and the second statement is the one
         that could drift.
+
+        The bridge rides along like every other turn (2026-10-18): without it
+        ``_bind_observer`` recomposed the braid off the construction-time base
+        -- Null -- whenever tracing was on, so the wake turn streamed to nobody
+        and every background event until the next human turn went nowhere the
+        operator could see.
         """
         try:
-            await world.loop.process_input(session, text)
+            await world.loop.process_input(
+                session, text, on_delta=bridge.on_delta, observer=bridge
+            )
         except Exception:  # noqa: BLE001 — a wake that fails is not a crashed app
             _log.exception("wake turn failed")
 
