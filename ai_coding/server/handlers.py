@@ -407,6 +407,12 @@ def make_handlers(
             raise ValueError(f"session not found: {session_id}")
         state.session = session
         state.session_id = session.session_id
+        # R05: the plan card is repainted from the recovered task — the card
+        # used to be painted by live plan.updated events only, so a reopened
+        # session lost it (F-48).  Empty task reads as None (same rule as the
+        # stored form: a task with no items is not written).
+        task = getattr(session, "task", None)
+        task_payload = task.to_dict() if task is not None and task.items else None
         # P5: ``load`` already derived the two recovery facts; until now they
         # were read and thrown away.  They ride this response rather than a new
         # event, the same way ``rejected`` rides ``session.prompt``'s.
@@ -420,6 +426,7 @@ def make_handlers(
             # P5 (18 §10.5): same two posture keys as session.stats, always.
             "mode": str(getattr(session, "mode", "normal") or "normal"),
             "readonly": bool(getattr(session, "readonly", False)),
+            "task": task_payload,
         }
 
     def _launch_turn(run: Callable[[], Coroutine[Any, Any, None]]) -> int:

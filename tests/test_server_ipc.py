@@ -1519,6 +1519,32 @@ async def test_session_load_reports_a_pending_approval(ipc):
 
 
 @pytest.mark.asyncio
+async def test_session_load_rebuilds_the_plan_card(ipc):
+    """R05 (F-48): a reopened session used to lose its plan card — the card
+    was only ever painted by live plan.updated events, and session.load did
+    not carry the task."""
+    world, _service, client = ipc
+    created = client.request("session.create", {"title": "planned"})
+    session_id = created["id"]
+    from ai_coding.domain.task import TaskState
+
+    session = world.sessions.load(session_id)
+    task = TaskState(goal="把卡带回来")
+    item = task.add("修回读", verify="true")
+    item.status = "completed"
+    task.armed = True
+    task.armed_profile = "plan"
+    session.task = task
+    world.sessions.save(session)
+
+    result = client.request("session.load", {"id": session_id})
+
+    assert result["task"]["goal"] == "把卡带回来"
+    assert result["task"]["items"][0]["status"] == "completed"
+    assert result["task"]["armed"] is True
+
+
+@pytest.mark.asyncio
 async def test_session_load_of_a_clean_session_says_nothing(ipc):
     """The regression guard: an ordinary session must look exactly as before."""
     world, _service, client = ipc

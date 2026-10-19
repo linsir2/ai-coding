@@ -12,7 +12,7 @@
 import type { IpcClient } from "../ipc"
 import { shorten, toolTarget, toolVerb } from "../util/toolmeta"
 import type { ChatMessage, Part, SessionState } from "./session"
-import { MAX_TRANSCRIPT_MESSAGES } from "./session"
+import { MAX_TRANSCRIPT_MESSAGES, applyPlanUpdate } from "./session"
 
 /** One persisted message as ``session.load`` returns it (snake-free keys). */
 export interface WireMessage {
@@ -247,10 +247,16 @@ export function recoveryNotice(data: RecoveryFacts): Part | null {
 export async function loadSession(client: IpcClient, id: string): Promise<SessionState> {
   const data = (await client.request("session.load", { id })) as {
     messages?: WireMessage[]
+    // R05: the recovered task rides the load response; the card is repainted
+    // through the live reducer so reload and live cannot drift.
+    task?: Record<string, unknown> | null
   } & RecoveryFacts
-  const state = messagesToState(data.messages ?? [])
+  let state = messagesToState(data.messages ?? [])
   const note = recoveryNotice(data)
   if (note) state.messages.unshift({ role: "assistant", parts: [note] })
+  if (data.task && Array.isArray(data.task["items"]) && data.task["items"].length > 0) {
+    state = applyPlanUpdate(state, data.task)
+  }
   return state
 }
 

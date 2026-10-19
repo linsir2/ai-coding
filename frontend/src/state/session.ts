@@ -556,46 +556,8 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
         ),
       }
     }
-    case "plan.updated": {
-      // 20 §批次2: the wire now carries the list itself; an empty update is
-      // the plan being dropped, so the card leaves instead of lingering as
-      // "(无任务项)".
-      const goal = str(data["goal"])
-      const items: PlanItem[] = Array.isArray(data["items"])
-        ? data["items"].map((raw) => {
-            const item = obj(raw)
-            return {
-              id: str(item["id"]),
-              content: str(item["content"]),
-              status: str(item["status"]),
-            }
-          })
-        : []
-      const next = updateAssistant(state, (parts) => {
-        const index = parts.findIndex((part) => part.kind === "plan")
-        if (!goal && items.length === 0) {
-          return index < 0 ? parts : parts.filter((part) => part.kind !== "plan")
-        }
-        const plan: Part = { kind: "plan", goal, items }
-        if (index < 0) return [...parts, plan]
-        const next = parts.slice()
-        next[index] = plan
-        return next
-      })
-      // G2: the same event feeds the sidebar's goal line.  Empty goal+items
-      // is the task being dropped, so the status clears with the card.
-      const status: GoalStatus | null =
-        goal || items.length > 0
-          ? {
-              goal,
-              armed: data["armed"] === true,
-              roundsRun: num(data["roundsRun"]),
-              tokensUsed: num(data["tokensUsed"]),
-              phase: str(data["goalPhase"]),
-            }
-          : null
-      return { ...next, goal: status }
-    }
+    case "plan.updated":
+      return applyPlanUpdate(state, data)
     case "ledger.updated": {
       const items = Array.isArray(data["items"]) ? data["items"] : []
       const lines: string[] = []
@@ -768,6 +730,53 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
       return updateAssistant(state, (parts) => appendNotice(parts, build(data)))
     }
   }
+}
+
+/** 20 §批次2 + R05: paint one plan card from one plan payload.
+ *
+ * The live ``plan.updated`` event and a reopened session's recovered task use
+ * this exact reducer — one card shape, so reload and live cannot drift.
+ * An empty goal+items is the plan being dropped ("(无任务项)" must leave).
+ */
+export function applyPlanUpdate(
+  state: SessionState,
+  data: Record<string, unknown>,
+): SessionState {
+  const goal = str(data["goal"])
+  const items: PlanItem[] = Array.isArray(data["items"])
+    ? data["items"].map((raw) => {
+        const item = obj(raw)
+        return {
+          id: str(item["id"]),
+          content: str(item["content"]),
+          status: str(item["status"]),
+        }
+      })
+    : []
+  const next = updateAssistant(state, (parts) => {
+    const index = parts.findIndex((part) => part.kind === "plan")
+    if (!goal && items.length === 0) {
+      return index < 0 ? parts : parts.filter((part) => part.kind !== "plan")
+    }
+    const plan: Part = { kind: "plan", goal, items }
+    if (index < 0) return [...parts, plan]
+    const next = parts.slice()
+    next[index] = plan
+    return next
+  })
+  // G2: the same payload feeds the sidebar's goal line.  Empty goal+items
+  // is the task being dropped, so the status clears with the card.
+  const status: GoalStatus | null =
+    goal || items.length > 0
+      ? {
+          goal,
+          armed: data["armed"] === true,
+          roundsRun: num(data["roundsRun"]),
+          tokensUsed: num(data["tokensUsed"]),
+          phase: str(data["goalPhase"]),
+        }
+      : null
+  return { ...next, goal: status }
 }
 
 export function reduce(state: SessionState, action: Action): SessionState {

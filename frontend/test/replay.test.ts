@@ -231,6 +231,27 @@ describe("loadSession", () => {
     })
   })
 
+  test("a loaded task rebuilds the plan card (R05)", async () => {
+    const state = await loadSession(
+      client({
+        messages: [{ role: "assistant", content: "done" }],
+        task: {
+          goal: "把卡带回来",
+          items: [{ id: "1", content: "修回读", status: "completed" }],
+          armed: true,
+        },
+      }),
+      "s1",
+    )
+    const card = state.messages.flatMap((m) => m.parts).find((p) => p.kind === "plan")
+    expect(card).toMatchObject({
+      kind: "plan",
+      goal: "把卡带回来",
+      items: [{ id: "1", content: "修回读", status: "completed" }],
+    })
+    expect(state.goal?.armed).toBe(true)
+  })
+
   test("a clean session replays exactly as before", async () => {
     const state = await loadSession(client({ messages: [{ role: "user", content: "hi" }] }), "s1")
     expect(state.messages).toHaveLength(1)
