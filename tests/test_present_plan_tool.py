@@ -222,6 +222,63 @@ async def test_approved_items_land_in_the_task_with_their_verify():
 
 
 @pytest.mark.asyncio
+async def test_depends_on_maps_indices_to_item_ids():
+    """R09: depends_on arrives as 0-based indices into this very list;
+    approval maps them onto the ids the runner reads (1..n after the clear).
+    Duplicates collapse, first occurrence wins."""
+    tool, _ = _tool(UserAnswer(answered=True, text='{"choice":"approve"}'))
+    ctx = _ctx(items=0)
+    r = await tool.execute(
+        {
+            "plan": "# p",
+            "items": [
+                {"content": "建目录"},
+                {"content": "写 db.py", "depends_on": [0]},
+                {"content": "跑迁移", "depends_on": [0, 1, 0]},
+            ],
+        },
+        ctx,
+    )
+    assert r.success is True
+    assert [item.id for item in ctx.task.items] == ["1", "2", "3"]
+    assert [item.depends_on for item in ctx.task.items] == [[], ["1"], ["1", "2"]]
+
+
+@pytest.mark.asyncio
+async def test_depends_on_rejects_backward_and_self():
+    """R09: only earlier steps may be referenced (0 <= d < index), so a self
+    reference and a forward reference both fail before anyone is asked."""
+    tool, prompt = _tool(UserAnswer(answered=True, text="开始执行"))
+    for deps in ([0], [1]):
+        r = await tool.execute(
+            {"plan": "# p", "items": [{"content": "step", "depends_on": deps}]},
+            _ctx(items=0),
+        )
+        assert r.success is False and r.error == "invalid_items"
+        assert "depends_on" in r.output
+    assert prompt.calls == []
+
+
+@pytest.mark.asyncio
+async def test_depends_on_rejects_out_of_range():
+    """R09: an index past this submission's own list cannot be mapped."""
+    tool, prompt = _tool(UserAnswer(answered=True, text="开始执行"))
+    r = await tool.execute(
+        {
+            "plan": "# p",
+            "items": [
+                {"content": "step 1"},
+                {"content": "step 2", "depends_on": [5]},
+            ],
+        },
+        _ctx(items=0),
+    )
+    assert r.success is False and r.error == "invalid_items"
+    assert "item 1" in r.output and "depends_on" in r.output
+    assert prompt.calls == []
+
+
+@pytest.mark.asyncio
 async def test_an_item_without_content_is_refused_before_the_human_sees_it():
     tool, prompt = _tool(UserAnswer(answered=True, text="开始执行"))
     r = await tool.execute(

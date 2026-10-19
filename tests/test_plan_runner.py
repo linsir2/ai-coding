@@ -170,6 +170,47 @@ async def test_run_respects_dependency_order():
 
 
 @pytest.mark.asyncio
+async def test_approval_maps_depends_on_and_the_run_waits_on_the_blocker():
+    """R09 end to end: approval turns indices into ids, and a dependent step
+    stays out of the round while its predecessor is unresolved — without the
+    mapping the runner would start it against an unfinished prerequisite."""
+    from ai_coding.security.user_prompt import UserAnswer
+    from ai_coding.tools.base import ToolContext
+    from ai_coding.tools.present_plan_tool import PresentPlanTool
+
+    class _Approve:
+        async def ask(self, question, options=(), *, detail="", intent=""):
+            return UserAnswer(answered=True, text='{"choice":"approve"}')
+
+    session = SessionData(
+        session_id="s", title="", created_time="t", last_access_time="t"
+    )
+    session.task = TaskState(goal="依赖链")
+    result = await PresentPlanTool(_Approve()).execute(
+        {
+            "plan": "# 计划",
+            "items": [
+                {"content": "first"},
+                {"content": "second needs first", "depends_on": [0]},
+            ],
+        },
+        ToolContext(
+            task=session.task, workspace="/tmp/ws", session_id="s", mode="plan"
+        ),
+    )
+    assert result.data == {"approved": True}
+    assert session.task.items[1].depends_on == ["1"]
+
+    loop = _StubLoop(["ignore"])  # the first step never claims done
+    report = await PlanRunner(loop).run(session)
+
+    assert len(loop.calls) == 1  # the dependent step must not start
+    assert report.stalled == ["1"]
+    assert report.stopped.startswith("deadlock")
+    assert session.task.items[1].status == "pending"
+
+
+@pytest.mark.asyncio
 async def test_verify_failure_triggers_one_repair_run_then_blocks():
     session = _session_with("fix it", verifies=["pytest tests/ -q"])
     loop = _StubLoop(["verify-fail", "verify-fail"])

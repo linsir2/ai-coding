@@ -105,6 +105,14 @@ class PresentPlanTool(BaseTool):
                                     "outcome is not machine-checkable."
                                 ),
                             },
+                            "depends_on": {
+                                "type": "array",
+                                "items": {"type": "integer", "minimum": 0},
+                                "description": (
+                                    "0-based indices of earlier steps this step "
+                                    "needs; forward references only."
+                                ),
+                            },
                         },
                         "required": ["content"],
                     },
@@ -146,7 +154,7 @@ class PresentPlanTool(BaseTool):
         if invalid is not None:
             return ToolResult(
                 success=False,
-                output=f"error: item {invalid} has no 'content'",
+                output=f"error: item {invalid[0]} {invalid[1]}",
                 error="invalid_items",
             )
         if not items:
@@ -205,8 +213,13 @@ class PresentPlanTool(BaseTool):
             # drops the ones whose statement is no longer on the list
             # (``plan_runner._drop_foreign_receipts``).
             ctx.task.items.clear()
-            for content, verify in items:
-                ctx.task.add(content, verify=verify)
+            for content, verify, deps in items:
+                # R09: depends_on arrives as 0-based indices into this very
+                # submission; the clear above makes ``add`` assign ids 1..n,
+                # so ``d + 1`` is the id the runner's blockers read.
+                ctx.task.add(
+                    content, verify=verify, depends_on=[str(d + 1) for d in deps]
+                )
             ctx.task.armed = True
             ctx.task.armed_profile = "plan"
             return ToolResult(success=True, output=_APPROVED, data={"approved": True})
@@ -219,24 +232,40 @@ class PresentPlanTool(BaseTool):
         return ToolResult(success=True, output=_KEEP_NO_FEEDBACK, data={"approved": False})
 
 
-def _parse_items(raw: Any) -> tuple[list[tuple[str, str]], int | None]:
-    """``(items, invalid_index)`` — ``(content, verify)`` pairs, or the index of
-    the first entry missing its ``content`` (``None`` when every entry is valid).
+def _parse_items(
+    raw: Any,
+) -> tuple[list[tuple[str, str, list[int]]], tuple[int, str] | None]:
+    """``(items, problem)`` — ``(content, verify, depends_on)`` triples, or the
+    first entry that cannot run as ``(index, why)``.
 
-    Lenient about shape on purpose: the model may hand back the JSON string it
-    was asked for, and a malformed entry means this submission cannot run -- the
-    refusal names the entry rather than raising through the tool boundary.
+    Strict about reachability, not generous about shape: ``items`` must be a
+    list of objects with a non-empty ``content`` (the old docstring claimed a
+    JSON string was accepted -- it never was: a string lands in the "no items"
+    refusal).  ``depends_on`` holds 0-based indices into this same submission
+    and may only point backwards (``0 <= d < index``); duplicates collapse,
+    first occurrence wins.  Approval maps the indices onto the ids it is about
+    to assign, so an out-of-range, forward or self reference is refused here,
+    before the human is asked.
     """
     if not isinstance(raw, list):
         return [], None
-    parsed: list[tuple[str, str]] = []
+    parsed: list[tuple[str, str, list[int]]] = []
     for index, entry in enumerate(raw):
         if not isinstance(entry, dict):
-            return [], index
+            return [], (index, "is not an object")
         content = str(entry.get("content", "") or "").strip()
         if not content:
-            return [], index
-        parsed.append((content, str(entry.get("verify", "") or "").strip()))
+            return [], (index, "has no 'content'")
+        raw_deps = entry.get("depends_on", [])
+        if not isinstance(raw_deps, list):
+            return [], (index, "has a bad 'depends_on' (earlier-step indices only)")
+        deps: list[int] = []
+        for dep in raw_deps:
+            if isinstance(dep, bool) or not isinstance(dep, int) or not (0 <= dep < index):
+                return [], (index, "has a bad 'depends_on' (earlier-step indices only)")
+            if dep not in deps:
+                deps.append(dep)
+        parsed.append((content, str(entry.get("verify", "") or "").strip(), deps))
     return parsed, None
 
 
