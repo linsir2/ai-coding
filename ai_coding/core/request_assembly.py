@@ -108,6 +108,12 @@ class RequestAssembler:
         policy: Any,
         memory: Any,
         reporter: Any,
+        # R01 (F-51): the loop replaces ``policy`` for a planning round or a
+        # plan step (``continuations_disabled``, ``_run_step``).  A provider
+        # makes every iteration read the policy actually in force instead of
+        # the object this assembler happened to be built with; absent, the
+        # passed-in policy is the answer (bare constructors, tests).
+        policy_provider: Callable[[], Any] | None = None,
         build_instructions: Callable[
             [Deadline | None, SessionData], Awaitable[str | None]
         ] | None = None,
@@ -124,6 +130,7 @@ class RequestAssembler:
     ) -> None:
         self._compactor = compactor
         self._policy = policy
+        self._policy_provider = policy_provider
         self._memory = memory
         self._reporter = reporter
         # The system prompt belongs to the composition root (project instructions +
@@ -146,6 +153,13 @@ class RequestAssembler:
         # off ``settings`` because ``AIConfig`` is not ``ToolsConfig``: reaching
         # across the two would be a lookup by accident.
         self._extra_roots = tuple(extra_workspace_roots)
+
+    def _active_policy(self) -> Any:
+        """The policy in force for this request (R01): the provider's answer
+        when one was handed in, the construction-time object otherwise."""
+        if self._policy_provider is not None:
+            return self._policy_provider()
+        return self._policy
 
     async def assemble(
         self,
@@ -197,7 +211,7 @@ class RequestAssembler:
             if self._build_instructions is not None
             else None
         )
-        injection = self._policy.inject_task(task, instructions)
+        injection = self._active_policy().inject_task(task, instructions)
         instructions = injection.instructions
         # Memory and task state are *volatile tail blocks*: the system prompt stays
         # byte-identical and the history stays append-only, so only this small
@@ -225,7 +239,7 @@ class RequestAssembler:
         # Last, after the digest, because it is an instruction and instructions
         # are the thing recency helps -- everything above it is state to read,
         # this is the one line asking for a change of behaviour.
-        pressure = self._policy.budget_pressure(
+        pressure = self._active_policy().budget_pressure(
             iteration=index, tokens_spent=self._reporter.tokens_spent()
         )
         # M2: recommend skills based on current context (after task, before hook).

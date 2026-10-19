@@ -395,6 +395,10 @@ class AgentLoop:
         self.assembler = RequestAssembler(
             compactor=self.compactor,
             policy=self.policy,
+            # R01: the planning round and plan steps swap ``loop.policy`` for
+            # their own ceiling; the assembler must read the live object, not
+            # the one it was built with (F-51).
+            policy_provider=lambda: self.policy,
             memory=self.turn_memory,
             reporter=self.reporter,
             build_instructions=self._build_instructions,

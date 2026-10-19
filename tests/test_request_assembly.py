@@ -362,3 +362,37 @@ async def test_a_compacted_session_is_told_where_its_words_went():
     env = _env_of(assembled)
     assert "history_search" in env
     assert "压缩" in env, "the line must say what happened, not just name a tool"
+
+
+# ---- R01: the policy in force is the live one, not the build-time snapshot --
+
+
+@pytest.mark.asyncio
+async def test_the_budget_block_reads_the_provider_not_the_construction_snapshot():
+    """R01 (F-51): the planning round and every plan step swap ``loop.policy``
+    for their own ceiling.  The assembler used to keep reading the object it
+    was built with, so ``[budget]`` described a budget the turn no longer had
+    — the provider is how the live loop hands it the current one."""
+    reporter = _Reporter()
+
+    async def _instructions(deadline: Any, session: Any = None) -> str | None:
+        return None
+
+    assembler = RequestAssembler(
+        compactor=_Compactor(True),
+        # The construction snapshot says "plenty of room" (100 rounds) ...
+        policy=TurnPolicy(TurnPolicyConfig(max_iterations=100)),
+        # ... while the policy actually in force is down to its last round.
+        policy_provider=lambda: TurnPolicy(TurnPolicyConfig(max_iterations=10)),
+        memory=_Memory(""),
+        reporter=reporter,
+        build_instructions=_instructions,
+        settings=_Settings(),
+        emit=lambda event: None,
+    )
+
+    assembled = await _assemble(assembler, index=9)
+
+    budget = [m for m in assembled.request if (m.content or "").startswith("[budget]")]
+    assert len(budget) == 1
+    assert "9/10" in budget[0].content

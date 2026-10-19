@@ -23,6 +23,7 @@ from ai_coding.core.events import (
     ToolStarted,
     TurnFinished,
 )
+from ai_coding.core.plan_runner import continuations_disabled
 from ai_coding.core.turn_policy import TASK_MESSAGE_LEAD
 from ai_coding.domain.loop import StepResult, TurnStatus
 from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolResult
@@ -1505,3 +1506,20 @@ async def test_an_armed_goal_keeps_its_objective_through_a_turn(tmp_path):
     await loop.process_input(session, "[goal] 第 1/20 轮 · 目标：迁移 X")
 
     assert session.task.goal == "迁移 X"
+
+
+@pytest.mark.asyncio
+async def test_the_request_assembler_reads_the_swapped_loop_policy(tmp_path):
+    """R01: ``continuations_disabled`` swaps ``loop.policy`` for the planning
+    round; the assembler must read through to the live object or the budget
+    block and the task injection keep the old ceiling (F-51)."""
+    engine = ScriptedEngine([_text("ok")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+
+    with continuations_disabled(loop, max_iterations=30):
+        assert loop.assembler._active_policy().config.max_iterations == 30  # noqa: SLF001
+    assert (
+        loop.assembler._active_policy().config.max_iterations  # noqa: SLF001
+        == loop.policy.config.max_iterations
+    )
