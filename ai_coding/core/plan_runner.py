@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from ai_coding.core.events import PlanStepReceipt
+from ai_coding.core.events import PlanStepReceipt, TaskUpdated
 from ai_coding.core.task_driver import TaskDriver
 from ai_coding.core.turn_policy import TurnPolicy
 from ai_coding.domain.acceptance import AcceptanceItem
@@ -301,6 +301,9 @@ class PlanRunner:
             # fiat-only run (all items already done) arms too — its single
             # loop pass is the backfill — and disarms on the way out.
             self._persist(session)
+            # R06: the runner's own arm is a task mutation like any tool's —
+            # a live card must see it (F-47).
+            self._emit_task(observer, task)
         try:
             report: PlanReport = await TaskDriver(self._loop).run(
                 session, self, console, on_delta=on_delta, observer=observer
@@ -311,9 +314,15 @@ class PlanRunner:
             # the round cap, cancellation, or a mid-air Esc (whose own handler
             # disarmed already; the shared object makes both writes benign).
             # The driver disarms on its normal paths; this covers cancellation.
-            if task is not None and getattr(task, "armed", False):
-                task.armed = False
-                self._persist(session)
+            if task is not None:
+                if getattr(task, "armed", False):
+                    task.armed = False
+                    self._persist(session)
+                # R06: whichever layer disarmed (the driver's normal exit or
+                # this finally), the final state reaches the wire.
+                self._emit_task(observer, task)
+                # R06: same wire, the other half of the lifecycle.
+                self._emit_task(observer, task)
 
     # ---- RoundProfile (11-plan §5.2): one hook per pre-T3 run-body piece --
 
@@ -706,7 +715,7 @@ class PlanRunner:
             end_turn = int(getattr(step_session, "turn_count", 0) or 0)
             delivery = self._settle(step_session, session, task, item, report, text,
                                    attempts, (start_turn, end_turn), step_usage,
-                                   len(seed))
+                                   len(seed), observer=observer)
             step_summary = delivery.summary
             self._record_on_parent(session, step_prompt, step_summary, observer)
         except asyncio.CancelledError:
@@ -714,6 +723,8 @@ class PlanRunner:
         except Exception as exc:  # noqa: BLE001 — one bad step must not kill the run
             task.update(item.id, status="blocked",
                         evidence=f"runner error: {exc}")
+            # R06: the blocked verdict is a task mutation; the wire sees it.
+            self._emit_task(observer, task)
             report.blocked.append(item.id)
             delivery = self._delivery(
                 item, "blocked", 1, [], f"runner error: {exc}", (0, 0),
@@ -790,7 +801,8 @@ class PlanRunner:
 
     def _settle(self, step_session: Any, parent: Any, task: Any, item: Any, report: PlanReport,
                 text: Any, attempts: int, turns: tuple[int, int],
-                usage: dict[str, int] | None, seed_chars: int) -> StepDelivery:
+                usage: dict[str, int] | None, seed_chars: int,
+                observer: Any = None) -> StepDelivery:
         """Score one finished step, record its delivery, and return it.
 
         Mechanical verdicts win: a step whose proof commands fail is blocked
@@ -813,9 +825,11 @@ class PlanRunner:
             if self._contracts_passed(step_session):
                 task.update(item.id, status="completed",
                             evidence=f"verify passed: {_tail(self._verify_output(step_session))}")
+                self._emit_task(observer, task)
             else:
                 task.update(item.id, status="blocked",
                             evidence=f"verify failed: {_tail(self._verify_output(step_session))}")
+                self._emit_task(observer, task)
                 status = "blocked"
                 report.blocked.append(item.id)
         elif not self._model_claimed_done(task, item):
@@ -837,6 +851,14 @@ class PlanRunner:
             if entry.output:
                 return str(entry.output)
         return ""
+
+    @staticmethod
+    def _emit_task(observer: Any, task: Any) -> None:
+        """R06 (F-47): the runner's own task mutations travel the same wire the
+        model's tool calls already use, so a live card never freezes at the
+        moment of approval.  None-safe: a bare caller stays silent."""
+        if observer is not None and hasattr(observer, "on_event"):
+            observer.on_event(TaskUpdated(task=task))
 
     def _delivery(self, item: Any, status: str, attempts: int,
                 ac: list[dict[str, Any]], summary: str,

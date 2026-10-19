@@ -389,3 +389,91 @@ async def test_a_runner_without_an_observer_records_as_before():
 
     assert report.deliveries[0].status == "completed"
     assert any("只做这一步" in (m.content or "") for m in session.messages)
+
+
+# ---- R06: the runner's own mutations reach the wire too ----------------------
+
+
+class _TaskSnapshots:
+    """Records ``(armed, statuses)`` **at event time**.
+
+    TaskUpdated shares the live task object (the bridge serializes it
+    synchronously), so post-run inspection would only ever see the last state —
+    this observer takes the snapshot the wire would have taken.
+    """
+
+    def __init__(self) -> None:
+        self.armed: list[bool] = []
+        self.statuses: list[list[str]] = []
+
+    def on_event(self, event) -> None:
+        from ai_coding.core.events import TaskUpdated
+
+        if isinstance(event, TaskUpdated):
+            self.armed.append(bool(event.task.armed))
+            self.statuses.append([item.status for item in event.task.items])
+
+
+@pytest.mark.asyncio
+async def test_the_runner_emits_task_updated_on_arm_and_disarm():
+    """R06 (F-47): arm/disarm happen outside any tool call; with nothing
+    emitting TaskUpdated for them, a live card froze at approval time."""
+    session = _session_with("fix bug")
+    observer = _TaskSnapshots()
+
+    await PlanRunner(_StubLoop(["complete"])).run(session, observer=observer)
+
+    assert observer.armed, "the run's arm/disarm mutations must reach the wire"
+    assert observer.armed[0] is True
+    assert observer.armed[-1] is False
+
+
+@pytest.mark.asyncio
+async def test_settle_emits_task_updated_when_a_verified_step_completes():
+    session = _session_with("fix it", verifies=["pytest tests/ -q"])
+    observer = _TaskSnapshots()
+
+    await PlanRunner(_StubLoop(["verify-pass"])).run(session, observer=observer)
+
+    assert any("completed" in statuses for statuses in observer.statuses), (
+        "the settle mutation (verify passed) must be visible live"
+    )
+
+
+@pytest.mark.asyncio
+async def test_settle_emits_task_updated_when_a_verified_step_blocks():
+    session = _session_with("fix it", verifies=["pytest tests/ -q"])
+    observer = _TaskSnapshots()
+
+    await PlanRunner(_StubLoop(["verify-fail", "verify-fail"])).run(
+        session, observer=observer
+    )
+
+    assert any("blocked" in statuses for statuses in observer.statuses), (
+        "the blocked verdict must be visible live"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dying_step_emits_task_updated_blocked():
+    class _DyingLoop:
+        settings = SimpleNamespace(plan_step_max_iterations=8, plan_max_step_turns=0)
+
+        def __init__(self):
+            self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=8))
+
+        async def process_input(self, session, text, on_delta=None, observer=None):
+            raise RuntimeError("engine exploded")
+
+    session = SessionData(session_id="s", title="", created_time="t",
+                          last_access_time="t")
+    task = TaskState(goal="g")
+    task.add("改一下 loader")
+    session.task = task
+    observer = _TaskSnapshots()
+
+    await PlanRunner(_DyingLoop()).run(session, observer=observer)
+
+    assert any("blocked" in statuses for statuses in observer.statuses), (
+        "a runner error writes blocked into the task; the wire must see it"
+    )
