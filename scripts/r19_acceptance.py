@@ -227,8 +227,8 @@ class _AutoReview:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
 
-    async def ask(self, question, options=(), *, detail="", intent=""):
-        self.calls.append((question, tuple(options), detail, intent))
+    async def ask(self, question, options=(), *, detail="", intent="", data=None):
+        self.calls.append((question, tuple(options), detail, intent, dict(data or {})))
         if intent == "plan_review":
             return UserAnswer(answered=True, text='{"choice":"approve"}')
         return UserAnswer(answered=False, reason="not_applicable")
@@ -341,7 +341,7 @@ def _check_plan_mode(result: dict[str, Any]) -> list[str]:
     if not result.get("review_questions"):
         problems.append("present_plan never reached the review channel")
     else:
-        question, options, detail, _intent = result["review_questions"][-1]
+        question, options, detail, _intent = result["review_questions"][-1][:4]
         if "批准" not in question or "开始执行" not in options:
             problems.append(f"the review prompt looks wrong: {question!r} {options!r}")
         if not detail.strip():
