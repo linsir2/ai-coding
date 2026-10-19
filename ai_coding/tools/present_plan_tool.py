@@ -166,12 +166,20 @@ class PresentPlanTool(BaseTool):
                 ),
                 error="no_plan_items",
             )
+        # R04: the card renders what approval will write -- the same validated
+        # triples, with depends_on in the 1-based display indices the table
+        # shows (approval maps them back onto ids).
+        review_items = [
+            {"content": content, "verify": verify, "dependsOn": [d + 1 for d in deps]}
+            for content, verify, deps in items
+        ]
         try:
             answer = await self._prompt.ask(
                 "批准这个计划并开始执行？",
                 ("开始执行", "继续规划"),
                 detail=plan,
                 intent="plan_review",
+                data={"items": review_items},
             )
         except Exception as exc:  # noqa: BLE001 — a tool boundary must not leak
             return ToolResult(

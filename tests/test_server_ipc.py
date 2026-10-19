@@ -1029,12 +1029,14 @@ async def test_user_prompt_round_trip_over_the_wire(ipc):
     client.ask_answer = "第二个"
     answer = await world.user_prompt.ask("哪个文件？", ["a.py", "b.py"])
     assert answer == UserAnswer(answered=True, text="第二个")
-    # 19 §3.2: detail/intent are always present (empty = a plain question).
+    # 19 §3.2: detail/intent are always present (empty = a plain question);
+    # R04: so is data ({} = no structured payload).
     assert client.ask_requests[-1] == {
         "question": "哪个文件？",
         "options": ["a.py", "b.py"],
         "detail": "",
         "intent": "",
+        "data": {},
     }
 
 
@@ -1057,6 +1059,36 @@ async def test_user_prompt_carries_detail_and_intent_over_the_wire(ipc):
         "options": ["开始执行", "继续规划"],
         "detail": "# 计划\n正文",
         "intent": "plan_review",
+        "data": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_plan_review_carries_the_items_over_the_wire(ipc):
+    """R04: the structured rows travel beside detail/intent -- the card renders
+    exactly what approval will write."""
+    from ai_coding.security.user_prompt import UserAnswer
+
+    world, _service, client = ipc
+    client.ask_answer = '{"choice":"approve"}'
+    items = [
+        {"content": "建目录", "verify": "test -d hotel", "dependsOn": []},
+        {"content": "写 db.py", "verify": "", "dependsOn": [1]},
+    ]
+    answer = await world.user_prompt.ask(
+        "批准这个计划并开始执行？",
+        ["开始执行", "继续规划"],
+        detail="# 计划",
+        intent="plan_review",
+        data={"items": items},
+    )
+    assert answer == UserAnswer(answered=True, text='{"choice":"approve"}')
+    assert client.ask_requests[-1] == {
+        "question": "批准这个计划并开始执行？",
+        "options": ["开始执行", "继续规划"],
+        "detail": "# 计划",
+        "intent": "plan_review",
+        "data": {"items": items},
     }
 
 

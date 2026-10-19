@@ -129,7 +129,7 @@ async def test_items_approved_through_present_plan_run_to_completion():
     from ai_coding.tools.present_plan_tool import PresentPlanTool
 
     class _Approve:
-        async def ask(self, question, options=(), *, detail="", intent=""):
+        async def ask(self, question, options=(), *, detail="", intent="", data=None):
             return UserAnswer(answered=True, text='{"choice":"approve"}')
 
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
@@ -179,7 +179,7 @@ async def test_approval_maps_depends_on_and_the_run_waits_on_the_blocker():
     from ai_coding.tools.present_plan_tool import PresentPlanTool
 
     class _Approve:
-        async def ask(self, question, options=(), *, detail="", intent=""):
+        async def ask(self, question, options=(), *, detail="", intent="", data=None):
             return UserAnswer(answered=True, text='{"choice":"approve"}')
 
     session = SessionData(

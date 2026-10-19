@@ -19,9 +19,13 @@ class _Prompt:
     def __init__(self, answer: UserAnswer) -> None:
         self.answer = answer
         self.calls: list[tuple] = []
+        # R04: the structured payload records on its own list, so the 4-tuple
+        # the older assertions unpack stays untouched.
+        self.datas: list[dict | None] = []
 
-    async def ask(self, question, options=(), *, detail="", intent=""):
+    async def ask(self, question, options=(), *, detail="", intent="", data=None):
         self.calls.append((question, tuple(options), detail, intent))
+        self.datas.append(data)
         return self.answer
 
 
@@ -139,7 +143,7 @@ async def test_a_dismissed_review_tells_the_model_to_hold():
 @pytest.mark.asyncio
 async def test_a_broken_channel_fails_without_breaking_the_turn():
     class _Boom:
-        async def ask(self, question, options=(), *, detail="", intent=""):
+        async def ask(self, question, options=(), *, detail="", intent="", data=None):
             raise RuntimeError("boom")
 
     r = await PresentPlanTool(_Boom()).execute(_plan_call("# p"), _ctx())
@@ -276,6 +280,39 @@ async def test_depends_on_rejects_out_of_range():
     assert r.success is False and r.error == "invalid_items"
     assert "item 1" in r.output and "depends_on" in r.output
     assert prompt.calls == []
+
+
+# ---- R04: the review request carries what approval will run ------------------
+
+
+@pytest.mark.asyncio
+async def test_the_review_request_carries_the_items():
+    """R04: the card renders what approval writes -- same rows, same order,
+    with depends_on in the 1-based display indices the table shows."""
+    tool, prompt = _tool(UserAnswer(answered=True, text='{"choice":"approve"}'))
+    ctx = _ctx(items=0)
+    r = await tool.execute(
+        {
+            "plan": "# p",
+            "items": [
+                {"content": "建目录", "verify": "test -d hotel"},
+                {"content": "写 db.py", "depends_on": [0]},
+            ],
+        },
+        ctx,
+    )
+    assert r.success is True
+    assert prompt.datas[-1] == {
+        "items": [
+            {"content": "建目录", "verify": "test -d hotel", "dependsOn": []},
+            {"content": "写 db.py", "verify": "", "dependsOn": [1]},
+        ]
+    }
+    # The contract that matters: what the card showed == what was written.
+    assert [(i.content, i.verify, i.depends_on) for i in ctx.task.items] == [
+        ("建目录", "test -d hotel", []),
+        ("写 db.py", "", ["1"]),
+    ]
 
 
 @pytest.mark.asyncio

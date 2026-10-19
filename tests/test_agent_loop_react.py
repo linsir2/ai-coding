@@ -627,7 +627,7 @@ async def test_present_plan_emits_task_updated_with_the_approved_items(tmp_path)
     from ai_coding.tools.present_plan_tool import PresentPlanTool
 
     class _Approve:
-        async def ask(self, question, options=(), *, detail="", intent=""):
+        async def ask(self, question, options=(), *, detail="", intent="", data=None):
             return UserAnswer(answered=True, text='{"choice":"approve"}')
 
     engine = ScriptedEngine(

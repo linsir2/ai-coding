@@ -14,6 +14,13 @@
  * arm the post-approval auto-run).
  */
 
+/** R04: one review row as the card renders it (dependsOn in display order). */
+export interface PlanItemData {
+  content: string
+  verify: string
+  dependsOn: number[]
+}
+
 export interface AskRequest {
   question: string
   options: string[]
@@ -21,10 +28,20 @@ export interface AskRequest {
   detail: string
   /** 19 §3.2: which card renders this request ("" = the generic ask panel). */
   intent: string
+  /**
+   * R04: the structured payload beside detail/intent (the plan review's item
+   * rows today; the generic panel ignores it).  Always an object — the wire
+   * contract keeps it explicit, {} included.
+   */
+  data: Record<string, unknown>
 }
 
 /** The answer that says "nobody answered" (esc, a closed panel). */
 export const ASK_SKIP = ""
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+}
 
 /** Build the panel's request from the wire params, dropping anything unshaped. */
 export function parseAskRequest(params: Record<string, unknown>): AskRequest {
@@ -35,7 +52,30 @@ export function parseAskRequest(params: Record<string, unknown>): AskRequest {
   const question = String(params["question"] ?? "").trim()
   const detail = typeof params["detail"] === "string" ? params["detail"] : ""
   const intent = typeof params["intent"] === "string" ? params["intent"] : ""
-  return { question: question || "…", options, detail, intent }
+  const data = isRecord(params["data"]) ? params["data"] : {}
+  return { question: question || "…", options, detail, intent, data }
+}
+
+/**
+ * R04: the review card's rows, shape-checked -- what the card renders is what
+ * approval will write.  Shapeless entries are dropped, never guessed at.
+ */
+export function planReviewItems(request: AskRequest): PlanItemData[] {
+  const raw = request.data["items"]
+  if (!Array.isArray(raw)) return []
+  const items: PlanItemData[] = []
+  for (const entry of raw) {
+    if (!isRecord(entry)) continue
+    const content = typeof entry["content"] === "string" ? entry["content"] : ""
+    if (!content) continue
+    const verify = typeof entry["verify"] === "string" ? entry["verify"] : ""
+    const rawDeps = entry["dependsOn"]
+    const dependsOn = Array.isArray(rawDeps)
+      ? rawDeps.filter((n): n is number => typeof n === "number" && Number.isInteger(n))
+      : []
+    items.push({ content, verify, dependsOn })
+  }
+  return items
 }
 
 /** The text a selection answers with; out of range (or no options) answers nothing. */

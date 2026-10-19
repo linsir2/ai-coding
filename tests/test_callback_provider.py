@@ -10,12 +10,12 @@ def test_user_prompt_set_provider():
     callback = CLIUserPromptCallback()
     calls = []
 
-    # Four parameters since 19 §3.2: question and options apart (so AskScreen
-    # can list them), plus the plan-review detail and its kind.  A narrower
-    # fake would raise TypeError here, land in the fail-safe branch and look
-    # like "no answer".
-    async def fake_provider(question, options, detail, intent):
-        calls.append((question, options, detail, intent))
+    # Five parameters since R04: question and options apart (so AskScreen
+    # can list them), the plan-review detail and its kind, and the structured
+    # data (the review rows).  A narrower fake would raise TypeError here,
+    # land in the fail-safe branch and look like "no answer".
+    async def fake_provider(question, options, detail, intent, data):
+        calls.append((question, options, detail, intent, data))
         return "user answer"
 
     callback.set_provider(fake_provider)
@@ -23,13 +23,13 @@ def test_user_prompt_set_provider():
     assert result.answered is True
     assert result.text == "user answer"
     assert len(calls) == 1
-    assert calls[0] == ("What?", [], "", "")
+    assert calls[0] == ("What?", [], "", "", {})
 
 
 def test_user_prompt_provider_exception_fails_safe():
     callback = CLIUserPromptCallback()
 
-    async def bad_provider(question, options, detail, intent):
+    async def bad_provider(question, options, detail, intent, data):
         raise RuntimeError("boom")
 
     callback.set_provider(bad_provider)

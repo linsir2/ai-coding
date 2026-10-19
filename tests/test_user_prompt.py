@@ -93,7 +93,8 @@ async def test_the_provider_receives_the_question_and_the_options_apart():
     assert answer.answered is True
     assert answer.text == "answer"
     # 19 §3.2: the provider call widened to carry detail/intent; absent means "".
-    assert seen == [("改 A 还是 B？", ["A", "B"], "", "")]
+    # R04: ... and the structured data, absent meaning {}.
+    assert seen == [("改 A 还是 B？", ["A", "B"], "", "", {})]
 
 
 @pytest.mark.asyncio
@@ -112,7 +113,7 @@ async def test_detail_and_intent_reach_the_provider():
     )
 
     assert answer.answered is True
-    assert seen == [("批准？", ["开始执行"], "# 计划", "plan_review")]
+    assert seen == [("批准？", ["开始执行"], "# 计划", "plan_review", {})]
 
 
 @pytest.mark.asyncio

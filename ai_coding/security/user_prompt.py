@@ -53,6 +53,7 @@ class UserPromptCallback(Protocol):
         *,
         detail: str = "",
         intent: str = "",
+        data: dict[str, Any] | None = None,
     ) -> UserAnswer: ...
 
 
@@ -71,10 +72,11 @@ class CLIUserPromptCallback:
 
     def __init__(self, input_fn: Callable[[str], str] | None = None) -> None:
         self._read: Callable[[str], str] = input_fn or (lambda prompt: input(prompt))
-        # Four parameters since 19 §3.2: question and options apart (the TUI
-        # renders options as a list), plus the plan-review ``detail`` (markdown
-        # body) and its ``intent`` (which card to render).  Same shape the
-        # approval channel already uses (``approval.py`` passes tool/params/reason).
+        # Five parameters since R04: question and options apart (the TUI
+        # renders options as a list), the plan-review ``detail`` (markdown
+        # body), its ``intent`` (which card to render) and its structured
+        # ``data`` (the item rows the card shows).  Same shape the approval
+        # channel already uses (``approval.py`` passes tool/params/reason).
         self._provider: Callable[..., Any] | None = None
 
     def set_provider(self, provider: Callable[..., Any]) -> None:
@@ -88,10 +90,13 @@ class CLIUserPromptCallback:
         *,
         detail: str = "",
         intent: str = "",
+        data: dict[str, Any] | None = None,
     ) -> UserAnswer:
         if self._provider is not None:
             try:
-                raw = await self._provider(question, list(options), detail, intent)
+                raw = await self._provider(
+                    question, list(options), detail, intent, dict(data or {})
+                )
                 text = str(raw or "").strip()
                 if not text:
                     return UserAnswer(answered=False, reason="empty")
@@ -121,5 +126,6 @@ class UnavailableUserPromptCallback:
         *,
         detail: str = "",
         intent: str = "",
+        data: dict[str, Any] | None = None,
     ) -> UserAnswer:
         return UserAnswer(answered=False, reason="no_user")

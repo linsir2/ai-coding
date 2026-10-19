@@ -1,34 +1,40 @@
 /**
- * Plan review card (19 §3.2) — a presented plan, in the prompt's slot while
- * ``present_plan`` waits for the human (AskPanel's sibling: same slot, same
- * "the answer IS the RPC response" contract).  The detail is the plan
- * markdown; the card shows its opening lines only — the full text sits in
- * the tool call above, which the transcript keeps.  Answers use the JSON
- * codec from util/ask.ts; esc stays the shared "nobody answered"
- * (``reason="empty"`` → the backend's dismissed semantics).
+ * Plan review card (19 §3.2, R04) — a presented plan, in the prompt's slot
+ * while ``present_plan`` waits for the human (AskPanel's sibling: same slot,
+ * same "the answer IS the RPC response" contract).  The card shows the plan
+ * in full — a scrolling region, no more twelve-line excerpt — followed by
+ * the item table: the rows approval will actually write, verify command and
+ * dependencies included.  What the user reads is what the run executes.
+ * Answers use the JSON codec from util/ask.ts; esc stays the shared "nobody
+ * answered" (``reason="empty"`` → the backend's dismissed semantics).
  */
 
 import { TextAttributes } from "@opentui/core"
 import { useBindings } from "@opentui/keymap/solid"
+import { useTerminalDimensions } from "@opentui/solid"
 import { For, Show, createSignal } from "solid-js"
 import { theme } from "../theme/tokens"
 import { moveSelection } from "../util/dialog-select"
-import { ASK_SKIP, planReviewAnswer, type AskRequest } from "../util/ask"
+import {
+  ASK_SKIP,
+  planReviewAnswer,
+  planReviewItems,
+  type AskRequest,
+} from "../util/ask"
 import { PROMPT_BORDER } from "./prompt"
-
-/** How much of the plan the card shows before pointing at the tool call. */
-const EXCERPT_LINES = 12
 
 export function PlanReviewPanel(props: {
   request: AskRequest
   onAnswer: (answer: string) => void
 }) {
+  const dimensions = useTerminalDimensions()
   const [selected, setSelected] = createSignal(0)
   const [feedback, setFeedback] = createSignal("")
   const options = () =>
     props.request.options.length > 0
       ? props.request.options
       : ["开始执行", "继续规划"]
+  const items = () => planReviewItems(props.request)
   const move = (delta: number) =>
     setSelected((current) => moveSelection(current, delta, options().length))
   // Approve submits straight away; keep-planning first lets the feedback be
@@ -39,13 +45,6 @@ export function PlanReviewPanel(props: {
         ? planReviewAnswer("approve")
         : planReviewAnswer("keep", feedback().trim()),
     )
-  const excerpt = () => {
-    const lines = props.request.detail
-      .split("\n")
-      .filter((line) => line.trim() !== "")
-    if (lines.length <= EXCERPT_LINES) return lines.join("\n")
-    return [...lines.slice(0, EXCERPT_LINES), "…（全文见上一条 present_plan 调用）"].join("\n")
-  }
 
   useBindings(() => ({
     enabled: true,
@@ -93,9 +92,29 @@ export function PlanReviewPanel(props: {
         ◆ Plan review
       </text>
       <text fg={theme.textBase}>{props.request.question}</text>
-      <box flexDirection="column" marginTop={1}>
-        <text fg={theme.textMuted}>{excerpt()}</text>
-      </box>
+      {/* R04: the full plan and the item table in one scrolling region. */}
+      <scrollbox
+        flexShrink={1}
+        maxHeight={Math.max(3, Math.floor(dimensions().height / 2) - 6)}
+        marginTop={1}
+      >
+        <text fg={theme.textMuted}>{props.request.detail}</text>
+        <box flexDirection="column" marginTop={1}>
+          <For each={items()}>
+            {(item, index) => (
+              <box flexDirection="column">
+                <text fg={theme.textBase}>{`${index() + 1}. ${item.content}`}</text>
+                <text fg={theme.textMuted}>
+                  {`   verify：${item.verify || "无证明命令"}` +
+                    (item.dependsOn.length > 0
+                      ? ` · 依赖 ${item.dependsOn.map((n) => `#${n}`).join(", ")}`
+                      : "")}
+                </text>
+              </box>
+            )}
+          </For>
+        </box>
+      </scrollbox>
       <box flexDirection="column" marginTop={1}>
         <For each={options()}>
           {(option, index) => (

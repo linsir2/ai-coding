@@ -8,16 +8,25 @@
  */
 
 import { describe, expect, test } from "bun:test"
-import { parseAskRequest, answerForSelection, ASK_SKIP, planReviewAnswer, isPlanApproval } from "../src/util/ask"
+import {
+  parseAskRequest,
+  answerForSelection,
+  ASK_SKIP,
+  planReviewAnswer,
+  planReviewItems,
+  isPlanApproval,
+} from "../src/util/ask"
 
 describe("parseAskRequest", () => {
   test("reads the question and the options", () => {
     expect(parseAskRequest({ question: "哪个文件？", options: ["a.py", "b.py"] })).toEqual({
       question: "哪个文件？",
       options: ["a.py", "b.py"],
-      // 19 §3.2: the plan review's payload keys, always explicit.
+      // 19 §3.2: the plan review's payload keys, always explicit; R04 added
+      // `data` to the same rule.
       detail: "",
       intent: "",
+      data: {},
     })
   })
 
@@ -52,6 +61,40 @@ describe("parseAskRequest", () => {
 
   test("a missing question still yields something the panel can show", () => {
     expect(parseAskRequest({}).question).toBe("…")
+  })
+
+  test("data is always an object", () => {
+    expect(parseAskRequest({ question: "q" }).data).toEqual({})
+    expect(parseAskRequest({ question: "q", data: 3 }).data).toEqual({})
+    expect(parseAskRequest({ question: "q", data: ["x"] }).data).toEqual({})
+  })
+})
+
+// ---- R04: the plan review's structured rows ---------------------------------
+
+
+describe("planReviewItems", () => {
+  test("keeps the card rows and sheds shapeless entries", () => {
+    const request = parseAskRequest({
+      question: "批准这个计划并开始执行？",
+      intent: "plan_review",
+      data: {
+        items: [
+          { content: "建目录", verify: "test -d hotel", dependsOn: [1, 2] },
+          { content: "写 db.py" },
+          { content: 3 },
+          "nope",
+        ],
+      },
+    })
+    expect(planReviewItems(request)).toEqual([
+      { content: "建目录", verify: "test -d hotel", dependsOn: [1, 2] },
+      { content: "写 db.py", verify: "", dependsOn: [] },
+    ])
+  })
+
+  test("a plain question has no rows", () => {
+    expect(planReviewItems(parseAskRequest({ question: "q" }))).toEqual([])
   })
 })
 

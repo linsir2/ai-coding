@@ -126,7 +126,11 @@ def _install_providers(
     if set_prompt_provider is not None:
 
         async def question_provider(
-            question: str, options: list[str], detail: str = "", intent: str = ""
+            question: str,
+            options: list[str],
+            detail: str = "",
+            intent: str = "",
+            data: dict[str, Any] | None = None,
         ) -> str:
             raw = await service.call(
                 "user_prompt.ask",
@@ -136,6 +140,9 @@ def _install_providers(
                     # 19 §3.2: always explicit; plain readers ignore the keys.
                     "detail": detail,
                     "intent": intent,
+                    # R04: the review card's structured rows ride the same
+                    # "always explicit" rule ({} for a plain question).
+                    "data": dict(data or {}),
                 },
             )
             return str(raw or "")
