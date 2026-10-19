@@ -61,6 +61,18 @@ def test_strategy_window_lapse_failed_escalates_to_l2_armed():
     assert (d.level, d.kind) == (2, "nudge")
 
 
+def test_strategy_does_not_fire_on_a_neutral_round():
+    """D (audit fix): a round where every call was neutral (plan_keep and the
+    like) leaves ``successful_calls == 0`` too, so the stall branch used to
+    read a working revision loop as stuck.  Whatever the streak of neutral
+    rounds, the ladder must stay parked."""
+    d = iv.select(
+        _snap(iteration=5, attempted_calls=4, successful_calls=0, neutral_streak=4),
+        phase=iv.PRE, limits=LIMITS,
+    )
+    assert d is None
+
+
 def test_strategy_helped_resets_to_l1_and_disarms():
     ledger = iv.settle(_fired("strategy", 2), _snap(iteration=4, failed_streak=0))
     assert ledger["strategy"]["outcome"] == "helped"

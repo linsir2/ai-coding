@@ -149,6 +149,7 @@ class TurnSnapshot:
     # R6b: how the tool calls have been going.  Fed in by the loop — the policy
     # never counts anything itself, so it stays pure and table-testable.
     failed_streak: int = 0  # consecutive iterations where every call failed
+    neutral_streak: int = 0  # D: consecutive rounds where every call was neutral (plan_keep etc.)
     attempted_calls: int = 0  # tool calls this turn (successful or not)
     successful_calls: int = 0  # successful tool calls this turn
     strategy_nudges: int = 0  # strategy nudges already injected this turn

@@ -112,6 +112,7 @@ def _strategy_triggered(snap: TurnSnapshot, limits: LadderLimits) -> bool:
         and snap.iteration > limits.stall_iterations
         and snap.attempted_calls
         and snap.successful_calls == 0
+        and snap.neutral_streak == 0
     )
 
 

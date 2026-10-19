@@ -114,6 +114,9 @@ class TurnBooks:
     successful_calls: int = 0
     #: Consecutive iterations in which every attempted call failed (R6b tier 2).
     failed_streak: int = 0
+    #: D: consecutive rounds where every call was neutral (plan_keep etc.) -- a
+    #: neutral round is not "stuck", so the stall trigger must not fire on it.
+    neutral_streak: int = 0
     #: Strategy nudges injected (``[strategy-gate]``).
     strategy_nudges: int = 0
     #: stage 4 r2: the plan submission guard spent its one remedy nudge.
@@ -340,8 +343,10 @@ class TurnBooks:
         counted = [item for item in outcomes if item.result.error not in _NOT_EVIDENCE_ERRORS]
         if not counted:
             self.failed_streak = 0
+            self.neutral_streak += 1
             return
         self.failed_streak = 0 if succeeded else self.failed_streak + 1
+        self.neutral_streak = 0
         for item in counted:
             if not item.result.success:
                 error = str(item.result.error or "failed")
@@ -389,6 +394,7 @@ class TurnBooks:
             final_text=final_text,
             tokens_spent=tokens_spent,
             failed_streak=self.failed_streak,
+            neutral_streak=self.neutral_streak,
             attempted_calls=self.attempted_calls,
             successful_calls=self.successful_calls,
             strategy_nudges=self.strategy_nudges,

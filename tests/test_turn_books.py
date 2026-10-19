@@ -362,7 +362,11 @@ def test_a_keep_round_neither_fails_nor_burns():
     assert books.failed_streak == 1
     books.note_outcomes([_outcome("present_plan", success=False, error="plan_keep")])
     assert books.failed_streak == 0
+    assert books.neutral_streak == 1
     assert [tool for tool, _reason, _preview in books.failures] == ["bash"]
+    # an ordinary outcome ends the neutral run
+    books.note_outcomes([_outcome("bash", success=True)])
+    assert books.neutral_streak == 0
 
 
 # ------------------- plan 提交守卫（stage 4 r2）-----------------------------
