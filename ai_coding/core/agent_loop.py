@@ -927,6 +927,17 @@ class AgentLoop:
                     and item.result.data.get("dismissed") is True
                     for item in outcomes
                 ):
+                    # B (audit fix): the note below claims nothing ran, so
+                    # nothing may stay armed -- this is the only branch that can
+                    # meet a dismissal while a plan is armed (the tool refuses a
+                    # second submission otherwise).  Only the plan profile is
+                    # the review's to disarm; a goal task has its own lifecycle.
+                    if (
+                        getattr(task, "armed", False)
+                        and getattr(task, "armed_profile", "") == "plan"
+                    ):
+                        task.armed = False
+                        task.armed_profile = ""
                     outcome = TurnOutcome(
                         status=TurnStatus.COMPLETED,
                         text=step.text,

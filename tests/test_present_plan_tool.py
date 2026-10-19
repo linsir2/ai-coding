@@ -444,3 +444,65 @@ async def test_approval_replaces_the_list_with_the_submitted_items():
     assert [item.content for item in ctx.task.items] == ["新步骤"]
     assert ctx.task.items[0].id == "1"  # ids restart: this is a new list
     assert ctx.task.goal == "g"  # the objective is the episode's, not the list's
+
+
+# ---- B (audit fix): approval is terminal for the turn -------------------------
+#
+# HIGH-1: approve armed the task and wrote the items; a SECOND present_plan in
+# the same turn reached the human again, and dismissing that one ended the turn
+# with a note claiming "not submitted, not executed" while ``task.armed`` was
+# still True and the frontend still had a run to dispatch.  Approval now closes
+# the door: a new submission is refused while a plan is armed, and a dismissal
+# disarms, so the note can be true.
+
+
+@pytest.mark.asyncio
+async def test_an_approved_plan_refuses_a_second_submission():
+    """B: once approved, the plan is armed -- a new one must not overwrite it."""
+    tool, prompt = _tool(UserAnswer(answered=True, text="开始执行"))
+    ctx = _ctx()
+    approved = await tool.execute(_plan_call("# first"), ctx)
+    assert approved.success is True
+    assert ctx.task.armed is True
+
+    again = await tool.execute(_plan_call("# second"), ctx)
+
+    assert again.success is False
+    assert again.error == "plan_already_approved"
+    # the human was not asked a second time, and the first plan still stands
+    assert len(prompt.calls) == 1
+    assert [item.content for item in ctx.task.items] == ["做一件事"]
+
+
+@pytest.mark.asyncio
+async def test_an_unarmed_plan_profile_can_be_submitted_again():
+    """The guard is ``armed``, not ``armed_profile``: /plan run disarms on the
+    way out, so a fresh submission after a finished run must still work."""
+    tool, _prompt = _tool(UserAnswer(answered=True, text="开始执行"))
+    ctx = _ctx()
+    await tool.execute(_plan_call("# first"), ctx)
+    # what PlanRunner's finally does when the run ends
+    ctx.task.armed = False
+
+    again = await tool.execute(_plan_call("# second"), ctx)
+
+    assert again.success is True
+    assert ctx.task.armed is True
+
+
+@pytest.mark.asyncio
+async def test_a_dismissal_meets_an_unarmed_task_by_construction():
+    """B: the armed gate makes the dismissal branch unreachable while a plan
+    runs -- so nothing here can disarm anything, and the loop's dismissal
+    branch is the only place that has to (it is the only one that can meet
+    an armed task).  This test pins that invariant instead of the branch."""
+    tool, _prompt = _tool(UserAnswer(answered=False, reason="empty"))
+    ctx = _ctx()
+    first = _tool(UserAnswer(answered=True, text="开始执行"))[0]
+    await first.execute(_plan_call("# approved earlier"), ctx)
+    assert ctx.task.armed is True
+
+    # the second submission never reaches the human while armed
+    blocked = await tool.execute(_plan_call("# not this one"), ctx)
+    assert blocked.error == "plan_already_approved"
+    assert ctx.task.armed is True

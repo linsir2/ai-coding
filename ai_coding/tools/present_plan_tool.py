@@ -132,6 +132,8 @@ class PresentPlanTool(BaseTool):
         if ctx is None or getattr(ctx, "mode", "normal") != "plan":
             return ToolResult(success=False, output=_NOT_IN_PLAN, error="not_in_plan")
         task = ctx.task
+        # R03: another profile owns the task -- a running goal must not be
+        # hijacked by a plan submission.
         if getattr(task, "armed", False) and task.armed_profile != "plan":
             return ToolResult(
                 success=False,
@@ -140,6 +142,22 @@ class PresentPlanTool(BaseTool):
                     "等它结束或先停止它，再提交计划。"
                 ),
                 error="task_busy",
+            )
+        # B (audit fix): approval is terminal.  Once a plan is armed it owns the
+        # task -- a second submission would silently replace the list a human
+        # already agreed to, and if that second card were dismissed the turn
+        # would end claiming nothing ran while the first plan stayed armed for
+        # the client (and the next boot) to run.  /plan run disarms on its way
+        # out, so a finished plan is submittable again; ``/plan off`` is the way
+        # out when a run never got dispatched.
+        if getattr(task, "armed", False):
+            return ToolResult(
+                success=False,
+                output=(
+                    "本次计划已批准，执行由系统接管；请简短收尾，不要开始执行。"
+                    "要换一份计划，先 /plan off 退出计划模式再重新进入。"
+                ),
+                error="plan_already_approved",
             )
         plan = str(params.get("plan", "") or "").strip()
         if not plan:
@@ -197,7 +215,11 @@ class PresentPlanTool(BaseTool):
                 data={"approved": False, "reason": answer.reason},
             )
         if not answer.answered:
-            # Dismissed (esc / empty): information for the model, not a retryable error.
+            # Dismissed (esc / empty): information for the model, not a retryable
+            # error.  Nothing can be armed here -- the gate above refuses any
+            # submission while a plan runs, so a dismissal always meets an
+            # unarmed task.  (The loop's dismissal branch is the one that can
+            # meet an armed task; it disarms there.)
             return ToolResult(
                 success=True,
                 output=_HOLD,

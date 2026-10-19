@@ -18,6 +18,7 @@ from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.turn_policy import PLAN_DISMISSED_NOTE
 from ai_coding.domain.loop import StepResult, TurnStatus
 from ai_coding.domain.message import ToolCallRef, ToolResult
+from ai_coding.domain.task import TaskState
 from ai_coding.security.approval import AutoApproveCallback
 from ai_coding.service.session_service import SessionService
 from ai_coding.tools.base import BaseTool
@@ -205,3 +206,67 @@ async def test_a_read_only_turn_does_not_ask_for_a_plan(tmp_path):
     outcome = loop.last_outcome
     assert outcome is not None and outcome.status is TurnStatus.COMPLETED
     assert outcome.note == ""
+
+
+# ---- B (audit fix): the dismissal branch is the only place a dismissal can
+#      meet an armed task, so it is the only place that has to disarm it. ------
+
+
+class _ArmingDismissedPlan(_PresentPlan):
+    """A dismissal that arrives while a plan from this turn is already armed.
+
+    With the B gate in place the real tool refuses a second submission, so this
+    fixture stands in for the state the loop must still handle correctly: the
+    dismissal flag and an armed task in the same batch (a keep that the model
+    turned into a fresh submission, an earlier approval plus a later esc)."""
+
+    def __init__(self) -> None:
+        self._armed = False
+
+    async def execute(self, params, ctx=None) -> ToolResult:
+        if not self._armed:
+            self._armed = True
+            ctx.task.armed = True
+            ctx.task.armed_profile = "plan"
+            ctx.task.add("第一步")
+        return ToolResult(
+            success=True,
+            output="已搁置",
+            data={"approved": False, "dismissed": True},
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_dismissal_disarms_the_plan_it_ends_the_turn_over(tmp_path):
+    """B: the dismissal note says nothing ran, so nothing may stay armed.  An
+    armed plan the user just waved away would otherwise be picked up by the
+    boot resume or a stray /plan run."""
+    engine = _ScriptedEngine([_call("c1", "present_plan")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, tool=_ArmingDismissedPlan())
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "给计划")
+
+    outcome = loop.last_outcome
+    assert outcome is not None and outcome.reason == "plan dismissed"
+    assert session.task is not None
+    assert session.task.armed is False
+    assert session.task.armed_profile == ""
+
+
+@pytest.mark.asyncio
+async def test_a_dismissal_leaves_a_goal_task_armed(tmp_path):
+    """Only the plan profile is the review's to disarm -- a goal task belongs
+    to the goal runner, which has its own lifecycle."""
+    engine = _ScriptedEngine([_call("c1", "present_plan")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, tool=_DismissedPlan())
+    session = _plan_session(sessions)
+    session.task = TaskState()
+    session.task.arm_goal("把发布跑通")
+
+    await loop.process_input(session, "给计划")
+
+    assert session.task.armed is True
+    assert session.task.armed_profile == "goal"
