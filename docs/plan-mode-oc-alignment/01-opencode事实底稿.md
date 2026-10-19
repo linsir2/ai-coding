@@ -1,5 +1,7 @@
 # 01 · opencode plan 模式 / plan agent 机制盘点（事实底稿）
 
+> 修订：本稿已被 `07-重审-opencode事实底稿.md` 取代（2026-10-19 重审），事实以重审版为准。
+
 > 状态：**已落档**（2026-10-19）。源：`/home/linsir365/projects/opencode` v2 @ `0a46301e3`。
 
 > 只读调研。所有结论附 `file:line`；`[verified]` = 代码直接证明，`[inferred]` = 推断并给理由。
