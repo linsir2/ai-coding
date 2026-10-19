@@ -339,6 +339,15 @@ def make_handlers(
                     f"（第 {int(getattr(task, 'resume_count', 0) or 0) + 1} 次）。"
                     "执行过程会实时显示在本会话；停止请按 esc。"
                 )
+                # R07: boot resumes *execution*, so the parent goes back to
+                # build first — keeping PLAN here left the status bar and the
+                # prompt posture in planning while the runner executed (F-46).
+                # Persist before the run so a crash mid-resume still reads
+                # build.
+                session.mode = "normal"
+                session.readonly = False
+                session.pending_posture = None
+                _persist_session(world, session)
                 _launch_boot_resume(session)
                 resuming = True
         else:

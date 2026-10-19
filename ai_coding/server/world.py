@@ -83,6 +83,12 @@ def find_armed_session(sessions: Any) -> Any | None:
         task = raw.get("task")
         if not isinstance(task, dict) or task.get("armed") is not True:
             continue
+        # R07: only a profile a runner can actually drive competes for the
+        # resume.  A stale armed task with an unknown profile used to win the
+        # scan (it was the newest) and then be dropped in initialize, which
+        # swallowed the one recovery chance a newer valid session still had.
+        if task.get("armedProfile") not in ("plan", "goal"):
+            continue
         stamp = str(raw.get("lastAccessTime", "") or "")
         if best is None or stamp > best[0]:
             best = (stamp, path.stem)

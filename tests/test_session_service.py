@@ -1,5 +1,7 @@
 """TDD (M1-2): SessionService — create/save/load/list/delete + atomic persistence."""
 
+import json
+
 from ai_coding.domain.message import ChatMessage
 from ai_coding.service.session_service import SessionService
 
@@ -300,6 +302,17 @@ def test_list_sessions_sorts_newest_first(tmp_path):
     )
     for s in (old, new, timeless):
         svc.save(s)
+    # R07: save() stamps last_access_time with "now" (a save is an access).
+    # This test controls the stamps, so it writes them straight into the files.
+    for s, stamp in (
+        (old, "2026-09-01T00:00:00Z"),
+        (new, "2026-10-02T00:00:00Z"),
+        (timeless, "garbage"),
+    ):
+        path = svc.root / f"{s.session_id}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["lastAccessTime"] = stamp
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     assert [s.session_id for s in svc.list_sessions()] == [
         new.session_id, old.session_id, timeless.session_id
@@ -329,3 +342,16 @@ def test_hostile_session_ids_are_refused_loudly(tmp_path):
         svc.load("../../x")
     with pytest.raises(ValueError):
         svc.delete("../../x")
+
+
+def test_save_touches_last_access_time(tmp_path):
+    """R07: a save is an access.  Only ``create`` used to stamp this field, so
+    boot's "newest armed" scan and the /resume list sorted by creation time --
+    a session someone just used could lose to a staler one."""
+    svc = _svc(tmp_path / "sessions")
+    s = svc.create()
+    s.last_access_time = "2000-01-01T00:00:00Z"
+
+    svc.save(s)
+
+    assert svc.load(s.session_id).last_access_time != "2000-01-01T00:00:00Z"

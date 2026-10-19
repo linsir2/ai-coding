@@ -1610,6 +1610,37 @@ async def test_initialize_consumes_an_armed_session_once(ipc):
 
 
 @pytest.mark.asyncio
+async def test_initialize_resets_a_plan_posture_before_resuming(ipc):
+    """R07: the approval that armed a plan can be followed by a crash; boot
+    then resumes execution, but the session kept its PLAN posture -- the
+    status bar said "PLAN\u00b7readonly" while the runner executed (F-46).
+    Boot sends the parent back to build first, and persists it before the
+    run so a crash mid-resume still reads build."""
+    world, _service, client = ipc
+    from ai_coding.domain.task import TaskState
+
+    armed = world.sessions.create(title="armed")
+    task = TaskState(goal="g")
+    task.add("step")
+    task.armed = True
+    task.armed_profile = "plan"
+    armed.task = task
+    armed.mode = "plan"
+    armed.readonly = True
+    armed.pending_posture = {"mode": "normal", "readonly": False}
+    world.sessions.save(armed)
+    world.pending_resume = world.sessions.load(armed.session_id)
+
+    hello = client.request("initialize")
+
+    assert hello["sessionId"] == armed.session_id
+    reloaded = world.sessions.load(armed.session_id)
+    assert reloaded.mode == "normal"
+    assert reloaded.readonly is False
+    assert reloaded.pending_posture is None
+
+
+@pytest.mark.asyncio
 async def test_boot_resume_steps_are_steps_and_the_run_ends_once(ipc):
     """P0-3: a resumed run owes the client the same shape a command run does.
 

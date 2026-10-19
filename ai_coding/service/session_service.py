@@ -156,6 +156,11 @@ class SessionService:
 
     def save(self, session: SessionData) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
+        # R07: a save is an access.  Only ``create`` used to stamp this field,
+        # so boot's "newest armed" scan and the /resume list sorted by
+        # creation time -- the session someone just used could lose to a
+        # staler one.
+        session.last_access_time = now_utc()
         target = self._path(session.session_id)
         tmp = target.with_suffix(".tmp")
         tmp.write_text(to_json_pretty(session.to_dict()), encoding="utf-8")
