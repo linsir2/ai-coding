@@ -143,7 +143,10 @@ async def test_items_approved_through_present_plan_run_to_completion():
                 {"content": "写 db.py"},
             ],
         },
-        ToolContext(task=session.task, workspace="/tmp/ws", session_id="s"),
+        # R03: the tool is plan-only; this path approves through the real tool.
+        ToolContext(
+            task=session.task, workspace="/tmp/ws", session_id="s", mode="plan"
+        ),
     )
     assert result.data == {"approved": True}
 

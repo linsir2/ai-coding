@@ -467,6 +467,23 @@ async def _handle_plan(
         console.info(msg)
         return REPLAction.CONTINUE, session
 
+    # R03: a task another profile owns keeps the whole /plan family out --
+    # /plan <topic> would clear the goal via begin_plan, /plan run would
+    # rewrite armed_profile to "plan" and execute; bare entry would just
+    # paint a read-only canvas whose submissions get refused anyway.  off
+    # above stays available as the safety valve.
+    armed_task = getattr(session, "task", None)
+    if (
+        armed_task is not None
+        and getattr(armed_task, "armed", False)
+        and getattr(armed_task, "armed_profile", "") != "plan"
+    ):
+        console.info(
+            f"[plan] 已有任务在跑（profile={armed_task.armed_profile or '?'}）；"
+            "先 /goal off 或等它结束，再进计划模式。"
+        )
+        return REPLAction.CONTINUE, session
+
     if sub == "run":
         needs_exit = session.mode == "plan" or session.readonly
         if needs_exit:

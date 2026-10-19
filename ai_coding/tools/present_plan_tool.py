@@ -37,6 +37,10 @@ _HOLD = (
 _NO_CHANNEL = (
     "当前没有人工可评审这份计划。保持计划模式，简要收尾并说明计划，等待用户指示。"
 )
+_NOT_IN_PLAN = (
+    "present_plan 只在计划模式可用；当前不在计划模式。"
+    "请直接以回答收尾，不要提交计划；需要制定计划时，让用户先进入计划模式（/plan）。"
+)
 
 
 class PresentPlanTool(BaseTool):
@@ -67,7 +71,8 @@ class PresentPlanTool(BaseTool):
             "executable steps — one entry per step, each with its 'verify' shell "
             "command when the outcome is machine-checkable. Approval makes the system "
             "execute the items automatically — do not execute them yourself; 'keep "
-            "planning' brings their feedback back, so revise and call this tool again."
+            "planning' brings their feedback back, so revise and call this tool again. "
+            "Only available in plan mode."
         )
 
     @property
@@ -111,6 +116,22 @@ class PresentPlanTool(BaseTool):
     async def execute(
         self, params: dict[str, Any], ctx: ToolContext | None = None
     ) -> ToolResult:
+        # R03: plan-only, and never over a task another profile owns --
+        # approval replaces the list and arms it, so a running goal/step task
+        # must be out of reach.  Both refusals fire before parsing or review;
+        # a missing context fails closed the same way.
+        if ctx is None or getattr(ctx, "mode", "normal") != "plan":
+            return ToolResult(success=False, output=_NOT_IN_PLAN, error="not_in_plan")
+        task = ctx.task
+        if getattr(task, "armed", False) and task.armed_profile != "plan":
+            return ToolResult(
+                success=False,
+                output=(
+                    f"目标任务（profile={task.armed_profile or '?'}）正在运行；"
+                    "等它结束或先停止它，再提交计划。"
+                ),
+                error="task_busy",
+            )
         plan = str(params.get("plan", "") or "").strip()
         if not plan:
             return ToolResult(
@@ -171,22 +192,23 @@ class PresentPlanTool(BaseTool):
             # 11-plan T4 (Q1=A): approval IS the consent — arm the live task
             # here so the closing turn's own save carries it to disk and a
             # crash before the run dispatch still auto-resumes on boot.
-            if ctx is not None and getattr(ctx, "task", None) is not None:
-                # P1: approval is the one write point, and it REPLACES the
-                # list -- dsh's shape (``tool-todo/src/index.ts:80`` sends the
-                # whole table).  Appending would let a model that pre-wrote
-                # items with todo_write leave orphan steps behind, and the
-                # runner executes everything open.  The goal stays: it belongs
-                # to the session/episode, not to this list.
-                #
-                # Stale step receipts are not this tool's business: the runner
-                # drops the ones whose statement is no longer on the list
-                # (``plan_runner._drop_foreign_receipts``).
-                ctx.task.items.clear()
-                for content, verify in items:
-                    ctx.task.add(content, verify=verify)
-                ctx.task.armed = True
-                ctx.task.armed_profile = "plan"
+            # (R03: the gates above guarantee ctx/task; the old defensive
+            # None-checks are gone.)
+            # P1: approval is the one write point, and it REPLACES the
+            # list -- dsh's shape (``tool-todo/src/index.ts:80`` sends the
+            # whole table).  Appending would let a model that pre-wrote
+            # items with todo_write leave orphan steps behind, and the
+            # runner executes everything open.  The goal stays: it belongs
+            # to the session/episode, not to this list.
+            #
+            # Stale step receipts are not this tool's business: the runner
+            # drops the ones whose statement is no longer on the list
+            # (``plan_runner._drop_foreign_receipts``).
+            ctx.task.items.clear()
+            for content, verify in items:
+                ctx.task.add(content, verify=verify)
+            ctx.task.armed = True
+            ctx.task.armed_profile = "plan"
             return ToolResult(success=True, output=_APPROVED, data={"approved": True})
         if feedback:
             return ToolResult(

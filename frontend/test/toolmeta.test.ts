@@ -123,6 +123,10 @@ describe("toolFailure", () => {
       // 内化批次: the readonly gate's own code was the last live 未知原因
       // (found in session 7ad86804's transcript).
       ["readonly_denied", "只读拒绝"],
+      // R03: present_plan's posture gates -- a step or plain session calling
+      // it gets a verdict, not 未知原因.
+      ["not_in_plan", "非计划模式"],
+      ["task_busy", "任务运行中"],
     ]
     for (const [code, label] of denied) {
       expect(toolFailure(code)).toEqual({ label, tone: "denied" })

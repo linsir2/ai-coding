@@ -104,6 +104,8 @@ def tool_context(
         instructions=instructions,
         # 18 §10.1: the switch rides the one shared factory.
         readonly=session.readonly,
+        # R03: ... and so does the posture fact (present_plan's gate).
+        mode=session.mode,
         emit=emit,
         turn=int(turn),
         note_checkpoint=note_checkpoint,

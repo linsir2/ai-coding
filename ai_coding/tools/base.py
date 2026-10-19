@@ -49,9 +49,14 @@ class ToolContext:
     session_messages: tuple[ChatMessage, ...] = ()
     instructions: str | None = None
     #: 18 §10.1: the session's enforcement switch; the dispatcher's gate
-    #: refuses mutating tools while this is True.  The prompt-side ``mode`` is
-    #: deliberately not mirrored here — the gate has one input.
+    #: refuses mutating tools while this is True.  The gate keeps its single
+    #: ``readonly`` input -- this field is not an enforcement source.
     readonly: bool = False
+    #: R03: the posture fact for the one tool whose semantics depend on it
+    #: (``present_plan`` is plan-only); ``tool_context`` reads it off the
+    #: session.  Not the gate's input: enforcement still reads only
+    #: ``readonly``.
+    mode: str = "normal"
     emit: Callable[[Any], None] = _noop_emit
     # R4a: the id of the call this execution belongs to.  The dispatcher stamps
     # one context per call (the batch shares everything else), which is what lets

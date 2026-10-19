@@ -119,6 +119,10 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   // 内化批次: the readonly gate's own code was the last live 未知原因
   // (7ad86804's transcript).
   readonly_denied: { label: "只读拒绝", tone: "denied" },
+  // R03: present_plan's posture gates -- a step or plain session calling it
+  // gets a verdict, not 未知原因.
+  not_in_plan: { label: "非计划模式", tone: "denied" },
+  task_busy: { label: "任务运行中", tone: "denied" },
 }
 
 export function toolFailure(error: string): { label: string; tone: FailureTone } {

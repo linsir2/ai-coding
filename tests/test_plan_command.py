@@ -503,3 +503,65 @@ def test_the_plan_prompt_says_the_mutating_tools_are_unavailable():
     lowered = PLAN_PROMPT.lower()
     assert "unavailable" in lowered
     assert "read/grep/glob" in lowered
+
+
+# ---- R03: an armed non-plan task keeps the whole /plan family out ------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["/plan", "/plan 新主题", "/plan run"])
+async def test_plan_refuses_while_a_non_plan_task_is_armed(raw):
+    """R03: a goal (any non-plan profile) owns the task table — bare entry, a
+    topic run and /plan run must all stay out of it, or they hijack the goal
+    (begin_plan clears it; the runner would rewrite armed_profile to plan)."""
+    from types import SimpleNamespace
+
+    from ai_coding.domain.task import TaskState
+
+    class _StubLoop(_Loop):
+        def __init__(self) -> None:
+            super().__init__()
+            self.settings = SimpleNamespace(
+                plan_step_max_iterations=8,
+                plan_max_step_turns=20,
+                stop_policy="natural",
+            )
+            self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
+
+    loop = _StubLoop()
+    sessions = _Sessions()
+    session = _session()
+    session.task = TaskState(goal="obj")
+    session.task.arm_goal("obj")
+    session.task.add("goal step")
+    dc, c = _console()
+
+    action, _ = await handle_input(loop, raw, session, sessions, dc)
+
+    assert action is REPLAction.CONTINUE
+    assert loop.calls == []  # no planning turn, no step run
+    assert (session.mode, session.readonly) == ("normal", False)
+    assert sessions.saved == []
+    assert session.task.armed is True and session.task.armed_profile == "goal"
+    assert session.task.done_count == 0
+    assert "已有任务在跑" in c.export_text()
+
+
+@pytest.mark.asyncio
+async def test_plan_off_stays_available_while_a_goal_is_armed():
+    """/plan off is the safety valve the refusal must not swallow: it lands
+    without touching the running task."""
+    from ai_coding.domain.task import TaskState
+
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.task = TaskState(goal="obj")
+    session.task.arm_goal("obj")
+    dc, c = _console()
+
+    await handle_input(loop, "/plan off", session, sessions, dc)
+
+    assert sessions.saved == [session]
+    assert session.task.armed is True and session.task.armed_profile == "goal"
+    assert "本就不在计划模式" in c.export_text()

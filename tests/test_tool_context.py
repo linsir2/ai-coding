@@ -61,6 +61,8 @@ def test_tool_context_carries_the_turn_number():
         session_id = "s1"
         # 18 §10.1: the double follows the widened interface.
         readonly = False
+        # R03: the factory also mirrors the posture mode now.
+        mode = "normal"
         # C-1: the factory now also reads the session's transcript.
         messages: list = []
 
@@ -75,3 +77,27 @@ def test_tool_context_carries_the_turn_number():
     )
     assert ctx.turn == 7
     assert ctx.session_id == "s1"
+
+
+# ---- R03: the posture mode travels with the context --------------------------
+
+
+def test_tool_context_mirrors_the_posture_mode():
+    from ai_coding.core.request_builder import tool_context
+    from ai_coding.domain.task import TaskState
+
+    class _Session:
+        session_id = "s1"
+        readonly = False
+        mode = "plan"
+        messages: list = []
+
+    ctx = tool_context(
+        task=TaskState(goal="g"),
+        workspace=".",
+        session=_Session(),  # type: ignore[arg-type]
+        history=[],
+        instructions=None,
+        emit=lambda _event: None,
+    )
+    assert ctx.mode == "plan"

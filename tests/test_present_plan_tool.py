@@ -25,11 +25,15 @@ class _Prompt:
         return self.answer
 
 
-def _ctx(*, items: int = 1) -> ToolContext:
+def _ctx(*, items: int = 1, mode: str = "plan") -> ToolContext:
+    # R03: the tool is plan-only now; the tests that exercise its own checks
+    # opt into the posture here (and the refusal tests opt out).
     task = TaskState(goal="g")
     for index in range(items):
         task.add(f"step {index + 1}")
-    return ToolContext(task=task, workspace="/tmp/ws", session_id="sid")
+    return ToolContext(
+        task=task, workspace="/tmp/ws", session_id="sid", mode=mode
+    )
 
 
 def _tool(answer: UserAnswer) -> tuple[PresentPlanTool, _Prompt]:
@@ -48,6 +52,40 @@ async def test_an_empty_plan_is_refused():
     r = await tool.execute({"plan": "   "}, _ctx())
     assert r.success is False and r.error == "missing_plan"
     assert prompt.calls == []
+
+
+@pytest.mark.asyncio
+async def test_present_plan_refuses_outside_plan_mode():
+    """R03: the tool is plan-only.  A normal/step/goal turn gets a structured
+    refusal before anyone is asked; a missing context fails closed the same
+    way (the gate runs before parsing or review)."""
+    tool, prompt = _tool(UserAnswer(answered=True, text="开始执行"))
+    r = await tool.execute(_plan_call("# p"), _ctx(mode="normal"))
+    assert r.success is False and r.error == "not_in_plan"
+    assert prompt.calls == []
+
+    r2 = await tool.execute(_plan_call("# p"), None)
+    assert r2.success is False and r2.error == "not_in_plan"
+    assert prompt.calls == []
+
+
+@pytest.mark.asyncio
+async def test_present_plan_refuses_while_a_goal_is_armed():
+    """R03: a non-plan task owns the list; approve must never be able to
+    replace it.  The refusal fires before parsing and touches nothing."""
+    tool, prompt = _tool(UserAnswer(answered=True, text='{"choice":"approve"}'))
+    ctx = _ctx()
+    assert ctx.task is not None
+    ctx.task.armed = True
+    ctx.task.armed_profile = "goal"
+
+    r = await tool.execute(_plan_call("# p"), ctx)
+
+    assert r.success is False and r.error == "task_busy"
+    assert "goal" in r.output
+    assert prompt.calls == []
+    assert [item.content for item in ctx.task.items] == ["step 1"]
+    assert ctx.task.armed is True and ctx.task.armed_profile == "goal"
 
 
 @pytest.mark.asyncio
