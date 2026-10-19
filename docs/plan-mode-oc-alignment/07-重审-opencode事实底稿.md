@@ -1,4 +1,4 @@
-# 02 · opencode plan 模式 / plan agent 源码级深审（v2 @ 0a46301e3）
+# 07 · opencode plan 模式 / plan agent 源码级深审（v2 @ 0a46301e3）
 
 > 状态：**已落档**（2026-10-19 重审轮）。源：opencode v2 @ 0a46301e3。取代 `01` 中与本稿冲突的事实。
 
