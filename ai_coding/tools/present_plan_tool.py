@@ -231,6 +231,16 @@ class PresentPlanTool(BaseTool):
                 )
             ctx.task.armed = True
             ctx.task.armed_profile = "plan"
+            # R10: approval starts a fresh episode -- the previous plan's
+            # rounds, resume budget and token spend must not ride into this
+            # one, and the session's ladder windows restart through the
+            # loop's callback (goal_phase belongs to the goal profile and is
+            # untouched).
+            ctx.task.rounds_run = 0
+            ctx.task.resume_count = 0
+            ctx.task.tokens_used = 0
+            if ctx.note_plan_approved is not None:
+                ctx.note_plan_approved()
             return ToolResult(success=True, output=_APPROVED, data={"approved": True})
         # R08 (dsh): keep is a tool error carrying the feedback -- the model
         # revises and resubmits in the same turn; an error (not a success)

@@ -86,6 +86,7 @@ def tool_context(
     turn: int = 0,
     note_checkpoint: Callable[[str], None] | None = None,
     note_approval: Callable[[dict[str, Any] | None], None] | None = None,
+    note_plan_approved: Callable[[], None] | None = None,
     jobs: Any = None,
 ) -> ToolContext:
     """The per-invocation context a tool receives (the dispatcher stamps call ids).
@@ -110,6 +111,7 @@ def tool_context(
         turn=int(turn),
         note_checkpoint=note_checkpoint,
         note_approval=note_approval,
+        note_plan_approved=note_plan_approved,
         # D-1: the workspace's background jobs.  Present only where the product
         # builds one; `None` elsewhere and the tools that need it say so.
         jobs=jobs,

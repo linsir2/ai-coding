@@ -658,6 +658,53 @@ async def test_present_plan_emits_task_updated_with_the_approved_items(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_approval_starts_a_fresh_episode_ledger(tmp_path):
+    """R10: approval is a new plan episode end-to-end -- the stale counters
+    and the session's ladder windows clear through the loop's own wiring,
+    not just in the tool's unit test."""
+    from ai_coding.security.user_prompt import UserAnswer
+    from ai_coding.tools.present_plan_tool import PresentPlanTool
+
+    class _Approve:
+        async def ask(self, question, options=(), *, detail="", intent="", data=None):
+            return UserAnswer(answered=True, text='{"choice":"approve"}')
+
+    engine = ScriptedEngine(
+        [
+            _calls(
+                _ref(
+                    "c1",
+                    "present_plan",
+                    '{"plan":"# p","items":[{"content":"建目录"}]}',
+                )
+            ),
+            _text("done"),
+        ]
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, _registry(PresentPlanTool(_Approve())))
+    session = sessions.create()
+    session.mode = "plan"
+    session.readonly = True
+    session.task = TaskState(goal="g")
+    session.task.rounds_run = 7
+    session.task.resume_count = 3
+    session.task.tokens_used = 1234
+    session.intervention_state = {"strategy": {"level": 1, "outcome": "pending"}}
+
+    await loop.process_input(session, "go")
+
+    assert session.task is not None
+    assert session.task.armed is True and session.task.armed_profile == "plan"
+    assert (
+        session.task.rounds_run,
+        session.task.resume_count,
+        session.task.tokens_used,
+    ) == (0, 0, 0)
+    assert session.intervention_state is None
+
+
+@pytest.mark.asyncio
 async def test_tool_context_carries_request_view(tmp_path):
     reader = _Tool("read")
     engine = ScriptedEngine([_calls(_ref("c1", "read")), _text("done")])

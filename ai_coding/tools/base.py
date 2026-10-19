@@ -75,6 +75,10 @@ class ToolContext:
     # does not lose the pending call -- the one place the snapshot was wrong.
     # ``None`` outside a loop that owns a session.
     note_approval: Callable[[dict[str, Any] | None], None] | None = None
+    # R10: how a tool tells the running turn that a new plan episode started
+    # (``present_plan`` approval).  The loop clears the session's ladder
+    # windows through it; ``None`` outside a loop that owns a session.
+    note_plan_approved: Callable[[], None] | None = None
     # R8c: a thread-safe "stop" flag for tools that own a subprocess (bash hands
     # it to the process runner).  The dispatcher sets it when the user cancels, so
     # the child dies even though the awaiting task was abandoned.

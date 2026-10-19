@@ -1514,6 +1514,11 @@ class AgentLoop:
                 # here and clears it when answered; the loop mirrors it into a
                 # marker beside the session file, never into the session itself.
                 note_approval=lambda pending: self._note_approval(session, pending),
+                # R10: approval is a new plan episode -- the session's stale
+                # ladder windows must not ride into it (begin_plan's sibling).
+                note_plan_approved=lambda: setattr(
+                    session, "intervention_state", None
+                ),
             ),
             deadline=deadline,
             iteration=index,

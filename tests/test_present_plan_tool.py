@@ -203,6 +203,51 @@ async def test_approval_arms_the_task_for_boot_resume():
 
 
 @pytest.mark.asyncio
+async def test_approval_resets_the_episode_counters():
+    """R10: an approved plan is a new episode -- the previous plan's rounds,
+    resume budget and token spend must not ride into it."""
+    tool, _ = _tool(UserAnswer(answered=True, text='{"choice":"approve"}'))
+    ctx = _ctx(items=0)
+    assert ctx.task is not None
+    ctx.task.rounds_run, ctx.task.resume_count, ctx.task.tokens_used = 7, 3, 1234
+
+    r = await tool.execute(_plan_call("# p"), ctx)
+
+    assert r.success is True
+    assert (ctx.task.rounds_run, ctx.task.resume_count, ctx.task.tokens_used) == (
+        0,
+        0,
+        0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_approval_clears_the_intervention_ledger():
+    """R10: approval restarts the ladder -- the session's window state is
+    cleared through the ctx callback (the loop wires it to the session);
+    a keep never asks for that."""
+    tool, _ = _tool(UserAnswer(answered=True, text='{"choice":"approve"}'))
+    ctx = _ctx(items=0)
+    cleared: list[int] = []
+    ctx.note_plan_approved = lambda: cleared.append(1)
+
+    r = await tool.execute(_plan_call("# p"), ctx)
+
+    assert r.success is True
+    assert cleared == [1]
+
+    keep_tool, _ = _tool(
+        UserAnswer(answered=True, text='{"choice":"keep","feedback":"改"}')
+    )
+    keep_ctx = _ctx(items=0)
+    keep_cleared: list[int] = []
+    keep_ctx.note_plan_approved = lambda: keep_cleared.append(1)
+
+    await keep_tool.execute(_plan_call("# p"), keep_ctx)
+    assert keep_cleared == []
+
+
+@pytest.mark.asyncio
 async def test_keep_and_dismiss_leave_the_task_unarmed():
     tool, _ = _tool(UserAnswer(answered=True, text='{"choice":"keep","feedback":"改"}'))
     ctx = _ctx()
