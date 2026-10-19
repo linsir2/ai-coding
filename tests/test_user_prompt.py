@@ -137,3 +137,31 @@ async def test_the_stdin_path_still_gets_one_flattened_prompt():
     assert len(prompts) == 1
     assert "改 A 还是 B？" in prompts[0]
     assert "（可选：A / B）" in prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_a_provider_signature_bug_is_not_disguised_as_no_user():
+    """E (audit fix): TypeError from the provider is a programming error (a
+    stale provider signature, a keyword the callee does not take) -- exactly
+    the class of bug that kept the plan review dark on real machines.  It must
+    surface, not masquerade as "nobody is there"."""
+    async def provider(*_args: object) -> str:
+        raise TypeError("got an unexpected keyword argument 'data'")
+
+    callback = CLIUserPromptCallback()
+    callback.set_provider(provider)
+    with pytest.raises(TypeError):
+        await callback.ask("批准？", intent="plan_review", data={"items": []})
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_provider_crash_still_ends_in_no_user():
+    """The channel itself (a hung UI, a closed pipe) must never break a turn."""
+    async def provider(*_args: object) -> str:
+        raise RuntimeError("ui is gone")
+
+    callback = CLIUserPromptCallback()
+    callback.set_provider(provider)
+    answer = await callback.ask("在吗？")
+    assert answer.answered is False
+    assert answer.reason == "no_user"

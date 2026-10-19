@@ -101,6 +101,11 @@ class CLIUserPromptCallback:
                 if not text:
                     return UserAnswer(answered=False, reason="empty")
                 return UserAnswer(answered=True, text=text)
+            except TypeError:
+                # E (audit fix): a provider signature mismatch is a bug, not an
+                # absent user.  Swallowing it here is what kept the plan review
+                # dark on real machines -- the review "just never answered".
+                raise
             except Exception:  # noqa: BLE001 — the channel must never break a turn
                 return UserAnswer(answered=False, reason="no_user")
         prompt = _format_prompt(question, options, detail)
