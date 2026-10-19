@@ -9,9 +9,14 @@
  * open to the model, never hanging the turn.
  *
  * 19 §3.2: the same request also carries the plan review — ``detail`` is the
- * plan markdown and ``intent`` picks the card; ``planReviewAnswer`` /
- * ``isPlanApproval`` are that card's answer codec (the only thing allowed to
- * arm the post-approval auto-run).
+ * plan markdown and ``intent`` picks the card.  ``planReviewAnswer`` is that
+ * card's answer codec; ``planReviewItems`` reads the rows R04 put on the wire.
+ *
+ * There is deliberately no "is this an approval?" helper here.  One existed
+ * (C removed it): the card's buttons now hand their intent to the caller with
+ * the answer, so the client never re-judges what the backend's
+ * ``present_plan`` already decided — the two disagreed on approve+feedback,
+ * and the client was the one that would have armed a run the backend refused.
  */
 
 /** R04: one review row as the card renders it (dependsOn in display order). */
@@ -86,14 +91,4 @@ export function answerForSelection(options: string[], index: number): string {
 /** 19 §3.3: the review card's answer, as the JSON ``present_plan`` parses. */
 export function planReviewAnswer(choice: "approve" | "keep", feedback = ""): string {
   return feedback ? JSON.stringify({ choice, feedback }) : JSON.stringify({ choice })
-}
-
-/** 19 §3.3: only an explicit approve arms the auto-run at the turn's end. */
-export function isPlanApproval(answer: string): boolean {
-  try {
-    const parsed = JSON.parse(answer) as { choice?: unknown }
-    return parsed?.choice === "approve"
-  } catch {
-    return false
-  }
 }

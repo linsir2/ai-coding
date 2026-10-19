@@ -36,7 +36,7 @@ import { useToast } from "../component/toast"
 import { theme } from "../theme/tokens"
 import { escStep } from "../util/esc"
 import { loadSession, resumeSession } from "../state/replay"
-import { isPlanApproval, type AskRequest } from "../util/ask"
+import type { AskRequest } from "../util/ask"
 import type { PermissionDecision, PermissionRequest } from "../util/permission"
 
 export interface SessionProps {
@@ -623,8 +623,12 @@ export function Session(props: SessionProps) {
               >
                 <PlanReviewPanel
                   request={request()}
-                  onAnswer={(answer) => {
-                    if (isPlanApproval(answer)) pendingPlanRun = true
+                  onAnswer={(answer, intent) => {
+                    // C: the panel says what it meant; we no longer re-parse the
+                    // answer to find out.  A dismiss also CLEARS a pending run:
+                    // the turn may have been approved once already, and esc on a
+                    // second card must not leave the earlier approval to fire.
+                    pendingPlanRun = intent === "approve"
                     props.onAskAnswer(answer)
                   }}
                 />

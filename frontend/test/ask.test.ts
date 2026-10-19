@@ -14,7 +14,7 @@ import {
   ASK_SKIP,
   planReviewAnswer,
   planReviewItems,
-  isPlanApproval,
+
 } from "../src/util/ask"
 
 describe("parseAskRequest", () => {
@@ -128,10 +128,15 @@ describe("the plan review's answer codec", () => {
     expect(planReviewAnswer("keep")).toBe('{"choice":"keep"}')
   })
 
-  test("only the approve choice arms the auto-run", () => {
-    expect(isPlanApproval(planReviewAnswer("approve"))).toBe(true)
-    expect(isPlanApproval(planReviewAnswer("keep", "x"))).toBe(false)
-    expect(isPlanApproval("")).toBe(false)
-    expect(isPlanApproval("开始执行")).toBe(false) // the card always sends JSON
+  // C（审核修复）：isPlanApproval 被删除 —— approve 的判定收敛到按钮本身
+  // （PlanReviewPanel 随答案传出 intent），前端不再解析答案字符串反推意图。
+  // 后端 present_plan._parse_answer 是唯一权威（approve+feedback=keep）。
+  test("the card's intent travels with the answer, not re-derived from it", () => {
+    // 编解码契约不变（后端仍按这个 JSON 解析）
+    expect(planReviewAnswer("approve")).toBe('{"choice":"approve"}')
+    expect(planReviewAnswer("keep", "第 3 步拆细")).toBe(
+      '{"choice":"keep","feedback":"第 3 步拆细"}',
+    )
+    expect(planReviewAnswer("keep")).toBe('{"choice":"keep"}')
   })
 })

@@ -9,7 +9,7 @@
  * answered" (``reason="empty"`` → the backend's dismissed semantics).
  */
 
-import { TextAttributes } from "@opentui/core"
+import { ScrollBoxRenderable, TextAttributes } from "@opentui/core"
 import { useBindings } from "@opentui/keymap/solid"
 import { useTerminalDimensions } from "@opentui/solid"
 import { For, Show, createSignal } from "solid-js"
@@ -23,13 +23,66 @@ import {
 } from "../util/ask"
 import { PROMPT_BORDER } from "./prompt"
 
+/** C: what the card's keys MEANT -- the only answer-semantics the client owns.
+ *
+ *  A (audit fix): the scroll region needs a keyboard path.  ``up``/``down``
+ *  already move the two options, so scrolling takes the pager keys and the
+ *  half-page pair; the footer's hint is generated from this list so the two
+ *  can never drift apart. */
+export type ReviewIntent = "approve" | "dismiss"
+
+export const SCROLL_STEP = 4
+
+/** A: the keys that scroll the review region, as (key, direction) pairs.
+ *
+ *  Rendered into the footer's hint and bound to the scrollbox alike, so what
+ *  the user is told is exactly what is wired -- they were one commit apart. */
+export const REVIEW_SCROLL_KEYS: readonly { key: string; dir: 1 | -1; label: string }[] = [
+  { key: "pageup", dir: -1, label: "pgup" },
+  { key: "pagedown", dir: 1, label: "pgdn" },
+  { key: "ctrl+u", dir: -1, label: "ctrl+u" },
+  { key: "ctrl+d", dir: 1, label: "ctrl+d" },
+]
+
+export const REVIEW_SCROLL_HINT = REVIEW_SCROLL_KEYS.map((k) => k.label).join("/")
+
+/** The card's key table, exported so the tests drive THIS table (a copy in a
+ *  test proves nothing about the card). */
+export const REVIEW_KEY_BINDINGS: readonly { key: string; cmd: string }[] = [
+  { key: "up", cmd: "plan-review.prev" },
+  { key: "k", cmd: "plan-review.prev" },
+  { key: "down", cmd: "plan-review.next" },
+  { key: "j", cmd: "plan-review.next" },
+  { key: "return", cmd: "plan-review.confirm" },
+  { key: "escape", cmd: "plan-review.dismiss" },
+  { key: "1", cmd: "plan-review.approve" },
+  { key: "2", cmd: "plan-review.keep" },
+  ...REVIEW_SCROLL_KEYS.map(({ key, dir }) => ({
+    key,
+    cmd: dir === 1 ? "plan-review.scroll-down" : "plan-review.scroll-up",
+  })),
+]
+
 export function PlanReviewPanel(props: {
   request: AskRequest
-  onAnswer: (answer: string) => void
+  /**
+   * C: the answer and what it MEANT.  The panel knows which button was
+   * pressed, so it says so instead of letting the caller re-parse the answer
+   * string -- that second judgement (`isPlanApproval`) disagreed with the
+   * backend's `_parse_answer` on approve+feedback and would have armed a run
+   * the backend refused.  The backend stays the only authority on what gets
+   * written; this only tells the client whether to dispatch it.
+   */
+  onAnswer: (answer: string, intent: ReviewIntent) => void
 }) {
   const dimensions = useTerminalDimensions()
   const [selected, setSelected] = createSignal(0)
   const [feedback, setFeedback] = createSignal("")
+  // A: the scroll region's handle.  Same contract dialog-select uses (a ref
+  // into the scrollbox, its scrollChildIntoView/scrollBy to move it) -- the
+  // review card simply had none, which is why a 24-row terminal showed the
+  // plan prose and none of the steps approval would write.
+  let region: ScrollBoxRenderable | undefined
   const options = () =>
     props.request.options.length > 0
       ? props.request.options
@@ -40,11 +93,9 @@ export function PlanReviewPanel(props: {
   // Approve submits straight away; keep-planning first lets the feedback be
   // typed (the input row appears with the selection), then enter submits.
   const confirm = () =>
-    props.onAnswer(
-      selected() === 0
-        ? planReviewAnswer("approve")
-        : planReviewAnswer("keep", feedback().trim()),
-    )
+    selected() === 0
+      ? props.onAnswer(planReviewAnswer("approve"), "approve")
+      : props.onAnswer(planReviewAnswer("keep", feedback().trim()), "dismiss")
 
   useBindings(() => ({
     enabled: true,
@@ -53,27 +104,31 @@ export function PlanReviewPanel(props: {
       { name: "plan-review.next", desc: "Next option", run: () => move(1) },
       { name: "plan-review.confirm", desc: "Answer with the selected option", run: confirm },
       {
-        name: "plan-review.skip",
-        desc: "Dismiss the review (ends the turn; nothing is submitted)",
-        run: () => props.onAnswer(ASK_SKIP),
-      },
-      {
         name: "plan-review.approve",
         desc: "Approve and execute",
-        run: () => props.onAnswer(planReviewAnswer("approve")),
+        run: () => props.onAnswer(planReviewAnswer("approve"), "approve"),
       },
       { name: "plan-review.keep", desc: "Keep planning", run: () => setSelected(1) },
+      // C: keep is not an approval -- the client must not arm a run for it.
+      {
+        name: "plan-review.dismiss",
+        desc: "Dismiss the review (ends the turn; nothing is submitted)",
+        run: () => props.onAnswer(ASK_SKIP, "dismiss"),
+      },
+      // A: the scroll path.  One command per direction, driven by the exported
+      // key table, so the footer hint and the binding cannot drift.
+      {
+        name: "plan-review.scroll-down",
+        desc: "Scroll the plan and items down",
+        run: () => region?.scrollBy(SCROLL_STEP),
+      },
+      {
+        name: "plan-review.scroll-up",
+        desc: "Scroll the plan and items up",
+        run: () => region?.scrollBy(-SCROLL_STEP),
+      },
     ],
-    bindings: [
-      { key: "up", cmd: "plan-review.prev" },
-      { key: "k", cmd: "plan-review.prev" },
-      { key: "down", cmd: "plan-review.next" },
-      { key: "j", cmd: "plan-review.next" },
-      { key: "return", cmd: "plan-review.confirm" },
-      { key: "escape", cmd: "plan-review.skip" },
-      { key: "1", cmd: "plan-review.approve" },
-      { key: "2", cmd: "plan-review.keep" },
-    ],
+    bindings: REVIEW_KEY_BINDINGS as never,
   }))
 
   return (
@@ -94,6 +149,7 @@ export function PlanReviewPanel(props: {
       <text fg={theme.textBase}>{props.request.question}</text>
       {/* R04: the full plan and the item table in one scrolling region. */}
       <scrollbox
+        ref={(element: ScrollBoxRenderable) => (region = element)}
         flexShrink={1}
         maxHeight={Math.max(3, Math.floor(dimensions().height / 2) - 6)}
         marginTop={1}
@@ -140,7 +196,9 @@ export function PlanReviewPanel(props: {
           />
         </box>
       </Show>
-      <text fg={theme.textMuted}>↑/↓ select · 1/2 quick · enter confirm · esc 结束本轮（不提交、不执行）</text>
+      <text fg={theme.textMuted}>
+        {`↑/↓ select · 1/2 quick · enter confirm · ${REVIEW_SCROLL_HINT} 滚动 · esc 结束本轮（不提交、不执行）`}
+      </text>
     </box>
   )
 }
