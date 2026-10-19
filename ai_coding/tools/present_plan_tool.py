@@ -32,7 +32,8 @@ _KEEP_NO_FEEDBACK = (
     "用户选择继续规划，未给出反馈：请询问要修改什么，或先修订后再次调用 present_plan。"
 )
 _HOLD = (
-    "用户搁置了这次评审：保持计划模式，简要向用户说明计划，然后停下等待进一步指示。"
+    "用户搁置了这次评审：本轮到此结束，不会执行任何计划。"
+    "保持计划模式，等待用户的下一步指示。"
 )
 _NO_CHANNEL = (
     "当前没有人工可评审这份计划。保持计划模式，简要收尾并说明计划，等待用户指示。"
@@ -231,13 +232,22 @@ class PresentPlanTool(BaseTool):
             ctx.task.armed = True
             ctx.task.armed_profile = "plan"
             return ToolResult(success=True, output=_APPROVED, data={"approved": True})
+        # R08 (dsh): keep is a tool error carrying the feedback -- the model
+        # revises and resubmits in the same turn; an error (not a success)
+        # is what stops it from counting as a submission.
         if feedback:
             return ToolResult(
-                success=True,
+                success=False,
                 output=_KEEP.format(feedback=feedback),
+                error="plan_keep",
                 data={"approved": False},
             )
-        return ToolResult(success=True, output=_KEEP_NO_FEEDBACK, data={"approved": False})
+        return ToolResult(
+            success=False,
+            output=_KEEP_NO_FEEDBACK,
+            error="plan_keep",
+            data={"approved": False},
+        )
 
 
 def _parse_items(
@@ -278,7 +288,11 @@ def _parse_items(
 
 
 def _parse_answer(text: str) -> tuple[str, str]:
-    """(choice, feedback): JSON first, plain words as the fallback (CLI path)."""
+    """(choice, feedback): JSON first, plain words as the fallback (CLI path).
+
+    R08 (dsh): approval is exact -- an approve carrying custom text is a
+    revision request (keep), not consent.
+    """
     raw = text.strip()
     if raw.startswith("{"):
         try:
@@ -286,6 +300,8 @@ def _parse_answer(text: str) -> tuple[str, str]:
             choice = str(data.get("choice", "") or "")
             feedback = str(data.get("feedback", "") or "").strip()
             if choice in ("approve", "keep"):
+                if choice == "approve" and feedback:
+                    return "keep", feedback
                 return choice, feedback
         except ValueError:
             pass

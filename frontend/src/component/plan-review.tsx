@@ -54,7 +54,7 @@ export function PlanReviewPanel(props: {
       { name: "plan-review.confirm", desc: "Answer with the selected option", run: confirm },
       {
         name: "plan-review.skip",
-        desc: "Hold the review (the model stops and waits)",
+        desc: "Dismiss the review (ends the turn; nothing is submitted)",
         run: () => props.onAnswer(ASK_SKIP),
       },
       {
@@ -140,7 +140,7 @@ export function PlanReviewPanel(props: {
           />
         </box>
       </Show>
-      <text fg={theme.textMuted}>↑/↓ select · 1/2 quick · enter confirm · esc hold</text>
+      <text fg={theme.textMuted}>↑/↓ select · 1/2 quick · enter confirm · esc 结束本轮（不提交、不执行）</text>
     </box>
   )
 }

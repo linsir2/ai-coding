@@ -56,6 +56,10 @@ PLAN_NUDGE = (
 PLAN_UNSUBMITTED_NOTE = (
     "[plan] 本回合未提交计划（未调用 present_plan）；可继续对话让它提交。"
 )
+#: R08: the terminal note a dismissed review leaves.  Dismiss (esc / empty on
+#: the card) now ends the turn at the batch -- the operator said "not now",
+#: and this line says what that meant: nothing submitted, nothing executed.
+PLAN_DISMISSED_NOTE = "[plan] 评审已搁置：本回合结束（计划未提交、未执行）。"
 #: G8-1: the marker for the one block that tells the model its budget is nearly
 #: gone.  Volatile (never persisted) like the memory and task blocks -- it
 #: describes a counter, not a fact about the work.
@@ -310,14 +314,20 @@ class TurnPolicy:
         # nagging a planning or read-only session to run tools is absurd.
         # Strategy/fatigue live at the PRE point and are untouched.
         if snapshot.mode == "plan" or snapshot.readonly:
-            # dsh's turn-stopping at our post-step seam: the stop guards run
-            # in order, the first verdict owns the decision.  Today's list is
-            # the plan submission guard (its silent-COMPLETED measurements
-            # 7ad86804 / 1fd3be1e are recorded beside its texts).
-            for guard in self._stop_guards:
-                verdict = guard.on_stop(snapshot)
-                if verdict is not None:
-                    return verdict
+            # R08: the submission guard speaks to the plan posture only —
+            # /readonly alone is not planning, and the measured misfire (the
+            # guard demanding a plan from a read-only session) must not come
+            # back through this seam.
+            if snapshot.mode == "plan":
+                # dsh's turn-stopping at our post-step seam: the stop guards
+                # run in order, the first verdict owns the decision.  Today's
+                # list is the plan submission guard (its silent-COMPLETED
+                # measurements 7ad86804 / 1fd3be1e are recorded beside its
+                # texts).
+                for guard in self._stop_guards:
+                    verdict = guard.on_stop(snapshot)
+                    if verdict is not None:
+                        return verdict
             return TurnDecision(TurnAction.FINISH, "model finished")
         if snapshot.acceptance:
             # R0-1: a turn with contracts does not end on the model's word.

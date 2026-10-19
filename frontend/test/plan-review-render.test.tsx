@@ -92,3 +92,11 @@ describe("PlanReviewPanel items (R04)", () => {
     expect(frame).not.toContain("…（全文见上一条 present_plan 调用）")
   })
 })
+
+describe("PlanReviewPanel dismiss label (R08)", () => {
+  test("esc is labelled as a dismiss that ends the turn", async () => {
+    const frame = textOf(await render())
+    expect(frame).toContain("esc 结束本轮")
+    expect(frame).not.toContain("esc hold")
+  })
+})

@@ -353,6 +353,18 @@ def test_an_invalid_plan_submission_is_a_verdict_too():
     assert books.failed_streak == 0
 
 
+def test_a_keep_round_neither_fails_nor_burns():
+    """R08: keep is the user asking for a revision, not breakage — the same
+    verdict class as ``no_plan_items`` (24d7109b).  Without the exemption,
+    two keeps would arm the strategy ladder against a working flow."""
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", success=False, error="timeout")])
+    assert books.failed_streak == 1
+    books.note_outcomes([_outcome("present_plan", success=False, error="plan_keep")])
+    assert books.failed_streak == 0
+    assert [tool for tool, _reason, _preview in books.failures] == ["bash"]
+
+
 # ------------------- plan 提交守卫（stage 4 r2）-----------------------------
 
 

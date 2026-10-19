@@ -15,6 +15,7 @@ import pytest
 from ai_coding.ai.engine import ChatEngine
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
+from ai_coding.core.turn_policy import PLAN_DISMISSED_NOTE
 from ai_coding.domain.loop import StepResult, TurnStatus
 from ai_coding.domain.message import ToolCallRef, ToolResult
 from ai_coding.security.approval import AutoApproveCallback
@@ -40,6 +41,18 @@ class _PresentPlan(BaseTool):
 
     async def execute(self, params, ctx=None) -> ToolResult:
         return ToolResult(success=True, output="计划已批准")
+
+
+class _DismissedPlan(_PresentPlan):
+    """The same call, dismissed: esc on the card -- the loop must end the turn
+    right after this batch (R08)."""
+
+    async def execute(self, params, ctx=None) -> ToolResult:
+        return ToolResult(
+            success=True,
+            output="已搁置",
+            data={"approved": False, "dismissed": True},
+        )
 
 
 class _ScriptedEngine(ChatEngine):
@@ -70,9 +83,11 @@ def _call(call_id: str, name: str) -> StepResult:
     )
 
 
-def _loop(engine: ChatEngine, sessions: SessionService) -> AgentLoop:
+def _loop(
+    engine: ChatEngine, sessions: SessionService, tool: BaseTool | None = None
+) -> AgentLoop:
     registry = ToolRegistry()
-    registry.register(_PresentPlan())
+    registry.register(tool if tool is not None else _PresentPlan())
     return AgentLoop(
         engine,
         sessions,
@@ -153,3 +168,40 @@ async def test_a_plain_turn_never_hears_from_the_guard(tmp_path):
 
     assert _plan_reminders(session) == []
     assert loop.last_outcome is not None and loop.last_outcome.note == ""
+
+
+@pytest.mark.asyncio
+async def test_a_dismissed_review_ends_the_turn_at_the_batch(tmp_path):
+    """R08 (dsh): dismiss = "not now" -- the turn ends right after the batch
+    (the engine is never asked again), no guard nudge, and the operator gets
+    the terminal note instead of a silent end."""
+    engine = _ScriptedEngine([_call("c1", "present_plan")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, tool=_DismissedPlan())
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "给计划")
+
+    assert _plan_reminders(session) == []
+    outcome = loop.last_outcome
+    assert outcome is not None and outcome.status is TurnStatus.COMPLETED
+    assert outcome.reason == "plan dismissed"
+    assert outcome.note == PLAN_DISMISSED_NOTE
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_turn_does_not_ask_for_a_plan(tmp_path):
+    """R08: /readonly alone is not planning -- the submission guard must not
+    misfire, and the quiet finish costs one step (no remedy round)."""
+    engine = _ScriptedEngine([_text("分析完毕。")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+    session = sessions.create()
+    session.readonly = True
+
+    await loop.process_input(session, "看看这个")
+
+    assert _plan_reminders(session) == []
+    outcome = loop.last_outcome
+    assert outcome is not None and outcome.status is TurnStatus.COMPLETED
+    assert outcome.note == ""

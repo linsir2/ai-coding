@@ -127,6 +127,8 @@ describe("toolFailure", () => {
       // it gets a verdict, not 未知原因.
       ["not_in_plan", "非计划模式"],
       ["task_busy", "任务运行中"],
+      // R08: keep planning is the user's revision request, not breakage.
+      ["plan_keep", "评审要求继续规划"],
     ]
     for (const [code, label] of denied) {
       expect(toolFailure(code)).toEqual({ label, tone: "denied" })

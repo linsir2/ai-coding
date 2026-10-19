@@ -89,6 +89,7 @@ from ai_coding.core.turn_close import (
 )
 from ai_coding.core.turn_hooks import TurnHooks
 from ai_coding.core.turn_policy import (
+    PLAN_DISMISSED_NOTE,
     PLAN_UNSUBMITTED_NOTE,
     TurnAction,
     TurnDecision,
@@ -914,6 +915,25 @@ class AgentLoop:
                         )
                 if any(item.halted for item in outcomes):
                     outcome = stopped_outcome(step.text, books.total_iterations)
+                    break
+                # R08 (dsh): a dismissed review (esc / empty on the card) ends
+                # the turn right here -- the user said "not now", not "not
+                # this".  No nudge, no arm, no auto-run; the note tells the
+                # operator nothing is pending.  Reads this batch's outcomes
+                # directly: the state is local, nothing needs remembering.
+                if any(
+                    item.call.name == "present_plan"
+                    and isinstance(item.result.data, dict)
+                    and item.result.data.get("dismissed") is True
+                    for item in outcomes
+                ):
+                    outcome = TurnOutcome(
+                        status=TurnStatus.COMPLETED,
+                        text=step.text,
+                        iterations=books.total_iterations,
+                        reason="plan dismissed",
+                        note=PLAN_DISMISSED_NOTE,
+                    )
                     break
         except asyncio.CancelledError:
             # Record what happened, persist the partial transcript, then let the

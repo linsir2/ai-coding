@@ -118,7 +118,8 @@ async def test_keep_planning_carries_the_feedback_back():
         UserAnswer(answered=True, text='{"choice":"keep","feedback":"第 3 步拆细"}')
     )
     r = await tool.execute(_plan_call("# p"), _ctx())
-    assert r.success is True
+    # R08: keep is a tool error (the model redoes it in the same turn).
+    assert r.success is False and r.error == "plan_keep"
     assert r.data == {"approved": False}
     assert "第 3 步拆细" in r.output
 
@@ -127,6 +128,7 @@ async def test_keep_planning_carries_the_feedback_back():
 async def test_a_plain_text_reply_is_treated_as_feedback():
     tool, _ = _tool(UserAnswer(answered=True, text="把验收去掉"))
     r = await tool.execute(_plan_call("# p"), _ctx())
+    assert r.success is False and r.error == "plan_keep"
     assert r.data == {"approved": False}
     assert "把验收去掉" in r.output
 
@@ -138,6 +140,36 @@ async def test_a_dismissed_review_tells_the_model_to_hold():
     assert r.success is True
     assert r.data == {"approved": False, "dismissed": True}
     assert "保持计划模式" in r.output
+
+
+@pytest.mark.asyncio
+async def test_keep_is_a_tool_error_with_feedback():
+    """R08 (dsh): keep planning is a tool error carrying the feedback -- the
+    model revises and resubmits in the same turn, and nothing here counts as
+    a submission."""
+    tool, _ = _tool(
+        UserAnswer(answered=True, text='{"choice":"keep","feedback":"第 3 步拆细"}')
+    )
+    r = await tool.execute(_plan_call("# p"), _ctx(items=0))
+    assert r.success is False and r.error == "plan_keep"
+    assert "第 3 步拆细" in r.output
+
+
+@pytest.mark.asyncio
+async def test_approve_with_custom_text_is_keep():
+    """R08 (dsh): only an exact approve is consent; an approve carrying
+    caveats is a revision request -- the task stays untouched and unarmed."""
+    tool, _ = _tool(
+        UserAnswer(
+            answered=True,
+            text='{"choice":"approve","feedback":"可以，但第 2 步再简化"}',
+        )
+    )
+    ctx = _ctx(items=0)
+    r = await tool.execute(_plan_call("# p"), ctx)
+    assert r.success is False and r.error == "plan_keep"
+    assert "第 2 步再简化" in r.output
+    assert ctx.task.items == [] and ctx.task.armed is False
 
 
 @pytest.mark.asyncio
@@ -336,6 +368,7 @@ async def test_keep_planning_does_not_write_the_items():
     r = await tool.execute(
         {"plan": "# p", "items": [{"content": "建目录"}]}, ctx
     )
+    assert r.success is False and r.error == "plan_keep"
     assert r.data == {"approved": False}
     assert ctx.task.items == []
 

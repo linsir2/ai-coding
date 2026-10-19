@@ -123,6 +123,8 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   // gets a verdict, not 未知原因.
   not_in_plan: { label: "非计划模式", tone: "denied" },
   task_busy: { label: "任务运行中", tone: "denied" },
+  // R08: keep planning is the user's revision request, not breakage.
+  plan_keep: { label: "评审要求继续规划", tone: "denied" },
 }
 
 export function toolFailure(error: string): { label: string; tone: FailureTone } {

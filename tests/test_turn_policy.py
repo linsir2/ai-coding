@@ -128,10 +128,11 @@ def test_after_step_finishes_quietly_under_a_posture_once_the_plan_is_in(posture
 # ---- plan 提交守卫（stage 4 r2）: 裸文本收尾 → 一次补救 → 终局通知 ----------
 
 
-@pytest.mark.parametrize("posture", [{"mode": "plan"}, {"readonly": True}])
-def test_after_step_asks_for_the_plan_it_never_got(posture):
+def test_after_step_asks_for_the_plan_it_never_got():
+    # R08: the guard speaks to the plan posture only; /readonly alone is not
+    # planning (its own case lives below).
     decision = TurnPolicy(_config()).decide_after_step(
-        TurnSnapshot(iteration=1, open_items=(_item("1"),), **posture)
+        TurnSnapshot(iteration=1, open_items=(_item("1"),), mode="plan")
     )
     assert (decision.action, decision.reason) == (TurnAction.NUDGE, "plan unsubmitted")
     assert decision.inject is not None and "present_plan" in decision.inject
@@ -168,14 +169,21 @@ def test_the_plan_nudge_sends_the_steps_through_present_plan():
     assert "todo_write" not in decision.inject
 
 
-@pytest.mark.parametrize("posture", [{"mode": "plan"}, {"readonly": True}])
-def test_after_step_stops_asking_after_one_remedy(posture):
+def test_after_step_stops_asking_after_one_remedy():
     decision = TurnPolicy(_config()).decide_after_step(
-        TurnSnapshot(
-            iteration=1, open_items=(_item("1"),), plan_nudged=True, **posture
-        )
+        TurnSnapshot(iteration=1, open_items=(_item("1"),), plan_nudged=True, mode="plan")
     )
     assert (decision.action, decision.reason) == (TurnAction.FINISH, "plan unsubmitted")
+
+
+def test_readonly_alone_never_asks_for_a_plan():
+    """R08: the submission guard speaks to the plan posture only — /readonly
+    alone is not planning, so it must not be nagged to submit, and the
+    execution gates stay silent exactly as before."""
+    decision = TurnPolicy(_config()).decide_after_step(
+        TurnSnapshot(iteration=1, open_items=(_item("1"),), readonly=True)
+    )
+    assert (decision.action, decision.reason) == (TurnAction.FINISH, "model finished")
 
 
 def test_a_plain_turn_never_asks_for_a_plan():

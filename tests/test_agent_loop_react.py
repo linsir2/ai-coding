@@ -680,10 +680,9 @@ async def test_a_read_only_turn_drops_the_methods_it_cannot_use(tmp_path):
     (the plan-mode work), and the prompt has to lose the same rows -- otherwise
     the model is told how to use bash on a turn that cannot call it."""
     reader = _Tool("read", mutates_world=False)
-    # Two steps: a read-only turn finishes through the plan-posture ladder, so
-    # the first stop is a nudge and the second is the end (same shape as the
-    # plan-guard tests).
-    engine = ScriptedEngine([_text("first"), _text("done")])
+    # R08: a read-only turn finishes quietly on the first stop (the plan
+    # submission guard speaks to plan posture only) -- one step suffices.
+    engine = ScriptedEngine([_text("done")])
     sessions = SessionService(tmp_path / "sessions")
     # This loop needs the assembler: the claim is about what the prompt says.
     loop = _loop(
@@ -1436,9 +1435,9 @@ async def test_readonly_hides_mutating_tools_from_the_request(tmp_path):
     """只读探索批次: the schema list mirrors the dispatch gate's own predicate
     (``mutates_world``) -- what the gate would refuse is never advertised, so
     the model has nothing to walk into.  Reading tools stay."""
-    # Two steps: the readonly posture also runs the plan guard, which spends
-    # its one remedy round before the guarded finish.
-    engine = ScriptedEngine([_text("done"), _text("done")])
+    # R08: a read-only turn finishes quietly on the first stop (the plan
+    # submission guard speaks to plan posture only).
+    engine = ScriptedEngine([_text("done")])
     sessions = SessionService(tmp_path / "sessions")
     loop = _loop(engine, sessions, registry=_registry(_Tool("bash")))
     session = sessions.create()
