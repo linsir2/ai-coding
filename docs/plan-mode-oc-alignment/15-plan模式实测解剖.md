@@ -177,6 +177,53 @@ commands._handle_plan → request_posture(mode="plan", readonly=True)     comman
 
 ---
 
+## 3.5 对照实验：同一件事，两个入口，两个行为（决定性）
+
+> 上面的解剖把「模型为什么不规划」指向了一个可疑处：**裸 `/plan` 不给模型任何规划指令**。
+> 用受控实验验证：同一个仓库、同一句话、同一模型、同一只读工具面，**只改入口**。
+
+| | 实验 A · 裸 `/plan`（= shift+tab 走的路） | 实验 B · `/plan <topic>` |
+|---|---|---|
+| 用户气泡 | `请你调研一下这个仓库的提交历史都干了些什么` | `PLAN_PROMPT.format(topic)`（`Create a detailed implementation plan for: …`） |
+| 任务注入 | **无**（`begin_plan` 没跑 → `task.goal` 为空 → 无 `<task-state>` 块） | 有（`目标: 调研这个仓库的提交历史都干了些什么`） |
+| **模型第一句 reasoning** | `The user wants me to **investigate** the git commit history of this repository…` | `The user wants me to **create a detailed implementation plan** for investigating the commit history…` |
+| 行为 | 探索 9 轮 → **直接输出报告** → 被守卫追讨 → 补交假计划 | 探索 3 轮 → **写计划** → `present_plan` |
+| 计划的步骤 | **已经做完的事**（读 .git/logs/HEAD…） | **还没做的事**（获取提交日志 → 逐个调查 4 次提交 → 汇总报告） |
+| 计划的 verify | **造假**：`test -f .git/logs/HEAD`、`glob '**/*'`（不是 shell 命令） | **真判据**：`git log --all --oneline --graph --date=short`、`git show --stat <sha>`、`git show <sha> -- '*.py'` |
+
+**结论**：模型「不规划、直接输出」不是因为它读不懂 system prompt（`<plan-mode>` 段占 system prompt 的 44.7%，位置也不埋没），而是因为**裸路径的用户气泡里没有任何东西告诉它「这是规划任务」**。
+
+它照字面执行了用户的话（去调研），把调研做完了，给出报告 —— **它做对了用户的话，但没做 plan 模式该做的事**。
+
+### 3.5.1 裸 `/plan` 为什么没有规划指令（代码）
+
+```python
+# app/commands.py:548-553   ——  裸 /plan：只切两个轴，然后直接返回
+if not rest:
+    if already:
+        console.info("[plan] 已在计划模式（只读）。继续对话写计划；评审卡批准后自动执行。")
+    return REPLAction.CONTINUE, session      # ← 没有规划回合、没有 PLAN_PROMPT、没有 begin_plan
+
+# app/commands.py:561-563   ——  /plan <topic>：走 plan_only
+report = await plan_only(loop, session, topic=rest, ...)
+#   └─ plan_runner.py:374-381
+#      begin_plan(session, topic)                       ← task.goal = topic（有任务注入了）
+#      loop.process_input(session, PLAN_PROMPT.format(topic))   ← 用户气泡 = 规划指令
+```
+
+**两条路径的差别不是「有没有 plan 模式」，而是「有没有给模型规划指令」。**
+
+### 3.5.2 附带发现：实验 B 的 present_plan 也失败了
+
+`error=workspace_paths`：
+
+> 目标路径在工作区外：`/tmp/repo_history_analysis.md`。文件工具（read/write/edit/glob）无法访问工作区外的路径；请 cd 到目标目录重新启动 ai-coding，或把计划改为工作区内的路径。
+
+R02 的工作区门正确拦住了「把报告写到 /tmp」。但这是 **D2 的连带伤害**：模型被迫给「写报告」造判据 → 造判据就要指定落盘路径 → 落盘路径又在门外 → 门把它拒了。**判据机制把一个纯输出动作变成了一个路径决策。**
+
+
+---
+
 ## 4. 五个具体缺陷（不是 prompt 措辞问题）
 
 | # | 缺陷 | 证据 | 后果 |
@@ -202,9 +249,35 @@ commands._handle_plan → request_posture(mode="plan", readonly=True)     comman
 
 ## 5. 根因判定
 
-### 5.1 一句话
+### 5.1 一句话（v2 修正）
 
-**plan 模式把「回合的结束条件」定义成了「提交一份带机械判据的可执行计划」。这个定义对实现类任务成立，对研究/回答类任务是错的——而系统没有为后者提供任何别的出口。**
+**plan 模式只切了两个轴（mode / readonly），没有向模型发出「这是一个规划任务」的信号。裸 `/plan`（= shift+tab 唯一的路径）连一句规划指令都不给，于是模型照字面执行了用户的话：把活干完、直接输出答案。等到守卫事后追讨计划时，它手里只剩「已经做过的事」，只能把它们伪装成「带 verify 的步骤」——verify 只能造假。**
+
+**所以「核验的计划」不是模型笨，是它在一个没有规划指令的回合里被迫补交计划。**（v1 的根因判定「缺研究出口」仍然成立，但它解释的是**研究类请求**为什么该有第二个出口；它解释不了「为什么它不规划」。v2 的判定解释的是后者。两者都要修。）
+
+### 5.1.1 三个层次的因果链
+
+```
+① 裸 /plan 不注入规划指令（commands.py:548-553 直接 return）
+        ↓
+② 模型把用户请求当普通任务执行 → 探索 → 直接输出答案
+        ↓
+③ 守卫是事后的（turn_policy.py:215-220 在模型「要收尾」时才问）
+        ↓
+④ 模型手里只有「已做的事」→ 伪装成步骤 → verify 只能造假（test -f / glob '**/*'）
+        ↓
+⑤ 批准后执行回合把同一批文件重读一遍（重复劳动），且 bash 仍要人批
+```
+
+**②③ 之间没有第三个信号**：模型在 9 轮探索里没有收到任何「你该规划了」的提示。
+
+### 5.1.2 为什么 system prompt 修不了
+
+`<plan-mode>` 段占了 system prompt 的 **44.7%**（602 / 1346 字符），位置在 55% 处，既不埋没也不含糊，原文就是 `Every request is answered with a plan, never with the finished work`。
+
+**模型还是没规划。** 所以问题不是「提示不够强」，而是「提示被一条更强的信号覆盖了」——**用户消息**。在实验 A 里用户消息是「请你调研一下这个仓库的提交历史都干了些什么」；在实验 B 里用户消息是「Create a detailed implementation plan for: …」。**后者是规划指令，前者是任务指令。任务指令赢了。**
+
+顺带排除一个可能的解释：不是「模型没看到 plan 段」——bash 被 `readonly_denied`、present_plan 出现在工具表里，都证明 mode 确实传到了。
 
 ### 5.2 为什么这不是 prompt 能修的
 
@@ -251,6 +324,99 @@ commands._handle_plan → request_posture(mode="plan", readonly=True)     comman
    - 不禁 → plan 的「只读」不再是硬边界（但 bash 在本仓是 WARN 档，会要人工批准，不是静默写）。
 4. **批准后规划回合要不要立刻停？**（D4）
 5. **执行期 bash 要不要免审？**（D5）——「批准即自动执行」要么兑现，要么别承诺。
+
+**实测后新增的两条**：
+
+6. **裸 `/plan` 要不要注入规划指令？**（F1）—— 这是「模型不规划」的直接原因，改动最小、零依赖。若不做，**plan 模式对 shift+tab 用户就是「只读模式」而不是「计划模式」**。
+7. **verify 是不是每步必填？**（F4）—— 这条动到执行层契约（08 §8.3 的保留项），**必须用户拍板**。
+
+---
+
+## 7. 修法（按根本性排序，含成本）
+
+> 这一节是**建议**，不是已拍板的方案。每一项都标了它治哪个缺陷、代价多大、能不能单独验证。
+
+### F1 · 裸 `/plan` 也注入规划指令（最小、治本）
+
+**改哪**：`app/commands.py:548-553`（裸路径直接 return）—— 让它与 `/plan <topic>` 走同一条「规划回合」的语义。
+
+**怎么改**（二选一，实施时定）：
+- (a) **用户气泡加前缀**：plan 模式下用户下一条消息 = 规划指令 + 原始请求（与 `/plan <topic>` 的 `PLAN_PROMPT.format(topic)` 同构）。
+- (b) **裸路径也跑 `plan_only`**：topic 为空时用用户的下一条消息作 topic。
+
+**治**：①②④（模型会规划、verify 会是真判据）
+**代价**：改 1 处 + 1 处用户气泡拼接；需要决策「裸路径的用户消息是否还算不算用户原话」（影响转录与 replay）
+**风险**：低。但要注意 (a) 会让**用户气泡**变形（转录里用户说的话被加了前缀）——需要标记成 synthetic（仓库已有 `synthetic=True` 的用法）。
+**可独立验证**：把实验 A 重跑一遍，看模型第一句 reasoning 是否变成「create a detailed implementation plan」。
+
+### F2 · plan 模式 agent 化（08 的 T1/T7，结构修法）
+
+**改哪**：08 §4.2 的 T1 —— 把 plan 从「两个轴」变成**一个角色**（agent 表里的一行，它的 system prompt 就是「你产出计划」）。
+
+**治**：①②（根上的）、以及 D5（agent 规则可以给 plan 不同的 bash 策略）
+**代价**：M1b 的一整个批次（agent 表 + 消息级归属 + 规则层）
+**收益**：角色化的 system prompt 权重远高于「通用助手 + 追加一段话」。**这也可能改变 M1a/M1b 的排序**（见 §8）
+
+### F3 · 守卫从「事后追讨」前移（治 D4 与「计划不早」）
+
+**改哪**：`core/turn_policy.py:215-220` 的 `on_stop` —— 现在只在模型**要收尾**时才问。
+
+**思路**：给规划回合一个**探索预算**（比普通回合小），预算到就强制 `present_plan`。这样「规划」自然发生在「探索」之后、「干活」之前。
+
+**治**：③（模型会在探索中途被推向规划）
+**代价**：要定预算数值；要处理「探索不够怎么办」
+**风险**：中。预算太小会把复杂计划逼成半成品。
+
+### F4 · 计划可以没有 verify（治 D2）
+
+**改哪**：`present_plan_tool.py` 的 items schema（`verify` 改成可选）+ `plan_runner._settle` 的机械裁决（没有 verify 时怎么办）。
+
+**治**：D2（模型不必造假判据）、以及 §3.5.2 的 `/tmp` 路径误伤
+**代价**：机械验收的语义要重新定义（08 §8.3 的保留契约写着「acceptance.verify_items 的机械验收」——这是**用户边界**，不能随便删）
+**风险**：高。**这条要用户拍板**：机械验收是本仓的核心设计（收据、blocked、stalled 判定全靠它），放开 verify 会动到整条执行层契约。
+
+### F5 · 计划执行期不再要人批 bash（治 D5）
+
+**改哪**：M1a 的规则引擎（`permissions.py`）—— plan 的 items 是**已批准**的，它们的 verify 命令是**计划的一部分**，不该再逐条问人。
+
+**治**：D5（「批准即自动执行」兑现）
+**代价**：依赖 M1a 的规则语言（给 plan 的 verify 一个「已批准即免问」的身份）
+**风险**：中。**安全边界要小心**：verify 命令是模型写的，批准的是「内容」不是「任意 shell」。
+
+---
+
+## 8. 一个被忽视的事实：这条路径用户根本看不见
+
+`frontend/src/util/submission.ts:104-116` 的 `planPrelude()` 会向后端发一条 `session.command {text:"/plan"}` —— **不带 topic**，而且**不进 transcript**。
+
+所以：**用户按 shift+tab 之后，输入框里的话是原样的，但后端已经在 plan 模式了。** 用户看到的是「我明明没输 /plan，怎么在写计划？」
+
+这条与 F1 直接相关：**如果 F1 落地，裸路径的用户气泡会被加上规划指令**，那用户在转录里就更看不到自己的原话了 —— 需要一个可见的标记（类似 `[plan]` 的 notice）。
+
+---
+
+## 9. 对 M1a / M1b 排序的影响
+
+原计划：M1a（权限引擎 T2/T2b/T2c）→ M1b（agent 承载 T1/T1b/T10）。
+
+**实测后的重新评估**：
+
+| | 原判断 | 实测后的判断 |
+|---|---|---|
+| plan 模式「不规划」是不是权限问题？ | 部分是（D3 禁 bash 逼模型绕远路） | **主要是角色问题**：没有规划指令 → 不是权限语言能解决的 |
+| agent 化（T1）能不能单独解决？ | 08 把它排在 M1b | **它可能才是 plan 模式的主修法**（F2） |
+| M1a 还要不要先做？ | 要（它是 M2/M3 的地基） | **仍要**，但 F1（裸路径注入规划指令）**不依赖任何东西**，可以插在 M1a 之前单独做 |
+
+**建议的插队**（待拍板）：
+
+```
+F1（裸路径注入规划指令）      ← 最小、零依赖、直接治「不规划」
+  ↓
+M1a（权限引擎）               ← M2/M3 的地基，仍按原计划
+  ↓
+M1b（agent 承载 T1）          ← F2 的主体；且实测显示它对 plan 模式的价值比原估高
+```
+
 
 ---
 
