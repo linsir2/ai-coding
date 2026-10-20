@@ -1119,3 +1119,32 @@ describe("plan.receipt (E2)", () => {
     expect(JSON.stringify(after.messages[1]?.parts)).toContain("步骤 1 完成")
   })
 })
+
+describe("command lifecycle (D: the composer must know a command is running)", () => {
+  test("a dispatched command holds the composer until its terminal turn ends", () => {
+    // The auto-run dispatches "/plan run" from the route: a command whose
+    // inner turns ride "turn.step" (which never touches busy) and whose
+    // terminal "turn.finished" is the only thing that frees the composer.
+    // Without a busy on the way in, the composer read as free for the whole
+    // run -- the operator could type into a session that was executing.
+    const state = feed(
+      initialState(),
+      { kind: "command-started" },
+      wire("turn.step", { handoff: "" }),
+    )
+    expect(state.busy).toBe(true)
+
+    const done = feed(
+      state,
+      wire("turn.finished", { status: "completed", reason: "", iterations: 1, truncatedByLength: false, handoff: "" }),
+    )
+    expect(done.busy).toBe(false)
+  })
+
+  test("a dispatched command draws no bubble of its own", () => {
+    // The run is the system's doing, not the operator's utterance: the
+    // transcript must not show a "/plan run" line as if they had typed it.
+    const state = feed(initialState(), { kind: "command-started" })
+    expect(state.messages).toHaveLength(0)
+  })
+})

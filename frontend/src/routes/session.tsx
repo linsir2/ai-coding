@@ -133,6 +133,14 @@ export function Session(props: SessionProps) {
     // from one decision, so the transcript cannot show a picture the model
     // never received.
     const { method, payload } = buildSubmission(props.commands ?? [], props.sessionId, text, images)
+    // D: a command runs on the server, so the composer must not read as
+    // free while it does.  Its inner turns ride "turn.step" (which never
+    // touches busy) and its terminal "turn.finished" is what frees the
+    // composer -- so the busy has to go up here, on the way in.  Typed
+    // commands already had it (the "submitted" action); the ones the route
+    // dispatches itself (the auto-run) did not, and the operator could
+    // type into a session that was executing a plan.
+    if (method === "session.command") apply({ kind: "command-started" })
     void props.client
       .request(method, payload)
       .then((ack: unknown) => {

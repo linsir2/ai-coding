@@ -134,6 +134,11 @@ export type Action =
   // 08: a resumed turn carries no prompt -- busy with no echo.  Reusing
   // "submitted" with an empty text would draw an empty user bubble.
   | { kind: "resumed" }
+  // D: a command the route dispatched (the auto-run's "/plan run") is the
+  // server working, not the operator speaking: busy, and no bubble.  The
+  // command's own terminal "turn.finished" is what frees the composer
+  // again -- the same contract a typed command has always had.
+  | { kind: "command-started" }
   | { kind: "queued"; id: string; text: string }
   | { kind: "queued-dispatched" }
   /** Replace the list with the backend's rows (mount, reload, panel edits). */
@@ -803,6 +808,8 @@ export function reduce(state: SessionState, action: Action): SessionState {
         busy: true,
       }
     case "resumed":
+      return { ...state, busy: true }
+    case "command-started":
       return { ...state, busy: true }
     case "queued":
       // The user message lands now (the retired Textual UI appended at submit
