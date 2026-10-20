@@ -33,7 +33,6 @@ from typing import Any
 
 from ai_coding.core.events import PlanStepReceipt, TaskUpdated
 from ai_coding.core.file_mentions import FILE_PATH_EXTENSIONS
-from ai_coding.core.shell_parse import path_candidates as _shell_path_candidates
 from ai_coding.core.task_driver import TaskDriver
 from ai_coding.core.turn_policy import TurnPolicy
 from ai_coding.domain.acceptance import AcceptanceItem
@@ -43,6 +42,7 @@ from ai_coding.domain.plan_delivery import StepDelivery
 from ai_coding.domain.session import SessionData
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
+from ai_coding.shell_parse import path_candidates as _shell_path_candidates
 
 #: Step prompts start here.  The replay matches user bubbles on this marker
 #: to rebuild step headers — turn numbers do not survive compaction, but the
@@ -204,7 +204,7 @@ def outside_workspace_paths(
 
     ``from_shell`` says the text is a shell command rather than prose, and
     it changes where the candidates come from.  A command is read by the
-    shell grammar (:mod:`ai_coding.core.shell_parse`), which sees paths
+    shell grammar (:mod:`ai_coding.shell_parse`), which sees paths
     that a text scan cannot -- the one behind a variable
     (``D=/data/x; rm -rf $D``), the one inside a command substitution
     (``$(cat /data/secret)``), the one in a directory command

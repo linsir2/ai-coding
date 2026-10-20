@@ -268,8 +268,87 @@ def test_subagent_list_is_allowed_without_a_confirmation():
 def test_start_goal_and_update_goal_are_allowed_without_a_confirmation():
     """D-4 (Q2 拍板): the model's own taskification is an orchestration switch
     on this session; the tool-level guards (readonly / already-armed / blocked
-    threshold) are the authority rule.  WARN would ask the user to approve the
-    model's judgement about its own work."""
+    threshold) are the authority rule.  WARN would ask the user to approve
+    the model's judgement about its own work."""
     gate = PermissionGate()
     assert gate.check("start_goal", {"objective": "x"}) == PermissionDecision.ALLOW
     assert gate.check("update_goal", {"status": "complete"}) == PermissionDecision.ALLOW
+
+
+# ---- W2/T: the red lines read the command's real words
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf /",
+        "rm -r -f /",
+        "rm --recursive --force /",
+        "chmod 777 /tmp/x",
+        "chmod a+rwx /tmp/x",
+        "chmod 0777 /tmp/x",
+        "sudo rm x",
+        "cat ~/.ssh/id_rsa",
+        "cat .env",
+    ],
+)
+def test_the_red_lines_survive_the_shell_grammar(command: str):
+    """W2/T: the words come from the shell grammar now, and the red lines
+    have to mean the same thing under it.
+
+    Each of these is a red line today.  Reading the command's words out of
+    a syntax tree instead of a regular expression must not change that --
+    the refusal and the approval panel share this verdict, so a difference
+    here is a difference the operator sees.
+    """
+    gate = _gate()
+    assert gate.check("bash", {"command": command}) == PermissionDecision.DENY
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls -la",
+        "rm -rf ./build",
+        "grep -r TODO src/",
+        "chmod 644 script.sh",
+        "cat README.md",
+        "cat .env.example",
+    ],
+)
+def test_ordinary_work_stays_ordinary_under_the_shell_grammar(command: str):
+    """The other side: reading the words properly must not widen the net."""
+    gate = _gate()
+    assert gate.check("bash", {"command": command}) == PermissionDecision.WARN
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo 'rm -rf /'",
+        'echo "rm -rf /"',
+        "# rm -rf /",
+    ],
+)
+def test_a_quoted_or_commented_red_line_is_not_a_command(command: str):
+    """W2/T: what the grammar can tell apart, the red lines now do too.
+
+    A quoted ``rm -rf /`` is a string and a commented one is a comment --
+    neither runs ``rm``.  The old table matched the *text*, so it refused
+    both, and a refusal of something that will never run teaches the
+    model that the red lines are noise.
+
+    Pinned here so the behaviour is a decision rather than an accident.
+    """
+    gate = _gate()
+    assert gate.check("bash", {"command": command}) == PermissionDecision.WARN
+
+
+def test_a_variable_prefix_does_not_hide_a_red_line():
+    """W2/T: ``FOO=bar rm -rf /`` is still ``rm -rf /``.
+
+    The grammar knows the assignment is a prefix and the command is the
+    rest; a text scan saw one word and lost the shape.
+    """
+    gate = _gate()
+    assert gate.check("bash", {"command": "FOO=bar rm -rf /"}) == PermissionDecision.DENY

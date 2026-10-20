@@ -18,7 +18,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ai_coding.security.bash_redlines import bash_red_line
 from ai_coding.security.grants import GrantStore
+from ai_coding.shell_parse import command_words
 
 
 class PermissionDecision(enum.Enum):
@@ -146,8 +148,17 @@ def _command_words(command: str) -> list[str]:
     ``rm -r -f /`` and ``rm -rf /`` are different word lists but the same
     command, so :func:`_dangerous_recursive_root_delete` compares the *set* of
     flags rather than the string.
+
+    Two readings of the same command, and the grammar's wins when it has
+    one.  A text split cannot tell a command from its prefix -- in
+    ``FOO=bar rm -rf /`` it makes ``FOO=bar`` the program's name, and the
+    red line is missed; the grammar knows the assignment is a prefix and the
+    command is the rest.  When the grammar has nothing to say (the text is
+    not a command at all), the text's words are what there is.
     """
-    words = _SHELL_SPLIT.split(command)
+    words = command_words(command)
+    if not words:
+        words = _SHELL_SPLIT.split(command)
     return [_HOME_PREFIX.sub(str(Path.home()), word) for word in words if word]
 
 def _dangerous_recursive_root_delete(words: list[str]) -> bool:
@@ -206,9 +217,26 @@ def _reads_credential(words: list[str]) -> str:
 def bash_denied(command: str) -> str:
     """Why this bash command may not run at all, or ``""`` when it may be asked.
 
-    Pure: no IO, no clock.  The dispatcher and the gate share this so the
-    approval panel and the refusal can never disagree about what is forbidden.
+    The verdict is the shell grammar's
+    (:func:`ai_coding.security.bash_redlines.bash_red_line`): a red line is
+    a property of a *command*, so ``a && rm -rf /`` is read as two commands
+    and the second one is the dangerous one, and ``echo "rm -rf /"`` is read
+    as a string and is not a command at all.
+
+    A command the grammar cannot read falls back to the old text reading --
+    the substring table and the flat word list.  That fallback is the
+    conservative direction: a broken line is judged by the rules that
+    existed before, not waved through.
+
+    The dispatcher and the gate share this, so the approval panel and the
+    refusal can never disagree about what is forbidden.  It reads no clock
+    and no file; the shell grammar is loaded once per process and kept.
     """
+    reason = bash_red_line(command)
+    if reason:
+        return reason
+    if _grammar_reads(command):
+        return ""
     normalized = _normalize_command(command)
     words = _command_words(normalized)
     if _dangerous_recursive_root_delete(words):
@@ -222,6 +250,24 @@ def bash_denied(command: str) -> str:
         if pattern in normalized:
             return f"{reason} ('{pattern}')"
     return ""
+
+
+def _grammar_reads(command: str) -> bool:
+    """Did the shell grammar read this command all the way through?
+
+    When it did, the rules above are the whole verdict -- there is nothing
+    left for the text's own reading to add.  When it did not, the text's
+    reading is the fallback.
+
+    A line with no command in it -- a comment, a bare assignment -- was
+    read all the way through: there was nothing in it to read.  That is
+    different from a line the grammar could not finish, and the difference
+    matters: ``# rm -rf /`` is a comment, and the old table's verdict on
+    it was a refusal of a line that would never run.
+    """
+    from ai_coding.shell_parse import parses_cleanly
+
+    return parses_cleanly(command)
 
 
 #: Tools an "always" may never remember, whatever resource can be extracted.

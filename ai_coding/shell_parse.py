@@ -29,9 +29,39 @@ them costs 0.04 ms together, and a parser holds no state between parses.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
-__all__ = ["command_words", "path_candidates"]
+__all__ = [
+    "CommandView",
+    "command_views",
+    "command_words",
+    "parses_cleanly",
+    "path_candidates",
+]
+
+
+@dataclass(frozen=True)
+class CommandView:
+    """One command, read out of the shell grammar.
+
+    A red line is a property of a *command*, not of a line of text: in
+    ``a && rm -rf /`` there are two commands, and the second one is the
+    dangerous one.  A flat word list cannot tell them apart, which is why
+    the rules read the tree command by command.
+    """
+
+    #: The program's name, as the shell would run it (``/bin/rm`` keeps
+    #: its path; the rules compare the basename).
+    program: str
+    #: The arguments, in order.
+    arguments: tuple[str, ...]
+    #: The targets of the command's redirections, in order.
+    redirects: tuple[str, ...]
+    #: Whether the grammar read the whole command.  A command the grammar
+    #: could not finish is still read as far as it goes, and this says so.
+    broken: bool = False
+
 
 #: The nodes whose text is a word the shell would pass on.  ``number`` is
 #: in the list because ``777`` is what makes ``chmod`` a red line, and the
@@ -178,6 +208,81 @@ def _tree(text: str) -> Any | None:
         return parser.parse(str(text or "").encode("utf-8", "replace"))
     except Exception:  # noqa: BLE001 - a broken command is not a crash
         return None
+
+
+def _redirect_targets(node: Any) -> list[str]:
+    """The targets of every redirection around this command.
+
+    A command with a redirection is not a root node but the ``body`` of a
+    ``redirected_statement``, and the target lives in the *parent*'s
+    ``redirect`` field.  There can be more than one, and the first is not
+    the only one that matters (``cat a > /dev/sda > /tmp/b``).
+    """
+    targets: list[str] = []
+    parent = node.parent
+    if parent is None or parent.type != "redirected_statement":
+        return targets
+    for redirect in parent.children_by_field_name("redirect"):
+        destination = redirect.child_by_field_name("destination")
+        if destination is not None:
+            targets.append(_text(destination))
+    return targets
+
+
+def _is_broken(node: Any) -> bool:
+    """Did the grammar fail to read this command?"""
+    if node.has_error:
+        return True
+    parent = node.parent
+    return bool(parent is not None and parent.has_error)
+
+
+def parses_cleanly(text: str) -> bool:
+    """Did the grammar read this text all the way through?
+
+    A line with nothing to read -- a comment, a bare assignment -- was
+    read all the way through: there was nothing in it to read.  That is
+    different from a line the grammar could not finish, and the
+    difference matters to whoever decides whether to trust this reading.
+    """
+    tree = _tree(text)
+    if tree is None:
+        return False
+    return not tree.root_node.has_error
+
+
+def command_views(text: str) -> list[CommandView]:
+    """One view per command in ``text``, in the order they run.
+
+    A command is a ``command`` node in the tree, so a command after ``&&``
+    or ``;`` is a view of its own, and a command inside a substitution is
+    one too.  A text that is not a command at all -- a plan's prose, a
+    comment -- yields no views.
+    """
+    tree = _tree(text)
+    if tree is None:
+        return []
+    views: list[CommandView] = []
+    for command in _commands(tree.root_node):
+        name = command.child_by_field_name("name")
+        program = _text(name) if name is not None else ""
+        arguments: list[str] = []
+        for argument in command.children_by_field_name("argument"):
+            if argument.type in _WORD_NODES:
+                arguments.append(_text(argument))
+            elif argument.type in _STRING_NODES:
+                for part in argument.children:
+                    if part.type == "string_content":
+                        arguments.append(_text(part))
+        views.append(
+            CommandView(
+                program=program,
+                arguments=tuple(arguments),
+                redirects=tuple(_redirect_targets(command)),
+                broken=_is_broken(command),
+            )
+        )
+    return views
 
 
 def command_words(text: str) -> list[str]:

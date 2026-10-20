@@ -8,7 +8,7 @@ says about the shapes that a regular expression got wrong.
 
 import pytest
 
-from ai_coding.core import shell_parse
+from ai_coding import shell_parse
 
 
 class TestPaths:
@@ -114,3 +114,79 @@ def test_the_parser_does_not_raise_on_any_shape(text):
     """Whatever the shape, the answer is an answer."""
     assert isinstance(shell_parse.command_words(text), list)
     assert isinstance(shell_parse.path_candidates(text), list)
+
+
+class TestCommandViews:
+    """The read layer: one view per command, with its program and arguments.
+
+    A red line is a property of a *command*, not of a line of text: ``a &&
+    rm -rf /`` is two commands and the second one is the dangerous one.  A
+    flat word list cannot tell them apart, so the words are read per
+    command here.
+    """
+
+    def test_a_command_reads_its_program_and_arguments(self):
+        views = shell_parse.command_views("rm -rf /")
+        assert len(views) == 1
+        assert views[0].program == "rm"
+        assert views[0].arguments == ("-rf", "/")
+
+    def test_a_command_after_and_is_its_own_view(self):
+        views = shell_parse.command_views("a && rm -rf /")
+        assert [(v.program, v.arguments) for v in views] == [
+            ("a", ()),
+            ("rm", ("-rf", "/")),
+        ]
+
+    def test_a_command_after_a_semicolon_is_its_own_view(self):
+        views = shell_parse.command_views("ls; chmod 777 /tmp/x")
+        assert [v.program for v in views] == ["ls", "chmod"]
+
+    def test_a_command_inside_a_substitution_is_its_own_view(self):
+        views = shell_parse.command_views("cat $(rm -rf /)")
+        # The substitution is not an argument word -- it is a command of its
+        # own, and the rules read it as one.
+        assert [(v.program, v.arguments) for v in views] == [
+            ("cat", ()),
+            ("rm", ("-rf", "/")),
+        ]
+
+    def test_a_variable_prefix_is_not_the_program(self):
+        views = shell_parse.command_views("FOO=bar rm -rf /")
+        assert views[0].program == "rm"
+        assert views[0].arguments == ("-rf", "/")
+
+    def test_a_quoted_phrase_is_one_argument(self):
+        views = shell_parse.command_views('echo "a; b"')
+        assert views[0].arguments == ("a; b",)
+
+    def test_a_comment_is_not_a_command(self):
+        assert shell_parse.command_views("# rm -rf /") == []
+
+    def test_a_redirect_target_is_read(self):
+        views = shell_parse.command_views("echo x > /dev/sda")
+        assert views[0].redirects == ("/dev/sda",)
+
+    def test_every_redirect_is_read(self):
+        views = shell_parse.command_views("cat a > /dev/sda > /tmp/b")
+        assert views[0].redirects == ("/dev/sda", "/tmp/b")
+
+    def test_a_redirect_without_a_space_is_read(self):
+        views = shell_parse.command_views("echo x >/dev/sda")
+        assert views[0].redirects == ("/dev/sda",)
+
+    def test_a_number_argument_keeps_its_text(self):
+        views = shell_parse.command_views("chmod 777 /tmp/x")
+        assert views[0].arguments == ("777", "/tmp/x")
+
+    def test_a_broken_command_reads_as_far_as_it_goes(self):
+        views = shell_parse.command_views('echo "unterminated')
+        assert [v.program for v in views] == ["echo"]
+
+    def test_a_broken_command_says_so(self):
+        """The caller needs to know the tree was not fully read, so it can
+        fall back to the text's own reading rather than trust a partial
+        one."""
+        assert shell_parse.command_views('echo "unterminated')[0].broken is True
+        assert shell_parse.command_views("rm -rf /")[0].broken is False
+
