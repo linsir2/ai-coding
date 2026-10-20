@@ -124,21 +124,52 @@ _OUTSIDE_PATH_RE = re.compile(r"(?<![\w:./])(?:/[^/\s'\"`,;)\]]+){2,}")
 #: same reason.
 _FILE_SUFFIX_RE = re.compile(rf"\.(?:{FILE_PATH_EXTENSIONS})$", re.IGNORECASE)
 
+#: The words that make the path in front of them a *directory*.  Used only
+#: for the trailing-slash form, which on its own cannot be told apart from a
+#: route (``/api/v1/users/`` and ``/data/w2demo/`` have the same shape).
+#:
+#: The live check found why this needs the words: the model writes a
+#: directory target as "确保目录 /data/w2demo/ 存在" and a route as
+#: "GET /api/v1/users/ 接口" -- the same shape, different surroundings.
+#: Reading only the slash would refuse the route, and a refused plan is a
+#: dead end the user cannot get around.
+#:
+#: The word has to be *right next to* the path, separated by nothing but
+#: space or a quote.  "目录" also means a table of contents, and "目录结构
+#: 如下 /api/v1/" is a document's outline, not a directory to create --
+#: there the words between the word and the path belong to the other
+#: meaning, and the gap is what tells the two apart.
+_DIRECTORY_BEFORE_RE = re.compile(
+    r"(?:目录|文件夹|创建目录|新建目录|建立目录|mkdir|directory|folder)"
+    r"[\s`'\"]*$",
+    re.IGNORECASE,
+)
 
-def _looks_like_path(candidate: str) -> bool:
+
+def _looks_like_path(candidate: str, *, directory: bool = False) -> bool:
     """Does this absolute path name something on the file system?
 
-    Two answers, both borrowed from the repository's own sense of what a path
-    is (``core/file_mentions.py``): the last segment names a known source or
-    document, or the first segment is a directory that exists here.  The
-    second covers the paths that carry no extension -- ``/etc/passwd``,
-    ``/usr/local/bin/tool`` -- and the first covers the mount points this
-    machine has never heard of.
+    Three answers, all borrowed from the repository's own sense of what a
+    path is (``core/file_mentions.py``):
 
-    A path that is neither is prose that happens to be shaped like one: an
-    API route, a version number, a fraction.  Those are not places, and
+    * the last segment names a known source or document (``app.py``);
+    * the first segment is a directory that exists here (``/etc/passwd``,
+      ``/usr/local/bin/tool``);
+    * the path was written as a directory, and the words around it say so
+      (``确保目录 /data/w2demo/ 存在``).
+
+    The third is the one the live check found the hard way: the model writes
+    a directory target the way a person does -- with no extension, under a
+    first segment the machine has never heard of.  A gate that recognised
+    only files let that plan through, and the review card went out for a
+    plan the file tools cannot execute.
+
+    A path that is none of these is prose that happens to be shaped like one:
+    an API route, a version number, a fraction.  Those are not places, and
     refusing a plan over them would be a false alarm.
     """
+    if directory:
+        return True
     if _FILE_SUFFIX_RE.search(candidate.rsplit("/", 1)[-1]):
         return True
     return Path("/" + candidate.split("/")[1]).is_dir()
@@ -162,17 +193,42 @@ def outside_workspace_paths(
     sandbox = Sandbox(workspace or ".", extra_roots=tuple(extra_roots))
     offenders: list[str] = []
     for text in texts:
-        for raw in _OUTSIDE_PATH_RE.findall(str(text or "")):
-            candidate = raw.rstrip(".,")
+        body = str(text or "")
+        for match in _OUTSIDE_PATH_RE.finditer(body):
+            candidate = match.group(0).rstrip(".,")
             if candidate in offenders:
                 continue
-            if not _looks_like_path(candidate):
+            # A trailing slash says "directory" -- but only the words around
+            # the path can confirm it: the candidate pattern stops before the
+            # slash (a segment may not be empty), so the slash is one
+            # character further on, and the context sits just before the
+            # match.  A route written with a trailing slash ("GET
+            # /api/v1/users/") has the same shape and no directory words
+            # around it, so it stays what it is.
+            directory = (
+                body[match.end() : match.end() + 1] == "/"
+                and _has_directory_context(body, match.start())
+            )
+            if not _looks_like_path(candidate, directory=directory):
                 continue
             try:
                 sandbox.resolve(candidate)
             except SandboxViolation:
                 offenders.append(candidate)
     return offenders
+
+
+def _has_directory_context(body: str, start: int) -> bool:
+    """Do the words just before this path say it is a directory?
+
+    The live check is what made this necessary: the model writes a directory
+    target as "确保目录 /data/w2demo/ 存在" and a route as "GET /api/v1/users/
+    接口" -- the same shape, different words around them.  The words are read
+    from the text just before the path, and only the ones that name a
+    directory count: a route's own words ("接口", "端点", "路由") say the
+    opposite.
+    """
+    return _DIRECTORY_BEFORE_RE.search(body[:start]) is not None
 
 
 def outside_workspace_message(paths: Sequence[str]) -> str:

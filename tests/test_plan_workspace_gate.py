@@ -105,6 +105,37 @@ def test_a_mount_point_outside_the_old_root_list_is_found(tmp_path):
     ]
 
 
+def test_a_directory_target_is_found_even_without_an_extension(tmp_path):
+    """W2/R02 (live check): the real model writes a directory target the way
+    a person does -- ``确保目录 /data/w2demo/ 存在`` -- with no extension and
+    a first segment this machine has never heard of.  A gate that only
+    recognised files let that plan through, and the review card went out for
+    a plan the file tools cannot execute."""
+    assert outside_workspace_paths(["确保目录 /data/w2demo/ 存在"], str(tmp_path)) == [
+        "/data/w2demo"
+    ]
+
+
+def test_a_route_with_a_trailing_slash_is_not_a_workspace_path(tmp_path):
+    """The trailing slash says "directory", and a route is not one.  This is
+    the other side of the directory rule: it must not swallow the routes.
+
+    A trailing slash alone cannot tell the two apart -- ``/api/v1/users/``
+    and ``/data/w2demo/`` have the same shape -- so the slash is only read
+    as "directory" when the words around it say so.
+    """
+    text = "新增 GET /api/v1/users/ 接口"
+    assert outside_workspace_paths([text], str(tmp_path)) == []
+
+
+def test_a_table_of_contents_is_not_a_directory(tmp_path):
+    """"目录" also means a table of contents.  The word only names a
+    directory when it sits right next to the path; "目录结构如下 /api/v1/"
+    is a document's outline, and the words between are the other meaning."""
+    text = "目录结构如下 /api/v1/"
+    assert outside_workspace_paths([text], str(tmp_path)) == []
+
+
 @pytest.mark.asyncio
 async def test_every_gate_honours_extra_roots(tmp_path):
     """W2/R02: one roots pipeline, and the gates share it.  A directory the
