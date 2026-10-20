@@ -56,7 +56,10 @@ def _needs_a_human(command: str, workspace: str) -> str:
     reason = bash_denied(command)
     if reason:
         return f"bash command blocked: {reason}"
-    offenders = outside_workspace_paths([command], workspace)
+    # A proof command is a command, not a sentence: the shell grammar reads
+    # the paths a text scan cannot see (the one behind a variable, the one
+    # inside a command substitution, the one a directory command names).
+    offenders = outside_workspace_paths([command], workspace, from_shell=True)
     if offenders:
         return (
             "目标路径在工作区外："

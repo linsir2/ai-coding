@@ -84,6 +84,43 @@ def test_a_configured_extra_root_is_not_reported_as_outside(tmp_path):
     assert outside_workspace_paths([text], str(tmp_path), extra_roots=(other,)) == []
 
 
+def test_a_shell_text_reports_a_path_the_shape_heuristic_would_skip(tmp_path):
+    """W2/T: the grammar confirms these are words in a command, so the shape
+    heuristic has nothing left to say about them.
+
+    ``D=/data/x`` names a path with no extension, under a first segment
+    this machine has never heard of, and with no directory words around
+    it -- the shape heuristic passes it over.  The grammar does not: it is
+    a word in a command, and a word that starts at the root is a path.
+    """
+    assert outside_workspace_paths(
+        ["D=/data/x; rm -rf $D"], str(tmp_path), from_shell=True
+    ) == ["/data/x"]
+
+
+def test_a_shell_text_still_passes_a_declared_root(tmp_path):
+    """The shell reading does not change what is reachable."""
+    other = tmp_path / "sibling"
+    other.mkdir()
+    text = f"test -f {other}/app.py"
+
+    assert outside_workspace_paths(
+        [text], str(tmp_path), extra_roots=(other,), from_shell=True
+    ) == []
+
+
+def test_a_prose_text_keeps_the_shape_heuristic(tmp_path):
+    """Prose is not a command.  A plan's sentence that mentions an API route
+    must not turn into a workspace refusal, and the shape heuristic is what
+    keeps it out."""
+    text = "新增 GET /api/v1/users 接口"
+
+    assert outside_workspace_paths([text], str(tmp_path)) == []
+    assert outside_workspace_paths([text], str(tmp_path), from_shell=True) == [
+        "/api/v1/users"
+    ]
+
+
 def test_an_api_route_is_not_a_workspace_path(tmp_path):
     """W2/R02: the candidate scan must not read an HTTP route as a file path.
 

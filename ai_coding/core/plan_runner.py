@@ -33,6 +33,7 @@ from typing import Any
 
 from ai_coding.core.events import PlanStepReceipt, TaskUpdated
 from ai_coding.core.file_mentions import FILE_PATH_EXTENSIONS
+from ai_coding.core.shell_parse import path_candidates as _shell_path_candidates
 from ai_coding.core.task_driver import TaskDriver
 from ai_coding.core.turn_policy import TurnPolicy
 from ai_coding.domain.acceptance import AcceptanceItem
@@ -190,6 +191,7 @@ def outside_workspace_paths(
     workspace: str,
     *,
     extra_roots: Sequence[str] = (),
+    from_shell: bool = False,
 ) -> list[str]:
     """Absolute filesystem paths in ``texts`` that file tools cannot reach.
 
@@ -199,14 +201,35 @@ def outside_workspace_paths(
     workspace alone, so a directory the operator had already authorized was
     reported as unreachable -- and the message tells the model to switch
     workspaces for a path that already works.
+
+    ``from_shell`` says the text is a shell command rather than prose, and
+    it changes where the candidates come from.  A command is read by the
+    shell grammar (:mod:`ai_coding.core.shell_parse`), which sees paths
+    that a text scan cannot -- the one behind a variable
+    (``D=/data/x; rm -rf $D``), the one inside a command substitution
+    (``$(cat /data/secret)``), the one in a directory command
+    (``mkdir -p /data/w2demo``).  The grammar confirms those are words in
+    a command, so the shape heuristic (:func:`_looks_like_path`) has
+    nothing left to say about them and is skipped: a word that starts at
+    the root *is* a path.
+
+    Prose is the other way round.  A plan's sentence is not a command, the
+    grammar can only read fragments out of it, and the shape heuristic is
+    what keeps "新增 GET /api/v1/users 接口" from turning into a
+    workspace refusal.
     """
     sandbox = Sandbox(workspace or ".", extra_roots=tuple(extra_roots))
     offenders: list[str] = []
     for text in texts:
         body = str(text or "")
         interpreters = _shebang_interpreters(body)
+        candidates: list[tuple[str, bool]] = []
         for match in _OUTSIDE_PATH_RE.finditer(body):
-            candidate = match.group(0).rstrip(".,")
+            candidates.append((match.group(0).rstrip(".,"), False))
+        if from_shell:
+            for candidate in _shell_path_candidates(body):
+                candidates.append((candidate, True))
+        for candidate, from_grammar in candidates:
             if candidate in offenders:
                 continue
             # A shebang names the interpreter that runs a script, not a file
@@ -221,15 +244,16 @@ def outside_workspace_paths(
             # may well write another file too, and that one is a target).
             if candidate in interpreters:
                 continue
-            # A trailing slash says "directory" -- and so do the words around
-            # the path: the model writes a directory target as "确保目录
-            # /data/w2demo/ 存在", and a command as "mkdir -p /data/w2demo".
-            # A route written with a trailing slash ("GET /api/v1/users/")
-            # has the same shape and no directory words around it, so it
-            # stays what it is.
-            directory = _has_directory_context(body, match.start())
-            if not _looks_like_path(candidate, directory=directory):
-                continue
+            if not from_grammar:
+                # A trailing slash says "directory" -- and so do the words
+                # around the path: the model writes a directory target as
+                # "确保目录 /data/w2demo/ 存在", and a command as
+                # "mkdir -p /data/w2demo".  A route written with a trailing
+                # slash ("GET /api/v1/users/") has the same shape and no
+                # directory words around it, so it stays what it is.
+                directory = _has_directory_context(body, match.start())
+                if not _looks_like_path(candidate, directory=directory):
+                    continue
             try:
                 sandbox.resolve(candidate)
             except SandboxViolation:

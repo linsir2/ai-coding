@@ -276,3 +276,23 @@ async def test_a_refused_proof_command_does_not_run(tmp_path):
     assert len(approval.asked) == 1
     assert not outside.exists()
     assert items[0].passed is False
+
+
+@pytest.mark.asyncio
+async def test_a_proof_command_reaching_outside_through_a_variable_asks(tmp_path):
+    """W2/T: the path is in the assignment, not in the command that uses it.
+
+    ``D=/data/x; rm -rf $D`` names a path the file tools cannot reach, and a
+    text scan cannot see it -- the variable hides it.  The shell grammar can:
+    the assignment is a word of its own.
+    """
+    approval = _RecordingApproval(ApprovalResult.NO)
+
+    items = await verify_items(
+        [_item(id="AC-1", verify="D=/data/w2proof; rm -rf $D")],
+        str(tmp_path),
+        approval=approval,
+    )
+
+    assert len(approval.asked) == 1, "the variable hid the path from the gate"
+    assert items[0].passed is False

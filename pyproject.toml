@@ -23,6 +23,14 @@ dependencies = [
     # TUI IPC (plan B, M0.5): the Python port of vscode-jsonrpc, maintained by
     # the python-lsp team; the TS side pairs with vscode-jsonrpc itself.
     "python-lsp-jsonrpc>=1.1.2",
+    # The shell grammar (W2/T): a command is a shell command, and a regular
+    # expression cannot tell "a; b" inside quotes from two commands, nor
+    # "cat $(rm -rf /)" from "cat".  Two prebuilt wheels -- no compiler, and
+    # one abi3 wheel covers python 3.10 to 3.14.  Pinned because the
+    # grammar's ABI moves with its version and the two packages have to
+    # agree on it.
+    "tree-sitter>=0.25,<0.27",
+    "tree-sitter-bash>=0.25,<0.26",
 ]
 
 [project.optional-dependencies]
