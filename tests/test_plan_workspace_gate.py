@@ -136,6 +136,32 @@ def test_a_table_of_contents_is_not_a_directory(tmp_path):
     assert outside_workspace_paths([text], str(tmp_path)) == []
 
 
+def test_a_shebang_interpreter_is_not_a_workspace_path(tmp_path):
+    """W2/R02 (live check): a script's interpreter is not a file the tools
+    would write.  The live plan carried ``#!/usr/bin/env python3`` inside the
+    script it wrote, and the gate reported the interpreter as an unreachable
+    target -- so the refusal named a path the model had no reason to change,
+    and the model retried the same plan thirteen times before it moved on.
+
+    ``#!`` says "the interpreter runs this", which is a different thing from
+    "the file tools touch this", and it says so in every spelling: the line
+    may be quoted into a printf, so the marker is looked for anywhere before
+    the path.
+    """
+    text = "printf '#!/usr/bin/env python3\\nprint(1)\\n' > app.py"
+
+    assert outside_workspace_paths([text], str(tmp_path)) == []
+
+
+def test_a_shebang_exempts_only_the_interpreter(tmp_path):
+    """A plan that writes a script may write another file too, and that one
+    is a target.  The shebang exempts the interpreter it names, not every
+    path that follows it."""
+    text = "printf '#!/usr/bin/env python3\\n' > app.py；然后写 /data/x/app.py"
+
+    assert outside_workspace_paths([text], str(tmp_path)) == ["/data/x/app.py"]
+
+
 @pytest.mark.asyncio
 async def test_every_gate_honours_extra_roots(tmp_path):
     """W2/R02: one roots pipeline, and the gates share it.  A directory the

@@ -145,6 +145,12 @@ _DIRECTORY_BEFORE_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: A shebang marker.  What follows it is the interpreter that runs the
+#: script, which is not a file the tools would write -- and a plan that
+#: writes a script says so.  The marker may be quoted into a printf rather
+#: than written at the start of a line, so it is looked for anywhere.
+_SHEBANG_MARKER = "#!"
+
 
 def _looks_like_path(candidate: str, *, directory: bool = False) -> bool:
     """Does this absolute path name something on the file system?
@@ -194,9 +200,22 @@ def outside_workspace_paths(
     offenders: list[str] = []
     for text in texts:
         body = str(text or "")
+        interpreters = _shebang_interpreters(body)
         for match in _OUTSIDE_PATH_RE.finditer(body):
             candidate = match.group(0).rstrip(".,")
             if candidate in offenders:
+                continue
+            # A shebang names the interpreter that runs a script, not a file
+            # the tools would write.  The live plan carried
+            # "#!/usr/bin/env python3" inside the script it wrote, and the
+            # gate reported the interpreter as unreachable -- so the refusal
+            # named a path the model had no reason to change, and it retried
+            # the same plan thirteen times before it moved on.
+            #
+            # Only the interpreter itself: a shebang exempts the first path
+            # after it, not every path after it (a plan that writes a script
+            # may well write another file too, and that one is a target).
+            if candidate in interpreters:
                 continue
             # A trailing slash says "directory" -- but only the words around
             # the path can confirm it: the candidate pattern stops before the
@@ -216,6 +235,33 @@ def outside_workspace_paths(
             except SandboxViolation:
                 offenders.append(candidate)
     return offenders
+
+
+def _shebang_interpreters(body: str) -> set[str]:
+    """The interpreter paths the shebangs in this text name.
+
+    A shebang (``#!``) says "this interpreter runs that script", which is a
+    different thing from "the file tools touch this": the interpreter is
+    read by the kernel, not written by a plan.  The live plan carried
+    ``#!/usr/bin/env python3`` inside the script it wrote, and the gate
+    reported the interpreter as an unreachable target -- so the refusal named
+    a path the model had no reason to change, and it retried the same plan
+    thirteen times before it moved on.
+
+    Each shebang exempts the first path after it and no other: a plan that
+    writes a script may write another file too, and that one is a target.
+    """
+    interpreters: set[str] = set()
+    start = 0
+    while True:
+        marker = body.find(_SHEBANG_MARKER, start)
+        if marker < 0:
+            return interpreters
+        after = _OUTSIDE_PATH_RE.search(body, marker + len(_SHEBANG_MARKER))
+        if after is None:
+            return interpreters
+        interpreters.add(after.group(0).rstrip(".,"))
+        start = after.end()
 
 
 def _has_directory_context(body: str, start: int) -> bool:
