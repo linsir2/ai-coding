@@ -25,7 +25,7 @@ def test_ignores_routes_urls_and_inside_paths(tmp_path):
 
 
 class _StubLoop:
-    def __init__(self, workspace, *, items=()):
+    def __init__(self, workspace, *, items=(), extra_roots=(), armed=False):
         self.workspace = workspace
         self.settings = SimpleNamespace(
             plan_step_max_iterations=8, plan_max_step_turns=0, stop_policy="todo_aware"
@@ -33,12 +33,21 @@ class _StubLoop:
         self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
         self.calls = []
         self._items = tuple(items)
+        self.extra_workspace_roots = tuple(extra_roots)
+        self.closer = SimpleNamespace(save=lambda session: None)
+        #: the human approved the plan inside the planning turn, so the task
+        #: is armed by the time the second gate runs (present_plan arms at
+        #: approval time).
+        self._armed = armed
 
     async def process_input(self, session, text, on_delta=None, observer=None):
         self.calls.append(text)
         session.begin_plan("t")
         for content in self._items:
             session.task.add(content)
+        if self._armed:
+            session.task.armed = True
+            session.task.armed_profile = "plan"
         return "planned"
 
 
@@ -73,3 +82,64 @@ def test_a_configured_extra_root_is_not_reported_as_outside(tmp_path):
     text = f"看下 {other}/app.py"
 
     assert outside_workspace_paths([text], str(tmp_path), extra_roots=(other,)) == []
+
+
+def test_an_api_route_is_not_a_workspace_path(tmp_path):
+    """W2/R02: the candidate scan must not read an HTTP route as a file path.
+
+    The route and a real target have the same shape (``/seg/seg``), so the
+    scan needs a second question beyond "does it look absolute": does it look
+    like a *file system* path at all?  A route names a resource, not a place
+    on disk, and refusing a plan over it would kill legitimate work.
+    """
+    text = "新增 GET /api/v1/users 接口，并写 /data/x/app.py"
+
+    assert outside_workspace_paths([text], str(tmp_path)) == ["/data/x/app.py"]
+
+
+def test_a_mount_point_outside_the_old_root_list_is_found(tmp_path):
+    """W2/R02: the old candidate regex knew eleven roots, so a mount point
+    (``/data``, ``/workspace``) was invisible and the plan sailed through."""
+    assert outside_workspace_paths(["写入 /data/x/app.py"], str(tmp_path)) == [
+        "/data/x/app.py"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_every_gate_honours_extra_roots(tmp_path):
+    """W2/R02: one roots pipeline, and the gates share it.  A directory the
+    operator declared is reachable, so no gate may report it as outside.
+
+    The runner's own gate (added with the executor front gate) has its own
+    case; here the two plan gates are what this pipeline feeds.
+    """
+    other = tmp_path / "sibling"
+    other.mkdir()
+    text = f"看下 {other}/app.py"
+
+    # gate #1: the topic
+    loop = _StubLoop(str(tmp_path), extra_roots=(other,))
+    report = await plan_only(loop, _session(), topic=text)
+    assert report.stopped is None, "the topic gate reported a declared root as outside"
+    assert len(loop.calls) == 1  # the planning turn ran
+
+    # gate #2: the written items
+    loop = _StubLoop(str(tmp_path), items=(text,), extra_roots=(other,))
+    report = await plan_only(loop, _session(), topic="实现一个小系统")
+    assert report.stopped is None, "the item gate reported a declared root as outside"
+
+
+@pytest.mark.asyncio
+async def test_the_second_gate_disarms_the_approved_plan(tmp_path):
+    """W2/R02: ``present_plan`` arms the task when the human approves, and
+    the second gate runs *after* that.  Refusing the plan must also withdraw
+    the approval, or the armed plan stays on disk and the boot resume runs it
+    (the plan was never executable in the first place)."""
+    loop = _StubLoop(str(tmp_path), items=("写代码到 /data/x/app.py",), armed=True)
+    session = _session()
+
+    report = await plan_only(loop, session, topic="实现一个小系统")
+
+    assert report.stopped is not None
+    assert session.task.armed is False
+    assert session.task.armed_profile == ""

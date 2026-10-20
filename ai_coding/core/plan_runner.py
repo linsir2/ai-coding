@@ -28,9 +28,11 @@ import uuid
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from ai_coding.core.events import PlanStepReceipt, TaskUpdated
+from ai_coding.core.file_mentions import FILE_PATH_EXTENSIONS
 from ai_coding.core.task_driver import TaskDriver
 from ai_coding.core.turn_policy import TurnPolicy
 from ai_coding.domain.acceptance import AcceptanceItem
@@ -92,9 +94,54 @@ PLAN_PROMPT = (
 # a leading word/colon is excluded so URLs and prose never match.  The gate
 # exists because file tools refuse outside paths anyway; failing at plan time
 # beats seventeen failed calls (hotel-session audit, root cause R2).
-_OUTSIDE_PATH_RE = re.compile(
-    r"(?<![:\w])/(?:home|Users|etc|tmp|opt|srv|mnt|media|var|root)/[^\s'\"`,;)\]]+"
-)
+#
+# W2/R02 replaced the root list: a mount point the operator never named
+# (``/data``, ``/workspace``) was invisible to it, so a plan naming one
+# sailed through.  The candidate is now *any* absolute path -- which roots
+# exist is not the question; reachability is.  Reachability is answered by
+# :class:`Sandbox`, which resolves for real, so the scan no longer has to
+# guess which prefixes might be roots.
+#
+# The lookbehind keeps three things out: a path glued to a word (``x/home``),
+# a URL's authority (``https://host/a/b``), and a relative path (``../sibling``
+# and ``./config`` are relative, and the leading ``.`` is what says so).  What
+# is left is a string that *could* be a path, which :func:`_looks_like_path`
+# then has to agree with.
+_OUTSIDE_PATH_RE = re.compile(r"(?<![\w:./])(?:/[^/\s'\"`,;)\]]+){2,}")
+
+#: The same "is this a file path?" question :mod:`ai_coding.core.file_mentions`
+#: asks of a pasted path, asked here of a path a plan names.  One answer for
+#: both: a known source/document extension, or a first segment that is a real
+#: directory on this machine.
+#:
+#: Without it the scan reads an HTTP route (``/api/v1/users``) as a file
+#: system path and refuses the plan -- a route names a resource, not a place
+#: on disk, and a plan may legitimately name one.
+#:
+#: The dot before the extension is part of the answer, not a detail: without
+#: it ``users`` ends in ``rs`` (Rust) and every route ending in a two-letter
+#: extension would read as a file.  ``file_mentions`` requires the dot for the
+#: same reason.
+_FILE_SUFFIX_RE = re.compile(rf"\.(?:{FILE_PATH_EXTENSIONS})$", re.IGNORECASE)
+
+
+def _looks_like_path(candidate: str) -> bool:
+    """Does this absolute path name something on the file system?
+
+    Two answers, both borrowed from the repository's own sense of what a path
+    is (``core/file_mentions.py``): the last segment names a known source or
+    document, or the first segment is a directory that exists here.  The
+    second covers the paths that carry no extension -- ``/etc/passwd``,
+    ``/usr/local/bin/tool`` -- and the first covers the mount points this
+    machine has never heard of.
+
+    A path that is neither is prose that happens to be shaped like one: an
+    API route, a version number, a fraction.  Those are not places, and
+    refusing a plan over them would be a false alarm.
+    """
+    if _FILE_SUFFIX_RE.search(candidate.rsplit("/", 1)[-1]):
+        return True
+    return Path("/" + candidate.split("/")[1]).is_dir()
 
 
 def outside_workspace_paths(
@@ -119,6 +166,8 @@ def outside_workspace_paths(
             candidate = raw.rstrip(".,")
             if candidate in offenders:
                 continue
+            if not _looks_like_path(candidate):
+                continue
             try:
                 sandbox.resolve(candidate)
             except SandboxViolation:
@@ -126,12 +175,48 @@ def outside_workspace_paths(
     return offenders
 
 
-def _outside_workspace_message(paths: Sequence[str]) -> str:
+def outside_workspace_message(paths: Sequence[str]) -> str:
+    """What the caller tells the model when a plan names an unreachable path."""
     return (
         "目标路径在工作区外：" + ", ".join(paths)
         + "。文件工具（read/write/edit/glob）无法访问工作区外的路径；"
         "请 cd 到目标目录重新启动 ai-coding，或把计划改为工作区内的路径。"
     )
+
+
+def _disarm(task: Any) -> bool:
+    """Withdraw the plan's arm; report whether anything changed.
+
+    ``armed_profile`` goes with it, the same pair ``agent_loop``'s dismissal
+    branch clears: a profile with nothing armed is a profile that owns
+    nothing, and the boot resume reads the pair to decide what it may run.
+    """
+    if not getattr(task, "armed", False):
+        return False
+    task.armed = False
+    task.armed_profile = ""
+    return True
+
+
+def _persist_session(loop: Any, session: Any) -> None:
+    """Write the session back, if this loop has a way to do it.
+
+    ``plan_only`` is a module-level function, so it cannot use
+    ``PlanRunner._persist``; the shape is the same one that method uses
+    (``loop.closer.save``), reached defensively because a test's stub loop
+    may not carry a closer at all.
+    """
+    save = getattr(getattr(loop, "closer", None), "save", None)
+    if save is not None:
+        save(session)
+
+
+def _emit_task(observer: Any, task: Any) -> None:
+    """R06: the task's own mutations travel the wire like the model's tool
+    calls do, so a live card sees the plan withdrawn rather than freezing on
+    a plan that was refused.  None-safe: a bare caller stays silent."""
+    if observer is not None and hasattr(observer, "on_event"):
+        observer.on_event(TaskUpdated(task=task))
 
 
 async def plan_only(
@@ -154,9 +239,10 @@ async def plan_only(
     that names unreachable paths (the caller shows ``report.stopped``).
     """
     workspace = str(getattr(loop, "workspace", "") or ".")
-    offenders = outside_workspace_paths([topic], workspace)
+    extra_roots = tuple(getattr(loop, "extra_workspace_roots", ()) or ())
+    offenders = outside_workspace_paths([topic], workspace, extra_roots=extra_roots)
     if offenders:
-        return PlanReport(stopped=_outside_workspace_message(offenders))
+        return PlanReport(stopped=outside_workspace_message(offenders))
     # A new plan starts a fresh book: goal, items and receipts belong together,
     # or the new plan's step ids collide with the old plan's receipts.
     begin = getattr(session, "begin_plan", None)
@@ -167,10 +253,20 @@ async def plan_only(
             session, PLAN_PROMPT.format(topic=topic),
             on_delta=on_delta, observer=observer,
         )
-    items = getattr(getattr(session, "task", None), "items", ())
-    offenders = outside_workspace_paths([item.content for item in items], workspace)
+    task = getattr(session, "task", None)
+    items = getattr(task, "items", ())
+    offenders = outside_workspace_paths(
+        [item.content for item in items], workspace, extra_roots=extra_roots
+    )
     if offenders:
-        return PlanReport(stopped=_outside_workspace_message(offenders))
+        # W2/R02: this gate runs *after* the human approved the plan, and
+        # approval is what armed the task.  Refusing the plan must withdraw
+        # that approval: an armed plan the runner would refuse anyway stays on
+        # disk, and the boot resume would pick it up and run it.
+        if task is not None and _disarm(task):
+            _persist_session(loop, session)
+            _emit_task(observer, task)
+        return PlanReport(stopped=outside_workspace_message(offenders))
     return PlanReport()
 
 

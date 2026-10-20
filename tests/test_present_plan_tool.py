@@ -29,14 +29,19 @@ class _Prompt:
         return self.answer
 
 
-def _ctx(*, items: int = 1, mode: str = "plan") -> ToolContext:
+def _ctx(*, items: int = 1, mode: str = "plan", workspace: str = "/tmp/ws",
+         extra_workspace_roots: tuple[str, ...] = ()) -> ToolContext:
     # R03: the tool is plan-only now; the tests that exercise its own checks
     # opt into the posture here (and the refusal tests opt out).
     task = TaskState(goal="g")
     for index in range(items):
         task.add(f"step {index + 1}")
     return ToolContext(
-        task=task, workspace="/tmp/ws", session_id="sid", mode=mode
+        task=task,
+        workspace=workspace,
+        session_id="sid",
+        mode=mode,
+        extra_workspace_roots=extra_workspace_roots,
     )
 
 
@@ -506,3 +511,68 @@ async def test_a_dismissal_meets_an_unarmed_task_by_construction():
     blocked = await tool.execute(_plan_call("# not this one"), ctx)
     assert blocked.error == "plan_already_approved"
     assert ctx.task.armed is True
+
+
+@pytest.mark.asyncio
+async def test_a_plan_naming_an_unreachable_path_is_refused_before_asking():
+    """W2/R02: the gate must run *before* the human is asked.
+
+    A review card for a plan the file tools cannot execute wastes the human's
+    attention and the model's turn; the model can revise the path itself, so
+    the refusal has to reach it as a tool error.
+    """
+    tool, prompt = _tool(UserAnswer(answered=True, text="开始执行"))
+    ctx = _ctx(workspace="/tmp/ws")
+
+    r = await tool.execute(
+        {
+            "plan": "把服务写进 /data/x/app.py",
+            "items": [{"content": "把服务写进 /data/x/app.py"}],
+        },
+        ctx,
+    )
+
+    assert r.success is False
+    assert r.error == "workspace_paths"
+    assert "/data/x/app.py" in r.output
+    # the human was never asked, and nothing was armed
+    assert prompt.calls == []
+    assert ctx.task.armed is False
+
+
+@pytest.mark.asyncio
+async def test_a_configured_extra_root_is_not_refused_by_the_plan_gate():
+    """W2/R02: one roots pipeline -- a directory the operator declared is
+    reachable, so the plan gate must not refuse a plan that names it."""
+    tool, prompt = _tool(UserAnswer(answered=True, text="开始执行"))
+    ctx = _ctx(workspace="/tmp/ws", extra_workspace_roots=("/tmp/other",))
+
+    r = await tool.execute(
+        {
+            "plan": "把服务写进 /tmp/other/app.py",
+            "items": [{"content": "把服务写进 /tmp/other/app.py"}],
+        },
+        ctx,
+    )
+
+    assert r.success is True
+    assert len(prompt.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_api_route_in_a_plan_is_not_refused():
+    """W2/R02: a route names a resource, not a place on disk.  Refusing the
+    plan over it would kill legitimate work."""
+    tool, prompt = _tool(UserAnswer(answered=True, text="开始执行"))
+    ctx = _ctx(workspace="/tmp/ws")
+
+    r = await tool.execute(
+        {
+            "plan": "新增 GET /api/v1/users 接口",
+            "items": [{"content": "新增 GET /api/v1/users 接口"}],
+        },
+        ctx,
+    )
+
+    assert r.success is True
+    assert len(prompt.calls) == 1

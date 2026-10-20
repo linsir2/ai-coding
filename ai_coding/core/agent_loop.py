@@ -295,6 +295,12 @@ class AgentLoop:
         self._current_instruction: ChatMessage | None = None
         self.default_model = default_model
         self.workspace = workspace
+        # W2/R02: the operator's declared roots, kept here because three
+        # consumers ask the same reachability question and must get the same
+        # answer -- the plan gates (``core/plan_runner.py``) and the tool
+        # context that carries them into ``present_plan``.  The assembler gets
+        # its own copy below; this one is the source both read.
+        self.extra_workspace_roots: tuple[str, ...] = tuple(extra_workspace_roots)
         # P4 (补充式方案 06): where /undo keeps the bytes of files the turn
         # created, so /redo survives a restart (a stash never held them).
         self._undo_files_store = UndoFileStore(
@@ -1518,6 +1524,10 @@ class AgentLoop:
                 emit=self._emit,
                 turn=turn,
                 jobs=self.jobs,
+                # W2/R02: the operator's declared roots ride along, so a tool
+                # that judges reachability (present_plan's gate) answers with
+                # the same roots the workspace gate uses.
+                extra_workspace_roots=self.extra_workspace_roots,
                 # R8a: the only channel a tool has to leave something in the
                 # turn's book (checkpoint_write uses it).
                 note_checkpoint=lambda text: books.note_checkpoint(text, limit=limit),

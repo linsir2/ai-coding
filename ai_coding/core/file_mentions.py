@@ -18,6 +18,18 @@ from pathlib import Path
 
 from ai_coding.skills.registry import iter_mentions
 
+#: The extensions that name a source or document.  This is the repository's
+#: own answer to "what looks like a file path" -- the plan gate
+#: (``core/plan_runner.py``) asks the same question about the paths a plan
+#: names, and one answer serves both.  Kept as a regex fragment (not a list)
+#: because ``_BARE_PATH`` splices it into a pattern; a caller that wants a
+#: suffix test builds its own alternation from it.
+FILE_PATH_EXTENSIONS = (
+    r"py|md|txt|json|ya?ml|toml|ini|cfg|ts|tsx|js|jsx|mjs|cjs|css|scss|html|htm"
+    r"|sh|bash|zsh|rs|go|java|kt|swift|c|h|cc|cpp|hpp|hxx|sql|csv|tsv|log|lock"
+    r"|env|ini|conf|xml|svg|png|jpg|jpeg|gif|webp|ipynb"
+)
+
 #: What a pasted path looks like in prose.  Two shapes, because both are real:
 #: a multi-segment path (``/abs/x.py``, ``pkg/a.py``) and a bare filename the
 #: user is in the middle of talking about (``用 main.py 这个文件``).
@@ -29,9 +41,7 @@ from ai_coding.skills.registry import iter_mentions
 _BARE_PATH = re.compile(
     r"(?<![\w@:/.-])"
     r"(?P<path>(?:\.{0,2}/)?(?:[A-Za-z0-9_~.+-]+/)*[A-Za-z0-9_~.+-]+\."
-    r"(?:py|md|txt|json|ya?ml|toml|ini|cfg|ts|tsx|js|jsx|mjs|cjs|css|scss|html|htm"
-    r"|sh|bash|zsh|rs|go|java|kt|swift|c|h|cc|cpp|hpp|hxx|sql|csv|tsv|log|lock"
-    r"|env|ini|conf|xml|svg|png|jpg|jpeg|gif|webp|ipynb)"
+    rf"(?:{FILE_PATH_EXTENSIONS})"
     r"(?![A-Za-z0-9]))"
 )
 

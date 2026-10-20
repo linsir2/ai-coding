@@ -88,6 +88,7 @@ def tool_context(
     note_approval: Callable[[dict[str, Any] | None], None] | None = None,
     note_plan_approved: Callable[[], None] | None = None,
     jobs: Any = None,
+    extra_workspace_roots: Sequence[str] = (),
 ) -> ToolContext:
     """The per-invocation context a tool receives (the dispatcher stamps call ids).
 
@@ -98,6 +99,10 @@ def tool_context(
         task=task,
         workspace=workspace,
         session_id=session.session_id,
+        # W2/R02: the operator's declared roots travel with the context, so a
+        # tool that judges reachability asks the same question the workspace
+        # gate asks (and gets the same answer).
+        extra_workspace_roots=tuple(extra_workspace_roots),
         messages=tuple(history),
         # The uncompacted transcript, for the tools that must read past the
         # summary (history_search).  ``history`` above is this request's view.

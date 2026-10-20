@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ai_coding.core.plan_runner import outside_workspace_message, outside_workspace_paths
 from ai_coding.domain.message import ToolResult
 from ai_coding.security.user_prompt import UserPromptCallback
 from ai_coding.tools.base import BaseTool, ToolContext
@@ -184,6 +185,23 @@ class PresentPlanTool(BaseTool):
                     "（每步一条，含 verify 命令），然后再次调用 present_plan。"
                 ),
                 error="no_plan_items",
+            )
+        # W2/R02: the workspace gate, before the human is asked.  A review card
+        # for a plan the file tools cannot execute wastes the human's attention
+        # and the model's turn; the model can revise the path itself, so the
+        # refusal has to reach it as a tool error.  The gate is the same one
+        # the runner uses, with the same roots, so the two never disagree
+        # about which paths are reachable.
+        offenders = outside_workspace_paths(
+            [plan, *(content for content, _, _ in items)],
+            str(getattr(ctx, "workspace", "") or "."),
+            extra_roots=tuple(getattr(ctx, "extra_workspace_roots", ()) or ()),
+        )
+        if offenders:
+            return ToolResult(
+                success=False,
+                output=outside_workspace_message(offenders),
+                error="workspace_paths",
             )
         # R04: the card renders what approval will write -- the same validated
         # triples, with depends_on in the 1-based display indices the table

@@ -36,6 +36,13 @@ class ToolContext:
     task: TaskState = field(default_factory=TaskState)
     workspace: str = "."
     session_id: str = ""
+    #: W2/R02: the directories the operator declared in
+    #: ``tools.extra_workspace_roots``, already expanded by the composition
+    #: root.  A tool that judges whether a path is reachable needs them: a
+    #: directory the operator authorized is reachable, and reporting it as
+    #: unreachable tells the model to switch workspaces for a path that
+    #: already works.
+    extra_workspace_roots: tuple[str, ...] = ()
     #: THIS request's view of the history -- already rewritten by compaction, so
     #: it is by construction the part the model can see.  Kept as-is for the
     #: tools that need it (memory_search falls back to the last user line);
