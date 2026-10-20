@@ -133,3 +133,42 @@ def test_ordinary_work_stays_ordinary(command: str):
     """The net must not widen: the ordinary commands a coding turn runs all
     day are asked about, not refused."""
     assert _verdict(command) == PermissionDecision.WARN
+
+
+# ---- a command the grammar cannot read falls back to the old reading
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "rm -rf /',  # the quote never closes
+        'rm -rf / "unterminated',  # the same, the other way round
+    ],
+)
+def test_a_broken_command_falls_back_to_the_texts_own_reading(command: str):
+    """A line the grammar could not finish is judged by the rules that
+    existed before it, not waved through.
+
+    The fallback is the conservative direction: a broken line is refused
+    if the old table would have refused it, and never less.  Pinned here
+    because a fallback that silently relaxed would be the worst kind of
+    bug -- it would look like the gate got smarter.
+    """
+    from ai_coding.shell_parse import parses_cleanly
+
+    assert not parses_cleanly(command)
+    assert _verdict(command) == PermissionDecision.DENY
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "printf done &&",  # the list never finishes
+        "cat >",  # the redirection has no target
+    ],
+)
+def test_a_broken_command_without_a_red_line_is_only_asked_about(command: str):
+    """The other half: a broken line that holds no red line is asked
+    about, not refused."""
+    assert _verdict(command) == PermissionDecision.WARN
+
