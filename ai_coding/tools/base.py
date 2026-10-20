@@ -25,6 +25,21 @@ def _noop_emit(_event: Any) -> None:
 
 
 @dataclass
+class TurnConclusion:
+    """Which exit (if any) has closed this turn (N1).
+
+    A plan-mode turn has two exits -- a submitted plan and a research
+    conclusion -- and they are mutually exclusive: the first one to succeed
+    owns the turn, and the other one is refused.  The holder is shared by
+    every tool call of the turn, so the second exit can see that the first
+    one already closed it.  It lives in the turn, not in the task: a
+    conclusion is a fact about one turn, and the task outlives it.
+    """
+
+    exit: str = ""
+
+
+@dataclass
 class ToolContext:
     """Per-invocation context handed to ``BaseTool.execute``.
 
@@ -86,6 +101,10 @@ class ToolContext:
     # (``present_plan`` approval).  The loop clears the session's ladder
     # windows through it; ``None`` outside a loop that owns a session.
     note_plan_approved: Callable[[], None] | None = None
+    #: N1: the turn's conclusion holder, shared by the turn's tool calls.
+    #: The two exits of a plan-mode turn read it to stay mutually exclusive;
+    #: ``None`` outside a loop that owns a turn.
+    conclusion: TurnConclusion | None = None
     # R8c: a thread-safe "stop" flag for tools that own a subprocess (bash hands
     # it to the process runner).  The dispatcher sets it when the user cancels, so
     # the child dies even though the awaiting task was abandoned.

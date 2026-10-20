@@ -125,6 +125,11 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   task_busy: { label: "任务运行中", tone: "denied" },
   // R08: keep planning is the user's revision request, not breakage.
   plan_keep: { label: "评审要求继续规划", tone: "denied" },
+  // N1: the research exit -- one turn, one exit, and a conclusion that was
+  // never written down is a model mistake, not breakage.
+  already_concluded: { label: "本回合已收尾", tone: "denied" },
+  missing_summary: { label: "结论为空", tone: "denied" },
+  plan_already_approved: { label: "计划已批准", tone: "denied" },
 }
 
 export function toolFailure(error: string): { label: string; tone: FailureTone } {

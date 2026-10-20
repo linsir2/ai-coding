@@ -160,6 +160,20 @@ class PresentPlanTool(BaseTool):
                 ),
                 error="plan_already_approved",
             )
+        # N1: the other exit already closed this turn (a research conclusion).
+        # One turn, one exit: the plan must not be asked for after the model
+        # has already given its conclusion.
+        conclusion = getattr(ctx, "conclusion", None)
+        done = str(getattr(conclusion, "exit", "") or "")
+        if done:
+            return ToolResult(
+                success=False,
+                output=(
+                    f"本次回合已经收尾（{done}）：不能再提交计划。"
+                    "请用一句话把结论说清楚。"
+                ),
+                error="already_concluded",
+            )
         plan = str(params.get("plan", "") or "").strip()
         if not plan:
             return ToolResult(
@@ -238,6 +252,10 @@ class PresentPlanTool(BaseTool):
             # submission while a plan runs, so a dismissal always meets an
             # unarmed task.  (The loop's dismissal branch is the one that can
             # meet an armed task; it disarms there.)
+            # A dismissal is an ending too: the turn stops here, so the other
+            # exit must not be taken afterwards.
+            if conclusion is not None:
+                conclusion.exit = "present_plan"
             return ToolResult(
                 success=True,
                 output=_HOLD,
@@ -281,6 +299,9 @@ class PresentPlanTool(BaseTool):
             ctx.task.tokens_used = 0
             if ctx.note_plan_approved is not None:
                 ctx.note_plan_approved()
+            # N1: the plan is this turn's exit; the other one is now refused.
+            if conclusion is not None:
+                conclusion.exit = "present_plan"
             return ToolResult(success=True, output=_APPROVED, data={"approved": True})
         # R08 (dsh): keep is a tool error carrying the feedback -- the model
         # revises and resubmits in the same turn; an error (not a success)

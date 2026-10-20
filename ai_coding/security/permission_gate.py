@@ -447,6 +447,11 @@ class PermissionGate:
             # card arrive behind an "unknown tool 'present_plan' requires
             # confirmation" prompt: two approvals for one plan (tmux, measured).
             "present_plan",
+            # N1: the research exit asks nobody and changes nothing -- the
+            # conclusion is a message, and the plan it replaces is not an
+            # action.  A WARN tier would put an approval panel in front of
+            # the one moment a research answer is allowed to land.
+            "finish_research",
             # D-4: starting/updating this session's own goal — an orchestration
             # switch with the blast radius of the session itself (like job_*
             # above): the armed task runs on this workspace's loop, the driver

@@ -90,6 +90,7 @@ from ai_coding.core.turn_close import (
 from ai_coding.core.turn_hooks import TurnHooks
 from ai_coding.core.turn_policy import (
     PLAN_DISMISSED_NOTE,
+    PLAN_RESEARCH_NOTE,
     PLAN_UNSUBMITTED_NOTE,
     TurnAction,
     TurnDecision,
@@ -132,6 +133,7 @@ from ai_coding.security.permission_gate import PermissionGate
 from ai_coding.service.session_service import SessionService
 from ai_coding.skills.catalog import build_catalog, superseded_note
 from ai_coding.skills.policy import denied_skill_ids
+from ai_coding.tools.base import TurnConclusion
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.schema import tool_schema, tool_schemas, tool_schemas_from_tools
 
@@ -609,6 +611,10 @@ class AgentLoop:
         # R7a: everything the turn counts about itself lives in one object, so a
         # new rule is a method on the books rather than a tenth local variable.
         books = TurnBooks()
+        # N1: the turn's two exits are mutually exclusive, and the holder is
+        # what they read to stay so.  It belongs to the turn, not to the task:
+        # a conclusion is a fact about one turn, and the task outlives it.
+        conclusion = TurnConclusion()
         # R4a: the previous request's canonical form, which answers "did the prefix
         # move" (the ledger it compares against lives on the reporter).
         previous_request: str | None = None
@@ -909,6 +915,7 @@ class AgentLoop:
                     session=session,
                     task=task,
                     books=books,
+                    conclusion=conclusion,
                     history=assembled.history,
                     instructions=assembled.instructions,
                     deadline=frame.deadline,
@@ -963,6 +970,22 @@ class AgentLoop:
                         iterations=books.total_iterations,
                         reason="plan dismissed",
                         note=PLAN_DISMISSED_NOTE,
+                    )
+                    break
+                # N1: the research exit closes the turn.  A conclusion is a
+                # terminal answer: nothing was planned, nothing is armed,
+                # nothing runs, and no review card was ever shown.  The turn
+                # ends at the batch, exactly like the dismissal above.
+                if any(
+                    item.call.name == "finish_research" and item.result.success
+                    for item in outcomes
+                ):
+                    outcome = TurnOutcome(
+                        status=TurnStatus.COMPLETED,
+                        text=step.text,
+                        iterations=books.total_iterations,
+                        reason="research finished",
+                        note=PLAN_RESEARCH_NOTE,
                     )
                     break
         except asyncio.CancelledError:
@@ -1543,6 +1566,7 @@ class AgentLoop:
         deadline: Deadline | None,
         index: int,
         turn: int = 0,
+        conclusion: TurnConclusion | None = None,
     ) -> list[DispatchOutcome]:
         """Run this step's tool calls and hand back what they did.
 
@@ -1585,6 +1609,9 @@ class AgentLoop:
                 # a run from such a turn; the backend must not leave the plan
                 # armed on disk for the boot resume to pick it up).
                 note_plan_approved=lambda: _on_plan_approved(session, books),
+                # N1: the turn's conclusion holder -- the two exits of a
+                # plan-mode turn read it to stay mutually exclusive.
+                conclusion=conclusion,
             ),
             deadline=deadline,
             iteration=index,
