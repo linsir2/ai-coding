@@ -106,8 +106,9 @@ async def handle_input(
                     f"unknown command '{token}' — did you mean '/{suggestion}'?"
                 )
                 return REPLAction.CONTINUE, session
-        answer = await loop.process_input(
-            session, text, on_delta=console.delta, observer=observer
+        answer = await run_human_turn(
+            loop, session, text, console=console,
+            on_delta=console.delta, observer=observer,
         )
         if answer and not answer.endswith("\n"):
             console.rule("")
@@ -570,6 +571,47 @@ async def _handle_plan(
             "[plan] 规划未完成（预算耗尽）：可继续对话补充，或重新描述需求后再次规划。"
         )
     return REPLAction.CONTINUE, session
+
+
+async def run_human_turn(
+    loop: Any,
+    session: Any,
+    text: str,
+    *,
+    console: ConsoleSink,
+    on_delta: Any = None,
+    observer: Any = None,
+    images: tuple[Any, ...] = (),
+) -> str:
+    """Run one human utterance as the turn it deserves.
+
+    In plan mode a human utterance is a *planning round* (19 §4): the words
+    are the topic, the model is asked for a plan, and the plan is what gets
+    reviewed.  Everywhere else it is an ordinary turn.
+
+    One function for both front doors -- the TUI's prompt and the REPL --
+    because the two drifting apart is what made plan mode a read-only flag
+    instead of a planning mode: the TUI sent the words as an ordinary
+    prompt, so the model answered instead of planning, and the guard could
+    only ask for a plan after the work was already done.
+    """
+    if getattr(session, "mode", "normal") != "plan":
+        # The images are offered only when there is something to offer, so
+        # loop doubles that predate r17/T5 stay callable for text turns.
+        answer: str = await loop.process_input(
+            session, text, on_delta=on_delta, observer=observer,
+            **({"images": images} if images else {}),
+        )
+        return answer
+    from ai_coding.core.plan_runner import plan_only
+
+    report = await plan_only(
+        loop, session, topic=text,
+        on_delta=on_delta, observer=observer, images=images,
+    )
+    if report.stopped:
+        console.error(f"[plan] {report.stopped}")
+    return ""
 
 
 def _handle_readonly(

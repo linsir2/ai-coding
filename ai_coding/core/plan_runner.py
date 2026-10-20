@@ -39,6 +39,7 @@ from ai_coding.domain.acceptance import AcceptanceItem
 from ai_coding.domain.loop import TurnStatus
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.plan_delivery import StepDelivery
+from ai_coding.domain.run import user_message
 from ai_coding.domain.session import SessionData
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
@@ -47,6 +48,12 @@ from ai_coding.shell_parse import path_candidates as _shell_path_candidates
 #: Step prompts start here.  The replay matches user bubbles on this marker
 #: to rebuild step headers — turn numbers do not survive compaction, but the
 #: prompt text travels inside the persisted user message.
+#: The mark on the harness's own line for a planning round.  The frontend
+#: skips a user message carrying it (see ``state/replay.ts``), so the
+#: transcript shows the human's words and not the instruction.  It is the
+#: same convention the other harness lines use (``[notice] ``, ``[steering] ``).
+PLAN_MARK = "[plan] "
+
 STEP_HEAD = "只做这一步，不要做别的："
 
 #: 19 §3.4-1: the planning round's own iteration ceiling.  It used to share
@@ -352,6 +359,7 @@ async def plan_only(
     topic: str,
     on_delta: Any = None,
     observer: Any = None,
+    images: tuple[Any, ...] = (),
 ) -> PlanReport:
     """``/plan <topic>``: plan the topic and stop — the planning half.
 
@@ -374,9 +382,19 @@ async def plan_only(
     begin = getattr(session, "begin_plan", None)
     if begin is not None:
         begin(topic)
+    #: The topic is what the human said, so it goes in as their own line:
+    #: the transcript shows their words rather than the instruction.  The
+    #: instruction the model acts on is the harness's, and carries the
+    #: ``[plan] `` mark so the transcript can tell the two apart.
+    #:
+    #: The instruction is deliberately the *last* message: it is the nearest
+    #: thing to the model's next step, and a planning round only works when
+    #: the instruction is there (measured: the same instruction in the
+    #: system prompt did not make the model plan).
+    session.add_message(user_message(topic, now_utc(), images))
     with continuations_disabled(loop, max_iterations=PLANNING_MAX_ITERATIONS):
         await loop.process_input(
-            session, PLAN_PROMPT.format(topic=topic),
+            session, f"{PLAN_MARK}{PLAN_PROMPT.format(topic=topic)}",
             on_delta=on_delta, observer=observer,
         )
     task = getattr(session, "task", None)

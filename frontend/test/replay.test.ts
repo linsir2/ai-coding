@@ -346,3 +346,40 @@ describe("[steering] replay (steering 前端化批次)", () => {
     ])
   })
 })
+
+describe("[plan] replay (计划模式归位批次)", () => {
+  test("the harness's planning line is skipped, the operator's words stay", () => {
+    // The planning round writes two messages: what the operator said, and
+    // the instruction the harness gave the model.  The transcript shows the
+    // first and skips the second -- a page of instruction in the operator's
+    // column would read as if they had said it.
+    const state = messagesToState([
+      { role: "user", content: "请你调研这个分支" },
+      { role: "user", content: "[plan] Create a detailed implementation plan for: 请你调研这个分支" },
+      { role: "assistant", content: "好" },
+    ])
+    const texts = state.messages.flatMap((m) =>
+      m.parts.map((p) => ("text" in p ? p.text : "")),
+    )
+    expect(texts).toContain("请你调研这个分支")
+    expect(texts.some((t) => t.includes("Create a detailed implementation plan"))).toBe(false)
+  })
+
+  test("the other harness lines keep their own rendering", () => {
+    // The mark is a prefix, not a class: "[notice] " still reads as a notice
+    // and "[steering] " still reads as the operator's own mid-turn words.
+    const notice = messagesToState([
+      { role: "user", content: "[notice] [子任务完成] probe：跑完了" },
+    ])
+    expect(notice.messages).toHaveLength(1)
+    expect(notice.messages[0]?.role).toBe("assistant")
+
+    const steering = messagesToState([
+      { role: "user", content: "[steering] 先看测试" },
+    ])
+    expect(steering.messages[0]).toEqual({
+      role: "user",
+      parts: [{ kind: "text", text: "先看测试", streaming: false }],
+    })
+  })
+})

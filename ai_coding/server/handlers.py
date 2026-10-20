@@ -667,14 +667,28 @@ def make_handlers(
                     {"name": str(item.get("name", "") or "图片"), "reason": saved.reason}
                 )
         async def run_turn() -> None:
-            await world.loop.process_input(
+            # A human utterance is not always an ordinary turn: in plan
+            # mode it is a planning round (19 §4).  The routing lives in
+            # ``run_human_turn`` so the REPL and this front door cannot
+            # drift apart -- the TUI sending the words as an ordinary
+            # prompt is what made plan mode a read-only flag instead of a
+            # planning mode.
+            from ai_coding.app.commands import run_human_turn
+
+            console = IpcConsole(
+                lambda method, message: service.notify(method, message),
+                bridge.on_delta,
+            )
+            await run_human_turn(
+                world.loop,
                 session,
                 text,
+                console=console,
                 on_delta=bridge.on_delta,
                 observer=bridge,
                 # offered only when there is something to offer, so loop
                 # doubles that predate r17/T5 stay callable for text turns
-                **({"images": tuple(images)} if images else {}),
+                images=tuple(images),
             )
             # D-4: the model may have armed a goal in this turn (start_goal).
             _maybe_launch_goal_run(session)
