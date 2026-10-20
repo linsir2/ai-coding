@@ -139,8 +139,12 @@ _FILE_SUFFIX_RE = re.compile(rf"\.(?:{FILE_PATH_EXTENSIONS})$", re.IGNORECASE)
 #: 如下 /api/v1/" is a document's outline, not a directory to create --
 #: there the words between the word and the path belong to the other
 #: meaning, and the gap is what tells the two apart.
+#:
+#: A command's own options may sit in the gap ("mkdir -p /data/x"): the
+#: option says how the directory is made, not that it is somewhere else.
 _DIRECTORY_BEFORE_RE = re.compile(
     r"(?:目录|文件夹|创建目录|新建目录|建立目录|mkdir|directory|folder)"
+    r"(?:\s+-{1,2}[A-Za-z-]+)*"
     r"[\s`'\"]*$",
     re.IGNORECASE,
 )
@@ -217,17 +221,13 @@ def outside_workspace_paths(
             # may well write another file too, and that one is a target).
             if candidate in interpreters:
                 continue
-            # A trailing slash says "directory" -- but only the words around
-            # the path can confirm it: the candidate pattern stops before the
-            # slash (a segment may not be empty), so the slash is one
-            # character further on, and the context sits just before the
-            # match.  A route written with a trailing slash ("GET
-            # /api/v1/users/") has the same shape and no directory words
-            # around it, so it stays what it is.
-            directory = (
-                body[match.end() : match.end() + 1] == "/"
-                and _has_directory_context(body, match.start())
-            )
+            # A trailing slash says "directory" -- and so do the words around
+            # the path: the model writes a directory target as "确保目录
+            # /data/w2demo/ 存在", and a command as "mkdir -p /data/w2demo".
+            # A route written with a trailing slash ("GET /api/v1/users/")
+            # has the same shape and no directory words around it, so it
+            # stays what it is.
+            directory = _has_directory_context(body, match.start())
             if not _looks_like_path(candidate, directory=directory):
                 continue
             try:

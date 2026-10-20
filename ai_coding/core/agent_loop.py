@@ -1678,7 +1678,15 @@ class AgentLoop:
         each = float(getattr(self.settings, "acceptance_verify_each_seconds", 120.0) or 0.0)
         total = float(getattr(self.settings, "acceptance_verify_total_seconds", 300.0) or 0.0)
         checked = await verify_items(
-            pending, self.workspace, timeout_each=each or 120.0, timeout_total=total or 300.0
+            pending,
+            self.workspace,
+            timeout_each=each or 120.0,
+            timeout_total=total or 300.0,
+            # W2: a proof command is a shell command, and it runs outside the
+            # dispatch gate -- so this is where a human gets to answer for
+            # one that reaches outside the workspace.  The dispatcher's
+            # callback is the same object this loop was built with.
+            approval=self.dispatcher.approval,
         )
         by_id = {item.id: item for item in checked}
         for item in session.acceptance:
