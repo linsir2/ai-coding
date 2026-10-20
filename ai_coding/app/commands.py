@@ -500,9 +500,16 @@ async def _handle_plan(
                 # "当前回合结束后生效" (that turn was already over).
                 console.info("[plan] 开始执行计划；执行完成后退出计划模式（只读）。")
         try:
-            await PlanRunner(loop).run(
+            report = await PlanRunner(loop).run(
                 session, console, on_delta=console.delta, observer=observer
             )
+            # W2/R02: the run branch used to drop the report, so a plan the
+            # runner refused (a step naming a path the file tools cannot
+            # reach) produced no message at all -- the command returned as if
+            # it had run.  The runner's own render only prints when it got as
+            # far as the driver, so the early refusals need this line.
+            if report.stopped:
+                console.error(f"[plan] {report.stopped}")
         finally:
             # stage 4 r2, boundary semantics (dsh's onBoundary): the run's
             # end IS the boundary, so the flip lands here directly instead of

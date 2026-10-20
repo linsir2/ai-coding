@@ -311,6 +311,44 @@ async def test_plan_run_without_a_plan_runs_and_reports_empty():
     assert "无任务项" in out or "完成 0 步" in out
 
 
+@pytest.mark.asyncio
+async def test_run_surfaces_a_stopped_plan():
+    """W2/R02: the run branch used to drop the runner's report on the floor,
+    so a plan the runner refused produced no message at all -- the user saw
+    the command return as if it had run."""
+    from types import SimpleNamespace
+
+    from ai_coding.domain.task import TaskState
+
+    class _RefusedLoop(_Loop):
+        def __init__(self) -> None:
+            super().__init__()
+            self.settings = SimpleNamespace(
+                plan_step_max_iterations=8,
+                plan_max_step_turns=20,
+                stop_policy="natural",
+            )
+            self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
+            self.workspace = "/tmp/ws"
+
+        async def process_input(self, session, text, on_delta=None, observer=None):
+            self.calls.append(text)
+            return "step done"
+
+    session = _session()
+    session.task = TaskState(goal="g")
+    session.task.add("写代码到 /data/x/app.py")
+    loop = _RefusedLoop()
+    dc, c = _console()
+
+    await handle_input(loop, "/plan run", session, _Sessions(), dc)
+
+    out = c.export_text()
+    assert "工作区外" in out, f"the refusal was not surfaced: {out!r}"
+    assert "/data/x/app.py" in out
+    assert loop.calls == [], "the refused plan still ran"
+
+
 # ---- the enforcement axis alone: /readonly -----------------------------------
 
 

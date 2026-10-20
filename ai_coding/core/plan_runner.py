@@ -389,6 +389,27 @@ class PlanRunner:
         run came from the command, a boot resume, or a direct caller.
         """
         task = getattr(session, "task", None)
+        # W2/R02: the runner's own workspace gate, before anything runs.
+        #
+        # This is what makes the refusal structural rather than advisory:
+        # every way into a run -- the command, the front end's auto-dispatch,
+        # the boot resume -- comes through this method, so a plan the file
+        # tools cannot execute never reaches a turn.  The earlier gates catch
+        # it earlier (before the human is asked), but a plan can also arrive
+        # here from a session that was armed before those gates existed, or
+        # from a task written by a tool that bypassed the review.
+        #
+        # The refusal has to withdraw the approval as well: the human's
+        # approval is what armed the task, and an armed plan the runner
+        # refuses would still be on disk for the boot resume to pick up.
+        offenders = self._workspace_offenders(task)
+        if offenders:
+            refused = self.new_report()
+            refused.stopped = outside_workspace_message(offenders)
+            if task is not None and _disarm(task):
+                self._persist(session)
+                self._emit_task(observer, task)
+            return refused
         if task is not None:
             task.armed = True
             task.armed_profile = "plan"
@@ -531,6 +552,23 @@ class PlanRunner:
         self._say(console, report.render())
 
     # ---- internals ------------------------------------------------------
+
+    def _workspace_offenders(self, task: Any) -> list[str]:
+        """The open steps that name a path the file tools cannot reach.
+
+        The open items are what the run would execute, so they are what the
+        gate has to look at.  A step already completed or dropped names
+        nothing the run would touch.
+        """
+        if task is None:
+            return []
+        workspace = str(getattr(self._loop, "workspace", "") or ".")
+        extra_roots = tuple(getattr(self._loop, "extra_workspace_roots", ()) or ())
+        return outside_workspace_paths(
+            [item.content for item in task.open_items()],
+            workspace,
+            extra_roots=extra_roots,
+        )
 
     def _persist(self, session: Any) -> None:
         """Write the run's results back into the parent's session file.

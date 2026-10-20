@@ -44,7 +44,7 @@ class _RecordingCloser:
 class _StubLoop:
     """Stands in for AgentLoop: records prompts, plays a script per call."""
 
-    def __init__(self, script, step_budget=8):
+    def __init__(self, script, step_budget=8, *, workspace=".", extra_workspace_roots=()):
         self.settings = SimpleNamespace(
             plan_step_max_iterations=step_budget,
             plan_max_step_turns=0,
@@ -56,6 +56,11 @@ class _StubLoop:
         self.step_sessions: list = []
         self.restored = True
         self.closer = _RecordingCloser()
+        # W2/R02: the runner's own workspace gate asks the same reachability
+        # question the plan gates ask, so the loop has to carry the same
+        # answers.
+        self.workspace = workspace
+        self.extra_workspace_roots = tuple(extra_workspace_roots)
 
     async def process_input(self, session, text, on_delta=None, observer=None):
         session.turn_count += 1
@@ -521,3 +526,59 @@ async def test_a_dying_step_emits_task_updated_blocked():
     assert any("blocked" in statuses for statuses in observer.statuses), (
         "a runner error writes blocked into the task; the wire must see it"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_plan_naming_unreachable_paths_never_runs(tmp_path):
+    """W2/R02: the runner's own workspace gate, before the first step.
+
+    This is the gate that makes the refusal structural rather than
+    advisory: every way into a run -- the command, the front end's
+    auto-dispatch, the boot resume -- comes through this method, so a plan
+    the file tools cannot execute never reaches a turn.
+    """
+    session = _session_with("写代码到 /data/x/app.py")
+    loop = _StubLoop(["complete"], workspace=str(tmp_path))
+
+    report = await PlanRunner(loop).run(session)
+
+    assert report.stopped is not None
+    assert "/data/x/app.py" in report.stopped
+    assert loop.calls == [], "the plan ran despite naming an unreachable path"
+    assert session.task.armed is False, "the refused plan stayed armed"
+    assert session.task.armed_profile == ""
+
+
+@pytest.mark.asyncio
+async def test_the_runner_gate_withdraws_the_approval_that_armed_the_plan(tmp_path):
+    """W2/R02: approval is what arms the plan, so refusing it must withdraw
+    the approval.  An armed plan the runner refuses anyway would still be on
+    disk, and the boot resume would pick it up and run it."""
+    session = _session_with("写代码到 /data/x/app.py")
+    session.task.armed = True
+    session.task.armed_profile = "plan"
+    loop = _StubLoop(["complete"], workspace=str(tmp_path))
+
+    report = await PlanRunner(loop).run(session)
+
+    assert report.stopped is not None
+    assert session.task.armed is False
+    assert session.task.armed_profile == ""
+    assert loop.closer.armed_at_save == [False], (
+        "the withdrawal must reach the disk, or the boot resume finds it armed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_runner_gate_honours_extra_roots(tmp_path):
+    """W2/R02: one roots pipeline.  A directory the operator declared is
+    reachable, so the runner's gate must let the plan through."""
+    other = tmp_path / "sibling"
+    other.mkdir()
+    session = _session_with(f"看下 {other}/app.py")
+    loop = _StubLoop(["complete"], workspace=str(tmp_path), extra_workspace_roots=(other,))
+
+    report = await PlanRunner(loop).run(session)
+
+    assert report.stopped is None
+    assert len(loop.calls) == 1, "the plan did not run"
