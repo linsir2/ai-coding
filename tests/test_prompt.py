@@ -66,7 +66,10 @@ PLAN_SEGMENT = (
     "items and starts execution automatically; do not track the planning with "
     "todo_write, do not write the analysis or files as your final answer, and "
     "do not mark items completed — the execution phase does the reading and "
-    "the work. bash/write/edit are unavailable here — explore with "
+    "the work. If the request needs no implementation — a survey, an "
+    "analysis, a comparison — close it with finish_research(summary) "
+    "instead: the conclusion is the answer, and no plan is submitted. "
+    "bash/write/edit are unavailable here — explore with "
     "read/grep/glob instead.</plan-mode>"
 )
 

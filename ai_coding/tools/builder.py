@@ -236,6 +236,14 @@ def _assemble_registry(
 
         registry.register(PresentPlanTool(user_prompt))
 
+    # N1: the research exit.  It needs no human (it asks nobody), so it is
+    # registered wherever a plan posture can exist: the main session.  A
+    # sub-agent runs in a throwaway session and never plans.
+    if include_subagent:
+        from ai_coding.tools.finish_research_tool import FinishResearchTool
+
+        registry.register(FinishResearchTool())
+
     if include_subagent:
         # D-4: the model's own taskification (start_goal / update_goal).  Main
         # session only, like present_plan: the goal run is dispatched by the

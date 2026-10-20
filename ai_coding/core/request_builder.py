@@ -20,7 +20,7 @@ from typing import Any
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
-from ai_coding.tools.base import ToolContext
+from ai_coding.tools.base import ToolContext, TurnConclusion
 
 __all__ = ["TailBlock", "build_tail", "content_of", "tool_context", "volatile_block"]
 
@@ -87,6 +87,7 @@ def tool_context(
     note_checkpoint: Callable[[str], None] | None = None,
     note_approval: Callable[[dict[str, Any] | None], None] | None = None,
     note_plan_approved: Callable[[], None] | None = None,
+    conclusion: TurnConclusion | None = None,
     jobs: Any = None,
     extra_workspace_roots: Sequence[str] = (),
 ) -> ToolContext:
@@ -117,6 +118,9 @@ def tool_context(
         note_checkpoint=note_checkpoint,
         note_approval=note_approval,
         note_plan_approved=note_plan_approved,
+        # N1: the turn's conclusion holder -- the two exits of a plan-mode
+        # turn read it to stay mutually exclusive.
+        conclusion=conclusion,
         # D-1: the workspace's background jobs.  Present only where the product
         # builds one; `None` elsewhere and the tools that need it say so.
         jobs=jobs,

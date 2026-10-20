@@ -50,16 +50,21 @@ TASK_MESSAGE_LEAD = "以下是你自己的任务清单状态（系统注入，�
 #: rides the outcome to the transcript when even the remedy is refused.
 #: Measured silent-completion twice: sessions 7ad86804 and 1fd3be1e.
 PLAN_NUDGE = (
-    "[plan] 尚未提交计划：把全部可执行步骤放进 present_plan 的 items 数组"
-    "（每步一条，含 verify 命令）提交评审，不能以纯文本收尾。请立即补交。"
+    "[plan] 本回合还没有出口：把全部可执行步骤放进 present_plan 的 items 数组"
+    "（每步一条，含 verify 命令）提交评审；若这个任务不需要实现，就用 "
+    "finish_research(summary) 直接给结论。不能以纯文本收尾。请立即给出一个出口。"
 )
 PLAN_UNSUBMITTED_NOTE = (
-    "[plan] 本回合未提交计划（未调用 present_plan）；可继续对话让它提交。"
+    "[plan] 本回合未提交计划（未调用 present_plan / finish_research）；可继续对话让它提交。"
 )
 #: R08: the terminal note a dismissed review leaves.  Dismiss (esc / empty on
 #: the card) now ends the turn at the batch -- the operator said "not now",
 #: and this line says what that meant: nothing submitted, nothing executed.
 PLAN_DISMISSED_NOTE = "[plan] 评审已搁置：本回合结束（计划未提交、未执行）。"
+#: N1: the terminal note a research conclusion leaves.  The other exit of a
+#: plan-mode turn: the conclusion is the answer, so the turn ends with it --
+#: no plan, nothing armed, nothing executed.
+PLAN_RESEARCH_NOTE = "[plan] 研究已收尾：结论已给出（未提交计划、未执行任何工作）。"
 #: G8-1: the marker for the one block that tells the model its budget is nearly
 #: gone.  Volatile (never persisted) like the memory and task blocks -- it
 #: describes a counter, not a fact about the work.

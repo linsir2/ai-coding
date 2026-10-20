@@ -94,7 +94,9 @@ PLAN_PROMPT = (
     "bash/write/edit are unavailable in plan mode — explore with "
     "read/grep/glob instead. "
     "present_plan presents the plan for the user's review, and approval "
-    "starts execution automatically — do not execute it yourself."
+    "starts execution automatically — do not execute it yourself. "
+    "If the topic needs no implementation — a survey, an analysis, a "
+    "comparison — close it with finish_research(summary) instead of a plan."
 )
 
 
