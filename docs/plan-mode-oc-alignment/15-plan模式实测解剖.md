@@ -433,3 +433,64 @@ M1b（agent 承载 T1）          ← F2 的主体；且实测显示它对 plan 
 | 出口穷举 | `ai_coding/core/turn_policy.py:215-220`、`ai_coding/tools/present_plan_tool.py:28-45` |
 | 绕过守卫的四个 FINISH 口 | `ai_coding/core/turn_policy.py:256-308` vs `:328-331` |
 | 进入 plan 的全部路径 | `ai_coding/app/commands.py:534`（唯一写 mode 的地方）、`frontend/src/util/submission.ts:104-116`、`frontend/src/routes/session.tsx:346-363` |
+
+---
+
+## 8. 第二次实测（用户会话 `135cc71c`，修复后）
+
+> 修复 = `b746bf5`（plan 模式下的输入走规划轮）。这次会话在修复之后跑的。
+
+### 8.1 执行链还原（64 条消息，逐条）
+
+| 消息 | 谁 | 内容 |
+|---|---|---|
+| [0] | user | 「请你探索一下这个分支里面到底都干了啥，相较于原来」 |
+| [1] | user | `[plan] Create a detailed implementation plan for: …` ← **规划轮生效** ✓ |
+| [2]-[5] | 助手 | glob / grep / read —— 开始探索 |
+| [6]-[7] | 工具 | `bash` ×2 → **readonly_denied**（只读闸） |
+| [8]-[55] | 助手 | **继续探索 11+ 轮、20 次工具调用**（读完 13 份设计文档 + 6 个源码文件） |
+| [56] | 助手 | **产出了完整的研究报告**（表格 + 五大节）← **它把活干完了** |
+| [57] | user | `[plan] 尚未提交计划：…不能以纯文本收尾。请立即补交。` ← 守卫 NUDGE |
+| [58] | 助手 | 「我来补交一个完整的可执行探索计划。」 |
+| [59] | 工具 | `present_plan` **失败**：`workspace_paths` —— 目标路径在工作区外：`/dev/null`, `/tmp/exploration_summary.md` |
+| [60]-[61] | 助手/工具 | 又试 `bash` → readonly_denied |
+| [62] | user | `[strategy-gate] 最近 2 轮的工具调用全部失败。不要重复同样的做法…` ← **策略梯子介入** |
+| [63] | 助手 | **把梯子的注入文本当成「演示素材」开始胡说**：「这是一个实际运行中的演示！我可以看到分支改造后的核心功能正在生效：…`strategy` 门已触发（L1）」 |
+
+**这一回合以模型胡说结束。**
+
+### 8.2 四个缺陷
+
+| # | 缺陷 | 证据 | 归属 |
+|---|---|---|---|
+| **A** | **plan 模式没有「计划先行」的结构性约束** —— 只有只读 + **事后**追讨 | 守卫只在模型要收尾时才问（`turn_policy.py:206-220` → `agent_loop.py:877`）；规划指令自己写着「use grep/glob to look at code selectively」（`plan_runner.py:78-98`） | 15 号稿 D2/F3 |
+| **B** | **NUDGE 后的补交被工作区门拒** | [59] `workspace_paths`（模型老想写 `/tmp/…`、`/dev/null`） | 15 号稿 §3.5.2 |
+| **C** | **策略梯子的注入被模型当成内容** → 胡说 | [62]→[63] | **新发现** |
+| **D** | **UI 竞态**：裸 `/plan` 命令的 `turn.finished` 与规划轮的 `submitted` 赛跑 → busy 被提前置 false → 输入框显示「Ask anything…」而模型在干活 | 见 §8.3 | **新发现** |
+
+### 8.3 缺陷 D 的机制（UI 竞态）
+
+```
+前端：planPrelude() → client.request("session.command", {text:"/plan"})
+        .finally(() => submit(prompt.text))        ← 响应到了就提交
+后端：那条命令自己也发一个 turn.finished（commands.py:487-530 → handlers.py:860-867）
+前端：state/session.ts:725  case "turn.finished" → busy = false
+```
+
+⇒ **命令的终局事件与规划轮的 `submitted`（busy=true）赛跑**：命令的 `turn.finished` 若后到，就把 busy 置回 false ⇒ 占位符从「Working…」变回「Ask anything…」，而规划轮正在跑。
+
+⇒ 前端只有 `turn.finished` 一个地方把 busy 置 false（`state/session.ts:725`），**协议里没有 `turn.started`**。
+
+### 8.4 A 的根：plan 模式是「只读 + 事后追讨」，不是「计划先行」
+
+| 任务类型 | 「干活」被只读挡住吗？ | 结果 |
+|---|---|---|
+| 实现类（写文件） | ✅ 挡住（`mutates_world` 工具被结构性拒绝，`dispatch.py:323-324`） | 流程天然是「读上下文 → 规划 → 批准 → 执行」 |
+| **研究类（读 + 答）** | ❌ 没挡住（`read`/`grep`/`glob` 的 `mutates_world=False`，`tools/read_tool.py:64` 等） | **探索就是干活** → 模型把活干完 → 守卫事后追讨 → 补交「已做过的事」当步骤 |
+
+⇒ **你这次会话是研究类**，所以「先探索完再给计划」在这个请求下是**结构必然**，不是模型不听话。
+
+⇒ 要治它，需要**结构性约束**而不是更强的措辞。代码里现成的接缝：
+- 规划轮的预算替换（`plan_runner.py:417-451` `continuations_disabled(max_iterations=…)`）→ 可换成更小的「探索预算」，并在快用尽时提前 NUDGE「现在交计划」
+- 回合收尾裁决点（`agent_loop.py:855-905`）
+- 回合开头裁决点（`agent_loop.py:658-660` → `turn_policy.py:256-308`）
