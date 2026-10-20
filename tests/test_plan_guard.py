@@ -12,10 +12,10 @@ repo's convention for loop-level files).
 
 import pytest
 
-from ai_coding.ai.engine import ChatEngine
+from ai_coding.ai.engine import ChatEngine, EngineError
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
-from ai_coding.core.turn_policy import PLAN_DISMISSED_NOTE
+from ai_coding.core.turn_policy import PLAN_DISMISSED_NOTE, TurnPolicy, TurnPolicyConfig
 from ai_coding.domain.loop import StepResult, TurnStatus
 from ai_coding.domain.message import ToolCallRef, ToolResult
 from ai_coding.domain.task import TaskState
@@ -23,6 +23,7 @@ from ai_coding.security.approval import AutoApproveCallback
 from ai_coding.service.session_service import SessionService
 from ai_coding.tools.base import BaseTool
 from ai_coding.tools.registry import ToolRegistry
+from ai_coding.tools.todo_write_tool import TodoWriteTool
 
 
 class _PresentPlan(BaseTool):
@@ -270,3 +271,208 @@ async def test_a_dismissal_leaves_a_goal_task_armed(tmp_path):
 
     assert session.task.armed is True
     assert session.task.armed_profile == "goal"
+
+
+# ---- W2 (boot 洞): an approval belongs to the turn that carried it ---------
+
+
+class _ApprovingPlan(_PresentPlan):
+    """The plan is approved: the task is armed, and the review said yes.
+
+    Only the plan profile is armed here -- a goal task has its own arming
+    path, and this fixture must not take it over.
+    """
+
+    async def execute(self, params, ctx=None) -> ToolResult:
+        task = getattr(ctx, "task", None)
+        if task is not None and getattr(task, "armed_profile", "") != "goal":
+            task.armed = True
+            task.armed_profile = "plan"
+            task.add("第一步")
+            if ctx.note_plan_approved is not None:
+                ctx.note_plan_approved()
+        return ToolResult(success=True, output="计划已批准", data={"approved": True})
+
+
+class _FailingEngine(_ScriptedEngine):
+    """A turn that dies after the approval: the engine fails on the call
+    that comes after the plan was submitted."""
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        if not self._steps:
+            raise EngineError("boom")
+        item = self._steps.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        if on_delta is not None and item.text:
+            on_delta(item.text)
+        return item
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_dies_after_the_approval_withdraws_it(tmp_path):
+    """W2: the approval belongs to the turn that carried it.
+
+    The front end already refuses to start a run from a turn that did not end
+    cleanly (``shouldDispatchPlanRun``), but the backend left the plan armed
+    on disk -- and the boot resume reads the disk, so the same turn said
+    "do not run" in one place and "run it" in the other.  The plan is
+    withdrawn, so the boot resume has nothing to pick up.
+    """
+    engine = _FailingEngine([_call("c1", "present_plan"), EngineError("boom")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, tool=_ApprovingPlan())
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "给计划")
+
+    outcome = loop.last_outcome
+    assert outcome is not None and outcome.status is TurnStatus.ERROR
+    assert session.task is not None
+    assert session.task.armed is False
+    assert session.task.armed_profile == ""
+
+
+@pytest.mark.asyncio
+async def test_a_clean_turn_keeps_the_approval(tmp_path):
+    """The other side: a turn that ended cleanly is what the approval was
+    for, and the run it authorises still has to happen."""
+    engine = _ScriptedEngine([_call("c1", "present_plan"), _text("完成。")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, tool=_ApprovingPlan())
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "给计划")
+
+    outcome = loop.last_outcome
+    assert outcome is not None and outcome.status is TurnStatus.COMPLETED
+    assert session.task is not None
+    assert session.task.armed is True
+    assert session.task.armed_profile == "plan"
+
+
+@pytest.mark.asyncio
+async def test_a_goal_task_survives_a_turn_that_dies(tmp_path):
+    """A goal's arm is the goal runner's business: it keeps running across
+    turns by design, so a turn that dies must not withdraw it."""
+    engine = _FailingEngine([_call("c1", "present_plan"), EngineError("boom")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, tool=_ApprovingPlan())
+    session = _plan_session(sessions)
+    session.task = TaskState()
+    session.task.arm_goal("把发布跑通")
+
+    await loop.process_input(session, "给计划")
+
+    assert session.task.armed is True
+    assert session.task.armed_profile == "goal"
+
+
+@pytest.mark.asyncio
+async def test_a_plan_step_whose_turn_was_cut_off_does_not_withdraw_the_plan(
+    tmp_path,
+):
+    """W2: the dangerous neighbour of the withdrawal.
+
+    A plan step runs on the *shared* task and is often cut short by the
+    step budget -- and a step that ends on ``max_iterations`` is not a turn
+    that went wrong, it is a step that ran out of room.  If the withdrawal
+    reached those, the driver would see the plan unarmed between rounds and
+    stop after the first step (the driver re-checks ``task.armed`` between
+    rounds).
+
+    A step never approves a plan (``present_plan`` is plan-mode only and a
+    step session is not in plan mode), so the withdrawal must not touch it.
+    """
+    from ai_coding.core.plan_runner import PlanRunner
+
+    class _BudgetLoop:
+        """A loop whose step turns run out of iterations."""
+
+        def __init__(self) -> None:
+            self.settings = AIConfig()
+            self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=1))
+            self.calls = 0
+
+        async def process_input(self, session, text, on_delta=None, observer=None):
+            self.calls += 1
+            for item in session.task.open_items():
+                if not item.is_terminal():
+                    item.status = "completed"
+                    break
+            return "step done"
+
+    loop = _BudgetLoop()
+    session = SessionService(tmp_path / "sessions").create()
+    session.task = TaskState(goal="plan")
+    session.task.add("第一步")
+    session.task.add("第二步")
+
+    report = await PlanRunner(loop).run(session)
+
+    assert report.stopped is None
+    assert [item.status for item in session.task.items] == ["completed", "completed"]
+    assert session.task.armed is False
+
+
+@pytest.mark.asyncio
+async def test_a_real_plan_step_cut_off_by_the_budget_keeps_the_plan_armed(
+    tmp_path,
+):
+    """W2: the same property, through the real loop.
+
+    The stub above cannot see the turn's close, which is where the
+    withdrawal lives.  Here a real ``AgentLoop`` runs a plan whose steps run
+    out of iterations -- the ordinary way a step ends -- and the plan must
+    still finish: the driver checks ``task.armed`` between rounds, so a
+    withdrawal that reached the steps would stop the plan after the first
+    one.
+    """
+    from ai_coding.core.plan_runner import PlanRunner
+
+    class _StepEngine(ChatEngine):
+        """Every model call wants a tool; the budget is what ends the turn."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None):
+            self.calls += 1
+            return StepResult(
+                text=None,
+                tool_calls=[
+                    ToolCallRef(
+                        id=f"c{self.calls}", name="todo_write",
+                        arguments='{"action":"list"}',
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    registry = ToolRegistry()
+    registry.register(TodoWriteTool())
+    sessions = SessionService(tmp_path / "sessions")
+    loop = AgentLoop(
+        _StepEngine(),
+        sessions,
+        registry,
+        settings=AIConfig(
+            stop_policy="natural",
+            max_tool_iterations=1,
+            plan_step_max_iterations=1,
+        ),
+        workspace=".",
+    )
+    session = sessions.create()
+    session.task = TaskState(goal="plan")
+    session.task.add("第一步")
+    session.task.add("第二步")
+
+    report = await PlanRunner(loop).run(session)
+
+    # Both steps ran: the plan was not cut short by a withdrawn arm.
+    assert len(report.deliveries) == 2
+    assert session.task.armed is False

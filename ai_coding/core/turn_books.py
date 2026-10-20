@@ -123,6 +123,12 @@ class TurnBooks:
     #: ``plan_submitted`` itself needs no field -- ``tool_success`` already
     #: remembers that present_plan succeeded.
     plan_nudged: bool = False
+    #: W2: this turn approved a plan.  The approval belongs to *this* turn --
+    #: the plan was written against the state this turn ended in -- so a turn
+    #: that did not end cleanly takes the approval back (the loop withdraws
+    #: it at the turn's close).  A turn that ended cleanly keeps it, and the
+    #: run starts.
+    plan_approved: bool = False
     #: What failed, newest last — the handoff names the most recent one.
     failures: list[Failure] = field(default_factory=list)
     #: The latest thing the model said (``None`` when it said nothing at all).
@@ -211,6 +217,16 @@ class TurnBooks:
         """stage 4 r2: the plan submission guard spent its one remedy."""
         self.nudges += 1
         self.plan_nudged = True
+
+    def note_plan_approved(self) -> None:
+        """W2: the human approved a plan in this turn.
+
+        The approval belongs to this turn: the plan was written against the
+        state this turn ended in, and a turn that did not end cleanly leaves
+        a state nobody looked at.  The loop reads this at the turn's close
+        and takes the approval back when the turn did not end cleanly.
+        """
+        self.plan_approved = True
 
     def note_acceptance_nudge(self) -> None:
         """The acceptance gate injected a reminder and will iterate again."""

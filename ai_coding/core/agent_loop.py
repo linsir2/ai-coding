@@ -198,6 +198,19 @@ def _tools_by_origin(registry: ToolRegistry) -> dict[str, int]:
     return dict(sorted(sizes.items(), key=lambda item: (-item[1], item[0])))
 
 
+def _on_plan_approved(session: SessionData, books: TurnBooks) -> None:
+    """What a plan approval changes, in one place.
+
+    Two things, both about the same moment: the session's ladder windows
+    restart (R10 -- a new episode must not ride the old one's numbers), and
+    the books learn that this turn approved a plan (W2 -- the approval
+    belongs to this turn, so a turn that does not end cleanly takes it back
+    at its close).
+    """
+    session.intervention_state = None
+    books.note_plan_approved()
+
+
 @dataclass(frozen=True)
 class _Staged:
     """What a staged revert has to put back, beyond the messages.
@@ -1403,6 +1416,35 @@ class AgentLoop:
         # 18 §10.2: a flip queued while this turn ran lands here, so the close's
         # own save carries it to disk (zero new save points).
         self._apply_pending_posture(session)
+        # W2: an approval belongs to the turn that carried it.
+        #
+        # The plan was written against the state this turn ended in.  A turn
+        # that did not end cleanly (error / timeout / budget / max_iterations
+        # / stopped) left the session somewhere else, and the front end
+        # already refuses to start a run from it -- so the backend must not
+        # leave the plan armed on disk either, or the boot resume would run
+        # exactly what the front end declined to run.  The two answers have
+        # to agree.
+        #
+        # A turn that ended cleanly keeps the approval: that is what the
+        # approval was for, and the run it authorises still has to happen.
+        #
+        # A crash is a different thing: the close never runs, so the
+        # approval stays armed and the boot resume continues the work the
+        # human agreed to (D-02's crash point ①).  Only the plan profile is
+        # touched -- a goal's arm belongs to the goal runner, which keeps
+        # running across turns by design.
+        #
+        # Before the close, so the close's own save carries the withdrawal
+        # (zero new save points).
+        if (
+            books.plan_approved
+            and outcome.status is not TurnStatus.COMPLETED
+            and getattr(task, "armed", False)
+            and getattr(task, "armed_profile", "") == "plan"
+        ):
+            task.armed = False
+            task.armed_profile = ""
         return self.closer.close(
             session,
             user_input=user_input,
@@ -1537,9 +1579,12 @@ class AgentLoop:
                 note_approval=lambda pending: self._note_approval(session, pending),
                 # R10: approval is a new plan episode -- the session's stale
                 # ladder windows must not ride into it (begin_plan's sibling).
-                note_plan_approved=lambda: setattr(
-                    session, "intervention_state", None
-                ),
+                # W2: and the books remember that this turn approved a plan,
+                # so the turn's close can withdraw the approval if the turn
+                # did not end cleanly (the front end already refuses to start
+                # a run from such a turn; the backend must not leave the plan
+                # armed on disk for the boot resume to pick it up).
+                note_plan_approved=lambda: _on_plan_approved(session, books),
             ),
             deadline=deadline,
             iteration=index,
