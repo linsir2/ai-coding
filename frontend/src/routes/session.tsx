@@ -35,6 +35,7 @@ import { type BudgetFigures, initialState, jobsFromEvent, reduce } from "../stat
 import { useToast } from "../component/toast"
 import { theme } from "../theme/tokens"
 import { escStep } from "../util/esc"
+import { shouldDispatchPlanRun } from "../util/plan-run"
 import { loadSession, resumeSession } from "../state/replay"
 import type { AskRequest } from "../util/ask"
 import type { PermissionDecision, PermissionRequest } from "../util/permission"
@@ -485,9 +486,18 @@ export function Session(props: SessionProps) {
         // 19 §3.3: an approved plan starts executing here — the mode disarm
         // already landed with the turn's close, so the internal run command
         // finds an idle loop.  The echo line mirrors the /review dispatch.
+        //
+        // W2/R11: the approval is a yes to *this* plan, and the turn that
+        // carried it is what the plan was written against.  A turn that did
+        // not end cleanly (aborted / error / timeout / budget /
+        // max_iterations / stopped) left the session somewhere else, so the
+        // run is not dispatched from it.  The approval itself is still
+        // consumed -- the pending flag is the approval's record, and the
+        // plan stays armed on the task for the boot resume to decide.
         let ranPlanRun = false
-        if (pendingPlanRun) {
-          pendingPlanRun = false
+        const approved = pendingPlanRun
+        pendingPlanRun = false
+        if (shouldDispatchPlanRun(approved, event.data["status"])) {
           ranPlanRun = true
           // 内化批次: silent — the run's own receipts and the posture notice
           // are the story; no "┃ /plan run" line dresses it as user input.
