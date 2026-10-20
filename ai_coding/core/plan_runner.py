@@ -377,6 +377,19 @@ async def plan_only(
     offenders = outside_workspace_paths([topic], workspace, extra_roots=extra_roots)
     if offenders:
         return PlanReport(stopped=outside_workspace_message(offenders))
+    # An armed plan is a pending commitment: the human approved it and the
+    # runner has not executed it yet.  A new planning round would swap the
+    # whole book (``begin_plan``) and silently un-approve it -- the plan
+    # would never run, and nobody would have said so.  Refuse instead, in
+    # the same shape the workspace gate uses.
+    task = getattr(session, "task", None)
+    if task is not None and getattr(task, "armed", False):
+        return PlanReport(
+            stopped=(
+                "已有一份批准的计划尚未执行；先执行它（/plan run），"
+                "或用 /plan off 放弃后再重新规划。"
+            )
+        )
     # A new plan starts a fresh book: goal, items and receipts belong together,
     # or the new plan's step ids collide with the old plan's receipts.
     begin = getattr(session, "begin_plan", None)

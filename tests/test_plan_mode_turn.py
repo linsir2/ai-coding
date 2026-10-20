@@ -18,6 +18,7 @@ from ai_coding.app.commands import run_human_turn
 from ai_coding.core.plan_runner import PLAN_MARK, plan_only
 from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
 from ai_coding.domain.session import SessionData
+from ai_coding.domain.task import TaskState
 
 
 class _Console:
@@ -194,3 +195,27 @@ def test_the_planning_instruction_is_not_the_operators_speech():
     # the replay recognises a message by what it starts with.
     assert PLAN_MARK.endswith(" ")
     assert PLAN_MARK.startswith("[")
+
+
+@pytest.mark.asyncio
+async def test_a_new_planning_round_does_not_discard_an_approved_plan():
+    """An armed plan is a pending commitment; a new round must not drop it.
+
+    ``begin_plan`` swaps the whole task book (a new plan's step ids collide
+    with the old plan's receipts), so a planning round that starts while a
+    plan is armed would silently un-approve it -- and the run would never
+    happen.  The refusal reuses the shape the workspace gate already uses.
+    """
+    loop = _Loop()
+    session = _session("plan")
+    session.task = TaskState(goal="旧主题")
+    session.task.add("写代码", verify="pytest -q")
+    session.task.armed = True
+    session.task.armed_profile = "plan"
+
+    report = await plan_only(loop, session, topic="新主题")
+
+    assert report.stopped, "an armed plan stops a new planning round"
+    assert session.task.armed is True, "the approved plan is still approved"
+    assert [item.content for item in session.task.items] == ["写代码"]
+    assert loop.calls == [], "nothing was run"
