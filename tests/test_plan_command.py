@@ -243,6 +243,121 @@ async def test_plan_off_without_a_plan_still_confirms_the_switch():
     assert "本就不在计划模式" in c.export_text()
 
 
+# ---- D1 (20 §批次 4a): /plan off can swap an approved plan --------------------
+
+
+@pytest.mark.asyncio
+async def test_plan_off_gives_up_an_approved_plan():
+    """The only way out of an approved plan the run never took.
+
+    Both refusals point here -- "已有一份批准的计划尚未执行；先执行它
+    （/plan run），或用 /plan off 放弃后再重新规划" -- and until now the
+    command only flipped the posture, so the user did what the error said
+    and hit the same wall twice over.
+
+    Giving it up means withdrawing the approval: the arm goes, and the
+    profile goes with it (a profile with nothing armed owns nothing, and
+    the boot resume reads the pair).
+    """
+    from ai_coding.core.events import RecordingObserver, TaskUpdated
+    from ai_coding.domain.task import TaskState
+
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.mode, session.readonly = "plan", True
+    session.task = TaskState(goal="g")
+    session.task.add("第一步")
+    session.task.armed = True
+    session.task.armed_profile = "plan"
+    dc, c = _console()
+    observer = RecordingObserver()
+
+    await handle_input(loop, "/plan off", session, sessions, dc, observer=observer)
+
+    assert session.task.armed is False
+    assert session.task.armed_profile == ""
+    out = c.export_text()
+    assert "已放弃" in out
+    # The old hint said "you can continue" -- which contradicts giving up.
+    assert "未执行" not in out
+    events = observer.of_type(TaskUpdated)
+    assert len(events) == 1 and events[0].task.armed is False, (
+        "the front end must see the withdrawal, or it keeps a card for a "
+        "plan the user gave up"
+    )
+
+
+@pytest.mark.asyncio
+async def test_plan_off_without_an_armed_plan_says_nothing_about_giving_up():
+    """R3: the withdrawal must not misfire.  A task that is not an approved
+    plan gets the words it always got."""
+    from ai_coding.domain.task import TaskState
+
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.task = TaskState(goal="g")
+    session.task.add("still open")
+    dc, c = _console()
+
+    await handle_input(loop, "/plan off", session, sessions, dc)
+
+    out = c.export_text()
+    assert "已放弃" not in out
+    assert "还有 1 项未执行" in out
+
+
+@pytest.mark.asyncio
+async def test_plan_off_does_not_claim_a_goal_was_given_up():
+    """R4: a goal is another line -- its exit is "/goal off".  The plan
+    command must not say it gave up a plan it never touched."""
+    from ai_coding.domain.task import TaskState
+
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.task = TaskState(goal="obj")
+    session.task.arm_goal("obj")
+    dc, c = _console()
+
+    await handle_input(loop, "/plan off", session, sessions, dc)
+
+    assert session.task.armed is True
+    assert session.task.armed_profile == "goal"
+    assert "已放弃" not in c.export_text()
+
+
+@pytest.mark.asyncio
+async def test_a_plan_given_up_can_be_replaced_by_a_new_one():
+    """The dead end, closed.
+
+    "已有一份批准的计划尚未执行；先执行它（/plan run），或用 /plan off
+    放弃后再重新规划" -- and the second half of that sentence was a lie:
+    "/plan off" left the plan approved, so the new planning round was
+    refused with the same words.  Giving the plan up has to make the next
+    round possible.
+    """
+    from ai_coding.domain.task import TaskState
+
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.task = TaskState(goal="g")
+    session.task.add("第一步")
+    session.task.armed = True
+    session.task.armed_profile = "plan"
+    dc, _c = _console()
+
+    await handle_input(loop, "/plan off", session, sessions, dc)
+    dc2, c2 = _console()
+    await handle_input(loop, "/plan 新主题", session, sessions, dc2)
+
+    assert loop.calls, "the new planning round was refused"
+    assert "尚未执行" not in c2.export_text()
+
+
+
 @pytest.mark.asyncio
 async def test_plan_run_executes_the_open_plan():
     """The explicit approval: /plan run disarms and executes, /plan plans only."""

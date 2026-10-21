@@ -454,16 +454,52 @@ async def _handle_plan(
         if not loop.request_posture(session, mode="normal", readonly=False):
             console.info(f"[plan] 退出计划模式已排队{_QUEUED}。")
             return REPLAction.CONTINUE, session
+        # D1 (20 §批次 4a): this is the user's explicit "give this plan up".
+        #
+        # An approved plan the run never took is a dead end without it: both
+        # refusals point here ("已有一份批准的计划尚未执行；先执行它（/plan
+        # run），或用 /plan off 放弃后再重新规划"), and until now the command
+        # only flipped the posture -- so the user did what the error said and
+        # hit the same wall again.
+        #
+        # Only the plan profile goes: a goal is another line, with its own
+        # exit ("/goal off"), and the two must not step on each other.  The
+        # arm that is running is not touched either -- a command that lands
+        # while a turn is busy is queued (the posture flip above), and by the
+        # time it lands the runner has already disarmed on its way out.
+        task = getattr(session, "task", None)
+        gave_up = False
+        if (
+            task is not None
+            and getattr(task, "armed", False)
+            and getattr(task, "armed_profile", "") == "plan"
+        ):
+            gave_up = bool(task.disarm())
         _save_session(sessions, session)
+        if gave_up and task is not None:
+            # R06: the wire, too -- otherwise the front end keeps a card for
+            # a plan the user just gave up.
+            if observer is not None:
+                from ai_coding.core.events import TaskUpdated
+
+                try:
+                    observer.on_event(TaskUpdated(task=task))
+                except Exception:  # noqa: BLE001 — observation only
+                    pass
         if was_plan:
             msg = "[plan] 已退出计划模式（只读已关闭）。"
         elif was_readonly:
             msg = "[plan] 只读已关闭（本就不在计划模式）。"
         else:
             msg = "[plan] 本就不在计划模式；只读开关也确认关闭。"
-        open_n = len(session.task.open_items()) if getattr(session, "task", None) else 0
-        if open_n:
-            msg += f" 还有 {open_n} 项未执行（重新进入 Plan 模式可以继续）。"
+        if gave_up:
+            # The old hint said "you can continue" -- which contradicts
+            # giving the plan up: a new plan starts a fresh book.
+            msg += " 已放弃这份批准的计划，可以重新规划。"
+        else:
+            open_n = len(session.task.open_items()) if getattr(session, "task", None) else 0
+            if open_n:
+                msg += f" 还有 {open_n} 项未执行（重新进入 Plan 模式可以继续）。"
         console.info(msg)
         return REPLAction.CONTINUE, session
 

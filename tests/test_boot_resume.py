@@ -7,6 +7,9 @@ scan would miss exactly the common case).
 
 import json
 
+import pytest
+from rich.console import Console
+
 from ai_coding.domain.task import TaskState
 from ai_coding.server.world import find_armed_session
 from ai_coding.service.session_service import SessionService
@@ -63,3 +66,39 @@ def test_an_armed_session_with_an_unknown_profile_does_not_win(tmp_path):
     found = find_armed_session(service)
 
     assert found is not None and found.session_id == real.session_id
+
+
+# ---- D1 (20 §批次 4a): a plan the user gave up must stay given up ------------
+
+
+@pytest.mark.asyncio
+async def test_a_plan_given_up_is_not_picked_up_by_the_boot_resume(tmp_path):
+    """Giving up has to survive the restart.
+
+    The scan reads the pair (armed + a profile a runner can drive), so a
+    withdrawn approval -- the flag gone and the profile gone with it --
+    leaves the next boot nothing to pick up.  Half a withdrawal (the flag
+    alone) would leave a profile that owns nothing.
+    """
+    from ai_coding.app.commands import handle_input
+    from ai_coding.app.console import DialogueConsole
+
+    class _Loop:
+        """The posture half of the command layer's contract."""
+
+        def request_posture(self, session, *, mode=None, readonly=None):
+            session.mode = mode or session.mode
+            session.readonly = bool(readonly)
+            return True
+
+    service = SessionService(root=tmp_path / "sessions")
+    session = _armed(service, "plan", "2026-01-01T00:00:00Z")
+    console = DialogueConsole(Console(record=True, width=80))
+
+    assert find_armed_session(service) is not None, "the armed plan is the resume's"
+
+    await handle_input(_Loop(), "/plan off", session, service, console)
+
+    assert find_armed_session(service) is None, (
+        "a plan the user gave up must not come back on the next boot"
+    )
