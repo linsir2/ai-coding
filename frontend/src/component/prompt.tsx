@@ -24,7 +24,7 @@
 import type { TextareaRenderable } from "@opentui/core"
 import { TextAttributes } from "@opentui/core"
 import { useBindings, useKeymap } from "@opentui/keymap/solid"
-import { For, Show, createEffect, createSignal, onMount } from "solid-js"
+import { For, Show, createEffect, createSignal, onMount, untrack } from "solid-js"
 import { theme } from "../theme/tokens"
 import {
   type PasteOutcome,
@@ -283,11 +283,15 @@ export function Prompt(props: PromptProps) {
     const disabled = props.disabled === true
     const element = input
     if (!element) return
-    element.focusable = !disabled
     if (disabled) {
+      // Renderable.blur() refuses to run once `focusable` is false, so the
+      // keyboard has to be handed back before the flag drops -- otherwise the
+      // textarea keeps focus (and the card's digits land in the draft).
       element.blur()
-    } else if (wasDisabled && props.autofocus !== false) {
-      element.focus()
+      element.focusable = false
+    } else {
+      element.focusable = true
+      if (wasDisabled && props.autofocus !== false) element.focus()
     }
     wasDisabled = disabled
   })
@@ -299,7 +303,9 @@ export function Prompt(props: PromptProps) {
     // The cursor lands at 0 after setText; a pre-filled command must be
     // *completed* by typing, not prefixed (E2E caught "auto/permissions").
     if (input) input.cursorOffset = seed.length
-    if (props.disabled !== true) input?.focus()
+    // Untracked: only a new seed should re-run this effect.  Reading the prop
+    // directly made a card opening replay the seed and overwrite the draft.
+    if (untrack(() => props.disabled) !== true) input?.focus()
     props.onSeedDone?.()
   })
 
@@ -406,6 +412,7 @@ export function Prompt(props: PromptProps) {
           </box>
         </Show>
         <textarea
+          id="composer-input"
           ref={(element: TextareaRenderable) => (input = element)}
           onPaste={(event) => {
             // r21: with bracketed paste on, the terminal eats ctrl+v and hands

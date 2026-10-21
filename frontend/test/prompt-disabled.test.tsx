@@ -53,3 +53,66 @@ describe("Prompt disabled (D4)", () => {
     setup.renderer.destroy()
   })
 })
+
+describe("Prompt disabled releases the keyboard (D4)", () => {
+  test("a paused composer neither holds focus nor takes keys", async () => {
+    const base = await createTestRenderer({ width: 100, height: 20 })
+    const keymap = setupKeymap(base.renderer)
+    const disabled = createSignal(false)
+    const setup = await testRender(
+      () => (
+        <KeymapProvider keymap={keymap}>
+          <Prompt
+            placeholder="Ask anything…"
+            metadata="p · m"
+            seed="半句需求"
+            onSubmit={() => {}}
+            disabled={disabled[0]()}
+          />
+        </KeymapProvider>
+      ),
+      base,
+    )
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    const input = setup.renderer.root.findDescendantById("composer-input") as unknown as {
+      focus: () => void
+      plainText: string
+    }
+    expect(input).toBeDefined()
+    input.focus()
+    await setup.flush()
+    expect(setup.renderer.currentFocusedRenderable).toBe(input as never)
+
+    setup.mockInput.typeText("x")
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    expect(input.plainText).toContain("x")
+    const draft = input.plainText
+
+    // The card's turn: blur must actually run -- setting `focusable` first
+    // makes Renderable.blur() return early and the composer keeps the keyboard.
+    disabled[1](true)
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    expect(setup.renderer.currentFocusedRenderable).toBeNull()
+
+    setup.mockInput.typeText("y")
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    expect(input.plainText).toBe(draft)
+
+    // ...and the keyboard comes back when the card closes
+    disabled[1](false)
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    expect(setup.renderer.currentFocusedRenderable).toBe(input as never)
+    setup.mockInput.typeText("z")
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    expect(input.plainText).toContain("z")
+    expect(input.plainText.length).toBe(draft.length + 1)
+
+    setup.renderer.destroy()
+  })
+})
