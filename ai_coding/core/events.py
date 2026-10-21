@@ -359,6 +359,31 @@ class PlanStepReceipt:
 
 
 @dataclass(frozen=True)
+class ResearchConcluded:
+    """A plan-mode turn closed with a research conclusion (23).
+
+    The conclusion is the *deliverable* of the research exit, and a tool
+    result is the one channel that is lossy by design: the event carries 500
+    chars, the UI draws 120, and ``finish_research`` streams no chunks, so
+    the card cannot even be opened.  Measured on a real session, a 4116-char
+    conclusion reached the user as 120 chars.
+
+    So the conclusion gets its own channel, whole -- the shape
+    ``PlanStepReceipt`` has for a plan step's summary.  The tool output stays
+    what it is (the model's own history needs the conclusion there); this
+    event is what the *human* reads.
+
+    No turn id rides along: this is a content event, not a terminal one (the
+    turn still ends with its own ``turn.finished``), and the bridge's turn id
+    is only meaningful for the turns it launches -- a command's inner turn has
+    none.  ``PlanStepReceipt`` and ``AssistantMessage`` are the same shape of
+    event, and neither carries one.
+    """
+
+    summary: str
+
+
+@dataclass(frozen=True)
 class TaskUpdated:
     """The task list changed (emitted after a todo_write call)."""
 
@@ -495,6 +520,7 @@ LoopEvent = (
     | TaskUpdated
     | BackgroundTaskDone
     | PlanStepReceipt
+    | ResearchConcluded
     | JobChanged
     | LedgerUpdated
     | TurnFinished
@@ -570,6 +596,7 @@ __all__ = [
     "TaskUpdated",
     "BackgroundTaskDone",
     "PlanStepReceipt",
+    "ResearchConcluded",
     "JobChanged",
     "TurnFinished",
     "MemoryInjected",

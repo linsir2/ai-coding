@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from ai_coding.core.events import ResearchConcluded
 from ai_coding.core.request_assembly import human_utterance
 from ai_coding.domain.message import ToolResult
 from ai_coding.tools.base import BaseTool, ToolContext
@@ -233,6 +234,11 @@ class FinishResearchTool(BaseTool):
         # history.  Nothing else happens -- no items, no arm, no review card.
         if conclusion is not None:
             conclusion.exit = "finish_research"
+        # 23: the tool output is the model's history, but it is also the one
+        # lossy channel (500 chars in the event, 120 on the screen, and this
+        # tool streams no chunks so the card cannot be opened).  The human
+        # reads the conclusion, so it gets its own channel -- whole.
+        ctx.emit(ResearchConcluded(summary=summary))
         return ToolResult(
             success=True,
             output=summary,

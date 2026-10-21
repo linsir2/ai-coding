@@ -54,6 +54,8 @@ from ai_coding.ai.factory import build_engine_from_config  # noqa: E402
 from ai_coding.app.commands import handle_input  # noqa: E402
 from ai_coding.cli import _build_loop, _build_tool_registry  # noqa: E402
 from ai_coding.config.loader import ConfigLoader  # noqa: E402
+from ai_coding.core.events import ResearchConcluded  # noqa: E402
+from ai_coding.server.bridge import to_wire  # noqa: E402
 from ai_coding.service.session_service import SessionService  # noqa: E402
 
 #: A research question: something to find out, nothing to implement.  It does
@@ -72,6 +74,21 @@ SCENARIO_VERDICT = {
     "research": "the research exit was taken and nothing was planned",
     "implement": "the implementation request got a plan, not a conclusion",
 }
+
+
+class _RecordingObserver:
+    """Collects loop events so the scenario can assert on the wire shape.
+
+    The conclusion reaches the human as its own event; the script replays the
+    same mapping the frontend consumes (``bridge.to_wire``), so the assertion
+    proves what the screen will see.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    def on_event(self, event: Any) -> None:
+        self.events.append(event)
 
 
 def _tool_calls(session) -> list[dict[str, Any]]:
@@ -134,7 +151,8 @@ async def run(
         registry = _build_tool_registry(app_cfg, str(ws), None, user_prompt=review)
         engine = build_engine_from_config(app_cfg)
         sessions = SessionService(ws / "sessions")
-        loop = _build_loop(engine, sessions, registry, app_cfg, str(ws), None)
+        rec = _RecordingObserver()
+        loop = _build_loop(engine, sessions, registry, app_cfg, str(ws), None, observer=rec)
         session = sessions.create()
         started = time.monotonic()
 
@@ -144,6 +162,17 @@ async def run(
         calls = _tool_calls(session)
         results = _tool_results(session)
         task = session.task
+        # 23: what the human actually receives -- the wire form of the
+        # conclusion, whole.  The tool result is the lossy channel (500 chars
+        # in the event, 120 on the screen), so the conclusion rides its own
+        # event; this is the shape the frontend draws as prose.
+        conclusion_wires = [
+            wire
+            for e in rec.events
+            if isinstance(e, ResearchConcluded)
+            for wire in [to_wire(e)]
+            if wire is not None
+        ]
         state = {
             "posture": (session.mode, session.readonly),
             "items": len(task.items) if task else 0,
@@ -153,6 +182,7 @@ async def run(
             "present_plan_calls": [c for c in calls if c["name"] == "present_plan"],
             "tool_results": results,
             "console": list(console.lines),
+            "conclusion_wires": conclusion_wires,
         }
         await loop.aclose()
     finally:
@@ -199,6 +229,21 @@ def check(result: dict[str, Any]) -> list[str]:
         return problems
     if not result["finish_research_calls"]:
         problems.append("the model never took the research exit")
+    # 23: the conclusion must reach the human *whole*.  The tool result is the
+    # lossy channel (500 chars in the event, 120 on the screen), so the
+    # conclusion rides its own event -- and this is that event's wire form.
+    # The invariant is equality with what the model wrote, not a length: a
+    # short conclusion is legitimately short.
+    if not result["conclusion_wires"]:
+        problems.append("the conclusion was never announced to the user")
+    else:
+        announced = result["conclusion_wires"][0]["data"]["summary"]
+        written = json.loads(result["finish_research_calls"][0]["arguments"])["summary"]
+        if announced != written:
+            problems.append(
+                f"the conclusion reached the user altered "
+                f"({len(announced)} of {len(written)} chars)"
+            )
     if result["present_plan_calls"]:
         problems.append("the model submitted a plan for a research question")
     if result["review_questions"]:

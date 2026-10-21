@@ -553,6 +553,19 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
         return handoff ? [...settled, { kind: "text", text: handoff, streaming: false }] : settled
       })
     }
+    case "research.concluded": {
+      // 23: the conclusion is the deliverable of the research exit, and it
+      // rides its own channel because the tool result it also travels in is
+      // the lossy one (500 chars in the event, 120 on the screen, and the
+      // tool streams no chunks so the card cannot be opened).  Drawn as prose
+      // -- it is a report, and a report is markdown.
+      const summary = str(data["summary"])
+      if (!summary) return state
+      return updateAssistant(state, (parts) => [
+        ...parts,
+        { kind: "text", text: summary, streaming: false },
+      ])
+    }
     case "plan.receipt": {
       // E2 / D6: the runner's step head is its replay marker (synthetic, and
       // skipped by the reload); the summary is the one line the operator

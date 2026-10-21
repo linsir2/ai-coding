@@ -32,6 +32,15 @@ export function ToolCard(props: { part: ToolPart }) {
   // refusal reaches the operator.
   if (props.part.toolName === "todo_write" && props.part.status !== "failed") return null
 
+  // 23: same shape, one turn later.  A settled finish_research's conclusion is
+  // drawn as prose (the research.concluded event, and the persisted tool
+  // result on reload), so the card would only repeat the first 120 chars of
+  // it under a "ran a tool" heading -- which is exactly the "filed under a
+  // category instead of shown as an answer" the user reported.  A failure still
+  // draws: a refusal (already_concluded / implementation_request / ...) is
+  // the only thing that reaches the operator there.
+  if (props.part.toolName === "finish_research" && props.part.status !== "failed") return null
+
   // Per-card fold, like the reasoning block (A4 §3): view state, never state.
   const [expanded, setExpanded] = createSignal(false)
   const toggle = () => setExpanded((value) => !value)

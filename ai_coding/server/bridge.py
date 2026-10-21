@@ -45,6 +45,7 @@ from ai_coding.core.events import (
     PlanStepReceipt,
     ProviderFallback,
     ProviderRetried,
+    ResearchConcluded,
     ScopedEvent,
     TaskUpdated,
     ToolChunk,
@@ -223,6 +224,15 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
     if isinstance(event, PlanStepReceipt):
         return {
             "type": "plan.receipt",
+            "data": {"summary": event.summary},
+        }
+    if isinstance(event, ResearchConcluded):
+        # 23: the conclusion is a deliverable, so it travels whole -- the tool
+        # output it also rides is the lossy channel (500 chars in the event,
+        # 120 on the screen), and this tool streams no chunks, so the card
+        # cannot even be opened.
+        return {
+            "type": "research.concluded",
             "data": {"summary": event.summary},
         }
     if isinstance(event, JobChanged):

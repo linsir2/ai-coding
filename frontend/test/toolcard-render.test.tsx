@@ -154,4 +154,40 @@ describe("ToolCard", () => {
     expect(frame).toContain("门卫拦截")
     setup.renderer.destroy()
   })
+
+  // 23: the research conclusion is drawn as prose (the conclusion event, and
+  // the persisted tool result on reload), so its card would only repeat the
+  // first 120 chars under a "ran a tool" heading -- the "filed under a
+  // category" the user reported.  A refusal still draws: it is the only place
+  // that reaches the operator.
+  test("a settled finish_research draws no card", async () => {
+    const setup = await render(
+      part({
+        toolName: "finish_research",
+        verb: "运行工具",
+        target: "finish_research",
+        status: "ok",
+        preview: "## 调研结论：会话落盘机制 本仓库不包含会话持久化的源代码实现",
+      }),
+    )
+    const frame = setup.captureCharFrame()
+    expect(frame).not.toContain("finish_research")
+    expect(frame).not.toContain("调研结论")
+    setup.renderer.destroy()
+  })
+
+  test("a failed finish_research still draws its card", async () => {
+    const setup = await render(
+      part({
+        toolName: "finish_research",
+        verb: "运行工具",
+        target: "finish_research",
+        error: "implementation_request",
+      }),
+    )
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("finish_research")
+    expect(frame).toContain("该请求要实现")
+    setup.renderer.destroy()
+  })
 })

@@ -185,7 +185,8 @@ export function messagesToState(messages: WireMessage[]): SessionState {
       const callId = message.toolCallId ?? ""
       const content = message.content ?? ""
       const success = !content || !content.split("\n")[0]!.includes('ok="false"')
-      const text = shorten(stripEnvelope(content), PREVIEW_CHARS)
+      const body = stripEnvelope(content)
+      const text = shorten(body, PREVIEW_CHARS)
       for (const part of assistant.parts) {
         if (part.kind !== "tool" || part.callId !== callId) continue
         if (success) {
@@ -195,6 +196,13 @@ export function messagesToState(messages: WireMessage[]): SessionState {
           part.status = "failed"
           part.error = text
         }
+      }
+      // 23: the research conclusion is the deliverable of that exit, and the
+      // persisted tool result holds it whole (the 500/120 truncation is a
+      // *display* rule of the tool card, not of the transcript).  Draw it as
+      // prose here, exactly as the live path draws the conclusion event.
+      if (success && message.toolName === "finish_research" && body) {
+        assistant.parts.push({ kind: "text", text: body, streaming: false })
       }
     }
   }
