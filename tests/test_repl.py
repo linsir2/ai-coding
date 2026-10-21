@@ -14,6 +14,7 @@ from rich.console import Console
 from ai_coding.app.commands import REPLAction, handle_input
 from ai_coding.app.console import DialogueConsole
 from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
+from ai_coding.domain.loop import TurnOutcome, TurnStatus
 
 pytestmark = pytest.mark.asyncio
 
@@ -1030,3 +1031,99 @@ async def test_tasks_stop_of_an_unknown_job_says_so(tmp_path):
     )
 
     assert "no background job" in _session_text(c)
+
+
+# ---- E4 (20 §批次 4a): the turn's note reaches the terminal ------------------
+
+
+class _NotedLoop(_FakeLoop):
+    """A loop whose turn leaves a note behind.
+
+    The note is the harness's own line for the operator (the plan guard's
+    "no plan was submitted", the withdrawal's "the approval was taken
+    back").  It rides on the outcome, and the loop publishes the outcome
+    as ``last_outcome`` -- the same channel the plan branch already reads
+    the iteration status from.
+    """
+
+    def __init__(self, note: str = "") -> None:
+        super().__init__()
+        self.note = note
+        self._outcome = None
+
+    @property
+    def last_outcome(self):
+        return self._outcome
+
+    async def process_input(self, session, text, on_delta=None, observer=None):
+        answer = await super().process_input(
+            session, text, on_delta=on_delta, observer=observer
+        )
+        self._outcome = TurnOutcome(
+            status=TurnStatus.COMPLETED, text=answer, note=self.note
+        )
+        return answer
+
+
+#: The guard's own line (the real one is longer; the terminal wraps it).
+_NOTE = "[plan] 本回合未提交计划（未调用 present_plan / finish_research）；可继续对话让它提交。"
+_NOTE_HEAD = "本回合未提交计划"
+
+
+async def test_the_plain_turn_note_reaches_the_terminal():
+    """E4: the guard's terminal line was visible in the front end and
+    nowhere else -- the command layer had no reader for it at all, so
+    every hint the guard leaves on a turn ended in silence here.
+    """
+    loop = _NotedLoop(note=_NOTE)
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    session = sessions.items[0]
+    session.mode, session.readonly = "plan", True
+
+    await handle_input(loop, "帮我改个 bug", session, sessions, dc)
+
+    assert _NOTE_HEAD in _session_text(c)
+
+
+async def test_the_planning_turn_note_reaches_the_terminal():
+    """The other place a turn runs: the "/plan <topic>" branch."""
+    loop = _NotedLoop(note=_NOTE)
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    await handle_input(loop, "/plan 帮我改个 bug", sessions.items[0], sessions, dc)
+
+    assert _NOTE_HEAD in _session_text(c)
+
+
+async def test_a_turn_without_a_note_prints_nothing():
+    """No note, no line: the terminal is not a place for empty notices."""
+    loop = _NotedLoop(note="")
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    session = sessions.items[0]
+    session.mode, session.readonly = "plan", True
+
+    await handle_input(loop, "帮我改个 bug", session, sessions, dc)
+
+    assert _session_text(c) == ""
+
+
+async def test_a_command_that_runs_no_turn_does_not_repeat_the_last_note():
+    """The stale case: the command paths do not run turns, so the outcome
+    they would read is the *previous* turn's.  Printing it would be
+    information about a turn that already ended.
+    """
+    loop = _NotedLoop(note=_NOTE)
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    session = sessions.items[0]
+    session.mode, session.readonly = "plan", True
+    await handle_input(loop, "帮我改个 bug", session, sessions, dc)
+
+    dc2, c2 = _console_capture()
+    await handle_input(loop, "/plan off", session, sessions, dc2)
+
+    assert _NOTE not in _session_text(c2)
+

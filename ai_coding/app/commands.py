@@ -106,10 +106,19 @@ async def handle_input(
                     f"unknown command '{token}' — did you mean '/{suggestion}'?"
                 )
                 return REPLAction.CONTINUE, session
+        before = getattr(loop, "last_outcome", None)
         answer = await run_human_turn(
             loop, session, text, console=console,
             on_delta=console.delta, observer=observer,
         )
+        # E4: the turn's own note -- the plan guard's "no plan was
+        # submitted", the withdrawal's "the approval was taken back".  The
+        # front end reads it off the turn.finished event; the command layer
+        # had no reader for it at all, so every hint the guard leaves ended
+        # in silence here.
+        note = _turn_note(loop, before)
+        if note:
+            console.info(note)
         if answer and not answer.endswith("\n"):
             console.rule("")
         return REPLAction.CONTINUE, session
@@ -278,6 +287,22 @@ def _save_session(sessions: Any, session: Any) -> None:
     save = getattr(sessions, "save", None)
     if save is not None:
         save(session)
+
+
+def _turn_note(loop: Any, before: Any) -> str:
+    """The note the turn that just ran left behind, if it left one.
+
+    ``last_outcome`` is the loop's own channel (the plan branch already
+    reads the iteration status from it), so the note needs no new one.  A
+    turn replaces the outcome with a fresh one, so comparing against the
+    one from before the turn is what says whether a turn ran at all: the
+    command paths do not run turns, and the previous turn's note would be
+    stale information about a turn that already ended.
+    """
+    after = getattr(loop, "last_outcome", None)
+    if after is None or after is before:
+        return ""
+    return str(getattr(after, "note", "") or "")
 
 
 def _goal_budget_warning(loop: Any, task: Any) -> str:
@@ -591,9 +616,17 @@ async def _handle_plan(
         console.info("[plan] 已在计划模式；回合结束后直接描述主题即可。")
         return REPLAction.CONTINUE, session
 
+    before = getattr(loop, "last_outcome", None)
     report = await plan_only(
         loop, session, topic=rest, on_delta=console.delta, observer=observer
     )
+    # E4: the planning round's own note ("no plan was submitted", "the
+    # approval was taken back").  Same channel, same reader as the plain
+    # turn's -- and the same rule: only a turn that actually ran may be
+    # reported (the refusals below return before the turn runs).
+    note = _turn_note(loop, before)
+    if note:
+        console.info(note)
     if report.stopped:
         console.error(f"[plan] {report.stopped}")
         return REPLAction.CONTINUE, session
