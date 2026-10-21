@@ -313,6 +313,11 @@ class EventBridge:
         #: its own terminal event after ``handle_input`` returns.  Mirrors
         #: the old TUI, which wrapped one command in one assistant block.
         self.command_run = False
+        #: The turn ``_launch_turn`` assigned to the live round (D7).  The
+        #: loop's own ``TurnFinished`` rides this bridge, so without the id the
+        #: client could not tell it from a command's ending; every terminal
+        #: event on the wire names its turn.
+        self.turn_id: int | None = None
 
     def on_delta(self, text: str) -> None:
         self._notify("event", {"type": "text.delta", "data": {"text": text}})
@@ -334,4 +339,12 @@ class EventBridge:
         if message is not None:
             if self.command_run and message["type"] == "turn.finished":
                 message = {**message, "type": "turn.step"}
+            elif message["type"] == "turn.finished" and self.turn_id is not None:
+                # D7: a terminal event names its turn.  A command's ending and
+                # the prompt submitted right after it are two different turns;
+                # without the id the client cannot tell which busy it frees.
+                message = {
+                    **message,
+                    "data": {**message["data"], "turnId": self.turn_id},
+                }
             self._notify("event", message)

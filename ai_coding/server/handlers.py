@@ -444,6 +444,12 @@ def make_handlers(
         ``turn.finished`` error event -- is the contract both callers need, and
         writing it twice is how the two drift apart.
         """
+        state.turn_id += 1
+        turn_id = state.turn_id
+        # D7: the bridge stamps the loop's live TurnFinished with this id.  The
+        # ack already carries it, so both ends of the turn agree on its name.
+        bridge.turn_id = turn_id
+
         async def guarded() -> None:
             try:
                 await run()
@@ -465,15 +471,16 @@ def make_handlers(
                             "iterations": 0,
                             "truncatedByLength": False,
                             "handoff": "",
+                            # the only ending a broken runner gets (D7)
+                            "turnId": turn_id,
                         },
                     },
                 )
 
-        state.turn_id += 1
         future = service.spawn(guarded())
         state.turn_futures.add(future)
         future.add_done_callback(_watch_turn)
-        return state.turn_id
+        return turn_id
 
     def _notify_terminal_turn(
         session: Any,
@@ -482,6 +489,7 @@ def make_handlers(
         reason: str,
         action: str,
         history_before: int,
+        turn_id: int,
         reload_in_place: bool = False,
     ) -> None:
         """The one end a multi-turn runner owes the client (P0-3).
@@ -507,6 +515,8 @@ def make_handlers(
                     "truncatedByLength": False,
                     "handoff": "",
                     "action": action,
+                    # D7: the turn this ending belongs to (the ack's id).
+                    "turnId": turn_id,
                     # the live session after the run (a NEW_SESSION action has
                     # switched it)
                     "sessionId": state.session_id,
@@ -569,6 +579,11 @@ def make_handlers(
         bypass.
         """
 
+        # Filled by ``_launch_turn`` below, before the task first runs: this
+        # handler is synchronous, so the coroutine cannot start earlier.  The
+        # run's one terminal event names the turn it ends (D7).
+        turn_id = 0
+
         async def run_resume() -> None:
             task = getattr(session, "task", None)
             # Count BEFORE resuming: if this resume crashes too, the count is
@@ -625,9 +640,10 @@ def make_handlers(
                 reason=reason,
                 action="continue",
                 history_before=history_before,
+                turn_id=turn_id,
             )
 
-        _launch_turn(run_resume)
+        turn_id = _launch_turn(run_resume)
 
     def session_prompt(params: dict[str, Any]) -> dict[str, Any]:
         """Start a real turn; events reach the client through the bridge."""
@@ -863,6 +879,7 @@ def make_handlers(
                 reason=reason,
                 action=action_name,
                 history_before=history_before,
+                turn_id=turn_id,
                 reload_in_place=reload_in_place,
             )
             if action_name == "quit" and shutdown is not None:

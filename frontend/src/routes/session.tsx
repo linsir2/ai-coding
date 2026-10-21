@@ -144,6 +144,11 @@ export function Session(props: SessionProps) {
     void props.client
       .request(method, payload)
       .then((ack: unknown) => {
+        // D7: the ack names the turn this request started; its terminal event
+        // will name it too.  Registering the id here is what lets the reducer
+        // tell this ending from an older turn's.
+        const turnId = Number((ack as { turnId?: unknown } | null)?.turnId ?? 0)
+        if (Number.isInteger(turnId) && turnId > 0) apply({ kind: "turn-started", turnId })
         // r20/F5: the backend refuses a paste it cannot store (bad mime, corrupt
         // payload, over the budget) and says so in the ack.  The transcript has
         // already drawn the picture, so without this the user watches an image
@@ -316,9 +321,12 @@ export function Session(props: SessionProps) {
           // The turn's wire events stream back like a prompted turn's; a
           // refusal (stale keypress) surfaces the same way a failed submit
           // does, which also releases `busy`.
-          void resumeSession(props.client, props.sessionId).catch((error) =>
-            apply({ kind: "submit-failed", reason: String(error) }),
-          )
+          void resumeSession(props.client, props.sessionId)
+            .then((ack) => {
+              // D7: the resumed turn's ending will name this id.
+              if (ack.turnId > 0) apply({ kind: "turn-started", turnId: ack.turnId })
+            })
+            .catch((error) => apply({ kind: "submit-failed", reason: String(error) }))
         },
       },
       {
@@ -512,10 +520,12 @@ export function Session(props: SessionProps) {
           dispatch("/plan run")
         }
         // One queued line per finished turn (deferred when the plan run won
-        // this end-of-turn slot).  The server row goes with it, best-effort:
-        // a local-only row has nothing to delete and the server ignores ids
-        // it never saw, so both kinds dispatch exactly the same way.
-        const next = ranPlanRun ? undefined : state.queued[0]
+        // this end-of-turn slot, or when the ending was not this turn's --
+        // the prelude's terminal lands while the prompt is still running).
+        // The server row goes with it, best-effort: a local-only row has
+        // nothing to delete and the server ignores ids it never saw, so both
+        // kinds dispatch exactly the same way.
+        const next = ranPlanRun || state.busy ? undefined : state.queued[0]
         if (next !== undefined) {
           apply({ kind: "queued-dispatched" })
           void props.client

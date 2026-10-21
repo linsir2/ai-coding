@@ -109,6 +109,12 @@ export interface SessionState {
   messages: ChatMessage[]
   /** True from submit until the turn's finish event; gates the prompt. */
   busy: boolean
+  /**
+   * D7: the turn this client started and has not seen end (the ack's id).
+   * A terminal event only settles if it names this turn -- a command's ending
+   * can land while the prompt submitted after it is still running.
+   */
+  turnId?: number
   /** Lines typed while a turn was running; one is dispatched per finished turn. */
   queued: QueuedLine[]
   /**
@@ -145,6 +151,8 @@ export type Action =
   // command's own terminal "turn.finished" is what frees the composer
   // again -- the same contract a typed command has always had.
   | { kind: "command-started" }
+  /** D7: the backend named the turn this request just started (the ack). */
+  | { kind: "turn-started"; turnId: number }
   | { kind: "queued"; id: string; text: string }
   | { kind: "queued-dispatched" }
   /** Replace the list with the backend's rows (mount, reload, panel edits). */
@@ -719,6 +727,11 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
       return { ...state, messages: retireOldest(messages, true) }
     }
     case "turn.finished": {
+      // D7: an ending settles the turn it names.  Home's /plan prelude and the
+      // prompt submitted right after it are two turns; the command's ending
+      // must not free a composer the prompt already took.
+      const ending = num(data["turnId"])
+      if (ending !== 0 && state.turnId !== ending) return state
       const handoff = str(data["handoff"])
       // stage 4 r2: the plan guard's terminal line (a muted notice, not the
       // red turn-end marker -- the turn itself completed fine).
@@ -733,7 +746,7 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
         if (marker) next = [...next, { kind: "turn-end", tone: "error", text: marker }]
         return next
       })
-      return { ...updated, busy: false }
+      return { ...updated, busy: false, turnId: undefined }
     }
     default: {
       const build = notices[event.type]
@@ -825,6 +838,10 @@ export function reduce(state: SessionState, action: Action): SessionState {
       return { ...state, busy: true }
     case "command-started":
       return { ...state, busy: true }
+    case "turn-started":
+      // Identity only: the busy flag already went up on the way in, and a
+      // steer's "submitted" must not detach the running turn (D7).
+      return { ...state, turnId: action.turnId }
     case "queued":
       // The user message lands now (the retired Textual UI appended at submit
       // too); the turn itself starts when the running one ends.

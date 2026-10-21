@@ -370,6 +370,59 @@ async def test_session_command_inner_turns_are_steps_not_endings(ipc):
 
 
 @pytest.mark.asyncio
+async def test_a_command_terminal_names_the_turn_its_ack_returned(ipc):
+    """D7: the ack hands the client a turn id, and the terminal event must
+    name that same turn.
+
+    The client cannot tell "the command I started ended" from "the prompt I
+    sent afterwards ended" unless both events agree on the id; without it the
+    command's ending clears the busy flag of a turn that is still running
+    (the Home + shift+tab submission showed a free composer mid-turn).
+    """
+    _world, _service, client = ipc
+    client.request("initialize")
+    ack = client.request("session.command", {"text": "/help"})
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert client.events[-1]["type"] == "turn.finished"
+    assert client.events[-1]["data"]["turnId"] == ack["turnId"]
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_terminal_names_the_turn_its_ack_returned(ipc):
+    """The live TurnFinished rides the bridge, not the command runner: the
+    bridge must stamp the id ``_launch_turn`` assigned, not leave the field
+    off and let the client fall back to "any ending will do"."""
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop.script = [
+        lambda obs, _delta: obs.on_event(
+            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="done"))
+        )
+    ]
+    ack = client.request("session.prompt", {"text": "one"})
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert client.events[-1]["type"] == "turn.finished"
+    assert client.events[-1]["data"]["turnId"] == ack["turnId"]
+
+
+@pytest.mark.asyncio
+async def test_an_escaped_turn_failure_names_the_turn_that_escaped(ipc):
+    """``_launch_turn``'s guard emits its own terminal event; it is the only
+    ending a broken runner gets, so it must carry the turn id too."""
+    world, _service, client = ipc
+    client.request("initialize")
+
+    async def boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("boom")
+
+    world.loop.process_input = boom
+    ack = client.request("session.prompt", {"text": "one"})
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert client.events[-1]["data"]["status"] == "error"
+    assert client.events[-1]["data"]["turnId"] == ack["turnId"]
+
+
+@pytest.mark.asyncio
 async def test_session_command_quit_reports_the_action(ipc):
     _world, _service, client = ipc
     client.request("initialize")
