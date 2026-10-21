@@ -131,6 +131,16 @@ export function Home(props: HomeProps) {
           skills={props.skills}
           files={props.files}
         />
+        {/* E1: the posture toggle is a key, not a menu item -- oc's prompt
+            footer says its shortcut out loud; the row is the only place a
+            cold-start user can learn shift+tab exists (17 号稿: the status
+            bar turned to PLAN with nothing saying why). */}
+        <box paddingTop={1} flexDirection="row" gap={1}>
+          <text fg={theme.textBase}>shift+tab</text>
+          <text fg={theme.textMuted}>
+            {mode() === "plan" ? "退出计划" : "计划模式"}
+          </text>
+        </box>
       </box>
       <box flexGrow={1} />
       {showFooter() ? (
