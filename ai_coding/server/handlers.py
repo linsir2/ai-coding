@@ -329,7 +329,7 @@ def make_handlers(
             profile = str(getattr(task, "armed_profile", "") or "plan")
             label = "目标" if profile == "goal" else "计划"
             if int(getattr(task, "resume_count", 0) or 0) >= _MAX_BOOT_RESUMES:
-                task.armed = False
+                task.disarm()
                 _persist_session(world, session)
                 resume_note = (
                     f"[{profile}] 自动续跑已达上限（{_MAX_BOOT_RESUMES} 次），"
@@ -731,7 +731,7 @@ def make_handlers(
         session = getattr(state, "session", None)
         task = getattr(session, "task", None) if session is not None else None
         if task is not None and getattr(task, "armed", False):
-            task.armed = False
+            task.disarm()
             _persist_session(world, session)
         # A stop is not a latch's business (2026-10-17): a wake waiting for the
         # runway must not open a turn right after the user hit Esc -- dsh

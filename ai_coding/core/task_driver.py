@@ -127,9 +127,13 @@ class TaskDriver:
             if profile.should_stop(report, item):
                 break
         # 11-spec §5.3: every stop path disarms; the profile's persist then
-        # carries it to disk.  Guarded so the fake-profile tests can drive a
-        # bare object.
-        if hasattr(task, "armed"):
+        # carries it to disk.  ``TaskState.disarm`` is the one way to give a
+        # task up (the flag and its profile go together).  The bare-object
+        # branch stays: the driver is duck-typed, and the fake-profile tests
+        # drive a plain object that has no profile to clear.
+        if hasattr(task, "disarm"):
+            task.disarm()
+        elif hasattr(task, "armed"):
             task.armed = False
         profile.persist(session)
         profile.finish(console, report)

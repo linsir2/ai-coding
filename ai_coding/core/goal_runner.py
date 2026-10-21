@@ -164,8 +164,7 @@ class GoalRunner:
             )
         finally:
             if task is not None:
-                if getattr(task, "armed", False):
-                    task.armed = False
+                if task.disarm():
                     self._persist(session)
                 # Driver-path stops disarm inside TaskDriver; this emission
                 # covers every exit, cancellation included.

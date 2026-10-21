@@ -289,3 +289,39 @@ def test_tokens_used_round_trips_and_arm_goal_resets_it():
     assert task.rounds_run == 0 and task.resume_count == 0
 
 
+# ---- 20 §批次 4a: one way to give a task up ----------------------------------
+
+
+def test_disarm_gives_the_task_up_and_says_whether_it_was_armed():
+    """The one way to give a task up: the flag and its profile go together.
+
+    Nine places used to do this by hand, and they had to agree.  An armed
+    task with no profile is one the boot resume will not pick up
+    (``server/world.py``'s profile whitelist), so a half-disarmed task is a
+    task nobody finishes and nobody can see.  One method, so they cannot
+    drift.
+    """
+    task = TaskState(goal="g", armed=True, armed_profile="plan")
+
+    assert task.disarm() is True
+    assert task.armed is False
+    assert task.armed_profile == ""
+
+
+def test_disarm_is_idempotent():
+    """Giving up a task twice is still giving up a task: the second call
+    reports that there was nothing left to give up.  The command path and the
+    runner's own exit both disarm, and they must not fight."""
+    task = TaskState(goal="g", armed=True, armed_profile="plan")
+
+    assert task.disarm() is True
+    assert task.disarm() is False
+    assert task.armed is False
+    assert task.armed_profile == ""
+
+    # A task that was never armed is not armed either way.
+    plain = TaskState(goal="g")
+    assert plain.disarm() is False
+    assert plain.armed is False and plain.armed_profile == ""
+
+

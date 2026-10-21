@@ -336,8 +336,7 @@ async def _handle_goal(
     rest = raw[len("/goal"):].strip()
 
     if rest.lower() == "off":
-        if task is not None and getattr(task, "armed", False):
-            task.armed = False
+        if task is not None and task.disarm():
             _save_session(sessions, session)
             # G2: the off path emits too -- an idle stop must clear the
             # sidebar's goal line without waiting for another run's arm.

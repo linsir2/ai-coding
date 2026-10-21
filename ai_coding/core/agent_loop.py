@@ -988,8 +988,7 @@ class AgentLoop:
                         getattr(task, "armed", False)
                         and getattr(task, "armed_profile", "") == "plan"
                     ):
-                        task.armed = False
-                        task.armed_profile = ""
+                        task.disarm()
                     outcome = TurnOutcome(
                         status=TurnStatus.COMPLETED,
                         text=step.text,
@@ -1476,8 +1475,7 @@ class AgentLoop:
             and getattr(task, "armed", False)
             and getattr(task, "armed_profile", "") == "plan"
         ):
-            task.armed = False
-            task.armed_profile = ""
+            task.disarm()
         return self.closer.close(
             session,
             user_input=user_input,

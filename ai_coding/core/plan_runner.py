@@ -321,20 +321,6 @@ def outside_workspace_message(paths: Sequence[str]) -> str:
     )
 
 
-def _disarm(task: Any) -> bool:
-    """Withdraw the plan's arm; report whether anything changed.
-
-    ``armed_profile`` goes with it, the same pair ``agent_loop``'s dismissal
-    branch clears: a profile with nothing armed is a profile that owns
-    nothing, and the boot resume reads the pair to decide what it may run.
-    """
-    if not getattr(task, "armed", False):
-        return False
-    task.armed = False
-    task.armed_profile = ""
-    return True
-
-
 def _persist_session(loop: Any, session: Any) -> None:
     """Write the session back, if this loop has a way to do it.
 
@@ -424,7 +410,7 @@ async def plan_only(
         # approval is what armed the task.  Refusing the plan must withdraw
         # that approval: an armed plan the runner would refuse anyway stays on
         # disk, and the boot resume would pick it up and run it.
-        if task is not None and _disarm(task):
+        if task is not None and task.disarm():
             _persist_session(loop, session)
             _emit_task(observer, task)
         return PlanReport(stopped=outside_workspace_message(offenders))
@@ -567,7 +553,7 @@ class PlanRunner:
         if offenders:
             refused = self.new_report()
             refused.stopped = outside_workspace_message(offenders)
-            if task is not None and _disarm(task):
+            if task is not None and task.disarm():
                 self._persist(session)
                 self._emit_task(observer, task)
             return refused
@@ -593,8 +579,7 @@ class PlanRunner:
             # disarmed already; the shared object makes both writes benign).
             # The driver disarms on its normal paths; this covers cancellation.
             if task is not None:
-                if getattr(task, "armed", False):
-                    task.armed = False
+                if task.disarm():
                     self._persist(session)
                 # R06: whichever layer disarmed (the driver's normal exit or
                 # this finally), the final state reaches the wire.

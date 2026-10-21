@@ -155,6 +155,25 @@ class TaskState:
         self.armed = True
         self.armed_profile = "goal"
 
+    def disarm(self) -> bool:
+        """Give the task up: not armed, and owned by nobody.
+
+        Nine places did this by hand, and they had to agree: an armed task
+        with no profile is one the boot resume will not pick up
+        (``server/world.py``'s profile whitelist), so a half-disarmed task is
+        a task nobody finishes and nobody can see.  One method, so they
+        cannot drift.
+
+        Returns whether the task was armed -- the caller's cue that
+        something changed and the state is worth persisting.  Idempotent:
+        giving up a task twice reports the second time that there was
+        nothing left to give up.
+        """
+        was_armed = bool(self.armed)
+        self.armed = False
+        self.armed_profile = ""
+        return was_armed
+
     def add(
         self,
         content: str,
