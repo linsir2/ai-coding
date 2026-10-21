@@ -57,6 +57,19 @@ PLAN_NUDGE = (
 PLAN_UNSUBMITTED_NOTE = (
     "[plan] 本回合未提交计划（未调用 present_plan / finish_research）；可继续对话让它提交。"
 )
+#: How many rounds of the exploration budget are kept for handing something
+#: over.  Three: the model is asked for an exit while it still has rounds to
+#: write the exit in, and it is asked while it is still exploring -- not
+#: after it has given up.
+#:
+#: Why it has to come early.  In the production session 135cc71c the model
+#: stopped on its own in round 19 and wrote its answer in prose; only then
+#: did the guard chase it for an exit.  The model had already changed its
+#: mind by then: the plan it wrote on the spot named paths outside the
+#: workspace, hit the workspace gate, and the turn went into a random retry
+#: loop.  Asked while it is still exploring, it has material to choose from
+#: and picks the exit that fits the request -- a plan or a conclusion.
+PLAN_WRAPUP_ROUNDS = 3
 #: The mouths a nudge cannot buy anything at: the clock is already over and
 #: the token ceiling is already reached, so the round a nudge asks for would
 #: run into the very same wall.  The plan guard reads this (A4) and finishes
@@ -318,6 +331,23 @@ class TurnPolicy:
         token_gate = bool(self.config.max_turn_tokens) and (
             snapshot.tokens_spent >= self.config.max_turn_tokens
         )
+        if snapshot.mode == "plan" and not snapshot.plan_nudged:
+            # The budget's edge is the last chance to ask for an exit while
+            # the model still has something to hand over -- and it is asked
+            # before the iteration ceiling on purpose: the round that hits
+            # the ceiling goes to _finish_at(..., "iteration", ...) and the
+            # guard takes it from there, so an ask that came after the
+            # ceiling check would be one round too late.
+            remaining = self.config.max_iterations - snapshot.iteration
+            if 0 < remaining <= PLAN_WRAPUP_ROUNDS:
+                # The guard's own reason and its own text.  The loop's
+                # accounting branch matches on the reason, so this ask spends
+                # the same remedy the guard spends: one ask per turn, and the
+                # guard stays quiet afterwards (no second mouth, no second
+                # ledger).
+                return TurnDecision(
+                    TurnAction.NUDGE, "plan unsubmitted", inject=PLAN_NUDGE
+                )
         if snapshot.iteration > self.config.max_iterations:
             # C3: the budget is gone but the work is not — open items mean the
             # model never finished, so inject a continuation prompt and start a
