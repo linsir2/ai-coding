@@ -969,6 +969,37 @@ class AgentLoop:
                         note=PLAN_RESEARCH_NOTE,
                     )
                     break
+                # N1: the plan exit closes the turn too.  An approval is the
+                # exit's success (占位 = 成功): the human said yes, the plan is
+                # armed, and the runner is about to execute it -- so the
+                # planning round has nothing left to say.
+                #
+                # This branch was missing, and the model kept exploring after
+                # the review card came back approved: the planning budget ran
+                # out, the turn ended *badly*, and a badly ended turn is the
+                # one thing that makes the close take the approval back (W2) --
+                # the operator had approved a plan and the system silently
+                # undid it (measured: scripts/plan_lifecycle_live_check.py,
+                # the [swap] scenario).
+                #
+                # It reads the turn's conclusion, not the batch's results: the
+                # holder is the one thing that says "this turn has an exit"
+                # (present_plan sets it on approval, present_plan_tool.py:324),
+                # and the two exits are mutually exclusive by construction --
+                # so a research conclusion and an approval cannot ride the
+                # same batch, and the order of the two branches is free.
+                #
+                # It comes after the halt above, because a batch the operator
+                # stopped did not end cleanly, and the withdrawal at the close
+                # is the right answer for that (W2).
+                if conclusion.exit == "present_plan":
+                    outcome = TurnOutcome(
+                        status=TurnStatus.COMPLETED,
+                        text=step.text,
+                        iterations=books.total_iterations,
+                        reason="plan approved",
+                    )
+                    break
                 # R08 (dsh): a dismissed review (esc / empty on the card) ends
                 # the turn right here -- the user said "not now", not "not
                 # this".  No nudge, no arm, no auto-run; the note tells the
