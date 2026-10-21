@@ -456,6 +456,21 @@ async def main(args: argparse.Namespace) -> int:
         if args.out_dir
         else Path(f"/tmp/opencode/plan-life-{int(time.time())}")
     )
+    # A reused out dir mixes two runs' artifacts, and the assertions read
+    # them: the boot-resume check scans every session file under the out
+    # dir, so a leftover armed session from an earlier run makes a clean run
+    # look broken (measured: two runs into one dir reported two failures
+    # that a clean run does not reproduce).  Nothing here is deleted, so the
+    # safe move is to refuse rather than to clean.
+    if args.out_dir and out_root.is_dir() and any(out_root.iterdir()):
+        print(
+            f"PLAN LIFECYCLE ERROR: the out dir is not empty: {out_root}\n"
+            "  Each run needs its own out dir (the artifacts are kept, never "
+            "deleted).  Use a fresh --out-dir, or drop the flag to get a "
+            "timestamped one.",
+            file=sys.stderr,
+        )
+        return 3
     out_root.mkdir(parents=True, exist_ok=True)
     print(f"model={model['name']}  upstream={model['base_url']}")
     print(f"artifacts: {out_root}")
