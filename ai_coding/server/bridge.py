@@ -145,6 +145,10 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
         # 20 §批次2: the list itself, not a pre-rendered display -- the UI
         # draws checkboxes from items (the model-facing rendering stays in
         # TaskState.render).
+        # D5: the item's own wire shape, not a hand-rolled subset -- the
+        # recovery path (`session.load` -> `task.to_dict()`) already speaks
+        # it, so the live card and the recovered card cannot drift.  The
+        # reducer drops keys the card does not read.
         return {
             "type": "plan.updated",
             "data": {
@@ -156,10 +160,7 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
                 "roundsRun": int(task.rounds_run),
                 "tokensUsed": int(task.tokens_used),
                 "goalPhase": task.goal_phase,
-                "items": [
-                    {"id": item.id, "content": item.content, "status": item.status}
-                    for item in task.items
-                ],
+                "items": [item.to_dict() for item in task.items],
             },
         }
     if isinstance(event, LedgerUpdated):

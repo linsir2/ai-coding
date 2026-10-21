@@ -141,6 +141,26 @@ def test_plan_updated_carries_the_structured_list() -> None:
     }
 
 
+def test_plan_updated_carries_verify_and_depends_on() -> None:
+    """D5: the live card must show what approval will run -- the wire has to
+    carry the item's proof command and its dependencies, not just id/content.
+
+    The recovery path (`session.load` -> `task.to_dict()`) already carries
+    them; the live event hand-rolls a subset and drops them.  One contract
+    for the item's wire shape, so reload and live cannot drift.
+    """
+    task = TaskState(goal="g")
+    task.add("step one", verify="test -f a", depends_on=["2"])
+    task.add("step two")
+    wire = to_wire(TaskUpdated(task=task))
+    assert wire is not None
+    assert wire["data"]["items"] == [
+        {"id": "1", "content": "step one", "status": "pending",
+         "verify": "test -f a", "dependsOn": ["2"]},
+        {"id": "2", "content": "step two", "status": "pending"},
+    ]
+
+
 def test_ledger_updated_items() -> None:
     item = UncertaintyItem(id="u1", question="is it?", level="high", evidence=("log line",))
     wire = to_wire(LedgerUpdated(items=(item,)))
