@@ -1154,19 +1154,28 @@ describe("the plan guard's terminal note (stage 4 r2)", () => {
 })
 
 
-describe("plan.receipt (E2)", () => {
-  test("a receipt appends the step head and its summary as two bubbles", () => {
+describe("plan.receipt (E2 / D6)", () => {
+  test("a receipt appends only the summary the operator reads", () => {
+    // The step head is the runner's replay marker, not something the
+    // operator said (D6): live draws one assistant line, and so does reload.
     const after = feed(initialState(), {
       kind: "wire",
       event: {
         type: "plan.receipt",
-        data: { prompt: "只做这一步，不要做别的：fix bug", summary: "步骤 1 完成" },
+        data: { summary: "步骤 1 完成" },
       } as never,
     })
 
-    expect(after.messages.map((m) => m.role)).toEqual(["user", "assistant"])
-    expect(JSON.stringify(after.messages[0]?.parts)).toContain("只做这一步")
-    expect(JSON.stringify(after.messages[1]?.parts)).toContain("步骤 1 完成")
+    expect(after.messages.map((m) => m.role)).toEqual(["assistant"])
+    expect(JSON.stringify(after.messages[0]?.parts)).toContain("步骤 1 完成")
+  })
+
+  test("an empty receipt draws nothing", () => {
+    const after = feed(initialState(), {
+      kind: "wire",
+      event: { type: "plan.receipt", data: { summary: "" } } as never,
+    })
+    expect(after.messages).toHaveLength(0)
   })
 })
 

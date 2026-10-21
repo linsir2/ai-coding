@@ -344,6 +344,31 @@ async def test_a_failed_step_still_leaves_a_replay_marker():
 
 
 @pytest.mark.asyncio
+async def test_the_step_marker_is_bookkeeping_not_the_operators_words():
+    """D6: the replay marker is the harness writing about the run.
+
+    Stored unstamped, it was indistinguishable from something the operator
+    typed: request assembly kept it as human history, /undo and compaction
+    treated it as such, and the live card drew "只做这一步，不要做别的：" as a
+    user bubble.  The receipt's summary is the only part a human reads.
+    """
+    loop = _StubLoop(["complete"])
+    session = _session_with("实现某功能")
+
+    await PlanRunner(loop).run(session)
+
+    markers = [
+        message
+        for message in session.messages
+        if message.role == "user" and (message.content or "").startswith(STEP_HEAD)
+    ]
+    assert markers, "the step left no replay marker"
+    assert all(message.synthetic for message in markers)
+    summaries = [message for message in session.messages if message.role == "assistant"]
+    assert summaries and not any(message.synthetic for message in summaries)
+
+
+@pytest.mark.asyncio
 async def test_arm_is_durable_before_rounds_and_cleared_after():
     """11-plan T4 (audit addendum): the run arms the task and persists it
     BEFORE the first round (crash point ①), counts the round, and the
@@ -408,10 +433,15 @@ async def test_a_step_receipt_reaches_a_wired_observer():
 
     receipts = observer.of_type(PlanStepReceipt)
     assert len(receipts) == 2, f"one receipt per step, got {len(receipts)}"
-    assert "fix bug" in receipts[0].prompt and "fix bug" in receipts[0].summary
-    # The event carries exactly the two bubbles the replay will show.
-    bubbles = [m.content for m in session.messages if m.role == "user"]
-    assert any(receipts[0].prompt == text for text in bubbles)
+    assert "fix bug" in receipts[0].summary
+    # The step head stays in the parent's book as the replay marker, stamped
+    # synthetic (D6): the wire carries only the line a human reads.
+    markers = [
+        message
+        for message in session.messages
+        if message.role == "user" and (message.content or "").startswith(STEP_HEAD)
+    ]
+    assert markers and all(message.synthetic for message in markers)
 
 
 @pytest.mark.asyncio

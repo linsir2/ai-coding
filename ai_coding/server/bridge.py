@@ -223,7 +223,7 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
     if isinstance(event, PlanStepReceipt):
         return {
             "type": "plan.receipt",
-            "data": {"prompt": event.prompt, "summary": event.summary},
+            "data": {"summary": event.summary},
         }
     if isinstance(event, JobChanged):
         return {"type": "job.changed", "data": {"jobs": [dict(row) for row in event.jobs]}}

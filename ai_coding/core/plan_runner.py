@@ -1066,7 +1066,12 @@ class PlanRunner:
         sorts or trims by it.
         """
         now = now_utc()
-        session.add_message(ChatMessage(role="user", content=prompt, timestamp=now))
+        # D6: the step head is the harness's replay marker, not something the
+        # operator said.  Stamped, request assembly / undo / compaction leave
+        # it alone, and replay can skip it by the class rather than a prefix.
+        session.add_message(
+            ChatMessage(role="user", content=prompt, timestamp=now, synthetic=True)
+        )
         session.add_message(ChatMessage(role="assistant", content=summary, timestamp=now))
         if observer is not None:
             # Observation only: a client that cannot render this must not cost
@@ -1081,7 +1086,7 @@ class PlanRunner:
             # same seam; pinned by the boot-resume IPC test's plan.receipt
             # count).
             try:
-                observer.on_event(PlanStepReceipt(prompt=prompt, summary=summary))
+                observer.on_event(PlanStepReceipt(summary=summary))
             except Exception:  # noqa: BLE001 — see above
                 pass
 

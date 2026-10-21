@@ -554,18 +554,16 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
       })
     }
     case "plan.receipt": {
-      // E2: the runner's two parent bubbles (step head + summary) travel as
-      // their own event now, so the live transcript matches what a reload
-      // would show -- they used to appear only after reopening the session.
-      const prompt = str(data["prompt"])
+      // E2 / D6: the runner's step head is its replay marker (synthetic, and
+      // skipped by the reload); the summary is the one line the operator
+      // reads.  Live draws exactly that one line, so the two paths agree.
       const summary = str(data["summary"])
-      if (!prompt && !summary) return state
+      if (!summary) return state
       return {
         ...state,
         messages: retireOldest(
           [
             ...state.messages,
-            { role: "user" as const, parts: [{ kind: "text" as const, text: prompt, streaming: false }] },
             {
               role: "assistant" as const,
               parts: [{ kind: "text" as const, text: summary, streaming: false }],

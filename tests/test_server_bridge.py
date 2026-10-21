@@ -473,14 +473,9 @@ def test_plan_step_receipt_maps_to_the_wire() -> None:
     reload, while the replay showed them -- live and replay disagreed."""
     from ai_coding.core.events import PlanStepReceipt
 
-    wire = to_wire(
-        PlanStepReceipt(prompt="只做这一步，不要做别的：fix bug", summary="[plan] 步骤 1 完成")
-    )
+    wire = to_wire(PlanStepReceipt(summary="[plan] 步骤 1 完成"))
 
     assert wire == {
         "type": "plan.receipt",
-        "data": {
-            "prompt": "只做这一步，不要做别的：fix bug",
-            "summary": "[plan] 步骤 1 完成",
-        },
+        "data": {"summary": "[plan] 步骤 1 完成"},
     }

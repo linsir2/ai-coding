@@ -346,17 +346,15 @@ class ScopedEvent:
 
 @dataclass(frozen=True)
 class PlanStepReceipt:
-    """One plan step's parent-transcript bubbles, on the wire (E2).
+    """One plan step's receipt, on the wire (E2 / D6).
 
-    The runner writes two bubbles to the parent session per step -- the step
-    head (the replay marker) and the one-line summary -- so a later ``/resume``
-    can rebuild the step timeline.  Nothing carried them to a connected client:
-    they appeared only after reopening the session, while the replay showed
-    them, so live and replay disagreed.  This event carries exactly the two
-    texts, and the client appends them the way the replay would.
+    The runner writes the step head (the replay marker, stamped synthetic) and
+    the one-line summary to the parent session.  The marker is bookkeeping: a
+    later ``/resume`` uses it to rebuild the step timeline, and replay skips it
+    so it cannot read as the operator's own words.  The summary is the one line
+    a human reads, so it is the only thing this event carries.
     """
 
-    prompt: str
     summary: str
 
 

@@ -23,6 +23,8 @@ export interface WireMessage {
   toolName?: string
   toolCalls?: { id: string; name: string; arguments: string }[]
   reasoning?: string
+  /** D6: the harness wrote it (a plan step marker, a nudge), not the operator. */
+  synthetic?: boolean
 }
 
 const PREVIEW_CHARS = 120
@@ -112,6 +114,16 @@ export function messagesToState(messages: WireMessage[]): SessionState {
       // The harness's planning instruction.  The operator typed the topic
       // and it is the message right above; showing the instruction too
       // would read as if they had said it.
+      continue
+    }
+    if (
+      message.role === "user" &&
+      message.synthetic &&
+      !(message.content ?? "").startsWith(STEERING_MARK)
+    ) {
+      // D6: the stamp is the class -- a plan step's marker, a closing prompt
+      // or a decision nudge.  Steering is the one synthetic line that wraps
+      // words the operator typed, so it falls through to the user branch.
       continue
     }
     if (message.role === "user" && !(message.content ?? "").startsWith(CHECKPOINT_MARK)) {

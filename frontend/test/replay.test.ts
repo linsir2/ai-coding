@@ -383,3 +383,41 @@ describe("[plan] replay (计划模式归位批次)", () => {
     })
   })
 })
+
+describe("synthetic bookkeeping (D6)", () => {
+  test("a stamped step marker never replays as the operator's words", () => {
+    // The plan runner writes the step head into the parent transcript so
+    // /resume can rebuild the timeline; it is the harness speaking about the
+    // run, and the live card no longer draws it either.
+    const state = messagesToState([
+      { role: "user", content: "实现某功能" },
+      { role: "user", content: "[plan] 只做这一步，不要做别的：实现某功能", synthetic: true },
+      { role: "assistant", content: "[plan] 步骤 1 完成：实现某功能" },
+    ])
+    expect(state.messages.map((message) => message.role)).toEqual(["user", "assistant"])
+    const texts = state.messages.flatMap((message) =>
+      message.parts.map((part) => ("text" in part ? part.text : "")),
+    )
+    expect(texts.some((text) => text.includes("只做这一步"))).toBe(false)
+  })
+
+  test("a stamped nudge without a mark is skipped too", () => {
+    // The guard is the stamp, not a prefix: closing prompts and decision
+    // nudges were already synthetic and still replayed as user bubbles.
+    const state = messagesToState([
+      { role: "user", content: "收个尾，先汇报再结束", synthetic: true },
+      { role: "assistant", content: "好" },
+    ])
+    expect(state.messages.map((message) => message.role)).toEqual(["assistant"])
+  })
+
+  test("steering is stamped but still shows the operator's own words", () => {
+    const state = messagesToState([
+      { role: "user", content: "[steering] 先看测试", synthetic: true },
+    ])
+    expect(state.messages[0]).toEqual({
+      role: "user",
+      parts: [{ kind: "text", text: "先看测试", streaming: false }],
+    })
+  })
+})
