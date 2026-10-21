@@ -58,22 +58,21 @@ def test_methods_section_rides_even_a_base_only_prompt():
 
 # ---- 18 §10.5 (P2): the posture rides build(mode=) ---------------------------
 
-PLAN_SEGMENT = (
-    "<plan-mode>You are in plan mode. Every request is answered with a plan, "
-    "never with the finished work: explore only enough to plan, then submit it "
-    "with present_plan — a concise markdown summary, and in its items array "
-    "every executable step with its verify command. Approval writes those "
-    "items and starts execution automatically; do not track the planning with "
-    "todo_write, do not write the analysis or files as your final answer, and "
-    "do not mark items completed — the execution phase does the reading and "
-    "the work. If the request needs no implementation — a survey, an "
-    "analysis, a comparison — close it with finish_research(summary) "
-    "instead: the conclusion is the answer, and no plan is submitted. A "
-    "request that asks for changes (implement, modify, add, fix, refactor) "
-    "needs a plan, not a conclusion. "
-    "bash/write/edit are unavailable here — explore with "
-    "read/grep/glob instead.</plan-mode>"
-)
+#: The two halves of the discriminator: the verbs that mean "there is
+#: something to change" and the words that mean "there is only something to
+#: conclude".  They decide which exit a request gets, so they have to be
+#: stated *before* the exits themselves.  A block that opens with "every
+#: request is answered with a plan" has already decided the question, and a
+#: research request comes back with a plan that then hits the workspace gate
+#: (measured: the production session's turn ended in a random retry loop).
+_CHANGES = "implement, modify, add, fix, refactor"
+_NO_CHANGE = "a survey, an analysis, a comparison"
+
+
+def _plan_segment() -> str:
+    """The plan-mode block, as the model sees it."""
+    out = _assembler().build(mode="plan")
+    return out[out.index("<plan-mode>"):]
 
 
 def test_plan_mode_segment():
@@ -89,11 +88,56 @@ def test_normal_output_is_byte_identical():
     assert _assembler().build(mode="normal") == expected
 
 
-def test_plan_segment_is_verbatim_and_sits_after_methods():
-    expected = (
-        "you are a coding assistant.\n\n" + METHODS_SECTION + "\n\n" + PLAN_SEGMENT
+def test_the_plan_segment_is_the_last_section_of_a_plan_prompt():
+    """The block still sits where it did: after the methods, and nothing else
+    is added for the planning posture."""
+    out = _assembler().build(mode="plan")
+    head, _, segment = out.partition("<plan-mode>")
+
+    assert head == "you are a coding assistant.\n\n" + METHODS_SECTION + "\n\n"
+    assert segment.endswith("</plan-mode>")
+
+
+def test_the_plan_segment_says_which_exit_before_it_names_the_exits():
+    """R9: the discriminator comes first, the two exits after it.
+
+    The words are free; the order is not.  What the model must learn is
+    *which* exit the request wants before it learns what the exits are --
+    otherwise the block's own framing decides the question for it.
+    """
+    segment = _plan_segment()
+
+    assert "present_plan" in segment, "the plan exit"
+    assert "finish_research" in segment, "the research exit"
+    assert _CHANGES in segment, "the rule that asks for a plan"
+    assert _NO_CHANGE in segment, "the rule that asks for a conclusion"
+    assert "never with the finished work" in segment, (
+        "the real contract: the answer is a plan or a conclusion, not the work"
     )
-    assert _assembler().build(mode="plan") == expected
+    assert segment.index(_CHANGES) < segment.index("present_plan")
+    assert segment.index(_CHANGES) < segment.index("finish_research")
+    assert segment.index(_NO_CHANGE) < segment.index("present_plan")
+    assert segment.index(_NO_CHANGE) < segment.index("finish_research")
+
+
+def test_the_planning_prompt_says_which_exit_before_it_names_the_exits():
+    """R9, the other half: the planning prompt carries the same rule.
+
+    The prompt is the last message of the round, so it is the nearest thing
+    to the model's next step -- and its first sentence used to command a
+    plan outright ("Create a detailed implementation plan for: ..."), which
+    is what turned a research request into a plan.
+    """
+    from ai_coding.core.plan_runner import PLAN_PROMPT
+
+    assert "present_plan" in PLAN_PROMPT, "the plan exit"
+    assert "finish_research" in PLAN_PROMPT, "the research exit"
+    assert _CHANGES in PLAN_PROMPT, "the rule that asks for a plan"
+    assert _NO_CHANGE in PLAN_PROMPT, "the rule that asks for a conclusion"
+    assert PLAN_PROMPT.index(_CHANGES) < PLAN_PROMPT.index("present_plan")
+    assert PLAN_PROMPT.index(_CHANGES) < PLAN_PROMPT.index("finish_research")
+    assert PLAN_PROMPT.index(_NO_CHANGE) < PLAN_PROMPT.index("present_plan")
+    assert PLAN_PROMPT.index(_NO_CHANGE) < PLAN_PROMPT.index("finish_research")
 
 
 def test_an_unknown_mode_reads_as_normal():

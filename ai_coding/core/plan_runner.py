@@ -87,7 +87,21 @@ def _tail(text: str | None) -> str:
 
 #: The planning prompt.  One definition: it used to be written out twice (the
 #: Textual front-end and the REPL dispatcher), which is how the two drifted.
+#:
+#: The discriminator comes first: the request decides the exit, and only then
+#: do the two exits get described.  The old prompt opened with "Create a
+#: detailed implementation plan for: {topic}" -- an instruction that commands
+#: a plan even for a request that only asks to be surveyed -- so a research
+#: request came back with a plan, and that plan hit the workspace gate
+#: (measured, production session 135cc71c: 19 rounds, then a retry loop and
+#: invented text).  The rule itself is the same one the ``finish_research``
+#: tool teaches, so the model does not learn two criteria.
 PLAN_PROMPT = (
+    "Decide first which exit this topic wants: a request that asks for "
+    "changes (implement, modify, add, fix, refactor) needs a plan, and a "
+    "request that needs no implementation (a survey, an analysis, a "
+    "comparison) needs a conclusion. "
+    "A request that needs a plan gets one like this. "
     "Create a detailed implementation plan for: {topic}. "
     "Break it down into specific, actionable steps. "
     "Submit the plan with present_plan: a concise markdown summary (a title "
@@ -107,10 +121,8 @@ PLAN_PROMPT = (
     "read/grep/glob instead. "
     "present_plan presents the plan for the user's review, and approval "
     "starts execution automatically — do not execute it yourself. "
-    "If the topic needs no implementation — a survey, an analysis, a "
-    "comparison — close it with finish_research(summary) instead of a plan. "
-    "A request that asks for changes (implement, modify, add, fix, refactor) "
-    "needs a plan, not a conclusion."
+    "A topic that needs no implementation closes with finish_research(summary) "
+    "instead of a plan."
 )
 
 

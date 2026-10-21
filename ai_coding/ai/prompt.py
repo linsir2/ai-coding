@@ -126,18 +126,29 @@ class PromptAssembler:
         sections.append(_render_methods(tools))
         if mode == "plan":
             sections.append(
-                "<plan-mode>You are in plan mode. Every request is answered with a plan, "
-                "never with the finished work: explore only enough to plan, then submit it "
-                "with present_plan — a concise markdown summary, and in its items array "
-                "every executable step with its verify command. Approval writes those "
-                "items and starts execution automatically; do not track the planning with "
-                "todo_write, do not write the analysis or files as your final answer, and "
-                "do not mark items completed — the execution phase does the reading and "
-                "the work. If the request needs no implementation — a survey, an "
-                "analysis, a comparison — close it with finish_research(summary) "
-                "instead: the conclusion is the answer, and no plan is submitted. A "
-                "request that asks for changes (implement, modify, add, fix, refactor) "
-                "needs a plan, not a conclusion. "
+                # The discriminator comes first, the two exits after it.  The
+                # old order said "every request is answered with a plan" and
+                # left the research exit as a late exception, so a survey
+                # request came back with a plan -- which then hit the
+                # workspace gate and sent the turn into a random retry loop
+                # (measured, production session 135cc71c).  The model has to
+                # learn *which* exit the request wants before it learns what
+                # the exits are.
+                "<plan-mode>You are in plan mode. Decide first which exit the "
+                "request wants: a request that asks for changes (implement, "
+                "modify, add, fix, refactor) needs a plan, and a request that "
+                "needs no implementation (a survey, an analysis, a comparison) "
+                "needs a conclusion. The answer is one of those two, never "
+                "with the finished work. To submit the plan: explore only "
+                "enough to plan, then submit it with present_plan — a concise "
+                "markdown summary, and in its items array every executable "
+                "step with its verify command. Approval writes those items and "
+                "starts execution automatically; do not track the planning with "
+                "todo_write, do not write the analysis or files as your final "
+                "answer, and do not mark items completed — the execution phase "
+                "does the reading and the work. To close it without a plan: "
+                "finish_research(summary) — the conclusion is the answer, and "
+                "no plan is submitted. "
                 "bash/write/edit are unavailable here — explore with "
                 "read/grep/glob instead.</plan-mode>"
             )
