@@ -70,6 +70,18 @@ PLAN_DISMISSED_NOTE = "[plan] 评审已搁置：本回合结束（计划未提�
 #: plan-mode turn: the conclusion is the answer, so the turn ends with it --
 #: no plan, nothing armed, nothing executed.
 PLAN_RESEARCH_NOTE = "[plan] 研究已收尾：结论已给出（未提交计划、未执行任何工作）。"
+#: D2: the note a *withdrawn approval* leaves.  The human approved a plan and
+#: the turn did not end cleanly, so the approval is taken back (the front end
+#: refuses to run a plan from a turn that ended badly) -- and until now that
+#: happened in silence: the screen showed nothing at all, and the plan simply
+#: never ran.  This is the only trace that the approval was taken away.
+#:
+#: Mutually exclusive with the guard's note above, so the two never need
+#: patching together: that one is for the turn that never submitted a plan,
+#: this one for the turn whose submission was taken back.
+PLAN_APPROVAL_WITHDRAWN_NOTE = (
+    "[plan] 已批准的计划在本回合未干净收尾，批准被撤回；重新规划后再次提交。"
+)
 #: G8-1: the marker for the one block that tells the model its budget is nearly
 #: gone.  Volatile (never persisted) like the memory and task blocks -- it
 #: describes a counter, not a fact about the work.

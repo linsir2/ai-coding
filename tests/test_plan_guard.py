@@ -371,6 +371,73 @@ async def test_a_goal_task_survives_a_turn_that_dies(tmp_path):
     assert session.task.armed_profile == "goal"
 
 
+# ---- D2 (20 §批次 4a): a withdrawn approval leaves a trace --------------------
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawn_approval_leaves_a_trace(tmp_path):
+    """The human approved something and the system took it back.
+
+    Withdrawing it was right -- a turn that did not end cleanly left the
+    session somewhere else, and the front end refuses to run from it -- but
+    it was silent.  The screen showed nothing at all, and the plan simply
+    never ran: the one thing the operator could not see was the one thing
+    that had been taken away.
+
+    The note says the approval was withdrawn and what to do about it.
+    """
+    engine = _FailingEngine([_call("c1", "present_plan"), EngineError("boom")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, tool=_ApprovingPlan())
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "给计划")
+
+    outcome = loop.last_outcome
+    assert outcome is not None
+    assert "撤回" in outcome.note
+    assert "重新规划" in outcome.note
+
+
+@pytest.mark.asyncio
+async def test_a_clean_turn_leaves_no_withdrawal_trace(tmp_path):
+    """R7: the other side.  A turn that ended cleanly keeps the approval --
+    that is what the approval was for -- so there is nothing to report and
+    the note must stay empty.  No noise on the path that worked.
+    """
+    engine = _ScriptedEngine([_call("c1", "present_plan"), _text("完成。")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, tool=_ApprovingPlan())
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "给计划")
+
+    outcome = loop.last_outcome
+    assert outcome is not None and outcome.status is TurnStatus.COMPLETED
+    assert outcome.note == ""
+    assert "撤回" not in outcome.note
+
+
+@pytest.mark.asyncio
+async def test_the_guard_note_and_the_withdrawal_note_never_ride_together(tmp_path):
+    """The two notes are about opposite facts, so they never need patching
+    together: the guard's is "no plan was submitted" (a turn that never
+    submitted), the withdrawal's is "the submission was taken back" (a turn
+    that did).  A turn that submitted cannot also be a turn that did not.
+    """
+    engine = _ScriptedEngine([_text("我就看看，不提交。"), _text("真的不提交。")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, tool=_PresentPlan())
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "给计划")
+
+    outcome = loop.last_outcome
+    assert outcome is not None
+    assert "未提交计划" in outcome.note
+    assert "撤回" not in outcome.note
+
+
 @pytest.mark.asyncio
 async def test_a_plan_step_whose_turn_was_cut_off_does_not_withdraw_the_plan(
     tmp_path,

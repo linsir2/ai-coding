@@ -89,6 +89,7 @@ from ai_coding.core.turn_close import (
 )
 from ai_coding.core.turn_hooks import TurnHooks
 from ai_coding.core.turn_policy import (
+    PLAN_APPROVAL_WITHDRAWN_NOTE,
     PLAN_DISMISSED_NOTE,
     PLAN_RESEARCH_NOTE,
     TurnAction,
@@ -1476,6 +1477,16 @@ class AgentLoop:
             and getattr(task, "armed_profile", "") == "plan"
         ):
             task.disarm()
+            # D2: the withdrawal has to leave a trace.  The human approved
+            # something and the system took it back; without a line about
+            # it the screen shows nothing at all, and the plan simply never
+            # runs -- the one thing the operator could not see is the one
+            # thing that was taken away.
+            #
+            # Mutually exclusive with the guard's note (the guard does not
+            # fire for a turn that submitted), so the two never need
+            # patching together.
+            outcome = replace(outcome, note=PLAN_APPROVAL_WITHDRAWN_NOTE)
         return self.closer.close(
             session,
             user_input=user_input,
