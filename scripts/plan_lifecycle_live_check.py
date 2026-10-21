@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """批次 4a live check — the plan's lifecycle: giving one up, and being heard.
 
-Two scenarios, behind ``scripts/recording_proxy.py`` with a fresh temp
+Three scenarios, behind ``scripts/recording_proxy.py`` with a fresh temp
 workspace, so every byte of the traffic is on disk before it is asserted:
 
   swap  — the dead end, closed.  ``/plan <topic>`` plans and the review
@@ -26,10 +26,19 @@ workspace, so every byte of the traffic is on disk before it is asserted:
           submit, so the turn ends unsubmitted, and the note has to be
           where the operator can read it.
 
+  budget — the exit is asked for *before* the budget is gone.  The guard's
+          remedy used to arrive only after the model had stopped and
+          written its answer in prose; the batch's early ask puts it in
+          front of the model while it is still exploring.  The exploration
+          budget is shrunk for this run (the patch lives in this script and
+          is undone on the way out) so the ask lands in the first rounds
+          whatever the model does -- with the real budget a good model
+          submits in four rounds and the ask never arrives.
+
 Usage:
 
     python scripts/plan_lifecycle_live_check.py [--config config.local.yaml]
-        [--out-dir /tmp/opencode/plan-life] [--only swap|note]
+        [--out-dir /tmp/opencode/plan-life] [--only swap|note|budget]
         [--topic "..."] [--note-topic "..."] [--model NAME]
 
 Artifacts (temp config, JSONL wire recording, session copies) stay under
@@ -64,11 +73,29 @@ from ai_coding.ai.factory import build_engine_from_config  # noqa: E402
 from ai_coding.app.commands import handle_input  # noqa: E402
 from ai_coding.cli import _build_loop, _build_tool_registry  # noqa: E402
 from ai_coding.config.loader import ConfigLoader  # noqa: E402
-from ai_coding.core.turn_policy import PLAN_UNSUBMITTED_NOTE  # noqa: E402
+from ai_coding.core import plan_runner  # noqa: E402
+from ai_coding.core.turn_policy import (  # noqa: E402
+    PLAN_NUDGE,
+    PLAN_UNSUBMITTED_NOTE,
+)
 from ai_coding.server.world import find_armed_session  # noqa: E402
 from ai_coding.service.session_service import SessionService  # noqa: E402
 
 SEP = "=" * 68
+
+#: The exploration budget of the ``budget`` scenario, in rounds.  The real
+#: one is 16 and the ask lands on round 13 -- but a good model submits a
+#: plan in three or four rounds (measured on this machine), so with the real
+#: budget the ask never arrives and the scenario would prove nothing.
+#:
+#: Five rounds put the ask on the model's second call -- after one round of
+#: exploration, which is the shape the mechanism exists for -- and leave it
+#: four rounds to hand something over.  Four rounds would do the same but
+#: with no margin: the model needed three of them.
+#:
+#: The number is patched into the module for the length of the scenario and
+#: put back afterwards; nothing in the product knows about it.
+BUDGET_MAX_ITERATIONS = 5
 
 #: An implementation request, so the model hands over a plan (the research
 #: exit refuses an implementation request -- N1's anti-abuse guard).
@@ -93,6 +120,11 @@ DEFAULT_NOTE_TOPIC = (
     "新增 PLAN_DEMO.md：写明本仓库的一句话用途；"
     "验收方式为文件存在（verify 用 test -f PLAN_DEMO.md）"
 )
+
+#: The scenario that proves the early ask.  An implementation request, so
+#: the model has a plan to hand over -- the research exit refuses it (N1's
+#: anti-abuse guard).
+DEFAULT_BUDGET_TOPIC = DEFAULT_TOPIC
 
 
 async def _run_swap(
@@ -279,9 +311,133 @@ def _check_note(result: dict[str, Any]) -> list[str]:
     return problems
 
 
+# ---- budget: the exit is asked for while the model is still exploring -------
+
+
+def _asked_for_an_exit(entries: list[dict[str, Any]]) -> int:
+    """The model call that first saw the ask (0 = never).
+
+    Read off the wire: the ask is a user message in the request, so the
+    first request that carries it is the call it reached.
+    """
+    for number, entry in enumerate(entries, start=1):
+        request = entry.get("request") or {}
+        messages = request.get("messages")
+        if not isinstance(messages, list):
+            continue
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("content", "")) == PLAN_NUDGE:
+                return number
+    return 0
+
+
+def _called(session: Any, name: str) -> bool:
+    """Did the session's transcript record a successful call to this tool?"""
+    for message in getattr(session, "messages", ()):
+        if getattr(message, "role", "") != "tool":
+            continue
+        if getattr(message, "tool_name", "") != name:
+            continue
+        if 'ok="false"' not in (message.content or ""):
+            return True
+    return False
+
+
+async def _run_budget(
+    *, topic: str, model: dict[str, Any], out_root: Path
+) -> dict[str, Any]:
+    """A planning round where the exit is asked for before the budget is gone.
+
+    The exploration budget is shrunk for the length of this run, so the ask
+    lands in the first rounds whatever the model does.  The patch is put back
+    afterwards, and it lives here in the script -- the product has no switch
+    that exists only for a test.
+    """
+    run_dir = out_root / "budget"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ws = run_dir / "ws"
+    ws.mkdir(exist_ok=True)
+    _git_workspace(ws)
+
+    wire = run_dir / "wire.jsonl"
+    server = serve(upstream=model["base_url"], port=0, out_path=wire, cut_first=0)
+    start(server)
+    port = server.server_address[1]
+
+    config_path = run_dir / "config.yaml"
+    _temp_config(config_path, model, port, model["base_url"], 12)
+    console = _RecordingConsole()
+    review = _AutoReview()
+    original_budget = plan_runner.PLANNING_MAX_ITERATIONS
+    plan_runner.PLANNING_MAX_ITERATIONS = BUDGET_MAX_ITERATIONS
+    try:
+        app_cfg = ConfigLoader.load_app(str(config_path))
+        _redact_api_key(config_path, model["api_key"])
+        # The real registry with a scripted human: present_plan is registered
+        # only with a human channel, and the review rides that channel.
+        registry = _build_tool_registry(app_cfg, str(ws), None, user_prompt=review)
+        engine = build_engine_from_config(app_cfg)
+        sessions = SessionService(ws / "sessions")
+        loop = _build_loop(engine, sessions, registry, app_cfg, str(ws), None)
+        session = sessions.create()
+        started = time.monotonic()
+
+        await handle_input(loop, f"/plan {topic}", session, sessions, console)
+        elapsed = round(time.monotonic() - started, 1)
+        outcome = getattr(loop, "last_outcome", None)
+        status = str(getattr(outcome, "status", "") or "")
+        note = str(getattr(outcome, "note", "") or "")
+        asked = any(
+            (message.content or "") == PLAN_NUDGE for message in session.messages
+        )
+        reviews = len([call for call in review.calls if call[3] == "plan_review"])
+        exited = bool(reviews) or _called(session, "finish_research")
+        await loop.aclose()
+    finally:
+        plan_runner.PLANNING_MAX_ITERATIONS = original_budget
+        server.shutdown()
+        server.server_close()
+
+    entries = [json.loads(line) for line in wire.read_text(encoding="utf-8").splitlines()]
+    shutil.copy(ws / "sessions" / f"{session.session_id}.json", run_dir / "session.json")
+    return {
+        "name": "budget",
+        "run_dir": str(run_dir),
+        "elapsed": elapsed,
+        "entries": entries,
+        "console": list(console.lines),
+        "asked": asked,
+        "ask_at_call": _asked_for_an_exit(entries),
+        "reviews": reviews,
+        "exited": exited,
+        "status": status,
+        "note": note,
+        "budget": BUDGET_MAX_ITERATIONS,
+    }
+
+
+def _check_budget(result: dict[str, Any]) -> list[str]:
+    problems: list[str] = []
+    if not result["asked"]:
+        problems.append(
+            "the exit was never asked for: no PLAN_NUDGE in the transcript "
+            f"(budget {result['budget']})"
+        )
+    if not result["exited"]:
+        problems.append(
+            "the round ended without an exit: neither present_plan nor "
+            f"finish_research was called (status={result['status']!r}, "
+            f"note={result['note']!r})"
+        )
+    return problems
+
+
 SCENARIOS = {
     "swap": {"driver": "swap"},
     "note": {"driver": "note"},
+    "budget": {"driver": "budget"},
 }
 
 
@@ -317,6 +473,12 @@ async def main(args: argparse.Namespace) -> int:
                 out_root=out_root,
             )
             problems = _check_swap(result)
+        elif name == "budget":
+            print("[budget] /plan <topic> → the exit is asked for before the budget")
+            result = await _run_budget(
+                topic=args.budget_topic, model=model, out_root=out_root
+            )
+            problems = _check_budget(result)
         else:
             print("[note] /plan <topic> → the turn ends without a submission")
             result = await _run_note(
@@ -330,6 +492,12 @@ async def main(args: argparse.Namespace) -> int:
             print(f"  after_plan={json.dumps(result['after_plan'], ensure_ascii=False)}")
             print(f"  after_off={json.dumps(result['after_off'], ensure_ascii=False)}")
             print(f"  after_replan={json.dumps(result['after_replan'], ensure_ascii=False)}")
+        elif name == "budget":
+            print(
+                f"  budget={result['budget']} ask_at_call={result['ask_at_call']} "
+                f"reviews={result['reviews']}"
+            )
+            print(f"  turn status={result['status']} note={result['note']!r}")
         else:
             print(f"  turn status={result['status']} note={result['note']!r}")
         if problems:
@@ -356,6 +524,7 @@ if __name__ == "__main__":
     parser.add_argument("--topic", default=DEFAULT_TOPIC)
     parser.add_argument("--second-topic", default=DEFAULT_SECOND_TOPIC)
     parser.add_argument("--note-topic", default=DEFAULT_NOTE_TOPIC)
+    parser.add_argument("--budget-topic", default=DEFAULT_BUDGET_TOPIC)
     parsed = parser.parse_args()
     try:
         code = asyncio.run(main(parsed))
