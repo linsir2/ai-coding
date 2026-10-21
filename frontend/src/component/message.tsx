@@ -103,9 +103,21 @@ function PartView(props: { part: Part; alwaysOpen: boolean }) {
               </Show>
               <For each={plan().items}>
                 {(item) => (
-                  <text fg={tone(item.status)}>
-                    {`${marker(item.status)} ${item.id}. ${item.content}`}
-                  </text>
+                  <>
+                    <text fg={tone(item.status)}>
+                      {`${marker(item.status)} ${item.id}. ${item.content}`}
+                    </text>
+                    {/* D5: the second line the review card draws -- what
+                      approval will run, and what it waits on. Always shown
+                      (an empty proof reads "无证明命令", never a missing
+                      line), so the two cards check against each other. */}
+                    <text fg={theme.textMuted}>
+                      {`   verify：${item.verify || "无证明命令"}` +
+                        (item.dependsOn.length > 0
+                          ? ` · 依赖 ${item.dependsOn.map((d) => `#${d}`).join(", ")}`
+                          : "")}
+                    </text>
+                  </>
                 )}
               </For>
             </box>

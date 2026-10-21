@@ -11,8 +11,17 @@ import type { ChatMessage } from "../src/state/session"
 
 const planMessage = (
   goal: string,
-  items: { id: string; content: string; status: string }[],
-): ChatMessage => ({ role: "assistant", parts: [{ kind: "plan", goal, items }] })
+  items: { id: string; content: string; status: string; verify?: string; dependsOn?: string[] }[],
+): ChatMessage => ({
+  role: "assistant",
+  parts: [
+    {
+      kind: "plan",
+      goal,
+      items: items.map((item) => ({ verify: "", dependsOn: [], ...item })),
+    },
+  ],
+})
 
 const render = async (message: ChatMessage) => {
   const setup = await testRender(() => <MessageView message={message} alwaysOpen={false} />, {
@@ -51,6 +60,25 @@ describe("the plan card (20 §批次2)", () => {
     )
     const frame = setup.captureCharFrame()
     expect(frame).toContain("[ ] 1. 怪状态")
+    setup.renderer.destroy()
+  })
+
+  test("items show their proof command and dependencies (D5)", async () => {
+    // D5: the live card shows what approval will run -- the same second
+    // line the review card draws, so the two cards can be checked against
+    // each other. An empty verify reads "无证明命令" (never a missing line).
+    const setup = await render(
+      planMessage("上线", [
+        { id: "1", content: "建目录", status: "completed", verify: "test -d out" },
+        { id: "2", content: "写文件", status: "in_progress", verify: "", dependsOn: ["1"] },
+        { id: "3", content: "想事情", status: "pending" },
+      ]),
+    )
+    const frame = setup.captureCharFrame()
+    const text = frame.split("\n").join(" ")
+    expect(text).toContain("verify：test -d out")
+    expect(text).toContain("verify：无证明命令 · 依赖 #1")
+    expect(text).toContain("verify：无证明命令")
     setup.renderer.destroy()
   })
 })

@@ -61,11 +61,17 @@ export interface ChatMessage {
   parts: Part[]
 }
 
-/** One todo entry on the plan card (20 §批次2) — live off ``plan.updated``. */
+/** One todo entry on the plan card (20 §批次2) — live off ``plan.updated``.
+ * D5: the card shows what approval will run, so the proof command and the
+ * dependencies ride along -- the same two keys the review card reads. */
 export interface PlanItem {
   id: string
   content: string
   status: string
+  /** R1-1: the shell proof for this step ("" = not machine-checkable). */
+  verify: string
+  /** Item ids this step waits on (plan ids are "1".."n", as displayed). */
+  dependsOn: string[]
 }
 
 /** One background shell job, as the panel renders it (D-1b). */
@@ -751,10 +757,18 @@ export function applyPlanUpdate(
   const items: PlanItem[] = Array.isArray(data["items"])
     ? data["items"].map((raw) => {
         const item = obj(raw)
+        // D5: read the same two keys the review card reads (there: numbers,
+        // here: the plan's own string ids). Malformed values are dropped,
+        // never guessed -- mirrors planReviewItems in util/ask.
+        const rawDeps = item["dependsOn"]
         return {
           id: str(item["id"]),
           content: str(item["content"]),
           status: str(item["status"]),
+          verify: str(item["verify"]),
+          dependsOn: Array.isArray(rawDeps)
+            ? rawDeps.filter((d): d is string => typeof d === "string")
+            : [],
         }
       })
     : []

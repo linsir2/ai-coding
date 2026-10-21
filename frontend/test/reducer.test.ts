@@ -333,7 +333,7 @@ describe("plan and ledger", () => {
     const state = feed(initialState(), delta("x"), first, second)
     const plans = lastAssistant(state).parts.filter((part) => part.kind === "plan")
     expect(plans).toEqual([
-      { kind: "plan", goal: "g", items: [{ id: "1", content: "one", status: "completed" }] },
+      { kind: "plan", goal: "g", items: [{ id: "1", content: "one", status: "completed", verify: "", dependsOn: [] }] },
     ])
   })
 
@@ -360,6 +360,56 @@ describe("plan and ledger", () => {
 
     const cleared = feed(armed, wire("plan.updated", { goal: "", items: [] }))
     expect(cleared.goal).toBeNull()
+  })
+
+  test("plan.updated carries verify and dependsOn onto the card (D5)", () => {
+    // D5: the live card must show what approval will run. The reducer is
+    // the single boundary both the live event and the recovered task pass
+    // through, so both shapes land here with the same keys.
+    const state = feed(
+      initialState(),
+      delta("x"),
+      wire("plan.updated", {
+        goal: "g",
+        items: [
+          { id: "1", content: "one", status: "pending", verify: "test -f a", dependsOn: ["2"] },
+          { id: "2", content: "two", status: "pending" },
+        ],
+      }),
+    )
+    const plans = lastAssistant(state).parts.filter((part) => part.kind === "plan")
+    expect(plans).toEqual([
+      {
+        kind: "plan",
+        goal: "g",
+        items: [
+          { id: "1", content: "one", status: "pending", verify: "test -f a", dependsOn: ["2"] },
+          { id: "2", content: "two", status: "pending", verify: "", dependsOn: [] },
+        ],
+      },
+    ])
+  })
+
+  test("plan.updated drops malformed verify/dependsOn instead of guessing", () => {
+    // Mirrors planReviewItems ("shapeless entries are dropped, never guessed
+    // at"): a non-string verify is "", a non-array dependsOn is [], and
+    // non-string elements are dropped element-wise.
+    const state = feed(
+      initialState(),
+      delta("x"),
+      wire("plan.updated", {
+        goal: "g",
+        items: [{ id: "1", content: "one", status: "pending", verify: 42, dependsOn: ["2", 3, null] }],
+      }),
+    )
+    const plans = lastAssistant(state).parts.filter((part) => part.kind === "plan")
+    expect(plans).toEqual([
+      {
+        kind: "plan",
+        goal: "g",
+        items: [{ id: "1", content: "one", status: "pending", verify: "", dependsOn: ["2"] }],
+      },
+    ])
   })
 
   test("an emptied plan leaves the transcript", () => {
