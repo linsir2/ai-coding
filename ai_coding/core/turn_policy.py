@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import enum
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from ai_coding.core import interventions
@@ -57,6 +57,11 @@ PLAN_NUDGE = (
 PLAN_UNSUBMITTED_NOTE = (
     "[plan] 本回合未提交计划（未调用 present_plan / finish_research）；可继续对话让它提交。"
 )
+#: The mouths a nudge cannot buy anything at: the clock is already over and
+#: the token ceiling is already reached, so the round a nudge asks for would
+#: run into the very same wall.  The plan guard reads this (A4) and finishes
+#: the turn with the note instead of nagging into the void.
+DEAD_BUDGET_PATHS = frozenset({"clock", "token"})
 #: R08: the terminal note a dismissed review leaves.  Dismiss (esc / empty on
 #: the card) now ends the turn at the batch -- the operator said "not now",
 #: and this line says what that meant: nothing submitted, nothing executed.
@@ -135,6 +140,12 @@ class TurnDecision:
     #: 13 §2.1: which ladder fired, and at what level — the loop records it.
     intervention: str = ""
     level: int = 0
+    #: The terminal line the operator must see (the plan guard's note).  It
+    #: rides the decision, not the reason: the reason says *why the turn
+    #: ended* ("iteration budget exhausted"), the note says what the turn
+    #: leaves undone ("no plan was submitted") — two different facts, and
+    #: the second one is the guard's alone.
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -190,6 +201,12 @@ class TurnSnapshot:
     #: dismissed review is not a submission, and an approved one must not be
     #: asked for again.
     plan_approved: bool = False
+    #: A4: which mouth is ending the turn — "" (the model's own stop),
+    #: "clock", "token", "iteration" or "ladder".  The policy sets it on the
+    #: snapshot it hands to the stop guards, because the policy is the only
+    #: place that knows which mouth it hit; a guard needs to know it because
+    #: a nudge is only worth anything when another round is still possible.
+    budget_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -224,14 +241,24 @@ class PlanSubmissionGuard:
     N1: the guard reads the *approval*, not the call: a plan the human
     approved is this turn's exit (占位 = 成功), and a review the human
     dismissed is not a submission — so neither of them is asked for again.
+
+    A4: the guard is asked on *every* mouth that ends a plan turn, not only
+    on the model's own stop.  The mouth decides whether a remedy is worth
+    anything: on the clock and the token ceiling the wall is right there
+    (a nudge would hit it again), so the turn finishes with the note; on the
+    iteration and ladder mouths one more round is still possible, so the
+    remedy is offered — once, and only once (the loop counts it, or the
+    mouth would offer it every round and the turn would never end).
     """
 
     def on_stop(self, snapshot: TurnSnapshot) -> TurnDecision | None:
         if snapshot.plan_approved or snapshot.plan_submitted:
             return None
-        if not snapshot.plan_nudged:
-            return TurnDecision(TurnAction.NUDGE, "plan unsubmitted", inject=PLAN_NUDGE)
-        return TurnDecision(TurnAction.FINISH, "plan unsubmitted")
+        if snapshot.plan_nudged or snapshot.budget_path in DEAD_BUDGET_PATHS:
+            return TurnDecision(
+                TurnAction.FINISH, "plan unsubmitted", note=PLAN_UNSUBMITTED_NOTE
+            )
+        return TurnDecision(TurnAction.NUDGE, "plan unsubmitted", inject=PLAN_NUDGE)
 
 
 class TurnPolicy:
@@ -272,7 +299,7 @@ class TurnPolicy:
     ) -> TurnDecision:
         """May ``snapshot.iteration`` start?  The turn clock wins over the count."""
         if budget_expired:
-            return TurnDecision(TurnAction.FINISH, "turn deadline exceeded")
+            return self._finish_at(snapshot, "clock", "turn deadline exceeded")
         # M1 audit fix: token exhaustion must not burn a C3 continuation.  The
         # gate is computed once and guards the continuation below; the reason
         # precedence for the plain ladder (iteration first) is unchanged.
@@ -307,9 +334,13 @@ class TurnPolicy:
                     "continue unfinished work",
                     inject=self.continuation_message(actionable),
                 )
-            return TurnDecision(TurnAction.FINISH, "iteration budget exhausted")
+            return self._finish_at(
+                snapshot, "iteration", "iteration budget exhausted"
+            )
         if token_gate:
-            return TurnDecision(TurnAction.FINISH, "turn token budget exhausted")
+            return self._finish_at(
+                snapshot, "token", "turn token budget exhausted"
+            )
         # R6b tiers 2-3 and F2 now live in the ladder (13 §2.1): one gate fires
         # per iteration, in trigger-priority order, with memory of what the last
         # injection achieved.  The death gates and C3 above stay exactly as they
@@ -318,10 +349,49 @@ class TurnPolicy:
             snapshot, phase=interventions.PRE, limits=self._limits
         )
         if gate is not None:
-            return self._as_turn_decision(gate)
+            decision = self._as_turn_decision(gate)
+            if decision.action is TurnAction.FINISH:
+                return self._finish_at(snapshot, "ladder", decision.reason)
+            return decision
         return TurnDecision(TurnAction.ITERATE, "within budget")
 
     # ---- stopping ----------------------------------------------------------
+
+    def _ask_guards(self, snapshot: TurnSnapshot) -> TurnDecision | None:
+        """The seam: the guards run in order, the first verdict wins.
+
+        ``None`` means every guard passed the turn on.
+        """
+        for guard in self._stop_guards:
+            verdict = guard.on_stop(snapshot)
+            if verdict is not None:
+                return verdict
+        return None
+
+    def _finish_at(
+        self, snapshot: TurnSnapshot, path: str, reason: str
+    ) -> TurnDecision:
+        """End the turn on a budget mouth — after the stop guards had their say.
+
+        A4: a planning turn that ends without a plan must say so on *every*
+        mouth, not only on the model's own stop — three of the four endings
+        used to be silent (the operator reads nothing but the note).  The
+        guard is asked with the mouth's name, because a remedy is only worth
+        anything when another round is still possible: on the clock and the
+        token ceiling the wall is right there.
+
+        The mouth's own reason survives.  The turn ended because the budget
+        ran out, not because a plan was missing; only the note is the
+        guard's to add.  A guard that wants another round (NUDGE) is
+        returned as it is — the loop counts the remedy and starts the round.
+        """
+        if snapshot.mode == "plan":
+            verdict = self._ask_guards(replace(snapshot, budget_path=path))
+            if verdict is not None:
+                if verdict.action is TurnAction.NUDGE:
+                    return verdict
+                return TurnDecision(TurnAction.FINISH, reason, note=verdict.note)
+        return TurnDecision(TurnAction.FINISH, reason)
 
     def decide_after_step(self, snapshot: TurnSnapshot) -> TurnDecision:
         """The model stopped asking for tools: finish, or run the gate ladders?"""
@@ -339,10 +409,9 @@ class TurnPolicy:
                 # list is the plan submission guard (its silent-COMPLETED
                 # measurements 7ad86804 / 1fd3be1e are recorded beside its
                 # texts).
-                for guard in self._stop_guards:
-                    verdict = guard.on_stop(snapshot)
-                    if verdict is not None:
-                        return verdict
+                verdict = self._ask_guards(snapshot)
+                if verdict is not None:
+                    return verdict
             return TurnDecision(TurnAction.FINISH, "model finished")
         if snapshot.acceptance:
             # R0-1: a turn with contracts does not end on the model's word.

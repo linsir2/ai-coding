@@ -67,7 +67,15 @@ def terminal_outcome(
     else:
         status = TurnStatus.MAX_ITERATIONS
     return TurnOutcome(
-        status=status, text=last_text, iterations=iterations, reason=decision.reason
+        status=status,
+        text=last_text,
+        iterations=iterations,
+        reason=decision.reason,
+        # A4: the guard's terminal line rides the decision, so a turn that
+        # ended on a budget mouth says what it left undone (no plan
+        # submitted) the same way a turn that ended on the model's own stop
+        # does.
+        note=decision.note,
     )
 
 

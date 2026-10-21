@@ -200,6 +200,10 @@ class PresentPlanTool(BaseTool):
         # iteration burn).  Validated before the human is asked -- a submission
         # that cannot execute must not become a review card.
         items, invalid = _parse_items(params.get("items"))
+        if invalid is None:
+            # A proof the shell cannot run is not a proof: it would fail at
+            # execution, after the operator had already approved the plan.
+            invalid = await self._proof_problem(items, ctx)
         if invalid is not None:
             return ToolResult(
                 success=False,
@@ -335,6 +339,24 @@ class PresentPlanTool(BaseTool):
             error="plan_keep",
             data={"approved": False},
         )
+
+    async def _proof_problem(
+        self, items: list[tuple[str, str, list[int]]], ctx: ToolContext
+    ) -> tuple[int, str] | None:
+        """The first step whose proof command cannot run, with the reason."""
+        from ai_coding.core.acceptance import verify_command_problem
+
+        for index, (_content, verify, _depends) in enumerate(items):
+            if not verify.strip():
+                # The schema says a step may omit its proof when the
+                # outcome is not machine-checkable (that step settles as
+                # stalled).  So the check applies to the proofs that are
+                # there, and does not invent a requirement.
+                continue
+            why = await verify_command_problem(verify)
+            if why:
+                return index, why
+        return None
 
 
 def _parse_items(

@@ -91,7 +91,6 @@ from ai_coding.core.turn_hooks import TurnHooks
 from ai_coding.core.turn_policy import (
     PLAN_DISMISSED_NOTE,
     PLAN_RESEARCH_NOTE,
-    PLAN_UNSUBMITTED_NOTE,
     TurnAction,
     TurnDecision,
     TurnPolicy,
@@ -726,6 +725,13 @@ class AgentLoop:
                         books.note_fatigue_nudge()
                     elif decision.intervention == "strategy":
                         books.note_strategy_nudge()
+                    elif decision.reason == "plan unsubmitted":
+                        # A4: the plan guard's remedy on a budget mouth has to
+                        # be counted here too, exactly like on the post-step
+                        # path.  A budget mouth stays true (the budget is
+                        # still spent), so an uncounted nudge would be offered
+                        # every round — an infinite spin instead of a turn.
+                        books.note_plan_nudge()
                     session.add_message(
                         user_message(decision.inject or "", now_utc(), synthetic=True)
                     )
@@ -888,12 +894,10 @@ class AgentLoop:
                             text=step.text,
                             iterations=books.total_iterations,
                             reason=decision.reason,
-                            # stage 4 r2: the plan guard's terminal line.
-                            note=(
-                                PLAN_UNSUBMITTED_NOTE
-                                if decision.reason == "plan unsubmitted"
-                                else ""
-                            ),
+                            # stage 4 r2: the plan guard's terminal line (A4:
+                            # the decision carries it, so every way a turn can
+                            # end shows the same note).
+                            note=decision.note,
                         )
                         break
                     if decision.intervention == "acceptance":

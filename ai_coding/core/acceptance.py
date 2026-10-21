@@ -17,6 +17,7 @@ from ai_coding.domain.acceptance import AcceptanceItem, pending_items
 from ai_coding.infra.subprocess_runner import run_process_async
 from ai_coding.security.approval import ApprovalCallback, ApprovalResult
 from ai_coding.security.permission_gate import bash_denied
+from ai_coding.shell_parse import command_views
 
 _DEFAULT_EACH_SECONDS = 120.0
 _DEFAULT_TOTAL_SECONDS = 300.0
@@ -146,3 +147,57 @@ async def _approved(
 
 
 __all__ = ["verify_items"]
+
+
+async def verify_command_problem(command: str) -> str:
+    """Why this proof command cannot run, or ``""`` when it can.
+
+    Two questions, in the order a reader asks them: can the shell read
+    it at all, and is every program in it something the shell can
+    actually run?  The second one is the one that catches a model
+    inventing a proof -- ``glob '**/*'`` is valid shell and names no
+    program, so the proof would fail at execution, after the operator
+    had already approved the plan.  The plan is where the model can
+    still fix it, so that is where the question belongs.
+
+    The oracle for "can the shell run it" is the shell itself
+    (``command -v``), because that is what will run the proof: it knows
+    the builtins and the PATH, so a check that disagreed with it would
+    refuse proofs that would have worked.
+    """
+    views = command_views(command)
+    if not views:
+        return "验收命令里没有可执行的命令"
+    broken = [view.program or "?" for view in views if view.broken]
+    if broken:
+        return "验收命令的语法读不完整：" + ", ".join(broken)
+    programs: list[str] = []
+    for view in views:
+        # A program that names a path is the model's own business: the
+        # check below looks the name up on PATH, and a relative path would
+        # be judged against the wrong directory.
+        if "/" in view.program or not view.program:
+            continue
+        if view.program not in programs:
+            programs.append(view.program)
+    missing = await _unresolvable_programs(programs)
+    if missing:
+        return "验收命令里的程序不存在：" + ", ".join(missing)
+    return ""
+
+
+async def _unresolvable_programs(programs: list[str]) -> list[str]:
+    """Which of these programs the shell would not be able to run."""
+    if not programs:
+        return []
+    script = 'for p do command -v "$p" >/dev/null || printf "%s\\n" "$p"; done'
+    outcome = await run_process_async(
+        ["/bin/sh", "-c", script, "sh", *programs],
+        shell=False,
+        timeout=10.0,
+    )
+    if getattr(outcome, "returncode", 0) != 0:
+        # The oracle itself failed: say nothing, so a working proof is not
+        # refused because the check could not run.
+        return []
+    return [line for line in (getattr(outcome, "stdout", "") or "").splitlines() if line.strip()]

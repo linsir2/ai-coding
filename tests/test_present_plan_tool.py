@@ -627,3 +627,51 @@ async def test_the_approval_closes_the_turn():
 
     assert r.success is True
     assert conclusion.exit == "present_plan"
+
+
+# ---- the proof command has to be a command the shell can run ----
+
+
+@pytest.mark.asyncio
+async def test_a_proof_command_that_names_no_program_is_refused():
+    """A proof the shell cannot run is not a proof.
+
+    ``glob '**/*'`` is valid shell and names no program: the step would
+    fail at execution, after the operator had already approved the plan.
+    The plan is where the model can still fix it, so it is where the
+    question belongs.
+    """
+    tool, prompt = _tool(UserAnswer(answered=True, text="开始执行"))
+    r = await tool.execute(
+        {"plan": "# p", "items": [{"content": "写报告", "verify": "glob '**/*'"}]},
+        _ctx(),
+    )
+    assert r.success is False
+    assert "glob" in r.output
+    assert prompt.calls == [], "the review is not asked for a plan that cannot run"
+
+
+@pytest.mark.asyncio
+async def test_a_proof_command_the_shell_can_run_is_accepted():
+    tool, prompt = _tool(UserAnswer(answered=True, text="开始执行"))
+    r = await tool.execute(
+        {
+            "plan": "# p",
+            "items": [
+                {"content": "写报告", "verify": "test -f report.md && wc -l report.md"},
+            ],
+        },
+        _ctx(),
+    )
+    assert r.success is True
+
+
+@pytest.mark.asyncio
+async def test_a_proof_command_the_shell_cannot_read_is_refused():
+    """A line the grammar cannot finish is not a command either."""
+    tool, prompt = _tool(UserAnswer(answered=True, text="开始执行"))
+    r = await tool.execute(
+        {"plan": "# p", "items": [{"content": "写报告", "verify": 'test -f "unterminated'}]},
+        _ctx(),
+    )
+    assert r.success is False

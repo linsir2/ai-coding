@@ -10,6 +10,9 @@ Harness: self-contained, shaped after tests/test_agent_loop_react.py (the
 repo's convention for loop-level files).
 """
 
+import time
+from dataclasses import replace
+
 import pytest
 
 from ai_coding.ai.engine import ChatEngine, EngineError
@@ -476,3 +479,238 @@ async def test_a_real_plan_step_cut_off_by_the_budget_keeps_the_plan_armed(
     # Both steps ran: the plan was not cut short by a withdrawn arm.
     assert len(report.deliveries) == 2
     assert session.task.armed is False
+
+
+# ---- the guard on every way a turn can end (A4) -----------------------------
+#
+# A planning turn can end four ways without ever submitting a plan: the
+# clock, the iteration budget, the token ceiling, an exhausted ladder.  Only
+# the model's own stop went through the guard, so the other three ended in
+# silence -- and the note is the only thing the operator gets (the front end
+# reads it, the CLI reads nothing at all).
+
+
+class _Noop(BaseTool):
+    """A tool that succeeds and changes nothing.
+
+    The turn has to keep going: only a turn that never stops on its own can
+    reach the budget mouths.
+    """
+
+    name = "noop"
+    parallel_safe = True
+    mutates_world = False
+
+    @property
+    def description(self) -> str:
+        return "do nothing, successfully"
+
+    @property
+    def params_json_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, params, ctx=None) -> ToolResult:
+        return ToolResult(success=True, output="ok")
+
+
+def _budget_loop(
+    engine: ChatEngine, sessions: SessionService, settings: AIConfig
+) -> AgentLoop:
+    registry = ToolRegistry()
+    registry.register(_Noop())
+    return AgentLoop(
+        engine,
+        sessions,
+        registry,
+        approval=AutoApproveCallback(),
+        settings=settings,
+        workspace=".",
+    )
+
+
+class _BlockingEngine(_ScriptedEngine):
+    """A step that blocks past the turn clock.
+
+    The block is synchronous on purpose: an await would be cut by the
+    deadline (and the turn would die as an engine error -- a different path),
+    while a blocked loop lets the step finish and lets the clock expire
+    *between* the rounds, which is where the turn notices it.
+    """
+
+    def __init__(self, steps: list, delay: float = 0.05) -> None:
+        super().__init__(steps)
+        self.delay = delay
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        time.sleep(self.delay)
+        return await super().step(
+            messages, tools=tools, instructions=instructions, on_delta=on_delta
+        )
+
+
+class _TokenEngine(_ScriptedEngine):
+    """A step that reports tokens: the token ceiling is what ends the turn."""
+
+    def __init__(self, steps: list, usage: dict) -> None:
+        super().__init__(steps)
+        self.usage = usage
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        item = await super().step(
+            messages, tools=tools, instructions=instructions, on_delta=on_delta
+        )
+        return replace(item, usage=self.usage)
+
+
+@pytest.mark.asyncio
+async def test_a_plan_turn_that_dies_on_the_iteration_budget_says_it_did_not_submit(
+    tmp_path,
+):
+    """A4: the budget is a mouth too.  A planning turn that ran out of
+    iterations without submitting a plan used to end in silence -- the note
+    is the only thing the operator gets."""
+    engine = _ScriptedEngine([_call("c1", "noop")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _budget_loop(engine, sessions, AIConfig(max_tool_iterations=1))
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "探索一下记忆层怎么设计的")
+
+    outcome = loop.last_outcome
+    assert outcome is not None
+    assert outcome.status is TurnStatus.MAX_ITERATIONS
+    assert "未提交计划" in outcome.note
+
+
+@pytest.mark.asyncio
+async def test_the_clock_mouth_finishes_the_plan_turn_with_the_note_and_no_nudge(
+    tmp_path,
+):
+    """The clock is already over when the mouth is reached: a nudge would run
+    into the same wall, so the turn finishes with the note instead."""
+    # The clock has to be long enough for the turn to reach its first model
+    # step (a deadline that expires earlier would cut the step off and end the
+    # turn as an engine error -- a different path), and the step has to
+    # outlast it.
+    engine = _BlockingEngine([_call("c1", "noop")], delay=1.2)
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _budget_loop(engine, sessions, AIConfig(turn_timeout_seconds=1.0))
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "探索一下记忆层怎么设计的")
+
+    outcome = loop.last_outcome
+    assert outcome is not None
+    assert outcome.status is TurnStatus.TIMEOUT
+    assert "未提交计划" in outcome.note
+    assert _plan_reminders(session) == []  # a dead mouth never nags
+
+
+@pytest.mark.asyncio
+async def test_the_token_mouth_finishes_the_plan_turn_with_the_note_and_no_nudge(
+    tmp_path,
+):
+    """The token ceiling is the same kind of wall: the spend is gone, so the
+    nudge would ask for a plan the turn cannot afford to hear."""
+    engine = _TokenEngine(
+        [_call("c1", "noop")], {"prompt_tokens": 100, "completion_tokens": 0}
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _budget_loop(engine, sessions, AIConfig(turn_token_budget=100))
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "探索一下记忆层怎么设计的")
+
+    outcome = loop.last_outcome
+    assert outcome is not None
+    assert outcome.status is TurnStatus.BUDGET
+    assert "未提交计划" in outcome.note
+    assert _plan_reminders(session) == []
+
+
+@pytest.mark.asyncio
+async def test_the_same_mouth_asked_twice_nudges_once_and_the_turn_still_ends(
+    tmp_path,
+):
+    """The spin trap: a budget mouth stays true, so an unaccounted nudge would
+    be offered every round -- forever.  The remedy is counted, so the second
+    visit to the same mouth finishes the turn (and the engine's script runs
+    out loudly if it ever does not)."""
+    engine = _ScriptedEngine([_call("c1", "noop"), _call("c2", "noop"), _call("c3", "noop")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _budget_loop(engine, sessions, AIConfig(max_tool_iterations=3))
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "探索一下记忆层怎么设计的")
+
+    assert len(_plan_reminders(session)) == 1  # the remedy, once
+    outcome = loop.last_outcome
+    assert outcome is not None
+    assert outcome.status is TurnStatus.MAX_ITERATIONS
+    assert "未提交计划" in outcome.note
+
+
+@pytest.mark.asyncio
+async def test_a_plain_turn_that_dies_on_the_iteration_budget_has_no_note(tmp_path):
+    """The guard speaks to the planning posture only: the execution layer's
+    budget mouths are untouched (this path is shared by every turn)."""
+    engine = _ScriptedEngine([_call("c1", "noop")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _budget_loop(engine, sessions, AIConfig(max_tool_iterations=1))
+    session = sessions.create()
+
+    await loop.process_input(session, "你好")
+
+    outcome = loop.last_outcome
+    assert outcome is not None
+    assert outcome.status is TurnStatus.MAX_ITERATIONS
+    assert outcome.note == ""
+    assert _plan_reminders(session) == []
+
+
+class _Failing(BaseTool):
+    """A tool that always fails: the ladder, not the budget, ends the turn."""
+
+    name = "fail"
+    parallel_safe = True
+    mutates_world = False
+
+    @property
+    def description(self) -> str:
+        return "always fail"
+
+    @property
+    def params_json_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, params, ctx=None) -> ToolResult:
+        return ToolResult(success=False, output="error: nope", error="tool_error")
+
+
+@pytest.mark.asyncio
+async def test_the_ladder_mouth_also_ends_the_plan_turn_with_the_note(tmp_path):
+    """The fourth mouth: an exhausted intervention ladder ends the turn too.
+    The guard buys one round there (a round is still possible), and the second
+    visit finishes the turn with the note -- the same one-remedy rule the
+    other mouths follow."""
+    registry = ToolRegistry()
+    registry.register(_Failing())
+    engine = _ScriptedEngine([_call(f"c{i}", "fail") for i in range(1, 13)])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = AgentLoop(
+        engine,
+        sessions,
+        registry,
+        approval=AutoApproveCallback(),
+        settings=AIConfig(max_tool_iterations=30),
+        workspace=".",
+    )
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "探索一下记忆层怎么设计的")
+
+    outcome = loop.last_outcome
+    assert outcome is not None
+    assert "no progress" in outcome.reason  # the ladder, not the budget
+    assert "未提交计划" in outcome.note
+    assert len(_plan_reminders(session)) == 1  # the remedy, once
