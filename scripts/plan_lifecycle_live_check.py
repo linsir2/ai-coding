@@ -67,6 +67,8 @@ from r19_acceptance import (  # noqa: E402
     _redact_api_key,
     _temp_config,
 )
+from ai_coding.core.events import TaskUpdated  # noqa: E402
+from ai_coding.server.bridge import to_wire  # noqa: E402
 from recording_proxy import serve, start  # noqa: E402
 
 from ai_coding.ai.factory import build_engine_from_config  # noqa: E402
@@ -127,6 +129,21 @@ DEFAULT_NOTE_TOPIC = (
 DEFAULT_BUDGET_TOPIC = DEFAULT_TOPIC
 
 
+class _RecordingObserver:
+    """Collects loop events so a scenario can assert on the wire shape.
+
+    The live card reads ``plan.updated``; the script replays the same mapping
+    the frontend consumes (``bridge.to_wire``), so the assertion proves what
+    the card will see -- no frontend needed for this half.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    def on_event(self, event: Any) -> None:
+        self.events.append(event)
+
+
 async def _run_swap(
     *, topic: str, second_topic: str, model: dict[str, Any], out_root: Path
 ) -> dict[str, Any]:
@@ -154,18 +171,38 @@ async def _run_swap(
         registry = _build_tool_registry(app_cfg, str(ws), None, user_prompt=review)
         engine = build_engine_from_config(app_cfg)
         sessions = SessionService(ws / "sessions")
-        loop = _build_loop(engine, sessions, registry, app_cfg, str(ws), None)
+        rec = _RecordingObserver()
+        loop = _build_loop(engine, sessions, registry, app_cfg, str(ws), None, observer=rec)
         session = sessions.create()
         started = time.monotonic()
 
         # 1. plan + approve
         await handle_input(loop, f"/plan {topic}", session, sessions, console)
         task = session.task
+        # D5: what the live card will see -- the wire form of every
+        # TaskUpdated, replayed through the same mapping the frontend
+        # consumes.  The last non-empty one is the approved plan.
+        plan_wires = [
+            wire
+            for e in rec.events
+            if isinstance(e, TaskUpdated)
+            for wire in [to_wire(e)]
+            if wire is not None
+            and wire.get("type") == "plan.updated"
+            and wire.get("data", {}).get("items")
+        ]
         after_plan = {
             "armed": bool(getattr(task, "armed", False)),
             "profile": str(getattr(task, "armed_profile", "") or ""),
             "items": len(task.items) if task else 0,
             "reviews": len([c for c in review.calls if c[3] == "plan_review"]),
+            "wire_items": plan_wires[-1]["data"]["items"] if plan_wires else [],
+            # D5: the domain shape the wire must equal -- the assertion is
+            # structural, not content-based: whether the model submitted a
+            # verify command varies run to run, but the live event must
+            # always be the domain serialization (conditional emission
+            # included), or the card cannot show what approval will run.
+            "domain_items": [i.to_dict() for i in task.items] if task else [],
         }
 
         # 2. give it up
@@ -272,6 +309,15 @@ def _check_swap(result: dict[str, Any]) -> list[str]:
         )
     if not after_plan["reviews"]:
         problems.append("the review channel was never asked")
+    wire_items = after_plan.get("wire_items") or []
+    domain_items = after_plan.get("domain_items") or []
+    if not wire_items:
+        problems.append("no plan.updated event reached the wire after approval")
+    elif wire_items != domain_items:
+        problems.append(
+            "the live event is not the domain shape: "
+            f"{wire_items!r} vs {domain_items!r}"
+        )
     if after_off["armed"]:
         problems.append("the plan is still armed after /plan off")
     if after_off["profile"]:
