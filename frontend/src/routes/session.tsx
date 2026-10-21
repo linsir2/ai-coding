@@ -272,6 +272,25 @@ export function Session(props: SessionProps) {
     return true
   }
 
+  /** A card owns the keyboard while it is up (D4). */
+  const cardOpen = (): boolean => props.permission !== null || props.ask !== null
+
+  /**
+   * 19 §3.1: the mode row's one action, shared by the session layer and the
+   * card layer (D4).  Mid-turn it queues like /review does — the backend's
+   * posture queue lands the flip at the turn's close either way.  内化批次:
+   * an idle flip dispatches silently — the backend notice tells the story;
+   * the transcript must not dress an internal command as a user line.
+   */
+  const cycleMode = (): void => {
+    const next = stats().mode === "plan" ? "/plan off" : "/plan"
+    if (state.busy) {
+      queueText(next)
+      return
+    }
+    dispatch(next)
+  }
+
   useBindings(() => ({
     enabled: !dialog.isOpen() && !suggesting() && props.permission === null && props.ask === null,
     commands: [
@@ -364,19 +383,7 @@ export function Session(props: SessionProps) {
         group: "Session",
         desc: "Switch between Build and read-only Plan mode",
         palette: true,
-        // 19 §3.1: the mode row's one action.  Mid-turn it queues like
-        // /review does — the backend's posture queue lands the flip at the
-        // turn's close either way.  内化批次: an idle flip dispatches silently
-        // — the backend notice tells the story; the transcript must not
-        // dress an internal command as a user line.
-        run: () => {
-          const next = stats().mode === "plan" ? "/plan off" : "/plan"
-          if (state.busy) {
-            queueText(next)
-            return
-          }
-          dispatch(next)
-        },
+        run: cycleMode,
       },
       {
         name: "session.review",
@@ -419,6 +426,23 @@ export function Session(props: SessionProps) {
       { key: "<leader>r", cmd: "session.resume" },
       { key: "<leader>i", cmd: "dialog.inbox.show" },
     ],
+  }))
+
+  // D4: the card owns the keyboard — its digits, esc and return must win —
+  // but the posture toggle is not part of the card's question.  A separate
+  // layer at a lower priority keeps shift+tab alive without re-enabling the
+  // session layer (whose overlapping keys would re-sort against the app's).
+  useBindings(() => ({
+    priority: -1,
+    enabled: cardOpen(),
+    commands: [
+      {
+        name: "session.mode.cycle.card",
+        desc: "Switch posture while a card is up",
+        run: cycleMode,
+      },
+    ],
+    bindings: [{ key: "shift+tab", cmd: "session.mode.cycle.card" }],
   }))
 
   // The suggestion lists seed the composer (e.g. ``@skill``); the seed lands
@@ -663,33 +687,29 @@ export function Session(props: SessionProps) {
               </Show>
             )}
           </Show>
-          <Show
-            when={props.permission === null && props.ask === null}
-            fallback={<></>}
-          >
-            <>
-              <Show when={state.queued.length > 0}>
-                <text fg={theme.textMuted}>{`${state.queued.length} queued`}</text>
-              </Show>
-              <Prompt
-                placeholder={
-                  editingInboxId() !== null
-                    ? "编辑排队输入…（回车保存）"
-                    : state.busy
-                      ? "Working…"
-                      : "Ask anything…"
-                }
-                metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
-                mode={stats().mode}
-                onSubmit={submit}
-                onOverlay={setSuggesting}
-                seed={promptSeed()}
-                onSeedDone={() => setPromptSeed("")}
-                skills={props.skills}
-                files={props.files}
-              />
-            </>
+          <Show when={state.queued.length > 0}>
+            <text fg={theme.textMuted}>{`${state.queued.length} queued`}</text>
           </Show>
+          <Prompt
+            // D4: a card no longer unmounts the composer -- the draft stays,
+            // the card owns the keyboard, and shift+tab still cycles.
+            disabled={cardOpen()}
+            placeholder={
+              editingInboxId() !== null
+                ? "编辑排队输入…（回车保存）"
+                : state.busy
+                  ? "Working…"
+                  : "Ask anything…"
+            }
+            metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
+            mode={stats().mode}
+            onSubmit={submit}
+            onOverlay={setSuggesting}
+            seed={promptSeed()}
+            onSeedDone={() => setPromptSeed("")}
+            skills={props.skills}
+            files={props.files}
+          />
         </box>
         </box>
         <Show when={dimensions().width >= 100}>

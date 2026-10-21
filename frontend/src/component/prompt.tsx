@@ -77,6 +77,12 @@ export interface PromptProps {
   onSubmit: (text: string, images: PromptImage[]) => boolean | string | void
   /** Focus the textarea on mount; disable while a turn streams. */
   autofocus?: boolean
+  /**
+   * D4: a card (permission / ask) owns the keyboard.  The composer stays
+   * mounted so the draft survives, but it must not take focus or keypresses --
+   * the card's digits, esc and return have to win.
+   */
+  disabled?: boolean
   /** True while the slash list is up — the session mutes its own bindings. */
   onOverlay?: (visible: boolean) => void
   /**
@@ -265,9 +271,25 @@ export function Prompt(props: PromptProps) {
   onMount(() => {
     // Focus after the renderer attached (a microtask is too early: the
     // element exists but the renderer has not wired input routing yet).
-    if (props.autofocus !== false) {
+    if (props.autofocus !== false && props.disabled !== true) {
       input?.focus()
     }
+  })
+
+  // D4: the card that takes the keyboard gives it back when it closes.  The
+  // draft is never touched -- that is the whole point of staying mounted.
+  let wasDisabled = props.disabled === true
+  createEffect(() => {
+    const disabled = props.disabled === true
+    const element = input
+    if (!element) return
+    element.focusable = !disabled
+    if (disabled) {
+      element.blur()
+    } else if (wasDisabled && props.autofocus !== false) {
+      element.focus()
+    }
+    wasDisabled = disabled
   })
 
   createEffect(() => {
@@ -277,7 +299,7 @@ export function Prompt(props: PromptProps) {
     // The cursor lands at 0 after setText; a pre-filled command must be
     // *completed* by typing, not prefixed (E2E caught "auto/permissions").
     if (input) input.cursorOffset = seed.length
-    input?.focus()
+    if (props.disabled !== true) input?.focus()
     props.onSeedDone?.()
   })
 
