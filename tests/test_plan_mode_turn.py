@@ -14,11 +14,19 @@ from typing import Any
 
 import pytest
 
+from ai_coding.ai.engine import ChatEngine
 from ai_coding.app.commands import run_human_turn
+from ai_coding.config.models import AIConfig
+from ai_coding.core.agent_loop import AgentLoop
+from ai_coding.core.events import IterationStarted, RecordingObserver
 from ai_coding.core.plan_runner import PLAN_MARK, plan_only
 from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
+from ai_coding.domain.loop import StepResult
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
+from ai_coding.security.approval import AutoApproveCallback
+from ai_coding.service.session_service import SessionService
+from ai_coding.tools.registry import ToolRegistry
 
 
 class _Console:
@@ -141,9 +149,9 @@ async def test_the_planning_round_keeps_the_operators_words_and_marks_the_instru
 async def test_the_planning_round_resets_the_book_and_raises_the_budget():
     """A new plan starts a fresh book, and the planning budget is the planning one.
 
-    The ordinary turn budget is 15; a planning round gets 30 and no auto
-    continuation, because a plan is written by thinking, not by being
-    dragged along.
+    The ordinary turn budget comes from the settings; a planning round gets
+    its own exploration budget and no auto continuation, because a plan is
+    written by thinking, not by being dragged along.
     """
     from ai_coding.core.plan_runner import PLANNING_MAX_ITERATIONS
 
@@ -156,6 +164,60 @@ async def test_the_planning_round_resets_the_book_and_raises_the_budget():
     assert session.task.goal == "主题"
     assert loop.budgets == [PLANNING_MAX_ITERATIONS], (
         "the planning round runs on the planning budget"
+    )
+
+
+# ---- the exploration budget, on the wire ------------------------------------
+
+
+class _ScriptedEngine(ChatEngine):
+    """Hands out the scripted steps, one per model call."""
+
+    def __init__(self, steps: list) -> None:
+        self._steps = list(steps)
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        if not self._steps:
+            raise AssertionError("engine called more times than the script allows")
+        return self._steps.pop(0)
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_the_planning_round_runs_on_a_sixteen_round_budget(tmp_path):
+    """R1: the planning round's ceiling is the exploration budget: 16 rounds.
+
+    The wire says so: every ``IterationStarted`` of a planning round carries
+    ``max_iterations=16`` -- not the settings' 10, and not the 30 the
+    planning round used to get (30 was never a budget anyone chose; it was
+    the number that was there).
+
+    Measured: a good model submits a plan in 4 rounds (live check), while the
+    runs that never submitted burned 15-19 -- 16 sits between the two.
+    """
+    engine = _ScriptedEngine([StepResult(text="还在看", finish_reason="stop")] * 4)
+    sessions = SessionService(tmp_path / "sessions")
+    observer = RecordingObserver()
+    loop = AgentLoop(
+        engine,
+        sessions,
+        ToolRegistry(),
+        approval=AutoApproveCallback(),
+        settings=AIConfig(),
+        workspace=".",
+        observer=observer,
+    )
+    session = sessions.create()
+    session.mode = "plan"
+
+    await plan_only(loop, session, topic="调研这个分支")
+
+    started = observer.of_type(IterationStarted)
+    assert started, "the planning round ran no iteration at all"
+    assert {event.max_iterations for event in started} == {16}, (
+        "the planning round runs on the exploration budget of 16"
     )
 
 

@@ -558,7 +558,7 @@ async def test_the_planning_turn_runs_with_the_planning_budget():
 
     await handle_input(loop, "/plan 新计划", _session(), _Sessions(), dc)
 
-    assert seen == [(30, 0)]
+    assert seen == [(16, 0)]
     assert loop.policy.config.max_iterations == original  # swap restored
 
 

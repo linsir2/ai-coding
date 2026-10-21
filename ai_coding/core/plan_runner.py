@@ -56,12 +56,24 @@ PLAN_MARK = "[plan] "
 
 STEP_HEAD = "只做这一步，不要做别的："
 
-#: 19 §3.4-1: the planning round's own iteration ceiling.  It used to share
-#: ``max_tool_iterations`` and died mid-plan (measured twice: 15 iterations
-#: eaten by large reads, a half-written plan reported as ready).  The ceiling
-#: is headroom; the prompt guidance ("skeleton first, no whole-file reads")
-#: is the actual fix.
-PLANNING_MAX_ITERATIONS = 30
+#: The planning round's exploration budget: how many rounds the model may
+#: spend before it has to hand something over.
+#:
+#: It used to share ``max_tool_iterations`` and died mid-plan (measured
+#: twice: 15 iterations eaten by large reads, a half-written plan reported as
+#: ready).  Its own ceiling was raised to 30 to buy headroom -- and the
+#: headroom turned into an exploration budget nobody was watching: the
+#: production session 135cc71c spent 19 rounds and 41 tool calls without ever
+#: submitting, and the guard only asked for an exit *after* the model had
+#: already written its conclusion in prose.
+#:
+#: 16 is the measured middle.  A good model submits in 4 rounds (live check:
+#: glob, read, glob, present_plan) and the budget has to clear that case
+#: (4-6 rounds); the runs that never submitted burned 15-19 rounds, so a
+#: budget above 16 buys nothing but latency.  The prompt guidance ("skeleton
+#: first, no whole-file reads") is still the actual fix for a plan that dies
+#: half-written -- this ceiling is the bound on the exploring, not the cure.
+PLANNING_MAX_ITERATIONS = 16
 
 #: Cap on the failure output quoted into a repair prompt (same 500-char
 #: preview discipline as the acceptance evidence tails).
