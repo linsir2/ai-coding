@@ -11,7 +11,7 @@ import pytest
 
 from ai_coding.domain.task import TaskState
 from ai_coding.security.user_prompt import UserAnswer
-from ai_coding.tools.base import ToolContext
+from ai_coding.tools.base import ToolContext, TurnConclusion
 from ai_coding.tools.present_plan_tool import PresentPlanTool
 
 
@@ -576,3 +576,54 @@ async def test_an_api_route_in_a_plan_is_not_refused():
 
     assert r.success is True
     assert len(prompt.calls) == 1
+
+
+# ---- N1: the turn's two exits (占位 = 成功) ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_dismissal_does_not_close_the_turn():
+    """占位 = 成功: the human's "not now" is not a submission, so it must not
+    close the turn -- the other exit stays open."""
+    tool, _ = _tool(UserAnswer(answered=False, reason="empty"))
+    conclusion = TurnConclusion()
+    ctx = _ctx()
+    ctx.conclusion = conclusion
+
+    r = await tool.execute(_plan_call("# p"), ctx)
+
+    assert r.success is True
+    assert conclusion.exit == ""
+    assert conclusion.dismissed is True
+
+
+@pytest.mark.asyncio
+async def test_the_review_is_not_asked_twice_after_a_dismissal():
+    """The human was already asked once.  A second card would ask them the
+    same question again, and a second approval would arm a plan the
+    dismissal then takes back."""
+    tool, prompt = _tool(UserAnswer(answered=False, reason="empty"))
+    conclusion = TurnConclusion()
+    ctx = _ctx()
+    ctx.conclusion = conclusion
+
+    await tool.execute(_plan_call("# p"), ctx)
+    r = await tool.execute(_plan_call("# p"), ctx)
+
+    assert r.success is False and r.error == "already_concluded"
+    assert len(prompt.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_approval_closes_the_turn():
+    """An approval is the plan exit's success: it owns the turn, so the other
+    exit is refused afterwards."""
+    tool, _ = _tool(UserAnswer(answered=True, text="开始执行"))
+    conclusion = TurnConclusion()
+    ctx = _ctx()
+    ctx.conclusion = conclusion
+
+    r = await tool.execute(_plan_call("# p"), ctx)
+
+    assert r.success is True
+    assert conclusion.exit == "present_plan"

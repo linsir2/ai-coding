@@ -68,7 +68,9 @@ PLAN_SEGMENT = (
     "do not mark items completed — the execution phase does the reading and "
     "the work. If the request needs no implementation — a survey, an "
     "analysis, a comparison — close it with finish_research(summary) "
-    "instead: the conclusion is the answer, and no plan is submitted. "
+    "instead: the conclusion is the answer, and no plan is submitted. A "
+    "request that asks for changes (implement, modify, add, fix, refactor) "
+    "needs a plan, not a conclusion. "
     "bash/write/edit are unavailable here — explore with "
     "read/grep/glob instead.</plan-mode>"
 )

@@ -96,7 +96,9 @@ PLAN_PROMPT = (
     "present_plan presents the plan for the user's review, and approval "
     "starts execution automatically — do not execute it yourself. "
     "If the topic needs no implementation — a survey, an analysis, a "
-    "comparison — close it with finish_research(summary) instead of a plan."
+    "comparison — close it with finish_research(summary) instead of a plan. "
+    "A request that asks for changes (implement, modify, add, fix, refactor) "
+    "needs a plan, not a conclusion."
 )
 
 

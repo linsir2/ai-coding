@@ -11,6 +11,8 @@ exit ends the turn at the batch, with a terminal note and no second model
 call.
 """
 
+import json
+
 import pytest
 
 from ai_coding.ai.engine import ChatEngine
@@ -20,8 +22,11 @@ from ai_coding.core.turn_policy import PLAN_RESEARCH_NOTE
 from ai_coding.domain.loop import StepResult, TurnStatus
 from ai_coding.domain.message import ToolCallRef, ToolResult
 from ai_coding.security.approval import AutoApproveCallback
+from ai_coding.security.user_prompt import UserAnswer
 from ai_coding.service.session_service import SessionService
 from ai_coding.tools.base import BaseTool
+from ai_coding.tools.finish_research_tool import FinishResearchTool
+from ai_coding.tools.present_plan_tool import PresentPlanTool
 from ai_coding.tools.registry import ToolRegistry
 
 
@@ -112,6 +117,116 @@ def _plan_reminders(session) -> list[str]:
     ]
 
 
+# ---- the two exits, in one batch (the mutual exclusion) ----------------------
+
+
+class _Dismiss:
+    """A human who says "not now" (esc / empty on the review card)."""
+
+    def __init__(self) -> None:
+        self.asked = 0
+
+    async def ask(self, question, options=(), *, detail="", intent="", data=None):
+        self.asked += 1
+        return UserAnswer(answered=False, reason="empty")
+
+
+class _Approve:
+    """A human who approves the plan."""
+
+    def __init__(self) -> None:
+        self.asked = 0
+
+    async def ask(self, question, options=(), *, detail="", intent="", data=None):
+        self.asked += 1
+        return UserAnswer(answered=True, text=json.dumps({"choice": "approve"}))
+
+
+def _calls(*specs: tuple[str, str, dict]) -> StepResult:
+    """One model step that asks for several tools, in the model's own order."""
+    return StepResult(
+        text=None,
+        tool_calls=[
+            ToolCallRef(id=cid, name=name, arguments=json.dumps(args))
+            for cid, name, args in specs
+        ],
+        finish_reason="tool_calls",
+    )
+
+
+def _exits_loop(engine: ChatEngine, sessions: SessionService, prompt) -> AgentLoop:
+    """A loop whose registry carries the two real exits -- they hold the turn."""
+    registry = ToolRegistry()
+    registry.register(PresentPlanTool(prompt))
+    registry.register(FinishResearchTool())
+    return AgentLoop(
+        engine,
+        sessions,
+        registry,
+        approval=AutoApproveCallback(),
+        settings=AIConfig(),
+        workspace=".",
+    )
+
+
+def _tool_result(session, name: str) -> tuple[bool, str]:
+    """``(success, text)`` of one tool's result, read off the transcript."""
+    for message in reversed(session.messages):
+        if message.role == "tool" and message.tool_name == name:
+            content = message.content or ""
+            return 'ok="false"' not in content, content
+    raise AssertionError(f"no tool result for {name}")
+
+
+_PLAN_CALL = (
+    "c_plan",
+    "present_plan",
+    {"plan": "查记忆层", "items": [{"content": "读代码"}]},
+)
+_RESEARCH_CALL = ("c_research", "finish_research", {"summary": "记忆层是三层。"})
+
+
+@pytest.mark.asyncio
+async def test_a_dismissed_review_does_not_eat_the_research_conclusion(tmp_path):
+    """占位 = 成功: the human's "not now" is not an exit, so the other exit
+    stays open.  A dismissal must not swallow the model's conclusion."""
+    engine = _ScriptedEngine([_calls(_PLAN_CALL, _RESEARCH_CALL)])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _exits_loop(engine, sessions, _Dismiss())
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "看看记忆层怎么设计的")
+
+    ok, text = _tool_result(session, "finish_research")
+    assert ok is True, text
+    assert "记忆层是三层。" in text
+    outcome = loop.last_outcome
+    assert outcome is not None and outcome.reason == "research finished"
+    assert session.task is not None and session.task.armed is False
+
+
+@pytest.mark.asyncio
+async def test_the_plan_after_a_conclusion_is_refused_and_arms_nothing(tmp_path):
+    """The two exits are mutually exclusive: the first one to succeed owns the
+    turn.  The plan submission is refused, the human is never asked, and
+    nothing is armed."""
+    engine = _ScriptedEngine([_calls(_RESEARCH_CALL, _PLAN_CALL)])
+    sessions = SessionService(tmp_path / "sessions")
+    human = _Approve()
+    loop = _exits_loop(engine, sessions, human)
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "看看记忆层怎么设计的")
+
+    ok, text = _tool_result(session, "present_plan")
+    assert ok is False, text
+    assert "不能再提交计划" in text
+    assert human.asked == 0
+    assert session.task is not None
+    assert session.task.armed is False
+    assert session.task.items == []
+
+
 @pytest.mark.asyncio
 async def test_a_conclusion_ends_the_turn_at_the_batch(tmp_path):
     """The conclusion is the deliverable, so the turn ends there: the engine is
@@ -162,3 +277,64 @@ async def test_a_refused_conclusion_leaves_the_turn_to_the_guard(tmp_path):
     outcome = loop.last_outcome
     assert outcome is not None and outcome.status is TurnStatus.COMPLETED
     assert "未提交计划" in outcome.note
+
+
+# ---- the tool table (the model's contract) ----------------------------------
+
+
+class _RecordingEngine(_ScriptedEngine):
+    """An engine that remembers the tool table it was handed."""
+
+    def __init__(self, steps: list) -> None:
+        super().__init__(steps)
+        self.surfaces: list[list] = []
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        self.surfaces.append(tools)
+        return await super().step(
+            messages, tools=tools, instructions=instructions, on_delta=on_delta
+        )
+
+
+def _tool_names(schemas: list) -> list[str]:
+    return [schema["function"]["name"] for schema in schemas]
+
+
+def _registry_loop(engine: ChatEngine, sessions: SessionService) -> AgentLoop:
+    registry = ToolRegistry()
+    registry.register(FinishResearchTool())
+    return AgentLoop(
+        engine,
+        sessions,
+        registry,
+        approval=AutoApproveCallback(),
+        settings=AIConfig(),
+        workspace=".",
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_research_exit_is_not_in_the_build_mode_tool_table(tmp_path):
+    """The tool table is a contract: outside the planning posture the research
+    exit must not be advertised -- it could only ever be refused."""
+    engine = _RecordingEngine([_text("好了。")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _registry_loop(engine, sessions)
+    session = sessions.create()
+
+    await loop.process_input(session, "看看记忆层怎么设计的")
+
+    assert "finish_research" not in _tool_names(engine.surfaces[0])
+
+
+@pytest.mark.asyncio
+async def test_the_research_exit_is_in_the_plan_mode_tool_table(tmp_path):
+    """The other half: the planning posture is where the exit belongs, so the
+    model must be able to see it there."""
+    engine = _RecordingEngine([_text("好了。"), _text("真的好了。")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _registry_loop(engine, sessions)
+    session = _plan_session(sessions)
+    await loop.process_input(session, "看看记忆层怎么设计的")
+
+    assert "finish_research" in _tool_names(engine.surfaces[0])

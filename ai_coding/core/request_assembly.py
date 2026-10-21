@@ -28,7 +28,7 @@ from typing import Any
 from ai_coding.core.compaction import Compactor
 from ai_coding.core.events import ContextCompacted, LoopEvent, MemoryInjected
 from ai_coding.core.file_mentions import resolve_bare_paths, resolve_file_mentions
-from ai_coding.core.plan_runner import outside_workspace_paths
+from ai_coding.core.plan_runner import PLAN_MARK, outside_workspace_paths
 from ai_coding.core.request_builder import build_tail, content_of, volatile_block
 from ai_coding.core.sop_router import SOPRouter
 from ai_coding.core.turn_books import TurnBooks
@@ -42,12 +42,39 @@ from ai_coding.skills.policy import denied_skill_ids
 from ai_coding.skills.registry import SkillRegistry, iter_mentions, resolve_mentions
 from ai_coding.skills.render import render_skill_content
 
-__all__ = ["Assembled", "RequestAssembler"]
+__all__ = ["Assembled", "RequestAssembler", "human_utterance"]
 
 #: r17/T4 caps: one file, one directory listing, and the whole block.
 _FILE_CHARS = 20_000
 _DIR_ENTRIES = 200
 _FILES_BLOCK_BUDGET = 40_000
+
+
+def human_utterance(messages: Sequence[ChatMessage]) -> str:
+    """The last thing a *human* wrote -- one criterion for every reader.
+
+    Two lines in the transcript are not the human's:
+
+    * a **synthetic** message (r18/F3): a nudge, a steering line, a task
+      state block -- the harness talking in the user's shape;
+    * the **planning instruction** (``[plan] ...``): the harness's own prompt,
+      still written in the user's voice (B3), so it is not what the human
+      asked for.  In a planning round it is the *last* user message, so
+      without this exclusion every reader would answer with the harness's
+      words.
+
+    Everything else is the human's, and it is the input the mention blocks
+    are rebuilt from, the input the outside-workspace warning looks at, and
+    the request the research exit judges.
+    """
+    for message in reversed(messages):
+        if message.role != "user" or message.synthetic:
+            continue
+        content = (message.content or "").strip()
+        if content.startswith(PLAN_MARK):
+            continue
+        return content
+    return ""
 
 
 def _file_tag(rel: str) -> str:
@@ -487,15 +514,11 @@ class RequestAssembler:
         """The last message a *human* wrote, which is what the mention blocks are
         rebuilt from.
 
-        Synthetic messages (r18/F3 -- a nudge, a steering line) are written as
-        ``role="user"`` too, and taking the last of those would rebuild
-        ``<referenced-files>`` from a system string the user never typed, losing
-        the file they attached for the rest of the turn.
+        The criterion lives in :func:`human_utterance` -- one answer for every
+        reader (the mention blocks, the outside-workspace warning, and the
+        research exit's own gate).
         """
-        for m in reversed(session.messages):
-            if m.role == "user" and not m.synthetic:
-                return (m.content or "").strip()
-        return ""
+        return human_utterance(session.messages)
 
     @staticmethod
     def _extract_recent_tools(session: SessionData, books: TurnBooks) -> list[str]:

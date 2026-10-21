@@ -39,6 +39,10 @@ _HOLD = (
 _NO_CHANNEL = (
     "当前没有人工可评审这份计划。保持计划模式，简要收尾并说明计划，等待用户指示。"
 )
+_DISMISSED = (
+    "本次评审已被搁置（人选择了「稍后」）：本回合不再提交计划。"
+    "请用一句话说明你的结论，或等待用户的下一步指示。"
+)
 _NOT_IN_PLAN = (
     "present_plan 只在计划模式可用；当前不在计划模式。"
     "请直接以回答收尾，不要提交计划；需要制定计划时，让用户先进入计划模式（/plan）。"
@@ -174,6 +178,17 @@ class PresentPlanTool(BaseTool):
                 ),
                 error="already_concluded",
             )
+        # N1: a dismissed review is not an exit -- it is "not now", so the
+        # other exit stays open.  It does close the review itself: the human
+        # was already asked once in this turn, and asking again would put a
+        # second card in front of them (and a second approval would arm a
+        # plan the dismissal then takes back).
+        if getattr(conclusion, "dismissed", False):
+            return ToolResult(
+                success=False,
+                output=_DISMISSED,
+                error="already_concluded",
+            )
         plan = str(params.get("plan", "") or "").strip()
         if not plan:
             return ToolResult(
@@ -252,10 +267,11 @@ class PresentPlanTool(BaseTool):
             # submission while a plan runs, so a dismissal always meets an
             # unarmed task.  (The loop's dismissal branch is the one that can
             # meet an armed task; it disarms there.)
-            # A dismissal is an ending too: the turn stops here, so the other
-            # exit must not be taken afterwards.
+            # A dismissal is not an exit: it closes the review, not the turn
+            # (N1: 占位 = 成功).  The research exit stays open, so the model
+            # can still give its conclusion after the human said "not now".
             if conclusion is not None:
-                conclusion.exit = "present_plan"
+                conclusion.dismissed = True
             return ToolResult(
                 success=True,
                 output=_HOLD,

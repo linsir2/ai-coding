@@ -422,4 +422,7 @@ class TurnBooks:
             ask_user_calls=self.ask_user_calls,
             plan_submitted="present_plan" in self.tool_success,
             plan_nudged=self.plan_nudged,
+            # N1: the approval is the plan exit's success, and the guard reads
+            # it from here (the books are the only place that knows it).
+            plan_approved=self.plan_approved,
         )

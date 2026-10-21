@@ -211,3 +211,81 @@ if any(
 - L-2 实现型请求（`scripts/r19_acceptance.py --only plan_mode`）→ 仍走 `present_plan`：1 个条目、批准后执行、1 张收据。
 
 **未做（留给下一批）**：N2（契约归位）、N3（只读变成权限规则，依赖 M1a）、M1a/M1b。
+
+---
+
+## 9. 评审落点的修复（2026-10-21，第二轮）
+
+> 对抗性评审指出原型的三个落点缺陷：**占位时机**（dismiss 也占位，把另一个出口封死）、**`plan_approved` 不在 snapshot**（守卫看不见「已批准」）、**`finish_research` 无条件注册**（build 模式的工具表里有一个永远调不通的工具）。
+> 另按用户拍板补上「出口②防滥用」：**prompt 判据 + 工具内兜底**（两者都做）。
+
+### 9.1 占位 = 成功
+
+| 事实 | 落点 |
+|---|---|
+| `present_plan` 的占位 = **人批准**；dismiss **不占位**（只关掉评审本身） | `present_plan_tool.py`：dismiss 分支改置 `conclusion.dismissed`，批准分支仍置 `conclusion.exit` |
+| dismiss 后同一回合的 `finish_research` **仍能成功** | 新用例 `test_a_dismissed_review_does_not_eat_the_research_conclusion`（Red → Green） |
+| `finish_research` 成功后同批的 `present_plan` 返回 `already_concluded`，**不 arm、不改 task** | 新用例 `test_the_plan_after_a_conclusion_is_refused_and_arms_nothing` |
+| 评审不被问第二次（dismiss 只关评审，不关另一个出口） | `TurnConclusion.dismissed` + `present_plan` 的第二道门（错误码仍用 `already_concluded`） |
+| 成功的出口拥有回合的终局说明 | `agent_loop.py`：研究出口的分支挪到 dismissal 分支**之前**（同一批里既有 dismissal 又有结论时，note 说「结论已给出」） |
+
+**两个终局 note 不矛盾**（评审要求核对）：
+
+- 已批准 → 批准即 arm，回合照常收尾（note 为空），执行层接管；研究出口此时已被 `already_concluded` 挡住。
+- 研究已完成 → `PLAN_RESEARCH_NOTE`（「结论已给出，未提交计划、未执行」）；此时 task 未 arm、无条目。
+- 两者能同时成立的前提是「同批里结论先成功、计划随后被批准」——**互斥门在提问之前就拒了它**（`present_plan` 的 `already_concluded` 门在评审之前），所以状态与 note 不可能矛盾。
+
+### 9.2 补齐的落点
+
+| 缺陷 | 落点 |
+|---|---|
+| `TurnSnapshot` 里没有 `plan_approved`，守卫看不见「已批准」 | `turn_policy.py` 加字段 + `PlanSubmissionGuard` 改读它；`turn_books.py` 的 `snapshot()` 带上 `self.plan_approved` |
+| build 模式的工具表里有永远调不通的 `finish_research` | `BaseTool.plan_only` + `FinishResearchTool.plan_only = True`；`agent_loop.py` 的工具面按姿态取（`_surface_tools` / `_surface_schemas`，按姿态缓存以保请求逐字稳定） |
+| 三处 prompt 各说一套 | `ai/prompt.py` 的 `<plan-mode>` 段、`core/plan_runner.py` 的 `PLAN_PROMPT`、`finish_research_tool.py` 的工具描述：同一句判据（"A request that asks for changes (implement, modify, add, fix, refactor) needs a plan, not a conclusion."） |
+
+> **与设计稿的一处偏差（如实记录）**：设计稿写「本批先只在 plan 模式**注册**」。工具注册表是**进程级**的（CLI / server 各建一次，所有会话共用），而姿态是**会话级**且运行时会翻（`/plan`、`/plan off`）——注册时根本不知道姿态。所以落点改成**工具面**（模型看到的工具表）而不是注册表：plan 姿态看得见 `finish_research`，别的姿态看不见；执行期还有工具自己的 mode 门兜底（`not_in_plan`）。真效果与设计稿一致，位置不同。
+
+### 9.3 出口②防滥用（prompt + 工具内兜底）
+
+| 层 | 落点 |
+|---|---|
+| (b) prompt 判据 | `<plan-mode>` 段与 `PLAN_PROMPT` 各加一句："A request that asks for changes (implement, modify, add, fix, refactor) needs a plan, not a conclusion." |
+| (a) 工具内兜底 | `finish_research_tool.py`：读**本回合人类的话** → 命中实现类动词就拒（`implementation_request`），并说清「改走 present_plan」 |
+
+**「本回合人类的话」从哪来**：复用 `core/request_assembly.py` 的 `_extract_user_input` 判据，抽成模块级 `human_utterance(messages)`（工具与装配器共用一份，不另写一套）。两处排除：**synthetic 消息**（harness 自己的话）与**规划指令**（`[plan] …`，B3：它写在用户的语气里，且在规划轮里是**最后**一条 user 消息——不排除它，守卫就会拿 harness 的提示词当用户的话）。
+
+**词表（小、只挡明显的实现类动词）**：
+
+- 中文：`实现 新增 加上 加一个 加个 修改 改成 改一下 改代码 修复 重构 写一个 删除`
+- 英文：`implement add fix refactor delete remove`（按**词边界**匹配，所以 `implementation` / `address` / `prefix` 不算）
+- **否定不算**：「不要改代码，只要调研」「不要提出实现改动」→ 不算实现意图（否则守卫会把 N1 存在的意义——研究请求出结论——顶回计划）
+- **名词不算**：「这个实现」「该实现」→ 实现**方式/复杂度**是名词，不是动词（英文靠词边界天然做到，中文靠代词排除）
+
+**已知误判（词表兜底的本质，08 号稿已认：「判定粗糙（同义/反讽会误判）」）**：
+
+- 假阳：「评估一下给 X **加一个**函数要动哪些地方」——研究请求被当成实现请求（模型会改交一份计划）。
+- 假阴：「调研**并**实现 X」——一个从句里既有调研词又有实现词，按词表算实现（拦下）✓，但若将来加「调研词优先」规则就会漏。
+
+真正的解法是 M1a 的规则语言（按 agent 规则集剪裁工具面），不是词表。
+
+### 9.4 真机（2026-10-21，qwen3.7-flash，`scripts/n1_live_check.py`）
+
+两个场景都跑在新场景脚本里（研究 + 实现），产物在 `/tmp/opencode/n1-live-final`（首跑 `/tmp/opencode/n1-live-fix`）：
+
+```
+[research] posture=('plan', True) items=0 armed=False reviews=0 finish_research=1 present_plan=0 elapsed=50.6s
+PASS [research] the research exit was taken and nothing was planned
+
+[implement] posture=('plan', True) items=1 armed=True reviews=1 finish_research=0 present_plan=1 elapsed=70.5s
+PASS [implement] the implementation request got a plan, not a conclusion
+```
+
+- **研究型**（`/plan 调研这个仓库的会话是怎么落盘的…不要提出实现改动，也不要写任何文件。`）→ 模型走 `finish_research`（1 次，`data={"research_finished": true}`），`present_plan` 0 次，评审卡 0 张，task 无条目、未 arm。★守卫没有误伤：这句话里有「实现改动」，但它在否定从句里。
+- **实现型**（`/plan 给 src/mod1.py 加一个函数，计算两个数的和。`）→ `finish_research` **0 次**，`present_plan` 1 次，评审卡 1 张，批准后 task 2 个条目并 arm。★这次模型**根本没试**研究出口——是 prompt 判据 (b) 起的作用（工具内兜底 (a) 是第二道，单元测试两侧都钉住了）。
+
+### 9.5 本轮的门禁
+
+- `python -m pytest -q` 全量 **EXIT=0**（新增 15 个用例函数，其中两个是参数化：7 + 6 个 case，合计 25 个 case；另有 `tests/test_prompt.py` 的 1 处常量迁移）。
+- `ruff check ai_coding tests`：**All checks passed**。
+- `mypy ai_coding`：**Success: no issues found in 144 source files**。
+- 前端 `bun test`：**409 pass / 0 fail**（只加了 `implementation_request` 的中文标签）。

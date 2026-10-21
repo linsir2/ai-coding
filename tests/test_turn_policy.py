@@ -430,3 +430,12 @@ def test_after_step_finishes_when_the_ask_was_ignored():
     assert (decision.action, decision.reason) == (
         TurnAction.FINISH, "todo ladder exhausted"
     )
+
+
+def test_the_guard_lets_an_approved_plan_through():
+    """占位 = 成功: an approval is the plan exit's success, so the guard must
+    not ask for a submission the human already gave."""
+    decision = TurnPolicy(_config()).decide_after_step(
+        TurnSnapshot(iteration=1, mode="plan", plan_approved=True)
+    )
+    assert (decision.action, decision.reason) == (TurnAction.FINISH, "model finished")

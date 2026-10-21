@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """N1 live check — the research exit, against the real model.
 
-One scenario, behind ``scripts/recording_proxy.py`` with a fresh temp
+Two scenarios, behind ``scripts/recording_proxy.py`` with a fresh temp
 workspace, so every byte of the traffic is on disk before it is asserted:
 
   research — drives the command layer for real: ``/plan <topic>`` enters the
@@ -10,13 +10,20 @@ workspace, so every byte of the traffic is on disk before it is asserted:
   into a plan, so the assertions are: the conclusion exit was taken, no plan
   review was ever asked, the task carries no items, and nothing is armed.
 
+  implement — the other half: an implementation request must not be answered
+  with a conclusion.  The research exit is refused for it (the request asks
+  for work), so the model hands over a plan instead: the assertions are that
+  no conclusion succeeded, that a plan was submitted, and that the review
+  was asked.
+
 Usage:
 
     python scripts/n1_live_check.py [--config config.local.yaml]
         [--out-dir /tmp/opencode/n1-live] [--topic "..."]
+        [--implement-topic "..."] [--only research|implement]
 
 Artifacts (temp config, JSONL wire recording, session copy) stay under the
-out dir; nothing is deleted.  Exit code 0 = the scenario passed.
+out dir; nothing is deleted.  Exit code 0 = the scenarios passed.
 """
 
 from __future__ import annotations
@@ -56,6 +63,16 @@ DEFAULT_TOPIC = (
     "不要提出实现改动，也不要写任何文件。"
 )
 
+#: An implementation request: the other half of the exit's contract.  The
+#: research exit must not answer it -- the work belongs to a plan.
+DEFAULT_IMPLEMENT_TOPIC = "给 src/mod1.py 加一个函数，计算两个数的和。"
+
+#: What each scenario proved, in one line.
+SCENARIO_VERDICT = {
+    "research": "the research exit was taken and nothing was planned",
+    "implement": "the implementation request got a plan, not a conclusion",
+}
+
 
 def _tool_calls(session) -> list[dict[str, Any]]:
     """The tool calls the model made, in the session's own transcript."""
@@ -77,19 +94,30 @@ def _tool_results(session) -> list[dict[str, Any]]:
         if getattr(message, "role", "") == "tool":
             results.append(
                 {
-                    "name": getattr(message, "name", "") or "",
+                    # the message's field is ``tool_name`` (a tool result is
+                    # paired with its call), not ``name``
+                    "name": getattr(message, "tool_name", "") or "",
                     "content": (getattr(message, "content", "") or "")[:2000],
                 }
             )
     return results
 
 
-async def run(*, topic: str, model: dict[str, Any], out_root: Path) -> dict[str, Any]:
-    run_dir = out_root / "research"
+async def run(
+    *, topic: str, model: dict[str, Any], out_root: Path, scenario: str = "research"
+) -> dict[str, Any]:
+    run_dir = out_root / scenario
     run_dir.mkdir(parents=True, exist_ok=True)
     ws = run_dir / "ws"
     ws.mkdir(exist_ok=True)
     _git_workspace(ws)
+    if scenario == "implement":
+        # The implementation scenario needs a file to change, or the model
+        # spends the round looking for one that is not there.
+        (ws / "src").mkdir(exist_ok=True)
+        (ws / "src" / "mod1.py").write_text(
+            "def existing():\n    return 1\n", encoding="utf-8"
+        )
 
     wire = run_dir / "wire.jsonl"
     server = serve(upstream=model["base_url"], port=0, out_path=wire, cut_first=0)
@@ -138,7 +166,7 @@ async def run(*, topic: str, model: dict[str, Any], out_root: Path) -> dict[str,
     ]
     shutil.copy(ws / "sessions" / f"{session.session_id}.json", run_dir / "session.json")
     return {
-        "name": "research",
+        "name": scenario,
         "run_dir": str(run_dir),
         "elapsed": elapsed,
         "entries": entries,
@@ -146,8 +174,29 @@ async def run(*, topic: str, model: dict[str, Any], out_root: Path) -> dict[str,
     }
 
 
+def _succeeded(result: dict[str, Any], tool: str) -> bool:
+    """Did this tool come back successful?  (``ok="false"`` is the wire's own
+    way of saying the tool refused.)"""
+    for entry in result["tool_results"]:
+        if entry["name"] == tool and 'ok="false"' not in entry["content"]:
+            return True
+    return False
+
+
 def check(result: dict[str, Any]) -> list[str]:
     problems: list[str] = []
+    if result["name"] == "implement":
+        # An implementation request belongs to present_plan: the research exit
+        # must not answer it, or the work never happens.
+        if _succeeded(result, "finish_research"):
+            problems.append("the research exit answered an implementation request")
+        if not result["present_plan_calls"]:
+            problems.append("the model never submitted a plan for an implementation request")
+        if not result["review_questions"]:
+            problems.append("no plan review was asked (the plan was never handed over)")
+        if result["posture"] != ("plan", True):
+            problems.append(f"the planning posture was not held: {result['posture']}")
+        return problems
     if not result["finish_research_calls"]:
         problems.append("the model never took the research exit")
     if result["present_plan_calls"]:
@@ -181,27 +230,41 @@ async def main(args: argparse.Namespace) -> int:
     print(f"model={model['name']}  upstream={model['base_url']}")
     print(f"artifacts: {out_root}")
 
-    result = await run(topic=args.topic, model=model, out_root=out_root)
-    problems = check(result)
-    print("=" * 68)
-    print(
-        f"posture={result['posture']} items={result['items']} armed={result['armed']} "
-        f"reviews={len(result['review_questions'])} "
-        f"finish_research={len(result['finish_research_calls'])} "
-        f"present_plan={len(result['present_plan_calls'])} "
-        f"elapsed={result['elapsed']}s"
-    )
-    for call in result["finish_research_calls"]:
-        print(f"  summary: {call['arguments'][:400]}")
-    for line in result["console"]:
-        print(f"  console: {line}")
-    print("=" * 68)
-    if problems:
-        for problem in problems:
-            print(f"FAIL {problem}")
-        return 1
-    print("PASS the research exit was taken and nothing was planned")
-    return 0
+    scenarios = [
+        ("research", args.topic),
+        ("implement", args.implement_topic),
+    ]
+    if args.only:
+        scenarios = [s for s in scenarios if s[0] == args.only]
+    failed = 0
+    for name, topic in scenarios:
+        result = await run(topic=topic, model=model, out_root=out_root, scenario=name)
+        problems = check(result)
+        print("=" * 68)
+        print(
+            f"[{name}] posture={result['posture']} items={result['items']} "
+            f"armed={result['armed']} reviews={len(result['review_questions'])} "
+            f"finish_research={len(result['finish_research_calls'])} "
+            f"present_plan={len(result['present_plan_calls'])} "
+            f"elapsed={result['elapsed']}s"
+        )
+        for call in result["finish_research_calls"]:
+            print(f"  finish_research: {call['arguments'][:400]}")
+        for entry in result["tool_results"]:
+            if entry["name"] == "finish_research":
+                print(f"  result: {entry['content'][:400]}")
+        for call in result["present_plan_calls"]:
+            print(f"  present_plan: {call['arguments'][:400]}")
+        for line in result["console"]:
+            print(f"  console: {line}")
+        print("=" * 68)
+        if problems:
+            failed = 1
+            for problem in problems:
+                print(f"FAIL [{name}] {problem}")
+        else:
+            print(f"PASS [{name}] {SCENARIO_VERDICT[name]}")
+    return failed
 
 
 if __name__ == "__main__":
@@ -209,4 +272,6 @@ if __name__ == "__main__":
     parser.add_argument("--config", default="config.local.yaml")
     parser.add_argument("--out-dir", default="")
     parser.add_argument("--topic", default=DEFAULT_TOPIC)
+    parser.add_argument("--implement-topic", default=DEFAULT_IMPLEMENT_TOPIC)
+    parser.add_argument("--only", default="", choices=["", "research", "implement"])
     raise SystemExit(asyncio.run(main(parser.parse_args())))

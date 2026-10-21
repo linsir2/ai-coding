@@ -239,6 +239,11 @@ def _assemble_registry(
     # N1: the research exit.  It needs no human (it asks nobody), so it is
     # registered wherever a plan posture can exist: the main session.  A
     # sub-agent runs in a throwaway session and never plans.
+    #
+    # The *visibility* is the tool's own business: ``plan_only`` keeps it out
+    # of the tool table outside the planning posture (the registry is
+    # process-wide, so the posture cannot decide the registration -- see
+    # ``BaseTool.plan_only`` and the loop's posture-aware tool surface).
     if include_subagent:
         from ai_coding.tools.finish_research_tool import FinishResearchTool
 

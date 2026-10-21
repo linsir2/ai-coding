@@ -133,7 +133,7 @@ from ai_coding.security.permission_gate import PermissionGate
 from ai_coding.service.session_service import SessionService
 from ai_coding.skills.catalog import build_catalog, superseded_note
 from ai_coding.skills.policy import denied_skill_ids
-from ai_coding.tools.base import TurnConclusion
+from ai_coding.tools.base import BaseTool, TurnConclusion
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.schema import tool_schema, tool_schemas, tool_schemas_from_tools
 
@@ -364,13 +364,13 @@ class AgentLoop:
         # answers a different question (whether the box should accept input).
         self._turn_lock = asyncio.Lock()
         self._tool_schemas = tool_schemas(tools)
-        # 只读探索批次: the schema list mirrors the dispatch gate's own
-        # predicate -- what `ctx.readonly` refuses is never advertised, so a
-        # read-only model has nothing to walk into (measured before: 3-4 bash
-        # collisions per planning turn).  Same predicate, one source of truth.
-        self._readonly_schemas = tool_schemas_from_tools(
-            [tool for tool in tools.all_tools if not tool.mutates_world]
-        )
+        # N1: the tool table a request carries depends on the posture.  A
+        # plan-only tool (the research exit) belongs to the planning
+        # posture: outside it, the model must not see a tool whose every
+        # call could only be refused.  The lists are derived per posture and
+        # cached, so a request stays byte-identical (the prompt cache and
+        # the provider's prefix cache depend on it).
+        self._surface_cache: dict[tuple[str, bool], list[dict[str, Any]]] = {}
         # R4a: the tool schemas are part of every prompt, so their size belongs in
         # the attribution (docs/r4-analysis.md 4.3).
         self._tools_text = short_json(self._tool_schemas)
@@ -942,6 +942,28 @@ class AgentLoop:
                 if any(item.halted for item in outcomes):
                     outcome = stopped_outcome(step.text, books.total_iterations)
                     break
+                # N1: the research exit closes the turn.  A conclusion is a
+                # terminal answer: nothing was planned, nothing is armed,
+                # nothing runs, and no review card was ever shown.  The turn
+                # ends at the batch, exactly like the dismissal below.
+                #
+                # It comes first because the successful exit owns the turn's
+                # note: when the model gave its conclusion *and* the human
+                # dismissed the review in the same batch, the conclusion is
+                # what the user is waiting for (the dismissal is their own
+                # action, and nothing was planned or executed either way).
+                if any(
+                    item.call.name == "finish_research" and item.result.success
+                    for item in outcomes
+                ):
+                    outcome = TurnOutcome(
+                        status=TurnStatus.COMPLETED,
+                        text=step.text,
+                        iterations=books.total_iterations,
+                        reason="research finished",
+                        note=PLAN_RESEARCH_NOTE,
+                    )
+                    break
                 # R08 (dsh): a dismissed review (esc / empty on the card) ends
                 # the turn right here -- the user said "not now", not "not
                 # this".  No nudge, no arm, no auto-run; the note tells the
@@ -970,22 +992,6 @@ class AgentLoop:
                         iterations=books.total_iterations,
                         reason="plan dismissed",
                         note=PLAN_DISMISSED_NOTE,
-                    )
-                    break
-                # N1: the research exit closes the turn.  A conclusion is a
-                # terminal answer: nothing was planned, nothing is armed,
-                # nothing runs, and no review card was ever shown.  The turn
-                # ends at the batch, exactly like the dismissal above.
-                if any(
-                    item.call.name == "finish_research" and item.result.success
-                    for item in outcomes
-                ):
-                    outcome = TurnOutcome(
-                        status=TurnStatus.COMPLETED,
-                        text=step.text,
-                        iterations=books.total_iterations,
-                        reason="research finished",
-                        note=PLAN_RESEARCH_NOTE,
                     )
                     break
         except asyncio.CancelledError:
@@ -1830,7 +1836,7 @@ class AgentLoop:
             step = await run_with_deadline(
                 self.engine.step(
                     request,
-                    tools=(self._readonly_schemas if session.readonly else self._tool_schemas),
+                    tools=self._surface_schemas(session),
                     instructions=instructions,
                     on_delta=counted_delta,
                     **(
@@ -2307,23 +2313,52 @@ class AgentLoop:
             project_instructions=project_text,
             skills_catalog=catalog,
             mode=mode,
-            # C-2: the same fact the step picks its schemas from (agent_loop.py:
-            # `self._readonly_schemas if session.readonly else ...`), so the
-            # prompt never teaches a tool the request cannot carry. One rule,
-            # read twice; no second surface to keep in sync.
-            tools=self._prompt_tools(readonly),
+            # C-2: the same fact the step picks its schemas from (the tool
+            # surface), so the prompt never teaches a tool the request cannot
+            # carry. One rule, read twice; no second surface to keep in sync.
+            tools=self._prompt_tools(mode, readonly),
         )
 
-    def _prompt_tools(self, readonly: bool) -> tuple[str, ...]:
+    def _prompt_tools(self, mode: str, readonly: bool) -> tuple[str, ...]:
         """The tool names the methods section should speak for.
 
         Read-only drops the mutating tools, which is what makes the guidance
-        shorter in plan mode rather than merely different.
+        shorter in plan mode rather than merely different -- and outside the
+        planning posture the plan-only tools are gone, so the prompt cannot
+        teach a tool the request does not carry.
         """
-        return tuple(
-            tool.name for tool in self.tools.all_tools
-            if not (readonly and tool.mutates_world)
-        )
+        return tuple(tool.name for tool in self._surface_tools(mode, readonly))
+
+    def _surface_tools(self, mode: str, readonly: bool) -> list[BaseTool]:
+        """The tools this request may call, in the registry's own order.
+
+        Two predicates, both about what the request may do: the read-only
+        posture drops the mutating tools (the dispatch gate refuses them
+        structurally -- 只读探索批次, measured: 3-4 bash collisions per
+        planning turn), and outside the planning posture the plan-only tools
+        are not advertised at all (N1).
+        """
+        tools = list(self.tools.all_tools)
+        if mode != "plan":
+            tools = [tool for tool in tools if not tool.plan_only]
+        if readonly:
+            tools = [tool for tool in tools if not tool.mutates_world]
+        return tools
+
+    def _surface_schemas(self, session: Any) -> list[dict[str, Any]]:
+        """The schema list for this request -- one per posture, cached.
+
+        The cache is what keeps the request byte-stable: the same posture
+        always produces the same list, in the same order.
+        """
+        mode = str(getattr(session, "mode", "normal") or "normal")
+        readonly = bool(getattr(session, "readonly", False))
+        key = (mode, readonly)
+        schemas = self._surface_cache.get(key)
+        if schemas is None:
+            schemas = tool_schemas_from_tools(self._surface_tools(mode, readonly))
+            self._surface_cache[key] = schemas
+        return schemas
 
     # ---- memory -----------------------------------------------------------
 

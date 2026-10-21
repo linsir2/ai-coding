@@ -130,6 +130,8 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   already_concluded: { label: "本回合已收尾", tone: "denied" },
   missing_summary: { label: "结论为空", tone: "denied" },
   plan_already_approved: { label: "计划已批准", tone: "denied" },
+  // N1: the request asks for work, so the conclusion exit is not the way out.
+  implementation_request: { label: "该请求要实现", tone: "denied" },
 }
 
 export function toolFailure(error: string): { label: string; tone: FailureTone } {

@@ -185,6 +185,11 @@ class TurnSnapshot:
     #: nudge has been spent.  Defaults keep earlier constructions identical.
     plan_submitted: bool = False
     plan_nudged: bool = False
+    #: N1: the human approved a plan this turn.  The approval is the plan
+    #: exit's *success* (占位 = 成功), and it is the fact the guard needs: a
+    #: dismissed review is not a submission, and an approved one must not be
+    #: asked for again.
+    plan_approved: bool = False
 
 
 @dataclass(frozen=True)
@@ -215,10 +220,14 @@ class PlanSubmissionGuard:
     too ends with the terminal note instead of a silent COMPLETED (7ad86804
     / 1fd3be1e measured the silent case twice — a bare analysis, no card, no
     execution).  The two texts live beside this rule, above.
+
+    N1: the guard reads the *approval*, not the call: a plan the human
+    approved is this turn's exit (占位 = 成功), and a review the human
+    dismissed is not a submission — so neither of them is asked for again.
     """
 
     def on_stop(self, snapshot: TurnSnapshot) -> TurnDecision | None:
-        if snapshot.plan_submitted:
+        if snapshot.plan_approved or snapshot.plan_submitted:
             return None
         if not snapshot.plan_nudged:
             return TurnDecision(TurnAction.NUDGE, "plan unsubmitted", inject=PLAN_NUDGE)

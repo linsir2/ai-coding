@@ -34,9 +34,18 @@ class TurnConclusion:
     every tool call of the turn, so the second exit can see that the first
     one already closed it.  It lives in the turn, not in the task: a
     conclusion is a fact about one turn, and the task outlives it.
+
+    ``exit`` is a *success*, nothing else: the plan counts when a human
+    approved it, and the research exit counts when the tool returned.  A
+    dismissed review is not a success (the human said "not now", so nothing
+    was submitted and nothing is armed) -- it only closes the review
+    itself, which is why it has its own field: the other exit stays open.
     """
 
     exit: str = ""
+    #: The human dismissed the plan review.  The review is not asked twice in
+    #: one turn, but the turn's other exit is still open.
+    dismissed: bool = False
 
 
 @dataclass
@@ -139,6 +148,13 @@ class BaseTool(ABC):
     #: Fail-closed default like ``parallel_safe``'s False; the two are
     #: orthogonal — ``subAgent`` runs arbitrary work yet is parallel-safe.
     mutates_world: bool = True
+    #: N1: does this tool belong to the planning posture only?  A plan-only
+    #: tool is not advertised outside it: the model must not see a tool whose
+    #: every call could only be refused (the research exit is plan-only, and
+    #: build mode has nothing for it to conclude).  The general version of
+    #: this -- a tool table pruned by a permission rule -- is M1a's job; this
+    #: is the one hard case this batch needed.
+    plan_only: bool = False
 
     @property
     def origin(self) -> str:

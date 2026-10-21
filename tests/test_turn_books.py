@@ -388,3 +388,13 @@ def test_snapshot_carries_the_plan_submission_state():
     assert snap2.plan_submitted is True
     books.note_plan_nudge()
     assert books.snapshot(iteration=1, tokens_spent=0).plan_nudged is True
+
+
+def test_snapshot_carries_the_approval():
+    """N1: the books know a human approved a plan (the consent), but the
+    snapshot did not carry it -- so the guard could not see that the turn's
+    plan exit was already taken."""
+    books = TurnBooks()
+    books.note_plan_approved()
+    snap = books.snapshot(iteration=1, tokens_spent=0)
+    assert snap.plan_approved is True
