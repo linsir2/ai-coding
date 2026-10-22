@@ -43,7 +43,7 @@ async def test_the_runner_reads_the_real_config():
             self.closer = SimpleNamespace(save=lambda session: None)
             self.calls: list[str] = []
 
-        async def process_input(self, session, text, on_delta=None, observer=None):
+        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
             self.calls.append(text)
             session.messages.append(
                 ChatMessage(role="tool", content="ok", timestamp="", tool_call_id="c1")

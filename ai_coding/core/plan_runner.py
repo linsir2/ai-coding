@@ -421,7 +421,13 @@ async def plan_only(
     session.add_message(user_message(topic, now_utc(), images))
     with continuations_disabled(loop, max_iterations=PLANNING_MAX_ITERATIONS):
         await loop.process_input(
-            session, f"{PLAN_MARK}{PLAN_PROMPT.format(topic=topic)}",
+            session,
+            f"{PLAN_MARK}{PLAN_PROMPT.format(topic=topic)}",
+            # M2 T3 (Q4): the instruction is the harness's, so it is marked
+            # as one.  It used to be told apart by its ``[plan] `` prefix --
+            # a convention every reader had to learn; the mark is the same
+            # answer the reminder gets.
+            synthetic=True,
             on_delta=on_delta, observer=observer,
         )
     task = getattr(session, "task", None)

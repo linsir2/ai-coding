@@ -241,7 +241,7 @@ async def test_plan_step_does_not_auto_continue(tmp_path):
             )
             self.policy = TurnPolicy(TurnPolicyConfig.from_ai_config(self.settings))
 
-        async def process_input(self, session, text, on_delta=None, observer=None):
+        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
             seen.append(self.policy.config.max_auto_continuations)
             for item in session.task.open_items():
                 if not item.is_terminal():

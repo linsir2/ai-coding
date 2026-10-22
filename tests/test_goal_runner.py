@@ -48,7 +48,7 @@ class _FakeLoop:
         #: C3's budget as each round's turn saw it (must be 0).
         self.policies_seen: list[int] = []
 
-    async def process_input(self, session, text, on_delta=None, observer=None):
+    async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
         index = len(self.calls)
         self.calls.append(text)
         self.policies_seen.append(self.policy.config.max_auto_continuations)

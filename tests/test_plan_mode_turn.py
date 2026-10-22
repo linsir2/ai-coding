@@ -63,6 +63,7 @@ class _Loop:
         text: str,
         on_delta: Any = None,
         observer: Any = None,
+        **kwargs: Any,
     ) -> str:
         self.calls.append((text, session.mode))
         self.budgets.append(self.policy.config.max_iterations)

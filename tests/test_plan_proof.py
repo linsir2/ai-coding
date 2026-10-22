@@ -39,7 +39,7 @@ class _StubLoop:
         self._script = list(script)
         self.calls = []
 
-    async def process_input(self, session, text, on_delta=None, observer=None):
+    async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
         session.turn_count += 1
         self.calls.append(text)
         action = self._script.pop(0) if self._script else "complete"

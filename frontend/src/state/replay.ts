@@ -63,13 +63,6 @@ const STEERING_MARK = "[steering] "
  */
 const NOTICE_MARK = "[notice] "
 
-/**
- * The harness's own line for a planning round: it tells the model to
- * produce a plan.  The operator's words are the message right above it, so
- * replaying this would put a page of instruction in their column.
- */
-const PLAN_MARK = "[plan] "
-
 /** Drop the ``<tool_output>`` wrapper and its machine ``<data>`` block. */
 export function stripEnvelope(content: string): string {
   const kept: string[] = []
@@ -160,12 +153,6 @@ export function messagesToState(
           },
         ],
       })
-      continue
-    }
-    if (message.role === "user" && (message.content ?? "").startsWith(PLAN_MARK)) {
-      // The harness's planning instruction.  The operator typed the topic
-      // and it is the message right above; showing the instruction too
-      // would read as if they had said it.
       continue
     }
     if (

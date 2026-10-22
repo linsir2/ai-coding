@@ -61,7 +61,7 @@ class _Loop:
         session.readonly = bool(readonly) if readonly is not None else session.readonly
         session.pending_posture = None
 
-    async def process_input(self, session, text, on_delta=None, observer=None):
+    async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
         self.calls.append(text)
         return "planned"
 
@@ -207,7 +207,7 @@ async def test_the_planning_turn_sees_c3_disabled(monkeypatch):
     seen: list[int] = []
 
     class _RecordingLoop(_Loop):
-        async def process_input(self, session, text, on_delta=None, observer=None):
+        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
             self.calls.append(text)
             seen.append(self.policy.config.max_auto_continuations)
             return "planned"
@@ -393,7 +393,7 @@ async def test_plan_run_executes_the_open_plan():
             )
             self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
 
-        async def process_input(self, session, text, on_delta=None, observer=None):
+        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
             self.calls.append(text)
             if "implementation plan" in text:
                 session.task = TaskState(goal="g")
@@ -428,7 +428,7 @@ async def test_plan_run_executes_the_open_plan():
 async def test_plan_run_without_a_plan_runs_and_reports_empty():
     """No plan, no model turn: the runner says "无任务项" instead."""
     class _RunnerLessLoop(_Loop):
-        async def process_input(self, session, text, on_delta=None, observer=None):
+        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
             self.calls.append(text)
             return "step done"
 
@@ -463,7 +463,7 @@ async def test_run_surfaces_a_stopped_plan():
             self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
             self.workspace = "/tmp/ws"
 
-        async def process_input(self, session, text, on_delta=None, observer=None):
+        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
             self.calls.append(text)
             return "step done"
 
@@ -567,7 +567,7 @@ async def test_the_planning_turn_runs_with_the_planning_budget():
     seen: list[tuple[int, int]] = []
 
     class _RecordingLoop(_Loop):
-        async def process_input(self, session, text, on_delta=None, observer=None):
+        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
             self.calls.append(text)
             seen.append(
                 (
@@ -649,7 +649,7 @@ async def test_plan_run_exits_the_posture_even_when_the_flip_had_to_queue():
     落在 run 之后：即时/排队两态归一，且入盘。"""
 
     class _BusyThenFreeLoop(_Loop):
-        async def process_input(self, session, text, on_delta=None, observer=None):
+        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
             self.calls.append(text)
             self.busy = False  # the lock is long gone by the time the run ends
             return "step done"

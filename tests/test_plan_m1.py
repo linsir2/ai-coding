@@ -70,7 +70,7 @@ class _StubLoop:
         self.prompt_chars = []   # chars of session.messages at each call
         self.step_sessions = []  # the session object each call ran on
 
-    async def process_input(self, session, text, on_delta=None, observer=None):
+    async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
         session.turn_count += 1
         self.calls.append((text, session.session_id))
         self.step_sessions.append(session)
@@ -141,7 +141,7 @@ class _TwoPhaseLoop:
         session.readonly = bool(readonly) if readonly is not None else session.readonly
         session.pending_posture = None
 
-    async def process_input(self, session, text, on_delta=None, observer=None):
+    async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
         self.calls.append(text)
         if "implementation plan" in text:
             session.task = TaskState(goal="test plan")
@@ -381,7 +381,7 @@ async def test_planning_failure_does_not_execute():
             )
             session.pending_posture = None
 
-        async def process_input(self, session, text, on_delta=None, observer=None):
+        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
             self.calls.append(text)
             return "nothing to plan"
 
@@ -888,7 +888,7 @@ class _StatusLoop(_StubLoop):
         self._statuses = list(statuses)
         self._last_status = None
 
-    async def process_input(self, session, text, on_delta=None, observer=None):
+    async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
         self._last_status = self._statuses.pop(0) if self._statuses else None
         return await super().process_input(
             session, text, on_delta=on_delta, observer=observer

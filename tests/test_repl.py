@@ -75,7 +75,7 @@ class _FakeLoop:
         session.readonly = bool(readonly) if readonly is not None else session.readonly
         session.pending_posture = None
 
-    async def process_input(self, session, text, on_delta=None, observer=None):
+    async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
         self.calls.append((text, on_delta, observer))
         return self.reply
 
@@ -617,7 +617,7 @@ async def test_plan_then_plan_run_executes_open_todos():
             )
             self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
 
-        async def process_input(self, session, text, on_delta=None, observer=None):
+        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
             session.turn_count += 1
             self.calls.append((text, on_delta))
             if "implementation plan" in text:
@@ -1072,7 +1072,7 @@ class _NotedLoop(_FakeLoop):
     def last_outcome(self):
         return self._outcome
 
-    async def process_input(self, session, text, on_delta=None, observer=None):
+    async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
         answer = await super().process_input(
             session, text, on_delta=on_delta, observer=observer
         )

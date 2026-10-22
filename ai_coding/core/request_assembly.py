@@ -28,7 +28,8 @@ from typing import Any
 from ai_coding.core.compaction import Compactor
 from ai_coding.core.events import ContextCompacted, LoopEvent, MemoryInjected
 from ai_coding.core.file_mentions import resolve_bare_paths, resolve_file_mentions
-from ai_coding.core.plan_runner import PLAN_MARK, outside_workspace_paths
+from ai_coding.core.plan_reminders import reconcile
+from ai_coding.core.plan_runner import outside_workspace_paths
 from ai_coding.core.request_builder import build_tail, content_of, volatile_block
 from ai_coding.core.sop_router import SOPRouter
 from ai_coding.core.turn_books import TurnBooks
@@ -53,15 +54,15 @@ _FILES_BLOCK_BUDGET = 40_000
 def human_utterance(messages: Sequence[ChatMessage]) -> str:
     """The last thing a *human* wrote -- one criterion for every reader.
 
-    Two lines in the transcript are not the human's:
+    One kind of line in the transcript is not the human's: a **synthetic**
+    message (r18/F3) -- a nudge, a steering line, a task state block, the
+    plan reminder (M2 T3), the planning instruction (M2 T3, Q4) -- the
+    harness talking in the user's shape.
 
-    * a **synthetic** message (r18/F3): a nudge, a steering line, a task
-      state block -- the harness talking in the user's shape;
-    * the **planning instruction** (``[plan] ...``): the harness's own prompt,
-      still written in the user's voice (B3), so it is not what the human
-      asked for.  In a planning round it is the *last* user message, so
-      without this exclusion every reader would answer with the harness's
-      words.
+    The planning instruction used to need its own exclusion, because it was
+    written in the user's voice and told apart by its ``[plan] `` prefix.
+    It is synthetic now, so the one rule covers it -- and a reader no longer
+    has to know what a prefix means.
 
     Everything else is the human's, and it is the input the mention blocks
     are rebuilt from, the input the outside-workspace warning looks at, and
@@ -71,8 +72,6 @@ def human_utterance(messages: Sequence[ChatMessage]) -> str:
         if message.role != "user" or message.synthetic:
             continue
         content = (message.content or "").strip()
-        if content.startswith(PLAN_MARK):
-            continue
         return content
     return ""
 
@@ -233,6 +232,22 @@ class RequestAssembler:
                 )
             )
             books.compaction_announced = True
+        # M2 T3: reconcile the plan reminder with the posture, every request.
+        # A compaction may have eaten it (put it back) or the session may
+        # have left plan mode without the withdrawal surviving (say so).
+        # The reminder joins the request's view of the history -- it is
+        # synthetic, so the readers that want the human's words skip it.
+        reminder = reconcile(history, is_plan=str(session.mode) == "plan")
+        if reminder:
+            history = [
+                *history,
+                ChatMessage(
+                    role="user",
+                    content=reminder,
+                    timestamp=now_local(),
+                    synthetic=True,
+                ),
+            ]
         instructions = (
             await self._build_instructions(deadline, session)
             if self._build_instructions is not None

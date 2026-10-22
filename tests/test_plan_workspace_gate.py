@@ -40,7 +40,7 @@ class _StubLoop:
         #: approval time).
         self._armed = armed
 
-    async def process_input(self, session, text, on_delta=None, observer=None):
+    async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
         self.calls.append(text)
         session.begin_plan("t")
         for content in self._items:

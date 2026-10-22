@@ -25,7 +25,7 @@ class _Loop:
         if settings is not None:
             self.settings = settings
 
-    async def process_input(self, session, text, on_delta=None, observer=None):
+    async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
         self.calls.append(text)
         return "done"
 
