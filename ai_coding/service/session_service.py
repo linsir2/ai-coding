@@ -57,6 +57,11 @@ _PENDING_DIR = "pending"
 #: subdirectory keeps a marker from being read as a phantom session.
 _PENDING_POSTURE_DIR = "pending-posture"
 
+#: Subdirectory holding a reminder waiting to be delivered (M2 T3).  Same
+#: reason as ``_PENDING_POSTURE_DIR``: the session scan globs the root, so a
+#: subdirectory keeps a marker from being read as a phantom session.
+_PENDING_REMINDER_DIR = "pending-reminder"
+
 #: Sibling directory holding the undo file-bytes sidecars (P4).  Mirrors the
 #: root ``AgentLoop`` builds its ``UndoFileStore`` on
 #: (``<workspace>/.ai-coding/undo``); named here so ``delete`` can take a
@@ -209,6 +214,44 @@ class SessionService:
             return None
         return data if isinstance(data, dict) else None
 
+    # ---- pending-reminder marker (M2 T3) -----------------------------------
+    #
+    # The same shape as the posture marker, for the same reason: the
+    # reminder is queued while a turn runs, and writing the session then
+    # would normalize the tool pairing and drop an in-flight carrier.
+
+    def _pending_reminder_path(self, session_id: str) -> Path:
+        _check_id(session_id)
+        return self.root / _PENDING_REMINDER_DIR / f"{session_id}.json"
+
+    def mark_pending_reminder(
+        self, session_id: str, payload: list[dict[str, Any]] | None
+    ) -> None:
+        """Record (or clear) the reminders one session has queued."""
+        path = self._pending_reminder_path(session_id)
+        try:
+            if payload is None:
+                path.unlink(missing_ok=True)
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(to_json_pretty(list(payload)), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass
+
+    def _read_pending_reminder(self, session_id: str) -> list[dict[str, Any]] | None:
+        path = self._pending_reminder_path(session_id)
+        if not path.is_file():
+            return None
+        try:
+            data = from_json_file(path)
+        except (ValueError, OSError):
+            return None
+        if not isinstance(data, list):
+            return None
+        return [row for row in data if isinstance(row, dict)]
+
     def create(self, title: str = "") -> SessionData:
         ts = now_utc()
         return SessionData(
@@ -246,6 +289,9 @@ class SessionService:
             # M1b T10: a posture flip queued while the turn ran, if the
             # process died before the boundary that would have applied it.
             session.pending_posture = self._read_pending_posture(session_id)
+            # M2 T3: the same for a reminder that was queued but not yet
+            # delivered.
+            session.pending_reminders = self._read_pending_reminder(session_id)
             return session
         # Not an exact id: fall back to a prefix, but only when it is unique.
         # Resuming the first of several matches would silently open the wrong
@@ -307,6 +353,7 @@ class SessionService:
         # a session that crashed before its first save leaves only the marker,
         # and an orphan would keep reporting a flip for a session nobody has.
         self._pending_posture_path(session_id).unlink(missing_ok=True)
+        self._pending_reminder_path(session_id).unlink(missing_ok=True)
         if not target.is_file():
             return False
         target.unlink()

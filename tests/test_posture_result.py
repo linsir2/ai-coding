@@ -219,3 +219,63 @@ async def test_a_sidecar_failure_does_not_end_the_turn(tmp_path):
     assert result is PostureResult.QUEUED
     assert session.pending_posture is not None
     await loop.aclose()
+
+
+# ---- the reminder's durable queue (M2 T3) -----------------------------------
+
+
+def test_a_switch_queues_a_reminder(tmp_path):
+    """The reminder is queued when the agent changes, and it is durable.
+
+    "The posture landed but the reminder has not been delivered" is a
+    real state -- the process can die between the two -- and a reminder
+    that only lives in memory is lost exactly there.
+    """
+    from ai_coding.core.plan_reminders import PLAN_ENTER_REMINDER
+
+    loop, sessions = _loop(tmp_path)
+    session = _session(sessions)
+    sessions.save(session)
+
+    loop.request_posture(session, agent="plan", readonly=True, reason="/plan")
+
+    assert session.pending_reminders == [
+        {"kind": "enter", "text": PLAN_ENTER_REMINDER}
+    ]
+    sidecar = tmp_path / "sessions" / "pending-reminder" / f"{session.session_id}.json"
+    assert sidecar.is_file()
+
+
+def test_leaving_plan_queues_the_withdrawal(tmp_path):
+    from ai_coding.core.plan_reminders import PLAN_LEAVE_REMINDER
+
+    loop, sessions = _loop(tmp_path)
+    session = _session(sessions)
+    session.agent = "plan"
+    sessions.save(session)
+
+    loop.request_posture(session, agent="build", readonly=False, reason="/plan off")
+
+    assert session.pending_reminders == [
+        {"kind": "leave", "text": PLAN_LEAVE_REMINDER}
+    ]
+
+
+def test_switching_between_ordinary_agents_queues_nothing(tmp_path):
+    loop, sessions = _loop(tmp_path)
+    session = _session(sessions)
+
+    loop.request_posture(session, agent="reviewer", readonly=False)
+
+    assert session.pending_reminders is None
+
+
+def test_the_queued_reminder_comes_back_after_a_crash(tmp_path):
+    loop, sessions = _loop(tmp_path)
+    session = _session(sessions)
+    sessions.save(session)
+    loop.request_posture(session, agent="plan", readonly=True, reason="/plan")
+
+    reloaded = sessions.load(session.session_id)
+    assert reloaded.pending_reminders
+    assert reloaded.pending_reminders[0]["kind"] == "enter"

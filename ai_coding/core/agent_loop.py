@@ -75,6 +75,7 @@ from ai_coding.core.guard import GuardChain, TurnView
 from ai_coding.core.hooks import HookPoint
 from ai_coding.core.memory_turn import TurnMemory
 from ai_coding.core.observers import Braid, SafeObserver
+from ai_coding.core.plan_reminders import PLAN_ENTER_REMINDER, reminder_for
 from ai_coding.core.request_assembly import RequestAssembler
 from ai_coding.core.request_builder import (
     tool_context,
@@ -571,12 +572,53 @@ class AgentLoop:
                 sink.on_event(event)
             except Exception:  # noqa: BLE001 — observation must not lose the switch
                 _log.debug("AgentSwitched observer failed", exc_info=True)
+            # M2 T3: the posture changed, so the model has to be told.  The
+            # reminder is *queued*, not delivered: a turn may be running and
+            # its request is already assembled, and a reminder that arrives
+            # mid-turn would change a request the model has already seen.
+            text = reminder_for(previous, target_agent)
+            if text is not None:
+                self._queue_reminder(session, text)
         self._clear_pending_posture(session)
+
+    def _queue_reminder(self, session: SessionData, text: str) -> None:
+        """Queue a plan reminder for the next turn boundary.
+
+        Durable like the posture flip it belongs to: the state "the posture
+        landed, the reminder has not" is real, and a crash in it would leave
+        the model in a posture it was never told about.
+        """
+        kind = "enter" if text == PLAN_ENTER_REMINDER else "leave"
+        queued = list(session.pending_reminders or ())
+        queued.append({"kind": kind, "text": text})
+        session.pending_reminders = queued
+        self.sessions.mark_pending_reminder(session.session_id, queued)
 
     def _clear_pending_posture(self, session: SessionData) -> None:
         """Forget the queued flip, in memory and on disk."""
         session.pending_posture = None
         self.sessions.mark_pending_posture(session.session_id, None)
+
+    def _apply_pending_reminders(self, session: SessionData) -> None:
+        """Turn the queued reminders into synthetic messages (M2 T3).
+
+        The boundary is the turn's close: the messages land in the history
+        and the close's own save carries them to disk, so a reminder costs
+        no new save point.  They are **synthetic** — the harness talking in
+        the user's shape — so the readers that answer "what did the human
+        say" skip them without knowing what a reminder is.
+        """
+        queued = list(session.pending_reminders or ())
+        if not queued:
+            return
+        ts = now_utc()
+        for row in queued:
+            text = str(row.get("text") or "")
+            if not text:
+                continue
+            session.add_message(user_message(text, ts, synthetic=True))
+        session.pending_reminders = None
+        self.sessions.mark_pending_reminder(session.session_id, None)
 
     @staticmethod
     def _pending_target(
@@ -618,6 +660,8 @@ class AgentLoop:
         on_delta: DeltaSink | None = None,
         observer: LoopObserver | None = None,
         images: tuple[ImageRef, ...] = (),
+        *,
+        synthetic: bool = False,
     ) -> str:
         """Run one user turn to completion and return the final assistant text.
 
@@ -625,9 +669,16 @@ class AgentLoop:
         which is the semantics the TUI already had when it queued submitted
         lines; rejecting instead would leave the front end queueing something the
         loop then refuses.
+
+        ``synthetic`` says the input is the harness's, not the human's (M2
+        T3, 16 §6).  The planning round is such an input: it is a task the
+        harness sets, and marking it is what lets the readers that answer
+        "what did the human say" stop guessing from a prefix.
         """
         async with self._turn_lock:
-            return await self._run_turn(session, user_input, on_delta, observer, images)
+            return await self._run_turn(
+                session, user_input, on_delta, observer, images, synthetic=synthetic
+            )
 
     async def resume_turn(
         self,
@@ -691,6 +742,7 @@ class AgentLoop:
         images: tuple[ImageRef, ...] = (),
         *,
         append_user: bool = True,
+        synthetic: bool = False,
     ) -> str:
         """One turn, ungated.  The body below is ``process_input`` unchanged:
         splitting it out keeps the re-entry guard a two-line diff instead of a
@@ -698,6 +750,8 @@ class AgentLoop:
         # 18 §10.2: harvest-window fallback — a flip queued after the close ran
         # (but before the lock released) lands here, before anything reads it.
         self._apply_pending_posture(session)
+        # M2 T3: the same for a reminder queued after the close ran.
+        self._apply_pending_reminders(session)
         await self._capture_snapshot(session)
         # r17/T5: clipboard images plus any @path.png in the text ride the user
         # message as parts; a token is claimed once, first spelling wins.
@@ -706,7 +760,12 @@ class AgentLoop:
             if ref.path not in {existing.path for existing in images}
         )
         frame = await self._begin_turn(
-            session, user_input, observer, attached, append_user=append_user
+            session,
+            user_input,
+            observer,
+            attached,
+            append_user=append_user,
+            synthetic=synthetic,
         )
         task = frame.task
         # R7a: everything the turn counts about itself lives in one object, so a
@@ -1165,6 +1224,7 @@ class AgentLoop:
         images: tuple[ImageRef, ...] = (),
         *,
         append_user: bool = True,
+        synthetic: bool = False,
     ) -> TurnFrame:
         """Everything that must happen before the first iteration.
 
@@ -1193,7 +1253,7 @@ class AgentLoop:
         # Q1 (08): resume reuses the persisted history -- appending the prompt
         # again would duplicate the user's line and start a new turn over it.
         if append_user:
-            session.add_message(user_message(user_input, now_utc(), images))
+            session.add_message(user_message(user_input, now_utc(), images, synthetic=synthetic))
         # T5: remember this request's instruction so compaction can keep it in
         # the history (hotel audit root cause R5: the instruction at index 80 fell
         # out of the L1 tail window and the model re-anchored on old content).
@@ -1581,6 +1641,9 @@ class AgentLoop:
         # 18 §10.2: a flip queued while this turn ran lands here, so the close's
         # own save carries it to disk (zero new save points).
         self._apply_pending_posture(session)
+        # M2 T3: a reminder queued while this turn ran lands here too, so the
+        # close's own save carries it (zero new save points).
+        self._apply_pending_reminders(session)
         # W2: an approval belongs to the turn that carried it.
         #
         # The plan was written against the state this turn ended in.  A turn
@@ -1739,10 +1802,13 @@ class AgentLoop:
             errors: tuple[str, ...] = ()
             if agent_id:
                 errors = (f"unknown agent {agent_id!r}; no agent rules applied",)
+            self._agent_rule_cache[agent_id] = rules
+            self._agent_rule_errors[agent_id] = errors
+            return rules
         else:
-            rules, errors = rules_from_dicts(
-                spec.permissions, label=f"agent {spec.id} rule"
-            )
+            # The catalog owns the parse (M2 T6): one reader, one place.
+            rules = self.agents.rules(agent_id)
+            errors = ()
         if errors:
             _log.warning("agent permission rules: %s", "; ".join(errors))
         self._agent_rule_cache[agent_id] = rules

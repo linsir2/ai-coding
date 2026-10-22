@@ -346,6 +346,13 @@ class SessionData:
     #: only — the durable copy is a sidecar (M1b); shape
     #: ``{"agent": str | None, "readonly": bool | None, "reason": str}``.
     pending_posture: dict[str, Any] | None = None
+    #: M2 T3: the plan reminder waiting to be delivered.  A reminder is
+    #: queued when the agent changes and turns into a synthetic message at
+    #: the turn's boundary -- it cannot be a message at the moment of the
+    #: switch, because a turn may be running and its request is already
+    #: assembled.  Runtime only, like ``pending_posture``: the durable copy
+    #: is a sidecar.
+    pending_reminders: list[dict[str, Any]] | None = None
     #: M1a: this session's own permission rules (the L4 layer), in the same
     #: JSON form the rule files use.  It stays on the session -- rather than
     #: in the process-wide gate -- so one session's rule cannot decide
