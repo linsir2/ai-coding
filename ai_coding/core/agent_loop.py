@@ -130,7 +130,7 @@ from ai_coding.infra.time_utils import now_utc
 from ai_coding.infra.vcs import git_branch
 from ai_coding.security.approval import ApprovalCallback
 from ai_coding.security.permission_gate import PermissionGate
-from ai_coding.security.permissions import Rule, rules_from_dicts
+from ai_coding.security.permissions import Rule, posture_of, rules_from_dicts
 from ai_coding.service.session_service import SessionService
 from ai_coding.skills.catalog import build_catalog, superseded_note
 from ai_coding.skills.policy import denied_skill_ids
@@ -377,7 +377,10 @@ class AgentLoop:
         # call could only be refused.  The lists are derived per posture and
         # cached, so a request stays byte-identical (the prompt cache and
         # the provider's prefix cache depend on it).
-        self._surface_cache: dict[tuple[str, bool], list[dict[str, Any]]] = {}
+        self.gate: PermissionGate = gate or PermissionGate()
+        self._surface_cache: dict[
+            tuple[str, bool, tuple[Rule, ...]], list[dict[str, Any]]
+        ] = {}
         # R4a: the tool schemas are part of every prompt, so their size belongs in
         # the attribution (docs/r4-analysis.md 4.3).
         self._tools_text = short_json(self._tool_schemas)
@@ -388,7 +391,7 @@ class AgentLoop:
         self._tools_warned = False
         self.dispatcher = ToolDispatcher(
             tools,
-            gate or PermissionGate(),
+            self.gate,
             approval,
             max_parallel=self.settings.max_concurrent_tools,
             observer=self.observer,
@@ -2377,9 +2380,11 @@ class AgentLoop:
         # session may be None on defensive paths — normal is the fail-safe.
         mode = "normal"
         readonly = False
+        session_rules: tuple[Rule, ...] = ()
         if session is not None:
             mode = getattr(session, "mode", "normal") or "normal"
             readonly = bool(getattr(session, "readonly", False))
+            session_rules = self._session_rules(session)
         return self.prompt.build(
             project_instructions=project_text,
             skills_catalog=catalog,
@@ -2387,47 +2392,68 @@ class AgentLoop:
             # C-2: the same fact the step picks its schemas from (the tool
             # surface), so the prompt never teaches a tool the request cannot
             # carry. One rule, read twice; no second surface to keep in sync.
-            tools=self._prompt_tools(mode, readonly),
+            tools=self._prompt_tools(mode, readonly, session_rules),
         )
 
-    def _prompt_tools(self, mode: str, readonly: bool) -> tuple[str, ...]:
+    def _prompt_tools(
+        self, mode: str, readonly: bool, session_rules: tuple[Rule, ...] = ()
+    ) -> tuple[str, ...]:
         """The tool names the methods section should speak for.
 
         Read-only drops the mutating tools, which is what makes the guidance
         shorter in plan mode rather than merely different -- and outside the
         planning posture the plan-only tools are gone, so the prompt cannot
-        teach a tool the request does not carry.
+        teach a tool the request does not carry.  A wholly denied action is
+        gone for the same reason: the request does not carry it.
         """
-        return tuple(tool.name for tool in self._surface_tools(mode, readonly))
+        return tuple(
+            tool.name for tool in self._surface_tools(mode, readonly, session_rules)
+        )
 
-    def _surface_tools(self, mode: str, readonly: bool) -> list[BaseTool]:
+    def _surface_tools(
+        self, mode: str, readonly: bool, session_rules: tuple[Rule, ...] = ()
+    ) -> list[BaseTool]:
         """The tools this request may call, in the registry's own order.
 
-        Two predicates, both about what the request may do: the read-only
+        Three predicates, all about what the request may do: the read-only
         posture drops the mutating tools (the dispatch gate refuses them
         structurally -- 只读探索批次, measured: 3-4 bash collisions per
-        planning turn), and outside the planning posture the plan-only tools
-        are not advertised at all (N1).
+        planning turn), outside the planning posture the plan-only tools are
+        not advertised at all (N1), and a wholly denied action is not offered
+        (M1a).  A scoped denial keeps the tool and refuses at dispatch, where
+        the model can read which resource it hit.
         """
         tools = list(self.tools.all_tools)
         if mode != "plan":
             tools = [tool for tool in tools if not tool.plan_only]
         if readonly:
             tools = [tool for tool in tools if not tool.mutates_world]
-        return tools
+        posture = posture_of(mode, readonly)
+        return [
+            tool
+            for tool in tools
+            if not self.gate.hides(
+                tool.name, session_rules=session_rules, posture=posture
+            )
+        ]
 
     def _surface_schemas(self, session: Any) -> list[dict[str, Any]]:
-        """The schema list for this request -- one per posture, cached.
+        """The schema list for this request -- one per posture and rule set.
 
-        The cache is what keeps the request byte-stable: the same posture
-        always produces the same list, in the same order.
+        The cache is what keeps the request byte-stable: the same posture and
+        the same session rules always produce the same list, in the same
+        order.  The rules are in the key because the catalogue now depends on
+        them: ``/permissions deny edit *`` must change the very next request.
         """
         mode = str(getattr(session, "mode", "normal") or "normal")
         readonly = bool(getattr(session, "readonly", False))
-        key = (mode, readonly)
+        session_rules = self._session_rules(session)
+        key = (mode, readonly, session_rules)
         schemas = self._surface_cache.get(key)
         if schemas is None:
-            schemas = tool_schemas_from_tools(self._surface_tools(mode, readonly))
+            schemas = tool_schemas_from_tools(
+                self._surface_tools(mode, readonly, session_rules)
+            )
             self._surface_cache[key] = schemas
         return schemas
 

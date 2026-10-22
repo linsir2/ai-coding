@@ -29,6 +29,7 @@ from ai_coding.security.permissions import (
     evaluate,
     load_file_rules,
     subjects_of,
+    wholly_disabled,
 )
 from ai_coding.shell_parse import command_words
 
@@ -648,6 +649,26 @@ class PermissionGate:
             name: len(layer)
             for name, layer in zip(names, self._layers(tuple(session_rules)), strict=True)
         }
+
+    def hides(
+        self,
+        action: str,
+        *,
+        session_rules: Ruleset = (),
+        posture: str = "build",
+    ) -> bool:
+        """Whether the whole action is cut from the tool catalogue.
+
+        A scoped denial (``edit *.env deny``) does **not** hide the tool:
+        the call is refused at dispatch, where the model can read which
+        resource it hit.  This is the same predicate the execution query
+        uses, so the catalogue and the verdict cannot drift apart.
+        """
+        return wholly_disabled(
+            action.lower(),
+            *self._layers(tuple(session_rules)),
+            posture=posture,
+        )
 
     def _skill_decision(self, params: Mapping[str, Any]) -> Decision | None:
         """The per-skill policy for the model's skill tool, or ``None``.
