@@ -160,8 +160,8 @@ class PromptAssembler:
                 "does the reading and the work. To close it without a plan: "
                 "finish_research(summary) — the conclusion is the answer, and "
                 "no plan is submitted. "
-                "bash/write/edit are unavailable here — explore with "
-                "read/grep/glob instead.</plan-mode>"
+                "Explore with the tools this request carries; the ones that "
+                "are missing are the ones you may not use.</plan-mode>"
             )
         if skills_catalog.strip():
             sections.append(
