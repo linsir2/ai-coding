@@ -177,5 +177,5 @@ def _loop(engine: ChatEngine, sessions: SessionService) -> AgentLoop:
 
 def _plan_session(sessions: SessionService):
     session = sessions.create()
-    session.mode, session.readonly = "plan", True
+    session.agent, session.readonly = "plan", True
     return session

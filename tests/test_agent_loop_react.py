@@ -647,7 +647,7 @@ async def test_present_plan_emits_task_updated_with_the_approved_items(tmp_path)
     loop = _loop(engine, sessions, _registry(PresentPlanTool(_Approve())), observer=observer)
 
     session = sessions.create()
-    session.mode = "plan"
+    session.agent = "plan"
     session.readonly = True
     await loop.process_input(session, "go")
 
@@ -684,7 +684,7 @@ async def test_approval_starts_a_fresh_episode_ledger(tmp_path):
     sessions = SessionService(tmp_path / "sessions")
     loop = _loop(engine, sessions, _registry(PresentPlanTool(_Approve())))
     session = sessions.create()
-    session.mode = "plan"
+    session.agent = "plan"
     session.readonly = True
     session.task = TaskState(goal="g")
     session.task.rounds_run = 7
@@ -1436,7 +1436,7 @@ async def test_plan_mode_finishes_without_nudging_open_items(tmp_path):
     sessions = SessionService(tmp_path / "sessions")
     loop = _loop(engine, sessions, settings=_settings(stop_policy="todo_aware"))
     session = sessions.create()
-    session.mode = "plan"
+    session.agent = "plan"
     session.task = TaskState(goal="g")
     session.task.add("still open")
 
@@ -1466,7 +1466,7 @@ async def test_plan_mode_does_not_refresh_a_bare_goal(tmp_path):
     sessions = SessionService(tmp_path / "sessions")
     loop = _loop(engine, sessions)
     session = sessions.create()
-    session.mode = "plan"
+    session.agent = "plan"
 
     await loop.process_input(session, "你好")
     await loop.process_input(session, "你的编排层怎么设计的")

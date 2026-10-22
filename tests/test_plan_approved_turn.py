@@ -163,7 +163,7 @@ def _registry(*tools: BaseTool) -> ToolRegistry:
 
 def _plan_session(sessions: SessionService):
     session = sessions.create()
-    session.mode, session.readonly = "plan", True
+    session.agent, session.readonly = "plan", True
     return session
 
 

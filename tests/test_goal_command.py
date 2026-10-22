@@ -125,14 +125,14 @@ async def test_goal_refuses_in_plan_mode_and_while_another_task_is_armed():
     loop = _Loop()
     sessions = _Sessions()
     session = _session()
-    session.mode, session.readonly = "plan", True
+    session.agent, session.readonly = "plan", True
     dc, c = _console()
 
     await handle_input(loop, "/goal 迁移 X", session, sessions, dc)
     assert "计划模式" in c.export_text()
     assert loop.calls == [] and sessions.saved == []
 
-    session.mode, session.readonly = "normal", False
+    session.agent, session.readonly = "build", False
     session.task = TaskState(goal="g", armed=True, armed_profile="plan")
     dc2, c2 = _console()
     await handle_input(loop, "/goal 迁移 X", session, sessions, dc2)
@@ -199,7 +199,7 @@ async def test_goal_resume_is_refused_in_plan_mode():
     loop = _Loop()
     sessions = _Sessions()
     session = _session()
-    session.mode, session.readonly = "plan", True
+    session.agent, session.readonly = "plan", True
     session.task = TaskState(goal="迁移 X", armed=False)
     dc, c = _console()
 
