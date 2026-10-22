@@ -79,6 +79,10 @@ class AIConfig(BaseModel):
     # Where the task list is injected: a volatile trailing message (cache
     # friendly) or appended to the system prompt (survives compaction).
     task_injection: Literal["message", "system"] = "message"
+    # M1b: the agent a *new* session starts in.  Only a primary agent may be
+    # the default; anything else falls back to build when the catalog is
+    # loaded.  An existing session keeps the agent it was switched to.
+    default_agent: str = "build"
     max_concurrent_tools: int = 4
     # R7c: how long a human gets to answer an approval prompt.  0 means "only the
     # turn clock bounds it" — a slow human is not a refusal, but a turn with a

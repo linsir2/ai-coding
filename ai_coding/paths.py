@@ -181,7 +181,33 @@ class Paths:
             self.workspace / ".agents" / "skills",
         )
 
+    @property
+    def user_agents(self) -> Path:
+        """The user's agent library (M1b).
+
+        In ``config_home`` next to ``grants.json`` rather than in
+        ``data_home`` next to the skills: an agent file is *configuration* —
+        it says how the assistant should behave — and it travels with the
+        machine, not with the accumulated state.
+        """
+        return self.config_home / "agents"
+
+    @property
+    def project_agents(self) -> Path:
+        """The project's agent library, which wins over the user's (M1b)."""
+        return self.workspace / ".ai-coding" / "agents"
+
     # ---- derived ------------------------------------------------------------
+
+    @property
+    def agent_roots(self) -> tuple[Path, ...]:
+        """Lowest precedence first. The project root is last, so it wins.
+
+        The same order and the same reason as ``skill_roots``: a nearer scope
+        makes the more specific claim, and a checked-out repository must not
+        be able to rewrite what the person running it installed globally.
+        """
+        return (self.user_agents, self.project_agents)
 
     @property
     def skill_roots(self) -> tuple[Path, ...]:

@@ -36,10 +36,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
+from ai_coding.infra.frontmatter import as_str, parse_header, split_frontmatter
 
 _SKILL_FILE = "SKILL.md"
-_FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)", re.DOTALL)
 
 #: The only two states a skill may declare.  Anything else reads as `active`
 #: rather than inventing a third state nobody handles downstream.
@@ -64,11 +63,6 @@ _KNOWN_KEYS = frozenset(
         "triggers",
     }
 )
-
-#: A ``key: value`` line whose value YAML would choke on because it contains an
-#: unquoted colon — `description: Build for AWS: ECS`.  Quoted on repair.
-_COLON_VALUE = re.compile(r"^(\s*)([A-Za-z0-9_.-]+)\s*:\s*(.+?)\s*$")
-
 
 @dataclass(frozen=True)
 class SkillTriggers:
@@ -152,64 +146,6 @@ class Skill:
         return wanted == self.id or (self.alias is not None and wanted == self.alias)
 
 
-def _split_frontmatter(text: str) -> tuple[str, str]:
-    """``(header, body)``. ``("", text)`` when there is no frontmatter block.
-
-    Anchored at the start: a ``---`` further down the file is body text, not a
-    header, and treating it as one silently emptied every field.
-    """
-    match = _FRONTMATTER.search(text)
-    if not match:
-        return "", text
-    return match.group(1), text[match.end() :]
-
-
-def _repair_header(header: str) -> str:
-    """Quote ``key: value`` lines whose value carries an unquoted second colon.
-
-    `description: Build for AWS: ECS` is how a skill author writes "build for
-    AWS ECS" and is a YAML scanner error. The registry used to survive this with
-    a regex fallback; keeping one parser means repairing the value and re-reading
-    it with the *same* parser, rather than parsing the file two ways.
-    """
-    lines: list[str] = []
-    for line in header.splitlines():
-        match = _COLON_VALUE.match(line)
-        if match:
-            prefix, key, value = match.groups()
-            if ":" in value and not value.startswith(("'", '"', "[", "{")):
-                line = f'{prefix}{key}: "{value}"'
-        lines.append(line)
-    return "\n".join(lines)
-
-
-def _parse_header(header: str) -> tuple[Mapping[str, Any] | None, str | None]:
-    """``(data, error)``. Repairs once, then reports rather than swallowing."""
-    if not header.strip():
-        return {}, None
-    try:
-        data = yaml.safe_load(header)
-    except yaml.YAMLError:
-        try:
-            data = yaml.safe_load(_repair_header(header))
-        except yaml.YAMLError as exc:
-            return None, str(exc).splitlines()[0]
-    if data is None:
-        return {}, None
-    if not isinstance(data, dict):
-        return None, f"frontmatter is {type(data).__name__}, not a mapping"
-    return data, None
-
-
-def _as_str(value: object) -> str:
-    """A frontmatter scalar as text, without YAML's quoting already stripped."""
-    if value is None or isinstance(value, (dict, list)):
-        return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value).strip()
-
-
 def _as_tuple(value: object) -> tuple[str, ...]:
     """YAML allows ``x: single`` and ``x: [a, b]``; both mean the same here."""
     if not value:
@@ -256,29 +192,29 @@ def parse_skill(path: Path | str) -> Skill:
         text = target.read_text(encoding="utf-8")
     except OSError as exc:
         return Skill(id=skill_id, body="", path=target, error=str(exc))
-    header, body = _split_frontmatter(text)
-    data, error = _parse_header(header)
+    header, body = split_frontmatter(text)
+    data, error = parse_header(header)
     if data is None:
         return Skill(id=skill_id, body=body, path=target, error=error)
 
-    declared = _as_str(data.get("name"))
-    status = (_as_str(data.get("status")) or "").casefold()
+    declared = as_str(data.get("name"))
+    status = (as_str(data.get("status")) or "").casefold()
     metadata = data.get("metadata")
     return Skill(
         id=skill_id,
         body=body.strip(),
         path=target,
-        description=_as_str(data.get("description")),
+        description=as_str(data.get("description")),
         alias=declared or None if declared != skill_id else None,
-        license=_as_str(data.get("license")) or None,
-        compatibility=_as_str(data.get("compatibility")) or None,
+        license=as_str(data.get("license")) or None,
+        compatibility=as_str(data.get("compatibility")) or None,
         allowed_tools=_as_tuple(data.get("allowed-tools")),
         metadata=dict(metadata) if isinstance(metadata, dict) else {},
         disable_model_invocation=_as_bool(data.get("disable-model-invocation")),
-        version=_as_str(data.get("version")) or DEFAULT_VERSION,
+        version=as_str(data.get("version")) or DEFAULT_VERSION,
         status=status if status in SKILL_STATUSES else "active",
-        phase=_as_str(data.get("phase")),
-        pattern_dna=_as_str(data.get("pattern_dna")),
+        phase=as_str(data.get("phase")),
+        pattern_dna=as_str(data.get("pattern_dna")),
         triggers=_parse_triggers(data.get("triggers")),
         extra={k: v for k, v in data.items() if k not in _KNOWN_KEYS},
         error=error,

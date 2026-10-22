@@ -384,20 +384,26 @@ def rule_to_dict(rule: Rule) -> dict[str, Any]:
     return data
 
 
-def rules_from_dicts(rows: Iterable[Any]) -> tuple[Ruleset, tuple[str, ...]]:
+def rules_from_dicts(
+    rows: Iterable[Any], *, label: str = "session rule"
+) -> tuple[Ruleset, tuple[str, ...]]:
     """Read the session's own layer, skipping (and naming) what is broken.
 
     A session file is written by this program, but it is also a JSON file a
     human can edit.  One bad row must not take the session down, and it must
     not disappear silently either -- the caller shows these reasons in
     ``/permissions``.
+
+    ``label`` names the layer in the error text, so a rule that came from an
+    agent file does not report itself as a session rule.  The default keeps
+    the session layer's own messages byte-for-byte what they were.
     """
     rules: list[Rule] = []
     errors: list[str] = []
     for index, entry in enumerate(rows):
         rule, error = _rule_from(entry, deny_only=False)
         if error:
-            errors.append(f"session rule {index + 1}: {error}")
+            errors.append(f"{label} {index + 1}: {error}")
             continue
         assert rule is not None
         rules.append(rule)
