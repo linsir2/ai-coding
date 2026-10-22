@@ -118,6 +118,15 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     # `ai-coding` startable from a fresh directory with only a personal key.
     app_cfg = ConfigLoader.load_layers(paths, path)
 
+    # M1b T1: the agent table, loaded once.  The project's files win over the
+    # user's, which win over the built-ins; a broken file is skipped with its
+    # reason kept for ``/agents``.  Every consumer below gets this same object.
+    from ai_coding.agents.registry import load_agents
+    from ai_coding.domain.agents import is_plan_agent
+
+    agents = load_agents(paths.agent_roots)
+    default_agent = agents.default_id(str(getattr(app_cfg.ai, "default_agent", "build")))
+
     from ai_coding.ai.factory import build_engine_from_config
     from ai_coding.ai.prompt import BASE_INSTRUCTIONS
 
@@ -153,6 +162,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         user_prompt=user_prompt, base_instructions=BASE_INSTRUCTIONS,
         notices=notices,
         jobs=jobs,
+        agents=agents,
     )
 
     # Per-workspace state lives under the workspace, beside the traces
@@ -161,7 +171,9 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     # directory the process started in — so a user's conversations landed in
     # the source tree they happened to launch from (A7).
     sessions = SessionService(
-        paths.sessions
+        paths.sessions,
+        default_agent=default_agent,
+        default_readonly=is_plan_agent(default_agent),
     )
     recorder = _make_recorder(app_cfg, str(paths.workspace), None)
     mcp_manager = MCPManager(app_cfg.mcp, observer=recorder)
@@ -195,6 +207,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         notices=notices,
         jobs=jobs,
         cancel=cancel,
+        agents=agents,
     )
     pending = find_armed_session(sessions)
     if pending is not None:

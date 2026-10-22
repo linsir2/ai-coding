@@ -135,6 +135,9 @@ def _build_loop(
     # r17/T1: pre-turn workspace snapshots.  ``None`` keeps /undo to the
     # history half (the bare-CLI paths that never wire one).
     snapshots: Any | None = None,
+    # M1b: the agent table.  ``None`` keeps the loop without an agent layer,
+    # which is what every test double and the bare REPL want.
+    agents: Any | None = None,
 ) -> Any:
     """Assemble the loop and its optional components (silent degradation)."""
     if approval is None:
@@ -208,6 +211,7 @@ def _build_loop(
         skills=skills,
         project=project,
         settings=app_cfg.ai,
+        agents=agents,
         models=app_cfg.models,
         default_model=app_cfg.default_model,
         observer=observer,
@@ -347,6 +351,7 @@ def _build_tool_registry(
     base_instructions: str = "",
     notices: Any | None = None,
     jobs: Any | None = None,
+    agents: Any | None = None,
 ) -> Any:
     """Build the domain tool registry the self-owned loop dispatches through."""
     from ai_coding.tools.builder import build_tool_registry
@@ -360,6 +365,7 @@ def _build_tool_registry(
         base_instructions=base_instructions,
         notices=notices,
         jobs=jobs,
+        agents=agents,
     )
 
 
