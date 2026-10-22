@@ -25,9 +25,25 @@ export interface WireMessage {
   reasoning?: string
   /** D6: the harness wrote it (a plan step marker, a nudge), not the operator. */
   synthetic?: boolean
+  /** M1b T1b: the agent that produced an assistant step (absent = older file). */
+  agent?: string
 }
 
 const PREVIEW_CHARS = 120
+
+/** One durable agent switch, as ``session.load`` returns it (M1b T1b). */
+export interface WireAgentSwitch {
+  from?: string
+  to?: string
+  ts?: string
+  reason?: string
+}
+
+function switchLine(sw: WireAgentSwitch): string {
+  const reason = (sw.reason ?? "").trim()
+  const suffix = reason ? `（${reason}）` : ""
+  return `Switched agent: ${sw.from || "?"} → ${sw.to || "?"}${suffix}`
+}
 
 /**
  * The checkpoint note's first line (ai_coding/core/context_compression.py
@@ -89,9 +105,45 @@ function parseArguments(argumentsText: string): Record<string, unknown> {
   }
 }
 
-export function messagesToState(messages: WireMessage[]): SessionState {
+export function messagesToState(
+  messages: WireMessage[],
+  switches: WireAgentSwitch[] = [],
+): SessionState {
   const out: ChatMessage[] = []
+
+  // M1b T1b: switches are anchored by **timestamp**, not by a message index.
+  // ``/compact`` rewrites ``session.messages``, so an index would point at the
+  // wrong message afterwards (or past the end); the surviving messages keep
+  // their timestamps, so this anchor survives compaction.
+  const pending = [...switches].sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? ""))
+  let nextSwitch = 0
+
+  // A switch is committed at a turn boundary, so appending its line to the
+  // last assistant bubble keeps the "one assistant message per turn" merge
+  // intact — pushing a standalone bubble mid-turn would capture the rest of
+  // that turn's prose and tool rows.
+  const flushSwitch = (sw: WireAgentSwitch): void => {
+    const part: Part = { kind: "notice", tone: "muted", text: switchLine(sw) }
+    const last = out[out.length - 1]
+    if (last && last.role === "assistant") {
+      last.parts.push(part)
+    } else {
+      out.push({ role: "assistant", parts: [part] })
+    }
+  }
+
+  const flushBefore = (stamp: string): void => {
+    while (nextSwitch < pending.length) {
+      const sw = pending[nextSwitch]!
+      const when = (sw.ts ?? "").trim()
+      if (when && stamp && when >= stamp) break
+      flushSwitch(sw)
+      nextSwitch++
+    }
+  }
+
   for (const message of messages) {
+    flushBefore((message.timestamp ?? "").trim())
     if (
       message.role === "user" &&
       (message.content ?? "").startsWith(NOTICE_MARK)
@@ -157,6 +209,7 @@ export function messagesToState(messages: WireMessage[]): SessionState {
     }
     if (message.role === "assistant") {      // Reasoning first, then the prose it produced — the same order the live
       // reducer rebuilds, so a reloaded transcript reads like the live one.
+      if (message.agent) assistant.agent = message.agent
       if (message.reasoning) {
         assistant.parts.push({ kind: "reasoning", text: message.reasoning })
       }
@@ -205,6 +258,10 @@ export function messagesToState(messages: WireMessage[]): SessionState {
         assistant.parts.push({ kind: "text", text: body, streaming: false })
       }
     }
+  }
+  while (nextSwitch < pending.length) {
+    flushSwitch(pending[nextSwitch]!)
+    nextSwitch++
   }
   // P3-4: a reopened session lands under the same cap as the live
   // transcript (the live side retires in session.ts).  Oldest first.
@@ -280,11 +337,13 @@ export function recoveryNotice(data: RecoveryFacts): Part | null {
 export async function loadSession(client: IpcClient, id: string): Promise<SessionState> {
   const data = (await client.request("session.load", { id })) as {
     messages?: WireMessage[]
+    // M1b T1b: the durable switch timeline.
+    agentHistory?: WireAgentSwitch[]
     // R05: the recovered task rides the load response; the card is repainted
     // through the live reducer so reload and live cannot drift.
     task?: Record<string, unknown> | null
   } & RecoveryFacts
-  let state = messagesToState(data.messages ?? [])
+  let state = messagesToState(data.messages ?? [], data.agentHistory ?? [])
   const note = recoveryNotice(data)
   if (note) state.messages.unshift({ role: "assistant", parts: [note] })
   if (data.task && Array.isArray(data.task["items"]) && data.task["items"].length > 0) {

@@ -59,6 +59,8 @@ export type Part =
 export interface ChatMessage {
   role: "user" | "assistant"
   parts: Part[]
+  /** M1b T1b: who produced this assistant bubble ("" / "build" = no tag). */
+  agent?: string
 }
 
 /** One todo entry on the plan card (20 §批次2) — live off ``plan.updated``.
@@ -260,16 +262,20 @@ function retireOldest(messages: ChatMessage[], explain: boolean): ChatMessage[] 
 function updateAssistant(
   state: SessionState,
   update: (parts: Part[]) => Part[],
+  agent?: string,
 ): SessionState {
   const last = state.messages[state.messages.length - 1]
   if (last?.role === "assistant") {
     const parts = update(last.parts)
-    if (parts === last.parts) return state
+    if (parts === last.parts && (!agent || last.agent === agent)) return state
     const messages = state.messages.slice()
-    messages[messages.length - 1] = { role: "assistant", parts }
+    messages[messages.length - 1] = { role: "assistant", parts, agent: agent ?? last.agent }
     return { ...state, messages: retireOldest(messages, true) }
   }
-  const messages: ChatMessage[] = [...state.messages, { role: "assistant", parts: update([]) }]
+  const messages: ChatMessage[] = [
+    ...state.messages,
+    { role: "assistant", parts: update([]), ...(agent ? { agent } : {}) },
+  ]
   return { ...state, messages: retireOldest(messages, true) }
 }
 
@@ -430,6 +436,9 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
     }
     case "message.finished": {
       const authoritative = typeof data["text"] === "string" ? (data["text"] as string) : null
+      // M1b T1b: the step's agent rides the same event, so the tag the live
+      // transcript draws is the same one a replay derives from the message.
+      const agent = str(data["agent"])
       // A step's thinking goes in FRONT of that step's own text: the wire
       // carries one message per step, so the order OpenCode gets from the
       // server's part stream is ours to rebuild (A4 §2).  Whitespace is not a
@@ -451,7 +460,15 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
           next = [...next, ...reasoning]
         }
         return next
-      })
+      }, agent || undefined)
+    }
+    case "agent.switched": {
+      const from = str(data["from"]) || "?"
+      const to = str(data["to"]) || "?"
+      const reason = str(data["reason"])
+      const suffix = reason ? `（${reason}）` : ""
+      const text = `Switched agent: ${from} → ${to}${suffix}`
+      return updateAssistant(state, (parts) => appendNotice(parts, text))
     }
     case "tool.started": {
       const callId = str(data["callId"])

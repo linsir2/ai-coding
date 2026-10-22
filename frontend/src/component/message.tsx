@@ -214,8 +214,17 @@ export function MessageView(props: { message: ChatMessage; alwaysOpen: boolean }
     )
   }
   return (
-    <Index each={props.message.parts}>
-      {(part) => <PartView part={part()} alwaysOpen={props.alwaysOpen} />}
-    </Index>
+    <>
+      <Index each={props.message.parts}>
+        {(part) => <PartView part={part()} alwaysOpen={props.alwaysOpen} />}
+      </Index>
+      {/* M1b T1b: who answered.  Only a non-default agent earns a tag — the
+          build agent is the norm, and a tag on every answer is noise. */}
+      <Show when={props.message.agent && props.message.agent !== "build"}>
+        <box paddingLeft={3}>
+          <text fg={theme.textMuted}>{`· ${props.message.agent}`}</text>
+        </box>
+      </Show>
+    </>
   )
 }
