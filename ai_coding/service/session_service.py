@@ -52,6 +52,11 @@ def _check_id(session_id: str) -> None:
 #: ``*.json`` session scan cannot read one as a session.
 _PENDING_DIR = "pending"
 
+#: Subdirectory holding a posture flip queued while a turn ran (M1b T10).
+#: Same reason as ``_PENDING_DIR``: the session scan globs the root, so a
+#: subdirectory keeps a marker from being read as a phantom session.
+_PENDING_POSTURE_DIR = "pending-posture"
+
 #: Sibling directory holding the undo file-bytes sidecars (P4).  Mirrors the
 #: root ``AgentLoop`` builds its ``UndoFileStore`` on
 #: (``<workspace>/.ai-coding/undo``); named here so ``delete`` can take a
@@ -92,8 +97,23 @@ def _first_user_preview(rows: Any) -> str:
 class SessionService:
     """Create, save, load, list, and delete sessions under a root directory."""
 
-    def __init__(self, root: str | Path = Path("sessions")) -> None:
+    def __init__(
+        self,
+        root: str | Path = Path("sessions"),
+        *,
+        default_agent: str = "build",
+        default_readonly: bool = False,
+    ) -> None:
+        """``root`` is where the session files live.
+
+        ``default_agent`` / ``default_readonly`` are what a **new** session
+        starts in (M1b).  They live here rather than in the command layer so
+        that every way of making a session — ``/clear``, the IPC
+        ``session.create``, a boot resume — inherits the same starting point.
+        """
         self.root = Path(root)
+        self._default_agent = str(default_agent or "build")
+        self._default_readonly = bool(default_readonly)
 
     def _path(self, session_id: str) -> Path:
         _check_id(session_id)
@@ -145,6 +165,50 @@ class SessionService:
             return None
         return data if isinstance(data, dict) else None
 
+    # ---- pending-posture marker (M1b T10) -----------------------------------
+    #
+    # Why a sidecar and not a session field: a posture flip is queued while a
+    # turn is *running*, and writing the session then saves mid-batch, which
+    # normalizes tool pairing and drops an assistant carrier whose result has
+    # not been written back yet (the same trap the approval marker documents).
+    # The sidecar leaves the session file — and therefore the save cadence —
+    # untouched, while still surviving a crash.
+
+    def _pending_posture_path(self, session_id: str) -> Path:
+        _check_id(session_id)
+        return self.root / _PENDING_POSTURE_DIR / f"{session_id}.json"
+
+    def mark_pending_posture(
+        self, session_id: str, payload: dict[str, Any] | None
+    ) -> None:
+        """Record (or clear) the posture flip one session has queued.
+
+        Best-effort like ``save``: a failure to record must not end the turn
+        (the in-memory pending still applies in this process), and a failure
+        to clear only costs a stale flip after a crash.
+        """
+        path = self._pending_posture_path(session_id)
+        try:
+            if payload is None:
+                path.unlink(missing_ok=True)
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(to_json_pretty(dict(payload)), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass
+
+    def _read_pending_posture(self, session_id: str) -> dict[str, Any] | None:
+        path = self._pending_posture_path(session_id)
+        if not path.is_file():
+            return None
+        try:
+            data = from_json_file(path)
+        except (ValueError, OSError):
+            return None
+        return data if isinstance(data, dict) else None
+
     def create(self, title: str = "") -> SessionData:
         ts = now_utc()
         return SessionData(
@@ -152,6 +216,8 @@ class SessionService:
             title=title,
             created_time=ts,
             last_access_time=ts,
+            agent=self._default_agent,
+            readonly=self._default_readonly,
         )
 
     def save(self, session: SessionData) -> None:
@@ -177,6 +243,9 @@ class SessionService:
             # P3: the approval the session was waiting on, if the marker is
             # still there -- i.e. the process died mid-wait.
             session.pending_approval = self._read_pending_approval(session_id)
+            # M1b T10: a posture flip queued while the turn ran, if the
+            # process died before the boundary that would have applied it.
+            session.pending_posture = self._read_pending_posture(session_id)
             return session
         # Not an exact id: fall back to a prefix, but only when it is unique.
         # Resuming the first of several matches would silently open the wrong
@@ -234,6 +303,10 @@ class SessionService:
 
     def delete(self, session_id: str) -> bool:
         target = self._path(session_id)
+        # M1b: drop the posture marker even when the session file is gone --
+        # a session that crashed before its first save leaves only the marker,
+        # and an orphan would keep reporting a flip for a session nobody has.
+        self._pending_posture_path(session_id).unlink(missing_ok=True)
         if not target.is_file():
             return False
         target.unlink()

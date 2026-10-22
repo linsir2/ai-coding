@@ -7,14 +7,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .acceptance import AcceptanceItem
+from .agents import is_plan_agent
 from .message import ChatMessage, ImageRef, ToolArtifact, ToolCallRef, tool_call_from_ref
 from .plan_delivery import StepDelivery
 from .task import TaskState
 from .turn_digest import TurnDigest
-
-#: 17 §4-P0: the fail-safe vocabulary for the persisted ``mode`` key — anything
-#: unknown reads back as "normal" rather than re-entering as an unknown posture.
-KNOWN_MODES: tuple[str, ...] = ("normal", "plan")
 
 
 def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
@@ -60,6 +57,9 @@ def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
         # P1: an older file has no ``id``; ``ChatMessage.__post_init__`` mints
         # one, which is the backfill.  A stored id is kept verbatim.
         id=str(data.get("id", "")),
+        # M1b T1b: absent means "not attributed", which is what every message
+        # written before the agent table existed reads back as.
+        agent=str(data.get("agent", "") or ""),
     )
 
 
@@ -112,6 +112,10 @@ def _message_to_dict(msg: ChatMessage) -> dict[str, Any]:
     # direction for /undo.
     if msg.artifacts:
         data["artifacts"] = [artifact.to_dict() for artifact in msg.artifacts]
+    # M1b T1b: written only when present — an old file (and the Java reader)
+    # never see the key, same rule as ``reasoning``.
+    if msg.agent:
+        data["agent"] = msg.agent
     return data
 
 
@@ -322,19 +326,25 @@ class SessionData:
     #: fires, ref}}).  Written only when non-empty; cleared by a new plan and
     #: by task completion — the ladder is per task, not per session.
     intervention_state: dict[str, Any] | None = None
-    #: 17 §4-P0: the cognition posture ("normal" | "plan").  Written only when
-    #: not normal — same rule as ``task``; unknown values read back as normal.
-    mode: str = "normal"
+    #: M1b T1: the agent this session speaks through — the *only* stored
+    #: authority for its posture.  ``mode`` is derived from it (see the
+    #: property below), so the file carries one fact about the posture, not
+    #: two that have to agree.
+    agent: str = "build"
+    #: M1b T1b: the durable record of every agent switch — who was in
+    #: charge, who took over, when and why.  Only grows; a row is written
+    #: when a switch is committed, never edited afterwards.
+    agent_history: list[dict[str, Any]] = field(default_factory=list)
     #: 18 §10.1: the enforcement switch.  A read-only session refuses every
     #: ``mutates_world`` tool at the dispatch gate; written only when True
     #: (same rule again).  Orthogonal to ``mode`` on purpose — ``/plan``
     #: composes the two at the command layer.
     readonly: bool = False
-    #: 18 §10.2: a posture flip requested while a turn is running waits here
-    #: until that turn closes (``AgentLoop._apply_pending_posture``) instead of
-    #: changing ``mode``/``readonly`` under a live turn.  Runtime only — a
-    #: crash drops a still-queued flip (the in-process limit dsh documents);
-    #: shape ``{"mode": str | None, "readonly": bool | None}``, later wins.
+    #: 18 §10.2 / M1b T10: a posture flip requested while a turn is running
+    #: waits here until that turn closes (``AgentLoop._apply_pending_posture``)
+    #: instead of changing ``agent``/``readonly`` under a live turn.  Runtime
+    #: only — the durable copy is a sidecar (M1b); shape
+    #: ``{"agent": str | None, "readonly": bool | None, "reason": str}``.
     pending_posture: dict[str, Any] | None = None
     #: M1a: this session's own permission rules (the L4 layer), in the same
     #: JSON form the rule files use.  It stays on the session -- rather than
@@ -381,6 +391,19 @@ class SessionData:
     # open turn, so the server can tell the user "the last turn did not finish"
     # once; the next turn clears ``open_turn`` and with it this notice.
     recovered_interrupted: bool = False
+
+    # ---- the derived posture ------------------------------------------------
+
+    @property
+    def mode(self) -> str:
+        """The cognition posture, derived from the agent (M1b T1).
+
+        ``"plan"`` when the session speaks through the plan agent, ``"normal"``
+        otherwise.  It is a **projection, not a field**: there is no second
+        place for the posture to live, so the two cannot drift, and assigning
+        to it raises rather than quietly creating one.
+        """
+        return "plan" if is_plan_agent(self.agent) else "normal"
 
     def begin_plan(self, goal: str) -> TaskState:
         """Start a new plan: fresh goal, no items, no step receipts (R1-5b).
@@ -573,9 +596,18 @@ class SessionData:
         # Same rule again: a session that never hit a ladder gains no key.
         if self.intervention_state:
             data["interventionState"] = dict(self.intervention_state)
-        # Same rule again (17 §4-P0): a normal session gains no key either.
-        if self.mode and self.mode != "normal":
-            data["mode"] = self.mode
+        # M1b T1: the agent is the one stored fact about the posture, and it
+        # is written only when it is not the default — so a file written
+        # before this layer existed reads the same.
+        if self.agent and self.agent != "build":
+            data["agent"] = self.agent
+        # M1b T1b: the switch history, only when there is one.  A row that is
+        # not a mapping is dropped rather than written: the runtime keeps
+        # this list, but nothing should be able to write a shape the reader
+        # cannot read back.
+        history = [dict(row) for row in self.agent_history if isinstance(row, Mapping)]
+        if history:
+            data["agentHistory"] = history
         # Same rule again (18 §10.1): a writable session gains no key.
         if self.readonly:
             data["readonly"] = True
@@ -632,7 +664,19 @@ class SessionData:
         raw_permissions = data.get("permissions")
         permission_rows = raw_permissions if isinstance(raw_permissions, list) else []
         permissions = [dict(row) for row in permission_rows if isinstance(row, Mapping)]
-        raw_mode = str(data.get("mode") or "normal")
+        # M1b T1: the agent is the authority.  A file written before the
+        # agent table existed carries the old ``mode`` key instead — that is
+        # the one migration, and it is on the reading side only.
+        raw_agent = data.get("agent")
+        if not isinstance(raw_agent, str) or not raw_agent:
+            raw_agent = "plan" if str(data.get("mode") or "") == "plan" else "build"
+        raw_history = data.get("agentHistory")
+        history_rows = raw_history if isinstance(raw_history, list) else []
+        agent_history = [
+            dict(row)
+            for row in history_rows
+            if isinstance(row, Mapping) and row.get("from") and row.get("to")
+        ]
         return cls(
             session_id=data.get("sessionId", ""),
             title=data.get("title", ""),
@@ -655,7 +699,8 @@ class SessionData:
             intervention_state=(
                 dict(raw_intervention) if isinstance(raw_intervention, dict) else None
             ),
-            mode=raw_mode if raw_mode in KNOWN_MODES else "normal",
+            agent=raw_agent,
+            agent_history=agent_history,
             # Truthy garbage coerces to the *restrictive* value: fail-closed.
             readonly=bool(data.get("readonly")),
             permissions=permissions,
@@ -663,4 +708,4 @@ class SessionData:
 
 
 # Re-export helper for callers that need to resolve references.
-__all__ = ["KNOWN_MODES", "SessionData", "StagedUndo", "TurnUsage", "tool_call_from_ref"]
+__all__ = ["SessionData", "StagedUndo", "TurnUsage", "tool_call_from_ref"]

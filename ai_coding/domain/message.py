@@ -202,6 +202,12 @@ class ChatMessage:
     #: the compaction tests).  The id names a message; it does not define what
     #: the message says, and two equal bodies are still equal.
     id: str = field(default="", compare=False)
+    #: M1b T1b: the agent that produced this message.  Empty means "not
+    #: attributed" — a message written before the agent table existed, or a
+    #: message that is not the model's own (a tool result, a harness line).
+    #: ``compare=False`` for the same reason ``id`` is: the id names a
+    #: message, it does not define what it says.
+    agent: str = field(default="", compare=False)
 
     def __post_init__(self) -> None:
         if self.role == "tool" and not self.tool_call_id:

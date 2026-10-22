@@ -35,14 +35,22 @@ def user_message(
     )
 
 
-def assistant_message(step: StepResult, timestamp: str) -> ChatMessage:
-    """Wrap one completed model step as an assistant message."""
+def assistant_message(
+    step: StepResult, timestamp: str, agent: str = ""
+) -> ChatMessage:
+    """Wrap one completed model step as an assistant message.
+
+    ``agent`` names who spoke (M1b T1b).  It travels with the message so the
+    transcript can say "this answer came from the plan agent" without having
+    to guess from the surrounding state.
+    """
     return ChatMessage(
         role="assistant",
         content=step.text,
         timestamp=timestamp,
         tool_calls=step.tool_calls or None,
         reasoning=step.reasoning,
+        agent=agent,
     )
 
 
