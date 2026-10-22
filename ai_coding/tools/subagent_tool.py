@@ -160,8 +160,9 @@ class SubAgentTool(BaseTool):
             f"Delegate a task to a sub-agent that {window}, then returns a "
             "structured packet: its conclusion, any unfinished task items, changed "
             "files, and a ledger path holding the full report. Use 'task' for what "
-            "to do and optionally 'name' for a short agent label. The sub-agent's "
-            "own reasoning is not returned."
+            "to do, 'agent' to choose which agent runs it (an id from the agent "
+            "table; a primary agent cannot be spawned), and 'name' for a short "
+            "label you make up. The sub-agent's own reasoning is not returned."
         )
 
     @property
@@ -175,7 +176,17 @@ class SubAgentTool(BaseTool):
                 },
                 "name": {
                     "type": "string",
-                    "description": "Optional short label for the sub-agent.",
+                    "description": (
+                        "Optional short label for this run (you choose it; it is "
+                        "not an agent id)."
+                    ),
+                },
+                "agent": {
+                    "type": "string",
+                    "description": (
+                        "Optional subagent id from the agent table. Defaults to "
+                        "general. Primary agents cannot be spawned."
+                    ),
                 },
                 "background": {
                     "type": "boolean",
@@ -216,6 +227,11 @@ class SubAgentTool(BaseTool):
                 error="missing_task",
             )
         name = str(params.get("name", "sub-agent")).strip() or "sub-agent"
+        # M1b: forward what the model asked for, verbatim.  ``None`` means "not
+        # specified" and the runner resolves the default — the tool does not
+        # hold the agent table, so it cannot tell which target is the default.
+        agent = params.get("agent")
+        agent = str(agent).strip() if isinstance(agent, str) and agent.strip() else None
 
         # R1-3: validate the shape contract before the runner ever sees it.
         schema = params.get("output_schema")
@@ -247,7 +263,7 @@ class SubAgentTool(BaseTool):
             )
 
         if params.get("background"):
-            return self._spawn_background(task, name, context, parent, schema)
+            return self._spawn_background(task, name, context, parent, schema, agent)
         try:
             result = await self._runner.run(
                 task,
@@ -265,6 +281,7 @@ class SubAgentTool(BaseTool):
                 # R1-3: the shape contract, always passed (None = prose as
                 # usual) so the call shape is one stable contract.
                 output_schema=schema,
+                agent=agent,
             )
         except Exception as exc:  # noqa: BLE001 — tool boundary
             return ToolResult(
@@ -277,6 +294,7 @@ class SubAgentTool(BaseTool):
     def _spawn_background(
         self, task: str, name: str, context: ToolContext, parent: ParentContext | None,
         schema: dict[str, Any] | None = None,
+        agent: str | None = None,
     ) -> ToolResult:
         """Hand a child to the background and return its handle at once.
 
@@ -301,6 +319,7 @@ class SubAgentTool(BaseTool):
                 # facts land in the packet and its ledger file, pointed at by
                 # the completion event.
                 output_schema=schema,
+                agent=agent,
             )
         except RuntimeError as exc:
             return ToolResult(

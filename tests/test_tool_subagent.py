@@ -21,7 +21,7 @@ class _FakeRunner:
 
     async def run(
         self, task, name, *, worktree_manager=None, isolate=True, parent=None,
-        parent_span="", observer=None, output_schema=None,
+        parent_span="", observer=None, output_schema=None, agent=None,
     ):
         self.calls.append(
             {
@@ -175,7 +175,7 @@ async def test_subagent_runner_error_is_tool_failure():
     class _BoomRunner:
         async def run(
         self, task, name, *, worktree_manager=None, isolate=True, parent=None,
-        parent_span="", observer=None, output_schema=None,
+        parent_span="", observer=None, output_schema=None, agent=None,
     ):
             raise RuntimeError("boom")
 

@@ -31,6 +31,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ai_coding.core.events import (
+    AgentSwitched,
     AssistantMessage,
     BackgroundTaskDone,
     CompactionDelta,
@@ -104,9 +105,27 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
         # Prose also travels the delta stream; this event finalises it with the
         # authoritative text and carries the step's thinking (blocked from the
         # model, shown to the human).
+        data: dict[str, Any] = {"text": event.text, "reasoning": event.reasoning}
+        # M1b T1b: who spoke.  Written only when attributed, so an event that
+        # predates the agent table produces the exact dictionary it always
+        # produced.
+        if event.agent:
+            data["agent"] = event.agent
         return {
             "type": "message.finished",
-            "data": {"text": event.text, "reasoning": event.reasoning},
+            "data": data,
+        }
+    if isinstance(event, AgentSwitched):
+        # M1b T1b: the live half of the switch.  The durable half is
+        # ``session.agentHistory``; both word it the same way so a live
+        # transcript and a replayed one read alike.
+        return {
+            "type": "agent.switched",
+            "data": {
+                "from": event.from_agent,
+                "to": event.to_agent,
+                "reason": event.reason,
+            },
         }
     if isinstance(event, ToolStarted):
         return {

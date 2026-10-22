@@ -1072,7 +1072,14 @@ class PlanRunner:
         session.add_message(
             ChatMessage(role="user", content=prompt, timestamp=now, synthetic=True)
         )
-        session.add_message(ChatMessage(role="assistant", content=summary, timestamp=now))
+        # 08 T1b: the execution layer's bubble is the *build* agent's report,
+        # not the plan agent's — the step ran as work, so it must not claim to
+        # be the planner's words.
+        session.add_message(
+            ChatMessage(
+                role="assistant", content=summary, timestamp=now, agent="build"
+            )
+        )
         if observer is not None:
             # Observation only: a client that cannot render this must not cost
             # the step its receipt (the bubbles are already written).
