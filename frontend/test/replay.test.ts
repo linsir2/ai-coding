@@ -353,9 +353,18 @@ describe("[plan] replay (计划模式归位批次)", () => {
     // the instruction the harness gave the model.  The transcript shows the
     // first and skips the second -- a page of instruction in the operator's
     // column would read as if they had said it.
+    //
+    // The instruction is *stamped* (M2 T3): the mark is the class, not a
+    // prefix to recognise.  The replay used to look for the "[plan] "
+    // prefix; now the synthetic branch skips it, like every other harness
+    // line.
     const state = messagesToState([
       { role: "user", content: "请你调研这个分支" },
-      { role: "user", content: "[plan] Create a detailed implementation plan for: 请你调研这个分支" },
+      {
+        role: "user",
+        content: "[plan] Create a detailed implementation plan for: 请你调研这个分支",
+        synthetic: true,
+      },
       { role: "assistant", content: "好" },
     ])
     const texts = state.messages.flatMap((m) =>
