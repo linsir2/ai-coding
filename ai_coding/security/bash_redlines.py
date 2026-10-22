@@ -27,7 +27,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
-from ai_coding.shell_parse import CommandView, command_views
+from ai_coding.shell_parse import CommandView, command_shape, command_views
 
 __all__ = ["bash_red_line"]
 
@@ -313,16 +313,5 @@ def bash_red_line(command: str) -> str:
             return f"credential file ({secret})"
         for reason, rule in _RULES:
             if rule(view):
-                return f"{reason} ({_shape(view)})"
+                return f"{reason} ({command_shape(view)})"
     return ""
-
-
-def _shape(view: CommandView) -> str:
-    """The command as it was written, for the refusal to name.
-
-    The operator reads the refusal and has to see *what* was refused, so
-    the reason carries the command's own words -- the same way the old
-    table's reasons carried the pattern that matched.
-    """
-    parts = [view.program, *view.arguments]
-    return " ".join(part for part in parts if part)

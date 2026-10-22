@@ -34,6 +34,7 @@ from typing import Any
 
 __all__ = [
     "CommandView",
+    "command_shape",
     "command_views",
     "command_words",
     "parses_cleanly",
@@ -61,6 +62,17 @@ class CommandView:
     #: Whether the grammar read the whole command.  A command the grammar
     #: could not finish is still read as far as it goes, and this says so.
     broken: bool = False
+
+
+def command_shape(view: CommandView) -> str:
+    """The command as it was written, in one line.
+
+    The program and its arguments, separated by spaces.  The operator
+    reads a refusal and has to see *what* was refused, so both the red
+    lines and the permission rules speak about the command in these
+    words -- one definition, so the two cannot drift apart.
+    """
+    return " ".join(part for part in (view.program, *view.arguments) if part)
 
 
 #: The nodes whose text is a word the shell would pass on.  ``number`` is
