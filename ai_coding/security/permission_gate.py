@@ -22,6 +22,7 @@ from ai_coding.security.bash_redlines import bash_red_line
 from ai_coding.security.grants import GrantStore
 from ai_coding.security.permissions import (
     NO_FILE_RULES,
+    POSTURES,
     Effect,
     FileRules,
     Rule,
@@ -318,6 +319,26 @@ def _directory_of(pattern: str) -> str:
     return "/".join(concrete)
 
 
+def _split_grant(key: str) -> tuple[str, str | None]:
+    """A stored grant as ``(key, posture)``; ``None`` means every posture.
+
+    New grants are written as ``key@posture``.  Old ones have no suffix and
+    keep meaning "everywhere" -- a file is not rewritten just because the
+    reader learned a new word.  A path literally ending in ``@build`` is
+    indistinguishable from a scoped grant; we read it as scoped, which is the
+    narrower (fail-closed) reading, matching how an unknown suffix is treated.
+    """
+    base, separator, suffix = key.rpartition("@")
+    if not separator or suffix not in POSTURES:
+        return key, None
+    return base, suffix
+
+
+def _grant_base(key: str) -> str:
+    """The path/tool part of a stored grant, without its posture suffix."""
+    return _split_grant(key)[0]
+
+
 def grant_key(tool_name: str, params: Mapping[str, Any]) -> str | None:
     """What an "always" would actually remember, or ``None`` when it cannot be said.
 
@@ -554,7 +575,7 @@ class PermissionGate:
         #    keeps meaning what it means today: the operator's own answer
         #    for that path, with no second question about the workspace.
         key = grant_key(name, params)
-        if key is not None and key in self._grants:
+        if key is not None and self._grant_applies(key, posture):
             return Decision(PermissionDecision.ALLOW, "")
 
         # 4. What the rules said.
@@ -726,6 +747,26 @@ class PermissionGate:
             )
         return None
 
+    def _grant_applies(self, key: str, posture: str) -> bool:
+        """Whether a stored grant answers this key in this posture.
+
+        A bare grant answers everywhere.  A scoped one answers in the posture
+        it was given in and in every looser one (the ladder ``plan <
+        readonly < build``); an unknown posture is treated as stricter than
+        ``plan``, so a build grant cannot leak through a misspelling.
+        """
+        try:
+            current = POSTURES.index(posture)
+        except ValueError:
+            current = -1
+        for stored in self._grants:
+            base, granted = _split_grant(stored)
+            if base != key:
+                continue
+            if granted is None or current >= POSTURES.index(granted):
+                return True
+        return False
+
     def allow_once(self, tool_name: str, params: Mapping[str, Any]) -> None:
         """Remember one approval for this process only (B).
 
@@ -749,6 +790,11 @@ class PermissionGate:
         directory reaches the tool instead of only the gate.  Containment is by
         prefix on the *granted* path's directory: a grant for ``/outside`` lets
         the tool read ``/outside/deep/file.py``, and nothing above it.
+
+        The posture suffix is ignored on purpose: the gate has already made
+        the posture decision, and a build grant for an outside path must still
+        reach the tool it was given for.  In a stricter posture the gate asks
+        first; the one-off ``yes`` arrives here as a bare key.
         """
         if not self._workspace:
             return False
@@ -760,7 +806,7 @@ class PermissionGate:
             tool_name, _, granted = key.partition(":")
             if tool_name not in _PATH_TOOLS and tool_name not in _DIR_TOOLS:
                 continue
-            root = Path(granted).expanduser()
+            root = Path(_grant_base(granted)).expanduser()
             if not root.is_absolute():
                 root = Path(self._workspace) / root
             try:
@@ -781,21 +827,32 @@ class PermissionGate:
         if name:
             self._trusted_servers.add(str(name))
 
-    def grant(self, tool_name: str, params: Mapping[str, Any]) -> str | None:
+    def grant(
+        self,
+        tool_name: str,
+        params: Mapping[str, Any],
+        *,
+        posture: str | None = None,
+    ) -> str | None:
         """Remember exactly this call; return the key, or ``None`` if unnameable.
 
         Called by the dispatcher when the human answered ``ALWAYS``.  Writing
         through to the store is best effort -- the operator did say always, so
         the grant holds for this process even if it cannot be written down.
+
+        ``posture`` scopes the answer to that posture and every looser one.
+        ``None`` writes a bare key meaning everywhere, which is both the old
+        format and what a direct caller (a test, a replay) gets.
         """
         key = grant_key(tool_name, params)
         if key is None:
             return None
-        if key not in self._grants:
-            self._grants.add(key)
+        stored = key if posture is None else f"{key}@{posture}"
+        if stored not in self._grants:
+            self._grants.add(stored)
             store = self._store
             if store is not None:
-                store.add(key)
+                store.add(stored)
         return key
 
     @property

@@ -90,7 +90,10 @@ async def test_answering_always_records_the_grant_in_the_gate():
 
     assert not denied
     assert approval.asked == [("edit", {"path": "src/a.py"})]
-    assert gate.grants == ("edit:src/a.py",)
+    assert gate.grants == ("edit:src/a.py@build",)
+    assert gate.check("edit", {"path": "src/a.py"}, posture="build") == (
+        PermissionDecision.ALLOW
+    )
 
 
 @pytest.mark.asyncio

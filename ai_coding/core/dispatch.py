@@ -416,7 +416,13 @@ class ToolDispatcher:
                     "reason": reason,
                 })
             try:
-                verdict_from_user = await self._ask(call, reason, deadline, named)
+                verdict_from_user = await self._ask(
+                    call,
+                    reason,
+                    deadline,
+                    named,
+                    posture_of(ctx.mode, ctx.readonly),
+                )
             finally:
                 if ctx.note_approval is not None:
                     ctx.note_approval(None)
@@ -491,6 +497,7 @@ class ToolDispatcher:
         reason: str,
         deadline: Deadline | None = None,
         auth_name: str | None = None,
+        posture: str = "build",
     ) -> ApprovalVerdict:
         """Prompt the user, inside the turn clock.  Never raises (R7c).
 
@@ -524,7 +531,7 @@ class ToolDispatcher:
             # and the TUI both arrive here, and a front end that forgot to
             # record would turn "always" into a silent "this once" -- exactly
             # how the REPL never had the feature at all (G4b).
-            self.gate.grant(named, call.params)
+            self.gate.grant(named, call.params, posture=posture)
             return ApprovalVerdict.APPROVED
         if answer is ApprovalResult.YES:
             # B: a one-off "yes" is still an answer, so the tool has to be able
