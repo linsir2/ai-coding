@@ -30,6 +30,7 @@ from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
 from ai_coding.domain.loop import TurnStatus
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
+from ai_coding.domain.stance import PostureResult
 from ai_coding.domain.task import TaskState
 
 #: Unique per call so a test can ask "did this step read an earlier step?".
@@ -124,13 +125,21 @@ class _TwoPhaseLoop:
         )
         self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
 
-    def request_posture(self, session, *, mode=None, readonly=None):
+    def request_posture(
+        self, session, *, agent=None, readonly=None, reason="", observer=None
+    ):
         """18 §10.1: the immediate half of AgentLoop.request_posture."""
-        if mode is not None:
-            session.mode = mode
-        if readonly is not None:
-            session.readonly = bool(readonly)
-        return True
+        self.commit_posture(
+            session, agent=agent, readonly=readonly, reason=reason, observer=observer
+        )
+        return PostureResult.COMMITTED
+
+    def commit_posture(
+        self, session, *, agent=None, readonly=None, reason="", observer=None
+    ):
+        session.agent = agent if agent is not None else session.agent
+        session.readonly = bool(readonly) if readonly is not None else session.readonly
+        session.pending_posture = None
 
     async def process_input(self, session, text, on_delta=None, observer=None):
         self.calls.append(text)
@@ -354,13 +363,23 @@ async def test_planning_failure_does_not_execute():
             )
             self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
 
-        def request_posture(self, session, *, mode=None, readonly=None):
+        def request_posture(
+            self, session, *, agent=None, readonly=None, reason="", observer=None
+        ):
             """18 §10.1: the immediate half of AgentLoop.request_posture."""
-            if mode is not None:
-                session.mode = mode
-            if readonly is not None:
-                session.readonly = bool(readonly)
-            return True
+            self.commit_posture(
+                session, agent=agent, readonly=readonly, reason=reason, observer=observer
+            )
+            return PostureResult.COMMITTED
+
+        def commit_posture(
+            self, session, *, agent=None, readonly=None, reason="", observer=None
+        ):
+            session.agent = agent if agent is not None else session.agent
+            session.readonly = (
+                bool(readonly) if readonly is not None else session.readonly
+            )
+            session.pending_posture = None
 
         async def process_input(self, session, text, on_delta=None, observer=None):
             self.calls.append(text)
@@ -452,7 +471,10 @@ async def test_an_immediate_flip_supersedes_the_same_key_already_queued(tmp_path
 
     applied = loop.request_posture(session, readonly=False)
 
-    assert applied is True
+    # M1b: asking for the state we are already in, while a different flip is
+    # queued, withdraws the queued flip — that is CANCELLED, and the effect
+    # the test is about (the stale value cannot resurrect) is the same.
+    assert applied is PostureResult.CANCELLED
     assert session.readonly is False
     assert session.pending_posture is None
     await loop.aclose()
@@ -464,7 +486,7 @@ async def test_a_leftover_pending_flip_lands_at_the_next_turn(tmp_path):
     lands at the next turn's entry (18 §10.2)."""
     loop, _sessions = _real_loop(tmp_path)
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
-    session.pending_posture = {"mode": "plan"}
+    session.pending_posture = {"agent": "plan", "readonly": True, "reason": "test"}
 
     await loop.process_input(session, "go")
 
@@ -502,10 +524,14 @@ async def test_a_flip_queued_mid_turn_lands_at_close_and_reads_back(tmp_path):
     turn = asyncio.create_task(loop.process_input(session, "go"))
     await asyncio.wait_for(engine.started.wait(), timeout=5)
 
-    applied = loop.request_posture(session, mode="plan", readonly=True)
-    assert applied is False
+    applied = loop.request_posture(session, agent="plan", readonly=True)
+    assert applied is PostureResult.QUEUED
     assert (session.mode, session.readonly) == ("normal", False)
-    assert session.pending_posture == {"mode": "plan", "readonly": True}
+    assert session.pending_posture == {
+        "agent": "plan",
+        "readonly": True,
+        "reason": "",
+    }
 
     engine.release.set()
     await asyncio.wait_for(turn, timeout=5)
@@ -553,7 +579,11 @@ async def test_a_command_flip_queued_mid_turn_lands_at_close_and_reads_back(tmp_
     try:
         await handle_input(loop, "/plan", session, sessions, console)
 
-        assert session.pending_posture == {"mode": "plan", "readonly": True}
+        assert session.pending_posture == {
+            "agent": "plan",
+            "readonly": True,
+            "reason": "/plan",
+        }
         assert (session.mode, session.readonly) == ("normal", False)
         assert "将在当前回合结束后生效" in rc.export_text()
     finally:

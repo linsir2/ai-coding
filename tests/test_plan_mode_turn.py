@@ -23,6 +23,7 @@ from ai_coding.core.plan_runner import PLAN_MARK, plan_only
 from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
 from ai_coding.domain.loop import StepResult
 from ai_coding.domain.session import SessionData
+from ai_coding.domain.stance import PostureResult
 from ai_coding.domain.task import TaskState
 from ai_coding.security.approval import AutoApproveCallback
 from ai_coding.service.session_service import SessionService
@@ -68,11 +69,22 @@ class _Loop:
         session.add_message(_user(text))
         return "done"
 
-    def request_posture(self, session: SessionData, **kwargs: Any) -> bool:
-        for key, value in kwargs.items():
-            if value is not None:
-                setattr(session, key, value)
-        return True
+    def request_posture(self, session: SessionData, **kwargs: Any) -> Any:
+        self.commit_posture(session, **kwargs)
+        return PostureResult.COMMITTED
+
+    def commit_posture(
+        self,
+        session: SessionData,
+        *,
+        agent: str | None = None,
+        readonly: bool | None = None,
+        reason: str = "",
+        observer: Any = None,
+    ) -> None:
+        session.agent = agent if agent is not None else session.agent
+        session.readonly = bool(readonly) if readonly is not None else session.readonly
+        session.pending_posture = None
 
 
 def _user(content: str, *, synthetic: bool = False) -> Any:
@@ -84,7 +96,8 @@ def _user(content: str, *, synthetic: bool = False) -> Any:
 
 def _session(mode: str = "normal") -> SessionData:
     session = SessionData(session_id="s1", title="t", created_time="", last_access_time="")
-    session.mode = mode
+    # M1b: the agent is the authority; ``mode`` is derived from it.
+    session.agent = "plan" if mode == "plan" else "build"
     return session
 
 
@@ -210,7 +223,7 @@ async def test_the_planning_round_runs_on_a_sixteen_round_budget(tmp_path):
         observer=observer,
     )
     session = sessions.create()
-    session.mode = "plan"
+    session.agent = "plan"
 
     await plan_only(loop, session, topic="调研这个分支")
 

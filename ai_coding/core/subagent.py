@@ -36,6 +36,7 @@ from ai_coding.core.observers import ScopedObserver
 from ai_coding.core.steering import SteeringQueue
 from ai_coding.core.turn_report import report_degraded
 from ai_coding.core.worktree import WorktreeError
+from ai_coding.domain.agents import AgentCatalog, AgentSpec
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.subagent import (
@@ -95,6 +96,13 @@ class _NullSessions:
         anyway -- its approval callback is the auto-approver."""
         return None
 
+    def mark_pending_posture(
+        self, session_id: str, payload: dict[str, Any] | None
+    ) -> None:
+        """M1b T10: a sub-agent owns no session file and takes no operator
+        flip — the same no-op as ``save``, and the same reason."""
+        return None
+
 
 class SubAgentRunner:
     """Run one sub-agent task, optionally inside a git worktree sandbox."""
@@ -115,6 +123,9 @@ class SubAgentRunner:
         base_instructions: str = "",
         skills: SkillRegistry | None = None,
         notices: SteeringQueue | None = None,
+        #: M1b: the agent table a ``subAgent`` target is resolved against.
+        #: ``None`` keeps the pre-M1b behaviour: no target, no agent layer.
+        agents: AgentCatalog | None = None,
     ) -> None:
         self._app_config = app_config
         self._skills = skills
@@ -146,6 +157,7 @@ class SubAgentRunner:
         # which is a human command, so without this lane a background run is a
         # one-way door for the model that started it.
         self._notices = notices
+        self._agents = agents
         self._max_concurrent_n = max(1, int(max_concurrent))
         self._semaphore = asyncio.Semaphore(self._max_concurrent_n)
         # R1-2: background runs tracked across turns: run id -> row, plus the
@@ -176,6 +188,7 @@ class SubAgentRunner:
         parent_span: str = "",
         observer: Any | None = None,
         output_schema: dict[str, Any] | None = None,
+        agent: str | None = None,
     ) -> SubagentResult:
         """Run ``task`` and return its packet.  Never raises for a sub-agent failure.
 
@@ -193,7 +206,7 @@ class SubAgentRunner:
         async with self._semaphore:
             return await self._run_isolated(
                 task, name, parent, parent_span, active,
-                worktree_manager, isolate, output_schema,
+                worktree_manager, isolate, output_schema, agent,
             )
 
     async def _run_isolated(
@@ -206,6 +219,7 @@ class SubAgentRunner:
         worktree_manager: Any | None,
         isolate: bool,
         output_schema: dict[str, Any] | None = None,
+        agent: str | None = None,
     ) -> SubagentResult:
         """Worktree branch shared by the synchronous and background paths."""
         if (
@@ -218,7 +232,7 @@ class SubAgentRunner:
                     return await self._run_in(
                         task, name, str(wt.path), parent,
                         parent_span=parent_span, observer=observer,
-                        output_schema=output_schema,
+                        output_schema=output_schema, agent=agent,
                     )
             except WorktreeError:
                 # Scoped like the child's own events: this record says the child
@@ -233,7 +247,7 @@ class SubAgentRunner:
                 )
         return await self._run_in(
             task, name, None, parent, parent_span=parent_span, observer=observer,
-            output_schema=output_schema,
+            output_schema=output_schema, agent=agent,
         )
 
     # ---- background runs (R1-2) -------------------------------------------
@@ -251,6 +265,7 @@ class SubAgentRunner:
         emit: Any = None,
         origin_session: str = "",
         output_schema: dict[str, Any] | None = None,
+        agent: str | None = None,
     ) -> str:
         """Start a child without waiting; return its run id at once.
 
@@ -284,7 +299,7 @@ class SubAgentRunner:
                 run_id, task=task, name=name, worktree_manager=worktree_manager,
                 isolate=isolate, parent=parent, parent_span=parent_span,
                 observer=active, emit=emit, origin_session=origin_session,
-                output_schema=output_schema,
+                output_schema=output_schema, agent=agent,
             ),
             name=f"subagent:{run_id}",
         )
@@ -352,6 +367,7 @@ class SubAgentRunner:
         emit: Any,
         origin_session: str,
         output_schema: dict[str, Any] | None = None,
+        agent: str | None = None,
     ) -> None:
         """Run one background child to settlement, then announce it.
 
@@ -362,7 +378,7 @@ class SubAgentRunner:
             async with self._semaphore:
                 result = await self._run_isolated(
                     task, name, parent, parent_span, observer,
-                    worktree_manager, isolate, output_schema,
+                    worktree_manager, isolate, output_schema, agent,
                 )
         except asyncio.CancelledError:
             result = SubagentResult(
@@ -504,6 +520,30 @@ class SubAgentRunner:
             self._app_config, workspace=self._workspace, skill_resolver=resolve
         )
 
+    def _resolve_target(self, agent: str | None) -> tuple[AgentSpec | None, str]:
+        """Which agent the child speaks through — ``(spec, problem)``.
+
+        Resolved here rather than in the tool because the table lives here:
+        the tool only forwards what the model asked for (``None`` = not
+        specified), so "the default" and "a target the model chose" stay
+        distinguishable — which is what lets a loop with no table keep its
+        pre-M1b behaviour.
+
+        A ``None`` spec with no problem is the pre-M1b path: no agent layer.
+        """
+        if self._agents is None:
+            if agent is None:
+                return None, ""
+            return None, "agent table not available"
+        requested = agent if agent is not None else "general"
+        spec = self._agents.get(requested)
+        if spec is None:
+            available = ", ".join(item.id for item in self._agents.subagents())
+            return None, f"unknown agent: {requested} (available: {available or 'none'})"
+        if not spec.is_subagent:
+            return None, f"primary agents cannot be spawned: {requested}"
+        return spec, ""
+
     async def _run_in(
         self,
         task: str,
@@ -514,7 +554,11 @@ class SubAgentRunner:
         parent_span: str = "",
         observer: Any | None = None,
         output_schema: dict[str, Any] | None = None,
+        agent: str | None = None,
     ) -> SubagentResult:
+        target, problem = self._resolve_target(agent)
+        if problem:
+            return SubagentResult(status="error", error=problem)
         registry = self._build_tools(workdir)
         engine = self._engine_factory()
         ts = now_utc()
@@ -543,6 +587,7 @@ class SubAgentRunner:
             created_time=ts,
             last_access_time=ts,
             messages=seeded,
+            agent=target.id if target is not None else "build",
         )
         loop = AgentLoop(
             engine,
@@ -565,6 +610,7 @@ class SubAgentRunner:
             # child's own session starts empty, so this is the only path by
             # which "deny edit *.env" reaches the work it delegates.
             session_permissions=parent.permissions if parent is not None else (),
+            agents=self._agents,
         )
         try:
             # The inner loop has its own (slightly tighter) turn deadline, so it

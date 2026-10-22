@@ -15,6 +15,7 @@ from ai_coding.app.commands import REPLAction, handle_input
 from ai_coding.app.console import DialogueConsole
 from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
 from ai_coding.domain.session import SessionData
+from ai_coding.domain.stance import PostureResult
 
 
 class _Loop:
@@ -29,20 +30,36 @@ class _Loop:
     def turn_running(self) -> bool:
         return self.busy
 
-    def request_posture(self, session, *, mode=None, readonly=None):
+    def request_posture(
+        self, session, *, agent=None, readonly=None, reason="", observer=None
+    ):
+        target = (
+            agent if agent is not None else session.agent,
+            bool(readonly) if readonly is not None else session.readonly,
+        )
+        if target == (session.agent, session.readonly):
+            if session.pending_posture:
+                session.pending_posture = None
+                return PostureResult.CANCELLED
+            return PostureResult.NOOP
         if self.busy:
-            pending = dict(session.pending_posture or {})
-            if mode is not None:
-                pending["mode"] = mode
-            if readonly is not None:
-                pending["readonly"] = bool(readonly)
-            session.pending_posture = pending
-            return False
-        if mode is not None:
-            session.mode = mode
-        if readonly is not None:
-            session.readonly = bool(readonly)
-        return True
+            session.pending_posture = {
+                "agent": target[0],
+                "readonly": target[1],
+                "reason": reason,
+            }
+            return PostureResult.QUEUED
+        self.commit_posture(
+            session, agent=target[0], readonly=target[1], reason=reason, observer=observer
+        )
+        return PostureResult.COMMITTED
+
+    def commit_posture(
+        self, session, *, agent=None, readonly=None, reason="", observer=None
+    ):
+        session.agent = agent if agent is not None else session.agent
+        session.readonly = bool(readonly) if readonly is not None else session.readonly
+        session.pending_posture = None
 
     async def process_input(self, session, text, on_delta=None, observer=None):
         self.calls.append(text)
@@ -93,7 +110,7 @@ async def test_bare_plan_while_already_on_is_a_notice_only():
     loop = _Loop()
     sessions = _Sessions()
     session = _session()
-    session.mode, session.readonly = "plan", True
+    session.agent, session.readonly = "plan", True
     dc, c = _console()
 
     await handle_input(loop, "/plan", session, sessions, dc)
@@ -212,7 +229,7 @@ async def test_plan_off_double_disarms_and_keeps_the_hint_slash_free():
     loop = _Loop()
     sessions = _Sessions()
     session = _session()
-    session.mode, session.readonly = "plan", True
+    session.agent, session.readonly = "plan", True
     session.task = __import__("ai_coding.domain.task", fromlist=["TaskState"]).TaskState(
         goal="g"
     )
@@ -265,7 +282,7 @@ async def test_plan_off_gives_up_an_approved_plan():
     loop = _Loop()
     sessions = _Sessions()
     session = _session()
-    session.mode, session.readonly = "plan", True
+    session.agent, session.readonly = "plan", True
     session.task = TaskState(goal="g")
     session.task.add("第一步")
     session.task.armed = True
@@ -510,7 +527,11 @@ async def test_posture_commands_queue_while_a_turn_is_running():
     await handle_input(loop, "/plan", session, sessions, dc)
 
     assert (session.mode, session.readonly) == ("normal", False)
-    assert session.pending_posture == {"mode": "plan", "readonly": True}
+    assert session.pending_posture == {
+        "agent": "plan",
+        "readonly": True,
+        "reason": "/plan",
+    }
     assert sessions.saved == []
     assert "将在当前回合结束后生效" in c.export_text()
 
@@ -526,7 +547,11 @@ async def test_a_mid_turn_plan_topic_queues_the_posture_only():
     await handle_input(loop, "/plan 给缓存加 TTL", session, sessions, dc)
 
     assert loop.calls == []  # no planning turn was started
-    assert session.pending_posture == {"mode": "plan", "readonly": True}
+    assert session.pending_posture == {
+        "agent": "plan",
+        "readonly": True,
+        "reason": "/plan",
+    }
     out = c.export_text()
     assert "直接描述计划主题" in out and "将在当前回合结束后生效" in out
 
@@ -634,7 +659,7 @@ async def test_plan_run_exits_the_posture_even_when_the_flip_had_to_queue():
     loop = _BusyThenFreeLoop(busy=True)
     sessions = _Sessions()
     session = _session()
-    session.mode, session.readonly = "plan", True
+    session.agent, session.readonly = "plan", True
     session.task = TaskState(goal="g")
     session.task.add("still open")  # a real step: the stub's process_input runs
     dc, c = _console()

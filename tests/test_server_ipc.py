@@ -80,6 +80,14 @@ class _FakeLoop:
     def set_model(self, name: str) -> None:
         self.model = name
 
+    def commit_posture(
+        self, session, *, agent=None, readonly=None, reason="", observer=None
+    ) -> None:
+        """M1b T10: the boot reset goes through the same write path as a flip."""
+        session.agent = agent if agent is not None else session.agent
+        session.readonly = bool(readonly) if readonly is not None else session.readonly
+        session.pending_posture = None
+
     async def process_input(self, session, user_input, on_delta=None, observer=None):
         self.calls.append(
             {"session": session, "text": user_input, "on_delta": on_delta, "observer": observer}
@@ -1300,7 +1308,7 @@ async def test_session_stats_reports_the_posture(ipc):
     """P5 (18 §10.5): both posture axes ride the stats payload, always."""
     world, _service, client = ipc
     session = world.sessions.create()
-    session.mode, session.readonly = "plan", True
+    session.agent, session.readonly = "plan", True
     world.sessions.save(session)
     client.request("session.load", {"id": session.session_id})
 
@@ -1322,12 +1330,29 @@ async def test_session_load_reports_the_posture(ipc):
     """P5 (18 §10.5): the load payload carries the same two keys."""
     world, _service, client = ipc
     session = world.sessions.create()
-    session.mode, session.readonly = "plan", True
+    session.agent, session.readonly = "plan", True
     world.sessions.save(session)
 
     result = client.request("session.load", {"id": session.session_id})
 
     assert (result["mode"], result["readonly"]) == ("plan", True)
+
+
+@pytest.mark.asyncio
+async def test_session_load_carries_the_switch_history(ipc):
+    """M1b T1b: the durable timeline a replayed transcript draws from."""
+    world, _service, client = ipc
+    session = world.sessions.create()
+    session.agent = "plan"
+    session.agent_history = [
+        {"from": "build", "to": "plan", "ts": "2026-10-22T10:00:00Z", "reason": "/plan"}
+    ]
+    world.sessions.save(session)
+
+    result = client.request("session.load", {"id": session.session_id})
+
+    assert result["agentHistory"] == session.agent_history
+
 
 @pytest.mark.asyncio
 async def test_model_set_routes_to_loop(ipc):
@@ -1763,7 +1788,7 @@ async def test_initialize_resets_a_plan_posture_before_resuming(ipc):
     task.armed = True
     task.armed_profile = "plan"
     armed.task = task
-    armed.mode = "plan"
+    armed.agent = "plan"
     armed.readonly = True
     armed.pending_posture = {"mode": "normal", "readonly": False}
     world.sessions.save(armed)

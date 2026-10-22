@@ -10,6 +10,7 @@ import json
 import pytest
 from rich.console import Console
 
+from ai_coding.domain.stance import PostureResult
 from ai_coding.domain.task import TaskState
 from ai_coding.server.world import find_armed_session
 from ai_coding.service.session_service import SessionService
@@ -86,10 +87,20 @@ async def test_a_plan_given_up_is_not_picked_up_by_the_boot_resume(tmp_path):
     class _Loop:
         """The posture half of the command layer's contract."""
 
-        def request_posture(self, session, *, mode=None, readonly=None):
-            session.mode = mode or session.mode
-            session.readonly = bool(readonly)
-            return True
+        def request_posture(
+            self, session, *, agent=None, readonly=None, reason="", observer=None
+        ):
+            self.commit_posture(
+                session, agent=agent, readonly=readonly, reason=reason
+            )
+            return PostureResult.COMMITTED
+
+        def commit_posture(
+            self, session, *, agent=None, readonly=None, reason="", observer=None
+        ):
+            session.agent = agent if agent is not None else session.agent
+            session.readonly = bool(readonly) if readonly is not None else session.readonly
+            session.pending_posture = None
 
     service = SessionService(root=tmp_path / "sessions")
     session = _armed(service, "plan", "2026-01-01T00:00:00Z")

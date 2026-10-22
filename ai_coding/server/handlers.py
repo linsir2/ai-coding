@@ -351,9 +351,15 @@ def make_handlers(
                 # prompt posture in planning while the runner executed (F-46).
                 # Persist before the run so a crash mid-resume still reads
                 # build.
-                session.mode = "normal"
-                session.readonly = False
-                session.pending_posture = None
+                # M1b: one write path, so the reset also records its history
+                # row and clears the durable sidecar.
+                world.loop.commit_posture(
+                    session,
+                    agent="build",
+                    readonly=False,
+                    reason="boot-resume",
+                    observer=bridge,
+                )
                 _persist_session(world, session)
                 _launch_boot_resume(session)
                 resuming = True
@@ -433,6 +439,9 @@ def make_handlers(
             # P5 (18 §10.5): same two posture keys as session.stats, always.
             "mode": str(getattr(session, "mode", "normal") or "normal"),
             "readonly": bool(getattr(session, "readonly", False)),
+            # M1b T1b: the durable switch history, so a replayed transcript
+            # draws the same "Switched agent" rows the live one showed.
+            "agentHistory": [dict(row) for row in session.agent_history],
             "task": task_payload,
         }
 
@@ -939,7 +948,11 @@ def make_handlers(
             getattr(state.session, "permissions", ()) or ()
         )
         counts = getattr(gate, "layer_counts", None)
-        layers = counts(rules) if callable(counts) else {}
+        agent_rules_of = getattr(world.loop, "_agent_rules", None)
+        agent_rules = (
+            agent_rules_of(state.session) if callable(agent_rules_of) else ()
+        )
+        layers = counts(rules, agent_rules) if callable(counts) else {}
         errors = [
             *tuple(getattr(getattr(gate, "_rules", None), "errors", ()) or ()),
             *session_errors,

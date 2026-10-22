@@ -48,6 +48,25 @@ class AssistantMessage:
     #: the transcript can show it; never re-fed to the model (the request
     #: mapping ignores it — pinned by test).
     reasoning: str | None = None
+    #: M1b T1b: the agent that produced this step.  Empty means "not
+    #: attributed" — an event built by a test that predates the agent table.
+    agent: str = ""
+
+
+@dataclass(frozen=True)
+class AgentSwitched:
+    """The session's agent changed (M1b T1b).
+
+    Fired at the commit point — a turn boundary, never mid-turn — so the
+    live transcript and the replayed one (which reads ``agentHistory``) place
+    the switch at the same seam.  ``from_agent`` is carried explicitly:
+    without it a client can only guess what was in charge before.
+    """
+
+    from_agent: str
+    to_agent: str
+    reason: str = ""
+    ts: str = ""
 
 
 @dataclass(frozen=True)
@@ -499,6 +518,7 @@ LoopEvent = (
     IterationStarted
     | AssistantTextDelta
     | AssistantMessage
+    | AgentSwitched
     | ToolApprovalRequested
     | ToolStarted
     | ToolFinished
@@ -586,6 +606,7 @@ __all__ = [
     "IterationStarted",
     "AssistantTextDelta",
     "AssistantMessage",
+    "AgentSwitched",
     "ModelStepFinished",
     "ScopedEvent",
     "ToolApprovalRequested",

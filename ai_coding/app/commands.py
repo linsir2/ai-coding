@@ -15,6 +15,7 @@ from typing import Any
 from ai_coding.app.console import ConsoleSink
 from ai_coding.app.slash import parse_slash, suggest_command
 from ai_coding.domain.loop import TurnStatus
+from ai_coding.domain.stance import PostureResult
 from ai_coding.skills.catalog import build_catalog
 
 HELP_TEXT = (
@@ -26,6 +27,7 @@ HELP_TEXT = (
     "  /permissions   view or change approval policy\n"
     "  /todo           show current task list\n"
     "  /goal [obj|resume|off] self-driving goal (resume=continue same goal, off=stop)\n"
+    "  /agents [id]    list agents, or switch to one\n"
     "  /tasks          list background sub-agent runs\n"
     "  /skills         list available skills\n"
     "  /review        review current changes\n"
@@ -214,7 +216,7 @@ async def handle_input(
     if cmd.name == "resume":
         return _handle_resume(loop, cmd.raw, session, sessions, console)
     if cmd.name == "permissions":
-        return _handle_permissions(loop, cmd.raw, session, sessions, console)
+        return _handle_permissions(loop, cmd.raw, session, sessions, console, observer)
     if cmd.name == "todo":
         task = getattr(session, "task", None)
         if task is None:
@@ -244,10 +246,12 @@ async def handle_input(
         return REPLAction.CONTINUE, session
     if cmd.name == "plan":
         return await _handle_plan(loop, session, sessions, cmd.raw, console, observer)
+    if cmd.name == "agents":
+        return _handle_agents(loop, session, sessions, cmd.raw, console, observer)
     if cmd.name == "goal":
         return await _handle_goal(loop, session, sessions, cmd.raw, console, observer)
     if cmd.name == "readonly":
-        return _handle_readonly(loop, session, sessions, cmd.raw, console)
+        return _handle_readonly(loop, session, sessions, cmd.raw, console, observer)
     if cmd.name == "review":
         console.info("[review] reviewing current changes...")
         await loop.process_input(
@@ -477,9 +481,17 @@ async def _handle_plan(
 
     if sub == "off":
         was_plan, was_readonly = session.mode == "plan", bool(session.readonly)
-        if not loop.request_posture(session, mode="normal", readonly=False):
+        leaving = loop.request_posture(
+            session, agent="build", readonly=False, reason="/plan off", observer=observer
+        )
+        if leaving is PostureResult.QUEUED:
             console.info(f"[plan] 退出计划模式已排队{_QUEUED}。")
             return REPLAction.CONTINUE, session
+        # Every other answer falls through: ``/plan off`` also *gives up an
+        # approved plan*, and that is meaningful even when the posture was
+        # already ordinary.  CANCELLED (a queued ``/plan`` was withdrawn) and
+        # NOOP (nothing to flip) therefore keep the original message block
+        # below, which already speaks for both cases.
         # D1 (20 §批次 4a): this is the user's explicit "give this plan up".
         #
         # An approved plan the run never took is a dead end without it: both
@@ -549,7 +561,10 @@ async def _handle_plan(
     if sub == "run":
         needs_exit = session.mode == "plan" or session.readonly
         if needs_exit:
-            if loop.request_posture(session, mode="normal", readonly=False):
+            leaving = loop.request_posture(
+                session, agent="build", readonly=False, reason="/plan run", observer=observer
+            )
+            if leaving is PostureResult.COMMITTED:
                 _save_session(sessions, session)
                 console.info("[plan] 已退出计划模式（只读已关闭）；开始执行计划。")
             else:
@@ -586,14 +601,22 @@ async def _handle_plan(
             # (a rare user message in the same instant) reads postures only
             # at assembly/dispatch time anyway.
             if needs_exit:
-                session.pending_posture = None
-                session.mode, session.readonly = "normal", False
+                loop.commit_posture(
+                    session,
+                    agent="build",
+                    readonly=False,
+                    reason="/plan run",
+                    observer=observer,
+                )
                 _save_session(sessions, session)
         return REPLAction.CONTINUE, session
 
     already = session.mode == "plan" and session.readonly
     if not already:
-        if not loop.request_posture(session, mode="plan", readonly=True):
+        entering = loop.request_posture(
+            session, agent="plan", readonly=True, reason="/plan", observer=observer
+        )
+        if entering is PostureResult.QUEUED:
             if rest:
                 console.info(
                     f"[plan] 进入计划模式（只读）已排队{_QUEUED}；"
@@ -601,6 +624,12 @@ async def _handle_plan(
                 )
             else:
                 console.info(f"[plan] 进入计划模式（只读）已排队{_QUEUED}。")
+            return REPLAction.CONTINUE, session
+        if entering is PostureResult.CANCELLED:
+            console.info("[plan] 已撤销排队中的切换；当前仍是普通模式。")
+            return REPLAction.CONTINUE, session
+        if entering is PostureResult.NOOP:
+            console.info("[plan] 已经是计划模式（只读）。")
             return REPLAction.CONTINUE, session
         _save_session(sessions, session)
         console.info(
@@ -684,7 +713,12 @@ async def run_human_turn(
 
 
 def _handle_readonly(
-    loop: Any, session: Any, sessions: Any, raw: str, console: ConsoleSink
+    loop: Any,
+    session: Any,
+    sessions: Any,
+    raw: str,
+    console: ConsoleSink,
+    observer: Any = None,
 ) -> tuple[REPLAction, Any]:
     """``/readonly on|off`` — the enforcement axis alone (18 §10.1)."""
     arg = raw[len("/readonly"):].strip().lower()
@@ -694,8 +728,17 @@ def _handle_readonly(
         (console.error if arg else console.info)(line)
         return REPLAction.CONTINUE, session
     value = arg == "on"
-    if not loop.request_posture(session, readonly=value):
+    result = loop.request_posture(
+        session, readonly=value, reason=f"/readonly {arg}", observer=observer
+    )
+    if result is PostureResult.QUEUED:
         console.info(f"[readonly] {'开启' if value else '关闭'}已排队{_QUEUED}。")
+        return REPLAction.CONTINUE, session
+    if result is PostureResult.CANCELLED:
+        console.info("[readonly] 已撤销排队中的切换。")
+        return REPLAction.CONTINUE, session
+    if result is PostureResult.NOOP:
+        console.info(f"[readonly] 只读已经是{'开启' if value else '关闭'}状态。")
         return REPLAction.CONTINUE, session
     _save_session(sessions, session)
     if value:
@@ -705,16 +748,94 @@ def _handle_readonly(
     return REPLAction.CONTINUE, session
 
 
-def _permission_layers(gate: Any, session_rules: Any) -> list[tuple[str, int]]:
+def _handle_agents(
+    loop: Any,
+    session: Any,
+    sessions: Any,
+    raw: str,
+    console: ConsoleSink,
+    observer: Any = None,
+) -> tuple[REPLAction, Any]:
+    """``/agents [id]`` — show the table, or switch the session's agent.
+
+    The list is the *visible* primaries only: a hidden agent is one the table
+    says not to offer, not one that cannot be named (``/agents <hidden>``
+    still works).  Switching also sets the read-only overlay to the target
+    agent's default (plan is read-only, everything else is writable), which is
+    what ``/plan off`` has always meant.
+    """
+    from ai_coding.domain.agents import is_plan_agent
+
+    catalog = getattr(loop, "agents", None)
+    if catalog is None:
+        console.error("[agents] 这个入口没有接 agent 表。")
+        return REPLAction.CONTINUE, session
+
+    arg = raw[len("/agents"):].strip()
+    if not arg:
+        lines = [f"[agents] {len(catalog.visible())} available · current: {session.agent}"]
+        for spec in catalog.visible():
+            marker = "*" if spec.id == session.agent else " "
+            label = spec.name or spec.description or ""
+            lines.append(
+                f" {marker} {spec.id:<12} {spec.kind:<9} {spec.source:<8} {label}".rstrip()
+            )
+        if catalog.skipped:
+            lines.append(f"[agents] skipped {len(catalog.skipped)}:")
+            lines.extend(f"  {reason}" for reason in catalog.skipped)
+        console.info("\n".join(lines))
+        return REPLAction.CONTINUE, session
+
+    target = catalog.get(arg)
+    if target is None or target.kind != "primary":
+        available = ", ".join(spec.id for spec in catalog.primary()) or "(none)"
+        if target is None:
+            console.error(f"[agents] 没有这个 agent：{arg}。可用：{available}")
+        else:
+            console.error(
+                f"[agents] {arg} 是 subagent，只能作为 subAgent 的目标；可用：{available}"
+            )
+        return REPLAction.CONTINUE, session
+
+    result = loop.request_posture(
+        session,
+        agent=target.id,
+        readonly=is_plan_agent(target.id),
+        reason=f"/agents {target.id}",
+        observer=observer,
+    )
+    if result is PostureResult.QUEUED:
+        console.info(f"[agents] 切换到 {target.id} 已排队{_QUEUED}。")
+        return REPLAction.CONTINUE, session
+    if result is PostureResult.CANCELLED:
+        console.info("[agents] 已撤销排队中的切换。")
+        return REPLAction.CONTINUE, session
+    if result is PostureResult.NOOP:
+        console.info(f"[agents] 已经是 {target.id}。")
+        return REPLAction.CONTINUE, session
+    _save_session(sessions, session)
+    suffix = "（只读）" if session.readonly else ""
+    console.info(f"[agents] 已切换到 {target.id}{suffix}。")
+    return REPLAction.CONTINUE, session
+
+
+def _permission_layers(
+    gate: Any, session_rules: Any, agent_rules: Any = ()
+) -> list[tuple[str, int]]:
     """The layer counts, named.  A gate that cannot answer shows none."""
     counts = getattr(gate, "layer_counts", None)
     if not callable(counts):
         return []
-    return list(counts(tuple(session_rules)).items())
+    return list(counts(tuple(session_rules), tuple(agent_rules)).items())
 
 
 def _handle_permissions(
-    loop: Any, raw: str, session: Any, sessions: Any, console: ConsoleSink
+    loop: Any,
+    raw: str,
+    session: Any,
+    sessions: Any,
+    console: ConsoleSink,
+    observer: Any = None,
 ) -> tuple[REPLAction, Any]:
     try:
         parts = shlex.split(raw)
@@ -732,7 +853,12 @@ def _handle_permissions(
     if len(parts) == 1:
         name = type(approval).__name__ if approval else "(none)"
         lines = [f"[permissions] current approval: {name}"]
-        layers = _permission_layers(gate, session_rules)
+        # M1b: the agent layer is a real layer of the chain, so the listing
+        # has to count it.  A loop without the agent table (a test double, a
+        # bare REPL) simply has no agent rules.
+        agent_rules_of = getattr(loop, "_agent_rules", None)
+        agent_rules = agent_rules_of(session) if callable(agent_rules_of) else ()
+        layers = _permission_layers(gate, session_rules, agent_rules)
         if layers:
             lines.append("[permissions] rules by layer:")
             lines.extend(f"  {label:<9} {count}" for label, count in layers)

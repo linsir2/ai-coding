@@ -15,6 +15,7 @@ from ai_coding.app.commands import REPLAction, handle_input
 from ai_coding.app.console import DialogueConsole
 from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
 from ai_coding.domain.loop import TurnOutcome, TurnStatus
+from ai_coding.domain.stance import PostureResult
 
 pytestmark = pytest.mark.asyncio
 
@@ -42,21 +43,37 @@ class _FakeLoop:
     def turn_running(self) -> bool:
         return self.busy
 
-    def request_posture(self, session, *, mode=None, readonly=None):
+    def request_posture(
+        self, session, *, agent=None, readonly=None, reason="", observer=None
+    ):
         """18 §10.1: the immediate half of AgentLoop.request_posture."""
+        target = (
+            agent if agent is not None else session.agent,
+            bool(readonly) if readonly is not None else session.readonly,
+        )
+        if target == (session.agent, session.readonly):
+            if session.pending_posture:
+                session.pending_posture = None
+                return PostureResult.CANCELLED
+            return PostureResult.NOOP
         if self.busy:
-            pending = dict(session.pending_posture or {})
-            if mode is not None:
-                pending["mode"] = mode
-            if readonly is not None:
-                pending["readonly"] = bool(readonly)
-            session.pending_posture = pending
-            return False
-        if mode is not None:
-            session.mode = mode
-        if readonly is not None:
-            session.readonly = bool(readonly)
-        return True
+            session.pending_posture = {
+                "agent": target[0],
+                "readonly": target[1],
+                "reason": reason,
+            }
+            return PostureResult.QUEUED
+        self.commit_posture(
+            session, agent=target[0], readonly=target[1], reason=reason, observer=observer
+        )
+        return PostureResult.COMMITTED
+
+    def commit_posture(
+        self, session, *, agent=None, readonly=None, reason="", observer=None
+    ):
+        session.agent = agent if agent is not None else session.agent
+        session.readonly = bool(readonly) if readonly is not None else session.readonly
+        session.pending_posture = None
 
     async def process_input(self, session, text, on_delta=None, observer=None):
         self.calls.append((text, on_delta, observer))
@@ -1079,7 +1096,7 @@ async def test_the_plain_turn_note_reaches_the_terminal():
     sessions = _FakeSessions()
     dc, c = _console_capture()
     session = sessions.items[0]
-    session.mode, session.readonly = "plan", True
+    session.agent, session.readonly = "plan", True
 
     await handle_input(loop, "帮我改个 bug", session, sessions, dc)
 
@@ -1103,7 +1120,7 @@ async def test_a_turn_without_a_note_prints_nothing():
     sessions = _FakeSessions()
     dc, c = _console_capture()
     session = sessions.items[0]
-    session.mode, session.readonly = "plan", True
+    session.agent, session.readonly = "plan", True
 
     await handle_input(loop, "帮我改个 bug", session, sessions, dc)
 
@@ -1119,7 +1136,7 @@ async def test_a_command_that_runs_no_turn_does_not_repeat_the_last_note():
     sessions = _FakeSessions()
     dc, c = _console_capture()
     session = sessions.items[0]
-    session.mode, session.readonly = "plan", True
+    session.agent, session.readonly = "plan", True
     await handle_input(loop, "帮我改个 bug", session, sessions, dc)
 
     dc2, c2 = _console_capture()
