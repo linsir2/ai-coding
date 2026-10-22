@@ -239,10 +239,11 @@ class SubAgentTool(BaseTool):
 
         context = resolve_ctx(ctx)
         parent: ParentContext | None = None
-        if context.messages or context.instructions:
+        if context.messages or context.instructions or context.permissions:
             parent = ParentContext(
                 messages=tuple(context.messages),
                 instructions=context.instructions,
+                permissions=tuple(context.permissions),
             )
 
         if params.get("background"):

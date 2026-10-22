@@ -1614,6 +1614,16 @@ class AgentLoop:
         session.pending_approval = pending
         self.sessions.mark_pending_approval(session.session_id, pending)
 
+    def _effective_session_rules(self, session: SessionData) -> tuple[Rule, ...]:
+        """This session's layer plus what a parent handed this loop.
+
+        The child's own session starts empty, so the second half is how a
+        parent's rules reach delegated work (M1a ④).  One method because the
+        dispatch context, the catalogue, the prompt and acceptance must all
+        read the same effective set.
+        """
+        return (*self._session_rules(session), *self._session_permissions)
+
     @staticmethod
     def _session_rules(session: SessionData) -> tuple[Rule, ...]:
         """This session's stored layer, with broken rows reported once.
@@ -1654,7 +1664,7 @@ class AgentLoop:
         if self.cancel is not None:
             # R8c: one Escape drops the batch that is starting, not the whole turn.
             self.cancel.clear()
-        session_rules = self._session_rules(session)
+        session_rules = self._effective_session_rules(session)
         outcomes = await self.dispatcher.dispatch_batch(
             step.tool_calls,
             tool_context(
@@ -1665,10 +1675,10 @@ class AgentLoop:
                 instructions=instructions,
                 emit=self._emit,
                 turn=turn,
-                # M1a: the session's own layer plus whatever a parent passed
-                # to this loop.  Parsed per batch, so a rule added between
-                # turns is in force on the next request.
-                permissions=(*session_rules, *self._session_permissions),
+                # M1a: the effective layer (own + inherited).  Parsed per
+                # batch, so a rule added between turns is in force on the
+                # next request.
+                permissions=session_rules,
                 jobs=self.jobs,
                 # W2/R02: the operator's declared roots ride along, so a tool
                 # that judges reachability (present_plan's gate) answers with
@@ -1784,6 +1794,11 @@ class AgentLoop:
             return
         each = float(getattr(self.settings, "acceptance_verify_each_seconds", 120.0) or 0.0)
         total = float(getattr(self.settings, "acceptance_verify_total_seconds", 300.0) or 0.0)
+        session_rules = self._effective_session_rules(session)
+        posture = posture_of(
+            str(getattr(session, "mode", "normal") or "normal"),
+            bool(getattr(session, "readonly", False)),
+        )
         checked = await verify_items(
             pending,
             self.workspace,
@@ -1794,6 +1809,15 @@ class AgentLoop:
             # one that reaches outside the workspace.  The dispatcher's
             # callback is the same object this loop was built with.
             approval=self.dispatcher.approval,
+            # M1a ③: a rule deny is not a question.  The same layer that
+            # refuses a bash tool call refuses a proof command, so the shell
+            # is no longer the one hole in "the rules are the boundary".
+            deny_reason=lambda action, params: self.gate.deny_reason(
+                action,
+                params,
+                session_rules=session_rules,
+                posture=posture,
+            ),
         )
         by_id = {item.id: item for item in checked}
         for item in session.acceptance:
@@ -2384,7 +2408,7 @@ class AgentLoop:
         if session is not None:
             mode = getattr(session, "mode", "normal") or "normal"
             readonly = bool(getattr(session, "readonly", False))
-            session_rules = self._session_rules(session)
+            session_rules = self._effective_session_rules(session)
         return self.prompt.build(
             project_instructions=project_text,
             skills_catalog=catalog,
@@ -2447,7 +2471,7 @@ class AgentLoop:
         """
         mode = str(getattr(session, "mode", "normal") or "normal")
         readonly = bool(getattr(session, "readonly", False))
-        session_rules = self._session_rules(session)
+        session_rules = self._effective_session_rules(session)
         key = (mode, readonly, session_rules)
         schemas = self._surface_cache.get(key)
         if schemas is None:

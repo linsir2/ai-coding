@@ -561,6 +561,10 @@ class SubAgentRunner:
             guards=self._guards,
             workspace=workdir or self._workspace,
             observer=self._scoped_observer(name, parent_span, observer),
+            # M1a ④: the parent's session layer, carried on the packet.  The
+            # child's own session starts empty, so this is the only path by
+            # which "deny edit *.env" reaches the work it delegates.
+            session_permissions=parent.permissions if parent is not None else (),
         )
         try:
             # The inner loop has its own (slightly tighter) turn deadline, so it

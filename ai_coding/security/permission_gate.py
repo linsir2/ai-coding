@@ -601,6 +601,27 @@ class PermissionGate:
             f"unknown tool '{tool_name}' requires confirmation",
         )
 
+    def deny_reason(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        *,
+        session_rules: Ruleset = (),
+        posture: str = "build",
+    ) -> str:
+        """Why the rule layer refuses this call, or ``""`` when it does not.
+
+        The narrow view acceptance uses (M1a ③): it must see a DENY, never a
+        WARN -- an ordinary proof command is ``bash`` and base says ask, so
+        treating WARN as a refusal would put a human in front of every proof.
+        """
+        decision = self.check(
+            tool_name, params, session_rules=session_rules, posture=posture
+        )
+        if decision.decision is PermissionDecision.DENY:
+            return decision.reason
+        return ""
+
     # ---- the layers ----------------------------------------------------------
 
     def _base_rules(self) -> Ruleset:

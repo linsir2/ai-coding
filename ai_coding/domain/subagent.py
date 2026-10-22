@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .message import ChatMessage, ToolArtifact, ToolCallRef
+
+if TYPE_CHECKING:
+    from ai_coding.security.permissions import Rule
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,10 @@ class ParentContext:
 
     messages: tuple[ChatMessage, ...] = ()
     instructions: str | None = None
+    #: M1a ④: the parent's session rule layer.  A child has a fresh session,
+    #: so without this its gate would see the files and the config but not
+    #: what the operator denied in the conversation that spawned it.
+    permissions: tuple[Rule, ...] = ()
 
 
 @dataclass(frozen=True)

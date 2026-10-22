@@ -11,7 +11,9 @@ is exactly the wall-clock burn the experiments measured.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import replace
+from typing import Any
 
 from ai_coding.domain.acceptance import AcceptanceItem, pending_items
 from ai_coding.infra.subprocess_runner import run_process_async
@@ -22,6 +24,11 @@ from ai_coding.shell_parse import command_views
 _DEFAULT_EACH_SECONDS = 120.0
 _DEFAULT_TOTAL_SECONDS = 300.0
 _OUTPUT_TAIL = 500
+
+#: A narrow view of the rule layer: the reason this proof command is refused,
+#: or ``""``.  Acceptance does not import the gate, so its dependency face stays
+#: the same as before M1a.
+DenyReason = Callable[[str, dict[str, Any]], str]
 
 
 def _tail(text: str) -> str:
@@ -77,6 +84,7 @@ async def verify_items(
     timeout_each: float = _DEFAULT_EACH_SECONDS,
     timeout_total: float = _DEFAULT_TOTAL_SECONDS,
     approval: ApprovalCallback | None = None,
+    deny_reason: DenyReason | None = None,
 ) -> list[AcceptanceItem]:
     """Check every not-yet-passed item; return the items with verdicts filled.
 
@@ -88,6 +96,12 @@ async def verify_items(
     outside the workspace (W2).  Without it such a command is refused rather
     than run: the proof commands bypass the dispatch gate, so this is the
     only place a boundary can be put on them.
+
+    ``deny_reason`` is the rule layer (M1a): called as
+    ``deny_reason("bash", {"command": cmd})`` before anything runs, and a
+    non-empty answer fails the item.  It is a callback rather than the gate so
+    this module keeps its small dependency face.  ``ask`` deliberately does
+    not count here: an ordinary ``pytest`` must not become a prompt.
     """
     checked: list[AcceptanceItem] = []
     spent = 0.0
@@ -95,6 +109,16 @@ async def verify_items(
         if spent >= timeout_total:
             checked.append(item)
             continue
+        if deny_reason is not None:
+            try:
+                denied = deny_reason("bash", {"command": item.verify})
+            except Exception:  # noqa: BLE001 — a boundary that cannot read fails closed
+                denied = "the permission rules could not be read"
+            if denied:
+                checked.append(
+                    replace(item, passed=False, output=_tail(f"refused: {denied}"))
+                )
+                continue
         reason = _needs_a_human(item.verify, workspace)
         if reason and not await _approved(item, reason, approval):
             checked.append(replace(item, passed=False, output=_tail(f"refused: {reason}")))
