@@ -516,6 +516,7 @@ class PermissionGate:
         params: dict[str, Any],
         *,
         session_rules: Ruleset = (),
+        agent_rules: Ruleset = (),
         posture: str = "build",
     ) -> Decision:
         """Return a ``Decision`` for the given tool invocation.
@@ -524,12 +525,16 @@ class PermissionGate:
 
         1. **the hard tier** -- what no rule may reopen: a bash red line, a
            tool the config denies, the skill policy;
-        2. **the rules** -- the base layer, the config's standing
-           permissions, the operator's files, the session's own layer and
-           the global policy, in that order, the last match winning;
-        3. **a saved grant**, which answers a question but never reopens a
+        2. **the agent's veto** -- the agent layer evaluated *alone*: a deny
+           there is absolute, because an agent that narrows a capability
+           must not be reopened by a session rule (M1b);
+        3. **the rules** -- the base layer, the config's standing
+           permissions, the agent layer, the operator's files, the session's
+           own layer and the global policy, in that order, the last match
+           winning;
+        4. **a saved grant**, which answers a question but never reopens a
            refusal;
-        4. **what the rules said**: an allow (with the workspace edge still
+        5. **what the rules said**: an allow (with the workspace edge still
            asked), a question, or the unknown-tool fallback.
         """
         name = tool_name.lower()
@@ -555,9 +560,30 @@ class PermissionGate:
             if decision is not None:
                 return decision
 
-        # 2. The rules.  One query per resource the call touches, combined:
+        # 2. The agent's veto.  Evaluated on the agent layer alone, so a
+        #    session ``allow`` can never reopen it.  This is the one place
+        #    the chain is not simply "last match wins": the agent's *deny*
+        #    is absolute, while its *allow* is only one layer of the chain
+        #    below (it wins base and standing, and loses to the operator).
+        if agent_rules:
+            veto = next(
+                (
+                    rule
+                    for subject in subjects_of(name, params)
+                    for rule in (evaluate(name, subject, agent_rules, posture=posture),)
+                    if rule is not None and rule.effect is Effect.DENY
+                ),
+                None,
+            )
+            if veto is not None:
+                return Decision(
+                    PermissionDecision.DENY,
+                    veto.reason or f"denied by agent rule: {veto.action} {veto.resource}",
+                )
+
+        # 3. The rules.  One query per resource the call touches, combined:
         #    a refusal on any of them refuses the call.
-        layers = self._layers(tuple(session_rules))
+        layers = self._layers(tuple(session_rules), tuple(agent_rules))
         winners = [
             evaluate(name, subject, *layers, posture=posture)
             for subject in subjects_of(name, params)
@@ -569,7 +595,7 @@ class PermissionGate:
                 denial.reason or f"denied by rule: {denial.action} {denial.resource}",
             )
 
-        # 3. A resource the operator already approved.  After the rules'
+        # 4. A resource the operator already approved.  After the rules'
         #    refusals, so a standing grant can never reopen something that is
         #    refused outright, and before the rules' allows, so a grant
         #    keeps meaning what it means today: the operator's own answer
@@ -578,7 +604,7 @@ class PermissionGate:
         if key is not None and self._grant_applies(key, posture):
             return Decision(PermissionDecision.ALLOW, "")
 
-        # 4. What the rules said.
+        # 5. What the rules said.
         question = next((w for w in winners if w is not None and w.effect is Effect.ASK), None)
         if question is not None:
             return Decision(
@@ -607,6 +633,7 @@ class PermissionGate:
         params: dict[str, Any],
         *,
         session_rules: Ruleset = (),
+        agent_rules: Ruleset = (),
         posture: str = "build",
     ) -> str:
         """Why the rule layer refuses this call, or ``""`` when it does not.
@@ -616,7 +643,11 @@ class PermissionGate:
         treating WARN as a refusal would put a human in front of every proof.
         """
         decision = self.check(
-            tool_name, params, session_rules=session_rules, posture=posture
+            tool_name,
+            params,
+            session_rules=session_rules,
+            agent_rules=agent_rules,
+            posture=posture,
         )
         if decision.decision is PermissionDecision.DENY:
             return decision.reason
@@ -662,34 +693,48 @@ class PermissionGate:
             ]
         )
 
-    def _layers(self, session_rules: Ruleset) -> tuple[Ruleset, ...]:
+    def _layers(
+        self, session_rules: Ruleset, agent_rules: Ruleset = ()
+    ) -> tuple[Ruleset, ...]:
         """The layers, lowest priority first; the last one has the last word.
 
-        The base, then what the config grants, then the operator's files
-        (the project over the user), then this session's own layer, and
-        last the global policy -- deny only, and the one thing nothing may
-        talk its way out of.
+        The base, then what the config grants, then the agent's own narrowing,
+        then the operator's files (the project over the user), then this
+        session's own layer, and last the global policy -- deny only, and the
+        one thing nothing may talk its way out of.
+
+        The agent sits *above* base/standing so it can narrow what they
+        allow, and *below* the operator's files so a person can always narrow
+        further.  Its deny is additionally absolute (``check`` evaluates that
+        layer alone); its allow is just this one layer.
         """
         return (
             self._base_rules(),
             self._standing_rules(),
+            tuple(agent_rules),
             self._rules.user,
             self._rules.project,
             tuple(session_rules),
             self._rules.policy,
         )
 
-    def layer_counts(self, session_rules: Ruleset = ()) -> dict[str, int]:
+    def layer_counts(
+        self, session_rules: Ruleset = (), agent_rules: Ruleset = ()
+    ) -> dict[str, int]:
         """How many rules each layer holds, lowest priority first.
 
         The read view wants the shape of the policy, not every rule: a user
         with three files would otherwise scroll past the answer.  The names
         are the layer names the docs use, in the same order as ``_layers``.
         """
-        names = ("base", "standing", "user", "project", "session", "policy")
+        names = ("base", "standing", "agent", "user", "project", "session", "policy")
         return {
             name: len(layer)
-            for name, layer in zip(names, self._layers(tuple(session_rules)), strict=True)
+            for name, layer in zip(
+                names,
+                self._layers(tuple(session_rules), tuple(agent_rules)),
+                strict=True,
+            )
         }
 
     def hides(
@@ -697,6 +742,7 @@ class PermissionGate:
         action: str,
         *,
         session_rules: Ruleset = (),
+        agent_rules: Ruleset = (),
         posture: str = "build",
     ) -> bool:
         """Whether the whole action is cut from the tool catalogue.
@@ -706,11 +752,12 @@ class PermissionGate:
         resource it hit.  This is the same predicate the execution query
         uses, so the catalogue and the verdict cannot drift apart.
         """
+        lowered = action.lower()
         return wholly_disabled(
-            action.lower(),
-            *self._layers(tuple(session_rules)),
+            lowered,
+            *self._layers(tuple(session_rules), tuple(agent_rules)),
             posture=posture,
-        )
+        ) or wholly_disabled(lowered, tuple(agent_rules), posture=posture)
 
     def _skill_decision(self, params: Mapping[str, Any]) -> Decision | None:
         """The per-skill policy for the model's skill tool, or ``None``.

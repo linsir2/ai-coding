@@ -58,6 +58,7 @@ from ai_coding.core.acceptance import verify_items
 from ai_coding.core.compaction import Compactor
 from ai_coding.core.dispatch import DispatchOutcome, ToolDispatcher
 from ai_coding.core.events import (
+    AgentSwitched,
     AssistantMessage,
     InputSteered,
     IterationStarted,
@@ -101,6 +102,7 @@ from ai_coding.core.turn_policy import (
 from ai_coding.core.turn_report import TurnReporter
 from ai_coding.core.undo_store import UndoFileStore
 from ai_coding.domain.acceptance import acceptance_states, pending_items
+from ai_coding.domain.agents import AgentCatalog
 from ai_coding.domain.ledger import ledger_signature
 from ai_coding.domain.loop import (
     EmptyStepError,
@@ -118,6 +120,7 @@ from ai_coding.domain.message import (
 from ai_coding.domain.model_config import ModelConfig
 from ai_coding.domain.run import assistant_message, user_message
 from ai_coding.domain.session import SessionData
+from ai_coding.domain.stance import PostureResult
 from ai_coding.domain.task import TaskState
 from ai_coding.domain.turn_digest import TurnDigest
 from ai_coding.infra.deadline import (
@@ -273,6 +276,10 @@ class AgentLoop:
         # rules would be invisible to it (④).  Empty for a top-level loop:
         # its rules come from its own session.
         session_permissions: Sequence[Rule] = (),
+        # M1b: the agent table.  ``None`` means "no agent layer at all" --
+        # every existing construction site (tests, the bare REPL) keeps
+        # answering exactly as it did; only the composition root passes one.
+        agents: AgentCatalog | None = None,
     ) -> None:
         self.engine = engine
         self.sessions = sessions
@@ -323,6 +330,12 @@ class AgentLoop:
         # its own copy below; this one is the source both read.
         self.extra_workspace_roots: tuple[str, ...] = tuple(extra_workspace_roots)
         self._session_permissions: tuple[Rule, ...] = tuple(session_permissions)
+        self.agents = agents
+        # M1b: the parsed rule layer per agent id.  The catalog holds raw
+        # rows (``domain`` may not import ``security``), so the parse happens
+        # here, once per agent rather than once per call.
+        self._agent_rule_cache: dict[str, tuple[Rule, ...]] = {}
+        self._agent_rule_errors: dict[str, tuple[str, ...]] = {}
         # P4 (补充式方案 06): where /undo keeps the bytes of files the turn
         # created, so /redo survives a restart (a stash never held them).
         self._undo_files_store = UndoFileStore(
@@ -379,7 +392,8 @@ class AgentLoop:
         # the provider's prefix cache depend on it).
         self.gate: PermissionGate = gate or PermissionGate()
         self._surface_cache: dict[
-            tuple[str, bool, tuple[Rule, ...]], list[dict[str, Any]]
+            tuple[str, bool, tuple[Rule, ...], tuple[Rule, ...]],
+            list[dict[str, Any]],
         ] = {}
         # R4a: the tool schemas are part of every prompt, so their size belongs in
         # the attribution (docs/r4-analysis.md 4.3).
@@ -467,39 +481,114 @@ class AgentLoop:
         self,
         session: SessionData,
         *,
-        mode: str | None = None,
+        agent: str | None = None,
         readonly: bool | None = None,
-    ) -> bool:
+        reason: str = "",
+        observer: LoopObserver | None = None,
+    ) -> PostureResult:
         """Apply a posture flip now, or queue it for the running turn's close.
 
-        Returns True when it landed immediately (the caller persists: the
-        command layer saves, so the immediate path writes only fields); False
-        when the loop is mid-turn and the flip was merged into
-        ``session.pending_posture`` (same key: the later request wins).  An
-        immediate write also clears the same keys already queued — otherwise a
-        stale pending value would resurrect at the next drain and undo the
-        newer command.  No ``await`` between check and write, so a turn cannot
-        start inside the gap.
+        The four answers are ``PostureResult`` — see that type for why a bool
+        could not say the things an operator needs to know.  The requested
+        axes that are ``None`` mean "leave this one alone": ``/readonly``
+        sends only ``readonly``, and a queued flip must still record a
+        resolved agent rather than ``None``.
+
+        ``observer`` is how a switch made *outside* a turn reaches the
+        frontend: ``self.observer`` is whatever the last turn bound, and
+        before the first turn it is the construction-time ``NullObserver``.
+        The command layer already holds the bridge, so it passes it in.
+
+        No ``await`` between the check and the write, so a turn cannot start
+        inside the gap.
         """
+        target = (
+            agent if agent is not None else session.agent,
+            bool(readonly) if readonly is not None else session.readonly,
+        )
+        current = (session.agent, session.readonly)
+        pending = session.pending_posture
+
+        if target == current:
+            # The request is "be where we already are": it either withdraws a
+            # queued change or there was nothing to do.
+            if pending:
+                self._clear_pending_posture(session)
+                return PostureResult.CANCELLED
+            return PostureResult.NOOP
+
         if self.turn_running:
-            pending = dict(session.pending_posture or {})
-            if mode is not None:
-                pending["mode"] = mode
-            if readonly is not None:
-                pending["readonly"] = bool(readonly)
-            session.pending_posture = pending
-            return False
-        if mode is not None:
-            session.mode = mode
-        if readonly is not None:
-            session.readonly = bool(readonly)
-        if session.pending_posture:
-            for key, value in (("mode", mode), ("readonly", readonly)):
-                if value is not None:
-                    session.pending_posture.pop(key, None)
-            if not session.pending_posture:
-                session.pending_posture = None
-        return True
+            if pending and self._pending_target(session, pending) == target:
+                return PostureResult.QUEUED
+            queued = {"agent": target[0], "readonly": target[1], "reason": reason}
+            session.pending_posture = queued
+            self.sessions.mark_pending_posture(session.session_id, queued)
+            return PostureResult.QUEUED
+
+        self.commit_posture(
+            session,
+            agent=target[0],
+            readonly=target[1],
+            reason=reason,
+            observer=observer,
+        )
+        return PostureResult.COMMITTED
+
+    def commit_posture(
+        self,
+        session: SessionData,
+        *,
+        agent: str | None = None,
+        readonly: bool | None = None,
+        reason: str = "",
+        observer: LoopObserver | None = None,
+    ) -> None:
+        """The one place a posture lands (M1b T10).
+
+        Every route goes through here — the immediate request, a queued flip
+        drained at a turn boundary, ``/plan run``'s finally, and the boot
+        reset — so the field write, the history row, the event and the
+        sidecar removal cannot drift apart.
+        """
+        target_agent = agent if agent is not None else session.agent
+        target_readonly = bool(readonly) if readonly is not None else session.readonly
+        previous = session.agent
+        session.agent = target_agent
+        session.readonly = target_readonly
+        if target_agent != previous:
+            ts = now_utc()
+            session.agent_history.append(
+                {"from": previous, "to": target_agent, "ts": ts, "reason": reason}
+            )
+            event = AgentSwitched(
+                from_agent=previous,
+                to_agent=target_agent,
+                reason=reason,
+                ts=ts,
+            )
+            sink = observer if observer is not None else self.observer
+            try:
+                sink.on_event(event)
+            except Exception:  # noqa: BLE001 — observation must not lose the switch
+                _log.debug("AgentSwitched observer failed", exc_info=True)
+        self._clear_pending_posture(session)
+
+    def _clear_pending_posture(self, session: SessionData) -> None:
+        """Forget the queued flip, in memory and on disk."""
+        session.pending_posture = None
+        self.sessions.mark_pending_posture(session.session_id, None)
+
+    @staticmethod
+    def _pending_target(
+        session: SessionData, pending: dict[str, Any]
+    ) -> tuple[str, bool]:
+        """Where a queued flip would land, with the unset axis resolved."""
+        agent = pending.get("agent")
+        readonly = pending.get("readonly")
+        return (
+            str(agent) if agent is not None else session.agent,
+            bool(readonly) if readonly is not None else session.readonly,
+        )
 
     def _apply_pending_posture(self, session: SessionData) -> None:
         """Land a flip queued while a turn ran (18 §10.2).
@@ -512,11 +601,13 @@ class AgentLoop:
         pending = session.pending_posture
         if not pending:
             return
-        session.pending_posture = None
-        if pending.get("mode") is not None:
-            session.mode = str(pending["mode"])
-        if pending.get("readonly") is not None:
-            session.readonly = bool(pending["readonly"])
+        agent, readonly = self._pending_target(session, pending)
+        self.commit_posture(
+            session,
+            agent=agent,
+            readonly=readonly,
+            reason=str(pending.get("reason") or ""),
+        )
 
     # ---- the turn ---------------------------------------------------------
 
@@ -1624,6 +1715,47 @@ class AgentLoop:
         """
         return (*self._session_rules(session), *self._session_permissions)
 
+    def _agent_rules(self, session: SessionData) -> tuple[Rule, ...]:
+        """The current agent's rule layer, parsed once per agent id.
+
+        The catalog stores the **rows** (``domain`` may not import
+        ``security``); the reader is the same one the session layer uses, so
+        an agent file and a session file are read by one definition of what a
+        rule is.  A loop with no agent table has no agent layer — which is
+        what keeps every existing construction site byte-for-byte compatible.
+        """
+        if self.agents is None:
+            return ()
+        agent_id = str(getattr(session, "agent", "") or "")
+        cached = self._agent_rule_cache.get(agent_id)
+        if cached is not None:
+            return cached
+        spec = self.agents.get(agent_id)
+        if spec is None:
+            # An id nobody knows: no agent layer.  ``resolve`` deliberately
+            # falls back to build's *rules* (empty), and inventing a layer for
+            # a typo would change behaviour for a session that never opted in.
+            rules: tuple[Rule, ...] = ()
+            errors: tuple[str, ...] = ()
+            if agent_id:
+                errors = (f"unknown agent {agent_id!r}; no agent rules applied",)
+        else:
+            rules, errors = rules_from_dicts(
+                spec.permissions, label=f"agent {spec.id} rule"
+            )
+        if errors:
+            _log.warning("agent permission rules: %s", "; ".join(errors))
+        self._agent_rule_cache[agent_id] = rules
+        self._agent_rule_errors[agent_id] = errors
+        return rules
+
+    def _agent_body(self, session: SessionData) -> str:
+        """The agent's own instructions, or ``""``."""
+        if self.agents is None:
+            return ""
+        spec = self.agents.get(str(getattr(session, "agent", "") or ""))
+        return spec.body if spec is not None else ""
+
     @staticmethod
     def _session_rules(session: SessionData) -> tuple[Rule, ...]:
         """This session's stored layer, with broken rows reported once.
@@ -1665,6 +1797,7 @@ class AgentLoop:
             # R8c: one Escape drops the batch that is starting, not the whole turn.
             self.cancel.clear()
         session_rules = self._effective_session_rules(session)
+        agent_rules = self._agent_rules(session)
         outcomes = await self.dispatcher.dispatch_batch(
             step.tool_calls,
             tool_context(
@@ -1679,6 +1812,7 @@ class AgentLoop:
                 # batch, so a rule added between turns is in force on the
                 # next request.
                 permissions=session_rules,
+                agent_rules=agent_rules,
                 jobs=self.jobs,
                 # W2/R02: the operator's declared roots ride along, so a tool
                 # that judges reachability (present_plan's gate) answers with
@@ -1795,6 +1929,7 @@ class AgentLoop:
         each = float(getattr(self.settings, "acceptance_verify_each_seconds", 120.0) or 0.0)
         total = float(getattr(self.settings, "acceptance_verify_total_seconds", 300.0) or 0.0)
         session_rules = self._effective_session_rules(session)
+        agent_rules = self._agent_rules(session)
         posture = posture_of(
             str(getattr(session, "mode", "normal") or "normal"),
             bool(getattr(session, "readonly", False)),
@@ -1816,6 +1951,7 @@ class AgentLoop:
                 action,
                 params,
                 session_rules=session_rules,
+                agent_rules=agent_rules,
                 posture=posture,
             ),
         )
@@ -1975,7 +2111,7 @@ class AgentLoop:
         )
         self._emit(AssistantMessage(
             text=step.text, tool_calls=tuple(step.tool_calls),
-            reasoning=step.reasoning))
+            reasoning=step.reasoning, agent=session.agent))
         # A step that neither spoke nor acted cannot become a message, and
         # ChatMessage says so on purpose (message.py:139).  Named here so the
         # turn ends as a turn — closed, persisted, counted — instead of the
@@ -1998,7 +2134,7 @@ class AgentLoop:
             # every later turn.  The reasoning went out as the event above,
             # which is what the screen shows.
             raise ThinkingOnlyStepError(step.finish_reason, len(step.reasoning or ""))
-        session.add_message(assistant_message(step, now_utc()))
+        session.add_message(assistant_message(step, now_utc(), agent=session.agent))
         return step
 
     async def aclose(self) -> None:
@@ -2405,22 +2541,29 @@ class AgentLoop:
         mode = "normal"
         readonly = False
         session_rules: tuple[Rule, ...] = ()
+        agent_rules: tuple[Rule, ...] = ()
         if session is not None:
             mode = getattr(session, "mode", "normal") or "normal"
             readonly = bool(getattr(session, "readonly", False))
             session_rules = self._effective_session_rules(session)
+            agent_rules = self._agent_rules(session)
         return self.prompt.build(
             project_instructions=project_text,
             skills_catalog=catalog,
             mode=mode,
+            agent_instructions=self._agent_body(session) if session is not None else "",
             # C-2: the same fact the step picks its schemas from (the tool
             # surface), so the prompt never teaches a tool the request cannot
             # carry. One rule, read twice; no second surface to keep in sync.
-            tools=self._prompt_tools(mode, readonly, session_rules),
+            tools=self._prompt_tools(mode, readonly, session_rules, agent_rules),
         )
 
     def _prompt_tools(
-        self, mode: str, readonly: bool, session_rules: tuple[Rule, ...] = ()
+        self,
+        mode: str,
+        readonly: bool,
+        session_rules: tuple[Rule, ...] = (),
+        agent_rules: tuple[Rule, ...] = (),
     ) -> tuple[str, ...]:
         """The tool names the methods section should speak for.
 
@@ -2431,11 +2574,18 @@ class AgentLoop:
         gone for the same reason: the request does not carry it.
         """
         return tuple(
-            tool.name for tool in self._surface_tools(mode, readonly, session_rules)
+            tool.name
+            for tool in self._surface_tools(
+                mode, readonly, session_rules, agent_rules
+            )
         )
 
     def _surface_tools(
-        self, mode: str, readonly: bool, session_rules: tuple[Rule, ...] = ()
+        self,
+        mode: str,
+        readonly: bool,
+        session_rules: tuple[Rule, ...] = (),
+        agent_rules: tuple[Rule, ...] = (),
     ) -> list[BaseTool]:
         """The tools this request may call, in the registry's own order.
 
@@ -2457,7 +2607,10 @@ class AgentLoop:
             tool
             for tool in tools
             if not self.gate.hides(
-                tool.name, session_rules=session_rules, posture=posture
+                tool.name,
+                session_rules=session_rules,
+                agent_rules=agent_rules,
+                posture=posture,
             )
         ]
 
@@ -2472,11 +2625,12 @@ class AgentLoop:
         mode = str(getattr(session, "mode", "normal") or "normal")
         readonly = bool(getattr(session, "readonly", False))
         session_rules = self._effective_session_rules(session)
-        key = (mode, readonly, session_rules)
+        agent_rules = self._agent_rules(session)
+        key = (mode, readonly, session_rules, agent_rules)
         schemas = self._surface_cache.get(key)
         if schemas is None:
             schemas = tool_schemas_from_tools(
-                self._surface_tools(mode, readonly, session_rules)
+                self._surface_tools(mode, readonly, session_rules, agent_rules)
             )
             self._surface_cache[key] = schemas
         return schemas

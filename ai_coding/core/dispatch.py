@@ -253,6 +253,7 @@ class ToolDispatcher:
             _authorized_name(tool, call),
             call.params,
             session_rules=ctx.permissions,
+            agent_rules=ctx.agent_rules,
             posture=posture_of(ctx.mode, ctx.readonly),
         )
 

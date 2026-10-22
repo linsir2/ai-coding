@@ -94,6 +94,7 @@ def tool_context(
     jobs: Any = None,
     extra_workspace_roots: Sequence[str] = (),
     permissions: Sequence[Rule] = (),
+    agent_rules: Sequence[Rule] = (),
 ) -> ToolContext:
     """The per-invocation context a tool receives (the dispatcher stamps call ids).
 
@@ -121,6 +122,9 @@ def tool_context(
         # between turns is in force on the next one -- and never in the
         # process-wide gate another session is using.
         permissions=tuple(permissions),
+        # M1b: the agent's narrowing rides the same request, for the same
+        # reason -- it is a per-session fact, current on every call.
+        agent_rules=tuple(agent_rules),
         emit=emit,
         turn=int(turn),
         note_checkpoint=note_checkpoint,

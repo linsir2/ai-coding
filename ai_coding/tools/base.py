@@ -96,6 +96,11 @@ class ToolContext:
     #: cannot decide another session's calls.  ``dispatch`` passes it to the
     #: gate; an empty tuple means "no session rules".
     permissions: tuple[Rule, ...] = ()
+    #: M1b: the current agent's rule layer.  Same reason it rides the
+    #: context: the agent can change between requests, and one session's
+    #: agent must not decide another session's calls.  The gate treats this
+    #: layer's deny as absolute.
+    agent_rules: tuple[Rule, ...] = ()
     emit: Callable[[Any], None] = _noop_emit
     # R4a: the id of the call this execution belongs to.  The dispatcher stamps
     # one context per call (the batch shares everything else), which is what lets

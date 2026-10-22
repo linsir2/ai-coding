@@ -97,8 +97,11 @@ class PromptAssembler:
     """Build the single system-prompt string from optional sections.
 
     Section order (13 §2.3): base -> project instructions -> methods ->
-    plan-mode segment -> skills catalog.  Only non-empty sections are joined,
-    separated by a blank line; ``methods`` is never empty.
+    plan-mode segment -> skills catalog.  M1b adds the agent's own
+    instructions between the project's and the methods: who is speaking is
+    more specific than the project's conventions, and the methods are
+    general guidance.  Only non-empty sections are joined, separated by a
+    blank line; ``methods`` is never empty.
     """
 
     def __init__(self, base_instructions: str) -> None:
@@ -108,6 +111,9 @@ class PromptAssembler:
         self,
         project_instructions: str = "",
         skills_catalog: str = "",
+        #: M1b: the current agent's own instructions.  Empty (the default,
+        #: and the case for build/plan/general today) produces no section.
+        agent_instructions: str = "",
         #: 18 §10.5 (P2): the session's prompt posture, "normal" | "plan".
         #: Unknown values read as normal (fail-safe, same rule as persistence).
         mode: str = "normal",
@@ -122,6 +128,11 @@ class PromptAssembler:
             sections.append(
                 "<system-reminder>Project instructions:\n"
                 f"{project_instructions.strip()}\n</system-reminder>"
+            )
+        if agent_instructions.strip():
+            sections.append(
+                "<system-reminder>Agent instructions:\n"
+                f"{agent_instructions.strip()}\n</system-reminder>"
             )
         sections.append(_render_methods(tools))
         if mode == "plan":
