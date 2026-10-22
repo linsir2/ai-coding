@@ -105,9 +105,14 @@ async def test_tool_output_names_position_role_and_time() -> None:
 
 
 @pytest.mark.asyncio
-async def test_it_says_when_the_transcript_is_not_there() -> None:
-    """A wiring gap must not look like "you never said that"."""
-    result = await HistorySearchTool().execute({"query": "x"}, _ctx([]))
+async def test_it_says_when_the_transcript_is_not_there(tmp_path: Path) -> None:
+    """A wiring gap must not look like "you never said that".
+
+    The workspace is an empty directory rather than the process cwd: the tool
+    also scans the workspace's ``transcripts/archive``, so a real archive
+    under the cwd made this assertion depend on ambient state.
+    """
+    result = await HistorySearchTool().execute({"query": "x"}, _ctx([], str(tmp_path)))
 
     assert result.success is False
     assert result.error == "no_transcript"
@@ -121,10 +126,12 @@ async def test_an_empty_query_is_refused() -> None:
     assert result.error == "empty_query"
 
 
-def _ctx(messages: list) -> ToolContext:
+def _ctx(messages: list, workspace: str = ".") -> ToolContext:
     from ai_coding.domain.task import TaskState
 
-    return ToolContext(task=TaskState(), session_messages=tuple(messages))
+    return ToolContext(
+        task=TaskState(), session_messages=tuple(messages), workspace=workspace
+    )
 
 
 # ---- the wiring that makes it different from reading ctx.messages -----------
