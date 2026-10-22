@@ -130,6 +130,7 @@ from ai_coding.infra.time_utils import now_utc
 from ai_coding.infra.vcs import git_branch
 from ai_coding.security.approval import ApprovalCallback
 from ai_coding.security.permission_gate import PermissionGate
+from ai_coding.security.permissions import Rule, rules_from_dicts
 from ai_coding.service.session_service import SessionService
 from ai_coding.skills.catalog import build_catalog, superseded_note
 from ai_coding.skills.policy import denied_skill_ids
@@ -267,6 +268,11 @@ class AgentLoop:
         # is ``AIConfig`` and the list lives on ``ToolsConfig``; the loop is not
         # the place that would go looking for it.
         extra_workspace_roots: Sequence[str] = (),
+        # M1a: the parent's session layer, handed to a sub-agent's loop.  A
+        # child has its own fresh session, so without this the parent's
+        # rules would be invisible to it (④).  Empty for a top-level loop:
+        # its rules come from its own session.
+        session_permissions: Sequence[Rule] = (),
     ) -> None:
         self.engine = engine
         self.sessions = sessions
@@ -316,6 +322,7 @@ class AgentLoop:
         # context that carries them into ``present_plan``.  The assembler gets
         # its own copy below; this one is the source both read.
         self.extra_workspace_roots: tuple[str, ...] = tuple(extra_workspace_roots)
+        self._session_permissions: tuple[Rule, ...] = tuple(session_permissions)
         # P4 (补充式方案 06): where /undo keeps the bytes of files the turn
         # created, so /redo survives a restart (a stash never held them).
         self._undo_files_store = UndoFileStore(
@@ -1604,6 +1611,21 @@ class AgentLoop:
         session.pending_approval = pending
         self.sessions.mark_pending_approval(session.session_id, pending)
 
+    @staticmethod
+    def _session_rules(session: SessionData) -> tuple[Rule, ...]:
+        """This session's stored layer, with broken rows reported once.
+
+        The raw rows stay on the session; skipping a bad one is the only
+        safe reading, and ``/permissions`` shows the reasons.  Logged only
+        when the set of reasons changes, so a bad row does not write a
+        warning on every batch of every turn.
+        """
+        rules, errors = rules_from_dicts(getattr(session, "permissions", ()) or ())
+        if errors and errors != tuple(getattr(session, "permission_errors", ()) or ()):
+            _log.warning("session permission rules: %s", "; ".join(errors))
+        session.permission_errors = errors
+        return rules
+
     async def _run_tools(
         self,
         step: StepResult,
@@ -1629,6 +1651,7 @@ class AgentLoop:
         if self.cancel is not None:
             # R8c: one Escape drops the batch that is starting, not the whole turn.
             self.cancel.clear()
+        session_rules = self._session_rules(session)
         outcomes = await self.dispatcher.dispatch_batch(
             step.tool_calls,
             tool_context(
@@ -1639,6 +1662,10 @@ class AgentLoop:
                 instructions=instructions,
                 emit=self._emit,
                 turn=turn,
+                # M1a: the session's own layer plus whatever a parent passed
+                # to this loop.  Parsed per batch, so a rule added between
+                # turns is in force on the next request.
+                permissions=(*session_rules, *self._session_permissions),
                 jobs=self.jobs,
                 # W2/R02: the operator's declared roots ride along, so a tool
                 # that judges reachability (present_plan's gate) answers with

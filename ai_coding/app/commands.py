@@ -6,6 +6,7 @@ stays import-light and offline; the OpenTUI frontend drives it over IPC.
 
 from __future__ import annotations
 
+import shlex
 import time
 from enum import Enum
 from pathlib import Path
@@ -213,7 +214,7 @@ async def handle_input(
     if cmd.name == "resume":
         return _handle_resume(loop, cmd.raw, session, sessions, console)
     if cmd.name == "permissions":
-        return _handle_permissions(loop, cmd.raw, session, console)
+        return _handle_permissions(loop, cmd.raw, session, sessions, console)
     if cmd.name == "todo":
         task = getattr(session, "task", None)
         if task is None:
@@ -704,16 +705,51 @@ def _handle_readonly(
     return REPLAction.CONTINUE, session
 
 
+def _permission_layers(gate: Any, session_rules: Any) -> list[tuple[str, int]]:
+    """The layer counts, named.  A gate that cannot answer shows none."""
+    counts = getattr(gate, "layer_counts", None)
+    if not callable(counts):
+        return []
+    return list(counts(tuple(session_rules)).items())
+
+
 def _handle_permissions(
-    loop: Any, raw: str, session: Any, console: ConsoleSink
+    loop: Any, raw: str, session: Any, sessions: Any, console: ConsoleSink
 ) -> tuple[REPLAction, Any]:
-    parts = raw.split()
+    try:
+        parts = shlex.split(raw)
+    except ValueError as exc:
+        console.error(f"[permissions] {exc}")
+        return REPLAction.CONTINUE, session
     dispatcher = getattr(loop, "dispatcher", None)
     approval = getattr(dispatcher, "approval", None) if dispatcher else None
     gate = getattr(dispatcher, "gate", None)
+    from ai_coding.security.permissions import Effect, Rule, rule_to_dict, rules_from_dicts
+
+    session_rules, session_errors = rules_from_dicts(
+        getattr(session, "permissions", ()) or ()
+    )
     if len(parts) == 1:
         name = type(approval).__name__ if approval else "(none)"
         lines = [f"[permissions] current approval: {name}"]
+        layers = _permission_layers(gate, session_rules)
+        if layers:
+            lines.append("[permissions] rules by layer:")
+            lines.extend(f"  {label:<9} {count}" for label, count in layers)
+        if session_rules:
+            lines.append("[permissions] session rules:")
+            lines.extend(
+                f"  {rule.effect.value:<5} {rule.action} {rule.resource}"
+                + (f"  ({rule.reason})" if rule.reason else "")
+                for rule in session_rules
+            )
+        errors = [
+            *tuple(getattr(getattr(gate, "_rules", None), "errors", ()) or ()),
+            *session_errors,
+        ]
+        if errors:
+            lines.append("[permissions] rules that could not be read:")
+            lines.extend(f"  {error}" for error in errors)
         # G4b: a standing grant outlives the process, so it has to be visible --
         # an authorisation the operator cannot inspect is one they cannot
         # consent to.  The path is shown so it can be deleted by hand too.
@@ -726,7 +762,10 @@ def _handle_permissions(
         store = getattr(gate, "_store", None)
         if store is not None:
             lines.append(f"[permissions] stored at: {store.path}")
-        lines.append("[permissions] /permissions clear removes them")
+        lines.append(
+            "[permissions] deny|allow <action> <resource> [reason] writes this "
+            "session; reset clears it; clear forgets remembered grants"
+        )
         console.info("\n".join(lines))
         return REPLAction.CONTINUE, session
     target = parts[1]
@@ -734,6 +773,37 @@ def _handle_permissions(
         if gate is not None:
             gate.revoke_all()
         console.info("[permissions] cleared remembered grants for this workspace")
+        return REPLAction.CONTINUE, session
+    if target == "reset":
+        session.permissions = []
+        session.permission_errors = ()
+        _save_session(sessions, session)
+        console.info("[permissions] cleared this session's own rules")
+        return REPLAction.CONTINUE, session
+    if target in ("deny", "allow"):
+        if len(parts) < 4:
+            console.error(
+                "[permissions] usage: /permissions deny|allow <action> <resource> [reason]"
+            )
+            return REPLAction.CONTINUE, session
+        action = parts[2].strip().lower()
+        resource = parts[3].strip()
+        reason = " ".join(parts[4:]).strip()
+        if not action or not resource:
+            console.error("[permissions] action and resource must not be empty")
+            return REPLAction.CONTINUE, session
+        rule = Rule(
+            action=action,
+            resource=resource,
+            effect=Effect(target),
+            reason=reason,
+        )
+        rows = list(getattr(session, "permissions", ()) or ())
+        rows.append(rule_to_dict(rule))
+        session.permissions = rows
+        session.permission_errors = ()
+        _save_session(sessions, session)
+        console.info(f"[permissions] this session: {target} {action} {resource}")
         return REPLAction.CONTINUE, session
     from ai_coding.security.approval import AutoApproveCallback, CLIApprovalCallback
     if target == "auto":
@@ -745,7 +815,10 @@ def _handle_permissions(
             dispatcher.approval = CLIApprovalCallback()
         console.info("[permissions] switched to confirm-all")
     else:
-        console.error(f"[permissions] unknown policy '{target}'. Available: auto, confirm, clear")
+        console.error(
+            f"[permissions] unknown policy '{target}'. "
+            "Available: auto, confirm, clear, deny, allow, reset"
+        )
     return REPLAction.CONTINUE, session
 
 

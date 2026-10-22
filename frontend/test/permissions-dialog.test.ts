@@ -12,6 +12,8 @@ import {
   grantLine,
   toggledPolicy,
   toggleCommand,
+  ruleLine,
+  RESET_SESSION_COMMAND,
 } from "../src/util/permissions-dialog"
 
 describe("policyLabel", () => {
@@ -28,6 +30,26 @@ describe("grantLine", () => {
 
   test("an empty grant list says so instead of rendering nothing", () => {
     expect(grantLine("")).toBe("(none)")
+  })
+})
+
+describe("the session layer", () => {
+  test("a rule reads as the decision it makes", () => {
+    expect(ruleLine({ action: "edit", resource: "*.env", effect: "deny" })).toBe(
+      "deny edit *.env",
+    )
+    expect(
+      ruleLine({
+        action: "bash",
+        resource: "rm -rf *",
+        effect: "ask",
+        reason: "recursive",
+      }),
+    ).toBe("ask bash rm -rf * · recursive")
+  })
+
+  test("reset is the backend command, not a second write path", () => {
+    expect(RESET_SESSION_COMMAND).toBe("/permissions reset")
   })
 })
 

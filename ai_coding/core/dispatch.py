@@ -61,6 +61,7 @@ from ai_coding.security.permission_gate import (
     PermissionDecision,
     PermissionGate,
 )
+from ai_coding.security.permissions import posture_of
 from ai_coding.tools.base import BaseTool, ToolContext
 from ai_coding.tools.registry import ToolRegistry
 
@@ -196,7 +197,8 @@ class ToolDispatcher:
             return []
 
         prepared = [
-            self._prepare(tool_call_from_ref(ref), iteration=iteration) for ref in calls
+            self._prepare(tool_call_from_ref(ref), ctx=ctx, iteration=iteration)
+            for ref in calls
         ]
 
         outcomes: list[DispatchOutcome] = []
@@ -232,13 +234,27 @@ class ToolDispatcher:
 
     # ---- preparation ------------------------------------------------------
 
-    def _prepare(self, call: ToolCall, *, iteration: int = 0) -> _Prepared:
+    def _prepare(
+        self, call: ToolCall, *, ctx: ToolContext, iteration: int = 0
+    ) -> _Prepared:
         """Resolve the tool and its permission verdict exactly once per call."""
         tool = self.registry.get(call.name)
-        decision = (
-            None if tool is None else self.gate.check(_authorized_name(tool, call), call.params)
-        )
+        decision = None if tool is None else self._check(tool, call, ctx)
         return _Prepared(call=call, tool=tool, decision=decision, iteration=iteration)
+
+    def _check(self, tool: BaseTool | None, call: ToolCall, ctx: ToolContext) -> Any:
+        """Ask the gate with the two facts only this request knows.
+
+        The session layer and the posture travel in the context: both are
+        per-call facts (a rule added between turns, a mode flipped mid-turn),
+        so neither belongs in the process-wide gate.
+        """
+        return self.gate.check(
+            _authorized_name(tool, call),
+            call.params,
+            session_rules=ctx.permissions,
+            posture=posture_of(ctx.mode, ctx.readonly),
+        )
 
     def _concurrent_groups(self, prepared: list[_Prepared]) -> list[list[_Prepared]]:
         """Split the batch into concurrent runs and single-call barriers.
@@ -339,7 +355,7 @@ class ToolDispatcher:
             rewritten_from = dict(call.params)
             call = replace(call, params=dict(guard_decision.params or {}))
             item = replace(item, call=call, tool=item.tool)
-            recheck = self.gate.check(_authorized_name(item.tool, call), call.params)
+            recheck = self._check(item.tool, call, ctx)
             if _verdict(recheck) is PermissionDecision.DENY:
                 # A rewrite must never be a way around the static gate.
                 return self._denied(call, _reason(recheck), rewritten=True), True, False
@@ -364,7 +380,7 @@ class ToolDispatcher:
                 rewritten_from = dict(call.params)
             call = replace(call, params=dict(hook_decision.params or {}))
             item = replace(item, call=call, tool=item.tool)
-            recheck = self.gate.check(_authorized_name(item.tool, call), call.params)
+            recheck = self._check(item.tool, call, ctx)
             if _verdict(recheck) is PermissionDecision.DENY:
                 return self._denied(call, _reason(recheck), rewritten=True), True, False
 

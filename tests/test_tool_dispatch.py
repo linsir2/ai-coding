@@ -339,7 +339,7 @@ async def test_outcomes_match_input_order():
         registry.register(tool)
 
     class _Gate(PermissionGate):
-        def check(self, tool_name, params):
+        def check(self, tool_name, params, **kwargs):
             from ai_coding.security.permission_gate import Decision, PermissionDecision
 
             return Decision(PermissionDecision.ALLOW, "")
@@ -406,7 +406,7 @@ async def test_safe_calls_batch_on_both_sides_of_a_barrier():
         registry.register(tool)
 
     class _AllowAll(PermissionGate):
-        def check(self, tool_name, params):
+        def check(self, tool_name, params, **kwargs):
             return Decision(PermissionDecision.ALLOW, "")
 
     outcomes = await ToolDispatcher(registry, _AllowAll()).dispatch_batch(
@@ -462,7 +462,7 @@ async def test_parallelism_bounded_by_max_parallel():
         registry.register(tool)
 
     class _AllowAll(PermissionGate):
-        def check(self, tool_name, params):
+        def check(self, tool_name, params, **kwargs):
             from ai_coding.security.permission_gate import Decision, PermissionDecision
 
             return Decision(PermissionDecision.ALLOW, "")

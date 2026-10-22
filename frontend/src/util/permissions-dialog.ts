@@ -10,10 +10,36 @@
 
 export type ApprovalPolicy = "auto" | "confirm"
 
+export type RuleEffect = "allow" | "ask" | "deny"
+
+export interface PermissionRule {
+  action: string
+  resource: string
+  effect: RuleEffect
+  reason?: string
+  postures?: string[]
+}
+
+export interface PermissionsRules {
+  layers: Record<string, number>
+  session: PermissionRule[]
+  errors: string[]
+}
+
 export interface PermissionsState {
   policy: ApprovalPolicy
   grants: string[]
   storePath: string
+  rules?: PermissionsRules
+}
+
+/** What reset sends: the session layer's own command, not a second store. */
+export const RESET_SESSION_COMMAND = "/permissions reset"
+
+/** One rule as the line the operator reads: effect, action, resource. */
+export function ruleLine(rule: PermissionRule): string {
+  const reason = rule.reason ? ` · ${rule.reason}` : ""
+  return `${rule.effect} ${rule.action} ${rule.resource}${reason}`
 }
 
 export function policyLabel(policy: ApprovalPolicy): string {

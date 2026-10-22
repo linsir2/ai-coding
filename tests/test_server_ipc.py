@@ -794,6 +794,33 @@ async def test_permissions_state_reports_policy_grants_and_store(ipc):
 
 
 @pytest.mark.asyncio
+async def test_permissions_state_shows_the_session_layer_the_dialog_can_reset(ipc):
+    """M1a: the dialog reads the session's own rules, and reset is a command."""
+    _world, _service, client = ipc
+    client.request("initialize")
+
+    assert client.request("permissions.state")["rules"] == {
+        "layers": {},
+        "session": [],
+        "errors": [],
+    }
+
+    client.request("session.command", {"text": "/permissions deny read *.env"})
+    assert await client.wait_for(client.turn_finished.is_set)
+    client.turn_finished.clear()
+
+    rules = client.request("permissions.state")["rules"]
+    assert rules["session"] == [
+        {"action": "read", "resource": "*.env", "effect": "deny"}
+    ]
+
+    client.request("session.command", {"text": "/permissions reset"})
+    assert await client.wait_for(client.turn_finished.is_set)
+
+    assert client.request("permissions.state")["rules"]["session"] == []
+
+
+@pytest.mark.asyncio
 async def test_session_command_new_session_switches_the_live_session(ipc):
     """/clear ends with the REPL's NEW_SESSION action: the live session
     follows the dispatcher, and the terminal event names the new one so the

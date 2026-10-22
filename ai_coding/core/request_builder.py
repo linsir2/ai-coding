@@ -15,12 +15,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
 from ai_coding.tools.base import ToolContext, TurnConclusion
+
+if TYPE_CHECKING:
+    from ai_coding.security.permissions import Rule
 
 __all__ = ["TailBlock", "build_tail", "content_of", "tool_context", "volatile_block"]
 
@@ -90,6 +93,7 @@ def tool_context(
     conclusion: TurnConclusion | None = None,
     jobs: Any = None,
     extra_workspace_roots: Sequence[str] = (),
+    permissions: Sequence[Rule] = (),
 ) -> ToolContext:
     """The per-invocation context a tool receives (the dispatcher stamps call ids).
 
@@ -113,6 +117,10 @@ def tool_context(
         readonly=session.readonly,
         # R03: ... and so does the posture fact (present_plan's gate).
         mode=session.mode,
+        # M1a: the session's own layer rides this request, so a rule added
+        # between turns is in force on the next one -- and never in the
+        # process-wide gate another session is using.
+        permissions=tuple(permissions),
         emit=emit,
         turn=int(turn),
         note_checkpoint=note_checkpoint,

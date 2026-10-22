@@ -636,6 +636,19 @@ class PermissionGate:
             self._rules.policy,
         )
 
+    def layer_counts(self, session_rules: Ruleset = ()) -> dict[str, int]:
+        """How many rules each layer holds, lowest priority first.
+
+        The read view wants the shape of the policy, not every rule: a user
+        with three files would otherwise scroll past the answer.  The names
+        are the layer names the docs use, in the same order as ``_layers``.
+        """
+        names = ("base", "standing", "user", "project", "session", "policy")
+        return {
+            name: len(layer)
+            for name, layer in zip(names, self._layers(tuple(session_rules)), strict=True)
+        }
+
     def _skill_decision(self, params: Mapping[str, Any]) -> Decision | None:
         """The per-skill policy for the model's skill tool, or ``None``.
 

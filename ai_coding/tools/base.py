@@ -14,10 +14,13 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ai_coding.domain.message import ChatMessage, ToolResult
 from ai_coding.domain.task import TaskState
+
+if TYPE_CHECKING:
+    from ai_coding.security.permissions import Rule
 
 
 def _noop_emit(_event: Any) -> None:
@@ -88,6 +91,11 @@ class ToolContext:
     #: session.  Not the gate's input: enforcement still reads only
     #: ``readonly``.
     mode: str = "normal"
+    #: M1a: this session's own rule layer (L4).  It rides the context rather
+    #: than the process-wide gate so it is current on every request and
+    #: cannot decide another session's calls.  ``dispatch`` passes it to the
+    #: gate; an empty tuple means "no session rules".
+    permissions: tuple[Rule, ...] = ()
     emit: Callable[[Any], None] = _noop_emit
     # R4a: the id of the call this execution belongs to.  The dispatcher stamps
     # one context per call (the batch shares everything else), which is what lets

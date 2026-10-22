@@ -933,10 +933,26 @@ def make_handlers(
         approval = getattr(dispatcher, "approval", None)
         gate = getattr(dispatcher, "gate", None)
         store = getattr(gate, "_store", None)
+        from ai_coding.security.permissions import rule_to_dict, rules_from_dicts
+
+        rules, session_errors = rules_from_dicts(
+            getattr(state.session, "permissions", ()) or ()
+        )
+        counts = getattr(gate, "layer_counts", None)
+        layers = counts(rules) if callable(counts) else {}
+        errors = [
+            *tuple(getattr(getattr(gate, "_rules", None), "errors", ()) or ()),
+            *session_errors,
+        ]
         return {
             "policy": "auto" if isinstance(approval, AutoApproveCallback) else "confirm",
             "grants": list(getattr(gate, "grants", ()) or ()),
             "storePath": str(getattr(store, "path", "") or ""),
+            "rules": {
+                "layers": layers,
+                "session": [rule_to_dict(rule) for rule in rules],
+                "errors": errors,
+            },
         }
 
     def model_set(params: dict[str, Any]) -> dict[str, Any]:

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import enum
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,6 +48,8 @@ __all__ = [
     "load_policy",
     "load_rules",
     "posture_of",
+    "rule_to_dict",
+    "rules_from_dicts",
     "rule_matches",
     "subjects_of",
     "wholly_disabled",
@@ -366,6 +368,40 @@ def _rule_from(entry: Any, *, deny_only: bool) -> tuple[Rule | None, str]:
         reason=str(entry.get("reason") or "").strip(),
         postures=names,
     ), ""
+
+
+def rule_to_dict(rule: Rule) -> dict[str, Any]:
+    """The JSON form a session stores (the same keys a YAML file uses)."""
+    data: dict[str, Any] = {
+        "action": rule.action,
+        "resource": rule.resource,
+        "effect": rule.effect.value,
+    }
+    if rule.reason:
+        data["reason"] = rule.reason
+    if rule.postures:
+        data["postures"] = list(rule.postures)
+    return data
+
+
+def rules_from_dicts(rows: Iterable[Any]) -> tuple[Ruleset, tuple[str, ...]]:
+    """Read the session's own layer, skipping (and naming) what is broken.
+
+    A session file is written by this program, but it is also a JSON file a
+    human can edit.  One bad row must not take the session down, and it must
+    not disappear silently either -- the caller shows these reasons in
+    ``/permissions``.
+    """
+    rules: list[Rule] = []
+    errors: list[str] = []
+    for index, entry in enumerate(rows):
+        rule, error = _rule_from(entry, deny_only=False)
+        if error:
+            errors.append(f"session rule {index + 1}: {error}")
+            continue
+        assert rule is not None
+        rules.append(rule)
+    return tuple(rules), tuple(errors)
 
 
 def load_rules(path: Path) -> tuple[Ruleset, list[str]]:

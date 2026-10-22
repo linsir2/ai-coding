@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -336,6 +336,16 @@ class SessionData:
     #: crash drops a still-queued flip (the in-process limit dsh documents);
     #: shape ``{"mode": str | None, "readonly": bool | None}``, later wins.
     pending_posture: dict[str, Any] | None = None
+    #: M1a: this session's own permission rules (the L4 layer), in the same
+    #: JSON form the rule files use.  It stays on the session -- rather than
+    #: in the process-wide gate -- so one session's rule cannot decide
+    #: another's calls, and so it is current on the very next request.
+    #: Written only when non-empty, like every other optional key.
+    permissions: list[dict[str, Any]] = field(default_factory=list)
+    #: Reasons a stored session rule could not be read.  Runtime only: the
+    #: raw rows stay on the session, and the consumer reports these in
+    #: ``/permissions`` rather than dropping the evidence.
+    permission_errors: tuple[str, ...] = ()
     #: 13 §2.4 (F): the workspace's git branch, refreshed once per turn by the
     #: loop (``infra.vcs.git_branch`` never raises).  Runtime only — the
     #: whitelist ``to_dict`` deliberately leaves it out of the file.
@@ -569,6 +579,10 @@ class SessionData:
         # Same rule again (18 §10.1): a writable session gains no key.
         if self.readonly:
             data["readonly"] = True
+        # M1a: same rule again -- a session with no rules of its own gains no
+        # key, so every file written before this layer existed reads the same.
+        if self.permissions:
+            data["permissions"] = [dict(row) for row in self.permissions]
         return data
 
     @classmethod
@@ -615,6 +629,9 @@ class SessionData:
         raw_open_turn = data.get("openTurn")
         raw_undo = data.get("undoState")
         raw_intervention = data.get("interventionState")
+        raw_permissions = data.get("permissions")
+        permission_rows = raw_permissions if isinstance(raw_permissions, list) else []
+        permissions = [dict(row) for row in permission_rows if isinstance(row, Mapping)]
         raw_mode = str(data.get("mode") or "normal")
         return cls(
             session_id=data.get("sessionId", ""),
@@ -641,6 +658,7 @@ class SessionData:
             mode=raw_mode if raw_mode in KNOWN_MODES else "normal",
             # Truthy garbage coerces to the *restrictive* value: fail-closed.
             readonly=bool(data.get("readonly")),
+            permissions=permissions,
         )
 
 

@@ -27,7 +27,7 @@ class _CountingGate(PermissionGate):
         super().__init__()
         self.calls: list[tuple[str, dict]] = []
 
-    def check(self, tool_name, params):  # type: ignore[no-untyped-def]
+    def check(self, tool_name, params, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append((tool_name, dict(params)))
         if "rm -rf /" in str(params.get("command", "")):
             return Decision(PermissionDecision.DENY, "bash command blocked")
