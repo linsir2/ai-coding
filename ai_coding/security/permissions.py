@@ -30,15 +30,21 @@ from typing import Any
 
 import yaml
 
+from ai_coding.paths import config_home
 from ai_coding.shell_parse import command_shape, command_views, parses_cleanly
 
 __all__ = [
+    "NO_FILE_RULES",
+    "POLICY_FILE",
     "POSTURES",
+    "PREFERENCE_FILE",
     "Effect",
+    "FileRules",
     "Rule",
     "Ruleset",
     "evaluate",
     "glob_match",
+    "load_file_rules",
     "load_policy",
     "load_rules",
     "posture_of",
@@ -82,6 +88,32 @@ class Rule:
 
 #: One layer's rules, in the order they were written.
 Ruleset = tuple[Rule, ...]
+
+
+@dataclass(frozen=True)
+class FileRules:
+    """The rules that came from files, grouped by the file they came from.
+
+    The grouping is not decoration: the operator's listing shows the rules
+    by where they came from, and "the project overrides the user" only
+    means something if the two are told apart.
+    """
+
+    #: The user's own file (``~/.config/ai-coding/permissions.yaml``).
+    user: Ruleset = ()
+    #: The project's file (``<workspace>/permissions.yaml``), which wins over
+    #: the user's.
+    project: Ruleset = ()
+    #: The global policy file (``~/.config/ai-coding/policies.yaml``): deny
+    #: only, and the last word.
+    policy: Ruleset = ()
+    #: Why a file or a rule was not read.  A rule the operator wrote must not
+    #: fail silently.
+    errors: tuple[str, ...] = ()
+
+
+#: No rules at all -- what a gate that reads no files starts from.
+NO_FILE_RULES = FileRules()
 
 
 # ---- matching ---------------------------------------------------------------
@@ -304,6 +336,11 @@ def _rule_from(entry: Any, *, deny_only: bool) -> tuple[Rule | None, str]:
         return None, "'action' is required"
     if not resource:
         return None, "'resource' is required"
+    # The action names a tool, and the gate lowercases every tool name
+    # before it looks for a rule.  Lowercasing the rule's action too keeps
+    # one namespace: an operator who writes "Edit" gets a rule that fires,
+    # not one that silently never matches.
+    action = action.lower()
     try:
         effect = Effect(effect_text)
     except ValueError:
@@ -347,3 +384,34 @@ def load_policy(path: Path) -> tuple[Ruleset, list[str]]:
     on purpose -- a project must not be able to talk its way out of it.
     """
     return _load(Path(path), deny_only=True)
+
+
+#: The file names, in one place: the preference class and the policy class.
+PREFERENCE_FILE = "permissions.yaml"
+POLICY_FILE = "policies.yaml"
+
+
+def load_file_rules(workspace: str | Path | None = None) -> FileRules:
+    """Read the three rule files: the user's, the project's, and the policy.
+
+    The user's file and the policy file live in the user's config directory
+    -- they follow the machine.  The project's file lives in the workspace,
+    so it can be committed with the project and travel with it.
+
+    A missing file is not an error: most sessions have none.  A broken one
+    is reported, never swallowed.
+    """
+    home = config_home()
+    user, user_errors = load_rules(home / PREFERENCE_FILE)
+    project: Ruleset = ()
+    project_errors: list[str] = []
+    if workspace:
+        root = Path(workspace).expanduser().resolve()
+        project, project_errors = load_rules(root / PREFERENCE_FILE)
+    policy, policy_errors = load_policy(home / POLICY_FILE)
+    return FileRules(
+        user=user,
+        project=project,
+        policy=policy,
+        errors=(*user_errors, *project_errors, *policy_errors),
+    )

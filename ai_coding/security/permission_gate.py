@@ -20,6 +20,16 @@ from typing import Any
 
 from ai_coding.security.bash_redlines import bash_red_line
 from ai_coding.security.grants import GrantStore
+from ai_coding.security.permissions import (
+    NO_FILE_RULES,
+    Effect,
+    FileRules,
+    Rule,
+    Ruleset,
+    evaluate,
+    load_file_rules,
+    subjects_of,
+)
 from ai_coding.shell_parse import command_words
 
 
@@ -365,6 +375,7 @@ class PermissionGate:
         skill_permissions: Mapping[str, str] | None = None,
         skill_resolver: Callable[[str], str | None] | None = None,
         workspace: str | None = None,
+        rules: FileRules = NO_FILE_RULES,
     ) -> None:
         #: Calls the operator answered "Always" for, as ``grant_key`` strings.
         #: Seeded from the store at startup and extended by ``grant``.
@@ -399,6 +410,10 @@ class PermissionGate:
             (skill_resolver(key) or key) if skill_resolver is not None else key: str(value)
             for key, value in (skill_permissions or {}).items()
         }
+        # M1a: the rules read from files -- the user's, the project's, and
+        # the global policy.  Injected rather than read here, so the gate
+        # stays constructible without a filesystem.
+        self._rules = rules
         self._allow_tools = {
             "read",
             "glob",
@@ -473,103 +488,178 @@ class PermissionGate:
         }
         self._warn_tools = {"write", "edit", "bash"}
 
-    def check(self, tool_name: str, params: dict[str, Any]) -> Decision:
-        """Return a ``Decision`` for the given tool invocation."""
+    def check(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        *,
+        session_rules: Ruleset = (),
+        posture: str = "build",
+    ) -> Decision:
+        """Return a ``Decision`` for the given tool invocation.
+
+        The shape of the answer:
+
+        1. **the hard tier** -- what no rule may reopen: a bash red line, a
+           tool the config denies, the skill policy;
+        2. **the rules** -- the base layer, the config's standing
+           permissions, the operator's files, the session's own layer and
+           the global policy, in that order, the last match winning;
+        3. **a saved grant**, which answers a question but never reopens a
+           refusal;
+        4. **what the rules said**: an allow (with the workspace edge still
+           asked), a question, or the unknown-tool fallback.
+        """
         name = tool_name.lower()
 
-        # 1. Bash hard-deny patterns (checked first, most specific).  The matcher
-        # normalizes and reads words, so a respelled command cannot walk past a
-        # red line, and a credential path is refused outright (bash is never
-        # grantable, so a WARN there is only a question).
+        # 1. The hard tier.  Three refusals that stand above the rules: a
+        #    red line, a config denial, and the skill policy.  The bash red
+        #    line is checked first because it is the most specific, and
+        #    because a red line a model can spell around is worse than none.
         if name == "bash":
-            command = str(params.get("command", ""))
-            reason = bash_denied(command)
+            reason = bash_denied(str(params.get("command", "")))
             if reason:
                 return Decision(
                     PermissionDecision.DENY,
                     f"bash command blocked: {reason}",
                 )
-            return Decision(
-                PermissionDecision.WARN,
-                "bash command requires confirmation",
-            )
-
-        # 1.5. M2: a tool the config denies outright.  Before the grants, for the
-        # same reason the bash list is first: a standing "always" may never
-        # reopen what the operator's own config refuses.
         if tool_name in self._denied_tools:
             return Decision(
                 PermissionDecision.DENY,
                 f"tool '{tool_name}' is denied by configuration",
             )
+        if name == "skill" and str(params.get("action", "")).lower() == "read":
+            decision = self._skill_decision(params)
+            if decision is not None:
+                return decision
 
-        # 2. A resource the operator already approved.  After the deny rules, so
-        # a standing grant can never reopen something that is refused outright:
-        # doing this first would make every future path-based deny bypassable by
-        # an "always" the user gave before it existed.
+        # 2. The rules.  One query per resource the call touches, combined:
+        #    a refusal on any of them refuses the call.
+        layers = self._layers(tuple(session_rules))
+        winners = [
+            evaluate(name, subject, *layers, posture=posture)
+            for subject in subjects_of(name, params)
+        ]
+        denial = next((w for w in winners if w is not None and w.effect is Effect.DENY), None)
+        if denial is not None:
+            return Decision(
+                PermissionDecision.DENY,
+                denial.reason or f"denied by rule: {denial.action} {denial.resource}",
+            )
+
+        # 3. A resource the operator already approved.  After the rules'
+        #    refusals, so a standing grant can never reopen something that is
+        #    refused outright, and before the rules' allows, so a grant
+        #    keeps meaning what it means today: the operator's own answer
+        #    for that path, with no second question about the workspace.
         key = grant_key(name, params)
         if key is not None and key in self._grants:
             return Decision(PermissionDecision.ALLOW, "")
 
-        # 2.5. E-5: a per-skill policy for the model's skill tool.  Only the
-        # model-initiated read is judged: a human's @mention is its own
-        # authorization, and ``list`` names skills but reads none.
-        if name == "skill" and str(params.get("action", "")).lower() == "read":
-            target = str(params.get("name", "")).strip()
-            canonical = self._skill_resolver(target) if self._skill_resolver is not None else None
-            policy = (
-                self._skill_permissions.get(canonical or "")
-                or self._skill_permissions.get(target)
-                or "allow"
+        # 4. What the rules said.
+        question = next((w for w in winners if w is not None and w.effect is Effect.ASK), None)
+        if question is not None:
+            return Decision(
+                PermissionDecision.WARN,
+                question.reason or f"tool '{tool_name}' requires confirmation",
             )
-            if policy == "deny":
-                return Decision(
-                    PermissionDecision.DENY,
-                    f"skill '{target}' is denied by configuration",
-                )
-            if policy == "ask":
-                return Decision(
-                    PermissionDecision.WARN,
-                    f"skill '{target}' requires confirmation",
-                )
-
-        # 3. Known allow-list
-        if name in self._allow_tools:
+        if winners and all(w is not None and w.effect is Effect.ALLOW for w in winners):
             # B: a read of a path outside every root this session knows is a
             # question, not an answer.  opencode treats an external directory
-            # the same way (``06-opencode长任务机制.md:20``), and the reason is
-            # measurable: we used to refuse outright, the model reached for
-            # ``bash`` instead, and that path was unguarded -- so the refusal
-            # bought a speed bump and the operator still said yes.
+            # the same way, and the reason is measurable: we used to refuse
+            # outright, the model reached for ``bash`` instead, and that path
+            # was unguarded -- so the refusal bought a speed bump and the
+            # operator still said yes.
             outside = self._outside_resource_reason(name, params)
             if outside is not None:
                 return Decision(PermissionDecision.WARN, outside)
             return Decision(PermissionDecision.ALLOW, "")
-
-        # 3.5. M2: a tool the config explicitly allows — no prompt, like the
-        # trusted-server rule but for one tool instead of the whole server.
-        if tool_name in self._allowed_tools:
-            return Decision(PermissionDecision.ALLOW, "")
-
-        # 4. Known warn-list
-        if name in self._warn_tools:
-            return Decision(
-                PermissionDecision.WARN,
-                f"tool '{tool_name}' requires confirmation",
-            )
-
-        # 5. A tool from a server the user declared trusted (R7d).  Checked before
-        # the fail-closed rule, and matched on the *server* segment only, so a
-        # local tool cannot be trusted by naming itself "bash__something".
-        server, sep, _remote = tool_name.partition("__")
-        if sep and server in self._trusted_servers:
-            return Decision(PermissionDecision.ALLOW, "")
-
-        # 6. Unknown tools → WARN (fail-closed / conservative)
         return Decision(
             PermissionDecision.WARN,
             f"unknown tool '{tool_name}' requires confirmation",
         )
+
+    # ---- the layers ----------------------------------------------------------
+
+    def _base_rules(self) -> Ruleset:
+        """The base layer, derived from the two lists that are the truth today.
+
+        Derived, never copied.  A hand-copied table is how ``finish_research``
+        went missing once (N1): the tool was added to the allow list and
+        nobody remembered the rule table, so a tool that had been allowed
+        for months started asking.
+        """
+        return tuple(
+            [
+                Rule(action=name, resource="*", effect=Effect.ALLOW)
+                for name in sorted(self._allow_tools)
+            ]
+            + [
+                Rule(action=name, resource="*", effect=Effect.ASK)
+                for name in sorted(self._warn_tools)
+            ]
+        )
+
+    def _standing_rules(self) -> Ruleset:
+        """The permissions the config grants for good.
+
+        A tool the config allows, and every tool of a server the operator
+        declared trusted.  Both are *standing* permissions rather than
+        refusals, so they sit above the base layer -- where a rule can
+        still narrow them, which is the point of having rules at all.
+        """
+        return tuple(
+            [
+                Rule(action=name.lower(), resource="*", effect=Effect.ALLOW)
+                for name in sorted(self._allowed_tools)
+            ]
+            + [
+                Rule(action=f"{server.lower()}__*", resource="*", effect=Effect.ALLOW)
+                for server in sorted(self._trusted_servers)
+            ]
+        )
+
+    def _layers(self, session_rules: Ruleset) -> tuple[Ruleset, ...]:
+        """The layers, lowest priority first; the last one has the last word.
+
+        The base, then what the config grants, then the operator's files
+        (the project over the user), then this session's own layer, and
+        last the global policy -- deny only, and the one thing nothing may
+        talk its way out of.
+        """
+        return (
+            self._base_rules(),
+            self._standing_rules(),
+            self._rules.user,
+            self._rules.project,
+            tuple(session_rules),
+            self._rules.policy,
+        )
+
+    def _skill_decision(self, params: Mapping[str, Any]) -> Decision | None:
+        """The per-skill policy for the model's skill tool, or ``None``.
+
+        Only the model-initiated read is judged: a human's @mention is its
+        own authorization, and ``list`` names skills but reads none.
+        """
+        target = str(params.get("name", "")).strip()
+        canonical = self._skill_resolver(target) if self._skill_resolver is not None else None
+        policy = (
+            self._skill_permissions.get(canonical or "")
+            or self._skill_permissions.get(target)
+            or "allow"
+        )
+        if policy == "deny":
+            return Decision(
+                PermissionDecision.DENY,
+                f"skill '{target}' is denied by configuration",
+            )
+        if policy == "ask":
+            return Decision(
+                PermissionDecision.WARN,
+                f"skill '{target}' requires confirmation",
+            )
+        return None
 
     # ---- outside-workspace resources (B) -----------------------------------
 
@@ -737,6 +827,11 @@ class PermissionGate:
             or {},
             skill_resolver=skill_resolver,
             workspace=workspace,
+            # Without a workspace there is no project to read, and reading
+            # the real user's files here would make every test that builds
+            # a gate depend on the machine it runs on.  Production always
+            # passes a workspace; a gate without one is session-only.
+            rules=load_file_rules(workspace) if workspace is not None else NO_FILE_RULES,
         )
 
 

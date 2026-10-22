@@ -335,6 +335,26 @@ class TestLoadRules:
         assert rules == ()
         assert errors
 
+    def test_an_action_is_lowercased_but_a_resource_is_not(self, tmp_path):
+        # The gate lowercases every tool name before it looks for a rule, so
+        # a rule's action is lowercased too -- otherwise "Edit" would be a
+        # rule that never fires.  A path is not lowercased: on Linux it is
+        # not the same file.
+        path = _write(
+            tmp_path,
+            "permissions.yaml",
+            """
+            rules:
+              - action: Edit
+                resource: "src/App.PY"
+                effect: deny
+            """,
+        )
+        rules, errors = load_rules(path)
+        assert errors == []
+        assert rules[0].action == "edit"
+        assert rules[0].resource == "src/App.PY"
+
 
 class TestLoadPolicy:
     def test_a_policy_file_is_read(self, tmp_path):
