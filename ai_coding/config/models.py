@@ -83,6 +83,13 @@ class AIConfig(BaseModel):
     # the default; anything else falls back to build when the catalog is
     # loaded.  An existing session keeps the agent it was switched to.
     default_agent: str = "build"
+    # M2 T6: the strict tier of the plan posture.  Off (the default) the
+    # plan agent refuses the tools that change the world -- exactly what the
+    # read-only overlay refused.  On, it also refuses the tools that change
+    # the conversation: asking the human, writing memory, starting a goal.
+    # It never refuses the two plan exits; a plan mode with no way to submit
+    # a plan is a plan mode that never ends.
+    plan_strict_readonly: bool = False
     max_concurrent_tools: int = 4
     # R7c: how long a human gets to answer an approval prompt.  0 means "only the
     # turn clock bounds it" — a slow human is not a refusal, but a turn with a

@@ -23,6 +23,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ai_coding.security.permissions import Rule
 
 __all__ = [
     "PLAN_AGENT_ID",
@@ -160,6 +164,28 @@ class AgentCatalog:
         if spec is None or spec.kind != PRIMARY:
             return DEFAULT_AGENT_ID
         return spec.id
+
+    def rules(self, agent_id: str) -> tuple[Rule, ...]:
+        """The parsed rule layer of one agent.
+
+        The catalog holds **raw rows** (``domain`` may not import
+        ``security``), so the parse happens here -- and it is the same
+        reader the session layer uses, so an agent file and a session file
+        are read by one definition of what a rule is.
+
+        An unknown id has no layer: a session whose agent nobody can
+        resolve runs with build's rules, and inventing a layer for a typo
+        would change behaviour for a session that never opted in.
+        """
+        from ai_coding.security.permissions import rules_from_dicts
+
+        spec = self.specs.get(agent_id)
+        if spec is None:
+            return ()
+        rules, _errors = rules_from_dicts(
+            spec.permissions, label=f"agent {spec.id} rule"
+        )
+        return rules
 
 
 __all__ += ["DEFAULT_AGENT_ID", "PRIMARY", "SUBAGENT"]

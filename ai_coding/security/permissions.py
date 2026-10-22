@@ -150,10 +150,39 @@ def rule_matches(
 
     Both the action and the resource must match, and the rule must be
     active in this posture.
+
+    The action is matched through the **alias table**: a rule names an
+    action, and some actions are more than one tool -- ``edit`` is write
+    and edit, ``shell`` is bash.  Without it a rule for ``deny edit *``
+    would refuse the edit tool and let write straight through, so the
+    rule would say one thing and do another.
     """
     if rule.postures and posture not in rule.postures:
         return False
-    return glob_match(action, rule.action) and glob_match(resource, rule.resource)
+    if not glob_match(resource, rule.resource):
+        return False
+    return any(glob_match(action, alias) for alias in actions_for(rule.action))
+
+
+#: The actions that are more than one tool (M2 T6).  The names are the
+#: **lower-case** tool names, because the gate lower-cases the tool name
+#: before it matches (``PermissionGate.check``): a rule written
+#: "subAgent" would never fire against the tool it names.
+ACTION_ALIASES: Mapping[str, frozenset[str]] = {
+    "edit": frozenset({"write", "edit"}),
+    "shell": frozenset({"bash"}),
+    "question": frozenset({"ask_user"}),
+}
+
+
+def actions_for(action: str) -> frozenset[str]:
+    """The tool names an action stands for.
+
+    An action with no alias stands for itself.  The set is what a rule's
+    action is matched against, so a rule may name either the alias or the
+    tool directly.
+    """
+    return ACTION_ALIASES.get(action.lower(), frozenset({action.lower()}))
 
 
 # ---- layering ----------------------------------------------------------------
@@ -193,12 +222,17 @@ def wholly_disabled(action: str, *layers: Ruleset, posture: str = "build") -> bo
     removes the tool from the model's context; a scoped one does not), and it
     is the same predicate the execution query uses, so the catalogue and
     the verdict cannot drift apart.
+
+    The action is matched through the same alias table the execution query
+    uses (``actions_for``), so ``deny edit *`` removes **both** write and
+    edit from the catalogue -- the catalogue and the verdict would
+    otherwise disagree about what the rule covers.
     """
     winner: Rule | None = None
     for layer in layers:
         for rule in layer:
             if not rule.postures or posture in rule.postures:
-                if glob_match(action, rule.action):
+                if any(glob_match(action, alias) for alias in actions_for(rule.action)):
                     winner = rule
     return winner is not None and winner.resource == "*" and winner.effect is Effect.DENY
 

@@ -333,18 +333,21 @@ class ToolDispatcher:
         if item.tool is None:
             return self._unknown(call), True, False
 
-        # 18 §10.1: a read-only session refuses mutating calls structurally.
-        # The refusal sits before the permission gate on purpose: an approval
-        # must not be spent on a call the session refuses anyway, and the model
-        # sees the reason.
-        if ctx.readonly and item.tool.mutates_world:
-            return self._readonly_denied(call), True, False
-
         verdict = _verdict(item.decision)
         reason = _reason(item.decision)
 
         if verdict is PermissionDecision.DENY:
             return self._denied(call, reason), True, False
+
+        # 18 §10.1 / M2 T6: a read-only session refuses mutating calls
+        # structurally.  It sits *after* the gate on purpose now: the gate
+        # speaks first when it has something to say (the plan agent's rule
+        # names what was refused and why), and this is the fallback for a
+        # session whose posture is the human's own switch.  The refusal is
+        # still before the approval, so no approval is ever spent on a call
+        # the session refuses anyway.
+        if ctx.readonly and item.tool.mutates_world:
+            return self._readonly_denied(call), True, False
 
         # ---- A3/A5: guards, and a rewritten call must pass the gate again ----
         turn_view = view if view is not None else TurnView()

@@ -85,12 +85,18 @@ def _ref(call_id: str, name: str, arguments: str = "{}") -> ToolCallRef:
     return ToolCallRef(id=call_id, name=name, arguments=arguments)
 
 
-def _ctx(*, readonly: bool = False, workspace: str = "/tmp/ws") -> ToolContext:
+def _ctx(
+    *,
+    readonly: bool = False,
+    workspace: str = "/tmp/ws",
+    agent_rules: tuple = (),
+) -> ToolContext:
     return ToolContext(
         task=TaskState(goal="g"),
         workspace=workspace,
         session_id="sid",
         readonly=readonly,
+        agent_rules=agent_rules,
     )
 
 
@@ -229,3 +235,59 @@ def test_the_mutating_classes_stay_mutating():
         MCPCallTool,
     ):
         assert cls.mutates_world is True, cls.__name__
+
+
+# ---- M2 T6: the plan posture is a rule, and the overlay is the fallback ----
+#
+# Two paths refuse a mutating call, and they must not say different things:
+#
+#   * the **rule layer** -- the plan agent denies the tools that change the
+#     world, and its reason names the rule;
+#   * the **read-only overlay** -- what ``/readonly on`` sets, which is the
+#     human's own switch and keeps its own wording (G9's fix: the model
+#     reads "you are still read-only" from that text).
+#
+# The rule is judged **first**: it is the more specific answer, and it
+# carries the reason the operator wrote.
+
+
+@pytest.mark.asyncio
+async def test_the_plan_rule_refuses_before_the_overlay():
+    """A rule's refusal carries the rule's reason, not the overlay's text."""
+    from ai_coding.security.permissions import Effect, Rule
+
+    tool = _FakeTool("write")
+    rules = (Rule(action="edit", resource="*", effect=Effect.DENY),)
+    outcomes = await _dispatcher([tool]).dispatch_batch(
+        [_ref("c1", "write")], _ctx(readonly=True, agent_rules=rules)
+    )
+    result = outcomes[0].result
+    assert outcomes[0].denied is True
+    assert result.error == "denied"
+    assert "edit" in result.output
+
+
+@pytest.mark.asyncio
+async def test_the_overlay_still_answers_when_no_rule_says_otherwise():
+    """``/readonly on`` keeps its own wording -- G9's fix must not change."""
+    tool = _FakeTool("write")
+    outcomes = await _dispatcher([tool]).dispatch_batch(
+        [_ref("c1", "write")], _ctx(readonly=True)
+    )
+    result = outcomes[0].result
+    assert outcomes[0].denied is True
+    assert result.error == "readonly_denied"
+    assert "只读" in result.output
+
+
+@pytest.mark.asyncio
+async def test_the_readonly_error_code_and_text_do_not_move():
+    """The exact wording is a contract (G9): the model reads it."""
+    tool = _FakeTool("write")
+    outcomes = await _dispatcher([tool]).dispatch_batch(
+        [_ref("c1", "write")], _ctx(readonly=True)
+    )
+    output = outcomes[0].result.output
+    assert "只读" in output
+    assert "read/grep/glob" in output
+    assert "present_plan" in output

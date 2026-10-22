@@ -152,6 +152,32 @@ def test_methods_section_sits_before_the_plan_mode_segment():
     assert out.index("<methods>") < out.index("<plan-mode>") < out.index("<skills>")
 
 
+def test_the_plan_segment_names_no_tools():
+    """M2 T3: the segment must not contradict the tool surface.
+
+    It used to say "bash/write/edit are unavailable here".  That was true
+    while the read-only posture was a structural veto -- but the posture is
+    now rules, and the rules have two tiers (soft and strict).  A text
+    that names tools is a text that can be wrong about which ones; the
+    surface itself is the authority, and it already prunes.
+    """
+    segment = _plan_segment()
+
+    # The three that the surface prunes in plan mode, as *tool names*.
+    # The words appear inside prose ("Approval writes those items",
+    # "do not write the analysis"), so a substring test would flag the
+    # English verb; what matters is that the segment does not name a tool
+    # the surface removed -- and the surface is what the model reads.
+    for tool in ("bash/write/edit", "read/grep/glob"):
+        assert tool not in segment, f"the segment still names {tool}"
+
+
+def test_the_plan_segment_still_says_what_to_do():
+    """Narrowing the segment must not empty it."""
+    segment = _plan_segment()
+
+    assert "present_plan" in segment
+    assert "finish_research" in segment
 # ---- C-2: the methods section follows the tools the request actually carries ---
 
 

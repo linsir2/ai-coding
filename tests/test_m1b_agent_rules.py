@@ -145,3 +145,83 @@ def test_no_agent_rules_answers_exactly_as_before():
         assert gate.check(tool, params).decision is gate.check(
             tool, params, agent_rules=()
         ).decision
+
+
+# ---- M2 T6: the plan agent's own read-only rules --------------------------
+
+
+def _plan_rules(strict: bool = False) -> tuple[Rule, ...]:
+    from ai_coding.agents.registry import builtin_catalog
+
+    return builtin_catalog(strict_readonly=strict).rules("plan")
+
+
+def test_the_plan_agent_denies_the_world_changing_tools():
+    """The plan posture is a rule now, not a special case in the dispatcher."""
+    rules = _plan_rules()
+    denied = {rule.action for rule in rules if rule.effect is Effect.DENY}
+    assert "edit" in denied      # → write + edit
+    assert "shell" in denied     # → bash
+    assert "subagent" in denied  # → subAgent
+    assert "webfetch" in denied
+    assert "websearch" in denied
+
+
+def test_the_plan_agent_keeps_the_reading_tools():
+    """The plan agent only *denies*; the reading tools come from the base.
+
+    A layer that allowed what the base already allows would be saying the
+    same thing twice, and the second copy is the one that drifts.
+    """
+    rules = _plan_rules()
+    assert all(rule.effect is Effect.DENY for rule in rules)
+
+    gate = PermissionGate()
+    for tool in ("read", "grep", "glob"):
+        decision = gate.check(tool, {"path": "x", "pattern": "*"}, agent_rules=rules)
+        assert decision.decision is PermissionDecision.ALLOW, tool
+
+
+def test_the_soft_tier_does_not_deny_the_shell():
+    """The soft tier is what the posture has always meant."""
+    denied = {r.action for r in _plan_rules(strict=False) if r.effect is Effect.DENY}
+    assert "question" not in denied
+    assert "memory_write" not in denied
+
+
+def test_the_strict_tier_denies_more():
+    strict = {r.action for r in _plan_rules(strict=True) if r.effect is Effect.DENY}
+    soft = {r.action for r in _plan_rules(strict=False) if r.effect is Effect.DENY}
+    assert strict > soft
+    assert "question" in strict
+
+
+def test_the_strict_tier_keeps_the_two_exits():
+    """A plan mode with no exit is a plan mode that never ends."""
+    strict = {r.action for r in _plan_rules(strict=True) if r.effect is Effect.DENY}
+    assert "present_plan" not in strict
+    assert "finish_research" not in strict
+
+
+def test_the_plan_rules_hide_exactly_what_the_readonly_overlay_hid():
+    """The soft tier must be equivalent to what it replaces.
+
+    The old posture refused every ``mutates_world`` tool; the new one is
+    a rule set.  If the two disagree, the prompt and the tool surface
+    start telling different stories.
+    """
+    from ai_coding.config.models import AIConfig, AppConfig
+    from ai_coding.tools.builder import build_tool_registry
+
+    registry = build_tool_registry(
+        AppConfig(models={}, default_model="", ai=AIConfig()), ".", None
+    )
+    hidden_by_overlay = {t.name for t in registry.all_tools if t.mutates_world}
+
+    gate = PermissionGate()
+    rules = _plan_rules()
+    hidden_by_rules = {
+        t.name for t in registry.all_tools if gate.hides(t.name, agent_rules=rules)
+    }
+
+    assert hidden_by_rules == hidden_by_overlay

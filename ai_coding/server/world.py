@@ -124,7 +124,10 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     from ai_coding.agents.registry import load_agents
     from ai_coding.domain.agents import is_plan_agent
 
-    agents = load_agents(paths.agent_roots)
+    agents = load_agents(
+        paths.agent_roots,
+        strict_readonly=bool(getattr(app_cfg.ai, "plan_strict_readonly", False)),
+    )
     default_agent = agents.default_id(str(getattr(app_cfg.ai, "default_agent", "build")))
 
     from ai_coding.ai.factory import build_engine_from_config

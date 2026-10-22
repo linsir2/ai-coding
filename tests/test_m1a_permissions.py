@@ -20,10 +20,12 @@ from __future__ import annotations
 import textwrap
 
 from ai_coding.security.permissions import (
+    ACTION_ALIASES,
     POSTURES,
     Effect,
     Rule,
     Ruleset,
+    actions_for,
     evaluate,
     glob_match,
     load_policy,
@@ -408,3 +410,50 @@ def test_a_rule_is_hashable():
     # The layers are tuples of rules and get compared and cached.
     rule = _deny("edit")
     assert hash(rule) == hash(_deny("edit"))
+
+
+# ---- M2 T6: the action aliases ---------------------------------------------
+#
+# A rule names an *action*, and some actions are more than one tool: "edit"
+# is write and edit, "shell" is bash.  Without the aliases a rule for
+# ``deny edit *`` would refuse the edit tool and let write straight
+# through -- the rule would say one thing and do another.
+#
+# The names are **lower case**, because the gate lower-cases the tool name
+# before it matches (``permission_gate.check``): a rule written
+# "subAgent" would never fire, since the gate compares it against
+# "subagent".
+
+
+class TestActionAliases:
+    def test_edit_covers_write_and_edit(self):
+        assert actions_for("edit") == frozenset({"write", "edit"})
+
+    def test_shell_covers_bash(self):
+        assert actions_for("shell") == frozenset({"bash"})
+
+    def test_question_covers_ask_user(self):
+        assert actions_for("question") == frozenset({"ask_user"})
+
+    def test_an_ordinary_action_is_itself(self):
+        assert actions_for("read") == frozenset({"read"})
+        assert actions_for("glob") == frozenset({"glob"})
+        assert actions_for("subagent") == frozenset({"subagent"})
+
+    def test_every_alias_is_lower_case(self):
+        for action, tools in ACTION_ALIASES.items():
+            assert action == action.lower(), action
+            for tool in tools:
+                assert tool == tool.lower(), tool
+
+    def test_a_tool_matches_its_alias(self):
+        assert rule_matches("edit", "x.py", Rule("edit", "*", Effect.DENY), posture="build")
+        assert rule_matches("write", "x.py", Rule("edit", "*", Effect.DENY), posture="build")
+        assert rule_matches("bash", "ls", Rule("shell", "*", Effect.DENY), posture="build")
+        # The gate lower-cases the tool name before it asks (``check`` does
+        # ``name = tool_name.lower()``), so this is the action it uses.
+        assert rule_matches("subagent", "t", Rule("subagent", "*", Effect.DENY), posture="build")
+
+    def test_a_tool_does_not_match_another_actions_alias(self):
+        assert not rule_matches("read", "x.py", Rule("edit", "*", Effect.DENY), posture="build")
+        assert not rule_matches("bash", "ls", Rule("edit", "*", Effect.DENY), posture="build")

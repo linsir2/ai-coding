@@ -56,12 +56,30 @@ _EXPLORE_ALLOWED = (
     "history_search",
 )
 
+#: The plan posture's soft tier (M2 T6): the tools that change the world.
+#: These are the six the read-only overlay used to refuse structurally --
+#: one rule set replaces the special case, and the tool surface prunes by
+#: the same rule the gate judges by.
+_PLAN_SOFT_DENY = ("edit", "shell", "subagent", "webfetch", "websearch")
+
+#: The strict tier adds the tools that do not change the workspace but do
+#: change the conversation or the plan: asking the human, writing memory,
+#: starting a goal.  It does **not** deny the two exits -- a plan mode
+#: with no way to submit a plan is a plan mode that never ends.
+_PLAN_STRICT_DENY = (
+    "question",
+    "memory_write",
+    "start_goal",
+    "update_goal",
+    "todo_write",
+)
+
 
 def _rule_row(action: str, effect: str) -> dict[str, Any]:
     return {"action": action, "resource": "*", "effect": effect}
 
 
-def builtin_catalog() -> AgentCatalog:
+def builtin_catalog(*, strict_readonly: bool = False) -> AgentCatalog:
     """The four agents that ship with the program.
 
     ``plan`` carries no rules yet: its read-only behaviour is still the
@@ -74,6 +92,10 @@ def builtin_catalog() -> AgentCatalog:
         _rule_row("*", "deny"),
         *(_rule_row(action, "allow") for action in _EXPLORE_ALLOWED),
     )
+    plan_deny = _PLAN_SOFT_DENY + (_PLAN_STRICT_DENY if strict_readonly else ())
+    plan_rows: tuple[dict[str, Any], ...] = tuple(
+        _rule_row(action, "deny") for action in plan_deny
+    )
     return AgentCatalog(
         specs={
             DEFAULT_AGENT_ID: AgentSpec(
@@ -85,6 +107,7 @@ def builtin_catalog() -> AgentCatalog:
                 id=PLAN_AGENT_ID,
                 name="Plan",
                 description="Read-only planning agent.",
+                permissions=plan_rows,
             ),
             "general": AgentSpec(
                 id="general",
@@ -158,13 +181,20 @@ def _parse_agent(
     )
 
 
-def load_agents(roots: Sequence[Path | str]) -> AgentCatalog:
+def load_agents(
+    roots: Sequence[Path | str], *, strict_readonly: bool = False
+) -> AgentCatalog:
     """Read every agent file under ``roots`` and merge them into a catalog.
 
     ``roots`` are **lowest precedence first** and the last one is the
     project's.  A file's id replaces a lower-precedence agent *whole*.
+
+    ``strict_readonly`` selects the strict tier of the built-in plan agent
+    (M2 T6): the posture refuses more than the soft tier does.
     """
-    specs: dict[str, AgentSpec] = dict(builtin_catalog().specs)
+    specs: dict[str, AgentSpec] = dict(
+        builtin_catalog(strict_readonly=strict_readonly).specs
+    )
     skipped: list[str] = []
     ordered = [Path(root) for root in roots]
     for index, root in enumerate(ordered):

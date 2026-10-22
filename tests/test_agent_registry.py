@@ -37,9 +37,16 @@ def test_the_builtin_four_are_there_and_know_what_they_are():
     assert sorted(spec.id for spec in catalog.subagents()) == ["explore", "general"]
 
 
-def test_the_plan_agent_has_no_rules_yet():
-    """M1b keeps plan's read-only on the overlay; T5/T6 write its rules."""
-    assert builtin_catalog().get("plan").permissions == ()
+def test_the_plan_agent_carries_its_own_rules():
+    """M2 T6 gave the plan agent its rules; the soft tier is the plan posture."""
+    rules = builtin_catalog().get("plan").permissions
+    assert rules, "the plan agent has no rules"
+    # The soft tier denies what the read-only overlay used to refuse
+    # structurally; it does not deny the plan's two exits.
+    denied = {row["action"] for row in rules if row["effect"] == "deny"}
+    assert {"edit", "shell", "subagent", "webfetch", "websearch"} <= denied
+    assert "present_plan" not in denied
+    assert "finish_research" not in denied
 
 
 def test_explore_denies_everything_and_allows_the_read_only_ones():
