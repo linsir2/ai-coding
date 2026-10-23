@@ -482,6 +482,23 @@ async def test_rg_keeps_env_example_searchable(tmp_path):
     assert ".env:" not in result.output
 
 
+@pytest.mark.asyncio
+async def test_rescue_skips_a_credential_symlink_named_env_example(tmp_path):
+    (tmp_path / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / ".env.example").symlink_to(tmp_path / ".env")
+    (tmp_path / "ok").mkdir()
+    (tmp_path / "ok" / ".env.example").write_text("TOKEN=example\n", encoding="utf-8")
+    tool = GrepTool(Sandbox(tmp_path), use_ripgrep=True)
+
+    result = await tool.execute({"pattern": "TOKEN"})
+
+    assert result.success is True
+    assert "ok/.env.example:1: TOKEN=example" in result.output
+    assert "sub/.env.example" not in result.output
+    assert "TOKEN=secret" not in result.output
+
+
 # ---- L1: plan writes stay on a verified descriptor chain -------------------
 
 

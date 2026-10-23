@@ -326,6 +326,8 @@ class GrepTool(BaseTool):
             shown = PurePosixPath(
                 path.relative_to(self._sandbox.workspace).as_posix()
             )
+            if self._is_credential_entry(shown, path):
+                continue
             if include and not _include_matches(shown, include):
                 continue
             argv: list[str] = [
