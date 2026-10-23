@@ -73,7 +73,15 @@ def _install_providers(
     if set_approval_provider is not None:
 
         async def approval_provider(tool_name: str, params: dict[str, Any], reason: str) -> str:
-            from ai_coding.security.permission_gate import grant_key
+            gate = getattr(dispatcher, "gate", None)
+            if gate is not None and hasattr(gate, "grant_key"):
+                grantable = gate.grant_key(tool_name, params) is not None
+            else:
+                # Legacy/doubles without a gate keep the pre-M4 lexical rule;
+                # production always reaches the workspace-aware method above.
+                from ai_coding.security.permission_gate import grant_key
+
+                grantable = grant_key(tool_name, params) is not None
 
             answer = str(
                 await service.call(
@@ -88,7 +96,7 @@ def _install_providers(
                         # instead of the panel re-implementing a security rule in
                         # TypeScript.  ``None`` means policy excludes the tool or
                         # the arguments name no single resource.
-                        "grantable": grant_key(tool_name, params) is not None,
+                        "grantable": grantable,
                     },
                 )
             )

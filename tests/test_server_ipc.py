@@ -1009,6 +1009,29 @@ async def test_the_approval_request_says_whether_an_always_can_be_remembered(ipc
 
 
 @pytest.mark.asyncio
+async def test_a_credential_alias_is_not_offered_as_a_standing_permission(
+    ipc, tmp_path
+):
+    """The gate's workspace-aware key must be what the panel receives."""
+    from ai_coding.security.permission_gate import PermissionGate
+
+    world, _service, client = ipc
+    (tmp_path / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+    (tmp_path / "config.txt").symlink_to(tmp_path / ".env")
+    world.loop.dispatcher.gate = PermissionGate(workspace=str(tmp_path))
+
+    await world.approval.approve("read", {"path": ".env"}, "credential")
+    assert client.approval_requests[-1]["grantable"] is False
+
+    await world.approval.approve("read", {"path": "config.txt"}, "credential")
+    assert client.approval_requests[-1]["grantable"] is False
+
+    (tmp_path / "notes.txt").write_text("ordinary\n", encoding="utf-8")
+    await world.approval.approve("read", {"path": "notes.txt"}, "allowed")
+    assert client.approval_requests[-1]["grantable"] is True
+
+
+@pytest.mark.asyncio
 async def test_a_rejection_can_carry_what_the_operator_would_accept_instead(ipc):
     """C-3: "no" tells the model nothing it can act on.
 
