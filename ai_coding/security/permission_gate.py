@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_coding.security.bash_redlines import bash_red_line
+from ai_coding.security.credentials import credential_match, credential_rules
 from ai_coding.security.grants import GrantStore
 from ai_coding.security.permissions import (
     NO_FILE_RULES,
@@ -125,37 +126,6 @@ _BASH_HARD_DENY_PATTERNS: list[tuple[str, str]] = [
     ("chmod 777", "world-writable permissions"),
 ]
 
-#: Credential paths bash must never read.  ``bash`` is never grantable
-#: (``_NEVER_REMEMBERED``), so a WARN here means the model can ask until you say
-#: yes; only this list says no regardless.  The file tools answer the same
-#: request by asking the operator, which is why leaving this empty made the
-#: sandbox boundary a speed bump: ``read`` was refused, the model reached for
-#: ``bash cat``, and the answer was yes.
-#:
-#: A *path shape*, not a word: ``.env.example`` is documentation and
-#: ``grep password src/`` is how one audits for a leak, so neither is matched.
-_CREDENTIAL_PATTERNS: tuple[str, ...] = (
-    "/.ssh/",
-    "/.aws/",
-    "/.config/gh/",
-    "/.gnupg/",
-    "/.kube/",
-    "/.docker/config.json",
-    "/.npmrc",
-    "/.pypirc",
-    "/.netrc",
-    "/etc/shadow",
-    "/etc/sudoers",
-)
-
-#: Exact basenames that are credentials wherever they appear.
-_CREDENTIAL_NAMES: frozenset[str] = frozenset(
-    {".env", ".netrc", ".npmrc", ".pypirc", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
-)
-
-#: Suffixes that are credentials wherever they appear.
-_CREDENTIAL_SUFFIXES: tuple[str, ...] = (".pem", ".key", ".p12", ".pfx", ".keystore")
-
 #: Shell metacharacters that end a word; a path token is read between them.
 _SHELL_SPLIT = re.compile(r"[\s;|&<>()'\"`]+")
 #: A leading ``~`` is the home directory wherever it is written.
@@ -232,16 +202,9 @@ def _reads_credential(words: list[str]) -> str:
     ``cat .env.example`` is not ``cat .env`` -- the token has to be the file.
     """
     for word in words[1:]:
-        candidate = Path(word)
-        name = candidate.name
-        if name in _CREDENTIAL_NAMES:
-            return name
-        if any(candidate.name.endswith(suffix) for suffix in _CREDENTIAL_SUFFIXES):
-            return candidate.name
-        posix = candidate.as_posix()
-        for pattern in _CREDENTIAL_PATTERNS:
-            if pattern in posix:
-                return pattern.strip("/")
+        secret = credential_match(word)
+        if secret:
+            return secret
     return ""
 
 
@@ -353,22 +316,11 @@ def _split_grant(key: str) -> tuple[str, str | None]:
     return base, suffix
 
 
-#: A dotenv file is a secret container: reading one asks the operator, and
-#: the example file (documentation, no secrets) is the one exception.  The
-#: order is the semantics -- the language is last-match-wins, so the allow has
-#: to come after both asks, and all three have to come after the base's
-#: blanket ``read * allow``.
-CREDENTIAL_READ_RULES: Ruleset = (
-    Rule(action="read", resource="*.env", effect=Effect.ASK),
-    Rule(action="read", resource="*.env.*", effect=Effect.ASK),
-    Rule(action="read", resource="*.env.example", effect=Effect.ALLOW),
-    # ``grep`` reads file contents too.  Leaving it on the blanket allow would
-    # make the read question a formality: one call to ``grep .* .env`` returns
-    # the secret without a prompt.
-    Rule(action="grep", resource="*.env", effect=Effect.ASK),
-    Rule(action="grep", resource="*.env.*", effect=Effect.ASK),
-    Rule(action="grep", resource="*.env.example", effect=Effect.ALLOW),
-)
+#: A credential file is a secret container: reading or searching it asks the
+#: operator, and the example file is the one documentation exception.  The
+#: vocabulary itself lives in ``security.credentials`` so Bash, read and grep
+#: cannot drift.
+CREDENTIAL_READ_RULES: Ruleset = credential_rules(("read", "grep"))
 
 
 def _grant_base(key: str) -> str:
@@ -376,7 +328,12 @@ def _grant_base(key: str) -> str:
     return _split_grant(key)[0]
 
 
-def grant_key(tool_name: str, params: Mapping[str, Any]) -> str | None:
+def grant_key(
+    tool_name: str,
+    params: Mapping[str, Any],
+    *,
+    workspace: str | None = None,
+) -> str | None:
     """What an "always" would actually remember, or ``None`` when it cannot be said.
 
     The key has to be *what the operator just read*.  Keyed on the tool name
@@ -404,6 +361,13 @@ def grant_key(tool_name: str, params: Mapping[str, Any]) -> str | None:
     if "__" in name:
         return name
     path = str(params.get("path") or "").strip()
+    if name in ("read", "grep") and path and credential_match(
+        path, workspace=workspace
+    ):
+        # A credential is approved one call at a time.  No standing grant may
+        # turn a later read into an unasked secret read, and a symlinked alias
+        # must not hide the same target.
+        return None
     if name in _PATH_TOOLS and path:
         if name == "read":
             # A read is granted by *directory* (opencode's external-directory
@@ -649,7 +613,7 @@ class PermissionGate:
         #    refused outright, and before the rules' allows, so a grant
         #    keeps meaning what it means today: the operator's own answer
         #    for that path, with no second question about the workspace.
-        key = grant_key(name, params)
+        key = self.grant_key(name, params)
         if key is not None and self._grant_applies(key, posture):
             return Decision(PermissionDecision.ALLOW, "")
 
@@ -953,10 +917,10 @@ class PermissionGate:
         Deliberately *not* in :attr:`grants`: that set is what "always" means,
         and ``/permissions`` prints it as standing permissions.  A one-off answer
         that showed up there would make every ``y`` look like a remembered
-        decision.  This is a separate, session-scoped set -- the same distinction
+        decision.          This is a separate, session-scoped set -- the same distinction
         the approval vocabulary already draws between yes and always.
         """
-        key = grant_key(tool_name, params)
+        key = self.grant_key(tool_name, params)
         if key is not None:
             self._once_grants.add(key)
 
@@ -1021,7 +985,7 @@ class PermissionGate:
         ``None`` writes a bare key meaning everywhere, which is both the old
         format and what a direct caller (a test, a replay) gets.
         """
-        key = grant_key(tool_name, params)
+        key = self.grant_key(tool_name, params)
         if key is None:
             return None
         stored = key if posture is None else f"{key}@{posture}"
@@ -1031,6 +995,12 @@ class PermissionGate:
             if store is not None:
                 store.add(stored)
         return key
+
+    def grant_key(
+        self, tool_name: str, params: Mapping[str, Any]
+    ) -> str | None:
+        """Whether this call may be remembered, resolved in this workspace."""
+        return grant_key(tool_name, params, workspace=self._workspace or None)
 
     @property
     def grants(self) -> tuple[str, ...]:

@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from ai_coding.domain.message import ToolResult
+from ai_coding.security.credentials import is_credential_path
 from ai_coding.security.file_state_tracker import FileStateTracker
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
-from ai_coding.tools.base import BaseTool, ToolContext
+from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 _DEFAULT_MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
@@ -85,6 +86,19 @@ class ReadTool(BaseTool):
             target = self._sandbox.resolve(path_str)
         except SandboxViolation as exc:
             return ToolResult(success=False, output=str(exc), error="sandbox_violation")
+
+        if (
+            is_credential_path(path_str, workspace=self._sandbox.workspace)
+            or is_credential_path(target)
+        ) and not resolve_ctx(ctx).credential_approved:
+            return ToolResult(
+                success=False,
+                output=(
+                    f"reading credential file '{path_str}' requires an explicit "
+                    "human approval for this call"
+                ),
+                error="credential_approval_required",
+            )
 
         if not target.is_file():
             return ToolResult(success=False, output=f"file not found: {path_str}")

@@ -22,8 +22,12 @@ from typing import Any
 from ai_coding.core.workspace_files import SKIP_DIRS, walk_workspace
 from ai_coding.domain.message import ToolResult
 from ai_coding.infra.subprocess_runner import run_process_async
+from ai_coding.security.credentials import (
+    credential_exclude_globs,
+    is_credential_path,
+)
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
-from ai_coding.tools.base import BaseTool, ToolContext
+from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 _DEFAULT_MAX_MATCHES = 100
 _DEFAULT_TIMEOUT = 30.0
@@ -133,10 +137,25 @@ class GrepTool(BaseTool):
         except SandboxViolation as exc:
             return ToolResult(success=False, output=str(exc))
 
+        approved = resolve_ctx(ctx).credential_approved
+        if (
+            is_credential_path(target_raw, workspace=self._sandbox.workspace)
+            or is_credential_path(target)
+        ) and not approved:
+            return ToolResult(
+                success=False,
+                output=(
+                    f"searching credential file '{target_raw}' requires an "
+                    "explicit human approval for this call"
+                ),
+                error="credential_approval_required",
+            )
+
         limit = int(params.get("limit", self._max_matches) or self._max_matches)
         include = str(params.get("include", "") or "")
         literal = bool(params.get("literal", False))
         case_sensitive = bool(params.get("case_sensitive", True))
+        skip_credentials = not approved and not target.is_file()
         try:
             if self._rg:
                 return await self._grep_with_rg(
@@ -146,6 +165,7 @@ class GrepTool(BaseTool):
                     literal=literal,
                     case_sensitive=case_sensitive,
                     limit=limit,
+                    skip_credentials=skip_credentials,
                 )
             # The fallback walks and reads the tree; on a real repository that is
             # seconds of blocking work.  read_tool does the same thing in a thread
@@ -158,6 +178,7 @@ class GrepTool(BaseTool):
                 literal=literal,
                 case_sensitive=case_sensitive,
                 limit=limit,
+                skip_credentials=skip_credentials,
             )
         except re.error as exc:
             return ToolResult(success=False, output=f"invalid pattern: {exc}")
@@ -198,7 +219,7 @@ class GrepTool(BaseTool):
 
     async def _grep_with_rg(
         self, target: Path, pattern: str, *, include: str, literal: bool,
-        case_sensitive: bool, limit: int,
+        case_sensitive: bool, limit: int, skip_credentials: bool,
     ) -> ToolResult:
         argv: list[str] = [
             self._rg or "rg", "--json", "--hidden", "--no-messages",
@@ -217,6 +238,8 @@ class GrepTool(BaseTool):
             argv.append("--ignore-case")
         if include:
             argv.append(f"--glob={include}")
+        if skip_credentials:
+            argv.extend(f"--glob={rule}" for rule in credential_exclude_globs())
         # The same directories the fallback prunes.  rg has no built-in ignore,
         # so without these the two runners disagreed about node_modules (F15).
         argv += [f"--glob=!**/{name}/**" for name in sorted(SKIP_DIRS)]
@@ -255,6 +278,10 @@ class GrepTool(BaseTool):
             # out right because the resulting ValueError left the raw string
             # in place (r19/F1).
             path = self._workspace_relative(target, data.get("path", {}).get("text", ""))
+            if skip_credentials and self._is_credential_entry(
+                path, self._sandbox.workspace / path
+            ):
+                continue
             hits.append(
                 (
                     path.as_posix(),
@@ -268,7 +295,7 @@ class GrepTool(BaseTool):
 
     def _grep_with_python(
         self, target: Path, pattern: str, *, include: str, literal: bool,
-        case_sensitive: bool, limit: int,
+        case_sensitive: bool, limit: int, skip_credentials: bool,
     ) -> ToolResult:
         flags = 0 if case_sensitive else re.IGNORECASE
         needle = re.escape(pattern) if literal else pattern
@@ -282,6 +309,8 @@ class GrepTool(BaseTool):
         hits: list[tuple[str, int, str]] = []
         for path, rel in files:
             shown = rel if anchor == PurePosixPath(".") else anchor / rel
+            if skip_credentials and self._is_credential_entry(shown, path):
+                continue
             if include and not _include_matches(shown, include):
                 continue
             try:
@@ -297,6 +326,18 @@ class GrepTool(BaseTool):
                 if matcher.search(line):
                     hits.append((shown.as_posix(), number, self._clip(line)))
         return self._render(hits, limit)
+
+    def _is_credential_entry(
+        self, shown: PurePosixPath, path: Path
+    ) -> bool:
+        """Whether a walked/result path is a credential by name or target."""
+        if is_credential_path(str(shown)):
+            return True
+        try:
+            resolved = path.resolve()
+        except (OSError, RuntimeError):
+            return True
+        return is_credential_path(resolved)
 
     def _walk(self, root: Path) -> list[tuple[Path, PurePosixPath]]:
         """The files under ``root``, through the shared workspace walk.
