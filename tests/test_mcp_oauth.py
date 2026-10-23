@@ -263,6 +263,25 @@ async def open_as():
         server.stop()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_browser(monkeypatch):
+    """Never let a test open a real browser.
+
+    ``mcp._open_browser`` calls ``webbrowser.open``.  On a headless box that
+    returns False and nothing happens, but under WSLg (or any desktop) it opens
+    a real Chrome window on the developer's screen -- one per test that reaches
+    the authorize step, each one then sitting on a refused connection because
+    the fake AS has already shut down.  So the default here is a browser that
+    opens nothing and reports that it did open (the flow then parks in
+    ``needs_auth``, which is what these tests are about).  The tests that do
+    want the redirect followed install their own ``webbrowser.open`` via
+    ``_patch_authorize`` afterwards, and that patch wins.
+    """
+    import webbrowser
+
+    monkeypatch.setattr(webbrowser, "open", lambda url: True)
+
+
 def _remote(name: str, base: str, **kwargs) -> MCPServerConfig:
     kwargs.setdefault("oauth", MCPOAuthConfig(callback_port=0))
     return MCPServerConfig(
