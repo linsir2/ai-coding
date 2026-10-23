@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 from ai_coding.domain.message import ToolArtifact, ToolResult
 from ai_coding.security.file_state_tracker import FileState, FileStateTracker
-from ai_coding.security.sandbox import Sandbox, SandboxViolation
+from ai_coding.security.sandbox import (
+    Sandbox,
+    SandboxViolation,
+    open_inside,
+    relative_to_root,
+)
 from ai_coding.tools.base import BaseTool, ToolContext
 
 
@@ -17,9 +24,12 @@ class EditTool(BaseTool):
         self,
         sandbox: Sandbox,
         file_state_tracker: FileStateTracker,
+        *,
+        plan_root: Path | None = None,
     ) -> None:
         self._sandbox = sandbox
         self._tracker = file_state_tracker
+        self._plan_root = Path(plan_root) if plan_root is not None else None
 
     @property
     def name(self) -> str:
@@ -78,6 +88,23 @@ class EditTool(BaseTool):
         if not target.is_file():
             return ToolResult(success=False, output=f"file not found: {path_str}")
 
+        if ctx is not None and ctx.mode == "plan":
+            relative = self._plan_relative(path_str)
+            if self._plan_root is None or relative is None:
+                return ToolResult(
+                    success=False,
+                    output="计划模式下只能编辑计划目录。",
+                    error="plan_directory_required",
+                )
+            return self._edit_plan_file(
+                path_str,
+                relative,
+                target,
+                old,
+                new,
+                replace_all,
+            )
+
         # Stale-read check
         state = self._tracker.check(target)
         if state == FileState.NEVER_READ:
@@ -122,6 +149,97 @@ class EditTool(BaseTool):
             output=f"replaced {replaced} occurrence(s) in {path_str}",
             artifacts=(  # r18/F4: see write_tool -- undo replays this list
                 ToolArtifact(path=target.relative_to(self._sandbox.workspace).as_posix()),
+            ),
+        )
+
+    def _plan_relative(self, path_str: str) -> Path | None:
+        if self._plan_root is None:
+            return None
+        candidate = Path(path_str).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(self._sandbox.workspace) / candidate
+        return relative_to_root(candidate, self._plan_root)
+
+    def _edit_plan_file(
+        self,
+        path_str: str,
+        relative: Path,
+        target: Path,
+        old: str,
+        new: str,
+        replace_all: bool,
+    ) -> ToolResult:
+        try:
+            opened = open_inside(self._plan_root or Path(), relative, mode="readwrite")
+        except (SandboxViolation, OSError) as exc:
+            return ToolResult(success=False, output=str(exc), error="sandbox_violation")
+        try:
+            # The stale defense is the fstat below on the verified fd, not a
+            # path re-stat; target.is_file() above is only the not-found fast path.
+            pre = os.fstat(opened.fd)
+            state = self._tracker.check_stat(
+                target, mtime=pre.st_mtime, size=pre.st_size
+            )
+            if state == FileState.NEVER_READ:
+                return ToolResult(
+                    success=False,
+                    output=(
+                        f"cannot edit '{path_str}': you must read the file first "
+                        "(stale-read protection)"
+                    ),
+                )
+            if state == FileState.STALE:
+                return ToolResult(
+                    success=False,
+                    output=(
+                        f"cannot edit '{path_str}': file has been modified externally; "
+                        "re-read it first"
+                    ),
+                )
+            os.lseek(opened.fd, 0, os.SEEK_SET)
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(opened.fd, 64 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            text = b"".join(chunks).decode("utf-8")
+            count = text.count(old)
+            if count == 0:
+                return ToolResult(
+                    success=False,
+                    output=f"old_string not found in {path_str}",
+                )
+            if not replace_all and count > 1:
+                return ToolResult(
+                    success=False,
+                    output=(
+                        f"old_string appears {count} times in {path_str}; "
+                        "it must be unique or set replace_all=true"
+                    ),
+                )
+            new_text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+            data = new_text.encode("utf-8")
+            os.ftruncate(opened.fd, 0)
+            os.lseek(opened.fd, 0, os.SEEK_SET)
+            while data:
+                written = os.write(opened.fd, data)
+                data = data[written:]
+            post = os.fstat(opened.fd)
+        except (OSError, UnicodeDecodeError) as exc:
+            return ToolResult(success=False, output=f"edit error: {exc}")
+        finally:
+            os.close(opened.fd)
+
+        self._tracker.record_stat(target, mtime=post.st_mtime, size=post.st_size)
+        replaced = count if replace_all else 1
+        return ToolResult(
+            success=True,
+            output=f"replaced {replaced} occurrence(s) in {path_str}",
+            artifacts=(
+                ToolArtifact(
+                    path=opened.path.relative_to(self._sandbox.workspace).as_posix()
+                ),
             ),
         )
 

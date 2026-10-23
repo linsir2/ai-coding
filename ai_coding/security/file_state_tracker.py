@@ -29,15 +29,36 @@ class FileStateTracker:
     def __init__(self) -> None:
         self._snapshots: dict[Path, FileSnapshot] = {}
 
+    def record_stat(self, path: str | Path, *, mtime: float, size: int) -> None:
+        """Remember an ``os.fstat`` result without touching the filesystem.
+
+        The key is still the resolved path; only the stat comes from the
+        already-verified fd, so a swap between resolve and record cannot move
+        the snapshot.
+        """
+        p = Path(path).resolve()
+        self._snapshots[p] = FileSnapshot(mtime=mtime, size=size)
+
+    def check_stat(self, path: str | Path, *, mtime: float, size: int) -> FileState:
+        """Compare an ``os.fstat`` result against the remembered snapshot."""
+        p = Path(path).resolve()
+        snap = self._snapshots.get(p)
+        if snap is None:
+            return FileState.NEVER_READ
+        if snap.mtime == mtime and snap.size == size:
+            return FileState.CLEAN
+        return FileState.STALE
+
     def record(self, path: str | Path) -> None:
         """Record the current state of a file (call after a successful read)."""
         p = Path(path).resolve()
         try:
             st = p.stat()
-            self._snapshots[p] = FileSnapshot(mtime=st.st_mtime, size=st.st_size)
         except OSError:
             # file vanished between read and record; just skip
             self._snapshots.pop(p, None)
+            return
+        self.record_stat(p, mtime=st.st_mtime, size=st.st_size)
 
     def check(self, path: str | Path) -> FileState:
         """Check whether the file is clean, stale, or has never been read."""
@@ -50,9 +71,7 @@ class FileStateTracker:
         except OSError:
             # file was deleted externally → treat as stale
             return FileState.STALE
-        if st.st_mtime == snap.mtime and st.st_size == snap.size:
-            return FileState.CLEAN
-        return FileState.STALE
+        return self.check_stat(p, mtime=st.st_mtime, size=st.st_size)
 
     def forget(self, path: str | Path) -> None:
         p = Path(path).resolve()
