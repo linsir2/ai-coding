@@ -27,6 +27,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
+from ai_coding.security.credentials import credential_match
 from ai_coding.shell_parse import CommandView, command_shape, command_views
 
 __all__ = ["bash_red_line"]
@@ -82,25 +83,6 @@ _BLOCK_DEVICE_RE = re.compile(
 #: along: ``git -C /tmp push --force`` is a force push.
 _GIT_VALUE_OPTIONS = frozenset(
     {"-C", "-c", "--config-env", "--exec-path", "--git-dir", "--namespace", "--work-tree"}
-)
-
-#: The names that must never be read, whatever the path looks like.
-_CREDENTIAL_NAMES = frozenset(
-    {".env", ".netrc", ".npmrc", ".pypirc", "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"}
-)
-
-#: The suffixes that mean a secret wherever they appear.
-_CREDENTIAL_SUFFIXES = (".key", ".keystore", ".p12", ".pem", ".pfx")
-
-#: The path shapes that mean a secret.
-_CREDENTIAL_PATTERNS = (
-    "/.aws/credentials",
-    "/.config/gh/hosts.yml",
-    "/.netrc",
-    "/.npmrc",
-    "/.pypirc",
-    "/.ssh/",
-    "/etc/shadow",
 )
 
 #: A leading ``~`` is the home directory wherever it is written.
@@ -189,15 +171,9 @@ def _reads_credential(view: CommandView) -> str:
     """
     for word in view.arguments:
         candidate = Path(_HOME_PREFIX.sub(str(Path.home()), word))
-        name = candidate.name
-        if name in _CREDENTIAL_NAMES:
-            return name
-        if any(name.endswith(suffix) for suffix in _CREDENTIAL_SUFFIXES):
-            return name
-        posix = candidate.as_posix()
-        for pattern in _CREDENTIAL_PATTERNS:
-            if pattern in posix:
-                return pattern.strip("/")
+        secret = credential_match(candidate)
+        if secret:
+            return secret
     return ""
 
 
