@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from ai_coding.security.file_state_tracker import FileState, FileStateTracker
 
 

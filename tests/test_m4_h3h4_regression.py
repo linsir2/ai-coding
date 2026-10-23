@@ -86,8 +86,6 @@ async def test_queued_posture_survives_reload_via_sidecar(tmp_path):
     ``request_posture`` writes (``agent_loop.py``) and ``SessionService.load``
     reads back.
     """
-    from ai_coding.core.agent_loop import AgentLoop
-    from ai_coding.domain.session import SessionData
     from ai_coding.service.session_service import SessionService
 
     sessions = SessionService(root=tmp_path / "sessions")
