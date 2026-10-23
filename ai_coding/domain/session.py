@@ -235,7 +235,7 @@ class SessionData:
     created_time: str
     last_access_time: str
     messages: list[ChatMessage] = field(default_factory=list)
-    task: TaskState | None = None
+    task: TaskState | None = None  # todo owner is the owning agent session; no is_subagent field.
     # R3b: how many messages have already been harvested into memory.  The cursor
     # lives in the session (not in the loop) because the CLI builds a fresh loop
     # for every turn, while the session is reloaded each time.
