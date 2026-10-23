@@ -53,6 +53,18 @@ def test_the_reminders_are_marked_as_system_reminders():
     assert PLAN_LEAVE_REMINDER.startswith("<system-reminder>")
 
 
+def test_the_enter_reminder_says_a_conversational_yes_is_not_approval():
+    """T12 (30 §3.4/M4b): the reminder's own copy — only present_plan's
+    approval starts execution."""
+    sentence = (
+        "Only present_plan's approval starts execution; "
+        "a conversational yes does not."
+    )
+
+    assert sentence in PLAN_ENTER_REMINDER
+    assert PLAN_ENTER_REMINDER.count(sentence) == 1
+
+
 def test_the_leave_reminder_says_the_restrictions_are_over():
     """An explicit withdrawal, not the absence of a new instruction."""
     assert "no longer" in PLAN_LEAVE_REMINDER.lower()

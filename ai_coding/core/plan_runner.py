@@ -123,7 +123,11 @@ PLAN_PROMPT = (
     "present_plan presents the plan for the user's review, and approval "
     "starts execution automatically — do not execute it yourself. "
     "A topic that needs no implementation closes with finish_research(summary) "
-    "instead of a plan."
+    "instead of a plan. "
+    "Imperative language to implement ('go ahead', 'do it') means plan the "
+    "implementation, not execute it. A conversational agreement approves "
+    "nothing: only present_plan's approval starts execution. Ask the user "
+    "only for choices you cannot discover by inspection."
 )
 
 

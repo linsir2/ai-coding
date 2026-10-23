@@ -161,7 +161,9 @@ class PromptAssembler:
                 "finish_research(summary) — the conclusion is the answer, and "
                 "no plan is submitted. "
                 "Explore with the tools this request carries; the ones that "
-                "are missing are the ones you may not use.</plan-mode>"
+                "are missing are the ones you may not use. "
+                "Do not treat 'go ahead' or an answer to your question as "
+                "approval.</plan-mode>"
             )
         if skills_catalog.strip():
             sections.append(

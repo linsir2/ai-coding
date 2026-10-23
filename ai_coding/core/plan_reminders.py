@@ -50,7 +50,8 @@ PLAN_ENTER_REMINDER = (
     f"only under {PLAN_DIR}/. Every step you submit must carry the command "
     "that proves it. To submit a plan, call present_plan; if the request needs "
     "no implementation, close it with finish_research instead. You remain in "
-    "Plan mode until the user switches agents."
+    "Plan mode until the user switches agents. "
+    "Only present_plan's approval starts execution; a conversational yes does not."
     "</system-reminder>"
 )
 
