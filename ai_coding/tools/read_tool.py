@@ -87,10 +87,12 @@ class ReadTool(BaseTool):
         except SandboxViolation as exc:
             return ToolResult(success=False, output=str(exc), error="sandbox_violation")
 
+        approved = resolve_ctx(ctx).credential_approved
+        workspace = getattr(self._sandbox, "workspace", None)
         if (
-            is_credential_path(path_str, workspace=self._sandbox.workspace)
+            is_credential_path(path_str, workspace=workspace)
             or is_credential_path(target)
-        ) and not resolve_ctx(ctx).credential_approved:
+        ) and not approved:
             return ToolResult(
                 success=False,
                 output=(

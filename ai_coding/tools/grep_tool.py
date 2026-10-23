@@ -138,8 +138,9 @@ class GrepTool(BaseTool):
             return ToolResult(success=False, output=str(exc))
 
         approved = resolve_ctx(ctx).credential_approved
+        workspace = getattr(self._sandbox, "workspace", None)
         if (
-            is_credential_path(target_raw, workspace=self._sandbox.workspace)
+            is_credential_path(target_raw, workspace=workspace)
             or is_credential_path(target)
         ) and not approved:
             return ToolResult(

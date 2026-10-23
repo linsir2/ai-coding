@@ -271,6 +271,7 @@ async def test_read_stat_oserror(tmp_path):
     class _Sandbox:
         def __init__(self, target):
             self.target = target
+            self.workspace = tmp_path
 
         def resolve(self, _p):
             return self.target
