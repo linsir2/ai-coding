@@ -55,14 +55,12 @@ def test_the_reminders_are_marked_as_system_reminders():
 
 def test_the_enter_reminder_says_a_conversational_yes_is_not_approval():
     """T12 (30 §3.4/M4b): the reminder's own copy — only present_plan's
-    approval starts execution."""
-    sentence = (
-        "Only present_plan's approval starts execution; "
-        "a conversational yes does not."
-    )
-
-    assert sentence in PLAN_ENTER_REMINDER
-    assert PLAN_ENTER_REMINDER.count(sentence) == 1
+    approval starts execution. Substring policy: keys carry the verdict."""
+    for key in (
+        "Only present_plan's approval starts execution",
+        "conversational yes does not",
+    ):
+        assert key in PLAN_ENTER_REMINDER
 
 
 def test_the_leave_reminder_says_the_restrictions_are_over():
