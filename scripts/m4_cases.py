@@ -122,7 +122,12 @@ class _HumanApproval(ApprovalCallback):
 async def a_swapped_symlink_cannot_write_outside_the_plan_directory(
     root: Path,
 ) -> tuple[bool, str]:
-    """check-time resolve passes, execute-time fd refuses; src/ stays clean."""
+    """check-time resolve passes, execute-time fd refuses; src/ stays clean.
+
+    Cooperative simulation (not a kernel-level race proof): the swap is a
+    single-threaded callback flip.  It proves the fd chain does not follow
+    an already-moved directory, not that the flip window is race-free.
+    """
     from ai_coding.domain.agents import PLAN_DIR
 
     workspace = root / "ws"
