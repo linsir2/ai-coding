@@ -175,10 +175,11 @@ class EditTool(BaseTool):
             return ToolResult(success=False, output=str(exc), error="sandbox_violation")
         try:
             # The stale defense is the fstat below on the verified fd, not a
-            # path re-stat; target.is_file() above is only the not-found fast path.
+            # path re-stat; target.is_file() above is only the not-found fast
+            # path and may misreport under a symlink race.
             pre = os.fstat(opened.fd)
             state = self._tracker.check_stat(
-                target, mtime=pre.st_mtime, size=pre.st_size
+                opened.path, mtime=pre.st_mtime, size=pre.st_size
             )
             if state == FileState.NEVER_READ:
                 return ToolResult(
@@ -231,7 +232,7 @@ class EditTool(BaseTool):
         finally:
             os.close(opened.fd)
 
-        self._tracker.record_stat(target, mtime=post.st_mtime, size=post.st_size)
+        self._tracker.record_stat(opened.path, mtime=post.st_mtime, size=post.st_size)
         replaced = count if replace_all else 1
         return ToolResult(
             success=True,

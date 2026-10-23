@@ -156,8 +156,9 @@ class WriteTool(BaseTool):
         content: str,
         target: Path,
     ) -> ToolResult:
-        # target.exists() is only the NEVER_READ fast path for a brand-new file;
-        # the real stale defense is the fstat below on the verified fd.
+        # target.exists() is only the NEVER_READ fast path for a brand-new
+        # file and may misreport under a symlink race; the authoritative
+        # verdict is the fstat below on the verified fd.
         existed = target.exists()
         try:
             # readwrite (not write) so O_TRUNC does not destroy the pre-stat
@@ -175,7 +176,7 @@ class WriteTool(BaseTool):
             pre = os.fstat(opened.fd)
             if existed:
                 state = self._tracker.check_stat(
-                    target, mtime=pre.st_mtime, size=pre.st_size
+                    opened.path, mtime=pre.st_mtime, size=pre.st_size
                 )
                 if state == FileState.NEVER_READ:
                     return ToolResult(
@@ -205,7 +206,7 @@ class WriteTool(BaseTool):
         finally:
             os.close(opened.fd)
 
-        self._tracker.record_stat(target, mtime=post.st_mtime, size=post.st_size)
+        self._tracker.record_stat(opened.path, mtime=post.st_mtime, size=post.st_size)
         return ToolResult(
             success=True,
             output=f"wrote {len(content)} chars to {path_str}",

@@ -32,16 +32,22 @@ class FileStateTracker:
     def record_stat(self, path: str | Path, *, mtime: float, size: int) -> None:
         """Remember an ``os.fstat`` result without touching the filesystem.
 
-        The key is still the resolved path; only the stat comes from the
-        already-verified fd, so a swap between resolve and record cannot move
-        the snapshot.
+        The key is the fd-verified path itself (``opened.path`` for plan
+        writes) -- deliberately not resolved, so a symlink swap between
+        resolve and record cannot move the snapshot to a different key.
+        Non-plan callers keep using :meth:`record`/:meth:`check`, which
+        resolve for compatibility.
         """
-        p = Path(path).resolve()
+        p = Path(path)
         self._snapshots[p] = FileSnapshot(mtime=mtime, size=size)
 
     def check_stat(self, path: str | Path, *, mtime: float, size: int) -> FileState:
-        """Compare an ``os.fstat`` result against the remembered snapshot."""
-        p = Path(path).resolve()
+        """Compare an ``os.fstat`` result against the remembered snapshot.
+
+        Same key rule as :meth:`record_stat`: the fd-verified path, not the
+        resolved one.
+        """
+        p = Path(path)
         snap = self._snapshots.get(p)
         if snap is None:
             return FileState.NEVER_READ
