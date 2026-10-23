@@ -101,6 +101,10 @@ class ToolContext:
     #: agent must not decide another session's calls.  The gate treats this
     #: layer's deny as absolute.
     agent_rules: tuple[Rule, ...] = ()
+    #: M4/L2: this one call carried human approval for its explicit
+    #: credential target.  False is the safe default for direct calls,
+    #: automatic approvals, and sibling calls in the same batch.
+    credential_approved: bool = False
     emit: Callable[[Any], None] = _noop_emit
     # R4a: the id of the call this execution belongs to.  The dispatcher stamps
     # one context per call (the batch shares everything else), which is what lets

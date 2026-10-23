@@ -57,6 +57,7 @@ from ai_coding.infra.deadline import (
     run_with_deadline,
 )
 from ai_coding.security.approval import ApprovalCallback, ApprovalResult
+from ai_coding.security.credentials import credential_match
 from ai_coding.security.permission_gate import (
     Decision,
     PermissionDecision,
@@ -486,6 +487,18 @@ class ToolDispatcher:
                 return self._approval_timeout(call, waited), True, False
             if verdict_from_user is not ApprovalVerdict.APPROVED:
                 return self._not_approved(call, "user declined"), True, False
+            if (
+                bool(getattr(self.approval, "is_human", False))
+                and call.name.lower() in ("read", "grep")
+                and credential_match(
+                    str(call.params.get("path") or ""),
+                    workspace=ctx.workspace,
+                )
+            ):
+                # This approval belongs to this one credential call.  A
+                # sibling call gets the dispatcher's original context, and an
+                # automatic YES never reaches this branch.
+                ctx = replace(ctx, credential_approved=True)
 
         # The call is allowed to run.  ``precheck`` decides whether it *can*,
         # and it can only know that now: the operator's answer is what may have
@@ -505,7 +518,7 @@ class ToolDispatcher:
             )
         result = self.guards.after(call, result, ctx, turn_view)
         await self._run_hooks(HookPoint.TOOL_AFTER, call, ctx, turn_view, result=result)
-        return result, False, False
+        return result, result.error == "credential_approval_required", False
 
     async def _run_hooks(
         self,

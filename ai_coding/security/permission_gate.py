@@ -917,7 +917,7 @@ class PermissionGate:
         Deliberately *not* in :attr:`grants`: that set is what "always" means,
         and ``/permissions`` prints it as standing permissions.  A one-off answer
         that showed up there would make every ``y`` look like a remembered
-        decision.          This is a separate, session-scoped set -- the same distinction
+        decision. This is a separate, session-scoped set -- the same distinction
         the approval vocabulary already draws between yes and always.
         """
         key = self.grant_key(tool_name, params)

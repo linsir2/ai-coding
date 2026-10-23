@@ -28,6 +28,11 @@ class ApprovalResult(enum.Enum):
 class ApprovalCallback:
     """Abstract protocol for interactive approval prompts."""
 
+    #: Whether an ``APPROVED`` answer came from a person.  Automatic callbacks
+    #: are allowed to relax ordinary WARN tiers for non-interactive runs, but
+    #: must never be mistaken for human consent to read a credential.
+    is_human: bool = False
+
     async def approve(
         self,
         tool_name: str,
@@ -47,6 +52,8 @@ class CLIApprovalCallback(ApprovalCallback):
     on screen — measured: a 1.0s turn took 5.00s, and the answer that finally
     arrived was thrown away (docs/r7-analysis.md 1.3).
     """
+
+    is_human = True
 
     def __init__(
         self,
@@ -114,6 +121,8 @@ class AutoApproveCallback(ApprovalCallback):
     (``DENY``) tiers are still blocked by the dispatcher before it ever asks, so
     this relaxes the interactive tier only, never the deny tier.
     """
+
+    is_human = False
 
     async def approve(
         self,
