@@ -154,6 +154,7 @@ def _assemble_registry(
 ) -> tuple[Any, Any]:
     """Create the sandbox/gate/registry triple shared by both builders."""
 
+    from ai_coding.domain.agents import PLAN_DIR
     from ai_coding.security.file_state_tracker import FileStateTracker
     from ai_coding.security.permission_gate import PermissionGate
     from ai_coding.security.sandbox import Sandbox
@@ -183,6 +184,7 @@ def _assemble_registry(
         grantor=gate,
     )
     fst = FileStateTracker()
+    plan_root = sandbox.workspace / PLAN_DIR
     registry = ToolRegistry()
 
     if tools_cfg.bash.enabled:
@@ -192,9 +194,9 @@ def _assemble_registry(
             ReadTool(sandbox, fst, max_file_size=tools_cfg.read.max_file_size)
         )
     if tools_cfg.write.enabled:
-        registry.register(WriteTool(sandbox, fst))
+        registry.register(WriteTool(sandbox, fst, plan_root=plan_root))
     if tools_cfg.edit.enabled:
-        registry.register(EditTool(sandbox, fst))
+        registry.register(EditTool(sandbox, fst, plan_root=plan_root))
     if tools_cfg.glob.enabled:
         registry.register(GlobTool(sandbox))
     if getattr(getattr(tools_cfg, "grep", None), "enabled", True):

@@ -85,8 +85,16 @@ def _plan_ctx(root: Path, **over: Any) -> ToolContext:
 
 
 def _registry(root: Path, gate: PermissionGate) -> ToolRegistry:
+    from ai_coding.domain.agents import PLAN_DIR
+
     registry = ToolRegistry()
-    registry.register(WriteTool(Sandbox(root), FileStateTracker()))
+    registry.register(
+        WriteTool(
+            Sandbox(root),
+            FileStateTracker(),
+            plan_root=root / PLAN_DIR,
+        )
+    )
     return registry
 
 

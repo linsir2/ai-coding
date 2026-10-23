@@ -40,8 +40,16 @@ def _config(root: Path) -> Path:
 
 
 def _registry(root: Path) -> ToolRegistry:
+    from ai_coding.domain.agents import PLAN_DIR
+
     registry = ToolRegistry()
-    registry.register(WriteTool(Sandbox(root), FileStateTracker()))
+    registry.register(
+        WriteTool(
+            Sandbox(root),
+            FileStateTracker(),
+            plan_root=root / PLAN_DIR,
+        )
+    )
     return registry
 
 

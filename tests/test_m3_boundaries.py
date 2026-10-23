@@ -7,6 +7,8 @@ surface), because M3's whole point is that those three stop disagreeing.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from ai_coding.core.dispatch import ToolDispatcher
@@ -220,13 +222,20 @@ def test_a_workspace_file_is_refused_and_the_reason_names_the_plan_directory(
 
 
 def _registry_for(workspace):
+    from ai_coding.domain.agents import PLAN_DIR
     from ai_coding.security.file_state_tracker import FileStateTracker
     from ai_coding.security.sandbox import Sandbox
     from ai_coding.tools.registry import ToolRegistry
     from ai_coding.tools.write_tool import WriteTool
 
     registry = ToolRegistry()
-    registry.register(WriteTool(Sandbox(workspace), FileStateTracker()))
+    registry.register(
+        WriteTool(
+            Sandbox(workspace),
+            FileStateTracker(),
+            plan_root=Path(workspace) / PLAN_DIR,
+        )
+    )
     return registry
 
 
