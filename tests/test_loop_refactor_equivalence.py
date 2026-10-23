@@ -14,6 +14,15 @@ against whatever the refactor happens to produce.
 Two kinds of field are deliberately dropped from the recording, because they are
 wall-clock noise rather than behaviour: ``duration_ms`` / ``latency_ms`` and the
 provider's ``usage`` (the fakes do not report any).
+
+A third kind is neutralised rather than dropped: the ``environment`` tail
+block's char length and ``estimated_tokens`` both move with the checkout
+(workspace path, git branch name, wall clock) while carrying no loop
+behaviour — the block's *presence* is still asserted, only its length is
+pinned to 0, and the token estimate is covered by the budget tests instead.
+Without this, the goldens only pass on the branch they were recorded on
+(measured 2026-10-23: ``environment`` 98 vs 74 chars = the branch-name
+length delta, ``estimated_tokens`` 115 vs 109 with it).
 """
 
 from __future__ import annotations
@@ -64,7 +73,6 @@ _KEEP: dict[str, tuple[str, ...]] = {
         "history_messages",
         "history_chars",
         "tail_blocks",
-        "estimated_tokens",
     ),
     "Degraded": ("component", "reason", "fallback"),
     "TaskUpdated": ("task",),
@@ -102,6 +110,14 @@ def _normalize(event: Any) -> dict[str, Any]:
     record: dict[str, Any] = {"type": name}
     for field_name in _KEEP.get(name, ()):
         record[field_name] = _plain(getattr(event, field_name, None))
+    if name == "ContextAssembled":
+        # The environment block carries workspace path + git branch + clock;
+        # its length is checkout noise, not loop behaviour.  Presence stays
+        # asserted, length is pinned.
+        record["tail_blocks"] = [
+            [block, 0] if block == "environment" else [block, chars]
+            for block, chars in record.get("tail_blocks", [])
+        ]
     return record
 
 

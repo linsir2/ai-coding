@@ -15,14 +15,13 @@
       "tail_blocks": [
         [
           "environment",
-          98
+          0
         ],
         [
           "task",
           103
         ]
-      ],
-      "estimated_tokens": 102
+      ]
     },
     {
       "type": "ModelStepFinished",
@@ -51,14 +50,13 @@
       "tail_blocks": [
         [
           "environment",
-          98
+          0
         ],
         [
           "task",
           103
         ]
-      ],
-      "estimated_tokens": 141
+      ]
     },
     {
       "type": "ModelStepFinished",
@@ -87,7 +85,7 @@
       "tail_blocks": [
         [
           "environment",
-          98
+          0
         ],
         [
           "task",
@@ -97,8 +95,7 @@
           "budget",
           57
         ]
-      ],
-      "estimated_tokens": 209
+      ]
     },
     {
       "type": "ModelStepFinished",
