@@ -41,6 +41,7 @@ from ai_coding.core.events import (
 )
 from ai_coding.core.guard import GuardChain, GuardVerdict, TurnView
 from ai_coding.core.hooks import HookDecision, HookPoint
+from ai_coding.domain.agents import PLAN_DIR
 from ai_coding.domain.message import (
     CANCELLED_BY_USER,
     ToolCall,
@@ -83,6 +84,9 @@ class _Prepared:
     call: ToolCall
     tool: BaseTool | None
     decision: Any | None
+    #: M3 T5: this ALLOW rests on a scoped rule (resource != "*"), so the
+    #: read-only overlay must not veto it a second time.
+    specific: bool = False
     # R4a: the loop's iteration, carried so the events can be correlated.
     iteration: int = 0
 
@@ -122,6 +126,34 @@ def _authorized_name(tool: BaseTool | None, call: ToolCall) -> str:
     guard or hook rewrite may have changed which remote tool is about to run.
     """
     return call.name if tool is None else tool.permission_name(call.params)
+
+
+def _plan_denial_reason(
+    tool_name: str, reason: str, ctx: ToolContext
+) -> str:
+    """What the model reads when the plan posture refuses a file tool.
+
+    A refusal that only says "denied by agent rule: edit *" tells the model
+    what went wrong but not what works.  In the plan posture two writers are
+    reachable for exactly one directory, so the refusal names that directory.
+    Every other refusal keeps its rule's own words: the shell and the web
+    tools are denied outright, and telling them about a plan directory would
+    be a different lie.
+    """
+    if posture_of(ctx.mode, ctx.readonly) != "plan":
+        return reason
+    # The registry name, not the authorized name: an ``mcp_call`` vessel may
+    # delegate to a remote "write", and a plan directory has nothing to say
+    # about a remote tool.
+    if tool_name.lower() not in ("write", "edit"):
+        return reason
+    workspace = str(getattr(ctx, "workspace", "") or "").rstrip("/")
+    plan_dir = f"{workspace}/{PLAN_DIR}" if workspace else PLAN_DIR
+    return (
+        f"计划模式下只能修改计划目录内的文件：{plan_dir}/。"
+        "工作区其他文件在计划模式下只读；请把计划正文或笔记写进该目录，"
+        "或用 present_plan 提交计划。"
+    )
 
 
 def _ask_budget(deadline: Deadline | None, approval_timeout: float | None) -> float | None:
@@ -240,7 +272,13 @@ class ToolDispatcher:
         """Resolve the tool and its permission verdict exactly once per call."""
         tool = self.registry.get(call.name)
         decision = None if tool is None else self._check(tool, call, ctx)
-        return _Prepared(call=call, tool=tool, decision=decision, iteration=iteration)
+        return _Prepared(
+            call=call,
+            tool=tool,
+            decision=decision,
+            specific=bool(getattr(decision, "specific", False)),
+            iteration=iteration,
+        )
 
     def _check(self, tool: BaseTool | None, call: ToolCall, ctx: ToolContext) -> Any:
         """Ask the gate with the two facts only this request knows.
@@ -337,7 +375,9 @@ class ToolDispatcher:
         reason = _reason(item.decision)
 
         if verdict is PermissionDecision.DENY:
-            return self._denied(call, reason), True, False
+            return self._denied(
+                call, _plan_denial_reason(call.name, reason, ctx)
+            ), True, False
 
         # 18 §10.1 / M2 T6: a read-only session refuses mutating calls
         # structurally.  It sits *after* the gate on purpose now: the gate
@@ -346,7 +386,16 @@ class ToolDispatcher:
         # session whose posture is the human's own switch.  The refusal is
         # still before the approval, so no approval is ever spent on a call
         # the session refuses anyway.
-        if ctx.readonly and item.tool.mutates_world:
+        # M3 T5: in the plan posture a scoped allow is the plan directory
+        # exception, and the overlay must not veto it.  Everywhere else the
+        # overlay keeps its absolute meaning: ``/readonly`` is the human's
+        # switch, and a session rule must not widen it.
+        plan_exception = (
+            posture_of(ctx.mode, ctx.readonly) == "plan"
+            and item.specific
+            and item.tool.mutates_world
+        )
+        if ctx.readonly and item.tool.mutates_world and not plan_exception:
             return self._readonly_denied(call), True, False
 
         # ---- A3/A5: guards, and a rewritten call must pass the gate again ----

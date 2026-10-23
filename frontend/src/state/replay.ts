@@ -204,12 +204,13 @@ export function messagesToState(
         assistant.parts.push({ kind: "text", text: message.content, streaming: false })
       }
       for (const call of message.toolCalls ?? []) {
+        const params = parseArguments(call.arguments)
         assistant.parts.push({
           kind: "tool",
           callId: call.id,
           toolName: call.name,
           verb: toolVerb(call.name),
-          target: toolTarget(call.name, parseArguments(call.arguments)),
+          target: toolTarget(call.name, params),
           status: "running",
           // A replayed card has no stream behind it: nothing to fold, and a
           // pipe tag per line would be a guess.
@@ -219,6 +220,9 @@ export function messagesToState(
           preview: "",
           error: "",
           durationMs: 0,
+          // M3 T11: only the plan card needs its arguments back; everything
+          // else would just duplicate the session file in the transcript.
+          ...(call.name === "present_plan" ? { params } : {}),
         })
       }
     } else if (message.role === "tool") {

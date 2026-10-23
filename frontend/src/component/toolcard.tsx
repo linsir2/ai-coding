@@ -16,6 +16,7 @@ import { For, Show, createSignal } from "solid-js"
 import type { Part } from "../state/session"
 import type { TailLine } from "../util/toolmeta"
 import { theme } from "../theme/tokens"
+import { planText, submittedPlan } from "../util/ask"
 import {
   formatDuration,
   toolFailure,
@@ -48,6 +49,10 @@ export function ToolCard(props: { part: ToolPart }) {
   const running = () => props.part.status === "running"
   const failure = () => toolFailure(props.part.error)
   const denied = () => props.part.status !== "running" && failure().tone === "denied"
+  // M3 T11: the plan the call submitted, read from its own arguments.  `task`
+  // is the execution state and changes under the run; this is the text the
+  // human actually approved.
+  const plan = () => submittedPlan(props.part.params ?? {})
 
   const accent = () => {
     if (running()) return theme.textBase
@@ -57,7 +62,8 @@ export function ToolCard(props: { part: ToolPart }) {
 
   const icon = () => (running() ? null : denied() ? "⊘" : props.part.status === "ok" ? "✓" : "✗")
   /** Only a settled call with output has something to open; no target, no lie. */
-  const canExpand = () => !running() && props.part.lines.length > 0
+  const canExpand = () =>
+    !running() && (props.part.lines.length > 0 || plan() !== null)
   const strike = () => (denied() ? TextAttributes.STRIKETHROUGH : undefined)
   const tailLines = () => props.part.lines.slice(-3)
 
@@ -96,6 +102,26 @@ export function ToolCard(props: { part: ToolPart }) {
       <Show when={expanded() && canExpand()}>
         <box border={["left"]} borderColor={theme.backgroundRaisedMax} paddingLeft={1} flexShrink={0}>
           <box flexDirection="column">
+            <Show when={plan()}>
+              {(artifact) => (
+                <>
+                  <text fg={theme.textBase}>{planText(artifact().plan)}</text>
+                  <For each={artifact().items}>
+                    {(item, index) => (
+                      <box flexDirection="column" marginTop={1}>
+                        <text fg={theme.textBase}>{`${index() + 1}. ${item.content}`}</text>
+                        <text fg={theme.textMuted}>
+                          {`   verify：${item.verify || "无证明命令"}` +
+                            (item.dependsOn.length > 0
+                              ? ` · 依赖 ${item.dependsOn.map((n) => `#${n}`).join(", ")}`
+                              : "")}
+                        </text>
+                      </box>
+                    )}
+                  </For>
+                </>
+              )}
+            </Show>
             <Show when={props.part.linesDropped}>
               <text fg={theme.textMuted}>{truncationNote(true)}</text>
             </Show>

@@ -155,7 +155,7 @@ class PromptAssembler:
                 "markdown summary, and in its items array every executable "
                 "step with its verify command. Approval writes those items and "
                 "starts execution automatically; do not track the planning with "
-                "todo_write, do not write the analysis or files as your final "
+                "a todo list, do not write the analysis or files as your final "
                 "answer, and do not mark items completed — the execution phase "
                 "does the reading and the work. To close it without a plan: "
                 "finish_research(summary) — the conclusion is the answer, and "

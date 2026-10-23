@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from ai_coding.domain.agents import is_plan_agent
+from ai_coding.domain.agents import PLAN_DIR, is_plan_agent
 from ai_coding.domain.message import ChatMessage
 
 __all__ = [
@@ -45,10 +45,12 @@ __all__ = [
 PLAN_ENTER_REMINDER = (
     "<system-reminder>You are in Plan mode. Discuss the plan with the user "
     "directly in the conversation; explore only as much as you need to plan, "
-    "and do not implement the changes yourself. Every step you submit must "
-    "carry the command that proves it. To submit a plan, call present_plan; "
-    "if the request needs no implementation, close it with finish_research "
-    "instead. You remain in Plan mode until the user switches agents."
+    "and do not implement the changes yourself. Do not create or update plan "
+    "files unless the user explicitly asks you to; when they do, write them "
+    f"only under {PLAN_DIR}/. Every step you submit must carry the command "
+    "that proves it. To submit a plan, call present_plan; if the request needs "
+    "no implementation, close it with finish_research instead. You remain in "
+    "Plan mode until the user switches agents."
     "</system-reminder>"
 )
 

@@ -267,11 +267,18 @@ async def the_humans_words_are_not_the_harnesss(root: Path) -> tuple[bool, str]:
 
 
 async def the_plan_rule_produces_the_old_tool_surface(root: Path) -> tuple[bool, str]:
-    """The rule layer and the old overlay must agree exactly.
+    """The rule layer and the old overlay, with M3's two declared changes.
 
     The overlay refused every ``mutates_world`` tool; the rule set has to
     refuse the same set, or the prompt and the surface start telling
     different stories.
+
+    M3 deliberately changed two entries, and this case names both so a third
+    difference cannot hide behind them:
+
+    * write/edit stay: a scoped plan-directory allow means the tool is
+      reachable there (opencode D06);
+    * todo_write goes: the planning list belongs to present_plan (T8).
     """
     from ai_coding.config.models import AIConfig, AppConfig
     from ai_coding.tools.builder import build_tool_registry
@@ -289,12 +296,13 @@ async def the_plan_rule_produces_the_old_tool_surface(root: Path) -> tuple[bool,
         for t in registry.all_tools
         if not t.plan_only and not gate.hides(t.name, agent_rules=rules)
     )
-    if today != new:
+    expected = (set(today) | {"write", "edit"}) - {"todo_write"}
+    if set(new) != expected:
         return False, (
             f"the surfaces differ: "
-            f"only-old={set(today) - set(new)} only-new={set(new) - set(today)}"
+            f"missing={expected - set(new)} unexpected={set(new) - expected}"
         )
-    return True, f"the same {len(today)} tools"
+    return True, f"{len(new)} tools (write/edit reachable, todo_write cut)"
 
 
 async def the_plan_rule_produces_the_old_verdicts(root: Path) -> tuple[bool, str]:

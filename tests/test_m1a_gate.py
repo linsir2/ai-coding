@@ -46,7 +46,15 @@ def test_the_base_layer_has_one_rule_per_live_list_entry() -> None:
 
     base = gate._base_rules()
 
-    assert len(base) == len(gate._allow_tools) + len(gate._warn_tools)
+    # M3 T9 added three **resource-scoped** read rules (dotenv ask/ask/allow).
+    # They are the one part of the base layer that is not derived from a tool
+    # list, so they are counted separately; the derivation invariant still
+    # holds for every list entry.
+    from ai_coding.security.permission_gate import CREDENTIAL_READ_RULES
+
+    assert len(base) == (
+        len(gate._allow_tools) + len(gate._warn_tools) + len(CREDENTIAL_READ_RULES)
+    )
 
 
 def test_every_allowed_tool_is_allowed_and_every_warned_tool_is_asked() -> None:

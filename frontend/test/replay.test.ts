@@ -429,4 +429,50 @@ describe("synthetic bookkeeping (D6)", () => {
       parts: [{ kind: "text", text: "先看测试", streaming: false }],
     })
   })
+
+  test("a replayed present_plan call keeps the plan it submitted", () => {
+    // M3 T11: the plan's durable home is the tool call's arguments.  A
+    // reopened session must be able to show the plan that was submitted,
+    // even though `task.items` has long since been rewritten by the run.
+    const state = messagesToState([
+      {
+        role: "assistant",
+        content: null,
+        toolCalls: [
+          {
+            id: "call_plan",
+            name: "present_plan",
+            arguments: JSON.stringify({
+              plan: "# 计划\n正文",
+              items: [{ content: "建目录", verify: "test -d hotel" }],
+            }),
+          },
+        ],
+      },
+    ])
+    const part = state.messages[0]?.parts[0]
+    expect(part?.kind).toBe("tool")
+    if (part?.kind !== "tool") throw new Error("not a tool part")
+    expect(part.params).toEqual({
+      plan: "# 计划\n正文",
+      items: [{ content: "建目录", verify: "test -d hotel" }],
+    })
+  })
+
+  test("an ordinary tool call does not keep its params", () => {
+    // Keeping every call's arguments would turn the transcript into a copy of
+    // the session file; only the plan card needs them.
+    const state = messagesToState([
+      {
+        role: "assistant",
+        content: null,
+        toolCalls: [
+          { id: "call_read", name: "read", arguments: '{"path":"a.py"}' },
+        ],
+      },
+    ])
+    const part = state.messages[0]?.parts[0]
+    if (part?.kind !== "tool") throw new Error("not a tool part")
+    expect(part.params).toBeUndefined()
+  })
 })

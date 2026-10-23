@@ -22,6 +22,7 @@ word).
 from __future__ import annotations
 
 import enum
+import posixpath
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -47,6 +48,7 @@ __all__ = [
     "load_file_rules",
     "load_policy",
     "load_rules",
+    "partially_allowed",
     "posture_of",
     "rule_to_dict",
     "rules_from_dicts",
@@ -237,21 +239,59 @@ def wholly_disabled(action: str, *layers: Ruleset, posture: str = "build") -> bo
     return winner is not None and winner.resource == "*" and winner.effect is Effect.DENY
 
 
+def partially_allowed(
+    action: str, *layers: Ruleset, posture: str = "build"
+) -> bool:
+    """Whether the whole action is still reachable somewhere.
+
+    The mirror image of :func:`wholly_disabled`, with one question changed:
+    "is the last rule for this action a **scoped allow**?"  A scoped allow
+    means the tool must stay in the catalogue (the model can call it for the
+    allowed resource), while everything else is refused at dispatch, where the
+    model can read which resource it hit.
+
+    This is what keeps the plan posture's tool table from saying "the plan
+    directory is writable" while offering no writer at all.  It shares the
+    alias table, the posture filter and the last-match-wins rule with
+    :func:`wholly_disabled`, so the catalogue and the verdict cannot drift
+    apart: one predicate removes a tool when nothing is allowed, the other
+    keeps it when *something* is.
+    """
+    winner: Rule | None = None
+    for layer in layers:
+        for rule in layer:
+            if not rule.postures or posture in rule.postures:
+                if any(glob_match(action, alias) for alias in actions_for(rule.action)):
+                    winner = rule
+    return (
+        winner is not None
+        and winner.resource != "*"
+        and winner.effect is Effect.ALLOW
+    )
+
+
 # ---- the resource vocabulary --------------------------------------------------
 
 
 def _lexical(path: str) -> str:
     """The path as the rule language compares it.
 
-    Only lexical: a leading ``./`` goes, and backslashes become slashes.
-    Resolving the path is the Sandbox's job (the same stance ``grant_key``
-    takes), so a rule matches the string the tool was handed and the
-    boundary is still adjudicated elsewhere.
+    Only lexical: a leading ``./`` goes, backslashes become slashes, and
+    ``a/../b`` becomes ``b``.  The last one is what makes a **scoped** rule
+    a boundary rather than a spelling test: ``*`` crosses slashes, so without
+    it ``edit .ai-coding/plan/* allow`` would also match
+    ``.ai-coding/plan/../../src/app.py`` -- an allow for the whole workspace.
+
+    Resolving the path (symlinks, the filesystem) is still the Sandbox's job
+    (the same stance ``grant_key`` takes), so a rule matches the *shape* the
+    tool was handed and the boundary is still adjudicated elsewhere.  An
+    absolute path stays absolute: ``/`` is not a parent segment.
     """
     text = str(path or "").replace("\\", "/")
     while text.startswith("./"):
         text = text[2:]
-    return text
+    normalized = posixpath.normpath(text) if text else text
+    return "" if normalized == "." else normalized
 
 
 def _named(text: str) -> str:

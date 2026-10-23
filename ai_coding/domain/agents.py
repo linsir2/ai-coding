@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from ai_coding.security.permissions import Rule
 
 __all__ = [
+    "PLAN_DIR",
     "PLAN_AGENT_ID",
     "AgentCatalog",
     "AgentSpec",
@@ -38,6 +39,13 @@ __all__ = [
 #: The id of the built-in planning agent.  A session whose agent is this one
 #: is *in plan mode*; every other agent is an ordinary working session.
 PLAN_AGENT_ID = "plan"
+
+#: The one place a planning agent may write, relative to the workspace.
+#: It lives here because four readers need to agree on it: the agent's own
+#: rule, both planning prompts, and the refusal the dispatcher hands the model.
+#: A relative path (not ``Paths``) on purpose: rule resources are portable
+#: text, and the absolute form is only ever needed for a human-facing message.
+PLAN_DIR = ".ai-coding/plan"
 
 #: The two kinds an agent may be.  A primary agent is a session's own agent;
 #: a subagent is a target a parent may delegate to (``subAgent``).

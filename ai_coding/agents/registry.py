@@ -31,6 +31,7 @@ from typing import Any
 from ai_coding.domain.agents import (
     DEFAULT_AGENT_ID,
     PLAN_AGENT_ID,
+    PLAN_DIR,
     PRIMARY,
     SUBAGENT,
     AgentCatalog,
@@ -60,7 +61,18 @@ _EXPLORE_ALLOWED = (
 #: These are the six the read-only overlay used to refuse structurally --
 #: one rule set replaces the special case, and the tool surface prunes by
 #: the same rule the gate judges by.
-_PLAN_SOFT_DENY = ("edit", "shell", "subagent", "webfetch", "websearch")
+_PLAN_SOFT_DENY = (
+    "edit",
+    "shell",
+    "subagent",
+    "webfetch",
+    "websearch",
+    # M3 T8: the planning list is present_plan's, not todo_write's.  Cutting
+    # the tool is what stops two owners from writing ``task.items`` in the
+    # same turn; a prompt that only *asks* the model not to use it leaves the
+    # tool in front of it.
+    "todo_write",
+)
 
 #: The strict tier adds the tools that do not change the workspace but do
 #: change the conversation or the plan: asking the human, writing memory,
@@ -71,7 +83,6 @@ _PLAN_STRICT_DENY = (
     "memory_write",
     "start_goal",
     "update_goal",
-    "todo_write",
 )
 
 
@@ -91,10 +102,22 @@ def builtin_catalog(*, strict_readonly: bool = False) -> AgentCatalog:
     explore_rows: tuple[dict[str, Any], ...] = (
         _rule_row("*", "deny"),
         *(_rule_row(action, "allow") for action in _EXPLORE_ALLOWED),
+        # The agent layer sits **above** base, so the ``read * allow`` just
+        # added would otherwise erase the base's dotenv question.  opencode's
+        # explore agent repeats the same three rows for the same reason
+        # (``plugin/agent.ts:121-124``).
+        {"action": "read", "resource": "*.env", "effect": "ask"},
+        {"action": "read", "resource": "*.env.*", "effect": "ask"},
+        {"action": "read", "resource": "*.env.example", "effect": "allow"},
     )
     plan_deny = _PLAN_SOFT_DENY + (_PLAN_STRICT_DENY if strict_readonly else ())
     plan_rows: tuple[dict[str, Any], ...] = tuple(
         _rule_row(action, "deny") for action in plan_deny
+    ) + (
+        # The exception has to come after the blanket deny: the rule language
+        # is last-match-wins.  A scoped allow also keeps write/edit in the
+        # tool table (``wholly_disabled`` only removes a wholly denied action).
+        {"action": "edit", "resource": f"{PLAN_DIR}/*", "effect": "allow"},
     )
     return AgentCatalog(
         specs={
@@ -106,7 +129,10 @@ def builtin_catalog(*, strict_readonly: bool = False) -> AgentCatalog:
             PLAN_AGENT_ID: AgentSpec(
                 id=PLAN_AGENT_ID,
                 name="Plan",
-                description="Read-only planning agent.",
+                description=(
+                    "Planning agent; writes only the plan directory "
+                    f"({PLAN_DIR}/)."
+                ),
                 permissions=plan_rows,
             ),
             "general": AgentSpec(

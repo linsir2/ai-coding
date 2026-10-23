@@ -2020,6 +2020,9 @@ class AgentLoop:
                 agent_rules=agent_rules,
                 posture=posture,
             ),
+            # M3 T5: a proof naming an operator-declared root is reachable;
+            # the same roots the file tools and the workspace gate use.
+            extra_roots=self.extra_workspace_roots,
         )
         by_id = {item.id: item for item in checked}
         for item in session.acceptance:
@@ -2667,7 +2670,27 @@ class AgentLoop:
         if mode != "plan":
             tools = [tool for tool in tools if not tool.plan_only]
         if readonly:
-            tools = [tool for tool in tools if not tool.mutates_world]
+            # M3 T5: in the plan posture a mutating tool with a **scoped**
+            # allow is reachable (the plan directory), so it must stay in the
+            # catalogue -- otherwise the rule could never be reached.  Every
+            # other posture keeps the old rule exactly: ``/readonly`` is an
+            # absolute switch the operator threw, and a session rule must not
+            # widen it.
+            plan = mode == "plan"
+            tools = [
+                tool
+                for tool in tools
+                if not tool.mutates_world
+                or (
+                    plan
+                    and self.gate.partially_allowed(
+                        tool.name,
+                        session_rules=session_rules,
+                        agent_rules=agent_rules,
+                        posture="plan",
+                    )
+                )
+            ]
         posture = posture_of(mode, readonly)
         return [
             tool

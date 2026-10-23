@@ -11,8 +11,9 @@ is exactly the wall-clock burn the experiments measured.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from ai_coding.domain.acceptance import AcceptanceItem, pending_items
@@ -38,7 +39,9 @@ def _tail(text: str) -> str:
     return text
 
 
-def _needs_a_human(command: str, workspace: str) -> str:
+def _needs_a_human(
+    command: str, workspace: str, *, extra_roots: Sequence[str] = ()
+) -> str:
     """Why this proof command has to be asked about, or ``""`` when it does not.
 
     A proof command is a shell command, and a shell has no sandbox: it can
@@ -67,7 +70,11 @@ def _needs_a_human(command: str, workspace: str) -> str:
     # A proof command is a command, not a sentence: the shell grammar reads
     # the paths a text scan cannot see (the one behind a variable, the one
     # inside a command substitution, the one a directory command names).
-    offenders = outside_workspace_paths([command], workspace, from_shell=True)
+    offenders = outside_workspace_paths(
+        [command], workspace, extra_roots=tuple(extra_roots), from_shell=True
+    )
+    if not offenders:
+        offenders = _relative_targets_outside(command, workspace, extra_roots)
     if offenders:
         return (
             "目标路径在工作区外："
@@ -75,6 +82,54 @@ def _needs_a_human(command: str, workspace: str) -> str:
             + "。验收命令由 shell 执行，能访问工作区外的路径。"
         )
     return ""
+
+
+def _relative_targets_outside(
+    command: str, workspace: str, extra_roots: Sequence[str]
+) -> list[str]:
+    """Relative words that resolve outside every root, from the shell grammar.
+
+    ``path_candidates`` only reports absolute-looking words, on purpose: a
+    prose path is not a command argument.  A proof *is* a command, though, so
+    ``cat ../secret.txt`` names a real target.  The same containment test as
+    the sandbox is used here (resolve, then ``relative_to``), so this adds no
+    second definition of "inside".
+    """
+    from ai_coding.security.sandbox import Sandbox, SandboxViolation
+    from ai_coding.shell_parse import command_views
+
+    sandbox = Sandbox(workspace, extra_roots=tuple(extra_roots))
+    offenders: list[str] = []
+    # ``cd`` changes the directory every later command runs in.  Tracking it
+    # is the difference between "this word is a bare filename" and "this
+    # filename is outside the workspace".
+    cwd = Path(workspace)
+    for view in command_views(command):
+        if view.program == "cd":
+            target = next((w for w in view.arguments if not w.startswith("-")), "")
+            if target:
+                cwd = (cwd / target).expanduser().resolve()
+            continue
+        for word in (*view.arguments, *view.redirects):
+            text = str(word or "")
+            if not text or text.startswith(("-", "$", "&")):
+                continue
+            # Absolute words are path_candidates' job; this is the relative
+            # half.  A bare word is a place only when ``cd`` moved us: in
+            # ``cd .. && cat secret.txt`` the second word is the target.
+            if text.startswith(("/", "~")):
+                continue
+            if "/" not in text and cwd == Path(workspace).resolve():
+                continue
+            try:
+                target_path = (cwd / text).expanduser()
+                resolved = target_path.resolve()
+                if sandbox._contained_in(resolved) is None:
+                    raise SandboxViolation(text)
+            except SandboxViolation:
+                if text not in offenders:
+                    offenders.append(text)
+    return offenders
 
 
 async def verify_items(
@@ -85,6 +140,7 @@ async def verify_items(
     timeout_total: float = _DEFAULT_TOTAL_SECONDS,
     approval: ApprovalCallback | None = None,
     deny_reason: DenyReason | None = None,
+    extra_roots: Sequence[str] = (),
 ) -> list[AcceptanceItem]:
     """Check every not-yet-passed item; return the items with verdicts filled.
 
@@ -119,7 +175,7 @@ async def verify_items(
                     replace(item, passed=False, output=_tail(f"refused: {denied}"))
                 )
                 continue
-        reason = _needs_a_human(item.verify, workspace)
+        reason = _needs_a_human(item.verify, workspace, extra_roots=extra_roots)
         if reason and not await _approved(item, reason, approval):
             checked.append(replace(item, passed=False, output=_tail(f"refused: {reason}")))
             continue

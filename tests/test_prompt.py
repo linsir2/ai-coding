@@ -245,9 +245,17 @@ def test_plan_segment_sends_the_steps_through_present_plan():
     """P1 (trace ec89d5ee): the segment taught a ``todo_write`` workflow whose
     measured cost was one iteration per step plus an add/clear loop.  The
     steps now ride ``present_plan``'s own call, and the planning phase is told
-    not to track itself with todo_write (dsh's rule, standard.patch.yml:59)."""
+    not to track itself with a todo list.
+
+    M3 T8 removed ``todo_write`` from the planning surface entirely, so the
+    segment must not name it: a prompt that teaches "don't use this tool" for
+    a tool the request does not carry is a second, drifting source of truth.
+    The behavioural half of the old assertion -- "do not build a side list" --
+    is still pinned.
+    """
     out = _assembler().build(mode="plan")
     assert "present_plan" in out
     assert "items" in out
     assert "todo items with todo_write" not in out  # the old teaching is gone
-    assert "do not track the planning with todo_write" in out
+    assert "todo_write" not in out
+    assert "do not track the planning with a todo list" in out

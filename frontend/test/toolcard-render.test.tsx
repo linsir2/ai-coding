@@ -190,4 +190,35 @@ describe("ToolCard", () => {
     expect(frame).toContain("该请求要实现")
     setup.renderer.destroy()
   })
+
+  test("a submitted plan opens into the plan that was actually sent", async () => {
+    // M3 T11: `task.items` is the run's state and changes; the call's own
+    // arguments are what the human approved.  The card must show those.
+    const setup = await render(
+      part({
+        toolName: "present_plan",
+        verb: "提交计划",
+        target: "",
+        status: "ok",
+        params: {
+          plan: "# 编排层计划\n正文内容",
+          items: [{ content: "建目录", verify: "test -d hotel" }],
+        },
+      }),
+    )
+    expect(setup.captureCharFrame()).toContain("已提交计划")
+    // The card is collapsed until opened; the click path is the row itself
+    // (no keyboard binding in this component), so press it through the
+    // renderer's mouse helper.
+    await setup.mockMouse.click(8, 1)
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("编排层计划")
+    // Markdown, not the raw source: a heading must lose its ``#``.
+    expect(frame).not.toContain("# 编排层计划")
+    expect(frame).toContain("建目录")
+    expect(frame).toContain("test -d hotel")
+    setup.renderer.destroy()
+  })
 })

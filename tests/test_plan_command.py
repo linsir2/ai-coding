@@ -638,7 +638,9 @@ def test_the_plan_prompt_sends_the_steps_through_present_plan():
     assert "items" in lowered
     assert "verify" in lowered
     assert "todo items with todo_write" not in lowered  # the old teaching is gone
-    assert "do not track the planning with todo_write" in lowered
+    # M3 T8 removed todo_write from the plan surface; the prompt must not
+    # name a tool the request cannot carry.
+    assert "todo_write" not in lowered
 
 
 @pytest.mark.asyncio

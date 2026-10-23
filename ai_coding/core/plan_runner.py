@@ -36,6 +36,7 @@ from ai_coding.core.file_mentions import FILE_PATH_EXTENSIONS
 from ai_coding.core.task_driver import TaskDriver
 from ai_coding.core.turn_policy import TurnPolicy
 from ai_coding.domain.acceptance import AcceptanceItem
+from ai_coding.domain.agents import PLAN_DIR
 from ai_coding.domain.loop import TurnStatus
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.plan_delivery import StepDelivery
@@ -108,7 +109,7 @@ PLAN_PROMPT = (
     "first) and, in its items array, every step — each item carries its proof "
     "command in 'verify' (a shell command) when the outcome is "
     "machine-checkable, so the plan can be executed and verified step by "
-    "step. Do not track the planning with todo_write. "
+    "step. "
     "Write the items as pending/open steps only — do not execute "
     "the work and do not mark items completed during planning. "
     "State each step's goal and its verifiable success criteria, "
@@ -117,8 +118,8 @@ PLAN_PROMPT = (
     "Write the full skeleton of items first (one line plus its verify for "
     "each) and refine afterwards; use grep/glob to look at code selectively "
     "— do not read whole large files just to write the plan. "
-    "bash/write/edit are unavailable in plan mode — explore with "
-    "read/grep/glob instead. "
+    f"Write only inside the plan directory ({PLAN_DIR}/); bash is "
+    "unavailable in plan mode. Explore with read/grep/glob. "
     "present_plan presents the plan for the user's review, and approval "
     "starts execution automatically — do not execute it yourself. "
     "A topic that needs no implementation closes with finish_research(summary) "
@@ -435,6 +436,13 @@ async def plan_only(
     offenders = outside_workspace_paths(
         [item.content for item in items], workspace, extra_roots=extra_roots
     )
+    if not offenders:
+        offenders = outside_workspace_paths(
+            [item.verify for item in items if item.verify],
+            workspace,
+            extra_roots=extra_roots,
+            from_shell=True,
+        )
     if offenders:
         # W2/R02: this gate runs *after* the human approved the plan, and
         # approval is what armed the task.  Refusing the plan must withdraw
@@ -740,10 +748,19 @@ class PlanRunner:
             return []
         workspace = str(getattr(self._loop, "workspace", "") or ".")
         extra_roots = tuple(getattr(self._loop, "extra_workspace_roots", ()) or ())
-        return outside_workspace_paths(
-            [item.content for item in task.open_items()],
+        items = task.open_items()
+        offenders = outside_workspace_paths(
+            [item.content for item in items],
             workspace,
             extra_roots=extra_roots,
+        )
+        if offenders:
+            return offenders
+        return outside_workspace_paths(
+            [item.verify for item in items if item.verify],
+            workspace,
+            extra_roots=extra_roots,
+            from_shell=True,
         )
 
     def _persist(self, session: Any) -> None:

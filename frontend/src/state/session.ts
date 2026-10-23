@@ -38,6 +38,13 @@ export type Part =
       error: string
       /** What the wire measured; 0 when the event carried none. */
       durationMs: number
+      /**
+       * M3 T11: the arguments of a `present_plan` call, so the transcript can
+       * show the plan that was actually submitted.  Undefined for every other
+       * tool -- keeping every call's arguments would make the transcript a
+       * second copy of the session file.
+       */
+      params?: Record<string, unknown>
     }
   | { kind: "plan"; goal: string; items: PlanItem[] }
   | { kind: "notice"; tone: Tone; text: string; action?: "resume" }
@@ -473,6 +480,7 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
     case "tool.started": {
       const callId = str(data["callId"])
       const toolName = str(data["toolName"])
+      const params = obj(data["params"])
       return updateAssistant(state, (parts) => [
         ...parts,
         {
@@ -488,6 +496,7 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
           preview: "",
           error: "",
           durationMs: 0,
+          ...(toolName === "present_plan" ? { params } : {}),
         },
       ])
     }

@@ -225,11 +225,27 @@ class PresentPlanTool(BaseTool):
         # refusal has to reach it as a tool error.  The gate is the same one
         # the runner uses, with the same roots, so the two never disagree
         # about which paths are reachable.
+        workspace = str(getattr(ctx, "workspace", "") or ".")
+        extra_roots = tuple(getattr(ctx, "extra_workspace_roots", ()) or ())
+        # The plan body and the step descriptions are prose: the shape
+        # heuristic keeps a route like ``GET /api/v1/users`` out of it.
         offenders = outside_workspace_paths(
             [plan, *(content for content, _, _ in items)],
-            str(getattr(ctx, "workspace", "") or "."),
-            extra_roots=tuple(getattr(ctx, "extra_workspace_roots", ()) or ()),
+            workspace,
+            extra_roots=extra_roots,
         )
+        # The proofs are shell commands, and they run *outside* the dispatch
+        # gate -- refusing them here is the last point before a human approves
+        # a plan the shell will run elsewhere.  Read by the shell grammar, not
+        # by the prose scan: a variable or command substitution hides a path
+        # from the latter (measurably, W2's live check).
+        if not offenders:
+            offenders = outside_workspace_paths(
+                [verify for _, verify, _ in items if verify],
+                workspace,
+                extra_roots=extra_roots,
+                from_shell=True,
+            )
         if offenders:
             return ToolResult(
                 success=False,

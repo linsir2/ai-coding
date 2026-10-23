@@ -62,25 +62,61 @@ export function parseAskRequest(params: Record<string, unknown>): AskRequest {
 }
 
 /**
- * R04: the review card's rows, shape-checked -- what the card renders is what
- * approval will write.  Shapeless entries are dropped, never guessed at.
+ * One reader for plan rows, used by the review card and the history card.
+ *
+ * A review payload carries ``dependsOn``, already display-shaped (1-based).
+ * A tool call carries ``depends_on``, 0-based into that same submission, so a
+ * replayed card shows step numbers and must shift it.  Rows without content
+ * are dropped, never guessed at.
  */
-export function planReviewItems(request: AskRequest): PlanItemData[] {
-  const raw = request.data["items"]
+export function planItems(
+  raw: unknown,
+  { coerce = false }: { coerce?: boolean } = {},
+): PlanItemData[] {
   if (!Array.isArray(raw)) return []
   const items: PlanItemData[] = []
   for (const entry of raw) {
     if (!isRecord(entry)) continue
-    const content = typeof entry["content"] === "string" ? entry["content"] : ""
-    if (!content) continue
-    const verify = typeof entry["verify"] === "string" ? entry["verify"] : ""
-    const rawDeps = entry["dependsOn"]
+    // The backend accepts any truthy `content` and normalizes it with
+    // ``str(...)`` (present_plan_tool._parse_items).  Dropping a numeric step
+    // here would renumber every later row and shift its dependencies.
+    const rawContent = entry["content"]
+    const content =
+      typeof rawContent === "string"
+        ? rawContent
+        : coerce && (typeof rawContent === "number" || typeof rawContent === "boolean")
+          ? String(rawContent)
+          : ""
+    if (!content.trim()) continue
+    const rawVerify = entry["verify"]
+    const verify =
+      typeof rawVerify === "string"
+        ? rawVerify
+        : typeof rawVerify === "number"
+          ? String(rawVerify)
+          : ""
+    // The two payloads mean different things: a review card's ``dependsOn`` is
+    // already 1-based display data, a tool call's ``depends_on`` is 0-based
+    // into the submission.  Read whichever the payload has; never merge them.
+    const fromTool = entry["depends_on"] !== undefined
+    const rawDeps = fromTool ? entry["depends_on"] : entry["dependsOn"]
     const dependsOn = Array.isArray(rawDeps)
       ? rawDeps.filter((n): n is number => typeof n === "number" && Number.isInteger(n))
       : []
-    items.push({ content, verify, dependsOn })
+    // One key wins, never a merge: the backend reads only ``depends_on``, so a
+    // payload carrying both must not display a union it did not execute.
+    const display = fromTool ? dependsOn.map((n) => n + 1) : dependsOn
+    items.push({ content, verify, dependsOn: display })
   }
   return items
+}
+
+/**
+ * R04: the review card's rows, shape-checked -- what the card renders is what
+ * approval will write.  Shapeless entries are dropped, never guessed at.
+ */
+export function planReviewItems(request: AskRequest): PlanItemData[] {
+  return planItems(request.data["items"])
 }
 
 /** The text a selection answers with; out of range (or no options) answers nothing. */
@@ -91,4 +127,48 @@ export function answerForSelection(options: string[], index: number): string {
 /** 19 §3.3: the review card's answer, as the JSON ``present_plan`` parses. */
 export function planReviewAnswer(choice: "approve" | "keep", feedback = ""): string {
   return feedback ? JSON.stringify({ choice, feedback }) : JSON.stringify({ choice })
+}
+
+/**
+ * M3 T11: the plan a ``present_plan`` call submitted, read back from its
+ * arguments.
+ *
+ * The durable home of a plan is the tool call, not `task.items` (which the
+ * run rewrites).  Live and replayed tool parts both carry the same `params`,
+ * so this one reader serves the transcript's historical card and keeps it in
+ * step with the review card.
+ *
+ * The rows go through the same reader as the review card (`planItems`), so
+ * a key rename in one payload cannot make the two cards disagree.
+ */
+export function submittedPlan(
+  params: Record<string, unknown>,
+): { plan: string; items: PlanItemData[] } | null {
+  const plan = typeof params["plan"] === "string" ? params["plan"] : ""
+  if (!plan.trim()) return null
+  // A tool call is the model's own JSON: normalize it the way the backend's
+  // ``_parse_items`` does (``str(content)``), so a numeric step is not dropped.
+  return { plan, items: planItems(params["items"], { coerce: true }) }
+}
+
+/**
+ * The plan as the card shows it when a nested markdown renderable has no
+ * layout to grow in: drop the block-level markers the operator does not need
+ * to read (``#``, ``-``, backticks), keep every word.
+ *
+ * This is deliberately a display transform, not a second parser: the raw
+ * plan stays in `submittedPlan`, and nothing here decides what ran.
+ */
+export function planText(plan: string): string {
+  return plan
+    .split("\n")
+    .map((line) =>
+      line
+        .replace(/^\s{0,3}#{1,6}\s+/, "")
+        .replace(/^\s{0,3}[-*+]\s+/, "· ")
+        .replace(/`/g, "")
+        .replace(/\*\*(.+?)\*\*/g, "$1")
+        .replace(/__(.+?)__/g, "$1"),
+    )
+    .join("\n")
 }

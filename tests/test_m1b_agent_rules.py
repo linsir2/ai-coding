@@ -55,6 +55,10 @@ def test_the_agent_layer_sits_between_standing_and_the_operator_files():
 
 def test_layer_counts_with_agent_rules_counts_them():
     counts = _gate().layer_counts((), _explore())
+    # ``_explore()`` is this file's own minimal fixture (one deny + eight
+    # allows), not the built-in explore agent.  The count pins that
+    # ``layer_counts`` reports the layer it was handed; the built-in table is
+    # covered by ``test_m3_boundaries.py``.
     assert counts["agent"] == 9
 
 
@@ -168,13 +172,24 @@ def test_the_plan_agent_denies_the_world_changing_tools():
 
 
 def test_the_plan_agent_keeps_the_reading_tools():
-    """The plan agent only *denies*; the reading tools come from the base.
+    """The plan agent denies the world; the reading tools come from the base.
 
     A layer that allowed what the base already allows would be saying the
     same thing twice, and the second copy is the one that drifts.
+
+    M3 T5 added one **scoped** allow -- the plan directory.  It is not a
+    second copy of a base rule: the base allows no writes at all, so this is
+    the only thing that makes a plan directory writable.  Every *unscoped*
+    rule in the layer still has to be a deny.
     """
     rules = _plan_rules()
-    assert all(rule.effect is Effect.DENY for rule in rules)
+    assert all(
+        rule.effect is Effect.DENY or rule.resource != "*" for rule in rules
+    )
+    assert any(
+        rule.effect is Effect.ALLOW and rule.resource == ".ai-coding/plan/*"
+        for rule in rules
+    )
 
     gate = PermissionGate()
     for tool in ("read", "grep", "glob"):
@@ -204,11 +219,17 @@ def test_the_strict_tier_keeps_the_two_exits():
 
 
 def test_the_plan_rules_hide_exactly_what_the_readonly_overlay_hid():
-    """The soft tier must be equivalent to what it replaces.
+    """The soft tier hides what the overlay hid, minus the plan directory.
 
     The old posture refused every ``mutates_world`` tool; the new one is
     a rule set.  If the two disagree, the prompt and the tool surface
     start telling different stories.
+
+    M3 T5 deliberately changed one half of that contract: write/edit now
+    stay in the catalogue because a **scoped** allow gives them one writable
+    place (opencode D06 -- the tool is visible, the refusal happens at
+    dispatch where the model can read which resource it hit).  Everything
+    else is still hidden exactly as before.
     """
     from ai_coding.config.models import AIConfig, AppConfig
     from ai_coding.tools.builder import build_tool_registry
@@ -216,7 +237,11 @@ def test_the_plan_rules_hide_exactly_what_the_readonly_overlay_hid():
     registry = build_tool_registry(
         AppConfig(models={}, default_model="", ai=AIConfig()), ".", None
     )
-    hidden_by_overlay = {t.name for t in registry.all_tools if t.mutates_world}
+    hidden_by_overlay = {
+        t.name
+        for t in registry.all_tools
+        if t.mutates_world and t.name not in ("write", "edit")
+    }
 
     gate = PermissionGate()
     rules = _plan_rules()
@@ -224,4 +249,9 @@ def test_the_plan_rules_hide_exactly_what_the_readonly_overlay_hid():
         t.name for t in registry.all_tools if gate.hides(t.name, agent_rules=rules)
     }
 
-    assert hidden_by_rules == hidden_by_overlay
+    # M3 T8 is the second deliberate difference: ``todo_write`` is not a
+    # world-mutating tool, so the old overlay never hid it -- and the plan
+    # posture does, because two owners must not write ``task.items``.
+    assert hidden_by_rules == hidden_by_overlay | {"todo_write"}
+    assert gate.partially_allowed("write", agent_rules=rules, posture="plan")
+    assert gate.partially_allowed("edit", agent_rules=rules, posture="plan")

@@ -29,9 +29,11 @@ from ai_coding.security.permissions import (
     Ruleset,
     evaluate,
     load_file_rules,
+    partially_allowed,
     subjects_of,
     wholly_disabled,
 )
+from ai_coding.security.permissions import _lexical as _lexical_subject
 from ai_coding.shell_parse import command_words
 
 
@@ -67,22 +69,39 @@ class Decision:
     ``decision.reason``.
     """
 
-    def __init__(self, decision: PermissionDecision, reason: str = "") -> None:
+    def __init__(
+        self,
+        decision: PermissionDecision,
+        reason: str = "",
+        *,
+        specific: bool = False,
+    ) -> None:
         self.decision = decision
         self.reason = reason
+        #: M3 T5: this ALLOW came from a **scoped** rule (resource != "*"),
+        #: so it is a boundary the dispatch overlay must not veto.  False is
+        #: the safe default: an overlay keeps refusing what it refused before.
+        self.specific = specific
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, PermissionDecision):
             return self.decision == other
         if isinstance(other, Decision):
-            return self.decision == other.decision and self.reason == other.reason
+            return (
+                self.decision == other.decision
+                and self.reason == other.reason
+                and self.specific == other.specific
+            )
         return NotImplemented
 
     def __hash__(self) -> int:
         return hash(self.decision)
 
     def __repr__(self) -> str:
-        return f"Decision({self.decision.value!r}, reason={self.reason!r})"
+        return (
+            f"Decision({self.decision.value!r}, reason={self.reason!r},"
+            f" specific={self.specific!r})"
+        )
 
 
 #: Hard deny patterns for bash commands
@@ -334,6 +353,24 @@ def _split_grant(key: str) -> tuple[str, str | None]:
     return base, suffix
 
 
+#: A dotenv file is a secret container: reading one asks the operator, and
+#: the example file (documentation, no secrets) is the one exception.  The
+#: order is the semantics -- the language is last-match-wins, so the allow has
+#: to come after both asks, and all three have to come after the base's
+#: blanket ``read * allow``.
+CREDENTIAL_READ_RULES: Ruleset = (
+    Rule(action="read", resource="*.env", effect=Effect.ASK),
+    Rule(action="read", resource="*.env.*", effect=Effect.ASK),
+    Rule(action="read", resource="*.env.example", effect=Effect.ALLOW),
+    # ``grep`` reads file contents too.  Leaving it on the blanket allow would
+    # make the read question a formality: one call to ``grep .* .env`` returns
+    # the secret without a prompt.
+    Rule(action="grep", resource="*.env", effect=Effect.ASK),
+    Rule(action="grep", resource="*.env.*", effect=Effect.ASK),
+    Rule(action="grep", resource="*.env.example", effect=Effect.ALLOW),
+)
+
+
 def _grant_base(key: str) -> str:
     """The path/tool part of a stored grant, without its posture suffix."""
     return _split_grant(key)[0]
@@ -560,6 +597,18 @@ class PermissionGate:
             if decision is not None:
                 return decision
 
+        subjects = list(subjects_of(name, params))
+        # A rule is a boundary over a *place*, not a spelling.  The same
+        # subject list serves the veto and the layered query, so the two
+        # cannot disagree about what this call touches.
+        resolved = self._resolved_subject(name, params)
+        if resolved is not None and resolved not in subjects:
+            subjects.append(resolved)
+        if name == "grep":
+            root = _lexical_subject(str(params.get("path") or ""))
+            if root and root not in subjects:
+                subjects.append(root)
+
         # 2. The agent's veto.  Evaluated on the agent layer alone, so a
         #    session ``allow`` can never reopen it.  This is the one place
         #    the chain is not simply "last match wins": the agent's *deny*
@@ -569,7 +618,7 @@ class PermissionGate:
             veto = next(
                 (
                     rule
-                    for subject in subjects_of(name, params)
+                    for subject in subjects
                     for rule in (evaluate(name, subject, agent_rules, posture=posture),)
                     if rule is not None and rule.effect is Effect.DENY
                 ),
@@ -586,7 +635,7 @@ class PermissionGate:
         layers = self._layers(tuple(session_rules), tuple(agent_rules))
         winners = [
             evaluate(name, subject, *layers, posture=posture)
-            for subject in subjects_of(name, params)
+            for subject in subjects
         ]
         denial = next((w for w in winners if w is not None and w.effect is Effect.DENY), None)
         if denial is not None:
@@ -621,7 +670,15 @@ class PermissionGate:
             outside = self._outside_resource_reason(name, params)
             if outside is not None:
                 return Decision(PermissionDecision.WARN, outside)
-            return Decision(PermissionDecision.ALLOW, "")
+            # M3 T5: an allow that rests on a **scoped** rule is a boundary --
+            # the tool may run for that resource and nowhere else.  The plan
+            # directory exception is exactly this, and the dispatch overlay
+            # must not veto it a second time.  Every touched resource has to
+            # be scoped: one wildcard allow would make the call unrestricted.
+            specific = all(
+                w is not None and w.resource != "*" for w in winners
+            )
+            return Decision(PermissionDecision.ALLOW, "", specific=specific)
         return Decision(
             PermissionDecision.WARN,
             f"unknown tool '{tool_name}' requires confirmation",
@@ -672,6 +729,10 @@ class PermissionGate:
                 Rule(action=name, resource="*", effect=Effect.ASK)
                 for name in sorted(self._warn_tools)
             ]
+            # M3 T9: appended last on purpose.  ``*`` crosses slashes, so these
+            # cover a nested ``config/.env`` too; putting them before
+            # ``read * allow`` would let the blanket allow win.
+            + list(CREDENTIAL_READ_RULES)
         )
 
     def _standing_rules(self) -> Ruleset:
@@ -759,6 +820,28 @@ class PermissionGate:
             posture=posture,
         ) or wholly_disabled(lowered, tuple(agent_rules), posture=posture)
 
+    def partially_allowed(
+        self,
+        action: str,
+        *,
+        session_rules: Ruleset = (),
+        agent_rules: Ruleset = (),
+        posture: str = "build",
+    ) -> bool:
+        """Whether a scoped allow keeps this whole action reachable.
+
+        The mirror of :meth:`hides`: a wholly denied action leaves the
+        catalogue, a partly allowed one stays and its other resources are
+        refused at dispatch.  The plan directory is the case this exists for
+        -- without it the plan agent's write rule could never be reached,
+        because the read-only overlay had already pruned the tool.
+        """
+        return partially_allowed(
+            action.lower(),
+            *self._layers(tuple(session_rules), tuple(agent_rules)),
+            posture=posture,
+        )
+
     def _skill_decision(self, params: Mapping[str, Any]) -> Decision | None:
         """The per-skill policy for the model's skill tool, or ``None``.
 
@@ -814,6 +897,32 @@ class PermissionGate:
                 f"'{self._workspace}' — it needs your approval"
             )
         return None
+
+    def _resolved_subject(
+        self, tool_name: str, params: Mapping[str, Any]
+    ) -> str | None:
+        """The real location of a path tool's target, relative to the workspace.
+
+        The rule language compares text; a symlink is the one place where the
+        text and the thing it names disagree.  ``Path.resolve`` follows the
+        parents that exist and leaves the final missing component alone, so a
+        write of a new file is judged by the directory it will land in.
+        """
+        if not self._workspace or tool_name not in ("read", "write", "edit", "grep"):
+            return None
+        raw = str(params.get("path") or "").strip()
+        if not raw:
+            return None
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(self._workspace) / candidate
+        try:
+            resolved = candidate.resolve()
+            return resolved.relative_to(Path(self._workspace)).as_posix()
+        except (OSError, ValueError):
+            # Outside every root: the sandbox owns that refusal, and adding a
+            # made-up subject here would let a rule match text nobody wrote.
+            return None
 
     def _grant_applies(self, key: str, posture: str) -> bool:
         """Whether a stored grant answers this key in this posture.
