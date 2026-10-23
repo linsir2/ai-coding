@@ -260,6 +260,9 @@ export function messagesToState(
     out.length > MAX_TRANSCRIPT_MESSAGES ? out.slice(out.length - MAX_TRANSCRIPT_MESSAGES) : out
   return {
     messages: capped.filter((message) => message.role === "user" || message.parts.length > 0),
+    // T7: a replay carries no live posture — the route hydrates
+    // SessionState.agent from session.stats right after.
+    agent: null,
     busy: false,
     queued: [],
     // Replayed history has no live jobs: the panel fills this from

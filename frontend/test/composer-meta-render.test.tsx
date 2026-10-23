@@ -3,14 +3,20 @@ import { testRender } from "@opentui/solid"
 import { ComposerMeta } from "../src/component/composer-meta"
 
 /**
- * 19 §3.1: the composer's metadata line leads with the mode tag — PLAN in the
- * plan colour, Build muted, and a missing key (old backend) reads as Build
- * (the same fail-safe direction as the stats payload itself).  Frame
- * assertions only; the colour lives in the theme.
+ * 19 §3.1 + T7: the composer's metadata line leads with the agent name — the
+ * plan colour for plan, muted otherwise — and PLAN/只读 is a suffix, not the
+ * headline.  A missing agent (old backend) reads as Build (the same
+ * fail-safe direction as the stats payload itself).  Frame assertions only;
+ * the colour lives in the theme.
  */
-const render = async (mode?: "normal" | "plan") => {
+const render = async (props: {
+  agent?: string | null
+  agentName?: string | null
+  mode?: "normal" | "plan"
+  readonly?: boolean
+}) => {
   const setup = await testRender(
-    () => <ComposerMeta mode={mode} metadata="qwen3.7-flash · working" />,
+    () => <ComposerMeta {...props} metadata="qwen3.7-flash · working" />,
     { width: 80, height: 2 },
   )
   await setup.flush()
@@ -20,20 +26,29 @@ const render = async (mode?: "normal" | "plan") => {
   return frame
 }
 
-describe("ComposerMeta mode tag (19 §3.1)", () => {
-  test("build mode shows the Build tag before the metadata", async () => {
-    const frame = await render("normal")
+describe("ComposerMeta agent tag (19 §3.1, T7)", () => {
+  test("build mode shows the agent name before the metadata", async () => {
+    const frame = await render({ agent: "build", agentName: "Build", mode: "normal" })
     expect(frame).toContain("Build · qwen3.7-flash · working")
   })
 
-  test("plan mode shows the PLAN tag", async () => {
-    const frame = await render("plan")
-    expect(frame).toContain("PLAN · qwen3.7-flash · working")
+  // T7 sanctioned behavior change (30-M4 §3.5/§7.5): the agent name leads and
+  // PLAN is demoted to a suffix — the old "PLAN · meta" headline (which also
+  // asserted the absence of any name) no longer exists.
+  test("plan mode shows the agent name with PLAN as suffix", async () => {
+    const frame = await render({ agent: "plan", agentName: "Plan", mode: "plan", readonly: true })
+    expect(frame).toContain("Plan · PLAN·只读 · qwen3.7-flash · working")
     expect(frame).not.toContain("Build")
   })
 
-  test("a missing mode reads as Build (old backend)", async () => {
-    const frame = await render(undefined)
+  test("a custom agent names itself, posture still suffixes", async () => {
+    const frame = await render({ agent: "reviewer", agentName: "Reviewer", mode: "normal" })
+    expect(frame).toContain("Reviewer · qwen3.7-flash · working")
+    expect(frame).not.toContain("PLAN")
+  })
+
+  test("a missing agent reads as Build (old backend)", async () => {
+    const frame = await render({})
     expect(frame).toContain("Build · qwen3.7-flash · working")
   })
 })

@@ -1223,6 +1223,8 @@ async def test_session_stats_without_usage(ipc):
         "maxContextTokens": 48000,
         "mode": "normal",
         "readonly": False,
+        # T7: stats carries the live agent id alongside the derived posture.
+        "agent": "build",
         "turnCount": 0,
         "budget": None,  # no recorder in this world: tracing is off
     }
@@ -1246,6 +1248,8 @@ async def test_session_stats_reports_last_turn_prompt_tokens(ipc):
         "maxContextTokens": 48000,
         "mode": "normal",
         "readonly": False,
+        # T7: stats carries the live agent id alongside the derived posture.
+        "agent": "build",
         "turnCount": 0,
         "budget": None,
     }
@@ -1320,6 +1324,8 @@ async def test_session_stats_reports_the_posture(ipc):
         "maxContextTokens": 48000,
         "mode": "plan",
         "readonly": True,
+        # T7: stats carries the live agent id alongside the derived posture.
+        "agent": "plan",
         "turnCount": 0,
         "budget": None,
     }
@@ -2541,3 +2547,153 @@ async def test_a_goal_breaker_resume_names_the_goal_and_starts_no_run(ipc):
     assert world.loop.calls == []  # nothing started
     # The breaker disarmed it; an itemless episode then evaporates by design.
     assert getattr(world.sessions.load(armed.session_id).task, "armed", False) is False
+
+
+def _t7_catalog():
+    """Three switchable primaries, one hidden primary, one subagent target."""
+    from ai_coding.domain.agents import AgentSpec
+
+    return {
+        "build": AgentSpec(id="build", name="Build", kind="primary", source="builtin"),
+        "plan": AgentSpec(
+            id="plan", name="Plan", kind="primary", source="builtin", description="read-only"
+        ),
+        "reviewer": AgentSpec(
+            id="reviewer", name="Reviewer", kind="primary", source="project"
+        ),
+        "secret": AgentSpec(id="secret", name="Secret", kind="primary", hidden=True),
+        "helper": AgentSpec(id="helper", name="Helper", kind="subagent"),
+    }
+
+
+def _t7_world_with_agents(world):
+    from ai_coding.domain.agents import AgentCatalog
+
+    world.loop.agents = AgentCatalog(specs=_t7_catalog())
+    return world
+
+
+@pytest.mark.asyncio
+async def test_stats_carries_the_current_agent(ipc):
+    """T7-1: session.stats carries the live agent id (stats.agent)."""
+    world, _service, client = ipc
+    client.request("initialize")
+    assert client.request("session.stats")["agent"] == "build"
+    # ``initialize`` keeps its session in memory only (create() does not
+    # save), so go through session.create for a session the store knows.
+    created = client.request("session.create", {"title": "t"})
+    session = world.sessions.load(created["id"])
+    assert session is not None
+    session.agent = "reviewer"
+    world.sessions.save(session)
+    client.request("session.load", {"id": created["id"]})
+    assert client.request("session.stats")["agent"] == "reviewer"
+
+
+@pytest.mark.asyncio
+async def test_session_agents_lists_only_non_hidden_primary_agents(ipc):
+    """T7-2: session.agents lists visible primaries only, sorted by id."""
+    world, _service, client = ipc
+    _t7_world_with_agents(world)
+    client.request("initialize")
+    result = client.request("session.agents")
+    rows = result["agents"]
+    assert [row["id"] for row in rows] == ["build", "plan", "reviewer"]
+    for row in rows:
+        assert set(row) == {"id", "name", "kind", "source", "description"}
+        assert row["kind"] == "primary"
+
+
+@pytest.mark.asyncio
+async def test_agent_select_commits_and_persists(ipc):
+    """T7-5: session.agent.select commits through request_posture, then persists."""
+    from ai_coding.domain.stance import PostureResult
+
+    world, _service, client = ipc
+    _t7_world_with_agents(world)
+    client.request("initialize")
+    seen: dict[str, object] = {}
+
+    def fake_request_posture(session, *, agent=None, readonly=None, reason="", observer=None):
+        seen.update(agent=agent, readonly=readonly, reason=reason, observer=observer)
+        session.agent = agent
+        session.readonly = bool(readonly)
+        return PostureResult.COMMITTED
+
+    world.loop.request_posture = fake_request_posture  # type: ignore[attr-defined]
+    saved = {"calls": 0}
+    real_save = world.sessions.save
+
+    def counting_save(session):
+        saved["calls"] += 1
+        return real_save(session)
+
+    world.sessions.save = counting_save  # type: ignore[method-assign]
+    try:
+        result = client.request("session.agent.select", {"id": "plan"})
+    finally:
+        world.sessions.save = real_save  # type: ignore[method-assign]
+    assert result == {"ok": True, "status": "committed"}
+    assert seen["agent"] == "plan" and seen["readonly"] is True
+    assert seen["reason"] == "agent.select" and seen["observer"] is not None
+    assert saved["calls"] >= 1
+    live = world.sessions.list_sessions()
+    assert world.sessions.load(live[0].session_id).agent == "plan"
+    assert client.request("session.stats")["agent"] == "plan"
+
+
+@pytest.mark.asyncio
+async def test_agent_select_queues_mid_turn_without_persisting(ipc):
+    """T7-6: a mid-turn select returns queued and persists nothing itself."""
+    from ai_coding.domain.stance import PostureResult
+
+    world, _service, client = ipc
+    _t7_world_with_agents(world)
+    client.request("initialize")
+
+    def fake_queued(session, *, agent=None, readonly=None, reason="", observer=None):
+        # The real loop marks the sidecar here; the save is the closer's job.
+        session.pending_posture = {"agent": agent, "readonly": bool(readonly), "reason": reason}
+        world.sessions.mark_pending_posture(session.session_id, session.pending_posture)
+        return PostureResult.QUEUED
+
+    world.loop.request_posture = fake_queued  # type: ignore[attr-defined]
+    saved = {"calls": 0}
+    real_save = world.sessions.save
+
+    def counting_save(session):
+        saved["calls"] += 1
+        return real_save(session)
+
+    world.sessions.save = counting_save  # type: ignore[method-assign]
+    try:
+        result = client.request("session.agent.select", {"id": "reviewer"})
+    finally:
+        world.sessions.save = real_save  # type: ignore[method-assign]
+    assert result == {"ok": True, "status": "queued"}
+    assert saved["calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_select_refuses_subagent_and_unknown_ids(ipc):
+    """T7-7/T7-8: subagent and unknown ids are explicit errors, no posture call."""
+    world, _service, client = ipc
+    _t7_world_with_agents(world)
+    client.request("initialize")
+
+    def bomb(session, **kwargs):
+        raise AssertionError("request_posture must not run for a refused id")
+
+    world.loop.request_posture = bomb  # type: ignore[attr-defined]
+    # NOTE: the refusal code rides ``reason``, not ``error`` -- a top-level
+    # ``error`` key is the JSON-RPC error field and the client parses it as
+    # one (measured: the reply crashed _handle_response and the call timed
+    # out).  Same convention as session.delete/mcp.connect.
+    assert client.request("session.agent.select", {"id": "helper"}) == {
+        "ok": False,
+        "reason": "not_primary",
+    }
+    assert client.request("session.agent.select", {"id": "nope"}) == {
+        "ok": False,
+        "reason": "unknown_agent",
+    }

@@ -21,6 +21,12 @@ export interface PendingPrompt {
   images: PromptImage[]
   /** 20 §批次1: the posture the Home row showed when this was submitted. */
   mode?: "normal" | "plan"
+  /**
+   * T7: the agent the Home draft named (null = default, no switch).  The
+   * Session route selects it before the prompt runs; the mode above stays
+   * only as the old-backend fallback for planPrelude.
+   */
+  agent?: string | null
 }
 
 /** What the composer keeps: images the wire did not take, and why. */
@@ -106,7 +112,11 @@ export function planPrelude(
   commands: readonly string[],
   sessionId: string,
 ): WireSubmission | null {
-  if (prompt.mode !== "plan") return null
+  // T7: the prelude follows the effective agent, not the legacy mode flag.
+  // An explicit agent wins; otherwise the Home-era mode stays as the
+  // old-backend fallback.
+  const agent = prompt.agent ?? (prompt.mode === "plan" ? "plan" : null)
+  if (agent !== "plan") return null
   if (commandName(commands, prompt.text)) return null
   return {
     method: "session.command",

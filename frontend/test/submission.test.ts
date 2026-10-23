@@ -76,9 +76,12 @@ describe("the Home route's signature (r18/F13)", () => {
     "utf8",
   )
 
-  test("onSubmit accepts the images Prompt passes it, plus the mode (20 §批次1)", () => {
+  // T7 sanctioned behavior change (30-M4 §3.5/§7.5): the Home draft is an
+  // agent id (null = default), not a mode boolean.  The mode only survives
+  // inside PendingPrompt as the old-backend fallback for planPrelude.
+  test("onSubmit carries the agent draft, null for default (T7)", () => {
     expect(src).toMatch(
-      /onSubmit:\s*\(text:\s*string,\s*images:\s*PromptImage\[\],\s*mode:\s*"normal"\s*\|\s*"plan"\)/,
+      /onSubmit:\s*\(text:\s*string,\s*images:\s*PromptImage\[\],\s*agent:\s*string\s*\|\s*null\)/,
     )
   })
 
@@ -106,5 +109,31 @@ describe("planPrelude (20 §批次1)", () => {
   test("a submission that is itself a command skips the prelude", () => {
     // `/help` is in COMMANDS above; with PLAN armed the command is the work.
     expect(planPrelude({ text: "/help", images: [], mode: "plan" }, COMMANDS, "s1")).toBeNull()
+  })
+})
+
+describe("planPrelude follows the agent (T7)", () => {
+  test("an explicit plan agent arms the prelude without the mode flag", () => {
+    const prelude = planPrelude({ text: "探索一下", images: [], agent: "plan" }, COMMANDS, "s1")
+    expect(prelude?.method).toBe("session.command")
+    expect(prelude?.payload).toEqual({ id: "s1", text: "/plan" })
+  })
+
+  test("a non-plan agent sends no prelude", () => {
+    expect(planPrelude({ text: "探索一下", images: [], agent: "reviewer" }, COMMANDS, "s1")).toBeNull()
+    expect(planPrelude({ text: "探索一下", images: [], agent: null }, COMMANDS, "s1")).toBeNull()
+  })
+
+  test("a null draft on an already-plan session still arms the entry", () => {
+    // The Session route fills agent from the hydrated live agent; the
+    // prelude must fire for it the way the old mode flag did.
+    const prelude = planPrelude({ text: "探索一下", images: [], agent: "plan" }, COMMANDS, "s1")
+    expect(prelude?.payload).toEqual({ id: "s1", text: "/plan" })
+  })
+
+  test("an explicit agent wins over a stale mode flag", () => {
+    expect(
+      planPrelude({ text: "x", images: [], agent: "reviewer", mode: "plan" }, COMMANDS, "s1"),
+    ).toBeNull()
   })
 })

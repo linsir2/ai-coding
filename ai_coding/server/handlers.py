@@ -26,6 +26,7 @@ from typing import Any
 
 from ai_coding.attachments import save_data_url
 from ai_coding.config.models import resolve_context_window
+from ai_coding.domain.agents import is_plan_agent
 from ai_coding.domain.session import InboxItem, _message_to_dict
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.infra.vcs import git_branch
@@ -1275,10 +1276,70 @@ def make_handlers(
             # sides from drifting on what "absent" means.
             "mode": str(getattr(session, "mode", "normal") or "normal"),
             "readonly": bool(getattr(session, "readonly", False)),
+            # T7: the current agent id (None before the first session exists);
+            # the frontend hydrates SessionState.agent from this on mount.
+            "agent": getattr(session, "agent", None),
             "turnCount": int(getattr(session, "turn_count", 0) or 0),
             "createdTime": str(getattr(session, "created_time", "") or ""),
             "budget": _session_budget(session),
         }
+
+    def session_agents(params: dict[str, Any]) -> dict[str, Any]:
+        """The switchable agents for the picker and shift+tab (T7).
+
+        The visible-primary subset of ``world.loop.agents``: ``visible()``
+        still carries subagents (delegation targets, not switch targets), and
+        ``primary()`` would include hidden ones.  Sorted by id for stability.
+        """
+        catalog = getattr(getattr(world, "loop", None), "agents", None)
+        if catalog is None:
+            return {"agents": []}
+        rows = [
+            {
+                "id": spec.id,
+                "name": spec.name,
+                "kind": spec.kind,
+                "source": spec.source,
+                "description": spec.description,
+            }
+            for spec in catalog.visible()
+            if spec.kind == "primary"
+        ]
+        rows.sort(key=lambda row: str(row["id"]))
+        return {"agents": rows}
+
+    def session_agent_select(params: dict[str, Any]) -> dict[str, Any]:
+        """Switch the live session's agent (T7).
+
+        A thin adapter over ``world.loop.request_posture``: the four-state
+        machine stays the only state machine.  Committed/cancelled/noop
+        persist through the closer-or-service save; queued leaves the durable
+        write to the pending-posture sidecar that already owns crash recovery.
+        """
+        session = state.session
+        if session is None:
+            raise ValueError("no session initialized")
+        agent_id = str(params.get("id", "") or "")
+        catalog = getattr(getattr(world, "loop", None), "agents", None)
+        spec = catalog.get(agent_id) if catalog is not None else None
+        # ``reason``, not ``error``: a top-level ``error`` key is the
+        # JSON-RPC error field, and the client parses it as one (the same
+        # convention session.delete/mcp.connect follow).
+        if spec is None:
+            return {"ok": False, "reason": "unknown_agent"}
+        if spec.kind != "primary":
+            return {"ok": False, "reason": "not_primary"}
+        result = world.loop.request_posture(
+            session,
+            agent=agent_id,
+            readonly=is_plan_agent(agent_id),
+            reason="agent.select",
+            observer=bridge,
+        )
+        status = str(getattr(result, "value", result)).lower()
+        if status != "queued":
+            _persist_session(world, session)
+        return {"ok": True, "status": status}
 
     def mcp_connect(params: dict[str, Any]) -> dict[str, Any]:
         """M3: the failed row's action — try this server again, now.
@@ -1610,6 +1671,8 @@ def make_handlers(
         "session.inbox": session_inbox,
         "session.jobs": session_jobs,
         "session.stats": session_stats,
+        "session.agents": session_agents,
+        "session.agent.select": session_agent_select,
         "mcp.list": mcp_list,
         "mcp.connect": mcp_connect,
         "mcp.login": mcp_login,

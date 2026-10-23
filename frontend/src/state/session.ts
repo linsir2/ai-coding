@@ -116,6 +116,13 @@ export interface QueuedLine {
 
 export interface SessionState {
   messages: ChatMessage[]
+  /**
+   * T7: the current agent — the ONE frontend truth (hydrated from
+   * session.stats on mount, moved by agent.switched at runtime).
+   * Null before the first hydration.  Never derived from a message tag: a
+   * tag is who produced that history, not the current posture.
+   */
+  agent: string | null
   /** True from submit until the turn's finish event; gates the prompt. */
   busy: boolean
   /**
@@ -151,6 +158,7 @@ export interface GoalStatus {
 }
 
 export type Action =
+  | { kind: "agent-synced"; agent: string | null }
   | { kind: "submitted"; text: string; images?: PromptImage[] }
   // 08: a resumed turn carries no prompt -- busy with no echo.  Reusing
   // "submitted" with an empty text would draw an empty user bubble.
@@ -178,7 +186,7 @@ export type Action =
   | { kind: "jobs"; jobs: JobRow[] }
 
 export function initialState(): SessionState {
-  return { messages: [], busy: false, queued: [], jobs: [], goal: null }
+  return { messages: [], agent: null, busy: false, queued: [], jobs: [], goal: null }
 }
 
 /** Narrow one wire row into the shape the panel draws. */
@@ -475,7 +483,11 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
       const reason = str(data["reason"])
       const suffix = reason ? `（${reason}）` : ""
       const text = `Switched agent: ${from} → ${to}${suffix}`
-      return updateAssistant(state, (parts) => appendNotice(parts, text))
+      // T7: the event moves the current agent AND inserts the notice.  The
+      // tag on a message is history attribution, never the current posture.
+      const toId = str(data["to"])
+      const switched = updateAssistant(state, (parts) => appendNotice(parts, text))
+      return toId ? { ...switched, agent: toId } : switched
     }
     case "tool.started": {
       const callId = str(data["callId"])
@@ -850,6 +862,10 @@ export function applyPlanUpdate(
 
 export function reduce(state: SessionState, action: Action): SessionState {
   switch (action.kind) {
+    // T7: stats.agent lands here on mount (and after reloads) — the only
+    // writer besides agent.switched, so the two cannot disagree.
+    case "agent-synced":
+      return action.agent === state.agent ? state : { ...state, agent: action.agent }
     case "submitted":
       return {
         ...state,

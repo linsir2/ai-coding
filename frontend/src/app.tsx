@@ -326,13 +326,13 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
     })
   })
 
-  const startSession = (text: string, images: PromptImage[] = [], mode: "normal" | "plan" = "normal") => {
+  const startSession = (text: string, images: PromptImage[] = [], agent: string | null = null) => {
     // r18/F13: Home is a second submit entry, so it has to carry the images the
     // way Session does.  Home's onSubmit used to take one argument, Prompt
     // passed two, and the second was dropped without a word.
-    // 20 §批次1: the mode the Home row showed rides along; the Session route
-    // lands the posture (`planPrelude`) before it sends the prompt.
-    setPendingPrompt({ text, images, mode })
+    // T7: the Home draft rides along as the agent; the Session route selects
+    // it (`session.agent.select`) before it sends the prompt.
+    setPendingPrompt({ text, images, agent })
     setRoute("session")
   }
 

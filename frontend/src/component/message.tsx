@@ -19,6 +19,7 @@
 import { For, Index, Match, Switch, Show } from "solid-js"
 import type { ChatMessage, Part } from "../state/session"
 import { theme } from "../theme/tokens"
+import { agentAccent } from "../util/agent"
 import { markdownSyntax } from "../theme/syntax"
 import { Reasoning } from "./reasoning"
 import { ToolCard } from "./toolcard"
@@ -218,11 +219,12 @@ export function MessageView(props: { message: ChatMessage; alwaysOpen: boolean }
       <Index each={props.message.parts}>
         {(part) => <PartView part={part()} alwaysOpen={props.alwaysOpen} />}
       </Index>
-      {/* M1b T1b: who answered.  Only a non-default agent earns a tag — the
-          build agent is the norm, and a tag on every answer is noise. */}
+      {/* M1b T1b + T7: who answered.  Only a non-default agent earns a tag —
+          the build agent is the norm, and a tag on every answer is noise.
+          The tag shares agentAccent with composer and status bar. */}
       <Show when={props.message.agent && props.message.agent !== "build"}>
         <box paddingLeft={3}>
-          <text fg={theme.textMuted}>{`· ${props.message.agent}`}</text>
+          <text fg={agentAccent(props.message.agent ?? "")}>{`· ${props.message.agent}`}</text>
         </box>
       </Show>
     </>

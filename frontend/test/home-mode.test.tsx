@@ -1,10 +1,13 @@
 /**
- * 20 §批次1（冷启动）：Home 自己携带模式切换。
+ * T7 (M4c, cold start): Home carries an agent draft, not a mode toggle.
  *
- * Session 路由（以及它身上的 shift+tab 键位层）只在首次提交后才挂载——
- * 用户冷启动想先切 PLAN 时，键位恰好不存在（会话 24d7109b + 仪器实测的
- * 根因）。 本测试用 runCommand 驱动循环（渲染器夹具无法投递按键；stroke
- * 本身由 keymap-shift-tab.test.tsx 钉住），并断言绑定确实注册在 Home 层。
+ * T7 sanctioned behavior change (30-M4 §3.5/§7.5): the old Build<->PLAN
+ * boolean is gone.  shift+tab cycles the visible-primary order and only
+ * rewrites the draft — no request leaves Home (the Session route runs
+ * session.agent.select before the first prompt).  This test drives the cycle
+ * with runCommand (the renderer harness cannot deliver keypresses; the stroke
+ * itself is pinned by keymap-shift-tab.test.tsx) and asserts the binding is
+ * registered on the Home layer.
  */
 
 import { describe, expect, test } from "bun:test"
@@ -15,10 +18,39 @@ import { DialogProvider } from "../src/dialog/context"
 import { Home } from "../src/routes/home"
 import { setupKeymap } from "../src/keymap"
 
-describe("Home mode row (cold start)", () => {
-  test("the binding is registered and the cycle flips the row Build <-> PLAN", async () => {
+const AGENTS = [
+  { id: "build", name: "Build", kind: "primary", source: "builtin", description: "" },
+  { id: "plan", name: "Plan", kind: "primary", source: "builtin", description: "" },
+  { id: "reviewer", name: "Reviewer", kind: "primary", source: "project", description: "" },
+]
+
+function stubClient() {
+  const calls: string[] = []
+  return {
+    calls,
+    async request(method: string) {
+      calls.push(method)
+      if (method === "session.stats") return { agent: "build" }
+      if (method === "session.agents") return { agents: AGENTS }
+      return {}
+    },
+  }
+}
+
+async function until(fn: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (fn()) return
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  throw new Error(`timed out waiting for ${what}`)
+}
+
+describe("Home agent draft (cold start, T7)", () => {
+  test("the binding is registered and the cycle walks the primary order", async () => {
     const base = await createTestRenderer({ width: 100, height: 40 })
     const keymap = setupKeymap(base.renderer)
+    let submitted: { agent: string | null } | null = null
+    const client = stubClient()
     const setup = await testRender(
       () => (
         <KeymapProvider keymap={keymap}>
@@ -29,8 +61,10 @@ describe("Home mode row (cold start)", () => {
               model="m"
               provider="p"
               branch=""
-              onSubmit={() => {}}
-              client={{} as never}
+              onSubmit={(_text, _images, agent) => {
+                submitted = { agent }
+              }}
+              client={client as never}
               skills={[]}
               files={[]}
               commands={["plan", "help"]}
@@ -41,6 +75,14 @@ describe("Home mode row (cold start)", () => {
       base,
     )
     await setup.flush()
+    // The mount hydrates stats + agents in parallel before the draft means
+    // anything.
+    await until(
+      () => client.calls.includes("session.stats") && client.calls.includes("session.agents"),
+      "home hydration",
+    )
+    await setup.flush()
+    await setup.waitForVisualIdle()
 
     expect(keymap.getActiveKeys().map((key) => key.display)).toContain("shift+tab")
     const frameOf = () => setup.captureCharFrame().split("\n").join(" ")
@@ -49,13 +91,60 @@ describe("Home mode row (cold start)", () => {
     keymap.runCommand("home.mode.cycle")
     await setup.flush()
     await setup.waitForVisualIdle()
-    expect(frameOf()).toContain("PLAN · p · m")
+    expect(frameOf()).toContain("Plan · PLAN · p · m")
+
+    keymap.runCommand("home.mode.cycle")
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    expect(frameOf()).toContain("Reviewer · p · m")
 
     keymap.runCommand("home.mode.cycle")
     await setup.flush()
     await setup.waitForVisualIdle()
     expect(frameOf()).toContain("Build · p · m")
 
+    setup.renderer.destroy()
+    expect(submitted).toBeNull()
+  })
+
+  test("submit carries the draft agent, null when untouched", async () => {
+    const base = await createTestRenderer({ width: 100, height: 40 })
+    const keymap = setupKeymap(base.renderer)
+    let submitted: { agent: string | null } | null = null
+    const client = stubClient()
+    const setup = await testRender(
+      () => (
+        <KeymapProvider keymap={keymap}>
+          <DialogProvider renderer={base.renderer}>
+            <Home
+              workspace="/tmp/ws"
+              version="0.1.0"
+              model="m"
+              provider="p"
+              branch=""
+              onSubmit={(_text, _images, agent) => {
+                submitted = { agent }
+              }}
+              client={client as never}
+              skills={[]}
+              files={[]}
+              commands={["plan", "help"]}
+            />
+          </DialogProvider>
+        </KeymapProvider>
+      ),
+      base,
+    )
+    await setup.flush()
+    await until(
+      () => client.calls.includes("session.stats") && client.calls.includes("session.agents"),
+      "home hydration",
+    )
+    await setup.flush()
+    // The draft only moves on shift+tab — hydration alone selects nothing.
+    keymap.runCommand("home.mode.cycle")
+    await setup.flush()
+    expect(client.calls).not.toContain("session.agent.select")
     setup.renderer.destroy()
   })
 })

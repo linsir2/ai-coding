@@ -26,6 +26,7 @@ import { TextAttributes } from "@opentui/core"
 import { useBindings, useKeymap } from "@opentui/keymap/solid"
 import { For, Show, createEffect, createSignal, onMount, untrack } from "solid-js"
 import { theme } from "../theme/tokens"
+import { agentAccent } from "../util/agent"
 import {
   type PasteOutcome,
   type PromptImage,
@@ -68,8 +69,14 @@ export const PROMPT_BORDER = {
 export interface PromptProps {
   placeholder: string
   metadata: string
-  /** 19 §3.1: the session's posture — leads the metadata line. */
+  /** T7: the current agent — names the metadata line and tints the border. */
+  agent?: string | null
+  /** Display name when the caller resolved one (falls back to the id). */
+  agentName?: string | null
+  /** 19 §3.1: the session's posture — a suffix on the metadata line. */
   mode?: "normal" | "plan"
+  /** P5: the enforcement switch — joins the suffix when set. */
+  readonly?: boolean
   /**
    * Submit handler.  Returning ``false`` rejects the submission and keeps the
    * text in the box (busy turns: docs/opencode-gui-m2-plan.md §1).
@@ -382,7 +389,7 @@ export function Prompt(props: PromptProps) {
       width="100%"
       border={["left", "bottom"]}
       customBorderChars={PROMPT_BORDER}
-      borderColor={theme.agentColor}
+        borderColor={agentAccent(props.agent ?? "")}
       backgroundColor={theme.backgroundBase}
       paddingLeft={2}
       paddingRight={2}
@@ -452,7 +459,13 @@ export function Prompt(props: PromptProps) {
             setTimeout(() => setTimeout(submit, 0), 0)
           }}
         />
-        <ComposerMeta mode={props.mode} metadata={props.metadata} />
+        <ComposerMeta
+          agent={props.agent}
+          agentName={props.agentName}
+          mode={props.mode}
+          readonly={props.readonly}
+          metadata={props.metadata}
+        />
       </box>
     </box>
   )

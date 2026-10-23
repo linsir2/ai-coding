@@ -3,12 +3,18 @@ import { testRender } from "@opentui/solid"
 import { StatusBar } from "../src/component/status-bar"
 
 /**
- * P5 (18 §10.5): the status bar carries the posture marker — one chip for the
- * prompt axis, one for the enforcement axis, combined when both are on; a
- * normal writable session shows nothing.  Frame assertions only (the muted
- * colour lives in the theme, not in the captured text).
+ * P5 (18 §10.5) + T7: the status bar names the agent first — the posture
+ * marker (PLAN/只读) is a suffix on that name, not the headline.  A normal
+ * writable build session reads `Build`; an old backend without an agent
+ * falls back the same way.  Frame assertions only (the colours live in the
+ * theme, not in the captured text).
  */
-const render = async (extra: { mode?: "normal" | "plan"; readonly?: boolean }) => {
+const render = async (extra: {
+  agent?: string | null
+  agentName?: string | null
+  mode?: "normal" | "plan"
+  readonly?: boolean
+}) => {
   const setup = await testRender(
     () => (
       <StatusBar
@@ -51,5 +57,17 @@ describe("StatusBar posture marker (P5)", () => {
   test("plan plus readonly shows the combined marker", async () => {
     const frame = await render({ mode: "plan", readonly: true })
     expect(frame).toContain("PLAN·只读")
+  })
+
+  // T7: the agent name leads, the posture suffixes it.
+  test("a custom agent names itself before the posture suffix", async () => {
+    const frame = await render({ agent: "reviewer", agentName: "Reviewer", mode: "normal" })
+    expect(frame).toContain("Reviewer")
+    expect(frame).not.toContain("PLAN")
+  })
+
+  test("the plan agent keeps its posture suffix after its name", async () => {
+    const frame = await render({ agent: "plan", agentName: "Plan", mode: "plan", readonly: true })
+    expect(frame).toContain("Plan·PLAN·只读")
   })
 })

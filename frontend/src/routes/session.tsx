@@ -22,6 +22,9 @@ import { PlanReviewPanel } from "../component/plan-review"
 import { PermissionPanel } from "../component/permission"
 import { Prompt } from "../component/prompt"
 import { buildSubmission, commandName, planPrelude, type PendingPrompt } from "../util/submission"
+import { normalizeAgents, nextAgentId, type AgentSummary } from "../state/agents"
+import { isPlanAgentId } from "../util/plan-agent"
+import { AgentPicker } from "../component/agent-picker"
 import { SessionHeader } from "../component/session-header"
 import { DialogInbox } from "../component/dialog-inbox"
 import { Sidebar } from "../component/sidebar"
@@ -80,6 +83,8 @@ interface Stats {
   /** P5 (18 §10.5): posture payload; absent key = old backend -> no marker. */
   mode?: "normal" | "plan"
   readonly?: boolean
+  /** T7: the live agent id; absent key = old backend -> composer fail-safe. */
+  agent?: string | null
   /** M4b: the session card's facts; absent keys = old backend -> lines hide. */
   turnCount?: number
   createdTime?: string
@@ -93,6 +98,18 @@ export function Session(props: SessionProps) {
   const [state, setState] = createStore<SessionState>(initialState())
   const [alwaysThinking, setAlwaysThinking] = createSignal(false)
   const [stats, setStats] = createSignal<Stats>({ tokens: 0, maxContextTokens: 0 })
+  // T7: the visible primaries (picker + shift+tab share this order).  The
+  // current agent itself lives in SessionState.agent, never here.
+  const [agents, setAgents] = createSignal<AgentSummary[]>([])
+  /** Display name for an agent id (falls back to the id). */
+  const agentName = (id: string | null | undefined): string =>
+    (id && agents().find((row) => row.id === id)?.name) || id || "Build"
+  // T7: the posture axes derive from the agent id at render time — the one
+  // truth is SessionState.agent (stats hydrates it, agent.switched moves it).
+  const currentAgent = () => state.agent ?? stats().agent ?? null
+  const currentMode = (): "normal" | "plan" => (isPlanAgentId(currentAgent()) ? "plan" : "normal")
+  const currentReadonly = () =>
+    isPlanAgentId(currentAgent()) ? true : (stats().readonly ?? false)
   const [interruptArmed, setInterruptArmed] = createSignal(false)
   const [suggesting, setSuggesting] = createSignal(false)
   let transcript: ScrollBoxRenderable | undefined
@@ -115,9 +132,18 @@ export function Session(props: SessionProps) {
     if (next !== state) setState(next)
   }
 
-  const refreshStats = async () => {
+  const refreshPosture = async () => {
+    // T7: stats and the agent list land together (one mount, one retry).
+    // stats.agent hydrates SessionState.agent; the list feeds picker/cycle.
     try {
-      setStats((await props.client.request("session.stats")) as Stats)
+      const [fetchedStats, fetchedAgents] = await Promise.all([
+        props.client.request("session.stats"),
+        props.client.request("session.agents"),
+      ])
+      setStats(fetchedStats as Stats)
+      setAgents(normalizeAgents((fetchedAgents as { agents?: unknown } | null)?.agents))
+      const agent = (fetchedStats as { agent?: unknown } | null)?.agent
+      apply({ kind: "agent-synced", agent: typeof agent === "string" && agent ? agent : null })
     } catch {
       /* the sidebar keeps the last known numbers; the next turn retries */
     }
@@ -162,7 +188,7 @@ export function Session(props: SessionProps) {
         // meter's boundary, so without this the sidebar kept reporting the
         // pre-compaction occupancy until the next turn happened to refresh it —
         // which reads as "the compaction did nothing".
-        if (method === "session.command") return refreshStats()
+        if (method === "session.command") return refreshPosture()
       })
       .catch((error) => {
         apply({ kind: "submit-failed", reason: String(error) })
@@ -276,19 +302,40 @@ export function Session(props: SessionProps) {
   const cardOpen = (): boolean => props.permission !== null || props.ask !== null
 
   /**
-   * 19 §3.1: the mode row's one action, shared by the session layer and the
-   * card layer (D4).  Mid-turn it queues like /review does — the backend's
-   * posture queue lands the flip at the turn's close either way.  内化批次:
-   * an idle flip dispatches silently — the backend notice tells the story;
-   * the transcript must not dress an internal command as a user line.
+   * T7: run one agent switch through session.agent.select.  The backend owns
+   * the mid-turn queue (it answers queued and lands the flip at the turn's
+   * close), so the route never queues text for this — idle or busy, the call
+   * is the same.  A refusal surfaces as a toast: the composer (and its busy
+   * flag) is not ours to rewrite for a switch that never happened.
+   */
+  const selectAgent = async (id: string): Promise<{ ok: boolean; status: string; reason: string }> => {
+    try {
+      const res = (await props.client.request("session.agent.select", { id })) as {
+        ok?: unknown
+        status?: unknown
+        reason?: unknown
+      }
+      if (res?.ok === true) return { ok: true, status: String(res.status ?? ""), reason: "" }
+      return { ok: false, status: "", reason: typeof res?.reason === "string" ? res.reason : "unknown" }
+    } catch (error) {
+      return { ok: false, status: "", reason: String(error) }
+    }
+  }
+
+  /**
+   * T7: the shift+tab action, shared by the session layer and the card layer
+   * (D4).  Cycles the visible-primary order from state/agents — no longer
+   * plan ↔ off.  An idle flip lands with the backend's agent.switched
+   * notice; a mid-turn one answers queued and lands at the turn's close.
    */
   const cycleMode = (): void => {
-    const next = stats().mode === "plan" ? "/plan off" : "/plan"
-    if (state.busy) {
-      queueText(next)
-      return
-    }
-    dispatch(next)
+    const next = nextAgentId(agents(), state.agent ?? stats().agent ?? "build")
+    if (!next) return
+    void selectAgent(next).then((res) => {
+      if (!res.ok) {
+        toast.show({ title: "Agent", message: `切换失败：${res.reason}`, variant: "error" })
+      }
+    })
   }
 
   useBindings(() => ({
@@ -379,11 +426,39 @@ export function Session(props: SessionProps) {
       },
       {
         name: "session.mode.cycle",
-        title: "Toggle plan mode",
+        title: "Cycle agent",
         group: "Session",
-        desc: "Switch between Build and read-only Plan mode",
+        desc: "Switch to the next primary agent",
         palette: true,
         run: cycleMode,
+      },
+      {
+        // T7: the TUI `/agents` listing — rows from state/agents, the switch
+        // through session.agent.select.  shift+tab cycles without asking;
+        // this names the target first.
+        name: "dialog.agents.show",
+        title: "Agents",
+        group: "Session",
+        desc: "List agents and switch the current one",
+        palette: true,
+        run: () =>
+          dialog.open(
+            () => (
+              <AgentPicker
+                agents={agents()}
+                current={state.agent ?? stats().agent ?? null}
+                onSelect={(id) => {
+                  dialog.close()
+                  void selectAgent(id).then((res) => {
+                    if (!res.ok) {
+                      toast.show({ title: "Agent", message: `切换失败：${res.reason}`, variant: "error" })
+                    }
+                  })
+                }}
+              />
+            ),
+            "large",
+          ),
       },
       {
         name: "session.review",
@@ -436,11 +511,11 @@ export function Session(props: SessionProps) {
     priority: -1,
     enabled: cardOpen(),
     commands: [
-      {
-        name: "session.mode.cycle.card",
-        desc: "Switch posture while a card is up",
-        run: cycleMode,
-      },
+        {
+          name: "session.mode.cycle.card",
+          desc: "Switch agent while a card is up",
+          run: cycleMode,
+        },
     ],
     bindings: [{ key: "shift+tab", cmd: "session.mode.cycle.card" }],
   }))
@@ -449,7 +524,10 @@ export function Session(props: SessionProps) {
   // the text in the textarea and focuses it.
   const [promptSeed, setPromptSeed] = createSignal("")
 
-  onMount(() => {
+    onMount(() => {
+    // The posture lands first: stats.agent hydrates SessionState.agent and
+    // the list feeds picker/cycle.  The initial prompt below waits for it.
+    const postureReady = refreshPosture()
     // The snapshot first: a job that started before this client connected has
     // no job.changed history to replay, and a panel that only ever shows new
     // jobs is worse than none.
@@ -466,7 +544,7 @@ export function Session(props: SessionProps) {
       apply({ kind: "wire", event })
       if (event.type === "turn.finished") {
         disarmInterrupt()
-        void refreshStats()
+        void refreshPosture()
         props.onTurnFinished()
         // /clear and /resume <id> end with the REPL's NEW_SESSION action; the
         // backend has already switched the live session, so the tabs follow.
@@ -496,7 +574,7 @@ export function Session(props: SessionProps) {
             }
             setState({ ...loaded, queued: [] })
             loadInbox()
-            void refreshStats()
+            void refreshPosture()
           })()
         }
         {
@@ -520,7 +598,7 @@ export function Session(props: SessionProps) {
               message: `${before} → ${after} messages`,
               variant: "info",
             })
-            void refreshStats()
+            void refreshPosture()
           }
         }
         // 19 §3.3: an approved plan starts executing here — the mode disarm
@@ -596,24 +674,45 @@ export function Session(props: SessionProps) {
       }
     })
     onCleanup(unsubscribe)
-    void refreshStats()
     if (props.initialPrompt) {
       const prompt = props.initialPrompt
-      // 20 §批次1: a Home submission made with PLAN armed lands the posture
-      // first over the internal command channel; the prompt waits for it
-      // (bare /plan is synchronous, no model call). The echo matches the
-      // command face, so the transcript says what the wire did.
-      const prelude = planPrelude(prompt, props.commands ?? [], props.sessionId)
-      if (prelude) {
-        // 内化批次: the posture lands silently; the "已进入计划模式" notice
-        // is the transcript's account of it (a "┃ /plan" echo dressed the
-        // internal command as the user's own line).
-        void props.client
-          .request(prelude.method, prelude.payload)
-          .finally(() => submit(prompt.text, prompt.images))
-      } else {
-        submit(prompt.text, prompt.images)
-      }
+      // T7: the Home draft selects first, then the old prelude, then the
+      // prompt — agent.select → [plan prelude] → prompt.  A queued or refused
+      // select sends NOTHING (displaying A while B executes is the failure
+      // mode this ordering exists to close); the reason lands in the
+      // composer area instead.
+      void (async () => {
+        // Wait for the hydration above: the prelude derives from the live
+        // agent, and the select must not race the sync that names it.
+        await postureReady
+        if (prompt.agent) {
+          const switched = await selectAgent(prompt.agent)
+          if (!switched.ok || switched.status === "queued") {
+            const why = switched.ok ? "已排队" : switched.reason
+            apply({ kind: "submit-failed", reason: `agent 切换未完成（${why}），未发送` })
+            return
+          }
+        }
+        // The prelude follows the effective agent now: an explicit draft, or
+        // the live one the stats just hydrated (a null draft on an already
+        // plan session still arms the plan entry).
+        const live = state.agent ?? stats().agent
+        const effectivePrompt: PendingPrompt = {
+          ...prompt,
+          agent: prompt.agent ?? (typeof live === "string" ? live : undefined),
+        }
+        const prelude = planPrelude(effectivePrompt, props.commands ?? [], props.sessionId)
+        if (prelude) {
+          // 内化批次: the posture lands silently; the notice is the
+          // transcript's account of it (a "┃ /plan" echo dressed the
+          // internal command as the user's own line).
+          void props.client
+            .request(prelude.method, prelude.payload)
+            .finally(() => submit(prompt.text, prompt.images))
+        } else {
+          submit(prompt.text, prompt.images)
+        }
+      })()
     }
   })
 
@@ -629,7 +728,7 @@ export function Session(props: SessionProps) {
           // read it once the session is actually here, not on mount (the
           // server has no session yet then, and the call fails silently).
           loadInbox()
-          void refreshStats()
+          void refreshPosture()
         }
       },
     ),
@@ -702,7 +801,10 @@ export function Session(props: SessionProps) {
                   : "Ask anything…"
             }
             metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
-            mode={stats().mode}
+            agent={currentAgent()}
+            agentName={agentName(currentAgent())}
+            mode={currentMode()}
+            readonly={currentReadonly()}
             onSubmit={submit}
             onOverlay={setSuggesting}
             seed={promptSeed()}
@@ -733,8 +835,10 @@ export function Session(props: SessionProps) {
         maxContextTokens={stats().maxContextTokens}
         version={props.version}
         interruptArmed={interruptArmed()}
-        mode={stats().mode}
-        readonly={stats().readonly}
+        agent={currentAgent()}
+        agentName={agentName(currentAgent())}
+        mode={currentMode()}
+        readonly={currentReadonly()}
       />
     </box>
   )

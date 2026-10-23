@@ -17,7 +17,7 @@
 
 import { useBindings } from "@opentui/keymap/solid"
 import { useTerminalDimensions } from "@opentui/solid"
-import { createSignal } from "solid-js"
+import { createSignal, onMount } from "solid-js"
 import stringWidth from "string-width"
 import { DialogSkills } from "../component/dialog-skills"
 import { Logo } from "../component/logo"
@@ -28,10 +28,12 @@ import type { PromptImage } from "../util/attachment"
 import type { MentionOption } from "../util/mention"
 import { theme } from "../theme/tokens"
 import { abbreviateHome, formatLocation, truncatePath } from "../util/location"
+import { normalizeAgents, nextAgentId, type AgentSummary } from "../state/agents"
+import { isPlanAgentId } from "../util/plan-agent"
 
 const PROMPT_EXAMPLES = [
   "Fix a TODO in the codebase",
-  "What is the tech stack of this project?",
+  "What is the stack of this project?",
   "Fix broken tests",
 ]
 
@@ -41,7 +43,7 @@ export interface HomeProps {
   model: string
   provider: string
   branch: string
-  onSubmit: (text: string, images: PromptImage[], mode: "normal" | "plan") => void
+  onSubmit: (text: string, images: PromptImage[], agent: string | null) => void
   client: IpcClient
   /** The registry's skills, for the composer's `@` suggestions (r16/E-2). */
   skills: MentionOption[]
@@ -57,9 +59,42 @@ export function Home(props: HomeProps) {
   const height = () => dimensions().height
   const dialog = useDialog()
   const [promptSeed, setPromptSeed] = createSignal("")
-  // 20 §批次1: the same two gears the session row shows, pre-armable before
-  // the Session route (and its keymap layer) exists at all.
-  const [mode, setMode] = createSignal<"normal" | "plan">("normal")
+  // T7: the Home draft is an agent id, not a mode boolean (null = default —
+  // the session's live agent).  shift+tab only rewrites this draft; the
+  // Session route selects it before the first prompt runs.
+  const [agents, setAgents] = createSignal<AgentSummary[]>([])
+  const [statsAgent, setStatsAgent] = createSignal<string | null>(null)
+  const [draft, setDraft] = createSignal<string | null>(null)
+
+  /** The agent the composer shows: the draft, or the live one, or build. */
+  const effective = () => draft() ?? statsAgent() ?? "build"
+  const effectiveName = () =>
+    agents().find((row) => row.id === effective())?.name ?? effective()
+
+  onMount(() => {
+    // Parallel like the Session route: the current agent and the pickable
+    // list.  A dead socket keeps the defaults (build + empty list).
+    void (async () => {
+      const [stats, listed] = await Promise.all([
+        (async () => {
+          try {
+            return (await props.client.request("session.stats")) as { agent?: unknown }
+          } catch {
+            return null
+          }
+        })(),
+        (async () => {
+          try {
+            return (await props.client.request("session.agents")) as { agents?: unknown }
+          } catch {
+            return null
+          }
+        })(),
+      ])
+      if (typeof stats?.agent === "string" && stats.agent) setStatsAgent(stats.agent)
+      setAgents(normalizeAgents(listed?.agents))
+    })()
+  })
 
   // r16/E-1: Home has a composer too — the old app-layer registration called
   // this panel read-only on the belief that it did not. Selecting a skill
@@ -85,15 +120,16 @@ export function Home(props: HomeProps) {
           ),
       },
       {
-        // 20 §批次1: the Toggle lives at both layers because the two routes
-        // never mount together; the palette shows exactly one. The carry into
-        // the session is `planPrelude` (util/submission), not this command.
+        // T7: the cycle rewrites the draft only — no request leaves Home.
+        // The carry into the session is PendingPrompt.agent (util/submission),
+        // not a command.
         name: "home.mode.cycle",
-        title: "Toggle plan mode",
+        title: "Cycle agent",
         group: "Session",
-        desc: "Switch between Build and read-only Plan mode",
+        desc: "Choose the agent the next session starts with",
         palette: true,
-        run: () => setMode((value) => (value === "plan" ? "normal" : "plan")),
+        run: () =>
+          setDraft((current) => nextAgentId(agents(), current ?? statsAgent() ?? "build")),
       },
     ],
     bindings: [{ key: "shift+tab", cmd: "home.mode.cycle" }],
@@ -124,8 +160,10 @@ export function Home(props: HomeProps) {
         <Prompt
           placeholder={placeholder()}
           metadata={metadata()}
-          mode={mode()}
-          onSubmit={(text, images) => props.onSubmit(text, images, mode())}
+          agent={effective()}
+          agentName={effectiveName()}
+          mode={isPlanAgentId(effective()) ? "plan" : "normal"}
+          onSubmit={(text, images) => props.onSubmit(text, images, draft())}
           seed={promptSeed()}
           onSeedDone={() => setPromptSeed("")}
           skills={props.skills}
@@ -133,13 +171,10 @@ export function Home(props: HomeProps) {
         />
         {/* E1: the posture toggle is a key, not a menu item -- oc's prompt
             footer says its shortcut out loud; the row is the only place a
-            cold-start user can learn shift+tab exists (17 号稿: the status
-            bar turned to PLAN with nothing saying why). */}
+            cold-start user can learn shift+tab exists. */}
         <box paddingTop={1} flexDirection="row" gap={1}>
           <text fg={theme.textBase}>shift+tab</text>
-          <text fg={theme.textMuted}>
-            {mode() === "plan" ? "退出计划" : "计划模式"}
-          </text>
+          <text fg={theme.textMuted}>{effectiveName()}</text>
         </box>
       </box>
       <box flexGrow={1} />

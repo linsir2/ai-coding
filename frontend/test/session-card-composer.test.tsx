@@ -1,10 +1,19 @@
 /**
- * D4: a card takes the keyboard, not the composer.
+ * D4 + T7: a card takes the keyboard, not the composer; the agent switch is
+ * an RPC, not a slash echo.
  *
  * The permission / plan-review panel used to unmount the Prompt: the draft
  * died with the renderable, the layout jumped, and the session's whole
  * binding layer went dark (shift+tab included).  The composer now stays
  * mounted and paused; the card's own keys keep priority.
+ *
+ * T7 sanctioned behavior change (30-M4 §3.5/§7.5): shift+tab no longer sends
+ * `/plan` over session.command — it runs session.agent.select with the next
+ * visible primary.  The mid-turn queue lives on the backend (it answers
+ * queued), so the route sends the call even while busy.
+ *
+ * T7 Home handoff: the first prompt waits for session.agent.select, then the
+ * plan prelude, then the prompt — and a queued/refused select sends nothing.
  */
 
 import { describe, expect, test } from "bun:test"
@@ -18,9 +27,16 @@ import { setupKeymap } from "../src/keymap"
 import { ToastProvider } from "../src/component/toast"
 import type { EventMessage, IpcClient } from "../src/ipc"
 import type { AskRequest } from "../src/util/ask"
+import type { PendingPrompt } from "../src/util/submission"
+
+const AGENTS = [
+  { id: "build", name: "Build", kind: "primary", source: "builtin", description: "" },
+  { id: "plan", name: "Plan", kind: "primary", source: "builtin", description: "" },
+]
 
 class _RecordingClient {
   readonly sent: { method: string; params: Record<string, unknown> }[] = []
+  canned: Record<string, unknown> = {}
 
   onEvent(_listener: (event: EventMessage) => void): () => void {
     return () => {}
@@ -28,12 +44,37 @@ class _RecordingClient {
 
   async request(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
     this.sent.push({ method, params })
-    return {}
+    if (method === "session.stats")
+      return (
+        (this.canned["session.stats"] as Record<string, unknown>) ?? {
+          tokens: 0,
+          maxContextTokens: 0,
+          agent: "build",
+        }
+      )
+    if (method === "session.agents")
+      return (this.canned["session.agents"] as Record<string, unknown>) ?? { agents: AGENTS }
+    if (method === "session.agent.select")
+      return (
+        (this.canned["session.agent.select"] as Record<string, unknown>) ?? {
+          ok: true,
+          status: "committed",
+        }
+      )
+    return this.canned[method] ?? {}
   }
 
-  commands(): { method: string; params: Record<string, unknown> }[] {
-    return this.sent.filter((row) => row.method === "session.command")
+  selects(): { method: string; params: Record<string, unknown> }[] {
+    return this.sent.filter((row) => row.method === "session.agent.select")
   }
+}
+
+async function until(fn: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (fn()) return
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  throw new Error(`timed out waiting for ${what}`)
 }
 
 const PLAN_REVIEW: AskRequest = {
@@ -44,10 +85,9 @@ const PLAN_REVIEW: AskRequest = {
   data: { items: [{ content: "写代码", verify: "", dependsOn: [] }] },
 }
 
-async function _mount(card: () => AskRequest | null) {
+async function _mount(card: () => AskRequest | null, client: _RecordingClient, initialPrompt?: PendingPrompt) {
   const base = await createTestRenderer({ width: 120, height: 40 })
   const keymap = setupKeymap(base.renderer)
-  const client = new _RecordingClient()
   const setup = await testRender(
     () => (
       <KeymapProvider keymap={keymap}>
@@ -59,6 +99,7 @@ async function _mount(card: () => AskRequest | null) {
               model="m"
               provider="p"
               commands={["plan"]}
+              initialPrompt={initialPrompt ?? null}
               title="t"
               workspace="/tmp/ws"
               branch=""
@@ -85,9 +126,17 @@ async function _mount(card: () => AskRequest | null) {
 }
 
 describe("a card pauses the composer, it does not remove it (D4)", () => {
-  test("the composer stays and shift+tab still cycles the posture", async () => {
+  test("the composer stays and shift+tab switches the agent through the card", async () => {
     const card = createSignal<AskRequest | null>(PLAN_REVIEW)
-    const { base, client, keymap, setup } = await _mount(() => card[0]())
+    const client = new _RecordingClient()
+    const { base, keymap, setup } = await _mount(() => card[0](), client)
+    await until(
+      () =>
+        client.sent.some((row) => row.method === "session.stats") &&
+        client.sent.some((row) => row.method === "session.agents"),
+      "session hydration",
+    )
+    await setup.flush()
     const frameOf = () => setup.captureCharFrame().split("\n").join(" ")
 
     // the card is up and the composer is still part of the screen
@@ -95,11 +144,12 @@ describe("a card pauses the composer, it does not remove it (D4)", () => {
     expect(frameOf()).toContain("p · m")
     expect(keymap.getActiveKeys().map((key) => key.display)).toContain("shift+tab")
 
-    // and the posture toggle works through the card, without touching the
-    // composer or the card's own keys
+    // and the agent cycle works through the card, as an RPC — not a slash
+    // echo dressed as the user's own line.
     keymap.runCommand("session.mode.cycle.card")
-    await setup.flush()
-    expect(client.commands().map((row) => row.params["text"])).toEqual(["/plan"])
+    await until(() => client.selects().length > 0, "agent select")
+    expect(client.selects().map((row) => row.params["id"])).toEqual(["plan"])
+    expect(client.sent.map((row) => row.method)).not.toContain("session.command")
 
     // closing the card leaves the composer where it was
     card[1](null)
@@ -108,6 +158,62 @@ describe("a card pauses the composer, it does not remove it (D4)", () => {
     expect(frameOf()).toContain("p · m")
     expect(keymap.getActiveKeys().map((key) => key.display)).toContain("shift+tab")
 
+    setup.renderer.destroy()
+  })
+})
+
+describe("the Home handoff selects before the first prompt (T7)", () => {
+  test("order is select, then plan prelude, then prompt", async () => {
+    const client = new _RecordingClient()
+    const { base, setup } = await _mount(() => null, client, {
+      text: "做一个开关",
+      images: [],
+      agent: "plan",
+    })
+    await until(
+      () => client.sent.some((row) => row.method === "session.prompt"),
+      "first prompt",
+    )
+    await setup.flush()
+    const order = client.sent.map((row) => row.method)
+    const selectAt = order.indexOf("session.agent.select")
+    const commandAt = order.indexOf("session.command")
+    const promptAt = order.indexOf("session.prompt")
+    expect(selectAt).toBeGreaterThanOrEqual(0)
+    expect(commandAt).toBeGreaterThan(selectAt)
+    expect(promptAt).toBeGreaterThan(commandAt)
+    expect(client.sent[selectAt]!.params).toEqual({ id: "plan" })
+    setup.renderer.destroy()
+  })
+
+  test("a refused select sends no prompt and names the reason", async () => {
+    const client = new _RecordingClient()
+    client.canned["session.agent.select"] = { ok: false, reason: "unknown_agent" }
+    const { base, setup } = await _mount(() => null, client, {
+      text: "做一个开关",
+      images: [],
+      agent: "nope",
+    })
+    await until(() => setup.captureCharFrame().includes("未发送"), "refusal notice")
+    await setup.flush()
+    expect(client.sent.map((row) => row.method)).not.toContain("session.prompt")
+    expect(client.sent.map((row) => row.method)).not.toContain("session.command")
+    const frameOf = () => setup.captureCharFrame().split("\n").join(" ")
+    expect(frameOf()).toContain("未发送")
+    setup.renderer.destroy()
+  })
+
+  test("a queued select sends no prompt either", async () => {
+    const client = new _RecordingClient()
+    client.canned["session.agent.select"] = { ok: true, status: "queued" }
+    const { base, setup } = await _mount(() => null, client, {
+      text: "做一个开关",
+      images: [],
+      agent: "plan",
+    })
+    await until(() => setup.captureCharFrame().includes("未发送"), "queued notice")
+    await setup.flush()
+    expect(client.sent.map((row) => row.method)).not.toContain("session.prompt")
     setup.renderer.destroy()
   })
 })
