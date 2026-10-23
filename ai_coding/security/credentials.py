@@ -61,6 +61,10 @@ def credential_match(path: str | Path, *, workspace: str | Path | None = None) -
     already-resolved path.  When supplied, a relative path is resolved against
     it as well; this is what catches ``config.txt -> .env`` before a grant is
     offered.
+
+    A path that cannot be resolved is treated as a credential (fail-closed):
+    ``grep``'s ``_is_credential_entry`` already refuses on ``OSError``, and an
+    unresolvable name must not become readable by being unresolvable.
     """
     text = _normalise(path)
     if not text:
@@ -88,7 +92,7 @@ def credential_match(path: str | Path, *, workspace: str | Path | None = None) -
         try:
             resolved = candidate.resolve()
         except (OSError, RuntimeError):
-            return ""
+            return text or "unresolvable"
         if resolved != candidate:
             return credential_match(resolved)
     return ""
@@ -102,27 +106,32 @@ def is_credential_path(path: str | Path, *, workspace: str | Path | None = None)
 def credential_exclude_globs() -> tuple[str, ...]:
     """Ripgrep glob rules that keep credential files out of the walk.
 
+    Pure-``!`` exclusions only: no ``**/*`` base (under rg 15.1.0
+    last-match-wins that bare include re-opens what ``.gitignore`` hid,
+    resurrecting e.g. ``x.log``) and no ``**/.env.example`` re-include.
+    ``.env.example`` stays searchable through an explicit per-file rescue in
+    ``grep_tool`` (tree search walks each ``.env.example`` without ``--glob``,
+    so the whitelist pattern never engages).
+
     The caller still filters returned paths through :func:`is_credential_path`,
     because a symlink alias can carry an ordinary visible name.  A direct
     search of an explicit non-credential file (notably ``.env.example``)
     skips these tree globs; an explicit credential file already needs human
     approval before reaching the runner.
-
-    ripgrep globs are last-match-wins (verified against rg 15.1.0): a bare
-    ``**/.env.example`` appended after the excludes would hide every other
-    file, so ``**/*`` opens the set and ``**/.env.example`` closes it.
     """
-    globs = ["**/*"]
-    globs += [f"!**/{name}" for name in sorted(CREDENTIAL_NAMES)]
+    globs = [f"!**/{name}" for name in sorted(CREDENTIAL_NAMES)]
     globs += [
         "!**/*.env",
         "!**/.env*",
         *[f"!**/*{suffix}" for suffix in CREDENTIAL_SUFFIXES],
         *[f"!**/{directory}/**" for directory in sorted(CREDENTIAL_DIRS)],
-        *[f"!**{pattern}*" for pattern in CREDENTIAL_PATTERNS],
+        "!**/.config/gh/*",
+        # Exact file: the old ``*`` suffix over-matched (``config.json.bak``).
         "!**/.docker/config.json",
+        # Exact files: trailing ``*`` would also hide ``shadow.bak`` etc.
+        "!**/etc/shadow",
+        "!**/etc/sudoers",
     ]
-    globs.append("**/.env.example")
     return tuple(globs)
 
 

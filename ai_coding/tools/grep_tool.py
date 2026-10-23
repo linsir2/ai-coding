@@ -289,7 +289,75 @@ class GrepTool(BaseTool):
                     self._clip(str(data.get("lines", {}).get("text", ""))),
                 )
             )
+        if skip_credentials and target.is_dir():
+            hits.extend(
+                await self._rescue_env_example(
+                    target, pattern, include=include, literal=literal,
+                    case_sensitive=case_sensitive,
+                )
+            )
         return self._render(hits, limit)
+
+    async def _rescue_env_example(
+        self, target: Path, pattern: str, *, include: str, literal: bool,
+        case_sensitive: bool,
+    ) -> list[tuple[str, int, str]]:
+        """Search each ``.env.example`` explicitly, without tree globs.
+
+        Pure-``!`` credential globs still exclude ``.env.example`` (via
+        ``!**/.env*``); the whitelist trick is gone, so the tree walk would
+        hide documentation.  Each example file is searched as an explicit
+        file path -- no ``--glob``, so the whitelist pattern never engages --
+        and the hits rejoin the main result before ``_render`` (limit/total
+        hold once).  Only rescued when ``include`` is empty or selects the
+        basename (``include="*.env"`` must not rescue; ``test_m4_security``
+        pins that).
+        """
+        rescued: list[tuple[str, int, str]] = []
+        try:
+            candidates = [
+                path for path, rel in self._walk(target)
+                if path.name == ".env.example"
+            ]
+        except OSError:
+            return []
+        for path in candidates:
+            shown = PurePosixPath(
+                path.relative_to(self._sandbox.workspace).as_posix()
+            )
+            if include and not _include_matches(shown, include):
+                continue
+            argv: list[str] = [
+                self._rg or "rg", "--json", "--hidden", "--no-messages",
+                "--no-require-git",
+                f"--max-filesize={_MAX_FILE_BYTES}",
+            ]
+            if literal:
+                argv.append("--fixed-strings")
+            if not case_sensitive:
+                argv.append("--ignore-case")
+            argv += ["--", pattern, str(path)]
+            outcome = await self._runner(
+                argv, cwd=str(self._sandbox.workspace), timeout=self._timeout
+            )
+            if outcome.error or outcome.returncode not in (0, 1):
+                continue
+            for raw in (outcome.stdout or "").splitlines():
+                try:
+                    record = json.loads(raw)
+                except ValueError:
+                    continue
+                if record.get("type") != "match":
+                    continue
+                data = record.get("data", {})
+                rescued.append(
+                    (
+                        shown.as_posix(),
+                        int(data.get("line_number", 0)),
+                        self._clip(str(data.get("lines", {}).get("text", ""))),
+                    )
+                )
+        return rescued
 
     # ---- pure Python fallback ---------------------------------------------
 
