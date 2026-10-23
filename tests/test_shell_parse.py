@@ -160,6 +160,13 @@ class TestCommandViews:
         views = shell_parse.command_views('echo "a; b"')
         assert views[0].arguments == ("a; b",)
 
+    def test_a_single_quoted_phrase_keeps_its_content(self):
+        views = shell_parse.command_views("python -c 'open(\"../x\")'")
+        assert views[0].arguments == ("-c", 'open("../x")')
+
+    def test_command_words_also_keeps_a_single_quoted_phrase(self):
+        assert shell_parse.command_words("cat '.env'") == ["cat", ".env"]
+
     def test_a_comment_is_not_a_command(self):
         assert shell_parse.command_views("# rm -rf /") == []
 

@@ -10,6 +10,7 @@ is exactly the wall-clock burn the experiments measured.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -25,6 +26,16 @@ from ai_coding.shell_parse import command_views
 _DEFAULT_EACH_SECONDS = 120.0
 _DEFAULT_TOTAL_SECONDS = 300.0
 _OUTPUT_TAIL = 500
+
+#: A path-shaped literal inside an otherwise opaque argument.  This is for
+#: ``python -c "open('../x')"``: the shell correctly sees one argument, and
+#: the command is free to interpret the path inside it.  URL prefixes are
+#: removed before this runs -- ``https://x/a/b`` names a resource, not a
+#: local path.
+_STRING_PATH_RE = re.compile(
+    r"(?:~|/|\.\.?/)?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.@+-]+)+"
+)
+_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
 
 #: A narrow view of the rule layer: the reason this proof command is refused,
 #: or ``""``.  Acceptance does not import the gate, so its dependency face stays
@@ -100,6 +111,18 @@ def _relative_targets_outside(
 
     sandbox = Sandbox(workspace, extra_roots=tuple(extra_roots))
     offenders: list[str] = []
+
+    def outside(text: str, base: Path) -> bool:
+        try:
+            resolved = (base / text).expanduser().resolve()
+            return sandbox._contained_in(resolved) is None
+        except (OSError, RuntimeError, SandboxViolation):
+            return True
+
+    def remember(text: str, base: Path) -> None:
+        if text and outside(text, base) and text not in offenders:
+            offenders.append(text)
+
     # ``cd`` changes the directory every later command runs in.  Tracking it
     # is the difference between "this word is a bare filename" and "this
     # filename is outside the workspace".
@@ -121,15 +144,36 @@ def _relative_targets_outside(
                 continue
             if "/" not in text and cwd == Path(workspace).resolve():
                 continue
-            try:
-                target_path = (cwd / text).expanduser()
-                resolved = target_path.resolve()
-                if sandbox._contained_in(resolved) is None:
-                    raise SandboxViolation(text)
-            except SandboxViolation:
-                if text not in offenders:
-                    offenders.append(text)
+            remember(text, cwd)
+        # A quoted argument can hide the path from the shell's word split
+        # (``python -c "open('../x')"``).  Read the obvious literal pieces
+        # inside it; this deliberately does not attempt to interpret Python,
+        # and dynamic construction remains outside this layer's promise.
+        for word in (*view.arguments, *view.redirects):
+            for fragment in _path_fragments(str(word or "")):
+                remember(fragment, cwd)
     return offenders
+
+
+def _path_fragments(text: str) -> list[str]:
+    """Obvious local-path literals inside one shell argument.
+
+    Quotes and punctuation around a literal are not part of it.  A token
+    needs at least two concrete segments, so a bare ``../`` used for runtime
+    concatenation is not mistaken for a discoverable target.  The caller
+    still makes the containment decision with the sandbox.
+
+    Single-segment credential literals (``open('.env')``) are deliberately
+    out of scope here: this layer only closes workspace-outside paths, and
+    a bare credential name is closed by the read/grep tool layer instead.
+    """
+    cleaned = _URL_RE.sub(" ", text)
+    found: list[str] = []
+    for match in _STRING_PATH_RE.finditer(cleaned):
+        token = match.group(0).rstrip(".,:;()[]{}<>\"'")
+        if token and token not in found:
+            found.append(token)
+    return found
 
 
 async def verify_items(

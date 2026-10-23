@@ -121,6 +121,20 @@ def _text(node: Any) -> str:
     return str(node.text.decode("utf-8", "replace"))
 
 
+def _string_content(node: Any) -> str:
+    """The content a quoted string contributes, without its quote marks.
+
+    Only ordinary ``string``/``raw_string`` nodes are handled (``$'..'``,
+    adjacent-string concatenation and other expansions stay out of scope).
+    """
+    raw = _text(node)
+    if node.type == "raw_string":
+        return raw[1:-1] if len(raw) >= 2 and raw[0] == raw[-1] == "'" else raw
+    return "".join(
+        _text(part) for part in node.children if part.type == "string_content"
+    )
+
+
 def _commands(node: Any, into: list[Any] | None = None) -> list[Any]:
     """Every command in the tree, including the ones inside a substitution.
 
@@ -181,9 +195,7 @@ def _words_of(command: Any) -> list[str]:
         elif child.type in _WORD_NODES:
             words.append(_text(child))
         elif child.type in _STRING_NODES:
-            for part in child.children:
-                if part.type == "string_content":
-                    words.append(_text(part))
+            words.append(_string_content(child))
     return words
 
 
@@ -203,9 +215,7 @@ def _paths_in(node: Any) -> list[str]:
         if child.type in _WORD_NODES:
             found.append(_text(child))
         elif child.type in _STRING_NODES:
-            for part in child.children:
-                if part.type == "string_content":
-                    found.extend(_text(part).split())
+            found.extend(_string_content(child).split())
         elif child.type == "string_content":
             found.extend(_text(child).split())
     return found
@@ -283,9 +293,7 @@ def command_views(text: str) -> list[CommandView]:
             if argument.type in _WORD_NODES:
                 arguments.append(_text(argument))
             elif argument.type in _STRING_NODES:
-                for part in argument.children:
-                    if part.type == "string_content":
-                        arguments.append(_text(part))
+                arguments.append(_string_content(argument))
         views.append(
             CommandView(
                 program=program,
