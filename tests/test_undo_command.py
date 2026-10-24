@@ -13,10 +13,13 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 
 from ai_coding.ai.engine import ChatEngine
+from ai_coding.app.commands import REPLAction, handle_input
+from ai_coding.app.console import DialogueConsole
 from ai_coding.core.agent_loop import AgentLoop
-from ai_coding.core.snapshots import SnapshotStore
+from ai_coding.core.snapshots import RestoreReport, SnapshotStore
 from ai_coding.domain.loop import StepResult
 from ai_coding.domain.message import ChatMessage
 from ai_coding.service.session_service import SessionService
@@ -56,6 +59,20 @@ def _loop(tmp_path: Path, workspace: Path) -> tuple[AgentLoop, SessionService]:
     sessions = SessionService(tmp_path / "sessions")
     loop = AgentLoop(_Engine(), sessions, ToolRegistry(), snapshots=SnapshotStore(workspace))
     return loop, sessions
+
+
+def _console() -> tuple[DialogueConsole, Console]:
+    c = Console(record=True, width=80)
+    return DialogueConsole(c), c
+
+
+async def _seeded_turn(loop: AgentLoop, session, workspace: Path) -> None:
+    """One user turn whose file half differs from the snapshot -- the shape an
+    undo/redo actually reverts."""
+    await loop._capture_snapshot(session)
+    session.add_message(ChatMessage(role="user", content="改一下 a.txt", timestamp="t"))
+    (workspace / "a.txt").write_text("broken\n", encoding="utf-8")
+    session.add_message(ChatMessage(role="assistant", content="done", timestamp="t"))
 
 
 @pytest.mark.asyncio
@@ -110,3 +127,68 @@ async def test_outside_a_repo_the_history_still_unrolls(tmp_path):
 
     assert report["ok"] is True and report["files"] == [] and report["text"] == "hello"
     assert session.messages == []
+
+
+@pytest.mark.asyncio
+async def test_a_partial_undo_still_reloads_the_transcript(tmp_path):
+    """M-A3: the history is truncated even when a file refuses to come back, so
+    the command must RELOAD -- otherwise the transcript and the tree disagree."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+    await _seeded_turn(loop, session, root)
+
+    async def _partial(key, *, created=None):
+        return RestoreReport(restored=[], failed=["a.txt"])
+
+    loop.snapshots.restore = _partial
+    console, sink = _console()
+    action, _ = await handle_input(loop, "/undo", session, sessions, console)
+
+    assert action is REPLAction.RELOAD
+    assert session.messages == [], "the history half still unrolls"
+    out = sink.export_text()
+    assert "restore-partial" in out, f"the partial failure was not reported: {out!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_partial_redo_still_reloads_the_transcript(tmp_path):
+    """M-A3: redo appends the history unconditionally, so a partial file
+    restore must still RELOAD -- the same lie undo had, on the other half."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+    await _seeded_turn(loop, session, root)
+
+    await loop.undo_last_turn(session)  # stages the tail and the redo baseline
+
+    async def _partial(key, *, created=None):
+        return RestoreReport(restored=[], failed=["a.txt"])
+
+    loop.snapshots.restore = _partial
+    console, sink = _console()
+    action, _ = await handle_input(loop, "/redo", session, sessions, console)
+
+    assert action is REPLAction.RELOAD
+    assert len(session.messages) == 2, "redo put the turn back"
+    out = sink.export_text()
+    assert "已恢复上一回合" in out and "restore-partial" in out, (
+        f"the partial redo neither reloaded nor named the failure: {out!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_leaves_the_view_alone(tmp_path):
+    """M-A3: a refusal carries only ``{ok, reason}`` -- no history accounting --
+    so the command must CONTINUE and leave the transcript alone.  This is the
+    premise ``_rewrote_history`` rests on (r20/F1)."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+    console, _ = _console()
+
+    undo_action, _ = await handle_input(loop, "/undo", session, sessions, console)
+    redo_action, _ = await handle_input(loop, "/redo", session, sessions, console)
+
+    assert undo_action is REPLAction.CONTINUE
+    assert redo_action is REPLAction.CONTINUE
