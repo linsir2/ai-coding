@@ -523,3 +523,38 @@ M  docs/data-contracts.md
 **评审确认的通过项**：`restore_ok` 覆盖全部失败路径；不能用 `not reason`（3 条实证）；
 6 处处置表准确；`messages_before` 判据当前不会误判；契约层无需改；
 只改 `ok` 会引入 TUI 回归；基线 0 failed / 6 skipped；ruff 0、mypy 3 处既有。
+
+---
+
+## 十五、第二轮评审（代码评审）与修复
+
+子智能体对**实施后的代码**（`3ff733e..9fa18ca`）再做一轮实跑评审，含 4 组突变实验。
+
+### 15.1 发现与处置
+
+| # | 严重度 | 问题 | 处置 |
+|---|---|---|---|
+| **P1** | 🔴 | **`restore_ok` 漏第 4 条失败路径**：[snapshots.py:129-130](file:///workspace/ai-coding/ai_coding/core/snapshots.py#L129-L130) 在 `git diff` 非 0 时**静默返回空 `RestoreReport()`**（不抛、不填 `failed`）→ `ok` 仍为 `True`、`reason` 为空、`files` 为空 —— 谎称"什么都没变"。**方案 §11.3"只有三种结局"的前提不成立** | ✅ 改为 `raise OSError`；调用方 undo/redo 已有 `except (OSError, TimeoutError, ValueError)` → 落成 `restore-failed`。补测 `test_a_failed_diff_is_raised_not_reported_as_a_clean_restore`，**突变回 `return RestoreReport()` 时该测试报 `DID NOT RAISE`** |
+| **P2** | 🟠 | **redo 的 `ok` 与 undo 不一致**：undo `no-snapshot` ⇒ `ok=True`（良性），redo 仍 `not reason` ⇒ `ok=False`。同一概念两个语义 | ✅ redo 也引入 `restore_ok` 布尔（两处 `if failed:` + `except` 置 False）。补测 `test_a_no_snapshot_redo_stays_a_success_at_the_loop_level` |
+| **P3** | 🟡 | **redo `no-snapshot` 文案误导**：`_REASON_TEXT["no-snapshot"]` 是 undo 语境（"工作区不是 git 仓库"），复用到 redo 时失真，且嵌套括号 | ✅ 新增 `_redo_outcome`，redo 分支不再前缀"还原 0 个文件"再被 reason 自我矛盾。补测 `test_a_no_snapshot_redo_reloads_and_says_why` |
+| **P4** | 🟡 | 3 条新用例抓 bug 能力不均（改前 `.F.`：只有 redo 那条直接抓原始缺陷） | ✅ 不改代码，仅记录 —— 三条各有作用（原始缺陷 / 半修复回归 / 前提锁定） |
+| **P5** | 🟡 | [test_r17_defects.py:1041](file:///workspace/ai-coding/tests/integration/test_r17_defects.py#L1041) 死分支：`report.get("restored")` 键在 redo 报告中不存在 | ✅ **不采纳评审建议的 `files`**（`files` 恒存在 → 整个断言恒真，更差）；改为删掉死分支：`assert report["ok"] is False` |
+| **P6** | 🟡 | `_rewrote_history` 属隐式耦合（字段存在性推断） | ✅ 记录；已由两条全字典相等断言 + 新用例兜底，长期建议加显式 `history` 字段 |
+
+### 15.2 第二轮评审确认的通过项（实跑）
+
+- `_rewrote_history` 对**全部**当前报告形状判据正确（undo 3 种 + redo 2 种），无假阳/假阴
+- 4 组突变各自精确打红对应用例（`ok`→`True`、undo 判据→`ok`、redo 判据→`ok`、`ok`→`not reason` 恰好 3 条）
+- 无越界改动：`handlers.py` / `frontend/src/routes/session.tsx` 未动
+- 无功能回归
+
+### 15.3 最终实测（全部修复后）
+
+```
+pytest  3812 tests / 0 failures / 0 errors / 6 skipped
+ruff    6 errors（全部既有，零新增）
+mypy    3 errors（零新增）
+git status  干净
+```
+
+> 说明：`3812 = 3806（M-A4 基线）+ 3（步骤 4）+ 3（第二轮 P1/P2/P3 补测）`。
