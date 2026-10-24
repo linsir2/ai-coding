@@ -1038,7 +1038,7 @@ async def test_redo_does_not_claim_success_when_restore_failed(tmp_path):
     await loop.undo_last_turn(session)
     report = await loop.redo_last_turn(session)
 
-    assert report["ok"] is False or report.get("files") is not None, report
+    assert report["ok"] is False, report
 
 
 @pytest.mark.asyncio
