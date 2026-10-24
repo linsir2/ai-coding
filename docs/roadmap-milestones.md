@@ -395,3 +395,25 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 | M-F1~F3 记忆 | ⬜ 未开始 | — |
 | M-G1~G4 可观测与质量 | ⬜ 未开始 | — |
 | M-H1~H4 产品化 | ⬜ 未开始 | — |
+
+---
+
+## 十三、M-A4 期间发现的新缺陷（待立项，不在 M-A4 范围）
+
+### N-1 · `gitcmd.git()` 把 stderr 并进 stdout，使解析 stdout 的调用方变脆
+
+| 项 | 内容 |
+|---|---|
+| **位置** | [gitcmd.py:38](file:///workspace/ai-coding/ai_coding/core/gitcmd.py#L38) —— `return outcome.returncode or 0, (outcome.stdout + outcome.stderr).strip()` |
+| **契约** | docstring 明写"returns `(returncode, stdout+stderr)`" —— **合并是有意的** |
+| **后果** | `SnapshotStore.capture` 直接 `sha = out.strip()` 当 stash sha 用。git 一旦往 **stderr** 打警告（如读不到用户 gitconfig：`warning: unable to access '/root/.config/git/ignore': Permission denied`），`capture` 拿到的就是**警告文本**，`update-ref` 失败 → `capture` 返回 `None` → **快照静默失效**（实测：`capture -> None`、`exists -> False`） |
+| **触发条件** | 任何让 git 往 stderr 输出警告的环境（无 HOME / 无 gitconfig / 权限受限） |
+| **为何不在 M-A4 修** | 这是**产品缺陷**，不是测试缺陷；M-A4 的交付物是"测试可移植化"。修它需要改 `gitcmd` 的输出语义或让调用方校验 `^[0-9a-f]{40}$` —— 属于独立里程碑 |
+| **建议修法** | ① `gitcmd.git()` 分离 stdout/stderr（改契约，需评估两个调用方）；或 ② 调用方校验 sha 形状，不符则视为失败并**明确报错**（而非静默返回 None） |
+| **实测证据** | `scripts/verify_real_eacces.py` 在 `HOME` 未设时：`capture -> None` → 干净中止；设 `HOME=/tmp` 后：`capture -> 'refs/ai-coding/undo/s/1'` |
+
+### N-2 · 既有 flaky 用例（评审实测发现）
+
+`tests/test_tool_surface_warning.py::test_the_warning_never_changes_the_request`（`:210`）——
+全量套件 5 次运行出现 1 次失败；单独循环 40 次复现 1 次（断言两侧内容肉眼相同 → 引擎请求记录存在竞争）。
+**与 M-A4 改动无关**，但它会让"让 CI 重新可信"的目标周期性落空，建议纳入 M-A5 收口。

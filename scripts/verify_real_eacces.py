@@ -5,7 +5,13 @@ the other half: it proves the *product* code really handles a real EACCES from
 the operating system, with no injection at all.  Run it as an unprivileged user:
 
     setpriv --reuid=65534 --regid=65534 --clear-groups \
+        env HOME=/tmp GIT_CONFIG_GLOBAL=/dev/null \
         /tmp/nbvenv/bin/python scripts/verify_real_eacces.py
+
+``GIT_CONFIG_GLOBAL=/dev/null`` matters: git prints a warning to *stderr* when
+it cannot read the user's config, and ``ai_coding.core.gitcmd.git`` returns
+stdout+stderr together, so ``SnapshotStore.capture`` would otherwise read that
+warning as the stash sha and silently record nothing.
 """
 
 from __future__ import annotations
@@ -69,7 +75,11 @@ async def main() -> int:
     # ---- 2. restore() really collects it into `failed` ---------------------
     root = repo(base)
     store = SnapshotStore(root)
-    await store.capture("s/1")
+    ref = await store.capture("s/1")
+    check("capture produced a real ref", ref is not None, f"capture -> {ref!r}")
+    if ref is None:
+        print("\n  aborting: without a ref the restore below proves nothing")
+        return 1
     locked2 = root / "ro"
     locked2.mkdir()
     (locked2 / "kept.txt").write_text("x\n", encoding="utf-8")
@@ -108,3 +118,4 @@ async def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
+

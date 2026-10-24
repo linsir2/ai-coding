@@ -17,7 +17,6 @@ from pathlib import Path
 import pytest
 
 from ai_coding.core.snapshots import SnapshotStore
-from tests.conftest import refused
 
 
 def _repo(tmp_path: Path) -> Path:
@@ -64,7 +63,7 @@ async def test_capture_then_restore_brings_back_the_pre_turn_content(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_file_that_cannot_be_deleted_is_reported_not_raised(tmp_path, monkeypatch):
+async def test_a_file_that_cannot_be_deleted_is_reported_not_raised(tmp_path, refused):
     """restore is a transaction: it either says what came back or it says what
     did not.  Raising halfway through used to leave the caller -- and the user
     -- believing the whole tree had been rewound, when the files before the
@@ -77,13 +76,15 @@ async def test_a_file_that_cannot_be_deleted_is_reported_not_raised(tmp_path, mo
     (locked / "kept.txt").write_text("x\n", encoding="utf-8")
     (locked / "after_in_locked.txt").write_text("z\n", encoding="utf-8")
     (root / "after.txt").write_text("y\n", encoding="utf-8")
-    with refused(monkeypatch, locked / "kept.txt"):
+    with refused(locked / "kept.txt"):
         report = await store.restore("s/1", created={"ro/kept.txt"})
 
         assert "ro/kept.txt" in report.failed, (
             f"the undeletable file is not reported as failed: {report}"
         )
-        assert (locked / "kept.txt").exists(), "the test did not exercise a real refusal"
+        assert (locked / "kept.txt").exists(), (
+            "the refused file must survive the restore"
+        )
 
 
 @pytest.mark.asyncio
