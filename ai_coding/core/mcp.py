@@ -614,11 +614,18 @@ class _CallbackServer:
             code = (query.get("code") or [""])[0]
             state = (query.get("state") or [""])[0]
             error = (query.get("error") or [""])[0]
+            error_description = (query.get("error_description") or [""])[0]
             if error:
                 body = f"Sign-in failed: {error}".encode()
             else:
                 body = b"Signed in - you can close this window."
-                if self._code is not None and not self._code.done():
+            if self._code is not None and not self._code.done():
+                # A refusal is an answer, not an empty code: hand it over as
+                # itself so the operator reads "access_denied" rather than a
+                # timeout, and the SDK never has to guess (RFC 6749 4.1.2.1).
+                if error:
+                    self._code.set_exception(OAuthCallbackError(error, error_description))
+                else:
                     self._code.set_result((code, state))
             writer.write(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "
@@ -632,17 +639,19 @@ class _CallbackServer:
         finally:
             writer.close()
 
-    async def result(self, timeout: float) -> Any:
-        """Wait for the browser to come back with a code."""
-        from mcp.client.auth import AuthorizationCodeResult
+    async def result(self, timeout: float) -> tuple[str, str | None]:
+        """Wait for the browser to come back with a code.
 
+        Returns ``(code, state)`` — the shape the ``mcp`` SDK's
+        ``callback_handler`` asks for (``Callable[[], Awaitable[tuple[str, str | None]]]``).
+        """
         if self._code is None:
             raise RuntimeError("callback server was never started")
         try:
             code, state = await asyncio.wait_for(self._code, timeout=timeout)
         except (asyncio.TimeoutError, TimeoutError) as exc:
             raise OAuthLoginTimeout(f"no sign-in callback within {timeout:g}s") from exc
-        return AuthorizationCodeResult(code=code, state=state or None)
+        return code, state or None
 
     async def stop(self) -> None:
         if self._server is not None:
@@ -653,6 +662,22 @@ class _CallbackServer:
 
 class OAuthLoginTimeout(Exception):
     """The operator never came back from the browser (M4)."""
+
+
+class OAuthCallbackError(Exception):
+    """The authorization server refused the sign-in (RFC 6749 4.1.2.1).
+
+    ``access_denied`` (the operator clicked "no"), ``invalid_scope`` and friends
+    are *answers*, not failures to connect: they must surface as themselves.
+    Reporting them as a timeout -- or swallowing them into an empty code -- sends
+    the operator to check the network for a refusal that happened in the browser.
+    """
+
+    def __init__(self, error: str, description: str = "") -> None:
+        self.error = error
+        self.description = description
+        detail = f" ({description})" if description else ""
+        super().__init__(f"sign-in failed: {error}{detail}")
 
 
 def _find_leaf(exc: BaseException | None, cls: type) -> BaseException | None:
@@ -784,19 +809,26 @@ def _remote_session_factory(
                     else None
                 ),
             )
-            import httpx2
+            import httpx
 
-            async with streamable_http_client(
-                server.url,
-                http_client=httpx2.AsyncClient(auth=provider, headers=headers or None),
-            ) as (read, write):
-                async with ClientSession(read, write) as session:
-                    # ``ClientSession.__aenter__`` only starts the dispatcher:
-                    # the handshake is a separate (idempotent) call, and for a
-                    # remote server it is also the request that discovers the
-                    # token is missing and starts the flow.
-                    await session.initialize()
-                    yield session
+            # The SDK does not own a client it was handed (``client_provided``),
+            # so the connection pool is ours to close -- a supervisor reconnect
+            # or a login per attempt would otherwise leak one each time.
+            async with httpx.AsyncClient(auth=provider, headers=headers or None) as client:
+                # mcp>=1.30 yields (read, write, get_session_id); the third item
+                # is the ``Mcp-Session-Id`` resumption callback.  We let the SDK
+                # own the session, so it is taken and dropped here -- but it must
+                # be taken, or the unpack raises before any request goes out.
+                async with streamable_http_client(
+                    server.url, http_client=client
+                ) as (read, write, _session_id):
+                    async with ClientSession(read, write) as session:
+                        # ``ClientSession.__aenter__`` only starts the dispatcher:
+                        # the handshake is a separate (idempotent) call, and for a
+                        # remote server it is also the request that discovers the
+                        # token is missing and starts the flow.
+                        await session.initialize()
+                        yield session
         finally:
             if callback is not None:
                 await callback.stop()

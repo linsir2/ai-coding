@@ -80,8 +80,18 @@ class _FakeAsHandler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             redirect_uri = (query.get("redirect_uri") or [""])[0]
             state = (query.get("state") or [""])[0]
+            self.state.authorizations.append(query)
             self.send_response(302)
-            target = f"{redirect_uri}?code={self.state.code_to_issue}&state={state}"
+            if self.state.refused:
+                # RFC 6749 4.1.2.1: the operator said no, and the AS says so in
+                # the redirect rather than issuing a code.
+                target = (
+                    f"{redirect_uri}?error=access_denied"
+                    f"&error_description=The+user+declined+the+request"
+                    f"&state={state}"
+                )
+            else:
+                target = f"{redirect_uri}?code={self.state.code_to_issue}&state={state}"
             self.send_header("Location", target)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -122,7 +132,14 @@ class _FakeAsHandler(BaseHTTPRequestHandler):
 
         if path == "/register":
             self.state.registrations.append(flat)
-            self._json({"client_id": "fake-client", "client_id_issued_at": int(time.time())})
+            # RFC 7591 3.2.1 lets the AS echo the registered redirect_uris; the
+            # SDK's OAuthClientInformationFull requires the field to be present
+            # at all, so a compliant fake has to send it back -- even as null.
+            response = {"client_id": "fake-client", "client_id_issued_at": int(time.time())}
+            response["redirect_uris"] = (
+                flat["redirect_uris"] if flat.get("redirect_uris") else None
+            )
+            self._json(response)
             return
 
         if path == "/token":
@@ -515,6 +532,40 @@ async def test_login_runs_the_real_flow_and_the_server_comes_up(fake_as, tmp_pat
     assert row["status"] == "connected"
     assert row["toolCount"] == 1
     assert "read_file" in [h.name for _s, handles in manager.available() for h in handles]
+    await manager.aclose()
+
+
+async def test_a_refusal_is_reported_as_a_refusal_not_a_timeout(fake_as, tmp_path, monkeypatch):
+    """RFC 6749 4.1.2.1: ``error=access_denied`` is an answer, not a hang.
+
+    Before the fix the callback server resolved the future with an empty code on
+    an error redirect, so the operator waited out the whole timeout to be told
+    "no sign-in callback" for a refusal that happened in the browser.
+    """
+    from ai_coding.core import mcp as mcp_module
+
+    monkeypatch.setattr(mcp_module, "_BACKOFF_MIN", 0.01)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    _patch_authorize(monkeypatch)
+    fake_as.state.refused = True
+
+    manager = MCPManager(
+        MCPConfig(
+            enabled=True,
+            servers=[_remote("r", fake_as.base, oauth=MCPOAuthConfig(callback_port=0))],
+        ),
+        session_factory=lambda server: (_ for _ in ()).throw(AssertionError("local factory")),
+    )
+    await manager.open_all()
+    assert await _until(lambda: manager.servers()[0]["status"] == "needs_auth")
+
+    result = await manager.login("r", timeout=15)
+
+    assert result["ok"] is False
+    assert "access_denied" in result["reason"], result
+    assert "declined" in result["reason"], result
+    assert "callback" not in result["reason"], result  # not a timeout
+    assert len(fake_as.state.authorizations) == 1  # the AS was reached at all
     await manager.aclose()
 
 
