@@ -59,14 +59,19 @@
 | **改动方向** | `core/snapshots.py` / `agent_loop.undo_last_turn`：`failed` 非空时不得报 `ok: True`，`reason` 必须点名未恢复文件 |
 | **验收判据** | ① 该 pytest 用例转绿；② 新增"只读目录下 undo"的回归用例；③ 文档 `docs/data-contracts.md` 的 undo 契约同步 |
 
-### M-A4 · 环境伪失败的隔离（CI 可信度）
+### M-A4 · 环境伪失败的隔离（CI 可信度）—— ✅ 已完成（2026-10-24）
+
+> 实施记录与评审见 [plan-m-a4.md](plan-m-a4.md)。**调研推翻了本节原判**：
+> 那 6 条"需外网"的 MCP OAuth 用例**是 M-A1 修好的**（它们用 `127.0.0.1` 假 AS，完全离线）；
+> 真正的环境伪失败只有 **3 条**，且全是 root 绕过 DAC 所致。
 
 | 项 | 内容 |
 |---|---|
-| **缺口** | 10 条 pytest 失败里 **8 条是环境伪失败**：2 条因 `root` 可写/可删一切（`test_grant_store`、`test_snapshots`），6 条因 MCP OAuth 需外网 |
-| **影响** | 真缺陷被噪音淹没；CI 红了也分不清是不是真坏 |
-| **改动方向** | ① 权限类用例加 `@pytest.mark.skipif(os.geteuid() == 0, ...)` 或改用非 root 用户运行；② MCP OAuth 用例加 `@pytest.mark.skipif(not os.environ.get("AI_CODING_MCP_OAUTH"), ...)`，并在 CI 里显式开启 |
-| **验收判据** | ① `pytest -q` 在 root 沙箱内 **0 失败**（或失败项全部显式标注为环境依赖）；② CI 日志能一眼区分"真失败 / 跳过" |
+| **实际缺口** | 3 条测试靠 `chmod` 制造"操作系统拒绝"，而 root 绕过 DAC → 拒绝不发生 → 断言失败 |
+| **影响** | root 容器（最常见的开发/CI 环境）下这 3 条**静默空转**：CI 绿了也不知道是不是真绿 |
+| **实际改动** | 新建 `tests/conftest.py` 的泛化 helper `refused(monkeypatch, path, attr)`；3 条测试改为注入；`pyproject.toml` 加 `-rs` |
+| **验收** | `pytest` **3806 tests / 0 failures / 0 errors / 6 skipped**；ruff 零新增；**突变测试**证明不空转；**真实 EACCES**（以 nobody 跑）证明产品代码是对的 |
+| **副产物** | `scripts/verify_real_eacces.py` —— 零注入的真实业务逻辑验证 |
 
 ### M-A5 · lint / type 门禁清零
 
@@ -376,7 +381,7 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 | M-A1 必崩缺陷 | ✅ **已完成** | `pytest tests/test_mcp_oauth.py` **18 passed**；全量 10→**3 failed**；mypy 6→**3**；方案见 [plan-m-a1.md](plan-m-a1.md) |
 | M-A2 契约漂移 | ⬜ 未开始 | — |
 | M-A3 undo 上报 | ⬜ 未开始 | — |
-| M-A4 环境伪失败 | ⬜ 未开始 | — |
+| M-A4 环境伪失败 | ✅ **已完成** | `pytest` **3806 tests / 0 failures / 0 errors / 6 skipped**；真实 EACCES 验证 3 passed；方案见 [plan-m-a4.md](plan-m-a4.md) |
 | M-A5 lint/type 清零 | ⬜ 未开始 | — |
 | M-A6 文档一致性 | ⬜ 未开始 | — |
 | M-B1 静态检查回喂 | ⬜ 未开始 | — |
