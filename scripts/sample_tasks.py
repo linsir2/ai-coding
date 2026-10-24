@@ -83,7 +83,9 @@ def _tool_messages(session, name: str | None = None):
 async def s0_mcp_off(app_cfg, root: Path) -> tuple[bool, str]:
     manager = MCPManager(app_cfg.mcp)
     try:
-        tools = await manager.open_all()
+        # eval-03 minimal fix: open_all() returns None (the tool surface now
+        # comes from manager.available()), but this scenario asserts on a count.
+        tools = (await manager.open_all()) or []
     finally:
         await manager.aclose()
     return tools == [], f"enabled={app_cfg.mcp.enabled} tools={len(tools)}"
