@@ -50,14 +50,17 @@
 | **决策（二选一，建议选 ②）** | ① 改文档承认 `None`；② **让 `open_all()` 返回工具列表**（对齐 R1a-6 原始设计，`for tool in await open_all()` 的写法才成立） |
 | **验收判据** | ① `docs/features.md` / `docs/r1a-6-analysis.md` 与代码一致；② `scripts/sample_tasks.py`、`scripts/r7_cases.py` 在不加 `or []` 的情况下通过；③ `ruff`/`mypy` 0 新增问题 |
 
-### M-A3 · undo 部分回滚未上报
+### M-A3 · undo 部分回滚未上报 —— ✅ 已完成（2026-10-24）
+
+> 实施记录与评审见 [plan-m-a3.md](plan-m-a3.md)。评审发现 redo 有同类缺陷（reload 判据），已纳入范围。
 
 | 项 | 内容 |
 |---|---|
-| **缺口** | `tests/integration/test_r17_defects.py::test_undo_names_the_files_it_could_not_restore` 失败：`{'ok': True, 'files': ['ro/stuck.txt'], 'reason': ''}` —— 报告"成功"却隐藏了部分回滚 |
-| **影响** | 用户以为全恢复了，实际有文件没恢复 |
-| **改动方向** | `core/snapshots.py` / `agent_loop.undo_last_turn`：`failed` 非空时不得报 `ok: True`，`reason` 必须点名未恢复文件 |
-| **验收判据** | ① 该 pytest 用例转绿；② 新增"只读目录下 undo"的回归用例；③ 文档 `docs/data-contracts.md` 的 undo 契约同步 |
+| **缺口** | `undo_last_turn` 的 `ok` 恒为 `True`，与 `failed`/异常解耦：部分回滚被报成成功（改前实测 `{'ok': True, 'reason': 'restore-partial: ro/stuck.txt'}`）；且 `commands.py` 用 `ok` 决定 `RELOAD`，而 redo 的历史是**无条件追加**的 → 部分 undo/redo、`no-snapshot`、`restore-failed` 都是"历史已改写但前端不重投影"，transcript 与 tree 不一致 |
+| **影响** | 用户以为全恢复了，实际有文件没恢复；且部分 undo/redo 时 transcript 与 tree 不一致 |
+| **改动** | `agent_loop.undo_last_turn` 引入 `restore_ok`（`if failed:` 与 `except` 两处置 `False`，报告改用之）；`commands.py` 新增 `_rewrote_history`，undo/redo 都改以"报告是否带历史记账字段"决定 `RELOAD`，redo 文案补 reason；`test_r17_defects.py:1005` 断言翻转；`test_undo_command.py` 新增 3 条 |
+| **验收** | ① 该 pytest 用例转绿；② 新增"部分 undo/redo 仍 RELOAD""早退仍 CONTINUE"回归用例；③ `docs/data-contracts.md` 同步；④ 全量 **0 failed / 6 skipped**；⑤ 突变（`ok` 改回 `True`）打红该用例 |
+| **不含** | `snapshots.py`（契约已正确）、`handlers.py`、`frontend/src/routes/session.tsx`、`_REASON_TEXT`（补映射会丢路径） |
 
 ### M-A4 · 环境伪失败的隔离（CI 可信度）—— ✅ 已完成（2026-10-24）
 
