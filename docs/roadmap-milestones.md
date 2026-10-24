@@ -29,16 +29,17 @@
 
 > 目标：**让"测试通过"这件事重新可信**。这是后续所有里程碑的验证前提。
 
-### M-A1 · 必崩缺陷修复
+### M-A1 · 必崩缺陷修复 —— ✅ 已完成（2026-10-24）
+
+> 实施记录与两轮评审见 [plan-m-a1.md](plan-m-a1.md)。**调研结论与原计划不同**：
+> 不是"1 行笔误"，而是**代码与 SDK 版本错配**（代码按 mcp 2.2.0 写，实装 1.30.0）。
 
 | 项 | 内容 |
 |---|---|
-| **缺口** | `ai_coding/core/mcp.py:787` 的 `import httpx2`（应为 `httpx`） |
-| **现状证据** | `mypy`：`Cannot find implementation or library stub for module named "httpx2"`；PyPI 无此包 |
-| **触发条件** | 任何走「远程 streamable-HTTP MCP 服务器 + OAuth」的路径 |
-| **后果** | `ModuleNotFoundError`，该分支 100% 崩溃 |
-| **改动** | 1 行：`import httpx2` → `import httpx`，`httpx2.AsyncClient` → `httpx.AsyncClient` |
-| **验收判据** | ① `mypy ai_coding` 该条 error 消失；② 单测 `tests/test_mcp_oauth.py` 从 `assert False` 转为通过（需模拟远端端点）；③ 新增一条**断言该分支真的 import 到 `httpx`** 的回归测试 |
+| **实际改动** | 产品 3 处（`mcp.py`）+ 依赖声明 1 处（`pyproject.toml`）+ 评审追加 3 处（客户端生命周期 / OAuth 拒绝语义 / 假 AS 回显）+ 负路径测试 1 条 |
+| **实测版本矩阵** | mcp **1.19–1.23** 无 `streamable_http_client`；**1.24–1.30** 两者皆可；**2.0+** 要 `AuthorizationCodeResult`+`httpx2` → 依赖收紧为 **`mcp>=1.24,<2`** |
+| **验收** | `pytest tests/test_mcp_oauth.py` **18 passed**；全量 **10→3 failed**；`mypy` **6→3**；`ruff`（改动文件）0 |
+| **副产物** | 澄清了 `httpx2` 之谜：它在 **mcp 2.2.0 里是真实依赖**，不是笔误 —— 原代码是按 2.2.0 写的 |
 
 ### M-A2 · 契约漂移收敛（`open_all()` 返回值）
 
@@ -372,7 +373,7 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 
 | 里程碑 | 状态 | 验证输出 |
 |---|---|---|
-| M-A1 必崩缺陷 | ⬜ 未开始 | — |
+| M-A1 必崩缺陷 | ✅ **已完成** | `pytest tests/test_mcp_oauth.py` **18 passed**；全量 10→**3 failed**；mypy 6→**3**；方案见 [plan-m-a1.md](plan-m-a1.md) |
 | M-A2 契约漂移 | ⬜ 未开始 | — |
 | M-A3 undo 上报 | ⬜ 未开始 | — |
 | M-A4 环境伪失败 | ⬜ 未开始 | — |
