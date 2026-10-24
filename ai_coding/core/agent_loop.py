@@ -2512,6 +2512,7 @@ class AgentLoop:
         reason = ""
         restored: list[str] = []
         failed: list[str] = []
+        restore_ok = True
         session_id = session.session_id
         if self.snapshots is not None:
             try:
@@ -2520,6 +2521,7 @@ class AgentLoop:
                     report = await self.snapshots.restore(key)
                     restored, failed = report.restored, report.failed
                     if failed:
+                        restore_ok = False
                         reason = "restore-partial: " + ", ".join(failed[:3]) + (
                             f" (+{len(failed) - 3} more)" if len(failed) > 3 else ""
                         )
@@ -2527,7 +2529,10 @@ class AgentLoop:
                     reason = "no-snapshot"
             except (OSError, TimeoutError, ValueError) as exc:
                 # r17 reported success here whatever happened, so the TUI said
-                # "restored" for a restore that never ran.
+                # "restored" for a restore that never ran.  restore_ok keeps the
+                # same door undo uses, so an exception and a partial restore are
+                # both a failure and no-snapshot is the one benign path (M-A3).
+                restore_ok = False
                 reason = f"restore-failed: {exc}"
         # r20/F9: the baseline commit is tracked files only, so the created ones
         # are written back from what undo kept.  A path that cannot be written
@@ -2548,6 +2553,7 @@ class AgentLoop:
             else:
                 restored.append(rel)
         if failed:
+            restore_ok = False
             reason = "restore-partial: " + ", ".join(failed[:3]) + (
                 f" (+{len(failed) - 3} more)" if len(failed) > 3 else ""
             )
@@ -2567,7 +2573,7 @@ class AgentLoop:
         self._undo_files_store.clear(session_id)
         self.closer.save(session)
         return {
-            "ok": not reason,
+            "ok": restore_ok,
             "reason": reason,
             "files": sorted(set(restored)),
             "messages": len(session.messages),

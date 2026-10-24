@@ -178,6 +178,28 @@ async def test_a_partial_redo_still_reloads_the_transcript(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_no_snapshot_redo_reloads_and_says_why(tmp_path):
+    """M-A3 review P3: a redo with no snapshot still appends the history, so the
+    command must RELOAD -- and the file half must be said as the reason, not as a
+    "还原 0 个文件" the reason then contradicts."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+    await _seeded_turn(loop, session, root)
+    await loop.undo_last_turn(session)  # stages the tail and the redo baseline
+    await loop.snapshots.forget(f"{session.session_id}/redo")  # the ref is gone
+
+    console, sink = _console()
+    action, _ = await handle_input(loop, "/redo", session, sessions, console)
+
+    assert action is REPLAction.RELOAD
+    out = sink.export_text()
+    assert "已恢复上一回合" in out, out
+    assert "本回合没有可用快照" in out, out
+    assert "还原 0 个文件" not in out, f"the reason is repeated as a count: {out!r}"
+
+
+@pytest.mark.asyncio
 async def test_a_refusal_leaves_the_view_alone(tmp_path):
     """M-A3: a refusal carries only ``{ok, reason}`` -- no history accounting --
     so the command must CONTINUE and leave the transcript alone.  This is the

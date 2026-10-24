@@ -80,6 +80,19 @@ def _undo_outcome(report: dict[str, Any]) -> str:
     return _reason_text(reason)
 
 
+def _redo_outcome(report: dict[str, Any]) -> str:
+    """The file half of a redo, said plainly either way.
+
+    Mirrors ``_undo_outcome``: a reason already names what did not come back
+    (``no-snapshot`` / ``restore-partial: <path>``), so prefixing it with
+    "还原 0 个文件" only repeats it and reads as a count the reason then
+    contradicts (M-A3 review P3)."""
+    reason = str(report.get("reason") or "")
+    if not reason:
+        return f"还原 {len(report.get('files') or [])} 个文件"
+    return _reason_text(reason)
+
+
 def _rewrote_history(report: dict[str, Any]) -> bool:
     """True when the report carries history accounting -- i.e. the transcript
     was rewritten and the caller must reload.  A refusal carries only
@@ -200,10 +213,7 @@ async def handle_input(
             return REPLAction.CONTINUE, session
         report = await redo(session)
         if _rewrote_history(report):
-            console.info(
-                f"[redo] 已恢复上一回合，还原 {len(report.get('files') or [])} 个文件"
-                + (f"（{_reason_text(report['reason'])}）" if report.get("reason") else "")
-            )
+            console.info("[redo] 已恢复上一回合，" + _redo_outcome(report))
             return REPLAction.RELOAD, session
         console.info("[redo] " + _reason_text(report.get("reason", "")))
         return REPLAction.CONTINUE, session

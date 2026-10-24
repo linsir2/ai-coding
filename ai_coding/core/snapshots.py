@@ -123,11 +123,17 @@ class SnapshotStore:
         ones before it undone and the ones after it untouched, and the caller
         cannot tell that from a clean one unless the partial outcome is handed
         back explicitly (r20/F1).
+
+        A ``git diff`` that cannot even name the differences is not a partial
+        restore -- it is no restore at all.  Returning an empty report here used
+        to read as "nothing differed, nothing to do", which the caller would
+        then report as a clean success; raising hands the caller its
+        ``restore-failed`` reason instead (M-A3 review P1).
         """
         ref = self._ref(key)
         code, out = await git(self._root, "diff", "--name-only", ref, timeout=self._timeout)
         if code != 0:
-            return RestoreReport()
+            raise OSError(f"git diff {ref} failed")
         paths = {line.strip() for line in out.splitlines() if line.strip()}
         restored: list[str] = []
         failed: list[str] = []

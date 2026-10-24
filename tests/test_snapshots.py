@@ -127,6 +127,21 @@ async def test_a_non_repo_degrades_to_no_snapshot(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_failed_diff_is_raised_not_reported_as_a_clean_restore(tmp_path):
+    """M-A3 review P1: ``git diff`` that cannot even name the differences is not
+    a partial restore -- it is no restore at all.
+
+    An empty report here read as "nothing differed, nothing to do", so the caller
+    (undo) reported a clean success for a restore that never ran.  Raising hands
+    the caller its ``restore-failed`` reason instead."""
+    root = _repo(tmp_path)
+    store = SnapshotStore(root)
+
+    with pytest.raises(OSError):
+        await store.restore("s/999")
+
+
+@pytest.mark.asyncio
 async def test_prune_keeps_the_newest_refs_only(tmp_path):
     root = _repo(tmp_path)
     store = SnapshotStore(root, keep=2)

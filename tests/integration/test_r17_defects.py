@@ -1038,7 +1038,26 @@ async def test_redo_does_not_claim_success_when_restore_failed(tmp_path):
     await loop.undo_last_turn(session)
     report = await loop.redo_last_turn(session)
 
-    assert report["ok"] is False or report.get("restored") is not None, report
+    assert report["ok"] is False or report.get("files") is not None, report
+
+
+@pytest.mark.asyncio
+async def test_a_no_snapshot_redo_stays_a_success_at_the_loop_level(tmp_path):
+    """M-A3 review P2: redo's ``ok`` is gated by the file half (``restore_ok``),
+    not by ``reason`` -- so ``no-snapshot``, the one benign reason, keeps
+    ``ok=True`` exactly as undo does.  ``not reason`` would have flipped it."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+    await loop.process_input(session, "TURN")
+    await loop.undo_last_turn(session)
+    await loop.snapshots.forget(f"{session.session_id}/redo")
+
+    report = await loop.redo_last_turn(session)
+
+    assert report["reason"] == "no-snapshot", report
+    assert report["ok"] is True, "no-snapshot is benign and must not read as failure"
+    assert len(session.messages) == 2, "the history half still came back"
 
 
 @pytest.mark.asyncio
