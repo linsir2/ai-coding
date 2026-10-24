@@ -1002,7 +1002,7 @@ async def test_undo_names_the_files_it_could_not_restore(tmp_path, refused):
     assert "ro/stuck.txt" in report["reason"], (
         f"undo hid a partial rewind behind a clean report: {report}"
     )
-    assert report["ok"] is True, "the conversation half still unrolls"
+    assert report["ok"] is False, "a partial rewind must not be reported as success"
 
 
 @pytest.mark.asyncio
