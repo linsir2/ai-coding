@@ -163,6 +163,7 @@ export function Home(props: HomeProps) {
           agent={effective()}
           agentName={effectiveName()}
           mode={isPlanAgentId(effective()) ? "plan" : "normal"}
+          readonly={isPlanAgentId(effective())}
           onSubmit={(text, images) => props.onSubmit(text, images, draft())}
           seed={promptSeed()}
           onSeedDone={() => setPromptSeed("")}

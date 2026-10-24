@@ -32,13 +32,18 @@ describe("ComposerMeta agent tag (19 §3.1, T7)", () => {
     expect(frame).toContain("Build · qwen3.7-flash · working")
   })
 
-  // T7 sanctioned behavior change (30-M4 §3.5/§7.5): the agent name leads and
-  // PLAN is demoted to a suffix — the old "PLAN · meta" headline (which also
-  // asserted the absence of any name) no longer exists.
-  test("plan mode shows the agent name with PLAN as suffix", async () => {
+  // The plan agent is already named "Plan" — the suffix keeps only what
+  // the name does not say ("只读"), so "Plan·PLAN·只读" never renders.
+  test("plan mode shows the agent name with readonly as suffix", async () => {
     const frame = await render({ agent: "plan", agentName: "Plan", mode: "plan", readonly: true })
-    expect(frame).toContain("Plan · PLAN·只读 · qwen3.7-flash · working")
+    expect(frame).toContain("Plan · 只读 · qwen3.7-flash · working")
+    expect(frame).not.toContain("PLAN")
     expect(frame).not.toContain("Build")
+  })
+
+  test("a non-plan agent in plan posture keeps the PLAN suffix", async () => {
+    const frame = await render({ agent: "reviewer", agentName: "Reviewer", mode: "plan", readonly: true })
+    expect(frame).toContain("Reviewer · PLAN·只读 · qwen3.7-flash · working")
   })
 
   test("a custom agent names itself, posture still suffixes", async () => {

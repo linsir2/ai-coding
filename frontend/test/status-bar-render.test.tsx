@@ -66,8 +66,14 @@ describe("StatusBar posture marker (P5)", () => {
     expect(frame).not.toContain("PLAN")
   })
 
-  test("the plan agent keeps its posture suffix after its name", async () => {
+  test("the plan agent keeps only the readonly suffix after its name", async () => {
     const frame = await render({ agent: "plan", agentName: "Plan", mode: "plan", readonly: true })
-    expect(frame).toContain("Plan·PLAN·只读")
+    expect(frame).toContain("Plan·只读")
+    expect(frame).not.toContain("PLAN")
+  })
+
+  test("a non-plan agent in plan posture keeps the PLAN suffix", async () => {
+    const frame = await render({ agent: "reviewer", agentName: "Reviewer", mode: "plan", readonly: true })
+    expect(frame).toContain("Reviewer·PLAN·只读")
   })
 })

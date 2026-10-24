@@ -91,7 +91,7 @@ describe("Home agent draft (cold start, T7)", () => {
     keymap.runCommand("home.mode.cycle")
     await setup.flush()
     await setup.waitForVisualIdle()
-    expect(frameOf()).toContain("Plan · PLAN · p · m")
+    expect(frameOf()).toContain("Plan · 只读 · p · m")
 
     keymap.runCommand("home.mode.cycle")
     await setup.flush()

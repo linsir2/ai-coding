@@ -11,6 +11,7 @@
 import { TextAttributes } from "@opentui/core"
 import { theme } from "../theme/tokens"
 import { agentAccent } from "../util/agent"
+import { postureSuffix } from "../util/plan-agent"
 
 export function ComposerMeta(props: {
   /** T7: the current agent id — the name leads the line. */
@@ -22,15 +23,9 @@ export function ComposerMeta(props: {
   metadata: string
 }) {
   const name = () => props.agentName ?? props.agent ?? "Build"
-  // T7: PLAN·只读 is a suffix now, not the headline.
-  const suffix = () => {
-    const plan = props.mode === "plan"
-    const readonly = props.readonly === true
-    if (plan && readonly) return "PLAN·只读"
-    if (plan) return "PLAN"
-    if (readonly) return "只读"
-    return null
-  }
+  // The plan agent is already named "Plan" — postureSuffix folds the
+  // redundant PLAN away, keeping only what the name does not say.
+  const suffix = () => postureSuffix(props.agent, props.mode, props.readonly)
   return (
     <box flexDirection="row">
       <text fg={agentAccent(props.agent ?? "")} attributes={TextAttributes.BOLD}>

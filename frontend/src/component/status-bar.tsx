@@ -11,6 +11,7 @@ import { theme } from "../theme/tokens"
 import { abbreviateHome, formatLocation, truncatePath } from "../util/location"
 import { formatTokens, percentUsed } from "../util/stats"
 import { agentAccent } from "../util/agent"
+import { postureSuffix } from "../util/plan-agent"
 
 /** Fixed segments (usage, hint, name/version, gaps, padding) — the rest is path. */
 const FIXED_WIDTH = 56
@@ -39,10 +40,10 @@ export function StatusBar(props: {
   // reads as Build, the stats contract's fail-safe direction).
   const marker = () => {
     const name = props.agentName ?? props.agent ?? "Build"
-    const plan = props.mode === "plan"
-    const readonly = props.readonly === true
-    const suffix = plan && readonly ? "·PLAN·只读" : plan ? "·PLAN" : readonly ? "·只读" : ""
-    return `${name}${suffix}`
+    // Same fold as the composer line: the plan agent's own name already
+    // says Plan, so the suffix keeps only what the name does not say.
+    const suffix = postureSuffix(props.agent, props.mode, props.readonly)
+    return suffix ? `${name}·${suffix}` : name
   }
   const location = () => {
     if (props.interruptArmed) return "Press esc again to interrupt"
