@@ -54,7 +54,10 @@ include = ["ai_coding*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# -rs: print the reason for every skip.  Without it a gate-gated case (the
+# MCP stdio round trips) reads as a bare "6 skipped", which is indistinguishable
+# from a real failure the log never mentions.
+addopts = "-q -rs"
 
 [tool.ruff]
 line-length = 100

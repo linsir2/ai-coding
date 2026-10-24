@@ -34,6 +34,7 @@ from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.webfetch_tool import FetchRefused, WebfetchTool, _is_public_url
 from ai_coding.tools.websearch_tool import WebsearchTool
 from ai_coding.tools.write_tool import WriteTool
+from tests.conftest import refused
 
 # --------------------------------------------------------------- T3: SSRF
 
@@ -955,14 +956,12 @@ async def test_undo_says_why_no_file_was_restored(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_undo_names_the_files_it_could_not_restore(tmp_path):
+async def test_undo_names_the_files_it_could_not_restore(tmp_path, monkeypatch):
     """r20/F1: a restore that stops halfway used to be reported as a clean
     rewind -- the paths that had already been undone were counted as restored
     and the one that refused was counted too, so the user saw a tidy list and
     an empty reason.  The report is the only evidence undo has, so it has to
     carry the failure."""
-    import os
-
     from ai_coding.domain.loop import StepResult
     from ai_coding.domain.message import ToolCallRef
 
@@ -994,11 +993,12 @@ async def test_undo_names_the_files_it_could_not_restore(tmp_path):
     session = sessions.create()
     await loop.process_input(session, "建个文件")
     assert (locked / "stuck.txt").exists(), "the turn did not create the file"
-    os.chmod(locked, 0o555)
-    try:
+    # The refusal is injected at the unlink, not at the report: this file's
+    # contract is "nothing mocks the seam under test", and the seam here is
+    # what undo *reports*.  chmod cannot produce a refusal for root, and root
+    # is the normal container user.
+    with refused(monkeypatch, locked / "stuck.txt"):
         report = await loop.undo_last_turn(session)
-    finally:
-        os.chmod(locked, 0o755)
 
     assert "ro/stuck.txt" in report["reason"], (
         f"undo hid a partial rewind behind a clean report: {report}"

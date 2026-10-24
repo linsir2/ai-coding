@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import json
 import pathlib
-import stat
 
 import pytest
 
 from ai_coding.security.grants import GrantStore, grants_path
+from tests.conftest import refused
 
 
 @pytest.fixture
@@ -94,18 +94,15 @@ def test_a_store_of_the_wrong_shape_degrades_to_nothing(store):
     assert store.load() == set()
 
 
-def test_an_unwritable_store_does_not_raise(store):
+def test_an_unwritable_store_does_not_raise(store, monkeypatch):
     """Best effort, like every other persistence in this project.  The *grant*
     is the gate's to keep for this session; all the store owes is to fail
     quietly rather than take the turn down with it."""
     store.path.parent.mkdir(parents=True, exist_ok=True)
-    store.path.parent.chmod(stat.S_IRUSR | stat.S_IXUSR)
-    try:
+    with refused(monkeypatch, store.path, "write_text"):
         store.add("edit:a.py")  # must not raise
 
         assert not store.path.exists()
-    finally:
-        store.path.parent.chmod(stat.S_IRWXU)
 
 
 def test_clearing_removes_only_this_workspace(tmp_path, monkeypatch):
