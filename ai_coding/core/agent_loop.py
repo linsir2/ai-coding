@@ -2414,6 +2414,7 @@ class AgentLoop:
         reason = "no-snapshot" if self.snapshots is None else ""
         restored: list[str] = []
         failed: list[str] = []
+        restore_ok = True
         if self.snapshots is not None:
             key = self._turn_key(session, max(0, session.turn_count - 1))
             try:
@@ -2442,12 +2443,14 @@ class AgentLoop:
                         # messages would leave a state where the transcript and
                         # the tree disagree about the same turn.  Say which paths
                         # did not move instead of implying a clean rewind.
+                        restore_ok = False
                         reason = "restore-partial: " + ", ".join(failed[:3]) + (
                             f" (+{len(failed) - 3} more)" if len(failed) > 3 else ""
                         )
                 else:
                     reason = "no-snapshot"
             except (OSError, TimeoutError, ValueError) as exc:
+                restore_ok = False
                 restored = []
                 reason = f"restore-failed: {exc}"
         self._undo_tail[session.session_id] = (
@@ -2486,7 +2489,7 @@ class AgentLoop:
         )
         self.closer.save(session)
         report = {
-            "ok": True,
+            "ok": restore_ok,
             "text": text,
             "files": restored,
             "reason": reason,
