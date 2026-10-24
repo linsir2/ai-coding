@@ -80,6 +80,13 @@ def _undo_outcome(report: dict[str, Any]) -> str:
     return _reason_text(reason)
 
 
+def _rewrote_history(report: dict[str, Any]) -> bool:
+    """True when the report carries history accounting -- i.e. the transcript
+    was rewritten and the caller must reload.  A refusal carries only
+    ``{ok, reason}`` and must leave the view alone (r20/F1)."""
+    return "messages_before" in report or "messages" in report
+
+
 async def handle_input(
     loop: Any,
     text: str,
@@ -178,7 +185,7 @@ async def handle_input(
             console.info("[undo] not supported by this loop")
             return REPLAction.CONTINUE, session
         report = await undo(session)
-        if not report.get("ok"):
+        if not _rewrote_history(report):
             console.info("[undo] " + _reason_text(report.get("reason", "")))
             return REPLAction.CONTINUE, session
         console.info(
@@ -192,8 +199,11 @@ async def handle_input(
             console.info("[redo] not supported by this loop")
             return REPLAction.CONTINUE, session
         report = await redo(session)
-        if report.get("ok"):
-            console.info(f"[redo] 已恢复上一回合，还原 {len(report.get('files') or [])} 个文件")
+        if _rewrote_history(report):
+            console.info(
+                f"[redo] 已恢复上一回合，还原 {len(report.get('files') or [])} 个文件"
+                + (f"（{_reason_text(report['reason'])}）" if report.get("reason") else "")
+            )
             return REPLAction.RELOAD, session
         console.info("[redo] " + _reason_text(report.get("reason", "")))
         return REPLAction.CONTINUE, session
