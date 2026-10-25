@@ -82,10 +82,12 @@ http_client=httpx2.AsyncClient(auth=provider, headers=headers or None),
 
 | 用例 | 期望 | 实测 | 判读 |
 |---|---|---|---|
-| `case7-delta-only` | 每轮收割批次 ≤3（用户+回答，不含历史） | `batch_sizes=[3, 4]` | **实测偏差**：有一轮把 4 条消息喂给了提取器，说明「只吃回合增量」在某条路径上多带了一条 |
-| `case11-cache-prefix` | append-only 前缀命中 ≥90%（文档记 92%） | `prefix_hit append-only=87%` / `per-turn-trim=15%` | **实测偏差**：低于文档自述的 92%，但仍远高于每轮压缩的 15% |
+| `case7-delta-only` | ~~每轮收割批次 ≤3~~ | ~~`batch_sizes=[3, 4]`~~ → 实测 `[3, 4, 1]` | ✅ **M-A6 已修正**：收割是**异步调度**（`agent_loop._schedule_harvest`），delta 取「游标之后的全部」，多回合合并是**设计**（`agent_loop.py:1509-1514`）。断言已改为「不丢不重 + 任一批 ≠ 整段历史」 |
+| `case11-cache-prefix` | ~~append-only 前缀命中 ≥90%~~ | ~~`prefix_hit 87%`~~ → 现为布尔不变量 | ✅ **M-A6 已修正**：阈值随工作区路径漂移（8/32/66/442 字符路径 → 87/87/86/77%）。断言已改为「剥离易失尾部后，请求 N 的稳定部分是请求 N+1 的精确前缀」 |
 
 > 这两条是**文档自述与实测不一致**的案例，值得在报告中单列。
+> **M-A6（2026-10-25）已收口**：两条都是「期望没跟上实现」，**产品代码零改动**。
+> `scripts/memory_cases.py` 现 **11/11**，详见 [plan-m-a6-n3.md](plan-m-a6-n3.md)。
 
 ## 4. 结论
 

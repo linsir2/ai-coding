@@ -407,6 +407,13 @@ AI_CODING_R11C_IT=1 .venv/bin/python scripts/r11c_cases.py --real --config confi
 实测对比（同一内容、同长度）：记忆放系统提示前缀命中 **7%**，放尾部 **94%**；
 每轮压缩历史中段只有 **26%**（现在改为按预算分页压缩后 92%）。
 
+> ⚠️ **口径说明（2026-10-25，M-A6）**：上面几个数字都是 **R3 的「同一内容、同长度」测量**。
+> 真实 loop 里历史会增长，且易失尾部（`<environment>` 的工作区路径 + `<task-state>` + `[budget]`）
+> 每轮重渲染、位于历史**之后** —— 字节前缀在尾部处断裂。因此**整请求的前缀比率不是定值**：
+> 实测随工作区路径长度漂移（8 / 32 / 66 / 442 字符路径 → 87% / 87% / 86% / 77%）。
+> `memory_cases` 的 case11 已改用**路径无关的布尔不变量**（剥离尾部后，请求 N 的稳定部分
+> 是请求 N+1 的精确前缀），不再使用百分比阈值。
+
 **命令**：R10 起 `ai-coding memory list｜search｜forget｜pin` 已删除（无 CLI 入口）；
 `MemoryService.write_note` / `MemoryStore.pin` / `MemoryStore.delete` / `store.all()` 仍在库里，
 可从代码直接调用。TUI 里 `/memory` 看统计、`/compact` 主动压缩历史。
@@ -592,7 +599,7 @@ R10 之前由 `InteractiveReader` 独占 stdin 并在「问题 / 转向 / 命令
 | 用量审计 | `ModelStepFinished` 带**真实** `prompt/completion/total` 与延迟；回合终态 `TurnOutcome.usage` 是累加值 |
 | 预算归因 | `ContextAssembled` 分别记 system / **tools schema** / 历史 / 各尾部块的长度与估算 token（工具 schema 实测约 5k 字符，漏掉它估算会差一个数量级） |
 | 缓存度量 | **provider 真值优先**：OpenAI `prompt_tokens_details.cached_tokens`、Anthropic `cache_read/creation`、DeepSeek `prompt_cache_hit/miss`；不认识就不猜（`None`）。实测 DashScope 会上报 |
-| 缓存前缀兜底 | 端点不报 cache 时，用「与上一次请求的最长公共前缀」比率兜底（纯追加回合实测 0.95） |
+| 缓存前缀兜底 | 端点不报 cache 时，用「与上一次请求的最长公共前缀」比率兜底（纯追加回合实测 0.95，指**剥离易失尾部后**的稳定部分占比；含尾部的整请求比率会随工作区路径漂移，见 M-A6 的口径说明） |
 | 成本 | `ModelConfig.price_*` 配置后才算；未配置返回 `None`，不假装是 0 |
 | 降级可见 | 压缩超时、记忆读失败、落盘失败、worktree 隔离失败、观察者异常等都会发 `Degraded` 事件 |
 | 子智能体 | 子循环事件以 `ScopedEvent` 扇出到父轨迹（父子 span 可重建；推理仍不回传） |

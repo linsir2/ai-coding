@@ -92,13 +92,19 @@
 | **验收** | `ruff check .` = **0**；`mypy ai_coding` = **0**（152 文件）；**突变 A/B** 各自精确复现原报错 |
 | **副产物** | CI 的 Lint / Type-check 两步（`ci.yml:35-38`）此前在新克隆上即红，现已转绿 |
 
-### M-A6 · 文档与实测不一致的修订
+### M-A6 · 文档与实测不一致的修订 —— ✅ 已完成（2026-10-25）
+
+> 实施记录与评审见 [plan-m-a6-n3.md](plan-m-a6-n3.md)。**调研推翻了本节原判的两条**：
+> case7 不是"代码多喂一条消息"（收割异步调度导致多回合合并，是设计）；
+> case11 不是"正常波动"（阈值随工作区路径漂移，87% → 77%）。
 
 | 项 | 内容 |
 |---|---|
 | **缺口** | `memory_cases` **case7**：文档/用例期望每轮收割批次 ≤3，实测 `[3, 4]`；**case11**：文档记缓存前缀 92%，实测 87% |
-| **改动方向** | 先定位是**代码错**还是**文档错**：case7 若代码多喂一条消息 → 修 `memory_turn.py` 的增量窗口；case11 若属正常波动 → 把文档改成"≥85%"并写明测量条件 |
-| **验收判据** | `scripts/memory_cases.py` **11/11**；`docs/features.md` 的数字与实测一致，且注明测量日期与环境 |
+| **实际根因** | 两条都是**期望没跟上实现**，**产品代码零改动**。① case7：收割是**异步调度**（`agent_loop._schedule_harvest`），delta 取「游标之后的全部」，多回合合并是**设计**（`agent_loop.py:1509-1514`）；旧断言 `len(sizes)==4` 测的是**事件循环时序**（同一测试两次记录不同：`[3,4]` vs `[3,4,1]`）。② case11：易失尾部含工作区路径，整请求比率随路径漂移（8/32/66/442 字符 → 87/87/86/**77%**） |
+| **改动** | `scripts/memory_cases.py`：case7 断言改为「不丢不重 + 任一批 ≠ 整段历史」（复用既有 `AgentLoop.flush_harvest()`）；case11 改用**路径无关的布尔不变量**（剥离易失尾部后 `startswith`）。文档同步 5 份（含 `features.md`） |
+| **验收** | ① `scripts/memory_cases.py` **11/11**；② **深路径（442 字符）下仍 11/11**；③ `docs/features.md` 已加口径说明；④ `ruff`/`mypy` 0 |
+| **副产物** | **发现比率是坏度量**：per-turn-trim 臂的稳定比率同样 ~100%，但 `prefix_intact=False`（历史被重写）—— **比率会说好，不变量会说实话** |
 
 ---
 
@@ -393,7 +399,7 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 | M-A3 undo 上报 | ✅ **已完成** | 全量 **3812 tests / 0 failed / 6 skipped**；方案见 [plan-m-a3.md](plan-m-a3.md) |
 | M-A4 环境伪失败 | ✅ **已完成** | `pytest` **3806 tests / 0 failures / 0 errors / 6 skipped**；真实 EACCES 验证 3 passed；方案见 [plan-m-a4.md](plan-m-a4.md) |
 | M-A5 lint/type 清零 | ✅ **已完成** | `ruff` 6→**0**；`mypy` 3→**0**（152 文件）；突变 A/B 复现原报错 |
-| M-A6 文档一致性 | ⬜ 未开始 | — |
+| M-A6 文档一致性 | ✅ **已完成** | `memory_cases` **11/11**（深路径 442 字符下仍 11/11）；`features.md` 加口径说明；方案见 [plan-m-a6-n3.md](plan-m-a6-n3.md) |
 | M-B1 静态检查回喂 | ⬜ 未开始 | — |
 | M-B2 检索收敛判据 | ⬜ 未开始 | — |
 | M-B3 重试分类 | ⬜ 未开始 | — |
@@ -428,13 +434,13 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 全量套件 5 次运行出现 1 次失败；单独循环 40 次复现 1 次（断言两侧内容肉眼相同 → 引擎请求记录存在竞争）。
 **与 M-A4 改动无关**，但它会让"让 CI 重新可信"的目标周期性落空，建议纳入 M-A5 收口。
 
-### N-3 · `mcp_echo_server.py` 引用了当前 mcp 版本不存在的模块
+### N-3 · `mcp_echo_server.py` 引用了当前 mcp 版本不存在的模块 —— ✅ 已修复（2026-10-25）
 
 | 项 | 内容 |
 |---|---|
-| **位置** | `scripts/mcp_echo_server.py:15` —— `from mcp.server.mcpserver import MCPServer` |
+| **位置** | `scripts/mcp_echo_server.py:15`、`scripts/mcp_many_tools_server.py:23`（同类缺陷） |
 | **现象** | `ModuleNotFoundError: No module named 'mcp.server.mcpserver'`（真机实跑 MCP 服务器返回 `status: failed`） |
-| **根因** | M-A1 把 `mcp` 收紧为 `>=1.24,<2`，该版本无 `mcp.server.mcpserver` 模块 |
+| **根因** | 这是 **mcp 2.x** 的模块（M-A1 收紧为 `>=1.24,<2` 后不存在）。`fastmcp.server.MCPServer` 只是 lowlevel `Server` 的别名 —— **没有 `.tool()`，`run()` 也不是 `transport=` 形式**，换 import 路径没用 |
+| **实际修法** | 改用官方高层 API `mcp.server.fastmcp.FastMCP`（两个脚本各 2 行） |
 | **影响** | `tests/test_mcp_stdio.py` 与 `tests/test_mcp_end_to_end.py` 平时被 `AI_CODING_MCP_STDIO=1` 门控故 skip（未暴露）；**CI 里那两个 step 会红**（`ci.yml:45/51` 设了该变量） |
-| **为何不在 M-A5 修** | M-A5 的交付物是 `ruff`/`mypy` 静态门禁清零，不含运行时；这是独立缺陷 |
-| **建议修法** | 按当前 `mcp` 版本的 API 重写该脚本（或改用官方 `mcp.server.fastmcp.FastMCP`） |
+| **验收** | `AI_CODING_MCP_STDIO=1 pytest tests/test_mcp_stdio.py tests/test_mcp_end_to_end.py` → **5 passed**（改前 1 failed + 3 failed）；`scripts/r7_cases.py` 的 MCP 档随之恢复 |
