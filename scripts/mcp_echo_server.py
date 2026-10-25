@@ -12,9 +12,9 @@ Run it by hand:
 
 from __future__ import annotations
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.fastmcp import FastMCP
 
-server = MCPServer("echo")
+server = FastMCP("echo")
 
 
 @server.tool()

@@ -20,9 +20,9 @@ Run it by hand, or point a ``mcp.servers`` entry at it:
 
 from __future__ import annotations
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.fastmcp import FastMCP
 
-server = MCPServer("many")
+server = FastMCP("many")
 
 _DESCRIPTION = (
     "Performs operation number {index} against the configured target. Accepts a "
