@@ -40,7 +40,7 @@ from ai_coding.domain.task import TaskState, TodoItem
 from ai_coding.domain.turn_digest import DEFAULT_NOTE_CHARS, one_line
 from ai_coding.infra.deadline import Deadline
 
-__all__ = ["STATE_ONLY_TOOLS", "Failure", "TurnBooks", "TurnFrame"]
+__all__ = ["RETRIEVAL_TOOLS", "STATE_ONLY_TOOLS", "Failure", "TurnBooks", "TurnFrame"]
 
 #: One failed call, as the handoff reports it: (tool, error, output excerpt).
 Failure = tuple[str, str, str]
@@ -49,6 +49,16 @@ Failure = tuple[str, str, str]
 #: checkpoint tells the turn about itself, so a turn that only did that is still
 #: a "model" turn as far as the harvest's provenance is concerned.
 STATE_ONLY_TOOLS = frozenset({"checkpoint_write"})
+
+#: B1/B2: tools whose contract is "look at existing state".  ``bash`` is
+#: deliberately absent: the static check itself runs through it, so a model that
+#: follows the search ladder's advice must be *rewarded* (its streak resets), not
+#: pushed further up the ladder.  Repeated identical calls are already covered by
+#: ``DuplicateCallGuard`` and repeated failing ones by ``FailedRepeatGuard`` --
+#: this set covers neither of those.
+RETRIEVAL_TOOLS = frozenset(
+    {"read", "grep", "glob", "history_search", "memory_search", "websearch", "webfetch"}
+)
 
 #: Errors that are verdicts rather than breakage (R8c D-11 cancel; 20 §批次3
 #: plan-validation refusals; P1's ``invalid_items``; R08's ``plan_keep`` --
@@ -176,6 +186,14 @@ class TurnBooks:
     #: is the evidence that closes an error question, so successes must be
     #: remembered by name, not just counted.
     tool_success: set[str] = field(default_factory=set)
+    #: B1/B2: consecutive successful retrieval calls, and how many there were in
+    #: total.  The streak is the only exactly-computable half of "is this turn
+    #: learning anything" (docs/plan-m-b.md section 3).
+    search_streak: int = 0
+    search_calls: int = 0
+    #: B1: the harness ran the configured static checks for this turn.  Once per
+    #: turn, because a re-fired L2 must not start mypy again.
+    static_check_ran: bool = False
     #: The last emitted ledger signature: sorted ``(id, level)`` pairs.  The
     #: loop compares each round's open set against this to detect movement.
     ledger_signature: tuple[tuple[str, str], ...] = ()
@@ -341,6 +359,15 @@ class TurnBooks:
         succeeded = [item for item in outcomes if item.result.success]
         self.successful_calls += len(succeeded)
         self.tool_success.update(item.call.name for item in succeeded)
+        # B1/B2: a successful look extends the streak; a successful *anything else*
+        # ends it.  Failures move neither number -- a failed call is STRATEGY's
+        # evidence, not evidence that the turn is looking without acting.
+        for item in succeeded:
+            if item.call.name in RETRIEVAL_TOOLS:
+                self.search_streak += 1
+                self.search_calls += 1
+            else:
+                self.search_streak = 0
         # 13 §2.1: the ladder's ask helped-signal counts only what actually
         # reached the user (a denied call never did).
         self.ask_user_calls += sum(
@@ -420,6 +447,8 @@ class TurnBooks:
             fatigue_index=self.fatigue_index,
             fatigue_nudges=self.fatigue_nudges,
             ask_user_calls=self.ask_user_calls,
+            search_streak=self.search_streak,
+            search_calls=self.search_calls,
             plan_submitted="present_plan" in self.tool_success,
             plan_nudged=self.plan_nudged,
             # N1: the approval is the plan exit's success, and the guard reads

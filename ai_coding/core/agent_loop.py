@@ -68,6 +68,7 @@ from ai_coding.core.events import (
     NullObserver,
     ProviderFallback,
     ProviderRetried,
+    SearchStalled,
     TaskUpdated,
     ToolSurfaceWarning,
 )
@@ -80,6 +81,7 @@ from ai_coding.core.request_assembly import RequestAssembler
 from ai_coding.core.request_builder import (
     tool_context,
 )
+from ai_coding.core.static_check import run_static_checks
 from ai_coding.core.trace import short_json
 from ai_coding.core.turn_books import TurnBooks, TurnFrame
 from ai_coding.core.turn_close import (
@@ -886,6 +888,32 @@ class AgentLoop:
                         books.note_fatigue_nudge()
                     elif decision.intervention == "strategy":
                         books.note_strategy_nudge()
+                    elif decision.intervention == interventions.SEARCH:
+                        # B1: L2 is the rung that asks *for* the static check, so run
+                        # it here and hand over the finding instead of another
+                        # keyword to guess.  Once per turn -- a re-fired L2 must not
+                        # start mypy again (seconds, for an answer that cannot have
+                        # changed).
+                        if (
+                            decision.level >= interventions.L2
+                            and not books.static_check_ran
+                        ):
+                            books.static_check_ran = True
+                            block = await run_static_checks(
+                                str(self.workspace or ""),
+                                list(self.settings.static_check.commands),
+                                timeout=self.settings.static_check.timeout_seconds,
+                                max_chars=self.settings.static_check.max_chars,
+                            )
+                            if block:
+                                decision = replace(
+                                    decision,
+                                    inject=(
+                                        f"{decision.inject}\n\n{block}"
+                                        if decision.inject
+                                        else block
+                                    ),
+                                )
                     elif decision.reason == "plan unsubmitted":
                         # A4: the plan guard's remedy on a budget mouth has to
                         # be counted here too, exactly like on the post-step
@@ -1964,13 +1992,26 @@ class AgentLoop:
         session.intervention_state = ledger or None
         return ledger
 
-    @staticmethod
     def _note_intervention(
-        session: SessionData, decision: TurnDecision, snapshot: TurnSnapshot
+        self, session: SessionData, decision: TurnDecision, snapshot: TurnSnapshot
     ) -> None:
         """Persist one fired decision (搭 checkpoint/close 的车落盘)."""
         if not decision.intervention:
             return
+        # B5: only the search ladder emits.  The other four gates already leave
+        # their evidence in the counters, and emitting for all five would change
+        # every existing trace.  Only the *nudge* path reaches here: a ladder that
+        # chose FINISH goes through ``_finish_at``, which drops the intervention
+        # metadata -- a known defect (docs/plan-m-b.md P1-1), out of this scope.
+        if decision.intervention == interventions.SEARCH:
+            self._emit(
+                SearchStalled(
+                    iteration=snapshot.iteration,
+                    level=decision.level,
+                    calls=snapshot.search_calls,
+                    streak=snapshot.search_streak,
+                )
+            )
         session.intervention_state = interventions.record(
             session.intervention_state or {}, decision, snapshot
         )

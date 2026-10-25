@@ -682,6 +682,38 @@ R7b 把这段话的前半句治掉了：L2 不再丢正文。实测同一份 70 
 这条边界被既有测试当场钉住。提前收尾的 `TurnStatus` 仍是 `max_iterations`，但报告标题写
 「零进展（提前收尾）」，不谎称预算用尽。
 
+### 只检索不动作：`[search-gate]`（B1/B2/B5）
+
+上一档只看**失败**。实测的病根是另一种形状：T2 的 63 次调用**全部成功**，全是 `read`/`grep`，
+一次也没改代码或验证 —— 模型以为自己在推进。判据是**精确可算**的：
+
+| 信号 | 定义 | 谁能算 |
+|---|---|---|
+| `search_streak` | 连续**成功**的检索调用（`read`/`grep`/`glob`/`history_search`/`memory_search`/`websearch`/`webfetch`），中间没有一次成功的"其它"调用 | 只看工具名 + `success`，**不解析输出** |
+| 重置 | 任何成功的非检索调用（`edit`/`write`/`bash`/…）把它清零 | 同上 |
+| 不计数 | 失败的检索调用（那归 `[strategy-gate]`） | 同上 |
+
+> **为什么不按"输出有没有新内容"判定**：实测双向皆错 —— `grep` 与 `glob` 的无匹配输出
+> 逐字节相同（`(no matches)`）、`glob` 按 mtime 排序、`history_search`/`websearch` 的输出
+> 内嵌 query、`grep` 把命中行裁到 300 字符；且 `DuplicateCallGuard` 默认拒绝第 3 次相同调用，
+> "相同输出"最多出现 2 次。详见 [plan-m-b.md](plan-m-b.md) §二。
+
+上升两档（**没有强制收尾档**：这个信号分不清"读了 8 个不同文件的调研"与"8 次写错符号的空转"，
+强行交接的害处更大；收尾交给 `[budget]` + 自动收尾）：
+
+| 档 | 触发 | 动作 |
+|---|---|---|
+| L1 | `search_streak >= 4` | `[search-gate]`：换符号名 / 换范围 / 读入口文件 / 直接动手 |
+| L2 | `search_streak >= 8` | `[search-gate]`：**不要再猜关键词**，并**附上 harness 自己跑出来的静态检查输出** |
+
+L2 的输出来自 `ai.static_check.commands`（默认 `["ruff check ."]`，在 workspace 里以
+`.venv/bin` 优先的 PATH 执行，超时 20s、总量 ≤2000 字符）。命令**必须声明、不能推断**：
+本仓 `mypy .` 报 271 条错（`scripts/` 未排除）而 `mypy ai_coding` 零错 —— 没有启发式能分辨。
+每回合最多跑一次；一次都没跑到时，nudge 的文案仍然给出该跑什么。
+
+同一档只在 streak 又长出一整个阈值后才再次发声（不然模型会把预算花在读提示上）。
+每次触发发一个 `SearchStalled` 事件（`iteration`/`level`/`calls`/`streak`），落进 trace jsonl。
+
 ## ask_user：模型主动提问（R6c）
 
 与被动审批互补：审批是「这一调用能不能做」，`ask_user` 是「我该做哪个」。

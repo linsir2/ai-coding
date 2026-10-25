@@ -398,3 +398,51 @@ def test_snapshot_carries_the_approval():
     books.note_plan_approved()
     snap = books.snapshot(iteration=1, tokens_spent=0)
     assert snap.plan_approved is True
+
+
+# ---- B1/B2: the look-only streak ----
+
+
+def test_retrieval_calls_extend_the_look_only_streak():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("read"), _outcome("grep"), _outcome("glob")])
+    assert books.search_streak == 3
+    assert books.search_calls == 3
+
+
+def test_a_state_changing_call_ends_the_streak():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("read"), _outcome("edit"), _outcome("read")])
+    assert books.search_streak == 1
+    assert books.search_calls == 2
+
+
+def test_running_the_static_check_ends_the_streak():
+    """P0-1 regression net: following the L2 advice must reset, not punish."""
+    books = TurnBooks()
+    books.note_outcomes([_outcome("read"), _outcome("read"), _outcome("bash")])
+    assert books.search_streak == 0
+
+
+def test_a_failed_retrieval_does_not_count():
+    """A failed call is STRATEGY's evidence, not evidence of looking without acting."""
+    books = TurnBooks()
+    books.note_outcomes(
+        [_outcome("grep", success=False, error="bad pattern") for _ in range(3)]
+    )
+    assert books.search_streak == 0
+    assert books.search_calls == 0
+
+
+def test_a_failure_does_not_erase_an_earned_streak():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("read")])
+    books.note_outcomes([_outcome("grep", success=False, error="bad pattern")])
+    assert books.search_streak == 1
+
+
+def test_the_snapshot_carries_the_search_counters():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("read"), _outcome("read")])
+    snap = books.snapshot(iteration=1, tokens_spent=0)
+    assert (snap.search_streak, snap.search_calls) == (2, 2)

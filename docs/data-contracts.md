@@ -304,10 +304,11 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `AcceptanceState` | `id`、`passed`、`output` | policy 可见投影：verdict 与证据同行，nudge 引用失败输出而不盲重跑 |
 | `UncertaintyItem`（`domain/ledger.py`） | `id`、`question`、`kind`（epistemic/aleatoric/preference）、`level`（high/medium/low）、`evidence`（尾 120）、`resolves`（AC id） | 纯派生：验失败/工具错误聚合/失败连胜；H 只降在记录证据上 |
 | `LedgerUpdated`（事件） | `items` | open 集签名变化才发（边沿触发）；transcript 显示 dim 行，trace 泛型记录 |
+| `SearchStalled`（事件） | `iteration`、`level`、`calls`、`streak` | B1/B2/B5：`[search-gate]` 每升一档发一条，只走 nudge 路径；`trace.py` 的 `asdict` 让它自动进 jsonl |
 | `SubagentResult` 扩展 | `truncated`、`exit_reason`、`usage` | 未完成必须明说；ledger 文件（`to_dict`）保留新字段 |
 | `ToolResult.error`（子跑） | `child_timeout` / `child_max_iterations` / `child_error` | 非完成态恒为机器码；max_iterations 仍算成功（streak 照 reset），细节在 `error_detail` 与输出文本 |
 
-`TurnSnapshot` 扩展（全带默认值，老决策表不受影响）：`acceptance`、`acceptance_nudges`。`TurnPolicyConfig` 扩展：`max_acceptance_nudges=2`（均可经 `AIConfig` 同名键覆盖，无 schema 变更）。`TurnBooks` 扩展：`verify`、`tool_success`（名集合）、`ledger_signature`、`step_latencies_ms/abandoned_steps/last_step_latency_ms`。
+`TurnSnapshot` 扩展（全带默认值，老决策表不受影响）：`acceptance`、`acceptance_nudges`、`search_streak`、`search_calls`。`TurnPolicyConfig` 扩展：`max_acceptance_nudges=2`（均可经 `AIConfig` 同名键覆盖，无 schema 变更）。`TurnBooks` 扩展：`verify`、`tool_success`（名集合）、`ledger_signature`、`step_latencies_ms/abandoned_steps/last_step_latency_ms`、`search_streak/search_calls/static_check_ran`。`AIConfig` 新增 `static_check{commands,timeout_seconds,max_chars}`（B1）。
 
 ### R1-1 计划执行契约
 

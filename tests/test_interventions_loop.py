@@ -218,3 +218,81 @@ async def test_a_validation_refusal_does_not_escalate_the_l1_window(tmp_path):
     ]
     assert len(nudges) == 1
     assert "直接拦截" not in nudges[0]  # L2's armed text never lands
+
+
+# ---- B1/B2/B5: the search ladder end to end ----
+
+
+class _Reader(BaseTool):
+    """A retrieval tool: its success is a "look", not an action."""
+
+    name = "read"
+    parallel_safe = True
+
+    @property
+    def description(self) -> str:
+        return "reads a file"
+
+    @property
+    def params_json_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, params, ctx=None) -> ToolResult:
+        return ToolResult(success=True, output="file body")
+
+
+def _read_call(call_id: str) -> StepResult:
+    return StepResult(
+        text=None,
+        tool_calls=[ToolCallRef(id=call_id, name="read", arguments="{}")],
+        finish_reason="tool_calls",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_look_only_turn_gets_the_static_check_output(tmp_path):
+    """B1's whole path: streak -> ladder -> harness runs the command -> injection.
+
+    Not a unit test of any one piece: a real AgentLoop drives a real tool, the
+    real policy decides, and the synthetic message the model would read is
+    asserted to carry both the gate text and the command's own output.
+    """
+    from ai_coding.core.events import RecordingObserver
+    from ai_coding.tools.registry import ToolRegistry
+
+    engine = _ScriptedEngine(
+        [
+            _read_call("c1"), _read_call("c2"), _read_call("c3"), _read_call("c4"),
+            _read_call("c5"), _read_call("c6"), _read_call("c7"), _read_call("c8"),
+            _read_call("c9"), _read_call("c10"), _read_call("c11"), _read_call("c12"),
+            _text("done"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(_Reader())
+    observer = RecordingObserver()
+    loop = AgentLoop(
+        engine,
+        SessionService(tmp_path / "sessions"),
+        registry,
+        approval=AutoApproveCallback(),
+        settings=AIConfig(
+            max_tool_iterations=13,
+            static_check={"commands": ["echo STATIC-CHECK-ANSWER"]},
+        ),
+        observer=observer,
+        workspace=str(tmp_path),
+    )
+    session = loop.sessions.create()
+
+    await loop.process_input(session, "find the thing")
+
+    nudges = [
+        m.content or ""
+        for m in session.messages
+        if m.synthetic and "search-gate" in (m.content or "")
+    ]
+    assert len(nudges) == 2, f"L1 then L2, and no nagging in between; got {len(nudges)}"
+    assert "STATIC-CHECK-ANSWER" in nudges[-1], "L2 must hand over the real output"
+    levels = [e.level for e in observer.events if type(e).__name__ == "SearchStalled"]
+    assert levels == [1, 2], f"one event per rung, in order; got {levels}"

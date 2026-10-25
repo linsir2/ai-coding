@@ -16,6 +16,19 @@ default_model: deepseek-chat
 ai:
   auto_process_tool_results: true
   max_tool_iterations: 10
+  # B1: what the harness runs itself once a turn has stalled in look-only mode
+  # (4 successful read/grep/glob calls with no edit, test or other action).  The
+  # commands are run in the workspace with `.venv/bin` first on PATH, bounded by
+  # timeout_seconds, and their output is attached to the `[search-gate]` nudge.
+  # Declared, never inferred: on this repository `mypy .` reports 271 errors
+  # (`scripts/` is not excluded) while `mypy ai_coding` -- what CI runs -- reports
+  # none, so a project that wants mypy must say so.  Empty list disables it.
+  static_check:
+    commands: ["ruff check ."]
+    # For this repository, add the check CI actually runs:
+    #   commands: ["ruff check .", "mypy ai_coding"]
+    timeout_seconds: 20.0
+    max_chars: 2000
   max_concurrent_subagents: 3
   subagent_worktree_isolation: true
   max_context_tokens: 48000

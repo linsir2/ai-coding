@@ -112,47 +112,53 @@
 
 > 目标：**解决本次评估最大的短板** —— T2 实测 63 次工具调用 / 900 秒 / 零结论。
 
-### M-B1 · 静态检查结果回喂通道 ⭐（最高性价比）
+### M-B1 · 静态检查结果回喂通道 ⭐ —— ✅ 已完成（2026-10-25）
+
+> 实施记录与两轮评审见 [plan-m-b.md](plan-m-b.md)。
 
 | 项 | 内容 |
 |---|---|
 | **缺口** | mypy/ruff 早就能报出 `httpx2`，但**结果没有回到模型面前**。模型只能逐文件 grep |
-| **改动方向** | 在 `core/agent_loop.py` 的请求装配处加一条：**当模型连续 N 次检索类工具调用（`grep`/`glob`/`read`）无新命中时**，自动注入一条合成提示，附上 `ruff`/`mypy` 的**增量输出**（或至少提示"先跑静态检查"） |
-| **验收判据** | 用 T2 同题复测：`ai-coding` 应在 **≤5 次工具调用、≤120s** 内给出 `mcp.py:787` 的结论；新增回归用例 `tests/test_convergence.py` |
+| **实际做法** | 新增 `core/static_check.py`（复用 `infra/subprocess_runner.run_process_async`）：`[search-gate]` **L2** 触发时，harness 在 workspace 里跑 `ai.static_check.commands`（`.venv/bin` 优先 PATH，20s 超时，≤2000 字符），把**真实输出**拼进注入文本；每回合最多一次 |
+| **关键否决** | **命令不能自动推断**：实测本仓 `mypy .` 报 **271 errors**（`scripts/` 未排除）而 CI 跑的 `mypy ai_coding` 零错。默认只给 `ruff check .`，mypy 由使用方声明 |
+| **验收** | ① 全链路用例 `test_a_look_only_turn_gets_the_static_check_output`（真 loop + 真工具 + 真子进程，断言注入文本含命令输出）；② `tests/test_static_check.py` 7 例；③ **未做** T2 真机复测（需 API key）|
 
-### M-B2 · 检索收敛判据（"够用就停"）
-
-| 项 | 内容 |
-|---|---|
-| **缺口** | `grep`/`glob` 连续无新发现时没有"换策略"提示。项目**已有** `[strategy-gate]`（针对工具全失败），但**没有针对"工具成功但无进展"** |
-| **改动方向** | 扩展 `core/interventions.py`：新增 `no_new_findings` 阶梯 —— 连续 K 次检索未命中 → 提示"扩大/缩小范围或换关键词"；再 K 次 → 提示"直接跑静态检查"；再 K 次 → 主动收尾并给交接报告 |
-| **验收判据** | ① 单测覆盖三级阶梯；② T2 复测收敛；③ `docs/features.md` 新增该阶梯的说明 |
-
-### M-B3 · 重试分类（对标 Codex `retry_delay`）
+### M-B2 · 检索收敛判据 —— ✅ 已完成（2026-10-25）
 
 | 项 | 内容 |
 |---|---|
-| **缺口** | `ai/openai_engine.py::_request_with_retry` 只对 `RateLimitError/ServiceUnavailableError/APIConnectionError/TimeoutExceeded` **统一指数退避** —— 没有"绝不重试"这一档 |
-| **改动方向** | 加 `RetryStrategy { NO_RETRY, SERVER_HINT, EXPONENTIAL_BACKOFF }` + `RETRY_LADDER` 映射（**完整设计见 [eval-06 T3](eval-06-comparison.md)**，含代码骨架） |
-| **三档分类** | **NO_RETRY**：`ContextWindowExceeded`、`InvalidRequest`、认证失败、配额用尽；**SERVER_HINT**：429（有 `Retry-After` 就用）；**EXPONENTIAL_BACKOFF**：`Stream`、`Timeout`、`ConnectionFailed`、5xx |
-| **关键约束** | 重试等待**计入** `turn_timeout_seconds` 预算（`deadline.py` 已有硬超时）；**不得**占用 `max_tool_iterations` |
-| **验收判据** | ① 三档各有单测（用 fake engine 注入各类异常）；② 端到端：注入 401 → **1 次调用即终止**；注入 503 → 退避重试后成功 |
+| **缺口** | `[strategy-gate]` 只管"工具全失败"，**没有针对"工具成功但无进展"** |
+| **实际信号** | `search_streak` = 连续**成功**的检索调用、中间没有成功的非检索调用。**只看工具名 + success，不解析输出** |
+| **为什么不用"无新命中"** | 评审 P0：`grep`/`glob` 的 `(no matches)` 逐字节相同、`glob` 按 mtime 排序、`history_search`/`websearch` 内嵌 query、`grep` 裁 300 字符、`DuplicateCallGuard` 拒绝第 3 次相同调用 → 双向皆错且达不到阈值 |
+| **阶梯** | L1（streak ≥4）换手段 → L2（≥8）跑静态检查。**无收尾档**（信号分不清调研与空转） |
+| **验收** | 11 条阶梯单测 + 3 条信号单测 + 1 条全链路用例；`docs/features.md` 已加该阶梯 |
 
-### M-B4 · 检索类任务的预算约束
-
-| 项 | 内容 |
-|---|---|
-| **缺口** | `max_tool_iterations=30` + `max_auto_continuations=4` = 单回合最多 150 个模型步，T2 就是这么烧掉 900s 的 |
-| **改动方向** | ① 对"纯检索/诊断"意图（可用 `turn_policy` 判定或让模型自报）用**更紧的迭代预算**；② 给 `/tasks` 里的长任务加**成本上限**（`turn_token_budget` 已有，需在 UI 可见） |
-| **验收判据** | T2 复测在 **≤180s** 内要么给结论、要么主动收尾并给交接报告 |
-
-### M-B5 · 收敛可观测
+### M-B3 · 重试分类 —— ✅ **早已实现**（roadmap 原判为误）
 
 | 项 | 内容 |
 |---|---|
-| **缺口** | 现在看不到"这个回合搜索了多少次、有没有进展" |
-| **改动方向** | trace 里加 `search_exhausted` / `no_new_findings` 事件；`/trace` 面板显示"检索次数 / 命中数 / 是否收敛" |
-| **验收判据** | T2 场景的 trace jsonl 里能读到收敛相关事件 |
+| **原判** | "只对四类异常统一指数退避 —— 没有'绝不重试'这一档" |
+| **实测** | `FailureKind` **六档** + `retry_delay(retry_after=…)` + `AUTH_ERROR` 在 [openai_engine.py:352-358](file:///workspace/ai-coding/ai_coding/ai/openai_engine.py#L352-L358) **显式不重试**（注释原文 "Exits on the first attempt instead of after four identical 401s"）。实跑 `max_retries=3` + 401 → `calls == 1` |
+| **唯一补丁** | 429 `insufficient_quota` 原先归 `RATE_LIMITED` 会重试满 4 次 → 已改为 `FATAL`（+1 测试） |
+| **不做** | roadmap 提的 `RetryStrategy` / `RETRY_LADDER` **是重复造轮子** → 砍 |
+
+### M-B4 · 检索类任务的预算约束 —— ⚠️ **大部分已实现**
+
+| 项 | 内容 |
+|---|---|
+| **原判** | "`max_tool_iterations=30` + `max_auto_continuations=4` = 150 步烧掉 900s" |
+| **实测** | 默认是 **10 / 3**（仓库内可读配置也是 10）；`budget_pressure()`（G8-1）已在预算将尽时注入 `[budget] 步数 x/y`；`_ask_for_closing`（G8-2）已做收尾（仅 iteration 分支） |
+| **未做** | "按检索意图收紧预算" —— 需要意图分类，**给不出可辩护契约**（模型自报不可靠、启发式会误伤正常重构回合）。B4 的验收判据（≤180s 给结论或收尾）靠 B1+B2 达成 |
+| **状态** | 记录为**不采纳**，不标 ✅ |
+
+### M-B5 · 收敛可观测 —— ✅ 已完成（2026-10-25）
+
+| 项 | 内容 |
+|---|---|
+| **缺口** | 看不到"这个回合检索了多少次、有没有收敛" |
+| **实际做法** | 新增 `SearchStalled` 事件（`iteration`/`level`/`calls`/`streak`），在 `_note_intervention` 发；`trace.py` 的 `dataclasses.asdict` 让它**自动**落进 trace jsonl，无需登记 |
+| **验收** | 全链路用例断言 `levels == [1, 2]`；trace jsonl 可直接读到 |
+| **未做** | `/trace` 面板的专门展示（前端不改；jsonl 已有） |
 
 ---
 
@@ -400,11 +406,11 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 | M-A4 环境伪失败 | ✅ **已完成** | `pytest` **3806 tests / 0 failures / 0 errors / 6 skipped**；真实 EACCES 验证 3 passed；方案见 [plan-m-a4.md](plan-m-a4.md) |
 | M-A5 lint/type 清零 | ✅ **已完成** | `ruff` 6→**0**；`mypy` 3→**0**（152 文件）；突变 A/B 复现原报错 |
 | M-A6 文档一致性 | ✅ **已完成** | `memory_cases` **11/11**（深路径 442 字符下仍 11/11）；`features.md` 加口径说明；方案见 [plan-m-a6-n3.md](plan-m-a6-n3.md) |
-| M-B1 静态检查回喂 | ⬜ 未开始 | — |
-| M-B2 检索收敛判据 | ⬜ 未开始 | — |
-| M-B3 重试分类 | ⬜ 未开始 | — |
-| M-B4 检索预算 | ⬜ 未开始 | — |
-| M-B5 收敛可观测 | ⬜ 未开始 | — |
+| M-B1 静态检查回喂 | ✅ **已完成** | `core/static_check.py` + L2 注入真实输出；全链路用例通过；方案见 [plan-m-b.md](plan-m-b.md) |
+| M-B2 检索收敛判据 | ✅ **已完成** | `SEARCH` 阶梯 L1(≥4)/L2(≥8)；11+3+1 条用例；信号不解析输出 |
+| M-B3 重试分类 | ✅ **早已实现** | `FailureKind` 六档 + AUTH_ERROR 首轮不重试；补 `insufficient_quota` 归 FATAL |
+| M-B4 检索预算 | ⚠️ **不采纳** | `budget_pressure` + 收尾已存在；意图分类无可辩护契约 |
+| M-B5 收敛可观测 | ✅ **已完成** | `SearchStalled` 事件（iteration/level/calls/streak）自动落 trace jsonl |
 | M-C1~C3 恢复与持久化 | ⬜ 未开始 | — |
 | M-D1~D3 安全 | ⬜ 未开始 | — |
 | M-E1~E4 上下文工程 | ⬜ 未开始 | — |

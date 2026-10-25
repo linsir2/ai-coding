@@ -468,6 +468,22 @@ class TurnFinished:
 
 
 @dataclass(frozen=True)
+class SearchStalled:
+    """The search ladder fired (B2/B5): look-only calls are piling up.
+
+    The trace could not answer "how many looks did this turn spend before anyone
+    noticed it was not acting": the nudge is a synthetic message, and a message
+    says what was injected, never why.  One event per rung, so a post-mortem can
+    read the climb off the jsonl.
+    """
+
+    iteration: int
+    level: int
+    calls: int
+    streak: int
+
+
+@dataclass(frozen=True)
 class MemoryInjected:
     """The volatile constraint block was attached to this request (R3b).
 
@@ -548,6 +564,7 @@ LoopEvent = (
     | MemoryRecalled
     | MemoryHarvested
     | MemoryConsolidated
+    | SearchStalled
 )
 
 
@@ -624,6 +641,7 @@ __all__ = [
     "MemoryRecalled",
     "MemoryHarvested",
     "MemoryConsolidated",
+    "SearchStalled",
     "LoopEvent",
     "LoopObserver",
     "NullObserver",

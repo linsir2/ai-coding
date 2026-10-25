@@ -40,6 +40,8 @@ __all__ = [
     "NUDGE_ITEM_LIMIT",
     "POST",
     "PRE",
+    "SEARCH",
+    "SEARCH_GATE_LEAD",
     "STRATEGY",
     "STRATEGY_GATE_LEAD",
     "TASK",
@@ -56,6 +58,10 @@ STRATEGY = "strategy"
 FATIGUE = "fatigue"
 TASK = "task"
 ACCEPTANCE = "acceptance"
+#: B1/B2: the look-only ladder -- tools keep succeeding and the turn keeps not
+#: acting.  The one shape the other four gates cannot see (they read failures,
+#: fatigue, open items and contracts; this reads "succeeded, and still nothing").
+SEARCH = "search"
 
 PRE = "pre"    # decide_next_iteration
 POST = "post"  # decide_after_step
@@ -76,6 +82,7 @@ TASK_GATE_TAIL = "请继续推进，或把不再需要的条目用 todo_write �
 STRATEGY_GATE_LEAD = "[strategy-gate]"
 FATIGUE_GATE_LEAD = "[fatigue-gate]"
 ACCEPTANCE_GATE_LEAD = "[acceptance-gate]"
+SEARCH_GATE_LEAD = "[search-gate]"
 
 
 @dataclass(frozen=True)
@@ -88,6 +95,10 @@ class LadderLimits:
     fatigue_l1: int = 1
     task_l1: int = 2
     acceptance_l1: int = 2
+    #: B1/B2: consecutive look-only calls before the search ladder speaks.  4 is
+    #: the smallest number a normal turn does not reach -- read, read, edit, test:
+    #: the streak is back to 0 by the third call.  0 disables the gate.
+    search_streak_threshold: int = 4
 
 
 @dataclass(frozen=True)
@@ -119,6 +130,11 @@ def _strategy_triggered(snap: TurnSnapshot, limits: LadderLimits) -> bool:
 def _triggered(gate: str, snap: TurnSnapshot, limits: LadderLimits) -> bool:
     if gate == STRATEGY:
         return _strategy_triggered(snap, limits)
+    if gate == SEARCH:
+        return bool(
+            limits.search_streak_threshold
+            and snap.search_streak >= limits.search_streak_threshold
+        )
     if gate == FATIGUE:
         return snap.fatigue_index >= FATIGUE_THRESHOLD
     if gate == TASK:
@@ -149,6 +165,14 @@ def _helped(gate: str, entry: Mapping[str, Any], snap: TurnSnapshot) -> bool:
         if level <= L2:
             return snap.failed_streak == 0
         return snap.ask_user_calls > _asks(ref)
+    if gate == SEARCH:
+        # Two honest shapes, both exactly computable: the run was broken (the
+        # streak dropped), or the model stopped looking altogether -- it is
+        # answering or acting now, which the nudge asked for.  Comparing the
+        # streak alone would call that second shape a failure and escalate.
+        return snap.search_streak < int(ref.get("streak", 0) or 0) or (
+            snap.search_calls <= int(ref.get("calls", 0) or 0)
+        )
     if gate == FATIGUE:
         if level == L1:
             return snap.fatigue_index <= float(ref.get("fatigue", 0.0) or 0.0)
@@ -173,6 +197,12 @@ def _ref_for(gate: str, snap: TurnSnapshot) -> dict[str, Any]:
     """The baseline the next window observes against (what "helped" compares)."""
     if gate == STRATEGY:
         return {"asks": int(snap.ask_user_calls)}
+    if gate == SEARCH:
+        return {
+            "asks": int(snap.ask_user_calls),
+            "streak": int(snap.search_streak),
+            "calls": int(snap.search_calls),
+        }
     if gate == FATIGUE:
         return {"asks": int(snap.ask_user_calls), "fatigue": float(snap.fatigue_index)}
     if gate == TASK:
@@ -207,10 +237,50 @@ def settle(
     return out
 
 
+def _search_due(
+    snap: TurnSnapshot, entry: Mapping[str, Any] | None, limits: LadderLimits
+) -> tuple[int, str] | None:
+    """The rung the look-only streak has earned, or None to stay quiet (B1/B2).
+
+    The rung is derived from the **streak**, not from the ledger's window, which
+    is why this gate does not share ``_due``'s escalation ladder.  Reason, measured
+    end to end (docs/plan-m-b.md §十五): a nudge is injected *before* the model
+    runs, and ``search_streak`` only decays when a non-retrieval call succeeds —
+    so a gate that re-armed from window bookkeeping alone re-fired on every
+    iteration and the model never got to run again.  Here:
+
+    ``pending``   -> quiet: the nudge is fresh, let the model act on it.
+    streak >= 2K  -> L2, the rung that asks for the static check.
+    streak >= K   -> L1 "change what you are doing", then quiet.
+    Either rung re-fires only once the streak has grown a whole threshold past
+    the last fire -- otherwise every extra look would inject another nudge and
+    the model would spend its iterations reading advice instead of working.
+    """
+    threshold = limits.search_streak_threshold
+    if not threshold or snap.search_streak < threshold:
+        return None
+    level = L2 if snap.search_streak >= threshold * 2 else L1
+    if entry is None:
+        return (level, "nudge")
+    if str(entry.get("outcome", "")) == "pending":
+        return None
+    ref: Mapping[str, Any] = entry.get("ref") or {}
+    if level > int(entry.get("level", 0) or 0):
+        return (level, "nudge")
+    if snap.search_streak >= int(ref.get("streak", 0) or 0) + threshold:
+        return (level, "nudge")
+    return None
+
+
 def _due(
-    gate: str, entry: Mapping[str, Any] | None, limits: LadderLimits
+    gate: str,
+    entry: Mapping[str, Any] | None,
+    snap: TurnSnapshot,
+    limits: LadderLimits,
 ) -> tuple[int, str] | None:
     """(level, kind) this gate should fire now, or None to keep observing."""
+    if gate == SEARCH:
+        return _search_due(snap, entry, limits)
     if entry is None:
         return (L1, "nudge")
     outcome = str(entry.get("outcome", ""))
@@ -240,7 +310,11 @@ def select(
     """Pick the one gate that fires at this decision point (priority order)."""
     ledger: Mapping[str, Any] = getattr(snapshot, "intervention_ledger", None) or {}
     if phase == PRE:
-        gates: tuple[str, ...] = (STRATEGY, FATIGUE)
+        # B1/B2: SEARCH last, so a turn whose calls are also *failing* hears the
+        # strategy ladder first ("stop repeating the failing call").  SEARCH is a
+        # PRE-only gate on purpose: at the post-step seam the model has already
+        # stopped looking by itself, so there is no rung left to climb.
+        gates: tuple[str, ...] = (STRATEGY, FATIGUE, SEARCH)
     else:
         # 13 §2.1（Q1 拍板）: the acceptance branch is exclusive when contracts
         # exist — the task gate never competes with it (plan-runner parity).
@@ -248,7 +322,7 @@ def select(
     for gate in gates:
         if not _triggered(gate, snapshot, limits):
             continue
-        due = _due(gate, ledger.get(gate), limits)
+        due = _due(gate, ledger.get(gate), snapshot, limits)
         if due is None:
             continue
         return _build(gate, due[0], due[1], snapshot)
@@ -316,6 +390,13 @@ def _build(gate: str, level: int, kind: str, snap: TurnSnapshot) -> Intervention
     if gate == STRATEGY:
         reason = "repeated tool failures" if level == L1 else f"repeated tool failures (L{level})"
         return InterventionDecision(gate, level, "nudge", reason, _strategy_text(level, snap))
+    if gate == SEARCH:
+        reason = (
+            "look-only streak"
+            if level == L1
+            else f"look-only streak (L{level})"
+        )
+        return InterventionDecision(gate, level, "nudge", reason, _search_text(level, snap))
     if gate == FATIGUE:
         reason = (
             "accumulated errors (fatigue)" if level == L1
@@ -347,6 +428,35 @@ def _strategy_text(level: int, snap: TurnSnapshot) -> str:
     return "\n".join([
         f"{STRATEGY_GATE_LEAD} 连续失败且换手段无效。现在必须用 ask_user 提问：",
         "说明你卡在哪里、已经试过什么、需要用户提供什么。",
+    ])
+
+
+def _search_text(level: int, snap: TurnSnapshot) -> str:
+    """The two rungs of the search ladder (B1 + B2).
+
+    Both rungs must read correctly for *both* shapes the streak cannot tell
+    apart -- a legitimate survey and a model guessing the same wrong symbol --
+    because a nudge that only fits one of them is noise half the time.
+    """
+    streak = max(1, snap.search_streak)
+    calls = max(streak, snap.search_calls)
+    if level <= L1:
+        return "\n".join([
+            f"{SEARCH_GATE_LEAD} 你已经连续 {streak} 次只读检索（本回合共 {calls} 次），"
+            "其间没有做任何修改或验证。继续读下去，收益会越来越小：",
+            "1) 如果你在找**某个符号/字符串**：换成符号名（函数名、类名、变量名），"
+            "不要用自然语言描述；把范围缩小到具体目录，而不是整仓库；",
+            "2) 如果你在**了解一个模块**：读它的入口文件（`main` / `__init__` / 路由注册处），"
+            "不要按关键词撒网；",
+            "3) 如果你已经知道要改哪里：直接改，然后用测试或命令验证，不要再搜。",
+        ])
+    return "\n".join([
+        f"{SEARCH_GATE_LEAD} 仍是只读检索（连续 {streak} 次，共 {calls} 次），没有推进。"
+        "**不要再猜关键词了** —— 让静态检查替你回答：",
+        "`ruff check .`（未定义名字 F821、未用导入 F401、真 bug 都在这里）、"
+        "`mypy <包名>`（模块不存在、类型不符）、"
+        "`grep -rn '<符号>' --include='*.py' .`（谁在用它）。",
+        "静态检查一次调用就能给出结论，比再读十个文件准。",
     ])
 
 

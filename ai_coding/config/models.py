@@ -42,11 +42,33 @@ class ToolsConfig(BaseModel):
     extra_workspace_roots: list[str] = Field(default_factory=list)
 
 
+class StaticCheckConfig(BaseModel):
+    """The commands the harness runs itself when the search ladder reaches L2 (B1).
+
+    Commands are *declared*, never inferred: measured on this repository,
+    ``mypy .`` reports 271 errors (it does not exclude ``scripts/``) while
+    ``mypy ai_coding`` -- what CI runs -- reports none.  No heuristic tells those
+    apart, so a project that wants mypy says so here.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    #: Shell commands, run in the workspace (``.venv/bin`` is first on ``PATH``).
+    #: Empty disables the feature; the nudge's own text still tells the model what
+    #: to run by hand.
+    commands: list[str] = Field(default_factory=lambda: ["ruff check ."])
+    timeout_seconds: float = 20.0
+    #: Cap on what the whole block may add to the prompt.
+    max_chars: int = 2000
+
+
 class AIConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     auto_process_tool_results: bool = True
     max_tool_iterations: int = 10
+    #: B1: what the harness runs itself when the turn stalls in look-only mode.
+    static_check: StaticCheckConfig = Field(default_factory=StaticCheckConfig)
     max_concurrent_subagents: int = 3
     subagent_worktree_isolation: bool = True
     max_context_tokens: int = 0

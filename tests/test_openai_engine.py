@@ -748,3 +748,28 @@ async def test_an_ordinary_bad_request_does_not_claim_to_be_an_overflow():
         await engine.step([_user()], tools=[])
 
     assert excinfo.value.kind != "context_overflow"
+
+
+@pytest.mark.asyncio
+async def test_a_spent_quota_is_not_retried():
+    """429 alone is a rate limit; 429 that says "quota" is the end of the budget.
+
+    Measured gap (docs/plan-m-b.md 9.3): `insufficient_quota` used to be filed as
+    RATE_LIMITED and cost four identical round trips before giving up.
+    """
+    import openai
+
+    from ai_coding.ai.openai_engine import FailureKind, classify_failure
+
+    quota = openai.RateLimitError(
+        "You exceeded your current quota: insufficient_quota",
+        response=_Resp(429),
+        body=None,
+    )
+    assert classify_failure(quota) is FailureKind.FATAL
+
+    client = _SequencedClient([quota])
+    engine = _fast_engine(client)
+    with pytest.raises(EngineError):
+        await engine.step([_user()], tools=[])
+    assert client.completions.calls == 1

@@ -211,6 +211,15 @@ class TurnSnapshot:
     #: 13 §2.1: successful ``ask_user`` calls this turn — the helped signal of
     #: the ask levels (L3 for strategy/fatigue, L2 for task/acceptance).
     ask_user_calls: int = 0
+    #: B1/B2: consecutive successful *retrieval* calls with no successful
+    #: non-retrieval call in between.  This is the measured shape of the T2 turn
+    #: (63 successful looks, never an action) and the only part of "is this turn
+    #: learning anything" the harness can compute exactly -- see
+    #: docs/plan-m-b.md section 2 for why the output-text version was rejected.
+    #: Fed in by the books like every other counter: the policy counts nothing.
+    search_streak: int = 0
+    #: Successful retrieval calls this turn, for the nudge text and the event.
+    search_calls: int = 0
     #: 18 §10.5: the two posture axes, read off the session by the loop.  They
     #: ride the snapshot so the decision stays pure; the defaults keep every
     #: pre-posture construction (and test) byte-identical.

@@ -128,6 +128,12 @@ def classify_failure(exc: BaseException) -> FailureKind:
     if isinstance(exc, APIStatusError):
         status = exc.status_code
         if status == 429:
+            # A quota that is used up does not refill in `Retry-After` seconds:
+            # waiting four times over burns four round trips to learn nothing.
+            # Only when the provider *says* it is the quota -- a plain 429 is a
+            # rate limit, and waiting is exactly right for it.
+            if "insufficient_quota" in str(exc).lower():
+                return FailureKind.FATAL
             return FailureKind.RATE_LIMITED
         if status >= 500:
             return FailureKind.SERVER_ERROR
