@@ -157,6 +157,10 @@ class MCPManager:
     async def aclose(self) -> None
 ```
 
+> ⚠️ **已被 M3 取代**：M3 起 `open_all()` 改为非阻塞（只起 supervisor 即返回），
+> 签名是 `async def open_all(self) -> None`，**不返回工具列表**。本节是旧设计分析，
+> 保留作为历史记录。工具表面请读 `MCPManager.available()`。
+
 `execute` 步骤：`await session.call_tool(tool.name, params)` →
 拼接 `content` 里各 `TextContent.text` 作为 `output`；
 `success = not result.is_error`；`data = {"server","tool","is_error","structured"}`；
@@ -165,6 +169,10 @@ class MCPManager:
 `open_all` 步骤：`enabled` 为假直接返回 `[]`；逐 server 过滤 `enabled/name/command`；
 `enter_async_context(session_factory(server))` → `list_tools()` → 每个 tool 造一个 adapter；
 任何异常 → 跳过该 server。
+
+> ⚠️ **已被 M3 取代**：M3 起 `open_all()` 改为非阻塞（只起 supervisor 即返回），
+> 签名是 `async def open_all(self) -> None`，**不返回工具列表**。本节是旧设计分析，
+> 保留作为历史记录。工具表面请读 `MCPManager.available()`。
 
 ### 4.2 `ai_coding/cli.py`（改）
 
@@ -184,6 +192,10 @@ async def _run_ask(...):
     finally:
         await manager.aclose()
 ```
+
+> ⚠️ **已被 M3 取代**：M3 起 `open_all()` 改为非阻塞（只起 supervisor 即返回），
+> 签名是 `async def open_all(self) -> None`，**不返回工具列表**。本节是旧设计分析，
+> 保留作为历史记录。工具表面请读 `MCPManager.available()`。
 
 `_warn_if_mcp_enabled` 删除（不再需要——MCP 现在真的可用）。
 
@@ -250,6 +262,10 @@ async def _run_ask(...):
 
 `mcp.enabled` 默认 `false` → `open_all()` 立即返回 `[]`，不连接、不 spawn。
 默认路径与删除 SDK 之前的行为一致；`aclose()` 对未开启的 manager 也安全。
+
+> ⚠️ **已被 M3 取代**：M3 起 `open_all()` 改为非阻塞（只起 supervisor 即返回），
+> 签名是 `async def open_all(self) -> None`，**不返回工具列表**。本节是旧设计分析，
+> 保留作为历史记录。工具表面请读 `MCPManager.available()`。
 
 ### 核验④（诚实标注）
 

@@ -1,6 +1,6 @@
 # M-A2 + M-A5 实施方案 · 契约漂移收敛 + lint/type 门禁清零
 
-> 状态：**待拍板**
+> 状态：**✅ 已完成（2026-10-24）** —— 实施记录见 §十四
 > 关联：[roadmap-milestones.md](roadmap-milestones.md) §1 M-A2 / M-A5
 > 依赖：M-A1（`httpx2`）、M-A3（`restore_ok`）
 > 评审：子智能体 `git worktree` 实跑评审（见 §十二），4 条阻塞项已修订
@@ -496,11 +496,54 @@ M  docs/roadmap-milestones.md
 
 ---
 
-## 十三、待拍板
+## 十三、拍板结论（已按推荐项执行）
 
-1. **M-A2 选 ① 改文档**（已论证 ② 不可能）。若你认为应改设计让 `open_all` 阻塞等连接，
-   那会推翻 M3 的非阻塞改造，属另一个里程碑。
-2. `sample_tasks.py` 改用 `available()` 后，`s0` 的语义从"工具数 0"变成"**server 数 0**"。
-   可接受吗？（当前写法是**恒真空转**，改后才有实质）
-3. 历史分析文档只加标注不改正文 —— 可接受吗？
-4. `mcp_echo_server.py` 的 `mcp.server.mcpserver` 缺陷 —— 本次记录不修，还是并入本方案？
+1. **M-A2 选 ① 改文档** —— ✅ 已执行。② 物理上不可能（非阻塞 ⇒ 返回时工具不存在）。
+2. `sample_tasks.py` 改用 `available()` 后，`s0` 的语义从"工具数 0"变成"**server 数 0**" —— ✅ 接受。
+   理由：原写法是**恒真空转**（突变 C 实测：3 个工具在场上仍 PASS），改后才有实质。
+3. 历史分析文档只加标注不改正文 —— ✅ 已执行（7 处标注）。
+4. `mcp_echo_server.py` 的 `mcp.server.mcpserver` 缺陷 —— ✅ 只记录不修，已立 **N-3**（见 roadmap §十三）。
+
+---
+
+## 十四、实施记录（2026-10-24）
+
+### 14.1 对方案的两处修正（实施中发现）
+
+| # | 方案原文 | 实测结论 | 处理 |
+|---|---|---|---|
+| **C-1** | §7.7 说 `w2_live_check.py:145` "删赋值、保留裸调用" | `result["entries"]` 来自第 95 行 `json.loads`（**已是可序列化对象**），`json.dumps` 结果被丢弃 → **纯无操作** | **整行删除**（保留裸调用就是"假实现"） |
+| **C-2** | §7.11 说 `ruff 4 errors` / `mypy 6 errors` | 实测 **6 / 3**（M-A1 已修掉 3 条 mypy） | roadmap 已按实测改写 |
+
+### 14.2 提交
+
+| commit | 内容 |
+|---|---|
+| `53e6eb2` | 方案重写（含工具面数据流实证与空转用例分析） |
+| `e709d4f` | M-A5：ruff 6→0、mypy 3→0 |
+| 本提交 | M-A2：文档对齐 + `sample_tasks` 换数据源 + roadmap 收口 |
+
+### 14.3 判据复核（全部实跑）
+
+| 判据 | 期望 | 实测 |
+|---|---|---|
+| `ruff check .` | 0 | **All checks passed!** |
+| `mypy ai_coding` | 0 | **Success: no issues found in 152 source files** |
+| 标注计数 `r1a-6` / `r1` / `architecture` | 4 / 2 / 1 | **4 / 2 / 1** |
+| `grep -c "立即返回空列表" docs/features.md` | 0 | **0** |
+| `grep -c "or \[\]" scripts/sample_tasks.py` | 0 | **0** |
+| `sample_tasks.py --only mcp-off` | PASS + `servers=0` | **PASS enabled=False servers=0** |
+| 全量 `pytest` | 0 failed，skipped ≤ 6 | **3806 passed / 6 skipped / 0 failed** |
+| **突变 A**（`cls` 改回裸 `type`） | mypy 复现 `mcp.py:693` | **复现** |
+| **突变 B**（`cast` 加回） | mypy 复现 `events.py:581` | **复现** |
+| **突变 C**（改回 `(await open_all()) or []`） | 证明原写法空转 | **证明**：3 工具在场上仍 PASS |
+
+### 14.4 突变 C 的原始输出（本次关键证据）
+
+```
+MCP enabled=True, 1 server declared
+  open_all() returned          : None
+  available() after connect    : [('fs', 3)]
+  OLD assertion  tools == []   : True   <- 空转，完全无视这 3 个工具
+  NEW assertion  rows  == []   : False
+```

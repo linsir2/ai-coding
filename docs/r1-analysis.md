@@ -821,6 +821,10 @@ class MCPToolAdapter(BaseTool):
     parallel_safe = False        # 远端副作用未知 → 保守串行
 ```
 
+> ⚠️ **已被 M3 取代**：M3 起 `open_all()` 改为非阻塞（只起 supervisor 即返回），
+> 签名是 `async def open_all(self) -> None`，**不返回工具列表**。本节是旧设计分析，
+> 保留作为历史记录。工具表面请读 `MCPManager.available()`。
+
 步骤：用 `mcp` 包的 stdio client 连接（`command` + `args`）；`list_tools()` 后为每个远端工具
 建一个 `MCPToolAdapter`（name 加 `{server}__{tool}` 前缀防冲突，description 与
 `inputSchema` 直传）；`execute` 调 `client.call_tool(name, params)`，把返回内容拼成文本；
@@ -829,6 +833,10 @@ class MCPToolAdapter(BaseTool):
 与现有一致；后续可在配置里给 server 声明 allow 策略。
 生命周期：`cli` 在 `AgentLoop` 运行前 `await mcp.open_all()`，把返回工具注册进注册表，
 `finally` 里 `aclose()`。
+
+> ⚠️ **已被 M3 取代**：M3 起 `open_all()` 改为非阻塞（只起 supervisor 即返回），
+> 签名是 `async def open_all(self) -> None`，**不返回工具列表**。本节是旧设计分析，
+> 保留作为历史记录。工具表面请读 `MCPManager.available()`。
 
 ### 4.15 `ai_coding/tools/builder.py`（修改）
 

@@ -94,6 +94,10 @@ cli.py::main(path, workspace, skills)
          spawn bun frontend/src/index.tsx（AI_CODING_SOCKET 环境变量；tty 归前端）
 ```
 
+> ⚠️ **已被 M3 取代**：M3 起 `open_all()` 改为非阻塞（只起 supervisor 即返回），
+> 签名是 `async def open_all(self) -> None`，**不返回工具列表**。上图是旧设计分析，
+> 保留作为历史记录。工具表面请读 `MCPManager.available()`。
+
 两条关键接线规则：
 
 - **审批策略在组合根决定**：`build_world` 显式传 `CLIApprovalCallback`，其 provider 由

@@ -41,14 +41,20 @@
 | **验收** | `pytest tests/test_mcp_oauth.py` **18 passed**；全量 **10→3 failed**；`mypy` **6→3**；`ruff`（改动文件）0 |
 | **副产物** | 澄清了 `httpx2` 之谜：它在 **mcp 2.2.0 里是真实依赖**，不是笔误 —— 原代码是按 2.2.0 写的 |
 
-### M-A2 · 契约漂移收敛（`open_all()` 返回值）
+### M-A2 · 契约漂移收敛（`open_all()` 返回值）—— ✅ 已完成（2026-10-24）
+
+> 实施记录与评审见 [plan-m-a2-a5.md](plan-m-a2-a5.md)。**调研推翻了本节原判的两条**：
+> ① "两处消费方已坏" —— 实测三个消费方（`world.py:195/204`、`mcp_call.py:92`）**都没坏**，
+> 工具面唯一来源是 `MCPManager.available()`；② "建议选 ②" —— **物理上不可能**：
+> M3 起 `open_all()` 非阻塞，返回时 server 尚未连上，工具不存在，强行返回只能撒谎。
 
 | 项 | 内容 |
 |---|---|
 | **缺口** | `MCPManager.open_all()` 标注 `-> None` 且返回 `None`，但 `docs/features.md:542` 写"返回空列表"；`docs/r1a-6-analysis.md:251` 亦写 `[]` |
-| **两处消费方已坏** | `scripts/sample_tasks.py:86`（已评估期修复）、`scripts/r7_cases.py:353/424` |
-| **决策（二选一，建议选 ②）** | ① 改文档承认 `None`；② **让 `open_all()` 返回工具列表**（对齐 R1a-6 原始设计，`for tool in await open_all()` 的写法才成立） |
-| **验收判据** | ① `docs/features.md` / `docs/r1a-6-analysis.md` 与代码一致；② `scripts/sample_tasks.py`、`scripts/r7_cases.py` 在不加 `or []` 的情况下通过；③ `ruff`/`mypy` 0 新增问题 |
+| **实际改动** | `docs/features.md:516/542` 措辞对齐；`r1a-6-analysis.md` ×4、`r1-analysis.md` ×2、`architecture.md` ×1 加"已被 M3 取代"标注；`eval-03-live-features.md:120` 同步；`scripts/sample_tasks.py` 的 `s0_mcp_off` 改读 `manager.available()` |
+| **关键发现** | 原 `s0_mcp_off` 用 `(await open_all()) or []` 断言 `tools == []` —— **恒真空转**：server 真连上 3 个工具时该断言仍为 `True`（突变 C 实测）。改后断言 `rows == []` 才有实质 |
+| **验收** | ① `ruff`/`mypy` 0；② 标注计数 4/2/1；③ `grep "立即返回空列表" docs/features.md` = 0；④ `sample_tasks.py --only mcp-off` → `PASS enabled=False servers=0`；⑤ 全量 **0 failed / 6 skipped** |
+| **不含** | `open_all()` / `available()` / `build_mcp_catalog` / `MCPCallTool` / `world.py`（**一行未改**） |
 
 ### M-A3 · undo 部分回滚未上报 —— ✅ 已完成（2026-10-24）
 
@@ -76,14 +82,15 @@
 | **验收** | `pytest` **3806 tests / 0 failures / 0 errors / 6 skipped**；ruff 零新增；**突变测试**证明不空转；**真实 EACCES**（以 nobody 跑）证明产品代码是对的 |
 | **副产物** | `scripts/verify_real_eacces.py` —— 零注入的真实业务逻辑验证 |
 
-### M-A5 · lint / type 门禁清零
+### M-A5 · lint / type 门禁清零 —— ✅ 已完成（2026-10-24）
 
 | 项 | 内容 |
 |---|---|
-| **缺口** | `ruff check .` **4 errors**（全在 `scripts/`：import 排序 ×2、未用 `shutil`、未用 `wire`）；`mypy ai_coding` **6 errors / 3 files** |
-| **mypy 明细** | `core/events.py:581` 冗余 cast；`infra/deadline.py:171` arg-type；`core/mcp.py:637` `mcp.client.auth` 无 `AuthorizationCodeResult`；`core/mcp.py:668` 返回类型；`core/mcp.py:787` `httpx2`（M-A1 修）；`core/mcp.py:789` 解包数量 |
-| **改动方向** | `ruff check . --fix` 清 3 条；`mcp.py:637/668/789` 按 `mcp` 库实际 API 修正（版本漂移） |
-| **验收判据** | `ruff check .` = 0；`mypy ai_coding` = 0；CI 增加这两步为硬门禁 |
+| **缺口** | `ruff check .` **6 errors**（`--fix` 自动修 3 条 + 手工 3 条）；`mypy ai_coding` **3 errors / 3 files** |
+| **mypy 明细** | `core/events.py:581` 冗余 cast；`infra/deadline.py:171` arg-type；`core/mcp.py:693` 返回类型（`cls: type` 裸 type 无法窄化） |
+| **改动** | `events.py:581` 去冗余 cast 并删仅此一处使用的 import；`deadline.py:171` 显式 `set[asyncio.Task[Any]]`；`mcp.py:683` `cls: type[BaseException]`；`w2_live_check.py:145` 删死行；`eval_comparison.py:81`/`eval_longtask_mechanics.py:98` 折行 |
+| **验收** | `ruff check .` = **0**；`mypy ai_coding` = **0**（152 文件）；**突变 A/B** 各自精确复现原报错 |
+| **副产物** | CI 的 Lint / Type-check 两步（`ci.yml:35-38`）此前在新克隆上即红，现已转绿 |
 
 ### M-A6 · 文档与实测不一致的修订
 
@@ -382,10 +389,10 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 | 里程碑 | 状态 | 验证输出 |
 |---|---|---|
 | M-A1 必崩缺陷 | ✅ **已完成** | `pytest tests/test_mcp_oauth.py` **18 passed**；全量 10→**3 failed**；mypy 6→**3**；方案见 [plan-m-a1.md](plan-m-a1.md) |
-| M-A2 契约漂移 | ⬜ 未开始 | — |
-| M-A3 undo 上报 | ⬜ 未开始 | — |
+| M-A2 契约漂移 | ✅ **已完成** | `ruff`/`mypy` 0；`sample_tasks --only mcp-off` → `PASS servers=0`；突变 C 证明原用例恒真空转；方案见 [plan-m-a2-a5.md](plan-m-a2-a5.md) |
+| M-A3 undo 上报 | ✅ **已完成** | 全量 **3812 tests / 0 failed / 6 skipped**；方案见 [plan-m-a3.md](plan-m-a3.md) |
 | M-A4 环境伪失败 | ✅ **已完成** | `pytest` **3806 tests / 0 failures / 0 errors / 6 skipped**；真实 EACCES 验证 3 passed；方案见 [plan-m-a4.md](plan-m-a4.md) |
-| M-A5 lint/type 清零 | ⬜ 未开始 | — |
+| M-A5 lint/type 清零 | ✅ **已完成** | `ruff` 6→**0**；`mypy` 3→**0**（152 文件）；突变 A/B 复现原报错 |
 | M-A6 文档一致性 | ⬜ 未开始 | — |
 | M-B1 静态检查回喂 | ⬜ 未开始 | — |
 | M-B2 检索收敛判据 | ⬜ 未开始 | — |
@@ -420,3 +427,14 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 `tests/test_tool_surface_warning.py::test_the_warning_never_changes_the_request`（`:210`）——
 全量套件 5 次运行出现 1 次失败；单独循环 40 次复现 1 次（断言两侧内容肉眼相同 → 引擎请求记录存在竞争）。
 **与 M-A4 改动无关**，但它会让"让 CI 重新可信"的目标周期性落空，建议纳入 M-A5 收口。
+
+### N-3 · `mcp_echo_server.py` 引用了当前 mcp 版本不存在的模块
+
+| 项 | 内容 |
+|---|---|
+| **位置** | `scripts/mcp_echo_server.py:15` —— `from mcp.server.mcpserver import MCPServer` |
+| **现象** | `ModuleNotFoundError: No module named 'mcp.server.mcpserver'`（真机实跑 MCP 服务器返回 `status: failed`） |
+| **根因** | M-A1 把 `mcp` 收紧为 `>=1.24,<2`，该版本无 `mcp.server.mcpserver` 模块 |
+| **影响** | `tests/test_mcp_stdio.py` 与 `tests/test_mcp_end_to_end.py` 平时被 `AI_CODING_MCP_STDIO=1` 门控故 skip（未暴露）；**CI 里那两个 step 会红**（`ci.yml:45/51` 设了该变量） |
+| **为何不在 M-A5 修** | M-A5 的交付物是 `ruff`/`mypy` 静态门禁清零，不含运行时；这是独立缺陷 |
+| **建议修法** | 按当前 `mcp` 版本的 API 重写该脚本（或改用官方 `mcp.server.fastmcp.FastMCP`） |

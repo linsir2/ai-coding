@@ -513,7 +513,7 @@ TencentDB Agent Memory 同值）同样只为重测而存在，故 `config.exampl
 
 ## MCP 集成
 
-`MCPManager` 用官方 `mcp` 包**直接连 stdio 服务器**：`open_all()` 连接启用的 server、
+`MCPManager` 用官方 `mcp` 包**直接连 stdio 服务器**：`open_all()` 起 supervisor（M3 起非阻塞）、
 `list_tools()` 发现远端工具。**M2 起每个远端工具不再是注册表里的一条 function
 schema**：LLM 只见一个 `mcp_call(server, tool, input)`，可调用的工具由
 `MCPManager.available()` 单一来源（`tools` whitelist 在此生效）渲染成有预算的 catalog
@@ -539,7 +539,8 @@ schema**：LLM 只见一个 `mcp_call(server, tool, input)`，可调用的工具
   拆成 `timeout{startup, catalog, execution}` 三段（毫秒）——握手、tools/list、单次调用各管各，
   挂住的工具列表不再躲在为 npx 冷启动准备的启动预算后面；删除无消费点的 `auto_discover`。
 
-`mcp.enabled=false`（默认）时 `open_all()` 立即返回空列表，不连接任何服务器。
+`mcp.enabled=false`（默认）时 `open_all()` 立即返回（`-> None`，不连接任何服务器）；
+可调用工具一律从 `MCPManager.available()` 读，`open_all` 从不返回工具列表。
 
 真连验证：`AI_CODING_MCP_STDIO=1 pytest tests/test_mcp_stdio.py -q`
 （默认 skip 并打印原因，详见[集成测试](integration_testing.md) 的环境矩阵）。

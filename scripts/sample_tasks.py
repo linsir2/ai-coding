@@ -83,12 +83,13 @@ def _tool_messages(session, name: str | None = None):
 async def s0_mcp_off(app_cfg, root: Path) -> tuple[bool, str]:
     manager = MCPManager(app_cfg.mcp)
     try:
-        # eval-03 minimal fix: open_all() returns None (the tool surface now
-        # comes from manager.available()), but this scenario asserts on a count.
-        tools = (await manager.open_all()) or []
+        await manager.open_all()
+        # The tool surface comes from available(), never from open_all's return
+        # value: open_all is non-blocking and returns before any server is up.
+        rows = manager.available()
     finally:
         await manager.aclose()
-    return tools == [], f"enabled={app_cfg.mcp.enabled} tools={len(tools)}"
+    return rows == [], f"enabled={app_cfg.mcp.enabled} servers={len(rows)}"
 
 
 async def s1_read(app_cfg, root: Path) -> tuple[bool, str]:

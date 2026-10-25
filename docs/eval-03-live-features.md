@@ -117,7 +117,7 @@ assistant : `sample.txt` 的内容如下：\n\n```\nalpha\nbeta\n```\n\n文件�
 
 | 现象 | 根因 | 最小修复 | 验证 |
 |---|---|---|---|
-| `sample_tasks` 的 `mcp-off` 抛 `TypeError: object of type 'NoneType' has no len()` | `MCPManager.open_all()` 现返回 `None`（工具面改由 `available()` 提供），而脚本与 `docs/features.md:542` 仍假设返回 `[]` | `tools = (await manager.open_all()) or []`（`scripts/sample_tasks.py`） | `--only mcp-off` → **PASS**，全量 **8/8** |
+| `sample_tasks` 的 `mcp-off` 抛 `TypeError: object of type 'NoneType' has no len()` | `MCPManager.open_all()` 现返回 `None`（工具面改由 `available()` 提供），而脚本与 `docs/features.md:542` 仍假设返回 `[]` | 评估期打了 `or []` 补丁；**M-A2 已改为读 `manager.available()`**（补丁移除） | `--only mcp-off` → **PASS** |
 | TUI 启动即退：`Cannot find package 'solid-js'` | `frontend/node_modules` 未安装 | `cd frontend && bun install`（117 包） | TUI 正常渲染 |
 | `tmux: command not found` | 环境重置导致包被卸载 | `apt-get update && apt-get install -y tmux` | tmux 3.4 恢复 |
 
