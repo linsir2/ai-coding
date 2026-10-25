@@ -1632,6 +1632,10 @@ async def run_app(path: str | None, workspace: str, skills: str | None) -> None:
         await mcp_manager.aclose()
 ```
 
+> ⚠️ **已被 M3 取代**：M3 起 `open_all()` 改为非阻塞（只起 supervisor 即返回），
+> 签名是 `async def open_all(self) -> None`，**不返回工具列表**。本节是旧设计分析，
+> 保留作为历史记录。工具表面请读 `MCPManager.available()`。
+
 - [ ] **Step 5: 运行测试确认通过**
 
 Run: `.venv/bin/python -m pytest tests/test_textual_app.py -q`

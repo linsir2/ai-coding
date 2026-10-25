@@ -533,7 +533,7 @@ M  docs/roadmap-milestones.md
 | `grep -c "立即返回空列表" docs/features.md` | 0 | **0** |
 | `grep -c "or \[\]" scripts/sample_tasks.py` | 0 | **0** |
 | `sample_tasks.py --only mcp-off` | PASS + `servers=0` | **PASS enabled=False servers=0** |
-| 全量 `pytest` | 0 failed，skipped ≤ 6 | **3806 passed / 6 skipped / 0 failed** |
+| 全量 `pytest` | 0 failed，skipped ≤ 6 | **3812 collected = 3806 passed + 6 skipped / 0 failed** |
 | **突变 A**（`cls` 改回裸 `type`） | mypy 复现 `mcp.py:693` | **复现** |
 | **突变 B**（`cast` 加回） | mypy 复现 `events.py:581` | **复现** |
 | **突变 C**（改回 `(await open_all()) or []`） | 证明原写法空转 | **证明**：3 工具在场上仍 PASS |
@@ -547,3 +547,20 @@ MCP enabled=True, 1 server declared
   OLD assertion  tools == []   : True   <- 空转，完全无视这 3 个工具
   NEW assertion  rows  == []   : False
 ```
+
+### 14.5 代码评审（子智能体，`git worktree` 独立实跑）
+
+评审结论：**两项提交均通过，无阻塞项**。评审在 `/tmp/review-ma2a5` 副本内独立复现了
+ruff=0、mypy=0、突变 A/B/C、`sample_tasks --only mcp-off`，并逐条核对 9 条改动确为
+"标注/import/行长/纯无操作"，确认工具面 3 个消费点（`world.py:195/204`、`mcp_call.py:92`）
+与 `r7_cases.py` 都不用 `open_all()` 的返回值。
+
+评审提出 2 条文档层问题，处理如下：
+
+| # | 问题 | 处理 |
+|---|---|---|
+| **P2** | 提交信息写"3806 passed"，评审误读为与 roadmap 的"3812 tests"矛盾 | **口径澄清**：`3812 collected = 3806 passed + 6 skipped`（实测 `--collect-only` = 3812）。两者一致，非缺陷 |
+| **P3** | 两份 superpowers 计划稿仍有 `for tool in await mcp_manager.open_all():` 未标注 | ✅ **已补标注**（`2026-09-28-textual-ui.md:1633`、`2026-09-28-terminal-interaction-redesign.md:1526`），漂移点归零 |
+
+> 漂移收敛后，`grep -rn "for tool in await.*open_all()"` 的 3 处命中全部位于
+> **已加警示块的代码块内**（`r1a-6-analysis.md:185` 的警示块在其后第 9 行）。

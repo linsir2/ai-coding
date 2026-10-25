@@ -51,7 +51,7 @@
 | 项 | 内容 |
 |---|---|
 | **缺口** | `MCPManager.open_all()` 标注 `-> None` 且返回 `None`，但 `docs/features.md:542` 写"返回空列表"；`docs/r1a-6-analysis.md:251` 亦写 `[]` |
-| **实际改动** | `docs/features.md:516/542` 措辞对齐；`r1a-6-analysis.md` ×4、`r1-analysis.md` ×2、`architecture.md` ×1 加"已被 M3 取代"标注；`eval-03-live-features.md:120` 同步；`scripts/sample_tasks.py` 的 `s0_mcp_off` 改读 `manager.available()` |
+| **实际改动** | `docs/features.md:516/542` 措辞对齐；`r1a-6-analysis.md` ×4、`r1-analysis.md` ×2、`architecture.md` ×1、`superpowers/plans/` ×2 加"已被 M3 取代"标注；`eval-03-live-features.md:120` 同步；`scripts/sample_tasks.py` 的 `s0_mcp_off` 改读 `manager.available()` |
 | **关键发现** | 原 `s0_mcp_off` 用 `(await open_all()) or []` 断言 `tools == []` —— **恒真空转**：server 真连上 3 个工具时该断言仍为 `True`（突变 C 实测）。改后断言 `rows == []` 才有实质 |
 | **验收** | ① `ruff`/`mypy` 0；② 标注计数 4/2/1；③ `grep "立即返回空列表" docs/features.md` = 0；④ `sample_tasks.py --only mcp-off` → `PASS enabled=False servers=0`；⑤ 全量 **0 failed / 6 skipped** |
 | **不含** | `open_all()` / `available()` / `build_mcp_catalog` / `MCPCallTool` / `world.py`（**一行未改**） |
@@ -389,7 +389,7 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 | 里程碑 | 状态 | 验证输出 |
 |---|---|---|
 | M-A1 必崩缺陷 | ✅ **已完成** | `pytest tests/test_mcp_oauth.py` **18 passed**；全量 10→**3 failed**；mypy 6→**3**；方案见 [plan-m-a1.md](plan-m-a1.md) |
-| M-A2 契约漂移 | ✅ **已完成** | `ruff`/`mypy` 0；`sample_tasks --only mcp-off` → `PASS servers=0`；突变 C 证明原用例恒真空转；方案见 [plan-m-a2-a5.md](plan-m-a2-a5.md) |
+| M-A2 契约漂移 | ✅ **已完成** | `ruff`/`mypy` 0；`sample_tasks --only mcp-off` → `PASS servers=0`；突变 C 证明原用例恒真空转；漂移点归零（含 superpowers 计划稿）；方案见 [plan-m-a2-a5.md](plan-m-a2-a5.md) |
 | M-A3 undo 上报 | ✅ **已完成** | 全量 **3812 tests / 0 failed / 6 skipped**；方案见 [plan-m-a3.md](plan-m-a3.md) |
 | M-A4 环境伪失败 | ✅ **已完成** | `pytest` **3806 tests / 0 failures / 0 errors / 6 skipped**；真实 EACCES 验证 3 passed；方案见 [plan-m-a4.md](plan-m-a4.md) |
 | M-A5 lint/type 清零 | ✅ **已完成** | `ruff` 6→**0**；`mypy` 3→**0**（152 文件）；突变 A/B 复现原报错 |
