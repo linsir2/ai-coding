@@ -17,9 +17,12 @@
 | **`hooks.enabled` + `hooks.events[].command`** | **是（任意程序）** | ❌ 无审批/无沙箱 | **高** |
 | **`hooks.events[].module` + `plugin_dir`** | **是（`exec_module` 任意 Python）** | ❌ 无 | **高** |
 | **`mcp.enabled` + `mcp.servers[].command`** | **是（spawn 子进程）** | ❌ 无审批 | **高** |
+| **`mcp.local.yaml` sidecar** | **是（追加 server，同样 spawn）** | ❌ 无 | **高** |
 | `mcp.servers[].environment` / `cwd` | 是（传给子进程） | ❌ 无 | 高 |
 | `models[].base_url` / `api_key` / `default_model` | 是（API 外发 + key 注入） | ❌ 无 | **高** |
 | `tools.extra_workspace_roots` | 是（文件工具免问读写任意根） | 仅目录校验 | **高** |
+| `ai.websearch_api_key` | 是（外发 key 给 Tavily） | ❌ 无 | 中高 |
+| `tracing.dir` | 是（向任意路径写 trace） | ❌ 无 | 中 |
 | `mcp.servers[].headers` + `url` | 是（外发，同名可复用 OAuth token） | token 落 0600 外部文件 | 中高 |
 | `mcp.servers[].auto_approve` / `permissions.allow` | 是（WARN→ALLOW 常驻） | deny 优先 | 中 |
 | `tools.bash.timeout_seconds` | 是（成本） | 有界 | 低 |
@@ -168,11 +171,6 @@ module_spec.loader.exec_module(module)      # ← 任意代码执行
 +    key -- the same reasoning ``core/static_check.py`` documents.
 +    """
 +    return os.environ.get("AI_CODING_TRUST_PROJECT") == "1"
-+
-+
-+def _drop_project_execution(document: dict[str, Any]) -> dict[str, Any]:
-+    """Remove the execution keys a project layer tried to set (N-4)."""
-+    return {k: v for k, v in document.items() if k not in EXECUTION_KEYS}
 ```
 
 `load_layers_report` 的循环里（[loader.py:235-243](file:///workspace/ai-coding/ai_coding/config/loader.py#L235-L243)）：
@@ -182,9 +180,14 @@ module_spec.loader.exec_module(module)      # ← 任意代码执行
          document = ConfigLoader._read_layer(layer)
          if not document:
              continue
-+        # N-4: a project layer may not grant execution.  Its hooks/mcp are
-+        # dropped here, before they can be merged over the user's, and said so
-+        # once -- a silent drop would read as "the feature is broken".
+-        if chosen is None or layer is not None:
+-            chosen = layer
+-        for key in document:
++        # N-4, normalized FIRST: ``_to_snake`` turns ``Hooks``/``MCP``/``Mcp``
++        # into ``hooks``/``mcp``, so filtering the raw document would leave a
++        # one-word bypass (review P0).  Normalizing here also keeps ``sources``
++        # and the merged config describing the same keys.
++        document = ConfigLoader._normalize(document)
 +        if _role == "project" and not _project_execution_allowed():
 +            dropped = [k for k in document if k in EXECUTION_KEYS]
 +            if dropped:
@@ -193,28 +196,65 @@ module_spec.loader.exec_module(module)      # ← 任意代码执行
 +                    "execution; set AI_CODING_TRUST_PROJECT=1 to allow it)",
 +                    ", ".join(sorted(dropped)),
 +                )
-+                document = _drop_project_execution(document)
-         if chosen is None or layer is not None:
-             chosen = layer
-         for key in document:
++                document = {
++                    k: v for k, v in document.items() if k not in EXECUTION_KEYS
++                }
++        # ``chosen`` is the anchor for the ``mcp.local.yaml`` sidecar
++        # (``_mcp_doc``), so in layered mode it must stay on the user layer:
++        # otherwise a repository's own sidecar is what gets merged in (review
++        # P1-2).  Only an explicit ``--path`` or the opt-in advances it.
++        if _role != "project" or _project_execution_allowed():
++            if chosen is None or layer is not None:
++                chosen = layer
++        for key in document:
              sources[key] = str(layer)
-         merged = ConfigLoader._overlay(merged, _normalize(document))
+-        merged = ConfigLoader._overlay(merged, _normalize(document))
++        merged = ConfigLoader._overlay(merged, document)
 ```
 
-`__all__` 加 `"EXECUTION_KEYS"`。`import os` 补上（`loader.py` 现在没有）。
+`__all__` 加 `"EXECUTION_KEYS"`。
 
-### 5.2 文档与配置样例
+> **`os` 已经 import 了**（[loader.py:6](file:///workspace/ai-coding/ai_coding/config/loader.py#L6)，`append_mcp_server` 的 `os.chmod`）—— 评审 P2-2 指出我初稿说错了。
+
+### 5.2 顺带订正 `_overlay` 的 docstring（评审 P2-1）
+
+它现在写着"Lists replace rather than extend"并**点名 `mcp.servers` 是 replace 的例子**，
+但代码对任意 `servers` key 做**追加**（[loader.py:216-217](file:///workspace/ai-coding/ai_coding/config/loader.py#L216-L217)）。
+文档与代码相反，会误导后续维护者：
+
+```diff
+-        """Deep merge, ``top`` wins per key. Lists replace rather than extend.
+-
+-        Lists replace on purpose: ``mcp.servers`` and ``tools.enabled`` are
+-        declarations of what exists, not additive layers, and concatenating
+-        them would let a project's ``enabled: [bash]`` silently re-enable
+-        everything the global layer turned off.
+-        """
++        """Deep merge, ``top`` wins per key. Lists replace -- except ``servers``.
++
++        Lists replace on purpose: ``tools.enabled`` is a declaration of what
++        exists, not an additive layer, and concatenating it would let a
++        project's ``enabled: [bash]`` silently re-enable everything the global
++        layer turned off.  ``servers`` is the deliberate exception: a project
++        adds MCP servers to the user's list rather than replacing it (M9), and
++        the name collision is surfaced by the manager instead of resolved here.
++        """
+```
+
+### 5.3 文档与配置样例
 
 - `config.example.yaml`：`hooks` / `mcp` 段各加一句"项目层不生效，需 `AI_CODING_TRUST_PROJECT=1`"
 - `docs/features.md` 的「安全与权限」章节：加一小节「项目配置不被信任授予执行」
 - `docs/data-contracts.md`：记 `EXECUTION_KEYS` 与 `AI_CODING_TRUST_PROJECT`
 - `docs/roadmap-milestones.md`：N-4 标 ✅
 
-### 5.3 **不改**（明确边界）
+### 5.4 **不改**（明确边界）
 
 - ❌ `hooks.py` / `mcp.py` 的执行逻辑（它们是对的，问题在谁能喂给它们）
 - ❌ `models[].base_url` / `api_key`（外发类，**另一个问题**，见 §十一）
 - ❌ `tools.extra_workspace_roots`（越权类，同上）
+- ❌ `ai.websearch_api_key`（外发 key 给 Tavily）、`tracing.dir`（越界文件写）—— 同类但修法不同
+- ❌ `hooks.plugin_dir`（默认 `<workspace>/.ai-coding/hooks`，即 python hook 的模块来自**不可信仓库树**）—— 同类，见 §十一
 - ❌ `static_check.py`（已 env 门）
 - ❌ `jobs.py` 的 `shell=True`（命令来自**模型**，有 bash 权限门）
 - ❌ `acceptance.py` 的 verify 执行（有红线 + 越界 + 审批三道）
@@ -333,8 +373,14 @@ M  tests/test_config_layers.py
 | U7 | 丢弃时**有 warning** | 可观测 | `caplog` 捕获含 `AI_CODING_TRUST_PROJECT` |
 | U8 | 项目层**没有** hooks/mcp 时**无 warning** | 静默 | 不产生噪音 |
 | U9 | 显式 `--path`（单文件，不分层） | 边界 | **不受影响**（`explicit` 层不是 `project`） |
+| **U10** | 项目层写 **`Hooks:`**（大写） | **P0 回归** | **同样被丢弃**（`_to_snake` 之后过滤） |
+| **U11** | 项目层写 **`MCP:`** / **`Mcp:`** | **P0 回归** | 同上 |
+| **U12** | 用户层开 MCP + 项目目录放 `mcp.local.yaml` | **P1-2 回归** | sidecar **不合并**（`chosen` 留在用户层） |
+| **U13** | 用户层开 MCP + `AI_CODING_TRUST_PROJECT=1` + 项目 sidecar | 逃生门 | sidecar **合并** |
+| **U14** | 项目层含 `default_model` **和** `mcp` | 边界 | `default_model` 生效、`mcp` 丢弃，**且 sidecar 仍不读项目目录** |
 
 > U9 重要：`--path` 是操作者显式给的，语义上就是"我信这个文件"，不该被丢弃。
+> U14 重要：它锁住"`chosen` 不因项目层的**非执行类** key 而推进"——否则 U12 的绕过会从这个缝里回来。
 
 ---
 
@@ -380,14 +426,15 @@ M  tests/test_config_layers.py
 
 ## 十、自我核验
 
-1. **改的是根源吗？** ✅ 是。根源是"`_overlay` 让项目层覆盖用户层，且没有'哪些 key 能被覆盖'的概念"。我在**分层读取处**按 role 过滤，不是在消费处打补丁（那样要改 hooks/mcp 两处且会漏）。
+1. **改的是根源吗？** ⚠️ **部分是**。根源是"`_overlay` 无信任边界"，而本方案在**分层读取处**按 role 过滤 —— 比在消费处（hooks/mcp 两处）打补丁好，因为消费处会漏（比如 sidecar）。但**它不是一次性收口**：`models.base_url`、`extra_workspace_roots`、`hooks.plugin_dir`、`mcp.local.yaml` 之外的路径仍开着（§十一）。所以准确说法是"**修掉执行类这一整类，并给 sidecar 补上**"，不是"配置信任问题解决了"。
 2. **会不会误伤项目级功能？** ⚠️ 会 —— 项目自带的 hooks/MCP 配置不再自动生效。这是**有意的行为变更**，所以给了逃生门，并写进文档。`default_model` / `max_tool_iterations` 等**不受影响**（U5 锁）。
 3. **`--path` 会不会被误伤？** ✅ 不会。`_layers_for` 对 explicit 返回 `[("explicit", path)]`，role 不是 `project`（U9 锁）。
-4. **`sources` 语义会变吗？** ⚠️ 会变：丢弃后 `sources["hooks"]` 指向用户层。这是**正确的**（值确实来自用户层），且 U6 锁住。
+4. **`sources` 语义会变吗？** ✅ 会，而且是**变正确**：丢弃后 `sources["hooks"]` 指向用户层（值确实来自用户层）。U6 锁住。
 5. **会不会重复造轮子？** ✅ 没有。复用了 `_layers_for` / `_read_layer` / `_overlay` / `LayeredConfig`，以及 `static_check` 的 env 门模式。
 6. **丢弃会不会静默？** ✅ 不会，有 `_log.warning`（U7/U8 锁）。
-7. **既有测试会破吗？** ⚠️ 可能 —— 如果有测试用"项目层配 MCP/hooks"来验证分层。实施时先跑 `tests/test_config_layers.py` 确认；若破，**那是测试写错了**（它假设项目层可授予执行），需要改测试并说明理由。
-8. **`ConfigManager` 要不要一起改？** ❌ 不用 —— 它**零消费者**，且走单文件路径（没有分层，就没有"项目层覆盖"问题）。
+7. **既有测试会破吗？** ⚠️ **会破一条**：`tests/test_config_layers.py::test_mcp_servers_from_both_layers_are_kept` 断言"两层 MCP server 都保留"，它锁定的是 `_overlay` 的**追加契约**（既有设计，不是写错）。本方案**有意变更**该契约（项目层不再能追加 server），所以这条测试要**同步改写**为"项目层的 server 被丢弃"，并在测试 docstring 里写明理由。**这不是"测试写错了"** —— 评审 P1-3 纠正了我初稿的说法。
+8. **`ConfigManager` 要不要一起改？** ❌ 不用 —— 它**零生产消费者**（仅一条测试引用），且走单文件路径（没有分层，就没有"项目层覆盖"问题）。
+9. **sidecar 的读写不对称要不要一起修？** ❌ 不用（评审 P3-2）。分层模式下 `world.config_path` 为 `None`，向导写不了 sidecar，但读用的是 discovered 路径 —— 这是**既有**的独立问题，本方案只把"读"纳入信任边界，不顺手改"写"。
 
 ---
 
@@ -397,5 +444,29 @@ M  tests/test_config_layers.py
 |---|---|
 | **本方案改** | `config/loader.py`（1 个文件）+ 1 个测试文件 + 4 份文档 |
 | **不改** | `hooks.py` / `mcp.py` / `static_check.py` / `jobs.py` / `acceptance.py` / 分层加载本身 |
-| **不做（另立项）** | `models[].base_url` / `api_key`（外发）、`tools.extra_workspace_roots`（越权）、`mcp.servers[].headers`（token 复用） |
+| **不做（另立项，同类）** | `models[].base_url` / `api_key`（外发）、`tools.extra_workspace_roots`（越权）、`ai.websearch_api_key`（外发 key）、`tracing.dir`（越界写）、`hooks.plugin_dir`（python hook 模块来自不可信仓库树）、`mcp.servers[].headers`（token 复用） |
 | **已修（M-B）** | `static_check.commands` 的 env 门 + argv + 白名单 |
+
+---
+
+## 十二、方案评审记录（子智能体，`git worktree` 独立实跑）
+
+评审在 `/workspace/review-wt` 实跑，主仓库全程干净。它抓到 **1 个 P0 + 2 个 P1 + 4 个 P2**，全部已并入本方案：
+
+| # | 问题 | 处理 |
+|---|---|---|
+| 🔴 **P0** | **大小写变体一行绕过**：`_to_snake('Hooks')='hooks'`，但过滤在 `_normalize` **之前** → 项目层写 `Hooks:` 就绕过 | ✅ 改为**先 `_normalize` 再过滤**；加 U10/U11 回归 |
+| 🟠 **P1-2** | **`mcp.local.yaml` sidecar 绕过**：`_mcp_doc(doc, chosen)` 用 `chosen`（= 项目层路径）解析 sidecar，仓库可在项目目录放 sidecar 注入 server | ✅ 分层模式下 `chosen` **不推进到 project 层**；加 U12/U13/U14 |
+| 🟠 **P1-3** | 既有测试 `test_mcp_servers_from_both_layers_are_kept` 会破，我误判为"测试写错了" | ✅ 改为"契约被有意变更，同步改写测试"（§十.7） |
+| 🟡 **P2-1** | `_overlay` docstring 说 `mcp.servers` 是 replace，代码是**追加** | ✅ §5.2 订正 |
+| 🟡 **P2-2** | 我说"`import os` 要补"，实际已 import | ✅ 已订正 |
+| 🟡 **P2-3** | §一 清单漏 `websearch_api_key` / `tracing.dir` | ✅ 已补 |
+| 🟡 **P2-4** | 漏 `hooks.plugin_dir`（python hook 模块来自不可信仓库树） | ✅ 已补进边界 |
+
+### 12.1 评审确认成立的判断
+
+- 项目层覆盖用户层、`discover` 优先级、TUI 走分层、`ConfigManager` 零消费者 —— 全部复核成立
+- U3（用户层保留）成立，且**正是因为丢弃发生在 `_overlay` 之前**
+- U9（`--path` 不受影响）成立
+- `mcp` 段只有 `enabled`/`servers`，丢整个 key 不误伤无害字段
+- `hooks` 段丢整个 key 是安全的（`plugin_dir` 本身是代码执行路径）
