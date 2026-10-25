@@ -6,6 +6,20 @@
 >
 > **规模：8 个领域 / 32 个里程碑**（A6 + B5 + C3 + D3 + E4 + F3 + G4 + H4）。
 
+### N-4 · 项目配置不被信任授予执行 —— ✅ 已完成（2026-10-25）
+
+> 方案与两轮评审见 [plan-config-trust.md](plan-config-trust.md)。
+
+| 项 | 内容 |
+|---|---|
+| **根因** | `ConfigLoader._overlay` 让**项目层逐键覆盖用户层**，而 `config.example.yaml` 是**仓库里被跟踪的文件**。`_overlay` 的 docstring 自己写了它防住了"项目层放宽工具开关"，却**没防"项目层新增执行能力"** |
+| **受影响字段** | `hooks.events[].command`（执行任意程序）、`hooks.events[].module`（`exec_module` 任意 Python）、`mcp.servers[].command`（spawn 任意子进程）、`mcp.local.yaml` sidecar（追加 server） |
+| **修法** | `loader.py` 分层读取处按 `role` 过滤：项目层的 `hooks`/`mcp` **丢弃 + warning**，除非 `AI_CODING_TRUST_PROJECT=1`（环境变量，仓库碰不到的信道）。`chosen`（sidecar 锚点）也**不推进到项目层** |
+| **关键实现点** | 过滤必须在 `_normalize` **之后** —— `_to_snake('Hooks')='hooks'`，否则一个大小写变体就绕过（评审 P0） |
+| **验收** | 14 条新用例（含大小写变体、sidecar、opt-in、`--path` 边界）；**突变 A/B/C 全部被测试抓住**；真机端到端：恶意仓库默认 `HOSTILE CONFIG LOADED: False`，opt-in 才 `True` |
+| **契约变更** | `test_mcp_servers_from_both_layers_are_kept` → 改写为"项目层的 server 被丢弃"（原测试锁定的是 `_overlay` 的追加语义，本方案有意变更） |
+| **未覆盖（另立项）** | `models[].base_url`/`api_key`（外发）、`tools.extra_workspace_roots`（越权）、`ai.websearch_api_key`（外发 key）、`tracing.dir`（越界写）、`hooks.plugin_dir`（python hook 模块来自不可信仓库树） |
+
 ---
 
 ## 0. 领域总览

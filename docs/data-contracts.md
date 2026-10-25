@@ -305,6 +305,7 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `UncertaintyItem`（`domain/ledger.py`） | `id`、`question`、`kind`（epistemic/aleatoric/preference）、`level`（high/medium/low）、`evidence`（尾 120）、`resolves`（AC id） | 纯派生：验失败/工具错误聚合/失败连胜；H 只降在记录证据上 |
 | `LedgerUpdated`（事件） | `items` | open 集签名变化才发（边沿触发）；transcript 显示 dim 行，trace 泛型记录 |
 | `SearchStalled`（事件） | `iteration`、`level`、`calls`、`streak` | B1/B2/B5：`[search-gate]` 每升一档发一条，只走 nudge 路径；`trace.py` 的 `asdict` 让它自动进 jsonl |
+| `EXECUTION_KEYS`（配置常量） | `{"hooks", "mcp"}` | N-4：项目层不得授予的顶层键。`ConfigLoader` 在 `_normalize` **之后**过滤，项目层设置即丢弃 + warning，除非 `AI_CODING_TRUST_PROJECT=1`。`mcp.local.yaml` sidecar 的锚点（`chosen`）同样不推进到项目层 |
 | `SubagentResult` 扩展 | `truncated`、`exit_reason`、`usage` | 未完成必须明说；ledger 文件（`to_dict`）保留新字段 |
 | `ToolResult.error`（子跑） | `child_timeout` / `child_max_iterations` / `child_error` | 非完成态恒为机器码；max_iterations 仍算成功（streak 照 reset），细节在 `error_detail` 与输出文本 |
 

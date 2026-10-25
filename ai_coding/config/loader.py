@@ -17,6 +17,29 @@ from .models import AppConfig, MCPConfig, MCPServerConfig, _coerce_model
 _log = logging.getLogger(__name__)
 
 
+#: Top-level keys whose value can make the harness *execute* something or send
+#: it somewhere.  A project's config is not trusted to grant that: the operator
+#: who runs ``ai-coding`` in a directory trusts its files, not its config, and
+#: ``config.example.yaml`` ships in the repository.  Only the user layer -- and
+#: the operator's explicit opt-in, see ``_project_execution_allowed`` -- may set
+#: these.
+#:
+#: Deliberately narrow.  ``models`` and ``tools`` stay trusted because their
+#: dangerous members (``base_url``, ``extra_workspace_roots``) are a different
+#: problem with a different fix, and lumping them in would break every project's
+#: model selection and tool list at once.
+EXECUTION_KEYS: frozenset[str] = frozenset({"hooks", "mcp"})
+
+#: The one channel a repository cannot touch, which is what makes it a permission
+#: rather than a config value (same reasoning as ``core/static_check.py``).
+TRUST_PROJECT_ENV = "AI_CODING_TRUST_PROJECT"
+
+
+def _project_execution_allowed() -> bool:
+    """Did the operator explicitly trust this project's execution settings?"""
+    return os.environ.get(TRUST_PROJECT_ENV) == "1"
+
+
 def _mcp_doc(doc: dict[str, Any], path: str | Path | None) -> dict[str, Any]:
     """The ``mcp:`` section with any sidecar servers merged in (M5).
 
@@ -201,12 +224,14 @@ class ConfigLoader:
 
     @staticmethod
     def _overlay(base: dict[str, Any], top: dict[str, Any]) -> dict[str, Any]:
-        """Deep merge, ``top`` wins per key. Lists replace rather than extend.
+        """Deep merge, ``top`` wins per key. Lists replace -- except ``servers``.
 
-        Lists replace on purpose: ``mcp.servers`` and ``tools.enabled`` are
-        declarations of what exists, not additive layers, and concatenating
-        them would let a project's ``enabled: [bash]`` silently re-enable
-        everything the global layer turned off.
+        Lists replace on purpose: ``tools.enabled`` is a declaration of what
+        exists, not an additive layer, and concatenating it would let a project's
+        ``enabled: [bash]`` silently re-enable everything the global layer turned
+        off.  ``servers`` is the deliberate exception: a project adds MCP servers
+        to the user's list rather than replacing it, and the name collision is
+        surfaced by the manager instead of being resolved here.
         """
         merged = dict(base)
         for key, value in top.items():
@@ -232,15 +257,42 @@ class ConfigLoader:
         merged: dict[str, Any] = {}
         sources: dict[str, str] = {}
         chosen: Path | None = None
-        for _role, layer in ConfigLoader._layers_for(paths, path):
+        trusted = _project_execution_allowed()
+        for role, layer in ConfigLoader._layers_for(paths, path):
             document = ConfigLoader._read_layer(layer)
             if not document:
                 continue
-            if chosen is None or layer is not None:
-                chosen = layer
+            # Normalize FIRST: ``_to_snake`` turns ``Hooks``/``MCP``/``Mcp`` into
+            # ``hooks``/``mcp``, so filtering the raw document would leave a
+            # one-word bypass.  Normalizing here also keeps ``sources`` and the
+            # merged config describing the same keys.
+            document = _normalize(document)
+            # A project layer may not grant execution.  Its hooks/mcp are dropped
+            # here, before they can be merged over the user's, and said so once --
+            # a silent drop would read as "the feature is broken".
+            if role == "project" and not trusted:
+                dropped = [k for k in document if k in EXECUTION_KEYS]
+                if dropped:
+                    _log.warning(
+                        "project config ignored for %s (a repository cannot grant "
+                        "execution; set %s=1 to allow it)",
+                        ", ".join(sorted(dropped)),
+                        TRUST_PROJECT_ENV,
+                    )
+                    document = {
+                        k: v for k, v in document.items() if k not in EXECUTION_KEYS
+                    }
+            # ``chosen`` anchors the ``mcp.local.yaml`` sidecar (``_mcp_doc``),
+            # so in layered mode it must stay on the user layer: otherwise a
+            # repository's own sidecar is what gets merged in.  An explicit
+            # ``--path`` is the operator's file and advances it; the opt-in does
+            # too, because trusting the project is exactly what it means.
+            if role != "project" or trusted:
+                if chosen is None or layer is not None:
+                    chosen = layer
             for key in document:
                 sources[key] = str(layer)
-            merged = ConfigLoader._overlay(merged, _normalize(document))
+            merged = ConfigLoader._overlay(merged, document)
         return LayeredConfig(
             config=ConfigLoader.app_from_doc(merged, chosen) if merged else AppConfig(),
             sources=sources,

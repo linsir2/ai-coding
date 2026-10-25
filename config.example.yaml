@@ -138,6 +138,11 @@ tools:
     enabled: true
 
 mcp:
+  # N-4: a *project* layer's mcp/hooks are ignored by default.  A repository
+  # cannot grant execution -- `config.example.yaml` ships in the repo, and
+  # `mcp.local.yaml` sits next to it.  Put servers you trust in this file
+  # (~/.config/ai-coding/config.yaml), or set AI_CODING_TRUST_PROJECT=1 to let a
+  # project's own config apply.  Dropped keys are reported as a warning.
   enabled: false                  # master switch; per-server default is ON
   # servers:                     # v2 shape (docs/specs/2026-10-10-external-mcp.md)
   #   - name: fs

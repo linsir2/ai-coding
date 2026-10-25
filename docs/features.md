@@ -121,6 +121,14 @@ GUI 复刻里程碑中已删除）。旧 Textual 实现的布局/组件细节见
 - **审批面板显示参数**：WARN 层的确认面板会打印这次调用**将要做什么**，而不只是工具名。本地工具本来就有一行摘要（`read` 的路径、`bash` 的命令）；MCP 调用过去只有 `fs__write_file` 这个名字，参数到了前端却被丢在渲染层——也就是在批准一个你看不见副作用的远程调用。现在 `permissionPayload()` 把 `input` 的每个参数逐行打印，单值截断 160 字符、整块上限 12 行（超了明说还剩几个），长值不换行以免把选项挤出屏幕。
 - **沙箱**：`Sandbox` 将文件工具的所有路径解析限制在工作区内，`..`、绝对路径、符号链接逃逸一律抛 `SandboxViolation`。
 - **过期读保护**：`FileStateTracker` 记录最近一次读取的快照，写入/编辑前比对 `mtime`+`size`；未被读过（`NEVER_READ`）或内容被外部改动（`STALE`）时阻止写入，防止盲写与覆盖外部修改。
+- **项目配置不被信任授予执行（N-4）**：配置分两层 —— `~/.config/ai-coding/config.yaml`（用户层，可信）与仓库里 `discover()` 找到的 `config.local.yaml` / `config.yaml` / `config.example.yaml`（项目层）。项目层**逐键覆盖**用户层，这对"怎么干"是对的（`default_model`、`max_tool_iterations` 等项目层照常生效），但**执行类字段只认用户层**：
+  - `hooks`（`command` 执行任意程序、`kind: python` 的 `module` 走 `exec_module` 执行任意 Python）
+  - `mcp`（`servers[].command` spawn 任意子进程）
+  - `mcp.local.yaml` sidecar（`_mcp_doc` 以"哪个文件回答了配置"为锚点解析它，所以锚点也不能推进到项目层）
+
+  项目层设置了这些键时**丢弃并发一条 warning**（不静默）。要信任某个仓库，`export AI_CODING_TRUST_PROJECT=1` —— 这是环境变量而不是配置键，因为**仓库不能替 agent 进程设置它**，这正是"许可"与"配置"的区别。过滤在 `_normalize` **之后**做，所以 `Hooks:` / `MCP:` / `Mcp:` 这些大小写变体同样被挡住。
+
+  未覆盖的同类项（另立项）：`models[].base_url` / `api_key`（外发 + key 注入）、`tools.extra_workspace_roots`（越权读写）、`ai.websearch_api_key`（外发 key）、`tracing.dir`（越界写）、`hooks.plugin_dir`（python hook 的模块来自不可信仓库树）。
 
 ## 上下文与回合编排
 
