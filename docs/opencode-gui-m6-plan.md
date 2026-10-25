@@ -67,7 +67,8 @@ plain / status_bar / input_bar / `__init__`。产出与渲染逻辑的旧拷贝�
   Textual AST 规则随 UI 消失）
 - 外科手术（删 Textual render 用例、保生产断言）：
   test_plan_command（删 4 个 `_plan_topic`/路由用例）、
-  test_plan_m1（时间戳用例改用 `datetime.fromisoformat`）、
+  test_plan_m1（时间戳用例改用 `datetime.fromisoformat`；**N-5 起改用 `parse_iso8601`**，
+  因 `Z` 到 3.11 才可解析而 3.10 是声明下限，见 docs/plan-ci-fix.md §3）、
   test_plan_runner（删 `_step_header` 匹配段）、test_loop_events（2 个 blocks render 用例）、
   test_thinking（7 个 render/fold 用例 + 无用的模块级 import/helper）、test_ledger、
   test_background_tasks、test_structured_handoff、test_tool_surface_warning（各 1 个用例）

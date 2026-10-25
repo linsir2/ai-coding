@@ -82,7 +82,7 @@ self._rg = rg_path or resolved
 
 > 评审提出的"两种判定标准不一致"因此不成立：`None` 的语义是"我不关心走哪条"（所以可以
 > 降级），`True` 的语义是"我必须走 rg"（所以坏了就得说）。把 `True` 也改成静默降级，
-> 恰好会退回 `docs/data-contracts.md:895` 警告过的"拿兜底比自己"——那条警告的原文是
+> 恰好会退回 `docs/data-contracts.md:896` 警告过的"拿兜底比自己"——那条警告的原文是
 > "rg 缺席时打印 UNVERIFIED 而非拿兜底比自己"。
 
 **结论：不改 `grep_tool.py`。** 本方案只补 CI 环境。
@@ -101,7 +101,7 @@ self._rg = rg_path or resolved
 | **skipif 跳过** | 2 | `test_r17_parity.py:183`、`test_r17_parity.py:366` | `@pytest.mark.skipif(not shutil.which("rg"))` |
 | **静默假绿** | 2 | `test_m4_security.py:461`、`test_r17_parity.py:206` | **仍然通过，但根本没验证到 rg 分支** |
 
-"静默假绿"是本项目最忌讳的一类（`docs/data-contracts.md:895`："拿兜底比自己"）：
+"静默假绿"是本项目最忌讳的一类（`docs/data-contracts.md:896`："拿兜底比自己"）：
 
 * `test_m4_security.py:461` `test_grep_include_dotenv_still_filters_credentials` ——
   `for use_rg in (False, True)` 且不注入 runner。rg 缺席时 `use_rg=True` 那一轮拿到的是
@@ -123,7 +123,7 @@ self._rg = rg_path or resolved
 
 ### 2.4 项目自己的立场
 
-`docs/data-contracts.md:895` 已经把这件事记下来了：
+`docs/data-contracts.md:896` 已经把这件事记下来了：
 
 > ~~rg 分支会把绝对路径漏给模型~~ **r20/F0 已修**（r19/F1 引入、**提交时 rg 已卸载被
 > skip 掩盖**；验收脚本现在会真跑 parity，rg 缺席时打印 UNVERIFIED 而非拿兜底比自己）
@@ -416,5 +416,21 @@ rg --version                                      # 14.1.0，对应 apt 安装�
 | N6【新 P3】 | §4.3 "时间格式化的唯一入口"措辞不准 | **已修订 §4.3**：改为"时间**处理**（格式化 + 解析）的唯一入口" |
 
 ### 8.3 实现评审（子智能体）
+
+结论：**无 P0、无 P1**。实现与方案逐项一致，未越界（没碰 `grep_tool.py`、没给 3 条硬
+失败加 skipif、没加 2 条静默假绿的守卫）。评审独立复现了全部验收门禁（3.14 / 3.10 各
+3863 passed、七步全绿、rg 缺席复现、3.10 突变）。
+
+3 个 P2 + 2 个 P3，逐条处置：
+
+| 编号 | 内容 | 处置 |
+|---|---|---|
+| P2-1 | `opencode-gui-m6-plan.md:70` 仍写"时间戳用例改用 `datetime.fromisoformat`" | **已修订**：保留历史记录，追加"N-5 起改用 `parse_iso8601`"的指引 |
+| P2-2 | 提交尚未推送，无真实 CI 运行记录 —— 本提交的核心收益（CI 首次真跑 rg 分支）只有本地证据 | **待推送后确认**（见 §8.4） |
+| P2-3 | 方案引用的 `data-contracts.md:895` 因本次编辑已漂到 `:896` | **已修订**：3 处引用同步为 `:896` |
+| P3-1 | `data-contracts.md:309` 称 `parse_iso8601` 是唯一入口，但 `test_infra_time.py:23` 仍裸用 `fromisoformat` | **已修订**：该测试改用 `parse_iso8601`，"唯一入口"对测试侧也成立 |
+| P3-2 | `m1-analysis.md` 的 `time_utils` 说明只列 `now_utc()` | **不改**：历史分析文档，记录当时状态 |
+
+### 8.4 推送后的真实验收
 
 _待填。_

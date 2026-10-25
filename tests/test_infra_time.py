@@ -20,7 +20,8 @@ def test_now_local_is_the_same_instant_as_utc_not_a_shifted_clock():
     """A wrong local zone would not be a formatting bug but a lie about when
     things happened, so the value must denote *this* moment, not the same
     digits in another zone."""
-    parsed = datetime.fromisoformat(now_local())
+    parsed = parse_iso8601(now_local())
+    assert parsed is not None
     assert parsed.tzinfo is not None
     drift = abs((datetime.now(timezone.utc) - parsed).total_seconds())
     assert drift < 5, f"now_local is {drift:.1f}s away from real now"
