@@ -192,7 +192,15 @@ async def case_6_disabled(root: Path) -> tuple[bool, str]:
 
 
 async def case_7_delta_only(root: Path) -> tuple[bool, str]:
-    """Every turn used to re-extract the whole history (2, 4, 6, ... messages)."""
+    """The extractor is never handed the whole history, and never sees it twice.
+
+    The harvest is *scheduled*, not awaited (``_schedule_harvest``), so a turn can
+    finish before the extractor runs and the delta -- "everything since the
+    cursor" -- coalesces the turns that outran extraction.  That is by design
+    (``agent_loop.py:1509-1514``).  What must hold is the invariant, not the batch
+    count: nothing is lost, nothing is shown twice, and no batch is the whole
+    history.
+    """
     extractor = _Extractor("事实")
     root_ws = root / "ws"
     root_ws.mkdir()
@@ -203,12 +211,20 @@ async def case_7_delta_only(root: Path) -> tuple[bool, str]:
     session = loop.sessions.create()
     for index in range(4):
         await loop.process_input(session, f"第{index}轮：聊点别的")
+    # The harvest chain is background work; drain it so the measurement is complete.
+    await loop.flush_harvest()
     sizes = [len(batch) for batch in extractor.seen]
-    repeated = sum(
-        1 for size in sizes if size > 3
+    flat = [message for batch in extractor.seen for message in batch]
+    total = len(session.messages)
+    identity_chain = len(flat) == total and all(
+        left is right for left, right in zip(flat, session.messages, strict=False)
     )
-    ok = len(sizes) == 4 and repeated == 0
-    return ok, f"batch_sizes={sizes}（每轮 ≤3：用户+回答，不含历史）"
+    whole_history = any(len(batch) == total for batch in extractor.seen)
+    ok = identity_chain and not whole_history
+    return ok, (
+        f"batch_sizes={sizes} total={total} "
+        f"identity_chain={identity_chain} whole_history={whole_history}"
+    )
 
 
 async def case_8_decision_survives(root: Path) -> tuple[bool, str]:
@@ -276,10 +292,36 @@ async def case_10_no_false_positive(root: Path) -> tuple[bool, str]:
 async def case_11_cache_prefix(root: Path) -> tuple[bool, str]:
     """Cost side: append-only turns keep the prompt-cache prefix intact.
 
+    The volatile tail (``<environment>`` / ``<task-state>`` / ``[budget]`` ...) is
+    rebuilt every turn and sits *after* the history, so a byte-level ratio over the
+    whole request is diluted by it -- and by the workspace path inside it, which is
+    why a fixed percentage threshold was both wrong and machine-dependent (87% on a
+    short path, 77% at 442 characters).
+
+    What must hold is the invariant, not a percentage: with the tail set aside,
+    request N's stable part is an exact prefix of request N+1's.
+
     The "per-turn-trim" arm reproduces the M3 policy on purpose (a context object
-    that compacts on *every* turn), which is what the old message-count threshold
-    did from turn 26 onwards.
+    that compacts on *every* turn), which rewrites the history -- so its stable part
+    is *not* a prefix.  That contrast is what the case exists to show.
     """
+
+    #: The tail blocks are recognisable by these markers; the history never is.
+    volatile_markers = (
+        "<environment>",
+        "<task-state>",
+        "<referenced-files>",
+        "<requested-skills>",
+        "[budget]",
+    )
+
+    def stable(request: dict) -> str:
+        """A request's instructions + history, with the volatile tail set aside."""
+
+        messages = list(request["messages"])
+        while messages and any(marker in messages[-1] for marker in volatile_markers):
+            messages.pop()
+        return request["instructions"] + "\n".join(messages)
 
     class _AlwaysCompacts:
         """M3 behaviour: run the pipeline every request, no budget check."""
@@ -290,7 +332,8 @@ async def case_11_cache_prefix(root: Path) -> tuple[bool, str]:
         async def compress(self, messages):
             return await self._inner.compress(messages)
 
-    results: dict[str, int] = {}
+    shares: dict[str, int] = {}
+    intact: dict[str, bool] = {}
     long_reply = "好的，这个模块负责装配与转发，入口在 build()，注意所有超时走 deadline 封装。" * 3
     modern = AIConfig(stop_policy="natural", max_tool_iterations=1, max_messages=400)
     legacy = AIConfig(stop_policy="natural", max_tool_iterations=1, max_messages=20)
@@ -320,26 +363,16 @@ async def case_11_cache_prefix(root: Path) -> tuple[bool, str]:
         session = loop.sessions.create()
         for index in range(18):
             await loop.process_input(session, f"第{index}轮：看看模块 {index}")
-        prefix = 0
-        for previous, current in zip(
-            engine.requests[-3:-1], engine.requests[-2:], strict=False
-        ):
-            a = previous["instructions"] + "\n".join(previous["messages"])
-            b = current["instructions"] + "\n".join(current["messages"])
-            limit = min(len(a), len(b))
-            index = 0
-            while index < limit and a[index] == b[index]:
-                index += 1
-            prefix = max(prefix, round(100 * index / max(len(b), 1)))
-        results[label] = prefix
-    ok = (
-        results["append-only"] >= 90
-        and results["per-turn-trim"] < 60
-        and results["append-only"] > results["per-turn-trim"]
-    )
+        stable_a = stable(engine.requests[-2])
+        stable_b = stable(engine.requests[-1])
+        shares[label] = round(100 * len(stable_a) / max(len(stable_b), 1))
+        intact[label] = stable_b.startswith(stable_a)
+    ok = intact["append-only"] and not intact["per-turn-trim"]
     return ok, (
-        f"prefix_hit append-only={results['append-only']}% "
-        f"per-turn-trim={results['per-turn-trim']}%"
+        f"prefix_intact append-only={intact['append-only']} "
+        f"per-turn-trim={intact['per-turn-trim']} "
+        f"(stable_share append-only={shares['append-only']}% "
+        f"per-turn-trim={shares['per-turn-trim']}%)"
     )
 
 
