@@ -271,3 +271,31 @@ def test_r10d_urllib_maps_404_to_unsupported_and_raises_the_rest(tmp_path):
     assert asyncio.run(drive(200)) == [[0.5, 0.5]]
     with pytest.raises(TimeoutError):
         asyncio.run(drive(None))
+
+
+def test_the_cache_path_is_clamped_into_the_workspace(tmp_path):
+    """An absolute path outside the workspace must not be written.
+
+    The cache is a pure accelerator (losing it only costs a recompute), so the
+    guard falls back to the default rather than refusing the feature.
+    """
+    from ai_coding.cli import _embeddings_for
+    from ai_coding.config.models import AppConfig, MemoryConfig
+    from ai_coding.paths import Paths
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "evil.json"
+    app_cfg = AppConfig(
+        memory=MemoryConfig.model_validate(
+            {"embeddings": {"enabled": True, "cache_path": str(outside)}}
+        )
+    )
+    paths = Paths.for_workspace(workspace)
+
+    index = _embeddings_for(app_cfg, paths)
+    assert index is not None
+    index._save()
+
+    assert not outside.exists(), "the cache was written outside the workspace"
+    assert (paths.memory / "embeddings.json").exists()

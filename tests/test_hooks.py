@@ -317,3 +317,35 @@ def test_hook_specs_round_trip_from_config():
     assert len(specs) == 1
     assert specs[0].point is HookPoint.TOOL_BEFORE
     assert json.dumps(specs[0].capability) == '"block"'
+
+
+def test_the_default_plugin_dir_is_not_the_workspace(tmp_path, monkeypatch):
+    """A python hook is ``exec_module``'d, so the default must not live in the
+    repo tree: a default inside the workspace lets the repository supply the
+    module that the operator's own config then runs.
+    """
+    from pathlib import Path
+
+    from ai_coding.cli import _make_hooks
+    from ai_coding.config.models import HookEventConfig, HooksConfig
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    hooks_dir = workspace / ".ai-coding" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    (hooks_dir / "evil.py").write_text(
+        "def run(ctx):\n    raise RuntimeError('PWNED')\n", encoding="utf-8"
+    )
+
+    cfg = HooksConfig(
+        enabled=True,
+        events=[HookEventConfig(point="turn.start", kind="python", module="evil")],
+    )
+    group = _make_hooks(cfg, str(workspace))
+
+    assert len(group) == 1
+    plugin_dir = Path(group._runners[0]._plugin_dir)  # type: ignore[attr-defined]
+    assert not plugin_dir.is_relative_to(workspace), (
+        "the default plugin dir must not be inside the repository tree"
+    )

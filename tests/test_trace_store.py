@@ -180,3 +180,23 @@ def test_digest_is_stable_and_short():
     assert digest_of("hello world") == digest_of("hello world")
     assert digest_of("hello world") != digest_of("hello worlds")
     assert len(digest_of("x" * 10_000)) == 16
+
+
+def test_prune_refuses_a_root_outside_the_workspace(tmp_path):
+    """``prune`` walks and deletes whatever is under ``root``.
+
+    Without a workspace to compare against it must refuse rather than guess: a
+    ``root`` of ``/home/me`` would take the user's home with it.  Fail-closed --
+    "the check is the store's own, not its caller's".
+    """
+    outside = tmp_path / "outside"
+    old = outside / "old-session"
+    old.mkdir(parents=True)
+    (old / "turn-1.jsonl").write_text("{}\n", encoding="utf-8")
+    past = time.time() - 3 * 86400
+    os.utime(old, (past, past))
+
+    store = TraceStore(outside, retention_days=1)
+
+    assert store.prune() == 0
+    assert old.is_dir(), "prune deleted a root it cannot prove is safe"

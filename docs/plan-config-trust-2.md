@@ -409,21 +409,24 @@ def _token_key(server: Any) -> str:
 
 ### Red（先写，必须变红）
 
-| 编号 | 用例 | 期望红相（**今天必须通过**，实现后必须失败） |
-|---|---|---|
-| U1 | `test_config_layers.py::test_a_project_model_endpoint_does_not_redirect_the_users_key` | 用户层 `models.x.api_key: sk-REAL` + 项目层只写 `models.x.base_url: https://evil` → 断言**生效**（记录"用户 key 被发往 evil"） |
-| U2 | `test_config_layers.py::test_a_project_layer_may_not_widen_extra_workspace_roots` | 用户层空 + 项目层 `["/"]` → `Sandbox` 对 `/etc/shadow` **不抛** |
-| U3 | `test_config_layers.py::test_a_project_websearch_key_does_not_replace_the_operators` | 用户层 `USER` + 项目层 `EVIL` → 工具内 key == `EVIL` |
-| U4 | `test_config_layers.py::test_a_project_tracing_dir_does_not_leave_the_workspace` | 项目层 `tracing.dir = tmp_path` → 断言 `store.root == tmp_path` |
-| U5 | `test_config_layers.py::test_a_project_embedding_cache_path_does_not_leave_the_workspace` | 项目层绝对路径 → 断言 `cache_path == 该绝对路径` |
-| U6 | `test_hooks.py::test_the_default_plugin_dir_is_not_the_workspace` | 项目目录放 `.ai-coding/hooks/evil.py` + 用户层 `module: evil` → 断言**被执行** |
-| U7 | `test_mcp_oauth.py::test_two_servers_that_share_a_name_do_not_share_a_token` | 同名不同 url 的两个 server → 断言**共享** token |
-| U8 | `test_trace_store.py::test_prune_refuses_a_root_outside_the_workspace` | 红相：`TraceStore(tmp_path)`（**不传 `workspace`**）+ `prune(0)` → 断言旧子目录**被删**（今天成立；`workspace` kwarg 尚不存在，写了会是 `TypeError` —— 评审 NP-1） |
-| U9 | `test_memory_embeddings.py::test_the_cache_path_is_clamped_into_the_workspace` | `cache_path = /etc/evil` → 断言 `_save` **写了**它 |
+用例名描述的是**期望的（安全）行为**，所以**今天必须失败** —— 这正是 RIPR 的 Red 相：
+先让用例红，实现后再转绿。"实现是否真的改了行为"因此是可机检的（红 → 绿）。
 
-> **刻意的写法**：U1–U7 断言的是"漏洞存在"（**基线用例**），实现后它们必须**失败**，
-> 然后**原地改写**成"漏洞已堵"。先让用例把现状钉住，再让实现把它推翻 —— 这样
-> "实现是否真的改了行为"是可机检的。U8/U9 是纵深防御的基线用例，同理。
+| 编号 | 用例 | 期望红相（**今天必须失败**） |
+|---|---|---|
+| U1 | `test_config_layers.py::test_a_project_model_endpoint_does_not_redirect_the_users_key` | 用户层 `models.x.api_key: sk-REAL` + 项目层只写 `models.x.base_url: https://evil` → 断言端点**未**被重定向（今天：被重定向 → 红） |
+| U2 | `test_config_layers.py::test_a_project_layer_may_not_widen_extra_workspace_roots` | 用户层空 + 项目层 `["/"]` → `Sandbox` 对 `/etc/shadow` **抛** `SandboxViolation`（今天：不抛 → 红） |
+| U3 | `test_config_layers.py::test_a_project_websearch_key_does_not_replace_the_operators` | 用户层 `USER` + 项目层 `EVIL` → 工具内 key == `USER`（今天：`EVIL` → 红） |
+| U4 | `test_config_layers.py::test_a_project_tracing_dir_does_not_leave_the_workspace` | 项目层 `tracing.dir = tmp_path` → 断言 `store.root` 落在工作区内（今天：`tmp_path` → 红） |
+| U5 | `test_config_layers.py::test_a_project_embedding_cache_path_does_not_leave_the_workspace` | 项目层绝对路径 → 断言 `cache_path` 落在工作区内（今天：绝对路径 → 红） |
+| U6 | `test_hooks.py::test_the_default_plugin_dir_is_not_the_workspace` | 项目目录放 `.ai-coding/hooks/evil.py` + 用户层 `module: evil` → 断言**未**被执行（今天：被执行 → 红） |
+| U7 | `test_mcp_oauth.py::test_two_servers_that_share_a_name_do_not_share_a_token` | 同名不同 url 的两个 server → 断言**不共享** token（今天：共享 → 红） |
+| U8 | `test_trace_store.py::test_prune_refuses_a_root_outside_the_workspace` | 红相：`TraceStore(tmp_path)`（**不传 `workspace`**）+ `prune(0)` → 断言旧子目录**未被删**（今天：被删 → 红；`workspace` kwarg 尚不存在，传了会是 `TypeError` —— 评审 NP-1） |
+| U9 | `test_memory_embeddings.py::test_the_cache_path_is_clamped_into_the_workspace` | `cache_path = /etc/evil` → 断言 `_save` **未**写到工作区外（今天：写了 → 红） |
+
+> **为什么不"反向断言漏洞"**：RIPR 的 Red 相是"**期望行为失败**"，它同时驱动实现
+> （红 → 绿）。反过来先断言漏洞存在，用例今天就是绿的，既不能驱动实现，也不符合
+> RIPR 的定义（评审 NP-1 的修订过程中确认）。
 
 ### Prove
 

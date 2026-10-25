@@ -446,6 +446,27 @@ async def test_logout_forgets_only_that_server(tmp_path, monkeypatch):
     assert (await other.get_tokens()).access_token == "t2"
 
 
+async def test_two_servers_that_share_a_name_do_not_share_a_token(tmp_path, monkeypatch):
+    """Keyed by name alone, one server's token is handed to the other."""
+    from mcp.shared.auth import OAuthToken
+
+    from ai_coding.config.models import MCPServerConfig
+    from ai_coding.core.mcp import _TokenStore, _token_key
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    a = MCPServerConfig(name="shared", type="remote", url="https://a.test/mcp")
+    b = MCPServerConfig(name="shared", type="remote", url="https://b.test/mcp")
+
+    await _TokenStore(_token_key(a)).set_tokens(
+        OAuthToken(access_token="for-a", token_type="Bearer")
+    )
+
+    assert await _TokenStore(_token_key(a)).get_tokens() is not None
+    assert await _TokenStore(_token_key(b)).get_tokens() is None, (
+        "a token minted for https://a.test was handed to https://b.test"
+    )
+
+
 # ---- R2/R3: needs_auth is a state, not a retry ----------------------------
 
 
