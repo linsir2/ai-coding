@@ -890,4 +890,59 @@ IterationStarted 10
 | 真仓库跑默认命令 | `ruff check .` → exit 0；`mypy ai_coding` → exit 0 |
 | 恶意命令 | `echo evil ; touch /tmp/PWNED` → **skipped，文件未生成** |
 
----
+### 15.7 第二轮评审（对修复本身的评审）：P0 其实没修掉
+
+上一节的修法把"任意命令"收窄成"允许名 + 非 shell"，但第二轮评审用探针证明**它仍不是安全边界**：
+
+| 绕过 | 实测 |
+|---|---|
+| 仓库放 `.venv/bin/ruff`（一个 `touch` 脚本） | `ruff check .` **执行了它**，marker 生成 |
+| `./ruff check .`、`/tmp/evil/ruff check .` | 同样执行（basename 比对只认名字） |
+| `cargo check`（在旧白名单里） | 执行了仓库的 `build.rs` |
+| `go run .`、`eslint .`（旧白名单） | 执行仓库代码 / 加载配置模块 |
+
+关键结论：**白名单只约束"叫什么名字"，不约束"跑谁"**。而 `commands` 仍可由仓库的
+`config.example.yaml` 设置 —— 所以原攻击链依然成立，我只是把 `echo` 换成了 `cargo`。
+
+**真正的修法：把"是否允许执行"放到仓库碰不到的信道**。`AI_CODING_STATIC_CHECK=1`
+（环境变量）现在是唯一开关，默认关闭；实测未开启时 `run_static_checks` 返回 `""`，
+仓库里的 `.venv/bin/ruff` **一次都没有被执行**。开启等于操作者对该仓库表态。
+
+同时把"本身就执行仓库代码"的工具移出白名单（`cargo`/`go`/`eslint`/`pylint`/`rubocop`/`phpstan`）。
+
+> **既有同源风险（不在本里程碑范围，需单独立项）**：`core/hooks.py:283` 也直接执行
+> **配置来源**的 `command`，且同样没有权限门；项目配置还能设 `mcp.servers[].command`。
+> 这说明缺的是**「项目配置是否可信」这一层机制**（`--trust-project-config` 之类），
+> 不是某一个字段的补丁。已记入 roadmap 待立项。
+
+### 15.8 第二轮评审发现的 3 个新 bug（已修）
+
+| # | 问题 | 实测 | 修法 |
+|---|---|---|---|
+| N-1 | 阈值 ≥6 时 **L1 被吞掉**（`max(l2, threshold)` 让 L1/L2 同阈值） | `threshold=8` → 只出现 `(9, 2)` | 改成 `max(l2, threshold + 1)`；实测 `threshold=8` → `(8,1)`、`(9,2)` |
+| N-2 | **负数阈值**每轮都 nudge，一个模型步都没有（直接烧完预算） | `threshold=-1` → 10 次 nudge、`engine_calls=1` | `AIConfig` 加 `ge=0`（实测 `ValidationError`） |
+| N-3 | L2 与**小预算**耦合：`max_tool_iterations=8` 时 L2 仍落在最后一步；`=6` 时 L2 根本不触发 | 8 → L2 在最后；6 → 只有 L1 | 运行静态检查前加 `index < max_iterations`（文案照发、只跳过执行）；预算依赖写进 features 与配置注释 |
+
+另外：`mcp_call`/`subAgent` 补进 `ACTION_TOOLS`（两者都可能改变世界，原先既不计检索也不清零，
+会让 streak 在真实工作之后继续上涨）。
+
+### 15.9 §15.6 的事实订正
+
+| 项 | §15.6 写的 | 实际 |
+|---|---|---|
+| `tests/test_static_check.py` | 10 passed | 现 **11 passed**（含 env 开关与"执行型工具被拒"两例） |
+| 全量 | 3840 passed | 修 P0/N-1..N-3 后 **3844** |
+| "任意二进制名不能被执行" | 表述过强 | 正确表述：名字必须在白名单内；**跑的是哪个文件不受约束**（这就是为什么开关必须放在 env） |
+| "与模型用 bash 跑 make 同级" | 错 | bash 走 dispatch + 权限门 + approval；本功能原先三者皆无 → 现由 env 开关弥补 |
+
+### 15.10 两轮修完后的判据（实跑）
+
+| 判据 | 结果 |
+|---|---|
+| 全量 `pytest` | **3844 passed / 6 skipped / 0 failed** |
+| `ruff` / `mypy ai_coding` | 0 / 0（153 文件） |
+| `tests/test_static_check.py` | 11 passed |
+| `test_interventions.py` + `test_interventions_loop.py` | 39 passed |
+| 未 opt-in 时执行 | `run_static_checks` → `""`，仓库二进制**未执行** |
+| opt-in 后恶意命令 | `;`/`&&`/`$()`/`|` 均只作参数；`cargo`/`go`/`eslint` 被 skipped |
+| 真仓库默认命令（opt-in） | `ruff check .` exit 0、`mypy ai_coding` exit 0 |

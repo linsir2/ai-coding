@@ -897,6 +897,12 @@ class AgentLoop:
                         if (
                             decision.level >= interventions.L2
                             and not books.static_check_ran
+                            # No room left to read it: a check whose output lands
+                            # on the turn's last iteration is pure cost (measured:
+                            # at max_tool_iterations=8 the L2 nudge was the final
+                            # message).  The text still goes out; only the run is
+                            # skipped.
+                            and index < self.policy.config.max_iterations
                         ):
                             books.static_check_ran = True
                             block = await run_static_checks(

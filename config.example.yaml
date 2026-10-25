@@ -20,10 +20,17 @@ ai:
   # in between) before the `[search-gate]` ladder speaks.  0 disables it.
   search_streak_threshold: 4
   # B1: what the harness runs itself when the ladder reaches its second rung.
-  # The commands are shlex-split and run WITHOUT a shell, and the first word must
-  # be one of the known analysis tools (ruff/mypy/tsc/eslint/...), because this
-  # field can be set by a repository's tracked config.example.yaml -- a string
-  # from there must never become a shell.  Unlisted programs are skipped.
+  # OFF unless you opt in: export AI_CODING_STATIC_CHECK=1.  That is deliberate --
+  # this field can be set by a repository's tracked config.example.yaml, and a repo
+  # must not be able to grant itself the right to run code; an env var is a channel
+  # it cannot touch.  Without the opt-in the [search-gate] text still names the
+  # commands, and the model can run them through bash (which has the permission
+  # gate) instead.
+  #
+  # Each entry is an *argv*, not a shell string: it is shlex-split and executed
+  # without a shell, so `;`/`&&`/`|`/`$(...)`/`>`/globs/`$VAR` are plain arguments
+  # and NOT expanded.  The first word must be one of ruff/mypy/pyright/flake8/
+  # black/isort/tsc/gofmt/staticcheck/shellcheck; anything else is skipped.
   # Declared, never inferred: on this repository `mypy .` reports 271 errors
   # (`scripts/` is not excluded) while `mypy ai_coding` -- what CI runs -- reports
   # none, so a project that wants mypy must say so.  Empty list disables it.

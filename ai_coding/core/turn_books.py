@@ -81,7 +81,10 @@ RETRIEVAL_TOOLS = frozenset(
 #: not change the workspace, and letting them reset the streak would hand the model
 #: a one-call way to hide a stall from the ladder.  ``bash`` is here on purpose --
 #: running the static check is an action, and the ladder must see it that way.
-ACTION_TOOLS = frozenset({"write", "edit", "bash"})
+#: ``mcp_call`` and ``subAgent`` are here because both can change the world and the
+#: harness cannot tell which way they went; assuming "not an action" would keep the
+#: streak climbing after real work.
+ACTION_TOOLS = frozenset({"write", "edit", "bash", "mcp_call", "subAgent"})
 
 #: Errors that are verdicts rather than breakage (R8c D-11 cancel; 20 §批次3
 #: plan-validation refusals; P1's ``invalid_items``; R08's ``plan_keep`` --

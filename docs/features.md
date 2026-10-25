@@ -715,12 +715,26 @@ L2 定在 6 而不是 8：默认 `max_tool_iterations=10`，而一次 nudge 占�
 
 `plan` 与只读姿态**不触发**：那两种姿态本来就该"只看不动"。
 
-L2 的输出来自 `ai.static_check.commands`（默认 `["ruff check ."]`）：命令用 **`shlex` 切分、
-`shell=False` 执行**，且首个词必须是已知的静态检查工具（`ruff`/`mypy`/`tsc`/`eslint`/…），
-否则整条 `skipped`。这不是洁癖 —— 该字段能被**仓库里被跟踪的 `config.example.yaml`** 设上
-（`ConfigLoader` 会向上查找它），若不这样处理，克隆一个仓库再让它读完 6 个文件就等于执行
-仓库里的任意命令。`;`/`&&`/`|` 因此只是普通参数。`.venv/bin` 优先 PATH，超时 20s、总量 ≤2000 字符。
-每回合最多跑一次；0 个阈值（`ai.search_streak_threshold: 0`）可整机关闭。
+L2 的输出来自 `ai.static_check.commands`（默认 `["ruff check ."]`），但**默认不执行**：
+需要操作者 `export AI_CODING_STATIC_CHECK=1`。原因不是保守 —— 该字段能被**仓库里被跟踪的
+`config.example.yaml`** 设上（`ConfigLoader` 会向上查找它），配置本身不能充当"允许运行代码"
+的凭证，否则克隆一个不受信仓库就等于把执行权交给它。环境变量是仓库碰不到的信道。
+
+开启后仍有两道约束：
+
+- 每条是 **argv 不是 shell 字符串**：`shlex` 切分 + `shell=False`，所以
+  `;`/`&&`/`|`/`$(...)`/`>`/通配/`$VAR` **都不展开**，只是普通参数；
+- 首个词必须在白名单里（`ruff`/`mypy`/`pyright`/`flake8`/`black`/`isort`/`tsc`/`gofmt`/
+  `staticcheck`/`shellcheck`）；`cargo`/`go`/`eslint`/`pylint`/`rubocop`/`phpstan`
+  **故意不在名单**——它们本身就是"执行仓库代码"（`build.rs`、`go run`、配置模块、
+  `--init-hook`）。
+
+> 没开启时，L2 的文案仍然把该跑的命令写给模型，由它经 `bash`（有权限门）去跑。
+> 开启等于操作者表态"这个仓库的 linter 我信"，与"在这个仓库里跑 make"是同一个决定。
+
+`.venv/bin` 优先 PATH，超时 20s、总量 ≤2000 字符，**每回合最多跑一次**，且**不在回合的最后
+一步跑**（跑完没人读就是纯成本）。`ai.search_streak_threshold: 0` 可整机关闭该阶梯
+（含 L1）。
 
 同一档只在 streak 又长出一整个 L1 阈值后才再次发声（不然模型会把预算花在读提示上）。
 每次触发发一个 `SearchStalled` 事件（`iteration`/`level`/`calls`/`streak`），

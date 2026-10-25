@@ -250,15 +250,22 @@ def _read_call(call_id: str) -> StepResult:
 
 
 @pytest.mark.asyncio
-async def test_a_look_only_turn_gets_the_static_check_output(tmp_path):
+async def test_a_look_only_turn_gets_the_static_check_output(tmp_path, monkeypatch):
     """B1's whole path: streak -> ladder -> harness runs the command -> injection.
 
     Not a unit test of any one piece: a real AgentLoop drives a real tool, the
     real policy decides, and the synthetic message the model would read is
     asserted to carry both the gate text and the command's own output.
+
+    The run itself is opt-in (``AI_CODING_STATIC_CHECK=1``) because the commands
+    can come from a repository's tracked config -- see
+    ``core/static_check.py``.
     """
     from ai_coding.core.events import RecordingObserver
+    from ai_coding.core.static_check import ENABLE_ENV
     from ai_coding.tools.registry import ToolRegistry
+
+    monkeypatch.setenv(ENABLE_ENV, "1")
 
     engine = _ScriptedEngine(
         [
@@ -307,10 +314,15 @@ async def test_a_look_only_turn_gets_the_static_check_output(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_the_static_check_output_is_readable_under_the_default_budget(tmp_path):
+async def test_the_static_check_output_is_readable_under_the_default_budget(
+    tmp_path, monkeypatch
+):
     """The default budget is 10 iterations; L2 must leave room to consume it."""
     from ai_coding.core.events import RecordingObserver
+    from ai_coding.core.static_check import ENABLE_ENV
     from ai_coding.tools.registry import ToolRegistry
+
+    monkeypatch.setenv(ENABLE_ENV, "1")
 
     engine = _ScriptedEngine(
         [_read_call(f"d{i}") for i in range(1, 10)] + [_text("done")]

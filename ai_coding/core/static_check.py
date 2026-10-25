@@ -8,15 +8,27 @@ Two properties shape everything here:
 **Nothing raises.** A turn must not fail because a linter is missing, so every
 command is independent and a broken one is reported, not propagated.
 
-**Nothing the repository can say becomes a shell.** ``commands`` may come from a
-project's tracked ``config.example.yaml`` -- ``ConfigLoader.DEFAULT_NAMES`` walks
-up from the workspace and a repo ships that file -- so a string from there must
-never reach a shell.  The command is ``shlex``-split and run with
-``shell=False``, and its first word must be one of the known analysis tools:
-``;``, ``|`` and ``&&`` are then literal arguments, not operators, and an unknown
-program is refused instead of executed.  This is a smaller, structural version of
-what ``core/acceptance.py`` does with its proof commands, and it exists because
-this is the one place the harness runs something by itself.
+**Nothing runs unless the operator opted in.** ``commands`` can be set by a
+project's *tracked* ``config.example.yaml`` (``ConfigLoader.DEFAULT_NAMES`` walks
+up from the workspace and a repo ships that file), so config alone cannot be the
+permission -- a repository would be granting itself the right to run code.  The
+gate is ``AI_CODING_STATIC_CHECK=1`` in the environment: a repository cannot set
+that for the agent process, and an operator who sets it is making the same trust
+decision as running ``make`` in that repo.  Off by default; the ``[search-gate]``
+nudge still names the commands, so the model can run them through ``bash`` and its
+permission gate instead.
+
+**And what runs is an argv, not a shell.** Even when enabled, the command is
+``shlex``-split and executed with ``shell=False`` and a first word from
+``ALLOWED_PROGRAMS``; ``;``, ``|`` and ``&&`` are then arguments.  The programs in
+the list are the ones that analyse code without running the project's own build
+(for example ``cargo``/``go``/``eslint`` are deliberately absent: they execute
+``build.rs``, ``go run`` and config modules by design).
+
+Residual risk, stated because it is real: with the opt-in given, a repository's
+own ``.venv/bin/ruff`` is what runs -- that is the whole point of using the
+project's installed linter, and it is why the opt-in is a trust decision rather
+than a toggle.
 """
 
 from __future__ import annotations
@@ -28,30 +40,37 @@ from pathlib import Path
 
 from ai_coding.infra.subprocess_runner import run_process_async
 
-__all__ = ["ALLOWED_PROGRAMS", "run_static_checks"]
+__all__ = ["ALLOWED_PROGRAMS", "ENABLE_ENV", "enabled", "run_static_checks"]
 
-#: The analysis tools this feature exists for.  Matched on the *basename* of the
-#: first word, so an absolute ``.venv/bin/ruff`` is allowed and ``curl`` is not.
+#: The environment variable that turns the feature on.  A repository cannot set it
+#: for the agent process, which is what makes it a permission rather than a config.
+ENABLE_ENV = "AI_CODING_STATIC_CHECK"
+
+#: Programs that analyse code *without* running the project's own build.  Matched
+#: on the basename of the first word, so an absolute ``.venv/bin/ruff`` is allowed
+#: and ``curl`` is not.  ``cargo``/``go``/``eslint``/``pylint``/``rubocop``/
+#: ``phpstan`` are deliberately absent: each executes repository code by design
+#: (``build.rs``, ``go run``, config modules, ``--init-hook``, ``require:``,
+#: ``bootstrapFiles``), which is not what this feature is for.
 ALLOWED_PROGRAMS = frozenset(
     {
         "ruff",
         "mypy",
         "pyright",
-        "pylint",
         "flake8",
         "black",
         "isort",
-        "eslint",
         "tsc",
         "gofmt",
-        "go",
         "staticcheck",
-        "cargo",
-        "rubocop",
-        "phpstan",
         "shellcheck",
     }
 )
+
+
+def enabled() -> bool:
+    """Is the harness allowed to run the checks itself?"""
+    return os.environ.get(ENABLE_ENV) == "1"
 
 
 def _search_path(workspace: str) -> dict[str, str]:
@@ -90,10 +109,12 @@ async def run_static_checks(
 ) -> str:
     """Run ``commands`` in ``workspace``; return a compact block, or ``""``.
 
-    ``""`` means "nothing to say" -- no workspace, no commands, or nothing could be
-    run at all.  The caller then keeps the nudge's own text, which still tells the
-    model what to run by hand.
+    ``""`` means "nothing to say" -- not opted in, no workspace, no commands, or
+    nothing could be run at all.  The caller then keeps the nudge's own text, which
+    still tells the model what to run by hand.
     """
+    if not enabled():
+        return ""
     if not workspace or not commands or max_chars <= 0:
         return ""
     env = _search_path(workspace)

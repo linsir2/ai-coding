@@ -68,8 +68,9 @@ class AIConfig(BaseModel):
     auto_process_tool_results: bool = True
     max_tool_iterations: int = 10
     #: B1/B2: consecutive look-only calls before the `[search-gate]` ladder speaks.
-    #: 0 disables it (and with it the harness-run static check at L2).
-    search_streak_threshold: int = 4
+    #: 0 disables it.  Clamped at 0 because a negative value would make every
+    #: iteration fire a nudge and leave the model no step to act in.
+    search_streak_threshold: int = Field(default=4, ge=0)
     #: B1: what the harness runs itself when the turn stalls in look-only mode.
     static_check: StaticCheckConfig = Field(default_factory=StaticCheckConfig)
     max_concurrent_subagents: int = 3

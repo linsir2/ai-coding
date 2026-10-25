@@ -120,9 +120,10 @@
 |---|---|
 | **缺口** | mypy/ruff 早就能报出 `httpx2`，但**结果没有回到模型面前**。模型只能逐文件 grep |
 | **实际做法** | 新增 `core/static_check.py`（复用 `infra/subprocess_runner.run_process_async`）：`[search-gate]` **L2**（streak ≥6）触发时，harness 跑 `ai.static_check.commands`，把**真实输出**拼进注入文本；每回合最多一次 |
-| **安全约束** | 该字段能被**仓库里被跟踪的 `config.example.yaml`** 设置 → 命令 **`shlex` 切分 + `shell=False`**，首词必须在已知静态检查工具白名单里，否则 `skipped`（评审 P0 的修法） |
+| **安全约束（两轮评审后）** | 该字段能被**仓库里被跟踪的 `config.example.yaml`** 设置，所以配置不能充当许可：**默认不执行**，需操作者 `AI_CODING_STATIC_CHECK=1`（仓库碰不到的信道）。开启后仍 `shlex` 切分 + `shell=False` + 首词白名单（`cargo`/`go`/`eslint` 等「本身执行仓库代码」的工具已移出白名单） |
+| **同源风险（待立项）** | `core/hooks.py:283` 同样执行**配置来源**的 command 且无权限门；`mcp.servers[].command` 亦然。缺的是「项目配置是否可信」这一层机制（`--trust-project-config`），不是单字段补丁 |
 | **关键否决** | **命令不能自动推断**：实测本仓 `mypy .` 报 **271 errors**（`scripts/` 未排除）而 CI 跑的 `mypy ai_coding` 零错。默认只给 `ruff check .`，mypy 由使用方声明 |
-| **验收** | ① 全链路用例 `test_a_look_only_turn_gets_the_static_check_output`（真 loop + 真工具 + 真子进程，断言注入文本含命令输出）；② `tests/test_static_check.py` 7 例；③ **未做** T2 真机复测（需 API key）|
+| **验收** | ① 2 条全链路用例（真 loop + 真工具 + 真子进程）；② `tests/test_static_check.py` 11 例（含 env 开关/执行型工具被拒/`;` 不成 shell）；③ **未做** T2 真机复测（需 API key）|
 
 ### M-B2 · 检索收敛判据 —— ✅ 已完成（2026-10-25）
 

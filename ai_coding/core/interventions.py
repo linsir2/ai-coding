@@ -264,7 +264,11 @@ def _search_due(
     threshold = limits.search_streak_threshold
     if not threshold or snap.search_streak < threshold:
         return None
-    level = L2 if snap.search_streak >= max(limits.search_streak_l2, threshold) else L1
+    # ``+1`` rather than ``max(l2, threshold)``: a threshold at or above the L2
+    # constant would otherwise earn L2 on the very same look that earned L1, and
+    # L1 would never be seen.
+    l2_at = max(limits.search_streak_l2, threshold + 1)
+    level = L2 if snap.search_streak >= l2_at else L1
     if entry is None:
         return (level, "nudge")
     if level > int(entry.get("level", 0) or 0):

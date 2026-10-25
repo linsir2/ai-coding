@@ -19,9 +19,15 @@ from pathlib import Path
 
 import pytest
 
-from ai_coding.core.static_check import run_static_checks
+from ai_coding.core.static_check import ENABLE_ENV, run_static_checks
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def _opt_in(monkeypatch):
+    """The feature is off unless the operator opts in (see the module docstring)."""
+    monkeypatch.setenv(ENABLE_ENV, "1")
 
 
 def _fake_check(workspace: Path, body: str, name: str = "ruff") -> Path:
@@ -48,7 +54,7 @@ async def test_no_commands_means_nothing_to_say(tmp_path: Path):
 
 async def test_a_missing_check_is_reported_not_raised(tmp_path: Path):
     """A check that is not installed: the nudge still goes out and says so."""
-    block = await run_static_checks(str(tmp_path), ["rubocop ."], timeout=10.0)
+    block = await run_static_checks(str(tmp_path), ["staticcheck ./..."], timeout=10.0)
     assert block != ""
     assert "could not run" in block
 
@@ -114,3 +120,26 @@ async def test_an_unknown_program_is_refused_not_executed(tmp_path: Path):
 
     assert not marker.exists()
     assert "skipped" in block
+
+
+async def test_nothing_runs_without_the_operators_opt_in(tmp_path: Path, monkeypatch):
+    """P0: a repository's tracked config.example.yaml can set `commands`.
+
+    Config alone therefore cannot be the permission -- a repo would be granting
+    itself the right to run code.  The unforgeable channel is the environment.
+    """
+    monkeypatch.delenv(ENABLE_ENV, raising=False)
+    marker = tmp_path / "PWNED"
+    _fake_check(tmp_path, f"touch {marker}")
+
+    block = await run_static_checks(str(tmp_path), ["ruff check ."], timeout=10.0)
+
+    assert block == ""
+    assert not marker.exists()
+
+
+async def test_build_running_tools_are_not_allowed(tmp_path: Path):
+    """`cargo check` runs build.rs, `go run` runs code: not analysis tools."""
+    for command in ("cargo check", "go run .", "eslint .", "pylint x", "rubocop ."):
+        block = await run_static_checks(str(tmp_path), [command], timeout=10.0)
+        assert "skipped" in block, f"{command} must be refused"
