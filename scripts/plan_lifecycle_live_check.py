@@ -67,8 +67,6 @@ from r19_acceptance import (  # noqa: E402
     _redact_api_key,
     _temp_config,
 )
-from ai_coding.core.events import TaskUpdated  # noqa: E402
-from ai_coding.server.bridge import to_wire  # noqa: E402
 from recording_proxy import serve, start  # noqa: E402
 
 from ai_coding.ai.factory import build_engine_from_config  # noqa: E402
@@ -76,10 +74,12 @@ from ai_coding.app.commands import handle_input  # noqa: E402
 from ai_coding.cli import _build_loop, _build_tool_registry  # noqa: E402
 from ai_coding.config.loader import ConfigLoader  # noqa: E402
 from ai_coding.core import plan_runner  # noqa: E402
+from ai_coding.core.events import TaskUpdated  # noqa: E402
 from ai_coding.core.turn_policy import (  # noqa: E402
     PLAN_NUDGE,
     PLAN_UNSUBMITTED_NOTE,
 )
+from ai_coding.server.bridge import to_wire  # noqa: E402
 from ai_coding.server.world import find_armed_session  # noqa: E402
 from ai_coding.service.session_service import SessionService  # noqa: E402
 

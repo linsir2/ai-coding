@@ -78,7 +78,9 @@ async def main(config_path: str, repo: Path) -> int:
                 "answer": answer or "",
             }
             results.append(rec)
-            print(f"\n{'='*66}\n[{name}] {dt:.1f}s  tools={len(tools)}  msgs={len(session.messages)}")
+            print(
+                f"\n{'='*66}\n[{name}] {dt:.1f}s  tools={len(tools)}  msgs={len(session.messages)}"
+            )
             print(f"tool_seq={tools}")
             print(f"answer({len(answer or '')} chars):\n{(answer or '')[:1400]}")
             await loop.aclose()

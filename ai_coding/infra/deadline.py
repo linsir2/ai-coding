@@ -168,7 +168,7 @@ async def run_with_deadline(
     try:
         if timeout is None and watcher is None:
             return await task
-        waiter = {task} if watcher is None else {task, watcher}
+        waiter: set[asyncio.Task[Any]] = {task} if watcher is None else {task, watcher}
         done, _pending = await asyncio.wait(
             waiter, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
         )

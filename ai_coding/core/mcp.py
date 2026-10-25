@@ -680,7 +680,7 @@ class OAuthCallbackError(Exception):
         super().__init__(f"sign-in failed: {error}{detail}")
 
 
-def _find_leaf(exc: BaseException | None, cls: type) -> BaseException | None:
+def _find_leaf(exc: BaseException | None, cls: type[BaseException]) -> BaseException | None:
     """The first leaf of ``exc`` that is a ``cls``, walking anyio's groups.
 
     A transport failure arrives wrapped — the group's own ``str()`` says only

@@ -95,7 +95,10 @@ async def section_continuation(ws: Path, app_cfg) -> None:
     tr = ws / "transcripts"
     persisted = list((tr / "persisted").glob("*")) if (tr / "persisted").is_dir() else []
     elided = list((tr / "elided").glob("*")) if (tr / "elided").is_dir() else []
-    print(f"         after turns: persisted={len(persisted)} elided={len(elided)} msgs={len(session.messages)}")
+    print(
+        f"         after turns: persisted={len(persisted)} "
+        f"elided={len(elided)} msgs={len(session.messages)}"
+    )
     # L3 only inspects the *trailing run of tool messages* (a mid-turn guard), so
     # it never shows up in an end-of-turn session whose last message is the
     # assistant's reply.  Verify it directly on the real function instead.

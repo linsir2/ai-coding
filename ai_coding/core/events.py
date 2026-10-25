@@ -13,7 +13,7 @@ log line.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, TypeVar, cast
+from typing import Any, Protocol, TypeVar
 
 from ai_coding.domain.ledger import UncertaintyItem
 from ai_coding.domain.loop import TurnOutcome
@@ -578,7 +578,7 @@ class RecordingObserver:
 
     def of_type(self, event_type: type[_T]) -> list[_T]:
         """All recorded events of one type, in arrival order."""
-        return [cast(_T, e) for e in self.events if isinstance(e, event_type)]
+        return [e for e in self.events if isinstance(e, event_type)]
 
 
 def preview(text: str, limit: int = OUTPUT_PREVIEW_CHARS) -> str:

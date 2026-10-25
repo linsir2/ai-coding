@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -28,6 +27,13 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from r19_acceptance import (  # noqa: E402
+    _AutoReview,
+    _git_workspace,
+    _RecordingConsole,
+    _redact_api_key,
+    _temp_config,
+)
 from recording_proxy import serve, start  # noqa: E402
 
 from ai_coding.ai.factory import build_engine_from_config  # noqa: E402
@@ -35,14 +41,6 @@ from ai_coding.app.commands import handle_input  # noqa: E402
 from ai_coding.cli import _build_loop, _build_tool_registry  # noqa: E402
 from ai_coding.config.loader import ConfigLoader  # noqa: E402
 from ai_coding.service.session_service import SessionService  # noqa: E402
-
-from r19_acceptance import (  # noqa: E402
-    _AutoReview,
-    _RecordingConsole,
-    _git_workspace,
-    _redact_api_key,
-    _temp_config,
-)
 
 SEP = "=" * 68
 
@@ -144,7 +142,6 @@ async def run_scenario(
 
 def check(result: dict[str, Any]) -> list[str]:
     problems: list[str] = []
-    wire = json.dumps(result["entries"], ensure_ascii=False)
     refusals = result["refusals"]
     # The gate must have refused the plan that named an unreachable path.
     if not refusals:
