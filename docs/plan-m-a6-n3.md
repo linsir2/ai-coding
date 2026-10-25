@@ -100,14 +100,18 @@ prefix=88%  len(a)=3045 len(b)=3200 diverge_at=2828
 
 请求的最后一截是**易失尾部**（每轮重渲染）：
 
-| 块 | 长度 | 内容 |
+| 块 | 实测长度（58 字符路径） | 内容 |
 |---|---|---|
-| `<environment>` | 80 | 工作区 + **时间戳** |
-| `<task-state>` | 78 | **目标 = 本轮用户消息** |
+| `<environment>` | ≈121 | 工作区路径 + **时间戳** |
+| `<task-state>` | ≈50 | **目标 = 本轮用户消息** |
 | `[budget]` | 57 | 步数 1/1 的收尾提示 |
-| **合计** | **215** | |
+| 静态分隔句 | ≈28 | "以下是你自己的任务清单状态（系统注入…）" |
+| **合计** | **≈256** | **随工作区路径长度线性增长** |
 
-请求结构：`[历史 2828][尾部 215]`，下一回合变成 `[历史 2828][a₁₆ u₁₇][尾部 215]`。
+> ⚠️ 方案的初稿把尾部记为"215 字符"，那是**特定路径下**的值。评审指出后实测：
+> 路径每长 1 字符，尾部就 +1 字符 → **尾部不是常数**。
+
+请求结构：`[历史 H][尾部 T]`，下一回合变成 `[历史 H][a₁₆ u₁₇][尾部 T']`。
 → 字节前缀在**尾部处**断裂。这是**最优布局**：尾部必须跟在历史之后（若塞进系统提示，前缀会更早破）。
 
 #### 92% 与 87% 的口径差异（关键）
@@ -121,13 +125,44 @@ len(公共前缀) / len(当前请求)   = 2828 / 3200 = 88.4%   ← 项目 prefi
 - [r3-analysis.md:881](file:///workspace/ai-coding/docs/r3-analysis.md#L881) 记的 **92%** 注明"**同一段落、同长度**"——即 `len(a) == len(b)`（delta=0）时两个口径**相等**
 - 真实 loop 里历史在增长（delta = 155 字符），两个口径分离 → **87% 与 92% 不是同一个量**
 
+#### 🔴 评审 P0：任何固定阈值都**随工作区路径漂移**
+
+评审发现（我独立复现）：**尾部含 `<environment>工作区: <path>`，路径每长 1 字符，`len(当前请求)` 就 +1，而公共前缀不变 → 比值被稀释。**
+
+| 工作区路径长度 | append-only 前缀（`len(当前请求)` 口径） |
+|---|---|
+| 8 字符 | **87%** |
+| 32 字符 | **87%** |
+| 66 字符 | **86%** |
+| 442 字符 | **77%** |
+
+```
+TMPDIR=/tmp/p0/level1-…/level12-…（442 字符）
+→ FAIL  prefix_hit append-only=77% per-turn-trim=13%
+```
+
+**所以方案 §11.1 的选项 A（`>= 85`）与 C（`>= 80`）都不可靠** —— 它们只在路径短时成立。
+
 #### 结论
 
 | 说法 | 判定 |
 |---|---|
-| 产品让前缀掉到 87% | ❌ 不是缺陷。87-89% 是"易失尾部 215 字符 + 历史增长"的必然结果 |
-| 用例阈值 `>= 90` | ⚠️ **过定**（over-specified）：把不可比的文档数字硬编进真实 loop |
-| 用例的**相对**断言 | ✅ 成立且是真正的目的：`append-only(87%) >> per-turn-trim(15%)` |
+| 产品让前缀掉到 87% | ❌ 不是缺陷。87-89% 是"易失尾部 + 历史增长"的必然结果 |
+| 用例阈值 `>= 90` | ❌ **过定 + 环境相关**（见上表） |
+| 用例的**相对**断言 | ⚠️ 能区分两臂，但同样受路径稀释 |
+| **真正的契约** | ✅ **剥离易失尾部后，请求 N 的稳定部分应当是请求 N+1 的精确前缀** |
+
+#### ✅ 修正方案：布尔不变量（无阈值、路径无关）
+
+```
+[append-only]    stable_a=2827  stable_b=2982  b.startswith(a)=True   ← 路径 16 / 454 都一样
+[per-turn-trim]  stable_a=3399  stable_b=3404  b.startswith(a)=False  ← 历史被重写
+```
+
+- **路径无关**：`stable_a` 恒为 **2827**（路径只进尾部，而尾部被剥离）
+- **无魔数阈值**：不再是"≥某个百分比"，而是"前缀是否完好"
+- **两臂对比**：append-only 保住前缀；per-turn-trim 的历史被压缩重写 → 不是前缀
+- 副产物：稳定口径下的比率是 **95%**，与项目"纯追加回合前缀不被破坏"的设计意图吻合
 
 ---
 
@@ -283,9 +318,89 @@ call tool_0: ['tool0:a:False:1']
 > 旧行为的批次是 `[2, 4, 6, 8]`（每批都是"到当前为止的全部历史"）→ `whole_history` 会命中最后一批 → **新断言依然打红旧实现**。
 > 判据见 §7 的**突变 C**。
 
-### 6.2 `scripts/memory_cases.py` · case11（阈值 + 测量条件）
+### 6.2 `scripts/memory_cases.py` · case11（改用布尔不变量）
 
-见 §6.5 的待拍板项 —— **三个选项**，我不替你选。
+```diff
+ async def case_11_cache_prefix(root: Path) -> tuple[bool, str]:
+-    """Cost side: append-only turns keep the prompt-cache prefix intact.
+-
+-    The "per-turn-trim" arm reproduces the M3 policy on purpose (a context object
+-    that compacts on *every* turn), which is what the old message-count threshold
+-    did from turn 26 onwards.
+-    """
++    """Cost side: append-only turns keep the prompt-cache prefix intact.
++
++    The volatile tail (``<environment>`` / ``<task-state>`` / ``[budget]`` …) is
++    rebuilt every turn and sits *after* the history, so a byte-level ratio over the
++    whole request is diluted by it -- and by the workspace path inside it.  That
++    makes a fixed percentage threshold both wrong and machine-dependent (87% on a
++    short path, 77% at 442 characters).
++
++    What must hold is the invariant, not a percentage: with the tail set aside,
++    request N's stable part is an exact prefix of request N+1's.
++
++    The "per-turn-trim" arm reproduces the M3 policy on purpose (a context object
++    that compacts on *every* turn), which rewrites the history -- so its stable part
++    is *not* a prefix.  That contrast is what the case exists to show.
++    """
++
++    #: The tail blocks are recognisable by these markers; the history never is.
++    _VOLATILE_MARKERS = (
++        "<environment>",
++        "<task-state>",
++        "<referenced-files>",
++        "<requested-skills>",
++        "[budget]",
++    )
++
++    def _stable(request: dict) -> str:
++        """A request's instructions + history, with the volatile tail set aside."""
++
++        messages = list(request["messages"])
++        while messages and any(
++            marker in messages[-1] for marker in _VOLATILE_MARKERS
++        ):
++            messages.pop()
++        return request["instructions"] + "\n".join(messages)
++
+     class _AlwaysCompacts:
+         """M3 behaviour: run the pipeline every request, no budget check."""
+```
+
+Then, in the loop:
+
+```diff
+-        results[label] = prefix
++        results[label] = {
++            "stable_share": round(100 * len(stable_a) / max(len(stable_b), 1)),
++            "prefix_intact": stable_b.startswith(stable_a),
++        }
+```
+
+And the assertion:
+
+```diff
+     ok = (
+-        results["append-only"] >= 90
+-        and results["per-turn-trim"] < 60
+-        and results["append-only"] > results["per-turn-trim"]
++        # append-only preserves the prefix; per-turn-trim rewrites the history.
++        results["append-only"]["prefix_intact"]
++        and not results["per-turn-trim"]["prefix_intact"]
+     )
+     return ok, (
+-        f"prefix_hit append-only={results['append-only']}% "
+-        f"per-turn-trim={results['per-turn-trim']}%"
++        f"prefix_intact append-only={results['append-only']['prefix_intact']} "
++        f"per-turn-trim={results['per-turn-trim']['prefix_intact']} "
++        f"(stable_share {results['append-only']['stable_share']}% vs "
++        f"{results['per-turn-trim']['stable_share']}%)"
+     )
+```
+
+> 断掉历史重写以外的判据（比率、阈值）不是因为"改松"，而是因为**比率本身是坏的度量**：
+> 实测 per-turn-trim 臂的稳定比率同样是 ~100%（`stable_a=3399 / stable_b=3404`），
+> 但它的 `prefix_intact=False` —— 历史被压缩重写。**比率会说"很好"，不变量会说实话。**
 
 ### 6.3 `scripts/mcp_echo_server.py`（N-3）
 
@@ -307,14 +422,22 @@ call tool_0: ['tool0:a:False:1']
 +server = FastMCP("many")
 ```
 
-### 6.5 文档同步（4 处）
+### 6.5 文档同步（**5 份**）
 
-| 文件 | 改动 |
-|---|---|
-| `docs/eval-01-offline-baseline.md:85` | case7 行：改为"**用例断言已修正**"，写明合并是设计 |
-| `docs/eval-01-offline-baseline.md:86` | case11 行：改为实测 87% + 口径说明 |
-| `docs/eval-02-feature-matrix.md:96/97` | G8/G9 两行的 ❌ 改为 ✅（或按 §6.5 的选项） |
-| `docs/roadmap-milestones.md` §M-A6 / §N-3 | 标 ✅ + 写明实测结论 |
+> 评审 P1：初稿漏了 `docs/features.md`，而 roadmap 的 M-A6 验收判据**点名**要求它
+> （"「`docs/features.md` 的数字与实测一致，且注明测量日期与环境」"）。
+
+| 文件 | 行 | 改动 |
+|---|---|---|
+| `docs/features.md` | 408 | `92%` → 改为"稳定口径 95%（R3 同长度 92%）"+ 注明测量日期 |
+| `docs/features.md` | 595 | `纯追加回合实测 0.95` → 与实测一致（0.95 恰好吻合，补口径注释） |
+| `docs/eval-01-offline-baseline.md` | 85 | case7 行：改为"**用例断言已修正**"，写明合并是设计 |
+| `docs/eval-01-offline-baseline.md` | 86 | case11 行：改为"口径改为布尔不变量；比率仅参考" |
+| `docs/eval-02-feature-matrix.md` | 96/97 | G8/G9 的 ❌ 改为 ✅ |
+| `docs/roadmap-milestones.md` | §M-A6 / §N-3 | 标 ✅ + 写明实测结论 |
+
+> `r4-analysis.md:653`、`hotel-fix-backlog.md:156`、`roadmap-milestones.md:241/243`
+> 也含同一数字，但都是**历史分析稿**，不追溯标注（沿用 M-A2 的既定处理）。
 
 ---
 
@@ -346,7 +469,8 @@ grep -c "len(sizes) == 4" scripts/memory_cases.py     # 1
 | **R** | 记录基线 | `memory_cases` = **9/11**；MCP stdio **1 failed**；end_to_end **3 failed** |
 | **I** | §6.1 case7 改用例 | case7 转 **PASS**，输出含 `identity_chain=True` |
 | **I** | §6.3/6.4 改 2 个脚本 | 两个 CI step **全绿** |
-| **I** | §6.2/6.5 按拍板改 | case11 转 **PASS**；文档与实测一致 |
+| **I** | §6.2 case11 改布尔不变量 | case11 转 **PASS**，输出含 `prefix_intact append-only=True per-turn-trim=False` |
+| **I** | §6.5 文档同步（5 份） | 文档数字与实测一致 |
 | **P** | `.venv/bin/python scripts/memory_cases.py` | **11/11** |
 | **P** | `AI_CODING_MCP_STDIO=1 pytest tests/test_mcp_stdio.py tests/test_mcp_end_to_end.py` | **5 passed** |
 | **P** | 全量 `pytest` | **0 failed**，skipped ≤ 6 |
@@ -354,6 +478,7 @@ grep -c "len(sizes) == 4" scripts/memory_cases.py     # 1
 | **P** | **突变 A**：`mcp_echo_server.py` 改回 `mcp.server.mcpserver` | stdio step **重新变红** |
 | **P** | **突变 B**：`mcp_many_tools_server.py` 改回 | `r7_cases` 的 MCP 档**重新报错** |
 | **P** | **突变 C**：把 case7 改回 `len(sizes) == 4` | case7 **重新变红**（证明新断言不是恒真） |
+| **P** | **突变 D**：把 case11 改回比率阈值 `>= 90` | **深路径（442 字符）下重新变红**；`prefix_intact` 版仍为绿 → 证明路径无关 |
 | **R** | `git status --porcelain` 白名单 | 见 §7.3 |
 
 ### 7.3 R 相白名单
@@ -362,13 +487,14 @@ grep -c "len(sizes) == 4" scripts/memory_cases.py     # 1
 M  scripts/memory_cases.py
 M  scripts/mcp_echo_server.py
 M  scripts/mcp_many_tools_server.py
+M  docs/features.md
 M  docs/eval-01-offline-baseline.md
 M  docs/eval-02-feature-matrix.md
 M  docs/roadmap-milestones.md
 ?? docs/plan-m-a6-n3.md
 ```
 
-即 **3 个脚本 + 3 份文档 + 1 份方案**。**不碰任何产品代码**（`ai_coding/` 零改动）。
+即 **3 个脚本 + 5 份文档 + 1 份方案**。**不碰任何产品代码**（`ai_coding/` 零改动）。
 
 ### 7.4 具体用例清单
 
@@ -405,13 +531,14 @@ M  docs/roadmap-milestones.md
 ### 8.2 case11 的请求布局（**本方案不改产品代码**）
 
 ```
-   请求 N      [ 系统提示 355 ][ 历史 …2828 ][ 易失尾部 215 ]
-   请求 N+1    [ 系统提示 355 ][ 历史 …2828 ][ a_N u_{N+1} ][ 易失尾部 215 ]
+   请求 N      [ 系统提示 355 ][ 历史 H …2827 ][ 易失尾部 T …256 ]
+   请求 N+1    [ 系统提示 355 ][ 历史 H …2827 ][ a_N u_{N+1} ][ 易失尾部 T' … ]
                                      └──────┬──────┘
                                            └─ 字节前缀在此断裂（尾部必须跟在历史后）
 
-   len(公共前缀)/len(请求N)   = 92%   ← 文档的 92%（R3 同长度测量）
-   len(公共前缀)/len(请求N+1) = 87%   ← 项目 prefix_shared 与用例的口径
+   比率口径（路径敏感 ❌）：len(公共前缀) / len(请求N+1) = 87%（442 字符路径下 77%）
+   不变量口径（路径无关 ✅）：strip(请求N+1).startswith(strip(请求N))  → True
+                              per-turn-trim 臂同法测量 → False（历史被重写）
 ```
 
 ### 8.3 N-3 的修复
@@ -434,6 +561,7 @@ M  docs/roadmap-milestones.md
 | `ruff` / `mypy` | 0 / 0 | **0 / 0**（保持） |
 | `ai_coding/` 产品代码 | — | **零改动** |
 | case7 测的东西 | 调度产物（会漂移） | **产品契约**（不丢不重） |
+| case11 测的东西 | 比率阈值（路径敏感） | **布尔不变量**（路径无关） |
 | case11 的文档 | 92%（不可比） | 与实测口径一致 |
 
 ### 9.1 按此计划实施后的最终模样（我的推演）
@@ -442,40 +570,71 @@ M  docs/roadmap-milestones.md
 - `AI_CODING_MCP_STDIO=1 pytest tests/test_mcp_stdio.py tests/test_mcp_end_to_end.py` → `5 passed`
 - `ruff check .` → `All checks passed!`；`mypy ai_coding` → `Success: no issues found in 152 source files`
 - 全量 `pytest` → `3812 collected = 3806 passed + 6 skipped / 0 failed`
+- **深路径（442 字符）下 case11 仍为绿** ← 这是旧方案做不到的
 - CI **7 个 step 全绿**
-- `git diff --stat` 只有 3 个脚本 + 3 份文档 + 1 份方案
+- `git diff --stat` 只有 3 个脚本 + 5 份文档 + 1 份方案
 
 ---
 
 ## 十、自我核验
 
 1. **case7 是不是"把测试改松了"？** —— 不是。旧断言 `len(sizes)==4` 测的是**事件循环时序**（同一测试两次记录不同：`[3,4]` vs `[3,4,1]`）。新断言 `identity_chain` + `not whole_history` 直接对应产品契约，且**能打红旧实现**（旧实现批次是 `[2,4,6,8]`，最后一批 = 整段历史）。
-2. **case11 的 87% 有没有可能是产品回归？** —— 已排除。尾部 215 字符、历史 2828、delta 155，三者相除即得 87-89%；且 5 次实跑**逐次相同**。产品布局（尾部跟在历史后）已是**最优**，塞进系统提示只会更早破前缀。
-3. **N-3 的修法有没有更"省事"的？** —— 有：`from mcp.server.fastmcp.server import MCPServer` 也能 import 成功。**但那只是 lowlevel `Server` 的别名，没有 `.tool()`，`run()` 也不是 `transport=` 形式** → 改了还是跑不通。必须用 `FastMCP`。
-4. **会不会漏了别的消费者？** —— `mcp_echo_server.py` 的消费者：`test_mcp_stdio.py`、`test_mcp_end_to_end.py`（已核）。`mcp_many_tools_server.py` 的消费者：`r7_cases.py:416`（已核，未被 CI 调用）。**无其它引用**。
-5. **会不会碰坏产品代码？** —— 不会。`ai_coding/` **零改动**，白名单里没有它。
-6. **`r7_cases.py` 要不要一起跑？** —— 它需要 `config.local.yaml` 且未被 CI 调用；本方案只修它依赖的夹具，不改它本身。
+2. **case11 的 87% 有没有可能是产品回归？** —— 已排除。易失尾部 ≈256 字符、历史 ≈2827、delta ≈155，三者相除即得 87-89%。产品布局（尾部跟在历史后）已是**最优**，塞进系统提示只会更早破前缀（`cache_probe.py` 的 `churn` 模式实测掉到 17%）。
+3. **固定阈值可不可靠？** —— ❌ **不可靠**（评审 P0，我独立复现）：尾部含工作区路径，442 字符路径下掉到 **77%**。已改用**路径无关的布尔不变量**。
+4. **改用布尔不变量是不是把测试改松了？** —— 不是，反而**更严**：它要求"请求 N 的稳定部分是请求 N+1 的**精确前缀**"。而比率是**更弱**的判据 —— 实测 per-turn-trim 臂的稳定比率同样 ~100%，但它的 `prefix_intact=False`（历史被重写）。**比率会说"很好"，不变量会说实话。**
+5. **case7 是不是"把测试改松了"？** —— 不是。旧断言 `len(sizes)==4` 测的是**事件循环时序**（同一测试两次记录不同：`[3,4]` vs `[3,4,1]`）。新断言 `identity_chain` + `not whole_history` 直接对应产品契约，且**能打红旧实现**（旧实现批次是 `[2,4,6,8]`，最后一批 = 整段历史）。
+6. **N-3 的修法有没有更"省事"的？** —— 有：`from mcp.server.fastmcp.server import MCPServer` 也能 import 成功。**但那只是 lowlevel `Server` 的别名，没有 `.tool()`，`run()` 也不是 `transport=` 形式** → 改了还是跑不通。必须用 `FastMCP`。
+7. **会不会漏了别的消费者？** —— `mcp_echo_server.py` 的消费者：`test_mcp_stdio.py`、`test_mcp_end_to_end.py`（已核）。`mcp_many_tools_server.py` 的消费者：`r7_cases.py:416`（已核，未被 CI 调用）。**无其它引用**。
+8. **会不会碰坏产品代码？** —— 不会。`ai_coding/` **零改动**，白名单里没有它。
+9. **`r7_cases.py` 要不要一起跑？** —— 它需要 `config.local.yaml` 且未被 CI 调用；本方案只修它依赖的夹具，不改它本身。
 
 ---
 
 ## 十一、待拍板
 
-### 11.1 case11 的阈值怎么定（**三选一，请拍板**）
+### 11.1 case11 —— ✅ 已定（评审 P0 推翻了原选项）
 
-| 选项 | 做法 | 好处 | 代价 |
-|---|---|---|---|
-| **A（推荐）** | 阈值 `>= 90` → **`>= 85`**，并写明测量条件（真实 loop、尾部 215 字符、口径 `len(当前请求)`） | 保留现有口径（与项目 `prefix_shared` 一致）；改动最小；相对断言（87% ≫ 15%）不动 | 阈值余量只有 2 个点 |
-| **B** | **改口径**：只测"稳定前缀"（把易失尾部排除），阈值保持 `>= 90` | 直接对应设计意图（"系统提示+历史"不变）；数字回到 90%+ | 与项目 `prefix_shared` 口径不一致；测试要自己识别尾部边界 |
-| **C** | 阈值 `>= 90` → **`>= 80`** | 余量最大 | 余量过大，弱化了对回归的敏感度 |
+原 §11.1 的选项 A（`>= 85`）/ C（`>= 80`）**已作废** —— 评审发现阈值随工作区路径漂移，
+442 字符路径下 87% → **77%**，任何固定阈值都不可靠。
 
-> 我不替你选：A 改数字、B 改口径、C 改数字且更松。三者都能让 CI 转绿，但**语义不同**。
+**最终方案：改用布尔不变量**（§6.2）—— `strip(请求N+1).startswith(strip(请求N))`，
+两臂分别为 `True` / `False`，**无阈值、路径无关、5 次实跑稳定**。
+
+> 如果你不接受"用例改语义"（比率 → 布尔），请指出。替代方案是
+> **B2：保留比率，但分母取"稳定部分"**（实测 95%）—— 但它**无法区分 per-turn-trim**
+> （该臂稳定比率也是 ~100%），所以无法单独成立。
 
 ### 11.2 文档里的 92% 怎么处理
 
-- ① 保留 92%，**加口径注释**（"R3 同长度测量；真实 loop 为 87%"）
-- ② 直接把 92% 改成 87%
+- ① 保留 92%，**加口径注释**（"R3 同长度测量；真实 loop 稳定口径 95%"）—— **推荐**
+- ② 直接把 92% 改成 95%
 
 ### 11.3 `mcp_many_tools_server.py` 是否一并修
 
 - ① **一并修**（推荐）—— 同类缺陷，改了只要 2 行，`r7_cases` 的 MCP 档随之恢复
 - ② 只修 `mcp_echo_server.py`，`many` 那个另立项
+
+---
+
+## 十二、评审记录
+
+子智能体在 `/workspace/review-m-a6-n3`（detached HEAD `6265451`）**独立重跑全部结论**：
+
+- **技术判断全部成立**：版本事实、根因、基线红相、修法、回归数字逐条复现，无一虚假
+- 方案的核心主张（新断言"能打红旧实现"）经反证成立：模拟旧实现 `[2,4,6,8]` → `ok=False`
+- 消费者清单、白名单、`ruff`/`mypy`、全量 `pytest`（3812）均核实
+
+### 12.1 评审发现（已处理）
+
+| # | 问题 | 处理 |
+|---|---|---|
+| 🔴 **P0** | **case11 阈值随工作区路径漂移**：尾部含路径，442 字符下 87%→77%，任何固定阈值都不可靠 | ✅ **改用布尔不变量**（§2.2、§6.2）；我自己独立复现了 77% |
+| 🟠 **P1** | **漏了 `docs/features.md`** —— roadmap 的 M-A6 验收判据点名要求它，且 `features.md:408` 含 92%、`:595` 含 0.95 | ✅ 已补进 §6.5 与白名单（**5 份文档**） |
+| 🟡 **P2** | §2.2 的尾部数字 215 与实跑不符（未含路径） | ✅ 已改为 ≈256 并标注"随路径浮动" |
+| 🟡 **P2** | §7.4 U4（`r7_cases`）在副本内不可机检（缺 `config.local.yaml`） | ✅ 已改为"直接 spawn 夹具验证"，并说明原因 |
+
+### 12.2 我的复核
+
+- 77% 那条我自己跑了 4 档路径（8 / 32 / 66 / 442 字符）→ 87 / 87 / 86 / **77**
+- 布尔不变量跑了 5 次 + 2 档路径（16 / 454 字符）→ 两臂均逐次稳定
+- 方案初稿的 `stable_a=2827` 路径无关性，独立复现为真
