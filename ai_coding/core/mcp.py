@@ -535,9 +535,10 @@ class _TokenStore:
     """``TokenStorage`` over one JSON file, scoped to one server (M4).
 
     The SDK's protocol is per-connection (get/set tokens and client info); the
-    file is per-process so every server's tokens share it, keyed by name.  A
-    token is a secret: the file is created 0600, and nothing here ever puts it
-    in the config, a trace event or a log line.
+    file is per-process so every server's tokens share it.  The key comes from
+    ``_token_key`` -- name *and* endpoint -- so two servers that share a name do
+    not share a token.  A token is a secret: the file is created 0600, and
+    nothing here ever puts it in the config, a trace event or a log line.
     """
 
     def __init__(self, server: str) -> None:

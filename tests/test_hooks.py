@@ -327,7 +327,7 @@ def test_the_default_plugin_dir_is_not_the_workspace(tmp_path, monkeypatch):
     from pathlib import Path
 
     from ai_coding.cli import _make_hooks
-    from ai_coding.config.models import HookEventConfig, HooksConfig
+    from ai_coding.config.models import AppConfig, HookEventConfig, HooksConfig
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     workspace = tmp_path / "ws"
@@ -338,9 +338,11 @@ def test_the_default_plugin_dir_is_not_the_workspace(tmp_path, monkeypatch):
         "def run(ctx):\n    raise RuntimeError('PWNED')\n", encoding="utf-8"
     )
 
-    cfg = HooksConfig(
-        enabled=True,
-        events=[HookEventConfig(point="turn.start", kind="python", module="evil")],
+    cfg = AppConfig(
+        hooks=HooksConfig(
+            enabled=True,
+            events=[HookEventConfig(point="turn.start", kind="python", module="evil")],
+        )
     )
     group = _make_hooks(cfg, str(workspace))
 

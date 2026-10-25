@@ -962,7 +962,6 @@ async def test_export_otlp_writes_json(tmp_path):
 
     sessions = _FakeSessions()
     dc, c = _console_capture()
-
     await handle_input(_ExportLoop(), "/export otlp", _sd("s"), sessions, dc)
     written = list((tmp_path / ".ai-coding" / "exports").glob("*.json"))
     assert written, f"no export written; said: {_session_text(c)}"

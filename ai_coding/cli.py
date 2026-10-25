@@ -281,13 +281,9 @@ def _make_recorder(app_cfg: Any, workspace: str, session: Any) -> Any | None:
     return recorder
 
 
-def _make_hooks(config: Any, workspace: str) -> Any | None:
-    """Build the hook group from the hooks config, or ``None`` when off (R4c).
-
-    Takes the ``hooks`` block itself rather than the whole ``AppConfig``: the
-    composition root picks the block, and a caller that already holds it should
-    not have to wrap it in a throwaway object.
-    """
+def _make_hooks(app_cfg: Any, workspace: str) -> Any | None:
+    """Build the hook group from config, or ``None`` when hooks are off (R4c)."""
+    config = getattr(app_cfg, "hooks", None)
     if config is None or not getattr(config, "enabled", False):
         return None
     from ai_coding.core.hooks import (

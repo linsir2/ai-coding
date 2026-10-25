@@ -51,6 +51,19 @@ PROJECT_FORBIDDEN_NESTED: dict[str, dict[str, frozenset[str]]] = {
 #: entry itself has survived the "must be user-defined" rule.
 MODEL_DESTINATION_MEMBERS: frozenset[str] = frozenset({"base_url", "api_key"})
 
+#: Top-level blocks ``AppConfig`` holds as mappings.  A project may not replace
+#: one with a scalar even when the operator never configured it: the schema wants
+#: a mapping there, so a scalar is a validation error the repository would be
+#: inflicting on the operator.
+MAPPING_BLOCKS: frozenset[str] = frozenset(
+    {"models", "tools", "ai", "memory", "mcp", "tracing", "guard", "hooks"}
+)
+#: Mapping members one level down, by the same schema.
+NESTED_MAPPING_BLOCKS: dict[str, frozenset[str]] = {
+    "tools": frozenset({"bash", "read", "write", "edit", "glob", "grep", "ask_user"}),
+    "memory": frozenset({"embeddings"}),
+}
+
 #: The one channel a repository cannot touch, which is what makes it a permission
 #: rather than a config value (same reasoning as ``core/static_check.py``).
 TRUST_PROJECT_ENV = "AI_CODING_TRUST_PROJECT"
@@ -108,6 +121,34 @@ def _normalize(value: Any, parent_key: str | None = None) -> Any:
     return value
 
 
+def _strip_scalar_overwrites(
+    node: dict[str, Any],
+    user_node: dict[str, Any],
+    dropped: list[str],
+    prefix: str = "",
+) -> None:
+    """Drop a project value that would turn a mapping into a non-mapping.
+
+    At any depth the operator configured, plus the schema's own top-level mapping
+    blocks.  ``models:`` (YAML null) used to reach ``_overlay``'s else branch and
+    overwrite the operator's dict with ``None``; ``models: {gpt-x: null}`` does
+    the same one level down, and ``tools: {bash: null}`` would fail validation
+    outright -- in every case the repository, not the operator, decides whether
+    the app starts.  ``NESTED_MAPPING_BLOCKS`` covers the one level the schema
+    names explicitly.
+    """
+    for key, value in list(node.items()):
+        name = f"{prefix}{key}"
+        user_value = user_node.get(key) if isinstance(user_node, dict) else None
+        if isinstance(value, dict):
+            if isinstance(user_value, dict):
+                _strip_scalar_overwrites(value, user_value, dropped, f"{name}.")
+            continue
+        if isinstance(user_value, dict) or (not prefix and key in MAPPING_BLOCKS):
+            node.pop(key)
+            dropped.append(name)
+
+
 def _filter_project_document(
     document: dict[str, Any],
     user_document: dict[str, Any],
@@ -136,11 +177,17 @@ def _filter_project_document(
 
     # Rule 0: a nearer layer may narrow, never remove.  ``models:`` (YAML null)
     # reaches ``_overlay``'s else branch and overwrites the operator's dict with
-    # ``None``; the same shape would do it to ``tools:``.
-    for key, value in list(filtered.items()):
-        if isinstance(user_document.get(key), dict) and not isinstance(value, dict):
-            filtered.pop(key)
-            dropped.append(key)
+    # ``None``; the same shape does it one level down, and the repository then
+    # decides whether the operator's app starts at all.
+    _strip_scalar_overwrites(filtered, user_document, dropped)
+    for block, members in NESTED_MAPPING_BLOCKS.items():
+        outer = filtered.get(block)
+        if not isinstance(outer, dict):
+            continue
+        for member in members:
+            if member in outer and not isinstance(outer[member], dict):
+                outer.pop(member)
+                dropped.append(f"{block}.{member}")
 
     # Rules 1-3: models.
     user_models = user_document.get("models")

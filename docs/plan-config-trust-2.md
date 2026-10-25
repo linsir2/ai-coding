@@ -287,6 +287,9 @@ def prune(self, now: float | None = None) -> int:
 
 * **`workspace=None`（默认）时拒删**（fail-closed）：无法证明安全就不删。
   代价是**必须更新全部构造点**（评审 P1-1），已在 §四 列出。
+* **`root == workspace` 也拒**（实现评审 P3-2）：`prune` 会遍历 `root` 的**每个子目录**，
+  所以 `tracing.dir` 指向工作区根时会把 `src/`、`tests/` 当作过期会话删掉 ——
+  比方案原文"root 不位于 workspace 内"更严，是必要的。
 * **`root` 必须 `resolve()` 后再比较**（评审 P1-2）：`TraceStore.__init__` 现在只做
   `Path(root)`；若 `root` 是工作区内的符号链接指向 `/home/me`，词法包含检查会通过，
   但 `rglob`/`unlink`/`rmdir` 落到外部。全仓约定是"先 resolve 再比较"（`Sandbox`、
@@ -456,7 +459,7 @@ def _token_key(server: Any) -> str:
   * 展开后为空（`[]`/`[""]`/`["/nope/*"]`/缺省）→ **用户层原样**（不收紧，评审 NP-7）；
   * `["/"]` → 用户层原样（**无法把机器塞进来**）；
   * `["<用户根>/a"]` 且用户根本身就是 `a`（或 `a` 的子集）→ 有效 = `{a}`（收紧）；
-  * 项目写的目录是用户根的**父目录**（如用户根 `a`、项目写 `/home/me`）→ 有效 = ∅
+  * 项目写用户根的**子目录**（如用户根 `/home/me/projects`、项目写 `.../a`）→ 有效 = ∅
     （覆盖语义：`U ⊄ P`；见 §三 B 边界）；
   * `["/etc"]`（不覆盖任何用户根）→ 有效 = ∅（收紧到无）。
 * `AI_CODING_TRUST_PROJECT=1` 时**全部**恢复。
@@ -522,4 +525,18 @@ def _token_key(server: Any) -> str:
 
 ### 8.3 实现评审（子智能体）
 
-_待填。_
+结论：**核心安全目标达成**（三类在项目层均被正确阻断，opt-in 完整恢复，纵深防御到位，
+全量与静态检查干净）。1 个 P1 + 2 个 P2 + 4 个 P3。逐条处置：
+
+| 编号 | 内容 | 处置 |
+|---|---|---|
+| P1 | **规则 0 只作用于顶层**：项目层写 `models: {gpt-x: null}`（或 `tools: {bash: null}`）仍会经 `_overlay` 深合并把用户层的嵌套 mapping 覆盖成 `None` → `ValidationError` → **仓库能让操作者起不来**（与 NP-3 同根因，深了一层） | **已修**：`_strip_scalar_overwrites` 递归（用户层是 mapping 的地方，项目层不得换成非 mapping）+ `MAPPING_BLOCKS`（顶层 8 个块）+ `NESTED_MAPPING_BLOCKS`（`tools.<tool>`、`memory.embeddings`）。实测 6 个变体（含"无用户配置"）全部 OK |
+| P2-1 | §六 的示例方向写反：覆盖语义下项目写用户根的**父目录**是"覆盖"（用户原样），写**子目录**才是 ∅ | **已修订 §六**：改为"项目写用户根的**子目录** → ∅" |
+| P2-2 | 验收判据缺测：展开后为空、子目录 → ∅、opt-in 恢复新三类过滤，三条都没钉住 | **已补 3 条用例**（`test_a_blank_project_root_declaration_...`、`test_a_project_root_below_the_operators_grant_covers_nothing`、`test_the_opt_in_restores_the_new_filters`） |
+| P3-1 | `_TokenStore` docstring 仍写"keyed by name" | **已修**：改为"键来自 `_token_key`（名 + 端点）" |
+| P3-2 | `prune` 额外拒绝 `root == workspace`（比方案更严） | **保留并写入 §三 D1**：`prune` 遍历 `root` 的每个子目录，`tracing.dir` 指向工作区根会把 `src/`、`tests/` 当过期会话删掉 |
+| P3-3 | `test_repl.py` 多了一行空行 | **已删** |
+| P3-4 | `_make_hooks` 签名从 `app_cfg` 改为 hooks 块（方案外的重构） | **已回退**为 `app_cfg`，用例改用 `AppConfig`；diff 只保留安全改动 |
+
+**修完复验**：3.14/3.10 均 **3879 passed / 6 skipped**；ruff、mypy 干净；突变（过滤改恒等）
+→ **9 条**安全用例变红；3.10 七步 + `r9_cases` 12/12 全绿。
