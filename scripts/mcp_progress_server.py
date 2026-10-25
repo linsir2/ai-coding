@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import asyncio
 
-from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.fastmcp import Context, FastMCP
 
-server = MCPServer("progress-demo")
+server = FastMCP("progress-demo")
 
 
 @server.tool()
