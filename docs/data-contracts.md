@@ -894,7 +894,7 @@ workspace 根向上走到用户主目录为止（home 是硬边界，否则 `~/C
 - ~~`walk_workspace` LIFO 倒序展开~~ **r20/F3 已修**：`pop(0)` 改广度优先，兄弟按字母序，`files.find` 的 200 条预算自顶向下花
 - ~~`grep(path="<子目录>")` 恒返回无命中~~ **r19/F1 已修**：两条路径都把「相对搜索目标」重新锚定到 workspace
 - ~~rg 分支会把绝对路径漏给模型~~ **r20/F0 已修**（r19/F1 引入、提交时 rg 已卸载被 skip 掩盖；验收脚本现在会真跑 parity，rg 缺席时打印 UNVERIFIED 而非拿兜底比自己）
-- ~~CI 从未验证过 rg 分支~~ **CI 修复已补**：`ubuntu-24.04` 镜像不含 ripgrep，`ci.yml` 现在显式 `apt-get install ripgrep`（noble = 14.1.0）。rg 分支的 7 个消费者（3 条硬失败、2 条 skipif、2 条静默假绿）此后全部真跑；实测 3.10 + rg 14.1.0 下 `test_r17_parity.py` 18 passed 无跳过、全量 3863 passed。**已知偏差**：`grep_tool.py:42` 与 `test_r17_parity.py:14` 记的"实测真值基于 rg 15.1.0"是**测量基线**，CI 跑的是 14.1.0；现有断言在 14.1.0 下全过，若将来某条需要 15.1.0，把该步换成官方预编译二进制 + sha256 即可
+- ~~CI 从未验证过 rg 分支~~ **CI 修复已补**：`ubuntu-24.04` 镜像不含 ripgrep，`ci.yml` 现在显式 `apt-get install ripgrep`。rg 分支的 7 个消费者（3 条硬失败、2 条 skipif、2 条静默假绿）此后全部真跑。**真实 CI 运行 [`40205842561`](https://github.com/linsir2/ai-coding/actions/runs/40205842561) 全绿**（3.10 + 3.13 双 success）：`grep -c "ripgrep is not installed"` = 0（2 条 parity 用例从跳过转运行），6 条跳过全部是 MCP 门控，`memory_cases` 11/11、`trace_cases` 7/7。runner 的 apt 源给的是 **ripgrep 15.1.0**，正好等于 `grep_tool.py:42` 记的测量基线，**无版本偏差**
 - `test_m4_security.py:461`（`test_grep_include_dotenv_still_filters_credentials`）与 `test_r17_parity.py:206`（`test_both_runners_answer_the_same_question`）在**本机没有 rg** 时会静默假绿（前者拿错误串过断言，后者兜底和自己比）。CI 已装 rg 所以不受影响；给这两条加 rg 守卫（与 `test_r17_parity.py:183/366` 同款 `skipif`）记在 roadmap 待办
 - ~~`ChatMessage.images` 对压缩预算贡献 0 token~~ **r19/F3 已修**：`ImageRef.bytes` 记录真实体积，预算按 `bytes//4` 计
 - ~~`undo → redo` 丢回合新建的文件~~ **r20/F9 已修**：stash 不含 untracked，undo 删除前先留底进 `saved`，redo 写回

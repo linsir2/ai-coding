@@ -159,15 +159,13 @@ self._rg = rg_path or resolved
 **命令细节**：runner 的默认用户是 `runner`，必须 `sudo`；包索引需要先 `update`
 （镜像自带缓存，但显式 update 才确定性可用）。`-qq` 压掉进度输出，避免刷屏。
 
-**版本**：`apt-get install ripgrep` 在 noble 上给 **14.1.0**。
-> **已知偏差**：`grep_tool.py:42` 与 `test_r17_parity.py:14` 记录"实测真值基于 rg
-> 15.1.0"。CI 装 14.1.0 意味着 CI 验证的是 14.1.0 的行为。
-> 本地（3.14 + rg 14.1.0）已实测：`test_r17_parity.py` **18 passed 且不跳过**，
-> 3 条 rg 用例通过。**并在 §五 Prove 加了 3.10 + 14.1.0 的硬门禁**。
-> `grep_tool.py:42` 的注释**有意不改** —— 它记录的是"测量基线"，不是"CI 环境"；
-> CI 的版本差异记在 `docs/data-contracts.md`。
-> 若将来某条断言需要 15.1.0，把这一步换成下载官方预编译二进制 + sha256 校验即可，
-> 其余不变。
+**版本**：`apt-get install ripgrep`。
+> **实测更正（§8.4）**：GitHub runner 的 apt 源给的是 **ripgrep 15.1.0**（不是本地 noble
+> 的 14.1.0），正好等于 `grep_tool.py:42` / `test_r17_parity.py:14` 记的"实测真值基于
+> rg 15.1.0"基线 —— 所以**没有版本偏差**。本地用 14.1.0 也跑通了全部断言（3863 passed），
+> 说明这批断言在两个版本上一致。
+> `grep_tool.py:42` 的注释**有意不改** —— 它记录的是"测量基线"，而 CI 现在正好跑那个
+> 版本，注释与 CI 不再有偏差。
 
 ---
 
@@ -433,4 +431,21 @@ rg --version                                      # 14.1.0，对应 apt 安装�
 
 ### 8.4 推送后的真实验收
 
-_待填。_
+**运行 [`40205842561`](https://github.com/linsir2/ai-coding/actions/runs/40205842561)**（`4c54b7f`）：
+`conclusion=success`，`quality (3.10)` 与 `quality (3.13)` **双双 success** —— 这是本仓库
+第一次 CI 全绿。
+
+从该运行的日志里取到的证据：
+
+| 证据 | 内容 |
+|---|---|
+| ripgrep 安装 | `Preparing to unpack .../ripgrep_15.1.0-1ubuntu1_amd64v3.deb` → `ripgrep 15.1.0` |
+| rg 相关跳过 | `grep -c "ripgrep is not installed"` = **0** —— 此前跳过的 2 条 parity 用例**已转为运行** |
+| 全部跳过（6 条） | **全部**是 `AI_CODING_MCP_STDIO` 门控的 MCP stdio 用例，与本地基线逐条一致 |
+| 失败 | `grep -cE "^E  \|FAILED\|##\[error\]"` = **0** |
+| 验收脚本 | `memory_cases` 11/11、`trace_cases` 7/7 |
+
+> **重要更正**：CI 的 apt 源给的是 **ripgrep 15.1.0**，而不是我本地 noble 的 14.1.0。
+> 也就是说 §2.5 里那条"已知偏差"（CI 14.1.0 vs 测量基线 15.1.0）**不成立** —— CI 跑的
+> 正是 `grep_tool.py:42` / `test_r17_parity.py:14` 记的那个测量基线版本。§2.5 的偏差
+> 说明已按此更正。

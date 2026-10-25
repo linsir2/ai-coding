@@ -31,9 +31,9 @@
 | **根因 B** | `tests/test_plan_m1.py:766` 用裸 `datetime.fromisoformat(stamp)`，而 `Z` 设计符到 **3.11** 才支持，3.10 是声明下限 → 3.10 job 独有的一条失败 |
 | **修法** | ① `ci.yml` 显式 `apt-get install ripgrep`（让环境满足测试的正当依赖，而非加 skipif 把问题藏起来）；② 新增 `infra/time_utils.parse_iso8601`，4 个消费者共用（3 处生产 + 1 处测试），消掉 3 份手写 `.replace("Z","+00:00")` |
 | **关键实现点** | `parse_iso8601` 是**纯解析器**（无偏移返回 naive）：三处消费者的时区策略不同（OTLP 按本地、`relevance.parse_time` 补 UTC），在共用函数里二选一会静默改变另一方的数字 |
-| **验收** | 3.14：3863 passed（+5 新用例）；**3.10 七步全绿**（3863 passed / mcp_stdio 1 / mcp_end_to_end 4 / memory 11/11 / trace 7/7 / ruff / mypy）—— 这是 **3.10 job 首次带 rg 跑完**，`test_r17_parity.py` 18 passed 无跳过。突变测试（去掉 `.replace`）在 3.10 下让 U1+U6 变红；rg 缺席复现让 3 条用例失败 |
+| **验收** | 3.14：3863 passed（+5 新用例）；**3.10 七步全绿**（3863 passed / mcp_stdio 1 / mcp_end_to_end 4 / memory 11/11 / trace 7/7 / ruff / mypy）。突变测试（去掉 `.replace`）在 3.10 下让 U1+U6 变红；rg 缺席复现让 3 条用例失败。**真实 CI [`40205842561`](https://github.com/linsir2/ai-coding/actions/runs/40205842561) 双 job 全绿**（本仓库首次）：rg 相关跳过 0 条（2 条 parity 从跳过转运行），6 条跳过全是 MCP 门控；runner apt 装的是 **rg 15.1.0**，与测量基线一致，无版本偏差 |
 | **契约变更** | `parse_iso8601` 成为 ISO-8601 解析唯一入口（见 `data-contracts.md`）；`memory/relevance.parse_time` 改为薄封装，导出契约不变 |
-| **未覆盖（另立项）** | N-6（2 条 rg 用例缺守卫）；rg 版本偏差（CI 14.1.0 vs 测量基线 15.1.0） |
+| **未覆盖（另立项）** | N-6（2 条 rg 用例缺守卫） |
 
 ---
 
