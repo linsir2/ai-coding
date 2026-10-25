@@ -1,6 +1,6 @@
 # M-A6 + N-3 实施方案 · 文档/实测不一致收口 + MCP 夹具修复
 
-> 状态：**待拍板**
+> 状态：**✅ 已完成（2026-10-25）** —— 实施记录见 §十三
 > 关联：[roadmap-milestones.md](roadmap-milestones.md) §1 M-A6 / §十三 N-3
 > 依赖：M-A1（`mcp>=1.24,<2`）、M-A5（lint/type 清零）
 > 调研日期：2026-10-25（全部结论均有实跑证据）
@@ -590,24 +590,28 @@ M  docs/roadmap-milestones.md
 
 ---
 
-## 十一、待拍板
+## 十一、拍板结论（已按批准执行）
 
-### 11.1 case11 —— ✅ 已定（评审 P0 推翻了原选项）
+| # | 问题 | 你的决定 | 执行 |
+|---|---|---|---|
+| 11.1 | case11 修法 | ✅ **改用布尔不变量** | ✅ 已实施 |
+| 11.2 | 文档里的 92% | ✅ **保留 92% + 加口径注释** | ✅ 已实施（`features.md:408`、`:595`） |
+| 11.3 | `mcp_many_tools_server.py` | ✅ **一并修** | ✅ 已实施 |
 
-原 §11.1 的选项 A（`>= 85`）/ C（`>= 80`）**已作废** —— 评审发现阈值随工作区路径漂移，
+### 11.1 为什么不是固定阈值
+
+原 §11.1 的选项 A（`>= 85`）/ C（`>= 80`）**已作废** —— 评审 P0 发现阈值随工作区路径漂移，
 442 字符路径下 87% → **77%**，任何固定阈值都不可靠。
 
-**最终方案：改用布尔不变量**（§6.2）—— `strip(请求N+1).startswith(strip(请求N))`，
+**最终方案：布尔不变量** —— `strip(请求N+1).startswith(strip(请求N))`，
 两臂分别为 `True` / `False`，**无阈值、路径无关、5 次实跑稳定**。
 
-> 如果你不接受"用例改语义"（比率 → 布尔），请指出。替代方案是
-> **B2：保留比率，但分母取"稳定部分"**（实测 95%）—— 但它**无法区分 per-turn-trim**
-> （该臂稳定比率也是 ~100%），所以无法单独成立。
+> 比率是**坏度量**：实测 per-turn-trim 臂的稳定比率同样 ~100%，但 `prefix_intact=False`
+> （历史被重写）。**比率会说好，不变量会说实话。**
 
 ### 11.2 文档里的 92% 怎么处理
 
-- ① 保留 92%，**加口径注释**（"R3 同长度测量；真实 loop 稳定口径 95%"）—— **推荐**
-- ② 直接把 92% 改成 95%
+- ① 保留 92%，**加口径注释**（"R3 同长度测量；真实 loop 稳定口径 95%"）—— ✅ 已选
 
 ### 11.3 `mcp_many_tools_server.py` 是否一并修
 
@@ -638,3 +642,55 @@ M  docs/roadmap-milestones.md
 - 77% 那条我自己跑了 4 档路径（8 / 32 / 66 / 442 字符）→ 87 / 87 / 86 / **77**
 - 布尔不变量跑了 5 次 + 2 档路径（16 / 454 字符）→ 两臂均逐次稳定
 - 方案初稿的 `stable_a=2827` 路径无关性，独立复现为真
+
+---
+
+## 十三、实施记录（2026-10-25）
+
+### 13.1 提交
+
+| commit | 内容 |
+|---|---|
+| `6265451` | 方案（含实跑证据与 RIPR 判据） |
+| `b65cc3d` | 方案按评审修订（P0 → 布尔不变量） |
+| `a755022` | **M-A6**：case7/case11 改用例断言（9/11 → 11/11） |
+| `8ece1cd` | **N-3**：两个 stdio 夹具改用官方 FastMCP |
+| `2c565a1` | 同步 5 份文档与 roadmap |
+| 本提交 | 实施记录 |
+
+### 13.2 判据复核（全部实跑）
+
+| 判据 | 期望 | 实测 |
+|---|---|---|
+| `.venv/bin/python scripts/memory_cases.py` | 11/11 | **11/11 passed** |
+| **深路径（442 字符）下** | 11/11 | **11/11 passed**（旧判据在此会红：77%） |
+| `AI_CODING_MCP_STDIO=1 pytest` 两个 MCP 文件 | 5 passed | **5 passed** |
+| `ruff check .` | 0 | **All checks passed!** |
+| `mypy ai_coding` | 0 | **Success: no issues found in 152 source files** |
+| 全量 `pytest` | 0 failed，skipped ≤ 6 | **3806 passed / 6 skipped / 0 failed** |
+| **突变 A**（echo 改回旧 API） | stdio 重新变红 | **1 failed** ✅ |
+| **突变 B**（many 改回旧 API） | 夹具起不来 | **`McpError: Connection closed`** ✅ |
+| **突变 C**（case7 改回 `len(sizes)==4`） | case7 重新变红 | **FAIL** ✅ |
+| **突变 D**（case11 改回整请求比率 `>=90`） | 深路径重新变红 | **FAIL（87% / 77%）** ✅ |
+
+### 13.3 白名单核验
+
+```
+M  scripts/memory_cases.py
+M  scripts/mcp_echo_server.py
+M  scripts/mcp_many_tools_server.py
+M  docs/features.md
+M  docs/eval-01-offline-baseline.md
+M  docs/eval-02-feature-matrix.md
+M  docs/roadmap-milestones.md
+?? docs/plan-m-a6-n3.md
+```
+
+**3 个脚本 + 5 份文档 + 1 份方案**；`ai_coding/` **零改动**（实测 `git diff --name-only | grep -c '^ai_coding/'` = **0**）。
+
+### 13.4 实施中发现并修正的两点
+
+| # | 问题 | 处理 |
+|---|---|---|
+| **I-1** | 方案 §7.4 的 U4 写"跑 `r7_cases` 验证 MCP 档"，但 `real_mcp_tool_surface`（唯一用 `many` 脚本的用例）在 **LIVE** 档（`r7_cases.py:487`），离线运行不覆盖 | 改为**直接 spawn 夹具**验证（`13.2` 突变 B），并注明原因 |
+| **I-2** | 突变 D 首次实现有缺陷（`return` 仍引用 `intact` → `KeyError`），不是有效的突变 | 修正为同时替换断言与 `return`，复现出真实的 87% / 77% |
