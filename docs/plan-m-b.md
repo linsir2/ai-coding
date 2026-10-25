@@ -553,28 +553,200 @@ def _search_text(level: int, snap: TurnSnapshot) -> str:
 
 ---
 
-## 九、待拍板（3 项）
+## 九、拍板结论（已按你的选择执行）
 
-### 9.1 B1 的注入强度：只提示 vs harness 主动跑
+| # | 问题 | 你的决定 | 影响 |
+|---|---|---|---|
+| 9.1 | B1 注入强度 | ✅ **harness 主动跑并注入**（不是推荐项） | 新增 §十三：一个模块 + 一组配置 + 接线 |
+| 9.2 | B2 收尾级 | ✅ **不做强制收尾**（L1/L2 两级） | §六.3 的 `_due` 已是此形状 |
+| 9.3 | 429 `insufficient_quota` | ✅ **算 NO_RETRY** | 新增 §十三.5，3 行 + 1 测试 |
 
-- **① 只提示（推荐）**：L2 文案给命令，模型自己跑 `bash`。零新增机制、零新失败模式。
-- **② harness 主动跑 ruff/mypy 并注入增量输出**：省一次模型调用，但要新增
-  子进程执行 + 超时 + 输出截断 + venv/解释器探测 + 配置开关（**+150 行、5 个新失败模式**），
-  且与"模型跑工具、harness 只提示"的既有分层冲突。
+### 9.1 为什么不推荐 harness 主动跑（我原先的判断），以及为什么仍然做
 
-### 9.2 B2 的第三级"主动收尾"要不要做
+原判断：项目分层是"模型跑工具、harness 只提示"，harness 跑命令需要新的子进程机制。
+**实际调研后，机制全都存在**，成本远低于我原估的 +150 行：
 
-- **① 不做（推荐）**：§3.4 —— 信号分不清"合法调研"与"空转"，强行交接会误伤；
-  收尾已由 `budget_pressure` + G8-2 close-out 覆盖。
-- **② 做**：`_due` 的 SEARCH 分支在 L2 `failed` 后返回 `(L3,"finish")`。
-  代价：合法长调研会被强制收尾；且 `_finish_at` 会丢掉 intervention 元数据（评审 P1-1），
-  那样 B5 在收尾这一级反而没有事件 —— 需要额外修 `_finish_at`。
+| 需要的能力 | 既有实现 | 复用方式 |
+|---|---|---|
+| 受控子进程（超时 + 进程组 killpg） | [infra/subprocess_runner.py:248](file:///workspace/ai-coding/ai_coding/infra/subprocess_runner.py#L248) `run_process_async`（含 `env` 与 `max_output_chars`） | **直接复用** |
+| "在 workspace 里跑一条 shell 命令并拿输出"的样板 | [core/acceptance.py:179-253](file:///workspace/ai-coding/ai_coding/core/acceptance.py#L179-L253) `verify_items` | **照抄形状** |
+| 输出截断 | 同上 + `max_output_chars` | **复用** |
 
-### 9.3 429 `insufficient_quota` 要不要算 NO_RETRY（评审 P2-7 发现的真实小缺口）
+真正的增量只有"**决定跑哪条命令**"与"**把结果拼成一段话**"。
 
-- **① 做（推荐）**：`classify_failure` 里 `status == 429` 且文本含 `insufficient_quota`
-  → 归 `FATAL`（不重试）。3 行 + 1 条测试。这是 roadmap M-B3 明确要求的档位。
-- **② 不做**：维持现状（会重试满 4 次）。记录为已知偏差。
+### 9.2 🔴 调研否决了"自动推断检查命令"（记住这个数字）
+
+我原本打算自动探测并跑 `mypy .`。实测：
+
+```
+$ .venv/bin/ruff check .   → All checks passed!                       0.035s
+$ .venv/bin/mypy .         → Found 271 errors in 31 files (188 files)  4.8s
+$ .venv/bin/mypy ai_coding → Success: no issues found in 152 files     ~2s
+```
+
+`mypy .` 把 `scripts/` 也算进来（`pyproject.toml` 只 `exclude = ["tests/", ".venv/"]`），
+**注入 271 条错误是纯噪声**；而 CI 跑的是 `mypy ai_coding`（0 errors）。
+
+**结论：检查命令不可能被自动推断，必须由配置声明。** 默认只给最便宜且零噪声的
+`ruff check .`；`mypy` 由使用方声明（本项目应写 `mypy ai_coding`）。
+
+---
+
+## 十三、B1 主动跑静态检查（按拍板实现）
+
+### 13.1 分工：为什么不在 `interventions.py` 里跑
+
+`interventions` 是**纯状态机**（无 IO、表驱动测试）。在那里跑子进程会破坏它的契约。
+
+```
+interventions（纯）     决定"什么时候该看静态检查" —— L2
+        ↓
+agent_loop（有 IO）    拿到 L2 决策后真去跑命令，把输出拼进注入文本
+        ↓
+static_check（新模块） 唯一职责：在 workspace 里跑配置的命令，返回一段话
+```
+
+### 13.2 新模块 `ai_coding/core/static_check.py`（约 70 行）
+
+```python
+"""Run the project's own static checks when a turn stalls in look-only mode (B1).
+
+``core/interventions.py`` decides *when* to ask; this module answers with actual
+command output, so the model gets the finding instead of another keyword to guess.
+
+Small on purpose: one bounded command per configured check, a size cap, and no
+new failure modes -- a check that cannot run is reported as such, never raised.
+"""
+
+__all__ = ["run_static_checks"]
+
+
+async def run_static_checks(
+    workspace: str,
+    commands: Sequence[str],
+    *,
+    timeout: float = 20.0,
+    max_chars: int = 2000,
+) -> str: ...
+```
+
+| 约束 | 做法 |
+|---|---|
+| ruff 通常不在 PATH | `env["PATH"] = f"{workspace}/.venv/bin{os.pathsep}{PATH}"` |
+| 一条命令挂了不能拖垮提示 | 每条独立 `try/except`，失败写 `could not run: …`，继续下一条 |
+| 输出可能上万行 | `run_process_async(max_output_chars=max_chars)` + 总量 `<= max_chars` |
+| 可能挂死 | `timeout`（默认 20s） |
+| 不能混淆"谁说的" | 块首写明 `[static-check] harness 自动执行` |
+
+输出形状（喂给模型的样子）：
+
+```
+[static-check] harness 自动执行了 2 条检查（工作区: /path/to/repo）
+$ ruff check .  → exit 0, 0.03s
+All checks passed!
+$ mypy ai_coding  → exit 1, 2.1s
+ai_coding/core/mcp.py:787: error: Cannot find implementation or library stub for module named "httpx2"
+```
+
+> 最后一行就是 T2 的答案 —— 模型不必再 grep 任何东西。
+
+### 13.3 配置（`AIConfig.static_check`）
+
+```diff
++class StaticCheckConfig(BaseModel):
++    """The commands the harness runs itself when the search ladder reaches L2 (B1).
++
++    Commands are *declared*, never inferred: measured on this repository,
++    ``mypy .`` reports 271 errors (it does not exclude ``scripts/``) while
++    ``mypy ai_coding`` -- what CI runs -- reports none.  No heuristic can tell
++    those apart.
++    """
++
++    model_config = ConfigDict(extra="ignore")
++
++    #: Shell commands, run in the workspace.  Empty = feature off.
++    commands: list[str] = Field(default_factory=lambda: ["ruff check ."])
++    timeout_seconds: float = 20.0
++    #: Cap on what the whole block may add to the prompt.
++    max_chars: int = 2000
+```
+
+`AIConfig` 加 `static_check: StaticCheckConfig = Field(default_factory=StaticCheckConfig)`；
+`config.example.yaml` 的 `ai:` 段加同名键（注释里写明本项目应写 `mypy ai_coding`）。
+
+### 13.4 接线（`agent_loop.py`，PRE nudge 分支）
+
+```diff
+                     elif decision.intervention == "strategy":
+                         books.note_strategy_nudge()
++                    elif decision.intervention == interventions.SEARCH:
++                        # B1: L2 is the rung that asks *for* the static check, so
++                        # run it here and hand over the finding.  Once per turn:
++                        # a re-fired L2 must not start mypy again.
++                        if decision.level >= interventions.L2 and not books.static_check_ran:
++                            books.static_check_ran = True
++                            block = await run_static_checks(
++                                str(self.workspace or ""),
++                                list(self.settings.static_check.commands),
++                                timeout=self.settings.static_check.timeout_seconds,
++                                max_chars=self.settings.static_check.max_chars,
++                            )
++                            if block:
++                                decision = replace(
++                                    decision,
++                                    inject=(
++                                        f"{decision.inject}\n\n{block}"
++                                        if decision.inject
++                                        else block
++                                    ),
++                                )
+```
+
+`TurnBooks` 加 `static_check_ran: bool = False`（每回合新建，天然按回合重置）。
+
+> **注意**：注入文本字段是 `TurnDecision.inject`（[agent_loop.py:897](file:///workspace/ai-coding/ai_coding/core/agent_loop.py#L897) 用它建合成消息），
+> 不是 `InterventionDecision.text`。
+
+### 13.5 `insufficient_quota` 归 NO_RETRY（§9.3 拍板）
+
+```diff
+         if status == 429:
+-            return FailureKind.RATE_LIMITED
++            # A quota that is used up does not refill in `Retry-After` seconds:
++            # waiting four times over burns four round trips to learn nothing.
++            # Only when the provider *says* it is the quota -- a plain 429 is a
++            # rate limit, and waiting is exactly right for it.
++            if "insufficient_quota" in str(exc).lower():
++                return FailureKind.FATAL
++            return FailureKind.RATE_LIMITED
+```
+
+测试：429 + `insufficient_quota` → `classify_failure` = `FATAL`，且 `max_retries=3` 下 `calls == 1`。
+
+### 13.6 B1 的测试（**需新增 1 个测试文件 —— 新模块必须有自己的测试**）
+
+`tests/test_static_check.py`：
+
+| # | 用例 | 断言 |
+|---|---|---|
+| S1 | `commands=["echo hi"]` | 块含 `$ echo hi`、`exit 0`、`hi` |
+| S2 | `commands=[]` | 返回 `""` |
+| S3 | 不存在的命令 | 块含 `could not run`，**不抛异常** |
+| S4 | `sleep 5` + `timeout=0.2` | 含 `timeout`，**耗时 < 2s** |
+| S5 | 输出 5000 字符 + `max_chars=200` | 长度 ≤ 200 + 固定头部 |
+| S6 | `.venv/bin` 里的可执行文件能被找到 | 临时 venv 桩验证 PATH 前置 |
+
+---
+
+## 十四、自我核验（追加 B1 部分）
+
+10. **harness 跑命令安全吗？** —— 命令来自**操作者配置**（不是模型产出），
+    与 `plan_runner` 的 verify 命令不同，**不需要**权限门；仍受 `cwd`、超时、输出上限三重约束。
+11. **会不会拖慢正常会话？** —— 只在 `SEARCH` **L2** 且**每回合一次**时跑；
+    正常回合 `search_streak` 到不了 4，一次都不跑。
+12. **ruff 不在 PATH？** —— `.venv/bin` 前置；仍找不到则该条写 `could not run`，
+    其余继续，nudge 照常发出（降级不失败）。
+13. **注入会不会撑爆 prompt？** —— 总块 ≤ `max_chars`（默认 2000）。
 
 ---
 
@@ -601,10 +773,10 @@ def _search_text(level: int, snap: TurnSnapshot) -> str:
 
 | 项 | 归属 |
 |---|---|
-| **本方案改** | 5 个源文件 + 2 个测试文件 + 3 份文档 |
-| **不改** | `openai_engine.py`（B3 已实现，除 §9.3 若批准）、`guard.py`、`turn_policy.py` 决策分支、`frontend/` |
-| **明确不做** | B4 意图分类、B1 harness 主动跑静态检查、B2 强制收尾、基于输出文本的任何推断 |
-| **记录不修（评审发现）** | **P1-1**：`_finish_at` 丢掉 intervention 元数据 → 任何走 FINISH 的 ladder 都不会发事件、账本不记 `exhausted`（Strategy L4 现在就受影响） |
+| **本方案改** | 6 个源文件（含 1 个新模块 `core/static_check.py`）+ `config/models.py` + `config.example.yaml` + 3 个测试文件 + 3 份文档 |
+| **明确不改** | `guard.py`、`turn_policy.py` 的**决策分支**（只加字段）、`frontend/`、`plan_runner.py` |
+| **明确不做** | B4 意图分类、B2 强制收尾、基于输出文本的任何推断（§二） |
+| **记录不修（评审发现）** | **P1-1**：`_finish_at` 丢掉 intervention 元数据 → 任何走 FINISH 的 ladder 不发事件、账本不记 `exhausted`（Strategy L4 现已受影响） |
 | **需校正** | roadmap M-B3（已完成）、M-B4（大部分已完成） |
 
 ---
