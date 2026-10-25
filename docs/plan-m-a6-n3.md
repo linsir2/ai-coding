@@ -487,6 +487,7 @@ grep -c "len(sizes) == 4" scripts/memory_cases.py     # 1
 M  scripts/memory_cases.py
 M  scripts/mcp_echo_server.py
 M  scripts/mcp_many_tools_server.py
+M  scripts/mcp_progress_server.py
 M  docs/features.md
 M  docs/eval-01-offline-baseline.md
 M  docs/eval-02-feature-matrix.md
@@ -494,7 +495,7 @@ M  docs/roadmap-milestones.md
 ?? docs/plan-m-a6-n3.md
 ```
 
-即 **3 个脚本 + 5 份文档 + 1 份方案**。**不碰任何产品代码**（`ai_coding/` 零改动）。
+即 **4 个脚本 + 5 份文档 + 1 份方案**。**不碰任何产品代码**（`ai_coding/` 零改动）。
 
 ### 7.4 具体用例清单
 
@@ -584,7 +585,7 @@ M  docs/roadmap-milestones.md
 4. **改用布尔不变量是不是把测试改松了？** —— 不是，反而**更严**：它要求"请求 N 的稳定部分是请求 N+1 的**精确前缀**"。而比率是**更弱**的判据 —— 实测 per-turn-trim 臂的稳定比率同样 ~100%，但它的 `prefix_intact=False`（历史被重写）。**比率会说"很好"，不变量会说实话。**
 5. **case7 是不是"把测试改松了"？** —— 不是。旧断言 `len(sizes)==4` 测的是**事件循环时序**（同一测试两次记录不同：`[3,4]` vs `[3,4,1]`）。新断言 `identity_chain` + `not whole_history` 直接对应产品契约，且**能打红旧实现**（旧实现批次是 `[2,4,6,8]`，最后一批 = 整段历史）。
 6. **N-3 的修法有没有更"省事"的？** —— 有：`from mcp.server.fastmcp.server import MCPServer` 也能 import 成功。**但那只是 lowlevel `Server` 的别名，没有 `.tool()`，`run()` 也不是 `transport=` 形式** → 改了还是跑不通。必须用 `FastMCP`。
-7. **会不会漏了别的消费者？** —— `mcp_echo_server.py` 的消费者：`test_mcp_stdio.py`、`test_mcp_end_to_end.py`（已核）。`mcp_many_tools_server.py` 的消费者：`r7_cases.py:416`（已核，未被 CI 调用）。**无其它引用**。
+7. **会不会漏了别的消费者？** —— ⚠️ **这条我最初写错了**（见 §13.4 I-3）：只 grep 了 `mcp_echo_server`，漏了 `mcp_progress_server`。**正确的清单**：`mcp_echo_server.py` → `test_mcp_stdio.py`、`test_mcp_end_to_end.py`；`mcp_many_tools_server.py` → `r7_cases.py:416`（LIVE 档）；`mcp_progress_server.py` → `test_mcp_progress.py`（门控）。**三个夹具全部已修**。
 8. **会不会碰坏产品代码？** —— 不会。`ai_coding/` **零改动**，白名单里没有它。
 9. **`r7_cases.py` 要不要一起跑？** —— 它需要 `config.local.yaml` 且未被 CI 调用；本方案只修它依赖的夹具，不改它本身。
 
@@ -671,7 +672,7 @@ M  docs/roadmap-milestones.md
 | **突变 A**（echo 改回旧 API） | stdio 重新变红 | **1 failed** ✅ |
 | **突变 B**（many 改回旧 API） | 夹具起不来 | **`McpError: Connection closed`** ✅ |
 | **突变 C**（case7 改回 `len(sizes)==4`） | case7 重新变红 | **FAIL** ✅ |
-| **突变 D**（case11 改回整请求比率 `>=90`） | 深路径重新变红 | **FAIL（87% / 77%）** ✅ |
+| **突变 D**（case11 改回**整请求**比率 `>=90`） | 深路径重新变红 | **FAIL（87% / 77%）** ✅ |
 
 ### 13.3 白名单核验
 
@@ -679,6 +680,7 @@ M  docs/roadmap-milestones.md
 M  scripts/memory_cases.py
 M  scripts/mcp_echo_server.py
 M  scripts/mcp_many_tools_server.py
+M  scripts/mcp_progress_server.py
 M  docs/features.md
 M  docs/eval-01-offline-baseline.md
 M  docs/eval-02-feature-matrix.md
@@ -686,11 +688,45 @@ M  docs/roadmap-milestones.md
 ?? docs/plan-m-a6-n3.md
 ```
 
-**3 个脚本 + 5 份文档 + 1 份方案**；`ai_coding/` **零改动**（实测 `git diff --name-only | grep -c '^ai_coding/'` = **0**）。
+**4 个脚本 + 5 份文档 + 1 份方案**；`ai_coding/` **零改动**（实测 `git diff --name-only | grep -c '^ai_coding/'` = **0**）。
 
 ### 13.4 实施中发现并修正的两点
 
 | # | 问题 | 处理 |
 |---|---|---|
 | **I-1** | 方案 §7.4 的 U4 写"跑 `r7_cases` 验证 MCP 档"，但 `real_mcp_tool_surface`（唯一用 `many` 脚本的用例）在 **LIVE** 档（`r7_cases.py:487`），离线运行不覆盖 | 改为**直接 spawn 夹具**验证（`13.2` 突变 B），并注明原因 |
-| **I-2** | 突变 D 首次实现有缺陷（`return` 仍引用 `intact` → `KeyError`），不是有效的突变 | 修正为同时替换断言与 `return`，复现出真实的 87% / 77% |
+| **I-2** | 突变 D 的**两种**实现都试了：① 只把断言改成 `shares >= 90`（`shares` 已是稳定比率，深路径仍 PASS，**不构成有效突变**）；② 首次实现有缺陷（`return` 仍引用 `intact` → `KeyError`） | 最终改为**完整复现旧判据**（重新引入整请求比率的计算 + 替换 `return`）→ 复现出真实的 87% / 77%。评审 P2 已如实记录 |
+| **I-3** | 代码评审 **P1**：`scripts/mcp_progress_server.py:18` 有**同一个坏 import**，消费者 `tests/test_mcp_progress.py`（门控）→ **1 failed**。我 §10.7 声称"无其它引用"是**错的**（当时只 grep 了 `mcp_echo_server`） | ✅ 已补修（2 行），门控用例转 **1 passed**；消费者清单与结论已更正 |
+| **I-4** | 代码评审 **P3**：case7 的 `identity_chain` 隐含假设"没有合成消息被追加"；case11 的 `volatile_markers` 是硬编码词表 | ✅ 两处均已补注释说明假设与同步要求 |
+
+---
+
+## 十四、代码评审记录（子智能体，`git worktree` 独立实跑）
+
+评审在 HEAD `2379e56` 的副本内独立复现：
+
+- 判据全部核实：`memory_cases` 11/11、深路径仍 PASS、MCP stdio 5 passed、`ruff`/`mypy` 0、
+  全量 `pytest` 3806 passed / 6 skipped / 0 failed、突变 C 成立、白名单与 `ai_coding/` 零改动为真
+- 关键数字独立复现：整请求比率 88%/78%（短/深路径）、`len(stable_a)=2827` 路径无关、
+  per-turn-trim 臂稳定比率 100% 但 `prefix_intact=False`
+
+### 14.1 评审发现（已全部处理）
+
+| # | 问题 | 处理 |
+|---|---|---|
+| 🔴 **P1** | **`scripts/mcp_progress_server.py:18` 同一个坏 import**，消费者 `tests/test_mcp_progress.py`（门控）→ **1 failed**。我 §10.7 声称"无其它引用"**与事实不符**（当时只 grep 了 `mcp_echo_server`） | ✅ **已补修**（2 行）→ 门控用例 **1 passed**；消费者清单与结论已更正（§10.7、roadmap N-3） |
+| 🟠 **P2** | **突变 D 的演示方式**：只把断言改成 `shares >= 90` 不构成有效突变（`shares` 已是稳定比率，深路径仍 PASS） | ✅ 已改为**完整复现旧判据**，并如实记入 §13.4 I-2 |
+| 🟡 **P3** | case7 `identity_chain` 隐含"无合成消息"假设；case11 `volatile_markers` 硬编码 | ✅ 两处均补注释（§13.4 I-4） |
+
+### 14.2 三个 MCP 夹具的最终状态
+
+| 夹具 | 消费者 | 改前 | 改后 |
+|---|---|---|---|
+| `mcp_echo_server.py` | `test_mcp_stdio.py`、`test_mcp_end_to_end.py` | 1 + 3 failed | **5 passed** |
+| `mcp_many_tools_server.py` | `r7_cases.py`（LIVE 档） | 夹具起不来 | **13 工具可列举** |
+| `mcp_progress_server.py` | `test_mcp_progress.py` | **1 failed** | **1 passed** |
+
+```
+AI_CODING_MCP_STDIO=1 pytest tests/test_mcp_stdio.py tests/test_mcp_end_to_end.py tests/test_mcp_progress.py
+→ 6 passed
+```

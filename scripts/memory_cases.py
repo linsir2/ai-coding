@@ -216,6 +216,10 @@ async def case_7_delta_only(root: Path) -> tuple[bool, str]:
     sizes = [len(batch) for batch in extractor.seen]
     flat = [message for batch in extractor.seen for message in batch]
     total = len(session.messages)
+    # `harvest` can append synthetic system messages (memory hints, a compaction
+    # summary) to the batch it hands over, and caps that batch at
+    # `harvest_max_messages`.  This scenario has neither -- the store is empty and
+    # nothing compacts -- so the batches are exactly the session's own messages.
     identity_chain = len(flat) == total and all(
         left is right for left, right in zip(flat, session.messages, strict=False)
     )
@@ -307,6 +311,8 @@ async def case_11_cache_prefix(root: Path) -> tuple[bool, str]:
     """
 
     #: The tail blocks are recognisable by these markers; the history never is.
+    #: Keep in step with the blocks `request_assembly` can emit (memory, task,
+    #: hook, digest, referenced-files, requested-skills, budget, ...).
     volatile_markers = (
         "<environment>",
         "<task-state>",

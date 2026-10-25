@@ -438,9 +438,10 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 
 | 项 | 内容 |
 |---|---|
-| **位置** | `scripts/mcp_echo_server.py:15`、`scripts/mcp_many_tools_server.py:23`（同类缺陷） |
+| **位置** | `scripts/mcp_echo_server.py:15`、`scripts/mcp_many_tools_server.py:23`、`scripts/mcp_progress_server.py:18`（**同一缺陷 ×3**） |
 | **现象** | `ModuleNotFoundError: No module named 'mcp.server.mcpserver'`（真机实跑 MCP 服务器返回 `status: failed`） |
 | **根因** | 这是 **mcp 2.x** 的模块（M-A1 收紧为 `>=1.24,<2` 后不存在）。`fastmcp.server.MCPServer` 只是 lowlevel `Server` 的别名 —— **没有 `.tool()`，`run()` 也不是 `transport=` 形式**，换 import 路径没用 |
-| **实际修法** | 改用官方高层 API `mcp.server.fastmcp.FastMCP`（两个脚本各 2 行） |
-| **影响** | `tests/test_mcp_stdio.py` 与 `tests/test_mcp_end_to_end.py` 平时被 `AI_CODING_MCP_STDIO=1` 门控故 skip（未暴露）；**CI 里那两个 step 会红**（`ci.yml:45/51` 设了该变量） |
-| **验收** | `AI_CODING_MCP_STDIO=1 pytest tests/test_mcp_stdio.py tests/test_mcp_end_to_end.py` → **5 passed**（改前 1 failed + 3 failed）；`scripts/r7_cases.py` 的 MCP 档随之恢复 |
+| **实际修法** | 改用官方高层 API `mcp.server.fastmcp.FastMCP`（三个脚本各 2 行） |
+| **影响** | `tests/test_mcp_stdio.py`、`test_mcp_end_to_end.py`、`test_mcp_progress.py` 平时被 `AI_CODING_MCP_STDIO=1` 门控故 skip（未暴露）；**CI 里前两个 step 会红**（`ci.yml:45/51` 设了该变量） |
+| **验收** | `AI_CODING_MCP_STDIO=1 pytest` 三个文件 → **6 passed**（改前 1+3+1 failed）；`scripts/r7_cases.py` 的 MCP 档随之恢复 |
+| **评审副产物** | 代码评审发现第三个夹具 —— 我最初只 grep 了 `mcp_echo_server`，漏了它（见 plan §13.4 I-3） |
