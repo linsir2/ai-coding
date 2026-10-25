@@ -704,15 +704,27 @@ R7b 把这段话的前半句治掉了：L2 不再丢正文。实测同一份 70 
 | 档 | 触发 | 动作 |
 |---|---|---|
 | L1 | `search_streak >= 4` | `[search-gate]`：换符号名 / 换范围 / 读入口文件 / 直接动手 |
-| L2 | `search_streak >= 8` | `[search-gate]`：**不要再猜关键词**，并**附上 harness 自己跑出来的静态检查输出** |
+| L2 | `search_streak >= 6` | `[search-gate]`：**不要再猜关键词**，并**附上 harness 自己跑出来的静态检查输出** |
 
-L2 的输出来自 `ai.static_check.commands`（默认 `["ruff check ."]`，在 workspace 里以
-`.venv/bin` 优先的 PATH 执行，超时 20s、总量 ≤2000 字符）。命令**必须声明、不能推断**：
-本仓 `mypy .` 报 271 条错（`scripts/` 未排除）而 `mypy ai_coding` 零错 —— 没有启发式能分辨。
-每回合最多跑一次；一次都没跑到时，nudge 的文案仍然给出该跑什么。
+L2 定在 6 而不是 8：默认 `max_tool_iterations=10`，而一次 nudge 占一个迭代 —— 8 会把 L2
+推到最后一个迭代，输出生成了却没人读。实测 6 时 L2 落在第 8 个迭代，后面还剩两步。
 
-同一档只在 streak 又长出一整个阈值后才再次发声（不然模型会把预算花在读提示上）。
-每次触发发一个 `SearchStalled` 事件（`iteration`/`level`/`calls`/`streak`），落进 trace jsonl。
+**动作白名单**：只有 `write`/`edit`/`bash` 清零 streak。`todo_write`、`checkpoint_write`、
+`ask_user`、goal 工具**不清零** —— 它们不改工作区，若算作动作，模型写一次 todo 就能把空转
+藏起来。（`bash` 在名单里是故意的：跑静态检查就是动作。）
+
+`plan` 与只读姿态**不触发**：那两种姿态本来就该"只看不动"。
+
+L2 的输出来自 `ai.static_check.commands`（默认 `["ruff check ."]`）：命令用 **`shlex` 切分、
+`shell=False` 执行**，且首个词必须是已知的静态检查工具（`ruff`/`mypy`/`tsc`/`eslint`/…），
+否则整条 `skipped`。这不是洁癖 —— 该字段能被**仓库里被跟踪的 `config.example.yaml`** 设上
+（`ConfigLoader` 会向上查找它），若不这样处理，克隆一个仓库再让它读完 6 个文件就等于执行
+仓库里的任意命令。`;`/`&&`/`|` 因此只是普通参数。`.venv/bin` 优先 PATH，超时 20s、总量 ≤2000 字符。
+每回合最多跑一次；0 个阈值（`ai.search_streak_threshold: 0`）可整机关闭。
+
+同一档只在 streak 又长出一整个 L1 阈值后才再次发声（不然模型会把预算花在读提示上）。
+每次触发发一个 `SearchStalled` 事件（`iteration`/`level`/`calls`/`streak`），
+在 trace jsonl 里长这样：`{"evt": "SearchStalled", "data": {...}}`。
 
 ## ask_user：模型主动提问（R6c）
 

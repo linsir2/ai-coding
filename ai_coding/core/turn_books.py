@@ -40,7 +40,14 @@ from ai_coding.domain.task import TaskState, TodoItem
 from ai_coding.domain.turn_digest import DEFAULT_NOTE_CHARS, one_line
 from ai_coding.infra.deadline import Deadline
 
-__all__ = ["RETRIEVAL_TOOLS", "STATE_ONLY_TOOLS", "Failure", "TurnBooks", "TurnFrame"]
+__all__ = [
+    "ACTION_TOOLS",
+    "RETRIEVAL_TOOLS",
+    "STATE_ONLY_TOOLS",
+    "Failure",
+    "TurnBooks",
+    "TurnFrame",
+]
 
 #: One failed call, as the handoff reports it: (tool, error, output excerpt).
 Failure = tuple[str, str, str]
@@ -52,13 +59,29 @@ STATE_ONLY_TOOLS = frozenset({"checkpoint_write"})
 
 #: B1/B2: tools whose contract is "look at existing state".  ``bash`` is
 #: deliberately absent: the static check itself runs through it, so a model that
-#: follows the search ladder's advice must be *rewarded* (its streak resets), not
-#: pushed further up the ladder.  Repeated identical calls are already covered by
-#: ``DuplicateCallGuard`` and repeated failing ones by ``FailedRepeatGuard`` --
-#: this set covers neither of those.
+#: follows the search ladder's advice must be *rewarded* (see ``ACTION_TOOLS``),
+#: not pushed further up the ladder.
 RETRIEVAL_TOOLS = frozenset(
-    {"read", "grep", "glob", "history_search", "memory_search", "websearch", "webfetch"}
+    {
+        "read",
+        "grep",
+        "glob",
+        "history_search",
+        "memory_search",
+        "websearch",
+        "webfetch",
+        "job_output",
+        "job_list",
+        "subagent_list",
+    }
 )
+
+#: B1/B2: what counts as *acting*.  An allowlist, not "anything that is not a
+#: look": ``todo_write``, ``checkpoint_write``, ``ask_user`` and the goal tools do
+#: not change the workspace, and letting them reset the streak would hand the model
+#: a one-call way to hide a stall from the ladder.  ``bash`` is here on purpose --
+#: running the static check is an action, and the ladder must see it that way.
+ACTION_TOOLS = frozenset({"write", "edit", "bash"})
 
 #: Errors that are verdicts rather than breakage (R8c D-11 cancel; 20 §批次3
 #: plan-validation refusals; P1's ``invalid_items``; R08's ``plan_keep`` --
@@ -359,14 +382,16 @@ class TurnBooks:
         succeeded = [item for item in outcomes if item.result.success]
         self.successful_calls += len(succeeded)
         self.tool_success.update(item.call.name for item in succeeded)
-        # B1/B2: a successful look extends the streak; a successful *anything else*
-        # ends it.  Failures move neither number -- a failed call is STRATEGY's
-        # evidence, not evidence that the turn is looking without acting.
+        # B1/B2: a successful look extends the streak; a successful *action*
+        # (see ``ACTION_TOOLS``) ends it.  Everything else -- failures, state-only
+        # tools, the goal/ask tools -- moves neither number: a failed call is
+        # STRATEGY's evidence, and a todo write is not an action on the workspace,
+        # so neither may be able to hide a stall from the ladder.
         for item in succeeded:
             if item.call.name in RETRIEVAL_TOOLS:
                 self.search_streak += 1
                 self.search_calls += 1
-            else:
+            elif item.call.name in ACTION_TOOLS:
                 self.search_streak = 0
         # 13 §2.1: the ladder's ask helped-signal counts only what actually
         # reached the user (a denied call never did).

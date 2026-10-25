@@ -773,3 +773,33 @@ async def test_a_spent_quota_is_not_retried():
     with pytest.raises(EngineError):
         await engine.step([_user()], tools=[])
     assert client.completions.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_spent_quota_is_detected_from_the_body_not_the_message():
+    """The real SDK puts the marker in `body`, not in `str(exc)` (review P1-2).
+
+    Measured on the real exception: str() reads "You exceeded your current quota,
+    please check your plan..." with no `insufficient_quota` in it; the marker only
+    exists in the parsed body.  A message-only check passes on a hand-written fake
+    and silently retries four times on live traffic.
+    """
+    import openai
+
+    from ai_coding.ai.openai_engine import FailureKind, classify_failure
+
+    quota = openai.RateLimitError(
+        "You exceeded your current quota, please check your plan and billing details.",
+        response=_Resp(429),
+        body={"error": {"type": "insufficient_quota", "code": "insufficient_quota"}},
+    )
+    assert "insufficient_quota" not in str(quota).lower()
+    assert classify_failure(quota) is FailureKind.FATAL
+
+
+@pytest.mark.asyncio
+async def test_a_plain_429_is_still_a_rate_limit():
+    """The quota marker must not turn every 429 into a fatal error."""
+    from ai_coding.ai.openai_engine import FailureKind, classify_failure
+
+    assert classify_failure(_rate_limited("1")) is FailureKind.RATE_LIMITED

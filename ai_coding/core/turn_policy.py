@@ -125,6 +125,11 @@ class TurnPolicyConfig:
     # asking instead of re-running the suite forever.
     max_acceptance_nudges: int = 2
     max_auto_continuations: int = 3
+    #: B1/B2: consecutive look-only calls before the search ladder speaks.
+    #: ``0`` disables the gate -- reachable from ``AIConfig`` because this gate
+    #: runs a subprocess by itself when it reaches L2, and an operator must be
+    #: able to turn that off without editing code.
+    search_streak_threshold: int = 4
 
     @classmethod
     def from_ai_config(cls, settings: Any) -> TurnPolicyConfig:
@@ -143,6 +148,9 @@ class TurnPolicyConfig:
             max_acceptance_nudges=int(getattr(settings, "max_acceptance_nudges", 2) or 0),
             max_auto_continuations=int(
                 getattr(settings, "max_auto_continuations", 3) or 0
+            ),
+            search_streak_threshold=int(
+                getattr(settings, "search_streak_threshold", 4) or 0
             ),
         )
 
@@ -324,6 +332,7 @@ class TurnPolicy:
                 else self.config.max_todo_nudges
             ),
             acceptance_l1=self.config.max_acceptance_nudges,
+            search_streak_threshold=self.config.search_streak_threshold,
         )
 
     # ---- budget ------------------------------------------------------------

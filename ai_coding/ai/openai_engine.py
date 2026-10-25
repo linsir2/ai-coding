@@ -132,7 +132,12 @@ def classify_failure(exc: BaseException) -> FailureKind:
             # waiting four times over burns four round trips to learn nothing.
             # Only when the provider *says* it is the quota -- a plain 429 is a
             # rate limit, and waiting is exactly right for it.
-            if "insufficient_quota" in str(exc).lower():
+            #
+            # ``str(exc)`` is not enough: the real SDK puts the message in the
+            # exception text and the marker in the body, so a body-only check is
+            # what makes this work on live traffic instead of only on the fake
+            # one (measured: str() lacked "insufficient_quota", body had it).
+            if _mentions_quota(exc):
                 return FailureKind.FATAL
             return FailureKind.RATE_LIMITED
         if status >= 500:
@@ -142,6 +147,18 @@ def classify_failure(exc: BaseException) -> FailureKind:
         if status in (400, 413) and _looks_like_context_overflow(exc):
             return FailureKind.CONTEXT_OVERFLOW
     return FailureKind.FATAL
+
+
+def _mentions_quota(exc: BaseException) -> bool:
+    """Does this 429 say the *quota* is spent, rather than "slow down"?
+
+    The marker lives in the response body (``error.type``/``error.code``) on real
+    SDK exceptions, and only sometimes in the message — so both are read.  A plain
+    429 stays a rate limit: waiting is exactly right for it.
+    """
+    body = getattr(exc, "body", None)
+    haystack = f"{exc} {body if body is not None else ''}".lower()
+    return "insufficient_quota" in haystack or "exceeded your current quota" in haystack
 
 
 def _retry_after(exc: BaseException) -> float | None:

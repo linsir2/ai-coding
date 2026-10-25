@@ -3,24 +3,55 @@
 ``core/interventions.py`` decides *when* to ask; this module answers with actual
 command output, so the model gets the finding instead of another keyword to guess.
 
-Small on purpose: one bounded command per configured check, a size cap, and no
-new failure modes -- a check that cannot run is reported as such, never raised.
+Two properties shape everything here:
 
-The commands are **declared, never inferred**: measured on this repository,
-``mypy .`` reports 271 errors (it does not exclude ``scripts/``) while
-``mypy ai_coding`` -- what CI runs -- reports none.  No heuristic tells those
-apart, so ``AIConfig.static_check`` carries the list.
+**Nothing raises.** A turn must not fail because a linter is missing, so every
+command is independent and a broken one is reported, not propagated.
+
+**Nothing the repository can say becomes a shell.** ``commands`` may come from a
+project's tracked ``config.example.yaml`` -- ``ConfigLoader.DEFAULT_NAMES`` walks
+up from the workspace and a repo ships that file -- so a string from there must
+never reach a shell.  The command is ``shlex``-split and run with
+``shell=False``, and its first word must be one of the known analysis tools:
+``;``, ``|`` and ``&&`` are then literal arguments, not operators, and an unknown
+program is refused instead of executed.  This is a smaller, structural version of
+what ``core/acceptance.py`` does with its proof commands, and it exists because
+this is the one place the harness runs something by itself.
 """
 
 from __future__ import annotations
 
 import os
+import shlex
 from collections.abc import Sequence
 from pathlib import Path
 
 from ai_coding.infra.subprocess_runner import run_process_async
 
-__all__ = ["run_static_checks"]
+__all__ = ["ALLOWED_PROGRAMS", "run_static_checks"]
+
+#: The analysis tools this feature exists for.  Matched on the *basename* of the
+#: first word, so an absolute ``.venv/bin/ruff`` is allowed and ``curl`` is not.
+ALLOWED_PROGRAMS = frozenset(
+    {
+        "ruff",
+        "mypy",
+        "pyright",
+        "pylint",
+        "flake8",
+        "black",
+        "isort",
+        "eslint",
+        "tsc",
+        "gofmt",
+        "go",
+        "staticcheck",
+        "cargo",
+        "rubocop",
+        "phpstan",
+        "shellcheck",
+    }
+)
 
 
 def _search_path(workspace: str) -> dict[str, str]:
@@ -37,6 +68,19 @@ def _search_path(workspace: str) -> dict[str, str]:
     return env
 
 
+def _argv(command: str) -> list[str] | None:
+    """``command`` as argv, or ``None`` when it is not an allowed analysis tool."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return None
+    if not argv:
+        return None
+    if Path(argv[0]).name not in ALLOWED_PROGRAMS:
+        return None
+    return argv
+
+
 async def run_static_checks(
     workspace: str,
     commands: Sequence[str],
@@ -46,42 +90,42 @@ async def run_static_checks(
 ) -> str:
     """Run ``commands`` in ``workspace``; return a compact block, or ``""``.
 
-    ``""`` means "nothing to say" -- no workspace, no commands configured, or the
-    block is empty.  The caller then keeps the nudge's own text, which still tells
-    the model what to run by hand.
-
-    Each command is independent: one that cannot start or overruns is reported in
-    the block and the next one still runs.  Nothing here raises -- a turn must not
-    fail because a linter is missing.
+    ``""`` means "nothing to say" -- no workspace, no commands, or nothing could be
+    run at all.  The caller then keeps the nudge's own text, which still tells the
+    model what to run by hand.
     """
     if not workspace or not commands or max_chars <= 0:
         return ""
     env = _search_path(workspace)
     lines = [f"[static-check] harness 自动执行了 {len(commands)} 条检查（工作区: {workspace}）"]
     spent = len(lines[0])
-    ran = 0
+    spoke = 0
     for command in commands:
-        if spent >= max_chars:
-            lines.append(f"… 已达到 {max_chars} 字符上限，剩余检查未执行")
-            break
-        remaining = max_chars - spent
+        argv = _argv(command)
+        if argv is None:
+            # A refusal is worth telling: it is the operator's own configured
+            # command, and silently dropping it would look like "no findings".
+            header = f"$ {command}  → skipped: 不在允许的静态检查工具里"
+            lines.append(header[: max(0, max_chars - spent)])
+            spent += len(header)
+            spoke += 1
+            continue
+        body = ""
+        status = "no exit code"
         try:
             outcome = await run_process_async(
-                command,
-                shell=True,
+                argv,
+                shell=False,
                 cwd=workspace,
                 env=env,
                 timeout=timeout,
-                max_output_chars=remaining,
+                max_output_chars=max(0, max_chars - spent),
             )
         except Exception as exc:  # noqa: BLE001 -- a check must never fail the turn
-            body = f"could not run: {type(exc).__name__}: {exc}"
+            status = f"could not run: {type(exc).__name__}: {exc}"
         else:
-            status = (
-                f"exit {outcome.returncode}"
-                if outcome.returncode is not None
-                else "no exit code"
-            )
+            if outcome.returncode is not None:
+                status = f"exit {outcome.returncode}"
             if outcome.timed_out:
                 status = f"timeout after {timeout:g}s"
             elif outcome.error:
@@ -94,14 +138,16 @@ async def run_static_checks(
                 )
                 if part
             )
-            header = f"$ {command}  → {status}"
-            lines.append(header)
-            spent += len(header)
-            ran += 1
-        if body:
+        header = f"$ {command}  → {status}"
+        lines.append(header[: max(0, max_chars - spent)])
+        spent += len(header)
+        spoke += 1
+        if body and spent < max_chars:
             clipped = body[: max(0, max_chars - spent)]
             lines.append(clipped)
             spent += len(clipped)
-    if not ran:
+        if spent >= max_chars:
+            break
+    if not spoke:
         return ""
     return "\n".join(lines)[:max_chars]

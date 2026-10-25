@@ -245,29 +245,29 @@ def test_search_never_ends_the_turn():
     assert d.kind == "nudge"
 
 
-def test_search_helped_when_the_streak_drops():
-    ledger = iv.settle(
-        _fired("search", 1, ref={"streak": 4, "calls": 4}),
-        _snap(search_streak=1, search_calls=5),
-    )
-    assert ledger["search"]["outcome"] == "helped"
+def test_search_outcome_is_audit_only_not_a_decision_input():
+    """``_helped`` answers False for SEARCH: the rung comes from the streak.
 
-
-def test_search_helped_when_the_model_stops_looking():
-    """Reviewer P1-2: a frozen streak is not evidence of a failed nudge."""
-    ledger = iv.settle(
-        _fired("search", 1, ref={"streak": 4, "calls": 4}),
-        _snap(search_streak=4, search_calls=4),
-    )
-    assert ledger["search"]["outcome"] == "helped"
-
-
-def test_search_failed_while_the_streak_keeps_growing():
+    The ledger still records the outcome for the audit trail, and ``_search_due``
+    never reads it -- pinned here so nobody re-wires escalation to it by accident.
+    """
     ledger = iv.settle(
         _fired("search", 1, at=(3, 4), ref={"streak": 4, "calls": 4}),
-        _snap(iteration=5, search_streak=5, search_calls=5),
+        _snap(iteration=5, search_streak=1, search_calls=5),
     )
     assert ledger["search"]["outcome"] == "failed"
+    # Same decision whether the outcome says helped or failed.
+    helped = _fired("search", 1, outcome="helped", ref={"streak": 4, "calls": 4})
+    failed = _fired("search", 1, outcome="failed", ref={"streak": 4, "calls": 4})
+    for ledger_in in (helped, failed):
+        assert (
+            iv.select(
+                _snap(search_streak=4, search_calls=4, intervention_ledger=ledger_in),
+                phase=iv.PRE,
+                limits=LIMITS,
+            )
+            is None
+        )
 
 
 def test_search_threshold_zero_disables_the_gate():
@@ -305,8 +305,8 @@ def test_search_goes_quiet_while_its_nudge_is_fresh():
 
 
 def test_search_escalates_from_the_streak_not_from_the_window():
-    """8 looks earn L2 even with no window bookkeeping at all."""
-    d = iv.select(_snap(search_streak=8, search_calls=8), phase=iv.PRE, limits=LIMITS)
+    """L2 is earned by the streak itself (6 looks), with no window bookkeeping."""
+    d = iv.select(_snap(search_streak=6, search_calls=6), phase=iv.PRE, limits=LIMITS)
     assert (d.gate, d.level) == ("search", 2)
 
 
@@ -315,7 +315,7 @@ def test_search_stays_quiet_while_the_streak_crawls():
     quiet = _fired("search", 1, outcome="failed", ref={"streak": 4, "calls": 4})
     assert (
         iv.select(
-            _snap(search_streak=7, search_calls=7, intervention_ledger=quiet),
+            _snap(search_streak=5, search_calls=5, intervention_ledger=quiet),
             phase=iv.PRE,
             limits=LIMITS,
         )
@@ -324,10 +324,25 @@ def test_search_stays_quiet_while_the_streak_crawls():
 
 
 def test_search_speaks_again_after_a_whole_threshold_of_new_looks():
-    again = _fired("search", 2, outcome="failed", ref={"streak": 8, "calls": 8})
+    again = _fired("search", 2, outcome="failed", ref={"streak": 6, "calls": 6})
     d = iv.select(
-        _snap(search_streak=12, search_calls=12, intervention_ledger=again),
+        _snap(search_streak=10, search_calls=10, intervention_ledger=again),
         phase=iv.PRE,
         limits=LIMITS,
     )
     assert (d.gate, d.level) == ("search", 2)
+
+
+def test_search_is_off_in_plan_and_read_only_postures():
+    """Those postures are *supposed* to be look-only (measured false positive)."""
+    for run in ({"mode": "plan"}, {"readonly": True}):
+        assert (
+            iv.select(_snap(search_streak=99, **run), phase=iv.PRE, limits=LIMITS)
+            is None
+        )
+
+
+def test_state_only_tools_cannot_hide_a_stall():
+    """A todo write is not an action; the books are the ones that know (T14b)."""
+    snap = _snap(search_streak=4, search_calls=4)
+    assert iv.select(snap, phase=iv.PRE, limits=LIMITS).gate == "search"

@@ -446,3 +446,18 @@ def test_the_snapshot_carries_the_search_counters():
     books.note_outcomes([_outcome("read"), _outcome("read")])
     snap = books.snapshot(iteration=1, tokens_spent=0)
     assert (snap.search_streak, snap.search_calls) == (2, 2)
+
+
+def test_state_only_tools_do_not_reset_the_streak():
+    """Otherwise one todo_write hides a stall from the ladder (review P1-4)."""
+    books = TurnBooks()
+    books.note_outcomes([_outcome("read"), _outcome("read")])
+    books.note_outcomes([_outcome("todo_write")])
+    books.note_outcomes([_outcome("checkpoint_write")])
+    assert books.search_streak == 2
+
+
+def test_reading_job_output_counts_as_looking():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("job_output"), _outcome("job_list")])
+    assert books.search_streak == 2

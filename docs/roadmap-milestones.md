@@ -119,7 +119,8 @@
 | 项 | 内容 |
 |---|---|
 | **缺口** | mypy/ruff 早就能报出 `httpx2`，但**结果没有回到模型面前**。模型只能逐文件 grep |
-| **实际做法** | 新增 `core/static_check.py`（复用 `infra/subprocess_runner.run_process_async`）：`[search-gate]` **L2** 触发时，harness 在 workspace 里跑 `ai.static_check.commands`（`.venv/bin` 优先 PATH，20s 超时，≤2000 字符），把**真实输出**拼进注入文本；每回合最多一次 |
+| **实际做法** | 新增 `core/static_check.py`（复用 `infra/subprocess_runner.run_process_async`）：`[search-gate]` **L2**（streak ≥6）触发时，harness 跑 `ai.static_check.commands`，把**真实输出**拼进注入文本；每回合最多一次 |
+| **安全约束** | 该字段能被**仓库里被跟踪的 `config.example.yaml`** 设置 → 命令 **`shlex` 切分 + `shell=False`**，首词必须在已知静态检查工具白名单里，否则 `skipped`（评审 P0 的修法） |
 | **关键否决** | **命令不能自动推断**：实测本仓 `mypy .` 报 **271 errors**（`scripts/` 未排除）而 CI 跑的 `mypy ai_coding` 零错。默认只给 `ruff check .`，mypy 由使用方声明 |
 | **验收** | ① 全链路用例 `test_a_look_only_turn_gets_the_static_check_output`（真 loop + 真工具 + 真子进程，断言注入文本含命令输出）；② `tests/test_static_check.py` 7 例；③ **未做** T2 真机复测（需 API key）|
 
@@ -130,8 +131,8 @@
 | **缺口** | `[strategy-gate]` 只管"工具全失败"，**没有针对"工具成功但无进展"** |
 | **实际信号** | `search_streak` = 连续**成功**的检索调用、中间没有成功的非检索调用。**只看工具名 + success，不解析输出** |
 | **为什么不用"无新命中"** | 评审 P0：`grep`/`glob` 的 `(no matches)` 逐字节相同、`glob` 按 mtime 排序、`history_search`/`websearch` 内嵌 query、`grep` 裁 300 字符、`DuplicateCallGuard` 拒绝第 3 次相同调用 → 双向皆错且达不到阈值 |
-| **阶梯** | L1（streak ≥4）换手段 → L2（≥8）跑静态检查。**无收尾档**（信号分不清调研与空转） |
-| **验收** | 11 条阶梯单测 + 3 条信号单测 + 1 条全链路用例；`docs/features.md` 已加该阶梯 |
+| **阶梯** | L1（streak ≥4）换手段 → L2（≥6）跑静态检查。**无收尾档**（信号分不清调研与空转） |
+| **验收** | 阶梯单测 + 信号单测 + 2 条全链路用例（含"默认预算下 L2 之后仍有模型步"）；`docs/features.md` 已加该阶梯 |
 
 ### M-B3 · 重试分类 —— ✅ **早已实现**（roadmap 原判为误）
 

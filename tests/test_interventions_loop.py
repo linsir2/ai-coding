@@ -292,7 +292,52 @@ async def test_a_look_only_turn_gets_the_static_check_output(tmp_path):
         for m in session.messages
         if m.synthetic and "search-gate" in (m.content or "")
     ]
-    assert len(nudges) == 2, f"L1 then L2, and no nagging in between; got {len(nudges)}"
-    assert "STATIC-CHECK-ANSWER" in nudges[-1], "L2 must hand over the real output"
     levels = [e.level for e in observer.events if type(e).__name__ == "SearchStalled"]
-    assert levels == [1, 2], f"one event per rung, in order; got {levels}"
+    assert levels[0] == 1, "the first rung changes the approach, not the tool"
+    assert levels == sorted(levels), "the ladder climbs, it never goes back down"
+    assert 2 in levels, "the turn kept looking, so it must reach the static check"
+    static_nudges = [n for n in nudges if "STATIC-CHECK-ANSWER" in n]
+    assert static_nudges, "L2 must hand over the real output the harness produced"
+    # P1-3 (review): the output must not land on the turn's last iteration -- the
+    # model has to get a step in which it can read it.
+    assert any(
+        message.synthetic and "search-gate" in (message.content or "")
+        for message in session.messages[:-1]
+    ), "a nudge must never be the last message of the turn"
+
+
+@pytest.mark.asyncio
+async def test_the_static_check_output_is_readable_under_the_default_budget(tmp_path):
+    """The default budget is 10 iterations; L2 must leave room to consume it."""
+    from ai_coding.core.events import RecordingObserver
+    from ai_coding.tools.registry import ToolRegistry
+
+    engine = _ScriptedEngine(
+        [_read_call(f"d{i}") for i in range(1, 10)] + [_text("done")]
+    )
+    registry = ToolRegistry()
+    registry.register(_Reader())
+    observer = RecordingObserver()
+    loop = AgentLoop(
+        engine,
+        SessionService(tmp_path / "sessions"),
+        registry,
+        approval=AutoApproveCallback(),
+        settings=AIConfig(static_check={"commands": ["echo STATIC-CHECK-ANSWER"]}),
+        observer=observer,
+        workspace=str(tmp_path),
+    )
+    session = loop.sessions.create()
+
+    await loop.process_input(session, "find the thing")
+
+    events = observer.events
+    l2_at = next(
+        e.iteration
+        for e in events
+        if type(e).__name__ == "SearchStalled" and e.level == 2
+    )
+    later_steps = [
+        e.index for e in events if type(e).__name__ == "IterationStarted" and e.index > l2_at
+    ]
+    assert later_steps, f"L2 landed at iteration {l2_at} with no step left to read it"

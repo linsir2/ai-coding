@@ -16,17 +16,20 @@ default_model: deepseek-chat
 ai:
   auto_process_tool_results: true
   max_tool_iterations: 10
-  # B1: what the harness runs itself once a turn has stalled in look-only mode
-  # (4 successful read/grep/glob calls with no edit, test or other action).  The
-  # commands are run in the workspace with `.venv/bin` first on PATH, bounded by
-  # timeout_seconds, and their output is attached to the `[search-gate]` nudge.
+  # B1/B2: consecutive look-only calls (read/grep/glob ... with no write/edit/bash
+  # in between) before the `[search-gate]` ladder speaks.  0 disables it.
+  search_streak_threshold: 4
+  # B1: what the harness runs itself when the ladder reaches its second rung.
+  # The commands are shlex-split and run WITHOUT a shell, and the first word must
+  # be one of the known analysis tools (ruff/mypy/tsc/eslint/...), because this
+  # field can be set by a repository's tracked config.example.yaml -- a string
+  # from there must never become a shell.  Unlisted programs are skipped.
   # Declared, never inferred: on this repository `mypy .` reports 271 errors
   # (`scripts/` is not excluded) while `mypy ai_coding` -- what CI runs -- reports
   # none, so a project that wants mypy must say so.  Empty list disables it.
   static_check:
+    # For this repository, use: ["ruff check .", "mypy ai_coding"]
     commands: ["ruff check ."]
-    # For this repository, add the check CI actually runs:
-    #   commands: ["ruff check .", "mypy ai_coding"]
     timeout_seconds: 20.0
     max_chars: 2000
   max_concurrent_subagents: 3

@@ -99,6 +99,11 @@ class LadderLimits:
     #: the smallest number a normal turn does not reach -- read, read, edit, test:
     #: the streak is back to 0 by the third call.  0 disables the gate.
     search_streak_threshold: int = 4
+    #: B1/B2: the streak that earns L2 (the static check).  Two past L1 rather than
+    #: twice L1 on purpose: the default turn budget is 10 iterations and a nudge
+    #: costs one of them, so a rung at 8 could land on the last iteration and the
+    #: model would never get to read the output the harness produced.
+    search_streak_l2: int = 6
 
 
 @dataclass(frozen=True)
@@ -131,6 +136,11 @@ def _triggered(gate: str, snap: TurnSnapshot, limits: LadderLimits) -> bool:
     if gate == STRATEGY:
         return _strategy_triggered(snap, limits)
     if gate == SEARCH:
+        # A planning or read-only posture is *supposed* to be look-only: nagging it
+        # to "stop looking" would be wrong every single time, so the gate is off
+        # there.  Measured: plan/readonly turns reached L1 and L2 within 8 reads.
+        if snap.mode == "plan" or snap.readonly:
+            return False
         return bool(
             limits.search_streak_threshold
             and snap.search_streak >= limits.search_streak_threshold
@@ -166,13 +176,10 @@ def _helped(gate: str, entry: Mapping[str, Any], snap: TurnSnapshot) -> bool:
             return snap.failed_streak == 0
         return snap.ask_user_calls > _asks(ref)
     if gate == SEARCH:
-        # Two honest shapes, both exactly computable: the run was broken (the
-        # streak dropped), or the model stopped looking altogether -- it is
-        # answering or acting now, which the nudge asked for.  Comparing the
-        # streak alone would call that second shape a failure and escalate.
-        return snap.search_streak < int(ref.get("streak", 0) or 0) or (
-            snap.search_calls <= int(ref.get("calls", 0) or 0)
-        )
+        # No ``_helped`` branch: the rung is derived from the streak itself (see
+        # ``_search_due``), so "did the last nudge help" has no decision to make.
+        # The ledger still records an outcome for audit, and nothing reads it.
+        return False
     if gate == FATIGUE:
         if level == L1:
             return snap.fatigue_index <= float(ref.get("fatigue", 0.0) or 0.0)
@@ -242,31 +249,27 @@ def _search_due(
 ) -> tuple[int, str] | None:
     """The rung the look-only streak has earned, or None to stay quiet (B1/B2).
 
-    The rung is derived from the **streak**, not from the ledger's window, which
-    is why this gate does not share ``_due``'s escalation ladder.  Reason, measured
-    end to end (docs/plan-m-b.md §十五): a nudge is injected *before* the model
-    runs, and ``search_streak`` only decays when a non-retrieval call succeeds —
-    so a gate that re-armed from window bookkeeping alone re-fired on every
-    iteration and the model never got to run again.  Here:
+    The rung is derived from the **streak**, not from the ledger's window, which is
+    why this gate does not share ``_due``'s escalation ladder.  Reason, measured end
+    to end (docs/plan-m-b.md §十五): a nudge is injected *before* the model runs, and
+    ``search_streak`` only decays on a successful action -- so a gate that re-armed
+    from window bookkeeping alone re-fired on every iteration, and the model never
+    got to run again.
 
-    ``pending``   -> quiet: the nudge is fresh, let the model act on it.
-    streak >= 2K  -> L2, the rung that asks for the static check.
-    streak >= K   -> L1 "change what you are doing", then quiet.
-    Either rung re-fires only once the streak has grown a whole threshold past
-    the last fire -- otherwise every extra look would inject another nudge and
-    the model would spend its iterations reading advice instead of working.
+    L1 at ``search_streak_threshold`` looks, L2 at ``search_streak_l2``, and either
+    rung re-fires only once the streak has grown a whole L1-threshold past the last
+    fire -- otherwise every extra look would inject another nudge and the model
+    would spend its iterations reading advice instead of working.
     """
     threshold = limits.search_streak_threshold
     if not threshold or snap.search_streak < threshold:
         return None
-    level = L2 if snap.search_streak >= threshold * 2 else L1
+    level = L2 if snap.search_streak >= max(limits.search_streak_l2, threshold) else L1
     if entry is None:
         return (level, "nudge")
-    if str(entry.get("outcome", "")) == "pending":
-        return None
-    ref: Mapping[str, Any] = entry.get("ref") or {}
     if level > int(entry.get("level", 0) or 0):
         return (level, "nudge")
+    ref: Mapping[str, Any] = entry.get("ref") or {}
     if snap.search_streak >= int(ref.get("streak", 0) or 0) + threshold:
         return (level, "nudge")
     return None

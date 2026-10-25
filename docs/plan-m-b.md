@@ -779,8 +779,6 @@ ai_coding/core/mcp.py:787: error: Cannot find implementation or library stub for
 | **记录不修（评审发现）** | **P1-1**：`_finish_at` 丢掉 intervention 元数据 → 任何走 FINISH 的 ladder 不发事件、账本不记 `exhausted`（Strategy L4 现已受影响） |
 | **需校正** | roadmap M-B3（已完成）、M-B4（大部分已完成） |
 
----
-
 ## 十二、方案评审记录（子智能体，`git worktree` 独立实跑）
 
 评审在 `/tmp/mb-review`（detached HEAD `5378131`）**不复用方案任何结论**，自写脚本重跑；
@@ -799,3 +797,97 @@ ai_coding/core/mcp.py:787: error: Cannot find implementation or library stub for
 | 🟡 **P2-1..6** | 漏 `events.__all__` + import；漏 `interventions.__all__`；"5 个分派函数"实为 6；`armed` 不需改（但要写注释）；POST 不接 SEARCH 要声明；B4 描述夸大 | ✅ 全部已改 |
 | 🟡 **P2-7** | 429 `insufficient_quota` 被当 RATE_LIMITED 重试满 4 次 | ✅ §九 待拍板 3 |
 | 🟡 **P3-1..3** | D 的归因错（成功重复是 `DuplicateCallGuard`）；前端不展示新事件；"30/4 是评估 config"无法证实 | ✅ 已校正 |
+
+
+---
+
+## 十五、代码评审后的修复（第二版，`ef1c036` 之后）
+
+子智能体对实现做了独立评审（worktree + 自写探针 + 真 trace），抓到 **1 个 P0 + 3 个 P1**。
+全部已修，逐条记录如下 —— 这是本轮最有价值的部分。
+
+### 15.1 🔴 P0：仓库里被跟踪的 `config.example.yaml` 就能设置要执行的命令
+
+我原以为"命令来自操作者配置，不是模型产出，不需要权限门"（§十四.10）。**这是事实错误**：
+
+- `ConfigLoader.DEFAULT_NAMES` 会从 workspace **向上查找** `config.local.yaml` /
+  `config.yaml` / `config.example.yaml`，而 `config.example.yaml` 是**仓库里被跟踪的文件**。
+- 实测：在一个只有 `config.example.yaml` 的目录里 `ConfigLoader.load_app_from('.')`
+  → `commands = ['echo PWNED-FROM-REPO-EXAMPLE']`。
+
+攻击链：克隆不受信任的仓库 → 在该仓库里启动 agent → 正常读 6 个文件 → L2 自动执行仓库里的命令。
+而 `core/acceptance.py` 的 verify 命令（**模型产出**）反而有 `bash_denied` + 工作区外检查 +
+approval —— 我把方向和安全性都搞反了。
+
+**修法（结构性，不是补检查）**：`shlex.split` + **`shell=False`** + 首词白名单
+（`ALLOWED_PROGRAMS`，比对 basename 所以 `.venv/bin/ruff` 仍可用）。于是：
+
+```
+$ ruff check .  → exit 0            （照常工作）
+$ echo evil ; touch /tmp/PWNED  → skipped: 不在允许的静态检查工具里   （PWNED 未生成）
+```
+
+`;`/`&&`/`|` 只是普通参数，且任意二进制名不能被执行。**残留风险**（已写进 docstring）：
+仓库可以在自己的 `.venv/bin` 里放一个叫 `ruff` 的恶意程序 —— 这是"运行项目自带的 linter"
+这个功能的固有代价，与"模型用 bash 跑 `make`"同级，但已从"任意命令"收窄到"必须叫静态检查工具名"。
+
+### 15.2 🟠 P1：`insufficient_quota` 修复对真实 SDK 无效
+
+我只看 `str(exc)`。实测真实 `openai.RateLimitError`：
+
+```
+str(exc)          = "You exceeded your current quota, please check your plan and billing details."
+marker in str     : False          ← 我的判断失效
+marker in body    : True           ← 真正的位置
+```
+
+测试之所以绿，是因为我把 marker 写进了 message。**修法**：新增 `_mentions_quota()`
+同时读 `exc.body`，并加一条用 body-only 的 429 的测试。
+
+### 15.3 🟠 P1：默认预算下 L2 的输出没人读
+
+默认 `max_tool_iterations=10`，一次 read/step 时 L2（原设计 streak 8）落在第 10 个迭代 ——
+**静态检查跑完、注入完，回合就结束了**。B1 的全部意义（把结论递到模型面前）落空。
+
+**修法**：L2 阈值与 L1 解耦（`search_streak_l2: int = 6`，原先是 `2×L1=8`）。实测修后：
+
+```
+SearchStalled it=8 lvl=2 calls=6 streak=6
+IterationStarted 9        ← L2 之后还有两步可以读它
+IterationStarted 10
+```
+
+并新增用例 `test_the_static_check_output_is_readable_under_the_default_budget`
+（跑默认预算，断言 L2 事件之后仍 `IterationStarted`）。原有用例只断言提示条数，漏掉了这条。
+
+### 15.4 🟠 P1：`todo_write` 能把空转藏起来
+
+原规则是"任何成功的非检索调用清零"，于是 `todo_write`/`checkpoint_write`/goal 工具也能清零 ——
+模型每读 3 次写一次 todo，gate 永远不触发。**修法**：改成**动作白名单**
+`ACTION_TOOLS = {write, edit, bash}`；其余既不计数也不清零。顺带把 `job_output`/
+`job_list`/`subagent_list` 补进检索集（它们是"看状态"）。
+
+### 15.5 🟡 P2/P3（都已处理）
+
+| # | 问题 | 修法 |
+|---|---|---|
+| P2-5 | `_helped` 的 SEARCH 分支是死代码（决策不读 outcome） | 删分支，改成一行注释 + 一条用例锁住"outcome 只是审计" |
+| P2-8 | `search_streak_threshold` 接不到 YAML，"0 可关"只是测试能力 | 接到 `AIConfig` → `TurnPolicyConfig` → `LadderLimits`（本功能会自己跑子进程，操作者必须能关） |
+| P2-10 | plan / 只读姿态被误伤（它们本来就该只看不动） | `_triggered` 对 `mode == "plan"` 或 `readonly` 直接返回 False |
+| P3-12 | `max_chars` 小于前导行时静默返回 `""` | 头部按 cap 截断，且"skipped"也算说过话 |
+| P3-13 | 异常分支可能把块丢掉 | 异常照样写头部（`could not run: …`），`spoke` 计数覆盖拒绝与异常 |
+| P3-14 | 文档 S3 写"含 could not run"，实际是 exit 127 | 现按 `shell=False` 后未安装的工具会走 `outcome.error` → 文案确实是 `could not run`；用例改为断言它 |
+| P3-6/7 | 文档说 L1 在第 4 次、L2 在第 6 次，trace 形如 `{"name":..., "payload":...}` | 已改为实测：L2 在第 8 个**迭代**；jsonl 是 `{"evt": "SearchStalled", "data": {...}}` |
+
+### 15.6 修后判据（全部实跑）
+
+| 判据 | 结果 |
+|---|---|
+| `tests/test_static_check.py`（含 2 条安全用例） | **10 passed** |
+| `tests/test_interventions.py` + `test_interventions_loop.py` | 全绿（含 2 条全链路） |
+| 全量 `pytest` | **3840 passed / 6 skipped / 0 failed** |
+| `ruff` / `mypy ai_coding` | **0 / 0**（153 文件） |
+| 真仓库跑默认命令 | `ruff check .` → exit 0；`mypy ai_coding` → exit 0 |
+| 恶意命令 | `echo evil ; touch /tmp/PWNED` → **skipped，文件未生成** |
+
+---
