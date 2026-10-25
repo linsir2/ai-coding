@@ -23,6 +23,7 @@
 | `tools.extra_workspace_roots` | 是（文件工具免问读写任意根） | 仅目录校验 | **高** |
 | `ai.websearch_api_key` | 是（外发 key 给 Tavily） | ❌ 无 | 中高 |
 | `tracing.dir` | 是（向任意路径写 trace） | ❌ 无 | 中 |
+| `memory.embeddings.cache_path` | 是（绝对路径时向任意路径写 embeddings 缓存，[cli.py:338-342](file:///workspace/ai-coding/ai_coding/cli.py#L338-L342)） | ❌ 无 | 中 |
 | `mcp.servers[].headers` + `url` | 是（外发，同名可复用 OAuth token） | token 落 0600 外部文件 | 中高 |
 | `mcp.servers[].auto_approve` / `permissions.allow` | 是（WARN→ALLOW 常驻） | deny 优先 | 中 |
 | `tools.bash.timeout_seconds` | 是（成本） | 有界 | 低 |
@@ -444,12 +445,14 @@ M  tests/test_config_layers.py
 |---|---|
 | **本方案改** | `config/loader.py`（1 个文件）+ 1 个测试文件 + 4 份文档 |
 | **不改** | `hooks.py` / `mcp.py` / `static_check.py` / `jobs.py` / `acceptance.py` / 分层加载本身 |
-| **不做（另立项，同类）** | `models[].base_url` / `api_key`（外发）、`tools.extra_workspace_roots`（越权）、`ai.websearch_api_key`（外发 key）、`tracing.dir`（越界写）、`hooks.plugin_dir`（python hook 模块来自不可信仓库树）、`mcp.servers[].headers`（token 复用） |
+| **不做（另立项，同类）** | `models[].base_url` / `api_key`（外发）、`tools.extra_workspace_roots`（越权）、`ai.websearch_api_key`（外发 key）、`tracing.dir`（越界写）、`memory.embeddings.cache_path`（越界写 embeddings 缓存）、`hooks.plugin_dir`（python hook 模块来自不可信仓库树）、`mcp.servers[].headers`（token 复用） |
 | **已修（M-B）** | `static_check.commands` 的 env 门 + argv + 白名单 |
 
 ---
 
 ## 十二、方案评审记录（子智能体，`git worktree` 独立实跑）
+
+### 12.1 方案评审（对方案的评审）
 
 评审在 `/workspace/review-wt` 实跑，主仓库全程干净。它抓到 **1 个 P0 + 2 个 P1 + 4 个 P2**，全部已并入本方案：
 
@@ -463,7 +466,36 @@ M  tests/test_config_layers.py
 | 🟡 **P2-3** | §一 清单漏 `websearch_api_key` / `tracing.dir` | ✅ 已补 |
 | 🟡 **P2-4** | 漏 `hooks.plugin_dir`（python hook 模块来自不可信仓库树） | ✅ 已补进边界 |
 
-### 12.1 评审确认成立的判断
+评审确认成立的判断：项目层覆盖用户层、`discover` 优先级、TUI 走分层、`ConfigManager` 零消费者、
+U3（用户层保留）、U9（`--path` 不受影响）、`mcp` 段只有 `enabled`/`servers`（丢整个 key 不误伤）。
+
+### 12.2 验收评审（对实现本身的评审）：P1-1 残余绕过
+
+验收评审（worktree 独立实跑 + 我复核）确认 P0 与 P1-2 主体已修（18 种大小写/空白/引号/全角变体全部被挡，无新绕过），
+但抓到 **1 个 P1**：
+
+| # | 问题 | 实测 | 修法 |
+|---|---|---|---|
+| 🟠 **P1-1** | **sidecar 残余绕过**：用户层**不存在/为空/损坏**时 `chosen` 保持 `None`，而 `mcp_sidecar(None)` **回退到 `discover()`**（锚在 `Path.cwd()` = 项目目录）→ 项目目录的 `mcp.local.yaml` 仍被合并 | 无用户层 + 项目有非执行键 + 项目 sidecar → `servers=['evil-sidecar']` | ✅ `chosen` 的赋值**移到"无可读文档"的 `continue` 之前**，且 user 层**总是**设置它（即使文件不存在）。实测该场景 → `servers=[]` |
+| 🟡 **P2-1** | `docs/data-contracts.md:799` 说"`mcp.servers` 全局和项目都是真的"，与新契约**直接矛盾**（本次提交改了该文件却漏这行） | — | ✅ 已订正 |
+| 🟡 **P2-2** | 三份文档都写"`chosen` 不推进到项目层"，字面成立但**暗示 sidecar 不会从项目目录读** | — | ✅ 随 P1-1 修好后该表述成立；data-contracts 已补"`None` 会回退到 `discover()`" |
+| 🟡 **P2-3** | 方案 §一 清单漏 `memory.embeddings.cache_path`（绝对路径时越界写 embeddings 缓存） | — | ✅ 已补 |
+| 🟡 **P2-4** | `_overlay` docstring 用 `tools.enabled: [bash]`（list）举例，但 `ToolsConfig` 现在是 dict 形状 | — | ✅ 改为不依赖具体形状，并注明信任边界在上一层 |
+| 🔵 **P3-1** | 提交信息说"14 条新用例"，实为 **13 条新增 + 1 条改名** | — | ✅ 订正为 14（13 新 + 1 改名 + 1 条 P1-1 回归 = 15） |
+| 🔵 **P3-5** | 方案 §5.3 说"hooks / mcp 段各加一句"，但 `config.example.yaml` **没有 hooks 段** | — | ✅ 只加 mcp 段（hooks 段不存在，加了反而是噪音） |
+
+### 12.3 验收评审确认成立的判断
+
+- P0 真修好：18 种变体（含 `hOoks`/`mCp` 这类**不能**归一化成 `hooks`/`mcp` 的）实跑全部安全
+- 嵌套 key、YAML anchor/alias/merge key `<<`、YAML tag（`!!python/object/apply`）**均无法绕过**
+- 突变 A/B/C 独立重跑，全部被测试抓住
+- 改写的 `test_a_project_layer_may_not_add_mcp_servers` 断言**合理**（表达"用户层保留、项目层丢弃"，非单纯反转）
+- 全量 3857 passed / 6 skipped / 0 failed；`ruff` 0；`mypy` 0（153 文件）—— 与提交信息一致
+
+### 12.4 评审指出的"非分层路径"（已确认是潜在而非现网）
+
+`load_app(path)` / `load_mcp(path)` / `ConfigManager.initialize` 也经 `_mcp_doc` 读 sidecar，
+但**三者在生产代码里零消费者**（仅 `tests/`、`scripts/` 引用）。方案 §2.3 / §十.8 的判断成立，不单独立项。
 
 - 项目层覆盖用户层、`discover` 优先级、TUI 走分层、`ConfigManager` 零消费者 —— 全部复核成立
 - U3（用户层保留）成立，且**正是因为丢弃发生在 `_overlay` 之前**

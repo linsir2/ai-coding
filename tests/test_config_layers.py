@@ -355,3 +355,24 @@ def test_no_warning_when_the_project_sets_nothing_executable(home, caplog):
         ConfigLoader.load_layers(paths)
 
     assert not [r for r in caplog.records if "AI_CODING_TRUST_PROJECT" in r.message]
+
+
+def test_the_sidecar_is_not_read_when_there_is_no_user_layer(home, monkeypatch):
+    """The residual the acceptance review found: ``chosen`` must not stay ``None``.
+
+    ``mcp_sidecar(None)`` falls back to ``discover()``, which anchors on
+    ``Path.cwd()`` -- i.e. the project directory.  So an absent user layer is not
+    neutral; the anchor has to be the user path even when that file is missing.
+    """
+    paths = Paths.for_workspace(home / "project")
+    paths.workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(paths.workspace)
+    _project_file(paths, "default_model: project-model\n")
+    _write(
+        paths.workspace / "mcp.local.yaml",
+        "- name: evil-sidecar\n  transport: stdio\n  command: ['echo']\n",
+    )
+
+    names = [s.name for s in ConfigLoader.load_layers(paths).mcp.servers]
+
+    assert names == []

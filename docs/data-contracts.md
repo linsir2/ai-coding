@@ -796,7 +796,7 @@ XDG 表达式原本在 `grants.py`/`mcp.py` 各写一份，现在统一向 `path
 | 契约 | 说明 |
 |---|---|
 | `ConfigLoader.discover(start)` | 锚在**工作区**（非进程 CWD）；**真实配置优先于 example 配置**，无论谁离得近（example 是文档，不是配置） |
-| `ConfigLoader.load_layers(paths)` | 全局 config 为 base，项目 overlay **深度合并、项目按 key 赢**。`mcp.servers` 是唯一累加的 list（全局服务器和项目服务器都是真的）；其余 list 替换，避免项目重开全局关掉的开关 |
+| `ConfigLoader.load_layers(paths)` | 全局 config 为 base，项目 overlay **深度合并、项目按 key 赢**。**例外（N-4）**：执行类顶层键 `hooks` / `mcp` 只认用户层 —— 项目层设置即丢弃 + warning，除非 `AI_CODING_TRUST_PROJECT=1`（仓库不能替 agent 进程设置环境变量）。因此 `mcp.servers` 不再是"全局+项目都真"；`mcp.local.yaml` sidecar 的锚点也固定为用户层路径（`None` 会回退到 `discover()`，锚在 CWD = 项目目录）。其余 list 替换，避免项目重开全局关掉的开关 |
 | `load_layers_report` | 额外返回**每个顶层 key 来自哪个文件**——合并后的配置回答不了「这个项目为什么用这个模型」，而「两个目录行为不同」正是本改动要修的 bug |
 | 坏层降级 | 某一层 YAML 损坏则跳过该层并告警，不致命——个人的坏配置不能让所有项目起不来 |
 | `SkillRegistry(roots)` | 多 root，**项目在后即项目赢**（Claude Code 反过来让个人层压项目层，这会让仓库改写使用者的工具与约定）。冲突经 `shadowed()` 报告，不静默 |

@@ -226,12 +226,16 @@ class ConfigLoader:
     def _overlay(base: dict[str, Any], top: dict[str, Any]) -> dict[str, Any]:
         """Deep merge, ``top`` wins per key. Lists replace -- except ``servers``.
 
-        Lists replace on purpose: ``tools.enabled`` is a declaration of what
-        exists, not an additive layer, and concatenating it would let a project's
-        ``enabled: [bash]`` silently re-enable everything the global layer turned
-        off.  ``servers`` is the deliberate exception: a project adds MCP servers
-        to the user's list rather than replacing it, and the name collision is
-        surfaced by the manager instead of being resolved here.
+        Lists replace on purpose: a list is a declaration of what exists, not an
+        additive layer, and concatenating it would let a project silently
+        re-enable something the global layer turned off.  ``servers`` is the
+        deliberate exception: a project adds MCP servers to the user's list
+        rather than replacing it, and the name collision is surfaced by the
+        manager instead of being resolved here.
+
+        Note the trust boundary sits one level up (``load_layers_report``): the
+        project layer's ``hooks``/``mcp`` are dropped before they reach this
+        function, so "a project adds servers" only holds for a trusted project.
         """
         merged = dict(base)
         for key, value in top.items():
@@ -259,6 +263,17 @@ class ConfigLoader:
         chosen: Path | None = None
         trusted = _project_execution_allowed()
         for role, layer in ConfigLoader._layers_for(paths, path):
+            # ``chosen`` anchors the ``mcp.local.yaml`` sidecar (``_mcp_doc``),
+            # so in layered mode it must be the *user* layer -- even when that
+            # file does not exist.  Leaving it ``None`` is not neutral:
+            # ``mcp_sidecar(None)`` falls back to ``discover()``, which anchors on
+            # ``Path.cwd()``, i.e. the project directory.  So the anchor has to
+            # be set before the "nothing to read" skip below, and only an
+            # explicit ``--path`` or the operator's opt-in may point it at a
+            # project file.
+            if role != "project" or trusted:
+                if layer is not None:
+                    chosen = layer
             document = ConfigLoader._read_layer(layer)
             if not document:
                 continue
@@ -282,14 +297,6 @@ class ConfigLoader:
                     document = {
                         k: v for k, v in document.items() if k not in EXECUTION_KEYS
                     }
-            # ``chosen`` anchors the ``mcp.local.yaml`` sidecar (``_mcp_doc``),
-            # so in layered mode it must stay on the user layer: otherwise a
-            # repository's own sidecar is what gets merged in.  An explicit
-            # ``--path`` is the operator's file and advances it; the opt-in does
-            # too, because trusting the project is exactly what it means.
-            if role != "project" or trusted:
-                if chosen is None or layer is not None:
-                    chosen = layer
             for key in document:
                 sources[key] = str(layer)
             merged = ConfigLoader._overlay(merged, document)
