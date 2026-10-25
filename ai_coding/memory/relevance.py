@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
 
+from ai_coding.infra.time_utils import parse_iso8601
 from ai_coding.memory.note import USER_SCOPE, MemoryNote
 from ai_coding.memory.tokenize import tokenize
 
@@ -196,12 +197,13 @@ class RecallScorer(Protocol):
 
 
 def parse_time(value: str) -> datetime | None:
-    """Parse an ISO-8601 timestamp (``Z`` or offset), ``None`` when unusable."""
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+    """Parse an ISO-8601 timestamp (``Z`` or offset), ``None`` when unusable.
+
+    A bare wall clock (no offset) is read as UTC: the store writes ``now_utc()`` stamps,
+    so a naive value is a stamp whose zone was lost, not a local time.
+    """
+    parsed = parse_iso8601(value)
+    if parsed is None:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 

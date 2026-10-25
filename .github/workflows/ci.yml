@@ -32,6 +32,17 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      # ripgrep is what GrepTool's rg branch shells out to, and seven tests exercise
+      # that branch -- three hard-fail without it, two skip themselves, and two would
+      # otherwise compare the fallback against itself.  ubuntu-24.04 ships without it,
+      # so without this step CI never verifies the rg branch at all, which is exactly
+      # how r19/F1 leaked absolute paths (docs/data-contracts.md, r20/F0).
+      - name: Install ripgrep (the rg branch is part of the contract)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ripgrep
+          rg --version
+
       - name: Lint
         run: ruff check .
 

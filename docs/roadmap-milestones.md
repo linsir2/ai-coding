@@ -20,6 +20,21 @@
 | **契约变更** | `test_mcp_servers_from_both_layers_are_kept` → 改写为"项目层的 server 被丢弃"（原测试锁定的是 `_overlay` 的追加语义，本方案有意变更） |
 | **未覆盖（另立项）** | `models[].base_url`/`api_key`（外发）、`tools.extra_workspace_roots`（越权）、`ai.websearch_api_key`（外发 key）、`tracing.dir`（越界写）、`hooks.plugin_dir`（python hook 模块来自不可信仓库树） |
 
+### N-5 · CI 连续失败修复（ripgrep 环境 + 3.10 时间戳解析）—— ✅ 已完成（2026-10-25）
+
+> 方案与两轮评审见 [plan-ci-fix.md](plan-ci-fix.md)。
+
+| 项 | 内容 |
+|---|---|
+| **事实澄清** | 仓库**没有 PR**（`gh pr list --state all` 为空）——失败的是直推 `main` 触发的 CI。4 次失败运行对应 **3 种互不相关的失败模式**，其中 2 种已在 HEAD 修掉（`test_loop_digest`、ruff 4 errors） |
+| **根因 A** | `ubuntu-24.04` 镜像（`20261012.334.1`）**不含 ripgrep**，而 rg 分支有 **7 个消费者**：3 条硬失败、2 条 skipif、2 条静默假绿。CI 因此**从未验证过 rg 分支** —— 正是 r19/F1 泄漏 bug 的成因（`data-contracts.md` r20/F0 条目） |
+| **根因 B** | `tests/test_plan_m1.py:766` 用裸 `datetime.fromisoformat(stamp)`，而 `Z` 设计符到 **3.11** 才支持，3.10 是声明下限 → 3.10 job 独有的一条失败 |
+| **修法** | ① `ci.yml` 显式 `apt-get install ripgrep`（让环境满足测试的正当依赖，而非加 skipif 把问题藏起来）；② 新增 `infra/time_utils.parse_iso8601`，4 个消费者共用（3 处生产 + 1 处测试），消掉 3 份手写 `.replace("Z","+00:00")` |
+| **关键实现点** | `parse_iso8601` 是**纯解析器**（无偏移返回 naive）：三处消费者的时区策略不同（OTLP 按本地、`relevance.parse_time` 补 UTC），在共用函数里二选一会静默改变另一方的数字 |
+| **验收** | 3.14：3863 passed（+5 新用例）；**3.10 七步全绿**（3863 passed / mcp_stdio 1 / mcp_end_to_end 4 / memory 11/11 / trace 7/7 / ruff / mypy）—— 这是 **3.10 job 首次带 rg 跑完**，`test_r17_parity.py` 18 passed 无跳过。突变测试（去掉 `.replace`）在 3.10 下让 U1+U6 变红；rg 缺席复现让 3 条用例失败 |
+| **契约变更** | `parse_iso8601` 成为 ISO-8601 解析唯一入口（见 `data-contracts.md`）；`memory/relevance.parse_time` 改为薄封装，导出契约不变 |
+| **未覆盖（另立项）** | N-6（2 条 rg 用例缺守卫）；rg 版本偏差（CI 14.1.0 vs 测量基线 15.1.0） |
+
 ---
 
 ## 0. 领域总览
@@ -467,3 +482,13 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 | **影响** | `tests/test_mcp_stdio.py`、`test_mcp_end_to_end.py`、`test_mcp_progress.py` 平时被 `AI_CODING_MCP_STDIO=1` 门控故 skip（未暴露）；**CI 里前两个 step 会红**（`ci.yml:45/51` 设了该变量） |
 | **验收** | `AI_CODING_MCP_STDIO=1 pytest` 三个文件 → **6 passed**（改前 1+3+1 failed）；`scripts/r7_cases.py` 的 MCP 档随之恢复 |
 | **评审副产物** | 代码评审发现第三个夹具 —— 我最初只 grep 了 `mcp_echo_server`，漏了它（见 plan §13.4 I-3） |
+
+### N-6 · 2 条 rg 用例缺 rg 守卫（本机无 rg 时静默假绿）
+
+| 项 | 内容 |
+|---|---|
+| **位置** | `tests/test_m4_security.py:461`（`test_grep_include_dotenv_still_filters_credentials`）、`tests/integration/test_r17_parity.py:206`（`test_both_runners_answer_the_same_question`） |
+| **现象** | rg 缺席时**仍然通过，但根本没验证到 rg 分支**：前者 `for use_rg in (False, True)` 且不注入 runner，rg 缺席时 `use_rg=True` 那轮拿到错误串，而断言只查 `"TOKEN=secret" not in result.output`；后者 autodetect，`real` 就是兜底 → 兜底和自己比，恒绿 |
+| **实测** | `PATH=/tmp/norg`（不含 `rg`）：这两条 `2 passed` |
+| **为何现在不修** | CI 已装 rg（N-5），这两条在 CI 里已真跑 rg 分支；加守卫只能帮到"本机没装 rg 的开发者"，属 N-5 范围外的加固 |
+| **建议修法** | 与 `test_r17_parity.py:183/366` 同款 `@pytest.mark.skipif(not shutil.which("rg"), reason="ripgrep is not installed")`；`test_m4_security.py:461` 是循环，需在 `use_rg=True` 那轮 `pytest.skip(...)` |

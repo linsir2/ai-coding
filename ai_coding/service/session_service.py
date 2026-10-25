@@ -9,14 +9,13 @@ from __future__ import annotations
 import os
 import shutil
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from ai_coding.domain.message import CHECKPOINT_MARK
 from ai_coding.domain.session import SessionData
 from ai_coding.infra.json_utils import from_json_file, to_json_pretty
-from ai_coding.infra.time_utils import now_utc
+from ai_coding.infra.time_utils import now_utc, parse_iso8601
 
 
 def _access_rank(value: Any) -> tuple[int, str]:
@@ -27,11 +26,7 @@ def _access_rank(value: Any) -> tuple[int, str]:
     bottom instead of raising, because one bad file must not hide the rest.
     """
     if isinstance(value, str) and value:
-        try:
-            datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            pass
-        else:
+        if parse_iso8601(value) is not None:
             return (0, value)
     return (1, "")
 

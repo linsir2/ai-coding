@@ -306,6 +306,7 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `LedgerUpdated`（事件） | `items` | open 集签名变化才发（边沿触发）；transcript 显示 dim 行，trace 泛型记录 |
 | `SearchStalled`（事件） | `iteration`、`level`、`calls`、`streak` | B1/B2/B5：`[search-gate]` 每升一档发一条，只走 nudge 路径；`trace.py` 的 `asdict` 让它自动进 jsonl |
 | `EXECUTION_KEYS`（配置常量） | `{"hooks", "mcp"}` | N-4：项目层不得授予的顶层键。`ConfigLoader` 在 `_normalize` **之后**过滤，项目层设置即丢弃 + warning，除非 `AI_CODING_TRUST_PROJECT=1`。`mcp.local.yaml` sidecar 的锚点（`chosen`）同样不推进到项目层 |
+| `parse_iso8601`（`infra/time_utils.py`） | `str -> datetime \| None` | ISO-8601 解析的**唯一**入口（CI 修复：4 个消费者共用）。内部把 `Z` 归一成 `+00:00`，因为 `datetime.fromisoformat` 到 3.11 才认 `Z`，而 3.10 是本项目声明下限（`pyproject` 的 `python_version`/`target-version` 与 CI 矩阵）。**纯解析器**：无偏移的值返回 naive——"裸 wall clock 算哪一区"是各调用方自己的策略（OTLP 交给 `timestamp()` 按本地，`memory/relevance.parse_time` 补 UTC），在函数里二选一会静默改变另一方的数字。`memory/relevance.parse_time` 仍是导出契约（`service.py`/`store.py` 从那里 import），只是改成薄封装 |
 | `SubagentResult` 扩展 | `truncated`、`exit_reason`、`usage` | 未完成必须明说；ledger 文件（`to_dict`）保留新字段 |
 | `ToolResult.error`（子跑） | `child_timeout` / `child_max_iterations` / `child_error` | 非完成态恒为机器码；max_iterations 仍算成功（streak 照 reset），细节在 `error_detail` 与输出文本 |
 
@@ -893,6 +894,8 @@ workspace 根向上走到用户主目录为止（home 是硬边界，否则 `~/C
 - ~~`walk_workspace` LIFO 倒序展开~~ **r20/F3 已修**：`pop(0)` 改广度优先，兄弟按字母序，`files.find` 的 200 条预算自顶向下花
 - ~~`grep(path="<子目录>")` 恒返回无命中~~ **r19/F1 已修**：两条路径都把「相对搜索目标」重新锚定到 workspace
 - ~~rg 分支会把绝对路径漏给模型~~ **r20/F0 已修**（r19/F1 引入、提交时 rg 已卸载被 skip 掩盖；验收脚本现在会真跑 parity，rg 缺席时打印 UNVERIFIED 而非拿兜底比自己）
+- ~~CI 从未验证过 rg 分支~~ **CI 修复已补**：`ubuntu-24.04` 镜像不含 ripgrep，`ci.yml` 现在显式 `apt-get install ripgrep`（noble = 14.1.0）。rg 分支的 7 个消费者（3 条硬失败、2 条 skipif、2 条静默假绿）此后全部真跑；实测 3.10 + rg 14.1.0 下 `test_r17_parity.py` 18 passed 无跳过、全量 3863 passed。**已知偏差**：`grep_tool.py:42` 与 `test_r17_parity.py:14` 记的"实测真值基于 rg 15.1.0"是**测量基线**，CI 跑的是 14.1.0；现有断言在 14.1.0 下全过，若将来某条需要 15.1.0，把该步换成官方预编译二进制 + sha256 即可
+- `test_m4_security.py:461`（`test_grep_include_dotenv_still_filters_credentials`）与 `test_r17_parity.py:206`（`test_both_runners_answer_the_same_question`）在**本机没有 rg** 时会静默假绿（前者拿错误串过断言，后者兜底和自己比）。CI 已装 rg 所以不受影响；给这两条加 rg 守卫（与 `test_r17_parity.py:183/366` 同款 `skipif`）记在 roadmap 待办
 - ~~`ChatMessage.images` 对压缩预算贡献 0 token~~ **r19/F3 已修**：`ImageRef.bytes` 记录真实体积，预算按 `bytes//4` 计
 - ~~`undo → redo` 丢回合新建的文件~~ **r20/F9 已修**：stash 不含 untracked，undo 删除前先留底进 `saved`，redo 写回
 - ~~连续 `/undo` 让前一次不可达~~ **r20/F2 已修**：对齐 OC 的「更宽的暂存回退」，redo 一次全回；`/redo` 同时复原 `turn_count` 与摘要环

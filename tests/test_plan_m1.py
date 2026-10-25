@@ -32,6 +32,7 @@ from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.stance import PostureResult
 from ai_coding.domain.task import TaskState
+from ai_coding.infra.time_utils import parse_iso8601
 
 #: Unique per call so a test can ask "did this step read an earlier step?".
 _TOOL_MARK = "tool-output-%d "
@@ -753,8 +754,6 @@ async def test_parent_step_bubbles_carry_real_timestamps():
     Asserted by parsing the stamp as ISO-8601 — the format every consumer
     (replay, export, OTLP) assumes — rather than against a literal string.
     """
-    from datetime import datetime
-
     session = _session_with("one")
     await PlanRunner(_StubLoop(["complete"])).run(session)
 
@@ -763,7 +762,10 @@ async def test_parent_step_bubbles_carry_real_timestamps():
     for message in bubbles:
         stamp = message.timestamp
         assert stamp, "a persisted message with no timestamp"
-        datetime.fromisoformat(stamp)  # raises if not a real stamp
+        # ``parse_iso8601``, not ``datetime.fromisoformat``: the ``Z`` designator is
+        # only understood from 3.11, and 3.10 is this project's declared floor, so the
+        # bare call failed on 3.10 only (docs/plan-ci-fix.md section 3).
+        assert parse_iso8601(stamp) is not None, "not a parseable ISO-8601 stamp"
 
 
 @pytest.mark.asyncio

@@ -13,10 +13,10 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
-from datetime import datetime
 from typing import Any
 
 from ai_coding.core.export_html import SessionView, SpanRow
+from ai_coding.infra.time_utils import parse_iso8601
 
 __all__ = ["rows_to_otlp"]
 
@@ -38,9 +38,8 @@ def _hash(value: str, length: int) -> str:
 
 
 def _nano(ts: str) -> int:
-    try:
-        moment = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except ValueError:
+    moment = parse_iso8601(ts)
+    if moment is None:
         return 0
     return int(moment.timestamp() * 1_000_000_000)
 
