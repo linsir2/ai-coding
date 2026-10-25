@@ -206,7 +206,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         observer=None,
         trace=recorder,
         guards=build_guards(app_cfg),
-        hooks=_make_hooks(app_cfg, str(paths.workspace)),
+        hooks=_make_hooks(app_cfg.hooks, str(paths.workspace)),
         notices=notices,
         jobs=jobs,
         cancel=cancel,

@@ -433,7 +433,7 @@ def test_budget_says_when_no_turn_has_run(tmp_path):
     from ai_coding.app.commands import _budget_report
     from ai_coding.core.trace import TraceStore
 
-    loop = _BudgetLoop(TraceStore(tmp_path))
+    loop = _BudgetLoop(TraceStore(tmp_path, workspace=tmp_path))
     out = _budget_report(loop, _session("never-ran"))
     assert "还没跑过回合" in out
 
@@ -442,7 +442,7 @@ def test_budget_says_when_zero_tokens(tmp_path):
     from ai_coding.app.commands import _budget_report
     from ai_coding.core.trace import TraceStore
 
-    store = TraceStore(tmp_path)
+    store = TraceStore(tmp_path, workspace=tmp_path)
     store.update_summary(
         "zero",
         {"turns": 2, "steps": 5, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0},
@@ -455,7 +455,7 @@ def test_budget_renders_real_usage(tmp_path):
     from ai_coding.app.commands import _budget_report
     from ai_coding.core.trace import TraceStore
 
-    store = TraceStore(tmp_path)
+    store = TraceStore(tmp_path, workspace=tmp_path)
     store.update_summary(
         "good",
         {
@@ -779,7 +779,7 @@ def test_budget_shows_money_when_the_recorder_knows_the_price(tmp_path):
     from ai_coding.core.budget import Pricing
     from ai_coding.core.trace import TraceStore
 
-    store = TraceStore(tmp_path)
+    store = TraceStore(tmp_path, workspace=tmp_path)
     store.update_summary("priced", {
         "turns": 3, "steps": 9, "prompt_tokens": 30_000,
         "completion_tokens": 3_000, "cached_tokens": 18_000,
@@ -885,7 +885,7 @@ async def test_stats_reports_across_sessions(tmp_path):
     """
     from ai_coding.core.trace import TraceStore
 
-    store = TraceStore(tmp_path / "traces")
+    store = TraceStore(tmp_path / "traces", workspace=tmp_path)
     store.update_summary(
         "s-one",
         {"turns": 2, "prompt_tokens": 120, "completion_tokens": 30},
@@ -915,7 +915,7 @@ async def test_stats_says_when_nothing_is_traced(tmp_path):
 
     class _StatsLoop:
         def __init__(self):
-            self.trace = _FakeTrace(TraceStore(tmp_path / "empty"))
+            self.trace = _FakeTrace(TraceStore(tmp_path / "empty", workspace=tmp_path))
 
     sessions = _FakeSessions()
     dc, c = _console_capture()
@@ -927,7 +927,7 @@ async def test_export_writes_html_into_the_workspace(tmp_path):
     """J4: the export lands inside the workspace, and the path is reported."""
     from ai_coding.core.trace import TraceStore
 
-    store = TraceStore(tmp_path / ".ai-coding" / "traces")
+    store = TraceStore(tmp_path / ".ai-coding" / "traces", workspace=tmp_path)
     store.update_summary("s-one", {"turns": 1, "prompt_tokens": 7, "completion_tokens": 3})
 
     class _ExportLoop:
@@ -951,7 +951,7 @@ async def test_export_writes_html_into_the_workspace(tmp_path):
 async def test_export_otlp_writes_json(tmp_path):
     from ai_coding.core.trace import TraceStore
 
-    store = TraceStore(tmp_path / ".ai-coding" / "traces")
+    store = TraceStore(tmp_path / ".ai-coding" / "traces", workspace=tmp_path)
     store.update_summary("s-one", {"turns": 1, "prompt_tokens": 7, "completion_tokens": 3})
 
     class _ExportLoop:
@@ -962,6 +962,7 @@ async def test_export_otlp_writes_json(tmp_path):
 
     sessions = _FakeSessions()
     dc, c = _console_capture()
+
     await handle_input(_ExportLoop(), "/export otlp", _sd("s"), sessions, dc)
     written = list((tmp_path / ".ai-coding" / "exports").glob("*.json"))
     assert written, f"no export written; said: {_session_text(c)}"
@@ -975,7 +976,7 @@ async def test_export_needs_a_known_format(tmp_path):
         workspace = str(tmp_path)
 
         def __init__(self):
-            self.trace = _FakeTrace(TraceStore(tmp_path / "t"))
+            self.trace = _FakeTrace(TraceStore(tmp_path / "t", workspace=tmp_path))
 
     sessions = _FakeSessions()
     dc, c = _console_capture()

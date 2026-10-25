@@ -14,7 +14,11 @@ from ai_coding.domain.message import ChatMessage
 
 
 def _store(tmp_path: Path, **over: object) -> TraceStore:
-    kwargs: dict[str, object] = {"max_turn_bytes": 100_000, "retention_days": 14}
+    kwargs: dict[str, object] = {
+        "max_turn_bytes": 100_000,
+        "retention_days": 14,
+        "workspace": tmp_path,
+    }
     kwargs.update(over)
     return TraceStore(tmp_path / "traces", **kwargs)  # type: ignore[arg-type]
 
@@ -130,7 +134,7 @@ def test_r9_prune_still_removes_only_expired_sessions(tmp_path):
 
 
 def test_r9_sessions_on_a_missing_root_is_empty(tmp_path):
-    assert TraceStore(tmp_path / "nope").sessions() == ()
+    assert TraceStore(tmp_path / "nope", workspace=tmp_path).sessions() == ()
 
 
 def test_summary_is_written_atomically_and_merges(tmp_path):

@@ -675,7 +675,7 @@ async def test_step_turns_trace_under_the_parent_session(tmp_path):
     from ai_coding.core.events import IterationStarted
     from ai_coding.core.trace import TraceRecorder, TraceStore
 
-    store = TraceStore(tmp_path / "traces")
+    store = TraceStore(tmp_path / "traces", workspace=tmp_path)
     recorder = TraceRecorder(store, session_id="")
     loop, sessions = _real_loop(tmp_path, trace=recorder)
     session = sessions.create(title="main")

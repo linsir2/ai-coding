@@ -20,6 +20,21 @@
 | **契约变更** | `test_mcp_servers_from_both_layers_are_kept` → 改写为"项目层的 server 被丢弃"（原测试锁定的是 `_overlay` 的追加语义，本方案有意变更） |
 | **未覆盖（另立项）** | `models[].base_url`/`api_key`（外发）、`tools.extra_workspace_roots`（越权）、`ai.websearch_api_key`（外发 key）、`tracing.dir`（越界写）、`hooks.plugin_dir`（python hook 模块来自不可信仓库树） |
 
+### N-4b · 项目配置不被信任授予端点/凭据/越界路径 —— ✅ 已完成（2026-10-25）
+
+> 方案与两轮评审见 [plan-config-trust-2.md](plan-config-trust-2.md)。
+
+| 项 | 内容 |
+|---|---|
+| **根因（与 N-4 同源）** | `ConfigLoader._overlay` 深合并、项目层逐键胜出，而 `config.example.yaml` 是仓库里被跟踪的文件。N-4 丢了执行类的**整键**；外发/越权/越界三类**修法不同**（按成员丢 / 取交集 / 丢弃 + 消费侧护栏） |
+| **缺口 1 · 外发** | 项目层只写 `models.x.base_url`，`api_key` 仍继承用户层真实密钥 → 用户 key + 整段对话被发往攻击者端点。修法：按成员丢 `base_url`/`api_key`；项目层新增的 `models` 条目整条丢弃；`default_model` 仅当指向项目层新增模型时丢 |
+| **缺口 2 · 越权** | `tools.extra_workspace_roots: ["/"]` → 沙箱对整台机器免问读写。修法：取交集（覆盖语义）；展开后为空的声明从项目 document 删键以保留用户层 |
+| **缺口 3 · 越界路径** | `tracing.dir`/`memory.embeddings.cache_path` 指向工作区外。修法：项目层丢弃（回落默认）+ 消费侧护栏（`TraceStore.prune` 越界拒删、`_embeddings_for` 钳回工作区） |
+| **缺口 6/7 · 残余** | `hooks.plugin_dir` 默认目录移到用户级（`~/.config/ai-coding/hooks`）；MCP token 键加入端点（`_token_key`） |
+| **关键实现点** | 过滤在 `_normalize` 之后；`_filter_project_document` 的 `models` 规则 0 处理 `models:`（YAML null）覆盖 mapping；`_narrow_roots` 在**展开后**的目录上取交集；`expand_root_patterns` 的 `base` 在所有调用点生效 |
+| **验收** | 11 条红相用例（7 config + 1 hooks + 1 trace + 1 embeddings + 1 mcp）+ 2 条 Prove 全绿；`TraceStore(...)` 全部构造点补 `workspace=` |
+| **契约变更** | ① 项目层 `models.*.base_url`/`api_key`、`ai.websearch_api_key`、`tracing.dir`、`memory.embeddings.cache_path` 不生效；② 项目层不能新增模型；③ `extra_workspace_roots` 只能收紧；④ 嵌入缓存绝对路径一律钳回工作区（**唯一跨层改动**）；⑤ `config.example.yaml` 的 `models`/`default_model` 失效；⑥ `plugin_dir` 默认改用户级；⑦ MCP token 键变 → 需重新登录一次 |
+
 ### N-5 · CI 连续失败修复（ripgrep 环境 + 3.10 时间戳解析）—— ✅ 已完成（2026-10-25）
 
 > 方案与两轮评审见 [plan-ci-fix.md](plan-ci-fix.md)。

@@ -520,6 +520,17 @@ def _auth_store_path() -> Path:
     return data_home() / "mcp-auth.json"
 
 
+def _token_key(server: Any) -> str:
+    """The token-store key for one server: name *and* endpoint.
+
+    Keyed by name alone, two servers that share a name but point at different
+    endpoints hand one's OAuth token to the other -- a token minted for
+    ``https://a`` presented to ``https://b``.  The endpoint is what the token is
+    actually valid for, so it is part of the identity.
+    """
+    return f"{server.name}\x00{server.url}"
+
+
 class _TokenStore:
     """``TokenStorage`` over one JSON file, scoped to one server (M4).
 
@@ -782,7 +793,7 @@ def _remote_session_factory(
                 if callback is not None
                 else None
             )
-            store = _TokenStore(server.name)
+            store = _TokenStore(_token_key(server))
             # With a manual bearer there is nothing to discover: the provider's
             # whole job is to turn a 401 into a login, and a header already
             # answers the challenge.  Building it anyway is not merely wasted —
@@ -1335,7 +1346,7 @@ class MCPManager:
         server = next((s for s in self._config.servers if s.name == name), None)
         if server is None:
             return {"ok": False, "reason": f"no MCP server named '{name}'"}
-        _TokenStore(name).clear()
+        _TokenStore(_token_key(server)).clear()
         self._wake_event(name).set()
         return {"ok": True}
 

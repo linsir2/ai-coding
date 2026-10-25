@@ -129,7 +129,7 @@ def _loop(
     registry = ToolRegistry()
     for tool in tools:
         registry.register(tool)
-    store = TraceStore(root / ".ai-coding" / "traces")
+    store = TraceStore(root / ".ai-coding" / "traces", workspace=root)
     recorder = recorder if recorder is not None else TraceRecorder(store, session_id="case-session")
 
     return AgentLoop(
@@ -372,7 +372,7 @@ async def real_cases(config_path: str) -> int:
         (root / "sample.txt").write_text("hello from a file\n", encoding="utf-8")
         registry = build_tool_registry(app_cfg, str(root), None)
         recorder = TraceRecorder(
-            TraceStore(root / ".ai-coding" / "traces"), session_id="real"
+            TraceStore(root / ".ai-coding" / "traces", workspace=root), session_id="real"
         )
         loop = AgentLoop(
             build_engine_from_config(app_cfg),

@@ -18,7 +18,7 @@ def _row(**over) -> dict:
 
 
 def _view(tmp_path: Path, rows: list[dict]) -> SessionView:
-    store = TraceStore(tmp_path / "traces")
+    store = TraceStore(tmp_path / "traces", workspace=tmp_path)
     writer = store.begin_turn("s")
     for row in rows:
         writer.write_line(json.dumps(row))

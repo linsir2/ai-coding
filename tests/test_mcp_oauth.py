@@ -451,7 +451,7 @@ async def test_two_servers_that_share_a_name_do_not_share_a_token(tmp_path, monk
     from mcp.shared.auth import OAuthToken
 
     from ai_coding.config.models import MCPServerConfig
-    from ai_coding.core.mcp import _TokenStore, _token_key
+    from ai_coding.core.mcp import _token_key, _TokenStore
 
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     a = MCPServerConfig(name="shared", type="remote", url="https://a.test/mcp")
@@ -544,9 +544,10 @@ async def test_login_runs_the_real_flow_and_the_server_comes_up(fake_as, tmp_pat
     assert len(fake_as.state.registrations) == 1
     assert fake_as.state.token_grants[0]["grant_type"] == "authorization_code"
     assert fake_as.state.token_grants[0]["code_verifier"]  # PKCE, not a plain code
-    from ai_coding.core.mcp import _TokenStore
+    from ai_coding.core.mcp import _token_key, _TokenStore
 
-    assert (await _TokenStore("r").get_tokens()).access_token == "token-abc"
+    store = _TokenStore(_token_key(_remote("r", fake_as.base)))
+    assert (await store.get_tokens()).access_token == "token-abc"
     # And the supervisor, woken, connected with it — tools and all.
     assert await _until(lambda: bool(manager.available()))
     row = manager.servers()[0]

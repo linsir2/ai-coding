@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -10,9 +11,11 @@ import typer
 
 from ai_coding.config.models import resolve_context_window
 from ai_coding.infra.logger_setup import send_logs_to_file, setup_logging
-from ai_coding.paths import Paths
+from ai_coding.paths import Paths, config_home
 from ai_coding.security.permission_gate import PermissionGate
 from ai_coding.skills.registry import SkillRegistry
+
+_log = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="ai-coding",
@@ -94,7 +97,8 @@ def _extra_roots(app_cfg: Any, workspace: str) -> tuple[str, ...]:
     from ai_coding.tools.builder import expand_root_patterns
 
     configured = getattr(getattr(app_cfg, "tools", None), "extra_workspace_roots", ())
-    return tuple(str(path) for path in expand_root_patterns(configured))
+    base = Path(workspace).expanduser().resolve()
+    return tuple(str(path) for path in expand_root_patterns(configured, base=base))
 
 
 def _build_gate(app_cfg: Any, workspace: str, skills: SkillRegistry) -> PermissionGate:
@@ -239,6 +243,7 @@ def _make_recorder(app_cfg: Any, workspace: str, session: Any) -> Any | None:
         root,
         max_turn_bytes=int(getattr(tracing, "max_turn_bytes", 2_000_000)),
         retention_days=int(getattr(tracing, "retention_days", 14)),
+        workspace=Path(workspace).expanduser().resolve(),
     )
     try:
         store.prune()
@@ -276,9 +281,13 @@ def _make_recorder(app_cfg: Any, workspace: str, session: Any) -> Any | None:
     return recorder
 
 
-def _make_hooks(app_cfg: Any, workspace: str) -> Any | None:
-    """Build the hook group from config, or ``None`` when hooks are off (R4c)."""
-    config = getattr(app_cfg, "hooks", None)
+def _make_hooks(config: Any, workspace: str) -> Any | None:
+    """Build the hook group from the hooks config, or ``None`` when off (R4c).
+
+    Takes the ``hooks`` block itself rather than the whole ``AppConfig``: the
+    composition root picks the block, and a caller that already holds it should
+    not have to wrap it in a throwaway object.
+    """
     if config is None or not getattr(config, "enabled", False):
         return None
     from ai_coding.core.hooks import (
@@ -292,9 +301,11 @@ def _make_hooks(app_cfg: Any, workspace: str) -> Any | None:
     if not specs:
         return None
     timeout = float(getattr(config, "timeout_seconds", 10.0) or 10.0)
-    plugin_dir = getattr(config, "plugin_dir", "") or str(
-        Path(workspace).expanduser().resolve() / ".ai-coding" / "hooks"
-    )
+    # The default lives at the user tier, not in the repo tree: a python hook is
+    # ``exec_module``'d, so a default inside the workspace would let the
+    # repository supply the very module the operator's own config then runs.
+    # An explicit ``plugin_dir`` (user layer) still wins.
+    plugin_dir = getattr(config, "plugin_dir", "") or str(config_home() / "hooks")
     runners: list[Any] = []
     if any(spec.kind == "command" for spec in specs):
         runners.append(
@@ -339,6 +350,24 @@ def _embeddings_for(app_cfg: Any, paths: Paths | None = None) -> Any | None:
     target = Path(configured).expanduser() if configured else paths.memory / "embeddings.json"
     if not target.is_absolute():
         target = paths.workspace / target
+    # The cache is a pure accelerator, so the guard falls back to the default
+    # rather than refusing the feature.  It applies to *every* layer, not just
+    # the project one: a future caller may hand an untrusted path in without
+    # knowing where it came from.  ``resolve()`` first, because a symlink inside
+    # the workspace that points out would otherwise pass a lexical check.
+    default_target = paths.memory / "embeddings.json"
+    try:
+        resolved = target.resolve()
+        workspace = paths.workspace.resolve()
+    except OSError:
+        resolved, workspace = target, paths.workspace
+    if not resolved.is_relative_to(workspace):
+        _log.warning(
+            "embedding cache path %s is outside the workspace; using %s instead",
+            target,
+            default_target,
+        )
+        target = default_target
     return EmbeddingIndex(embeddings_cfg, models, cache_path=target)
 
 

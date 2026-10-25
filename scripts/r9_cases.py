@@ -129,7 +129,7 @@ async def gate_can_be_switched_off(tmp: Path) -> tuple[bool, str]:
 
 def _fake_store(tmp: Path) -> TraceStore:
     """One session, one turn, one hostile tool output."""
-    store = TraceStore(tmp / "traces")
+    store = TraceStore(tmp / "traces", workspace=tmp)
     writer = store.begin_turn("sess-1")
     writer.write_line(
         json.dumps(
@@ -246,7 +246,7 @@ async def _real_loop_with_trace(
     for tool in (MemorySearchTool(memory), MemoryWriteTool(memory), CheckpointTool()):
         if registry.get(tool.name) is None:
             registry.register(tool)
-    store = TraceStore(workspace / ".ai-coding" / "traces")
+    store = TraceStore(workspace / ".ai-coding" / "traces", workspace=workspace)
     recorder = TraceRecorder(store, session_id=session.session_id)
     loop = AgentLoop(
         engine,

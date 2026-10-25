@@ -21,7 +21,9 @@ from ai_coding.tools.subagent_tool import SubAgentListTool, SubAgentTool
 _WILDCARDS = "*?["
 
 
-def expand_root_patterns(patterns: Any) -> tuple[Path, ...]:
+def expand_root_patterns(
+    patterns: Any, *, base: Path | None = None
+) -> tuple[Path, ...]:
     """Turn the configured extra roots into concrete directories (B).
 
     A root is a standing "always", so it must never re-ask.  Patterns are
@@ -34,6 +36,11 @@ def expand_root_patterns(patterns: Any) -> tuple[Path, ...]:
     matches nothing yields nothing rather than an error, and every result is
     resolved, so a symlinked root cannot smuggle in a path the sandbox would
     later refuse.
+
+    ``base`` resolves a relative entry against the workspace instead of the
+    process CWD -- the CWD is not the workspace when the app is launched from
+    elsewhere, and a relative root silently following ``cd`` is the same class of
+    bug the embedding cache used to have (paths.py docstring).
     """
     roots: list[Path] = []
     for raw in patterns or ():
@@ -41,6 +48,8 @@ def expand_root_patterns(patterns: Any) -> tuple[Path, ...]:
         if not entry:
             continue
         expanded = Path(entry).expanduser()
+        if base is not None and not expanded.is_absolute():
+            expanded = base / expanded
         if not any(char in entry for char in _WILDCARDS):
             candidates: list[Path] = [expanded]
         else:
@@ -179,7 +188,8 @@ def _assemble_registry(
     sandbox = Sandbox(
         workspace,
         extra_roots=expand_root_patterns(
-            getattr(tools_cfg, "extra_workspace_roots", ())
+            getattr(tools_cfg, "extra_workspace_roots", ()),
+            base=Path(workspace).expanduser().resolve(),
         ),
         grantor=gate,
     )

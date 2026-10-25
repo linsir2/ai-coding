@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import re
@@ -29,6 +30,26 @@ _log = logging.getLogger(__name__)
 #: problem with a different fix, and lumping them in would break every project's
 #: model selection and tool list at once.
 EXECUTION_KEYS: frozenset[str] = frozenset({"hooks", "mcp"})
+
+#: Members that decide *where* a request goes or *which secret* it carries.
+#: Same reasoning as ``EXECUTION_KEYS`` -- the operator trusts the directory as a
+#: workspace, not its config -- one level finer: the block stays (a project may
+#: still tune how the agent behaves), only the destination and the credential are
+#: withheld.
+#:
+#: ``models`` is the one block whose *entries* are also filtered: see
+#: ``_filter_project_document``.
+PROJECT_FORBIDDEN_MEMBERS: dict[str, frozenset[str]] = {
+    "ai": frozenset({"websearch_api_key"}),
+    "tracing": frozenset({"dir"}),
+}
+#: One level deeper: ``memory.embeddings.cache_path``.
+PROJECT_FORBIDDEN_NESTED: dict[str, dict[str, frozenset[str]]] = {
+    "memory": {"embeddings": frozenset({"cache_path"})},
+}
+#: ``models`` members that decide the destination.  Applied per entry, after the
+#: entry itself has survived the "must be user-defined" rule.
+MODEL_DESTINATION_MEMBERS: frozenset[str] = frozenset({"base_url", "api_key"})
 
 #: The one channel a repository cannot touch, which is what makes it a permission
 #: rather than a config value (same reasoning as ``core/static_check.py``).
@@ -85,6 +106,133 @@ def _normalize(value: Any, parent_key: str | None = None) -> Any:
     if isinstance(value, list):
         return [_normalize(v) for v in value]
     return value
+
+
+def _filter_project_document(
+    document: dict[str, Any],
+    user_document: dict[str, Any],
+    *,
+    workspace: Path,
+) -> tuple[dict[str, Any], list[str]]:
+    """Strip from a project document the members a repository may not grant.
+
+    Returns the filtered document and the dotted names dropped, so the caller can
+    say so once instead of silently changing behaviour.
+
+    The rules, in the order they are applied:
+
+    * a top-level key the operator holds as a mapping may not be replaced by a
+      scalar (``models:`` with YAML null used to wipe every model);
+    * a ``models`` entry the operator did not define is dropped whole -- it can
+      never carry an endpoint, so it is a hollow shell -- and a surviving entry
+      keeps only its behaviour knobs, losing ``base_url``/``api_key``;
+    * ``default_model`` is dropped only when it points at a model the project
+      itself introduced (the one case that would leave a dangling reference);
+    * the members in ``PROJECT_FORBIDDEN_MEMBERS`` / ``PROJECT_FORBIDDEN_NESTED``
+      and ``tools.extra_workspace_roots`` are withheld or narrowed.
+    """
+    filtered = copy.deepcopy(document)
+    dropped: list[str] = []
+
+    # Rule 0: a nearer layer may narrow, never remove.  ``models:`` (YAML null)
+    # reaches ``_overlay``'s else branch and overwrites the operator's dict with
+    # ``None``; the same shape would do it to ``tools:``.
+    for key, value in list(filtered.items()):
+        if isinstance(user_document.get(key), dict) and not isinstance(value, dict):
+            filtered.pop(key)
+            dropped.append(key)
+
+    # Rules 1-3: models.
+    user_models = user_document.get("models")
+    user_models = user_models if isinstance(user_models, dict) else {}
+    project_models = filtered.get("models")
+    if isinstance(project_models, dict):
+        kept_models: dict[str, Any] = {}
+        introduced: set[str] = set()
+        for name, entry in project_models.items():
+            if name not in user_models:
+                introduced.add(name)
+                dropped.append(f"models.{name}")
+                continue
+            if isinstance(entry, dict):
+                for member in MODEL_DESTINATION_MEMBERS:
+                    if member in entry:
+                        dropped.append(f"models.{name}.{member}")
+                entry = {
+                    k: v for k, v in entry.items() if k not in MODEL_DESTINATION_MEMBERS
+                }
+            kept_models[name] = entry
+        filtered["models"] = kept_models
+        default_model = filtered.get("default_model")
+        if isinstance(default_model, str) and default_model in introduced:
+            filtered.pop("default_model", None)
+            dropped.append("default_model")
+
+    # The flat member lists: a secret and a path that would leave the workspace.
+    for block, members in PROJECT_FORBIDDEN_MEMBERS.items():
+        value = filtered.get(block)
+        if not isinstance(value, dict):
+            continue
+        for member in members:
+            if member in value:
+                value.pop(member)
+                dropped.append(f"{block}.{member}")
+
+    # One level deeper, for the embedding cache path.
+    for block, sub_blocks in PROJECT_FORBIDDEN_NESTED.items():
+        outer = filtered.get(block)
+        if not isinstance(outer, dict):
+            continue
+        for sub, members in sub_blocks.items():
+            inner = outer.get(sub)
+            if not isinstance(inner, dict):
+                continue
+            for member in members:
+                if member in inner:
+                    inner.pop(member)
+                    dropped.append(f"{block}.{sub}.{member}")
+
+    # The grant: a project may only narrow the operator's roots, never widen.
+    tools = filtered.get("tools")
+    if isinstance(tools, dict) and "extra_workspace_roots" in tools:
+        from ai_coding.tools.builder import expand_root_patterns
+
+        user_tools = user_document.get("tools")
+        user_patterns = (
+            user_tools.get("extra_workspace_roots") if isinstance(user_tools, dict) else None
+        )
+        project_patterns = tools.get("extra_workspace_roots")
+        # Expanded-empty is the test, not the raw list: ``[""]`` and a pattern
+        # that matches nothing would otherwise clear the operator's grant.
+        if not expand_root_patterns(project_patterns, base=workspace):
+            tools.pop("extra_workspace_roots")
+        else:
+            tools["extra_workspace_roots"] = _narrow_roots(
+                project_patterns, user_patterns, workspace=workspace
+            )
+
+    return filtered, dropped
+
+
+def _narrow_roots(
+    project_patterns: Any, user_patterns: Any, *, workspace: Path
+) -> list[str]:
+    """Keep the operator's roots that the project's declaration covers.
+
+    "A project may narrow the operator's grant, never widen it."  Computed on the
+    expanded directories, because two pattern sets have no intersection of their
+    own.  An empty project declaration is handled by the caller removing the key
+    outright, so it never reaches here.
+    """
+    from ai_coding.tools.builder import expand_root_patterns
+
+    project_dirs = expand_root_patterns(project_patterns, base=workspace)
+    user_dirs = expand_root_patterns(user_patterns, base=workspace)
+    return [
+        str(directory)
+        for directory in user_dirs
+        if any(directory.is_relative_to(project) for project in project_dirs)
+    ]
 
 
 class ConfigLoader:
@@ -262,6 +410,7 @@ class ConfigLoader:
         sources: dict[str, str] = {}
         chosen: Path | None = None
         trusted = _project_execution_allowed()
+        user_document: dict[str, Any] = {}
         for role, layer in ConfigLoader._layers_for(paths, path):
             # ``chosen`` anchors the ``mcp.local.yaml`` sidecar (``_mcp_doc``),
             # so in layered mode it must be the *user* layer -- even when that
@@ -282,21 +431,29 @@ class ConfigLoader:
             # one-word bypass.  Normalizing here also keeps ``sources`` and the
             # merged config describing the same keys.
             document = _normalize(document)
-            # A project layer may not grant execution.  Its hooks/mcp are dropped
-            # here, before they can be merged over the user's, and said so once --
-            # a silent drop would read as "the feature is broken".
+            if role == "user":
+                user_document = document
+            # A project layer may not grant execution, endpoints, credentials or
+            # paths outside the workspace.  They are dropped here, before they
+            # can be merged over the user's, and said so once -- a silent drop
+            # would read as "the feature is broken".
             if role == "project" and not trusted:
-                dropped = [k for k in document if k in EXECUTION_KEYS]
-                if dropped:
-                    _log.warning(
-                        "project config ignored for %s (a repository cannot grant "
-                        "execution; set %s=1 to allow it)",
-                        ", ".join(sorted(dropped)),
-                        TRUST_PROJECT_ENV,
-                    )
+                document, dropped = _filter_project_document(
+                    document, user_document, workspace=paths.workspace
+                )
+                execution_dropped = [k for k in document if k in EXECUTION_KEYS]
+                if execution_dropped:
                     document = {
                         k: v for k, v in document.items() if k not in EXECUTION_KEYS
                     }
+                if dropped or execution_dropped:
+                    _log.warning(
+                        "project config ignored for %s (a repository cannot grant "
+                        "execution, endpoints, credentials or paths outside the "
+                        "workspace; set %s=1 to allow it)",
+                        ", ".join(sorted([*execution_dropped, *dropped])),
+                        TRUST_PROJECT_ENV,
+                    )
             for key in document:
                 sources[key] = str(layer)
             merged = ConfigLoader._overlay(merged, document)

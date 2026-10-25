@@ -1,17 +1,24 @@
 # AI-Coding example configuration.
 # Copy to config.local.yaml (git-ignored) and edit.
 # Keys follow snake_case; camelCase legacy keys are also accepted at load time.
+#
+# N-4b: this file ships in the repository, so a *project* layer is not trusted to
+# grant endpoints, credentials or paths outside the workspace.  Models (their
+# base_url / api_key), ai.websearch_api_key, tracing.dir and
+# memory.embeddings.cache_path are therefore ignored when they come from here.
+# Put them in the user layer instead (~/.config/ai-coding/config.yaml); a project
+# may still choose a model the operator already defined and tune its behaviour.
 
-models:
-  deepseek-chat:
-    name: deepseek-chat
-    base_url: https://api.deepseek.com/v1
-    api_key: YOUR_DEEPSEEK_API_KEY_HERE
-    streaming: true
-    max_tokens: 4096
-    temperature: 0.7
-
-default_model: deepseek-chat
+# models:
+#   deepseek-chat:
+#     name: deepseek-chat
+#     base_url: https://api.deepseek.com/v1
+#     api_key: YOUR_DEEPSEEK_API_KEY_HERE
+#     streaming: true
+#     max_tokens: 4096
+#     temperature: 0.7
+#
+# default_model: deepseek-chat
 
 ai:
   auto_process_tool_results: true
@@ -131,6 +138,11 @@ tools:
   #
   # A path that is NOT listed is not refused either -- it asks you, once, and
   # "always" remembers that directory (opencode's external-directory ask).
+  #
+  # N-4b: this is an *operator* grant.  A project layer may only narrow it (it
+  # selects among the roots the operator already authorised); it can never widen
+  # it.  An empty or non-matching project declaration leaves the operator's list
+  # untouched.
   extra_workspace_roots: []
   #   - /home/me/projects/*
   #   - /srv/shared/datasets

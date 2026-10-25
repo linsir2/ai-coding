@@ -260,7 +260,7 @@ def test_provider_retried_lands_in_the_trace_with_its_span(tmp_path):
     that never reaches disk is invisible after the turn ends."""
     from ai_coding.core.trace import TraceRecorder, TraceStore
 
-    store = TraceStore(tmp_path / "traces", max_turn_bytes=1_000_000)
+    store = TraceStore(tmp_path / "traces", max_turn_bytes=1_000_000, workspace=tmp_path)
     recorder = TraceRecorder(store, session_id="sess-1", capture="full")
     recorder.on_event(IterationStarted(index=1, max_iterations=10))
     recorder.on_event(

@@ -306,6 +306,12 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `LedgerUpdated`（事件） | `items` | open 集签名变化才发（边沿触发）；transcript 显示 dim 行，trace 泛型记录 |
 | `SearchStalled`（事件） | `iteration`、`level`、`calls`、`streak` | B1/B2/B5：`[search-gate]` 每升一档发一条，只走 nudge 路径；`trace.py` 的 `asdict` 让它自动进 jsonl |
 | `EXECUTION_KEYS`（配置常量） | `{"hooks", "mcp"}` | N-4：项目层不得授予的顶层键。`ConfigLoader` 在 `_normalize` **之后**过滤，项目层设置即丢弃 + warning，除非 `AI_CODING_TRUST_PROJECT=1`。`mcp.local.yaml` sidecar 的锚点（`chosen`）同样不推进到项目层 |
+| `PROJECT_FORBIDDEN_MEMBERS` / `PROJECT_FORBIDDEN_NESTED` / `MODEL_DESTINATION_MEMBERS`（配置常量） | `{"ai": {"websearch_api_key"}, "tracing": {"dir"}}` / `{"memory": {"embeddings": {"cache_path"}}}` / `{"base_url", "api_key"}` | N-4b：项目层**不得授予端点、凭据、越界路径**。`loader._filter_project_document` 在 `_normalize` 之后、`_overlay` 之前对项目层生效：`models` 条目若用户层没有则整条丢弃（项目层新增条目永远拿不到 `base_url`，是空壳）；用户层已有条目只丢 `base_url`/`api_key`，`name`/`max_tokens`/`temperature` 等仍生效；`default_model` 仅当指向项目层自己新增的模型时丢弃。**规则 0**：用户层在某顶层键上是 mapping 而项目层不是 → 丢项目层的值（`models:` YAML null 曾把用户所有模型覆盖成 `None`）。`tools.extra_workspace_roots` 取交集（见下）。`AI_CODING_TRUST_PROJECT=1` 时全部跳过 |
+| `tools.extra_workspace_roots` 的合并（N-4b） | 覆盖语义 | 项目层声明**非空**时，有效集 = {用户层展开后的根 ∩ 被项目层声明**覆盖**的根}；声明**展开后为空**（`[]`/`[""]`/匹配不到的 pattern/缺省）→ 从项目 document 删掉该键，`_overlay` 的 list-replace 保留用户层原样。故 `["/"]` 覆盖全部用户根（无法把整台机器塞进来），`["<用户根>/a"]` 且用户根恰为 `a` 才收紧到 `{a}`，`["/etc"]` 收紧到 ∅。交集在**展开后**的目录上算（两个 pattern 集合无交集） |
+| `TraceStore.workspace`（N-4b） | `str \| Path \| None = None` | 纵深防御：`prune` 遍历并删除 `root` 下的一切，故 `root` 不在 `workspace` 内（或 `workspace=None`，fail-closed）时**直接返回 0 + warning**，不删任何东西。比较前双方都 `resolve()`，符号链接绕不过。代价：所有 `TraceStore(...)` 构造点须传 `workspace=` |
+| `cli._embeddings_for` 的工作区护栏（N-4b） | 消费侧 | 解析出的 `cache_path` 若不在 `paths.workspace` 内 → 回落 `paths.memory/embeddings.json` + warning。**作用于所有层**（护栏不知道来源层），比较前 `resolve()`。缓存是 pure accelerator，代价很低 |
+| `_token_key(server)`（N-4b） | `name + "\x00" + url` | MCP OAuth token 的存储键加入端点：同名不同 url 的两个 server 曾共享 token（为 `https://a` 签发的 token 被呈给 `https://b`）。`_TokenStore` 保持字符串键签名不变；**行为变更**：磁盘上的键变了，既有 token 失效，需重新登录一次 |
+| `hooks.plugin_dir` 默认值（N-4b） | `~/.config/ai-coding/hooks` | 原默认是 `<workspace>/.ai-coding/hooks`，位于不可信仓库树内：用户层写 `module: X` 时 `exec_module` 的是仓库里的文件。改到用户级；显式 `plugin_dir`（用户层）仍生效 |
 | `parse_iso8601`（`infra/time_utils.py`） | `str -> datetime \| None` | ISO-8601 解析的**唯一**入口（CI 修复：4 个消费者共用）。内部把 `Z` 归一成 `+00:00`，因为 `datetime.fromisoformat` 到 3.11 才认 `Z`，而 3.10 是本项目声明下限（`pyproject` 的 `python_version`/`target-version` 与 CI 矩阵）。**纯解析器**：无偏移的值返回 naive——"裸 wall clock 算哪一区"是各调用方自己的策略（OTLP 交给 `timestamp()` 按本地，`memory/relevance.parse_time` 补 UTC），在函数里二选一会静默改变另一方的数字。`memory/relevance.parse_time` 仍是导出契约（`service.py`/`store.py` 从那里 import），只是改成薄封装 |
 | `SubagentResult` 扩展 | `truncated`、`exit_reason`、`usage` | 未完成必须明说；ledger 文件（`to_dict`）保留新字段 |
 | `ToolResult.error`（子跑） | `child_timeout` / `child_max_iterations` / `child_error` | 非完成态恒为机器码；max_iterations 仍算成功（streak 照 reset），细节在 `error_detail` 与输出文本 |
@@ -797,7 +803,7 @@ XDG 表达式原本在 `grants.py`/`mcp.py` 各写一份，现在统一向 `path
 | 契约 | 说明 |
 |---|---|
 | `ConfigLoader.discover(start)` | 锚在**工作区**（非进程 CWD）；**真实配置优先于 example 配置**，无论谁离得近（example 是文档，不是配置） |
-| `ConfigLoader.load_layers(paths)` | 全局 config 为 base，项目 overlay **深度合并、项目按 key 赢**。**例外（N-4）**：执行类顶层键 `hooks` / `mcp` 只认用户层 —— 项目层设置即丢弃 + warning，除非 `AI_CODING_TRUST_PROJECT=1`（仓库不能替 agent 进程设置环境变量）。因此 `mcp.servers` 不再是"全局+项目都真"；`mcp.local.yaml` sidecar 的锚点也固定为用户层路径（`None` 会回退到 `discover()`，锚在 CWD = 项目目录）。其余 list 替换，避免项目重开全局关掉的开关 |
+| `ConfigLoader.load_layers(paths)` | 全局 config 为 base，项目 overlay **深度合并、项目按 key 赢**。**例外（N-4）**：执行类顶层键 `hooks` / `mcp` 只认用户层 —— 项目层设置即丢弃 + warning，除非 `AI_CODING_TRUST_PROJECT=1`（仓库不能替 agent 进程设置环境变量）。因此 `mcp.servers` 不再是"全局+项目都真"；`mcp.local.yaml` sidecar 的锚点也固定为用户层路径（`None` 会回退到 `discover()`，锚在 CWD = 项目目录）。其余 list 替换，避免项目重开全局关掉的开关。**N-4b 细化**：项目层的 `models[].base_url`/`api_key`、`ai.websearch_api_key`、`tracing.dir`、`memory.embeddings.cache_path` 同样不生效（按成员丢），`tools.extra_workspace_roots` 只能收紧（取交集），`models` 新增条目整条丢弃 |
 | `load_layers_report` | 额外返回**每个顶层 key 来自哪个文件**——合并后的配置回答不了「这个项目为什么用这个模型」，而「两个目录行为不同」正是本改动要修的 bug |
 | 坏层降级 | 某一层 YAML 损坏则跳过该层并告警，不致命——个人的坏配置不能让所有项目起不来 |
 | `SkillRegistry(roots)` | 多 root，**项目在后即项目赢**（Claude Code 反过来让个人层压项目层，这会让仓库改写使用者的工具与约定）。冲突经 `shadowed()` 报告，不静默 |

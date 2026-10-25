@@ -250,10 +250,15 @@ class TraceStore:
         *,
         max_turn_bytes: int = 2_000_000,
         retention_days: int = 14,
+        workspace: str | Path | None = None,
     ) -> None:
         self.root = Path(root)
         self.max_turn_bytes = max(1, int(max_turn_bytes))
         self.retention_days = max(0, int(retention_days))
+        #: The workspace ``root`` must sit inside for :meth:`prune` to run.
+        #: ``None`` means "cannot prove it is safe", so prune refuses -- the
+        #: check is the store's own, not its caller's.
+        self.workspace = Path(workspace) if workspace is not None else None
 
     def session_dir(self, session_id: str) -> Path:
         return self.root / (session_id or "unknown")
@@ -337,8 +342,36 @@ class TraceStore:
             _log.debug("trace summary write failed", exc_info=True)
 
     def prune(self, now: float | None = None) -> int:
-        """Delete session directories whose last write is past retention."""
+        """Delete session directories whose last write is past retention.
+
+        Refuses to run at all when ``root`` is outside ``workspace``: this walks
+        and deletes whatever is under ``root``, so a ``root`` of ``/home/me`` would
+        take the user's home with it.  The check is the store's own, not its
+        caller's -- a trusted config is not the only way to reach this code.
+
+        Both sides are resolved before comparing, so a symlinked ``root``
+        that points outside the workspace cannot slip past a lexical check.
+        """
         if self.retention_days <= 0 or not self.root.is_dir():
+            return 0
+        if self.workspace is None:
+            _log.warning(
+                "trace prune skipped: %s has no workspace to prove it is inside",
+                self.root,
+            )
+            return 0
+        try:
+            root = self.root.resolve()
+            workspace = self.workspace.resolve()
+        except OSError:
+            _log.warning("trace prune skipped: cannot resolve %s", self.root)
+            return 0
+        if root == workspace or not root.is_relative_to(workspace):
+            _log.warning(
+                "trace prune refused: %s is not inside the workspace %s",
+                root,
+                workspace,
+            )
             return 0
         cutoff = (now if now is not None else time.time()) - self.retention_days * 86400
         removed = 0

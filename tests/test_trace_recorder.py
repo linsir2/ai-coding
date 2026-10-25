@@ -24,7 +24,7 @@ from ai_coding.domain.loop import TurnOutcome, TurnStatus
 def _recorder(tmp_path, **over):
     kwargs = {"session_id": "sess-1"}
     kwargs.update(over)
-    store = TraceStore(tmp_path / "traces", max_turn_bytes=1_000_000)
+    store = TraceStore(tmp_path / "traces", max_turn_bytes=1_000_000, workspace=tmp_path)
     return TraceRecorder(store, **kwargs), store
 
 
@@ -135,7 +135,7 @@ def test_a_broken_disk_never_raises(tmp_path):
     # ``traces`` is a file, so no session directory (and no trace file) can exist
     blocked = tmp_path / "traces"
     blocked.write_text("not a directory", encoding="utf-8")
-    recorder = TraceRecorder(TraceStore(blocked), session_id="sess-1")
+    recorder = TraceRecorder(TraceStore(blocked, workspace=tmp_path), session_id="sess-1")
 
     recorder.on_event(IterationStarted(index=1, max_iterations=1))
 

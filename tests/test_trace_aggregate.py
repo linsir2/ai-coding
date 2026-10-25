@@ -10,7 +10,7 @@ from ai_coding.core.trace import TraceStore
 
 
 def _store(tmp_path: Path) -> TraceStore:
-    return TraceStore(tmp_path / "traces")
+    return TraceStore(tmp_path / "traces", workspace=tmp_path)
 
 
 def _record(store: TraceStore, session: str, *, turns: int, summary: dict | None) -> None:

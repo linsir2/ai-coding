@@ -21,7 +21,7 @@ def _row(**over) -> dict:
 def _session(
     tmp_path: Path, *, session: str = "sess-1", rows: list[dict] | None = None
 ) -> TraceStore:
-    store = TraceStore(tmp_path / "traces")
+    store = TraceStore(tmp_path / "traces", workspace=tmp_path)
     writer = store.begin_turn(session)
     for row in rows if rows is not None else [_row()]:
         writer.write_line(json.dumps(row))
@@ -95,7 +95,7 @@ def test_r9_the_index_page_carries_the_totals(tmp_path):
 
 
 def test_r9_a_fifty_turn_session_stays_under_a_megabyte(tmp_path):
-    store = TraceStore(tmp_path / "traces")
+    store = TraceStore(tmp_path / "traces", workspace=tmp_path)
     for turn in range(1, 51):
         writer = store.begin_turn("big")
         for index in range(20):
