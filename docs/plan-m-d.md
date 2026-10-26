@@ -178,28 +178,55 @@ class SandboxBackend(Protocol):
 # security/process_sandbox.py
 def spawn_argv(
     command: str,
-    policy: ProcessSandboxPolicy,
+    policy: ProcessSandboxPolicy | None,
     backend: SandboxBackend | None,
     roots: Sequence[Path],
+    *,
+    emit: Callable[[str], None] | None = None,
 ) -> list[str]:
     """shell 命令 → 可直接 spawn 的 argv（规范化 + wrap）。**两个调用方共用这一个入口。**
 
     规范化的唯一形态是 ``["/bin/sh", "-c", command]``；``shell`` 一律 ``False``。
     """
     argv = ["/bin/sh", "-c", command]
-    if policy.mode == "off" or policy.bypass or backend is None:
+    if policy is None or policy.mode == "off" or policy.bypass:
+        return argv
+    if backend is None:
+        # fail-closed：enforce 下没有机制就是没有隔离，不能静默放行（评审 P1-2）
+        if policy.mode == "enforce":
+            raise SandboxGap("sandbox.backend.missing")
         return argv
     if not backend.available():
         if policy.mode == "enforce":
             raise SandboxGap(backend.gap())
-        return argv                      # warn：继续，但事件已发
+        if emit is not None:
+            emit(backend.gap())          # warn：继续，但要发 Degraded（评审 P2-1）
+        return argv
     return backend.wrap(argv, roots) or argv
 ```
 
+* **`policy=None` 是唯一的"不改变行为"入口**（评审 P1-2）：既有 66 处 `BashTool()` /
+  `JobRegistry(root=...)` 构造**不传 policy 就是 `off`**，不会因为本轮改动而突然 fail-closed。
+  **组合根**（`builder.py` / `world.py`）传真实的 `enforce` policy —— 默认 `enforce` 指的是
+  **组合根的默认**，不是工具构造函数的默认。
+* **`emit` 是 `warn` 档的发事件出口**（评审 P2-1）：`spawn_argv` 不自己发事件（它不该依赖
+  `world`/事件总线），由调用方传入。
+* **`SandboxGap` 的捕获点必须写死（评审 P1-1）**：`spawn_argv` 抛出的异常如果一路冒到
+  [dispatch.py:662-668](file:///workspace/ai-coding/ai_coding/core/dispatch.py#L662-L668) 的
+  `except Exception`，结果会是 `error="tool_error"` + `data={"tool": "bash"}` ——
+  **不是** §A.4 承诺的 `error="denied"` + `data.reason`。
+  * `BashTool.execute`：`except SandboxGap as exc: return ToolResult(success=False, error="denied", data={"reason": exc.reason})`
+  * `JobRegistry.start`：同样 catch，转成 job 的失败态（不写 ledger 行）。
+  * **U3/U5 必须断言 `error == "denied"` 且 `data["reason"]` 正确**，否则测不出这个退化。
 * **调用方（`bash_tool` / `jobs`）只做一件事**：`argv = spawn_argv(...)`，然后 `shell=False` 交给 runner。
-  `jobs` 额外要把 `_bounded(command)` **折进 `-c` 的字符串**（否则 `ulimit -f` 日志上限静默失效，
-  见 §A.3 与评审 P1-2）。
-* **wrap 点唯一**：`spawn_argv` 是唯一做wrap 的地方 —— 新增调用方不可能绕过（只要用它）。
+  `jobs` 额外要把 `_bounded(command)` **折进 `-c` 的字符串**（否则 `ulimit -f` 日志上限静默失效）。
+* **jobs 路径只在 `JobRegistry.start` 内 wrap 一次**（评审 P2-2）：jobs 是 `BashTool` → `registry.start`，
+  若两边都 wrap 就是**双重 bwrap**。写死：`BashTool` 对 job 类调用**不 wrap**，只有 `start` wrap。
+* **jobs 的 pid/kill 语义（评审 P2-3）**：bwrap 带 `--unshare-pid` → 内层在另一个 PID 命名空间。
+  * `Job.pid` 对外报 **bwrap 的 pid**（父进程），kill 用 `os.killpg(os.getpgid(bwrap_pid))`
+    —— bwrap 会把信号转发给内层，且 `--die-with-parent` 保证父死子亡。
+  * **必须在实现时验证一次**（U1c 断言 job 能被 kill），若 bwrap 的 pid 转发不成立则改用
+    `--no-pidns`（放弃 pid 隔离换可管理性），并在文档记录这个取舍。
 * `wrap()` 只处理 **argv**，不碰 shell 语义 —— 协议干净。
 * `shell=False` 是**必须的**：留着 `shell=True` 会让 bwrap 的参数被再解析一次。
 * **机理要写准（评审 P2-5）**：`shell=True` 对**列表**参数**不会** join —— CPython 的
@@ -277,38 +304,48 @@ def spawn_argv(
 
 #### B.1 语料（新，`security/redline_corpus.py`）
 
-**五类 + 冻结判定**。每条语料是一个三元组 `(command, label, verdict)`，其中 **`verdict` 是
-今天 `bash_denied` 的真实输出（冻结）** —— 基准的硬断言是 **golden 比对**，不是"类别推断"。
+**六类 + 冻结判定**。每条语料是一个三元组 `(command, label, verdict)`，其中 **`verdict` 是
+今天 `bash_denied` 的真实输出（逐条冻结）** —— 基准的硬断言是 **golden 比对**，不是"类别推断"。
 
-| 类 | 语义 | `verdict` 冻结值 | 硬断言 |
+| 类 | 语义 | `verdict` | 硬断言 |
 |---|---|---|---|
-| `dangerous` | 字面危险命令 | 非空（硬 DENY） | 非空 → **FN=0** |
-| `safe` | 规则本就不该拦 | 空 | 空 → **FP=0** |
-| `unparseable` | 语法**读不懂**（引号/转义/截断） | **空**（→ 走审批门 **WARN**） | 与冻结值一致 |
+| `dangerous` | 字面危险命令 | 非空（硬 DENY） | 非空 → 计入 **FN** |
+| `unparseable_deny` | 语法**读不懂**且**含红线** | 非空（保守回退拦住） | 非空 → 计入 **FN** |
+| `unparseable_warn` | 语法**读不懂**且**无红线** | **空**（→ 走审批门 **WARN**） | 与冻结值一致（**不计 FN**） |
+| `safe` | 规则本就不该拦 | 空 | 空 → 计入 **FP** |
 | `known_miss` | 语法**可读**但语义危险（变量展开/命令替换） | 空 | 与冻结值一致；**计数上报** |
 | `known_fp` | 业务上安全但规则会拦（`chmod 777 ./build`） | 非空 | 与冻结值一致；**计数上报** |
 
-**为什么 `unparseable` 的 `verdict` 是空（评审 P0-2）**：
+**为什么把 `unparseable` 拆成两类（评审 P0-1 —— 原表按单一 verdict 冻结是错的）**：
 
-仓库**已经钉住**了这个行为 —— [test_bash_red_lines.py:163-173](file:///workspace/ai-coding/tests/test_bash_red_lines.py#L163-L173)：
+实测（装上 tree-sitter 后真跑 `bash_denied`）：
 
-```python
-def test_a_broken_command_without_a_red_line_is_only_asked_about(command):
-    """The other half: a broken line that holds no red line is asked
-    about, not refused."""
-    assert _verdict(command) == PermissionDecision.WARN     # ← 不是 DENY
+```
+'echo "rm -rf /'   => verdict = "recursive root deletion ('rm -rf /')"   parses_cleanly=False
+'printf done &&'   => verdict = ''                                       parses_cleanly=False
+'cat >'            => verdict = ''                                       parses_cleanly=False
 ```
 
-读不懂的命令**交给审批门问（WARN）**，不是硬拒。所以 `unparseable` 类的判据是
-**"与冻结值一致"**，**不是** `!= ""` —— 后者会让 CI 第一天就红，且与既有契约冲突。
+`echo "rm -rf /` 是 [test_bash_red_lines.py:141-160](file:///workspace/ai-coding/tests/test_bash_red_lines.py#L141-L160)
+钉住的"读不懂但含红线 → **DENY**"；`printf done &&` / `cat >` 是
+[L163-173](file:///workspace/ai-coding/tests/test_bash_red_lines.py#L163-L173) 钉住的"读不懂且无红线 → **WARN**"。
+**两条都是"读不懂"，但 verdict 一非空一空** —— 所以 `unparseable` 不能有单一冻结值，必须拆开。
+
+* **"读不懂且无红线"是独立状态**（保持 WARN），既不进 `unparseable_deny` 也不进 `safe` —— 它现在有
+  自己的标签 `unparseable_warn`。
+* **FN 只统计 `dangerous` + `unparseable_deny`** —— `unparseable_warn` 的 verdict 空是**既有契约**，
+  算成 FN 会让 CI 第一天就红。
 
 **FN/FP 的口径（最终）**：
 
-* **FN = `dangerous` 类里 `verdict == ""` 的条数** —— 必须 0。
-* **FP = `safe` 类里 `verdict != ""` 的条数** —— 必须 0。
+* **FN = `dangerous` + `unparseable_deny` 里 `verdict == ""` 的条数** —— 必须 0。
+* **FP = `safe` 里 `verdict != ""` 的条数** —— 必须 0。
 * `known_miss` / `known_fp` 的计数**按判定输出统计**（不是按标签）——
   这样"缺口被修好"会**反映在指标上**（计数降到 0），而不是永远 >0（评审 P2-2）。
-* **golden 断言覆盖全部五类**：任何一条的 `verdict` 变了就红 —— 这是"回归检测"的本体。
+* **golden 断言覆盖全部六类**：任何一条的 `verdict` 变了就红 —— 这是"回归检测"的本体。
+* **`known_miss` 的 re-freeze 流程（评审 P1-5）**：某条的冻结值是**当时**的快照。
+  **修好缺口时**必须同步：① 该条 `verdict` 改非空；② 标签从 `known_miss` 移到 `dangerous`。
+  这是**受评审的语义变更**，不是"偷偷改测试" —— 基准的 golden 会强制这一步显式发生。
 
 **为什么单设 `known_miss`（本次调研最重要的发现之一）**：
 
@@ -415,14 +452,21 @@ tree-sitter 读得懂（赋值 + 变量展开），`_runs(view, "rm")` 为假 �
   * 注入的 clock **返回 epoch**（默认 `time.time`）。项目已有的
     [infra/time_utils.now_utc](file:///workspace/ai-coding/ai_coding/core/jobs.py#L55) 返回的是
     `datetime`，**不复用**（会让 `GrantStore` 依赖 datetime 且引入两种格式）。
-* **`add()` 的去重语义（评审 P3-2）**：v2 后同键重复 `add` → **更新 `meta` 的时间戳**（刷新 TTL），
+* **`add()` 的去重语义（评审 P3-2）**：同键重复 `add` → **更新 `meta` 的时间戳**（刷新 TTL），
   而不是追加一条 —— 否则"重新批准"不会延长有效期。
+* **`clear()` / `revoke()` 必须同步删 `meta`（评审 P3-3）**：`GrantStore.clear()` 今天只删
+  `workspaces[ws]`，扩展后**必须同时删 `meta[ws]`** —— 否则撤销后 `meta` 里的过期信息会残留。
+* **`meta` 与 `workspaces[ws]` 的键一致性（评审 P3-4）**：读取时**以 `workspaces[ws]` 为准**
+  （它是权威列表）；`meta` 里**多出的键忽略**、**缺失的键视为永久**。写入时两者同步。
+  —— 这样单侧损坏不会放大成安全问题。
 
 #### C.2 到期
 
 * `GrantStore.load()` 过滤过期的（`grantedAt + ttl < now`）。
-* **TTL 的数据通路（评审 P1-4）**：gate 的 `_grants` 是 `set[str]`、`_grant_applies` 逐字符串比较
-  —— **没有时间戳，无从过滤**。必须加一条并行映射：
+* **TTL 的数据通路（评审 P1-4 + P1-3）** —— 两个洞，都要补：
+
+  **洞一：gate 侧没有时间戳。** `_grants` 是 `set[str]`、`_grant_applies` 逐字符串比较 ——
+  必须加一条并行映射：
 
   ```python
   self._grant_expiry: dict[str, float] = {}   # key -> 过期 epoch；缺省 = 永久
@@ -431,10 +475,21 @@ tree-sitter 读得懂（赋值 + 变量展开），`_runs(view, "rm")` 为假 �
   * `_grant_applies` 命中 grant 时**先查过期** → 过期即视为未授权。
   * `grant()` 写入时同时写 `_grant_expiry`（TTL 来自配置）。
   * `revoke_all()` 一并清空。
+
+  **洞二：磁盘加载的授权拿不到 expiry。** `GrantStore.load()` 只返回 `set[str]`，
+  `from_config` 也只把 `set[str]` 传给 `grants=` → **持久化授权在 `_grant_expiry` 里没有条目** →
+  过期检查对它们是空操作 → **TTL 对持久化授权永不生效**。
+
+  * 修法：`GrantStore` 增加 `load_with_expiry() -> tuple[set[str], dict[str, float]]`，
+    `from_config` 用它**同时 seed** `_grants` 与 `_grant_expiry`。
+  * **U12/U13 必须覆盖"从磁盘加载的带 TTL 授权在会话内过期"**，否则这个洞会原样保留。
 * `PermissionGate.grants` 只返回**未过期**的（面板看到的是"当前有效"）。
-* **prune 会写盘**（评审 P2-7）：`grants.json` 的读写**无锁**（今天也如此，best-effort 语义），
-  现在每次 load 都可能写 → 窗口变大。**记一句**：仍保持 best-effort（写失败不影响内存态），
-  不引入锁（与项目既有语义一致）；多写者场景下最坏情况是"某次 prune 丢失"，可接受。
+* **`load()` 只读、`prune()` 单独写盘（评审 P2-4）** —— 原稿两处自相矛盾（§C.2 说"每次 load 都可能写"，
+  §8.2.1 说"不在 `load()` 里写"）。统一为：
+  * `load()` / `load_with_expiry()` **只读 + 内存过滤**，不写盘。
+  * `prune()` 显式写盘，**调用点**：`grant()` / `revoke()` 之后（写路径顺带清理）。
+  * `grants.json` 的读写**无锁**（今天也如此，best-effort 语义），多写者下最坏是"某次 prune 丢失"，
+    可接受 —— **不引入锁**（与项目既有语义一致）。
 
 #### C.3 逐条撤销
 
@@ -462,30 +517,40 @@ tree-sitter 读得懂（赋值 + 变量展开），`_runs(view, "rm")` 为假 �
 | 1 | `security/process_sandbox.py`（新） | `SandboxGap` / `ProcessSandboxPolicy` / `SandboxBackend` / `BwrapBackend` / **`spawn_argv`** | M-D1 的策略/机制分离 + 唯一 wrap 入口 |
 | 2 | `tools/bash_tool.py` / `core/jobs.py` | 改用 `spawn_argv(...)` + `shell=False`（**唯一两个调用方**） | M-D1 接线 |
 | 3 | `config/models.py` | `process_sandbox`（mode / allowBypass / writablePaths）+ `security.grantTtlSeconds` | 配置 |
-| 4 | `cli.py` / `server/world.py` | 构造 policy + backend | 组合根 |
-| 5 | `core/events.py` | **复用** `Degraded`（`component="process_sandbox"`），**不新造事件类型** | M-D1 的上报（评审 P1-1） |
-| 6 | `security/bash_redlines.py` | 迁入回退层（**完整清单见下**）+ 新增 `bash_red_line_with_fallback` | M-D2 合并双读法 |
-| 7 | `security/permission_gate.py` | `bash_denied` 改为委托（**删掉自己的规则**）；`_grant_expiry` + 过期过滤 | M-D2 单一判据 + M-D3 TTL 通路（评审 P1-4） |
-| 8 | `security/redline_corpus.py`（新） | 五类语料（`dangerous`/`safe`/`unparseable`/`known_miss`/`known_fp`）+ **冻结 verdict** | M-D2 |
-| 9 | `scripts/redline_benchmark.py`（新） | 基准脚本（golden 全绿 / FN=0 / FP=0 / 分类计数） | M-D2 |
-| 10 | `.github/workflows/ci.yml` | 加基准步骤 + `apt-get install -y bubblewrap` | M-D2 进 CI + M-D1 可跑 |
-| 11 | `security/grants.py` | **`meta` 可选键**（形状不变、**不 bump 版本**）+ TTL + prune + `revoke(key)` + 时钟注入 | M-D3（评审 P1-3） |
-| 12 | `security/permission_gate.py` | `revoke(key)` / 过滤过期 / 暴露 `_once_grants` | M-D3 |
-| 13 | `server/handlers.py` | `permissions.revoke` + 面板显示 once/过期 | M-D3 |
-| 14 | `app/commands.py` | `/permissions revoke <key>` | M-D3 |
-| 15 | `frontend/src/util/permissions-dialog.ts` + `component/dialog-permissions.tsx` | `PermissionsState.grants` 变为带过期时间的记录；**`grantLine` 签名同步**；渲染 once grants | M-D3（评审 P1-3 / P3-3） |
-| 16 | `config.example.yaml` | 新配置面的示例 | 评审 P2-5 |
-| 17 | `docs/data-contracts.md` | 契约同步 | |
+| 4 | `tools/builder.py` | `BashTool` 在 [L200](file:///workspace/ai-coding/ai_coding/tools/builder.py#L200) 构造、`Sandbox.roots` 也在那里可得 → **policy/backend/roots 经 `_build_tool_registry` 传入**（评审 P2-5：原稿漏了） | M-D1 接线 |
+| 5 | `cli.py` / `server/world.py` | 构造 policy + backend | 组合根 |
+| 6 | `core/events.py` | **复用** `Degraded`（`component="process_sandbox"`），**不新造事件类型** | M-D1 的上报（评审 P1-1） |
+| 7 | `security/bash_redlines.py` | 迁入回退层（**完整清单见下**）+ 新增 `bash_red_line_with_fallback` | M-D2 合并双读法 |
+| 8 | `security/permission_gate.py` | `bash_denied` 改为委托（**删掉自己的规则**）；`_grant_expiry` + 过期过滤；`load_with_expiry` seed | M-D2 单一判据 + M-D3 TTL 通路（评审 P1-4 / P1-3） |
+| 9 | `security/redline_corpus.py`（新） | **六类**语料（`dangerous`/`unparseable_deny`/`unparseable_warn`/`safe`/`known_miss`/`known_fp`）+ **逐条冻结 verdict** | M-D2（评审 P0-1） |
+| 10 | `scripts/redline_benchmark.py`（新） | 基准脚本（golden 全绿 / FN=0 / FP=0 / 分类计数） | M-D2 |
+| 11 | `.github/workflows/ci.yml` | 加基准步骤 + `apt-get install -y bubblewrap` | M-D2 进 CI + M-D1 可跑 |
+| 12 | `security/grants.py` | **`meta` 可选键**（形状不变、**不 bump 版本**）+ TTL + `load_with_expiry` + `prune()` + `revoke(key)` + 时钟注入 | M-D3（评审 P1-3） |
+| 13 | `security/permission_gate.py` | `revoke(key)` / 过滤过期 / 暴露 `_once_grants` | M-D3 |
+| 14 | `server/handlers.py` | `permissions.revoke` + 面板显示 once/过期 | M-D3 |
+| 15 | `app/commands.py` | `/permissions revoke <key>` | M-D3 |
+| 16 | `frontend/src/util/permissions-dialog.ts` + `component/dialog-permissions.tsx` | `PermissionsState.grants` 变为带过期时间的记录；**`grantLine` 签名同步**；渲染 once grants | M-D3（评审 P1-3 / P3-3） |
+| 17 | `config.example.yaml` | 新配置面的示例；**给 `warn` 示例**（默认 `enforce` + 无 userns = 拒掉所有 bash，评审 P3-6） | 评审 P2-5 / P3-6 |
+| 18 | `docs/data-contracts.md` | 契约同步 | |
 
 **回退层迁入 `bash_redlines.py` 的完整清单（评审 P2-3 —— 漏一个 U9 就会假绿）**：
 
-| 符号 | 现位置 |
-|---|---|
-| `_normalize_command` / `_command_words` / `_SHELL_SPLIT` / `_HOME_PREFIX` | `permission_gate.py` |
-| `_dangerous_recursive_root_delete` / `_world_writable_chmod` / `_reads_credential` | `permission_gate.py` |
-| `_BASH_HARD_DENY_PATTERNS` | `permission_gate.py` |
-| `_grammar_reads` | `permission_gate.py`（**判断"语法是否读完"，合并后属于判据的一部分**） |
+| 符号 | 处置 | 现位置 |
+|---|---|---|
+| `_normalize_command` / `_command_words` / `_SHELL_SPLIT` | 迁入 | `permission_gate.py` |
+| `_dangerous_recursive_root_delete` / `_world_writable_chmod` | 迁入 | `permission_gate.py` |
+| `_BASH_HARD_DENY_PATTERNS` | 迁入 | `permission_gate.py` |
+| `_grammar_reads` | 迁入（判断"语法是否读完"，合并后属于判据的一部分） | `permission_gate.py` |
+| `_reads_credential(words)` | 迁入，**改名 `_reads_credential_words`** | `permission_gate.py` |
+| `_reads_credential(view)` | **复用既有**（`bash_redlines.py:165` 已有） | `bash_redlines.py` |
+| `_HOME_PREFIX` | **复用既有**（两处定义完全相同） | 两边都有 |
+| `command_words` / `parses_cleanly` | **import 补上**（回退层依赖；`bash_redlines` 目前只 import `command_shape, command_views`） | `shell_parse.py` |
 
+> **重名是硬伤（评审 P1-4）**：`bash_redlines._reads_credential(view: CommandView)` 与
+> `permission_gate._reads_credential(words: list[str])` **同名不同签名**。若按原名迁入，
+> 模块级后定义覆盖前定义 → `bash_red_line` 会拿 `CommandView` 当 `list[str]` 迭代 → `TypeError`，
+> **整条语法层红线判定挂掉**。必须改名。
+>
 > 另：`_verdict` 的测试辅助与 `test_bash_red_lines.py` 的 `_verdict` 包装需同步。
 
 **测试条目（评审 P0-4 —— 原稿漏了）**：
@@ -537,17 +602,19 @@ tree-sitter 读得懂（赋值 + 变量展开），`_runs(view, "rm")` 为假 �
 | U1c | `test_process_sandbox.py::test_a_background_job_is_sandboxed` | **经 `JobRegistry.start`**：job 在 `enforce` 下写不到工作区外（评审 P1-2） |
 | U2 | `test_process_sandbox.py::test_a_process_under_enforce_can_write_inside` | 同进程写工作区内 → 成功（今天：成功 → **本条是 Prove**） |
 | U2b | `test_process_sandbox.py::test_enforce_still_reads_outside_the_workspace` | **反向断言**：`enforce` 下读 `~/.ssh/id_rsa`（或任一工作区外文件）**仍成功** —— 本轮**只保证写边界**，防止把"沙箱"误读为"隔离"（评审 P2-6） |
-| U3 | `test_process_sandbox.py::test_enforce_refuses_when_the_mechanism_is_missing` | backend 报不可用 → `bash` 返回 `denied` + `reason`（今天：无机制，会执行） |
+| U3 | `test_process_sandbox.py::test_enforce_refuses_when_the_mechanism_is_missing` | backend 报不可用 → `bash` 返回 **`error == "denied"`** + `data["reason"] == "bwrap.unavailable"`（评审 P1-1：不 catch 就退化成 `tool_error`）（今天：无机制，会执行） |
+| U3b | `test_process_sandbox.py::test_enforce_refuses_when_the_backend_is_missing` | `backend=None` + `enforce` → `SandboxGap("sandbox.backend.missing")`（评审 P1-2） |
 | U4 | `test_process_sandbox.py::test_warn_degrades_and_reports` | `warn` + 不可用 → 执行 + **`Degraded`** 事件（`component="process_sandbox"`）（今天：无事件） |
-| U5 | `test_process_sandbox.py::test_the_gap_has_a_stable_reason_code` | `SandboxGap.reason == "bwrap.unavailable"`（今天：无） |
+| U5 | `test_process_sandbox.py::test_the_gap_has_a_stable_reason_code` | `SandboxGap.reason == "bwrap.unavailable"`，且**经 `BashTool.execute`** 时 `error == "denied"`（今天：无） |
 | U6 | `test_process_sandbox.py::test_bypass_skips_the_mechanism` | `bypass=True` → 不包装（今天：无） |
 | U7 | `test_process_sandbox.py::test_wrap_puts_the_writable_bind_after_the_readonly_root` | `wrap()` 的 argv 里 `--bind <ws>` 在 `--ro-bind / /` **之后**（顺序错则工作区仍只读） |
 | U8 | `test_redline_benchmark.py::test_the_corpus_matches_its_frozen_verdicts` | **golden 全绿**：每条语料的 `verdict` 与冻结值一致（今天：无基准 → 用例无法运行/断言"基准存在"失败） |
 | U9 | `test_redline_benchmark.py::test_the_two_readers_agree` | `bash_red_line_with_fallback` 与**旧 `bash_denied` 的冻结快照**在语料 + 现有测试集上**逐条等价**（合并是行为保持） |
 | U10 | `test_redline_benchmark.py::test_known_miss_is_surfaced` | `x="rm -rf /"; $x` 被计入 `known_miss` 且**出现在指标表里**（今天：无上报 → 缺口隐形） |
 | U11 | `test_redline_benchmark.py::test_the_corpus_is_not_emptied` | 语料规模 ≥ 阈值（dangerous 20 / unparseable 10 / safe 20 / known_miss 5） |
-| U12 | `test_grant_store.py::test_an_expired_grant_is_not_loaded` | 写入带 TTL 的授权 → 过期后 `load()` 不含它（今天：无 TTL） |
-| U13 | `test_grant_store.py::test_v1_grants_still_load_and_are_permanent` | v1 格式仍可读、视为永久（今天：v1 可读但无"永久"语义） |
+| U11b | `test_redline_benchmark.py::test_unparseable_splits_into_deny_and_warn` | `echo "rm -rf /` 在 `unparseable_deny`（非空）、`printf done &&` 在 `unparseable_warn`（空）—— **两类都有**，证明拆分不是空的（评审 P0-1） |
+| U12 | `test_grant_store.py::test_an_expired_grant_is_not_loaded` | 写入带 TTL 的授权 → 过期后 `load_with_expiry()` 不含它（今天：无 TTL） |
+| U13 | `test_grant_store.py::test_a_disk_loaded_grant_expires_inside_the_session` | **从磁盘加载**的带 TTL 授权 → `from_config` seed 后，**会话内**过期即失效（评审 P1-3 —— 这是"持久化授权 TTL 永不生效"那个洞的回归锁） |
 | U14 | `test_permission_gate.py::test_a_single_grant_can_be_revoked` | `revoke(key)` 只删一条；传基名撤销全部 posture 变体（今天：只有 `revoke_all`） |
 | U15 | `test_permission_gate.py::test_the_panel_shows_once_grants_and_expiry` | `permissions_state` 含 once grants + 过期时间（今天：无） |
 
@@ -710,6 +777,35 @@ AF_UNIX 残余风险（P1-6 → §7.1）、时钟格式（P1-7 → §C.1 epoch �
 ### 8.3 实现评审（子智能体）
 
 _待填。_
+
+#### 8.2.2 第 3 轮评审的处置（全部已修）
+
+**1 个 P0**：
+
+| # | 问题 | 修法 |
+|---|---|---|
+| P0-1 | `unparseable` 按**单一 verdict** 冻结是错的 —— 实测 `echo "rm -rf /` → 非空（DENY），`printf done &&` / `cat >` → 空（WARN），**两条都是"读不懂"**。且"第三种状态"在六类里无处安放 | **拆成 `unparseable_deny`（读不懂且含红线 → 非空，计入 FN）+ `unparseable_warn`（读不懂且无红线 → 空，不计 FN）**；FN 口径同步改为 `dangerous` + `unparseable_deny` |
+
+**5 个 P1**：
+
+| # | 问题 | 修法 |
+|---|---|---|
+| P1-1 | `SandboxGap` **没有捕获点** → 冒到 `dispatch.py:662` 的 `except Exception` → `error="tool_error"`，**不是**承诺的 `error="denied"` | 写死：`BashTool.execute` / `JobRegistry.start` 各自 `except SandboxGap` → `denied` + `data.reason`；**U3/U5 断言 `error == "denied"`** |
+| P1-2 | `enforce` + `backend is None` **静默不隔离**（与 fail-closed 冲突）；且既有 66 处构造不能红 | `spawn_argv` 里 `enforce` + `backend is None` → `raise SandboxGap("sandbox.backend.missing")`；**`policy=None` 是唯一的"不改变行为"入口**（工具构造默认 `None`＝`off`，**组合根**才传 `enforce`） |
+| P1-3 | TTL 数据通路**只覆盖会话内新授权** —— 磁盘加载的授权在 `_grant_expiry` 里没有条目 → **持久化授权的 TTL 永不生效** | `GrantStore.load_with_expiry() -> tuple[set[str], dict[str, float]]`；`from_config` 用它**同时 seed**；U12/U13 覆盖"磁盘加载的带 TTL 授权在会话内过期" |
+| P1-4 | `_reads_credential` **同名不同签名**（view 版 vs words 版）→ 按原名迁入会**打挂整条语法层** | 回退版改名 **`_reads_credential_words`**；view 版复用既有；`_HOME_PREFIX` 复用既有；补 `command_words`/`parses_cleanly` 的 import |
+| P1-5 | "`known_miss` 计数会降到 0" 与 "verdict 变了就红" **冲突** | 写明 **re-freeze 流程**：修好缺口时①verdict 改非空 ②标签移到 `dangerous` —— 这是**受评审的语义变更**，golden 强制它显式发生 |
+
+**5 个 P2 + 6 个 P3（全部已修）**：`warn` 档的发事件出口（→ `emit` 形参）、jobs 路径**只 wrap 一次**
+（→ 写死 `BashTool` 对 job 不 wrap）、jobs 的 pid/kill 语义（→ `Job.pid` 报 bwrap pid + `--die-with-parent`，
+U1c 验证；不成立则 `--no-pidns`）、`load()` 只读 / `prune()` 写盘（→ 统一）、`builder.py` 漏进清单、
+`GrantStore.clear()` 同步删 `meta`、`meta` 与 `workspaces[ws]` 的键一致性、**U9 快照落点**
+（→ 冻结快照就是**语料文件本身**，U9 断言"合并后的实现 == 语料冻结值"，与 U8 不重复）、
+`config.example.yaml` 给 `warn` 示例。
+
+> **评审已核实为"对"的点**（不改）：grants `meta` 可选键 + 不 bump 版本（T1 仍绿）、
+> 回退层符号完整且只被 `bash_denied` 使用、`shell=False` + `["/bin/sh","-c",cmd]` 语义等价、
+> `known_miss` 的归因（子串表能拦、被 `_grammar_reads` 短路）、`known_fp`/`safe` 的边界。
 
 ---
 
