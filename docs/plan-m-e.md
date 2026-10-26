@@ -561,7 +561,41 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
 
 ### 8.3 实现评审（子智能体）
 
-_待填。_
+**0 P0 · 1 P2 · 7 P3（全部已修，见 §8.3.1）**
+
+**已实测验证**（评审逐条复核）：
+
+| 项 | 方式 | 结果 |
+|---|---|---|
+| 后端全量 | `pytest` | ✅ exit 0，6 条 skip 全为 MCP stdio 门控 |
+| 领域 E 定向 | 6 个测试文件 | ✅ 全绿 |
+| 前端 | `bun test` / `tsc` | ✅ 484 pass / 0 fail；tsc 干净 |
+| `CompactionEnded.layers` plumbing | 代码走查 | ✅ 链路完整（`last_layer_stats` → `Compactor._compress_once` → `CompactionEnded`） |
+| **camelCase / snake_case 分道** | 端到端测试 | ✅ wire 用 camelCase、trace JSONL 用 snake_case、`/trace` 读 snake_case —— 有测试钉住 |
+| M-E4 传的是 `Assembled.history` | 代码走查 | ✅ 不是 `request`（传 `request` 必假） |
+| M-E4 五类 skip | 代码走查 | ✅ 恰好五类，与 §D.3 逐条对应 |
+| M-E4 "至少执行一次"护栏 | 逻辑复核 | ✅ `checked >= 1` 能拦住 vacuous pass |
+| M-E2 W2 内容真值契约 | 实跑 | ✅ `_SameCountRewriter` 造"同条数异内容" → `CompactionEnded(8,8)` |
+| M-E2 W3 顺序不变量 | 实跑 | ✅ `force=True` + 双注入点，非 vacuous |
+| **突变：`last_layer_stats` 恒空** | 实测 | ✅ **3 failed** —— plumbing 被验证 |
+| **突变：`/trace` 读 camelCase** | 实测 | ✅ 变红（渲染成 0→0） |
+
+**实现期发现并修的真 bug**：trace JSONL 用 `dataclasses.asdict`（**snake_case**），
+而 wire 用 camelCase —— 最初让 `/trace` 读 camelCase，导致真实 trace 渲染成 `0→0 token`。
+已改为 snake_case 并补端到端测试锁死。
+
+#### 8.3.1 实现评审的处置（全部已修）
+
+| 级别 | 问题 | 修法 |
+|---|---|---|
+| **P2-1** | **`/trace` 未输出"L4 未触发"** —— 方案 §C.1 明文要求，实现只做了"`layers` 不含 L4 项" | 新增 `_compaction_line()` + 断言 `test_the_trace_says_when_l4_did_not_run` |
+| P3-1 | `LayerStat.skipped` 的**一般语义**未被 L1/L4 兑现（恒 0） | 收窄 docstring 为"**仅 L2/L3** 计数"（L1/L4 改条数而非扫描候选），同步 `features.md` |
+| P3-2 | `LayerStat.removed` 的 docstring 与**净减**语义差一个占位符（L1 装 `[snipped N]`、L4 装摘要条） | 改 docstring 为"净减条数"，同步 `features.md` |
+| P3-3 | W3 测试名 `..._l3_l1_l2_l4` **只断言 L2→L4**，名字过度承诺 | 补齐 L3/L1 两个模块级注入点，断言改为**全序** `["L3","L1","L2","L4"]` |
+| P3-4 | W4 管线级原子组锁**恒真**（`sanitize_pairs` 结构性保证） | docstring 显式声明为**弱锁**（tripwire），并说明"吸附到 user message"的修法正是被降级成这把回归锁 |
+| P3-5 | `books_feed_the_policy` 未按 §C.3 移出 M-E | 保留用例但**标注归属 domain B（R7a 内核）**，写明其 FAIL 是策略阶梯的过期期望 |
+| P3-6 | `summarize_turn` 存的 `compaction_before/after` **从未被使用**（死数据） | **删除**（与 `layers[0].before_tokens` / `layers[-1].after_tokens` 完全重复） |
+| P3-7 | 五类 skip 中 ③ 只有单元覆盖，无端到端场景 | 可接受（不影响正确性） |
 
 #### 8.2.3 第 4 轮评审的处置（全部已修）
 
