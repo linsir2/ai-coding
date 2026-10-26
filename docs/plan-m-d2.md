@@ -237,6 +237,24 @@ if backend.tier != "full":
 * CI（真 VM）：预期 **`full`**。
 * 两处都能跑，不再出现"7 条全 skip"。
 
+#### A.4b **`no-proc` 档的代价必须写明（评审 P1-1 —— 实测）**
+
+`--tmpfs /proc` 关掉逃逸的**代价是 `/proc` 完全不可用**。**实测**（`no-proc` 档）：
+
+| 坏 | 好 |
+|---|---|
+| `ps` / `pgrep` / `free` / `uptime` / `df` / `mount` | `lsof -v` / `ss -l` |
+| `readlink /proc/self/exe` | `git --version` / `node --version` / `python3 -V` |
+| **bash 进程替换 `cat <(echo hi)`** | `pip` / `make` / `gcc` / `pytest` |
+
+最隐蔽的是**进程替换**：`--dev /dev` 会建 `/dev/fd → /proc/self/fd`，`/proc` 一空就**悬空**
+→ `cat: /dev/fd/63: No such file or directory`。
+
+→ **三处写明**：① §7.1 残余风险；② `sandbox.tier.no-proc` 的上报文案带一句"代价：`/proc` 不可用"；
+③ **加断言钉住**（沙箱内 `ps` 非零、`<(...)` 失败）—— 否则将来有人"顺手修好"它会直接重新打开逃逸。
+
+**这是降级档的已知代价，不是缺陷。**
+
 #### A.5 必须同步改的既有用例（评审 P1-3）
 
 [test_wrap_keeps_the_isolation_switches](file:///workspace/ai-coding/tests/test_process_sandbox.py#L476-L480)
@@ -322,15 +340,21 @@ if backend.tier != "full":
 * **glob 是构造期快照** —— 运行期新增的密钥文件**不会**被重新遮蔽。写进文档（这是能力边界）。
 * 展开时同样做 §B 的 `resolve()`。
 
-#### B.5 默认清单的完整性（评审 P2-5）
+#### B.5 默认清单的完整性（评审 P2-5 / P2-1 / P2-2）
 
 读面是 **denylist** —— **"永远少一条"正是调研批评的失效模式**（Pillar："allow-default 不是沙箱，
 而是一张永远少一条的清单"）。因此：
 
 * 默认清单**扩充**：`~/.git-credentials`、`~/.npmrc`、`~/.pypirc`、`~/.config/gh/hosts.yml`、
   `~/.cargo/credentials`、`~/.terraform.d/credentials`、`~/.bash_history`、`~/.python_history`、`~/.viminfo`。
-* **但必须在残余风险里显式写**："denylist **不完整**，这是**刻意的能力边界**，不是保证" ——
-  否则读者会以为默认清单等于"读边界已闭合"。
+* **按 XDG 展开，不写死 `~/.config`（评审 P2-1）**：[paths.py](file:///workspace/ai-coding/ai_coding/paths.py#L37-L54)
+  用的是 `config_home()` / `data_home()`（尊重 `XDG_CONFIG_HOME` / `XDG_DATA_HOME`）。
+  写死 `~/.config/ai-coding` 的话，**XDG 被覆盖时掩码落到空目录，API key 照样可读**。
+* **补其他用户主目录**（评审 P3-2）：`/home/*/.ssh`、`/root/.ssh`（非当前用户时）。
+* **但必须在残余风险里显式写**：
+  * "denylist **不完整**，这是**刻意的能力边界**，不是保证"；
+  * **工作区级配置不在读边界内**（评审 P2-2）：`config.yaml` / `config.local.yaml` 可含**同一个 API key**，
+    而工作区**必然可读**（否则工具没法干活）→ "保护本仓库自身凭据"**只覆盖用户级**，不覆盖工作区级。
 
 **fail-closed**：`enforce` 下若某条遮蔽**无法构造**（路径存在但 IO 失败）→ **拒绝而非跳过**。
 
@@ -383,8 +407,20 @@ bwrap ... -- <sandbox-bridge> --unix <proxy_socket> -- <用户 argv...>
 
 * `<sandbox-bridge>` 是一个**小 Python 程序**（随包分发，`/usr` 已 bind → `python3` 可用；
   或直接用一个 `socat` 调用 + `exec`，取决于实现期实测）。
-* 它做三件事：① 绑定一个 loopback TCP 端口；② 起后台线程转发到 Unix socket；
-  ③ **把 `HTTP_PROXY` 等设进自己的 env**，然后 `execv(用户 argv)`。
+* **生命周期模型（评审 P1-2 —— 原设计自相矛盾）**：原写"起后台**线程**转发 + `execv`" ——
+  **`execv` 会杀掉所有线程，转发线程必死**，于是"桥启动成功但转发已死" →
+  **网络静默挂死**，而 §C.1 的 fail-closed 只覆盖"启动失败"，覆盖不到这种。
+  → **写死**：**`fork` 转发子进程**（父进程 `execv` 用户命令；子进程跑转发循环），
+  并用 **`PR_SET_PDEATHSIG`**（或父子退出联动）保证用户命令退出时转发子进程被清理。
+  备选：桥**不** `execv`，而是 `spawn` 用户命令并 `wait`。
+* **参数协议**（评审 P3-3）：`--unix <sock>` 之后**首个 `--`** 为界，其后全部是用户 argv。加用例覆盖歧义。
+* **桥路径必须从读边界豁免**（评审 P1-3 —— 实测）：桥若落在被 `--tmpfs` 遮蔽的目录下
+  → `execvp ... ENOENT`，整条命令不执行（fail-closed，但 **`proxy` 档直接不可用**）。
+  → **写死**：桥路径 `resolve()` 后**显式从 `read_deny_paths` 排除**；
+  并加一条断言（桥路径永不被遮蔽）。
+* **`block_af_unix=True` 与 `network.mode="proxy"` 互斥**（评审 P1-3）：
+  seccomp 档会拒 `socket(AF_UNIX)` → 桥无法连代理套接字。
+  → **配置校验期报错**（与 C.3 的 `"*"` 同一层）。
 * **端口协调**：端口由桥选，env 由桥设 —— **不存在"env 无从得知端口"的问题**（评审 P1-1 的缺口）。
 * **env 的基线清理**走 bwrap 的 `--setenv` / `--unsetenv`（`wrap()` 只返回 argv，
   env 必须走 bwrap 参数 —— 评审 P3）。清理 `NO_PROXY` / `http_proxy` / `all_proxy`。
@@ -455,9 +491,20 @@ host == allow_entry  or  host.endswith("." + allow_entry)
 | **套接字权限** | 代理监听 Unix socket 并被 `--bind` 进沙箱；若 world-accessible，**其他本地用户**可连接 | socket 文件权限 **`0600`**（仅属主），构造时显式 `chmod` |
 | **对抗性输入** | 沙箱内进程会**主动构造畸形 HTTP** | 解析 hardening（见上）+ 单条连接超时 |
 
-**迁移说明**（评审 P2-11）：默认从 `off` 改成 `deny` 会**直接打断** `pip install`、`npm install`、
+**迁移说明**（评审 P2-11 / P2-5）：默认从 `off` 改成 `deny` 会**直接打断** `pip install`、`npm install`、
 `git clone`、`go mod download` —— 代价**比写边界大得多**。`config.example.yaml` 必须给
 `network.mode` 与 `proxy` 档的**最小可用配置示例**，并写明"**默认 deny 会打断联网构建，proxy 是出口**"。
+
+**读边界的迁移代价（评审 P2-5 —— 原方案只写了网络墙的）**：遮蔽默认清单会打断常见工作流 ——
+
+| 被遮蔽 | 坏掉的 | 替代 |
+|---|---|---|
+| `~/.ssh` | `git push`（SSH）、`scp` | `ssh-agent`（agent 套接字在 `/tmp`，需评估）；或只遮 `id_*` 留 `config` |
+| `~/.gnupg` | 签名提交 | 用 `gpg-agent`；或只遮私钥文件 |
+| `~/.docker/config.json` | `docker push`（registry 凭据） | 改用 credential helper |
+| `~/.aws` | `aws` CLI | 用 IAM role / env 凭据（env 也要遮，见 §7.1） |
+
+→ `config.example.yaml` 与本文档都要写明这些代价与替代方案。**这是刻意的范围裁剪，不是疏漏。**
 
 ### D. AF_UNIX 防护
 
@@ -525,7 +572,7 @@ host == allow_entry  or  host.endswith("." + allow_entry)
 | 1 | `security/process_sandbox.py` | `_CONSTRUCTION_TIERS`（**两档，无 `no-pid`**）+ 分级探测（**完整构造**）+ `--unshare-user-try` + 读遮蔽 + 网络开关 + AF_UNIX 遮蔽 + seccomp 档 + **`tier` 属性** | 机制组装处 |
 | 2 | `security/process_sandbox.py` | `ProcessSandboxPolicy.read_deny_paths` / `NetworkConfig` / `SandboxProxy` 协议 / `SandboxMaskReport` | 策略层 |
 | 3 | `config/models.py` + `config.example.yaml` | `read_deny_paths` / `network`（含 `proxy` 最小可用示例） | 配置 |
-| 4 | `config/loader.py` | **显式加一行**：`EXECUTION_KEYS` 纳入 `read_deny_paths` / `network`（评审 P2-13：能关墙的键必须与 `process_sandbox` 同层受信） | 信任边界 |
+| 4 | `config/loader.py` | **显式加一行**：把"能关墙的键"纳入 `EXECUTION_KEYS`（评审 P2-13 / P2-3）。**放置层级要先定死**：`read_deny_paths` / `network` 若嵌在 `process_sandbox` 下，则整块已被丢弃、加行是**空操作**；只有**顶层键**才需要加。→ **本轮把它们放在 `process_sandbox` 下**（已被 `EXECUTION_KEYS` 覆盖），并在 `data-contracts.md` 写明"项目层不能关沙箱/读边界/网络墙" | 信任边界 |
 | 5 | `server/sandbox_proxy.py`（新） | 最小 HTTP/CONNECT 代理（Unix socket + C.2 白名单 + 每连接一线程） | 网络墙的 `proxy` 档 |
 | 6 | `server/world.py` / `cli.py` | 代理进程生命周期（同步就绪 + 补进 `aclose`）+ 配置接线 | 组合根 |
 | 7 | `tools/builder.py` | 透传新配置给工具栈与子智能体栈 | 接线 |
@@ -566,7 +613,7 @@ host == allow_entry  or  host.endswith("." + allow_entry)
 | 编号 | 用例 | 期望红相（今天必须失败） |
 |---|---|---|
 | V1 | `test_a_construction_tier_is_selected_and_reported` | 档位探测选中并**上报降级**（今天无档位概念） |
-| V1b | `test_proc_and_pid_namespace_are_all_or_nothing` | **两条断言**：① argv 不变量（`--proc` ⟺ `--unshare-pid`）；② **行为**：沙箱内 `ls /proc` **为空**、读 `/proc/<pid>/root/...` **失败**（评审 P0-1：只做 argv 断言抓不到） |
+| V1b | `test_proc_escape_is_closed_per_tier` | **按档位断言**（评审 P1-4 —— 无条件断言在 `full` 档必红）：**`no-proc`** → `ls /proc` **为空** + 读 `/proc/<pid>/root` **ENOENT**；**`full`** → `/proc` 非空但 **`/proc/1/comm` ≠ 宿主 init** 且 **读 `/proc/<宿主 pid>/root` 不可达**。另加 argv 不变量（`--proc` ⟺ `--unshare-pid`）。**这条把 `full` 档的逃逸闭合钉在 CI** —— 本环境恒 EPERM、该组合从未被验证 |
 | V2 | `test_the_mechanism_runs_without_cap_sys_admin` | 加 `--unshare-user-try` 后 `available()` 为真（今天恒 False → 7 条真实用例全 skip） |
 | V3 | `test_a_sandboxed_process_cannot_read_ssh_keys` | `enforce` 下 `cat ~/.ssh/id_rsa` → **失败**（今天：成功读到） |
 | V4 | `test_a_sandboxed_process_cannot_read_cloud_credentials` | 同上，`~/.aws/credentials` |
@@ -638,7 +685,8 @@ host == allow_entry  or  host.endswith("." + allow_entry)
 
 | 风险 | 说明 | 处置 |
 |---|---|---|
-| **`/proc/<pid>/root` / `environ`（`full` 档）** | `--ro-bind / /` 是**递归绑定** → `/proc` **始终**存在。A.1 用 `--tmpfs /proc` 关掉 `no-proc` 档的整块 `/proc`；**`full` 档保留 `/proc`**（工具需要），此时靠 `--unshare-pid` 缩小（沙箱只看自己的 pid），但**不是零** | 本轮**不修**（要修需完全不挂 `/proc` 或改 env 传递） |
+| **`no-proc` 档的 `/proc` 不可用** | 实测：`ps`/`pgrep`/`free`/`uptime`/`df`/`mount` 坏，**bash 进程替换 `<(...)` 坏**（`/dev/fd` 悬空） | 已知代价（A.4b）；断言钉住 |
+| **`full` 档的 `/proc` 通道** | 有 `--unshare-pid` 时**宿主 pid 命名空间不可见**，`/proc/<pid>/root` 通道**已关**（与 §A.1 一致 —— 评审 P2-4 的统一表述）。**残余场景**：若 userns 不可用导致 `--unshare-pid` 失效，通道重开 | V1b 按档位钉住 |
 | **递归 bind 带进 `/sys`、`/run`** | 同上 —— 沙箱能看到宿主 `/sys`、`/run` 等子挂载，读边界与 AF_UNIX 的暴露面**比原假设更大** | 写进本文档 |
 | **符号链接绕过读遮蔽** | 遮蔽的是**路径名**不是 **inode**；`resolve()` 只解析 deny 路径自身，**运行期重指向不覆盖**（调研 F3） | 已做 `resolve()` + 遮蔽原始路径与目标；**仍不完整** |
 | **读 denylist 不完整** | denylist **"永远少一条"** —— 这是**刻意的能力边界**，**不是保证**（Pillar） | 已扩充清单；**显式声明不完整** |
@@ -724,3 +772,23 @@ host == allow_entry  or  host.endswith("." + allow_entry)
 ### 8.3 实现评审（子智能体）
 
 _待填。_
+
+#### 8.2.2 第 3 轮评审的处置（全部已修）
+
+**0 个 P0 · 4 个 P1 · 5 个 P2 · 4 个 P3**
+
+| 级别 | 问题 | 修法 |
+|---|---|---|
+| P1-1 | **`no-proc` 档的 `/proc` 工具断裂完全漏记** —— 实测 `ps`/`pgrep`/`free`/`uptime`/`df`/`mount`/`readlink /proc/self/exe` 全坏，**bash 进程替换 `<(...)` 也坏**（`/dev/fd` 悬空） | §A.4b：三处写明（残余风险 / 上报文案 / **断言钉住**） |
+| P1-2 | **桥设计自相矛盾**：`execv` 会杀掉后台转发线程 → "桥启动成功但转发已死" → **网络静默挂死**，fail-closed 覆盖不到 | §C.1：**`fork` 转发子进程** + `PR_SET_PDEATHSIG`（或 spawn+wait）；参数协议明确 |
+| P1-3 | **桥路径未被读边界豁免**（实测：桥在被遮蔽目录下 → `execvp ENOENT`，`proxy` 档直接不可用）；**`block_af_unix` 与 `proxy` 互斥** | §C.1：桥路径 `resolve()` 后显式排除 + 断言；互斥在**配置校验期**报错 |
+| P1-4 | **V1b 无条件断言在 `full` 档必红**；且 `full` 档的逃逸闭合**从未被验证**（本环境恒 EPERM） | V1b 改**按档位断言**（no-proc：`/proc` 空；full：`/proc/1/comm` ≠ 宿主 init + `/proc/<宿主 pid>/root` 不可达）—— **钉在 CI** |
+| P2-1 | 掩码**写死 `~/.config`**，忽略 `XDG_CONFIG_HOME` → XDG 被覆盖时掩码落空、key 可读 | §B.5：按 `config_home()`/`data_home()` 展开 |
+| P2-2 | **工作区级配置未被遮蔽**（`config.yaml` 可含同一 API key，工作区必然可读） | §B.5 / §7.1 显式声明"只覆盖用户级" |
+| P2-3 | `EXECUTION_KEYS` 改动**落点不清**（嵌套则加行是空操作） | §四 #4：**定死放在 `process_sandbox` 下**（已被覆盖） |
+| P2-4 | §7.1 与 §A.1 **自相矛盾** | §7.1 统一表述（有 `--unshare-pid` 时通道已关；残余场景写明） |
+| P2-5 | 读边界的**可用性代价未写迁移说明** | §C 补表（ssh/gpg/docker/aws 的替代方案） |
+| P3-1 | 整目录 `--tmpfs` 连带隐藏非机密兄弟项，且遮蔽目录在沙箱内**可写**（临时） | 文档点明；需要时改逐文件 `--ro-bind /dev/null` |
+| P3-2 | 只遮当前用户 `~` | §B.5 补 `/home/*/.ssh`、`/root/.ssh` |
+| P3-3 | 桥的参数协议未定义（`--` 歧义） | §C.1：首个 `--` 为界 + 用例 |
+| P3-4 | `no-proc` 档丢了 `--unshare-pid` → 与宿主共享 pid 命名空间 | 记入降级档说明 |
