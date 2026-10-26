@@ -211,6 +211,35 @@ class CompactionDelta:
 
 
 @dataclass(frozen=True)
+class LayerStat:
+    """One compression layer's measured effect, at the layer's own boundary.
+
+    ``removed`` counts messages the layer actually took out (only L1's snip
+    and L4's summary do); ``rewritten`` counts bodies the layer replaced while
+    keeping the message count (L2's envelope, L3's persist).  The two are
+    deliberately separate: L2/L3 never remove a message, so folding them into
+    ``removed`` would render a misleading number (plan-m-e §C.1).  ``skipped``
+    is how many the layer examined and left alone — L3 is the case that
+    matters, because a non-trailing large output is not even in the trailing
+    batch and an under-threshold trailing one is examined and skipped.
+
+    ``before_tokens``/``after_tokens`` are measured with ``_history_tokens``
+    (text plus a flat 1600 per image), on the exact list the pipeline
+    transforms at that point, so a layer's token delta is what ``/trace`` and
+    the compaction card report.  Order is the pipeline order
+    (L3 -> L1 -> L2 -> L4), never numeric, and a layer that did not run is
+    absent rather than all-zero.
+    """
+
+    name: str
+    removed: int
+    rewritten: int
+    skipped: int
+    before_tokens: int
+    after_tokens: int
+
+
+@dataclass(frozen=True)
 class CompactionEnded:
     """A compaction job finished (durable).
 
@@ -218,6 +247,12 @@ class CompactionEnded:
     context size (OpenCode parity, docs/compaction-debt.md P3).  ``text`` is
     the accepted summary body for the transcript row; deltas are lossy
     (bridge throttles them), so the row cannot be reconstructed from them.
+
+    ``layers`` is the per-layer account of the pipeline boundary (L4's exit
+    when it ran, else L2's).  ``estimated_before``/``estimated_after`` are
+    that boundary's ends — NOT the ``Compactor`` boundary, which also carries
+    the paging loop and can differ from the layers; the two are not the same
+    measure and must not be compared (plan-m-e §C.1).
     """
 
     reason: CompactionReason = "auto"
@@ -227,6 +262,9 @@ class CompactionEnded:
     completion_tokens: int = 0
     total_tokens: int = 0
     text: str = ""
+    layers: tuple[LayerStat, ...] = ()
+    estimated_before: int = 0
+    estimated_after: int = 0
 
 
 @dataclass(frozen=True)
@@ -634,6 +672,7 @@ def preview(text: str, limit: int = OUTPUT_PREVIEW_CHARS) -> str:
 __all__ = [
     "OUTPUT_PREVIEW_CHARS",
     "CompactionReason",
+    "LayerStat",
     "CompactionStarted",
     "CompactionDelta",
     "CompactionEnded",

@@ -61,7 +61,19 @@ export type Part =
       outputTokens: number
       totalTokens: number
       error: string
+      /** M-E3: per-layer account (removed/rewritten/skipped + token delta). */
+      layers: LayerStat[]
     }
+
+/** M-E3: what one compression layer did, as the wire reports it. */
+export interface LayerStat {
+  name: string
+  removed: number
+  rewritten: number
+  skipped: number
+  beforeTokens: number
+  afterTokens: number
+}
 
 export interface ChatMessage {
   role: "user" | "assistant"
@@ -209,6 +221,23 @@ export function jobsFromEvent(data: Record<string, unknown>): JobRow[] | null {
   const raw = data["jobs"]
   if (!Array.isArray(raw)) return null
   return raw.map(toJobRow)
+}
+
+/** Narrow the wire's per-layer account into the card's shape (M-E3). */
+function layerStats(data: Record<string, unknown>): LayerStat[] {
+  const raw = data["layers"]
+  if (!Array.isArray(raw)) return []
+  return raw.map((item) => {
+    const row = obj(item)
+    return {
+      name: str(row["name"]),
+      removed: num(row["removed"]),
+      rewritten: num(row["rewritten"]),
+      skipped: num(row["skipped"]),
+      beforeTokens: num(row["beforeTokens"]),
+      afterTokens: num(row["afterTokens"]),
+    }
+  })
 }
 
 // ---- data narrowing (wire values arrive as unknown) ------------------------
@@ -654,6 +683,7 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
           outputTokens: 0,
           totalTokens: 0,
           error: "",
+          layers: [],
         },
       ])
     }
@@ -690,6 +720,7 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
         outputTokens: num(data["outputTokens"]),
         totalTokens: num(data["totalTokens"]),
         error: "",
+        layers: layerStats(data),
       } as Part
       const withoutLegacy = (parts: Part[]): Part[] =>
         parts.filter(
@@ -728,6 +759,7 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
         outputTokens: 0,
         totalTokens: 0,
         error,
+        layers: [],
       } as Part
       // The failed card IS the red error row (✗ 压缩失败：{error}); appending a
       // notice with the same text doubled the report (measured live: two
@@ -760,6 +792,7 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
         outputTokens: 0,
         totalTokens: 0,
         error: "",
+        layers: [],
       } as Part
       const index = findRunningCompaction(state.messages)
       if (index < 0) {

@@ -27,6 +27,7 @@ from ai_coding.ai.llm_helpers import (
     SINCE_OPEN,
     checkpoint_body,
 )
+from ai_coding.core.events import LayerStat
 from ai_coding.domain.message import CHECKPOINT_MARK, ChatMessage
 
 PERSISTED_OUTPUT_PREFIX = "<persisted-output"
@@ -247,6 +248,24 @@ def persist_large_outputs(
 
     Only the single-block outputs larger than ``per_result_bytes`` are written;
     the in-history body becomes a ``<persisted-output>`` marker with a preview.
+
+    **This is a mid-turn guard, not a compression layer** (plan-m-e §A / M-E1).
+    The ``while`` loop below takes only the *trailing run* of
+    ``role == "tool"`` messages, so:
+
+    * a turn that ended with an assistant reply has an empty batch and returns
+      untouched — which is why ``persisted`` is almost never non-zero on the
+      session file written at turn end (eval-04);
+    * a large output that is followed by an assistant message is **not**
+      persisted, by design: the moment it protects is "a tool just returned and
+      the model has not answered yet", where a single 100KB body would otherwise
+      make the next request a 400.
+
+    The gate is ``total > max_result_bytes`` (half the context window) *and*
+    ``single > per_result_bytes`` (30000).  The semantics are locked by a test
+    (``test_l3_semantics_are_locked``) and made observable through
+    ``LayerStat.skipped`` on ``CompactionEnded``, so this is a stated contract
+    rather than an implicit one.
     """
     end = len(messages)
     start = end
@@ -489,6 +508,41 @@ def _ensure_pinned(
     return messages
 
 
+def _trailing_tool_batch(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """The trailing run of ``role == "tool"`` messages — L3's whole input.
+
+    Extracted so the observable ``LayerStat`` and the stage itself cannot
+    disagree about what L3 examined.
+    """
+    end = len(messages)
+    start = end
+    while start > 0 and messages[start - 1].role == "tool":
+        start -= 1
+    return messages[start:end]
+
+
+def _older_tool_count(messages: list[ChatMessage], keep_recent: int) -> int:
+    """How many tool results L2 may look at (everything older than the recent tail)."""
+    tool_count = sum(1 for m in messages if m.role == "tool")
+    return max(0, tool_count - int(keep_recent))
+
+
+def _rewritten_count(
+    before: list[ChatMessage], after: list[ChatMessage]
+) -> int:
+    """How many bodies were replaced in place (the message count is untouched).
+
+    L2 and L3 both rewrite a body and keep the message, so this is their
+    ``rewritten``; comparing content (not identity) is what makes a no-op —
+    the stage handing back the caller's own list — count as zero.
+    """
+    return sum(
+        1
+        for a, b in zip(before, after, strict=False)
+        if (a.content or "") != (b.content or "")
+    )
+
+
 class ContextManager:
     """Orchestrates the four-layer compression pipeline over a history copy.
 
@@ -542,6 +596,13 @@ class ContextManager:
         #: The funnel reads it to tell "nothing worth summarising" (skip,
         #: muted) from "the summary call failed" (failure, red).
         self.last_summary_attempted = False
+        #: The per-layer account of the last ``compress`` run, at the
+        #: pipeline boundary (L4's exit when it ran, else L2's).  ``None``
+        #: before the first call — a run that never ran must not report the
+        #: previous call's layers, exactly like ``last_summary_usage``.
+        #: ``Compactor._compress_once`` reads it to fill
+        #: ``CompactionEnded.layers`` (plan-m-e §C.1).
+        self.last_layer_stats: list[LayerStat] | None = None
         # L3 triggers at (roughly) half the context budget, mirroring the Java rule.
         self._max_result_bytes = max(1, self._max_context_tokens // 2)
 
@@ -560,12 +621,31 @@ class ContextManager:
         # usage or attempt as its own (the funnel reads both).
         self.last_summary_usage = None
         self.last_summary_attempted = False
+        self.last_layer_stats = None
+        stats: list[LayerStat] = []
         out = list(messages)  # copy — never mutate the caller's history
+        # L3: the mid-turn guard.  The stat turns its semantics observable —
+        # "the trailing run was K messages, we persisted R and skipped the
+        # rest" — instead of leaving them in a comment (plan-m-e §A/M-E1).
+        l3_before = _history_tokens(out)
+        l3_in = out
         out = persist_large_outputs(
             out,
             root=self._root,
             max_result_bytes=self._max_result_bytes,
             per_result_bytes=self._per_result_bytes,
+        )
+        l3_rewritten = _rewritten_count(l3_in, out)
+        l3_batch = _trailing_tool_batch(l3_in)
+        stats.append(
+            LayerStat(
+                name="L3",
+                removed=0,
+                rewritten=l3_rewritten,
+                skipped=len(l3_batch) - l3_rewritten,
+                before_tokens=l3_before,
+                after_tokens=_history_tokens(out),
+            )
         )
         # What L4 must be shown is decided and captured BEFORE the snip, because
         # the snip is the stage that destroys the evidence. Measured on a real
@@ -581,17 +661,43 @@ class ContextManager:
         # exactly what survives — so a snipped-away message always reaches the
         # summariser, and a verbatim-kept one is never summarised twice.
         l4_source = out
+        l1_before = _history_tokens(out)
+        l1_count = len(out)
         snipped = snip_middle(out, self._max_messages, self._keep_head, self._keep_tail)
         dropped = len(snipped) < len(out)
         if dropped:
             self.archive_transcript(out)
         out = snipped
+        stats.append(
+            LayerStat(
+                name="L1",
+                removed=max(0, l1_count - len(out)),
+                rewritten=0,
+                skipped=0,
+                before_tokens=l1_before,
+                after_tokens=_history_tokens(out),
+            )
+        )
+        l2_before = _history_tokens(out)
+        l2_in = out
         out = placeholder_old_results(
             out,
             self._keep_recent_results,
             window_chars=self._l2_window_chars,
             window_budget=self._l2_window_budget,
             elide_root=self._root,
+        )
+        l2_rewritten = _rewritten_count(l2_in, out)
+        l2_examined = _older_tool_count(l2_in, self._keep_recent_results)
+        stats.append(
+            LayerStat(
+                name="L2",
+                removed=0,
+                rewritten=l2_rewritten,
+                skipped=max(0, l2_examined - l2_rewritten),
+                before_tokens=l2_before,
+                after_tokens=_history_tokens(out),
+            )
         )
         _, surviving_tail = self.split_tail(out)
         l4_head = self._l4_head_text_excluding(l4_source, surviving_tail)
@@ -603,9 +709,22 @@ class ContextManager:
         )
         if should_summarise and self._summarizer is not None:
             self.last_summary_attempted = True
+            l4_before = _history_tokens(out)
+            l4_count = len(out)
             out = await self._run_l4(
                 out, head_text=l4_head, on_summary=on_summary, on_delta=on_delta
             )
+            stats.append(
+                LayerStat(
+                    name="L4",
+                    removed=max(0, l4_count - len(out)),
+                    rewritten=0,
+                    skipped=0,
+                    before_tokens=l4_before,
+                    after_tokens=_history_tokens(out),
+                )
+            )
+        self.last_layer_stats = stats
 
         if _history_tokens(out) > self._max_context_tokens:
             out = hard_trim(out, HARD_TRIM_KEEP_TAIL)
@@ -888,6 +1007,7 @@ __all__ = [
     "CHECKPOINT_MARK",
     "ELIDED_DIR",
     "ELIDED_NOTE",
+    "LayerStat",
     "PERSISTED_OUTPUT_PREFIX",
     "PERSISTED_MARKER",
     "PREVIOUS_RESULT",

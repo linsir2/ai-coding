@@ -286,6 +286,164 @@ def test_render_turn_says_nothing_about_subagents_when_there_were_none(tmp_path)
     assert "subagent" not in text
 
 
+def _compaction_turn_file(tmp_path):
+    """One turn whose history was rewritten, with a per-layer account (M-E3)."""
+    path = tmp_path / "traces" / "s1" / "turn-3.jsonl"
+    _write(
+        path,
+        [
+            _rec("turn", "", "TurnStarted", {}, iteration=0),
+            _rec(
+                "i1",
+                "turn",
+                "CompactionStarted",
+                {"reason": "auto"},
+            ),
+            _rec(
+                "i1",
+                "turn",
+                "CompactionEnded",
+                {
+                    "reason": "auto",
+                    "beforeMessages": 74,
+                    "afterMessages": 3,
+                    "inputTokens": 1312,
+                    "outputTokens": 147,
+                    "totalTokens": 1896,
+                    "text": "## 目标\ndone",
+                    "layers": [
+                        {
+                            "name": "L3",
+                            "removed": 0,
+                            "rewritten": 1,
+                            "skipped": 2,
+                            "before_tokens": 90000,
+                            "after_tokens": 80000,
+                        },
+                        {
+                            "name": "L1",
+                            "removed": 20,
+                            "rewritten": 0,
+                            "skipped": 0,
+                            "before_tokens": 80000,
+                            "after_tokens": 60000,
+                        },
+                        {
+                            "name": "L2",
+                            "removed": 0,
+                            "rewritten": 5,
+                            "skipped": 3,
+                            "before_tokens": 60000,
+                            "after_tokens": 40000,
+                        },
+                        {
+                            "name": "L4",
+                            "removed": 0,
+                            "rewritten": 0,
+                            "skipped": 0,
+                            "before_tokens": 40000,
+                            "after_tokens": 20000,
+                        },
+                    ],
+                    "estimated_before": 90000,
+                    "estimated_after": 20000,
+                },
+            ),
+        ],
+    )
+    return path
+
+
+def test_the_trace_renders_the_compaction_layers(tmp_path):
+    """W6: /trace renders the per-layer account, by token delta.
+
+    A turn that compacted must say what each layer did; the counts alone would
+    mislead for L2/L3, so the line leads with the token transition.
+    """
+    text = render_turn(summarize_turn(_compaction_turn_file(tmp_path)))
+
+    assert "压缩：" in text
+    assert "L1 −20 条" in text
+    assert "L2 改写 5 条" in text
+    assert "跳过 2 条" in text
+    assert "L4 摘要 40000→20000 token（估）" in text
+
+
+def test_the_trace_says_nothing_about_compaction_when_there_were_none(tmp_path):
+    """No compaction, no line: the common case must not grow a zero-valued tail."""
+    text = render_turn(summarize_turn(_turn_file(tmp_path)))
+
+    assert "压缩：" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_real_compaction_event_renders_its_token_deltas(tmp_path):
+    """End to end: the JSONL is snake_case (``dataclasses.asdict``), not the
+    wire's camelCase.
+
+    A reader that looked for ``beforeTokens`` would render ``0→0`` on a real
+    trace — the layers are there, the numbers are not.  This runs the real
+    recorder and compactor, so the key names cannot drift apart again.
+    """
+    from types import SimpleNamespace
+
+    from ai_coding.core.compaction import Compactor
+    from ai_coding.core.context_compression import ContextManager
+    from ai_coding.core.events import TurnFinished
+    from ai_coding.core.trace import TraceRecorder, TraceStore
+    from ai_coding.domain.loop import TurnOutcome, TurnStatus
+    from ai_coding.domain.message import ChatMessage, ToolCallRef
+
+    store = TraceStore(tmp_path / "traces", workspace=tmp_path)
+    recorder = TraceRecorder(store, "s1")
+
+    async def summarizer(text, previous=None, on_delta=None, usage_sink=None):
+        return "## 目标\n摘要"
+
+    settings = SimpleNamespace(
+        max_context_tokens=12_000,
+        max_messages=6,
+        snip_keep_head=3,
+        snip_keep_tail=3,
+        keep_recent_tool_results=3,
+        per_result_persist_bytes=5_000,
+        l4_tail_tokens=15_000,
+    )
+    context = ContextManager(settings, transcripts_root=tmp_path, summarizer=summarizer)
+    compactor = Compactor(context, emit=recorder.on_event)
+    history = [ChatMessage(role="user", content="z" * 40_000, timestamp="")]
+    for index in range(8):
+        history.append(
+            ChatMessage(
+                role="assistant",
+                content=None,
+                timestamp="",
+                tool_calls=[ToolCallRef(id=f"c{index}", name="bash", arguments="{}")],
+            )
+        )
+        history.append(
+            ChatMessage(
+                role="tool",
+                content="y" * 5_000,
+                timestamp="",
+                tool_call_id=f"c{index}",
+                tool_name="bash",
+            )
+        )
+    await compactor.compress(history, deadline=None, force=True)
+    recorder.on_event(
+        TurnFinished(
+            outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="ok", iterations=1, reason="")
+        )
+    )
+
+    text = render_turn(summarize_turn(recorder.last_path))
+    assert "压缩：" in text
+    # The token deltas are real numbers, not the 0→0 a camelCase reader gives.
+    assert "0→0 token" not in text
+    assert "L1 −10 条" in text
+
+
 # ---- G7: /budget splits the spend by model ----------------------------------
 
 

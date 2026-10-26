@@ -43,6 +43,10 @@ note = ChatMessage(role="user", content=f"[以下为早期对话摘要]\n{summar
 return [note, *tail]
 ```
 
+> **历史快照**：`_l4_keep_tail` 这个配置项（条数）**已删除**，`_run_l4` 的尾部现在是
+> token 预算（`ContextManager.split_tail`，`min(l4_tail_tokens, window//4)`，吸附到 user 边界）。
+> 下面的代码块保留为当时的记录，不再代表现行实现。
+
 `llm_helpers.py::build_summarizer`（`:95-120`）：
 ```python
 async def summarize(text: str) -> str | None:

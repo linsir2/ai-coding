@@ -298,6 +298,21 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
                 "outputTokens": event.completion_tokens,
                 "totalTokens": event.total_tokens,
                 "text": event.text,
+                # Hand-written mapping, not asdict: the front end cannot see the
+                # per-layer account without these keys (plan-m-e §四 #4b).
+                "layers": [
+                    {
+                        "name": stat.name,
+                        "removed": stat.removed,
+                        "rewritten": stat.rewritten,
+                        "skipped": stat.skipped,
+                        "beforeTokens": stat.before_tokens,
+                        "afterTokens": stat.after_tokens,
+                    }
+                    for stat in event.layers
+                ],
+                "estimatedBefore": event.estimated_before,
+                "estimatedAfter": event.estimated_after,
             },
         }
     if isinstance(event, CompactionFailed):

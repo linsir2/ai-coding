@@ -204,6 +204,47 @@ plan-runner 的步内强制关闭（`max_auto_continuations=0`）：步是共享
 
 所有阶段都在消息列表的浅拷贝上进行，绝不修改调用方历史。
 
+### 压缩层的语义、判据与可观测（M-E1 ~ M-E4）
+
+> 这四条来自 `docs/plan-m-e.md`：把"隐式的语义/缺失的不变量/缺失的观测"显式化，
+> **不改压缩行为**（除新增每层统计外）。
+
+**① L3 是回合中段护栏，不是压缩层**（M-E1）。`persist_large_outputs` 只取**末尾连续
+`role=="tool"` 段**，且要求该段总字节 > 窗口一半、**单条** > `per_result_persist_bytes`（30000）。
+所以：回合结束时末条是 assistant → batch 为空 → 直接返回（`eval-04`：10 轮真实对话后
+`persisted=0`）；**非尾部**的大输出即使超大也**不**持久化（它保护的瞬间是"工具刚返回、
+模型还没答"）。语义由 `test_l3_semantics_are_locked` 锁住，并通过 `CompactionEnded.layers`
+的 `L3.skipped`（检查了但没动手的条数）可观测。
+
+**② 计数稳定性：触发按 token、成功按内容真值，不按条数**（M-E2）。
+* 触发：`should_compact` 取 `max(provider observed, _history_tokens) >= ceiling`（token 判据，
+  `compaction_ceiling` 对齐 OpenCode）。
+* 成功：`Compactor._compress_once` 用**内容真值** `result != history` 判定，**不是**条数比较。
+  按条数判会把"省了 36% token 但条数没变"误判为失败 → 假性耗尽 → 会话重置（Hermes 的 bug，
+  本仓已由 `test_a_compaction_that_saves_tokens_without_changing_the_count_is_a_success` 锁住）。
+* **管线顺序是硬不变量** `L3 → L1 → L2 → L4`，由 `test_the_pipeline_order_is_l3_l1_l2_l4`
+  锁住（`force=True`，否则 vacuous）。L4 摘要会吃掉 L2 刚生成的信封 → **不以压缩后条数/
+  信封数为目标**，现存断言都是 token 判据。
+* tool_call/result **原子淘汰**：`sanitize_pairs` 结构性保证"无孤儿 result、无无 result 的 call"，
+  且所有管线出口都过它；管线级回归锁见 `test_no_orphan_tool_result_survives_a_full_pipeline_compress`。
+
+**③ 压缩预算可观测**（M-E3）。`CompactionEnded` 新增 `layers: tuple[LayerStat, ...]`、
+`estimated_before`/`estimated_after`（**层序边界**，不是 Compactor 边界——后者含分页循环）。
+`LayerStat` 字段：`name`（L1/L2/L3/L4）、`removed`（真减条数，只 L1/L4）、`rewritten`（保条数改
+内容，L2/L3）、`skipped`（检查了但没动手）、`before_tokens`/`after_tokens`（用 `_history_tokens`，
+含每张图固定 1600）。顺序写死 = 管线顺序；L4 未跑时 `layers` **不含** L4 项。
+`/trace` 的 `render_turn` 按 **token 差**渲染压缩行（条数对 L2/L3 无意义）；前端压缩卡片显示每层
+统计。`Compactor._compress_once` 从 `context.last_layer_stats` 读取后填入（这是 plumbing 的关键
+一行，缺它 `layers` 永远为空）。
+
+**④ 前缀缓存友好度**（M-E4）。注入全部落在**可变区**（尾部），稳定前缀不被改写。
+守护用**布尔不变量** `stable_b.startswith(stable_a)`，其中
+`stable = canonical_request(instructions, Assembled.history, tools_text)`——**必须传 `Assembled.history`
+（pre-tail）**，传 `request` 必然断裂（`canonical_request` 不知道 tail 边界）。**不用百分比阈值**
+（M-A6 已弃用：整请求比率随工作区路径漂移）。跨回合前缀稳定的五类合法断裂作为 skip：
+① `task_injection="system"` ② 回合内压缩 ③ instructions 变化 ④ `tools_text` 变化 ⑤ plan reminder
+（追加到 history 末尾、每次重加）。系统提示与工具定义**无秒级时间戳**（时间戳放尾部块是正确设计）。
+
 ## 记忆
 
 R3 重写（✅ **P0 完成**）。记忆层现在回答三个问题：**写什么、什么时候写、以什么位置/形式交给模型**。

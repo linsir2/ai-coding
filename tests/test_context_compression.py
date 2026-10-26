@@ -5,8 +5,11 @@ to disk.  The L4/LLM stage and ``ContextManager.compress`` orchestration live in
 ``test_context_compression_l4.py``.
 """
 
+import pytest
+
 from ai_coding.core.context_compression import (
     PERSISTED_MARKER,
+    ContextManager,
     persist_large_outputs,
     placeholder_old_results,
     sanitize_pairs,
@@ -230,3 +233,134 @@ def test_snip_can_lose_the_instruction_and_pin_brings_it_back():
     out = _ensure_pinned(out, [instruction])
     assert out[-1] is instruction
     assert sum(1 for m in out if m.content == "审查一下这个项目") == 1
+
+
+# ------------------------------------------------- L3 semantics (M-E1, W1)
+
+
+def test_l3_semantics_are_locked(tmp_path):
+    """W1 (plan-m-e M-E1): L3 is a mid-turn guard, not a compression layer.
+
+    ``persist_large_outputs`` takes only the trailing run of
+    ``role == "tool"`` messages.  So a large output an assistant reply follows
+    is **not** persisted, while the same output trailing is.  Locking this is
+    the whole point: the semantics used to live only in a comment, and the
+    next reader would "fix" it into a layer that persists everything.
+    """
+    big = "x" * 60000
+    # Not trailing: an assistant reply after the large output empties the batch.
+    not_trailing = [_tool(big, "c1"), _assistant("answered")]
+    out = persist_large_outputs(
+        not_trailing, root=tmp_path, max_result_bytes=1000, per_result_bytes=1000
+    )
+    assert out[0].content == big
+    assert PERSISTED_MARKER not in out[0].content
+    assert not list((tmp_path / "transcripts" / "persisted").glob("*.txt"))
+
+    # Trailing: the same large output is persisted.
+    trailing = [_tool(big, "c1")]
+    out = persist_large_outputs(
+        trailing, root=tmp_path, max_result_bytes=1000, per_result_bytes=1000
+    )
+    assert PERSISTED_MARKER in out[0].content
+    assert out[0].tool_call_id == "c1"
+
+
+# ------------------------------------- pipeline order + atomic group (M-E2)
+
+
+def _settings(**overrides):
+    base = {
+        "max_context_tokens": 256_000,
+        "max_messages": 400,
+        "snip_keep_head": 3,
+        "snip_keep_tail": 20,
+        "keep_recent_tool_results": 3,
+        "per_result_persist_bytes": 30_000,
+        "l4_tail_tokens": 15_000,
+    }
+    base.update(overrides)
+    from types import SimpleNamespace
+
+    return SimpleNamespace(**base)
+
+
+def _paired_history(turns: int = 12) -> list[ChatMessage]:
+    """A realistic tool-heavy history: user, then (assistant call, tool result)."""
+    messages: list[ChatMessage] = []
+    for index in range(turns):
+        messages.append(_user(f"第 {index} 步"))
+        messages.append(
+            _assistant_with_calls(None, ToolCallRef(id=f"c{index}", name="bash", arguments="{}"))
+        )
+        messages.append(_tool(f"RESULT-{index}", f"c{index}"))
+    return messages
+
+
+def _assert_strictly_paired(messages: list[ChatMessage]) -> None:
+    declared = {
+        call.id
+        for message in messages
+        if message.role == "assistant"
+        for call in (message.tool_calls or ())
+    }
+    results = {m.tool_call_id for m in messages if m.role == "tool"}
+    assert results <= declared, "an orphan tool result survived the pipeline"
+    assert declared <= results, "a tool call survived without its result"
+
+
+@pytest.mark.asyncio
+async def test_the_pipeline_order_is_l3_l1_l2_l4(tmp_path, monkeypatch):
+    """W3 (plan-m-e M-E2): the layer order is a hard invariant.
+
+    L2 runs before L4, so L4's summary can fold the envelopes L2 just made
+    (measured: the envelopes are gone afterwards).  The two stages are injected
+    differently — L2 is a module-level function, L4 a bound method — so each
+    appends a tag to a shared list and the assertion is the tag order.
+
+    ``force=True`` is required: without it ``should_summarise`` may be False
+    (L4 never runs) and the order assertion would be vacuous.
+    """
+    import ai_coding.core.context_compression as cc
+
+    calls: list[str] = []
+    real_placeholder = cc.placeholder_old_results
+    real_run_l4 = cc.ContextManager._run_l4
+
+    def _tagged_placeholder(messages, *args, **kwargs):
+        calls.append("L2")
+        return real_placeholder(messages, *args, **kwargs)
+
+    async def _tagged_run_l4(self, messages, **kwargs):
+        calls.append("L4")
+        return await real_run_l4(self, messages, **kwargs)
+
+    monkeypatch.setattr(cc, "placeholder_old_results", _tagged_placeholder)
+    monkeypatch.setattr(cc.ContextManager, "_run_l4", _tagged_run_l4)
+
+    async def _summary(text, previous=None, on_delta=None, usage_sink=None):
+        return "## 目标\n摘要"
+
+    manager = ContextManager(
+        _settings(), transcripts_root=tmp_path, summarizer=_summary
+    )
+    await manager.compress(_paired_history(8), force=True)
+
+    assert calls == ["L2", "L4"]
+
+
+@pytest.mark.asyncio
+async def test_no_orphan_tool_result_survives_a_full_pipeline_compress(tmp_path):
+    """W4 (plan-m-e M-E2): the pipeline's exit is always strictly paired.
+
+    ``sanitize_pairs`` is the structural guarantee, but the stage-level tests
+    never ran the whole pipeline; this does, so a future stage that drops a
+    call without its result (or vice versa) cannot pass unnoticed.  The
+    pipeline-level lock is what the "adsorb to a user message" fix was downgraded
+    to — the structural invariant already holds, this makes it a test.
+    """
+    manager = ContextManager(_settings(), transcripts_root=tmp_path)
+
+    out = await manager.compress(_paired_history(12), force=True)
+
+    _assert_strictly_paired(out)

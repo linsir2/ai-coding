@@ -22,6 +22,7 @@ from ai_coding.core.events import (
     CompactionReason,
     CompactionSkipped,
     CompactionStarted,
+    LayerStat,
     LoopEvent,
 )
 from ai_coding.core.turn_report import emit_degraded
@@ -179,6 +180,7 @@ class Compactor:
             return history
         if session is not None:
             session.last_compacted_turn = int(getattr(session, "turn_count", 0) or 0)
+        layers = self._layer_stats()
         self._emit(
             CompactionEnded(
                 reason=reason,
@@ -188,6 +190,9 @@ class Compactor:
                 completion_tokens=usage.get("completion_tokens", 0),
                 total_tokens=usage.get("total_tokens", 0),
                 text=summaries[-1] if summaries else "",
+                layers=tuple(layers),
+                estimated_before=layers[0].before_tokens if layers else 0,
+                estimated_after=layers[-1].after_tokens if layers else 0,
             )
         )
         return result
@@ -228,6 +233,19 @@ class Compactor:
             if isinstance(value, int):
                 out[key] = value
         return out
+
+    def _layer_stats(self) -> list[LayerStat]:
+        """The delegate's per-layer account of this run (``CompactionEnded.layers``).
+
+        ``Compactor`` only ever read ``last_summary_usage``; without reading
+        ``last_layer_stats`` here the new ``layers`` field would always be
+        empty, which is the exact plumbing gap plan-m-e P0-1 closed.  Unknown
+        delegates (the legacy ``compress``-only objects) simply report none.
+        """
+        raw = getattr(self._context, "last_layer_stats", None)
+        if not isinstance(raw, (list, tuple)):
+            return []
+        return [stat for stat in raw if isinstance(stat, LayerStat)]
 
     async def _compress(
         self,

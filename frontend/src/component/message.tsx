@@ -17,12 +17,28 @@
  */
 
 import { For, Index, Match, Switch, Show } from "solid-js"
-import type { ChatMessage, Part } from "../state/session"
+import type { ChatMessage, LayerStat, Part } from "../state/session"
 import { theme } from "../theme/tokens"
 import { agentAccent } from "../util/agent"
 import { markdownSyntax } from "../theme/syntax"
 import { Reasoning } from "./reasoning"
 import { ToolCard } from "./toolcard"
+
+/** One layer's share of the compaction line (M-E3): counts + token delta.
+
+ * Counts alone would mislead for L2/L3 — they rewrite a body and keep the
+ * message — so the token transition rides along, matching `/trace`.
+ */
+function layerLine(layer: LayerStat): string {
+  const tail = `${layer.beforeTokens}→${layer.afterTokens} tok`
+  if (layer.name === "L4") return `L4 摘要 ${tail}`
+  if (layer.removed) return `${layer.name} −${layer.removed} 条 · ${tail}`
+  const bits: string[] = []
+  if (layer.rewritten) bits.push(`改写 ${layer.rewritten} 条`)
+  if (layer.skipped) bits.push(`跳过 ${layer.skipped} 条`)
+  bits.push(tail)
+  return `${layer.name} ${bits.join(" · ")}`
+}
 
 /** OpenCode's user-message border: left ┃ with a half-block bottom cap. */
 export const USER_BORDER = {
@@ -183,6 +199,13 @@ function PartView(props: { part: Part; alwaysOpen: boolean }) {
                 <text fg={theme.textMuted}>
                   · {row().beforeMessages}→{row().afterMessages} 条 · {row().inputTokens} in ·{" "}
                   {row().outputTokens} out · 压缩耗 {row().totalTokens}
+                </text>
+              ) : null}
+              {row().status === "done" && row().layers.length ? (
+                <text fg={theme.textMuted}>
+                  {row()
+                    .layers.map(layerLine)
+                    .join(" / ")}
                 </text>
               ) : null}
             </box>

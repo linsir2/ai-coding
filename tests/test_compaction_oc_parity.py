@@ -14,6 +14,7 @@ Locks the OC rules adopted in the compact-layer refactor:
 
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -200,6 +201,50 @@ class _SilentContext:
         self, history, **_: object
     ):
         return list(history)
+
+
+class _SameCountRewriter:
+    """Rewrites the history without changing its length — the Hermes trap.
+
+    The success criterion is content truth (``result != history``), never the
+    message count.  A compaction that cuts the token bill but leaves the same
+    number of messages is a success; judging it by ``len(messages)`` is what
+    made Hermes report "context exhausted" and reset the session.
+    """
+
+    last_summary_usage: dict | None = None
+    last_summary_attempted = True
+
+    async def compress_if_needed(self, history, **_: object):  # type: ignore[no-untyped-def]
+        return [
+            dataclasses.replace(message, content=f"rewritten:{index}")
+            for index, message in enumerate(history)
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_that_saves_tokens_without_changing_the_count_is_a_success() -> None:
+    """W2 (plan-m-e M-E2): the success criterion is content truth, not count.
+
+    Explicitly locked: a rewrite that preserves the message count but changes
+    the content is ``CompactionEnded`` (a success), never a skip and never a
+    failure.  ``test_compaction_oc_parity.py`` already locked the content-truth
+    rule for the empty case; this extends it to the count-preserving case the
+    Hermes bug was about.
+    """
+    compactor, observer = _compactor(_SameCountRewriter())
+    history = _msgs(8)
+
+    out = await compactor.compress(history, deadline=None, reason="manual", force=True)
+
+    assert out is not history
+    assert len(out) == len(history)
+    assert out != history
+    ended = observer.of_type(CompactionEnded)
+    assert len(ended) == 1
+    assert (ended[0].before_messages, ended[0].after_messages) == (8, 8)
+    assert observer.of_type(CompactionSkipped) == []
+    assert observer.of_type(CompactionFailed) == []
 
 
 @pytest.mark.asyncio

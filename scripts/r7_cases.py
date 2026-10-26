@@ -31,6 +31,7 @@ from ai_coding.config.models import (  # noqa: E402
     MCPConfig,
     MCPServerConfig,
     MCPTimeout,
+    resolve_context_window,
 )
 from ai_coding.core.context_compression import (  # noqa: E402
     ContextManager,
@@ -232,12 +233,26 @@ async def case_l2_leaves_small_bodies_alone(root: Path) -> tuple[bool, str]:
 
 
 async def case_l2_long_history_stays_under_budget(root: Path) -> tuple[bool, str]:
-    cm = ContextManager(AIConfig(), root)
+    """The budget case reads the *resolved* window, not the unresolved field.
+
+    ``AIConfig().max_context_tokens`` is 0 by default (the field is a config
+    override, resolved by ``resolve_context_window`` against the model's own
+    window or the conservative default).  Comparing the estimate against
+    ``0 * 0.5`` made the case fail at 0.0 even though the real window is 48000
+    (threshold 24000) and the estimate was 29% of it — a wrong carrier that
+    manufactured a "budget gap" (plan-m-e §2.3 / M-E3 P0-1).
+    """
+    cfg = AIConfig()
+    window = resolve_context_window(cfg)
+    cm = ContextManager(cfg, root, context_window=window)
     out = await cm.compress_if_needed(_long_history())
     tokens = estimate_tokens(_joined_history_text(out))
     envelopes = [m for m in out if (m.content or "").startswith("[Previous")]
-    ok = tokens <= AIConfig().max_context_tokens * 0.5 and bool(envelopes)
-    return ok, f"est tokens={tokens} envelopes={len(envelopes)} of {len(out)} messages"
+    ok = tokens <= window * 0.5 and bool(envelopes)
+    return ok, (
+        f"window={window} est tokens={tokens} "
+        f"envelopes={len(envelopes)} of {len(out)} messages"
+    )
 
 
 async def case_context_manager_persists_the_elided_bodies(root: Path) -> tuple[bool, str]:

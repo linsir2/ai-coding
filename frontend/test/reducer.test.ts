@@ -785,6 +785,7 @@ describe("compaction lifecycle (P3-2)", () => {
         outputTokens: 0,
         totalTokens: 0,
         error: "",
+        layers: [],
       },
     ])
     expect(state.busy).toBe(false)
@@ -830,6 +831,33 @@ describe("compaction lifecycle (P3-2)", () => {
       outputTokens: 147,
       totalTokens: 1896,
       error: "",
+      layers: [],
+    })
+  })
+
+  test("ended carries the per-layer account onto the card (M-E3)", () => {
+    const layers = [
+      { name: "L3", removed: 0, rewritten: 1, skipped: 2, beforeTokens: 90000, afterTokens: 80000 },
+      { name: "L1", removed: 20, rewritten: 0, skipped: 0, beforeTokens: 80000, afterTokens: 60000 },
+    ]
+    const state = feed(
+      initialState(),
+      wire("compaction.started", { reason: "auto" }),
+      wire("compaction.ended", {
+        reason: "auto",
+        beforeMessages: 74,
+        afterMessages: 3,
+        inputTokens: 1312,
+        outputTokens: 147,
+        totalTokens: 1896,
+        text: "## 目标\nfull",
+        layers,
+      }),
+    )
+    expect(lastAssistant(state).parts[0]).toMatchObject({
+      kind: "compaction",
+      status: "done",
+      layers,
     })
   })
 
@@ -888,6 +916,7 @@ describe("compaction lifecycle (P3-2)", () => {
         outputTokens: 0,
         totalTokens: 0,
         error: "boom",
+        layers: [],
       },
     ])
   })
@@ -909,6 +938,7 @@ describe("compaction lifecycle (P3-2)", () => {
         outputTokens: 0,
         totalTokens: 0,
         error: "late",
+        layers: [],
       },
     ])
   })
@@ -933,6 +963,7 @@ describe("compaction lifecycle (P3-2)", () => {
         outputTokens: 0,
         totalTokens: 0,
         error: "",
+        layers: [],
       },
     ])
   })
@@ -951,6 +982,7 @@ describe("compaction lifecycle (P3-2)", () => {
         outputTokens: 0,
         totalTokens: 0,
         error: "",
+        layers: [],
       },
     ])
   })
@@ -1013,6 +1045,7 @@ describe("transcript retirement (P3-4)", () => {
       outputTokens: 0,
       totalTokens: 0,
       error: "",
+      layers: [],
     })
   })
 

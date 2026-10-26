@@ -69,6 +69,13 @@ L2（`elide_and_persist`）在管线中位于 L4 **之前**（L3 → L1 → L2 �
 是 0 或 1，**不是稳定断言**。已改为直接验证真实 `elide_and_persist`：
 内容寻址文件名 `read_<sha1前12位>.txt`，落盘成功。
 
+> **M-E2 固化**：这条承认已变成**显式不变量**，不再是脚注。
+> - 顺序由 `tests/test_context_compression.py::test_the_pipeline_order_is_l3_l1_l2_l4`
+>   锁住（L2 必须先于 L4；`force=True`，否则断言会 vacuous）。
+> - 「计数不可断言」本身写进管线文档与 `_run_l4` 注释：L4 摘要会吃掉 L2 的信封，
+>   所以**不以压缩后条数/信封数为目标**；现存断言（`test_context_compression_l2_window.py`、
+>   `r7_cases.py`）都是 **token 判据**。
+
 ### compact_session 效果
 
 `{'messages': 28, 'after': 3, 'removed': 25}` —— 28 条压到 3 条，

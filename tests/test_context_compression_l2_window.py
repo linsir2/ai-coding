@@ -219,6 +219,31 @@ async def test_the_window_settings_reach_the_pipeline(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_a_long_history_stays_well_under_the_context_budget(tmp_path: Path):
-    cm = ContextManager(_Settings(), tmp_path)
+    from ai_coding.config.models import AIConfig, resolve_context_window
+
+    # The carrier is the *resolved* window, not the unresolved override: the
+    # field's default is 0 and reading it made the r7 case compare against a
+    # threshold of zero (plan-m-e §2.3 / M-E3 P0-1).
+    cfg = AIConfig()
+    window = resolve_context_window(cfg)
+    cm = ContextManager(cfg, tmp_path, context_window=window)
     out = await cm.compress_if_needed(_long_history())
-    assert estimate_tokens(_joined_history_text(out)) <= _Settings.max_context_tokens * 0.5
+    assert estimate_tokens(_joined_history_text(out)) <= window * 0.5
+
+
+def test_the_r7_budget_case_uses_the_resolved_window():
+    """W10 (plan-m-e M-E3): the budget case reads the *resolved* window.
+
+    ``AIConfig().max_context_tokens`` is 0 by default — it is a config override,
+    resolved against the model's own window or the conservative default by
+    ``resolve_context_window``.  Comparing the estimate against ``0 * 0.5``
+    failed at a threshold of zero even though the estimate was 29% of the true
+    48000 window.  This locks the carrier so the wrong one cannot return.
+    """
+    from ai_coding.config.models import AIConfig, resolve_context_window
+
+    cfg = AIConfig()
+    assert cfg.max_context_tokens == 0, "the unresolved override is 0 by default"
+    window = resolve_context_window(cfg)
+    assert window == 48_000
+    assert window * 0.5 == 24_000.0

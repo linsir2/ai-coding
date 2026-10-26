@@ -32,6 +32,12 @@ def _blank_summary() -> dict[str, Any]:
         "degraded": [],
         "guard_denied": 0,
         "tools": [],
+        # The per-layer account of the last CompactionEnded in this turn, and
+        # the layer-boundary token estimates (M-E3): /trace renders what the
+        # pipeline actually did, not just the message counts.
+        "compaction_layers": [],
+        "compaction_before": 0,
+        "compaction_after": 0,
         # The sub-agent slice of the totals above.  Kept as a split rather than
         # subtracted, so the totals still mean "what this turn cost".
         "subagent_scopes": 0,
@@ -42,6 +48,33 @@ def _blank_summary() -> dict[str, Any]:
 
 def _thousands(value: int) -> str:
     return f"{value:,}"
+
+
+def _layer_line(layer: Mapping[str, Any]) -> str:
+    """One layer's share of the compaction line, by token delta.
+
+    Counts alone would mislead: L2/L3 rewrite a body and keep the message, so
+    their real effect is the token drop, which is what this shows (plan-m-e
+    §C.1 / §C.2).  L4 is labelled as a summary rather than a count.
+    """
+    name = str(layer.get("name", ""))
+    removed = _int(layer.get("removed"))
+    rewritten = _int(layer.get("rewritten"))
+    skipped = _int(layer.get("skipped"))
+    before = _int(layer.get("before_tokens"))
+    after = _int(layer.get("after_tokens"))
+    tail = f"{before}→{after} token（估）"
+    if name == "L4":
+        return f"L4 摘要 {tail}"
+    if removed:
+        return f"{name} −{removed} 条 · {tail}"
+    segs: list[str] = []
+    if rewritten:
+        segs.append(f"改写 {rewritten} 条")
+    if skipped:
+        segs.append(f"跳过 {skipped} 条")
+    segs.append(tail)
+    return f"{name} " + " · ".join(segs)
 
 
 def _int(value: Any) -> int:
@@ -124,6 +157,15 @@ def summarize_turn(path: str | Path) -> dict[str, Any]:
             component = data.get("component")
             if isinstance(component, str):
                 summary["degraded"].append(component)
+        elif event == "CompactionEnded":
+            # Fold the lifecycle (started/delta/ended) into one line's worth of
+            # facts: the per-layer account and the boundary estimates.  Deltas
+            # are lossy and the started event carries nothing to summarise.
+            # Keys are the trace's own snake_case (``dataclasses.asdict``), not
+            # the camelCase the wire bridge emits.
+            summary["compaction_layers"] = list(data.get("layers") or [])
+            summary["compaction_before"] = _int(data.get("estimated_before"))
+            summary["compaction_after"] = _int(data.get("estimated_after"))
 
     summary["spans"] = len(spans)
     summary["subagent_scopes"] = len(scopes)
@@ -165,6 +207,11 @@ def render_turn(summary: Mapping[str, Any]) -> str:
         parts.append(f"model {model_ms / 1000:.1f}s · tools {tool_ms / 1000:.1f}s")
     degraded = list(summary.get("degraded") or [])
     parts.append(f"{len(degraded)} degraded" + (f" ({', '.join(degraded)})" if degraded else ""))
+    # Only when a compaction happened: a turn that never rewrote its history
+    # must not grow a zero-valued tail, exactly like the sub-agent line.
+    layers = list(summary.get("compaction_layers") or [])
+    if layers:
+        parts.append("压缩：" + " / ".join(_layer_line(layer) for layer in layers))
     if summary.get("guard_denied"):
         parts.append(f"{int(summary['guard_denied'])} guard denial(s)")
     return " · ".join(parts)
