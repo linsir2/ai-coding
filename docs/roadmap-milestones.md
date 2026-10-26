@@ -208,17 +208,22 @@
 
 ---
 
-## 3. 领域 C · 恢复与持久化 【P1 · 依赖 A】
+## 3. 领域 C · 恢复与持久化 【P1 · 依赖 A】—— ✅ 已完成（2026-10-25）
 
-### M-C1 · step 级 durable intent
+> 方案：[plan-m-c.md](plan-m-c.md)（含两轮联网调研 + 两轮评审）。
+> **范围裁剪**：write-ahead 落在 **sidecar**（`sessions/write-ahead/`）而非 `TurnCloser.save` ——
+> 后者会**丢弃在飞的工具调用**，而这个坑仓库里已踩过三次。
+
+### M-C1 · step 级 durable intent —— ✅ 已完成（2026-10-25）
 
 | 项 | 内容 |
 |---|---|
 | **缺口** | 恢复粒度是**会话级**（`world.find_armed_session` 只捞 `armed_profile ∈ {plan, goal}`）。对标：opencode **write-ahead claim**（step 级）、Codex **rollout 写恢复** |
 | **改动方向** | 会话 JSON 增加 step 级 intent 记录（已执行的工具调用 + 结果摘要），重启后可从**最近已完成 step** 续跑，而非整段重跑 |
 | **验收判据** | ① 单测：模拟进程在 step N 后崩溃 → 重启续跑且**不重复执行已完成的工具**；② `docs/data-contracts.md` 更新会话 schema |
+| **实际落地** | `mutates_world` 工具的 **write-ahead sidecar**（`sessions/write-ahead/`），**回合结束清空**（复用域 = 恢复窗口，避免 `websearch`/`bash("npm install")` 在后续回合返回旧结果）；`digest` 复用 `call_fingerprint` |
 
-### M-C2 · 记忆并发写安全
+### M-C2 · 记忆并发写安全 —— ✅ 已完成（2026-10-25）
 
 | 项 | 内容 |
 |---|---|
@@ -226,42 +231,51 @@
 | **复现** | 需 `threading.Barrier.wait()` 强制同步，4 线程 × 30 次写，25 次里 5-6 次损坏（文档已自述） |
 | **改动方向** | `_save` 进锁（文档说"会改动每个调用方的持久化形状"，需评估）；或改用 `fcntl.flock` 跨进程文件锁 |
 | **验收判据** | 新增 `test_memory_concurrent_write_never_corrupts`：强制同步下 25 次写 **0 损坏**，且重载后条数一致 |
+| **实际落地** | `_save` 进锁 + `fcntl.flock` + **唯一 tmp 路径**（三管齐下：进程内互斥 + 跨进程互斥 + 消除同路径竞争） |
 
-### M-C3 · 崩溃后续跑的验收门
+### M-C3 · 崩溃后续跑的验收门 —— ✅ 已完成（2026-10-25）
 
 | 项 | 内容 |
 |---|---|
 | **缺口** | `resume_count >= 5` 才 disarm，期间没有"这次续跑有没有真的前进"的判据 |
 | **改动方向** | 续跑时比较"续跑前后产出"，无前进则提前 disarm 并给交接报告 |
 | **验收判据** | 单测：续跑无前进 → 提前终止 + 交接报告 |
+| **实际落地** | **boot 到 boot** 四元组指纹（含**非合成消息数**）+ **连续 2 次无前进** → 提前 disarm + `ResumeStalled`。（原判据 `rounds_run` 每轮必增，**不可满足**；且崩在轮中途时"记 after"根本不执行 —— 评审 P1 修） |
 
 ---
 
-## 4. 领域 D · 安全 【P1 · 依赖 A】
+## 4. 领域 D · 安全 【P1 · 依赖 A】—— ✅ 已完成（2026-10-26）
 
-### M-D1 · OS 级沙箱
+> 方案：[plan-m-d.md](plan-m-d.md)（三轮方案评审 7 个 P0 + 一轮实现评审 1 P1 全部收口）。
+> **范围裁剪**：本轮**只保证写边界**（工作区外不可写），读边界与网络墙留待下一轮 ——
+> 调研的"双墙缺一不可"已写进方案的残余风险表。
+
+### M-D1 · OS 级沙箱 —— ✅ 已完成（2026-10-26）
 
 | 项 | 内容 |
 |---|---|
 | **缺口** | `security/sandbox.py` **只做路径限制**（拦 `..`/绝对路径/符号链接逃逸）。对标 Codex：`execpolicy`（纯策略）+ `sandboxing`（纯机制）+ 跨平台后端（Seatbelt / bwrap+landlock / MXC） |
 | **改动方向** | ① 先做 **Linux landlock/bubblewrap**（bwrap 已有依赖先例）；② 把策略判定（ALLOW/WARN/DENY）与机制（真正隔离）**分离**，`bypass_sandbox` 要求显式 allow |
 | **验收判据** | ① 单测：沙箱内进程**写不到**工作区外（真实子进程验证，不是 mock）；② `ruff`/`mypy` 0 |
+| **实际落地** | `security/process_sandbox.py`：`ProcessSandboxPolicy`（off/warn/enforce）/ `SandboxBackend` / `BwrapBackend` / `spawn_argv`（唯一 wrap 入口）。**策略与机制分离**，`enforce` 默认、fail-closed（机制缺失即拒绝并给出稳定原因码）。`BashTool` 与 `JobRegistry` 各自 catch `SandboxGap` → `error="denied"`。**子智能体栈同样接线**（roots 绑定子 worktree）。验收①**在 CI（真内核 + bubblewrap）实测通过** |
 
-### M-D2 · 危险命令判定的可解释性
+### M-D2 · 危险命令判定的可解释性 —— ✅ 已完成（2026-10-26）
 
 | 项 | 内容 |
 |---|---|
 | **缺口** | `security/bash_redlines.py` 用正则/tree-sitter 判危险命令，但**误报/漏报无基准** |
 | **改动方向** | 建一个**危险命令语料基准**（正例：`rm -rf /`、`sudo`、`dd if=`、`> /dev/sd`、强制 push…；负例：`rm -rf ./build`、`sudo` 出现在引号里…），输出 FP/FN 指标 |
 | **验收判据** | 基准脚本 + 指标表；FN = 0（漏报零容忍），FP 有界 |
+| **实际落地** | `security/redline_corpus.py`（**六类 golden 语料 135 条**，verdict 逐条冻结）+ `scripts/redline_benchmark.py`（进 CI）。**基准的定位是回归检测**：FN=0 / FP=0 为硬阈值，`known_miss`/`known_fp` 按判定输出上报。**附带合并了"双读法"**（`bash_redlines` 与 `permission_gate` 各一份规则 → 单一判据 `bash_red_line_with_fallback`，用独立冻结快照证明行为保持）。**16 条 `known_miss` 让"语法可读但无规则命中即放行"这个真缺口可见**（GuardFall 机理在本仓库的具体落点） |
 
-### M-D3 · 权限授予的最小化
+### M-D3 · 权限授予的最小化 —— ✅ 已完成（2026-10-26）
 
 | 项 | 项 | 内容 |
 |---|---|---|
 | **缺口** | `security/grants.py` 的"always"记忆是**目录级**的；`extra_workspace_roots` 是启动时一次性展开 |
 | **改动方向** | 到期/撤销机制；UI 可见"当前会话被授予了哪些权限" |
 | **验收判据** | 单测覆盖授予/撤销/到期；`/permissions` 面板可查 |
+| **实际落地** | `grants.json` **形状不变 + `meta` 可选键**（合项目"加可选键、不 bump 版本"的迁移约定）→ TTL 可配（默认 24h）；`GrantStore.load_with_expiry` + gate 的 `_grant_expiry` → **磁盘加载的授权也会在会话内过期**；`revoke(key)`（全键精确 / 基名撤销全部 posture 变体）+ `permissions.revoke` IPC + `/permissions revoke` + 面板逐条撤销（↑/↓ 选、`x`）。`process_sandbox` 进 `EXECUTION_KEYS`（项目层不能关沙箱） |
 
 ---
 
@@ -457,8 +471,8 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 | M-B3 重试分类 | ✅ **早已实现** | `FailureKind` 六档 + AUTH_ERROR 首轮不重试；补 `insufficient_quota` 归 FATAL |
 | M-B4 检索预算 | ⚠️ **不采纳** | `budget_pressure` + 收尾已存在；意图分类无可辩护契约 |
 | M-B5 收敛可观测 | ✅ **已完成** | `SearchStalled` 事件（iteration/level/calls/streak）自动落 trace jsonl |
-| M-C1~C3 恢复与持久化 | ⬜ 未开始 | — |
-| M-D1~D3 安全 | ⬜ 未开始 | — |
+| M-C1~C3 恢复与持久化 | ✅ 已完成 | 2026-10-25 |
+| M-D1~D3 安全 | ✅ 已完成 | 2026-10-26 |
 | M-E1~E4 上下文工程 | ⬜ 未开始 | — |
 | M-F1~F3 记忆 | ⬜ 未开始 | — |
 | M-G1~G4 可观测与质量 | ⬜ 未开始 | — |

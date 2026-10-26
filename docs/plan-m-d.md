@@ -776,7 +776,32 @@ AF_UNIX 残余风险（P1-6 → §7.1）、时钟格式（P1-7 → §C.1 epoch �
 
 ### 8.3 实现评审（子智能体）
 
-_待填。_
+**0 P0 · 1 P1 · 4 P2 · 5 P3（全部已修，见 §8.3.1）**
+
+**已实测验证**（评审逐条复核）：
+
+| 断言 | 方式 | 结果 |
+|---|---|---|
+| `spawn_argv` fail-closed 的所有可达路径 | 直接调用 | ✅ enforce+backend None→`sandbox.backend.missing`；enforce+不可用→`bwrap.unavailable`；warn+不可用→放行+`emit`；off/bypass/None→原样 |
+| 写边界真的隔离 | userns 变体实跑 bwrap | ✅ 写 `$HOME/md1-outside.txt`→`Read-only file system`；写工作区内→成功 |
+| `--tmpfs` 必须在 `--bind` 之前 | 两种顺序实跑 | ✅ 原顺序→`Directory nonexistent`；实现顺序→成功（**实现相对方案是一处正确的缺陷修复**） |
+| job 的 pid/kill 语义 | 实跑 `killpg(bwrap_pgid)` | ✅ `--die-with-parent` 保证父死子亡 |
+| 双读法合并行为保持 | `git show` 逐行 diff | ✅ 迁出的回退层与旧 `bash_denied` 逐字节等价 |
+| 基准 | 脚本 | ✅ 135/135 golden、FN=0、FP=0、known_miss=16、known_fp=9 |
+| grants meta 向后兼容 | T1 | ✅ `version==1` 且 `workspaces[ws]==["edit:a.py"]` |
+| TTL 数据通路 | U13 | ✅ 磁盘加载的带 TTL 授权在会话内过期 |
+| **CI（真内核）** | `gh run view` | ✅ **仅 6 个 SKIPPED（全 MCP 门控）→ 沙箱真实子进程用例在 CI 里真的跑了并通过** |
+
+#### 8.3.1 实现评审的处置（全部已修）
+
+| 级别 | 问题 | 修法 |
+|---|---|---|
+| **P1-1** | **子智能体栈未接沙箱** —— `build_subagent_runner` 未透传 policy/backend/roots，子智能体的 bash **完全不受 bwrap 约束**（模型可经 `subAgent` 委托写工作区外）。**若威胁模型含模型主动委托，此项实质是 P0** | 透传进 `build_tools`，**roots 取子 worktree**（避免子智能体写到父树）；补接线用例 + 端到端用例 |
+| P2-1 | `path_allowed` 不查 `_grant_expiry` —— 过期授权在**沙箱层**仍生效 | 改为遍历 `self.grants`（已按过期过滤）+ 用例 |
+| P2-2 | `spawn_argv` 的 `or argv` 是潜在 fail-open；`warn`+`backend=None` 静默 | enforce 下 `wrap()` 返回 `None` → `raise SandboxGap("sandbox.wrap.no-op")`；warn+None 也走 `emit` |
+| P2-3 | `config.example.yaml` 出厂 `mode: warn` 抵消了 `enforce` 默认 | 改 `enforce` + 注释说明无 userns 时如何降级 |
+| P2-4 | **U9 两侧是同一个函数，断言恒真** | 新增 `redline_legacy_snapshot.py`（135 条旧 `bash_denied` 冻结快照，独立于被测代码）→ 真实等价断言 |
+| P3 | job-kill 未落成自动化用例；`revokeGrantCommand` 未接进面板 | 补 `test_a_sandboxed_background_job_can_be_killed`（断言内层心跳也停）；面板加 ↑/↓ 选、`x` 撤销 |
 
 #### 8.2.2 第 3 轮评审的处置（全部已修）
 
