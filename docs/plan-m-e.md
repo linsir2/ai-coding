@@ -105,39 +105,57 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
   `eval-04` 的端到端计数断言**已被改成"直接验证真实 `elide_and_persist`"** ——
   即**承认了计数不可断言**，但没有把这个承认**固化成不变量**。
 
-### 2.3 M-E3 · 压缩预算可观测 —— **观测层缺失 + 测试载体错配**
+### 2.3 M-E3 · 压缩预算可观测 —— **观测层缺失**（但"预算缺口"是误诊）
 
 * **实现**：`/trace` 的 `summarize_turn` **完全不处理压缩事件**；`render_turn` 只输出
   token/spans/model steps/tool calls/degraded/cache%。
 * **契约**：`CompactionEnded` 只带 `before_messages/after_messages` + 摘要自身 usage，
   **没有每层压缩前后的 token 估算与命中数**。前端压缩卡片也只显示 `before→after 条 · in/out · 压缩耗`。
-* **可验证缺口证据（我复现）**：
+* **`/trace` 不渲染压缩** —— ✅ 属实。
+* **`r7_cases` 的 `l2_long_history_stays_under_budget` FAIL —— 但根因是测试 bug，不是预算缺口**
+  （**第 1 轮评审 P0-1 更正**）。实测：
 
   ```
-  $ python scripts/r7_cases.py
-  FAIL  books_feed_the_policy: action=NUDGE reason='repeated tool failures'
-  FAIL  l2_long_history_stays_under_budget: est tokens=7058 envelopes=67 of 280 messages
+  AIConfig().max_context_tokens           = 0        ← 未解析
+  r7 用例阈值 = max_context_tokens * 0.5   = 0.0      ← 用例实际用的
+  resolve_context_window(cfg)             = 48000    ← 真窗口
+  resolve_context_window(cfg) * 0.5       = 24000.0  ← 正确阈值
+  tokens=7058 <= 24000  →  True                              ← 本应 PASS
+  tokens=7058 <= 0      →  False  ← r7 的判据，所以 FAIL
   ```
 
-  而 pytest 版 `test_a_long_history_stays_well_under_the_context_budget` **通过** ——
-  差异是它用 `_Settings.max_messages=50`（触发 L1 snip），而 r7 用 `AIConfig()` 默认
-  `max_messages=400`（280 条不触发 snip，只靠 L2 信封化，7058 > 24000 目标）。
-* **缺口**：`r7_cases.py` **不在 CI**（ci.yml 只跑 redline/memory/trace cases），
-  且 pytest 版用**非默认 `max_messages`** 绕过了真实失败 ——
-  **该缺口既无自动化守护，也被测试默认值掩盖**。
+  **7058 是 24000 的 29%** —— **没有预算缺口**。失败是因为 r7 用例读了**未解析的**
+  `AIConfig().max_context_tokens`（默认 0），而 `ContextManager` 靠内部的 `or 48_000` 兜底才拿到真窗口。
+* **连带更正**：
+  * **不存在"调 L2 窗口 / 调水位"的拍板项** —— 修法是**改判据载体**（`resolve_context_window(cfg)`）。
+  * `books_feed_the_policy` 的 FAIL 与压缩**毫无关系**（它只构造 `TurnBooks`+`TurnPolicy`，
+    失败是策略阶梯先命中 L1 而非期望的 L2）—— 是 **domain B 的过期期望**，应单独归案，**移出 M-E**。
+  * "r7 与 pytest 的差异是 `max_messages` 造成" **也不成立**（正确阈值下两者都通过）。
+* **缺口（真实的）**：`r7_cases.py` **不在 CI**，且**断言载体是错的** ——
+  一个错误的断言既不能守护预算，又会**制造"有缺口"的错觉**。
 
-### 2.4 M-E4 · 压缩前缀缓存友好度 —— **无统一断言 + 探针不在 CI**
+### 2.4 M-E4 · 压缩前缀缓存友好度 —— **缺 CI 里的离线门禁**
 
 * **实现**：`request_builder.build_tail` 把 memory/task/hook/digest 作为**易变尾部追加在请求末尾**，
   system prompt 与历史保持字节一致；`compress_if_needed` 低于水位**完全不动历史**（`out is history`），
   从而保持 append-only。
 * **契约**：`ContextAssembled.prefix_shared_ratio` 是我们自己的**估算**；
   `ModelStepFinished.cached_tokens` 是 provider **真实值**。
-* **可验证缺口证据**：`features.md` 记录实测 —— 记忆放系统提示前缀命中 **7%**、放尾部 **94%**；
-  每轮压缩历史中段仅 **26%**（改按预算分页后 **92%**）。目标 ≥90%。
+* **实测**：`features.md` 记录 —— 记忆放系统提示前缀命中 **7%**、放尾部 **94%**；
+  每轮压缩历史中段仅 **26%**（改按预算分页后 **92%**）。
+* **已有守护（第 1 轮评审 P1-3 更正 —— 原写"未被任何阈值测试守护"不准确）**：
+  * `test_agent_loop_r4_wiring.py:148`：`> 0.5`（离线、**在 CI**）
+  * `test_budget_ledger.py:58/91`：精确 0.9 / 0.95
+  * `trace_cases.py:429`：`>= 0.9`（**仅 `--real`**）
+  * → 准确说法：**缺 CI 里的离线 0.9 门禁**。
 * **缺口**：`cache_probe.py` 是**手工脚本**（需 `config.local.yaml`、产生真实调用、**不在 CI**），
-  且只覆盖 system-prompt/尾部两类通道；**没有**"所有注入通道都按预算分页"的**统一断言**，
-  `prefix_shared_ratio` 也**未被任何阈值测试守护**。
+  且只覆盖 system-prompt/尾部两类通道；**没有**"所有注入通道都按预算分页"的**统一断言**。
+* **`prefix_shared_ratio` 不能当硬阈值用（第 1 轮评审 P0-2）**：
+  `features.md:418-423`（M-A6，2026-10-25）已明确 —— **整请求的前缀比率不是定值**，
+  实测随工作区路径长度漂移（8/32/66/442 字符 → 87%/87%/86%/**77%**），
+  `memory_cases` 的 case11 已改用**路径无关的布尔不变量**并**不再使用百分比阈值**。
+  机理：`prefix_shared` 的分母 `len(current)` **含易失尾部**，尾部越大比率越低。
+  → **本轮不得重新引入百分比阈值**（会推翻 M-A6 的决策，并在深路径工作区下 flaky）。
 
 ### 2.5 附带发现（文档漂移）
 
@@ -153,34 +171,51 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
 
 **问题**：L3 的语义（"只处理末尾连续 tool 段"）是**隐式**的 —— 无文档、无测试锁定。
 
-**修法**：**把语义写成可执行的契约**，二选一由用户拍板（见 §五）：
+**修法**：**A1（文档化 + 测试锁定现状）** —— 用户已拍板（A2 的真实风险见评审 P1-1：
+它会去掉"最后手段"判据、未定义范围/顺序/预算、并缩小 L2 覆盖；若要保留须**先补规格**）。
 
-| 方案 | 内容 |
+**具体动作**：
+
+| 动作 | 内容 |
 |---|---|
-| **A1（保守）** | **文档化 + 测试锁定现状**：在 `features.md` / `data-contracts.md` 写明"L3 是**回合中段护栏**，只处理末尾连续 tool 段"；加一条测试断言"**非尾部大输出不被持久化**"（把现状钉住） |
-| **A2（扩展）** | **扩展语义**：`persist_large_outputs` 也处理**非尾部**的单条超大工具结果（> 阈值即持久化），并在文档写明新的语义边界 |
+| 文档 | 在 `features.md` / `data-contracts.md` 写明"L3 是**回合中段护栏**，只处理**末尾连续 tool 段**，且要求批总量 > 窗口一半 + 单条 > 30000" |
+| 测试 | 加一条断言"**非尾部大输出不被持久化**"（把现状钉住） |
+| 可观测 | `CompactionEnded`（或新事件）带上 **L3 实际持久化了几条 / 跳过几条 / 为什么** —— 让"语义"从注释变成**可观测事实**（见 M-E3） |
 
-* **共同部分**：`CompactionEnded`（或新事件）带上 **L3 实际持久化了几条 / 跳过几条 / 为什么** ——
-  让"语义"从注释变成**可观测事实**（这是 M-E3 的一部分）。
 * **为什么这条重要**：`eval-04` 记录"10 轮真实对话后 `persisted=0`" ——
   **真实使用里 L3 几乎从不触发**。若语义是"压缩层"，这是缺口；若是"回合中段护栏"，这是设计。
   **必须显式化，否则下一个人会按错误的心智模型去改它。**
 
 ### B. M-E2 · 计数稳定性
 
-**问题**：压缩成功的判据**没有写死**，且"压缩后条数"被当成断言目标（而它不稳定）。
+**问题（第 1 轮评审 P0-3 更正）**：原方案说"压缩成功的判据没有写死，一律用 token"——
+**前提不存在**。实测：
 
-**修法**：
+* `should_compact`（`context_compression.py:618-635`）**本来就是 token 判据**
+  （`max(observed, _history_tokens) >= ceiling`）。
+* "压缩成功"判据在 `compaction.py:152-193` 是**内容真值** `result != history`，
+  且 `test_compaction_oc_parity.py:10` 已把它写成契约。
+* **全仓没有任何 `len(messages)` 版的成功判据可替换** —— 实测"token 大降、条数不变"
+  的场景**已被判为成功**（`Ended=1 Failed=0`）。
 
-1. **写死"按 token 判定"**（调研的 Hermes 教训）：
-   `should_compact` / 压缩成功判据**一律用 token**，**不用 `len(messages)`**。
-   加一条单测：**构造"token 大降但条数不变"的场景，断言压缩被判定为成功**。
-2. **加管线顺序不变量单测**：断言 `compress()` 中 L2 的调用**先于** L4
+→ **Hermes 教训在本仓已经落实**。原方案的 W2（断言"按 token 判定"）**恒绿**，违反 RIPR。
+
+**修法（重新定位）**：
+
+1. **文档化现有判据**：把"触发按 token（`should_compact`）、成功按内容真值（`result != history`）、
+   **不按条数**"写进 `features.md` / `data-contracts.md`，并说明**为什么**（Hermes 的教训：
+   按条数判会把"省了 36% token 但条数没变"误判为失败 → 假性耗尽 → 会话重置）。
+2. **加契约测试锁住内容真值判据**：断言 `Compactor` 的成功判据**是** `result != history`
+   （不是条数比较）—— 把 `test_compaction_oc_parity.py` 的契约**扩展到显式断言"条数不变也算成功"**。
+3. **加管线顺序不变量单测**：断言 `compress()` 中 L2 的调用**先于** L4
    （用可注入的 recorder 或 monkeypatch 计数），把 docstring 里的"硬不变量"**变成可执行断言**。
-3. **把"elided 计数不可断言"固化**：把 `eval-04` 里那句"直接验证真实 `elide_and_persist`"
+   * **以文档为主、单测作回归锁**（评审 P2-1）—— 别把单测当主要交付。
+4. **把"elided 计数不可断言"固化**：把 `eval-04` 里那句"直接验证真实 `elide_and_persist`"
    的承认**写进测试注释与文档**，并**删掉/改写**任何仍以"压缩后条数"为目标的断言。
-4. **原子组**：`hard_trim` / L1 的截断边界**吸附到 user message**（调研：切在 tool_call/tool_result
-   中间会产生非法请求）。加一条测试：构造 tool_call 与 result 相邻的历史，断言压缩后**两者同生共死**。
+5. **原子组（修订）**：`sanitize_pairs`（`context_compression.py:322-359`）**已结构性保证**
+   "无孤儿 result、无无 result 的 call"，且**所有管线出口**都过它。
+   → 原方案的"修法（吸附到 user message）"**非必需**（管线里不会产生非法请求）；
+   **只保留管线级回归锁**（现有 `test_sanitize_*` 只到 stage 级）。
 
 ### C. M-E3 · 压缩预算可观测
 
@@ -199,35 +234,56 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
 
    * `LayerStat` 是**新增 dataclass**，不破坏既有字段。
    * 与调研的 `compact:start`/`compact:exec`（携带压缩前后 token、压缩比、摘要文本）对齐。
+   * **plumbing（评审 P2-4）**：`Compactor._compress_once` 只从
+     `self._context.last_summary_usage` 取数 —— 要填 `layers` / `estimated_before/after`，
+     `ContextManager` 需**新增** `last_layer_stats` 之类的暴露，`Compactor` 再读它。**这一步必须写进实现清单。**
 2. **`/trace` 渲染压缩**：`summarize_turn` 折叠 `CompactionStarted/Delta/Ended`，
    `render_turn` 增加一行"压缩：L1 −N 条 / L2 −M 条 / L3 −K 条 / L4 摘要 X→Y token（估）"。
-3. **修测试载体错配**：
-   * pytest 版的 `test_a_long_history_stays_well_under_the_context_budget` **改用默认 `max_messages`**，
-     让那个**真实的 7058 > 24000 失败**在 CI 里可见；
-   * **先诊断再修**：7058 token / 280 条 / 67 信封 —— 目标 24000，**超了 3 倍**。
-     这是**真实的预算缺口**（不是测试问题），需要决定：① 调 L2 窗口；② 调水位；③ 承认并记录。
-     **由用户拍板**（见 §五）。
+3. **修测试载体（评审 P0-1 / P2-3）**：
+   * **根因是测试读了未解析的配置**：r7 用例用 `AIConfig().max_context_tokens * 0.5`（= `0.0`），
+     而真窗口是 `resolve_context_window(cfg)` = **48000**（阈值 **24000**）。
+     **7058 是 24000 的 29%，没有预算缺口。**
+   * **修法**：把判据载体换成 `resolve_context_window(cfg)`（或 `ContextManager` 解析后的窗口）。
+   * **pytest 版必须改用 `AIConfig()` + `resolve_context_window`** —— 它现在用手搭
+     `_Settings(max_context_tokens=48000)`，**并不复现**这个 bug；不换的话"搬进 pytest"
+     只是把 bug 一起搬（评审 P2-3）。
    * `r7_cases.py` 的预算用例**接入 CI**（或等价地，把该断言搬进 pytest）。
+   * **删掉"调 L2 窗口 / 调水位"的拍板项**（不存在缺口，无需调参）。
+   * **`books_feed_the_policy` 移出 M-E** —— 它与压缩无关，是 domain B 的过期期望。
 4. **前端压缩卡片**：显示每层命中数（数据来自 #1）。
 
 ### D. M-E4 · 前缀缓存友好度
 
-**问题**：`prefix_shared_ratio` 无阈值守护；无"所有注入通道都按预算分页"的统一断言；探针不在 CI。
+**问题**：缺 **CI 里的离线门禁**；无"所有注入通道都按预算分页"的统一断言；探针不在 CI。
+**且 `prefix_shared_ratio` 不能当硬阈值**（评审 P0-2 —— M-A6 已弃用百分比阈值）。
 
 **修法**：
 
 1. **统一分页断言**（新，`tests/test_context_compression_cache_friendliness.py`）：
    对**每一条**注入通道（memory / task / hook / digest / skill 索引 / 检索片段）断言
-   **注入后前缀共享率 ≥ 阈值**，且**注入位置在可变区之后**。
+   **注入位置在可变区之外**（即"稳定前缀不被改写"）—— 用**布尔不变量**，不用百分比。
    —— 把 `features.md` 里那句"改按预算分页后 92%"从**一次性实测**变成**永久回归锁**。
-2. **`prefix_shared_ratio` 阈值测试**：直接断言 `ContextAssembled.prefix_shared_ratio ≥ 0.9`
-   （在注入 memory 的场景下）。
-3. **`cache_probe.py` 接入 CI**（或做一个**离线等价物**）：
+2. **用 M-A6 的布尔不变量，不用百分比阈值**（评审 P0-2）：
+   复用 `scripts/memory_cases.py` 的 `case_11_cache_prefix`（`stable()` + `stable_b.startswith(stable_a)`）
+   —— **路径无关**，不会在深路径工作区下 flaky。
+3. **前缀字节稳定断言必须分口径**（评审 P1-4 —— 否则必然误报）：
+   * **`prefix_shared_ratio` 只能度量"同回合内相邻模型步"** —— 因为
+     `previous_request` **每回合重置为 `None`**（`agent_loop.py:783`），它**测不了"连续两轮"**。
+   * **跨回合**的稳定必须走**独立的确定性序列化**（即 memory_cases case11 那条路），
+     **两者不能混用**。
+   * **三类误报触发点必须作为 skip 条件**：
+     ① `task_injection="system"`（`todo_write` 会改系统提示）；
+     ② **回合内触发压缩**（`compress_if_needed` 重写历史 → 前缀**合法**断裂）；
+     ③ `_build_instructions` 变化（技能目录 / 项目说明）。
+4. **`cache_probe.py` 接入 CI**（或做一个**离线等价物**）：
    * 离线版：用**确定性序列化**断言"同一会话连续两轮请求的**前缀字节完全相同**"
      （除了末尾的易变区）—— 不需要真实 provider。
    * 保留 `cache_probe.py` 作为**真实 provider 验证**的手工工具。
-4. **时间戳陷阱扫描**：加一条测试/扫描，断言**系统提示与工具定义里没有秒级时间戳**
-   （调研：这是"开了缓存反而更贵 25%"的根因）。
+5. **时间戳陷阱扫描**（范围要精确，评审 P2-5）：
+   断言**系统提示与工具定义**里没有秒级时间戳。
+   **注意**：`now_local()` 出现在 environment **尾部块**（`request_assembly.py:393`）
+   与 plan reminder 的 `timestamp` 字段（`canonical_request` **不渲染** timestamp）——
+   **尾部块放时间戳是正确设计**，扫描**不能误伤**。
 
 ### E. 附带 · 修文档漂移
 
@@ -268,16 +324,19 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
 
 | 编号 | 用例 | 期望红相（今天必须失败） |
 |---|---|---|
-| W1 | `test_l3_semantics_are_locked`（A1） | 断言"非尾部大输出**不**被持久化"（今天：无此断言） |
-| W2 | `test_a_token_reduction_with_an_unchanged_message_count_counts_as_success` | token 大降、条数不变 → 压缩判为**成功**（今天：无此判据） |
+| W1 | `test_l3_semantics_are_locked` | 断言"非尾部大输出**不**被持久化"（今天：无此断言） |
+| W2 | `test_a_compaction_that_saves_tokens_without_changing_the_count_is_a_success` | 断言 `Compactor` 的成功判据是 `result != history`（**条数不变也算成功**）（今天：契约只隐含，无显式断言） |
 | W3 | `test_the_pipeline_order_is_l3_l1_l2_l4` | 顺序不变量（今天：无断言） |
-| W4 | `test_a_tool_call_and_its_result_are_eliminated_together` | 原子组（今天：无断言） |
+| W4 | `test_no_orphan_tool_result_survives_a_full_pipeline_compress` | **管线级**原子组（今天：只有 stage 级） |
 | W5 | `test_compaction_ended_reports_per_layer_stats` | `layers` / `estimated_before/after`（今天：无字段） |
 | W6 | `test_the_trace_renders_the_compaction_layers` | `/trace` 输出每层统计（今天：不渲染压缩） |
-| W7 | `test_every_injection_channel_keeps_the_prefix_shared` | 每通道前缀共享率 ≥ 阈值（今天：无统一断言） |
-| W8 | `test_the_context_prefix_is_byte_stable_across_turns` | 连续两轮请求前缀字节相同（除末尾易变区）（今天：无断言） |
-| W9 | `test_the_system_prompt_carries_no_sub_second_timestamp` | 时间戳陷阱扫描（今天：无断言） |
-| W10 | `test_the_default_max_messages_still_stays_under_budget` | **用默认配置**跑长历史 → 预算内（今天：**失败**，7058 > 24000） |
+| W7 | `test_every_injection_channel_leaves_the_stable_prefix_alone` | 每通道**布尔不变量**（今天：无统一断言） |
+| W8 | `test_a_turns_prefix_is_byte_stable_when_nothing_volatile_changed` | 跨回合前缀字节稳定（**skip 条件**：task_injection=system / 回合内压缩 / instructions 变化）（今天：无断言） |
+| W9 | `test_the_system_prompt_carries_no_sub_second_timestamp` | 时间戳陷阱扫描（**范围排除尾部块**）（今天：无断言） |
+| W10 | `test_the_r7_budget_case_uses_the_resolved_window` | 断言判据载体是 `resolve_context_window(cfg)`（今天：用未解析的 `AIConfig().max_context_tokens` → **恒 FAIL**） |
+
+> **W2 的口径（评审 P0-3）**：**不是**"断言按 token 判定"（那恒绿），而是
+> **显式断言成功判据是内容真值 `result != history`**，并把"条数不变也算成功"钉住。
 
 ### Prove
 
@@ -285,10 +344,11 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
 2. `.venv/bin/ruff check .` / `.venv/bin/mypy ai_coding`
 3. **突变测试**：
    * 把 L4 挪到 L2 之前 → W3 变红
-   * 把成功判据改回 `len(messages)` → W2 变红
-   * 去掉原子组保护 → W4 变红
+   * 把成功判据改回 `len(messages) 减少` → W2 变红
+   * 让 `sanitize_pairs` 放行孤儿 result → W4 变红
    * 去掉 `layers` 字段 → W5/W6 变红
    * 把 memory 注入移到 system prompt 前缀 → W7/W8 变红
+   * 把 W10 的判据换回 `AIConfig().max_context_tokens * 0.5` → W10 变红
 4. **3.10 venv 跑 CI 同构七步**
 5. **端到端**：`/trace` 看到压缩层统计
 
@@ -324,7 +384,37 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
 
 ### 8.1 方案评审（子智能体，第 1 轮）
 
-_待填。_
+**3 个 P0 · 4 个 P1 · 5 个 P2 · 3 个 P3（全部已修，见 §8.1.1）**
+
+**已实测验证**（评审/我逐条复核）：
+
+| 断言 | 方式 | 结果 |
+|---|---|---|
+| L3 只取末尾连续 `tool` 段 | 实跑 | ✅ 属实（非尾部落盘=0） |
+| L2 信封被 L4 吃掉 | 实跑 `compress(force=True)` | ✅ 属实（压缩后信封数=0） |
+| **`r7` 的 7058 不是预算缺口** | 实跑 | ✅ `AIConfig().max_context_tokens=0` → 阈值 `0.0`；真窗口 48000 → 阈值 24000；`7058 <= 24000` = **True** |
+| **"按 token 判定"前提不存在** | 实跑 | ✅ `should_compact` 本就是 token；成功判据是 `result != history`；"条数不变"已判成功 |
+| **`prefix_shared_ratio` 不能当硬阈值** | 对照 M-A6 | ✅ 分母含易失尾部 → 深路径下 77%；M-A6 已弃用百分比阈值 |
+
+#### 8.1.1 本轮 findings 的处置（全部已修）
+
+| 级别 | 问题 | 修法 |
+|---|---|---|
+| **P0-1** | **M-E3 根因诊断错误** —— 7058 **并不** > 24000。r7 用例读了**未解析的** `AIConfig().max_context_tokens`（默认 0）→ 阈值 `0.0` → FAIL。真窗口 48000，7058 是 **29%** | §2.3 / §C.3 / W10 全部重写：**修法是改判据载体**（`resolve_context_window`），**删掉"调 L2 窗口/水位"的拍板项**；`books_feed_the_policy` **移出 M-E**（与压缩无关，是 domain B 过期期望） |
+| **P0-2** | **M-E4 的 `prefix_shared_ratio ≥ 0.9` 与 M-A6 直接冲突且不可达** —— 分母含易失尾部，深路径下实测 **77%**；M-A6 已**明确弃用百分比阈值** | §D.2 改为复用 `memory_cases` case11 的**布尔不变量**（`stable()` + `startswith`）；§2.4 措辞改为"缺 CI 里的离线门禁" |
+| **P0-3** | **M-E2"按 token 判定"的前提不存在** —— `should_compact` 本就是 token 判据；成功判据是内容真值 `result != history`；全仓**没有** `len(messages)` 版判据可替换 → 原 W2 **恒绿** | §B 重写：改为**文档化现有判据 + 契约测试锁住内容真值**；W2 重写为"断言成功判据是 `result != history`（条数不变也算成功）" |
+| P1-1 | M-E1 的 A1 站得住；A2 的真实风险不是"破坏护栏"，而是**去掉"最后手段"判据**（`total > window/2`）→ 变成无差别 30KB 阈值 + **未定义范围/顺序/预算** + **缩小 L2 覆盖** | §A 改为**只推 A1**；A2 若要保留须**先补规格**（范围/顺序/预算/L2 交互），不与 A1 并列 |
+| P1-2 | 把无关的 `books_feed_the_policy` 失败算作 M-E 证据 | 移出（见 P0-1） |
+| P1-3 | "`prefix_shared_ratio` 未被任何阈值测试守护"**不准确** | §2.4 更正：已有 `>0.5`（CI）、0.9/0.95（测试）、`>=0.9`（`--real`）；缺的是**CI 离线 0.9 门禁** |
+| P1-4 | **W8 前缀字节稳定断言会因正常轮转误报**（`task_injection="system"`、回合内压缩、`_build_instructions`）；且 `previous_request` **每回合重置** → `prefix_shared_ratio` **测不了"连续两轮"** | §D.3 重写：**分口径**（同回合相邻步 vs 跨回合确定性序列化）+ **三类误报触发点作为 skip 条件** |
+| P2-1 | M-E2 W3 锁的是实现细节；roadmap 原意是"明确顺序是刻意的" | §B.3：**以文档为主、单测作回归锁** |
+| P2-2 | M-E2 W4"原子组"**已被 `sanitize_pairs` 结构性保证**；"修法（吸附到 user message）"是误判 | §B.5：去掉修法，**只保留管线级回归锁** |
+| P2-3 | M-E3"把 r7 断言搬进 pytest"**必须用 `AIConfig()`**，否则把 bug 一起搬 | §C.3 写明 |
+| P2-4 | `CompactionEnded` 加 `layers` **缺 plumbing**（`Compactor` 只读 `last_summary_usage`） | §C.1 补：`ContextManager` 新增 `last_layer_stats` 暴露 |
+| P2-5 | M-E4 W9 时间戳扫描**范围要精确**（尾部块的 `now_local()` 是正确设计，不能误伤） | §D.5 补范围说明 |
+| P3-1 | 文档漂移已确认，修法正确 | §E 保留 |
+| P3-2 | M-E1 证据链成立（`eval-04`：`persisted=0`） | ✅ |
+| P3-3 | M-E3"`/trace` 不渲染压缩"属实 | ✅ |
 
 ### 8.2 方案评审（子智能体，第 2 轮）
 
