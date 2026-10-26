@@ -514,4 +514,30 @@ boot N 的 initialize:
 
 ### 8.3 实现评审（子智能体）
 
-_待填。_
+结论：**无 P0**；实现整体忠实于方案（sidecar 落点、`call_fingerprint` 复用、回合清空、
+三层并发写、boot-to-boot 指纹、`bind_session` 落 trace 都到位）。1 个 P1 + 3 个 P2 + 3 个 P3。
+逐条处置：
+
+| 编号 | 内容 | 处置 |
+|---|---|---|
+| **P1-1** | **M-C3 的两个新字段在"计划重新提交"路径没有重置** —— `present_plan_tool.py`（唯一的 plan arm 点）重置了 `resume_count` 却没重置 `no_progress_resumes`/`resume_fingerprint`。后果：计划被门 disarm 后，用户重新批准 → 指纹仍等于新 episode 的开局 → 下次 boot 立即再 disarm，**刚批准的计划一次都不跑** | **已修**：`present_plan_tool` 补上两个重置；新增 `test_an_approved_plan_restarts_the_resume_gate`（突变验证：去掉重置 → 1 红）。**注意**：`plan_runner`/`goal_runner` 的 `run` **不是** arm 点（它们重入一个已 armed 的任务），**不应**重置 —— 否则每次续跑都会清空调期计数 |
+| P2-1 | `clip_data` 只截断字符串值，非字符串（list/dict）原样写入 → "三个上限都有界"未真正满足 | **已修**：`_clip_value` 递归截断（深度 2、广度 `DATA_KEYS`），字符串原地截断（**不**做 `json.dumps` —— 那会把 `"a.py"` 变成 `"\"a.py\""`，破坏往返） |
+| P2-2 | 指纹在 `ensure_tool_pairing` **之前**采集 → 消息数分量可能漂移，把停滞读成"有进展" | **已修**：指纹改在 `_persist_session` **之后**采集（多一次 boot 期写盘） |
+| P2-3 | sidecar 只在正常 `close` 路径清空；回合体**没有 `finally`** → 未预期异常跳过 `_close_turn` → 同进程下一回合会复用上一回合的记录 | **已修**：回合体加 `finally` 清空；新增 `test_an_aborted_turn_leaves_no_records_for_the_next_one`（突变验证：去掉 `finally` → 1 红）。**不能**在 `_begin_turn` 清 —— 那会抹掉崩溃留下的记录，正好毁掉 M-C1（实测踩到） |
+| P2-4 | "每回合一个 log"只体现在文档上（实际每 batch 一个，靠 `session.write_ahead` 共享） | **可接受**：功能等价；docstring 已说明 |
+| P3-1 | 复用 `data` 为空返回 `None`，契约表写 `dict` | **已修**：契约表改 `dict \| None` |
+| P3-2 | `mark_write_ahead` 用固定 `<id>.tmp`（与 M-C2 的唯一 tmp 不同） | **可接受**：会话 sidecar 是单写者（subagent 走 `_NullSessions`）；已在注释里点明 |
+| P3-3 | `bind_session` 未设 `_tool_observer._observations` | **可接受**：disarm 分支不跑工具；下一次 turn 会重设 |
+
+**实现期发现并处理的三处偏差**（提交说明已记录）：
+1. 两处 fake（`trace_cases` c6 / `test_agent_loop_react`）名义是 `read` 却声明
+   `mutates_world=True` → 按 M-C1 会被复用，"第三次重复被 guard 拒绝"不再成立。
+   改为 `mutates_world=False`（**fake 本身语义有误**，不是放宽测试）。
+2. U8 的突变判据：单移除进程锁**不会**红（唯一 tmp + flock 已防损坏）→ 加强为多轮，
+   稳定捕获"三层全移除"。
+3. 复用结果必须与全新执行**逐字节一致**：`data` 为空时记 `None` 而非 `{}`（否则多一个
+   `<data>{}</data>` 块，打破 golden）。
+
+**验收复核**：3.14 / 3.10 均 **3898 passed / 6 skipped**（18 条新用例）；ruff、mypy 干净；
+突变 4 处全部被抓住（去复用分支 → 3 红；去 M-C3 门 → 1 红；去回合 `finally` → 1 红；
+去 `present_plan` 重置 → 1 红）；3.10 CI 七步 + `r9_cases` 12/12 全绿。

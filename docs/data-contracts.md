@@ -923,7 +923,7 @@ M-C1~M-C3 见 `docs/plan-m-c.md`。三条新契约，其余全是新增或追加
 |---|---|---|
 | `callId` / `tool` / `digest` | `str` | 一次副作用调用的身份；`digest = call_fingerprint(call)`（复用 `core/guard.py`，不新造指纹） |
 | `status` | `"running" \| "ok" \| "failed"` | 执行**前**写 `running`，执行**后**回填 |
-| `output` / `data` / `artifacts` | `str` / `dict` / `list[dict]` | 复用必须与全新执行**不可区分**：模型读 `output`，回合 digest/handoff 读 `artifacts` |
+| `output` / `data` / `artifacts` | `str` / `dict \| None` / `list[dict]` | 复用必须与全新执行**不可区分**：模型读 `output`，回合 digest/handoff 读 `artifacts`。`data` 为空时记 `None` 而非 `{}` —— 全新执行会报 `data=None`，空 dict 会多出一个 `<data>{}</data>` 块 |
 
 落点是 **sidecar** `sessions/write-ahead/<id>.json`（子目录，避开 `*.json` 会话扫描），不是会话字段：`claim` 必须在 `_execute` **之前**调，而此刻 `write_back` 还没跑，写会话会触发 `ensure_tool_pairing` 丢掉在飞的载体（仓库已三次明令禁止的坑）。`SessionData.write_ahead` 是**运行时字段**（`load` 时从 sidecar 读回），**不进 `to_dict`** → 会话 JSON 不变大、save 节奏不变。
 
@@ -936,7 +936,7 @@ M-C1~M-C3 见 `docs/plan-m-c.md`。三条新契约，其余全是新增或追加
 | 字段 | JSON 键 | 说明 |
 |---|---|---|
 | `resume_fingerprint: tuple[int, ...] \| None` | `resumeFingerprint` | 上一次续跑留下的指纹：`(rounds_run, tokens_used, 非合成消息数, len(step_deliveries))`，存为 int 列表；仅非 `None` 时写 |
-| `no_progress_resumes: int` | `noProgressResumes` | 连续无进展的续跑次数；仅非零时写。`arm_goal` 重置两者 |
+| `no_progress_resumes: int` | `noProgressResumes` | 连续无进展的续跑次数；仅非零时写。`arm_goal` 与 `present_plan_tool`（唯一的 plan arm 点）重置两者 —— 漏重置会让刚被门 disarm 的计划在下次 boot 被立即再 disarm |
 
 **判据是 boot 到 boot**，不是 run 的首尾：`rounds_run` 每轮必增，而崩在轮中途时「记 after」根本不执行。指纹全等 = 上一次续跑没开一轮、没产生真实消息、没结算任何步骤。**非合成消息数**是关键：`resume_turn` 在有待审批时会追加一条合成 user 消息，`len(messages)` 会读成「有进展」，掩盖真正的停滞。连续 **2** 次（一次可能是崩在 `resume_turn` 刚开头）→ disarm + `ResumeStalled`，与 note 在同一个 `initialize` 响应里。
 

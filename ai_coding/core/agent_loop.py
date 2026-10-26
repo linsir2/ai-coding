@@ -1240,6 +1240,16 @@ class AgentLoop:
             outcome = failed_outcome(
                 exc, last_text=books.last_text, iterations=books.total_iterations
             )
+        finally:
+            # M-C1: the reuse domain is the turn.  ``close`` clears the sidecar
+            # on the normal path; this covers a turn that ended on an exception
+            # the body does not name.  A *process* crash never reaches here --
+            # which is exactly why the records survive for the resumed turn.
+            if self.closer.write_ahead is not None:
+                try:
+                    self.closer.write_ahead.clear()
+                except Exception:  # noqa: BLE001 — the close must still succeed
+                    _log.debug("write-ahead clear failed", exc_info=True)
 
         return await self._finish_turn(
             session,

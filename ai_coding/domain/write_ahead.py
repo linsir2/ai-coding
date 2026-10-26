@@ -45,13 +45,35 @@ def clip_output(text: Any) -> str:
 
 
 def clip_data(data: Any) -> dict[str, Any]:
-    """Cap the recorded structured result by key count and per-value length."""
+    """Cap the recorded structured result by key count and per-value size.
+
+    Strings are clipped in place; containers are clipped recursively (depth and
+    breadth bounded); anything else is kept as-is (a scalar) or replaced by its
+    ``repr`` (an object JSON cannot encode).  The cap is on the value's *size*,
+    not on ``str`` alone: a tool whose ``data`` is a list or a nested dict
+    (``grep``/``glob`` shape one) would otherwise pass through whole, and the
+    sidecar would grow with the tool's output rather than with the call count.
+    """
     if not isinstance(data, dict):
         return {}
-    clipped: dict[str, Any] = {}
-    for key, value in list(data.items())[:DATA_KEYS]:
-        clipped[str(key)] = value[:DATA_VALUE_CHARS] if isinstance(value, str) else value
-    return clipped
+    return {
+        str(key): _clip_value(value) for key, value in list(data.items())[:DATA_KEYS]
+    }
+
+
+def _clip_value(value: Any, depth: int = 0) -> Any:
+    if isinstance(value, str):
+        return value[:DATA_VALUE_CHARS]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, dict) and depth < 2:
+        return {
+            str(key): _clip_value(item, depth + 1)
+            for key, item in list(value.items())[:DATA_KEYS]
+        }
+    if isinstance(value, list) and depth < 2:
+        return [_clip_value(item, depth + 1) for item in value[:DATA_KEYS]]
+    return repr(value)[:DATA_VALUE_CHARS]
 
 
 def clip_artifacts(artifacts: Iterable[Any]) -> list[dict[str, Any]]:

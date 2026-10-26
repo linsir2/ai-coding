@@ -118,6 +118,22 @@ def _records(service: SessionService, session_id: str):
     return service._read_write_ahead(session_id)
 
 
+class _ExplodingEngine(ChatEngine):
+    """Runs one batch, then raises an exception the turn body does not name."""
+
+    def __init__(self, batches: list[list[tuple[str, str, str]]]) -> None:
+        self._inner = _ScriptEngine(batches)
+        self._steps = 0
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        self._steps += 1
+        if self._steps > 1:
+            raise RuntimeError("boom")
+        return await self._inner.step(
+            messages, tools=tools, instructions=instructions, on_delta=on_delta
+        )
+
+
 # ---- the claim happens before the call runs --------------------------------
 
 
@@ -245,6 +261,29 @@ async def test_a_later_turn_does_not_reuse_a_previous_turns_call(tmp_path):
     await loop.process_input(session, "again")
 
     assert tool.executions == 2, "the sidecar leaked into the next turn"
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_turn_leaves_no_records_for_the_next_one(tmp_path):
+    """The reuse domain is the turn even when the turn dies badly.
+
+    The turn body names only a few exceptions; anything else propagates without
+    ``close``.  Without the ``finally``, the next turn in the same process
+    would start from this one's records -- crash recovery turned into a
+    same-process call cache.
+    """
+    service = SessionService(root=tmp_path / "sessions")
+    session = _session(service)
+    tool = _WriteTool()
+    loop = _loop(_ExplodingEngine([[("c1", "write", "{}")]]), service, tmp_path, tool)
+
+    with pytest.raises(RuntimeError):
+        await loop.process_input(session, "go")
+
+    assert tool.executions == 1
+    assert _records(service, session.session_id) is None, (
+        "an aborted turn left its records behind"
+    )
 
 
 @pytest.mark.asyncio

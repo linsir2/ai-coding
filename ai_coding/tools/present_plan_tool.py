@@ -333,6 +333,12 @@ class PresentPlanTool(BaseTool):
             ctx.task.rounds_run = 0
             ctx.task.resume_count = 0
             ctx.task.tokens_used = 0
+            # M-C3: the resume gate counts within an episode too.  Without
+            # these two, a plan the gate just disarmed would be disarmed again
+            # on the very next boot -- the fingerprint it left behind matches
+            # the freshly-approved episode's opening state.
+            ctx.task.no_progress_resumes = 0
+            ctx.task.resume_fingerprint = None
             if ctx.note_plan_approved is not None:
                 ctx.note_plan_approved()
             # N1: the plan is this turn's exit; the other one is now refused.

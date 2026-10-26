@@ -25,6 +25,7 @@ from ai_coding.core.plan_runner import continuations_disabled
 from ai_coding.core.turn_policy import PLAN_APPROVAL_WITHDRAWN_NOTE
 from ai_coding.domain.loop import StepResult, TurnStatus
 from ai_coding.domain.message import ToolCallRef, ToolResult
+from ai_coding.domain.task import TaskState
 from ai_coding.security.approval import ApprovalResult, AutoApproveCallback
 from ai_coding.security.user_prompt import UserAnswer
 from ai_coding.service.session_service import SessionService
@@ -219,6 +220,32 @@ async def test_an_approved_plan_stays_armed_after_the_turn(tmp_path):
     assert session.task.armed is True
     assert session.task.armed_profile == "plan"
     assert [item.content for item in session.task.items] == ["建目录"]
+
+
+@pytest.mark.asyncio
+async def test_an_approved_plan_restarts_the_resume_gate(tmp_path):
+    """M-C3's counters count within an episode, so approval resets them.
+
+    ``present_plan`` is the plan arm point.  Without the M-C3 pair, a plan the
+    gate just disarmed would be disarmed again on the very next boot: the
+    fingerprint it left behind matches the freshly-approved episode's opening
+    state, and the operator's re-approval would never run a single round.
+    """
+    engine = _ScriptedEngine([_call(*_PLAN_CALL), _call("c2", "read")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, _registry(PresentPlanTool(_Approve()), _Read()))
+    session = _plan_session(sessions)
+    # The state the gate leaves behind: disarmed, with its counters still set.
+    session.task = TaskState(goal="给个计划")
+    session.task.no_progress_resumes = 2
+    session.task.resume_fingerprint = [0, 0, 0, 0]
+
+    with continuations_disabled(loop, max_iterations=2):
+        await loop.process_input(session, "给个计划")
+
+    assert session.task.armed is True
+    assert session.task.no_progress_resumes == 0
+    assert session.task.resume_fingerprint is None
 
 
 @pytest.mark.asyncio

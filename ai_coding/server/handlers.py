@@ -412,11 +412,6 @@ def make_handlers(
                        else "或重新进入 Plan 模式。")
                 )
             else:
-                # M-C3: the fingerprint is stored before the posture reset, so
-                # the persist below carries it -- a crash between the two
-                # persists can lose the older breaker's increment, but not the
-                # fact that this resume started from here.
-                task.resume_fingerprint = now
                 # 可达+有痕批次: the note rides the initialize response, not a
                 # console.line -- events emitted while the shell is still on
                 # Home are lost, and this one must be seen.
@@ -439,6 +434,12 @@ def make_handlers(
                     reason="boot-resume",
                     observer=bridge,
                 )
+                _persist_session(world, session)
+                # M-C3: take the fingerprint *after* the persist, so it counts
+                # the messages that actually survived ``ensure_tool_pairing``.
+                # Taken before, a carrier dropped on the way to disk would read
+                # as progress on the next boot and hide a real stall.
+                task.resume_fingerprint = resume_fingerprint(task, session)
                 _persist_session(world, session)
                 _launch_boot_resume(session)
                 resuming = True
