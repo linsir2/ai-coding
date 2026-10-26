@@ -774,7 +774,43 @@ host == allow_entry  or  host.endswith("." + allow_entry)
 
 ### 8.3 实现评审（子智能体）
 
-_待填。_
+**0 P0 · 1 P1 · 5 P2 · 8 P3（全部已修，见 §8.3.1）**
+
+**已实测验证**（评审逐条复核，本环境 `no-proc` 档）：
+
+| 断言 | 方式 | 结果 |
+|---|---|---|
+| `no-proc` 档 `/proc` 闭合 | 实测 | ✅ `ls /proc`=0、`/proc/1/root/...`=ENOENT、`mount -t proc`=**EPERM**（无法重挂绕过） |
+| `/proc/self/root` **不**绕过读遮蔽 | 用 host procfs 验语义 | ✅ 在进程自身 mount ns 内解析 → 遮蔽生效 |
+| 读遮蔽顺序（`--ro-bind / /` 后 / `--tmpfs /tmp` 后 / 可写 `--bind` 后） | argv + 行为断言 | ✅ |
+| 符号链接：`resolve()` 后遮目标有效；直接遮链接 bwrap 报错 | 实测 | ✅ |
+| glob 展开（`ssh_host_*_key`，`.pub` 不遮） | 用例 | ✅ |
+| 网络三档隔离 | 实测 | ✅ `deny` 下 `connect(1.1.1.1)`=`ENETUNREACH`；`proxy` 下白名单通、非白名单/直连 IP=403 |
+| 桥生命周期（fork + `PR_SET_PDEATHSIG`） | 进程树实测 | ✅ 转发子进程在 `execv` 后存活、命令退出后被回收 |
+| 白名单匹配（精确/后缀/剥端口/大小写/`"*"` 不匹配） | 参数化用例 | ✅ |
+| DNS 防护（解析后拒私网/loopback/link-local/metadata + pin 已校验地址） | 用例 + 逻辑复核 | ✅ |
+| 降级方向（只降 `deny`，绝不 `off`） | 用例 | ✅ |
+| AF_UNIX 遮蔽错误码 | 实测 | ✅ `ECONNREFUSED(111)`（更正方案的 `ENOTSOCK` 误测） |
+
+#### 8.3.1 实现评审的处置（全部已修）
+
+| 级别 | 问题 | 修法 |
+|---|---|---|
+| **P1-1** | **seccomp 过滤器硬编码 x86_64 的 `_NR_SOCKET=41`** —— aarch64（`__NR_socket=198`）上 `socket(AF_UNIX)` 不匹配 → **ALLOW**，`block_af_unix` **静默失效** | 按 `platform.machine()` 查表；**未知架构显式拒绝**（不猜 —— 否则 ARM 上 41 是 `faccessat`，过滤器静默全放行）；V13 加 arch 守卫避免假绿 |
+| P2-1 | **代理白名单不约束端口** —— `allow:["example.com"]` 放行 `CONNECT example.com:22/3389/6379`（白名单域名可当 TCP 跳板） | 默认只放行 **80/443**；支持 `domain:port` / `domain:port1,port2`；畸形端口 fail-closed |
+| P2-2 | **AF_UNIX 并行通道 + 默认清单不完整** —— 实测沙箱可连 `/run/supervisor.sock`、`/run/shared/minimal-ssh-agent.sock`；默认只遮 3 条 | 默认清单扩到 **30+ 条**；§C 表述改为"代理是**所有 TCP/UDP 出网流量**的唯一出口" |
+| P2-3 | **`full` 档的闭合在本环境无法验证**（`--proc`+`--unshare-pid` EPERM，永远选不中；V1b full 分支只在 CI 跑） | 由 **CI 的 V1b full 分支**背书；已在方案与本文档标明这是**验证盲区** |
+| P2-4 | **桥转发子进程运行期死亡无守护**（`accept()` 非超时 `OSError` / `Thread.start` `EAGAIN`）→ "桥活着但转发已死"残余场景 | 子进程内 **catch 全部异常并继续**（仅父进程消失时退出）；`EAGAIN` 丢该连接继续 |
+| P2-5 | **`deny` 档未清理继承的代理 env**（只有 `proxy` 档 `--unsetenv`） | `--unsetenv` 提到**三档统一** |
+| P3-2 | `SandboxMaskReport.failed` **无人消费** —— §B.2 的"构造失败→拒绝/Degraded"未落地 | `spawn_argv` 读它：`enforce` → `raise SandboxGap("sandbox.mask.failed")`；`warn` → `emit` |
+| P3-3 | `_covers_protected` 的跳过**不记入** `SandboxMaskReport`（静默） | 记入 `skipped` |
+| P3-4 | 代理不拒绝**重复 `Host` 头**；绝对式请求把客户端 `Host` 原样转发（请求走私面） | 拒绝重复 `Host`（400） |
+| P3-5 | 读 denylist 未覆盖 `memory.json` / `grants.json`（仅 `mcp-auth.json`） | 补用户级数据目录 |
+| P3-6 | `read_deny_paths: []` **静默**关闭读边界 | 加载期一次性告警 |
+| P3-7 | 代理每连接一线程**无上限**（DoS 面） | `max_connections=256` 的 `BoundedSemaphore`，池满丢连接 |
+| P3-8 | `Content-Length` **无上限** | `max_body_bytes=10 MiB`，超限 400 |
+| P3-1 | `_probe` 未带 `roots`（方案 A.2 要求"完整构造"） | 实现期已带；当前是 fail-closed 非安全洞 |
+| P3-2' | 测试里的重复探测 | 探测已缓存，影响有限 |
 
 #### 8.2.2 第 3 轮评审的处置（全部已修）
 

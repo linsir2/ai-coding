@@ -861,6 +861,54 @@ def test_a_missing_read_deny_path_is_skipped_without_degraded(tmp_path):
     assert not [reason for reason in seen if "mask" in reason], seen
 
 
+def test_an_untraversable_deny_path_does_not_abort_the_wrap(tmp_path, monkeypatch):
+    """A deny path the host cannot stat must not abort the whole spawn.
+
+    On a non-root CI runner, ``/root/.ssh`` exists but is not traversable, so
+    ``exists()`` raises ``PermissionError``.  An uncaught one here used to
+    propagate out of ``_mask_arguments`` and kill the entire spawn; the guard
+    treats it as "not ours to mask": the sandbox still gets every mask that
+    could be built, and the skip is recorded (skipped + failed), not silent.
+    """
+    import ai_coding.security.process_sandbox as module
+
+    base = Path(tempfile.mkdtemp(prefix="ai-coding-untraversable-", dir=str(Path.home())))
+    try:
+        denied = base / "denied"
+        denied.mkdir()
+        (denied / "inside.txt").write_text("S\n", encoding="utf-8")
+        reachable = base / "reachable"
+        reachable.mkdir()
+        (reachable / "inside.txt").write_text("R\n", encoding="utf-8")
+
+        original_exists = module.Path.exists
+
+        def fake_exists(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            if self == denied.resolve():
+                raise PermissionError(13, "Permission denied")
+            return original_exists(self, *args, **kwargs)
+
+        monkeypatch.setattr(module.Path, "exists", fake_exists)
+
+        backend = module.BwrapBackend(
+            writable_paths=(), read_deny_paths=[denied, reachable], af_unix_deny_paths=()
+        )
+        # The regression: this used to raise PermissionError out of wrap().
+        argv = backend.wrap(["/bin/true"], [tmp_path])
+
+        report = backend.mask_report
+        assert denied in report.skipped, report
+        assert any(
+            entry[0] == denied and "unreadable" in entry[1] for entry in report.failed
+        ), report
+        # The mask that could be built is still applied, so the read boundary
+        # is not silently weaker for the traversable paths.
+        assert reachable.resolve() in report.masked, report
+        assert str(reachable.resolve()) in argv, argv
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 # ---- V12 / V13: AF_UNIX ---------------------------------------------------
 
 

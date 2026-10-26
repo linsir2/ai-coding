@@ -816,12 +816,26 @@ class BwrapBackend:
                     seen.add(resolved)
                     skipped.append(path)
                     continue
-                if not resolved.exists():
+                # A path under a directory the operator cannot traverse (the
+                # classic case: /root/.ssh on a CI runner that is not root)
+                # raises PermissionError from exists()/is_dir() -- and an
+                # uncaught one here aborts the whole spawn.  Treat it as
+                # "not ours to mask": the sandbox still gets every mask that
+                # could be built, and the skip is recorded, not silent.
+                try:
+                    present = resolved.exists()
+                    is_dir = present and resolved.is_dir()
+                except OSError as exc:
+                    seen.add(resolved)
+                    skipped.append(path)
+                    failed.append((path, f"unreadable: {exc}"))
+                    continue
+                if not present:
                     seen.add(resolved)
                     skipped.append(path)
                     continue
                 seen.add(resolved)
-                if resolved.is_dir():
+                if is_dir:
                     args += ["--tmpfs", str(resolved)]
                 else:
                     args += ["--ro-bind", "/dev/null", str(resolved)]
