@@ -139,7 +139,17 @@ class _SlowApproval(ApprovalCallback):
 
 
 async def case_books_feed_the_policy(_root: Path) -> tuple[bool, str]:
-    """The counters decide the ladder, and the snapshot is built where they live."""
+    """The counters decide the ladder, and the snapshot is built where they live.
+
+    **Domain B (R7a kernel), not M-E compression.**  This case only builds
+    ``TurnBooks`` + ``TurnPolicy`` and never touches the pipeline, so it is
+    not a compression claim and must not be counted as M-E evidence
+    (plan-m-e §2.3 / §C.3).  It lives here because it *is* an R7a acceptance
+    case; the review flagged it only because a FAIL was once read as a
+    compaction defect.  Its current FAIL is a stale expectation in the policy
+    ladder — it fires L1 (``repeated tool failures``) before the expected L2
+    — and is tracked as a domain-B item, not a compression one.
+    """
     books = TurnBooks(iterations=3, attempted_calls=4, successful_calls=0)
     policy = TurnPolicy()
     decision = policy.decide_next_iteration(
@@ -393,6 +403,7 @@ async def _until(predicate, timeout: float = 30.0) -> bool:
 
 
 OFFLINE: dict[str, CaseFn] = {
+    # Domain B (R7a kernel), not M-E compression — see its docstring.
     "books_feed_the_policy": case_books_feed_the_policy,
     "close_reports_when_the_model_is_silent": case_close_reports_when_the_model_is_silent,
     "l2_envelope_is_recoverable": case_l2_envelope_is_recoverable,

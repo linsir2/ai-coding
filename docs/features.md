@@ -230,9 +230,11 @@ plan-runner 的步内强制关闭（`max_auto_continuations=0`）：步是共享
 
 **③ 压缩预算可观测**（M-E3）。`CompactionEnded` 新增 `layers: tuple[LayerStat, ...]`、
 `estimated_before`/`estimated_after`（**层序边界**，不是 Compactor 边界——后者含分页循环）。
-`LayerStat` 字段：`name`（L1/L2/L3/L4）、`removed`（真减条数，只 L1/L4）、`rewritten`（保条数改
-内容，L2/L3）、`skipped`（检查了但没动手）、`before_tokens`/`after_tokens`（用 `_history_tokens`，
-含每张图固定 1600）。顺序写死 = 管线顺序；L4 未跑时 `layers` **不含** L4 项。
+`LayerStat` 字段：`name`（L1/L2/L3/L4）、`removed`（**净减条数**，比"真的减少的条数"少一个占位符
+——L1 装 `[snipped N messages]`、L4 装摘要条，只 L1/L4）、`rewritten`（保条数改内容，L2/L3）、
+`skipped`（检查了但没动手，**仅 L2/L3**：L1/L4 改条数而非扫描候选，恒 0）、`before_tokens`/
+`after_tokens`（用 `_history_tokens`，含每张图固定 1600）。顺序写死 = 管线顺序；L4 未跑时 `layers`
+**不含** L4 项，`/trace` 该行输出「L4 未触发」。
 `/trace` 的 `render_turn` 按 **token 差**渲染压缩行（条数对 L2/L3 无意义）；前端压缩卡片显示每层
 统计。`Compactor._compress_once` 从 `context.last_layer_stats` 读取后填入（这是 plumbing 的关键
 一行，缺它 `layers` 永远为空）。

@@ -214,14 +214,25 @@ class CompactionDelta:
 class LayerStat:
     """One compression layer's measured effect, at the layer's own boundary.
 
-    ``removed`` counts messages the layer actually took out (only L1's snip
-    and L4's summary do); ``rewritten`` counts bodies the layer replaced while
-    keeping the message count (L2's envelope, L3's persist).  The two are
-    deliberately separate: L2/L3 never remove a message, so folding them into
-    ``removed`` would render a misleading number (plan-m-e §C.1).  ``skipped``
-    is how many the layer examined and left alone — L3 is the case that
-    matters, because a non-trailing large output is not even in the trailing
-    batch and an under-threshold trailing one is examined and skipped.
+    ``removed`` is the layer's **net** change in message count, floored at zero
+    (only L1's snip and L4's summary change it).  When it removes anything it
+    installs exactly one message of its own — L1's ``[snipped N messages]``
+    placeholder, L4's summary note — so the net is one less than the messages
+    the layer actually took out, and reading it as "messages deleted" would
+    over-count by one (plan-m-e §C.1).  ``rewritten`` counts bodies the layer
+    replaced while keeping the message count (L2's envelope, L3's persist).
+    The two are deliberately separate: L2/L3 never remove a message, so folding
+    them into ``removed`` would render a misleading number.
+
+    ``skipped`` counts how many a *count-preserving* layer examined and left
+    alone.  Only L2 and L3 do that — they scan candidates and rewrite some in
+    place, so "checked but did not act" is a real number there (L3 is the case
+    that matters, because a non-trailing large output is not even in the
+    trailing batch and an under-threshold trailing one is examined and
+    skipped).  L1 and L4 change the count instead of scanning candidates, so
+    they report 0: the messages they leave alone are the head/tail they
+    deliberately kept, not candidates they declined, and a nonzero ``skipped``
+    on them would read as "these were skipped".
 
     ``before_tokens``/``after_tokens`` are measured with ``_history_tokens``
     (text plus a flat 1600 per image), on the exact list the pipeline

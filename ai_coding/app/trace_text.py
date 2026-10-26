@@ -32,12 +32,12 @@ def _blank_summary() -> dict[str, Any]:
         "degraded": [],
         "guard_denied": 0,
         "tools": [],
-        # The per-layer account of the last CompactionEnded in this turn, and
-        # the layer-boundary token estimates (M-E3): /trace renders what the
-        # pipeline actually did, not just the message counts.
+        # The per-layer account of the last CompactionEnded in this turn (M-E3):
+        # /trace renders what the pipeline actually did, not just the message
+        # counts.  The layer list is self-contained — the boundary estimates
+        # are its first ``before_tokens`` and last ``after_tokens`` — so the
+        # summary carries no second copy of them.
         "compaction_layers": [],
-        "compaction_before": 0,
-        "compaction_after": 0,
         # The sub-agent slice of the totals above.  Kept as a split rather than
         # subtracted, so the totals still mean "what this turn cost".
         "subagent_scopes": 0,
@@ -75,6 +75,19 @@ def _layer_line(layer: Mapping[str, Any]) -> str:
         segs.append(f"跳过 {skipped} 条")
     segs.append(tail)
     return f"{name} " + " · ".join(segs)
+
+
+def _compaction_line(layers: list[Mapping[str, Any]]) -> str:
+    """The whole compaction part: one segment per layer, plus L4's absence.
+
+    A layer that did not run is *absent* from ``layers``, never all-zero
+    (plan-m-e §C.1 P2-1), so the line names it explicitly rather than letting a
+    reader assume L4 ran and produced an empty summary.
+    """
+    segments = [_layer_line(layer) for layer in layers]
+    if not any(str(layer.get("name", "")) == "L4" for layer in layers):
+        segments.append("L4 未触发")
+    return "压缩：" + " / ".join(segments)
 
 
 def _int(value: Any) -> int:
@@ -159,13 +172,11 @@ def summarize_turn(path: str | Path) -> dict[str, Any]:
                 summary["degraded"].append(component)
         elif event == "CompactionEnded":
             # Fold the lifecycle (started/delta/ended) into one line's worth of
-            # facts: the per-layer account and the boundary estimates.  Deltas
-            # are lossy and the started event carries nothing to summarise.
-            # Keys are the trace's own snake_case (``dataclasses.asdict``), not
-            # the camelCase the wire bridge emits.
+            # facts: the per-layer account.  Deltas are lossy and the started
+            # event carries nothing to summarise.  Keys are the trace's own
+            # snake_case (``dataclasses.asdict``), not the camelCase the wire
+            # bridge emits.
             summary["compaction_layers"] = list(data.get("layers") or [])
-            summary["compaction_before"] = _int(data.get("estimated_before"))
-            summary["compaction_after"] = _int(data.get("estimated_after"))
 
     summary["spans"] = len(spans)
     summary["subagent_scopes"] = len(scopes)
@@ -211,7 +222,7 @@ def render_turn(summary: Mapping[str, Any]) -> str:
     # must not grow a zero-valued tail, exactly like the sub-agent line.
     layers = list(summary.get("compaction_layers") or [])
     if layers:
-        parts.append("压缩：" + " / ".join(_layer_line(layer) for layer in layers))
+        parts.append(_compaction_line(layers))
     if summary.get("guard_denied"):
         parts.append(f"{int(summary['guard_denied'])} guard denial(s)")
     return " · ".join(parts)

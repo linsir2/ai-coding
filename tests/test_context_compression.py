@@ -314,9 +314,10 @@ async def test_the_pipeline_order_is_l3_l1_l2_l4(tmp_path, monkeypatch):
     """W3 (plan-m-e M-E2): the layer order is a hard invariant.
 
     L2 runs before L4, so L4's summary can fold the envelopes L2 just made
-    (measured: the envelopes are gone afterwards).  The two stages are injected
-    differently — L2 is a module-level function, L4 a bound method — so each
-    appends a tag to a shared list and the assertion is the tag order.
+    (measured: the envelopes are gone afterwards).  The four stages are
+    injected differently — L3/L1/L2 are module-level functions, L4 a bound
+    method — so each appends a tag to a shared list and the assertion is the
+    tag order, all four of them (not just the L2->L4 pair).
 
     ``force=True`` is required: without it ``should_summarise`` may be False
     (L4 never runs) and the order assertion would be vacuous.
@@ -324,8 +325,18 @@ async def test_the_pipeline_order_is_l3_l1_l2_l4(tmp_path, monkeypatch):
     import ai_coding.core.context_compression as cc
 
     calls: list[str] = []
+    real_persist = cc.persist_large_outputs
+    real_snip = cc.snip_middle
     real_placeholder = cc.placeholder_old_results
     real_run_l4 = cc.ContextManager._run_l4
+
+    def _tagged_persist(messages, *args, **kwargs):
+        calls.append("L3")
+        return real_persist(messages, *args, **kwargs)
+
+    def _tagged_snip(messages, *args, **kwargs):
+        calls.append("L1")
+        return real_snip(messages, *args, **kwargs)
 
     def _tagged_placeholder(messages, *args, **kwargs):
         calls.append("L2")
@@ -335,6 +346,8 @@ async def test_the_pipeline_order_is_l3_l1_l2_l4(tmp_path, monkeypatch):
         calls.append("L4")
         return await real_run_l4(self, messages, **kwargs)
 
+    monkeypatch.setattr(cc, "persist_large_outputs", _tagged_persist)
+    monkeypatch.setattr(cc, "snip_middle", _tagged_snip)
     monkeypatch.setattr(cc, "placeholder_old_results", _tagged_placeholder)
     monkeypatch.setattr(cc.ContextManager, "_run_l4", _tagged_run_l4)
 
@@ -346,18 +359,25 @@ async def test_the_pipeline_order_is_l3_l1_l2_l4(tmp_path, monkeypatch):
     )
     await manager.compress(_paired_history(8), force=True)
 
-    assert calls == ["L2", "L4"]
+    assert calls == ["L3", "L1", "L2", "L4"]
 
 
 @pytest.mark.asyncio
 async def test_no_orphan_tool_result_survives_a_full_pipeline_compress(tmp_path):
     """W4 (plan-m-e M-E2): the pipeline's exit is always strictly paired.
 
-    ``sanitize_pairs`` is the structural guarantee, but the stage-level tests
-    never ran the whole pipeline; this does, so a future stage that drops a
-    call without its result (or vice versa) cannot pass unnoticed.  The
-    pipeline-level lock is what the "adsorb to a user message" fix was downgraded
-    to — the structural invariant already holds, this makes it a test.
+    This is a **weak lock**, and the weakness is by design: ``sanitize_pairs``
+    runs on every pipeline exit and is what actually enforces the invariant,
+    so the assertion below cannot fail on any current pipeline — it is
+    vacuously true here.  Its value is as a tripwire, not a proof: it pins the
+    *contract* ("the pipeline returns a strictly paired list") so that a future
+    change which routes a stage's output around ``sanitize_pairs`` (or a test
+    that calls a stage directly and forgets it) fails loudly instead of
+    silently shipping an illegal request.  The stage-level tests cover the
+    transformation itself; this covers the composition.
+
+    The "adsorb to a user message" fix was downgraded to exactly this — the
+    structural invariant already holds, so only the regression lock is kept.
     """
     manager = ContextManager(_settings(), transcripts_root=tmp_path)
 

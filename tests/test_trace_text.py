@@ -286,8 +286,49 @@ def test_render_turn_says_nothing_about_subagents_when_there_were_none(tmp_path)
     assert "subagent" not in text
 
 
-def _compaction_turn_file(tmp_path):
-    """One turn whose history was rewritten, with a per-layer account (M-E3)."""
+def _compaction_turn_file(tmp_path, *, with_l4: bool = True):
+    """One turn whose history was rewritten, with a per-layer account (M-E3).
+
+    ``with_l4=False`` drops L4 the way a pipeline that never summarised does —
+    absent, not all-zero (plan-m-e §C.1 P2-1).
+    """
+    layers = [
+        {
+            "name": "L3",
+            "removed": 0,
+            "rewritten": 1,
+            "skipped": 2,
+            "before_tokens": 90000,
+            "after_tokens": 80000,
+        },
+        {
+            "name": "L1",
+            "removed": 20,
+            "rewritten": 0,
+            "skipped": 0,
+            "before_tokens": 80000,
+            "after_tokens": 60000,
+        },
+        {
+            "name": "L2",
+            "removed": 0,
+            "rewritten": 5,
+            "skipped": 3,
+            "before_tokens": 60000,
+            "after_tokens": 40000,
+        },
+    ]
+    if with_l4:
+        layers.append(
+            {
+                "name": "L4",
+                "removed": 0,
+                "rewritten": 0,
+                "skipped": 0,
+                "before_tokens": 40000,
+                "after_tokens": 20000,
+            }
+        )
     path = tmp_path / "traces" / "s1" / "turn-3.jsonl"
     _write(
         path,
@@ -311,40 +352,7 @@ def _compaction_turn_file(tmp_path):
                     "outputTokens": 147,
                     "totalTokens": 1896,
                     "text": "## 目标\ndone",
-                    "layers": [
-                        {
-                            "name": "L3",
-                            "removed": 0,
-                            "rewritten": 1,
-                            "skipped": 2,
-                            "before_tokens": 90000,
-                            "after_tokens": 80000,
-                        },
-                        {
-                            "name": "L1",
-                            "removed": 20,
-                            "rewritten": 0,
-                            "skipped": 0,
-                            "before_tokens": 80000,
-                            "after_tokens": 60000,
-                        },
-                        {
-                            "name": "L2",
-                            "removed": 0,
-                            "rewritten": 5,
-                            "skipped": 3,
-                            "before_tokens": 60000,
-                            "after_tokens": 40000,
-                        },
-                        {
-                            "name": "L4",
-                            "removed": 0,
-                            "rewritten": 0,
-                            "skipped": 0,
-                            "before_tokens": 40000,
-                            "after_tokens": 20000,
-                        },
-                    ],
+                    "layers": layers,
                     "estimated_before": 90000,
                     "estimated_after": 20000,
                 },
@@ -367,6 +375,18 @@ def test_the_trace_renders_the_compaction_layers(tmp_path):
     assert "L2 改写 5 条" in text
     assert "跳过 2 条" in text
     assert "L4 摘要 40000→20000 token（估）" in text
+
+
+def test_the_trace_says_when_l4_did_not_run(tmp_path):
+    """plan-m-e §C.1 P2-1: L4 absent from ``layers`` is named, not silent.
+
+    A reader who only saw L3/L1/L2 would assume L4 ran and produced an empty
+    summary; the line has to say it never ran.
+    """
+    text = render_turn(summarize_turn(_compaction_turn_file(tmp_path, with_l4=False)))
+
+    assert "L4 未触发" in text
+    assert "L4 摘要" not in text
 
 
 def test_the_trace_says_nothing_about_compaction_when_there_were_none(tmp_path):
