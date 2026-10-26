@@ -19,6 +19,20 @@ about the program *and* its arguments (rm, chmod, dd), one about a
 *redirection target* (the raw disk), one about a *subcommand and its
 flags* (git push --force), and one about the *paths* the command touches
 (the credentials).
+
+**Where the two readings meet.**  The grammar is the first reading, but it
+is not the only one: a line it cannot finish is judged by the *text* reading
+that existed before it -- a substring table and a flat word list.  That
+fallback used to live in ``permission_gate``, which meant the same red line
+(``rm -rf /``, ``chmod 777``) was decided in two places that only an oral
+agreement kept in step.  It lives here now, and ``bash_denied`` delegates to
+:func:`bash_red_line_with_fallback`.  ``bash_red_line`` keeps its contract --
+the pure grammar layer, ``""`` for a line it cannot read -- so a caller that
+needs to tell "the grammar read this" from "it did not" still can.
+
+The fallback is the conservative direction and nothing more: it refuses what
+the old table refused and never less.  It is a second reading of the same
+question, not a second opinion about it.
 """
 
 from __future__ import annotations
@@ -28,9 +42,15 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ai_coding.security.credentials import credential_match
-from ai_coding.shell_parse import CommandView, command_shape, command_views
+from ai_coding.shell_parse import (
+    CommandView,
+    command_shape,
+    command_views,
+    command_words,
+    parses_cleanly,
+)
 
-__all__ = ["bash_red_line"]
+__all__ = ["bash_red_line", "bash_red_line_with_fallback"]
 
 #: The wrapper commands that run another program.  ``env sudo ls`` is a
 #: sudo, and so is ``nohup sudo ls``; the program the shell runs is the
@@ -272,10 +292,12 @@ _RULES: tuple[tuple[str, Callable[[CommandView], bool]], ...] = (
 def bash_red_line(command: str) -> str:
     """Why this command may not run at all, or ``""`` when it may be asked.
 
-    ``command`` is a shell command line.  A command the grammar cannot
-    read is not judged here -- the caller falls back to the text's own
-    reading, so a broken line is judged by the old table rather than
-    waved through.
+    ``command`` is a shell command line.  This is the **grammar layer only**:
+    a command the grammar cannot read is not judged here -- it returns ``""``
+    and leaves the line to :func:`bash_red_line_with_fallback`, which reads
+    the text the way it did before the grammar existed.  A caller that needs
+    to tell the two apart (``_grammar_reads``) can, and a caller that does
+    not should call the ``with_fallback`` function.
 
     The reason names the shape that triggered it, the way the old table
     did: the operator reads the refusal and has to see *what* was refused.
@@ -290,4 +312,166 @@ def bash_red_line(command: str) -> str:
         for reason, rule in _RULES:
             if rule(view):
                 return f"{reason} ({command_shape(view)})"
+    return ""
+
+
+#: Hard deny patterns for bash commands, the text reading's substring table.
+#:
+#: Matched against the *normalized* command (:func:`_normalize_command`), not
+#: the raw text.  The table used to be applied with ``pattern in command``,
+#: and a space was enough to walk past it: ``rm  -rf /``, ``rm -r -f /``,
+#: ``RM -RF /`` and ``chmod  777`` all returned WARN.  A red line a model
+#: can defeat by respelling it is worse than no red line, because the first
+#: refusal teaches the spelling that works.
+_BASH_HARD_DENY_PATTERNS: list[tuple[str, str]] = [
+    ("rm -rf /", "recursive root deletion"),
+    ("sudo ", "sudo escalation"),
+    ("shutdown", "system shutdown"),
+    ("reboot", "system reboot"),
+    ("mkfs", "filesystem format"),
+    ("dd if=", "disk write"),
+    ("> /dev/sd", "raw disk write"),
+    ("git push --force", "force git push"),
+    ("git push -f ", "force git push (short)"),
+    ("chmod 777", "world-writable permissions"),
+]
+
+#: Shell metacharacters that end a word; a path token is read between them.
+_SHELL_SPLIT = re.compile(r"[\s;|&<>()'\"`]+")
+
+
+def _normalize_command(command: str) -> str:
+    """Collapse the spellings that let a red line be walked past.
+
+    Runs of whitespace become one space, so ``rm  -rf  /`` normalizes to
+    ``rm -rf /``.  Nothing else is rewritten: the table is matched against this
+    text as a whole, and collapsing whitespace is the only normalization that
+    cannot change which command runs.
+    """
+    return re.sub(r"\s+", " ", command).strip()
+
+
+def _command_words(command: str) -> list[str]:
+    """The command's words, ``~`` expanded, for shape-based matching.
+
+    ``rm -r -f /`` and ``rm -rf /`` are different word lists but the same
+    command, so :func:`_dangerous_recursive_root_delete` compares the *set* of
+    flags rather than the string.
+
+    Two readings of the same command, and the grammar's wins when it has
+    one.  A text split cannot tell a command from its prefix -- in
+    ``FOO=bar rm -rf /`` it makes ``FOO=bar`` the program's name, and the
+    red line is missed; the grammar knows the assignment is a prefix and the
+    command is the rest.  When the grammar has nothing to say (the text is
+    not a command at all), the text's words are what there is.
+    """
+    words = command_words(command)
+    if not words:
+        words = _SHELL_SPLIT.split(command)
+    return [_HOME_PREFIX.sub(str(Path.home()), word) for word in words if word]
+
+
+def _dangerous_recursive_root_delete(words: list[str]) -> bool:
+    """``rm`` with recursive+force aimed at ``/``, whatever the flag spelling.
+
+    Every ordering and every amount of whitespace collapses to the same two
+    facts: the program is ``rm``, it carries both ``-r`` and ``-f`` (in any
+    grouping), and the target is the filesystem root.
+    """
+    if not words:
+        return False
+    program = Path(words[0]).name.lower()
+    if program != "rm":
+        return False
+    flags: set[str] = set()
+    targets: list[str] = []
+    for word in words[1:]:
+        if word.startswith("-") and word != "--":
+            flags.update(word[1:].lower())
+        elif word in ("--recursive", "--force"):
+            flags.update("r" if word == "--recursive" else "f")
+        else:
+            targets.append(word)
+    return "r" in flags and "f" in flags and any(t.rstrip("/") in ("", "/") for t in targets)
+
+
+def _world_writable_chmod(words: list[str]) -> bool:
+    """``chmod 777`` in any spelling, including octal written out long."""
+    if not words or Path(words[0]).name.lower() != "chmod":
+        return False
+    return any(word in ("777", "0777", "a+rwx", "a+w", "+rwx") for word in words[1:])
+
+
+def _reads_credential_words(words: list[str]) -> str:
+    """The credential this command touches, or ``""`` -- the *text* reading.
+
+    Named ``_reads_credential_words`` and not ``_reads_credential`` on
+    purpose: the grammar layer's own :func:`_reads_credential` takes a
+    ``CommandView``.  Two functions with one name in one module is how the
+    grammar layer's rule came to iterate a ``CommandView`` as if it were a
+    word list, which would have taken the whole red line set down with it.
+
+    A word is a path if it looks like one (starts at ``/`` or ``~``, or carries
+    a suffix); the home directory is expanded first so ``~/.ssh`` and
+    ``/home/you/.ssh`` compare equal.  Matching is on the *word*, so
+    ``cat .env.example`` is not ``cat .env`` -- the token has to be the file.
+    """
+    for word in words[1:]:
+        secret = credential_match(word)
+        if secret:
+            return secret
+    return ""
+
+
+def _grammar_reads(command: str) -> bool:
+    """Did the shell grammar read this command all the way through?
+
+    When it did, the rules above are the whole verdict -- there is nothing
+    left for the text's own reading to add.  When it did not, the text's
+    reading is the fallback.
+
+    A line with no command in it -- a comment, a bare assignment -- was
+    read all the way through: there was nothing in it to read.  That is
+    different from a line the grammar could not finish, and the difference
+    matters: ``# rm -rf /`` is a comment, and the old table's verdict on
+    it was a refusal of a line that would never run.
+    """
+    return parses_cleanly(command)
+
+
+def bash_red_line_with_fallback(command: str) -> str:
+    """Why this bash command may not run at all, or ``""`` when it may be asked.
+
+    The one judge for a bash command.  The verdict is the shell grammar's
+    (:func:`bash_red_line`): a red line is a property of a *command*, so
+    ``a && rm -rf /`` is read as two commands and the second one is the
+    dangerous one, and ``echo "rm -rf /"`` is read as a string and is not a
+    command at all.
+
+    A command the grammar cannot read falls back to the text reading -- the
+    substring table and the flat word list, which live beside the grammar
+    rules in this module.  That fallback is the conservative direction: a
+    broken line is judged by the rules that existed before, not waved through.
+
+    The dispatcher and the gate share this, so the approval panel and the
+    refusal can never disagree about what is forbidden.  It reads no clock
+    and no file; the shell grammar is loaded once per process and kept.
+    """
+    reason = bash_red_line(command)
+    if reason:
+        return reason
+    if _grammar_reads(command):
+        return ""
+    normalized = _normalize_command(command)
+    words = _command_words(normalized)
+    if _dangerous_recursive_root_delete(words):
+        return "recursive root deletion (rm -rf /)"
+    if _world_writable_chmod(words):
+        return "world-writable permissions (chmod 777)"
+    secret = _reads_credential_words(words)
+    if secret:
+        return f"credential file ({secret})"
+    for pattern, reason in _BASH_HARD_DENY_PATTERNS:
+        if pattern in normalized:
+            return f"{reason} ('{pattern}')"
     return ""

@@ -52,6 +52,14 @@ jobs:
       - name: Tests (offline unit + integration, nothing excluded)
         run: python -m pytest -q
 
+      # M-D2: the red line corpus is a golden snapshot, so this is regression
+      # detection rather than a pass/fail checklist -- any verdict that moved
+      # (a new false negative inside the corpus, a new false positive) is a
+      # red build.  The known_miss / known_fp counts are printed so a later
+      # fix is visible as a number dropping to zero.
+      - name: Red line benchmark (golden corpus, FN/FP)
+        run: python scripts/redline_benchmark.py
+
       - name: Real MCP stdio round trip
         run: AI_CODING_MCP_STDIO=1 python -m pytest tests/test_mcp_stdio.py -q
 

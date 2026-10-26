@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ai_coding.security.bash_redlines import bash_red_line
+from ai_coding.security.bash_redlines import bash_red_line_with_fallback
 from ai_coding.security.credentials import credential_match, credential_rules
 from ai_coding.security.grants import GrantStore
 from ai_coding.security.permissions import (
@@ -35,7 +35,6 @@ from ai_coding.security.permissions import (
     wholly_disabled,
 )
 from ai_coding.security.permissions import _lexical as _lexical_subject
-from ai_coding.shell_parse import command_words
 
 
 class PermissionDecision(enum.Enum):
@@ -105,163 +104,23 @@ class Decision:
         )
 
 
-#: Hard deny patterns for bash commands
-#:
-#: Matched against the *normalized* command (``_normalize_command``), not the raw
-#: text.  The table used to be applied with ``pattern in command``, and a space
-#: was enough to walk past it: ``rm  -rf /``, ``rm -r -f /``, ``RM -RF /`` and
-#: ``chmod  777`` all returned WARN.  A red line a model can defeat by respelling
-#: it is worse than no red line, because the first refusal teaches the spelling
-#: that works.
-_BASH_HARD_DENY_PATTERNS: list[tuple[str, str]] = [
-    ("rm -rf /", "recursive root deletion"),
-    ("sudo ", "sudo escalation"),
-    ("shutdown", "system shutdown"),
-    ("reboot", "system reboot"),
-    ("mkfs", "filesystem format"),
-    ("dd if=", "disk write"),
-    ("> /dev/sd", "raw disk write"),
-    ("git push --force", "force git push"),
-    ("git push -f ", "force git push (short)"),
-    ("chmod 777", "world-writable permissions"),
-]
-
-#: Shell metacharacters that end a word; a path token is read between them.
-_SHELL_SPLIT = re.compile(r"[\s;|&<>()'\"`]+")
-#: A leading ``~`` is the home directory wherever it is written.
-_HOME_PREFIX = re.compile(r"^~(?=/|$)")
-
-
-def _normalize_command(command: str) -> str:
-    """Collapse the spellings that let a red line be walked past.
-
-    Runs of whitespace become one space, so ``rm  -rf  /`` normalizes to
-    ``rm -rf /``.  Nothing else is rewritten: the table is matched against this
-    text as a whole, and collapsing whitespace is the only normalization that
-    cannot change which command runs.
-    """
-    return re.sub(r"\s+", " ", command).strip()
-
-
-def _command_words(command: str) -> list[str]:
-    """The command's words, ``~`` expanded, for shape-based matching.
-
-    ``rm -r -f /`` and ``rm -rf /`` are different word lists but the same
-    command, so :func:`_dangerous_recursive_root_delete` compares the *set* of
-    flags rather than the string.
-
-    Two readings of the same command, and the grammar's wins when it has
-    one.  A text split cannot tell a command from its prefix -- in
-    ``FOO=bar rm -rf /`` it makes ``FOO=bar`` the program's name, and the
-    red line is missed; the grammar knows the assignment is a prefix and the
-    command is the rest.  When the grammar has nothing to say (the text is
-    not a command at all), the text's words are what there is.
-    """
-    words = command_words(command)
-    if not words:
-        words = _SHELL_SPLIT.split(command)
-    return [_HOME_PREFIX.sub(str(Path.home()), word) for word in words if word]
-
-def _dangerous_recursive_root_delete(words: list[str]) -> bool:
-    """``rm`` with recursive+force aimed at ``/``, whatever the flag spelling.
-
-    Every ordering and every amount of whitespace collapses to the same two
-    facts: the program is ``rm``, it carries both ``-r`` and ``-f`` (in any
-    grouping), and the target is the filesystem root.
-    """
-    if not words:
-        return False
-    program = Path(words[0]).name.lower()
-    if program != "rm":
-        return False
-    flags: set[str] = set()
-    targets: list[str] = []
-    for word in words[1:]:
-        if word.startswith("-") and word != "--":
-            flags.update(word[1:].lower())
-        elif word in ("--recursive", "--force"):
-            flags.update("r" if word == "--recursive" else "f")
-        else:
-            targets.append(word)
-    return "r" in flags and "f" in flags and any(t.rstrip("/") in ("", "/") for t in targets)
-
-
-def _world_writable_chmod(words: list[str]) -> bool:
-    """``chmod 777`` in any spelling, including octal written out long."""
-    if not words or Path(words[0]).name.lower() != "chmod":
-        return False
-    return any(word in ("777", "0777", "a+rwx", "a+w", "+rwx") for word in words[1:])
-
-
-def _reads_credential(words: list[str]) -> str:
-    """The credential this command touches, or ``""``.
-
-    A word is a path if it looks like one (starts at ``/`` or ``~``, or carries
-    a suffix); the home directory is expanded first so ``~/.ssh`` and
-    ``/home/you/.ssh`` compare equal.  Matching is on the *word*, so
-    ``cat .env.example`` is not ``cat .env`` -- the token has to be the file.
-    """
-    for word in words[1:]:
-        secret = credential_match(word)
-        if secret:
-            return secret
-    return ""
-
-
 def bash_denied(command: str) -> str:
     """Why this bash command may not run at all, or ``""`` when it may be asked.
 
-    The verdict is the shell grammar's
-    (:func:`ai_coding.security.bash_redlines.bash_red_line`): a red line is
-    a property of a *command*, so ``a && rm -rf /`` is read as two commands
-    and the second one is the dangerous one, and ``echo "rm -rf /"`` is read
-    as a string and is not a command at all.
+    A delegate, and deliberately so.  The judgement -- the shell grammar, and
+    the text reading that stands behind it for a line the grammar cannot
+    finish -- lives in :mod:`ai_coding.security.bash_redlines`, in
+    :func:`~ai_coding.security.bash_redlines.bash_red_line_with_fallback`.
+    It used to be duplicated here: the same ``rm -rf /`` and ``chmod 777``
+    decided twice, and the two copies were kept in step only by an oral
+    agreement.  One judge now, so the refusal and the approval panel cannot
+    disagree about what is forbidden.
 
-    A command the grammar cannot read falls back to the old text reading --
-    the substring table and the flat word list.  That fallback is the
-    conservative direction: a broken line is judged by the rules that
-    existed before, not waved through.
-
-    The dispatcher and the gate share this, so the approval panel and the
-    refusal can never disagree about what is forbidden.  It reads no clock
-    and no file; the shell grammar is loaded once per process and kept.
+    This name stays because two callers import it (the dispatcher and the
+    acceptance runner), and it reads no clock and no file; the shell grammar
+    is loaded once per process and kept.
     """
-    reason = bash_red_line(command)
-    if reason:
-        return reason
-    if _grammar_reads(command):
-        return ""
-    normalized = _normalize_command(command)
-    words = _command_words(normalized)
-    if _dangerous_recursive_root_delete(words):
-        return "recursive root deletion (rm -rf /)"
-    if _world_writable_chmod(words):
-        return "world-writable permissions (chmod 777)"
-    secret = _reads_credential(words)
-    if secret:
-        return f"credential file ({secret})"
-    for pattern, reason in _BASH_HARD_DENY_PATTERNS:
-        if pattern in normalized:
-            return f"{reason} ('{pattern}')"
-    return ""
-
-
-def _grammar_reads(command: str) -> bool:
-    """Did the shell grammar read this command all the way through?
-
-    When it did, the rules above are the whole verdict -- there is nothing
-    left for the text's own reading to add.  When it did not, the text's
-    reading is the fallback.
-
-    A line with no command in it -- a comment, a bare assignment -- was
-    read all the way through: there was nothing in it to read.  That is
-    different from a line the grammar could not finish, and the difference
-    matters: ``# rm -rf /`` is a comment, and the old table's verdict on
-    it was a refusal of a line that would never run.
-    """
-    from ai_coding.shell_parse import parses_cleanly
-
-    return parses_cleanly(command)
+    return bash_red_line_with_fallback(command)
 
 
 #: Tools an "always" may never remember, whatever resource can be extracted.
