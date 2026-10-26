@@ -49,6 +49,9 @@ class AppWorld:
     #: 11-spec §7.2: the newest armed session, found at boot; ``initialize``
     #: consumes it exactly once (loading it as live and resuming its driver).
     pending_resume: Any = None
+    #: M-D2 §C: the process sandbox backend owns the ``proxy`` mode's Unix-socket
+    #: proxy, which must be closed with the world.  ``aclose`` below does that.
+    sandbox_backend: Any = None
 
     async def aclose(self) -> None:
         for closer in (
@@ -61,6 +64,13 @@ class AppWorld:
                 await closer()
             except Exception:  # noqa: BLE001 — shutdown is best-effort
                 _log.debug("world close failed", exc_info=True)
+        # The backend's close is synchronous (it owns a socket and a thread).
+        close_backend = getattr(self.sandbox_backend, "aclose", None)
+        if callable(close_backend):
+            try:
+                close_backend()
+            except Exception:  # noqa: BLE001 — shutdown is best-effort
+                _log.debug("sandbox backend close failed", exc_info=True)
 
 
 def find_armed_session(sessions: Any) -> Any | None:
@@ -256,4 +266,5 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         approval=approval,
         user_prompt=user_prompt,
         pending_resume=pending,
+        sandbox_backend=sandbox_backend,
     )

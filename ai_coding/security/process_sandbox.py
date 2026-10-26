@@ -34,8 +34,12 @@ the **AF_UNIX** layer (``docs/plan-m-d2.md`` §B/§D):
   without the seccomp tier the "allow-list" is every pathname socket on the
   host minus the few masked ones -- path-level control is close to none.
 
-The network wall (M-D2 §C) is **not** built here; the default is the host
-network, unchanged.
+The network wall (M-D2 §C) lives here too: ``off`` / ``deny`` / ``proxy``.
+``deny`` is the default -- a read/write wall without a network wall leaks, since
+what the sandbox reads can be sent straight out.  ``proxy`` binds one Unix
+socket into the sandbox and puts a small bridge at ``argv[0]``; the bridge
+turns the socket into a loopback ``http://`` proxy URL, because no HTTP client
+accepts ``unix://`` as a proxy scheme (measured).
 
 **Construction tiers.**  The mechanism is built in tiers, strongest first, and
 the first tier that actually runs is selected and reported.  A tier is a
@@ -73,14 +77,17 @@ import glob
 import os
 import struct
 import subprocess
+import sys
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from ai_coding.config.models import (
     DEFAULT_AF_UNIX_DENY_PATHS,
+    NetworkConfig,
     ProcessSandboxConfig,
 )
 
@@ -92,6 +99,7 @@ __all__ = [
     "SandboxMaskReport",
     "SandboxMode",
     "build_process_sandbox",
+    "default_bridge_argv",
     "spawn_argv",
 ]
 
@@ -106,6 +114,11 @@ BWRAP_GAP = "bwrap.unavailable"
 #: under ``enforce`` that is a gap -- the command would run with no isolation at
 #: all -- so it is refused rather than passed through.
 SANDBOX_WRAP_GAP = "sandbox.wrap.no-op"
+
+#: The reason code for "``network.mode='proxy'`` was asked for, but the proxy
+#: could not start".  The wall degrades to ``deny`` -- never to ``off``, which
+#: would silently hand the sandbox the host network (review P1-7).
+PROXY_UNAVAILABLE = "sandbox.proxy.unavailable"
 
 #: The construction tiers, strongest first.  The first one that runs is selected
 #: and reported (``sandbox.tier.<name>``).  A tier is a *prefix*: the writable
@@ -155,6 +168,36 @@ _CONSTRUCTION_TIERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 _TIER_FLAGS: dict[str, tuple[str, ...]] = dict(_CONSTRUCTION_TIERS)
+
+#: Proxy environment variables the sandbox must not inherit.  The bridge sets
+#: the correct values after ``--unsetenv``; an inherited ``NO_PROXY`` would let
+#: a whitelisted client bypass the bridge entirely (review P3-5).
+_PROXY_ENV_NAMES: tuple[str, ...] = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+)
+
+
+def _bridge_script() -> Path:
+    """The in-sandbox bridge shipped beside this module."""
+    return Path(__file__).with_name("sandbox_bridge.py").resolve()
+
+
+def default_bridge_argv() -> tuple[str, ...]:
+    """The composition root's ``argv[0]`` prefix for ``proxy`` mode.
+
+    A *program*, not a shell wrapper: ``wrap()`` still returns ``list[str]``,
+    so no second parsing layer is introduced (the P0-1 rule).  The interpreter
+    is the running one (``/usr`` and the package are readable through the
+    recursive ``--ro-bind / /``).
+    """
+    return (sys.executable or "python3", str(_bridge_script()))
 
 
 class SandboxGap(Exception):
@@ -212,6 +255,10 @@ class ProcessSandboxPolicy:
     #: Install a seccomp filter refusing ``socket(AF_UNIX)`` (all namespaces,
     #: including abstract).  Off by default: it breaks legitimate IPC.
     block_af_unix: bool = False
+    #: The network wall (M-D2 §C): ``off`` / ``deny`` / ``proxy``, default
+    #: ``deny``.  The mechanism reads the same object; the policy carries it so
+    #: the two layers describe one decision.
+    network: NetworkConfig = dataclass_field(default_factory=NetworkConfig)
 
 
 @dataclass(frozen=True)
@@ -272,6 +319,20 @@ def _tier_report(backend: SandboxBackend) -> str | None:
     return None if tier == "full" else f"sandbox.tier.{tier}"
 
 
+def _network_report(backend: SandboxBackend) -> str | None:
+    """The one-shot report for a proxy that could not start.
+
+    A backend without the reporter (a test double) has no proxy, so it reports
+    nothing.  Like the tier report, this is consumed once per backend -- the
+    composition root's probe already cached the answer.
+    """
+    reporter = getattr(backend, "take_network_report", None)
+    if callable(reporter):
+        result = reporter()
+        return None if result is None else str(result)
+    return None
+
+
 def spawn_argv(
     command: str,
     policy: ProcessSandboxPolicy | None,
@@ -317,6 +378,9 @@ def spawn_argv(
     report = _tier_report(backend)
     if report is not None and emit is not None:
         emit(report)
+    network_report = _network_report(backend)
+    if network_report is not None and emit is not None:
+        emit(network_report)
     wrapped = backend.wrap(argv, roots)
     if wrapped is None:
         if policy.mode == "enforce":
@@ -455,6 +519,10 @@ class BwrapBackend:
         read_deny_paths: Sequence[Path] = (),
         af_unix_deny_paths: Sequence[Path] | None = None,
         block_af_unix: bool = False,
+        network: NetworkConfig | None = None,
+        proxy: Any = None,
+        bridge_argv: Sequence[str] | None = None,
+        bridge_script: Path | None = None,
     ) -> None:
         self._binary = binary
         self._writable = tuple(Path(path).expanduser().resolve() for path in writable_paths)
@@ -462,6 +530,22 @@ class BwrapBackend:
         af_unix = DEFAULT_AF_UNIX_DENY_PATHS if af_unix_deny_paths is None else af_unix_deny_paths
         self._af_unix_deny = tuple(Path(path).expanduser() for path in af_unix)
         self._block_af_unix = bool(block_af_unix)
+        self._network = network if network is not None else NetworkConfig()
+        self._proxy = proxy
+        self._bridge_argv = (
+            tuple(bridge_argv) if bridge_argv is not None else default_bridge_argv()
+        )
+        self._bridge_script = (
+            Path(bridge_script) if bridge_script is not None else _bridge_script()
+        )
+        self._proxy_socket = (
+            Path(self._network.proxy_socket).expanduser().resolve()
+            if self._network.proxy_socket is not None
+            else None
+        )
+        self._proxy_unavailable = self._compute_proxy_unavailable()
+        self._network_emitted = False
+        self._closed = False
         self._cache: bool | None = None
         self._tier: str = "none"
         self._tier_emitted = False
@@ -469,6 +553,36 @@ class BwrapBackend:
         self._seccomp_fd: int | None = None
         if self._block_af_unix:
             self._seccomp_fd = _seccomp_filter_fd()
+
+    # ---- network -----------------------------------------------------------
+
+    def _compute_proxy_unavailable(self) -> bool:
+        """Whether ``proxy`` mode has to fall back to ``deny``.
+
+        Never to ``off``: a proxy that is not there means *no* network, not the
+        host network.  A ``proxy`` mode without a socket is a configuration
+        error the config layer rejects; treating it as unavailable here keeps a
+        hand-built backend fail-closed instead of crashing.
+        """
+        if self._network.mode != "proxy":
+            return False
+        if self._proxy_socket is None or self._proxy is None:
+            return True
+        return not bool(getattr(self._proxy, "available", False))
+
+    @property
+    def network_mode(self) -> str:
+        """The effective mode: ``proxy`` degrades to ``deny``, never ``off``."""
+        if self._network.mode == "proxy":
+            return "deny" if self._proxy_unavailable else "proxy"
+        return self._network.mode
+
+    def take_network_report(self) -> str | None:
+        """One-shot ``sandbox.proxy.unavailable`` report, or ``None``."""
+        if self._network_emitted or not self._proxy_unavailable:
+            return None
+        self._network_emitted = True
+        return PROXY_UNAVAILABLE
 
     # ---- tier selection ----------------------------------------------------
 
@@ -548,6 +662,31 @@ class BwrapBackend:
         """The construction-time summary of the read/AF_UNIX masks."""
         return self._mask_arguments()[1]
 
+    def _protected_paths(self) -> tuple[Path, ...]:
+        """Paths a read mask must never cover: the bridge and the proxy socket.
+
+        A mask over the bridge makes ``execvp`` fail with ``ENOENT`` and the
+        whole ``proxy`` mode unusable; a mask over the proxy socket makes
+        ``--bind`` fail.  Both are resolved and excluded before masking (review
+        P1-3).  An ancestor directory is excluded too: ``--tmpfs`` on the parent
+        would hide the child just as effectively.
+        """
+        protected: list[Path] = []
+        try:
+            protected.append(self._bridge_script.resolve())
+        except OSError:
+            pass
+        if self._proxy_socket is not None:
+            protected.append(self._proxy_socket)
+        return tuple(protected)
+
+    @staticmethod
+    def _covers_protected(resolved: Path, protected: Sequence[Path]) -> bool:
+        for path in protected:
+            if path == resolved or path.is_relative_to(resolved):
+                return True
+        return False
+
     def _mask_arguments(self) -> tuple[list[str], SandboxMaskReport]:
         if self._mask_cache is not None:
             return self._mask_cache
@@ -556,6 +695,7 @@ class BwrapBackend:
         skipped: list[Path] = []
         failed: list[tuple[Path, str]] = []
         seen: set[Path] = set()
+        protected = self._protected_paths()
         for pattern in (*self._read_deny, *self._af_unix_deny):
             for path in _expand_globs((pattern,)):
                 try:
@@ -564,6 +704,8 @@ class BwrapBackend:
                     failed.append((path, str(exc)))
                     continue
                 if resolved in seen:
+                    continue
+                if self._covers_protected(resolved, protected):
                     continue
                 if not resolved.exists():
                     skipped.append(path)
@@ -608,8 +750,49 @@ class BwrapBackend:
             # EINVAL.  Rewind before every construction.
             os.lseek(self._seccomp_fd, 0, os.SEEK_SET)
             prefix += ["--seccomp", str(self._seccomp_fd)]
+        mode = self.network_mode
+        if mode in ("deny", "proxy"):
+            prefix += ["--unshare-net"]
+        if mode == "proxy":
+            if self._proxy_socket is None:  # defensive: network_mode says proxy
+                raise ValueError("network.mode='proxy' without a proxy socket")
+            # After --tmpfs /tmp and after the masks: a proxy socket under /tmp
+            # must survive the tmpfs, and a mask must never cover it.
+            prefix += ["--bind", str(self._proxy_socket), str(self._proxy_socket)]
+            for name in _PROXY_ENV_NAMES:
+                prefix += ["--unsetenv", name]
         prefix += ["--"]
+        if mode == "proxy":
+            bridge = [*self._bridge_argv, "--unix", str(self._proxy_socket)]
+            if self._network.bridge_port:
+                bridge += ["--port", str(self._network.bridge_port)]
+            bridge += ["--"]
+            return prefix + bridge + list(argv)
         return prefix + list(argv)
+
+    def aclose(self) -> None:
+        """Release the long-lived pieces the composition root owns.
+
+        The proxy process is per-workspace and must not outlive ``AppWorld``;
+        the seccomp descriptor is a file descriptor this backend opened.  Both
+        are best-effort: shutdown must never fail a run.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        proxy = self._proxy
+        closer = getattr(proxy, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:  # noqa: BLE001 - shutdown is best-effort
+                pass
+        if self._seccomp_fd is not None:
+            try:
+                os.close(self._seccomp_fd)
+            except OSError:
+                pass
+            self._seccomp_fd = None
 
 
 def build_process_sandbox(
@@ -629,6 +812,14 @@ def build_process_sandbox(
     writable = tuple(Path(path).expanduser() for path in cfg.writable_paths or ())
     read_deny = tuple(Path(path).expanduser() for path in cfg.read_deny_paths or ())
     af_unix_deny = tuple(Path(path).expanduser() for path in cfg.af_unix_deny_paths or ())
+    network = cfg.network
+    if network.mode == "proxy" and cfg.block_af_unix:
+        # The config model rejects this pair; a duck-typed namespace does not,
+        # so keep the composition root fail-closed too.
+        raise ValueError(
+            "block_af_unix and network.mode='proxy' are mutually exclusive"
+        )
+    proxy = _start_sandbox_proxy(network)
     policy = ProcessSandboxPolicy(
         mode=cfg.mode,
         bypass=bool(cfg.allow_bypass),
@@ -636,11 +827,38 @@ def build_process_sandbox(
         read_deny_paths=read_deny,
         af_unix_deny_paths=af_unix_deny,
         block_af_unix=bool(cfg.block_af_unix),
+        network=network,
     )
     backend = BwrapBackend(
         writable_paths=writable,
         read_deny_paths=read_deny,
         af_unix_deny_paths=af_unix_deny,
         block_af_unix=bool(cfg.block_af_unix),
+        network=network,
+        proxy=proxy,
+        bridge_argv=default_bridge_argv(),
     )
     return policy, backend
+
+
+def _start_sandbox_proxy(network: NetworkConfig) -> Any:
+    """Start the proxy synchronously; ``None`` means "degrade to deny".
+
+    ``bind()`` returning is the readiness signal: the very first sandboxed
+    command may already carry ``--bind <socket>``, so a lazily started proxy
+    would fail the spawn.  A failure is not raised -- the backend turns ``None``
+    into ``deny`` plus ``sandbox.proxy.unavailable``, never into ``off`` (review
+    P1-7).
+    """
+    if network.mode != "proxy":
+        return None
+    if network.proxy_socket is None:  # the model rejects this; defensive
+        return None
+    from ai_coding.server.sandbox_proxy import SandboxProxy
+
+    proxy = SandboxProxy(network.proxy_socket, allow=network.allow)
+    try:
+        proxy.start()
+    except OSError:
+        return None
+    return proxy

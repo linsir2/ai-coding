@@ -201,6 +201,33 @@ process_sandbox:
   # read_deny_paths: []
   # af_unix_deny_paths: []
   block_af_unix: false
+  # M-D2 §C: the network wall.  A write/read wall without a network wall leaks:
+  # what the sandbox reads can be sent straight out.
+  #
+  #   off   = the host network (the pre-M-D2 behaviour)
+  #   deny  = --unshare-net, loopback only.  **The default.**
+  #   proxy = --unshare-net + one bound Unix socket + an in-sandbox bridge;
+  #           only the whitelisted HTTP/CONNECT proxy can reach the outside.
+  #
+  # Cost: `deny` breaks `pip install`, `npm install`, `git clone` and
+  # `go mod download` -- much bigger than the write boundary's cost.  `proxy`
+  # is the exit: list the domains a build needs.  Empty `allow` denies
+  # everything, and "*" is rejected at load time (a wildcard is not a wall).
+  # Non-HTTP protocols (databases, raw TCP, UDP) are not proxied.
+  #
+  # Minimal working proxy example:
+  #
+  # network:
+  #   mode: proxy
+  #   proxy_socket: ~/.local/share/ai-coding/sandbox-proxy.sock
+  #   allow:
+  #     - pypi.org
+  #     - files.pythonhosted.org
+  #     - github.com
+  #     - codeload.github.com
+  #   bridge_port: 0            # 0 = the bridge picks a free loopback port
+  network:
+    mode: deny
 
 mcp:
   # N-4: a *project* layer's mcp/hooks are ignored by default.  A repository

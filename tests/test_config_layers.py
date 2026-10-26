@@ -252,6 +252,21 @@ def test_a_project_layer_cannot_turn_off_the_process_sandbox(home):
     assert app.process_sandbox.mode == "enforce"
 
 
+def test_a_project_layer_cannot_open_the_network_wall(home):
+    """M-D2 §C: ``network`` sits under ``process_sandbox``, so the same
+    ``EXECUTION_KEYS`` rule stops a repository from switching the wall off."""
+    paths = Paths.for_workspace(home / "project")
+    _write(
+        paths.user_config,
+        "process_sandbox:\n  network:\n    mode: deny\n",
+    )
+    _project_file(paths, "process_sandbox:\n  network:\n    mode: off\n")
+
+    app = ConfigLoader.load_layers(paths)
+
+    assert app.process_sandbox.network.mode == "deny"
+
+
 def test_the_sidecar_is_not_read_from_the_project_directory(home):
     """``_mcp_doc`` resolves ``mcp.local.yaml`` next to ``chosen``.
 

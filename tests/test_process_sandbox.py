@@ -24,17 +24,23 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from ai_coding.config.models import ProcessSandboxConfig
+from ai_coding.config.loader import ConfigLoader
+from ai_coding.config.models import NetworkConfig, ProcessSandboxConfig
 from ai_coding.core.events import Degraded
 from ai_coding.security.process_sandbox import (
     BwrapBackend,
     ProcessSandboxPolicy,
     SandboxGap,
+    build_process_sandbox,
+    default_bridge_argv,
     spawn_argv,
 )
 from ai_coding.tools.base import ToolContext
@@ -174,6 +180,41 @@ def _host_init_comm() -> str:
         return Path("/proc/1/comm").read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def _proxy_resolver(host: str, port: int):  # noqa: ANN202 - test helper
+    """Point every allowed name at the local upstream.
+
+    The production resolver refuses loopback after DNS (§C.6); this injection
+    lets the bridge/bwrap path be exercised offline without weakening that
+    check (``test_sandbox_proxy.py`` tests the real resolver).
+    """
+    return (socket.AF_INET, socket.SOCK_STREAM, 0, ("127.0.0.1", port))
+
+
+@pytest.fixture
+def upstream_http():
+    """A tiny local HTTP origin, returning a recognisable body."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server's spelling
+            body = b"HELLO-FROM-UPSTREAM\n"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield int(server.server_address[1])
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 # ---- U1: the write boundary itself ----------------------------------------
@@ -905,3 +946,202 @@ def test_a_symlinked_deny_path_masks_the_target(tmp_path):
         assert "SECRET" not in outcome.stdout.decode("utf-8", errors="replace")
     finally:
         shutil.rmtree(base, ignore_errors=True)
+
+
+# ---- V9-V15: the network wall --------------------------------------------
+
+
+def test_the_bridge_protocol_uses_the_first_double_dash_as_the_boundary():
+    """§C.1 P3-3: the user argv may contain ``--``; only the first one is ours.
+
+    Guessing which ``--`` belongs to the bridge would either run the wrong
+    command or hand the user's arguments to the bridge.
+    """
+    from ai_coding.security.sandbox_bridge import _BridgeError, _parse
+
+    sock, port, command = _parse(
+        ["--unix", "/tmp/p.sock", "--port", "0", "--", "/bin/sh", "-c", "echo --unix -- x"]
+    )
+    assert sock == "/tmp/p.sock"
+    assert port == 0
+    assert command == ["/bin/sh", "-c", "echo --unix -- x"]
+
+    with pytest.raises(_BridgeError):
+        _parse(["--unix", "/tmp/p.sock"])
+    with pytest.raises(_BridgeError):
+        _parse(["--unix", "/tmp/p.sock", "--"])
+
+
+@_NEEDS_BWRAP
+def test_a_sandboxed_process_has_no_network_by_default(tmp_path):
+    """V9: the default is ``deny`` -- the sandbox cannot reach the host network.
+
+    A read/write wall without a network wall leaks: what the sandbox reads can
+    be sent straight out.  ``off`` is the opt-in escape hatch, never the default.
+    """
+    backend = BwrapBackend(writable_paths=(), network=NetworkConfig())
+    assert backend.network_mode == "deny"
+    argv = spawn_argv(
+        "curl -sS --max-time 3 http://1.1.1.1",
+        ProcessSandboxPolicy(mode="enforce"),
+        backend,
+        [tmp_path],
+    )
+    assert "--unshare-net" in argv, argv
+    outcome = _spawn(
+        "curl -sS --max-time 3 http://1.1.1.1", backend, [tmp_path], tmp_path
+    )
+    assert outcome.returncode != 0, "the default network mode reached the host network"
+
+
+@_NEEDS_BWRAP
+def test_the_proxy_bridge_lets_an_allowed_domain_through(tmp_path, upstream_http):
+    """V10: the proxy tier bridges loopback to the bound Unix socket.
+
+    The whitelist is decided by the proxy (outside the netns); an unlisted name
+    is refused.  The ``--bind`` of the socket is exercised for real -- a socket
+    file is not a regular file, so this is the case that proves bwrap preserves
+    its semantics (review P2-7).
+    """
+    from ai_coding.server.sandbox_proxy import SandboxProxy
+
+    sock = tmp_path / "proxy.sock"
+    proxy = SandboxProxy(
+        sock, allow=["allowed.test"], resolve_target=_proxy_resolver
+    ).start()
+    backend = BwrapBackend(
+        writable_paths=(),
+        network=NetworkConfig(
+            mode="proxy", proxy_socket=sock, allow=["allowed.test"]
+        ),
+        proxy=proxy,
+        bridge_argv=default_bridge_argv(),
+    )
+    try:
+        assert backend.network_mode == "proxy"
+        argv = spawn_argv("true", ProcessSandboxPolicy(mode="enforce"), backend, [tmp_path])
+        resolved_sock = str(sock.resolve())
+        bind_at = next(
+            index
+            for index, value in enumerate(argv)
+            if value == "--bind" and argv[index + 1] == resolved_sock
+        )
+        assert argv[bind_at + 2] == resolved_sock, argv
+        assert "--unshare-net" in argv, argv
+        assert any("sandbox_bridge" in value for value in argv), argv
+
+        allowed = _spawn(
+            f"curl -sS --max-time 5 http://allowed.test:{upstream_http}/",
+            backend,
+            [tmp_path],
+            tmp_path,
+        )
+        assert allowed.returncode == 0, allowed.stderr
+        assert b"HELLO-FROM-UPSTREAM" in allowed.stdout
+
+        blocked = _spawn(
+            f"curl -sS -f --max-time 5 http://blocked.test:{upstream_http}/",
+            backend,
+            [tmp_path],
+            tmp_path,
+        )
+        assert blocked.returncode != 0
+        assert b"HELLO-FROM-UPSTREAM" not in blocked.stdout
+    finally:
+        backend.aclose()
+
+
+def test_the_proxy_refuses_a_wildcard_allow_list(tmp_path):
+    """V11: ``allow=["*"]`` is rejected at load time, not at the first bash.
+
+    A wildcard allow-list is no wall.  A configuration error must fail loudly
+    when the app starts, so both the model and the loader path are pinned.
+    """
+    with pytest.raises(ValidationError):
+        ProcessSandboxConfig(network={"allow": ["*"]})
+    with pytest.raises(ValidationError):
+        ConfigLoader.app_from_doc(
+            {"process_sandbox": {"network": {"allow": ["*"]}}}
+        )
+
+
+@_NEEDS_BWRAP
+def test_the_proxy_socket_bind_comes_after_the_tmpfs(tmp_path, upstream_http):
+    """V14: a proxy socket under ``/tmp`` survives ``--tmpfs /tmp``.
+
+    ``pytest``'s ``tmp_path`` is under ``/tmp``, so this is the real ordering
+    case: a bind before the tmpfs would be erased, and the proxy would be
+    unreachable even though every argv element looked right.
+    """
+    from ai_coding.server.sandbox_proxy import SandboxProxy
+
+    sock = tmp_path / "proxy.sock"
+    proxy = SandboxProxy(
+        sock, allow=["allowed.test"], resolve_target=_proxy_resolver
+    ).start()
+    backend = BwrapBackend(
+        writable_paths=(),
+        network=NetworkConfig(
+            mode="proxy", proxy_socket=sock, allow=["allowed.test"]
+        ),
+        proxy=proxy,
+        bridge_argv=default_bridge_argv(),
+    )
+    try:
+        argv = backend.wrap(["/bin/true"], [tmp_path])
+        resolved_sock = str(sock.resolve())
+        bind_at = next(
+            index
+            for index, value in enumerate(argv)
+            if value == "--bind" and argv[index + 1] == resolved_sock
+        )
+        assert bind_at > argv.index("--tmpfs"), argv
+        outcome = _spawn(
+            f"curl -sS --max-time 5 http://allowed.test:{upstream_http}/",
+            backend,
+            [tmp_path],
+            tmp_path,
+        )
+        assert outcome.returncode == 0, outcome.stderr
+        assert b"HELLO-FROM-UPSTREAM" in outcome.stdout
+    finally:
+        backend.aclose()
+
+
+@_NEEDS_BWRAP
+def test_the_proxy_degrades_to_deny_never_to_off(tmp_path):
+    """V15: an unavailable proxy means **no network**, never the host network.
+
+    The socket's parent is a regular file, so ``bind()`` fails with ENOTDIR.
+    The backend must keep ``--unshare-net`` and drop the bridge/bind, and say
+    so through the one-shot ``sandbox.proxy.unavailable`` report.
+    """
+    from types import SimpleNamespace
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory\n", encoding="utf-8")
+    cfg = ProcessSandboxConfig(
+        network=NetworkConfig(
+            mode="proxy",
+            proxy_socket=blocker / "proxy.sock",
+            allow=["example.com"],
+        )
+    )
+    policy, backend = build_process_sandbox(
+        SimpleNamespace(process_sandbox=cfg), tmp_path
+    )
+    try:
+        assert backend.network_mode == "deny"
+        seen: list[str] = []
+        argv = spawn_argv(
+            "echo x", policy, backend, [tmp_path], emit=seen.append
+        )
+        assert "sandbox.proxy.unavailable" in seen, seen
+        assert "--unshare-net" in argv, argv
+        assert not any("sandbox_bridge" in value for value in argv), argv
+        outcome = _spawn(
+            "curl -sS --max-time 3 http://1.1.1.1", backend, [tmp_path], tmp_path
+        )
+        assert outcome.returncode != 0
+    finally:
+        backend.aclose()

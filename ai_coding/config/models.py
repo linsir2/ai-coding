@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ai_coding.domain.model_config import ModelConfig
 
@@ -111,6 +112,58 @@ DEFAULT_AF_UNIX_DENY_PATHS: tuple[str, ...] = (
 )
 
 
+class NetworkConfig(BaseModel):
+    """M-D2 §C: the network wall.
+
+    Three modes, deliberately not a boolean:
+
+    * ``off``   -- the host network, unchanged (the pre-M-D2 behaviour).
+    * ``deny``  -- ``--unshare-net``: a netns with only loopback.  **The default**:
+      a write/read wall without a network wall leaks, because what the sandbox
+      reads can be sent straight out.
+    * ``proxy`` -- ``--unshare-net`` plus one bound Unix socket and an in-sandbox
+      bridge; the only way out is the whitelisted HTTP/CONNECT proxy in
+      ``server/sandbox_proxy.py``.
+
+    ``allow`` is a domain whitelist decided by the proxy.  Empty means **deny
+    everything**.  ``"*"`` is rejected **at load time** -- a wildcard is not a
+    wall, and a configuration error must fail loudly at startup rather than at
+    the first bash command (review P2-10).
+
+    ``proxy_socket`` has no default on purpose: a guessed path would silently
+    point at a socket nobody is listening on.  ``mode="proxy"`` without it is a
+    load error (review P2-6).
+
+    ``bridge_port`` is the loopback port the in-sandbox bridge listens on;
+    ``0`` lets the bridge pick a free one and hand it to the command through
+    the proxy environment variables.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    mode: Literal["off", "deny", "proxy"] = "deny"
+    proxy_socket: Path | None = None
+    allow: list[str] = Field(default_factory=list)
+    bridge_port: int = 0
+
+    @field_validator("allow")
+    @classmethod
+    def _reject_wildcard(cls, value: list[str]) -> list[str]:
+        for entry in value:
+            if str(entry).strip() == "*":
+                raise ValueError(
+                    'network.allow must not contain "*": a wildcard allow-list '
+                    "is no network wall"
+                )
+        return value
+
+    @model_validator(mode="after")
+    def _proxy_requires_a_socket(self) -> NetworkConfig:
+        if self.mode == "proxy" and self.proxy_socket is None:
+            raise ValueError("network.mode='proxy' requires network.proxy_socket")
+        return self
+
+
 class ProcessSandboxConfig(BaseModel):
     """M-D1/D2: the OS-level process sandbox (the write and read boundaries).
 
@@ -130,6 +183,10 @@ class ProcessSandboxConfig(BaseModel):
     ``socket(AF_UNIX)`` outright -- including the abstract namespace, which has
     no path to mask.
 
+    ``network`` is the network wall (M-D2 §C): ``off`` / ``deny`` / ``proxy``,
+    default ``deny``.  It lives here, under ``process_sandbox``, so the existing
+    ``EXECUTION_KEYS`` coverage also stops a project layer from opening it.
+
     The default is ``enforce``: roadmap's acceptance criterion is "a process
     under ``enforce`` cannot write outside the workspace", and a default of
     ``off`` would make it empty out of the box.  On a host with no unprivileged
@@ -148,6 +205,17 @@ class ProcessSandboxConfig(BaseModel):
         default_factory=lambda: list(DEFAULT_AF_UNIX_DENY_PATHS)
     )
     block_af_unix: bool = False
+    network: NetworkConfig = Field(default_factory=NetworkConfig)
+
+    @model_validator(mode="after")
+    def _proxy_and_block_af_unix_are_exclusive(self) -> ProcessSandboxConfig:
+        if self.network.mode == "proxy" and self.block_af_unix:
+            raise ValueError(
+                "block_af_unix and network.mode='proxy' are mutually exclusive: "
+                "the seccomp filter refuses socket(AF_UNIX), so the sandbox "
+                "proxy bridge could not reach the proxy socket"
+            )
+        return self
 
 
 class SecurityConfig(BaseModel):
