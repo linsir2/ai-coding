@@ -63,6 +63,31 @@ def upstream_port():
 
 
 @pytest.fixture
+def make_proxy(tmp_path):
+    """A factory for proxies whose allow-list names a specific port.
+
+    The forwarding cases need the ephemeral upstream port allowed, so the
+    fixture cannot fix the allow-list; the factory takes it per case.
+    """
+    instances: list[SandboxProxy] = []
+
+    def _make(allow, **kwargs):  # noqa: ANN001, ANN202 - test helper
+        index = len(instances)
+        instance = SandboxProxy(
+            tmp_path / f"proxy-{index}.sock",
+            allow=allow,
+            resolve_target=_resolver,
+            **kwargs,
+        ).start()
+        instances.append(instance)
+        return instance
+
+    yield _make
+    for instance in instances:
+        instance.close()
+
+
+@pytest.fixture
 def proxy(tmp_path):
     instance = SandboxProxy(
         tmp_path / "proxy.sock",
@@ -124,7 +149,8 @@ def _connect_tunnel(
 # ---- the tunnel itself ---------------------------------------------------
 
 
-def test_plain_http_is_forwarded(proxy, upstream_port):
+def test_plain_http_is_forwarded(make_proxy, upstream_port):
+    proxy = make_proxy([f"allowed.test:{upstream_port}"])
     response = _raw(
         proxy.socket_path,
         (
@@ -136,7 +162,8 @@ def test_plain_http_is_forwarded(proxy, upstream_port):
     assert _BODY in response
 
 
-def test_connect_tunnel_is_forwarded(proxy, upstream_port):
+def test_connect_tunnel_is_forwarded(make_proxy, upstream_port):
+    proxy = make_proxy([f"allowed.test:{upstream_port}"])
     body = _connect_tunnel(
         proxy.socket_path,
         "allowed.test",
@@ -179,29 +206,47 @@ def test_an_empty_allow_list_denies_everything(tmp_path, upstream_port):
 
 
 @pytest.mark.parametrize(
-    ("host", "expected"),
+    ("host", "port", "allow", "expected"),
     [
-        ("example.com", True),
-        ("api.example.com", True),
-        ("example.com:443", True),
-        ("Example.COM:443", True),
-        ("evil-example.com", False),
-        ("example.com.evil.com", False),
-        ("notexample.com", False),
+        ("example.com", 443, ["example.com"], True),
+        ("api.example.com", 80, ["example.com"], True),
+        ("example.com:443", 443, ["example.com"], True),
+        ("Example.COM:443", 443, ["example.com"], True),
+        ("evil-example.com", 443, ["example.com"], False),
+        ("example.com.evil.com", 443, ["example.com"], False),
+        ("notexample.com", 443, ["example.com"], False),
+        # P2-1: a bare domain admits only 80/443, not lateral-movement ports.
+        ("example.com", 22, ["example.com"], False),
+        ("example.com", 3389, ["example.com"], False),
+        ("example.com", 8443, ["example.com"], False),
+        # P2-1: domain:port admits exactly that port.
+        ("example.com", 22, ["example.com:22"], True),
+        ("example.com", 3389, ["example.com:22"], False),
+        ("example.com", 8443, ["example.com:80,8443"], True),
+        ("example.com", 80, ["example.com:80,8443"], True),
+        ("example.com", 9000, ["example.com:80,8443"], False),
+        # A malformed port entry matches nothing (fail closed, never a guess).
+        ("example.com", 80, ["example.com:notaport"], False),
+        ("example.com", 80, ["example.com:0"], False),
+        ("example.com", 80, ["example.com:70000"], False),
     ],
 )
-def test_the_whitelist_is_exact_or_suffix(host, expected):
-    assert _host_allowed(host, ["example.com"]) is expected
+def test_the_whitelist_is_exact_or_suffix(host, port, allow, expected):
+    assert _host_allowed(host, port, allow) is expected
 
 
 def test_a_port_is_stripped_before_matching():
-    assert _host_allowed("example.com:8443", ["example.com"])
-    assert _host_allowed("[::1]:8443", ["::1"])
+    # The request host may carry a port and so may the entry; both are stripped
+    # before the host comparison, and the port is then compared.
+    assert _host_allowed("example.com:8443", 8443, ["example.com:8443"]) is True
+    assert _host_allowed("example.com", 8443, ["example.com:8443"]) is True
+    assert _host_allowed("[::1]:8443", 8443, ["[::1]:8443"]) is True
+    assert _host_allowed("[::1]", 8443, ["[::1]:8443"]) is True
 
 
 def test_a_wildcard_never_matches():
-    assert _host_allowed("*", ["*"]) is False
-    assert _host_allowed("anything.test", ["*"]) is False
+    assert _host_allowed("*", 443, ["*"]) is False
+    assert _host_allowed("anything.test", 443, ["*"]) is False
 
 
 def test_the_allow_list_is_required_for_proxy_mode():
@@ -217,6 +262,52 @@ def test_proxy_and_block_af_unix_are_mutually_exclusive(tmp_path):
             network={"mode": "proxy", "proxy_socket": str(tmp_path / "p.sock")},
             block_af_unix=True,
         )
+
+
+# ---- P2-1: the port is part of the allow decision ------------------------
+
+
+def test_a_bare_domain_does_not_admit_a_non_web_port(make_proxy, upstream_port):
+    """P2-1: ``allow: ["allowed.test"]`` must not open port 22/3389."""
+    proxy = make_proxy(["allowed.test"])
+    response = _raw(
+        proxy.socket_path,
+        (
+            f"GET http://allowed.test:{upstream_port}/ HTTP/1.1\r\n"
+            "Host: allowed.test\r\n\r\n"
+        ).encode(),
+    )
+    assert response.startswith(b"HTTP/1.1 403"), response[:120]
+    assert _BODY not in response
+
+
+def test_connect_to_a_non_web_port_is_refused_for_a_bare_domain(tmp_path):
+    """P2-1: the CONNECT tunnel is port-checked too."""
+    instance = SandboxProxy(
+        tmp_path / "proxy.sock", allow=["allowed.test"], resolve_target=_resolver
+    ).start()
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(10.0)
+        client.connect(str(instance.socket_path))
+        client.sendall(b"CONNECT allowed.test:22 HTTP/1.1\r\nHost: allowed.test\r\n\r\n")
+        head = client.recv(4096)
+        assert b" 403 " in head, head
+        client.close()
+    finally:
+        instance.close()
+
+
+def test_connect_to_an_explicitly_allowed_port_is_forwarded(make_proxy, upstream_port):
+    """P2-1: ``domain:port`` admits exactly that port."""
+    proxy = make_proxy([f"allowed.test:{upstream_port}"])
+    body = _connect_tunnel(
+        proxy.socket_path,
+        "allowed.test",
+        upstream_port,
+        b"GET / HTTP/1.0\r\nHost: allowed.test\r\n\r\n",
+    )
+    assert _BODY in body
 
 
 # ---- §C.6: the resolved address is checked, not just the name ------------
@@ -281,6 +372,85 @@ def test_localhost_is_refused_by_the_real_resolver():
 
     with pytest.raises(module._Refused):
         module._resolve_public_address("localhost", 80)
+
+
+# ---- P3-4 / P3-7 / P3-8: parser and resource hardening --------------------
+
+
+def test_a_duplicate_host_header_is_rejected(proxy):
+    """P3-4: two Host headers are a request-smuggling primitive."""
+    payload = (
+        b"GET http://allowed.test:80/ HTTP/1.1\r\n"
+        b"Host: allowed.test\r\n"
+        b"Host: other.test\r\n\r\n"
+    )
+    response = _raw(proxy.socket_path, payload)
+    assert response.startswith(b"HTTP/1.1 400"), response[:160]
+
+
+def test_an_oversized_content_length_is_refused(make_proxy):
+    """P3-8: a declared body length above the cap is refused before forwarding."""
+    proxy = make_proxy(["allowed.test"], max_body_bytes=16)
+    payload = (
+        b"POST http://allowed.test:80/ HTTP/1.1\r\n"
+        b"Host: allowed.test\r\n"
+        b"Content-Length: 1000000\r\n\r\n"
+    )
+    response = _raw(proxy.socket_path, payload)
+    assert response.startswith(b"HTTP/1.1 400"), response[:160]
+
+
+def test_the_connection_pool_is_bounded(tmp_path):
+    """P3-7: the pool has a ceiling; an extra connection is dropped, not queued."""
+    arrived = threading.Event()
+
+    class Slow(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server's spelling
+            arrived.set()
+            time.sleep(1.0)
+            body = b"SLOW-OK\n"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = int(server.server_address[1])
+    instance = SandboxProxy(
+        tmp_path / "proxy.sock",
+        allow=[f"allowed.test:{port}"],
+        resolve_target=_resolver,
+        max_connections=1,
+    ).start()
+    try:
+        first = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        first.settimeout(5.0)
+        first.connect(str(instance.socket_path))
+        first.sendall(
+            (
+                f"GET http://allowed.test:{port}/ HTTP/1.1\r\n"
+                "Host: allowed.test\r\n\r\n"
+            ).encode()
+        )
+        assert arrived.wait(timeout=5.0), "the first connection was not served"
+
+        second = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        second.settimeout(2.0)
+        second.connect(str(instance.socket_path))
+        # The pool is full: the proxy drops the second connection instead of
+        # starting another thread (review P3-7).
+        assert second.recv(1) == b"", "the second connection was served"
+        second.close()
+        first.close()
+    finally:
+        instance.close()
+        server.shutdown()
+        server.server_close()
 
 
 # ---- hardening and lifecycle --------------------------------------------
@@ -351,7 +521,7 @@ def test_a_regular_file_at_the_socket_path_is_not_deleted(tmp_path):
     assert path.read_text(encoding="utf-8") == "keep me\n"
 
 
-def test_concurrent_connections_are_served_in_parallel(proxy):
+def test_concurrent_connections_are_served_in_parallel(make_proxy):
     """Each connection gets a thread: one slow tunnel must not stall the rest."""
     state = {"active": 0, "peak": 0}
     lock = threading.Lock()
@@ -377,6 +547,7 @@ def test_concurrent_connections_are_served_in_parallel(proxy):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = int(server.server_address[1])
+    proxy = make_proxy([f"allowed.test:{port}"])
     try:
         results: list[bytes] = []
 

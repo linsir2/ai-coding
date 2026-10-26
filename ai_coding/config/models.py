@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ai_coding.domain.model_config import ModelConfig
+
+_log = logging.getLogger(__name__)
 
 
 class ToolConfig(BaseModel):
@@ -105,10 +108,52 @@ def default_read_deny_paths() -> list[str]:
 #: connect/bind filtering, so pathname sockets are hidden the same way files
 #: are; abstract sockets have no path and are only reachable through the
 #: seccomp tier (``block_af_unix``).
+#:
+#: The list is a denylist -- it is always one rule short, and the plan's Pillar
+#: finding applies to it exactly as to the read boundary.  It was expanded after
+#: the sandbox was measured reaching ``/run/supervisor.sock`` and
+#: ``/run/shared/minimal-ssh-agent.sock`` (review P2-2): a supervisor socket is
+#: command execution, and an ssh-agent socket is a signing oracle, so both are
+#: at least as dangerous as a D-Bus socket.
 DEFAULT_AF_UNIX_DENY_PATHS: tuple[str, ...] = (
+    # per-user session buses and agents (the CVE-2026-47128 class)
     "/run/user/*/bus",
-    "/var/run/docker.sock",
+    "/run/user/*/systemd/private",
+    "/run/user/*/pulse/native",
+    "/run/user/*/keyring/control",
+    "/run/user/*/dconf",
+    "/run/user/*/at-spi/bus_*",
+    "/run/user/*/gvfsd",
+    "/run/user/*/snapd.socket",
+    "/run/user/*/gnome-*",
+    # system buses
+    "/run/dbus/system_bus_socket",
+    "/var/run/dbus/system_bus_socket",
+    "/run/systemd/private",
+    "/run/systemd/notify",
+    # container runtimes
     "/run/docker.sock",
+    "/var/run/docker.sock",
+    "/run/containerd/containerd.sock",
+    # supervisors (a supervisor socket is command execution)
+    "/run/supervisor.sock",
+    "/var/run/supervisor.sock",
+    # shared agents (an ssh-agent socket is a signing oracle)
+    "/run/shared/minimal-ssh-agent.sock",
+    "/run/shared/*ssh-agent*.sock",
+    # databases / caches
+    "/run/postgresql/.s.PGSQL.*",
+    "/var/run/postgresql/.s.PGSQL.*",
+    "/run/redis/redis.sock",
+    "/var/run/redis/redis.sock",
+    "/run/uuidd/request",
+    "/run/acpid.socket",
+    "/run/openvswitch/db.sock",
+    "/run/nscd/socket",
+    "/var/run/nscd/socket",
+    # snapd
+    "/run/snapd.socket",
+    "/run/snapd-snap.socket",
 )
 
 
@@ -122,13 +167,20 @@ class NetworkConfig(BaseModel):
       a write/read wall without a network wall leaks, because what the sandbox
       reads can be sent straight out.
     * ``proxy`` -- ``--unshare-net`` plus one bound Unix socket and an in-sandbox
-      bridge; the only way out is the whitelisted HTTP/CONNECT proxy in
-      ``server/sandbox_proxy.py``.
+      bridge; the only **TCP/UDP** way out is the whitelisted HTTP/CONNECT
+      proxy in ``server/sandbox_proxy.py``.  AF_UNIX is a parallel channel the
+      proxy does not see, covered by the AF_UNIX masks instead (§D).
 
     ``allow`` is a domain whitelist decided by the proxy.  Empty means **deny
     everything**.  ``"*"`` is rejected **at load time** -- a wildcard is not a
     wall, and a configuration error must fail loudly at startup rather than at
     the first bash command (review P2-10).
+
+    Each entry is a domain, optionally ``domain:port`` (or
+    ``domain:port1,port2``).  A bare domain allows only ports 80 and 443: a
+    domain-only entry used to admit every port, so ``allow: ["example.com"]``
+    also opened ``CONNECT example.com:22`` and ``:3389`` -- lateral-movement
+    ports behind a web allow-list (review P2-1).
 
     ``proxy_socket`` has no default on purpose: a guessed path would silently
     point at a socket nobody is listening on.  ``mode="proxy"`` without it is a
@@ -214,6 +266,24 @@ class ProcessSandboxConfig(BaseModel):
                 "block_af_unix and network.mode='proxy' are mutually exclusive: "
                 "the seccomp filter refuses socket(AF_UNIX), so the sandbox "
                 "proxy bridge could not reach the proxy socket"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_when_the_read_boundary_is_off(self) -> ProcessSandboxConfig:
+        """An empty ``read_deny_paths`` silently closes the read boundary.
+
+        The default is non-empty, so an empty list is an explicit "turn the read
+        boundary off".  Doing that silently -- with no warning at load time --
+        means a workspace config (or a pasted example) can hand the sandbox's
+        read protection away without anyone noticing (review P3-6).  The warning
+        is emitted once, here, at load time.
+        """
+        if not self.read_deny_paths:
+            _log.warning(
+                "process_sandbox.read_deny_paths is empty: the read boundary is "
+                "OFF, so ~/.ssh, ~/.aws and this repository's own credentials "
+                "are readable inside the sandbox"
             )
         return self
 

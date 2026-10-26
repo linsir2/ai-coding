@@ -163,7 +163,16 @@ def _handle(client: socket.socket, sock_path: str) -> None:
 
 
 def _forwarding_loop(listener: socket.socket, sock_path: str) -> None:
-    """The forked child: accept and relay until the command exits."""
+    """The forked child: accept and relay until the command exits.
+
+    Every failure except a real shutdown is survivable and the loop continues.
+    A non-timeout ``OSError`` from ``accept`` (``EMFILE``, ``ECONNABORTED``,
+    ``EINVAL`` ...) used to end the loop, which silently killed the relay while
+    the user command kept running -- "the bridge started but forwarding is
+    dead", and the command then had no network at all (review P2-4).  A thread
+    that cannot be created (``RuntimeError`` from ``EAGAIN`` when the process is
+    out of threads) drops that one connection instead of dying with it.
+    """
     _set_pdeathsig(signal.SIGTERM)
     if os.getppid() == 1:
         os._exit(0)
@@ -175,11 +184,20 @@ def _forwarding_loop(listener: socket.socket, sock_path: str) -> None:
             if os.getppid() == 1:
                 break
             continue
-        except OSError:
-            break
-        threading.Thread(
-            target=_handle, args=(client, sock_path), daemon=True
-        ).start()
+        except Exception:
+            if os.getppid() == 1:
+                break
+            continue
+        try:
+            threading.Thread(
+                target=_handle, args=(client, sock_path), daemon=True
+            ).start()
+        except Exception:
+            try:
+                client.close()
+            except OSError:
+                pass
+            continue
 
 
 def _start_listener(port: int) -> socket.socket:

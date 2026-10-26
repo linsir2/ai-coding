@@ -197,7 +197,8 @@ process_sandbox:
     - ~/.cache
   # The built-in default (when this key is absent) is the standard credential
   # set plus this repository's own keys, expanded through XDG.  Set it to [] to
-  # turn the read boundary off, or list your own paths to replace the default.
+  # turn the read boundary off -- a warning is logged at load time when you do,
+  # because an empty list silently hands the sandbox's read protection away.
   # read_deny_paths: []
   # af_unix_deny_paths: []
   block_af_unix: false
@@ -207,12 +208,16 @@ process_sandbox:
   #   off   = the host network (the pre-M-D2 behaviour)
   #   deny  = --unshare-net, loopback only.  **The default.**
   #   proxy = --unshare-net + one bound Unix socket + an in-sandbox bridge;
-  #           only the whitelisted HTTP/CONNECT proxy can reach the outside.
+  #           the only TCP/UDP way out is the whitelisted HTTP/CONNECT proxy
+  #           (AF_UNIX is a parallel channel it does not see -- see
+  #           af_unix_deny_paths above).
   #
   # Cost: `deny` breaks `pip install`, `npm install`, `git clone` and
   # `go mod download` -- much bigger than the write boundary's cost.  `proxy`
   # is the exit: list the domains a build needs.  Empty `allow` denies
   # everything, and "*" is rejected at load time (a wildcard is not a wall).
+  # A bare domain allows only ports 80/443; use `domain:port` (or
+  # `domain:80,443`) to allow another port, e.g. `github.com:22` for SSH.
   # Non-HTTP protocols (databases, raw TCP, UDP) are not proxied.
   #
   # Minimal working proxy example:

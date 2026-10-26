@@ -382,7 +382,7 @@ class NetworkConfig:
 |---|---|---|
 | `off` | 不加 | 完整宿主网络（今天的行为） |
 | `deny` | `--unshare-net` | `Network is unreachable` |
-| `proxy` | `--unshare-net` + `--bind <proxy_socket> <proxy_socket>` + **沙箱内桥接** + env | 只有经代理的流量能出 |
+| `proxy` | `--unshare-net` + `--bind <proxy_socket> <proxy_socket>` + **沙箱内桥接** + env | 只有经代理的 **TCP/UDP** 流量能出（AF_UNIX 是代理看不见的并行通道，见 §D） |
 
 #### C.1 **沙箱内桥接：与 `list[str]` 契约相容的落地方式（评审 P1-1）**
 
@@ -482,7 +482,7 @@ host == allow_entry  or  host.endswith("." + allow_entry)
 
 #### C.6 代理作为单点新增的攻击面（评审 P1-2 / P2-2）
 
-代理是**所有出网流量的唯一通道**，它本身成了攻击面：
+代理是**所有 TCP/UDP 出网流量的唯一出口**，它本身成了攻击面：
 
 | 风险 | 说明 | 处置 |
 |---|---|---|

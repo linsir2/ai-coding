@@ -20,6 +20,7 @@ review-driven semantic change, recorded in ``docs/plan-m-d2.md`` §4.1.
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import socket
 import subprocess
@@ -36,9 +37,13 @@ from ai_coding.config.loader import ConfigLoader
 from ai_coding.config.models import NetworkConfig, ProcessSandboxConfig
 from ai_coding.core.events import Degraded
 from ai_coding.security.process_sandbox import (
+    _PROXY_ENV_NAMES,
+    _SOCKET_NR,
+    MASK_FAILED,
     BwrapBackend,
     ProcessSandboxPolicy,
     SandboxGap,
+    af_unix_seccomp_filter,
     build_process_sandbox,
     default_bridge_argv,
     spawn_argv,
@@ -53,6 +58,18 @@ _NEEDS_BWRAP = pytest.mark.skipif(
     reason="bwrap unavailable: the mechanism cannot run here (bubblewrap "
     "missing, or no unprivileged user namespace / CAP_SYS_ADMIN), so the OS "
     "write/read boundary cannot be exercised",
+)
+
+#: The seccomp AF_UNIX filter is built from a table of per-architecture
+#: ``socket`` syscall numbers; an architecture the table does not know is
+#: refused by the backend.  The guard turns that refusal into an explicit skip
+#: rather than a red test on a host where the filter cannot be installed
+#: (review P1-1: a filter that silently allowed AF_UNIX would read as a pass).
+_SECCOMP_ARCH = platform.machine().lower()
+_SECCOMP_ARCH_GUARD = pytest.mark.skipif(
+    _SECCOMP_ARCH not in _SOCKET_NR,
+    reason=f"the seccomp AF_UNIX filter is not built for {platform.machine()!r}: "
+    "block_af_unix refuses to install there rather than silently allow AF_UNIX",
 )
 
 
@@ -757,7 +774,11 @@ def test_the_read_boundary_hides_a_directory_and_a_file(tmp_path):
         file = base / "token.txt"
         file.write_text("TOKEN\n", encoding="utf-8")
 
-        backend = BwrapBackend(writable_paths=(), read_deny_paths=[directory, file])
+        backend = BwrapBackend(
+            writable_paths=(),
+            read_deny_paths=[directory, file],
+            af_unix_deny_paths=(),
+        )
         argv = backend.wrap(["/bin/true"], [tmp_path])
         idx = argv.index(str(directory))
         assert argv[idx - 1] == "--tmpfs", argv
@@ -804,7 +825,9 @@ def test_the_read_boundary_expands_globs(tmp_path):
         (keys / "ssh_host_rsa_key").write_text("K2\n", encoding="utf-8")
         (keys / "ssh_host_ed25519_key.pub").write_text("PUB\n", encoding="utf-8")
         backend = BwrapBackend(
-            writable_paths=(), read_deny_paths=[keys / "ssh_host_*_key"]
+            writable_paths=(),
+            read_deny_paths=[keys / "ssh_host_*_key"],
+            af_unix_deny_paths=(),
         )
         assert set(backend.mask_report.masked) == {
             keys / "ssh_host_ed25519_key",
@@ -875,11 +898,15 @@ def test_a_sandboxed_process_cannot_reach_the_dbus_socket(tmp_path):
 
 
 @_NEEDS_BWRAP
+@_SECCOMP_ARCH_GUARD
 def test_seccomp_blocks_af_unix_when_enabled(tmp_path):
     """V13: the seccomp tier refuses ``socket(AF_UNIX)`` and nothing else.
 
     The filter is handed to bwrap through an inherited descriptor
-    (``--seccomp <fd>``), so the case also pins the ``pass_fds`` channel.
+    (``--seccomp <fd>``), so the case also pins the ``pass_fds`` channel.  The
+    arch guard skips on a host whose ``socket`` syscall number the filter table
+    does not know: there the backend refuses to install the filter, and a green
+    result would mean "the wall is a no-op" (review P1-1).
     """
     backend = BwrapBackend(writable_paths=(), block_af_unix=True)
     assert backend.seccomp_fds, "the filter fd must be exposed for pass_fds"
@@ -899,6 +926,44 @@ def test_seccomp_blocks_af_unix_when_enabled(tmp_path):
     outcome = _spawn(f"python3 -c \"{probe}\"", backend, [tmp_path], tmp_path)
     assert b"AFIX_ERR 1 EPERM" in outcome.stdout, outcome.stdout
     assert b"INET_OK" in outcome.stdout, outcome.stdout
+
+
+def _filter_socket_nr() -> int:
+    """The ``socket`` syscall number embedded in the filter's ``JEQ k`` field.
+
+    The BPF program is one ``struct sock_filter`` (8 bytes) per instruction:
+    ``code(2) jt(1) jf(1) k(4)``.  The second instruction compares the syscall
+    number, so its ``k`` is at offset 12.
+    """
+    return int.from_bytes(af_unix_seccomp_filter()[12:16], "little")
+
+
+def test_the_seccomp_filter_embeds_the_running_arch_socket_number(monkeypatch):
+    """P1-1: the ``socket`` number comes from the arch, not a hardcoded 41.
+
+    A hardcoded 41 is x86_64 only; on aarch64, 41 is ``faccessat``, so the
+    filter would silently allow ``socket(AF_UNIX)`` while blocking the wrong
+    syscall.
+    """
+    import ai_coding.security.process_sandbox as module
+
+    for arch, number in _SOCKET_NR.items():
+        monkeypatch.setattr(module.platform, "machine", lambda arch=arch: arch)
+        assert module._socket_syscall_number() == number, arch
+        assert _filter_socket_nr() == number, arch
+
+
+def test_an_unknown_arch_refuses_the_seccomp_filter(monkeypatch):
+    """P1-1: an architecture the table does not know is refused, not guessed."""
+    import ai_coding.security.process_sandbox as module
+
+    monkeypatch.setattr(module.platform, "machine", lambda: "sparc64")
+    with pytest.raises(module.UnsupportedSeccompArch):
+        module._socket_syscall_number()
+    with pytest.raises(module.UnsupportedSeccompArch):
+        module.af_unix_seccomp_filter()
+    with pytest.raises(module.UnsupportedSeccompArch):
+        BwrapBackend(writable_paths=(), block_af_unix=True)
 
 
 # ---- V16: symlinks -------------------------------------------------------
@@ -1007,12 +1072,12 @@ def test_the_proxy_bridge_lets_an_allowed_domain_through(tmp_path, upstream_http
 
     sock = tmp_path / "proxy.sock"
     proxy = SandboxProxy(
-        sock, allow=["allowed.test"], resolve_target=_proxy_resolver
+        sock, allow=[f"allowed.test:{upstream_http}"], resolve_target=_proxy_resolver
     ).start()
     backend = BwrapBackend(
         writable_paths=(),
         network=NetworkConfig(
-            mode="proxy", proxy_socket=sock, allow=["allowed.test"]
+            mode="proxy", proxy_socket=sock, allow=[f"allowed.test:{upstream_http}"]
         ),
         proxy=proxy,
         bridge_argv=default_bridge_argv(),
@@ -1077,12 +1142,12 @@ def test_the_proxy_socket_bind_comes_after_the_tmpfs(tmp_path, upstream_http):
 
     sock = tmp_path / "proxy.sock"
     proxy = SandboxProxy(
-        sock, allow=["allowed.test"], resolve_target=_proxy_resolver
+        sock, allow=[f"allowed.test:{upstream_http}"], resolve_target=_proxy_resolver
     ).start()
     backend = BwrapBackend(
         writable_paths=(),
         network=NetworkConfig(
-            mode="proxy", proxy_socket=sock, allow=["allowed.test"]
+            mode="proxy", proxy_socket=sock, allow=[f"allowed.test:{upstream_http}"]
         ),
         proxy=proxy,
         bridge_argv=default_bridge_argv(),
@@ -1145,3 +1210,192 @@ def test_the_proxy_degrades_to_deny_never_to_off(tmp_path):
         assert outcome.returncode != 0
     finally:
         backend.aclose()
+
+
+# ---- review P2-2 / P2-4 / P2-5 / P3-2 / P3-3 ----------------------------
+
+
+def test_the_default_af_unix_masks_cover_supervisors_and_shared_agents():
+    """P2-2: the default AF_UNIX denylist is a denylist; it was missing real ones.
+
+    Measured: the sandbox reached ``/run/supervisor.sock`` (command execution)
+    and ``/run/shared/minimal-ssh-agent.sock`` (a signing oracle).  Both are
+    now in the default list.
+    """
+    from ai_coding.config.models import DEFAULT_AF_UNIX_DENY_PATHS
+
+    assert "/run/supervisor.sock" in DEFAULT_AF_UNIX_DENY_PATHS
+    assert "/run/shared/minimal-ssh-agent.sock" in DEFAULT_AF_UNIX_DENY_PATHS
+    assert "/run/user/*/bus" in DEFAULT_AF_UNIX_DENY_PATHS
+
+
+def test_the_forwarding_loop_survives_a_transient_accept_error(monkeypatch):
+    """P2-4: a non-timeout OSError from accept must not end the relay."""
+    import ai_coding.security.sandbox_bridge as bridge
+
+    monkeypatch.setattr(bridge, "_set_pdeathsig", lambda sig: None)
+    ppid_calls = {"n": 0}
+
+    def fake_getppid() -> int:
+        ppid_calls["n"] += 1
+        return 1 if ppid_calls["n"] > 2 else 4242
+
+    monkeypatch.setattr(bridge.os, "getppid", fake_getppid)
+
+    accepts = {"n": 0}
+
+    class _FakeListener:
+        def settimeout(self, _timeout: float) -> None:
+            return None
+
+        def accept(self):
+            accepts["n"] += 1
+            if accepts["n"] == 1:
+                raise OSError(24, "Too many open files")
+            raise TimeoutError
+
+    bridge._forwarding_loop(_FakeListener(), "/tmp/proxy.sock")
+    # Without the guard the loop breaks on the first OSError (accepts == 1).
+    assert accepts["n"] >= 2, accepts
+
+
+def test_the_forwarding_loop_drops_a_connection_when_a_thread_cannot_start(
+    monkeypatch,
+):
+    """P2-4: Thread.start can raise EAGAIN; drop the connection, keep relaying."""
+    import ai_coding.security.sandbox_bridge as bridge
+
+    monkeypatch.setattr(bridge, "_set_pdeathsig", lambda sig: None)
+    ppid_calls = {"n": 0}
+
+    def fake_getppid() -> int:
+        ppid_calls["n"] += 1
+        return 1 if ppid_calls["n"] > 2 else 4242
+
+    monkeypatch.setattr(bridge.os, "getppid", fake_getppid)
+
+    class _FakeThread:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def start(self) -> None:
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(bridge.threading, "Thread", _FakeThread)
+
+    accepts = {"n": 0}
+    closed = {"n": 0}
+
+    class _FakeClient:
+        def close(self) -> None:
+            closed["n"] += 1
+
+    class _FakeListener:
+        def settimeout(self, _timeout: float) -> None:
+            return None
+
+        def accept(self):
+            accepts["n"] += 1
+            if accepts["n"] == 1:
+                return _FakeClient(), ("127.0.0.1", 1234)
+            raise TimeoutError
+
+    bridge._forwarding_loop(_FakeListener(), "/tmp/proxy.sock")
+    assert accepts["n"] >= 2, accepts
+    assert closed["n"] == 1, closed
+
+
+def _unset_names(argv: list[str]) -> set[str]:
+    return {argv[i + 1] for i in range(len(argv) - 1) if argv[i] == "--unsetenv"}
+
+
+def test_the_deny_tier_cleans_inherited_proxy_env(tmp_path):
+    """P2-5: the deny tier cleans the inherited proxy env, not just proxy."""
+    backend = BwrapBackend(writable_paths=(), network=NetworkConfig(mode="deny"))
+    argv = backend.wrap(["/bin/true"], [tmp_path])
+    assert set(_PROXY_ENV_NAMES).issubset(_unset_names(argv)), argv
+
+
+def test_the_off_tier_cleans_inherited_proxy_env(tmp_path):
+    """P2-5: all three network tiers clean the inherited proxy env uniformly."""
+    backend = BwrapBackend(writable_paths=(), network=NetworkConfig(mode="off"))
+    argv = backend.wrap(["/bin/true"], [tmp_path])
+    assert set(_PROXY_ENV_NAMES).issubset(_unset_names(argv)), argv
+
+
+def _mask_failed_backend() -> object:
+    class _Failed:
+        name = "maskfail"
+        tier = "full"
+
+        def available(self) -> bool:
+            return True
+
+        def gap(self) -> str:
+            return MASK_FAILED
+
+        def wrap(self, argv, roots):  # noqa: ANN001, ANN202
+            return list(argv)
+
+        def take_mask_report(self) -> str | None:
+            return MASK_FAILED
+
+    return _Failed()
+
+
+def test_enforce_refuses_when_a_mask_cannot_be_built(tmp_path):
+    """P3-2: a failed mask is a refusal under enforce, not a silent pass."""
+    with pytest.raises(SandboxGap) as exc:
+        spawn_argv(
+            "echo x", ProcessSandboxPolicy(mode="enforce"), _mask_failed_backend(), [tmp_path]
+        )
+    assert exc.value.reason == MASK_FAILED
+
+
+def test_warn_reports_a_failed_mask(tmp_path):
+    """P3-2: a warn run whose mask failed reports it instead of a green lie."""
+    seen: list[str] = []
+    argv = spawn_argv(
+        "echo x",
+        ProcessSandboxPolicy(mode="warn"),
+        _mask_failed_backend(),
+        [tmp_path],
+        emit=seen.append,
+    )
+    assert argv == ["/bin/sh", "-c", "echo x"]
+    assert MASK_FAILED in seen
+
+
+def test_take_mask_report_is_one_shot_and_silent_when_nothing_failed(tmp_path):
+    """P3-2: the report is one-shot; a clean (skipped-only) mask reports nothing."""
+    backend = BwrapBackend(writable_paths=(), read_deny_paths=[tmp_path / "missing"])
+    assert backend.mask_report.failed == ()
+    assert backend.take_mask_report() is None
+
+
+def test_take_mask_report_reports_a_real_mask_failure(tmp_path, monkeypatch):
+    """P3-2: a mask whose ``resolve()`` fails is reported (and consumed once)."""
+    import ai_coding.security.process_sandbox as module
+
+    original = module.Path.resolve
+
+    def fake_resolve(self, *args, **kwargs):  # noqa: ANN001, ANN202
+        if self.name == "boom":
+            raise OSError("IO error")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(module.Path, "resolve", fake_resolve)
+    target = tmp_path / "boom"
+    target.mkdir()
+    backend = module.BwrapBackend(writable_paths=(), read_deny_paths=[target])
+    assert backend.mask_report.failed
+    assert backend.take_mask_report() == MASK_FAILED
+    assert backend.take_mask_report() is None  # one-shot
+
+
+def test_a_protected_path_is_skipped_and_recorded(tmp_path):
+    """P3-3: the bridge's exemption from the read masks is recorded, not silent."""
+    bridge_script = Path(default_bridge_argv()[1])
+    backend = BwrapBackend(writable_paths=(), read_deny_paths=[bridge_script])
+    assert bridge_script.resolve() in backend.mask_report.skipped
+    assert bridge_script.resolve() not in backend.mask_report.masked

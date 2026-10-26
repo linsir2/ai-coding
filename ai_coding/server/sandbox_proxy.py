@@ -10,23 +10,31 @@ What it refuses, and why:
 
 * **A domain not in ``allow``** -- empty means deny everything; ``"*"`` never
   matches (the config layer rejects it at load time, and the proxy keeps the
-  rule locally so a hand-built instance cannot open the wall).
+  rule locally so a hand-built instance cannot open the wall).  A bare domain
+  allows only ports 80/443; ``domain:port`` names the port(s) it may use
+  (review P2-1).
 * **A non-public resolved address** -- the whitelist decides by *name*, but the
   connection is made by *IP*.  A whitelisted ``evil.com`` could resolve to
   ``169.254.169.254`` (cloud metadata) or an intranet address, so the resolution
   result is checked after DNS and the connection is pinned to the checked
   address (no second lookup, no rebinding window, §C.6).
 * **Malformed or oversized requests** -- the sandbox is adversarial input by
-  construction: request line/header sizes, illegal ports and non-ASCII bytes
-  are rejected rather than parsed loosely.
+  construction: request line/header sizes, illegal ports, non-ASCII bytes and
+  a duplicate ``Host`` header are rejected rather than parsed loosely
+  (review P3-4/P3-8).
 
 Each connection gets its own thread: a single slow tunnel must not stall every
-other request (review P2-12).  The socket file is ``chmod 0600`` -- another
-local user must not be able to borrow the sandbox's exit (review P2-2).
+other request (review P2-12).  The thread count is bounded (``max_connections``)
+-- an adversarial client can open many connections, and an unbounded thread per
+connection is a cheap resource-exhaustion (review P3-7).  The socket file is
+``chmod 0600`` -- another local user must not be able to borrow the sandbox's
+exit (review P2-2).
 
 Non-HTTP protocols (databases, raw TCP, UDP) are not proxied.  Domain
 whitelisting is blind to bare IP/CIDR/UDP traffic; that is a recorded scope cut
-(``docs/plan-m-d2.md`` §7.1), not an accident.
+(``docs/plan-m-d2.md`` §7.1), not an accident.  The proxy is the only
+**TCP/UDP** exit of the ``proxy`` tier -- AF_UNIX is a parallel channel it does
+not see (§D).
 """
 
 from __future__ import annotations
@@ -71,6 +79,12 @@ class _Refused(Exception):
     """The request parsed, but policy forbids it."""
 
 
+#: Ports a bare domain entry allows.  A domain-only entry used to admit every
+#: port, so ``allow: ["example.com"]`` also opened ``CONNECT example.com:22``
+#: and ``:3389`` -- lateral-movement ports behind a web allow-list (P2-1).
+_DEFAULT_ALLOWED_PORTS: frozenset[int] = frozenset({80, 443})
+
+
 def _strip_port(value: str) -> str:
     """Lower-case a host and drop a trailing port, ``[]`` and trailing dot.
 
@@ -89,22 +103,62 @@ def _strip_port(value: str) -> str:
     return host
 
 
-def _host_allowed(host: str, allow: Sequence[str]) -> bool:
-    """``host == entry`` or ``host.endswith("." + entry)``, never a substring.
+def _parse_allow_entry(entry: str) -> tuple[str, frozenset[int]]:
+    """``"host"`` -> ``(host, {80, 443})``; ``"host:443"`` -> ``(host, {443})``.
+
+    ``"host:80,443"`` names several ports; ``"[::1]:443"`` is an IPv6 literal
+    with a port.  A malformed port (non-numeric or out of range) yields an
+    empty port set, i.e. matches nothing: a bad entry must never widen the wall.
+    """
+    text = str(entry).strip().lower().rstrip(".")
+    if not text or text == "*":
+        return "", frozenset()
+    if text.startswith("["):
+        end = text.find("]")
+        if end == -1:
+            return "", frozenset()
+        host = text[1:end]
+        rest = text[end + 1 :]
+    elif text.count(":") == 1:
+        host, _, port = text.partition(":")
+        rest = ":" + port
+    else:
+        host, rest = text, ""
+    if not rest:
+        return host, _DEFAULT_ALLOWED_PORTS
+    if not rest.startswith(":"):
+        return host, frozenset()
+    ports: set[int] = set()
+    for part in rest[1:].split(","):
+        try:
+            number = int(part)
+        except ValueError:
+            return host, frozenset()
+        if not 1 <= number <= 65535:
+            return host, frozenset()
+        ports.add(number)
+    return host, frozenset(ports)
+
+
+def _host_allowed(host: str, port: int, allow: Sequence[str]) -> bool:
+    """Exact/suffix host match **and** a port the entry allows.
 
     The exact/suffix rule is the whole point: a substring test would let
-    ``evil-example.com`` and ``example.com.evil.com`` through.  An empty
-    allow-list denies everything, and ``"*"`` is treated as no entry -- a
-    wildcard is not a wall.
+    ``evil-example.com`` and ``example.com.evil.com`` through.  The port is the
+    second half: a bare domain allows only 80/443, a ``domain:port`` entry
+    allows exactly that port (P2-1).  An empty allow-list denies everything, and
+    ``"*"`` is treated as no entry -- a wildcard is not a wall.
     """
     candidate = _strip_port(host)
     if not candidate:
         return False
     for entry in allow:
-        allowed = _strip_port(str(entry))
-        if not allowed or allowed == "*":
+        allowed_host, ports = _parse_allow_entry(str(entry))
+        if not allowed_host:
             continue
-        if candidate == allowed or candidate.endswith("." + allowed):
+        if candidate != allowed_host and not candidate.endswith("." + allowed_host):
+            continue
+        if port in ports:
             return True
     return False
 
@@ -222,7 +276,7 @@ def _read_headers(reader: _ConnReader, max_bytes: int) -> list[tuple[str, str]]:
         if line is None:
             raise _BadRequest("unexpected end of headers")
         if line == b"":
-            return headers
+            break
         total += len(line) + 2
         if total > max_bytes or len(headers) > _MAX_HEADERS:
             raise _BadRequest("headers too large")
@@ -240,6 +294,11 @@ def _read_headers(reader: _ConnReader, max_bytes: int) -> list[tuple[str, str]]:
         if any(char == "\x00" or (ord(char) < 0x20 and char != "\t") for char in value):
             raise _BadRequest("illegal header value")
         headers.append((name, value))
+    if sum(1 for name, _ in headers if name.lower() == "host") > 1:
+        # Two Host headers are the classic request-smuggling primitive: the
+        # proxy and the upstream may pick different ones.  Reject rather than
+        # forward a request whose framing is ambiguous (review P3-4).
+        raise _BadRequest("duplicate Host header")
     return headers
 
 
@@ -306,18 +365,22 @@ def _send_error(conn: socket.socket, code: int, reason: str, detail: str) -> Non
         pass
 
 
-def _authorize(proxy: SandboxProxy, host: str) -> None:
-    if not _host_allowed(host, proxy.allow):
-        raise _Refused(f"domain not in allow-list: {host}")
+def _authorize(proxy: SandboxProxy, host: str, port: int) -> None:
+    if not _host_allowed(host, port, proxy.allow):
+        raise _Refused(f"domain:port not in allow-list: {host}:{port}")
 
 
-def _body_length(headers: list[tuple[str, str]]) -> int:
+def _body_length(headers: list[tuple[str, str]], max_bytes: int) -> int:
     """Validate the request framing and return the declared body length.
 
     Done **before** connecting: a conflicting ``Content-Length`` is the classic
     request-smuggling primitive and must not depend on an upstream being
     reachable.  Chunked bodies are outside this minimal proxy and are refused
     rather than forwarded half-understood.
+
+    A declared length above ``max_bytes`` is refused too (review P3-8): the
+    body is read into memory before forwarding, so an unbounded
+    ``Content-Length`` is a cheap memory/time sink.
     """
     content_lengths: set[int] = set()
     for name, value in headers:
@@ -329,6 +392,8 @@ def _body_length(headers: list[tuple[str, str]]) -> int:
                 raise _BadRequest("invalid Content-Length") from exc
             if declared < 0:
                 raise _BadRequest("negative Content-Length")
+            if declared > max_bytes:
+                raise _BadRequest("Content-Length too large")
             content_lengths.add(declared)
         elif lower == "transfer-encoding" and "chunked" in value.lower():
             raise _BadRequest("chunked request bodies are not supported")
@@ -435,7 +500,7 @@ def _serve_connection(conn: socket.socket, proxy: SandboxProxy) -> None:
 
         if method.upper() == "CONNECT":
             host, port = _parse_connect_target(target)
-            _authorize(proxy, host)
+            _authorize(proxy, host, port)
             upstream = _connect(proxy.resolve_target(host, port), proxy.connect_timeout)
             conn.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             buffered = reader.take_buffer()
@@ -448,8 +513,8 @@ def _serve_connection(conn: socket.socket, proxy: SandboxProxy) -> None:
             return
 
         host, port, path = _parse_http_target(target, headers)
-        _authorize(proxy, host)
-        content_length = _body_length(headers)
+        _authorize(proxy, host, port)
+        content_length = _body_length(headers, proxy.max_body_bytes)
         upstream = _connect(proxy.resolve_target(host, port), proxy.connect_timeout)
         try:
             upstream.settimeout(proxy.connect_timeout)
@@ -502,6 +567,8 @@ class SandboxProxy:
         resolve_target: ResolveTarget | None = None,
         max_request_line: int = 8192,
         max_header_bytes: int = 65536,
+        max_body_bytes: int = 10 * 1024 * 1024,
+        max_connections: int = 256,
     ) -> None:
         self._socket_path = Path(socket_path).expanduser().resolve()
         self._allow = tuple(
@@ -513,9 +580,16 @@ class SandboxProxy:
         self.resolve_target: ResolveTarget = resolve_target or _resolve_public_address
         self.max_request_line = max_request_line
         self.max_header_bytes = max_header_bytes
+        self.max_body_bytes = max_body_bytes
+        self.max_connections = max_connections
         self._listener: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._closed = threading.Event()
+        # A bounded pool, not a thread per connection with no ceiling: the
+        # sandbox is adversarial input, and an unbounded thread count is a cheap
+        # exhaustion (review P3-7).  When the pool is full the connection is
+        # dropped rather than queued behind the existing work.
+        self._slots = threading.BoundedSemaphore(max(1, int(max_connections)))
 
     @property
     def allow(self) -> tuple[str, ...]:
@@ -586,6 +660,14 @@ class SandboxProxy:
                 continue
             except OSError:
                 break
+            if not self._slots.acquire(blocking=False):
+                # The pool is full: drop this connection rather than grow
+                # without bound (review P3-7).
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                continue
             threading.Thread(
                 target=self._serve, args=(conn,), name="sandbox-proxy-conn", daemon=True
             ).start()
@@ -598,6 +680,8 @@ class SandboxProxy:
                 conn.close()
             except OSError:
                 pass
+        finally:
+            self._slots.release()
 
     def close(self) -> None:
         self._closed.set()

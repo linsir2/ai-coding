@@ -1020,8 +1020,8 @@ M-D2 在 M-D1 的写边界之上补了**读边界**与 **AF_UNIX** 两层（`doc
 | 字段 | 类型 / 默认 | 说明 |
 |---|---|---|
 | `read_deny_paths` | `list[str]`，默认见 `default_read_deny_paths()` | **读面 denylist**，与 `writable_paths`（写面 allow-list）**互不推导**。目录 → `--tmpfs`（变空），文件 → `--ro-bind /dev/null`（不可读）；glob 构造期展开。默认清单经 `config_home()` / `data_home()` 展开（尊重 `XDG_CONFIG_HOME` / `XDG_DATA_HOME`），**不是**写死的 `~/.config`。清单含 `~/.ssh`、`~/.aws`、`~/.config/ai-coding`（API key）、`~/.local/share/ai-coding/mcp-auth.json`（MCP token）、`/etc/shadow`、`/etc/ssh/ssh_host_*_key`、`/home/*/.ssh`、`/root/.ssh` 等。**denylist 永远少一条**，这是刻意的能力边界（§7.1），不是保证；工作区级 `config.yaml` 不在内（工作区必然可读） |
-| `af_unix_deny_paths` | `list[str]`，默认 `/run/user/*/bus`、`/var/run/docker.sock`、`/run/docker.sock` | pathname AF_UNIX 套接字的遮蔽清单。bwrap 无 `connect`/`bind` 过滤，这是**遮蔽**不是过滤；abstract 套接字无路径，遮不到 |
-| `block_af_unix` | `bool = False` | 装 seccomp 过滤器，`socket(AF_UNIX)` → `EPERM`（含 abstract）。默认关：会断合法 IPC |
+| `af_unix_deny_paths` | `list[str]`，默认见 `DEFAULT_AF_UNIX_DENY_PATHS`（`/run/user/*/bus`、`/run/dbus/system_bus_socket`、`/run/docker.sock`、`/run/containerd/containerd.sock`、`/run/supervisor.sock`、`/run/shared/minimal-ssh-agent.sock`、`/run/postgresql/.s.PGSQL.*`、`/run/redis/redis.sock`、`/run/snapd.socket`、`/run/uuidd/request`、`/run/acpid.socket`、`/run/nscd/socket` 等） | pathname AF_UNIX 套接字的遮蔽清单。bwrap 无 `connect`/`bind` 过滤，这是**遮蔽**不是过滤；abstract 套接字无路径，遮不到。清单是 denylist（永远少一条） |
+| `block_af_unix` | `bool = False` | 装 seccomp 过滤器，`socket(AF_UNIX)` → `EPERM`（含 abstract）。默认关：会断合法 IPC。过滤器按 `platform.machine()` 查 `socket(2)` 系统调用号；**未知架构拒绝安装**（不猜，避免硬编码 41 在 aarch64 上静默放行，评审 P1-1） |
 
 ### 构造分级（`security/process_sandbox.py`）
 
@@ -1031,7 +1031,7 @@ M-D2 在 M-D1 的写边界之上补了**读边界**与 **AF_UNIX** 两层（`doc
 | 档位规则 | `--proc` 与 `--unshare-pid` **同生共死**；不含这两者的档**必须**带 `--tmpfs /proc` —— `--ro-bind / /` 是递归绑定，宿主 `/proc` 与 `--proc` 无关地进沙箱，只有 `--tmpfs /proc` 能关掉 `/proc/<pid>/root` 逃逸 |
 | 探测 | `_probe()` 用**完整构造**逐级试（`wrap(["/bin/true"], roots)` 带上当次全部附加项），选第一个成功的并缓存；**一次性** |
 | `tier` | `BwrapBackend.tier -> "full" \| "no-proc" \| "none"`。`spawn_argv` 在 `tier != "full"` 时经 `emit` 上报 `sandbox.tier.<tier>`（**每个 backend 一次**，不是每次 bash） |
-| `SandboxMaskReport` | 构造期汇总（`masked` / `skipped` / `failed`），一次性、可读；**不进 `Degraded`**（跳过的路径是正常情况，污染 `/trace` 的 degraded 计数） |
+| `SandboxMaskReport` | 构造期汇总（`masked` / `skipped` / `failed`），一次性、可读。`skipped`（路径不存在、被保护路径豁免）**不进 `Degraded`**；`failed`（遮蔽构造失败）由 `spawn_argv` 消费 —— `enforce` 拒绝（`sandbox.mask.failed`）、`warn` 上报（评审 P3-2） |
 | 遮蔽顺序 | 遮蔽项在 `--ro-bind / /` **之后**、`--tmpfs /tmp` **之后**、可写 `--bind` **之后**（**deny 赢**） |
 | 符号链接 | 先 `resolve()` 再遮蔽**目标**；直接对符号链接做 `--tmpfs`/`--ro-bind` 会被 bwrap 拒绝（实测） |
 | `seccomp_fds` | `--seccomp <fd>` 的 fd 由 backend 持有，调用方经 `subprocess` 的 `pass_fds` 传入；`wrap()` 仍返回 `list[str]` |

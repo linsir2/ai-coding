@@ -41,6 +41,10 @@ socket into the sandbox and puts a small bridge at ``argv[0]``; the bridge
 turns the socket into a loopback ``http://`` proxy URL, because no HTTP client
 accepts ``unix://`` as a proxy scheme (measured).
 
+The proxy is the only **TCP/UDP** exit, not the only exit: AF_UNIX is a
+parallel channel the proxy does not see, which is why the AF_UNIX masks are a
+separate layer (M-D2 §D) rather than a consequence of the network wall.
+
 **Construction tiers.**  The mechanism is built in tiers, strongest first, and
 the first tier that actually runs is selected and reported.  A tier is a
 *prefix*; the probe runs the **full** construction (``wrap(["/bin/true"],
@@ -75,6 +79,7 @@ from __future__ import annotations
 
 import glob
 import os
+import platform
 import struct
 import subprocess
 import sys
@@ -119,6 +124,12 @@ SANDBOX_WRAP_GAP = "sandbox.wrap.no-op"
 #: could not start".  The wall degrades to ``deny`` -- never to ``off``, which
 #: would silently hand the sandbox the host network (review P1-7).
 PROXY_UNAVAILABLE = "sandbox.proxy.unavailable"
+
+#: The reason code for "a read/AF_UNIX mask could not be constructed".  §B.2:
+#: a mask that exists but fails (an IO error) is a **failure**, not a skip --
+#: the read boundary would be silently weaker, so ``enforce`` refuses and
+#: ``warn`` reports (review P3-2).
+MASK_FAILED = "sandbox.mask.failed"
 
 #: The construction tiers, strongest first.  The first one that runs is selected
 #: and reported (``sandbox.tier.<name>``).  A tier is a *prefix*: the writable
@@ -333,6 +344,27 @@ def _network_report(backend: SandboxBackend) -> str | None:
     return None
 
 
+def _mask_report(backend: SandboxBackend) -> str | None:
+    """The one-shot report for a mask that could not be constructed (§B.2).
+
+    ``SandboxMaskReport.failed`` was never consumed anywhere, so the plan's
+    "a failed mask is refused under ``enforce`` / reported under ``warn``" rule
+    did not exist: a broken read boundary simply ran weaker and nobody knew
+    (review P3-2).  ``spawn_argv`` reads it and turns it into a refusal or a
+    report.
+
+    A test double without the reporter but with a ``mask_report`` attribute is
+    read directly, so the contract can be pinned without a real bwrap.
+    """
+    reporter = getattr(backend, "take_mask_report", None)
+    if callable(reporter):
+        result = reporter()
+        return None if result is None else str(result)
+    report = getattr(backend, "mask_report", None)
+    failed = getattr(report, "failed", None)
+    return MASK_FAILED if failed else None
+
+
 def spawn_argv(
     command: str,
     policy: ProcessSandboxPolicy | None,
@@ -388,6 +420,15 @@ def spawn_argv(
         if emit is not None:
             emit(SANDBOX_WRAP_GAP)
         return argv
+    # ``wrap()`` populated the mask report; a mask that could not be built is a
+    # real failure, not a skip (§B.2 / review P3-2).  Read it here so the
+    # read boundary cannot silently run weaker.
+    mask_report = _mask_report(backend)
+    if mask_report is not None:
+        if policy.mode == "enforce":
+            raise SandboxGap(MASK_FAILED)
+        if emit is not None:
+            emit(mask_report)
     return wrapped
 
 
@@ -432,9 +473,52 @@ _SECCOMP_RET_ALLOW = 0x7FFF0000
 _SECCOMP_RET_ERRNO = 0x00050000
 _EPERM = 1
 
-#: x86_64 syscall numbers used by the filter.
-_NR_SOCKET = 41
+#: ``socket(2)`` syscall number by architecture.  A hardcoded ``41`` is
+#: **x86_64 only**: on aarch64, 41 is ``faccessat``, so a filter written against
+#: it silently *allows* ``socket(AF_UNIX)`` -- the exact P1-1 hole (the filter
+#: matches the wrong syscall, so the wall is a no-op and the sandbox looks green).
+#: The number is derived from the architecture the backend runs on, and an
+#: architecture this table does not know is **refused**, never guessed.
+#:
+#: The sandbox runs on the same host, so ``platform.machine()`` is the arch the
+#: filter will actually be evaluated under; there is no cross-arch case here.
+_SOCKET_NR: dict[str, int] = {
+    "x86_64": 41,
+    "amd64": 41,
+    "i386": 359,
+    "i486": 359,
+    "i586": 359,
+    "i686": 359,
+    "aarch64": 198,
+    "arm64": 198,
+    "armv7l": 281,
+    "armv6l": 281,
+    "riscv64": 198,
+}
+
 _AF_UNIX = 1
+
+
+class UnsupportedSeccompArch(ValueError):
+    """The seccomp filter cannot be built for this architecture."""
+
+
+def _socket_syscall_number() -> int:
+    """The ``socket(2)`` syscall number for the running architecture.
+
+    Raises :class:`UnsupportedSeccompArch` for an architecture the table does
+    not know, so ``block_af_unix=True`` fails loudly instead of installing a
+    filter that allows every AF_UNIX socket.
+    """
+    machine = platform.machine().lower()
+    number = _SOCKET_NR.get(machine)
+    if number is None:
+        raise UnsupportedSeccompArch(
+            f"socket(2) syscall number is unknown for architecture {machine!r}; "
+            "refusing to install a seccomp filter that would silently allow "
+            "AF_UNIX sockets"
+        )
+    return number
 
 
 def _sock_filter(code: int, jt: int = 0, jf: int = 0, k: int = 0) -> bytes:
@@ -451,11 +535,19 @@ def af_unix_seccomp_filter() -> bytes:
 
     ``seccomp_data`` layout: ``nr`` at offset 0, ``args[0]`` at offset 16.  The
     domain is the low 32 bits of ``args[0]``, which is all ``AF_UNIX`` needs.
+
+    The ``socket`` syscall number is looked up for the running architecture;
+    a hardcoded 41 would be a silent no-op on aarch64 (review P1-1).
     """
     return b"".join(
         (
             _sock_filter(_BPF_LD | _BPF_W | _BPF_ABS, k=0),  # A = syscall nr
-            _sock_filter(_BPF_JMP | _BPF_JEQ | _BPF_K, jt=0, jf=3, k=_NR_SOCKET),
+            _sock_filter(
+                _BPF_JMP | _BPF_JEQ | _BPF_K,
+                jt=0,
+                jf=3,
+                k=_socket_syscall_number(),
+            ),
             _sock_filter(_BPF_LD | _BPF_W | _BPF_ABS, k=16),  # A = args[0]
             _sock_filter(_BPF_JMP | _BPF_JEQ | _BPF_K, jt=0, jf=1, k=_AF_UNIX),
             _sock_filter(_BPF_RET | _BPF_K, k=_SECCOMP_RET_ERRNO | _EPERM),
@@ -550,6 +642,7 @@ class BwrapBackend:
         self._tier: str = "none"
         self._tier_emitted = False
         self._mask_cache: tuple[list[str], SandboxMaskReport] | None = None
+        self._mask_emitted = False
         self._seccomp_fd: int | None = None
         if self._block_af_unix:
             self._seccomp_fd = _seccomp_filter_fd()
@@ -662,6 +755,18 @@ class BwrapBackend:
         """The construction-time summary of the read/AF_UNIX masks."""
         return self._mask_arguments()[1]
 
+    def take_mask_report(self) -> str | None:
+        """One-shot ``sandbox.mask.failed`` report, or ``None`` (review P3-2).
+
+        The mask report is a construction-time summary; the report is consumed
+        once per backend so a panel or log sees the failure once, not once per
+        bash call (the same one-shot shape as the tier and proxy reports).
+        """
+        if self._mask_emitted or not self.mask_report.failed:
+            return None
+        self._mask_emitted = True
+        return MASK_FAILED
+
     def _protected_paths(self) -> tuple[Path, ...]:
         """Paths a read mask must never cover: the bridge and the proxy socket.
 
@@ -706,8 +811,13 @@ class BwrapBackend:
                 if resolved in seen:
                     continue
                 if self._covers_protected(resolved, protected):
+                    # Skipped by design, but a silent skip is exactly how a
+                    # broken read boundary hides: record it (review P3-3).
+                    seen.add(resolved)
+                    skipped.append(path)
                     continue
                 if not resolved.exists():
+                    seen.add(resolved)
                     skipped.append(path)
                     continue
                 seen.add(resolved)
@@ -753,14 +863,19 @@ class BwrapBackend:
         mode = self.network_mode
         if mode in ("deny", "proxy"):
             prefix += ["--unshare-net"]
+        # Clean the inherited proxy environment in **every** mode (review P2-5):
+        # an inherited HTTP_PROXY/NO_PROXY is a channel a whitelisted client can
+        # use to bypass the bridge, and the ``deny`` tier used to inherit it
+        # untouched.  Only ``proxy`` re-sets the correct values, and it does so
+        # through the in-sandbox bridge's environment.
+        for name in _PROXY_ENV_NAMES:
+            prefix += ["--unsetenv", name]
         if mode == "proxy":
             if self._proxy_socket is None:  # defensive: network_mode says proxy
                 raise ValueError("network.mode='proxy' without a proxy socket")
             # After --tmpfs /tmp and after the masks: a proxy socket under /tmp
             # must survive the tmpfs, and a mask must never cover it.
             prefix += ["--bind", str(self._proxy_socket), str(self._proxy_socket)]
-            for name in _PROXY_ENV_NAMES:
-                prefix += ["--unsetenv", name]
         prefix += ["--"]
         if mode == "proxy":
             bridge = [*self._bridge_argv, "--unix", str(self._proxy_socket)]

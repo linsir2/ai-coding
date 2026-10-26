@@ -503,3 +503,30 @@ def test_a_broken_sidecar_is_ignored_not_fatal(tmp_path):
     mcp = ConfigLoader.load_mcp(cfg)
 
     assert mcp.servers == []
+
+
+# ---- P3-6: an empty read denylist must not be silent -----------------------
+
+
+def test_an_empty_read_deny_list_warns_at_load_time(caplog):
+    """P3-6: ``read_deny_paths: []`` closes the read boundary; say so at load."""
+    import logging
+
+    from ai_coding.config.models import ProcessSandboxConfig
+
+    with caplog.at_level(logging.WARNING):
+        ProcessSandboxConfig(read_deny_paths=[])
+    assert any("read_deny_paths is empty" in record.message for record in caplog.records)
+
+
+def test_the_default_read_deny_list_does_not_warn(caplog):
+    """P3-6: the warning is for an explicit empty list, not the default."""
+    import logging
+
+    from ai_coding.config.models import ProcessSandboxConfig
+
+    with caplog.at_level(logging.WARNING):
+        ProcessSandboxConfig()
+    assert not [
+        record for record in caplog.records if "read_deny_paths is empty" in record.message
+    ]
