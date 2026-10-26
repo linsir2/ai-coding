@@ -180,7 +180,7 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
 |---|---|
 | 文档 | 在 `features.md` / `data-contracts.md` 写明"L3 是**回合中段护栏**，只处理**末尾连续 tool 段**，且要求批总量 > 窗口一半 + 单条 > 30000" |
 | 测试 | 加一条断言"**非尾部大输出不被持久化**"（把现状钉住） |
-| 可观测 | `CompactionEnded`（或新事件）带上 **L3 实际持久化了几条 / 跳过几条** —— 让"语义"从注释变成**可观测事实**（见 M-E3）。**注意（评审 P2-5）**：`LayerStat` 的字段集**不覆盖"跳过几条/为什么"** → 要么给 `LayerStat` 补 `skipped` 字段，要么把这条降级为"（或新事件）" |
+| 可观测 | `CompactionEnded`（或新事件）带上 **L3 实际持久化了几条 / 跳过几条** —— 让"语义"从注释变成**可观测事实**（见 M-E3）。**落地（评审 P0-2）**：`LayerStat` **加 `skipped` 字段**；"为什么"**不做字段**（自由文本无法断言），由文档说明 |
 
 * **为什么这条重要**：`eval-04` 记录"10 轮真实对话后 `persisted=0`" ——
   **真实使用里 L3 几乎从不触发**。若语义是"压缩层"，这是缺口；若是"回合中段护栏"，这是设计。
@@ -216,6 +216,8 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
      `placeholder_old_results(...)`（`monkeypatch.setattr(context_compression, ...)`），
      L4 是**绑定方法** `ContextManager._run_l4`（patch `ContextManager._run_l4`）。
    * **具体形状**：monkeypatch 两个目标，各自 append 一个 tag 到共享列表，断言 `tags == ["L2", "L4"]`。
+   * **必须 `force=True`（评审 P3）** —— 否则 `should_summarise` 可能为 False（L4 不跑），
+     顺序断言会 **vacuous**。这与 §B.2 的提醒是同一件事，两处都要写。
    * **以文档为主、单测作回归锁**（评审 P2-1）—— 别把单测当主要交付。
 4. **把"elided 计数不可断言"固化**：把 `eval-04` 里那句"直接验证真实 `elide_and_persist`"
    的承认**写进测试注释与文档**。
@@ -241,9 +243,20 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
        name: str             # "L1" | "L2" | "L3" | "L4"
        removed: int          # 真的**减少**的条数（只有 L1/L4 会）
        rewritten: int        # **改写内容但保条数**的条数（L2 信封化、L3 持久化）
+       skipped: int          # 该层**检查了但没动手**的条数（评审 P0-2：三节口径统一）
        before_tokens: int    # 进入该层时的估算 token
        after_tokens: int     # 离开该层时的估算 token
    ```
+
+   * **`skipped` 字段（评审 P0-2 —— 原 §A/§C.1/§C.4 三节三种口径）**：**加**。
+     它承载 §A 要求的"L3 跳过了几条"。**"为什么"不做字段**（会是自由文本，无法断言）——
+     降级为：`/trace` 与前端只显示数字，原因由文档说明。
+   * **L4 未跑时的形状（评审 P2）**：`layers` **不含 L4 项**（不是全 0 项）；
+     `/trace` 该行输出 `"L4 未触发"`。
+   * **Σ 不变量的真正编码（评审 P2）**：`Σ(after − before) == layers[-1].after − layers[0].before`
+     是**telescoping 恒等式**，它真正保证的是**相邻层连续**（`before_{i+1} == after_i`）。
+     → **直接写成连续性断言**（逐对断言 `layers[i+1].before_tokens == layers[i].after_tokens`），
+     否则实现者会以为那是个独立不变量而漏掉真正的检查点。
 
    * **字段口径（评审 P2-① / P1-2）**：`removed`（真减条数）与 `rewritten`（保条数改内容）**分列** ——
      **L2 信封化、L3 持久化都不减条数**（`placeholder_old_results` 明写 "message count untouched"；
@@ -281,12 +294,13 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
      **7058 是 24000 的 29%，没有预算缺口。**
    * **修法**：把判据载体换成 `resolve_context_window(cfg)`（或 `ContextManager` 解析后的窗口）。
    * **pytest 版必须改用 `AIConfig()` + `resolve_context_window`** —— 它现在用手搭
-     `_Settings(max_context_tokens=48000)`，**并不复现**这个 bug；不换的话"搬进 pytest"
-     只是把 bug 一起搬（评审 P2-3）。
+     `_Settings(max_context_tokens=48000)`，**用的是同一个真窗口**；改成 `AIConfig()` 是
+     **对齐真窗口的来源**（并顺带暴露"未解析配置"这类误用），不是"复现 bug"（评审 P3）。
    * `r7_cases.py` 的预算用例**接入 CI**（或等价地，把该断言搬进 pytest）。
    * **删掉"调 L2 窗口 / 调水位"的拍板项**（不存在缺口，无需调参）。
    * **`books_feed_the_policy` 移出 M-E** —— 它与压缩无关，是 domain B 的过期期望。
-4. **前端压缩卡片**：显示每层命中数（数据来自 #1）。
+4. **前端压缩卡片**：显示每层统计 —— **用 `removed`/`rewritten`/`skipped` + token 差**
+   （评审 P0-2：原写"每层命中数"，而 `LayerStat` **没有**叫"命中数"的字段）。
 
 ### D. M-E4 · 前缀缓存友好度
 
@@ -306,16 +320,21 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
      + `inject_task(task_injection="system")`。
    * **history 通道**：plan reminder。
 
-   断言方式（评审 P2-④ / P1-6）—— **两类必须分开写**：
-   * **tail 块（11 个）**：对每个块断言"该块内容**不出现在 stable 前缀里**"。
-     * 名字可枚举自 **`ContextAssembled.tail_blocks`**（评审 P2-④：名字是
-       `request_assembly.py:348-358` 的**字符串字面量**，**没有注册表**，`TailBlock` 只是
-       `@dataclass(name, message)` —— 说"TailBlock.name 天然可枚举"不准确）。
-   * **system prompt 通道 + history 通道**：它们**本来就在 stable 前缀内**
-     （`features.md:409`："逐字节静态"）→ 对它们断言"不在前缀里"**必然失败**。
-     → 这两类只能断言**"前缀整体在相邻两轮间不变"**（见下）。
-   * **最省事且覆盖最全的做法**：直接断言 **stable 前缀的字节在相邻两轮间不变**
-     （天然覆盖所有通道，不需要 per-channel 提取）。
+   断言设计（评审 P2-④ / P1-2 / P1-6）—— **二选一，本方案选 (b)**：
+
+   * **(a) per-channel 提取**：对每个 tail 块断言"该块内容不出现在 stable 前缀里"。
+     * **问题**：`ContextAssembled.tail_blocks` 只给 `(name, chars)`，**不给文本** →
+       **这条断言当前写不出来**；且 system prompt / history 通道**本来就在 stable 前缀内**，
+       对它们断言"不在前缀里"**必然失败**。
+   * **(b) 全前缀整体断言（采用）**：断言 **stable 前缀的规范化字节在相邻两轮间不变**。
+     * **可执行定义**：`stable_prefix = canonical_request(instructions, history, tools_text)`
+       （**传 `Assembled.history`，不传 `request`**，见 §D.4），
+       断言 `stable_b.startswith(stable_a)`（**路径无关的布尔不变量**）。
+     * **覆盖**：天然覆盖**全部 11 个 tail 块 + system prompt + history 通道**，
+       不需要 per-channel 提取。
+   * 11 个 tail 块的名字**仍要枚举**（用于**文档与诊断**，不再是断言主体）——
+     可枚举自 **`ContextAssembled.tail_blocks`**（评审 P2-④：名字是
+     `request_assembly.py:348-358` 的**字符串字面量**，**没有注册表**）。
    * **措辞更正（评审 P2-③）**：是"注入落在**可变区内**，从而**稳定前缀不被改写**" ——
      原写"注入位置在可变区之外"与括号内意图**正好相反**。
 2. **用 M-A6 的布尔不变量，不用百分比阈值**（评审 P0-2）：
@@ -341,6 +360,12 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
      （一次字符串比较覆盖全部，评审 P2-⑧：窄枚举会漏掉 `mode` 与 `tools` 变化）；
      ④ **`tools_text` 变化** —— `canonical_request` 把工具 schema 放在**最前面**
      （mode 切换 / MCP catalog 变化 / skills catalog 变化都会改前缀）；
+     * **可观测载体（评审 P1-5）**：`Assembled` **没有** `tools_text` —— 它在
+       `AgentLoop._tools_text`（`agent_loop.py:404`）与 `TurnReporter._tools_text`（`turn_report.py:86-90`）。
+       → 测试要么**注入一个已知的 tools 集合**再比较，要么**断言"tools 集合变化即 skip"**
+       （用 `AgentLoop` 暴露的 tools 快照，而非 `Assembled`）。
+     * `canonical_request(instructions, messages, tools_text)` **三参** —— §D.4 必须同时传
+       `instructions`、`Assembled.history`、tools 文本。
      ⑤ **plan reminder** —— 它**不在 tail**，而是被追加到 **history 末尾**
      （`request_assembly.py:240-250`）且**不落 `session.messages`** → `reconcile` **每次请求都重加**，
      于是 turn N 的 history = `M_N + [R]`、turn N+1 = `M_N + new + [R]`，`startswith` 在 R 处**必断裂**。
@@ -374,21 +399,24 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
 
 | # | 文件 | 改动 | 为什么 |
 |---|---|---|---|
-| 1 | `core/context_compression.py` | `persist_large_outputs`（**A1：文档化，不改行为**）+ `LayerStat` 收集 + `last_layer_stats` 暴露（含首尾估算，**每调用重置**，镜像 `last_summary_usage`） | M-E1 / M-E3 |
+| 1 | `core/context_compression.py` | `persist_large_outputs`（**A1：文档化，不改行为**）+ **生产** `LayerStat` 并暴露 `last_layer_stats`（含首尾估算，**每调用重置**，镜像 `last_summary_usage`） | M-E1 / M-E3 |
 | 2 | `core/events.py` | `CompactionEnded` 增 `layers` / `estimatedBefore` / `estimatedAfter`（**向后兼容**）+ 定义 `LayerStat` | M-E3 |
+| **2b** | **`core/compaction.py`** | **`Compactor._compress_once` 读 `context.last_layer_stats` → 填进 `CompactionEnded`**（评审 P0-1：**没有这一行，`layers` 永远是 `None`**） | M-E3 |
 | 3 | `app/trace_text.py` | `summarize_turn` 折叠压缩事件；`render_turn` 输出每层统计 | M-E3 |
 | 4 | `frontend/src/component/message.tsx` + `util/*` | 压缩卡片显示每层命中数 | M-E3 |
 | 4b | **`server/bridge.py`** | `to_wire` 增 `layers` / `estimatedBefore` / `estimatedAfter`（**手写映射，不是 `asdict`** —— 不加就进不了前端） | M-E3（评审 P1-a） |
 | 4c | **`frontend/src/state/session.ts`** | reducer + `Part` 类型增 `layers` | M-E3（评审 P1-a） |
 | 4d | **`tests/test_compaction_events.py`** | `compaction.ended` 的 wire **整字典相等断言**会因新增键而红 → 放宽为子集断言 | M-E3（评审 P1-a） |
 | 4f | **`frontend/test/reducer.test.ts`** | compaction 卡片有 **7 处 `toEqual` 精确断言**（776-789、822-833、879-892、900-913、924-937、942-955、1005-1016）→ 加 `layers` 后必红，需同步放宽 | M-E3（评审 P1-3） |
-| 4e | `core/context_compression.py` | 新增 `last_layer_stats` 暴露（`Compactor` 读它） | M-E3（评审 P2-4） |
-| 5 | `tests/test_context_compression.py` | M-E1 语义锁定（A1）或扩展断言（A2） | M-E1 |
-| 6 | `tests/test_context_compression_l2_window.py` | 阈值载体改为 **`AIConfig()` + `resolve_context_window`**（评审 P2-1：原写"改用默认 `max_messages`"是 P0-1 前的残留措辞，且与 §2.3 矛盾） | M-E3 |
-| 7 | `tests/test_context_compression_cache_friendliness.py`（新） | 统一分页断言（**布尔不变量**）+ 前缀字节稳定（`canonical_request`）+ 时间戳陷阱扫描 | M-E4 |
-| 8 | `tests/test_context_compression.py` | 管线顺序不变量 + **按 token 判定** + 原子组 | M-E2 |
+| 4e | ~~`core/context_compression.py`~~ → **见 #2b** | `last_layer_stats` 的**消费方是 `Compactor`**，落点在 `core/compaction.py`（评审 P0-1：原文件列错误） | M-E3 |
+| 8 | `tests/test_context_compression.py` | 管线顺序不变量（W3）+ 原子组（W4）+ **M-E1 语义锁定（A1）** | M-E1 / M-E2 |
+| 8b | **`tests/test_compaction_oc_parity.py`** | **W2 的落点**：把内容真值判据契约**扩展到显式断言"条数不变也算成功"**（评审 P1-3：原清单漏了这个文件） | M-E2 |
+| 8c | **`tests/test_trace_text.py`** | **W6 的落点**：`/trace` 渲染压缩层的断言（评审 P2：原 #3 只列了 `app/trace_text.py`） | M-E3 |
 | 9 | `scripts/cache_probe.py` | 保留为手工工具（离线等价物进 #7） | M-E4 |
-| 10 | `docs/features.md` / `docs/data-contracts.md` | M-E1 语义 + 修 `l4_keep_tail` 漂移 | 文档 |
+| 9b | **`scripts/r7_cases.py`** | **判据载体换成 `resolve_context_window(cfg)`**（评审 P1-6：原错判据在 `r7_cases.py:239`，**不在清单**） | M-E3 |
+| 9c | **`.github/workflows/ci.yml`**（条件性） | 若选"r7 接入 CI"这条路才改（评审 P1-6）；否则等价地把断言搬进 pytest | M-E3 |
+| 10 | `docs/features.md` / `docs/data-contracts.md` | M-E1 语义 + 修 `l4_keep_tail` / `max_context_tokens` 漂移 | 文档 |
+| 10b | **`docs/r11-analysis.md`** | `messages[-self._l4_keep_tail:]` 标注为**历史快照**（评审 P2） | 文档 |
 | 11 | `docs/eval-04-longtask-mechanics.md` | 把"计数不可断言"的承认**固化** | M-E2 |
 
 ### 4.1 语义等价性
@@ -419,7 +447,7 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
 | W5 | `test_compaction_ended_reports_per_layer_stats` | `layers` / `estimated_before/after`（今天：无字段） |
 | W6 | `test_the_trace_renders_the_compaction_layers` | `/trace` 输出每层统计（今天：不渲染压缩） |
 | W7 | `test_every_injection_channel_leaves_the_stable_prefix_alone` | 每通道**布尔不变量**（今天：无统一断言） |
-| W8 | `test_a_turns_prefix_is_byte_stable_when_nothing_volatile_changed` | 跨回合前缀字节稳定（**skip 条件**：task_injection=system / 回合内压缩 / instructions 变化）（今天：无断言） |
+| W8 | `test_a_turns_prefix_is_byte_stable_when_nothing_volatile_changed` | 跨回合前缀字节稳定（**skip 条件 = §D.3 的全部五类**：① `task_injection="system"` ② 回合内压缩 ③ instructions 变化 ④ `tools_text` 变化 ⑤ plan reminder）（今天：无断言） |
 | W9 | `test_the_system_prompt_carries_no_sub_second_timestamp` | 时间戳陷阱扫描（**范围排除尾部块**）（今天：无断言） |
 | W10 | `test_the_r7_budget_case_uses_the_resolved_window` | 断言判据载体是 `resolve_context_window(cfg)`（今天：用未解析的 `AIConfig().max_context_tokens` → **恒 FAIL**） |
 
@@ -444,7 +472,7 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
 
 ## 六、验收判据
 
-* **M-E1**：L3 的语义**被文档化且被测试锁定**（A1）或**按扩展后的语义实现并锁定**（A2）。
+* **M-E1**：L3 的语义**被文档化且被测试锁定**（**A1** —— A2 须先补规格，不在本轮）。
 * **M-E2**：压缩**触发**按 token、**成功**按**内容真值**（`result != history`），**不按条数**；
   管线顺序**有不变量单测**；tool_call/result **原子淘汰**（管线级回归锁）。
   * **本轮不改用 token 判成功** —— 那正是 Hermes bug 的形态（省了 token 但条数没变被判失败）。
@@ -534,6 +562,31 @@ L3 persist_large_outputs → L1 snip_middle → L2 placeholder_old_results
 ### 8.3 实现评审（子智能体）
 
 _待填。_
+
+#### 8.2.3 第 4 轮评审的处置（全部已修）
+
+**2 个 P0 · 6 个 P1 · 4 个 P2 · 3 个 P3** —— 评审结论：**技术判断全部正确，可开工**。
+
+| 级别 | 问题 | 修法 |
+|---|---|---|
+| **P0-1** | **§四 改动清单没有 `core/compaction.py`**，且 #4e 把 plumbing 的**文件列写错**（写成 `context_compression.py`）→ 按清单执行 `CompactionEnded.layers` **永远是 `None`**，W5/W6 无法落地 | §四 补 **#2b**（`Compactor._compress_once` 读 `last_layer_stats` → 填 `CompactionEnded`）；#4e 改为指向 #2b |
+| **P0-2** | **`skipped` 字段在 §A / §C.1 / §C.4 三节三种口径且未拍板** | **拍板：加 `skipped` 字段**（"为什么"不做字段）；§C.4 的"每层命中数"改为 `removed`/`rewritten`/`skipped` + token 差 |
+| P1-1 | **§五 W8 的 skip 只有 3 类，§D.3 有 5 类** —— 按 §五 写会**假红** | §五 W8 改为"skip 条件 = §D.3 全部五类" |
+| P1-2 | §D.1 给了 **两种互斥**的断言设计，而 §六/W7 要求 per-channel；且 per-channel 版**写不出来**（`tail_blocks` 只给 `(name, chars)`） | §D.1 **二选一，选 (b) 全前缀整体断言**，并给出可执行定义（`canonical_request(instructions, history, tools_text)`） |
+| P1-3 | §四 **遗漏 `tests/test_compaction_oc_parity.py`**（W2 的落点） | §四 补 **#8b** |
+| P1-4 | 三处"修正未同步"残留：§四 #8"按 token 判定"、§四 #5 与 §六 的 A1/A2 并列 | #8 改为"触发按 token / 成功按内容真值"；#5 与 §六 删掉 A2 |
+| P1-5 | §D.3 ④ 的 `tools_text` **没有可观测载体**（`Assembled` 没有它） | §D.3 ④ 补载体（`AgentLoop._tools_text`）；§D.4 补 `canonical_request` 三参 |
+| P1-6 | §四 **遗漏 `scripts/r7_cases.py`**（+ 条件性 `ci.yml`）；且 W10 的红相只在 r7 成立 | §四 补 **#9b / #9c** |
+| P2-1 | §C.1 未定义 **L4 未跑**时 `layers` 的形状 | 补：`layers` 不含 L4 项；`/trace` 输出"L4 未触发" |
+| P2-2 | Σ 不变量是 **telescoping 恒等式**，真正编码的是**相邻层连续** | 改为**逐对连续性断言** |
+| P2-3 | §四 编号混乱（#4f 在 #4e 前；#4e 与 #1 重复） | 编号重整 |
+| P2-4 | §E 遗漏 `docs/r11-analysis.md`；W6 遗漏 `tests/test_trace_text.py` | §四 补 **#10b / #8c** |
+| P3-1 | §B.3 没说顺序不变量需 `force=True`（否则 vacuous） | §B.3 补 |
+| P3-2 | §C.3 "把 bug 一起搬"措辞不准（pytest 版本就用真窗口） | §C.3 改为"对齐真窗口的来源" |
+| P3-3 | §B.4"删条数断言"确实可能是空操作 | 保留（已标注"先核实再写"） |
+
+> **评审的正面结论**：§C.1 的字段口径、Σ 不变量（修正后）、`/trace` 按 token 差渲染、
+> `removed/rewritten` 分列、`_history_tokens`（含 1600/张图）这些**技术判断逐条核过，全部正确**。
 
 #### 8.2.2 第 3 轮评审的处置（全部已修）
 
