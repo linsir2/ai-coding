@@ -1015,6 +1015,13 @@ def make_handlers(
         field anywhere (J1): ``AutoApproveCallback`` means auto, anything else
         means confirm.  Grants and their on-disk home come from the gate, which
         is also what ``/permissions clear`` empties.
+
+        M-D3: a grant is reported as ``{key, expiresAt}`` -- ``expiresAt`` is the
+        epoch deadline, or ``null`` for a permanent one -- and the session-scoped
+        one-off answers ride along under ``onceGrants``.  Both are shown because
+        an authorisation the operator cannot inspect is one they cannot consent
+        to, and a "this once" that looks like a standing grant is the same
+        deception one level down.
         """
         from ai_coding.security.approval import AutoApproveCallback
 
@@ -1037,9 +1044,18 @@ def make_handlers(
             *tuple(getattr(getattr(gate, "_rules", None), "errors", ()) or ()),
             *session_errors,
         ]
+        records = (
+            gate.grant_records()
+            if gate is not None and hasattr(gate, "grant_records")
+            else []
+        )
+        once = sorted(getattr(gate, "_once_grants", ()) or ())
         return {
             "policy": "auto" if isinstance(approval, AutoApproveCallback) else "confirm",
-            "grants": list(getattr(gate, "grants", ()) or ()),
+            "grants": [
+                {"key": key, "expiresAt": expiry} for key, expiry in records
+            ],
+            "onceGrants": once,
             "storePath": str(getattr(store, "path", "") or ""),
             "rules": {
                 "layers": layers,
@@ -1047,6 +1063,22 @@ def make_handlers(
                 "errors": errors,
             },
         }
+
+    def permissions_revoke(params: dict[str, Any]) -> dict[str, Any]:
+        """M-D3: forget one grant, by full key or by base name.
+
+        The mutation goes through the gate (memory + store), never the file, so
+        ``/permissions revoke`` and the panel's button cannot disagree.
+        """
+        key = str(params.get("key", "") or "").strip()
+        dispatcher = getattr(world.loop, "dispatcher", None)
+        gate = getattr(dispatcher, "gate", None)
+        if not key:
+            return {"ok": False, "reason": "a key is required"}
+        if gate is None or not hasattr(gate, "revoke"):
+            return {"ok": False, "reason": "no permission gate in this world"}
+        removed = bool(gate.revoke(key))
+        return {"ok": removed, "key": key}
 
     def model_set(params: dict[str, Any]) -> dict[str, Any]:
         name = str(params.get("name", ""))
@@ -1736,6 +1768,7 @@ def make_handlers(
         "session.delete": session_delete,
         "model.set": model_set,
         "permissions.state": permissions_state,
+        "permissions.revoke": permissions_revoke,
         "skills.list": skills_list,
         "slash.list": slash_list,
         "files.find": files_find,

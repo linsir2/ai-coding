@@ -13,6 +13,7 @@ from __future__ import annotations
 import enum
 import os
 import re
+import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,7 +21,7 @@ from typing import Any
 
 from ai_coding.security.bash_redlines import bash_red_line_with_fallback
 from ai_coding.security.credentials import credential_match, credential_rules
-from ai_coding.security.grants import GrantStore
+from ai_coding.security.grants import DEFAULT_GRANT_TTL, GrantStore
 from ai_coding.security.permissions import (
     NO_FILE_RULES,
     POSTURES,
@@ -258,10 +259,28 @@ class PermissionGate:
         skill_resolver: Callable[[str], str | None] | None = None,
         workspace: str | None = None,
         rules: FileRules = NO_FILE_RULES,
+        #: M-D3: per-grant expiry, epoch seconds; a grant absent here is
+        #: permanent.  Seeded from ``GrantStore.load_with_expiry`` so a grant
+        #: loaded from disk carries the lifetime it was written with.
+        grant_expiry: Mapping[str, float] | None = None,
+        #: M-D3: the TTL a newly granted "always" gets; ``None`` is permanent.
+        grant_ttl: float | None = DEFAULT_GRANT_TTL,
+        #: M-D3: the clock the expiry check reads.  Injected so a test (and the
+        #: store) can move time; the default is the wall clock.
+        clock: Callable[[], float] = time.time,
     ) -> None:
         #: Calls the operator answered "Always" for, as ``grant_key`` strings.
         #: Seeded from the store at startup and extended by ``grant``.
         self._grants = {str(key) for key in grants}
+        #: M-D3: when each standing grant stops answering (epoch seconds).  A
+        #: grant with no entry here is permanent -- the shape every v1 file
+        #: already has.
+        self._grant_expiry = {
+            str(key): float(deadline)
+            for key, deadline in (grant_expiry or {}).items()
+        }
+        self._grant_ttl = grant_ttl
+        self._clock = clock
         #: One-off "yes" answers (B).  Session-scoped and never persisted: they
         #: exist so the sandbox can honour the answer for the call it was given
         #: to, and they are not standing permissions.
@@ -754,12 +773,21 @@ class PermissionGate:
         it was given in and in every looser one (the ladder ``plan <
         readonly < build``); an unknown posture is treated as stricter than
         ``plan``, so a build grant cannot leak through a misspelling.
+
+        M-D3: a grant whose deadline has passed is treated as absent, checked
+        *before* the posture ladder so an expired grant never answers in any
+        posture.  The clock is read per call, which is what lets a grant loaded
+        from disk expire inside the session that loaded it.
         """
         try:
             current = POSTURES.index(posture)
         except ValueError:
             current = -1
+        now = self._clock()
         for stored in self._grants:
+            deadline = self._grant_expiry.get(stored)
+            if deadline is not None and deadline < now:
+                continue
             base, granted = _split_grant(stored)
             if base != key:
                 continue
@@ -848,11 +876,18 @@ class PermissionGate:
         if key is None:
             return None
         stored = key if posture is None else f"{key}@{posture}"
-        if stored not in self._grants:
-            self._grants.add(stored)
-            store = self._store
-            if store is not None:
-                store.add(stored)
+        self._grants.add(stored)
+        store = self._store
+        if store is not None:
+            # Unconditional: a re-approval refreshes the store's grantedAt (and
+            # so the TTL), which is the whole point of answering "always" twice.
+            store.add(stored)
+        # M-D3: a grant written with a TTL carries its deadline.  Re-approving
+        # refreshes the store's timestamp; the in-memory deadline moves with it
+        # so the answer holds for the new lifetime, not the old one.
+        self._grant_expiry.pop(stored, None)
+        if self._grant_ttl is not None:
+            self._grant_expiry[stored] = self._clock() + float(self._grant_ttl)
         return key
 
     def grant_key(
@@ -863,12 +898,68 @@ class PermissionGate:
 
     @property
     def grants(self) -> tuple[str, ...]:
-        """What is currently remembered, sorted for display."""
-        return tuple(sorted(self._grants))
+        """What is currently remembered -- the *live* ones, sorted for display.
+
+        M-D3: an expired grant is not "remembered" any more, so the panel shows
+        the same set the gate answers with.
+        """
+        now = self._clock()
+        live = (
+            key
+            for key in self._grants
+            if self._grant_expiry.get(key, now) >= now
+        )
+        return tuple(sorted(live))
+
+    def grant_expiry_map(self) -> dict[str, float]:
+        """The deadline of every live grant that has one (epoch seconds)."""
+        now = self._clock()
+        return {
+            key: deadline
+            for key, deadline in self._grant_expiry.items()
+            if key in self._grants and deadline >= now
+        }
+
+    def grant_records(self) -> list[tuple[str, float | None]]:
+        """Every live grant as ``(key, expiry)``; ``None`` expiry is permanent.
+
+        The panel's row shape: one call yields both halves (the key and whether
+        it expires) so the two cannot disagree about what is remembered.
+        """
+        expiry = self.grant_expiry_map()
+        return [(key, expiry.get(key)) for key in self.grants]
+
+    def revoke(self, key: str) -> bool:
+        """Forget one grant, by full key or by base name.
+
+        A stored key is ``tool:path[@posture]``.  Passing the **full** key
+        (``edit:src/foo.py@build``) removes exactly that variant; passing the
+        **base name** (the part before ``@``, e.g. ``edit:src/foo.py``) removes
+        every posture variant of it.  Both halves -- memory and disk -- are
+        cleared, and the deadline goes with them.  Returns whether anything was
+        removed, so a command can say "no such grant" instead of "done".
+        """
+        text = str(key).strip()
+        if not text:
+            return False
+        _, posture = _split_grant(text)
+        if posture is not None:
+            targets = [stored for stored in self._grants if stored == text]
+        else:
+            targets = [stored for stored in self._grants if _grant_base(stored) == text]
+        if not targets:
+            return False
+        for stored in targets:
+            self._grants.discard(stored)
+            self._grant_expiry.pop(stored, None)
+            if self._store is not None:
+                self._store.revoke(stored)
+        return True
 
     def revoke_all(self) -> None:
         """Forget everything, on disk as well as in memory."""
         self._grants.clear()
+        self._grant_expiry.clear()
         self._once_grants.clear()
         if self._store is not None:
             self._store.clear()
@@ -880,6 +971,9 @@ class PermissionGate:
         *,
         workspace: str | None = None,
         skill_resolver: Callable[[str], str | None] | None = None,
+        #: M-D3: the clock the gate's expiry check reads; the store is built with
+        #: the same one so a grant written and a grant read agree on "now".
+        clock: Callable[[], float] = time.time,
     ) -> PermissionGate:
         """The one place the composition root's policy is read (R7d).
 
@@ -897,10 +991,16 @@ class PermissionGate:
 
         ``skill_resolver`` (E-5) turns a skill spelling into its canonical id so
         ``ai.skill_permissions`` keys and call arguments meet in one namespace.
+
+        M-D3: the store is read with :meth:`GrantStore.load_with_expiry`, so a
+        grant loaded from disk carries the deadline it was written with -- the
+        expiry check reads the clock per call, which is what lets it expire
+        inside the session that loaded it.
         """
         mcp = getattr(app_cfg, "mcp", None)
         servers = getattr(mcp, "servers", None) or []
-        store = GrantStore(workspace) if workspace else None
+        ttl = getattr(getattr(app_cfg, "security", None), "grant_ttl_seconds", DEFAULT_GRANT_TTL)
+        store = GrantStore(workspace, ttl=ttl, clock=clock) if workspace else None
         denied: list[str] = []
         allowed: list[str] = []
         for server in servers:
@@ -910,13 +1010,17 @@ class PermissionGate:
                 denied.append(f"{name}__{remote}")
             for remote in getattr(rules, "allow", None) or []:
                 allowed.append(f"{name}__{remote}")
+        grants, expiry = store.load_with_expiry() if store is not None else ((), {})
         return cls(
             trusted_servers=[
                 str(getattr(server, "name", ""))
                 for server in servers
                 if getattr(server, "auto_approve", False)
             ],
-            grants=store.load() if store is not None else (),
+            grants=grants,
+            grant_expiry=expiry,
+            grant_ttl=ttl,
+            clock=clock,
             store=store,
             denied_tools=denied,
             allowed_tools=allowed,

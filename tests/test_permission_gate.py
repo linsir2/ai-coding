@@ -352,3 +352,110 @@ def test_a_variable_prefix_does_not_hide_a_red_line():
     """
     gate = _gate()
     assert gate.check("bash", {"command": "FOO=bar rm -rf /"}) == PermissionDecision.DENY
+
+
+# ---- M-D3: TTL and per-grant revocation ------------------------------------
+
+
+def test_an_expired_grant_stops_answering():
+    now = {"t": 1000.0}
+    gate = PermissionGate(clock=lambda: now["t"], grant_ttl=60.0)
+    gate.grant("edit", {"path": "src/a.py"}, posture="build")
+
+    assert gate.check("edit", {"path": "src/a.py"}) == PermissionDecision.ALLOW
+
+    now["t"] += 61.0
+
+    assert gate.check("edit", {"path": "src/a.py"}) == PermissionDecision.WARN
+    assert gate.grants == ()
+
+
+def test_a_permanent_grant_never_expires():
+    now = {"t": 1000.0}
+    gate = PermissionGate(clock=lambda: now["t"], grant_ttl=None)
+    gate.grant("edit", {"path": "src/a.py"}, posture="build")
+
+    now["t"] += 10_000_000.0
+
+    assert gate.check("edit", {"path": "src/a.py"}) == PermissionDecision.ALLOW
+
+
+def test_reapproving_refreshes_the_grants_lifetime():
+    """P3-2: "always" again restarts the clock rather than keeping the old one."""
+    now = {"t": 1000.0}
+    gate = PermissionGate(clock=lambda: now["t"], grant_ttl=60.0)
+    gate.grant("edit", {"path": "src/a.py"}, posture="build")
+
+    now["t"] += 50.0
+    gate.grant("edit", {"path": "src/a.py"}, posture="build")
+
+    now["t"] += 50.0  # 100s since the first grant, 50s since the second
+
+    assert gate.grants == ("edit:src/a.py@build",)
+    assert gate.check("edit", {"path": "src/a.py"}) == PermissionDecision.ALLOW
+
+
+def test_a_single_grant_can_be_revoked():
+    """U14: a full key removes exactly that variant -- not every looser one."""
+    gate = PermissionGate()
+    gate.grant("edit", {"path": "src/a.py"}, posture="build")
+    gate.grant("edit", {"path": "src/a.py"}, posture="readonly")
+
+    assert gate.revoke("edit:src/a.py@build") is True
+
+    assert gate.grants == ("edit:src/a.py@readonly",)
+    assert gate.revoke("edit:src/a.py@build") is False
+    assert gate.revoke("edit:src/a.py@readonly") is True
+    assert gate.grants == ()
+    assert gate.check("edit", {"path": "src/a.py"}, posture="build") == (
+        PermissionDecision.WARN
+    )
+
+
+def test_revoking_by_base_name_drops_every_posture_variant():
+    gate = PermissionGate()
+    gate.grant("edit", {"path": "src/a.py"}, posture="build")
+    gate.grant("edit", {"path": "src/a.py"}, posture="readonly")
+    gate.grant("edit", {"path": "src/b.py"}, posture="build")
+
+    assert gate.revoke("edit:src/a.py") is True
+
+    assert gate.grants == ("edit:src/b.py@build",)
+
+
+def test_revoking_an_unknown_key_is_not_an_error():
+    gate = PermissionGate()
+
+    assert gate.revoke("edit:src/a.py") is False
+
+
+def test_revoking_reaches_the_store(tmp_path):
+    from ai_coding.security.grants import GrantStore
+
+    store = GrantStore(tmp_path, tmp_path / "grants.json")
+    gate = PermissionGate(store=store)
+    gate.grant("edit", {"path": "src/a.py"}, posture="build")
+
+    assert gate.revoke("edit:src/a.py") is True
+
+    assert store.load() == set()
+
+
+def test_grant_records_carry_the_expiry():
+    """U15: the panel's row shape -- the key and its deadline in one place."""
+    now = {"t": 1000.0}
+    gate = PermissionGate(clock=lambda: now["t"], grant_ttl=60.0)
+    gate.grant("edit", {"path": "src/a.py"}, posture="build")
+    gate.grant("write", {"path": "src/b.py"})
+
+    assert gate.grant_records() == [
+        ("edit:src/a.py@build", 1060.0),
+        ("write:src/b.py", 1060.0),
+    ]
+
+
+def test_a_permanent_grant_has_no_deadline():
+    gate = PermissionGate(grant_ttl=None)
+    gate.grant("edit", {"path": "src/a.py"})
+
+    assert gate.grant_records() == [("edit:src/a.py", None)]

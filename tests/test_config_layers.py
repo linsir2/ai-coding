@@ -240,6 +240,18 @@ def test_only_the_execution_keys_are_dropped(home):
     assert app.mcp.enabled is False
 
 
+def test_a_project_layer_cannot_turn_off_the_process_sandbox(home):
+    """M-D3: the sandbox is the write boundary, and a repository's tracked
+    config must not be able to switch it off for every bash/job."""
+    paths = Paths.for_workspace(home / "project")
+    _write(paths.user_config, "process_sandbox:\n  mode: enforce\n")
+    _project_file(paths, "process_sandbox:\n  mode: off\n")
+
+    app = ConfigLoader.load_layers(paths)
+
+    assert app.process_sandbox.mode == "enforce"
+
+
 def test_the_sidecar_is_not_read_from_the_project_directory(home):
     """``_mcp_doc`` resolves ``mcp.local.yaml`` next to ``chosen``.
 

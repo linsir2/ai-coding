@@ -10,6 +10,7 @@ import { describe, expect, test } from "bun:test"
 import {
   policyLabel,
   grantLine,
+  revokeGrantCommand,
   toggledPolicy,
   toggleCommand,
   ruleLine,
@@ -25,11 +26,24 @@ describe("policyLabel", () => {
 
 describe("grantLine", () => {
   test("renders a grant key the way the key reads", () => {
-    expect(grantLine("write:/tmp/a.py")).toBe("write · /tmp/a.py")
+    expect(grantLine({ key: "write:/tmp/a.py", expiresAt: null })).toBe("write · /tmp/a.py")
   })
 
   test("an empty grant list says so instead of rendering nothing", () => {
-    expect(grantLine("")).toBe("(none)")
+    expect(grantLine({ key: "", expiresAt: null })).toBe("(none)")
+  })
+
+  test("a grant with a deadline says when it stops answering", () => {
+    const deadline = 1_700_000_000
+    expect(grantLine({ key: "read:src", expiresAt: deadline })).toBe(
+      `read · src · expires ${new Date(deadline * 1000).toISOString()}`,
+    )
+  })
+})
+
+describe("revokeGrantCommand", () => {
+  test("is the backend command, not a second write path", () => {
+    expect(revokeGrantCommand("edit:src/a.py")).toBe("/permissions revoke edit:src/a.py")
   })
 })
 

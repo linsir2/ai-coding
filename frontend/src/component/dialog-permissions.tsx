@@ -25,7 +25,6 @@ import {
   ruleLine,
   toggleCommand,
 } from "../util/permissions-dialog"
-
 export function DialogPermissions(props: { client: IpcClient; liveSessionId: string }) {
   const [permissions, setPermissions] = createSignal<PermissionsState | null>(null)
   const [error, setError] = createSignal("")
@@ -114,7 +113,7 @@ export function DialogPermissions(props: { client: IpcClient; liveSessionId: str
                 </>
               )}
             </Show>
-            <For each={state().grants.length > 0 ? state().grants : [""]}>
+            <For each={state().grants.length > 0 ? state().grants : [{ key: "", expiresAt: null }]}>
               {(grant) => (
                 <box flexDirection="row" justifyContent="space-between">
                   <text fg={theme.textMuted}>{"  remembered"}</text>
@@ -122,6 +121,16 @@ export function DialogPermissions(props: { client: IpcClient; liveSessionId: str
                 </box>
               )}
             </For>
+            <Show when={state().onceGrants.length > 0}>
+              <For each={state().onceGrants}>
+                {(grant) => (
+                  <box flexDirection="row" justifyContent="space-between">
+                    <text fg={theme.textMuted}>{"  once"}</text>
+                    <text fg={theme.textBase}>{grantLine({ key: grant, expiresAt: null })}</text>
+                  </box>
+                )}
+              </For>
+            </Show>
             <Show when={state().storePath}>
               <box flexDirection="row" justifyContent="space-between">
                 <text fg={theme.textMuted}>{"  store"}</text>

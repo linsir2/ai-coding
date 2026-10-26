@@ -305,7 +305,7 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `UncertaintyItem`（`domain/ledger.py`） | `id`、`question`、`kind`（epistemic/aleatoric/preference）、`level`（high/medium/low）、`evidence`（尾 120）、`resolves`（AC id） | 纯派生：验失败/工具错误聚合/失败连胜；H 只降在记录证据上 |
 | `LedgerUpdated`（事件） | `items` | open 集签名变化才发（边沿触发）；transcript 显示 dim 行，trace 泛型记录 |
 | `SearchStalled`（事件） | `iteration`、`level`、`calls`、`streak` | B1/B2/B5：`[search-gate]` 每升一档发一条，只走 nudge 路径；`trace.py` 的 `asdict` 让它自动进 jsonl |
-| `EXECUTION_KEYS`（配置常量） | `{"hooks", "mcp"}` | N-4：项目层不得授予的顶层键。`ConfigLoader` 在 `_normalize` **之后**过滤，项目层设置即丢弃 + warning，除非 `AI_CODING_TRUST_PROJECT=1`。`mcp.local.yaml` sidecar 的锚点（`chosen`）同样不推进到项目层 |
+| `EXECUTION_KEYS`（配置常量） | `{"hooks", "mcp", "process_sandbox"}` | N-4：项目层不得授予的顶层键。`ConfigLoader` 在 `_normalize` **之后**过滤，项目层设置即丢弃 + warning，除非 `AI_CODING_TRUST_PROJECT=1`。`mcp.local.yaml` sidecar 的锚点（`chosen`）同样不推进到项目层。**M-D3 加入 `process_sandbox`**：它是唯一能关掉 OS 写边界的开关（`mode: off`/`allow_bypass`），被仓库 tracked config 改掉等于让该工作区所有 bash/job 以非沙箱运行；`AI_CODING_TRUST_PROJECT=1` 仍可覆盖 |
 | `PROJECT_FORBIDDEN_MEMBERS` / `PROJECT_FORBIDDEN_NESTED` / `MODEL_DESTINATION_MEMBERS`（配置常量） | `{"ai": {"websearch_api_key"}, "tracing": {"dir"}}` / `{"memory": {"embeddings": {"cache_path"}}}` / `{"base_url", "api_key"}` | N-4b：项目层**不得授予端点、凭据、越界路径**。`loader._filter_project_document` 在 `_normalize` 之后、`_overlay` 之前对项目层生效：`models` 条目若用户层没有则整条丢弃（项目层新增条目永远拿不到 `base_url`，是空壳）；用户层已有条目只丢 `base_url`/`api_key`，`name`/`max_tokens`/`temperature` 等仍生效；`default_model` 仅当指向项目层自己新增的模型时丢弃。**规则 0**：用户层在某顶层键上是 mapping 而项目层不是 → 丢项目层的值（`models:` YAML null 曾把用户所有模型覆盖成 `None`）。`tools.extra_workspace_roots` 取交集（见下）。`AI_CODING_TRUST_PROJECT=1` 时全部跳过 |
 | `tools.extra_workspace_roots` 的合并（N-4b） | 覆盖语义 | 项目层声明**非空**时，有效集 = {用户层展开后的根 ∩ 被项目层声明**覆盖**的根}；声明**展开后为空**（`[]`/`[""]`/匹配不到的 pattern/缺省）→ 从项目 document 删掉该键，`_overlay` 的 list-replace 保留用户层原样。故 `["/"]` 覆盖全部用户根（无法把整台机器塞进来），`["<用户根>/a"]` 且用户根恰为 `a` 才收紧到 `{a}`，`["/etc"]` 收紧到 ∅。交集在**展开后**的目录上算（两个 pattern 集合无交集） |
 | `TraceStore.workspace`（N-4b） | `str \| Path \| None = None` | 纵深防御：`prune` 遍历并删除 `root` 下的一切，故 `root` 不在 `workspace` 内（或 `workspace=None`，fail-closed）时**直接返回 0 + warning**，不删任何东西。比较前双方都 `resolve()`，符号链接绕不过。代价：所有 `TraceStore(...)` 构造点须传 `workspace=` |
@@ -952,4 +952,58 @@ M-C1~M-C3 见 `docs/plan-m-c.md`。三条新契约，其余全是新增或追加
 ### 记忆写并发（M-C2，`memory/store.py`）
 
 三层：`_save` **进锁**（`_mutate` 的 `try/except` 保留在锁内，`to_json_pretty` 可能抛非 `OSError`）；**唯一 tmp 路径** `<path>.<uuid4hex>.tmp`（锁失效时最坏 last-write-wins，文件始终合法）；**`fcntl.flock`** 在写 tmp + `os.replace` 期间锁**正式文件**（POSIX-only，`try/except ImportError` 可选导入，不可用时降级为裸 `os.replace`）。**诚实框定**：今天所有真实路径都是单写者，这是**潜在隐患的预防性修复**，不是正在漏的洞。
+
+## M-D3 契约（授权生命周期：TTL + 逐条撤销）
+
+### `grants.json` 的形状（`security/grants.py`）
+
+**形状不变、不 bump 版本**（`version` 仍是 `1`）——项目既有迁移约定是"加可选键、不 bump 版本"，旧代码读新文件时忽略未知键。`workspaces[ws]` 仍是 `list[str]`（权威列表），旁边新增可选 `meta`：
+
+```json
+{
+  "version": 1,
+  "workspaces": {"/abs/ws": ["read:src@build"]},
+  "meta": {"/abs/ws": {"read:src@build": {"grantedAt": 1761465600.0, "ttl": 86400}}}
+}
+```
+
+* `grantedAt` 是 **epoch 浮点**（`time.time()`）；写入、比较、序列化全用 epoch，不混 ISO。
+* `ttl` 省略 = **永久**；`grantedAt` 或 `ttl` 缺失/非数字 = **永久**（`meta` 多余键忽略）。
+* **读取以 `workspaces[ws]` 为准**：`meta` 里多出的键忽略；列表里的键没有可用 `meta` 记录则视为永久。单侧损坏不放大成安全问题。
+* `add()` 同键重复 → **刷新 `grantedAt`**（延长 TTL），不追加第二行。
+* `clear()` / `revoke()` **同步删 `meta`**（否则撤销后残留过期记录）。
+
+### 方法契约（`security/grants.py`）
+
+| 方法 | 契约 |
+|---|---|
+| `GrantStore.load()` | **只读**：返回未过期键的 `set[str]`，**不写盘** |
+| `GrantStore.load_with_expiry()` | `-> (set[str], dict[str, float])`：未过期键 + 各自的过期 epoch（永久键不进 expiry map）。`PermissionGate.from_config` 用它同时 seed `_grants` 与 `_grant_expiry` |
+| `GrantStore.prune()` | 显式写盘，丢弃过期行（列表 + `meta`）；由写路径（`add`/`revoke`）顺带调用 |
+| `GrantStore.revoke(key)` | 精确键：删列表项与 `meta` 记录；返回是否删到东西 |
+| `GrantStore.clear()` | 删 `workspaces[ws]` **与** `meta[ws]`（即使列表项不存在也要删 meta） |
+| 构造 | `GrantStore(workspace, path=None, *, clock=time.time, ttl=DEFAULT_GRANT_TTL)`：`clock` 注入便于测试，`ttl=None` = 永久 |
+
+### `PermissionGate` 的过期与撤销
+
+* `_grant_expiry: dict[str, float]`（key → 过期 epoch；无条目 = 永久），由 `load_with_expiry` seed。
+* `_grant_applies` 命中 grant 时**先查过期**（`deadline < now` 视为未授权），再走 posture 阶梯。时钟**每次调用读**，所以**磁盘加载的带 TTL 授权会在会话内过期**。
+* `grant()` 写入时同时写 `_grant_expiry`（TTL 来自 `security.grant_ttl_seconds`）；`None` = 永久。
+* `grants` 属性只返回**未过期**的（面板看到的是"当前有效"）。
+* `grant_records() -> list[(key, float | None)]`：面板行形状（`None` = 永久）。
+* `revoke(key) -> bool`：传**全键**（`edit:src/a.py@build`）精确撤销该条；传**基名**（`@` 之前，`edit:src/a.py`）撤销该基名的**全部 posture 变体**。内存 + 磁盘同步。
+* `revoke_all()` 一并清空 `_grant_expiry`。
+
+### 配置：`security.grant_ttl_seconds`（`config/models.py`）
+
+`SecurityConfig.grant_ttl_seconds: float | None = 86400.0`。默认 24h；`null` = 永久。被 `AppConfig.security` 持有，`from_config` 读它构造 store 与 gate。
+
+### IPC / 命令 / 前端
+
+| 面 | 契约 |
+|---|---|
+| `permissions.state` | 新增 `onceGrants: string[]`（session 级一次性授权，不持久化）；`grants` 变为 `{key: string, expiresAt: number \| null}[]` |
+| `permissions.revoke` | `{key}` → `{ok, key}`：经 gate 内存 + 磁盘撤销 |
+| `/permissions revoke <key>` | 接受全键或基名；无此授权时明确回报"没有" |
+| `PermissionsState` / `grantLine` | 前端 `grants: GrantRecord[]`（`GrantRecord = {key, expiresAt}`）；`grantLine(record)` 追加 `· expires <ISO>`；新增 `revokeGrantCommand(key)` |
 

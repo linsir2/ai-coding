@@ -802,6 +802,49 @@ async def test_permissions_state_reports_policy_grants_and_store(ipc):
 
 
 @pytest.mark.asyncio
+async def test_permissions_state_shows_grant_expiry_and_once_grants(ipc):
+    """U15: the panel sees each grant's deadline and the session's one-off answers."""
+    world, _service, client = ipc
+    client.request("initialize")
+    from ai_coding.security.permission_gate import PermissionGate
+
+    gate = PermissionGate(workspace=str(world.workspace))
+    gate.grant("edit", {"path": "src/a.py"}, posture="build")
+    gate.allow_once("edit", {"path": "src/b.py"})
+    world.loop.dispatcher.gate = gate
+
+    state = client.request("permissions.state")
+
+    assert state["onceGrants"] == ["edit:src/b.py"]
+    expiry = gate.grant_expiry_map()["edit:src/a.py@build"]
+    assert state["grants"] == [
+        {"key": "edit:src/a.py@build", "expiresAt": expiry}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_permissions_revoke_forgets_one_grant(ipc):
+    world, _service, client = ipc
+    client.request("initialize")
+    from ai_coding.security.permission_gate import PermissionGate
+
+    gate = PermissionGate()
+    gate.grant("edit", {"path": "src/a.py"}, posture="build")
+    gate.grant("edit", {"path": "src/b.py"}, posture="build")
+    world.loop.dispatcher.gate = gate
+
+    assert client.request("permissions.revoke", {"key": "edit:src/a.py@build"}) == {
+        "ok": True,
+        "key": "edit:src/a.py@build",
+    }
+    assert gate.grants == ("edit:src/b.py@build",)
+    assert client.request("permissions.revoke", {"key": "edit:src/a.py@build"}) == {
+        "ok": False,
+        "key": "edit:src/a.py@build",
+    }
+
+
+@pytest.mark.asyncio
 async def test_permissions_state_shows_the_session_layer_the_dialog_can_reset(ipc):
     """M1a: the dialog reads the session's own rules, and reset is a command."""
     _world, _service, client = ipc

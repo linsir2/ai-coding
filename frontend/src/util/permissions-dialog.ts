@@ -26,15 +26,29 @@ export interface PermissionsRules {
   errors: string[]
 }
 
+/** One standing grant as the panel shows it: the key and, when it has one, its deadline. */
+export interface GrantRecord {
+  key: string
+  /** Epoch seconds; ``null`` means the grant is permanent (a v1 grant, or TTL disabled). */
+  expiresAt: number | null
+}
+
 export interface PermissionsState {
   policy: ApprovalPolicy
-  grants: string[]
+  grants: GrantRecord[]
+  /** M-D3: this session's one-off "yes" answers -- shown so they are not mistaken for standing grants. */
+  onceGrants: string[]
   storePath: string
   rules?: PermissionsRules
 }
 
 /** What reset sends: the session layer's own command, not a second store. */
 export const RESET_SESSION_COMMAND = "/permissions reset"
+
+/** The dispatch line that forgets one grant (M-D3). */
+export function revokeGrantCommand(key: string): string {
+  return `/permissions revoke ${key}`
+}
 
 /** One rule as the line the operator reads: effect, action, resource. */
 export function ruleLine(rule: PermissionRule): string {
@@ -47,10 +61,15 @@ export function policyLabel(policy: ApprovalPolicy): string {
 }
 
 /** One grant as a readable line: the key is ``tool:path`` or just ``tool``. */
-export function grantLine(grant: string): string {
-  if (!grant) return "(none)"
-  const separator = grant.indexOf(":")
-  return separator < 0 ? grant : `${grant.slice(0, separator)} · ${grant.slice(separator + 1)}`
+export function grantLine(grant: GrantRecord): string {
+  if (!grant || !grant.key) return "(none)"
+  const separator = grant.key.indexOf(":")
+  const base = separator < 0 ? grant.key : grant.key.slice(0, separator)
+  const rest = separator < 0 ? "" : grant.key.slice(separator + 1)
+  const expiry = grant.expiresAt
+    ? ` · expires ${new Date(grant.expiresAt * 1000).toISOString()}`
+    : ""
+  return separator < 0 ? `${base}${expiry}` : `${base} · ${rest}${expiry}`
 }
 
 /**

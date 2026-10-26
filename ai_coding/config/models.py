@@ -67,6 +67,21 @@ class ProcessSandboxConfig(BaseModel):
     writable_paths: list[str] = Field(default_factory=lambda: ["~/.cache"])
 
 
+class SecurityConfig(BaseModel):
+    """M-D3: the standing-grant lifetime.
+
+    ``grant_ttl_seconds`` is how long an "always" stays in force: a grant
+    written ``grant_ttl_seconds`` seconds ago stops answering (the store drops
+    it on the next write, and the gate stops matching it the moment the clock
+    passes the deadline).  ``None`` means a grant is permanent -- the explicit
+    "always" of the pre-TTL shape, which every v1 file already is.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    grant_ttl_seconds: float | None = 86_400.0
+
+
 class StaticCheckConfig(BaseModel):
     """The commands the harness runs itself when the search ladder reaches L2 (B1).
 
@@ -481,6 +496,8 @@ class AppConfig(BaseModel):
     # M-D1: the OS-level process sandbox.  Policy and mechanism are separate;
     # the mechanism is built by the composition root from this.
     process_sandbox: ProcessSandboxConfig = Field(default_factory=ProcessSandboxConfig)
+    # M-D3: the standing-grant lifetime.
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
 
 
 def _coerce_fallbacks(raw: Any) -> tuple[str, ...]:

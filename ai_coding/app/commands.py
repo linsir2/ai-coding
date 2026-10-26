@@ -910,7 +910,8 @@ def _handle_permissions(
             lines.append(f"[permissions] stored at: {store.path}")
         lines.append(
             "[permissions] deny|allow <action> <resource> [reason] writes this "
-            "session; reset clears it; clear forgets remembered grants"
+            "session; reset clears it; clear forgets remembered grants; "
+            "revoke <key> forgets one grant"
         )
         console.info("\n".join(lines))
         return REPLAction.CONTINUE, session
@@ -919,6 +920,23 @@ def _handle_permissions(
         if gate is not None:
             gate.revoke_all()
         console.info("[permissions] cleared remembered grants for this workspace")
+        return REPLAction.CONTINUE, session
+    if target == "revoke":
+        # M-D3: forget one grant.  Accepts the full key
+        # (``edit:src/foo.py@build``) or its base name (``edit:src/foo.py``),
+        # which drops every posture variant -- the panel prints the full key but
+        # a person typing it usually types the base.
+        key = " ".join(parts[2:]).strip()
+        if not key:
+            console.error("[permissions] usage: /permissions revoke <key>")
+            return REPLAction.CONTINUE, session
+        if gate is None or not hasattr(gate, "revoke"):
+            console.error("[permissions] no permission gate in this session")
+            return REPLAction.CONTINUE, session
+        if gate.revoke(key):
+            console.info(f"[permissions] revoked '{key}'")
+        else:
+            console.info(f"[permissions] no such remembered grant '{key}'")
         return REPLAction.CONTINUE, session
     if target == "reset":
         session.permissions = []

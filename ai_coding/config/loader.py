@@ -29,7 +29,11 @@ _log = logging.getLogger(__name__)
 #: dangerous members (``base_url``, ``extra_workspace_roots``) are a different
 #: problem with a different fix, and lumping them in would break every project's
 #: model selection and tool list at once.
-EXECUTION_KEYS: frozenset[str] = frozenset({"hooks", "mcp"})
+#:
+#: ``process_sandbox`` (M-D3) is here because it is the *only* switch that turns
+#: the OS-level write boundary off: a repository's tracked config must not be
+#: able to make every bash/job in the workspace run unsandboxed.
+EXECUTION_KEYS: frozenset[str] = frozenset({"hooks", "mcp", "process_sandbox"})
 
 #: Members that decide *where* a request goes or *which secret* it carries.
 #: Same reasoning as ``EXECUTION_KEYS`` -- the operator trusts the directory as a

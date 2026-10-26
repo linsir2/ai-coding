@@ -187,6 +187,26 @@ def test_the_verdict_vocabulary_is_unchanged_for_callers():
 
 
 @pytest.mark.asyncio
+async def test_revoking_a_grant_puts_the_question_back():
+    """T7: "always" is a permission that can be taken back.  A revoke must
+    return the call to the approval path, not leave the old answer standing."""
+    gate = PermissionGate()
+    approval = _Recorder(ApprovalResult.ALWAYS)
+    dispatcher = _dispatcher(gate, approval)
+
+    _, denied, _ = await _decide(dispatcher, _ref("c1", "edit", path="src/a.py"))
+    assert not denied
+    assert gate.grants == ("edit:src/a.py@build",)
+
+    assert gate.revoke("edit:src/a.py@build")
+    approval.answer = ApprovalResult.NO
+    _, denied, _ = await _decide(dispatcher, _ref("c2", "edit", path="src/a.py"))
+
+    assert denied
+    assert [call for call, _ in approval.asked] == ["edit", "edit"]
+
+
+@pytest.mark.asyncio
 async def test_the_gate_and_the_prompt_see_the_real_call_not_the_vessel():
     """M2: one dispatcher (mcp_call) carries every remote call, but the gate
     must judge fs__write_file — otherwise the prompt reads "mcp_call" and the
