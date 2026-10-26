@@ -34,6 +34,7 @@ from ai_coding.security.redline_corpus import (
     UNPARSEABLE_DENY,
     UNPARSEABLE_WARN,
 )
+from ai_coding.security.redline_legacy_snapshot import LEGACY_BASH_DENIED
 
 #: The DENY half of ``tests/test_bash_red_lines.py``, replayed by U9.  Kept in
 #: step with that file on purpose: the merge has to keep both green.
@@ -125,24 +126,33 @@ def test_the_corpus_matches_its_frozen_verdicts() -> None:
 # ---- U9: the two readers agree (the merge is behaviour-preserving) ----------
 
 
-def test_the_two_readers_agree() -> None:
-    """The gate's ``bash_denied`` and the merged reader answer identically.
+def test_the_merged_reader_matches_the_frozen_bash_denied_snapshot() -> None:
+    """U9: the merge is behaviour-preserving, measured against a frozen snapshot.
 
-    ``bash_denied`` used to own the fallback; it now delegates.  On the corpus
-    and on the existing test set the answer has to be the same string, so a
-    difference here is a difference the operator sees in the approval panel.
+    ``bash_denied`` now delegates to ``bash_red_line_with_fallback``, so the two
+    sides of the old comparison were the *same* function and the assertion was
+    true by construction -- it could not fail no matter what the merge did.  The
+    real equivalence is against ``LEGACY_BASH_DENIED``: the pre-merge
+    ``bash_denied``'s verdicts, captured once and stored beside the corpus, so a
+    divergence in either entry point is a red build rather than a tautology.
     """
-    for case in CORPUS:
-        assert bash_denied(case.command) == bash_red_line_with_fallback(
-            case.command
-        ), case.command
-
-    for command in DENY_CASES:
-        assert bash_red_line_with_fallback(command), command
-        assert bash_denied(command), command
-    for command in WARN_CASES:
-        assert bash_red_line_with_fallback(command) == "", command
-        assert bash_denied(command) == "", command
+    commands = (
+        {case.command for case in CORPUS} | set(DENY_CASES) | set(WARN_CASES)
+    )
+    missing = commands - set(LEGACY_BASH_DENIED)
+    assert not missing, f"the snapshot lost a command the tests use: {sorted(missing)}"
+    for command in sorted(commands):
+        expected = LEGACY_BASH_DENIED[command]
+        assert bash_red_line_with_fallback(command) == expected, (
+            command,
+            expected,
+            bash_red_line_with_fallback(command),
+        )
+        assert bash_denied(command) == expected, (
+            command,
+            expected,
+            bash_denied(command),
+        )
 
 
 def test_the_gate_no_longer_owns_a_copy_of_the_rules() -> None:

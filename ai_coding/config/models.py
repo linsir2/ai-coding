@@ -57,7 +57,7 @@ class ProcessSandboxConfig(BaseModel):
     ``off`` would make it empty out of the box.  On a host with no unprivileged
     user namespaces (a common Debian/RHEL configuration) that means every bash
     call is refused until the operator sets ``warn`` -- which is the honest
-    outcome, and why ``config.example.yaml`` shows a ``warn`` example.
+    outcome, and why ``config.example.yaml`` shows the ``warn`` fallback.
     """
 
     model_config = ConfigDict(extra="ignore")

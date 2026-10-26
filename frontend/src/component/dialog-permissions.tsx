@@ -17,17 +17,23 @@ import { useBindings } from "@opentui/keymap/solid"
 import { For, Show, createSignal, onMount } from "solid-js"
 import type { IpcClient } from "../ipc"
 import { theme } from "../theme/tokens"
-import type { PermissionsState } from "../util/permissions-dialog"
+import type { GrantRecord, PermissionsState } from "../util/permissions-dialog"
 import {
   RESET_SESSION_COMMAND,
   grantLine,
+  moveGrantCursor,
   policyLabel,
+  revokeGrantCommand,
   ruleLine,
   toggleCommand,
 } from "../util/permissions-dialog"
 export function DialogPermissions(props: { client: IpcClient; liveSessionId: string }) {
   const [permissions, setPermissions] = createSignal<PermissionsState | null>(null)
   const [error, setError] = createSignal("")
+  const [cursor, setCursor] = createSignal(0)
+
+  const grants = (): GrantRecord[] => permissions()?.grants ?? []
+  const cursorGrant = (): GrantRecord | null => grants()[cursor()] ?? null
 
   const read = async () => {
     try {
@@ -46,6 +52,18 @@ export function DialogPermissions(props: { client: IpcClient; liveSessionId: str
       return
     }
     await read()
+  }
+
+  const move = (delta: number) => {
+    setCursor((current) => moveGrantCursor(current, delta, grants().length))
+  }
+
+  /** M-D3: forget the grant under the cursor, through the backend's own command. */
+  const revoke = async () => {
+    const grant = cursorGrant()
+    if (!grant || !grant.key) return
+    await dispatch(revokeGrantCommand(grant.key))
+    setCursor(0)
   }
 
   onMount(read)
@@ -68,11 +86,29 @@ export function DialogPermissions(props: { client: IpcClient; liveSessionId: str
         desc: "Clear this session's rules",
         run: () => void dispatch(RESET_SESSION_COMMAND),
       },
+      {
+        name: "dialog.permissions.prev",
+        desc: "Previous grant",
+        run: () => move(-1),
+      },
+      {
+        name: "dialog.permissions.next",
+        desc: "Next grant",
+        run: () => move(1),
+      },
+      {
+        name: "dialog.permissions.revoke",
+        desc: "Revoke the selected grant",
+        run: () => void revoke(),
+      },
     ],
     bindings: [
       { key: "p", cmd: "dialog.permissions.toggle" },
       { key: "c", cmd: "dialog.permissions.clear" },
       { key: "r", cmd: "dialog.permissions.reset" },
+      { key: "up", cmd: "dialog.permissions.prev" },
+      { key: "down", cmd: "dialog.permissions.next" },
+      { key: "x", cmd: "dialog.permissions.revoke" },
     ],
   }))
 
@@ -114,10 +150,13 @@ export function DialogPermissions(props: { client: IpcClient; liveSessionId: str
               )}
             </Show>
             <For each={state().grants.length > 0 ? state().grants : [{ key: "", expiresAt: null }]}>
-              {(grant) => (
+              {(grant, index) => (
                 <box flexDirection="row" justifyContent="space-between">
                   <text fg={theme.textMuted}>{"  remembered"}</text>
-                  <text fg={theme.textBase}>{grantLine(grant)}</text>
+                  <text fg={index() === cursor() ? theme.textBase : theme.textMuted}>
+                    {index() === cursor() && grant.key ? "▸ " : "  "}
+                    {grantLine(grant)}
+                  </text>
                 </box>
               )}
             </For>
@@ -141,7 +180,7 @@ export function DialogPermissions(props: { client: IpcClient; liveSessionId: str
         )}
       </Show>
       <text fg={theme.textMuted}>
-        {error() || "p switch policy · c forget grants · r reset session rules · esc close"}
+        {error() || "↑↓ pick a grant · x revoke it · p switch policy · c forget grants · r reset session rules · esc close"}
       </text>
     </box>
   )

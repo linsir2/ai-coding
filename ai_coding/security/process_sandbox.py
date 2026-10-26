@@ -64,6 +64,12 @@ SandboxMode = Literal["off", "warn", "enforce"]
 #: The one reason code for "the mechanism is not installed / cannot run here".
 BWRAP_GAP = "bwrap.unavailable"
 
+#: The reason code for a mechanism that answered "available" and then declined
+#: to wrap.  A ``None`` from ``wrap()`` is the protocol's "nothing to wrap", but
+#: under ``enforce`` that is a gap -- the command would run with no isolation at
+#: all -- so it is refused rather than passed through.
+SANDBOX_WRAP_GAP = "sandbox.wrap.no-op"
+
 
 class SandboxGap(Exception):
     """The mechanism is unavailable and the policy says stop.
@@ -142,9 +148,15 @@ def spawn_argv(
     shape -- ``["/bin/sh", "-c", command]`` -- and ``shell`` is always ``False``
     at the spawn site.
 
-    Fail-closed: ``enforce`` with no mechanism raises :class:`SandboxGap`; the
-    callers catch it and answer ``denied``.  ``warn`` continues and reports the
-    fallback through ``emit`` (a stable reason code, not a sentence).
+    Fail-closed, in both directions a mechanism can fail:
+
+    * ``enforce`` with no mechanism raises :class:`SandboxGap`; the callers
+      catch it and answer ``denied``.
+    * ``enforce`` with a mechanism that answers "available" but then declines
+      to wrap (``wrap()`` returns ``None``) raises too -- a silent pass here
+      would run the command with no isolation at all.
+    * ``warn`` continues in both cases and reports the fallback through
+      ``emit`` (a stable reason code, not a sentence), never a green lie.
     """
     argv = ["/bin/sh", "-c", command]
     if policy is None or policy.mode == "off" or policy.bypass:
@@ -152,6 +164,8 @@ def spawn_argv(
     if backend is None:
         if policy.mode == "enforce":
             raise SandboxGap("sandbox.backend.missing")
+        if emit is not None:
+            emit("sandbox.backend.missing")
         return argv
     if not backend.available():
         if policy.mode == "enforce":
@@ -159,7 +173,14 @@ def spawn_argv(
         if emit is not None:
             emit(backend.gap())
         return argv
-    return backend.wrap(argv, roots) or argv
+    wrapped = backend.wrap(argv, roots)
+    if wrapped is None:
+        if policy.mode == "enforce":
+            raise SandboxGap(SANDBOX_WRAP_GAP)
+        if emit is not None:
+            emit(SANDBOX_WRAP_GAP)
+        return argv
+    return wrapped
 
 
 class BwrapBackend:

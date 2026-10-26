@@ -370,6 +370,31 @@ def test_an_expired_grant_stops_answering():
     assert gate.grants == ()
 
 
+def test_an_expired_grant_does_not_open_the_sandbox(tmp_path):
+    """P2-1: the file tools' path check honours the TTL, not only the gate's.
+
+    ``Sandbox`` asks ``path_allowed`` before refusing, so a grant that had
+    expired on the gate side but still opened the path side would keep an
+    "always" read working after its lifetime -- the two halves of the same
+    boundary disagreeing about what is authorized.
+    """
+    now = {"t": 1000.0}
+    gate = PermissionGate(
+        workspace=str(tmp_path), clock=lambda: now["t"], grant_ttl=60.0
+    )
+    outside = tmp_path.parent / "perm-grant-outside"
+    gate.grant("read", {"path": str(outside / "a.py")}, posture="build")
+
+    assert gate.path_allowed(outside / "a.py") is True
+    assert gate.path_allowed(outside / "b.py") is True
+
+    now["t"] += 61.0
+
+    assert gate.grants == ()
+    assert gate.path_allowed(outside / "a.py") is False
+    assert gate.path_allowed(outside / "b.py") is False
+
+
 def test_a_permanent_grant_never_expires():
     now = {"t": 1000.0}
     gate = PermissionGate(clock=lambda: now["t"], grant_ttl=None)

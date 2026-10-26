@@ -50,6 +50,18 @@ export function revokeGrantCommand(key: string): string {
   return `/permissions revoke ${key}`
 }
 
+/**
+ * Move the grant-list cursor by `delta`, wrapping at both ends (M-D3).
+ *
+ * The permissions panel is a summary, not a full list navigator, so a stray
+ * arrow key must not run off either end: with three grants, `down` from the
+ * last row wraps to the first rather than doing nothing.
+ */
+export function moveGrantCursor(current: number, delta: number, count: number): number {
+  if (count <= 0) return 0
+  return (((current + delta) % count) + count) % count
+}
+
 /** One rule as the line the operator reads: effect, action, resource. */
 export function ruleLine(rule: PermissionRule): string {
   const reason = rule.reason ? ` · ${rule.reason}` : ""

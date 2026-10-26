@@ -823,6 +823,11 @@ class PermissionGate:
         the posture decision, and a build grant for an outside path must still
         reach the tool it was given for.  In a stricter posture the gate asks
         first; the one-off ``yes`` arrives here as a bare key.
+
+        M-D3: a grant whose TTL has passed is treated as absent, on this path too
+        -- otherwise an expired grant would keep opening the *file* tools while
+        the gate had already stopped answering it, the two halves of the same
+        boundary disagreeing about what is authorized.
         """
         if not self._workspace:
             return False
@@ -830,7 +835,7 @@ class PermissionGate:
             resolved = Path(path).expanduser().resolve()
         except OSError:
             return False
-        for key in (*self._grants, *self._once_grants):
+        for key in (*self.grants, *self._once_grants):
             tool_name, _, granted = key.partition(":")
             if tool_name not in _PATH_TOOLS and tool_name not in _DIR_TOOLS:
                 continue

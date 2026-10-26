@@ -10,6 +10,7 @@ import { describe, expect, test } from "bun:test"
 import {
   policyLabel,
   grantLine,
+  moveGrantCursor,
   revokeGrantCommand,
   toggledPolicy,
   toggleCommand,
@@ -44,6 +45,23 @@ describe("grantLine", () => {
 describe("revokeGrantCommand", () => {
   test("is the backend command, not a second write path", () => {
     expect(revokeGrantCommand("edit:src/a.py")).toBe("/permissions revoke edit:src/a.py")
+  })
+})
+
+describe("moveGrantCursor", () => {
+  test("moves down and wraps from the last row to the first", () => {
+    expect(moveGrantCursor(0, 1, 3)).toBe(1)
+    expect(moveGrantCursor(2, 1, 3)).toBe(0)
+  })
+
+  test("moves up and wraps from the first row to the last", () => {
+    expect(moveGrantCursor(0, -1, 3)).toBe(2)
+    expect(moveGrantCursor(1, -1, 3)).toBe(0)
+  })
+
+  test("an empty grant list keeps the cursor at zero", () => {
+    expect(moveGrantCursor(0, 1, 0)).toBe(0)
+    expect(moveGrantCursor(2, 1, 0)).toBe(0)
   })
 })
 

@@ -73,6 +73,9 @@ def build_subagent_runner(
     notices: Any | None = None,
     jobs: Any = None,
     agents: Any = None,
+    sandbox_policy: Any = None,
+    sandbox_backend: Any = None,
+    sandbox_roots: Any = (),
 ) -> Any:
     """Build a :class:`SubAgentRunner` bound to the given workspace.
 
@@ -80,6 +83,13 @@ def build_subagent_runner(
     factory plus a *registry* of tools — always without a nested ``subAgent``, or
     delegation would recurse.  Its tool stacks resolve ``workdir=None`` to the
     main workspace and otherwise to the worktree directory passed in.
+
+    M-D1: the parent's process sandbox has to reach the child's ``BashTool`` too.
+    A sub-agent could otherwise delegate a write to the workspace through
+    ``subAgent`` and the model would bypass the boundary the parent's own bash is
+    held to.  ``sandbox_policy``/``sandbox_backend`` are therefore threaded
+    through, and the writable ``roots`` follow the child: when it runs in a
+    worktree the roots are that worktree, otherwise the caller's own roots.
     """
     from ai_coding.ai.factory import build_engine_from_config
     from ai_coding.core.subagent import SubAgentRunner
@@ -88,8 +98,17 @@ def build_subagent_runner(
     main_ws = str(Path(workspace).expanduser().resolve())
 
     def build_tools(workdir: str | None) -> Any:
+        roots = tuple(sandbox_roots)
+        if workdir:
+            roots = (Path(workdir).expanduser().resolve(),)
         return build_tool_registry(
-            app_cfg, workdir or main_ws, skills, include_subagent=False
+            app_cfg,
+            workdir or main_ws,
+            skills,
+            include_subagent=False,
+            sandbox_policy=sandbox_policy,
+            sandbox_backend=sandbox_backend,
+            sandbox_roots=roots,
         )
 
     ai_cfg = getattr(app_cfg, "ai", None)
@@ -328,6 +347,10 @@ def _assemble_registry(
 
     if include_subagent:
         # Real sub-agent delegation, isolated in a git worktree when enabled.
+        # M-D1: the child's bash shares the parent's process sandbox.  The
+        # roots are deliberately NOT passed down: the runner binds them to the
+        # child's worktree, so a delegated write cannot land in the parent's
+        # tree (or outside the child's worktree).
         runner = build_subagent_runner(
             app_cfg,
             workspace,
@@ -335,6 +358,8 @@ def _assemble_registry(
             base_instructions=base_instructions,
             notices=notices,
             agents=agents,
+            sandbox_policy=sandbox_policy,
+            sandbox_backend=sandbox_backend,
         )
         manager = WorktreeManager(workspace)
         isolate = bool(getattr(app_cfg.ai, "subagent_worktree_isolation", True))

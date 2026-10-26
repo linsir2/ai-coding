@@ -23,6 +23,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,21 @@ class _UntouchableBackend:
 
     def wrap(self, argv, roots):  # noqa: ANN001, ANN202 - never reached
         raise AssertionError("bypass must not wrap")
+
+
+class _NoWrapBackend:
+    """Reports "available" and then declines to wrap -- the silent-pass gap."""
+
+    name = "noop"
+
+    def available(self) -> bool:
+        return True
+
+    def gap(self) -> str:
+        return "sandbox.wrap.no-op"
+
+    def wrap(self, argv, roots):  # noqa: ANN001, ANN202
+        return None
 
 
 @pytest.fixture
@@ -156,6 +172,131 @@ def test_a_background_job_is_sandboxed(tmp_path, outside_base):
     assert not outside.exists(), "a background job wrote outside the workspace"
 
 
+@_NEEDS_BWRAP
+def test_a_sandboxed_background_job_can_be_killed(tmp_path):
+    """P3: a job under ``enforce`` is stoppable, and its inner child dies too.
+
+    ``Job.pid`` reports the bwrap process and ``kill`` signals the process
+    group, so the check has to prove the *inner* command went with it -- an
+    orphaned child would keep writing after the panel said "stopped".  The job
+    writes a heartbeat into the worktree, and a stopped job must stop writing.
+    """
+    from ai_coding.core.jobs import JobRegistry
+
+    backend = BwrapBackend(writable_paths=())
+    registry = JobRegistry(
+        root=tmp_path / "jobs",
+        policy=ProcessSandboxPolicy(mode="enforce"),
+        backend=backend,
+        roots=[tmp_path],
+    )
+    heartbeat = tmp_path / "heartbeat.txt"
+    job = registry.start(
+        f"i=0; while [ $i -lt 100 ]; do echo $i >> {heartbeat}; "
+        f"i=$((i+1)); sleep 0.2; done",
+        cwd=str(tmp_path),
+        session_id="s",
+    )
+    assert job.status == "running"
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if heartbeat.exists() and len(heartbeat.read_text(encoding="utf-8").splitlines()) >= 2:
+            break
+        time.sleep(0.05)
+
+    killed = registry.kill(job.id, reason="test over")
+    assert killed.status == "killed"
+    assert job.done.wait(timeout=10), "the killed job never settled"
+
+    count = len(heartbeat.read_text(encoding="utf-8").splitlines())
+    time.sleep(1.0)
+    after = len(heartbeat.read_text(encoding="utf-8").splitlines())
+    assert after == count, (
+        f"the sandboxed job's inner child kept running after the kill "
+        f"({count} -> {after} lines)"
+    )
+
+
+def _subagent_cfg(ws: str):
+    """The duck-typed app config ``build_subagent_runner`` needs."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        tools=SimpleNamespace(
+            bash=SimpleNamespace(enabled=True, timeout_seconds=60),
+            read=SimpleNamespace(enabled=True, max_file_size=1 << 20),
+            write=SimpleNamespace(enabled=True),
+            edit=SimpleNamespace(enabled=True),
+            glob=SimpleNamespace(enabled=True),
+            grep=SimpleNamespace(enabled=True),
+            extra_workspace_roots=[],
+            ask_user=SimpleNamespace(enabled=False),
+        ),
+        ai=SimpleNamespace(websearch_api_key="", websearch_max_results=5),
+        mcp=SimpleNamespace(servers=[]),
+        security=SimpleNamespace(grant_ttl_seconds=86400.0),
+    )
+
+
+def test_the_subagent_stack_inherits_the_process_sandbox(tmp_path):
+    """P1-1: the child's ``BashTool`` carries the parent's policy/backend/roots.
+
+    The wiring is what the P1-1 finding is about: ``build_subagent_runner`` used
+    to build the child stack without them, so a delegated write through
+    ``subAgent`` was unsandboxed even though the parent's own bash was held.  A
+    real-subprocess case would skip where bwrap is absent, so this pins the
+    wiring itself, everywhere.
+    """
+    from ai_coding.tools.builder import build_subagent_runner
+
+    policy = ProcessSandboxPolicy(mode="enforce")
+    backend = _UnavailableBackend()
+    worktree = tmp_path / "child-worktree"
+    worktree.mkdir()
+    runner = build_subagent_runner(
+        _subagent_cfg(str(tmp_path)),
+        str(tmp_path),
+        None,
+        sandbox_policy=policy,
+        sandbox_backend=backend,
+    )
+
+    tool = runner._build_tools(str(worktree)).get("bash")
+    assert tool is not None
+    assert tool._policy is policy
+    assert tool._backend is backend
+    # The child's writable face is its worktree, not the parent's workspace.
+    assert tool._roots == (worktree.resolve(),)
+
+
+@_NEEDS_BWRAP
+@pytest.mark.asyncio
+async def test_bash_through_the_subagent_stack_cannot_write_outside(
+    tmp_path, outside_base
+):
+    """Through a delegated sub-agent's stack: the write boundary still holds."""
+    from ai_coding.tools.builder import build_subagent_runner
+
+    worktree = tmp_path / "child-worktree"
+    worktree.mkdir()
+    runner = build_subagent_runner(
+        _subagent_cfg(str(tmp_path)),
+        str(tmp_path),
+        None,
+        sandbox_policy=ProcessSandboxPolicy(mode="enforce"),
+        sandbox_backend=BwrapBackend(writable_paths=()),
+    )
+    tool = runner._build_tools(str(worktree)).get("bash")
+    assert tool is not None
+    outside = _outside(outside_base, "subagent-outside.txt")
+    result = await tool.execute(
+        {"command": f"echo x > {outside}"}, ToolContext(workspace=str(worktree))
+    )
+    assert not outside.exists(), "a delegated sub-agent wrote outside its worktree"
+    assert result.success is False
+
+
 # ---- U2 / U2b: the boundary's two sides ------------------------------------
 
 
@@ -213,6 +354,48 @@ def test_enforce_refuses_when_the_backend_is_missing(tmp_path):
             "echo x", ProcessSandboxPolicy(mode="enforce"), None, [tmp_path]
         )
     assert exc.value.reason == "sandbox.backend.missing"
+
+
+def test_enforce_refuses_when_wrap_returns_nothing(tmp_path):
+    """P2-2: a mechanism that answers "available" and then declines to wrap.
+
+    ``wrap()`` returning ``None`` used to fall through to ``or argv`` and the
+    command ran with no isolation at all -- the exact silent pass ``enforce``
+    exists to prevent.
+    """
+    with pytest.raises(SandboxGap) as exc:
+        spawn_argv(
+            "echo x", ProcessSandboxPolicy(mode="enforce"), _NoWrapBackend(), [tmp_path]
+        )
+    assert exc.value.reason == "sandbox.wrap.no-op"
+
+
+def test_warn_with_no_backend_reports_the_gap(tmp_path):
+    """P2-2: ``warn`` keeps going *and* says so, with no mechanism at all."""
+    seen: list[str] = []
+    argv = spawn_argv(
+        "echo x",
+        ProcessSandboxPolicy(mode="warn"),
+        None,
+        [tmp_path],
+        emit=seen.append,
+    )
+    assert argv == ["/bin/sh", "-c", "echo x"]
+    assert seen == ["sandbox.backend.missing"]
+
+
+def test_warn_reports_when_wrap_returns_nothing(tmp_path):
+    """P2-2: a ``warn`` run whose mechanism declines to wrap is not a green lie."""
+    seen: list[str] = []
+    argv = spawn_argv(
+        "echo x",
+        ProcessSandboxPolicy(mode="warn"),
+        _NoWrapBackend(),
+        [tmp_path],
+        emit=seen.append,
+    )
+    assert argv == ["/bin/sh", "-c", "echo x"]
+    assert seen == ["sandbox.wrap.no-op"]
 
 
 @pytest.mark.asyncio
