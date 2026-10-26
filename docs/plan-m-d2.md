@@ -139,22 +139,23 @@ $ bwrap --unshare-user-try --ro-bind / / --dev /dev /bin/true        # exit 0  �
 
 ```python
 #: 构造档位，从强到弱。第一个能跑通的被选中并上报。
-#: **--proc 与 --unshare-pid 同生共死**（评审 P0-1，见下）。
+#: **不含 --proc+--unshare-pid 的档必须加 --tmpfs /proc** —— 因为 --ro-bind / /
+#: 是递归绑定，宿主的 /proc 与 --proc 无关地被带进沙箱（评审 P0-1）。
 _CONSTRUCTION_TIERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("full",    ("--unshare-user-try", "--ro-bind", "/", "/",
                  "--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev",
                  "--unshare-pid", "--die-with-parent", "--new-session")),
     ("no-proc", ("--unshare-user-try", "--ro-bind", "/", "/",
-                 "--tmpfs", "/tmp", "--dev", "/dev",
+                 "--tmpfs", "/tmp", "--tmpfs", "/proc", "--dev", "/dev",
                  "--die-with-parent", "--new-session")),
 )
 ```
 
-#### A.1 **为什么删掉 `no-pid` 档（评审 P0-1 —— 本轮最重要的一条）**
+#### A.1 **关闭 `/proc/<pid>/root` 逃逸（评审 P0-1 —— 本轮最重要的一条）**
 
 原方案有 `no-pid`（保留 `--proc /proc`、只去 `--unshare-pid`）。**这一档会击穿整个文件系统墙**：
 
-* **`/proc` 是否暴露宿主 pid，取决于有没有 `--unshare-pid`，与 `--proc` 存不存在无关。**
+* **`/proc` 是否暴露宿主 pid，取决于有没有 `--unshare-pid`。**
   不 unshare-pid 时 procfs 展示的是**宿主 pid 命名空间** —— **实测**：宿主 9 个 pid，
   沙箱内（无 `--unshare-pid`）可见 **10 个**。
 * 于是沙箱内可读 `/proc/<host-pid>/root/...` —— 这是**指向宿主根的符号链接**，
@@ -162,14 +163,39 @@ _CONSTRUCTION_TIERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 * 同一条通道还绕过 `--tmpfs /tmp` 对 `IpcService` 套接字的**偶然**遮蔽。
 * **更糟的是方案自己的测试抓不到它**：V3–V5 只 `cat ~/.ssh/id_rsa`（被遮蔽 → 失败 → 绿），
   不会去 `cat /proc/<pid>/root/...`。于是"enforce 下读不到 `~/.ssh`"这条验收判据
-  **在 `no-pid` 档下是假的，而测试全绿**。
+  **在该档下是假的，而测试全绿**。
+
+**第 2 轮评审的关键更正（P0 未修复）**：第 1 轮把修法定为"删掉 `no-pid`"，**不成立** ——
+**`--ro-bind / /` 是递归绑定**，宿主的 `/proc`（以及 `/sys`、`/run`）**与 `--proc` 无关**地被带进沙箱。
+**实测**：
+
+| 构造 | `/proc` | `/proc/1/comm` | 读 `/proc/1/root/...` |
+|---|---|---|---|
+| 选择性 bind（**不含 `/`**） | **不存在** | — | — |
+| `--ro-bind / /`（= `no-proc` 档） | **存在，61 条** | **`tini`（宿主 init）** | `Permission denied`（**仅 userns 挡住**） |
+| `--ro-bind / / --unshare-pid` | 存在，62 条 | **`tini`** | `Permission denied`（仅 userns） |
+| `--ro-bind / / --proc /proc` | 存在，61 条 | `tini` | `Permission denied`（仅 userns） |
+| **`--ro-bind / / --tmpfs /proc`** | **空** | — | **`No such file or directory`** ✅ |
+
+**`--unshare-pid` 单独并不能关闭逃逸** —— 递归 bind 进来的是宿主 procfs 超级块，仍显示宿主 pid。
+**唯一能关闭逃逸的是 `--tmpfs /proc`**（或 `--proc /proc` + `--unshare-pid`，而本环境后者 EPERM）。
+
+→ **规则写死**：
+
+1. **档位表**：不含 `--proc`+`--unshare-pid` 的档，**必须加 `--tmpfs /proc`**。
+2. **V1b 补行为断言**（不只是 argv 不变量）：沙箱内 `ls /proc` **为空**、
+   读 `/proc/<pid>/root/...` **失败** —— 否则测试仍抓不到（这正是第 1 轮 P0 的原始教训）。
 
 **实测补充**：本环境的 userns 恰好挡住了 `/proc/1/root`（子 userns 不能 ptrace 初始 userns 的 pid 1），
-所以**这里没复现**。但这**不是机制保证** —— 在不使用 userns 的部署（bwrap 以真实身份运行、
-或 userns 不可用）下，同 uid 即可读。**不能把"恰好被 userns 挡住"当防护。**
+所以**这里没复现**。但这**不是机制保证** —— 在不使用 userns 的部署下，同 uid 即可读。
+**不能把"恰好被 userns 挡住"当防护。**
 
-→ **规则写死**：**`--proc` 与 `--unshare-pid` 同生共死**。删除 `no-pid` 档。
-另加一条**不变量用例**（V1b）：`wrap()` 的 argv 里 `--proc` 出现 ⟺ `--unshare-pid` 出现。
+**连带更正**：
+* §B 局限 3 与 §D.4 原写"`--proc /proc` 挂着时"才暴露 `/proc/<pid>/environ` —— **错**，
+  `/proc` **始终**存在（递归 bind）。
+* §7.1 需把 **`/proc/<pid>/root`** 列入残余风险。
+* **递归 bind 还意味着沙箱能看到 `/sys`、`/run` 等宿主子挂载** —— 读边界与 AF_UNIX 的
+  暴露面比原方案假设的**更大**（写进残余风险）。
 
 #### A.2 档位探测必须用**完整构造**（评审 P1-2）
 
@@ -246,17 +272,26 @@ if backend.tier != "full":
 1. **顺序敏感（两条，不只一条 —— 评审 P2-3）**：遮蔽项必须在 `--ro-bind / /` **之后**，
    **且**在 `--tmpfs /tmp` **之后**（否则 deny 路径在 `/tmp` 下时会被 tmpfs 抹掉）。
    T3 的顺序断言要覆盖这两种。
-2. **符号链接（评审 P1-4 —— 原对策不成立）**：`--ro-bind /dev/null <link>` 遮的是**链接本身**；
-   `--tmpfs <link>` 同样作用在**链接路径**上。若 `~/.ssh` 指向 `/data/keys`，
-   目标 `/data/keys` 仍在 `--ro-bind / /` 之下 → **照旧可读**。
-   → **规则**：遮蔽前对每个 deny 路径做**宿主侧 `resolve()`**，对**解析后的目标**也加遮蔽。
-   **并实测** bwrap 对符号链接目标的行为（跟随 / 报错 / 只遮链接）—— 结论写进实现注释。
-   **注意**：这仍是"遮蔽路径名"而非"遮蔽 inode"，任何指向宿主其它路径的**新**符号链接都能绕开 →
-   写进残余风险（与调研的 F3 同源）。
-3. **`/proc/<pid>/environ`**：`--proc /proc` 挂着时，沙箱内可读**父进程的 env**（含 API key）。
-   → 本轮**不修**（要修需改 env 传递方式，是独立工程），写进残余风险。
-   **注意**：A.1 的 `/proc/<pid>/root` 逃逸已随 `no-pid` 档删除而消除，但 **`/proc/<pid>/environ`
-   在 `full` 档下仍然存在**（userns 在本环境挡住了它，同样的"恰好"问题）。
+2. **符号链接（评审 P1-4 —— 第 1 轮的对策不成立，第 2 轮更正表述）**：
+   原写"`--tmpfs <link>` 同样作用在链接路径上"、"`--ro-bind /dev/null <link>` 遮的是链接本身"
+   —— **都不对**。**实测**（bubblewrap 0.9.0）：
+
+   | 操作 | 结果 |
+   |---|---|
+   | `--tmpfs <符号链接>` | **报错** `Can't mount tmpfs ... No such file or directory`，exit 1 |
+   | `--ro-bind /dev/null <符号链接>` | **报错** `Can't create file ... No such file or directory`，exit 1 |
+   | 遮蔽 `resolve()` 后的**目标** | **有效**：经链接读 → `No such file or directory`；直接读目标 → `Permission denied` |
+
+   → **规则**：**先 `resolve()` 再遮蔽**，且**同时遮蔽原始路径与解析目标**（双保险）。
+   * **残余缺口**：`resolve()` 只解析 deny 路径**自身**的符号链接；构造期快照，
+     **运行期重指向不覆盖**（与 glob 同）。这仍是"遮蔽路径名"而非"遮蔽 inode"
+     → 写进残余风险（与调研的 F3 同源）。
+   * **V16 补断言**：直接对符号链接做 `--tmpfs`/`--ro-bind` **会报错** —— 锁死"必须先 resolve"。
+3. **`/proc/<pid>/environ` 与 `/proc/<pid>/root`**：**`/proc` 始终存在**（`--ro-bind / /` 是递归绑定，
+   与 `--proc` 无关）。A.1 的档位规则用 `--tmpfs /proc` 关掉整块 `/proc`；
+   **`full` 档保留 `/proc`**（工具需要），此时 `/proc/<pid>/root` 与 `/proc/<pid>/environ`
+   的通道**靠 `--unshare-pid` 缩小**（沙箱只看到自己的 pid），但**不是零**。
+   → 本轮**不修**（要修需改 env 传递方式 / 完全不挂 `/proc`），写进残余风险。
 4. **`--tmpfs` 要求目标可创建**：父目录不存在时 `--tmpfs` 会失败 → 按 §B.2 的规则跳过。
 
 #### B.2 跳过 vs 报错（评审 P2-1）
@@ -325,25 +360,39 @@ class NetworkConfig:
 | `deny` | `--unshare-net` | `Network is unreachable` |
 | `proxy` | `--unshare-net` + `--bind <proxy_socket> <proxy_socket>` + **沙箱内桥接** + env | 只有经代理的流量能出 |
 
-#### C.1 **沙箱内桥接是必须的（评审 P1-5 —— 实测）**
+#### C.1 **沙箱内桥接：与 `list[str]` 契约相容的落地方式（评审 P1-1）**
 
 `HTTP_PROXY=unix://<sock>` **不是标准代理 scheme**，**curl 直接拒绝**：
 
 ```text
-$ curl -x ... (ALL_PROXY=unix:///tmp/nonexistent-proxy.sock)
+$ curl ... (ALL_PROXY=unix:///tmp/nonexistent-proxy.sock)
 curl: (7) Unsupported proxy scheme for 'unix:///tmp/nonexistent-proxy.sock'
 ```
 
 （`http://unix/...`、`socks5h://unix/...` 同样不支持。）
 
-→ **proxy 档的构造**：
+**为什么不能"argv 前置 socat"**：`socat` 是**服务器**，前置到 bwrap argv 后
+**用户命令不会执行**；若改成 `sh -c "socat ... & exec ..."` 包装，则**重新引入 shell 解析层**
+—— 正是 `plan-m-d.md` P0-1 禁止的 join+shell 路径。
 
-1. `--bind <proxy_socket> <proxy_socket>` 把宿主代理的 Unix socket 挂进沙箱；
-2. **在沙箱内启动一个桥接**（`argv` 前置）：
-   `socat TCP-LISTEN:127.0.0.1:<bridge_port>,fork,reuseaddr UNIX-CONNECT:<proxy_socket>`
-   （`socat` 不可用时回落到一个等价的 **Python 桥** —— 沙箱内有 `/usr`，`python3` 可用）；
-3. env：`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY=http://127.0.0.1:<bridge_port>`，
-   并**清理** `NO_PROXY`/`http_proxy`/`all_proxy`（评审 P3-5）。
+→ **落地方式：一个由组合根注入的小程序作为 `argv[0]` 前置**（`wrap()` 仍返回 `list[str]`）：
+
+```
+bwrap ... -- <sandbox-bridge> --unix <proxy_socket> -- <用户 argv...>
+```
+
+* `<sandbox-bridge>` 是一个**小 Python 程序**（随包分发，`/usr` 已 bind → `python3` 可用；
+  或直接用一个 `socat` 调用 + `exec`，取决于实现期实测）。
+* 它做三件事：① 绑定一个 loopback TCP 端口；② 起后台线程转发到 Unix socket；
+  ③ **把 `HTTP_PROXY` 等设进自己的 env**，然后 `execv(用户 argv)`。
+* **端口协调**：端口由桥选，env 由桥设 —— **不存在"env 无从得知端口"的问题**（评审 P1-1 的缺口）。
+* **env 的基线清理**走 bwrap 的 `--setenv` / `--unsetenv`（`wrap()` 只返回 argv，
+  env 必须走 bwrap 参数 —— 评审 P3）。清理 `NO_PROXY` / `http_proxy` / `all_proxy`。
+* **桥挂了怎么办**（评审 P1-1 未覆盖）：桥在**沙箱内部**，其失败对外不可见。
+  → **fail-closed**：桥无法启动时**以非零退出**（用户命令根本不会执行）→ 表现为"网络不可用"，
+  且**不会**退化成"有网"。桥自身的错误信息要清晰可辨（"sandbox proxy bridge failed: ..."）。
+* **loopback 无需额外处理**（评审 P3）：`--unshare-net` 下 loopback **已 UP**（实测），
+  桥监听 `127.0.0.1` 可行 —— 作为 V10 的一条断言固化。
 
 **顺序**：`--bind <proxy_socket>` 必须在 `--tmpfs /tmp` **之后**（否则被遮蔽）；
 若代理套接字在 `/tmp` 下 → **必须**显式 `--bind`，**不能依赖"没被遮蔽"**。
@@ -394,6 +443,17 @@ host == allow_entry  or  host.endswith("." + allow_entry)
 **为什么默认 `deny` 而不是 `off`**：与 `writable_paths` 的取舍一致 ——
 写面已经默认收紧并付出了"打断真实构建"的代价，读/网两面若默认放开，
 等于"**只有文件系统墙没有网络墙会泄漏**"白做。`proxy` 档是可用性的出口。
+
+#### C.6 代理作为单点新增的攻击面（评审 P1-2 / P2-2）
+
+代理是**所有出网流量的唯一通道**，它本身成了攻击面：
+
+| 风险 | 说明 | 处置 |
+|---|---|---|
+| **DNS rebinding / metadata SSRF** | 白名单按**域名**判定，但代理**解析后按 IP 连接**。白名单里的 `evil.com` 可解析到 `169.254.169.254`（云 metadata）或内网 IP → 沙箱借代理访问内网/元数据 | 代理**解析后**再做一次判定：**拒私网 / loopback / link-local / metadata 段**（`10/8`、`172.16/12`、`192.168/16`、`169.254/16`、`127/8`、`::1`） |
+| **同进程逻辑绕过** | 代理与持有 API key 的 ai-coding **同进程**（每连接一线程）。请求走私、头注入、CONNECT 隧道滥用即等于白名单失效 | 本轮**不降权**（独立进程是另一个工程）；写进残余风险。解析要做 **hardening**（拒绝畸形请求行/超长头/非法端口） |
+| **套接字权限** | 代理监听 Unix socket 并被 `--bind` 进沙箱；若 world-accessible，**其他本地用户**可连接 | socket 文件权限 **`0600`**（仅属主），构造时显式 `chmod` |
+| **对抗性输入** | 沙箱内进程会**主动构造畸形 HTTP** | 解析 hardening（见上）+ 单条连接超时 |
 
 **迁移说明**（评审 P2-11）：默认从 `off` 改成 `deny` 会**直接打断** `pip install`、`npm install`、
 `git clone`、`go mod download` —— 代价**比写边界大得多**。`config.example.yaml` 必须给
@@ -446,7 +506,7 @@ host == allow_entry  or  host.endswith("." + allow_entry)
 2. **`/proc/<host-pid>/environ`**（评审 P3-3 更正）：`launcher.py:57-65` 把 `AI_CODING_SOCKET`
    通过 env 交给**前端子进程**，**不在** ai-coding 进程自己的 `os.environ` 里 ——
    所以沙箱 bash（继承 ai-coding 的 env，`jobs.py` 的 `env={**os.environ, "AI_CODING_JOB": ...}`）
-   **不会**继承它。真正能读到它的通道是 `/proc/<host-pid>/environ`（需 `full` 档 + 无 userns 保护）。
+   **不会**继承它。真正能读到它的通道是 `/proc/<host-pid>/environ`（`full` 档 + 无 userns 保护）。
    **不要**去"清理 env"，要修的是 `/proc`（已由 A.1 的档位规则覆盖）。
 3. `--ro-bind / /` 让 `/run/user/*/bus`、`/var/run/docker.sock` 等**任意**宿主套接字文件可见。
 
@@ -506,7 +566,7 @@ host == allow_entry  or  host.endswith("." + allow_entry)
 | 编号 | 用例 | 期望红相（今天必须失败） |
 |---|---|---|
 | V1 | `test_a_construction_tier_is_selected_and_reported` | 档位探测选中并**上报降级**（今天无档位概念） |
-| V1b | `test_proc_and_pid_namespace_are_all_or_nothing` | **不变量**：`wrap()` 的 argv 里 `--proc` 出现 ⟺ `--unshare-pid` 出现（评审 P0-1 的回归锁） |
+| V1b | `test_proc_and_pid_namespace_are_all_or_nothing` | **两条断言**：① argv 不变量（`--proc` ⟺ `--unshare-pid`）；② **行为**：沙箱内 `ls /proc` **为空**、读 `/proc/<pid>/root/...` **失败**（评审 P0-1：只做 argv 断言抓不到） |
 | V2 | `test_the_mechanism_runs_without_cap_sys_admin` | 加 `--unshare-user-try` 后 `available()` 为真（今天恒 False → 7 条真实用例全 skip） |
 | V3 | `test_a_sandboxed_process_cannot_read_ssh_keys` | `enforce` 下 `cat ~/.ssh/id_rsa` → **失败**（今天：成功读到） |
 | V4 | `test_a_sandboxed_process_cannot_read_cloud_credentials` | 同上，`~/.aws/credentials` |
@@ -578,18 +638,20 @@ host == allow_entry  or  host.endswith("." + allow_entry)
 
 | 风险 | 说明 | 处置 |
 |---|---|---|
-| **`/proc/<pid>/environ` 泄露** | `full` 档挂着 `--proc /proc` → 沙箱内可读**父进程 env**（含 API key）。本环境的 userns 恰好挡住了它 —— **同样的"恰好"问题，不是机制保证** | 本轮**不修**（要修需改 env 传递方式） |
-| **符号链接绕过读遮蔽** | 遮蔽的是**路径名**不是 **inode**；任何指向宿主其它路径的**新**符号链接都能绕开（调研 F3） | 已做 `resolve()` + 遮蔽目标；**仍不完整**，写进文档 |
-| **读 denylist 不完整** | denylist **"永远少一条"** —— 这是**刻意的能力边界**，**不是保证**（Pillar："allow-default 不是沙箱，而是一张永远少一条的清单"） | 已扩充清单；**显式声明不完整** |
-| **glob 是构造期快照** | 运行期新增的密钥文件不会被重新遮蔽 | 写进文档（能力边界） |
+| **`/proc/<pid>/root` / `environ`（`full` 档）** | `--ro-bind / /` 是**递归绑定** → `/proc` **始终**存在。A.1 用 `--tmpfs /proc` 关掉 `no-proc` 档的整块 `/proc`；**`full` 档保留 `/proc`**（工具需要），此时靠 `--unshare-pid` 缩小（沙箱只看自己的 pid），但**不是零** | 本轮**不修**（要修需完全不挂 `/proc` 或改 env 传递） |
+| **递归 bind 带进 `/sys`、`/run`** | 同上 —— 沙箱能看到宿主 `/sys`、`/run` 等子挂载，读边界与 AF_UNIX 的暴露面**比原假设更大** | 写进本文档 |
+| **符号链接绕过读遮蔽** | 遮蔽的是**路径名**不是 **inode**；`resolve()` 只解析 deny 路径自身，**运行期重指向不覆盖**（调研 F3） | 已做 `resolve()` + 遮蔽原始路径与目标；**仍不完整** |
+| **读 denylist 不完整** | denylist **"永远少一条"** —— 这是**刻意的能力边界**，**不是保证**（Pillar） | 已扩充清单；**显式声明不完整** |
+| **glob 是构造期快照** | 运行期新增的密钥文件不会被重新遮蔽 | 写进文档 |
+| **代理单点 / DNS rebinding** | 域名白名单对**解析后的 IP** 无控制；`evil.com` 可解析到 metadata/内网 | 代理**解析后**再拒私网/loopback/link-local/metadata 段（§C.6） |
+| **代理同进程** | 代理与持有 API key 的 ai-coding 同进程；逻辑绕过 = 白名单失效 | 本轮**不降权**；解析 hardening + 残余风险 |
 | **IP/CIDR/UDP 绕过** | 域名白名单对裸 IP/UDP 无效（调研 F12/F13） | 本轮**不修** |
 | **abstract AF_UNIX 不被遮蔽覆盖** | abstract socket 无路径，只能靠 seccomp 档（默认关） | 写进文档 |
-| **AF_UNIX 路径级控制基本等于没有** | `--ro-bind / /` 已 bind 整个宿主根；无 seccomp 档时"允许清单"是空洞的 | **诚实记录**，不假装存在白名单 |
+| **AF_UNIX 路径级控制基本等于没有** | `--ro-bind / /` 已 bind 整个宿主根；无 seccomp 档时"允许清单"是空洞的 | **诚实记录** |
 | **seccomp user-notification 路径中介** | nono 的修法，复杂度高一个量级 | 本轮**不做** |
 | **信任交接型逃逸** | 沙箱外组件（hook / MCP / Git 子系统）消费沙箱产物（调研 F14） | **不在本轮范围** |
-| **MCP 子进程不受读边界约束** | `plan-m-d.md` §七 已声明不覆盖 MCP（长驻、需 stdio/网络），且它持有自己的凭据（评审 P2-14） | 写进本文档 |
+| **MCP 子进程不受读边界约束** | `plan-m-d.md` §七 已声明不覆盖 MCP，且它持有自己的凭据（评审 P2-14） | 写进本文档 |
 | **macOS / Windows** | 本轮只做 Linux（bwrap）；Seatbelt 已弃用、Windows 用受限令牌 | 平台相关，另立 |
-| **代理单点** | 代理是所有出网流量的唯一通道；它崩了 → 降级到 `deny`（网络全断，fail-closed） | 已写死降级方向 |
 
 ---
 
@@ -646,7 +708,18 @@ host == allow_entry  or  host.endswith("." + allow_entry)
 
 ### 8.2 方案评审（子智能体，第 2 轮）
 
-_待填。_
+**1 个 P0 · 2 个 P1 · 2 个 P2 · 3 个 P3（全部已修，见 §8.2.1）**
+
+#### 8.2.1 本轮 findings 的处置（全部已修）
+
+| 级别 | 问题 | 修法 |
+|---|---|---|
+| **P0-1** | **第 1 轮的修复不成立**：`--ro-bind / /` 是**递归绑定**，宿主 `/proc`（及 `/sys`、`/run`）**与 `--proc` 无关**地被带进沙箱。实测：`no-proc` 档下 `/proc` **存在 61 条**、`/proc/1/comm` = **`tini`（宿主 init）**；`--unshare-pid` **单独并不能关闭逃逸**。**唯一能关闭的是 `--tmpfs /proc`**（实测 → `No such file or directory`） | **`no-proc` 档加 `--tmpfs /proc`**；**V1b 补行为断言**（`ls /proc` 为空 + 读 `/proc/<pid>/root` 失败），否则测试仍抓不到（第 1 轮 P0 的原始教训）；§B 局限 3 / §D.4 / §7.1 连带更正 |
+| P1-1 | **桥接与 `list[str]` 契约冲突**：`socat` 前置到 argv 后用户命令不执行；`sh -c "... & exec"` 包装则**重新引入 shell 解析层**（`plan-m-d.md` P0-1 禁止的路径）。且 env 无处表达（`wrap()` 只返回 argv）、端口协调缺口、**桥挂了未定义** | §C.1 重写：**组合根注入的小程序作 `argv[0]` 前置**（桥选端口 + 设 env + `execv`）；env 走 bwrap `--setenv`/`--unsetenv`；桥失败 **fail-closed**（非零退出，命令不执行） |
+| P1-2 | **代理作为单点的攻击面**：域名白名单对**解析后的 IP** 无控制 → `evil.com` 可解析到 `169.254.169.254`（metadata）或内网 | §C.6：代理**解析后**再拒私网/loopback/link-local/metadata 段 |
+| P2-1 | `resolve()` 方向对但**表述错**（实测 `--tmpfs <link>` / `--ro-bind /dev/null <link>` **都直接报错**，不是"只遮链接"） | §B 局限 2 按实测重写；**同时遮蔽原始路径与解析目标**；V16 补"直接遮符号链接会报错"断言 |
+| P2-2 | 代理其余攻击面（同进程逻辑绕过、套接字权限、对抗性输入） | §C.6 补：socket `0600`、解析 hardening、连接超时 |
+| P3 | env 走 `--setenv`；loopback 已 UP（作 V10 断言）；代理 socket 清理与冲突 fail-closed | §C.1 / §C.5 补 |
 
 ### 8.3 实现评审（子智能体）
 
