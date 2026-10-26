@@ -776,6 +776,14 @@ AF_UNIX 残余风险（P1-6 → §7.1）、时钟格式（P1-7 → §C.1 epoch �
 
 ### 8.3 实现评审（子智能体）
 
+> **一次与本轮无关的 CI 偶发**：`40306229455`（纯文档提交）在 3.13 job 红在
+> `tests/test_worktree.py::test_can_isolate_is_false_when_git_times_out` ——
+> `assert await WorktreeManager(git_repo, timeout=0.001).can_isolate() is False`。
+> 这是 **1ms 超时的时序敏感用例**：CI 机器上 git 若在 1ms 内完成，`can_isolate()` 返回 `True` → 断言失败。
+> `ai_coding/core/worktree.py` 最后改动是 `d1da11a`（UI 重构），**与领域 D 无关**；
+> 本地连跑 5/5 通过。**同一提交的 3.10 job 绿、前一次全量 CI（`40305144103`）双 job 绿** —— 判定为偶发。
+> 建议纳入 N-2 的 flaky 收口（`timeout=0.001` 这类"不真实的小超时"用例对机器速度敏感）。
+
 **0 P0 · 1 P1 · 4 P2 · 5 P3（全部已修，见 §8.3.1）**
 
 **已实测验证**（评审逐条复核）：
