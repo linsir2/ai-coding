@@ -42,6 +42,31 @@ class ToolsConfig(BaseModel):
     extra_workspace_roots: list[str] = Field(default_factory=list)
 
 
+class ProcessSandboxConfig(BaseModel):
+    """M-D1: the OS-level process sandbox (the write boundary).
+
+    ``mode`` is the policy tier and ``allow_bypass`` is roadmap's explicit
+    "do not isolate this run".  ``writable_paths`` are the extra writable
+    directories beyond the roots the process layer shares with the path
+    sandbox (``Sandbox.roots``); the default carries ``~/.cache`` and never a
+    credential directory.  Widening this narrows the sandbox -- the trade is
+    written down in ``docs/plan-m-d.md`` §A.2.
+
+    The default is ``enforce``: roadmap's acceptance criterion is "a process
+    under ``enforce`` cannot write outside the workspace", and a default of
+    ``off`` would make it empty out of the box.  On a host with no unprivileged
+    user namespaces (a common Debian/RHEL configuration) that means every bash
+    call is refused until the operator sets ``warn`` -- which is the honest
+    outcome, and why ``config.example.yaml`` shows a ``warn`` example.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    mode: Literal["off", "warn", "enforce"] = "enforce"
+    allow_bypass: bool = False
+    writable_paths: list[str] = Field(default_factory=lambda: ["~/.cache"])
+
+
 class StaticCheckConfig(BaseModel):
     """The commands the harness runs itself when the search ladder reaches L2 (B1).
 
@@ -453,6 +478,9 @@ class AppConfig(BaseModel):
     tracing: TracingConfig = Field(default_factory=TracingConfig)
     guard: GuardConfig = Field(default_factory=GuardConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
+    # M-D1: the OS-level process sandbox.  Policy and mechanism are separate;
+    # the mechanism is built by the composition root from this.
+    process_sandbox: ProcessSandboxConfig = Field(default_factory=ProcessSandboxConfig)
 
 
 def _coerce_fallbacks(raw: Any) -> tuple[str, ...]:

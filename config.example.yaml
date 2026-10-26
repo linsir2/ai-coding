@@ -149,6 +149,29 @@ tools:
   grep:
     enabled: true
 
+# M-D1: the OS-level process sandbox (the *write* boundary).  A bash command or
+# a background job under `enforce` cannot create, modify or delete outside the
+# workspace and the writable paths below.  It does NOT bound reads -- the whole
+# root is bound read-only, so ~/.ssh/id_rsa is still readable inside the
+# sandbox; that is a deliberate scope cut (docs/plan-m-d.md §A).
+#
+# Default is `enforce`, which REFUSES every bash/job when bwrap cannot run
+# (bubblewrap not installed, or no unprivileged user namespaces) instead of
+# silently running unsandboxed.  On a host without userns that means every
+# command is denied -- set `mode: warn` to keep working and report the
+# fallback (a Degraded event) rather than fail.
+#
+# `allow_bypass` is roadmap's explicit "do not isolate this run".
+# `writable_paths` are extra writable directories beyond the roots (which are
+# the workspace plus tools.extra_workspace_roots); the default carries
+# ~/.cache and never a credential directory.  Widening this narrows the
+# sandbox.
+process_sandbox:
+  mode: warn                  # off | warn | enforce (enforce is the built-in default)
+  allow_bypass: false
+  writable_paths:
+    - ~/.cache
+
 mcp:
   # N-4: a *project* layer's mcp/hooks are ignored by default.  A repository
   # cannot grant execution -- `config.example.yaml` ships in the repo, and

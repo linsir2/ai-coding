@@ -126,6 +126,9 @@ def build_tool_registry(
     notices: Any | None = None,
     jobs: Any = None,
     agents: Any = None,
+    sandbox_policy: Any = None,
+    sandbox_backend: Any = None,
+    sandbox_roots: Any = (),
 ) -> Any:
     """Build the *domain* tool registry used by the self-owned loop (R1a-4).
 
@@ -135,6 +138,10 @@ def build_tool_registry(
     R6c: ``user_prompt`` is the channel ``ask_user`` would use.  A sub-agent stack
     (``include_subagent=False``) never gets it: delegating to an isolated worktree
     means there is nobody to ask, so the tool list must not pretend otherwise.
+
+    M-D1: the process sandbox's policy/mechanism/roots arrive here so that
+    ``BashTool`` shares the composition root's backend instance with
+    ``JobRegistry``.  ``None``/empty leaves the behaviour exactly as before.
     """
     registry, _gate = _assemble_registry(
         app_cfg,
@@ -146,6 +153,9 @@ def build_tool_registry(
         notices,
         jobs,
         agents=agents,
+        sandbox_policy=sandbox_policy,
+        sandbox_backend=sandbox_backend,
+        sandbox_roots=sandbox_roots,
     )
     return registry
 
@@ -160,6 +170,9 @@ def _assemble_registry(
     notices: Any | None = None,
     jobs: Any = None,
     agents: Any = None,
+    sandbox_policy: Any = None,
+    sandbox_backend: Any = None,
+    sandbox_roots: Any = (),
 ) -> tuple[Any, Any]:
     """Create the sandbox/gate/registry triple shared by both builders."""
 
@@ -198,7 +211,18 @@ def _assemble_registry(
     registry = ToolRegistry()
 
     if tools_cfg.bash.enabled:
-        registry.register(BashTool(timeout_seconds=tools_cfg.bash.timeout_seconds))
+        # M-D1: the process layer's writable face is the path layer's -- the
+        # same roots, so a directory the file tools may write is a directory a
+        # bash command may write, and never one or the other.
+        roots = tuple(sandbox_roots) if sandbox_roots else sandbox.roots
+        registry.register(
+            BashTool(
+                timeout_seconds=tools_cfg.bash.timeout_seconds,
+                policy=sandbox_policy,
+                backend=sandbox_backend,
+                roots=roots,
+            )
+        )
     if tools_cfg.read.enabled:
         registry.register(
             ReadTool(sandbox, fst, max_file_size=tools_cfg.read.max_file_size)

@@ -377,6 +377,9 @@ def _build_tool_registry(
     notices: Any | None = None,
     jobs: Any | None = None,
     agents: Any | None = None,
+    sandbox_policy: Any = None,
+    sandbox_backend: Any = None,
+    sandbox_roots: Any = (),
 ) -> Any:
     """Build the domain tool registry the self-owned loop dispatches through."""
     from ai_coding.tools.builder import build_tool_registry
@@ -391,6 +394,9 @@ def _build_tool_registry(
         notices=notices,
         jobs=jobs,
         agents=agents,
+        sandbox_policy=sandbox_policy,
+        sandbox_backend=sandbox_backend,
+        sandbox_roots=sandbox_roots,
     )
 
 

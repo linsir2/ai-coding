@@ -46,13 +46,20 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ai_coding.core.events import BackgroundTaskDone, JobChanged
+from ai_coding.core.turn_report import emit_degraded
 from ai_coding.infra.time_utils import now_utc
+from ai_coding.security.process_sandbox import (
+    ProcessSandboxPolicy,
+    SandboxBackend,
+    SandboxGap,
+    spawn_argv,
+)
 
 __all__ = [
     "MAX_JOB_LOG_BYTES",
@@ -145,6 +152,10 @@ class Job:
     #: still hands back ``-9``, so the fact has to be recorded where it happens
     #: rather than guessed at settle time.
     stop_reason: str = ""
+    #: M-D1: the stable reason code when the process sandbox refused to start
+    #: this command (``SandboxGap``).  The job never spawned, so no ledger row
+    #: is written; the field is what ``bash_tool`` reads to answer ``denied``.
+    denied_reason: str = ""
     #: True when this process found the row on disk instead of starting it.
     adopted: bool = False
     #: The pid's start time as the kernel counts it; the anti-reuse check.
@@ -218,9 +229,24 @@ class JobRegistry:
     owned by something that does too.
     """
 
-    def __init__(self, root: str | Path, *, notices: Any | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        notices: Any | None = None,
+        policy: ProcessSandboxPolicy | None = None,
+        backend: SandboxBackend | None = None,
+        roots: Sequence[Path] = (),
+    ) -> None:
         self._root = Path(root)
         self._notices = notices
+        # M-D1: the process sandbox.  ``start`` is the one wrap point for a job
+        # (``bash_tool`` does not wrap a job-class call), and it shares the
+        # backend instance with ``BashTool`` so the two agree on whether the
+        # mechanism exists.
+        self._policy = policy
+        self._backend = backend
+        self._roots = tuple(Path(root_path) for root_path in roots)
         self._jobs: dict[str, Job] = {}
         # Reentrant on purpose: _publish holds it across a snapshot *and* the
         # emit scan so one event is one atomic view of the table, and snapshot()
@@ -245,6 +271,11 @@ class JobRegistry:
         Raises :class:`OSError` when the process cannot be spawned at all -- no
         ledger row is written for a command that never ran -- and
         :class:`JobLimitReached` when the workspace is already full.
+
+        M-D1: a :class:`SandboxGap` is **not** raised.  The command was refused
+        by the process sandbox, so it becomes a settled failed job carrying the
+        stable reason code in ``denied_reason`` -- no ledger row, no watcher, no
+        process.  ``bash_tool`` reads the field and answers ``denied``.
         """
         with self._lock:
             if self._running_count() >= MAX_RUNNING_JOBS:
@@ -253,14 +284,40 @@ class JobRegistry:
                     f"(limit: {MAX_RUNNING_JOBS}); use job_kill to stop an unneeded "
                     f"job, wait for one to finish, then retry"
                 )
+        degraded = (
+            (lambda reason: emit_degraded(emit, "process_sandbox", reason))
+            if emit is not None
+            else None
+        )
+        try:
+            argv = spawn_argv(
+                _bounded(command), self._policy, self._backend, self._roots, emit=degraded
+            )
+        except SandboxGap as exc:
+            job = Job(
+                id=f"job_{uuid.uuid4().hex[:8]}",
+                command=command,
+                pid=0,
+                log_path="",
+                started_at=now_utc(),
+                origin_session=session_id,
+                status=STATUS_FAILED,
+                detail=f"denied: {exc.reason}",
+                denied_reason=exc.reason,
+                settled=True,
+                announce=False,
+                emit=emit,
+            )
+            job.done.set()
+            return job
         self._root.mkdir(parents=True, exist_ok=True)
         job_id = f"job_{uuid.uuid4().hex[:8]}"
         log_path = self._root / f"{job_id}.log"
         handle = open(log_path, "wb")  # noqa: SIM115 - the child needs the fd open
         try:
             proc = subprocess.Popen(
-                _bounded(command),
-                shell=True,
+                argv,
+                shell=False,
                 cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=handle,

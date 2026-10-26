@@ -99,7 +99,13 @@ def find_armed_session(sessions: Any) -> Any | None:
 
 async def build_world(path: str | None, workspace: str, skills: str | None) -> AppWorld:
     """Build config -> engine -> registry -> MCP -> loop (never starts a UI)."""
-    from ai_coding.cli import _build_loop, _build_tool_registry, _make_hooks, _make_recorder
+    from ai_coding.cli import (
+        _build_loop,
+        _build_tool_registry,
+        _extra_roots,
+        _make_hooks,
+        _make_recorder,
+    )
     from ai_coding.config.loader import ConfigLoader
     from ai_coding.core.guard import build_guards
     from ai_coding.core.jobs import JobRegistry
@@ -107,6 +113,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     from ai_coding.core.steering import SteeringQueue
     from ai_coding.paths import Paths
     from ai_coding.security.approval import CLIApprovalCallback
+    from ai_coding.security.process_sandbox import build_process_sandbox
     from ai_coding.security.user_prompt import CLIUserPromptCallback
     from ai_coding.service.session_service import SessionService
     from ai_coding.skills.registry import SkillRegistry
@@ -159,13 +166,31 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     # D-1: one job table per workspace, beside the sessions and traces rather
     # than inside either -- a background command outlives the session that
     # started it, and the ledger that says so has to outlive it too.
-    jobs = JobRegistry(root=Path(workspace) / ".ai-coding" / "jobs", notices=notices)
+    #
+    # M-D1: the process sandbox's policy/mechanism/roots are built once here and
+    # handed to both the job table and the tool stack, so a bash command and a
+    # background job share one backend instance and one writable face.
+    sandbox_policy, sandbox_backend = build_process_sandbox(app_cfg, workspace)
+    sandbox_roots = (
+        Path(workspace).expanduser().resolve(),
+        *(Path(root) for root in _extra_roots(app_cfg, workspace)),
+    )
+    jobs = JobRegistry(
+        root=Path(workspace) / ".ai-coding" / "jobs",
+        notices=notices,
+        policy=sandbox_policy,
+        backend=sandbox_backend,
+        roots=sandbox_roots,
+    )
     registry = _build_tool_registry(
         app_cfg, workspace, skill_registry,
         user_prompt=user_prompt, base_instructions=BASE_INSTRUCTIONS,
         notices=notices,
         jobs=jobs,
         agents=agents,
+        sandbox_policy=sandbox_policy,
+        sandbox_backend=sandbox_backend,
+        sandbox_roots=sandbox_roots,
     )
 
     # Per-workspace state lives under the workspace, beside the traces

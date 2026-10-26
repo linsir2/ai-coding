@@ -14,13 +14,21 @@ import asyncio
 import itertools
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from ai_coding.core.events import ToolChunk
 from ai_coding.core.jobs import WAIT_CANCELLED, WAIT_SETTLED
+from ai_coding.core.turn_report import emit_degraded
 from ai_coding.domain.message import ToolResult
 from ai_coding.infra.subprocess_runner import run_process_async
+from ai_coding.security.process_sandbox import (
+    ProcessSandboxPolicy,
+    SandboxBackend,
+    SandboxGap,
+    spawn_argv,
+)
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 _DEFAULT_TIMEOUT = 60
@@ -107,12 +115,24 @@ class BashTool(BaseTool):
         timeout_seconds: int = _DEFAULT_TIMEOUT,
         max_output_chars: int = _DEFAULT_MAX_OUTPUT,
         max_timeout_seconds: int = _MAX_TIMEOUT_SECONDS,
+        *,
+        policy: ProcessSandboxPolicy | None = None,
+        backend: SandboxBackend | None = None,
+        roots: Sequence[Path] = (),
     ) -> None:
         self._max_timeout = max(1, int(max_timeout_seconds))
         # The default can never exceed the ceiling: two yardsticks for one
         # command would teach the model that limits are negotiable prose.
         self._timeout = max(1, min(int(timeout_seconds), self._max_timeout))
         self._max_output = max_output_chars
+        # M-D1: policy and mechanism are separate, and both default to "no
+        # opinion" so a stack built without them behaves exactly as before.
+        # The composition root passes the real pair; a job-class call does NOT
+        # wrap here -- ``JobRegistry.start`` is the one wrap point (double
+        # wrapping would mean two layers of bwrap).
+        self._policy = policy
+        self._backend = backend
+        self._roots = tuple(Path(root) for root in roots)
 
     @property
     def name(self) -> str:
@@ -206,6 +226,11 @@ class BashTool(BaseTool):
             )
         except JobLimitReached as exc:
             return ToolResult(success=False, output=f"error: {exc}", error="job_limit")
+        denied = getattr(job, "denied_reason", "")
+        if denied:
+            return ToolResult(
+                success=False, output=f"error: {denied}", error="denied", data={"reason": denied}
+            )
         return ToolResult(
             success=True,
             output=(
@@ -250,6 +275,11 @@ class BashTool(BaseTool):
             # result has nobody but a notice to reach the model through.
             announce=False,
         )
+        denied = getattr(job, "denied_reason", "")
+        if denied:
+            return ToolResult(
+                success=False, output=f"error: {denied}", error="denied", data={"reason": denied}
+            )
         pump = _LogTail(job, context.emit, context.call_id)
         pump.start()
         started = time.monotonic()
@@ -398,9 +428,29 @@ class BashTool(BaseTool):
                 )
             )
 
+        # M-D1: the command becomes an argv through the one shared helper, and
+        # the spawn is ``shell=False``.  A SandboxGap is a *denial*, not a tool
+        # error: letting it reach the dispatcher's ``except Exception`` would
+        # report ``error="tool_error"`` and lose the reason code.
+        try:
+            argv = spawn_argv(
+                command,
+                self._policy,
+                self._backend,
+                self._roots,
+                emit=lambda reason: emit_degraded(live.emit, "process_sandbox", reason),
+            )
+        except SandboxGap as exc:
+            return ToolResult(
+                success=False,
+                output=f"error: {exc.reason}",
+                error="denied",
+                data={"reason": exc.reason},
+            )
+
         outcome = await run_process_async(
-            command,
-            shell=True,
+            argv,
+            shell=False,
             cwd=self._workspace_dir(ctx),
             timeout=effective,
             max_output_chars=self._max_output,
