@@ -3,7 +3,7 @@
 > 调研：两轮联网（55+ 引用源，全文见 [research-persistence-crash-recovery.md](research-persistence-crash-recovery.md)）
 > + 两轮仓库核实（子智能体）。方案与评审记录见 §八。
 >
-> 本稿为**第 2 版**，已按子智能体方案评审（§八）修订。
+> 本稿为**第 3 版**，已按两轮子智能体方案评审（§八）修订。
 
 ---
 
@@ -62,12 +62,11 @@ checkpointed"* → **崩溃批次的工具会重跑**。
 两线程落到同一 `<path>.tmp` → `os.replace` 后另一线程继续写正式文件 →
 **文件变非法 JSON** → `_load` 吞掉 `ValueError` 返回 `[]` → **全部记忆丢失**。
 
-**必须诚实框定**（评审 P1-7）：`MemoryStore` 的 docstring 自己写了两句关键的话 ——
-*"A single-writer store is fine; **that is every real path in this repo**"* 与
-*"**R10 reviewed this and chose to record it rather than restructure persistence**"*。
-今天确实全部单线程（`recall_with_diagnostics` 里的 `touch_notes` 是直接同步调用，
-没有 `to_thread`）。**所以 M-C2 修的是"把 store 写操作移到线程之前必须先修的隐患"，
-不是一个正在漏的洞。** 方向与 docstring 自己给的修法一致。
+**必须诚实框定**：`MemoryStore` 的 docstring 自己写了 *"A single-writer store is
+fine; **that is every real path in this repo**"* 与 *"**R10 reviewed this and chose
+to record it rather than restructure persistence**"*。今天确实全部单线程
+（`recall_with_diagnostics` 里的 `touch_notes` 是直接同步调用，没有 `to_thread`）。
+**所以 M-C2 修的是"把 store 写操作移到线程之前必须先修的隐患"，不是一个正在漏的洞。**
 
 ### M-C3 · 崩溃后续跑的验收门 —— ✅ 完全相符
 
@@ -101,36 +100,37 @@ boot → find_armed_session（会话级扫描，仅 plan/goal，按 lastAccessTi
 mutates_world 工具执行【前】
     → 写 sidecar: { callId, tool, digest, status: "running" }        ← write-ahead
 执行【后】
-    → 回填: { status: "ok"/"failed", output: 摘要 }
+    → 回填: { status: "ok"/"failed", output, data, artifacts }
 再次出现同一 (tool, digest) 且 status == "ok"
     → 直接复用该结果，【不执行】
+回合结束
+    → 清空 sidecar                                                  ← 复用域 = 恢复窗口
 ```
 
-**为什么是 `(tool, digest)` 而不是 `callId`**：`resume_turn` 会让模型**重新生成**
-工具调用，新调用的 `callId` 与崩溃前不同。能对齐的只有**意图**（工具 + 规范化参数）。
+#### A.1 落点：**sidecar**，不是会话字段
 
-#### A.1 落点：**sidecar**，不是会话字段（评审 P0-1）
-
-> **P0 修正**：初版方案写"落盘走 `TurnCloser.save`"。那是**错的** ——
-> `TurnCloser.save` 的第一件事是 `ensure_tool_pairing()`（`turn_close.py:208`），
-> 它会**丢弃没有配对结果的 assistant 载体**。而 `claim` 必须在 `_execute` **之前**
-> 调（`dispatch.py:514`），此刻 `write_back` 还没跑（`agent_loop.py:1951`）→
-> 载体被丢 → 随后写回的 tool 消息成了孤儿 → 下次落盘再被丢。
->
-> **这个坑仓库里已经踩过三次，三次都写了注释明令禁止**：
-> `agent_loop.py:1794`（"Deliberately not a session save … destroying the pending
-> call (verified)"）、`session_service.py:122/168/212`、`data-contracts.md:68`。
-> 审批等待就是为此改成 sidecar 的。
-
-**所以 write-ahead 走 sidecar**，照抄 `mark_pending_approval` 的形状：
+> **为什么不能走 `TurnCloser.save`**：`save` 的第一件事是
+> `ensure_tool_pairing()`（`turn_close.py:208`），它会**丢弃没有配对结果的
+> assistant 载体**。而 `claim` 必须在 `_execute` **之前**调（`dispatch.py:514`），
+> 此刻 `write_back` 还没跑（`agent_loop.py:1951`）→ 载体被丢 → 随后写回的 tool
+> 消息成了孤儿 → 下次落盘再被丢。**这个坑仓库里已经踩过三次，三次都写了注释
+> 明令禁止**（`agent_loop.py:1794`、`session_service.py:122/168/212`、
+> `data-contracts.md:68`）。审批等待就是为此改成 sidecar 的。
 
 * `SessionService` 加 `_write_ahead_path` / `mark_write_ahead(session_id, records)` /
-  `_read_write_ahead(session_id)`，写到 **`sessions/write-ahead/<id>.json`**。
+  `_read_write_ahead(session_id)` / `clear_write_ahead(session_id)`，写到
+  **`sessions/write-ahead/<id>.json`**。
   * **必须是子目录**：会话扫描 glob `*.json`，`session_service.py:134-138` 记录了
     "兄弟 marker 被 `list_sessions` 读成幽灵空会话"的坑。
-* `SessionData.write_ahead` 改为**运行时字段**（`pending_approval` 同款，`load` 时从
-  sidecar 读回，`session_service.py:283` 是现成的接线点），**不进 `to_dict` 白名单**。
+* `SessionData.write_ahead` 是**运行时字段**（`pending_approval` 同款，`load` 时从
+  sidecar 读回，`session_service.py:283` 是现成接线点），**不进 `to_dict` 白名单**
   → 会话 JSON 不因此变大，save 节奏不变（每个 golden test 钉着的节奏）。
+* **生命周期**（评审新问题 ①②）：
+  * `delete()` 必须清（`session_service.py:345` 已清 `pending`/`pending-posture`/
+    `pending-reminder`/`undo` 四个 sidecar —— 这是仓库第 5 次修同一类孤儿）；
+  * **回合结束时清**（`TurnCloser.close` → `clear_write_ahead`）。
+    这一条同时把**复用域**限制在恢复窗口内（评审新问题 ③）：sidecar 只在回合中
+    （以及崩溃后）存在，跨回合的同 `(tool, digest)` **不可能**命中。
 
 #### A.2 契约：`WriteAheadIntent`（新，`domain/write_ahead.py`）
 
@@ -149,6 +149,12 @@ class WriteAheadIntent:
     happened, so recovery re-runs it.  Only ``ok`` is reused.  Closing the
     remaining window (effect done, ``ok`` not yet on disk) needs an outbox and
     fencing tokens, which this repo does not have (§七).
+
+    ``output``/``data``/``artifacts`` are carried because a reuse has to be
+    *indistinguishable* from a fresh run: the model reads ``output``, and the
+    turn's digest/handoff read ``artifacts`` (``turn_close.py:177``).  Dropping
+    them would silently shrink the turn's evidence.  All three are capped --
+    an unbounded record per call is how a sidecar becomes a second transcript.
     """
 
     call_id: str
@@ -157,15 +163,19 @@ class WriteAheadIntent:
     digest: str
     #: "running" | "ok" | "failed"
     status: str = "running"
-    #: Tail of the output, capped (see §A.3).  The full result already rides the
-    #: history as a tool message.
     output: str = ""
+    data: dict[str, Any] = field(default_factory=dict)
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
 ```
 
 * **`digest` 复用 `core/guard.py:109` 的 `call_fingerprint`**（sha1 截 12，
-  `(tool, params)` 顺序不敏感、值敏感）—— 不新造第二个指纹函数（评审 P2-1）。
+  `(tool, params)` 顺序不敏感、值敏感）—— 不新造第二个指纹函数。
   `DuplicateCallGuard` 已经在用它拦"同参重复调用"（阈值 2、只数成功、跨轮重置），
-  write-ahead 补的是它缺的**跨崩溃**那一半（§A.4）。
+  write-ahead 补的是它缺的**跨崩溃**那一半（§A.5）。
+* **三个上限**：`output` 4000 字符（评审新问题 ⑤：崩溃批次的 tool 消息**不在盘上**
+  ——`resume_turn` 的 docstring 说历史止于上一个已完成结果，`write_back`(1951) 与
+  `checkpoint`(1962) 之间崩溃即未落盘 —— 所以续跑时模型看到的只有这里，200 字符
+  对大输出是实质信息损失）；`data` 8 键 × 200 字符；`artifacts` 4 条。
 
 #### A.3 行为：`WriteAheadLog`（新，`core/write_ahead.py`）
 
@@ -182,42 +192,51 @@ class WriteAheadLog:
     Both methods are **synchronous**: the dispatcher's ALLOW group runs a batch
     through ``asyncio.gather`` (``dispatch.py:253``), and a sync method is what
     keeps two same-param calls in one batch from both claiming a miss.
+
+    The reuse domain is **the turn**: ``clear`` runs at turn close, so a match
+    can only come from the turn that is running (or the one a crash interrupted).
+    A later turn starts with an empty log -- this is crash recovery, not a
+    session-long call cache.
     """
 
     def claim(self, call: ToolCall) -> ToolResult | None: ...
     def settle(self, call: ToolCall, result: ToolResult) -> None: ...
+    def clear(self) -> None: ...
 ```
 
-* **覆盖哪些工具**：`item.tool.mutates_world`（评审 P1-4）。
+* **覆盖哪些工具**：`item.tool.mutates_world`（评审 P1-4 修正）。
   * `ACTION_TOOLS`（M-B）**不是**这份语义 —— 它是搜索连胜阶梯里"什么算 acting"
     的清单（`turn_books.py:79-87` 的 docstring 原文），与"改世界"不等价：
-    `job_kill`/`memory_write` 是 `mutates_world=True` 却不在其中，而 `bash`
-    在其中有自己的理由（"为了奖励跑静态检查"）。
+    `job_kill`/`memory_write` 是 `mutates_world=True` 却不在其中。
   * `mutates_world` 是**工具自己声明的**元数据（`base.py:167`，默认 True），
     也是 dispatcher 只读门的同一份判据 → **同一份语义，不新造清单**。
-  * **已知边界**：`subAgent` 声明为 `mutates_world=False`（`subagent_tool.py:357`）。
-    子智能体的副作用经它自己的工具产生，记在子会话里 —— 本方案**不**为父调用记
-    write-ahead。这是有意的（子会话有自己的持久化路径），也是既有的声明。
+  * **注意它比 `ACTION_TOOLS` 宽**：`SubAgentTool`（`subagent_tool.py:119`）与
+    `websearch`（`websearch_tool.py:80`）/`webfetch`（`webfetch_tool.py:198`）都
+    **继承默认 True**。这是可接受的 —— 复用域是**回合**，同一回合内重复的
+    `websearch`/`subAgent` 本来就命中 `DuplicateCallGuard`（阈值 2）；而
+    `subAgent` 的结果复用是**收益**（重跑一个子智能体很贵）。
+    （`subagent_tool.py:357` 那条 `mutates_world = False` 属于
+    **`SubAgentListTool`**，不是 `SubAgentTool` —— 评审 P1-4 的更正。）
 * **`ephemeral` 会话不记**：plan 步会话不落盘（`turn_close.py:206`），
   sidecar 是纯开销。`WriteAheadLog` 构造时判一次即可。
-* **有界**：保留最近 **256** 条（评审 P2-3：`max_iterations=10 × max_parallel=4 = 40`，
-  重放再 +40，64 不够）。**`output` 截断到 200 字符**（评审 P2-2）——
-  有界条数 × 无界长度仍会撑大会话文件。
+* **条数上界 256**：`max_iterations=10 × max_parallel=4 = 40`，重放再 +40，
+  256 有余量；配合回合结束清空，实际长度是"一个批次"。
 
 #### A.4 接线
 
 | 位置 | 改动 |
 |---|---|
-| `domain/write_ahead.py`（新） | `WriteAheadIntent`（dataclass + to/from_dict） |
-| `domain/session.py` | `write_ahead: list[WriteAheadIntent] = field(default_factory=list)`（**运行时**，非落盘字段） |
-| `service/session_service.py` | `_write_ahead_path` / `mark_write_ahead` / `_read_write_ahead`；`load` 里读回 |
+| `domain/write_ahead.py`（新） | `WriteAheadIntent` + 三个上限的裁剪 |
+| `domain/session.py` | `write_ahead`（运行时字段） |
+| `service/session_service.py` | sidecar 四方法 + `load` 读回 + `delete` 清理 |
 | `core/write_ahead.py`（新） | `WriteAheadLog` |
 | `tools/base.py` | `ToolContext.write_ahead: Any = None`（与 `jobs` 同款 duck-typed） |
 | `core/request_builder.py` | `tool_context` 透传 |
 | `core/agent_loop.py` | `_run_tools` 造 log 并传入 |
 | `core/dispatch.py` | `_decide` 里 claim/settle |
+| `core/turn_close.py` | `close` 里 `clear()` |
 
-**精确插入点**（评审 P2-6）：
+**精确插入点**：
 
 ```
 _decide(call)
@@ -236,10 +255,9 @@ _decide(call)
 
 * `digest` 必须用 **guard/hook rewrite 之后**的 `call.params` —— 否则同一意图会算出
   两个不同的键。
-* **复用时跳过 `guards.after` 与 `TOOL_AFTER` hooks**（评审 P2-9）：它们的输入是
-  "刚刚执行的结果"，而复用没有执行。`TOOL_BEFORE` 与 guards 的 `check` **已经跑过**
-  （在 claim 之前），所以权限语义不 bypass。**这是有意的**，写入 `WriteAheadLog`
-  的 docstring。
+* **复用时跳过 `guards.after` 与 `TOOL_AFTER` hooks**：它们的输入是"刚刚执行的
+  结果"，而复用没有执行。`TOOL_BEFORE` 与 guards 的 `check` **已经跑过**
+  （在 claim 之前），所以权限语义不 bypass。**这是有意的**，写入 docstring。
 
 #### A.5 与现有机制的关系
 
@@ -254,17 +272,16 @@ _decide(call)
 
 **三层**：
 
-1. **`_save` 进锁**：`_mutate` 改成
+1. **`_save` 进锁**：
    ```python
    with self._lock:
        result = fn()
        self._save()
    return result
    ```
-   **必须保留 `_save` 外层的 try/except**（评审 P2-5）：`to_json_pretty` 可能抛非
-   `OSError`（例如 `default=` 处理不了的 object），逃逸出锁会让后续写全部卡死。
-   `_save` 内部已有 `except OSError`；`_mutate` 外层再包一层 `except Exception`
-   （与今天一致）。
+   **必须保留 `_save` 外层的 try/except**：`to_json_pretty` 可能抛非 `OSError`，
+   逃逸出锁会让后续写全部卡死。`_save` 内部已有 `except OSError`；`_mutate`
+   外层再包一层 `except Exception`（与今天一致）。
 2. **`fcntl.flock` 跨进程**：`_save` 在写 tmp + `os.replace` 期间对**正式文件**加
    排他锁。两个 `ai-coding` 实例跑同一 workspace 时，进程内 `RLock` 互不感知。
 3. **唯一 tmp 路径**：`<path>.<uuid4hex>.tmp`。即使锁失效（非 POSIX 平台没有
@@ -277,29 +294,25 @@ def _replace_under_lock(self, tmp: Path) -> None:
 
     The lock must span the *rename*, not just the write: releasing before
     ``os.replace`` leaves a window where another process renames its own tmp in
-    between, and the two end up interleaved (review P2-4).  ``fcntl`` is
-    POSIX-only; elsewhere this degrades to a bare ``os.replace`` and the
-    docstring says so -- the process-internal lock still applies.
+    between, and the two end up interleaved.  ``fcntl`` is POSIX-only; elsewhere
+    this degrades to a bare ``os.replace`` and the docstring says so -- the
+    process-internal lock still applies.
     """
 ```
 
 * **跨平台**：`fcntl` 用 `try/except ImportError` 可选导入；不可用时**不假装修了**，
   docstring 与 `data-contracts` 明写"跨进程保护仅 POSIX"。
-* **诚实框定**（§二）：今天所有真实路径都是单写者，这是**潜在隐患的预防性修复**，
-  不是正在漏的洞。
-* **不动 `session_service.py` 的 4 处 `tmp + os.replace`** —— 会话写是单写者
+* **诚实框定**（§二）：今天所有真实路径都是单写者，这是**潜在隐患的预防性修复**。
+* **不动 `session_service.py` 的 4 处会话 `tmp + os.replace`** —— 会话写是单写者
   （event loop + `_turn_lock`），无对应缺口。
 
 ### C. M-C3 · 崩溃后续跑的验收门
 
-**判据**（评审 P1-1 修正后）：**boot 到 boot 比较**，而不是 run 的首尾比较。
+**判据**：**boot 到 boot 比较**，而不是 run 的首尾比较。
 
-> **为什么**：初版判据"续跑前后 `(rounds_run, tokens_used, len(messages))` 相等"
-> **不可满足** —— `rounds_run` 在两个 profile 里每轮必增（`plan_runner.py:715`、
+> **为什么**：`rounds_run` 在两个 profile 里每轮必增（`plan_runner.py:715`、
 > `goal_runner.py:261`），跑完 ≥1 轮就必变；而崩在轮中途时"记 after"这行代码
-> 根本不会执行。唯一相等的情形是 0 轮的 resume。
-
-**修正后的形状**：
+> 根本不会执行。
 
 ```
 boot N 的 initialize:
@@ -310,23 +323,38 @@ boot N 的 initialize:
     若 no_progress_resumes >= 2 → disarm + ResumeStalled + note（同一个响应）
     否则:
         resume_fingerprint = fingerprint(task, session)        ← 先存"之前"
-        resume_count += 1; persist
-        → _launch_armed_run(boot=True)
+        → _launch_armed_run(boot=True)                        ← resume_count 仍在其中自增
 ```
 
-* **指纹** = `(rounds_run, tokens_used, len(messages), len(step_deliveries))`。
-  四者全等 = **上一次续跑没有完成任何一轮、没产生任何消息、没结算任何步骤**。
+* **指纹** = `(rounds_run, tokens_used, 非合成消息数, len(step_deliveries))`。
+  * **非合成消息数**（评审新问题 ⑨）：`resume_turn` 在有待审批时会**追加一条合成
+    user 消息并 save**（`agent_loop.py:718`），`len(messages)` 因此变化 → 指纹会
+    读成"有进展"，掩盖一次真正的停滞。合成消息是 harness 说的，不是任务推进。
+  * 四者全等 = **上一次续跑没有完成任何一轮、没产生任何真实消息、没结算任何步骤**。
 * **为什么 2 次**：一次可能是崩溃在很早期（`resume_turn` 刚开头）。
-* **disarm 与 note 在同一个 `initialize` 响应里**（评审 P1-3）—— 判定发生在
-  `initialize`（同步），不在异步 run 里。
-* **"0 轮"不等于"已完成计划"**：已完成的计划已被 runner disarm（`goal_runner.py:167`
-  的 `finally`），不会再 armed 到 boot。
+* **disarm 与 note 在同一个 `initialize` 响应里** —— 判定发生在 `initialize`
+  （同步），不在异步 run 里。
+* **`resume_count` 的位置**（评审新问题 ⑧）：它在 `run_resume`（异步，
+  `handlers.py:609`）自增并落盘，而 `initialize` 自己在 `handlers.py:372` 已
+  persist 过一次。**指纹在 `initialize` 落盘**（早于 372），所以两次 persist 之间
+  崩溃会丢 `resume_count` 的自增、但留下指纹 —— 下一次 boot 会把它读成"停滞"
+  并计数。可接受（宁紧不松）。
+* **"0 轮"不等于"已完成计划"**：已完成的计划已被 runner disarm
+  （`goal_runner.py:167` 的 `finally`），不会再 armed 到 boot。
 
-**交接报告**：新增 `ResumeStalled` 事件（结构化：`resumes`/`no_progress`/`before`/`after`），
-进 `LoopEvent` → **自动落 trace jsonl**（`dataclasses.asdict`，无需登记），
-并在 `initialize` 的响应里给一条 note。
-* **不改前端**（评审 P1-2）：`bridge.to_wire` 是白名单，加分支要动前端 reducer；
-  本方案把报告放进**已在流动的** trace + `initialize` 响应，不新增 UI 通道。
+**交接报告**：新增 `ResumeStalled` 事件（`resumes`/`no_progress`/`before`/`after`）。
+
+* **落 trace 需要显式绑定**（评审新问题 P1-2）：trace recorder **不在**
+  `initialize` 的观察者辫子里 —— `AgentLoop.__init__` 只把 base observer 包成
+  `SafeObserver`（`agent_loop.py:347`），trace 进辫子只发生在 `_bind_observer`
+  （`:1734`），而它只被 `_begin_turn`（`:1269`）调用。disarm 分支**不启动任何
+  turn** → trace 从未绑定 → `trace.session_id` 还是构造时的值，事件会落错目录
+  （`trace.py:263` 的 `session_dir("")` → `root/"unknown"`）。
+  **所以**：`AgentLoop` 新增公开方法 `bind_session(session)`（内部调
+  `_bind_observer(None)` + `_bind_trace(session)`），`initialize` 在 emit 前调它。
+* **不改前端**：`bridge.to_wire` 是白名单，新分支要动前端 reducer。本方案把
+  结构化记录放进 trace（自动 `dataclasses.asdict`），把操作者可读的总结放进
+  **已在流动的** `initialize` 响应的 `resumeNote`。
 
 ---
 
@@ -334,37 +362,43 @@ boot N 的 initialize:
 
 | # | 文件 | 改动 | 为什么 |
 |---|---|---|---|
-| 1 | `ai_coding/domain/write_ahead.py`（新） | `WriteAheadIntent` | M-C1 的 sidecar 契约 |
-| 2 | `ai_coding/domain/session.py` | `write_ahead`（运行时字段）+ reset | 契约挂载 |
-| 3 | `ai_coding/service/session_service.py` | sidecar 三方法 + `load` 读回 | M-C1 的落点 |
+| 1 | `ai_coding/domain/write_ahead.py`（新） | `WriteAheadIntent` + 三个上限裁剪 | M-C1 的 sidecar 契约 |
+| 2 | `ai_coding/domain/session.py` | `write_ahead`（运行时字段） | 契约挂载 |
+| 3 | `ai_coding/service/session_service.py` | sidecar 四方法 + `load` 读回 + `delete` 清理 | M-C1 的落点 |
 | 4 | `ai_coding/core/write_ahead.py`（新） | `WriteAheadLog` | M-C1 的行为 |
 | 5 | `ai_coding/tools/base.py` | `ToolContext.write_ahead` | 传给 dispatcher |
 | 6 | `ai_coding/core/request_builder.py` | `tool_context` 透传 | 同上 |
-| 7 | `ai_coding/core/agent_loop.py` | `_run_tools` 造 log 并传入 | 接线 |
-| 8 | `ai_coding/core/dispatch.py` | `_decide` 里 claim/settle（精确点见 §A.4） | M-C1 的落点 |
-| 9 | `ai_coding/memory/store.py` | `_save` 进锁 + 唯一 tmp + `_replace_under_lock`；docstring 重写 | M-C2 |
-| 10 | `ai_coding/domain/task.py` | `resume_fingerprint`、`no_progress_resumes`；to/from_dict | M-C3 的状态 |
-| 11 | `ai_coding/core/events.py` | `ResumeStalled` + 进 `LoopEvent` | M-C3 的报告 |
-| 12 | `ai_coding/server/handlers.py` | 指纹比较 + 提前 disarm + 发事件 + note | M-C3 的落点 |
-| 13 | `docs/data-contracts.md` | 三条契约 | 评审 P1-6 |
+| 7 | `ai_coding/core/agent_loop.py` | `_run_tools` 造 log 并传入；`bind_session` | 接线 |
+| 8 | `ai_coding/core/dispatch.py` | `_decide` 里 claim/settle | M-C1 的落点 |
+| 9 | `ai_coding/core/turn_close.py` | `close` 里 `clear()` | 复用域 = 回合 |
+| 10 | `ai_coding/memory/store.py` | `_save` 进锁 + 唯一 tmp + `_replace_under_lock`；docstring 重写 | M-C2 |
+| 11 | `ai_coding/domain/task.py` | `resume_fingerprint`、`no_progress_resumes`；to/from_dict | M-C3 的状态 |
+| 12 | `ai_coding/core/events.py` | `ResumeStalled` + 进 `LoopEvent` | M-C3 的报告 |
+| 13 | `ai_coding/server/handlers.py` | 指纹比较 + 提前 disarm + 发事件 + note | M-C3 的落点 |
+| 14 | `docs/data-contracts.md` | 三条契约（`WriteAheadIntent` / `TaskState` 两字段 / `ResumeStalled`） | 契约同步 |
 
 > **不新造轮子**：`call_fingerprint` 复用的；`mutates_world` 复用的；
-> sidecar 形状复用的；`tmp + os.replace` 不变重复用的；trace 落盘复用的。
+> sidecar 形状复用的；`tmp + os.replace` 不变重复用的；trace 落盘复用的；
+> `initialize` 响应复用的。
 
 ### 4.1 语义等价性
 
 * **无 write-ahead 时**（非 `mutates_world` / `ephemeral` / 无 log）：行为与今天
   **逐字节相同**。
 * **有 write-ahead 时**：副作用工具**照常执行**，只是多一个 sidecar 文件。
-  只有当**同一 `(tool, digest)` 在同一会话里第二次出现**时才复用。
+  只有当**同一 `(tool, digest)` 在同一回合内第二次出现**时才复用。
 * **会话 JSON 不变大**（write-ahead 在 sidecar 里）；save 节奏不变。
 * **M-C2**：单写者路径行为不变；并发路径从"可能损坏"变成"不损坏"。
 * **M-C3**：有前进的续跑行为不变；只新增"连续 2 次无前进 → 提前终止"。
 
 ### 4.2 对数据流的影响
 
-* **新增 sidecar 目录** `sessions/write-ahead/`（子目录，避免幽灵会话）。
-* **副作用工具多一次 sidecar 写**（`mark_write_ahead` 每次 claim/settle 各一次）。
+* **新增 sidecar 目录** `sessions/write-ahead/`（子目录，避免幽灵会话；
+  `delete` 与回合结束都会清）。
+* **写放大**（评审新问题 ⑦）：`mark_write_ahead` 每次全量重写列表 ——
+  256 条 × ~250B ≈ 64 KB/次；一批 40 个 `mutates_world` 调用 × 2 次
+  （claim + settle）≈ 80 次写 ≈ **5 MB/回合**。相对 `bash`/`write` 自身的 IO
+  可忽略，但**必须写进文档**，别让下一个人以为它是零成本的。
 * **`resume_turn` 的语义被修正**：续跑后模型重复生成的副作用调用会被复用 ——
   今天会执行两次。
 
@@ -377,48 +411,50 @@ boot N 的 initialize:
 | 编号 | 用例 | 期望红相（今天必须失败） |
 |---|---|---|
 | U1 | `test_write_ahead.py::test_a_side_effect_tool_is_claimed_before_it_runs` | 工具执行中读 sidecar → 已有 `status:"running"`（今天：无 sidecar） |
-| U2 | `test_write_ahead.py::test_the_outcome_is_settled_after_the_call` | 执行后 → `status:"ok"` + output 摘要（今天：无） |
+| U2 | `test_write_ahead.py::test_the_outcome_is_settled_after_the_call` | 执行后 → `status:"ok"` + output/data/artifacts（今天：无） |
 | U3 | `test_write_ahead.py::test_a_regenerated_call_reuses_the_recorded_result` | 同 `(tool, digest)` 第二次 → **不执行**（fake tool 计数 1）（今天：2 次） |
-| U4 | `test_write_ahead.py::test_the_reuse_is_visible_to_the_model` | 复用结果 `data.reused is True`（今天：无） |
-| U5 | `test_write_ahead.py::test_a_read_only_tool_is_not_claimed` | `read`/`grep` 不产生 sidecar（今天：无机制 → 断言"sidecar 不存在"在实现后仍成立，**本条是 Prove 不是 Red**） |
-| U6 | `test_write_ahead.py::test_the_claim_does_not_disturb_the_session_file` | claim 后读会话 JSON → `messages` 里在飞的工具调用**没被丢**（今天：若走 save 会被丢；本条锁住 P0-1 的修法） |
+| U4 | `test_write_ahead.py::test_the_reuse_carries_the_data_and_artifacts` | 复用结果带原 `data`/`artifacts`（今天：无） |
+| U5 | `test_write_ahead.py::test_a_later_turn_does_not_reuse_a_previous_turns_call` | 回合结束清空后，同 `(tool, digest)` **重新执行**（今天：无机制 → 断言"执行了"在实现后成立，**本条是 Prove**） |
+| U6 | `test_write_ahead.py::test_the_claim_does_not_disturb_the_session_file` | claim 后读会话 JSON → 在飞的工具调用**没被丢**（锁住 P0-1 的修法） |
 | U7 | `test_write_ahead.py::test_the_digest_is_call_fingerprint` | `digest == call_fingerprint(call)`（今天：无 digest） |
 | U8 | `test_memory_store.py::test_concurrent_writes_never_corrupt` | 4 线程 × barrier × 25 次写 → 0 损坏 + 重载条数一致（今天：4-6 次损坏） |
 | U9 | `test_memory_store.py::test_two_processes_never_corrupt` | 两进程各写 25 次 → 文件始终合法（今天：无跨进程保护） |
 | U10 | `test_resume_gate.py::test_one_stalled_resume_does_not_stop_the_task` | 指纹不变 1 次 → 不 disarm（今天：无判据） |
 | U11 | `test_resume_gate.py::test_two_stalled_resumes_stop_the_task` | 连续 2 次不变 → disarm + `ResumeStalled`（今天：要 5 次） |
 | U12 | `test_resume_gate.py::test_progress_resets_the_counter` | 中间有一次前进 → 计数归零（今天：无） |
+| U13 | `test_resume_gate.py::test_a_synthetic_resume_message_is_not_progress` | `resume_turn` 追加合成消息 → 指纹**不变**（今天：无判据） |
 
-> U5 是 **Prove**（它断言的是"没有记录"，实现前后都成立），不是 Red —— 初版把它
-> 误列为 Red（评审 P2-7）。
+> U5 是 **Prove**（断言"重新执行"，实现前后都成立），不是 Red。
 
 ### Prove
 
 1. `.venv/bin/python -m pytest -q`
 2. `.venv/bin/ruff check .` / `.venv/bin/mypy ai_coding`
 3. **突变测试**（每层一处）：去掉 `claim` 的复用分支 → U3/U4 变红；把 `_save`
-   挪出锁 → U8 变红；去掉 `no_progress_resumes >= 2` → U11 变红
-4. **3.10 venv 跑 CI 同构七步**（CI 矩阵是 **3.10 + 3.13**，本地 venv 是 3.14 —
-   评审 P2-8："与 CI 同构"指的是步骤，不是解释器）
+   挪出锁 → U8 变红；去掉 `no_progress_resumes >= 2` → U11 变红；
+   去掉回合结束的 `clear` → U5 变红
+4. **3.10 venv 跑 CI 同构七步**（CI 矩阵是 **3.10 + 3.13**，本地 venv 是 3.14 ——
+   "与 CI 同构"指步骤，不是解释器）
 5. **端到端**：真跑一个会话 → `write`/`bash` 后读到 sidecar；杀掉进程 →
    重启续跑 → 断言副作用工具没有第二次执行
 
 ### Refactor
 
-* 确认 `WriteAheadLog` 的上限与 `output` 截断**都有界**
+* 确认 `WriteAheadLog` 的三个上限（`output`/`data`/`artifacts`）与条数上界**都有界**
 * 确认 `call_fingerprint` 是**唯一**的 `(tool, params)` 指纹（没有第二份）
 
 ---
 
 ## 六、验收判据
 
-* **M-C1**：`mutates_world` 工具执行前写 sidecar `running`、执行后写 `ok`/`failed`；
-  同一 `(tool, digest)` 再次出现时**不执行**并复用结果；只读工具与 `ephemeral`
-  会话不写；**会话文件不受影响**（P0-1 的回归锁）；记录有界。
+* **M-C1**：`mutates_world` 工具执行前写 sidecar `running`、执行后写 `ok`/`failed`
+  且带 `data`/`artifacts`；同一 `(tool, digest)` 在同回合内第二次出现时**不执行**
+  并复用；**跨回合不复用**；只读工具与 `ephemeral` 会话不写；
+  **会话文件不受影响**；sidecar 在 `delete` 与回合结束时清理。
 * **M-C2**：4 线程 × barrier × 25 次写 **0 损坏**，重载后条数一致；两进程并发写
   文件始终合法。
-* **M-C3**：boot 到 boot 指纹连续 2 次不变 → 提前 disarm + `ResumeStalled`；
-  有前进 → 计数归零。
+* **M-C3**：boot 到 boot 指纹连续 2 次不变 → 提前 disarm + `ResumeStalled`
+  （落 trace 且 `session_id` 正确）；有前进 → 计数归零。
 * 3.10 与 3.13 全量绿；真实 CI 双 job 绿。
 
 ---
@@ -430,9 +466,11 @@ boot N 的 initialize:
 * **不新造指纹函数** —— 复用 `call_fingerprint`。
 * **不引入配置项**（哪些工具要 write-ahead）—— 用 `mutates_world`。
 * **不改 `session_service.py` 的 4 处会话 `tmp + os.replace`** —— 会话写是单写者。
-* **不改前端** —— 报告走 trace + `initialize` 响应。
+* **不改前端** —— 结构化记录走 trace，操作者总结走 `initialize` 响应。
 * **不做 Outbox / 租约 / 围栏令牌** —— 那是分布式多 Worker 的解法；`running` 档的
   残留窗口（§一 的框定）本方案**不封**，并写进了 `WriteAheadIntent` 的 docstring。
+* **不做跨回合的 write-ahead 复用** —— 复用域是回合（恢复窗口），这是**有意的**
+  （评审新问题 ③）。
 
 ---
 
@@ -441,33 +479,38 @@ boot N 的 initialize:
 ### 8.1 方案评审（子智能体，第 1 轮）
 
 结论：调研质量高，三条缺口的代码断言逐条核对**基本准确**；1 个 P0、7 个 P1、10 个 P2。
-逐条处置：
 
 | 编号 | 内容 | 处置 |
 |---|---|---|
-| **P0-1** | 用 `TurnCloser.save` 落 write-ahead 会**丢弃在飞的工具调用** —— `save` 先跑 `ensure_tool_pairing()`（`turn_close.py:208`），而 `claim` 在 `_execute` **之前**（`dispatch.py:514`），`write_back` 还没跑（`agent_loop.py:1951`）→ 载体被丢、写回成孤儿。仓库已三次明令禁止（`agent_loop.py:1794`、`session_service.py:122/168/212`、`data-contracts.md:68`） | **已改 §A.1**：write-ahead 落到**sidecar** `sessions/write-ahead/<id>.json`（照抄 `mark_pending_approval`），`SessionData.write_ahead` 改为**运行时字段**（`load` 时读回，`session_service.py:283` 是现成接线点），**不进 `to_dict`** → 会话 JSON 不变大、save 节奏不变。新增 U6 锁住这个回归 |
-| P1-1 | M-C3 判据**不可满足**：`rounds_run` 每轮必增（`plan_runner.py:715`、`goal_runner.py:261`）→ 跑完 ≥1 轮必变；崩在轮中途时"记 after"根本不执行 | **已改 §C**：改为 **boot 到 boot 比较** —— 指纹在续跑**前**持久化，在**下一次** `initialize` 比较；判据 = 四元组全等（`rounds_run` + `tokens_used` + `len(messages)` + `len(step_deliveries)`） |
-| P1-2 | `ResumeStalled` 没接桥，`bridge.to_wire` 是白名单，前端 reducer 会丢弃 | **已改 §C**：报告走 **trace（自动）+ `initialize` 响应 note**，明确**不改前端** |
-| P1-3 | "initialize 响应里给 note" 与 disarm 在异步 run 里矛盾 | **已解决**：判定移到 `initialize`（同步），note 与 disarm 同一响应 |
-| P1-4 | `ACTION_TOOLS` 语义是"搜索连胜阶梯里什么算 acting"，**不是**"改世界"：`job_kill`/`memory_write` 是 `mutates_world=True` 却不在其中 | **已改 §A.3**：改用 **`item.tool.mutates_world`**（工具自己声明的元数据，也是只读门的同一判据）。`subAgent` 声明为 False 是已知边界，写入 docstring |
-| P1-5 | 漏了 `DuplicateCallGuard` / `call_fingerprint` | **已补 §A.5** 表格 + §A.2 复用 `call_fingerprint` |
-| P1-6 | 未更新 `data-contracts.md` | **已补 §四 #13** |
-| P1-7 | M-C2 未交代 R10 的显式 deferral 与"单写者才是真实路径" | **已补 §二**：明确框定为**潜在隐患的预防性修复**，不是正在漏的洞 |
-| P2-1 | 新造 digest 与 `call_fingerprint` 重复 | **已改**：复用 `call_fingerprint`（sha1 截 12） |
-| P2-2 | `output` 无长度上界 | **已改**：截断 200 字符 |
-| P2-3 | 64 条上限不够（重放叠加 40+40） | **已改**：256 条 |
-| P2-4 | `_replace_under_lock` 未说明 fd 生命周期 | **已改**：锁必须覆盖 `os.replace`，写入 docstring |
-| P2-5 | `_mutate` 重写丢了 `_save` 外层 try/except | **已改**：保留外层 `except Exception` |
-| P2-6 | claim/settle 精确插入点未定义 | **已改 §A.4**：`precheck` 之后、`_execute` 之前，用 rewrite 后的 params |
-| P2-7 | U5/U6/U10/U12 不是有效 Red | **已改**：U5 明确标为 Prove；U6 改成"锁住 P0-1 回归"的有效 Red |
-| P2-8 | "3.14 全量绿"与 CI 矩阵不符 | **已改 §六**：CI 是 3.10 + 3.13；"同构"指步骤 |
-| P2-9 | 复用时跳过 `guards.after`/hooks | **已改 §A.4**：明确这是有意的，写入 docstring |
-| P2-10 | 并发安全未提（ALLOW 组 `gather`） | **已改 §A.3**：`claim`/`settle` 必须同步，写入 docstring |
-| 附录 B | `running` 档的残留风险未框定 | **已改 §一**：显式写明 M-C1 只封"成功后崩溃"那一半，`running` 仍会重跑 |
+| **P0-1** | 用 `TurnCloser.save` 落 write-ahead 会**丢弃在飞的工具调用** —— `save` 先跑 `ensure_tool_pairing()`，而 `claim` 在 `_execute` **之前**，`write_back` 还没跑 → 载体被丢。仓库已三次明令禁止 | **已改 §A.1**：落到 **sidecar**，`SessionData.write_ahead` 改为**运行时字段**，**不进 `to_dict`** |
+| P1-1 | M-C3 判据**不可满足**（`rounds_run` 每轮必增；崩在轮中途时"记 after"不执行） | **已改 §C**：**boot 到 boot 比较** |
+| P1-2 | `ResumeStalled` 没接桥 | **已改 §C**：走 trace + `initialize` 响应（**第 2 轮又发现 trace 也不可达，见 8.2**） |
+| P1-3 | note 与 disarm 时序矛盾 | **已解决**：判定移到 `initialize` |
+| P1-4 | `ACTION_TOOLS` 语义不符 | **已改 §A.3**：改用 `mutates_world`（**第 2 轮更正了 `subAgent` 的引用错误，见 8.2**） |
+| P1-5 | 漏了 `DuplicateCallGuard` | **已补 §A.5** + 复用 `call_fingerprint` |
+| P1-6 | 未更新 `data-contracts.md` | **已补 §四 #14** |
+| P1-7 | M-C2 未交代 R10 的 deferral | **已补 §二**：框定为**潜在隐患** |
+| P2-1 ~ P2-10 | 新造 digest / `output` 无界 / 64 条不够 / fd 生命周期 / try/except / 插入点 / 无效 Red / CI 矩阵 / 复用跳过 hooks / 并发安全 | **全部已改**（见 §A.2/§A.3/§A.4/§五） |
+| 附录 B | `running` 档残留风险 | **已改 §一**：显式框定 |
 
 ### 8.2 方案评审（子智能体，第 2 轮）
 
-_待填。_
+结论：8 条里 **6 条真闭合**；**P1-2（trace 不可达）与 P1-4（`subAgent` 引用错误）未闭合**；
+另新抓 1 个 P1、8 个 P2。逐条处置：
+
+| 编号 | 内容 | 处置 |
+|---|---|---|
+| **P1-2（未闭合）** | trace recorder **不在** `initialize` 的观察者辫子里 —— `AgentLoop.__init__` 只包 `SafeObserver(base)`（`agent_loop.py:347`），trace 进辫子只在 `_bind_observer`（`:1734`），而它只被 `_begin_turn`（`:1269`）调用；disarm 分支不启动任何 turn → 事件落错会话目录（`trace.py:263` 的 `session_dir("")` → `root/"unknown"`） | **已改 §C**：新增公开方法 `AgentLoop.bind_session(session)`（内部 `_bind_observer(None)` + `_bind_trace(session)`），`initialize` 在 emit 前调它 |
+| **P1-4（未闭合）** | `subagent_tool.py:357` 是 **`SubAgentListTool`**，不是 `SubAgentTool`；后者（`:119`）**继承 `mutates_world=True`** → 按方案自己的判据 `subAgent` **会**被 claim，与"本方案不为父调用记 write-ahead"直接矛盾 | **已改 §A.3**：更正引用；承认 `SubAgentTool`/`websearch`/`webfetch` 都继承 True，并论证**在"复用域 = 回合"下这是可接受的**（同回合重复的 `websearch` 本就命中 `DuplicateCallGuard`；`subAgent` 复用是收益） |
+| 新③（P1） | **复用域是"整会话"**：`claim` 每次 `_decide` 都跑，sidecar 全量 → 跨回合复用 → `websearch`/`bash("npm install")` 在后续回合返回旧结果。方案实际变成了"整会话的调用缓存" | **已改 §A.1/§A.3**：**回合结束清空 sidecar** → 复用域 = 恢复窗口；跨回合不可能命中 |
+| 新①（P2） | `SessionService.delete` 清了 4 个 sidecar，**没有** `write-ahead`（仓库第 5 次修同类孤儿） | **已改 §A.1**：`delete` 必须清 |
+| 新②（P2） | sidecar 从不清空 → 按会话数无限增长 | **已改 §A.1**：回合结束清（与新③同一处修法） |
+| 新④（P2） | 复用的 `ToolResult` 缺 `data`/`artifacts` → `turn_close.py:177` 的 `artifacts.extend` 取不到 → 回合 digest/handoff 少证据 | **已改 §A.2**：`WriteAheadIntent` 加 `data`/`artifacts`（有界） |
+| 新⑤（P2） | 200 字符上限的理由已失效（sidecar 不影响会话文件）；且崩溃批次的 tool 消息**不在盘上**，续跑时模型只能看到尾部 | **已改 §A.2**：上限提到 **4000**，理由改为"崩溃批次的消息不在盘上" |
+| 新⑥（P2） | `WriteAheadLog` 的 reset 位置未定 | **已改 §A.1/§A.3**：回合结束 `clear`（`TurnCloser.close`） |
+| 新⑦（P2） | 写放大未量化（80 次写 × 64 KB ≈ 5 MB/回合） | **已改 §4.2**：写明量级 |
+| 新⑧（P2） | `resume_count` 伪代码位置与实际不符（在异步 `run_resume`，不在 `initialize`） | **已改 §C**：指纹在 `initialize` 落盘，`resume_count` 仍在 `run_resume` 自增 |
+| 新⑨（P2） | `resume_turn` 追加合成消息 → `len(messages)` 变化 → 掩盖真正停滞 | **已改 §C**：指纹用**非合成消息数**；新增 U13 |
 
 ### 8.3 实现评审（子智能体）
 
