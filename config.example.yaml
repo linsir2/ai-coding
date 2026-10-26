@@ -151,9 +151,29 @@ tools:
 
 # M-D1: the OS-level process sandbox (the *write* boundary).  A bash command or
 # a background job under `enforce` cannot create, modify or delete outside the
-# workspace and the writable paths below.  It does NOT bound reads -- the whole
-# root is bound read-only, so ~/.ssh/id_rsa is still readable inside the
-# sandbox; that is a deliberate scope cut (docs/plan-m-d.md §A).
+# workspace and the writable paths below.
+#
+# M-D2 adds the *read* boundary and the AF_UNIX layer (docs/plan-m-d2.md §B/§D).
+# `--ro-bind / /` makes the whole root readable, so `read_deny_paths` is a
+# denylist: directories become empty (`--tmpfs`), files become unreadable
+# (`--ro-bind /dev/null`).  It is **not** derived from `writable_paths` -- the
+# two are independent sides of one wall, and a mask is applied *after* the
+# writable binds so deny wins.  The defaults hide `~/.ssh`, `~/.aws`, the
+# repository's own credentials (`~/.config/ai-coding`, MCP tokens) and the
+# like; the list is expanded through `XDG_CONFIG_HOME` / `XDG_DATA_HOME`, not
+# a hardcoded `~/.config`.  It is a denylist, so it is always one rule short:
+# that is a deliberate capability boundary, not a guarantee (§7.1).
+#
+# Cost: masking `~/.ssh` / `~/.gnupg` / `~/.docker/config.json` breaks
+# `git push` over SSH, signed commits and `docker push`.  Alternatives: an
+# ssh-agent / gpg-agent socket, or a credential helper.  This is a deliberate
+# scope cut, not an oversight.
+#
+# `af_unix_deny_paths` masks pathname sockets (D-Bus, docker.sock).  bwrap has
+# no connect/bind filtering, so this is a mask, not a filter -- and it does not
+# cover abstract sockets.  `block_af_unix` installs a seccomp filter refusing
+# `socket(AF_UNIX)` outright (including abstract); off by default because it
+# breaks legitimate IPC (some npm IPC, the docker CLI).
 #
 # `mode` is `enforce` here, matching the built-in default: when bwrap cannot
 # run (bubblewrap not installed, or no unprivileged user namespaces) every
@@ -175,6 +195,12 @@ process_sandbox:
   allow_bypass: false
   writable_paths:
     - ~/.cache
+  # The built-in default (when this key is absent) is the standard credential
+  # set plus this repository's own keys, expanded through XDG.  Set it to [] to
+  # turn the read boundary off, or list your own paths to replace the default.
+  # read_deny_paths: []
+  # af_unix_deny_paths: []
+  block_af_unix: false
 
 mcp:
   # N-4: a *project* layer's mcp/hooks are ignored by default.  A repository

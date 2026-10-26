@@ -1,4 +1,4 @@
-"""OS-level process sandbox (M-D1): the write boundary, policy and mechanism apart.
+"""OS-level process sandbox (M-D1/D2): write boundary, read boundary, AF_UNIX.
 
 The file-tool path sandbox (``security/sandbox.py``) bounds *which paths a file
 tool may touch*.  It says nothing about what a ``bash`` command or a background
@@ -19,40 +19,77 @@ joined string: a joined string handed back to ``shell=True`` is exactly the
 path that re-parses the wrapper's arguments and silently loses the isolation
 (the P0-1 finding in ``docs/plan-m-d.md`` §A.1b).
 
-**Scope, stated plainly.**  This round guarantees the **write** boundary only:
-a process under ``enforce`` cannot create, modify or delete outside the
-workspace and the configured writable paths.  It does **not** guarantee a read
-boundary -- ``--ro-bind / /`` leaves ``~/.ssh/id_rsa``, ``~/.aws/credentials``
-and ``/etc/shadow`` readable inside the sandbox.  That is a deliberate scope cut,
-not an oversight, and ``tests/test_process_sandbox.py`` pins the reverse
-assertion so "sandbox" is never misread as "isolation".  The network wall is
-likewise not built here (``docs/plan-m-d.md`` §七).
+**Scope.**  M-D1 built the write boundary; M-D2 adds the **read boundary** and
+the **AF_UNIX** layer (``docs/plan-m-d2.md`` §B/§D):
 
-The environment this module is developed in cannot run the mechanism: bubblewrap
-is not installed as delivered, and this kernel (6.18) refuses the namespace
-construction even once it is -- ``bwrap --unshare-pid --proc /proc`` answers
-"Creating new namespace failed: Operation not permitted".  ``available()``
-therefore answers honestly and ``enforce`` refuses, rather than pretending a
-sandbox exists.  The write boundary itself was verified here with a variant that
-drops only ``--proc``: a write outside the bound root fails with "Read-only file
-system" and a write inside succeeds.
+* *write* -- an ``enforce`` process cannot create, modify or delete outside the
+  workspace and the configured writable paths.
+* *read* -- the default denylist hides ``~/.ssh``, ``~/.aws``, the repository's
+  own credentials and the like.  ``--ro-bind / /`` makes the whole root
+  readable, so the read face is a **denylist** (``read_deny_paths``), never
+  derived from ``writable_paths``: the two are independent sides of one wall.
+* *AF_UNIX* -- pathname sockets are masked; a seccomp tier can refuse
+  ``socket(AF_UNIX)`` outright (the abstract namespace has no path to mask).
+  Stated honestly: ``--ro-bind / /`` already binds the whole host root, so
+  without the seccomp tier the "allow-list" is every pathname socket on the
+  host minus the few masked ones -- path-level control is close to none.
+
+The network wall (M-D2 §C) is **not** built here; the default is the host
+network, unchanged.
+
+**Construction tiers.**  The mechanism is built in tiers, strongest first, and
+the first tier that actually runs is selected and reported.  A tier is a
+*prefix*; the probe runs the **full** construction (``wrap(["/bin/true"],
+roots)`` with every addition) because a probe that only tries the prefix is
+fooled by an environment that accepts the prefix and rejects a later bind.
+
+Two hard rules the tiers encode:
+
+1. ``--proc`` and ``--unshare-pid`` are born together.  ``--ro-bind / /`` is a
+   **recursive** bind, so the host's ``/proc`` is inside the sandbox regardless
+   of ``--proc``; without ``--unshare-pid`` it shows host pids and
+   ``/proc/<host-pid>/root`` bypasses every read mask.  The ``no-proc`` tier
+   therefore mounts ``--tmpfs /proc`` -- the only thing that closes the escape
+   (measured: ``--unshare-pid`` alone does not).
+2. ``--unshare-user-try`` is present in every tier.  Running as root without
+   ``CAP_SYS_ADMIN`` (a container's normal shape) makes the namespace
+   construction fail with "Operation not permitted"; the flag asks for a user
+   namespace and continues without one when that is refused, which is what
+   makes the mechanism available here at all.
+
+``available()`` runs the *same* construction ``wrap()`` would (against
+``/bin/true``), not just ``which``: a probe that only checks ``which`` is
+fooled by an environment that forbids the pid namespace, which fails only at
+the real call.  The probe carries every addition that can fail for environmental
+reasons -- the writable binds, the read/AF_UNIX masks and the seccomp filter --
+so a tier is not reported as available when the real call would fail (review
+P1-2).  The answer is cached per instance, because the composition root hands
+one backend to both the tool and the job table.
 """
 
 from __future__ import annotations
 
+import glob
+import os
+import struct
 import subprocess
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from ai_coding.config.models import ProcessSandboxConfig
+from ai_coding.config.models import (
+    DEFAULT_AF_UNIX_DENY_PATHS,
+    ProcessSandboxConfig,
+)
 
 __all__ = [
     "BwrapBackend",
     "ProcessSandboxPolicy",
     "SandboxBackend",
     "SandboxGap",
+    "SandboxMaskReport",
     "SandboxMode",
     "build_process_sandbox",
     "spawn_argv",
@@ -69,6 +106,55 @@ BWRAP_GAP = "bwrap.unavailable"
 #: under ``enforce`` that is a gap -- the command would run with no isolation at
 #: all -- so it is refused rather than passed through.
 SANDBOX_WRAP_GAP = "sandbox.wrap.no-op"
+
+#: The construction tiers, strongest first.  The first one that runs is selected
+#: and reported (``sandbox.tier.<name>``).  A tier is a *prefix*: the writable
+#: binds, the read masks and the seccomp filter are appended by ``wrap()``.
+#:
+#: A tier without ``--proc`` + ``--unshare-pid`` **must** carry ``--tmpfs /proc``
+#: -- ``--ro-bind / /`` is recursive, so the host's ``/proc`` (and ``/sys``,
+#: ``/run``) come in regardless of ``--proc``, and without ``--unshare-pid``
+#: they expose host pids.  ``--tmpfs /proc`` is the only thing measured to close
+#: that escape (review P0-1).
+_CONSTRUCTION_TIERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "full",
+        (
+            "--unshare-user-try",
+            "--ro-bind",
+            "/",
+            "/",
+            "--tmpfs",
+            "/tmp",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--unshare-pid",
+            "--die-with-parent",
+            "--new-session",
+        ),
+    ),
+    (
+        "no-proc",
+        (
+            "--unshare-user-try",
+            "--ro-bind",
+            "/",
+            "/",
+            "--tmpfs",
+            "/tmp",
+            "--tmpfs",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--die-with-parent",
+            "--new-session",
+        ),
+    ),
+)
+
+_TIER_FLAGS: dict[str, tuple[str, ...]] = dict(_CONSTRUCTION_TIERS)
 
 
 class SandboxGap(Exception):
@@ -103,6 +189,11 @@ class ProcessSandboxPolicy:
 
     ``bypass`` is roadmap's named explicit allow: the operator said, for this
     run, not to isolate.
+
+    ``writable_paths`` is the write face (an allow-list); ``read_deny_paths`` is
+    the read face (a denylist).  They are **not** derived from each other:
+    "writable implies readable" does not hold -- a path may be writable and
+    still hidden (the mask is applied after the bind, so deny wins).
     """
 
     mode: SandboxMode = "enforce"
@@ -111,6 +202,31 @@ class ProcessSandboxPolicy:
     #: default in config carries ``~/.cache``; ``~/.ssh`` / ``~/.aws`` /
     #: ``~/.gnupg`` are never in it.  Widening this narrows the sandbox.
     writable_paths: tuple[Path, ...] = ()
+    #: Paths hidden from the sandbox.  Directories become empty (``--tmpfs``),
+    #: files become unreadable (``--ro-bind /dev/null``).  Globs are expanded at
+    #: construction time.  Empty = the read boundary is off.
+    read_deny_paths: tuple[Path, ...] = ()
+    #: Pathname AF_UNIX sockets to mask.  Abstract sockets have no path and are
+    #: only reachable through ``block_af_unix``.
+    af_unix_deny_paths: tuple[Path, ...] = ()
+    #: Install a seccomp filter refusing ``socket(AF_UNIX)`` (all namespaces,
+    #: including abstract).  Off by default: it breaks legitimate IPC.
+    block_af_unix: bool = False
+
+
+@dataclass(frozen=True)
+class SandboxMaskReport:
+    """What the read/AF_UNIX masking pass did, computed once per backend.
+
+    A **construction-time summary**, not a per-call event: a skipped path is a
+    normal case (``~/.aws`` usually does not exist) and must not pollute
+    ``/trace``'s degraded count, while a failed mask is a real problem.  Kept on
+    the backend so a panel or a log can read it once.
+    """
+
+    masked: tuple[Path, ...] = ()
+    skipped: tuple[Path, ...] = ()
+    failed: tuple[tuple[Path, str], ...] = ()
 
 
 class SandboxBackend(Protocol):
@@ -123,6 +239,11 @@ class SandboxBackend(Protocol):
 
     name: str
 
+    @property
+    def tier(self) -> str:
+        """The selected construction tier: ``"full"`` / ``"no-proc"`` / ``"none"``."""
+        ...
+
     def available(self) -> bool: ...
 
     def gap(self) -> str:
@@ -132,6 +253,23 @@ class SandboxBackend(Protocol):
     def wrap(self, argv: Sequence[str], roots: Sequence[Path]) -> list[str] | None:
         """The wrapped command; ``None`` means "nothing to wrap"."""
         ...
+
+
+def _tier_report(backend: SandboxBackend) -> str | None:
+    """The one-shot degraded report for a downgraded construction tier.
+
+    ``full`` is not a downgrade, so it reports nothing; ``no-proc`` reports
+    ``sandbox.tier.no-proc`` **once per backend** (the probe is cached, so the
+    report is too -- not one per bash call).  A backend that is not a
+    :class:`BwrapBackend` has no one-shot flag, so it reports every time; the
+    only such backends are test doubles.
+    """
+    reporter = getattr(backend, "take_tier_report", None)
+    if callable(reporter):
+        result = reporter()
+        return None if result is None else str(result)
+    tier = backend.tier
+    return None if tier == "full" else f"sandbox.tier.{tier}"
 
 
 def spawn_argv(
@@ -157,6 +295,9 @@ def spawn_argv(
       would run the command with no isolation at all.
     * ``warn`` continues in both cases and reports the fallback through
       ``emit`` (a stable reason code, not a sentence), never a green lie.
+
+    A downgraded construction tier (``no-proc``) is reported the same way: the
+    operator must be able to see that the sandbox is weaker than ``full``.
     """
     argv = ["/bin/sh", "-c", command]
     if policy is None or policy.mode == "off" or policy.bypass:
@@ -173,6 +314,9 @@ def spawn_argv(
         if emit is not None:
             emit(backend.gap())
         return argv
+    report = _tier_report(backend)
+    if report is not None and emit is not None:
+        emit(report)
     wrapped = backend.wrap(argv, roots)
     if wrapped is None:
         if policy.mode == "enforce":
@@ -183,54 +327,272 @@ def spawn_argv(
     return wrapped
 
 
+_GLOB_CHARS = "*?["
+
+
+def _expand_globs(patterns: Sequence[Path]) -> tuple[Path, ...]:
+    """Expand the glob patterns among ``patterns``; leave the rest alone.
+
+    bwrap has no glob, so ``/etc/ssh/ssh_host_*_key`` is expanded here (read
+    directory + fnmatch) into one mask per match.  Shared by the read boundary
+    and the AF_UNIX masks so the two cannot drift (review P2-4).
+
+    A **construction-time snapshot**: a key file created after the sandbox was
+    built is not re-masked.  That is a capability boundary, recorded in
+    ``docs/plan-m-d2.md`` §7.1.
+    """
+    expanded: list[Path] = []
+    for pattern in patterns:
+        text = str(pattern)
+        if any(char in text for char in _GLOB_CHARS):
+            for match in glob.glob(text):
+                expanded.append(Path(match))
+        else:
+            expanded.append(pattern)
+    return tuple(expanded)
+
+
+# ---- seccomp: refuse socket(AF_UNIX) --------------------------------------
+
+#: BPF instruction classes / modes (Linux ``linux/filter.h``).
+_BPF_LD = 0x00
+_BPF_JMP = 0x05
+_BPF_RET = 0x06
+_BPF_W = 0x00
+_BPF_ABS = 0x20
+_BPF_JEQ = 0x10
+_BPF_K = 0x00
+
+#: ``seccomp_data`` actions (``linux/seccomp.h``).
+_SECCOMP_RET_ALLOW = 0x7FFF0000
+_SECCOMP_RET_ERRNO = 0x00050000
+_EPERM = 1
+
+#: x86_64 syscall numbers used by the filter.
+_NR_SOCKET = 41
+_AF_UNIX = 1
+
+
+def _sock_filter(code: int, jt: int = 0, jf: int = 0, k: int = 0) -> bytes:
+    """One ``struct sock_filter`` (8 bytes, little-endian)."""
+    return struct.pack("<HBBI", code, jt, jf, k)
+
+
+def af_unix_seccomp_filter() -> bytes:
+    """A BPF program: ``socket(AF_UNIX, ...)`` -> ``EPERM``, everything else allowed.
+
+    The program is **not empty** on purpose: an empty filter makes
+    ``prctl(PR_SET_SECCOMP)`` fail with ``EINVAL`` (measured), so the filter
+    must carry at least one instruction.
+
+    ``seccomp_data`` layout: ``nr`` at offset 0, ``args[0]`` at offset 16.  The
+    domain is the low 32 bits of ``args[0]``, which is all ``AF_UNIX`` needs.
+    """
+    return b"".join(
+        (
+            _sock_filter(_BPF_LD | _BPF_W | _BPF_ABS, k=0),  # A = syscall nr
+            _sock_filter(_BPF_JMP | _BPF_JEQ | _BPF_K, jt=0, jf=3, k=_NR_SOCKET),
+            _sock_filter(_BPF_LD | _BPF_W | _BPF_ABS, k=16),  # A = args[0]
+            _sock_filter(_BPF_JMP | _BPF_JEQ | _BPF_K, jt=0, jf=1, k=_AF_UNIX),
+            _sock_filter(_BPF_RET | _BPF_K, k=_SECCOMP_RET_ERRNO | _EPERM),
+            _sock_filter(_BPF_RET | _BPF_K, k=_SECCOMP_RET_ALLOW),
+        )
+    )
+
+
+def _seccomp_filter_fd() -> int:
+    """Write the filter to a temp file and return the open descriptor.
+
+    bwrap's ``--seccomp`` takes a **file descriptor**, so the caller must pass
+    it (``subprocess``'s ``pass_fds``); the file itself is unlinked at once --
+    the descriptor keeps the bytes alive.  The fd is owned by the backend and
+    lives as long as it does.
+    """
+    fd, path = tempfile.mkstemp(prefix="ai-coding-seccomp-")
+    try:
+        os.write(fd, af_unix_seccomp_filter())
+        os.lseek(fd, 0, os.SEEK_SET)
+    except BaseException:
+        os.close(fd)
+        os.unlink(path)
+        raise
+    os.unlink(path)
+    return fd
+
+
 class BwrapBackend:
     """The mechanism, backed by the external ``bwrap`` binary (Flatpak's own).
 
     bwrap's semantics are "you get what you bind", which is an allow-list by
-    construction -- the opposite of the "allow-default denylist that is always
-    one rule short" the research calls out.  The write boundary is built by
-    binding the whole root read-only and then binding the writable roots on
-    top of it.
+    construction for the write face -- the opposite of the "allow-default
+    denylist that is always one rule short" the research calls out.  The write
+    boundary is built by binding the whole root read-only and then binding the
+    writable roots on top of it; the read boundary is built by *masking* the
+    denylist on top of that.
 
-    The order matters and is not the one ``docs/plan-m-d.md`` §A.2 lists
-    literally (implementation-review finding): a ``--tmpfs /tmp`` placed *after*
-    ``--bind <root>`` hides a root that lives under ``/tmp`` -- measured here,
-    ``echo x > /tmp/ws/in.txt`` answered "Directory nonexistent" and the real
-    directory stayed empty.  pytest's ``tmp_path`` is under ``/tmp``, so the
-    literal order would fail U2 in CI.  The invariant the plan actually states
-    ("``--bind`` must come after ``--ro-bind / /``") is kept; the tmpfs/proc/dev
-    mounts go *before* the binds so a root under ``/tmp`` survives them.
+    **Order matters.**  The read masks come *after* ``--ro-bind / /`` (a mask
+    before it is covered by the recursive bind) **and** after ``--tmpfs /tmp``
+    (a mask under ``/tmp`` would be erased by the tmpfs) **and** after the
+    writable binds (a writable bind would otherwise silently unmask a denied
+    path -- deny wins).  The seccomp filter is appended last.
+
+    **Symlinks.**  A mask is applied to ``resolve()``'s target, never to the
+    link itself: ``--tmpfs <link>`` and ``--ro-bind /dev/null <link>`` both make
+    bwrap fail with "No such file or directory" (measured, bubblewrap 0.9.0).
+    Resolving first hides the target, which hides it through the link too.
 
     No ``preexec_fn``: the wrapper is pure argv, so the runner's concurrent
     threads are unaffected.
-
-    ``available()`` runs the *same* construction ``wrap()`` would (against
-    ``-- true``), not just ``which``: a probe that only checks ``which`` is
-    fooled by an environment that forbids the pid namespace, which fails only
-    at the real call.  The answer is cached per instance, because the
-    composition root hands one backend to both the tool and the job table.
     """
 
     name = "bwrap"
 
     def __init__(
-        self, *, binary: str = "bwrap", writable_paths: Sequence[Path] = ()
+        self,
+        *,
+        binary: str = "bwrap",
+        writable_paths: Sequence[Path] = (),
+        read_deny_paths: Sequence[Path] = (),
+        af_unix_deny_paths: Sequence[Path] | None = None,
+        block_af_unix: bool = False,
     ) -> None:
         self._binary = binary
         self._writable = tuple(Path(path).expanduser().resolve() for path in writable_paths)
+        self._read_deny = tuple(Path(path).expanduser() for path in read_deny_paths)
+        af_unix = DEFAULT_AF_UNIX_DENY_PATHS if af_unix_deny_paths is None else af_unix_deny_paths
+        self._af_unix_deny = tuple(Path(path).expanduser() for path in af_unix)
+        self._block_af_unix = bool(block_af_unix)
         self._cache: bool | None = None
+        self._tier: str = "none"
+        self._tier_emitted = False
+        self._mask_cache: tuple[list[str], SandboxMaskReport] | None = None
+        self._seccomp_fd: int | None = None
+        if self._block_af_unix:
+            self._seccomp_fd = _seccomp_filter_fd()
+
+    # ---- tier selection ----------------------------------------------------
+
+    @property
+    def tier(self) -> str:
+        """The selected construction tier: ``"full"`` / ``"no-proc"`` / ``"none"``."""
+        if self._cache is None:
+            self._probe()
+        return self._tier
+
+    def take_tier_report(self) -> str | None:
+        """The one-shot degraded report for a downgraded tier, or ``None``.
+
+        ``no-proc`` reports ``sandbox.tier.no-proc``; the cost that carries is
+        that ``/proc`` is unavailable inside the sandbox (``ps``,
+        ``readlink /proc/self/exe``, and bash process substitution ``<(...)``
+        all break, because ``--dev /dev``'s ``/dev/fd`` link dangles).
+        ``full`` is not a downgrade and reports nothing.
+        """
+        if self._cache is None:
+            self._probe()
+        if self._tier != "no-proc" or self._tier_emitted:
+            return None
+        self._tier_emitted = True
+        return f"sandbox.tier.{self._tier}"
 
     def available(self) -> bool:
         if self._cache is None:
             self._cache = self._probe()
-        return self._cache
+        return bool(self._cache)
 
     def gap(self) -> str:
         return BWRAP_GAP
 
-    def wrap(self, argv: Sequence[str], roots: Sequence[Path]) -> list[str]:
-        prefix = [self._binary, "--ro-bind", "/", "/"]
-        prefix += ["--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev"]
+    def _probe(self) -> bool:
+        """Try each tier with the **full** construction; keep the first that runs."""
+        for tier_name, _flags in _CONSTRUCTION_TIERS:
+            if self._try_tier(tier_name):
+                self._tier = tier_name
+                return True
+        self._tier = "none"
+        return False
+
+    def _try_tier(self, tier: str) -> bool:
+        try:
+            proc = subprocess.run(
+                self._build(["/bin/true"], (), tier),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10.0,
+                pass_fds=self._seccomp_fds(),
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return proc.returncode == 0
+
+    def _seccomp_fds(self) -> tuple[int, ...]:
+        if self._seccomp_fd is None:
+            return ()
+        return (self._seccomp_fd,)
+
+    @property
+    def seccomp_fds(self) -> tuple[int, ...]:
+        """The descriptors the caller must keep open and pass to the child.
+
+        ``bwrap --seccomp FD`` reads the filter from an inherited descriptor, so
+        ``subprocess``'s ``pass_fds`` is the only channel that reaches it while
+        ``wrap()`` still returns a plain ``list[str]``.
+        """
+        return self._seccomp_fds()
+
+    # ---- masking -----------------------------------------------------------
+
+    @property
+    def mask_report(self) -> SandboxMaskReport:
+        """The construction-time summary of the read/AF_UNIX masks."""
+        return self._mask_arguments()[1]
+
+    def _mask_arguments(self) -> tuple[list[str], SandboxMaskReport]:
+        if self._mask_cache is not None:
+            return self._mask_cache
+        args: list[str] = []
+        masked: list[Path] = []
+        skipped: list[Path] = []
+        failed: list[tuple[Path, str]] = []
+        seen: set[Path] = set()
+        for pattern in (*self._read_deny, *self._af_unix_deny):
+            for path in _expand_globs((pattern,)):
+                try:
+                    resolved = path.resolve()
+                except OSError as exc:
+                    failed.append((path, str(exc)))
+                    continue
+                if resolved in seen:
+                    continue
+                if not resolved.exists():
+                    skipped.append(path)
+                    continue
+                seen.add(resolved)
+                if resolved.is_dir():
+                    args += ["--tmpfs", str(resolved)]
+                else:
+                    args += ["--ro-bind", "/dev/null", str(resolved)]
+                masked.append(resolved)
+        report = SandboxMaskReport(
+            masked=tuple(masked), skipped=tuple(skipped), failed=tuple(failed)
+        )
+        self._mask_cache = (args, report)
+        return self._mask_cache
+
+    # ---- construction ------------------------------------------------------
+
+    def wrap(self, argv: Sequence[str], roots: Sequence[Path]) -> list[str] | None:
+        if self._cache is None:
+            self._probe()
+        tier = self._tier if self._tier != "none" else "full"
+        return self._build(argv, roots, tier)
+
+    def _build(self, argv: Sequence[str], roots: Sequence[Path], tier: str) -> list[str]:
+        flags = _TIER_FLAGS.get(tier)
+        if flags is None:
+            raise ValueError(f"unknown construction tier: {tier!r}")
+        prefix = [self._binary, *flags]
         for root in roots:
             prefix += ["--bind", str(root), str(root)]
         for path in self._writable:
@@ -239,26 +601,15 @@ class BwrapBackend:
             except OSError:
                 continue
             prefix += ["--bind", str(path), str(path)]
-        prefix += [
-            "--unshare-pid",
-            "--die-with-parent",
-            "--new-session",
-            "--",
-        ]
+        prefix += self._mask_arguments()[0]
+        if self._seccomp_fd is not None:
+            # bwrap reads the filter to EOF, which leaves the descriptor at its
+            # end; the next spawn would read an empty program and fail with
+            # EINVAL.  Rewind before every construction.
+            os.lseek(self._seccomp_fd, 0, os.SEEK_SET)
+            prefix += ["--seccomp", str(self._seccomp_fd)]
+        prefix += ["--"]
         return prefix + list(argv)
-
-    def _probe(self) -> bool:
-        try:
-            proc = subprocess.run(
-                self.wrap(["/bin/true"], ()),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10.0,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return False
-        return proc.returncode == 0
 
 
 def build_process_sandbox(
@@ -276,10 +627,20 @@ def build_process_sandbox(
     if not isinstance(cfg, ProcessSandboxConfig):
         cfg = ProcessSandboxConfig()
     writable = tuple(Path(path).expanduser() for path in cfg.writable_paths or ())
+    read_deny = tuple(Path(path).expanduser() for path in cfg.read_deny_paths or ())
+    af_unix_deny = tuple(Path(path).expanduser() for path in cfg.af_unix_deny_paths or ())
     policy = ProcessSandboxPolicy(
         mode=cfg.mode,
         bypass=bool(cfg.allow_bypass),
         writable_paths=writable,
+        read_deny_paths=read_deny,
+        af_unix_deny_paths=af_unix_deny,
+        block_af_unix=bool(cfg.block_af_unix),
     )
-    backend = BwrapBackend(writable_paths=writable)
+    backend = BwrapBackend(
+        writable_paths=writable,
+        read_deny_paths=read_deny,
+        af_unix_deny_paths=af_unix_deny,
+        block_af_unix=bool(cfg.block_af_unix),
+    )
     return policy, backend

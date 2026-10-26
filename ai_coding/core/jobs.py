@@ -324,6 +324,8 @@ class JobRegistry:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
                 env={**os.environ, "AI_CODING_JOB": job_id},
+                # M-D2 §D.3: the seccomp filter is an inherited descriptor.
+                pass_fds=tuple(getattr(self._backend, "seccomp_fds", ())),
             )
         finally:
             handle.close()  # the child holds its own duplicate; ours is done

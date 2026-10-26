@@ -104,6 +104,7 @@ def run_process(
     max_output_chars: int | None = None,
     on_chunk: Callable[[str, str], None] | None = None,
     cancel: threading.Event | None = None,
+    pass_fds: Sequence[int] = (),
 ) -> ProcessOutcome:
     """Run ``command`` with a hard timeout.  Never raises for process failures.
 
@@ -138,6 +139,9 @@ def run_process(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            # M-D2 §D.3: the seccomp filter reaches bwrap through an inherited
+            # descriptor, and ``wrap()`` still returns a plain ``list[str]``.
+            pass_fds=tuple(pass_fds),
         )
     except (OSError, ValueError) as exc:
         return ProcessOutcome(
@@ -258,6 +262,7 @@ async def run_process_async(
     tick: float = HEARTBEAT_SECONDS,
     on_chunk: Callable[[str, str], None] | None = None,
     cancel: threading.Event | None = None,
+    pass_fds: Sequence[int] = (),
 ) -> ProcessOutcome:
     """Async wrapper: the work happens in a daemon thread under a hard deadline.
 
@@ -293,6 +298,7 @@ async def run_process_async(
         "max_output_chars": max_output_chars,
         "on_chunk": deliver,
         "cancel": cancel,
+        "pass_fds": pass_fds,
     }
     try:
         return await run_with_deadline(

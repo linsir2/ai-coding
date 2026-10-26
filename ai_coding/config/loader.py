@@ -33,6 +33,12 @@ _log = logging.getLogger(__name__)
 #: ``process_sandbox`` (M-D3) is here because it is the *only* switch that turns
 #: the OS-level write boundary off: a repository's tracked config must not be
 #: able to make every bash/job in the workspace run unsandboxed.
+#:
+#: M-D2's read boundary (``read_deny_paths``) and AF_UNIX layer
+#: (``af_unix_deny_paths`` / ``block_af_unix``) live **inside** ``process_sandbox``
+#: (deliberately, review P2-3): they are covered by this one key, so a project
+#: layer cannot widen the read denylist or turn off the AF_UNIX masks either.
+#: Adding them as top-level ``EXECUTION_KEYS`` would be a no-op.
 EXECUTION_KEYS: frozenset[str] = frozenset({"hooks", "mcp", "process_sandbox"})
 
 #: Members that decide *where* a request goes or *which secret* it carries.

@@ -559,9 +559,12 @@ host == allow_entry  or  host.endswith("." + allow_entry)
 
 #### D.5 错误码要断言（评审 P3-4）
 
-`--ro-bind /dev/null <sock>` 把 socket 路径变成**字符设备** → `connect()` 应返回 **`ENOTSOCK`**。
-→ V12 **断言具体错误码**，而不是只断言"失败"（"失败"也可能是权限问题，
-遮蔽是否真的生效就说不清）。
+`--ro-bind /dev/null <sock>` 把 socket 路径变成**字符设备**。
+**实测**（bubblewrap 0.9.0）：`connect()` 返回 **`ECONNREFUSED`(111)** ——
+不是 `ENOTSOCK`（方案原写 `ENOTSOCK` 是**误测**，实现期已更正）。
+
+→ V12 **断言具体错误码 `ECONNREFUSED`**，而不是只断言"失败"
+（"失败"也可能是权限问题，遮蔽是否真的生效就说不清）。
 
 ---
 

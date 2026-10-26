@@ -42,8 +42,77 @@ class ToolsConfig(BaseModel):
     extra_workspace_roots: list[str] = Field(default_factory=list)
 
 
+def default_read_deny_paths() -> list[str]:
+    """The read boundary's default denylist (M-D2 §B).
+
+    A **denylist**, deliberately: the write face is an allow-list (``writable_paths``)
+    and the read face is not derived from it -- the two are independent sides of
+    one wall.  ``--ro-bind / /`` makes the whole root readable, so without this
+    list ``~/.ssh/id_rsa``, ``~/.aws/credentials`` and the repository's own API
+    key are readable inside the sandbox.
+
+    Expanded through :func:`ai_coding.paths.config_home` /
+    :func:`~ai_coding.paths.data_home` rather than a hardcoded ``~/.config``:
+    when the XDG config root is overridden, a hardcoded mask lands on an empty
+    directory and the key stays readable (review P2-1).  ``~`` is expanded by
+    the composition root, so the user-tier entries stay relative.
+
+    **Incomplete on purpose.**  A denylist is always one rule short -- that is
+    the research's Pillar finding -- so this is a capability boundary, not a
+    guarantee.  It also covers only the *user* tier: a workspace's own
+    ``config.yaml`` may hold the same API key, and the workspace is necessarily
+    readable (otherwise the tools cannot work).  Both are recorded in
+    ``docs/plan-m-d2.md`` §7.1.
+    """
+    from ai_coding.paths import config_home, data_home
+
+    xdg_config = config_home().parent
+    xdg_data = data_home().parent
+    return [
+        "~/.ssh",
+        "~/.aws",
+        str(xdg_config / "gcloud"),
+        "~/.azure",
+        "~/.gnupg",
+        "~/.netrc",
+        "~/.docker/config.json",
+        "~/.kube/config",
+        # The repository's own credentials: the user config (API key) and the
+        # MCP OAuth tokens.  Readable, they hand over the model credential and
+        # the MCP authorisation.
+        str(config_home()),
+        str(xdg_data / "ai-coding" / "mcp-auth.json"),
+        "/etc/shadow",
+        "/etc/ssh/ssh_host_*_key",
+        "~/.git-credentials",
+        "~/.npmrc",
+        "~/.pypirc",
+        str(xdg_config / "gh" / "hosts.yml"),
+        "~/.cargo/credentials",
+        "~/.terraform.d/credentials",
+        "~/.bash_history",
+        "~/.python_history",
+        "~/.viminfo",
+        # Other users' homes: the mask is per-user, but a sandbox that shares
+        # the host root still sees them.
+        "/home/*/.ssh",
+        "/root/.ssh",
+    ]
+
+
+#: The AF_UNIX pathname sockets masked by default (M-D2 §D).  bwrap has no
+#: connect/bind filtering, so pathname sockets are hidden the same way files
+#: are; abstract sockets have no path and are only reachable through the
+#: seccomp tier (``block_af_unix``).
+DEFAULT_AF_UNIX_DENY_PATHS: tuple[str, ...] = (
+    "/run/user/*/bus",
+    "/var/run/docker.sock",
+    "/run/docker.sock",
+)
+
+
 class ProcessSandboxConfig(BaseModel):
-    """M-D1: the OS-level process sandbox (the write boundary).
+    """M-D1/D2: the OS-level process sandbox (the write and read boundaries).
 
     ``mode`` is the policy tier and ``allow_bypass`` is roadmap's explicit
     "do not isolate this run".  ``writable_paths`` are the extra writable
@@ -51,6 +120,15 @@ class ProcessSandboxConfig(BaseModel):
     sandbox (``Sandbox.roots``); the default carries ``~/.cache`` and never a
     credential directory.  Widening this narrows the sandbox -- the trade is
     written down in ``docs/plan-m-d.md`` §A.2.
+
+    ``read_deny_paths`` is the read boundary (M-D2 §B): paths hidden from the
+    sandbox (directories become empty, files become unreadable).  It is a
+    denylist, symmetric to ``writable_paths`` and never derived from it.
+
+    ``af_unix_deny_paths`` / ``block_af_unix`` are the AF_UNIX layer (M-D2 §D):
+    pathname sockets are masked, and the seccomp tier can refuse
+    ``socket(AF_UNIX)`` outright -- including the abstract namespace, which has
+    no path to mask.
 
     The default is ``enforce``: roadmap's acceptance criterion is "a process
     under ``enforce`` cannot write outside the workspace", and a default of
@@ -65,6 +143,11 @@ class ProcessSandboxConfig(BaseModel):
     mode: Literal["off", "warn", "enforce"] = "enforce"
     allow_bypass: bool = False
     writable_paths: list[str] = Field(default_factory=lambda: ["~/.cache"])
+    read_deny_paths: list[str] = Field(default_factory=default_read_deny_paths)
+    af_unix_deny_paths: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_AF_UNIX_DENY_PATHS)
+    )
+    block_af_unix: bool = False
 
 
 class SecurityConfig(BaseModel):

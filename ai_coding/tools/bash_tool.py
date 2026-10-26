@@ -458,6 +458,8 @@ class BashTool(BaseTool):
             # R8c: when the user cancels, the dispatcher sets this flag and the
             # runner kills the process group - waiting is not enough (D-10).
             cancel=live.kill_event,
+            # M-D2 §D.3: the seccomp filter is an inherited descriptor.
+            pass_fds=getattr(self._backend, "seccomp_fds", ()),
         )
 
         if outcome.error is not None:
