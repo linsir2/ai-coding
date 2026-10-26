@@ -95,6 +95,7 @@ def tool_context(
     extra_workspace_roots: Sequence[str] = (),
     permissions: Sequence[Rule] = (),
     agent_rules: Sequence[Rule] = (),
+    write_ahead: Any = None,
 ) -> ToolContext:
     """The per-invocation context a tool receives (the dispatcher stamps call ids).
 
@@ -136,4 +137,6 @@ def tool_context(
         # D-1: the workspace's background jobs.  Present only where the product
         # builds one; `None` elsewhere and the tools that need it say so.
         jobs=jobs,
+        # M-C1: the turn's write-ahead log (see ``core/write_ahead.py``).
+        write_ahead=write_ahead,
     )

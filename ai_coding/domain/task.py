@@ -136,6 +136,15 @@ class TaskState:
     #: driver reads it after each round and stops on a claim; written only when
     #: non-empty (same discipline as every optional key).
     goal_phase: str = ""
+    #: M-C3: the fingerprint the last boot resume left behind.  Compared
+    #: **boot to boot**: an unchanged fingerprint means the resume opened no
+    #: round, produced no real message and settled no step.  A tuple of four
+    #: ints (rounds, tokens, non-synthetic messages, settled steps), stored as
+    #: a JSON list; written only when set.
+    resume_fingerprint: tuple[int, ...] | None = None
+    #: M-C3: consecutive resumes that made no progress.  Reset by any progress;
+    #: at the limit the task is disarmed with a ``ResumeStalled`` report.
+    no_progress_resumes: int = 0
 
     # ---- mutations --------------------------------------------------------
 
@@ -152,6 +161,9 @@ class TaskState:
         self.rounds_run = 0
         self.resume_count = 0
         self.tokens_used = 0
+        # M-C3: the resume gate counts within an episode too.
+        self.no_progress_resumes = 0
+        self.resume_fingerprint = None
         self.armed = True
         self.armed_profile = "goal"
 
@@ -392,6 +404,11 @@ class TaskState:
             data["tokensUsed"] = int(self.tokens_used)
         if self.goal_phase:
             data["goalPhase"] = self.goal_phase
+        # M-C3: same discipline -- a task with no resume history gains no key.
+        if self.resume_fingerprint is not None:
+            data["resumeFingerprint"] = [int(value) for value in self.resume_fingerprint]
+        if self.no_progress_resumes:
+            data["noProgressResumes"] = int(self.no_progress_resumes)
         return data
 
     @classmethod
@@ -402,6 +419,12 @@ class TaskState:
             for entry in raw_items
             if isinstance(entry, dict) and entry.get("id")
         ]
+        raw_fingerprint = data.get("resumeFingerprint")
+        fingerprint = (
+            tuple(int(value) for value in raw_fingerprint)
+            if isinstance(raw_fingerprint, list)
+            else None
+        )
         return cls(
             goal=str(data.get("goal", "")),
             items=items,
@@ -411,6 +434,8 @@ class TaskState:
             resume_count=int(data.get("resumeCount", 0) or 0),
             tokens_used=int(data.get("tokensUsed", 0) or 0),
             goal_phase=str(data.get("goalPhase", "") or ""),
+            resume_fingerprint=fingerprint,
+            no_progress_resumes=int(data.get("noProgressResumes", 0) or 0),
         )
 
 

@@ -72,9 +72,14 @@ class _EchoTool(BaseTool):
 
     parallel_safe = True
 
-    def __init__(self, name: str = "bash") -> None:
+    def __init__(self, name: str = "bash", *, mutates_world: bool = True) -> None:
         self._name = name
+        self._mutates_world = mutates_world
         self.calls: list[dict[str, Any]] = []
+
+    @property
+    def mutates_world(self) -> bool:
+        return self._mutates_world
 
     @property
     def name(self) -> str:
@@ -220,8 +225,10 @@ async def c5_secret_never_reaches_disk(root: Path) -> tuple[bool, str]:
 async def c6_duplicate_guard(root: Path) -> tuple[bool, str]:
     """The third identical call is refused, and the turn still ends cleanly."""
     # ``read`` is ALLOW tier: without this the WARN/approval step would refuse the
-    # calls first and the guard would never get to decide anything.
-    tool = _EchoTool("read")
+    # calls first and the guard would never get to decide anything.  It is also
+    # non-mutating (M-C1): a mutating tool's second identical call is answered
+    # from the write-ahead record before the guard's count can reach the third.
+    tool = _EchoTool("read", mutates_world=False)
     engine = _Engine(
         [
             _calls(_path_ref("c1", "notes.txt")),

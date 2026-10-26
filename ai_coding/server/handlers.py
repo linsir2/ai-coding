@@ -26,6 +26,7 @@ from typing import Any
 
 from ai_coding.attachments import save_data_url
 from ai_coding.config.models import resolve_context_window
+from ai_coding.core.events import ResumeStalled
 from ai_coding.domain.agents import is_plan_agent
 from ai_coding.domain.session import InboxItem, _message_to_dict
 from ai_coding.infra.time_utils import now_utc
@@ -216,6 +217,31 @@ class _WorldState:
 #: with a notice instead of flapping forever (OpenCode's countResume shape).
 _MAX_BOOT_RESUMES = 5
 
+#: M-C3: consecutive boot-to-boot resumes that made no progress before the task
+#: is disarmed.  One is not enough -- a crash can land very early in
+#: ``resume_turn``, before any round opened.
+_NO_PROGRESS_RESUMES = 2
+
+
+def resume_fingerprint(task: Any, session: Any) -> tuple[int, int, int, int]:
+    """The boot-to-boot fingerprint of an armed task (M-C3).
+
+    Four facts, every one of which a *real* resume moves: the rounds the driver
+    opened, the tokens the episode spent, the real (non-synthetic) messages and
+    the steps the plan settled.  A synthetic ``[resume]`` note is deliberately
+    excluded -- ``resume_turn`` appends one whenever a pending approval is
+    re-decided, and counting it would read a genuine stall as progress.
+    """
+    rounds = int(getattr(task, "rounds_run", 0) or 0)
+    tokens = int(getattr(task, "tokens_used", 0) or 0)
+    messages = sum(
+        1
+        for message in getattr(session, "messages", ()) or ()
+        if not bool(getattr(message, "synthetic", False))
+    )
+    steps = len(getattr(session, "step_deliveries", ()) or ())
+    return (rounds, tokens, messages, steps)
+
 #: C-3: how a refusal carries the operator's own words ("no::改用 ls -la").
 #: The panel builds it (util/permission.ts), and it is lifted back off here --
 #: before the shared parser sees anything, because that parser serves two front
@@ -337,6 +363,17 @@ def make_handlers(
             # "goal" are different tasks to the person reading it.
             profile = str(getattr(task, "armed_profile", "") or "plan")
             label = "目标" if profile == "goal" else "计划"
+            # M-C3: compare against the fingerprint the last resume left.  The
+            # comparison runs before either breaker so a stall is counted even
+            # when the older cap is what finally disarms.
+            now = resume_fingerprint(task, session)
+            if getattr(task, "resume_fingerprint", None) is not None:
+                if now == tuple(task.resume_fingerprint):
+                    task.no_progress_resumes = (
+                        int(getattr(task, "no_progress_resumes", 0) or 0) + 1
+                    )
+                else:
+                    task.no_progress_resumes = 0
             if int(getattr(task, "resume_count", 0) or 0) >= _MAX_BOOT_RESUMES:
                 task.disarm()
                 _persist_session(world, session)
@@ -346,7 +383,40 @@ def make_handlers(
                     + ("或重新立案（/goal 或让模型 start_goal）。" if profile == "goal"
                        else "或重新进入 Plan 模式。")
                 )
+            elif int(getattr(task, "no_progress_resumes", 0) or 0) >= _NO_PROGRESS_RESUMES:
+                task.disarm()
+                _persist_session(world, session)
+                # M-C3: the trace recorder is not in the observer braid until a
+                # turn begins, and this branch begins none -- bind it first or
+                # the event lands under root/"unknown" (trace.py's
+                # session_dir("")).
+                bind_session = getattr(world.loop, "bind_session", None)
+                if callable(bind_session):
+                    bind_session(session)
+                before = tuple(getattr(task, "resume_fingerprint", None) or ())
+                after = resume_fingerprint(task, session)
+                emit = getattr(getattr(world.loop, "observer", None), "on_event", None)
+                if callable(emit):
+                    emit(
+                        ResumeStalled(
+                            resumes=int(getattr(task, "resume_count", 0) or 0),
+                            no_progress=int(task.no_progress_resumes),
+                            before=before,
+                            after=after,
+                        )
+                    )
+                resume_note = (
+                    f"[{profile}] 连续 {_NO_PROGRESS_RESUMES} 次自动续跑均无进展，"
+                    f"{label}任务已暂停；检查后继续对话"
+                    + ("或重新立案（/goal 或让模型 start_goal）。" if profile == "goal"
+                       else "或重新进入 Plan 模式。")
+                )
             else:
+                # M-C3: the fingerprint is stored before the posture reset, so
+                # the persist below carries it -- a crash between the two
+                # persists can lose the older breaker's increment, but not the
+                # fact that this resume started from here.
+                task.resume_fingerprint = now
                 # 可达+有痕批次: the note rides the initialize response, not a
                 # console.line -- events emitted while the shell is still on
                 # Home are lost, and this one must be seen.

@@ -484,6 +484,29 @@ class SearchStalled:
 
 
 @dataclass(frozen=True)
+class ResumeStalled:
+    """A boot resume made no progress twice in a row, so the task was disarmed (M-C3).
+
+    ``resume_count`` alone cannot tell a resume that did nothing from one that
+    did: it increments on every boot.  The fingerprint compares boot to boot --
+    rounds, tokens, real (non-synthetic) messages and settled steps -- and an
+    unchanged one means the resume produced none of them.  Two in a row ends the
+    episode instead of flapping.
+
+    ``before``/``after`` are the fingerprint the previous resume left and the one
+    that failed to move; ``no_progress`` is the consecutive count that tripped
+    the gate.  The operator-facing summary rides the ``initialize`` response's
+    ``resumeNote`` -- this event is the structured record (the trace's
+    ``dataclasses.asdict`` writes it).
+    """
+
+    resumes: int = 0
+    no_progress: int = 0
+    before: tuple[int, ...] = ()
+    after: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
 class MemoryInjected:
     """The volatile constraint block was attached to this request (R3b).
 
@@ -565,6 +588,7 @@ LoopEvent = (
     | MemoryHarvested
     | MemoryConsolidated
     | SearchStalled
+    | ResumeStalled
 )
 
 
@@ -642,6 +666,7 @@ __all__ = [
     "MemoryHarvested",
     "MemoryConsolidated",
     "SearchStalled",
+    "ResumeStalled",
     "LoopEvent",
     "LoopObserver",
     "NullObserver",

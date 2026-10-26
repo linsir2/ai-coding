@@ -508,9 +508,21 @@ class ToolDispatcher:
         if blocked is not None:
             return blocked, True, False
 
-        tool = item.tool
-        if tool is None:  # pragma: no cover - guarded above
-            return self._unknown(call), True, False
+        # M-C1: claim before execution.  ``precheck`` has run (the params are
+        # final) and ``_execute`` has not -- this is the one moment a
+        # side-effecting call can be named without racing a concurrent sibling.
+        # The digest is ``call_fingerprint(call)``, so it is stable across a
+        # guard/hook rewrite above.
+        log = getattr(ctx, "write_ahead", None)
+        if tool.mutates_world and log is not None:
+            reused = log.claim(call)
+            if reused is not None:
+                # A reuse is not an execution: ``guards.after`` and the
+                # TOOL_AFTER hooks read "the result of what just ran", and
+                # nothing ran.  ``TOOL_BEFORE`` and the guards' ``check``
+                # already ran above, so the permission semantics are intact.
+                return reused, False, False
+
         result = await self._execute(tool, call, ctx, deadline)
         if rewritten_from is not None:
             result = self._annotate_rewrite(
@@ -518,6 +530,8 @@ class ToolDispatcher:
             )
         result = self.guards.after(call, result, ctx, turn_view)
         await self._run_hooks(HookPoint.TOOL_AFTER, call, ctx, turn_view, result=result)
+        if tool.mutates_world and log is not None:
+            log.settle(call, result)
         return result, result.error == "credential_approval_required", False
 
     async def _run_hooks(

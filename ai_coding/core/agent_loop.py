@@ -104,6 +104,7 @@ from ai_coding.core.turn_policy import (
 )
 from ai_coding.core.turn_report import TurnReporter
 from ai_coding.core.undo_store import UndoFileStore
+from ai_coding.core.write_ahead import WriteAheadLog
 from ai_coding.domain.acceptance import acceptance_states, pending_items
 from ai_coding.domain.agents import AgentCatalog
 from ai_coding.domain.ledger import ledger_signature
@@ -1783,6 +1784,18 @@ class AgentLoop:
             self.trace.session_id = session.session_id
         self.trace.attach_session(session, start=len(session.messages))
 
+    def bind_session(self, session: SessionData) -> None:
+        """Point the trace at ``session`` *without* starting a turn (M-C3).
+
+        The boot resume's stalled branch disarms without opening any turn, so
+        ``_begin_turn`` never runs and the trace recorder stays on its
+        construction-time observer -- a ``ResumeStalled`` emitted then would
+        land under ``root/"unknown"`` instead of the session's own directory.
+        This is the one place a caller can make the recorder reachable.
+        """
+        self._bind_observer(None)
+        self._bind_trace(session)
+
     def _trace_path(self, session: SessionData) -> str:
         """Where this turn's trace lives, for the handoff (best effort)."""
         path = getattr(self.trace, "current_path", None)
@@ -1898,6 +1911,13 @@ class AgentLoop:
             self.cancel.clear()
         session_rules = self._effective_session_rules(session)
         agent_rules = self._agent_rules(session)
+        # M-C1: one write-ahead log per batch, seeded from whatever the sidecar
+        # holds (empty for a fresh turn, the crashed turn's records for a
+        # resumed one).  ``session.write_ahead`` is the shared in-memory copy,
+        # so the next batch re-reads it instead of re-reading the file; the
+        # closer holds the last batch's log so the turn close can clear it.
+        write_ahead = WriteAheadLog(session, self.sessions, enabled=not session.ephemeral)
+        self.closer.write_ahead = write_ahead
         outcomes = await self.dispatcher.dispatch_batch(
             step.tool_calls,
             tool_context(
@@ -1936,6 +1956,9 @@ class AgentLoop:
                 # N1: the turn's conclusion holder -- the two exits of a
                 # plan-mode turn read it to stay mutually exclusive.
                 conclusion=conclusion,
+                # M-C1: the turn's write-ahead log, so a regenerated
+                # side-effecting call is answered from the record.
+                write_ahead=write_ahead,
             ),
             deadline=deadline,
             iteration=index,

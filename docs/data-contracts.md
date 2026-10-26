@@ -910,3 +910,46 @@ workspace 根向上走到用户主目录为止（home 是硬边界，否则 `~/C
 - ~~`webfetch` 输出无字符数上限~~ **r20/F4 已修**：清洗后 50k，警示恒在末尾
 - ~~rg 与兜底在文件大小上不同形~~ **r20/F6 已修**：rg 加 `--max-filesize`。**二进制嗅探仍不同形但实测复现不出**（四种样本两路一致），未改
 - 剪贴板图片的真机验证在无剪贴板环境不可做（覆盖由纯函数测试承担）
+
+---
+
+## M-C 契约（write-ahead 恢复 / 记忆并发写 / 续跑验收门）
+
+M-C1~M-C3 见 `docs/plan-m-c.md`。三条新契约，其余全是新增或追加默认值。
+
+### `WriteAheadIntent`（`domain/write_ahead.py`，M-C1）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `callId` / `tool` / `digest` | `str` | 一次副作用调用的身份；`digest = call_fingerprint(call)`（复用 `core/guard.py`，不新造指纹） |
+| `status` | `"running" \| "ok" \| "failed"` | 执行**前**写 `running`，执行**后**回填 |
+| `output` / `data` / `artifacts` | `str` / `dict` / `list[dict]` | 复用必须与全新执行**不可区分**：模型读 `output`，回合 digest/handoff 读 `artifacts` |
+
+落点是 **sidecar** `sessions/write-ahead/<id>.json`（子目录，避开 `*.json` 会话扫描），不是会话字段：`claim` 必须在 `_execute` **之前**调，而此刻 `write_back` 还没跑，写会话会触发 `ensure_tool_pairing` 丢掉在飞的载体（仓库已三次明令禁止的坑）。`SessionData.write_ahead` 是**运行时字段**（`load` 时从 sidecar 读回），**不进 `to_dict`** → 会话 JSON 不变大、save 节奏不变。
+
+**三个上限**（`OUTPUT_CHARS=4000` / `DATA_KEYS=8`×`DATA_VALUE_CHARS=200` / `ARTIFACTS=4`）：崩溃批次的 tool 消息**不在盘上**（`resume_turn` 的历史止于上一个已完成结果），续跑时模型只能看到这里；无界记录会让 sidecar 变成第二份 transcript。条数上界 256（`WriteAheadLog.MAX_RECORDS`）。
+
+**复用域 = 回合**：`TurnCloser.close` 清空 sidecar，跨回合不可能命中。只覆盖 `mutates_world` 的工具（工具自报的元数据，与只读门同一份判据）；`ephemeral` 会话不记。`running` **不是**命中（副作用可能已发生），只有 `ok` 复用 —— 「副作用已成、`ok` 未落盘」的残留窗口需要 outbox/围栏令牌，本方案**不封**（§七）。复用时跳过 `guards.after` 与 `TOOL_AFTER`（没有执行），但 `TOOL_BEFORE` 与 guards 的 `check` 已跑过，权限语义不 bypass。`delete` 与回合结束都会清 sidecar。
+
+### `TaskState` 两个字段（M-C3）
+
+| 字段 | JSON 键 | 说明 |
+|---|---|---|
+| `resume_fingerprint: tuple[int, ...] \| None` | `resumeFingerprint` | 上一次续跑留下的指纹：`(rounds_run, tokens_used, 非合成消息数, len(step_deliveries))`，存为 int 列表；仅非 `None` 时写 |
+| `no_progress_resumes: int` | `noProgressResumes` | 连续无进展的续跑次数；仅非零时写。`arm_goal` 重置两者 |
+
+**判据是 boot 到 boot**，不是 run 的首尾：`rounds_run` 每轮必增，而崩在轮中途时「记 after」根本不执行。指纹全等 = 上一次续跑没开一轮、没产生真实消息、没结算任何步骤。**非合成消息数**是关键：`resume_turn` 在有待审批时会追加一条合成 user 消息，`len(messages)` 会读成「有进展」，掩盖真正的停滞。连续 **2** 次（一次可能是崩在 `resume_turn` 刚开头）→ disarm + `ResumeStalled`，与 note 在同一个 `initialize` 响应里。
+
+### `ResumeStalled`（`core/events.py`，M-C3）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `resumes` / `no_progress` | `int` | 触发时的 `resume_count` 与连续无进展次数 |
+| `before` / `after` | `tuple[int, ...]` | 上一次续跑留下的指纹 / 本次未能推动的指纹 |
+
+落 **trace**（`dataclasses.asdict` 自动进 jsonl），操作者可读的总结走**已在流动的** `initialize` 响应 `resumeNote` —— 不改前端。`AgentLoop.bind_session(session)` 是公开方法：disarm 分支不启动任何 turn，trace recorder 不在观察者辫子里，不先绑定会让事件落错会话目录（`trace.py` 的 `session_dir("")` → `root/"unknown"`）。
+
+### 记忆写并发（M-C2，`memory/store.py`）
+
+三层：`_save` **进锁**（`_mutate` 的 `try/except` 保留在锁内，`to_json_pretty` 可能抛非 `OSError`）；**唯一 tmp 路径** `<path>.<uuid4hex>.tmp`（锁失效时最坏 last-write-wins，文件始终合法）；**`fcntl.flock`** 在写 tmp + `os.replace` 期间锁**正式文件**（POSIX-only，`try/except ImportError` 可选导入，不可用时降级为裸 `os.replace`）。**诚实框定**：今天所有真实路径都是单写者，这是**潜在隐患的预防性修复**，不是正在漏的洞。
+

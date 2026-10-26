@@ -162,12 +162,17 @@ class TurnCloser:
         self.artifacts: list[ToolArtifact] = []
         #: The last closed outcome (the loop exposes it as ``last_outcome``).
         self.last_outcome: TurnOutcome | None = None
+        #: M-C1: the turn's write-ahead log, set by the loop's ``_run_tools``.
+        #: The reuse domain is the turn, so the sidecar dies here.
+        self.write_ahead: Any = None
 
     # ---- during the turn ---------------------------------------------------
 
     def begin_turn(self) -> None:
         """Forget the previous turn's artifacts."""
         self.artifacts = []
+        # M-C1: the write-ahead log is per turn; a new turn starts with none.
+        self.write_ahead = None
 
     def write_back(
         self, session: SessionData, outcomes: Sequence[DispatchOutcome]
@@ -282,6 +287,14 @@ class TurnCloser:
         if filled is not None and filled.usage and any(filled.usage.values()):
             session.record_turn_usage(turn_number, filled.usage)
             self.save(session)
+        # M-C1: the reuse domain is the turn -- clear the sidecar now that the
+        # turn is over.  Best-effort: a failure only costs a spurious reuse.
+        log = self.write_ahead
+        if log is not None:
+            try:
+                log.clear()
+            except Exception:  # noqa: BLE001 — the close must still succeed
+                _log.debug("write-ahead clear failed", exc_info=True)
         return outcome
 
     # ---- introspection -----------------------------------------------------

@@ -301,6 +301,11 @@ class SessionData:
     #: re-reviews from 0, which is idempotent (won't create duplicate skills).
     skill_review_counter: int = 0
     skill_review_cursor: int = 0
+    #: M-C1: the turn's in-flight write-ahead records, read back from the
+    #: sidecar on ``load`` (``pending_approval``'s shape).  Runtime only -- the
+    #: durable copy is ``sessions/write-ahead/<id>.json``, so the session file
+    #: and its save cadence do not change.
+    write_ahead: list[Any] | None = None
     # Step deliveries (R1-1): what each plan-runner step left behind.  The
     # resume replay reads these to rebuild the step timeline; persisted only
     # when non-empty, same rule as above.

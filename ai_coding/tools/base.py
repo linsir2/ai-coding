@@ -142,6 +142,10 @@ class ToolContext:
     # `emit`/`notice_checkpoint`: the registry lives in ``core`` and the tools
     # package importing it would drag the loop's world in behind it.
     jobs: Any = None
+    # M-C1: the turn's write-ahead log, so a regenerated side-effecting call can
+    # be answered from the record instead of running twice.  `None` outside a
+    # loop that owns a turn.  Typed `Any` like ``jobs`` for the same reason.
+    write_ahead: Any = None
 
 
 def resolve_ctx(ctx: ToolContext | None) -> ToolContext:

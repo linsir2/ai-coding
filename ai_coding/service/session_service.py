@@ -14,6 +14,7 @@ from typing import Any
 
 from ai_coding.domain.message import CHECKPOINT_MARK
 from ai_coding.domain.session import SessionData
+from ai_coding.domain.write_ahead import WriteAheadIntent
 from ai_coding.infra.json_utils import from_json_file, to_json_pretty
 from ai_coding.infra.time_utils import now_utc, parse_iso8601
 
@@ -62,6 +63,11 @@ _PENDING_REMINDER_DIR = "pending-reminder"
 #: (``<workspace>/.ai-coding/undo``); named here so ``delete`` can take a
 #: session's sidecar with it instead of orphaning redo bytes.
 _UNDO_DIR = "undo"
+
+#: Subdirectory holding a turn's write-ahead records (M-C1).  Same reason as
+#: the other marker directories: the session scan globs ``*.json`` at the root,
+#: so a subdirectory keeps a sidecar from being read as a phantom session.
+_WRITE_AHEAD_DIR = "write-ahead"
 
 
 #: A preview is one line by definition; measured on the compaction checkpoint,
@@ -247,6 +253,59 @@ class SessionService:
             return None
         return [row for row in data if isinstance(row, dict)]
 
+    # ---- write-ahead marker (M-C1) -----------------------------------------
+    #
+    # Why a sidecar and not a session field: the claim must be written *before*
+    # the tool runs, ahead of any checkpoint.  Writing it to the session means a
+    # mid-batch save, and ``TurnCloser.save`` normalizes tool pairing -- which
+    # drops an assistant carrier whose result has not been written back yet
+    # (the same trap the approval marker documents, and the one this batch's
+    # P0-1 review found for write-ahead).  A small file keeps the session file --
+    # and therefore the save cadence every golden test pins -- untouched.
+
+    def _write_ahead_path(self, session_id: str) -> Path:
+        _check_id(session_id)
+        return self.root / _WRITE_AHEAD_DIR / f"{session_id}.json"
+
+    def mark_write_ahead(
+        self, session_id: str, records: list[dict[str, Any]] | None
+    ) -> None:
+        """Record (or clear) the turn's write-ahead records.
+
+        Best-effort like ``save``: a failure to record must not end the turn,
+        and a failure to clear only costs a spurious reuse after a crash.
+        """
+        path = self._write_ahead_path(session_id)
+        try:
+            if not records:
+                path.unlink(missing_ok=True)
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(to_json_pretty(list(records)), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass
+
+    def _read_write_ahead(self, session_id: str) -> list[WriteAheadIntent] | None:
+        path = self._write_ahead_path(session_id)
+        if not path.is_file():
+            return None
+        try:
+            data = from_json_file(path)
+        except (ValueError, OSError):
+            return None
+        if not isinstance(data, list):
+            return None
+        return [
+            record
+            for record in (WriteAheadIntent.from_dict(row) for row in data)
+            if record is not None
+        ]
+
+    def clear_write_ahead(self, session_id: str) -> None:
+        self._write_ahead_path(session_id).unlink(missing_ok=True)
+
     def create(self, title: str = "") -> SessionData:
         ts = now_utc()
         return SessionData(
@@ -287,6 +346,9 @@ class SessionService:
             # M2 T3: the same for a reminder that was queued but not yet
             # delivered.
             session.pending_reminders = self._read_pending_reminder(session_id)
+            # M-C1: the turn's write-ahead records, if the process died with a
+            # side-effecting call in flight.
+            session.write_ahead = self._read_write_ahead(session_id)
             return session
         # Not an exact id: fall back to a prefix, but only when it is unique.
         # Resuming the first of several matches would silently open the wrong
@@ -349,6 +411,9 @@ class SessionService:
         # and an orphan would keep reporting a flip for a session nobody has.
         self._pending_posture_path(session_id).unlink(missing_ok=True)
         self._pending_reminder_path(session_id).unlink(missing_ok=True)
+        # M-C1: same orphan class -- a deleted session's write-ahead records
+        # would otherwise keep answering a call nobody is making.
+        self.clear_write_ahead(session_id)
         if not target.is_file():
             return False
         target.unlink()

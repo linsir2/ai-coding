@@ -312,7 +312,9 @@ async def test_tool_result_is_fed_back_to_next_step(tmp_path):
 
 @pytest.mark.asyncio
 async def test_multiple_calls_in_one_message_all_executed(tmp_path):
-    reader = _Tool("read")
+    # A read tool is non-mutating (M-C1): a mutating tool's identical second
+    # call would be answered from the write-ahead record, not executed.
+    reader = _Tool("read", mutates_world=False)
     engine = ScriptedEngine([_calls(_ref("c1", "read"), _ref("c2", "read")), _text("done")])
     sessions = SessionService(tmp_path / "sessions")
     loop = _loop(engine, sessions, _registry(reader))

@@ -33,6 +33,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
+try:  # POSIX-only cross-process lock (M-C2); optional on other platforms.
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    fcntl = None  # type: ignore[assignment]
+
 from ai_coding.infra.json_utils import from_json_file, to_json_pretty
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.memory.note import MemoryNote, NoteKind, new_note
@@ -86,36 +91,30 @@ def _load(path: Path) -> list[MemoryNote]:
 class MemoryStore:
     """A disk-backed memory index that never raises on IO errors.
 
-    Concurrent **reads** are safe: every read path takes the lock.  Concurrent
-    **writes** are not, and this class does not claim they are.
+    Concurrent **reads** and **writes** are safe.  The write path serialises at
+    two layers (M-C2):
 
-    :meth:`_mutate` releases the lock *before* :meth:`_save`, and ``_save`` reads
-    ``self._notes`` while holding none.  Two threads therefore serialise onto the
-    **same** ``<path>.tmp``; ``os.replace`` renames that inode to the live path while
-    the second thread still has it open, so its remaining writes land on the live
-    file and append a second JSON document.  Measured (4 threads, barrier before
-    **every** write): 4-6 of 25 trials left a file that ``json.loads`` rejects, and
-    ``_load`` swallows that ``ValueError`` and returns ``[]`` — **every note gone,
-    not one**.  A barrier only before the write *loop* measures 0/25: the race needs
-    the two saves to overlap per write, not merely to start together.  Without any
-    synchronisation the rate is 3/200.  A single-writer store is fine; that is
-    every real path in this repo.
+    * the process-internal ``RLock`` now spans the *save*, so two threads can no
+      longer land on one tmp path and leave the live file holding two JSON
+      documents (which ``_load`` swallowed into ``[]`` -- every note gone, not
+      one);
+    * the tmp path is unique per write, so even without the lock two writers
+      cannot append into the same file -- the worst case is last-write-wins;
+    * on POSIX the rename itself is serialised across processes with
+      ``fcntl.flock`` on the live file, so two ``ai-coding`` instances over one
+      workspace cannot interleave either.
 
-    Fixing it means holding the lock across the save, which changes the persistence
-    shape for every caller.  R10 reviewed this and chose to record it rather than
-    restructure persistence inside a retrieval round.
+    **Honest framing** (§二 of the plan): every real path in this repo is a
+    single writer today (``recall_with_diagnostics`` calls ``touch_notes``
+    synchronously on the event loop).  This is a *preventive* fix for the
+    hazard that appears the moment a store write moves onto a thread, not a
+    live leak.  Cross-process protection is POSIX-only; elsewhere the process
+    lock and the unique tmp still hold.
 
-    **Do not move a store write onto a thread.** Recall touches notes on the read
-    path, and the obvious way to stop that blocking the event loop is
-    ``asyncio.to_thread(store.touch_notes, ids)``.  That is the one change that
-    turns this from latent into live: today every path runs on the single event
-    loop thread and ``recall_with_diagnostics`` contains no ``await``, so the writes
-    serialise; off-thread they stop doing so.  Move the save inside the lock (or
-    to a per-write tmp path) *before* anything touches this store from a thread.
-    ``scripts/r10_cases.py::recall_survives_concurrent_harvest`` runs concurrent
-    recalls against concurrent harvests and reports what it sees, which is
-    **survival, not the absence of this hazard** — it imposes no per-write barrier,
-    so it cannot exhibit the corruption, and 32 runs of it never did.
+    **Do not move a store write onto a thread without reading this.**  The
+    obvious way to stop recall blocking the event loop is
+    ``asyncio.to_thread(store.touch_notes, ids)``.  With the fix in place that
+    is safe; before it, it turned the latent hazard live.
     """
 
     def __init__(self, path: str | Path = Path(".memory")) -> None:
@@ -134,20 +133,60 @@ class MemoryStore:
                     "notes": [note.to_dict() for note in self._notes],
                 }
             )
-            tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+            # A unique tmp per write (M-C2): even without the lock -- a
+            # non-POSIX platform, or a caller that moved the save off it -- two
+            # writers cannot append into the same file.  The worst case is
+            # last-write-wins (one update lost), never "every note gone".
+            tmp = self._path.with_suffix(f".{uuid.uuid4().hex}.tmp")
             tmp.write_text(payload, encoding="utf-8")
-            os.replace(tmp, self._path)
+            self._replace_under_lock(tmp)
         except OSError:
             pass  # memory persistence is best-effort; never raise
 
+    def _replace_under_lock(self, tmp: Path) -> None:
+        """Atomically move ``tmp`` onto the live path, serialized across processes.
+
+        The lock must span the *rename*, not just the write: releasing before
+        ``os.replace`` leaves a window where another process renames its own tmp
+        in between, and the two end up interleaved.  ``fcntl`` is POSIX-only;
+        elsewhere this degrades to a bare ``os.replace`` and the docstring says
+        so -- the process-internal lock still applies.
+
+        The live file is opened ``r+b`` (never created here): a concurrent
+        reader must never observe the half-state of a file this method is
+        responsible for creating, so the *first* writer -- for whom there is no
+        inode to lock -- takes the bare rename and relies on the unique tmp.
+        """
+        if fcntl is None:  # pragma: no cover - non-POSIX platforms
+            os.replace(tmp, self._path)
+            return
+        try:
+            handle = open(self._path, "r+b")
+        except FileNotFoundError:
+            os.replace(tmp, self._path)
+            return
+        with handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                os.replace(tmp, self._path)
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
     def _mutate(self, fn: Callable[[], _T]) -> _T:
-        """Run a mutation and swallow any persistence error (memory never raises)."""
+        """Run a mutation and swallow any persistence error (memory never raises).
+
+        The save runs *inside* the lock (M-C2): ``_save`` reads ``self._notes``
+        while holding none, so two threads used to serialise onto one tmp path
+        and leave the live file holding two JSON documents -- which ``_load``
+        then swallowed into ``[]``.  Holding the lock across the save is what
+        makes the writes serialise instead of interleave.
+        """
         with self._lock:
             result = fn()
-        try:
-            self._save()
-        except Exception:  # noqa: BLE001 — persistence is best-effort
-            pass
+            try:
+                self._save()
+            except Exception:  # noqa: BLE001 — persistence is best-effort
+                pass
         return result
 
     # ---- creation / updates ----------------------------------------------
