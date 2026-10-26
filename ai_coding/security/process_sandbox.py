@@ -284,6 +284,15 @@ class SandboxMaskReport:
 
     masked: tuple[Path, ...] = ()
     skipped: tuple[Path, ...] = ()
+    #: Paths that exist but could not be *stat*ed (an untraversable parent --
+    #: the classic case is ``/root/.ssh`` on a runner that is not root).  These
+    #: are **not** failures: we cannot know whether there is anything to mask,
+    #: and refusing to run because of another user's directory would make the
+    #: sandbox unusable on any non-root machine.  Recorded so the gap is
+    #: visible rather than silent.
+    unreadable: tuple[tuple[Path, str], ...] = ()
+    #: A mask that was attempted and genuinely failed (bwrap rejected it).
+    #: Non-empty is a real problem and fails closed.
     failed: tuple[tuple[Path, str], ...] = ()
 
 
@@ -798,6 +807,7 @@ class BwrapBackend:
         args: list[str] = []
         masked: list[Path] = []
         skipped: list[Path] = []
+        unreadable: list[tuple[Path, str]] = []
         failed: list[tuple[Path, str]] = []
         seen: set[Path] = set()
         protected = self._protected_paths()
@@ -819,16 +829,18 @@ class BwrapBackend:
                 # A path under a directory the operator cannot traverse (the
                 # classic case: /root/.ssh on a CI runner that is not root)
                 # raises PermissionError from exists()/is_dir() -- and an
-                # uncaught one here aborts the whole spawn.  Treat it as
-                # "not ours to mask": the sandbox still gets every mask that
-                # could be built, and the skip is recorded, not silent.
+                # uncaught one here aborts the whole spawn.  It is not a mask
+                # failure either: we cannot know whether anything is there.
+                # Refusing to run over another user's directory would make the
+                # sandbox unusable on any non-root machine, so it is recorded
+                # as unreadable and skipped -- visible, never silent.
                 try:
                     present = resolved.exists()
                     is_dir = present and resolved.is_dir()
                 except OSError as exc:
                     seen.add(resolved)
                     skipped.append(path)
-                    failed.append((path, f"unreadable: {exc}"))
+                    unreadable.append((path, f"unreadable: {exc}"))
                     continue
                 if not present:
                     seen.add(resolved)
@@ -841,7 +853,10 @@ class BwrapBackend:
                     args += ["--ro-bind", "/dev/null", str(resolved)]
                 masked.append(resolved)
         report = SandboxMaskReport(
-            masked=tuple(masked), skipped=tuple(skipped), failed=tuple(failed)
+            masked=tuple(masked),
+            skipped=tuple(skipped),
+            unreadable=tuple(unreadable),
+            failed=tuple(failed),
         )
         self._mask_cache = (args, report)
         return self._mask_cache

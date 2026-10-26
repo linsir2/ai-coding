@@ -868,7 +868,9 @@ def test_an_untraversable_deny_path_does_not_abort_the_wrap(tmp_path, monkeypatc
     ``exists()`` raises ``PermissionError``.  An uncaught one here used to
     propagate out of ``_mask_arguments`` and kill the entire spawn; the guard
     treats it as "not ours to mask": the sandbox still gets every mask that
-    could be built, and the skip is recorded (skipped + failed), not silent.
+    could be built, and the gap is recorded as **unreadable** -- visible, never
+    silent, and crucially *not* a mask failure (a failure would make ``enforce``
+    refuse to run on any non-root machine).
     """
     import ai_coding.security.process_sandbox as module
 
@@ -898,9 +900,13 @@ def test_an_untraversable_deny_path_does_not_abort_the_wrap(tmp_path, monkeypatc
 
         report = backend.mask_report
         assert denied in report.skipped, report
+        # Unreadable is recorded, and is NOT a failure: failing closed over
+        # another user's directory would make the sandbox unusable anywhere
+        # the operator is not root.
         assert any(
-            entry[0] == denied and "unreadable" in entry[1] for entry in report.failed
+            entry[0] == denied and "unreadable" in entry[1] for entry in report.unreadable
         ), report
+        assert report.failed == (), report
         # The mask that could be built is still applied, so the read boundary
         # is not silently weaker for the traversable paths.
         assert reachable.resolve() in report.masked, report
