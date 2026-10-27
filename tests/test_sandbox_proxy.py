@@ -573,3 +573,57 @@ def test_concurrent_connections_are_served_in_parallel(make_proxy):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# --- D: CIDR entries must match the *resolved* address ----------------------
+#
+# Measured: `allow=['8.8.8.0/24']` was parsed as a hostname and therefore never
+# matched anything -- fail-closed, but silent.  The proxy has to match CIDR
+# entries against the pinned address after resolution (E2B does the same).
+
+from ai_coding.server.sandbox_proxy import _authorize  # noqa: E402
+
+
+def _cidr_allowed(ip: str, allow: list[str]) -> bool:  # noqa: ANN001, ANN201
+    """Imported lazily so the module still collects before the fix lands."""
+    from ai_coding.server.sandbox_proxy import _cidr_allowed as _impl
+
+    return _impl(ip, allow)
+
+
+def test_a_cidr_entry_matches_the_resolved_address():
+    assert _cidr_allowed("8.8.8.8", ["8.8.8.0/24"]) is True
+    assert _cidr_allowed("8.8.8.8", ["8.8.8.0/24", "9.9.9.9"]) is True
+    assert _cidr_allowed("8.8.4.4", ["8.8.8.0/24"]) is False
+
+
+def test_a_cidr_entry_does_not_break_the_domain_whitelist():
+    """The OR: a domain entry still authorizes its own host."""
+    assert _host_allowed("example.com", 443, ["example.com"]) is True
+    assert _host_allowed("8.8.8.8", 443, ["8.8.8.0/24"]) is False, (
+        "a CIDR entry is not a hostname"
+    )
+
+
+def test_a_malformed_cidr_is_refused_at_construction():
+    with pytest.raises(ValueError):
+        SandboxProxy(socket.socket(socket.AF_UNIX), allow=["8.8.8.0/33"])
+
+
+def test_authorize_resolves_once(monkeypatch):
+    """The CIDR check and the connection must see the *same* pinned address.
+
+    Two lookups would open a rebinding window between the check and the connect.
+    """
+    calls: list[str] = []
+
+    class _Proxy:
+        allow = ["8.8.8.0/24"]
+
+        def resolve_target(self, host, port):  # noqa: ANN001, ANN201
+            calls.append(host)
+            return (socket.AF_INET, socket.SOCK_STREAM, 0, ("8.8.8.8", port))
+
+    address = _authorize(_Proxy(), "8.8.8.8", 443)  # type: ignore[arg-type]
+    assert address[3][0] == "8.8.8.8"
+    assert calls == ["8.8.8.8"], f"expected exactly one resolution, got {calls}"

@@ -179,3 +179,56 @@ async def test_only_the_files_the_turn_reported_are_deleted(tmp_path):
     )
     assert not (root / "created.txt").exists(), "the file the turn did report is gone"
     assert sorted(report.restored) == ["a.txt", "created.txt"]
+
+
+# --- N-1: a non-fatal stderr line must never become the sha -----------------
+#
+# Measured: with `.git/info/exclude` unreadable, `git stash create` exits 0 and
+# prints the sha on stdout *and* four warnings on stderr.  `git()` merges the two
+# streams, so `capture` used to parse "warning...\n<sha>" as the sha, `update-ref`
+# failed, and the snapshot was silently skipped.
+
+import hashlib  # noqa: E402
+
+from ai_coding.core import snapshots as snapshots_mod  # noqa: E402
+
+_SHA = hashlib.sha1(b"x").hexdigest()
+
+
+def _fake_git(polluted: str):
+    async def _git(root, *args, **kwargs):
+        assert kwargs.get("merge_stderr") is False, (
+            "the sha-producing calls must not merge stderr into the value"
+        )
+        return 0, polluted
+
+    return _git
+
+
+@pytest.mark.asyncio
+async def test_a_stderr_line_never_becomes_the_sha(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    store = SnapshotStore(root)
+    polluted = f"warning: unable to access '.git/info/exclude': Permission denied\n{_SHA}"
+    monkeypatch.setattr(snapshots_mod, "git", _fake_git(polluted))
+
+    ref = await store.capture("s/1")
+
+    assert ref == "refs/ai-coding/undo/s/1", (
+        "the polluted stream must not be used as the ref target"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_sha_is_shape_checked(tmp_path, monkeypatch):
+    root = _repo(tmp_path)
+    store = SnapshotStore(root)
+    monkeypatch.setattr(
+        snapshots_mod, "git", _fake_git(f"not-a-sha-at-all\n{_SHA}")
+    )
+
+    ref = await store.capture("s/1")
+
+    assert ref is None or await store.exists("s/1"), (
+        "a non-hex sha must not be written as a ref"
+    )

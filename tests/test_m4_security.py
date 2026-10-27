@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 
 import pytest
 
@@ -462,9 +463,16 @@ async def test_grep_include_dotenv_still_filters_credentials(tmp_path):
     (tmp_path / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
     (tmp_path / ".env.example").write_text("TOKEN=example\n", encoding="utf-8")
     for use_rg in (False, True):
+        if use_rg and shutil.which("rg") is None:
+            pytest.skip("ripgrep is not installed")
         tool = GrepTool(Sandbox(tmp_path), use_ripgrep=use_rg)
         result = await tool.execute({"pattern": "TOKEN", "include": "*.env"})
         assert "TOKEN=secret" not in result.output
+        if use_rg:
+            # N-6: prove the rg branch actually ran.  Without this the case
+            # passed silently when rg was missing (the runner failed, the
+            # output had no secret in it, and the assertion still held).
+            assert result.success is True, "the rg branch must actually run"
 
 
 @pytest.mark.asyncio

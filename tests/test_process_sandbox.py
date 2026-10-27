@@ -1453,3 +1453,33 @@ def test_a_protected_path_is_skipped_and_recorded(tmp_path):
     backend = BwrapBackend(writable_paths=(), read_deny_paths=[bridge_script])
     assert bridge_script.resolve() in backend.mask_report.skipped
     assert bridge_script.resolve() not in backend.mask_report.masked
+
+
+# --- F: wrap() must not fall back to "full" when the probe found no tier ------
+#
+# Measured locally (no bwrap): `backend.tier` reported "none" while `wrap()`
+# built the **full** construction.  One object, two contradictory answers -- and
+# a caller that skips `available()` would get an argv that looks isolated.
+
+def test_wrap_returns_none_when_the_mechanism_is_absent():
+    """Contract: `None` means "nothing to wrap".
+
+    Falling back to "full" hands out an argv that looks isolated and then fails
+    at spawn time, which is a fail-open.
+    """
+    backend = BwrapBackend()
+    if backend.available():                      # CI has bwrap: nothing to prove
+        pytest.skip("bubblewrap is available here")
+    assert backend.tier == "none"
+    assert backend.wrap(["/bin/true"], []) is None
+
+
+def test_tier_and_wrap_agree_when_the_mechanism_is_absent():
+    """The two answers a backend gives about itself must not contradict."""
+    backend = BwrapBackend()
+    if backend.available():
+        pytest.skip("bubblewrap is available here")
+    assert backend.tier == "none"
+    assert backend.wrap(["/bin/true"], []) is None, (
+        "tier says none but wrap() built a construction"
+    )

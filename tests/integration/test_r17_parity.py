@@ -203,11 +203,19 @@ async def test_both_runners_skip_a_file_over_the_size_budget(tmp_path):
         assert "a.py" in found, "the budget swallowed the whole tree"
 
 
+@pytest.mark.skipif(
+    not shutil.which("rg"),
+    reason="ripgrep is not installed: the rg branch cannot be compared",
+)
 @pytest.mark.asyncio
 async def test_both_runners_answer_the_same_question(tmp_path):
     """The real comparison: one tree, two genuinely different search engines."""
     root = _tree(tmp_path / "ws")
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    # N-6: without this the case compared the fallback against itself when rg
+    # was missing (use_ripgrep=None autodetects), so it was green in both
+    # environments and proved nothing.
+    assert GrepTool(Sandbox(root))._rg is not None, "the rg branch must be in use"
 
     for params in (
         {"pattern": "target"},
