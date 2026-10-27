@@ -197,8 +197,18 @@ async def test_the_hint_names_the_most_expensive_origin():
 
 
 @pytest.mark.asyncio
-async def test_the_warning_never_changes_the_request():
-    """R4 的纪律：观测只写不改。开不开告警，请求逐字节相同。"""
+async def test_the_warning_never_changes_the_request(monkeypatch):
+    """R4 的纪律：观测只写不改。开不开告警，请求逐字节相同。
+
+    The clock is frozen on purpose: the environment block embeds
+    ``时间: <local time>`` (request_assembly.py:393), and two separately-run
+    loops straddle a second boundary on a fast host -- the requests then differ
+    by the timestamp, and the assertion fails for a reason that has nothing to
+    do with the warning (measured flaky, N-2).
+    """
+    from ai_coding.core import request_assembly
+
+    monkeypatch.setattr(request_assembly, "now_local", lambda: "2026-01-01 00:00:00")
     quiet, quiet_engine, quiet_events = _loop(
         _Tool("remote", "y" * 3000, origin="mcp"), mcp_chars_warn=0
     )

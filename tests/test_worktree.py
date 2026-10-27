@@ -96,21 +96,48 @@ async def test_worktrees_land_under_repo_worktrees(git_repo: Path) -> None:
 
 # ---- R2b: bounded git ---------------------------------------------------
 # ``_git`` used to await ``communicate()`` with no timeout at all, so one stuck
-# git call froze the whole turn (docs/r2-analysis.md 1.4-B).  An unrealistically
-# small timeout is the honest way to exercise the real code path.
+# git call froze the whole turn (docs/r2-analysis.md 1.4-B).  The timeout path
+# is exercised by *forcing* the runner to report one -- an unrealistically small
+# real timeout races the clock (N-2).
 
 
-async def test_can_isolate_is_false_when_git_times_out(git_repo: Path) -> None:
-    assert await WorktreeManager(git_repo, timeout=0.001).can_isolate() is False
+def _force_git_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the git runner report a timeout, without racing the clock.
+
+    ``timeout=0.001`` only works when the machine is slow enough that git does
+    not finish inside a millisecond.  On a fast host git wins the race, no
+    timeout is raised, and the assertions below fail for the wrong reason --
+    measured flaky in CI (N-2).
+    """
+    from ai_coding.core import gitcmd
+    from ai_coding.infra.subprocess_runner import ProcessOutcome
+
+    async def _timed_out(*_args: object, **_kwargs: object) -> ProcessOutcome:
+        return ProcessOutcome(returncode=None, stdout="", stderr="", timed_out=True)
+
+    monkeypatch.setattr(gitcmd, "run_process_async", _timed_out)
 
 
-async def test_list_returns_empty_when_git_times_out(git_repo: Path) -> None:
-    assert await WorktreeManager(git_repo, timeout=0.001).list() == []
+async def test_can_isolate_is_false_when_git_times_out(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force_git_timeout(monkeypatch)
+    assert await WorktreeManager(git_repo, timeout=60.0).can_isolate() is False
 
 
-async def test_create_raises_worktree_error_when_git_times_out(git_repo: Path) -> None:
+async def test_list_returns_empty_when_git_times_out(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force_git_timeout(monkeypatch)
+    assert await WorktreeManager(git_repo, timeout=60.0).list() == []
+
+
+async def test_create_raises_worktree_error_when_git_times_out(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _force_git_timeout(monkeypatch)
     with pytest.raises(WorktreeError, match="timed out"):
-        await WorktreeManager(git_repo, timeout=0.001).create("slow")
+        await WorktreeManager(git_repo, timeout=60.0).create("slow")
 
 
 async def test_git_spawn_failure_is_mapped(

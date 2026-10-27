@@ -490,7 +490,7 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 | 缺陷 | 状态 |
 |---|---|
 | **N-1** `gitcmd.git()` 合并 stderr 致快照静默失效 | ✅ **已修复**（2026-10-27）—— `merge_stderr=False` + `_SHA_RE` 校验；非 root 真子进程复现脚本 `scripts/verify_snapshot_stderr.py` |
-| **N-2** 既有 flaky（`test_tool_surface_warning` / `test_worktree`） | ⬜ **本轮未纳入**（未复现，留给下一轮） |
+| **N-2** 既有 flaky（`test_tool_surface_warning` / `test_worktree`） | ✅ **已修复**（2026-10-27）—— 根因**实测确认**：前者是环境块内嵌 `时间: <本地时间>`（`request_assembly.py:393`），两次循环跨秒即不同 → 冻结时钟；后者 `timeout=0.001` 与真实 git 赛跑（快机 git 赢）→ 改为注入 `timed_out=True` |
 | **N-6** 2 条 rg 用例缺守卫 | ✅ **已修复**（2026-10-27）—— 补 `skipif` + 正向断言"rg 分支真的跑了" |
 | **§2.6 新发现** `BwrapBackend.wrap()` 的 fail-open | ✅ **已修复**（2026-10-27）—— 机制缺席时返回 `None`（契约诚实），9 条用例改写/补守卫 |
 | **安全残余** CIDR / 运行期根 | ✅ **已修复**（2026-10-27）—— 代理支持 CIDR + 只 resolve 一次；进程层 roots 改活 |
