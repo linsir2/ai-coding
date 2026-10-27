@@ -264,57 +264,119 @@ async def capture(self, key: str) -> str | None:
   [:183](file:///workspace/ai-coding/tests/integration/test_r17_parity.py#L183) 一致）；
   并在用例内断言 `GrepTool(Sandbox(root))._rg is not None`，**钉住"真跑了 rg 分支"**。
 
-### C. `known_miss` 收敛
+### C. `known_miss` —— **全量修 16 条**（用户拍板）
 
-**分类（16 条 → 4 类）**：
+> **设计已原型验证**（`/tmp/proto_rules.py`，未落代码）：**15/16 修复、`SAFE` 误报 0 条、
+> 33 条真实工作命令里 32 条放行**。下面每条规则都对应原型里的一次实测。
 
-| 类 | 条目 | 可否用规则修 |
+#### C.0 根因：语法层把"带展开的词"整个丢掉了
+
+**这是本类缺口的真正根因**，实测（tree-sitter 树）：
+
+| 命令 | 树 | `view.arguments` |
 |---|---|---|
-| **E · 提权包装器** | `doas rm x`、`env -i sudo ls`、`timeout 5 sudo ls` | **可修**（包装器链） |
-| **F · force push 变体** | `git push --force-with-lease origin main` | **可修**（`--force` 的同义 flag） |
-| **A/B · 变量/波浪号展开** | `x="rm -rf /"; $x`、`D=/data; rm -rf $D`、`rm -rf ${HOME}`、`rm -rf $HOME`、`rm -rf $PWD`、`cat ~/.ssh/id_$USER`、`x=1; $x rm -rf /`、`rm -rf ~`、`rm -rf ~/` | **结构性不可解**（Codex 明示） |
-| **C/D · 路径穿越/绝对路径** | `rm -rf ./..`、`rm -rf /home/user`、`rm -rf /var/log` | **不在本轮**（redline 层不知道 workspace，硬修会引入新 FP） |
+| `cat ~/.ssh/id_$USER` | `concatenation` → `word '~/.ssh/id_'` + `simple_expansion '$USER'` | **`()`** |
+| `rm -rf $HOME` | `simple_expansion '$HOME'` | **`()`** |
+| `rm -rf ${HOME}` | `expansion '${HOME}'` | **`()`** |
+| `x="rm -rf /"; $x` | `command_name` → `simple_expansion '$x'` | `()`，program=`$x` |
 
-#### C.1 修 E + F（4 条 → `dangerous`）
+[shell_parse.py:82](file:///workspace/ai-coding/ai_coding/shell_parse.py#L82) 的
+`_WORD_NODES = ("word", "number")` **不含** `concatenation` / `simple_expansion` / `expansion`，
+于是 `_words_of`（[:187](file:///workspace/ai-coding/ai_coding/shell_parse.py#L187)）
+**把这些词整个丢掉** —— 规则看不见它们，`_grammar_reads` 又返回 `True` 短路掉文本回退，
+**双重失明**。这正是 GuardFall 的机理：过滤器检查的是**原始字符串**，
+而 bash 执行的是**展开之后的 argv**。
 
-* `doas` 进包装器表；
-* `env -i` / `timeout 5` 这类"带值的包装器"要能被剥掉（现在链在第一个带值词处断）；
-* `--force-with-lease` 与 `--force` 同等对待。
+#### C.1 五处规则改动
 
-#### C.2 剩余 12 条：**用机制层证明覆盖**（本轮核心）
+**① `_WORD_NODES` 补三个节点**（`shell_parse.py`）
 
-**关键论点**：这 12 条的**文本层漏判，被 OS 写边界兜住**。
-`--ro-bind / /` + 只有 workspace 可写 → `rm -rf $HOME`、`rm -rf ~`、`rm -rf /var/log`、
-`rm -rf ./..` 在沙箱内**全部 EROFS 失败**。
+```python
+_WORD_NODES = ("word", "number", "concatenation", "simple_expansion", "expansion")
+```
 
-**证明方式**：在 CI（装了 bubblewrap 的真内核）加一条**真实子进程**用例 ——
-把这 12 条命令逐条在 `enforce` 档沙箱内执行，断言**没有一条写进了工作区外**。
-这就是"双墙缺一不可"在本仓库的**可机检形式**。
+Shell **确实**会把这些当词传下去（`$HOME` 展开后就是一个词）。补上它们，规则才看得见。
+**实测：`cat ~/.ssh/id_$USER` 的 `arguments` 从 `()` 变成 `('~/.ssh/id_$USER',)`。**
 
-#### C.3 文档写明结构性边界
+**② 新增"不可审计"展开**（`bash_redlines.py`）
 
-在 `redline_corpus.py` 的 `known_miss` 段与 `features.md` 写明（引 Codex 的表述）：
-**变量展开 / 命令替换 / 重定向 / 通配符 / 控制流会使规则无法逐条匹配 —— 这是文本判定的
-结构性边界，不是规则写得不够多；兜底是审批 + OS 写/读边界，由 C.2 的用例钉住。**
+```python
+_UNRESOLVED = "\x00unresolved\x00"          # 哨兵：判据读不到 env，不给 fall-open 留口
 
-#### C.3 "询问"已经是现状 —— 真问题是"要不要硬拒"
+def _expand(word: str) -> str:
+    """``~`` / ``$VAR`` / ``${VAR}`` → 具体路径；解不开的展开 → 哨兵。"""
+```
 
-**实测契约**（`permission_gate._decide`）：bash 命令只有在 redline 命中时才 **DENY**
-（[:425-431](file:///workspace/ai-coding/ai_coding/security/permission_gate.py#L425-L431)）；
-未命中时落到 **WARN**（[:499-504](file:///workspace/ai-coding/ai_coding/security/permission_gate.py#L499-L504)、
-[:524-527](file:///workspace/ai-coding/ai_coding/security/permission_gate.py#L524-L527)），
-也就是**询问**（AutoApprove 下自动放行）。
+* 能解开：`~`、`$HOME`/`${HOME}`、`$PWD`/`${PWD}`、`$USER`/`${USER}`；
+* 解不开（`$UNSET`、`$(...)`、反引号）→ 哨兵。
 
-所以：
+**③ `rm -rf` 的受保护目标**（`bash_redlines.py`）
 
-* `known_miss` 的**当下后果** = 询问（或自动放行）**+ OS 写边界兜住**，**不是"静默放行"**。
-* **"要不要加询问兜底"是个伪命题** —— 询问已经在。真问题是**要不要硬拒**。
-* 硬拒这 12 条需要展开变量 / 波浪号，文本层做不到。Codex 的 "disable splitting"
-  表述正是这件事的权威声明；它的 `untrusted` 档能做到"全部询问"，是因为它整条命令走
-  exec-policy，而不是在"规则未命中"这个**残余**上加询问。
+`_is_root_target` 从"精确匹配"升级为 `_is_protected_target`：
 
-> **明确不做**：把 12 条硬拒掉。那需要 redline 层知道 workspace 或执行 shell 展开，
-> 两条都会引入大量新 FP（`rm -rf $DIR` 是正常用法）。
+| 形状 | 判据 | 覆盖 |
+|---|---|---|
+| 根 / 顶层系统目录 | **前缀**匹配 `_SYSTEM_ROOTS`（`/var/log` 命中 `/var`） | `rm -rf /var/log` |
+| 操作者的家 | 精确等于 `Path.home()` | `rm -rf ~`、`rm -rf $HOME`、`rm -rf ${HOME}` |
+| 别人的家 | `/home/<name>`（深度 3） | `rm -rf /home/user` |
+| 路径含 `..` | 任一组件是 `..` | `rm -rf ./..` |
+| 解不开的展开 | 哨兵 | `D=/data; rm -rf $D` |
+
+> **`/home` 从"前缀集"里排除**，只走深度 3 那条 —— 否则 `rm -rf /home/<user>/proj/build`
+> 会被误拒（`/home` 常是工作区所在）。**这是原型里 `SAFE` 误报 0 条的关键。**
+
+**④ 包装器剥值**（`bash_redlines.py::_programs`）
+
+`env -i sudo ls` / `timeout 5 sudo ls` 现在断在 `-i` / `5` 上。改成
+**跳过包装器自己的 flag 及其取值**：
+
+```python
+_WRAPPER_VALUE_FIRST = frozenset({"timeout", "nice", "ionice", "stdbuf", "watch"})
+_WRAPPER_VALUE_FLAGS = {
+    "env": frozenset({"-u", "-C", "-S"}),
+    "nice": frozenset({"-n"}),
+    "ionice": frozenset({"-c", "-n", "-p"}),
+    "stdbuf": frozenset({"-i", "-o", "-e"}),
+    "timeout": frozenset({"-s", "-k"}),
+}
+```
+
+同时把 `doas` 加进提权规则（`_runs(view, "sudo") or _runs(view, "doas")`）—— `doas` 已在
+`_WRAPPERS` 里，只是规则没查它。
+
+**⑤ `--force-with-lease`**（`bash_redlines.py::_git_push_is_forced`）
+
+`--force` / `-f` 之外补 `--force-with-lease`（它就是 force push，只是更安全的写法）。
+
+#### C.2 唯一一条不改判的：`rm -rf $PWD` → 转 `SAFE`
+
+`$PWD` 展开成 cwd = 工作区。`rm -rf $PWD` ≡ `rm -rf .`，而 `rm -rf .`
+**今天就是放行的**（`_is_root_target(".")` 为假）。所以它不是"漏判"，是**语料标错了**。
+
+**实测**：33 条真实工作命令里 `rm -rf $DIR` 被拒（`$DIR` 解不开 → 不可审计），
+而 `rm -rf $PWD` 放行 —— 与 `rm -rf .` 一致。
+
+> **这是"全量修"里唯一的行为变更，必须写明**：`rm -rf $<解不开的变量>` 现在会被拒
+> （理由：命令文本没说清要删什么，不可审计）。操作者的对策是写**字面路径**
+> （`rm -rf build`），那一直是放行的。**这是刻意的取舍，不是回归。**
+
+#### C.3 语料重冻
+
+* 15 条 `known_miss` → `dangerous`（verdict 填新理由）；
+* `rm -rf $PWD` → `SAFE`；
+* `MIN_KNOWN_MISS` 16 → 0，`MIN_DANGEROUS` 20 → 35（ floors 只设下限，自动满足）；
+* `redline_benchmark.py` 的 `known_miss` 计数**从判定输出计算**，自动归零 —— 不需要改脚本。
+
+#### C.4 兜底仍可机检（保留）
+
+即使 16 条全修，**OS 写/读边界仍是兜底**（文本层总会有新写法）。C.2 的证明方式不变：
+在 CI 真沙箱内把这 16 条逐条跑一遍，断言**没有一条写进工作区外 / 读到凭据**。
+
+#### C.5 为什么这不是"加正则"
+
+GuardFall 说文本过滤结构性失败 —— **对**。但本轮做的不是"加更多正则去猜展开后的值"，
+而是：**让语法层别再丢掉带展开的词**（C.1①，根因），再把"解不开"这件事本身
+**当成拒绝的理由**（C.1②③）。判据从"猜值"变成"承认猜不到"，这是方向上的不同。
 
 ### D. 代理 CIDR + 裸 IP 语义
 
@@ -430,10 +492,11 @@ def test_wrap_returns_none_when_the_mechanism_is_absent():
 | `scripts/verify_snapshot_stderr.py` | **新**：以非 root 真子进程复现并验证（同 `verify_real_eacces.py` 模式） | N-1 Prove |
 | `tests/test_m4_security.py` | rg 守卫 + 正向断言 | N-6 |
 | `tests/integration/test_r17_parity.py` | rg 守卫 + 钉住 rg 分支 | N-6 |
-| `ai_coding/security/bash_redlines.py` | `doas` 包装器、带值包装器剥离、`--force-with-lease` | known_miss E/F |
-| `ai_coding/security/redline_corpus.py` | 4 条 `known_miss` → `dangerous`；`MIN_KNOWN_MISS` 16→12 | known_miss |
-| `scripts/redline_benchmark.py` | 计数随语料自动更新（无需改） | known_miss |
-| `tests/test_process_sandbox.py` | **新**：12 条结构性缺口在 `enforce` 沙箱内全部写不出去 | known_miss C.2 |
+| `ai_coding/shell_parse.py` | `_WORD_NODES` 补 `concatenation`/`simple_expansion`/`expansion` | C.1① |
+| `ai_coding/security/bash_redlines.py` | `_expand` + `_UNRESOLVED` 哨兵；`_is_protected_target`；`_programs` 剥值；`doas`；`--force-with-lease` | C.1②③④⑤ |
+| `ai_coding/security/redline_corpus.py` | 15 条 `known_miss` → `dangerous`；`rm -rf $PWD` → `SAFE`；`MIN_KNOWN_MISS` → 0 | C.3 |
+| `scripts/redline_benchmark.py` | 计数随语料自动更新（无需改） | C.3 |
+| `tests/test_process_sandbox.py` | **新**：16 条在 `enforce` 沙箱内全部写不出去 / 读不到凭据 | C.4 |
 | `ai_coding/server/sandbox_proxy.py` | `_cidr_allowed` + 解析后查 CIDR | CIDR |
 | `ai_coding/config/models.py` | malformed CIDR 启动即拒 | CIDR |
 | `ai_coding/security/sandbox.py` | `LiveRoots` | E |
@@ -457,10 +520,14 @@ def test_wrap_returns_none_when_the_mechanism_is_absent():
 | U1 | `capture` 收到 `(0, "warning: ...\n<sha>")` | **不得**把污染串当 sha 去 `update-ref`（monkeypatch `snapshots.git`） |
 | U2 | rg 缺席 + `use_rg=True` | `test_grep_include_dotenv_still_filters_credentials` **skip**，不再静默通过 |
 | U3 | rg 缺席 + parity | `test_both_runners_answer_the_same_question` **skip** |
-| U4 | `doas rm x` | 判为危险 |
-| U5 | `env -i sudo ls` / `timeout 5 sudo ls` | 判为危险 |
-| U6 | `git push --force-with-lease origin main` | 判为危险 |
-| U7 | 12 条结构性缺口在 `enforce` 沙箱内执行 | **没有一条**写进工作区外 |
+| U4 | `x="rm -rf /"; $x`、`D=/data; rm -rf $D`、`x=1; $x rm -rf /` | 判为危险（不可审计） |
+| U5 | `rm -rf ${HOME}`、`rm -rf $HOME`、`rm -rf ~`、`rm -rf ~/`、`rm -rf /home/user`、`rm -rf /var/log`、`rm -rf ./..` | 判为危险（受保护目标） |
+| U6 | `doas rm x`、`env -i sudo ls`、`timeout 5 sudo ls` | 判为危险（提权） |
+| U7 | `git push --force-with-lease origin main` | 判为危险（force push） |
+| U7b | `cat ~/.ssh/id_$USER` | 判为危险（凭据） |
+| U7c | `rm -rf $PWD` | **放行**（≡ `rm -rf .`），语料转 `SAFE` |
+| U7d | `rm -rf ./build`、`rm -rf /tmp/build`、`rm -rf build`、`echo "rm -rf /"`、`# rm -rf /` | **仍放行**（`SAFE` 零回归） |
+| U7e | 16 条在 `enforce` 沙箱内执行 | **没有一条**写进工作区外 / 读到凭据 |
 | U8 | `allow=['8.8.8.0/24']` + 请求 `8.8.8.8:443` | **放行**（现在是被拒） |
 | U9 | `allow=['10.0.0.0/8']` | **拒绝**（私网不变） |
 | U10 | `allow=['8.8.8.0/33']` | **启动即报错**（不是静默全拒） |
@@ -489,8 +556,8 @@ def test_wrap_returns_none_when_the_mechanism_is_absent():
 * **N-1**：改前复现脚本 `capture → None`；改后返回 `refs/ai-coding/undo/<key>`，且 `update-ref` 的
   目标**是** 40 位 hex。`_SHA_RE` 拒绝污染串。
 * **N-6**：`PATH=/tmp/norg` 下两条**跳过**（不是通过）；有 rg 时**通过**且断言 `success is True` / `_rg is not None`。
-* **known_miss**：基准 `known_miss` 计数 **16 → 12**；`dangerous` 63 → 67；FN=0 / FP=0 硬阈值不变；
-  **12 条在 CI 真沙箱内全部写不出去**。
+* **known_miss**：基准 `known_miss` 计数 **16 → 0**；`dangerous` 63 → 78；`SAFE` 26 → 27；
+  FN=0 / FP=0 硬阈值不变；**16 条在 CI 真沙箱内全部写不出去 / 读不到凭据**（U7e）。
 * **CIDR**：`8.8.8.0/24` 放行、`10.0.0.0/8` 拒绝、malformed 启动即拒；域名匹配**无回归**
   （`evil-example.com` / `example.com.evil.com` 仍拒）。
 * **E**：grant 后 bash 与文件工具**写面一致**（U12 不变量）；`ruff`/`mypy` 0。
@@ -505,11 +572,13 @@ def test_wrap_returns_none_when_the_mechanism_is_absent():
 ## 七、不做的事
 
 * **不改 `git()` 的默认合并语义** —— 会动 `WorktreeManager` 的 6 个调用点，且合并是有意的。
-* **不给"规则未命中"加统一询问兜底** —— 会把所有正常命令变成询问（见 §C.3）。
-* **不修 C/D 类 `known_miss`**（`rm -rf ./..`、`rm -rf /home/user`、`rm -rf /var/log`）——
-  redline 层不知道 workspace，硬修必引入新 FP；**由 OS 写边界兜住**（U7 证明）。
+* **不给"规则未命中"加统一询问兜底** —— bash 未命中本来就是 WARN（询问），加不出新东西。
+* **不猜展开后的值** —— `_expand` 只解 `~`/`$HOME`/`$PWD`/`$USER`，其余一律当"不可审计"。
+  猜值（跑 shell、查 env 全表）会引入不可辩护的 FP，且判据不再纯函数。
+* **不改 `_grammar_reads` 的短路语义** —— 修好 `_WORD_NODES` 后，语法层已经看得见这些词，
+  不需要动"文本回退什么时候接管"这条契约（它会波及全部 unparseable 用例）。
+* **`rm -rf $PWD` 保持放行** —— ≡ `rm -rf .`，今天就是放行的；改判它会是行为回归。
 * **不加 seccomp UDP 过滤** —— `--unshare-net` 已阻断 UDP（§2.4 实测）；再加一层是重复造轮子。
-* **不做 IP/CIDR 的出网"绕过"叙事** —— 残余表那条写错了，本轮是**改文档**，不是加机制。
 * **不改 `Sandbox` 的路径层语义** —— 它已经是对的（§2.5）。
 
 ---
