@@ -6,7 +6,7 @@ from ai_coding.ai.engine import ChatEngine
 from ai_coding.config.models import AppConfig
 from ai_coding.domain.model_config import ModelConfig
 
-__all__ = ["build_engine_from_config"]
+__all__ = ["build_engine", "build_engine_from_config"]
 
 
 def _resolve_chain(models: dict[str, ModelConfig], start: str) -> list[str]:
@@ -37,6 +37,34 @@ def _resolve_chain(models: dict[str, ModelConfig], start: str) -> list[str]:
     return order
 
 
+def build_engine(
+    models: dict[str, ModelConfig], start: str, *, stream_usage: bool = True
+) -> ChatEngine:
+    """The engine for one model key, with its own ``fallback_models`` chain.
+
+    Split out of :func:`build_engine_from_config` because ``/model`` has to
+    build an engine *after* the world exists (H3).  Swapping only
+    ``model_config`` would leave the client pointing at the old endpoint with
+    the old key, and would ignore the target model's own chain.
+
+    Raises:
+        ValueError: ``start`` is not in ``models``, or the declared chain names
+            an unknown model or loops back on itself.  Never touches the
+            network.
+    """
+    order = _resolve_chain(models, start)
+
+    from ai_coding.ai.fallback_engine import FallbackEngine
+    from ai_coding.ai.openai_engine import OpenAIChatEngine
+
+    engines = [
+        OpenAIChatEngine(models[key], stream_usage=stream_usage) for key in order
+    ]
+    if len(engines) == 1:
+        return engines[0]
+    return FallbackEngine(engines)
+
+
 def build_engine_from_config(app_config: AppConfig) -> ChatEngine:
     """Resolve ``default_model`` into a step-wise ``ChatEngine``.
 
@@ -53,13 +81,5 @@ def build_engine_from_config(app_config: AppConfig) -> ChatEngine:
     if not default:
         raise ValueError("no default model configured")
 
-    order = _resolve_chain(app_config.models, default)
-
-    from ai_coding.ai.fallback_engine import FallbackEngine
-    from ai_coding.ai.openai_engine import OpenAIChatEngine
-
     stream_usage = bool(getattr(app_config.ai, "stream_usage", True))
-    engines = [OpenAIChatEngine(app_config.models[key], stream_usage=stream_usage) for key in order]
-    if len(engines) == 1:
-        return engines[0]
-    return FallbackEngine(engines)
+    return build_engine(app_config.models, default, stream_usage=stream_usage)
