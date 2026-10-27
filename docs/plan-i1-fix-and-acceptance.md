@@ -108,6 +108,52 @@
 - **只做**：提示层要求 + `verify` 必须是真 shell 命令（复用 `acceptance.verify_command_problem`，`acceptance.py:276`）。
 - **验收（可机检的那一半）**："产出的 verify 非 shell → 拒绝"；**不断言"必须产出"**（模型不产出时门本就不参与，不可机检）。
 
+### R-6（P1-9）压缩：**只做收缩阶梯补全，不做后台预计算**（分叉 1 选 C 已确认）
+
+调研结论（两个独立评审员一致）：**完整预计算不值得做**。
+
+1. **招牌收益不迁移**：opencode 的预计算价值是"复用 prompt cache"（其摘要请求把 prompt 追加到主 `request.messages`，命中前缀缓存）。我们的摘要请求是**另一套 system prompt + 把 history 拍平成文本**（`ai/llm_helpers.py:70-78/297-303`），与主请求前缀不重合 → provider 的 prefix cache 命不中。
+2. **竞品自己默认关**：opencode `initial: () => ({precompute: false})` 且 `PRECOMPUTE_MIN_TOKENS = 64_000`；我们默认窗口 48k（`config/models.py:832`）→ ceiling 32k，**永远到不了门槛**。
+3. **成本实、收益虚**：过 85% 后**每回合**一次后台 LLM 调用（秒级、付费），复用率却受 tail 超限约束，可能大量付费很少复用。
+4. 真正的阻塞是"一次摘要调用"，而它**每会话只发生几次**（ceiling 触发 + 溢出救援上限 2 次/回合，`agent_loop.py:196`），不是高频痛点。
+
+**只做（零风险）**：`_SHRINK_STEPS = (0.85, 0.7, 0.5, 0.35)`（`ai/llm_helpers.py:44`）——首枪更温和、溢出时少丢内容。
+- **测试不用改**：`tests/test_summary_shrink.py:205` 是 `1 + len(_SHRINK_STEPS)` 的动态断言，自动从 4 变 5。
+- **文档同步**：`llm_helpers.py:39-44` 注释、`docs/r15-summary-shrink.md` 的"四级/4 次"。
+- **不做**：不引入后台 task、不改 `_run_l4` 复用分支、不动 `_turn_lock`/`aclose`。
+- **若将来真要做预计算**：先在 `events.py:254-278` 的 `CompactionEnded` 加一个"reused"标记，用 trace 的 `CompactionStarted→Ended` 时间差（`trace.py:691` 每事件带 `ts`）先量出复用率，再决定。**先测量，后实现。**
+
+### R-7（P1-5）收敛：两步走（分叉 1 选 C 已确认）
+
+**第一步（L3 兜底，~40-60 行，风险最低）**：把"连续只读 16 次"也变成强制收尾。
+
+| 文件 | 改动 |
+|---|---|
+| `config/models.py` `AIConfig` | 加 `search_streak_l3: int = 16`（`ge=0`） |
+| `core/turn_policy.py` | `TurnPolicyConfig.search_streak_l3` + `from_ai_config` + 传给 `LadderLimits` |
+| `core/interventions.py:88-106` | `LadderLimits.search_streak_l3: int = 0`（**默认 0 → 既有 24 条 search 单测全绿**） |
+| `core/interventions.py:247-279` | `_search_due`：`search_streak >= search_streak_l3` → `(L3, "finish")` |
+| `core/interventions.py:384-396` | `_build` 加 SEARCH finish 分支 |
+| `core/interventions.py:109-118` | `InterventionDecision` 加 `note: str = ""` |
+| `core/turn_policy.py:431-454/500-510` | `_finish_at`/`_as_turn_decision` **透传 `intervention/level/note`**（顺带修一个既有缺陷：FINISH 路径丢元数据导致事件不发射，`agent_loop.py:2115-2119`） |
+| `core/agent_loop.py:939` | 收尾条件从"只有 `_ITERATION_BUDGET`"扩到"或 search unconverged"，复用现成的 `_ask_for_closing`（`tools=[]` 是**结构性**约束，比再发一条提示可靠） |
+| `domain/turn_digest.py:299-300` | `search unconverged` → 标签"检索未收敛（强制收尾）" |
+
+**第二步（"无新发现"语义，~90-120 行）**：`TurnBooks` 里做**归一化证据指纹**。
+
+- **比较什么**：`(工具名, 证据单元集合)` 的哈希——**不是**原始输出哈希（`docs/plan-m-b.md:52-65` 已用 6 条实测反例否决：grep/glob 的 `(no matches)` 会跨工具碰撞、glob 按 mtime 排序、grep 裁 300 字符、空文件 `read` 都是 `""`）。
+- **证据单元**：`read` → 整段 output 哈希（空则 `empty@<path>`）；`grep` → 每个命中取 **`path:line`**（丢掉截断文本；空则 `nomatch@<root>`）；`glob` → **排序后**的路径集合哈希；`webfetch`/`job_output`/`job_list` 同理；`memory_search`/`history_search`/`websearch` 最小版设**中性**（既不 novel 也不 stale）。
+- **状态**：证据集合与 `stale_streak` 在 `TurnBooks`（**回合级、不持久化**）；阶梯档位仍在 `session.intervention_state`（会话级、持久化，沿用现有语义）。
+- **重置**：成功 ACTION（`write/edit/bash/mcp_call/subAgent`）→ 清零并**清空** `seen`（世界可能已变）；用户插话 → 同；失败调用 → 不动。
+- **触发**：`stale>=3` → L1；`>=4` → L2；**`stale>=6 且 repeated_nonempty>=2` → L3**。
+- **关键性质**：`DuplicateCallGuard`（同参数最多成功 2 次）**不会**让 stale 到不了阈值——stale 统计的是"不同 params 产生相同证据"（同文件换关键词、同文件不同 offset 返回同一段）。
+- **上限**：`seen_findings` 上限 4096，**溢出时清空而非淘汰**（最多一次 false negative，不会 false positive）。
+- **可观测**：复用 `SearchStalled`（`events.py:519-533`）加 5 个**带默认值**的字段（`stale_streak`/`novel`/`repeated`/`unconverged`/`reason`），不破坏旧 trace 读取。
+
+**兼容性**：采用"增量叠加 + `search_streak_l3` 默认 0"**不改任何既有断言**。要动的只有：`test_search_never_ends_the_turn` 的 docstring（契约从"永不收尾"变成"无正证据不收尾"）；两个 loop 用例**补** L3 事件/提前 FINISH 的断言（现有断言仍成立）。
+
+**真机验收**：`eval_comparison.py` 的 T2 原题（找真实运行时缺陷）。目标：`tool_calls` 63 → **≤16**；`seconds` 900 → **<300**；`answer` 非空；trace 里 `SearchStalled.level==3` 且 `unconverged=true`、`TurnFinished.reason="search unconverged"`。
+
 ---
 
 ## §4 真机验收设计（v2：命令全部实测可跑）
@@ -163,8 +209,14 @@
 | `test_switching_updates_the_context_window` | 切到小窗口模型 → `_max_context_tokens` 与 `_max_result_bytes` 都变小 |
 | （选 B）`test_a_non_shell_verify_is_refused` | `verify: "glob '**/*'"` → 拒绝 |
 | （选 B）`test_an_absent_contract_changes_nothing` | 无契约时回合行为与从前一致（回归） |
+| `test_the_shrink_ladder_starts_at_eighty_five` | `_SHRINK_STEPS[0] == 0.85`；溢出重试调用数 == `1 + len(_SHRINK_STEPS)` |
+| `test_a_turn_of_only_looks_ends_itself` | 脚本引擎连续返回只读结果 → 在 ≤ `search_streak_l3` 次内出现 L3，`last_outcome.reason == "search unconverged"`，`closing` 非空 |
+| `test_search_l3_is_off_by_default` | `LadderLimits()` 的 `search_streak_l3 == 0` → 既有 search 单测行为不变 |
+| `test_the_finish_path_carries_the_intervention` | L3 FINISH 时 `decision.intervention/level/note` 透传，事件被发射（修既有缺陷） |
+| `test_repeated_evidence_is_stale_different_files_are_novel` | 同文件两次 grep 同 key → stale+1；不同文件 → 归零；`grep`/`glob` 的空结果不碰撞 |
+| `test_an_action_effort_clears_the_evidence` | `write`/`bash` 成功后 `stale_streak` 与 `seen_findings` 清空 |
 
-**变异**：quota 改回 `FATAL` / 去掉"首次即切"分支（→ 重试 4 次）/ 去掉 QUOTA 分支 / `active_model` 退回读 `app_cfg.default_model` / 窗口 setter 删掉 `_max_result_bytes` 重算——每条都必须被打红。
+**变异**：quota 改回 `FATAL` / 去掉"首次即切"分支（→ 重试 4 次）/ 去掉 QUOTA 分支 / `active_model` 退回读 `app_cfg.default_model` / 窗口 setter 删掉 `_max_result_bytes` 重算 / `_SHRINK_STEPS` 去掉 0.85 / `search_streak_l3` 默认改成非 0 / `_finish_at` 不透传 `note` / 证据指纹改成整段 output 哈希 / ACTION 不清空 `seen`——每条都必须被打红。
 
 ---
 
@@ -184,3 +236,4 @@
 |---|---|
 | v1 | 首版：15 项复核 + 32 里程碑 + 6 项修复 + 6 阶段真机矩阵 + 4 个分叉 |
 | v2 | 评审修入：① **R-1 必须加"首次即切"分支**，否则复现 4 次空转；**`AUTH_ERROR` 本来就切**（v1 写反）；要改 `test_openai_engine.py:769/797`（+`:775`）并同步 `plan-m-b.md`。② R-2 的组合根是鸡生蛋（`world.py:216` 时 loop 未建）→ 用 holder；key 映射复用 `handlers.py:1118-1131`；`set_model` 存 `_current_model_key`。③ R-3 字段名是 `_max_context_tokens`，setter 要重算 `_max_result_bytes`；**不改 `config.default_model`**，`config.summary` 仍报配置窗口。④ R-5 接缝是 `session.acceptance` 不是 `turn_policy`；只提示层，不自动注入；"必须产出"不可机检 → 改成"非 shell verify 被拒"。⑤ R-4 写明新断言值（`NUDGE`/`"repeated tool failures"`）。⑥ 里程碑计数更正为 **28 达成 / 1 未采纳 / 3 未达成**；M-H1 记为"部分实现"。⑦ 真机命令全部实测：**`ai-coding` 不在 PATH**（用 `.venv/bin/ai-coding`）；**不带 `--path` 会整条丢弃项目层模型并可能 `MissingSecret`**；**`eval_fullstack_task.py` 不带 `--keep` 会 rmtree** → 换新目录；补 `network.mode=deny` 说明与绝对路径 |
+| v3 | 用户拍板：修复范围 **C**（含 P1-9 + P1-5）、沙箱 **A**、真机 **全量 6 阶段**、产物 **A**。补两节设计：**R-6（P1-9）调研结论是"完整预计算不值得做"**——招牌收益（复用 prompt cache）不迁移（摘要请求是另一套 system prompt + 拍平文本，`llm_helpers.py:70-78`），opencode 自己默认关且设 64k 门槛（我们默认 48k 窗口到不了），成本实收益虚；**只做收缩阶梯补全**（`_SHRINK_STEPS` 加 0.85，测试动态断言自动适配）。**R-7（P1-5）两步走**：第一步 L3 兜底（`search_streak_l3=16` + 强制收尾，`LadderLimits` 默认 0 保住 24 条既有单测）+ 顺带修"`_finish_at` 丢元数据导致事件不发射"；第二步 `TurnBooks` 归一化证据指纹（`grep` 取 `path:line`、`glob` 排序后哈希、空结果带 target、ACTION 清空、上限 4096 溢出即清空）。§6 补 6 条用例与 9 条变异 |
