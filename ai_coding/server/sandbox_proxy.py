@@ -148,11 +148,17 @@ def _host_allowed(host: str, port: int, allow: Sequence[str]) -> bool:
     second half: a bare domain allows only 80/443, a ``domain:port`` entry
     allows exactly that port (P2-1).  An empty allow-list denies everything, and
     ``"*"`` is treated as no entry -- a wildcard is not a wall.
+
+    Entries containing ``/`` are CIDR networks, not hostnames; they cannot
+    match a name and are left to :func:`_cidr_allowed`, which sees the
+    *resolved* address (§D.1).
     """
     candidate = _strip_port(host)
     if not candidate:
         return False
     for entry in allow:
+        if "/" in str(entry):
+            continue  # a CIDR entry is not a hostname
         allowed_host, ports = _parse_allow_entry(str(entry))
         if not allowed_host:
             continue
@@ -161,6 +167,23 @@ def _host_allowed(host: str, port: int, allow: Sequence[str]) -> bool:
         if port in ports:
             return True
     return False
+
+
+def _cidr_allowed(ip: str, allow: Sequence[str]) -> bool:
+    """CIDR entries judged against an **already resolved** address.
+
+    A hostname cannot be compared to a network, so this runs only after
+    :func:`_resolve_public_address` has pinned the sockaddr -- the same address
+    the connection will use (§D.1).
+    """
+    try:
+        addr = ipaddress.ip_address(ip.split("%", 1)[0])
+    except ValueError:
+        return False
+    return any(
+        "/" in str(entry) and addr in ipaddress.ip_network(str(entry), strict=False)
+        for entry in allow
+    )
 
 
 def _is_forbidden_ip(ip: str) -> bool:
@@ -365,9 +388,21 @@ def _send_error(conn: socket.socket, code: int, reason: str, detail: str) -> Non
         pass
 
 
-def _authorize(proxy: SandboxProxy, host: str, port: int) -> None:
-    if not _host_allowed(host, port, proxy.allow):
-        raise _Refused(f"domain:port not in allow-list: {host}:{port}")
+def _authorize(proxy: SandboxProxy, host: str, port: int) -> Address:
+    """Authorize and resolve **once**: the CIDR check must see the same address
+    the connection will use, or a rebinding window opens between the two.
+
+    The two rules are a real OR: a hostname entry authorizes its own host, and
+    a CIDR entry authorizes the resolved address.  ``_host_allowed`` skips the
+    CIDR entries (they are not hostnames), so a CIDR-only allow-list is not
+    rejected by the name check (§D.1).
+    """
+    if _host_allowed(host, port, proxy.allow):
+        return proxy.resolve_target(host, port)
+    address = proxy.resolve_target(host, port)
+    if not _cidr_allowed(str(address[3][0]), proxy.allow):
+        raise _Refused(f"host/address not in allow-list: {host}:{port}")
+    return address
 
 
 def _body_length(headers: list[tuple[str, str]], max_bytes: int) -> int:
@@ -500,8 +535,8 @@ def _serve_connection(conn: socket.socket, proxy: SandboxProxy) -> None:
 
         if method.upper() == "CONNECT":
             host, port = _parse_connect_target(target)
-            _authorize(proxy, host, port)
-            upstream = _connect(proxy.resolve_target(host, port), proxy.connect_timeout)
+            address = _authorize(proxy, host, port)
+            upstream = _connect(address, proxy.connect_timeout)
             conn.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             buffered = reader.take_buffer()
             if buffered:
@@ -513,9 +548,9 @@ def _serve_connection(conn: socket.socket, proxy: SandboxProxy) -> None:
             return
 
         host, port, path = _parse_http_target(target, headers)
-        _authorize(proxy, host, port)
+        address = _authorize(proxy, host, port)
         content_length = _body_length(headers, proxy.max_body_bytes)
-        upstream = _connect(proxy.resolve_target(host, port), proxy.connect_timeout)
+        upstream = _connect(address, proxy.connect_timeout)
         try:
             upstream.settimeout(proxy.connect_timeout)
             _forward_http(
@@ -570,12 +605,25 @@ class SandboxProxy:
         max_body_bytes: int = 10 * 1024 * 1024,
         max_connections: int = 256,
     ) -> None:
-        self._socket_path = Path(socket_path).expanduser().resolve()
-        self._allow = tuple(
+        allow_entries = [
             str(entry).strip().lower().rstrip(".")
             for entry in allow
             if str(entry).strip()
-        )
+        ]
+        # A hand-built instance must not be able to carry a malformed CIDR
+        # silently: it would parse as a hostname and deny everything, with no
+        # explanation (§D.2).  Validated here because tests build the proxy
+        # directly, bypassing the config layer.
+        for entry in allow_entries:
+            if "/" in entry:
+                try:
+                    ipaddress.ip_network(entry, strict=False)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"malformed CIDR in network.allow: {entry!r}"
+                    ) from exc
+        self._socket_path = Path(socket_path).expanduser().resolve()
+        self._allow = tuple(allow_entries)
         self.connect_timeout = connect_timeout
         self.resolve_target: ResolveTarget = resolve_target or _resolve_public_address
         self.max_request_line = max_request_line

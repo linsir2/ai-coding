@@ -148,6 +148,8 @@ def build_tool_registry(
     sandbox_policy: Any = None,
     sandbox_backend: Any = None,
     sandbox_roots: Any = (),
+    gate: Any = None,
+    sandbox: Any = None,
 ) -> Any:
     """Build the *domain* tool registry used by the self-owned loop (R1a-4).
 
@@ -161,6 +163,10 @@ def build_tool_registry(
     M-D1: the process sandbox's policy/mechanism/roots arrive here so that
     ``BashTool`` shares the composition root's backend instance with
     ``JobRegistry``.  ``None``/empty leaves the behaviour exactly as before.
+
+    E.2: ``gate``/``sandbox`` may be passed in by the composition root (world.py)
+    so the job table and the tool stack share one gate and one live-roots source;
+    when they are not, this builds its own, exactly as before.
     """
     registry, _gate = _assemble_registry(
         app_cfg,
@@ -175,6 +181,8 @@ def build_tool_registry(
         sandbox_policy=sandbox_policy,
         sandbox_backend=sandbox_backend,
         sandbox_roots=sandbox_roots,
+        gate=gate,
+        sandbox=sandbox,
     )
     return registry
 
@@ -192,6 +200,8 @@ def _assemble_registry(
     sandbox_policy: Any = None,
     sandbox_backend: Any = None,
     sandbox_roots: Any = (),
+    gate: Any = None,
+    sandbox: Any = None,
 ) -> tuple[Any, Any]:
     """Create the sandbox/gate/registry triple shared by both builders."""
 
@@ -216,30 +226,38 @@ def _assemble_registry(
     # approval the operator gave has to reach the tool -- a sandbox holding its
     # own copy of the answer would make "always" a promise nothing keeps.
     tools_cfg = app_cfg.tools
-    gate = PermissionGate.from_config(app_cfg, workspace=workspace)
-    sandbox = Sandbox(
-        workspace,
-        extra_roots=expand_root_patterns(
-            getattr(tools_cfg, "extra_workspace_roots", ()),
-            base=Path(workspace).expanduser().resolve(),
-        ),
-        grantor=gate,
-    )
+    if gate is None:
+        gate = PermissionGate.from_config(app_cfg, workspace=workspace)
+    if sandbox is None:
+        if sandbox_roots:
+            # A sub-agent stack (``build_subagent_runner`` passes the child's
+            # worktree): its writable face is that worktree plus its own grants,
+            # **never** the parent's configured extra roots (builder.py:351-353
+            # says they are deliberately not passed down).
+            sandbox = Sandbox(workspace, extra_roots=(), grantor=gate)
+        else:
+            sandbox = Sandbox(
+                workspace,
+                extra_roots=expand_root_patterns(
+                    getattr(tools_cfg, "extra_workspace_roots", ()),
+                    base=Path(workspace).expanduser().resolve(),
+                ),
+                grantor=gate,
+            )
     fst = FileStateTracker()
     plan_root = sandbox.workspace / PLAN_DIR
     registry = ToolRegistry()
 
     if tools_cfg.bash.enabled:
-        # M-D1: the process layer's writable face is the path layer's -- the
-        # same roots, so a directory the file tools may write is a directory a
-        # bash command may write, and never one or the other.
-        roots = tuple(sandbox_roots) if sandbox_roots else sandbox.roots
+        # E.1/E.2: the process layer's writable face is the path layer's, read
+        # **live** -- the same roots, so a directory the file tools may write is
+        # a directory a bash command may write, and never one or the other.
         registry.register(
             BashTool(
                 timeout_seconds=tools_cfg.bash.timeout_seconds,
                 policy=sandbox_policy,
                 backend=sandbox_backend,
-                roots=roots,
+                roots=sandbox.live_roots,
             )
         )
     if tools_cfg.read.enabled:

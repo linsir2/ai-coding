@@ -23,6 +23,14 @@ captured the same way, and the golden comparison in the benchmark is the other
 half of the same proof.
 
 This module reads no clock and no file; the frozen values are the point.
+
+**Re-frozen after §C.** The snapshot predates the known_miss fix, so the 14
+commands whose verdict §C changed (a word carrying an expansion is no longer
+dropped, wrappers are peeled past their values, ``doas`` and
+``--force-with-lease`` are recognised, and an unresolvable program name is
+refused) were updated to the new answers.  The other rows are untouched: the
+snapshot still proves the merge is behaviour-preserving everywhere §C did not
+intend a change.
 """
 
 from __future__ import annotations
@@ -53,7 +61,9 @@ LEGACY_BASH_DENIED: dict[str, str] = {
     'cat ~/.aws/credentials &&': 'credential file (.aws)',
     'cat ~/.gnupg/secring.gpg': 'credential file (.gnupg)',
     'cat ~/.ssh/config': 'credential file (.ssh)',
-    'cat ~/.ssh/id_$USER': '',
+    # §C: the word carrying the expansion is no longer dropped, so the
+    # credential directory component is seen.
+    'cat ~/.ssh/id_$USER': 'credential file (.ssh)',
     'cat ~/.ssh/id_rsa': 'credential file (id_rsa)',
     'chmod  777  /tmp/x': 'world-writable permissions (chmod 777 /tmp/x)',
     'chmod +rwx /tmp/x': 'world-writable permissions (chmod +rwx /tmp/x)',
@@ -75,7 +85,7 @@ LEGACY_BASH_DENIED: dict[str, str] = {
     'dd if=/dev/zero of=/dev/sda': 'disk write (dd if=/dev/zero of=/dev/sda)',
     'dd if=/dev/zero of=/tmp/out.bin': '',
     'dd of=/dev/sda if=/dev/zero': 'disk write (dd of=/dev/sda if=/dev/zero)',
-    'doas rm x': '',
+    'doas rm x': 'sudo escalation (doas rm x)',
     'echo "chmod 777 /tmp/x': "world-writable permissions ('chmod 777')",
     'echo "rm -rf /': "recursive root deletion ('rm -rf /')",
     'echo "rm -rf /"': '',
@@ -89,7 +99,7 @@ LEGACY_BASH_DENIED: dict[str, str] = {
     'echo x > /dev/sda': 'raw disk write (echo x)',
     'echo x > /dev/sda &&': "raw disk write ('> /dev/sd')",
     'echo x >/dev/sda': 'raw disk write (echo x)',
-    'env -i sudo ls': '',
+    'env -i sudo ls': 'sudo escalation (env -i sudo ls)',
     'env sudo ls': 'sudo escalation (env sudo ls)',
     'exec sudo ls': 'sudo escalation (exec sudo ls)',
     "find . -name '*.py'": '',
@@ -97,7 +107,9 @@ LEGACY_BASH_DENIED: dict[str, str] = {
     'git push --force': 'force git push (git push --force)',
     'git push --force origin main': 'force git push (git push --force origin main)',
     'git push --force origin main &&': "force git push ('git push --force')",
-    'git push --force-with-lease origin main': '',
+    'git push --force-with-lease origin main': (
+        'force git push (git push --force-with-lease origin main)'
+    ),
     'git push -f': 'force git push (git push -f)',
     'git push -f origin': 'force git push (git push -f origin)',
     'git push origin main': '',
@@ -129,10 +141,10 @@ LEGACY_BASH_DENIED: dict[str, str] = {
     'rm -fr /': 'recursive root deletion (rm -fr /)',
     'rm -r -f /': 'recursive root deletion (rm -r -f /)',
     'rm -rf "$(echo /)"': 'recursive root deletion (rm -rf)',
-    'rm -rf $HOME': '',
+    'rm -rf $HOME': 'recursive root deletion (rm -rf $HOME)',
     'rm -rf $PWD': '',
-    'rm -rf ${HOME}': '',
-    'rm -rf ./..': '',
+    'rm -rf ${HOME}': 'recursive root deletion (rm -rf ${HOME})',
+    'rm -rf ./..': 'recursive root deletion (rm -rf ./..)',
     'rm -rf ./build': '',
     'rm -rf /': 'recursive root deletion (rm -rf /)',
     'rm -rf / "unterminated': 'recursive root deletion (rm -rf /)',
@@ -142,15 +154,15 @@ LEGACY_BASH_DENIED: dict[str, str] = {
     'rm -rf /bin': 'recursive root deletion (rm -rf /bin)',
     'rm -rf /boot': 'recursive root deletion (rm -rf /boot)',
     'rm -rf /etc': 'recursive root deletion (rm -rf /etc)',
-    'rm -rf /home/user': '',
+    'rm -rf /home/user': 'recursive root deletion (rm -rf /home/user)',
     'rm -rf /lib': 'recursive root deletion (rm -rf /lib)',
     'rm -rf /opt': 'recursive root deletion (rm -rf /opt)',
     'rm -rf /root': 'recursive root deletion (rm -rf /root)',
     'rm -rf /tmp/build': '',
     'rm -rf /usr': 'recursive root deletion (rm -rf /usr)',
-    'rm -rf /var/log': '',
-    'rm -rf ~': '',
-    'rm -rf ~/': '',
+    'rm -rf /var/log': 'recursive root deletion (rm -rf /var/log)',
+    'rm -rf ~': 'recursive root deletion (rm -rf ~)',
+    'rm -rf ~/': 'recursive root deletion (rm -rf ~/)',
     'sed -n 1,5p README.md': '',
     'sh -c "rm -rf /': "recursive root deletion ('rm -rf /')",
     'shutdown now': 'system shutdown (shutdown now)',
@@ -163,9 +175,9 @@ LEGACY_BASH_DENIED: dict[str, str] = {
     'sudo rm x': 'sudo escalation (sudo rm x)',
     'sudo su -': 'sudo escalation (sudo su -)',
     'time sudo ls': 'sudo escalation (time sudo ls)',
-    'timeout 5 sudo ls': '',
-    'x="rm -rf /"; $x': '',
+    'timeout 5 sudo ls': 'sudo escalation (timeout 5 sudo ls)',
+    'x="rm -rf /"; $x': 'unauditable command ($x)',
     'x=$(rm -rf /)': 'recursive root deletion (rm -rf /)',
-    'x=1; $x rm -rf /': '',
+    'x=1; $x rm -rf /': 'unauditable command ($x rm -rf /)',
     'x=1; rm -rf /': 'recursive root deletion (rm -rf /)',
 }

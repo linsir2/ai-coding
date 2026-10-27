@@ -18,7 +18,6 @@ import pytest
 from ai_coding.security.bash_redlines import bash_red_line_with_fallback as judge
 from ai_coding.shell_parse import command_views
 
-
 # --- C.1①  the grammar must not drop a word that carries an expansion --------
 
 @pytest.mark.parametrize(
@@ -36,6 +35,23 @@ def test_a_word_with_an_expansion_is_not_dropped(command, expected):
     assert views[0].arguments == expected, (
         f"{command!r}: the expansion-carrying word was dropped"
     )
+
+
+# --- C.1③  path normalisation + quote handling ------------------------------
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf /home/../etc",
+        "rm -rf /home//user",
+        "rm -rf /home/./user",
+        # A concatenation node keeps its quotes in the view, so `_expand` has to
+        # strip them -- `/etc/x` is protected whatever the environment.
+        'rm -rf "/etc"/x',
+    ],
+)
+def test_the_path_is_normalised_and_the_quotes_are_not_part_of_it(command):
+    assert judge(command), f"{command!r}: normpath + quote handling"
 
 
 # --- C.1③  protected targets, judged after expansion ------------------------

@@ -627,3 +627,37 @@ def test_authorize_resolves_once(monkeypatch):
     address = _authorize(_Proxy(), "8.8.8.8", 443)  # type: ignore[arg-type]
     assert address[3][0] == "8.8.8.8"
     assert calls == ["8.8.8.8"], f"expected exactly one resolution, got {calls}"
+
+
+def test_a_request_resolves_the_target_exactly_once(tmp_path, upstream_port):
+    """The CIDR check and the connection must see the **same** pinned address.
+
+    Two lookups would open a rebinding window between the check and the
+    connect, so the whole request path -- not just ``_authorize`` -- has to
+    resolve once.
+    """
+    instance = SandboxProxy(
+        tmp_path / "proxy.sock",
+        allow=[f"allowed.test:{upstream_port}"],
+        resolve_target=_resolver,
+    ).start()
+    calls: list[str] = []
+    original = instance.resolve_target
+
+    def counting(host, port):  # noqa: ANN001, ANN201
+        calls.append(host)
+        return original(host, port)
+
+    instance.resolve_target = counting  # type: ignore[method-assign]
+    try:
+        response = _raw(
+            instance.socket_path,
+            (
+                f"GET http://allowed.test:{upstream_port}/ HTTP/1.1\r\n"
+                "Host: allowed.test\r\n\r\n"
+            ).encode(),
+        )
+    finally:
+        instance.close()
+    assert b"200" in response.split(b"\r\n", 1)[0], response[:120]
+    assert calls == ["allowed.test"], f"expected one resolution, got {calls}"

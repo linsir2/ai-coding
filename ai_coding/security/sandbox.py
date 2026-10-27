@@ -67,6 +67,25 @@ class Sandbox:
         """Every root that resolves without a question, workspace first."""
         return (self.workspace, *self.extra_roots)
 
+    def live_roots(self) -> tuple[Path, ...]:
+        """The writable roots **right now**: the static ones plus whatever the
+        grantor currently authorizes **for writing**.
+
+        ``Sandbox.resolve`` already asks the grantor before refusing, so the
+        path layer's answer is live.  The process layer must be live too -- a
+        snapshot is exactly how a directory the file tools may write becomes one
+        a bash command may not (``builder.py`` claims the two never diverge).
+
+        The grantor's protocol only declares ``path_allowed``, so
+        ``authorized_roots`` is read defensively: a grantor without it (a bare
+        REPL, a test double) contributes nothing, and the static roots stand.
+        """
+        roots = list(self.roots)
+        grantor = getattr(self._grantor, "authorized_roots", None)
+        if grantor is not None:
+            roots.extend(grantor())
+        return tuple(dict.fromkeys(roots))  # de-duplicate, keep order
+
     def _contained_in(self, resolved: Path) -> Path | None:
         for root in self.roots:
             try:

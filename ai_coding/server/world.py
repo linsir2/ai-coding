@@ -181,16 +181,27 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     # handed to both the job table and the tool stack, so a bash command and a
     # background job share one backend instance and one writable face.
     sandbox_policy, sandbox_backend = build_process_sandbox(app_cfg, workspace)
-    sandbox_roots = (
-        Path(workspace).expanduser().resolve(),
-        *(Path(root) for root in _extra_roots(app_cfg, workspace)),
+    # E.2: the gate and the sandbox are built **before** the job table so both
+    # can hold the same *live* roots -- ``JobRegistry`` takes
+    # ``Sandbox.live_roots`` (a callable) and the tool stack gets the same
+    # object.  A static tuple here would snapshot the writable face and break
+    # the invariant ``builder.py`` claims (a directory the file tools may write
+    # is one a bash command may write, and never one or the other).
+    from ai_coding.security.permission_gate import PermissionGate
+    from ai_coding.security.sandbox import Sandbox
+
+    gate = PermissionGate.from_config(app_cfg, workspace=workspace)
+    sandbox = Sandbox(
+        workspace,
+        extra_roots=_extra_roots(app_cfg, workspace),
+        grantor=gate,
     )
     jobs = JobRegistry(
         root=Path(workspace) / ".ai-coding" / "jobs",
         notices=notices,
         policy=sandbox_policy,
         backend=sandbox_backend,
-        roots=sandbox_roots,
+        roots=sandbox.live_roots,
     )
     registry = _build_tool_registry(
         app_cfg, workspace, skill_registry,
@@ -200,7 +211,8 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         agents=agents,
         sandbox_policy=sandbox_policy,
         sandbox_backend=sandbox_backend,
-        sandbox_roots=sandbox_roots,
+        gate=gate,
+        sandbox=sandbox,
     )
 
     # Per-workspace state lives under the workspace, beside the traces

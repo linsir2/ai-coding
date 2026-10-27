@@ -14,7 +14,7 @@ import enum
 import os
 import re
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -143,6 +143,15 @@ _PATH_TOOLS = frozenset({"write", "edit", "read"})
 #: "always" on one pattern does not re-ask for its siblings -- and it cannot open
 #: anything above that directory.
 _DIR_TOOLS = frozenset({"glob", "grep"})
+
+#: The tools whose grant may open a path *for reading*: the file tools plus the
+#: two directory tools.  This is the set ``path_allowed`` walks.
+_READ_GRANT_TOOLS = _PATH_TOOLS | _DIR_TOOLS
+
+#: The tools whose grant may open a path *for writing*.  Only these become
+#: writable bind mounts: a read or glob/grep grant must not turn into a write
+#: capability, which would be a read approval becoming a write permission.
+_WRITE_GRANT_TOOLS = frozenset({"write", "edit"})
 
 
 def _directory_of(pattern: str) -> str:
@@ -835,19 +844,59 @@ class PermissionGate:
             resolved = Path(path).expanduser().resolve()
         except OSError:
             return False
+        for _key, root in self._iter_granted_roots(_READ_GRANT_TOOLS):
+            try:
+                resolved.relative_to(root)
+            except ValueError:
+                continue
+            return True
+        return False
+
+    def _iter_granted_roots(
+        self, tools: frozenset[str]
+    ) -> Iterator[tuple[str, Path]]:
+        """Yield ``(key, resolved_root)`` for the grants whose tool is in ``tools``.
+
+        One key parser, shared by :meth:`path_allowed` (which asks "is this
+        path contained in a granted one?") and :meth:`authorized_roots` (which
+        asks "what may be written?"): the two read the same stored grants and
+        must not drift apart on how a key's path is resolved.  The posture
+        suffix is stripped by ``_grant_base``; a relative path is resolved
+        against the workspace, the way ``grant_key`` wrote it.
+        """
         for key in (*self.grants, *self._once_grants):
             tool_name, _, granted = key.partition(":")
-            if tool_name not in _PATH_TOOLS and tool_name not in _DIR_TOOLS:
+            if tool_name not in tools:
                 continue
             root = Path(_grant_base(granted)).expanduser()
             if not root.is_absolute():
                 root = Path(self._workspace) / root
             try:
-                resolved.relative_to(Path(os.path.normpath(str(root.resolve()))))
-            except (ValueError, OSError):
+                yield key, Path(os.path.normpath(str(root.resolve())))
+            except OSError:
                 continue
-            return True
-        return False
+
+    def authorized_roots(self) -> tuple[Path, ...]:
+        """Directories and files the operator approved for **writing**.
+
+        Only ``write``/``edit`` grants: a read or glob/grep grant must not
+        become a writable bind mount -- that would be a read approval turning
+        into a write capability.  Files are kept because ``_build`` binds a root
+        as-is (``--bind src dst`` works for a file too), which is exactly the
+        file-level grant the path layer gives the write tools.
+
+        ``exists()`` is judged at **run time**, not at grant time: the process
+        layer re-wraps on every bash call, so a directory that does not exist
+        yet is simply skipped now and picked up when it appears.  Caching would
+        freeze the answer at grant time and permanently exclude it.
+        """
+        if not self._workspace:
+            return ()
+        roots: list[Path] = []
+        for _key, root in self._iter_granted_roots(_WRITE_GRANT_TOOLS):
+            if root.exists():  # bwrap fails on a nonexistent bind source
+                roots.append(root)
+        return tuple(dict.fromkeys(roots))
 
     def trust_server(self, name: str) -> None:
         """Trust a server's tools from now on (M5, the wizard's last step).

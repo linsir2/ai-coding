@@ -144,10 +144,11 @@ class TestCommandViews:
 
     def test_a_command_inside_a_substitution_is_its_own_view(self):
         views = shell_parse.command_views("cat $(rm -rf /)")
-        # The substitution is not an argument word -- it is a command of its
-        # own, and the rules read it as one.
+        # The substitution is an argument word *and* a command of its own:
+        # ``cat`` receives its output as a filename, so the word is not dropped
+        # (§C.1①), and the ``rm`` view is what the red lines judge.
         assert [(v.program, v.arguments) for v in views] == [
-            ("cat", ()),
+            ("cat", ("$(rm -rf /)",)),
             ("rm", ("-rf", "/")),
         ]
 

@@ -19,6 +19,7 @@ async def git(
     *args: str,
     stdin_data: str | None = None,
     timeout: float = DEFAULT_GIT_TIMEOUT,
+    merge_stderr: bool = True,
 ) -> tuple[int, str]:
     """Run one git command in ``root``; returns ``(returncode, stdout+stderr)``.
 
@@ -27,6 +28,12 @@ async def git(
     baseline.  Raises ``OSError``/``TimeoutError`` only when git cannot be
     started or overran; a git *failure* is the caller's to interpret (probing
     callers rely on ``rev-parse`` returning non-zero).
+
+    ``merge_stderr=False`` for the callers that parse this stream as a value:
+    git may put a *non-fatal* warning on stderr (an unreadable
+    ``.git/info/exclude``, measured) and the caller would otherwise parse the
+    warning as the value.  The default keeps the merged shape every existing
+    caller was written against.
     """
     outcome = await run_process_async(
         ("git", *args), cwd=str(root), timeout=timeout, stdin_data=stdin_data
@@ -35,7 +42,8 @@ async def git(
         raise OSError(outcome.error)
     if outcome.timed_out:
         raise TimeoutError(f"git {args[0] if args else 'git'} timed out after {timeout:g}s")
-    return outcome.returncode or 0, (outcome.stdout + outcome.stderr).strip()
+    stream = (outcome.stdout + outcome.stderr) if merge_stderr else outcome.stdout
+    return outcome.returncode or 0, stream.strip()
 
 
 __all__ = ["DEFAULT_GIT_TIMEOUT", "git"]

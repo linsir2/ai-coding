@@ -84,7 +84,7 @@ import struct
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
@@ -378,7 +378,7 @@ def spawn_argv(
     command: str,
     policy: ProcessSandboxPolicy | None,
     backend: SandboxBackend | None,
-    roots: Sequence[Path],
+    roots: Iterable[Path],
     *,
     emit: Callable[[str], None] | None = None,
 ) -> list[str]:
@@ -422,7 +422,10 @@ def spawn_argv(
     network_report = _network_report(backend)
     if network_report is not None and emit is not None:
         emit(network_report)
-    wrapped = backend.wrap(argv, roots)
+    # Materialise the iterable once: the live roots source may be a generator
+    # (``Sandbox.live_roots`` returns a tuple, but the contract is an iterable),
+    # and ``wrap`` reads it exactly once.
+    wrapped = backend.wrap(argv, list(roots))
     if wrapped is None:
         if policy.mode == "enforce":
             raise SandboxGap(SANDBOX_WRAP_GAP)
@@ -866,8 +869,12 @@ class BwrapBackend:
     def wrap(self, argv: Sequence[str], roots: Sequence[Path]) -> list[str] | None:
         if self._cache is None:
             self._probe()
-        tier = self._tier if self._tier != "none" else "full"
-        return self._build(argv, roots, tier)
+        if self._tier == "none":
+            # The contract is ``None`` = nothing to wrap.  Falling back to
+            # "full" here is a fail-open: a caller that bypassed ``available()``
+            # would get an argv that looks isolated but cannot run.
+            return None
+        return self._build(argv, roots, self._tier)
 
     def _build(self, argv: Sequence[str], roots: Sequence[Path], tier: str) -> list[str]:
         flags = _TIER_FLAGS.get(tier)

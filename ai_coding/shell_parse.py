@@ -79,7 +79,21 @@ def command_shape(view: CommandView) -> str:
 #: in the list because ``777`` is what makes ``chmod`` a red line, and the
 #: grammar keeps it in a node of its own.  A quoted string contributes its
 #: *content*: the quotes are the shell's, not the word's.
-_WORD_NODES = ("word", "number")
+#:
+#: A word that *carries* an expansion is still a word -- the shell expands it
+#: and passes the result on -- so ``concatenation`` (``~/.ssh/id_$USER``),
+#: ``simple_expansion`` (``$HOME``), ``expansion`` (``${HOME}``) and
+#: ``command_substitution`` (``$(pwd)``) are in the list too.  They used to be
+#: dropped, which made ``rm -rf $HOME`` and ``cat ~/.ssh/id_$USER`` invisible to
+#: the rules *and* to the text fallback behind them: a double blindness.
+_WORD_NODES = (
+    "word",
+    "number",
+    "concatenation",
+    "simple_expansion",
+    "expansion",
+    "command_substitution",
+)
 _STRING_NODES = ("string", "raw_string")
 
 #: A path starts at the root or at the home.  Anything else is relative,
@@ -124,14 +138,23 @@ def _text(node: Any) -> str:
 def _string_content(node: Any) -> str:
     """The content a quoted string contributes, without its quote marks.
 
-    Only ordinary ``string``/``raw_string`` nodes are handled (``$'..'``,
-    adjacent-string concatenation and other expansions stay out of scope).
+    Expansion children are included: ``"$HOME"`` is one word that expands to
+    the home directory, and dropping it would drop the argument entirely
+    (``rm -rf "$HOME"`` used to read as ``rm -rf ""``).
+
+    Only ordinary ``string``/``raw_string`` nodes are handled; ``$'..'`` and
+    adjacent-string concatenation stay out of scope.  A ``raw_string`` keeps
+    its literal text (quotes stripped) -- the shell does not expand inside it,
+    and the red line layer reads what the shell would pass on.
     """
     raw = _text(node)
     if node.type == "raw_string":
         return raw[1:-1] if len(raw) >= 2 and raw[0] == raw[-1] == "'" else raw
     return "".join(
-        _text(part) for part in node.children if part.type == "string_content"
+        _text(part)
+        for part in node.children
+        if part.type
+        in ("string_content", "simple_expansion", "expansion", "concatenation")
     )
 
 

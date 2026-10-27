@@ -29,6 +29,9 @@ from ai_coding.core.gitcmd import git
 #: slot a session keeps).  Session ids are uuid hex; turns are decimal.
 _KEY = re.compile(r"^[A-Za-z0-9_-]+/(?:[0-9]+|redo)$")
 
+#: A git object id: 40 hex for SHA-1, 64 for SHA-256 repositories.
+_SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
+
 
 @dataclass(frozen=True)
 class RestoreReport:
@@ -69,7 +72,11 @@ class SnapshotStore:
     async def _is_repo(self) -> bool:
         try:
             code, _ = await git(
-                self._root, "rev-parse", "--is-inside-work-tree", timeout=self._timeout
+                self._root,
+                "rev-parse",
+                "--is-inside-work-tree",
+                timeout=self._timeout,
+                merge_stderr=False,
             )
         except (OSError, TimeoutError):
             return False
@@ -84,14 +91,29 @@ class SnapshotStore:
         """Snapshot the working tree; returns the ref, or None outside a repo."""
         if not await self._is_repo():
             return None
-        code, out = await git(self._root, "stash", "create", timeout=self._timeout)
+        code, out = await git(
+            self._root, "stash", "create", timeout=self._timeout, merge_stderr=False
+        )
         sha = out.strip() if code == 0 else ""
-        if not sha:  # a clean tree's pre-turn state *is* HEAD
-            code, sha = await git(self._root, "rev-parse", "HEAD", timeout=self._timeout)
-            if code != 0 or not sha:
+        if not _SHA_RE.match(sha):
+            # A non-fatal warning rode the stream (measured: an unreadable
+            # .git/info/exclude).  git prints the sha as a bare hex token, so
+            # pick that token out rather than parse the warning as the value.
+            sha = next((token for token in out.split() if _SHA_RE.match(token)), "")
+        if not _SHA_RE.match(sha):  # a clean tree's pre-turn state *is* HEAD
+            code, sha = await git(
+                self._root, "rev-parse", "HEAD", timeout=self._timeout,
+                merge_stderr=False,
+            )
+            if code != 0 or not _SHA_RE.match(sha):
                 return None
         ref = self._ref(key)
-        if (await git(self._root, "update-ref", ref, sha, timeout=self._timeout))[0] != 0:
+        if (
+            await git(
+                self._root, "update-ref", ref, sha,
+                timeout=self._timeout, merge_stderr=False,
+            )
+        )[0] != 0:
             return None
         return ref
 
@@ -104,6 +126,7 @@ class SnapshotStore:
                 "--quiet",
                 self._ref(key),
                 timeout=self._timeout,
+                merge_stderr=False,
             )
         except (OSError, TimeoutError):
             return False
@@ -131,7 +154,10 @@ class SnapshotStore:
         ``restore-failed`` reason instead (M-A3 review P1).
         """
         ref = self._ref(key)
-        code, out = await git(self._root, "diff", "--name-only", ref, timeout=self._timeout)
+        code, out = await git(
+            self._root, "diff", "--name-only", ref, timeout=self._timeout,
+            merge_stderr=False,
+        )
         if code != 0:
             raise OSError(f"git diff {ref} failed")
         paths = {line.strip() for line in out.splitlines() if line.strip()}
@@ -140,10 +166,14 @@ class SnapshotStore:
         saved: dict[str, bytes] = {}
         for rel in sorted(paths):
             target = self._root / rel
-            code, _ = await git(self._root, "cat-file", "-e", f"{ref}:{rel}", timeout=self._timeout)
+            code, _ = await git(
+                self._root, "cat-file", "-e", f"{ref}:{rel}", timeout=self._timeout,
+                merge_stderr=False,
+            )
             if code == 0:
                 code, _ = await git(
-                    self._root, "checkout", ref, "--", rel, timeout=self._timeout
+                    self._root, "checkout", ref, "--", rel, timeout=self._timeout,
+                    merge_stderr=False,
                 )
                 if code != 0:
                     failed.append(rel)
@@ -172,7 +202,10 @@ class SnapshotStore:
 
     async def forget(self, key: str) -> None:
         """Drop one snapshot -- the redo slot -- without touching anything else."""
-        await git(self._root, "update-ref", "-d", self._ref(key), timeout=self._timeout)
+        await git(
+            self._root, "update-ref", "-d", self._ref(key), timeout=self._timeout,
+            merge_stderr=False,
+        )
 
     async def prune(self, session_id: str) -> None:
         """Keep only the newest ``keep`` refs of one session."""
@@ -182,6 +215,7 @@ class SnapshotStore:
             "--format=%(refname)",
             f"{self._base}/{session_id}/",
             timeout=self._timeout,
+            merge_stderr=False,
         )
         if code != 0:
             return
@@ -194,7 +228,10 @@ class SnapshotStore:
         ]
         turn_refs.sort(key=lambda ref: int(ref.rsplit("/", 1)[-1]))
         for ref in turn_refs[: max(0, len(turn_refs) - self._keep)]:
-            await git(self._root, "update-ref", "-d", ref, timeout=self._timeout)
+            await git(
+                self._root, "update-ref", "-d", ref, timeout=self._timeout,
+                merge_stderr=False,
+            )
 
 
 def _remove(target: Path) -> bool:

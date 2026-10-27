@@ -12,9 +12,10 @@ Two things are pinned here, and they are not the same thing:
   ``bash_denied`` answered, on the corpus *and* on the existing test set.
 
 The ``known_miss`` class is the point of the whole exercise: ``x="rm -rf /"; $x``
-is a real hole (the grammar reads it, no rule matches, and ``_grammar_reads``
-short-circuits the text fallback).  It is not fixed here -- it is made
-**visible**, so a later fix shows up as the count dropping to zero.
+used to be a real hole (the grammar read it, no rule matched, and
+``_grammar_reads`` short-circuited the text fallback).  §C closed all 16 of
+those rows, so the class is now empty and the counter is the assertion: a
+regression that reopens one shows up as the count rising from zero.
 """
 
 from __future__ import annotations
@@ -179,20 +180,26 @@ def test_the_gate_no_longer_owns_a_copy_of_the_rules() -> None:
 
 
 def test_known_miss_is_surfaced(capsys) -> None:
-    """``x="rm -rf /"; $x`` is counted and printed, every run.
+    """The ``known_miss`` count is printed, and §C drove it to zero.
 
-    The gap is that the grammar reads the command, no rule matches, and
-    ``_grammar_reads`` short-circuits the text fallback -- so the substring
-    table that *would* refuse it is never consulted.  Fixing it later has to
-    show up as this number dropping, which is only possible if it is printed.
+    It used to be that ``x="rm -rf /"; $x`` was counted and printed, every
+    run, because the grammar read the command and no rule matched.  §C closed
+    all 16 rows, so the section is gone and the *counter* is the assertion:
+    a regression that reopens a hole has to show up as the number rising from
+    zero, not as a section quietly disappearing.
     """
+    import re
+
     from scripts import redline_benchmark
 
     assert redline_benchmark.main([]) == 0
     out = capsys.readouterr().out
 
-    assert 'x="rm -rf /"; $x' in out
-    assert "known_miss" in out
+    match = re.search(r"known_miss（仍漏报，按判定输出）\s*\|\s*(\d+)", out)
+    assert match is not None, "the known_miss counter must stay in the report"
+    assert int(match.group(1)) == 0, (
+        "§C closed every known_miss row; a nonzero count is a reopened hole"
+    )
     assert "known_fp" in out
     assert "| FN" in out
     assert "| FP" in out

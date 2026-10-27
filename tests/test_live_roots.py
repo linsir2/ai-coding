@@ -46,15 +46,36 @@ def test_a_read_grant_does_not_become_a_write(tmp_path):
     """A read approval must not turn into a writable bind mount."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    outside = tmp_path / "outside"
+    base = tmp_path / "base"
+    base.mkdir()
+    outside = base / "outside"
     outside.mkdir()
 
     gate = _gate(workspace)
     sandbox = Sandbox(workspace, grantor=gate)
+    # `read` is granted by *directory* (grant_key takes the dirname), so this
+    # grants `base` -- and `base` must stay read-only for bash.
     gate.grant("read", {"path": str(outside)})
 
-    assert outside.resolve() not in sandbox.live_roots(), (
+    assert base.resolve() not in sandbox.live_roots(), (
         "a read grant became a writable root"
+    )
+
+
+@pytest.mark.parametrize("tool", ["glob", "grep"])
+def test_a_directory_read_grant_does_not_become_a_write(tmp_path, tool):
+    """glob/grep grants name a tree; that tree must not become writable."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    base = tmp_path / "base"
+    base.mkdir()
+
+    gate = _gate(workspace)
+    sandbox = Sandbox(workspace, grantor=gate)
+    gate.grant(tool, {"path": str(base)})
+
+    assert base.resolve() not in sandbox.live_roots(), (
+        f"a {tool} grant became a writable root"
     )
 
 

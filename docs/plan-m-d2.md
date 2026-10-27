@@ -696,7 +696,7 @@ host == allow_entry  or  host.endswith("." + allow_entry)
 | **glob 是构造期快照** | 运行期新增的密钥文件不会被重新遮蔽 | 写进文档 |
 | **代理单点 / DNS rebinding** | 域名白名单对**解析后的 IP** 无控制；`evil.com` 可解析到 metadata/内网 | 代理**解析后**再拒私网/loopback/link-local/metadata 段（§C.6） |
 | **代理同进程** | 代理与持有 API key 的 ai-coding 同进程；逻辑绕过 = 白名单失效 | 本轮**不降权**；解析 hardening + 残余风险 |
-| **IP/CIDR/UDP 绕过** | 域名白名单对裸 IP/UDP 无效（调研 F12/F13） | 本轮**不修** |
+| **IP/CIDR/UDP 绕过** | 实测（§D.4 修正）：**裸 IP 一直可用**（`1.2.3.4` 条目可授权）；**UDP 已被 `--unshare-net` 阻断**（新 netns 只有 `lo`，UDP `sendto` → `ENETREACH`）。**真缺口是 CIDR** —— `8.8.8.0/24` 曾被当作主机名，静默永不匹配 | **本轮修**：代理按**已解析地址**匹配 CIDR（§D.1），只 resolve 一次；malformed CIDR 在 config 与 hand-built 两处构造即报错（§D.2） |
 | **abstract AF_UNIX 不被遮蔽覆盖** | abstract socket 无路径，只能靠 seccomp 档（默认关） | 写进文档 |
 | **AF_UNIX 路径级控制基本等于没有** | `--ro-bind / /` 已 bind 整个宿主根；无 seccomp 档时"允许清单"是空洞的 | **诚实记录** |
 | **seccomp user-notification 路径中介** | nono 的修法，复杂度高一个量级 | 本轮**不做** |

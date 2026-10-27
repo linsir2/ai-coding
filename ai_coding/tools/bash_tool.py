@@ -14,7 +14,7 @@ import asyncio
 import itertools
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,7 @@ from ai_coding.security.process_sandbox import (
     SandboxGap,
     spawn_argv,
 )
+from ai_coding.security.sandbox import Sandbox
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 _DEFAULT_TIMEOUT = 60
@@ -118,7 +119,7 @@ class BashTool(BaseTool):
         *,
         policy: ProcessSandboxPolicy | None = None,
         backend: SandboxBackend | None = None,
-        roots: Sequence[Path] = (),
+        roots: Sequence[Path] | Sandbox | Callable[[], Sequence[Path]] = (),
     ) -> None:
         self._max_timeout = max(1, int(max_timeout_seconds))
         # The default can never exceed the ceiling: two yardsticks for one
@@ -132,7 +133,22 @@ class BashTool(BaseTool):
         # wrapping would mean two layers of bwrap).
         self._policy = policy
         self._backend = backend
-        self._roots = tuple(Path(root) for root in roots)
+        # E.1: the writable roots are a **live** source (a Sandbox, or a
+        # callable such as ``Sandbox.live_roots``), read on every call -- a
+        # snapshot would let a directory the file tools may write become one a
+        # bash command may not.  ``_roots`` stays as the snapshot view for
+        # assertions and debugging (tests read it directly).
+        self._roots_source = roots
+        self._roots = self._snapshot_roots()
+
+    def _snapshot_roots(self) -> tuple[Path, ...]:
+        """The writable roots as they are **now**, from the live source."""
+        source = self._roots_source
+        if isinstance(source, Sandbox):
+            return source.live_roots()
+        if callable(source):
+            return tuple(source())
+        return tuple(Path(root) for root in source)
 
     @property
     def name(self) -> str:
@@ -437,7 +453,7 @@ class BashTool(BaseTool):
                 command,
                 self._policy,
                 self._backend,
-                self._roots,
+                self._snapshot_roots(),
                 emit=lambda reason: emit_degraded(live.emit, "process_sandbox", reason),
             )
         except SandboxGap as exc:

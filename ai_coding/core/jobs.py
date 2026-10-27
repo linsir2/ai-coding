@@ -236,7 +236,7 @@ class JobRegistry:
         notices: Any | None = None,
         policy: ProcessSandboxPolicy | None = None,
         backend: SandboxBackend | None = None,
-        roots: Sequence[Path] = (),
+        roots: Sequence[Path] | Callable[[], Sequence[Path]] = (),
     ) -> None:
         self._root = Path(root)
         self._notices = notices
@@ -246,7 +246,10 @@ class JobRegistry:
         # mechanism exists.
         self._policy = policy
         self._backend = backend
-        self._roots = tuple(Path(root_path) for root_path in roots)
+        # E.2: the writable roots may be a **live** source (``Sandbox.live_roots``
+        # or any callable), read at ``start`` time -- a snapshot would let a
+        # directory the file tools may write become one a background job may not.
+        self._roots = roots if callable(roots) else tuple(Path(p) for p in roots)
         self._jobs: dict[str, Job] = {}
         # Reentrant on purpose: _publish holds it across a snapshot *and* the
         # emit scan so one event is one atomic view of the table, and snapshot()
@@ -290,8 +293,9 @@ class JobRegistry:
             else None
         )
         try:
+            roots = self._roots() if callable(self._roots) else self._roots
             argv = spawn_argv(
-                _bounded(command), self._policy, self._backend, self._roots, emit=degraded
+                _bounded(command), self._policy, self._backend, roots, emit=degraded
             )
         except SandboxGap as exc:
             job = Job(

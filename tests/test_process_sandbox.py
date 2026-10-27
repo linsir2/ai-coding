@@ -566,9 +566,14 @@ def test_bypass_skips_the_mechanism(tmp_path):
 
 
 def test_wrap_puts_the_writable_bind_after_the_readonly_root(tmp_path):
-    """Order matters: a bind before ``--ro-bind / /`` is covered by it."""
+    """Order matters: a bind before ``--ro-bind / /`` is covered by it.
+
+    Asserted on ``_build(..., "full")``: this is a shape claim, and a shape
+    must not need the kernel (``wrap()`` returns ``None`` when the probe found
+    no tier, which is exactly the contract F.1 pins).
+    """
     backend = BwrapBackend(writable_paths=())
-    argv = backend.wrap(["/bin/true"], [tmp_path])
+    argv = backend._build(["/bin/true"], [tmp_path], "full")
     readonly = argv.index("--ro-bind")
     writable = argv.index("--bind")
     assert writable > readonly, argv
@@ -586,32 +591,24 @@ def test_wrap_mounts_tmpfs_before_the_roots(tmp_path):
     first, and the bind overrides it.
     """
     backend = BwrapBackend(writable_paths=())
-    argv = backend.wrap(["/bin/true"], [tmp_path])
+    argv = backend._build(["/bin/true"], [tmp_path], "full")
     assert argv.index("--tmpfs") < argv.index("--bind"), argv
 
 
 def test_wrap_keeps_the_isolation_switches(tmp_path):
     """The switches a *selected* tier must carry, and the ``--proc`` invariant.
 
-    ``no-proc`` has no ``--unshare-pid``, so an unconditional assertion would
-    fail on every host whose ``--proc`` + ``--unshare-pid`` combination is
-    refused (this one).  The invariant A.1 pins is ``--proc`` iff
+    Asserted on the ``full`` construction directly: reading ``backend.tier``
+    would trigger the probe, and the probe is exactly what is unavailable on a
+    host without bwrap.  The invariant A.1 pins is ``--proc`` iff
     ``--unshare-pid``: a tier may keep ``/proc`` only together with its own pid
     namespace.
     """
     backend = BwrapBackend(writable_paths=())
-    argv = backend.wrap(["/bin/true"], [tmp_path])
+    argv = backend._build(["/bin/true"], [tmp_path], "full")
     for flag in ("--die-with-parent", "--new-session"):
         assert flag in argv, argv
     assert ("--proc" in argv) == ("--unshare-pid" in argv), argv
-    if backend.tier == "full":
-        assert "--unshare-pid" in argv, argv
-        assert "--proc" in argv, argv
-    else:
-        assert "--unshare-pid" not in argv, argv
-        assert "--proc" not in argv, argv
-        # /tmp and /proc are both tmpfs'd in this tier.
-        assert argv.count("--tmpfs") >= 2, argv
 
 
 def test_wrap_masks_after_the_tmpfs_and_the_binds(tmp_path):
@@ -627,7 +624,7 @@ def test_wrap_masks_after_the_tmpfs_and_the_binds(tmp_path):
         denied.mkdir()
         (denied / "secret.txt").write_text("S\n", encoding="utf-8")
         backend = BwrapBackend(writable_paths=[denied], read_deny_paths=[denied])
-        argv = backend.wrap(["/bin/true"], [tmp_path])
+        argv = backend._build(["/bin/true"], [tmp_path], "full")
         mask = argv.index(str(denied), argv.index("--bind"))
         assert mask > argv.index("--ro-bind"), argv
         assert mask > argv.index("--tmpfs"), argv
@@ -764,6 +761,7 @@ def test_a_sandboxed_process_cannot_read_the_repos_own_api_key(tmp_path, fake_ho
     assert "LIVE-KEY" not in outcome.stdout.decode("utf-8", errors="replace")
 
 
+@_NEEDS_BWRAP
 def test_the_read_boundary_hides_a_directory_and_a_file(tmp_path):
     """V6: a directory becomes empty, a file becomes unreadable."""
     base = Path(tempfile.mkdtemp(prefix="ai-coding-mask-", dir=str(Path.home())))
@@ -797,6 +795,7 @@ def test_the_read_boundary_hides_a_directory_and_a_file(tmp_path):
         shutil.rmtree(base, ignore_errors=True)
 
 
+@_NEEDS_BWRAP
 def test_a_writable_path_under_a_read_deny_is_still_unreadable(tmp_path):
     """V6b: deny wins -- the mask is applied after the writable bind."""
     base = Path(tempfile.mkdtemp(prefix="ai-coding-overlap-", dir=str(Path.home())))
@@ -896,7 +895,7 @@ def test_an_untraversable_deny_path_does_not_abort_the_wrap(tmp_path, monkeypatc
             writable_paths=(), read_deny_paths=[denied, reachable], af_unix_deny_paths=()
         )
         # The regression: this used to raise PermissionError out of wrap().
-        argv = backend.wrap(["/bin/true"], [tmp_path])
+        argv = backend._build(["/bin/true"], [tmp_path], "full")
 
         report = backend.mask_report
         assert denied in report.skipped, report
@@ -1366,14 +1365,14 @@ def _unset_names(argv: list[str]) -> set[str]:
 def test_the_deny_tier_cleans_inherited_proxy_env(tmp_path):
     """P2-5: the deny tier cleans the inherited proxy env, not just proxy."""
     backend = BwrapBackend(writable_paths=(), network=NetworkConfig(mode="deny"))
-    argv = backend.wrap(["/bin/true"], [tmp_path])
+    argv = backend._build(["/bin/true"], [tmp_path], "full")
     assert set(_PROXY_ENV_NAMES).issubset(_unset_names(argv)), argv
 
 
 def test_the_off_tier_cleans_inherited_proxy_env(tmp_path):
     """P2-5: all three network tiers clean the inherited proxy env uniformly."""
     backend = BwrapBackend(writable_paths=(), network=NetworkConfig(mode="off"))
-    argv = backend.wrap(["/bin/true"], [tmp_path])
+    argv = backend._build(["/bin/true"], [tmp_path], "full")
     assert set(_PROXY_ENV_NAMES).issubset(_unset_names(argv)), argv
 
 

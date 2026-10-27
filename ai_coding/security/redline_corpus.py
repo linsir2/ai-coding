@@ -76,7 +76,10 @@ class RedlineCase:
 MIN_DANGEROUS = 20
 MIN_UNPARSEABLE = 10
 MIN_SAFE = 20
-MIN_KNOWN_MISS = 5
+#: §C closed all 16 ``known_miss`` rows, so the floor is now zero.  The class
+#: stays (and the counter stays printed) so a regression that reopens one shows
+#: up as the number rising from zero rather than as a silently dropped section.
+MIN_KNOWN_MISS = 0
 
 
 #: Literal red lines, in every spelling the rules and the fallback agree on.
@@ -203,6 +206,28 @@ DANGEROUS: tuple[RedlineCase, ...] = (
         "rm -rf / && echo done", "dangerous", "recursive root deletion (rm -rf /)"
     ),
     RedlineCase('rm -rf "$(echo /)"', "dangerous", "recursive root deletion (rm -rf)"),
+    # --- §C: the 14 repaired known_miss rows, with their new verdicts frozen.
+    # The grammar used to drop a word that carried an expansion, so these were
+    # invisible to the rules; now the target is judged after expansion and the
+    # program name after peeling the wrappers.
+    RedlineCase('x="rm -rf /"; $x', "dangerous", "unauditable command ($x)"),
+    RedlineCase("rm -rf ${HOME}", "dangerous", "recursive root deletion (rm -rf ${HOME})"),
+    RedlineCase("rm -rf $HOME", "dangerous", "recursive root deletion (rm -rf $HOME)"),
+    RedlineCase("rm -rf ~", "dangerous", "recursive root deletion (rm -rf ~)"),
+    RedlineCase("rm -rf ~/", "dangerous", "recursive root deletion (rm -rf ~/)"),
+    RedlineCase("rm -rf /home/user", "dangerous", "recursive root deletion (rm -rf /home/user)"),
+    RedlineCase("rm -rf /var/log", "dangerous", "recursive root deletion (rm -rf /var/log)"),
+    RedlineCase("rm -rf ./..", "dangerous", "recursive root deletion (rm -rf ./..)"),
+    RedlineCase("cat ~/.ssh/id_$USER", "dangerous", "credential file (.ssh)"),
+    RedlineCase("x=1; $x rm -rf /", "dangerous", "unauditable command ($x rm -rf /)"),
+    RedlineCase("doas rm x", "dangerous", "sudo escalation (doas rm x)"),
+    RedlineCase("env -i sudo ls", "dangerous", "sudo escalation (env -i sudo ls)"),
+    RedlineCase("timeout 5 sudo ls", "dangerous", "sudo escalation (timeout 5 sudo ls)"),
+    RedlineCase(
+        "git push --force-with-lease origin main",
+        "dangerous",
+        "force git push (git push --force-with-lease origin main)",
+    ),
 )
 
 #: The grammar cannot read the line *and* a red line is in it: the conservative
@@ -286,37 +311,26 @@ SAFE: tuple[RedlineCase, ...] = (
     RedlineCase("git status", "safe", ""),
     # A redirection with no command in it: nothing runs, so nothing is refused.
     RedlineCase("> out.txt", "safe", ""),
+    # --- §C: two former known_miss rows that were never a hole.
+    # ``$PWD`` expands to the working directory, which is where the work is, not
+    # a protected target; ``$D`` cannot be resolved (``command_views`` does not
+    # return assignments, and ``D=/data`` is a separate command), so the line
+    # is asked about (WARN) rather than refused.  The OS write boundary owns
+    # the outside-workspace case.
+    RedlineCase("rm -rf $PWD", "safe", ""),
+    RedlineCase("D=/data; rm -rf $D", "safe", ""),
 )
 
 #: The grammar reads the line, no rule matches, and ``_grammar_reads`` then
 #: returns ``""`` without consulting the text fallback -- the substring table
 #: that *would* refuse these is never reached.  GuardFall's mechanism, in this
-#: repository's own shape.  Reported, never failed; fixing one moves its count
-#: to zero.
-KNOWN_MISS: tuple[RedlineCase, ...] = (
-    RedlineCase('x="rm -rf /"; $x', "known_miss", ""),
-    RedlineCase("D=/data; rm -rf $D", "known_miss", ""),
-    RedlineCase("rm -rf ${HOME}", "known_miss", ""),
-    RedlineCase("rm -rf $HOME", "known_miss", ""),
-    RedlineCase("rm -rf $PWD", "known_miss", ""),
-    RedlineCase("rm -rf ./..", "known_miss", ""),
-    RedlineCase("rm -rf ~", "known_miss", ""),
-    RedlineCase("rm -rf ~/", "known_miss", ""),
-    RedlineCase("rm -rf /home/user", "known_miss", ""),
-    RedlineCase("rm -rf /var/log", "known_miss", ""),
-    RedlineCase("cat ~/.ssh/id_$USER", "known_miss", ""),
-    RedlineCase("x=1; $x rm -rf /", "known_miss", ""),
-    # A wrapper the grammar peels only when the wrapper takes no value: ``env
-    # -i`` and ``timeout 5`` put a word in front of sudo, and the chain stops
-    # there.  ``doas`` is not in the wrapper table at all.
-    RedlineCase("doas rm x", "known_miss", ""),
-    RedlineCase("env -i sudo ls", "known_miss", ""),
-    RedlineCase("timeout 5 sudo ls", "known_miss", ""),
-    # The force flag spelled ``--force-with-lease`` is not ``--force``.
-    RedlineCase(
-        "git push --force-with-lease origin main", "known_miss", ""
-    ),
-)
+#: repository's own shape.
+#:
+#: §C closed all 16 rows (14 -> :data:`DANGEROUS`, 2 -> :data:`SAFE`), so this
+#: class is empty and its count is zero.  The class and the counter stay: a
+#: regression that reopens a hole shows up as the number rising from zero, not
+#: as a section quietly disappearing from the report.
+KNOWN_MISS: tuple[RedlineCase, ...] = ()
 
 #: Business-safe work the rules still refuse.  Reported, never failed.
 KNOWN_FP: tuple[RedlineCase, ...] = (

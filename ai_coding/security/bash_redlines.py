@@ -37,6 +37,8 @@ question, not a second opinion about it.
 
 from __future__ import annotations
 
+import os
+import posixpath
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -72,9 +74,37 @@ _WRAPPERS = frozenset(
     }
 )
 
+#: Wrappers whose *first* word after the name is always a value (``timeout 5
+#: sudo``), so the word is skipped whatever it looks like.
+_WRAPPER_VALUE_FIRST = frozenset({"timeout"})
+
+#: Wrappers that may carry a numeric first word (``nice 5 cmd`` / ``nice -n 5
+#: cmd``) but whose first word is the command when it is not a number
+#: (``nice cmd`` is legal).  The value is skipped only when it is a digit.
+_WRAPPER_NUMERIC_FIRST = frozenset({"nice"})
+
+#: Flags that take a value, per wrapper.  A value-taking flag pushes the cursor
+#: past its value, so ``-i`` in ``env -i sudo`` does not hide the ``sudo``.
+#: ``command``'s set is only ``-v``/``-V``: those look a name up and execute
+#: nothing, while ``-p`` means "use the default PATH" and the word after it
+#: *is* the command (§C.1④).
+_WRAPPER_VALUE_FLAGS = {
+    "env": frozenset({"-u", "-C", "-S"}),
+    "nice": frozenset({"-n"}),
+    "ionice": frozenset({"-c", "-n", "-p"}),
+    "stdbuf": frozenset({"-i", "-o", "-e"}),
+    "timeout": frozenset({"-s", "-k"}),
+    "command": frozenset({"-v", "-V"}),
+}
+
 #: The top-level directories that belong to the system rather than to the
 #: work.  A recursive delete aimed at one of them is a red line: the
 #: operator did not mean to empty ``/etc``.
+#:
+#: ``/home`` is in this set but *not* in :data:`_PREFIX_ROOTS`: a home
+#: directory is a prefix of ``/home/<name>`` and of a project tree under it
+#: (``/home/<name>/proj/build`` is ordinary work), so ``/home`` is judged by
+#: exact match and depth 3 instead of as a prefix (§C.1③).
 _SYSTEM_ROOTS = frozenset(
     {
         "/bin",
@@ -91,6 +121,23 @@ _SYSTEM_ROOTS = frozenset(
         "/var",
     }
 )
+
+#: The system roots matched by exact-or-prefix.  ``/home`` is excluded: a
+#: prefix match would refuse ``/home/<name>/proj/build``, which is ordinary
+#: work, and ``rm -rf /home`` is caught by the exact ``/home`` check below.
+_PREFIX_ROOTS = _SYSTEM_ROOTS - {"/home"}
+
+#: The values a ``~`` / ``$VAR`` expansion can be resolved to *without*
+#: running a shell.  Only these three names: guessing at the whole environment
+#: would turn the judge into a shell and make its verdict depend on a clock or
+#: a file (§七: "不猜展开后的值").  An unset name is ``""`` and is **not**
+#: expanded -- expanding ``$USER`` to the empty string would turn ``rm -rf
+#: $USER`` into ``rm -rf ""`` and then judge ``/``, a false positive.
+_EXPANSIONS = {
+    "HOME": str(Path.home()),
+    "PWD": os.getcwd(),
+    "USER": os.environ.get("USER", ""),
+}
 
 #: The block devices a write to is a red line.  ``/dev/zero`` and
 #: ``/dev/null`` are not among them: they are character devices, and
@@ -114,19 +161,109 @@ def _basename(program: str) -> str:
     return Path(program).name.lower()
 
 
+def _expand(word: str) -> str:
+    """``~`` / ``$VAR`` / ``${VAR}`` -> a concrete path; unresolvable -> ``""``.
+
+    Returning ``""`` (not a sentinel) is deliberate: a target that cannot be
+    resolved is **not** a protected target, so it does not trigger a red line
+    and falls through to the gate's WARN -- ask the operator.  That is the
+    same reading as Codex's ``ForcedRm -> Prompt``, which never looks at
+    whether the target resolves at all (§1.4).  The OS write boundary is the
+    backstop for the ones outside the workspace.
+
+    Only double quotes are stripped: single quotes are the shell's *literal*
+    marks (``'$HOME'`` names a directory literally called ``$HOME``), so
+    stripping them would misjudge it as the home directory.
+
+    No same-line assignment resolution: ``command_views`` does not return
+    assignments, and ``D=/data`` / ``rm -rf $D`` are two separate commands, so
+    ``$D`` stays unresolved and is asked about.
+    """
+    out = word.replace('"', "")
+    if out == "~" or out.startswith("~/"):
+        out = _EXPANSIONS["HOME"] + out[1:]
+    elif out.startswith("~"):
+        return ""  # ~user: not this operator's home, do not guess
+    for name, value in _EXPANSIONS.items():
+        if not value:
+            continue  # unset (e.g. USER empty) -> leave it alone
+        out = re.sub(r"\$\{" + name + r"\}", value, out)
+        # A word boundary, or $PWDDIR is read as $PWD + "DIR".
+        out = re.sub(r"\$" + name + r"(?![A-Za-z0-9_])", value, out)
+    if "$" in out or "`" in out:
+        return ""  # unresolvable -> not protected -> the gate asks
+    return out
+
+
+def _program_is_unauditable(program: str) -> bool:
+    """Is this program name an expansion the name-based rules cannot read?
+
+    ``$x`` may name anything, so no rule over names can be trusted to have read
+    the command -- the whole rule set is about program names, so this is a hole
+    rather than a question (unlike an unresolvable *target*, §1.4).
+
+    A command substitution (``$(...)`` / backticks) is **not** unauditable in
+    this sense: the grammar descends into it and judges the inner command on its
+    own view, so the outer view is redundant.  Refusing it here would shadow the
+    inner command with a vaguer reason -- ``$(rm -rf /)`` is already a red line
+    via the ``rm`` view, and a bare ``$(echo hi)`` should fall through to the
+    gate's question, not be refused as "unauditable".
+    """
+    if program.startswith("$(") or program.startswith("`"):
+        return False
+    return "$" in program or "`" in program
+
+
 def _programs(view: CommandView) -> list[str]:
     """The programs the command runs, wrappers peeled off.
 
     ``env sudo ls`` runs sudo; ``sudo`` is a wrapper here and ``ls`` is
     not, so the chain stops at the first name that is not a wrapper.
+
+    A wrapper's own arguments have to be walked past, or the program behind
+    them hides: ``env -i sudo ls`` put ``-i`` in front of ``sudo`` and the
+    chain stopped there (a measured miss).  Two shapes of wrapper argument are
+    walked:
+
+    * a **value-taking flag** (``-u``/``-C``/``-S`` for ``env``, ``-n`` for
+      ``nice``, ``-c``/``-n``/``-p`` for ``ionice``, ``-i``/``-o``/``-e`` for
+      ``stdbuf``, ``-s``/``-k`` for ``timeout``, ``-v``/``-V`` for ``command``)
+      is followed by its value;
+    * a wrapper whose first word is always a value (``timeout``) skips it, and
+      one that may carry a number (``nice``) skips it only when it is a digit
+      -- ``nice sudo ls`` is a legal spelling and must not be peeled to
+      nothing.
+
+    ``--`` is skipped in both loops (it ends the wrapper's options; the word
+    after it is the command).
     """
     names: list[str] = []
-    for word in (view.program, *view.arguments):
-        name = _basename(word)
+    words = (view.program, *view.arguments)
+    index = 0
+    while index < len(words):
+        if words[index] == "--":
+            index += 1
+            continue
+        name = _basename(words[index])
         if not name:
+            index += 1
             continue
         names.append(name)
         if name not in _WRAPPERS:
+            break
+        index += 1
+        while index < len(words):
+            nxt = words[index]
+            if nxt == "--":
+                index += 1
+                continue
+            if nxt.startswith("-"):
+                index += 2 if nxt in _WRAPPER_VALUE_FLAGS.get(name, ()) else 1
+                continue
+            if name in _WRAPPER_VALUE_FIRST or (
+                name in _WRAPPER_NUMERIC_FIRST and nxt.isdigit()
+            ):
+                index += 1
             break
     return names
 
@@ -169,12 +306,57 @@ def _targets(view: CommandView) -> list[str]:
     return paths
 
 
-def _is_root_target(path: str) -> bool:
-    """Is this path the filesystem root, or a top-level system directory?"""
-    normalized = path.rstrip("/") or "/"
+def _is_protected_target(path: str) -> bool:
+    """Is this path the root, a system directory, or someone's home?
+
+    Judged **after expansion**: ``rm -rf $HOME`` deletes the operator's home
+    and ``rm -rf ~`` deletes it too, and a rule that reads only the literal
+    word misses both.  The expansion is the limited one (:func:`_expand`), and
+    an expansion it cannot resolve returns ``""`` -- which is **not** protected,
+    so the command is asked about rather than refused (§1.4: unresolvable ->
+    WARN, like Codex's ``ForcedRm -> Prompt``).
+
+    Shapes:
+
+    * the root, exactly or with a glob (``/``, ``/*``);
+    * a top-level system directory, exactly or by prefix (``/etc``, and
+      ``/var/log`` under ``/var``) -- a prefix match on ``/etc`` also catches
+      ``/etc/foo``, while an exact match catches ``/etc`` itself;
+    * the operator's home, exactly (``$HOME``, ``~``);
+    * ``/home`` itself, exactly;
+    * another user's home, ``/home/<name>`` at depth 3;
+    * a path whose **last** component is ``..`` (``./..`` deletes the ancestor
+      itself).  ``../build`` is *not* protected: that is a sibling directory,
+      ordinary monorepo work, and the OS write boundary owns it.
+
+    An **empty** target is protected: it is the old fail-closed reading, and it
+    is what a quoted string whose whole content is a command substitution reads
+    as here (``rm -rf "$(echo /)"`` -- the substitution is not expanded, so the
+    word is empty, and the command it stands for really does delete a path).
+    The unresolvable case is different: a *non-empty* word that ``_expand``
+    cannot resolve (``$DIR``) is asked about, not refused (§1.4).
+    """
+    if not path:
+        return True
+    expanded = _expand(path)
+    if not expanded:
+        return False  # unresolvable -> not protected -> the gate asks
+    # normpath first: /home/../etc, /home//user and /home/./user all normalize,
+    # so the shape checks below cannot be walked past.  Same normalisation the
+    # credential matcher uses.
+    normalized = posixpath.normpath(expanded) or "/"
     if normalized in ("/", "/*"):
         return True
-    return normalized in _SYSTEM_ROOTS
+    parts = normalized.split("/")
+    if parts[-1] == "..":
+        return True
+    if normalized == _EXPANSIONS["HOME"]:
+        return True
+    if normalized == "/home":
+        return True
+    if len(parts) == 3 and parts[1] == "home":
+        return True
+    return any(normalized == r or normalized.startswith(r + "/") for r in _PREFIX_ROOTS)
 
 
 def _is_block_device(path: str) -> bool:
@@ -218,7 +400,10 @@ def _git_push_is_forced(view: CommandView) -> bool:
     if index >= len(words) or words[index] != "push":
         return False
     rest = words[index + 1 :]
-    return any(word in ("--force", "-f") for word in rest)
+    # ``--force-with-lease`` is a force push written the safe way: it refuses
+    # when the remote moved, but it still overwrites history.  Treating it as
+    # ordinary would let the one flag that *looks* careful through.
+    return any(word in ("--force", "-f", "--force-with-lease") for word in rest)
 
 
 def _dd_touches_a_disk(view: CommandView) -> bool:
@@ -247,7 +432,7 @@ _RULES: tuple[tuple[str, Callable[[CommandView], bool]], ...] = (
         "recursive root deletion",
         lambda view: _runs(view, "rm")
         and {"r", "f"} <= _flags(view)
-        and any(_is_root_target(path) for path in _targets(view)),
+        and any(_is_protected_target(path) for path in _targets(view)),
     ),
     (
         "world-writable permissions",
@@ -258,7 +443,9 @@ _RULES: tuple[tuple[str, Callable[[CommandView], bool]], ...] = (
     ),
     (
         "sudo escalation",
-        lambda view: _runs(view, "sudo"),
+        # doas is the OpenBSD sudo and is in _WRAPPERS; the rule has to ask for
+        # it by name too, or a doas is waved through.
+        lambda view: _runs(view, "sudo") or _runs(view, "doas"),
     ),
     (
         "system shutdown",
@@ -285,6 +472,16 @@ _RULES: tuple[tuple[str, Callable[[CommandView], bool]], ...] = (
     (
         "force git push",
         lambda view: _runs(view, "git") and _git_push_is_forced(view),
+    ),
+    (
+        # A program name that is itself an expansion cannot be audited: ``$x``
+        # may name anything, so no rule over names can be trusted to have read
+        # the command.  Unlike an unresolvable *target* (asked about, §1.4), an
+        # unresolvable *program* is refused -- the whole rule set is about
+        # program names, so one it cannot read is a hole, not a question.  A
+        # command substitution is not this case: see _program_is_unauditable.
+        "unauditable command",
+        lambda view: _program_is_unauditable(view.program),
     ),
 )
 

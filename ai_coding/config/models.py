@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 from pathlib import Path
 from typing import Any, Literal
@@ -202,11 +203,22 @@ class NetworkConfig(BaseModel):
     @classmethod
     def _reject_wildcard(cls, value: list[str]) -> list[str]:
         for entry in value:
-            if str(entry).strip() == "*":
+            text = str(entry).strip()
+            if text == "*":
                 raise ValueError(
                     'network.allow must not contain "*": a wildcard allow-list '
                     "is no network wall"
                 )
+            # A CIDR entry the proxy cannot parse would silently deny
+            # everything (it is not a hostname); a configuration error must
+            # fail loudly at load time, like the wildcard above (§D.2).
+            if "/" in text:
+                try:
+                    ipaddress.ip_network(text, strict=False)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"malformed CIDR in network.allow: {text!r}"
+                    ) from exc
         return value
 
     @model_validator(mode="after")
