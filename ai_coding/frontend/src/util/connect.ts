@@ -34,7 +34,7 @@ export interface AuthOption {
 }
 
 /** The wizard's screens, plus the terminal state `nextStep` closes on. */
-export type ConnectStep = "provider" | "auth" | "key" | "model" | "done"
+export type ConnectStep = "provider" | "baseUrl" | "auth" | "key" | "model" | "done"
 
 export interface ConnectValues {
   provider: string
@@ -103,15 +103,33 @@ export function authOptions(provider: Pick<ProviderInfo, "envVar" | "hasEnv">): 
 }
 
 /**
- * The next screen.  Only a typed key visits the key screen; an environment
- * reference and a keyless endpoint go straight to the model name.  `done` is
- * terminal, and so is any step this wizard does not know.
+ * The next screen.  A generic provider has no endpoint to default, so it asks
+ * for one before anything else and its key is optional (a self-hosted
+ * OpenAI-compatible server may need one or not).  Every other provider asks how
+ * to authenticate; only a typed key visits the key screen, and an environment
+ * reference goes straight to the model name.  `done` is terminal, and so is any
+ * step this wizard does not know.
  */
-export function nextStep(step: ConnectStep, choice?: string): ConnectStep {
-  if (step === "provider") return "auth"
+export function nextStep(
+  step: ConnectStep,
+  provider: string,
+  choice?: string,
+): ConnectStep {
+  if (step === "provider") return provider === GENERIC_PROVIDER ? "baseUrl" : "auth"
+  if (step === "baseUrl") return "key"
   if (step === "auth") return choice === "typed" ? "key" : "model"
   if (step === "key") return "model"
   return "done"
+}
+
+/**
+ * Whether the key screen may be submitted empty.
+ *
+ * `generic` is the endpoint we know nothing about: it may be a local server
+ * with no authentication at all, so the key is offered but not demanded.
+ */
+export function keyIsOptional(provider: string): boolean {
+  return provider === GENERIC_PROVIDER
 }
 
 /**

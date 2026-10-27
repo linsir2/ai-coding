@@ -256,7 +256,7 @@ async def test_closing_the_loop_closes_the_retired_engines(tmp_path):
     loop = _loop(tmp_path, engine=old)
 
     loop.set_model("beta")
-    assert old.closed is False, "no running loop: the close is deferred"
+    assert old.closed is False, "a switch must not close an engine a live turn may be using"
 
     await loop.aclose()
 

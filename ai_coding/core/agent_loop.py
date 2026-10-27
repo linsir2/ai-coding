@@ -519,24 +519,17 @@ class AgentLoop:
         self.models[key] = cfg
 
     def _retire(self, engine: Any) -> None:
-        """Close a superseded engine without blocking the caller.
+        """Hold a superseded engine until ``aclose`` releases it.
 
-        The engine goes on the list unconditionally, because ``aclose`` is what
-        drains that list -- a switch made outside a loop (a command handler, a
-        test) has no task to schedule and would otherwise leak the client.  With
-        a running loop the close is also scheduled now, so it does not wait for
-        ``aclose``; the later drain is idempotent.  An engine without ``aclose``
-        (a test double) is left alone.
+        Closing it here would be wrong: ``/model`` is reachable from a global
+        key binding while a turn is streaming, and that turn is still reading
+        from the old engine's client.  So the engine is parked and closed once,
+        at shutdown, when nothing can be using it.  An engine without
+        ``aclose`` (a test double) is left alone.
         """
-        aclose = getattr(engine, "aclose", None)
-        if aclose is None:
+        if getattr(engine, "aclose", None) is None:
             return
         self._retired_engines.append(engine)
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        asyncio.create_task(aclose())
 
     def _rewire_llm_helpers(self) -> None:
         """Point compaction and memory extraction at the current model.

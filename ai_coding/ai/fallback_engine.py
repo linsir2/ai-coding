@@ -42,13 +42,7 @@ class FallbackEngine(ChatEngine):
 
     @property
     def model_config(self) -> Any:
-        """The config of the engine that is actually being asked.
-
-        ``AgentLoop.set_model`` assigns here, so the setter below has to exist;
-        without it that line would raise ``AttributeError`` on this class alone
-        and only once someone repairs the call (``AIConfig`` has no ``models``
-        field today, so it never runs).
-        """
+        """The config of the engine that is actually being asked."""
         return self._engines[self._active].model_config
 
     @model_config.setter
@@ -56,14 +50,15 @@ class FallbackEngine(ChatEngine):
         """Make this model the one to try first.
 
         Not "start at its index": ``step`` begins at the top of the chain on
-        purpose, so recording a preference anywhere else would be ignored -- which
-        is exactly what ``/model`` used to do while reporting success.  Moving the
-        engine to the front keeps the promise the command makes, and the models
-        that followed it stay behind it in their original order.
+        purpose, so recording a preference anywhere else would be ignored.  A
+        chain can express any of its own members this way, because each engine
+        already owns the client for its own endpoint.
 
-        Rebuilding the chain from a model that is *not* in it would mean
-        replacing the engine -- new clients, new subscriptions, the old ones
-        closed -- so that is refused rather than half-done.
+        ``/model`` no longer comes through here (H3): it rebuilds the engine so
+        the *target* model's own ``fallback_models`` chain takes over.  The
+        setter stays for the narrower operation it names -- promoting a member
+        of this chain -- and rebuilding would be the only way to reach a model
+        outside it.
         """
         for index, engine in enumerate(self._engines):
             if engine.model_config is value or engine.model_config == value:

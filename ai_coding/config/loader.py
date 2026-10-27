@@ -149,7 +149,10 @@ def _merge_model_sidecar(
         document["models"] = models
     for key, entry in entries.items():
         if isinstance(entry, dict):
-            models[str(key)] = entry
+            # Normalized like every other layer: the sidecar is hand-editable,
+            # and a main config accepts ``baseUrl`` while an unnormalized entry
+            # here would be silently ignored by ``_coerce_model``.
+            models[str(key)] = _normalize(entry)
     return document
 
 
@@ -548,7 +551,7 @@ class ConfigLoader:
                 # "no config.yaml yet" is exactly the fresh-install case the
                 # sidecar has to survive -- and into ``user_document`` so the
                 # project layer treats them as operator-defined.
-                document = _merge_model_sidecar(document)
+                document = _merge_model_sidecar(document, paths.config_home)
                 user_document = document
             if not document:
                 continue
@@ -584,6 +587,13 @@ class ConfigLoader:
         from ai_coding.config.secrets import secret_env_names
 
         names = secret_env_names(merged.get("models") or {})
+        # ``sources`` is "which file answered this key".  A model the sidecar
+        # supplied came from a file that is not the user's config, and saying
+        # otherwise points the operator at a path that may not even exist.
+        if path is None:
+            sidecar = ConfigLoader.models_sidecar(paths.config_home)
+            if sidecar.is_file() and "models" in sources:
+                sources["models"] = str(sidecar)
         return LayeredConfig(
             config=ConfigLoader.app_from_doc(merged, chosen, env=env)
             if merged
@@ -646,19 +656,29 @@ class ConfigLoader:
             os.chmod(directory, 0o700)
         except OSError:
             pass
-        sidecar = directory / "models.local.yaml"
+        sidecar = ConfigLoader.models_sidecar(directory)
         document: dict[str, Any] = {}
         if sidecar.is_file():
             try:
                 loaded = yaml.safe_load(sidecar.read_text(encoding="utf-8")) or {}
-            except (OSError, yaml.YAMLError):
-                loaded = {}
-            if isinstance(loaded, dict):
-                document = loaded
+            except (OSError, yaml.YAMLError) as exc:
+                # Rewriting an unreadable file would destroy whatever the
+                # operator was editing; the read side is forgiving, the write
+                # side must not be.
+                raise ValueError(
+                    f"{sidecar} is not valid YAML; fix or delete it first ({exc})"
+                ) from exc
+            if not isinstance(loaded, dict):
+                raise ValueError(
+                    f"{sidecar} does not hold a mapping; fix or delete it first"
+                )
+            document = loaded
+        models = document.get("models")
+        if models is not None and not isinstance(models, dict):
+            raise ValueError(
+                f"{sidecar}: 'models' must be a mapping; fix or delete it first"
+            )
         models = document.setdefault("models", {})
-        if not isinstance(models, dict):
-            models = {}
-            document["models"] = models
         models[key] = entry
         sidecar.write_text(
             yaml.safe_dump(document, sort_keys=False, allow_unicode=True),

@@ -190,6 +190,21 @@ def test_an_explicit_path_run_ignores_the_sidecar(tmp_path):
     assert list(layered.config.models) == ["only"]
 
 
+def test_a_corrupt_sidecar_is_not_silently_overwritten(tmp_path):
+    """The read side forgives a broken file; the write side must not erase it."""
+    _paths(tmp_path)
+    sidecar = _sidecar(tmp_path)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text("models: [unclosed\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="models.local.yaml"):
+        ConfigLoader.append_model(
+            "gpt-5", {"provider": "openai", "name": "gpt-5", "api_key": "k"}
+        )
+
+    assert "unclosed" in sidecar.read_text(encoding="utf-8")
+
+
 def test_appending_twice_keeps_both_entries(tmp_path):
     paths = _paths(tmp_path)
 

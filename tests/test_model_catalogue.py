@@ -204,7 +204,9 @@ def test_connect_accepts_a_typed_key(tmp_path):
     )
 
     assert result["ok"] is True
-    assert backend.secrets == [], "a literal key is not an environment variable"
+    # A literal key still means the conventional variable is a secret this run
+    # must strip: the child process must not be able to read it back either.
+    assert "OPENAI_API_KEY" in backend.secrets
 
 
 def test_connect_accepts_a_keyless_local_provider(tmp_path):

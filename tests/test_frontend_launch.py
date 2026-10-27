@@ -143,6 +143,20 @@ def test_a_failed_install_is_a_value_error_naming_the_command(tmp_path):
     assert not (runtime / "node_modules").exists(), "a half-install must be removed"
 
 
+def test_a_timeout_is_a_value_error_and_clears_the_half_install(tmp_path):
+    runtime = _frontend(tmp_path)
+
+    def timing_out(argv, *, cwd, timeout):
+        (Path(cwd) / "node_modules").mkdir(exist_ok=True)
+        raise launcher.subprocess.TimeoutExpired(cmd="bun install", timeout=timeout)
+
+    with pytest.raises(ValueError) as caught:
+        launcher._ensure_deps(runtime, "/usr/bin/bun", run=timing_out)
+
+    assert "bun install" in str(caught.value)
+    assert not (runtime / "node_modules").exists(), "a half-install must be removed"
+
+
 def test_a_missing_frontend_names_the_override(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()

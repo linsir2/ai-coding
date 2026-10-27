@@ -6,6 +6,7 @@
 
 - Python >= 3.10
 - Linux（使用 bash 工具时）
+- [bun](https://bun.sh) >= 1.2（TUI 前端；首次启动需联网装一次依赖，见下）
 - 一个兼容 OpenAI Chat Completions 协议的模型端点与 API Key（示例默认配 DeepSeek）
 
 ## 安装
@@ -68,8 +69,9 @@ onboarding 断头。
 仍会继承环境。
 
 `--path` 仍可用：显式路径是**唯一**一层，不做信任过滤。适合一次性验证，不适合长期放 key。
-**`--path` 开发流不适用 `/connect`**：TUI 的连接向导（`ctrl+a`）要把模型写进用户层配置，
-而 `--path` 运行会拒绝它（否则模型下次启动就消失）。需要向导就改用上面的 `config init` 用户层配置。
+**`--path` 开发流不适用 `/connect`**：TUI 的连接向导（打开模型面板 `/models` 后按 `ctrl+a`）
+要把模型写进用户层配置，而 `--path` 运行会拒绝它（否则模型下次启动就消失）。
+需要向导就改用上面的 `config init` 用户层配置。
 
 ## 命令速查
 

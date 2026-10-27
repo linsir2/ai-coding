@@ -95,12 +95,21 @@ def _ensure_deps(
     """Install the frontend's dependencies once, with a bounded wait."""
     if (directory / "node_modules").is_dir():
         return
-    result = run(
-        [bun, "install", "--frozen-lockfile"],
-        cwd=str(directory),
-        timeout=600,
-    )
+    try:
+        result = run(
+            [bun, "install", "--frozen-lockfile"],
+            cwd=str(directory),
+            timeout=600,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        shutil.rmtree(directory / "node_modules", ignore_errors=True)
+        raise ValueError(
+            f"bun install failed in {directory} ({exc}); check that bun is "
+            "installed and the network is reachable"
+        ) from exc
     if result.returncode != 0 or not (directory / "node_modules").is_dir():
+        # A half-written node_modules would be taken as "already installed" on
+        # the next launch, and bun would then fail on a missing package.
         shutil.rmtree(directory / "node_modules", ignore_errors=True)
         raise ValueError(
             f"bun install failed in {directory} (exit {result.returncode}); "
@@ -120,34 +129,46 @@ async def run_tui(path: str | None, workspace: str, skills: str | None) -> None:
             "bun is required for the TUI frontend but was not found on PATH "
             "(install: https://bun.sh)"
         )
-    await asyncio.to_thread(_ensure_deps, runtime, bun)
 
+    # The world comes first: a configuration error ("no default model") is both
+    # more common and cheaper to report than a network install that can take
+    # ten minutes.  Nothing here reaches the terminal before the child does.
     world = await build_world(path, workspace, skills)
-    socket_path = Path(f"/tmp/ai-coding-{os.getpid()}.sock")
-    stop_event = asyncio.Event()
-    # The handler table needs the service (event push/approval calls), and the
-    # service needs the table — the dict is shared and filled in one step.
-    service = IpcService(socket_path, asyncio.get_running_loop())
-    service.start()
-    service.dispatcher.update(make_handlers(world, service, shutdown=stop_event.set))
-
-    env = {**os.environ, "AI_CODING_SOCKET": str(socket_path)}
-    # The argv is relative to ``cwd``: bun resolves ``node_modules`` by walking
-    # up from the *entry file's* directory, so an absolute path into the package
-    # would look for the dependencies in the wrong tree.
-    proc = await asyncio.create_subprocess_exec(
-        bun, str(entry.relative_to(runtime)),
-        cwd=str(runtime),
-        env=env,
-        # The tty stays with the child; IPC rides the socket instead.
-        stdin=None,
-        stdout=None,
-        stderr=None,
-    )
     try:
-        await proc.wait()
+        await asyncio.to_thread(_ensure_deps, runtime, bun)
+
+        socket_path = Path(f"/tmp/ai-coding-{os.getpid()}.sock")
+        stop_event = asyncio.Event()
+        # The handler table needs the service (event push/approval calls), and
+        # the service needs the table — the dict is shared and filled in one step.
+        service = IpcService(socket_path, asyncio.get_running_loop())
+        service.start()
+        try:
+            service.dispatcher.update(
+                make_handlers(world, service, shutdown=stop_event.set)
+            )
+
+            env = {**os.environ, "AI_CODING_SOCKET": str(socket_path)}
+            # The argv is relative to ``cwd``: bun resolves ``node_modules`` by
+            # walking up from the *entry file's* directory, so an absolute path
+            # into the package would look for the dependencies in the wrong tree.
+            proc = await asyncio.create_subprocess_exec(
+                bun, str(entry.relative_to(runtime)),
+                cwd=str(runtime),
+                env=env,
+                # The tty stays with the child; IPC rides the socket instead.
+                stdin=None,
+                stdout=None,
+                stderr=None,
+            )
+            try:
+                await proc.wait()
+            finally:
+                if proc.returncode not in (0, None):
+                    print(
+                        f"frontend exited with code {proc.returncode}", file=sys.stderr
+                    )
+        finally:
+            service.close()
     finally:
-        service.close()
         await world.aclose()
-        if proc.returncode not in (0, None):
-            print(f"frontend exited with code {proc.returncode}", file=sys.stderr)

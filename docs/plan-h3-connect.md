@@ -230,7 +230,7 @@ models:
       new.on_fallback = self._restate_engine_fallback
       old, self.engine = self.engine, new
       self._rewire_llm_helpers()        ← 见下：context/memory 为 None 时跳过
-      self._retire(old)                 ← 有 running loop → create_task(old.aclose())；否则入 _retired_engines
+      self._retire(old)                 ← 只入 _retired_engines；**不**当场关（见下）
   → provider = provider_from_base_url(str(getattr(engine.model_config, "base_url", "")))
 ```
 
@@ -256,13 +256,14 @@ def _rewire_llm_helpers(self) -> None:
 否则 `context.summarizer = …` 只会新建一个没人读的属性——**静默失效**，那正是 v1 的"半修"。
 
 **"当前引擎"只有一个读法**（`world.engine` 不再被任何地方赋值）：
-
 ```python
 def _active_engine(world):
     return getattr(world.loop, "engine", None) or world.engine
 ```
 
 `initialize` / `model_set` / `model_list` 都用它。这样手打 `/model x`（走 `commands.py:1170` 的 `loop.set_model`，不经过 handler）也不会让 `model.list` 报旧模型。
+
+**旧引擎不当场关闭。** `_retire` 只把它放进 `_retired_engines`，`aclose` 时统一关。理由：`/model` 有全局按键（`<leader>m` → Models 面板 → 回车），一个正在流式输出的回合仍握着旧引擎的 client；当场 `close()` 会掐断那次请求。停在一个只增不减的列表里是有意的——代价是每次切换多留一个空闲 client 到进程退出，换的是"切换永远不会弄坏正在跑的回合"。
 
 ### 4.3 数据流（A：分发）
 
@@ -576,6 +577,8 @@ $ ls -l ~/.config/ai-coding/models.local.yaml
 7. **`ModelConfig.streaming` 仍无消费者**（M-H2 已记录）。
 8. **`load_app`（`scripts/*`、eval）看不到侧车**。生产路径 `build_world` 走 `load_layers_report`，没问题；脚本里的模型列表与 TUI 可能不一致。
 9. **`frontend/package.json` 的 version 不参与发布**。唯一版本源是 `ai_coding/__init__.py`（pyproject 从它取）；前端私有、不发布 npm，所以那一份只作参考，CI 不校验。
+10. **`frontend/test/**/*.tsx` 不在 `tsc --noEmit` 的范围内**。把 `test/**/*.tsx` 加进 `tsconfig.include` 会立刻暴露 20 处既存类型错误（`TextareaProps.value`、`TestRendererOptions`、`CommandResult` 等），全部与 H3 无关；`bun test` 照常运行它们（498 例）。属于独立一轮的清理。
+11. **`_runtime_dir` 的"已复制"判据只是 `src/index.tsx` 存在**。`copytree` 被中断（Ctrl-C、磁盘满）时可能留下一个缺文件但入口还在的目录，后续启动不会再复制。恢复手段是删掉 `~/.local/share/ai-coding/frontend/<版本>/`。
 
 ---
 
@@ -586,3 +589,4 @@ $ ls -l ~/.config/ai-coding/models.local.yaml
 | v1 | 首版：A 分发 + B `/connect`；§3 四个分叉；§7 14 个变异 |
 | v2 | 第一轮评审修入 15 项（侧车改 map、落盘写原文、`_rewire_llm_helpers`、`_active_engine`、`FallbackEngine` 无 `base_url`、`Unknown model` 守卫、`add_secret_env_names`、`ValueError`、`_runtime_dir`、删 `<Show>`、取消 `model` 补全条目、`/connect` 进 `_ALIASES`、变异 14→18、分发清单、`read` 工具过度声明） |
 | v3 | 第二轮评审修入：① `_rewire_llm_helpers` 的属性名错了——真实字段是 `ContextManager._summarizer` / `MemoryService._extractor`（无公开 property），赋值会**静默失效**，改为给两类各加可写 property；② `add_secret_env_names` 挂错了类——`ProcessSandboxPolicy` 是 frozen dataclass 且无该字段，`--unsetenv` 读的是 `BwrapBackend._secret_env_names`，改挂 backend（`AppWorld.sandbox_backend` 已存在）；③ `entry` 必须是 `runtime/"src"/"index.tsx"`（包内绝对路径会让 `bun` 找不到 `node_modules`，实测）；④ 不删 `Hello.models`（会让 `test_server_ipc.py:279` 变红），改为"首帧 + 现取"；⑤ `_coerce_model` 外包 `try/except ValueError`（`${VAR}` 未设会抛 `MissingSecret`）；⑥ `context`/`memory` 为 `None` 时跳过 rewire、无 running loop 时 `_retire` 走列表；⑦ M4/M9/M10 的用例改成真的能杀死变异（M10 用工作区诱饵文件）；⑧ `pyproject` 删静态 `version`、加 `namespaces = false`；⑨ CI 用 `setup-bun@v2`（锁 1.2.14）+ `pip wheel` 断言；⑩ `AI_CODING_FRONTEND` 也走 `_ensure_deps`，失败时清半截 `node_modules`；⑪ 文档同步清单按实测补 `architecture.md`/`architecture-v2.md`/`features.md`，删掉空操作的 `README.md`；⑫ 新增 §9.10"不做 PyPI 发布"与 §9.14"不打包 `config.example.yaml`"；⑬ §0 措辞改为"`pip install` + 有 `bun`（首次联网）"；⑭ §10.1/§10.2 明确"不声称已跟随" |
+| v4 | 实现评审（两名评审员，0 P0 / 2 P1 / 12 P2）修入：① **`_retire` 不再当场关旧引擎**——`/model` 有全局按键，正在流式输出的回合仍握着旧 client，当场 `close()` 会掐断它（顺带消掉"双关"与"task 无引用"两个 P2）；② `model_connect` 改为**先 `add_model` 再落盘**，碰撞预检也改看 `loop.models`（唯一会抛的那张表）；③ `/connect` 写入后按 `secret_env_names({key: entry})` 补沙箱集合（与配置路径同口径，字面 key 也要剥约定变量）；④ 侧车条目过 `_normalize`（可手改，`baseUrl` 不再静默失效）；⑤ 写侧遇到坏侧车**拒绝覆盖**（读侧仍宽容）；⑥ `append_model` 复用 `models_sidecar()`（一个文件名）；⑦ `sources["models"]` 指向侧车；⑧ `_merge_model_sidecar(document, paths.config_home)`（死参数有消费者）；⑨ `model_list` 的 provider 与状态栏统一走 `provider_from_base_url`，并守住 `active_name` 为空；⑩ `HELP_TEXT` 补 `/connect`，提示文案改成"先 `/models` 再 ctrl+a"（ctrl+a 只在面板内有效）；⑪ `FallbackEngine.model_config` 的 docstring 改准确；⑫ **`generic` 现在能带 key**：`nextStep` 改成 provider 感知（`provider → baseUrl → key → model`），key 可选，`keyIsOptional` 进纯逻辑并有测试；⑬ `_ensure_deps` 捕获 `TimeoutExpired`/`OSError` → `ValueError` + 清半截 `node_modules`；⑭ `build_world` 先于依赖安装（配置错误先报），`spawn` 挪进 `try`（失败也关 service/world）；⑮ CI 的 wheel 断言补 `.ts` 与 `tsconfig.json`；⑯ `how-to-run.md` 环境要求补 `bun`；⑰ P 相 18/18 全杀（含三条映射修正，见 §7.2 末） |

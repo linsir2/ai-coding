@@ -23,6 +23,7 @@ HELP_TEXT = (
     "  /help, /h       show this help\n"
     "  /status         show session info\n"
     "  /model [name]   list or switch models\n"
+    "  /connect        open the model panel's connect wizard (ctrl+a)\n"
     "  /resume [id]    list or resume saved sessions\n"
     "  /permissions   view or change approval policy\n"
     "  /todo           show current task list\n"
@@ -286,7 +287,7 @@ async def handle_input(
         return _handle_config(loop, session, console)
     if cmd.name == "connect":
         console.info(
-            "[connect] 在 TUI 里按 ctrl+a 打开连接向导；"
+            "[connect] 打开模型面板（/models 或 <leader>m）后按 ctrl+a 进入连接向导；"
             "非 TUI 运行用 `ai-coding config init` 配置模型与密钥"
         )
         return REPLAction.CONTINUE, session

@@ -1,9 +1,10 @@
 /**
  * Guided "connect a provider or model" (H3 §5.2).
  *
- * Four screens, one question each: the provider (a filterable list), the
- * authentication answer (a list), the one text field that provider still needs
- * — a key, or the endpoint for `generic` — and the model name.  The shape is
+ * One question per screen: the provider (a filterable list), then either the
+ * authentication answer (a list) or — for `generic`, whose endpoint cannot be
+ * defaulted — the endpoint, then the one text field that is still needed (a
+ * key, optional for `generic`) and the model name.  The shape is
  * `dialog-mcp-add.tsx`'s: lists reuse `DialogSelect`, input screens hold one
  * field and take only what is typed into it, and enter belongs to the keymap
  * rather than to the input's `onSubmit`.
@@ -20,11 +21,11 @@ import { TextAttributes, type InputRenderable } from "@opentui/core"
 import { useBindings } from "@opentui/keymap/solid"
 import type { IpcClient } from "../ipc"
 import type { SelectOption } from "../util/dialog-select"
-import type { AuthChoice, ConnectStep, ProviderInfo } from "../util/connect"
+import type { ConnectStep, ProviderInfo } from "../util/connect"
 import {
-  GENERIC_PROVIDER,
   authOptions,
   buildConnectBody,
+  keyIsOptional,
   nextStep,
   providerOptions,
 } from "../util/connect"
@@ -40,7 +41,6 @@ interface Field {
 export function DialogConnect(props: { client: IpcClient; onDone: () => void }) {
   const [providers, setProviders] = createSignal<ProviderInfo[]>([])
   const [provider, setProvider] = createSignal<ProviderInfo | null>(null)
-  const [auth, setAuth] = createSignal<AuthChoice>("none")
   const [step, setStep] = createSignal<ConnectStep>("provider")
   const [loading, setLoading] = createSignal(true)
   // Only ever what the operator typed into the current input: the elements are
@@ -73,26 +73,30 @@ export function DialogConnect(props: { client: IpcClient; onDone: () => void }) 
     const chosen = provider()
     if (!chosen || step() === "provider") return "Connect a provider"
     if (step() === "auth") return `Connect ${chosen.id} — how do you authenticate?`
+    if (step() === "baseUrl") return `Connect ${chosen.id} — endpoint`
     if (step() === "key") {
-      return chosen.id === GENERIC_PROVIDER
-        ? `Connect ${chosen.id} — endpoint`
+      return keyIsOptional(chosen.id)
+        ? `Connect ${chosen.id} — API key (optional)`
         : `Connect ${chosen.id} — API key`
     }
     return `Connect ${chosen.id} — model name`
   }
 
-  /**
-   * The one text field the current screen asks for.  `generic` has no default
-   * endpoint, so its key screen asks for the URL instead; that is the only
-   * extra screen the four-step skeleton can need.
-   */
   const field = (): Field | null => {
-    const chosen = provider()
-    if (!chosen) return null
+    if (!provider()) return null
+    if (step() === "baseUrl") {
+      return {
+        key: "baseUrl",
+        label: "Endpoint URL",
+        placeholder: "https://api.example.com/v1",
+      }
+    }
     if (step() === "key") {
-      return chosen.id === GENERIC_PROVIDER
-        ? { key: "baseUrl", label: "Endpoint URL", placeholder: "https://api.example.com/v1" }
-        : { key: "apiKey", label: "API key", placeholder: "sk-…" }
+      return {
+        key: "apiKey",
+        label: keyIsOptional(provider()!.id) ? "API key (optional)" : "API key",
+        placeholder: "sk-…",
+      }
     }
     if (step() === "model") {
       return { key: "model", label: "Model name", placeholder: "gpt-5" }
@@ -110,15 +114,8 @@ export function DialogConnect(props: { client: IpcClient; onDone: () => void }) 
     }))
   }
 
-  /**
-   * `nextStep` is the skeleton; a generic provider needs one more question
-   * before the model name, and `auth` is the only screen that can lead into it
-   * (its key screen is otherwise unused — it has no key to ask for).
-   */
   const advance = (from: ConnectStep, choice?: string) => {
-    const next = nextStep(from, choice)
-    const endpointFirst = from === "auth" && provider()?.id === GENERIC_PROVIDER
-    setStep(endpointFirst ? "key" : next)
+    setStep(nextStep(from, provider()?.id ?? "", choice))
     setTyped("")
   }
 
@@ -126,19 +123,17 @@ export function DialogConnect(props: { client: IpcClient; onDone: () => void }) 
     const chosen = providers().find((item) => item.id === option.value)
     if (!chosen) return
     setProvider(chosen)
-    setAuth("none")
     setError("")
-    advance("provider", option.value)
+    advance("provider")
   }
 
   const pickAuth = (option: SelectOption) => {
-    setAuth(option.value as AuthChoice)
     setError("")
     advance("auth", option.value)
   }
 
   const submit = () => {
-    if (step() === "key") submitField()
+    if (step() === "baseUrl" || step() === "key") submitField()
     else if (step() === "model") void connect()
   }
 
@@ -146,14 +141,21 @@ export function DialogConnect(props: { client: IpcClient; onDone: () => void }) 
     const current = field()
     if (!current) return
     const value = typed().trim()
-    if (!value) {
-      setError(current.key === "baseUrl" ? "an endpoint is required" : "a key is required")
-      return
+    if (current.key === "baseUrl") {
+      if (!value) {
+        setError("an endpoint is required")
+        return
+      }
+      setBaseUrl(value)
+    } else if (current.key === "apiKey") {
+      if (!value && !keyIsOptional(provider()!.id)) {
+        setError("a key is required")
+        return
+      }
+      setApiKey(value)
     }
-    if (current.key === "baseUrl") setBaseUrl(value)
-    else setApiKey(value)
     setError("")
-    advance("key")
+    advance(step())
   }
 
   const connect = async () => {

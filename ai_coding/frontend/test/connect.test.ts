@@ -12,6 +12,7 @@ import { filterOptions } from "../src/util/dialog-select"
 import {
   authOptions,
   buildConnectBody,
+  keyIsOptional,
   nextStep,
   providerOptions,
   type ProviderInfo,
@@ -77,15 +78,25 @@ describe("authOptions", () => {
 describe("nextStep", () => {
   test("only a typed key visits the key screen", () => {
     expect(nextStep("provider", "openai")).toBe("auth")
-    expect(nextStep("auth", "env")).toBe("model")
-    expect(nextStep("auth", "typed")).toBe("key")
-    expect(nextStep("auth", "none")).toBe("model")
+    expect(nextStep("auth", "openai", "env")).toBe("model")
+    expect(nextStep("auth", "openai", "typed")).toBe("key")
+    expect(nextStep("auth", "ollama", "none")).toBe("model")
   })
 
-  test("the four steps close on done", () => {
-    expect(nextStep("key", "sk-…")).toBe("model")
-    expect(nextStep("model", "gpt-5")).toBe("done")
-    expect(nextStep("done")).toBe("done")
+  test("the steps close on done", () => {
+    expect(nextStep("key", "openai", "sk-…")).toBe("model")
+    expect(nextStep("model", "openai", "gpt-5")).toBe("done")
+    expect(nextStep("done", "openai")).toBe("done")
+  })
+
+  test("generic asks for its endpoint first, then an optional key", () => {
+    // A self-hosted OpenAI-compatible server has no endpoint we could default
+    // and may or may not want a key, so both questions are asked.
+    expect(nextStep("provider", "generic")).toBe("baseUrl")
+    expect(nextStep("baseUrl", "generic")).toBe("key")
+    expect(nextStep("key", "generic")).toBe("model")
+    expect(keyIsOptional("generic")).toBe(true)
+    expect(keyIsOptional("openai")).toBe(false)
   })
 })
 

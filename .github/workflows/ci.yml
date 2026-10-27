@@ -109,9 +109,13 @@ jobs:
           required = {
               "ai_coding/frontend/src/index.tsx",
               "ai_coding/frontend/src/component/dialog-models.tsx",
+              # One `.ts` too: the `.tsx` and `.ts` globs are separate entries,
+              # and losing the latter breaks every import.
+              "ai_coding/frontend/src/util/connect.ts",
               "ai_coding/frontend/bun.lock",
               "ai_coding/frontend/package.json",
               "ai_coding/frontend/bunfig.toml",
+              "ai_coding/frontend/tsconfig.json",
           }
           missing = required - names
           sys.exit(f"wheel missing: {sorted(missing)}" if missing else 0)

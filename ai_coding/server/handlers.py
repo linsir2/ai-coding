@@ -28,13 +28,13 @@ from typing import Any
 from ai_coding.attachments import save_data_url
 from ai_coding.config.loader import ConfigLoader
 from ai_coding.config.models import _coerce_model, resolve_context_window
-from ai_coding.config.secrets import env_reference
+from ai_coding.config.secrets import secret_env_names
 from ai_coding.core.events import ResumeStalled
 from ai_coding.domain.agents import is_plan_agent
 from ai_coding.domain.session import InboxItem, _message_to_dict
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.infra.vcs import git_branch
-from ai_coding.providers import GENERIC, PROVIDERS, api_key_env, provider_id_for
+from ai_coding.providers import GENERIC, PROVIDERS, api_key_env
 from ai_coding.server.bridge import EventBridge, Notify
 from ai_coding.server.display import provider_from_base_url
 from ai_coding.server.service import IpcService
@@ -1124,15 +1124,18 @@ def make_handlers(
                 break
         else:
             active_name = str(getattr(active, "name", "") or "")
-            for key, cfg in models.items():
-                if str(getattr(cfg, "name", "") or "") == active_name:
-                    current = key
-                    break
+            if active_name:
+                for key, cfg in models.items():
+                    if str(getattr(cfg, "name", "") or "") == active_name:
+                        current = key
+                        break
         rows = [
             {
                 "key": key,
                 "name": str(getattr(cfg, "name", "") or key),
-                "provider": provider_id_for(str(getattr(cfg, "base_url", "") or "")),
+                # The same heuristic the status bar uses (``model.set`` and
+                # ``initialize``), so the panel and the bar cannot disagree.
+                "provider": provider_from_base_url(str(getattr(cfg, "base_url", "") or "")),
                 "baseUrl": str(getattr(cfg, "base_url", "") or ""),
                 "hasKey": bool(getattr(cfg, "api_key", "")),
             }
@@ -1186,11 +1189,11 @@ def make_handlers(
         key = str(params.get("model", "") or "").strip()
         if not key:
             return {"ok": False, "reason": "a model name is required"}
-        models = getattr(world.config, "models", None)
-        if models is None:
-            models = {}
-            world.config.models = models
-        if key in models:
+        # The loop's table is what ``/model`` switches against; the config's is
+        # what the catalogue reports.  They are two dicts, so the collision is
+        # checked against the one that would raise.
+        switchable = getattr(world.loop, "models", None) or {}
+        if key in switchable:
             return {
                 "ok": False,
                 "reason": (
@@ -1220,15 +1223,30 @@ def make_handlers(
             cfg = _coerce_model(dict(entry))
         except ValueError as exc:
             return {"ok": False, "reason": str(exc)}
-        ConfigLoader.append_model(key, entry)
-        models[key] = cfg
+        # Hot-add first: it is the only step that can refuse, and doing it after
+        # the write would leave a persisted model that ``/model`` cannot reach.
         world.loop.add_model(key, cfg)
-        reference = env_reference(api_key_text)
-        if reference is not None:
-            backend = getattr(world, "sandbox_backend", None)
-            add_secret = getattr(backend, "add_secret_env_names", None)
-            if callable(add_secret):
-                add_secret([reference])
+        try:
+            ConfigLoader.append_model(key, entry)
+        except (OSError, ValueError) as exc:
+            return {
+                "ok": False,
+                "reason": (
+                    f"{key} is usable this session but could not be saved: {exc}"
+                ),
+            }
+        models = getattr(world.config, "models", None)
+        if models is None:
+            models = {}
+            world.config.models = models
+        models[key] = cfg
+        # The same set the config path would strip: the provider's conventional
+        # variable counts even when a literal key was typed, because the child
+        # process must not be able to read it either way.
+        backend = getattr(world, "sandbox_backend", None)
+        add_secret = getattr(backend, "add_secret_env_names", None)
+        if callable(add_secret):
+            add_secret(sorted(secret_env_names({key: entry})))
         return {
             "ok": True,
             "key": key,
