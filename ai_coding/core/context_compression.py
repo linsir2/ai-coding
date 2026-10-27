@@ -606,6 +606,22 @@ class ContextManager:
         # L3 triggers at (roughly) half the context budget, mirroring the Java rule.
         self._max_result_bytes = max(1, self._max_context_tokens // 2)
 
+    @property
+    def summarizer(self) -> Callable[[str], Awaitable[str | None]] | None:
+        """The L4 summarizer; writable so ``/model`` can repoint it (H3).
+
+        The field is read in two places (``_call_summarizer`` and the L4 gate),
+        so without this property assigning ``context.summarizer = ...`` would
+        create an attribute nobody reads -- a silent no-op.
+        """
+        return self._summarizer
+
+    @summarizer.setter
+    def summarizer(
+        self, value: Callable[[str], Awaitable[str | None]] | None
+    ) -> None:
+        self._summarizer = value
+
     async def compress(
         self,
         messages: list[ChatMessage],

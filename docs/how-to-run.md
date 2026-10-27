@@ -10,6 +10,25 @@
 
 ## 安装
 
+作为工具安装（推荐）：
+
+```bash
+uv tool install --from .      # 或：pipx install .
+ai-coding config init         # 写 ~/.config/ai-coding/config.yaml（目录 0700、文件 0600）
+export DEEPSEEK_API_KEY=sk-...
+ai-coding                      # 直接启动 TUI，不需要 --path
+```
+
+**首次启动需要 `bun` 与网络。** 前端源码随包安装在 `ai_coding/frontend/`；第一次启动会把它
+复制到 `~/.local/share/ai-coding/frontend/<版本>/`，并在那里执行一次
+`bun install --frozen-lockfile`（上限 600 秒）。所以先装好 [bun](https://bun.sh) 并保持网络可达；
+装好之后每次启动都直接复用，不再联网。
+
+`AI_CODING_FRONTEND=/path/to/checkout` 可指向一个前端 checkout：就地运行、不复制（开发热改），
+但依赖仍会被检查，缺 `node_modules` 时同样跑一次 `bun install`。
+
+从源码开发：
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
@@ -17,6 +36,7 @@ pip install -e ".[dev]"
 ```
 
 `.[dev]` 会一并装好 `pytest`、`pytest-asyncio`、`ruff`、`mypy`。安装后 `ai-coding` 命令即用。
+源码树里 `ai_coding/frontend/node_modules` 已存在时就地运行，既不复制也不安装。
 
 ## 配置
 
@@ -48,6 +68,8 @@ onboarding 断头。
 仍会继承环境。
 
 `--path` 仍可用：显式路径是**唯一**一层，不做信任过滤。适合一次性验证，不适合长期放 key。
+**`--path` 开发流不适用 `/connect`**：TUI 的连接向导（`ctrl+a`）要把模型写进用户层配置，
+而 `--path` 运行会拒绝它（否则模型下次启动就消失）。需要向导就改用上面的 `config init` 用户层配置。
 
 ## 命令速查
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import uuid
 from collections.abc import Callable, Coroutine
@@ -25,12 +26,15 @@ from concurrent.futures import Future
 from typing import Any
 
 from ai_coding.attachments import save_data_url
-from ai_coding.config.models import resolve_context_window
+from ai_coding.config.loader import ConfigLoader
+from ai_coding.config.models import _coerce_model, resolve_context_window
+from ai_coding.config.secrets import env_reference
 from ai_coding.core.events import ResumeStalled
 from ai_coding.domain.agents import is_plan_agent
 from ai_coding.domain.session import InboxItem, _message_to_dict
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.infra.vcs import git_branch
+from ai_coding.providers import GENERIC, PROVIDERS, api_key_env, provider_id_for
 from ai_coding.server.bridge import EventBridge, Notify
 from ai_coding.server.display import provider_from_base_url
 from ai_coding.server.service import IpcService
@@ -42,6 +46,17 @@ __all__ = ["HandlerTable", "make_handlers"]
 
 
 HandlerTable = dict[str, Callable[[dict[str, Any]], Any]]
+
+
+def _active_engine(world: AppWorld) -> Any:
+    """The engine the loop is using right now.
+
+    ``world.engine`` is the boot-time object; ``AgentLoop.set_model`` replaces
+    ``loop.engine``, and a switch typed by hand (``/model x``) never touches the
+    world.  One read, so ``initialize`` / ``model.set`` / ``model.list`` cannot
+    disagree about which model is active.
+    """
+    return getattr(world.loop, "engine", None) or world.engine
 
 
 def _install_providers(
@@ -447,7 +462,7 @@ def make_handlers(
             session = world.sessions.create()
             state.session = session
             state.session_id = session.session_id
-        model = getattr(world.engine, "model_config", None)
+        model = getattr(_active_engine(world), "model_config", None)
         models = [
             {"name": str(getattr(cfg, "name", "") or key), "key": key}
             for key, cfg in (getattr(world.config, "models", None) or {}).items()
@@ -1085,11 +1100,141 @@ def make_handlers(
         world.loop.set_model(name)
         # The metadata label reads the endpoint of the *active* model, so a
         # switch across providers must report the new one.
-        model = getattr(world.engine, "model_config", None)
+        model = getattr(_active_engine(world), "model_config", None)
         return {
             "ok": True,
             "model": name,
             "provider": provider_from_base_url(str(getattr(model, "base_url", "") or "")),
+        }
+
+    def model_list(params: dict[str, Any]) -> dict[str, Any]:
+        """The live catalogue, with the model the engine is using right now.
+
+        ``current`` is the active engine's ``model_config`` -- identity first,
+        ``name`` second -- not the configured default: those are two different
+        things, and ``/model`` can move the first without touching the second.
+        The api_key is never included; it is a plaintext credential.
+        """
+        active = getattr(_active_engine(world), "model_config", None)
+        models = getattr(world.config, "models", None) or {}
+        current = ""
+        for key, cfg in models.items():
+            if cfg is active:
+                current = key
+                break
+        else:
+            active_name = str(getattr(active, "name", "") or "")
+            for key, cfg in models.items():
+                if str(getattr(cfg, "name", "") or "") == active_name:
+                    current = key
+                    break
+        rows = [
+            {
+                "key": key,
+                "name": str(getattr(cfg, "name", "") or key),
+                "provider": provider_id_for(str(getattr(cfg, "base_url", "") or "")),
+                "baseUrl": str(getattr(cfg, "base_url", "") or ""),
+                "hasKey": bool(getattr(cfg, "api_key", "")),
+            }
+            for key, cfg in models.items()
+        ]
+        return {
+            "ok": True,
+            "current": current,
+            "default": str(getattr(world.config, "default_model", "") or ""),
+            "models": rows,
+        }
+
+    def model_providers(params: dict[str, Any]) -> dict[str, Any]:
+        """The provider table, so the wizard offers exactly what we accept.
+
+        ``hasEnv`` is a snapshot for the UI's default choice; ``model.connect``
+        checks the environment again, because it can change in between.
+        """
+        return {
+            "ok": True,
+            "providers": [
+                {
+                    "id": provider_id,
+                    "baseUrl": provider.default_base_url,
+                    "envVar": provider.api_key_env,
+                    "hasEnv": bool(
+                        provider.api_key_env and os.environ.get(provider.api_key_env)
+                    ),
+                }
+                for provider_id, provider in PROVIDERS.items()
+            ],
+        }
+
+    def model_connect(params: dict[str, Any]) -> dict[str, Any]:
+        """Register a model, persist it, and make it usable this session (H3).
+
+        Every refusal is ``{ok: false, reason}`` rather than an exception: the
+        TUI has no try/except semantics on the wire.  The sidecar keeps the
+        api_key **as written** -- ``${VAR}`` stays a reference, so resolving it
+        here would write the plaintext secret to disk.
+        """
+        config_path = getattr(world, "config_path", None)
+        if config_path:
+            return {
+                "ok": False,
+                "reason": (
+                    f"this run reads {config_path} (--path); add the model there "
+                    "instead -- a sidecar write would vanish on the next start"
+                ),
+            }
+        key = str(params.get("model", "") or "").strip()
+        if not key:
+            return {"ok": False, "reason": "a model name is required"}
+        models = getattr(world.config, "models", None)
+        if models is None:
+            models = {}
+            world.config.models = models
+        if key in models:
+            return {
+                "ok": False,
+                "reason": (
+                    f"model '{key}' already exists; pick another name or "
+                    "switch with /model"
+                ),
+            }
+        provider = str(params.get("provider", "") or "").strip()
+        base_url = str(params.get("baseUrl", "") or "").strip()
+        if provider == GENERIC and not base_url:
+            return {"ok": False, "reason": "provider 'generic' needs a baseUrl"}
+        api_key_text = str(params.get("apiKey", "") or "").strip()
+        env_name = api_key_env(provider)
+        if env_name and not os.environ.get(env_name) and not api_key_text:
+            return {
+                "ok": False,
+                "reason": f"export {env_name} or paste a key",
+            }
+        if not api_key_text and env_name and os.environ.get(env_name):
+            api_key_text = "${" + env_name + "}"
+        entry: dict[str, Any] = {"provider": provider, "name": key}
+        if base_url:
+            entry["base_url"] = base_url
+        if api_key_text:
+            entry["api_key"] = api_key_text
+        try:
+            cfg = _coerce_model(dict(entry))
+        except ValueError as exc:
+            return {"ok": False, "reason": str(exc)}
+        ConfigLoader.append_model(key, entry)
+        models[key] = cfg
+        world.loop.add_model(key, cfg)
+        reference = env_reference(api_key_text)
+        if reference is not None:
+            backend = getattr(world, "sandbox_backend", None)
+            add_secret = getattr(backend, "add_secret_env_names", None)
+            if callable(add_secret):
+                add_secret([reference])
+        return {
+            "ok": True,
+            "key": key,
+            "provider": provider,
+            "name": key,
+            "hasKey": bool(cfg.api_key),
         }
 
     def slash_list(params: dict[str, Any]) -> dict[str, Any]:
@@ -1767,6 +1912,9 @@ def make_handlers(
         "session.command": session_command,
         "session.delete": session_delete,
         "model.set": model_set,
+        "model.list": model_list,
+        "model.providers": model_providers,
+        "model.connect": model_connect,
         "permissions.state": permissions_state,
         "permissions.revoke": permissions_revoke,
         "skills.list": skills_list,

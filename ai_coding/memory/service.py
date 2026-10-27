@@ -307,6 +307,20 @@ class MemoryService:
     def enabled(self) -> bool:
         return bool(getattr(self._config, "enabled", True))
 
+    @property
+    def extractor(self) -> Extractor | None:
+        """The memory extractor; writable so ``/model`` can repoint it (H3).
+
+        The harvest paths read ``self._extractor``, so assigning through this
+        property is the only way a switch can take effect -- a bare attribute
+        assignment would be a silent no-op.
+        """
+        return self._extractor
+
+    @extractor.setter
+    def extractor(self, value: Extractor | None) -> None:
+        self._extractor = value
+
     def _get(self, name: str, default: Any) -> Any:
         return getattr(self._config, name, default)
 

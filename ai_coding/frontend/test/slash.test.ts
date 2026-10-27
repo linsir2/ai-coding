@@ -130,3 +130,11 @@ describe("the command catalogue (A2.3)", () => {
     expect(budget?.command ?? "/budget").toBe("/budget")
   })
 })
+
+describe("connect slash entry (H3)", () => {
+  test("/connect opens the guided provider wizard", () => {
+    const matches = filterSlashCommands("conn")
+    expect(matches[0]!.name).toBe("connect")
+    expect(matches[0]!.command).toBe("dialog.connect.show")
+  })
+})

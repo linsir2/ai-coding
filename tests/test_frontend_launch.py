@@ -83,17 +83,21 @@ def test_the_packaged_frontend_is_copied_once(tmp_path, monkeypatch):
     copies: list[tuple[str, str]] = []
     real = launcher.shutil.copytree
 
-    def counting(src, dst, **kwargs):
-        copies.append((str(src), str(dst)))
-        return real(src, dst, **kwargs)
+    # ``*args``: CPython's copytree re-enters this module attribute once per
+    # subdirectory with seven positional arguments.
+    def counting(*args, **kwargs):
+        copies.append((str(args[0]), str(args[1])))
+        return real(*args, **kwargs)
 
     monkeypatch.setattr(launcher.shutil, "copytree", counting)
 
     first = launcher._runtime_dir(packaged)
+    after_first = len(copies)
     second = launcher._runtime_dir(packaged)
 
     assert first == second
-    assert len(copies) == 1
+    assert copies[0] == (str(packaged), str(first)), "the top-level copy is the first"
+    assert len(copies) == after_first, "the second call must not copy again"
     assert (first / "src" / "index.tsx").is_file()
     assert not (first / "node_modules").exists(), "node_modules must not be copied"
 

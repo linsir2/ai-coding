@@ -1,16 +1,20 @@
 name: CI
 
-# Four jobs, because the layers answer different questions and a failure in one
+# Five jobs, because the layers answer different questions and a failure in one
 # should not hide the others:
 #
 #   quality      -- lint, types, the golden-corpus benchmarks, the acceptance
-#                   scripts, and the two gates that used to be local-only.
+#                   scripts, the two gates that used to be local-only, and the
+#                   wheel-contents assertion (the frontend must ship inside the
+#                   package, H3).
 #   unit         -- everything that is neither integration nor live.
 #   integration  -- the tests/integration/ suite (real I/O, one process).
 #   live         -- the tests that need a real MCP server, gated on
 #                   AI_CODING_MCP_STDIO.  It lives in its own job so a live
 #                   failure cannot block the layer that runs on every push, and
 #                   so the gate variable is set exactly where it is needed.
+#   frontend     -- the TypeScript TUI: bun install, typecheck, bun test.  Its
+#                   own job because the toolchain is bun, not Python.
 #
 # No test file is excluded from the unit layer: R2b made every subprocess
 # bounded (thread + process-group kill), so the former hang risks run everywhere.
@@ -89,6 +93,29 @@ jobs:
 
       - name: R18 acceptance (rg contract, offline)
         run: python scripts/r18_acceptance.py
+
+      # H3: the TUI ships inside the package.  A wheel that builds but omits
+      # ai_coding/frontend is a green build whose `ai-coding` cannot start, so
+      # the contents are asserted, not assumed.  `build` is not in the dev
+      # extras, hence `pip wheel`.
+      - name: Wheel contains the frontend
+        run: |
+          python -m pip wheel . -w /tmp/wheelhouse --no-deps
+          python - <<'PY'
+          import glob, sys, zipfile
+          wheels = glob.glob("/tmp/wheelhouse/ai_coding-*.whl")
+          assert len(wheels) == 1, wheels
+          names = set(zipfile.ZipFile(wheels[0]).namelist())
+          required = {
+              "ai_coding/frontend/src/index.tsx",
+              "ai_coding/frontend/src/component/dialog-models.tsx",
+              "ai_coding/frontend/bun.lock",
+              "ai_coding/frontend/package.json",
+              "ai_coding/frontend/bunfig.toml",
+          }
+          missing = required - names
+          sys.exit(f"wheel missing: {sorted(missing)}" if missing else 0)
+          PY
 
   unit:
     runs-on: ubuntu-latest
@@ -183,3 +210,28 @@ jobs:
       # a red build rather than a green one covering nothing.
       - name: Live tests (real MCP server)
         run: AI_CODING_MCP_STDIO=1 python -m pytest -q -m live
+
+  # The TUI is TypeScript on bun; nothing in the Python jobs compiles it.  The
+  # bun version is pinned to the one that generated bun.lock, because
+  # --frozen-lockfile fails on a lockfile written by a different resolver.
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.14"
+
+      - name: Install
+        working-directory: ai_coding/frontend
+        run: bun install --frozen-lockfile
+
+      - name: Type-check
+        working-directory: ai_coding/frontend
+        run: bun run typecheck
+
+      - name: Frontend tests
+        working-directory: ai_coding/frontend
+        run: bun test

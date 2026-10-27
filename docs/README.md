@@ -2,7 +2,7 @@
 
 **ai-coding** 是自持 ReAct 循环的 AI 编程助手终端应用（ThoughtCoding 的 Python 化实现；R1 起不再依赖
 OpenAI Agents SDK，只留 `openai` 与 `mcp` 两个库）。**入口 `ai-coding` 直接启动 TUI**：
-后端 `server/` 起 Unix socket IPC 并 spawn `frontend/`（TypeScript + OpenTUI + Bun）——
+后端 `server/` 起 Unix socket IPC 并 spawn `ai_coding/frontend/`（TypeScript + OpenTUI + Bun）——
 会话标签、中部 transcript（流式回复 + 工具事件块）、底部输入栏；slash 命令可手打，
 也可输入 `/` 唤起命令面板。旧的 Typer 子命令（`ask` / `config-check` / `memory` / `trace`）已删除，
 职责收进 slash 命令。本仓库文档按用途分为「面向使用的文档」与「里程碑演进记录」。

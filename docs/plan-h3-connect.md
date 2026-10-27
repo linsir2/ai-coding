@@ -486,18 +486,25 @@ CI 的 wheel 断言（`dev` extras 里没有 `build`，用 `pip wheel`）：
 | M4 | `set_model` 不调 `_rewire_llm_helpers` | `test_switching_repoints_compaction_and_memory` |
 | M5 | `add_model` 允许覆盖同名 | `test_add_model_refuses_to_overwrite` |
 | M6 | 侧车按 `name` 建键（而非 `key`） | `test_a_key_that_differs_from_the_name_survives` |
-| M7 | 侧车合并进 project 层 | `test_a_project_cannot_inject_a_model` |
+| M7 | `model.list` 的 `default` 跟着 `current` 走 | `test_model_list_follows_a_switch_made_outside_the_rpc` |
 | M8 | 侧车合并在 `secret_env_names` 之后 | `test_sidecar_env_references_are_stripped…` |
 | M9 | 空层仍 `continue`（侧车在无用户配置时被跳过） | `test_the_sidecar_applies_without_a_user_config` |
-| M10 | 侧车锚定 workspace 而非 `paths.config_home` | `test_an_explicit_path_run_ignores_the_sidecar`（诱饵文件） |
+| M10 | 侧车锚定 workspace（`_merge_model_sidecar(document, paths.workspace)`） | `test_a_workspace_sidecar_is_not_read` |
 | M11 | `model.list` 返回 `apiKey` | `test_model_list_never_sends_the_key` |
 | M12 | `append_model` 写 0644 | `test_the_sidecar_is_created_at_0600` |
-| M13 | `model.connect` 不校验 provider | `test_connect_refuses_an_unknown_provider` |
+| M13 | `model.connect` 接受无 `baseUrl` 的 `generic` | `test_connect_refuses_custom_without_a_base_url` |
 | M14 | `model.connect` 只热加入、不落盘 | `test_connect_persists_and_hot_adds` |
 | M15 | `model.connect` 落盘解析后的明文而非原文 | `test_connect_writes_the_env_reference…` |
 | M16 | `model.connect` 不补沙箱 secret 集合 | `test_a_connected_env_reference_is_stripped_this_session` |
 | M17 | `_active_engine` 退回只读 `world.engine` | `test_model_list_follows_a_switch_made_outside_the_rpc` |
 | M18 | `_runtime_dir` 有 `node_modules` 也 copytree | `test_a_checked_out_frontend_is_used_in_place` |
+
+**P 相实测：18/18 全被杀。** 过程中修正了三条原本杀不死的映射，并顺带砍掉一处冗余契约：
+
+- **M13 原形态（"connect 不校验 provider"）杀不死**：`_coerce_model` 已经用同一张 `PROVIDERS` 表拒绝未知 provider，而且消息里还带模型名。这说明 handler 里那段显式校验是**第二份真值**，已删除——现在只剩 `generic` 必须有 `baseUrl` 这一条（`_coerce_model` 只告警不拒绝）。
+- **M10 原形态（"锚定 cwd"）杀不死**：`Path.cwd()` 是仓库根，测试里的诱饵在 tmp 工作区。改成在调用点锚定 `paths.workspace`，并新增 `test_a_workspace_sidecar_is_not_read`——那才是真正的信任边界（仓库不能自带一个侧车来选端点）。
+- **M7 原形态（"`user_document` 在合并前取快照"）是伪变异**：`_merge_model_sidecar` 就地改 `document`，两个顺序行为等价。换成"`default` 跟着 `current` 走"，并把 `test_model_list_follows_a_switch_made_outside_the_rpc` 补上 `default == "alpha"` 的断言。
+- `test_a_project_cannot_inject_a_model` / `test_a_project_may_tune_a_sidecar_model` 保留为 N-4b 既有行为的回归守卫，不是本轮变异目标。
 
 ---
 

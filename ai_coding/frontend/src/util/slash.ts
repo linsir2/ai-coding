@@ -46,6 +46,15 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "Switch the active model",
   },
   {
+    // H3: the guided provider/model wizard.  Deliberately no "model" entry —
+    // it ties with "models" for the query "mod", and `/model x` is already a
+    // text command the backend dispatches (§4.4 #11).
+    name: "connect",
+    command: "dialog.connect.show",
+    title: "Connect",
+    description: "Add a provider or model",
+  },
+  {
     name: "mcp",
     command: "mcp.list",
     title: "MCP servers",

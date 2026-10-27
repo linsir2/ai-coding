@@ -120,13 +120,18 @@ def test_model_list_marks_the_active_one(tmp_path):
 
 
 def test_model_list_follows_a_switch_made_outside_the_rpc(tmp_path):
-    """``/model x`` typed in the composer goes straight to ``loop.set_model``."""
+    """``/model x`` typed in the composer goes straight to ``loop.set_model``.
+
+    The configured default does not move with it: "what I am using" and "what
+    the config says" are two facts, and the picker marks the first.
+    """
     world, _backend = _world(tmp_path)
 
     world.loop.set_model("beta")
     result = _handlers(world)["model.list"]({})
 
     assert result["current"] == "beta"
+    assert result["default"] == "alpha"
 
 
 def test_model_list_never_sends_the_key(tmp_path):

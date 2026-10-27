@@ -668,6 +668,23 @@ class BwrapBackend:
         if self._block_af_unix:
             self._seccomp_fd = _seccomp_filter_fd()
 
+    def add_secret_env_names(self, names: Sequence[str]) -> None:
+        """Add environment names to strip from child processes (H3).
+
+        ``/connect`` can register a new ``${VAR}`` reference after the backend
+        exists; ``_bwrap_prefix`` re-reads this tuple on every spawn, so the next
+        run is stripped without rebuilding the backend.  Duplicates are dropped
+        and the original order kept.
+        """
+        merged = list(self._secret_env_names)
+        seen = set(merged)
+        for name in names:
+            text = str(name).strip()
+            if text and text not in seen:
+                seen.add(text)
+                merged.append(text)
+        self._secret_env_names = tuple(merged)
+
     # ---- network -----------------------------------------------------------
 
     def _compute_proxy_unavailable(self) -> bool:

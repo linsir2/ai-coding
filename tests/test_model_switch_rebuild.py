@@ -14,8 +14,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 import ai_coding.ai.llm_helpers as llm_helpers

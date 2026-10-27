@@ -1,6 +1,8 @@
 [project]
 name = "ai-coding"
-version = "0.1.0"
+# The version lives in ai_coding/__init__.py and is read from there, so the
+# launcher's per-version frontend copy and `--version` can never disagree.
+dynamic = ["version"]
 description = "an AI coding assistant CLI with a self-owned ReAct loop"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -49,8 +51,28 @@ ai-coding = "ai_coding.cli:app"
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.dynamic]
+version = {attr = "ai_coding.__version__"}
+
 [tool.setuptools.packages.find]
 include = ["ai_coding*"]
+# The frontend lives inside the package (ai_coding/frontend).  Without this,
+# `frontend/src` and every directory under node_modules would be picked up as
+# namespace packages, and stray .py files would ride along in the wheel.
+namespaces = false
+
+# The wheel carries the frontend sources (H3): `ai-coding` copies them to
+# data_home()/frontend/<version> and runs `bun install` there on first launch.
+# node_modules is deliberately absent -- bun.lock pins what to install.
+[tool.setuptools.package-data]
+ai_coding = [
+    "frontend/src/**/*.ts",
+    "frontend/src/**/*.tsx",
+    "frontend/package.json",
+    "frontend/bun.lock",
+    "frontend/bunfig.toml",
+    "frontend/tsconfig.json",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

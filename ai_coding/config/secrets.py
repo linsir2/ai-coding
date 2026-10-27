@@ -28,11 +28,22 @@ from typing import Any
 
 from ai_coding.providers import UnknownProvider, api_key_env, provider_id_for
 
-__all__ = ["MissingSecret", "resolve_api_key", "secret_env_names"]
+__all__ = ["MissingSecret", "env_reference", "resolve_api_key", "secret_env_names"]
 
 #: A whole-value reference.  Not a template: ``prefix-${VAR}`` is a literal,
 #: because a half-expanded secret is more likely a typo than an intent.
 _REF = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+
+
+def env_reference(raw: str) -> str | None:
+    """The variable a ``${VAR}`` value names, or ``None`` for a literal.
+
+    One spelling of the rule, because two consumers need it: resolving the key
+    and deciding whether a *written* value is a reference (the sidecar keeps it
+    as written rather than storing the plaintext).
+    """
+    match = _REF.match(str(raw or "").strip())
+    return match.group(1) if match is not None else None
 
 
 class MissingSecret(ValueError):
@@ -49,9 +60,8 @@ def resolve_api_key(
     environ = os.environ if env is None else env
     raw = str(raw_api_key or "").strip()
 
-    reference = _REF.match(raw)
-    if reference is not None:
-        name = reference.group(1)
+    name = env_reference(raw)
+    if name is not None:
         if not environ.get(name):
             raise MissingSecret(
                 f"api_key references ${{{name}}}, which is not set; export {name}"
@@ -101,7 +111,7 @@ def secret_env_names(models_doc: Mapping[str, Any]) -> frozenset[str]:
         conventional = api_key_env(provider_id)
         if conventional:
             names.add(conventional)
-        reference = _REF.match(str(entry.get("api_key") or "").strip())
+        reference = env_reference(str(entry.get("api_key") or ""))
         if reference is not None:
-            names.add(reference.group(1))
+            names.add(reference)
     return frozenset(names)

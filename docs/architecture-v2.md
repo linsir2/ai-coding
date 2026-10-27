@@ -260,7 +260,7 @@ MCPManager
 ## 八、前端架构(TypeScript + OpenTUI + Bun)
 
 ```
-frontend/src/
+ai_coding/frontend/src/
 ├── component/          # 组件: session-tabs, transcript, prompt(input), permission, ask, modals
 ├── dialog/             # 对话框: sessions, skills, status, help, mcp
 ├── state/              # 状态管理: session reducer(纯函数)

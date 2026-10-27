@@ -13,6 +13,7 @@ import { useBindings } from "@opentui/keymap/solid"
 import { Show, createSignal, onMount } from "solid-js"
 import { CommandPalette } from "./component/command-palette"
 import { DialogHelp } from "./component/dialog-help"
+import { DialogConnect } from "./component/dialog-connect"
 import { DialogMcp } from "./component/dialog-mcp"
 import { DialogMcpAdd } from "./component/dialog-mcp-add"
 import { DialogMemory } from "./component/dialog-memory"
@@ -211,6 +212,26 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
     }
   }
 
+  // H3: the wizard hands the list back when it succeeds, because the row it
+  // produced is what the operator wants to see — the same shape as
+  // `openMcpPanel`.  `/connect` does not switch models; enter in this list does.
+  const openModels = () =>
+    dialog.open(
+      () => (
+        <DialogModels
+          client={props.client}
+          models={props.hello.models}
+          currentKey={modelKey()}
+          onSelect={switchModel}
+          onConnectNew={openConnect}
+        />
+      ),
+      "large",
+    )
+
+  const openConnect = () =>
+    dialog.open(() => <DialogConnect client={props.client} onDone={openModels} />, "large")
+
   const switchTo = (id: string, state: SessionState) => {
     setSessionId(id)
     setHydrate({ key: id, state })
@@ -352,10 +373,17 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         group: "Model",
         desc: "Change the active model",
         palette: true,
-        run: () =>
-          dialog.open(() => (
-            <DialogModels models={props.hello.models} currentKey={modelKey()} onSelect={switchModel} />
-          )),
+        run: openModels,
+      },
+      {
+        // H3: the guided provider/model wizard behind `/connect` and the
+        // models panel's ctrl+a.
+        name: "dialog.connect.show",
+        title: "Connect a provider",
+        group: "Model",
+        desc: "Add a provider or model",
+        palette: true,
+        run: openConnect,
       },
       {
         name: "dialog.sessions.show",

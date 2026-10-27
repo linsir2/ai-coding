@@ -12,7 +12,7 @@ from typing import Any
 
 import yaml
 
-from ai_coding.paths import ancestors_up_to_home
+from ai_coding.paths import ancestors_up_to_home, config_home
 
 from .models import AppConfig, MCPConfig, MCPServerConfig, _coerce_model
 
@@ -114,6 +114,43 @@ def _mcp_doc(doc: dict[str, Any], path: str | Path | None) -> dict[str, Any]:
     servers.extend(entry for entry in extra if isinstance(entry, dict))
     section["servers"] = servers
     return section
+
+
+def _merge_model_sidecar(
+    document: dict[str, Any], base: Path | None = None
+) -> dict[str, Any]:
+    """Merge ``models.local.yaml`` into a user-layer document (H3).
+
+    The sidecar is a **map** under ``models:`` -- the same shape as the main
+    file -- because ``app_from_doc`` iterates it with ``.items()`` and
+    ``secret_env_names`` silently ignores a non-mapping.  A sidecar entry wins
+    over the same key in the main file: the wizard wrote it later, and the
+    operator can still edit it.
+
+    A missing, unreadable or non-mapping sidecar leaves the document untouched,
+    so a broken file never makes every project unstartable.
+    """
+    sidecar = ConfigLoader.models_sidecar(base)
+    if not sidecar.is_file():
+        return document
+    try:
+        loaded = yaml.safe_load(sidecar.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        _log.warning("models.local.yaml is not valid YAML; ignoring it")
+        return document
+    if not isinstance(loaded, dict):
+        return document
+    entries = loaded.get("models")
+    if not isinstance(entries, dict):
+        return document
+    models = document.setdefault("models", {})
+    if not isinstance(models, dict):
+        models = {}
+        document["models"] = models
+    for key, entry in entries.items():
+        if isinstance(entry, dict):
+            models[str(key)] = entry
+    return document
 
 
 def _to_snake(key: str) -> str:
@@ -500,15 +537,21 @@ class ConfigLoader:
                 if layer is not None:
                     chosen = layer
             document = ConfigLoader._read_layer(layer)
-            if not document:
-                continue
             # Normalize FIRST: ``_to_snake`` turns ``Hooks``/``MCP``/``Mcp`` into
             # ``hooks``/``mcp``, so filtering the raw document would leave a
             # one-word bypass.  Normalizing here also keeps ``sources`` and the
             # merged config describing the same keys.
             document = _normalize(document)
             if role == "user":
+                # H3: runtime-connected models live in a sidecar beside the user
+                # config.  Merged *before* the empty-layer skip below, because
+                # "no config.yaml yet" is exactly the fresh-install case the
+                # sidecar has to survive -- and into ``user_document`` so the
+                # project layer treats them as operator-defined.
+                document = _merge_model_sidecar(document)
                 user_document = document
+            if not document:
+                continue
             # A project layer may not grant execution, endpoints, credentials or
             # paths outside the workspace.  They are dropped here, before they
             # can be merged over the user's, and said so once -- a silent drop
@@ -570,6 +613,59 @@ class ConfigLoader:
     def load_mcp(path: str | Path | None = None) -> MCPConfig:
         doc = _normalize(ConfigLoader._read_doc(path))
         return MCPConfig.model_validate(_mcp_doc(doc, path))
+
+    @staticmethod
+    def models_sidecar(base: Path | None = None) -> Path:
+        """Where runtime-connected models live (``models.local.yaml``, H3).
+
+        Anchored on ``config_home()`` rather than on the discovered config file:
+        ``mcp_sidecar`` needs a main file to sit beside, but the model sidecar
+        has to apply on a fresh install where ``config.yaml`` does not exist yet.
+        """
+        directory = Path(base) if base is not None else config_home()
+        return directory / "models.local.yaml"
+
+    @staticmethod
+    def append_model(
+        key: str, entry: dict[str, Any], base: Path | None = None
+    ) -> Path:
+        """Persist one runtime-connected model to the sidecar (H3).
+
+        A map under ``models:``, the same shape as the main file, because
+        ``app_from_doc`` iterates it with ``.items()`` and ``secret_env_names``
+        silently ignores a non-mapping.  ``entry`` keeps ``api_key`` exactly as
+        the request wrote it -- resolving ``${VAR}`` first would put the
+        plaintext secret on disk.
+
+        Write-merge-rewrite over a file this code owns (never the operator's
+        config), then ``0600`` because it can carry a literal key.
+        """
+        directory = Path(base) if base is not None else config_home()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            pass
+        sidecar = directory / "models.local.yaml"
+        document: dict[str, Any] = {}
+        if sidecar.is_file():
+            try:
+                loaded = yaml.safe_load(sidecar.read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError):
+                loaded = {}
+            if isinstance(loaded, dict):
+                document = loaded
+        models = document.setdefault("models", {})
+        if not isinstance(models, dict):
+            models = {}
+            document["models"] = models
+        models[key] = entry
+        sidecar.write_text(
+            yaml.safe_dump(document, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        os.chmod(sidecar, 0o600)
+        return sidecar
 
     @staticmethod
     def mcp_sidecar(path: str | Path | None = None) -> Path | None:

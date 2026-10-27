@@ -322,6 +322,11 @@ class AgentLoop:
         # shared by every entry point.  Without it ``/model`` could only ever
         # report "unknown model" (``set_model`` below is the only reader).
         self.models: dict[str, ModelConfig] = dict(models or {})
+        # Engines a model switch superseded, kept until ``aclose`` (H3).  A
+        # rebuilt engine owns its client, so leaving it unclosed would leak a
+        # socket per switch; the list also covers the no-running-loop case,
+        # where there is nothing to schedule the close on.
+        self._retired_engines: list[Any] = []
         # Remembered separately from ``engine.model_config`` so ``/model`` can
         # still mark the configured default after the user switched away.
         self._current_instruction: ChatMessage | None = None
@@ -373,12 +378,17 @@ class AgentLoop:
         # Subscribing here rather than in the TUI keeps the contract honest for
         # every consumer at once (transcript, trace recorder, REPL).  Engines
         # that never retry simply never call it.
-        engine.on_retry = self._restate_engine_retry
+        # A bound method is a new object on every access, so one instance is kept
+        # and handed to every engine: a rebuilt engine carries the same observer
+        # rather than a fresh bound method (H3).
+        self._retry_observer = self._restate_engine_retry
+        self._fallback_observer = self._restate_engine_fallback
+        engine.on_retry = self._retry_observer
         # M2: the same seam one level up.  A chain of engines decides when to move
         # on, but only the loop knows how to say so, so it subscribes on their
         # behalf -- otherwise the switch stays silent until the status bar
         # refreshes at the end of the command.
-        engine.on_fallback = self._restate_engine_fallback
+        engine.on_fallback = self._fallback_observer
         # G1-1: "one turn at a time" was a Textual property -- an exclusive
         # worker plus a submit queue -- so it held inside one app instance and
         # nowhere else.  The REPL, a plan step and any future front end had only
@@ -461,7 +471,13 @@ class AgentLoop:
         )
 
     def set_model(self, name: str) -> None:
-        """Switch to a different model.
+        """Switch to a different model by rebuilding the engine.
+
+        Rebuilding rather than assigning ``model_config``: ``OpenAIChatEngine``
+        fixes ``base_url`` / ``api_key`` when it is constructed, so mutating the
+        field would keep sending requests to the previous endpoint with the
+        previous key while reporting success (H3).  A rebuild also makes the
+        target model's own ``fallback_models`` chain the one in force.
 
         Args:
             name: The model name from settings.models
@@ -472,7 +488,73 @@ class AgentLoop:
         if name not in self.models:
             available = ", ".join(sorted(self.models)) or "none configured"
             raise ValueError(f"Unknown model: {name} (available: {available})")
-        self.engine.model_config = self.models[name]
+        from ai_coding.ai.factory import build_engine
+
+        new = build_engine(
+            self.models,
+            name,
+            stream_usage=bool(getattr(self.settings, "stream_usage", True)),
+        )
+        # M1/M2: the loop subscribes the engine's retry/fallback seams on the
+        # engine's behalf; a rebuilt engine arrives without them.  The cached
+        # bound methods are reused so the observers are the same objects.
+        new.on_retry = self._retry_observer
+        new.on_fallback = self._fallback_observer
+        old, self.engine = self.engine, new
+        self._rewire_llm_helpers()
+        self._retire(old)
+
+    def add_model(self, key: str, cfg: ModelConfig) -> None:
+        """Add a model to the switchable table at runtime (``/connect``).
+
+        The table is a shallow copy made in ``__init__``, so an entry added here
+        is switchable right away and reaches the next process through the sidecar.
+
+        Raises:
+            ValueError: If ``key`` is already present.  Overwriting would hide a
+                typo in the model the user just wrote.
+        """
+        if key in self.models:
+            raise ValueError(f"model {key!r} already exists")
+        self.models[key] = cfg
+
+    def _retire(self, engine: Any) -> None:
+        """Close a superseded engine without blocking the caller.
+
+        The engine goes on the list unconditionally, because ``aclose`` is what
+        drains that list -- a switch made outside a loop (a command handler, a
+        test) has no task to schedule and would otherwise leak the client.  With
+        a running loop the close is also scheduled now, so it does not wait for
+        ``aclose``; the later drain is idempotent.  An engine without ``aclose``
+        (a test double) is left alone.
+        """
+        aclose = getattr(engine, "aclose", None)
+        if aclose is None:
+            return
+        self._retired_engines.append(engine)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        asyncio.create_task(aclose())
+
+    def _rewire_llm_helpers(self) -> None:
+        """Point compaction and memory extraction at the current model.
+
+        Both helpers bake ``model_config`` into a closure at build time, so a
+        rebuilt engine would leave them talking to the previous provider.  The
+        two collaborators are optional and may not exist yet, so each is skipped
+        when absent.
+        """
+        cfg = getattr(self.engine, "model_config", None)
+        if cfg is None:
+            return
+        from ai_coding.ai.llm_helpers import build_extractor, build_summarizer
+
+        if self.context is not None:
+            self.context.summarizer = build_summarizer(cfg)
+        if self.memory is not None:
+            self.memory.extractor = build_extractor(cfg)
 
     # ---- posture (18 §10.2) ------------------------------------------------
 
@@ -2300,6 +2382,19 @@ class AgentLoop:
         except Exception:  # noqa: BLE001 — shutdown is best-effort
             _log.debug("harvest flush on close failed or timed out", exc_info=True)
         await self.engine.aclose()
+        # H3: engines a model switch superseded (or deferred for lack of a
+        # running loop) hold their own clients; closing them here is best-effort
+        # so a broken one cannot stop the loop's shutdown.
+        for retired in self._retired_engines:
+            try:
+                aclose = getattr(retired, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+            except Exception:  # noqa: BLE001 — shutdown is best-effort
+                _log.debug("retired engine close failed", exc_info=True)
+        # Dropped, not just drained: a second ``aclose`` must not re-close them,
+        # and the references would otherwise outlive the loop.
+        self._retired_engines.clear()
 
     def memory_status(self) -> dict[str, Any]:
         """Memory counts for the UI (``/memory`` / ``/status``); never raises."""

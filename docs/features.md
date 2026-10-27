@@ -35,23 +35,23 @@ R10 之前存在 `config-check` / `ask` / `memory` / `trace` / `repl` 五个子�
 
 ## 全屏 TUI（OpenTUI 前端）
 
-界面由 `frontend/`（TypeScript + OpenTUI + Bun）全屏渲染，经 `server/` 的 Unix socket IPC
+界面由 `ai_coding/frontend/`（TypeScript + OpenTUI + Bun）全屏渲染，经 `server/` 的 Unix socket IPC
 与后端对话；它取代了 R10 的 `prompt_toolkit` 版本与随后的 Textual 版本（`ai_coding/ui/`，
 GUI 复刻里程碑中已删除）。旧 Textual 实现的布局/组件细节见文末「历史」备注。
 
 | 区域 | 实现 | 内容 |
 |---|---|---|
-| 顶部 | `frontend/src/component/session-tabs.tsx` | 多会话标签（切换式）+ New |
-| 中部 | `frontend/src/state/` + `component/` | 用户输入、assistant 流式 Markdown、思考折叠块、工具事件块（开始/结束/chunk）、子智能体嵌套行、todo/台账 dim 行、回合终态 |
-| 底部 | `frontend/src/component/prompt.tsx` | 输入（Enter 提交；回合运行中仍可输入，提交的内容进队列，当前回合结束后按序自动执行；`/resume` 走会话对话框） |
-| 弹层 | `frontend/src/dialog/` + `component/permission.tsx` | 审批（←/→ 选择，y/a/n 快捷键）、命令面板 / 模型 / 会话 / 技能 / 状态 / 帮助对话框 |
+| 顶部 | `ai_coding/frontend/src/component/session-tabs.tsx` | 多会话标签（切换式）+ New |
+| 中部 | `ai_coding/frontend/src/state/` + `component/` | 用户输入、assistant 流式 Markdown、思考折叠块、工具事件块（开始/结束/chunk）、子智能体嵌套行、todo/台账 dim 行、回合终态 |
+| 底部 | `ai_coding/frontend/src/component/prompt.tsx` | 输入（Enter 提交；回合运行中仍可输入，提交的内容进队列，当前回合结束后按序自动执行；`/resume` 走会话对话框） |
+| 弹层 | `ai_coding/frontend/src/dialog/` + `component/permission.tsx` | 审批（←/→ 选择，y/a/n 快捷键）、命令面板 / 模型 / 会话 / 技能 / 状态 / 帮助对话框 |
 
-键位：`<leader>`（ctrl+x）+ `q` 退出；`esc` 两段式中断；`ctrl+x m/l/s/n` 打开对应对话框。键位表以 `frontend/src/keymap.ts` 为准。
+键位：`<leader>`（ctrl+x）+ `q` 退出；`esc` 两段式中断；`ctrl+x m/l/s/n` 打开对应对话框。键位表以 `ai_coding/frontend/src/keymap.ts` 为准。
 
 ## slash 命令
 
 手打 `/xxx`（`app/slash.py` 解析，`app/commands.py::handle_input` 分发；TUI 侧由
-`frontend/src/prompt` 的自动补全 + `util/slash.ts` 过滤）；输入 `/` 会唤起命令面板（见 R12 节），
+`ai_coding/frontend/src/prompt` 的自动补全 + `util/slash.ts` 过滤）；输入 `/` 会唤起命令面板（见 R12 节），
 所以 `/` 本身不是普通文本。未知 `/xxx` 仍会**当作普通输入发给模型**，不是错误。
 
 > **TUI 接线状态（A2）**：TUI 里 `/` 开头的行统一经 `session.command` 交给上面的
@@ -1041,7 +1041,7 @@ app 的 50ms flush 定时器**只在真的写了内容时**才吸底，否则空
 
 **验证方式**：`tests/test_server_ipc.py`（socket 级审批/会话/中断 E2E）、
 `tests/test_server_bridge.py`（事件→IPC 映射）、`tests/test_console_text_boundary.py`
-（markup 边界守卫），前端渲染由 `frontend/test/`（bun test）覆盖，另以真实终端人工验证。
+（markup 边界守卫），前端渲染由 `ai_coding/frontend/test/`（bun test）覆盖，另以真实终端人工验证。
 
 
 

@@ -149,6 +149,23 @@ def test_sidecar_env_references_are_stripped_from_children(tmp_path, monkeypatch
     assert "MY_TOKEN" in layered.secret_env_names
 
 
+def test_a_workspace_sidecar_is_not_read(tmp_path):
+    """The workspace is project-controlled: a committed sidecar must be inert.
+
+    The sidecar lives beside the *user* config for this reason — anchoring it on
+    the workspace would let a repository choose where requests go.
+    """
+    paths = _paths(tmp_path)
+    (paths.workspace / "models.local.yaml").write_text(
+        "models:\n  planted:\n    base_url: https://planted.test/v1\n    api_key: k\n",
+        encoding="utf-8",
+    )
+
+    layered = ConfigLoader.load_layers_report(paths)
+
+    assert "planted" not in layered.config.models
+
+
 def test_an_explicit_path_run_ignores_the_sidecar(tmp_path):
     """``--path`` means "that file, and only that file".
 

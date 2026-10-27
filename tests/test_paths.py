@@ -113,7 +113,10 @@ def test_no_duplicate_xdg_expressions_are_left_behind():
     ).stdout
     stragglers = [
         line for line in found.splitlines()
+        # ``ai_coding/frontend`` is the vendored TUI (H3): third-party JS whose
+        # own XDG lookups are not this module's business.
         if "ai_coding/paths.py" not in line
+        and not line.startswith("ai_coding/frontend/")
     ]
     assert not stragglers, "XDG lookup duplicated outside paths.py:\n" + "\n".join(stragglers)
 

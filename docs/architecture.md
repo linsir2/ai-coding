@@ -28,7 +28,7 @@ ai_coding/
 ├─ skills/         技能目录注册表
 ├─ app/            命令分发与行式输出：slash / commands（handle_input）/ console（DialogueConsole）
 └─ server/         后端 IPC：world（组合根）、service（Unix socket）、handlers、launcher（起 bun 前端）
-        前端本体在 `frontend/`（TypeScript + OpenTUI）：types/ → ipc / keymap → state/ → component/ → routes/
+        前端本体在 `ai_coding/frontend/`（TypeScript + OpenTUI）：types/ → ipc / keymap → state/ → component/ → routes/
 ```
 
 依赖方向单向：`domain` 不被任何层反向 import；`config`/`infra` 只依赖 `domain`/标准库；
@@ -91,7 +91,7 @@ cli.py::main(path, workspace, skills)
                                           hooks, steering)
             └─ approval = CLIApprovalCallback()（provider 由 handlers._wire_approval 安装）
          service = IpcService(/tmp/ai-coding-<pid>.sock) + make_handlers(world, service)
-         spawn bun frontend/src/index.tsx（AI_CODING_SOCKET 环境变量；tty 归前端）
+         spawn bun ai_coding/frontend/src/index.tsx（AI_CODING_SOCKET 环境变量；tty 归前端）
 ```
 
 > ⚠️ **已被 M3 取代**：M3 起 `open_all()` 改为非阻塞（只起 supervisor 即返回），
@@ -154,7 +154,7 @@ sequenceDiagram
 | 新增工具 | 继承 `BaseTool`（实现 `execute(params, ctx)`），在 `build_tool_registry` 注册 |
 | 改审批策略 | 实现 `ApprovalCallback`，在 `server/world.py::build_world` 传入 |
 | 观察循环 | 实现 `LoopObserver`（`on_event`）并 braid 进 loop；`server/bridge.py` 把事件映射成 IPC `event` 通知推给前端 |
-| 改 TUI 布局 / 渲染 | 改 `frontend/`（TypeScript + OpenTUI）：布局在 `component/`，事件→视图在 `state/` |
+| 改 TUI 布局 / 渲染 | 改 `ai_coding/frontend/`（TypeScript + OpenTUI）：布局在 `component/`，事件→视图在 `state/` |
 | **加一个运行时守卫**（R4b） | 在 `core/guard.py` 实现 `check()`（返回 `GuardDecision`），加进 `GuardChain`；在 `cli._make_guards` 装配 |
 | **挂钩子**（R4c） | 配置 `hooks.events`，写脚本（stdin/stdout JSON）或放 `<workspace>/.ai-coding/hooks/*.py`（进程内） |
 | **改可观测**（R4a） | 自己实现 `LoopObserver` 并 `Braid` 进去；或改 `core/trace.py` 的落盘与脱敏策略 |

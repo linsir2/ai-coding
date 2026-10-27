@@ -38,9 +38,9 @@ config.local.yaml
 # Generated TUI preview (scripts/tui_shot.py)
 docs/tui-*.svg
 
-# Frontend (bun)
-frontend/node_modules/
-frontend/.bun/
+# Frontend (bun) — inside the package so the wheel can carry it
+ai_coding/frontend/node_modules/
+ai_coding/frontend/.bun/
 
 # Runtime-added MCP servers (the wizard writes this; never commit secrets)
 mcp.local.yaml

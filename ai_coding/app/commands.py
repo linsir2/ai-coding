@@ -284,6 +284,12 @@ async def handle_input(
         return REPLAction.CONTINUE, session
     if cmd.name == "config":
         return _handle_config(loop, session, console)
+    if cmd.name == "connect":
+        console.info(
+            "[connect] 在 TUI 里按 ctrl+a 打开连接向导；"
+            "非 TUI 运行用 `ai-coding config init` 配置模型与密钥"
+        )
+        return REPLAction.CONTINUE, session
     return REPLAction.CONTINUE, session
 
 
@@ -1172,11 +1178,11 @@ def _handle_model(
         try:
             set_model(target)
         except ValueError as exc:
-            # A model can be configured and still not be servable: with a
-            # fallback chain the engine only knows the models on that chain, and
-            # switching to a third one would mean rebuilding it (G7).  The
-            # command has to say so -- it used to raise out of the submit path,
-            # where nothing catches it.
+            # ``set_model`` rebuilds the engine now, so a configured model is
+            # normally switchable; a ``ValueError`` still means this one cannot
+            # be served (an unset ``${VAR}`` reference, a bad endpoint, or a
+            # provider that refused the rebuild).  The command has to say so --
+            # it used to raise out of the submit path, where nothing catches it.
             console.error(f"[model] cannot switch to '{target}': {exc}")
             return REPLAction.CONTINUE, session
         console.info(f"[model] switched to {target}")
