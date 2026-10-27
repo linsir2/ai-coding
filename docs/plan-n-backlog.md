@@ -6,9 +6,10 @@
 > **前情**：roadmap §十三 列了 N-1/N-2/N-6；`plan-m-d2.md` §7.1 列了安全残余。
 > 本方案把两者合并成一轮可独立交付的清理。
 >
-> **版本**：v5 —— 两轮方案评审（第 1 轮 2 P0 + 9 P1，第 2 轮 1 P0 + 4 P1）全部收口；
-> 另加**第 2 次调研（§1.4，一手源码）推翻了 known_miss 的口径**（解不开的目标 → 询问，
-> 不是硬拒），并修掉一处跑全量时**新发现**的 `wrap()` fail-open。**可开工**（见 §八）。
+> **版本**：v6 —— 三轮方案评审（第 1 轮 2 P0 + 9 P1，第 2 轮 1 P0 + 4 P1，
+> 第 3 轮 0 P0 + 3 P1）全部收口；另加**第 2 次调研（§1.4，一手源码）推翻了 known_miss 的口径**
+> （解不开的目标 → 询问，不是硬拒），以及一处跑全量时**新发现**的 `wrap()` fail-open。
+> **可开工**（见 §八）。
 
 ---
 
@@ -82,7 +83,7 @@ Codex 的应对**不是加正则**，而是两条：
 |---|---|---|
 | **Codex** | `Some("rm") if rm_args_include_force_option(...)` → `ForcedRm` → **Prompt（询问）** —— **完全不看目标能否解析** | [is_dangerous_command.rs:142](file:///workspace/_vendors/codex/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs#L142)（源码） |
 | **Codex** | 规则未命中 dangerous 时：`AskForApproval::Never` → **Allow**（注释直书 "relying on the sandbox for protection"）；`UnlessTrusted` → **Prompt** | `exec_policy.rs:L811-L846`（源码） |
-| **opencode**（portable 扫描器） | `boundDollar && boundOpen && variableSink` → `opaque{reason:"dynamic-execution"}` → `shell.ts` **直接失败**（DENY）。**触发条件是变量被当作命令名** | [scan.ts:213](file:///workspace/_vendors/opencode/packages/core/src/shell/scan.ts#L213)、`shell.ts:L219-L220`（源码） |
+| **opencode**（portable 扫描器） | 返回 `opaque{reason:"dynamic-execution"}` → **命令失败**。触发条件是 **`$` 展开进入算术/绑定求值上下文**（`$((...))`、`${name:off:len}`、`let`、`eval`、`PS4`…），**不是**"变量被当作命令名" | [scan.ts:213-214](file:///workspace/_vendors/opencode/packages/core/src/shell/scan.ts#L213-L214)、`bashEvaluatesExpansion` [:1163-1178](file:///workspace/_vendors/opencode/packages/core/src/shell/scan.ts#L1163-L1178)、消费点 `parse.ts:219-220`、反证 `shell-parse-parity.test.ts:41`（`$COMMAND status` 期望 `scanned`） |
 | **opencode**（legacy 扫描器） | `expandKnownDirectory`：`if value.includes("$") \|\| value.includes("`") \|\| value.startsWith("(") return` —— **解不开就跳过解析**，落默认 `ask` | `parse.ts:L358-L367`（源码） |
 | **Claude Code** | 规则按**命令文本前缀**匹配（支持 `*`），**不做变量展开**；不匹配的 bash 命令 → **默认询问** | 官方文档 [iam](https://docs.claude.com/en/docs/claude-code/iam) [SINGLE-SOURCE] |
 | **Sandlock** | **不主张在文本层猜展开** —— 静态策略下沉内核强制，运行时决策交 supervisor | [arXiv 2605.26298](https://arxiv.org/pdf/2605.26298v1) |
@@ -91,7 +92,7 @@ Codex 的应对**不是加正则**，而是两条：
 
 | 口径 | 支持证据 | 代价 |
 |---|---|---|
-| **a) 硬拒** | opencode portable（**仅程序名**不可解）；Codex 在 `Never` 档下 dangerous → Forbidden | **误报高**：`rm -rf $DIR`、`rm -rf $PWD` 都是正常用法；把"读不懂"与"危险"混同 |
+| **a) 硬拒** | Codex 在 `Never` 档下 dangerous → Forbidden | **误报高**：`rm -rf $DIR`、`rm -rf $PWD` 都是正常用法；把"读不懂"与"危险"混同 |
 | **b) 询问** | **Codex 默认**（`ForcedRm → Prompt`）；**Claude Code 默认**；**opencode legacy 默认** | 摩擦、审批疲劳；但保留可用性 |
 | **c) 放行 + OS 兜底** | Codex `Never` 档；opencode legacy；Sandlock | 依赖沙箱正确性；沙箱不可用时必须 fail-closed |
 
@@ -101,7 +102,7 @@ Codex 的应对**不是加正则**，而是两条：
 >
 > **所以 §C 原设计里"`rm -rf $<解不开>` → 硬拒"是比 Codex 更严的口径**，
 > 且引入了原型实测到的真实 FP 类。**本轮改为 (b)：解不开的目标 → 询问 + OS 写边界兜底；
-> 只有"程序名解不开"与"目标解析到受保护位置"才硬拒**（与 opencode 的 `dynamic-execution` 一致）。
+> 只有"程序名解不开"与"目标解析到受保护位置"才硬拒**。
 
 ---
 
@@ -351,6 +352,37 @@ _WORD_NODES = (
 
 Shell **确实**会把这些当词传下去（`$HOME` / `$(pwd)` 展开后就是一个词）。补上它们，规则才看得见。
 
+**①b `_string_content` 要包含展开子节点**（评审第 3 轮的 FN，**安全侧**）
+
+实测：`rm -rf "$HOME"` 的 `view.arguments` 是 **`()`** —— `"$HOME"` 是 `string` 节点，
+其唯一子节点是 `expansion`，而 `_string_content`（[:124-135](file:///workspace/ai-coding/ai_coding/shell_parse.py#L124-L135)）
+**只收集 `string_content` 子节点** → 返回 `""` → 整个参数丢失。
+
+```python
+def _string_content(node: Any) -> str:
+    """The content a quoted string contributes, without its quote marks.
+
+    Expansion children are included: ``"$HOME"`` is one word that expands to the
+    home directory, and dropping it would drop the argument entirely.
+    """
+    raw = _text(node)
+    if node.type == "raw_string":
+        return raw[1:-1] if len(raw) >= 2 and raw[0] == raw[-1] == "'" else raw
+    return "".join(
+        _text(part)
+        for part in node.children
+        if part.type
+        in ("string_content", "simple_expansion", "expansion", "concatenation")
+    )
+```
+
+> **已知残余 FP（评审 P3，记录不修）**：`rm -rf '$HOME'`（**单引号**）仍会被判危险 ——
+> 单引号在 shell 里是**字面量**，但 `_string_content` 的 `raw_string` 分支
+> **已经把引号剥掉**，红线层拿到的词是 `$HOME`，无法区分。
+> 要修需要让 `_string_content` 对 `raw_string` 保留引号，而那会波及
+> `path_candidates`（`_paths_in` 对它做 `.split()`）与 `command_words`。
+> **代价大于收益**（该形式极罕见，且拒了只是"啰嗦"，无安全损失），**记为残余**。
+
 > **评审 P2（已采纳）**：`_WORD_NODES` 同时驱动 `_paths_in` → `path_candidates`
 > （[shell_parse.py:202](file:///workspace/ai-coding/ai_coding/shell_parse.py#L202)），
 > 所以 `cat ~/.ssh/id_$USER` 会**新进入** `plan_runner` 的 shell 路径候选
@@ -363,23 +395,22 @@ Shell **确实**会把这些当词传下去（`$HOME` / `$(pwd)` 展开后就是
 ```python
 _EXPANSIONS = {"HOME": str(Path.home()), "PWD": os.getcwd(), "USER": os.environ.get("USER", "")}
 
-def _expand(word: str, assignments: Mapping[str, str] | None = None) -> str:
-    """``~`` / ``$VAR`` / ``${VAR}`` / **同行赋值** → 具体路径；解不开 → ``""``。
+def _expand(word: str) -> str:
+    """``~`` / ``$VAR`` / ``${VAR}`` → 具体路径；解不开 → ``""``。
 
     返回 ``""``（而不是哨兵）是有意的：解不开的目标**不是**受保护目标，
     于是不触发红线 → 落到 gate 的 **WARN（询问）** —— 与 Codex 的
     ``ForcedRm → Prompt`` 同口径（§1.4）。
+
+    **只剥双引号**：单引号在 shell 里是**字面量**（``'$HOME'`` 是一个名叫
+    ``$HOME`` 的目录），剥掉会把它误判成家目录（评审 P3）。
     """
-    out = word.replace('"', "").replace("'", "")     # 引号是 shell 的，不是路径的
+    out = word.replace('"', "")
     if out == "~" or out.startswith("~/"):
         out = _EXPANSIONS["HOME"] + out[1:]
     elif out.startswith("~"):
         return ""                                # ~user：不是我们的家
-    values = dict(_EXPANSIONS)
-    for name, value in (assignments or {}).items():
-        if value:
-            values[name] = value                 # `D=/data; rm -rf $D` → /data
-    for name, value in values.items():
+    for name, value in _EXPANSIONS.items():
         if not value:
             continue                             # 未设置（如 USER 为空）→ 不解
         out = re.sub(r"\$\{" + name + r"\}", value, out)
@@ -389,13 +420,19 @@ def _expand(word: str, assignments: Mapping[str, str] | None = None) -> str:
     return out
 ```
 
-**评审修的四处**：
+> **不做"同行赋值可解"**（评审 P1）：v5 曾写 `D=/data; rm -rf $D` 的 `$D`
+> 可由同行赋值解出 —— 但 `command_views` **不返回赋值**，且 `D=/data` 与
+> `rm -rf $D` 被 `;` 分成**两条独立命令**（[shell_parse.py:276-305](file:///workspace/ai-coding/ai_coding/shell_parse.py#L276-L305)），
+> 跨命令收集是另一个机制。**该论证已删除**：`D=/data; rm -rf $D` 实际是
+> **解不开 → 询问**，verdict 为 `""` —— 与 `SAFE` 同类（见 C.2）。
+
+**评审修的五处**：
 
 * `(?![A-Za-z0-9_])` **词边界**（否则 `$PWDDIR` 被 `$PWD` 猜成 `<cwd>DIR`）；
 * `~user` **不猜**（`_HOME + "user"` 是错的）；
-* **剥引号**（P2）：`_WORD_NODES` 补了 `concatenation` 后，`command_views` 对拼接节点取
-  `_text`（**含引号**），`rm -rf "$HOME"/x` 会展开成 `"<home>"/x`，引号残留让判定失效；
-* **空值不解**（P3）：`$USER` 未设时展开成 `""` → `normalized = "/"` → 误判危险。
+* **只剥双引号**（P3）：单引号是字面量，剥掉会把 `'$HOME'` 误判成家目录；
+* **空值不解**（P3）：`$USER` 未设时展开成 `""` → `normalized = "/"` → 误判危险；
+* ~~同行赋值~~ —— **不做**（见上）。
 
 **③ `rm -rf` 的受保护目标**（`bash_redlines.py`）
 
@@ -404,11 +441,13 @@ def _expand(word: str, assignments: Mapping[str, str] | None = None) -> str:
 ```python
 _PREFIX_ROOTS = _SYSTEM_ROOTS - {"/home"}      # /home 走精确 + 深度3，见下
 
-def _is_protected_target(path: str, assignments: Mapping[str, str] | None = None) -> bool:
-    expanded = _expand(path, assignments)
+def _is_protected_target(path: str) -> bool:
+    expanded = _expand(path)
     if not expanded:
         return False                       # 解不开 → 不是受保护目标 → 交给 gate 询问（§1.4）
-    normalized = expanded.rstrip("/") or "/"
+    # 先 normpath：`/home/../etc`、`/home//user`、`/home/./user` 都要归一，
+    # 与 credential_match 的 posixpath.normpath 同口径（评审 P2）。
+    normalized = posixpath.normpath(expanded) or "/"
     if normalized in ("/", "/*"):
         return True
     parts = normalized.split("/")
@@ -430,7 +469,7 @@ def _is_protected_target(path: str, assignments: Mapping[str, str] | None = None
 | 根 / 顶层系统目录 | **精确或前缀**匹配 `_PREFIX_ROOTS`（`/etc` 与 `/var/log` 都命中） | `rm -rf /var/log`、`rm -rf /etc` |
 | 操作者的家 | 精确等于 `Path.home()` | `rm -rf ~`、`rm -rf $HOME`、`rm -rf ${HOME}` |
 | `/home` 本身 | 精确等于 `/home` | `rm -rf /home`（评审 P1：前缀集排除了它，深度 3 也盖不住） |
-| 别人的家 | `/home/<name>`（深度 3） | `rm -rf /home/user` |
+| 别人的家 | `/home/<name>`（深度 3） | `rm -rf /home/user`、`rm -rf /home//user`、`rm -rf /home/./user` |
 | `..` 结尾 | 最后一节是 `..` | `rm -rf ./..` |
 | **解不开的展开** | `_expand` 返回 `""` → **False** | `rm -rf $DIR` → **询问**（不是硬拒，§1.4） |
 
@@ -447,6 +486,9 @@ def _is_protected_target(path: str, assignments: Mapping[str, str] | None = None
 > **评审 P1（已修）**：把 `/home` 从前缀集排除后，**`rm -rf /home` 自己漏了**
 > （深度 3 只盖 `/home/<name>`）—— 与 P0 同类，且**语料里没有这条**，
 > 所以"OLD 19 / NEW 19"照样照不出来。已补 `normalized == "/home"`。
+> **评审 P2（已修）**：**不做 `normpath` 会漏** `rm -rf /home/../etc`（实际删 `/etc`）、
+> `/home//user`、`/home/./user`、`/home/user/.` —— 而 `credential_match` 用
+> `posixpath.normpath`，**同仓库两处口径不一致**。已统一。
 
 > **`/home` 从"前缀集"里排除**，只走精确 + 深度 3 —— 否则 `rm -rf /home/<user>/proj/build`
 > 会被误拒（`/home` 常是工作区所在）。**实测 `rm -rf /home/user/proj/build` 放行。**
@@ -562,12 +604,17 @@ def _programs(view: CommandView) -> list[str]:
 不是受保护目标**（受保护的是根 / 顶层系统目录 / 各家目录）。所以它放行 ——
 **与 `rm -rf /<工作区绝对路径>` 放行是一致的**，而后者今天就是放行的。
 
-**② `D=/data; rm -rf $D`** —— **同行赋值可解**：`$D` = `/data`。
-`/data` 不在受保护集合里（不是根、不是顶层系统目录、不是家），所以**不是红线** ——
-与 `rm -rf /tmp/build`（语料里已是 `SAFE`）**同一判据**。
-真正的边界是 **OS 写边界**：`/data` 在工作区外 → 沙箱内 EROFS → 拦住。
+**② `D=/data; rm -rf $D`** —— **解不开**（`command_views` 不返回赋值，且 `D=/data` 与
+`rm -rf $D` 是两条独立命令，见 C.1② 的说明）→ **不触发红线** → gate 落 **WARN（询问）**。
 
-> **这两条都不是"静默漏洞"**：verdict 仍是 `""`，gate 仍是 **WARN（询问）**。
+> **注意"放行"是红线层的措辞，不是 gate 层的**（评审 P2）：`bash` 在 `_warn_tools` 里，
+> **非红线即 WARN**，不是 ALLOW。所以 `rm -rf $PWD` 与 `rm -rf $DIR` 在 **gate 层都是 WARN**，
+> 区别只在**红线层**（前者 verdict `""`、后者也是 `""`）。
+> 文档里统一写"**不触发红线**"，不写"放行"。
+
+**真正的边界是 OS 写边界**：`/data` 在工作区外 → 沙箱内 EROFS → 拦住。
+
+> **这两条都不是"静默漏洞"**：verdict 是 `""`，gate 是 **WARN（询问）**。
 > C.4 的兜底用例也**测不到它们**（一个删工作区内、一个被 OS 边界拦）——
 > 所以文档里必须写明"工作区内的删除是操作者自己的事；工作区外的删除由 OS 写边界兜底"。
 
@@ -664,6 +711,18 @@ def _authorize(proxy, host, port) -> Address:
     if not _cidr_allowed(str(address[3][0]), proxy.allow):
         raise _Refused(...)
     return address
+```
+
+**评审第 3 轮的 P2（已修）**：v5 只画了 `_authorize`，**`_serve_connection` 没画** ——
+它在 [:503-504](file:///workspace/ai-coding/ai_coding/server/sandbox_proxy.py#L503-L504) 与
+[:516-518](file:///workspace/ai-coding/ai_coding/server/sandbox_proxy.py#L516-L518)
+**各自** `proxy.resolve_target(host, port)` 并**丢弃** `_authorize` 的返回值。
+只改 `_authorize` 的话，**双次解析与重绑定窗口依旧存在**，与 §8.2 自称已修的 P1 矛盾。
+**两处必须一并改成**：
+
+```python
+address = _authorize(proxy, host, port)      # 授权 + 解析，一次
+_connect(address, ...)                        # 复用同一个 pinned 地址
 ```
 
 **评审第 2 轮的 P0（已修）**：v3 的伪代码是**顺序 AND**（两个 `if not ...: raise`），
@@ -842,10 +901,35 @@ roots 实际在**三处**被构造并下发，v1 的清单只覆盖了工具栈�
 > registry = _build_tool_registry(..., gate=gate, sandbox=sandbox)
 > ```
 >
-> `JobRegistry` 侧把 `roots` 接受为 `Sequence[Path] | Callable[[], Sequence[Path]]`，
-> `start()` 里 `roots = self._roots() if callable(self._roots) else self._roots`
-> （[jobs.py:249](file:///workspace/ai-coding/ai_coding/core/jobs.py#L249)、
-> [:293-295](file:///workspace/ai-coding/ai_coding/core/jobs.py#L293-L295)）。
+> `JobRegistry` 侧把 `roots` 接受为 `Sequence[Path] | Callable[[], Sequence[Path]]`：
+> **`__init__` 与 `start()` 都要改**（评审第 3 轮 P2）——
+> [jobs.py:249](file:///workspace/ai-coding/ai_coding/core/jobs.py#L249) 现在是
+> `self._roots = tuple(Path(root_path) for root_path in roots)`，传函数会
+> `TypeError: 'function' object is not iterable`：
+>
+> ```python
+> # jobs.py
+> self._roots = roots if callable(roots) else tuple(Path(p) for p in roots)
+> ...
+> roots = self._roots() if callable(self._roots) else self._roots   # start() 里
+> ```
+
+**评审第 3 轮的 P2（已修）**：`BashTool` **保留 `_roots` 属性**。
+[test_process_sandbox.py:382](file:///workspace/ai-coding/tests/test_process_sandbox.py#L382)
+断言 `tool._roots == (worktree.resolve(),)`，直接读该属性 —— 若 `BashTool`
+改成"持 `Sandbox`"而不留 `_roots`，这条会 `AttributeError`。
+所以 `BashTool` 持 `Sandbox`（或一个 `Callable`）**同时**保留 `_roots`
+（作为"当前 roots 的快照视图"，供断言与调试用）。
+
+**评审第 3 轮的 P2（已修）**：**子智能体的 `Sandbox` 必须以 `extra_roots=()` 构造**。
+`_assemble_registry` 里的 `sandbox` 用 `workspace=workdir` + **父配置**的
+`extra_workspace_roots` 构造（[builder.py:220-227](file:///workspace/ai-coding/ai_coding/tools/builder.py#L220-L227)），
+于是 `sandbox.live_roots()` 会带上**父配置的 roots**；而当前
+`roots = tuple(sandbox_roots)`（[:236](file:///workspace/ai-coding/ai_coding/tools/builder.py#L236)）
+**刻意只给子 worktree**，且 [:351-353](file:///workspace/ai-coding/ai_coding/tools/builder.py#L351-L353)
+注释明写"deliberately NOT passed down"。
+**子栈的 `live_roots()` 只应含子 worktree + 子授权**，否则会把父配置 roots 带进子栈（越权）。
+
 
 子智能体那条：子 `BashTool` 的 roots 绑定**子 worktree**，需要一个绑定到子 sandbox/gate 的
 `live_roots()` —— 否则不变量只对主会话成立（评审 P2）。
@@ -890,18 +974,24 @@ def wrap(self, argv, roots):
 |---|---|---|
 | `test_the_read_boundary_hides_a_directory_and_a_file` | :767 | `@_NEEDS_BWRAP`（要真 bwrap 跑 `_spawn`） |
 | `test_a_writable_path_under_a_read_deny_is_still_unreadable` | :800 | `@_NEEDS_BWRAP`（同上） |
-| `test_wrap_keeps_the_isolation_switches` | :593 | **改写**（见下） |
+| `test_wrap_keeps_the_isolation_switches` | :593 | **改写**（删掉 `backend.tier` 分支，见下） |
 | `test_wrap_puts_the_writable_bind_after_the_readonly_root` | :568 | **改写** |
 | `test_wrap_mounts_tmpfs_before_the_roots` | :580 | **改写** |
 | `test_wrap_masks_after_the_tmpfs_and_the_binds` | :617 | **改写** |
 | `test_the_deny_tier_cleans_inherited_proxy_env` | :1366 | **改写** |
 | `test_the_off_tier_cleans_inherited_proxy_env` | :1373 | **改写** |
+| **`test_an_untraversable_deny_path_does_not_abort_the_wrap`** | **:864** | **改写**（评审 P1：v5 漏了这条 —— 它 :899 调 `wrap()`、:913 断言 `in argv`，无 bwrap 时 `None` 会 `TypeError`） |
 
-> **评审第 2 轮的 P2（已修）**：v3 把 `test_wrap_keeps_the_isolation_switches` 归到"加守卫"，
-> 但它和另外 5 条一样是**纯 argv 形状断言**（唯一例外是它读了 `backend.tier`）——
-> 加守卫与"形状测试不需要真机制"自相矛盾。**6 条全部改写成不依赖 `wrap()` 的返回值**
-> （直接断言 `_build(argv, roots, "full")` 的产物，`_build` 在
-> [process_sandbox.py:872](file:///workspace/ai-coding/ai_coding/security/process_sandbox.py#L872)，
+> **评审第 3 轮的 P1（已修）**：全仓 `.wrap(` 调用点共 **10 处**，其中 :1210 已有守卫，
+> **受影响的是 9 条**（不是 v5 写的 8 条）—— 漏的正是
+> `test_an_untraversable_deny_path_does_not_abort_the_wrap`（:864）。
+>
+> **评审第 2 轮的 P2（已修）**：`test_wrap_keeps_the_isolation_switches` 的
+> `if backend.tier == "full"` 分支（:607-614）**必须删掉** —— 它读 `backend.tier`
+> 会触发 `_probe()`，无 bwrap 时 `_tier=="none"` → 走 `else` 断言 `--unshare-pid not in argv`，
+> 而 `_build(..., "full")` 的产物**含** `--unshare-pid` → 仍红。
+> **6 条全部改写成不依赖 `wrap()` 的返回值**（直接断言 `_build(argv, roots, "full")` 的产物，
+> `_build` 在 [process_sandbox.py:872](file:///workspace/ai-coding/ai_coding/security/process_sandbox.py#L872)，
 > `_TIER_FLAGS["full"]` 存在、不依赖 probe）；**只有 2 条**（真 bwrap 跑 `_spawn` 的）加守卫。
 > **它们测的是形状，形状不该需要内核。**
 
@@ -937,20 +1027,20 @@ v1 用 `_UnavailableBackend`，但它 `tier = "full"` 且 `wrap()` 返回 `list(
 | `scripts/verify_snapshot_stderr.py` | **新**：以非 root 真子进程复现并验证（同 `verify_real_eacces.py` 模式） | N-1 Prove |
 | `tests/test_m4_security.py` | rg 守卫 + 正向断言 | N-6 |
 | `tests/integration/test_r17_parity.py` | rg 守卫 + 钉住 rg 分支 | N-6 |
-| `ai_coding/shell_parse.py` | `_WORD_NODES` 补 `concatenation`/`simple_expansion`/`expansion`/`command_substitution` | C.1① |
-| `ai_coding/security/bash_redlines.py` | `_expand`（词边界/剥引号/空值不解/**同行赋值可解**，**解不开 → `""` 不判受保护**）；`_is_protected_target`（精确+前缀、`/home`、`..` 结尾）；`_programs` 完整算法；`doas`；`--force-with-lease`；程序名不可审计规则；**`_reads_credential` 不动**（对原词判） | C.1②③④⑤⑥ |
+| `ai_coding/shell_parse.py` | `_WORD_NODES` 补 `concatenation`/`simple_expansion`/`expansion`/`command_substitution`；`_string_content` 补展开子节点 | C.1① / ①b |
+| `ai_coding/security/bash_redlines.py` | `_expand`（词边界/只剥双引号/空值不解，**解不开 → `""` 不判受保护**）；`_is_protected_target`（**normpath** + 精确/前缀 + `/home` + `..` 结尾）；`_programs` 完整算法；`doas`；`--force-with-lease`；程序名不可审计规则；**`_reads_credential` 不动**（对原词判） | C.1②③④⑤⑥ |
 | `ai_coding/security/redline_corpus.py` | **14 条** `known_miss` → `dangerous`；**2 条** → `SAFE`；`MIN_KNOWN_MISS` → 0 | C.3 |
 | `scripts/redline_benchmark.py` | 计数随语料自动更新（无需改） | C.3 |
 | `tests/test_redline_benchmark.py` | `test_known_miss_is_surfaced` 改写（断言 `known_miss` 计数为 0） | C.3 |
 | `tests/test_process_sandbox.py` | **新**：16 条在 `enforce` 沙箱内全部写不出去 / 读不到凭据 | C.4 |
-| `ai_coding/server/sandbox_proxy.py` | `_host_allowed` 跳过 CIDR 条目；新增 `_cidr_allowed`；`_authorize` 真 OR 且**只 resolve 一次**（返回 `Address`，用 `address[3][0]`）；`SandboxProxy.__init__` 校验 malformed CIDR | D.1 / D.2 |
+| `ai_coding/server/sandbox_proxy.py` | `_host_allowed` 跳过 CIDR 条目；新增 `_cidr_allowed`；`_authorize` 真 OR 且**只 resolve 一次**（返回 `Address`，用 `address[3][0]`）；**`_serve_connection` 两处改用 `_authorize` 的返回值**；`SandboxProxy.__init__` 校验 malformed CIDR | D.1 / D.2 |
 | `ai_coding/config/models.py` | `NetworkConfig.allow` 的 malformed CIDR 校验 | D.2 |
 | `ai_coding/security/sandbox.py` | `live_roots()`（`getattr` 兜底 + 去重） | E.1 |
 | `ai_coding/security/permission_gate.py` | 公开 `authorized_roots()`：**只取 `write`/`edit` 授权**、文件/目录都要、运行时 `exists()` | E.1 |
-| `ai_coding/tools/bash_tool.py` | roots 改活（持 `Sandbox`） | E.1 |
-| `ai_coding/core/jobs.py` | `roots` 接受 `Sequence[Path] \| Callable`，`start()` 里解析 | E.2 |
+| `ai_coding/tools/bash_tool.py` | roots 改活（持 `Sandbox`），**保留 `_roots` 属性** | E.1 |
+| `ai_coding/core/jobs.py` | `roots` 接受 `Sequence[Path] \| Callable`，**`__init__` 与 `start()` 都改** | E.2 |
 | `ai_coding/server/world.py` | gate + `Sandbox` **提到 JobRegistry 之前**；`_build_tool_registry` 加可选 `gate=`/`sandbox=` | E.2 |
-| `ai_coding/tools/builder.py` | 主栈 + **子智能体** 的 roots 改活；`_assemble_registry` 加可选参数 | E.1 / E.2 |
+| `ai_coding/tools/builder.py` | 主栈 + **子智能体**（子 `Sandbox` 以 `extra_roots=()` 构造）的 roots 改活；`_assemble_registry` 加可选参数 | E.1 / E.2 |
 | `ai_coding/security/process_sandbox.py` | `spawn_argv` 接受 `Iterable[Path]` | E.1 |
 | `docs/plan-m-d2.md` | 修正 §7.1 的裸 IP / UDP 断言；补 CIDR 语义与"多地址只判第一个" | D.4 |
 | `ai_coding/security/process_sandbox.py` | `wrap()` 在 `tier == "none"` 时返回 `None`（不再回落 `"full"`） | F.1 |
@@ -978,10 +1068,12 @@ v1 用 `_UnavailableBackend`，但它 `tier = "full"` 且 `wrap()` 返回 `list(
 | U7e | 16 条在 `enforce` 沙箱内执行 | **没有一条**写进工作区外 / 读到凭据 |
 | U7f | `rm -rf /etc`、`rm -rf /root`、`rm -rf /usr`、`rm -rf /bin`、`rm -rf /opt`、`rm -rf /boot`、`rm -rf /lib`、**`rm -rf /home`** | **仍判危险**（评审两轮：精确顶层目录不能被前缀匹配漏掉） |
 | U7g | `command -v sudo`、`command -p sudo ls`、`nice sudo ls`、`stdbuf sudo ls`、`nice -n 5 sudo ls`、`nice 5 sudo ls`、`env -i sudo ls`、`env -- sudo ls`、`timeout 5 -- sudo ls` | `command -v` **放行**；其余**仍判提权**（评审两轮的双向钉） |
-| U7h | `rm -rf $PWDDIR`、`rm -rf ~root`、`rm -rf "$HOME"/x`、`rm -rf $USER`（未设） | 判危险（词边界 / `~user` / 剥引号 / 空值不解） |
-| U7i | **`rm -rf ../build`、`rm -rf ../../dist`** | **放行**（评审 P2：`..` 不在结尾时是兄弟目录，monorepo 常见） |
-| **U7j** | **`rm -rf $DIR`、`rm -rf $(pwd)`、`rm -rf ${TMPDIR}/build`** | **询问（WARN），不是硬拒**（§1.4 调研：与 Codex `ForcedRm → Prompt` 同口径；**FP 归零**） |
-| **U7k** | **`D=/data; rm -rf $D`** | **同行赋值可解 → `/data` → 放行**（与 `rm -rf /tmp/build` 同判据；OS 边界拦写） |
+| U7h | `rm -rf $PWDDIR`、`rm -rf $USER`（未设）、`rm -rf /home/../etc`、`rm -rf /home//user` | `$PWDDIR`/`$USER` **不触发红线（词边界 / 空值不解）**；`/home/../etc`、`/home//user` **判危险（normpath）** |
+| U7i | **`rm -rf ../build`、`rm -rf ../../dist`** | **不触发红线**（评审 P2：`..` 不在结尾时是兄弟目录，monorepo 常见） |
+| **U7j** | **`rm -rf $DIR`、`rm -rf $(pwd)`、`rm -rf ${TMPDIR}/build`、`rm -rf ~root`** | **不触发红线 → 询问（WARN）**（§1.4 调研：与 Codex `ForcedRm → Prompt` 同口径；**FP 归零**） |
+| **U7k** | **`D=/data; rm -rf $D`** | **不触发红线**（`$D` 解不开）→ 询问；verdict `""` 与 `SAFE` 同类 |
+| **U7l** | **`rm -rf "$HOME"`** | **判危险**（`_string_content` 补展开子节点后 = home） |
+| **U7m** | **`rm -rf '$HOME'`** | **判危险（已知残余 FP）** —— 单引号已被 `_string_content` 剥掉，红线层无法区分（记录不修） |
 | U8 | `allow=['8.8.8.0/24']` + 请求 `8.8.8.8:443` | **放行**（现在是被拒） |
 | U8b | `allow=['example.com']` + 请求 `example.com:443` | **仍放行**（评审 P0：别把域名白名单改坏） |
 | U8c | `allow=['8.8.8.0/24']` 与 connect 用**同一个** pinned 地址 | 断言 `_authorize` 只 resolve **一次**（评审 P1：双次解析 = 重绑定窗口） |
@@ -1034,7 +1126,7 @@ v1 用 `_UnavailableBackend`，但它 `tier = "full"` 且 `wrap()` 返回 `list(
   域名匹配**无回归**（`evil-example.com` / `example.com.evil.com` 仍拒）。
 * **E**：grant 后 bash 与文件工具**写面一致**（U12 不变量）；**文件级**可写授权进 roots（U12b）；
   **只读授权不进**（U12c）；`ruff`/`mypy` 0。
-* **F**：本地（无 bwrap）**2 条跳过、6 条改写后仍运行**（不藏回归）；
+* **F**：本地（无 bwrap）**9 条受影响 → 2 条跳过、7 条改写后仍运行**（不藏回归）；
   `wrap()` 在机制缺席时返回 `None`；
   CI（有 bwrap）行为**不变**（探针成功，走不到该分支）。
 * **N-2**：`test_tool_surface_warning` 与 `test_worktree` 的 flaky 收口（复现方式见 §八 评审记录）。
@@ -1070,6 +1162,75 @@ v1 用 `_UnavailableBackend`，但它 `tier = "full"` 且 `wrap()` 返回 `list(
   本轮先收 §2.6（确定可复现），N-2 的复现方式留给评审决定。
 * `tests/test_worktree.py` 的 `timeout=0.001` 用例：本地 5/5 通过，同样是时序敏感，
   与 §2.6 同类（**本地/快机才照得出来**）。
+
+### 8.4 方案评审（子智能体，第 3 轮）
+
+**0 个 P0 · 3 个 P1 · 6 个 P2 · 4 个 P3（全部已修，见 §8.4.1）**
+
+**§C 的 P1**：
+
+* **U7h 仍是 v4 口径**（会把新增用例直接变红）—— v5 把口径改成"解不开 → 询问"，
+  但 U7h 仍写 `rm -rf $PWDDIR` / `~root` / `$USER`（未设）"判危险"，
+  且与突变 ⑪（钉住"解不开必须交给询问"）**自相矛盾**。已改为"不触发红线"。
+* **"同行赋值可解"是没接线的空机制** —— `command_views` **不返回赋值**，
+  且 `D=/data` 与 `rm -rf $D` 被 `;` 分成**两条独立命令**。**该论证已删除**，
+  改为"`$D` 解不开 → 询问"。
+
+**§C 的 P2**：`_is_protected_target` **不做 `normpath`** → 漏 `rm -rf /home/../etc`
+（实际删 `/etc`）、`/home//user`、`/home/./user`，且与 `credential_match` 的
+`posixpath.normpath` **同仓库两处口径不一致** → 已统一；
+**只剥双引号**（单引号是字面量，剥掉会把 `'$HOME'` 误判成家目录）；
+`rm -rf "$HOME"/x` **依赖运行环境**（CI root 的 `/root/x` 命中前缀、普通用户的
+`/home/<name>/x` 深度 4 漏）→ 改用 `rm -rf "$HOME"` 钉"剥引号"；
+**"放行"措辞混淆层级**（bash ∈ `_warn_tools`，非红线即 WARN 不是 ALLOW）→ 统一改"不触发红线"。
+
+**§1.4 的 P2**：opencode portable 的证据**两处都错** —— 消费点应为 `parse.ts:219-220`
+（非 `shell.ts`）；`dynamic-execution` 的触发是"`$` 展开进入**算术/绑定求值**上下文"，
+**不是**"变量被当作命令名"（vendored 测试 `["/bin/bash","$COMMAND status"]` 期望 `scanned`）。
+**已删除"与本方案一致"的论证**，口径选择仍由 Codex / Claude Code / opencode legacy 三家支撑。
+
+**§D 的 P2**：v5 只画了 `_authorize`，**`_serve_connection` 没画** ——
+它在两处各自 `resolve_target` 并丢弃返回值，只改 `_authorize` 的话
+**双次解析与重绑定窗口依旧存在**。已补两处改用 `_authorize` 的返回值。
+
+**§E 的 P2**：`JobRegistry.__init__` **无法接受 callable**（会 `TypeError`）→ `__init__` 与
+`start()` 都要改；`BashTool` 改"持 `Sandbox`"会破坏
+[test_process_sandbox.py:382](file:///workspace/ai-coding/tests/test_process_sandbox.py#L382)
+的 `tool._roots == (worktree.resolve(),)` → **保留 `_roots` 属性**；
+**子智能体的 `Sandbox` 必须以 `extra_roots=()` 构造**，否则 `live_roots()` 会带上
+**父配置的 roots**（越权）。
+
+**§F 的 P1**：§F.2 的"8 条"**漏了一条** ——
+`test_an_untraversable_deny_path_does_not_abort_the_wrap`（:864）也调 `wrap()`，
+无 bwrap 时会 `TypeError`。**实际受影响 9 条**。
+
+**§F 的 P2**：`test_wrap_keeps_the_isolation_switches` 的 `if backend.tier == "full"`
+分支**必须删掉**（它触发 `_probe()`，无 bwrap 时走 `else` 断言 `--unshare-pid not in argv`，
+而 `_build(..., "full")` 的产物**含** `--unshare-pid` → 仍红）。
+
+**P3**：world.py 提前构造与 `_assemble_registry` 兜底构造**形成两份逻辑**（Refactor 段要消除）；
+`authorized_roots()` 缺 `path_allowed` 的**无 workspace 守卫**；
+CIDR 三条新用例未指定落点测试文件（应落 `tests/test_sandbox_proxy.py`）；
+§F.2 的算术口径与 §2.6 不一致。
+
+#### 8.4.1 第 3 轮 findings 的处置
+
+| Finding | 级别 | 处置 |
+|---|---|---|
+| U7h 仍是 v4 口径 | **P1** | 改为"不触发红线"；新增 U7l 与突变 ⑪ |
+| "同行赋值可解"未接线 | **P1** | **删除该论证**，改"`$D` 解不开 → 询问" |
+| `_is_protected_target` 不 normpath | P2 | 加 `posixpath.normpath`；U7h 补 `/home/../etc`、`/home//user` |
+| 只剥双引号 | P2 | 单引号是字面量；U7l |
+| `rm -rf "$HOME"/x` 依赖环境 | P2 | 改用 `rm -rf "$HOME"` 钉剥引号 |
+| "放行"措辞混淆层级 | P2 | 统一改"不触发红线" |
+| opencode portable 证据错两处 | P2 | 修正出处与触发条件，删除"与本方案一致" |
+| `_serve_connection` 未画 | P2 | 补两处改用 `_authorize` 返回值 |
+| `JobRegistry.__init__` 不接受 callable | P2 | `__init__` 与 `start()` 都改 |
+| `BashTool._roots` 会被破坏 | P2 | 保留 `_roots` 属性 |
+| 子智能体 `extra_roots` 越权 | P2 | 子 `Sandbox` 以 `extra_roots=()` 构造 |
+| §F.2 漏 1 条 | **P1** | 补 `test_an_untraversable_deny_path_does_not_abort_the_wrap`（:864）→ **9 条** |
+| `backend.tier` 分支要删 | P2 | 明确写入改写要求 |
+| 两份构造逻辑 / 无 workspace 守卫 / CIDR 用例落点 / 算术口径 | P3 | 已记录 |
 
 ### 8.3 第 2 次调研（口径推翻）+ 原型 v3 复验
 
