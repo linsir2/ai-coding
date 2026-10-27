@@ -1394,7 +1394,55 @@ v4 的"解不开 → 硬拒"**比 Codex 更严**且引入真实 FP → **改为 
 
 ---
 
+### 8.5 实现评审（子智能体，2 轮）+ 收口
+
+**第 1 轮：1 P0 · 2 P1 · 6 P2 · 4 P3（全部已修）**
+
+* **P0**：`_serve_connection` 只改了一半 —— 方案只画了 `_authorize`，两处调用点
+  仍各自 `resolve_target`，**双次解析与重绑定窗口依旧存在**（与 §8.2 自称已修的 P1 矛盾）。
+* **P1**：`_build_loop` 自建 gate，`world.py` 的 sandbox 用另一个 —— **运行期 "always"
+  到不了文件工具与 `live_roots`**（所有测试都把同一个 gate 交给两侧，抓不到）。
+  修法：`_build_loop` 加可选 `gate=`，`world.py` 传入。
+* **P2**：`env -S 'sudo ls'` 漏放（`-S` 的值是一个待切分的命令串）；
+  `test_wrap_keeps_the_isolation_switches` 的 `==` 断言对 `"full"` **恒真**。
+* **P3**：`MIN_KNOWN_MISS = 0` 让护栏空转、计数器恒 0（**已加 `MIN_CORPUS = 100` 总规模护栏**）。
+
+**第 2 轮：1 P1 · 2 P2 · 4 P3（全部已修）**
+
+* **P1**：`world.py` 的 sandbox grantor 与 loop 的 dispatcher gate 不是同一对象（同上，已修）。
+* **P2**：`env -S 'sudo ls'` 绕过 `sudo escalation`（已加 `_unfold_env_split_string`）；
+  `rm -rf '$HOME'`（单引号字面量）假阳性 —— **已确认为残余**（`_string_content` 先剥了引号）。
+* **P3**：`test_the_sha_is_shape_checked` 恒真（已改为在 `update-ref` 处记录并断言目标）；
+  config 层 malformed CIDR 无用例（已补）；`MIN_KNOWN_MISS = 0` 护栏（已加 `MIN_CORPUS`）；
+  子智能体 sandbox 回退分支无测试覆盖（记录）。
+
+**收口后的证据**：
+
+| 项 | 结果 |
+|---|---|
+| 全量 | **0 failed**（`pytest tests/` 退出码 0） |
+| `ruff check .` | All checks passed |
+| `mypy ai_coding` | no issues in 160 files |
+| `scripts/redline_benchmark.py` | golden **135/135**、FN **0**、FP **0**、known_miss **0** |
+| **突变测试** | **20 个突变全部被抓**（M1–M14，含 gate 身份、双次解析、env -S、语料掏空） |
+| 非 root 真子进程复现 | `scripts/verify_snapshot_stderr.py` 4 passed（`capture → refs/ai-coding/undo/s/1`） |
+
+#### 8.5.1 实现期的偏离（均已说明理由）
+
+| 偏离 | 理由 |
+|---|---|
+| §A 的 `merge_stderr=False` 铺到整个 `SnapshotStore`（方案写"只两处"） | 红相对**每一次** git 调用都断言 `merge_stderr is False`；且更严格（快照模块永不把 stderr 并进被解析的值） |
+| §A 增加"从流中提取 hex token" | 第二道防线；`merge_stderr=False` 已让流干净，该步在生产是 no-op |
+| `_is_protected_target` 的 `if not path: return True`（方案写 `if not expanded: return False`） | 既有语料 `rm -rf "$(echo /)"` 的参数读成 `""`；空目标沿用旧的 fail-closed 读法，**非空但解不开**的词仍交给询问 |
+| `_program_is_unauditable` 排除命令替换（方案是字面 `"$" in program`） | `$(rm -rf /)` 的 program 就是替换本身，字面规则会用更含糊的理由**遮蔽**内层视图，使既有冻结 verdict 漂移 |
+| `redline_legacy_snapshot.py` 重冻 14 条 | 合并读者用例会拿旧快照逐条比对，不重冻必红 |
+| `tests/test_shell_parse.py` 的子替换视图断言更新 | 它编码的正是被 §C.1① 修掉的旧行为 |
+
+
+---
+
 ## 九、调研来源
+
 
 * Codex CLI 权限模型与 exec-policy 的 "disable splitting" 表述 —— https://agenticcontrolplane.com/controls/codex-cli
 * Codex sandbox 模式与 Landlock/bubblewrap 现状 —— https://backgrind.com/blog/codex-cli-sandbox-modes/
