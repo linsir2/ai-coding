@@ -12,9 +12,10 @@ was silently dropped.
 
 from __future__ import annotations
 
-from ai_coding.memory.scenes import SCENE_SYNONYMS, fold_scene
+import pytest
 
 from ai_coding.memory.note import normalize_scene
+from ai_coding.memory.scenes import SCENE_SYNONYMS, fold_scene
 from ai_coding.memory.service import MemoryService
 
 
@@ -43,11 +44,17 @@ def test_fold_scene_is_idempotent():
 
 
 def _service(tmp_path) -> MemoryService:
+    from ai_coding.memory.service import _default_config
     from ai_coding.memory.store import MemoryStore
 
     return MemoryService(
         store=MemoryStore(tmp_path / "memory.json"),
-        config={"max_index_entries": 200, "recall_timeout_seconds": 0.0},
+        # `_default_config`, not a dict: `_get` reads with `getattr`, so a dict
+        # config is silently ignored and every key falls back to default.
+        config=_default_config(
+            max_index_entries=200,
+            recall_timeout_seconds=0.0,
+        ),
     )
 
 
@@ -58,23 +65,29 @@ def test_the_write_path_folds(tmp_path):
     assert svc.store.active()[0].scene == "记忆"
 
 
-def test_the_filter_folds_the_argument(tmp_path):
+@pytest.mark.asyncio
+async def test_the_filter_folds_the_argument(tmp_path):
     """The measured gap: the argument was compared raw."""
     svc = _service(tmp_path)
     for text in ("one", "two", "three"):
         svc.write_note(text, scene="记忆模块")
-    hits, diag = svc.recall_with_diagnostics("one", scene="记忆模块")
+    hits, diag = await svc.recall_with_diagnostics("one", scene="记忆模块")
     assert hits, "the filter must reach the folded label"
     assert diag.ignored_scene is None, "the label was dropped as 'not a group'"
 
 
-def test_the_gate_before_the_filter_folds(tmp_path):
-    """A label with two notes under one spelling and two under the synonym
-    must be seen as one group of four -- the gate runs before the filter."""
+def test_two_spellings_merge_into_one_group(tmp_path):
+    """Two spellings written separately must land on one label, so the group
+    clears the ``governed_scenes`` threshold together.
+
+    This pins the **write** fold.  The gate's fold (it runs before the filter)
+    is what ``test_the_filter_folds_the_argument`` pins, through
+    ``diag.ignored_scene``.
+    """
     svc = _service(tmp_path)
-    for text in ("a", "b"):
+    for text in ("甲一", "乙二"):
         svc.write_note(text, scene="记忆模块")
-    for text in ("c", "d"):
+    for text in ("丙三", "丁四"):
         svc.write_note(text, scene="记忆")
     assert "记忆" in svc.governed_scenes()
 

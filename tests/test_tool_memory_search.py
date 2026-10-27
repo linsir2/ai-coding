@@ -798,6 +798,61 @@ async def test_r11b_search_payload_carries_timed_out_false_by_default(tmp_path):
     assert result.data["timed_out"] is False
 
 
+def _semantic_tool(tmp_path, transport) -> MemorySearchTool:
+    """A tool whose memory has a *working* embedding tier.
+
+    The payload's `semantic_status` must then read "on".  Without this the
+    `getattr` fallback decides, and it decides "off" for every configuration.
+    """
+    from ai_coding.config.models import EmbeddingsConfig
+    from ai_coding.domain.model_config import ModelConfig
+    from ai_coding.memory.embeddings import EmbeddingIndex
+
+    index = EmbeddingIndex(
+        EmbeddingsConfig(
+            enabled=True, provider="p", model="m", dimensions=8, min_cosine=0.6
+        ),
+        {
+            "p": ModelConfig(
+                name="p", base_url="https://example.invalid/v1", api_key="k"
+            )
+        },
+        transport=transport,
+    )
+    svc = MemoryService(
+        MemoryStore(tmp_path / "m.json"),
+        config=_default_config(recall_timeout_seconds=0.0),
+        embeddings=index,
+    )
+    svc.write_note("构建用 uv 管理依赖", kind="fact")
+    return MemorySearchTool(svc)
+
+
+async def _ok_transport(model: str, texts: list[str]):  # noqa: ANN001, ANN202
+    return [[0.0] * 8 for _ in texts]
+
+
+@pytest.mark.asyncio
+async def test_m_f1_the_payload_reports_the_tiers_real_state(tmp_path):
+    """M-F1: the payload carries the tier's state, not a fallback.
+
+    `getattr` must read the *return value*.  Reading the bound method instead
+    made the fallback win unconditionally, so an operator whose endpoint could
+    not embed saw "off" -- exactly the silence this milestone removes.  Both
+    paths are pinned: a hit and a miss each ask the tier once.
+    """
+    tool = _semantic_tool(tmp_path, _ok_transport)
+
+    hit = await tool.execute({"query": "构建用什么依赖"})
+    miss = await tool.execute({"query": "199 198 197 196 195"})
+
+    assert hit.success and hit.data["notes"], "the fixture must hit"
+    assert miss.success, "the fixture must not error"
+    assert hit.data["semantic_status"] == "on"
+    assert miss.data["semantic_status"] == "on"
+    assert hit.data["semantic_unavailable"] is False
+
+
 @pytest.mark.asyncio
 async def test_r11b_search_emits_degraded_on_timeout(tmp_path):
     """R11b: over budget the hits still return, plus one Degraded on the turn bus."""

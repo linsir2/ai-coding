@@ -619,7 +619,8 @@ OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnix
 | `no_match` | `bool` | `false` | `not notes` |
 | `terms_known` | `list[str]` | 有 | 见上表「两个指代」 |
 | `terms_unknown` | `list[str]` | 有 | 索引里一次都没出现过的查询词（CJK bigram 会被拆成 `['依赖','赖怎','么装']`） |
-| `semantic_unavailable` | `bool` | 有 | **本轮恒为 `false`**。存在的唯一理由是可选语义层落地时 payload 不必改形状；现在没有任何代码把它置真 |
+| `semantic_unavailable` | `bool` | 有 | **只有语义档调用中途失败时才为 `true`**（超时/网络/坏响应），此时结果是纯词面回退。"没配"与"配了但端点不会 embed"都是 `false`——它们不是失败，是**没有语义意见**，状态由 `semantic_status` 说。用 `getattr` 读，老 double 没有这个字段时读成 `false` |
+| `semantic_status` | `str` | 有 | M-F1：语义档的**四态**，`off`（未配置/不可用）/ `endpoint_unsupported`（端点 404，探测每进程一次并闩锁）/ `on`（已配置且端点可用，**含候选为空**）/ `error`（调用中途失败，此时 `semantic_unavailable=true`）。存在的理由是"配了 `enabled=True` 而端点没有 `/embeddings`"此前**完全静默**（三态语义把它和"没配"混成同一个 `false`）。用 `getattr` 读，老 double 没有这个字段时读成 `off` |
 | `timed_out` | `bool` | 有 | R11b：本次召回**超过** `memory.recall_timeout_seconds`。命中照返（超时绝不饿死模型），被跳过的只有那一次可选的 `touch` 整文件写；工具同时经 `ctx.emit` 发一条 `Degraded(component="memory_recall")`。用 `getattr` 读，老 double 没有这个字段时读成 `false` |
 | `near_misses` | `list[dict]` | **仅未命中时**（除非显式 `include_near_misses: true`） | `id`/`kind`/`score`/`relevance`/`preview`(40 字符)，最多 3 条 |
 | `index` | `dict` | **仅未命中时** | `active` / `by_kind` / `recent`（3 条 `id`+`kind`+`preview`）。**没有索引概览时这个键不存在**（记忆关掉、排序抛错、或 pre-R10c 的 double），文案此时也不编造条数 |
@@ -654,7 +655,8 @@ OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnix
 |---|---|
 | `IndexSummary(active, by_kind, recent)` | 有界概览：`recent` 最多 3 条 `(id, kind, preview)`，`preview` 40 字符。失败的召回**不该把整个索引塞回上下文** |
 | `RecallDiagnostics(terms_known, terms_unknown, near_misses, index_summary, semantic_unavailable, no_vocabulary_match, filtered_out)` | 「召回为什么失败」所需的全部信息。外层各字段默认可空；`pre-R10c` 的 double 没有 `recall_with_diagnostics` 时，工具走兼容分支并用 `_EmptyDiagnostics` 占位 |
-| `RecallDiagnostics.timed_out` / `.elapsed_seconds` | R11b 追加在末尾（默认 `False` / `0.0`）：排名（**含语义层与未命中探针**）实测耗时与是否超预算。计时窗口从 `_candidates` 之后起、到探针结束止——同步 BM25 没有挂起点可抢占，所以这是**事后计量**而不是 `run_with_deadline` 式取消；超预算只买「跳过 touch」，买不到「掐断计算」 |
+| `RecallDiagnostics.semantic_status` / `.semantic_unavailable` | M-F1 追加（默认 `"off"` / `False`）：语义档的**四态**与"这次是否失败"。`semantic_status` 是 `str`，取值 `off` / `endpoint_unsupported` / `on` / `error`；工具 payload 的 `data.semantic_status` 就从这里 `getattr` 出来 |
+| `RecallDiagnostics.timed_out` / `.elapsed_seconds` | R11b 追加在末尾（默认 `False` / `0.0`）：排名（**含语义层与未命中探针**）实测耗时与是否超预算。计时窗口从 `_candidates` 之后起、到探针结束止——同步 BM25 没有挂起点可抢占，所以这是**事后计量**而不是 `run_with_deadline` 式取消；超预算只买「跳过 touch」，买不到「掐断计算」。**窗口在写盘之前关闭**，所以 `1 + len(hits)` 次整文件写与 `index_summary` 都不计入 |
 
 ### 没接上的两个旋钮
 
@@ -692,7 +694,7 @@ OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnix
 | 契约 | 内容 |
 |---|---|
 | `EmbeddingsConfig`（`config/models.py`） | `enabled/provider/model/dimensions/min_cosine/cache_path/timeout_seconds`，全有默认，默认全关。`provider` 指向 `models.<name>`，复用其 `base_url/api_key` |
-| `data.semantic_unavailable` | 三态语义：`False` + 有命中＝词面或语义正常返回；`False` + 无命中＝词面没找到（语义没开或端点不支持，**静默**）；`True`＝配了但这次坏了（超时/网络/坏响应），结果是纯词面回退 |
+| `data.semantic_unavailable` 与 `data.semantic_status` | **四态**，两者互补：`semantic_status=off` + `semantic_unavailable=false`＝没配/不可用；`off` + `false`（端点不支持）＝配了但端点不会 embed，**不再静默**（M-F1 之前这与"没配"不可区分）；`on` + `false`＝词面或语义正常返回；`error` + `true`＝配了但这次坏了（超时/网络/坏响应），结果是纯词面回退 |
 | 关掉逐字节一致 | `enabled=false` 或整块缺席时，`memory_search` 的 output 与 data 与纯词面逐字节相同（归一化掉随机 id 后比对）。唯一允许不同的键不存在——连 `semantic_unavailable` 都保持 `False`，R11b 的 `timed_out` 在预算内同样是 `false` |
 | 缓存 key | `sha1(base_url\|model\|dimensions\|dedupe_key)`。端点在 key 里：同名模型换端点不会吃陈旧向量。`dedupe_key` 已覆盖文本，笔记改写自动重算，旧条目成孤儿（不删） |
 | 能力闩锁 | 端点首次 404 置位，之后短路零网络。配 deepseek 的用户每次搜索不再多等一次 612ms 往返 |

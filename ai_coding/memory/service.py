@@ -21,8 +21,9 @@ the **tail** of the request, never into the system prompt — sections 1.13/1.16
 Invariants kept from M3: every public method degrades silently — memory never
 raises at its callers.  "Never blocks the loop" is **no longer true** and is
 dropped rather than softened: recall writes.  A hit calls
-:meth:`MemoryStore.touch_notes`, which is a synchronous whole-file save, so a
-turn now pays one file write per recall that returned something.  The invariant
+:meth:`MemoryStore.update_stake` once per hit and :meth:`MemoryStore.touch_notes`
+once, so a turn pays ``1 + len(hits)`` synchronous whole-file saves per recall
+that returned something — not one.  The invariant
 that remains is the ``except Exception`` around each public path — a failing
 recall degrades to ``[]``, never to an exception — and ``enabled=False`` means
 "neither read nor write" (case 6).  ``harvest`` deliberately does **not** use the
@@ -51,7 +52,6 @@ from ai_coding.memory.note import (
     NoteKind,
     is_plausible_note_text,
     new_note,
-    normalize_scene,
 )
 from ai_coding.memory.relevance import (
     RecallParams,
@@ -59,6 +59,7 @@ from ai_coding.memory.relevance import (
     parse_time,
     rank_notes_detailed,
 )
+from ai_coding.memory.scenes import fold_scene
 from ai_coding.memory.schema import HarvestCandidate
 from ai_coding.memory.scoped_store import ScopedStore
 from ai_coding.memory.store import MemoryStore
@@ -195,9 +196,9 @@ class IndexSummary:
 class RecallDiagnostics:
     """Everything needed to explain a recall, and to retry it.
 
-    ``semantic_unavailable`` is False in every case this round builds; it
-    exists so the tool payload does not have to change shape when the
-    optional embeddings tier lands.
+    ``semantic_unavailable`` is True only for the ``error`` state — the tier was
+    configured and reachable but this call failed; every other state leaves it
+    False, so the tool can say "configured but unusable this time".
 
     ``filtered_out`` counts what the *filters* cost a miss.  It cannot be
     ``len(ranked) - len(kept)`` any more, because filtering now happens before
@@ -221,6 +222,12 @@ class RecallDiagnostics:
     # write was skipped; `elapsed_seconds` is the measured rank time.
     timed_out: bool = False
     elapsed_seconds: float = 0.0
+    #: M-F1: the semantic tier's observable state for this recall — ``off`` /
+    #: ``endpoint_unsupported`` / ``on`` / ``error``.  Defaults to ``off`` so the
+    #: three early returns (disabled, no injection budget, empty query) and the
+    #: ranker-raising path report "nothing was attempted" without each of them
+    #: spelling it out.
+    semantic_status: str = "off"
 
 
 @dataclass(frozen=True)
@@ -406,6 +413,10 @@ class MemoryService:
         # empty recall, which is the one failure mode this path must not have.
         window = float(since_days or 0)
         cutoff = now - timedelta(days=window) if window > 0.0 else None
+        # M-F2: fold both sides.  The gate already folded the argument, but
+        # `_candidates` is also the filter itself, so a synonym in either the
+        # input or a note written before the read/write fold must match.
+        wanted_scene = fold_scene(scene) if scene is not None else None
         selected: list[MemoryNote] = []
         for note in self._store.active():
             if wanted_kinds and note.kind.value not in wanted_kinds:
@@ -416,7 +427,7 @@ class MemoryService:
                 continue
             if scope is not None and note.scope != scope:
                 continue
-            if scene is not None and note.scene != scene:
+            if wanted_scene is not None and fold_scene(note.scene) != wanted_scene:
                 # R11c: exact match, like `scope`. The labels are free text the
                 # model wrote, so a scene it guesses wrong matches nothing — and
                 # `filtered_out` is what tells the model which filter did it.
@@ -430,26 +441,42 @@ class MemoryService:
 
     async def _semantic_scores(
         self, query: str, candidates: list[MemoryNote]
-    ) -> tuple[dict[str, float] | None, bool]:
-        """Cosines for the candidates, or (None, unavailable-flag).
+    ) -> tuple[dict[str, float] | None, bool, str]:
+        """Cosines for the candidates, or ``(None, unavailable, status)``.
 
-        Returns ``(None, False)`` whenever the tier is off, unconfigured, or
-        the endpoint has proven it cannot embed — all three are silent, because
-        "no semantic opinion" is not an error.  Only a mid-call failure (network,
-        timeout, malformed response) sets the flag, so the tool can say the tier
-        was configured but unusable this time.
+        The third element is the tier's observable state (M-F1), one of four:
+
+        * ``off`` — the tier is not configured or not available: no index, or a
+          config with no enabled provider/model/base url.  Nothing was attempted,
+          so there is nothing to report.
+        * ``endpoint_unsupported`` — the endpoint has proven it cannot embed
+          (HTTP 404), latched once per process.  This is the "configured but it
+          does not work" case the milestone makes visible instead of silent.
+        * ``on`` — configured and the endpoint answered: cosines were asked for,
+          whether or not there were candidates to score.  An empty candidate set
+          still reports ``on``: the tier is up, and reporting ``off`` would hide
+          a working configuration behind an empty index.
+        * ``error`` — a mid-call failure (network, timeout, malformed response).
+          ``unavailable`` is True so the tool can say the tier was configured but
+          unusable *this time*.
+
+        Returns ``(None, False, ...)`` whenever no semantic opinion exists,
+        because "no semantic opinion" is not an error.  Only a mid-call failure
+        sets the flag.
         """
         index = self._embeddings
-        if index is None or not index.available() or not candidates:
-            return None, False
+        if index is None or not index.available():
+            return None, False, "off"
         try:
             if await index.provider_lacks_embeddings():
-                return None, False
-            return await index.cosine_scores(query, candidates), False
+                return None, False, "endpoint_unsupported"
+            if not candidates:
+                return None, False, "on"
+            return await index.cosine_scores(query, candidates), False, "on"
         except EmbeddingsUnsupportedError:
-            return None, False
+            return None, False, "endpoint_unsupported"
         except Exception:  # noqa: BLE001 — recall is best-effort
-            return None, True
+            return None, True, "error"
 
     async def recall_with_diagnostics(
         self,
@@ -478,14 +505,23 @@ class MemoryService:
         if not query.strip():
             return [], RecallDiagnostics()
         ignored_scene = None
-        if scene is not None and scene not in self.governed_scenes():
-            # A label that nothing else shares cannot narrow anything: it would
-            # keep one note and throw the rest of the index away, which is worse
-            # than not filtering at all (67% of the real store's notes sat on
-            # such a label).  Drop it, and say so, so the model learns which
-            # labels are groups instead of re-guessing one that is not.
-            ignored_scene = scene
-            scene = None
+        if scene is not None:
+            # M-F2: fold *before* the gate.  `governed_scenes()` groups by the
+            # label as written (which the read/write paths fold), so comparing
+            # the raw input here would drop a synonym -- 「记忆模块」 against a
+            # store holding 「记忆」 -- as "not a group" and silently ignore the
+            # filter the model asked for.
+            folded_scene = fold_scene(scene)
+            if folded_scene not in self.governed_scenes():
+                # A label that nothing else shares cannot narrow anything: it would
+                # keep one note and throw the rest of the index away, which is worse
+                # than not filtering at all (67% of the real store's notes sat on
+                # such a label).  Drop it, and say so, so the model learns which
+                # labels are groups instead of re-guessing one that is not.
+                ignored_scene = scene
+                scene = None
+            else:
+                scene = folded_scene
         moment = now or _now()
         ceiling = supply if limit is None else limit
         try:
@@ -498,7 +534,9 @@ class MemoryService:
                 now=moment,
                 scene=scene,
             )
-            semantic, unavailable = await self._semantic_scores(query, candidates)
+            semantic, unavailable, semantic_status = await self._semantic_scores(
+                query, candidates
+            )
             result = rank_notes_detailed(
                 candidates,
                 query,
@@ -569,6 +607,7 @@ class MemoryService:
             filtered_out=filtered_out,
             ignored_scene=ignored_scene,
             semantic_unavailable=unavailable,
+            semantic_status=semantic_status,
             timed_out=timed_out,
             elapsed_seconds=elapsed,
         )
@@ -777,7 +816,9 @@ class MemoryService:
             importance=max(1, min(5, int(importance))),
             action="supersede" if target else "add",
             target_id=target or None,
-            scene=normalize_scene(scene),
+            # M-F2: folded once, in `_reconcile`, which every write funnels
+            # through -- folding here as well left the write-path fold unpinned.
+            scene=scene,
             scope=scope,
         )
         return self._reconcile(
@@ -864,7 +905,10 @@ class MemoryService:
                 source_turn=turn_index,
                 evidence=evidence,
                 source_message_ids=source_refs,
-                scene=candidate.scene,
+                # M-F2: the harvest path's candidate scene is raw extractor
+                # output, so fold it here too — otherwise a fresh synonym sits
+                # beside the label it is a synonym of.
+                scene=fold_scene(candidate.scene),
                 scope=candidate.scope,
             )
             if candidate.action == "noop":

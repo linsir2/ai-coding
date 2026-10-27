@@ -22,9 +22,16 @@ sys.path.insert(0, str(ROOT))
 
 from datetime import datetime, timezone  # noqa: E402
 
-from ai_coding.memory.benchmark import evaluate, format_metrics, load_corpus  # noqa: E402
+from ai_coding.memory.benchmark import (  # noqa: E402
+    EvalCase,
+    evaluate,
+    format_metrics,
+    load_corpus,
+)
+from ai_coding.memory.embeddings import Transport  # noqa: E402
+from ai_coding.memory.note import MemoryNote  # noqa: E402
 from ai_coding.memory.relevance import RecallParams, rank_notes  # noqa: E402
-from ai_coding.memory.service import _default_config  # noqa: E402
+from ai_coding.memory.service import MemoryService, _default_config  # noqa: E402
 
 #: Pinned so recency is part of the fixture, not of the day we run it.
 NOW = datetime(2026, 9, 28, tzinfo=timezone.utc)
@@ -128,6 +135,31 @@ def main(argv: list[str] | None = None) -> int:
         f"semantic tier would capture)"
     )
     print(f"no-answer correctly refused: {noanswer.no_answer_ok}/{noanswer.no_answer} (reported)")
+    reachable_cases = [c for c in cases if c.category in REACHABLE]
+    unanswerable = [c for c in cases if not c.relevant]
+    # `lexical_hit` means the lexical ranker actually answered the query, not
+    # that its category is reachable -- the two differ by one case here (67 vs
+    # 68), and the word is reported the same way by calibrate_memory_threshold.py.
+    # `reachable_cases` above is the *subset size*, a different quantity.
+    answerable = [case for case in cases if case.relevant]
+    relevant_of = {case.query: case.relevant for case in answerable}
+    lexical_hit = {
+        case.query
+        for case in answerable
+        if set(rank(case.query)[:3]) & relevant_of[case.query]
+    }
+    print(
+        f"\ntiers (offline): lexical_hit={len(lexical_hit)}/{len(reachable_cases)} reachable  "
+        f"paraphrase_missed={len(answerable) - len(lexical_hit)}  "
+        f"unanswerable={len(unanswerable)} (excluded from FP)"
+    )
+    if not args.with_embeddings:
+        # The two semantic tiers are only computable with a transport; the
+        # default path stays offline and says so rather than inventing numbers.
+        print(
+            "  paraphrase_recovered / lexical_regression: needs --with-embeddings "
+            "(live semantic tier)"
+        )
     print(
         f"\nguardrails: reachable R@3>={GUARDRAILS['reachable_R@3']} "
         f"reachable FP@5<={GUARDRAILS['reachable_FP@5']}"
@@ -146,7 +178,92 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _run_semantic_table(notes, cases, args) -> int:
+def _build_semantic_service(
+    notes: list[MemoryNote],
+    args: argparse.Namespace,
+    *,
+    min_cosine: float,
+    transport: Transport | None = None,
+    directory: Path | None = None,
+) -> MemoryService | None:
+    """The production-path service for the semantic table (M-F1 / A.2).
+
+    ``transport`` injected (tests / calibration) or read from ``args.config``.
+    ``min_cosine`` flows into ``RecallParams`` through the service config, so the
+    same service can be re-pointed at a new threshold between runs without
+    rebuilding the store.  Returns ``None`` when the live config names no such
+    provider, so the caller can report it instead of raising.
+    """
+    import tempfile
+
+    from ai_coding.config.models import EmbeddingsConfig, _coerce_model
+    from ai_coding.domain.model_config import ModelConfig
+    from ai_coding.memory.embeddings import EmbeddingIndex
+    from ai_coding.memory.service import MemoryService
+    from ai_coding.memory.store import MemoryStore
+
+    directory = directory or Path(tempfile.mkdtemp(prefix="ai-coding-semantic-"))
+    if transport is None:
+        import yaml
+
+        raw = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+        models = {
+            name: _coerce_model(item)
+            for name, item in (raw.get("models") or {}).items()
+        }
+        if args.provider not in models:
+            print(f"no models.{args.provider} in {args.config}")
+            return None
+        embeddings_cfg = EmbeddingsConfig(
+            enabled=True,
+            provider=args.provider,
+            model="text-embedding-v4",
+            min_cosine=min_cosine,
+            cache_path=str(
+                Path(tempfile.gettempdir()) / "r10-bench-embeddings.json"
+            ),
+        )
+    else:
+        models = {
+            "p": ModelConfig(
+                name="p", base_url="https://example.invalid/v1", api_key="k"
+            )
+        }
+        # dimensions=0 means "take whatever the injected transport returns".
+        embeddings_cfg = EmbeddingsConfig(
+            enabled=True,
+            provider="p",
+            model="m",
+            dimensions=0,
+            min_cosine=min_cosine,
+            cache_path=str(
+                Path(tempfile.gettempdir()) / "calibrate-embeddings.json"
+            ),
+        )
+    store = MemoryStore(directory / "m.json")
+    for note in notes:
+        store.add_note(note)
+    return MemoryService(
+        store,
+        embeddings=EmbeddingIndex(embeddings_cfg, models, transport=transport),
+        config=SimpleNamespace(
+            **{
+                **vars(_default_config()),
+                "recall_fusion": getattr(args, "fusion", "blend"),
+                "embeddings": embeddings_cfg,
+            }
+        ),
+    )
+
+
+def _run_semantic_table(
+    notes: list[MemoryNote],
+    cases: list[EvalCase],
+    args: argparse.Namespace,
+    *,
+    min_cosine: float | None = None,
+    transport: Transport | None = None,
+) -> int:
     """Second table through the true production path, with a live index.
 
     This is the only place that touches the network in the benchmark suite.  It
@@ -159,42 +276,24 @@ def _run_semantic_table(notes, cases, args) -> int:
     fusion rule move the gates" is a question the yardstick cannot answer — which
     is exactly why the earlier semantic numbers in the docs could not be
     reproduced from this script.
+
+    M-F1: ``min_cosine`` and ``transport`` are parameters, so the calibration
+    script can sweep thresholds and inject a transport instead of going live.
     """
     import asyncio
     import tempfile
 
-    import yaml
-
-    from ai_coding.config.models import EmbeddingsConfig, _coerce_model
-    from ai_coding.memory.embeddings import EmbeddingIndex
-    from ai_coding.memory.service import MemoryService
-    from ai_coding.memory.store import MemoryStore
-
-    parser_args = args
-    raw = yaml.safe_load(Path(parser_args.config).read_text(encoding="utf-8"))
-    models = {
-        name: _coerce_model(item)
-        for name, item in (raw.get("models") or {}).items()
-    }
-    if parser_args.provider not in models:
-        print(f"no models.{parser_args.provider} in {parser_args.config}")
-        return 2
-    cfg = EmbeddingsConfig(
-        enabled=True, provider=parser_args.provider, model="text-embedding-v4",
-        min_cosine=0.60, cache_path=str(
-            Path(tempfile.gettempdir()) / "r10-bench-embeddings.json"
-        ),
-    )
+    threshold = 0.60 if min_cosine is None else float(min_cosine)
     with tempfile.TemporaryDirectory() as directory:
-        store = MemoryStore(Path(directory) / "m.json")
-        for note in notes:
-            store.add_note(note)
-        service = MemoryService(
-            store,
-            embeddings=EmbeddingIndex(cfg, models),
-            config=SimpleNamespace(**{**vars(_default_config()),
-                                      "recall_fusion": parser_args.fusion}),
+        service = _build_semantic_service(
+            notes,
+            args,
+            min_cosine=threshold,
+            transport=transport,
+            directory=Path(directory),
         )
+        if service is None:
+            return 2
 
         def rank(query: str) -> list[str]:
             hits, _ = asyncio.run(
@@ -202,8 +301,10 @@ def _run_semantic_table(notes, cases, args) -> int:
             )
             return [hit.note.id for hit in hits]
 
-        print(f"\nsemantic (live index, same corpus, same clock, fusion="
-              f"{parser_args.fusion}):")
+        print(
+            f"\nsemantic (live index, same corpus, same clock, fusion="
+            f"{args.fusion}, min_cosine={threshold:.2f}):"
+        )
         print(format_metrics("semantic", evaluate(rank, cases)))
         for category in CATEGORIES:
             subset = [case for case in cases if case.category == category]
@@ -218,12 +319,12 @@ def _run_semantic_table(notes, cases, args) -> int:
             f"FP@5={reachable.false_positive_share:.2f}"
         )
         print(f"semantic paraphrase@3={para_at_3}/{len(para_cases)}")
-        if parser_args.fusion != "blend":
+        if args.fusion != "blend":
             # Deliberately not a gate. A switch that is off by default and measured
             # worse must not be turned into a contract by making it fail CI; what
             # it owes the reader is this line, and the numbers above it.
             print(
-                f"note: fusion={parser_args.fusion} is not the default and is not "
+                f"note: fusion={args.fusion} is not the default and is not "
                 f"gated -- the guardrails above cover the default lexical path only"
             )
     return 0

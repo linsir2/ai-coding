@@ -311,6 +311,34 @@ R3 重写（✅ **P0 完成**）。记忆层现在回答三个问题：**写什�
 **位置引用的前提**：消息只 append、压缩只改副本、`ensure_tool_pairing` 在落盘前清洗，所以下标
 长期稳定。**若将来支持编辑或删除历史消息，这个字段必须重审。**
 
+**同义折叠（M-F2）**：`MemoryNote.scene` 是自由文本，提取器给同一个话题起了不同拼写
+（「记忆模块」/「记忆系统」/「记忆配置」），于是它们各自都是单例、永远达不到
+`SCENE_SUPPORT=3`，`scene=` 过滤被静默丢弃。折叠表只有一份 ——
+`ai_coding/memory/scenes.py::SCENE_SYNONYMS`（`scripts/migrate_scenes.py` 导入同一份，
+不再有第二份词表），`fold_scene()` 先 `normalize_scene` 再查表。`normalize_scene` 本身
+**不变**（`docs/data-contracts.md:868-869` 的契约：词表若落在归一化层，所有既有归一化
+测试都会被打碎）。表是**幂等**的：值不得再是键，否则二次折叠会过折
+（`tests/test_memory_scenes.py::test_fold_scene_is_idempotent` 钉死）。
+
+折叠有**四处**应用点，缺一处就静默失效：
+
+| 路径 | 位置 | 为什么必须 |
+|---|---|---|
+| **闸门之前** | `service.py` 的 `governed_scenes()` 闸门 | 闸门用原始 `scene` 比较，折叠放晚了，「记忆模块」会被当"不是组"丢弃 |
+| **过滤时** | `service.py::_candidates` | 对入参 `scene` 与 `note.scene` **都**套 `fold_scene` |
+| **读时** | `store.py::_load` | 磁盘上的旧拼写 |
+| **写时** | `service.py::_reconcile`（唯一写路径） | 只折叠读路径会让同进程内新写的旧拼写与旧笔记并存，`governed_scenes()` 计成两个标签。**只有这一处**：`write_note` 与 harvest 都汇流到 `_reconcile`，在 `write_note` 里再折一次就是冗余，且会让写路径的折叠不被任何测试钉住 |
+
+磁盘上的旧拼写由 `scripts/migrate_scenes.py --apply` 一次性归并（默认 dry-run，写前把旧
+标签落到 `<store>.scenes.bak`）；本轮**不自动迁移**。
+
+**为什么不给 `scene` 设全局上限**：消费者里 `governed_scenes()`（≥3）与
+`index_summary().top_scenes`（取前 5）都有界，但 `index_summary().by_scene` 与
+`status()["by_scene"]` **无界**，且未命中时 `by_scene` 原样发给模型。真正的上界是
+`max_index_entries=200`（标签数 ≤ 笔记数 ≤ 200），所以默认配置下不设全局上限站得住 ——
+但**调大 `max_index_entries` 时 `by_scene` 会线性膨胀并直接进入模型上下文**，必须一起评估
+（M-F3 的 1_000/10_000 压力档正是这样）。
+
 #### 真机实测（`scripts/r11c_cases.py --real`，2026-10-03）
 
 单测钉住形状，只有真模型能回答「生产者到底产不产」。三次运行（每轮 3 会话 × 3 回合、
@@ -407,8 +435,40 @@ AI_CODING_R11C_IT=1 .venv/bin/python scripts/r11c_cases.py --real --config confi
 因此 `consolidate` 里 `hits >= 3 → importance + 1` 这条规则第一次真正可达——R3 写下它的时候，
 `hits` 永远是 0。未命中不写任何东西；被过滤掉的候选**不算使用**（模型没看见它）。
 
-代价（明说）：命中路径每轮多一次**同步整文件写**。M3 那句「记忆永不阻塞回合」因此不再成立，
+代价（明说）：命中路径每轮多 `1 + len(hits)` 次**同步整文件写**（每条命中一次
+`update_stake`，加一次 `touch_notes`）。M3 那句「记忆永不阻塞回合」因此不再成立，
 `service.py` 的模块 docstring 已改成现在的事实；「永不抛错」那条不变。
+
+**`recall_timeout_seconds=2.0` 的实测依据（M-F3）**：它比较的是 `RecallDiagnostics.elapsed_seconds`，
+也就是**只含排序**的时间 —— `elapsed` 在写盘与 `index_summary` **之前**算完，所以 `1 + len(hits)`
+次整文件写、以及每次召回都跑的 `index_summary`，都**不在**这个预算里。基准
+（`scripts/memory_latency_cases.py`，造库不走 `add_note`，因为那是 O(N²)）实测：
+
+| 规模 | 命中档 elapsed p50/p95 | 普通未命中 elapsed p50/p95 | 过滤未命中 elapsed p50/p95 | 写盘 p50 | `index_summary` p50 |
+|---|---|---|---|---|---|
+| 50 | 0.95 / 0.97 ms | 1.01 / 1.04 ms | 1.04 / 1.08 ms | 2.2 ms | 0.21 ms |
+| 200 | 3.60 / 3.67 ms | 3.75 / 4.39 ms | 3.81 / 3.86 ms | 4.1 ms | 0.73 ms |
+| 1_000 | 17.8 / 18.9 ms | 18.2 / 19.1 ms | 18.5 / 20.5 ms | 16.5 ms | 3.6 ms |
+| 10_000（显式压力档） | 185.6 / 193.1 ms | 188.8 / 197.7 ms | 194.2 / 201.6 ms | 144.5 ms | 41.3 ms |
+
+（本机实测，随环境与负载浮动；结论是量级，不是精确值。三档 × 三规模由
+`scripts/memory_latency_cases.py` 打印，结构断言只用计数桩。）
+
+三档的 `elapsed` **几乎相同**，因为它们都是一次全库 BM25：命中档与未命中档的差别只在
+`hits` 是否为空，而排序成本与是否命中无关。真正的代价差在 `elapsed` **之外** —— 写盘
+（`1 + len(hits)` 次）与 `index_summary`，两者都不计入预算。
+
+**"普通未命中"必须是真未命中**：夹具若用 `"nothing matches this"` 这种库里一个词都不认识的
+查询，`rank_notes_detailed` 会在词表检查处提前返回（`relevance.py:451`），量到的是提前返回
+（200 条库 0.70ms）而不是一次排序（3.75ms），**差 5.4×**。夹具用五个只出现在单条笔记里的
+稀有数字，使每条笔记的 IDF 覆盖只有 1/5 = 0.20 < `min_relevance` 0.25，排序跑满而门禁全拒。
+`tests/test_memory_latency.py::test_a_plain_miss_ranks_once` 用
+`diag.no_vocabulary_match` 钉住这条，防止夹具退化成提前返回。
+
+所以 2.0s 是 1_000 条库命中档 p95 的约 **100×**、10_000 条压力档的约 **10×** —— 对当前生产规模
+（`max_index_entries=200`）**非常宽松**，实际是"排序卡死"的兜底，不是性能 SLA。基准**不设硬阈值**：
+阈值依赖部署环境，操作者按自己环境的 p95 定 buffer（共享 runner 上绝对时间断言天然抖动，所以基准
+只打印分位，断言只用计数桩）。
 
 被过滤掉的候选**不算使用**（模型没看见它），所以过滤必须在 touch 之前跑。`k` 截断掉的候选
 同样不算——`touch_notes` 只收**真的返回给模型**的那些 id。这条不变量曾经只写在文档里、
@@ -470,7 +530,7 @@ AI_CODING_R11C_IT=1 .venv/bin/python scripts/r11c_cases.py --real --config confi
 可从代码直接调用。TUI 里 `/memory` 看统计、`/compact` 主动压缩历史。
 索引持久化为工作区下 `.memory`（schema v2，旧的 v1 文件只读迁移）。任何异常静默降级——
 记忆永不抛错，且受 R2 的回合预算约束。「永不阻塞回合」**自 R10b 起不再成立**：召回命中会写
-`hits`/`last_used`，是一次同步整文件写。
+`hits`/`last_used`，是 `1 + len(hits)` 次同步整文件写。
 
 **并发写不是安全的，别按线程安全用。** `MemoryStore` 的读路径都在锁里，但 `_mutate` 在
 `_save` **之前**就放掉了锁，而 `_save` 无锁读 `self._notes`，两个线程会落到同一个
@@ -504,6 +564,16 @@ token 删掉一个已被 spec 定义的参数，是在优化那把尺子；语�
 可达 R@3 0.99→**1.00**，可达 FP@5 0.46→**0.48**。`min_cosine=0.60` 是量出来的（正例 min 0.44 /
 负例 max 0.66 重叠，没有阈值能分干净），**换 provider 或模型必须重跑基准重标**——否则门
 要么漏放噪音要么错杀。融合权重 0.5 未调参：46 条上 0.7 多救 1 条属噪声，未采纳。
+
+**"配了但不工作"现在可观测（M-F1）**：`RecallDiagnostics.semantic_status` 四态 ——
+`off`（未配置/不可用）/ `endpoint_unsupported`（端点 404，探测每进程一次并闩锁）/
+`on`（已配置且端点可用，含无候选）/ `error`（调用中途失败，此时 `semantic_unavailable=True`）。
+工具 payload 带 `semantic_status`（`getattr`，因为 pre-R10c 的 double 没这个字段）——
+操作者配了 `enabled=True` 而端点没有 `/embeddings` 时，不再静默。标定脚本是
+`scripts/calibrate_memory_threshold.py`（注入 transport，扫阈值出 FP/FN 曲线 + 推荐值，
+按 `case.relevant` 过滤掉无 `relevant` 条目，并同时报 FP@5）；`retrieval_cases.py` 默认离线路径
+只报 `lexical_hit` / `paraphrase_missed` 两档，`paraphrase_recovered` / `lexical_regression`
+走 `--with-embeddings`。**有效域 = f(语料, embedding 模型)**，脚本输出里也打印这一句。
 
 `scope` 那条取舍之外，这里还有一处：语义档让 `recall_with_diagnostics` 第一次出现 `await`，
 之前"无 await 所以并发串行"的论证不再成立（touch 本身仍同步，所以写不交错，但 embed 并发）。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -10,7 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from migrate_scenes import SPELLING_MERGES, head, plan  # noqa: E402
+from migrate_scenes import SCENE_SYNONYMS, head, plan  # noqa: E402
 
 from ai_coding.memory.note import MemoryNote, NoteKind, normalize_scene  # noqa: E402
 from ai_coding.memory.store import MemoryStore  # noqa: E402
@@ -72,8 +73,8 @@ def test_the_table_folds_in_one_pass_and_keeps_the_labels_short(tmp_path):
     (Whether the fold actually buys any group depends on the data — the script's
     dry run reports that, and there is no test fixture large enough to mean it.)
     """
-    for _old, target in SPELLING_MERGES.items():
-        assert target not in SPELLING_MERGES, f"{target} is folded twice; run the script again"
+    for _old, target in SCENE_SYNONYMS.items():
+        assert target not in SCENE_SYNONYMS, f"{target} is folded twice; run the script again"
         assert len(target) <= 8, f"{target} is longer than the label limit"
         assert normalize_scene(target) == target, f"{target} is not already normalized"
 
@@ -114,3 +115,41 @@ def test_a_store_with_nothing_to_merge_still_runs(tmp_path, before):
         assert main() == 0
     finally:
         sys.argv = argv
+
+
+def test_a_failed_write_never_leaves_a_truncated_store(tmp_path, monkeypatch):
+    """`--apply` rewrites the whole file once per note, so the write is atomic.
+
+    A crash between the truncate and the flush would leave a store that loads as
+    zero notes, and the merge's only undo is the side file written beforehand.
+    The failure is raised rather than swallowed: a migration that reports
+    `wrote N notes` while writing nothing is worse than one that stops.
+    """
+    import migrate_scenes
+
+    path = tmp_path / "m.json"
+    original = json.dumps(
+        {
+            "version": 2,
+            "notes": [
+                {"id": "n0", "text": "内容 0", "scene": "记忆模块"},
+                {"id": "n1", "text": "内容 1", "scene": "记忆系统"},
+            ],
+        }
+    )
+    path.write_text(original, encoding="utf-8")
+    store = migrate_scenes._RawStore(path)
+
+    def _boom(tmp, target):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", _boom)
+
+    with pytest.raises(OSError):
+        store.update(
+            MemoryNote(id="n0", text="内容 0", kind=NoteKind.FACT, scene="记忆")
+        )
+
+    assert path.read_text(encoding="utf-8") == original, (
+        "the live store must be untouched"
+    )

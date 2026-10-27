@@ -48,6 +48,7 @@ from ai_coding.memory.relevance import (
     rank_notes,
     recency,
 )
+from ai_coding.memory.scenes import fold_scene
 from ai_coding.memory.tokenize import similarity
 
 __all__ = ["MemoryEntry", "MemoryStore", "SCHEMA_VERSION"]
@@ -82,9 +83,15 @@ def _load(path: Path) -> list[MemoryNote]:
         if not isinstance(item, dict):
             continue
         try:
-            notes.append(MemoryNote.from_dict(item))
+            note = MemoryNote.from_dict(item)
         except (ValueError, TypeError):
             continue
+        # M-F2: fold on read, so a label written with an old spelling matches
+        # the folded one the write path produces.  `normalize_scene` is unchanged
+        # (contract); the fold is a separate gate.
+        if note.scene:
+            note = replace(note, scene=fold_scene(note.scene))
+        notes.append(note)
     return notes
 
 

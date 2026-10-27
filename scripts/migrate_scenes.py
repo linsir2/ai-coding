@@ -34,49 +34,92 @@ import json
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
+from typing import Protocol
 
-from ai_coding.memory.note import normalize_scene
+from ai_coding.memory.note import MemoryNote
+from ai_coding.memory.scenes import SCENE_SYNONYMS, fold_scene
 from ai_coding.memory.service import IndexSummary
-from ai_coding.memory.store import MemoryStore
 
-#: old label -> the label that replaces it.  A value that is also a key means
-#: the whole family collapses onto it (e.g. all three 记忆 spellings -> 记忆).
-SPELLING_MERGES: dict[str, str] = {
-    "记忆模块": "记忆",
-    "记忆系统": "记忆",
-    "记忆配置": "记忆",
-    "项目概况": "项目",
-    "项目环境": "项目",
-    "项目结构": "项目",
-    "环境依赖": "环境",
-    "环境信息": "环境",
-    "环境版本": "环境",
-    "环境约束": "环境",
-    "环境配置": "环境",
-    "文档规范": "文档",
-    "文档组织": "文档",
-    "架构演进": "架构",
-    "架构约束": "架构",
-    "配置管理": "配置",
-    "配置约定": "配置",
-    "MCP架构": "MCP",
-    "MCP设置": "MCP",
-    "开发命令": "开发流程",
-    "执行约束": "开发流程",
-    "分支管理": "开发流程",
-    "工具环境": "工具",
-    "工具约束": "工具",
-    "UI状态栏": "界面",
-    "UI组件": "界面",
-    "酒店管理系统": "工具",
-    "路由检查": "依赖",
-    "测试质量": "测试",
-    "模型配置": "技术",
-    "权限控制": "权限",
-}
+__all__ = ["SCENE_SYNONYMS", "head", "label_count", "plan"]
 
 
-def plan(store: MemoryStore) -> tuple[list[tuple[str, str]], dict[str, int]]:
+class _NoteSource(Protocol):
+    """What ``plan`` reads: a source of notes, in file order."""
+
+    def all(self) -> list[MemoryNote]: ...
+
+
+class _RawStore:
+    """A store view that reads the file **without** the read-time fold.
+
+    ``MemoryStore._load`` folds synonyms on read (M-F2) — right for recall, and
+    wrong for the one-off whose whole job is to rewrite those spellings on disk.
+    Reading through ``MemoryStore`` would fold first and leave nothing to merge,
+    so this reads the raw rows itself.  The on-disk format is unchanged.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._notes = _read_raw_notes(path)
+
+    def all(self) -> list[MemoryNote]:
+        return list(self._notes)
+
+    def active(self) -> list[MemoryNote]:
+        return [note for note in self._notes if note.is_active]
+
+    def update(self, note: MemoryNote) -> bool:
+        for index, current in enumerate(self._notes):
+            if current.id == note.id:
+                self._notes[index] = note
+                self._save()
+                return True
+        return False
+
+    def _save(self) -> None:
+        import os
+        import uuid
+
+        from ai_coding.infra.json_utils import to_json_pretty
+
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        payload = to_json_pretty(
+            {"version": 2, "notes": [note.to_dict() for note in self._notes]}
+        )
+        # Atomic, like MemoryStore._save: --apply rewrites the whole file once
+        # per note, so a crash mid-run must not leave a truncated store.
+        tmp = self._path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, self._path)
+
+
+def _read_raw_notes(path: Path) -> list[MemoryNote]:
+    """Read v2 (``notes``) or v1 (``entries``) rows without the fold; never raise."""
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("notes")
+    if not isinstance(raw, list):
+        raw = data.get("entries")  # v1 migration (read-only)
+    if not isinstance(raw, list):
+        return []
+    notes: list[MemoryNote] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            notes.append(MemoryNote.from_dict(item))
+        except (ValueError, TypeError):
+            continue
+    return notes
+
+
+def plan(store: _NoteSource) -> tuple[list[tuple[str, str]], dict[str, int]]:
     """``(changes, counts_after)`` for this store, computed without touching it.
 
     ``counts_after`` is what the labels become, so the caller can see the head
@@ -85,9 +128,7 @@ def plan(store: MemoryStore) -> tuple[list[tuple[str, str]], dict[str, int]]:
     changes: list[tuple[str, str]] = []
     counts_after: Counter[str] = Counter()
     for note in store.all():
-        scene = note.scene
-        target = SPELLING_MERGES.get(scene, scene)
-        target = normalize_scene(target)
+        target = fold_scene(note.scene)
         if note.scene != target:
             changes.append((note.id, target))
         counts_after[target] += 1
@@ -112,7 +153,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    store = MemoryStore(args.store)
+    store = _RawStore(args.store)
     changes, after_counts = plan(store)
     before_counts = Counter(note.scene for note in store.active() if note.scene)
     before, after = head(dict(before_counts)), head(after_counts)
@@ -130,7 +171,7 @@ def main() -> int:
     print("groups after the merge:")
     for name, count in after:
         print(f"  {count:>3}  {name}")
-    untouched = sorted(set(before_counts) - set(SPELLING_MERGES) - {""})
+    untouched = sorted(set(before_counts) - set(SCENE_SYNONYMS) - {""})
     if untouched:
         print()
         print(f"left alone ({len(untouched)}): {'、'.join(untouched)}")
@@ -152,7 +193,7 @@ def main() -> int:
             {
                 note.id: note.scene
                 for note in store.all()
-                if normalize_scene(SPELLING_MERGES.get(note.scene, note.scene)) != note.scene
+                if fold_scene(note.scene) != note.scene
             },
             ensure_ascii=False,
             indent=2,
@@ -161,7 +202,7 @@ def main() -> int:
     )
     written = 0
     for note in store.all():
-        target = normalize_scene(SPELLING_MERGES.get(note.scene, note.scene))
+        target = fold_scene(note.scene)
         if target != note.scene and store.update(replace(note, scene=target)):
             written += 1
     print()

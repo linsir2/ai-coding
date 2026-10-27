@@ -18,36 +18,39 @@ from ai_coding.memory.service import MemoryService
 
 def _service(tmp_path, *, enabled: bool, transport=None) -> MemoryService:
     from ai_coding.memory.embeddings import EmbeddingIndex
+    from ai_coding.memory.service import _default_config
     from ai_coding.memory.store import MemoryStore
 
-    cfg = {
-        "max_index_entries": 200,
-        "recall_timeout_seconds": 0.0,
-        "embeddings": {
-            "enabled": enabled,
-            "provider": "p",
-            "model": "m",
-            "dimensions": 8,
-            "min_cosine": 0.6,
-            "timeout_seconds": 1.0,
-        },
+    overrides = {
+        "provider": "p",
+        "model": "m",
+        "dimensions": 8,
+        "min_cosine": 0.6,
+        "timeout_seconds": 1.0,
     }
     index = None
     if transport is not None:
         index = EmbeddingIndex(
-            _embeddings_config(cfg), {"p": _model()}, transport=transport
+            _embeddings_config(enabled, overrides),
+            {"p": _model()},
+            transport=transport,
         )
     return MemoryService(
         store=MemoryStore(tmp_path / "memory.json"),
-        config=cfg,
+        # `_default_config`, not a dict: `_get` reads with `getattr`, so a dict
+        # config is silently ignored and every key falls back to default.
+        config=_default_config(
+            max_index_entries=200,
+            recall_timeout_seconds=0.0,
+        ),
         embeddings=index,
     )
 
 
-def _embeddings_config(cfg: dict):
+def _embeddings_config(enabled: bool, overrides: dict):
     from ai_coding.config.models import EmbeddingsConfig
 
-    return EmbeddingsConfig(**cfg["embeddings"])
+    return EmbeddingsConfig(enabled=enabled, **overrides)
 
 
 def _model():
@@ -115,3 +118,30 @@ async def test_the_unsupported_endpoint_is_probed_once_per_process(tmp_path):
     for _ in range(3):
         await svc.recall_with_diagnostics("anything")
     assert len(calls) == 1, f"expected one probe, got {len(calls)}"
+
+
+def test_the_calibration_curve_is_produced(capsys):
+    """U5: the calibration script is a pipeline test, not a quality proof.
+
+    A fake transport's cosine is arbitrary, so the *recommended* threshold has
+    no calibration meaning -- what is testable is that the sweep runs, the
+    curve is printed, FP@5 is reported and the effective domain is declared.
+    """
+    from scripts import calibrate_memory_threshold
+
+    assert calibrate_memory_threshold.main([]) == 0
+    out = capsys.readouterr().out
+    assert "baseline FP@5" in out, "FP@5 must be reported next to the curve"
+    assert "有效域" in out, "the effective domain must be declared"
+    assert "0.30" in out, "the sweep must actually run"
+    # The sweep's own denominator must be the answerable subset: `noanswer` and
+    # `trap` cases have no relevant note, so mixing them in would measure FP on
+    # cases the metric is not defined on.
+    from ai_coding.memory.benchmark import load_corpus
+    from scripts.retrieval_cases import CORPUS, NOW
+
+    _, cases = load_corpus(CORPUS, now=NOW)
+    answerable = len([case for case in cases if case.relevant])
+    assert f"answerable: {answerable}" in out, (
+        f"expected answerable: {answerable}, got {out.splitlines()[1]!r}"
+    )

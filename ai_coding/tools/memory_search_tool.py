@@ -175,6 +175,17 @@ class MemorySearchTool(BaseTool):
             "terms_known": list(diagnostics.terms_known),
             "terms_unknown": list(diagnostics.terms_unknown),
             "semantic_unavailable": bool(diagnostics.semantic_unavailable),
+            # M-F1: the tier's four states, read with `getattr` because a
+            # pre-R10c double has no such field and inventing one would be
+            # exactly what this payload must not do (same discipline as
+            # `timed_out` below).  Without it an operator who set
+            # `enabled=True` against an endpoint without `/embeddings` gets no
+            # signal that the configuration did nothing.
+            #
+            # Read off `diagnostics` -- the *return value* -- not `detailed`,
+            # which is the bound method and has no such attribute, so the
+            # fallback always won and the payload said "off" unconditionally.
+            "semantic_status": getattr(diagnostics, "semantic_status", "off"),
             # R11b: getattr, because a pre-R10c double has no such field and
             # inventing a timeout for it would be exactly what this text must
             # not do (same duck-typing discipline as `_filtered_out` below).
