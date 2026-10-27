@@ -75,3 +75,34 @@ def test_disabled_redactor_is_a_passthrough():
 @pytest.mark.parametrize("blank", ["", "   ", "plain text with no secrets"])
 def test_blank_and_plain_inputs_are_stable(blank):
     assert Redactor().redact(blank) == blank
+
+
+# ---- M-H2: Bearer tokens ----------------------------------------------------
+#
+# The four shapes above cover `sk-`/`ghp_`/`AKIA`/PEM.  A self-hosted gateway
+# hands out an opaque token, and the trace records tool parameters verbatim, so
+# `Authorization: Bearer <opaque>` was the one header that reached disk intact.
+
+
+def test_a_bearer_token_is_redacted():
+    redactor = Redactor()
+    for token in (
+        "gw_7f3c9a2b41d84e6f9c0a",
+        "abcdefgh+ijkl/mnop==",  # base64: `+`, `/` and `=` must be inside the class
+        "sk-abcdefghijklmnop123456",
+    ):
+        out = redactor.redact(f"Authorization: Bearer {token}")
+        assert token not in out, token
+        assert "Bearer" in out, "the scheme is useful context; only the value goes"
+
+
+def test_a_bearer_token_inside_a_dict_repr_is_redacted():
+    """Trace payloads are JSON-ish reprs, so the header is not at line start."""
+    out = Redactor().redact("{'Authorization': 'Bearer gw_7f3c9a2b41d84e6f9c0a'}")
+    assert "gw_7f3c9a2b41d84e6f9c0a" not in out
+
+
+def test_an_ordinary_sentence_about_bearers_is_not_redacted():
+    """A pattern that eats prose makes the trace useless (same rule as above)."""
+    for text in ("Bearer authentication is required here", "the bearer of bad news"):
+        assert Redactor().redact(text) == text

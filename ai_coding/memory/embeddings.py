@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import urllib.request
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -31,6 +32,9 @@ from typing import Any
 
 from ai_coding.config.models import EmbeddingsConfig
 from ai_coding.memory.note import MemoryNote
+from ai_coding.providers import PROVIDERS
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "EmbeddingIndex",
@@ -97,6 +101,24 @@ class EmbeddingIndex:
         self._cache: dict[str, list[float]] | None = None
         self._unsupported = False
         self._seen_ok = False
+        # M-H2: `provider` here is a key in `models`, not a provider id (that is
+        # the field `models.<key>.provider`).  With a provider id in this slot the
+        # index reports `available() == False` and the semantic tier silently
+        # never runs -- so say which confusion it is.
+        if (
+            config.enabled
+            and config.provider
+            and config.provider not in models
+            and config.provider in PROVIDERS
+        ):
+            _log.warning(
+                "memory.embeddings.provider names a models key, not a provider id: "
+                "%r is a provider id and %s has no such key, so the semantic tier "
+                "will stay off; use one of %s",
+                config.provider,
+                "models",
+                sorted(models),
+            )
 
     # ---- configuration ----------------------------------------------------
 

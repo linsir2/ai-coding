@@ -6,6 +6,7 @@ import copy
 import logging
 import os
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -57,9 +58,16 @@ PROJECT_FORBIDDEN_MEMBERS: dict[str, frozenset[str]] = {
 PROJECT_FORBIDDEN_NESTED: dict[str, dict[str, frozenset[str]]] = {
     "memory": {"embeddings": frozenset({"cache_path"})},
 }
-#: ``models`` members that decide the destination.  Applied per entry, after the
-#: entry itself has survived the "must be user-defined" rule.
-MODEL_DESTINATION_MEMBERS: frozenset[str] = frozenset({"base_url", "api_key"})
+#: ``models`` members that decide the destination or the credential.  Applied per
+#: entry, after the entry itself has survived the "must be user-defined" rule.
+#:
+#: ``provider`` is here because it selects **both**: it supplies a default
+#: ``base_url`` and it picks the environment variable the key is read from
+#: (``ai_coding/providers.py``).  A repository that could set it could make the
+#: agent send an ``OPENAI_API_KEY`` the operator meant for something else.
+MODEL_DESTINATION_MEMBERS: frozenset[str] = frozenset(
+    {"base_url", "api_key", "provider"}
+)
 
 #: Top-level blocks ``AppConfig`` holds as mappings.  A project may not replace
 #: one with a scalar even when the operator never configured it: the schema wants
@@ -368,22 +376,30 @@ class ConfigLoader:
         return doc if isinstance(doc, dict) else {}
 
     @staticmethod
-    def load_app(path: str | Path | None = None) -> AppConfig:
+    def load_app(
+        path: str | Path | None = None, *, env: Mapping[str, str] | None = None
+    ) -> AppConfig:
         return ConfigLoader.app_from_doc(
-            _normalize(ConfigLoader._read_doc(path)), path
+            _normalize(ConfigLoader._read_doc(path)), path, env=env
         )
 
     @staticmethod
-    def app_from_doc(doc: dict[str, Any], path: str | Path | None = None) -> AppConfig:
+    def app_from_doc(
+        doc: dict[str, Any],
+        path: str | Path | None = None,
+        *,
+        env: Mapping[str, str] | None = None,
+    ) -> AppConfig:
         """Validate an already-merged document.
 
         Split out from :meth:`load_app` because layering produces one document
         from several files, and re-reading any single one of them to validate it
-        would silently drop the rest.
+        would silently drop the rest.  ``env`` is the secret source handed to
+        every model entry; ``None`` means the real environment.
         """
         models_raw = doc.get("models") or {}
         coerced = {
-            name: _coerce_model(entry) if isinstance(entry, dict) else entry
+            name: _coerce_model(entry, env=env) if isinstance(entry, dict) else entry
             for name, entry in models_raw.items()
         }
         doc["models"] = coerced
@@ -455,7 +471,10 @@ class ConfigLoader:
 
     @staticmethod
     def load_layers_report(
-        paths: Any, path: str | Path | None = None
+        paths: Any,
+        path: str | Path | None = None,
+        *,
+        env: Mapping[str, str] | None = None,
     ) -> LayeredConfig:
         """Load both layers and record which file answered each top-level key.
 
@@ -507,23 +526,39 @@ class ConfigLoader:
                     _log.warning(
                         "project config ignored for %s (a repository cannot grant "
                         "execution, endpoints, credentials or paths outside the "
-                        "workspace; set %s=1 to allow it)",
+                        "workspace; set %s=1 to allow it). A dropped api_key is "
+                        "still readable by the agent in that file -- move models "
+                        "and keys to the user layer: `ai-coding config path`",
                         ", ".join(sorted([*execution_dropped, *dropped])),
                         TRUST_PROJECT_ENV,
                     )
             for key in document:
                 sources[key] = str(layer)
             merged = ConfigLoader._overlay(merged, document)
+        # Computed **before** `app_from_doc`: it replaces `merged["models"]` with
+        # the coerced entries in place, and after that the name of a `${VAR}`
+        # reference is gone (M-H2).
+        from ai_coding.config.secrets import secret_env_names
+
+        names = secret_env_names(merged.get("models") or {})
         return LayeredConfig(
-            config=ConfigLoader.app_from_doc(merged, chosen) if merged else AppConfig(),
+            config=ConfigLoader.app_from_doc(merged, chosen, env=env)
+            if merged
+            else AppConfig(),
             sources=sources,
             layers=[str(layer) for _role, layer in ConfigLoader._layers_for(paths, path)],
+            secret_env_names=names,
         )
 
     @staticmethod
-    def load_layers(paths: Any, path: str | Path | None = None) -> AppConfig:
+    def load_layers(
+        paths: Any,
+        path: str | Path | None = None,
+        *,
+        env: Mapping[str, str] | None = None,
+    ) -> AppConfig:
         """``AppConfig`` from the user layer with the project layer on top."""
-        return ConfigLoader.load_layers_report(paths, path).config
+        return ConfigLoader.load_layers_report(paths, path, env=env).config
 
     @staticmethod
     def load_app_from(start: str | Path | None = None) -> AppConfig:
@@ -577,17 +612,23 @@ class ConfigLoader:
 class LayeredConfig:
     """A merged ``AppConfig`` plus where each top-level key came from."""
 
-    __slots__ = ("config", "sources", "layers")
+    __slots__ = ("config", "sources", "layers", "secret_env_names")
 
     def __init__(
         self,
         config: AppConfig,
         sources: dict[str, str],
         layers: list[str],
+        secret_env_names: frozenset[str] = frozenset(),
     ) -> None:
         self.config = config
         self.sources = sources
         self.layers = layers
+        #: Environment variables this configuration consumes as secrets, so the
+        #: process sandbox can strip them from the children it spawns (M-H2).
+        #: Carried here rather than recomputed later because once the key is
+        #: resolved, the name of a ``${VAR}`` reference is gone.
+        self.secret_env_names = secret_env_names
 
 
 class ConfigManager:

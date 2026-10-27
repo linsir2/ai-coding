@@ -1491,3 +1491,32 @@ def test_tier_and_wrap_agree_when_the_mechanism_is_absent():
     assert backend.wrap(["/bin/true"], []) is None, (
         "tier says none but wrap() built a construction"
     )
+
+
+# ---- M-H2: the key must not reach the agent's own children ------------------
+
+
+def test_consumed_secret_env_names_are_stripped():
+    """`--unsetenv` is the existing hook the proxy variables already use.
+
+    An env-based API key would otherwise be inherited by every `bash` child, and
+    `echo $DEEPSEEK_API_KEY` is the whole attack.
+    """
+    backend = BwrapBackend(writable_paths=(), secret_env_names=("DEEPSEEK_API_KEY",))
+
+    argv = backend._build(["sh", "-c", "true"], (), "full")
+
+    assert "--unsetenv" in argv
+    pairs = list(zip(argv, argv[1:], strict=False))
+    assert ("--unsetenv", "DEEPSEEK_API_KEY") in pairs
+    # The proxy names are still stripped: one loop, two sources.
+    assert ("--unsetenv", "HTTP_PROXY") in pairs
+
+
+def test_no_secret_names_means_no_extra_unsetenv():
+    backend = BwrapBackend(writable_paths=())
+
+    argv = backend._build(["sh", "-c", "true"], (), "full")
+
+    pairs = list(zip(argv, argv[1:], strict=False))
+    assert ("--unsetenv", "DEEPSEEK_API_KEY") not in pairs

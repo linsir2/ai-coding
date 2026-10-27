@@ -76,10 +76,22 @@ _KV_PATTERN = re.compile(
     r"(?i)\b(api[_-]?key|access[_-]?key|token|password|passwd|secret)\b\s*[:=]\s*\S+"
 )
 
+# M-H2: an opaque gateway token has none of the shapes above, and a trace records
+# tool parameters verbatim -- so `Authorization: Bearer <token>` used to reach
+# disk intact.  Twenty characters is the discriminator: shorter than that and
+# ordinary prose ("Bearer authentication is required") would be eaten, and a
+# pattern that eats prose makes the trace useless.
+_BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=\-]{20,}")
+
 
 def _kv_replace(match: re.Match[str]) -> str:
     label = match.group(1)
     return f"{label}: {REDACTION_MARK}"
+
+
+def _bearer_replace(match: re.Match[str]) -> str:
+    # Keep the scheme: it says *what* was redacted, which is the useful half.
+    return f"Bearer {REDACTION_MARK}"
 
 
 class Redactor:
@@ -94,6 +106,7 @@ class Redactor:
         out = text
         for pattern in _SECRET_PATTERNS:
             out = pattern.sub(REDACTION_MARK, out)
+        out = _BEARER_PATTERN.sub(_bearer_replace, out)
         return _KV_PATTERN.sub(_kv_replace, out)
 
     def redact_obj(self, obj: Any) -> Any:

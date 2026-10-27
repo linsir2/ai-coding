@@ -38,6 +38,7 @@ import asyncio
 import json
 import pathlib
 import sys
+from dataclasses import replace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -51,11 +52,13 @@ CONFIG = pathlib.Path(__file__).resolve().parent.parent / "config.local.yaml"
 
 
 def _model_config(models: dict, name: str) -> ModelConfig:
-    raw = models[name]
-    return ModelConfig(
-        name=raw["name"], base_url=raw["base_url"], api_key=raw["api_key"],
-        max_tokens=128, temperature=0.0, streaming=True,
-    )
+    # Through `_coerce_model` (M-H2): it fills `base_url` from `provider` and
+    # resolves a `${VAR}` key.  Building `ModelConfig` by hand here would send
+    # the literal "${DEEPSEEK_API_KEY}" as the key.
+    from ai_coding.config.models import _coerce_model
+
+    coerced = _coerce_model(models[name])
+    return replace(coerced, max_tokens=128, temperature=0.0, streaming=True)
 
 
 def _tools(count: int = 12) -> list[dict]:

@@ -627,8 +627,17 @@ class BwrapBackend:
         proxy: Any = None,
         bridge_argv: Sequence[str] | None = None,
         bridge_script: Path | None = None,
+        secret_env_names: Sequence[str] = (),
     ) -> None:
         self._binary = binary
+        #: Environment variables this run consumed as secrets (M-H2).  Stripped
+        #: from the child with the same ``--unsetenv`` the proxy names use, so an
+        #: env-based API key cannot be read back with ``echo $DEEPSEEK_API_KEY``.
+        #: Only effective while bwrap actually wraps: ``mode=off``, a missing
+        #: binary, or a stack built without a policy all inherit the environment.
+        self._secret_env_names = tuple(
+            str(name) for name in secret_env_names if str(name).strip()
+        )
         self._writable = tuple(Path(path).expanduser().resolve() for path in writable_paths)
         self._read_deny = tuple(Path(path).expanduser() for path in read_deny_paths)
         af_unix = DEFAULT_AF_UNIX_DENY_PATHS if af_unix_deny_paths is None else af_unix_deny_paths
@@ -906,6 +915,12 @@ class BwrapBackend:
         # through the in-sandbox bridge's environment.
         for name in _PROXY_ENV_NAMES:
             prefix += ["--unsetenv", name]
+        # M-H2: the same mechanism, for the keys this run read out of the
+        # environment.  Appended after the proxy names so the two lists cannot
+        # shadow each other; a duplicate ``--unsetenv`` is harmless anyway.
+        for name in self._secret_env_names:
+            if name not in _PROXY_ENV_NAMES:
+                prefix += ["--unsetenv", name]
         if mode == "proxy":
             if self._proxy_socket is None:  # defensive: network_mode says proxy
                 raise ValueError("network.mode='proxy' without a proxy socket")
@@ -947,7 +962,10 @@ class BwrapBackend:
 
 
 def build_process_sandbox(
-    app_cfg: Any, workspace: str | Path
+    app_cfg: Any,
+    workspace: str | Path,
+    *,
+    secret_env_names: Sequence[str] = (),
 ) -> tuple[ProcessSandboxPolicy, SandboxBackend]:
     """The policy + mechanism pair the composition root hands to both callers.
 
@@ -956,6 +974,11 @@ def build_process_sandbox(
     mechanism exists.  ``roots`` is *not* built here -- it is the caller's
     ``Sandbox.roots``, so the process layer and the path layer share one
     writable face by construction.
+
+    ``secret_env_names`` are the environment variables the run consumed as
+    secrets (M-H2); they are stripped from the child with ``--unsetenv``.  The
+    stripping only happens when bwrap actually wraps: ``mode=off``, a missing
+    binary, or a stack built without this function all inherit the environment.
     """
     cfg = getattr(app_cfg, "process_sandbox", None)
     if not isinstance(cfg, ProcessSandboxConfig):
@@ -988,6 +1011,7 @@ def build_process_sandbox(
         network=network,
         proxy=proxy,
         bridge_argv=default_bridge_argv(),
+        secret_env_names=secret_env_names,
     )
     return policy, backend
 

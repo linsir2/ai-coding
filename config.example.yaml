@@ -1,24 +1,36 @@
 # AI-Coding example configuration.
-# Copy to config.local.yaml (git-ignored) and edit.
-# Keys follow snake_case; camelCase legacy keys are also accepted at load time.
 #
-# N-4b: this file ships in the repository, so a *project* layer is not trusted to
-# grant endpoints, credentials or paths outside the workspace.  Models (their
-# base_url / api_key), ai.websearch_api_key, tracing.dir and
-# memory.embeddings.cache_path are therefore ignored when they come from here.
-# Put them in the user layer instead (~/.config/ai-coding/config.yaml); a project
-# may still choose a model the operator already defined and tune its behaviour.
+# Do **not** copy this file to config.local.yaml to hold your key: a file found
+# in the workspace is the *project* layer, and a project may not grant endpoints
+# or credentials (a repository must not decide where your code goes).  Models,
+# their base_url / api_key / provider, ai.websearch_api_key, tracing.dir and
+# memory.embeddings.cache_path are dropped when they come from there.
+#
+# Instead:
+#     ai-coding config init      # writes ~/.config/ai-coding/config.yaml (0600)
+#     export DEEPSEEK_API_KEY=sk-...
+#     ai-coding
+#
+# Keys follow snake_case; camelCase legacy keys are also accepted at load time.
+# `streaming` is accepted for compatibility but has no consumer yet.
 
+# The user layer (~/.config/ai-coding/config.yaml) is the only place this block
+# belongs:
+#
 # models:
 #   deepseek-chat:
+#     provider: deepseek            # fills base_url from ai_coding/providers.py
 #     name: deepseek-chat
-#     base_url: https://api.deepseek.com/v1
-#     api_key: YOUR_DEEPSEEK_API_KEY_HERE
-#     streaming: true
+#     api_key: ${DEEPSEEK_API_KEY}  # or omit it: the provider's env var is used
 #     max_tokens: 4096
 #     temperature: 0.7
 #
 # default_model: deepseek-chat
+#
+# `api_key` resolves in this order: a ${VAR} reference, then a literal you wrote,
+# then the provider's conventional variable (DEEPSEEK_API_KEY / OPENAI_API_KEY /
+# DASHSCOPE_API_KEY).  The environment fills an absence; it never overrules a
+# literal.  A ${VAR} that is missing or empty is an error naming the variable.
 
 ai:
   auto_process_tool_results: true

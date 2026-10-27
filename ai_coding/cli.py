@@ -588,6 +588,111 @@ def trace_overview(
 app.add_typer(trace_app, name="trace")
 
 
+# ---- ai-coding config -----------------------------------------------------
+#
+# Where the user layer lives, and how to create it.  The trust filter means a
+# *project* config may not carry a model's endpoint or key (a repository must not
+# choose where your code goes), so the user layer is the only place a key can
+# live -- and until M-H2 there was no way to create it except by hand at a path
+# the docs never named.
+
+_CONFIG_TEMPLATE = """\
+# ai-coding user configuration.
+#
+# This file is the only layer allowed to carry model endpoints and keys: a
+# project's config may tune behaviour, but it may not decide where a request
+# goes or which credential it carries.
+#
+# The key is read from the environment, so it is not written here.  Export it:
+#     export DEEPSEEK_API_KEY=sk-...
+# ... or replace the reference below with a literal (less safe).
+
+models:
+  deepseek-chat:
+    provider: deepseek            # fills base_url from the provider table
+    name: deepseek-chat
+    api_key: ${DEEPSEEK_API_KEY}
+default_model: deepseek-chat
+
+# Other providers, same shape -- uncomment one and point default_model at it:
+#   gpt-5:
+#     provider: openai
+#     name: gpt-5
+#     api_key: ${OPENAI_API_KEY}
+#   qwen-max:
+#     provider: qwen
+#     name: qwen-max
+#     api_key: ${DASHSCOPE_API_KEY}
+#   llama-local:
+#     provider: ollama            # no key: a local server
+#     name: llama3
+"""
+
+
+config_app = typer.Typer(help="Where configuration lives.", no_args_is_help=True)
+
+
+@config_app.command("path")
+def config_path() -> None:
+    """Print the user-layer config file (it may not exist yet)."""
+    from ai_coding.paths import config_home
+
+    typer.echo(str(config_home() / "config.yaml"))
+
+
+@config_app.command("init")
+def config_init(
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing file."),
+) -> None:
+    """Write a starter user-layer config at 0600, creating the directory at 0700.
+
+    ``O_EXCL`` rather than "write then chmod": with the latter the file exists
+    world-readable between the two calls, and umask decides what lands there.
+    """
+    import os
+
+    from ai_coding.paths import config_home
+
+    directory = config_home()
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:  # pragma: no cover - a shared/odd filesystem
+        pass
+
+    path = directory / "config.yaml"
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_TRUNC if force else os.O_EXCL)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        typer.secho(
+            f"error: {path} already exists; pass --force to overwrite it",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+    # `O_TRUNC` keeps the existing file's mode, so an old 0644 file would stay
+    # readable after a --force rewrite.  `O_EXCL` already created it at 0600.
+    if force:
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            os.close(fd)  # nothing will own the descriptor otherwise
+            raise
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(_CONFIG_TEMPLATE)
+
+    typer.echo(f"wrote {path} (0600)")
+    typer.echo(
+        "next: export DEEPSEEK_API_KEY=..., or edit api_key in that file. "
+        "If this workspace has an older config.local.yaml with a literal key, "
+        "delete it or replace the key with ${DEEPSEEK_API_KEY}."
+    )
+
+
+app.add_typer(config_app, name="config")
+
+
 def run() -> None:
     app()
 

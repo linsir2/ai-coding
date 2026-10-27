@@ -20,15 +20,34 @@ pip install -e ".[dev]"
 
 ## 配置
 
-复制示例配置为本地配置并填写密钥：
+一条命令生成用户层配置，然后把密钥放进环境变量：
 
 ```bash
-cp config.example.yaml config.local.yaml
-# 编辑 config.local.yaml，把 deepseek-chat.api_key 换成真实 Key
+ai-coding config init          # 写 ~/.config/ai-coding/config.yaml（目录 0700、文件 0600）
+export DEEPSEEK_API_KEY=sk-...
+ai-coding                       # 不需要 --path
 ```
 
-`config.local.yaml` 在 `.gitignore` 中，不会误提交。通过 `--path config.local.yaml` 传入。
-不传 `--path` 默认加载空配置（仅默认值，无模型），因此真实调用必须显式指定配置路径。
+`ai-coding config path` 打印那个文件的位置；`config init --force` 覆盖重建。
+
+**为什么不是 `cp config.example.yaml config.local.yaml`**：工作区里找到的配置文件是**项目层**，
+而项目层**不允许**提供端点与凭据 —— 一个仓库不该决定你的代码发到哪里去。所以放在那里的
+`models.*.base_url` / `api_key` / `provider` 会被丢掉（并打一条警告），结果就是
+`models: []`、`default_model: ''`、启动报 "no default model configured"。这正是 M-H2 修掉的
+onboarding 断头。
+
+**密钥的解析顺序**：`${VAR}` 引用 → 你明写的字面值 → provider 的约定变量
+（`DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `DASHSCOPE_API_KEY`）。**环境变量只填空位，不覆盖
+你明写的 key**。`${VAR}` 未设置或为空是硬错，消息会告诉你该 export 哪个变量。
+
+**`provider` 能省掉 `base_url`**：`provider: deepseek` 就够（表在 `ai_coding/providers.py`）。
+自建网关不写 `provider` 时按 host+port 推断，推不出就退到 `generic`（没有默认端点、没有约定变量）。
+
+**子进程看不到密钥**：被消费的变量会经 `bwrap --unsetenv` 从 agent 的 bash 子进程里剥掉。
+边界要说清楚：`process_sandbox.mode=off`、bwrap 不可用、或没有 policy 的工具栈（脚本/测试）
+仍会继承环境。
+
+`--path` 仍可用：显式路径是**唯一**一层，不做信任过滤。适合一次性验证，不适合长期放 key。
 
 ## 命令速查
 

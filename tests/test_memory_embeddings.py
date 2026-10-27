@@ -299,3 +299,46 @@ def test_the_cache_path_is_clamped_into_the_workspace(tmp_path):
 
     assert not outside.exists(), "the cache was written outside the workspace"
     assert (paths.memory / "embeddings.json").exists()
+
+
+# ---- M-H2: `provider` here is a models KEY, not a provider id ---------------
+
+
+def test_a_provider_id_in_the_embeddings_field_is_reported(caplog):
+    """`memory.embeddings.provider` names a key in `models`, not a provider id.
+
+    With a provider id in that slot the index silently reports `available() ==
+    False` — the semantic tier just never runs, and nothing says why.
+    """
+    import logging
+
+    models = {
+        "deepseek-chat": ModelConfig(
+            name="deepseek-chat", base_url="https://api.deepseek.com/v1", api_key="k"
+        )
+    }
+    with caplog.at_level(logging.WARNING, logger="ai_coding.memory.embeddings"):
+        EmbeddingIndex(
+            EmbeddingsConfig(enabled=True, provider="deepseek", model="m"), models
+        )
+
+    assert any(
+        "models key" in record.message and "deepseek" in record.message
+        for record in caplog.records
+    ), [record.message for record in caplog.records]
+
+
+def test_a_real_models_key_is_not_reported(caplog):
+    import logging
+
+    models = {
+        "deepseek-chat": ModelConfig(
+            name="deepseek-chat", base_url="https://api.deepseek.com/v1", api_key="k"
+        )
+    }
+    with caplog.at_level(logging.WARNING, logger="ai_coding.memory.embeddings"):
+        EmbeddingIndex(
+            EmbeddingsConfig(enabled=True, provider="deepseek-chat", model="m"), models
+        )
+
+    assert caplog.records == []

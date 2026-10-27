@@ -80,6 +80,29 @@ R1 之后「一步」与「一回合」是两个契约（`domain/loop.py`）：
   空元组表示不降级，工厂直接返回单个引擎，行为与 M2 之前完全一致。
   链在启动时解析：名字不存在或成环都直接抛 `ValueError`。
 
+**`api_key` 是已解析值（M-H2）**：`_coerce_model` 是 YAML → `ModelConfig` 的唯一汇合点，
+它已经把 `${VAR}` / provider 约定变量解析完。所以下游（engine / pricing / embeddings / trace）
+拿到的 `api_key` 永远是一个可用的字符串，形状不变。`streaming` 是**死字段**（只被读、无人消费）。
+
+## M-H2 契约（provider 表 / 密钥解析 / 子进程脱敏）
+
+| 契约 | 位置 | 说明 |
+|---|---|---|
+| `Provider(id, default_base_url, api_key_env)` | `ai_coding/providers.py` | 三个字段，每个都有指名消费者：`id` = 表键与 `provider:` 的合法值；`default_base_url` = 允许省略 `base_url`；`api_key_env` = 缺省时读哪个环境变量。表只有 5 条（openai / deepseek / qwen / ollama / generic），**新增一条 = 加一行** |
+| `provider_id_for(base_url, *, explicit="")` | 同上 | 显式名优先；否则按 **host+port** 精确匹配（只按 host 会让 `localhost:8000` 变成 `ollama`）；都不中 → `generic`。未知的显式名抛 `UnknownProvider(ValueError)` 并列出合法值 |
+| `resolve_api_key(raw, provider_id, *, env=None)` | `ai_coding/config/secrets.py` | 顺序：`${VAR}` → 字面值 → provider 约定变量。**环境变量只填空位，不覆盖字面值**；`${VAR}` 缺失**或为空**抛 `MissingSecret(ValueError)`，消息给出变量名 |
+| `secret_env_names(models_doc)` | 同上 | 纯函数，从**原始** models 文档算出本配置会消费的环境变量。必须在 `app_from_doc` 之前调用 —— 它会把 `doc["models"]` 就地换成已解析的条目，之后 `${VAR}` 的名字就没了 |
+| `LayeredConfig.secret_env_names` | `config/loader.py` | 与 `sources` / `layers` 同类信息，由组合根（`server/world.py`）交给 `build_process_sandbox` |
+| `BwrapBackend(secret_env_names=...)` | `security/process_sandbox.py` | 复用既有的 `--unsetenv` 循环（`_PROXY_ENV_NAMES` 用的就是它）。边界：`mode=off` / bwrap 不可用 / `sandbox_policy is None` 时子进程仍继承环境 |
+| `MODEL_DESTINATION_MEMBERS` | `config/loader.py` | `{base_url, api_key, provider}`。`provider` 在这里是因为它同时决定端点**和**读哪个凭据 —— 项目层能设它就是凭据注入 |
+| `Redactor` 的 Bearer 模式 | `core/trace.py` | `(?i)\bBearer\s+[A-Za-z0-9._~+/=\-]{20,}`（大小写不敏感）。20 位是判别式：再短就会吃掉 `Bearer authentication is required` 这类普通句子；字符类不含非 ASCII，所以中文 token 漏报（已知边界） |
+| `ai-coding config init` / `config path` | `cli.py` | `init` 写 `config_home()/config.yaml`（目录 0700、文件 0600，`O_EXCL`；`--force` 用 `O_TRUNC` + `fchmod`）。`path` 打印那个位置 |
+
+**本轮边界**：只覆盖 model `api_key`。`ai.websearch_api_key`（Tavily）与 `mcp.servers[].headers`
+的 `Authorization` **不支持 `${VAR}`、也不在 `secret_env_names` 剥除范围内**（不过 trace 里的
+`Bearer <20+>` 仍会被 `Redactor` 替换）。另外 `--unsetenv` 只作用于 **agent 可控的 bash / job
+子进程**；stdio MCP server 以 `env=None` 启动、继承完整环境，仍能读到这些变量。
+
 ## 配置 schema
 
 `AppConfig` 是顶层根，字段均带默认值：
@@ -306,7 +329,7 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `LedgerUpdated`（事件） | `items` | open 集签名变化才发（边沿触发）；transcript 显示 dim 行，trace 泛型记录 |
 | `SearchStalled`（事件） | `iteration`、`level`、`calls`、`streak` | B1/B2/B5：`[search-gate]` 每升一档发一条，只走 nudge 路径；`trace.py` 的 `asdict` 让它自动进 jsonl |
 | `EXECUTION_KEYS`（配置常量） | `{"hooks", "mcp", "process_sandbox"}` | N-4：项目层不得授予的顶层键。`ConfigLoader` 在 `_normalize` **之后**过滤，项目层设置即丢弃 + warning，除非 `AI_CODING_TRUST_PROJECT=1`。`mcp.local.yaml` sidecar 的锚点（`chosen`）同样不推进到项目层。**M-D3 加入 `process_sandbox`**：它是唯一能关掉 OS 写边界的开关（`mode: off`/`allow_bypass`），被仓库 tracked config 改掉等于让该工作区所有 bash/job 以非沙箱运行；`AI_CODING_TRUST_PROJECT=1` 仍可覆盖 |
-| `PROJECT_FORBIDDEN_MEMBERS` / `PROJECT_FORBIDDEN_NESTED` / `MODEL_DESTINATION_MEMBERS`（配置常量） | `{"ai": {"websearch_api_key"}, "tracing": {"dir"}}` / `{"memory": {"embeddings": {"cache_path"}}}` / `{"base_url", "api_key"}` | N-4b：项目层**不得授予端点、凭据、越界路径**。`loader._filter_project_document` 在 `_normalize` 之后、`_overlay` 之前对项目层生效：`models` 条目若用户层没有则整条丢弃（项目层新增条目永远拿不到 `base_url`，是空壳）；用户层已有条目只丢 `base_url`/`api_key`，`name`/`max_tokens`/`temperature` 等仍生效；`default_model` 仅当指向项目层自己新增的模型时丢弃。**规则 0**：用户层在某顶层键上是 mapping 而项目层不是 → 丢项目层的值（`models:` YAML null 曾把用户所有模型覆盖成 `None`）。`tools.extra_workspace_roots` 取交集（见下）。`AI_CODING_TRUST_PROJECT=1` 时全部跳过 |
+| `PROJECT_FORBIDDEN_MEMBERS` / `PROJECT_FORBIDDEN_NESTED` / `MODEL_DESTINATION_MEMBERS`（配置常量） | `{"ai": {"websearch_api_key"}, "tracing": {"dir"}}` / `{"memory": {"embeddings": {"cache_path"}}}` / `{"base_url", "api_key", "provider"}` | N-4b：项目层**不得授予端点、凭据、越界路径**。`loader._filter_project_document` 在 `_normalize` 之后、`_overlay` 之前对项目层生效：`models` 条目若用户层没有则整条丢弃（项目层新增条目永远拿不到 `base_url`，是空壳）；用户层已有条目只丢 `base_url`/`api_key`/`provider`，`name`/`max_tokens`/`temperature` 等仍生效；`default_model` 仅当指向项目层自己新增的模型时丢弃。**规则 0**：用户层在某顶层键上是 mapping 而项目层不是 → 丢项目层的值（`models:` YAML null 曾把用户所有模型覆盖成 `None`）。`tools.extra_workspace_roots` 取交集（见下）。`AI_CODING_TRUST_PROJECT=1` 时全部跳过 |
 | `tools.extra_workspace_roots` 的合并（N-4b） | 覆盖语义 | 项目层声明**非空**时，有效集 = {用户层展开后的根 ∩ 被项目层声明**覆盖**的根}；声明**展开后为空**（`[]`/`[""]`/匹配不到的 pattern/缺省）→ 从项目 document 删掉该键，`_overlay` 的 list-replace 保留用户层原样。故 `["/"]` 覆盖全部用户根（无法把整台机器塞进来），`["<用户根>/a"]` 且用户根恰为 `a` 才收紧到 `{a}`，`["/etc"]` 收紧到 ∅。交集在**展开后**的目录上算（两个 pattern 集合无交集） |
 | `TraceStore.workspace`（N-4b） | `str \| Path \| None = None` | 纵深防御：`prune` 遍历并删除 `root` 下的一切，故 `root` 不在 `workspace` 内（或 `workspace=None`，fail-closed）时**直接返回 0 + warning**，不删任何东西。比较前双方都 `resolve()`，符号链接绕不过。代价：所有 `TraceStore(...)` 构造点须传 `workspace=` |
 | `cli._embeddings_for` 的工作区护栏（N-4b） | 消费侧 | 解析出的 `cache_path` 若不在 `paths.workspace` 内 → 回落 `paths.memory/embeddings.json` + warning。**作用于所有层**（护栏不知道来源层），比较前 `resolve()`。缓存是 pure accelerator，代价很低 |

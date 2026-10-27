@@ -133,7 +133,13 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     # Layered: the user-global config as the base, the project's on top (M9).
     # With no project file, the global one still answers — which is what makes
     # `ai-coding` startable from a fresh directory with only a personal key.
-    app_cfg = ConfigLoader.load_layers(paths, path)
+    #
+    # The *report* rather than `load_layers` because it also carries the
+    # environment variables this configuration consumed as secrets (M-H2): the
+    # sandbox strips them from every child, and once the key is resolved the name
+    # of a `${VAR}` reference is gone, so it has to come from here.
+    layered = ConfigLoader.load_layers_report(paths, path)
+    app_cfg = layered.config
 
     # M1b T1: the agent table, loaded once.  The project's files win over the
     # user's, which win over the built-ins; a broken file is skipped with its
@@ -180,7 +186,11 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     # M-D1: the process sandbox's policy/mechanism/roots are built once here and
     # handed to both the job table and the tool stack, so a bash command and a
     # background job share one backend instance and one writable face.
-    sandbox_policy, sandbox_backend = build_process_sandbox(app_cfg, workspace)
+    sandbox_policy, sandbox_backend = build_process_sandbox(
+        # Sorted: a frozenset has no order, and an argv that changes with
+        # PYTHONHASHSEED breaks "same config, same command".
+        app_cfg, workspace, secret_env_names=sorted(layered.secret_env_names)
+    )
     # E.2: the gate and the sandbox are built **before** the job table so both
     # can hold the same *live* roots -- ``JobRegistry`` takes
     # ``Sandbox.live_roots`` (a callable) and the tool stack gets the same

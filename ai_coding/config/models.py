@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -747,17 +748,71 @@ def _coerce_fallbacks(raw: Any) -> tuple[str, ...]:
     return tuple(str(name) for name in raw)
 
 
-def _coerce_model(raw: dict[str, Any]) -> ModelConfig:
-    """Build a domain ``ModelConfig`` accepting snake_case or legacy camelCase keys."""
+def _number(raw: Mapping[str, Any], key: str, default: float) -> float:
+    """``raw[key]``, or ``default`` when it is absent **or explicitly null**.
+
+    Not ``raw.get(key) or default``: ``temperature: 0`` is a value a user means,
+    and `or` would quietly turn it into the default.
+    """
+    value = raw.get(key)
+    return default if value is None else float(value)
+
+
+def _coerce_model(
+    raw: dict[str, Any], *, env: Mapping[str, str] | None = None
+) -> ModelConfig:
+    """Build a domain ``ModelConfig`` accepting snake_case or legacy camelCase keys.
+
+    This is the one place a YAML entry becomes a usable connection (M-H2): the
+    provider fills a missing ``base_url`` and decides which environment variable
+    carries the key.  ``env`` is injectable so a test never depends on the
+    machine it runs on.
+    """
+    from ai_coding.config.secrets import resolve_api_key
+    from ai_coding.providers import GENERIC, default_base_url, provider_id_for
+
+    name = str(raw.get("name") or "")
+    # `or ""` rather than a default: YAML `api_key:` with no value parses as
+    # None, and `str(None)` would send the literal "None" as the key.
+    base_url = str(raw.get("base_url") or raw.get("baseURL") or "").strip()
+    explicit = str(raw.get("provider") or "").strip()
+    try:
+        provider_id = provider_id_for(base_url, explicit=explicit)
+        base_url = base_url or default_base_url(provider_id)
+        api_key = resolve_api_key(str(raw.get("api_key") or ""), provider_id, env=env)
+    except ValueError as exc:
+        # Every refusal here is about *this* model, and a multi-model config with
+        # one bad entry would otherwise say only "unknown provider 'deapsek'".
+        raise type(exc)(f"model {name or '?'!r}: {exc}") from exc
+    if explicit and base_url:
+        # `provider` wins unconditionally, so a config naming one provider and an
+        # endpoint belonging to another would send A's key to B with no warning.
+        inferred = provider_id_for(base_url)
+        if inferred not in ("", GENERIC) and inferred != provider_id:
+            _log.warning(
+                "model %r: provider %r but base_url belongs to %r; the key will be "
+                "read for %r and sent to %s",
+                name,
+                explicit,
+                inferred,
+                provider_id,
+                base_url,
+            )
+    if not base_url:
+        _log.warning(
+            "model %r has no base_url and its provider has no default; the SDK "
+            "will fall back to OPENAI_BASE_URL",
+            name,
+        )
     return ModelConfig(
-        name=str(raw.get("name", "")),
-        base_url=str(raw.get("base_url", raw.get("baseURL", ""))),
-        api_key=str(raw.get("api_key", "")),
+        name=name,
+        base_url=base_url,
+        api_key=api_key,
         streaming=bool(raw.get("streaming", True)),
-        max_tokens=int(raw.get("max_tokens", 4096)),
-        temperature=float(raw.get("temperature", 0.7)),
-        top_p=float(raw.get("top_p", 0.9)),
-        timeout=int(raw.get("timeout", 60)),
+        max_tokens=int(_number(raw, "max_tokens", 4096)),
+        temperature=_number(raw, "temperature", 0.7),
+        top_p=_number(raw, "top_p", 0.9),
+        timeout=int(_number(raw, "timeout", 60)),
         # P0-1: a negative budget is nonsense, so clamp rather than trust the file.
         max_retries=max(0, int(raw.get("max_retries", 3) or 0)),
         retry_base_seconds=max(0.0, float(raw.get("retry_base_seconds", 2.0) or 0.0)),

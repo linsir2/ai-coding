@@ -128,7 +128,42 @@ GUI 复刻里程碑中已删除）。旧 Textual 实现的布局/组件细节见
 
   项目层设置了这些键时**丢弃并发一条 warning**（不静默）。要信任某个仓库，`export AI_CODING_TRUST_PROJECT=1` —— 这是环境变量而不是配置键，因为**仓库不能替 agent 进程设置它**，这正是"许可"与"配置"的区别。过滤在 `_normalize` **之后**做，所以 `Hooks:` / `MCP:` / `Mcp:` 这些大小写变体同样被挡住。
 
-  未覆盖的同类项（另立项）：`models[].base_url` / `api_key`（外发 + key 注入）、`tools.extra_workspace_roots`（越权读写）、`ai.websearch_api_key`（外发 key）、`tracing.dir`（越界写）、`hooks.plugin_dir`（python hook 的模块来自不可信仓库树）。
+  `models` 的**条目**也逐条过滤：项目层不能新增模型条目，已有条目只保留行为键，`base_url` /
+  `api_key` / `provider` 一律丢掉 —— 后者是 M-H2 加的，因为它同时决定端点**和**读哪个环境变量。
+
+  仍未覆盖的同类项（另立项）：`tools.extra_workspace_roots`（越权读写）、`ai.websearch_api_key`
+  （外发 key，已在 `PROJECT_FORBIDDEN_MEMBERS` 里但不在本节的清单中）、`tracing.dir`（越界写）、
+  `hooks.plugin_dir`（python hook 的模块来自不可信仓库树）。
+
+### 密钥从哪里来（M-H2）
+
+**`api_key` 的解析顺序**：`${VAR}` 引用 → 明写的字面值 → provider 的约定变量
+（`DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `DASHSCOPE_API_KEY`）。环境变量**只填空位，不覆盖
+字面值** —— 反过来会让一台导出了 `DEEPSEEK_API_KEY` 的 CI 机器静默用错账号，而且让测试结果
+取决于跑在哪台机器上。`${VAR}` 缺失**或为空**是硬错，消息给出变量名（以前会静默变成 `""`，
+一路走到 `AsyncOpenAI(api_key="")` 才报 `The api_key client option must be set`）。
+
+**provider 是一张 5 行的表**（`ai_coding/providers.py`）：openai / deepseek / qwen / ollama /
+generic。三个字段各有消费者 —— 默认 `base_url`（`provider: deepseek` 就不必再写端点）、约定
+环境变量名、以及表键本身。**不做的**：不做能力矩阵、不做第二套协议、不做价目表。原因写在
+`domain/usage.py` 与 `openai_engine` 里：usage 形状、reasoning 字段、context overflow 都是
+"挨个试"，本来就不需要知道 provider。
+
+**推断用 host+port**，不是 host：只按 host 会让 `http://localhost:8000/v1` 命中 `ollama`
+（默认 `localhost:11434`）。TUI 的 provider 标签仍走原来的 `provider_from_base_url`
+（从 host 猜），M-H2 没有动它 —— 它已经猜得够准。
+
+**子进程看不到密钥**：被消费的变量名由 `secret_env_names()` 从原始 models 文档算出（必须早于
+`app_from_doc`，否则 `${VAR}` 的名字就丢了），经 `LayeredConfig` 交给组合根，最后复用
+`process_sandbox` 里 `--unsetenv` 那个既有循环。边界要说全：`mode=off`、bwrap 不可用、或没有
+policy 的工具栈（脚本/测试）仍继承环境；**stdio MCP server 以 `env=None` 启动、继承完整环境**，
+不受这条保护；`static_check` 也不在沙箱内。沙箱生效时 `/proc/<pid>/environ` 那条路被
+`--unshare-pid` / `--tmpfs /proc` 关着 —— 那才是"子进程看不到密钥"的完整前提，不只是
+`--unsetenv`。
+
+**`config init` / `config path`**：前者写用户层（目录 0700、文件 0600、`O_EXCL`），后者打印
+位置。这是 onboarding 断头的根因修复 —— 以前文档教 `cp config.example.yaml config.local.yaml`，
+而那正是会被信任过滤丢掉的那一层。
 
 ## 上下文与回合编排
 

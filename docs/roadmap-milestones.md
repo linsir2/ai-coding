@@ -411,6 +411,7 @@
 | **缺口** | 密钥只能写 `config.local.yaml`；无密钥轮换、无环境变量优先级文档 |
 | **改动方向** | 环境变量优先 + `.env` 支持 + 启动时密钥来源提示 |
 | **验收判据** | 文档 + 单测覆盖优先级 |
+| **实际落地（2026-10-27）** | ✅ 环境变量 + `${VAR}` 引用（**不加 `.env`、不加 keychain**）：`${VAR}` → 字面值 → provider 约定变量，**env 只填空位不覆盖字面值**；`${VAR}` 缺失/为空是硬错并给出变量名。新增 `ai_coding/providers.py`（5 行 provider 表：默认 `base_url` + 约定环境变量名）与 `config/secrets.py`；`provider` 进 `MODEL_DESTINATION_MEMBERS`（它同时是端点与凭据选择器）。新增 `ai-coding config init` / `config path`（目录 0700、文件 0600），修掉"`cp config.example.yaml config.local.yaml` 反而得到空 models"的 onboarding 断头。子进程脱敏复用 `process_sandbox` 既有的 `--unsetenv` 循环。边界：`ai.websearch_api_key` 与 MCP `headers` 仍是字面值。 |
 
 ### M-H3 · IDE 集成
 
