@@ -144,6 +144,8 @@ def test_an_unresolvable_program_is_refused(command):
         "timeout 5 -- sudo ls",
         "stdbuf -o0 sudo ls",
         "ionice -c 3 sudo ls",
+        "env -S 'sudo ls'",
+        "env --split-string 'doas rm x'",
     ],
 )
 def test_a_wrapper_chain_still_reaches_the_escalation(command):
@@ -173,6 +175,14 @@ def test_force_with_lease_is_a_force_push():
 
 def test_an_ordinary_push_is_not():
     assert judge("git push origin main") == ""
+
+
+def test_env_split_string_still_reaches_the_wrapped_command():
+    """`env -S 'sudo ls'` splits and runs the pieces -- the peel must see sudo."""
+    assert judge("env -S 'sudo ls'")
+    assert judge("env --split-string 'doas rm x'")
+    # and the ordinary spelling is untouched
+    assert judge("env -S 'npm run build'") == ""
 
 
 # --- C.1①b  a double-quoted expansion must survive --------------------------

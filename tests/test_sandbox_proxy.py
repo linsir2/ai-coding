@@ -610,6 +610,17 @@ def test_a_malformed_cidr_is_refused_at_construction():
         SandboxProxy(socket.socket(socket.AF_UNIX), allow=["8.8.8.0/33"])
 
 
+def test_the_config_layer_refuses_a_malformed_cidr():
+    """U10: both the config source and the hand-built proxy refuse it."""
+    with pytest.raises(ValidationError):
+        NetworkConfig(allow=["8.8.8.0/33"])
+
+
+@pytest.mark.parametrize("cidr", ["8.8.8.0/24", "::1/128", "10.0.0.0/8"])
+def test_a_well_formed_cidr_is_accepted(cidr):
+    NetworkConfig(allow=[cidr])
+
+
 def test_authorize_resolves_once(monkeypatch):
     """The CIDR check and the connection must see the *same* pinned address.
 

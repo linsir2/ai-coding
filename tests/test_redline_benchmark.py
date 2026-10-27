@@ -205,6 +205,18 @@ def test_known_miss_is_surfaced(capsys) -> None:
     assert "| FP" in out
 
 
+def test_the_corpus_floor_is_real():
+    """``known_miss`` is retired, so a total-size floor is the vacuity guard.
+
+    Deleting rows from ``DANGEROUS`` would otherwise make the golden comparison
+    pass over a smaller set; the benchmark refuses that with ``MIN_CORPUS``.
+    The literal here pins the intent even if the constant were lowered to 0.
+    """
+    from ai_coding.security.redline_corpus import CORPUS
+
+    assert len(CORPUS) >= 100, f"the corpus shrank to {len(CORPUS)}"
+
+
 # ---- U11: the corpus is not quietly emptied ---------------------------------
 
 

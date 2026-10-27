@@ -221,14 +221,24 @@ async def test_a_stderr_line_never_becomes_the_sha(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_the_sha_is_shape_checked(tmp_path, monkeypatch):
+    """The ref target must be a bare object id, never a warning line.
+
+    Recorded at the ``update-ref`` call rather than asserted through
+    ``exists``: a fake git answers every call successfully, so an ``exists``
+    based assertion holds with or without the shape check (review P3).
+    """
     root = _repo(tmp_path)
     store = SnapshotStore(root)
-    monkeypatch.setattr(
-        snapshots_mod, "git", _fake_git(f"not-a-sha-at-all\n{_SHA}")
-    )
+    written: list[str] = []
+
+    async def _git(_root, *args, **kwargs):
+        if args[:1] == ("update-ref",):
+            written.append(args[2])
+        return 0, f"warning: unable to access '.git/info/exclude': Permission denied\n{_SHA}"
+
+    monkeypatch.setattr(snapshots_mod, "git", _git)
 
     ref = await store.capture("s/1")
 
-    assert ref is None or await store.exists("s/1"), (
-        "a non-hex sha must not be written as a ref"
-    )
+    assert ref == "refs/ai-coding/undo/s/1"
+    assert written == [_SHA], f"update-ref was handed {written!r}"

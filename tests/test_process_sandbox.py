@@ -598,17 +598,26 @@ def test_wrap_mounts_tmpfs_before_the_roots(tmp_path):
 def test_wrap_keeps_the_isolation_switches(tmp_path):
     """The switches a *selected* tier must carry, and the ``--proc`` invariant.
 
-    Asserted on the ``full`` construction directly: reading ``backend.tier``
-    would trigger the probe, and the probe is exactly what is unavailable on a
-    host without bwrap.  The invariant A.1 pins is ``--proc`` iff
-    ``--unshare-pid``: a tier may keep ``/proc`` only together with its own pid
-    namespace.
+    Asserted on **both** constructions directly: reading ``backend.tier`` would
+    trigger the probe, and the probe is exactly what is unavailable on a host
+    without bwrap.  The invariant A.1 pins is ``--proc`` iff ``--unshare-pid``:
+    a tier may keep ``/proc`` only together with its own pid namespace.
+
+    Both tiers are asserted explicitly -- a single ``==`` over ``full`` alone
+    is a tautology, because ``full`` always carries both flags (review P2).
     """
     backend = BwrapBackend(writable_paths=())
-    argv = backend._build(["/bin/true"], [tmp_path], "full")
+    full = backend._build(["/bin/true"], [tmp_path], "full")
+    no_proc = backend._build(["/bin/true"], [tmp_path], "no-proc")
+
     for flag in ("--die-with-parent", "--new-session"):
-        assert flag in argv, argv
-    assert ("--proc" in argv) == ("--unshare-pid" in argv), argv
+        assert flag in full, full
+        assert flag in no_proc, no_proc
+
+    assert ("--proc" in full) == ("--unshare-pid" in full), full
+    assert "--proc" in full and "--unshare-pid" in full, full
+    assert ("--proc" in no_proc) == ("--unshare-pid" in no_proc), no_proc
+    assert "--proc" not in no_proc and "--unshare-pid" not in no_proc, no_proc
 
 
 def test_wrap_masks_after_the_tmpfs_and_the_binds(tmp_path):

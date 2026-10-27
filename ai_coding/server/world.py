@@ -258,6 +258,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         jobs=jobs,
         cancel=cancel,
         agents=agents,
+        gate=gate,
     )
     pending = find_armed_session(sessions)
     if pending is not None:

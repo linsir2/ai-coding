@@ -146,3 +146,38 @@ def test_live_roots_do_not_include_the_parent_configuration(tmp_path):
 
     child = Sandbox(workspace, extra_roots=())
     assert child.live_roots() == (workspace.resolve(),)
+
+
+def test_the_loop_reuses_the_sandbox_gate(tmp_path):
+    """A runtime "always" must reach **both** halves of the boundary.
+
+    The dispatcher records the grant on the loop's gate; the sandbox asks its
+    grantor.  Two gates would mean the operator's answer lands in one and the
+    file tools keep refusing it -- the exact split §E exists to close, and a
+    test that hands the same gate to both sides hides it.
+    """
+    from ai_coding.ai.engine import ChatEngine
+    from ai_coding.cli import _build_loop, _build_tool_registry
+    from ai_coding.config.models import AppConfig
+
+    class _Engine(ChatEngine):
+        async def step(self, *args, **kwargs):  # pragma: no cover - never called
+            raise AssertionError("the loop must not run")
+
+        async def aclose(self) -> None:
+            return None
+
+    class _Sessions:
+        def save(self, session) -> None:
+            return None
+
+        def mark_pending_approval(self, session_id, request) -> None:
+            return None
+
+    cfg = AppConfig()
+    registry = _build_tool_registry(cfg, str(tmp_path), None)
+    gate = PermissionGate(workspace=str(tmp_path))
+    loop = _build_loop(
+        _Engine(), _Sessions(), registry, cfg, str(tmp_path), None, gate=gate
+    )
+    assert loop.gate is gate, "the loop built its own gate: a grant cannot reach the sandbox"

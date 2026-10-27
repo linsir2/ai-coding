@@ -214,6 +214,31 @@ def _program_is_unauditable(program: str) -> bool:
     return "$" in program or "`" in program
 
 
+def _unfold_env_split_string(words: tuple[str, ...]) -> tuple[str, ...]:
+    """``env -S 'sudo ls'`` -> ``env sudo ls``.
+
+    coreutils ``env -S`` / ``--split-string`` splits its argument on whitespace
+    and runs the pieces, so the command it wraps arrives as **one** word and the
+    wrapper peel stops at it.  Unfolding it lets the peel see the real program.
+    """
+    out: list[str] = []
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if (
+            _basename(word) == "env"
+            and index + 2 < len(words)
+            and words[index + 1] in ("-S", "--split-string")
+        ):
+            out.append(word)
+            out.extend(words[index + 2].split())
+            index += 3
+            continue
+        out.append(word)
+        index += 1
+    return tuple(out)
+
+
 def _programs(view: CommandView) -> list[str]:
     """The programs the command runs, wrappers peeled off.
 
@@ -236,9 +261,13 @@ def _programs(view: CommandView) -> list[str]:
 
     ``--`` is skipped in both loops (it ends the wrapper's options; the word
     after it is the command).
+
+    ``env -S 'sudo ls'`` is unfolded first: coreutils splits that argument on
+    whitespace and runs the pieces, so the wrapped command is hidden behind a
+    single word otherwise (a measured miss).
     """
+    words = _unfold_env_split_string((view.program, *view.arguments))
     names: list[str] = []
-    words = (view.program, *view.arguments)
     index = 0
     while index < len(words):
         if words[index] == "--":

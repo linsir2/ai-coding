@@ -51,6 +51,7 @@ __all__ = [
     "DANGEROUS",
     "KNOWN_FP",
     "KNOWN_MISS",
+    "MIN_CORPUS",
     "MIN_DANGEROUS",
     "MIN_KNOWN_MISS",
     "MIN_SAFE",
@@ -76,10 +77,14 @@ class RedlineCase:
 MIN_DANGEROUS = 20
 MIN_UNPARSEABLE = 10
 MIN_SAFE = 20
-#: §C closed all 16 ``known_miss`` rows, so the floor is now zero.  The class
-#: stays (and the counter stays printed) so a regression that reopens one shows
-#: up as the number rising from zero rather than as a silently dropped section.
+#: ``KNOWN_MISS`` is empty by design: §C closed all 16, so there is nothing left
+#: to report and the counter is retired (the golden comparison over
+#: ``DANGEROUS`` is the regression net).  The floor is 0 rather than absent so
+#: the benchmark still states the invariant.
 MIN_KNOWN_MISS = 0
+#: A floor on the **total** corpus.  With ``known_miss`` retired, deleting rows
+#: is the one way to make the benchmark pass vacuously, and this refuses it.
+MIN_CORPUS = 100
 
 
 #: Literal red lines, in every spelling the rules and the fallback agree on.

@@ -41,6 +41,7 @@ from ai_coding.security.redline_corpus import (  # noqa: E402
     DANGEROUS,
     KNOWN_FP,
     KNOWN_MISS,
+    MIN_CORPUS,
     MIN_DANGEROUS,
     MIN_KNOWN_MISS,
     MIN_SAFE,
@@ -117,6 +118,12 @@ class Metrics:
             problems.append(f"safe = {len(SAFE)}, need >= {MIN_SAFE}")
         if len(KNOWN_MISS) < MIN_KNOWN_MISS:
             problems.append(f"known_miss = {len(KNOWN_MISS)}, need >= {MIN_KNOWN_MISS}")
+        # ``KNOWN_MISS`` is empty by design now (§C closed all 16), so the
+        # known_miss counter above is retired -- the golden comparison over
+        # ``DANGEROUS`` is what catches a verdict regressing to "".  A floor on
+        # the *total* corpus keeps "someone deleted the rows" from passing.
+        if len(CORPUS) < MIN_CORPUS:
+            problems.append(f"corpus = {len(CORPUS)}, need >= {MIN_CORPUS}")
         commands = [case.command for case in CORPUS]
         if len(set(commands)) != len(commands):
             problems.append("duplicate corpus commands")

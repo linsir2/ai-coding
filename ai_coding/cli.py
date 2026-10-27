@@ -142,6 +142,12 @@ def _build_loop(
     # M1b: the agent table.  ``None`` keeps the loop without an agent layer,
     # which is what every test double and the bare REPL want.
     agents: Any | None = None,
+    # E.2: the gate the **sandbox** already asks.  Passing it in is what makes a
+    # runtime "always" reach both halves of the boundary -- the dispatcher
+    # records the grant on this object and ``Sandbox.resolve``/``live_roots``
+    # read it back.  Two gates would mean the operator's answer lands in one
+    # and the file tools keep refusing it.
+    gate: Any | None = None,
 ) -> Any:
     """Assemble the loop and its optional components (silent degradation)."""
     if approval is None:
@@ -206,7 +212,7 @@ def _build_loop(
         sessions,
         registry,
         approval=approval,
-        gate=_build_gate(app_cfg, str(ws), skills),
+        gate=gate if gate is not None else _build_gate(app_cfg, str(ws), skills),
         snapshots=snapshots,
         context=context,
         memory=memory,
