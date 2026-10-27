@@ -43,6 +43,10 @@ from ai_coding.service.session_service import SessionService
 from ai_coding.tools.grep_tool import GrepTool
 from ai_coding.tools.registry import ToolRegistry
 
+# M-G3: the integration layer.  These files already lived in tests/integration/;
+# the marker is what lets CI run them as their own job.
+pytestmark = pytest.mark.integration
+
 PNG_1PX = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQ"
     "AAAABJRU5ErkJggg=="

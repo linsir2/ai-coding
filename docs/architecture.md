@@ -256,9 +256,9 @@ flowchart TB
 ```mermaid
 flowchart LR
     W["TraceRecorder（写入，未改）"] --> FS[(".ai-coding/traces/<session>/turn-N.jsonl + summary.json")]
-    FS --> REF["TraceStore.sessions() / prune()（同一 mtime 口径）"]
+    FS --> REF["TraceStore.sessions() / prune()（同一 last_activity 口径）"]
     REF --> AGG["core.aggregate.build_report()（纯数据，坏文件记零）"]
-    AGG --> T1["ui.trace_render.render_overview（trace overview）"]
+    AGG --> T1["app.trace_text.render_overview（ai-coding trace overview）"]
     AGG --> T2["core.export_html（trace export --format html）"]
     FS --> V["export_html.read_session_view()"]
     V --> T2

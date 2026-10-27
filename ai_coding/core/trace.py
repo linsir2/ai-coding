@@ -183,12 +183,121 @@ class SessionRef:
 
     session: str
     path: Path
-    mtime: float
+    #: When the session was last active, as an epoch second.  From the last
+    #: parseable ``ts`` in the highest-numbered turn file, falling back to the
+    #: directory mtime when there is nothing readable.  The directory mtime
+    #: alone cannot answer this: an ``rsync`` without ``-t`` rewrites it to the
+    #: transfer time, so every session looks brand new and ``prune`` never
+    #: deletes anything again.
+    last_activity: float
     turn_files: tuple[Path, ...]
 
     @property
     def turns(self) -> int:
         return len(self.turn_files)
+
+
+#: The shape ``now_iso`` writes: millisecond precision, UTC, trailing ``Z``.
+_TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+
+
+def _parse_ts(stamp: object) -> float | None:
+    """``2026-10-27T07:24:54.623Z`` → epoch second, or ``None``."""
+    if not isinstance(stamp, str):
+        return None
+    try:
+        parsed = datetime.strptime(stamp, _TS_FORMAT).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return parsed.timestamp()
+
+
+_TRAILING_WS = b"\r\n \t"
+
+
+def _last_line(path: Path, *, chunk: int = 8192) -> str:
+    """The last **non-empty** line of ``path``, reading backwards.
+
+    A fixed tail window is not enough: ``capture: full`` writes untrimmed
+    payloads, so one line can exceed any constant.  The file itself is capped at
+    ``max_turn_bytes`` (2 MB), so the scan is bounded by that.
+
+    Three linear passes: trim the trailing whitespace to find where the last line
+    ends, scan back for the newline that starts it, then read just that line.
+    Prepending each block to a growing buffer instead would be quadratic --
+    measured 12s for 200 sessions whose last line is 2 MB, against 2.7s here for
+    the same input (and both are pathological: that is 400 MB of trace).
+    """
+    chunk = max(1, chunk)
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            end = handle.tell()
+            if end == 0:
+                return ""
+
+            # 1. Where does the last non-whitespace byte sit?  Trailing newlines
+            #    are separators, not content, so "the last line" is not "the
+            #    bytes after the final newline".
+            end_content = -1
+            position = end
+            while position > 0:
+                step = min(chunk, position)
+                position -= step
+                handle.seek(position)
+                block = handle.read(step)
+                trimmed = block.rstrip(_TRAILING_WS)
+                if trimmed:
+                    end_content = position + len(trimmed)
+                    break
+            if end_content == -1:
+                return ""  # the file is nothing but whitespace
+
+            # 2. The newline that starts that line.
+            newline_at = -1
+            position = end_content
+            while position > 0:
+                step = min(chunk, position)
+                position -= step
+                handle.seek(position)
+                block = handle.read(step)
+                found = block.rfind(b"\n")
+                if found != -1:
+                    newline_at = position + found
+                    break
+
+            # 3. That line, and nothing else.
+            start = newline_at + 1
+            handle.seek(start)
+            data = handle.read(end_content - start)
+    except OSError:
+        return ""
+    return data.decode("utf-8", "replace").strip()
+
+
+def _last_activity(turn_files: Sequence[Path], fallback: float) -> float:
+    """The last parseable ``ts`` in the highest-numbered turn file.
+
+    Falls back to the previous turn file when the newest has no ``ts`` (an empty
+    file, or a hand-written one), and to ``fallback`` when none does.  Turn
+    numbers come from ``next_turn_number``, so the highest-numbered file is the
+    latest activity; a ``truncated`` marker line carries its own ``ts`` and is a
+    real last activity.
+    """
+    for path in reversed(turn_files):
+        line = _last_line(path).strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        parsed = _parse_ts(payload.get("ts"))
+        if parsed is not None:
+            return parsed
+    return fallback
 
 
 def _turn_number(path: Path) -> int:
@@ -287,10 +396,9 @@ class TraceStore:
         return highest + 1
 
     def sessions(self) -> tuple[SessionRef, ...]:
-        """Every session directory, newest write first.  Never raises (R9b).
+        """Every session directory, most recently active first.  Never raises.
 
-        Newest-first is the order ``trace overview`` wants; ties fall back to the
-        session id, so the output is deterministic.
+        Ties fall back to the session id, so the output is deterministic.
         """
         if not self.root.is_dir():
             return ()
@@ -303,8 +411,10 @@ class TraceStore:
             except OSError:
                 continue
             files = tuple(sorted(entry.glob("turn-*.jsonl"), key=_turn_number))
-            refs.append(SessionRef(entry.name, entry, mtime, files))
-        refs.sort(key=lambda ref: (-ref.mtime, ref.session))
+            refs.append(
+                SessionRef(entry.name, entry, _last_activity(files, mtime), files)
+            )
+        refs.sort(key=lambda ref: (-ref.last_activity, ref.session))
         return tuple(refs)
 
     def summary_path(self, session_id: str) -> Path:
@@ -376,7 +486,7 @@ class TraceStore:
         cutoff = (now if now is not None else time.time()) - self.retention_days * 86400
         removed = 0
         for ref in self.sessions():
-            if ref.mtime >= cutoff:
+            if ref.last_activity >= cutoff:
                 continue
             try:
                 for child in sorted(ref.path.rglob("*"), reverse=True):

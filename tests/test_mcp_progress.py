@@ -34,6 +34,9 @@ pytestmark = [
             "(docs/r2-analysis.md section 1.5)"
         ),
     ),
+    # M-G3: the live layer.  Appended, never assigned -- a bare
+    # `pytestmark = pytest.mark.live` would drop the two marks above.
+    pytest.mark.live,
 ]
 
 

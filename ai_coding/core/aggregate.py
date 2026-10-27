@@ -72,12 +72,15 @@ def row_from_summary(
     summary: Any,
     *,
     files: int,
-    mtime: float,
+    last_activity: float,
     now: float,
 ) -> SessionRow:
     """One reading row; a missing/broken summary is "zeros", not an exception."""
     data: dict[str, Any] = summary if isinstance(summary, dict) else {}
-    age_days = max(0.0, (now - mtime) / 86_400) if mtime else 0.0
+    # No special case for 0: `last_activity` always comes from `SessionRef`, which
+    # falls back to the directory mtime, so it is a real timestamp.  Treating 0 as
+    # "unknown" would hide an epoch-0 trace as "just now".
+    age_days = max(0.0, (now - last_activity) / 86_400)
     return SessionRow(
         session=session,
         turns=_int(data.get("turns")),
@@ -109,21 +112,24 @@ def build_report(
 ) -> AggregateReport:
     """Read every session on disk and fold it into one report (R9b).
 
-    ``since_days`` filters on the **directory mtime**, exactly like ``prune``, so
-    "what prune would delete" and "what counts as old" can never disagree.
+    ``since_days`` filters on ``SessionRef.last_activity`` -- the newest ``ts``
+    inside the session's own trace files -- so it and ``prune`` read the same
+    number.  It used to read the session *directory* mtime, which an ``rsync``
+    without ``-t`` rewrites to the transfer time: every session then looked brand
+    new, ``since_days`` returned everything, and ``prune`` never deleted again.
     """
     moment = time.time() if now is None else now
     cutoff = moment - since_days * 86_400 if since_days > 0 else None
     rows: list[SessionRow] = []
     for ref in store.sessions():
-        if cutoff is not None and ref.mtime < cutoff:
+        if cutoff is not None and ref.last_activity < cutoff:
             continue
         rows.append(
             row_from_summary(
                 ref.session,
                 store.read_summary(ref.session),
                 files=ref.turns,
-                mtime=ref.mtime,
+                last_activity=ref.last_activity,
                 now=moment,
             )
         )

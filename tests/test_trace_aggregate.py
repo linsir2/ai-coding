@@ -3,7 +3,10 @@
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from ai_coding.core.aggregate import SessionRow, aggregate_sessions, build_report
 from ai_coding.core.trace import TraceStore
@@ -13,9 +16,24 @@ def _store(tmp_path: Path) -> TraceStore:
     return TraceStore(tmp_path / "traces", workspace=tmp_path)
 
 
-def _record(store: TraceStore, session: str, *, turns: int, summary: dict | None) -> None:
+def _iso(epoch: float) -> str:
+    return (
+        datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+        + "Z"
+    )
+
+
+def _record(
+    store: TraceStore,
+    session: str,
+    *,
+    turns: int,
+    summary: dict | None,
+    ts: float | None = None,
+) -> None:
+    line = "{}" if ts is None else json.dumps({"v": 1, "ts": _iso(ts), "evt": "X"})
     for _ in range(turns):
-        store.begin_turn(session).write_line("{}")
+        store.begin_turn(session).write_line(line)
     if summary is not None:
         (store.session_dir(session) / "summary.json").write_text(
             json.dumps(summary), encoding="utf-8"
@@ -66,12 +84,29 @@ def test_r9_a_corrupt_summary_is_not_fatal(tmp_path):
     assert row.files == 1 and row.turns == 0
 
 
-def test_r9_since_filters_by_directory_mtime_and_keeps_order(tmp_path):
+def test_r9_since_filters_by_in_file_ts_and_keeps_order(tmp_path):
+    """The time source is the trace itself, so an rsync cannot move it.
+
+    ``since_days`` used to read the session *directory* mtime, which an
+    ``rsync`` without ``-t`` rewrites to the transfer time -- every session
+    then looked brand new and the window returned everything.
+    """
     store = _store(tmp_path)
-    _record(store, "old", turns=1, summary={"turns": 1})
-    _record(store, "new", turns=1, summary={"turns": 1})
     stale = time.time() - 30 * 86400
-    os.utime(store.session_dir("old"), (stale, stale))
+    _record(store, "old", turns=1, summary={"turns": 1}, ts=stale)
+    _record(store, "new", turns=1, summary={"turns": 1}, ts=time.time())
 
     assert [row.session for row in build_report(store, since_days=7).rows] == ["new"]
     assert [row.session for row in build_report(store).rows] == ["new", "old"]
+
+
+def test_r9_age_comes_from_the_in_file_ts_not_the_directory(tmp_path):
+    store = _store(tmp_path)
+    stale = time.time() - 5 * 86400
+    _record(store, "sess-1", turns=1, summary={"turns": 1}, ts=stale)
+    # the rsync: the directory looks fresh, the trace does not
+    os.utime(store.session_dir("sess-1"), (time.time(), time.time()))
+
+    row = build_report(store).rows[0]
+
+    assert row.age_days == pytest.approx(5.0, abs=0.05)

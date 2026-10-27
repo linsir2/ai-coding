@@ -32,8 +32,9 @@ cp config.example.yaml config.local.yaml
 
 ## 命令速查
 
-R10 起只有一种调用方式：`ai-coding` 直接启动全屏 TUI。旧的 Typer 子命令
-（`config-check` / `ask` / `memory` / `trace` / `repl`）已删除。
+裸 `ai-coding` 直接启动全屏 TUI。另有三个子命令：`ai-coding skill install|list|remove`、
+`ai-coding trace overview`（M-G2 恢复，看跨会话 token 与命中率）、`ai-coding --version`。
+R10 删掉的 `config-check` / `ask` / `memory` / `repl` 仍未回来。
 
 ```bash
 ai-coding --version
@@ -234,14 +235,17 @@ mcp:
 |---|---|---|
 | 让 `todo_write` 挡住「依赖没做完就开始/完成」 | 不用开：`ai.enforce_dependencies` 默认 `true` | 同时挡正向引用与自指（`add` 直接拒绝）。老清单若真有环/幽灵依赖，`update` 会返回 `blocked_by_dependencies` 并把 `open` / `unknown` / `cycle` 一起给你 |
 | 关掉依赖门禁（只给历史遗留清单） | `ai.enforce_dependencies: false` | 回到 R1 行为：只渲染、不强制 |
-| 一眼看完所有会话的 token 与命中率 | R10 起暂无 CLI 入口（`ai-coding trace` 已删除）；`core.aggregate.build_report(TraceStore(root), since_days=N)` 仍在库里 | `--since` 依赖「写文件会刷新目录 mtime」这一文件系统行为，`rsync` / 复制过的目录会整体漂移（与 `prune` 同病同源） |
+| 一眼看完所有会话的 token 与命中率 | `ai-coding trace overview [-w DIR] [--since N] [--format table\|json]`（M-G2 恢复；R10 曾删掉这个命令） | `--since` 读的是会话 trace 里**最后一个 `ts`**（`SessionRef.last_activity`），`rsync` / 复制过的目录**不再漂移**；`prune` 用同一个数 |
 | 把一次会话导成一个能直接打开的页面 | `core.export_html.render_session_html([read_session_view(store, sid)])` | 单文件、内联 CSS、无 JS、无外链；**所有动态串都转义**（工具输出里的 `<script>` 只会显示成文本） |
 | 把轨迹喂给别的观测系统 | `core.export_otlp.rows_to_otlp(views)` | 零依赖：只写 OTLP/JSON 文件，**不发 HTTP**、不装 OTel SDK |
 | 连消息全文一起导出（取证用） | 加 `--full` | 默认**不含**全文；只有 `capture: full` 的轨迹才有 `turn-<n>.full.json` 可导 |
 
-两个诚实提醒：`mismatch`（`summary.turns` 与磁盘回合数对不上）**只标注不报错**，退出码仍是 0；
-`--since` 依赖「写文件会刷新目录 mtime」这一文件系统行为，`rsync` / 复制过的目录会整体漂移
-（与 `prune` 同病同源）。
+一个诚实提醒：`mismatch`（`summary.turns` 与磁盘回合数对不上）**只标注不报错**，退出码仍是 0。
+
+`--since` 与 `prune` 读同一个数：`SessionRef.last_activity`，即会话自己 trace 里最后一个可解析的
+`ts`（读不到时回退到目录 mtime）。这是 M-G2 改的：以前读目录 mtime，而 `rsync` 不带 `-t` 会把
+每个目录的 mtime 改成传输时间 —— 于是所有会话都像刚写的，`--since` 返回全部、`prune` 再也删不掉
+旧会话。注意 `--since` 是**查看窗口**，删除阈值是 `tracing.retention_days`。
 
 验收脚本：`.venv/bin/python scripts/r9_cases.py`（离线 12 条）；
 `--real` 再加 1 条：真模型跑一个回合，断言 `build_report` 把这次会话算进去了。

@@ -35,6 +35,10 @@ from ai_coding.tools.webfetch_tool import FetchRefused, WebfetchTool, _is_public
 from ai_coding.tools.websearch_tool import WebsearchTool
 from ai_coding.tools.write_tool import WriteTool
 
+# M-G3: the integration layer.  These files already lived in tests/integration/;
+# the marker is what lets CI run them as their own job.
+pytestmark = pytest.mark.integration
+
 # --------------------------------------------------------------- T3: SSRF
 
 

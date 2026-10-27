@@ -1190,6 +1190,12 @@ def _stats_report(loop: Any) -> str:
 
     Read-only: every traced session is folded into one report, newest first.
     An empty store says so — a hollow table would read as a bug.
+
+    This deliberately does **not** reuse ``app.trace_text.render_overview``: the
+    REPL wants one compact line per session (``turns= steps= tok=``), the CLI
+    wants a fixed-width table with a TOTAL row.  Forcing one renderer on both
+    would cost one of them its shape.  Both read the same ``build_report``, so
+    the numbers cannot drift; only the presentation differs.
     """
     from ai_coding.core.aggregate import build_report
 

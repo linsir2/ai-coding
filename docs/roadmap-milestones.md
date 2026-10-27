@@ -363,6 +363,7 @@
 | **缺口** | `scripts/retrieval_cases.py --check` 是**本地门禁，CI 目前不调**（文档自述） |
 | **改动方向** | 接入 CI；`memory_cases`、`r18_acceptance`、`trace_cases` 一并接 |
 | **验收判据** | CI 里这些脚本任一不达标 → 红 |
+| **实际落地（2026-10-27）** | ✅ 实测：`memory_cases` / `trace_cases` / `redline_benchmark` **早已在 CI**，真缺口只有 `retrieval_cases.py --check` 与 `r18_acceptance.py`（今天都是绿的）。两个 step 已接进 `quality` job。**`r7_cases`（exit 1）与 `r11c_cases`（exit 2）离线且今天是红的**，本轮点名不接（需先修 domain-B 过期期望 / C5 场景未产出）。其余 `*_cases.py` 的离线分支基本重跑已有单测，不接。 |
 
 ### M-G2 · 成本看板
 
@@ -371,6 +372,7 @@
 | **缺口** | `core/aggregate.py::build_report` 已能算 token，但 `--since` 依赖目录 mtime（rsync 会漂移）；且已无 CLI 入口 |
 | **改动方向** | 修 `--since` 的漂移（改用文件内时间戳）；恢复一个 CLI 或做成 `/usage` 面板 |
 | **验收判据** | rsync 后的目录不漂移；面板可查 |
+| **实际落地（2026-10-27）** | ✅ 实测 `--since` 是**死参数**（3 个生产调用方都不传），但 `prune` 读同一个目录 mtime 且**真被调用** —— rsync 不带 `-t` 后 `prune` 永久失效。修法：`SessionRef.mtime` → `last_activity`（取 turn 文件里最后一个 `ts`，回退目录 mtime），`prune` / `--since` / 排序三处同源。`render_overview()` 本来就在、只是**零消费者**，恢复 `ai-coding trace overview [--since] [--format]` 让它第一次被用上。`/stats` 与 `/export` 的 **age 与会话顺序**会变（修正，非回归）。 |
 
 ### M-G3 · 测试分层
 
@@ -379,6 +381,7 @@
 | **缺口** | 3799 个用例混跑，慢；且环境伪失败（M-A4）混在里面 |
 | **改动方向** | 分 `unit` / `integration` / `live` 三层，CI 分别跑；live 层需 gate 变量 |
 | **验收判据** | CI 分层清晰，任一层可单独复跑 |
+| **实际落地（2026-10-27）** | ✅ 注册 `integration` / `live` 两个 marker + `--strict-markers`；`addopts` **故意不放 `-m`**（实测：`-m 'not live'` 会让 `pytest tests/test_mcp_stdio.py` 收集 0 条、exit 5）。CI 拆 4 job（quality / unit / integration / live）× 2 版本。`tests/test_live_gate.py` 是 canary：`-m live` 缺 gate 变量时**失败**而不是静默全 skip。顺带修一个既有遗漏：`test_mcp_progress.py` 第一次在 CI 真跑。 |
 
 ### M-G4 · 危险命令与权限的端到端基准
 
@@ -387,6 +390,7 @@
 | **缺口** | `sample_tasks` 的 `bash-deny` 场景是**单例**，不是基准 |
 | **改动方向** | 扩成基准集（正例/负例各 N 条），输出指标 |
 | **验收判据** | 基准脚本 + 指标 |
+| **实际落地（2026-10-27）** | ✅ 判定级基准（`redline_corpus` + `redline_benchmark`）早已成熟；本轮补**规则链层**：`security/permission_corpus.py`（58 行自描述语料）+ `scripts/permission_benchmark.py`（驱动真实 `PermissionGate.check()`，冻结 `(verdict, rule)`，报 FN/FP + 规模下限，退 0/1，进 CI）。**发现并记录一个缺口**：`grep`/`glob` 带绝对越界路径时 ALLOW（`_directory_of` 去掉前导 `/`），作为 `KNOWN_MISS` 打印，不改 `check()`。 |
 
 ---
 
@@ -485,7 +489,7 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 | M-E1~E4 上下文工程 | ✅ 已完成 | 2026-10-26 |
 | M-F1~F3 记忆 | ✅ 已完成 | 2026-10-27 |
 
-| M-G1~G4 可观测与质量 | ⬜ 未开始 | — |
+| M-G1~G4 可观测与质量 | ✅ 已完成 | 2026-10-27 |
 | M-H1~H4 产品化 | ⬜ 未开始 | — |
 
 ### 待立项缺陷（§十三）的处置

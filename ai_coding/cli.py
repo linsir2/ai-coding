@@ -505,6 +505,89 @@ def skill_remove(
 app.add_typer(skill_app, name="skill")
 
 
+# ---- ai-coding trace ------------------------------------------------------
+#
+# `render_overview` (R9b) and `build_report` survived R10, but the command that
+# called them did not, so the renderer sat in `__all__` with no consumer.  This
+# is that command again, and `--since` gets its first production caller.
+
+
+trace_app = typer.Typer(help="Inspect traced sessions.", no_args_is_help=True)
+
+
+@trace_app.command("overview")
+def trace_overview(
+    workspace: str = typer.Option(".", "--workspace", "-w"),
+    since: int = typer.Option(
+        0,
+        "--since",
+        min=0,
+        help="Only sessions active in the last N days (0 = all). This is a view "
+        "window, not the delete threshold -- deletion is tracing.retention_days.",
+    ),
+    output_format: str = typer.Option("table", "--format", help="table | json"),
+) -> None:
+    """One table for every traced session in this workspace (R9b, restored in M-G2).
+
+    ``render_overview`` already existed and was exported; R10 deleted the command
+    that called it and left it with no consumer.  Reusing it here rather than
+    writing a second renderer is the point -- a copy would drift.
+    """
+    import json
+    from dataclasses import asdict
+
+    from ai_coding.app.trace_text import render_overview
+    from ai_coding.core.aggregate import build_report
+    from ai_coding.core.trace import TraceStore
+
+    if output_format not in ("table", "json"):
+        typer.secho(
+            f"error: --format must be table or json, got {output_format!r}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    ws = Path(workspace).expanduser().resolve()
+    root = ws / ".ai-coding" / "traces"
+    report = build_report(TraceStore(root, workspace=ws), since_days=since)
+    if output_format == "json":
+        # An empty store is still a JSON document: `--format json | jq .sessions`
+        # must not have to special-case prose.
+        typer.echo(
+            json.dumps(
+                {
+                    "sessions": [
+                        {
+                            "session": row.session,
+                            "turns": row.turns,
+                            "files": row.files,
+                            "steps": row.steps,
+                            "prompt_tokens": row.prompt_tokens,
+                            "completion_tokens": row.completion_tokens,
+                            "cached_tokens": row.cached_tokens,
+                            "cache_ratio": row.cache_ratio,
+                            "age_days": row.age_days,
+                            "mismatch": row.mismatch,
+                        }
+                        for row in report.rows
+                    ],
+                    "totals": asdict(report.totals),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+    if not report.rows:
+        typer.echo(f"(no traced sessions under {root})")
+        return
+    typer.echo(render_overview(report))
+
+
+app.add_typer(trace_app, name="trace")
+
+
 def run() -> None:
     app()
 

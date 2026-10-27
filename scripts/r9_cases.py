@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Coroutine
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -127,15 +128,23 @@ async def gate_can_be_switched_off(tmp: Path) -> tuple[bool, str]:
 # ------------------------------------------------------- the three outlets ----
 
 
-def _fake_store(tmp: Path) -> TraceStore:
-    """One session, one turn, one hostile tool output."""
+def _fake_store(tmp: Path, *, age_days: float = 30.0) -> TraceStore:
+    """One session, one turn, one hostile tool output.
+
+    ``age_days`` is written into the trace line's ``ts``, which is what
+    ``SessionRef.last_activity`` reads -- the directory mtime no longer decides
+    how old a session is.
+    """
+    stamp = datetime.fromtimestamp(
+        time.time() - age_days * 86_400, timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     store = TraceStore(tmp / "traces", workspace=tmp)
     writer = store.begin_turn("sess-1")
     writer.write_line(
         json.dumps(
             {
                 "v": 1,
-                "ts": "2026-09-28T00:00:00.000Z",
+                "ts": stamp,
                 "session": "sess-1",
                 "turn": 1,
                 "span": "c1",
@@ -192,10 +201,12 @@ async def otlp_is_deterministic(tmp: Path) -> tuple[bool, str]:
 
 
 async def prune_and_overview_agree(tmp: Path) -> tuple[bool, str]:
-    """Both must use the directory mtime (D-R9-8)."""
-    store = _fake_store(tmp)
-    stale = time.time() - 30 * 86400
-    os.utime(store.session_dir("sess-1"), (stale, stale))
+    """Both must read ``SessionRef.last_activity`` (D-R9-8, M-G2).
+
+    The session's age lives in its own trace, so an ``rsync`` that rewrites the
+    directory mtime cannot make ``prune`` and ``since_days`` disagree.
+    """
+    store = _fake_store(tmp, age_days=30.0)
     old = build_report(store, since_days=7).rows == ()
     return old and store.prune() == 1, "consistent"
 

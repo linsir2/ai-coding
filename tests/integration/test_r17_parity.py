@@ -27,6 +27,10 @@ import pytest
 from ai_coding.security.sandbox import Sandbox
 from ai_coding.tools.grep_tool import GrepTool
 
+# M-G3: the integration layer.  These files already lived in tests/integration/;
+# the marker is what lets CI run them as their own job.
+pytestmark = pytest.mark.integration
+
 
 def _tree(root: Path) -> Path:
     """A workspace whose shape exercises every rule under test."""

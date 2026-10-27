@@ -23,6 +23,10 @@ from ai_coding.tools.base import ToolContext
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.write_tool import WriteTool
 
+# M-G3: the integration layer.  These files already lived in tests/integration/;
+# the marker is what lets CI run them as their own job.
+pytestmark = pytest.mark.integration
+
 
 def _config(root: Path) -> Path:
     path = root / "config.yaml"

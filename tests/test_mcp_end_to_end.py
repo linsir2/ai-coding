@@ -46,6 +46,9 @@ pytestmark = [
         os.environ.get(GATE) != "1",
         reason=f"real MCP stdio round trip needs a normal OS; set {GATE}=1",
     ),
+    # M-G3: the live layer.  Appended, never assigned -- a bare
+    # `pytestmark = pytest.mark.live` would drop the two marks above.
+    pytest.mark.live,
 ]
 
 

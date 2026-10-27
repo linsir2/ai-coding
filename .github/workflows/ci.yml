@@ -1,10 +1,20 @@
 name: CI
 
-# No test file is excluded here.  ``tests/test_tool_bash.py`` and
-# ``tests/test_worktree.py`` used to hang in a sandboxed shell; R2b made every
-# subprocess bounded (thread + process-group kill), so they run everywhere, and
-# ``tests/test_mcp_stdio.py`` — which really spawns an MCP server — runs in the
-# step that sets its gate variable.  See docs/r2-analysis.md sections 1 and 9.
+# Four jobs, because the layers answer different questions and a failure in one
+# should not hide the others:
+#
+#   quality      -- lint, types, the golden-corpus benchmarks, the acceptance
+#                   scripts, and the two gates that used to be local-only.
+#   unit         -- everything that is neither integration nor live.
+#   integration  -- the tests/integration/ suite (real I/O, one process).
+#   live         -- the tests that need a real MCP server, gated on
+#                   AI_CODING_MCP_STDIO.  It lives in its own job so a live
+#                   failure cannot block the layer that runs on every push, and
+#                   so the gate variable is set exactly where it is needed.
+#
+# No test file is excluded from the unit layer: R2b made every subprocess
+# bounded (thread + process-group kill), so the former hang risks run everywhere.
+# See docs/r2-analysis.md sections 1 and 9.
 
 on:
   push:
@@ -32,35 +42,21 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
-      # ripgrep is what GrepTool's rg branch shells out to, and seven tests exercise
-      # that branch -- three hard-fail without it, two skip themselves, and two would
-      # otherwise compare the fallback against itself.  ubuntu-24.04 ships without it,
-      # so without this step CI never verifies the rg branch at all, which is exactly
-      # how r19/F1 leaked absolute paths (docs/data-contracts.md, r20/F0).
-      - name: Install ripgrep (the rg branch is part of the contract)
+      # r18_acceptance compares the rg branch against the fallback.  Without
+      # ripgrep it prints a NOTE and returns 0, which is the "both sides ran the
+      # fallback" green it warns about.  `git` is used by the same script and
+      # ships with the runner.
+      - name: Install ripgrep (r18 needs it)
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ripgrep
           rg --version
-
-      # M-D1: the OS-level process sandbox's real-subprocess cases (U1/U1b/U1c/
-      # U2/U2b) exercise bubblewrap itself.  Without the package they skip with
-      # their stated reason -- which is honest but means CI never verifies the
-      # write boundary at all.  ubuntu-24.04 ships without bubblewrap, and its
-      # kernel allows unprivileged user namespaces, so the cases run here.
-      - name: Install bubblewrap (the process sandbox's mechanism)
-        run: |
-          sudo apt-get install -y -qq bubblewrap
-          bwrap --version
 
       - name: Lint
         run: ruff check .
 
       - name: Type-check
         run: mypy ai_coding
-
-      - name: Tests (offline unit + integration, nothing excluded)
-        run: python -m pytest -q
 
       # M-D2: the red line corpus is a golden snapshot, so this is regression
       # detection rather than a pass/fail checklist -- any verdict that moved
@@ -70,17 +66,120 @@ jobs:
       - name: Red line benchmark (golden corpus, FN/FP)
         run: python scripts/redline_benchmark.py
 
-      - name: Real MCP stdio round trip
-        run: AI_CODING_MCP_STDIO=1 python -m pytest tests/test_mcp_stdio.py -q
-
-      # The class the model actually calls, end to end: engine -> mcp_call ->
-      # real subprocess -> write_back. Without this, mcp_call has never been
-      # executed against a real server by anything (M5 follow-up).
-      - name: Real MCP call, whole path
-        run: AI_CODING_MCP_STDIO=1 python -m pytest tests/test_mcp_end_to_end.py -q
+      # M-G4: the same discipline one layer up.  The red line benchmark freezes
+      # one judge (bash_red_line_with_fallback); this one drives the whole
+      # PermissionGate.check() chain -- agent veto, the rule layers, a saved
+      # grant, the workspace edge -- over a frozen corpus.
+      - name: Permission gate benchmark (golden corpus, FN/FP)
+        run: python scripts/permission_benchmark.py
 
       - name: Memory acceptance cases (offline, 11 cases)
         run: python scripts/memory_cases.py
 
       - name: Observability / guard / hook acceptance cases (offline)
         run: python scripts/trace_cases.py
+
+      # M-G1: these two were local-only gates -- the retrieval script's own
+      # header said "what CI should call" and CI never called it.  Both pass
+      # today, so wiring them in is a pure tightening: a regression in the
+      # retrieval guardrails or in the rg contract now turns the build red
+      # instead of waiting for a human.
+      - name: Retrieval guardrails (golden corpus, R@3 / FP@5)
+        run: python scripts/retrieval_cases.py --check
+
+      - name: R18 acceptance (rg contract, offline)
+        run: python scripts/r18_acceptance.py
+
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      # ripgrep is what GrepTool's rg branch shells out to, and seven tests
+      # exercise that branch -- three hard-fail without it, two skip themselves,
+      # and two would otherwise compare the fallback against itself.
+      - name: Install ripgrep (the rg branch is part of the contract)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ripgrep
+          rg --version
+
+      # M-D1: the OS-level process sandbox's real-subprocess cases exercise
+      # bubblewrap itself.  Without the package they skip with their stated
+      # reason -- honest, but it means CI never verifies the write boundary.
+      - name: Install bubblewrap (the process sandbox's mechanism)
+        run: |
+          sudo apt-get install -y -qq bubblewrap
+          bwrap --version
+
+      - name: Unit tests (neither integration nor live)
+        run: python -m pytest -q -m "not integration and not live"
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      # test_r17_parity compares the rg branch against the fallback; the other
+      # two files shell out to git, which the runner ships.
+      - name: Install ripgrep (the rg branch is part of the contract)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ripgrep
+          rg --version
+
+      - name: Integration tests
+        run: python -m pytest -q -m integration
+
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      # The gate variable is set here and nowhere else.  tests/test_live_gate.py
+      # fails if it is missing, so a job that silently skips the whole layer is
+      # a red build rather than a green one covering nothing.
+      - name: Live tests (real MCP server)
+        run: AI_CODING_MCP_STDIO=1 python -m pytest -q -m live

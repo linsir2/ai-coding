@@ -54,10 +54,26 @@ include = ["ai_coding*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# M-G3: two explicit layers.  The unit layer is "everything else", selected by
+# exclusion -- marking 272 top-level files would be churn for no signal.
+#
+# `--strict-markers` makes an undeclared marker a collection error instead of a
+# warning: a typo'd marker would otherwise silently select nothing, which is how
+# a "layer" becomes a hole.  (`asyncio` is registered by pytest-asyncio, so the
+# 1397 existing `@pytest.mark.asyncio` lines are unaffected.)
+#
+# NO `-m` here on purpose.  addopts is prepended to *every* invocation, so
+# `-m 'not live'` would make `pytest tests/test_mcp_stdio.py` collect zero tests
+# and exit 5, breaking the documented single-file commands and the live CI step.
+# CI selects the layer explicitly instead.
+markers = [
+    "integration: real I/O inside one process (the tests/integration/ suite)",
+    "live: needs an external mechanism (a real MCP server); CI runs it with the gate variable",
+]
 # -rs: print the reason for every skip.  Without it a gate-gated case (the
 # MCP stdio round trips) reads as a bare "6 skipped", which is indistinguishable
 # from a real failure the log never mentions.
-addopts = "-q -rs"
+addopts = "-q -rs --strict-markers"
 
 [tool.ruff]
 line-length = 100

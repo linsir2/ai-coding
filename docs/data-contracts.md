@@ -572,16 +572,16 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 
 | 契约 | 位置 | 说明 |
 |---|---|---|
-| `SessionRef(session, path, mtime, turn_files)` + `.turns` | `core/trace.py` | 磁盘上的一个会话目录 |
-| `TraceStore.sessions() -> tuple[SessionRef, ...]` | 同上 | mtime 倒序、tie 按 session id；根目录不存在返回 `()`；从不抛异常 |
-| `TraceStore.prune()` | 同上 | 改为走 `sessions()`，行为不变（`--since` 与它同口径＝目录 mtime） |
+| `SessionRef(session, path, last_activity, turn_files)` + `.turns` | `core/trace.py` | 磁盘上的一个会话目录。`last_activity` 取**最高号 turn 文件里最后一个可解析的 `ts`**（回退：上一个 turn 文件 → 目录 mtime） |
+| `TraceStore.sessions() -> tuple[SessionRef, ...]` | 同上 | `last_activity` 倒序、tie 按 session id；根目录不存在返回 `()`；从不抛异常 |
+| `TraceStore.prune()` | 同上 | 走 `sessions()`，按 `last_activity` 判保留期（M-G2：**不再是目录 mtime** —— `rsync` 不带 `-t` 会把目录 mtime 改成传输时间，于是每个会话都像刚写的，`prune` 从此再也删不掉东西） |
 | `SessionRow(session, turns, files, steps, prompt_tokens, completion_tokens, cached_tokens, age_days)` | `core/aggregate.py` | 一行读数；`mismatch` = `turns != files`，`cache_ratio` = `cached / prompt`（prompt=0 时为 0.0） |
 | `AggregateReport(rows, totals)` + `.cache_ratio` | 同上 | `totals.session` 固定为 `"(all)"` |
-| `aggregate_sessions(rows)` / `row_from_summary(...)` / `build_report(store, *, since_days=0, now=None)` | 同上 | 前两个纯函数；`build_report` 是唯一的读盘入口，坏 summary 记零 |
+| `aggregate_sessions(rows)` / `row_from_summary(..., last_activity=, now=)` / `build_report(store, *, since_days=0, now=None)` | 同上 | 前两个纯函数；`build_report` 是唯一的读盘入口，坏 summary 记零。`since_days` 与 `age_days` 都读 `SessionRef.last_activity`，与 `prune` 同源 |
 | `SpanRow` / `TurnView` / `SessionView` / `read_session_view(store, session, *, full=False)` | `core/export_html.py` | 读盘 → 视图对象；`full=True` 才去读 `turn-<n>.full.json` |
 | `render_session_html(view)` / `render_index_html(report, views)` | 同上 | 纯函数；单文件 HTML，内联 CSS、无 JS/外链、所有动态串经 `html.escape` |
 | `rows_to_otlp(views, *, service_name="ai-coding")` | `core/export_otlp.py` | 按 `span` 分组 → `resourceSpans[0].scopeSpans[0].spans`；`traceId`/`spanId` 由 sha256 派生（**确定性**，与真 SDK 的随机 id 不同） |
-| `render_overview(report)` | `ui/trace_render.py` | 纯函数，一张表 + `TOTAL` 行 + `!mismatch` 标注 |
+| `render_overview(report)` | `app/trace_text.py` | 纯函数，一张表 + `TOTAL` 行 + `!mismatch` 标注。消费者是 `ai-coding trace overview`（M-G2 恢复；R10 删掉命令后它一度零消费者） |
 
 OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnixNano`（无时长则
 `start+1` 并标 `ai-coding.instant=true`）；行内 `data` 逐键成 attribute（bool/int/float/str 各自成类型，
@@ -1011,6 +1011,37 @@ M-C1~M-C3 见 `docs/plan-m-c.md`。三条新契约，其余全是新增或追加
 
 
 ---
+
+## M-G4 契约（权限闸门的 golden 语料基准）
+
+`redline_benchmark` 冻结的是**一个判定器**：`bash_red_line_with_fallback`，也就是
+`PermissionGate.check()` 五步链里第 1 步的 bash 分支。规则链、agent veto、已存 grant、
+workspace 边界这四层此前**没有任何基准**。M-G4 补上这一层，沿用同一个范式（冻结行 +
+规模下限 + FN/FP 双向 + 退 0/1），只是换了被驱动的东西。
+
+| 契约 | 位置 | 说明 |
+|---|---|---|
+| `PermissionCase(tool, params, label, verdict, rule="", grants, denied_tools, allowed_tools, skill_permissions, workspace, rules, session_rules, agent_rules, posture)` | `security/permission_corpus.py` | 一行 = 一次调用 + 它需要的闸门配置 + 冻结答案。`params` 是**有序二元组**而非 dict（frozen dataclass 里放 dict 不可 hash，语料要按整行去重）。`verdict` 是 `PermissionDecision.name`（**大写**；`.value` 是小写，用错会让每一行都 mismatch） |
+| `rule` | 同上 | `rule_of(Decision.reason)`：**哪一层**做出的决定。只有语料显式钉住时才比较 —— gate 的两个 ALLOW 出口 reason 都是空串，所以 ALLOW 行钉不住层 |
+| 类别与下限 | 同上 | `DENY_HARD_TIER` / `DENY_AGENT_VETO` / `DENY_RULE_CHAIN` / `ALLOW_RULE_CHAIN` / `ALLOW_GRANT_ANSWERS` / `ALLOW_SAFE` / `WARN_ASKS` / `WARN_OUTSIDE_WORKSPACE` / `KNOWN_MISS` / `KNOWN_FP`，各带 `MIN_*` |
+| `MUST_DENY` / `MUST_ALLOW` / `MUST_WARN` + `*_LABELS` | 同上 | FN/FP 的方向由 **label** 决定（不是由模块级 tuple），这样测试里造的合成行也能被同样计数 |
+| `judge(case) -> (verdict, rule)` | `scripts/permission_benchmark.py` | 每个 case 现造一个 `PermissionGate(...)`（全关键字、全默认，不需要 app config），调真实 `check()` |
+| `Metrics(cases=CORPUS)` | 同上 | `mismatches` / `fn` / `fp` / `known_miss_still_open` / `known_fp_still_open` / `problems` / `by_rule` / `ok`。`cases` 是参数而非模块全局量，所以 fn/fp 的计数能被合成行验证 |
+| 退出码 | 同上 | 0 = 全部冻结值一致 + FN=0 + FP=0 + 规模达标；1 = 否则。CI 的 `quality` job 跑它 |
+
+**三条 corpus 约束**（每条都有测试，因为违反时**静默**退化）：
+
+1. `ALLOW_GRANT_ANSWERS` 只用 `write` / `edit`。`read` 本来就在允许清单里，删掉 step 4 它仍然
+   ALLOW；`write` 没有 grant 时是 WARN，所以 grant 的作用是可观测的。
+2. 测 workspace 边界的行必须设 `workspace`。`workspace=None` 让 `_outside_resource_reason`
+   第一行就 `return None`，边界检查整体关闭。
+3. `grants` 用 `grant_key()` 生成。`read` 是按**目录**授权的，手写 `read:src/a.py` 永远不命中。
+
+**已记录的缺口**：`grep` / `glob` 带**绝对**越界路径时是 ALLOW，而 `read` / `write` 同一路径会询问
+—— `_outside_resource_reason` 对 `_DIR_TOOLS` 会先过 `_directory_of`，而它把前导 `/` 去掉了，
+于是 `/etc` 变成相对路径 `etc`，命中"相对路径按构造在工作区内"的提前返回。这是**询问层**的绕过
+（写边界仍由沙箱执行），不在 M-G4 范围内（本轮只加基准、不改 `check()` 行为），所以它作为
+`KNOWN_MISS` **列在语料里并打印**，修好后计数降到 0。
 
 ## M-D2 读边界 / AF_UNIX / 构造分级契约
 

@@ -1079,8 +1079,11 @@ app 的 50ms flush 定时器**只在真的写了内容时**才吸底，否则空
 | 单文件 HTML | `ai-coding trace export --format html --session <id> --out t.html` | 内联 CSS、无 JS、无外链；**每个动态字符串都 `html.escape`** |
 | OTLP/JSON | `ai-coding trace export --format otlp-json --session <id>` | 按 span 分组的真 span 树；`sha256(session\|turn\|span)` 派生 id，导出两次字节一致 |
 
-`TraceStore.sessions()` 让「有哪些会话」可枚举（目录 mtime 倒序、tie 按 id），`--since` 与 `prune`
-**共用同一个口径**（目录 mtime），所以「prune 会删什么」和「什么算旧」永远不会打架。
+`TraceStore.sessions()` 让「有哪些会话」可枚举（`last_activity` 倒序、tie 按 id），`--since` 与 `prune`
+**共用同一个口径**：`SessionRef.last_activity`，即会话自己 trace 里最后一个可解析的 `ts`（读不到时
+回退目录 mtime）。M-G2 之前用的是**目录 mtime**，而 `rsync` 不带 `-t` 会把它改成传输时间 —— 于是每个
+会话都像刚写的，`--since` 返回全部、`prune` 再也删不掉旧会话。所以「prune 会删什么」和「什么算旧」
+现在由数据本身决定，而不是文件系统。
 某会话的 `summary.json` 缺失或损坏时记零（不抛异常），`summary.turns != 磁盘回合数` 时**只标注**
 `mismatch`、退出码仍为 0。导出**默认不含**消息全文，`--full` 显式打开（`turn-<n>.full.json` 只在
 `capture: full` 时才会存在）。
