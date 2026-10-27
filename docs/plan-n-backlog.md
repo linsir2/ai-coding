@@ -6,8 +6,9 @@
 > **前情**：roadmap §十三 列了 N-1/N-2/N-6；`plan-m-d2.md` §7.1 列了安全残余。
 > 本方案把两者合并成一轮可独立交付的清理。
 >
-> **版本**：v4 —— 两轮方案评审（第 1 轮 2 P0 + 9 P1，第 2 轮 1 P0 + 4 P1）全部收口，
-> 另加一处跑全量时**新发现**的 `wrap()` fail-open。**可开工**（见 §八）。
+> **版本**：v5 —— 两轮方案评审（第 1 轮 2 P0 + 9 P1，第 2 轮 1 P0 + 4 P1）全部收口；
+> 另加**第 2 次调研（§1.4，一手源码）推翻了 known_miss 的口径**（解不开的目标 → 询问，
+> 不是硬拒），并修掉一处跑全量时**新发现**的 `wrap()` fail-open。**可开工**（见 §八）。
 
 ---
 
@@ -71,6 +72,36 @@ Codex 的应对**不是加正则**，而是两条：
 | CIDR 无效 | `allow=['8.8.8.0/24']` → `_host_allowed('8.8.8.8',443)` = **False** | **对**：这是真缺口 |
 
 **残余风险表 itself 需要修** —— 这正是本项目最在意的一类缺陷（文档与实测不一致）。
+
+### 1.4 补充调研（第 2 次）：**一手源码级**证据 —— 推翻了 §C 的原设计
+
+> **来源分级**：本轮拿到 **P0 一手源码**（仓库内 vendored 副本，逐行读过），
+> 比第 1 轮的二手转引硬得多。
+
+| 对象 | 遇到「解不开的展开」时的实际行为 | 证据 |
+|---|---|---|
+| **Codex** | `Some("rm") if rm_args_include_force_option(...)` → `ForcedRm` → **Prompt（询问）** —— **完全不看目标能否解析** | [is_dangerous_command.rs:142](file:///workspace/_vendors/codex/codex-rs/shell-command/src/command_safety/is_dangerous_command.rs#L142)（源码） |
+| **Codex** | 规则未命中 dangerous 时：`AskForApproval::Never` → **Allow**（注释直书 "relying on the sandbox for protection"）；`UnlessTrusted` → **Prompt** | `exec_policy.rs:L811-L846`（源码） |
+| **opencode**（portable 扫描器） | `boundDollar && boundOpen && variableSink` → `opaque{reason:"dynamic-execution"}` → `shell.ts` **直接失败**（DENY）。**触发条件是变量被当作命令名** | [scan.ts:213](file:///workspace/_vendors/opencode/packages/core/src/shell/scan.ts#L213)、`shell.ts:L219-L220`（源码） |
+| **opencode**（legacy 扫描器） | `expandKnownDirectory`：`if value.includes("$") \|\| value.includes("`") \|\| value.startsWith("(") return` —— **解不开就跳过解析**，落默认 `ask` | `parse.ts:L358-L367`（源码） |
+| **Claude Code** | 规则按**命令文本前缀**匹配（支持 `*`），**不做变量展开**；不匹配的 bash 命令 → **默认询问** | 官方文档 [iam](https://docs.claude.com/en/docs/claude-code/iam) [SINGLE-SOURCE] |
+| **Sandlock** | **不主张在文本层猜展开** —— 静态策略下沉内核强制，运行时决策交 supervisor | [arXiv 2605.26298](https://arxiv.org/pdf/2605.26298v1) |
+
+**三种口径与代价（交叉验证后）**：
+
+| 口径 | 支持证据 | 代价 |
+|---|---|---|
+| **a) 硬拒** | opencode portable（**仅程序名**不可解）；Codex 在 `Never` 档下 dangerous → Forbidden | **误报高**：`rm -rf $DIR`、`rm -rf $PWD` 都是正常用法；把"读不懂"与"危险"混同 |
+| **b) 询问** | **Codex 默认**（`ForcedRm → Prompt`）；**Claude Code 默认**；**opencode legacy 默认** | 摩擦、审批疲劳；但保留可用性 |
+| **c) 放行 + OS 兜底** | Codex `Never` 档；opencode legacy；Sandlock | 依赖沙箱正确性；沙箱不可用时必须 fail-closed |
+
+> **决定性结论**：**主流默认是 (b) 询问**，而**本仓库今天就已经是 (b)** ——
+> `bash` 未命中红线时落 **WARN**（[permission_gate.py:390](file:///workspace/ai-coding/ai_coding/security/permission_gate.py#L390)
+> `_warn_tools = {"write","edit","bash"}`）。
+>
+> **所以 §C 原设计里"`rm -rf $<解不开>` → 硬拒"是比 Codex 更严的口径**，
+> 且引入了原型实测到的真实 FP 类。**本轮改为 (b)：解不开的目标 → 询问 + OS 写边界兜底；
+> 只有"程序名解不开"与"目标解析到受保护位置"才硬拒**（与 opencode 的 `dynamic-execution` 一致）。
 
 ---
 
@@ -327,26 +358,34 @@ Shell **确实**会把这些当词传下去（`$HOME` / `$(pwd)` 展开后就是
 > 这是**正确的方向**（那条路径确实含凭据目录），但必须在实现期跑一遍
 > `tests/test_plan_runner*.py` 确认没有计划命令被误拒。
 
-**② 新增"不可审计"展开**（`bash_redlines.py`）
+**② 展开：能解就解，解不开 → 交给询问（**不是**硬拒）**（`bash_redlines.py`）
 
 ```python
-_UNRESOLVED = "\x00unresolved\x00"          # 哨兵：判据读不到 env，不给 fall-open 留口
 _EXPANSIONS = {"HOME": str(Path.home()), "PWD": os.getcwd(), "USER": os.environ.get("USER", "")}
 
-def _expand(word: str) -> str:
-    """``~`` / ``$VAR`` / ``${VAR}`` → 具体路径；解不开的展开 → 哨兵。"""
+def _expand(word: str, assignments: Mapping[str, str] | None = None) -> str:
+    """``~`` / ``$VAR`` / ``${VAR}`` / **同行赋值** → 具体路径；解不开 → ``""``。
+
+    返回 ``""``（而不是哨兵）是有意的：解不开的目标**不是**受保护目标，
+    于是不触发红线 → 落到 gate 的 **WARN（询问）** —— 与 Codex 的
+    ``ForcedRm → Prompt`` 同口径（§1.4）。
+    """
     out = word.replace('"', "").replace("'", "")     # 引号是 shell 的，不是路径的
     if out == "~" or out.startswith("~/"):
         out = _EXPANSIONS["HOME"] + out[1:]
     elif out.startswith("~"):
-        return _UNRESOLVED               # ~user：不是我们的家，解不开
-    for name, value in _EXPANSIONS.items():
+        return ""                                # ~user：不是我们的家
+    values = dict(_EXPANSIONS)
+    for name, value in (assignments or {}).items():
+        if value:
+            values[name] = value                 # `D=/data; rm -rf $D` → /data
+    for name, value in values.items():
         if not value:
-            continue                     # 未设置（如 USER 为空）→ 不解，留给哨兵
+            continue                             # 未设置（如 USER 为空）→ 不解
         out = re.sub(r"\$\{" + name + r"\}", value, out)
         out = re.sub(r"\$" + name + r"(?![A-Za-z0-9_])", value, out)   # 词边界
     if "$" in out or "`" in out:
-        return _UNRESOLVED
+        return ""                                # 解不开 → 不判为受保护
     return out
 ```
 
@@ -365,10 +404,10 @@ def _expand(word: str) -> str:
 ```python
 _PREFIX_ROOTS = _SYSTEM_ROOTS - {"/home"}      # /home 走精确 + 深度3，见下
 
-def _is_protected_target(path: str) -> bool:
-    expanded = _expand(path)
-    if expanded is _UNRESOLVED:
-        return True                        # 不可审计
+def _is_protected_target(path: str, assignments: Mapping[str, str] | None = None) -> bool:
+    expanded = _expand(path, assignments)
+    if not expanded:
+        return False                       # 解不开 → 不是受保护目标 → 交给 gate 询问（§1.4）
     normalized = expanded.rstrip("/") or "/"
     if normalized in ("/", "/*"):
         return True
@@ -393,7 +432,14 @@ def _is_protected_target(path: str) -> bool:
 | `/home` 本身 | 精确等于 `/home` | `rm -rf /home`（评审 P1：前缀集排除了它，深度 3 也盖不住） |
 | 别人的家 | `/home/<name>`（深度 3） | `rm -rf /home/user` |
 | `..` 结尾 | 最后一节是 `..` | `rm -rf ./..` |
-| 解不开的展开 | 哨兵 | `D=/data; rm -rf $D` |
+| **解不开的展开** | `_expand` 返回 `""` → **False** | `rm -rf $DIR` → **询问**（不是硬拒，§1.4） |
+
+> **这是本轮调研推翻原设计的点**：v4 原写"解不开 → 哨兵 → 判为受保护 → 硬拒"，
+> 比 Codex 的 `ForcedRm → Prompt` **更严**，且原型实测到真实 FP 类
+> （`rm -rf $DIR`、`rm -rf ${TMPDIR}/build`）。改为 **False（交给询问）** 后：
+> ① 与 Codex / Claude Code / opencode legacy 的**主流默认 (b) 询问**一致；
+> ② **FP 归零**；③ 而 `rm -rf $HOME`（可解、解析到受保护位置）**仍然硬拒** —— 因为
+> `D=/data; rm -rf $D` 与 `rm -rf $DIR` 的区别在于**能否解析**，而不是"含不含变量"。
 
 > **评审 P0（已修）**：原型 v1 只写了 `startswith(r + "/")`，**精确顶层目录全部漏**
 > （`rm -rf /etc`、`/root`、`/usr`、`/bin`、`/opt`、`/boot`、`/lib`）——
@@ -501,9 +547,12 @@ def _programs(view: CommandView) -> list[str]:
 必须单列一条。**评审 P2（已采纳）**：原型靠这一行修好那两条，v1 方案文字漏了。
 
 
-#### C.2 `rm -rf $PWD` → 转 `SAFE`（**评审 P1 已修正论证**）
+#### C.2 两条**不是漏判**的：`rm -rf $PWD`、`D=/data; rm -rf $D` → 转 `SAFE`
 
-**v1 说它"≡ `rm -rf .`"，这是错的**（评审实测指出）：
+> **这两条是"语料标错了"，不是"规则漏了"** —— 它们的共同点是
+> **目标能解析、且解析结果不在受保护集合里**，所以**本来就不该是红线**。
+
+**① `rm -rf $PWD`** —— **v1 说它"≡ `rm -rf .`"，这是错的**（评审实测指出）：
 
 * `rm -rf .` 在 GNU rm 下因默认 `--preserve-root` **被拒**，是 **no-op**（`skipping '.'`）；
 * `rm -rf $PWD` 的 `$PWD` 是**绝对路径**（如 `/workspace`），`rm -rf /workspace`
@@ -513,14 +562,23 @@ def _programs(view: CommandView) -> list[str]:
 不是受保护目标**（受保护的是根 / 顶层系统目录 / 各家目录）。所以它放行 ——
 **与 `rm -rf /<工作区绝对路径>` 放行是一致的**，而后者今天就是放行的。
 
-> **这不是"静默漏洞"**：它的 verdict 仍是 `""`，gate 仍是 **WARN（询问）**，
-> 不是硬放行。C.4 的兜底用例也**测不到它**（它删的是工作区**内**，沙箱允许）——
-> 所以这一条必须在文档里写明"工作区内的删除是操作者自己的事"。
+**② `D=/data; rm -rf $D`** —— **同行赋值可解**：`$D` = `/data`。
+`/data` 不在受保护集合里（不是根、不是顶层系统目录、不是家），所以**不是红线** ——
+与 `rm -rf /tmp/build`（语料里已是 `SAFE`）**同一判据**。
+真正的边界是 **OS 写边界**：`/data` 在工作区外 → 沙箱内 EROFS → 拦住。
+
+> **这两条都不是"静默漏洞"**：verdict 仍是 `""`，gate 仍是 **WARN（询问）**。
+> C.4 的兜底用例也**测不到它们**（一个删工作区内、一个被 OS 边界拦）——
+> 所以文档里必须写明"工作区内的删除是操作者自己的事；工作区外的删除由 OS 写边界兜底"。
 
 #### C.3 语料重冻
 
-* 15 条 `known_miss` → `dangerous`（verdict 填新理由）；
-* `rm -rf $PWD` → `SAFE`（理由见 C.2，**不是**"≡ `rm -rf .`"）；
+* **14 条** `known_miss` → `dangerous`（verdict 填新理由）：
+  `x="rm -rf /"; $x`、`D=/data`…（**不含**）、`rm -rf ${HOME}`、`rm -rf $HOME`、`rm -rf ~`、
+  `rm -rf ~/`、`rm -rf /home/user`、`rm -rf /var/log`、`rm -rf ./..`、
+  `cat ~/.ssh/id_$USER`、`x=1; $x rm -rf /`、`doas rm x`、`env -i sudo ls`、
+  `timeout 5 sudo ls`、`git push --force-with-lease origin main`；
+* **2 条** `known_miss` → `SAFE`：`rm -rf $PWD`、`D=/data; rm -rf $D`（理由见 C.2）；
 * **`MIN_KNOWN_MISS` 必须显式改成 `0`**（评审 P1：v1 说"floors 只设下限，自动满足"是**错的** ——
   [redline_corpus.py:79](file:///workspace/ai-coding/ai_coding/security/redline_corpus.py#L79)
   是 `= 5`，`0 < 5` 会让 `redline_benchmark` 直接返回 1）；
@@ -542,11 +600,20 @@ def _programs(view: CommandView) -> list[str]:
 即使 16 条全修，**OS 写/读边界仍是兜底**（文本层总会有新写法）。C.2 的证明方式不变：
 在 CI 真沙箱内把这 16 条逐条跑一遍，断言**没有一条写进工作区外 / 读到凭据**。
 
-#### C.5 为什么这不是"加正则"
+#### C.5 为什么这不是"加正则"，以及本轮调研把口径从 (a) 改成了 (b)
 
-GuardFall 说文本过滤结构性失败 —— **对**。但本轮做的不是"加更多正则去猜展开后的值"，
-而是：**让语法层别再丢掉带展开的词**（C.1①，根因），再把"解不开"这件事本身
-**当成拒绝的理由**（C.1②③）。判据从"猜值"变成"承认猜不到"，这是方向上的不同。
+GuardFall 说文本过滤结构性失败 —— **对**。但本轮做的不是"加更多正则去猜展开后的值"，而是：
+
+* **让语法层别再丢掉带展开的词**（C.1①，**根因**）；
+* 把"**解不开**"与"**解析到受保护位置**"**分开**：前者交给 gate 的 WARN（询问），
+  后者才是红线。
+
+判据从"猜值"变成"**承认猜不到，并交给询问 + OS 边界**"，这是方向上的不同。
+
+> **第 2 次调研（§1.4，一手源码）推翻了 v4 的口径**：v4 写"解不开 → 硬拒"，
+> 那是**比 Codex 更严**的口径（Codex：`ForcedRm → Prompt`，**完全不看目标**），
+> 且原型实测到真实 FP（`rm -rf $DIR`、`rm -rf ${TMPDIR}/build`）。
+> 改成 (b) 后与 **Codex / Claude Code / opencode legacy 三家默认一致**，且 **FP 归零**。
 
 ### D. 代理 CIDR + 裸 IP 语义
 
@@ -871,8 +938,8 @@ v1 用 `_UnavailableBackend`，但它 `tier = "full"` 且 `wrap()` 返回 `list(
 | `tests/test_m4_security.py` | rg 守卫 + 正向断言 | N-6 |
 | `tests/integration/test_r17_parity.py` | rg 守卫 + 钉住 rg 分支 | N-6 |
 | `ai_coding/shell_parse.py` | `_WORD_NODES` 补 `concatenation`/`simple_expansion`/`expansion`/`command_substitution` | C.1① |
-| `ai_coding/security/bash_redlines.py` | `_expand`（词边界/剥引号/空值不解）；`_is_protected_target`（精确+前缀、`/home`、`..` 结尾）；`_programs` 完整算法；`doas`；`--force-with-lease`；程序名不可审计规则；**`_reads_credential` 不动**（对原词判） | C.1②③④⑤⑥ |
-| `ai_coding/security/redline_corpus.py` | 15 条 `known_miss` → `dangerous`；`rm -rf $PWD` → `SAFE`；`MIN_KNOWN_MISS` → 0 | C.3 |
+| `ai_coding/security/bash_redlines.py` | `_expand`（词边界/剥引号/空值不解/**同行赋值可解**，**解不开 → `""` 不判受保护**）；`_is_protected_target`（精确+前缀、`/home`、`..` 结尾）；`_programs` 完整算法；`doas`；`--force-with-lease`；程序名不可审计规则；**`_reads_credential` 不动**（对原词判） | C.1②③④⑤⑥ |
+| `ai_coding/security/redline_corpus.py` | **14 条** `known_miss` → `dangerous`；**2 条** → `SAFE`；`MIN_KNOWN_MISS` → 0 | C.3 |
 | `scripts/redline_benchmark.py` | 计数随语料自动更新（无需改） | C.3 |
 | `tests/test_redline_benchmark.py` | `test_known_miss_is_surfaced` 改写（断言 `known_miss` 计数为 0） | C.3 |
 | `tests/test_process_sandbox.py` | **新**：16 条在 `enforce` 沙箱内全部写不出去 / 读不到凭据 | C.4 |
@@ -911,8 +978,10 @@ v1 用 `_UnavailableBackend`，但它 `tier = "full"` 且 `wrap()` 返回 `list(
 | U7e | 16 条在 `enforce` 沙箱内执行 | **没有一条**写进工作区外 / 读到凭据 |
 | U7f | `rm -rf /etc`、`rm -rf /root`、`rm -rf /usr`、`rm -rf /bin`、`rm -rf /opt`、`rm -rf /boot`、`rm -rf /lib`、**`rm -rf /home`** | **仍判危险**（评审两轮：精确顶层目录不能被前缀匹配漏掉） |
 | U7g | `command -v sudo`、`command -p sudo ls`、`nice sudo ls`、`stdbuf sudo ls`、`nice -n 5 sudo ls`、`nice 5 sudo ls`、`env -i sudo ls`、`env -- sudo ls`、`timeout 5 -- sudo ls` | `command -v` **放行**；其余**仍判提权**（评审两轮的双向钉） |
-| U7h | `rm -rf $PWDDIR`、`rm -rf $(pwd)`、`rm -rf ~root`、`rm -rf "$HOME"/x`、`rm -rf $USER`（未设） | 判危险（词边界 / 替换 / `~user` / 剥引号 / 空值不解） |
+| U7h | `rm -rf $PWDDIR`、`rm -rf ~root`、`rm -rf "$HOME"/x`、`rm -rf $USER`（未设） | 判危险（词边界 / `~user` / 剥引号 / 空值不解） |
 | U7i | **`rm -rf ../build`、`rm -rf ../../dist`** | **放行**（评审 P2：`..` 不在结尾时是兄弟目录，monorepo 常见） |
+| **U7j** | **`rm -rf $DIR`、`rm -rf $(pwd)`、`rm -rf ${TMPDIR}/build`** | **询问（WARN），不是硬拒**（§1.4 调研：与 Codex `ForcedRm → Prompt` 同口径；**FP 归零**） |
+| **U7k** | **`D=/data; rm -rf $D`** | **同行赋值可解 → `/data` → 放行**（与 `rm -rf /tmp/build` 同判据；OS 边界拦写） |
 | U8 | `allow=['8.8.8.0/24']` + 请求 `8.8.8.8:443` | **放行**（现在是被拒） |
 | U8b | `allow=['example.com']` + 请求 `example.com:443` | **仍放行**（评审 P0：别把域名白名单改坏） |
 | U8c | `allow=['8.8.8.0/24']` 与 connect 用**同一个** pinned 地址 | 断言 `_authorize` 只 resolve **一次**（评审 P1：双次解析 = 重绑定窗口） |
@@ -940,7 +1009,9 @@ v1 用 `_UnavailableBackend`，但它 `tier = "full"` 且 `wrap()` 返回 `list(
   ⑦c 把 `_expand` 的剥引号去掉 → U7h 的 `rm -rf "$HOME"/x` 变红（评审 P2 的回归钉）；
   ⑧ 把 `_WORD_NODES` 的新增节点去掉一个 → U7b/U5 变红；
   ⑨ 把 `_authorize` 的 OR 改回 AND → **U8b 变红**（评审 P0 的回归钉）；
-  ⑩ 把 `authorized_roots()` 的工具过滤去掉（收 read/glob/grep）→ **U12c 变红**（评审 P1 的回归钉）。
+  ⑩ 把 `authorized_roots()` 的工具过滤去掉（收 read/glob/grep）→ **U12c 变红**（评审 P1 的回归钉）；
+  ⑪ 把 `_is_protected_target` 的 `if not expanded: return False` 改成 `return True`
+  → **U7j 变红**（第 2 次调研的口径回归钉：解不开必须交给询问，不能硬拒）。
 
 ### Refactor
 
@@ -954,9 +1025,10 @@ v1 用 `_UnavailableBackend`，但它 `tier = "full"` 且 `wrap()` 返回 `list(
 * **N-1**：改前复现脚本 `capture → None`；改后返回 `refs/ai-coding/undo/<key>`，且 `update-ref` 的
   目标**是** 40 位 hex（64 位仓库同样通过）。`_SHA_RE` 拒绝污染串。
 * **N-6**：`PATH=/tmp/norg` 下两条**跳过**（不是通过）；有 rg 时**通过**且断言 `success is True` / `_rg is not None`。
-* **known_miss**：基准 `known_miss` 计数 **16 → 0**；`dangerous` 63 → 78；`SAFE` 26 → 27；
+* **known_miss**：基准 `known_miss` 计数 **16 → 0**（**14 → dangerous、2 → SAFE**）；
   FN=0 / FP=0 硬阈值不变；**16 条在 CI 真沙箱内全部写不出去 / 读不到凭据**（U7e）；
-  **全量语料逐条比对改前改后一致**（真零回归，U7f/U7g/U7h/U7i）。
+  **全量语料逐条比对改前改后一致**（真零回归，U7f/U7g/U7h/U7i）；
+  **`rm -rf $DIR` 等"解不开的目标"保持询问**（U7j，FP 归零）。
 * **CIDR**：`8.8.8.0/24` 放行（U8）、**域名白名单不回归**（U8b）、**只 resolve 一次**（U8c）、
   `10.0.0.0/8` 拒绝、malformed 在 config 与 hand-built **两处**都拒；
   域名匹配**无回归**（`evil-example.com` / `example.com.evil.com` 仍拒）。
@@ -998,6 +1070,27 @@ v1 用 `_UnavailableBackend`，但它 `tier = "full"` 且 `wrap()` 返回 `list(
   本轮先收 §2.6（确定可复现），N-2 的复现方式留给评审决定。
 * `tests/test_worktree.py` 的 `timeout=0.001` 用例：本地 5/5 通过，同样是时序敏感，
   与 §2.6 同类（**本地/快机才照得出来**）。
+
+### 8.3 第 2 次调研（口径推翻）+ 原型 v3 复验
+
+**§1.4 的一手源码证据**（`_vendors/codex`、`_vendors/opencode` 逐行读过）显示：
+
+* **Codex**：`Some("rm") if rm_args_include_force_option(...)` → `ForcedRm` → **Prompt** ——
+  **完全不看目标能否解析**；
+* **opencode portable**：`dynamic-execution`（变量被当作**命令名**）→ 命令**直接失败**；
+* **opencode legacy / Claude Code**：解不开 → 跳过解析 / 文本前缀匹配 → **默认询问**。
+
+**结论**：主流默认是 **(b) 询问**，而**本仓库今天就已经是 (b)**（`_warn_tools` 含 `bash`）。
+v4 的"解不开 → 硬拒"**比 Codex 更严**且引入真实 FP → **改为 (b)**。
+
+**原型 v3 复验**（`known_miss` 16 条 + `SAFE` 26 条 + `DANGEROUS` 63 条）：
+
+| 指标 | 结果 |
+|---|---|
+| `SAFE` 被误拒（FP） | **0 / 26** |
+| `known_miss` 修好（→ DENY） | **12 / 16**（另 4 条中 2 条是原型未实现包装器剥值，2 条按设计转 SAFE） |
+| 关键探针 | `rm -rf $DIR` / `$(pwd)` / `${TMPDIR}/build` → **`''`（询问）**；`D=/data; rm -rf $D` → **`''`（SAFE）**；`rm -rf $HOME`/`${HOME}`/`~`/`./..`/`/home/user`/`/var/log`/`/etc`/`/home` → **DENY**；`x="rm -rf /"; $x` / `x=1; $x rm -rf /` → **DENY**；`cat ~/.ssh/id_$USER` → **DENY** |
+| `rm -rf ../build` / `./build` / `/tmp/build` | **`''`（放行，零回归）** |
 
 ### 8.2 方案评审（子智能体，第 2 轮）
 
