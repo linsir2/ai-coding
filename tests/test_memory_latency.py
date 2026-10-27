@@ -18,7 +18,6 @@ from pathlib import Path
 
 import pytest
 
-from ai_coding.memory.note import MemoryNote
 from ai_coding.memory.service import MemoryService
 from ai_coding.memory.store import MemoryStore
 

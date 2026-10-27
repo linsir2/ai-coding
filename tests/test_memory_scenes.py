@@ -12,10 +12,9 @@ was silently dropped.
 
 from __future__ import annotations
 
-import pytest
-
-from ai_coding.memory.note import MemoryNote, normalize_scene
 from ai_coding.memory.scenes import SCENE_SYNONYMS, fold_scene
+
+from ai_coding.memory.note import normalize_scene
 from ai_coding.memory.service import MemoryService
 
 
@@ -37,7 +36,7 @@ def test_normalize_scene_is_unchanged_by_the_fold():
 
 def test_fold_scene_is_idempotent():
     """A value must not be a key, or a second fold over-folds."""
-    for key, value in SCENE_SYNONYMS.items():
+    for value in SCENE_SYNONYMS.values():
         assert value not in SCENE_SYNONYMS, f"{value!r} is both a key and a value"
     for key in SCENE_SYNONYMS:
         assert fold_scene(fold_scene(key)) == fold_scene(key)
@@ -81,7 +80,6 @@ def test_the_gate_before_the_filter_folds(tmp_path):
 
 
 def test_the_read_path_folds(tmp_path):
-    store = _service(tmp_path).store
     path = tmp_path / "memory.json"
     path.write_text(
         '{"version": 2, "notes": ['
