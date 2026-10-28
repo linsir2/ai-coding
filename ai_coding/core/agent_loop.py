@@ -484,6 +484,9 @@ class AgentLoop:
         self.reporter = TurnReporter(tools_text=self._tools_text, emit=self._emit)
         # R7a: what a turn leaves behind (write-back, checkpoint, handoff, digest).
         self.closer = TurnCloser(sessions, self.reporter, self.settings)
+        #: I2/D4: the write-ahead digests a *resumed* turn may replay.  ``None``
+        #: outside a resume, so a live turn can never answer from a record.
+        self._replay_scope: frozenset[str] | None = None
         # R5: the memory-facing half of a turn (block / harvest / status).
         self.turn_memory = TurnMemory(memory, emit=self._emit, save=self.closer.save)
         #: 2026-10-17: the fire-and-forget harvest chain.  The harvest no longer
@@ -880,9 +883,20 @@ class AgentLoop:
                 # path, so the per-turn save rhythm the golden tests pin is
                 # untouched.
                 self.closer.save(session)
-            return await self._run_turn(
-                session, "", on_delta, observer, (), append_user=False, resumed=True
+            # I2/D4: only the records that were already on disk when the turn
+            # was interrupted are replayable.  Without the snapshot a call the
+            # *resumed* turn itself settled becomes replayable for its later
+            # batches -- the model edits a file, re-reads it, and gets the
+            # pre-edit output, which is the eval-08 stage F loop again.
+            self._replay_scope = frozenset(
+                record.digest for record in (session.write_ahead or ())
             )
+            try:
+                return await self._run_turn(
+                    session, "", on_delta, observer, (), append_user=False, resumed=True
+                )
+            finally:
+                self._replay_scope = None
 
     async def _run_turn(
         self,
@@ -2084,7 +2098,12 @@ class AgentLoop:
         # resumed one).  ``session.write_ahead`` is the shared in-memory copy,
         # so the next batch re-reads it instead of re-reading the file; the
         # closer holds the last batch's log so the turn close can clear it.
-        write_ahead = WriteAheadLog(session, self.sessions, enabled=not session.ephemeral)
+        write_ahead = WriteAheadLog(
+            session,
+            self.sessions,
+            enabled=not session.ephemeral,
+            replay_scope=self._replay_scope,
+        )
         self.closer.write_ahead = write_ahead
         outcomes = await self.dispatcher.dispatch_batch(
             step.tool_calls,

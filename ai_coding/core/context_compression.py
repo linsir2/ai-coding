@@ -340,11 +340,25 @@ def _tool_copy(m: ChatMessage, content: str) -> ChatMessage:
 # ---------------------------------------------------------------- fallback / sanitize
 
 
+def _is_checkpoint_note(message: ChatMessage) -> bool:
+    """Is this message the one that stands for everything before it?"""
+    return message.role == "user" and (message.content or "").startswith(CHECKPOINT_MARK)
+
+
 def hard_trim(
     messages: list[ChatMessage], keep_tail: int = HARD_TRIM_KEEP_TAIL
 ) -> list[ChatMessage]:
-    """Blunt fallback: keep everything newer than the tail window, then sanitize."""
-    return sanitize_pairs(messages[-keep_tail:])
+    """Blunt fallback: keep everything newer than the tail window, then sanitize.
+
+    I2: the checkpoint note survives.  It is one message that stands for the
+    whole head, so trimming it away removes the entire older conversation from
+    the model's view while the tail alone is what is left -- the exact failure
+    the note exists to prevent.
+    """
+    keep = messages[-keep_tail:] if keep_tail > 0 else list(messages)
+    if keep and messages and keep[0] is not messages[0] and _is_checkpoint_note(messages[0]):
+        keep = [messages[0], *keep]
+    return sanitize_pairs(keep)
 
 
 def sanitize_pairs(messages: list[ChatMessage]) -> list[ChatMessage]:
@@ -633,6 +647,10 @@ def _anchor_of(messages: Sequence[ChatMessage]) -> str:
     digest = hashlib.sha1()
     for message in messages:
         digest.update(f"{message.role}\0{message.content or ''}\0".encode())
+        for call in getattr(message, "tool_calls", ()) or ():
+            digest.update(
+                f"{getattr(call, 'name', '')}\0{getattr(call, 'arguments', '')}\0".encode()
+            )
     return digest.hexdigest()[:16]
 
 
@@ -786,7 +804,7 @@ class ContextManager:
         #: long turn from paying for one summary per iteration -- measured at
         #: 68.8% of the whole turn's prompt tokens before this existed.
         self._summary_delta_tokens = int(
-            getattr(ai_settings, "summary_delta_tokens", 4_000) or 0
+            getattr(ai_settings, "summary_delta_tokens", 4_000) or 4_000
         )
         self._compress_target_ratio = float(
             getattr(ai_settings, "compress_target_ratio", 0.5)
@@ -923,12 +941,18 @@ class ContextManager:
             # makes ``delta`` exact.  Slicing the *post-L1* list by length is
             # how a boundary message used to fall between the two.
             head, tail = self.split_tail(l4_source)
+            if not head and 0 < used <= len(l4_source):
+                # Everything fitted the tail budget, so ``split_tail`` handed
+                # the whole history back verbatim.  The checkpoint already
+                # stands for ``messages[:used]``; sending both would pay for the
+                # same messages twice and break branch C's "only the delta".
+                head, tail = l4_source[:used], l4_source[used:]
             stats.append(
                 LayerStat(
                     name="L1",
-                    removed=len(head),
+                    removed=0,
                     rewritten=0,
-                    skipped=0,
+                    skipped=len(head),
                     before_tokens=_history_tokens(l4_source),
                     after_tokens=_history_tokens(tail),
                 )
@@ -958,15 +982,19 @@ class ContextManager:
                 )
             )
             l4_before = _history_tokens(delta)
+            breaker_open = self._l4_failure_count(session) >= _L4_BREAKER_THRESHOLD
             wants_summary = bool(delta) and (
-                force or _history_tokens(delta) >= self._summary_delta_tokens
+                force
+                or (
+                    not breaker_open
+                    and _history_tokens(delta) >= self._summary_delta_tokens
+                )
             )
             if wants_summary and self._summarizer is not None:
                 self.last_summary_attempted = True
                 fresh = await self._run_l4(
                     delta,
                     previous=previous,
-                    tail=tail,
                     on_summary=on_summary,
                     on_delta=on_delta,
                     session=session,
@@ -983,9 +1011,11 @@ class ContextManager:
                     )
                     out = [_checkpoint_note(fresh), *tail]
                 else:
-                    # Branch D: no summary, so nothing may be dropped.  The
-                    # whole history goes out and the next request tries again.
-                    out = l4_source
+                    # Branch D: the summary failed, so the checkpoint must not
+                    # advance -- but the previous one still describes
+                    # ``messages[:used]``, and dropping it here would take the
+                    # whole head with it (the tail alone is not the history).
+                    out = [_checkpoint_note(previous), *delta, *tail]
             else:
                 # Branch C: the delta is small enough to carry verbatim.  This
                 # is the branch that stops "summarise on every iteration".
@@ -1058,12 +1088,16 @@ class ContextManager:
                 l4_count = len(out)
                 fresh = await self._run_l4(
                     l4_head,
-                    tail=surviving_tail,
                     on_summary=on_summary,
                     on_delta=on_delta,
                     session=session,
                 )
-                cut = len(l4_source) - len(surviving_tail)
+                # Where the verbatim tail starts, decided by identity.  The old
+                # ``len(source) - len(tail)`` counted the snip placeholder as a
+                # real message, so when L1's marker was the tail's first entry
+                # ``cut`` landed one message short: that message was summarised
+                # while its index still read "not covered".
+                cut = self._cut_index(l4_source, surviving_tail)
                 if fresh and cut > 0:
                     self.archive_transcript(l4_head)
                     install_checkpoint(
@@ -1111,6 +1145,22 @@ class ContextManager:
         """
         kept = {id(message) for message in tail}
         return [message for message in source if id(message) not in kept]
+
+    @staticmethod
+    def _cut_index(
+        source: Sequence[ChatMessage], tail: Sequence[ChatMessage]
+    ) -> int:
+        """The index in ``source`` where the verbatim ``tail`` begins.
+
+        The counterpart of :meth:`_delta_by_identity`, and identity-based for
+        the same reason: a snip placeholder inside ``tail`` is not in
+        ``source``, so subtracting lengths lands one message short.
+        """
+        kept = {id(message) for message in tail}
+        cut = len(source)
+        while cut > 0 and id(source[cut - 1]) in kept:
+            cut -= 1
+        return cut
 
     # ---- R3b: the compaction policy -----------------------------------
 
@@ -1233,7 +1283,16 @@ class ContextManager:
         tail.reverse()
         while len(tail) > 1 and (tail[0].role != "user" or tail[0].synthetic):
             tail.pop(0)
-        head = messages[: len(messages) - len(tail)] if tail else list(messages)
+        # A tail that starts on a tool result is orphaned: the assistant message
+        # that declared the call sits in the head, so ``sanitize_pairs`` deletes
+        # the result -- the newest thing the model learned would reach neither
+        # the request nor the summary.  Walk back to the carrier.  This is the
+        # common shape at the end of a tool-heavy turn, not a corner case.
+        start = len(messages) - len(tail)
+        while tail and tail[0].role == "tool" and start > 0:
+            start -= 1
+            tail.insert(0, messages[start])
+        head = messages[:start]
         if not head and len(messages) > 1:
             # Everything fit the budget: keep only the latest exchange
             # verbatim and summarize the rest (OpenCode parity).  Without
@@ -1266,44 +1325,6 @@ class ContextManager:
             return True
         _, rest = split_checkpoint(head)
         return not _joined_history_text(rest).strip()
-
-    def _l4_head_text(self, messages: list[ChatMessage]) -> str:
-        """The text L4 is meant to summarise, with the checkpoint labelled apart.
-
-        With no checkpoint this is exactly what it has always been — the joined
-        transcript — so the first compaction does not move.
-        """
-        return self._l4_head_text_excluding(messages, self.split_tail(messages)[1])
-
-    def _l4_head_text_excluding(
-        self,
-        full: list[ChatMessage],
-        surviving: Sequence[ChatMessage],
-    ) -> str:
-        """The head text over ``full`` minus what survives verbatim.
-
-        ``surviving`` is the tail the pipeline kept (same objects); everything
-        else in ``full`` is what L4 must preserve, including messages a snip
-        already dropped elsewhere.  Snip markers never qualify: they describe
-        a deletion, and summarising one is how the model once wrote a summary
-        of a sentence saying something had been deleted (M11-0).
-        """
-        kept = {id(message) for message in surviving}
-        head = [
-            message
-            for message in full
-            if id(message) not in kept
-            and not _is_snip_placeholder(message)
-            and not _is_background_notice(message)
-        ]
-        checkpoint, rest = split_checkpoint(head)
-        body = _joined_history_text(rest)
-        if not checkpoint:
-            return body
-        return (
-            f"{CHECKPOINT_OPEN}\n{checkpoint}\n{CHECKPOINT_CLOSE}\n\n"
-            f"{SINCE_OPEN}\n{body}\n{SINCE_CLOSE}"
-        )
 
     async def _call_summarizer(
         self,
@@ -1370,7 +1391,6 @@ class ContextManager:
         messages: list[ChatMessage],
         *,
         previous: str = "",
-        tail: Sequence[ChatMessage] | None = None,
         head_text: str | None = None,
         on_summary: Callable[[str], None] | None = None,
         on_delta: Callable[[str], None] | None = None,

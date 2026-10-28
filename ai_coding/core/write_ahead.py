@@ -38,10 +38,22 @@ __all__ = ["MAX_RECORDS", "WriteAheadLog"]
 class WriteAheadLog:
     """The turn's write-ahead records, keyed by ``(tool, digest)``."""
 
-    def __init__(self, session: Any, sessions: Any, *, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        session: Any,
+        sessions: Any,
+        *,
+        enabled: bool = True,
+        replay_scope: frozenset[str] | None = None,
+    ) -> None:
         self._session = session
         self._sessions = sessions
         self._enabled = bool(enabled)
+        #: Which digests may be answered from a record at all.  ``None`` means
+        #: "whatever is on disk" (a resumed turn that did not take a snapshot);
+        #: a set narrows it to the records the *interrupted* turn left behind,
+        #: so a call this turn settled cannot be replayed back to itself.
+        self._replay_scope = replay_scope
         self._records: dict[str, WriteAheadIntent] = {}
         # ``load`` reads the sidecar back onto the session, so a resumed turn
         # starts from what the crashed one left behind.
@@ -67,7 +79,12 @@ class WriteAheadLog:
             return None
         digest = call_fingerprint(call)
         record = self._records.get(digest)
-        if record is not None and record.status == "ok" and allow_replay:
+        if (
+            record is not None
+            and record.status == "ok"
+            and allow_replay
+            and (self._replay_scope is None or digest in self._replay_scope)
+        ):
             return ToolResult(
                 success=True,
                 output=record.output,

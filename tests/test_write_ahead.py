@@ -450,3 +450,32 @@ def test_the_log_is_a_noop_when_disabled(tmp_path):
     call = ToolCall(id="c1", name="write", params={"path": "a.py"})
     assert log.claim(call) is None
     assert _records(service, session.session_id) is None
+
+
+def test_a_resumed_turn_only_replays_what_the_crash_left_behind(tmp_path):
+    """I2/D4: the replay scope is the *interrupted* turn's records.
+
+    A resumed turn keeps running for several batches, and the records it
+    settles itself land in ``session.write_ahead`` too.  Without a snapshot
+    those become replayable for the later batches: the model edits a file,
+    re-reads it, and is handed the pre-edit output -- the eval-08 stage F loop,
+    reproduced inside a resume.
+    """
+    service = SessionService(root=tmp_path / "sessions")
+    session = service.create(title="s")
+    crashed = ToolCall(id="c0", name="write", params={"path": "old.py"})
+    fresh = ToolCall(id="c1", name="write", params={"path": "new.py"})
+
+    first = WriteAheadLog(session, service)
+    first.claim(crashed)
+    first.settle(crashed, ToolResult(success=True, output="OLD"))
+    first.claim(fresh)
+    first.settle(fresh, ToolResult(success=True, output="NEW"))
+
+    scope = frozenset({call_fingerprint(crashed)})
+    log = WriteAheadLog(session, service, replay_scope=scope)
+
+    assert log.claim(crashed, allow_replay=True) is not None
+    assert log.claim(fresh, allow_replay=True) is None, (
+        "a call settled by the resumed turn must run again, not be replayed"
+    )

@@ -241,8 +241,13 @@ plan-runner 的步内强制关闭（`max_auto_continuations=0`）：步是共享
 
 **I2 的三条不丢消息的不变量**（`docs/plan-i2-context-integrity.md` §3.0）：每条消息要么原样在请求里，
 要么被 checkpoint 覆盖（下标 < `compaction_consumed`），**不会两边都没有**；摘要失败时不推进
-`compaction_consumed`、不装 note、也不丢 delta（分支 D）；`compaction_anchor` 是覆盖前缀的内容指纹，
-历史被改写/回退即作废重摘。L4 消费掉的原文会先归档到 `transcripts/archive/`，`history_search` 的承诺才成立（D9）。
+`compaction_consumed`、不装 note、也不丢 delta（分支 D）；`compaction_anchor` 是覆盖前缀的内容指纹
+（role + 正文 + 工具参数），历史被改写/回退即作废重摘。L4 消费掉的原文会先归档到 `transcripts/archive/`，
+`history_search` 的承诺才成立（D9）。
+
+两个显式例外，写在契约里而不是靠读者推断：① `[后台任务]` 通知不进摘要输入，但计入 `consumed`——它是
+可再生的（`job_list` 随时能取回）；② checkpoint note 本身是一条消息，`hard_trim` 永远保留它，否则
+"保尾"会连同整个 head 一起丢掉。
 
 ### 压缩层的语义、判据与可观测（M-E1 ~ M-E4）
 

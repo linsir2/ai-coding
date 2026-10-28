@@ -378,8 +378,9 @@ class AIConfig(BaseModel):
     l2_window_budget: int = 12_000
     #: I2/D1 branch C: a delta smaller than this is carried verbatim into the
     #: request instead of paying for a summary call.  Keeps "compress" from
-    #: firing on every iteration once a checkpoint exists.
-    summary_delta_tokens: int = Field(default=4_000, ge=0)
+    #: firing on every iteration once a checkpoint exists.  Must be > 0: zero
+    #: would silently disable branch C and restore one summary per iteration.
+    summary_delta_tokens: int = Field(default=4_000, gt=0)
     # P3-2 refactor: the L4 tail is token-budgeted (OpenCode parity), not
     # counted.  Effective budget is min(l4_tail_tokens, window // 4): the
     # tail alone can never approach the post-compaction paging target.

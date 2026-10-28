@@ -31,7 +31,9 @@ from ai_coding.core.context_compression import (
     ContextManager,
     _anchor_of,
     _history_tokens,
+    hard_trim,
     install_checkpoint,
+    sanitize_pairs,
 )
 from ai_coding.domain.loop import TurnOutcome, TurnStatus
 from ai_coding.domain.message import ChatMessage, ToolCallRef
@@ -64,7 +66,9 @@ def _manager(summarizer, **overrides) -> ContextManager:
         "snip_keep_head": 3,
         "snip_keep_tail": 20,
         "keep_recent_tool_results": 8,
-        "summary_delta_tokens": 0,  # any non-empty delta earns a summary
+        # 1, not 0: zero is rejected by the config (it would silently disable
+        # branch C).  Anything non-empty clears a threshold of 1.
+        "summary_delta_tokens": 1,
         **overrides,
     }
     return ContextManager(
@@ -413,8 +417,11 @@ def test_a_failed_summary_does_not_drop_the_delta():
 
     assert calls, "the summariser was asked"
     body = _text_of(out)
-    missing = [i for i in range(20) if f"KEEP-{i} " not in body]
-    assert missing == [], "a failed summary must leave the history untouched"
+    # The old checkpoint still stands for messages[:5]; everything after it must
+    # be verbatim -- the failed call may not swallow the delta.
+    assert body.startswith(CHECKPOINT_MARK)
+    missing = [i for i in range(5, 20) if f"KEEP-{i} " not in body]
+    assert missing == [], "a failed summary must leave the delta untouched"
 
 
 # ---- #18: what L4 consumed stays searchable ----------------------------
@@ -431,3 +438,128 @@ def test_the_l4_consumed_head_is_archived_for_history_search(tmp_path):
     assert archived, "history_search promises the originals are on disk"
     body = "\n".join(path.read_text(encoding="utf-8") for path in archived)
     assert "ARCH-0 " in body
+
+
+# ---- review findings (v3) ----------------------------------------------
+
+
+def test_a_tool_heavy_tail_keeps_the_message_that_declares_its_call():
+    """The end of a tool-heavy turn is ``… assistant(c1), tool1``.
+
+    ``split_tail`` backtracks to a user boundary; when the last user message is
+    older than the tail budget the tail collapses onto a single ``tool``
+    message, whose declaring assistant sits in the head.  ``sanitize_pairs``
+    then deletes it -- the newest result would reach neither the request nor
+    the summary.
+    """
+    history = [
+        ChatMessage(role="user", content="开始", timestamp=""),
+        ChatMessage(
+            role="assistant",
+            content="",
+            timestamp="",
+            tool_calls=(ToolCallRef(id="c1", name="bash", arguments='{"command":"ls"}'),),
+        ),
+        ChatMessage(
+            role="tool", content="RESULT-LATEST", timestamp="", tool_name="bash",
+            tool_call_id="c1",
+        ),
+    ]
+
+    # A tail budget of 1 token cannot even hold the tool result.
+    out = asyncio.run(
+        _manager(_recorder([]), l4_tail_tokens=1).compress(history, force=True)
+    )
+
+    assert "RESULT-LATEST" in _text_of(out), (
+        "the newest tool result must survive sanitize_pairs; an orphaned tail "
+        "is a deletion, not a compaction"
+    )
+    assert all(m.role != "tool" or m.tool_call_id == "c1" for m in out)
+    assert out == sanitize_pairs(out)
+
+
+def test_a_hard_trim_keeps_the_checkpoint_note():
+    """The note is one message standing for the whole head."""
+    note = ChatMessage(role="user", content=f"{CHECKPOINT_MARK}\n{FIRST_SUMMARY}", timestamp="")
+    tail = _chat(10, "T", size=10)
+
+    trimmed = hard_trim([note, *tail], keep_tail=3)
+
+    assert trimmed and trimmed[0].content.startswith(CHECKPOINT_MARK)
+    assert len(trimmed) == 4
+
+
+def test_the_checkpoint_path_honours_the_circuit_breaker():
+    """Three failures must stop the retries -- in *this* branch too."""
+    calls: list[str] = []
+    manager = _manager(_recorder(calls, reply=None), l4_tail_tokens=30)
+    history = _chat(20, "B", size=20)
+    session = _session()
+    session.compaction_failures = 3
+    install_checkpoint(
+        session, FIRST_SUMMARY, consumed=5, anchor=_anchor_of(history[:5])
+    )
+
+    out = asyncio.run(manager.compress(history, session=session))
+
+    assert calls == [], "an open breaker must not spend another summary call"
+    assert "B-5 " in _text_of(out), "and the delta is still carried verbatim"
+
+
+def test_a_history_that_fits_the_tail_is_not_sent_twice():
+    """A single-user history makes ``split_tail`` hand everything back.
+
+    The fallback anchors the verbatim tail on the latest user message; with
+    only one user message that is index 0, so ``tail`` becomes the whole
+    history.  Sending it *and* the checkpoint would pay for ``messages[:used]``
+    twice and break branch C's "only the delta".
+    """
+    calls: list[str] = []
+    manager = _manager(_recorder(calls), l4_tail_tokens=10_000)
+    history = [
+        ChatMessage(role="user", content="S-0 唯一的指令", timestamp=""),
+        *[
+            ChatMessage(role="assistant", content=f"S-{i} 继续", timestamp="")
+            for i in range(1, 6)
+        ],
+    ]
+    session = _session()
+    install_checkpoint(
+        session, FIRST_SUMMARY, consumed=4, anchor=_anchor_of(history[:4])
+    )
+
+    out = asyncio.run(manager.compress(history, session=session))
+
+    body = _text_of(out)
+    assert "S-0 " not in body, "the checkpoint already stands for messages[:4]"
+    assert "S-4 " in body and "S-5 " in body
+
+
+def test_a_snip_placeholder_in_the_tail_does_not_shift_the_covered_prefix():
+    """``len(source) - len(tail)`` counted the placeholder as a real message.
+
+    With L1's marker inside the verbatim tail the subtraction landed two
+    messages early: 14 and 15 were summarised, but the recorded ``consumed``
+    said they were not covered, so the next request summarised them again (and
+    a checkpoint with a slightly different boundary could drop them outright).
+    """
+    calls: list[str] = []
+    manager = _manager(
+        _recorder(calls), max_messages=8, snip_keep_tail=4, l4_tail_tokens=40
+    )
+    history = _chat(20, "P", size=20)
+    session = _session()
+
+    out = asyncio.run(manager.compress(history, session=session, force=True))
+
+    consumed = session.compaction_consumed
+    assert consumed > 0
+    body = _text_of(out)
+    for index, message in enumerate(history):
+        if index < consumed:
+            continue
+        marker = (message.content or "").split(" ")[0]
+        assert marker in body, (
+            f"message {index} is outside the checkpoint but not in the request"
+        )

@@ -264,9 +264,13 @@ class SessionData:
     # on every request, so without these three the summariser re-read the same
     # opening of the conversation every time and its verdict never advanced
     # (measured: two summaries 21 iterations apart, both "blocked: conversation
-    # truncated").  ``compaction_anchor`` is the id of ``messages[consumed - 1]``;
-    # undo, rewind or any external rewrite changes it, and a checkpoint that no
-    # longer describes the history in front of it must not be carried forward.
+    # truncated").  ``compaction_anchor`` is a content fingerprint of
+    # ``messages[:consumed]`` (role + body + tool-call arguments), not an id:
+    # ``ChatMessage.id`` is empty for every message the loop creates, so
+    # comparing ids compared "" == "" and never invalidated anything.  Undo,
+    # rewind, an edited turn or any external rewrite changes the fingerprint,
+    # and a checkpoint that no longer describes the history in front of it must
+    # not be carried forward.
     compaction_checkpoint: str = ""
     compaction_consumed: int = 0
     compaction_anchor: str = ""
@@ -614,6 +618,11 @@ class SessionData:
             data["compactionCheckpoint"] = self.compaction_checkpoint
             data["compactionConsumed"] = int(self.compaction_consumed)
             data["compactionAnchor"] = self.compaction_anchor
+        # Written on its own: the counter outlives a checkpoint (a session that
+        # never compacted can still have failed to), and losing it on reload
+        # would let a broken summariser burn two calls per request forever.
+        if self.compaction_failures:
+            data["compactionFailures"] = int(self.compaction_failures)
         # Same rule again: sessions without acceptance contracts write no key,
         # so every file written before R0-1 keeps reading byte-identically.
         if self.acceptance:
@@ -726,6 +735,7 @@ class SessionData:
             compaction_checkpoint=str(data.get("compactionCheckpoint", "") or ""),
             compaction_consumed=int(data.get("compactionConsumed", 0) or 0),
             compaction_anchor=str(data.get("compactionAnchor", "") or ""),
+            compaction_failures=int(data.get("compactionFailures", 0) or 0),
             acceptance=acceptance,
             step_deliveries=step_deliveries,
             open_turn=int(raw_open_turn)
