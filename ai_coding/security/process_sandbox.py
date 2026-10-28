@@ -374,6 +374,17 @@ def _mask_report(backend: SandboxBackend) -> str | None:
     return MASK_FAILED if failed else None
 
 
+#: The interpreter every shell command runs under.  The tool is called ``bash``
+#: and models emit bash (``mkdir -p a/{b,c}``, ``[[ ... ]]``, ``$'...'``); on a
+#: Debian-ish box ``/bin/sh`` is dash, where brace expansion is not implemented
+#: and ``mkdir -p src/{components,pages}`` silently creates **one directory
+#: named ``{components,pages}``**.  Measured in eval-08's full-stack task, where
+#: it cost a whole round.  ``sh`` stays as the Alpine fallback.
+SHELL_ARGV0 = next(
+    (p for p in ("/bin/bash", "/usr/bin/bash") if Path(p).exists()), "/bin/sh"
+)
+
+
 def spawn_argv(
     command: str,
     policy: ProcessSandboxPolicy | None,
@@ -385,7 +396,7 @@ def spawn_argv(
     """A shell command as a directly spawnable argv (normalised + wrapped).
 
     Both callers share this one entry point.  Normalisation has exactly one
-    shape -- ``["/bin/sh", "-c", command]`` -- and ``shell`` is always ``False``
+    shape -- ``[SHELL_ARGV0, "-c", command]`` -- and ``shell`` is always ``False``
     at the spawn site.
 
     Fail-closed, in both directions a mechanism can fail:
@@ -401,7 +412,7 @@ def spawn_argv(
     A downgraded construction tier (``no-proc``) is reported the same way: the
     operator must be able to see that the sandbox is weaker than ``full``.
     """
-    argv = ["/bin/sh", "-c", command]
+    argv = [SHELL_ARGV0, "-c", command]
     if policy is None or policy.mode == "off" or policy.bypass:
         return argv
     if backend is None:

@@ -58,6 +58,7 @@ from ai_coding.security.process_sandbox import (
     ProcessSandboxPolicy,
     SandboxBackend,
     SandboxGap,
+    SHELL_ARGV0,
     spawn_argv,
 )
 
@@ -90,8 +91,11 @@ MAX_RUNNING_JOBS = 10
 #: backstop for shells that ignore the limit.
 MAX_JOB_LOG_BYTES = 20_000_000
 
-#: POSIX ``ulimit -f`` counts 512-byte blocks.
-_ULIMIT_BLOCK = 512
+#: ``ulimit -f`` counts *blocks*, and how big one is depends on the shell: POSIX
+#: says 512 bytes, dash does that, and **bash counts 1024**.  One constant for
+#: both is how the cap silently became 128 KB under bash when eval-08's shell
+#: switch landed (measured: the cap test saw exactly 2× the configured limit).
+_ULIMIT_BLOCK = 1024 if Path(SHELL_ARGV0).name == "bash" else 512
 #: Signal 25 / a shell reporting 128+25: "this process wrote past its file limit".
 _SIG_FILE_TOO_BIG = 25
 

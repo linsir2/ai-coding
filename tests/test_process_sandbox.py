@@ -40,6 +40,7 @@ from ai_coding.security.process_sandbox import (
     _PROXY_ENV_NAMES,
     _SOCKET_NR,
     MASK_FAILED,
+    SHELL_ARGV0,
     BwrapBackend,
     ProcessSandboxPolicy,
     SandboxGap,
@@ -497,8 +498,26 @@ def test_warn_with_no_backend_reports_the_gap(tmp_path):
         [tmp_path],
         emit=seen.append,
     )
-    assert argv == ["/bin/sh", "-c", "echo x"]
+    assert argv == [SHELL_ARGV0, "-c", "echo x"]
     assert seen == ["sandbox.backend.missing"]
+
+
+def test_the_shell_understands_brace_expansion(tmp_path):
+    """Agents write bash, so the interpreter has to be bash.
+
+    Measured in eval-08's full-stack task: with ``/bin/sh`` (dash) the very
+    ordinary ``mkdir -p src/{components,pages}`` exits 0 and creates a single
+    directory *named* ``{components,pages}`` -- a silent wrong result that cost
+    a whole round.  Skipped where only sh exists (Alpine): there the fallback is
+    what ships, and this claim is not testable.
+    """
+    if Path(SHELL_ARGV0).name != "bash":
+        pytest.skip("no bash on this host: sh is the documented fallback")
+    argv = spawn_argv("mkdir -p src/{components,pages}", None, None, [tmp_path])
+    subprocess.run(argv, cwd=tmp_path, check=True)
+    assert (tmp_path / "src" / "components").is_dir()
+    assert (tmp_path / "src" / "pages").is_dir()
+    assert not (tmp_path / "src" / "{components,pages}").exists()
 
 
 def test_warn_reports_when_wrap_returns_nothing(tmp_path):
@@ -511,7 +530,7 @@ def test_warn_reports_when_wrap_returns_nothing(tmp_path):
         [tmp_path],
         emit=seen.append,
     )
-    assert argv == ["/bin/sh", "-c", "echo x"]
+    assert argv == [SHELL_ARGV0, "-c", "echo x"]
     assert seen == ["sandbox.wrap.no-op"]
 
 
@@ -562,7 +581,7 @@ def test_bypass_skips_the_mechanism(tmp_path):
         _UntouchableBackend(),
         [tmp_path],
     )
-    assert argv == ["/bin/sh", "-c", "echo x"]
+    assert argv == [SHELL_ARGV0, "-c", "echo x"]
 
 
 def test_wrap_puts_the_writable_bind_after_the_readonly_root(tmp_path):
@@ -1424,7 +1443,7 @@ def test_warn_reports_a_failed_mask(tmp_path):
         [tmp_path],
         emit=seen.append,
     )
-    assert argv == ["/bin/sh", "-c", "echo x"]
+    assert argv == [SHELL_ARGV0, "-c", "echo x"]
     assert MASK_FAILED in seen
 
 
