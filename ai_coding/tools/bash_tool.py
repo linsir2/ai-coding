@@ -23,6 +23,7 @@ from ai_coding.core.jobs import WAIT_CANCELLED, WAIT_SETTLED
 from ai_coding.core.turn_report import emit_degraded
 from ai_coding.domain.message import ToolResult
 from ai_coding.infra.subprocess_runner import run_process_async
+from ai_coding.infra.text_clip import clip_head_tail
 from ai_coding.security.process_sandbox import (
     ProcessSandboxPolicy,
     SandboxBackend,
@@ -530,8 +531,12 @@ class BashTool(BaseTool):
             )
 
         if len(output) > self._max_output:
-            output = output[: self._max_output] + (
-                f"\n... [truncated, total {len(output)} chars]"
+            # Both ends: the head identifies what ran, the tail carries the
+            # verdict (a build's last lines, pytest's ``FAILED`` list).  A
+            # head-only clip is how the model came to see "0 errors" from a
+            # command whose error was in the last 20 lines (eval-08).
+            output = clip_head_tail(
+                output, self._max_output, note=f"命令共输出 {len(output)} 字符"
             )
 
         if outcome.returncode == 0:

@@ -224,8 +224,19 @@ class ToolDispatcher:
         deadline: Deadline | None = None,
         iteration: int = 0,
         view: TurnView | None = None,
+        allow_replay: bool = False,
     ) -> list[DispatchOutcome]:
-        """Run ``calls`` and return one outcome per call, in the given order."""
+        """Run ``calls`` and return one outcome per call, in the given order.
+
+        ``allow_replay`` is the write-ahead reuse switch, and it is **off for a
+        live turn**.  It used to be always on, which meant a second identical
+        ``bash`` in the same turn returned the *first* run's output without
+        executing: eval-08 stage F had ten ``cat`` calls whose output and
+        duration were byte-identical after the file had been edited, and the
+        model concluded "the edit didn't apply".  Only a turn resumed after a
+        crash may answer from the record -- that is the case M-C1 was written
+        for, where the effect really did happen before the process died.
+        """
         if not calls:
             return []
 
@@ -246,7 +257,9 @@ class ToolDispatcher:
                 )
                 continue
             if len(group) == 1:
-                outcome = await self._handle(group[0], ctx, deadline, view)
+                outcome = await self._handle(
+                    group[0], ctx, deadline, view, allow_replay=allow_replay
+                )
                 outcomes.append(outcome)
                 halted = outcome.halted
                 continue
@@ -254,7 +267,9 @@ class ToolDispatcher:
 
             async def run(item: _Prepared, gate: asyncio.Semaphore) -> DispatchOutcome:
                 async with gate:
-                    return await self._handle(item, ctx, deadline, view)
+                    return await self._handle(
+                        item, ctx, deadline, view, allow_replay=allow_replay
+                    )
 
             ran = list(await asyncio.gather(*(run(item, semaphore) for item in group)))
             outcomes.extend(ran)
@@ -329,6 +344,8 @@ class ToolDispatcher:
         ctx: ToolContext,
         deadline: Deadline | None = None,
         view: TurnView | None = None,
+        *,
+        allow_replay: bool = False,
     ) -> DispatchOutcome:
         call = item.call
         # R4a: one context per *call*, so the execution can identify itself even
@@ -344,7 +361,9 @@ class ToolDispatcher:
         )
         started = time.monotonic()
 
-        result, denied, halted = await self._decide(item, ctx, deadline, view)
+        result, denied, halted = await self._decide(
+            item, ctx, deadline, view, allow_replay=allow_replay
+        )
 
         self.observer.on_event(
             ToolFinished(
@@ -365,6 +384,8 @@ class ToolDispatcher:
         ctx: ToolContext,
         deadline: Deadline | None = None,
         view: TurnView | None = None,
+        *,
+        allow_replay: bool = False,
     ) -> tuple[ToolResult, bool, bool]:
         """Return ``(result, denied, halted)`` for one prepared call."""
         call = item.call
@@ -513,15 +534,26 @@ class ToolDispatcher:
         # side-effecting call can be named without racing a concurrent sibling.
         # The digest is ``call_fingerprint(call)``, so it is stable across a
         # guard/hook rewrite above.
+        #
+        # Only a *resumed* turn may answer from the record (``allow_replay``):
+        # in a live turn the same call must really run again, or the model reads
+        # a stale result and the guards never see the repeat.
         log = getattr(ctx, "write_ahead", None)
         if tool.mutates_world and log is not None:
-            reused = log.claim(call)
+            reused = log.claim(call, allow_replay=allow_replay)
             if reused is not None:
-                # A reuse is not an execution: ``guards.after`` and the
-                # TOOL_AFTER hooks read "the result of what just ran", and
-                # nothing ran.  ``TOOL_BEFORE`` and the guards' ``check``
-                # already ran above, so the permission semantics are intact.
-                return reused, False, False
+                # The call *did* run -- before the crash.  Counting it now is
+                # what keeps the duplicate/failed budgets honest across the
+                # resume; the flag on the payload lets a trace tell a reuse from
+                # a fresh run.
+                data = dict(reused.data or {})
+                data["replayed"] = True
+                reused = replace(reused, data=data)
+                result = self.guards.after(call, reused, ctx, turn_view)
+                await self._run_hooks(
+                    HookPoint.TOOL_AFTER, call, ctx, turn_view, result=result
+                )
+                return result, False, False
 
         result = await self._execute(tool, call, ctx, deadline)
         if rewritten_from is not None:

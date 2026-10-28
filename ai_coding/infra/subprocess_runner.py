@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ai_coding.infra.deadline import HEARTBEAT_SECONDS, DeadlineExpired, run_with_deadline
+from ai_coding.infra.text_clip import clip_head_tail
 
 __all__ = ["DEFAULT_KILL_GRACE", "ProcessOutcome", "run_process", "run_process_async"]
 
@@ -56,9 +57,15 @@ class ProcessOutcome:
 
 
 def _truncate(text: str, limit: int | None, total: int) -> str:
+    """Cap one stream, keeping both ends.
+
+    Head-only was wrong in the direction that matters: when stdout is large,
+    the *error* is what got dropped -- a compiler's last lines, pytest's
+    ``FAILED`` list.  The omission is stated so the model knows it happened.
+    """
     if limit is None or len(text) <= limit:
         return text
-    return text[:limit] + f"\n... [truncated, total {total} chars]"
+    return clip_head_tail(text, limit, note=f"本流共 {total} 字符")
 
 
 def _decode(raw: bytes | str | None) -> str:

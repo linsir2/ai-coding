@@ -48,19 +48,26 @@ class WriteAheadLog:
         for record in getattr(session, "write_ahead", None) or ():
             self._records[record.digest] = record
 
-    def claim(self, call: ToolCall) -> ToolResult | None:
+    def claim(
+        self, call: ToolCall, *, allow_replay: bool = False
+    ) -> ToolResult | None:
         """Record the intent before it runs; return a result to reuse, if any.
 
         ``running`` is not a hit -- the side effect's outcome is unknown -- so a
         resumed turn re-runs the call and settles it again.  Only ``ok`` is
         reused, and the reuse carries the recorded output/data/artifacts so it
         is indistinguishable from a fresh run.
+
+        ``allow_replay`` defaults to **False** because the record exists for
+        crash recovery, not for de-duplicating a live turn.  Reusing inside the
+        turn it was written in is how a model came to re-read a file it had
+        just edited and conclude the edit had failed (eval-08 stage F).
         """
         if not self._enabled:
             return None
         digest = call_fingerprint(call)
         record = self._records.get(digest)
-        if record is not None and record.status == "ok":
+        if record is not None and record.status == "ok" and allow_replay:
             return ToolResult(
                 success=True,
                 output=record.output,

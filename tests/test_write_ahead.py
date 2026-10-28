@@ -197,11 +197,17 @@ async def test_the_outcome_is_settled_after_the_call(tmp_path):
     assert [a["path"] for a in record.artifacts] == ["a.py"]
 
 
-# ---- a regenerated call reuses the recorded result -------------------------
+# ---- a live turn re-runs the call; only a resume reuses --------------------
 
 
 @pytest.mark.asyncio
-async def test_a_regenerated_call_reuses_the_recorded_result(tmp_path):
+async def test_a_regenerated_call_in_a_live_turn_runs_again(tmp_path):
+    """The record is crash recovery, not a same-turn call cache.
+
+    Reusing inside the turn that wrote the record is how the model came to read
+    a file it had just edited, see the pre-edit bytes, and conclude the edit had
+    failed (eval-08 stage F: ten ``cat`` calls, identical output and duration).
+    """
     service = SessionService(root=tmp_path / "sessions")
     session = _session(service)
     tool = _WriteTool()
@@ -215,7 +221,7 @@ async def test_a_regenerated_call_reuses_the_recorded_result(tmp_path):
 
     await loop.process_input(session, "go")
 
-    assert tool.executions == 1, "the regenerated call ran a second time"
+    assert tool.executions == 2, "a live turn must really run the call again"
 
 
 # ---- the reuse carries the data and artifacts ------------------------------
@@ -223,27 +229,81 @@ async def test_a_regenerated_call_reuses_the_recorded_result(tmp_path):
 
 @pytest.mark.asyncio
 async def test_the_reuse_carries_the_data_and_artifacts(tmp_path):
+    """A resumed reuse has to be indistinguishable from a fresh run."""
     service = SessionService(root=tmp_path / "sessions")
     session = _session(service)
-    tool = _WriteTool()
-    engine = _ScriptEngine(
+    call = ToolCall(id="c0", name="write", params={"path": "a.py"})
+    service.mark_write_ahead(
+        session.session_id,
         [
-            [("c1", "write", '{"path":"a.py"}')],
-            [("c2", "write", '{"path":"a.py"}')],
-        ]
+            WriteAheadIntent(
+                call_id="c0",
+                tool="write",
+                digest=call_fingerprint(call),
+                status="ok",
+                output="written #1",
+                data={"path": "a.py"},
+                artifacts=[{"path": "a.py", "kind": "write"}],
+            ).to_dict()
+        ],
     )
-    loop = _loop(engine, service, tmp_path, tool)
+    reloaded = service.load(session.session_id)
+    assert reloaded is not None
+    reloaded.open_turn = 1
 
-    await loop.process_input(session, "go")
+    tool = _WriteTool()
+    loop = _loop(
+        _ScriptEngine([[("c2", "write", '{"path":"a.py"}')]]), service, tmp_path, tool
+    )
+    await loop.resume_turn(reloaded)
 
-    tool_messages = {m.tool_call_id: m for m in session.messages if m.role == "tool"}
+    tool_messages = {m.tool_call_id: m for m in reloaded.messages if m.role == "tool"}
     reused = tool_messages["c2"]
     # The reuse hands back the *recorded* output, not a fresh run's.
     assert reused.content is not None and "written #1" in reused.content
     assert "written #2" not in reused.content
     assert "<data>" in reused.content
     assert "a.py" in reused.content
+    # A reuse is marked so a trace can tell it from a fresh run.
+    assert '"replayed": true' in reused.content
     assert [a.path for a in reused.artifacts] == ["a.py"]
+
+
+@pytest.mark.asyncio
+async def test_a_live_turn_cannot_loop_on_the_same_call(tmp_path):
+    """The other half of R4: once a live call really runs, the guard sees it.
+
+    Before this change a repeated ``bash`` was answered from the record, so
+    ``DuplicateCallGuard.after`` never ran and the third identical call was
+    allowed -- eval-08 stage F made ten of them.  Now the third is refused.
+    """
+    from types import SimpleNamespace
+
+    from ai_coding.config.models import GuardConfig
+    from ai_coding.core.dispatch import ToolDispatcher
+    from ai_coding.core.guard import build_guards
+    from ai_coding.security.permission_gate import PermissionGate
+    from ai_coding.tools.base import ToolContext
+
+    tool = _WriteTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    dispatcher = ToolDispatcher(
+        registry,
+        PermissionGate(),
+        AutoApproveCallback(),
+        guards=build_guards(SimpleNamespace(guard=GuardConfig(duplicate_threshold=2))),
+    )
+    ref = ToolCallRef(id="c1", name="write", arguments='{"path":"a.py"}')
+    ctx = ToolContext(workspace=str(tmp_path))
+
+    outcomes = []
+    for _ in range(3):
+        outcomes.extend(await dispatcher.dispatch_batch([ref], ctx=ctx))
+
+    assert tool.executions == 2, "the third identical call must not run"
+    assert outcomes[-1].denied, "the third identical call must be refused"
+    assert "already succeeded" in (outcomes[-1].result.output or "")
 
 
 # ---- the reuse domain is the turn, not the session -------------------------
@@ -289,7 +349,13 @@ async def test_an_aborted_turn_leaves_no_records_for_the_next_one(tmp_path):
 @pytest.mark.asyncio
 async def test_a_crashed_turns_settled_call_is_reused_after_a_restart(tmp_path):
     """The point of the whole mechanism: the process died with the call's
-    outcome on the sidecar, so the resumed turn must not run it again."""
+    outcome on the sidecar, so the resumed turn must not run it again.
+
+    The recovery entry point is ``resume_turn``, not ``process_input``: only a
+    turn that is *continued* after a crash may answer from the record.  A live
+    turn must really run its calls (eval-08 stage F: ten replayed ``cat`` calls
+    showed the pre-edit file and the model concluded its edit had failed).
+    """
     service = SessionService(root=tmp_path / "sessions")
     session = _session(service)
     call = ToolCall(id="c0", name="write", params={"path": "a.py"})
@@ -309,12 +375,14 @@ async def test_a_crashed_turns_settled_call_is_reused_after_a_restart(tmp_path):
     )
     reloaded = service.load(session.session_id)
     assert reloaded is not None
+    # A turn that never closed is what makes it resumable.
+    reloaded.open_turn = 1
 
     tool = _WriteTool()
     loop = _loop(
         _ScriptEngine([[("c1", "write", '{"path":"a.py"}')]]), service, tmp_path, tool
     )
-    await loop.process_input(reloaded, "go")
+    await loop.resume_turn(reloaded)
 
     assert tool.executions == 0, "the crashed turn's call ran a second time"
 

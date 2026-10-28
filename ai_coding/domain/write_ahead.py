@@ -20,6 +20,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ai_coding.infra.text_clip import clip_head_tail
+
 #: The record's caps (M-C1).  Every one is a bound: a sidecar is crash recovery,
 #: not a second transcript.
 OUTPUT_CHARS = 4000
@@ -40,8 +42,15 @@ __all__ = [
 
 
 def clip_output(text: Any) -> str:
-    """Cap the recorded output; ``None`` reads as the empty string."""
-    return ("" if text is None else str(text))[:OUTPUT_CHARS]
+    """Cap the recorded output; ``None`` reads as the empty string.
+
+    Both ends, not just the head: a replayed result is what the model reads in
+    place of a real run, and a head-only 4k clip of a test run loses exactly the
+    part that says whether it failed (eval-08 stage F replayed ten ``cat``
+    commands whose tail was the only thing that had changed).
+    """
+    raw = "" if text is None else str(text)
+    return clip_head_tail(raw, OUTPUT_CHARS)
 
 
 def clip_data(data: Any) -> dict[str, Any]:

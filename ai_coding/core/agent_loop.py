@@ -881,7 +881,7 @@ class AgentLoop:
                 # untouched.
                 self.closer.save(session)
             return await self._run_turn(
-                session, "", on_delta, observer, (), append_user=False
+                session, "", on_delta, observer, (), append_user=False, resumed=True
             )
 
     async def _run_turn(
@@ -894,6 +894,7 @@ class AgentLoop:
         *,
         append_user: bool = True,
         synthetic: bool = False,
+        resumed: bool = False,
     ) -> str:
         """One turn, ungated.  The body below is ``process_input`` unchanged:
         splitting it out keeps the re-entry guard a two-line diff instead of a
@@ -1274,6 +1275,7 @@ class AgentLoop:
                     deadline=frame.deadline,
                     index=index,
                     turn=frame.turn_number,
+                    resumed=resumed,
                 )
                 books.note_outcomes(outcomes)
                 # I2: check constraint violations after tool execution
@@ -2062,6 +2064,7 @@ class AgentLoop:
         index: int,
         turn: int = 0,
         conclusion: TurnConclusion | None = None,
+        resumed: bool = False,
     ) -> list[DispatchOutcome]:
         """Run this step's tool calls and hand back what they did.
 
@@ -2135,6 +2138,9 @@ class AgentLoop:
                 # the single source of "is the ladder's refusal phase open".
                 strict_repeats=interventions.armed(session.intervention_state),
             ),
+            # M-C1: the record is for crash recovery, so only a resumed turn may
+            # be answered from it.  A live turn must really run the call again.
+            allow_replay=resumed,
         )
         self.closer.write_back(session, outcomes)
         if any(
