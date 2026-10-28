@@ -26,11 +26,22 @@ import json
 import sys
 from pathlib import Path
 
-from ai_coding.domain.read_ledger import ReadMark, extract_claims, same_file
+from ai_coding.domain.read_ledger import (
+    extract_claims,
+    names_more_than_one_file,
+    normalize,
+    unsupported_claims,
+)
 from ai_coding.domain.session import SessionData
 
 
 def coverage(session: SessionData, answer: str) -> dict[str, object]:
+    """The coverage the loop itself would have computed.
+
+    Delegates to ``unsupported_claims`` rather than re-implementing the tiers:
+    the first real re-run showed what a second copy of the rule costs -- the
+    guard counted two spellings of one file as two files and skipped the answer.
+    """
     claims = extract_claims(answer)
     if not claims:
         return {
@@ -40,43 +51,25 @@ def coverage(session: SessionData, answer: str) -> dict[str, object]:
             "coverage": None,
             "note": "the answer cites no path:line at all",
         }
-    paths = {path for path, _, _ in claims}
-    if len(paths) > 1:
+    paths = {normalize(path) for path, _, _ in claims}
+    if names_more_than_one_file(paths):
         return {
             "claims": len(claims),
             "covered": 0,
             "uncovered": 0,
             "coverage": None,
-            "note": f"skipped: the answer names {len(paths)} files",
+            "note": f"skipped: the answer names {len(paths)} spellings",
         }
-    path = claims[0][0]
-    marks = [m for m in session.read_ledger if same_file(m.path, path)]
-    if marks:
-        uncovered = [
-            (start, end)
-            for _, start, end in claims
-            if not _covered(marks, start, end)
-        ]
-    elif any(same_file(seen, path) for seen in session.seen_paths):
-        uncovered = []
-    else:
-        uncovered = [(start, end) for _, start, end in claims]
-    covered = len(claims) - len(uncovered)
+    bad = unsupported_claims(session.read_ledger, session.seen_paths, claims)
+    covered = len(claims) - len(bad)
     return {
         "claims": len(claims),
         "covered": covered,
-        "uncovered": len(uncovered),
+        "uncovered": len(bad),
         "coverage": covered / len(claims),
-        "uncovered_ranges": uncovered,
+        "uncovered_ranges": bad,
         "note": "",
     }
-
-
-def _covered(marks: list[ReadMark], start: int, end: int) -> bool:
-    for mark in marks:
-        if mark.start <= end and start <= mark.end:
-            return True
-    return False
 
 
 def main() -> int:

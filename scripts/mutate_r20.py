@@ -113,11 +113,21 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
     (
         "D5  the ambiguity guard is removed",
         "ai_coding/domain/read_ledger.py",
-        "    if len({normalize(path) for path, _, _ in claims}) > 1:\n"
+        "    if names_more_than_one_file("
+        "{normalize(path) for path, _, _ in claims}):\n"
         "        return []",
         "    if False:\n"
         "        return []",
         "tests/test_read_ledger.py tests/test_claim_check.py",
+    ),
+    (
+        "D14 the ambiguity guard counts two spellings as two files",
+        "ai_coding/domain/read_ledger.py",
+        "    names = list(paths)\n"
+        "    first = names.pop()\n"
+        "    return any(not same_file(first, other) for other in names)",
+        "    return len(paths) > 1",
+        "tests/test_read_ledger.py",
     ),
     (
         "D9  the shorthand citation forms stop being recognised",

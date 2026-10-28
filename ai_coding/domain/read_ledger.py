@@ -332,6 +332,19 @@ def extract_claims(text: str) -> list[tuple[str, int, int]]:
     return claims
 
 
+def names_more_than_one_file(paths: set[str]) -> bool:
+    """Do these path spellings denote more than one file?
+
+    ``llm_helpers.py`` and ``ai_coding/ai/llm_helpers.py`` are one file -- the
+    ledger stores the second and the answer abbreviates to the first.  Counting
+    them as two would skip a perfectly checkable answer, which is exactly what
+    happened on the first real re-run of T2.
+    """
+    names = list(paths)
+    first = names.pop()
+    return any(not same_file(first, other) for other in names)
+
+
 def unsupported_claims(
     marks: Sequence[ReadMark],
     seen: Sequence[str],
@@ -354,7 +367,7 @@ def unsupported_claims(
     """
     if not claims:
         return []
-    if len({normalize(path) for path, _, _ in claims}) > 1:
+    if names_more_than_one_file({normalize(path) for path, _, _ in claims}):
         return []
     path = claims[0][0]
     rows = [mark for mark in marks if same_file(mark.path, path)]
@@ -375,6 +388,7 @@ __all__ = [
     "extract_claims",
     "merge_mark",
     "missing_ranges",
+    "names_more_than_one_file",
     "normalize",
     "paths_in",
     "render",

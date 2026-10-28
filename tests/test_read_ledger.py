@@ -519,6 +519,24 @@ def test_two_files_in_one_answer_skip_the_check():
     assert unsupported_claims(marks, (), claims) == []
 
 
+def test_two_spellings_of_one_file_are_not_two_files():
+    """Found on the first real re-run: the answer wrote ``llm_helpers.py`` and
+    ``ai_coding/ai/llm_helpers.py`` for one file, the guard read that as two, and
+    a fully checkable answer was skipped.
+
+    The file is *unread* here, so the correct answer is "challenge it" -- which
+    is what distinguishes this from the ambiguity guard's skip.
+    """
+    claims = [
+        ("ai_coding/ai/llm_helpers.py", 89, 89),
+        ("llm_helpers.py", 130, 133),
+    ]
+    assert unsupported_claims((), (), claims) == [
+        ("ai_coding/ai/llm_helpers.py", 89, 89),
+        ("llm_helpers.py", 130, 133),
+    ]
+
+
 def test_a_bare_line_number_without_a_path_is_never_challenged():
     assert unsupported_claims((), (), []) == []
 
