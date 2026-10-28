@@ -884,8 +884,13 @@ class ContextManager:
         pinned: Sequence[ChatMessage] = (),
         force: bool = False,
         session: Any | None = None,
+        page: bool = True,
     ) -> list[ChatMessage]:
         """Run the four-layer pipeline once.
+
+        ``page=False`` leaves the final window trim to the caller, so
+        ``compress_if_needed`` can own both the trim and its single
+        ``[上下文超限]`` declaration instead of announcing twice.
 
         I2 changes *what L4 is shown*, not the layer order (L3→L1→L2→L4 is
         still the invariant M-E2 pinned).  Two things are new:
@@ -1138,7 +1143,7 @@ class ContextManager:
                 )
         self.last_layer_stats = stats
 
-        if _history_tokens(out) > self._max_context_tokens:
+        if page and _history_tokens(out) > self._max_context_tokens:
             out = self._announce_omissions(out, hard_trim(out, HARD_TRIM_KEEP_TAIL))
 
         out = _ensure_pinned(out, pinned)
@@ -1221,6 +1226,7 @@ class ContextManager:
             pinned=pinned,
             force=force,
             session=session,
+            page=False,
         )
         target = int(self._max_context_tokens * self._compress_target_ratio)
         trimmed = out
@@ -1248,9 +1254,23 @@ class ContextManager:
         silently is not: the model would go on reasoning as if it had read
         them.  The originals are archived first, so ``history_search`` can
         still reach them.
+
+        Compared by *content*, not by identity: ``hard_trim`` ends in
+        ``sanitize_pairs``, which rebuilds every assistant message that carries
+        tool calls.  An identity diff would count those survivors as dropped,
+        inflate the number the model reads, and archive them a second time.
         """
-        kept = {id(message) for message in after}
-        dropped = [message for message in before if id(message) not in kept]
+        pool: dict[tuple[str, str], int] = {}
+        for message in after:
+            key = (message.role, message.content or "")
+            pool[key] = pool.get(key, 0) + 1
+        dropped: list[ChatMessage] = []
+        for message in before:
+            key = (message.role, message.content or "")
+            if pool.get(key, 0) > 0:
+                pool[key] -= 1
+                continue
+            dropped.append(message)
         if not dropped:
             return after
         self.archive_transcript(dropped)

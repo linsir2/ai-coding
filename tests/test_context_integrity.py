@@ -480,11 +480,37 @@ def test_paging_says_what_it_dropped_and_archives_it(tmp_path):
     out = asyncio.run(manager.compress_if_needed(history, session=session))
 
     body = _text_of(out)
+    assert body.count(OMISSION_MARK) == 1, "one call, one declaration"
     assert OMISSION_MARK in body, "a silent drop is the bug this test exists for"
     archived = list((tmp_path / "transcripts" / "archive").glob("*.md"))
     assert archived, "the dropped messages must stay reachable"
     text = "\n".join(p.read_text(encoding="utf-8") for p in archived)
     assert "D-4 " in text, "the first message paging removed is on disk"
+
+
+def test_the_omission_count_ignores_rebuilt_messages():
+    """``sanitize_pairs`` rebuilds assistant carriers; a survivor is not a drop."""
+    manager = _manager(_recorder([]))
+    carrier = ChatMessage(
+        role="assistant",
+        content="",
+        timestamp="",
+        tool_calls=(ToolCallRef(id="c1", name="bash", arguments="{}"),),
+    )
+    result = ChatMessage(
+        role="tool", content="R", timestamp="", tool_name="bash", tool_call_id="c1"
+    )
+    before = [*_chat(10, "X"), carrier, result]
+    after = sanitize_pairs([carrier, result])
+    assert after[0] is not carrier, "the rebuild really happens"
+
+    out = manager._announce_omissions(before, after)
+
+    assert out[0].content.startswith(OMISSION_MARK)
+    assert "已省略 10 条" in out[0].content, (
+        "the carrier survived; counting it as dropped inflates the number the "
+        "model reads and archives a message that is still in the request"
+    )
 
 
 def test_a_user_message_quoting_the_checkpoint_marker_is_not_a_note():
