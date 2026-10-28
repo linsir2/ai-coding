@@ -57,6 +57,10 @@ _NOTE_ALLOWANCE = 160
 HARD_TRIM_KEEP_TAIL = 20
 _L4_BREAKER_THRESHOLD = 3
 _MIN_PAGE_MESSAGES = 4
+#: How much of the tail budget a user boundary must preserve to be worth
+#: backtracking to.  Below this the tail keeps its token budget and starts
+#: wherever the budget lands (with the tool-carrier repair).
+_TAIL_BOUNDARY_FLOOR = 0.5
 
 
 def estimate_tokens(text: str) -> int:
@@ -975,26 +979,18 @@ class ContextManager:
                 )
             )
             delta = head[used:] if used <= len(head) else []
-            l2_before = _history_tokens(tail)
-            l2_in = tail
-            tail = placeholder_old_results(
-                tail,
-                self._keep_recent_results,
-                window_chars=self._l2_window_chars,
-                window_budget=self._l2_window_budget,
-                elide_root=self._root,
-            )
+            # L2 is deliberately skipped here.  ``tail`` is what the pipeline
+            # chose to keep verbatim inside a budget of ``window // 4``; eliding
+            # its bodies can only remove information the model is about to need,
+            # and it is what turned a 12k tail into 1-3k of envelope text
+            # (eval-08 T2: the model re-read ``agent_loop.py`` four times).
             stats.append(
                 LayerStat(
                     name="L2",
                     removed=0,
-                    rewritten=_rewritten_count(l2_in, tail),
-                    skipped=max(
-                        0,
-                        _older_tool_count(l2_in, self._keep_recent_results)
-                        - _rewritten_count(l2_in, tail),
-                    ),
-                    before_tokens=l2_before,
+                    rewritten=0,
+                    skipped=_older_tool_count(tail, self._keep_recent_results),
+                    before_tokens=_history_tokens(tail),
                     after_tokens=_history_tokens(tail),
                 )
             )
@@ -1071,37 +1067,42 @@ class ContextManager:
                     after_tokens=_history_tokens(out),
                 )
             )
-            l2_before = _history_tokens(out)
-            l2_in = out
-            out = placeholder_old_results(
-                out,
-                self._keep_recent_results,
-                window_chars=self._l2_window_chars,
-                window_budget=self._l2_window_budget,
-                elide_root=self._root,
-            )
-            l2_rewritten = _rewritten_count(l2_in, out)
-            l2_examined = _older_tool_count(l2_in, self._keep_recent_results)
-            stats.append(
-                LayerStat(
-                    name="L2",
-                    removed=0,
-                    rewritten=l2_rewritten,
-                    skipped=max(0, l2_examined - l2_rewritten),
-                    before_tokens=l2_before,
-                    after_tokens=_history_tokens(out),
-                )
-            )
+            # The split is taken here, after the snip and **before** L2: the
+            # snip keeps the original objects, so ``surviving_tail`` is still a
+            # true suffix of ``l4_source`` and both identity operations work.
+            # Taken after L2 it was not: L2 hands back new objects, so
+            # ``_delta_by_identity`` could not exclude the tail (the summary
+            # was handed the whole history again) and ``_cut_index`` matched
+            # nothing and returned ``len(l4_source)`` -- a checkpoint claiming
+            # to cover the verbatim tail, which then vanished from the next
+            # request.  Measured on eval-08 T2: after-compaction context fell
+            # to 323 tokens and the model re-read the same files four times.
             _, surviving_tail = self.split_tail(out)
             l4_head = self._delta_by_identity(l4_source, surviving_tail)
+            cut = self._cut_index(l4_source, surviving_tail)
             should_summarise = (
                 (force and not self._l4_since_empty(out))
                 or self._l4_should_run(out, session)
                 or (dropped and self._l4_failure_count(session) < _L4_BREAKER_THRESHOLD)
             )
-            if should_summarise and self._summarizer is not None and l4_head:
+            l2_before = _history_tokens(out)
+            tail_before = _history_tokens(surviving_tail)
+            # L2 runs on the tail only.  The head is about to be replaced by the
+            # summary, so eliding it would only degrade the summary; the tail is
+            # what the model keeps verbatim, so eliding *that* is what turned a
+            # 12k tail into 1-3k of envelope text.
+            kept_tail = placeholder_old_results(
+                surviving_tail,
+                self._keep_recent_results,
+                window_chars=self._l2_window_chars,
+                window_budget=self._l2_window_budget,
+                elide_root=self._root,
+            )
+            l2_rewritten = _rewritten_count(surviving_tail, kept_tail)
+            attempted = bool(should_summarise and self._summarizer is not None and l4_head)
+            fresh = None
+            if attempted:
                 self.last_summary_attempted = True
-                l4_before = _history_tokens(out)
                 l4_count = len(out)
                 fresh = await self._run_l4(
                     l4_head,
@@ -1109,35 +1110,53 @@ class ContextManager:
                     on_delta=on_delta,
                     session=session,
                 )
-                # Where the verbatim tail starts, decided by identity.  The old
-                # ``len(source) - len(tail)`` counted the snip placeholder as a
-                # real message, so when L1's marker was the tail's first entry
-                # ``cut`` landed one message short: that message was summarised
-                # while its index still read "not covered".
-                cut = self._cut_index(l4_source, surviving_tail)
-                if fresh and cut > 0:
-                    self.archive_transcript(l4_head)
-                    install_checkpoint(
-                        session,
-                        fresh,
-                        consumed=cut,
-                        anchor=_anchor_of(messages[:cut]),
-                    )
-                    out = [
-                        _checkpoint_note(fresh),
-                        *[
-                            message
-                            for message in surviving_tail
-                            if not _is_snip_placeholder(message)
-                        ],
-                    ]
+            if fresh and cut > 0:
+                self.archive_transcript(l4_head)
+                install_checkpoint(
+                    session,
+                    fresh,
+                    consumed=cut,
+                    anchor=_anchor_of(messages[:cut]),
+                )
+                out = [_checkpoint_note(fresh), *kept_tail]
+                l2_after = l2_before - (tail_before - _history_tokens(kept_tail))
+            else:
+                # No checkpoint was installed, so nothing may be dropped -- and
+                # the request still has to fit.  This is the one path where L2
+                # covers the whole history: it shrinks bodies (archived,
+                # windowed) without removing a message.
+                l2_in = out
+                out = placeholder_old_results(
+                    out,
+                    self._keep_recent_results,
+                    window_chars=self._l2_window_chars,
+                    window_budget=self._l2_window_budget,
+                    elide_root=self._root,
+                )
+                l2_rewritten = _rewritten_count(l2_in, out)
+                l2_after = _history_tokens(out)
+            stats.append(
+                LayerStat(
+                    name="L2",
+                    removed=0,
+                    rewritten=l2_rewritten,
+                    skipped=max(
+                        0,
+                        _older_tool_count(surviving_tail, self._keep_recent_results)
+                        - l2_rewritten,
+                    ),
+                    before_tokens=l2_before,
+                    after_tokens=l2_after,
+                )
+            )
+            if attempted:
                 stats.append(
                     LayerStat(
                         name="L4",
                         removed=max(0, l4_count - len(out)),
                         rewritten=0,
-                        skipped=0,
-                        before_tokens=l4_before,
+                        skipped=0 if fresh else 1,
+                        before_tokens=l2_after,
                         after_tokens=_history_tokens(out),
                     )
                 )
@@ -1323,6 +1342,19 @@ class ContextManager:
             int(getattr(session, "compaction_failures", 0) or 0) + 1 if failed else 0
         )
 
+    def _message_cost(self, message: ChatMessage) -> int:
+        """What one message costs the request: body, tool arguments, images.
+
+        The tail budget used to count the body alone, so a turn of ``write``
+        calls (10 KB of arguments each, no body) fitted "for free" and blew the
+        budget the moment it was sent.
+        """
+        return (
+            estimate_tokens(message.content or "")
+            + estimate_tokens(_tool_args_text([message]))
+            + image_tokens([message])
+        )
+
     def split_tail(
         self, messages: list[ChatMessage]
     ) -> tuple[list[ChatMessage], list[ChatMessage]]:
@@ -1340,20 +1372,39 @@ class ContextManager:
         tail: list[ChatMessage] = []
         used = 0
         for message in reversed(messages):
-            cost = estimate_tokens(message.content or "") + image_tokens([message])
+            cost = self._message_cost(message)
             if tail and used + cost > budget:
                 break
             tail.append(message)
             used += cost
         tail.reverse()
-        while len(tail) > 1 and (tail[0].role != "user" or tail[0].synthetic):
-            tail.pop(0)
+        start = len(messages) - len(tail)
+        # Prefer a user boundary so question-answer pairs stay whole -- but only
+        # while it does not throw the budget away.  An agent turn is *one* user
+        # message followed by dozens of assistant/tool steps, so the old
+        # unconditional backtrack popped all the way down to a single message:
+        # measured on eval-08 T2, a 48k window with a 12k tail budget left the
+        # model 323-2,600 tokens after every compaction, which is why it kept
+        # re-reading the same files.  A boundary that keeps less than half the
+        # budget is not worth its cost.
+        candidate = next(
+            (
+                index
+                for index, message in enumerate(tail)
+                if message.role == "user" and not message.synthetic
+            ),
+            None,
+        )
+        if candidate is not None and candidate > 0:
+            discarded = sum(self._message_cost(message) for message in tail[:candidate])
+            if used - discarded >= budget * _TAIL_BOUNDARY_FLOOR:
+                start += candidate
+                tail = tail[candidate:]
         # A tail that starts on a tool result is orphaned: the assistant message
         # that declared the call sits in the head, so ``sanitize_pairs`` deletes
         # the result -- the newest thing the model learned would reach neither
         # the request nor the summary.  Walk back to the carrier.  This is the
         # common shape at the end of a tool-heavy turn, not a corner case.
-        start = len(messages) - len(tail)
         while tail and tail[0].role == "tool" and start > 0:
             start -= 1
             tail.insert(0, messages[start])

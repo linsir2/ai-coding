@@ -488,6 +488,91 @@ def test_paging_says_what_it_dropped_and_archives_it(tmp_path):
     assert "D-4 " in text, "the first message paging removed is on disk"
 
 
+def test_a_first_compaction_does_not_claim_to_cover_the_verbatim_tail():
+    """The checkpoint's ``consumed`` must stop where the verbatim tail starts.
+
+    Measured on eval-08 T2: L2 rebuilt the tail's objects, so
+    ``_delta_by_identity`` matched nothing and ``_cut_index`` returned
+    ``len(l4_source)`` -- a checkpoint claiming to cover everything, after
+    which the next request carried only the note (323 tokens) and the model
+    re-read the same files four times.
+    """
+    calls: list[str] = []
+    manager = _manager(
+        _recorder(calls), l4_tail_tokens=200, keep_recent_tool_results=1
+    )
+    history: list[ChatMessage] = []
+    for i in range(6):
+        history.append(ChatMessage(role="user", content=f"U{i}", timestamp=""))
+        history.append(
+            ChatMessage(
+                role="assistant",
+                content="",
+                timestamp="",
+                tool_calls=(ToolCallRef(id=f"c{i}", name="bash", arguments="{}"),),
+            )
+        )
+        history.append(
+            ChatMessage(
+                role="tool",
+                content=f"R{i} " + "x" * 800,
+                timestamp="",
+                tool_name="bash",
+                tool_call_id=f"c{i}",
+            )
+        )
+    session = _session()
+
+    out = asyncio.run(manager.compress(history, session=session, force=True))
+
+    consumed = session.compaction_consumed
+    assert 0 < consumed < len(history), "the tail must stay outside the checkpoint"
+    body = _text_of(out)
+    for index, message in enumerate(history):
+        if index < consumed:
+            continue
+        marker = (message.content or "").split(" ")[0]
+        assert marker in body, (
+            f"message {index} is outside the checkpoint but not in the request"
+        )
+
+
+def test_a_tool_heavy_turn_keeps_its_tail_budget():
+    """One user message + 30 steps must not collapse the tail to one message.
+
+    The old rule backtracks to a user boundary unconditionally, and an agent
+    turn has exactly one user message -- at index 0.  Measured on eval-08 T2
+    (after the checkpoint fix): a 12k tail budget left 323-2,600 tokens in the
+    request, so the model re-read ``agent_loop.py`` four times.
+    """
+    manager = _manager(_recorder([]), max_context_tokens=48_000, l4_tail_tokens=12_000)
+    history: list[ChatMessage] = [ChatMessage(role="user", content="找缺陷", timestamp="")]
+    for i in range(15):
+        history.append(
+            ChatMessage(
+                role="assistant",
+                content="",
+                timestamp="",
+                tool_calls=(ToolCallRef(id=f"c{i}", name="bash", arguments='{"command":"x"}'),),
+            )
+        )
+        history.append(
+            ChatMessage(
+                role="tool",
+                content=f"R{i} " + "x" * 4_000,
+                timestamp="",
+                tool_name="bash",
+                tool_call_id=f"c{i}",
+            )
+        )
+
+    head, tail = manager.split_tail(history)
+
+    assert _history_tokens(tail) >= 6_000, "at least half the 12k budget must survive"
+    assert tail[0].role != "tool", "the tail must not start orphaned"
+    assert head, "something must still be summarised"
+
+
 def test_the_omission_count_ignores_rebuilt_messages():
     """``sanitize_pairs`` rebuilds assistant carriers; a survivor is not a drop."""
     manager = _manager(_recorder([]))
