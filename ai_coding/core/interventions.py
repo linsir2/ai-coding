@@ -115,7 +115,8 @@ class LadderLimits:
     #: I1/R-7: the streak that forces the turn to close.  0 = off, and that is
     #: the default on purpose: every pre-existing search test constructs a bare
     #: ``LadderLimits()`` and pins "the ladder never finishes the turn".  The
-    #: loop opts in through ``AIConfig.search_streak_l3`` (default 16).
+    #: loop opts in through ``AIConfig.search_streak_l3`` (default 0 = off:
+    #: eval-08 measured it cutting a novel-only read sweep, see ``AIConfig``).
     search_streak_l3: int = 0
     #: I1/R-7: *stale* evidence (the same finding seen again) earns the rungs
     #: earlier than the streak can.  Measured: 63 looks with near-identical
@@ -295,9 +296,12 @@ def _search_due(
 
     I1/R-7 adds two things on top (the streak itself is unchanged):
 
-    * **L3 is a hard stop.** At ``search_streak_l3`` looks (0 = off) the turn is
-      finished with ``search unconverged``.  Measured before it existed: 63
-      successful looks, 900s, no conclusion.
+    * **L3 is a hard stop.** At ``search_streak_l3`` looks (0 = off, and the
+      default) the turn is finished with ``search unconverged``.  The count is
+      off by default because eval-08 measured what it selects for: a design
+      question's 18 reads were *all* novel (0 stale) and the stop truncated an
+      answer that had been complete, while the 61-call survey it targets
+      interleaves ``bash`` and never builds a streak at all.
     * **Stale evidence earns rungs earlier.** ``stale_l1``/``stale_l2`` fire the
       advice rungs; ``stale_l3`` *finishes*, but only when at least two of the
       repeats carried content -- six empty results are a survey of empty places,

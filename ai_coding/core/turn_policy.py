@@ -130,8 +130,10 @@ class TurnPolicyConfig:
     #: runs a subprocess by itself when it reaches L2, and an operator must be
     #: able to turn that off without editing code.
     search_streak_threshold: int = 4
-    #: I1/R-7: consecutive look-only calls that force the turn to close.  0 = off.
-    search_streak_l3: int = 16
+    #: I1/R-7: consecutive look-only calls that force the turn to close.  0 = off
+    #: by default -- eval-08 measured it firing on a novel-only read sweep and
+    #: skipping the pathology it was meant to stop (see ``AIConfig``).
+    search_streak_l3: int = 0
 
     @classmethod
     def from_ai_config(cls, settings: Any) -> TurnPolicyConfig:
@@ -154,7 +156,7 @@ class TurnPolicyConfig:
             search_streak_threshold=int(
                 getattr(settings, "search_streak_threshold", 4) or 0
             ),
-            search_streak_l3=int(getattr(settings, "search_streak_l3", 16) or 0),
+            search_streak_l3=int(getattr(settings, "search_streak_l3", 0) or 0),
         )
 
 

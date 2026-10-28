@@ -376,3 +376,19 @@ def test_search_l3_is_off_by_default():
         limits=limits,
     )
     assert d is not None and d.kind == "nudge"
+
+
+def test_the_product_default_for_the_look_count_is_off():
+    """eval-08 measured the count rung selecting the wrong turns.
+
+    A design question made 18 consecutive look-only calls and *every one* was a
+    new finding (``stale_streak=0``, ``novel=18``); the count rung cut the turn
+    and the answer shrank from 6,734 to a handoff report.  The survey it targets
+    interleaves ``bash``, so its streak never even reached 7.  Turning this back
+    on has to be a deliberate act, not a default drift.
+    """
+    from ai_coding.config.models import AIConfig
+    from ai_coding.core.turn_policy import TurnPolicyConfig
+
+    assert AIConfig().search_streak_l3 == 0
+    assert TurnPolicyConfig.from_ai_config(AIConfig()).search_streak_l3 == 0

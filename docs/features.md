@@ -862,12 +862,16 @@ R7b 把这段话的前半句治掉了：L2 不再丢正文。实测同一份 70 
 |---|---|---|
 | L1 | `search_streak >= 4` 或 `stale_streak >= 3` | `[search-gate]`：换符号名 / 换范围 / 读入口文件 / 直接动手 |
 | L2 | `search_streak >= 6` 或 `stale_streak >= 4` | `[search-gate]`：**不要再猜关键词**，并**附上 harness 自己跑出来的静态检查输出** |
-| **L3** | `search_streak >= search_streak_l3`（默认 16），或 `stale_streak >= 6` 且 `repeated_nonempty >= 2` | **强制 `FINISH`**，`reason="search unconverged"`；随后用 `tools=[]` 要一次模型收尾（结构性约束） |
+| **L3** | `search_streak >= search_streak_l3`（**默认 0 = 关闭**，可用 `ai.search_streak_l3` 打开），或 `stale_streak >= 6` 且 `repeated_nonempty >= 2` | **强制 `FINISH`**，`reason="search unconverged"`；随后用 `tools=[]` 要一次模型收尾（结构性约束） |
 
 L3 的判据是"**没有新发现**"，不是"调用次数多"：实测的 T2 回合用了 63 次只读调用、
 900 秒撞满超时、零结论；只数 streak 会让"64 次里有一次有效"和"64 次全是同一批证据"看起来一样。
-`search_streak_l3` 默认 16（`ai.search_streak_l3`，0 关闭），`LadderLimits` 内部默认 0
-（既有 24 条 search 单测直接构造它，保持"不强制收尾"的旧契约）。
+
+**eval-08 实测后把计数档默认关掉（16 → 0）**：同一次评估里，一条设计题连续 18 次只读调用
+**全部是新发现**（`stale_streak=0`、`novel=18`），被 16 的计数档拦腰截断，答案从 6,734 字符
+缩到只剩收尾报告；而它要治的那种 61 次调用、无结论的回合**夹着 `bash`**，streak 根本没到 7。
+所以"次数"选不对目标，留下的默认判据只有证据档；计数档保留为 opt-in（想跑短预算的部署可开）。
+`LadderLimits` 内部默认 0（既有 24 条 search 单测直接构造它，保持"不强制收尾"的旧契约）。
 
 L2 定在 6 而不是 8：默认 `max_tool_iterations=10`，而一次 nudge 占一个迭代 —— 8 会把 L2
 推到最后一个迭代，输出生成了却没人读。实测 6 时 L2 落在第 8 个迭代，后面还剩两步。
