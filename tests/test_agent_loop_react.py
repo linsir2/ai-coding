@@ -1153,7 +1153,12 @@ async def test_the_model_is_asked_to_close_when_the_iteration_budget_ends(tmp_pa
     text = await loop.process_input(sessions.create(), "go")
 
     assert len(engine.requests) == 3, "one iteration past the budget, for the closing"
-    assert engine.requests[-1]["messages"][-1].content.startswith("本轮步数预算已用完")
+    # The closing request carries the closing prompt.  Pinned by value rather
+    # than by prose: eval-08 changed the wording (it asked for a work log and
+    # got one, with no answer in it), and that is not what this test is about.
+    from ai_coding.core.agent_loop import _CLOSING_PROMPT
+
+    assert engine.requests[-1]["messages"][-1].content == _CLOSING_PROMPT
     assert "[回合未完成" in text
     assert "读了两次，还差一个结论。" in text
 

@@ -251,7 +251,10 @@ class TurnCloser:
         turn without a final word) and the **digest** (the one line the next
         request's ``<working-memory>`` block is rendered from).
         """
-        if not outcome.text:
+        # G8-2: a closing was asked for *only* when the turn was cut short, so
+        # the report is owed even if the model narrated above its last tool call
+        # -- that narration is not a conclusion (measured: 30 chars vs 900+).
+        if closing or not outcome.text:
             handoff = render_handoff(
                 outcome=outcome,
                 task=task,

@@ -295,8 +295,16 @@ def render_handoff(
     that it did.  Letting prose stand in for the banner would let a cut-off turn
     read as a finished one — the model's words belong in the report, not in place
     of it.
+
+    A *closing* outranks narration.  Real models put prose above their tool
+    calls ("let me read the next file"), and that prose lands in
+    ``outcome.text``; treating it as "the model spoke" swallowed the closing
+    word the turn had explicitly asked for (measured twice on the same
+    question: 3,204 characters of answer vs 30 characters of narration).
     """
-    if (outcome.text or "").strip() or outcome.status is TurnStatus.COMPLETED:
+    if outcome.status is TurnStatus.COMPLETED:
+        return ""
+    if (outcome.text or "").strip() and not closing.strip():
         return ""
     label = _STATUS_LABEL.get(outcome.status, outcome.status.value)
     if outcome.reason.startswith(_STALL_PREFIX):

@@ -170,11 +170,14 @@ _CONTEXT_OVERFLOW = "context_overflow"
 _ITERATION_BUDGET = "iteration budget exhausted"
 
 #: G8-2: what the model is asked when the harness would otherwise write the
-#: report.  It asks for a summary, and says not to start anything: an unanswered
-#: "what should I do next" would just spend the round on more work.
+#: report.  It must ask for the **answer**, not for a work log: measured on the
+#: eval-08 T2 question, "summarise what you did" produced 900 characters of
+#: "I reviewed these ten modules" and still no defect.  Saying what is left
+#: unconfirmed keeps the answer honest without turning it into a status report.
 _CLOSING_PROMPT = (
-    "本轮步数预算已用完，请用一段话收尾：说明已经完成了什么、还差什么、"
-    "下一步该做什么。不要再调用任何工具。"
+    "本轮不能再调用任何工具了。请基于已经看到的内容**直接回答用户的问题**："
+    "能确定的部分要给出具体结论（文件、行号、命令或结果），"
+    "再用一两句话说明哪些尚未确认。不要只写工作总结。"
 )
 
 #: 13 §2.5 (B): the synthetic line that resumes a broken stream.  Persisted like
@@ -1679,7 +1682,9 @@ class AgentLoop:
         # M1: schedule a background skill review if the interval has been reached.
         self._maybe_schedule_skill_review(session)
         # R6a: a turn that ran out of budget used to hand the user an empty string.
-        return outcome.text or outcome.handoff
+        # I1: and a cut-short turn hands over the *report* (banner + the closing
+        # word it asked for), not the narration above the last tool call.
+        return outcome.handoff or outcome.text or ""
 
     # ---- skill review (M1) --------------------------------------------------
 

@@ -396,6 +396,16 @@ def _path_call(call_id: str, path: str) -> StepResult:
     )
 
 
+def _narrated_path_call(call_id: str, path: str) -> StepResult:
+    """The same look, plus the prose a real model puts above its tool call."""
+    step = _path_call(call_id, path)
+    return StepResult(
+        text="让我先读下一个文件。",
+        tool_calls=step.tool_calls,
+        finish_reason="tool_calls",
+    )
+
+
 def _look_only_loop(
     engine: ChatEngine,
     sessions: SessionService,
@@ -483,3 +493,33 @@ async def test_the_finish_path_carries_the_intervention(tmp_path):
     assert stalled[-1].reason == "search unconverged"
     assert loop.last_outcome.reason == "search unconverged"
     assert loop.last_outcome.note, "the FINISH decision's note must reach the outcome"
+
+
+@pytest.mark.asyncio
+async def test_narration_between_looks_does_not_swallow_the_closing(tmp_path):
+    """A real model narrates inside its tool-calling steps ("let me read X").
+
+    Measured in eval-08's stage E: the same T3 question, run twice, returned
+    3,204 characters of answer when the last tool step carried no prose and 30
+    characters of "Let我先快速确认…" when it did.  ``render_handoff`` skips the
+    report whenever ``outcome.text`` is non-empty, so narration pre-empted the
+    closing word the turn had explicitly asked for.  Narration is not an
+    answer: the closing exists *because* the turn was cut short.
+    """
+    engine = _ScriptedEngine(
+        [_narrated_path_call(f"r{i}", f"h{i}.py") for i in range(1, 5)]
+        + [_text("收尾：结论如上")]
+    )
+    loop = _look_only_loop(
+        engine,
+        SessionService(tmp_path / "sessions"),
+        max_tool_iterations=10,
+        search_streak_l3=4,
+    )
+    session = loop.sessions.create()
+
+    answer = await loop.process_input(session, "look around")
+
+    assert "收尾：结论如上" in answer, "the closing word must reach the operator"
+    assert "让我先读下一个文件" not in answer, "narration must not stand in for it"
+    assert "回合未完成" in answer, "a cut-short turn must say that it was cut short"
