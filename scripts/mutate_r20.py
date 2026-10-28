@@ -91,10 +91,36 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "tests/test_tool_read.py",
     ),
     (
+        "P1  covers() goes back to intersection",
+        "ai_coding/domain/read_ledger.py",
+        "        if same_file(mark.path, path) and mark.start <= start"
+        " and end <= mark.end:",
+        "        if same_file(mark.path, path) and mark.start <= end"
+        " and start <= mark.end:",
+        "tests/test_read_ledger.py",
+    ),
+    (
+        "P4  tier 2 stops checking the end of the file",
+        "ai_coding/domain/read_ledger.py",
+        "        total = size_of(path)\n"
+        "        if not total:",
+        "        return []\n"
+        "        total = size_of(path)\n"
+        "        if not total:",
+        "tests/test_read_ledger.py",
+    ),
+    (
+        "P5  tier 2 checks start instead of end",
+        "ai_coding/domain/read_ledger.py",
+        "            if end > total",
+        "            if start > total",
+        "tests/test_read_ledger.py",
+    ),
+    (
         "D3  covers() stops checking the range",
         "ai_coding/domain/read_ledger.py",
-        "        if same_file(mark.path, path)"
-        " and mark.start <= end and start <= mark.end:\n"
+        "        if same_file(mark.path, path) and mark.start <= start"
+        " and end <= mark.end:\n"
         "            return True\n"
         "    return False",
         "        return True\n"
@@ -105,9 +131,9 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "D7  tier 2 stops protecting grep-only citations",
         "ai_coding/domain/read_ledger.py",
         "    if any(same_file(seen_path, path) for seen_path in seen):\n"
-        "        return []",
+        "        if size_of is None:",
         "    if False:\n"
-        "        return []",
+        "        if size_of is None:",
         "tests/test_read_ledger.py tests/test_claim_check.py",
     ),
     (

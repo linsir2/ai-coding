@@ -2284,6 +2284,23 @@ class AgentLoop:
             session.intervention_state or {}, decision, snapshot
         )
 
+    def _line_count(self, path: str) -> int:
+        """How many lines ``path`` has, or 0 when it cannot be read.
+
+        Injected into the citation check as ``size_of``: it is called only for a
+        file the model cited after merely *seeing* it (grep/glob/bash), so the
+        common case costs nothing.  Best-effort and read-only -- an unreadable
+        path yields 0, which widens rather than narrows the check.
+        """
+        candidate = Path(self.workspace) / path
+        try:
+            if not candidate.is_file():
+                return 0
+            with candidate.open("r", encoding="utf-8", errors="replace") as handle:
+                return sum(1 for _ in handle)
+        except OSError:
+            return 0
+
     def _has_a_round_left(self, index: int) -> bool:
         """Is there an iteration after this one for a correction to land in?
 
@@ -2313,7 +2330,9 @@ class AgentLoop:
         claims = extract_claims(text)
         if not claims:
             return False
-        bad = unsupported_claims(session.read_ledger, session.seen_paths, claims)
+        bad = unsupported_claims(
+            session.read_ledger, session.seen_paths, claims, size_of=self._line_count
+        )
         if not bad:
             return False
         session.claim_retries += 1

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 
 #: The file suffixes a citation can plausibly name.  Opened up to any token and
@@ -239,14 +239,22 @@ def missing_ranges(
 
 
 def covers(marks: Sequence[ReadMark], path: str, start: int, end: int) -> bool:
-    """Does the cited range overlap what was read at all?
+    """Is the cited range *entirely inside* one of the read runs?  (R20b)
 
-    Only a range that falls *entirely* outside the read spans is a problem: the
-    model did see part of a half-right citation, and rejecting it costs an
-    iteration at the worst possible moment — the budget's end.
+    Containment, not intersection.  The intersection rule let "read 61-110, cite
+    100-120" pass while lines 111-120 had never been read — the exact shape of
+    the T2 hallucination.  Containment closes that.
+
+    Normal paging is unaffected: ``merge_mark`` coalesces adjacent runs, so
+    reading 1-500 then 501-1000 leaves a single 1-1000 mark.
+
+    A citation spanning a read gap (read 1-60 and 300-434, cite 50-350) is
+    challenged on purpose.  That costs one iteration; the ambiguity guard (two or
+    more files in one answer skips the check) and the one-retry-per-turn cap are
+    the buffers.
     """
     for mark in marks:
-        if same_file(mark.path, path) and mark.start <= end and start <= mark.end:
+        if same_file(mark.path, path) and mark.start <= start and end <= mark.end:
             return True
     return False
 
@@ -349,17 +357,21 @@ def unsupported_claims(
     marks: Sequence[ReadMark],
     seen: Sequence[str],
     claims: Sequence[tuple[str, int, int]],
+    *,
+    size_of: Callable[[str], int] | None = None,
 ) -> list[tuple[str, int, int]]:
-    """Which citations must be challenged, by the three-tier rule (decision 5b).
+    """Which citations must be challenged, by the three-tier rule (R20b).
 
     * **Tier 1** — the path no tool result ever named.  Strongest signal: the
       model named a file this session never touched.
-    * **Tier 2** — the path was seen (grep/glob/bash) but not read.  Nothing:
-      those tools show lines the model may legitimately cite, and the ledger
-      cannot say which ones.  This is the false-positive guard; T2 was
-      "grep `[0]` first, then read 61-110".
-    * **Tier 3** — the path was read, and the cited range falls outside what was
-      read.  The shape of T2's actual hallucination.
+    * **Tier 2** — the path was seen (grep/glob/bash) but not read.  Those tools
+      show lines the model may legitimately cite, and the ledger cannot say which
+      ones, so the default is to let it pass.  The one thing that *is* provable
+      is a citation past the end of the file, and ``size_of`` supplies that: it
+      is called only here, only for the cited path, so the common case costs no
+      IO at all.  ``None`` (the eval script, old sessions) degrades to pass.
+    * **Tier 3** — the path was read, and the cited range is not contained in what
+      was read.  The shape of T2's actual hallucination.
 
     An answer naming two or more files is skipped entirely: the binding is
     last-path-wins, so a paragraph that mentions two files would challenge a
@@ -378,7 +390,18 @@ def unsupported_claims(
             if not covers(rows, path, start, end)
         ]
     if any(same_file(seen_path, path) for seen_path in seen):
-        return []
+        if size_of is None:
+            return []
+        total = size_of(path)
+        if not total:
+            # Unreadable: outside the workspace (normalize folds it to a
+            # basename), deleted, a directory.  Widening, not a safety property.
+            return []
+        return [
+            (cited, start, end)
+            for cited, start, end in claims
+            if end > total
+        ]
     return list(claims)
 
 

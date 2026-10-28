@@ -305,12 +305,74 @@ def test_a_citation_past_the_read_range_is_not_covered():
     assert not covers(marks, "a.py", 18, 46)
 
 
-def test_a_partially_overlapping_citation_counts_as_covered():
-    """Only a range that falls *entirely* outside what was read is a problem:
-    the model did see part of it, and rejecting a half-right citation costs an
-    iteration at the worst possible moment (the budget's end)."""
+def test_a_partially_overlapping_citation_is_not_covered():
+    """R20b: containment, not intersection.
+
+    The model read 61-110 and cites 100-120.  Lines 111-120 were never read, so
+    a claim about them is the T2 hallucination shape.  Intersection let it pass;
+    containment does not.  Paged reads merge (merge_mark), so the normal
+    "read the file in 500-line chunks then cite the whole thing" still passes.
+    """
     marks = (ReadMark("a.py", 61, 110, 117),)
-    assert covers(marks, "a.py", 100, 120)
+    assert not covers(marks, "a.py", 100, 120)
+
+
+def test_a_citation_spanning_a_gap_is_not_covered():
+    """The shape the old intersection rule let through: read the head and the
+    tail of a file, then cite the middle."""
+    marks = (ReadMark("a.py", 1, 60, 441), ReadMark("a.py", 300, 434, 441))
+    assert not covers(marks, "a.py", 50, 350)
+
+
+def test_adjacent_paged_reads_merge_so_the_whole_file_is_covered():
+    """Why containment does not break normal paging: merge_mark coalesces
+    adjacent runs, so reading 1-500 then 501-1000 leaves one 1-1000 mark."""
+    marks = (ReadMark("a.py", 1, 500, 1000), ReadMark("a.py", 501, 1000, 1000))
+    merged = merge_mark(marks[:1], marks[1])
+    assert covers(merged, "a.py", 1, 1000)
+
+
+# ---- R20b: tier 2 (seen but not read) ----
+
+
+def test_a_citation_past_the_end_of_a_seen_file_is_challenged():
+    """grep showed the file, so the model may name it -- but a line past the end
+    of the file is not a citation, it is a guess."""
+    claims = [("a.py", 999, 999)]
+    assert unsupported_claims((), ("a.py",), claims, size_of=lambda p: 100) == claims
+
+
+def test_a_citation_range_running_past_eof_is_challenged():
+    """The v1 rule used ``start > total`` and missed this: start=90 is inside a
+    100-line file while end=999 is not."""
+    claims = [("a.py", 90, 999)]
+    assert unsupported_claims((), ("a.py",), claims, size_of=lambda p: 100) == claims
+
+
+def test_a_citation_inside_a_seen_file_is_still_accepted():
+    claims = [("a.py", 3, 3)]
+    assert unsupported_claims((), ("a.py",), claims, size_of=lambda p: 100) == []
+
+
+def test_an_unreadable_file_does_not_block_a_citation():
+    """size_of returns 0 for a path we cannot read (outside the workspace, gone,
+    a directory).  That is a widening, not a safety property -- documented."""
+    claims = [("a.py", 999, 999)]
+    assert unsupported_claims((), ("a.py",), claims, size_of=lambda p: 0) == []
+
+
+def test_a_never_touched_file_is_still_challenged_with_size_of():
+    """Tier 1 returns before tier 2, so adding size_of must not weaken it."""
+    claims = [("a.py", 1, 10)]
+    assert unsupported_claims((), (), claims, size_of=lambda p: 100) == claims
+
+
+def test_without_size_of_tier_two_stays_open():
+    """The eval script and old session files have no size source; the check must
+    degrade to the R20 behaviour rather than raise."""
+    claims = [("a.py", 999, 999)]
+    assert unsupported_claims((), ("a.py",), claims) == []
+    assert unsupported_claims((), ("a.py",), claims, size_of=None) == []
 
 
 def test_a_basename_citation_matches_the_ledger():
