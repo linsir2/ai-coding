@@ -55,10 +55,10 @@ from ai_coding.core.events import BackgroundTaskDone, JobChanged
 from ai_coding.core.turn_report import emit_degraded
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.security.process_sandbox import (
+    SHELL_ARGV0,
     ProcessSandboxPolicy,
     SandboxBackend,
     SandboxGap,
-    SHELL_ARGV0,
     spawn_argv,
 )
 
