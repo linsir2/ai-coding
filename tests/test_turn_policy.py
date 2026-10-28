@@ -362,6 +362,18 @@ def test_pressure_appears_once_the_iterations_run_low():
     assert "收尾" in text
 
 
+def test_pressure_offers_an_out_when_the_evidence_is_not_enough():
+    """RC-5: "不要再开新的工作" plus a task that asks for one deep answer made
+    the cheapest satisfying move "fill the gap from memory".  Measured on T2:
+    the block appeared at iteration 32, the model read at 34, and answered at
+    35 -- with a constructor it had never opened."""
+    policy = TurnPolicy(TurnPolicyConfig(max_iterations=10))
+
+    text = policy.budget_pressure(iteration=9, tokens_spent=0)
+
+    assert "未确认" in text
+
+
 def test_pressure_appears_once_the_token_budget_runs_low():
     policy = TurnPolicy(TurnPolicyConfig(max_iterations=10, max_turn_tokens=10_000))
 

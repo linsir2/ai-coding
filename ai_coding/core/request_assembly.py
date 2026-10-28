@@ -34,6 +34,7 @@ from ai_coding.core.request_builder import build_tail, content_of, volatile_bloc
 from ai_coding.core.sop_router import SOPRouter
 from ai_coding.core.turn_books import TurnBooks
 from ai_coding.domain.message import IMAGE_MIME_BY_SUFFIX, ChatMessage
+from ai_coding.domain.read_ledger import render as render_read_ledger
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
 from ai_coding.domain.turn_digest import render_working_memory
@@ -347,6 +348,10 @@ class RequestAssembler:
             [
                 volatile_block("environment", environment_text),
                 volatile_block("memory", memory_block),
+                # R20/RC-2: the read ledger.  A volatile block, so it is rebuilt
+                # from session state every iteration and compaction cannot reach
+                # it -- the checkpoint stores conclusions, this stores evidence.
+                volatile_block("read_ledger", render_read_ledger(session.read_ledger)),
                 volatile_block("mcp_catalog", catalog),
                 volatile_block("task", content_of(injection.message)),
                 volatile_block("recommended_skills", recommended_skills_block),

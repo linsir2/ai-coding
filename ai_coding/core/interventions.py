@@ -167,9 +167,21 @@ def _triggered(gate: str, snap: TurnSnapshot, limits: LadderLimits) -> bool:
         # there.  Measured: plan/readonly turns reached L1 and L2 within 8 reads.
         if snap.mode == "plan" or snap.readonly:
             return False
+        # I1/R-7: the hard stop is a *count* rung on purpose -- a turn of only
+        # looks must close even when every look was new (see L3's docstring).
+        # It is judged before the evidence gate below, which would otherwise
+        # switch it off: the gate's whole point is that a novel-only sweep is
+        # exactly the case the fingerprint cannot help with.
+        if limits.search_streak_l3 and snap.search_streak >= limits.search_streak_l3:
+            return True
         if not limits.search_streak_threshold:
             return False
-        if snap.search_streak >= limits.search_streak_threshold:
+        # R20/RC-1: the count rung only fires when the streak produced no new
+        # evidence.  Measured on T2: streak=4, novel=4, stale_streak=0 still
+        # fired, and the model answered every nudge with `ruff` -- the rung was
+        # telling it to stop doing the one thing that was working, and `bash`
+        # reset the streak, which re-armed the gate.  Eleven iterations lost.
+        if snap.search_streak >= limits.search_streak_threshold and not snap.novel_findings:
             return True
         # I1/R-7: repeated evidence earns the rungs earlier than the streak can:
         # a turn that keeps re-finding the same thing is not learning.
@@ -524,23 +536,48 @@ def _search_text(level: int, snap: TurnSnapshot) -> str:
     """
     streak = max(1, snap.search_streak)
     calls = max(streak, snap.search_calls)
+    # Which rung fired decides what the text may claim.  The count rung fires on
+    # a streak that produced no new evidence; the stale rung fires on a run of
+    # repeats *after* some new evidence.  Saying "no new evidence" in the second
+    # case is a lie the model can check against its own transcript.
+    if snap.stale_streak:
+        lead = (
+            f"{SEARCH_GATE_LEAD} 最近 {snap.stale_streak} 次检索都在重复已经看过的"
+            f"内容（连续 {streak} 次只读检索，本回合共 {calls} 次）。"
+            "继续读下去，收益会越来越小："
+        )
+    else:
+        lead = (
+            f"{SEARCH_GATE_LEAD} 你已经连续 {streak} 次检索（本回合共 {calls} 次），"
+            "但**没有带来任何新证据**，其间也没有做任何修改或验证。"
+            "继续读下去，收益会越来越小："
+        )
     if level <= L1:
         return "\n".join([
-            f"{SEARCH_GATE_LEAD} 你已经连续 {streak} 次只读检索（本回合共 {calls} 次），"
-            "其间没有做任何修改或验证。继续读下去，收益会越来越小：",
+            lead,
             "1) 如果你在找**某个符号/字符串**：换成符号名（函数名、类名、变量名），"
             "不要用自然语言描述；把范围缩小到具体目录，而不是整仓库；",
             "2) 如果你在**了解一个模块**：读它的入口文件（`main` / `__init__` / 路由注册处），"
             "不要按关键词撒网；",
             "3) 如果你已经知道要改哪里：直接改，然后用测试或命令验证，不要再搜。",
+            "4) 如果读过的内容已经够下结论：**直接给结论**，把不确定的部分写「未确认」。",
         ])
+    repeat = (
+        f"最近 {snap.stale_streak} 次检索都在重复已经看过的内容"
+        if snap.stale_streak
+        else "这些检索没有带来任何新证据"
+    )
+    # The ledger block only appears once something has been *read*; this rung can
+    # fire on grep/glob alone.  So the text points at the block conditionally --
+    # naming it outright would send the model looking for a block that is not in
+    # the request.
     return "\n".join([
-        f"{SEARCH_GATE_LEAD} 仍是只读检索（连续 {streak} 次，共 {calls} 次），没有推进。"
-        "**不要再猜关键词了** —— 让静态检查替你回答：",
-        "`ruff check .`（未定义名字 F821、未用导入 F401、真 bug 都在这里）、"
-        "`mypy <包名>`（模块不存在、类型不符）、"
-        "`grep -rn '<符号>' --include='*.py' .`（谁在用它）。",
-        "静态检查一次调用就能给出结论，比再读十个文件准。",
+        f"{SEARCH_GATE_LEAD} 仍是只读检索（连续 {streak} 次，共 {calls} 次），"
+        f"{repeat}，也没有推进。**停止重读同一个地方**：",
+        "1) 你已经读过的行不要再读一遍（请求里有 `<read-ledger>` 块时，"
+        "它列出的缺口才是没读过的部分）；",
+        "2) 读过的内容够下结论就直接给结论，缺的部分写「未确认」并说明缺什么；",
+        "3) 确实缺信息就用 ask_user 提问，不要靠再读一次猜出来。",
     ])
 
 

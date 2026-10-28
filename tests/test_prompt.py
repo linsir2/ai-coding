@@ -1,6 +1,6 @@
 """TDD (M3-3): PromptAssembler — section ordering and conditional joins."""
 
-from ai_coding.ai.prompt import METHODS_SECTION, PromptAssembler
+from ai_coding.ai.prompt import BASE_INSTRUCTIONS, METHODS_SECTION, PromptAssembler
 
 
 def _assembler() -> PromptAssembler:
@@ -232,6 +232,31 @@ def test_the_methods_section_stays_inside_its_budget():
     a tool that was not connected. The section is ~2x today; the test is the
     tripwire that stops it becoming an order of magnitude."""
     assert len(METHODS_SECTION) <= 900, len(METHODS_SECTION)
+
+
+# ---- R20/RC-6: every claim needs an citation -------------------------------
+
+
+def test_the_base_instructions_demand_a_citation_for_every_claim():
+    """RC-6: the four general rules had nothing about evidence.  "Verify the
+    change before reporting it done" is about edits; nothing stopped the model
+    describing code it had never opened -- which is exactly what T2 did."""
+    assert "path:line" in BASE_INSTRUCTIONS
+    assert "unconfirmed" in BASE_INSTRUCTIONS
+
+
+def test_the_methods_section_no_longer_tells_the_model_to_page_its_reads():
+    """RC-3: this line is why a 441-line file was read eleven times in 30-line
+    windows.  Paging is the tool's job now (it caps at 500 lines and says where
+    to continue), so the advice only cost the model context."""
+    assert "dumping a whole file" not in METHODS_SECTION
+
+
+def test_the_citation_rule_is_not_charged_to_the_methods_budget():
+    """It lives in the base instructions, which have no ceiling -- putting it in
+    ``GENERAL_METHODS`` would have pushed the section from 824 to ~974 and
+    broken the tripwire above."""
+    assert "path:line" not in METHODS_SECTION
 
 
 def test_a_subagent_surface_keeps_its_own_habits():

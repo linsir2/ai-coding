@@ -215,8 +215,16 @@ def test_search_l1_fires_on_the_streak_threshold():
     assert iv.SEARCH_GATE_LEAD in d.text
 
 
-def test_search_l1_aftermath_escalates_to_the_static_check():
-    """B1: the second rung must name the static check -- that is its whole job."""
+def test_search_l1_aftermath_escalates_to_l2():
+    """B1: the second rung exists, and after R20 it says something else.
+
+    This test used to assert the rung named ``ruff check``/``mypy`` -- "that is
+    its whole job".  R20/RC-1 measured why that was wrong: after the count rung
+    was gated on *no new evidence*, L2 means "you re-read the same place three
+    times", where a static check is off-topic, and the old text pushed T2 into
+    eleven ``ruff``/``grep``/``find`` calls its own checkpoint had already ruled
+    out.  The escalation itself is unchanged; the advice is not.
+    """
     d = iv.select(
         _snap(
             search_streak=8,
@@ -227,8 +235,7 @@ def test_search_l1_aftermath_escalates_to_the_static_check():
         limits=LIMITS,
     )
     assert (d.gate, d.level, d.kind) == ("search", 2, "nudge")
-    assert "ruff check" in d.text
-    assert "mypy" in d.text
+    assert "停止重读" in d.text
 
 
 def test_search_never_ends_the_turn():
@@ -392,3 +399,137 @@ def test_the_product_default_for_the_look_count_is_off():
 
     assert AIConfig().search_streak_l3 == 0
     assert TurnPolicyConfig.from_ai_config(AIConfig()).search_streak_l3 == 0
+
+
+# ---- R20/RC-1: the count rung needs evidence, not just a count ------------
+
+
+def test_the_count_rung_is_off_while_every_look_is_new():
+    """RC-1, the regression this whole block exists for.
+
+    Measured on T2's trace: ``{"iteration": 3, "level": 1, "calls": 4,
+    "streak": 4, "novel": 4, "repeated": 0, "stale_streak": 0}`` -- every look
+    was new evidence and the gate fired anyway, then told the model to stop
+    doing the one thing that was working.  It answered each nudge with ``ruff``,
+    which reset the streak, which re-armed the gate: eleven iterations spent on
+    static checks instead of the answer.
+    """
+    snap = _snap(search_streak=4, search_calls=4, novel_findings=4)
+    assert iv.select(snap, phase=iv.PRE, limits=LIMITS) is None
+
+
+def test_a_novel_streak_of_six_stays_quiet_too():
+    """The rung is ``search_streak >= 4``; six novel looks are still six novel
+    looks, so the gate must not escalate to L2 either."""
+    snap = _snap(search_streak=6, search_calls=6, novel_findings=6)
+    assert iv.select(snap, phase=iv.PRE, limits=LIMITS) is None
+
+
+def test_four_looks_without_any_new_evidence_still_nag():
+    """The rung keeps its original job: a streak that produced nothing."""
+    d = iv.select(
+        _snap(search_streak=4, search_calls=4, novel_findings=0),
+        phase=iv.PRE,
+        limits=LIMITS,
+    )
+    assert (d.gate, d.level, d.kind) == ("search", 1, "nudge")
+
+
+def test_the_hard_stop_still_closes_an_all_novel_look_only_turn():
+    """The trap in the first draft of this fix.
+
+    L3 walks ``_triggered`` too, so gating the count rung naively switched the
+    hard stop off as well -- and ``test_a_turn_of_only_looks_ends_itself``
+    (sixteen *novel* looks) stopped finishing.  L3 must be judged on the streak
+    alone, before the evidence gate.
+    """
+    snap = _snap(search_streak=16, search_calls=16, novel_findings=16)
+    d = iv.select(snap, phase=iv.PRE, limits=iv.LadderLimits(search_streak_l3=16))
+    assert (d.gate, d.level, d.kind) == ("search", 3, "finish")
+
+
+def test_the_stale_rungs_are_untouched():
+    """The evidence fingerprint keeps earning rungs earlier than the streak."""
+    snap = _snap(search_streak=5, search_calls=5, novel_findings=2, stale_streak=3)
+    d = iv.select(snap, phase=iv.PRE, limits=LIMITS)
+    assert (d.gate, d.level) == ("search", 1)
+
+
+def test_the_nudge_says_the_streak_earned_no_new_evidence():
+    """The text has to tell the truth about why it fired.  The count rung fires
+    on a streak that produced nothing -- and this snapshot is that case."""
+    d = iv.select(
+        _snap(search_streak=4, search_calls=4, novel_findings=0),
+        phase=iv.PRE,
+        limits=LIMITS,
+    )
+    assert "没有带来任何新证据" in d.text
+
+
+def test_a_stale_streak_does_not_claim_there_was_no_new_evidence():
+    """The stale rung fires on a run of repeats *after* some new evidence, so
+    "no new evidence" would be a lie the model can check against its own
+    transcript.  It says what is actually true instead."""
+    d = iv.select(
+        _snap(search_streak=5, search_calls=5, novel_findings=2, stale_streak=3),
+        phase=iv.PRE,
+        limits=LIMITS,
+    )
+    assert "重复已经看过" in d.text
+    assert "没有带来任何新证据" not in d.text
+
+
+def test_the_second_rung_stops_pushing_static_checks():
+    """Decision 6.
+
+    After the fix L2 means "you re-read the same place three times", where
+    ``ruff`` is off-topic.  Measured: T2's eleven ``bash`` calls were all
+    ``ruff``/``grep``/``find`` while the model's own checkpoint had already
+    written "ruff check . 未能暴露运行时逻辑缺陷" -- it knew the path was dead
+    and the gate kept pushing it back onto it.
+    """
+    d = iv.select(
+        _snap(
+            search_streak=8,
+            search_calls=8,
+            intervention_ledger=_fired("search", 1, outcome="failed"),
+        ),
+        phase=iv.PRE,
+        limits=LIMITS,
+    )
+    assert (d.gate, d.level, d.kind) == ("search", 2, "nudge")
+    assert "ruff check" not in d.text
+    assert "mypy" not in d.text
+    assert "停止重读" in d.text
+
+
+def test_the_second_rung_does_not_name_a_block_that_may_not_exist():
+    """The ledger block only appears once something has been *read*; L2 can fire
+    on grep/glob alone.  Pointing at it outright would send the model looking for
+    a block that is not in the request."""
+    d = iv.select(
+        _snap(
+            search_streak=8,
+            search_calls=8,
+            intervention_ledger=_fired("search", 1, outcome="failed"),
+        ),
+        phase=iv.PRE,
+        limits=LIMITS,
+    )
+    assert "请求里有 `<read-ledger>` 块时" in d.text
+
+
+def test_the_hard_stop_is_independent_of_the_count_switch():
+    """``search_streak_threshold=0`` disables the count and stale rungs; L3 has
+    its own switch and must still be able to close a look-only turn.
+
+    Pinned because the first draft of the RC-1 fix read the threshold check as
+    "off means the whole gate is off" and silently dropped the hard stop too.
+    """
+    limits = iv.LadderLimits(search_streak_threshold=0, search_streak_l3=4)
+    d = iv.select(
+        _snap(search_streak=4, search_calls=4, novel_findings=4),
+        phase=iv.PRE,
+        limits=limits,
+    )
+    assert (d.gate, d.level, d.kind) == ("search", 3, "finish")

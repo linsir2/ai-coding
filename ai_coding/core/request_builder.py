@@ -88,6 +88,10 @@ def tool_context(
     emit: Callable[[Any], None],
     turn: int = 0,
     note_checkpoint: Callable[[str], None] | None = None,
+    # R20/RC-2: the read tool reports the range it returned, so the ledger is
+    # built from what the harness actually sent rather than from what the model
+    # claims it read.
+    note_read: Callable[[str, int, int, int], None] | None = None,
     note_approval: Callable[[dict[str, Any] | None], None] | None = None,
     note_plan_approved: Callable[[], None] | None = None,
     conclusion: TurnConclusion | None = None,
@@ -129,6 +133,7 @@ def tool_context(
         emit=emit,
         turn=int(turn),
         note_checkpoint=note_checkpoint,
+        note_read=note_read,
         note_approval=note_approval,
         note_plan_approved=note_plan_approved,
         # N1: the turn's conclusion holder -- the two exits of a plan-mode

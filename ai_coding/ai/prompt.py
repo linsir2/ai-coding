@@ -15,7 +15,10 @@ from __future__ import annotations
 #: has one home instead of being hardcoded in cli.py and the runner.
 BASE_INSTRUCTIONS = (
     "You are an AI coding assistant. Respond to the user's coding questions "
-    "clearly and concisely, in the same language the user writes in."
+    "clearly and concisely, in the same language the user writes in. "
+    "Ground every claim about the code in something you actually read this "
+    "session: cite `path:line`. If you have not read it, say \"unconfirmed\" "
+    "instead of describing it."
 )
 
 #: C-2 (13 §2.3 A): the tool-methodology section.
@@ -58,7 +61,6 @@ TOOL_GUIDANCE: dict[str, tuple[str, ...]] = {
     "read": (
         "Use read — not shell commands like cat, sed, head or tail — to inspect "
         "text files.",
-        "Read a line range with offset/limit instead of dumping a whole file.",
     ),
     "glob": ("Use glob — not shell find — to discover files by path pattern.",),
     "grep": ("Use grep — not shell grep or rg — to search file contents.",),

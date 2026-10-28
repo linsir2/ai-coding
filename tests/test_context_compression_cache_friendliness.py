@@ -37,6 +37,7 @@ from ai_coding.domain.task import TaskState
 TAIL_BLOCK_NAMES = (
     "environment",
     "memory",
+    "read_ledger",
     "mcp_catalog",
     "task",
     "recommended_skills",

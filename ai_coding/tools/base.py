@@ -117,6 +117,11 @@ class ToolContext:
     # R8a: how a tool tells the running turn "remember this line for later"
     # (``checkpoint_write``).  ``None`` outside a loop that owns a turn book.
     note_checkpoint: Callable[[str], None] | None = None
+    # R20/RC-2: how ``read`` tells the running turn which lines it returned, so
+    # the harness can render the ``<read-ledger>`` block from session state
+    # instead of trusting a narrative.  Same shape as ``note_checkpoint``: the
+    # loop gives it, the tool uses it, ``None`` outside a loop that owns a turn.
+    note_read: Callable[[str, int, int, int], None] | None = None
     # P3 (补充式方案 06): how the dispatcher tells the running turn that an
     # approval question is about to be asked (or has been answered).  The loop
     # writes a small marker beside the session file so a crash during the wait

@@ -1,0 +1,383 @@
+"""The read ledger — what this session has actually read, and where the gaps are.
+
+RC-2 (docs/r20-t2-rootcause.md): the memory layer stored *conclusions*, not
+*evidence*.  The checkpoint said "读取 ai_coding/tools/present_plan_tool.py 源码"
+with no line numbers, so after one compaction the model could not tell "I read
+this file" from "I never opened it" — and re-read the same 441-line file eleven
+times at overlapping offsets (195, 300, 195, 140, 55, 25, 195, 195, 195, 245,
+360, 384).
+
+The design answer (section 1 of the plan): the ledger does **not** pretend the
+content survives.  It records "which lines, and that the content is gone" and
+tells the model to re-read the gaps — the opencode/codex split, where the
+pointer survives compaction and the content does not.
+
+Everything here is a pure function over values: no IO, no session, no clock.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
+
+#: The file suffixes a citation can plausibly name.  Opened up to any token and
+#: ordinary prose ("foo.bar") would read as a file the model never touched.
+_SOURCE_SUFFIXES = (
+    ".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".json", ".md", ".txt",
+    ".toml", ".yaml", ".yml", ".cfg", ".ini", ".sh", ".go", ".rs",
+    ".java", ".rb", ".c", ".h", ".cpp", ".hpp",
+)
+
+_SUFFIX_ALT = "|".join(
+    sorted({suffix.lstrip(".") for suffix in _SOURCE_SUFFIXES})
+)
+
+#: What a source path looks like, without the edges.  The edges live with the
+#: users because they differ: a token in a prose scan must not start mid-word or
+#: inside a URL, and a citation's path must not swallow the ``c`` of ``a.pyc``.
+#:
+#: The suffix list is deliberately local.  ``core/file_mentions.py`` holds the
+#: repository's other answer to the same question, and the two have drifted --
+#: but ``domain/`` does not import ``core/`` anywhere, and creating that edge
+#: for a regex fragment is the worse trade.
+_PATH_SHAPE = (
+    r"(?:\.{0,2}/)?(?:[A-Za-z0-9_~.+-]+/)*[A-Za-z0-9_~.+-]+\."
+    rf"(?:{_SUFFIX_ALT})"
+)
+
+#: Not preceded by a word character, ``@``, or a URL/path separator, and not
+#: followed by more name.  Without the left edge ``https://host/a/b.py`` yields
+#: ``host/a/b.py``; without the right edge ``Node.js`` yields ``Node.js``.
+_PATH_EDGE = r"(?<![\w@:/.-])" + _PATH_SHAPE + r"(?![A-Za-z0-9])"
+
+#: Every citation shape the real answer used, in one alternation so a single
+#: left-to-right pass can bind line numbers to the last path it saw.
+#:
+#: * ``path:line`` / ``path:line-line`` — the inline form
+#: * ``第 N 行`` / ``第 N-M 行`` — with or without a space
+#: * ``line N`` / ``L N`` / ``#L N`` — the English and shorthand forms
+#: * a bare path on its own — it only moves the binding target
+_CLAIM = re.compile(
+    rf"(?P<inline>(?<![\w@:/.-])(?P<ipath>{_PATH_SHAPE})\s*:\s*(?P<iline>\d+)"
+    rf"(?:\s*[-–~]\s*(?P<ieend>\d+))?)"
+    rf"|(?<![\w@:/.-])(?P<path>{_PATH_SHAPE})(?![A-Za-z0-9])"
+    rf"|(?P<zhang>第\s*(?P<zstart>\d+)\s*(?:[-–~]\s*(?P<zend>\d+)\s*)?行)"
+    rf"|(?P<en>(?<![A-Za-z0-9_])#?\s*[Ll](?:ine)?\s*(?P<estart>\d+)"
+    rf"(?:\s*[-–~]\s*(?P<eend>\d+))?)"
+)
+
+_PATH_TOKEN = re.compile(_PATH_EDGE)
+
+
+@dataclass(frozen=True)
+class ReadMark:
+    """One contiguous run of lines the session has read.
+
+    ``path`` is workspace-relative (``normalize`` is the only way in), ``start``
+    and ``end`` are 1-based inclusive, and ``total`` is the file's line count —
+    ``0`` when the read never learned it, which is a real answer, not a default
+    to be filled in with a guess.
+    """
+
+    path: str
+    start: int
+    end: int
+    total: int = 0
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+# ------------------------------------------------------------------ normalise
+
+
+def normalize(path: str, workspace: str = "") -> str:
+    """Absolute / relative / ``./``-prefixed paths → one workspace-relative key.
+
+    Measured on T2: the same session received both
+    ``/workspace/ai-coding/ai_coding/domain/plan_delivery.py`` and
+    ``ai_coding/core/agent_loop.py`` for the very same files, while the answer
+    cited ``ai_coding/domain/plan_delivery.py``.  Without this, ``covers`` would
+    answer False for every citation and the check would reject the whole answer.
+    """
+    text = str(path or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    if os.path.isabs(text):
+        if workspace:
+            try:
+                relative = os.path.relpath(text, workspace).replace("\\", "/")
+            except ValueError:
+                relative = ""
+            # ``..`` means "outside the workspace": keep the basename rather
+            # than a path the model can never resolve.
+            if relative and not relative.startswith(".."):
+                return relative
+        return os.path.basename(text)
+    while text.startswith("./"):
+        text = text[2:]
+    return text.lstrip("/")
+
+
+def same_file(a: str, b: str) -> bool:
+    """Are these two paths the same file?  Exact, or basename-onto-path.
+
+    The ledger stores ``ai_coding/domain/plan_delivery.py``; the answer writes
+    ``plan_delivery.py:81``; grep's output writes the relative path.  All three
+    are one file.
+
+    Only a *bare* basename is folded onto a path.  Two paths that both carry a
+    directory are never folded together: ``a/foo.py`` and ``b/foo.py`` are
+    different files, and treating them as one would answer a citation of the
+    unread one from a read of the other -- and would stop tier 1 ("no tool ever
+    named this") from ever firing.
+    """
+    left, right = normalize(a), normalize(b)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    if "/" not in left or "/" not in right:
+        return os.path.basename(left) == os.path.basename(right)
+    return False
+
+
+def paths_in(text: str, workspace: str = "") -> tuple[str, ...]:
+    """Every source path a piece of tool output names.
+
+    grep renders ``path:line: text`` and glob renders bare paths, so both are
+    the model's evidence that a file exists — which is what tier 1 of the
+    citation check needs.  Deduplicated, order preserved.
+    """
+    out: list[str] = []
+    for token in _PATH_TOKEN.findall(text or ""):
+        norm = normalize(token, workspace)
+        if norm and norm not in out:
+            out.append(norm)
+    return tuple(out)
+
+
+# ---------------------------------------------------------------------- marks
+
+
+def merge_mark(
+    marks: Sequence[ReadMark], mark: ReadMark, *, max_marks: int = 40
+) -> tuple[ReadMark, ...]:
+    """Add one read to the ledger, coalescing the ranges of the same file.
+
+    Overlapping *and adjacent* runs collapse: reading 1-60 and then 61-120 is
+    one run of 1-120, not two, and the render must not ask the model to re-read
+    line 61.
+
+    Overflow drops the oldest marks rather than evicting the newest: the newest
+    are what the model is working from right now.
+    """
+    group = [m for m in marks if m.path == mark.path]
+    others = [m for m in marks if m.path != mark.path]
+    spans = sorted((m.start, m.end) for m in group)
+    spans.append((mark.start, mark.end))
+    spans.sort()
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    total = max([mark.total, *(m.total for m in group)] or [0])
+    out = (*others, *(ReadMark(mark.path, s, e, total) for s, e in merged))
+    # ``out[-0:]`` is the whole list, so the ceiling has to be guarded: a
+    # ``max_marks`` of 0 must not read as "no limit".
+    if max_marks > 0 and len(out) > max_marks:
+        out = out[-max_marks:]
+    return out
+
+
+def _clip_lines(body: str, max_chars: int) -> str:
+    """Cut a rendered block at a line boundary, never through a line.
+
+    Cutting by character count leaves the model holding half of a file line,
+    which it will then try to interpret.
+    """
+    while body and len(body) > max_chars:
+        cut = body.rfind("\n")
+        if cut <= 0:
+            return body[:max_chars] + "…"
+        body = body[:cut]
+    return body
+
+
+def _gaps(spans: Sequence[tuple[int, int]], total: int) -> list[tuple[int, int]]:
+    """The unread runs between 1 and ``total``, for sorted ``spans``."""
+    out: list[tuple[int, int]] = []
+    cursor = 1
+    for start, end in spans:
+        if start > cursor:
+            out.append((cursor, min(start - 1, total)))
+        cursor = max(cursor, end + 1)
+    if cursor <= total:
+        out.append((cursor, total))
+    return [(a, b) for a, b in out if a <= b]
+
+
+def missing_ranges(
+    marks: Sequence[ReadMark], path: str
+) -> list[tuple[int, int]]:
+    """Where this file has not been read yet (only answerable when the size is known).
+
+    ``total == 0`` means the read never learned the length; inventing a gap would
+    send the model chasing lines that do not exist.
+    """
+    rows = [m for m in marks if same_file(m.path, path)]
+    if not rows:
+        return []
+    total = max(m.total for m in rows)
+    if not total:
+        return []
+    return _gaps(sorted((m.start, m.end) for m in rows), total)
+
+
+def covers(marks: Sequence[ReadMark], path: str, start: int, end: int) -> bool:
+    """Does the cited range overlap what was read at all?
+
+    Only a range that falls *entirely* outside the read spans is a problem: the
+    model did see part of a half-right citation, and rejecting it costs an
+    iteration at the worst possible moment — the budget's end.
+    """
+    for mark in marks:
+        if same_file(mark.path, path) and mark.start <= end and start <= mark.end:
+            return True
+    return False
+
+
+# --------------------------------------------------------------------- render
+
+
+def render(
+    marks: Sequence[ReadMark], *, max_chars: int = 900, max_files: int = 8
+) -> str:
+    """The ``<read-ledger>`` tail block, or ``""`` when there is nothing to say.
+
+    An empty block is not an empty block: it is a message the model would pay
+    for on every iteration (the same rule ``volatile_block`` already keeps).
+    """
+    if not marks:
+        return ""
+    order: list[str] = []
+    groups: dict[str, list[ReadMark]] = {}
+    for mark in reversed(marks):
+        if mark.path not in groups:
+            groups[mark.path] = []
+            order.append(mark.path)
+        groups[mark.path].append(mark)
+    lines: list[str] = []
+    for path in order[:max_files]:
+        rows = groups[path]
+        total = max(m.total for m in rows)
+        spans = sorted((m.start, m.end) for m in rows)
+        shown = ",".join(f"{s}-{e}" for s, e in spans)
+        if total:
+            gaps = _gaps(spans, total)
+            missing = ",".join(f"{a}-{b}" for a, b in gaps)
+            tail = "（完整）" if not gaps else f"（缺 {missing}）"
+            lines.append(f"- {path} 共 {total} 行：{shown}{tail}")
+        else:
+            lines.append(f"- {path}：{shown}")
+    body = _clip_lines("\n".join(lines), max_chars)
+    # The count rides *outside* the budget: a truncation that dropped it would
+    # leave the model believing eight files is all there is.
+    if len(order) > max_files:
+        body = f"{body}\n…还有 {len(order) - max_files} 个文件"
+    return (
+        "<read-ledger>\n"
+        "本会话已读（行号；内容不在上下文里，需要时按缺口重读）：\n"
+        f"{body}\n"
+        "未读完的只读缺的段；已完整的不要重读。\n"
+        "</read-ledger>"
+    )
+
+
+# ------------------------------------------------------------ claim extraction
+
+
+def extract_claims(text: str) -> list[tuple[str, int, int]]:
+    """Every ``(path, start, end)`` the answer cites, in the order written.
+
+    One left-to-right pass: a path token moves the binding target, and every
+    line-number shape after it binds to that target.  A bare ``第 N 行`` with no
+    path anywhere is dropped — there is nothing to check it against.
+    """
+    claims: list[tuple[str, int, int]] = []
+    current: str | None = None
+    for match in _CLAIM.finditer(text or ""):
+        if match.group("inline"):
+            current = match.group("ipath")
+            start = int(match.group("iline"))
+            end = int(match.group("ieend") or start)
+            claims.append((current, start, end))
+            continue
+        if match.group("path"):
+            current = match.group("path")
+            continue
+        if not current:
+            continue
+        if match.group("zhang"):
+            start = int(match.group("zstart"))
+            end = int(match.group("zend") or start)
+        else:
+            start = int(match.group("estart"))
+            end = int(match.group("eend") or start)
+        claims.append((current, start, end))
+    return claims
+
+
+def unsupported_claims(
+    marks: Sequence[ReadMark],
+    seen: Sequence[str],
+    claims: Sequence[tuple[str, int, int]],
+) -> list[tuple[str, int, int]]:
+    """Which citations must be challenged, by the three-tier rule (decision 5b).
+
+    * **Tier 1** — the path no tool result ever named.  Strongest signal: the
+      model named a file this session never touched.
+    * **Tier 2** — the path was seen (grep/glob/bash) but not read.  Nothing:
+      those tools show lines the model may legitimately cite, and the ledger
+      cannot say which ones.  This is the false-positive guard; T2 was
+      "grep `[0]` first, then read 61-110".
+    * **Tier 3** — the path was read, and the cited range falls outside what was
+      read.  The shape of T2's actual hallucination.
+
+    An answer naming two or more files is skipped entirely: the binding is
+    last-path-wins, so a paragraph that mentions two files would challenge a
+    citation that was right.  Missing a rejection is cheaper than inventing one.
+    """
+    if not claims:
+        return []
+    if len({normalize(path) for path, _, _ in claims}) > 1:
+        return []
+    path = claims[0][0]
+    rows = [mark for mark in marks if same_file(mark.path, path)]
+    if rows:
+        return [
+            (cited, start, end)
+            for cited, start, end in claims
+            if not covers(rows, path, start, end)
+        ]
+    if any(same_file(seen_path, path) for seen_path in seen):
+        return []
+    return list(claims)
+
+
+__all__ = [
+    "ReadMark",
+    "covers",
+    "extract_claims",
+    "merge_mark",
+    "missing_ranges",
+    "normalize",
+    "paths_in",
+    "render",
+    "same_file",
+    "unsupported_claims",
+]

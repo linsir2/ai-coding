@@ -599,6 +599,11 @@ class TurnPolicy:
             [
                 f"{BUDGET_PRESSURE_LEAD}（{'，'.join(parts)}）。",
                 "请用这一轮收尾：把已完成的和还差的讲清楚，不要再开新的工作。",
+                # R20/RC-5: without this exit, "don't start anything new" plus a
+                # task that demands one deep answer makes the cheapest satisfying
+                # move "fill the gap from memory" -- measured on T2, which
+                # answered with a constructor it had never opened.
+                "证据不足的部分直接写「未确认」并说明缺什么，不要补全。",
             ]
         )
 

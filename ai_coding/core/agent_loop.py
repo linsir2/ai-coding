@@ -122,6 +122,7 @@ from ai_coding.domain.message import (
     ToolArtifact,
 )
 from ai_coding.domain.model_config import ModelConfig
+from ai_coding.domain.read_ledger import extract_claims, paths_in, unsupported_claims
 from ai_coding.domain.run import assistant_message, user_message
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.stance import PostureResult
@@ -1232,6 +1233,21 @@ class AgentLoop:
                     # only their verdicts (its purity is what keeps the stop
                     # decision table-testable).
                     await self._verify_acceptance(session, books)
+                    # R20/RC-7: after the proofs, before the policy decides.
+                    # Before the proofs would skip them; and a retry issued on
+                    # the *last* allowed iteration would be spent without the
+                    # model ever seeing it -- the turn closes with a handoff
+                    # instead of the answer it had.  So the guard only fires
+                    # while a further round exists.
+                    if self._has_a_round_left(index) and self._reject_unsupported_claims(
+                        session, step.text or "", index
+                    ):
+                        self.reporter.report_degraded(
+                            "model_step",
+                            "the answer cited code this session never read",
+                            "asked it once to correct the citation",
+                        )
+                        continue
                     snapshot = books.snapshot(
                         iteration=index,
                         tokens_spent=self.reporter.tokens_spent(),
@@ -1531,6 +1547,8 @@ class AgentLoop:
         # would leave a session that had one bad minute permanently unable to
         # summarise, with the delta growing until paging has to drop it.
         session.compaction_failures = 0
+        # R20/RC-7: one correction chance per turn's answer.
+        session.claim_retries = 0
         self.reporter.begin_turn(self.observer)
         self._warn_tools_chars_once()
         # P2 (补充式方案 06) mark this turn open; 11-spec §7.1 makes it
@@ -2131,6 +2149,13 @@ class AgentLoop:
                 # R8a: the only channel a tool has to leave something in the
                 # turn's book (checkpoint_write uses it).
                 note_checkpoint=lambda text: books.note_checkpoint(text, limit=limit),
+                # R20/RC-2: the read tool reports the range it returned.  The
+                # workspace rides along because the same file arrives as an
+                # absolute and a relative path in one session, and two keys for
+                # one file would make every citation look uncovered.
+                note_read=lambda path, start, end, total: session.note_read(
+                    path, start, end, total, workspace=self.workspace
+                ),
                 # P3 (补充式方案 06): the dispatcher announces a pending approval
                 # here and clears it when answered; the loop mirrors it into a
                 # marker beside the session file, never into the session itself.
@@ -2163,6 +2188,22 @@ class AgentLoop:
             # M-C1: the record is for crash recovery, so only a resumed turn may
             # be answered from it.  A live turn must really run the call again.
             allow_replay=resumed,
+        )
+        # R20: every source path a tool result named is evidence the model has
+        # seen that file.  Accumulated here rather than derived from the
+        # transcript: compaction keeps only a 2,000-character excerpt of each
+        # tool result, so a derived set would forget the early ones and reject a
+        # legitimate citation.
+        #
+        # ``read`` is excluded: its output is the *content* of a file, which
+        # names every other module it mentions.  Counting those would let a
+        # citation of a never-opened file pass as "seen" and silently disable
+        # tier 1.  A read's own path is the ledger's job (``note_read``).
+        session.note_seen(
+            path
+            for item in outcomes
+            if item.result.success and item.call.name != "read"
+            for path in paths_in(item.result.output or "", self.workspace)
         )
         self.closer.write_back(session, outcomes)
         if any(
@@ -2242,6 +2283,53 @@ class AgentLoop:
         session.intervention_state = interventions.record(
             session.intervention_state or {}, decision, snapshot
         )
+
+    def _has_a_round_left(self, index: int) -> bool:
+        """Is there an iteration after this one for a correction to land in?
+
+        The turn closes with a handoff report once the ceiling is reached, so a
+        correction issued on the last allowed iteration is written into the
+        history and never read.
+        """
+        ceiling = max(1, int(self.policy.config.max_iterations))
+        return index < ceiling
+
+    def _reject_unsupported_claims(
+        self, session: SessionData, text: str, index: int
+    ) -> bool:
+        """Send the answer back once when it cites code this session never read.
+
+        RC-7: nothing checked the answer at all.  ``path:line`` existed and the
+        line really contained the quoted code, so every §8-style check passed --
+        but the *context* around it (a constructor, a default value) was invented
+        from a range the model had never opened.
+
+        One correction, never a loop: ``claim_retries`` is reset per turn, and a
+        second pass through this method lets the answer through whatever it says.
+        The three-tier decision itself is pure (``read_ledger.unsupported_claims``).
+        """
+        if session.claim_retries >= 1:
+            return False
+        claims = extract_claims(text)
+        if not claims:
+            return False
+        bad = unsupported_claims(session.read_ledger, session.seen_paths, claims)
+        if not bad:
+            return False
+        session.claim_retries += 1
+        listed = "\n".join(f"- {path}:{start}-{end}" for path, start, end in bad[:5])
+        session.add_message(
+            user_message(
+                "你的答案引用了本会话没有读过的位置：\n"
+                f"{listed}\n"
+                "请核对：要么先读这些位置再确认，要么把结论改成「未确认」并说明缺什么。\n"
+                "不要凭记忆描述没有读过的代码。",
+                now_utc(),
+                synthetic=True,
+            )
+        )
+        self.closer.checkpoint(session, index)
+        return True
 
     async def _verify_acceptance(self, session: SessionData, books: TurnBooks) -> None:
         """Run the proof commands for unchecked acceptance items (R0-1).

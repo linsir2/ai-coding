@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,8 +10,14 @@ from .acceptance import AcceptanceItem
 from .agents import is_plan_agent
 from .message import ChatMessage, ImageRef, ToolArtifact, ToolCallRef, tool_call_from_ref
 from .plan_delivery import StepDelivery
+from .read_ledger import ReadMark, merge_mark, normalize
 from .task import TaskState
 from .turn_digest import TurnDigest
+
+#: R20: the ceiling on ``seen_paths``.  A session that greps a whole repository
+#: names thousands of files; the citation check only needs "was this one ever
+#: mentioned", so a long tail is dead weight in every session file.
+_SEEN_PATHS_CAP = 200
 
 
 def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
@@ -281,6 +287,23 @@ class SessionData:
     # the breaker exists to stop hammering a broken summariser within a turn,
     # not to disable summarisation for the life of the session.
     compaction_failures: int = 0
+    # R20/RC-2: the read ledger.  Which lines this session has read, and the
+    # file sizes that make the gaps computable.  Persisted (ranges only, never
+    # content) and rewritten every iteration into the ``<read-ledger>`` tail
+    # block -- a volatile block, so compaction cannot reach it.  The checkpoint
+    # stores conclusions; this stores evidence.
+    read_ledger: tuple[ReadMark, ...] = ()
+    # R20: every source path any tool result named.  Tier 1 of the citation
+    # check ("the model cited a file this session never touched") needs it, and
+    # it must be *accumulated*, not derived from ``messages``: compaction keeps
+    # only a 2,000-character excerpt of each tool result, so a derived set would
+    # forget the early ones and reject a legitimate citation.
+    seen_paths: tuple[str, ...] = ()
+    # R20/RC-7: how many times this turn has sent the model's answer back for
+    # citing code it never read.  Per turn, in process (same lifetime as
+    # ``compaction_failures``): one correction chance per answer, not one per
+    # session, and never carried across turns.
+    claim_retries: int = 0
     # NOT persisted — ``to_dict`` is a hand-written whitelist, so this stays out
     # of the on-disk format and the Java side keeps reading the same bytes.
     # ``SessionService.list_sessions`` reads every file anyway and drops the
@@ -458,6 +481,41 @@ class SessionData:
     def add_message(self, message: ChatMessage) -> None:
         self.messages.append(message)
 
+    # ---- R20/RC-2: the read ledger ---------------------------------------
+
+    def note_read(
+        self,
+        path: str,
+        start: int,
+        end: int,
+        total: int = 0,
+        *,
+        workspace: str = "",
+    ) -> None:
+        """Record that lines ``start..end`` of ``path`` reached the context.
+
+        The path is normalised here rather than trusted from the caller: the
+        same session receives absolute and relative spellings of one file, and
+        two keys for one file would make ``covers`` miss a citation.  The range
+        is the *returned* one, so a paged read records its page, not the file.
+        """
+        key = normalize(path, workspace)
+        if not key or end < start:
+            return
+        self.read_ledger = merge_mark(
+            self.read_ledger, ReadMark(key, start, end, total)
+        )
+
+    def note_seen(self, paths: Iterable[str]) -> None:
+        """Accumulate the source paths a batch of tool results named.
+
+        Deduplicated and capped: the newest are what the model is working from,
+        and a long session must not grow this without bound.
+        """
+        fresh = [p for p in dict.fromkeys(paths) if p and p not in self.seen_paths]
+        if fresh:
+            self.seen_paths = (self.seen_paths + tuple(fresh))[-_SEEN_PATHS_CAP:]
+
     def stage_undo(
         self,
         removed: Sequence[ChatMessage],
@@ -621,6 +679,12 @@ class SessionData:
             data["compactionCheckpoint"] = self.compaction_checkpoint
             data["compactionConsumed"] = int(self.compaction_consumed)
             data["compactionAnchor"] = self.compaction_anchor
+        # R20: same rule again -- a session that never read a file writes no key,
+        # so every file written before this layer existed reads the same.
+        if self.read_ledger:
+            data["readLedger"] = [mark.to_dict() for mark in self.read_ledger]
+        if self.seen_paths:
+            data["seenPaths"] = list(self.seen_paths)
         # Same rule again: sessions without acceptance contracts write no key,
         # so every file written before R0-1 keeps reading byte-identically.
         if self.acceptance:
@@ -704,6 +768,23 @@ class SessionData:
         raw_permissions = data.get("permissions")
         permission_rows = raw_permissions if isinstance(raw_permissions, list) else []
         permissions = [dict(row) for row in permission_rows if isinstance(row, Mapping)]
+        # R20: the read ledger.  A row that is not a mapping, or that is missing
+        # any of the three fields, is dropped rather than written back -- the
+        # runtime keeps the list, but nothing should be able to write a shape
+        # the reader cannot read back (same rule as ``agentHistory``).
+        raw_ledger = data.get("readLedger")
+        ledger_rows = raw_ledger if isinstance(raw_ledger, list) else []
+        read_ledger = tuple(
+            ReadMark(**row)
+            for row in ledger_rows
+            if isinstance(row, Mapping)
+            and {"path", "start", "end"} <= set(row)
+        )
+        raw_seen = data.get("seenPaths")
+        seen_rows = raw_seen if isinstance(raw_seen, list) else []
+        seen_paths = tuple(
+            str(row) for row in seen_rows if isinstance(row, str) and row
+        )
         # M1b T1: the agent is the authority.  A file written before the
         # agent table existed carries the old ``mode`` key instead — that is
         # the one migration, and it is on the reading side only.
@@ -733,6 +814,8 @@ class SessionData:
             compaction_checkpoint=str(data.get("compactionCheckpoint", "") or ""),
             compaction_consumed=int(data.get("compactionConsumed", 0) or 0),
             compaction_anchor=str(data.get("compactionAnchor", "") or ""),
+            read_ledger=read_ledger,
+            seen_paths=seen_paths,
             acceptance=acceptance,
             step_deliveries=step_deliveries,
             open_turn=int(raw_open_turn)
