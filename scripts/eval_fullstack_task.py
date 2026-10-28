@@ -138,9 +138,21 @@ def _pytest_digest(text: str, limit: int = 4_000) -> str:
     if counts:
         parts.append(f"[{counts}]")
     if not parts:
-        return "\n".join(clean(lines))[-limit:]
+        return _tail_at_line("\n".join(clean(lines)), limit)
     joined = "\n".join(part for part in parts if part)
     return joined if len(joined) <= limit else joined[: limit - 20] + "\n…（已截断）"
+
+
+def _tail_at_line(text: str, limit: int) -> str:
+    """The last ``limit`` characters, starting at a line boundary.
+
+    A mid-line cut turns a traceback's first line into noise ("ecent call
+    last)"), which is exactly what the model was handed for a failed install.
+    """
+    body = text if len(text) <= limit else text[-limit:]
+    if len(text) > limit and "\n" in body:
+        body = body.split("\n", 1)[1]
+    return body
 
 
 def self_check(ws: Path) -> dict:
@@ -157,13 +169,20 @@ def self_check(ws: Path) -> dict:
         out["be_install"] = rc
         # No --timeout: pytest-timeout is not in this venv, and passing an
         # unknown flag makes pytest exit 4 (a false negative on the gate).
-        rc2, log2 = (
-            _run([py, "-m", "pytest", "-q", "--no-header"], be)
-            if rc == 0
-            else (rc, log)
-        )
+        # pytest runs even when the install failed: the interpreter's own
+        # site-packages often already has the dependency, and feeding the model
+        # a pip traceback instead of the test failures hides the only thing it
+        # can act on (measured: a pydantic-core source build failed on Python
+        # 3.14 while the tests themselves ran fine).
+        rc2, log2 = _run([py, "-m", "pytest", "-q", "--no-header"], be)
         out["be_pytest"] = rc2
-        out["be_log"] = _pytest_digest(log2) if rc2 not in (0, None) else log2[-1200:]
+        body = _pytest_digest(log2) if rc2 not in (0, None) else log2[-1200:]
+        if rc != 0:
+            body = (
+                f"[依赖安装失败] pip install 返回 {rc}（测试仍然照常运行）：\n"
+                f"{_tail_at_line(log, 1200)}\n\n{body}"
+            )
+        out["be_log"] = body
     else:
         out["be_pytest"] = None
         out["be_log"] = "backend/ not created yet"
