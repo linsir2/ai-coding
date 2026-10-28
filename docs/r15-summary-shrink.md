@@ -14,7 +14,7 @@ CJK 历史上约 30k token，加上七节系统提示词——32k 窗口模型�
 ## 2. 对照参考：OpenCode 怎么做
 
 `compaction.ts:421-426`：当 `isContextOverflowFailure(err) || isPayloadTooLarge(err)`，按
-`SHRINK_STEPS = [0.7, 0.5, 0.35]` 逐级收缩重发，第五次拒绝（`SHRINK_STEPS[4] === undefined`）放弃。
+`SHRINK_STEPS = [0.85, 0.7, 0.5, 0.35]` 逐级收缩重发，最后一次拒绝后放弃。（I1/R-6 补上了 0.85 首档：首枪更温和，`0.7` 会为了换一次重试扔掉 30% 对话。）
 
 `rejected ??= estimateRequest(request)`（`:421`）——锚定的是**首次被拒的请求大小**，
 不是原始历史；收缩沿"消息数量/token 预算"两轴同时收（`:425-426`）。
@@ -34,7 +34,7 @@ CJK 历史上约 30k token，加上七节系统提示词——32k 窗口模型�
 
 `ai_coding/ai/llm_helpers.py`：
 
-- `_SHRINK_STEPS = (0.7, 0.5, 0.35)` —— 只此一个新常量。
+- `_SHRINK_STEPS = (0.85, 0.7, 0.5, 0.35)` —— 只此一个新常量。
 - `_clip_for_summary(text, cap=_MAX_SUMMARY_CHARS)` —— `cap` 参数带默认值，向后兼容
   （`tests/test_compaction_checkpoint_merge.py:258` 的单参调用不动）。
 - `summarize` 改为**外层 cap 阶梯 × 内层 NUDGE 双轴**：
@@ -45,7 +45,7 @@ CJK 历史上约 30k token，加上七节系统提示词——32k 窗口模型�
     限流/网络错误走原来的 one-shot 语义，I2 锁定）。
   - 形状失败 / 增长超限——两轮 NUDGE 耗尽后 `return None`，**不进入**下一级
     （I3 锁定；`calls[1].startswith(calls[0])` 断言历史前缀未被动过）。
-  - 末级仍 overflow → `None`；保持"降级为原始历史、不中断 turn"（I1 锁定 4 次调用）。
+  - 末级仍 overflow → `None`；保持"降级为原始历史、不中断 turn"（I1 锁定 5 次调用）。
   - `max_tokens`（`_CREATE_TOKENS`/`_MERGE_TOKENS`）按 `previous` 选定后**在整个阶梯内不变**
     ——收的是输入预算，不动输出预算（P1 锁定）。
 
@@ -55,7 +55,7 @@ CJK 历史上约 30k token，加上七节系统提示词——32k 窗口模型�
 |---|---|---|
 | R1 | 首次 overflow→收缩→成功 | 缺陷本身：老代码返回 `None` |
 | R2 | 真 `AsyncOpenAI` → 本地真 HTTP（首 400 `context_length_exceeded`） | wire 上第二次请求字节数更小；防"mock 自证" |
-| I1 | 四级全拒 | 4 次调用、严格递减、`None` |
+| I1 | 五级全拒 | 5 次调用、严格递减、`None` |
 | I2 | 非 overflow（RateLimit）异常 | `None`、只 1 次调用（分类错误会多烧 3 次） |
 | I3 | 形状失败 ×2 | `None`、恰 2 次调用、历史前缀不变（误收缩会多烧） |
 | I4 | 首调成功 | 1 次调用 |

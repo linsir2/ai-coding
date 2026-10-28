@@ -130,6 +130,8 @@ class TurnPolicyConfig:
     #: runs a subprocess by itself when it reaches L2, and an operator must be
     #: able to turn that off without editing code.
     search_streak_threshold: int = 4
+    #: I1/R-7: consecutive look-only calls that force the turn to close.  0 = off.
+    search_streak_l3: int = 16
 
     @classmethod
     def from_ai_config(cls, settings: Any) -> TurnPolicyConfig:
@@ -152,6 +154,7 @@ class TurnPolicyConfig:
             search_streak_threshold=int(
                 getattr(settings, "search_streak_threshold", 4) or 0
             ),
+            search_streak_l3=int(getattr(settings, "search_streak_l3", 16) or 0),
         )
 
 
@@ -228,6 +231,12 @@ class TurnSnapshot:
     search_streak: int = 0
     #: Successful retrieval calls this turn, for the nudge text and the event.
     search_calls: int = 0
+    #: I1/R-7: retrieval calls whose evidence was already seen this turn (same
+    #: finding, possibly different params), the non-empty ones among them, and
+    #: how many findings were new.  Fed in by the books like every other counter.
+    stale_streak: int = 0
+    repeated_nonempty: int = 0
+    novel_findings: int = 0
     #: 18 §10.5: the two posture axes, read off the session by the loop.  They
     #: ride the snapshot so the decision stays pure; the defaults keep every
     #: pre-posture construction (and test) byte-identical.
@@ -333,6 +342,7 @@ class TurnPolicy:
             ),
             acceptance_l1=self.config.max_acceptance_nudges,
             search_streak_threshold=self.config.search_streak_threshold,
+            search_streak_l3=self.config.search_streak_l3,
         )
 
     # ---- budget ------------------------------------------------------------
@@ -411,7 +421,14 @@ class TurnPolicy:
         if gate is not None:
             decision = self._as_turn_decision(gate)
             if decision.action is TurnAction.FINISH:
-                return self._finish_at(snapshot, "ladder", decision.reason)
+                return self._finish_at(
+                    snapshot,
+                    "ladder",
+                    decision.reason,
+                    intervention=decision.intervention,
+                    level=decision.level,
+                    note=decision.note,
+                )
             return decision
         return TurnDecision(TurnAction.ITERATE, "within budget")
 
@@ -429,7 +446,14 @@ class TurnPolicy:
         return None
 
     def _finish_at(
-        self, snapshot: TurnSnapshot, path: str, reason: str
+        self,
+        snapshot: TurnSnapshot,
+        path: str,
+        reason: str,
+        *,
+        intervention: str = "",
+        level: int = 0,
+        note: str = "",
     ) -> TurnDecision:
         """End the turn on a budget mouth — after the stop guards had their say.
 
@@ -444,14 +468,31 @@ class TurnPolicy:
         ran out, not because a plan was missing; only the note is the
         guard's to add.  A guard that wants another round (NUDGE) is
         returned as it is — the loop counts the remedy and starts the round.
+
+        I1/R-7: the ladder's metadata rides through.  Before this, a gate that
+        chose FINISH lost ``intervention``/``level``/``note`` here, so
+        ``_note_intervention`` saw no intervention (no ``SearchStalled``) and
+        the terminal note never reached the outcome.
         """
         if snapshot.mode == "plan":
             verdict = self._ask_guards(replace(snapshot, budget_path=path))
             if verdict is not None:
                 if verdict.action is TurnAction.NUDGE:
                     return verdict
-                return TurnDecision(TurnAction.FINISH, reason, note=verdict.note)
-        return TurnDecision(TurnAction.FINISH, reason)
+                return TurnDecision(
+                    TurnAction.FINISH,
+                    reason,
+                    intervention=intervention,
+                    level=level,
+                    note=verdict.note or note,
+                )
+        return TurnDecision(
+            TurnAction.FINISH,
+            reason,
+            intervention=intervention,
+            level=level,
+            note=note,
+        )
 
     def decide_after_step(self, snapshot: TurnSnapshot) -> TurnDecision:
         """The model stopped asking for tools: finish, or run the gate ladders?"""
@@ -507,6 +548,8 @@ class TurnPolicy:
             inject=gate.text or None,
             intervention=gate.gate,
             level=gate.level,
+            # I1/R-7: a ladder FINISH's terminal line must survive the mapping.
+            note=gate.note,
         )
 
     # ---- task text ---------------------------------------------------------

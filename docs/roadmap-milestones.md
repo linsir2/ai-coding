@@ -481,7 +481,7 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 | M-A5 lint/type 清零 | ✅ **已完成** | `ruff` 6→**0**；`mypy` 3→**0**（152 文件）；突变 A/B 复现原报错 |
 | M-A6 文档一致性 | ✅ **已完成** | `memory_cases` **11/11**（深路径 442 字符下仍 11/11）；`features.md` 加口径说明；方案见 [plan-m-a6-n3.md](plan-m-a6-n3.md) |
 | M-B1 静态检查回喂 | ✅ **已完成** | `core/static_check.py` + L2 注入真实输出；全链路用例通过；方案见 [plan-m-b.md](plan-m-b.md) |
-| M-B2 检索收敛判据 | ✅ **已完成** | `SEARCH` 阶梯 L1(≥4)/L2(≥8)；11+3+1 条用例；信号不解析输出 |
+| M-B2 检索收敛判据 | ✅ **已完成** | `SEARCH` 阶梯 L1(≥4)/L2(≥6)（= `interventions.py` 的 `search_streak_threshold` / `search_streak_l2`）；11+3+1 条用例；信号不解析输出 |
 | M-B3 重试分类 | ✅ **早已实现** | `FailureKind` 六档 + AUTH_ERROR 首轮不重试；补 `insufficient_quota` 归 FATAL |
 | M-B4 检索预算 | ⚠️ **不采纳** | `budget_pressure` + 收尾已存在；意图分类无可辩护契约 |
 | M-B5 收敛可观测 | ✅ **已完成** | `SearchStalled` 事件（iteration/level/calls/streak）自动落 trace jsonl |

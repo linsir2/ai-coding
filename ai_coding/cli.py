@@ -148,6 +148,11 @@ def _build_loop(
     # read it back.  Two gates would mean the operator's answer lands in one
     # and the file tools keep refusing it.
     gate: Any | None = None,
+    # R2: the composition root's mutable holder for the *current* model key.
+    # The loop writes it in ``set_model``; the sub-agent engine factory reads
+    # it.  ``None`` (tests, the bare REPL) keeps the factory on the configured
+    # default, exactly as before.
+    current_key: list[str] | None = None,
 ) -> Any:
     """Assemble the loop and its optional components (silent degradation)."""
     if approval is None:
@@ -233,6 +238,7 @@ def _build_loop(
         jobs=jobs,
         cancel=cancel,
         extra_workspace_roots=_extra_roots(app_cfg, str(ws)),
+        current_key=current_key,
     )
 
 
@@ -388,6 +394,7 @@ def _build_tool_registry(
     sandbox_roots: Any = (),
     gate: Any = None,
     sandbox: Any = None,
+    current_key: list[str] | None = None,
 ) -> Any:
     """Build the domain tool registry the self-owned loop dispatches through."""
     from ai_coding.tools.builder import build_tool_registry
@@ -407,6 +414,7 @@ def _build_tool_registry(
         sandbox_roots=sandbox_roots,
         gate=gate,
         sandbox=sandbox,
+        current_key=current_key,
     )
 
 

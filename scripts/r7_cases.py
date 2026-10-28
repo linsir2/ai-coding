@@ -146,16 +146,22 @@ async def case_books_feed_the_policy(_root: Path) -> tuple[bool, str]:
     not a compression claim and must not be counted as M-E evidence
     (plan-m-e §2.3 / §C.3).  It lives here because it *is* an R7a acceptance
     case; the review flagged it only because a FAIL was once read as a
-    compaction defect.  Its current FAIL is a stale expectation in the policy
-    ladder — it fires L1 (``repeated tool failures``) before the expected L2
-    — and is tracked as a domain-B item, not a compression one.
+    compaction defect.
+
+    The expectation is **L1**, not FINISH: the strategy ladder speaks once
+    before it gives up, so four failed attempts buy a nudge, and only a turn
+    that ignores the nudge ends.  The case used to expect FINISH/"no progress"
+    and failed for a year against correct behaviour (I1/R-4).
     """
     books = TurnBooks(iterations=3, attempted_calls=4, successful_calls=0)
     policy = TurnPolicy()
     decision = policy.decide_next_iteration(
         books.snapshot(iteration=4, tokens_spent=0)
     )
-    ok = decision.action is TurnAction.FINISH and "no progress" in decision.reason
+    ok = (
+        decision.action is TurnAction.NUDGE
+        and "repeated tool failures" in decision.reason
+    )
     return ok, f"action={decision.action.name} reason={decision.reason!r}"
 
 

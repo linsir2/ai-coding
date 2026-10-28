@@ -28,8 +28,10 @@ The accounting rules are the ones R6 measured and argued for, moved verbatim:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import hashlib
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from ai_coding.core.dispatch import DispatchOutcome
 from ai_coding.core.turn_policy import TurnSnapshot
@@ -119,6 +121,70 @@ _SEVERITY_KEYWORDS: dict[int, tuple[str, ...]] = {
 }
 
 _FAILURE_EXCERPT = 160
+
+#: I1/R-7: retrieval tools whose output can be turned into a *finding* key.
+#: ``memory_search``/``history_search``/``websearch`` are deliberately absent:
+#: their outputs embed the query, so changing the wording looks like news.
+#: ``subagent_list`` is absent too -- its output is the harness's own bookkeeping.
+_FINDING_TOOLS = frozenset({"read", "grep", "glob", "webfetch", "job_output", "job_list"})
+
+#: I1/R-7: the `seen_findings` ceiling.  Overflow clears the set (worst case one
+#: false negative) rather than evicting (which could admit a false positive).
+_EVIDENCE_LIMIT = 4096
+
+#: What a tool renders when it found nothing -- evidence of *absence*, not content.
+_NO_MATCH = "(no matches)"
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _target(params: Mapping[str, Any]) -> str:
+    """The root a search was aimed at -- so two empty results are different keys."""
+    return str(params.get("path") or params.get("pattern") or "")
+
+
+def _finding_key(name: str, params: Mapping[str, Any], output: str) -> str | None:
+    """Normalise one retrieval result into an evidence key (I1/R-7).
+
+    The rules are the plan's, each bought with a measured counter-example
+    (docs/plan-m-b.md section 2): the tool name is part of every key (grep's and
+    glob's ``(no matches)`` are byte-identical), grep keeps only ``path:line``
+    (its hit text is clipped at 300 chars), glob hashes a *sorted* path set (it
+    renders by mtime), and empty results keep the target they were aimed at.
+    """
+    body = output or ""
+    if name == "read":
+        path = str(params.get("path", "") or "")
+        if not body.strip():
+            return f"read:empty@{path}"
+        return f"read:{path}:{_digest(body)}"
+    if name in ("grep", "glob"):
+        target = _target(params)
+        lines = [
+            line
+            for line in body.splitlines()
+            if line and not line.startswith("... [showing")
+        ]
+        if not lines or body.strip() == _NO_MATCH:
+            return f"{name}:nomatch@{target}"
+        if name == "grep":
+            # Every hit is "path:line: text"; the text is the clipped part.
+            units = sorted({
+                ":".join(line.split(":", 2)[:2]) if ":" in line else line
+                for line in lines
+            })
+            return f"grep:{_digest(chr(10).join(units))}"
+        return f"glob:{_digest(chr(10).join(sorted(lines)))}"
+    if not body.strip():
+        return f"{name}:empty@{_target(params)}"
+    return f"{name}:{_digest(body)}"
+
+
+def _has_payload(output: str) -> bool:
+    """True when a retrieval found something (an empty result is not a finding)."""
+    return bool((output or "").strip()) and (output or "").strip() != _NO_MATCH
 
 
 @dataclass(frozen=True)
@@ -217,6 +283,14 @@ class TurnBooks:
     #: learning anything" (docs/plan-m-b.md section 3).
     search_streak: int = 0
     search_calls: int = 0
+    #: I1/R-7: normalised evidence fingerprints already seen this turn (finding
+    #: keys, not raw outputs -- see ``_finding_key``), and the accounting built
+    #: on it: consecutive retrievals whose evidence was already seen, the
+    #: non-empty ones among those, and how many findings were new.
+    seen_findings: set[str] = field(default_factory=set)
+    stale_streak: int = 0
+    repeated_nonempty: int = 0
+    novel_findings: int = 0
     #: B1: the harness ran the configured static checks for this turn.  Once per
     #: turn, because a re-fired L2 must not start mypy again.
     static_check_ran: bool = False
@@ -337,6 +411,8 @@ class TurnBooks:
         """
         self.steering_messages += max(0, int(count))
         self.failed_streak = 0
+        # I1/R-7: the user changed the task, so what we saw may be irrelevant.
+        self._clear_findings()
 
     def note_step(
         self,
@@ -394,8 +470,13 @@ class TurnBooks:
             if item.call.name in RETRIEVAL_TOOLS:
                 self.search_streak += 1
                 self.search_calls += 1
+                # I1/R-7: a successful look also answers "is this news".
+                self._note_finding(item)
             elif item.call.name in ACTION_TOOLS:
                 self.search_streak = 0
+                # The world may have moved: what we saw before is not evidence
+                # about it any more.  A *failed* action changes nothing.
+                self._clear_findings()
         # 13 §2.1: the ladder's ask helped-signal counts only what actually
         # reached the user (a denied call never did).
         self.ask_user_calls += sum(
@@ -429,6 +510,41 @@ class TurnBooks:
                 # F2: incremental fatigue accumulation (Paris' Law: ΔD = C × s^m)
                 severity = self._severity_of(error)
                 self.fatigue_index += _FATIGUE_C * (severity ** _FATIGUE_M)
+
+    # ---- I1/R-7: evidence fingerprints ----------------------------------
+
+    def _clear_findings(self) -> None:
+        """Forget the evidence seen so far (an action, or the user steering)."""
+        self.seen_findings.clear()
+        self.stale_streak = 0
+        self.repeated_nonempty = 0
+
+    def _note_finding(self, item: DispatchOutcome) -> None:
+        """Count one successful look as news or as the same old evidence."""
+        name = item.call.name
+        if name not in _FINDING_TOOLS:
+            # memory/history/websearch embed the query; the subagent list is
+            # harness bookkeeping.  Neutral: neither novel nor stale.
+            return
+        output = item.result.output or ""
+        key = _finding_key(name, item.call.params, output)
+        if key is None:
+            return
+        if key in self.seen_findings:
+            self.stale_streak += 1
+            if _has_payload(output):
+                self.repeated_nonempty += 1
+            return
+        self.seen_findings.add(key)
+        self.novel_findings += 1
+        # News ends the old stale streak: what L3 measures is a *run* of repeats.
+        self.stale_streak = 0
+        self.repeated_nonempty = 0
+        if len(self.seen_findings) > _EVIDENCE_LIMIT:
+            # Clear, never evict: losing the whole set costs at most one false
+            # negative; keeping most of it and evicting the wrong entry could
+            # report a genuinely new finding as stale.
+            self.seen_findings.clear()
 
     # ---- F2: Paris' Law fatigue ------------------------------------------
 
@@ -477,6 +593,9 @@ class TurnBooks:
             ask_user_calls=self.ask_user_calls,
             search_streak=self.search_streak,
             search_calls=self.search_calls,
+            stale_streak=self.stale_streak,
+            repeated_nonempty=self.repeated_nonempty,
+            novel_findings=self.novel_findings,
             plan_submitted="present_plan" in self.tool_success,
             plan_nudged=self.plan_nudged,
             # N1: the approval is the plan exit's success, and the guard reads

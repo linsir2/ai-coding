@@ -76,6 +76,7 @@ def build_subagent_runner(
     sandbox_policy: Any = None,
     sandbox_backend: Any = None,
     sandbox_roots: Any = (),
+    current_key: list[str] | None = None,
 ) -> Any:
     """Build a :class:`SubAgentRunner` bound to the given workspace.
 
@@ -90,8 +91,13 @@ def build_subagent_runner(
     held to.  ``sandbox_policy``/``sandbox_backend`` are therefore threaded
     through, and the writable ``roots`` follow the child: when it runs in a
     worktree the roots are that worktree, otherwise the caller's own roots.
+
+    R2: ``current_key`` is the composition root's mutable holder for the *active*
+    model key.  A sub-agent's engine is built per run, so reading the holder
+    here is what makes it follow ``/model``; without it the factory falls back
+    to the configured default, which is the pre-R2 behaviour.
     """
-    from ai_coding.ai.factory import build_engine_from_config
+    from ai_coding.ai.factory import build_engine, build_engine_from_config
     from ai_coding.core.subagent import SubAgentRunner
     from ai_coding.security.approval import AutoApproveCallback
 
@@ -111,10 +117,20 @@ def build_subagent_runner(
             sandbox_roots=roots,
         )
 
+    def engine_factory() -> Any:
+        if current_key is None:
+            return build_engine_from_config(app_cfg)
+        # Same shape as ``build_engine_from_config`` (the configured override
+        # and the stream flag), but keyed by the *current* model.  A chain is
+        # resolved from the holder's key, so a delegated run follows the
+        # parent's fallback chain too.
+        stream_usage = bool(getattr(app_cfg.ai, "stream_usage", True))
+        return build_engine(app_cfg.models, current_key[0], stream_usage=stream_usage)
+
     ai_cfg = getattr(app_cfg, "ai", None)
     return SubAgentRunner(
         app_cfg,
-        engine_factory=lambda: build_engine_from_config(app_cfg),
+        engine_factory=engine_factory,
         build_tools=build_tools,
         skills=skills,
         ledger_root=main_ws,
@@ -150,6 +166,7 @@ def build_tool_registry(
     sandbox_roots: Any = (),
     gate: Any = None,
     sandbox: Any = None,
+    current_key: list[str] | None = None,
 ) -> Any:
     """Build the *domain* tool registry used by the self-owned loop (R1a-4).
 
@@ -183,6 +200,7 @@ def build_tool_registry(
         sandbox_roots=sandbox_roots,
         gate=gate,
         sandbox=sandbox,
+        current_key=current_key,
     )
     return registry
 
@@ -202,6 +220,7 @@ def _assemble_registry(
     sandbox_roots: Any = (),
     gate: Any = None,
     sandbox: Any = None,
+    current_key: list[str] | None = None,
 ) -> tuple[Any, Any]:
     """Create the sandbox/gate/registry triple shared by both builders."""
 
@@ -378,6 +397,7 @@ def _assemble_registry(
             agents=agents,
             sandbox_policy=sandbox_policy,
             sandbox_backend=sandbox_backend,
+            current_key=current_key,
         )
         manager = WorktreeManager(workspace)
         isolate = bool(getattr(app_cfg.ai, "subagent_worktree_isolation", True))

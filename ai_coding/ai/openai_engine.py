@@ -40,14 +40,20 @@ class FailureKind(enum.Enum):
 
     ``RATE_LIMITED`` earns its own value for the wait, not the verdict: a
     rate-limited provider states how long to wait and repeating it earlier earns
-    another 429 (P0-1).  ``AUTH_ERROR`` earns its own because it is the one
-    verdict where waiting is pointless but a different provider may still work.
+    another 429 (P0-1).  ``AUTH_ERROR`` and ``QUOTA`` earn their own because
+    they are the verdicts where waiting is pointless but a different provider
+    may still work.
     """
 
     RATE_LIMITED = "rate_limited"
     SERVER_ERROR = "server_error"
     TRANSPORT = "transport"
     AUTH_ERROR = "auth_error"
+    #: The account's budget is spent.  Like ``AUTH_ERROR``, waiting cannot fix
+    #: it -- but unlike a rejected request, another provider may still answer.
+    #: Its own value keeps the two halves apart: the verdict is worth another
+    #: model, yet the retry budget must not be spent on it first (R-1).
+    QUOTA = "quota"
     #: The prompt does not fit.  Not worth another model -- the same messages
     #: overflow every one of them, and ``ModelConfig`` carries no window to pick
     #: a bigger one with -- but worth compacting the history, which is what the
@@ -92,6 +98,7 @@ WORTH_ANOTHER_MODEL = frozenset(
         FailureKind.SERVER_ERROR,
         FailureKind.TRANSPORT,
         FailureKind.AUTH_ERROR,
+        FailureKind.QUOTA,
     }
 )
 
@@ -138,7 +145,7 @@ def classify_failure(exc: BaseException) -> FailureKind:
             # what makes this work on live traffic instead of only on the fake
             # one (measured: str() lacked "insufficient_quota", body had it).
             if _mentions_quota(exc):
-                return FailureKind.FATAL
+                return FailureKind.QUOTA
             return FailureKind.RATE_LIMITED
         if status >= 500:
             return FailureKind.SERVER_ERROR
@@ -376,6 +383,16 @@ class OpenAIChatEngine(ChatEngine):
                     # Waiting cannot fix a rejected key, so the budget is not
                     # spent on it -- but another provider can.  Exits on the
                     # first attempt instead of after four identical 401s.
+                    raise FallbackWorthwhile(
+                        f"{kind.value}: {type(exc).__name__}: {exc}", kind=kind.value
+                    ) from exc
+                if kind is FailureKind.QUOTA:
+                    # A spent quota does not refill between retries either, so
+                    # the retry budget is not spent on it (docs/plan-m-b.md
+                    # §9.3).  Unlike a rejected request, another provider may
+                    # still have budget -- the chain is what can reach it, and
+                    # it must be reached on the first attempt, not after the
+                    # four identical 429s that fix removed.
                     raise FallbackWorthwhile(
                         f"{kind.value}: {type(exc).__name__}: {exc}", kind=kind.value
                     ) from exc

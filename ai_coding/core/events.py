@@ -530,6 +530,14 @@ class SearchStalled:
     level: int
     calls: int
     streak: int
+    #: I1/R-7 (all defaulted so old traces still read): how many looks returned
+    #: evidence already seen, how many were new, the non-empty repeats among the
+    #: stale ones, whether the turn was *forced* to close, and the gate's reason.
+    stale_streak: int = 0
+    novel: int = 0
+    repeated: int = 0
+    unconverged: bool = False
+    reason: str = ""
 
 
 @dataclass(frozen=True)

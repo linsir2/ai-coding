@@ -26,6 +26,8 @@ roadmap 说"只对四类异常统一指数退避，没有'绝不重试'这一档
 >
 > ⚠️ 评审 P2-7 找到一个**真实小缺口**：429 的 `insufficient_quota`（配额用尽）被归类为
 > `RATE_LIMITED` → 会重试满 4 次，而 roadmap 要求它属 NO_RETRY。见 §九 待拍板 3。
+> **I1/R-1 后续修正**：它现在是独立的 `FailureKind.QUOTA` —— 不重试（首次即切备用
+> provider），既保留了 NO_RETRY 的"不空转"，又不再把额度耗尽误当成"请求本身有问题"。
 
 ### 1.2 M-B4（检索预算）—— ⚠️ **大部分已实现，且我有夸大**
 
@@ -108,8 +110,11 @@ T2 的病根**不是**"搜到了重复内容"，而是"**连续 63 次只看不�
 因此：
 
 - L1/L2 的文案**必须对两种情形都成立**（不能只说"换关键词"）
-- **不做"强制收尾"那一级** —— 对合法调研强行交接的害处大于对空转放任的害处；
-  收尾交给既有的 `budget_pressure` + G8-2 close-out（§1.2）
+- ~~**不做"强制收尾"那一级**~~ —— **I1/R-7 已加**：`search_streak_l3`（默认 16，`LadderLimits`
+  默认 0 保持既有单测契约）与归一化证据指纹（`stale_l3=6` 且 `repeated_nonempty>=2`）都会
+  强制 `FINISH`（`reason="search unconverged"`），并用 `tools=[]` 向模型要一次收尾。
+  原判断"分不清合法调研与空转"由证据指纹解决：不同文件是 novel，同批证据才是 stale；
+  原始输出哈希仍按 §二 否决。
 
 ---
 
@@ -493,11 +498,11 @@ def _search_text(level: int, snap: TurnSnapshot) -> str:
  interventions.select(snapshot, PRE)
         │   gates = (STRATEGY, FATIGUE, SEARCH)                        ◄── 本方案
         ▼
- _triggered(SEARCH)  ← search_streak >= 4                             ◄── 本方案
+ _triggered(SEARCH)  ← search_streak >= 4 或 stale_streak >= 3           ◄── 本方案
         ▼
- _due(SEARCH, entry) → L1 nudge → L2 nudge（无 finish）              ◄── 本方案
+ _due(SEARCH, entry) → L1 nudge → L2 nudge → L3 finish                ◄── I1/R-7 补 L3
         ▼
- _build → 文案（L2 = 跑 ruff/mypy）                                   ◄── 本方案（B1）
+ _build → 文案（L2 = 跑 ruff/mypy；L3 = search unconverged + note）    ◄── 本方案（B1）
         ▼
  TurnDecision(nudge)
         ├─► loop 注入合成 user 消息（既有机制）
@@ -536,7 +541,8 @@ def _search_text(level: int, snap: TurnSnapshot) -> str:
 
 | 观测点 | 改前 | 改后 |
 |---|---|---|
-| 工具**成功**但只读不动作 | **无提示** | `SEARCH` L1 → L2 |
+| 工具**成功**但只读不动作 | **无提示** | `SEARCH` L1 → L2（I1/R-7 再加 L3 强制收尾） |
+| 同一批证据反复出现 | **无提示** | `stale_streak` 3/4/6 → L1/L2/**L3 finish**（归一化证据指纹） |
 | 静态检查的提示 | prompt/gate 里**零命中** | L2 明确给出 `ruff check .` / `mypy` / `grep -rn` |
 | 收敛可观测 | trace 读不到 | `SearchStalled` 事件（每级一条） |
 | 正常修复回合（读→改→测） | — | **streak 恒为 0，gate 永不触发**；请求与 trace **逐字节不变** |
@@ -559,7 +565,7 @@ def _search_text(level: int, snap: TurnSnapshot) -> str:
 |---|---|---|---|
 | 9.1 | B1 注入强度 | ✅ **harness 主动跑并注入**（不是推荐项） | 新增 §十三：一个模块 + 一组配置 + 接线 |
 | 9.2 | B2 收尾级 | ✅ **不做强制收尾**（L1/L2 两级） | §六.3 的 `_due` 已是此形状 |
-| 9.3 | 429 `insufficient_quota` | ✅ **算 NO_RETRY** | 新增 §十三.5，3 行 + 1 测试 |
+| 9.3 | 429 `insufficient_quota` | ✅ **算 NO_RETRY，且首次即切备用 provider**（I1/R-1 改为 `QUOTA`） | 新增 §十三.5；`WORTH_ANOTHER_MODEL` + 首次即切分支 |
 
 ### 9.1 为什么不推荐 harness 主动跑（我原先的判断），以及为什么仍然做
 
@@ -707,7 +713,7 @@ ai_coding/core/mcp.py:787: error: Cannot find implementation or library stub for
 > **注意**：注入文本字段是 `TurnDecision.inject`（[agent_loop.py:897](file:///workspace/ai-coding/ai_coding/core/agent_loop.py#L897) 用它建合成消息），
 > 不是 `InterventionDecision.text`。
 
-### 13.5 `insufficient_quota` 归 NO_RETRY（§9.3 拍板）
+### 13.5 `insufficient_quota` 归 NO_RETRY，并首次即切备用 provider（§9.3 拍板 + I1/R-1）
 
 ```diff
          if status == 429:
@@ -716,12 +722,19 @@ ai_coding/core/mcp.py:787: error: Cannot find implementation or library stub for
 +            # waiting four times over burns four round trips to learn nothing.
 +            # Only when the provider *says* it is the quota -- a plain 429 is a
 +            # rate limit, and waiting is exactly right for it.
-+            if "insufficient_quota" in str(exc).lower():
-+                return FailureKind.FATAL
++            if _mentions_quota(exc):
++                return FailureKind.QUOTA
 +            return FailureKind.RATE_LIMITED
 ```
 
-测试：429 + `insufficient_quota` → `classify_failure` = `FATAL`，且 `max_retries=3` 下 `calls == 1`。
+`QUOTA` 同时加入 `WORTH_ANOTHER_MODEL`，并在 `step()` 的 `AUTH_ERROR` 分支旁加一个
+**首次即 `raise FallbackWorthwhile`** 的 `QUOTA` 分支。**三处缺一不可**：只加集合会让
+它走进通用分支先重试 `max_retries` 次，复现当初修掉的 4 次空转；只改分类（FATAL）则
+额度耗尽时不会切备用 provider。
+
+测试：429 + `insufficient_quota` → `classify_failure` = `QUOTA`；`max_retries=3` 下
+`calls == 1` 且抛 `FallbackWorthwhile`（首次即切）。429 普通限速仍是 `RATE_LIMITED`
+（先重试，不切）；401 行为不变（首次即切）。
 
 ### 13.6 B1 的测试（**需新增 1 个测试文件 —— 新模块必须有自己的测试**）
 
@@ -795,7 +808,7 @@ ai_coding/core/mcp.py:787: error: Cannot find implementation or library stub for
 | 🟠 **P1-3** | 跨回合 `unfinished` 会跳级 | ✅ v2 用实跑确认 `_triggered` 先拦（T11） |
 | 🟠 **P1-4** | v1 的 `_due` 让 L2→L3 变 nudge，与 T4 断言矛盾 | ✅ v2 `_due` 只有 L1/L2 两级，无 finish |
 | 🟡 **P2-1..6** | 漏 `events.__all__` + import；漏 `interventions.__all__`；"5 个分派函数"实为 6；`armed` 不需改（但要写注释）；POST 不接 SEARCH 要声明；B4 描述夸大 | ✅ 全部已改 |
-| 🟡 **P2-7** | 429 `insufficient_quota` 被当 RATE_LIMITED 重试满 4 次 | ✅ §九 待拍板 3 |
+| 🟡 **P2-7** | 429 `insufficient_quota` 被当 RATE_LIMITED 重试满 4 次 | ✅ §九 待拍板 3；I1/R-1 改为 `QUOTA`（不重试 + 首次即切） |
 | 🟡 **P3-1..3** | D 的归因错（成功重复是 `DuplicateCallGuard`）；前端不展示新事件；"30/4 是评估 config"无法证实 | ✅ 已校正 |
 
 

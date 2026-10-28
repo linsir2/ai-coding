@@ -141,6 +141,13 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     layered = ConfigLoader.load_layers_report(paths, path)
     app_cfg = layered.config
 
+    # R2: the active model key, held in a mutable cell shared by the tool stack
+    # and the loop.  The registry (and the SubAgentRunner inside it) is built
+    # *before* the loop exists, so a ``lambda: world.loop...`` factory would
+    # raise UnboundLocalError at boot; this cell is written by
+    # ``AgentLoop.set_model`` and read by the sub-agent engine factory.
+    current_key: list[str] = [str(getattr(app_cfg, "default_model", "") or "")]
+
     # M1b T1: the agent table, loaded once.  The project's files win over the
     # user's, which win over the built-ins; a broken file is skipped with its
     # reason kept for ``/agents``.  Every consumer below gets this same object.
@@ -223,6 +230,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         sandbox_backend=sandbox_backend,
         gate=gate,
         sandbox=sandbox,
+        current_key=current_key,
     )
 
     # Per-workspace state lives under the workspace, beside the traces
@@ -269,6 +277,7 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         cancel=cancel,
         agents=agents,
         gate=gate,
+        current_key=current_key,
     )
     pending = find_armed_session(sessions)
     if pending is not None:

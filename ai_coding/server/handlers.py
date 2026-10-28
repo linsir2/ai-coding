@@ -29,6 +29,7 @@ from ai_coding.attachments import save_data_url
 from ai_coding.config.loader import ConfigLoader
 from ai_coding.config.models import _coerce_model, resolve_context_window
 from ai_coding.config.secrets import secret_env_names
+from ai_coding.core.agent_loop import resolve_model_key
 from ai_coding.core.events import ResumeStalled
 from ai_coding.domain.agents import is_plan_agent
 from ai_coding.domain.session import InboxItem, _message_to_dict
@@ -1117,18 +1118,9 @@ def make_handlers(
         """
         active = getattr(_active_engine(world), "model_config", None)
         models = getattr(world.config, "models", None) or {}
-        current = ""
-        for key, cfg in models.items():
-            if cfg is active:
-                current = key
-                break
-        else:
-            active_name = str(getattr(active, "name", "") or "")
-            if active_name:
-                for key, cfg in models.items():
-                    if str(getattr(cfg, "name", "") or "") == active_name:
-                        current = key
-                        break
+        # Identity first, ``name`` second -- one shared resolver with the loop's
+        # own ``_current_model_key``, so the two cannot answer differently.
+        current = resolve_model_key(models, active)
         rows = [
             {
                 "key": key,

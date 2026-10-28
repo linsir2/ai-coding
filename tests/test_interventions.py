@@ -232,7 +232,13 @@ def test_search_l1_aftermath_escalates_to_the_static_check():
 
 
 def test_search_never_ends_the_turn():
-    """No finish rung: the streak cannot tell a survey from a stall (plan 3.4)."""
+    """The bare ladder gives no finish rung to a turn with *no positive evidence*.
+
+    I1/R-7 changed the contract only in this sense: when the books also report
+    stale/repeated evidence (or the loop opts into ``search_streak_l3``), L3
+    *does* end the turn.  A bare ``LadderLimits()`` (l3 off, stale fields at
+    their snapshots' defaults) keeps the old behaviour pinned here.
+    """
     d = iv.select(
         _snap(
             search_streak=99,
@@ -346,3 +352,27 @@ def test_state_only_tools_cannot_hide_a_stall():
     """A todo write is not an action; the books are the ones that know (T14b)."""
     snap = _snap(search_streak=4, search_calls=4)
     assert iv.select(snap, phase=iv.PRE, limits=LIMITS).gate == "search"
+
+
+# ---- I1/R-7: the L3 hard stop (off by default keeps B1/B2 unchanged) ----
+
+
+def test_search_l3_is_off_by_default():
+    """``LadderLimits()`` is the compatibility contract: 0 means the rung is off.
+
+    The loop opts in through ``AIConfig.search_streak_l3``; a bare limits object
+    (every pre-existing search unit test) must behave exactly as it did before
+    the rung existed -- even at 99 looks with an exhausted ledger.
+    """
+    limits = iv.LadderLimits()
+    assert limits.search_streak_l3 == 0
+    d = iv.select(
+        _snap(
+            search_streak=99,
+            search_calls=99,
+            intervention_ledger=_fired("search", 2, outcome="failed"),
+        ),
+        phase=iv.PRE,
+        limits=limits,
+    )
+    assert d is not None and d.kind == "nudge"

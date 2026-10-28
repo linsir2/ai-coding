@@ -36,12 +36,16 @@ _CREATE_TOKENS = 1_200
 _MERGE_TOKENS = 1_600
 _TRUNCATION_NOTE = "\n[历史过长，此处截断]"
 
-#: OpenCode's shrink ladder (compaction.ts:92): when the provider rejects a
-#: request as too big, retry at 70%/50%/35% of the size actually sent, then give
-#: up.  The anchor is the first *sent* size, not the raw history, so a history
-#: that only overflowed after ``_clip_for_summary`` truncation still shrinks
-#: from where it actually is.
-_SHRINK_STEPS = (0.7, 0.5, 0.35)
+#: OpenCode's shrink ladder (compaction.ts:120): when the provider rejects a
+#: request as too big, retry at 85%/70%/50%/35% of the size actually sent, then
+#: give up.  The anchor is the first *sent* size, not the raw history, so a
+#: history that only overflowed after ``_clip_for_summary`` truncation still
+#: shrinks from where it actually is.
+#:
+#: 0.85 first (I1/R-6): a provider that refuses the whole history usually
+#: accepts almost all of it, and starting at 70% throws away 30% of the
+#: conversation to buy a retry that a 15% trim would have bought.
+_SHRINK_STEPS = (0.85, 0.7, 0.5, 0.35)
 
 #: The two halves of a checkpoint-aware summary input, and the labels that
 #: separate them.  They live here rather than next to the compressor because

@@ -345,6 +345,12 @@ class AIConfig(BaseModel):
     #: 0 disables it.  Clamped at 0 because a negative value would make every
     #: iteration fire a nudge and leave the model no step to act in.
     search_streak_threshold: int = Field(default=4, ge=0)
+    #: I1/R-7: consecutive look-only calls that force the turn to close.  The
+    #: ladder's L1/L2 are advice; this is the rung that stops a survey from
+    #: spending the whole budget (measured: 63 looks, 900s, no conclusion).
+    #: 0 disables the rung -- ``LadderLimits`` defaults to 0 so the unit tests
+    #: that pin L1/L2 keep their contract.
+    search_streak_l3: int = Field(default=16, ge=0)
     #: B1: what the harness runs itself when the turn stalls in look-only mode.
     static_check: StaticCheckConfig = Field(default_factory=StaticCheckConfig)
     max_concurrent_subagents: int = 3

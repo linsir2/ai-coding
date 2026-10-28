@@ -311,6 +311,10 @@ async def test_a_look_only_turn_gets_the_static_check_output(tmp_path, monkeypat
         message.synthetic and "search-gate" in (message.content or "")
         for message in session.messages[:-1]
     ), "a nudge must never be the last message of the turn"
+    # I1/R-7: twelve reads with byte-identical results are stale evidence, so
+    # the same turn must also reach the hard stop and finish unconverged.
+    assert 3 in levels, "repeated evidence must earn the L3 stop"
+    assert loop.last_outcome.reason == "search unconverged"
 
 
 @pytest.mark.asyncio
@@ -353,3 +357,129 @@ async def test_the_static_check_output_is_readable_under_the_default_budget(
         e.index for e in events if type(e).__name__ == "IterationStarted" and e.index > l2_at
     ]
     assert later_steps, f"L2 landed at iteration {l2_at} with no step left to read it"
+    # I1/R-7: the nine identical reads are stale evidence; the hard stop closes
+    # the turn once the fingerprint reports no new findings.
+    assert any(
+        e.level == 3 for e in events if type(e).__name__ == "SearchStalled"
+    )
+    assert loop.last_outcome.reason == "search unconverged"
+
+
+# ---- I1/R-7: the L3 hard stop, end to end ----
+
+
+class _PathReader(BaseTool):
+    """A retrieval tool whose evidence depends on the path it was asked for."""
+
+    name = "read"
+    parallel_safe = True
+
+    @property
+    def description(self) -> str:
+        return "reads the named file"
+
+    @property
+    def params_json_schema(self) -> dict:
+        return {"type": "object", "properties": {"path": {"type": "string"}}}
+
+    async def execute(self, params, ctx=None) -> ToolResult:
+        return ToolResult(success=True, output=f"body:{params.get('path', '')}")
+
+
+def _path_call(call_id: str, path: str) -> StepResult:
+    return StepResult(
+        text=None,
+        tool_calls=[
+            ToolCallRef(id=call_id, name="read", arguments=f'{{"path": "{path}"}}')
+        ],
+        finish_reason="tool_calls",
+    )
+
+
+def _look_only_loop(
+    engine: ChatEngine,
+    sessions: SessionService,
+    observer=None,
+    **settings,
+) -> AgentLoop:
+    registry = ToolRegistry()
+    registry.register(_PathReader())
+    return AgentLoop(
+        engine,
+        sessions,
+        registry,
+        approval=AutoApproveCallback(),
+        settings=AIConfig(**settings),
+        observer=observer,
+        workspace=".",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_turn_of_only_looks_ends_itself(tmp_path):
+    """The T2 shape: 63 successful looks, never an action, no conclusion.
+
+    Every look here returns *new* evidence (a different path), so this is the
+    streak rung alone -- the evidence fingerprint cannot help.  The turn must
+    stop itself at ``search_streak_l3`` and ask the model for a closing word.
+    """
+    from ai_coding.core.events import RecordingObserver
+
+    # 16 looks + the closing answer.  Nudges cost iterations without a call, so
+    # the budget must leave room for the advice rungs *and* the 16th look.
+    looks = 16
+    engine = _ScriptedEngine(
+        [_path_call(f"p{i}", f"f{i}.py") for i in range(1, looks + 1)]
+        + [_text("结论：没有找到真实缺陷，但已列出可疑点")]
+    )
+    observer = RecordingObserver()
+    loop = _look_only_loop(
+        engine,
+        SessionService(tmp_path / "sessions"),
+        observer=observer,
+        max_tool_iterations=30,
+        search_streak_l3=looks,
+    )
+    session = loop.sessions.create()
+
+    await loop.process_input(session, "find the real bug")
+
+    stalled = [e for e in observer.events if type(e).__name__ == "SearchStalled"]
+    assert any(e.level == 3 for e in stalled), "the hard stop never fired"
+    assert loop.last_outcome.reason == "search unconverged"
+    assert loop.last_outcome.handoff, "the turn must leave the operator a report"
+    assert "模型收尾" in loop.last_outcome.handoff
+
+
+@pytest.mark.asyncio
+async def test_the_finish_path_carries_the_intervention(tmp_path):
+    """A ladder FINISH must carry intervention/level/note and emit its event.
+
+    Before I1/R-7 ``_finish_at`` dropped that metadata on the ladder mouth, so
+    ``_note_intervention`` saw no intervention and emitted nothing -- the L3
+    stop would have been invisible in the trace and its note lost.
+    """
+    from ai_coding.core.events import RecordingObserver
+
+    engine = _ScriptedEngine(
+        [_path_call(f"q{i}", f"g{i}.py") for i in range(1, 6)]
+        + [_text("收尾：结论如上")]
+    )
+    observer = RecordingObserver()
+    loop = _look_only_loop(
+        engine,
+        SessionService(tmp_path / "sessions"),
+        observer=observer,
+        max_tool_iterations=10,
+        search_streak_l3=4,
+    )
+    session = loop.sessions.create()
+
+    await loop.process_input(session, "look around")
+
+    stalled = [e for e in observer.events if type(e).__name__ == "SearchStalled"]
+    assert stalled, "a ladder FINISH must still emit its SearchStalled"
+    assert (stalled[-1].level, stalled[-1].unconverged) == (3, True)
+    assert stalled[-1].reason == "search unconverged"
+    assert loop.last_outcome.reason == "search unconverged"
+    assert loop.last_outcome.note, "the FINISH decision's note must reach the outcome"

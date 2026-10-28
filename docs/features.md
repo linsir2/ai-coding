@@ -849,27 +849,52 @@ R7b 把这段话的前半句治掉了：L2 不再丢正文。实测同一份 70 
 | 重置 | 任何成功的非检索调用（`edit`/`write`/`bash`/…）把它清零 | 同上 |
 | 不计数 | 失败的检索调用（那归 `[strategy-gate]`） | 同上 |
 
-> **为什么不按"输出有没有新内容"判定**：实测双向皆错 —— `grep` 与 `glob` 的无匹配输出
-> 逐字节相同（`(no matches)`）、`glob` 按 mtime 排序、`history_search`/`websearch` 的输出
-> 内嵌 query、`grep` 把命中行裁到 300 字符；且 `DuplicateCallGuard` 默认拒绝第 3 次相同调用，
-> "相同输出"最多出现 2 次。详见 [plan-m-b.md](plan-m-b.md) §二。
+> **为什么不按"输出有没有新内容"判定**（B1/B2 时期的结论）：直接对整段输出哈希双向皆错 ——
+> `grep` 与 `glob` 的无匹配输出逐字节相同（`(no matches)`）、`glob` 按 mtime 排序、
+> `history_search`/`websearch` 的输出内嵌 query、`grep` 把命中行裁到 300 字符；
+> 且 `DuplicateCallGuard` 默认拒绝第 3 次相同调用，同参数"相同输出"最多出现 2 次。
+> 详见 [plan-m-b.md](plan-m-b.md) §二。I1/R-7 的做法是**归一化证据指纹**，不是原始输出哈希，
+> 见下节。
 
-上升两档（**没有强制收尾档**：这个信号分不清"读了 8 个不同文件的调研"与"8 次写错符号的空转"，
-强行交接的害处更大；收尾交给 `[budget]` + 自动收尾）：
+上升三档（I1/R-7 补上 L3 强制收尾）：
 
 | 档 | 触发 | 动作 |
 |---|---|---|
-| L1 | `search_streak >= 4` | `[search-gate]`：换符号名 / 换范围 / 读入口文件 / 直接动手 |
-| L2 | `search_streak >= 6` | `[search-gate]`：**不要再猜关键词**，并**附上 harness 自己跑出来的静态检查输出** |
+| L1 | `search_streak >= 4` 或 `stale_streak >= 3` | `[search-gate]`：换符号名 / 换范围 / 读入口文件 / 直接动手 |
+| L2 | `search_streak >= 6` 或 `stale_streak >= 4` | `[search-gate]`：**不要再猜关键词**，并**附上 harness 自己跑出来的静态检查输出** |
+| **L3** | `search_streak >= search_streak_l3`（默认 16），或 `stale_streak >= 6` 且 `repeated_nonempty >= 2` | **强制 `FINISH`**，`reason="search unconverged"`；随后用 `tools=[]` 要一次模型收尾（结构性约束） |
+
+L3 的判据是"**没有新发现**"，不是"调用次数多"：实测的 T2 回合用了 63 次只读调用、
+900 秒撞满超时、零结论；只数 streak 会让"64 次里有一次有效"和"64 次全是同一批证据"看起来一样。
+`search_streak_l3` 默认 16（`ai.search_streak_l3`，0 关闭），`LadderLimits` 内部默认 0
+（既有 24 条 search 单测直接构造它，保持"不强制收尾"的旧契约）。
 
 L2 定在 6 而不是 8：默认 `max_tool_iterations=10`，而一次 nudge 占一个迭代 —— 8 会把 L2
 推到最后一个迭代，输出生成了却没人读。实测 6 时 L2 落在第 8 个迭代，后面还剩两步。
 
-**动作白名单**：只有 `write`/`edit`/`bash` 清零 streak。`todo_write`、`checkpoint_write`、
+**证据指纹（R-7 第二步）**：`TurnBooks` 记 `seen_findings`（回合级、不持久化），规则每条都
+对应一个实测反例：
+
+| 工具 | 证据单元 |
+|---|---|
+| `read` | 整段输出哈希；空输出为 `empty@<path>` |
+| `grep` | 每个命中只取 `path:line`（丢掉被裁到 300 字符的文本）；空为 `nomatch@<root>` |
+| `glob` | 路径集合**先排序**再哈希（工具本身按 mtime 排序）；空为 `nomatch@<root>` |
+| `webfetch` / `job_output` / `job_list` | 整段输出哈希；空带 target |
+| `memory_search` / `history_search` / `websearch` | **中性**（输出内嵌 query，换措辞就变字节） |
+
+key **一定带工具名**（否则 grep/glob 的空结果跨工具碰撞）。同 key 复现 → `stale_streak+1`；
+新 key → `stale_streak` 归零、`novel_findings+1`；`seen_findings` 上限 4096，**溢出时清空而非淘汰**
+（最多一次 false negative，不会 false positive）。**成功的动作**（`write`/`edit`/`bash`/`mcp_call`/
+`subAgent`）与**用户插话**会清零并清空 `seen_findings`（世界可能已变），失败调用不动。
+
+**动作白名单**：只有 `write`/`edit`/`bash`/`mcp_call`/`subAgent` 清零 streak。`todo_write`、`checkpoint_write`、
 `ask_user`、goal 工具**不清零** —— 它们不改工作区，若算作动作，模型写一次 todo 就能把空转
 藏起来。（`bash` 在名单里是故意的：跑静态检查就是动作。）
 
 `plan` 与只读姿态**不触发**：那两种姿态本来就该"只看不动"。
+
+`ai.search_streak_threshold: 0` 可整机关闭该阶梯（含 L1/L2/L3 与 stale 判据）。
 
 L2 的输出来自 `ai.static_check.commands`（默认 `["ruff check ."]`），但**默认不执行**：
 需要操作者 `export AI_CODING_STATIC_CHECK=1`。原因不是保守 —— 该字段能被**仓库里被跟踪的
@@ -889,11 +914,11 @@ L2 的输出来自 `ai.static_check.commands`（默认 `["ruff check ."]`），�
 > 开启等于操作者表态"这个仓库的 linter 我信"，与"在这个仓库里跑 make"是同一个决定。
 
 `.venv/bin` 优先 PATH，超时 20s、总量 ≤2000 字符，**每回合最多跑一次**，且**不在回合的最后
-一步跑**（跑完没人读就是纯成本）。`ai.search_streak_threshold: 0` 可整机关闭该阶梯
-（含 L1）。
+一步跑**（跑完没人读就是纯成本）。
 
 同一档只在 streak 又长出一整个 L1 阈值后才再次发声（不然模型会把预算花在读提示上）。
-每次触发发一个 `SearchStalled` 事件（`iteration`/`level`/`calls`/`streak`），
+每次触发发一个 `SearchStalled` 事件（`iteration`/`level`/`calls`/`streak`，以及 R-7 的
+`stale_streak`/`novel`/`repeated`/`unconverged`/`reason`；新增字段都有默认值，旧 trace 仍可读），
 在 trace jsonl 里长这样：`{"evt": "SearchStalled", "data": {...}}`。
 
 ## ask_user：模型主动提问（R6c）

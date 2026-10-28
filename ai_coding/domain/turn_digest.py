@@ -69,6 +69,9 @@ WORKING_MEMORY_NOTE = "需要更早的细节时用 memory_search 查证，不要
 # failing; tests/test_turn_policy_escalation.py pins that phrase.  The report must
 # not turn it into "the budget ran out", because it did not.
 _STALL_PREFIX = "no progress"
+# I1/R-7: the search ladder's forced close.  A local string so this domain
+# module does not import ``core``; same value as ``interventions.SEARCH_UNCONVERGED``.
+_SEARCH_UNCONVERGED = "search unconverged"
 
 _STATUS_LABEL: dict[TurnStatus, str] = {
     TurnStatus.MAX_ITERATIONS: "迭代预算用尽",
@@ -298,6 +301,8 @@ def render_handoff(
     label = _STATUS_LABEL.get(outcome.status, outcome.status.value)
     if outcome.reason.startswith(_STALL_PREFIX):
         label = "零进展（提前收尾）"
+    elif outcome.reason.startswith(_SEARCH_UNCONVERGED):
+        label = "检索未收敛（强制收尾）"
     lines = [f"[回合未完成 · {label}（{outcome.iterations} 轮）]"]
     if closing.strip():
         lines.append(f"模型收尾: {one_line(closing, _CLOSING_LIMIT)}")

@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING, Any
 
 from ai_coding.ai.engine import ChatEngine, EngineError
 from ai_coding.attachments import load_image
-from ai_coding.config.models import AIConfig
+from ai_coding.config.models import DEFAULT_CONTEXT_TOKENS, AIConfig
 from ai_coding.core import interventions
 from ai_coding.core.acceptance import verify_items
 from ai_coding.core.compaction import Compactor
@@ -208,6 +208,33 @@ def _tools_by_origin(registry: ToolRegistry) -> dict[str, int]:
     return dict(sorted(sizes.items(), key=lambda item: (-item[1], item[0])))
 
 
+def resolve_model_key(models: Mapping[str, ModelConfig] | None, active: Any) -> str:
+    """Map the active engine's ``ModelConfig`` back to its key in ``models``.
+
+    Identity first -- the engine usually holds the very object the table
+    carries -- then the wire ``name`` (a switch rebuilds an equal-but-not-
+    identical config).  ``""`` when nothing matches: a loop built without a
+    model table has no key to report, and an unmatched name is honest rather
+    than a guess.
+
+    One function for both readers (``model.list`` and the loop's own
+    ``_current_model_key``), so "which model is active" cannot be answered two
+    ways.
+    """
+    table = models or {}
+    if active is None:
+        return ""
+    for key, cfg in table.items():
+        if cfg is active:
+            return key
+    active_name = str(getattr(active, "name", "") or "")
+    if active_name:
+        for key, cfg in table.items():
+            if str(getattr(cfg, "name", "") or "") == active_name:
+                return key
+    return ""
+
+
 def _on_plan_approved(session: SessionData, books: TurnBooks) -> None:
     """What a plan approval changes, in one place.
 
@@ -284,6 +311,13 @@ class AgentLoop:
         # every existing construction site (tests, the bare REPL) keeps
         # answering exactly as it did; only the composition root passes one.
         agents: AgentCatalog | None = None,
+        # R2: a mutable holder for the *current* model key, shared with the
+        # tool stack's sub-agent engine factory.  The registry (and the runner
+        # inside it) is built before this loop exists, so it cannot read
+        # ``self._current_model_key`` at construction -- it reads this instead,
+        # and ``set_model`` writes both.  ``None`` (every other construction
+        # site) keeps the sub-agent stack on the configured default, as before.
+        current_key: list[str] | None = None,
     ) -> None:
         self.engine = engine
         self.sessions = sessions
@@ -322,6 +356,15 @@ class AgentLoop:
         # shared by every entry point.  Without it ``/model`` could only ever
         # report "unknown model" (``set_model`` below is the only reader).
         self.models: dict[str, ModelConfig] = dict(models or {})
+        # R2: the key of the model the engine was built from, seeded from the
+        # boot engine so a reader has a value before any switch.  ``set_model``
+        # keeps it current; the configured default stays a separate fact
+        # (``default_model`` below), which is why ``/model`` can mark it after
+        # the user moved away.
+        self._current_model_key = resolve_model_key(
+            self.models, getattr(engine, "model_config", None)
+        )
+        self._current_key_holder = current_key
         # Engines a model switch superseded, kept until ``aclose`` (H3).  A
         # rebuilt engine owns its client, so leaving it unclosed would leak a
         # socket per switch; the list also covers the no-running-loop case,
@@ -502,6 +545,14 @@ class AgentLoop:
         new.on_fallback = self._fallback_observer
         old, self.engine = self.engine, new
         self._rewire_llm_helpers()
+        # R2: the active key is the one the caller asked for, and the tool
+        # stack's sub-agent factory reads the shared holder rather than this
+        # loop (it was built before the loop existed).  The configured default
+        # is deliberately NOT written: "what I am using" and "what the config
+        # says" are two facts.
+        self._current_model_key = name
+        if self._current_key_holder is not None:
+            self._current_key_holder[0] = name
         self._retire(old)
 
     def add_model(self, key: str, cfg: ModelConfig) -> None:
@@ -546,8 +597,27 @@ class AgentLoop:
 
         if self.context is not None:
             self.context.summarizer = build_summarizer(cfg)
+            # R3: the window follows the active model, not the configured
+            # default -- a smaller target model must shrink the threshold too,
+            # or the old model's half keeps persisting past the new window.
+            self.context._max_context_tokens = self._context_window_for(cfg)
         if self.memory is not None:
             self.memory.extractor = build_extractor(cfg)
+
+    def _context_window_for(self, cfg: ModelConfig) -> int:
+        """The window the active model should hold (R-3).
+
+        Same precedence as ``resolve_context_window`` (a config override wins,
+        then the model's own declaration, then the conservative default) but
+        keyed by the *active* model.  ``resolve_context_window`` reads the
+        configured ``default_model``, which does not move with ``/model`` and
+        is left alone on purpose.
+        """
+        configured = int(getattr(self.settings, "max_context_tokens", 0) or 0)
+        if configured > 0:
+            return configured
+        declared = int(getattr(cfg, "context_window", 0) or 0)
+        return declared if declared > 0 else DEFAULT_CONTEXT_TOKENS
 
     # ---- posture (18 §10.2) ------------------------------------------------
 
@@ -934,9 +1004,14 @@ class AgentLoop:
                     # the iteration budget -- not the clock, and not the token
                     # ceiling -- is what stopped the turn, ask the model for a
                     # closing word so the operator gets prose about the work
-                    # instead of a list of artifacts.  Bounded to once per turn,
+                    # instead of a list of artifacts.  I1/R-7: the same courtesy
+                    # is owed to the L3 hard stop -- the turn was cut short
+                    # *because* it never produced one.  Bounded to once per turn,
                     # and skipped when there is no room left to answer.
-                    if not closing and decision.reason == _ITERATION_BUDGET:
+                    if not closing and decision.reason in (
+                        _ITERATION_BUDGET,
+                        interventions.SEARCH_UNCONVERGED,
+                    ):
                         closing = await self._ask_for_closing(
                             session=session,
                             task=task,
@@ -2114,9 +2189,9 @@ class AgentLoop:
             return
         # B5: only the search ladder emits.  The other four gates already leave
         # their evidence in the counters, and emitting for all five would change
-        # every existing trace.  Only the *nudge* path reaches here: a ladder that
-        # chose FINISH goes through ``_finish_at``, which drops the intervention
-        # metadata -- a known defect (docs/plan-m-b.md P1-1), out of this scope.
+        # every existing trace.  I1/R-7 fixed the old defect where a ladder
+        # FINISH dropped its metadata in ``_finish_at``: the L3 hard stop must be
+        # visible in the trace too (``unconverged`` marks it).
         if decision.intervention == interventions.SEARCH:
             self._emit(
                 SearchStalled(
@@ -2124,6 +2199,11 @@ class AgentLoop:
                     level=decision.level,
                     calls=snapshot.search_calls,
                     streak=snapshot.search_streak,
+                    stale_streak=snapshot.stale_streak,
+                    novel=snapshot.novel_findings,
+                    repeated=snapshot.repeated_nonempty,
+                    unconverged=decision.reason == interventions.SEARCH_UNCONVERGED,
+                    reason=decision.reason,
                 )
             )
         session.intervention_state = interventions.record(

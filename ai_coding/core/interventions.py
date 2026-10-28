@@ -42,6 +42,7 @@ __all__ = [
     "PRE",
     "SEARCH",
     "SEARCH_GATE_LEAD",
+    "SEARCH_UNCONVERGED",
     "STRATEGY",
     "STRATEGY_GATE_LEAD",
     "TASK",
@@ -83,6 +84,13 @@ STRATEGY_GATE_LEAD = "[strategy-gate]"
 FATIGUE_GATE_LEAD = "[fatigue-gate]"
 ACCEPTANCE_GATE_LEAD = "[acceptance-gate]"
 SEARCH_GATE_LEAD = "[search-gate]"
+#: I1/R-7: the reason a look-only turn was forced to close.  The loop matches
+#: on it (to ask for a closing word) and the digest maps it to a label.
+SEARCH_UNCONVERGED = "search unconverged"
+#: The operator-facing terminal line when the hard stop fires.
+SEARCH_UNCONVERGED_NOTE = (
+    "[search-gate] 检索未收敛：这一回合只有只读调用、没有带来新证据，已强制收尾。"
+)
 
 
 @dataclass(frozen=True)
@@ -104,6 +112,20 @@ class LadderLimits:
     #: costs one of them, so a rung at 8 could land on the last iteration and the
     #: model would never get to read the output the harness produced.
     search_streak_l2: int = 6
+    #: I1/R-7: the streak that forces the turn to close.  0 = off, and that is
+    #: the default on purpose: every pre-existing search test constructs a bare
+    #: ``LadderLimits()`` and pins "the ladder never finishes the turn".  The
+    #: loop opts in through ``AIConfig.search_streak_l3`` (default 16).
+    search_streak_l3: int = 0
+    #: I1/R-7: *stale* evidence (the same finding seen again) earns the rungs
+    #: earlier than the streak can.  Measured: 63 looks with near-identical
+    #: results and no conclusion.  0 disables a rung.
+    stale_l1: int = 3
+    stale_l2: int = 4
+    #: The forced close: repeated evidence alone is not enough (an empty result
+    #: repeated six times is a survey of empty places, not a stall), so L3 also
+    #: demands ``repeated_nonempty`` -- non-empty repeated findings.
+    stale_l3: int = 6
 
 
 @dataclass(frozen=True)
@@ -115,6 +137,9 @@ class InterventionDecision:
     kind: str          # "nudge" | "finish"
     reason: str
     text: str = ""     # nudges only
+    #: I1/R-7: the terminal line that must reach the operator when a ladder
+    #: *finishes* the turn.  It rides the decision like the plan guard's note.
+    note: str = ""
 
 
 # ---- triggers --------------------------------------------------------------
@@ -141,10 +166,13 @@ def _triggered(gate: str, snap: TurnSnapshot, limits: LadderLimits) -> bool:
         # there.  Measured: plan/readonly turns reached L1 and L2 within 8 reads.
         if snap.mode == "plan" or snap.readonly:
             return False
-        return bool(
-            limits.search_streak_threshold
-            and snap.search_streak >= limits.search_streak_threshold
-        )
+        if not limits.search_streak_threshold:
+            return False
+        if snap.search_streak >= limits.search_streak_threshold:
+            return True
+        # I1/R-7: repeated evidence earns the rungs earlier than the streak can:
+        # a turn that keeps re-finding the same thing is not learning.
+        return bool(limits.stale_l1 and snap.stale_streak >= limits.stale_l1)
     if gate == FATIGUE:
         return snap.fatigue_index >= FATIGUE_THRESHOLD
     if gate == TASK:
@@ -209,6 +237,10 @@ def _ref_for(gate: str, snap: TurnSnapshot) -> dict[str, Any]:
             "asks": int(snap.ask_user_calls),
             "streak": int(snap.search_streak),
             "calls": int(snap.search_calls),
+            # I1/R-7: the stale stream re-fires on its own threshold.
+            "stale": int(snap.stale_streak),
+            "novel": int(snap.novel_findings),
+            "repeated": int(snap.repeated_nonempty),
         }
     if gate == FATIGUE:
         return {"asks": int(snap.ask_user_calls), "fatigue": float(snap.fatigue_index)}
@@ -260,21 +292,55 @@ def _search_due(
     rung re-fires only once the streak has grown a whole L1-threshold past the last
     fire -- otherwise every extra look would inject another nudge and the model
     would spend its iterations reading advice instead of working.
+
+    I1/R-7 adds two things on top (the streak itself is unchanged):
+
+    * **L3 is a hard stop.** At ``search_streak_l3`` looks (0 = off) the turn is
+      finished with ``search unconverged``.  Measured before it existed: 63
+      successful looks, 900s, no conclusion.
+    * **Stale evidence earns rungs earlier.** ``stale_l1``/``stale_l2`` fire the
+      advice rungs; ``stale_l3`` *finishes*, but only when at least two of the
+      repeats carried content -- six empty results are a survey of empty places,
+      not a stall.
     """
+    l3_at = limits.search_streak_l3
+    if l3_at and snap.search_streak >= l3_at:
+        return (L3, "finish")
+    if (
+        limits.stale_l3
+        and snap.stale_streak >= limits.stale_l3
+        and snap.repeated_nonempty >= 2
+    ):
+        return (L3, "finish")
     threshold = limits.search_streak_threshold
-    if not threshold or snap.search_streak < threshold:
+    if not threshold:
         return None
     # ``+1`` rather than ``max(l2, threshold)``: a threshold at or above the L2
     # constant would otherwise earn L2 on the very same look that earned L1, and
     # L1 would never be seen.
     l2_at = max(limits.search_streak_l2, threshold + 1)
-    level = L2 if snap.search_streak >= l2_at else L1
+    level = 0
+    if snap.search_streak >= l2_at:
+        level = L2
+    elif snap.search_streak >= threshold:
+        level = L1
+    if limits.stale_l2 and snap.stale_streak >= limits.stale_l2:
+        level = max(level, L2)
+    elif limits.stale_l1 and snap.stale_streak >= limits.stale_l1:
+        level = max(level, L1)
+    if not level:
+        return None
     if entry is None:
         return (level, "nudge")
     if level > int(entry.get("level", 0) or 0):
         return (level, "nudge")
     ref: Mapping[str, Any] = entry.get("ref") or {}
     if snap.search_streak >= int(ref.get("streak", 0) or 0) + threshold:
+        return (level, "nudge")
+    # The stale stream grows independently of the streak (different params, same
+    # evidence), so it earns its re-fire on its own whole L1-threshold.
+    stale_l1 = limits.stale_l1 or threshold
+    if snap.stale_streak >= int(ref.get("stale", 0) or 0) + stale_l1:
         return (level, "nudge")
     return None
 
@@ -383,6 +449,13 @@ def armed(ledger: Mapping[str, Any] | None) -> bool:
 
 def _build(gate: str, level: int, kind: str, snap: TurnSnapshot) -> InterventionDecision:
     if kind == "finish":
+        if gate == SEARCH:
+            # I1/R-7: the hard stop.  Its reason is what the loop matches on to
+            # ask for a closing word, and what the digest labels.
+            return InterventionDecision(
+                gate, level, "finish", SEARCH_UNCONVERGED,
+                note=SEARCH_UNCONVERGED_NOTE,
+            )
         if gate == STRATEGY:
             count = snap.failed_streak or max(1, snap.iteration - 1)
             return InterventionDecision(

@@ -22,9 +22,10 @@ def _outcome(
     error: str | None = None,
     output: str = "",
     halted: bool = False,
+    params: dict | None = None,
 ) -> DispatchOutcome:
     return DispatchOutcome(
-        call=ToolCall(id=f"c-{name}", name=name),
+        call=ToolCall(id=f"c-{name}", name=name, params=params or {}),
         result=ToolResult(success=success, output=output, error=error),
         denied=not success,
         halted=halted,
@@ -461,3 +462,63 @@ def test_reading_job_output_counts_as_looking():
     books = TurnBooks()
     books.note_outcomes([_outcome("job_output"), _outcome("job_list")])
     assert books.search_streak == 2
+
+
+# ---- I1/R-7: the evidence fingerprint ("no new findings") ----
+
+
+def test_repeated_evidence_is_stale_different_files_are_novel():
+    """Same evidence is stale even with different params; a new file is novel."""
+    books = TurnBooks()
+    books.note_outcomes(
+        [_outcome("grep", params={"pattern": "x"}, output="a.py:1: x")]
+    )
+    assert (books.stale_streak, books.novel_findings) == (0, 1)
+    # Different params (the DuplicateCallGuard case), same hits -> stale.
+    books.note_outcomes(
+        [_outcome("grep", params={"pattern": "y"}, output="a.py:1: x")]
+    )
+    assert books.stale_streak == 1
+    # A different file's hit is new evidence, and it resets the stale streak.
+    books.note_outcomes(
+        [_outcome("grep", params={"pattern": "x"}, output="b.py:2: y")]
+    )
+    assert (books.stale_streak, books.novel_findings) == (0, 2)
+
+    # The tool name is part of the key: grep's and glob's empty results are
+    # different findings even though their outputs are byte-identical.
+    before = books.novel_findings
+    books.note_outcomes([_outcome("grep", params={"path": "src"}, output="(no matches)")])
+    assert books.novel_findings == before + 1
+    books.note_outcomes([_outcome("glob", params={"pattern": "*.py"}, output="(no matches)")])
+    assert books.novel_findings == before + 2
+
+    # glob orders by mtime; the same set in a different order is not new.
+    books.note_outcomes([_outcome("glob", params={"pattern": "*.py"}, output="b.py\na.py")])
+    books.note_outcomes([_outcome("glob", params={"pattern": "*.py"}, output="a.py\nb.py")])
+    assert books.stale_streak >= 1
+
+    # Same file + same body via read: the path is part of the finding's identity.
+    books.note_outcomes([_outcome("read", params={"path": "a.py"}, output="body")])
+    books.note_outcomes([_outcome("read", params={"path": "a.py"}, output="body")])
+    assert books.stale_streak == 1
+    books.note_outcomes([_outcome("read", params={"path": "b.py"}, output="body")])
+    assert books.stale_streak == 0
+
+
+def test_an_action_effort_clears_the_evidence():
+    """A successful action means the world may have moved: forget what we saw."""
+    books = TurnBooks()
+    books.note_outcomes([_outcome("read", params={"path": "a.py"}, output="body")])
+    books.note_outcomes([_outcome("read", params={"path": "a.py"}, output="body")])
+    assert books.stale_streak == 1
+    books.note_outcomes([_outcome("write", params={"path": "a.py"}, output="ok")])
+    assert (books.stale_streak, books.repeated_nonempty) == (0, 0)
+    assert books.seen_findings == set()
+
+    # A failed action changes nothing.
+    books.note_outcomes([_outcome("read", params={"path": "a.py"}, output="body")])
+    books.note_outcomes([_outcome("read", params={"path": "a.py"}, output="body")])
+    assert books.stale_streak == 1
+    books.note_outcomes([_outcome("bash", success=False, error="nonzero_exit")])
+    assert books.stale_streak == 1

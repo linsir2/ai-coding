@@ -566,6 +566,10 @@ class ContextManager:
             context_window or getattr(ai_settings, "max_context_tokens", 0) or 48_000
         )
         self._max_messages = int(getattr(ai_settings, "max_messages", 50))
+        # R3: the window is writable (``/model`` repoints it at the active
+        # model), so the L3 threshold is derived by the setter below rather
+        # than recomputed here -- otherwise a switch to a smaller model would
+        # keep persisting at the old model's half.
         self._keep_head = int(getattr(ai_settings, "snip_keep_head", 3))
         self._keep_tail = int(getattr(ai_settings, "snip_keep_tail", 20))
         self._keep_recent_results = int(
@@ -603,8 +607,27 @@ class ContextManager:
         #: ``Compactor._compress_once`` reads it to fill
         #: ``CompactionEnded.layers`` (plan-m-e §C.1).
         self.last_layer_stats: list[LayerStat] | None = None
-        # L3 triggers at (roughly) half the context budget, mirroring the Java rule.
-        self._max_result_bytes = max(1, self._max_context_tokens // 2)
+        # L3 triggers at (roughly) half the context budget, mirroring the Java
+        # rule.  Derived by the ``_max_context_tokens`` setter above, so a
+        # switch to a smaller model moves the threshold with the window.
+
+    @property
+    def _max_context_tokens(self) -> int:
+        """The window the pipeline is anchored on; writable so ``/model`` can
+        repoint it at the active model (R-3).
+
+        The backing field is ``_context_tokens``: the name stays the contract
+        the meter and the pipeline read, and the setter re-derives the L3
+        threshold, which is half the window.  ``_max_result_bytes`` used to be
+        computed once in ``__init__``, so a smaller target model left the old
+        model's threshold in force and could overrun the new window.
+        """
+        return self._context_tokens
+
+    @_max_context_tokens.setter
+    def _max_context_tokens(self, value: int) -> None:
+        self._context_tokens = int(value)
+        self._max_result_bytes = max(1, self._context_tokens // 2)
 
     @property
     def summarizer(self) -> Callable[[str], Awaitable[str | None]] | None:

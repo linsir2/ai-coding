@@ -38,6 +38,9 @@ ai:
   # B1/B2: consecutive look-only calls (read/grep/glob ... with no write/edit/bash
   # in between) before the `[search-gate]` ladder speaks.  0 disables it.
   search_streak_threshold: 4
+  # I1/R-7: hard stop.  This many consecutive look-only calls (no write/edit/bash
+  # in between) ends the turn and asks the model for a closing word.  0 disables.
+  search_streak_l3: 16
   # B1: what the harness runs itself when the ladder reaches its second rung.
   # OFF unless you opt in: export AI_CODING_STATIC_CHECK=1.  That is deliberate --
   # this field can be set by a repository's tracked config.example.yaml, and a repo

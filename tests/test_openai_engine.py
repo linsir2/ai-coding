@@ -360,6 +360,17 @@ def _auth_error():
     return openai.AuthenticationError("bad key", response=_Resp(401), body=None)
 
 
+def _quota_exhausted():
+    """A 429 whose body says the *quota* is spent, not "slow down"."""
+    import openai
+
+    return openai.RateLimitError(
+        "You exceeded your current quota, please check your plan and billing details.",
+        response=_Resp(429),
+        body={"error": {"type": "insufficient_quota", "code": "insufficient_quota"}},
+    )
+
+
 def _timeout():
     import openai
 
@@ -675,6 +686,58 @@ async def test_a_stream_failure_before_any_output_is_fallback_worthwhile():
         await engine.step([_user()], tools=[])
 
 
+# ---- I1/R-1: a spent quota switches provider on the first attempt -----------
+
+
+@pytest.mark.asyncio
+async def test_quota_exhaustion_falls_back_without_retrying():
+    """429 + ``insufficient_quota`` is "this budget is gone", not "slow down".
+
+    It will not refill in ``Retry-After`` seconds, so waiting would spend the
+    whole retry budget to learn what the first 429 already said (the four wasted
+    round trips docs/plan-m-b.md §9.3 removed).  What that fix missed is that
+    another provider *can* still answer -- so the verdict is fallback-worthy and
+    the switch happens on the first attempt.
+    """
+    client = _SequencedClient([_quota_exhausted()])
+    engine = _fast_engine(client)  # default max_retries == 3
+
+    with pytest.raises(FallbackWorthwhile) as excinfo:
+        await engine.step([_user()], tools=[])
+
+    assert client.completions.calls == 1
+    assert excinfo.value.kind == "quota"
+
+
+@pytest.mark.asyncio
+async def test_auth_error_still_falls_back_on_first_attempt():
+    """Regression guard: R-1 must not disturb the existing 401 behaviour."""
+    client = _SequencedClient([_auth_error()])
+    engine = _fast_engine(client, max_retries=3)
+
+    with pytest.raises(FallbackWorthwhile) as excinfo:
+        await engine.step([_user()], tools=[])
+
+    assert client.completions.calls == 1
+    assert excinfo.value.kind == "auth_error"
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_still_does_not_fall_back():
+    """A plain 429 is "slow down": retry the same provider, never switch.
+
+    If the quota marker leaked onto every 429 this would raise instead of
+    succeeding on the second attempt.
+    """
+    client = _SequencedClient([_rate_limited(), [_text_chunk("hi", finish_reason="stop")]])
+    engine = _fast_engine(client, max_retries=2)
+
+    step = await engine.step([_user()], tools=[])
+
+    assert step.text == "hi"
+    assert client.completions.calls == 2
+
+
 # ---- G5-1: a context overflow is recoverable, but not here ------------------
 
 
@@ -755,7 +818,9 @@ async def test_a_spent_quota_is_not_retried():
     """429 alone is a rate limit; 429 that says "quota" is the end of the budget.
 
     Measured gap (docs/plan-m-b.md 9.3): `insufficient_quota` used to be filed as
-    RATE_LIMITED and cost four identical round trips before giving up.
+    RATE_LIMITED and cost four identical round trips before giving up.  R-1 kept
+    that "no retry" guarantee but made the verdict fallback-worthy, so it is
+    raised as ``FallbackWorthwhile`` on the first attempt.
     """
     import openai
 
@@ -766,12 +831,13 @@ async def test_a_spent_quota_is_not_retried():
         response=_Resp(429),
         body=None,
     )
-    assert classify_failure(quota) is FailureKind.FATAL
+    assert classify_failure(quota) is FailureKind.QUOTA
 
     client = _SequencedClient([quota])
     engine = _fast_engine(client)
-    with pytest.raises(EngineError):
+    with pytest.raises(FallbackWorthwhile) as excinfo:
         await engine.step([_user()], tools=[])
+    assert excinfo.value.kind == "quota"
     assert client.completions.calls == 1
 
 
@@ -794,7 +860,7 @@ async def test_a_spent_quota_is_detected_from_the_body_not_the_message():
         body={"error": {"type": "insufficient_quota", "code": "insufficient_quota"}},
     )
     assert "insufficient_quota" not in str(quota).lower()
-    assert classify_failure(quota) is FailureKind.FATAL
+    assert classify_failure(quota) is FailureKind.QUOTA
 
 
 @pytest.mark.asyncio
