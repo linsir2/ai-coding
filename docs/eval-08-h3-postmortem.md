@@ -6,6 +6,7 @@
 > 看功能是否真起作用、差距在哪里、有没有为了"修好"而新弄坏的地方。
 > 环境：Linux 6.x / Python 3.14 / tmux 3.4 / bubblewrap 0.9.0 / 模型 `dashscope qwen3.7-flash`
 > 起点：`f5ce59d`（H3 `/connect` + 模型切换）→ I1 修复 `747ad99` → 本文件收口的 3 个新缺陷 `7cbc9f5`
+> 收口后 CI：run [`40619922039`](https://github.com/linsir2/ai-coding/actions/runs/40619922039) **10/10 job 全绿**
 
 ---
 
