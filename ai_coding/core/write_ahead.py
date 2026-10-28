@@ -60,6 +60,20 @@ class WriteAheadLog:
         for record in getattr(session, "write_ahead", None) or ():
             self._records[record.digest] = record
 
+    @staticmethod
+    def replay_scope(session: Any) -> frozenset[str]:
+        """The digests a resumed turn may answer from.
+
+        Only records the *crashed* turn settled: ``running`` proves nothing
+        (the side effect's outcome is unknown), and a record the resumed turn
+        settles itself must stay out of the scope or the next batch replays it.
+        """
+        return frozenset(
+            record.digest
+            for record in (getattr(session, "write_ahead", None) or ())
+            if record.status == "ok"
+        )
+
     def claim(
         self, call: ToolCall, *, allow_replay: bool = False
     ) -> ToolResult | None:

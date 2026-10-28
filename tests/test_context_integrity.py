@@ -28,9 +28,11 @@ from ai_coding.ai.llm_helpers import SUMMARY_SECTIONS, checkpoint_body, summary_
 from ai_coding.config.models import AIConfig
 from ai_coding.core.context_compression import (
     CHECKPOINT_MARK,
+    OMISSION_MARK,
     ContextManager,
     _anchor_of,
     _history_tokens,
+    _is_checkpoint_note,
     hard_trim,
     install_checkpoint,
     sanitize_pairs,
@@ -422,6 +424,78 @@ def test_a_failed_summary_does_not_drop_the_delta():
     assert body.startswith(CHECKPOINT_MARK)
     missing = [i for i in range(5, 20) if f"KEEP-{i} " not in body]
     assert missing == [], "a failed summary must leave the delta untouched"
+
+
+def test_a_tail_that_starts_before_the_boundary_is_cut_at_the_boundary():
+    """``split_tail`` can cut *inside* the covered prefix.
+
+    Its fallback anchors on the latest user message; when that sits before
+    ``consumed`` the "tail" contains messages the checkpoint already stands
+    for, and ``delta`` would come out empty -- the checkpoint then never
+    advances while the same messages are re-sent every request.
+    """
+    calls: list[str] = []
+    manager = _manager(_recorder(calls), l4_tail_tokens=10_000)
+    history = [
+        ChatMessage(role="user", content="U-0", timestamp=""),
+        ChatMessage(role="assistant", content="U-1", timestamp=""),
+        ChatMessage(role="user", content="U-2", timestamp=""),
+        ChatMessage(role="assistant", content="U-3", timestamp=""),
+        ChatMessage(role="assistant", content="U-4", timestamp=""),
+        ChatMessage(role="assistant", content="U-5", timestamp=""),
+    ]
+    session = _session()
+    install_checkpoint(
+        session, FIRST_SUMMARY, consumed=4, anchor=_anchor_of(history[:4])
+    )
+
+    out = asyncio.run(manager.compress(history, session=session))
+
+    body = _text_of(out)
+    assert "U-2" not in body and "U-3" not in body, "covered by the checkpoint"
+    assert "U-4" in body and "U-5" in body
+
+
+def test_paging_says_what_it_dropped_and_archives_it(tmp_path):
+    """The one place a message can still disappear: the request must fit.
+
+    Paging only runs after the summary failed and the history is still over
+    target, so what it removes is *not* covered by the checkpoint.  Dropping is
+    unavoidable; dropping silently is not -- the model would keep reasoning as
+    if it had read those messages.
+    """
+    calls: list[str] = []
+    manager = _manager(
+        _recorder(calls, reply=None),
+        root=str(tmp_path),
+        max_context_tokens=2_000,
+        l4_tail_tokens=200,
+    )
+    history = _chat(40, "D", size=300)
+    session = _session()
+    install_checkpoint(
+        session, FIRST_SUMMARY, consumed=4, anchor=_anchor_of(history[:4])
+    )
+
+    out = asyncio.run(manager.compress_if_needed(history, session=session))
+
+    body = _text_of(out)
+    assert OMISSION_MARK in body, "a silent drop is the bug this test exists for"
+    archived = list((tmp_path / "transcripts" / "archive").glob("*.md"))
+    assert archived, "the dropped messages must stay reachable"
+    text = "\n".join(p.read_text(encoding="utf-8") for p in archived)
+    assert "D-4 " in text, "the first message paging removed is on disk"
+
+
+def test_a_user_message_quoting_the_checkpoint_marker_is_not_a_note():
+    """``hard_trim`` pins what ``split_checkpoint`` calls a note -- nothing else."""
+    quoted = ChatMessage(
+        role="user", content=f"{CHECKPOINT_MARK} 这段是用户粘的，不是摘要", timestamp=""
+    )
+    assert _is_checkpoint_note(quoted) is False
+
+    real = ChatMessage(role="user", content=f"{CHECKPOINT_MARK}\n{FIRST_SUMMARY}", timestamp="")
+    assert _is_checkpoint_note(real) is True
 
 
 # ---- #18: what L4 consumed stays searchable ----------------------------

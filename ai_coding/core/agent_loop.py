@@ -888,9 +888,7 @@ class AgentLoop:
             # *resumed* turn itself settled becomes replayable for its later
             # batches -- the model edits a file, re-reads it, and gets the
             # pre-edit output, which is the eval-08 stage F loop again.
-            self._replay_scope = frozenset(
-                record.digest for record in (session.write_ahead or ())
-            )
+            self._replay_scope = WriteAheadLog.replay_scope(session)
             try:
                 return await self._run_turn(
                     session, "", on_delta, observer, (), append_user=False, resumed=True
@@ -1528,6 +1526,11 @@ class AgentLoop:
         session.continuations = 0
         # R4b: guard state (duplicate calls, …) is per turn, never per process.
         self.dispatcher.guards.reset()
+        # I2/D8: so is the L4 breaker.  It exists to stop hammering a broken
+        # summariser *within* a turn; carrying it across turns (it is persisted)
+        # would leave a session that had one bad minute permanently unable to
+        # summarise, with the delta growing until paging has to drop it.
+        session.compaction_failures = 0
         self.reporter.begin_turn(self.observer)
         self._warn_tools_chars_once()
         # P2 (补充式方案 06) mark this turn open; 11-spec §7.1 makes it

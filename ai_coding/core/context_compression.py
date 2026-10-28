@@ -341,8 +341,19 @@ def _tool_copy(m: ChatMessage, content: str) -> ChatMessage:
 
 
 def _is_checkpoint_note(message: ChatMessage) -> bool:
-    """Is this message the one that stands for everything before it?"""
-    return message.role == "user" and (message.content or "").startswith(CHECKPOINT_MARK)
+    """Is this message the one that stands for everything before it?
+
+    Same definition as :func:`split_checkpoint` — a bare prefix match would let
+    a user message that merely *quotes* the marker be pinned by ``hard_trim``
+    and cost a real message.
+    """
+    return bool(split_checkpoint([message])[0])
+
+
+#: First line of the message that says "some history was dropped here".  A drop
+#: the model cannot notice is a drop it will reason from as if nothing were
+#: missing (same rule as the tool-output clip marker).
+OMISSION_MARK = "[上下文超限]"
 
 
 def hard_trim(
@@ -941,11 +952,12 @@ class ContextManager:
             # makes ``delta`` exact.  Slicing the *post-L1* list by length is
             # how a boundary message used to fall between the two.
             head, tail = self.split_tail(l4_source)
-            if not head and 0 < used <= len(l4_source):
-                # Everything fitted the tail budget, so ``split_tail`` handed
-                # the whole history back verbatim.  The checkpoint already
-                # stands for ``messages[:used]``; sending both would pay for the
-                # same messages twice and break branch C's "only the delta".
+            if (not head or len(head) < used) and 0 < used <= len(l4_source):
+                # ``split_tail`` either handed the whole history back (everything
+                # fitted the budget) or cut before the checkpoint's boundary.
+                # Either way the checkpoint already stands for
+                # ``messages[:used]``; sending it again pays twice and keeps the
+                # checkpoint from ever advancing.
                 head, tail = l4_source[:used], l4_source[used:]
             stats.append(
                 LayerStat(
@@ -1080,7 +1092,7 @@ class ContextManager:
             should_summarise = (
                 (force and not self._l4_since_empty(out))
                 or self._l4_should_run(out, session)
-                or dropped
+                or (dropped and self._l4_failure_count(session) < _L4_BREAKER_THRESHOLD)
             )
             if should_summarise and self._summarizer is not None and l4_head:
                 self.last_summary_attempted = True
@@ -1127,7 +1139,7 @@ class ContextManager:
         self.last_layer_stats = stats
 
         if _history_tokens(out) > self._max_context_tokens:
-            out = hard_trim(out, HARD_TRIM_KEEP_TAIL)
+            out = self._announce_omissions(out, hard_trim(out, HARD_TRIM_KEEP_TAIL))
 
         out = _ensure_pinned(out, pinned)
         return sanitize_pairs(out)
@@ -1211,16 +1223,49 @@ class ContextManager:
             session=session,
         )
         target = int(self._max_context_tokens * self._compress_target_ratio)
+        trimmed = out
         guard = 0
         while (
-            _history_tokens(out) > target
-            and len(out) > _MIN_PAGE_MESSAGES
+            _history_tokens(trimmed) > target
+            and len(trimmed) > _MIN_PAGE_MESSAGES
             and guard < 4
         ):
-            out = hard_trim(out, max(_MIN_PAGE_MESSAGES, len(out) // 2))
+            trimmed = hard_trim(trimmed, max(_MIN_PAGE_MESSAGES, len(trimmed) // 2))
             guard += 1
+        out = self._announce_omissions(out, trimmed)
         out = _ensure_pinned(out, pinned)
         return out
+
+    def _announce_omissions(
+        self, before: list[ChatMessage], after: list[ChatMessage]
+    ) -> list[ChatMessage]:
+        """Say what paging dropped, and archive it.
+
+        Paging only runs once the summary has already failed (or been skipped
+        by the breaker) and the history is still over target, so the messages
+        it removes are ones the checkpoint does *not* cover.  Dropping them is
+        unavoidable at that point -- the request has to fit -- but doing it
+        silently is not: the model would go on reasoning as if it had read
+        them.  The originals are archived first, so ``history_search`` can
+        still reach them.
+        """
+        kept = {id(message) for message in after}
+        dropped = [message for message in before if id(message) not in kept]
+        if not dropped:
+            return after
+        self.archive_transcript(dropped)
+        notice = ChatMessage(
+            role="user",
+            content=(
+                f"{OMISSION_MARK} 为放进上下文窗口，已省略 {len(dropped)} 条较早消息；"
+                "原文已归档，需要时用 history_search 取回。"
+            ),
+            timestamp="",
+            synthetic=True,
+        )
+        if after and _is_checkpoint_note(after[0]):
+            return [after[0], notice, *after[1:]]
+        return [notice, *after]
 
     # ---- L4 -----------------------------------------------------------
 

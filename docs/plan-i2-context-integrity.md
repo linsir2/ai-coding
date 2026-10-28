@@ -218,7 +218,13 @@ opencode 的 `flattenAndDropOldest` 名字本身就是答案：**要丢就丢最
 
 > 对任意一次 `compress(messages)`，返回的请求历史中，每条 `messages` 里的消息
 > **要么原样出现在 tail 里，要么被某次摘要覆盖（索引 < consumed）**。
-> 不允许第三种结局。
+> 不允许**静默**的第三种结局。
+
+第三条出口只有一个，且必须**说出来**：请求仍然超窗时（摘要已失败/被熔断跳过），
+`compress_if_needed` 的分页只能删消息才能塞进窗口。此时被删的消息先 `archive_transcript`
+落盘，再在历史里插一条 `[上下文超限] 已省略 N 条…用 history_search 取回` 的合成消息——
+模型不会在"以为自己读过"的前提下继续推理（与工具输出的 `[truncated: 省略 N 字符]` 同一原则）。
+这是降级路径，不是正常路径：正常路径下三个分支都不删消息。
 
 三条分支各自满足它：
 
@@ -227,7 +233,8 @@ opencode 的 `flattenAndDropOldest` 名字本身就是答案：**要丢就丢最
 | A 首次压缩 | 无有效 checkpoint，且 `dropped` 或超 ceiling | `[note(new)] + tail`，`consumed = len(head)` |
 | B 增量压缩 | 有 checkpoint，且 delta ≥ 阈值（或 force） | `[note(new)] + tail`，`consumed = len(head)` |
 | C 攒着不摘 | 有 checkpoint，delta < 阈值 | `[note(prev)] + delta + tail` ← **delta 原样携带** |
-| D 摘要失败 | 任何分支的摘要返回 None | 返回**未安装 note 的 `out`**（降级为不压缩，绝不丢 delta） |
+| D 摘要失败 | 任何分支的摘要返回 None | `[note(prev)] + delta + tail`（不推进 consumed、不装新 note、不丢 delta） |
+| 兜底 | 以上之后仍超窗 | 分页删除 + 归档 + `[上下文超限]` 声明（唯一允许丢消息的出口） |
 
 ### D1 · checkpoint 变成会话级持久状态 + 按身份切分
 
@@ -583,3 +590,4 @@ L4 替换掉的 head **不归档**——而环境块却承诺"需要原文用 `h
 | v2 | 两轮独立评审修入 **8 个 P0**：① 切点改**按对象身份**（长度算术会在 L1 占位符处丢消息，且 L2 会换对象）；② `previous` **必须渲染进 prompt**（v1 以为传了就够，实际 `llm_helpers.py:289-293` 只用于选 max_tokens）；③ `/compact` 与 overflow 救援会改写 `session.messages` → 增加"从 `messages[0]` 的 note 回退"；④ 摘要失败不推进 consumed、不装 note；⑤ `dropped` 不再每轮触发 L4（否则 ≤6 次摘要不可能），新增分支 C"delta 原样携带"；⑥ 分块去掉块数上限（上限=静默丢弃）；⑦ 新增 D9（L4 消费的 head 也要归档，否则 `history_search` 承诺是假的）、D10（L2 保留量 3→8、窗口 200→1200，依据 R5：窗口 48k 却只给模型 2–3k）、D8（`_l4_failures` 跨会话共享）；⑧ 评测补 4 条防作弊判据并声明"不能证明找到 bug"。另更正 token 数字：446,289（非 635,067），摘要占 68.8%。 |
 | v3 | **实现期发现并修掉两个 v2 没看见的问题**：<br/>① **anchor 用 `ChatMessage.id` 是空转**——循环创建的消息 id 一律为 `""`，`"" == ""` 恒真，等于没有失效判据。改成**覆盖前缀的内容指纹** `_anchor_of(messages[:consumed])`：跨存盘稳定，前缀里任何一条被改写/删除/回退都会失配。只指纹"边界那一条"也不够（改前面某条检测不到），所以是整段前缀。<br/>② 新增 `test_context_integrity.py` 15 条用例；**15/15 变异全部被杀**（原计划的变异 #1「长度算术切点」经实测是**等价变异**——在 L1 插入占位符后，`len(source)-len(tail)` 与按身份得到的切点数值相同，因为 tail 始终是 `l4_source` 的真后缀；已替换为「tail 丢掉第一条」这一真正会丢消息的变异）。<br/>③ `_run_l4` 的 chunk 数不设上限由 `_split_text` 的行边界切分保证，已用 150k 输入的用例锁定。 |
 | v4 | **独立实现评审（只读、逐行）发现 2 个 P0 + 4 个 P1，全部修入**：<br/>**P0-a** `split_tail` 回溯到"只剩一条 tool"时，声明它的 assistant 在 head 里，`sanitize_pairs` 会把这条最新工具结果删掉——它既不在请求里也不在 checkpoint 覆盖内。修：回溯后若 `tail[0].role == "tool"`，向前把载体一并纳入 tail（`split_tail`）。这是"工具密集回合的末尾"，不是边角。<br/>**P0-b** 分支 D 原样返回全量历史后，`compress_if_needed` 的 paging 用 `hard_trim` 丢掉未覆盖前缀，且 note 根本不在请求里。修：分支 D 改为 `[note(previous), *delta, *tail]`（与分支 C 同形——旧 checkpoint 仍然描述 `messages[:used]`），并让 `hard_trim` **保留 checkpoint note**。<br/>**P1-a** checkpoint 路径完全没接 L4 熔断器（`_l4_should_run` 只在首压路径被调用）→ 摘要持续失败时每个请求都白打 2 次。修：`wants_summary` 加 `not breaker_open`（`force` 仍可绕过，手动 `/compact` 要能重试）。<br/>**P1-b** `split_tail` 兜底分支在"整段都放得下"时返回 `head=[]`，分支 C 会把已被 checkpoint 覆盖的整段历史再发一遍。修：`head` 为空且有 checkpoint 时，以 `used` 为界重切。<br/>**P1-c** 首压路径 `cut = len(l4_source) - len(surviving_tail)` 把 snip 占位符当真实消息，占位符落在 tail 首部时 `cut` 少 1 → 该条被摘要却记为"未覆盖"。修：新增 `_cut_index`（按身份从尾部扫）。<br/>**P1-d** 恢复回合内**新 settle** 的记录也能被重放（R4 只是缩小了窗口）。修：`resume_turn` 开始时快照 sidecar 的 digest 集合，`WriteAheadLog(replay_scope=…)` 只对快照内的记录重放。<br/>**P2**：删掉死代码 `_l4_head_text*` 与 `_run_l4(tail=)`；`compaction_failures` 落盘；L1 的 `LayerStat.removed` 在 checkpoint 路径改为 `skipped`（head 是被 note 代表，不是被删）；`_anchor_of` 纳入 `tool_calls` 参数；`summary_delta_tokens` 改 `gt=0`（0 会静默关掉分支 C）。<br/>**变异 21/21 全杀**（新增 6 条对应上面的修复）。 |
+| v5 | **第二轮独立评审（对抗式，专查修复本身）又找到 1 个 P0 + 2 个 P1**：<br/>**P0** P0-b 修得不彻底——`hard_trim` 只保住了 note，note 之后全是**未覆盖的 delta**，分页照样把它们删掉。修：新增 `_announce_omissions`——分页真正删消息时先 `archive_transcript`，再插一条 `[上下文超限] 已省略 N 条…用 history_search 取回` 的合成消息；§3.0 的不变量改成"不允许**静默**的第三种结局"，并把这条兜底路径写进表格。<br/>**P1** `replay_scope` 把 `running` 记录也算进可重放集合（崩溃时正在执行的那条，恢复回合自己 settle 后会被重放）。修：抽出 `WriteAheadLog.replay_scope(session)`，只取 `status == "ok"`。<br/>**P1** 熔断器打开后没有复位路径 → 会话永久不摘要。修：`AgentLoop._begin_turn` 每回合清零（熔断的语义是"本回合别再打了"，不是"这个会话永远别摘要"），因此 `compaction_failures` **不落盘**（契约与实现一致）。<br/>**P2** 首压路径的 `dropped` 也绕过熔断；`len(head) < used` 时会重发已覆盖消息；`_is_checkpoint_note` 退回前缀匹配会把用户粘贴的引用当成 note。三条都已修并有用例。<br/>**变异 25/25 全杀**；`test_context_integrity.py` 25 条 + write-ahead 2 条。 |

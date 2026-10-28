@@ -140,8 +140,11 @@ async def test_hard_trim_keeps_tail_and_drops_oldest(tmp_path):
         tmp_path,
         summarizer=None,
     )
-    out = await cm.compress(_msgs(30))
-    assert len(out) == HARD_TRIM_KEEP_TAIL
+    history = _msgs(30)
+    out = await cm.compress(history)
+    # I2: the drop is announced -- one synthetic message in front of the tail.
+    assert out[0].content.startswith("[上下文超限]")
+    assert out[1:] == history[-HARD_TRIM_KEEP_TAIL:]
 
 
 @pytest.mark.asyncio

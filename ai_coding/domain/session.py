@@ -277,6 +277,9 @@ class SessionData:
     # I2: how many consecutive L4 failures this *session* has had.  The counter
     # used to live on the shared ``ContextManager``, so three failures in one
     # session stopped summarisation for every other session in the process.
+    # Memory-only and reset at the start of every turn (``AgentLoop._begin_turn``):
+    # the breaker exists to stop hammering a broken summariser within a turn,
+    # not to disable summarisation for the life of the session.
     compaction_failures: int = 0
     # NOT persisted — ``to_dict`` is a hand-written whitelist, so this stays out
     # of the on-disk format and the Java side keeps reading the same bytes.
@@ -618,11 +621,6 @@ class SessionData:
             data["compactionCheckpoint"] = self.compaction_checkpoint
             data["compactionConsumed"] = int(self.compaction_consumed)
             data["compactionAnchor"] = self.compaction_anchor
-        # Written on its own: the counter outlives a checkpoint (a session that
-        # never compacted can still have failed to), and losing it on reload
-        # would let a broken summariser burn two calls per request forever.
-        if self.compaction_failures:
-            data["compactionFailures"] = int(self.compaction_failures)
         # Same rule again: sessions without acceptance contracts write no key,
         # so every file written before R0-1 keeps reading byte-identically.
         if self.acceptance:
@@ -735,7 +733,6 @@ class SessionData:
             compaction_checkpoint=str(data.get("compactionCheckpoint", "") or ""),
             compaction_consumed=int(data.get("compactionConsumed", 0) or 0),
             compaction_anchor=str(data.get("compactionAnchor", "") or ""),
-            compaction_failures=int(data.get("compactionFailures", 0) or 0),
             acceptance=acceptance,
             step_deliveries=step_deliveries,
             open_turn=int(raw_open_turn)

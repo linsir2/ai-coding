@@ -479,3 +479,26 @@ def test_a_resumed_turn_only_replays_what_the_crash_left_behind(tmp_path):
     assert log.claim(fresh, allow_replay=True) is None, (
         "a call settled by the resumed turn must run again, not be replayed"
     )
+
+
+def test_a_running_record_settled_by_the_resume_is_not_replayable(tmp_path):
+    """A crash mid-call leaves ``running``; the resumed turn re-runs and settles it.
+
+    If the snapshot had taken the record just because it existed, that settled
+    result would become replayable for the resume's later batches -- the same
+    stale-read loop, one layer down.
+    """
+    service = SessionService(root=tmp_path / "sessions")
+    session = service.create(title="s")
+    call = ToolCall(id="c0", name="bash", params={"command": "cat a.py"})
+
+    first = WriteAheadLog(session, service)
+    first.claim(call)  # intent only: status stays "running"
+
+    scope = WriteAheadLog.replay_scope(session)
+    assert scope == frozenset(), "an unfinished call proves nothing"
+
+    log = WriteAheadLog(session, service, replay_scope=scope)
+    log.settle(call, ToolResult(success=True, output="STALE"))
+
+    assert log.claim(call, allow_replay=True) is None
