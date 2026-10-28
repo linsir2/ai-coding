@@ -482,7 +482,7 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 | M-A6 文档一致性 | ✅ **已完成** | `memory_cases` **11/11**（深路径 442 字符下仍 11/11）；`features.md` 加口径说明；方案见 [plan-m-a6-n3.md](plan-m-a6-n3.md) |
 | M-B1 静态检查回喂 | ✅ **已完成** | `core/static_check.py` + L2 注入真实输出；全链路用例通过；方案见 [plan-m-b.md](plan-m-b.md) |
 | M-B2 检索收敛判据 | ✅ **已完成** | `SEARCH` 阶梯 L1(≥4)/L2(≥6)（= `interventions.py` 的 `search_streak_threshold` / `search_streak_l2`）；11+3+1 条用例；信号不解析输出 |
-| M-B3 重试分类 | ✅ **早已实现** | `FailureKind` 六档 + AUTH_ERROR 首轮不重试；补 `insufficient_quota` 归 FATAL |
+| M-B3 重试分类 | ✅ **早已实现** | `FailureKind` 六档 + AUTH_ERROR 首轮不重试；`insufficient_quota` 现归 `QUOTA` 并**首次即切**备用 provider（I1/R-1，eval-08 复测：4 类错误各自行为符合预期） |
 | M-B4 检索预算 | ⚠️ **不采纳** | `budget_pressure` + 收尾已存在；意图分类无可辩护契约 |
 | M-B5 收敛可观测 | ✅ **已完成** | `SearchStalled` 事件（iteration/level/calls/streak）自动落 trace jsonl |
 | M-C1~C3 恢复与持久化 | ✅ 已完成 | 2026-10-25 |
@@ -491,7 +491,10 @@ M-B1（静态检查回喂）确实是**性价比最高的功能改进**，但它
 | M-F1~F3 记忆 | ✅ 已完成 | 2026-10-27 |
 
 | M-G1~G4 可观测与质量 | ✅ 已完成 | 2026-10-27 |
-| M-H1~H4 产品化 | ⬜ 未开始 | — |
+| M-H1 安装分发 | ⚠️ **部分** | 版本单源、前端进 wheel（CI 断言 wheel 内容）、`ai-coding config init`；**无 PyPI 发布、无 CHANGELOG** → 判据"干净环境 `pip install ai-coding`"不成立 |
+| M-H2 配置与密钥 | ✅ **已完成** | 环境变量 + `${VAR}` + 来源提示；`config init/path`（2026-10-27） |
+| M-H3 IDE 集成 | ⬜ **未开始** | 全仓无 LSP/editor 代码（32 条里唯一不可机检项） |
+| M-H4 插件市场 | ⬜ **未开始** | 技能安装有，签名/来源校验无（`skills/` 内无 signature 相关代码） |
 
 ### 待立项缺陷（§十三）的处置
 
