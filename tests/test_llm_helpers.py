@@ -103,7 +103,11 @@ async def test_a_well_formed_summary_is_taken_on_the_first_call(monkeypatch):
 
     async def fake_chat(model_config, system, user, max_tokens):
         calls.append(user)
-        return "## 目标\n压缩历史\n## 待办\n- 无"
+        # I2: a usable checkpoint covers the template (``summary_shape_ok``);
+        # a two-section stub is what a *cut-off* reply looks like.
+        return "\n".join(
+            f"{section}\n压缩历史" for section in llm_helpers.SUMMARY_SECTIONS
+        )
 
     monkeypatch.setattr(llm_helpers, "_chat", fake_chat)
 
@@ -118,7 +122,10 @@ async def test_an_unstructured_reply_is_asked_for_again(monkeypatch):
     """One nudge, matching the reference implementations: cheaper than
     degrading, and bounded so a model that will not comply cannot hold the
     pipeline."""
-    replies = iter(["好的，我总结了一下。", "## 目标\n压缩历史\n## 已完成\n- 跑了测试"])
+    complete = "\n".join(
+        f"{section}\n压缩历史" for section in llm_helpers.SUMMARY_SECTIONS
+    )
+    replies = iter(["好的，我总结了一下。", complete])
     calls: list[str] = []
 
     async def fake_chat(model_config, system, user, max_tokens):
@@ -129,7 +136,7 @@ async def test_an_unstructured_reply_is_asked_for_again(monkeypatch):
 
     got = await llm_helpers.build_summarizer(object())("很长的历史")
 
-    assert got is not None and "## 已完成" in got
+    assert got is not None and "## 工作状态" in got
     assert len(calls) == 2
 
 

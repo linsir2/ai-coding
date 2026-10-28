@@ -148,6 +148,7 @@ class Compactor:
             pinned=pinned,
             observed_tokens=observed_tokens,
             reason=reason,
+            session=session,
         )
         usage = self._summary_usage()
         if result is history:
@@ -258,6 +259,7 @@ class Compactor:
         pinned: Sequence[ChatMessage] = (),
         observed_tokens: int = 0,
         reason: CompactionReason = "auto",
+        session: Any | None = None,
     ) -> list[ChatMessage]:
         if self._context is None:
             return history
@@ -286,6 +288,10 @@ class Compactor:
                     kwargs["on_delta"] = on_delta
                 if "reason" in params:
                     kwargs["reason"] = reason
+                # I2: the checkpoint lives on the session, so the context
+                # manager needs it to know what has already been summarised.
+                if session is not None and "session" in params:
+                    kwargs["session"] = session
                 return await run_with_deadline(
                     aware(history, **kwargs),
                     timeout=budget,

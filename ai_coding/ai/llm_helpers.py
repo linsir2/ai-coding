@@ -27,13 +27,17 @@ DeltaSink = Any  # Callable[[str], None], chunks of a streaming summary
 
 _MAX_SUMMARY_CHARS = 60_000
 _MAX_EXTRACT_CHARS = 40_000
-#: One seven-section set is roughly this many characters.  It is also the floor
-#: under the growth bound: the template grew from four sections to seven, so a
+#: One eight-section set is roughly this many characters.  It is also the floor
+#: under the growth bound: the template grew from four sections to eight, so a
 #: first merge can legitimately more than double a short predecessor, and
 #: rejecting that would drop the summary entirely (see docs/r11-analysis.md 12.2).
 _MIN_SUMMARY_CHARS = 1_200
-_CREATE_TOKENS = 1_200
-_MERGE_TOKENS = 1_600
+#: I2: 1,200 output tokens held about 10–15 facts, while the task that motivated
+#: this (eval-08 T2) touched 20+ files.  The checkpoint is the *only* thing
+#: carrying those facts forward, and the window it saves is 48k — a 2.4k-token
+#: summary is 5% of it, not a budget problem.
+_CREATE_TOKENS = 2_400
+_MERGE_TOKENS = 2_800
 _TRUNCATION_NOTE = "\n[历史过长，此处截断]"
 
 #: OpenCode's shrink ladder (compaction.ts:120): when the provider rejects a
@@ -146,11 +150,18 @@ async def _chat_stream(
 #: to put the user's constraints or the reasons behind a decision, so a merge
 #: had to crush them into "目标" or drop them. Those are exactly the two kinds
 #: of knowledge a checkpoint exists to carry forward.
+#:
+#: I2 adds an eighth, ``## 已尝试且失败``: eval-08's full-stack task spent 90
+#: minutes re-trying one root cause five times because nothing carried "I already
+#: moved that table and it still failed" forward.  Claude Code's template has the
+#: same section ("errors and fixes"), and Roo Code's condense prompt asks for
+#: "all attempted solutions and their outcomes".
 SUMMARY_SECTIONS = (
     "## 目标",
     "## 约束与要求",
     "## 决策",
     "## 工作状态",
+    "## 已尝试且失败",
     "## 下一步",
     "## 关键文件",
     "## 重要上下文",
@@ -174,6 +185,15 @@ _MERGE_RULES = (
     "· 仅当新内容明确推翻、取代、解决或使其失效时，才移除旧信息；\n"
     "· 只更新各小节的内容，不要新增、删除或改名字节；\n"
     "· 逐字保留文件路径、命令、标识符、错误串、URL。\n"
+    # I2: three rules that keep the checkpoint from drifting on a long task.
+    # "Newer wins" alone lets a model quietly rewrite the objective, and a
+    # failure ledger that can be dropped is not a ledger.
+    "· 「目标」与「约束与要求」是**粘性**的：只有更新的用户消息才能改写它们，"
+    "其它内容一律不得改动这两节。\n"
+    "· 「已尝试且失败」**只增不减**：后续成功只能把条目移到「已完成」并注明修复方式，"
+    "不能因为新内容没提到就删掉。\n"
+    "· 新内容与旧「决策」冲突时，两条都保留并注明哪一条被推翻、为什么，不要静默覆盖。\n"
+    "· 篇幅不够时，先压缩「工作状态」的细节；永远不要压缩目标、约束和失败账本。\n"
     "· 若" + CHECKPOINT_OPEN + " 为空，则直接总结" + SINCE_OPEN + "。\n"
 )
 
@@ -287,10 +307,7 @@ def build_summarizer(model_config: Any) -> Summarizer:
         previous_len = len(previous or "")
         streaming = on_delta is not None or usage_sink is not None
         for cap in caps:
-            prompt = (
-                f"请{('更新' if previous else '压缩')}以下对话：\n"
-                f"\n{_clip_for_summary(text, cap)}"
-            )
+            prompt = _summary_prompt(text, previous, cap)
             too_big = False
             for attempt in range(2):
                 try:
@@ -322,6 +339,8 @@ def build_summarizer(model_config: Any) -> Summarizer:
                 body = checkpoint_body(out)
                 if body is None:
                     continue
+                if not summary_shape_ok(body):
+                    continue
                 if not summary_within_growth_bound(previous_len, body):
                     continue
                 return body
@@ -330,6 +349,49 @@ def build_summarizer(model_config: Any) -> Summarizer:
         return None
 
     return summarize
+
+
+def _summary_prompt(text: str, previous: str | None, cap: int) -> str:
+    """The user turn: the checkpoint to update, then what happened since.
+
+    ``previous`` used to be passed to this function's caller and then dropped --
+    it only picked ``max_tokens`` and one Chinese verb, while the system prompt
+    went on describing a ``<previous-checkpoint>`` block that never arrived.
+    That made "update" a rewrite: every pass re-derived the objective from
+    whatever fragment of history it happened to see, which is how a long task's
+    checkpoint came to freeze at its opening (eval-08 T2: two summaries 21
+    iterations apart, both "blocked: conversation truncated").
+    """
+    body = _clip_for_summary(text, cap)
+    if not previous:
+        return f"请压缩以下对话：\n\n{SINCE_OPEN}\n{body}\n{SINCE_CLOSE}"
+    return (
+        "请更新以下 checkpoint。\n\n"
+        f"{CHECKPOINT_OPEN}\n{previous}\n{CHECKPOINT_CLOSE}\n\n"
+        f"{SINCE_OPEN}\n{body}\n{SINCE_CLOSE}"
+    )
+
+
+def summary_shape_ok(body: str) -> bool:
+    """Is this a usable checkpoint, not just a reply that names one heading?
+
+    ``checkpoint_body`` accepts any text containing a heading line, which is
+    right for *stripping a preamble* and too weak for *accepting a summary*: a
+    reply that stopped after ``## 目标`` was installed as the whole record of a
+    session.  A checkpoint has to cover most of the template, in order, starting
+    at the top — with the eighth section (``## 已尝试且失败``) optional, because a
+    first compaction legitimately has nothing to report there.
+    """
+    found: list[int] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped in SUMMARY_SECTIONS:
+            found.append(SUMMARY_SECTIONS.index(stripped))
+    if not found or found[0] != 0:
+        return False
+    if found != sorted(set(found)):
+        return False
+    return len(found) >= 5
 
 
 def build_extractor(model_config: Any) -> Extractor:

@@ -278,6 +278,8 @@ class TurnCloser:
                 note_chars=int(
                     getattr(self._settings, "working_memory_note_chars", 120) or 120
                 ),
+                # I2/D6: the ledger the next request's <working-memory> reads.
+                failures=failures,
             ),
             keep=int(getattr(self._settings, "working_memory_keep", 12)),
         )

@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -72,11 +73,74 @@ def _run(cmd: list[str], cwd: Path, timeout: int = 300) -> tuple[int, str]:
         p = subprocess.run(
             cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout
         )
-        return p.returncode, (p.stdout + p.stderr)[-3000:]
+        return p.returncode, (p.stdout + p.stderr)[-60_000:]
     except subprocess.TimeoutExpired:
         return 124, "TIMEOUT"
     except FileNotFoundError as exc:
         return 127, str(exc)
+
+
+#: A pytest section header, e.g. ``=========== FAILURES ===========``.
+_PYTEST_SECTION = re.compile(r"^=+ (?P<title>[^=]+?) =+$")
+#: A line pytest emits for a warning, with or without a ``path:line:`` prefix.
+_PYTEST_WARNING = re.compile(r"^\s*(?:\S+:\d+: )?\w*Warning: ")
+_PYTEST_COUNT = re.compile(r"(\d+) (failed|passed|error|errors)")
+
+
+def _pytest_digest(text: str, limit: int = 4_000) -> str:
+    """I2/D7: what a model actually needs out of a pytest run.
+
+    Before this, the feedback was ``log[-1200:]``: on eval-08 stage F that was
+    ~500 characters of deprecation warnings plus *one* of eighteen failures, so
+    the model kept "fixing" the wrong thing.  The index of every failure is the
+    part that matters; the first traceback is the part that explains it.
+    """
+    lines = text.splitlines()
+    failed: list[str] = []
+    for line in lines:
+        if line.startswith("FAILED ") and line.strip() not in failed:
+            failed.append(line.strip())
+    sections: list[tuple[str, list[str]]] = []
+    title = ""
+    body: list[str] = []
+    for line in lines:
+        header = _PYTEST_SECTION.match(line)
+        if header:
+            if title or body:
+                sections.append((title, body))
+            title = header.group("title").strip()
+            body = []
+            continue
+        body.append(line)
+    if title or body:
+        sections.append((title, body))
+
+    def clean(raw: list[str]) -> list[str]:
+        out: list[str] = []
+        for line in raw:
+            if _PYTEST_WARNING.match(line):
+                continue
+            if line.strip().startswith(("warnings summary", "PytestDeprecationWarning")):
+                continue
+            out.append(line)
+        return out
+
+    parts: list[str] = []
+    if failed:
+        parts.append("\n".join(failed))
+    failures = next((clean(b) for t, b in sections if t == "FAILURES"), [])
+    if failures:
+        parts.append("=== 首个失败详情 ===")
+        parts.append("\n".join(failures).strip())
+    counts = "，".join(
+        f"{n} {kind}" for n, kind in _PYTEST_COUNT.findall(" ".join(lines[-20:]))
+    )
+    if counts:
+        parts.append(f"[{counts}]")
+    if not parts:
+        return "\n".join(clean(lines))[-limit:]
+    joined = "\n".join(part for part in parts if part)
+    return joined if len(joined) <= limit else joined[: limit - 20] + "\n…（已截断）"
 
 
 def self_check(ws: Path) -> dict:
@@ -99,7 +163,7 @@ def self_check(ws: Path) -> dict:
             else (rc, log)
         )
         out["be_pytest"] = rc2
-        out["be_log"] = log2[-1200:]
+        out["be_log"] = _pytest_digest(log2) if rc2 not in (0, None) else log2[-1200:]
     else:
         out["be_pytest"] = None
         out["be_log"] = "backend/ not created yet"

@@ -122,10 +122,11 @@ mcp:               # MCPConfig（默认关闭）
 |---|---|---|
 | `max_context_tokens` | 0 | 上下文预算的**配置覆盖**（默认 0 = 未设置）。真实窗口由 `resolve_context_window(cfg)` 解析：显式配置 → 激活模型自身 `context_window` → 保守默认 48000。压缩水位与预算用例都必须读解析后的窗口，读未解析的字段会得到 0 |
 | `max_messages` | 400 | L1 裁剪阈值（保留头/尾见下；R3b 起它只在预算被突破时才真正触发） |
-| `snip_keep_head` / `snip_keep_tail` | 3 / 20 | L1 裁剪保留条数 |
-| `keep_recent_tool_results` | 3 | L2 保留最近工具结果数 |
-| `l2_window_chars` | 200 | L2 信封保留的头/尾各多少字符（R7b） |
-| `l2_window_budget` | 4000 | L2 一次压缩里所有窗口的总字符预算，从新到旧分配（R7b） |
+| `snip_keep_head` / `snip_keep_tail` | 3 / 30 | L1 裁剪保留条数（I2/D10：尾 20→30，只影响无 checkpoint 的首压路径） |
+| `keep_recent_tool_results` | 8 | L2 保留最近工具结果数（I2/D10：3→8，48k 窗口放得下，且 3 条只覆盖 1–2 个迭代） |
+| `l2_window_chars` | 1200 | L2 信封保留的头/尾各多少字符（R7b；I2/D10：200→1200，200 等于「内容没了」） |
+| `l2_window_budget` | 12000 | L2 一次压缩里所有窗口的总字符预算，从新到旧分配（R7b；I2/D10：4000→12000） |
+| `summary_delta_tokens` | 4000 | I2/D1 分支 C 的阈值：已存在 checkpoint 时，新增部分小于它就不调摘要模型，原样带进请求 |
 | `per_result_persist_bytes` | 30000 | L3 单结果持久化阈值 |
 | `l4_tail_tokens` | 15000 | L4 摘要保留尾部的 **token 预算**（有效值 `min(l4_tail_tokens, window//4)`，吸附到 user 边界）。~~`l4_keep_tail`（条数）~~ 已删除——条数既约束不了成本也约束不了覆盖 |
 | `auto_process_tool_results` | true | 是否自动执行工具结果回喂 |
@@ -453,8 +454,12 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 | `turn_count: int = 0` | `turnCount` | 会话级回合号（1 起）。旧会话从 0 开始重新计数（不回溯） |
 | `turn_digests: list[TurnDigest]` | `turnDigests` | 有界回合摘要环（空则不写，与 `task` 同规则）。坏行忽略 |
 | `turn_usages: list[TurnUsage]` | `turnUsages` | 每轮 token 花费（`{turn, promptTokens, completionTokens, totalTokens}`），`reporter` 填数后在 `close()` 里追记并重存一次；零花费/无上报不写行、不重存。旧文件缺键即空表 |
+| `compaction_checkpoint: str = ""` | `compactionCheckpoint` | I2/D1：会话级持久 checkpoint（摘要正文）。非空才写盘；旧会话缺键 = 无 checkpoint |
+| `compaction_consumed: int = 0` | `compactionConsumed` | checkpoint 覆盖 `messages[:consumed]` |
+| `compaction_anchor: str = ""` | `compactionAnchor` | 被覆盖前缀的内容指纹（`_anchor_of(messages[:consumed])`）。前缀被改写/回退 → 失配 → checkpoint 作废并重摘 |
+| `compaction_failures: int = 0` | `compactionFailures` | 连续 L4 失败计数，熔断按**会话**隔离（原先挂在共享的 `ContextManager` 上，跨会话互相影响） |
 
-`TurnDigest`（`domain/turn_digest.py`）：`turn` / `request` / `outcome` / `status` / `files` / `openItems`（camelCase），
+`TurnDigest`（`domain/turn_digest.py`）：`turn` / `request` / `outcome` / `status` / `files` / `openItems`（camelCase）/ `note` / `source` / `attempts`（I2/D6，最多 3 条「试过什么」，渲染成 `<working-memory>` 里的 `试过:` 行），
 `render()` 产出一行。派生函数 `build_digest(...)` 不发模型调用；`render_working_memory(...)` 产出
 `<working-memory>` 块（仅当本轮历史真被改写）；`append_digest(...)` 维护有界环且永不抛错。
 
@@ -954,7 +959,7 @@ M-C1~M-C3 见 `docs/plan-m-c.md`。三条新契约，其余全是新增或追加
 
 **三个上限**（`OUTPUT_CHARS=4000` / `DATA_KEYS=8`×`DATA_VALUE_CHARS=200` / `ARTIFACTS=4`）：崩溃批次的 tool 消息**不在盘上**（`resume_turn` 的历史止于上一个已完成结果），续跑时模型只能看到这里；无界记录会让 sidecar 变成第二份 transcript。条数上界 256（`WriteAheadLog.MAX_RECORDS`）。
 
-**复用域 = 回合**：`TurnCloser.close` 清空 sidecar，跨回合不可能命中。只覆盖 `mutates_world` 的工具（工具自报的元数据，与只读门同一份判据）；`ephemeral` 会话不记。`running` **不是**命中（副作用可能已发生），只有 `ok` 复用 —— 「副作用已成、`ok` 未落盘」的残留窗口需要 outbox/围栏令牌，本方案**不封**（§七）。复用时跳过 `guards.after` 与 `TOOL_AFTER`（没有执行），但 `TOOL_BEFORE` 与 guards 的 `check` 已跑过，权限语义不 bypass。`delete` 与回合结束都会清 sidecar。
+**复用域 = 回合**：`TurnCloser.close` 清空 sidecar，跨回合不可能命中。只覆盖 `mutates_world` 的工具（工具自报的元数据，与只读门同一份判据）；`ephemeral` 会话不记。`running` **不是**命中（副作用可能已发生），只有 `ok` 复用 —— 「副作用已成、`ok` 未落盘」的残留窗口需要 outbox/围栏令牌，本方案**不封**（§七）。**I2/D4：只有恢复被崩溃的回合才复用**（`resume_turn` 传 `allow_replay=True`）；活 turn 内同一调用必须真的再跑一次，否则模型读到陈旧结果、护栏也看不到重复（eval-08 阶段 F：`cat -n models.py` 连跑 10 次、输出逐字节相同、`duration` 全是 0.018s）。恢复时复用的那一次**照样跑 `guards.after` 与 `TOOL_AFTER`**（崩溃前它确实发生过），并在 `data["replayed"]=True` 标明。`delete` 与回合结束都会清 sidecar。
 
 ### `TaskState` 两个字段（M-C3）
 

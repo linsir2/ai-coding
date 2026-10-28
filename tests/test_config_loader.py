@@ -54,7 +54,7 @@ def test_load_from_yaml_file_overrides(tmp_path):
     assert app.ai.max_context_tokens == 12345
     assert app.ai.max_messages == 99
     # non-overridden defaults remain
-    assert app.ai.snip_keep_tail == 20
+    assert app.ai.snip_keep_tail == 30
 
 
 def test_load_models_camelcase_compat(tmp_path):

@@ -46,7 +46,11 @@ from ai_coding.domain.message import ChatMessage
 PREAMBLE = "好的，我来总结一下：\n\n"
 PROSE = "这个项目的 ## 目标 我已经梳理过了。"
 
-GOOD = "## 目标\n把审计做完\n\n## 约束与要求\n无"
+#: A complete reply.  I2 made the acceptance check require the template's shape
+#: (``summary_shape_ok``): a reply that stopped after ``## 目标`` used to be
+#: installed as the whole record of a session.  This fixture is the "good"
+#: answer, so it has to be one.
+GOOD = "\n".join(f"{section}\n无" for section in SUMMARY_SECTIONS)
 
 _note = lambda body: ChatMessage(  # noqa: E731
     role="user", content=f"{CHECKPOINT_MARK}\n{body}", timestamp=""

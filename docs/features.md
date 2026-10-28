@@ -232,12 +232,17 @@ plan-runner 的步内强制关闭（`max_auto_continuations=0`）：步是共享
 | 层 | 动作 |
 |---|---|
 | L3 | 超阈值的大段尾部工具输出持久化到 `transcripts/persisted/`，历史内替换为 `<persisted-output>` 占位 |
-| L1 | 超 `max_messages` 时裁剪中间段，留 `snip_keep_head`/`snip_keep_tail` 条并插入 `[snipped n messages]` |
+| L1 | 超 `max_messages` 时裁剪中间段，留 `snip_keep_head`/`snip_keep_tail` 条并插入 `[snipped n messages]`。**已存在 checkpoint 时不运行**：head 由 checkpoint 代表，tail 直接从原历史取真后缀（I2/D1） |
 | L2 | 早于 `keep_recent_tool_results` 的旧工具结果换成**可回收的信封**：正文先落盘到 `transcripts/elided/`（内容寻址，同一正文不重复写），历史里留「清了多少字符 + 原文路径 + 头 `l2_window_chars` 字符 + 尾 `l2_window_chars` 字符」；窗口总量受 `l2_window_budget` 约束、**从新到旧**分配，预算用完之后只剩信封（路径仍在，所以信息永远取回得到）。比占位还短的正文原样保留（R7b） |
-| L4 | 超上下文预算时用真实 LLM 摘要压缩历史（带 3 次失败熔断），降级为硬裁剪 |
+| L4 | 超上下文预算时用真实 LLM 摘要压缩历史（带 3 次失败熔断，按会话隔离），降级为硬裁剪。**checkpoint 之后只摘要新增部分**（按消息身份切分，绝不按长度猜），上一次摘要以 `<previous-checkpoint>` 进 prompt 做增量更新；新增部分小于 `summary_delta_tokens` 时**不调模型**，原样带进请求（I2/D1 分支 C）。摘要输入按 `_SUMMARY_CAP` 分块滚动合并，**不截断** |
 | 兜底 | 硬裁剪 + `sanitize_pairs` 保证严格配对 |
 
 所有阶段都在消息列表的浅拷贝上进行，绝不修改调用方历史。
+
+**I2 的三条不丢消息的不变量**（`docs/plan-i2-context-integrity.md` §3.0）：每条消息要么原样在请求里，
+要么被 checkpoint 覆盖（下标 < `compaction_consumed`），**不会两边都没有**；摘要失败时不推进
+`compaction_consumed`、不装 note、也不丢 delta（分支 D）；`compaction_anchor` 是覆盖前缀的内容指纹，
+历史被改写/回退即作废重摘。L4 消费掉的原文会先归档到 `transcripts/archive/`，`history_search` 的承诺才成立（D9）。
 
 ### 压缩层的语义、判据与可观测（M-E1 ~ M-E4）
 

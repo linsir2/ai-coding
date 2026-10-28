@@ -13,12 +13,17 @@ import ai_coding.ai.llm_helpers as llm_helpers
 
 
 def _ok_summary() -> str:
-    return "## 目标\n压缩完成"
+    # I2: the acceptance check requires the template's shape, so the "good"
+    # fixture has to be a complete checkpoint.
+    from ai_coding.ai.llm_helpers import SUMMARY_SECTIONS
+
+    return "\n".join(f"{section}\n压缩完成" for section in SUMMARY_SECTIONS)
 
 
 @pytest.mark.asyncio
 async def test_summarizer_forwards_chunks_to_on_delta_and_records_usage(monkeypatch):
-    chunks = ["## 目标\n", "压缩完成"]
+    full = _ok_summary()
+    chunks = [full[:20], full[20:]]
     seen: list[str] = []
 
     async def fake_chat_stream(model_config, system, user, max_tokens, on_delta=None):

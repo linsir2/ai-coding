@@ -56,7 +56,12 @@ def _big_history(n: int = 60_000) -> str:
 
 
 def _ok_summary() -> str:
-    return "## 目标\n压缩完成"
+    # A complete template: I2's acceptance check requires the shape, so a
+    # two-section reply is a *failure* now (it used to be installed as the whole
+    # record of a session).
+    from ai_coding.ai.llm_helpers import SUMMARY_SECTIONS
+
+    return "\n".join(f"{section}\n压缩完成" for section in SUMMARY_SECTIONS)
 
 
 async def _summarize(text: str, previous: str | None = None):
@@ -87,7 +92,7 @@ async def test_an_overflow_on_the_first_size_is_retried_at_a_lower_cap(monkeypat
 
     got = await _summarize(_big_history())
 
-    assert got == "## 目标\n压缩完成"
+    assert got == _ok_summary()
     assert len(calls) == 2, "one shrink retry, not zero"
     assert len(calls[1]) < len(calls[0]), "the retry must carry less text"
 
@@ -179,7 +184,7 @@ async def test_the_real_async_client_retries_a_400_overflow_and_ships_a_smaller_
 
         got = await summarize(_big_history())
 
-        assert got == "## 目标\n压缩完成"
+        assert got == _ok_summary()
         assert len(server.state.request_sizes) == 2, "one 400 then one retry"
         assert server.state.request_sizes[1] < server.state.request_sizes[0], (
             "the retried request must be smaller on the wire"
@@ -271,7 +276,7 @@ async def test_a_first_attempt_that_fits_is_not_retried(monkeypatch):
 
     got = await _summarize(_big_history())
 
-    assert got == "## 目标\n压缩完成"
+    assert got == _ok_summary()
     assert len(calls) == 1
 
 
@@ -309,7 +314,7 @@ async def test_the_merge_prompt_keeps_its_output_budget_while_shrinking(monkeypa
 
     got = await _summarize("以前的结论\n" + _big_history(), previous="以前的结论")
 
-    assert got == "## 目标\n压缩完成"
+    assert got == _ok_summary()
     assert len(calls) == 2
     assert budgets == [llm_helpers._MERGE_TOKENS, llm_helpers._MERGE_TOKENS], (
         "shrinking input must not shrink the merge's output budget"

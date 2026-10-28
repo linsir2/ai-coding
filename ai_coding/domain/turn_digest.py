@@ -62,6 +62,13 @@ _ELLIPSIS = "…"
 _CLOSING_LIMIT = 600
 _MAX_FILES_SHOWN = 4
 _WHITESPACE = re.compile(r"\s+")
+#: I2/D6: the "what did I already try" ledger.  Three lines is what fits in the
+#: working-memory budget without crowding out the turn lines themselves; the
+#: eval-08 stage F loop repeated one failed edit for eight minutes, and a line
+#: saying "already tried: models.py → nonzero_exit" is the cheapest possible
+#: brake on that.  It is a *mitigation*, not the cure (see plan §7).
+_MAX_ATTEMPTS = 3
+_ATTEMPT_CHARS = 100
 
 WORKING_MEMORY_NOTE = "需要更早的细节时用 memory_search 查证，不要整读会话文件。"
 
@@ -116,6 +123,9 @@ class TurnDigest:
     note: str = ""
     #: "model" when ``note`` came from ``checkpoint_write``, else "harness".
     source: str = "harness"
+    #: I2/D6: what this turn tried and failed at, newest last.  Derived from the
+    #: loop's own failure records, so it costs no model call.
+    attempts: tuple[str, ...] = ()
 
     def display(self) -> str:
         """The sentence the ring shows: the model's note wins when there is one."""
@@ -134,6 +144,8 @@ class TurnDigest:
             extras.append(self.status)
         if extras:
             line += f"（{'；'.join(extras)}）"
+        if self.attempts:
+            line += "\n  试过: " + "；".join(self.attempts)
         return line
 
     def to_dict(self) -> dict[str, Any]:
@@ -152,6 +164,8 @@ class TurnDigest:
         # Written even when it is "harness", so the round trip is exact and a
         # reloaded session keeps answering "who wrote this line?".
         data["source"] = self.source or "harness"
+        if self.attempts:
+            data["attempts"] = list(self.attempts)
         return data
 
     @staticmethod
@@ -176,6 +190,12 @@ class TurnDigest:
             open_items = int(data.get("openItems", 0) or 0)
         except (TypeError, ValueError):
             open_items = 0
+        raw_attempts = data.get("attempts")
+        attempts = (
+            tuple(str(item) for item in raw_attempts)
+            if isinstance(raw_attempts, (list, tuple))
+            else ()
+        )
         return TurnDigest(
             turn=turn,
             request=request,
@@ -185,7 +205,29 @@ class TurnDigest:
             open_items=open_items,
             note=str(data.get("note", "") or ""),
             source=str(data.get("source", "") or "harness"),
+            attempts=attempts,
         )
+
+
+def _attempts(
+    failures: Sequence[tuple[str, str, str]], files: Sequence[str]
+) -> tuple[str, ...]:
+    """I2/D6: ``(tool, reason)`` pairs this turn hit, then the files it touched.
+
+    Deduplicated and newest-last, capped at ``_MAX_ATTEMPTS``.  A ``bash`` that
+    exits non-zero ten times yields *one* line, which is the point: the model
+    needs to see "I already tried this", not ten copies of it.
+    """
+    seen: list[str] = []
+    for tool, reason, _preview in failures:
+        text = one_line(f"{tool} → {reason}", _ATTEMPT_CHARS)
+        if text and text not in seen:
+            seen.append(text)
+    for path in files:
+        text = one_line(f"改了 {path}", _ATTEMPT_CHARS)
+        if text and text not in seen:
+            seen.append(text)
+    return tuple(seen[-_MAX_ATTEMPTS:])
 
 
 def build_digest(
@@ -199,6 +241,7 @@ def build_digest(
     outcome_chars: int = DEFAULT_OUTCOME_CHARS,
     model_note: str = "",
     note_chars: int = DEFAULT_NOTE_CHARS,
+    failures: Sequence[tuple[str, str, str]] = (),
 ) -> TurnDigest:
     """The one line this turn leaves in the session (harness-derived, no model call)."""
     spoken = one_line(outcome.text or "", outcome_chars)
@@ -207,15 +250,17 @@ def build_digest(
         reason = one_line(outcome.reason, outcome_chars)
         spoken = f"{label}：{reason}" if reason else label
     note = one_line(model_note, note_chars) if model_note else ""
+    files = _unique_paths(artifacts)
     return TurnDigest(
         turn=int(turn),
         request=one_line(user_input, request_chars),
         outcome=spoken,
         status=outcome.status.value,
-        files=_unique_paths(artifacts),
+        files=files,
         open_items=len(task.open_items()) if task is not None else 0,
         note=note,
         source="model" if note else "harness",
+        attempts=_attempts(failures, files),
     )
 
 

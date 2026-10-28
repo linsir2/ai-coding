@@ -210,15 +210,19 @@ def test_the_first_summary_is_unbounded_because_it_has_no_predecessor():
     assert summary_within_growth_bound(0, "y" * 5000) is True
 
 
-# ---- the seven-section contract --------------------------------------------
+# ---- the section contract ---------------------------------------------------
 
 
-def test_the_template_carries_the_seven_sections():
+def test_the_template_carries_the_eight_sections():
+    """I2 adds ``## 已尝试且失败``: eval-08's full-stack task re-tried one root
+    cause five times because nothing carried "I already moved that table and it
+    still failed" forward.  Claude Code's template has the same section."""
     assert SUMMARY_SECTIONS == (
         "## 目标",
         "## 约束与要求",
         "## 决策",
         "## 工作状态",
+        "## 已尝试且失败",
         "## 下一步",
         "## 关键文件",
         "## 重要上下文",

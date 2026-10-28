@@ -259,6 +259,21 @@ class SessionData:
     # (see `server.handlers.context_tokens`). 0 means "never compacted", which
     # keeps the ordinary reading — the newest turn — unchanged.
     last_compacted_turn: int = 0
+    # I2: the checkpoint the context pipeline installed, and how much of
+    # ``messages`` it stands for.  Compaction is recomputed from the full history
+    # on every request, so without these three the summariser re-read the same
+    # opening of the conversation every time and its verdict never advanced
+    # (measured: two summaries 21 iterations apart, both "blocked: conversation
+    # truncated").  ``compaction_anchor`` is the id of ``messages[consumed - 1]``;
+    # undo, rewind or any external rewrite changes it, and a checkpoint that no
+    # longer describes the history in front of it must not be carried forward.
+    compaction_checkpoint: str = ""
+    compaction_consumed: int = 0
+    compaction_anchor: str = ""
+    # I2: how many consecutive L4 failures this *session* has had.  The counter
+    # used to live on the shared ``ContextManager``, so three failures in one
+    # session stopped summarisation for every other session in the process.
+    compaction_failures: int = 0
     # NOT persisted — ``to_dict`` is a hand-written whitelist, so this stays out
     # of the on-disk format and the Java side keeps reading the same bytes.
     # ``SessionService.list_sessions`` reads every file anyway and drops the
@@ -593,6 +608,12 @@ class SessionData:
         # compaction had already invalidated, and the meter read them again.
         if self.last_compacted_turn:
             data["lastCompactedTurn"] = int(self.last_compacted_turn)
+        # I2: same rule — a session that never compacted writes none of these,
+        # so every file written before I2 keeps reading byte-identically.
+        if self.compaction_checkpoint:
+            data["compactionCheckpoint"] = self.compaction_checkpoint
+            data["compactionConsumed"] = int(self.compaction_consumed)
+            data["compactionAnchor"] = self.compaction_anchor
         # Same rule again: sessions without acceptance contracts write no key,
         # so every file written before R0-1 keeps reading byte-identically.
         if self.acceptance:
@@ -702,6 +723,9 @@ class SessionData:
             turn_usages=usages,
             inbox=inbox,
             last_compacted_turn=int(data.get("lastCompactedTurn", 0) or 0),
+            compaction_checkpoint=str(data.get("compactionCheckpoint", "") or ""),
+            compaction_consumed=int(data.get("compactionConsumed", 0) or 0),
+            compaction_anchor=str(data.get("compactionAnchor", "") or ""),
             acceptance=acceptance,
             step_deliveries=step_deliveries,
             open_turn=int(raw_open_turn)

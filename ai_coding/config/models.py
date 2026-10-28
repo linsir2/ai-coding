@@ -363,14 +363,23 @@ class AIConfig(BaseModel):
     # when the token budget is exceeded" (docs/r3-analysis.md 1.15).
     max_messages: int = 400
     snip_keep_head: int = 3
-    snip_keep_tail: int = 20
-    keep_recent_tool_results: int = 3
+    # I2/D10: the first-compaction path keeps a longer verbatim tail.  Measured
+    # in eval-08: a 48k window was handing the model 2-3k, so every iteration
+    # re-read what the previous one had just learned.
+    snip_keep_tail: int = 30
+    keep_recent_tool_results: int = 8
     per_result_persist_bytes: int = 30_000
     # R7b: what an elided tool result keeps on each side, and what all of them may
     # keep together.  The body itself is written to transcripts/elided/ first, so
     # a window of 0 is still safe (it only costs the model a read).
-    l2_window_chars: int = 200
-    l2_window_budget: int = 4_000
+    # I2/D10: 200 chars was "the content is gone"; the model's only recourse was
+    # to read the file again.  1200 keeps the shape of a diff/hunk.
+    l2_window_chars: int = 1_200
+    l2_window_budget: int = 12_000
+    #: I2/D1 branch C: a delta smaller than this is carried verbatim into the
+    #: request instead of paying for a summary call.  Keeps "compress" from
+    #: firing on every iteration once a checkpoint exists.
+    summary_delta_tokens: int = Field(default=4_000, ge=0)
     # P3-2 refactor: the L4 tail is token-budgeted (OpenCode parity), not
     # counted.  Effective budget is min(l4_tail_tokens, window // 4): the
     # tail alone can never approach the post-compaction paging target.
