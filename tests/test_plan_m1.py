@@ -235,7 +235,7 @@ async def test_parent_messages_exclude_step_transcripts():
     assert parent_text.count(STEP_HEAD) == 2       # both prompts are there
     assert "one" in parent_text and "two" in parent_text
     # the seed (goal + plan) stays inside the step's own short conversation
-    assert "[计划目标]" not in parent_text
+    assert "[计划标题]" not in parent_text
     # linear: 2 steps -> 2 prompts + 2 summaries, nothing else
     assert len(session.messages) == 4
 
@@ -253,6 +253,10 @@ async def test_step_seed_carries_goal_and_plan_state():
     assert "plan" in seed_2
     assert "two" in seed_2 and "three" in seed_2
     assert "one" not in seed_2
+    # R21 §3: the seed says "title", not "goal" -- ``plan.updated`` also has a
+    # ``goal`` key, and "目标" sent steps looking for a running goal.
+    assert "[计划标题]" in seed_2
+    assert "[计划目标]" not in seed_2
     # constant size: step 3's seed is not larger than step 2's
     assert len(loop.step_sessions[2].messages[0].content) <= len(seed_2) + 50
 

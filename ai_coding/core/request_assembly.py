@@ -25,7 +25,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ai_coding.ai.llm_helpers import checkpoint_body
+from ai_coding.config.models import DEFAULT_CONTEXT_TOKENS
 from ai_coding.core.compaction import Compactor
+from ai_coding.core.context_compression import chars_for_tokens, estimate_tokens
 from ai_coding.core.events import ContextCompacted, LoopEvent, MemoryInjected
 from ai_coding.core.file_mentions import resolve_bare_paths, resolve_file_mentions
 from ai_coding.core.plan_reminders import reconcile
@@ -33,7 +36,7 @@ from ai_coding.core.plan_runner import outside_workspace_paths
 from ai_coding.core.request_builder import build_tail, content_of, volatile_block
 from ai_coding.core.sop_router import SOPRouter
 from ai_coding.core.turn_books import TurnBooks
-from ai_coding.domain.message import IMAGE_MIME_BY_SUFFIX, ChatMessage
+from ai_coding.domain.message import CHECKPOINT_MARK, IMAGE_MIME_BY_SUFFIX, ChatMessage
 from ai_coding.domain.read_ledger import render as render_read_ledger
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
@@ -46,10 +49,25 @@ from ai_coding.skills.render import render_skill_content
 
 __all__ = ["Assembled", "RequestAssembler", "human_utterance"]
 
-#: r17/T4 caps: one file, one directory listing, and the whole block.
-_FILE_CHARS = 20_000
+#: r17/T4 caps, now expressed in the unit the window is measured in (R22/H10).
+#:
+#: These used to be character constants (20,000 per file, 40,000 per block)
+#: whatever ``max_context_tokens`` was.  A 6k window therefore received 40,138
+#: characters on every iteration -- 96% of the request -- and because the block
+#: is appended *after* compression, the pipeline could never shrink it: S3
+#: compacted three times in one turn and still ran at 2.7x the window.
+#:
+#: The block now gets 15% of the window in tokens.  ``10,000`` is the ceiling the
+#: old 40,000 **ASCII** characters stood for (a Chinese-heavy file reached ~20k
+#: tokens at the same character count, which is exactly the over-admission this
+#: change removes), so a large window cannot grow the block without bound.
+#: ``estimate_tokens`` turns a token budget into a character cut, and the min is
+#: a per-file floor so one big paste cannot reduce the next file to a pointer.
+_FILES_BLOCK_RATIO = 0.15
+_FILES_BLOCK_TOKENS_CAP = 10_000
+_FILES_BLOCK_MIN_TOKENS = 150
+_FILE_TOKENS_CAP = 5_000
 _DIR_ENTRIES = 200
-_FILES_BLOCK_BUDGET = 40_000
 
 
 def human_utterance(messages: Sequence[ChatMessage]) -> str:
@@ -68,13 +86,44 @@ def human_utterance(messages: Sequence[ChatMessage]) -> str:
     Everything else is the human's, and it is the input the mention blocks
     are rebuilt from, the input the outside-workspace warning looks at, and
     the request the research exit judges.
+
+    R22/A-15: a **checkpoint** is stored as a user-role message too (it has to
+    be -- the model reads it as the conversation so far), and it is *model*
+    text.  Before this, `/compact` made the summary "the last thing a human
+    wrote", so the file-reference block, the skill mentions and the
+    outside-workspace check were all rebuilt from a summary.  The test here is
+    the one `split_checkpoint` already uses -- the marker plus
+    `checkpoint_body`'s shape -- not a second prefix rule.
     """
     for message in reversed(messages):
         if message.role != "user" or message.synthetic:
             continue
         content = (message.content or "").strip()
+        if _is_checkpoint_text(content):
+            continue
         return content
     return ""
+
+
+def _is_checkpoint_text(content: str) -> bool:
+    """True when this user-role line is a compaction checkpoint, not a person."""
+    if not content.startswith(CHECKPOINT_MARK):
+        return False
+    return checkpoint_body(content[len(CHECKPOINT_MARK) :]) is not None
+
+
+def _carries_checkpoint(messages: Sequence[ChatMessage]) -> bool:
+    """True when a summary already stands in for earlier turns of this history.
+
+    R22/H11: ``/compact`` replaces ``session.messages`` itself, so
+    ``did_compact`` (a comparison against the session's own list) is False on
+    every later turn — the one case where the checkpoint is *persistent* is the
+    one case the "the summary may be unreliable" caveat would have missed.
+    """
+    return any(
+        message.role == "user" and _is_checkpoint_text((message.content or "").strip())
+        for message in messages
+    )
 
 
 def _file_tag(rel: str) -> str:
@@ -82,21 +131,51 @@ def _file_tag(rel: str) -> str:
     return f'<file path="{rel}">\n'
 
 
-def _file_content(rel: str, target: Path, *, limit: int = _FILE_CHARS) -> str:
-    """One file's text, wrapped, truncated to ``limit``.
+def _file_content(rel: str, target: Path, *, room_tokens: int) -> str:
+    """One file's text, wrapped, cut to ``room_tokens``.
 
-    ``limit`` is whichever ceiling is tighter: the per-file cap, or what is
-    left of the block budget.  The truncation note always says the real total,
-    so the model can ask for the rest rather than believe it read the whole
-    thing (D5).
+    ``room_tokens`` is whichever ceiling is tighter: the per-file cap, or what is
+    left of the block budget.  The cut lands on a line boundary and the note
+    names the range it holds plus the ``read`` call that continues it -- S3's
+    model read a 497-line head of a 6000-line log and concluded the file was
+    complete, because the old note only said how many *characters* existed.
     """
     try:
         text = target.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return f'<file path="{rel}">[unreadable: {exc}]</file>'
-    if len(text) > limit:
-        text = text[:limit] + f"\n[truncated: {len(text)} chars total]"
-    return f'<file path="{rel}">\n{text}\n</file>'
+    limit = chars_for_tokens(text, room_tokens)
+    if limit >= len(text):
+        return f'<file path="{rel}">\n{text}\n</file>'
+    cut = text[:limit]
+    # Land on a line boundary so ``offset`` below names a whole line (a leading
+    # blank line is boundary 0 and must be kept, not mistaken for "no newline").
+    boundary = cut.rfind("\n")
+    if boundary >= 0:
+        cut = cut[: boundary + 1]
+    # Split the same way ``read`` does (splitlines counts \x0c and \u2028 too),
+    # otherwise the note's line numbers drift from the tool's offsets.
+    total = len(text.splitlines())
+    if cut.count("\n") == 0:
+        shown = 0
+    else:
+        shown = len(cut.splitlines())
+    if shown == 0:
+        # A file with no line break in the shown part cannot be paged by
+        # ``read``'s line offset; saying "lines 1-0, offset=0" would send the
+        # model back to the beginning.
+        note = (
+            f"\n[truncated: {len(text)} chars, {total} line{'s' if total != 1 else ''} total; "
+            f"this text is the first {len(cut)} chars of line 1]"
+        )
+    else:
+        # ``read``'s offset is 0-based, so "already shown lines 1-N" continues at
+        # offset=N -- exactly the number in this note.
+        note = (
+            f"\n[truncated: {len(text)} chars, {total} lines total; this text is lines 1-{shown}; "
+            f"read offset={shown} limit=500 for the rest]"
+        )
+    return f'<file path="{rel}">\n{cut}{note}\n</file>'
 
 
 def _observed_prompt_tokens(session: SessionData) -> int:
@@ -339,7 +418,9 @@ class RequestAssembler:
         # of the router, because a workspace can hold files without skills.
         file_block = self._referenced_files_block(user_input)
         # I3: inject anchor after compaction
-        anchor_block = self._format_anchor_block(session, compacted)
+        anchor_block = self._format_anchor_block(
+            session, compacted or _carries_checkpoint(history)
+        )
         # M2: the catalog sits with the other state to read, before the
         # instructions — it is reference data, not an instruction.
         catalog = self._catalog_builder() if self._catalog_builder is not None else ""
@@ -461,6 +542,15 @@ class RequestAssembler:
             "用户引用了以下文件/目录（@ 提及或直接粘贴路径），内容如下：",
         ]
         used = 0
+        budget = self._files_block_tokens()
+        # Every named file keeps a floor of `_FILES_BLOCK_MIN_TOKENS` while
+        # others are still to come, so one large paste cannot turn the 21-byte
+        # file after it into a bare pointer (measured: it did, before this).
+        pending = sum(
+            1
+            for rel in paths
+            if Path(rel).suffix.lower() not in IMAGE_MIME_BY_SUFFIX and not (root / rel).is_dir()
+        )
         for rel in paths:
             # r17/T5: an image mention rides as a message part (the loop reads
             # its bytes); injecting it as text would be noise at best.
@@ -470,24 +560,36 @@ class RequestAssembler:
             if target.is_dir():
                 block = self._directory_listing(rel, target)
             else:
-                room = _FILES_BLOCK_BUDGET - used
-                if len(_file_tag(rel)) >= room:
+                pending -= 1
+                room = min(_FILE_TOKENS_CAP, budget - used - pending * _FILES_BLOCK_MIN_TOKENS)
+                if room <= 0:
                     # D5: a file the user named is asked for, so the budget
                     # decides how much of it the model reads -- never whether it
-                    # reads it.  Dropping it whole (the old
-                    # ``[budget exhausted, not included]``) meant a third paste
-                    # arrived with nothing in it but a note that it had been
-                    # left out, which is the opposite of what pasting means.
+                    # reads it.  Out of room here now means "a pointer with the
+                    # read call", not "a fragment of three hundred characters".
                     lines.append(
                         f"- {rel}: [no room left in this request's file budget; "
                         "read it with the read tool instead]"
                     )
                     continue
-                block = _file_content(rel, target, limit=room)
-            used += len(block)
+                block = _file_content(rel, target, room_tokens=room)
+            used += estimate_tokens(block)
             lines.append(block)
         lines.append("</referenced-files>")
         return "\n".join(lines)
+
+    def _files_block_tokens(self) -> int:
+        """This block's budget, in tokens, from the window the pipeline uses.
+
+        Read from the compactor rather than from ``settings``: the window is what
+        the pipeline compacts against (``/model`` can repoint it), and
+        ``AIConfig`` on its own has no ``ai``/``models`` section for
+        ``resolve_context_window`` to read -- calling that here silently returned
+        the 48k default and would have left a 6k session unfixed.
+        """
+        window = int(getattr(self._compactor, "context_window", None) or DEFAULT_CONTEXT_TOKENS)
+        scaled = int(window * _FILES_BLOCK_RATIO)
+        return max(_FILES_BLOCK_MIN_TOKENS, min(_FILES_BLOCK_TOKENS_CAP, scaled))
 
     @staticmethod
     def _directory_listing(rel: str, target: Path) -> str:
@@ -586,16 +688,30 @@ class RequestAssembler:
 
     @staticmethod
     def _format_anchor_block(session: SessionData, compacted: bool) -> str:
-        """Format pre-compaction anchor as tail block."""
+        """Format pre-compaction anchor as tail block.
+
+        R22/H11: the caveat rides this block rather than a new one, because this
+        is the only block that exists *only* after a compaction -- the moment the
+        model starts trusting a summary it cannot recompute.  S3 answered "8
+        lines (truth 162)" from a checkpoint that claimed all 12 chunks were read;
+        the summariser had only ever seen 1,000-character head/tail slices of each
+        tool result, so its count was never verifiable.  Keyed on ``compacted``
+        alone: an anchor with no task goal (no plan/goal run) still needs it.
+        """
         anchor = getattr(session, "pre_compaction_anchor", "")
-        if not compacted or not anchor:
+        if not compacted:
             return ""
-        return (
-            "<task-anchor>\n"
-            f"压缩前的任务锚点：{anchor}\n"
-            "如果当前工作偏离此目标，请回到原始任务。\n"
-            "</task-anchor>"
+        lines = ["<task-anchor>"]
+        if anchor:
+            lines.append(f"压缩前的任务锚点：{anchor}")
+        lines.append(
+            "摘要可能不完整：若结论依赖计数、聚合或逐项枚举，请用一条命令重新核算"
+            "（如 grep -c / wc -l），不要只依据摘要。"
         )
+        if anchor:
+            lines.append("如果当前工作偏离此目标，请回到原始任务。")
+        lines.append("</task-anchor>")
+        return "\n".join(lines)
 
     # ---- I2: Constraint extraction ------------------------------------------
 

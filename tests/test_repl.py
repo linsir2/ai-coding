@@ -477,6 +477,64 @@ def test_budget_says_when_tracing_is_off(tmp_path):
     assert "tracing is off" in out
 
 
+class _PathTrace:
+    """A recorder whose last turn file is ``current_path`` (trace.py's shape)."""
+
+    def __init__(self, path):
+        self.current_path = path
+        self.store = None
+
+
+class _PathLoop:
+    def __init__(self, path):
+        self.trace = _PathTrace(path)
+
+
+async def test_trace_says_when_tracing_is_off():
+    """R22/FIX-2: three states, not two.
+
+    ``/trace`` used to answer "tracing is off" whenever no turn had run yet,
+    which read as "the config did not take effect" while ``/budget`` said
+    "本会话还没跑过回合" from the same recorder.  The off-state is only the
+    recorder being absent.
+    """
+    from ai_coding.app.commands import _trace_report
+
+    assert "tracing is off" in _trace_report(_NoTraceLoop(), _session("x"))
+
+
+async def test_trace_says_when_no_turn_has_run(tmp_path):
+    from ai_coding.app.commands import _trace_report
+    from ai_coding.core.trace import TraceStore
+
+    out = _trace_report(_BudgetLoop(TraceStore(tmp_path, workspace=tmp_path)), _session("never"))
+    assert "还没跑过回合" in out
+    assert "tracing is off" not in out
+
+
+async def test_trace_ignores_the_previous_session_turn(tmp_path):
+    """The recorder outlives ``/new``: its last path must not be presented as ours."""
+    from ai_coding.app.commands import _trace_report
+
+    stale = tmp_path / "old-session-id" / "turn-1.jsonl"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("", encoding="utf-8")
+    out = _trace_report(_PathLoop(stale), _session("new-session-id"))
+    assert "还没跑过回合" in out
+
+
+async def test_trace_renders_this_sessions_turn(tmp_path, monkeypatch):
+    from ai_coding.app import trace_text
+    from ai_coding.app.commands import _trace_report
+
+    mine = tmp_path / "s1" / "turn-1.jsonl"
+    mine.parent.mkdir(parents=True)
+    mine.write_text("", encoding="utf-8")
+    monkeypatch.setattr(trace_text, "summarize_turn", lambda path: {"turn": 1})
+    monkeypatch.setattr(trace_text, "render_turn", lambda summary: "turn 1: ok")
+    assert _trace_report(_PathLoop(mine), _session("s1")) == "[trace] turn 1: ok"
+
+
 async def test_unknown_close_command_gets_a_suggestion():
     """A typo must not become a model turn."""
     loop = _FakeLoop()

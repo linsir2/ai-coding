@@ -86,7 +86,14 @@ def _text(text: str) -> StepResult:
     return StepResult(text=text, finish_reason="stop")
 
 
-def _loop(engine: ChatEngine, sessions: SessionService, **settings) -> AgentLoop:
+def _loop(
+    engine: ChatEngine,
+    sessions: SessionService,
+    *,
+    workspace: str = ".",
+    observer=None,
+    **settings,
+) -> AgentLoop:
     registry = ToolRegistry()
     registry.register(_Reader())
     registry.register(_Greper())
@@ -96,7 +103,8 @@ def _loop(engine: ChatEngine, sessions: SessionService, **settings) -> AgentLoop
         registry,
         approval=AutoApproveCallback(),
         settings=AIConfig(**settings),
-        workspace=".",
+        workspace=workspace,
+        observer=observer,
     )
 
 
@@ -441,3 +449,113 @@ def _tracking_reject(loop, order):
         return original(session, text, index)
 
     return _wrapped
+
+
+# ---------------------------------------- R21 §6: position != content
+
+
+def _quote_corrections(session) -> list[str]:
+    return [
+        m.content or ""
+        for m in session.messages
+        if m.synthetic and "内容与这些位置对不上" in (m.content or "")
+    ]
+
+
+class _Events:
+    def __init__(self) -> None:
+        self.seen: list = []
+
+    def on_event(self, event) -> None:
+        self.seen.append(event)
+
+
+@pytest.mark.asyncio
+async def test_a_quote_the_range_no_longer_holds_is_sent_back_once(tmp_path):
+    """The file was rewritten between the read and the answer: the range still
+    "covers" the citation, but the quoted line is gone."""
+    (tmp_path / "a.py").write_text(
+        "def build():\n    return 1\n# end\n", encoding="utf-8"
+    )
+    engine = _ScriptedEngine([
+        _text('`a.py:2-3` 里写的是 "def deploy(): return 99"。'),
+        _text('更正：`a.py` 第 2-3 行是 "def build(): return 1"。'),
+    ])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, workspace=str(tmp_path))
+    session = sessions.create()
+    session.note_read("a.py", 1, 3, 3, workspace=str(tmp_path))
+
+    answer = await loop.process_input(session, "看看这个文件")
+
+    assert len(_quote_corrections(session)) == 1
+    assert "a.py:2-3" in _quote_corrections(session)[0]
+    assert session.claim_retries == 1
+    assert "更正" in answer
+
+
+@pytest.mark.asyncio
+async def test_the_second_pass_lets_it_through_and_reports_degraded(tmp_path):
+    (tmp_path / "a.py").write_text(
+        "def build():\n    return 1\n# end\n", encoding="utf-8"
+    )
+    engine = _ScriptedEngine([
+        _text('`a.py:2-3` 里写的是 "def deploy(): return 99"。'),
+        _text('`a.py:2-3` 里写的是 "def deploy(): return 99"。'),
+    ])
+    sessions = SessionService(tmp_path / "sessions")
+    events = _Events()
+    loop = _loop(engine, sessions, workspace=str(tmp_path), observer=events)
+    session = sessions.create()
+    session.note_read("a.py", 1, 3, 3, workspace=str(tmp_path))
+
+    await loop.process_input(session, "看看这个文件")
+
+    assert len(_quote_corrections(session)) == 1, "the check must not loop"
+    degraded = [
+        event for event in events.seen if getattr(event, "component", "") == "claim_check"
+    ]
+    assert degraded and "spent" in degraded[0].reason
+    assert loop.last_outcome.status.value != "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_tier_three_correction_spends_the_quote_budget_too(tmp_path):
+    """One budget, two checks: a turned-back answer does not get a second
+    challenge from the quote half in the same turn."""
+    (tmp_path / "a.py").write_text(
+        "def build():\n    return 1\n# end\n", encoding="utf-8"
+    )
+    engine = _ScriptedEngine([
+        _text("缺陷在 `a.py` 第 99-100 行，内容是 \"whatever it is here\"。"),
+        _text("更正：`a.py` 第 2 行就是返回值，99-100 行不存在。"),
+    ])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, workspace=str(tmp_path))
+    session = sessions.create()
+    session.note_read("a.py", 1, 3, 3, workspace=str(tmp_path))
+
+    await loop.process_input(session, "找缺陷")
+
+    assert len(_corrections(session)) == 1
+    assert _quote_corrections(session) == []
+
+
+@pytest.mark.asyncio
+async def test_an_answer_about_a_file_that_is_gone_is_not_challenged(tmp_path):
+    """Fail-open: no file on disk means no comparison, and no comparison means
+    no challenge.  The ledger says the range *was* read; the disk cannot
+    confirm or deny the quote, so the answer stands."""
+    engine = _ScriptedEngine([
+        _text('`a.py:1-3` 里写的是 "def deploy(): return 99"。'),
+    ])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, workspace=str(tmp_path))
+    session = sessions.create()
+    session.note_read("a.py", 1, 3, 3, workspace=str(tmp_path))
+
+    answer = await loop.process_input(session, "看看这个文件")
+
+    assert _quote_corrections(session) == []
+    assert session.claim_retries == 0
+    assert "def deploy()" in answer

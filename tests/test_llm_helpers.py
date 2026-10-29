@@ -174,3 +174,29 @@ async def test_the_summary_prompt_asks_for_the_shape_that_is_checked(monkeypatch
     # sections with OpenCode's seven, and this literal did not notice).
     for section in llm_helpers.SUMMARY_SECTIONS:
         assert section in seen[0]
+
+
+@pytest.mark.asyncio
+async def test_the_summary_prompt_demands_evidence_for_numbers(monkeypatch):
+    """R22/H11: the checkpoint said "all 12 chunks are done, total 8" when the
+    truth was 162, and the model then answered from the checkpoint.
+
+    The summariser only sees a 2,000-character head/tail of each tool result, so
+    it cannot recompute a count -- but it happily wrote one.  Three rules, in the
+    prompt it already reads, are what stop that: numbers need a source, partial
+    evidence may not be called complete, and a count that matters belongs in a
+    re-runnable command rather than in a bare number.
+    """
+    seen: list[str] = []
+
+    async def fake_chat(model_config, system, user, max_tokens):
+        seen.append(system)
+        return "## 目标\nx"
+
+    monkeypatch.setattr(llm_helpers, "_chat", fake_chat)
+    await llm_helpers.build_summarizer(object())("历史")
+
+    prompt = seen[0]
+    assert "来源" in prompt and "命令" in prompt
+    assert "部分" in prompt and "全部" in prompt
+    assert "重新核算" in prompt or "重算" in prompt

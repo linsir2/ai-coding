@@ -257,7 +257,7 @@
 | **缺口** | `security/sandbox.py` **只做路径限制**（拦 `..`/绝对路径/符号链接逃逸）。对标 Codex：`execpolicy`（纯策略）+ `sandboxing`（纯机制）+ 跨平台后端（Seatbelt / bwrap+landlock / MXC） |
 | **改动方向** | ① 先做 **Linux landlock/bubblewrap**（bwrap 已有依赖先例）；② 把策略判定（ALLOW/WARN/DENY）与机制（真正隔离）**分离**，`bypass_sandbox` 要求显式 allow |
 | **验收判据** | ① 单测：沙箱内进程**写不到**工作区外（真实子进程验证，不是 mock）；② `ruff`/`mypy` 0 |
-| **实际落地** | `security/process_sandbox.py`：`ProcessSandboxPolicy`（off/warn/enforce）/ `SandboxBackend` / `BwrapBackend` / `spawn_argv`（唯一 wrap 入口）。**策略与机制分离**，`enforce` 默认、fail-closed（机制缺失即拒绝并给出稳定原因码）。`BashTool` 与 `JobRegistry` 各自 catch `SandboxGap` → `error="denied"`。**子智能体栈同样接线**（roots 绑定子 worktree）。验收①**在 CI（真内核 + bubblewrap）实测通过** |
+| **实际落地** | `security/process_sandbox.py`：`ProcessSandboxPolicy`（off/warn/enforce）/ `SandboxBackend` / `BwrapBackend` / `spawn_argv`（唯一 wrap 入口）。**策略与机制分离**，`enforce` 默认、fail-closed（机制缺失即拒绝并给出稳定原因码）。`BashTool` 与 `JobRegistry` 各自 catch `SandboxGap` → `error="sandbox_unavailable"`（R22/A-4 起；此前误报 `denied`）。**子智能体栈同样接线**（roots 绑定子 worktree）。验收①**在 CI（真内核 + bubblewrap）实测通过** |
 
 ### M-D2 · 危险命令判定的可解释性 —— ✅ 已完成（2026-10-26）
 

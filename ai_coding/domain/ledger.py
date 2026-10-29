@@ -93,6 +93,11 @@ def build_ledger(
         tails[key] = excerpt
     for (tool, error), count in counts.items():
         hot = count >= 2 or (stall_threshold and failed_streak >= stall_threshold)
+        # R21 §3: "反复失败（1 次）" was a grammatical contradiction -- one
+        # failure is not a repeat.  Only the wording changes; the level rule
+        # stays exactly as it was (``count == 1`` is still medium), because it
+        # is what raises the question on the first sighting.
+        what = "调用失败" if count == 1 else "反复失败"
         items.append(UncertaintyItem(
             id=f"U-err-{tool}-{error}",
             # The failure code stays in the item id, not in the sentence: this
@@ -100,7 +105,7 @@ def build_ledger(
             # nothing injects it into the model's context), and the evidence
             # below it already carries the real output, so the code would only
             # be noise on screen (A5 §3b).
-            question=f"{tool} 反复失败（{count} 次）：直接原因是什么？",
+            question=f"{tool} {what}（{count} 次）：直接原因是什么？",
             kind="epistemic",
             level="high" if hot else "medium",
             evidence=(_tail(tails[tool, error]),),

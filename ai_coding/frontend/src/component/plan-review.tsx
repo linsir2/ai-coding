@@ -17,8 +17,10 @@ import { theme } from "../theme/tokens"
 import { moveSelection } from "../util/dialog-select"
 import {
   ASK_SKIP,
+  planProse,
   planReviewAnswer,
   planReviewItems,
+  planText,
   type AskRequest,
 } from "../util/ask"
 import { PROMPT_BORDER } from "./prompt"
@@ -88,6 +90,10 @@ export function PlanReviewPanel(props: {
       ? props.request.options
       : ["开始执行", "继续规划"]
   const items = () => planReviewItems(props.request)
+  // R21 §1: the plan is the model's Markdown; show it as readable text, and
+  // drop a step table whose rows the item list below already carries --
+  // otherwise the operator reads the same steps twice.
+  const prose = () => planText(planProse(props.request.detail, items()))
   const move = (delta: number) =>
     setSelected((current) => moveSelection(current, delta, options().length))
   // Approve submits straight away; keep-planning first lets the feedback be
@@ -154,7 +160,7 @@ export function PlanReviewPanel(props: {
         maxHeight={Math.max(3, Math.floor(dimensions().height / 2) - 6)}
         marginTop={1}
       >
-        <text fg={theme.textMuted}>{props.request.detail}</text>
+        <text fg={theme.textMuted}>{prose()}</text>
         <box flexDirection="column" marginTop={1}>
           <For each={items()}>
             {(item, index) => (

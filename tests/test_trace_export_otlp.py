@@ -90,6 +90,40 @@ def test_r9_a_tool_error_becomes_an_error_status(tmp_path):
     assert span["status"]["code"] == 2
 
 
+def test_a13_a_span_is_named_by_its_first_event(tmp_path):
+    """A-13: the span name is one operation name, not the whole event log."""
+    view = _view(tmp_path, [
+        _row(evt="IterationStarted"),
+        _row(evt="ContextAssembled"),
+        _row(evt="AssistantMessage"),
+        _row(span="c1", evt="ToolStarted"),
+        _row(span="c1", evt="ToolFinished"),
+    ])
+    spans = {span["spanId"]: span for span in _spans(rows_to_otlp([view]))}
+    by_span = {
+        attr["value"]["stringValue"]: span
+        for span in spans.values()
+        for attr in span["attributes"]
+        if attr["key"] == "ai-coding.span"
+    }
+    iteration = by_span["i1"]
+    tool = by_span["c1"]
+    assert iteration["name"] == "IterationStarted"
+    assert "|" not in iteration["name"]
+    events = {attr["key"]: attr["value"] for attr in iteration["attributes"]}["ai-coding.events"]
+    assert events == {"stringValue": "IterationStarted|ContextAssembled|AssistantMessage"}
+    assert tool["name"] == "ToolStarted"
+
+
+def test_a13_the_name_is_the_earliest_event_not_the_first_written_line(tmp_path):
+    """A skew or a resumed writer can put a later event on disk first."""
+    view = _view(tmp_path, [
+        _row(span="c1", evt="ToolFinished", ts="2026-09-28T00:00:02.000Z"),
+        _row(span="c1", evt="ToolStarted", ts="2026-09-28T00:00:01.000Z"),
+    ])
+    assert _spans(rows_to_otlp([view]))[0]["name"] == "ToolStarted"
+
+
 def test_r9_the_export_is_deterministic(tmp_path):
     view = _view(tmp_path, [_row(), _row(span="c1", parent="i1", evt="ToolStarted")])
     first = json.dumps(rows_to_otlp([view]), sort_keys=True)

@@ -59,6 +59,11 @@ class FailureKind(enum.Enum):
     #: a bigger one with -- but worth compacting the history, which is what the
     #: loop does with this verdict (G5-1).
     CONTEXT_OVERFLOW = "context_overflow"
+    #: The request carried an unparseable ``tool_calls[].arguments``.  Not
+    #: worth another model (every provider validates the same field) but not
+    #: fatal either: the repair is on our side, so the engine rebuilds the
+    #: request once and retries (R21 §10).
+    INVALID_ARGUMENTS = "invalid_arguments"
     FATAL = "fatal"
 
 
@@ -85,6 +90,23 @@ def _looks_like_context_overflow(exc: BaseException) -> bool:
     """True when a rejected request was rejected *for being too big*."""
     text = str(exc).lower()
     return any(marker in text for marker in _OVERFLOW_MARKERS)
+
+
+#: Substrings that identify a rejected ``tool_calls[].arguments`` field.  The
+#: measured case is dashscope's ``InternalError.Algo.InvalidParameter: The
+#: "function.arguments" parameter of the code model must be in JSON format``;
+#: the others cover the spellings an OpenAI-compatible gateway may use.
+_BAD_ARGUMENTS_MARKERS = (
+    "function.arguments",
+    "tool_calls[",
+    "arguments parameter",
+)
+
+
+def _looks_like_bad_arguments(exc: BaseException) -> bool:
+    """True when the body was rejected for one call's ``arguments`` string."""
+    text = f"{exc} {getattr(exc, 'body', None) or ''}".lower()
+    return any(marker in text for marker in _BAD_ARGUMENTS_MARKERS)
 
 
 #: Verdicts another provider could plausibly survive (M2 §5).  ``FATAL`` is
@@ -153,6 +175,8 @@ def classify_failure(exc: BaseException) -> FailureKind:
             return FailureKind.AUTH_ERROR
         if status in (400, 413) and _looks_like_context_overflow(exc):
             return FailureKind.CONTEXT_OVERFLOW
+        if status in (400, 422) and _looks_like_bad_arguments(exc):
+            return FailureKind.INVALID_ARGUMENTS
     return FailureKind.FATAL
 
 
@@ -356,7 +380,10 @@ class OpenAIChatEngine(ChatEngine):
             kwargs["stream_options"] = {"include_usage": True}
 
         attempts = max(0, cfg.max_retries) + 1
-        for attempt in range(attempts):
+        rebuilt = False
+        # One spare iteration: a rebuild-and-retry is not a retry of the same
+        # body, so it must not come out of the transient-failure budget.
+        for attempt in range(attempts + 1):
             try:
                 return await self._stream(kwargs, on_delta)
             except EngineError:
@@ -365,6 +392,25 @@ class OpenAIChatEngine(ChatEngine):
                 raise
             except Exception as exc:  # noqa: BLE001 — engine boundary, re-raised typed
                 kind = classify_failure(exc)
+                if kind is FailureKind.INVALID_ARGUMENTS and not rebuilt:
+                    # The history carries an unparseable ``arguments`` string;
+                    # re-sending the same body cannot help (measured: four
+                    # identical 400s per turn, forever).  Rebuild from the
+                    # domain messages -- ``mapping`` repairs the field -- and
+                    # try once.  This is also what rescues a session file
+                    # written before the repair existed (R21 §10).
+                    rebuilt = True
+                    kwargs["messages"] = self.build_request_messages(
+                        messages, instructions, image_loader
+                    )
+                    if self.on_retry is not None:
+                        self.on_retry(
+                            kind=kind.value,
+                            attempt=attempt + 1,
+                            delay_seconds=0.0,
+                            reason=str(exc),
+                        )
+                    continue
                 last = attempt == attempts - 1
                 if kind not in WORTH_ANOTHER_MODEL or last:
                     # The verdict alone is not a diagnosis: "fatal: bad key"

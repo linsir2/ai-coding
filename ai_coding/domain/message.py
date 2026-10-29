@@ -113,6 +113,30 @@ class ToolExecution:
     result: ToolResult
 
 
+def arguments_are_valid(raw: str) -> bool:
+    """Does ``raw`` parse into a JSON *object*?
+
+    ``tool_calls[].arguments`` is a string on the wire, and a provider rejects
+    the whole request when it is not a JSON object.  A ``max_tokens`` cut can
+    leave half an object behind, which is the case this exists for (R21 §10).
+    """
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(parsed, dict)
+
+
+def normalize_arguments(raw: str) -> str:
+    """``raw`` when it is a JSON object, else ``"{}"``.
+
+    Used at the wire boundary so a request can never be rejected for a reason
+    the provider cannot explain back to us -- including a session whose stored
+    history already carries a truncated call.
+    """
+    return raw if arguments_are_valid(raw) else "{}"
+
+
 def tool_call_from_ref(ref: ToolCallRef) -> ToolCall:
     """Parse ``ref.arguments`` JSON into ``params``; never raise on bad JSON."""
     try:

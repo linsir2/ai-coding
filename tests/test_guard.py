@@ -16,12 +16,32 @@ from ai_coding.core.guard import (
     TurnView,
     call_fingerprint,
 )
-from ai_coding.domain.message import ToolCall, ToolResult
+from ai_coding.domain.message import ChatMessage, ToolCall, ToolResult
 from ai_coding.tools.base import ToolContext
 
 
-def _call(name: str = "read", **params) -> ToolCall:
-    return ToolCall(id="c1", name=name, params=dict(params))
+def _call(name: str = "read", call_id: str = "c1", **params) -> ToolCall:
+    return ToolCall(id=call_id, name=name, params=dict(params))
+
+
+def _tool_msg(call_id: str, body: str) -> ChatMessage:
+    return ChatMessage(
+        role="tool",
+        content=body,
+        timestamp="t",
+        tool_call_id=call_id,
+        tool_name="read",
+    )
+
+
+def _visible(*call_ids: str) -> ToolContext:
+    """A context whose history still carries these tool results in full (O-1)."""
+    return ToolContext(
+        messages=tuple(
+            _tool_msg(call_id, f'<tool_output tool="read">\nresult {call_id}\n</tool_output>')
+            for call_id in call_ids
+        )
+    )
 
 
 class _Deny:
@@ -89,7 +109,7 @@ def test_duplicate_guard_allows_a_retry_then_refuses():
     guard = DuplicateCallGuard(threshold=2)
     view = TurnView()
     call = _call("read", path="a.txt")
-    ctx = ToolContext()
+    ctx = _visible("c1")
 
     assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
     guard.after(call, ToolResult(success=True, output="ok"), ctx, view)
@@ -105,7 +125,7 @@ def test_duplicate_guard_allows_a_retry_then_refuses():
 def test_duplicate_guard_resets_between_turns():
     guard = DuplicateCallGuard(threshold=1)
     view = TurnView()
-    ctx = ToolContext()
+    ctx = _visible("c1")
     call = _call("read", path="a.txt")
     guard.check(call, ctx, view)
     guard.after(call, ToolResult(success=True, output="ok"), ctx, view)
@@ -167,7 +187,7 @@ def test_duplicate_guard_still_refuses_a_third_successful_repeat():
     """The protection itself is unchanged: a call that worked twice has a result
     worth reusing, and that is exactly when the refusal is the useful message."""
     guard = DuplicateCallGuard(threshold=2)
-    view, ctx = TurnView(), ToolContext()
+    view, ctx = TurnView(), _visible("c1")
     call = _call("read", path="a.txt")
     for _ in range(2):
         assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
@@ -182,7 +202,7 @@ def test_duplicate_guard_names_no_call_when_every_attempt_failed():
     only failures on record there is no such call, and naming one would send the
     model back to an error."""
     guard = DuplicateCallGuard(threshold=1)
-    view, ctx = TurnView(), ToolContext()
+    view, ctx = TurnView(), _visible("c1")
     call = _call("read", path="a.txt")
     guard.check(call, ctx, view)
     guard.after(call, _fail(), ctx, view)
@@ -195,6 +215,127 @@ def test_duplicate_guard_names_no_call_when_every_attempt_failed():
     refused = guard.check(call, ctx, view)
     assert refused.verdict is GuardVerdict.DENY
     assert "(call " in refused.reason  # the successes gave it something to name
+
+
+# ---- O-1: what counts is a result the model can still reuse ----------------
+#
+# s3's turn-1 read the file in 12 chunks, L3 persisted every 40 KB block to a
+# marker and L4 summarised all twelve away; the model then re-read the first
+# range and the refusal told it to "reuse the earlier result" -- a result that
+# was no longer in the request at all.  A read whose output has left the context
+# demonstrates nothing reusable, so it does not consume the duplicate budget;
+# the total is still capped so a model cannot loop on one range forever.
+
+
+def test_duplicate_guard_allows_a_reread_whose_output_left_the_context():
+    guard = DuplicateCallGuard(threshold=2)
+    view, ctx = TurnView(), ToolContext()
+    first = _call("read", call_id="a", path="big.txt", offset=0, limit=500)
+    second = _call("read", call_id="b", path="big.txt", offset=0, limit=500)
+    for call in (first, second):
+        assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
+        guard.after(call, _ok(), ctx, view)
+    third = _call("read", call_id="c", path="big.txt", offset=0, limit=500)
+    assert guard.check(third, ctx, view).verdict is GuardVerdict.ALLOW
+
+
+def test_duplicate_guard_still_denies_while_the_earlier_result_is_visible():
+    guard = DuplicateCallGuard(threshold=2)
+    view = TurnView()
+    ctx = _visible("a", "b")
+    first = _call("read", call_id="a", path="big.txt")
+    second = _call("read", call_id="b", path="big.txt")
+    for call in (first, second):
+        assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
+        guard.after(call, _ok(), ctx, view)
+    third = _call("read", call_id="c", path="big.txt")
+    denied = guard.check(third, ctx, view)
+    assert denied.verdict is GuardVerdict.DENY
+    assert "reuse the earlier result" in denied.reason
+
+
+def test_duplicate_guard_names_the_visible_call_not_the_summarised_one():
+    guard = DuplicateCallGuard(threshold=1)
+    view = TurnView()
+    ctx = _visible("b")  # ``a`` has been summarised away
+    for call_id in ("a", "b"):
+        call = _call("read", call_id=call_id, path="big.txt")
+        assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
+        guard.after(call, _ok(), ctx, view)
+    denied = guard.check(_call("read", call_id="c", path="big.txt"), ctx, view)
+    assert denied.verdict is GuardVerdict.DENY
+    assert "(call b)" in denied.reason
+    assert "(call a)" not in denied.reason
+
+
+def test_duplicate_guard_caps_rereads_whose_output_is_gone():
+    guard = DuplicateCallGuard(threshold=2)
+    view, ctx = TurnView(), ToolContext()
+    for index in range(4):
+        call = _call("read", call_id=f"c{index}", path="big.txt")
+        assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
+        guard.after(call, _ok(), ctx, view)
+    denied = guard.check(_call("read", call_id="c5", path="big.txt"), ctx, view)
+    assert denied.verdict is GuardVerdict.DENY
+    assert "4 time(s)" in denied.reason
+    assert "reuse the earlier result" not in denied.reason
+    assert "grep" in denied.reason
+
+
+def test_duplicate_guard_cap_scales_with_the_threshold():
+    guard = DuplicateCallGuard(threshold=1)
+    view, ctx = TurnView(), ToolContext()
+    for index in range(2):
+        call = _call("read", call_id=f"r{index}", path="a.txt")
+        assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
+        guard.after(call, _ok(), ctx, view)
+    denied = guard.check(_call("read", call_id="r2", path="a.txt"), ctx, view)
+    assert denied.verdict is GuardVerdict.DENY
+
+
+def test_duplicate_guard_does_not_excuse_a_trimmed_bash():
+    """A trimmed *output* is not evidence that the side effect did not happen."""
+    guard = DuplicateCallGuard(threshold=2)
+    view, ctx = TurnView(), ToolContext()
+    for call_id in ("a", "b"):
+        call = _call("bash", call_id=call_id, command="echo x >> f")
+        assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
+        guard.after(call, _ok(), ctx, view)
+    third = _call("bash", call_id="c", command="echo x >> f")
+    assert guard.check(third, ctx, view).verdict is GuardVerdict.DENY
+
+
+def test_duplicate_guard_treats_an_envelope_or_marker_as_gone():
+    guard = DuplicateCallGuard(threshold=1)
+    view = TurnView()
+    for body in (
+        "[Previous: used read · 21000 chars elided · full output: /tmp/x]",
+        '<persisted-output path="/tmp/x" bytes="42000" tool="read">\npreview',
+    ):
+        ctx = ToolContext(messages=(_tool_msg("a", body),))
+        first = _call("read", call_id="a", path="big.txt")
+        assert guard.check(first, ctx, view).verdict is GuardVerdict.ALLOW
+        guard.after(first, _ok(), ctx, view)
+        assert (
+            guard.check(_call("read", call_id="b", path="big.txt"), ctx, view).verdict
+            is GuardVerdict.ALLOW
+        )
+        guard.reset()
+
+
+def test_duplicate_guard_a_denied_call_does_not_clear_the_budget():
+    """A refusal never runs ``after``; if it did, ``success=False`` would wipe
+    the budget and the model could loop by being refused."""
+    guard = DuplicateCallGuard(threshold=2)
+    view = TurnView()
+    ctx = _visible("a", "b")
+    for call_id in ("a", "b"):
+        call = _call("read", call_id=call_id, path="x")
+        guard.check(call, ctx, view)
+        guard.after(call, _ok(), ctx, view)
+    third = _call("read", call_id="c", path="x")
+    for _ in range(3):
+        assert guard.check(third, ctx, view).verdict is GuardVerdict.DENY
 
 
 # ---- BashPolicyGuard -------------------------------------------------------
@@ -276,7 +417,7 @@ def _succeed_once(guard, call, ctx, view):
 
 def test_a_repeated_read_still_says_reuse_the_result():
     guard = DuplicateCallGuard(threshold=1)
-    view, ctx = TurnView(), ToolContext()
+    view, ctx = TurnView(), _visible("c1")
     call = _call("read", path="a.txt")
     _succeed_once(guard, call, ctx, view)
     assert "reuse the earlier result" in guard.check(call, ctx, view).reason

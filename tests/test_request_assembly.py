@@ -155,10 +155,13 @@ async def test_blocks_keep_the_declared_order():
         assembler, session=session, hook_context="<hook-context>h</hook-context>"
     )
     contents = [message.content for message in assembled.request]
-    assert "<memory-constraints>" in contents[-4]
-    assert "task-state" in contents[-3]
-    assert "<hook-context>" in contents[-2]
-    assert "<working-memory>" in contents[-1]
+    # R22/H11 adds an `anchor` block after every compaction, so the positions
+    # shift; what the test is about is the *order*, not the offsets.
+    order = [
+        next(i for i, body in enumerate(contents) if needle in body)
+        for needle in ("<memory-constraints>", "task-state", "<hook-context>", "<working-memory>")
+    ]
+    assert order == sorted(order), order
 
 
 # ------------------------------------------------------- environment (13 §2.4)
@@ -210,12 +213,17 @@ async def test_an_empty_block_is_not_a_message():
     # the history (one message, plus the rewrite the fake compactor made), the
     # environment block and the task block — memory, hook and digest each
     # contributed nothing (13 §2.4: environment is never empty).
+    # R22/H11: the compaction this fake compactor performed also earns the
+    # `anchor` caveat (the model is working from a shortened history), so the
+    # tail is four blocks rather than three.
     assert [message.role for message in assembled.request] == [
-        "user", "user", "user", "user",
+        "user", "user", "user", "user", "user",
     ]
-    assert "<environment>" in assembled.request[-2].content
-    assert "task-state" in assembled.request[-1].content
-    assert "working-memory" not in assembled.request[-1].content
+    # Declared order: environment → task → anchor.  The caveat closes the tail.
+    assert "<environment>" in assembled.request[-3].content
+    assert "task-state" in assembled.request[-2].content
+    assert "重新核算" in assembled.request[-1].content
+    assert "working-memory" not in "".join(m.content or "" for m in assembled.request)
 
 
 async def test_the_digest_block_only_appears_when_the_history_was_rewritten():

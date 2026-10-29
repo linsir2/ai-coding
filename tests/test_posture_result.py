@@ -163,6 +163,40 @@ def test_a_readonly_only_change_records_no_history(tmp_path):
     assert session.agent_history == []
 
 
+def test_a_readonly_only_change_still_announces_the_posture(tmp_path):
+    """R21 §2: ``/readonly`` moved this axis and emitted nothing at all.
+
+    The front end derives both posture axes from its own state, so a flip with
+    no event left the status bar showing the old one until some unrelated
+    refresh happened to land.
+    """
+    recorder = _Recorder()
+    loop, sessions = _loop(tmp_path, recorder)
+    session = _session(sessions)
+
+    loop.request_posture(session, readonly=True)
+
+    switched = [event for event in recorder.events if isinstance(event, AgentSwitched)]
+    assert len(switched) == 1
+    assert switched[0].readonly is True
+    # Same agent on both ends: the notice is suppressed, not invented.
+    assert (switched[0].from_agent, switched[0].to_agent) == ("build", "build")
+
+
+def test_the_switch_event_names_the_read_only_axis(tmp_path):
+    recorder = _Recorder()
+    loop, sessions = _loop(tmp_path, recorder)
+    session = _session(sessions)
+
+    loop.request_posture(session, agent="plan", readonly=True, reason="/plan")
+
+    switched = [event for event in recorder.events if isinstance(event, AgentSwitched)]
+    assert len(switched) == 1
+    assert switched[0].readonly is True
+    # And the history row keeps its old shape (no readonly key to replay).
+    assert set(session.agent_history[0]) == {"from", "to", "ts", "reason"}
+
+
 def test_the_queued_flip_lands_at_the_turn_boundary(tmp_path):
     loop, sessions = _loop(tmp_path, busy=True)
     session = _session(sessions)

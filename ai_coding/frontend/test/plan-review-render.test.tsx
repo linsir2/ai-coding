@@ -83,7 +83,10 @@ describe("PlanReviewPanel (19 §3.2)", () => {
     const frame = textOf(await render())
     expect(frame).toContain("◆ Plan review")
     expect(frame).toContain("批准这个计划并开始执行？")
-    expect(frame).toContain("# 编排层改造计划")
+    // R21 §1: the card shows the plan through planText, so the ``#`` heading
+    // marker is gone -- the words are what the operator reads.
+    expect(frame).toContain("编排层改造计划")
+    expect(frame).not.toContain("# 编排层改造计划")
     expect(frame).toContain("1  开始执行")
     expect(frame).toContain("2  继续规划")
   })

@@ -250,21 +250,33 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
     if (wasLive) dialog.close()
   }
 
+  // A-12: while one of these awaits, the backend has already moved the live
+  // session but this shell still holds the old id -- submissions wait on this
+  // counter instead of going out under it.  A count, not a flag: two switches
+  // in flight must not let the first finishing one release the route early.
+  const [switchDepth, setSwitchDepth] = createSignal(0)
+
   const onSelectSession = async (id: string) => {
+    setSwitchDepth((depth) => depth + 1)
     try {
       switchTo(id, await loadSession(props.client, id))
     } catch {
       /* a failed load leaves the current session in place */
+    } finally {
+      setSwitchDepth((depth) => depth - 1)
     }
   }
 
   const onNewSession = async () => {
+    setSwitchDepth((depth) => depth + 1)
     try {
       const created = (await props.client.request("session.create", {})) as { id: string }
       switchTo(created.id, initialState())
       void refreshSessions()
     } catch {
       /* ignore: the current session stays */
+    } finally {
+      setSwitchDepth((depth) => depth - 1)
     }
   }
 
@@ -563,6 +575,7 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
           <Session
             client={props.client}
             sessionId={sessionId()}
+            switching={() => switchDepth() > 0}
             model={modelName()}
             provider={providerName()}
             initialPrompt={pendingPrompt()}

@@ -9,7 +9,7 @@ compaction never rewrites the caller's history (docs/r5-analysis.md 3.3).
 import pytest
 
 from ai_coding.core.compaction import Compactor
-from ai_coding.core.events import Degraded, RecordingObserver
+from ai_coding.core.events import Degraded, LayerStat, RecordingObserver
 from ai_coding.domain.message import ChatMessage
 from ai_coding.infra.deadline import DeadlineExpired
 
@@ -161,3 +161,85 @@ async def test_compact_now_is_a_no_op_for_an_empty_session_or_no_context():
         "after": 1,
         "removed": 0,
     }
+
+
+class _LayeredContext:
+    """A delegate that reports layer stats, content-identical or not.
+
+    The pipeline always works on a copy, and rewriting an identical body can
+    still leave a list that compares unequal, so ``last_compacted_turn`` cannot
+    be decided from list equality — only from the estimate the layers report.
+    """
+
+    def __init__(self, after_tokens: int, before_tokens: int = 681) -> None:
+        self.last_layer_stats = [
+            LayerStat("L3", 0, 0, 1, before_tokens, before_tokens),
+            LayerStat("L1", 0, 0, 0, before_tokens, before_tokens),
+            LayerStat("L2", 0, 0, 0, before_tokens, after_tokens),
+        ]
+
+    async def compress_if_needed(self, history, *, force=False, on_summary=None):  # type: ignore[no-untyped-def]
+        if on_summary is not None:
+            on_summary("no change")
+        return [ChatMessage(role="user", content="rewritten", timestamp="")]
+
+
+def _usage_session(sid: str = "s1"):
+    from ai_coding.domain.session import SessionData, TurnUsage
+
+    session = SessionData(session_id=sid, title="", created_time="", last_access_time="")
+    session.messages = [ChatMessage(role="user", content="hello", timestamp="")]
+    session.turn_count = 1
+    session.turn_usages = [
+        TurnUsage(
+            turn=1, prompt_tokens=681, completion_tokens=0, total_tokens=681, context_tokens=681
+        )
+    ]
+    return session
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_that_changes_nothing_keeps_the_context_meter():
+    """R22/A-8: ``/compact`` reported 7 → 7 and the meter dropped to 0 tokens.
+
+    The boundary is what makes ``live_prompt_tokens`` discard earlier usage.  A
+    job whose layers report no token change (before == after) did not invalidate
+    anything, so raising it turned "nothing happened" into "the window is empty".
+    """
+    session = _usage_session()
+    compactor, _ = _compactor(_LayeredContext(after_tokens=681))
+
+    await compactor.compress(session.messages, deadline=None, session=session)
+
+    assert session.last_compacted_turn == 0
+    assert session.live_prompt_tokens() == 681
+
+
+@pytest.mark.asyncio
+async def test_a_real_compaction_still_raises_the_boundary():
+    session = _usage_session()
+    compactor, _ = _compactor(_LayeredContext(after_tokens=120))
+
+    await compactor.compress(session.messages, deadline=None, session=session)
+
+    assert session.last_compacted_turn == 1
+    assert session.live_prompt_tokens() == 0
+
+
+@pytest.mark.asyncio
+async def test_hard_trim_shrink_counts_even_when_layers_report_no_change():
+    """`hard_trim` is not a layer: it runs after the stats and can drop pages.
+
+    With only the layer numbers as evidence, that compaction looked like a no-op
+    and the meter kept describing a history that no longer existed.
+    """
+    session = _usage_session()
+
+    class _Trimmed(_LayeredContext):
+        async def compress_if_needed(self, history, *, force=False, on_summary=None):  # type: ignore[no-untyped-def]
+            return []
+
+    compactor, _ = _compactor(_Trimmed(after_tokens=681))
+    await compactor.compress(session.messages, deadline=None, session=session)
+
+    assert session.last_compacted_turn == 1

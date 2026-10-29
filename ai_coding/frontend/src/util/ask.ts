@@ -19,6 +19,8 @@
  * and the client was the one that would have armed a run the backend refused.
  */
 
+import stringWidth from "string-width"
+
 /** R04: one review row as the card renders it (dependsOn in display order). */
 export interface PlanItemData {
   content: string
@@ -154,21 +156,151 @@ export function submittedPlan(
 /**
  * The plan as the card shows it when a nested markdown renderable has no
  * layout to grow in: drop the block-level markers the operator does not need
- * to read (``#``, ``-``, backticks), keep every word.
+ * to read (``#``, ``-``, backticks, ``---`` rules), lay a pipe table out as a
+ * fixed-width table, and keep every word.
  *
- * This is deliberately a display transform, not a second parser: the raw
- * plan stays in `submittedPlan`, and nothing here decides what ran.
+ * R21 §1: the plan is the model's own Markdown, so a table arrived as raw
+ * ``|`` rows whose columns never lined up.  Aligning is a string transform,
+ * not a second parser -- the raw plan stays in `submittedPlan`, and nothing
+ * here decides what ran.
  */
 export function planText(plan: string): string {
-  return plan
-    .split("\n")
-    .map((line) =>
-      line
-        .replace(/^\s{0,3}#{1,6}\s+/, "")
-        .replace(/^\s{0,3}[-*+]\s+/, "· ")
-        .replace(/`/g, "")
-        .replace(/\*\*(.+?)\*\*/g, "$1")
-        .replace(/__(.+?)__/g, "$1"),
-    )
-    .join("\n")
+  const out: string[] = []
+  let fence = false
+  let table: string[] = []
+  const flush = () => {
+    if (table.length === 0) return
+    out.push(...renderTable(table))
+    table = []
+  }
+  for (const line of plan.split("\n")) {
+    if (FENCE.test(line)) {
+      flush()
+      fence = !fence
+      out.push(line)
+      continue
+    }
+    if (!fence && isTableLine(line)) {
+      table.push(line)
+      continue
+    }
+    flush()
+    if (!fence && RULE.test(line)) {
+      // A rule separated two blocks; without it the gap would be two blank
+      // lines, so the blank line before it goes too.
+      if (out.length > 0 && out[out.length - 1] === "") out.pop()
+      continue
+    }
+    out.push(inline(line))
+  }
+  flush()
+  return out.join("\n")
+}
+
+/**
+ * What the review card still has to show: everything except a table that only
+ * repeats the reviewed items.  The card lists those rows below the prose, with
+ * the verify command and dependencies -- a second copy of the same rows is
+ * exactly the "duplicated and cheap" reading R21 §1 removed.
+ *
+ * Matched by content, not by shape: a plan that keeps a table of risks or
+ * trade-offs keeps that table.
+ */
+export function planProse(
+  plan: string,
+  items: readonly { content: string }[],
+): string {
+  const wanted = new Set(items.map((item) => item.content.trim()).filter(Boolean))
+  if (wanted.size === 0) return plan
+  const out: string[] = []
+  let fence = false
+  let table: string[] = []
+  const flush = () => {
+    if (table.length === 0) return
+    if (!repeatsTheItems(table, wanted)) out.push(...table)
+    table = []
+  }
+  for (const line of plan.split("\n")) {
+    if (FENCE.test(line)) {
+      flush()
+      fence = !fence
+      out.push(line)
+      continue
+    }
+    if (!fence && isTableLine(line)) {
+      table.push(line)
+      continue
+    }
+    flush()
+    out.push(line)
+  }
+  flush()
+  return out.join("\n")
+}
+
+/** An open/close code fence: a table inside one is code, not a table. */
+const FENCE = /^\s*(?:```|~~~)/
+
+/** A horizontal rule on its own line — pure noise once headings are gone. */
+const RULE = /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/
+
+/** One pipe-table row split into trimmed cells; the outer pipes are optional. */
+function tableCells(line: string): string[] {
+  const cells = line.trim().split("|")
+  if (cells.length > 0 && cells[0].trim() === "") cells.shift()
+  if (cells.length > 0 && cells[cells.length - 1].trim() === "") cells.pop()
+  return cells.map((cell) => cell.trim())
+}
+
+const SEPARATOR_CELL = /^:?-{3,}:?$/
+
+function isSeparatorRow(cells: string[]): boolean {
+  return cells.length > 0 && cells.every((cell) => SEPARATOR_CELL.test(cell))
+}
+
+function isTableLine(line: string): boolean {
+  const trimmed = line.trim()
+  return trimmed.length > 1 && trimmed.startsWith("|") && trimmed.endsWith("|")
+}
+
+/** Pad to `width` columns as a terminal counts them (CJK is two wide). */
+function pad(cell: string, width: number): string {
+  return cell + " ".repeat(Math.max(0, width - stringWidth(cell)))
+}
+
+/** A pipe-table block as a fixed-width table; the ``---`` row is dropped. */
+function renderTable(rows: string[]): string[] {
+  const body = rows.map(tableCells).filter((cells) => !isSeparatorRow(cells))
+  if (body.length === 0) return []
+  const columns = Math.max(...body.map((cells) => cells.length))
+  const widths = Array.from({ length: columns }, (_, index) =>
+    Math.max(...body.map((cells) => stringWidth(cells[index] ?? ""))),
+  )
+  return body.map(
+    (cells) => `| ${widths.map((width, index) => pad(cells[index] ?? "", width)).join(" | ")} |`,
+  )
+}
+
+/** Does this block list the reviewed items (and nothing else worth reading)? */
+function repeatsTheItems(rows: string[], wanted: Set<string>): boolean {
+  let matched = 0
+  let other = 0
+  for (const cells of rows.map(tableCells)) {
+    if (isSeparatorRow(cells)) continue
+    if (cells.some((cell) => wanted.has(cell))) matched += 1
+    else other += 1
+  }
+  // One "other" row is the header (a table of steps names its columns);
+  // anything more is prose that merely shares the shape.
+  return matched === wanted.size && other <= 1
+}
+
+/** The inline markers the old flat-text card already dropped. */
+function inline(line: string): string {
+  return line
+    .replace(/^\s{0,3}#{1,6}\s+/, "")
+    .replace(/^\s{0,3}[-*+]\s+/, "· ")
+    .replace(/`/g, "")
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
 }

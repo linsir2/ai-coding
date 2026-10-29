@@ -67,6 +67,13 @@ class AgentSwitched:
     to_agent: str
     reason: str = ""
     ts: str = ""
+    #: R21 §2: the session's read-only switch *after* the commit.  The agent
+    #: id alone cannot express it (``/readonly`` moves this axis without
+    #: moving the agent), so the front end had to re-poll stats -- and a
+    #: ``/plan run`` ack raced that poll, showing ``Build · 只读``.  ``None``
+    #: means "not reported": an older producer, or a caller that only moved
+    #: the agent, keeps the old payload byte for byte.
+    readonly: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -98,7 +105,11 @@ class ToolFinished:
     tool_name: str
     success: bool
     output_preview: str = ""
+    # Wall-clock from ToolStarted to this event, approval wait included.
     duration_ms: int = 0
+    # A-10: how much of that was spent waiting for a human to answer.  It is a
+    # *part* of duration_ms, not a fourth number: traces keep the real span.
+    approval_ms: int = 0
     # Machine-readable failure code (R2a): "tool_timeout", "denied", "unknown_tool",
     # "not_approved", "stopped", "skipped", "tool_error"… None means success.
     error: str | None = None

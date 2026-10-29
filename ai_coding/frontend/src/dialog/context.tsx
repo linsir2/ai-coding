@@ -12,7 +12,7 @@
  * esc (interrupt) and ctrl+c (exit) stay quiet under a dialog.
  */
 
-import { RGBA, type CliRenderer, type Renderable } from "@opentui/core"
+import { type CliRenderer, type Renderable } from "@opentui/core"
 import { useBindings } from "@opentui/keymap/solid"
 import { useTerminalDimensions } from "@opentui/solid"
 import { Show, createContext, createSignal, useContext, type JSX } from "solid-js"
@@ -93,12 +93,20 @@ export function DialogProvider(props: { renderer: CliRenderer; children: JSX.Ele
           zIndex={3000}
           alignItems="center"
           paddingTop={Math.floor(dimensions().height / 4)}
-          backgroundColor={RGBA.fromInts(0, 0, 0, 150)}
+          // R20b: an opaque surface, not OpenCode's translucent backdrop
+          // (RGBA.fromInts(0,0,0,150)).  Blending over the screen blanked every
+          // double-width glyph underneath it -- a Chinese transcript turned into
+          // holes the moment a dialog opened.  A solid base colour plus the
+          // frame's raised surface and border reads as one modal and cannot
+          // corrupt what is behind it.
+          backgroundColor={theme.backgroundBase}
         >
           <box
             width={dialogWidth(size())}
             maxWidth={dimensions().width - 2}
             backgroundColor={theme.backgroundRaised}
+            border
+            borderColor={theme.borderBase}
             paddingTop={1}
           >
             {element()?.()}

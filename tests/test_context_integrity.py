@@ -748,3 +748,51 @@ def test_a_snip_placeholder_in_the_tail_does_not_shift_the_covered_prefix():
         assert marker in body, (
             f"message {index} is outside the checkpoint but not in the request"
         )
+
+
+def test_a_checkpoint_is_not_the_human_speaking():
+    """R22/A-15: the checkpoint note is stored as a user-role message, and it used
+    to be "the last thing a human wrote" -- so `/compact` made it the input the
+    file-reference, skill-mention and outside-workspace blocks are rebuilt from.
+
+    The judgement is the one `split_checkpoint` already uses: the marker plus
+    `checkpoint_body`'s shape, not a second prefix rule of our own.
+    """
+    from ai_coding.core.request_assembly import human_utterance
+    from ai_coding.domain.message import CHECKPOINT_MARK, ChatMessage
+
+    history = [
+        ChatMessage(role="user", content="看 @notes.txt 里的约束", timestamp=""),
+        ChatMessage(role="user", content="我是助手，先做 A 再做 B", timestamp=""),
+        ChatMessage(
+            role="user",
+            content=f"{CHECKPOINT_MARK}\n{_checkpoint_text()}",
+            timestamp="",
+        ),
+    ]
+
+    assert human_utterance(history) == "我是助手，先做 A 再做 B"
+
+
+def test_a_message_that_merely_mentions_a_heading_is_still_human():
+    from ai_coding.core.request_assembly import human_utterance
+    from ai_coding.domain.message import ChatMessage
+
+    history = [ChatMessage(role="user", content="## 目标\n把这个文件改好", timestamp="")]
+    assert human_utterance(history) == "## 目标\n把这个文件改好"
+
+
+def test_a_history_that_is_only_a_checkpoint_has_no_human_line():
+    from ai_coding.core.request_assembly import human_utterance
+    from ai_coding.domain.message import CHECKPOINT_MARK, ChatMessage
+
+    history = [
+        ChatMessage(role="user", content=f"{CHECKPOINT_MARK}\n{_checkpoint_text()}", timestamp="")
+    ]
+    assert human_utterance(history) == ""
+
+
+def _checkpoint_text() -> str:
+    from ai_coding.ai.llm_helpers import SUMMARY_SECTIONS
+
+    return "\n".join(f"{section}\n无" for section in SUMMARY_SECTIONS)

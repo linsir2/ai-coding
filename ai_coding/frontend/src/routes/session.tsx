@@ -38,6 +38,7 @@ import { type BudgetFigures, initialState, jobsFromEvent, reduce } from "../stat
 import { useToast } from "../component/toast"
 import { theme } from "../theme/tokens"
 import { escStep } from "../util/esc"
+import { historyRewriteTitle, reloadTarget } from "../util/history"
 import { shouldDispatchPlanRun } from "../util/plan-run"
 import { loadSession, resumeSession } from "../state/replay"
 import type { AskRequest } from "../util/ask"
@@ -65,6 +66,12 @@ export interface SessionProps {
   onAskAnswer: (answer: string) => void
   /** Leave through the shell's exit sequence (a command's `/quit`, I5). */
   onQuit: () => void
+  /**
+   * A-12: true while the shell's session switch is in flight (it awaits
+   * `loadSession` before moving `sessionId`).  Submissions wait for the id
+   * instead of going out under the one the backend has already left.
+   */
+  switching?: () => boolean
   /** Follow the live session when the backend switched it (/clear, /resume). */
   onSelectSession: (id: string) => void
   /** Open the sessions panel — the strip is a header now, not a tab rail. */
@@ -108,8 +115,11 @@ export function Session(props: SessionProps) {
   // truth is SessionState.agent (stats hydrates it, agent.switched moves it).
   const currentAgent = () => state.agent ?? stats().agent ?? null
   const currentMode = (): "normal" | "plan" => (isPlanAgentId(currentAgent()) ? "plan" : "normal")
+  // R21 §2: the read-only axis has its own truth now.  ``agent.switched``
+  // carries it, so a flip that moves only this axis (``/readonly``) shows up
+  // immediately; stats remains the fallback until the first event/mount.
   const currentReadonly = () =>
-    isPlanAgentId(currentAgent()) ? true : (stats().readonly ?? false)
+    isPlanAgentId(currentAgent()) ? true : (state.readonly ?? stats().readonly ?? false)
   const [interruptArmed, setInterruptArmed] = createSignal(false)
   const [suggesting, setSuggesting] = createSignal(false)
   let transcript: ScrollBoxRenderable | undefined
@@ -143,13 +153,27 @@ export function Session(props: SessionProps) {
       setStats(fetchedStats as Stats)
       setAgents(normalizeAgents((fetchedAgents as { agents?: unknown } | null)?.agents))
       const agent = (fetchedStats as { agent?: unknown } | null)?.agent
-      apply({ kind: "agent-synced", agent: typeof agent === "string" && agent ? agent : null })
+      const readonly = (fetchedStats as { readonly?: unknown } | null)?.readonly
+      apply({
+        kind: "agent-synced",
+        agent: typeof agent === "string" && agent ? agent : null,
+        // R21 §2: hydrate the second axis too, so ``/readonly``'s ack path
+        // has a truth to read rather than a stale poll.
+        ...(typeof readonly === "boolean" ? { readonly } : {}),
+      })
     } catch {
       /* the sidebar keeps the last known numbers; the next turn retries */
     }
   }
 
-  const dispatch = (text: string, images: PromptImage[] = []) => {
+  // A-12: submissions made while the shell is switching sessions wait here.
+  // Each keeps the id it was typed under, so the flush can tell "the switch
+  // landed" (send under the new id) from "it failed" (put the line back).
+  // ``echo`` delays the transcript echo until the line is really sent: a
+  // failed switch then leaves no phantom user row and no stuck ``busy``.
+  const deferred: { text: string; images: PromptImage[]; from: string; echo: boolean }[] = []
+
+  const dispatchNow = (text: string, images: PromptImage[] = []) => {
     // A "/"-prefixed line is a slash command: the backend's dispatcher
     // (app/commands.py::handle_input) decides what it means, so the TUI gains
     // the whole command layer through one entry.  Unknown commands fall
@@ -193,6 +217,24 @@ export function Session(props: SessionProps) {
       .catch((error) => {
         apply({ kind: "submit-failed", reason: String(error) })
       })
+  }
+
+  /**
+   * A-12: hold the line until the shell's session switch has settled.
+   * Returns false when it was held -- the caller then skips its echo, which the
+   * flush replays on success and drops on failure.
+   */
+  const dispatch = (
+    text: string,
+    images: PromptImage[] = [],
+    echo = true,
+  ): boolean => {
+    if (props.switching?.()) {
+      deferred.push({ text, images, from: props.sessionId, echo })
+      return false
+    }
+    dispatchNow(text, images)
+    return true
   }
 
   /** Local ids for rows the socket was too dead to persist (D-2). */
@@ -293,8 +335,8 @@ export function Session(props: SessionProps) {
     // were sent.
     const submission = buildSubmission(props.commands ?? [], props.sessionId, text, images)
     if (submission.kept.length > 0) return submission.withheldReason
-    apply({ kind: "submitted", text, images })
-    dispatch(text, images)
+    // A-12: while a switch is in flight the echo waits with the line.
+    if (dispatch(text, images)) apply({ kind: "submitted", text, images })
     return true
   }
 
@@ -471,8 +513,7 @@ export function Session(props: SessionProps) {
             queueText("/review")
             return
           }
-          apply({ kind: "submitted", text: "/review" })
-          dispatch("/review")
+          if (dispatch("/review")) apply({ kind: "submitted", text: "/review" })
         },
       },
       {
@@ -549,43 +590,58 @@ export function Session(props: SessionProps) {
         // /clear and /resume <id> end with the REPL's NEW_SESSION action; the
         // backend has already switched the live session, so the tabs follow.
         const action = event.data["action"]
-        if (action === "new_session") {
-          const id = String(event.data["sessionId"] ?? "")
-          if (id) props.onSelectSession(id)
+        const switchedTo = String(event.data["sessionId"] ?? "")
+        if (action === "new_session" && switchedTo) {
+          props.onSelectSession(switchedTo)
         }
         if (action === "quit") props.onQuit()
         if (event.data["reload"] === true) {
           // The live session switched (/clear, /resume), or /undo|/redo
           // rewrote this session's history in place (r17/T1): re-project.
-          void (async () => {
-            const loaded = await loadSession(props.client, props.sessionId)
-            // Carry the queue across the switch the way the old in-memory list
-            // did: rows that only ever lived here are persisted into the fresh
-            // session first, then the server's list -- which now includes them
-            // -- becomes the list.  A reload implies a live socket (the load
-            // just succeeded over it), so the flush cannot strand them.
-            for (const row of state.queued) {
-              if (!row.id.startsWith("local-")) continue
-              try {
-                await props.client.request("session.inbox", { op: "add", text: row.text })
-              } catch {
-                break
+          // R22/A-11: on a switch the event's id is authoritative -- the prop
+          // still names the session the app started in (the tab switch awaits
+          // an IPC round trip), and projecting that one asked the server for a
+          // session file that never existed: `session not found: 0330a025…`.
+          const target = reloadTarget(action, switchedTo, props.sessionId)
+          if (target !== null) {
+            void (async () => {
+              const loaded = await loadSession(props.client, target)
+              // Carry the queue across the switch the way the old in-memory list
+              // did: rows that only ever lived here are persisted into the fresh
+              // session first, then the server's list -- which now includes them
+              // -- becomes the list.  A reload implies a live socket (the load
+              // just succeeded over it), so the flush cannot strand them.
+              for (const row of state.queued) {
+                if (!row.id.startsWith("local-")) continue
+                try {
+                  await props.client.request("session.inbox", { op: "add", text: row.text })
+                } catch {
+                  break
+                }
               }
-            }
-            setState({ ...loaded, queued: [] })
-            loadInbox()
-            void refreshPosture()
-          })()
+              setState({ ...loaded, queued: [] })
+              loadInbox()
+              void refreshPosture()
+            })().catch((error) => {
+              // A projection that dies used to become an unhandled rejection in
+              // the middle of the transcript ("Error: ValueError: session not
+              // found").  One line in the notice lane says the same thing and
+              // leaves the composer usable.
+              apply({ kind: "submit-failed", reason: String(error) })
+            })
+          }
         }
         {
-          // /undo hands the undone user message back so it can be edited and
-          // re-sent, the gesture the old TUI had.
+          // R22/A-3: one field carries both a compaction and an undo (any
+          // same-session rewrite), so the title has to say which it was —
+          // `/undo` used to show "Compacted".  The undo payload exists only on
+          // the rewinding commands (/undo and /redo), so it names the case; but
+          // the draft is re-seeded only when the history actually shrank
+          // (`compacted`), because /redo reports the same payload and would
+          // otherwise put the undone prompt back into the composer.
           const undo = event.data["undo"] as { text?: unknown } | null | undefined
-          if (undo && typeof undo.text === "string") setPromptSeed(undo.text)
-        }
-        {
-          // A same-session history rewrite reports itself for the toast.  It
-          // is separate from `reload` above: only a switch re-projects.
+          const rewound = undo !== null && undo !== undefined
+          const undoneText = rewound && typeof undo.text === "string" ? undo.text : ""
           const compacted = event.data["compacted"] as
             | { before?: unknown; after?: unknown }
             | null
@@ -593,8 +649,9 @@ export function Session(props: SessionProps) {
           const before = typeof compacted?.before === "number" ? compacted.before : 0
           const after = typeof compacted?.after === "number" ? compacted.after : 0
           if (compacted && before > after) {
+            if (undoneText) setPromptSeed(undoneText)
             toast.show({
-              title: "Compacted",
+              title: historyRewriteTitle(rewound),
               message: `${before} → ${after} messages`,
               variant: "info",
             })
@@ -619,7 +676,7 @@ export function Session(props: SessionProps) {
           ranPlanRun = true
           // 内化批次: silent — the run's own receipts and the posture notice
           // are the story; no "┃ /plan run" line dresses it as user input.
-          dispatch("/plan run")
+          dispatch("/plan run", [], false)
         }
         // One queued line per finished turn (deferred when the plan run won
         // this end-of-turn slot, or when the ending was not this turn's --
@@ -635,7 +692,7 @@ export function Session(props: SessionProps) {
             .catch(() => {
               /* the row is already out of local state; nothing to reconcile */
             });
-          dispatch(next.text)
+          dispatch(next.text, [], false)
         }
       }
       if (event.type === "provider.retried") {
@@ -733,6 +790,34 @@ export function Session(props: SessionProps) {
       },
     ),
   )
+
+  // A-12: release what `dispatch` held back, once the switch has settled.
+  // Built after the hydrate effect on purpose -- the re-projection above wipes
+  // the pending line's echo, so this replay has to come second, not first.
+  createEffect(() => {
+    const switching = props.switching?.() ?? false
+    const id = props.sessionId
+    if (switching || deferred.length === 0) return
+    const rows = deferred.splice(0, deferred.length)
+    const first = rows[0]!
+    if (id !== first.from) {
+      // The switch landed: send under the id the shell moved to, and replay
+      // the echo the caller withheld.
+      if (first.echo) apply({ kind: "submitted", text: first.text, images: first.images })
+      dispatchNow(first.text, first.images)
+    } else {
+      // The load failed.  On /resume / /clear the backend had already moved,
+      // so the old id is not live -- guessing would send a second refusal and
+      // lose the line.  Give it back to the composer instead.
+      setPromptSeed(first.text)
+      toast.show({
+        title: "Session",
+        message: "切换未完成，输入已放回输入框",
+        variant: "warning",
+      })
+    }
+    for (const row of rows.slice(1)) queueText(row.text)
+  })
 
   return (
     <box flexDirection="column" width="100%" height="100%">

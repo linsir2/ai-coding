@@ -122,7 +122,12 @@ from ai_coding.domain.message import (
     ToolArtifact,
 )
 from ai_coding.domain.model_config import ModelConfig
-from ai_coding.domain.read_ledger import extract_claims, paths_in, unsupported_claims
+from ai_coding.domain.read_ledger import (
+    extract_claims,
+    paths_in,
+    unsupported_claims,
+    unsupported_quotes,
+)
 from ai_coding.domain.run import assistant_message, user_message
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.stance import PostureResult
@@ -143,6 +148,7 @@ from ai_coding.service.session_service import SessionService
 from ai_coding.skills.catalog import build_catalog, superseded_note
 from ai_coding.skills.policy import denied_skill_ids
 from ai_coding.tools.base import BaseTool, TurnConclusion
+from ai_coding.tools.goal_tools import GOAL_TOOL_NAMES
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.schema import tool_schema, tool_schemas, tool_schemas_from_tools
 
@@ -198,6 +204,23 @@ _REACTIVE_COMPACT_SECONDS = 60.0
 #: summary of a summary, and a pass that removes nothing still ends the turn
 #: honestly (the ``removed == 0`` guard in the catch block).
 _MAX_OVERFLOW_COMPACTS = 2
+
+#: Ceiling for the citation check's lazy line count.  Past this the count is
+#: unknown and the citation is not challenged -- a 10MB file must not be read to
+#: answer "does line 999 exist".
+_LINE_COUNT_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _armed_profile(session: Any) -> str:
+    """What the session's task is armed as (``""`` when nothing is armed).
+
+    R21 §3: a plan round arms the task as ``plan`` while a goal run arms it as
+    ``goal``; the tool surface tells them apart by this one fact.
+    """
+    task = getattr(session, "task", None)
+    if task is None or not getattr(task, "armed", False):
+        return ""
+    return str(getattr(task, "armed_profile", "") or "")
 
 
 def _tools_by_origin(registry: ToolRegistry) -> dict[str, int]:
@@ -453,7 +476,7 @@ class AgentLoop:
         # the provider's prefix cache depend on it).
         self.gate: PermissionGate = gate or PermissionGate()
         self._surface_cache: dict[
-            tuple[str, bool, tuple[Rule, ...], tuple[Rule, ...]],
+            tuple[str, bool, tuple[Rule, ...], tuple[Rule, ...], str],
             list[dict[str, Any]],
         ] = {}
         # R4a: the tool schemas are part of every prompt, so their size belongs in
@@ -709,31 +732,45 @@ class AgentLoop:
         target_agent = agent if agent is not None else session.agent
         target_readonly = bool(readonly) if readonly is not None else session.readonly
         previous = session.agent
+        previous_readonly = session.readonly
+        agent_moved = target_agent != previous
+        readonly_moved = target_readonly != previous_readonly
         session.agent = target_agent
         session.readonly = target_readonly
-        if target_agent != previous:
+        # R21 §2: the posture has two axes, and only one of them had an event.
+        # ``/readonly`` moved this axis alone and announced nothing, while a
+        # ``/plan run`` moved both and announced only the agent -- the front
+        # end then re-polled stats and lost the race with the command's own ack
+        # (measured: ``Build · 只读`` right after the run started).
+        if agent_moved or readonly_moved:
             ts = now_utc()
-            session.agent_history.append(
-                {"from": previous, "to": target_agent, "ts": ts, "reason": reason}
-            )
             event = AgentSwitched(
                 from_agent=previous,
                 to_agent=target_agent,
                 reason=reason,
                 ts=ts,
+                readonly=target_readonly,
             )
             sink = observer if observer is not None else self.observer
             try:
                 sink.on_event(event)
             except Exception:  # noqa: BLE001 — observation must not lose the switch
                 _log.debug("AgentSwitched observer failed", exc_info=True)
-            # M2 T3: the posture changed, so the model has to be told.  The
-            # reminder is *queued*, not delivered: a turn may be running and
-            # its request is already assembled, and a reminder that arrives
-            # mid-turn would change a request the model has already seen.
-            text = reminder_for(previous, target_agent)
-            if text is not None:
-                self._queue_reminder(session, text)
+            # The durable row and the model's reminder are about the *agent*
+            # only: a read-only flip is not a change of who is in charge, and
+            # recording it as one would replay as "Switched agent: build →
+            # build" and queue a reminder the model never needed.
+            if agent_moved:
+                session.agent_history.append(
+                    {"from": previous, "to": target_agent, "ts": ts, "reason": reason}
+                )
+                # M2 T3: the posture changed, so the model has to be told.  The
+                # reminder is *queued*, not delivered: a turn may be running and
+                # its request is already assembled, and a reminder that arrives
+                # mid-turn would change a request the model has already seen.
+                text = reminder_for(previous, target_agent)
+                if text is not None:
+                    self._queue_reminder(session, text)
         self._clear_pending_posture(session)
 
     def _queue_reminder(self, session: SessionData, text: str) -> None:
@@ -2188,6 +2225,9 @@ class AgentLoop:
             # M-C1: the record is for crash recovery, so only a resumed turn may
             # be answered from it.  A live turn must really run the call again.
             allow_replay=resumed,
+            # R21 §10: a step that stopped on the length limit may have had its
+            # arguments cut mid-JSON.  Nothing in it is safe to execute.
+            truncated=step.finish_reason == "length",
         )
         # R20: every source path a tool result named is evidence the model has
         # seen that file.  Accumulated here rather than derived from the
@@ -2291,10 +2331,16 @@ class AgentLoop:
         file the model cited after merely *seeing* it (grep/glob/bash), so the
         common case costs nothing.  Best-effort and read-only -- an unreadable
         path yields 0, which widens rather than narrows the check.
+
+        The read is bounded: this is a sanity check on a citation, not a licence
+        to pull a 10MB file into memory.  Past the cap the count is unknown, and
+        unknown means "do not challenge".
         """
         candidate = Path(self.workspace) / path
         try:
             if not candidate.is_file():
+                return 0
+            if candidate.stat().st_size > _LINE_COUNT_MAX_BYTES:
                 return 0
             with candidate.open("r", encoding="utf-8", errors="replace") as handle:
                 return sum(1 for _ in handle)
@@ -2311,41 +2357,91 @@ class AgentLoop:
         ceiling = max(1, int(self.policy.config.max_iterations))
         return index < ceiling
 
+    def _read_for_quote(self, path: str) -> str | None:
+        """The cited file's text, or ``None`` when it cannot be compared.
+
+        Injected into ``read_ledger.unsupported_quotes``.  Fail-open by design:
+        an unreadable, missing or oversized file means "no evidence either
+        way", and a challenge must never be invented from that.  The cap is the
+        same one tier 2 uses -- a sanity check on a citation is not a licence
+        to pull a 10MB file into memory.
+        """
+        candidate = Path(self.workspace) / path
+        try:
+            if not candidate.is_file():
+                return None
+            if candidate.stat().st_size > _LINE_COUNT_MAX_BYTES:
+                return None
+            return candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
     def _reject_unsupported_claims(
         self, session: SessionData, text: str, index: int
     ) -> bool:
-        """Send the answer back once when it cites code this session never read.
+        """Send the answer back once when its evidence does not hold up.
 
         RC-7: nothing checked the answer at all.  ``path:line`` existed and the
         line really contained the quoted code, so every §8-style check passed --
         but the *context* around it (a constructor, a default value) was invented
         from a range the model had never opened.
 
+        R21 §6 adds the second half: a range can be fully read and still no
+        longer contain what the answer quotes, because the file was rewritten
+        between the read and the answer.  ``unsupported_claims`` only knows the
+        ranges, so ``unsupported_quotes`` reads the region back and compares.
+
         One correction, never a loop: ``claim_retries`` is reset per turn, and a
-        second pass through this method lets the answer through whatever it says.
-        The three-tier decision itself is pure (``read_ledger.unsupported_claims``).
+        second pass lets the answer through and says in the turn report that the
+        check was spent.
         """
-        if session.claim_retries >= 1:
-            return False
         claims = extract_claims(text)
         if not claims:
             return False
         bad = unsupported_claims(
             session.read_ledger, session.seen_paths, claims, size_of=self._line_count
         )
-        if not bad:
+        bad_quotes = (
+            []
+            if bad
+            else unsupported_quotes(
+                text, session.read_ledger, self._read_for_quote
+            )
+        )
+        if not bad and not bad_quotes:
+            return False
+        if session.claim_retries >= 1:
+            # The budget is one correction per turn.  Saying so is the honest
+            # part: the answer goes out unverified, and the turn report should
+            # not read as if every citation had been checked.
+            self.reporter.report_degraded(
+                "claim_check",
+                "citation correction already spent this turn",
+                "answer let through unverified",
+            )
             return False
         session.claim_retries += 1
-        listed = "\n".join(f"- {path}:{start}-{end}" for path, start, end in bad[:5])
-        session.add_message(
-            user_message(
+        if bad:
+            listed = "\n".join(f"- {path}:{start}-{end}" for path, start, end in bad[:5])
+            correction = (
                 "你的答案引用了本会话没有读过的位置：\n"
                 f"{listed}\n"
                 "请核对：要么先读这些位置再确认，要么把结论改成「未确认」并说明缺什么。\n"
-                "不要凭记忆描述没有读过的代码。",
-                now_utc(),
-                synthetic=True,
+                "不要凭记忆描述没有读过的代码。"
             )
+        else:
+            listed = "\n".join(
+                f"- {path}:{start}-{end}：「{quote[:60]}」"
+                for path, start, end, quote in bad_quotes[:5]
+            )
+            correction = (
+                "你的答案引用的内容与这些位置对不上"
+                "（文件可能已被修改，或引文不在该区间）：\n"
+                f"{listed}\n"
+                "请重新读这些位置后复述原文，或把结论改成「未确认」并说明缺什么。"
+            )
+        session.add_message(
+            user_message(correction, now_utc(), synthetic=True)
         )
         self.closer.checkpoint(session, index)
         return True
@@ -3021,7 +3117,9 @@ class AgentLoop:
             # C-2: the same fact the step picks its schemas from (the tool
             # surface), so the prompt never teaches a tool the request cannot
             # carry. One rule, read twice; no second surface to keep in sync.
-            tools=self._prompt_tools(mode, readonly, session_rules, agent_rules),
+            tools=self._prompt_tools(
+                mode, readonly, session_rules, agent_rules, _armed_profile(session)
+            ),
         )
 
     def _prompt_tools(
@@ -3030,6 +3128,7 @@ class AgentLoop:
         readonly: bool,
         session_rules: tuple[Rule, ...] = (),
         agent_rules: tuple[Rule, ...] = (),
+        armed: str = "",
     ) -> tuple[str, ...]:
         """The tool names the methods section should speak for.
 
@@ -3042,7 +3141,7 @@ class AgentLoop:
         return tuple(
             tool.name
             for tool in self._surface_tools(
-                mode, readonly, session_rules, agent_rules
+                mode, readonly, session_rules, agent_rules, armed
             )
         )
 
@@ -3052,18 +3151,23 @@ class AgentLoop:
         readonly: bool,
         session_rules: tuple[Rule, ...] = (),
         agent_rules: tuple[Rule, ...] = (),
+        armed: str = "",
     ) -> list[BaseTool]:
         """The tools this request may call, in the registry's own order.
 
-        Three predicates, all about what the request may do: the read-only
+        Four predicates, all about what the request may do: the read-only
         posture drops the mutating tools (the dispatch gate refuses them
         structurally -- 只读探索批次, measured: 3-4 bash collisions per
         planning turn), outside the planning posture the plan-only tools are
-        not advertised at all (N1), and a wholly denied action is not offered
-        (M1a).  A scoped denial keeps the tool and refuses at dispatch, where
-        the model can read which resource it hit.
+        not advertised at all (N1), a wholly denied action is not offered
+        (M1a), and a plan round does not advertise the goal pair: its task is
+        armed as ``plan``, so ``start_goal``/``update_goal`` could only answer
+        ``no_goal`` (R21 §3).  A scoped denial keeps the tool and refuses at
+        dispatch, where the model can read which resource it hit.
         """
         tools = list(self.tools.all_tools)
+        if armed == "plan":
+            tools = [tool for tool in tools if tool.name not in GOAL_TOOL_NAMES]
         if mode != "plan":
             tools = [tool for tool in tools if not tool.plan_only]
         if readonly:
@@ -3112,11 +3216,21 @@ class AgentLoop:
         readonly = bool(getattr(session, "readonly", False))
         session_rules = self._effective_session_rules(session)
         agent_rules = self._agent_rules(session)
-        key = (mode, readonly, session_rules, agent_rules)
+        # R21 §3: the tool surface now depends on *what the task is armed as*
+        # (a plan round has no running goal), so that fact joins the key --
+        # otherwise the first request of a plan run would keep serving the
+        # catalogue cached while the same session was just a plain chat.
+        key = (mode, readonly, session_rules, agent_rules, _armed_profile(session))
         schemas = self._surface_cache.get(key)
         if schemas is None:
             schemas = tool_schemas_from_tools(
-                self._surface_tools(mode, readonly, session_rules, agent_rules)
+                self._surface_tools(
+                    mode,
+                    readonly,
+                    session_rules,
+                    agent_rules,
+                    key[-1],
+                )
             )
             self._surface_cache[key] = schemas
         return schemas

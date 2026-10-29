@@ -47,6 +47,7 @@ from ai_coding.domain.message import (
     ToolCall,
     ToolCallRef,
     ToolResult,
+    arguments_are_valid,
     tool_call_from_ref,
 )
 from ai_coding.infra.deadline import (
@@ -90,6 +91,10 @@ class _Prepared:
     specific: bool = False
     # R4a: the loop's iteration, carried so the events can be correlated.
     iteration: int = 0
+    #: R21 §10: the error code this call is refused with before anything runs
+    #: (``invalid_arguments`` / ``truncated_arguments``).  Empty means "no
+    #: refusal"; the call proceeds to the gate as usual.
+    refusal: str = ""
 
 
 def _verdict(decision: Any) -> PermissionDecision:
@@ -225,6 +230,7 @@ class ToolDispatcher:
         iteration: int = 0,
         view: TurnView | None = None,
         allow_replay: bool = False,
+        truncated: bool = False,
     ) -> list[DispatchOutcome]:
         """Run ``calls`` and return one outcome per call, in the given order.
 
@@ -236,12 +242,19 @@ class ToolDispatcher:
         model concluded "the edit didn't apply".  Only a turn resumed after a
         crash may answer from the record -- that is the case M-C1 was written
         for, where the effect really did happen before the process died.
+
+        ``truncated`` (R21 §10) says the step hit ``finish_reason == "length"``.
+        Every call in it is refused: a cut can land inside the arguments and
+        still parse (a shorter list, a half-written string that happens to
+        close), so "it parsed" is not evidence the model said what it meant.
         """
         if not calls:
             return []
 
         prepared = [
-            self._prepare(tool_call_from_ref(ref), ctx=ctx, iteration=iteration)
+            self._prepare(
+                ref, ctx=ctx, iteration=iteration, truncated=truncated
+            )
             for ref in calls
         ]
 
@@ -283,17 +296,37 @@ class ToolDispatcher:
     # ---- preparation ------------------------------------------------------
 
     def _prepare(
-        self, call: ToolCall, *, ctx: ToolContext, iteration: int = 0
+        self,
+        ref: ToolCallRef,
+        *,
+        ctx: ToolContext,
+        iteration: int = 0,
+        truncated: bool = False,
     ) -> _Prepared:
-        """Resolve the tool and its permission verdict exactly once per call."""
+        """Resolve the tool and its permission verdict exactly once per call.
+
+        The raw reference is needed here (not just the parsed call): whether the
+        arguments were legal decides whether the call may run at all, and the
+        parsed form has already forgotten the damage (``tool_call_from_ref``
+        turns unparseable JSON into ``{}``).
+        """
+        call = tool_call_from_ref(ref)
+        refusal = ""
+        if truncated:
+            # The step ran out of tokens: even a parseable tail may be a
+            # fragment the model never finished saying.
+            refusal = "truncated_arguments"
+        elif not arguments_are_valid(ref.arguments):
+            refusal = "invalid_arguments"
         tool = self.registry.get(call.name)
-        decision = None if tool is None else self._check(tool, call, ctx)
+        decision = None if refusal or tool is None else self._check(tool, call, ctx)
         return _Prepared(
             call=call,
             tool=tool,
             decision=decision,
             specific=bool(getattr(decision, "specific", False)),
             iteration=iteration,
+            refusal=refusal,
         )
 
     def _check(self, tool: BaseTool | None, call: ToolCall, ctx: ToolContext) -> Any:
@@ -361,7 +394,7 @@ class ToolDispatcher:
         )
         started = time.monotonic()
 
-        result, denied, halted = await self._decide(
+        result, denied, halted, approval_ms = await self._decide(
             item, ctx, deadline, view, allow_replay=allow_replay
         )
 
@@ -371,7 +404,10 @@ class ToolDispatcher:
                 tool_name=call.name,
                 success=result.success,
                 output_preview=preview(result.output),
+                # A-10: the card shows how much of this was waiting for a
+                # human; the trace keeps the whole span.
                 duration_ms=int((time.monotonic() - started) * 1000),
+                approval_ms=approval_ms,
                 error=result.error,
                 iteration=item.iteration,
             )
@@ -386,9 +422,38 @@ class ToolDispatcher:
         view: TurnView | None = None,
         *,
         allow_replay: bool = False,
+    ) -> tuple[ToolResult, bool, bool, int]:
+        """``(result, denied, halted, approval_ms)`` for one prepared call.
+
+        A-10: the wait for a human is measured in one place and carried out
+        through a mutable ``timing`` slot rather than appended to every early
+        return -- one missed return would crash the caller's unpacking.
+        """
+        timing = {"approval_ms": 0}
+        result, denied, halted = await self._decide_inner(
+            item, ctx, deadline, view, allow_replay=allow_replay, timing=timing
+        )
+        return result, denied, halted, timing["approval_ms"]
+
+    async def _decide_inner(
+        self,
+        item: _Prepared,
+        ctx: ToolContext,
+        deadline: Deadline | None = None,
+        view: TurnView | None = None,
+        *,
+        allow_replay: bool = False,
+        timing: dict[str, int],
     ) -> tuple[ToolResult, bool, bool]:
         """Return ``(result, denied, halted)`` for one prepared call."""
         call = item.call
+
+        # R21 §10: the model's own arguments were unusable.  Nothing is run --
+        # not even the prechecks -- because there is nothing to run *with*, and
+        # executing ``{}`` would be a silent different call (the old behaviour:
+        # a truncated ``write`` became an empty write).
+        if item.refusal:
+            return self._bad_arguments(call, item.refusal), True, False
 
         if item.tool is None:
             return self._unknown(call), True, False
@@ -490,6 +555,11 @@ class ToolDispatcher:
                     "params": dict(call.params),
                     "reason": reason,
                 })
+            asked = time.monotonic()
+            # The budget ``_ask`` will apply; captured *before* the wait so a
+            # timeout message quotes what the human was actually given, not the
+            # ~0 left after they ran out of it.
+            approval_budget = _ask_budget(deadline, self.approval_timeout)
             try:
                 verdict_from_user = await self._ask(
                     call,
@@ -499,13 +569,15 @@ class ToolDispatcher:
                     posture_of(ctx.mode, ctx.readonly),
                 )
             finally:
+                # A-10: how long the human took, for the card (the trace keeps
+                # the whole span, approval included).
+                timing["approval_ms"] = int((time.monotonic() - asked) * 1000)
                 if ctx.note_approval is not None:
                     ctx.note_approval(None)
             if verdict_from_user is ApprovalVerdict.STOPPED:
                 return self._stopped(call), True, True
             if verdict_from_user is ApprovalVerdict.TIMED_OUT:
-                waited = _ask_budget(deadline, self.approval_timeout)
-                return self._approval_timeout(call, waited), True, False
+                return self._approval_timeout(call, approval_budget), True, False
             if verdict_from_user is not ApprovalVerdict.APPROVED:
                 return self._not_approved(call, "user declined"), True, False
             if (
@@ -700,6 +772,34 @@ class ToolDispatcher:
             )
 
     # ---- structured results ----------------------------------------------
+
+    @staticmethod
+    def _bad_arguments(call: ToolCall, refusal: str) -> ToolResult:
+        """The call's own arguments were cut off or unparseable (R21 §10).
+
+        The model has to be told *what to do*, not just that it failed: the
+        failure is structural -- it asked for something it never finished
+        saying -- so the fix is to say less per call.
+        """
+        if refusal == "truncated_arguments":
+            output = (
+                "error: 上一步输出被长度上限截断，本批工具调用全部不执行——"
+                "参数可能只写了一半。请把工作拆成更小的步骤重做："
+                "一次只写一个文件或一段，必要时分段写入（write 建文件、"
+                "edit 续写），并且单次内容不要超过长度上限。"
+            )
+        else:
+            output = (
+                "error: 工具调用的参数不是合法 JSON 对象，本次调用未执行。"
+                "请修正后重发；如果是一次写了太多内容导致被截断，"
+                "请把内容拆小或分段写入（write 建文件、edit 续写）。"
+            )
+        return ToolResult(
+            success=False,
+            output=output,
+            error=refusal,
+            data={"decision": "deny", "reason": refusal, "tool": call.name},
+        )
 
     @staticmethod
     def _unknown(call: ToolCall) -> ToolResult:

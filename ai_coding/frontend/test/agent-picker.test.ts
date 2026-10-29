@@ -61,6 +61,57 @@ describe("agent.switched updates the current agent (T7)", () => {
   })
 })
 
+describe("agent.switched carries the read-only axis (R21 §2)", () => {
+  const posture = (data: Record<string, unknown>) =>
+    reduce(initialState(), { kind: "wire", event: { type: "agent.switched", data } })
+
+  test("a readonly-only flip lands without a bogus agent notice", () => {
+    // ``/readonly`` moves this axis alone; the agent id is the same on both
+    // ends, so "Switched agent: build → build" must not appear.
+    const state = posture({ from: "build", to: "build", reason: "/readonly", readonly: true })
+
+    expect(state.readonly).toBe(true)
+    expect(state.agent).toBe("build")
+    expect(noticesOf(state)).toEqual([])
+  })
+
+  test("a run that leaves the plan posture clears it in the same event", () => {
+    const plan = posture({ from: "build", to: "plan", reason: "/plan", readonly: true })
+    const running = reduce(plan, {
+      kind: "wire",
+      event: {
+        type: "agent.switched",
+        data: { from: "plan", to: "build", reason: "/plan run", readonly: false },
+      },
+    })
+
+    expect(running.readonly).toBe(false)
+    expect(running.agent).toBe("build")
+  })
+
+  test("an event that names no readonly axis leaves the known one alone", () => {
+    const known = posture({ from: "build", to: "build", readonly: true })
+    const next = reduce(known, {
+      kind: "wire",
+      event: { type: "agent.switched", data: { from: "build", to: "plan", reason: "agent.select" } },
+    })
+
+    expect(next.readonly).toBe(true)
+    expect(noticesOf(next)).toEqual(["Switched agent: build → plan（agent.select）"])
+  })
+
+  test("stats hydration writes both axes", () => {
+    const state = reduce(initialState(), {
+      kind: "agent-synced",
+      agent: "build",
+      readonly: false,
+    })
+
+    expect(state.agent).toBe("build")
+    expect(state.readonly).toBe(false)
+  })
+})
+
 describe("shift+tab cycles the visible primaries (T7)", () => {
   test("order follows the list, wrapping at the end", () => {
     expect(nextAgentId(LIST, "build")).toBe("plan")

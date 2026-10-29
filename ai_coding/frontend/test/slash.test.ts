@@ -7,9 +7,12 @@
  */
 
 import { describe, expect, test } from "bun:test"
+import { readFileSync, readdirSync } from "node:fs"
+import { join } from "node:path"
 import {
   SLASH_COMMANDS,
   filterSlashCommands,
+  ownCommand,
   slashQuery,
   slashSelectionText,
 } from "../src/util/slash"
@@ -77,6 +80,25 @@ describe("filterSlashCommands", () => {
     expect(filterSlashCommands("zzzzz")).toEqual([])
   })
 
+  // R22/A-2: the suggestion list used to search descriptions too, so a command
+  // the *backend* knows but the catalogue does not was replaced at Enter by a
+  // fuzzy neighbour: `/readonly` ran `/export`, `/plan` opened the permissions
+  // dialog, `/agents` ran `/tasks`, `/clear` opened permissions, `/resume` ran
+  // `/export`.  A name-only match leaves the line alone, so Enter submits it to
+  // the backend dispatcher instead of running somebody else's command.
+  test("a command the catalogue does not list matches nothing", () => {
+    for (const query of ["readonly", "plan", "agents", "clear", "resume", "goal"]) {
+      expect(filterSlashCommands(query)).toEqual([])
+    }
+  })
+
+  test("descriptions are displayed, not searched", () => {
+    // "Review the current git diff" is the /review description; "diff" must not
+    // surface it, because the same rule would let any description word hijack a
+    // typed command.
+    expect(filterSlashCommands("diff").map((entry) => entry.name)).toEqual([])
+  })
+
   test("a keymap entry names a dotted command; names carry no slash", () => {
     // A2.3 widened the contract: a text entry has no keymap command (the line
     // is submitted to the backend dispatcher).  What must still hold for a
@@ -128,6 +150,70 @@ describe("the command catalogue (A2.3)", () => {
   test("a text entry carries the exact line the backend dispatches", () => {
     const budget = SLASH_COMMANDS.find((entry) => entry.name === "budget")
     expect(budget?.command ?? "/budget").toBe("/budget")
+  })
+
+  /**
+   * R20b: /permissions pointed at "session.permissions", a name no keymap ever
+   * registered — selecting it cleared the composer and did nothing.  The
+   * catalogue's contract ("points at a command the TUI can actually run") was
+   * only ever checked by eye, so this reads the source for the registrations.
+   */
+  test("every keymap entry names a command the app actually registers", () => {
+    const registered = new Set<string>()
+    const walk = (dir: string) => {
+      for (const item of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, item.name)
+        if (item.isDirectory()) walk(full)
+        else if (/\.tsx?$/.test(item.name)) {
+          const source = readFileSync(full, "utf8")
+          for (const match of source.matchAll(/name:\s*"([a-z][\w.]*)"/g)) {
+            registered.add(match[1]!)
+          }
+        }
+      }
+    }
+    walk(join(import.meta.dir, "..", "src"))
+    const dead = SLASH_COMMANDS.filter(
+      (entry) => entry.command && !registered.has(entry.command),
+    )
+    expect(dead.map((entry) => `${entry.name} -> ${entry.command}`)).toEqual([])
+  })
+
+  test("/permissions opens the dialog rather than a dead pointer", () => {
+    const entry = SLASH_COMMANDS.find((command) => command.name === "permissions")
+    expect(entry?.command).toBe("dialog.permissions.show")
+  })
+})
+
+/**
+ * R20b: the names the backend has never known.  Typed by hand they used to be
+ * submitted as prose — `/models` reached the model as a question.
+ */
+describe("a typed line that names a TUI command (R20b)", () => {
+  test("the four backend-unknown names resolve to their keymap command", () => {
+    expect(ownCommand("/models")?.command).toBe("dialog.models.show")
+    expect(ownCommand("/sessions")?.command).toBe("dialog.sessions.show")
+    expect(ownCommand("/new")?.command).toBe("session.new")
+    expect(ownCommand("/mcp")?.command).toBe("mcp.list")
+  })
+
+  test("surrounding whitespace does not stop the match", () => {
+    expect(ownCommand("  /models  ")?.name).toBe("models")
+  })
+
+  test("arguments leave the line to the backend", () => {
+    // `/permissions auto` is a text command; the keymap form takes no argument.
+    expect(ownCommand("/permissions auto")).toBeUndefined()
+  })
+
+  test("a text-only entry is never run directly", () => {
+    expect(ownCommand("/budget")).toBeUndefined()
+    expect(ownCommand("/export html")).toBeUndefined()
+  })
+
+  test("ordinary prose and paths stay prose", () => {
+    expect(ownCommand("please read /src/main.ts")).toBeUndefined()
+    expect(ownCommand("/src/main.ts")).toBeUndefined()
   })
 })
 

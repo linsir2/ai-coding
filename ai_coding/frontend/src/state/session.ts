@@ -39,6 +39,12 @@ export type Part =
       /** What the wire measured; 0 when the event carried none. */
       durationMs: number
       /**
+       * A-10: how much of `durationMs` was a human answering an approval
+       * prompt.  A part of the total, never an additional number; 0 when
+       * nobody was asked.
+       */
+      approvalMs: number
+      /**
        * M3 T11: the arguments of a `present_plan` call, so the transcript can
        * show the plan that was actually submitted.  Undefined for every other
        * tool -- keeping every call's arguments would make the transcript a
@@ -135,6 +141,13 @@ export interface SessionState {
    * tag is who produced that history, not the current posture.
    */
   agent: string | null
+  /**
+   * R21 §2: the session's read-only switch.  ``null`` means "not told yet";
+   * the route then falls back to ``stats()``.  ``agent.switched`` carries it,
+   * so a flip that does not move the agent (``/readonly``) still lands -- and
+   * a run that moves both no longer has to re-poll.
+   */
+  readonly: boolean | null
   /** True from submit until the turn's finish event; gates the prompt. */
   busy: boolean
   /**
@@ -170,7 +183,7 @@ export interface GoalStatus {
 }
 
 export type Action =
-  | { kind: "agent-synced"; agent: string | null }
+  | { kind: "agent-synced"; agent: string | null; readonly?: boolean }
   | { kind: "submitted"; text: string; images?: PromptImage[] }
   // 08: a resumed turn carries no prompt -- busy with no echo.  Reusing
   // "submitted" with an empty text would draw an empty user bubble.
@@ -198,7 +211,15 @@ export type Action =
   | { kind: "jobs"; jobs: JobRow[] }
 
 export function initialState(): SessionState {
-  return { messages: [], agent: null, busy: false, queued: [], jobs: [], goal: null }
+  return {
+    messages: [],
+    agent: null,
+    readonly: null,
+    busy: false,
+    queued: [],
+    jobs: [],
+    goal: null,
+  }
 }
 
 /** Narrow one wire row into the shape the panel draws. */
@@ -510,13 +531,24 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
       const from = str(data["from"]) || "?"
       const to = str(data["to"]) || "?"
       const reason = str(data["reason"])
-      const suffix = reason ? `（${reason}）` : ""
-      const text = `Switched agent: ${from} → ${to}${suffix}`
-      // T7: the event moves the current agent AND inserts the notice.  The
-      // tag on a message is history attribution, never the current posture.
+      // R21 §2: the payload carries the read-only axis when the producer
+      // reports it (``readonly`` is absent on an agent-only switch).
+      const readonly =
+        typeof data["readonly"] === "boolean" ? (data["readonly"] as boolean) : state.readonly
+      // A read-only-only flip names the same agent on both ends: moving the
+      // posture is right, but "Switched agent: build → build" is not.
+      const switched =
+        from === to
+          ? state
+          : updateAssistant(state, (parts) =>
+              appendNotice(parts, `Switched agent: ${from} → ${to}${reason ? `（${reason}）` : ""}`),
+            )
       const toId = str(data["to"])
-      const switched = updateAssistant(state, (parts) => appendNotice(parts, text))
-      return toId ? { ...switched, agent: toId } : switched
+      return {
+        ...switched,
+        agent: toId || switched.agent,
+        readonly,
+      }
     }
     case "tool.started": {
       const callId = str(data["callId"])
@@ -537,6 +569,7 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
           preview: "",
           error: "",
           durationMs: 0,
+          approvalMs: 0,
           ...(toolName === "present_plan" ? { params } : {}),
         },
       ])
@@ -574,12 +607,14 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
       const preview = shorten(str(data["outputPreview"]), PREVIEW_CHARS)
       const error = str(data["error"])
       const durationMs = num(data["durationMs"])
+      // A-10: absent unless a human was actually asked (the bridge omits it).
+      const approvalMs = num(data["approvalMs"])
       let found = false
       const updated = updateAssistant(state, (parts) =>
         mapParts(parts, (part) => {
           if (part.kind !== "tool" || part.callId !== callId) return part
           found = true
-          return { ...part, status: success ? "ok" : "failed", preview, error, durationMs }
+          return { ...part, status: success ? "ok" : "failed", preview, error, durationMs, approvalMs }
         }),
       )
       if (found) return updated
@@ -599,6 +634,7 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
           preview,
           error,
           durationMs,
+          approvalMs,
         },
       ])
     }
@@ -898,7 +934,12 @@ export function reduce(state: SessionState, action: Action): SessionState {
     // T7: stats.agent lands here on mount (and after reloads) — the only
     // writer besides agent.switched, so the two cannot disagree.
     case "agent-synced":
-      return action.agent === state.agent ? state : { ...state, agent: action.agent }
+      if (action.agent === state.agent && action.readonly === undefined) return state
+      return {
+        ...state,
+        agent: action.agent,
+        readonly: action.readonly ?? state.readonly,
+      }
     case "submitted":
       return {
         ...state,

@@ -29,6 +29,7 @@ from ai_coding.domain.read_ledger import (
     render,
     same_file,
     unsupported_claims,
+    unsupported_quotes,
 )
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
@@ -375,6 +376,39 @@ def test_without_size_of_tier_two_stays_open():
     assert unsupported_claims((), ("a.py",), claims, size_of=None) == []
 
 
+def test_tier_two_measures_the_seen_spelling_not_the_abbreviated_one():
+    """An answer abbreviates ``ai_coding/ai/llm_helpers.py`` to ``llm_helpers.py``.
+    ``same_file`` matches, but a size lookup against the workspace root for the
+    bare name finds nothing -- tier 2 then silently failed open (review finding).
+    """
+    seen = ["ai_coding/ai/llm_helpers.py"]
+    claims = [("llm_helpers.py", 999, 999)]
+    asked: list[str] = []
+
+    def size_of(path: str) -> int:
+        asked.append(path)
+        return 100 if path == "ai_coding/ai/llm_helpers.py" else 0
+
+    assert unsupported_claims((), seen, claims, size_of=size_of) == claims
+    assert asked == ["ai_coding/ai/llm_helpers.py"]
+
+
+def test_a_size_lookup_that_raises_does_not_take_the_turn_down():
+    claims = [("a.py", 999, 999)]
+
+    def size_of(path: str) -> int:
+        raise OSError("gone")
+
+    assert unsupported_claims((), ("a.py",), claims, size_of=size_of) == []
+
+
+def test_an_inverted_range_is_read_as_the_range_it_meant():
+    """``a.py:100-1`` is a typo.  With containment it would otherwise look
+    "inside" any mark starting at or before 100 -- weaker than the old rule."""
+    assert extract_claims("见 a.py:100-1") == [("a.py", 1, 100)]
+    assert extract_claims("见 a.py:7") == [("a.py", 7, 7)]
+
+
 def test_a_basename_citation_matches_the_ledger():
     marks = (ReadMark("ai_coding/domain/plan_delivery.py", 61, 110, 117),)
     assert covers(marks, "plan_delivery.py", 81, 81)
@@ -617,3 +651,74 @@ def test_the_real_t2_answer_is_challenged_on_exactly_one_citation():
     )
     bad = unsupported_claims(marks, seen, extract_claims(answer))
     assert bad == [("ai_coding/domain/plan_delivery.py", 18, 46)]
+
+
+# ------------------------------------------- R21 §6: position != content
+
+
+def test_a_quote_the_cited_range_holds_passes():
+    text = "import os\ndef build():\n    return 1\n"
+    answer = '`a.py:2-3` 写的是 "def build(): return 1"。'
+    assert unsupported_quotes(answer, (), lambda path: text) == []
+
+
+def test_a_quote_the_range_no_longer_holds_is_reported():
+    """The rewrite case: the range was read, the file has since changed."""
+    text = "import os\ndef build():\n    return 1\n"
+    answer = '`a.py:2-3` 写的是 "def deploy(): return 99"。'
+    bad = unsupported_quotes(answer, (), lambda path: text)
+    assert [row[:3] for row in bad] == [("a.py", 2, 3)]
+
+
+def test_a_close_paraphrase_passes():
+    """A reflowed quote of ten-plus tokens is tolerated; a short one is not."""
+    text = "the loader reads alpha beta gamma delta epsilon zeta eta theta\n"
+    answer = '`a.py:1` 说的是 "the loader reads alpha beta gamma delta epsilon zeta eta thetaa"。'
+    assert unsupported_quotes(answer, (), lambda path: text) == []
+
+
+def test_a_short_fragment_is_not_compared_with_sequence_matching():
+    text = "def build():\n"
+    answer = '`a.py:1` 里是 "def bui1d():"。'
+    assert unsupported_quotes(answer, (), lambda path: text)
+
+
+def test_an_unreadable_file_widens_rather_than_challenges():
+    answer = '`a.py:1` 里是 "anything at all here"。'
+    assert unsupported_quotes(answer, (), lambda path: None) == []
+
+
+def test_a_range_past_the_end_of_the_file_widens():
+    answer = '`a.py:50-52` 里是 "anything at all here"。'
+    assert unsupported_quotes(answer, (), lambda path: "one line\n") == []
+
+
+def test_fullwidth_punctuation_and_a_line_number_prefix_still_match():
+    """Short on purpose: under ten tokens, so only the prefix strip can match
+    it -- the paraphrase allowance must not be what saves this case."""
+    text = "def f(x) -> x\n"
+    answer = '`a.py:1` 里是 "    1  def f（x） －＞ x"。'
+    assert unsupported_quotes(answer, (), lambda path: text) == []
+
+
+def test_the_ledger_spelling_is_what_gets_read():
+    """The answer abbreviates ``src/a.py`` to ``a.py``; the reader only knows
+    the full path, so resolving through the ledger is what makes this check
+    possible at all."""
+    marks = (ReadMark("src/a.py", 1, 5, 5),)
+    text = "def build():\n    return 1\n"
+    answer = '`a.py:1-2` 写的是 "def build(): return 1"。'
+    calls: list[str] = []
+
+    def reader(path: str) -> str | None:
+        calls.append(path)
+        return text if path == "src/a.py" else None
+
+    assert unsupported_quotes(answer, marks, reader) == []
+    assert calls == ["src/a.py"]
+
+
+def test_an_answer_naming_two_files_is_skipped_entirely():
+    text = "def build():\n    return 1\n"
+    answer = '`a.py:1-2` 与 `b.py:1` 里写的是 "def deploy(): return 99"。'
+    assert unsupported_quotes(answer, (), lambda path: text) == []

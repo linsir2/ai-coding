@@ -73,10 +73,15 @@ def test_r9_full_payload_is_opt_in(tmp_path):
 
 
 def test_r9_every_turn_becomes_a_details_block_with_its_summary(tmp_path):
+    """R20b: the turn cards carry a class, so the count is of ``<details`` tags.
+
+    The intent is unchanged -- one collapsible block per turn -- but the exact
+    ``<details>`` string was the R9c markup and the redesign needed the class.
+    """
     store = _session(tmp_path)
     view = read_session_view(store, "sess-1")
     html = render_session_html(view)
-    assert html.count("<details>") == len(view.turns) == 1
+    assert html.count("<details") == len(view.turns) == 1
     assert "turn 1" in html
 
 

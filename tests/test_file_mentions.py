@@ -59,10 +59,15 @@ def test_an_excluded_token_is_left_to_the_skill_path(tmp_path):
 # ---- the block the model actually reads ------------------------------------
 
 
-def _assembler(workspace, skills=None) -> RequestAssembler:
+def _assembler(workspace, skills=None, window=None) -> RequestAssembler:
     class _Compactor:
         async def compress(self, history, **kwargs):
             return history
+
+        # R22/H10: the assembler asks the compactor for the window the pipeline
+        # actually compacts against (``/model`` can repoint it).  ``None`` here
+        # is the "stub without an answer" case and must fall back to the default.
+        context_window = window
 
     class _Reporter:
         def report_context(self, **kwargs):
@@ -94,10 +99,10 @@ def _assembler(workspace, skills=None) -> RequestAssembler:
     )
 
 
-def _request_text(workspace, user_text: str, skills=None) -> str:
+def _request_text(workspace, user_text: str, skills=None, window=None) -> str:
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
     session.messages.append(ChatMessage(role="user", content=user_text, timestamp="t"))
-    assembler = _assembler(workspace, skills)
+    assembler = _assembler(workspace, skills, window)
 
     async def _run():
         return await assembler.assemble(
@@ -257,17 +262,97 @@ def test_prose_that_shares_the_shape_is_still_prose(tmp_path):
 
 
 def test_a_file_over_the_remaining_budget_is_truncated_not_dropped(tmp_path):
-    """Three pastes, one block budget: the third used to vanish with a
-    ``[budget exhausted, not included]`` line and no content at all.  A user who
-    pasted a file asked for that file, so the budget now decides how much of it
-    the model sees, never whether it sees it."""
+    """R22/H10: the budget decides how much of a file the model sees, and every
+    named file still arrives with a head plus the ``read`` call that continues it.
+
+    Before this the block had a flat 40,000-character budget whatever the window
+    was, so a 6k window received 40,138 characters on every iteration (96% of the
+    request) and compaction could not touch it.
+    """
     for name in "abc":
-        (tmp_path / f"{name}.txt").write_text(f"MARKER_{name} " + "y" * 15_000, encoding="utf-8")
+        (tmp_path / f"{name}.txt").write_text(f"MARKER_{name}\n" + _lines(200), encoding="utf-8")
 
     text = _request_text(tmp_path, "a.txt b.txt c.txt")
 
     for name in "abc":
-        assert f"MARKER_{name}" in text, f"{name}.txt was dropped"
+        assert f'<file path="{name}.txt">' in text, f"{name}.txt was dropped"
     assert "budget exhausted" not in text
-    assert "[truncated" in text
-    assert len(text) < 60_000
+    assert "[truncated" in text and "read offset=" in text
+    assert len(text) < 32_000
+
+
+def _block(text: str) -> str:
+    start = text.index("<referenced-files>")
+    return text[start : text.index("</referenced-files>") + len("</referenced-files>")]
+
+
+def _lines(count: int, width: int = 79) -> str:
+    return "".join(f"{i:05d} " + "z" * (width - 6) + "\n" for i in range(1, count + 1))
+
+
+def test_the_block_budget_scales_with_the_context_window(tmp_path):
+    """A 6k window received 40,138 characters per request (S3, measured).
+
+    The budget is 15% of the window in tokens; ``estimate_tokens`` says CJK is
+    half a token per character, so the character count is not ``tokens × 4``.
+    The assertion allows ~100 tokens of wrapper (header, tags, truncation note),
+    which is fixed and independent of the window.
+    """
+    from ai_coding.core.context_compression import estimate_tokens
+
+    (tmp_path / "big.txt").write_text(_lines(6000), encoding="utf-8")
+
+    block = _block(_request_text(tmp_path, "@big.txt", window=6000))
+
+    assert len(block) <= 4_200
+    assert estimate_tokens(block) <= 1_050
+
+
+def test_the_default_window_keeps_the_block_near_fifteen_percent(tmp_path):
+    from ai_coding.core.context_compression import estimate_tokens
+
+    (tmp_path / "big.txt").write_text(_lines(6000), encoding="utf-8")
+
+    block = _block(_request_text(tmp_path, "@big.txt", window=48_000))
+
+    assert len(block) <= 29_000
+    assert estimate_tokens(block) <= 7_400
+
+
+def test_a_huge_window_still_caps_the_block(tmp_path):
+    """Ten thousand tokens is the ceiling the old 40,000 ASCII characters stood for."""
+    for name in "abcd":
+        (tmp_path / f"{name}.txt").write_text(_lines(6000), encoding="utf-8")
+
+    block = _block(_request_text(tmp_path, "@a.txt @b.txt @c.txt @d.txt", window=200_000))
+
+    assert len(block) <= 41_000
+
+
+def test_a_tiny_file_after_a_huge_one_still_arrives(tmp_path):
+    """The 21-byte file used to become a bare pointer once the first ate the budget."""
+    (tmp_path / "big.txt").write_text(_lines(6000), encoding="utf-8")
+    (tmp_path / "tiny.txt").write_text("TINY_SECOND_FILE_MARK\n", encoding="utf-8")
+
+    text = _request_text(tmp_path, "@big.txt @tiny.txt", window=6000)
+
+    assert "TINY_SECOND_FILE_MARK" in text
+
+
+def test_the_truncation_note_says_what_it_holds_and_how_to_read_on(tmp_path):
+    """The S3 failure: the model read a 497-line head of a 6000-line file and
+    concluded the file was complete.  The note must name the range and the call
+    that continues it."""
+    import re
+
+    lines = [f"{i:05d} " + "z" * 72 for i in range(1, 6001)]
+    (tmp_path / "big.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    block = _block(_request_text(tmp_path, "@big.txt", window=6000))
+
+    shown = re.search(r"this text is lines 1-(\d+)", block)
+    offset = re.search(r"read offset=(\d+)", block)
+    assert shown and offset, block[-400:]
+    # `read`'s offset is 0-based, so "after line N" is exactly offset=N.
+    assert int(offset.group(1)) == int(shown.group(1))
+    assert "6000 lines total" in block

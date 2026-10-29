@@ -96,6 +96,25 @@ def test_tool_finished_passes_every_field() -> None:
     }
 
 
+def test_a10_an_approval_wait_travels_only_when_there_was_one() -> None:
+    """The wire stays byte-identical for calls nobody was asked about."""
+    waited = to_wire(
+        ToolFinished(
+            call_id="c1",
+            tool_name="bash",
+            success=True,
+            output_preview="ok",
+            duration_ms=28_900,
+            approval_ms=28_500,
+        )
+    )
+    assert waited is not None
+    assert waited["data"]["approvalMs"] == 28_500
+    plain = to_wire(ToolFinished(call_id="c2", tool_name="read", success=True))
+    assert plain is not None
+    assert "approvalMs" not in plain["data"]
+
+
 def test_approval_requested_stays_off_the_event_stream() -> None:
     """M5: approvals use the request round-trip, not a wire event.
 

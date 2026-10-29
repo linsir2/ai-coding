@@ -24,6 +24,7 @@ const part = (over: Partial<ToolPart> = {}): ToolPart => ({
   preview: "",
   error: "",
   durationMs: 0,
+  approvalMs: 0,
   ...over,
 })
 
@@ -41,6 +42,19 @@ describe("ToolCard", () => {
     expect(frame).toContain("命令返回非零")
     expect(frame).not.toContain("nonzero_exit")
     expect(frame).toContain("820ms")
+    setup.renderer.destroy()
+  })
+
+  test("a settled call names the approval wait (A-10)", async () => {
+    const setup = await render(part({ status: "ok", durationMs: 28_900, approvalMs: 28_500 }))
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("28.9s（审批 28.5s）")
+    setup.renderer.destroy()
+  })
+
+  test("a call nobody was asked about shows only its duration", async () => {
+    const setup = await render(part({ status: "ok", durationMs: 820 }))
+    expect(setup.captureCharFrame()).not.toContain("审批")
     setup.renderer.destroy()
   })
 

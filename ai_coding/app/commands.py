@@ -222,7 +222,7 @@ async def handle_input(
         console.info(_memory_report(loop))
         return REPLAction.CONTINUE, session
     if cmd.name == "trace":
-        console.info(_trace_report(loop))
+        console.info(_trace_report(loop, session))
         return REPLAction.CONTINUE, session
     if cmd.name == "stats":
         console.info(_stats_report(loop))
@@ -1301,15 +1301,44 @@ def _handle_export(
     return REPLAction.CONTINUE, session
 
 
-def _trace_report(loop: Any) -> str:
-    """Render the last turn's trace summary for ``/trace`` (best-effort)."""
+def _trace_report(loop: Any, session: Any = None) -> str:
+    """Render the last turn's trace summary for ``/trace`` (best-effort).
+
+    Three states, because "no turn yet" used to hide inside "tracing is off" —
+    the same recorder answered ``/budget`` with ``本会话还没跑过回合``, so the
+    two commands contradicted each other on screen (measured: r22 S1 frame 12).
+
+    ``TraceRecorder.current_path`` keeps the *last* turn's file after a turn
+    closes, and the recorder outlives a ``/new``/``/clear`` switch, so a fresh
+    session would present the previous session's turn as its own — the third
+    state therefore checks the file's session directory, not just existence.
+    """
     from ai_coding.app.trace_text import render_turn, summarize_turn
 
     recorder = getattr(loop, "trace", None)
-    path = getattr(recorder, "current_path", None)
-    if path is None:
+    if recorder is None:
         return "[trace] tracing is off for this session"
+    path = getattr(recorder, "current_path", None)
+    if path is None or _trace_is_another_session(path, session):
+        return "[trace] 本会话还没跑过回合（跑完一轮后可看）"
     return f"[trace] {render_turn(summarize_turn(path))}"
+
+
+def _trace_is_another_session(path: Any, session: Any) -> bool:
+    """True when ``path``'s turn belongs to a different session.
+
+    Only a *provable* mismatch counts: an empty session id, or a directory that
+    is not shaped like a session directory, keeps the old behaviour (a recorder
+    built by a test or a future layout must not silently report "no turn").
+    """
+    session_id = str(getattr(session, "session_id", "") or "")
+    if not session_id:
+        return False
+    try:
+        parent = Path(str(path)).parent.name
+    except (TypeError, ValueError):
+        return False
+    return bool(parent) and parent != session_id
 
 
 def _budget_report(loop: Any, session: Any) -> str:

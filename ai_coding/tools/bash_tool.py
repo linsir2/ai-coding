@@ -35,6 +35,10 @@ from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 _DEFAULT_TIMEOUT = 60
 _DEFAULT_MAX_OUTPUT = 50_000
+#: A-4: the mechanism could not run here (no bwrap / no namespaces).  It is an
+#: environment failure, not a human or gate refusal -- "denied" read as "someone
+#: said no", and the UI drew it struck through as if permission had been refused.
+SANDBOX_UNAVAILABLE = "sandbox_unavailable"
 # Per-call widening ceiling: the model may raise a slow command's timeout up to
 # this (see `timeout_seconds` in the schema), but never past it.  It lines up
 # with the turn wall clock (`ai.turn_timeout_seconds`, 600) and the sub-agent
@@ -246,7 +250,10 @@ class BashTool(BaseTool):
         denied = getattr(job, "denied_reason", "")
         if denied:
             return ToolResult(
-                success=False, output=f"error: {denied}", error="denied", data={"reason": denied}
+                success=False,
+                output=f"error: {denied}",
+                error=SANDBOX_UNAVAILABLE,
+                data={"reason": denied},
             )
         return ToolResult(
             success=True,
@@ -295,7 +302,10 @@ class BashTool(BaseTool):
         denied = getattr(job, "denied_reason", "")
         if denied:
             return ToolResult(
-                success=False, output=f"error: {denied}", error="denied", data={"reason": denied}
+                success=False,
+                output=f"error: {denied}",
+                error=SANDBOX_UNAVAILABLE,
+                data={"reason": denied},
             )
         pump = _LogTail(job, context.emit, context.call_id)
         pump.start()
@@ -446,9 +456,10 @@ class BashTool(BaseTool):
             )
 
         # M-D1: the command becomes an argv through the one shared helper, and
-        # the spawn is ``shell=False``.  A SandboxGap is a *denial*, not a tool
-        # error: letting it reach the dispatcher's ``except Exception`` would
-        # report ``error="tool_error"`` and lose the reason code.
+        # the spawn is ``shell=False``.  A SandboxGap is *sandbox_unavailable*
+        # (A-4), not ``denied`` and not a tool error: letting it reach the
+        # dispatcher's ``except Exception`` would report ``tool_error`` and lose
+        # the reason code, and "denied" said a human had refused the call.
         try:
             argv = spawn_argv(
                 command,
@@ -461,7 +472,7 @@ class BashTool(BaseTool):
             return ToolResult(
                 success=False,
                 output=f"error: {exc.reason}",
-                error="denied",
+                error=SANDBOX_UNAVAILABLE,
                 data={"reason": exc.reason},
             )
 

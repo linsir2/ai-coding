@@ -180,7 +180,25 @@ describe("tools", () => {
       preview: "",
       error: "",
       durationMs: 0,
+      approvalMs: 0,
     })
+  })
+
+  test("tool.finished carries the approval wait the wire sent (A-10)", () => {
+    const state = feed(
+      initialState(),
+      wire("tool.started", { callId: "c1", toolName: "read", params: { path: "/a" } }),
+      wire("tool.finished", {
+        callId: "c1",
+        toolName: "read",
+        success: true,
+        outputPreview: "",
+        durationMs: 28_900,
+        approvalMs: 28_500,
+        error: null,
+      }),
+    )
+    expect(lastAssistant(state).parts[0]).toMatchObject({ durationMs: 28_900, approvalMs: 28_500 })
   })
 
   test("tool.finished updates the matching card", () => {

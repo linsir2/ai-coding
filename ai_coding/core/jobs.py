@@ -158,7 +158,8 @@ class Job:
     stop_reason: str = ""
     #: M-D1: the stable reason code when the process sandbox refused to start
     #: this command (``SandboxGap``).  The job never spawned, so no ledger row
-    #: is written; the field is what ``bash_tool`` reads to answer ``denied``.
+    #: is written; the field is what ``bash_tool`` reads to answer
+    #: ``sandbox_unavailable`` (A-4: an environment failure, not a refusal).
     denied_reason: str = ""
     #: True when this process found the row on disk instead of starting it.
     adopted: bool = False
@@ -282,7 +283,8 @@ class JobRegistry:
         M-D1: a :class:`SandboxGap` is **not** raised.  The command was refused
         by the process sandbox, so it becomes a settled failed job carrying the
         stable reason code in ``denied_reason`` -- no ledger row, no watcher, no
-        process.  ``bash_tool`` reads the field and answers ``denied``.
+        process.  ``bash_tool`` reads the field and answers
+        ``sandbox_unavailable`` (A-4).
         """
         with self._lock:
             if self._running_count() >= MAX_RUNNING_JOBS:
@@ -310,7 +312,11 @@ class JobRegistry:
                 started_at=now_utc(),
                 origin_session=session_id,
                 status=STATUS_FAILED,
-                detail=f"denied: {exc.reason}",
+                # A-4: the command never ran because the mechanism is absent;
+                # "denied" read as a human decision.  The stable reason code
+                # stays in ``denied_reason`` for machines, this line is for the
+                # operator (jobs panel / /tasks).
+                detail=f"未执行 · {exc.reason}",
                 denied_reason=exc.reason,
                 settled=True,
                 announce=False,

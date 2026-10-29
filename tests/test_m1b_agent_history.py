@@ -56,6 +56,21 @@ def test_the_wire_mapping_names_both_ends_and_the_reason():
     }
 
 
+def test_the_read_only_axis_is_absent_unless_the_producer_knows_it():
+    """R21 §2: ``None`` means "not reported" and must not become a JSON null.
+
+    An agent-only producer keeps the exact old payload -- the client reads a
+    *present* boolean as the truth and an absent key as "keep what you have".
+    """
+    silent = to_wire(AgentSwitched(from_agent="build", to_agent="plan", ts="t"))
+    assert "readonly" not in silent["data"]
+
+    reported = to_wire(
+        AgentSwitched(from_agent="plan", to_agent="build", readonly=False)
+    )
+    assert reported["data"]["readonly"] is False
+
+
 def test_message_finished_carries_the_agent_only_when_attributed():
     from ai_coding.core.events import AssistantMessage
 

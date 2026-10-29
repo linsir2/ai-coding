@@ -8,13 +8,220 @@ without touching a terminal (docs/r4-analysis.md 11).
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ai_coding.core.aggregate import AggregateReport
 
-__all__ = ["render_budget", "render_overview", "render_turn", "summarize_turn"]
+__all__ = [
+    "ToolCall",
+    "TurnFacts",
+    "fold_turn",
+    "render_budget",
+    "render_overview",
+    "render_turn",
+    "summarize_turn",
+]
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """One tool invocation, paired from its ``Started`` and ``Finished`` spans."""
+
+    name: str
+    params: str
+    output: str
+    error: str
+    duration_ms: int
+    success: bool
+    span: str
+
+
+@dataclass(frozen=True)
+class TurnFacts:
+    """Everything the HTML export shows for one turn, folded from its spans.
+
+    ``answer`` is the turn's final word (``TurnFinished.outcome.text``); ``prose``
+    is the streamed text, which is the fallback for a trace that never recorded a
+    ``TurnFinished`` (a crashed turn, or one written before the event existed).
+    """
+
+    turn: int
+    status: str
+    reason: str
+    iterations: int
+    max_iterations: int
+    prompt_tokens: int
+    completion_tokens: int
+    cached_tokens: int
+    model_ms: int
+    tool_ms: int
+    tools: tuple[ToolCall, ...]
+    prose: str
+    answer: str
+    layers: tuple[Mapping[str, Any], ...]
+    degraded: tuple[tuple[str, str, str], ...]
+    guard_denied: int
+
+
+def _clip(text: str, limit: int = 4000) -> str:
+    """Bound one tool's output: the export must stay under a megabyte."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
+
+
+def _params_summary(params: Any) -> str:
+    """One line for a tool's arguments, without dumping a whole file read."""
+    if not isinstance(params, Mapping) or not params:
+        return ""
+    for key in ("command", "path", "pattern", "query", "url", "file_path"):
+        if key in params:
+            return f"{key}={str(params[key])[:200]}"
+    return ", ".join(f"{k}={str(v)[:80]}" for k, v in list(params.items())[:3])
+
+
+def _status_name(raw: Any) -> str:
+    """``TurnStatus.COMPLETED`` -> ``completed`` (the trace stores the repr)."""
+    text = str(raw or "")
+    return text.rsplit(".", 1)[-1].lower() if text else "unknown"
+
+
+def fold_turn(spans: Sequence[Any]) -> TurnFacts:
+    """Fold one turn's spans into the facts the HTML export renders.
+
+    Pure and never raises: a malformed span is skipped, not fatal -- the export
+    is a view over a log, and a bad line must not take the page down.
+
+    ``spans`` is ``Sequence[Any]`` because two shapes reach here: the exporter's
+    ``SpanRow`` and an already-parsed mapping.  Both are read by attribute/key
+    below, so a narrower type would be a lie.
+    """
+    started: dict[str, Mapping[str, Any]] = {}
+    tools: list[ToolCall] = []
+    prose_parts: list[str] = []
+    layers: list[Mapping[str, Any]] = []
+    degraded: list[tuple[str, str, str]] = []
+    guard_denied = 0
+    prompt = completion = cached = model_ms = tool_ms = 0
+    iterations = max_iterations = 0
+    status, reason, answer = "unknown", "", ""
+
+    for row in spans:
+        # Both shapes occur: ``SpanRow`` from the exporter's reader, and a plain
+        # mapping from a caller that already parsed the JSONL.
+        if isinstance(row, Mapping):
+            data = row.get("data")
+            event = row.get("evt")
+            span_id = row.get("span")
+        else:
+            data = getattr(row, "data", None)
+            event = getattr(row, "evt", None)
+            span_id = getattr(row, "span", None)
+        data = data if isinstance(data, Mapping) else {}
+        if event == "IterationStarted":
+            iterations = max(iterations, _int(data.get("index")) + 1)
+            max_iterations = max(max_iterations, _int(data.get("max_iterations")))
+        elif event == "ToolStarted":
+            started[str(data.get("call_id") or span_id or "")] = data
+        elif event == "ToolFinished":
+            call_id = str(data.get("call_id") or "")
+            begin = started.pop(call_id, {})
+            name = str(data.get("tool_name") or begin.get("tool_name") or "tool")
+            error = str(data.get("error") or "")
+            if error in {"guard_denied", "guard_error"}:
+                guard_denied += 1
+            duration = _int(data.get("duration_ms"))
+            tool_ms += duration
+            tools.append(
+                ToolCall(
+                    name=name,
+                    params=_params_summary(begin.get("params")),
+                    output=_clip(str(data.get("output_preview") or "")),
+                    error=error,
+                    duration_ms=duration,
+                    success=bool(data.get("success")),
+                    span=str(span_id or ""),
+                )
+            )
+        elif event == "ModelStepFinished":
+            usage = data.get("usage")
+            if isinstance(usage, Mapping):
+                prompt += _int(usage.get("prompt_tokens"))
+                completion += _int(usage.get("completion_tokens"))
+                cached += _int(usage.get("cached_tokens"))
+            model_ms += _int(data.get("latency_ms"))
+        elif event == "AssistantTextDelta":
+            chunk = str(data.get("text") or "")
+            if chunk:
+                prose_parts.append(chunk)
+        elif event == "CompactionEnded":
+            raw_layers = data.get("layers")
+            if isinstance(raw_layers, list):
+                layers = [item for item in raw_layers if isinstance(item, Mapping)]
+        elif event == "Degraded":
+            degraded.append(
+                (
+                    str(data.get("component") or ""),
+                    str(data.get("reason") or ""),
+                    str(data.get("fallback") or ""),
+                )
+            )
+        elif event == "TurnFinished":
+            outcome = data.get("outcome")
+            if isinstance(outcome, Mapping):
+                status = _status_name(outcome.get("status"))
+                reason = str(outcome.get("reason") or "")
+                answer = str(outcome.get("text") or "")
+                iterations = _int(outcome.get("iterations")) or iterations
+                usage = outcome.get("usage")
+                if isinstance(usage, Mapping):
+                    prompt += _int(usage.get("prompt_tokens"))
+                    completion += _int(usage.get("completion_tokens"))
+                    cached += _int(usage.get("cached_tokens"))
+
+    # A call that started and never finished (an interrupted turn, a crash, a
+    # span written before the outcome event existed) still happened -- the model
+    # asked for it -- so it belongs in the timeline.
+    for call_id, begin in started.items():
+        tools.append(
+            ToolCall(
+                name=str(begin.get("tool_name") or "tool"),
+                params=_params_summary(begin.get("params")),
+                output=_clip(str(begin.get("output_preview") or "")),
+                error="unfinished",
+                duration_ms=0,
+                success=False,
+                span=call_id,
+            )
+        )
+
+    turn = 0
+    if spans:
+        first = spans[0]
+        turn = _int(first.get("turn")) if isinstance(first, Mapping) else _int(
+            getattr(first, "turn", 0)
+        )
+    return TurnFacts(
+        turn=turn,
+        status=status,
+        reason=reason,
+        iterations=iterations,
+        max_iterations=max_iterations,
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        cached_tokens=cached,
+        model_ms=model_ms,
+        tool_ms=tool_ms,
+        tools=tuple(tools),
+        prose="".join(prose_parts),
+        answer=answer,
+        layers=tuple(layers),
+        degraded=tuple(degraded),
+        guard_denied=guard_denied,
+    )
 
 
 def _blank_summary() -> dict[str, Any]:

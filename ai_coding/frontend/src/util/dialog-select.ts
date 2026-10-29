@@ -82,3 +82,62 @@ export function moveSelection(current: number, delta: number, count: number): nu
   if (count <= 0) return 0
   return (((current + delta) % count) + count) % count
 }
+
+/**
+ * Content line offsets for the rows DialogSelect lays out, and the total
+ * content height in lines.
+ *
+ * A category header occupies one line for the first group and two for later
+ * ones (the label box carries a one-line top gap); every option is one line.
+ * The render, the viewport height, and the scroll math all derive from this
+ * single layout, so none of them can drift from the others.
+ */
+export function rowLayout(startsHeader: readonly boolean[]): { tops: number[]; height: number } {
+  const tops: number[] = []
+  let line = 0
+  startsHeader.forEach((header, index) => {
+    if (header) {
+      if (index > 0) line += 1
+      line += 1
+    }
+    tops.push(line)
+    line += 1
+  })
+  return { tops, height: line }
+}
+
+/**
+ * Collapse a multi-line label to one line.
+ *
+ * Rows are one terminal line tall, and queued-input / memory labels can carry
+ * newlines from the user's own text.  Folding them keeps the words (instead of
+ * silently dropping every line after the first) while the row stays a row.
+ */
+export function singleLineText(text: string): string {
+  return text.replace(/\s*\n\s*/g, " ")
+}
+
+/**
+ * Scroll offset that brings a one-line row at `rowTop` into a `viewport`-line
+ * window starting at `currentTop`, with the smallest move.
+ *
+ * `blockTop` is where the row's group header starts (the first option of a
+ * category); scrolling up aligns to it so Home/PageUp do not leave a header
+ * sliced off the top.  It defaults to the row itself.
+ *
+ * This replaces ScrollBox.scrollChildIntoView, whose nearest-delta helper
+ * returns 0 when the target row is entirely outside the viewport -- exactly
+ * the PageDown/PageUp case, where the selection jumps past the window and the
+ * list stopped following it.
+ */
+export function scrollTopFor(
+  currentTop: number,
+  rowTop: number,
+  viewport: number,
+  blockTop: number = rowTop,
+): number {
+  const height = Math.max(1, viewport)
+  if (rowTop < currentTop) return Math.max(0, blockTop)
+  if (rowTop + 1 > currentTop + height) return Math.max(0, rowTop + 1 - height)
+  return currentTop
+}

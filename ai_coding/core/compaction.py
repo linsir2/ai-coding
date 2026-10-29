@@ -34,6 +34,21 @@ __all__ = ["Compactor"]
 _log = logging.getLogger(__name__)
 
 
+def _freed_tokens(layers: Sequence[LayerStat], before_messages: int, after_messages: int) -> bool:
+    """Did this compaction actually invalidate the previous context reading?
+
+    Layer stats are the measured answer when the delegate reports them, but they
+    only cover the pipeline layers — ``hard_trim`` runs *after* them and is not
+    a layer, so a compaction whose pages really dropped messages can still show
+    ``after == before`` there.  Either signal counts: the estimate shrank, or the
+    history did.  A delegate that reports no layers (the legacy
+    ``compress``-only shape) has only the message count to go on.
+    """
+    if layers and layers[-1].after_tokens < layers[0].before_tokens:
+        return True
+    return after_messages < before_messages
+
+
 class Compactor:
     """History compaction with a hard budget and a visible fallback."""
 
@@ -48,6 +63,18 @@ class Compactor:
         # One compaction at a time (see ``compress``): both entries — the
         # turn's assembly and the user's command — pass through it.
         self._lock = asyncio.Lock()
+
+    @property
+    def context_window(self) -> int | None:
+        """The window the pipeline compacts against, or ``None`` without one.
+
+        R22/H10: the referenced-file block must size itself from the same number
+        the compactor uses -- a caller reading the raw config instead got the 48k
+        default while a 6k session was running.  Duck-typed on purpose: the
+        legacy ``compress``-only context objects and the test stubs simply have
+        no window, and the block falls back to the default.
+        """
+        return getattr(self._context, "max_context_tokens", None)
 
     @staticmethod
     def did_compact(source: Sequence[ChatMessage], result: Sequence[ChatMessage]) -> bool:
@@ -179,9 +206,16 @@ class Compactor:
             else:
                 self._emit(CompactionSkipped(reason=reason))
             return history
-        if session is not None:
-            session.last_compacted_turn = int(getattr(session, "turn_count", 0) or 0)
         layers = self._layer_stats()
+        # R22/A-8: raise the boundary only when the pipeline actually freed
+        # tokens.  `/compact` on a short session reported 7 → 7 with every layer
+        # at 681→681, yet the meter dropped to 0 tokens / 0% because the
+        # boundary had been raised anyway -- `live_prompt_tokens` discards every
+        # usage at or before it, so "nothing happened" read as "the window is
+        # empty".  Content equality cannot decide this: the pipeline works on a
+        # copy and can rewrite identical bodies into an unequal list.
+        if session is not None and _freed_tokens(layers, len(history), len(result)):
+            session.last_compacted_turn = int(getattr(session, "turn_count", 0) or 0)
         self._emit(
             CompactionEnded(
                 reason=reason,

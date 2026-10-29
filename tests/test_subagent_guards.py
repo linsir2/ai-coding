@@ -428,9 +428,9 @@ def test_every_subagent_gets_its_own_duplicate_call_budget():
     # duplicate counter by name so chain order can never hide a shared budget.
     dup_a = next(g for g in a._guards if getattr(g, "name", "") == "duplicate_call")
     dup_b = next(g for g in b._guards if getattr(g, "name", "") == "duplicate_call")
-    dup_a._counts["x"] = 9
+    dup_a._successes["x"] = ["c1"]
 
-    assert not dup_b._counts.get("x")
+    assert not dup_b._successes.get("x")
 
 
 def test_a_runner_assembles_its_chain_at_construction():

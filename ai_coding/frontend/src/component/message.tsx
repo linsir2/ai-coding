@@ -24,20 +24,37 @@ import { markdownSyntax } from "../theme/syntax"
 import { Reasoning } from "./reasoning"
 import { ToolCard } from "./toolcard"
 
+/**
+ * What each pipeline layer does, in one word (R22/A-8).
+ *
+ * The compaction line used to read `L3 681→681 tok / L1 … / L2 …` — numbers with
+ * no meaning for anyone who has not read the pipeline: L1 snips messages, L2
+ * replaces a body with a pointer, L3 persists a large output to a file, L4
+ * summarises.  The label rides on the layer that reports it, so no extra line
+ * and no legend to learn.
+ */
+const LAYER_LABELS: Record<string, string> = {
+  L1: "剪断",
+  L2: "占位",
+  L3: "落盘",
+  L4: "摘要",
+}
+
 /** One layer's share of the compaction line (M-E3): counts + token delta.
 
  * Counts alone would mislead for L2/L3 — they rewrite a body and keep the
  * message — so the token transition rides along, matching `/trace`.
  */
-function layerLine(layer: LayerStat): string {
+export function layerLine(layer: LayerStat): string {
   const tail = `${layer.beforeTokens}→${layer.afterTokens} tok`
-  if (layer.name === "L4") return `L4 摘要 ${tail}`
-  if (layer.removed) return `${layer.name} −${layer.removed} 条 · ${tail}`
+  const name = `${layer.name} ${LAYER_LABELS[layer.name] ?? ""}`.trim()
+  if (layer.name === "L4") return `${name} ${tail}`
+  if (layer.removed) return `${name} −${layer.removed} 条 · ${tail}`
   const bits: string[] = []
   if (layer.rewritten) bits.push(`改写 ${layer.rewritten} 条`)
   if (layer.skipped) bits.push(`跳过 ${layer.skipped} 条`)
   bits.push(tail)
-  return `${layer.name} ${bits.join(" · ")}`
+  return `${name} ${bits.join(" · ")}`
 }
 
 /** OpenCode's user-message border: left ┃ with a half-block bottom cap. */

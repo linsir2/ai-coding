@@ -44,6 +44,28 @@ def test_repeated_tool_error_escalates_and_later_success_closes_it():
     assert [i.id for i in closed if i.id.startswith("U-err")] == []
 
 
+def test_one_failure_is_not_called_a_repeat():
+    """R21 §3: "反复失败（1 次）" contradicted itself on the first sighting.
+
+    Only the sentence changes: the level rule (one failure is already worth a
+    medium question) must stay, because it is what raises the item at all.
+    """
+    first = build_ledger(
+        failures=(("bash", "nonzero_exit", "x"),), verify={},
+        failed_streak=0, iteration=2, succeeded_tools=frozenset(), stall_threshold=2,
+    )
+    assert first[0].question == "bash 调用失败（1 次）：直接原因是什么？"
+    assert first[0].level == "medium"
+
+    twice = build_ledger(
+        failures=(("bash", "nonzero_exit", "x"), ("bash", "nonzero_exit", "y")),
+        verify={}, failed_streak=0, iteration=3,
+        succeeded_tools=frozenset(), stall_threshold=2,
+    )
+    assert twice[0].question == "bash 反复失败（2 次）：直接原因是什么？"
+    assert twice[0].level == "high"
+
+
 def test_signature_is_order_stable():
     left = build_ledger(
         failures=(("b", "e", "x"), ("a", "e", "y")), verify={},

@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable, Sequence
+import unicodedata
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict, dataclass
+from difflib import SequenceMatcher
 
 #: The file suffixes a citation can plausibly name.  Opened up to any token and
 #: ordinary prose ("foo.bar") would read as a file the model never touched.
@@ -323,6 +325,8 @@ def extract_claims(text: str) -> list[tuple[str, int, int]]:
             current = match.group("ipath")
             start = int(match.group("iline"))
             end = int(match.group("ieend") or start)
+            if start > end:
+                start, end = end, start
             claims.append((current, start, end))
             continue
         if match.group("path"):
@@ -336,6 +340,12 @@ def extract_claims(text: str) -> list[tuple[str, int, int]]:
         else:
             start = int(match.group("estart"))
             end = int(match.group("eend") or start)
+        # ``a.py:100-1`` is a typo, not a range.  Swapping keeps the check
+        # meaningful: with containment, an inverted range would otherwise be
+        # "inside" any mark whose start is <= its (larger) start -- a citation
+        # that read better than the old intersection rule did (review finding).
+        if start > end:
+            start, end = end, start
         claims.append((current, start, end))
     return claims
 
@@ -392,7 +402,18 @@ def unsupported_claims(
     if any(same_file(seen_path, path) for seen_path in seen):
         if size_of is None:
             return []
-        total = size_of(path)
+        # Resolve the *seen* spelling, not the cited one: an answer may abbreviate
+        # ``ai_coding/ai/llm_helpers.py`` to ``llm_helpers.py``, and the caller's
+        # ``size_of`` resolves against the workspace root, where the bare name
+        # does not exist -- that made tier 2 silently fail open (review finding).
+        resolved = next(
+            (seen_path for seen_path in seen if same_file(seen_path, path)), path
+        )
+        try:
+            total = size_of(resolved)
+        except (OSError, ValueError):
+            # The contract says "do not raise", but a caller is a caller.
+            total = 0
         if not total:
             # Unreadable: outside the workspace (normalize folds it to a
             # basename), deleted, a directory.  Widening, not a safety property.
@@ -403,6 +424,129 @@ def unsupported_claims(
             if end > total
         ]
     return list(claims)
+
+
+#: The quote forms an answer uses around a pasted fragment: straight and curly
+#: doubles, the two CJK bracket pairs, straight singles, and backticks.  Eight
+#: characters minimum because a one-word "quote" carries no evidence.
+_QUOTE_FORMS = re.compile(
+    r'"([^"\n]{8,})"'
+    r"|“([^”\n]{8,})”"
+    r"|「([^」\n]{8,})」"
+    r"|『([^』\n]{8,})』"
+    r"|'([^'\n]{8,})'"
+    r"|`([^`\n]{8,})`"
+)
+
+
+def _normalize_quote(text: str) -> str:
+    """Fold a quoted fragment into what a substring check can compare.
+
+    NFKC maps full-width punctuation and digits to their ASCII forms; the curly
+    quotes have no compatibility decomposition, so they are replaced by hand.
+    A ``read`` output prefixes every line with ``%6d  `` -- an answer may copy
+    that prefix into its quote, and the file does not have it.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    text = (
+        text.replace("“", '"')
+        .replace("”", '"')
+        .replace("‘", "'")
+        .replace("’", "'")
+    )
+    text = re.sub(r"^\s*\d+\s{2}", "", text, flags=re.MULTILINE)
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _quote_matches(quote: str, window: str) -> bool:
+    """Is ``quote`` in ``window`` -- verbatim, or as a close paraphrase?
+
+    The paraphrase allowance exists because the model legitimately reflows
+    code into prose.  It is bounded on purpose: a ratio of 0.9 over at least
+    ten tokens; a three-word fragment that happens to share half its letters
+    is not evidence of anything.
+    """
+    if not quote:
+        return True
+    if quote in window:
+        return True
+    if len(quote.split()) < 10:
+        return False
+    matcher = SequenceMatcher(None, quote, window, autojunk=False)
+    if matcher.ratio() >= 0.9:
+        return True
+    return any(
+        SequenceMatcher(None, quote, line, autojunk=False).ratio() >= 0.9
+        for line in window.splitlines()
+    )
+
+
+def _quotes_near_citations(answer: str) -> Iterator[tuple[str, int, int, str]]:
+    """Each quoted fragment, bound to the citation on its own line.
+
+    Last citation wins, the same rule ``extract_claims`` uses: a paragraph
+    that moves between two files cannot say which quote belongs to which, so
+    attaching to the nearest preceding citation is the only stable reading.
+    """
+    for line in answer.splitlines():
+        claims = extract_claims(line)
+        if not claims:
+            continue
+        path, start, end = claims[-1]
+        for match in _QUOTE_FORMS.finditer(line):
+            raw = next(group for group in match.groups() if group is not None)
+            if extract_claims(raw):
+                continue  # a quoted path, not a quoted fragment
+            if "/" in raw and " " not in raw:
+                continue  # a bare file path in backticks
+            yield path, start, end, raw
+
+
+def unsupported_quotes(
+    answer: str,
+    marks: Sequence[ReadMark],
+    reader: Callable[[str], str | None],
+) -> list[tuple[str, int, int, str]]:
+    """Quotes the cited range does not contain (R21 §6).
+
+    The ledger records *which lines* were read, never what they said.  So a
+    citation can be fully contained in a read range and still quote code that
+    those lines no longer hold -- the file was rewritten or replaced between
+    the read and the answer.  This reads the region back and looks for the
+    quoted fragment.
+
+    Fail-open everywhere it cannot know: no quote attached to a citation, two
+    files in the answer, an unreadable file (``reader`` returns ``None``), a
+    range past the end of what is on disk.  A challenge is only ever raised on
+    a comparison that actually happened.
+    """
+    claims = extract_claims(answer)
+    if not claims:
+        return []
+    if names_more_than_one_file({normalize(path) for path, _, _ in claims}):
+        return []
+    checked: list[tuple[str, int, int, str]] = []
+    for path, start, end, raw in _quotes_near_citations(answer):
+        quote = _normalize_quote(raw)
+        if not quote:
+            continue
+        rows = [mark for mark in marks if same_file(mark.path, path)]
+        # The ledger stored the spelling the read tool used; the answer may
+        # abbreviate it, and the reader resolves from the workspace root.
+        resolved = rows[0].path if rows else path
+        text = reader(resolved)
+        if text is None:
+            continue
+        lines = text.splitlines()
+        if start < 1 or end > len(lines):
+            continue
+        window = _normalize_quote("\n".join(lines[start - 1 : end]))
+        if _quote_matches(quote, window):
+            continue
+        row = (path, start, end, quote)
+        if row not in checked:
+            checked.append(row)
+    return checked
 
 
 __all__ = [
@@ -417,4 +561,5 @@ __all__ = [
     "render",
     "same_file",
     "unsupported_claims",
+    "unsupported_quotes",
 ]

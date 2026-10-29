@@ -4,8 +4,9 @@ The cases split in two by what they can prove:
 
 * U3/U3b/U4/U5/U6/U7 and the argv/order cases need **no** real mechanism: they
   use a backend double or inspect the argv, so they run everywhere and pin the
-  contract that matters most -- fail-closed, the stable reason code, ``denied``
-  rather than ``tool_error``, warn reporting, the bypass, and the bind order.
+  contract that matters most -- fail-closed, the stable reason code,
+  ``sandbox_unavailable`` rather than ``denied``/``tool_error`` (A-4), warn
+  reporting, the bypass, and the bind order.
 * U1/U1b/U1c/U2/U2b/V* run a **real** subprocess through bubblewrap.  They skip
   with an explicit reason when the mechanism cannot run (bubblewrap missing, or
   no unprivileged user namespace / ``CAP_SYS_ADMIN``) -- the honest outcome,
@@ -450,7 +451,7 @@ def test_enforce_cannot_read_a_denied_path_outside_the_workspace(tmp_path, outsi
 
 @pytest.mark.asyncio
 async def test_enforce_refuses_when_the_mechanism_is_missing(tmp_path):
-    """No mechanism + enforce = a denial, not a tool error and not a run."""
+    """No mechanism + enforce = sandbox_unavailable, and the command never runs."""
     from ai_coding.tools.bash_tool import BashTool
 
     tool = BashTool(
@@ -460,9 +461,69 @@ async def test_enforce_refuses_when_the_mechanism_is_missing(tmp_path):
         {"command": "echo must-not-run"}, ToolContext(workspace=str(tmp_path))
     )
     assert result.success is False
-    assert result.error == "denied"
+    assert result.error == "sandbox_unavailable"
     assert result.data is not None
     assert result.data["reason"] == "bwrap.unavailable"
+
+
+@pytest.mark.asyncio
+async def test_a4_the_waiting_path_names_the_sandbox_not_a_denial(tmp_path):
+    """With a job registry every foreground call waits on its own job."""
+    from ai_coding.core.jobs import JobRegistry
+    from ai_coding.tools.bash_tool import BashTool
+
+    policy = ProcessSandboxPolicy(mode="enforce")
+    backend = _UnavailableBackend()
+    registry = JobRegistry(
+        tmp_path / "jobs", policy=policy, backend=backend, roots=(tmp_path,)
+    )
+    tool = BashTool(policy=policy, backend=backend)
+    result = await tool.execute(
+        {"command": "echo x"},
+        ToolContext(workspace=str(tmp_path), jobs=registry),
+    )
+    assert result.error == "sandbox_unavailable"
+    assert result.data is not None and result.data["reason"] == "bwrap.unavailable"
+
+
+@pytest.mark.asyncio
+async def test_a4_the_background_path_names_the_sandbox_not_a_denial(tmp_path):
+    from ai_coding.core.jobs import JobRegistry
+    from ai_coding.tools.bash_tool import BashTool
+
+    policy = ProcessSandboxPolicy(mode="enforce")
+    backend = _UnavailableBackend()
+    registry = JobRegistry(
+        tmp_path / "jobs", policy=policy, backend=backend, roots=(tmp_path,)
+    )
+    tool = BashTool(policy=policy, backend=backend)
+    result = await tool.execute(
+        {"command": "echo x", "run_in_background": True},
+        ToolContext(workspace=str(tmp_path), jobs=registry),
+    )
+    assert result.error == "sandbox_unavailable"
+    assert result.data is not None and result.data["reason"] == "bwrap.unavailable"
+    # A refused job never arms: nothing to list, stop or wake.
+    assert registry.snapshot() == []
+
+
+@pytest.mark.asyncio
+async def test_a4_a_refused_job_names_the_sandbox_not_a_denial(tmp_path):
+    from ai_coding.core.jobs import STATUS_FAILED, JobRegistry
+
+    policy = ProcessSandboxPolicy(mode="enforce")
+    registry = JobRegistry(
+        tmp_path / "jobs",
+        policy=policy,
+        backend=_UnavailableBackend(),
+        roots=(tmp_path,),
+    )
+    job = registry.start("echo x", cwd=str(tmp_path), session_id="s")
+    assert job.status == STATUS_FAILED
+    assert job.denied_reason == "bwrap.unavailable"
+    assert job.detail == "未执行 · bwrap.unavailable"
+    # Not registered: nothing for /tasks or job_list to show, nothing to kill.
+    assert registry.snapshot() == []
 
 
 def test_enforce_refuses_when_the_backend_is_missing(tmp_path):
@@ -562,14 +623,14 @@ def test_the_gap_has_a_stable_reason_code(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_the_gap_reaches_the_model_as_denied(tmp_path):
+async def test_the_gap_reaches_the_model_as_sandbox_unavailable(tmp_path):
     from ai_coding.tools.bash_tool import BashTool
 
     tool = BashTool(
         policy=ProcessSandboxPolicy(mode="enforce"), backend=_UnavailableBackend()
     )
     result = await tool.execute({"command": "echo x"}, ToolContext(workspace=str(tmp_path)))
-    assert result.error == "denied"
+    assert result.error == "sandbox_unavailable"
     assert result.data is not None
     assert result.data["reason"] == "bwrap.unavailable"
 

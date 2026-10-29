@@ -35,7 +35,11 @@ sys.path.insert(0, str(ROOT))
 from ai_coding.ai.factory import build_engine_from_config  # noqa: E402
 from ai_coding.app.commands import handle_input  # noqa: E402
 from ai_coding.app.console import DialogueConsole  # noqa: E402
-from ai_coding.cli import _build_loop, _build_tool_registry  # noqa: E402
+from ai_coding.cli import (  # noqa: E402
+    _build_loop,
+    _build_tool_registry,
+    _make_recorder,
+)
 from ai_coding.config.loader import ConfigLoader  # noqa: E402
 from ai_coding.infra.logger_setup import setup_logging  # noqa: E402
 from ai_coding.service.session_service import SessionService  # noqa: E402
@@ -158,7 +162,18 @@ def _tail_at_line(text: str, limit: int) -> str:
 def self_check(ws: Path) -> dict:
     """Run the two hard gates the task itself demands."""
     out: dict[str, object] = {}
-    py = sys.executable
+    # R21: the project gets its **own** interpreter.  Running its
+    # ``pip install -r requirements.txt`` against ``sys.executable`` installed a
+    # pinned ``pytest<8`` into this repo's venv, which then broke
+    # ``pytest-asyncio`` for every other suite -- measured: the agent venv went
+    # 8.4.2 -> 7.4.4 mid-run and both the eval gate and the repo's own tests
+    # died.  A project is not allowed to mutate the harness it is measured by.
+    py = str(ws / ".venv" / "bin" / "python")
+    if not Path(py).exists():
+        py = sys.executable  # no venv yet: fall back, but say so in the log
+        out["project_venv"] = False
+    else:
+        out["project_venv"] = True
     be = ws / "backend"
     if (be / "requirements.txt").exists() or (be / "pyproject.toml").exists():
         rc, log = (
@@ -227,12 +242,34 @@ async def main(config_path: str, ws: Path, rounds: int, keep: bool = False) -> i
     if not (ws / ".git").exists():
         (ws / ".git").mkdir()  # repo-ish root so worktree isolation can work
         subprocess.run(["git", "init", "-q"], cwd=ws, check=True)
+    # R21: a project-local interpreter, created up front.  Without it the gate
+    # installs the project's pins into *this* venv (see `self_check`).
+    if not (ws / ".venv" / "bin" / "python").exists():
+        subprocess.run(
+            [sys.executable, "-m", "venv", str(ws / ".venv")],
+            check=False,
+            capture_output=True,
+        )
 
     sessions = SessionService(ws / "sessions")
     registry = _build_tool_registry(app_cfg, str(ws), None)
+    # R22 §3.2: the harness used to build its loop with ``trace=None``, so a
+    # long run left no trace at all — "what did the model actually receive"
+    # had no evidence but the proxy log.  ``_make_recorder`` is the same
+    # constructor the CLI and the TUI use; the loop points it at whichever
+    # session runs (``agent_loop._begin_turn`` -> ``trace.session_id``).
+    recorder = _make_recorder(app_cfg, str(ws), None)
     loop = _build_loop(
-        build_engine_from_config(app_cfg), sessions, registry, app_cfg, str(ws), None
+        build_engine_from_config(app_cfg),
+        sessions,
+        registry,
+        app_cfg,
+        str(ws),
+        None,
+        trace=recorder,
     )
+    if recorder is not None:
+        print(f"[eval] trace -> {recorder.store.root}")
     session = sessions.create()
     console = DialogueConsole()
 

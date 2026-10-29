@@ -119,14 +119,16 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
         # M1b T1b: the live half of the switch.  The durable half is
         # ``session.agentHistory``; both word it the same way so a live
         # transcript and a replayed one read alike.
-        return {
-            "type": "agent.switched",
-            "data": {
-                "from": event.from_agent,
-                "to": event.to_agent,
-                "reason": event.reason,
-            },
+        payload: dict[str, Any] = {
+            "from": event.from_agent,
+            "to": event.to_agent,
+            "reason": event.reason,
         }
+        # R21 §2: the read-only axis, only when this producer reported it --
+        # an event that only names agents keeps the exact old payload.
+        if event.readonly is not None:
+            payload["readonly"] = event.readonly
+        return {"type": "agent.switched", "data": payload}
     if isinstance(event, ToolStarted):
         return {
             "type": "tool.started",
@@ -138,18 +140,20 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
             },
         }
     if isinstance(event, ToolFinished):
-        return {
-            "type": "tool.finished",
-            "data": {
-                "callId": event.call_id,
-                "toolName": event.tool_name,
-                "success": event.success,
-                "outputPreview": event.output_preview,
-                "durationMs": event.duration_ms,
-                "error": event.error,
-                "iteration": event.iteration,
-            },
+        tool_data: dict[str, Any] = {
+            "callId": event.call_id,
+            "toolName": event.tool_name,
+            "success": event.success,
+            "outputPreview": event.output_preview,
+            "durationMs": event.duration_ms,
+            "error": event.error,
+            "iteration": event.iteration,
         }
+        # A-10: written only when a human actually waited, the way ``agent`` and
+        # ``readonly`` are -- an auto-approved call keeps its exact old payload.
+        if event.approval_ms > 0:
+            tool_data["approvalMs"] = event.approval_ms
+        return {"type": "tool.finished", "data": tool_data}
     if isinstance(event, ToolChunk):
         return {
             "type": "tool.chunk",

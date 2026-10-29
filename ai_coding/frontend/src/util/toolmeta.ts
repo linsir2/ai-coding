@@ -108,6 +108,10 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   nonzero_exit: { label: "命令返回非零", tone: "failed" },
   timeout: { label: "命令超时", tone: "failed" },
   spawn_failed: { label: "命令无法启动", tone: "failed" },
+  // A-4: the process sandbox cannot run here (no bwrap / namespaces).  It is
+  // an environment failure, so it gets ✗ rather than the ⊘ a refusal wears --
+  // "被拒绝" said a human had said no, which is not what happened.
+  sandbox_unavailable: { label: "沙箱不可用（命令未执行）", tone: "failed" },
   tool_timeout: { label: "工具调用超时", tone: "failed" },
   tool_error: { label: "工具异常", tone: "failed" },
   unknown_tool: { label: "未知工具", tone: "failed" },
@@ -136,6 +140,10 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   plan_already_approved: { label: "计划已批准", tone: "denied" },
   // N1: the request asks for work, so the conclusion exit is not the way out.
   implementation_request: { label: "该请求要实现", tone: "denied" },
+  // R21 §3: a plan-step turn has no running goal (``armed_profile == "plan"``),
+  // so ``update_goal`` there is a misplaced call, not breakage.  The fallback
+  // drew it as 未知原因（no_goal） in the middle of execution.
+  no_goal: { label: "无运行中的目标", tone: "denied" },
 }
 
 export function toolFailure(error: string): { label: string; tone: FailureTone } {
@@ -150,6 +158,23 @@ export function formatDuration(ms: number): string {
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
   const minutes = Math.floor(ms / 60_000)
   return `${minutes}m ${Math.round((ms % 60_000) / 1000)}s`
+}
+
+/** A wait below this is noise (an auto-approval costs milliseconds). */
+export const APPROVAL_NOTE_MS = 1000
+
+/**
+ * A card's duration, naming the wait when a human dominated the call (A-10).
+ *
+ * `approvalMs` is part of `durationMs`, never an addition.  The parenthetical
+ * only appears when the wait is at least a second *and* at least a tenth of
+ * the call -- otherwise the row is about the tool, not the operator.
+ */
+export function formatToolDuration(durationMs: number, approvalMs: number): string {
+  const total = formatDuration(durationMs)
+  const wait = Math.min(Math.max(approvalMs, 0), Math.max(durationMs, 0))
+  if (wait < APPROVAL_NOTE_MS || wait * 10 < durationMs) return total
+  return `${total}（审批 ${formatDuration(wait)}）`
 }
 
 /** The head of a long tool tail is dropped; say so rather than pretend. */

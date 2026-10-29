@@ -85,7 +85,12 @@ const PLAN_REVIEW: AskRequest = {
   data: { items: [{ content: "写代码", verify: "", dependsOn: [] }] },
 }
 
-async function _mount(card: () => AskRequest | null, client: _RecordingClient, initialPrompt?: PendingPrompt) {
+async function _mount(
+  card: () => AskRequest | null,
+  client: _RecordingClient,
+  initialPrompt?: PendingPrompt,
+  options?: { sessionId?: () => string; switching?: () => boolean },
+) {
   const base = await createTestRenderer({ width: 120, height: 40 })
   const keymap = setupKeymap(base.renderer)
   const setup = await testRender(
@@ -95,7 +100,8 @@ async function _mount(card: () => AskRequest | null, client: _RecordingClient, i
           <DialogProvider renderer={base.renderer}>
             <Session
               client={client as unknown as IpcClient}
-              sessionId="s1"
+              sessionId={options?.sessionId?.() ?? "s1"}
+              switching={options?.switching}
               model="m"
               provider="p"
               commands={["plan"]}
@@ -158,6 +164,66 @@ describe("a card pauses the composer, it does not remove it (D4)", () => {
     expect(frameOf()).toContain("p · m")
     expect(keymap.getActiveKeys().map((key) => key.display)).toContain("shift+tab")
 
+    setup.renderer.destroy()
+  })
+})
+
+describe("a submission during a session switch waits for the new id (A-12)", () => {
+  const hydrate = async (client: _RecordingClient, setup: { flush: () => Promise<void> }) => {
+    await until(
+      () =>
+        client.sent.some((row) => row.method === "session.stats") &&
+        client.sent.some((row) => row.method === "session.agents"),
+      "session hydration",
+    )
+    await setup.flush()
+  }
+
+  test("the line is held back while switching, then sent under the new id", async () => {
+    const client = new _RecordingClient()
+    const switching = createSignal(true)
+    const sessionId = createSignal("s1")
+    const { keymap, setup } = await _mount(() => null, client, undefined, {
+      sessionId: sessionId[0],
+      switching: switching[0],
+    })
+    await hydrate(client, setup)
+
+    // Every request that names a session; hydration calls carry no id.
+    const identified = () => client.sent.filter((row) => typeof row.params["id"] === "string")
+
+    keymap.runCommand("session.review")
+    await setup.flush()
+    expect(identified()).toEqual([])
+
+    sessionId[1]("s2")
+    switching[1](false)
+    await until(() => identified().some((row) => row.params["id"] === "s2"), "deferred request")
+    expect(identified().map((row) => row.params)).toEqual([{ id: "s2", text: "/review" }])
+    expect(client.sent.every((row) => row.params["id"] !== "s1")).toBe(true)
+    setup.renderer.destroy()
+  })
+
+  test("a failed switch does not guess: the line goes back to the composer", async () => {
+    const client = new _RecordingClient()
+    const switching = createSignal(true)
+    const sessionId = createSignal("s1")
+    const { keymap, setup } = await _mount(() => null, client, undefined, {
+      sessionId: sessionId[0],
+      switching: switching[0],
+    })
+    await hydrate(client, setup)
+
+    keymap.runCommand("session.review")
+    await setup.flush()
+    // The load failed: the id never moved.
+    switching[1](false)
+    await setup.flush()
+
+    expect(client.sent.some((row) => typeof row.params["id"] === "string")).toBe(false)
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("/review")
+    expect(frame).toContain("输入已放回输入框")
     setup.renderer.destroy()
   })
 })

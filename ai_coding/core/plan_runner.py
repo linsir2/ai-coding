@@ -512,22 +512,22 @@ class PlanReport:
     tokens_used: dict[str, int] | None = None
 
     def render(self) -> str:
-        # R1-5b: the headline counts work this run did (attested).  Fiat
-        # receipts are real completions but not this run's work — claiming
-        # them in the headline read as a lie (measured: "完成 4 步" for 0
-        # turns).  report.completed still lists every done id (API stable);
-        # only the human sentence splits the provenance.
-        attested_of = {entry.step_id: entry.attested for entry in self.deliveries}
-        attested_done = sum(
-            1 for step_id in self.completed if attested_of.get(step_id, True)
-        )
-        head = f"[plan] 完成 {attested_done} 步 · 用了 {self.turns_used} 回合"
+        # R21 §4: the headline counts every completion and names how many of
+        # them were not settled step by step.  Counting only attested steps
+        # (R1-5b) was meant to avoid the old lie ("完成 4 步" for 0 turns), but
+        # it made the sentence disagree, on one screen, with the task card's
+        # ``Todos n/m`` and with the ``已完成`` line right below it (measured:
+        # "完成 1 步" beside "Todos 2/2" and "已完成：1, 2").  The qualifier is
+        # what keeps the provenance visible without contradicting the list.
+        unattested = sum(1 for entry in self.deliveries if not entry.attested)
+        qualifier = f"（其中 {unattested} 步未经分步验收）" if unattested else ""
+        head = f"[plan] 完成 {len(self.completed)} 步{qualifier}"
+        # A closing Chinese bracket already separates the clauses, so the
+        # separator loses its leading space when the qualifier is present.
+        head += f"{'' if qualifier else ' '}· 用了 {self.turns_used} 回合"
         if self.tokens_used:
             head += f" / {self.tokens_used.get('total_tokens', '?')} tokens"
         parts = [head]
-        unattested = sum(1 for entry in self.deliveries if not entry.attested)
-        if unattested:
-            parts.append(f"(含 {unattested} 步分步外完成，未经分步验收)")
         on_claim = [entry.step_id for entry in self.deliveries if entry.proof == "on-claim"]
         if on_claim:
             parts.append(f"(含 {len(on_claim)} 步无证明完成：{', '.join(on_claim)})")
@@ -902,7 +902,11 @@ class PlanRunner:
         roughly two orders of magnitude smaller than transcripts.  Calling
         that "linear" was wrong; the per-step size is what stayed flat.
         """
-        lines = [f"[计划目标] {task.goal or '(未命名计划)'}", "", "[计划步骤]"]
+        # "[计划标题]" not "[计划目标]": ``plan.updated`` also carries a
+        # ``goal`` key, and a step reading "目标" went looking for a running
+        # goal (``start_goal``/``update_goal`` are for R21 §3).  A plan has a
+        # title; a goal has a lifetime.  The two words must not collide.
+        lines = [f"[计划标题] {task.goal or '(未命名计划)'}", "", "[计划步骤]"]
         for entry in task.items:
             if entry.is_terminal():
                 continue

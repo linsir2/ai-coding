@@ -524,7 +524,7 @@ class GuardChain:
 
 | 守卫 | 生效条件 | 规则 | 默认 | 依据的真实失效模式 |
 |---|---|---|---|---|
-| `DuplicateCallGuard` | `duplicate_threshold > 0` | 同一 `(工具名, 参数指纹)` 第 N 次调用起拒绝；拒绝结果里**带上一次结果的 call_id**，让模型直接复用 | **开（阈值 2）** | ReAct 循环经典病：模型原地重复 `read`/`bash`。既省 token 又破死循环 |
+| `DuplicateCallGuard` | `duplicate_threshold > 0` | 同一 `(工具名, 参数指纹)` 第 N 次调用起拒绝；拒绝结果里**带上一次结果的 call_id**，让模型直接复用。O-1 之后 `read` 只在"上次结果仍在本请求上下文里"时才算重复：L2 信封、L3 持久化标记、L4 摘要掉的结果都不可复用，放行重读，但同一指纹的总成功次数封顶 `2×阈值`（防原地重读循环） | **开（阈值 2）** | ReAct 循环经典病：模型原地重复 `read`/`bash`。既省 token 又破死循环 |
 | `BashPolicyGuard` | 配置了 `bash_deny` / `bash_confirm` | 在权限门硬拒表**之外**，允许配置追加拒绝模式（命中即 DENY）与「必须确认」模式 | 开（空表 = 不生效） | 权限门的硬拒表写死了，用户加不了自己的红线 |
 | `SecretGuard`（后置） | 总是 | 高置信密钥模式在**写盘前**强制脱敏；是否同时改历史由 `redact_history` 控制 | trace 强制；history 默认关 | `config.local.yaml` 里就是真实 key，轨迹落盘即泄漏面 |
 | `PathEscapeGuard` | `strict_paths` | `bash` 参数里出现工作区外的绝对路径 / `cd /`：默认**只观察**（放行 + 轨迹标记），`strict_paths: true` 才拒绝 | 观察 | `Sandbox` 只管文件工具；`bash` 能绕过 `ctx.workspace` |
@@ -884,7 +884,7 @@ you> /trace --degraded
 | 2 | **观测拖慢回合** | 与 `_SafeObserver` 同纪律；目标 <5ms/回合，超标退化为回合末批量落盘 | `capture: full` 会显著变大 → 默认关 |
 | 3 | **前缀共享率测不准** | 与引擎字段映射是近似，口径已写进 §4.2 | 仅作兜底，不当真值（真值用 provider cache） |
 | 4 | **provider 不报 cache** | DashScope 是否上报**未知**；C2 先打印真实 usage 键再适配；不报就 `None` + 兜底 | 若完全不报，「缓存是否被打穿」只能靠我们的估算 |
-| 5 | **门卫误伤正常回环** | 重复阈值默认 2（允许一次有意重试）；指纹含参数，参数一变即放行 | 模型「合理重读同一文件」会被拦 → 拒绝结果里给了上次 call_id，可引导复用 |
+| 5 | **门卫误伤正常回环** | 重复阈值默认 2（允许一次有意重试）；指纹含参数，参数一变即放行；`read` 的结果被 L2/L3/L4 移出上下文后不再占用预算（O-1），总量按 `2×阈值` 兜底 | 同一批并行提交的重复调用不共享本批的计数（`check` 全部先于 `after`），可能多放行几次 |
 | 6 | **改写绕过权限门** | A5 强制重跑门 + 专门的 `test_dispatch_rewrite_regate.py` | —— |
 | 7 | **钩子破坏缓存纪律** | `inject` 只进易失尾部；`persist` 才进历史且留痕；`step.before` 不允许 block | 用户显式 `persist: true` 时缓存代价由用户承担（有事件留痕） |
 | 8 | **合同破坏面** | 只有 `TurnStatus.BUDGET` 与 `TurnOutcome.usage` 两处，已单列（§7.3）并作为决策点 | 需要你点头 |

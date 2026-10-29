@@ -197,6 +197,20 @@ _MERGE_RULES = (
     "· 若" + CHECKPOINT_OPEN + " 为空，则直接总结" + SINCE_OPEN + "。\n"
 )
 
+#: R22/H11: the checkpoint is the only thing a later iteration sees of the work
+#: that produced it, and the summariser reads each tool result as a 1,000-char
+#: head plus tail (``_SUMMARY_TOOL_CHARS``).  So it *cannot* recompute a count --
+#: but it wrote "已确认遍历完整，合计 8 行" anyway, and the model answered from
+#: that.  These three rules keep a conclusion inside what the input can support.
+_EVIDENCE_RULES = (
+    "\n关于数字与证据：\n"
+    "· 任何数量、计数、耗时、行号，都要带来源（命令 + 输出片段）；找不到来源的数字不要写。\n"
+    "· 只有在输入里确实出现过全量证据时，才能写「已完成」「全部」「确认完整」；"
+    "输入被截断或只见到部分时，写「部分（缺 …）」，并在「下一步」给出补证命令。\n"
+    "· 结论依赖计数或聚合时，「下一步」写一条可直接执行的重算命令"
+    "（如 grep -c、wc -l、sort | uniq -c），不要只复述一个数字。\n"
+)
+
 _SUMMARY_SYSTEM_PROMPT = (
     "你是资深研发助手。你要把一段很长的编程会话压缩成一份 checkpoint，"
     "交给另一个 agent 接着干活。只输出下面的小节，不要前言、不要结语：\n"
@@ -210,6 +224,7 @@ _SUMMARY_SYSTEM_PROMPT = (
     "每节用短句分行；没有内容的节写「无」。\n"
     + _INPUT_SHAPE
     + _MERGE_RULES
+    + _EVIDENCE_RULES
     + "\n不要描述你在做总结这件事，不要调用工具。"
 )
 

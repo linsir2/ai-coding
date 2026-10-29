@@ -220,6 +220,7 @@ export function messagesToState(
           preview: "",
           error: "",
           durationMs: 0,
+          approvalMs: 0,
           // M3 T11: only the plan card needs its arguments back; everything
           // else would just duplicate the session file in the transcript.
           ...(call.name === "present_plan" ? { params } : {}),
@@ -263,6 +264,8 @@ export function messagesToState(
     // T7: a replay carries no live posture — the route hydrates
     // SessionState.agent from session.stats right after.
     agent: null,
+    // R21 §2: same for the read-only axis; stats fills both on mount.
+    readonly: null,
     busy: false,
     queued: [],
     // Replayed history has no live jobs: the panel fills this from

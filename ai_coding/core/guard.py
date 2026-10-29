@@ -25,7 +25,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
-from ai_coding.domain.message import ToolCall, ToolResult
+from ai_coding.domain.message import ChatMessage, ToolCall, ToolResult
 from ai_coding.tools.base import ToolContext
 
 __all__ = [
@@ -196,6 +196,41 @@ _DUPLICATE_GUIDANCE: dict[str, str] = {
 
 _DUPLICATE_GUIDANCE_DEFAULT = "reuse the earlier result"
 
+#: O-1: tools whose output *is* the result and whose re-execution has no side
+#: effect.  Only these may run again when their earlier output left the context
+#: -- a trimmed ``bash`` output is not evidence that its side effect did not
+#: happen, so the guard keeps refusing repeats there.
+_REREADABLE = frozenset({"read"})
+
+#: O-1: hard ceiling on how many times one fingerprint may succeed in a turn
+#: once its output is no longer visible, as a multiple of the threshold.  The
+#: "reuse is possible" rule alone cannot bound this: L3 replaces a large read
+#: with a marker immediately, so "nothing to reuse" would be true every time.
+_UNVISIBLE_REREAD_FACTOR = 2
+
+#: The heads that mean "this tool message no longer carries its body": the L2
+#: envelope and its legacy bare form, then L3's persisted marker.  An L4 summary
+#: removes the message entirely, so it never reaches this check.
+_GONE_HEADS = ("[Previous: used", "<persisted-output")
+
+
+def _visible_tool_ids(history: Sequence[ChatMessage]) -> frozenset[str]:
+    """Call ids whose tool result is still fully in the request's history (O-1).
+
+    ``ToolContext.messages`` is by construction the assembled history -- what
+    the model can still see (``tools/base.py``).  Reading it keeps this guard
+    pure: no IO, no session, no clock.
+    """
+    visible: set[str] = set()
+    for message in history:
+        if message.role != "tool" or not message.tool_call_id:
+            continue
+        body = message.content or ""
+        if any(body.startswith(head) for head in _GONE_HEADS):
+            continue
+        visible.add(message.tool_call_id)
+    return frozenset(visible)
+
 
 class DuplicateCallGuard:
     """Refuse a call that repeats one this turn has already made too often.
@@ -225,30 +260,64 @@ class DuplicateCallGuard:
         self.reset()
 
     def reset(self) -> None:
-        self._counts: Counter[str] = Counter()
-        self._first_call: dict[str, str] = {}
+        #: Fingerprint -> the ids of its successful calls, oldest first.  The id
+        #: (not just the count) is kept so ``check`` can ask which results the
+        #: model still has in front of it (O-1).
+        self._successes: dict[str, list[str]] = {}
 
     def check(self, call: ToolCall, ctx: ToolContext, view: TurnView) -> GuardDecision:
-        del ctx, view
+        del view
         if self.threshold <= 0:
             return GuardDecision(GuardVerdict.ALLOW)
         fingerprint = call_fingerprint(call)
-        previous = self._counts[fingerprint]
-        if previous >= self.threshold:
-            earlier = self._first_call.get(fingerprint, "")
+        succeeded = self._successes.get(fingerprint, [])
+        if call.name.lower() in _REREADABLE:
+            return self._check_reread(call, succeeded, _visible_tool_ids(ctx.messages))
+        if len(succeeded) >= self.threshold:
+            return self._refusal(call, succeeded[0], len(succeeded))
+        return GuardDecision(GuardVerdict.ALLOW)
+
+    def _check_reread(
+        self, call: ToolCall, succeeded: Sequence[str], visible: frozenset[str]
+    ) -> GuardDecision:
+        """A read is only "duplicate" while its earlier output is still there.
+
+        O-1 (s3 turn-1): after L3 persisted every 40 KB block and L4 summarised
+        the batch away, re-reading the same range was the only way to recover
+        the content -- and the refusal pointed at a result that no longer
+        existed.  The total is still capped so one range cannot be re-read
+        forever.
+        """
+        shown = [call_id for call_id in succeeded if call_id in visible]
+        if len(shown) >= self.threshold:
+            return self._refusal(call, shown[0], len(shown))
+        if len(succeeded) >= self.threshold * _UNVISIBLE_REREAD_FACTOR:
+            return self._refusal(
+                call, succeeded[0], len(succeeded), reusable=False
+            )
+        return GuardDecision(GuardVerdict.ALLOW)
+
+    def _refusal(
+        self, call: ToolCall, earlier: str, previous: int, *, reusable: bool = True
+    ) -> GuardDecision:
+        if reusable:
             guidance = _DUPLICATE_GUIDANCE.get(
                 call.name.lower(), _DUPLICATE_GUIDANCE_DEFAULT
             )
-            return GuardDecision(
-                GuardVerdict.DENY,
-                reason=(
-                    f"'{call.name}' already succeeded {previous} time(s) this turn "
-                    f"with the same arguments; {guidance}"
-                    + (f" (call {earlier})" if earlier else "")
-                ),
-                guard=self.name,
+            reason = (
+                f"'{call.name}' already succeeded {previous} time(s) this turn "
+                f"with the same arguments; {guidance}"
             )
-        return GuardDecision(GuardVerdict.ALLOW)
+        else:
+            reason = (
+                f"'{call.name}' already succeeded {previous} time(s) this turn "
+                "with the same arguments and its earlier output is no longer "
+                "fully in the context; read a different range, or use grep for "
+                "a search or count"
+            )
+        if earlier:
+            reason += f" (call {earlier})"
+        return GuardDecision(GuardVerdict.DENY, reason=reason, guard=self.name)
 
     def after(
         self, call: ToolCall, result: ToolResult, ctx: ToolContext, view: TurnView
@@ -264,11 +333,9 @@ class DuplicateCallGuard:
             return result
         fingerprint = call_fingerprint(call)
         if result.success:
-            self._counts[fingerprint] += 1
-            self._first_call.setdefault(fingerprint, call.id)
+            self._successes.setdefault(fingerprint, []).append(call.id)
         else:
-            self._counts.pop(fingerprint, None)
-            self._first_call.pop(fingerprint, None)
+            self._successes.pop(fingerprint, None)
         return result
 
 

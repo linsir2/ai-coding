@@ -8,13 +8,15 @@
  */
 
 import { describe, expect, test } from "bun:test"
+import stringWidth from "string-width"
 import {
   parseAskRequest,
   answerForSelection,
   ASK_SKIP,
+  planProse,
   planReviewAnswer,
   planReviewItems,
-
+  planText,
 } from "../src/util/ask"
 
 describe("parseAskRequest", () => {
@@ -95,6 +97,83 @@ describe("planReviewItems", () => {
 
   test("a plain question has no rows", () => {
     expect(planReviewItems(parseAskRequest({ question: "q" }))).toEqual([])
+  })
+})
+
+// ---- R21 §1: the plan card's text transform --------------------------------
+
+
+describe("planText", () => {
+  test("a pipe table lines up, and the --- row is gone", () => {
+    const plan = [
+      "| 步骤 | 验收 |",
+      "|---|---|",
+      "| 建目录 | test -d hotel |",
+      "| 写 db.py | pytest |",
+    ].join("\n")
+    const rows = planText(plan).split("\n")
+    expect(rows.length).toBe(3) // the separator row is not a row
+    expect(rows.join("\n")).not.toContain("---")
+    // Every row occupies the same number of terminal columns -- measured,
+    // not hand-counted, so the CJK cells are included in the check.
+    expect(new Set(rows.map((row) => stringWidth(row))).size).toBe(1)
+    expect(rows[1]).toContain("建目录")
+    expect(rows[2]).toContain("写 db.py")
+  })
+
+  test("CJK cells are padded by display width, not by character count", () => {
+    // "建" is two columns wide: one 建 == two ASCII chars, so the ASCII rows
+    // pad by fewer spaces than a naive .length would.
+    const rows = planText("| a | b |\n| 建 | x |").split("\n")
+    expect(rows[0]).toBe("| a  | b |")
+    expect(rows[1]).toBe("| 建 | x |")
+  })
+
+  test("a --- rule between sections is dropped", () => {
+    expect(planText("why\n\n---\n\nrisk")).toBe("why\n\nrisk")
+  })
+
+  test("a table inside a fence is left alone", () => {
+    const plan = "```\n| a | b |\n```"
+    expect(planText(plan)).toBe(plan)
+  })
+
+  test("the old markers still go", () => {
+    expect(planText("# 标题\n- 项\n`code` **bold**")).toBe("标题\n· 项\ncode bold")
+  })
+
+  test("an empty plan is an empty string", () => {
+    expect(planText("")).toBe("")
+  })
+})
+
+describe("planProse", () => {
+  const items = [{ content: "建目录" }, { content: "写 db.py" }]
+
+  test("a table that only lists the reviewed items is dropped", () => {
+    const plan = [
+      "做法是先脚手架后数据层。",
+      "",
+      "| 步骤 | 验收 |",
+      "|---|---|",
+      "| 建目录 | test -d hotel |",
+      "| 写 db.py | pytest |",
+      "",
+      "风险：写库需要迁移脚本。",
+    ].join("\n")
+    expect(planProse(plan, items)).toBe(
+      "做法是先脚手架后数据层。\n\n\n风险：写库需要迁移脚本。",
+    )
+  })
+
+  test("a table of trade-offs stays (the items are not what it lists)", () => {
+    const plan = "| 取舍 | 理由 |\n|---|---|\n| 用 sqlite | 无外部依赖 |"
+    expect(planProse(plan, items)).toBe(plan)
+  })
+
+  test("no items to compare against: the plan is untouched", () => {
+    const plan = "| 步骤 | 验收 |\n|---|---|\n| 建目录 | test |"
+    expect(planProse(plan, [])).toBe(plan)
   })
 })
 

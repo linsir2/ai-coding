@@ -102,11 +102,15 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
     (
         "P4  tier 2 stops checking the end of the file",
         "ai_coding/domain/read_ledger.py",
-        "        total = size_of(path)\n"
-        "        if not total:",
-        "        return []\n"
-        "        total = size_of(path)\n"
-        "        if not total:",
+        "            if end > total",
+        "            if False",
+        "tests/test_read_ledger.py",
+    ),
+    (
+        "P4b tier 2 measures the cited spelling, not the seen one",
+        "ai_coding/domain/read_ledger.py",
+        "            total = size_of(resolved)",
+        "            total = size_of(path)",
         "tests/test_read_ledger.py",
     ),
     (

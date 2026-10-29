@@ -218,6 +218,12 @@ R2 补两个码与一个字段：
 | `ToolResult.error` | `timeout` / `nonzero_exit` / `spawn_failed` | `bash` 自身的命令超时 / 非零退出 / 起不来（此时 `data` 带 `exit_code`、`timed_out`、`duration_seconds`） |
 | `ToolResult.data`（超时） | `{tool, timeout_seconds, reason}` | `reason` = `call_budget_exhausted`（跑着被掐）或 `turn_budget_exhausted`（没预算，压根没启动） |
 
+R22/A-4 再补一个码：
+
+| 新增 | 取值 | 含义 |
+|---|---|---|
+| `ToolResult.error` | `sandbox_unavailable` | 进程沙箱机制在本机不可用（`SandboxGap`，原因码在 `data.reason`，如 `bwrap.unavailable`）——命令未执行，是**环境失败**而不是审批/门禁拒绝；区别于 `sandbox_violation`（文件工具的路径越界）与 `spawn_failed`（沙箱通过后 exec 失败）。后台 job 同源：`Job.denied_reason` 存原因码，`detail` 为 `未执行 · <原因>` |
+
 ### 工具上下文与子智能体
 
 | 类型 | 字段 | 说明 |
@@ -241,6 +247,11 @@ R2 再加一个只读属性 `max_duration_seconds: float | None`：工具自报�
 
 R2 给 `ToolFinished` 追加末尾字段 `error: str | None = None`（与 `ToolResult.error` 同源），
 让事件流也能区分「失败」与「超时」而不必解析文本。
+
+A-10 给 `ToolFinished` 追加 `approval_ms: int = 0`（在 `duration_ms` 之后）：等人按审批的毫秒数，
+是 `duration_ms` 的**一部分**而不是另一个并列时长（轨迹/OTLP 仍按墙钟跨度）。线上
+（`server/bridge.py`）只在 `> 0` 时写 `approvalMs`，自动批准的调用保持旧 payload 逐字节不变；
+前端卡片在等待 ≥1s 且 ≥ 总时长 10% 时显示 `28.9s（审批 28.5s）`。
 
 ### `AIConfig` 新增项
 
@@ -611,9 +622,11 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 | `rows_to_otlp(views, *, service_name="ai-coding")` | `core/export_otlp.py` | 按 `span` 分组 → `resourceSpans[0].scopeSpans[0].spans`；`traceId`/`spanId` 由 sha256 派生（**确定性**，与真 SDK 的随机 id 不同） |
 | `render_overview(report)` | `app/trace_text.py` | 纯函数，一张表 + `TOTAL` 行 + `!mismatch` 标注。消费者是 `ai-coding trace overview`（M-G2 恢复；R10 删掉命令后它一度零消费者） |
 
-OTLP 字段映射：`latency_ms` / `duration_ms` 的最大值决定 `endTimeUnixNano`（无时长则
-`start+1` 并标 `ai-coding.instant=true`）；行内 `data` 逐键成 attribute（bool/int/float/str 各自成类型，
-嵌套结构转 JSON 文本，`None` 丢弃）；任一行有 `error` → `status.code = 2`。
+OTLP 字段映射：`name` 取该 span **ts 最早**事件的事件名（低基数操作名，tie 按写入顺序，如
+`IterationStarted` / `ToolStarted`；整串事件在 `ai-coding.events` 属性，A-13 之前误拼进 `name`）；`latency_ms` /
+`duration_ms` 的最大值决定 `endTimeUnixNano`（无时长则 `start+1` 并标 `ai-coding.instant=true`）；
+行内 `data` 逐键成 attribute（bool/int/float/str 各自成类型，嵌套结构转 JSON 文本，`None` 丢弃）；
+任一行有 `error` → `status.code = 2`。
 
 ## R10 契约（`memory_search` 的候选集过滤与诊断）
 

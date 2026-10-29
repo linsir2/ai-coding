@@ -76,6 +76,103 @@ async def test_update_goal_complete_is_accepted_during_an_armed_goal():
 
 
 @pytest.mark.asyncio
+async def test_a14_complete_closes_the_items_the_goal_supersedes():
+    """A-14: a stale open item must not outlive the goal it belonged to."""
+    task = TaskState(goal="g", armed=True, armed_profile="goal")
+    task.add("Add type hints to add")
+    task.add("Add type hints to sub")
+    task.update("1", status="in_progress")
+    task.update("2", status="completed")
+
+    result = await UpdateGoalTool().execute({"status": "complete"}, _ctx(task))
+
+    assert result.success is True
+    assert [item.status for item in task.items] == ["dropped", "completed"]
+    assert result.data is not None
+    assert result.data["closedItems"] == [
+        {"id": "1", "content": "Add type hints to add", "from": "in_progress"}
+    ]
+    assert "- 1. Add type hints to add（原 in_progress）" in result.output
+    # What the model reads next iteration: no dead work, no "下一步".
+    render = task.render()
+    assert "[>]" not in render and "下一步" not in render
+    assert "进度: 2/2" in render
+
+
+@pytest.mark.asyncio
+async def test_a14_complete_closes_pending_and_blocked_items_too():
+    task = TaskState(goal="g", armed=True, armed_profile="goal")
+    task.add("never started")
+    task.add("cannot start")
+    task.add("done")
+    task.update("2", status="blocked")
+    task.update("3", status="completed")
+
+    result = await UpdateGoalTool().execute({"status": "complete"}, _ctx(task))
+
+    assert [item.status for item in task.items] == ["dropped", "dropped", "completed"]
+    assert result.data is not None
+    assert [entry["from"] for entry in result.data["closedItems"]] == ["pending", "blocked"]
+
+
+@pytest.mark.asyncio
+async def test_a14_complete_on_a_clean_list_says_nothing_extra():
+    task = TaskState(goal="g", armed=True, armed_profile="goal")
+    result = await UpdateGoalTool().execute({"status": "complete"}, _ctx(task))
+    assert result.success is True
+    assert result.data is not None and "closedItems" not in result.data
+    assert "dropped" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_a14_a_second_complete_changes_nothing():
+    task = TaskState(goal="g", armed=True, armed_profile="goal")
+    task.add("stale")
+    await UpdateGoalTool().execute({"status": "complete"}, _ctx(task))
+    again = await UpdateGoalTool().execute({"status": "complete"}, _ctx(task))
+    assert again.success is True
+    assert again.data is not None and "closedItems" not in again.data
+    assert task.items[0].status == "dropped"
+
+
+@pytest.mark.asyncio
+async def test_a14_the_task_gate_stops_asking_once_the_goal_is_complete():
+    """The measured damage: the gate nudged a finished goal for nine rounds."""
+    from ai_coding.core.turn_policy import TurnAction, TurnPolicy, TurnSnapshot
+
+    task = TaskState(goal="g", armed=True, armed_profile="goal")
+    task.add("Add type hints to add")
+    task.update("1", status="in_progress")
+    policy = TurnPolicy()
+
+    before = policy.decide_after_step(
+        TurnSnapshot(iteration=2, open_items=tuple(task.open_items()))
+    )
+    assert before.action is TurnAction.NUDGE
+
+    await UpdateGoalTool().execute({"status": "complete"}, _ctx(task))
+    after = policy.decide_after_step(
+        TurnSnapshot(iteration=3, open_items=tuple(task.open_items()))
+    )
+    assert after.action is TurnAction.FINISH
+    assert after.reason == "model finished"
+
+
+@pytest.mark.asyncio
+async def test_a14_blocked_keeps_the_items_for_a_later_attempt():
+    task = TaskState(goal="g", armed=True, armed_profile="goal", rounds_run=3)
+    task.add("still worth doing")
+    task.update("1", status="in_progress")
+
+    await UpdateGoalTool().execute(
+        {"status": "blocked", "note": "waiting on CI"}, _ctx(task)
+    )
+
+    assert task.goal_phase == "blocked"
+    assert task.items[0].status == "in_progress"
+
+
+@pytest.mark.asyncio
 async def test_update_goal_blocked_is_refused_before_three_rounds():
     task = TaskState(goal="g", armed=True, armed_profile="goal", rounds_run=2)
     result = await UpdateGoalTool().execute(

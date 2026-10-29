@@ -93,6 +93,19 @@ class _NeverAsked(_Approval):
         raise AssertionError("approval must not be requested for this call")
 
 
+class _SlowApproval(_Approval):
+    """A human who takes a measurable moment to answer."""
+
+    def __init__(self, answer: ApprovalResult | None = None, delay: float = 0.03) -> None:
+        super().__init__(answer)
+        self.delay = delay
+
+    async def approve(self, tool_name, params, reason):
+        self.calls.append((tool_name, params, reason))
+        await asyncio.sleep(self.delay)
+        return self.answer
+
+
 class _ConcurrencyProbe:
     """Tracks the highest number of overlapping executions."""
 
@@ -151,6 +164,42 @@ async def test_warn_tool_approval_yes_executes():
     assert outcomes[0].result.success is True
     assert tool.executed is True
     assert approval.calls[0][0] == "write"
+
+
+@pytest.mark.asyncio
+async def test_a10_the_approval_wait_is_reported_apart_from_the_run():
+    """The card's number must not be mostly the human thinking."""
+    tool = _FakeTool("write")
+    observer = RecordingObserver()
+    approval = _SlowApproval(ApprovalResult.YES)
+    await _dispatcher([tool], approval=approval, observer=observer).dispatch_batch(
+        [_ref("c1", "write", '{"path":"a"}')], _ctx()
+    )
+    finished = observer.of_type(ToolFinished)[0]
+    assert finished.approval_ms >= 25
+    assert finished.duration_ms >= finished.approval_ms
+
+
+@pytest.mark.asyncio
+async def test_a10_an_allowed_call_reports_no_approval_wait():
+    tool = _FakeTool("read")
+    observer = RecordingObserver()
+    await _dispatcher([tool], observer=observer).dispatch_batch([_ref("c1", "read")], _ctx())
+    assert observer.of_type(ToolFinished)[0].approval_ms == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [ApprovalResult.NO, ApprovalResult.STOP])
+async def test_a10_a_refused_call_still_reports_how_long_it_waited(answer):
+    tool = _FakeTool("write")
+    observer = RecordingObserver()
+    approval = _SlowApproval(answer)
+    await _dispatcher([tool], approval=approval, observer=observer).dispatch_batch(
+        [_ref("c1", "write")], _ctx()
+    )
+    finished = observer.of_type(ToolFinished)[0]
+    assert finished.approval_ms >= 25
+    assert finished.duration_ms >= finished.approval_ms
 
 
 @pytest.mark.asyncio
@@ -256,10 +305,15 @@ async def test_unknown_tool_does_not_ask_approval():
 
 
 @pytest.mark.asyncio
-async def test_malformed_arguments_degrade_to_empty_params():
+async def test_malformed_arguments_are_refused_not_run():
+    """R21 §10: ``{}`` used to be executed as if the model had asked for it."""
     tool = _FakeTool("read")
-    await _dispatcher([tool]).dispatch_batch([_ref("c1", "read", "{not json")], _ctx())
-    assert tool.params_seen == [{}]
+    outcomes = await _dispatcher([tool]).dispatch_batch(
+        [_ref("c1", "read", "{not json")], _ctx()
+    )
+    assert tool.params_seen == []
+    assert outcomes[0].result.error == "invalid_arguments"
+    assert outcomes[0].denied is True
 
 
 @pytest.mark.asyncio

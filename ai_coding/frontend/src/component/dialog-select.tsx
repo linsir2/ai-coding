@@ -15,7 +15,15 @@ import { useTerminalDimensions } from "@opentui/solid"
 import { Index, Show, createEffect, createMemo, createSignal, onMount } from "solid-js"
 import { theme } from "../theme/tokens"
 import type { SelectAction, SelectOption } from "../util/dialog-select"
-import { filterOptions, flattenGroups, groupOptions, moveSelection } from "../util/dialog-select"
+import {
+  filterOptions,
+  flattenGroups,
+  groupOptions,
+  moveSelection,
+  rowLayout,
+  scrollTopFor,
+  singleLineText,
+} from "../util/dialog-select"
 
 export interface DialogSelectProps {
   title: string
@@ -49,6 +57,15 @@ export function DialogSelect(props: DialogSelectProps) {
     const option = flat()[selected()]
     if (option) (props.onSelect ?? option.onSelect)?.(option)
   }
+
+  // R20b: a scrollbox with no explicit height filled the overlay, so an empty
+  // list still produced a screen-tall panel.  Size it to the rows it has.
+  //
+  // The row offsets and the content height come from one layout so the
+  // viewport and the scroll math cannot disagree about how tall a row is.
+  const layout = createMemo(() => rowLayout(flat().map((_, index) => showHeader(index))))
+  const maxList = () => Math.max(3, Math.floor(dimensions().height / 2) - 6)
+  const listHeight = () => Math.max(1, Math.min(layout().height, maxList()))
 
   onMount(() => input?.focus())
 
@@ -84,9 +101,19 @@ export function DialogSelect(props: DialogSelectProps) {
     ],
   }))
 
+  // Keep the selected row in view by its content offset.  ScrollBox's
+  // scrollChildIntoView gives up when the target is entirely outside the
+  // viewport (its nearest-delta returns 0), which is exactly a PageDown /
+  // PageUp jump -- the list used to stay put while the selection moved off
+  // screen.
   createEffect(() => {
-    const option = flat()[selected()]
-    if (option && list) list.scrollChildIntoView(`dialog-row-${option.value}`)
+    const index = selected()
+    const rowTop = layout().tops[index]
+    if (rowTop === undefined || !list) return
+    // Scrolling up should reveal the group header too, not half of it.
+    const blockTop = showHeader(index) ? Math.max(0, rowTop - 1) : rowTop
+    const viewport = Math.max(1, list.viewport.height)
+    list.scrollTop = scrollTopFor(list.scrollTop, rowTop, viewport, blockTop)
   })
 
   return (
@@ -111,48 +138,58 @@ export function DialogSelect(props: DialogSelectProps) {
           setSelected(0)
         }}
       />
-      <scrollbox
-        ref={(element: ScrollBoxRenderable) => (list = element)}
-        flexShrink={1}
-        maxHeight={Math.max(3, Math.floor(dimensions().height / 2) - 6)}
+      <Show
+        when={flat().length > 0}
+        fallback={<text fg={theme.textMuted}>{"  no matches"}</text>}
       >
-        <Index each={flat()}>
-          {(option, index) => (
-            <>
-              <Show when={showHeader(index)}>
-                <box paddingTop={index === 0 ? 0 : 1} paddingLeft={2}>
-                  <text fg={theme.hueAccent} attributes={TextAttributes.BOLD}>
-                    {option().category}
-                  </text>
-                </box>
-              </Show>
-              <box
-                id={`dialog-row-${option().value}`}
-                flexDirection="row"
-                paddingLeft={2}
-                paddingRight={2}
-                backgroundColor={index === selected() ? theme.backgroundRaisedMax : undefined}
-              >
-                <text fg={theme.hueInteractive}>{option().current ? "● " : "  "}</text>
-                <text
-                  flexGrow={1}
-                  wrapMode="none"
-                  fg={option().danger ? theme.feedbackError : index === selected() ? theme.textBase : theme.textMuted}
-                  attributes={index === selected() || option().danger ? TextAttributes.BOLD : undefined}
-                >
-                  {option().title}
-                  <Show when={option().description}>
-                    <span>{`  ${option().description}`}</span>
-                  </Show>
-                </text>
-                <Show when={option().footer}>
-                  <text wrapMode="none" fg={theme.textMuted}>{`  ${option().footer}`}</text>
+        <scrollbox
+          ref={(element: ScrollBoxRenderable) => (list = element)}
+          height={listHeight()}
+          flexShrink={1}
+        >
+          <Index each={flat()}>
+            {(option, index) => (
+              <>
+                <Show when={showHeader(index)}>
+                  <box paddingTop={index === 0 ? 0 : 1} paddingLeft={2}>
+                    <text fg={theme.hueAccent} attributes={TextAttributes.BOLD}>
+                      {option().category}
+                    </text>
+                  </box>
                 </Show>
-              </box>
-            </>
-          )}
-        </Index>
-      </scrollbox>
+                {/* A row is one terminal line.  Left to flex, a row whose
+                    title + description + footer exceed the width was measured
+                    two lines tall by the native renderer (the second line
+                    blank), halving how many commands fit the viewport. */}
+                <box
+                  id={`dialog-row-${option().value}`}
+                  flexDirection="row"
+                  height={1}
+                  paddingLeft={2}
+                  paddingRight={2}
+                  backgroundColor={index === selected() ? theme.backgroundRaisedMax : undefined}
+                >
+                  <text fg={theme.hueInteractive}>{option().current ? "● " : "  "}</text>
+                  <text
+                    flexGrow={1}
+                    wrapMode="none"
+                    fg={option().danger ? theme.feedbackError : index === selected() ? theme.textBase : theme.textMuted}
+                    attributes={index === selected() || option().danger ? TextAttributes.BOLD : undefined}
+                  >
+                    {singleLineText(option().title)}
+                    <Show when={option().description}>
+                      <span>{`  ${singleLineText(option().description ?? "")}`}</span>
+                    </Show>
+                  </text>
+                  <Show when={option().footer}>
+                    <text wrapMode="none" fg={theme.textMuted}>{`  ${option().footer}`}</text>
+                  </Show>
+                </box>
+              </>
+            )}
+          </Index>
+        </scrollbox>
+      </Show>
       <text fg={theme.textMuted}>{props.footer ?? "enter select · esc close"}</text>
     </box>
   )

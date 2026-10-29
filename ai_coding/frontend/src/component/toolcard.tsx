@@ -18,7 +18,7 @@ import type { TailLine } from "../util/toolmeta"
 import { theme } from "../theme/tokens"
 import { planText, submittedPlan } from "../util/ask"
 import {
-  formatDuration,
+  formatToolDuration,
   toolFailure,
   toolTitle,
   truncationNote,
@@ -82,7 +82,10 @@ export function ToolCard(props: { part: ToolPart }) {
           {toolTitle(props.part.verb, props.part.target, running())}
         </text>
         <Show when={props.part.durationMs > 0}>
-          <text fg={theme.textMuted}>{`· ${formatDuration(props.part.durationMs)}`}</text>
+          {/* A-10: never let the wait note wrap or squeeze the tool name. */}
+          <text flexShrink={0} wrapMode="none" fg={theme.textMuted}>
+            {`· ${formatToolDuration(props.part.durationMs, props.part.approvalMs)}`}
+          </text>
         </Show>
       </box>
       <Show when={!running() && failure().label} fallback={<Show when={running()}>

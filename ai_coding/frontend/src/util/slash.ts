@@ -2,12 +2,17 @@
  * Slash-command autocomplete, the pure half (M5).
  *
  * Only commands this TUI can actually run are listed — the backend's REPL
- * vocabulary (the retired ui/slash.py) has 21 entries, but 14 of them have no
- * TUI action, and offering a dead command would send its text to the model
- * as a plain prompt.  Each entry therefore points at a keymap command.
+ * vocabulary has entries with no TUI action, and offering a dead command would
+ * send its text to the model as a plain prompt.  Each entry therefore points at
+ * a keymap command or submits its own slash line.
+ *
+ * R20b: the two directions are now reconciled at submit time.  A typed line that
+ * names an entry **with** a keymap command runs that command (see
+ * ``prompt.tsx::submit``), so ``/models`` and ``/sessions`` — names the backend
+ * has never known — no longer reach the model as prose, and a command that
+ * exists on both sides (``/help``, ``/status``, ``/memory``) has one behaviour
+ * instead of two.
  */
-
-import { go } from "fuzzysort"
 
 export interface SlashCommand {
   /** Canonical name without the slash, e.g. ``help``. */
@@ -117,8 +122,13 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "undo", title: "Undo", description: "Roll the last turn back (history + files)" },
   { name: "redo", title: "Redo", description: "Put back the turn /undo removed" },
   {
+    // R20b: pointed at "session.permissions", which no keymap ever registered —
+    // selecting it cleared the composer and did nothing.  The dialog is the
+    // TUI's own implementation (app.tsx registers it at the app layer because
+    // the policy is workspace-global); typing "/permissions auto" still reaches
+    // the backend's text handler, which is the only form that takes an argument.
     name: "permissions",
-    command: "session.permissions",
+    command: "dialog.permissions.show",
     title: "Permissions",
     description: "Show or switch the approval policy (add: auto|confirm|clear)",
   },
@@ -129,6 +139,22 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "Write traces out (add: html|otlp, optionally a session id)",
   },
 ]
+
+/**
+ * The catalogue entry a typed line runs directly, or ``undefined``.
+ *
+ * Only an exact ``/name`` with no arguments: a keymap command takes none, and a
+ * line with arguments (``/permissions auto``) belongs to the backend's text
+ * dispatcher.  R20b — this is what stops ``/models``, ``/sessions``, ``/new``
+ * and ``/mcp`` (names the backend has never known) from being submitted as
+ * ordinary prose for the model to answer.
+ */
+export function ownCommand(text: string): SlashCommand | undefined {
+  const line = text.trim()
+  return SLASH_COMMANDS.find(
+    (entry) => entry.command !== undefined && `/${entry.name}` === line,
+  )
+}
 
 /**
  * The command query before the cursor, or ``null`` when no token is active.
@@ -150,13 +176,34 @@ export function slashQuery(text: string, cursor: number): string | null {
   return null
 }
 
-/** Fuzzy-match the catalogue; an empty query keeps it (threshold 0, like OpenCode's command mode). */
+/**
+ * Substring match on the **name only**, prefix first (R22/A-2).
+ *
+ * This used to be ``go()`` over ``["name","description"]`` with ``threshold: 0``.
+ * Two things went wrong with that.  Descriptions are prose, so ``/clear`` hit
+ * ``/permissions`` ("auto|confirm|clear") and ``/agents`` hit ``/tasks``
+ * ("sub-agent runs"); and fuzzysort matches *subsequences*, so ``/readonly``
+ * matched ``/redo``.  In the TUI the selection is what Enter runs
+ * (``prompt.tsx::prompt.autocomplete.select``), so a typed backend command the
+ * catalogue does not list was silently replaced by a neighbour — measured:
+ * ``/readonly`` ran ``/export``, ``/plan`` opened the permissions dialog,
+ * ``/agents`` ran ``/tasks``, ``/clear`` opened permissions, ``/resume`` ran
+ * ``/export``.
+ *
+ * A substring of the name cannot do that: no name contains "readonly", so the
+ * list is empty, the popup closes, and Enter submits the line to the backend
+ * dispatcher that has always known it.  Descriptions stay visible on the row;
+ * the command palette (ctrl+x p) still searches them.
+ */
 export function filterSlashCommands(query: string): SlashCommand[] {
-  const needle = query.trim()
+  const needle = query.trim().toLowerCase()
   if (!needle) return SLASH_COMMANDS
-  return go(needle, SLASH_COMMANDS, {
-    keys: ["name", "description"],
-    scoreFn: (result) => result[0]!.score * 2 + result[1]!.score,
-    threshold: 0,
-  }).map((result) => result.obj)
+  const hits = SLASH_COMMANDS.map((entry) => ({
+    entry,
+    at: entry.name.toLowerCase().indexOf(needle),
+  })).filter((row) => row.at >= 0)
+  // A prefix ("mod" → models) outranks a mid-word hit; shorter names first so
+  // "re" lists redo before review rather than in catalogue order.
+  hits.sort((a, b) => a.at - b.at || a.entry.name.length - b.entry.name.length)
+  return hits.map((row) => row.entry)
 }

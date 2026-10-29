@@ -83,6 +83,11 @@ def rows_to_otlp(
             for span_name, rows in grouped.items():
                 events = [row.evt for row in rows]
                 start = min(_nano(row.ts) for row in rows)
+                # The span's operation name: the event with the earliest ts
+                # (ties keep the write order).  Same anchor as ``start``, so a
+                # clock skew or an out-of-order line cannot name the span after
+                # an event it did not start with.
+                first_event = min(rows, key=lambda row: _nano(row.ts)).evt
                 duration_ms = max(
                     max(_int(row.data.get("latency_ms")), _int(row.data.get("duration_ms")))
                     for row in rows
@@ -110,7 +115,10 @@ def rows_to_otlp(
                             if not parent or parent == "turn" and span_name == "turn"
                             else _span_id(view.session, turn.turn, parent)
                         ),
-                        "name": "|".join(events),
+                        # A-13: the span name is one operation name, not the
+                        # whole event log; the full list stays in
+                        # ``ai-coding.events`` above.
+                        "name": first_event,
                         "kind": 1,  # SPAN_KIND_INTERNAL
                         "startTimeUnixNano": str(start),
                         "endTimeUnixNano": str(

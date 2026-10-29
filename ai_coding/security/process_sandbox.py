@@ -216,8 +216,9 @@ class SandboxGap(Exception):
 
     ``reason`` is a **stable** code (``"bwrap.unavailable"``,
     ``"sandbox.backend.missing"``).  The catch sites in ``bash_tool`` and
-    ``core/jobs`` turn it into a denial; the code is what an operator reads in a
-    log or a panel, so it must not be a free-form sentence.
+    ``core/jobs`` turn it into ``ToolResult.error = "sandbox_unavailable"``
+    (A-4: an environment failure, not a refusal); the code is what an operator
+    reads in a log or a panel, so it must not be a free-form sentence.
     """
 
     def __init__(self, reason: str) -> None:
@@ -402,7 +403,8 @@ def spawn_argv(
     Fail-closed, in both directions a mechanism can fail:
 
     * ``enforce`` with no mechanism raises :class:`SandboxGap`; the callers
-      catch it and answer ``denied``.
+      catch it and answer ``sandbox_unavailable`` (A-4: the mechanism is
+      missing, nobody refused anything).
     * ``enforce`` with a mechanism that answers "available" but then declines
       to wrap (``wrap()`` returns ``None``) raises too -- a silent pass here
       would run the command with no isolation at all.

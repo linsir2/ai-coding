@@ -34,7 +34,13 @@ export function DialogHelp() {
         </text>
         <text fg={theme.textMuted}>esc</text>
       </box>
-      <scrollbox flexShrink={1} maxHeight={Math.max(3, Math.floor(dimensions().height / 2) - 6)}>
+      {/* paddingRight: the scrollbox's own scrollbar occupies the last column,
+          and without this the shortcut column ran flush into it (R20b). */}
+      <scrollbox
+        flexShrink={1}
+        paddingRight={1}
+        maxHeight={Math.max(3, Math.floor(dimensions().height / 2) - 6)}
+      >
         <For each={groups()}>
           {(group) => (
             <box flexDirection="column" paddingTop={1}>

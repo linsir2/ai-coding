@@ -72,7 +72,9 @@ async def test_fiat_completions_get_unattested_receipts():
     assert by_id["3"].attested is False and by_id["3"].attempts == 0
     assert "分步之外" in by_id["2"].summary
     assert report.completed == ["1", "2", "3"]
-    assert "分步外完成" in report.render()
+    # R21 §4: the headline counts all three (the card says Todos 3/3) and the
+    # qualifier keeps the provenance.
+    assert "完成 3 步（其中 2 步未经分步验收）" in report.render()
 
 
 @pytest.mark.asyncio
@@ -115,6 +117,26 @@ async def test_stalled_run_still_receipts_fiat_siblings():
 
 
 @pytest.mark.asyncio
+async def test_a_mixed_run_says_how_many_steps_were_settled():
+    """R21 §4: one step settled, one already done -- the headline counted 1.
+
+    The card beside it said ``Todos 2/2`` and the line below said
+    ``已完成：1, 2``, so the sentence read as a contradiction even though every
+    number was individually right.
+    """
+    session = _session_with("one", "two")
+    session.task.items[1].status = "completed"  # done outside the step turn
+    report = await PlanRunner(_StubLoop(["complete"])).run(session)
+
+    rendered = report.render()
+    assert "完成 2 步（其中 1 步未经分步验收）" in rendered
+    done_line = next(
+        line for line in rendered.splitlines() if line.startswith("已完成：")
+    )
+    assert sorted(done_line.removeprefix("已完成：").split(", ")) == ["1", "2"]
+
+
+@pytest.mark.asyncio
 async def test_fiat_only_run_reports_zero_attested():
     """The screenshot case: everything already done, the run does no work."""
     session = _session_with("one", "two")
@@ -127,8 +149,9 @@ async def test_fiat_only_run_reports_zero_attested():
     assert report.turns_used == 0
     assert len(report.deliveries) == 2
     assert all(d.attested is False for d in report.deliveries)
-    assert "完成 0 步" in report.render()
-    assert "分步外完成" in report.render()
+    # R21 §4: zero turns, two done steps -- the sentence says both, so the
+    # screen cannot be read as "the run did two steps of work".
+    assert "完成 2 步（其中 2 步未经分步验收）· 用了 0 回合" in report.render()
 
 
 @pytest.mark.asyncio
@@ -137,7 +160,7 @@ async def test_clean_run_render_has_no_attestation_note():
     report = await PlanRunner(_StubLoop(["complete"])).run(session)
 
     assert report.completed == ["1"]
-    assert "分步外" not in report.render()
+    assert "未经分步验收" not in report.render()
 
 
 def test_old_receipt_without_attested_defaults_true():

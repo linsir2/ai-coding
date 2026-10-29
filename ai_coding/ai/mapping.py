@@ -19,7 +19,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from ai_coding.domain.message import ChatMessage, ImageRef, ToolCallRef
+from ai_coding.domain.message import (
+    ChatMessage,
+    ImageRef,
+    ToolCallRef,
+    normalize_arguments,
+)
 
 #: Turns one message image into a data URL, or None when it cannot be read
 #: (r17/T5).  The caller that owns the workspace supplies it for a call, so
@@ -28,11 +33,18 @@ ImageLoader = Callable[[ImageRef], str | None]
 
 
 def tool_call_to_dict(ref: ToolCallRef) -> dict[str, Any]:
-    """Map one domain tool-call reference onto OpenAI's function-call shape."""
+    """Map one domain tool-call reference onto OpenAI's function-call shape.
+
+    ``arguments`` is repaired here rather than upstream because this is the last
+    point before the provider sees it: a truncated string (``max_tokens`` cut a
+    ``write`` mid-JSON) makes the *entire* later request a 400, so one bad step
+    poisons the whole session (R21 §10).  The call itself was already refused by
+    the dispatcher; this only keeps the history sendable.
+    """
     return {
         "id": ref.id,
         "type": "function",
-        "function": {"name": ref.name, "arguments": ref.arguments or "{}"},
+        "function": {"name": ref.name, "arguments": normalize_arguments(ref.arguments)},
     }
 
 

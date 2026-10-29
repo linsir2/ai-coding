@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from ai_coding.core.dispatch import ToolDispatcher
+from ai_coding.core.events import RecordingObserver, ToolFinished
 from ai_coding.domain.message import ToolCallRef, ToolResult
 from ai_coding.infra.deadline import Deadline
 from ai_coding.security.approval import (
@@ -109,6 +110,22 @@ async def test_an_expired_approval_does_not_halt_the_turn():
     )
     assert outcomes[0].halted is False
     assert outcomes[0].denied is True
+
+
+async def test_a10_a_timed_out_wait_is_reported_even_though_the_call_never_ran():
+    observer = RecordingObserver()
+    dispatcher = _dispatcher(_SlowApproval(5.0), approval_timeout=0.5, observer=observer)
+    await dispatcher.dispatch_batch(_CALL, ToolContext(workspace="."))
+    finished = observer.of_type(ToolFinished)[0]
+    assert finished.approval_ms >= 400
+    assert finished.duration_ms >= finished.approval_ms
+
+
+async def test_a10_a_timed_out_prompt_names_the_budget_it_was_given():
+    """The message must quote 0.5s, not the ~0 left after the wait."""
+    dispatcher = _dispatcher(_SlowApproval(5.0), approval_timeout=0.5)
+    outcomes = await dispatcher.dispatch_batch(_CALL, ToolContext(workspace="."))
+    assert "within 0.5s" in outcomes[0].result.output
 
 
 async def test_a_configured_approval_timeout_bounds_a_turn_without_a_clock():

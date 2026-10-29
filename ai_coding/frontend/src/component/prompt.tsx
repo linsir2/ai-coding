@@ -42,7 +42,7 @@ import type { MentionOption } from "../util/mention"
 import { ComposerMeta } from "./composer-meta"
 import { filterMentions, mentionQuery, replaceMentionToken } from "../util/mention"
 import type { SlashCommand } from "../util/slash"
-import { filterSlashCommands, slashQuery, slashSelectionText } from "../util/slash"
+import { filterSlashCommands, ownCommand, slashQuery, slashSelectionText } from "../util/slash"
 
 /** One row of the suggestion list: `/command` or `@skill`. */
 interface Suggestion {
@@ -371,6 +371,18 @@ export function Prompt(props: PromptProps) {
     const text = messageText.trim()
     if (!text && images.length === 0) return
     setSuggestions([])
+    // R20b: a typed line that names one of this TUI's own commands runs that
+    // command, exactly as picking it from the palette would.  The backend never
+    // heard of /models, /sessions, /new or /mcp, so before this they were
+    // submitted as ordinary prose and the model answered a slash line.
+    const own = ownCommand(text)
+    if (own) {
+      input?.setText("")
+      setImagesByToken({})
+      setHint("")
+      keymap.runCommand(own.command!)
+      return
+    }
     // A string is a refusal with a reason (r18/F14: a command sent no images,
     // so the composer keeps them and says so); false is the busy refusal.
     const refused = props.onSubmit(text, images)

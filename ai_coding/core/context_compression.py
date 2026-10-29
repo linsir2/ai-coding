@@ -80,6 +80,33 @@ def _is_cjk(ch: str) -> bool:
     return (0x4E00 <= o <= 0x9FFF) or (0x3400 <= o <= 0x4DBF) or (0xF900 <= o <= 0xFAFF)
 
 
+def chars_for_tokens(text: str, budget: int) -> int:
+    """How many leading characters of ``text`` fit in ``budget`` tokens.
+
+    The exact inverse of :func:`estimate_tokens` for a prefix: the scan counts
+    the same two classes and stops at the first character that would exceed the
+    budget, so it is one pass over what it returns and never over the whole
+    file.  Used by the referenced-file block, which has to turn a token budget
+    into a character cut without assuming ASCII (4 chars/token would admit twice
+    the window's worth of Chinese).
+
+    Returns ``len(text)`` when the whole text fits, so callers can tell "fits"
+    from "truncated" without a second measurement.
+    """
+    if budget <= 0 or not text:
+        return 0
+    cjk = 0
+    other = 0
+    for index, ch in enumerate(text):
+        if _is_cjk(ch):
+            cjk += 1
+        else:
+            other += 1
+        if math.ceil(cjk / 2) + math.ceil(other / 4) > budget:
+            return index
+    return len(text)
+
+
 def compaction_ceiling(window: int) -> int:
     """The usage level at which compaction is due (OpenCode parity).
 
@@ -844,6 +871,17 @@ class ContextManager:
         # L3 triggers at (roughly) half the context budget, mirroring the Java
         # rule.  Derived by the ``_max_context_tokens`` setter above, so a
         # switch to a smaller model moves the threshold with the window.
+
+    @property
+    def max_context_tokens(self) -> int:
+        """The window this pipeline compacts against, read-only (R22/H10).
+
+        ``_max_context_tokens`` is the writable contract ``/model`` repoints;
+        this is the name other modules may read without reaching for the
+        underscore one.  The referenced-file block sizes itself from this number,
+        because it is the only window that cannot disagree with the compactor.
+        """
+        return self._context_tokens
 
     @property
     def _max_context_tokens(self) -> int:

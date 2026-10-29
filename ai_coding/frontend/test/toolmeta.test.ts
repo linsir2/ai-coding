@@ -9,6 +9,7 @@ import { describe, expect, test } from "bun:test"
 import {
   foldToolChunk,
   formatDuration,
+  formatToolDuration,
   toolFailure,
   toolTarget,
   toolTitle,
@@ -129,6 +130,9 @@ describe("toolFailure", () => {
       ["task_busy", "任务运行中"],
       // R08: keep planning is the user's revision request, not breakage.
       ["plan_keep", "评审要求继续规划"],
+      // R21 §3: a plan-step turn has no running goal, so update_goal there is
+      // misplaced rather than an unknown cause.
+      ["no_goal", "无运行中的目标"],
     ]
     for (const [code, label] of denied) {
       expect(toolFailure(code)).toEqual({ label, tone: "denied" })
@@ -167,6 +171,35 @@ describe("formatDuration", () => {
     expect(formatDuration(820)).toBe("820ms")
     expect(formatDuration(1500)).toBe("1.5s")
     expect(formatDuration(125000)).toBe("2m 5s")
+  })
+})
+
+describe("toolFailure", () => {
+  test("a sandbox that cannot run is an environment failure, not a refusal (A-4)", () => {
+    expect(toolFailure("sandbox_unavailable")).toEqual({
+      label: "沙箱不可用（命令未执行）",
+      tone: "failed",
+    })
+    // A real refusal keeps its own words and its own tone.
+    expect(toolFailure("denied")).toEqual({ label: "被拒绝", tone: "denied" })
+  })
+})
+
+describe("formatToolDuration", () => {
+  test("names the approval wait when a human dominated the call (A-10)", () => {
+    expect(formatToolDuration(28_900, 28_500)).toBe("28.9s（审批 28.5s）")
+  })
+
+  test("a short wait or a minor share stays out of the row", () => {
+    expect(formatToolDuration(820, 0)).toBe("820ms")
+    expect(formatToolDuration(1500, 900)).toBe("1.5s")
+    // 8% of the call: the wait is not what the reader is wondering about.
+    expect(formatToolDuration(50_000, 4_000)).toBe("50.0s")
+  })
+
+  test("a bogus wait is clamped to the total", () => {
+    expect(formatToolDuration(1500, 9000)).toBe("1.5s（审批 1.5s）")
+    expect(formatToolDuration(1500, -1)).toBe("1.5s")
   })
 })
 

@@ -24,11 +24,22 @@ from typing import Any
 from ai_coding.domain.message import ToolResult
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
-__all__ = ["StartGoalTool", "UpdateGoalTool"]
+__all__ = ["StartGoalTool", "UpdateGoalTool", "GOAL_TOOL_NAMES"]
+
+#: The tools that exist only for a *running goal*.  A plan step turn has none
+#: (``armed_profile == "plan"``), so advertising them there invites a call that
+#: can only be refused as ``no_goal`` (R21 §3).  One table, two readers: the
+#: loop's tool surface and the prompt's methods section read the same set.
+GOAL_TOOL_NAMES = frozenset({"start_goal", "update_goal"})
 
 #: dsh's `blockedAfterConsecutiveRounds` (packages/goal/tool-goal/src/index.ts:39)
 #: and Codex's continuation.md agree on 3; kept as one named number.
 BLOCKED_MIN_ROUNDS = 3
+
+#: A-14: how many closed items the receipt names before summarising.  The same
+#: number the task gate lists (``interventions.NUDGE_ITEM_LIMIT``); kept local
+#: so the tool layer does not import the orchestration layer.
+CLOSE_NOTICE_LIMIT = 10
 
 STARTED = (
     "已立案：目标为「{objective}」。本回合结束后系统会自行开第一轮，"
@@ -196,12 +207,43 @@ class UpdateGoalTool(BaseTool):
                     data={"roundsRun": task.rounds_run},
                 )
         task.goal_phase = status
+        closed: list[dict[str, str]] = []
         if status == "complete":
-            output = "已记录 complete：本轮做收尾说明即可，系统将在本轮结束后停下。"
+            # A-14: the goal is done, so anything still open belongs to an
+            # earlier shape of the work (or is work the model gave up on).
+            # Left open, the task gate keeps pushing it -- measured S4: a stale
+            # "add type hints" item drove a finished goal into all ten
+            # iterations -- and the injected <task-state> contradicts the
+            # model's own claim.  Dropped, not completed: nobody did it.
+            #
+            # ``blocked`` items are closed too: "this step cannot be done" is
+            # moot once the objective is declared done, and leaving them open
+            # would keep the same gate firing.
+            closed = [
+                {"id": item.id, "content": item.content, "from": item.status}
+                for item in task.items
+                if not item.is_terminal()
+            ]
+            for entry in closed:
+                task.update(entry["id"], status="dropped")
+            lines = [
+                f"- {entry['id']}. {entry['content']}（原 {entry['from']}）"
+                for entry in closed[:CLOSE_NOTICE_LIMIT]
+            ]
+            if len(closed) > CLOSE_NOTICE_LIMIT:
+                lines.append(f"…另有 {len(closed) - CLOSE_NOTICE_LIMIT} 项")
+            note = (
+                "\n未完成项已标为 dropped（目标已申报完成）：\n" + "\n".join(lines)
+                if closed
+                else ""
+            )
+            output = (
+                "已记录 complete：本轮做收尾说明即可，系统将在本轮结束后停下。"
+                f"{note}"
+            )
         else:
             output = "已记录 blocked：本轮做收尾说明即可，系统将在本轮结束后停下。"
-        return ToolResult(
-            success=True,
-            output=output,
-            data={"status": status, "roundsRun": task.rounds_run},
-        )
+        data: dict[str, Any] = {"status": status, "roundsRun": task.rounds_run}
+        if closed:
+            data["closedItems"] = closed
+        return ToolResult(success=True, output=output, data=data)

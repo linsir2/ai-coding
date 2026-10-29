@@ -322,7 +322,7 @@ OTLP-JSON 摄入口。**本轮不发 HTTP**（D-R9-5 拍板后可能加 `--endpo
 | `session` | `resource.attributes["ai-coding.session"]` | 一个会话一个 `resourceSpans`，`service.name="ai-coding"` |
 | `turn` | `spans[].attributes["ai-coding.turn"]` | 也用于 `traceId` 的确定性生成 |
 | `span` / `parent` | `spanId` / `parentSpanId` | 由 `sha256(session|turn|span)` 截断而成；`turn` 作为根 span 没有 parent |
-| `evt` | `name` | 事件名就是 span 名（`IterationStarted` / `ModelStepFinished` / `ToolFinished` …） |
+| `evt` | `name` | 事件名就是 span 名：按 `span` 分组后取该 span **ts 最早**的事件名（tie 按写入顺序；`IterationStarted` / `ModelStepFinished` / `ToolStarted` / `TurnFinished`）；整串事件在 `ai-coding.events` 属性（A-13 之前误把整串拼进了 `name`） |
 | `ts` | `startTimeUnixNano` | ISO-8601 → 纳秒 |
 | `data.latency_ms` / `data.duration_ms` | `endTimeUnixNano = start + 时长` | 没有时长的事件标 `ai-coding.instant=true`，`end = start + 1ns` |
 | `data.*`（扁平） | `attributes` | `stringValue` / `intValue` / `boolValue` / `doubleValue`；嵌套值降级为 JSON 字符串 |
