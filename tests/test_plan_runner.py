@@ -69,6 +69,10 @@ class _StubLoop:
         action = self._script.pop(0) if self._script else "complete"
         if action == "complete":
             for item in session.task.open_items():
+                # A blocked item is open but not claimable: the model's "done"
+                # must land on the item it actually worked on.
+                if item.status == "blocked":
+                    continue
                 if not item.is_terminal():
                     item.status = "completed"
                     break
@@ -85,8 +89,8 @@ class _StubLoop:
         return "step done"
 
 
-def test_config_defaults_step_budget_to_eight():
-    assert AIConfig().plan_step_max_iterations == 8
+def test_config_defaults_step_budget_to_sixty():
+    assert AIConfig().plan_step_max_iterations == 60
 
 
 def test_step_delivery_round_trips_through_the_session():
@@ -229,6 +233,25 @@ async def test_verify_failure_triggers_one_repair_run_then_blocks():
     assert "245" in (session.task.items[0].evidence or "")
     assert report.deliveries[0].status == "blocked"
     assert report.deliveries[0].attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_step_does_not_stop_independent_steps():
+    """r22: one failed proof used to end the whole run.
+
+    The measured hotel plan verified one step with a wrong path, blocked it,
+    and stopped — steps that never depended on it were never touched.  The
+    run now records the block and continues with the ready items.
+    """
+    session = _session_with("first", "second", verifies=["pytest -q"])
+    loop = _StubLoop(["verify-fail", "verify-fail", "complete"])
+    report = await PlanRunner(loop).run(session)
+
+    assert report.blocked == ["1"]
+    assert report.completed == ["2"]
+    assert len(loop.calls) == 3
+    assert session.task.items[0].status == "blocked"
+    assert session.task.items[1].status == "completed"
 
 
 @pytest.mark.asyncio

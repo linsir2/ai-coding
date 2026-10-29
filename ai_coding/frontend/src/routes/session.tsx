@@ -564,6 +564,16 @@ export function Session(props: SessionProps) {
   // The suggestion lists seed the composer (e.g. ``@skill``); the seed lands
   // the text in the textarea and focuses it.
   const [promptSeed, setPromptSeed] = createSignal("")
+  // r22: the draft mirror.  A permission / ask card replaces the composer, so
+  // the textarea is unmounted while it is up; this signal is what brings the
+  // operator's text back when the card closes.
+  const [draft, setDraft] = createSignal("")
+  let cardWasOpen = cardOpen()
+  createEffect(() => {
+    const open = cardOpen()
+    if (cardWasOpen && !open && draft()) setPromptSeed(draft())
+    cardWasOpen = open
+  })
 
     onMount(() => {
     // The posture lands first: stats.agent hydrates SessionState.agent and
@@ -874,29 +884,33 @@ export function Session(props: SessionProps) {
           <Show when={state.queued.length > 0}>
             <text fg={theme.textMuted}>{`${state.queued.length} queued`}</text>
           </Show>
-          <Prompt
-            // D4: a card no longer unmounts the composer -- the draft stays,
-            // the card owns the keyboard, and shift+tab still cycles.
-            disabled={cardOpen()}
-            placeholder={
-              editingInboxId() !== null
-                ? "编辑排队输入…（回车保存）"
-                : state.busy
-                  ? "Working…"
-                  : "Ask anything…"
-            }
-            metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
-            agent={currentAgent()}
-            agentName={agentName(currentAgent())}
-            mode={currentMode()}
-            readonly={currentReadonly()}
-            onSubmit={submit}
-            onOverlay={setSuggesting}
-            seed={promptSeed()}
-            onSeedDone={() => setPromptSeed("")}
-            skills={props.skills}
-            files={props.files}
-          />
+          <Show when={!cardOpen()}>
+            <Prompt
+              // r22: a card owns this slot, not a second box above it.  The
+              // permission / ask panel takes the composer's place (same bottom
+              // position, no stacked double panel) and the draft is restored
+              // by `draft` -> `promptSeed` when it closes.
+              placeholder={
+                editingInboxId() !== null
+                  ? "编辑排队输入…（回车保存）"
+                  : state.busy
+                    ? "Working…"
+                    : "Ask anything…"
+              }
+              metadata={`${[props.provider, props.model].filter(Boolean).join(" · ") || "no model"}${state.busy ? " · working" : ""}`}
+              agent={currentAgent()}
+              agentName={agentName(currentAgent())}
+              mode={currentMode()}
+              readonly={currentReadonly()}
+              onSubmit={submit}
+              onOverlay={setSuggesting}
+              seed={promptSeed()}
+              onSeedDone={() => setPromptSeed("")}
+              onDraft={setDraft}
+              skills={props.skills}
+              files={props.files}
+            />
+          </Show>
         </box>
         </box>
         <Show when={dimensions().width >= 100}>

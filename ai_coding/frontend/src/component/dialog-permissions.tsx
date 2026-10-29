@@ -21,10 +21,12 @@ import type { GrantRecord, PermissionsState } from "../util/permissions-dialog"
 import {
   RESET_SESSION_COMMAND,
   grantLine,
+  layerSummary,
   moveGrantCursor,
   policyLabel,
   revokeGrantCommand,
   ruleLine,
+  shortStorePath,
   toggleCommand,
 } from "../util/permissions-dialog"
 export function DialogPermissions(props: { client: IpcClient; liveSessionId: string }) {
@@ -130,57 +132,56 @@ export function DialogPermissions(props: { client: IpcClient; liveSessionId: str
             <Show when={state().rules}>
               {(rules) => (
                 <>
-                  <text fg={theme.textMuted}>
-                    {Object.entries(rules().layers)
-                      .map(([layer, count]) => `${layer} ${count}`)
-                      .join(" · ")}
-                  </text>
-                  <For each={rules().session}>
-                    {(rule) => (
-                      <box flexDirection="row" justifyContent="space-between">
-                        <text fg={theme.textMuted}>{"  session"}</text>
-                        <text fg={theme.textBase}>{ruleLine(rule)}</text>
-                      </box>
-                    )}
-                  </For>
+                  {/* A4 follow-up: one readable line, not the raw layer table
+                      with zeros ("base 83 · standing 0 · agent 7 · …"). */}
+                  <box flexDirection="row" justifyContent="space-between">
+                    <text fg={theme.textMuted}>Rules</text>
+                    <text fg={theme.textBase}>{layerSummary(rules().layers)}</text>
+                  </box>
+                  <Show when={rules().session.length > 0}>
+                    <text fg={theme.textMuted}>  this session</text>
+                    <For each={rules().session}>
+                      {(rule) => (
+                        <box flexDirection="row" justifyContent="space-between">
+                          <text fg={theme.textMuted}>{"  "}</text>
+                          <text fg={theme.textBase}>{ruleLine(rule)}</text>
+                        </box>
+                      )}
+                    </For>
+                  </Show>
                   <For each={rules().errors}>
                     {(error) => <text fg={theme.textMuted}>{`  ! ${error}`}</text>}
                   </For>
                 </>
               )}
             </Show>
-            <For each={state().grants.length > 0 ? state().grants : [{ key: "", expiresAt: null }]}>
+            <text fg={theme.textMuted}>{`Remembered  ${grants().length}`}</text>
+            <For each={grants()}>
               {(grant, index) => (
-                <box flexDirection="row" justifyContent="space-between">
-                  <text fg={theme.textMuted}>{"  remembered"}</text>
-                  <text fg={index() === cursor() ? theme.textBase : theme.textMuted}>
-                    {index() === cursor() && grant.key ? "▸ " : "  "}
-                    {grantLine(grant)}
-                  </text>
-                </box>
+                <text fg={index() === cursor() ? theme.textBase : theme.textMuted}>
+                  {`  ${index() === cursor() ? "▸" : " "} ${grantLine(grant)}`}
+                </text>
               )}
             </For>
+            <Show when={grants().length === 0}>
+              <text fg={theme.textMuted}>{"  none yet — Allow always adds one"}</text>
+            </Show>
             <Show when={state().onceGrants.length > 0}>
+              <text fg={theme.textMuted}>{`Once  ${state().onceGrants.length}`}</text>
               <For each={state().onceGrants}>
                 {(grant) => (
-                  <box flexDirection="row" justifyContent="space-between">
-                    <text fg={theme.textMuted}>{"  once"}</text>
-                    <text fg={theme.textBase}>{grantLine({ key: grant, expiresAt: null })}</text>
-                  </box>
+                  <text fg={theme.textMuted}>{`    ${grantLine({ key: grant, expiresAt: null })}`}</text>
                 )}
               </For>
             </Show>
             <Show when={state().storePath}>
-              <box flexDirection="row" justifyContent="space-between">
-                <text fg={theme.textMuted}>{"  store"}</text>
-                <text fg={theme.textBase}>{state().storePath}</text>
-              </box>
+              <text fg={theme.textMuted}>{`Storage  ${shortStorePath(state().storePath)}`}</text>
             </Show>
           </>
         )}
       </Show>
       <text fg={theme.textMuted}>
-        {error() || "↑↓ pick a grant · x revoke it · p switch policy · c forget grants · r reset session rules · esc close"}
+        {error() || "↑↓ grant · x revoke · p policy · c forget · r reset · esc close"}
       </text>
     </box>
   )

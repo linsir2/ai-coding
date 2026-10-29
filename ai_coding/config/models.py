@@ -340,7 +340,14 @@ class AIConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     auto_process_tool_results: bool = True
-    max_tool_iterations: int = 10
+    #: Per-turn tool-call ceiling.  Raised from 10 to 100 in r22: 10 ended real
+    #: work mid-step ("budget exhausted, type continue"), which is not how the
+    #: assistants this project is measured against behave.  Claude Code, Codex
+    #: and OpenCode have no default iteration cap at all -- their loop ends when
+    #: the model stops calling tools, and auto-compaction carries long turns.
+    #: 100 keeps a hard bound for a runaway loop while clearing any real task;
+    #: the clock, token budget and ladder guards are still the safety net.
+    max_tool_iterations: int = 100
     #: B1/B2: consecutive look-only calls before the `[search-gate]` ladder speaks.
     #: 0 disables it.  Clamped at 0 because a negative value would make every
     #: iteration fire a nudge and leave the model no step to act in.
@@ -356,7 +363,7 @@ class AIConfig(BaseModel):
     search_streak_l3: int = Field(default=0, ge=0)
     #: B1: what the harness runs itself when the turn stalls in look-only mode.
     static_check: StaticCheckConfig = Field(default_factory=StaticCheckConfig)
-    max_concurrent_subagents: int = 3
+    max_concurrent_subagents: int = 6
     subagent_worktree_isolation: bool = True
     max_context_tokens: int = 0
     # R3b: demoted from "trim every turn at 50 messages" to "fallback cap used
@@ -390,7 +397,11 @@ class AIConfig(BaseModel):
     # ---- R1a orchestration (docs/r1-analysis.md) --------------------------
     # How a turn is allowed to end.  "todo_aware" gates the stop on open items.
     stop_policy: Literal["natural", "todo_aware", "strict"] = "todo_aware"
-    max_todo_nudges: int = 2
+    #: How many "your list still has open items" nudges one turn may receive.
+    #: Raised from 2 to 10 in r22: a model that closes one item and stops was
+    #: handing the operator a dead turn every few minutes.  The cap still keeps
+    #: a list nobody is working on from nudging forever.
+    max_todo_nudges: int = 10
     # R9a: refuse to start/finish an item whose depends_on is unmet, and refuse
     # to create a dependency on a missing or self id.  Off = the R1 behaviour,
     # which exists for legacy lists only (docs/r9-analysis.md D-R9-3).
@@ -414,7 +425,7 @@ class AIConfig(BaseModel):
     # turn clock bounds it" — a slow human is not a refusal, but a turn with a
     # clock must still be able to end.
     approval_timeout_seconds: float = 0.0
-    subagent_timeout_seconds: int = 600
+    subagent_timeout_seconds: int = 1200
     # R7e-4: how much of the parent a sub-agent starts with.  "full" is the R1a-5
     # behaviour (the parent's request view + system prompt); "task_only" gives it a
     # clean window and the composition root's base instructions instead, which is
@@ -435,22 +446,28 @@ class AIConfig(BaseModel):
     # R2a: wall-clock ceiling for one user turn.  Iteration counts cannot bound a
     # call that never returns, so any stuck step or tool must still end the turn.
     # Includes time spent waiting for a human approval prompt; 0 disables it.
-    turn_timeout_seconds: float = 600.0
-    # R1-1: iteration ceiling for one plan-runner step.  Measured: simple steps
-    # close in 5-7 iterations; 8 leaves headroom without funding a wander.
-    plan_step_max_iterations: int = 8
+    # Raised from 600s to 1800s in r22: a plan step that writes a package can
+    # legitimately take longer than ten minutes, and the measured hotel session
+    # was cut by this clock as well as by the iteration cap.
+    turn_timeout_seconds: float = 1800.0
+    # R1-1: iteration ceiling for one plan-runner step.  Raised from 8 to 60 in
+    # r22: 8 was measured on "simple steps close in 5-7 iterations", but a step
+    # that writes several files (a models package, a router set) needs far more
+    # than 7, and the measured hotel session died at 8/8 with four files still
+    # unwritten ("本轮预算有限").  60 clears a real step; the clock, acceptance
+    # gate and runner's one repair pass are still the guards.
+    plan_step_max_iterations: int = 60
     # C3: when a normal turn's iteration budget dies with todo items still
     # open, the loop injects a continuation prompt and starts a fresh round
     # instead of stopping.  0 disables.  The cap keeps a model that never
     # closes its items from running forever.  Fires regardless of stop_policy.
     max_auto_continuations: int = 3
-    # R1-4: turn ceiling for one /plan-run.  Steps are bounded but the run was
-    # not — a plan that keeps "completing" spent steps x (1-2) turns with no
-    # cap, and each process_input starts a FRESH wall-clock deadline
-    # (AgentLoop._begin_turn), so wall-clock was unbounded too.  One knob
-    # bounds all three: turns directly, tokens via turns x step-iterations x
-    # max_tokens, wall-clock via turns x turn_timeout_seconds.  0 disables.
-    plan_max_step_turns: int = 20
+    # R1-4: turn ceiling for one /plan-run.  0 (the r22 default) means "no run
+    # cap": the measured hotel plan had 23 steps and the old 20-turn ceiling
+    # stopped it with steps 21-23 untouched ("budget: plan turn budget
+    # exhausted").  Each step is already bounded, and the run ends on
+    # done/deadlock; an operator who wants a ceiling can still set one.
+    plan_max_step_turns: int = 0
     # D-4: episode-wide round ceiling for one armed goal; 0 disables.  Was a
     # phantom until 2026-10-17: the runner read it duck-typed while this class
     # had no such field, and `extra="ignore"` swallowed any yaml key for it.

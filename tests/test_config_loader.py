@@ -33,7 +33,7 @@ def test_load_returns_defaults_on_none(no_config):
     # window the policy and the meter will use, and an undeclared model must
     # still resolve to the conservative default rather than an invented large one.
     assert resolve_context_window(app) == 48_000
-    assert app.ai.max_tool_iterations == 10
+    assert app.ai.max_tool_iterations == 100
 
 
 def test_load_from_yaml_file_overrides(tmp_path):

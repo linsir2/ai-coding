@@ -130,8 +130,8 @@ mcp:               # MCPConfig（默认关闭）
 | `per_result_persist_bytes` | 30000 | L3 单结果持久化阈值 |
 | `l4_tail_tokens` | 15000 | L4 摘要保留尾部的 **token 预算**（有效值 `min(l4_tail_tokens, window//4)`，吸附到 user 边界）。~~`l4_keep_tail`（条数）~~ 已删除——条数既约束不了成本也约束不了覆盖 |
 | `auto_process_tool_results` | true | 是否自动执行工具结果回喂 |
-| `max_tool_iterations` | 10 | 单回合工具循环上限 |
-| `max_concurrent_subagents` | 3 | 子代理并发上限 |
+| `max_tool_iterations` | 100 | 单回合工具循环上限（r22：10 → 100；Claude Code/Codex/OpenCode 默认无上限，这里保留硬边界） |
+| `max_concurrent_subagents` | 6 | 子代理并发上限（r22：3 → 6） |
 | `subagent_worktree_isolation` | true | 子代理是否 worktree 隔离 |
 
 `MemoryConfig`：`enabled`, `auto_extract`, `consolidate_threshold=10`, `max_index_entries=200`, `max_per_turn_injections=3`（R3 起：这是 `memory_search` 每次返回的条数上限）。
@@ -258,15 +258,15 @@ A-10 给 `ToolFinished` 追加 `approval_ms: int = 0`（在 `duration_ms` 之后
 | 参数 | 默认 | 作用 |
 |---|---|---|
 | `stop_policy` | `"todo_aware"` | `natural` / `todo_aware` / `strict` |
-| `max_todo_nudges` | `2` | todo 门禁最多提醒次数 |
+| `max_todo_nudges` | `10` | todo 门禁最多提醒次数（r22：2 → 10，模型每完成一项就停不再变成死回合） |
 | `task_injection` | `"message"` | `message`（易失末尾消息）/ `system`（并入指令） |
 | `max_concurrent_tools` | `4` | 同批工具并发上限 |
-| `subagent_timeout_seconds` | `600` | 子智能体超时（超时是一种 `status`，不是异常） |
+| `subagent_timeout_seconds` | `1200` | 子智能体超时（超时是一种 `status`，不是异常） |
 | `max_result_data_bytes` | `8000` | 结构化工具结果上限 |
 | `max_subagent_conclusion_chars` | `4000` | 子智能体结论截断（全文只进 ledger） |
 | `stream_usage` | `true` | 是否请求 `stream_options.include_usage` |
 | `persist_checkpoint_messages` | `200` | 超过此条数后，回合内落盘按步长（每 3 轮）节流 |
-| `turn_timeout_seconds` | `600.0` | **回合墙钟上限**（R2）：到期 → `TurnStatus.TIMEOUT`，保留已产出文本与轨迹；`0` 关闭。含人工审批等待时间 |
+| `turn_timeout_seconds` | `1800.0` | **回合墙钟上限**（R2）：到期 → `TurnStatus.TIMEOUT`，保留已产出文本与轨迹；`0` 关闭。含人工审批等待时间（r22：600 → 1800） |
 | `max_auto_continuations` | `3` | **C3**：正常回合迭代预算耗尽且 todo 仍有 open 项时，注入 `[continue]` 提示并**重新武装迭代预算**（新一轮 `max_tool_iterations`），最多 N 次；`0` 关闭。不受 `stop_policy` 影响；每用户回合重置。**`blocked` 项不算未完成**：blocked 是「这一步现在做不了」（模型放弃或验收否决），与 C3「模型自己的活没干完」的前提相反；过滤只发生在 policy 的判定里，`open_items()` 仍把 blocked 视为 open（runner 下次 `/plan` 要重试它）。实测：单个 blocked 项从 6 次模型调用 / 3 次续跑降到 2 次 / 0 次。token 预算耗尽优先判终态（不白烧续跑额度）。plan-runner 步内强制 `0`（一步一个有界回合，共享计划 task 不能让单步续跑） |
 
 ### 回合终态（`domain/loop.py`）
@@ -362,7 +362,7 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `StepDelivery`（`domain/plan_delivery.py`） | `stepId`、`statement`、`status`（completed/blocked/stalled）、`attempts`、`ac`（[{id, passed}]）、`summary`、`turns`、`usage`（R1-4）、`attested`（R1-5）、`seedChars`（M1，该步 seed 字符数；fiat 回填为 0，缺键或旧 snake_case 键读 0） | 一步的收据；`SessionData.step_deliveries`，仅非空落盘；老收据无新键照读默认值 |
 | `PlanReport`（`core/plan_runner.py`） | `turns_used`（本轮 `process_input` 次数）、`tokens_used`（求和或 None）、`stopped` 新增 `budget:…` 值 | render 头行 `完成 n 步 · 用了 T 回合 [/ K tokens]`（R1-5b：n 只计 attested——本轮亲手结算的步；fiat 另列在下一行，`completed` 列表仍含全部 done id）；顶盖检查只在还有剩余工作时触发（正好用完跑完=干净结束） |
 | `StepDelivery.proof`（派生属性，R1-6，不落盘） | `verified`（completed+attested+ac 非空即全过）/`on-claim`（completed+attested+ac 空）/`fiat`（attested=False）/`n/a`（未完成） | 只读推导，无字段、无 `to/from_dict` 改动；老收据 retroactive 可分级；非法组合 fallback 到 on-claim（宁可标没证过，不标证过） |
-| `AIConfig.plan_step_max_iterations` | `int = 8` | plan-runner 单步迭代上限；runner 临时换 policy 副本（同时 `stop_policy=natural` 关 todo 门禁、`max_auto_continuations=0` 禁 C3），`finally` 恢复 |
+| `AIConfig.plan_step_max_iterations` | `int = 60` | plan-runner 单步迭代上限（r22：8 → 60；写多个文件的步骤不会再在 8/8 处停下）；runner 临时换 policy 副本（同时 `stop_policy=natural` 关 todo 门禁、`max_auto_continuations=0` 禁 C3），`finally` 恢复 |
 | M1 短对话契约 | 每步全新 `SessionData`（`plan-<uuid>`、`ephemeral=True`），seed = goal + 计划当前状态（只列未完成项）+ 本步验收；步骤全文留子 session，父只收 prompt + 一行摘要 + 收据 | 每步上下文只由计划决定、不再由对话长度决定（实测 4 回合 41k/82k/130k/254k → 每步平稳；seed 仍随未完成项数增长，全计划合计对步骤数仍是二次，8/16/32/64 步 seed 2.4k/8.8k/34k/132k 字符）；`/plan-run` 删除，`/plan` 计划并执行；步会话不落盘（`TurnCloser.save` 对 ephemeral 跳过），不污染 `/resume` |
 | `SessionData.ephemeral`（H1，不落盘） | `bool = False` | 内部会话旗标：正常 session 为 False；plan 步会话 True。`TurnCloser.save` 唯一持久化闸口处跳过（checkpoint/finalize 都走它） |
 | `SessionData.continuations`（C3，不落盘） | `int = 0` | 本用户回合已用的自动续跑次数；`_begin_turn` 归零，续跑分支 +1；`to_dict` 白名单不含它（跨重启无意义） |

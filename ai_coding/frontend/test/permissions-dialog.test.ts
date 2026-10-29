@@ -10,8 +10,10 @@ import { describe, expect, test } from "bun:test"
 import {
   policyLabel,
   grantLine,
+  layerSummary,
   moveGrantCursor,
   revokeGrantCommand,
+  shortStorePath,
   toggledPolicy,
   toggleCommand,
   ruleLine,
@@ -22,6 +24,35 @@ describe("policyLabel", () => {
   test("names the two policies the backend has (J1)", () => {
     expect(policyLabel("auto")).toBe("Auto-approve")
     expect(policyLabel("confirm")).toBe("Confirm each call")
+  })
+})
+
+describe("layerSummary", () => {
+  test("hides zero layers and glosses the internal names", () => {
+    expect(
+      layerSummary({ base: 83, standing: 0, agent: 7, user: 0, project: 0, session: 0, policy: 0 }),
+    ).toBe("83 built-in · 7 agent")
+  })
+
+  test("counts the session layer when it has rules", () => {
+    expect(layerSummary({ base: 83, session: 2 })).toBe("83 built-in · 2 session")
+  })
+
+  test("an empty policy says none instead of an empty line", () => {
+    expect(layerSummary({})).toBe("none")
+    expect(layerSummary({ base: 0 })).toBe("none")
+  })
+})
+
+describe("shortStorePath", () => {
+  test("turns the home prefix into ~ so the row fits", () => {
+    expect(shortStorePath("/home/me/.config/ai-coding/grants.json")).toBe(
+      "~/.config/ai-coding/grants.json",
+    )
+  })
+
+  test("leaves a path outside home alone", () => {
+    expect(shortStorePath("/tmp/grants.json")).toBe("/tmp/grants.json")
   })
 })
 

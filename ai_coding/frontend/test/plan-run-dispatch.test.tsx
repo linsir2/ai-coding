@@ -121,6 +121,25 @@ describe("plan auto-run dispatch (W2/R11)", () => {
     setup.renderer.destroy()
   })
 
+  test("a turn cut by the planning budget still runs its approved plan", async () => {
+    const { base, client, keymap, setup } = await _mount()
+
+    keymap.runCommand("plan-review.approve")
+    await setup.flush()
+    await setup.waitForVisualIdle()
+
+    // r22: a 23-step plan can be approved after the planning budget is gone.
+    // The plan exists and the task is armed; refusing the run stranded it.
+    client.emit("turn.finished", { status: "max_iterations", reason: "", iterations: 32 })
+    await setup.flush()
+
+    const commands = client.commands()
+    expect(commands.length).toBe(1)
+    expect(commands[0].params["text"]).toBe("/plan run")
+
+    setup.renderer.destroy()
+  })
+
   test("a turn that did not end cleanly does not start the run", async () => {
     const { base, client, keymap, setup } = await _mount()
 
@@ -128,7 +147,7 @@ describe("plan auto-run dispatch (W2/R11)", () => {
     await setup.flush()
     await setup.waitForVisualIdle()
 
-    for (const status of ["aborted", "error", "timeout", "budget", "max_iterations", "stopped"]) {
+    for (const status of ["aborted", "error", "timeout", "budget", "stopped"]) {
       client.emit("turn.finished", { status, reason: "", iterations: 1 })
       await setup.flush()
     }

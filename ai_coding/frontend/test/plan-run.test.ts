@@ -2,23 +2,22 @@ import { describe, expect, test } from "bun:test"
 import { shouldDispatchPlanRun } from "../src/util/plan-run"
 
 describe("shouldDispatchPlanRun", () => {
-  test("only a completed turn dispatches the run", () => {
+  test("an approved plan runs when its turn completed", () => {
     expect(shouldDispatchPlanRun(true, "completed")).toBe(true)
   })
 
+  test("an approved plan still runs when the planning budget was the ending", () => {
+    // r22: a large plan can be submitted and approved after the planning
+    // budget is gone; the plan exists and the task is armed, so refusing the
+    // run stranded an approved plan ("approved, then nothing").
+    expect(shouldDispatchPlanRun(true, "max_iterations")).toBe(true)
+  })
+
   test("a turn that did not end cleanly never dispatches the run", () => {
-    // The seven terminal statuses of a turn (server/domain/loop.py:16-25).
-    // Only "completed" means the turn reached a clean end; the rest left the
-    // session mid-flight, and dispatching a run on top of that is how a plan
-    // ends up executing against a state nobody looked at.
-    for (const status of [
-      "aborted",
-      "error",
-      "timeout",
-      "budget",
-      "max_iterations",
-      "stopped",
-    ]) {
+    // The remaining terminal statuses of a turn (server/domain/loop.py:16-25).
+    // They left the session mid-flight, and dispatching a run on top of that
+    // is how a plan ends up executing against a state nobody looked at.
+    for (const status of ["aborted", "error", "timeout", "budget", "stopped"]) {
       expect(shouldDispatchPlanRun(true, status)).toBe(false)
     }
   })

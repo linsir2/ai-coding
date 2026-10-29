@@ -35,7 +35,7 @@ from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.plan_runner import PLANNING_MAX_ITERATIONS, continuations_disabled
 from ai_coding.core.turn_books import TurnBooks
-from ai_coding.core.turn_policy import PLAN_NUDGE, PLAN_UNSUBMITTED_NOTE
+from ai_coding.core.turn_policy import PLAN_NUDGE, PLAN_UNSUBMITTED_NOTE, PLAN_WRAPUP_ROUNDS
 from ai_coding.domain.loop import StepResult, TurnStatus
 from ai_coding.domain.message import ToolCallRef, ToolResult
 from ai_coding.security.approval import AutoApproveCallback
@@ -43,9 +43,9 @@ from ai_coding.service.session_service import SessionService
 from ai_coding.tools.base import BaseTool
 from ai_coding.tools.registry import ToolRegistry
 
-#: The round the ask lands on: the exploration budget (16) minus the three
-#: rounds kept for handing something over.
-ASK_ROUND = 13
+#: The round the ask lands on: the exploration budget minus the three rounds
+#: kept for handing something over.
+ASK_ROUND = PLANNING_MAX_ITERATIONS - PLAN_WRAPUP_ROUNDS
 
 
 class _Peek(BaseTool):
@@ -261,18 +261,19 @@ async def test_an_ordinary_turn_is_never_asked_for_an_exit(tmp_path):
     """R6: outside the planning posture nothing changes.
 
     The ask belongs to the planning round: an ordinary turn runs on the
-    budget from the settings and is never asked for a plan -- not at round
-    13, not at any other round.
+    budget from the settings and is never asked for a plan -- not at the
+    planning ask round, not at any other round.  Its budget is set above the
+    ask round so the turn really does run past it.
     """
     engine = _ScriptedEngine([_tool_step(f"c{index}") for index in range(30)])
     sessions = SessionService(tmp_path / "sessions")
-    loop = _loop(engine, sessions, settings=AIConfig(max_tool_iterations=20))
+    loop = _loop(engine, sessions, settings=AIConfig(max_tool_iterations=40))
     session = sessions.create()
 
     await loop.process_input(session, "继续")
 
     assert _plan_nudges(session) == [], "an ordinary turn is never asked for a plan"
-    assert loop.policy.config.max_iterations == 20, (
+    assert loop.policy.config.max_iterations == 40, (
         "the ordinary budget still comes from the settings"
     )
     assert engine.calls >= ASK_ROUND, "the turn really did run past the ask round"

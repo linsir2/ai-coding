@@ -94,10 +94,17 @@ export interface PromptProps {
   onOverlay?: (visible: boolean) => void
   /**
    * Text to drop into the composer (then clear), e.g. the ``@skill`` seeds
-   * the skill/mention lists leave behind.
+   * the skill/mention lists leave behind, or the draft a permission card
+   * hands back when it closes.
    */
   seed?: string
   onSeedDone?: () => void
+  /**
+   * r22: the draft's current text, on every edit.  The route keeps it so a
+   * card that replaces the composer (permission / ask) can give the same text
+   * back when it closes -- unmounting must not eat what the operator typed.
+   */
+  onDraft?: (text: string) => void
   /** The registry's skills, for the `@` suggestions (r16/E-2). */
   skills?: MentionOption[]
   /** Workspace files/directories for the same list (r17/T4). */
@@ -238,6 +245,8 @@ export function Prompt(props: PromptProps) {
 
   const refresh = () => {
     const text = input?.plainText ?? ""
+    // r22: the route mirrors the draft so a replacing card can restore it.
+    props.onDraft?.(text)
     const cursor = input?.cursorOffset ?? text.length
     const slash = slashQuery(text, cursor)
     if (slash !== null) {

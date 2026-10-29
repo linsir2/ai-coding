@@ -19,7 +19,7 @@ from ai_coding.app.commands import run_human_turn
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.events import IterationStarted, RecordingObserver
-from ai_coding.core.plan_runner import PLAN_MARK, plan_only
+from ai_coding.core.plan_runner import PLAN_MARK, PLANNING_MAX_ITERATIONS, plan_only
 from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
 from ai_coding.domain.loop import StepResult
 from ai_coding.domain.session import SessionData
@@ -167,8 +167,6 @@ async def test_the_planning_round_resets_the_book_and_raises_the_budget():
     its own exploration budget and no auto continuation, because a plan is
     written by thinking, not by being dragged along.
     """
-    from ai_coding.core.plan_runner import PLANNING_MAX_ITERATIONS
-
     loop = _Loop()
     session = _session("plan")
     session.task = None
@@ -230,8 +228,8 @@ async def test_the_planning_round_runs_on_a_sixteen_round_budget(tmp_path):
 
     started = observer.of_type(IterationStarted)
     assert started, "the planning round ran no iteration at all"
-    assert {event.max_iterations for event in started} == {16}, (
-        "the planning round runs on the exploration budget of 16"
+    assert {event.max_iterations for event in started} == {PLANNING_MAX_ITERATIONS}, (
+        "the planning round runs on the exploration budget, not the turn default"
     )
 
 

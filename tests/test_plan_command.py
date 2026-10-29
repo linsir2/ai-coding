@@ -583,7 +583,9 @@ async def test_the_planning_turn_runs_with_the_planning_budget():
 
     await handle_input(loop, "/plan 新计划", _session(), _Sessions(), dc)
 
-    assert seen == [(16, 0)]
+    from ai_coding.core.plan_runner import PLANNING_MAX_ITERATIONS
+
+    assert seen == [(PLANNING_MAX_ITERATIONS, 0)]
     assert loop.policy.config.max_iterations == original  # swap restored
 
 

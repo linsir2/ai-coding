@@ -62,19 +62,12 @@ STEP_HEAD = "只做这一步，不要做别的："
 #:
 #: It used to share ``max_tool_iterations`` and died mid-plan (measured
 #: twice: 15 iterations eaten by large reads, a half-written plan reported as
-#: ready).  Its own ceiling was raised to 30 to buy headroom -- and the
-#: headroom turned into an exploration budget nobody was watching: the
-#: production session 135cc71c spent 19 rounds and 41 tool calls without ever
-#: submitting, and the guard only asked for an exit *after* the model had
-#: already written its conclusion in prose.
-#:
-#: 16 is the measured middle.  A good model submits in 4 rounds (live check:
-#: glob, read, glob, present_plan) and the budget has to clear that case
-#: (4-6 rounds); the runs that never submitted burned 15-19 rounds, so a
-#: budget above 16 buys nothing but latency.  The prompt guidance ("skeleton
-#: first, no whole-file reads") is still the actual fix for a plan that dies
-#: half-written -- this ceiling is the bound on the exploring, not the cure.
-PLANNING_MAX_ITERATIONS = 16
+#: ready).  It then moved to 16, which a real repository plan (23 steps of a
+#: hotel system) can still exceed -- and a planning turn that ends on its
+#: budget no longer auto-runs its approved plan.  32 clears the measured
+#: shape (4-6 rounds for a small plan, 16-25 for a large one) while still
+#: bounding an exploration that never submits.
+PLANNING_MAX_ITERATIONS = 32
 
 #: Cap on the failure output quoted into a repair prompt (same 500-char
 #: preview discipline as the acceptance evidence tails).
@@ -720,11 +713,17 @@ class PlanRunner:
         self._persist(session)
 
     def should_stop(self, report: PlanReport, item: Any) -> bool:
-        """19 §3.4-3 (Q5=A): a stalled step is recorded, not fatal — the run
-        moves to the next ready item and the report lists the stalls for a
-        re-run.  Blocked stays fatal for the item at hand: a failed proof is
-        the decision point this runner exists to surface."""
-        return bool(report.blocked) and report.blocked[-1] == item.id
+        """r22: one failed step must not end the whole run.
+
+        A blocked step is recorded and its dependents stay unrunnable (the
+        driver's ``next_item`` only considers ready items), but *independent*
+        steps still have work to do.  The old rule stopped at the first
+        blocked step -- measured in the hotel session, whose plan verified one
+        step with a wrong path and then never touched the remaining ones, so
+        the operator had to drive every step by hand.  The run now ends on
+        done/deadlock/cap and its report lists what was blocked.
+        """
+        return False
 
     def taskless(self, report: PlanReport, console: Any) -> None:
         """No task at all (a bare /plan on a session that never had one):
@@ -849,7 +848,7 @@ class PlanRunner:
 
     def _step_budget(self) -> int:
         settings = getattr(self._loop, "settings", None)
-        return int(getattr(settings, "plan_step_max_iterations", 8) or 8)
+        return int(getattr(settings, "plan_step_max_iterations", 60) or 60)
 
     def _make_step_session(
         self, session: Any, task: Any, item: Any, report: PlanReport
@@ -936,13 +935,13 @@ class PlanRunner:
     def _run_budget(self) -> int:
         """Turn ceiling for this run (R1-4): 0 (or negative) disables."""
         settings = getattr(self._loop, "settings", None)
-        value = getattr(settings, "plan_max_step_turns", 20)
+        value = getattr(settings, "plan_max_step_turns", 0)
         if value is None:
-            return 20
+            return 0
         try:
             return max(int(value), 0)
         except (TypeError, ValueError):
-            return 20
+            return 0
 
     @staticmethod
     def _merge_usage(

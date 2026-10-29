@@ -72,6 +72,35 @@ export function policyLabel(policy: ApprovalPolicy): string {
   return policy === "auto" ? "Auto-approve" : "Confirm each call"
 }
 
+/** The rule layers as one readable line (A4 follow-up).
+ *
+ * The dialog used to print ``base 83 · standing 0 · agent 7 · user 0 · project
+ * 0 · session 0 · policy 0`` — raw keys and zero counts.  The operator needs
+ * to know *where* the rules came from, not the internal layer names: zeros
+ * are noise and ``base``/``standing`` mean nothing without the glossary.
+ */
+const LAYER_LABELS: Record<string, string> = {
+  base: "built-in",
+  standing: "standing",
+  agent: "agent",
+  user: "user",
+  project: "project",
+  session: "session",
+  policy: "policy",
+}
+
+export function layerSummary(layers: Record<string, number>): string {
+  const parts = Object.entries(layers)
+    .filter(([, count]) => count > 0)
+    .map(([layer, count]) => `${count} ${LAYER_LABELS[layer] ?? layer}`)
+  return parts.length > 0 ? parts.join(" · ") : "none"
+}
+
+/** ``$HOME`` as ``~`` so the store path fits one row instead of being clipped. */
+export function shortStorePath(path: string): string {
+  return path.replace(/^\/(?:home|Users)\/[^/]+/, "~")
+}
+
 /** One grant as a readable line: the key is ``tool:path`` or just ``tool``. */
 export function grantLine(grant: GrantRecord): string {
   if (!grant || !grant.key) return "(none)"

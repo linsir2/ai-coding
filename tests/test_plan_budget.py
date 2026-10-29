@@ -83,8 +83,10 @@ def _usage_of(loop):
     return getattr(loop, "last_outcome", None)
 
 
-def test_config_defaults_run_budget_to_twenty():
-    assert AIConfig().plan_max_step_turns == 20
+def test_config_defaults_the_run_budget_to_unbounded():
+    # r22: a 23-step hotel plan hit the old 20-turn ceiling with steps 21-23
+    # untouched.  Each step is bounded on its own; the run is not.
+    assert AIConfig().plan_max_step_turns == 0
 
 
 @pytest.mark.asyncio

@@ -64,7 +64,7 @@ export function permissionAnswer(decision: PermissionDecision, note = ""): strin
 
 /** Why the remembered option is missing, in the panel's own voice. */
 export const NO_GRANT_NOTE =
-  "Not remembered for this call — it names no single resource (or policy excludes it), so it is asked every time."
+  "Not remembered for this call — it will ask again next time."
 
 /** What the panel is asked about: the wire payload, in panel terms. */
 export interface PermissionRequest {

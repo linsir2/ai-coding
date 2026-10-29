@@ -1,11 +1,10 @@
 /**
- * D4 + T7: a card takes the keyboard, not the composer; the agent switch is
- * an RPC, not a slash echo.
+ * r22: a card takes the composer's slot, not a second box above it.
  *
- * The permission / plan-review panel used to unmount the Prompt: the draft
- * died with the renderable, the layout jumped, and the session's whole
- * binding layer went dark (shift+tab included).  The composer now stays
- * mounted and paused; the card's own keys keep priority.
+ * The permission / plan-review panel used to sit NEXT TO the composer: two
+ * stacked boxes, the card floating above an "Ask anything…" bar nobody could
+ * use.  It now replaces the composer while it is up, and the route mirrors the
+ * draft so closing the card gives the same text back.
  *
  * T7 sanctioned behavior change (30-M4 §3.5/§7.5): shift+tab no longer sends
  * `/plan` over session.command — it runs session.agent.select with the next
@@ -27,6 +26,7 @@ import { setupKeymap } from "../src/keymap"
 import { ToastProvider } from "../src/component/toast"
 import type { EventMessage, IpcClient } from "../src/ipc"
 import type { AskRequest } from "../src/util/ask"
+import type { PermissionRequest } from "../src/util/permission"
 import type { PendingPrompt } from "../src/util/submission"
 
 const AGENTS = [
@@ -89,7 +89,11 @@ async function _mount(
   card: () => AskRequest | null,
   client: _RecordingClient,
   initialPrompt?: PendingPrompt,
-  options?: { sessionId?: () => string; switching?: () => boolean },
+  options?: {
+    sessionId?: () => string
+    switching?: () => boolean
+    permission?: () => PermissionRequest | null
+  },
 ) {
   const base = await createTestRenderer({ width: 120, height: 40 })
   const keymap = setupKeymap(base.renderer)
@@ -110,7 +114,7 @@ async function _mount(
               workspace="/tmp/ws"
               branch=""
               version="0.1.0"
-              permission={null}
+              permission={options?.permission?.() ?? null}
               onPermissionDecide={() => {}}
               ask={card()}
               onAskAnswer={() => {}}
@@ -131,8 +135,8 @@ async function _mount(
   return { base, client, keymap, setup }
 }
 
-describe("a card pauses the composer, it does not remove it (D4)", () => {
-  test("the composer stays and shift+tab switches the agent through the card", async () => {
+describe("a card takes the composer's place (r22)", () => {
+  test("the card is in the composer slot and the composer comes back after it closes", async () => {
     const card = createSignal<AskRequest | null>(PLAN_REVIEW)
     const client = new _RecordingClient()
     const { base, keymap, setup } = await _mount(() => card[0](), client)
@@ -145,9 +149,9 @@ describe("a card pauses the composer, it does not remove it (D4)", () => {
     await setup.flush()
     const frameOf = () => setup.captureCharFrame().split("\n").join(" ")
 
-    // the card is up and the composer is still part of the screen
+    // the card is up and the composer is NOT a second box below it
     expect(frameOf()).toContain("批准这个计划并开始执行？")
-    expect(frameOf()).toContain("p · m")
+    expect(frameOf()).not.toContain("Ask anything")
     expect(keymap.getActiveKeys().map((key) => key.display)).toContain("shift+tab")
 
     // and the agent cycle works through the card, as an RPC — not a slash
@@ -157,12 +161,81 @@ describe("a card pauses the composer, it does not remove it (D4)", () => {
     expect(client.selects().map((row) => row.params["id"])).toEqual(["plan"])
     expect(client.sent.map((row) => row.method)).not.toContain("session.command")
 
-    // closing the card leaves the composer where it was
+    // closing the card brings the composer back in the same slot
     card[1](null)
     await setup.flush()
     await setup.waitForVisualIdle()
-    expect(frameOf()).toContain("p · m")
+    expect(frameOf()).toContain("Ask anything")
     expect(keymap.getActiveKeys().map((key) => key.display)).toContain("shift+tab")
+
+    setup.renderer.destroy()
+  })
+
+  test("the draft survives the card and comes back with the composer", async () => {
+    const card = createSignal<AskRequest | null>(null)
+    const client = new _RecordingClient()
+    const { base, setup } = await _mount(() => card[0](), client)
+    await until(
+      () => client.sent.some((row) => row.method === "session.stats"),
+      "session hydration",
+    )
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    const frameOf = () => setup.captureCharFrame().split("\n").join(" ")
+    const input = setup.renderer.root.findDescendantById("composer-input") as unknown as {
+      focus: () => void
+      plainText: string
+    }
+    input.focus()
+    await setup.flush()
+    setup.mockInput.typeText("半句需求")
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    expect(frameOf()).toContain("半句需求")
+
+    // the card replaces the composer...
+    card[1](PLAN_REVIEW)
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    expect(frameOf()).toContain("批准这个计划并开始执行？")
+    expect(frameOf()).not.toContain("半句需求")
+
+    // ...and the operator's text is handed back, not eaten
+    card[1](null)
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    expect(frameOf()).toContain("半句需求")
+
+    setup.renderer.destroy()
+  })
+
+  test("a permission card takes the same slot, and the composer returns after it is answered", async () => {
+    const permission = createSignal<PermissionRequest | null>({
+      toolName: "bash",
+      params: { command: "ls -la /tmp/ws" },
+      reason: "tool 'bash' requires confirmation",
+      grantable: false,
+    })
+    const client = new _RecordingClient()
+    const { base, setup } = await _mount(() => null, client, undefined, {
+      permission: () => permission[0](),
+    })
+    await until(
+      () => client.sent.some((row) => row.method === "session.stats"),
+      "session hydration",
+    )
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    const frameOf = () => setup.captureCharFrame().split("\n").join(" ")
+
+    expect(frameOf()).toContain("Permission required")
+    expect(frameOf()).toContain("ls -la /tmp/ws")
+    expect(frameOf()).not.toContain("Ask anything")
+
+    permission[1](null)
+    await setup.flush()
+    await setup.waitForVisualIdle()
+    expect(frameOf()).toContain("Ask anything")
 
     setup.renderer.destroy()
   })
