@@ -1,16 +1,41 @@
 # AI-Coding
 
-ThoughtCoding 的 Python 化实现 —— 一个**自持 ReAct 循环**的 AI 编程助手 CLI。
+ThoughtCoding 的 Python 化实现 —— 一个**自持 ReAct 循环**的 AI 编程助手，入口就是全屏终端 UI。
 
-> Todo 驱动编排 + 显式停止策略、权限门与审批、结构化工具结果、四层上下文压缩、
+> Todo 驱动编排 + 显式停止策略、权限门与逐次审批、结构化工具结果、四层上下文压缩、
 > Git worktree 子智能体隔离、记忆系统、MCP 集成、会话持久化与回合中断。
+
+**命令面板** —— `/` 或 `ctrl+x p` 唤起，按层聚合命令，支持搜索与整屏翻页。
+
+![命令面板](docs/assets/screenshots/command-palette.png)
+
+**会话与工具卡片** —— 工具调用带状态、时长与输出预览；markdown 表格、审批卡与侧栏都在 transcript 里。
+
+![会话与工具卡片](docs/assets/screenshots/session.png)
+
+**状态面板** —— `/status` 展示当前会话、模型、工作区与运行限制。
+
+![状态面板](docs/assets/screenshots/status.png)
+
+## 快速开始
+
+```bash
+uv tool install --from .     # 或 pipx install .
+ai-coding config init        # 写 ~/.config/ai-coding/config.yaml
+export DEEPSEEK_API_KEY=sk-...
+ai-coding                     # 直接启动 TUI
+```
+
+首次启动需要 [bun](https://bun.sh) >= 1.2 与一次网络（安装前端依赖），之后离线复用。
+配置、快捷键与故障排查见 [运行指南](docs/how-to-run.md)。
 
 ## 技术栈
 
 编排循环、工具分发、上下文压缩、记忆与会话**全部是自家实现**；模型调用走一个可替换的
 `ChatEngine` 端口，默认实现直连 OpenAI 兼容的 `chat.completions`（不依赖任何 agent 框架）。
-配置用 Pydantic + PyYAML；CLI 用 Typer；终端 UI 用 Textual + rich；MCP 用官方 `mcp` 包；
-bash 工具仅面向 **Linux**。
+配置用 Pydantic + PyYAML；后端是纯 Python（`server/` 经 Unix socket 提供 JSON-RPC IPC），
+终端 UI 位于 `ai_coding/frontend/`（TypeScript + OpenTUI + SolidJS，Bun 构建/运行）；
+MCP 用官方 `mcp` 包；bash 工具仅面向 **Linux**。R12 之前的 Textual UI 已退役。
 
 ## 开发
 
