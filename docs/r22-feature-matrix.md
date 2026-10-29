@@ -62,9 +62,9 @@
 | 10 | `/review` | 真回合 | ✓ | — | ✓ 重试行 `⤷ 重试 [transport] 第 1 次，等 2s：Connection error.` | ✓ 输出 markdown **表格**（Changes Made）+ 编号小节 + Verdict | ✓ `回合未完成 · 引擎错误（1 轮）/ 原因 / 目标 / 轨迹: …/turn-1.jsonl` | 正文可鼠标滚轮滚动 | **L4** | `23`(失败态)、`30`(成功态全文)、`31`(滚轮) |
 | 11 | `/budget` | 内联 | ✓ | — | — | ✓ 四态文案之一 `[budget] 本会话还没跑过回合` | — | — | L2 | `09-budget`；四态设计见 `commands.py:1315` |
 | 12 | `/trace` | 内联 | ✓ | — | — | ✓ `[trace] turn 1: 0 tok (0 in / 0 out) · 2 spans · 0 model steps · 0 tool calls · 0 degraded` | ⚠ 无回合时误报 `tracing is off for this session` | — | L2（文案有错，A-1）| `12-trace`（错）→ `24-trace-after-turn`（对）|
-| 13 | `/todo` | 内联 | ✓ | — | — | ⚠ 英文 `[todo] no task list for this session` | — | — | L2（语言不一致，A-5）| `13-todo` |
+| 13 | `/todo` | 内联 | ✓ | — | — | ✓ `[todo] 本会话还没有任务清单（开始一轮对话后建立）`（A-5 已修）| — | — | L2 | `13-todo`（旧英文）→ 批次 9-3 真机帧 160 |
 | 14 | `/memory` | 对话框 | ✓ | `enter 全文 · ctrl+d delete · ctrl+t pin/unpin · ctrl+g 跨项目` | — | ✓ `0 条 · 没有记忆` | — | — | L2（空态）| `14-memory`（本场景无记忆；跨项目切换靠 ctrl+g）|
-| 15 | `/config` | 内联 | ✓ | — | — | ✓ 五行限制值 | ⚠ `model: qwen`（与 `/status` 的 `qwen3.7-flash` 不是同一个字段）| — | L2（A-7）| `10-config` |
+| 15 | `/config` | 内联 | ✓ | — | — | ✓ 五行限制值；`[config] default_model: qwen（qwen3.7-flash）`（A-7 已修）| — | — | L2 | `10-config`（旧 `model: qwen`）→ 批次 9-5 真机帧 164 |
 | 16 | `/tasks` | 内联 | ✓ | — | — | ✓ `no background runs` + `no background shell jobs`（两类都答）| — | — | L2 | `15-tasks` |
 | 17 | `/compact` | 内联 | ✓ | — | ✓ `⠙ 正在运行…`（未压缩时几乎瞬时）| ⚠ `· 7→7 条 · 0 in · 0 out · 压缩耗 0` + `L3 681→681 tok / L1 … / L2 …` + `[compact] messages 7 → 7 (removed 0)`：L1/L2/L3 无解释 | — | — | L2（文案不可读，A-8）| `32-compact`；且 `removed 0` 后上下文计量被清零（见 A-8）|
 | 18 | `/undo` | 内联 + reload | ✓ | — | — | ✓ 历史回滚、**被撤销的用户消息回填到输入框**（可直接改再发）| ⚠ toast 标题写成 `Compacted` | — | L2（A-3）| `33-undo` |
@@ -118,14 +118,15 @@
 | **A-2** | **P1** | 手打 `/readonly`→执行 `/export`；`/plan`→打开权限对话框；`/agents`→执行 `/tasks`；`/clear`→打开权限对话框；`/resume`→执行 `/export` | `filterSlashCommands` 用 `threshold: 0` 的模糊匹配（`util/slash.ts:182-190`），任何 query 都返回至少一条；`prompt.tsx:344-364` 在建议条可见时把 `return` 绑给 `prompt.autocomplete.select`，于是回车执行**被选中项**而不是提交文本 | `42/47/48/49/51/52` |
 | **A-3** | P2 | `/undo` 后的 toast 标题是 `Compacted` | 任一"同会话历史重写"都走 `event.data.compacted`，客户端把标题写死为 `Compacted`（`routes/session.tsx:596-613`）| `33-undo` |
 | ~~**A-4**~~ | ~~P2~~ | ~~沙箱起不来时工具结果 `error: "denied"`，UI 显示"被拒绝"~~ **已修（批次 8-6）**：三处 `SandboxGap` 翻译统一为 `sandbox_unavailable`，后台拒单 `detail` 为 `未执行 · <原因码>`，UI 显示"沙箱不可用（命令未执行）"(✗，非 ⊘)；真机帧 156 | `bwrap.unavailable` 被映射成 `denied` 语义 | `turn-2.jsonl`；新轨迹 `7bd0766d…/turn-1.jsonl` `error:"sandbox_unavailable"` |
-| **A-5** | P3 | `/todo` 空态是英文，其它命令是中文 | `commands.py` 该分支未本地化 | `13-todo` |
-| **A-6** | P3 | 空态质量不一致：`/mcp` 解释"为什么空 + 怎么开"，`/skills`、`/sessions` 只有 `no matches` | 各 dialog 自己写空态 | `05/06/07` |
-| **A-7** | P3 | `/config` 的 `model: qwen` 与 `/status` 的 `qwen3.7-flash` 不是同一字段，读起来像"模型名被截断" | `/config` 打印 provider 名，`/status` 打印 model id | `08/10` |
+| ~~**A-5**~~ | ~~P3~~ | ~~`/todo` 空态是英文，其它命令是中文~~ **已修（批次 9-3）**：改为 `[todo] 本会话还没有任务清单（开始一轮对话后建立）`；任务为空时的 `(无任务项)` 原有中文不变 | `commands.py` 的 `task is None` 分支未本地化 | `13-todo`；批次 9-3 真机帧 160 |
+| ~~**A-6**~~ | ~~P3~~ | ~~空态质量不一致：`/mcp` 解释"为什么空 + 怎么开"，`/skills`、`/sessions` 只有 `no matches`~~ **已修（批次 9-4）**：`DialogSelect` 区分"无数据/搜索无命中"并允许面板覆盖；skills/sessions/mcp 各给"为什么空 + 下一步"，加载中/失败不误报；真机帧 161–163 | 各 dialog 自己写空态 | `05/06/07`；批次 9-4 真机 |
+| ~~**A-7**~~ | ~~P3~~ | ~~`/config` 的 `model: qwen` 与 `/status` 的 `qwen3.7-flash` 不是同一字段，读起来像"模型名被截断"~~ **已修（批次 9-5）**：`/config` 改打配置键并附解析名 `default_model: qwen（qwen3.7-flash）`；`/status` 保持运行时口径；真机帧 164 | `/config` 打印 `loop.default_model`（配置键），`/status` 打印运行时模型名 | `08/10`；批次 9-5 真机 |
 | **A-8** | P2 | `/compact` 什么都没压（`removed 0`）却把上下文计量清零（`0 tokens / 0%`），像"上下文被清空了"；`L1/L2/L3` 无解释 | `last_compacted_turn` 被抬到当前轮，`live_prompt_tokens` 据此丢弃所有既有 usage（`domain/session.py:569-590`、`server/handlers.py:278-296`）| `32-compact` → `33-undo` |
 | **A-9** | P2 | 命令调色板（批次 8 复核后改写）：① 首屏只露 8 条、整屏跳（PageDown/Home/End）时列表不跟随；② 输入 `agents` 在 Home 显示 `no matches`（会话内正常命中）；另发现同名双胞胎重复行（`Review`×2、`Queued input`×2） | ① 行 `<box>` 被原生渲染器量成 2 行（带 footer 且 title+desc+footer 超宽，第二行空），17 行视口只放 8 条；`ScrollBox.scrollChildIntoView` 在"目标行完全在视口外"直接 `return 0`，整屏跳不回滚；② `dialog.agents.show` 只在会话层注册（Home 没有该命令，不是匹配问题）；重复行因为 app 层与会话层各注册一份同名命令、`visibility:"registered"` 按层展开不去重 | `150–154` 帧；`/tmp/a9-rows.log`（`content` 子节点 `y/h` 实测：footer 行 h=2、无 footer h=1） |
 | **A-10** | P3 | 工具卡片时长把**审批等待**算进去：`git status` 显示 `28.9s` | `duration_ms` 从发起算起，与人工等待混在一起 | `29-review-out`；**已修（批次 8-3）**：新增 `ToolFinished.approval_ms`，卡片显示 `14.1s（审批 13.9s）` |
 | **A-1** | P2 | `/trace` 在"还没跑过回合"时报 `tracing is off for this session` | `_trace_report` 只看 `recorder.current_path`，把"无回合"与"没开 trace"合并（`app/commands.py:1304-1312`）；`/budget` 分了四态，`/trace` 没分 | `12-trace` → `24-trace-after-turn` |
-| **U-1** | 观察 | 一次 TUI 卡在 `Working…`（`/tasks` 之后），输入被排进 inbox（`/export`，`target: next-turn`），两次 esc 无效，重启才恢复 | 未能复现第二次；同会话后续 `/tasks`、`/permissions`→Esc→`/tasks` 都不卡。猜测与 `session.command` 的终态事件和 ack 的 `turnId` 竞态有关（`state/session.ts:837-842`），**待批次 2 用日志复现** | `15-tasks`、`a81c9be0.json` inbox |
+| ~~**U-1**~~ | 观察 | ~~一次 TUI 卡在 `Working…`（`/tasks` 之后），输入被排进 inbox（`/export`，`target: next-turn`），两次 esc 无效，重启才恢复~~ **已修（批次 9-6）**：快速命令的终态可能先于 ack 到达，reducer 的 D7 守卫会把它丢掉、`busy` 永不结算。现在把未注册的终态 id 记为 `orphanTurnId`，ack 到达时结算；reducer 8 例（含 D7 保护）绿，真机连跑 `/tasks`、`/config`、`/budget` 3 轮均回到 `Ask anything…`（帧 165） | 前端 `/tasks` 命令卡 `Working…`，输入排进 inbox，两次 esc 无效，重启恢复 | `15-tasks`、`a81c9be0.json` inbox；批次 9-6 帧 165 |
+| **U-2** | 观察 | U-1 竞态发生时，结算 busy 的时机在 ack 回调而不是 `turn.finished` 处理器里，因此结算前几毫秒内排进 inbox 的行不会自动派发，要等下一轮 | 队列派发只在 `turn.finished` 事件处理器里读 busy（`routes/session.tsx:687`）；没有任何"ack 结算后 flush"的触发点 | U-1 评审（`docs/r22-batch9-u1-plan.md` §6） |
 
 ## 6. 批次 1 结论
 
@@ -161,7 +162,7 @@
 | A-4 沙箱不可用被报成拒绝 | **已修（批次 8-6）** | 新码 `sandbox_unavailable`（三处 `SandboxGap` 翻译点）；后台拒单 `detail` 为 `未执行 · bwrap.unavailable`；UI 用 ✗ 而非 ⊘。真机帧 156（影子 `bwrap` 让机制真不可用）：`沙箱不可用（命令未执行）`，轨迹 `error:"sandbox_unavailable"`。顺带更正：本机 `enforce` 实际可用（回退到 `no-proc` 层） |
 | O-1 重复调用守卫挡住"重读累加" | **已修（批次 8-7）** | 守卫按"结果还能不能复用"计数：`read` 的上次结果被 L2 信封 / L3 `<persisted-output>` / L4 摘要移出 `ctx.messages` 后不再占用预算，总量封顶 `2×阈值`；拒绝文案改为"换个行段读，或搜索/计数用 grep"。s3 轨迹重放：iter3 从 `guard_denied` 变为 ALLOW，第 5 次仍拒。方案 `docs/r22-batch8-o1-plan.md` |
 
-### A-11（新，P1）`/resume` 之后的下一次刷新用旧 sessionId → `session not found`
+### ~~A-11（新，P1）~~ `/resume` 之后的下一次刷新用旧 sessionId —— **已修（批次 5）**
 
 **实测**：`/resume 957ab4e2` 成功切到该会话（页眉与侧栏都对），随后 `/compact` 在 transcript 里打出
 
@@ -177,9 +178,9 @@
 紧接着 `event.data["reload"] === true` 分支却用 **`props.sessionId`（还是旧的）** 调 `loadSession`。
 两个分支同一次事件里竞争，reload 抢在了路由更新之前。
 
-**候选修法**：reload 分支优先用 `event.data["sessionId"]`（终态事件本来就带权威 id），
-或 `action === "new_session"` 时跳过 reload（切换已由 `onSelectSession` 负责）。
-**影响面**：`/clear`、`/resume` 之后紧接的任何"会触发重投影"的命令（`/compact`、`/undo`）都会撞上。
+**修法（`docs/r22-batch5-fix-plan.md` FIX-6）**：新增纯函数 `reloadTarget(action, eventSessionId, propSessionId)`，
+切换时用事件里的权威 id，事件无 id 时跳过重投影；真机帧 100–101，`/resume 957ab4e2` 后 `/compact`
+不再出现 `session not found`。
 
 ### ~~A-12（新，P3）~~ 切换会话的窗口内提交仍带旧 id —— **已修（批次 8-5）**
 
@@ -209,12 +210,15 @@ Session 的 `dispatch` 在切换期间把行挂起（记下入队时的 id 与�
 真实 trace 离线重导 122 个 span，名字只有 5 类、最长 17 字符、无 `|`；与旧导出按 spanId 对比
 51 个共有 span，`ai-coding.events` 逐字一致。方案见 `docs/r22-batch8-a13-plan.md`。
 
-### A-16（新，P2）子代理 span 与父循环 span 同名并组
+### ~~A-16（新，P2）~~ 子代理 span 与父循环 span 同名并组 —— **已修（批次 9-1）**
 
-`export_otlp.py:81-82` 的分组键只有 `row.span`，丢掉了记录里的 `scope`（`core/trace.py:688-706`
-为子代理事件写 `line["scope"]`）。子代理与父循环都用 `i1`/`step1` 这类 id，于是父、子同名 span
-被并成一个：`parentSpanId` 取先出现那条、一方的 `error` 会把整组标成 ERROR、`start` 取两者最小。
-修法是把分组键改成 `(scope, span)` 并让 `spanId` 派生也带 scope（契约级改动，单独一轮）。
+`export_otlp.py` 的分组键只有 `row.span`，丢掉了记录里的 `scope`（`core/trace.py` 为子代理事件写
+`line["scope"]`）；父、子同名 span（`i1`/`step1`/`turn`）被并成一个，`error` 会把整组标红。
+
+修法：轨迹写入端 `_describe` 用递归得到的 `inner_parent`，还原子循环内部树；`SpanRow` 透传 `scope`；
+导出按 `(scope, span)` 分组、id 带 scope（无 scope 保持旧公式）、子代理 span 加 `ai-coding.scope`。
+实测 s5 的 turn-1：14 → 21 个 span，子 `turn` 指向 spawn call；无子代理会话 143 个 spanId 零差异。
+方案 `docs/r22-batch9-a16-plan.md`。
 
 ### ~~A-14（新，P2）~~ 任务清单没有随目标完成收尾 —— **已修（批次 8-4）**
 
@@ -228,13 +232,14 @@ S4 的 goal 回合结束后，会话里仍是 `items=[('1','in_progress'),('2','
 同时该轮以 `回合未完成 · 迭代预算用尽（10 轮）` 结束：一次 edit 就完成的工作，被"验证 + 解释过期清单"耗光了预算。
 候选：`stop_policy: todo_aware` 在收敛时把未收尾项显式写进 `note`；或目标完成时把 open items 归一为 `completed`/`dropped` 并留一条 digest。
 
-### A-17（新，P3）失败卡片的标题仍说"已运行命令"
+### ~~A-17（新，P3）~~ 失败卡片的标题仍说"已运行命令" —— **已修（批次 9-2）**
 
-`toolTitle()`（`util/toolmeta.ts:81-84`）只用"是否还在跑"决定 `正在/已`，不看结果，所以一张
-`✗` 的失败卡片写成 `✗ 已运行命令 · ls`，下一行却是"沙箱不可用（命令未执行）"——
-同一张卡自相矛盾。`timeout`/`spawn_failed`/`tool_error` 等所有失败共用这条路径。
-修法要动卡片标题的通用语义（例如失败时改成 `已尝试运行命令` 或按 tone 取词），
-牵连 `toolmeta.test.ts` 与多张卡片快照；批次 8-6 只做到"副标题不再说被拒绝"，标题留待单独一轮。
+`toolTitle()` 只用"是否还在跑"决定 `正在/已`，不看结果，所以 `✗` 卡片写成
+`✗ 已运行命令 · ls`，下一行却是"沙箱不可用（命令未执行）"。
+
+修法：`toolTitle(verb, target, running, ok=true)`，失败/被拒用 `已尝试{verb}`；卡片传
+`status === "ok"`。成功与运行中不变。真机帧 159：`✗ 已尝试运行命令 · ls`。方案
+`docs/r22-batch9-a17-plan.md`。
 
 ## 10. H10 修复后的 S3 复验
 

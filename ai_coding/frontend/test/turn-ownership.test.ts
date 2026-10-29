@@ -78,4 +78,37 @@ describe("turn ownership (D7)", () => {
     expect(state.turnId).toBe(3)
     expect(reduce(state, wire("turn.finished", { turnId: 3 })).busy).toBe(false)
   })
+
+  // U-1: a fast command (/tasks) can end before its ack arrives.  The ending
+  // must be remembered and settled when the ack shows up, not dropped.
+  test("an ending that arrives before its ack settles on the ack", () => {
+    const ending = feed(
+      initialState(),
+      { kind: "command-started" },
+      wire("turn.finished", { turnId: 5, status: "completed" }),
+    )
+    expect(ending.busy).toBe(true)
+
+    const acked = reduce(ending, { kind: "turn-started", turnId: 5 })
+    expect(acked.busy).toBe(false)
+    expect(acked.turnId).toBeUndefined()
+  })
+
+  test("an older ending does not settle the new turn", () => {
+    const state = feed(
+      initialState(),
+      { kind: "command-started" },
+      wire("turn.finished", { turnId: 1, status: "completed" }),
+      { kind: "turn-started", turnId: 2 },
+    )
+    expect(state.busy).toBe(true)
+    expect(state.turnId).toBe(2)
+    expect(state.orphanTurnId).toBeUndefined()
+  })
+
+  test("an orphan ending while idle is ignored", () => {
+    const state = reduce(initialState(), wire("turn.finished", { turnId: 5, status: "completed" }))
+    expect(state.busy).toBe(false)
+    expect(state.orphanTurnId).toBeUndefined()
+  })
 })

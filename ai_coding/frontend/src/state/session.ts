@@ -156,6 +156,8 @@ export interface SessionState {
    * can land while the prompt submitted after it is still running.
    */
   turnId?: number
+  /** U-1：终态先于 ack 到达的回合 id。ack 迟到时用它结算，而不是永远 busy。 */
+  orphanTurnId?: number
   /** Lines typed while a turn was running; one is dispatched per finished turn. */
   queued: QueuedLine[]
   /**
@@ -849,7 +851,14 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
       // prompt submitted right after it are two turns; the command's ending
       // must not free a composer the prompt already took.
       const ending = num(data["turnId"])
-      if (ending !== 0 && state.turnId !== ending) return state
+      if (ending !== 0 && state.turnId !== undefined && state.turnId !== ending) return state
+      if (ending !== 0 && state.turnId === undefined) {
+        // U-1: this ending belongs to a turn this client just started whose ack
+        // is still in flight.  Remember it and touch nothing else -- writing
+        // its marker now could attribute an older turn's ending to the turn
+        // that is still running (D7).
+        return state.busy ? { ...state, orphanTurnId: ending } : state
+      }
       const handoff = str(data["handoff"])
       // stage 4 r2: the plan guard's terminal line (a muted notice, not the
       // red turn-end marker -- the turn itself completed fine).
@@ -864,7 +873,7 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
         if (marker) next = [...next, { kind: "turn-end", tone: "error", text: marker }]
         return next
       })
-      return { ...updated, busy: false, turnId: undefined }
+      return { ...updated, busy: false, turnId: undefined, orphanTurnId: undefined }
     }
     default: {
       const build = notices[event.type]
@@ -966,9 +975,13 @@ export function reduce(state: SessionState, action: Action): SessionState {
     case "command-started":
       return { ...state, busy: true }
     case "turn-started":
+      if (action.turnId === state.orphanTurnId) {
+        // U-1: it already ended; the ack is merely late.
+        return { ...state, busy: false, turnId: undefined, orphanTurnId: undefined }
+      }
       // Identity only: the busy flag already went up on the way in, and a
       // steer's "submitted" must not detach the running turn (D7).
-      return { ...state, turnId: action.turnId }
+      return { ...state, turnId: action.turnId, orphanTurnId: undefined }
     case "queued":
       // The user message lands now (the retired Textual UI appended at submit
       // too); the turn itself starts when the running one ends.

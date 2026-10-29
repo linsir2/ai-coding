@@ -51,6 +51,13 @@ export function filterOptions(
   }).map((result) => result.obj)
 }
 
+/** 无数据 vs 有数据但搜索无命中，各给一句人话；面板可覆盖。 */
+export function emptyLabel(
+  hasOptions: boolean, emptyText?: string, noMatchText?: string,
+): string {
+  return hasOptions ? (noMatchText ?? "没有匹配项") : (emptyText ?? "没有可选项")
+}
+
 /** Group by `category` in first-seen order; unlabelled options share "". */
 export function groupOptions(
   options: SelectOption[],

@@ -40,6 +40,9 @@ export function DialogSessions(props: {
   const [rows, setRows] = createSignal<SessionRow[]>([])
   const [armed, setArmed] = createSignal("")
   const [error, setError] = createSignal("")
+  // The "还没有会话" sentence is only true after the list has answered; a fetch
+  // in flight (or a failed one) must not be reported as "no sessions".
+  const [loaded, setLoaded] = createSignal(false)
   const now = new Date()
 
   const listRows = async (): Promise<SessionRow[]> => {
@@ -49,7 +52,9 @@ export function DialogSessions(props: {
 
   onMount(async () => {
     try {
-      setRows(await listRows())
+      const rows = await listRows()
+      setRows(rows)
+      setLoaded(true)
     } catch (cause) {
       setError(String(cause))
     }
@@ -115,6 +120,7 @@ export function DialogSessions(props: {
       options={options()}
       actions={actions}
       onSelect={(option) => void choose(option)}
+      emptyText={loaded() ? "还没有会话（发一条消息就会创建）" : undefined}
       footer={error() || armed() ? CONFIRM : "enter open · ctrl+d delete · esc close"}
     />
   )

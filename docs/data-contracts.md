@@ -619,7 +619,7 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 | `aggregate_sessions(rows)` / `row_from_summary(..., last_activity=, now=)` / `build_report(store, *, since_days=0, now=None)` | 同上 | 前两个纯函数；`build_report` 是唯一的读盘入口，坏 summary 记零。`since_days` 与 `age_days` 都读 `SessionRef.last_activity`，与 `prune` 同源 |
 | `SpanRow` / `TurnView` / `SessionView` / `read_session_view(store, session, *, full=False)` | `core/export_html.py` | 读盘 → 视图对象；`full=True` 才去读 `turn-<n>.full.json` |
 | `render_session_html(view)` / `render_index_html(report, views)` | 同上 | 纯函数；单文件 HTML，内联 CSS、无 JS/外链、所有动态串经 `html.escape` |
-| `rows_to_otlp(views, *, service_name="ai-coding")` | `core/export_otlp.py` | 按 `span` 分组 → `resourceSpans[0].scopeSpans[0].spans`；`traceId`/`spanId` 由 sha256 派生（**确定性**，与真 SDK 的随机 id 不同） |
+| `rows_to_otlp(views, *, service_name="ai-coding")` | `core/export_otlp.py` | 按 `(scope, span)` 分组 → `resourceSpans[0].scopeSpans[0].spans`；`traceId`/`spanId` 由 sha256 派生（**确定性**；无 scope 时 `session\|turn\|span`，有 scope 时 `session\|turn\|scope\|span`） |
 | `render_overview(report)` | `app/trace_text.py` | 纯函数，一张表 + `TOTAL` 行 + `!mismatch` 标注。消费者是 `ai-coding trace overview`（M-G2 恢复；R10 删掉命令后它一度零消费者） |
 
 OTLP 字段映射：`name` 取该 span **ts 最早**事件的事件名（低基数操作名，tie 按写入顺序，如
@@ -627,6 +627,11 @@ OTLP 字段映射：`name` 取该 span **ts 最早**事件的事件名（低基�
 `duration_ms` 的最大值决定 `endTimeUnixNano`（无时长则 `start+1` 并标 `ai-coding.instant=true`）；
 行内 `data` 逐键成 attribute（bool/int/float/str 各自成类型，嵌套结构转 JSON 文本，`None` 丢弃）；
 任一行有 `error` → `status.code = 2`。
+
+A-16：轨迹行的 `scope`（子代理为 `subagent:<name>:<call_id>`）参与分组与 id——父循环与子代理的同名
+span（`i1`/`step1`/`turn`）不再并组；子代理 span 追加 `ai-coding.scope` 属性。`parentSpanId` 按
+scope 解析：子循环内部（新轨迹的 `i1→turn`、`step1→i1`）留在同 scope，只有子循环的根与旧轨迹
+（星形，全挂 `subAgent` call）回落到根 scope；父行被截断丢失时保持在本 scope（悬空但不串树）。
 
 ## R10 契约（`memory_search` 的候选集过滤与诊断）
 

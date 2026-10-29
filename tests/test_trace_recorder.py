@@ -80,7 +80,9 @@ def test_scoped_events_are_unwrapped_with_their_parent(tmp_path):
     line = _lines(recorder)[0]
     assert line["evt"] == "ToolStarted"
     assert line["scope"] == "subagent:c9"
-    assert line["parent"] == "c9"
+    # A-16: an inner tool hangs off the child's own iteration; only the child's
+    # root turn attaches to the call that spawned the sub-agent ("c9").
+    assert line["parent"] == "i0"
     assert line["data"]["call_id"] == "c2"
 
 
@@ -317,6 +319,63 @@ def test_a_sub_agents_streamed_output_is_not_recorded(tmp_path):
     kinds = [entry["evt"] for entry in _lines(recorder)]
     assert "ToolChunk" not in kinds, kinds
     assert "ToolStarted" in kinds and "ToolFinished" in kinds
+
+
+def test_a16_scoped_rows_keep_their_inner_hierarchy(tmp_path):
+    """A-16: a sub-agent's rows keep the tree its own loop built.
+
+    The recursion already knows ``step1→i1`` and ``i1→turn``; only the child's
+    root (``TurnFinished``, whose inner parent is empty) belongs to the
+    ``subAgent`` call that spawned it.
+    """
+    recorder, _ = _recorder(tmp_path)
+    scope = "subagent:child:c1"
+    recorder.on_event(
+        ScopedEvent(
+            scope=scope,
+            parent="c1",
+            event=IterationStarted(index=1, max_iterations=5),
+        )
+    )
+    recorder.on_event(
+        ScopedEvent(
+            scope=scope,
+            parent="c1",
+            event=ModelStepFinished(index=1, usage={"prompt_tokens": 1}, latency_ms=2),
+        )
+    )
+    recorder.on_event(
+        ScopedEvent(
+            scope=scope,
+            parent="c1",
+            event=ToolStarted(call_id="child-1", tool_name="read", params={}, iteration=1),
+        )
+    )
+    recorder.on_event(
+        ScopedEvent(
+            scope=scope,
+            parent="c1",
+            event=TurnFinished(
+                outcome=TurnOutcome(
+                    status=TurnStatus.COMPLETED, text="ok", iterations=1, reason=""
+                )
+            ),
+        )
+    )
+
+    scoped = [line for line in _lines(recorder) if line.get("scope")]
+    pairs = {(line["span"], line["parent"]) for line in scoped}
+    assert ("i1", "turn") in pairs
+    assert ("step1", "i1") in pairs
+    assert ("child-1", "i1") in pairs
+    assert ("turn", "c1") in pairs
+    # The exporter's scope rule has to know every inner parent name; a new one
+    # added here without updating it would silently attach to the root loop.
+    from ai_coding.core.export_otlp import _INNER_PARENT
+
+    assert all(
+        parent == "c1" or _INNER_PARENT.match(parent) for _, parent in pairs
+    )
 
 
 def test_a_sub_agents_turn_finishing_does_not_end_the_parent_turn(tmp_path):

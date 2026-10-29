@@ -1152,7 +1152,7 @@ app 的 50ms flush 定时器**只在真的写了内容时**才吸底，否则空
 |---|---|---|
 | 跨会话总览 | `ai-coding trace overview [--since N] [--format json]` | 一张表 + `TOTAL` 行（turns / files / steps / prompt / completion / cached / 命中率 / 龄期） |
 | 单文件 HTML | `ai-coding trace export --format html --session <id> --out t.html` | 内联 CSS、无 JS、无外链；**每个动态字符串都 `html.escape`** |
-| OTLP/JSON | `ai-coding trace export --format otlp-json --session <id>` | 按 span 分组的真 span 树；`sha256(session\|turn\|span)` 派生 id，导出两次字节一致 |
+| OTLP/JSON | `ai-coding trace export --format otlp-json --session <id>` | 按 `(scope, span)` 分组的真 span 树；无 scope 用 `sha256(session\|turn\|span)`、有 scope 带 scope 派生 id，导出两次字节一致；子代理 span 带 `ai-coding.scope` |
 
 `TraceStore.sessions()` 让「有哪些会话」可枚举（`last_activity` 倒序、tie 按 id），`--since` 与 `prune`
 **共用同一个口径**：`SessionRef.last_activity`，即会话自己 trace 里最后一个可解析的 `ts`（读不到时

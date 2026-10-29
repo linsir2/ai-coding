@@ -323,7 +323,7 @@ async def test_handle_todo_no_task():
     action, _ = await handle_input(loop, "/todo", sessions.items[0], sessions, dc)
     assert action is REPLAction.CONTINUE
     out = _session_text(c)
-    assert "no task" in out.lower() or "empty" in out.lower() or "0" in out
+    assert "[todo] 本会话还没有任务清单（开始一轮对话后建立）" in out
 
 
 async def test_handle_skills_lists_catalog(tmp_path):
@@ -388,8 +388,43 @@ async def test_handle_config_shows_settings():
     action, _ = await handle_input(loop, "/config", sessions.items[0], sessions, dc)
     assert action is REPLAction.CONTINUE
     out = _session_text(c)
+    assert "[config] default_model: gpt-4" in out
     assert "gpt-4" in out
     assert "48000" in out
+
+
+async def test_config_names_the_key_and_the_resolved_model():
+    loop = _FakeLoop()
+    loop.default_model = "gpt-4"
+    loop.models = {"gpt-4": type("M", (), {"name": "gpt-4-turbo"})()}
+    loop.settings = type("S", (), {
+        "max_context_tokens": 48000,
+        "max_tool_iterations": 10,
+        "stop_policy": "todo_aware",
+    })()
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    action, _ = await handle_input(loop, "/config", sessions.items[0], sessions, dc)
+    assert action is REPLAction.CONTINUE
+    assert "[config] default_model: gpt-4（gpt-4-turbo）" in _session_text(c)
+
+
+async def test_config_keeps_the_bare_key_when_it_is_the_model_name():
+    loop = _FakeLoop()
+    loop.default_model = "gpt-4"
+    loop.models = {"gpt-4": type("M", (), {"name": "gpt-4"})()}
+    loop.settings = type("S", (), {
+        "max_context_tokens": 48000,
+        "max_tool_iterations": 10,
+        "stop_policy": "todo_aware",
+    })()
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+    action, _ = await handle_input(loop, "/config", sessions.items[0], sessions, dc)
+    assert action is REPLAction.CONTINUE
+    out = _session_text(c)
+    assert "[config] default_model: gpt-4" in out
+    assert "（" not in out
 
 
 async def test_help_includes_new_commands():

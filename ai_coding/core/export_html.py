@@ -235,6 +235,7 @@ class SpanRow:
     iter: int
     evt: str
     data: dict[str, Any]
+    scope: str = ""
 
 
 @dataclass(frozen=True)
@@ -293,6 +294,7 @@ def _read_spans(path: Path) -> tuple[SpanRow, ...]:
                 iter=_int(row.get("iter")),
                 evt=str(row.get("evt", "")),
                 data=dict(data) if isinstance(data, dict) else {},
+                scope=str(row.get("scope", "")),
             )
         )
     return tuple(spans)

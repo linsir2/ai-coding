@@ -74,9 +74,28 @@ describe("ToolCard", () => {
       ),
     )
     expect(struck).toBe(true)
-    expect(setup.captureCharFrame()).toContain("被拒绝")
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("被拒绝")
+    // R22 A-17: the denial never ran, so the title says it was tried.
+    expect(frame).toContain("已尝试编辑文件")
     setup.renderer.destroy()
   })
+
+  // R22 A-17: A-4's real frame read "✗ 已运行命令 · ls" over "沙箱不可用（命令未执行）",
+  // which says the command ran and did not run in the same card.
+  test("a failed card says it tried, not that it ran", async () => {
+    const setup = await render(
+      part({ target: "ls", error: "sandbox_unavailable" }),
+    )
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("已尝试运行命令 · ls")
+    expect(frame).toContain("沙箱不可用（命令未执行）")
+    expect(frame).not.toContain("已运行命令")
+    setup.renderer.destroy()
+  })
+
+  // The running branch is covered by toolmeta.test.ts: a running part draws the
+  // spinner, which the render harness has no component for.
 
 
   test("stderr lines read as errors and stdout lines do not", async () => {

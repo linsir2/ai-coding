@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test"
 import type { SelectOption } from "../src/util/dialog-select"
 import {
+  emptyLabel,
   filterOptions,
   flattenGroups,
   groupOptions,
@@ -131,6 +132,21 @@ describe("singleLineText", () => {
     expect(singleLineText("first line\nsecond line")).toBe("first line second line")
     expect(singleLineText("first\n\nsecond")).toBe("first second")
     expect(singleLineText("no breaks")).toBe("no breaks")
+  })
+})
+
+describe("emptyLabel", () => {
+  test("no options at all says there is nothing to pick", () => {
+    expect(emptyLabel(false)).toBe("没有可选项")
+  })
+
+  test("options that a query did not match say so instead", () => {
+    expect(emptyLabel(true)).toBe("没有匹配项")
+  })
+
+  test("a panel's own wording wins over the defaults", () => {
+    expect(emptyLabel(false, "自定义空态", "自定义无命中")).toBe("自定义空态")
+    expect(emptyLabel(true, "自定义空态", "自定义无命中")).toBe("自定义无命中")
   })
 })
 

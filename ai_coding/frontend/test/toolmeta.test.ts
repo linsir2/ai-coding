@@ -98,6 +98,16 @@ describe("toolTitle", () => {
   test("no target renders the bare action", () => {
     expect(toolTitle("更新计划", "", false)).toBe("已更新计划")
   })
+
+  // R22 A-17: a failed call must not claim it ran -- the subtitle already says
+  // why, the title only has to stop lying.
+  test("a failed call does not claim it ran", () => {
+    expect(toolTitle("运行命令", "ls", false, false)).toBe("已尝试运行命令 · ls")
+  })
+
+  test("a denied call also does not claim it ran", () => {
+    expect(toolTitle("编辑文件", "a.py", false, false)).toBe("已尝试编辑文件 · a.py")
+  })
 })
 
 /**

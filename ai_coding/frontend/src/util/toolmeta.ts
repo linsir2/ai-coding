@@ -77,9 +77,20 @@ function mcpCallTarget(params: Record<string, unknown>): string {
   return server && tool ? `${server}__${tool}` : "mcp_call"
 }
 
-/** `正在运行命令 · ls` while running, `已运行命令 · ls` once settled. */
-export function toolTitle(verb: string, target: string, running: boolean): string {
-  const action = `${running ? "正在" : "已"}${verb}`
+/**
+ * `正在运行命令 · ls` / `已运行命令 · ls`；失败时是 `已尝试运行命令 · ls`.
+ *
+ * R22 A-17: the title used to ignore the result, so a failed call read as
+ * "已运行命令" over a subtitle saying it never ran.  The subtitle already names
+ * the cause, so the title only has to stop claiming the call happened.
+ */
+export function toolTitle(
+  verb: string,
+  target: string,
+  running: boolean,
+  ok = true,
+): string {
+  const action = running ? `正在${verb}` : ok ? `已${verb}` : `已尝试${verb}`
   return target ? `${action} · ${target}` : action
 }
 

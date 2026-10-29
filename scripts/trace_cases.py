@@ -503,6 +503,7 @@ async def c10_subagent_scope_is_recorded(root: Path) -> tuple[bool, str]:
     scoped = [r for r in rows if r.get("scope")]
     scopes = {r["scope"] for r in scoped}
     parents = {r["parent"] for r in scoped}
+    pairs = {(r["span"], r["parent"]) for r in scoped}
     # A set, not a count: `_loop` hands the recorder to the loop twice, so every
     # row is written twice and a count would measure that harness detail.
     inner_tools = {
@@ -522,7 +523,15 @@ async def c10_subagent_scope_is_recorded(root: Path) -> tuple[bool, str]:
         bool(scoped)
         and len(scopes) == 1
         and next(iter(scopes)).startswith("subagent:")
-        and parents == {"c1"}
+        and pairs
+        == {
+            ("turn", "c1"),
+            ("i1", "turn"),
+            ("step1", "i1"),
+            ("child-1", "i1"),
+            ("i2", "turn"),
+            ("step2", "i2"),
+        }
         and inner_tools == {("child-1", "read")}
         # the parent's own calls stay distinguishable from the child's
         and all("scope" not in r for r in parent_rows if r["data"]["call_id"] == "c1")

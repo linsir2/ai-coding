@@ -1,7 +1,8 @@
 /**
  * Tool card (M2, folded in A5) — what a settled call reads like:
  *
- *   row     : ± ✓/✗/⊘  已运行命令 · git branch · 820ms      (click opens)
+ *   row     : ✓ 已运行命令 / ✗ 已尝试运行命令 / ⊘ 已尝试运行命令 · git branch · 820ms
+ *                                                                  (click opens)
  *   folded  : the failure as a sentence, or the output preview
  *   open    : the whole tail, with a note when its head was dropped
  *
@@ -79,7 +80,7 @@ export function ToolCard(props: { part: ToolPart }) {
           </text>
         </Show>
         <text fg={accent()} attributes={strike()}>
-          {toolTitle(props.part.verb, props.part.target, running())}
+          {toolTitle(props.part.verb, props.part.target, running(), props.part.status === "ok")}
         </text>
         <Show when={props.part.durationMs > 0}>
           {/* A-10: never let the wait note wrap or squeeze the tool name. */}

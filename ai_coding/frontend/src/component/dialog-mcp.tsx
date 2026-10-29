@@ -111,10 +111,10 @@ export function DialogMcp(props: {
       title="MCP servers"
       options={options()}
       actions={actions()}
+      emptyText="没有配置 MCP 服务器"
       footer={
         error() ||
         [
-          rows().length === 0 ? "没有配置 MCP 服务器" : "",
           enabled()
             ? props.onConnectNew
               ? "ctrl+a connect a new server"

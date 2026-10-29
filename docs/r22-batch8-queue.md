@@ -88,7 +88,8 @@
 
 ### 下一轮从哪里开始
 
-1. **A-11**（P1）：`routes/session.tsx` 的 reload 分支改用 `event.data["sessionId"]`，或与 `new_session` 互斥；
+1. ~~A-11（P1）~~：已在批次 5（`docs/r22-batch5-fix-plan.md` FIX-6）修复并真机复验，矩阵原有小节漏标；
 2. **A-16**（P2）：`export_otlp` 分组键 `(scope, span)` + spanId 派生带 scope；
 3. **A-17**（P3）：失败卡片标题的通用措辞；
-4. 观察项：U-1（`/tasks` 后卡 `Working…`，需日志复现）；A-15 已在批次 7（`r22-batch7-h11-plan.md`）处理，矩阵未单列。
+4. **A-5/A-6/A-7**（P3）：`/todo` 空态英文、空态一致性、`/config` 与 `/status` 的模型字段口径；
+5. 观察项：U-1（`/tasks` 后卡 `Working…`，需日志复现）；A-15 已在批次 7（`r22-batch7-h11-plan.md`）处理，矩阵未单列。

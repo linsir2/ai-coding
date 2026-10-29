@@ -129,3 +129,140 @@ def test_r9_the_export_is_deterministic(tmp_path):
     first = json.dumps(rows_to_otlp([view]), sort_keys=True)
     second = json.dumps(rows_to_otlp([view]), sort_keys=True)
     assert first == second
+
+
+# ---- A-16: a sub-agent's spans are their own spans --------------------------
+
+
+def _attrs(span: dict) -> dict:
+    return {attr["key"]: attr["value"] for attr in span["attributes"]}
+
+
+def _text(span: dict, key: str) -> str:
+    return _attrs(span).get(key, {}).get("stringValue", "")
+
+
+def _scope_span_id(session: str, turn: int, span: str, scope: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(f"{session}|{turn}|{scope}|{span}".encode()).hexdigest()[:16]
+
+
+def test_a16_a_subagent_span_is_not_merged_into_its_parent(tmp_path):
+    scope = "subagent:child:c1"
+    view = _view(tmp_path, [
+        _row(span="i1", parent="turn", evt="IterationStarted"),
+        _row(span="i1", parent="turn", evt="IterationStarted", scope=scope),
+    ])
+    spans = [span for span in _spans(rows_to_otlp([view])) if _text(span, "ai-coding.span") == "i1"]
+    assert len(spans) == 2
+    assert spans[0]["spanId"] != spans[1]["spanId"]
+    scoped = [span for span in spans if "ai-coding.scope" in _attrs(span)]
+    assert len(scoped) == 1
+    assert _text(scoped[0], "ai-coding.scope") == scope
+
+
+def test_a16_the_subagent_root_points_at_the_spawning_call(tmp_path):
+    scope = "subagent:child:c1"
+    view = _view(tmp_path, [
+        _row(span="turn", parent="", evt="TurnFinished"),
+        _row(span="call_fd", parent="i1", evt="ToolFinished"),
+        _row(span="turn", parent="call_fd", scope=scope, evt="TurnFinished"),
+    ])
+    spans = _spans(rows_to_otlp([view]))
+    root_turn = next(
+        span for span in spans
+        if _text(span, "ai-coding.span") == "turn" and "ai-coding.scope" not in _attrs(span)
+    )
+    call = next(span for span in spans if _text(span, "ai-coding.span") == "call_fd")
+    child_turn = next(span for span in spans if _text(span, "ai-coding.scope") == scope)
+    assert child_turn["parentSpanId"] == call["spanId"]
+    assert child_turn["parentSpanId"] != root_turn["spanId"]
+
+
+def test_a16_the_subagent_inner_tree_survives_export(tmp_path):
+    scope = "subagent:child:c1"
+    view = _view(tmp_path, [
+        _row(span="turn", parent="", evt="TurnFinished"),
+        _row(span="i1", parent="turn", evt="IterationStarted"),
+        _row(span="call_fd", parent="i1", evt="ToolFinished"),
+        _row(span="turn", parent="call_fd", scope=scope, evt="TurnFinished"),
+        _row(span="i1", parent="turn", scope=scope, evt="IterationStarted"),
+        _row(span="step1", parent="i1", scope=scope, evt="ModelStepFinished"),
+        _row(span="call_x", parent="i1", scope=scope, evt="ToolStarted"),
+    ])
+    by = {
+        (_text(span, "ai-coding.scope"), _text(span, "ai-coding.span")): span
+        for span in _spans(rows_to_otlp([view]))
+    }
+    assert by[("", "turn")]["parentSpanId"] == ""
+    assert by[("", "i1")]["parentSpanId"] == by[("", "turn")]["spanId"]
+    assert by[("", "call_fd")]["parentSpanId"] == by[("", "i1")]["spanId"]
+    assert by[(scope, "turn")]["parentSpanId"] == by[("", "call_fd")]["spanId"]
+    assert by[(scope, "i1")]["parentSpanId"] == by[(scope, "turn")]["spanId"]
+    assert by[(scope, "step1")]["parentSpanId"] == by[(scope, "i1")]["spanId"]
+    assert by[(scope, "call_x")]["parentSpanId"] == by[(scope, "i1")]["spanId"]
+
+
+def test_a16_old_flat_subagent_rows_still_export(tmp_path):
+    scope = "subagent:child:c1"
+    view = _view(tmp_path, [
+        _row(span="call_fd", parent="i1", evt="ToolFinished"),
+        _row(span="i1", parent="call_fd", scope=scope, evt="IterationStarted"),
+        _row(span="step1", parent="call_fd", scope=scope, evt="ModelStepFinished"),
+        _row(span="turn", parent="call_fd", scope=scope, evt="TurnFinished"),
+    ])
+    by = {
+        (_text(span, "ai-coding.scope"), _text(span, "ai-coding.span")): span
+        for span in _spans(rows_to_otlp([view]))
+    }
+    for span_name in ("i1", "step1", "turn"):
+        assert by[(scope, span_name)]["parentSpanId"] == by[("", "call_fd")]["spanId"]
+
+
+def test_a16_a_truncated_child_parent_stays_in_its_own_scope(tmp_path):
+    """A child trace cut before its ``turn`` row must not attach to the root."""
+    scope = "subagent:child:c1"
+    view = _view(tmp_path, [
+        _row(span="turn", parent="", evt="TurnFinished"),
+        _row(span="i1", parent="turn", scope=scope, evt="IterationStarted"),
+    ])
+    by = {
+        (_text(span, "ai-coding.scope"), _text(span, "ai-coding.span")): span
+        for span in _spans(rows_to_otlp([view]))
+    }
+    assert by[(scope, "i1")]["parentSpanId"] != by[("", "turn")]["spanId"]
+    assert by[(scope, "i1")]["parentSpanId"] == _scope_span_id("s", 1, "turn", scope)
+
+
+def test_a16_each_scope_keeps_its_own_status(tmp_path):
+    scope = "subagent:child:c1"
+    view = _view(tmp_path, [
+        _row(span="i1", parent="turn", evt="IterationStarted"),
+        _row(span="i1", parent="turn", scope=scope, evt="IterationStarted",
+             data={"error": "x"}),
+    ])
+    spans = [span for span in _spans(rows_to_otlp([view])) if _text(span, "ai-coding.span") == "i1"]
+    root = next(span for span in spans if "ai-coding.scope" not in _attrs(span))
+    child = next(span for span in spans if _text(span, "ai-coding.scope") == scope)
+    assert root["status"]["code"] == 0
+    assert child["status"]["code"] == 2
+
+
+def test_a16_unscoped_span_ids_are_unchanged(tmp_path):
+    import hashlib
+
+    payload = rows_to_otlp([_view(tmp_path, [_row(evt="IterationStarted")])])
+    span = _spans(payload)[0]
+    assert span["spanId"] == hashlib.sha256(b"s|1|i1").hexdigest()[:16]
+
+
+def test_a16_two_scopes_with_the_same_name_get_distinct_ids(tmp_path):
+    view = _view(tmp_path, [
+        _row(span="i1", parent="turn", evt="IterationStarted"),
+        _row(span="i1", parent="turn", scope="subagent:a:c1", evt="IterationStarted"),
+        _row(span="i1", parent="turn", scope="subagent:b:c2", evt="IterationStarted"),
+    ])
+    ids = [span["spanId"] for span in _spans(rows_to_otlp([view]))]
+    assert len(ids) == 3
+    assert len(set(ids)) == 3

@@ -23,11 +23,16 @@ export function DialogSkills(props: { client: IpcClient; onSelect: (name: string
   const dialog = useDialog()
   const [rows, setRows] = createSignal<SkillRow[]>([])
   const [error, setError] = createSignal("")
+  // "还没有技能" is a claim about the library, so it may only be shown once the
+  // library has answered.  Before that (and after a failed fetch) the generic
+  // empty label stands in, instead of calling an unknown state empty.
+  const [loaded, setLoaded] = createSignal(false)
 
   onMount(async () => {
     try {
       const data = (await props.client.request("skills.list")) as { skills?: SkillRow[] }
       setRows(data.skills ?? [])
+      setLoaded(true)
     } catch (cause) {
       setError(String(cause))
     }
@@ -51,6 +56,7 @@ export function DialogSkills(props: { client: IpcClient; onSelect: (name: string
       title="Skills"
       options={options()}
       onSelect={choose}
+      emptyText={loaded() ? "还没有技能（把带 SKILL.md 的目录放进工作区 skills/）" : undefined}
       footer={error() || "enter add to prompt"}
     />
   )

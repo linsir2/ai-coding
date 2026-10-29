@@ -82,4 +82,20 @@ async def test_todo_no_task_list():
     )
     assert action is REPLAction.CONTINUE
     assert not any(isinstance(e, TaskUpdated) for e in obs.events)
-    assert "no task" in c.export_text().lower()
+    out = c.export_text()
+    assert "[todo] 本会话还没有任务清单（开始一轮对话后建立）" in out
+    assert "no task" not in out.lower()
+
+
+async def test_todo_empty_list_is_chinese():
+    session = SessionData(
+        session_id="s1", title="", created_time="", last_access_time=""
+    )
+    session.task = TaskState(goal="Build feature X")
+    dc, c = _console()
+    action, _ = await handle_input(
+        _FakeLoop(), "/todo", session, _FakeSessions(), dc, observer=None
+    )
+    assert action is REPLAction.CONTINUE
+    out = c.export_text()
+    assert "(无任务项)" in out

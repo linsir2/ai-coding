@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -65,8 +66,42 @@ def _attributes(payload: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _span_id(session: str, turn: int, span: str) -> str:
-    return _hash(f"{session}|{turn}|{span}", _SPAN_ID_CHARS)
+def _span_id(session: str, turn: int, span: str, scope: str = "") -> str:
+    # Without a scope the key is the historical one, byte-for-byte; with a scope
+    # the scope is part of the hash so a sub-agent's ``i1`` is its own span.
+    key = f"{session}|{turn}|{span}" if not scope else f"{session}|{turn}|{scope}|{span}"
+    return _hash(key, _SPAN_ID_CHARS)
+
+
+#: The span names a child loop builds for itself.  A scoped row whose parent is
+#: one of these belongs to the same scope even when the parent row is missing
+#: (a truncated trace), never to the root loop's span of the same name.
+_INNER_PARENT = re.compile(r"^(?:turn|i\d+|step\d+)$")
+
+
+def _parent_scope(
+    name: str, own_scope: str, scopes_by_span: dict[str, set[str]]
+) -> str:
+    """Which scope a parent span of ``name`` lives in, from the child's view."""
+    if not name or not own_scope:
+        return ""
+    # A new trace keeps the child's inner tree in the same scope (i1→turn,
+    # step1→i1).  Only the child's root points outside it.
+    if own_scope in scopes_by_span.get(name, set()):
+        return own_scope
+    if _INNER_PARENT.match(name):
+        # The same-scope parent row is gone (truncated turn file).  Keeping the
+        # id inside this scope is a dangling reference; the root loop may have a
+        # span with the same name, and attaching to it would be silently wrong.
+        return own_scope
+    candidates = scopes_by_span.get(name, set()) - {own_scope}
+    if not candidates:
+        return own_scope
+    if "" in candidates:
+        # The spawning ``subAgent`` call is in the root scope; old flat traces
+        # hung every child row off that call.
+        return ""
+    return sorted(candidates)[0]
 
 
 def rows_to_otlp(
@@ -77,10 +112,12 @@ def rows_to_otlp(
     for view in views:
         spans: list[dict[str, Any]] = []
         for turn in view.turns:
-            grouped: dict[str, list[SpanRow]] = {}
+            grouped: dict[tuple[str, str], list[SpanRow]] = {}
+            scopes_by_span: dict[str, set[str]] = {}
             for row in turn.spans:
-                grouped.setdefault(row.span, []).append(row)
-            for span_name, rows in grouped.items():
+                grouped.setdefault((row.scope, row.span), []).append(row)
+                scopes_by_span.setdefault(row.span, set()).add(row.scope)
+            for (scope, span_name), rows in grouped.items():
                 events = [row.evt for row in rows]
                 start = min(_nano(row.ts) for row in rows)
                 # The span's operation name: the event with the earliest ts
@@ -100,6 +137,10 @@ def rows_to_otlp(
                     {"key": "ai-coding.span", "value": {"stringValue": span_name}},
                     {"key": "ai-coding.events", "value": {"stringValue": "|".join(events)}},
                 ]
+                if scope:
+                    attributes.append(
+                        {"key": "ai-coding.scope", "value": {"stringValue": scope}}
+                    )
                 if instant:
                     attributes.append(
                         {"key": "ai-coding.instant", "value": {"boolValue": True}}
@@ -109,11 +150,17 @@ def rows_to_otlp(
                 spans.append(
                     {
                         "traceId": _hash(f"{view.session}|{turn.turn}", _TRACE_ID_CHARS),
-                        "spanId": _span_id(view.session, turn.turn, span_name),
+                        "spanId": _span_id(view.session, turn.turn, span_name, scope),
                         "parentSpanId": (
                             ""
-                            if not parent or parent == "turn" and span_name == "turn"
-                            else _span_id(view.session, turn.turn, parent)
+                            if not parent
+                            or (parent == "turn" and span_name == "turn" and not scope)
+                            else _span_id(
+                                view.session,
+                                turn.turn,
+                                parent,
+                                _parent_scope(parent, scope, scopes_by_span),
+                            )
                         ),
                         # A-13: the span name is one operation name, not the
                         # whole event log; the full list stays in

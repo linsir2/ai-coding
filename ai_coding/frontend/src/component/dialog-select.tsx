@@ -16,6 +16,7 @@ import { Index, Show, createEffect, createMemo, createSignal, onMount } from "so
 import { theme } from "../theme/tokens"
 import type { SelectAction, SelectOption } from "../util/dialog-select"
 import {
+  emptyLabel,
   filterOptions,
   flattenGroups,
   groupOptions,
@@ -34,6 +35,10 @@ export interface DialogSelectProps {
   actions?: readonly SelectAction[]
   /** Left footer text; defaults to the select hint. */
   footer?: string
+  /** Shown when there are no options at all; defaults to “没有可选项”. */
+  emptyText?: string
+  /** Shown when options exist but the query matches none; defaults to “没有匹配项”. */
+  noMatchText?: string
   /** Fuzzysort threshold (the palette uses a stricter 0.7). */
   threshold?: number
 }
@@ -140,7 +145,9 @@ export function DialogSelect(props: DialogSelectProps) {
       />
       <Show
         when={flat().length > 0}
-        fallback={<text fg={theme.textMuted}>{"  no matches"}</text>}
+        fallback={
+          <text fg={theme.textMuted}>{`  ${emptyLabel(props.options.length > 0, props.emptyText, props.noMatchText)}`}</text>
+        }
       >
         <scrollbox
           ref={(element: ScrollBoxRenderable) => (list = element)}

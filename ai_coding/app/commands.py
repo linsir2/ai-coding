@@ -241,7 +241,7 @@ async def handle_input(
     if cmd.name == "todo":
         task = getattr(session, "task", None)
         if task is None:
-            console.info("[todo] no task list for this session")
+            console.info("[todo] 本会话还没有任务清单（开始一轮对话后建立）")
         else:
             if observer is not None:
                 from ai_coding.core.events import TaskUpdated
@@ -299,8 +299,13 @@ def _handle_config(loop: Any, session: Any, console: ConsoleSink) -> tuple[REPLA
     if settings is None:
         console.info("[config] not available")
         return REPLAction.CONTINUE, session
+    key = getattr(loop, "default_model", "") or "?"
+    models = getattr(loop, "models", None)
+    config = models.get(key) if isinstance(models, dict) else None
+    resolved = getattr(config, "name", "") or ""
+    model = f"{key}（{resolved}）" if resolved and resolved != key else key
     lines = [
-        f"[config] model: {getattr(loop, 'default_model', '') or '?'}",
+        f"[config] default_model: {model}",
         f"  max_context_tokens: {getattr(settings, 'max_context_tokens', '?')}",
         f"  max_tool_iterations: {getattr(settings, 'max_tool_iterations', '?')}",
         f"  stop_policy: {getattr(settings, 'stop_policy', '?')}",

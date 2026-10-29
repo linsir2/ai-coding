@@ -783,8 +783,15 @@ class TraceRecorder:
         if isinstance(event, ScopedEvent):
             scope = event.scope
             inner = event.event
-            name, payload, span, _parent, iteration, _inner_scope = self._describe(inner)
-            return name, payload, span, event.parent, iteration, scope
+            # Nested scopes (a child spawning its own child) are not produced by
+            # the tool builder today; if one arrives, this keeps the outer
+            # scope and inherits the inner parent, which is the least wrong
+            # answer available without a per-scope parent chain.
+            name, payload, span, inner_parent, iteration, _inner_scope = self._describe(inner)
+            # The child loop has its own tree (step1→i1, i1→turn); only its root
+            # (TurnFinished, whose inner parent is empty) hangs off the subAgent
+            # call that spawned it.
+            return name, payload, span, inner_parent or event.parent, iteration, scope
 
         name = type(event).__name__
         payload = self.redactor.redact_obj(dataclasses.asdict(event))

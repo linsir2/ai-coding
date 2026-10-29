@@ -89,7 +89,11 @@ describe("DialogMcp", () => {
 
   test("no configured servers says so instead of listing nothing", async () => {
     const text = await frame([])
-    expect(text).toContain("没有配置 MCP 服务器")
+    // A-6 moved the sentence from the footer into the empty body; pin the
+    // position, or the old footer would satisfy a bare ``toContain`` forever.
+    const line = text.split("\n").find((row) => row.includes("没有配置 MCP 服务器"))
+    expect(line).toBeDefined()
+    expect(line).not.toContain("esc close")
   })
 
   test("a server that needs a sign-in says so (M4)", async () => {
