@@ -151,6 +151,10 @@ class ToolContext:
     # be answered from the record instead of running twice.  `None` outside a
     # loop that owns a turn.  Typed `Any` like ``jobs`` for the same reason.
     write_ahead: Any = None
+    # C3: this call runs inside the ephemeral replan turn.  ``todo_write`` then
+    # may only touch non-terminal items -- a replan edits what is left, never
+    # the history the receipts already attest.
+    replan: bool = False
 
 
 def resolve_ctx(ctx: ToolContext | None) -> ToolContext:
@@ -181,6 +185,12 @@ class BaseTool(ABC):
     #: this -- a tool table pruned by a permission rule -- is M1a's job; this
     #: is the one hard case this batch needed.
     plan_only: bool = False
+    #: C3: does this tool belong to a running plan *wave* only?  ``wave_report``
+    #: hands over interfaces/decisions/pitfalls, which mean nothing outside the
+    #: wave boundary it feeds.  The surface hides it in ordinary sessions (the
+    #: schema is paid for on every step), and ``execute`` refuses a call made
+    #: from memory.
+    wave_only: bool = False
 
     @property
     def origin(self) -> str:

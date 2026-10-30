@@ -231,9 +231,11 @@ async def test_five_items_run_in_three_waves_and_carry_the_handoff():
 @pytest.mark.asyncio
 async def test_deadlock_is_reported_not_called_done():
     # An unknown dependency means no item is ever ready: that is a deadlock,
-    # not a completion.
+    # not a completion.  C3 adds a replan attempt first; this pins the ending
+    # with that feature off (its own suite covers the replan path).
     session = _session_with("a", deps={"1": ["99"]})
     loop = _StubLoop([])
+    loop.settings.plan_max_replans = 0
 
     report = await WaveRunner(loop).run(session)
 

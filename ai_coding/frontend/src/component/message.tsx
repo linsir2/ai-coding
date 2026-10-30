@@ -112,6 +112,17 @@ function PartView(props: { part: Part; alwaysOpen: boolean }) {
           const plan = () => part() as Extract<Part, { kind: "plan" }>
           const done = () => plan().items.filter((item) => item.status === "completed").length
           const skipped = () => plan().items.filter((item) => item.status === "skipped").length
+          // C3: a live wave names itself (completed waves + 1); between waves
+          // the card keeps the plain count, so a finished plan reads as before.
+          const waveLabel = () => {
+            const wave = plan().wave
+            const rounds = plan().rounds ?? 0
+            if (wave) {
+              const ids = wave.items.length > 0 ? ` · #${wave.items.join(",#")} 进行中` : ""
+              return ` · 第 ${rounds + 1} 波${ids}`
+            }
+            return rounds > 0 ? ` · ${rounds} 波` : ""
+          }
           const marker = (status: string) =>
             status === "completed"
               ? "[✓]"
@@ -136,7 +147,8 @@ function PartView(props: { part: Part; alwaysOpen: boolean }) {
             <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
               <text fg={theme.textMuted}>
                 {`# Todos ${done()}/${plan().items.length}` +
-                  (skipped() ? ` · 跳过 ${skipped()}` : "")}
+                  (skipped() ? ` · 跳过 ${skipped()}` : "") +
+                  waveLabel()}
               </text>
               <Show when={plan().goal}>
                 <text fg={theme.textMuted}>{`目标: ${plan().goal}`}</text>

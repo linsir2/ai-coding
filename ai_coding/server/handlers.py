@@ -729,7 +729,9 @@ def make_handlers(
                     else:
                         from ai_coding.core.wave_runner import plan_runner_for
 
-                        await plan_runner_for(world.loop).run(
+                        await plan_runner_for(
+                            world.loop, user_prompt=world.user_prompt
+                        ).run(
                             session, console, on_delta=bridge.on_delta, observer=bridge
                         )
             except asyncio.CancelledError:
@@ -949,7 +951,8 @@ def make_handlers(
             bridge.command_run = True
             try:
                 action, next_session = await handle_input(
-                    world.loop, text, session, world.sessions, console, observer=bridge
+                    world.loop, text, session, world.sessions, console,
+                    observer=bridge, user_prompt=world.user_prompt,
                 )
                 if isinstance(action, REPLAction):
                     action_name = action.value

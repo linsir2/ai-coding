@@ -335,6 +335,11 @@ class SessionData:
     # whose TurnCloser would otherwise write one "plan step N" file per step
     # and flood the /resume picker.
     ephemeral: bool = False
+    #: C3: this ephemeral session is the wave-boundary replan turn.  The tool
+    #: context reads it so ``todo_write`` may only edit non-terminal items
+    #: (editing the history the receipts already attest is not a replan).  In
+    #: process only, like ``ephemeral``.
+    replan_mode: bool = False
     # The skill ids last listed in the system prompt. `skill_review` writes new
     # skills every few turns, so the catalog does change mid-session — three
     # places in our docs claim it cannot. Rather than repeat a claim the code

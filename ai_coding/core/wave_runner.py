@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -49,6 +50,7 @@ from ai_coding.core.wave_planner import (
 from ai_coding.domain.acceptance import AcceptanceItem
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.plan_delivery import StepDelivery
+from ai_coding.domain.plan_wave import WaveHandoff
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import WAVE_NOTE_MAX_CHARS, TaskState, TodoItem
 from ai_coding.infra.time_utils import now_utc
@@ -56,12 +58,16 @@ from ai_coding.infra.time_utils import now_utc
 __all__ = ["WaveRunner", "WaveItem", "WAVE_ITEM_HEAD", "plan_runner_for"]
 
 
-def plan_runner_for(loop: Any) -> Any:
+def plan_runner_for(loop: Any, user_prompt: Any = None) -> Any:
     """The executor the configuration asks for (``wave`` unless told otherwise).
 
     One selection point for the command layer and the server: the legacy runner
     stays reachable as ``plan_orchestrator: legacy`` and keeps every one of its
     tests, while the default moves to waves.
+
+    ``user_prompt`` (C3) is the human channel a wave-boundary replan asks for
+    approval through.  ``None`` means the run cannot get approval, so a replan
+    is rolled back instead of applied -- the conservative direction.
     """
     settings = getattr(loop, "settings", None)
     name = str(getattr(settings, "plan_orchestrator", "wave") or "wave")
@@ -69,7 +75,7 @@ def plan_runner_for(loop: Any) -> Any:
         from ai_coding.core.plan_runner import PlanRunner
 
         return PlanRunner(loop)
-    return WaveRunner(loop)
+    return WaveRunner(loop, user_prompt=user_prompt)
 
 
 #: The per-item prompt's leading marker.  Reuses the legacy step head on
@@ -89,16 +95,21 @@ def _tail(text: str | None) -> str:
 
 @dataclass(frozen=True)
 class WaveItem:
-    """One wave as the driver's "item" — it needs an id and an order."""
+    """One wave as the driver's "item" — it needs an id and an order.
+
+    ``replan`` is non-empty when this "round" is the wave-boundary replan turn
+    instead of a real wave (C3); ``wave`` is then empty.
+    """
 
     id: str
     wave: Wave
+    replan: str = ""
 
 
 class WaveRunner:
     """The ``plan`` RoundProfile that executes a plan wave by wave."""
 
-    def __init__(self, loop: Any) -> None:
+    def __init__(self, loop: Any, user_prompt: Any = None) -> None:
         self._loop = loop
         self._parent: Any = None
         self._task: TaskState | None = None
@@ -109,6 +120,16 @@ class WaveRunner:
         self._wave_tokens: int = 0
         self._wave_started: float = 0.0
         self._base_config: Any = None
+        # C3: the human channel a replan asks for approval through (None means
+        # nobody can approve, so a replan is rolled back).
+        self._user_prompt = user_prompt
+        #: A wave asked for a replan; the next round must be that turn.
+        self._replan_pending: str = ""
+        #: Replan turns opened this run (the budget counts attempts).
+        self._replans_opened: int = 0
+        #: The last round was a real wave (``after_round`` updates the wave
+        #: counter only then -- a replan is not a wave).
+        self._last_round_was_wave: bool = True
 
     # ---- lifecycle --------------------------------------------------------
 
@@ -169,9 +190,19 @@ class WaveRunner:
         self._receipted = {entry.step_id for entry in getattr(session, "step_deliveries", [])}
         self._attempted_items = set()
         self._recorded_this_run = set()
+        self._replan_pending = ""
+        self._replans_opened = 0
+        self._last_round_was_wave = True
         return self._receipted
 
     def next_item(self, task: Any, attempted: set[str]) -> WaveItem | None:
+        # C3: a wave asked for a replan -> that turn runs before any new wave.
+        # A finished plan (no open items) has nothing to rewrite: the request
+        # is dropped rather than spending a turn on an empty list.
+        if self._replan_pending:
+            if task.open_items() and self._can_replan():
+                return self._replan_item(self._replan_pending)
+            self._replan_pending = ""
         waves = group_waves(task, size=self._setting_int("plan_wave_size", DEFAULT_WAVE_SIZE))
         for wave in waves:
             signature = self._wave_signature(wave)
@@ -184,7 +215,33 @@ class WaveRunner:
                 # wave would spend a round to do nothing.
                 continue
             return WaveItem(id=signature, wave=wave)
+        # C3: no runnable wave while an open item was never attempted = deadlock
+        # (a missing dependency or a cycle).  Items this run already tried and
+        # left open are "stalled", not deadlocked -- C2's ending stays.
+        if self._deadlocked(task) and self._can_replan():
+            return self._replan_item(
+                "deadlock: 剩余项没有可运行的波（依赖缺失或成环）"
+            )
         return None
+
+    def _can_replan(self) -> bool:
+        return self._replans_opened < self._setting_int("plan_max_replans", 2)
+
+    def _deadlocked(self, task: TaskState) -> bool:
+        open_items = task.open_items()
+        return bool(open_items) and any(
+            item.id not in self._attempted_items for item in open_items
+        )
+
+    def _replan_item(self, reason: str) -> WaveItem:
+        """Consume the pending replan and hand the driver one round for it."""
+        self._replan_pending = ""
+        self._replans_opened += 1
+        return WaveItem(
+            id=f"replan-{self._replans_opened}",
+            wave=Wave(index=0, items=()),
+            replan=reason,
+        )
 
     def no_item(self, task: Any, report: PlanReport) -> None:
         open_items = task.open_items()
@@ -226,13 +283,24 @@ class WaveRunner:
         on_delta: Any,
         observer: Any,
     ) -> None:
+        if item.replan:
+            self._last_round_was_wave = False
+            await self._run_replan(
+                session, task, item, report, console,
+                on_delta=on_delta, observer=observer,
+            )
+            return
+        self._last_round_was_wave = True
         await self._run_wave(
             session, task, item.wave, report, console,
             on_delta=on_delta, observer=observer,
         )
 
     def after_round(self, session: Any, task: Any, report: PlanReport) -> None:
-        task.rounds_run = int(getattr(task, "rounds_run", 0) or 0) + 1
+        # A replan turn is not a wave: the wire's ``roundsRun`` (and the card's
+        # "第 N 波") must keep counting only real waves.
+        if self._last_round_was_wave:
+            task.rounds_run = int(getattr(task, "rounds_run", 0) or 0) + 1
         self._persist(session)
 
     def should_stop(self, report: PlanReport, item: WaveItem) -> bool:
@@ -340,6 +408,14 @@ class WaveRunner:
     ) -> None:
         report.waves += 1
         self._wave_tokens = 0
+        deliveries_start = len(report.deliveries)
+        # C3: the wave is live now -- wave_report becomes callable, the card can
+        # say which wave is running, and a stale report from an earlier wave is
+        # dropped.
+        task.wave_active = True
+        task.wave_items = wave.ids
+        task.wave_report = None
+        self._emit_task(task)
         seed = self._seed(task, wave, report)
         wave_session = self._make_wave_session(parent, task, seed, report)
         started = time.monotonic()
@@ -388,6 +464,16 @@ class WaveRunner:
             self._loop.policy = original_policy
 
         task.wave_note = self._build_wave_note(wave_session, task, wave)
+        task.wave_handoff = self._build_wave_handoff(
+            wave_session, task, wave, report.deliveries[deliveries_start:]
+        ).to_dict()
+        # C3: a model that asked for a replan gets one *before* the next wave
+        # (the trigger is the wave_report, not a blocked ratio).
+        if isinstance(task.wave_report, dict) and task.wave_report.get("needs_replan"):
+            self._replan_pending = "needs_replan: 模型请求重规划剩余项"
+        task.wave_report = None
+        task.wave_active = False
+        task.wave_items = ()
         task.plan_tokens_used = int(getattr(task, "plan_tokens_used", 0) or 0) + self._wave_tokens
         self._persist(parent)
         self._emit_task(task)
@@ -695,7 +781,12 @@ class WaveRunner:
 
     def _seed(self, task: TaskState, wave: Wave, report: PlanReport) -> str:
         lines = [f"[计划标题] {task.goal or '(未命名计划)'}"]
-        if task.wave_note:
+        handoff = WaveHandoff.from_dict(task.wave_handoff)
+        if handoff is not None:
+            # C3: the structured handoff, once per wave (the seed is built once).
+            # A wave that produced none falls back to the mechanical note below.
+            lines += ["", "[上一波交接]", handoff.render()]
+        elif task.wave_note:
             lines += ["", "[上一波交接]", task.wave_note.strip()]
         lines += ["", f"[本波 {report.waves}，共 {len(wave.items)} 项]"]
         for item in wave.items:
@@ -843,6 +934,54 @@ class WaveRunner:
             note = note[: WAVE_NOTE_MAX_CHARS - 1] + "…"
         return note
 
+    def _build_wave_handoff(
+        self,
+        session: SessionData,
+        task: TaskState,
+        wave: Wave,
+        deliveries: list[StepDelivery],
+    ) -> WaveHandoff:
+        """Merge this wave's mechanical facts with the model's report (C3).
+
+        ``done``/``skipped``/``files``/``verify`` come from the executor; the
+        model's ``wave_report`` supplies only interfaces/decisions/pitfalls/
+        hint (``WaveHandoff.build`` enforces that).
+        """
+        done: list[str] = []
+        skipped: list[str] = []
+        for item in wave.items:
+            current = task.get(item.id)
+            if current is None:
+                continue
+            if current.status == "completed":
+                done.append(item.id)
+            elif current.status == "skipped":
+                skipped.append(item.id)
+        verify: list[dict[str, Any]] = []
+        for delivery in deliveries:
+            entry = task.get(delivery.step_id)
+            if entry is None or not entry.verify:
+                continue
+            passed = any(
+                result.get("passed") is True for result in delivery.ac
+            )
+            verify.append(
+                {
+                    "itemId": delivery.step_id,
+                    "command": entry.verify,
+                    "passed": passed,
+                    "tail": _tail(delivery.summary) if not passed else "",
+                }
+            )
+        report = task.wave_report if isinstance(task.wave_report, dict) else None
+        return WaveHandoff.build(
+            done=tuple(done),
+            skipped=tuple(skipped),
+            files=tuple(self._files_touched(session)),
+            verify=tuple(verify),
+            report=report,
+        )
+
     def _files_touched(self, session: SessionData) -> list[str]:
         seen: list[str] = []
         workspace = str(getattr(self._loop, "workspace", "") or "")
@@ -882,6 +1021,178 @@ class WaveRunner:
                 continue
             return current
         return None
+
+    # ---- wave-boundary replan (C3) ---------------------------------------
+
+    async def _run_replan(
+        self,
+        parent: Any,
+        task: TaskState,
+        item: WaveItem,
+        report: PlanReport,
+        console: Any,
+        *,
+        on_delta: Any,
+        observer: Any,
+    ) -> None:
+        """One ephemeral turn that may rewrite the remaining items.
+
+        The model edits with ``todo_write`` only; a human must approve the new
+        list before any work runs on it.  No change, no approval, or no prompt
+        channel -> restore the snapshot and stop: this run never silently
+        re-plans its own plan.
+        """
+        reason = item.replan
+        report.replanned += 1
+        snapshot = deepcopy(task.items)
+        replan_session = self._make_replan_session(parent, task, reason)
+        report.turns_used += 1
+        self._say(console, f"[plan] {reason}；正在重规划剩余项…")
+        try:
+            await self._run_replan_turn(replan_session, task, reason, on_delta, observer)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — a failed replan is a stop, not a crash
+            task.items = snapshot
+            report.stopped = f"replan failed: {exc}"
+            self._persist(parent)
+            self._emit_task(task)
+            return
+        usage = self._last_usage()
+        if usage:
+            report.tokens_used = self._merge_usage(report.tokens_used, usage)
+        task.plan_tokens_used = (
+            int(getattr(task, "plan_tokens_used", 0) or 0)
+            + self._total_tokens(usage)
+        )
+        if not self._items_changed(snapshot, task.items):
+            task.items = snapshot
+            report.stopped = f"{reason}：重规划没有修改剩余项"
+            self._persist(parent)
+            self._emit_task(task)
+            return
+        if not await self._approved(task):
+            task.items = snapshot
+            report.stopped = "replan rejected：等待人工重新规划"
+            self._persist(parent)
+            self._emit_task(task)
+            return
+        self._persist(parent)
+        self._emit_task(task)
+        self._say(console, f"[plan] 已批准重规划（第 {report.replanned} 次）")
+
+    async def _run_replan_turn(
+        self,
+        replan_session: SessionData,
+        task: TaskState,
+        reason: str,
+        on_delta: Any,
+        observer: Any,
+    ) -> None:
+        original = getattr(self._loop, "policy", None)
+        base = self._base_config or getattr(original, "config", None)
+        if original is not None and base is not None:
+            self._loop.policy = TurnPolicy(
+                replace(
+                    base,
+                    max_iterations=max(1, self._setting_int("plan_step_max_iterations", 60)),
+                    stop_policy="natural",
+                    max_auto_continuations=0,
+                )
+            )
+        try:
+            await self._loop.process_input(
+                replan_session,
+                self._replan_prompt(task, reason),
+                on_delta=on_delta,
+                observer=observer,
+            )
+        finally:
+            if original is not None:
+                self._loop.policy = original
+
+    def _make_replan_session(
+        self, parent: Any, task: TaskState, reason: str
+    ) -> SessionData:
+        session = SessionData(
+            session_id=f"plan-replan-{uuid.uuid4().hex[:12]}",
+            title="plan replan",
+            created_time=now_utc(),
+            last_access_time=now_utc(),
+        )
+        session.ephemeral = True
+        session.task = task
+        # Same rule as the wave session: the operator's grants must reach it.
+        session.permissions = [dict(row) for row in getattr(parent, "permissions", ()) or ()]
+        session.agent = "build"
+        session.readonly = False
+        # The one fact ``todo_write`` reads: only open items may change here.
+        session.replan_mode = True
+        session.messages = [
+            ChatMessage(role="user", content=self._replan_prompt(task, reason), timestamp="")
+        ]
+        return session
+
+    @staticmethod
+    def _replan_prompt(task: TaskState, reason: str) -> str:
+        lines = [
+            "[重规划]",
+            f"原因：{reason}",
+            f"目标：{task.goal or '(未命名计划)'}",
+            "剩余未完成项：",
+        ]
+        open_items = task.open_items()
+        if not open_items:
+            lines.append("(没有剩余项)")
+        for item in open_items:
+            dep = f"（依赖 {','.join(item.depends_on)}）" if item.depends_on else ""
+            lines.append(f"{item.id}. {item.content}{dep}")
+        lines += [
+            "",
+            "只允许用 todo_write 调整上面这些未完成项：add 新项、update 现有项、"
+            "或把某项标为 dropped。",
+            "不要执行任何工作，不要改目标；已完成/已跳过/已删除的项不能改。",
+            "如果无需调整，直接回答 NO_REPLAN。",
+        ]
+        return "\n".join(lines)
+
+    async def _approved(self, task: TaskState) -> bool:
+        """Ask the human to approve the rewritten list (C3, fail-closed)."""
+        if self._user_prompt is None:
+            return False
+        ask = getattr(self._user_prompt, "ask", None)
+        if ask is None:
+            return False
+        try:
+            answer = await ask(
+                "计划已重规划：批准新的剩余项并继续执行？",
+                ("继续执行", "停止计划"),
+                detail=task.render_display(),
+                intent="plan_replan",
+            )
+        except Exception:  # noqa: BLE001 — no channel is a refusal, not a crash
+            return False
+        if not bool(getattr(answer, "answered", False)):
+            return False
+        return "继续执行" in str(getattr(answer, "text", "") or "")
+
+    @staticmethod
+    def _items_changed(before: list[TodoItem], after: list[TodoItem]) -> bool:
+        def signature(items: list[TodoItem]) -> list[tuple[Any, ...]]:
+            return [
+                (
+                    item.id,
+                    item.content,
+                    item.status,
+                    tuple(item.depends_on),
+                    item.verify,
+                    tuple(item.files),
+                    item.kind,
+                )
+                for item in items
+            ]
+
+        return signature(before) != signature(after)
 
     # ---- budgets / settings ----------------------------------------------
 

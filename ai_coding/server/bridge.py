@@ -173,20 +173,25 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
         # recovery path (`session.load` -> `task.to_dict()`) already speaks
         # it, so the live card and the recovered card cannot drift.  The
         # reducer drops keys the card does not read.
-        return {
-            "type": "plan.updated",
-            "data": {
-                "goal": task.goal,
-                # G2: the orchestration fields ride along raw -- the sidebar's
-                # goal line reads them; the UI decides the presentation.
-                "armed": bool(task.armed),
-                "armedProfile": task.armed_profile,
-                "roundsRun": int(task.rounds_run),
-                "tokensUsed": int(task.tokens_used),
-                "goalPhase": task.goal_phase,
-                "items": [item.to_dict() for item in task.items],
-            },
+        task_data: dict[str, Any] = {
+            "goal": task.goal,
+            # G2: the orchestration fields ride along raw -- the sidebar's
+            # goal line reads them; the UI decides the presentation.
+            "armed": bool(task.armed),
+            "armedProfile": task.armed_profile,
+            "roundsRun": int(task.rounds_run),
+            "tokensUsed": int(task.tokens_used),
+            "goalPhase": task.goal_phase,
+            "items": [item.to_dict() for item in task.items],
         }
+        # C3: only a live wave adds the block; a task between waves (and every
+        # older client) sees exactly the payload it saw before.
+        if getattr(task, "wave_active", False):
+            task_data["wave"] = {
+                "active": True,
+                "items": list(getattr(task, "wave_items", ()) or ()),
+            }
+        return {"type": "plan.updated", "data": task_data}
     if isinstance(event, LedgerUpdated):
         return {
             "type": "ledger.updated",

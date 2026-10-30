@@ -144,4 +144,7 @@ def tool_context(
         jobs=jobs,
         # M-C1: the turn's write-ahead log (see ``core/write_ahead.py``).
         write_ahead=write_ahead,
+        # C3: the ephemeral replan turn edits what is left; ``todo_write``
+        # refuses terminal items there.
+        replan=bool(getattr(session, "replan_mode", False)),
     )

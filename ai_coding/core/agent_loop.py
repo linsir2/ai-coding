@@ -223,6 +223,17 @@ def _armed_profile(session: Any) -> str:
     return str(getattr(task, "armed_profile", "") or "")
 
 
+def _wave_active(session: Any) -> bool:
+    """Is a plan wave running right now (C3)?
+
+    ``wave_report`` is only meaningful at a wave boundary, so the surface reads
+    this transient fact -- the task is shared by every wave turn, and the
+    executor flips it on entry and off at the boundary.
+    """
+    task = getattr(session, "task", None)
+    return bool(task is not None and getattr(task, "wave_active", False))
+
+
 def _tools_by_origin(registry: ToolRegistry) -> dict[str, int]:
     """Serialised schema chars per origin, biggest first (R7e-3).
 
@@ -476,7 +487,7 @@ class AgentLoop:
         # the provider's prefix cache depend on it).
         self.gate: PermissionGate = gate or PermissionGate()
         self._surface_cache: dict[
-            tuple[str, bool, tuple[Rule, ...], tuple[Rule, ...], str],
+            tuple[str, bool, tuple[Rule, ...], tuple[Rule, ...], str, bool],
             list[dict[str, Any]],
         ] = {}
         # R4a: the tool schemas are part of every prompt, so their size belongs in
@@ -3127,7 +3138,12 @@ class AgentLoop:
             # surface), so the prompt never teaches a tool the request cannot
             # carry. One rule, read twice; no second surface to keep in sync.
             tools=self._prompt_tools(
-                mode, readonly, session_rules, agent_rules, _armed_profile(session)
+                mode,
+                readonly,
+                session_rules,
+                agent_rules,
+                _armed_profile(session),
+                _wave_active(session),
             ),
         )
 
@@ -3138,6 +3154,7 @@ class AgentLoop:
         session_rules: tuple[Rule, ...] = (),
         agent_rules: tuple[Rule, ...] = (),
         armed: str = "",
+        wave_active: bool = False,
     ) -> tuple[str, ...]:
         """The tool names the methods section should speak for.
 
@@ -3145,12 +3162,14 @@ class AgentLoop:
         shorter in plan mode rather than merely different -- and outside the
         planning posture the plan-only tools are gone, so the prompt cannot
         teach a tool the request does not carry.  A wholly denied action is
-        gone for the same reason: the request does not carry it.
+        gone for the same reason: the request does not carry it.  The wave-only
+        tools follow the same rule (C3): the prompt mentions them only while
+        the request carries them.
         """
         return tuple(
             tool.name
             for tool in self._surface_tools(
-                mode, readonly, session_rules, agent_rules, armed
+                mode, readonly, session_rules, agent_rules, armed, wave_active
             )
         )
 
@@ -3161,24 +3180,28 @@ class AgentLoop:
         session_rules: tuple[Rule, ...] = (),
         agent_rules: tuple[Rule, ...] = (),
         armed: str = "",
+        wave_active: bool = False,
     ) -> list[BaseTool]:
         """The tools this request may call, in the registry's own order.
 
-        Four predicates, all about what the request may do: the read-only
+        Five predicates, all about what the request may do: the read-only
         posture drops the mutating tools (the dispatch gate refuses them
         structurally -- 只读探索批次, measured: 3-4 bash collisions per
         planning turn), outside the planning posture the plan-only tools are
         not advertised at all (N1), a wholly denied action is not offered
-        (M1a), and a plan round does not advertise the goal pair: its task is
+        (M1a), a plan round does not advertise the goal pair: its task is
         armed as ``plan``, so ``start_goal``/``update_goal`` could only answer
-        ``no_goal`` (R21 §3).  A scoped denial keeps the tool and refuses at
-        dispatch, where the model can read which resource it hit.
+        ``no_goal`` (R21 §3), and the wave-only tools (C3) are advertised only
+        inside a running plan wave.  A scoped denial keeps the tool and refuses
+        at dispatch, where the model can read which resource it hit.
         """
         tools = list(self.tools.all_tools)
         if armed == "plan":
             tools = [tool for tool in tools if tool.name not in GOAL_TOOL_NAMES]
         if mode != "plan":
             tools = [tool for tool in tools if not tool.plan_only]
+        if not (armed == "plan" and wave_active):
+            tools = [tool for tool in tools if not tool.wave_only]
         if readonly:
             # M3 T5: in the plan posture a mutating tool with a **scoped**
             # allow is reachable (the plan directory), so it must stay in the
@@ -3229,7 +3252,17 @@ class AgentLoop:
         # (a plan round has no running goal), so that fact joins the key --
         # otherwise the first request of a plan run would keep serving the
         # catalogue cached while the same session was just a plain chat.
-        key = (mode, readonly, session_rules, agent_rules, _armed_profile(session))
+        # C3: ``wave_only`` tools appear mid-wave, so that fact joins the key --
+        # otherwise the first request of the wave would keep serving the
+        # catalogue cached from the planning turn.
+        key = (
+            mode,
+            readonly,
+            session_rules,
+            agent_rules,
+            _armed_profile(session),
+            _wave_active(session),
+        )
         schemas = self._surface_cache.get(key)
         if schemas is None:
             schemas = tool_schemas_from_tools(
@@ -3238,6 +3271,7 @@ class AgentLoop:
                     readonly,
                     session_rules,
                     agent_rules,
+                    key[-2],
                     key[-1],
                 )
             )

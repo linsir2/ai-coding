@@ -408,6 +408,46 @@ describe("plan and ledger", () => {
     ])
   })
 
+  test("plan.updated carries the live wave and drops it at the boundary (C3)", () => {
+    const live = feed(
+      initialState(),
+      delta("x"),
+      wire("plan.updated", {
+        goal: "g",
+        items: [{ id: "1", content: "one", status: "in_progress" }],
+        roundsRun: 1,
+        wave: { active: true, items: ["1"] },
+      }),
+    )
+    expect(lastAssistant(live).parts.filter((part) => part.kind === "plan")).toEqual([
+      {
+        kind: "plan",
+        goal: "g",
+        items: [{ id: "1", content: "one", status: "in_progress", verify: "", dependsOn: [] }],
+        rounds: 1,
+        wave: { active: true, items: ["1"] },
+      },
+    ])
+
+    // A boundary emit has no wave block: the card keeps the count, drops 第 N 波.
+    const idle = feed(
+      live,
+      wire("plan.updated", {
+        goal: "g",
+        items: [{ id: "1", content: "one", status: "completed" }],
+        roundsRun: 2,
+      }),
+    )
+    expect(lastAssistant(idle).parts.filter((part) => part.kind === "plan")).toEqual([
+      {
+        kind: "plan",
+        goal: "g",
+        items: [{ id: "1", content: "one", status: "completed", verify: "", dependsOn: [] }],
+        rounds: 2,
+      },
+    ])
+  })
+
   test("plan.updated drops malformed verify/dependsOn instead of guessing", () => {
     // Mirrors planReviewItems ("shapeless entries are dropped, never guessed
     // at"): a non-string verify is "", a non-array dependsOn is [], and

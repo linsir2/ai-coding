@@ -160,6 +160,25 @@ def test_plan_updated_carries_the_structured_list() -> None:
     }
 
 
+def test_plan_updated_carries_the_live_wave_only_while_it_runs() -> None:
+    """C3: the card's "第 N 波" reads a transient block; between waves the
+    payload is byte-for-byte the old one, so an older client is unaffected."""
+    task = TaskState(goal="g")
+    task.add("step one")
+    task.wave_active = True
+    task.wave_items = ("1",)
+
+    wave = to_wire(TaskUpdated(task=task))
+    assert wave is not None
+    assert wave["data"]["wave"] == {"active": True, "items": ["1"]}
+
+    task.wave_active = False
+    task.wave_items = ()
+    idle = to_wire(TaskUpdated(task=task))
+    assert idle is not None
+    assert "wave" not in idle["data"]
+
+
 def test_plan_updated_carries_verify_and_depends_on() -> None:
     """D5: the live card must show what approval will run -- the wire has to
     carry the item's proof command and its dependencies, not just id/content.

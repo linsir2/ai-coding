@@ -82,6 +82,36 @@ def test_the_prompt_speaks_for_the_same_surface(tmp_path):
     assert "update_goal" in goal_armed
 
 
+def test_wave_report_is_advertised_only_inside_a_live_plan_wave(tmp_path):
+    """C3: the handoff tool costs no schema outside the wave boundary."""
+    from ai_coding.tools.wave_report_tool import WaveReportTool
+
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        ScriptedEngine([_text("unused")]),
+        sessions,
+        registry=_registry(WaveReportTool()),
+    )
+    session = sessions.create()
+    task = TaskState(goal="a plan")
+    task.add("one")
+    task.armed = True
+    task.armed_profile = "plan"
+    session.task = task
+
+    assert "wave_report" not in _names(loop._surface_schemas(session))
+
+    task.wave_active = True
+    assert "wave_report" in _names(loop._surface_schemas(session))
+
+    # The cache key carries the transient fact: leaving the wave removes it.
+    task.wave_active = False
+    assert "wave_report" not in _names(loop._surface_schemas(session))
+
+    assert "wave_report" not in loop._prompt_tools("normal", False, (), (), "plan")
+    assert "wave_report" in loop._prompt_tools("normal", False, (), (), "plan", True)
+
+
 def test_an_unarmed_session_offers_them_as_before(tmp_path):
     """The predicate keys on ``armed``; a plain chat is untouched."""
     loop, session = _loop_with_goals(tmp_path)

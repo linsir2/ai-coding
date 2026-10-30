@@ -95,7 +95,8 @@ class TodoWriteTool(BaseTool):
         params: dict[str, Any],
         ctx: ToolContext | None = None,
     ) -> ToolResult:
-        task = resolve_ctx(ctx).task
+        resolved = resolve_ctx(ctx)
+        task = resolved.task
         action = str(params.get("action", "")).strip().lower()
 
         if action == "add":
@@ -119,7 +120,7 @@ class TodoWriteTool(BaseTool):
                     error="readonly_completion",
                     data={"action": "update", "reason": "readonly_session"},
                 )
-            return self._update(params, task)
+            return self._update(params, task, replan=resolved.replan)
         if action == "list":
             return self._ok(task, "list")
         return ToolResult(
@@ -174,7 +175,9 @@ class TodoWriteTool(BaseTool):
         item = task.add(content, depends_on=deps, verify=str(params.get("verify", "") or ""))
         return self._ok(task, "add", item_id=item.id)
 
-    def _update(self, params: dict[str, Any], task: TaskState) -> ToolResult:
+    def _update(
+        self, params: dict[str, Any], task: TaskState, *, replan: bool = False
+    ) -> ToolResult:
         item_id = str(params.get("id", "")).strip()
         if not item_id:
             return ToolResult(
@@ -182,6 +185,31 @@ class TodoWriteTool(BaseTool):
                 output="error: 'id' is required for 'update'",
                 error="missing_id",
             )
+        if replan:
+            # C3: the replan turn rewrites what is left, not the history the
+            # receipts already attest.  A terminal item keeps its status and
+            # its content; a replan may not reopen one either.
+            current = task.get(item_id)
+            if current is not None and current.is_terminal():
+                return ToolResult(
+                    success=False,
+                    output=(
+                        f"error: todo #{item_id} 已完成/已跳过/已删除，重规划不能改它。"
+                        "只调整剩下未完成的项。"
+                    ),
+                    error="replan_terminal_item",
+                    data={"action": "update", "id": item_id},
+                )
+            if str(params.get("status", "")).strip().lower() == "completed":
+                return ToolResult(
+                    success=False,
+                    output=(
+                        "error: 重规划回合只改计划，不执行、不完成条目。"
+                        "需要改就 add/update 剩余项，或直接回答 NO_REPLAN。"
+                    ),
+                    error="replan_not_allowed",
+                    data={"action": "update", "id": item_id},
+                )
         status = params.get("status")
         content = params.get("content")
         evidence = params.get("evidence")

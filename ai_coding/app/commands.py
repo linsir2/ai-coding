@@ -108,6 +108,7 @@ async def handle_input(
     sessions: Any,
     console: ConsoleSink,
     observer: Any = None,
+    user_prompt: Any = None,
 ) -> tuple[REPLAction, Any]:
     """Process a single input line. Plain text runs the loop; slash reacts.
 
@@ -266,7 +267,9 @@ async def handle_input(
             console.info("[skills] no skills found")
         return REPLAction.CONTINUE, session
     if cmd.name == "plan":
-        return await _handle_plan(loop, session, sessions, cmd.raw, console, observer)
+        return await _handle_plan(
+            loop, session, sessions, cmd.raw, console, observer, user_prompt=user_prompt
+        )
     if cmd.name == "agents":
         return _handle_agents(loop, session, sessions, cmd.raw, console, observer)
     if cmd.name == "goal":
@@ -495,7 +498,7 @@ async def _handle_goal(
 
 async def _handle_plan(
     loop: Any, session: Any, sessions: Any, raw: str,
-    console: ConsoleSink, observer: Any,
+    console: ConsoleSink, observer: Any, *, user_prompt: Any = None,
 ) -> tuple[REPLAction, Any]:
     """``/plan [topic|off|run]`` — the command matrix of 18 §10.1.
 
@@ -611,7 +614,7 @@ async def _handle_plan(
         try:
             from ai_coding.core.wave_runner import plan_runner_for
 
-            report = await plan_runner_for(loop).run(
+            report = await plan_runner_for(loop, user_prompt=user_prompt).run(
                 session, console, on_delta=console.delta, observer=observer
             )
             # W2/R02: the run branch used to drop the report, so a plan the

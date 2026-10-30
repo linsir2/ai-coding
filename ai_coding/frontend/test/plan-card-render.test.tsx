@@ -76,6 +76,45 @@ describe("the plan card (20 §批次2)", () => {
     setup.renderer.destroy()
   })
 
+  test("a live wave names itself and the items it covers (C3)", async () => {
+    const setup = await render({
+      role: "assistant",
+      parts: [
+        {
+          kind: "plan",
+          goal: "",
+          items: [
+            { id: "1", content: "当前波", status: "in_progress", verify: "", dependsOn: [] },
+            { id: "2", content: "当前波续", status: "pending", verify: "", dependsOn: [] },
+          ],
+          rounds: 1,
+          wave: { active: true, items: ["1", "2"] },
+        },
+      ],
+    })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("# Todos 0/2 · 第 2 波 · #1,#2 进行中")
+    setup.renderer.destroy()
+  })
+
+  test("between waves the card shows the completed count only (C3)", async () => {
+    const setup = await render({
+      role: "assistant",
+      parts: [
+        {
+          kind: "plan",
+          goal: "",
+          items: [{ id: "1", content: "完成", status: "completed", verify: "", dependsOn: [] }],
+          rounds: 3,
+        },
+      ],
+    })
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("# Todos 1/1 · 3 波")
+    expect(frame).not.toContain("进行中")
+    setup.renderer.destroy()
+  })
+
   test("items show their proof command and dependencies (D5)", async () => {
     // D5: the live card shows what approval will run -- the same second
     // line the review card draws, so the two cards can be checked against

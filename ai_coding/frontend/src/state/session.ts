@@ -52,7 +52,15 @@ export type Part =
        */
       params?: Record<string, unknown>
     }
-  | { kind: "plan"; goal: string; items: PlanItem[] }
+  | {
+      kind: "plan"
+      goal: string
+      items: PlanItem[]
+      /** C3: completed waves this plan run spent (wire ``roundsRun``). */
+      rounds?: number
+      /** C3: the wave running right now; absent between waves. */
+      wave?: { active: boolean; items: string[] }
+    }
   | { kind: "notice"; tone: Tone; text: string; action?: "resume" }
   | { kind: "image"; name: string }
   | { kind: "turn-end"; tone: "error"; text: string }
@@ -912,12 +920,33 @@ export function applyPlanUpdate(
         }
       })
     : []
+  // C3: the wave block is transient -- present only while a wave runs, so the
+  // card's "第 N 波" disappears at the boundary and no replay carries it.
+  const rounds = num(data["roundsRun"])
+  const rawWave = data["wave"]
+  const wave =
+    rawWave && typeof rawWave === "object" && (rawWave as { active?: unknown }).active === true
+      ? {
+          active: true,
+          items: Array.isArray((rawWave as { items?: unknown }).items)
+            ? ((rawWave as { items: unknown[] }).items.filter(
+                (id): id is string => typeof id === "string",
+              ))
+            : [],
+        }
+      : null
   const next = updateAssistant(state, (parts) => {
     const index = parts.findIndex((part) => part.kind === "plan")
     if (!goal && items.length === 0) {
       return index < 0 ? parts : parts.filter((part) => part.kind !== "plan")
     }
-    const plan: Part = { kind: "plan", goal, items }
+    const plan: Part = {
+      kind: "plan",
+      goal,
+      items,
+      ...(rounds > 0 ? { rounds } : {}),
+      ...(wave ? { wave } : {}),
+    }
     if (index < 0) return [...parts, plan]
     const next = parts.slice()
     next[index] = plan

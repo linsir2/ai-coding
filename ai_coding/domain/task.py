@@ -194,6 +194,18 @@ class TaskState:
     #: the goal episode's ``tokens_used`` so the two profiles cannot spend each
     #: other's budget.  Written only when non-zero.
     plan_tokens_used: int = 0
+    #: C3: the last wave's structured handoff (``domain/plan_wave.py``).  One
+    #: consumer -- the next wave's seed -- and only the newest wave is kept.
+    #: Written only when non-empty, like every other optional key.
+    wave_handoff: dict[str, Any] | None = None
+    #: C3 lifetime state, never persisted: a wave is running right now, and
+    #: which item ids it covers.  ``BaseTool.wave_only`` hides ``wave_report``
+    #: until this is True, and the wire's ``wave`` block reads it.
+    wave_active: bool = False
+    wave_items: tuple[str, ...] = ()
+    #: C3: the model's raw ``wave_report`` for the wave in progress.  The
+    #: executor merges it with its own facts at wave end; never persisted.
+    wave_report: dict[str, Any] | None = None
 
     # ---- mutations --------------------------------------------------------
 
@@ -531,6 +543,8 @@ class TaskState:
             data["noProgressResumes"] = int(self.no_progress_resumes)
         if self.wave_note:
             data["waveNote"] = self.wave_note
+        if self.wave_handoff:
+            data["waveHandoff"] = dict(self.wave_handoff)
         if self.plan_tokens_used:
             data["planTokensUsed"] = int(self.plan_tokens_used)
         return data
@@ -561,6 +575,11 @@ class TaskState:
             resume_fingerprint=fingerprint,
             no_progress_resumes=int(data.get("noProgressResumes", 0) or 0),
             wave_note=str(data.get("waveNote", "") or ""),
+            wave_handoff=(
+                dict(data["waveHandoff"])
+                if isinstance(data.get("waveHandoff"), dict)
+                else None
+            ),
             plan_tokens_used=int(data.get("planTokensUsed", 0) or 0),
         )
 
