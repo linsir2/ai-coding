@@ -57,17 +57,20 @@ _EXPLORE_ALLOWED = (
     "history_search",
 )
 
-#: The plan posture's soft tier (M2 T6): the tools that change the world.
-#: These are the six the read-only overlay used to refuse structurally --
-#: one rule set replaces the special case, and the tool surface prunes by
-#: the same rule the gate judges by.
+#: The plan posture's soft tier (M2 T6): the tools a planning turn may not
+#: use.  These are the ones the read-only overlay used to refuse structurally —
+#: one rule set replaces the special case, and the tool surface prunes by the
+#: same rule the gate judges by.
+#:
+#: ``parallel_research`` is deliberately **absent**: it is a read-only fan-out
+#: (children are ``explore`` with a readonly session), and research before a
+#: plan is what planning needs.  ``subagent`` stays denied because it can
+#: target a writable agent, which would widen the plan session's posture
+#: through the back door.
 _PLAN_SOFT_DENY = (
     "edit",
     "shell",
     "subagent",
-    # B0: the fan-out tool delegates to N sub-agents; plan mode does not
-    # delegate (same policy as `subagent`, not a new exception).
-    "parallel_research",
     "webfetch",
     "websearch",
     # M3 T8: the planning list is present_plan's, not todo_write's.  Cutting

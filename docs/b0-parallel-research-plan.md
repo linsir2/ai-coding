@@ -53,7 +53,7 @@ B0 提供一个**只读 fan-out 工具**：一次调用、2–4 个独立问题�
 | 工具基类 / 结果 | `tools/base.py`、`domain/message.py`（`ToolResult/Artifact`） | 标准 `ToolResult` + `data` + `output` | 不造新结果类型 |
 | 并发限流 | `core/subagent.py:206`（信号量） | runner 的 `max_concurrent_subagents` | 不再加 semaphore |
 | 权限门 | `security/permission_gate.py:327-398`（ALLOW 清单） | 加一个 ALLOW 项，避免每调一次弹审批 | 不改门逻辑 |
-| 计划模式策略 | `agents/registry.py:64-75`（`_PLAN_SOFT_DENY`，已禁 `subagent`） | 把 `parallel_research` 一并禁掉 | 不改 plan 语义 |
+| 计划模式策略 | `agents/registry.py:60-80`（`_PLAN_SOFT_DENY`，禁 `subagent`） | **r25 起不再禁 `parallel_research`**：规划阶段也需要调研（见 §13）；`subagent` 仍禁 | 不改 plan 的只读语义 |
 | 工具卡 | `frontend/src/util/toolmeta.ts:16-35` | 加一个中文动词 | 不改渲染 |
 | 并行只读工具批次 | `core/dispatch.py:347-370` | 工具 `parallel_safe=True`，同批可并发 | 不改 dispatcher |
 
@@ -69,7 +69,7 @@ B0 的价值是把这三件事收进一次工具调用，不是重新实现并�
 ```text
 模型一步
   └─ tool_call: parallel_research{questions:[q1..qN], context}
-      └─ ToolDispatcher（ALLOW + parallel_safe；plan 模式被 agent 规则拒）
+      └─ ToolDispatcher（ALLOW + parallel_safe；build 与 plan 都可达）
           └─ ParallelResearchTool.execute
               ├─ 从 ToolContext 取 messages/instructions/permissions → ParentContext
               └─ ResearchFanOut.run(questions, parent, observer, parent_span)
@@ -147,6 +147,15 @@ B0 的价值是把这三件事收进一次工具调用，不是重新实现并�
 失败/无结构时 `facts=None`，原始 `conclusion` 仍保留（`SubagentResult` 已有）。
 `key_files` 必须是仓库相对路径；**不采 `artifacts`**（artifacts 可能是 worktree 内路径）。
 
+**r25 起并入冻结契约**（`docs/subagent-handoff-contract.md`）：
+- 子代理收到的任务文本由 `SubagentBrief.render()` 生成（`[TASK]/[CONTEXT]/[SCOPE]/[CONSTRAINTS]`），
+  不再是本模块手拼散文；非法 brief 在 `_run_one` 里直接返回 `error` packet。
+- schema 调用的返回指令只有一条（JSON），不再叠加中文不确定协议；`confidence`/`notes`
+  由 schema 声明为可选键、`_packet` 优先从 facts 读。
+- `extract_json_facts` 现在执行声明的 `type`/`items.type`：`RESEARCH_SCHEMA` 的
+  `summary: string`、`key_files: array<string>` 真正生效；校验失败会带进
+  `ResearchPacket.schema_valid/schema_errors` 并显示在合并报告里。
+
 ### 4.3 结果
 
 ```python
@@ -193,7 +202,8 @@ data = {
   HEAD 快照——真机上子代理把未跟踪的 `wave_runner.py` 报成「不存在」。所以 fan-out 子代理
   `isolate=False`，直接读当前工作区；真机只读探针验证其工具面只有 `glob/grep/read`。
 - `parallel_research` 加入 `_allow_tools`（否则 unknown tool → WARN → 每次弹审批）。
-- 加入 plan agent 的 `_PLAN_SOFT_DENY`：plan 模式不放开委派，与 `subagent` 一致。
+- **不**加入 plan agent 的 `_PLAN_SOFT_DENY`（r25；见 §13）：规划阶段正是最需要调研的地方。
+  `subagent` 仍被拒——它能指向有写工具的 agent，会把 plan 会话的只读姿态绕开。
 - `explore` 白名单不含 `parallel_research`，子代理不能递归 fan-out。
 
 ## 5. 逐文件改动（最小集）
@@ -206,7 +216,7 @@ data = {
 | 4 | `ai_coding/tools/builder.py` | 在 `include_subagent` 分支注册 `ParallelResearchTool(runner)`（与 `SubAgentTool` 共用同一个 runner；子栈不注册） | 不重复构造 runner |
 | 5 | `ai_coding/domain/subagent.py` | 新增 `SUCCESS_STATUSES`（`{completed, max_iterations}`） | 去掉 `subagent_tool` / fan-out / 工具三处重复定义 |
 | 6 | `ai_coding/security/permission_gate.py` | `_allow_tools` 加 `parallel_research` | 不弹审批 |
-| 7 | `ai_coding/agents/registry.py` | `_PLAN_SOFT_DENY` 加 `parallel_research` | plan 模式不委派 |
+| 7 | `ai_coding/agents/registry.py` | r25：**从** `_PLAN_SOFT_DENY` 移除 `parallel_research`（`subagent` 保留） | 规划阶段可只读调研 |
 | 8 | `ai_coding/frontend/src/util/toolmeta.ts` | `TOOL_VERBS` 加 `parallel_research: "并行调研"` | 工具卡可读 |
 | 9 | `tests/test_subagent_context_mode.py`（**已存在**） | **追加** per-call `task_only` / 未知模式回落 / readonly 工具面用例，不改旧断言 | RIPR 红相 |
 | 10 | `tests/test_research_fanout.py`（新） | 假 runner：并发、部分失败、合并、上限、usage | RIPR 主体 |
@@ -259,7 +269,7 @@ async def execute(self, params, ctx=None) -> ToolResult: ...
 - 一个失败时，另两个结果照常返回，模型能看到 `error` 段；
 - 80 字符目录 + 3×600 字摘要，落在 8k 内；
 - trace 中 3 个 `subagent:research:qX` span 挂在同一个 tool call 下；
-- 没有任何文件被写；plan 模式下调用被 agent 规则拒绝；
+- 没有任何文件被写；plan 模式下同样可调用（只读子代理）；
 - 父回合 token 账不包含子代理，但 `data.usage` 与 trace 能看到真实花费。
 
 ## 7. RIPR（红 → 实现 → 证明 → 重构）
@@ -288,7 +298,7 @@ async def execute(self, params, ctx=None) -> ToolResult: ...
 | U6 | usage：3 个 `{total_tokens: 100}` | 计量 | `data.usage.total_tokens=300`；**不改变** `TurnBooks.tokens_spent` |
 | U7 | ParentContext：messages/instructions/permissions 原样传递 | 上下文 | 假 runner 收到 |
 | U8 | permission gate `decide` 对 `parallel_research` 为 ALLOW | 权限 | 不询问 |
-| U9 | plan agent 规则对 `parallel_research` 为 DENY | 策略 | 拒绝 |
+| U9 | plan agent 规则对 `parallel_research` 为 ALLOW；`subagent` 仍 DENY | 策略 | 见 §13 |
 | U10 | `SubAgentRunner.run(context_mode="task_only", readonly=True)` 覆盖全局；子会话 `readonly=True`、工具面剔除 mutating | 单测 | 现有 `test_subagent_context_mode.py` 追加，假 engine 记录 mode/readonly |
 | U11 | 前端 `toolVerb("parallel_research") === "并行调研"` | UI | 断言 |
 
@@ -315,7 +325,7 @@ async def execute(self, params, ctx=None) -> ToolResult: ...
 | 临时 worktree | **不建**（`isolate=False`，读当前工作区；只读已由 readonly 兜住；真机发现 HEAD 快照看不到未提交文件） |
 | 失败策略 | **部分成功**（单条失败不影响其余） |
 | usage 记账 | **只报告**：`data.usage` + trace；**不纳入 turn/token 预算** |
-| plan 模式 | **拒绝**（与 `subagent` 一致） |
+| plan 模式 | **允许**（只读 fan-out；`subagent` 仍拒） |
 | 默认条数上限 | 4（本文默认，不再问） |
 
 ## 10. 实施顺序（评审通过后）
@@ -343,8 +353,8 @@ async def execute(self, params, ctx=None) -> ToolResult: ...
 | 架构图 | §3 |
 | 最终模样 | §6（模型一次调用、3 条结果、只读、失败隔离、花费可见） |
 
-**已确认决策**：task_only、部分成功、usage 只报告不进预算、plan 模式拒绝、不建 worktree、
-readonly 硬开关、条数上限 4。
+**已确认决策**：task_only、部分成功、usage 只报告不进预算、plan 模式允许只读调研
+（`subagent` 仍拒）、不建 worktree、readonly 硬开关、条数上限 4。
 
 ## 12. 实施与评审结论（2026-10-30）
 
@@ -380,3 +390,41 @@ builder / 权限 ALLOW / plan deny / 前端 label；三个测试文件（含既�
 此时已完成的 packet 会一起丢失——这是 dispatcher「取消即丢弃」的既有语义，`subAgent` 同形；
 工具自己的上限已经按 lane 算够，不会先于子代理预算触发。
 
+
+## 13. r25/B：规划阶段放开只读调研（已实现）
+
+**为什么改**（复研结论）：计划执行回合的波会话是 `agent="build"`、`readonly=False`
+（`core/wave_runner.py:675-694`），主栈工具里有 `parallel_research`，所以**执行阶段**模型本来
+就能自己发起调研并当场读完整报告（≤8k tool result）。真正的缺口在**规划阶段**：
+`_PLAN_SOFT_DENY` 把 `parallel_research`、`webfetch`、`websearch`、`subagent` 全拒了，
+规划时只能串行 read/grep。Claude Code 的 Plan 子代理正是这个形状：plan 模式里用 read-only
+子代理做调研，主会话保持只读。
+
+因此原 C3「执行器代跑调研波」被放弃（它需要把结果跨会话搬运进下一波，通道只有 900 字的
+`wave_note`，必然有损；详见 `docs/c3-research-wave-plan.md` §13）。
+
+**改了什么**：
+- `agents/registry.py`：`_PLAN_SOFT_DENY` 移除 `parallel_research`。`subagent` 保留——
+  它能指向有写工具的 `general`，放开它等于从后门扩大 plan 会话的只读姿态。
+- `core/plan_runner.py`：`PLAN_PROMPT` 增加一句——2–4 个独立只读问题用 `parallel_research`，
+  它并发跑只读子代理并返回一份合并报告。不加这句，提示词仍在说「Explore with read/grep/glob」，
+  模型不会去用它。
+- 测试：`test_parallel_research_tool.py` 的原「plan agent 拒绝本工具」用例按新契约改写为
+  `gate.hides(...) is False` + `gate.check(...) is ALLOW` + `subagent` 仍 `hides`；新增
+  真实请求面用例（驱动一次 plan posture 的 `process_input`，读引擎收到的工具表）：
+  `parallel_research` 在、`subAgent` 不在。
+
+**为什么安全**：fan-out 子代理固定 `agent="explore"` + `readonly=True`（B0 §4.6），
+`explore` 白名单本身只读；plan 会话的 `readonly` 覆盖层仍在，写工具照旧被 dispatch 结构性拒绝。
+`subagent` 依旧被拒，所以规划阶段无法经它拿到写能力。
+
+**已知取舍**：`explore` 白名单含 `webfetch`/`websearch`，所以规划阶段的调研子代理可以联网
+（用户已拍板允许）；plan 主会话自己仍然不能直接联网。规划回合会因此更慢、更贵，是否使用由
+模型按需决定。
+
+**真机**（`config.local.yaml` → dashscope，真实模型）：真实 `AgentLoop` + 真实 registry +
+`session.agent="plan"`、`readonly=True`。请求面 11 个工具，`parallel_research` 在、
+`subAgent` / `bash` 不在、`read` 在。模型在同一回合里先 `read`、再调
+`parallel_research`（2 个问题），拿到 **5500 字符**的合并报告（含两个问题的 id/摘要/关键文件），
+随后写出分工总结并用 `finish_research` 收尾——全程零写入、未提交计划。
+探针脚本在 `/tmp/r25_plan_research_smoke.py`（不进仓库）。

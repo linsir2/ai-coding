@@ -176,11 +176,100 @@ def test_permission_gate_allows_the_tool_without_asking():
     assert gate.check("parallel_research", {}).decision is PermissionDecision.ALLOW
 
 
-def test_the_plan_agent_denies_the_tool():
-    from ai_coding.agents.registry import builtin_catalog
-    from ai_coding.domain.agents import PLAN_AGENT_ID
+def test_the_plan_agent_allows_read_only_research_but_not_delegation():
+    """r25/B: planning needs research; delegation stays out of the plan posture.
 
-    spec = builtin_catalog().get(PLAN_AGENT_ID)
-    assert spec is not None
-    rows = [row for row in spec.permissions if row.get("action") == "parallel_research"]
-    assert rows and all(row.get("effect") == "deny" for row in rows)
+    Pinned on the predicate the tool surface actually prunes with
+    (``PermissionGate.hides``) plus the verdict dispatch would return, not on
+    a catalog row: a row can be edited while the surface still hides the tool.
+    """
+    from ai_coding.agents.registry import builtin_catalog
+    from ai_coding.security.permission_gate import PermissionDecision, PermissionGate
+
+    gate = PermissionGate()
+    rules = builtin_catalog().rules("plan")
+    assert gate.hides("parallel_research", agent_rules=rules, posture="plan") is False
+    assert (
+        gate.check(
+            "parallel_research", {}, agent_rules=rules, posture="plan"
+        ).decision
+        is PermissionDecision.ALLOW
+    )
+    # The generic delegation can target a writable agent, so it stays denied:
+    # allowing it would widen the plan session's read-only posture.
+    assert gate.hides("subagent", agent_rules=rules, posture="plan") is True
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_advertises_the_read_only_fan_out(tmp_path):
+    """r25/B: the real request surface, not just the rule table.
+
+    The catalogue is pruned by ``gate.hides`` inside ``AgentLoop``; a rule
+    change that reached the catalog but not the request would still look
+    right here.  So this drives a real plan-posture turn and reads the tool
+    list the engine was actually given.
+    """
+    from ai_coding.agents.registry import builtin_catalog
+    from ai_coding.ai.engine import ChatEngine
+    from ai_coding.config.models import AIConfig
+    from ai_coding.core.agent_loop import AgentLoop
+    from ai_coding.domain.loop import StepResult
+    from ai_coding.domain.message import ToolResult
+    from ai_coding.service.session_service import SessionService
+    from ai_coding.tools.base import BaseTool
+    from ai_coding.tools.registry import ToolRegistry
+
+    class _Engine(ChatEngine):
+        def __init__(self) -> None:
+            self.surfaces: list[list[dict]] = []
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None):
+            self.surfaces.append(list(tools))
+            return StepResult(text="计划好了", tool_calls=[], finish_reason="stop")
+
+    class _Subagent(BaseTool):
+        mutates_world = False
+        parallel_safe = False
+
+        @property
+        def name(self) -> str:
+            return "subAgent"
+
+        @property
+        def description(self) -> str:
+            return "subAgent"
+
+        @property
+        def params_json_schema(self) -> dict:
+            return {"type": "object", "properties": {}}
+
+        async def execute(self, params, ctx: ToolContext | None = None) -> ToolResult:
+            return ToolResult(success=True)
+
+    class _NoopRunner:
+        timeout_seconds = 1.0
+        max_concurrent = 1
+
+    engine = _Engine()
+    registry = ToolRegistry()
+    registry.register(ParallelResearchTool(runner=_NoopRunner()))
+    registry.register(_Subagent())
+    sessions = SessionService(tmp_path / "sessions")
+    loop = AgentLoop(
+        engine,
+        sessions,
+        registry,
+        settings=AIConfig(),
+        workspace=str(tmp_path),
+        agents=builtin_catalog(),
+    )
+    session = sessions.create()
+    session.agent, session.readonly = "plan", True
+
+    await loop.process_input(session, "调研一下这个仓库")
+
+    names = {schema["function"]["name"] for schema in engine.surfaces[0]}
+    assert "parallel_research" in names
+    # The generic delegation is still cut from the request: this change widens
+    # the plan posture by one read-only tool, nothing else.
+    assert "subAgent" not in names
