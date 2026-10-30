@@ -278,3 +278,159 @@ async def test_completion_event_carries_ledger_pointer(tmp_path):
     assert payload["facts"] == {"failed": [], "passed": 5}
 
 
+
+# ---- r25: the frozen return contract -----------------------------------------
+
+TYPED = {
+    "type": "object",
+    "required": ["summary"],
+    "properties": {
+        "summary": {"type": "string"},
+        "confidence": {"type": "string"},
+        "notes": {"type": "string"},
+    },
+}
+
+
+def test_a_declared_type_is_enforced_not_just_presence():
+    facts, valid, errors = extract_json_facts('{"summary": 123}', TYPED)
+
+    assert facts is None and valid is False
+    assert "summary" in errors[0] and "string" in errors[0]
+    assert "int" in errors[0]
+
+
+def test_array_item_types_are_enforced():
+    schema = {
+        "type": "object",
+        "required": ["key_files"],
+        "properties": {
+            "key_files": {"type": "array", "items": {"type": "string"}}
+        },
+    }
+
+    facts, valid, errors = extract_json_facts('{"key_files": "a.py"}', schema)
+    assert valid is False and "key_files" in errors[0] and "array" in errors[0]
+
+    facts, valid, errors = extract_json_facts('{"key_files": ["a.py", 3]}', schema)
+    assert valid is False and "index 1" in errors[0]
+
+
+def test_undeclared_keys_stay_presence_only():
+    """No ``properties`` in the schema means only required keys are checked."""
+    facts, valid, _ = extract_json_facts('{"failed": [], "passed": "many"}', SCHEMA)
+    assert valid is True and facts == {"failed": [], "passed": "many"}
+
+
+def test_the_packet_wire_carries_its_version():
+    payload = SubagentResult(status="completed").to_dict()
+
+    assert payload["v"] == 1
+    # Every field the old shape had is still there: additive only.
+    assert {
+        "status", "conclusion", "todos", "artifacts", "iterations", "workdir",
+        "ledger_path", "error", "context_mode", "truncated", "exit_reason",
+        "usage", "facts", "schema_valid", "schema_errors", "notes", "confidence",
+    } <= set(payload)
+
+
+@pytest.mark.asyncio
+async def test_a_schema_call_gets_exactly_one_format_instruction():
+    engine = _Engine('{"summary": "ok"}')
+    await _runner(engine).run("look", output_schema=TYPED)
+
+    text = "\n".join(m.content or "" for m in engine.requests[0]["messages"])
+    assert "[response format" in text
+    assert "JSON" in text
+    # The Chinese protocol asks for prose lines after the JSON -- two mutually
+    # exclusive instructions in one request.
+    assert "不确定协议" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_free_form_call_keeps_the_uncertainty_protocol():
+    engine = _Engine("done")
+    await _runner(engine).run("look")
+
+    text = "\n".join(m.content or "" for m in engine.requests[0]["messages"])
+    assert "不确定协议" in text
+    assert "[response format" not in text
+
+
+@pytest.mark.asyncio
+async def test_optional_schema_keys_are_named_for_the_child():
+    """The child never sees the schema object, so optional keys must be named."""
+    engine = _Engine('{"summary": "ok"}')
+    await _runner(engine).run("look", output_schema=TYPED)
+
+    text = "\n".join(m.content or "" for m in engine.requests[0]["messages"])
+    assert "Optional keys" in text
+    assert "confidence" in text and "notes" in text
+
+
+@pytest.mark.asyncio
+async def test_declared_confidence_and_notes_land_on_the_packet():
+    engine = _Engine('{"summary": "ok", "confidence": "low", "notes": "flaky"}')
+    result = await _runner(engine).run("look", output_schema=TYPED)
+
+    assert result.schema_valid is True
+    assert result.confidence == "low"
+    assert result.notes == "flaky"
+
+
+@pytest.mark.asyncio
+async def test_the_packet_keeps_the_raw_status_and_the_adapter_maps_it():
+    """One contract, two adapters: the packet never rewrites ``status``.
+
+    ``subagent`` maps it to its own error vocabulary; the research fan-out
+    (tests/test_research_fanout.py) keeps ``timeout`` verbatim.  Pinning the
+    subagent half here stops the two adapters drifting apart again.
+    """
+    timed_out = SubagentResult(status="timeout", error="child_timeout")
+    tool = SubAgentTool(runner=_CannedRunner(timed_out))
+
+    out = await tool.execute({"task": "t"}, _ctx())
+
+    assert out.data["status"] == "timeout"
+    assert out.data["error"] == "child_timeout"
+    assert out.success is False
+
+
+def test_a_wrong_optional_type_is_dropped_not_fatal():
+    """One malformed optional field must not discard a good summary."""
+    schema = {
+        "type": "object",
+        "required": ["summary"],
+        "properties": {
+            "summary": {"type": "string"},
+            "findings": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    facts, valid, errors = extract_json_facts(
+        '{"summary": "ok", "findings": {"a": 1}}', schema
+    )
+
+    assert valid is False
+    assert facts == {"summary": "ok"}
+    assert "findings" in errors[0] and "array" in errors[0]
+
+
+@pytest.mark.asyncio
+async def test_the_trailer_carries_property_shapes():
+    """Names alone let a real run return ``findings`` as an object."""
+    engine = _Engine('{"summary": "ok"}')
+    await _runner(engine).run("look", output_schema=TYPED)
+
+    text = "\n".join(m.content or "" for m in engine.requests[0]["messages"])
+    assert "summary: string" in text
+    assert "confidence: string" in text and "notes: string" in text
+
+
+def test_array_shapes_are_rendered_for_the_child():
+    from ai_coding.core.research_fanout import RESEARCH_SCHEMA
+    from ai_coding.core.subagent import _format_instruction
+
+    text = _format_instruction(RESEARCH_SCHEMA)
+    assert "summary: string" in text
+    assert "key_files: string[]" in text
+    assert "findings: string[]" in text

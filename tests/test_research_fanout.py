@@ -149,3 +149,57 @@ def test_total_usage_sums_keywise_and_returns_none_when_nobody_reported():
             usage={"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
         ),
     ]) == {"prompt_tokens": 30, "completion_tokens": 15, "total_tokens": 30}
+
+# ---- r25: the frozen brief and the return verdict ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_child_receives_the_frozen_brief_envelope():
+    runner = _Runner([_result()])
+    await ResearchFanOut(runner).run(
+        [ResearchQuestion("q1", "路由在哪注册？", ("app/",))],
+        shared_context="目标：给房间加价格",
+    )
+
+    task = runner.calls[0]["task"]
+    assert task.startswith("[TASK]\n路由在哪注册？")
+    assert "[CONTEXT]\n目标：给房间加价格" in task
+    assert "[SCOPE]\n- app/" in task
+    assert "[CONSTRAINTS]\n- 只读" in task
+    # The format instruction belongs to the runner's schema trailer, not the brief.
+    assert "[response format" not in task
+
+
+@pytest.mark.asyncio
+async def test_an_unfit_brief_is_refused_before_the_child_runs():
+    from ai_coding.domain.subagent import OBJECTIVE_MAX
+
+    runner = _Runner([])
+    packets = await ResearchFanOut(runner).run(
+        [ResearchQuestion("q1", "x" * (OBJECTIVE_MAX + 1))]
+    )
+
+    assert packets[0].status == "error"
+    assert "invalid_brief" in packets[0].error
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_schema_failure_survives_into_the_packet_and_the_report():
+    runner = _Runner([
+        SubagentResult(
+            status="completed",
+            conclusion='{"summary": 123}',
+            facts=None,
+            schema_valid=False,
+            schema_errors=("key 'summary' must be string, got int",),
+        )
+    ])
+    packets = await ResearchFanOut(runner).run([ResearchQuestion("q1", "一")])
+
+    assert packets[0].schema_valid is False
+    assert packets[0].to_dict()["schema_valid"] is False
+
+    report = render_report(packets)
+    assert "结构校验未过" in report
+    assert "must be string" in report

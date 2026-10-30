@@ -23,6 +23,23 @@ if TYPE_CHECKING:
 #: the plan executor cannot drift apart.
 SUCCESS_STATUSES: frozenset[str] = frozenset({"completed", "max_iterations"})
 
+#: Wire version of ``SubagentResult.to_dict()`` (the packet, and the ledger file
+#: written from it).  Compatibility rule: **additive optional fields only**;
+#: adding a required field, removing one, or changing a field's meaning bumps
+#: this number.  Consumers read ``v`` before trusting the shape.
+SUBAGENT_PACKET_VERSION = 1
+
+#: Caps for the structured brief.  One source for every internal caller: the
+#: fan-out and any future plan-side research build the same object, and the
+#: model-facing ``subagent`` tool keeps its free-form string (unchanged).
+OBJECTIVE_MAX = 800
+CONTEXT_MAX = 1_000
+SCOPE_ITEMS_MAX = 10
+SCOPE_ITEM_MAX = 200
+CONSTRAINTS_MAX = 10
+CONSTRAINT_MAX = 200
+BRIEF_MAX = 4_000
+
 
 @dataclass(frozen=True)
 class SubagentTurn:
@@ -51,6 +68,84 @@ class ParentContext:
     #: so without this its gate would see the files and the config but not
     #: what the operator denied in the conversation that spawned it.
     permissions: tuple[Rule, ...] = ()
+
+
+@dataclass(frozen=True)
+class SubagentBrief:
+    """The frozen parent → child brief used by internal callers.
+
+    The model-facing ``subagent`` tool keeps its free-form ``task`` string on
+    purpose (the model writes its own delegation); this object is what our own
+    code produces, so the child sees one deterministic envelope instead of an
+    ad-hoc paragraph per call site.
+
+    ``problems()`` is a refusal list, never a clamp: a caller that cannot fit
+    the caps must shorten the brief itself (silent truncation loses exactly the
+    fact the child needed).  ``render()`` is deterministic and pinned by tests.
+    """
+
+    objective: str
+    scope: tuple[str, ...] = ()
+    context: str = ""
+    constraints: tuple[str, ...] = ()
+
+    def problems(self) -> tuple[str, ...]:
+        """Everything that makes this brief unfit to send (empty = valid)."""
+        issues: list[str] = []
+        objective = self.objective.strip()
+        if not objective:
+            issues.append("objective is required")
+        elif len(objective) > OBJECTIVE_MAX:
+            issues.append(
+                f"objective is longer than {OBJECTIVE_MAX} characters"
+            )
+        if len(self.context.strip()) > CONTEXT_MAX:
+            issues.append(f"context is longer than {CONTEXT_MAX} characters")
+        issues.extend(
+            _list_problems("scope", self.scope, SCOPE_ITEMS_MAX, SCOPE_ITEM_MAX)
+        )
+        issues.extend(
+            _list_problems(
+                "constraints", self.constraints, CONSTRAINTS_MAX, CONSTRAINT_MAX
+            )
+        )
+        rendered = self.render()
+        if len(rendered) > BRIEF_MAX:
+            issues.append(f"brief is longer than {BRIEF_MAX} characters")
+        return tuple(issues)
+
+    def render(self) -> str:
+        """The child's task text: a fixed envelope, sections omitted when empty."""
+        lines = ["[TASK]", self.objective.strip()]
+        context = self.context.strip()
+        if context:
+            lines += ["", "[CONTEXT]", context]
+        if self.scope:
+            lines += ["", "[SCOPE]", *(f"- {item.strip()}" for item in self.scope)]
+        if self.constraints:
+            lines += [
+                "",
+                "[CONSTRAINTS]",
+                *(f"- {item.strip()}" for item in self.constraints),
+            ]
+        return "\n".join(lines)
+
+
+def _list_problems(
+    name: str, values: tuple[str, ...], max_items: int, max_chars: int
+) -> list[str]:
+    issues: list[str] = []
+    if len(values) > max_items:
+        issues.append(f"{name} has more than {max_items} items")
+    for index, value in enumerate(values):
+        text = value.strip()
+        if not text:
+            issues.append(f"{name} item {index + 1} is empty")
+        elif len(text) > max_chars:
+            issues.append(
+                f"{name} item {index + 1} is longer than {max_chars} characters"
+            )
+    return issues
 
 
 @dataclass(frozen=True)
@@ -105,6 +200,7 @@ class SubagentResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "v": SUBAGENT_PACKET_VERSION,
             "status": self.status,
             "conclusion": self.conclusion,
             "todos": [dict(entry) for entry in self.todos],
@@ -131,11 +227,15 @@ def extract_json_facts(
     """Pull a JSON object out of ``text`` and check it against ``schema``.
 
     Forgiving about *shape* (code fences stripped, prose around the object
-    tolerated), strict about *content*: only the ``required`` key list is
-    enforced — every other JSON Schema keyword is ignored by design (a subset
-    interpreter that never pretends to understand ``oneOf``/``pattern``/
-    ``$ref``).  Extra keys are tolerated, values are never coerced: a wrong
-    type is reported, not silently fixed.
+    tolerated), strict about *content*: the ``required`` key list and every
+    declared ``type``/``items.type`` are enforced — every other JSON Schema
+    keyword is ignored by design (a subset interpreter that never pretends to
+    understand ``oneOf``/``pattern``/``$ref``).  Extra keys are tolerated,
+    values are never coerced: a wrong type is reported, not silently fixed.
+
+    A wrong type on a **required** key invalidates the packet (no facts).  A
+    wrong type on an **optional** declared key drops just that key and keeps
+    the rest: one malformed optional field must not discard a good summary.
 
     Returns ``(facts, valid, errors)``.  Callers pass a non-empty schema;
     an empty/missing schema means "no contract requested", not "anything
@@ -164,7 +264,88 @@ def extract_json_facts(
     missing = [key for key in required if key not in parsed]
     if missing:
         return None, False, (f"missing required keys: {', '.join(map(str, missing))}",)
-    return dict(parsed), True, ()
+    # Declared types are checked, undeclared keys stay "presence only".  This is
+    # still not a JSON Schema interpreter (no oneOf/$ref/pattern), but a schema
+    # that says ``summary: string`` must not accept ``{"summary": 123}`` -- the
+    # parent would otherwise get a number where its consumer expects prose.
+    if not isinstance(schema, dict):
+        return dict(parsed), True, ()
+    fatal, optional, dropped = _type_problems(parsed, schema, set(required))
+    if fatal:
+        return None, False, tuple(fatal + optional)
+    kept = {key: value for key, value in parsed.items() if key not in dropped}
+    if optional:
+        return kept, False, tuple(optional)
+    return kept, True, ()
+
+
+_TYPES: dict[str, tuple[type, ...]] = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "array": (list,),
+    "object": (dict,),
+}
+
+
+def _type_problems(
+    data: dict[str, Any], schema: dict[str, Any], required: set[str]
+) -> tuple[list[str], list[str], set[str]]:
+    """``(fatal, optional, dropped)`` type mismatches for declared properties.
+
+    A required key's wrong type is fatal (the caller returns no facts); an
+    optional key's wrong type is dropped and reported, so a good required
+    payload survives one malformed optional field.
+    """
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict):
+        return [], [], set()
+    fatal: list[str] = []
+    optional: list[str] = []
+    dropped: set[str] = set()
+
+    def note(key: str, message: str) -> None:
+        if key in required:
+            fatal.append(message)
+        else:
+            optional.append(message)
+            dropped.add(key)
+
+    for key, spec in properties.items():
+        if key not in data or not isinstance(spec, dict):
+            continue
+        expected = spec.get("type")
+        if not isinstance(expected, str) or expected not in _TYPES:
+            continue
+        value = data[key]
+        if expected in ("integer", "number") and isinstance(value, bool):
+            note(key, f"key {key!r} must be {expected}, got bool")
+            continue
+        if not isinstance(value, _TYPES[expected]):
+            note(key, f"key {key!r} must be {expected}, got {type(value).__name__}")
+            continue
+        if expected != "array" or not isinstance(value, list):
+            continue
+        items = spec.get("items")
+        item_type = items.get("type") if isinstance(items, dict) else None
+        if not isinstance(item_type, str) or item_type not in _TYPES:
+            continue
+        for index, entry in enumerate(value):
+            if item_type in ("integer", "number") and isinstance(entry, bool):
+                note(
+                    key,
+                    f"key {key!r} items must be {item_type}; index {index} is bool",
+                )
+                break
+            if not isinstance(entry, _TYPES[item_type]):
+                note(
+                    key,
+                    f"key {key!r} items must be {item_type}; "
+                    f"index {index} is {type(entry).__name__}",
+                )
+                break
+    return fatal, optional, dropped
 
 
 def _strip_fences(text: str) -> str:

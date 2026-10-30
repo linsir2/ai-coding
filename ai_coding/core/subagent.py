@@ -664,9 +664,15 @@ class SubAgentRunner:
             # is needed for the child to see it.
             child_task = task
             if output_schema:
-                child_task = task + _format_instruction(output_schema)
-            # F4: append uncertainty protocol
-            child_task += _UNCERTAINTY_PROTOCOL
+                # One format instruction, never two: the JSON trailer and the
+                # Chinese uncertainty protocol used to be appended together,
+                # which is a contradiction ("JSON and nothing else" vs "append
+                # four prose lines").  A schema call ends with JSON; the
+                # confidence/notes the protocol used to collect are read from
+                # the facts when the schema declares them (``_packet``).
+                child_task += _format_instruction(output_schema)
+            else:
+                child_task += _UNCERTAINTY_PROTOCOL
             await run_with_deadline(
                 loop.process_input(session, child_task),
                 timeout=self._timeout,
@@ -738,8 +744,15 @@ class SubAgentRunner:
             facts, schema_valid, schema_errors = extract_json_facts(
                 conclusion, output_schema
             )
-        # F4: extract notes and confidence from conclusion
+        # F4: extract notes and confidence from conclusion.  A schema call has
+        # no prose tail (see the format trailer), so declared optional facts win:
+        # the caller asks for what it needs in the schema it already owns.
         notes, confidence = _extract_notes_and_confidence(conclusion)
+        if facts:
+            if isinstance(facts.get("confidence"), str) and facts["confidence"].strip():
+                confidence = facts["confidence"].strip().lower()
+            if isinstance(facts.get("notes"), str) and facts["notes"].strip():
+                notes = facts["notes"].strip()
         result = SubagentResult(
             status=status,
             conclusion=conclusion,
@@ -834,20 +847,51 @@ def _with_ledger(result: SubagentResult, root: Path | None) -> SubagentResult:
 
 
 def _format_instruction(schema: dict[str, Any]) -> str:
-    """The machine contract trailer appended to the child's task text (R1-3)."""
+    """The machine contract trailer appended to the child's task text (R1-3).
+
+    The child never sees the schema object, so the trailer has to carry enough
+    of it: names **and** shapes.  A required key list alone is what let a real
+    run return ``findings`` as an object while the schema said ``string[]``.
+    """
+    properties = schema.get("properties") if isinstance(schema, dict) else None
     required = schema.get("required", []) if isinstance(schema, dict) else []
-    keys = ", ".join(map(str, required)) if isinstance(required, list) else ""
+    required_keys = list(required) if isinstance(required, list) else []
+    shapes = properties if isinstance(properties, dict) else {}
+    required_desc = ", ".join(
+        f"{key}: {_shape(shapes.get(key))}" for key in required_keys
+    ) or ", ".join(map(str, required_keys))
+    optional = [str(key) for key in shapes if key not in required_keys]
     lines = [
         "",
         "",
         "[response format — machine contract, not prose]",
         "Return your conclusion as a JSON object"
-        + (f" with these required keys: {keys}." if keys else "."),
+        + (f" with these required keys: {required_desc}." if required_desc else "."),
         "Output the JSON object and nothing else (no code fences, no commentary).",
         "If you cannot produce valid JSON, still write your conclusion as plain "
         "text — partial work is never discarded.",
     ]
+    if optional:
+        # Optional properties are how a caller asks for confidence/notes (or
+        # findings) now: the child only sees this trailer, not the schema
+        # itself, so they have to be named with their shape or they will never
+        # be filled correctly.
+        described = ", ".join(f"{key}: {_shape(shapes.get(key))}" for key in optional)
+        lines.insert(
+            -1, f"Optional keys, when you can fill them: {described}."
+        )
     return "\n".join(lines)
+
+
+def _shape(spec: Any) -> str:
+    """A compact type hint for one property (``string[]``, ``object``, …)."""
+    if not isinstance(spec, dict):
+        return "any"
+    kind = spec.get("type")
+    if kind == "array":
+        items = spec.get("items")
+        return f"{(items.get('type') if isinstance(items, dict) else None) or 'any'}[]"
+    return str(kind or "any")
 
 
 __all__ = ["SubAgentRunner"]

@@ -19,7 +19,12 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from ai_coding.domain.subagent import SUCCESS_STATUSES, ParentContext, SubagentResult
+from ai_coding.domain.subagent import (
+    SUCCESS_STATUSES,
+    ParentContext,
+    SubagentBrief,
+    SubagentResult,
+)
 
 __all__ = [
     "CHILD_TIMEOUT_GRACE",
@@ -76,6 +81,11 @@ class ResearchPacket:
     usage: dict[str, int] | None = None
     error: str = ""
     truncated: bool = False
+    #: Did the child's JSON payload match the frozen research schema?  ``None``
+    #: means the child returned no facts at all (prose fallback) — the parent
+    #: must be able to tell "shape failed" from "nothing structured was asked".
+    schema_valid: bool | None = None
+    schema_errors: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -87,6 +97,8 @@ class ResearchPacket:
             "usage": dict(self.usage) if self.usage is not None else None,
             "error": self.error,
             "truncated": self.truncated,
+            "schema_valid": self.schema_valid,
+            "schema_errors": list(self.schema_errors),
         }
 
 
@@ -128,9 +140,19 @@ class ResearchFanOut:
         parent_span: str,
     ) -> ResearchPacket:
         brief = _brief(question, shared_context)
+        problems = brief.problems()
+        if problems:
+            # The brief is the frozen input contract: an unfit one is refused
+            # here, before a child is spawned (the tool validates its own
+            # params, but a future internal caller bypasses the tool).
+            return ResearchPacket(
+                id=question.id,
+                status="error",
+                error="invalid_brief: " + "; ".join(problems),
+            )
         try:
             result = await self._runner.run(
-                brief,
+                brief.render(),
                 f"research:{question.id}",
                 # A read-only child has nothing to isolate *from*: `readonly`
                 # already removes every mutating tool, and a worktree would
@@ -155,18 +177,14 @@ class ResearchFanOut:
         return _packet(question.id, result)
 
 
-def _brief(question: ResearchQuestion, shared_context: str) -> str:
-    """The child's whole world in ``task_only`` mode."""
-    lines = ["你是只读调研子代理（explore）。不要写文件、不要运行命令。"]
-    if shared_context:
-        lines.append(f"背景/约束：{shared_context}")
-    lines.append(f"问题：{question.question}")
-    if question.scope:
-        lines.append("优先范围：" + ", ".join(question.scope))
-    lines.append(
-        "只返回 JSON：summary（结论）、key_files（仓库相对路径）、findings（要点列表）。"
+def _brief(question: ResearchQuestion, shared_context: str) -> SubagentBrief:
+    """The frozen parent → child brief (one envelope for every question)."""
+    return SubagentBrief(
+        objective=question.question,
+        scope=question.scope,
+        context=shared_context,
+        constraints=("只读：不要写文件、不要运行命令。",),
     )
-    return "\n".join(lines)
 
 
 def _packet(question_id: str, result: SubagentResult) -> ResearchPacket:
@@ -204,6 +222,10 @@ def _packet(question_id: str, result: SubagentResult) -> ResearchPacket:
         # see.  Before, only the child's own ``truncated`` flag was carried, so
         # a 600-char summary and a dropped third finding looked complete.
         truncated=bool(result.truncated) or cut,
+        # The frozen return contract's verdict must survive the fan-out: a child
+        # that answered a different shape is not a complete answer.
+        schema_valid=result.schema_valid,
+        schema_errors=tuple(result.schema_errors),
     )
 
 
@@ -222,6 +244,9 @@ def render_report(packets: list[ResearchPacket]) -> str:
             lines.append(f"- {finding}")
         if packet.error:
             lines.append(f"错误：{packet.error}")
+        if packet.schema_valid is False:
+            miss = "; ".join(packet.schema_errors) or "unparseable conclusion"
+            lines.append(f"⚠ 结构校验未过（{miss}），已保留原文")
         for path in packet.key_files:
             if path not in seen_files:
                 seen_files.append(path)

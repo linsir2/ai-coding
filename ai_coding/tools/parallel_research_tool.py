@@ -27,17 +27,20 @@ from ai_coding.core.research_fanout import (
     total_usage,
 )
 from ai_coding.domain.message import ToolResult
-from ai_coding.domain.subagent import SUCCESS_STATUSES, ParentContext
+from ai_coding.domain.subagent import (
+    CONTEXT_MAX,
+    OBJECTIVE_MAX,
+    SCOPE_ITEM_MAX,
+    SCOPE_ITEMS_MAX,
+    SUCCESS_STATUSES,
+    ParentContext,
+)
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 __all__ = ["ParallelResearchTool"]
 
 _MAX_QUESTIONS = 4
 _MIN_QUESTIONS = 2
-_MAX_QUESTION_CHARS = 800
-_MAX_CONTEXT_CHARS = 1_000
-_MAX_SCOPE_ITEMS = 10
-_MAX_SCOPE_ITEM_CHARS = 200
 
 
 class ParallelResearchTool(BaseTool):
@@ -194,11 +197,11 @@ def _parse_questions(
     if raw_context is not None:
         if not isinstance(raw_context, str):
             return None, "bad_questions", "'context' must be a string"
-        if len(raw_context) > _MAX_CONTEXT_CHARS:
+        if len(raw_context) > CONTEXT_MAX:
             return (
                 None,
                 "context_too_long",
-                f"'context' must be at most {_MAX_CONTEXT_CHARS} characters",
+                f"'context' must be at most {CONTEXT_MAX} characters",
             )
 
     used: set[str] = set()
@@ -209,11 +212,11 @@ def _parse_questions(
         text = entry.get("question")
         if not isinstance(text, str) or not text.strip():
             return None, "bad_questions", f"question {index + 1} needs 'question'"
-        if len(text) > _MAX_QUESTION_CHARS:
+        if len(text) > OBJECTIVE_MAX:
             return (
                 None,
                 "bad_questions",
-                f"question {index + 1} is longer than {_MAX_QUESTION_CHARS} characters",
+                f"question {index + 1} is longer than {OBJECTIVE_MAX} characters",
             )
         raw_id = entry.get("id")
         if raw_id is None:
@@ -232,8 +235,8 @@ def _parse_questions(
         if not isinstance(raw_scope, list):
             return None, "bad_questions", f"question {index + 1} 'scope' must be an array"
         scope = tuple(
-            str(item).strip()[:_MAX_SCOPE_ITEM_CHARS]
-            for item in raw_scope[:_MAX_SCOPE_ITEMS]
+            str(item).strip()[:SCOPE_ITEM_MAX]
+            for item in raw_scope[:SCOPE_ITEMS_MAX]
             if str(item).strip()
         )
         used.add(question_id)
