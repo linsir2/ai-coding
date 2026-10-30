@@ -424,6 +424,7 @@ class WaveRunner:
         self._base_config = original_policy.config
         attempts_cap = self._attempts_cap()
         self._say(console, f"[plan] 第 {report.waves} 波（{len(wave.items)} 项）")
+        completed = False
         try:
             while True:
                 ready = self._next_ready(task, wave)
@@ -460,8 +461,17 @@ class WaveRunner:
                 await self._settle_extra_completions(
                     wave_session, parent, task, wave, report, observer,
                 )
+            completed = True
         finally:
             self._loop.policy = original_policy
+            if not completed:
+                # Esc/cancel (or any exception) skips the wave-end block below.
+                # These facts are transient, but the run's closing emit would
+                # otherwise advertise a wave that no longer exists, and a reused
+                # task would keep wave_report advertised.
+                task.wave_active = False
+                task.wave_items = ()
+                task.wave_report = None
 
         task.wave_note = self._build_wave_note(wave_session, task, wave)
         task.wave_handoff = self._build_wave_handoff(
@@ -797,6 +807,7 @@ class WaveRunner:
             "",
             "按上面的顺序做；每完成一项就停下等验收；不要做本波之外的条目。",
             "完成后用 todo_write 标记 completed；做不了就标 blocked 并说明缺什么。",
+            "本波收尾前调用一次 wave_report，交接口/决定/坑与下一波提示（没有可写就跳过）。",
         ]
         return "\n".join(lines)
 
@@ -1051,6 +1062,11 @@ class WaveRunner:
         try:
             await self._run_replan_turn(replan_session, task, reason, on_delta, observer)
         except asyncio.CancelledError:
+            # The turn may already have rewritten the list through todo_write;
+            # an unapproved rewrite must not survive the cancel.
+            task.items = snapshot
+            self._persist(parent)
+            self._emit_task(task)
             raise
         except Exception as exc:  # noqa: BLE001 — a failed replan is a stop, not a crash
             task.items = snapshot
@@ -1125,7 +1141,10 @@ class WaveRunner:
         # Same rule as the wave session: the operator's grants must reach it.
         session.permissions = [dict(row) for row in getattr(parent, "permissions", ()) or ()]
         session.agent = "build"
-        session.readonly = False
+        # C3: "only todo_write, never execute" is structural, not a prompt
+        # request.  todo_write is non-mutating, so the read-only posture keeps
+        # it (and read/grep/glob); write/edit/bash are dropped by the gate.
+        session.readonly = True
         # The one fact ``todo_write`` reads: only open items may change here.
         session.replan_mode = True
         session.messages = [

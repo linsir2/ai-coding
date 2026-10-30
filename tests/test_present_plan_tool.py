@@ -125,8 +125,42 @@ async def test_keep_planning_carries_the_feedback_back():
     r = await tool.execute(_plan_call("# p"), _ctx())
     # R08: keep is a tool error (the model redoes it in the same turn).
     assert r.success is False and r.error == "plan_keep"
-    assert r.data == {"approved": False}
+    assert r.data == {"approved": False, "reviewed": True}
     assert "第 3 步拆细" in r.output
+
+
+@pytest.mark.asyncio
+async def test_keep_without_feedback_is_a_hold_and_ends_the_turn():
+    """C3: the card's "继续规划" with an empty input gave the model nothing to
+    revise with; looping on it burned the whole planning budget (measured:
+    25 review cards, MAX_ITERATIONS).  It is the same "not now" as esc: a
+    dismissal, so the loop's existing dismissal branch ends the turn."""
+    tool, _ = _tool(UserAnswer(answered=True, text='{"choice":"keep"}'))
+    conclusion = TurnConclusion()
+    ctx = _ctx(items=0)
+    ctx.conclusion = conclusion
+
+    r = await tool.execute(_plan_call("# p"), ctx)
+
+    assert r.success is True
+    assert r.data == {"approved": False, "dismissed": True, "reviewed": True}
+    assert conclusion.dismissed is True
+    assert ctx.task.items == [] and ctx.task.armed is False
+
+
+@pytest.mark.asyncio
+async def test_the_plain_keep_label_is_also_a_hold():
+    """The CLI path sends plain words; the option's own label must not be
+    mistaken for feedback (that was the plain-text half of the same loop)."""
+    tool, _ = _tool(UserAnswer(answered=True, text="继续规划"))
+    conclusion = TurnConclusion()
+    ctx = _ctx(items=0)
+    ctx.conclusion = conclusion
+
+    r = await tool.execute(_plan_call("# p"), ctx)
+
+    assert r.success is True and r.data["dismissed"] is True
+    assert conclusion.dismissed is True
 
 
 @pytest.mark.asyncio
@@ -134,7 +168,7 @@ async def test_a_plain_text_reply_is_treated_as_feedback():
     tool, _ = _tool(UserAnswer(answered=True, text="把验收去掉"))
     r = await tool.execute(_plan_call("# p"), _ctx())
     assert r.success is False and r.error == "plan_keep"
-    assert r.data == {"approved": False}
+    assert r.data == {"approved": False, "reviewed": True}
     assert "把验收去掉" in r.output
 
 
@@ -419,7 +453,7 @@ async def test_keep_planning_does_not_write_the_items():
         {"plan": "# p", "items": [{"content": "建目录"}]}, ctx
     )
     assert r.success is False and r.error == "plan_keep"
-    assert r.data == {"approved": False}
+    assert r.data == {"approved": False, "reviewed": True}
     assert ctx.task.items == []
 
 

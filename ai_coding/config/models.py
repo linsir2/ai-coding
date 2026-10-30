@@ -491,8 +491,9 @@ class AIConfig(BaseModel):
     #: Episode-wide token ceiling for one plan run, counted across waves;
     #: 0 disables.  Kept separate from ``goal_token_budget`` on purpose.
     plan_token_budget: int = 0
-    #: Wave rewrites one run may perform (deadlock / needs_replan); 0 disables
-    #: replanning.  Reserved for C3; the wave runner reads it once replan lands.
+    #: Replan *attempts* one run may open (deadlock / needs_replan); 0 disables
+    #: replanning.  Counted per attempt, approved or not: a failed or refused
+    #: rewrite must not let the same cause retry forever (C3).
     plan_max_replans: int = 2
     # D-4: episode-wide round ceiling for one armed goal; 0 disables.  Was a
     # phantom until 2026-10-17: the runner read it duck-typed while this class

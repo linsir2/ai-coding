@@ -79,6 +79,13 @@ DEAD_BUDGET_PATHS = frozenset({"clock", "token"})
 #: the card) now ends the turn at the batch -- the operator said "not now",
 #: and this line says what that meant: nothing submitted, nothing executed.
 PLAN_DISMISSED_NOTE = "[plan] 评审已搁置：本回合结束（计划未提交、未执行）。"
+#: C3: the note a turn leaves when a plan *was* shown but the human kept
+#: planning and the turn ended before another review (the model stopped after
+#: a revision, or a budget mouth arrived).  Saying "未提交" here was a lie:
+#: the review card had been on screen.
+PLAN_HELD_NOTE = (
+    "[plan] 评审未批准：本回合结束（计划未执行）；调整后可再次提交。"
+)
 #: N1: the terminal note a research conclusion leaves.  The other exit of a
 #: plan-mode turn: the conclusion is the answer, so the turn ends with it --
 #: no plan, nothing armed, nothing executed.
@@ -248,6 +255,11 @@ class TurnSnapshot:
     #: submitted this turn (``present_plan`` succeeded), and the one remedy
     #: nudge has been spent.  Defaults keep earlier constructions identical.
     plan_submitted: bool = False
+    #: C3/R08: a plan reached the review (the human saw the card), even if the
+    #: answer was keep.  The guard must not nag "submit a plan" or report
+    #: "never submitted" after that -- and keep-with-feedback still means the
+    #: model may revise in-turn; this fact only stops the false chase.
+    plan_reviewed: bool = False
     plan_nudged: bool = False
     #: N1: the human approved a plan this turn.  The approval is the plan
     #: exit's *success* (占位 = 成功), and it is the fact the guard needs: a
@@ -295,6 +307,11 @@ class PlanSubmissionGuard:
     approved is this turn's exit (占位 = 成功), and a review the human
     dismissed is not a submission — so neither of them is asked for again.
 
+    C3: a plan the human *kept* did reach the review, even though the tool
+    returned an error (keep is not a submission).  The guard ends that turn
+    with the held note instead of chasing a second submission and, later,
+    claiming the plan was never submitted.
+
     A4: the guard is asked on *every* mouth that ends a plan turn, not only
     on the model's own stop.  The mouth decides whether a remedy is worth
     anything: on the clock and the token ceiling the wall is right there
@@ -307,6 +324,13 @@ class PlanSubmissionGuard:
     def on_stop(self, snapshot: TurnSnapshot) -> TurnDecision | None:
         if snapshot.plan_approved or snapshot.plan_submitted:
             return None
+        # C3: a plan reached the review.  The human said "keep planning", so
+        # there is nothing to chase -- the turn ends with the held note (the
+        # model did what the guard exists to require).
+        if snapshot.plan_reviewed:
+            return TurnDecision(
+                TurnAction.FINISH, "plan review held", note=PLAN_HELD_NOTE
+            )
         if snapshot.plan_nudged or snapshot.budget_path in DEAD_BUDGET_PATHS:
             return TurnDecision(
                 TurnAction.FINISH, "plan unsubmitted", note=PLAN_UNSUBMITTED_NOTE
@@ -361,7 +385,11 @@ class TurnPolicy:
         token_gate = bool(self.config.max_turn_tokens) and (
             snapshot.tokens_spent >= self.config.max_turn_tokens
         )
-        if snapshot.mode == "plan" and not snapshot.plan_nudged:
+        if (
+            snapshot.mode == "plan"
+            and not snapshot.plan_nudged
+            and not snapshot.plan_reviewed
+        ):
             # The budget's edge is the last chance to ask for an exit while
             # the model still has something to hand over -- and it is asked
             # before the iteration ceiling on purpose: the round that hits

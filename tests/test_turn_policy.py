@@ -11,6 +11,7 @@ from ai_coding.config.models import AIConfig
 from ai_coding.core import interventions
 from ai_coding.core.interventions import TASK_GATE_LEAD
 from ai_coding.core.turn_policy import (
+    PLAN_HELD_NOTE,
     TASK_MESSAGE_LEAD,
     TaskInjection,
     TurnAction,
@@ -174,6 +175,18 @@ def test_after_step_stops_asking_after_one_remedy():
         TurnSnapshot(iteration=1, open_items=(_item("1"),), plan_nudged=True, mode="plan")
     )
     assert (decision.action, decision.reason) == (TurnAction.FINISH, "plan unsubmitted")
+
+
+def test_a_kept_review_ends_the_turn_with_the_held_note():
+    """C3: the human saw the card and said "keep planning"; chasing another
+    submission is wrong, and the note must not claim nothing was submitted."""
+    decision = TurnPolicy(_config()).decide_after_step(
+        TurnSnapshot(iteration=1, mode="plan", plan_reviewed=True)
+    )
+
+    assert (decision.action, decision.reason) == (TurnAction.FINISH, "plan review held")
+    assert decision.note == PLAN_HELD_NOTE
+    assert decision.inject is None
 
 
 def test_readonly_alone_never_asks_for_a_plan():

@@ -111,13 +111,15 @@ TaskDriver（core/task_driver.py:78-140）
 **流程**：
 
 1. **快照**：`saved_items = copy.deepcopy(task.items)`（只快照条目；handoff 不受影响）。
-2. **重规划回合**：`_run_replan` 新建 ephemeral 会话（同 `_make_wave_session` 的构造），
+2. **重规划回合**：`_run_replan` 新建 ephemeral **只读**会话（`readonly=True`；
+   `todo_write` 是 `mutates_world=False`，只读姿态下仍可用，write/edit/bash 被结构性拿掉），
    seed = 目标 + 当前 open 项 + 触发原因（deadlock / 模型的 needs_replan / 失败摘要）；
    policy = `plan_step_max_iterations` / `natural` / `max_auto_continuations=0`；
    提示词：**只允许**用 `todo_write` 改剩余项（add / update open 项 / drop open 项），
    不得执行工作、不得改目标；没有要改的就回答 `NO_REPLAN`。
    - 会话带 `replan_mode=True`（瞬态）；`todo_write` 在该上下文里只允许操作**非终态**条目，
      拒绝 `completed`/`skipped`，拒绝把终态改回 pending。
+   - 该回合被取消（Esc）时同样恢复快照再抛出，未批准的重写不落盘。
 3. **无改动**（模型回答 `NO_REPLAN` 或列表未变）：`report.stopped =
    "needs_replan: 模型没有修改剩余项"`，本轮结束（不需要麻烦人）。
 4. **有改动** → 通过注入的 `user_prompt` 问人：
@@ -171,7 +173,7 @@ TaskDriver（core/task_driver.py:78-140）
 set wave_active=False → emit plan.updated
 next_item：
   ├─ pending / deadlock 且 replanned < cap → WaveItem(replan=reason)
-  │    └─ _run_replan：ephemeral 会话 → todo_write 改剩余项 → plan.updated
+  │    └─ _run_replan：ephemeral 只读会话 → todo_write 改剩余项 → plan.updated
   └─ 否则 → 正常 WaveItem
 下一波 seed：task.wave_handoff.render()（结构化，一次性）或 wave_note
 ```

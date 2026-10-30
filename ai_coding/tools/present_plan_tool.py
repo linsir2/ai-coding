@@ -29,9 +29,6 @@ _APPROVED = (
     "计划已批准：执行由系统接管（前端将自动开始执行）。请简短收尾，不要开始执行。"
 )
 _KEEP = "用户选择继续规划。反馈：{feedback}。修改计划后再次调用 present_plan。"
-_KEEP_NO_FEEDBACK = (
-    "用户选择继续规划，未给出反馈：请询问要修改什么，或先修订后再次调用 present_plan。"
-)
 _HOLD = (
     "用户搁置了这次评审：本轮到此结束，不会执行任何计划。"
     "保持计划模式，等待用户的下一步指示。"
@@ -347,19 +344,27 @@ class PresentPlanTool(BaseTool):
             return ToolResult(success=True, output=_APPROVED, data={"approved": True})
         # R08 (dsh): keep is a tool error carrying the feedback -- the model
         # revises and resubmits in the same turn; an error (not a success)
-        # is what stops it from counting as a submission.
+        # is what stops it from counting as a submission.  ``reviewed`` tells
+        # the turn guard that a plan *was* shown (the guard must not chase a
+        # submission that already happened).
         if feedback:
             return ToolResult(
                 success=False,
                 output=_KEEP.format(feedback=feedback),
                 error="plan_keep",
-                data={"approved": False},
+                data={"approved": False, "reviewed": True},
             )
+        # C3: keep with no feedback gives the model nothing to revise with.
+        # Looping would just resubmit the same plan and burn the planning
+        # budget (measured: 25 review cards, MAX_ITERATIONS); the button
+        # means "not now", which is exactly the dismissal contract -- same
+        # result as esc, same turn-ending branch in the loop.
+        if conclusion is not None:
+            conclusion.dismissed = True
         return ToolResult(
-            success=False,
-            output=_KEEP_NO_FEEDBACK,
-            error="plan_keep",
-            data={"approved": False},
+            success=True,
+            output=_HOLD,
+            data={"approved": False, "dismissed": True, "reviewed": True},
         )
 
     async def _proof_problem(
@@ -438,4 +443,8 @@ def _parse_answer(text: str) -> tuple[str, str]:
             pass
     if raw == "开始执行":
         return "approve", ""
+    if raw == "继续规划":
+        # The card's own label, typed as plain text (the CLI path): the human
+        # picked the option without adding feedback -- a hold, not feedback.
+        return "keep", ""
     return "keep", raw

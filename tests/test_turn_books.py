@@ -23,10 +23,11 @@ def _outcome(
     output: str = "",
     halted: bool = False,
     params: dict | None = None,
+    data: dict | None = None,
 ) -> DispatchOutcome:
     return DispatchOutcome(
         call=ToolCall(id=f"c-{name}", name=name, params=params or {}),
-        result=ToolResult(success=success, output=output, error=error),
+        result=ToolResult(success=success, output=output, error=error, data=data or {}),
         denied=not success,
         halted=halted,
     )
@@ -368,6 +369,24 @@ def test_a_keep_round_neither_fails_nor_burns():
     # an ordinary outcome ends the neutral run
     books.note_outcomes([_outcome("bash", success=True)])
     assert books.neutral_streak == 0
+
+
+def test_a_kept_review_is_recorded_as_reviewed():
+    """C3/R08: keep is an error, so ``tool_success`` cannot see the plan that
+    reached the review.  The guard needs "the human saw a card" as its own fact
+    -- otherwise it chased a submission that already happened."""
+    books = TurnBooks()
+    books.note_outcomes([
+        _outcome(
+            "present_plan",
+            success=False,
+            error="plan_keep",
+            data={"approved": False, "reviewed": True},
+        )
+    ])
+
+    assert books.plan_reviewed is True
+    assert "present_plan" not in books.tool_success
 
 
 # ------------------- plan 提交守卫（stage 4 r2）-----------------------------

@@ -6,12 +6,15 @@ The replan rewrites what is left, asks a human, and restores the snapshot on
 refusal or when nobody can approve.
 """
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from ai_coding.core.events import TaskUpdated
-from ai_coding.core.wave_runner import WaveRunner
+from ai_coding.core.plan_runner import PlanReport
+from ai_coding.core.wave_planner import Wave
+from ai_coding.core.wave_runner import WaveItem, WaveRunner
 from ai_coding.domain.loop import TurnStatus
 from ai_coding.domain.plan_wave import (
     WAVE_HANDOFF_HINT_MAX_CHARS,
@@ -49,6 +52,19 @@ class _Prompt:
         self.asked += 1
         self.details.append(detail)
         return self._answer
+
+
+class _CancelOnTurn(_StubLoop):
+    """The operator pressed Esc: the turn (and the wave/replan) is cancelled."""
+
+    def __init__(self, actions=(), *, mutate_before_cancel: bool = False):
+        super().__init__(actions)
+        self._mutate = mutate_before_cancel
+
+    async def process_input(self, session, text, on_delta=None, observer=None):
+        if self._mutate:
+            session.task.update("2", status="dropped")
+        raise asyncio.CancelledError()
 
 
 class _Loop(_StubLoop):
@@ -241,6 +257,9 @@ async def test_the_next_wave_seed_carries_the_structured_handoff_once():
     assert "接口：" in seed and "def f(): ..." in seed
     # It is injected once, at the wave head.
     assert seed.count("[上一波交接]") == 1
+    # The model must be told to hand over, or the structured half stays empty
+    # in natural runs (measured: real waves produced only the mechanical note).
+    assert "wave_report" in seed
     assert "[上一波交接]" not in loop.calls[1]
 
 
@@ -348,6 +367,62 @@ async def test_todo_write_refuses_terminal_items_in_a_replan_turn():
     assert complete.error == "replan_not_allowed"
     assert drop.success is True
     assert task.items[0].content == "done"
+
+
+# ---- cancellation and the replan turn's boundary ---------------------
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_wave_clears_the_live_wave_facts():
+    """C3: Esc skips the wave-end block, but the transient facts must not
+    survive -- the run's closing emit would advertise a wave that is gone."""
+    session = _session_with("a")
+    task = session.task
+    task.armed = True
+    task.armed_profile = "plan"
+    runner = WaveRunner(_CancelOnTurn())
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner._run_wave(
+            session, task, Wave(index=0, items=(task.get("1"),)),
+            PlanReport(), None, on_delta=None, observer=None,
+        )
+
+    assert task.wave_active is False
+    assert task.wave_items == ()
+    assert task.wave_report is None
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_replan_restores_the_unapproved_list():
+    """C3: the replan turn may already have rewritten the list; a cancel is
+    not an approval, so the snapshot goes back before the error propagates."""
+    session = _session_with("a", "b")
+    task = session.task
+    task.armed = True
+    task.armed_profile = "plan"
+    runner = WaveRunner(_CancelOnTurn(mutate_before_cancel=True))
+    item = WaveItem(id="replan-1", wave=Wave(index=0, items=()), replan="deadlock")
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner._run_replan(
+            session, task, item, PlanReport(), None, on_delta=None, observer=None,
+        )
+
+    assert [entry.status for entry in task.items] == ["pending", "pending"]
+
+
+def test_the_replan_turn_cannot_touch_the_world():
+    """C3: "only todo_write" is a boundary, not a prompt sentence.  The
+    read-only posture keeps todo_write (non-mutating) and drops write/bash."""
+    session = _session_with("a")
+    runner = WaveRunner(_StubLoop([]))
+
+    replan = runner._make_replan_session(session, session.task, "deadlock")
+
+    assert replan.readonly is True
+    assert replan.replan_mode is True
+    assert replan.ephemeral is True
 
 
 def test_a_standard_todo_write_still_edits_terminal_items():
