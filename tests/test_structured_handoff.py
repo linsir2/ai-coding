@@ -325,12 +325,13 @@ def test_undeclared_keys_stay_presence_only():
 def test_the_packet_wire_carries_its_version():
     payload = SubagentResult(status="completed").to_dict()
 
-    assert payload["v"] == 1
+    assert payload["v"] == 2
     # Every field the old shape had is still there: additive only.
     assert {
         "status", "conclusion", "todos", "artifacts", "iterations", "workdir",
         "ledger_path", "error", "context_mode", "truncated", "exit_reason",
-        "usage", "facts", "schema_valid", "schema_errors", "notes", "confidence",
+        "usage", "facts", "schema_valid", "schema_errors",
+        "worktree_branch", "commit",
     } <= set(payload)
 
 
@@ -348,12 +349,13 @@ async def test_a_schema_call_gets_exactly_one_format_instruction():
 
 
 @pytest.mark.asyncio
-async def test_a_free_form_call_keeps_the_uncertainty_protocol():
+async def test_a_free_form_call_carries_no_format_trailer():
+    """r25/v2: the F4 prose protocol was write-only; nothing consumes it."""
     engine = _Engine("done")
     await _runner(engine).run("look")
 
     text = "\n".join(m.content or "" for m in engine.requests[0]["messages"])
-    assert "不确定协议" in text
+    assert "不确定协议" not in text
     assert "[response format" not in text
 
 
@@ -367,15 +369,6 @@ async def test_optional_schema_keys_are_named_for_the_child():
     assert "Optional keys" in text
     assert "confidence" in text and "notes" in text
 
-
-@pytest.mark.asyncio
-async def test_declared_confidence_and_notes_land_on_the_packet():
-    engine = _Engine('{"summary": "ok", "confidence": "low", "notes": "flaky"}')
-    result = await _runner(engine).run("look", output_schema=TYPED)
-
-    assert result.schema_valid is True
-    assert result.confidence == "low"
-    assert result.notes == "flaky"
 
 
 @pytest.mark.asyncio

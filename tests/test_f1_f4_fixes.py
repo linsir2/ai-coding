@@ -138,39 +138,10 @@ class TestF3InterventionFix:
 
 
 # ===========================================================================
-# F4 Fix: trace field bounded, sync path writes, no dead from_dict
+# F4 package contract: no dead deserializer
 # ===========================================================================
 
 
-class TestF4TraceFieldFix:
-    """Trace field should be bounded and written from both paths."""
-
-    def test_trace_file_bounded(self, tmp_path):
-        from ai_coding.core.subagent import MAX_TRACE_ENTRIES, _write_trace_note
-        # Write more than the limit
-        for i in range(MAX_TRACE_ENTRIES + 10):
-            result = SubagentResult(
-                status="completed",
-                notes=f"Note {i}",
-                ledger_path=str(tmp_path / f"test-{i}.json"),
-            )
-            _write_trace_note(result, tmp_path)
-        trace_file = tmp_path / "transcripts" / "skill-traces" / "trace-field.md"
-        if trace_file.exists():
-            content = trace_file.read_text()
-            # Should not contain the oldest notes
-            assert "Note 0" not in content
-            assert f"Note {MAX_TRACE_ENTRIES + 5}" in content
-
-    def test_subagent_result_no_from_dict(self):
-        """SubagentResult should NOT have from_dict (removed as dead code)."""
-        assert not hasattr(SubagentResult, 'from_dict') or SubagentResult.from_dict is None
-
-    def test_extract_notes_handles_markdown(self, tmp_path):
-        """Notes extraction should handle markdown-formatted output."""
-        from ai_coding.core.subagent import _extract_notes_and_confidence
-        conclusion = ("Some output\n\n**置信度: low**\n"
-                       "原因: not sure\n给后来者的笔记: Use bash for external paths")
-        notes, confidence = _extract_notes_and_confidence(conclusion)
-        assert confidence == "low"
-        assert "bash" in notes
+def test_subagent_result_no_from_dict():
+    """SubagentResult should NOT have from_dict (removed as dead code)."""
+    assert not hasattr(SubagentResult, "from_dict")

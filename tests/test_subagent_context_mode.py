@@ -72,7 +72,6 @@ def _runner(engine: _Engine, *, base_instructions: str = "BASE INSTRUCTIONS", **
 def _parent() -> ParentContext:
     return ParentContext(
         messages=(ChatMessage(role="user", content="parent-said-this", timestamp="t"),),
-        instructions="PARENT INSTRUCTIONS",
     )
 
 
@@ -82,9 +81,12 @@ async def test_the_default_mode_is_full():
     result = await _runner(engine).run("do it", parent=_parent())
     contents = [m.content or "" for m in engine.requests[0]["messages"]]
     assert any("parent-said-this" in content for content in contents)
-    # 13 §2.3: the child inherits the parent's prompt *plus* the methods section.
-    assert engine.requests[0]["instructions"].startswith("PARENT INSTRUCTIONS")
-    assert "<methods>" in engine.requests[0]["instructions"]
+    # r25/v2: the child builds its own prompt from the composition root's base;
+    # it does not inherit the parent's assembled text (that duplicated sections).
+    instructions = engine.requests[0]["instructions"]
+    assert instructions.startswith("BASE INSTRUCTIONS")
+    assert "PARENT INSTRUCTIONS" not in instructions
+    assert instructions.count("<methods>") == 1
     assert result.context_mode == "full"
 
 
@@ -132,12 +134,23 @@ async def test_the_packet_reports_the_mode():
 
 
 @pytest.mark.asyncio
-async def test_full_mode_still_inherits_the_parent_instructions():
+async def test_full_mode_does_not_reuse_the_parent_prompt():
+    """r25/v2: an assembled prompt belongs to one tool surface, not the child's.
+
+    Reusing it made the child append project/skills/methods a second time and
+    advertise tools it does not carry (measured 617 -> 1140 chars).
+    """
     engine = _Engine()
     runner = _runner(engine)
     assert runner.context_mode == "full"
     await runner.run("t", parent=_parent())
-    assert engine.requests[0]["instructions"].startswith("PARENT INSTRUCTIONS")
+    instructions = engine.requests[0]["instructions"]
+    assert instructions.startswith("BASE INSTRUCTIONS")
+    assert "PARENT INSTRUCTIONS" not in instructions
+    assert instructions.count("<methods>") == 1
+    # The parent's *messages* are what full mode inherits.
+    contents = [m.content or "" for m in engine.requests[0]["messages"]]
+    assert any("parent-said-this" in content for content in contents)
 
 
 @pytest.mark.asyncio
@@ -193,3 +206,53 @@ async def test_a_readonly_child_is_not_advertised_mutating_tools():
     tools = json.dumps(engine.requests[0]["tools"], ensure_ascii=False)
     assert '"read"' in tools
     assert '"write"' not in tools
+
+
+class _Project:
+    def load(self) -> str:
+        return "PROJECT RULES"
+
+
+@pytest.mark.asyncio
+async def test_full_mode_adds_the_project_section_exactly_once():
+    engine = _Engine()
+    cfg = AIConfig(max_tool_iterations=2, stop_policy="natural")
+    runner = SubAgentRunner(
+        cfg,
+        engine_factory=lambda: engine,
+        build_tools=lambda workdir: ToolRegistry(),
+        settings=cfg,
+        workspace=".",
+        base_instructions="BASE INSTRUCTIONS",
+        project=_Project(),
+    )
+
+    await runner.run("t", parent=_parent())
+
+    instructions = engine.requests[0]["instructions"]
+    assert instructions.count("PROJECT RULES") == 1
+    assert instructions.count("<methods>") == 1
+
+
+@pytest.mark.asyncio
+async def test_task_only_keeps_the_clean_window_without_the_project_section():
+    engine = _Engine()
+    cfg = AIConfig(
+        max_tool_iterations=2, stop_policy="natural", subagent_context_mode="task_only"
+    )
+    runner = SubAgentRunner(
+        cfg,
+        engine_factory=lambda: engine,
+        build_tools=lambda workdir: ToolRegistry(),
+        settings=cfg,
+        workspace=".",
+        base_instructions="BASE INSTRUCTIONS",
+        project=_Project(),
+    )
+
+    await runner.run("t", parent=_parent())
+
+    instructions = engine.requests[0]["instructions"]
+    assert "PROJECT RULES" not in instructions
+    contents = [m.content or "" for m in engine.requests[0]["messages"]]
+    assert not any("parent-said-this" in content for content in contents)

@@ -65,7 +65,9 @@ async def test_two_questions_run_and_merge():
     # one parent context; otherwise the fan-out is a black box.
     assert runner.calls[0]["parent_span"] == "call-1"
     assert runner.calls[0]["parent"] is not None
-    assert runner.calls[0]["parent"].instructions == "INSTRUCTIONS"
+    # r25/v2: the request view travels; the child assembles its own prompt.
+    assert [m.content for m in runner.calls[0]["parent"].messages] == ["parent"]
+    assert not hasattr(runner.calls[0]["parent"], "instructions")
     assert runner.calls[0]["observer"] is not None
 
 

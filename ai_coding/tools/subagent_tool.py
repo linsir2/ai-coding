@@ -37,14 +37,18 @@ _TIMEOUT_GRACE = 15.0
 
 
 def _render(result: SubagentResult, name: str) -> str:
-    """Human/LLM-readable rendering of the packet."""
-    lines = [f"[{name}] {result.status} in {result.iterations} iteration(s)"]
+    """The model-facing report: only what shapes the parent's next decision.
+
+    Diagnostics (iterations, usage, workdir, the ledger pointer) stay in
+    ``data``/the ledger.  ``usage`` is report-only (never budgeted), ``workdir``
+    is a temporary directory that is gone by the time the parent reads this, and
+    a ledger line on every call is noise -- it is shown only when the report was
+    cut short or its structured shape failed, which is when the parent needs the
+    full packet.
+    """
+    lines = [f"[{name}] {result.status}"]
     if result.truncated:
         lines.append(f"⚠ truncated: {result.exit_reason or 'unfinished work remains'}")
-    if result.usage:
-        prompt = result.usage.get("prompt_tokens", 0)
-        completion = result.usage.get("completion_tokens", 0)
-        lines.append(f"tokens: prompt={prompt} completion={completion}")
     if result.conclusion:
         lines.append(result.conclusion)
     elif result.error:
@@ -71,9 +75,11 @@ def _render(result: SubagentResult, name: str) -> str:
     if result.artifacts:
         lines.append("产物:")
         lines.extend(f"  - {artifact.path}" for artifact in result.artifacts[:10])
-    if result.workdir:
-        lines.append(f"工作区: {result.workdir}")
-    if result.ledger_path:
+    # r25/v2: isolated writes live on a branch now; the worktree path is gone.
+    if result.worktree_branch:
+        suffix = f"，{result.commit[:7]}" if result.commit else ""
+        lines.append(f"工作区分支: {result.worktree_branch}（未合并{suffix}）")
+    if result.ledger_path and (result.truncated or result.schema_valid is False):
         lines.append(f"完整回包: {result.ledger_path}")
     return "\n".join(lines)
 
@@ -109,6 +115,8 @@ def _to_tool_result(result: SubagentResult, name: str) -> ToolResult:
             "facts": dict(result.facts) if result.facts is not None else None,
             "schema_valid": result.schema_valid,
             "schema_errors": list(result.schema_errors),
+            "worktree_branch": result.worktree_branch,
+            "commit": result.commit,
         },
         artifacts=result.artifacts,
     )
@@ -153,14 +161,16 @@ class SubAgentTool(BaseTool):
                 "every fact, path and decision it needs into 'task'"
             )
         else:
-            window = "sees the same conversation context and system prompt as you do"
+            window = "sees this conversation's messages and builds its own system prompt"
         return (
             f"Delegate a task to a sub-agent that {window}, then returns a "
             "structured packet: its conclusion, any unfinished task items, changed "
-            "files, and a ledger path holding the full report. Use 'task' for what "
-            "to do, 'agent' to choose which agent runs it (an id from the agent "
-            "table; a primary agent cannot be spawned), and 'name' for a short "
-            "label you make up. The sub-agent's own reasoning is not returned."
+            "files, and (when isolated) the branch its commits landed on. Use "
+            "'task' for what to do, 'agent' to choose which agent runs it (an id "
+            "from the agent table; a primary agent cannot be spawned), and 'name' "
+            "for a short label you make up. Isolated writes are committed to a "
+            "branch and are NOT merged; the report names it. The sub-agent's own "
+            "reasoning is not returned."
         )
 
     @property
@@ -253,10 +263,12 @@ class SubAgentTool(BaseTool):
 
         context = resolve_ctx(ctx)
         parent: ParentContext | None = None
-        if context.messages or context.instructions or context.permissions:
+        # r25/v2: only the request view and the rule layer travel; the child
+        # assembles its own system prompt (inheriting the parent's assembled
+        # text duplicated project/skills/methods and taught tools it lacks).
+        if context.messages or context.permissions:
             parent = ParentContext(
                 messages=tuple(context.messages),
-                instructions=context.instructions,
                 permissions=tuple(context.permissions),
             )
 

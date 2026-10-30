@@ -71,7 +71,7 @@ B0 的价值是把这三件事收进一次工具调用，不是重新实现并�
   └─ tool_call: parallel_research{questions:[q1..qN], context}
       └─ ToolDispatcher（ALLOW + parallel_safe；build 与 plan 都可达）
           └─ ParallelResearchTool.execute
-              ├─ 从 ToolContext 取 messages/instructions/permissions → ParentContext
+              ├─ 从 ToolContext 取 messages/permissions → ParentContext（系统提示由子代理自建）
               └─ ResearchFanOut.run(questions, parent, observer, parent_span)
                   ├─ for q in questions:
                   │     SubAgentRunner.run(
@@ -296,7 +296,7 @@ async def execute(self, params, ctx=None) -> ToolResult: ...
 | U4 | 3 问全 error | 失败 | `success=False`，`all_children_failed` |
 | U5 | 合并：重复 key_files 去重；summary 超 600 截断；总输出 ≤8k | 合并 | 断言长度与去重 |
 | U6 | usage：3 个 `{total_tokens: 100}` | 计量 | `data.usage.total_tokens=300`；**不改变** `TurnBooks.tokens_spent` |
-| U7 | ParentContext：messages/instructions/permissions 原样传递 | 上下文 | 假 runner 收到 |
+| U7 | ParentContext：messages/permissions 原样传递（r25/v2 起不含 instructions） | 上下文 | 假 runner 收到 |
 | U8 | permission gate `decide` 对 `parallel_research` 为 ALLOW | 权限 | 不询问 |
 | U9 | plan agent 规则对 `parallel_research` 为 ALLOW；`subagent` 仍 DENY | 策略 | 见 §13 |
 | U10 | `SubAgentRunner.run(context_mode="task_only", readonly=True)` 覆盖全局；子会话 `readonly=True`、工具面剔除 mutating | 单测 | 现有 `test_subagent_context_mode.py` 追加，假 engine 记录 mode/readonly |

@@ -104,9 +104,12 @@ class _Worktree:
         async def _cm(_name: str):
             if self._fail:
                 raise WorktreeError("boom")
-            yield SimpleNamespace(path=self._path)
+            yield SimpleNamespace(path=self._path, branch="ai_sub_test")
 
         return _cm(name)
+
+    async def commit_if_dirty(self, path, message):
+        return None
 
 
 def _registry(*extra: BaseTool) -> ToolRegistry:
@@ -148,12 +151,11 @@ def _runner(
     )
 
 
-def _parent(messages=("parent-said-this",), instructions="PARENT INSTRUCTIONS"):
+def _parent(messages=("parent-said-this",)):
     return ParentContext(
         messages=tuple(
             ChatMessage(role="user", content=m, timestamp="t") for m in messages
         ),
-        instructions=instructions,
     )
 
 
@@ -174,12 +176,11 @@ async def test_subagent_receives_parent_messages(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_subagent_receives_parent_instructions(tmp_path):
+async def test_subagent_does_not_inherit_the_parent_prompt(tmp_path):
+    """r25/v2: only the parent's *messages* travel, never its assembled prompt."""
     engine = _Engine()
     await _runner(engine).run("t", parent=_parent())
-    # 13 §2.3: the parent's prompt plus the methods section (shared on purpose).
-    assert engine.requests[0]["instructions"].startswith("PARENT INSTRUCTIONS")
-    assert "<methods>" in engine.requests[0]["instructions"]
+    assert "PARENT INSTRUCTIONS" not in (engine.requests[0]["instructions"] or "")
 
 
 @pytest.mark.asyncio

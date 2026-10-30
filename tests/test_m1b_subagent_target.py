@@ -164,7 +164,7 @@ async def test_the_child_uses_its_own_agent_and_inherits_the_parent_session_rule
         "look",
         isolate=False,
         agent="explore",
-        parent=ParentContext(messages=(), instructions="", permissions=parent_rules),
+        parent=ParentContext(messages=(), permissions=parent_rules),
     )
 
     # The child's **tool list** is the observable: it speaks as explore, so

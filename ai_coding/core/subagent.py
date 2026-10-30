@@ -126,6 +126,11 @@ class SubAgentRunner:
         #: M1b: the agent table a ``subAgent`` target is resolved against.
         #: ``None`` keeps the pre-M1b behaviour: no target, no agent layer.
         agents: AgentCatalog | None = None,
+        #: r25/v2: the project-instructions loader a ``full`` child uses to build
+        #: its own system prompt (the parent's assembled prompt is no longer
+        #: inherited).  ``None`` keeps tests and bare callers free of filesystem
+        #: reads; production passes ``ProjectInstructionsLoader(workspace)``.
+        project: Any | None = None,
     ) -> None:
         self._app_config = app_config
         self._skills = skills
@@ -147,6 +152,9 @@ class SubAgentRunner:
 
         self._approval = approval if approval is not None else AutoApproveCallback()
         self._workspace = workspace
+        # r25/v2: the child's own project section (full mode only).  Read from the
+        # main workspace, not the worktree: both see the same project file.
+        self._project = project
         # R4a: the parent's observer, so a sub-agent stops being a black box.  Its
         # events are wrapped with their scope/parent by ``ScopedObserver`` below.
         self._observer = observer
@@ -262,12 +270,30 @@ class SubAgentRunner:
         ):
             try:
                 async with worktree_manager.temporary(name) as wt:
-                    return await self._run_in(
+                    result = await self._run_in(
                         task, name, str(wt.path), parent,
                         parent_span=parent_span, observer=observer,
                         output_schema=output_schema, agent=agent,
                         context_mode=context_mode, readonly=readonly,
                     )
+                    # r25/v2: the worktree is force-removed on exit, so a write
+                    # that is not committed dies with it.  Commit first, then
+                    # hand the branch + sha to the parent; the directory goes,
+                    # the branch stays.  A failed commit is reported as "no
+                    # commit" (never swallowed into a fake success).
+                    commit = await worktree_manager.commit_if_dirty(
+                        str(wt.path), f"subagent: {name}"
+                    )
+                    if commit:
+                        enriched = replace(
+                            result, worktree_branch=wt.branch, commit=commit
+                        )
+                        # The ledger was written inside ``_packet`` before the
+                        # commit existed; refresh it so the "full packet" file
+                        # names the branch instead of a removed worktree.
+                        _refresh_ledger(enriched)
+                        return enriched
+                    return result
             except WorktreeError:
                 # Scoped like the child's own events: this record says the child
                 # ran in the *main* workspace, and `report_degraded` carries no
@@ -446,13 +472,18 @@ class SubAgentRunner:
         )
         if emit is None:
             return
-        # F4: write trace note for future sub-agents
-        _write_trace_note(result, self._ledger_root)
         summary = (result.conclusion or result.error or "").strip().replace("\n", " ")
+        # r25/v2/F5: a background schema call used to lose its verdict here --
+        # the model saw prose and a ledger pointer only.  One short marker is
+        # enough; the facts stay in the ledger.
         if len(summary) > _SUMMARY_TAIL:
             summary = summary[:_SUMMARY_TAIL] + "…"
+        # Append after the cut: a long conclusion must not eat the verdict.
+        if result.schema_valid is False:
+            summary = f"{summary}（结构校验未过）".strip()
         self._announce_to_model(
-            run_id, row.name, result.status, summary, result.ledger_path
+            run_id, row.name, result.status, summary, result.ledger_path,
+            result.worktree_branch,
         )
         try:
             emit(BackgroundTaskDone(
@@ -468,7 +499,13 @@ class SubAgentRunner:
             _log.debug("background announce failed for %s", run_id, exc_info=True)
 
     def _announce_to_model(
-        self, run_id: str, name: str, status: str, summary: str, ledger_path: str | None
+        self,
+        run_id: str,
+        name: str,
+        status: str,
+        summary: str,
+        ledger_path: str | None,
+        branch: str | None = None,
     ) -> None:
         """Hand the settlement to the parent's loop (P0-2).
 
@@ -479,7 +516,9 @@ class SubAgentRunner:
         if self._notices is None:
             return
         try:
-            self._notices.put(_notice_text(run_id, name, status, summary, ledger_path))
+            self._notices.put(
+                _notice_text(run_id, name, status, summary, ledger_path, branch)
+            )
         except Exception:  # noqa: BLE001 — same reason as the event above
             _log.debug("background notice failed for %s", run_id, exc_info=True)
 
@@ -600,25 +639,23 @@ class SubAgentRunner:
         registry = self._build_tools(workdir)
         engine = self._engine_factory()
         ts = now_utc()
-        # R7e-4: which window this child gets.  ``task_only`` is a clean context -
-        # the parent has to put every fact it needs into the task text - and an
-        # empty base string must stay None, because a blank PromptAssembler is a
-        # different request, not an equivalent one (an existing test asserts it).
+        # R7e-4 + r25/v2: which window this child gets.  ``task_only`` is a clean
+        # context - the parent has to put every fact it needs into the task text.
+        # Both modes build the child's **own** system prompt: inheriting the
+        # parent's *assembled* prompt made the child append project/skills/methods
+        # a second time (measured 617 -> 1140 chars) and advertised tools the
+        # child does not have.  ``full`` differs only in the seeded history and
+        # the project section.
         mode = context_mode
+        prompt = (
+            PromptAssembler(self._base_instructions)
+            if self._base_instructions
+            else None
+        )
         if mode == "task_only":
             seeded: list[ChatMessage] = []
-            prompt = (
-                PromptAssembler(self._base_instructions)
-                if self._base_instructions
-                else None
-            )
         else:
             seeded = list(parent.messages) if parent is not None else []
-            prompt = (
-                PromptAssembler(parent.instructions)
-                if parent is not None and parent.instructions
-                else None
-            )
         session = SessionData(
             session_id=f"sub-{uuid.uuid4().hex[:12]}",
             title=name,
@@ -644,6 +681,9 @@ class SubAgentRunner:
             # (the tool registry always got the path) with no catalog naming
             # anything it could load.
             skills=self._skills,
+            # r25/v2: the project section is the child's own; full mode only
+            # (task_only keeps the R7e-4 clean window).
+            project=self._project if mode != "task_only" else None,
             settings=self._subagent_settings(),
             guards=self._guards,
             workspace=workdir or self._workspace,
@@ -664,15 +704,10 @@ class SubAgentRunner:
             # is needed for the child to see it.
             child_task = task
             if output_schema:
-                # One format instruction, never two: the JSON trailer and the
-                # Chinese uncertainty protocol used to be appended together,
-                # which is a contradiction ("JSON and nothing else" vs "append
-                # four prose lines").  A schema call ends with JSON; the
-                # confidence/notes the protocol used to collect are read from
-                # the facts when the schema declares them (``_packet``).
+                # One format instruction, never two.  The old prose
+                # "uncertainty protocol" is gone: nothing read its notes and
+                # the confidence it collected had no consumer.
                 child_task += _format_instruction(output_schema)
-            else:
-                child_task += _UNCERTAINTY_PROTOCOL
             await run_with_deadline(
                 loop.process_input(session, child_task),
                 timeout=self._timeout,
@@ -744,15 +779,8 @@ class SubAgentRunner:
             facts, schema_valid, schema_errors = extract_json_facts(
                 conclusion, output_schema
             )
-        # F4: extract notes and confidence from conclusion.  A schema call has
-        # no prose tail (see the format trailer), so declared optional facts win:
-        # the caller asks for what it needs in the schema it already owns.
-        notes, confidence = _extract_notes_and_confidence(conclusion)
-        if facts:
-            if isinstance(facts.get("confidence"), str) and facts["confidence"].strip():
-                confidence = facts["confidence"].strip().lower()
-            if isinstance(facts.get("notes"), str) and facts["notes"].strip():
-                notes = facts["notes"].strip()
+        # F4's prose notes/confidence are gone: nothing read them (confidence
+        # had no consumer at all; notes only wrote an unread trace file).
         result = SubagentResult(
             status=status,
             conclusion=conclusion,
@@ -768,11 +796,7 @@ class SubAgentRunner:
             facts=facts,
             schema_valid=schema_valid,
             schema_errors=schema_errors,
-            notes=notes,
-            confidence=confidence,
         )
-        # F4: write trace note (sync path — background path does it in _finish_background)
-        _write_trace_note(result, self._ledger_root)
         return _with_ledger(result, self._ledger_root)
 
 
@@ -782,34 +806,6 @@ def _truncate(text: str | None, limit: int) -> str | None:
     if limit <= 0 or len(text) <= limit:
         return text
     return text[:limit] + "…"
-
-
-def _extract_notes_and_confidence(conclusion: str | None) -> tuple[str, str]:
-    """Extract notes and confidence from a sub-agent's conclusion.
-
-    Looks for the uncertainty protocol markers in the text.
-    Handles markdown formatting (bold, etc.) and both Chinese/English colons.
-    Returns (notes, confidence).
-    """
-    if not conclusion:
-        return "", "high"
-    notes = ""
-    confidence = "high"
-    for line in conclusion.split("\n"):
-        # Strip markdown formatting
-        stripped = line.strip().strip("*").strip()
-        # Handle both Chinese and English colons
-        for prefix in ["置信度:", "置信度："]:
-            if stripped.startswith(prefix):
-                value = stripped[len(prefix):].strip().lower()
-                if value in ("high", "medium", "low"):
-                    confidence = value
-                break
-        for prefix in ["给后来者的笔记:", "给后来者的笔记："]:
-            if stripped.startswith(prefix):
-                notes = stripped[len(prefix):].strip()
-                break
-    return notes, confidence
 
 
 def _with_ledger(result: SubagentResult, root: Path | None) -> SubagentResult:
@@ -840,10 +836,26 @@ def _with_ledger(result: SubagentResult, root: Path | None) -> SubagentResult:
         facts=result.facts,
         schema_valid=result.schema_valid,
         schema_errors=result.schema_errors,
-        notes=result.notes,
-        confidence=result.confidence,
+        worktree_branch=result.worktree_branch,
+        commit=result.commit,
     )
 
+
+def _refresh_ledger(result: SubagentResult) -> None:
+    """Rewrite the ledger after branch/commit enrichment (r25/v2).
+
+    The ledger is written inside ``_packet``, before the commit exists; without
+    this rewrite the "full packet" file would name a worktree that is about to
+    be deleted and carry no branch to find the work on.
+    """
+    if not result.ledger_path:
+        return
+    try:
+        Path(result.ledger_path).write_text(
+            to_json_pretty(result.to_dict()), encoding="utf-8"
+        )
+    except OSError:
+        pass  # best-effort: the packet itself already carries the branch
 
 
 def _format_instruction(schema: dict[str, Any]) -> str:
@@ -872,10 +884,8 @@ def _format_instruction(schema: dict[str, Any]) -> str:
         "text — partial work is never discarded.",
     ]
     if optional:
-        # Optional properties are how a caller asks for confidence/notes (or
-        # findings) now: the child only sees this trailer, not the schema
-        # itself, so they have to be named with their shape or they will never
-        # be filled correctly.
+        # The child never sees the schema object, so optional properties must be
+        # named with their shape or they will never be filled correctly.
         described = ", ".join(f"{key}: {_shape(shapes.get(key))}" for key in optional)
         lines.insert(
             -1, f"Optional keys, when you can fill them: {described}."
@@ -896,42 +906,6 @@ def _shape(spec: Any) -> str:
 
 __all__ = ["SubAgentRunner"]
 
-MAX_TRACE_ENTRIES = 100  #: Cap trace-field.md entries to prevent unbounded growth.
-
-
-def _write_trace_note(result: SubagentResult, root: Path | None) -> None:
-    """Write a note to the shared trace field for future sub-agents.
-
-    Bounded: keeps the last MAX_TRACE_ENTRIES entries (FIFO eviction).
-    """
-    if root is None or not result.notes:
-        return
-    try:
-        target_dir = root / "transcripts" / "skill-traces"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        trace_file = target_dir / "trace-field.md"
-        with open(trace_file, "a", encoding="utf-8") as f:
-            f.write(f"\n---\n[{result.status}] {result.ledger_path}\n{result.notes}\n")
-        # Enforce bound: read all lines, keep last N entries
-        _enforce_trace_limit(trace_file)
-    except OSError:
-        pass  # best-effort
-
-
-def _enforce_trace_limit(trace_file: Path) -> None:
-    """Keep only the last MAX_TRACE_ENTRIES entries in the trace file."""
-    if not trace_file.exists():
-        return
-    content = trace_file.read_text(encoding="utf-8")
-    entries = content.split("\n---\n")
-    # Remove empty first element if file starts with ---
-    entries = [e for e in entries if e.strip()]
-    if len(entries) > MAX_TRACE_ENTRIES:
-        # Keep the last N entries
-        kept = entries[-MAX_TRACE_ENTRIES:]
-        trace_file.write_text("\n---\n".join(kept) + "\n", encoding="utf-8")
-
-
 #: The four settlements ``BackgroundTaskDone`` can carry, in the operator's
 #: language rather than the event's enum value.
 _NOTICE_STATUS = {
@@ -943,7 +917,12 @@ _NOTICE_STATUS = {
 
 
 def _notice_text(
-    run_id: str, name: str, status: str, summary: str, ledger_path: str | None
+    run_id: str,
+    name: str,
+    status: str,
+    summary: str,
+    ledger_path: str | None,
+    branch: str | None = None,
 ) -> str:
     """One harness line for a background run that settled.
 
@@ -952,22 +931,17 @@ def _notice_text(
     (a command is the caller's to place).  A fixed marker prefix buys both, and
     the ledger pointer is what makes a 200-character summary enough -- the file
     is inside the workspace, so the model can read the whole packet.
+
+    ``branch`` names where an isolated child committed its changes; without it
+    a background write handoff has no address at all (the worktree is removed).
     """
     word = _NOTICE_STATUS.get(status, status)
     line = f"[子任务{word}] {name}（{run_id[:12]}）"
     body = " ".join(str(summary or "").split())
     if body:
         line += f"：{body}"
+    if branch:
+        line += f" · 分支 {branch}（未合并）"
     if ledger_path:
         line += f" · 完整回包 {ledger_path}"
     return line
-
-
-_UNCERTAINTY_PROTOCOL = (
-    "\n\n## 不确定协议\n"
-    "如果你对结论不完全确定，请在最后用以下格式标记：\n"
-    "置信度: [high|medium|low]\n"
-    "原因: [为什么不确定]\n"
-    "需要: [需要什么信息才能确定]\n"
-    "给后来者的笔记: [你踩的坑、发现的捷径、未完成的探索]\n"
-)

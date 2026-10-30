@@ -229,7 +229,7 @@ R22/A-4 再补一个码：
 | 类型 | 字段 | 说明 |
 |---|---|---|
 | `ToolContext` | `task`、`workspace`、`session_id`、`messages`、`session_messages`、`instructions`、`emit`、`jobs` | 工具的**每次调用**上下文；`messages`/`instructions` 是父回合当次请求视图（`messages` 已被压缩改写）；C-1 加 `session_messages` = 会话自身**未压缩**的 transcript（压缩器只改副本），供 `history_search` 读回被摘要丢掉的内容；D-1 加 `jobs` = 工作区级后台 job 表（`core/jobs.py`，`None` 表示该工具栈没接后台 job，工具会如实报错而不是说“没有任务”） |
-| `ParentContext` | `messages`、`instructions` | 传给子智能体的「相同上下文」 |
+| `ParentContext` | `messages`、`permissions`（r25/v2 起系统提示不继承，子代理自建） | 传给子智能体的请求视图与规则层 |
 | `SubagentResult` | `status`、`conclusion`、`todos`、`artifacts`、`iterations`、`workdir`、`ledger_path`、`error` | 子智能体的结构化信息包（`text` 是 `conclusion` 的只读别名） |
 
 `BaseTool` 增加两个契约成员：`execute(params, ctx=None)` 与 `parallel_safe: bool`（默认 `False`，

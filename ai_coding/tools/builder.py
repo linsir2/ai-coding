@@ -128,6 +128,8 @@ def build_subagent_runner(
         return build_engine(app_cfg.models, current_key[0], stream_usage=stream_usage)
 
     ai_cfg = getattr(app_cfg, "ai", None)
+    from ai_coding.core.project_instructions import ProjectInstructionsLoader
+
     return SubAgentRunner(
         app_cfg,
         engine_factory=engine_factory,
@@ -143,6 +145,9 @@ def build_subagent_runner(
         workspace=main_ws,
         # R7e-4: a task_only child gets this instead of the parent's prompt.
         base_instructions=base_instructions,
+        # r25/v2: a full child builds its own prompt; the project section comes
+        # from the main workspace (the worktree holds the same file).
+        project=ProjectInstructionsLoader(main_ws),
         # P0-2: the lane a settled background run uses to reach the model.
         notices=notices,
         # M1b: the table a ``subAgent`` target is resolved against.

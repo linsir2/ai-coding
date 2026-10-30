@@ -82,14 +82,18 @@ def test_tool_result_carries_machine_readable_child_codes():
     assert done.success is True and done.error is None
 
 
-def test_tool_render_names_truncation_and_cost():
+def test_tool_render_names_truncation_not_cost():
+    """r25/v2: usage is report-only; the model report names the cut and the
+    ledger pointer (the full packet), not tokens."""
     from ai_coding.tools.subagent_tool import _render  # noqa: SLF001
 
     text = _render(
         _result(status="timeout", truncated=True, exit_reason="outer_timeout",
-                usage={"prompt_tokens": 100, "completion_tokens": 50}), "t")
+                usage={"prompt_tokens": 100, "completion_tokens": 50},
+                ledger_path="/tmp/ledger.json"), "t")
     assert "truncated" in text and "outer_timeout" in text
-    assert "100" in text and "50" in text
+    assert "100" not in text and "50" not in text
+    assert "完整回包" in text
 
 
 @pytest.mark.asyncio

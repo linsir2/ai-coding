@@ -79,7 +79,7 @@
 | 后台子代理 | run id、跨轮监督、完成通知 | tool 行 + `/tasks` 列表 |
 | worktree 隔离 | git worktree 沙箱 | 状态徽标 |
 | 结构化输出 | output_schema 校验 | tool 详情 |
-| 不确定性协议 F4 | notes/confidence + trace-field.md（保 100 条） | 详情 + trace 记录 |
+| 不确定性协议 F4 | **已移除（r25/v2：notes 只写不读、confidence 无消费者）** | — |
 | 包/账本 | `transcripts/subagents/<id>.json` | 跳转查看 |
 
 ### 1.6 任务与规划（Tasks / Planning）

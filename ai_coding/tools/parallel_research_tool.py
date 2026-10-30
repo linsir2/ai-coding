@@ -142,10 +142,11 @@ class ParallelResearchTool(BaseTool):
                 data={"questions": 0},
             )
         parent = None
-        if context.messages or context.instructions or context.permissions:
+        # r25/v2: the child gets the request view + rule layer only; its system
+        # prompt is its own (task_only inherits no messages anyway).
+        if context.messages or context.permissions:
             parent = ParentContext(
                 messages=tuple(context.messages),
-                instructions=context.instructions,
                 permissions=tuple(context.permissions),
             )
         shared = str(params.get("context", "") or "").strip()

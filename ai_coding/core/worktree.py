@@ -125,6 +125,46 @@ class WorktreeManager:
         if leftover.exists():
             shutil.rmtree(leftover, ignore_errors=True)
 
+    async def commit_if_dirty(self, path: str | Path, message: str) -> str | None:
+        """Commit a child's worktree changes; return the sha, or ``None``.
+
+        ``temporary()`` force-removes the directory, so an uncommitted edit dies
+        with it -- a write delegation used to look successful while the work was
+        gone.  Committing first leaves the work on the branch (the directory is
+        still removed).  Identity is passed per call so a machine with no
+        configured git user still produces a commit.
+
+        Never raises: any failure (git missing, timeout, no identity) is
+        reported as ``None``, which the packet renders as "no commit" instead of
+        turning a finished child into an error.
+        """
+        target = str(Path(path).expanduser().resolve())
+        try:
+            # ``merge_stderr=False``: a non-fatal git warning must not be read
+            # as "there are changes".
+            code, text = await git(
+                target, "status", "--porcelain", timeout=self._timeout,
+                merge_stderr=False,
+            )
+            if code != 0 or not text.strip():
+                return None
+            code, _ = await git(target, "add", "-A", timeout=self._timeout)
+            if code != 0:
+                return None
+            code, _ = await git(
+                target,
+                "-c", "user.name=ai-coding",
+                "-c", "user.email=subagent@local",
+                "commit", "-m", message,
+                timeout=self._timeout,
+            )
+            if code != 0:
+                return None
+            code, sha = await git(target, "rev-parse", "HEAD", timeout=self._timeout)
+        except (OSError, TimeoutError):
+            return None
+        return sha.strip() if code == 0 and sha.strip() else None
+
     @asynccontextmanager
     async def temporary(self, name: str = "sub") -> AsyncIterator[Worktree]:
         """Create a worktree for the block and remove it on exit (best-effort)."""

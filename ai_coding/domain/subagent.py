@@ -26,8 +26,10 @@ SUCCESS_STATUSES: frozenset[str] = frozenset({"completed", "max_iterations"})
 #: Wire version of ``SubagentResult.to_dict()`` (the packet, and the ledger file
 #: written from it).  Compatibility rule: **additive optional fields only**;
 #: adding a required field, removing one, or changing a field's meaning bumps
-#: this number.  Consumers read ``v`` before trusting the shape.
-SUBAGENT_PACKET_VERSION = 1
+#: this number.  v2 (r25) removed ``notes``/``confidence`` and added
+#: ``worktree_branch``/``commit``.  Consumers read ``v`` before trusting the
+#: shape.
+SUBAGENT_PACKET_VERSION = 2
 
 #: Caps for the structured brief.  One source for every internal caller: the
 #: fan-out and any future plan-side research build the same object, and the
@@ -58,12 +60,14 @@ class ParentContext:
     """What the parent turn was looking at when it delegated.
 
     ``messages`` is the parent request view (compressed, *before* its volatile
-    task block) and ``instructions`` is the assembled system prompt — so the
-    sub-agent sees exactly what the parent saw on that step.
+    task block).  The system prompt is **not** inherited: a prompt is assembled
+    for a specific tool surface and agent, so the child rebuilds its own
+    (r25/v2; opencode's child session does the same).  Inheriting the assembled
+    text appended project/skills/methods a second time and advertised tools the
+    child does not have.
     """
 
     messages: tuple[ChatMessage, ...] = ()
-    instructions: str | None = None
     #: M1a ④: the parent's session rule layer.  A child has a fresh session,
     #: so without this its gate would see the files and the config but not
     #: what the operator denied in the conversation that spawned it.
@@ -188,10 +192,12 @@ class SubagentResult:
     #: R1-3: why validation failed (missing keys, bad JSON) — named so the
     #: parent can ask for exactly what is absent instead of guessing.
     schema_errors: tuple[str, ...] = ()
-    #: F4: notes for future sub-agents (trace field).
-    notes: str = ""
-    #: F4: confidence level (high/medium/low) — uncertainty protocol.
-    confidence: str = "high"
+    #: r25/v2: the branch a worktree-isolated child committed its changes to,
+    #: and the commit sha.  Without these the packet advertised ``artifacts``
+    #: paths inside a worktree that is force-removed on return — a write
+    #: delegation looked successful while the work was gone.
+    worktree_branch: str | None = None
+    commit: str | None = None
 
     @property
     def text(self) -> str | None:
@@ -216,8 +222,8 @@ class SubagentResult:
             "facts": dict(self.facts) if self.facts is not None else None,
             "schema_valid": self.schema_valid,
             "schema_errors": list(self.schema_errors),
-            "notes": self.notes,
-            "confidence": self.confidence,
+            "worktree_branch": self.worktree_branch,
+            "commit": self.commit,
         }
 
 

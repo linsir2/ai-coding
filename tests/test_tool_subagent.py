@@ -57,8 +57,10 @@ async def test_subagent_tool_passes_parent_context():
     assert call["worktree_manager"] == "wt/1"
     assert call["isolate"] is False
     assert call["parent"] is not None
-    assert call["parent"].instructions == "PARENT INSTRUCTIONS"
+    # r25/v2: only the request view and the rule layer travel; the child builds
+    # its own system prompt.
     assert [m.content for m in call["parent"].messages] == ["parent view"]
+    assert not hasattr(call["parent"], "instructions")
 
 
 class _SpawnRunner:
@@ -218,7 +220,8 @@ def test_the_description_promises_shared_context_in_full_mode():
     runner = _FakeRunner()
     runner.context_mode = "full"
     text = SubAgentTool(runner=runner).description
-    assert "same conversation context" in text
+    assert "sees this conversation's messages" in text
+    assert "builds its own system prompt" in text
     assert "cannot see" not in text
 
 
