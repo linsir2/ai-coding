@@ -63,7 +63,8 @@ class AskUserTool(BaseTool):
             "Ask the user a question and wait for their answer. Use it when a decision "
             "is genuinely theirs (which of two files, which of two migrations) and you "
             "cannot settle it from the repository. Provide 'question'; optionally "
-            "'options' to offer concrete choices. In a non-interactive run nobody can "
+            "'options' to offer concrete choices -- write them for THIS situation, the "
+            "user can always type their own instead. In a non-interactive run nobody can "
             "answer: you will be told so, and you must decide, state your assumption "
             "and carry on rather than asking again."
         )

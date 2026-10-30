@@ -8,6 +8,11 @@
  * enter answers; without options the panel holds a one-line input for a typed
  * answer; esc answers with the empty string, which the shared callback turns
  * into ``reason="empty"`` so the model decides itself instead of hanging.
+ *
+ * C3: the choices are the model's, so they can never cover everyone.  A list
+ * therefore always carries one extra row — 「其他（自己填写）」 — which opens
+ * the same input the option-less panel uses.  A question is a place to answer,
+ * not a menu to squeeze the human into.
  */
 
 import { TextAttributes } from "@opentui/core"
@@ -18,6 +23,9 @@ import { moveSelection } from "../util/dialog-select"
 import { answerForSelection, type AskRequest } from "../util/ask"
 import { PROMPT_BORDER } from "./prompt"
 
+/** C3: the row that opens the free-text input (the model's options cannot be complete). */
+export const ASK_OTHER_OPTION = "其他（自己填写）"
+
 export function AskPanel(props: {
   request: AskRequest
   onAnswer: (answer: string) => void
@@ -25,11 +33,35 @@ export function AskPanel(props: {
   const [selected, setSelected] = createSignal(0)
   const [typed, setTyped] = createSignal("")
   const options = () => props.request.options
+  // C3: with choices on offer, the free-text row is appended to them.
+  const rows = () => (options().length > 0 ? [...options(), ASK_OTHER_OPTION] : [])
+  const onOther = () => options().length > 0 && selected() === options().length
 
   const move = (delta: number) =>
-    setSelected((current) => moveSelection(current, delta, Math.max(1, options().length)))
-  const confirm = () => props.onAnswer(answerForSelection(options(), selected()))
-  const quick = (index: number) => props.onAnswer(answerForSelection(options(), index))
+    setSelected((current) => moveSelection(current, delta, Math.max(1, rows().length)))
+  const confirm = () => {
+    if (options().length === 0) {
+      props.onAnswer(typed().trim())
+      return
+    }
+    if (onOther()) {
+      // An empty free-text answer is not "skip": it means the user is still
+      // typing.  esc stays the only way to let the model decide.
+      const text = typed().trim()
+      if (text) props.onAnswer(text)
+      return
+    }
+    props.onAnswer(answerForSelection(options(), selected()))
+  }
+  const quick = (index: number) => {
+    // Only the model's own choices get number keys; the free-text row is
+    // reached with ↓/↓ or by pressing its number last.
+    if (index < options().length) {
+      props.onAnswer(answerForSelection(options(), index))
+      return
+    }
+    if (index === options().length) setSelected(index)
+  }
 
   useBindings(() => ({
     enabled: true,
@@ -86,7 +118,7 @@ export function AskPanel(props: {
         </box>
       }>
         <box flexDirection="column" marginTop={1}>
-          <For each={options()}>
+          <For each={rows()}>
             {(option, index) => (
               <box flexDirection="row">
                 <text
@@ -99,6 +131,20 @@ export function AskPanel(props: {
             )}
           </For>
         </box>
+        <Show when={onOther()}>
+          <box flexDirection="row" marginTop={1}>
+            <text fg={theme.textMuted}>{"› "}</text>
+            <input
+              focused
+              placeholder="写下你的答案，enter 提交（可留空，esc 让模型自行决定）"
+              onInput={(value: string) => setTyped(value)}
+              onSubmit={() => {
+                const text = typed().trim()
+                if (text) props.onAnswer(text)
+              }}
+            />
+          </box>
+        </Show>
       </Show>
       <text fg={theme.textMuted}>
         {options().length > 0
