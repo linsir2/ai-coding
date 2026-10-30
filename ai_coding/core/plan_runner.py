@@ -496,6 +496,8 @@ class PlanReport:
     completed: list[str] = field(default_factory=list)
     blocked: list[str] = field(default_factory=list)
     stalled: list[str] = field(default_factory=list)
+    #: r24/C: items given up because a dependency failed (not user drops).
+    skipped: list[str] = field(default_factory=list)
     deliveries: list[StepDelivery] = field(default_factory=list)
     #: None = ran to the end; otherwise why it stopped early.
     stopped: str | None = None
@@ -503,6 +505,10 @@ class PlanReport:
     turns_used: int = 0
     #: Summed model-step usage, or None when the loop reported none (R1-4).
     tokens_used: dict[str, int] | None = None
+    #: r24/C: waves this run opened (0 on the legacy path).
+    waves: int = 0
+    #: r24/C: wave rewrites this run performed (0 until C3).
+    replanned: int = 0
 
     def render(self) -> str:
         # R21 §4: the headline counts every completion and names how many of
@@ -518,6 +524,8 @@ class PlanReport:
         # A closing Chinese bracket already separates the clauses, so the
         # separator loses its leading space when the qualifier is present.
         head += f"{'' if qualifier else ' '}· 用了 {self.turns_used} 回合"
+        if self.waves:
+            head += f" · {self.waves} 波"
         if self.tokens_used:
             head += f" / {self.tokens_used.get('total_tokens', '?')} tokens"
         parts = [head]
@@ -528,6 +536,8 @@ class PlanReport:
             parts.append("已完成：" + ", ".join(self.completed))
         if self.blocked:
             parts.append("受阻：" + ", ".join(self.blocked))
+        if self.skipped:
+            parts.append("跳过（依赖失败）：" + ", ".join(self.skipped))
         if self.stalled:
             parts.append("停滞（下次可重跑）：" + ", ".join(self.stalled))
         if self.stopped:

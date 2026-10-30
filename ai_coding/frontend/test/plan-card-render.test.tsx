@@ -63,6 +63,19 @@ describe("the plan card (20 §批次2)", () => {
     setup.renderer.destroy()
   })
 
+  test("a skipped item is a muted [~] and the header counts it (r24/C)", async () => {
+    const setup = await render(
+      planMessage("", [
+        { id: "1", content: "完成", status: "completed" },
+        { id: "2", content: "依赖失败跳过", status: "skipped" },
+      ]),
+    )
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("# Todos 1/2 · 跳过 1")
+    expect(frame).toContain("[~] 2. 依赖失败跳过")
+    setup.renderer.destroy()
+  })
+
   test("items show their proof command and dependencies (D5)", async () => {
     // D5: the live card shows what approval will run -- the same second
     // line the review card draws, so the two cards can be checked against

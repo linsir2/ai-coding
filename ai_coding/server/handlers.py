@@ -727,9 +727,9 @@ def make_handlers(
                             session, console, on_delta=bridge.on_delta, observer=bridge
                         )
                     else:
-                        from ai_coding.core.plan_runner import PlanRunner
+                        from ai_coding.core.wave_runner import plan_runner_for
 
-                        await PlanRunner(world.loop).run(
+                        await plan_runner_for(world.loop).run(
                             session, console, on_delta=bridge.on_delta, observer=bridge
                         )
             except asyncio.CancelledError:

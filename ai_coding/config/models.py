@@ -468,6 +468,32 @@ class AIConfig(BaseModel):
     # exhausted").  Each step is already bounded, and the run ends on
     # done/deadlock; an operator who wants a ceiling can still set one.
     plan_max_step_turns: int = 0
+    # ---- r24/C: wave execution ---------------------------------------
+    #: Which plan executor `/plan run` uses.  ``wave`` (default) runs items in
+    #: continuous waves; ``legacy`` keeps the one-short-session-per-step runner
+    #: exactly as it was (the escape hatch).
+    plan_orchestrator: Literal["wave", "legacy"] = "wave"
+    #: Open items one wave may hold.  4 is a context budget, not a correctness
+    #: rule: a heavy proof command or a research/verify item always closes the
+    #: wave earlier (see core/wave_planner.py).
+    plan_wave_size: int = 4
+    #: Provider-reported tokens one wave may spend; 0 disables.  The executor
+    #: also clamps each turn's ``max_turn_tokens`` to what remains, so a single
+    #: turn cannot overshoot the whole wave budget.
+    plan_wave_token_budget: int = 300_000
+    #: Wall-clock ceiling for one wave, checked between turns; 0 disables.
+    plan_wave_wall_seconds: float = 1_200.0
+    #: Turns one item may spend before it is marked blocked (includes the
+    #: acceptance repair turn).
+    plan_max_item_attempts: int = 2
+    #: Waves one run may open; 0 disables (the plan itself bounds the run).
+    plan_max_waves: int = 0
+    #: Episode-wide token ceiling for one plan run, counted across waves;
+    #: 0 disables.  Kept separate from ``goal_token_budget`` on purpose.
+    plan_token_budget: int = 0
+    #: Wave rewrites one run may perform (deadlock / needs_replan); 0 disables
+    #: replanning.  Reserved for C3; the wave runner reads it once replan lands.
+    plan_max_replans: int = 2
     # D-4: episode-wide round ceiling for one armed goal; 0 disables.  Was a
     # phantom until 2026-10-17: the runner read it duck-typed while this class
     # had no such field, and `extra="ignore"` swallowed any yaml key for it.

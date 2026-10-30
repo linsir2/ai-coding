@@ -1037,7 +1037,7 @@ class AgentLoop:
                         decision.reason != "turn deadline exceeded"
                         and pending_items(session.acceptance)
                     ):
-                        await self._verify_acceptance(session, books)
+                        await self.verify_acceptance(session, books)
                         if session.acceptance and all(
                             item.passed is True for item in session.acceptance
                         ):
@@ -1269,7 +1269,7 @@ class AgentLoop:
                     # word — the proof commands run first, and the policy sees
                     # only their verdicts (its purity is what keeps the stop
                     # decision table-testable).
-                    await self._verify_acceptance(session, books)
+                    await self.verify_acceptance(session, books)
                     # R20/RC-7: after the proofs, before the policy decides.
                     # Before the proofs would skip them; and a retry issued on
                     # the *last* allowed iteration would be spent without the
@@ -2446,13 +2446,21 @@ class AgentLoop:
         self.closer.checkpoint(session, index)
         return True
 
-    async def _verify_acceptance(self, session: SessionData, books: TurnBooks) -> None:
+    async def verify_acceptance(
+        self, session: SessionData, books: TurnBooks | None = None
+    ) -> None:
         """Run the proof commands for unchecked acceptance items (R0-1).
 
         Only items that never passed are checked, so a green suite is not
         re-run every iteration.  Verdicts land on the session items (persisted
         by the normal save) and in the books (for the policy snapshot and the
         uncertainty ledger) — the policy itself never touches a shell.
+
+        ``books`` is optional since r24/C: a plan executor verifies an item
+        *after* the turn has closed (the model may have completed several
+        items in one turn), and there is no live ``TurnBooks`` then.  The
+        ledger entry is observation, not the verdict; skipping it must not
+        skip the check.
         """
         # 18 §10.5: a read-only session promised not to run anything — the
         # proof commands are shell and bypass the dispatch gate, so they stop
@@ -2502,11 +2510,12 @@ class AgentLoop:
                 item.output = by_id[item.id].output
         # Only verdicts (pass/fail) enter the books — items skipped by the
         # total cap stay None and must not fabricate ledger entries.
-        books.note_verify({
-            item.id: (item.passed, item.output)
-            for item in checked
-            if item.passed is not None
-        })
+        if books is not None:
+            books.note_verify({
+                item.id: (item.passed, item.output)
+                for item in checked
+                if item.passed is not None
+            })
 
     async def _ask_for_closing(
         self,

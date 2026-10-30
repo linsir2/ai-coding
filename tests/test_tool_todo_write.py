@@ -266,3 +266,21 @@ async def test_readonly_still_allows_planning_mutations(tool, readonly_ctx):
         {"action": "update", "id": "1", "status": "in_progress"}, readonly_ctx
     )
     assert progress.success is True
+
+
+# ---- r24/C: skipped is a runner verdict, never the model's ------------------
+
+
+@pytest.mark.asyncio
+async def test_model_cannot_mark_an_item_skipped(tool, ctx):
+    await tool.execute({"action": "add", "content": "work"}, ctx)
+    r = await tool.execute({"action": "update", "id": "1", "status": "skipped"}, ctx)
+    assert r.success is False
+    assert r.error == "runner_only_status"
+    assert ctx.task.get("1").status == "pending"
+
+
+def test_skipped_is_not_advertised_in_the_schema(tool):
+    enum = tool.params_json_schema["properties"]["status"]["enum"]
+    assert "skipped" not in enum
+    assert "pending" in enum and "blocked" in enum

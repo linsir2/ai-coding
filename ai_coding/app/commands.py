@@ -506,7 +506,7 @@ async def _handle_plan(
     ``loop.request_posture`` and the receipt says so (18 §10.2); a mid-turn
     topic never starts a planning turn.
     """
-    from ai_coding.core.plan_runner import PlanRunner, plan_only
+    from ai_coding.core.plan_runner import plan_only
 
     rest = raw[len("/plan"):].strip()
     sub = rest.lower()
@@ -609,7 +609,9 @@ async def _handle_plan(
                 # "当前回合结束后生效" (that turn was already over).
                 console.info("[plan] 开始执行计划；执行完成后退出计划模式（只读）。")
         try:
-            report = await PlanRunner(loop).run(
+            from ai_coding.core.wave_runner import plan_runner_for
+
+            report = await plan_runner_for(loop).run(
                 session, console, on_delta=console.delta, observer=observer
             )
             # W2/R02: the run branch used to drop the report, so a plan the

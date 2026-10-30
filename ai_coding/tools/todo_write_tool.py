@@ -62,7 +62,11 @@ class TodoWriteTool(BaseTool):
                 "id": {"type": "string", "description": "Item id (for 'update')."},
                 "status": {
                     "type": "string",
-                    "enum": sorted(VALID_STATUSES),
+                    # r24/C: ``skipped`` is a runner verdict, not something the
+                    # model may choose -- a model able to skip items can skip
+                    # itself to "done".  Kept out of the advertised enum and
+                    # refused in ``_update`` as well.
+                    "enum": sorted(VALID_STATUSES - {"skipped"}),
                     "description": "New status (for 'update').",
                 },
                 "evidence": {
@@ -183,6 +187,19 @@ class TodoWriteTool(BaseTool):
         evidence = params.get("evidence")
         verify = params.get("verify")
         normalised = None if status is None else str(status).strip().lower()
+        if normalised == "skipped":
+            # r24/C: only the plan executor gives an item up, and only when a
+            # dependency failed.  A model that can write ``skipped`` can end a
+            # plan by skipping its remaining work.
+            return ToolResult(
+                success=False,
+                output=(
+                    "error: skipped 由执行器在依赖失败时设置，模型不能直接写。"
+                    "做不了本项时请标 blocked，并说明缺什么。"
+                ),
+                error="runner_only_status",
+                data={"action": "update", "id": item_id},
+            )
         if self._enforce and normalised in {"in_progress", "completed"}:
             blockers = task.blockers(item_id)
             if blockers.any:

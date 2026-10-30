@@ -111,6 +111,7 @@ function PartView(props: { part: Part; alwaysOpen: boolean }) {
           // is prompt format; the UI's job is the glyph a reader scans.
           const plan = () => part() as Extract<Part, { kind: "plan" }>
           const done = () => plan().items.filter((item) => item.status === "completed").length
+          const skipped = () => plan().items.filter((item) => item.status === "skipped").length
           const marker = (status: string) =>
             status === "completed"
               ? "[✓]"
@@ -120,9 +121,11 @@ function PartView(props: { part: Part; alwaysOpen: boolean }) {
                   ? "[!]"
                   : status === "dropped"
                     ? "[−]"
-                    : "[ ]"
+                    : status === "skipped"
+                      ? "[~]"
+                      : "[ ]"
           const tone = (status: string) =>
-            status === "completed" || status === "dropped"
+            status === "completed" || status === "dropped" || status === "skipped"
               ? theme.textMuted
               : status === "in_progress"
                 ? theme.feedbackWarning
@@ -131,7 +134,10 @@ function PartView(props: { part: Part; alwaysOpen: boolean }) {
                   : theme.textBase
           return (
             <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
-              <text fg={theme.textMuted}>{`# Todos ${done()}/${plan().items.length}`}</text>
+              <text fg={theme.textMuted}>
+                {`# Todos ${done()}/${plan().items.length}` +
+                  (skipped() ? ` · 跳过 ${skipped()}` : "")}
+              </text>
               <Show when={plan().goal}>
                 <text fg={theme.textMuted}>{`目标: ${plan().goal}`}</text>
               </Show>

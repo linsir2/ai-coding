@@ -409,7 +409,7 @@ async def test_seen_paths_survive_a_compaction(tmp_path):
 
 @pytest.mark.asyncio
 async def test_the_correction_is_issued_after_the_acceptance_proofs(tmp_path):
-    """Decision 7: the check runs after ``_verify_acceptance``.  Issuing it
+    """Decision 7: the check runs after ``verify_acceptance``.  Issuing it
     before would skip the proofs, and T2's hallucination landed at the budget's
     end where a later retry would never be seen."""
     order: list[str] = []
@@ -421,13 +421,13 @@ async def test_the_correction_is_issued_after_the_acceptance_proofs(tmp_path):
     loop = _loop(engine, sessions)
     session = sessions.create()
     session.note_read("a.py", 61, 110, 117, workspace=".")
-    original = loop._verify_acceptance
+    original = loop.verify_acceptance
 
     async def _tracked(session, books):
         order.append("acceptance")
         await original(session, books)
 
-    loop._verify_acceptance = _tracked  # type: ignore[method-assign]
+    loop.verify_acceptance = _tracked  # type: ignore[method-assign]
     loop._reject_unsupported_claims = _tracking_reject(loop, order)  # type: ignore[method-assign]
 
     await loop.process_input(session, "找缺陷")

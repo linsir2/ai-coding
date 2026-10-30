@@ -15,12 +15,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
-TodoStatus = Literal["pending", "in_progress", "completed", "blocked", "dropped"]
+TodoStatus = Literal[
+    "pending", "in_progress", "completed", "blocked", "dropped", "skipped"
+]
 
 VALID_STATUSES: frozenset[str] = frozenset(
-    {"pending", "in_progress", "completed", "blocked", "dropped"}
+    {"pending", "in_progress", "completed", "blocked", "dropped", "skipped"}
 )
-TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "dropped"})
+#: ``skipped`` is terminal but *not* a success: its dependency never produced
+#: the input it needed.  Being terminal keeps it out of ``open_items`` (a plan
+#: whose only leftovers were skipped is finished); the dependency query below
+#: still treats it as unsatisfied so a dependent can never look ready.
+TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "dropped", "skipped"})
 
 _MARKERS: dict[str, str] = {
     "pending": "[ ]",
@@ -28,9 +34,14 @@ _MARKERS: dict[str, str] = {
     "completed": "[x]",
     "blocked": "[!]",
     "dropped": "[-]",
+    "skipped": "[~]",
 }
 
 RENDER_MAX_ITEMS = 40
+#: Longest handoff digest the prompt carries.  A wave note is a contract, not a
+#: transcript: sixteen lines of decisions/interfaces fit; a summary of the work
+#: does not belong here (the receipts already carry it).
+WAVE_NOTE_MAX_CHARS = 900
 
 
 @dataclass
@@ -48,6 +59,18 @@ class TodoItem:
     #: The plan runner turns it into an acceptance contract for the step's turn;
     #: unwritten when empty, so old files read byte-identically.
     verify: str = ""
+    #: r24/C: the repository paths this item is expected to touch.  A *grouping
+    #: hint* only -- waves prefer to keep items sharing a path together -- never
+    #: a correctness constraint.  Unwritten when empty.
+    files: list[str] = field(default_factory=list)
+    #: r24/C: ``write`` | ``research`` | ``verify``.  ``verify`` items are heavy
+    #: test/build commands and close a wave; ``research`` items may run in a
+    #: read-only sub-agent later.  Unwritten when default.
+    kind: str = "write"
+    #: r24/C: repair rounds this item already spent inside its wave.  Kept on the
+    #: item (not the wave) so a retry after a resume knows where it stopped.
+    #: Unwritten when zero.
+    attempts: int = 0
 
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATUSES
@@ -64,6 +87,12 @@ class TodoItem:
             data["evidence"] = self.evidence
         if self.verify:
             data["verify"] = self.verify
+        if self.files:
+            data["files"] = list(self.files)
+        if self.kind != "write":
+            data["kind"] = self.kind
+        if self.attempts:
+            data["attempts"] = int(self.attempts)
         if self.created_at:
             data["createdAt"] = self.created_at
         if self.updated_at:
@@ -76,7 +105,13 @@ class TodoItem:
         status = raw_status if raw_status in VALID_STATUSES else "pending"
         raw_deps = data.get("dependsOn") or data.get("depends_on") or []
         deps = [str(d) for d in raw_deps] if isinstance(raw_deps, list) else []
+        raw_files = data.get("files") or []
+        files = [str(f) for f in raw_files] if isinstance(raw_files, list) else []
         evidence = data.get("evidence")
+        try:
+            attempts = int(data.get("attempts", 0) or 0)
+        except (TypeError, ValueError):
+            attempts = 0
         return cls(
             id=str(data.get("id", "")),
             content=str(data.get("content", "")),
@@ -84,6 +119,9 @@ class TodoItem:
             depends_on=deps,
             evidence=None if evidence is None else str(evidence),
             verify=str(data.get("verify", "") or ""),
+            files=files,
+            kind=str(data.get("kind", "write") or "write"),
+            attempts=attempts,
             created_at=str(data.get("createdAt", data.get("created_at", ""))),
             updated_at=str(data.get("updatedAt", data.get("updated_at", ""))),
         )
@@ -95,16 +133,19 @@ class Blockers:
 
     ``open``    - dependencies that exist and are not terminal yet;
     ``unknown`` - dependencies whose target is gone (legacy or hand-edited data);
-    ``cycle``   - a blocking chain that comes back to this item, when there is one.
+    ``cycle``   - a blocking chain that comes back to this item, when there is one;
+    ``skipped`` - dependencies that were given up (r24/C): terminal, but they never
+                  produced the input this item needs, so it can never run either.
     """
 
     open: tuple[str, ...] = ()
     unknown: tuple[str, ...] = ()
     cycle: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
 
     @property
     def any(self) -> bool:
-        return bool(self.open or self.unknown or self.cycle)
+        return bool(self.open or self.unknown or self.cycle or self.skipped)
 
 
 @dataclass
@@ -145,6 +186,14 @@ class TaskState:
     #: M-C3: consecutive resumes that made no progress.  Reset by any progress;
     #: at the limit the task is disarmed with a ``ResumeStalled`` report.
     no_progress_resumes: int = 0
+    #: r24/C: the previous wave's handoff digest.  It is re-rendered into every
+    #: request (the seed alone would be compacted away mid-wave), and written
+    #: only when non-empty.  This is a plan-scoped contract, not a log.
+    wave_note: str = ""
+    #: r24/C: the plan episode's provider-reported tokens, kept separate from
+    #: the goal episode's ``tokens_used`` so the two profiles cannot spend each
+    #: other's budget.  Written only when non-zero.
+    plan_tokens_used: int = 0
 
     # ---- mutations --------------------------------------------------------
 
@@ -192,6 +241,8 @@ class TaskState:
         *,
         depends_on: list[str] | None = None,
         verify: str = "",
+        files: list[str] | None = None,
+        kind: str = "write",
         ts: str = "",
         item_id: str | None = None,
     ) -> TodoItem:
@@ -202,6 +253,8 @@ class TaskState:
             status="pending",
             depends_on=list(depends_on or []),
             verify=verify,
+            files=list(files or []),
+            kind=kind or "write",
             created_at=ts,
             updated_at=ts,
         )
@@ -276,13 +329,65 @@ class TaskState:
                 out.append(dep)
         return out
 
+    def skipped_dependencies(self, item: TodoItem) -> list[str]:
+        """Ids this item waits on that were given up (r24/C).
+
+        A skipped dependency is terminal, so ``unmet_dependencies`` no longer
+        sees it -- but it never produced the input this item needs.  The wave
+        executor propagates ``skipped`` along this edge; the render says so, so
+        the model does not mistake the item for ready work.
+        """
+        out: list[str] = []
+        for dep in item.depends_on:
+            target = self.get(dep)
+            if target is not None and target.status == "skipped":
+                out.append(dep)
+        return out
+
+    def skip_dependents(self, item_id: str, *, ts: str = "") -> list[str]:
+        """Give up every non-terminal item that depends on ``item_id``.
+
+        A skipped dependency produced no input, so its dependents can never
+        run -- and leaving them pending makes the plan look stalled instead of
+        finished.  The walk is transitive (a skipped child skips its own
+        children) and touches only non-terminal items, so a dependent that was
+        already completed keeps its receipt.
+
+        Returns the ids this call changed, in discovery order; the executor
+        writes one ``skipped`` receipt per id.  Pure domain mutation: it emits
+        nothing, because the runner owns the wire.
+        """
+        children: dict[str, list[str]] = {}
+        for item in self.items:
+            for dep in item.depends_on:
+                children.setdefault(dep, []).append(item.id)
+        skipped: list[str] = []
+        seen: set[str] = {item_id}
+        queue: list[str] = [item_id]
+        while queue:
+            parent = queue.pop(0)
+            for child_id in children.get(parent, []):
+                if child_id in seen:
+                    continue
+                seen.add(child_id)
+                child = self.get(child_id)
+                if child is None or child.is_terminal():
+                    continue
+                child.status = "skipped"
+                child.evidence = f"dependency skipped: {parent}"
+                if ts:
+                    child.updated_at = ts
+                skipped.append(child_id)
+                queue.append(child_id)
+        return skipped
+
     def focus(self) -> TodoItem | None:
         """The item to work on next: first unblocked open item, else first open."""
         open_items = self.open_items()
         if not open_items:
             return None
         for item in open_items:
-            if not self.unmet_dependencies(item):
+            if not self.blockers(item.id).any:
                 return item
         return open_items[0]
 
@@ -297,14 +402,20 @@ class TaskState:
             return Blockers()
         open_ids: list[str] = []
         unknown: list[str] = []
+        skipped: list[str] = []
         for dep in item.depends_on:
             target = self.get(dep)
             if target is None:
                 unknown.append(dep)
+            elif target.status == "skipped":
+                skipped.append(dep)
             elif not target.is_terminal():
                 open_ids.append(dep)
         cycle = self._cycle_from(item_id) if (open_ids or unknown) else ()
-        return Blockers(open=tuple(open_ids), unknown=tuple(unknown), cycle=cycle)
+        return Blockers(
+            open=tuple(open_ids), unknown=tuple(unknown), cycle=cycle,
+            skipped=tuple(skipped),
+        )
 
     def _cycle_from(self, item_id: str) -> tuple[str, ...]:
         """A non-terminal dependency chain that comes back to ``item_id``.
@@ -354,6 +465,11 @@ class TaskState:
         lines: list[str] = []
         if self.goal:
             lines.append(f"目标: {self.goal}")
+        if self.wave_note:
+            note = self.wave_note.strip()
+            if len(note) > WAVE_NOTE_MAX_CHARS:
+                note = note[: WAVE_NOTE_MAX_CHARS - 1] + "…"
+            lines.append(f"交接: {note}")
         if not self.items:
             lines.append("(无任务项)")
             return lines
@@ -362,10 +478,14 @@ class TaskState:
         shown = self.items[:max_items]
         for item in shown:
             marker = _MARKERS.get(item.status, "[ ]")
-            suffix = ""
+            reasons: list[str] = []
             unmet = self.unmet_dependencies(item)
-            if unmet and not item.is_terminal():
-                suffix = f" (blocked by {', '.join(unmet)})"
+            if unmet:
+                reasons.append("blocked by " + ", ".join(unmet))
+            gone = self.skipped_dependencies(item)
+            if gone:
+                reasons.append("dependency skipped: " + ", ".join(gone))
+            suffix = f" ({'; '.join(reasons)})" if reasons and not item.is_terminal() else ""
             lines.append(f"{marker} {item.id}. {item.content}{suffix}")
         if len(self.items) > len(shown):
             lines.append(f"... 另有 {len(self.items) - len(shown)} 项未显示")
@@ -409,6 +529,10 @@ class TaskState:
             data["resumeFingerprint"] = [int(value) for value in self.resume_fingerprint]
         if self.no_progress_resumes:
             data["noProgressResumes"] = int(self.no_progress_resumes)
+        if self.wave_note:
+            data["waveNote"] = self.wave_note
+        if self.plan_tokens_used:
+            data["planTokensUsed"] = int(self.plan_tokens_used)
         return data
 
     @classmethod
@@ -436,6 +560,8 @@ class TaskState:
             goal_phase=str(data.get("goalPhase", "") or ""),
             resume_fingerprint=fingerprint,
             no_progress_resumes=int(data.get("noProgressResumes", 0) or 0),
+            wave_note=str(data.get("waveNote", "") or ""),
+            plan_tokens_used=int(data.get("planTokensUsed", 0) or 0),
         )
 
 
@@ -444,6 +570,7 @@ __all__ = [
     "VALID_STATUSES",
     "TERMINAL_STATUSES",
     "RENDER_MAX_ITEMS",
+    "WAVE_NOTE_MAX_CHARS",
     "Blockers",
     "TodoItem",
     "TaskState",

@@ -325,3 +325,124 @@ def test_disarm_is_idempotent():
     assert plain.armed is False and plain.armed_profile == ""
 
 
+# ---- r24/C: skipped, the dependency edge it leaves behind, group hints ------
+
+
+def test_skipped_is_terminal_but_not_open():
+    task = TaskState(goal="g")
+    task.add("upstream")
+    task.add("downstream", depends_on=["1"])
+    task.update("1", status="skipped")
+
+    assert task.get("1").is_terminal() is True
+    assert [item.id for item in task.open_items()] == ["2"]
+    assert "[~] 1. upstream" in task.render()
+
+
+def test_skipped_dependency_blocks_its_dependents():
+    """skipped is terminal for the plan, unsatisfied for the dependents.
+
+    ``unmet_dependencies`` stops seeing it (it is terminal), so the blocker
+    query has to carry the fact itself -- otherwise the dependent looks ready
+    and the wave runs work whose input never existed.
+    """
+    task = TaskState(goal="g")
+    task.add("upstream")
+    task.add("downstream", depends_on=["1"])
+    task.update("1", status="skipped")
+
+    blockers = task.blockers("2")
+    assert blockers.skipped == ("1",)
+    assert blockers.open == ()
+    assert blockers.any is True
+    assert "dependency skipped: 1" in task.render()
+    # The focus hint must not offer the dependent as next work.
+    assert task.focus().id == "2"  # fallback only: nothing is ready
+    task.add("other")
+    assert task.focus().id == "3"
+
+
+def test_wave_fields_round_trip_only_when_set():
+    task = TaskState(goal="g")
+    plain = task.add("plain")
+    assert plain.files == [] and plain.kind == "write" and plain.attempts == 0
+    data = plain.to_dict()
+    assert "files" not in data and "kind" not in data and "attempts" not in data
+
+    item = task.add("grouped", files=["a.py", "b.py"], kind="research")
+    item.attempts = 2
+    restored = TaskState.from_dict(task.to_dict()).get(item.id)
+    assert restored.files == ["a.py", "b.py"]
+    assert restored.kind == "research"
+    assert restored.attempts == 2
+
+
+def test_unknown_wave_fields_degrade():
+    task = TaskState.from_dict(
+        {"items": [{"id": "1", "content": "x", "files": "nope", "attempts": "?"}]}
+    )
+    item = task.get("1")
+    assert item.files == [] and item.attempts == 0 and item.kind == "write"
+
+
+def test_skip_dependents_closes_the_chain_transitively():
+    task = TaskState(goal="g")
+    task.add("a")
+    task.add("b", depends_on=["1"])
+    task.add("c", depends_on=["2"])
+    task.add("independent")
+    task.update("1", status="blocked", evidence="missing input")
+
+    skipped = task.skip_dependents("1")
+    assert skipped == ["2", "3"]
+    assert task.get("2").status == "skipped"
+    assert task.get("3").status == "skipped"
+    assert task.get("2").evidence == "dependency skipped: 1"
+    assert task.get("3").evidence == "dependency skipped: 2"
+    assert task.get("4").status == "pending"
+    # The blocked source stays open (it is retryable); only its dependents close.
+    assert [item.id for item in task.open_items()] == ["1", "4"]
+
+
+def test_skip_dependents_keeps_completed_and_is_idempotent():
+    task = TaskState(goal="g")
+    task.add("a")
+    task.add("b", depends_on=["1"])
+    task.add("c", depends_on=["2"])
+    task.add("d", depends_on=["2"])
+    # c was already completed (legacy/out-of-band); it keeps its receipt.
+    task.update("3", status="completed", evidence="done")
+
+    assert task.skip_dependents("1") == ["2", "4"]
+    assert task.get("3").status == "completed"
+    assert task.get("2").status == "skipped"
+    assert task.get("4").status == "skipped"
+    assert task.skip_dependents("1") == []
+
+
+def test_wave_note_and_plan_tokens_round_trip_only_when_set():
+    task = TaskState(goal="g")
+    assert "waveNote" not in task.to_dict()
+    assert "planTokensUsed" not in task.to_dict()
+
+    task.wave_note = "接口 A 稳定；文件所有权：hotel/rooms.py"
+    task.plan_tokens_used = 98_765
+    data = task.to_dict()
+    assert data["waveNote"] == task.wave_note
+    assert data["planTokensUsed"] == 98_765
+    restored = TaskState.from_dict(data)
+    assert restored.wave_note == task.wave_note
+    assert restored.plan_tokens_used == 98_765
+    assert "交接: 接口 A 稳定" in restored.render()
+
+
+def test_wave_note_render_is_capped():
+    from ai_coding.domain.task import WAVE_NOTE_MAX_CHARS
+
+    task = TaskState(goal="g")
+    task.wave_note = "x" * (WAVE_NOTE_MAX_CHARS + 50)
+    rendered = task.render()
+    line = next(line for line in rendered.splitlines() if line.startswith("交接:"))
+    assert len(line) <= WAVE_NOTE_MAX_CHARS + len("交接: ")
+
+
