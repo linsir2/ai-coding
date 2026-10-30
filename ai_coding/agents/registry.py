@@ -65,6 +65,9 @@ _PLAN_SOFT_DENY = (
     "edit",
     "shell",
     "subagent",
+    # B0: the fan-out tool delegates to N sub-agents; plan mode does not
+    # delegate (same policy as `subagent`, not a new exception).
+    "parallel_research",
     "webfetch",
     "websearch",
     # M3 T8: the planning list is present_plan's, not todo_write's.  Cutting

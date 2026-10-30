@@ -333,6 +333,11 @@ class PermissionGate:
             "webfetch",
             "websearch",
             "todo_write",
+            # B0: read-only fan-out.  It changes nothing in the repo; its
+            # children are readonly (mutating tools are not even advertised), so
+            # WARN would put an approval panel in front of an exploration the
+            # operator asked for.
+            "parallel_research",
             "skill",
             "subagent",
             "memory_search",  # read-only recall (R3b)

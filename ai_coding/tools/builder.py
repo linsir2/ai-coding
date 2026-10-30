@@ -404,6 +404,13 @@ def _assemble_registry(
         registry.register(
             SubAgentTool(runner=runner, worktree_manager=manager, isolate=isolate)
         )
+        # B0: the main session's read-only fan-out shares the runner above.  A
+        # sub-agent stack (``include_subagent=False``) never gets it, so fan-out
+        # cannot recurse.  No worktree manager: the children are readonly, and
+        # they must read the live working tree, not a HEAD snapshot.
+        from ai_coding.tools.parallel_research_tool import ParallelResearchTool
+
+        registry.register(ParallelResearchTool(runner=runner))
         # C-3b: the model's own view of the table /tasks reads.
         registry.register(SubAgentListTool(runner=runner))
 

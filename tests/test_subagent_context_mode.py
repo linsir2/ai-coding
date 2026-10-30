@@ -15,8 +15,9 @@ from ai_coding.ai.engine import ChatEngine
 from ai_coding.config.models import AIConfig
 from ai_coding.core.subagent import SubAgentRunner
 from ai_coding.domain.loop import StepResult
-from ai_coding.domain.message import ChatMessage
+from ai_coding.domain.message import ChatMessage, ToolResult
 from ai_coding.domain.subagent import ParentContext
+from ai_coding.tools.base import BaseTool, ToolContext
 from ai_coding.tools.registry import ToolRegistry
 
 
@@ -25,8 +26,35 @@ class _Engine(ChatEngine):
         self.requests: list[dict[str, object]] = []
 
     async def step(self, messages, *, tools, instructions=None, on_delta=None):
-        self.requests.append({"messages": list(messages), "instructions": instructions})
+        self.requests.append({
+            "messages": list(messages),
+            "instructions": instructions,
+            "tools": list(tools),
+        })
         return StepResult(text="做完了", tool_calls=[], finish_reason="stop")
+
+
+class _Tool(BaseTool):
+    parallel_safe = False
+
+    def __init__(self, name: str, *, mutates_world: bool) -> None:
+        self._name = name
+        self.mutates_world = mutates_world
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return self._name
+
+    @property
+    def params_json_schema(self) -> dict[str, object]:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, params, ctx: ToolContext | None = None) -> ToolResult:
+        return ToolResult(success=True)
 
 
 def _runner(engine: _Engine, *, base_instructions: str = "BASE INSTRUCTIONS", **overrides):
@@ -117,3 +145,51 @@ async def test_task_only_without_a_parent_uses_the_base_instructions():
     engine = _Engine()
     await _runner(engine, subagent_context_mode="task_only").run("t")
     assert engine.requests[0]["instructions"].startswith("BASE INSTRUCTIONS")
+
+
+# ---- B0: per-call overrides (fan-out must not copy the parent N times) ------
+
+
+@pytest.mark.asyncio
+async def test_a_per_call_task_only_override_wins_over_the_global_full():
+    engine = _Engine()
+    result = await _runner(engine).run(
+        "调查路由", parent=_parent(), context_mode="task_only"
+    )
+    contents = [m.content or "" for m in engine.requests[0]["messages"]]
+    assert not any("parent-said-this" in content for content in contents)
+    assert any("调查路由" in content for content in contents)
+    assert result.context_mode == "task_only"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_per_call_mode_falls_back_to_the_global_one():
+    engine = _Engine()
+    result = await _runner(engine).run("t", parent=_parent(), context_mode="bogus")
+    assert result.context_mode == "full"
+    contents = [m.content or "" for m in engine.requests[0]["messages"]]
+    assert any("parent-said-this" in content for content in contents)
+
+
+@pytest.mark.asyncio
+async def test_a_readonly_child_is_not_advertised_mutating_tools():
+    import json
+
+    engine = _Engine()
+    registry = ToolRegistry()
+    registry.register(_Tool("read", mutates_world=False))
+    registry.register(_Tool("write", mutates_world=True))
+    cfg = AIConfig(max_tool_iterations=2, stop_policy="natural")
+    runner = SubAgentRunner(
+        cfg,
+        engine_factory=lambda: engine,
+        build_tools=lambda workdir: registry,
+        settings=cfg,
+        workspace=".",
+    )
+
+    await runner.run("t", parent=_parent(), readonly=True)
+
+    tools = json.dumps(engine.requests[0]["tools"], ensure_ascii=False)
+    assert '"read"' in tools
+    assert '"write"' not in tools

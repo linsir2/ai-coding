@@ -17,6 +17,12 @@ from .message import ChatMessage, ToolArtifact, ToolCallRef
 if TYPE_CHECKING:
     from ai_coding.security.permissions import Rule
 
+#: ``SubagentResult.status`` values that mean "it did the work": a child that hit
+#: its iteration ceiling still returns a usable conclusion, exactly like
+#: ``ToolResult.success`` treats it.  One definition so the tool, the fan-out and
+#: the plan executor cannot drift apart.
+SUCCESS_STATUSES: frozenset[str] = frozenset({"completed", "max_iterations"})
+
 
 @dataclass(frozen=True)
 class SubagentTurn:

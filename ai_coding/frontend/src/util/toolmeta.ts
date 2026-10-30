@@ -32,6 +32,9 @@ const TOOL_VERBS: Record<string, string> = {
   // says what happened, and the card can be opened for the plan itself.
   present_plan: "提交计划",
   finish_research: "收尾研究",
+  // B0: one call fans out several read-only questions; without a verb it
+  // would draw as the generic 运行工具.
+  parallel_research: "并行调研",
 }
 
 /** The past-tense verb for a tool card; unknown tools (MCP) run under 运行工具. */

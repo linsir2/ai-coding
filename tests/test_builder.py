@@ -42,6 +42,17 @@ def test_registry_builder_excludes_nested_subagent(tmp_path):
     assert "read" in registry.list_names()
 
 
+def test_parallel_research_is_a_main_session_tool_only(tmp_path):
+    """B0: it needs a runner; a child stack must not fan out again."""
+    registry = build_tool_registry(_cfg(str(tmp_path)), str(tmp_path), None)
+    assert "parallel_research" in registry.list_names()
+
+    inner = build_tool_registry(
+        _cfg(str(tmp_path)), str(tmp_path), None, include_subagent=False
+    )
+    assert "parallel_research" not in inner.list_names()
+
+
 def test_registry_builder_skips_disabled_tools(tmp_path):
     cfg = _cfg(str(tmp_path))
     cfg.tools.read.enabled = False

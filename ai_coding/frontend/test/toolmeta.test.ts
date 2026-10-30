@@ -37,6 +37,10 @@ describe("toolVerb", () => {
   test("unknown tools (MCP included) fall back to 运行工具", () => {
     expect(toolVerb("mcp__search__web")).toBe("运行工具")
   })
+
+  test("B0: the read-only research fan-out has a verb", () => {
+    expect(toolVerb("parallel_research")).toBe("并行调研")
+  })
 })
 
 describe("toolTarget", () => {

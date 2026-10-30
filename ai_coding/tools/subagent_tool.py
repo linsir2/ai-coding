@@ -14,10 +14,8 @@ from typing import Any
 
 from ai_coding.core.observers import EmitObserver
 from ai_coding.domain.message import ToolResult
-from ai_coding.domain.subagent import ParentContext, SubagentResult
+from ai_coding.domain.subagent import SUCCESS_STATUSES, ParentContext, SubagentResult
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
-
-SUCCESS_STATUSES = frozenset({"completed", "max_iterations"})
 
 #: Bound on a caller-supplied ``output_schema`` (R1-3): the schema is pasted
 #: into the child's prompt, so an unbounded one is a token bomb.  4000 chars

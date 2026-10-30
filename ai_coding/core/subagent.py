@@ -177,6 +177,11 @@ class SubAgentRunner:
         """``full`` (the parent's view) or ``task_only`` (a clean window), R7e-4."""
         return str(getattr(self._settings, "subagent_context_mode", "full") or "full")
 
+    @property
+    def max_concurrent(self) -> int:
+        """How many children may run at once (B0: a fan-out's wall clock needs it)."""
+        return self._max_concurrent_n
+
     async def run(
         self,
         task: str,
@@ -189,6 +194,8 @@ class SubAgentRunner:
         observer: Any | None = None,
         output_schema: dict[str, Any] | None = None,
         agent: str | None = None,
+        context_mode: str | None = None,
+        readonly: bool = False,
     ) -> SubagentResult:
         """Run ``task`` and return its packet.  Never raises for a sub-agent failure.
 
@@ -201,13 +208,37 @@ class SubAgentRunner:
         the child is instructed to return its verdict as JSON, and the packet
         carries the parsed ``facts`` plus a ``schema_valid`` verdict.  The raw
         conclusion always survives — a bad brace must not kill an hour of work.
+
+        ``context_mode`` (B0) overrides the configured window for this call.
+        A fan-out of N research children must not copy the parent history N
+        times; the caller passes ``task_only`` and puts every needed fact in the
+        brief.  Unknown values fall back to the configured mode rather than
+        silently changing what a child sees.
+
+        ``readonly`` (B0) is the hard read-only switch: the child's session is
+        readonly, so the tool surface drops mutating tools and the dispatch gate
+        refuses them.  A fan-out does not rely on the ``explore`` agent id alone
+        — a project file may override that id whole.
         """
         active = self._observer if observer is None else observer
+        mode = self._resolve_context_mode(self.context_mode, context_mode)
         async with self._semaphore:
             return await self._run_isolated(
                 task, name, parent, parent_span, active,
-                worktree_manager, isolate, output_schema, agent,
+                worktree_manager, isolate, output_schema, agent, mode, readonly,
             )
+
+    @staticmethod
+    def _resolve_context_mode(configured: str, requested: str | None) -> str:
+        """The mode a child runs with: a valid override, else the configured one.
+
+        Anything other than the two documented windows is ignored on purpose:
+        a typo must not become a third, undefined context semantics.
+        """
+        mode = (requested or configured or "full").strip().lower()
+        if mode not in ("full", "task_only"):
+            mode = (configured or "full").strip().lower()
+        return mode if mode in ("full", "task_only") else "full"
 
     async def _run_isolated(
         self,
@@ -220,6 +251,8 @@ class SubAgentRunner:
         isolate: bool,
         output_schema: dict[str, Any] | None = None,
         agent: str | None = None,
+        context_mode: str = "full",
+        readonly: bool = False,
     ) -> SubagentResult:
         """Worktree branch shared by the synchronous and background paths."""
         if (
@@ -233,6 +266,7 @@ class SubAgentRunner:
                         task, name, str(wt.path), parent,
                         parent_span=parent_span, observer=observer,
                         output_schema=output_schema, agent=agent,
+                        context_mode=context_mode, readonly=readonly,
                     )
             except WorktreeError:
                 # Scoped like the child's own events: this record says the child
@@ -248,6 +282,7 @@ class SubAgentRunner:
         return await self._run_in(
             task, name, None, parent, parent_span=parent_span, observer=observer,
             output_schema=output_schema, agent=agent,
+            context_mode=context_mode, readonly=readonly,
         )
 
     # ---- background runs (R1-2) -------------------------------------------
@@ -379,6 +414,7 @@ class SubAgentRunner:
                 result = await self._run_isolated(
                     task, name, parent, parent_span, observer,
                     worktree_manager, isolate, output_schema, agent,
+                    self.context_mode, False,
                 )
         except asyncio.CancelledError:
             result = SubagentResult(
@@ -555,6 +591,8 @@ class SubAgentRunner:
         observer: Any | None = None,
         output_schema: dict[str, Any] | None = None,
         agent: str | None = None,
+        context_mode: str = "full",
+        readonly: bool = False,
     ) -> SubagentResult:
         target, problem = self._resolve_target(agent)
         if problem:
@@ -566,7 +604,7 @@ class SubAgentRunner:
         # the parent has to put every fact it needs into the task text - and an
         # empty base string must stay None, because a blank PromptAssembler is a
         # different request, not an equivalent one (an existing test asserts it).
-        mode = self.context_mode
+        mode = context_mode
         if mode == "task_only":
             seeded: list[ChatMessage] = []
             prompt = (
@@ -588,6 +626,10 @@ class SubAgentRunner:
             last_access_time=ts,
             messages=seeded,
             agent=target.id if target is not None else "build",
+            # B0: the hard read-only switch.  A fan-out passes True so the
+            # child's tool surface drops mutating tools; the agent id alone is
+            # not a boundary (a project may override ``explore`` whole).
+            readonly=readonly,
         )
         loop = AgentLoop(
             engine,
