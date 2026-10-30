@@ -205,6 +205,12 @@ def _build_loop(
             from ai_coding.tools.checkpoint_tool import CheckpointTool
 
             registry.register(CheckpointTool())
+        # These two joined the registry after ``build_tool_registry`` ran its
+        # defer pass; applying the same composition decision here keeps their
+        # schemas off the request until ``tool_search`` asks for them.
+        from ai_coding.tools.builder import mark_deferred_tools
+
+        mark_deferred_tools(registry)
 
     if snapshots is None:
         # Every interactive entry point gets undo; only the history half works

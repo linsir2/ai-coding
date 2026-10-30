@@ -427,7 +427,50 @@ def _assemble_registry(
         # C-3b: the model's own view of the table /tasks reads.
         registry.register(SubAgentListTool(runner=runner))
 
+    # Deferred tools: the prompt names them (one line each in tool_search's
+    # answer), and their schemas ride the request only after the model asks.
+    # Which ones is a composition decision -- a tool used once per session
+    # should not pay its JSON on every step.  Core work tools (bash/read/write/
+    # edit/glob/grep/todo_write), the plan exits (present_plan /
+    # finish_research / wave_report), history_search, subagent and tool_search
+    # itself stay advertised.
+    mark_deferred_tools(registry)
+
+    from ai_coding.tools.tool_search_tool import ToolSearchTool
+
+    registry.register(ToolSearchTool(registry))
+
     return registry, gate
 
 
-__all__ = ["build_tool_registry", "build_subagent_runner"]
+#: The composition decision above, named so a registry assembled elsewhere can
+#: apply it too.  Two of these (``memory_search``/``memory_write``) are
+#: registered *after* ``build_tool_registry`` (``cli._build_loop`` needs the
+#: memory service), so marking them only here would leave their ~3.6k
+#: characters of schema on every step and make ``tool_search`` unable to find
+#: them at all.
+DEFERRED_TOOL_NAMES = frozenset(
+    {
+        "memory_search",
+        "memory_write",
+        "parallel_research",
+        "subagent_list",
+        "job_list",
+        "job_output",
+        "job_kill",
+        "ask_user",
+        "skill",
+        "webfetch",
+        "websearch",
+    }
+)
+
+
+def mark_deferred_tools(registry: Any) -> None:
+    """Mark the low-frequency tools on ``registry`` as deferred (idempotent)."""
+    for tool in getattr(registry, "all_tools", ()):
+        if tool.name in DEFERRED_TOOL_NAMES:
+            tool.defer = True
+
+
+__all__ = ["build_tool_registry", "build_subagent_runner", "mark_deferred_tools"]

@@ -81,7 +81,7 @@ _STALL_PREFIX = "no progress"
 _SEARCH_UNCONVERGED = "search unconverged"
 
 _STATUS_LABEL: dict[TurnStatus, str] = {
-    TurnStatus.MAX_ITERATIONS: "迭代预算用尽",
+    TurnStatus.MAX_ITERATIONS: "回合步数上限",
     TurnStatus.BUDGET: "token 预算用尽",
     TurnStatus.TIMEOUT: "回合超时",
     TurnStatus.ERROR: "引擎错误",

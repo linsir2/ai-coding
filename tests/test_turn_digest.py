@@ -82,7 +82,7 @@ def test_digest_falls_back_to_the_status_when_the_model_said_nothing():
             status=TurnStatus.MAX_ITERATIONS, text=None, reason="iteration budget exhausted"
         ),
     )
-    assert "迭代预算用尽" in digest.outcome
+    assert "回合步数上限" in digest.outcome
     assert digest.status == "max_iterations"
 
 

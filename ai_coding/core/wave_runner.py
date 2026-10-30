@@ -53,6 +53,7 @@ from ai_coding.domain.plan_delivery import StepDelivery
 from ai_coding.domain.plan_wave import WaveHandoff
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import WAVE_NOTE_MAX_CHARS, TaskState, TodoItem
+from ai_coding.infra.deadline import Deadline
 from ai_coding.infra.time_utils import now_utc
 
 __all__ = ["WaveRunner", "WaveItem", "WAVE_ITEM_HEAD", "plan_runner_for"]
@@ -480,11 +481,18 @@ class WaveRunner:
                 if item is None:
                     break
                 self._attempted_items.add(item.id)
-                _moved, usage = await self._run_item(
-                    wave_session, parent, task, wave, item, report,
-                    console, on_delta=on_delta, observer=observer,
-                    attempts_cap=attempts_cap,
-                )
+                # One wall clock per item, shared by every turn the attempts
+                # spend on it (see ``plan_item_wall_seconds``).  Cleared after
+                # the item so the settle turn that follows is unscoped.
+                self._arm_item_deadline(wave_session)
+                try:
+                    _moved, usage = await self._run_item(
+                        wave_session, parent, task, wave, item, report,
+                        console, on_delta=on_delta, observer=observer,
+                        attempts_cap=attempts_cap,
+                    )
+                finally:
+                    wave_session.item_deadline = None
                 if usage:
                     report.tokens_used = self._merge_usage(report.tokens_used, usage)
                 # The model may have finished more than the item it was asked
@@ -573,12 +581,18 @@ class WaveRunner:
         while True:
             attempts += 1
             item.attempts = attempts
-            self._set_policy(item, wave_session)
+            # The first attempt may continue once; the repair attempt may not
+            # (C3 is per turn, so the repair would buy another full round --
+            # see ``_set_policy``).
+            self._set_policy(
+                item, wave_session, continuations=1 if attempts == 1 else 0
+            )
             self._set_acceptance(wave_session, item)
             prompt = self._item_prompt(item, repair=attempts > 1, failure=failure)
             try:
                 await self._loop.process_input(
-                    wave_session, prompt, on_delta=on_delta, observer=observer
+                    wave_session, prompt, on_delta=on_delta, observer=observer,
+                    synthetic=True,
                 )
             except asyncio.CancelledError:
                 raise
@@ -627,7 +641,8 @@ class WaveRunner:
         before = self._tool_calls(wave_session)
         try:
             await self._loop.process_input(
-                wave_session, prompt, on_delta=on_delta, observer=observer
+                wave_session, prompt, on_delta=on_delta, observer=observer,
+                synthetic=True,
             )
         except asyncio.CancelledError:
             raise
@@ -668,6 +683,11 @@ class WaveRunner:
             seed_chars,
         )
         self._record(report, parent, delivery, observer=self._observer)
+        # The wave session is ephemeral, but the task it shares with the parent
+        # is the durable record.  Saving only at the wave boundary meant a run
+        # killed mid-wave left every finished item ``pending`` on disk (measured
+        # 2026-10-30: items 2-4 completed in memory, the file still said item 1).
+        self._persist(parent)
 
     def _block_item(
         self,
@@ -697,6 +717,7 @@ class WaveRunner:
             len(wave_session.messages),
         )
         self._record(report, parent, delivery, observer=observer)
+        self._persist(parent)  # a blocked item is a durable verdict too
         self._skip_dependents(parent, task, item, report, observer)
 
     def _stall_item(
@@ -724,6 +745,7 @@ class WaveRunner:
             len(wave_session.messages),
         )
         self._record(report, parent, delivery, observer=observer)
+        self._persist(parent)  # the receipt is what /resume reads
 
     def _skip_dependents(
         self, parent: Any, task: TaskState, item: TodoItem, report: PlanReport, observer: Any
@@ -816,7 +838,7 @@ class WaveRunner:
         session.agent = "build"
         session.readonly = False
         session.messages = [
-            ChatMessage(role="user", content=seed, timestamp="")
+            ChatMessage(role="user", content=seed, timestamp="", synthetic=True)
         ]
         return session
 
@@ -849,19 +871,43 @@ class WaveRunner:
             else []
         )
 
-    def _set_policy(self, item: TodoItem, session: SessionData) -> None:
+    def _set_policy(
+        self, item: TodoItem, session: SessionData, *, continuations: int = 1
+    ) -> None:
         if getattr(self._loop, "policy", None) is None or self._base_config is None:
             return
         base = self._base_config
         overrides: dict[str, Any] = {
-            "max_iterations": max(1, self._setting_int("plan_step_max_iterations", 60)),
+            "max_iterations": max(1, self._setting_int("plan_step_max_iterations", 100)),
             "stop_policy": "natural",
-            "max_auto_continuations": 0,
+            # One continuation, not zero: a step that ran out of iterations with
+            # its item still open gets one more round.  It is safe only because
+            # ``step_item_id`` narrows the open set to this item -- otherwise the
+            # nudge would offer the whole rest of the plan to one step.
+            #
+            # The repair attempt (``continuations=0``) is the item's last
+            # attempt.  C3 grants one continuation *per turn* (the counter
+            # resets in ``_begin_turn``), so leaving it armed here would add
+            # another 100 iterations on top of 100+100 (first attempt) + 100
+            # (repair) -- 300 for one item instead of 200.
+            "max_auto_continuations": max(0, int(continuations)),
         }
+        # The scope the continuation reads (agent_loop._open_items_for).
+        session.step_item_id = str(getattr(item, "id", "") or "")
+        # A new item is a new piece of work: the previous item's ladder windows
+        # (TASK refs, acceptance fingerprints) would otherwise read "helped"
+        # against an item that is not this one.
+        session.intervention_state = {}
         remaining = self._wave_remaining_tokens()
         if remaining is not None:
             overrides["max_turn_tokens"] = remaining
         self._loop.policy = TurnPolicy(replace(base, **overrides))
+
+    def _arm_item_deadline(self, session: SessionData) -> None:
+        """Give this item one wall clock, shared by every turn spent on it."""
+        settings = getattr(self._loop, "settings", None)
+        limit = float(getattr(settings, "plan_item_wall_seconds", 0.0) or 0.0)
+        session.item_deadline = Deadline.after(limit) if limit > 0 else None
 
     def _item_passed(self, session: SessionData, item: TodoItem) -> bool:
         if item.verify:
@@ -1142,7 +1188,7 @@ class WaveRunner:
             self._loop.policy = TurnPolicy(
                 replace(
                     base,
-                    max_iterations=max(1, self._setting_int("plan_step_max_iterations", 60)),
+                    max_iterations=max(1, self._setting_int("plan_step_max_iterations", 100)),
                     stop_policy="natural",
                     max_auto_continuations=0,
                 )
@@ -1179,7 +1225,12 @@ class WaveRunner:
         # The one fact ``todo_write`` reads: only open items may change here.
         session.replan_mode = True
         session.messages = [
-            ChatMessage(role="user", content=self._replan_prompt(task, reason), timestamp="")
+            ChatMessage(
+                role="user",
+                content=self._replan_prompt(task, reason),
+                timestamp="",
+                synthetic=True,
+            )
         ]
         return session
 

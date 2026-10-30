@@ -94,6 +94,10 @@ def tool_context(
     note_read: Callable[[str, int, int, int], None] | None = None,
     note_approval: Callable[[dict[str, Any] | None], None] | None = None,
     note_plan_approved: Callable[[], None] | None = None,
+    note_tool_loaded: Callable[[tuple[str, ...]], None] | None = None,
+    #: What ``tool_search`` may offer: the deferred part of this request's own
+    #: surface.  ``()`` means nothing is on offer (no loop stamped it).
+    searchable_names: Sequence[str] = (),
     conclusion: TurnConclusion | None = None,
     jobs: Any = None,
     extra_workspace_roots: Sequence[str] = (),
@@ -136,6 +140,9 @@ def tool_context(
         note_read=note_read,
         note_approval=note_approval,
         note_plan_approved=note_plan_approved,
+        note_tool_loaded=note_tool_loaded,
+        loaded_tools=tuple(getattr(session, "loaded_tools", ()) or ()),
+        searchable_names=tuple(searchable_names),
         # N1: the turn's conclusion holder -- the two exits of a plan-mode
         # turn read it to stay mutually exclusive.
         conclusion=conclusion,

@@ -530,7 +530,7 @@ async def test_a_plan_step_whose_turn_was_cut_off_does_not_withdraw_the_plan(
             self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=1))
             self.calls = 0
 
-        async def process_input(self, session, text, on_delta=None, observer=None):
+        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
             self.calls += 1
             for item in session.task.open_items():
                 if not item.is_terminal():

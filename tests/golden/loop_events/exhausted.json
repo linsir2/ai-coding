@@ -158,18 +158,18 @@
       "outcome": {
         "status": "max_iterations",
         "text": null,
-        "handoff": "[回合未完成 · 迭代预算用尽（2 轮）]\n原因: iteration budget exhausted\n目标: 开始",
+        "handoff": "[回合未完成 · 回合步数上限（2 轮）]\n原因: iteration budget exhausted\n目标: 开始",
         "iterations": 2,
         "reason": "iteration budget exhausted"
       }
     }
   ],
   "summary": {
-    "answer": "[回合未完成 · 迭代预算用尽（2 轮）]\n原因: iteration budget exhausted\n目标: 开始",
+    "answer": "[回合未完成 · 回合步数上限（2 轮）]\n原因: iteration budget exhausted\n目标: 开始",
     "outcome": {
       "status": "max_iterations",
       "text": null,
-      "handoff": "[回合未完成 · 迭代预算用尽（2 轮）]\n原因: iteration budget exhausted\n目标: 开始",
+      "handoff": "[回合未完成 · 回合步数上限（2 轮）]\n原因: iteration budget exhausted\n目标: 开始",
       "iterations": 2,
       "reason": "iteration budget exhausted"
     },

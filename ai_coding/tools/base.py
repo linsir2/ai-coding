@@ -139,6 +139,19 @@ class ToolContext:
     # (``present_plan`` approval).  The loop clears the session's ladder
     # windows through it; ``None`` outside a loop that owns a session.
     note_plan_approved: Callable[[], None] | None = None
+    #: How ``tool_search`` makes a deferred tool visible: the loop stamps this
+    #: once per request, the tool reports the names it matched, and the next
+    #: request carries their schemas.  ``None`` outside a loop.
+    note_tool_loaded: Callable[[tuple[str, ...]], None] | None = None
+    #: What this session has already loaded (``tool_search``): the search skips
+    #: these and names what is still available.  Read-only here; the write
+    #: channel is ``note_tool_loaded``.
+    loaded_tools: tuple[str, ...] = ()
+    #: What ``tool_search`` may offer at all: the deferred tools that pass this
+    #: request's surface (posture, read-only, permission rules, plan/wave
+    #: posture).  The loop stamps it per request; ``()`` means nothing is on
+    #: offer, so a call made outside a loop loads nothing.
+    searchable_names: tuple[str, ...] = ()
     #: N1: the turn's conclusion holder, shared by the turn's tool calls.
     #: The two exits of a plan-mode turn read it to stay mutually exclusive;
     #: ``None`` outside a loop that owns a turn.
@@ -198,6 +211,13 @@ class BaseTool(ABC):
     #: schema is paid for on every step), and ``execute`` refuses a call made
     #: from memory.
     wave_only: bool = False
+    #: Deferred tools are named in the prompt but their full schema is not
+    #: carried until the model asks for it (``tool_search``).  The schema is
+    #: paid on every step, so a tool used once per session should not cost its
+    #: JSON on every request.  Core tools stay advertised; the flag is set where
+    #: the tool is registered (``tools/builder.py``), because "how often is this
+    #: worth its schema" is a composition decision, not a tool's own.
+    defer: bool = False
 
     @property
     def origin(self) -> str:

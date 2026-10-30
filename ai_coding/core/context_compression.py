@@ -107,6 +107,14 @@ def chars_for_tokens(text: str, budget: int) -> int:
     return len(text)
 
 
+#: I2/D1 branch C: the share of the window new material must add before another
+#: summary call is worth it, and the floor below which a tiny window would
+#: otherwise never advance its checkpoint.  One flat number served neither end:
+#: 4,000 was 8% of a 48k window and 1.5% of a 256k one.
+_SUMMARY_DELTA_RATIO = 0.02
+_SUMMARY_DELTA_FLOOR = 1_000
+
+
 def compaction_ceiling(window: int) -> int:
     """The usage level at which compaction is due (OpenCode parity).
 
@@ -455,6 +463,28 @@ def _history_tokens(messages: list[ChatMessage]) -> int:
         + estimate_tokens(_tool_args_text(messages))
         + image_tokens(messages)
     )
+
+
+def working_history_tokens(session: Any) -> int:
+    """The history the next request would carry: checkpoint plus what follows it.
+
+    The budget path compacts a *copy* and never rewrites ``session.messages``
+    (docs/features.md:240 — append-only, so rewind and undo still work).  That
+    design is sound, but it left the gate measuring the full, ever-growing
+    history: once it crossed the ceiling it stayed over it forever, and every
+    iteration compacted again (measured live 2026-10-30: 21 iterations, 21
+    compactions, five paid summaries).
+
+    This is the measurement the gate's fallback should use.  The checkpoint
+    already stands for ``messages[:consumed]``, so counting both would pay for
+    the head twice.  Without a checkpoint (or with one whose anchor no longer
+    matches) it is the full history, exactly as before.
+    """
+    messages = list(getattr(session, "messages", ()) or ())
+    previous, used = read_checkpoint(session, messages)
+    if previous and 0 < used <= len(messages):
+        return estimate_tokens(previous) + _history_tokens(messages[used:])
+    return _history_tokens(messages)
 
 
 def _tool_args_text(messages: Sequence[ChatMessage]) -> str:
@@ -816,6 +846,11 @@ class ContextManager:
         # It wins over the raw setting because resolving it once at the
         # composition root is what keeps the policy and the meter from
         # disagreeing about how big the window is.
+        # The override is read before the window is set: the window setter
+        # derives the summary delta from it, so it must already exist.
+        self._summary_delta_override = int(
+            getattr(ai_settings, "summary_delta_tokens", 0) or 0
+        )
         self._max_context_tokens = int(
             context_window or getattr(ai_settings, "max_context_tokens", 0) or 48_000
         )
@@ -845,9 +880,8 @@ class ContextManager:
         #: rides into the request verbatim (branch C), which is what keeps a
         #: long turn from paying for one summary per iteration -- measured at
         #: 68.8% of the whole turn's prompt tokens before this existed.
-        self._summary_delta_tokens = int(
-            getattr(ai_settings, "summary_delta_tokens", 4_000) or 4_000
-        )
+        #: Derived by the window setter above (2% of the window, floor 1,000),
+        #: with ``summary_delta_tokens`` as an explicit override.
         self._compress_target_ratio = float(
             getattr(ai_settings, "compress_target_ratio", 0.5)
         )
@@ -900,6 +934,18 @@ class ContextManager:
     def _max_context_tokens(self, value: int) -> None:
         self._context_tokens = int(value)
         self._max_result_bytes = max(1, self._context_tokens // 2)
+        # The summary delta is window-relative (see the module constants): a
+        # model switch moves the window, so it must move this too.  An explicit
+        # positive ``summary_delta_tokens`` stays an override.
+        override = int(getattr(self, "_summary_delta_override", 0) or 0)
+        self._summary_delta_tokens = (
+            override
+            if override > 0
+            else max(
+                _SUMMARY_DELTA_FLOOR,
+                int(self._context_tokens * _SUMMARY_DELTA_RATIO),
+            )
+        )
 
     @property
     def summarizer(self) -> Callable[[str], Awaitable[str | None]] | None:
@@ -1017,18 +1063,33 @@ class ContextManager:
                 )
             )
             delta = head[used:] if used <= len(head) else []
-            # L2 is deliberately skipped here.  ``tail`` is what the pipeline
-            # chose to keep verbatim inside a budget of ``window // 4``; eliding
-            # its bodies can only remove information the model is about to need,
-            # and it is what turned a 12k tail into 1-3k of envelope text
-            # (eval-08 T2: the model re-read ``agent_loop.py`` four times).
+            # L2 runs on the verbatim tail, exactly as in the first-compaction
+            # path.  Skipping it here (the old behaviour) protected the tail from
+            # eval-08's over-elision, but it also left every *later* request
+            # carrying the same old tool bodies: the tail climbed back to the
+            # ceiling within a dozen iterations while the gate kept firing.
+            # ``keep_recent_tool_results`` is the same window in both paths, so
+            # the results the model is about to use stay byte-identical.
+            verbatim_tail = tail
+            tail = placeholder_old_results(
+                verbatim_tail,
+                self._keep_recent_results,
+                window_chars=self._l2_window_chars,
+                window_budget=self._l2_window_budget,
+                elide_root=self._root,
+            )
+            l2_rewritten = _rewritten_count(verbatim_tail, tail)
             stats.append(
                 LayerStat(
                     name="L2",
                     removed=0,
-                    rewritten=0,
-                    skipped=_older_tool_count(tail, self._keep_recent_results),
-                    before_tokens=_history_tokens(tail),
+                    rewritten=l2_rewritten,
+                    skipped=max(
+                        0,
+                        _older_tool_count(verbatim_tail, self._keep_recent_results)
+                        - l2_rewritten,
+                    ),
+                    before_tokens=_history_tokens(verbatim_tail),
                     after_tokens=_history_tokens(tail),
                 )
             )
@@ -1249,13 +1310,21 @@ class ContextManager:
         only reads the estimate therefore cannot open until the request has
         already failed, which is what it did.
 
-        So the gate takes the provider's own count when there is one, and takes
-        the larger of the two. A first session has no usage yet, and 0 keeps the
-        pre-existing estimate-only behaviour there.
+        So a measurement beats an estimate.  When ``observed_tokens`` is given
+        (the provider's own reading, or ``working_history_tokens`` at cold
+        start) it *is* the verdict; the character estimate is used only when
+        nothing measured the request.  Taking the larger of the two looked
+        safer but reopened the gate on every iteration: the estimate measures
+        the un-compacted history, which never shrinks (2026-10-30 live run:
+        21 iterations, 21 compactions).
+
+        A first session has no usage yet, and 0 keeps the pre-existing
+        estimate-only behaviour there.
         """
         ceiling = compaction_ceiling(self._max_context_tokens)
-        observed = max(int(observed_tokens or 0), _history_tokens(messages))
-        return observed >= ceiling
+        if observed_tokens > 0:
+            return int(observed_tokens) >= ceiling
+        return _history_tokens(messages) >= ceiling
 
     async def compress_if_needed(
         self,

@@ -258,9 +258,17 @@ async def test_the_composition_root_registers_memory_write(tmp_path: Path):
 
     cfg = AppConfig()
     registry = _build_tool_registry(cfg, str(tmp_path), None)
-    _build_loop(_Engine(), _Sessions(), registry, cfg, str(tmp_path), None)
+    loop = _build_loop(_Engine(), _Sessions(), registry, cfg, str(tmp_path), None)
     assert registry.get("memory_write") is not None
     assert registry.get("memory_search") is not None
+    # Registered after build_tool_registry's defer pass: the composition root
+    # must apply the same decision, or their schemas ride every request and
+    # ``tool_search`` cannot even find them (defer was False).
+    assert registry.get("memory_write").defer is True
+    assert registry.get("memory_search").defer is True
+    assert "memory_search" not in {
+        tool.name for tool in loop._surface_tools("normal", False)
+    }
 
 
 # ---- the user tier (M10) ---------------------------------------------------

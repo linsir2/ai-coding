@@ -464,7 +464,7 @@ L4 替换掉的 head **不归档**——而环境块却承诺"需要原文用 `h
 | `ai.l2_window_chars` | 200 | **1200** | 200 字符等于"内容没了"，模型只能重读 |
 | `ai.l2_window_budget` | 4000 | **12000** | 配合上面两项 |
 | `ai.snip_keep_tail` | 20 | **30** | 只影响无 checkpoint 的首压路径 |
-| `ai.summary_delta_tokens`（新） | — | **4000** | 分支 C 的阈值 |
+| `ai.summary_delta_tokens`（新） | — | **0（自动）** | 分支 C 的阈值；0 = `max(1000, window × 0.02)`（2026-10-30 由固定 4000 改为按窗口比例） |
 
 ---
 

@@ -37,11 +37,11 @@ from ai_coding.core.task_driver import TaskDriver
 from ai_coding.core.turn_policy import TurnPolicy
 from ai_coding.domain.acceptance import AcceptanceItem
 from ai_coding.domain.agents import PLAN_DIR
-from ai_coding.domain.loop import TurnStatus
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.plan_delivery import StepDelivery
 from ai_coding.domain.run import user_message
 from ai_coding.domain.session import SessionData
+from ai_coding.infra.deadline import Deadline
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
 from ai_coding.shell_parse import path_candidates as _shell_path_candidates
@@ -472,7 +472,9 @@ def continuations_disabled(
       than work in progress.  Continuing it told the model to "keep going" on
       the one turn whose prompt says *do not execute the work* (measured: 10
       model calls and 3 ``[continue]`` injections where 2 calls did the job);
-    - plan steps, which get the same treatment inline in ``_run_step``;
+    - plan steps, which now carry the same one-continuation treatment as a
+      scoped policy (``max_auto_continuations=1`` + ``step_item_id``), not this
+      helper;
     - sub-agents, which a parent already waits on and which carry their own
       wall-clock ceiling (``subagent._subagent_settings``).
 
@@ -860,7 +862,7 @@ class PlanRunner:
 
     def _step_budget(self) -> int:
         settings = getattr(self._loop, "settings", None)
-        return int(getattr(settings, "plan_step_max_iterations", 60) or 60)
+        return int(getattr(settings, "plan_step_max_iterations", 100) or 100)
 
     def _make_step_session(
         self, session: Any, task: Any, item: Any, report: PlanReport
@@ -891,6 +893,7 @@ class PlanRunner:
                 role="user",
                 content=self._seed(session, task, item, report),
                 timestamp="",
+                synthetic=True,
             )
         ]
         return step
@@ -1013,15 +1016,24 @@ class PlanRunner:
         )
         original_policy = self._loop.policy
         budget = self._step_budget()
+        # One wall clock for this item; its repair turn shares it (the old
+        # behaviour bought a fresh ``turn_timeout_seconds`` per call).
+        item_limit = float(
+            getattr(getattr(self._loop, "settings", None), "plan_item_wall_seconds", 0.0)
+            or 0.0
+        )
+        step_session.item_deadline = (
+            Deadline.after(item_limit) if item_limit > 0 else None
+        )
         # M1-B: close the todo gate too — a step must not be nudged about the
         # plan's other open items.  Same swap-and-restore discipline as before.
-        # C3: 0 as well — the step session shares the plan's task, so on budget
-        # exhaustion every remaining plan item would look like "unfinished
-        # work" and one step would spend the whole plan's list.  A step is one
-        # bounded turn, by design.
+        # C3: one continuation, and only because ``step_item_id`` narrows the
+        # open set to this item — the step session shares the plan's task, so
+        # without a scope one continuation would spend the whole plan's list.
+        step_session.step_item_id = str(getattr(item, "id", "") or "")
         self._loop.policy = TurnPolicy(
             replace(original_policy.config, max_iterations=budget,
-                    stop_policy="natural", max_auto_continuations=0)
+                    stop_policy="natural", max_auto_continuations=1)
         )
         attempts = 0
         step_usage: dict[str, int] | None = None
@@ -1034,30 +1046,30 @@ class PlanRunner:
             start_turn = int(getattr(step_session, "turn_count", 0) or 0)
             text = await self._loop.process_input(
                 step_session, step_prompt,
-                on_delta=step_delta, observer=observer,
+                on_delta=step_delta, observer=observer, synthetic=True,
             )
             attempts = 1
             # R1-4: every returned turn costs budget, and its spend is read
             # off the loop while it is still "the last turn".
             step_usage = self._charge_turn(report, step_usage)
             if contracts and not self._contracts_passed(step_session):
+                # The repair turn is this item's last attempt.  C3 grants one
+                # continuation *per turn* (the counter resets in
+                # ``_begin_turn``), so leaving it armed would add another 100
+                # iterations on top of 100+100 (first attempt) + 100 (repair).
+                self._loop.policy = TurnPolicy(
+                    replace(self._loop.policy.config, max_auto_continuations=0)
+                )
                 text = await self._loop.process_input(
                     step_session, self._repair_prompt(item, step_session),
-                    on_delta=step_delta, observer=observer,
+                    on_delta=step_delta, observer=observer, synthetic=True,
                 )
                 attempts = 2
                 step_usage = self._charge_turn(report, step_usage)
-            elif self._budget_died() and not self._model_claimed_done(task, item):
-                # 19 §3.4-2: the budget cut this step mid-work (the model was
-                # still going — "继续精读…" in the measured run), so it gets one
-                # bounded continuation.  Shares the single repair allowance
-                # with the verify path above; the two never stack.
-                text = await self._loop.process_input(
-                    step_session, self._continue_prompt(item),
-                    on_delta=step_delta, observer=observer,
-                )
-                attempts = 2
-                step_usage = self._charge_turn(report, step_usage)
+            # A budget-killed turn no longer gets its own continuation call:
+            # the loop's C3 already continues once inside that turn, scoped to
+            # this item (``step_item_id``).  Two mechanisms meant 2 attempts x 2
+            # rounds = 400 iterations for one step.
             end_turn = int(getattr(step_session, "turn_count", 0) or 0)
             delivery = self._settle(step_session, session, task, item, report, text,
                                    attempts, (start_turn, end_turn), step_usage,
@@ -1242,22 +1254,6 @@ class PlanRunner:
         turn_usage = self._turn_usage()
         report.tokens_used = self._merge_usage(report.tokens_used, turn_usage)
         return self._merge_usage(step_usage, turn_usage)
-
-    def _budget_died(self) -> bool:
-        """True when the last step turn was cut by the iteration budget (19 §3.4-2).
-
-        ``TurnStatus``, not a reason string: the enum is what the loop reports
-        against.  Stubs without the field read as "no" — fail-open to the old
-        stall semantics.
-        """
-        outcome = getattr(self._loop, "last_outcome", None)
-        return getattr(outcome, "status", None) is TurnStatus.MAX_ITERATIONS
-
-    def _continue_prompt(self, item: Any) -> str:
-        return (
-            f"{STEP_HEAD}{item.content}\n"
-            f"上一步预算用尽但本步未完成：从停下的地方继续，只做这一步；完成后简要汇报。"
-        )
 
     def _repair_prompt(self, item: Any, step_session: Any) -> str:
         return (

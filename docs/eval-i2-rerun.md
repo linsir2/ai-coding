@@ -56,6 +56,10 @@ L2 会给每个被 elide 的消息**新建对象**，于是：
 tail 是模型唯一逐字看到的东西，elide 它等于把刚读完的内容抽走。
 修：checkpoint 路径整体跳过 L2；首压路径只对 tail 之外的失败兜底才 elide。
 
+> 2026-10-30 反转：checkpoint 路径改为**启用** L2（`context_compression.py` 的 checkpoint 分支调用
+> `placeholder_old_results`）。理由是旧 checkpoint 的正文本来就会被摘要覆盖，elide 它不会抽走
+> 模型逐字依赖的内容，反而把每轮都付的信封成本降下来；`keep_recent` 内的结果仍不动。
+
 ### D-C · `split_tail` 的 user 边界回溯会把 tail 压成 1 条（P1）
 
 旧规则无条件回溯到"最近一条非 synthetic 的 user 消息"。但 **agent 的一个回合只有一条

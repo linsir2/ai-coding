@@ -97,9 +97,10 @@ GUI 复刻里程碑中已删除）。旧 Textual 实现的布局/组件细节见
 
 ## 内置工具
 
-主工具栈由 `tools/builder.py` 装配。默认 7 个工具随配置注册（bash/read/write/edit/glob 受 `tools.*.enabled` 控制），`todo_write`、`subAgent` 始终注册；只要工作区存在 `skills/` 就追加 `skill` 工具，共 8 个。
+主工具栈由 `tools/builder.py` 装配。默认 8 个核心工具随配置注册（bash/read/write/edit/glob 受 `tools.*.enabled` 控制），`todo_write`、`subAgent` 始终注册；只要工作区存在 `skills/` 就追加 `skill` 工具。
+低频工具（`memory_search`/`memory_write`/`parallel_research`/`subagent_list`/job 三件套/`ask_user`/`skill`/`webfetch`/`websearch`，见 `DEFERRED_TOOL_NAMES`）默认**延迟加载**：请求里只有 `tool_search` 可查，命中后**下一请求**才携带它们的完整 schema；可加载集合仍是本请求 surface（readonly/plan/wave/权限过滤都在其中生效）。
 记忆开启时组合根再追加 `memory_search`（读）与 **`memory_write`（写，R7e-1）**——后者是模型自己写一条耐久记忆的通道；
-**子智能体的工具栈里没有任何记忆工具**（它连写入口都不该有）。每个工具实现 `BaseTool` 契约（`name`/`description`/`params_json_schema`/`execute`），经 `sdk_adapter` 包装成 SDK FunctionTool。
+**子智能体的工具栈里没有任何记忆工具**（它连写入口都不该有）。每个工具实现 `BaseTool` 契约（`name`/`description`/`params_json_schema`/`execute`）。
 
 | 工具 | 权限级别 | 行为要览 |
 |---|---|---|
@@ -224,8 +225,10 @@ policy 的工具栈（脚本/测试）仍继承环境；**stdio MCP server 以 `
 是终态，优先于续跑——不会注入注定无效的提示白烧一次额度。handoff/`TurnOutcome.iterations`
 报**累计模型步数**（跨续跑轮），不是最后一轮的序号。实测（qwen，`max_tool_iterations=2`）：
 一个三步任务连续 3 次，续跑提示里剩余项随实际进展收缩（3→2→1），最后模型自己收尾"全部完成 3/3"。
-plan-runner 的步内强制关闭（`max_auto_continuations=0`）：步是共享计划 task 的一个有界回合，
-开着会让单步把整个计划的剩余项当成"未完成工作"。
+plan-runner 的步内只给**一次**续跑（`max_auto_continuations=1`）：步是共享计划 task 的一个
+有界回合，所以续跑必须用 `session.step_item_id` 把 open 集合收窄到本项——否则单步会把整个
+计划的剩余项当成"未完成工作"（这正是它曾是 0 的原因）。一个项的多次尝试共享同一条墙钟
+（`ai.plan_item_wall_seconds`），repair 不再每次换一份新的回合超时。
 
 **四层上下文压缩**（`ContextManager`，调用顺序为硬约束）：
 
@@ -234,7 +237,7 @@ plan-runner 的步内强制关闭（`max_auto_continuations=0`）：步是共享
 | L3 | 超阈值的大段尾部工具输出持久化到 `transcripts/persisted/`，历史内替换为 `<persisted-output>` 占位 |
 | L1 | 超 `max_messages` 时裁剪中间段，留 `snip_keep_head`/`snip_keep_tail` 条并插入 `[snipped n messages]`。**已存在 checkpoint 时不运行**：head 由 checkpoint 代表，tail 直接从原历史取真后缀（I2/D1） |
 | L2 | 早于 `keep_recent_tool_results` 的旧工具结果换成**可回收的信封**：正文先落盘到 `transcripts/elided/`（内容寻址，同一正文不重复写），历史里留「清了多少字符 + 原文路径 + 头 `l2_window_chars` 字符 + 尾 `l2_window_chars` 字符」；窗口总量受 `l2_window_budget` 约束、**从新到旧**分配，预算用完之后只剩信封（路径仍在，所以信息永远取回得到）。比占位还短的正文原样保留（R7b） |
-| L4 | 超上下文预算时用真实 LLM 摘要压缩历史（带 3 次失败熔断，按会话隔离），降级为硬裁剪。**checkpoint 之后只摘要新增部分**（按消息身份切分，绝不按长度猜），上一次摘要以 `<previous-checkpoint>` 进 prompt 做增量更新；新增部分小于 `summary_delta_tokens` 时**不调模型**，原样带进请求（I2/D1 分支 C）。摘要输入按 `_SUMMARY_CAP` 分块滚动合并，**不截断** |
+| L4 | 超上下文预算时用真实 LLM 摘要压缩历史（带 3 次失败熔断，按会话隔离），降级为硬裁剪。**checkpoint 之后只摘要新增部分**（按消息身份切分，绝不按长度猜），上一次摘要以 `<previous-checkpoint>` 进 prompt 做增量更新；新增部分小于 `summary_delta_tokens`（默认按窗口 2%、下限 1000 计算，0=自动）时**不调模型**，原样带进请求（I2/D1 分支 C）。摘要输入按 `_SUMMARY_CAP` 分块滚动合并，**不截断** |
 | 兜底 | 硬裁剪 + `sanitize_pairs` 保证严格配对 |
 
 所有阶段都在消息列表的浅拷贝上进行，绝不修改调用方历史。

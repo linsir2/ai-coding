@@ -28,7 +28,11 @@ from typing import Any
 from ai_coding.ai.llm_helpers import checkpoint_body
 from ai_coding.config.models import DEFAULT_CONTEXT_TOKENS
 from ai_coding.core.compaction import Compactor
-from ai_coding.core.context_compression import chars_for_tokens, estimate_tokens
+from ai_coding.core.context_compression import (
+    chars_for_tokens,
+    estimate_tokens,
+    working_history_tokens,
+)
 from ai_coding.core.events import ContextCompacted, LoopEvent, MemoryInjected
 from ai_coding.core.file_mentions import resolve_bare_paths, resolve_file_mentions
 from ai_coding.core.plan_reminders import reconcile
@@ -178,19 +182,54 @@ def _file_content(rel: str, target: Path, *, room_tokens: int) -> str:
     return f'<file path="{rel}">\n{cut}{note}\n</file>'
 
 
+def _bare_pointer(rel: str, target: Path) -> str:
+    """One line for a path the prompt merely names: name the file, not its bytes.
+
+    ``resolve_bare_paths`` cannot tell "look at this file" from "this file exists
+    and is part of the sentence", so inlining the body of every name turned a
+    wave seed into 22-28k characters of ``<referenced-files>`` per request --
+    paid on every iteration, unreachable by compaction (it is a volatile tail
+    block), and larger than the history the pipeline was busy shrinking.
+
+    The read tool is one call away and asks for approval on its own; a pointer is
+    enough.  An explicit ``@file`` keeps the inline: that is a request to paste.
+    """
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"- {rel}: [unreadable: {exc}]"
+    lines = len(text.splitlines())
+    return (
+        f"- {rel} ({lines} line{'s' if lines != 1 else ''}): "
+        "[not inlined this request; read it with the read tool]"
+    )
+
+
 def _observed_prompt_tokens(session: SessionData) -> int:
-    """The provider's own count for the newest turn that reported one.
+    """The best measurement of the request that is about to be sent.
 
     The compaction gate used to read only ``estimate_tokens``, which counts
     characters and underestimated a tool-output-heavy history by ~4x on a real
     session (60k estimated against 237,157 billed). The provider's number is the
     ground truth, so it is what the gate gets.
 
+    Two sources, in order:
+
+    * the running turn's own step reading (``live_prompt_tokens``) — the
+      provider measured the request this turn actually sent;
+    * ``working_history_tokens`` — what the *compacted* history would weigh,
+      used before the first step has reported.  Measuring the raw
+      ``session.messages`` instead made the gate open on every iteration once
+      the append-only history crossed the ceiling (2026-10-30 live run).
+
     The boundary question is the session's to answer, not this module's: a row at
     or before the last compaction measured a context that no longer exists, and
     reading it would make the gate compact again on the very next request.
     """
-    return session.live_prompt_tokens()
+    live = session.live_prompt_tokens()
+    if live > 0:
+        return live
+    return working_history_tokens(session)
 
 
 @dataclass(frozen=True)
@@ -215,10 +254,11 @@ class RequestAssembler:
         memory: Any,
         reporter: Any,
         # R01 (F-51): the loop replaces ``policy`` for a planning round or a
-        # plan step (``continuations_disabled``, ``_run_step``).  A provider
-        # makes every iteration read the policy actually in force instead of
-        # the object this assembler happened to be built with; absent, the
-        # passed-in policy is the answer (bare constructors, tests).
+        # sub-agent (``continuations_disabled``) or a plan step (a scoped
+        # policy of its own).  A provider makes every iteration read the policy
+        # actually in force instead of the object this assembler happened to be
+        # built with; absent, the passed-in policy is the answer (bare
+        # constructors, tests).
         policy_provider: Callable[[], Any] | None = None,
         build_instructions: Callable[
             [Deadline | None, SessionData], Awaitable[str | None]
@@ -526,14 +566,18 @@ class RequestAssembler:
                 for token in iter_mentions(user_input)
                 if self._skills.resolve(token) is not None
             }
-        paths = list(
-            dict.fromkeys(
-                [
-                    *resolve_file_mentions(user_input, self._workspace, exclude=claimed),
-                    *resolve_bare_paths(user_input, self._workspace, exclude=claimed),
-                ]
-            )
+        explicit = list(
+            resolve_file_mentions(user_input, self._workspace, exclude=claimed)
         )
+        # A bare path is a name, not a paste request (see ``_bare_pointer``).
+        # An ``@file`` that is also named bare stays explicit.
+        bare = [
+            path
+            for path in resolve_bare_paths(user_input, self._workspace, exclude=claimed)
+            if path not in set(explicit)
+        ]
+        paths = list(dict.fromkeys([*explicit, *bare]))
+        explicit_paths = set(explicit)
         if not paths:
             return ""
         root = Path(self._workspace).expanduser().resolve()
@@ -549,7 +593,9 @@ class RequestAssembler:
         pending = sum(
             1
             for rel in paths
-            if Path(rel).suffix.lower() not in IMAGE_MIME_BY_SUFFIX and not (root / rel).is_dir()
+            if rel in explicit_paths
+            and Path(rel).suffix.lower() not in IMAGE_MIME_BY_SUFFIX
+            and not (root / rel).is_dir()
         )
         for rel in paths:
             # r17/T5: an image mention rides as a message part (the loop reads
@@ -559,6 +605,9 @@ class RequestAssembler:
             target = root / rel
             if target.is_dir():
                 block = self._directory_listing(rel, target)
+            elif rel not in explicit_paths:
+                # Named, not attached: a pointer plus the read tool's name.
+                block = _bare_pointer(rel, target)
             else:
                 pending -= 1
                 room = min(_FILE_TOKENS_CAP, budget - used - pending * _FILES_BLOCK_MIN_TOKENS)

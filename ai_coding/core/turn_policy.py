@@ -643,10 +643,10 @@ class TurnPolicy:
         up, and says not to redo finished work.
         """
         lines = [
-            "[continue] 上一轮预算耗尽，但还有未完成的任务项："
+            "[continue] 上一轮到了迭代上限，工作还没做完："
         ]
         lines.extend(
             f"- {item.id}. {item.content}" for item in open_items[:NUDGE_ITEM_LIMIT]
         )
-        lines.append("继续未完成的工作，不要重复已完成的部分。")
+        lines.append("继续把剩下的工作做完，不要重复已完成的部分。")
         return "\n".join(lines)

@@ -92,6 +92,10 @@ ai:
   # cannot bound a call that never returns; on expiry the turn ends as TIMEOUT
   # with whatever text was produced.  Includes time spent on approval prompts.
   turn_timeout_seconds: 600
+  # Wall clock one *plan item* may spend, shared by every turn the runner spends
+  # on it (a repair pass used to buy a fresh turn timeout each time).  0 = keep
+  # the per-turn ceiling above.
+  plan_item_wall_seconds: 3600
   max_result_data_bytes: 8000
   max_subagent_conclusion_chars: 4000
   stream_usage: true               # set false if your endpoint rejects stream_options

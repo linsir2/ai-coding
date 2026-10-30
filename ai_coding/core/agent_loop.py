@@ -211,6 +211,27 @@ _MAX_OVERFLOW_COMPACTS = 2
 #: answer "does line 999 exist".
 _LINE_COUNT_MAX_BYTES = 4 * 1024 * 1024
 
+#: How many deferred tools a session may hold loaded at once.  A loaded tool's
+#: schema rides every later request, so this bounds both the request size and
+#: what a model can grow by searching repeatedly.
+_LOADED_TOOLS_CAP = 12
+
+
+def _open_items_for(session: Any, task: Any) -> list[Any]:
+    """The open items this turn may be nudged about.
+
+    A plan step shares the plan's whole task with the parent, so the loop's
+    "unfinished work" set has to be narrowed to the item that step is on.  An
+    unscoped session (the ordinary loop) keeps the full list.  Without this, one
+    continuation offered to a step lists the rest of the plan (the measured
+    reason the step policy used to carry ``max_auto_continuations=0``).
+    """
+    items = list(task.open_items())
+    scope = str(getattr(session, "step_item_id", "") or "")
+    if not scope:
+        return items
+    return [item for item in items if item.id == scope]
+
 
 def _armed_profile(session: Any) -> str:
     """What the session's task is armed as (``""`` when nothing is armed).
@@ -488,7 +509,15 @@ class AgentLoop:
         # the provider's prefix cache depend on it).
         self.gate: PermissionGate = gate or PermissionGate()
         self._surface_cache: dict[
-            tuple[str, bool, tuple[Rule, ...], tuple[Rule, ...], str, bool],
+            tuple[
+                str,
+                bool,
+                tuple[Rule, ...],
+                tuple[Rule, ...],
+                str,
+                bool,
+                tuple[str, ...],
+            ],
             list[dict[str, Any]],
         ] = {}
         # R4a: the tool schemas are part of every prompt, so their size belongs in
@@ -1019,7 +1048,7 @@ class AgentLoop:
                     # C3 reads the open set to decide whether the budget died
                     # with work unfinished.  The old ladder never needed it;
                     # without it the continuation never fires.
-                    open_items=task.open_items(),
+                    open_items=_open_items_for(session, task),
                     # settle evaluates every gate's window at both decision
                     # points; an acceptance window must see its real signature
                     # here too — with the default () it would compare empty vs
@@ -1300,7 +1329,7 @@ class AgentLoop:
                     snapshot = books.snapshot(
                         iteration=index,
                         tokens_spent=self.reporter.tokens_spent(),
-                        open_items=task.open_items(),
+                        open_items=_open_items_for(session, task),
                         final_text=step.text,
                         acceptance=acceptance_states(session.acceptance),
                         continuations=session.continuations,
@@ -1598,6 +1627,10 @@ class AgentLoop:
         # C3: the continuation allowance is per user turn — a new message
         # starts with a fresh budget, not the previous turn's leftovers.
         session.continuations = 0
+        # The in-turn context reading belongs to the turn that took it.  A new
+        # turn must not inherit the last turn's number: the gate would then
+        # judge a request it has not seen yet by a size it no longer has.
+        session.live_context_tokens = 0
         # R4b: guard state (duplicate calls, …) is per turn, never per process.
         self.dispatcher.guards.reset()
         # I2/D8: so is the L4 breaker.  It exists to stop hammering a broken
@@ -1623,12 +1656,20 @@ class AgentLoop:
         # F (13 §2.4): one subprocess per turn; never raises (see infra.vcs).
         session.git_branch = git_branch(self.workspace)
         hook_context = await self.turn_hooks.context(session)
-        turn_timeout = float(getattr(self.settings, "turn_timeout_seconds", 0.0) or 0.0)
+        # A plan item may spend several turns (one per attempt); they share one
+        # deadline so N attempts cannot each buy a fresh wall clock.  An
+        # unscoped session keeps the plain per-turn ceiling.
+        shared_deadline = getattr(session, "item_deadline", None)
+        if shared_deadline is not None:
+            deadline = shared_deadline
+        else:
+            turn_timeout = float(getattr(self.settings, "turn_timeout_seconds", 0.0) or 0.0)
+            deadline = Deadline.after(turn_timeout) if turn_timeout > 0 else None
         return TurnFrame(
             turn_number=session.turn_count,
             task=task,
             hook_context=hook_context,
-            deadline=Deadline.after(turn_timeout) if turn_timeout > 0 else None,
+            deadline=deadline,
         )
 
     def _take_notices(self, session: SessionData, index: int) -> None:
@@ -1929,7 +1970,7 @@ class AgentLoop:
             books.snapshot(
                 iteration=books.iterations,
                 tokens_spent=0,
-                open_items=task.open_items(),
+                open_items=_open_items_for(session, task),
             ),
             turn_end=True,
         )
@@ -2226,6 +2267,15 @@ class AgentLoop:
                 # a run from such a turn; the backend must not leave the plan
                 # armed on disk for the boot resume to pick it up).
                 note_plan_approved=lambda: _on_plan_approved(session, books),
+                # Deferred tools: the search tool reports what it matched, and
+                # the next request carries those schemas (still filtered by the
+                # posture and the permission rules at surface time).
+                note_tool_loaded=lambda names: self._note_tools_loaded(session, names),
+                # Deferred tools: what the search may offer is this request's
+                # surface with only the cost filter lifted, so a read-only
+                # posture cannot load a mutating tool, and a denied one is
+                # never on offer.
+                searchable_names=self._searchable_names(session),
                 # N1: the turn's conclusion holder -- the two exits of a
                 # plan-mode turn read it to stay mutually exclusive.
                 conclusion=conclusion,
@@ -2691,6 +2741,17 @@ class AgentLoop:
             step=step,
             latency_ms=latency_ms,
             model=str(getattr(getattr(self.engine, "model_config", None), "name", "") or ""),
+        )
+        # The gate's live reading: this step's own context size.  ``turn_usages``
+        # is written when the turn closes, so without this the compaction gate
+        # re-measured the (never-rewritten) full history on every later
+        # iteration of the same turn.  DashScope's compatible mode reports no
+        # ``context_tokens``, so the step's own ``prompt_tokens`` is the same
+        # measurement one field over -- exactly the fallback
+        # ``live_prompt_tokens`` already applies to recorded rows.
+        _usage = step.usage or {}
+        session.live_context_tokens = int(
+            _usage.get("context_tokens") or _usage.get("prompt_tokens") or 0
         )
         self._emit(AssistantMessage(
             text=step.text, tool_calls=tuple(step.tool_calls),
@@ -3167,6 +3228,7 @@ class AgentLoop:
                 agent_rules,
                 _armed_profile(session),
                 _wave_active(session),
+                tuple(getattr(session, "loaded_tools", ()) or ()),
             ),
         )
 
@@ -3178,6 +3240,7 @@ class AgentLoop:
         agent_rules: tuple[Rule, ...] = (),
         armed: str = "",
         wave_active: bool = False,
+        loaded: tuple[str, ...] = (),
     ) -> tuple[str, ...]:
         """The tool names the methods section should speak for.
 
@@ -3192,7 +3255,7 @@ class AgentLoop:
         return tuple(
             tool.name
             for tool in self._surface_tools(
-                mode, readonly, session_rules, agent_rules, armed, wave_active
+                mode, readonly, session_rules, agent_rules, armed, wave_active, loaded
             )
         )
 
@@ -3204,6 +3267,8 @@ class AgentLoop:
         agent_rules: tuple[Rule, ...] = (),
         armed: str = "",
         wave_active: bool = False,
+        loaded: tuple[str, ...] = (),
+        include_deferred: bool = False,
     ) -> list[BaseTool]:
         """The tools this request may call, in the registry's own order.
 
@@ -3225,6 +3290,17 @@ class AgentLoop:
             tools = [tool for tool in tools if not tool.plan_only]
         if not (armed == "plan" and wave_active):
             tools = [tool for tool in tools if not tool.wave_only]
+        # Deferred tools cost their schema on every step; they are advertised
+        # only after ``tool_search`` reported them (``loaded``).  The posture
+        # and permission filters below still apply, so loading a denied tool
+        # never makes it visible.  ``include_deferred`` is how ``tool_search``
+        # asks the same question with the cost filter lifted: what it may offer
+        # is exactly the deferred part of this request's own surface.
+        if not include_deferred:
+            loaded_tools = set(loaded)
+            tools = [
+                tool for tool in tools if not tool.defer or tool.name in loaded_tools
+            ]
         if readonly:
             # M3 T5: in the plan posture a mutating tool with a **scoped**
             # allow is reachable (the plan directory), so it must stay in the
@@ -3259,6 +3335,41 @@ class AgentLoop:
             )
         ]
 
+    def _searchable_names(self, session: Any) -> tuple[str, ...]:
+        """The deferred tools ``tool_search`` may offer this request.
+
+        The search must answer the same question the catalogue answers: a
+        read-only posture cannot load a mutating tool, a plan round cannot
+        load the goal pair, a denied action is not on offer.  So it asks the
+        surface itself with only the cost filter lifted.
+        """
+        mode = str(getattr(session, "mode", "normal") or "normal")
+        readonly = bool(getattr(session, "readonly", False))
+        return tuple(
+            tool.name
+            for tool in self._surface_tools(
+                mode,
+                readonly,
+                self._effective_session_rules(session),
+                self._agent_rules(session),
+                _armed_profile(session),
+                _wave_active(session),
+                include_deferred=True,
+            )
+            if tool.defer
+        )
+
+    def _note_tools_loaded(self, session: Any, names: tuple[str, ...]) -> None:
+        """Record what ``tool_search`` matched; the next request advertises it.
+
+        A tool loaded once stays loaded for the session (the surface is not
+        history, so compaction leaves it alone).  Capped so a model that keeps
+        searching cannot grow the request without bound; the oldest entries
+        fall out first.
+        """
+        merged = tuple(dict.fromkeys([*getattr(session, "loaded_tools", ()), *names]))
+        session.loaded_tools = merged[-_LOADED_TOOLS_CAP:]
+
     def _surface_schemas(self, session: Any) -> list[dict[str, Any]]:
         """The schema list for this request -- one per posture and rule set.
 
@@ -3285,6 +3396,9 @@ class AgentLoop:
             agent_rules,
             _armed_profile(session),
             _wave_active(session),
+            # Deferred tools: which of them the session has loaded decides
+            # which schemas this request carries.
+            tuple(getattr(session, "loaded_tools", ()) or ()),
         )
         schemas = self._surface_cache.get(key)
         if schemas is None:
@@ -3294,6 +3408,7 @@ class AgentLoop:
                     readonly,
                     session_rules,
                     agent_rules,
+                    key[-3],
                     key[-2],
                     key[-1],
                 )

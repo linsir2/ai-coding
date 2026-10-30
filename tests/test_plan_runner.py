@@ -53,6 +53,7 @@ class _StubLoop:
         self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
         self._script = list(script)
         self.calls = []  # (text, policy_max_iterations_at_call)
+        self.continuation_caps: list[int] = []
         self.step_sessions: list = []
         self.restored = True
         self.closer = _RecordingCloser()
@@ -62,9 +63,10 @@ class _StubLoop:
         self.workspace = workspace
         self.extra_workspace_roots = tuple(extra_workspace_roots)
 
-    async def process_input(self, session, text, on_delta=None, observer=None):
+    async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
         session.turn_count += 1
         self.calls.append((text, self.policy.config.max_iterations))
+        self.continuation_caps.append(self.policy.config.max_auto_continuations)
         self.step_sessions.append(session)
         action = self._script.pop(0) if self._script else "complete"
         if action == "complete":
@@ -89,8 +91,12 @@ class _StubLoop:
         return "step done"
 
 
-def test_config_defaults_step_budget_to_sixty():
-    assert AIConfig().plan_step_max_iterations == 60
+def test_config_defaults_step_budget_to_one_hundred():
+    """2026-10-30: a plan step is the same work as an ordinary turn, so it got
+    the same ceiling (100).  A 27-iteration hotel step measured 26 minutes and
+    the old 60 cut it off mid-verify."""
+    assert AIConfig().plan_step_max_iterations == 100
+    assert AIConfig().plan_item_wall_seconds == 3600.0
 
 
 def test_step_delivery_round_trips_through_the_session():
@@ -266,6 +272,19 @@ async def test_verify_failure_repaired_on_second_attempt_completes():
 
 
 @pytest.mark.asyncio
+async def test_the_repair_turn_gets_no_continuation_of_its_own():
+    """One item = one continuation across its attempts.  The repair turn is the
+    last attempt, so C3 there would make 2 attempts x 2 rounds = ~400 iterations
+    for one step (the reason the old runner-level continuation was deleted)."""
+    session = _session_with("fix it", verifies=["pytest tests/ -q"])
+    loop = _StubLoop(["verify-fail", "verify-pass"])
+
+    await PlanRunner(loop).run(session)
+
+    assert loop.continuation_caps == [1, 0]
+
+
+@pytest.mark.asyncio
 async def test_items_without_verify_trust_a_completed_turn():
     session = _session_with("write docs")
     loop = _StubLoop(["complete"])
@@ -299,7 +318,7 @@ async def test_session_acceptance_is_set_per_step_and_restored():
     seen = []
 
     class _SpyLoop(_StubLoop):
-        async def process_input(self, session, text, on_delta=None, observer=None):
+        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
             seen.append([item.id for item in session.acceptance])
             return await super().process_input(session, text, on_delta, observer)
 
@@ -345,7 +364,7 @@ async def test_a_failed_step_still_leaves_a_replay_marker():
         def __init__(self):
             self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=8))
 
-        async def process_input(self, session, text, on_delta=None, observer=None):
+        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
             raise RuntimeError("engine exploded")
 
     session = SessionData(session_id="s", title="", created_time="t",
@@ -564,7 +583,7 @@ async def test_a_dying_step_emits_task_updated_blocked():
         def __init__(self):
             self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=8))
 
-        async def process_input(self, session, text, on_delta=None, observer=None):
+        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
             raise RuntimeError("engine exploded")
 
     session = SessionData(session_id="s", title="", created_time="t",

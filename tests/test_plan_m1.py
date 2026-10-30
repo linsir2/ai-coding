@@ -906,34 +906,34 @@ class _StatusLoop(_StubLoop):
 
 
 @pytest.mark.asyncio
-async def test_a_budget_dead_step_gets_one_continuation():
-    """19 §3.4-2: cut mid-work (MAX_ITERATIONS) != out of ideas — continue once."""
+async def test_a_budget_dead_step_is_not_continued_by_the_runner():
+    """19 §3.4-2, re-homed: the once-only continuation lives *inside* the step
+    turn (the loop's C3, scoped to this item by ``step_item_id``, covered in
+    ``test_auto_continue.py``).  The runner must not add a second mechanism:
+    two of them meant 2 attempts x 2 rounds = 400 iterations for one step.
+    """
     session = _session_with("read the big file")
-    loop = _StatusLoop(["ignore", "complete"], [TurnStatus.MAX_ITERATIONS, TurnStatus.COMPLETED])
+    loop = _StatusLoop(["ignore"], [TurnStatus.MAX_ITERATIONS])
 
     report = await PlanRunner(loop).run(session)
 
-    assert len(loop.calls) == 2          # turn 1 + the continuation
-    assert report.completed == ["1"]
-    assert report.stalled == []
-    assert report.deliveries[0].attempts == 2
-    assert report.turns_used == 2
+    assert len(loop.calls) == 1, "the runner adds no continuation of its own"
+    assert report.deliveries[0].attempts == 1
+    assert report.turns_used == 1
+    assert report.stalled == ["1"]
 
 
 @pytest.mark.asyncio
-async def test_the_continuation_allowance_is_one():
-    """Still cut after the continuation: settle as stalled, no third turn."""
+async def test_a_budget_dead_step_that_never_finishes_settles_as_stalled():
+    """Still open after its one turn: a retryable next run, no third turn."""
     session = _session_with("read the endless file")
-    loop = _StatusLoop(
-        ["ignore", "ignore"],
-        [TurnStatus.MAX_ITERATIONS, TurnStatus.MAX_ITERATIONS],
-    )
+    loop = _StatusLoop(["ignore"], [TurnStatus.MAX_ITERATIONS])
 
     report = await PlanRunner(loop).run(session)
 
-    assert len(loop.calls) == 2
+    assert len(loop.calls) == 1
     assert report.stalled == ["1"]
-    assert report.deliveries[0].attempts == 2
+    assert report.deliveries[0].attempts == 1
 
 
 @pytest.mark.asyncio

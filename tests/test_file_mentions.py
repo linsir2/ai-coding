@@ -179,22 +179,28 @@ def test_a_skill_mention_is_not_treated_as_a_file(tmp_path):
 # ``Sandbox`` -- an outside path belongs to the read tool and its approval.
 
 
-def test_a_pasted_absolute_path_reaches_the_model(tmp_path):
+def test_a_pasted_absolute_path_reaches_the_model_as_a_pointer(tmp_path):
+    """2026-10-30: a wave seed names files, and pasting every body cost 22-28k
+    characters per request.  A bare path still *reaches* the model -- as a
+    pointer with the read tool named -- while an explicit ``@file`` inlines."""
     (tmp_path / "notes.txt").write_text("the answer is 42\n", encoding="utf-8")
 
     text = _request_text(tmp_path, f"看下 {tmp_path}/notes.txt")
 
     assert "<referenced-files>" in text
-    assert "the answer is 42" in text
+    assert "notes.txt" in text
+    assert "read" in text
+    assert "the answer is 42" not in text, "a bare path must not paste the body"
 
 
-def test_a_pasted_relative_path_reaches_the_model(tmp_path):
+def test_a_pasted_relative_path_reaches_the_model_as_a_pointer(tmp_path):
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "a.py").write_text("MARKER\n", encoding="utf-8")
 
     text = _request_text(tmp_path, "我们用 pkg/a.py 这个文件")
 
-    assert "MARKER" in text
+    assert "pkg/a.py" in text
+    assert "MARKER" not in text, "a bare path must not paste the body"
 
 
 def test_a_pasted_path_outside_the_workspace_is_not_injected(tmp_path):
@@ -272,7 +278,10 @@ def test_a_file_over_the_remaining_budget_is_truncated_not_dropped(tmp_path):
     for name in "abc":
         (tmp_path / f"{name}.txt").write_text(f"MARKER_{name}\n" + _lines(200), encoding="utf-8")
 
-    text = _request_text(tmp_path, "a.txt b.txt c.txt")
+    # Explicit references: R22/H10 is about how much of an *attached* file the
+    # budget allows, not about whether a bare path attaches at all (that is the
+    # pointer rule, pinned next door).
+    text = _request_text(tmp_path, "@a.txt @b.txt @c.txt")
 
     for name in "abc":
         assert f'<file path="{name}.txt">' in text, f"{name}.txt was dropped"

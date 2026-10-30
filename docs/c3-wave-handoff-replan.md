@@ -115,6 +115,8 @@ TaskDriver（core/task_driver.py:78-140）
    `todo_write` 是 `mutates_world=False`，只读姿态下仍可用，write/edit/bash 被结构性拿掉），
    seed = 目标 + 当前 open 项 + 触发原因（deadlock / 模型的 needs_replan / 失败摘要）；
    policy = `plan_step_max_iterations` / `natural` / `max_auto_continuations=0`；
+   （重规划回合**不设** `step_item_id`，它的 open 集合就是整个计划——所以这里必须是 0，
+   而执行回合是 1 + 单项作用域；两者不要混用）
    提示词：**只允许**用 `todo_write` 改剩余项（add / update open 项 / drop open 项），
    不得执行工作、不得改目标；没有要改的就回答 `NO_REPLAN`。
    - 会话带 `replan_mode=True`（瞬态）；`todo_write` 在该上下文里只允许操作**非终态**条目，

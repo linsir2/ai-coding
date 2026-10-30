@@ -385,9 +385,14 @@ class AIConfig(BaseModel):
     l2_window_budget: int = 12_000
     #: I2/D1 branch C: a delta smaller than this is carried verbatim into the
     #: request instead of paying for a summary call.  Keeps "compress" from
-    #: firing on every iteration once a checkpoint exists.  Must be > 0: zero
-    #: would silently disable branch C and restore one summary per iteration.
-    summary_delta_tokens: int = Field(default=4_000, gt=0)
+    #: firing on every iteration once a checkpoint exists.
+    #:
+    #: 0 (the default) means "derive it from the window": 2% with a 1,000-token
+    #: floor (``ContextManager``).  A flat number cannot serve both a 48k and a
+    #: 256k model -- 4000 was 8% of one and 1.5% of the other.  A positive value
+    #: stays as an explicit override (tests, operators).  Zero is safe because
+    #: the derived value is always > 0.
+    summary_delta_tokens: int = Field(default=0, ge=0)
     # P3-2 refactor: the L4 tail is token-budgeted (OpenCode parity), not
     # counted.  Effective budget is min(l4_tail_tokens, window // 4): the
     # tail alone can never approach the post-compaction paging target.
@@ -454,9 +459,16 @@ class AIConfig(BaseModel):
     # r22: 8 was measured on "simple steps close in 5-7 iterations", but a step
     # that writes several files (a models package, a router set) needs far more
     # than 7, and the measured hotel session died at 8/8 with four files still
-    # unwritten ("本轮预算有限").  60 clears a real step; the clock, acceptance
-    # gate and runner's one repair pass are still the guards.
-    plan_step_max_iterations: int = 60
+    # unwritten ("本轮预算有限").  100 matches the ordinary turn (the step is
+    # the same work), and the clock, acceptance gate, stall ladder and the
+    # runner's one repair pass are still the guards.
+    plan_step_max_iterations: int = 100
+    #: Wall clock one plan *item* may spend, shared by every turn the runner
+    #: spends on it (a repair pass used to get a fresh ``turn_timeout_seconds``
+    #: each time, so N attempts multiplied the ceiling).  0 = keep the per-turn
+    #: ceiling.  3600 is one hour for one item -- enough for a 27-iteration
+    #: hotel step measured at 26 minutes, and still a bound.
+    plan_item_wall_seconds: float = 3600.0
     # C3: when a normal turn's iteration budget dies with todo items still
     # open, the loop injects a continuation prompt and starts a fresh round
     # instead of stopping.  0 disables.  The cap keeps a model that never

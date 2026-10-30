@@ -126,7 +126,8 @@ mcp:               # MCPConfig（默认关闭）
 | `keep_recent_tool_results` | 8 | L2 保留最近工具结果数（I2/D10：3→8，48k 窗口放得下，且 3 条只覆盖 1–2 个迭代） |
 | `l2_window_chars` | 1200 | L2 信封保留的头/尾各多少字符（R7b；I2/D10：200→1200，200 等于「内容没了」） |
 | `l2_window_budget` | 12000 | L2 一次压缩里所有窗口的总字符预算，从新到旧分配（R7b；I2/D10：4000→12000） |
-| `summary_delta_tokens` | 4000 | I2/D1 分支 C 的阈值：已存在 checkpoint 时，新增部分小于它就不调摘要模型，原样带进请求 |
+| `summary_delta_tokens` | 0（自动） | I2/D1 分支 C 的阈值：已存在 checkpoint 时，新增部分小于它就不调摘要模型，原样带进请求。**0 = 按窗口计算**：`max(1000, window × 0.02)`（256k→5120，48k→1000）；显式 >0 为覆盖值 |
+| `tools.defer` / `session.loadedTools` | 见 `tools/builder.py` / `domain/session.py` | 低频工具的 schema 默认不下发（常驻「名称 + 一行描述」占位）；`tool_search` 命中后写 `loadedTools`，**下一请求**才带完整 schema。权限与 posture 过滤仍在 surface 时生效 |
 | `per_result_persist_bytes` | 30000 | L3 单结果持久化阈值 |
 | `l4_tail_tokens` | 15000 | L4 摘要保留尾部的 **token 预算**（有效值 `min(l4_tail_tokens, window//4)`，吸附到 user 边界）。~~`l4_keep_tail`（条数）~~ 已删除——条数既约束不了成本也约束不了覆盖 |
 | `auto_process_tool_results` | true | 是否自动执行工具结果回喂 |
@@ -362,7 +363,8 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `StepDelivery`（`domain/plan_delivery.py`） | `stepId`、`statement`、`status`（completed/blocked/stalled）、`attempts`、`ac`（[{id, passed}]）、`summary`、`turns`、`usage`（R1-4）、`attested`（R1-5）、`seedChars`（M1，该步 seed 字符数；fiat 回填为 0，缺键或旧 snake_case 键读 0） | 一步的收据；`SessionData.step_deliveries`，仅非空落盘；老收据无新键照读默认值 |
 | `PlanReport`（`core/plan_runner.py`） | `turns_used`（本轮 `process_input` 次数）、`tokens_used`（求和或 None）、`stopped` 新增 `budget:…` 值 | render 头行 `完成 n 步 · 用了 T 回合 [/ K tokens]`（R1-5b：n 只计 attested——本轮亲手结算的步；fiat 另列在下一行，`completed` 列表仍含全部 done id）；顶盖检查只在还有剩余工作时触发（正好用完跑完=干净结束） |
 | `StepDelivery.proof`（派生属性，R1-6，不落盘） | `verified`（completed+attested+ac 非空即全过）/`on-claim`（completed+attested+ac 空）/`fiat`（attested=False）/`n/a`（未完成） | 只读推导，无字段、无 `to/from_dict` 改动；老收据 retroactive 可分级；非法组合 fallback 到 on-claim（宁可标没证过，不标证过） |
-| `AIConfig.plan_step_max_iterations` | `int = 60` | plan-runner 单步迭代上限（r22：8 → 60；写多个文件的步骤不会再在 8/8 处停下）；runner 临时换 policy 副本（同时 `stop_policy=natural` 关 todo 门禁、`max_auto_continuations=0` 禁 C3），`finally` 恢复 |
+| `AIConfig.plan_step_max_iterations` | `int = 100` | plan-runner 单步迭代上限（2026-10-30：60 → 100；步和普通回合是同一份工作量，一个 27 迭代/26 分钟的酒店步骤曾被 60 拦腰截断）。runner 临时换 policy 副本（同时 `stop_policy=natural` 关 todo 门禁、`max_auto_continuations=1` 只给一次续跑、`session.step_item_id` 把 open 集合收窄到本项），`finally` 恢复 |
+| `AIConfig.plan_item_wall_seconds` | `float = 3600.0` | **每个计划项**的墙钟上限，由该项所有回合共享（`session.item_deadline`，`_begin_turn` 优先于 `turn_timeout_seconds`）。修复前每次 repair 都拿一份新的回合超时，N 次尝试把上限乘了 N。`0` = 仍用每回合超时 |
 | M1 短对话契约 | 每步全新 `SessionData`（`plan-<uuid>`、`ephemeral=True`），seed = goal + 计划当前状态（只列未完成项）+ 本步验收；步骤全文留子 session，父只收 prompt + 一行摘要 + 收据 | 每步上下文只由计划决定、不再由对话长度决定（实测 4 回合 41k/82k/130k/254k → 每步平稳；seed 仍随未完成项数增长，全计划合计对步骤数仍是二次，8/16/32/64 步 seed 2.4k/8.8k/34k/132k 字符）；`/plan-run` 删除，`/plan` 计划并执行；步会话不落盘（`TurnCloser.save` 对 ephemeral 跳过），不污染 `/resume` |
 | `SessionData.ephemeral`（H1，不落盘） | `bool = False` | 内部会话旗标：正常 session 为 False；plan 步会话 True。`TurnCloser.save` 唯一持久化闸口处跳过（checkpoint/finalize 都走它） |
 | `SessionData.continuations`（C3，不落盘） | `int = 0` | 本用户回合已用的自动续跑次数；`_begin_turn` 归零，续跑分支 +1；`to_dict` 白名单不含它（跨重启无意义） |

@@ -88,7 +88,7 @@ class _FakeLoop:
         session.readonly = bool(readonly) if readonly is not None else session.readonly
         session.pending_posture = None
 
-    async def process_input(self, session, user_input, on_delta=None, observer=None):
+    async def process_input(self, session, user_input, on_delta=None, observer=None, **kwargs):
         self.calls.append(
             {"session": session, "text": user_input, "on_delta": on_delta, "observer": observer}
         )
@@ -143,7 +143,7 @@ class _SavingCloser:
 class _SlowLoop(_FakeLoop):
     """A turn that hangs until cancelled, honouring the loop's cancel contract."""
 
-    async def process_input(self, session, user_input, on_delta=None, observer=None):
+    async def process_input(self, session, user_input, on_delta=None, observer=None, **kwargs):
         self.calls.append(
             {"session": session, "text": user_input, "on_delta": on_delta, "observer": observer}
         )
@@ -163,7 +163,7 @@ class _SlowLoop(_FakeLoop):
 class _BrokenLoop(_FakeLoop):
     """A turn that dies outside the loop's own error handling."""
 
-    async def process_input(self, session, user_input, on_delta=None, observer=None):
+    async def process_input(self, session, user_input, on_delta=None, observer=None, **kwargs):
         raise RuntimeError("boom")
 
 

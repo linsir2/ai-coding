@@ -61,7 +61,7 @@ class _CancelOnTurn(_StubLoop):
         super().__init__(actions)
         self._mutate = mutate_before_cancel
 
-    async def process_input(self, session, text, on_delta=None, observer=None):
+    async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
         if self._mutate:
             session.task.update("2", status="dropped")
         raise asyncio.CancelledError()
@@ -70,7 +70,7 @@ class _CancelOnTurn(_StubLoop):
 class _Loop(_StubLoop):
     """Adds the C3 actions: report a handoff, edit the list in a replan turn."""
 
-    async def process_input(self, session, text, on_delta=None, observer=None):
+    async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
         action = self._actions[0] if self._actions else "complete"
         if action.startswith("report") or action.startswith("replan"):
             self._actions.pop(0)

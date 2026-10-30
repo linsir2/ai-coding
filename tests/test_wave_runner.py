@@ -51,6 +51,7 @@ class _StubLoop:
         self._verify_results: list[bool] = []
         self.calls: list[str] = []
         self.policies: list[int] = []
+        self.continuation_caps: list[int] = []
         self.sessions: list[SessionData] = []
         self.closer = _Closer()
         self.workspace = workspace
@@ -59,11 +60,12 @@ class _StubLoop:
             status=TurnStatus.COMPLETED, text="ok", usage=None
         )
 
-    async def process_input(self, session, text, on_delta=None, observer=None):
+    async def process_input(self, session, text, on_delta=None, observer=None, synthetic=False):
         session.turn_count += 1
         self.calls.append(text)
         self.sessions.append(session)
         self.policies.append(int(self.policy.config.max_turn_tokens))
+        self.continuation_caps.append(self.policy.config.max_auto_continuations)
         action = self._actions.pop(0) if self._actions else "complete"
         if action == "complete":
             target = self._target(session.task, text)
@@ -162,6 +164,9 @@ async def test_a_repair_turn_can_turn_a_failed_verify_green():
 
     assert report.completed == ["1"]
     assert len(loop.calls) == 2
+    assert loop.continuation_caps == [1, 0], (
+        "the repair turn must not spend a second continuation on the same item"
+    )
     assert session.task.get("1").status == "completed"
     assert "verify passed" in (session.task.get("1").evidence or "")
 
@@ -347,6 +352,31 @@ async def test_a_previous_stalled_receipt_does_not_suppress_a_new_completion():
 
 
 @pytest.mark.asyncio
+async def test_each_item_gets_one_wall_clock_shared_by_its_turns():
+    """A repair pass used to buy a fresh turn timeout, so N attempts multiplied
+    the ceiling.  One item now gets one deadline (``plan_item_wall_seconds``),
+    and the settle turn that follows gets none again."""
+    session = _session_with("a", "b")
+    loop = _StubLoop(["complete", "complete"])
+    loop.settings.plan_item_wall_seconds = 1.0
+    seen: list = []
+    original = loop.process_input
+
+    async def spy(step_session, text, **kwargs):
+        seen.append(step_session.item_deadline)
+        return await original(step_session, text, **kwargs)
+
+    loop.process_input = spy  # type: ignore[method-assign]
+
+    await WaveRunner(loop).run(session)
+
+    assert len(seen) == 2
+    assert all(deadline is not None for deadline in seen)
+    assert seen[0] != seen[1], "a new item gets a new clock"
+    assert loop.sessions[-1].item_deadline is None, "no clock outlives its item"
+
+
+@pytest.mark.asyncio
 async def test_the_prompt_is_scoped_to_the_current_item():
     session = _session_with("a", "b", "c")
     loop = _StubLoop(["complete", "complete", "complete"])
@@ -356,3 +386,112 @@ async def test_the_prompt_is_scoped_to_the_current_item():
     assert loop.calls[0].startswith(WAVE_ITEM_HEAD)
     assert " b" not in loop.calls[0]
     assert " c" not in loop.calls[0]
+
+
+# ---- D: state lands when an item lands, not when the wave ends --------------
+
+
+class _SnapshotCloser:
+    """Records what the task looked like at every save.
+
+    A save count alone cannot tell "item 1 was persisted" from "the wave-end
+    save happened to include it" -- both leave item 1 completed on disk when the
+    run finishes.  The order is the fact: a snapshot in which item 1 is done and
+    item 2 is not can only come from a save that ran between them.
+    """
+
+    def __init__(self):
+        self.snapshots: list[list[tuple[str, str]]] = []
+
+    def save(self, session):  # type: ignore[no-untyped-def]
+        self.snapshots.append([(item.id, item.status) for item in session.task.items])
+
+
+@pytest.mark.asyncio
+async def test_each_completed_item_is_persisted_before_the_next_one_starts():
+    """Measured live 2026-10-30: three items completed inside a wave, the wave
+    was killed mid-flight, and the parent session still said ``pending`` for all
+    three -- the only save points were arm, wave end and disarm."""
+    session = _session_with("a", "b", "c")
+    loop = _StubLoop(["complete", "complete", "complete"])
+    loop.closer = _SnapshotCloser()
+
+    await WaveRunner(loop).run(session)
+
+    between = [
+        dict(snapshot)
+        for snapshot in loop.closer.snapshots
+        if dict(snapshot).get("1") == "completed" and dict(snapshot).get("2") != "completed"
+    ]
+    assert between, (
+        "no save happened while item 1 was done and item 2 was not; "
+        f"snapshots={loop.closer.snapshots}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dead_turn_after_an_item_keeps_that_item_on_disk():
+    """The wave session is ephemeral (its transcript is disposable), but the
+    *task* it shares with the parent is the durable record."""
+
+    class _CrashingLoop(_StubLoop):
+        async def process_input(self, session, text, on_delta=None, observer=None, synthetic=False):
+            if self.calls:
+                raise RuntimeError("turn died")
+            return await super().process_input(session, text, on_delta, observer, synthetic)
+
+    session = _session_with("a", "b")
+    loop = _CrashingLoop(["complete", "complete"])
+    loop.closer = _SnapshotCloser()
+
+    # The runner turns a dead turn into a report entry, not an exception (one bad
+    # turn must not kill the wave).  Either way item 1 already happened.
+    await WaveRunner(loop).run(session)
+
+    between = [
+        dict(snapshot)
+        for snapshot in loop.closer.snapshots
+        if dict(snapshot).get("1") == "completed"
+    ]
+    assert between, f"item 1 never reached a save; snapshots={loop.closer.snapshots}"
+    assert session.task.get("1").status == "completed"
+
+
+# ---- E: the harness's own words must not rebuild the file block ------------
+
+
+class _SyntheticRecordingLoop(_StubLoop):
+    def __init__(self, actions, **kwargs):
+        super().__init__(actions, **kwargs)
+        self.synthetic_flags: list[bool] = []
+
+    async def process_input(self, session, text, on_delta=None, observer=None, synthetic=False):
+        self.synthetic_flags.append(synthetic)
+        return await super().process_input(session, text, on_delta, observer, synthetic)
+
+
+@pytest.mark.asyncio
+async def test_the_item_prompt_is_sent_as_synthetic():
+    """Measured 2026-10-30: the wave seed names ``backend/app/models.py`` and the
+    file block rebuilt from it carried 22-28k characters into *every* request.
+    The prompt is the harness's, so it must not answer 'what did the human say'."""
+    session = _session_with("a", "b")
+    loop = _SyntheticRecordingLoop(["complete", "complete"])
+
+    await WaveRunner(loop).run(session)
+
+    assert loop.synthetic_flags == [True, True], (
+        f"item prompts reached the loop as human speech: {loop.synthetic_flags}"
+    )
+
+
+def test_the_wave_seed_is_marked_synthetic():
+    session = _session_with("a")
+    loop = _StubLoop([])
+    runner = WaveRunner(loop)
+    report = SimpleNamespace(waves=1)
+
+    wave_session = runner._make_wave_session(session, session.task, "种子", report)
+
+    assert wave_session.messages, "the seed is the wave's first message"
+    assert wave_session.messages[0].synthetic is True

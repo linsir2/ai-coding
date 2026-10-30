@@ -265,6 +265,30 @@ class SessionData:
     # (see `server.handlers.context_tokens`). 0 means "never compacted", which
     # keeps the ordinary reading — the newest turn — unchanged.
     last_compacted_turn: int = 0
+    # NOT persisted (``to_dict`` is a hand-written whitelist).  The provider's
+    # own context reading for the most recent model step *of the running turn*.
+    # ``turn_usages`` is only filled when a turn closes, so without this the
+    # compaction gate saw a stale (or zeroed) reading for every iteration after
+    # the first compaction of a turn and fell back to the character estimate --
+    # which measures the un-compacted history and never shrinks.  Measured live
+    # 2026-10-30: 21 iterations, 21 compactions.  0 means "no step has reported".
+    live_context_tokens: int = 0
+    # NOT persisted.  Which plan item the current turn is allowed to work on.
+    # A wave session is shared across the whole wave and the task it shares
+    # with the parent holds every open item, so an unbounded continuation would
+    # nudge one step to finish the *rest of the plan* (the reason the step
+    # policy used to set ``max_auto_continuations=0``).  Empty means "no scope":
+    # the ordinary loop sees the whole task.  Set by the wave/step runner.
+    step_item_id: str = ""
+    # NOT persisted.  The one deadline every ``process_input`` call of the same
+    # plan item shares, so N attempts cannot each spend a fresh wall clock.
+    # ``None`` means "each turn gets its own".
+    item_deadline: Any = None
+    # Persisted.  Tools the model has asked for (``tool_search``): their schemas
+    # are deferred, so this is what makes them appear on the *next* request.
+    # Capped by the loop; a tool loaded once stays loaded for the session (the
+    # tool surface is unrelated to history, so compaction does not clear it).
+    loaded_tools: tuple[str, ...] = ()
     # I2: the checkpoint the context pipeline installed, and how much of
     # ``messages`` it stands for.  Compaction is recomputed from the full history
     # on every request, so without these three the summariser re-read the same
@@ -572,7 +596,7 @@ class SessionData:
         )
 
     def live_prompt_tokens(self) -> int:
-        """The newest turn's prompt tokens that still describe the live context.
+        """The newest measurement of the context that is actually live.
 
         Two readers need this and they once answered it differently: the sidebar
         meter skipped usage at or before the compaction boundary, while the
@@ -583,7 +607,14 @@ class SessionData:
 
         The boundary is session state, so the rule belongs to the session. One
         implementation, two callers, no way to drift again.
+
+        ``live_context_tokens`` comes first: it is the running turn's own step
+        reading, and a turn only writes ``turn_usages`` when it closes, so the
+        rows below are always one turn behind. Without the in-turn value every
+        iteration after the first compaction read a boundary-invalidated number.
         """
+        if self.live_context_tokens > 0:
+            return int(self.live_context_tokens)
         if not self.turn_usages:
             return 0
         live = [row for row in self.turn_usages if int(row.turn) > self.last_compacted_turn]
@@ -690,6 +721,9 @@ class SessionData:
             data["readLedger"] = [mark.to_dict() for mark in self.read_ledger]
         if self.seen_paths:
             data["seenPaths"] = list(self.seen_paths)
+        # Deferred tool schemas: only a session that loaded some writes the key.
+        if self.loaded_tools:
+            data["loadedTools"] = list(self.loaded_tools)
         # Same rule again: sessions without acceptance contracts write no key,
         # so every file written before R0-1 keeps reading byte-identically.
         if self.acceptance:
@@ -821,6 +855,9 @@ class SessionData:
             compaction_anchor=str(data.get("compactionAnchor", "") or ""),
             read_ledger=read_ledger,
             seen_paths=seen_paths,
+            loaded_tools=tuple(
+                str(name) for name in (data.get("loadedTools") or ()) if name
+            ),
             acceptance=acceptance,
             step_deliveries=step_deliveries,
             open_turn=int(raw_open_turn)
