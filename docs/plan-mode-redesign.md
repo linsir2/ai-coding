@@ -180,7 +180,9 @@ dsh 的 `exit_plan_mode` **刻意不做结构化**（`index.ts:281` 只有 markd
   │    │   ★ items **替换**列表（items.clear() + 逐项 add()，复用 id 分配）
   │    │   → TaskUpdated → plan.updated → 前端卡片（现有链路，零改动）
   │    │
-  │    └─【继续规划】→ _KEEP 文案带 feedback（现有）
+  │    └─【继续规划】→ 有反馈：_KEEP 带 feedback，同轮修订后再提交
+  │                   无反馈：模型先用 ask_user 问「哪里需要调整？」（2-4 个选项），
+  │                          回答到达后才允许再次提交；未问就重交 = 拒绝一次，再交 = 结束本回合
   │
   ├─ turn.finished ─→ 前端 pendingPlanRun ─→ dispatch("/plan run")
   │

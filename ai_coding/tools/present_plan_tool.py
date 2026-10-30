@@ -29,6 +29,21 @@ _APPROVED = (
     "计划已批准：执行由系统接管（前端将自动开始执行）。请简短收尾，不要开始执行。"
 )
 _KEEP = "用户选择继续规划。反馈：{feedback}。修改计划后再次调用 present_plan。"
+#: C3: keep with no feedback.  The card's button means "there is a problem" --
+#: but the problem is the human's to state, and the original design says so
+#: ("若无反馈则：请询问要改什么").  Without this the model resubmitted the same
+#: plan until the planning budget died (measured: 25 cards, MAX_ITERATIONS).
+_ASK_FOR_CHANGES = (
+    "用户选择继续规划，但没有说明要改什么。请先调用 ask_user 提问："
+    "「这份计划哪里需要调整？」，并给出 2-4 个具体、可选的调整方向"
+    "（例如拆得更细、调整步骤顺序与依赖、改验收命令、换实现方案），"
+    "拿到回答后再按它修订并重新提交计划。"
+    "如果用户没有回答，直接用一句话收尾，不要再次提交同一份计划。"
+)
+_NEEDS_QUESTION_FIRST = (
+    "error: 上一轮评审要求继续规划，还没有问用户要改什么。"
+    "先用 ask_user 提问（给出 2-4 个具体选项），拿到回答后再提交修订版。"
+)
 _HOLD = (
     "用户搁置了这次评审：本轮到此结束，不会执行任何计划。"
     "保持计划模式，等待用户的下一步指示。"
@@ -185,6 +200,28 @@ class PresentPlanTool(BaseTool):
                 success=False,
                 output=_DISMISSED,
                 error="already_concluded",
+            )
+        # C3: the human asked for a revision without saying what.  The reason
+        # is theirs to give, so a revised plan can only follow an answered
+        # question.  Telling the model once is enough; submitting twice ends
+        # the turn like a held review instead of looping to the budget.
+        review_state = str(getattr(conclusion, "plan_review_state", "") or "")
+        if review_state == "refused":
+            if conclusion is not None:
+                conclusion.dismissed = True
+            return ToolResult(
+                success=True,
+                output=_HOLD,
+                data={"approved": False, "dismissed": True, "reviewed": True},
+            )
+        if review_state == "needs_feedback":
+            if conclusion is not None:
+                conclusion.plan_review_state = "refused"
+            return ToolResult(
+                success=False,
+                output=_NEEDS_QUESTION_FIRST,
+                error="plan_feedback_needed",
+                data={"approved": False, "reviewed": True},
             )
         plan = str(params.get("plan", "") or "").strip()
         if not plan:
@@ -354,17 +391,17 @@ class PresentPlanTool(BaseTool):
                 error="plan_keep",
                 data={"approved": False, "reviewed": True},
             )
-        # C3: keep with no feedback gives the model nothing to revise with.
-        # Looping would just resubmit the same plan and burn the planning
-        # budget (measured: 25 review cards, MAX_ITERATIONS); the button
-        # means "not now", which is exactly the dismissal contract -- same
-        # result as esc, same turn-ending branch in the loop.
+        # C3: keep with no reason.  The human said "there is a problem" and
+        # nothing more, so the model has to ask what it is -- HITL with
+        # concrete choices.  The turn stays open for that question; the loop
+        # pays the debt when ask_user gets an answer.
         if conclusion is not None:
-            conclusion.dismissed = True
+            conclusion.plan_review_state = "needs_feedback"
         return ToolResult(
-            success=True,
-            output=_HOLD,
-            data={"approved": False, "dismissed": True, "reviewed": True},
+            success=False,
+            output=_ASK_FOR_CHANGES,
+            error="plan_keep",
+            data={"approved": False, "reviewed": True, "needs_feedback": True},
         )
 
     async def _proof_problem(

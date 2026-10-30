@@ -49,6 +49,13 @@ class TurnConclusion:
     #: The human dismissed the plan review.  The review is not asked twice in
     #: one turn, but the turn's other exit is still open.
     dismissed: bool = False
+    #: C3: where the plan review stands after a "keep planning" answer.
+    #: ``""`` nothing owed; ``"needs_feedback"`` the human asked for a revision
+    #: without saying what -- the model must ask (``ask_user``) before it may
+    #: submit again; ``"refused"`` it submitted anyway once and was told, so a
+    #: second attempt ends the turn instead of looping.  Cleared by a answered
+    #: ``ask_user`` (the loop pays the debt) or by a keep that carries feedback.
+    plan_review_state: str = ""
 
 
 @dataclass

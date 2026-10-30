@@ -95,6 +95,7 @@ from ai_coding.core.turn_hooks import TurnHooks
 from ai_coding.core.turn_policy import (
     PLAN_APPROVAL_WITHDRAWN_NOTE,
     PLAN_DISMISSED_NOTE,
+    PLAN_HELD_NOTE,
     PLAN_RESEARCH_NOTE,
     TurnAction,
     TurnDecision,
@@ -1431,12 +1432,13 @@ class AgentLoop:
                 # this".  No nudge, no arm, no auto-run; the note tells the
                 # operator nothing is pending.  Reads this batch's outcomes
                 # directly: the state is local, nothing needs remembering.
-                if any(
-                    item.call.name == "present_plan"
+                dismissed = [
+                    item for item in outcomes
+                    if item.call.name == "present_plan"
                     and isinstance(item.result.data, dict)
                     and item.result.data.get("dismissed") is True
-                    for item in outcomes
-                ):
+                ]
+                if dismissed:
                     # B (audit fix): the note below claims nothing ran, so
                     # nothing may stay armed -- this is the only branch that can
                     # meet a dismissal while a plan is armed (the tool refuses a
@@ -1447,12 +1449,20 @@ class AgentLoop:
                         and getattr(task, "armed_profile", "") == "plan"
                     ):
                         task.disarm()
+                    # C3: a plan that *was* reviewed must not be reported as
+                    # "never submitted" -- a held review says the card was
+                    # shown and not approved.
+                    reviewed = any(
+                        isinstance(item.result.data, dict)
+                        and item.result.data.get("reviewed") is True
+                        for item in dismissed
+                    )
                     outcome = TurnOutcome(
                         status=TurnStatus.COMPLETED,
                         text=step.text,
                         iterations=books.total_iterations,
                         reason="plan dismissed",
-                        note=PLAN_DISMISSED_NOTE,
+                        note=PLAN_HELD_NOTE if reviewed else PLAN_DISMISSED_NOTE,
                     )
                     break
         except asyncio.CancelledError:
@@ -2257,6 +2267,19 @@ class AgentLoop:
             for path in paths_in(item.result.output or "", self.workspace)
         )
         self.closer.write_back(session, outcomes)
+        # C3: the review asked for a revision and did not say what -- the
+        # model's job is to ask (ask_user), and this batch paid that debt.  The
+        # flag lives on the turn's conclusion holder, which is the only object
+        # every tool call of the turn shares.
+        if (
+            conclusion is not None
+            and getattr(conclusion, "plan_review_state", "") == "needs_feedback"
+            and any(
+                item.call.name == "ask_user" and item.result.success
+                for item in outcomes
+            )
+        ):
+            conclusion.plan_review_state = ""
         if any(
             # ``present_plan`` joined the list with P1: approval is what writes
             # the submitted items into the task, and the plan card is driven by

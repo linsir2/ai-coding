@@ -130,11 +130,11 @@ async def test_keep_planning_carries_the_feedback_back():
 
 
 @pytest.mark.asyncio
-async def test_keep_without_feedback_is_a_hold_and_ends_the_turn():
-    """C3: the card's "继续规划" with an empty input gave the model nothing to
-    revise with; looping on it burned the whole planning budget (measured:
-    25 review cards, MAX_ITERATIONS).  It is the same "not now" as esc: a
-    dismissal, so the loop's existing dismissal branch ends the turn."""
+async def test_keep_without_feedback_sends_the_model_to_ask_the_human():
+    """C3: the card's "继续规划" with an empty input means "there is a problem"
+    -- and the problem is the human's to state.  The model has to ask
+    (ask_user, with concrete choices), then revise.  Resubmitting instead is
+    what burned the planning budget (measured: 25 cards, MAX_ITERATIONS)."""
     tool, _ = _tool(UserAnswer(answered=True, text='{"choice":"keep"}'))
     conclusion = TurnConclusion()
     ctx = _ctx(items=0)
@@ -142,16 +142,17 @@ async def test_keep_without_feedback_is_a_hold_and_ends_the_turn():
 
     r = await tool.execute(_plan_call("# p"), ctx)
 
-    assert r.success is True
-    assert r.data == {"approved": False, "dismissed": True, "reviewed": True}
-    assert conclusion.dismissed is True
+    assert r.success is False and r.error == "plan_keep"
+    assert r.data == {"approved": False, "reviewed": True, "needs_feedback": True}
+    assert "ask_user" in r.output
+    assert conclusion.plan_review_state == "needs_feedback"
+    assert conclusion.dismissed is False
     assert ctx.task.items == [] and ctx.task.armed is False
 
 
 @pytest.mark.asyncio
-async def test_the_plain_keep_label_is_also_a_hold():
-    """The CLI path sends plain words; the option's own label must not be
-    mistaken for feedback (that was the plain-text half of the same loop)."""
+async def test_the_plain_keep_label_asks_for_feedback_too():
+    """The CLI path sends plain words; the option's own label is not feedback."""
     tool, _ = _tool(UserAnswer(answered=True, text="继续规划"))
     conclusion = TurnConclusion()
     ctx = _ctx(items=0)
@@ -159,8 +160,31 @@ async def test_the_plain_keep_label_is_also_a_hold():
 
     r = await tool.execute(_plan_call("# p"), ctx)
 
-    assert r.success is True and r.data["dismissed"] is True
+    assert r.error == "plan_keep" and r.data["needs_feedback"] is True
+    assert conclusion.plan_review_state == "needs_feedback"
+
+
+@pytest.mark.asyncio
+async def test_a_resubmission_without_asking_is_refused_once_then_ends_the_turn():
+    """C3: the debt is paid by an answered question, not by resubmitting the
+    same plan.  One refusal tells the model; a second attempt ends the turn the
+    way a held review does -- bounded, never a 25-card loop."""
+    tool, prompt = _tool(UserAnswer(answered=True, text='{"choice":"keep"}'))
+    conclusion = TurnConclusion()
+    ctx = _ctx(items=0)
+    ctx.conclusion = conclusion
+    await tool.execute(_plan_call("# p"), ctx)
+
+    refused = await tool.execute(_plan_call("# p"), ctx)
+    held = await tool.execute(_plan_call("# p"), ctx)
+
+    assert refused.success is False and refused.error == "plan_feedback_needed"
+    assert "ask_user" in refused.output
+    assert held.success is True and held.data["dismissed"] is True
     assert conclusion.dismissed is True
+    # The human is asked exactly once: the loop's own resubmission attempts
+    # never put a second review card on screen.
+    assert len(prompt.calls) == 1
 
 
 @pytest.mark.asyncio

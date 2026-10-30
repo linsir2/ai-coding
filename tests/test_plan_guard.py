@@ -18,7 +18,12 @@ import pytest
 from ai_coding.ai.engine import ChatEngine, EngineError
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
-from ai_coding.core.turn_policy import PLAN_DISMISSED_NOTE, TurnPolicy, TurnPolicyConfig
+from ai_coding.core.turn_policy import (
+    PLAN_DISMISSED_NOTE,
+    PLAN_HELD_NOTE,
+    TurnPolicy,
+    TurnPolicyConfig,
+)
 from ai_coding.domain.loop import StepResult, TurnStatus
 from ai_coding.domain.message import ToolCallRef, ToolResult
 from ai_coding.domain.task import TaskState
@@ -58,6 +63,67 @@ class _DismissedPlan(_PresentPlan):
             output="已搁置",
             data={"approved": False, "dismissed": True},
         )
+
+
+class _HoldingPlan(BaseTool):
+    """keep with no feedback, and the question-debt it leaves on the turn.
+
+    Mirrors the real tool's three states so the loop test pins the *clear* (an
+    answered ask_user pays the debt), not the tool's own bookkeeping.
+    """
+
+    name = "present_plan"
+    parallel_safe = False
+    mutates_world = False
+
+    def __init__(self) -> None:
+        self.seen_states: list[str] = []
+
+    @property
+    def description(self) -> str:
+        return "submit the plan for review"
+
+    @property
+    def params_json_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, params, ctx=None) -> ToolResult:
+        state = str(getattr(ctx.conclusion, "plan_review_state", "") or "")
+        self.seen_states.append(state)
+        if state == "refused":
+            ctx.conclusion.dismissed = True
+            return ToolResult(
+                success=True,
+                output="held",
+                data={"approved": False, "dismissed": True, "reviewed": True},
+            )
+        if state == "needs_feedback":
+            ctx.conclusion.plan_review_state = "refused"
+            return ToolResult(
+                success=False,
+                output="ask first",
+                error="plan_feedback_needed",
+                data={"approved": False, "reviewed": True},
+            )
+        ctx.conclusion.plan_review_state = "needs_feedback"
+        return ToolResult(
+            success=False,
+            output="ask",
+            error="plan_keep",
+            data={"approved": False, "reviewed": True, "needs_feedback": True},
+        )
+
+
+class _AnsweringPrompt:
+    def __init__(self, text: str = "拆得更细") -> None:
+        self._text = text
+        self.calls: list[str] = []
+
+    async def ask(self, question, options=(), *, detail="", intent="", data=None):
+        self.calls.append(question)
+        from ai_coding.security.user_prompt import UserAnswer
+
+        return UserAnswer(answered=True, text=self._text)
 
 
 class _ScriptedEngine(ChatEngine):
@@ -781,3 +847,60 @@ async def test_the_ladder_mouth_also_ends_the_plan_turn_with_the_note(tmp_path):
     assert "no progress" in outcome.reason  # the ladder, not the budget
     assert "未提交计划" in outcome.note
     assert len(_plan_reminders(session)) == 1  # the remedy, once
+
+
+# ---- C3: keep-with-no-feedback is a question, not a resubmission loop ------
+
+
+@pytest.mark.asyncio
+async def test_an_answered_question_pays_the_review_debt(tmp_path):
+    """The human said "keep planning" without saying what.  The turn must ask
+    (ask_user) and only then accept a resubmission -- and the turn ends with
+    the *held* note, because a plan did reach the review (measured: 25 cards
+    and MAX_ITERATIONS before this)."""
+    from ai_coding.tools.ask_user_tool import AskUserTool
+
+    plan, prompt = _HoldingPlan(), _AnsweringPrompt()
+    registry = ToolRegistry()
+    registry.register(plan)
+    registry.register(AskUserTool(prompt))
+    ask = StepResult(
+        text=None,
+        tool_calls=[
+            ToolCallRef(
+                id="c2",
+                name="ask_user",
+                arguments='{"question": "这份计划哪里需要调整？", "options": ["拆得更细"]}',
+            )
+        ],
+        finish_reason="tool_calls",
+    )
+    engine = _ScriptedEngine(
+        [
+            _call("c1", "present_plan"),
+            ask,
+            _call("c3", "present_plan"),
+            _text("按你的回答改好了。"),
+        ]
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    loop = AgentLoop(
+        engine,
+        sessions,
+        registry,
+        approval=AutoApproveCallback(),
+        settings=AIConfig(),
+        workspace=".",
+    )
+    session = _plan_session(sessions)
+
+    await loop.process_input(session, "给计划")
+
+    # The third submission ran *after* the question was answered: the debt was
+    # cleared by the loop, not by the model's own bookkeeping.
+    assert plan.seen_states == ["", ""]
+    assert len(prompt.calls) == 1
+    assert any("用户回答：拆得更细" in (m.content or "") for m in session.messages)
+    outcome = loop.last_outcome
+    assert outcome is not None
+    assert outcome.note == PLAN_HELD_NOTE
