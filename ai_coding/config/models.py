@@ -477,12 +477,30 @@ class AIConfig(BaseModel):
     #: rule: a heavy proof command or a research/verify item always closes the
     #: wave earlier (see core/wave_planner.py).
     plan_wave_size: int = 4
-    #: Provider-reported tokens one wave may spend; 0 disables.  The executor
-    #: also clamps each turn's ``max_turn_tokens`` to what remains, so a single
-    #: turn cannot overshoot the whole wave budget.
-    plan_wave_token_budget: int = 300_000
-    #: Wall-clock ceiling for one wave, checked between turns; 0 disables.
-    plan_wave_wall_seconds: float = 1_200.0
+    #: Provider-reported tokens one wave may spend; 0 disables (the default).
+    #:
+    #: Measured (2026-10-30, hotel-management task, 21 items): the FIRST item
+    #: alone spent 269k prompt tokens, so the old 300k default ended the run
+    #: after wave 1 -- "budget: wave token budget exhausted
+    #: (318489/300000); remaining items stay open" -- left 18 items open and
+    #: asked the operator to re-run ``/plan run``.  Carrying a plan to the end
+    #: is the executor's whole job, so a per-segment spend cap defeats it.
+    #: Context growth is bounded by compaction (``max_context_tokens``), which
+    #: is what Claude Code / opencode / Codex rely on; a *spend* cap belongs to
+    #: the episode (``plan_token_budget``), where an operator sets one on
+    #: purpose.  A stuck plan is caught by ``plan_no_progress_waves`` instead.
+    plan_wave_token_budget: int = 0
+    #: Wall-clock ceiling for one wave, checked between turns; 0 disables (the
+    #: default).  Same lesson: a four-item wave with tests and a build routinely
+    #: runs past 20 minutes, and stopping there is another mid-plan
+    #: interruption, not a safety net.
+    plan_wave_wall_seconds: float = 0.0
+    #: Consecutive waves that complete no item before the run is stopped as
+    #: "no progress".  0 disables.  This is the only automatic brake left on a
+    #: plan run: a wave that keeps exploring, re-reading and writing nothing
+    #: terminal is the failure mode worth stopping (a slow plan that completes
+    #: an item per wave is not).  The turn/ladder gates still bound each turn.
+    plan_no_progress_waves: int = 3
     #: Turns one item may spend before it is marked blocked (includes the
     #: acceptance repair turn).
     plan_max_item_attempts: int = 2

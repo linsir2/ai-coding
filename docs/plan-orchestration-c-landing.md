@@ -134,13 +134,15 @@ class WaveHandoff:
 
 | 预算 | 默认 | 作用 |
 |---|---|---|
-| `plan_wave_token_budget` | 300000 | 单波 token 上限；每回合 `max_turn_tokens` 夹到剩余额度，防止单回合 7× 超支 |
-| `plan_wave_wall_seconds` | 1200 | 单波墙钟，超时结束本波 |
-| `plan_token_budget` | 0 | episode 上限，0 = 不限 |
-| `plan_wall_seconds` | 0 | episode 墙钟，0 = 不限 |
-| `max_tool_iterations` | 0 | 回合内不限；仅防失控时手动设 |
+| `plan_wave_token_budget` | **0（关）** | 单波 token 上限。实测（2026-10-30，酒店管理 21 项）：**单个条目就花了 269k**，旧的 300k 默认在第一波后终止整轮（`budget: wave token budget exhausted … remaining items stay open`），18 项挂起，必须人工再 `/plan run` —— 与 C 的“连续执行”目标相反，故默认关闭 |
+| `plan_wave_wall_seconds` | **0（关）** | 单波墙钟。一个含测试与构建的 4 项波经常超过 20 分钟，同样是中途打断，默认关闭 |
+| `plan_no_progress_waves` | 3 | **A+C 的唯一自动刹车**：连续 N 波没有完成任何条目 → `no progress` 结束（缓慢但每波有产出的计划不会触发） |
+| `plan_token_budget` | 0 | episode 上限（整轮花费闸），0 = 不限；操作者要控成本时才设 |
+| `plan_max_waves` | 0 | 整轮波数上限，0 = 不限 |
+| `max_tool_iterations` / `plan_step_max_iterations` | 100 / 60 | 回合内边界；配合 1800s 回合超时兜底 |
 
-到限不是失败：本波已完成的收据保留，`blocked`/`open` 项留给下一波或下次 `/plan run`。
+上下文增长由压缩解决（`max_context_tokens`，与 Claude Code / opencode / Codex 同一思路），不靠花费预算。
+到限（仅当操作者显式设置时）不是失败：本波已完成的收据保留，`blocked`/`open` 项留给下一波或下次 `/plan run`。
 
 ## 7. 重规划
 

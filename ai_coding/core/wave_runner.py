@@ -130,6 +130,11 @@ class WaveRunner:
         #: The last round was a real wave (``after_round`` updates the wave
         #: counter only then -- a replan is not a wave).
         self._last_round_was_wave: bool = True
+        #: C3/A+C: the only automatic brake on a run that has no per-wave
+        #: spend cap.  A wave that completes nothing is exploration, not work;
+        #: consecutive such waves are the failure mode worth stopping.
+        self._waves_without_progress: int = 0
+        self._completed_seen: int = 0
 
     # ---- lifecycle --------------------------------------------------------
 
@@ -193,6 +198,10 @@ class WaveRunner:
         self._replan_pending = ""
         self._replans_opened = 0
         self._last_round_was_wave = True
+        # A new run starts with a clean progress ledger; the counters describe
+        # *this* run's waves, not the task's history.
+        self._waves_without_progress = 0
+        self._completed_seen = 0
         return self._receipted
 
     def next_item(self, task: Any, attempted: set[str]) -> WaveItem | None:
@@ -301,7 +310,29 @@ class WaveRunner:
         # "第 N 波") must keep counting only real waves.
         if self._last_round_was_wave:
             task.rounds_run = int(getattr(task, "rounds_run", 0) or 0) + 1
+            self._settle_progress(task, report)
         self._persist(session)
+
+    def _settle_progress(self, task: TaskState, report: PlanReport) -> None:
+        """Count waves that finished an item; stop after too many empty ones.
+
+        A+C: per-wave token/wall budgets are off by default (a real item costs
+        more than the old cap), so this is the one automatic brake left.  It
+        keys on *completed* items -- the only progress the plan can bank --
+        and never fires while the run is still finishing work each wave.
+        """
+        completed = len(report.completed)
+        if completed > self._completed_seen:
+            self._waves_without_progress = 0
+        else:
+            self._waves_without_progress += 1
+        self._completed_seen = completed
+        cap = self._setting_int("plan_no_progress_waves", 3)
+        if cap and self._waves_without_progress >= cap and task.open_items():
+            report.stopped = (
+                f"no progress: {self._waves_without_progress} consecutive waves "
+                "completed no item; remaining items stay open"
+            )
 
     def should_stop(self, report: PlanReport, item: WaveItem) -> bool:
         return report.stopped is not None

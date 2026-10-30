@@ -37,7 +37,13 @@ def test_load_returns_defaults_on_none(no_config):
     # r24/C: waves are the default executor; legacy stays one setting away.
     assert app.ai.plan_orchestrator == "wave"
     assert app.ai.plan_wave_size == 4
-    assert app.ai.plan_wave_token_budget == 300_000
+    # A+C (measured): one real item spent 269k tokens, so a per-wave spend cap
+    # ended a real run after one wave.  Both segment caps are off by default;
+    # the episode ceiling and the no-progress brake are the operator's levers.
+    assert app.ai.plan_wave_token_budget == 0
+    assert app.ai.plan_wave_wall_seconds == 0.0
+    assert app.ai.plan_no_progress_waves == 3
+    assert app.ai.plan_token_budget == 0
     assert app.ai.plan_max_item_attempts == 2
 
 

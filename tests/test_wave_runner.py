@@ -179,6 +179,56 @@ async def test_extra_items_finished_in_one_turn_are_settled():
 
 
 @pytest.mark.asyncio
+async def test_a_real_item_spend_runs_the_whole_plan_in_one_run():
+    """A+C: one real item costs ~269k tokens (measured), so the shipped
+    defaults carry no per-wave spend cap.  Five such items must finish in one
+    run -- no stop, no manual /plan run."""
+    session = _session_with("a", "b", "c", "d", "e")
+    loop = _StubLoop(["complete"] * 5, usage_per_turn=270_000)
+
+    report = await WaveRunner(loop).run(session)
+
+    assert report.stopped is None
+    assert report.completed == ["1", "2", "3", "4", "5"]
+    assert report.waves == 2  # five items at the default wave size of four
+    assert all(item.status == "completed" for item in session.task.items)
+
+
+@pytest.mark.asyncio
+async def test_a_plan_that_completes_nothing_for_three_waves_is_stopped():
+    """The one automatic brake: waves that explore but finish no item are the
+    failure mode worth stopping (a slow plan is not)."""
+    session = _session_with(*[f"i{index}" for index in range(12)])
+    loop = _StubLoop(["noop"] * 12)
+
+    report = await WaveRunner(loop).run(session)
+
+    assert report.stopped is not None
+    assert report.stopped.startswith("no progress:")
+    assert report.completed == []
+    assert report.waves == 3
+    assert all(item.status == "pending" for item in session.task.items)
+
+
+@pytest.mark.asyncio
+async def test_a_slow_plan_that_completes_one_item_per_wave_is_not_stopped():
+    """Progress resets the counter -- only a run of empty waves fires it.
+
+    The run may still end for C2's own reason (items attempted and left open
+    are "stalled"); what this pins is that the *no-progress* brake never fires
+    while each wave banks an item."""
+    session = _session_with(*[f"i{index}" for index in range(9)])
+    loop = _StubLoop(
+        ["complete", "noop", "noop", "complete", "noop", "noop", "complete", "noop", "noop"]
+    )
+
+    report = await WaveRunner(loop).run(session)
+
+    assert report.completed == ["1", "4", "7"]
+    assert report.stopped is None or not report.stopped.startswith("no progress:")
+
+
+@pytest.mark.asyncio
 async def test_wave_budget_stops_between_turns_and_leaves_the_item_open():
     session = _session_with("a", "b")
     loop = _StubLoop(["complete"], usage_per_turn=60)
