@@ -177,6 +177,20 @@ while True:
 | B-1 | `7c82f81` | loop 结构续跑（不写消息）、两个刹车、删除策略层注入 | 4 个真机测试 + 全量 pytest/ruff/mypy |
 | B-2 | `6e95ef3` | `TurnSnapshot.plan_executing`、不再替换 `loop.policy`、`<plan-state>` 尾块、删除 `idle_streak`/`PLAN_CONTINUE` 死代码 | 同上（新增 `<plan-state>` 断言） |
 
+逐条对照（文档第 3 节的五步）：
+
+| 步骤 | 落点 | 状态 |
+|---|---|---|
+| B1 结构续跑 | `agent_loop.py` 的 `plan_executing` 续跑块；无工具调用时 `continue` 不写消息 | 已实现（`7c82f81`） |
+| B2 删 plan 策略分支 | `turn_policy.py` 删 `PLAN_CONTINUE` / `_plan_after_step` / `_plan_continue_text`；`allow_search` 改读 `snapshot.plan_executing` | 已实现（`6e95ef3`） |
+| B3 `<plan-state>` 易失尾块 | `TurnPolicy.plan_state_block()` + `request_assembly.py` 的 `plan_state` 槽位（紧跟 `task`） | 已实现（`6e95ef3`） |
+| B4 不替换 `loop.policy` | `plan_executor.py` 只设 `session.plan_executing`；`_has_a_round_left` 按 `plan_executing` 取无限上限 | 已实现（`6e95ef3`） |
+| B5 刹车位置 | `PLAN_IDLE_LIMIT=3` / `PLAN_STALL_ROUNDS=6` 判定在 loop 续跑分支，`TurnPolicy` 只读 `stall_rounds` | 已实现（`7c82f81`） |
+
+复验（HEAD `33591c1` 上重跑）：`pytest` 4821 passed / 29 skipped（bwrap 缺失导致跳过）、
+`ruff` 通过、`mypy` 173 文件无告警、`realrun_plan.py` 三个场景全 PASS、
+`realrun_spin.py` 在 6 轮后以 `plan stalled: 6 rounds without progress` 收口。
+
 真机测试在 `tests/test_plan_continuation.py`：真实 `AgentLoop` + 脚本化模型，
 覆盖"单回合完成并回合内修复""空闲刹车 3 次""记账工具空转 6 轮""无 verify 条目"。
 
