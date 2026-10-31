@@ -16,22 +16,114 @@ from types import SimpleNamespace
 
 import pytest
 
-from ai_coding.core.plan_executor import PlanExecutor
+from ai_coding.core.plan_executor import PlanExecutor, plan_runner_for
 from ai_coding.core.plan_runner import PlanRunner
 from ai_coding.core.turn_policy import (
     PLAN_CONTINUE,
     PLAN_CONTINUE_LEAD,
+    PLAN_IDLE_LIMIT,
     TurnPolicy,
     TurnPolicyConfig,
     TurnSnapshot,
 )
-from ai_coding.core.wave_runner import WaveRunner, plan_runner_for
 from ai_coding.domain.loop import TurnStatus
-from tests.test_wave_runner import _session_with, _StubLoop
+from ai_coding.domain.session import SessionData
+from ai_coding.domain.task import TaskState
+
+
+def _session_with(*contents, verifies=(), deps=None):
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    task = TaskState(goal="plan")
+    for index, content in enumerate(contents):
+        item = task.add(content)
+        if index < len(verifies) and verifies[index]:
+            item.verify = verifies[index]
+    for item_id, parents in (deps or {}).items():
+        task.get(item_id).depends_on.extend(parents)
+    session.task = task
+    return session
+
+
+class _Closer:
+    def __init__(self):
+        self.saves = 0
+
+    def save(self, session):
+        self.saves += 1
+
+
+class _StubLoop:
+    """Stands in for AgentLoop: scripted turn outcomes, no model, no shell."""
+
+    def __init__(self, actions, *, usage_per_turn=0, workspace="."):
+        self.settings = SimpleNamespace(
+            plan_step_max_iterations=60,
+            plan_token_budget=0,
+        )
+        self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
+        self._actions = list(actions)
+        self._usage = int(usage_per_turn)
+        self._verify_results: list[bool] = []
+        self.calls: list[str] = []
+        self.policies: list[int] = []
+        self.continuation_caps: list[int] = []
+        self.sessions: list[SessionData] = []
+        self.closer = _Closer()
+        self.workspace = workspace
+        self.extra_workspace_roots = ()
+        self.last_outcome = SimpleNamespace(
+            status=TurnStatus.COMPLETED, text="ok", usage=None
+        )
+
+    async def process_input(
+        self, session, text, on_delta=None, observer=None, synthetic=False
+    ):
+        session.turn_count += 1
+        self.calls.append(text)
+        self.sessions.append(session)
+        self.policies.append(int(self.policy.config.max_turn_tokens))
+        self.continuation_caps.append(self.policy.config.max_auto_continuations)
+        action = self._actions.pop(0) if self._actions else "complete"
+        if action == "complete":
+            target = self._target(session.task, text)
+            if target is not None:
+                target.status = "completed"
+        elif action == "complete-both":
+            for item in session.task.open_items():
+                if item.status != "blocked":
+                    item.status = "completed"
+        elif action in ("verify-pass", "verify-fail"):
+            for entry in session.acceptance:
+                entry.passed = action == "verify-pass"
+                entry.output = "ok" if entry.passed else "boom"
+        elif action == "noop":
+            pass
+        usage = (
+            {"total_tokens": self._usage, "input_tokens": self._usage}
+            if self._usage
+            else None
+        )
+        self.last_outcome = SimpleNamespace(
+            status=TurnStatus.COMPLETED, text=action, usage=usage
+        )
+        return "ok"
+
+    async def verify_acceptance(self, session, books=None):
+        verdict = self._verify_results.pop(0) if self._verify_results else True
+        for entry in session.acceptance:
+            entry.passed = verdict
+            entry.output = "ok" if verdict else "boom"
+
+    @staticmethod
+    def _target(task, text):
+        for item in task.open_items():
+            if item.content in text:
+                return item
+        return None
 
 
 class _Loop(_StubLoop):
-    """The wave stub plus the observations this executor needs.
+    """The stub plus the observations this executor needs.
 
     ``complete-all`` is the ideal continuous step: one model call finishes
     every open item, so the executor must not open a second turn.
@@ -110,14 +202,8 @@ class _CancelLoop(_Loop):
 def _settings(loop: _Loop, **overrides) -> SimpleNamespace:
     values = {
         "plan_step_max_iterations": 60,
-        "plan_max_waves": 0,
-        "plan_wave_size": 4,
-        "plan_wave_token_budget": 0,
-        "plan_wave_wall_seconds": 0,
-        "plan_max_item_attempts": 2,
         "plan_token_budget": 0,
         "plan_item_wall_seconds": 0,
-        "plan_max_continues": 30,
         "plan_orchestrator": "session",
     }
     values.update(overrides)
@@ -132,7 +218,7 @@ def _plan_policy(**overrides) -> TurnPolicy:
     return TurnPolicy(TurnPolicyConfig(stop_policy=PLAN_CONTINUE, **overrides))
 
 
-def _snapshot_with(*contents, statuses=(), continuations=0) -> TurnSnapshot:
+def _snapshot_with(*contents, statuses=(), continuations=0, idle_streak=0) -> TurnSnapshot:
     from ai_coding.domain.task import TaskState
 
     task = TaskState(goal="g")
@@ -141,7 +227,8 @@ def _snapshot_with(*contents, statuses=(), continuations=0) -> TurnSnapshot:
     for item, status in zip(task.items, statuses, strict=False):
         item.status = status
     return TurnSnapshot(
-        iteration=1, open_items=tuple(task.open_items()), continuations=continuations
+        iteration=1, open_items=tuple(task.open_items()),
+        continuations=continuations, idle_streak=idle_streak,
     )
 
 
@@ -163,13 +250,14 @@ def test_plan_policy_finishes_when_nothing_is_left():
     assert decision.reason == "plan complete"
 
 
-def test_plan_policy_stops_asking_after_its_budget():
-    decision = _plan_policy(max_plan_continues=2).decide_after_step(
-        _snapshot_with("a", continuations=2)
+def test_plan_policy_stops_after_repeated_idle_boundaries():
+    """A plan turn has no iteration budget; the idle streak is its only brake."""
+    decision = _plan_policy().decide_after_step(
+        _snapshot_with("a", idle_streak=PLAN_IDLE_LIMIT)
     )
 
     assert decision.action.value == "finish"
-    assert "continuation budget" in (decision.reason or "")
+    assert "idle boundaries" in (decision.reason or "")
 
 
 def test_plan_policy_ignores_blocked_items():
@@ -209,7 +297,7 @@ async def test_plan_policy_is_active_and_acceptance_stays_out_of_the_turn():
     await PlanExecutor(loop).run(session)
 
     assert loop.stop_policies == [PLAN_CONTINUE]
-    assert loop.max_iterations == [60]
+    assert loop.max_iterations == [-1]
     assert loop.executing_seen == [True]
     assert loop.acceptance_seen == [[]]
     assert session.acceptance == []
@@ -297,7 +385,8 @@ async def test_no_progress_stops_after_one_empty_turn():
 
 
 @pytest.mark.asyncio
-async def test_token_budget_uses_the_turns_delta():
+async def test_token_spend_is_reported_but_never_stops_the_run():
+    """A plan turn has no spend cap: the counter is visibility, not a verdict."""
     session = _session_with("a", verifies=["true"])
     loop = _Loop(["complete-all"], usage_per_turn=120)
     _settings(loop, plan_token_budget=100)
@@ -305,7 +394,8 @@ async def test_token_budget_uses_the_turns_delta():
 
     report = await PlanExecutor(loop).run(session)
 
-    assert "budget" in (report.stopped or "")
+    assert report.stopped is None
+    assert report.completed == ["1"]
     assert session.task.plan_tokens_used == 120
 
 
@@ -374,9 +464,6 @@ async def test_plan_runner_for_selects_the_session_executor():
     loop = _Loop([])
     _settings(loop)
     assert isinstance(plan_runner_for(loop), PlanExecutor)
-
-    _settings(loop, plan_orchestrator="wave")
-    assert isinstance(plan_runner_for(loop), WaveRunner)
 
     _settings(loop, plan_orchestrator="legacy")
     assert isinstance(plan_runner_for(loop), PlanRunner)

@@ -268,6 +268,11 @@ class TurnBooks:
     #: Acceptance-gate nudges injected (``[acceptance-gate]``) — its own budget,
     #: separate from the todo and strategy ladders.
     acceptance_nudges: int = 0
+    #: Plan-as-Goal: consecutive idle boundaries (the model stopped with open
+    #: items and touched no tool) since the last tool batch.  A plan turn has no
+    #: iteration budget, so this is its only brake: a model that keeps stopping
+    #: without reaching for a tool is not working on the list.
+    idle_boundaries: int = 0
     #: Per-step model latency, newest last (R0-4) — the reporter already emits
     #: each step's latency as an event; the books keep the series so the turn
     #: can account its wall-clock the way it accounts its iterations.
@@ -353,6 +358,10 @@ class TurnBooks:
     def note_acceptance_nudge(self) -> None:
         """The acceptance gate injected a reminder and will iterate again."""
         self.acceptance_nudges += 1
+
+    def note_idle_boundary(self) -> None:
+        """Plan-as-Goal: the model stopped with open items and no tool ran."""
+        self.idle_boundaries += 1
 
     def note_fatigue_nudge(self) -> None:
         """The fatigue gate injected a reminder and will iterate again."""
@@ -461,6 +470,9 @@ class TurnBooks:
         """
         if not outcomes:
             return
+        # Plan-as-Goal: any tool batch is activity, so the idle streak (the only
+        # brake on a plan turn with no iteration budget) resets here.
+        self.idle_boundaries = 0
         self.attempted_calls += len(outcomes)
         succeeded = [item for item in outcomes if item.result.success]
         self.successful_calls += len(succeeded)
@@ -603,6 +615,7 @@ class TurnBooks:
             acceptance=tuple(acceptance),
             acceptance_nudges=self.acceptance_nudges,
             continuations=continuations,
+            idle_streak=self.idle_boundaries,
             fatigue_index=self.fatigue_index,
             fatigue_nudges=self.fatigue_nudges,
             ask_user_calls=self.ask_user_calls,

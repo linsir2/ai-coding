@@ -82,8 +82,9 @@ class TodoWriteTool(BaseTool):
                     "type": "string",
                     "description": (
                         "Shell command proving this item (for 'add'/'update'). "
-                        "The plan runner turns it into an acceptance contract "
-                        "for the step's turn; empty means not machine-checkable."
+                        "During a plan run the harness runs it the moment the item "
+                        "is marked completed and returns the verdict in this "
+                        "tool's result; empty means not machine-checkable."
                     ),
                 },
             },
@@ -113,7 +114,7 @@ class TodoWriteTool(BaseTool):
             getattr(resolved, "plan_executing", False)
         )
 
-        # F: a step/wave turn is inside the approved plan, not in front of the
+        # F: a step turn is inside the approved plan, not in front of the
         # review.  Letting it rewrite verify/content (or add an item) would turn
         # the runner into an executor for a command the model authored mid-run,
         # outside the approval that armed the plan.  Status updates stay allowed
@@ -154,7 +155,8 @@ class TodoWriteTool(BaseTool):
                     error="readonly_completion",
                     data={"action": "update", "reason": "readonly_session"},
                 )
-            return self._update(params, task, replan=resolved.replan)
+            result = self._update(params, task)
+            return await self._verify_on_completion(params, task, resolved, result)
         if action == "list":
             return self._ok(task, "list")
         return ToolResult(
@@ -164,6 +166,57 @@ class TodoWriteTool(BaseTool):
         )
 
     # ---- actions ----------------------------------------------------------
+
+    async def _verify_on_completion(
+        self,
+        params: dict[str, Any],
+        task: TaskState,
+        ctx: ToolContext,
+        result: ToolResult,
+    ) -> ToolResult:
+        """Plan-as-Goal: run the item's proof the moment it is marked done.
+
+        The proof used to run after the whole turn closed, which meant a red
+        verdict could only be repaired by the next ``/plan run``.  Running it
+        here makes the failure part of this tool's own result: the model sees
+        it before its next step and fixes it while the context is still hot.
+        Outside a plan turn (or when the item has no verify command) this is a
+        pass-through, exactly the old shape.
+        """
+        if not result.success:
+            return result
+        if str(params.get("status", "")).strip().lower() != "completed":
+            return result
+        if not bool(getattr(ctx, "plan_executing", False)):
+            return result
+        verify_item = getattr(ctx, "verify_item", None)
+        if verify_item is None:
+            return result
+        item = task.get(str(params.get("id", "")).strip())
+        if item is None or not str(item.verify or "").strip():
+            return result
+        passed, output = await verify_item(item.id, item.content, item.verify)
+        tail = " ".join((output or "").split())[-500:]
+        if passed:
+            return ToolResult(
+                success=True,
+                output=(
+                    f"{result.output}\n[verify] 通过：{item.verify}\n"
+                    "验收通过，继续下一项。"
+                ),
+                data={**(result.data or {}), "verify": "passed"},
+            )
+        task.update(item.id, status="in_progress", evidence=f"verify failed: {tail}")
+        return ToolResult(
+            success=False,
+            output=(
+                f"{result.output}\n[verify] 未通过：{item.verify}\n{tail}\n"
+                "条目已退回 in_progress。现在修复失败点，修好后重新标记 completed；"
+                "不要跳过它。"
+            ),
+            error="verify_failed",
+            data={**(result.data or {}), "action": "update", "id": item.id},
+        )
 
     def _frozen_change(self, params: dict[str, Any], task: TaskState) -> ToolResult | None:
         """Refuse a plan-contract edit made by a step that is executing it."""
@@ -233,9 +286,7 @@ class TodoWriteTool(BaseTool):
         item = task.add(content, depends_on=deps, verify=str(params.get("verify", "") or ""))
         return self._ok(task, "add", item_id=item.id)
 
-    def _update(
-        self, params: dict[str, Any], task: TaskState, *, replan: bool = False
-    ) -> ToolResult:
+    def _update(self, params: dict[str, Any], task: TaskState) -> ToolResult:
         item_id = str(params.get("id", "")).strip()
         if not item_id:
             return ToolResult(
@@ -243,31 +294,6 @@ class TodoWriteTool(BaseTool):
                 output="error: 'id' is required for 'update'",
                 error="missing_id",
             )
-        if replan:
-            # C3: the replan turn rewrites what is left, not the history the
-            # receipts already attest.  A terminal item keeps its status and
-            # its content; a replan may not reopen one either.
-            current = task.get(item_id)
-            if current is not None and current.is_terminal():
-                return ToolResult(
-                    success=False,
-                    output=(
-                        f"error: todo #{item_id} 已完成/已跳过/已删除，重规划不能改它。"
-                        "只调整剩下未完成的项。"
-                    ),
-                    error="replan_terminal_item",
-                    data={"action": "update", "id": item_id},
-                )
-            if str(params.get("status", "")).strip().lower() == "completed":
-                return ToolResult(
-                    success=False,
-                    output=(
-                        "error: 重规划回合只改计划，不执行、不完成条目。"
-                        "需要改就 add/update 剩余项，或直接回答 NO_REPLAN。"
-                    ),
-                    error="replan_not_allowed",
-                    data={"action": "update", "id": item_id},
-                )
         status = params.get("status")
         content = params.get("content")
         evidence = params.get("evidence")

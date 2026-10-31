@@ -612,9 +612,9 @@ async def _handle_plan(
                 # "当前回合结束后生效" (that turn was already over).
                 console.info("[plan] 开始执行计划；执行完成后退出计划模式（只读）。")
         try:
-            from ai_coding.core.wave_runner import plan_runner_for
+            from ai_coding.core.plan_executor import plan_runner_for
 
-            report = await plan_runner_for(loop, user_prompt=user_prompt).run(
+            report = await plan_runner_for(loop).run(
                 session, console, on_delta=console.delta, observer=observer
             )
             # W2/R02: the run branch used to drop the report, so a plan the

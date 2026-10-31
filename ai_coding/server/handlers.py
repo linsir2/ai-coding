@@ -249,7 +249,13 @@ def resume_fingerprint(task: Any, session: Any) -> tuple[int, int, int, int]:
     re-decided, and counting it would read a genuine stall as progress.
     """
     rounds = int(getattr(task, "rounds_run", 0) or 0)
-    tokens = int(getattr(task, "tokens_used", 0) or 0)
+    # A plan episode spends through ``plan_tokens_used`` (the executor adds to
+    # it while the plan runs); the goal profile spends through ``tokens_used``.
+    # Reading only the latter made every plan resume look like it had spent
+    # nothing, so "did this resume move?" was answered by the wrong fact.
+    tokens = int(getattr(task, "tokens_used", 0) or 0) + int(
+        getattr(task, "plan_tokens_used", 0) or 0
+    )
     messages = sum(
         1
         for message in getattr(session, "messages", ()) or ()
@@ -727,11 +733,9 @@ def make_handlers(
                             session, console, on_delta=bridge.on_delta, observer=bridge
                         )
                     else:
-                        from ai_coding.core.wave_runner import plan_runner_for
+                        from ai_coding.core.plan_executor import plan_runner_for
 
-                        await plan_runner_for(
-                            world.loop, user_prompt=world.user_prompt
-                        ).run(
+                        await plan_runner_for(world.loop).run(
                             session, console, on_delta=bridge.on_delta, observer=bridge
                         )
             except asyncio.CancelledError:

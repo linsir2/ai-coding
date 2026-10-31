@@ -4,13 +4,18 @@ The approved plan is a durable objective.  ``/plan run`` executes it in the
 **parent** session: one turn opens, the model works through the items, and when
 it stops with items left the loop's ``plan`` stop policy injects the remaining
 list and continues the same turn (opencode's idle hook / Claude's ``/goal``).
-No per-item ``process_input`` boundary, no fresh step/wave session.
+No per-item ``process_input`` boundary, no fresh step session.
 
-Verification stays outside the turn: the executor runs each completed item's
-proof command afterwards, so the acceptance ladder can never turn an autonomous
-run into ``ask_user``.  A failed proof reverts the item to ``in_progress`` and
-one bounded repair turn follows; still failing means ``blocked`` and its
-dependents are skipped.
+The turn has no iteration ceiling, no token budget and no per-plan wall clock:
+what bounds it is the context window (compaction runs on every iteration's own
+gate) and the idle brake (three consecutive stops with no tool call).  The item
+list is the only "budget" -- the run ends when the list does.
+
+Verification happens at the item boundary: ``todo_write`` runs the item's proof
+command the moment the model marks it completed, and a red verdict comes back
+as that call's own result, so the model repairs it while the context is still
+hot.  ``_settle_completed`` remains as the reconciliation pass for completions
+made without a verify (or before the hook existed).
 
 Everything else is inherited from ``PlanRunner``: the workspace gate, the
 arm/disarm lifecycle, receipts, delivery scoring, prompt markers and the report.
@@ -31,14 +36,13 @@ from ai_coding.core.plan_runner import (
 from ai_coding.core.turn_policy import PLAN_CONTINUE, TurnPolicy
 from ai_coding.domain.acceptance import AcceptanceItem
 from ai_coding.domain.plan_delivery import StepDelivery
-from ai_coding.infra.deadline import Deadline
 from ai_coding.infra.time_utils import now_utc
 
 __all__ = [
-    "NO_PROGRESS_TURNS",
     "PLAN_CONTINUE_HEAD",
     "PLAN_RUN_HEAD",
     "PlanExecutor",
+    "plan_runner_for",
 ]
 
 #: The kickoff prompt's marker.  It is the harness speaking, not the human, so
@@ -46,9 +50,24 @@ __all__ = [
 PLAN_RUN_HEAD = "[plan-run] 开始执行计划："
 PLAN_CONTINUE_HEAD = "[plan-run] 继续执行："
 
-#: A turn that made no tool call and settled nothing means the plan policy
-#: already exhausted its nudges; another turn would repeat that cost.
-NO_PROGRESS_TURNS = 1
+
+def plan_runner_for(loop: Any) -> Any:
+    """The executor the configuration asks for (``session`` unless told otherwise).
+
+    One selection point for the command layer and the server:
+
+    * ``session`` (default) — Plan-as-Goal: every round runs on the parent
+      session, so the plan's transcript is the continuity;
+    * ``legacy`` — the pre-existing runner that gives every item its own short
+      session and turn (kept as the escape hatch).
+    """
+    settings = getattr(loop, "settings", None)
+    name = str(getattr(settings, "plan_orchestrator", "session") or "session")
+    if name == "legacy":
+        from ai_coding.core.plan_runner import PlanRunner
+
+        return PlanRunner(loop)
+    return PlanExecutor(loop)
 
 
 class PlanExecutor(PlanRunner):
@@ -96,15 +115,20 @@ class PlanExecutor(PlanRunner):
             if entry.status == "completed"
         }
         self._recorded_this_run = set()
+        # Fresh verdict table: a boundary verdict from an earlier run must not
+        # stand in for a proof this run never ran.
+        reset = getattr(self._loop, "reset_boundary_verdicts", None)
+        if callable(reset):
+            reset()
 
-        settings = getattr(self._loop, "settings", None)
-        plan_limit = float(
-            getattr(settings, "plan_item_wall_seconds", 0.0) or 0.0
-        )
         original_policy = getattr(self._loop, "policy", None)
-        session.item_deadline = (
-            Deadline.after(plan_limit) if plan_limit > 0 else None
-        )
+        # Plan-as-Goal runs on the conversation's own clock and window: there is
+        # no per-plan wall clock, no iteration ceiling and no token budget.  A
+        # plan is bounded by its item list, by the context window (every
+        # iteration compacts on its own gate) and by the idle brake (three
+        # consecutive stops with no tool call).  ``max_iterations=-1`` is the
+        # policy's "no ceiling" spelling (0 would mean "no round at all").
+        session.item_deadline = None
         session.step_item_id = ""
         session.acceptance = []
         session.plan_executing = True
@@ -112,12 +136,9 @@ class PlanExecutor(PlanRunner):
             self._loop.policy = TurnPolicy(
                 replace(
                     original_policy.config,
-                    max_iterations=max(1, self._step_budget()),
+                    max_iterations=-1,
                     stop_policy=PLAN_CONTINUE,
                     max_auto_continuations=1,
-                    max_plan_continues=max(
-                        0, int(getattr(settings, "plan_max_continues", 30) or 0)
-                    ),
                 )
             )
         failures: dict[str, str] = {}
@@ -160,12 +181,6 @@ class PlanExecutor(PlanRunner):
                 failures = await self._settle_completed(
                     session, task, report, observer
                 )
-                budget = int(getattr(settings, "plan_token_budget", 0) or 0)
-                if budget > 0 and int(getattr(task, "plan_tokens_used", 0) or 0) >= budget:
-                    report.stopped = (
-                        f"budget: plan token budget exhausted "
-                        f"({task.plan_tokens_used}/{budget})"
-                    )
                 progressed = (
                     self._verdict_count(report) > verdicts_before
                     or self._tool_calls(session) > tools_before
@@ -216,8 +231,9 @@ class PlanExecutor(PlanRunner):
         lines.extend(self._item_lines(pending))
         lines += [
             "",
-            "每完成一项用 todo_write 标 completed；标记前先自己跑一遍该条目的 verify。",
-            "做不了就标 blocked 并说明缺什么。运行器会在本回合结束后统一机械验收。",
+            "每完成一项用 todo_write 标 completed。标记的同时系统会自动跑该条目的 "
+            "verify；通过就继续下一项，失败会把输出回给你，就在本回合修复。",
+            "做不了就标 blocked 并说明缺什么——不要停下来问用户是否继续。",
         ]
         return "\n".join(lines)
 
@@ -384,6 +400,18 @@ class PlanExecutor(PlanRunner):
     ) -> tuple[bool, list[dict[str, Any]], str]:
         if not item.verify:
             return True, [], ""
+        # The item boundary already ran this proof when the model marked the
+        # item completed; reusing its verdict keeps the reconciliation pass
+        # from paying for the same command twice in one run.
+        boundary = getattr(self._loop, "boundary_verdict", None)
+        recorded = boundary(item.id) if callable(boundary) else None
+        if recorded is not None:
+            passed, output = recorded
+            return (
+                bool(passed),
+                [{"id": f"plan-{item.id}", "passed": bool(passed)}],
+                output,
+            )
         contracts = [
             AcceptanceItem(
                 id=f"plan-{item.id}", statement=item.content, verify=item.verify

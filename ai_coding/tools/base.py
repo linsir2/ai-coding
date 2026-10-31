@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -148,7 +148,7 @@ class ToolContext:
     #: channel is ``note_tool_loaded``.
     loaded_tools: tuple[str, ...] = ()
     #: What ``tool_search`` may offer at all: the deferred tools that pass this
-    #: request's surface (posture, read-only, permission rules, plan/wave
+    #: request's surface (posture, read-only, permission rules, plan
     #: posture).  The loop stamps it per request; ``()`` means nothing is on
     #: offer, so a call made outside a loop loads nothing.
     searchable_names: tuple[str, ...] = ()
@@ -171,11 +171,7 @@ class ToolContext:
     # be answered from the record instead of running twice.  `None` outside a
     # loop that owns a turn.  Typed `Any` like ``jobs`` for the same reason.
     write_ahead: Any = None
-    # C3: this call runs inside the ephemeral replan turn.  ``todo_write`` then
-    # may only touch non-terminal items -- a replan edits what is left, never
-    # the history the receipts already attest.
-    replan: bool = False
-    #: F: the plan item this step/wave turn owns (``""`` outside a step).  A
+    #: F: the plan item this step turn owns (``""`` outside a step).  A
     #: step may update its own item's status, but it must not rewrite the plan
     #: contract (verify/content) or add items -- the runner would execute a
     #: command the model authored mid-run, outside the review.
@@ -184,6 +180,13 @@ class ToolContext:
     #: session.  ``todo_write`` freezes the plan contract (add/verify/content)
     #: for its duration; status/evidence updates stay allowed.
     plan_executing: bool = False
+    #: Plan-as-Goal: run one item's proof command at the moment the model marks
+    #: it completed.  ``(item_id, statement, command) -> (passed, output tail)``.
+    #: Present only while a plan turn runs; ``None`` elsewhere, where the tool
+    #: trusts the model's word exactly as before.  Verifying at the boundary
+    #: (instead of after the turn) is what lets a failed proof be repaired in
+    #: the same turn.
+    verify_item: Callable[[str, str, str], Awaitable[tuple[bool, str]]] | None = None
 
 
 def resolve_ctx(ctx: ToolContext | None) -> ToolContext:
@@ -214,12 +217,6 @@ class BaseTool(ABC):
     #: this -- a tool table pruned by a permission rule -- is M1a's job; this
     #: is the one hard case this batch needed.
     plan_only: bool = False
-    #: C3: does this tool belong to a running plan *wave* only?  ``wave_report``
-    #: hands over interfaces/decisions/pitfalls, which mean nothing outside the
-    #: wave boundary it feeds.  The surface hides it in ordinary sessions (the
-    #: schema is paid for on every step), and ``execute`` refuses a call made
-    #: from memory.
-    wave_only: bool = False
     #: Deferred tools are named in the prompt but their full schema is not
     #: carried until the model asks for it (``tool_search``).  The schema is
     #: paid on every step, so a tool used once per session should not cost its

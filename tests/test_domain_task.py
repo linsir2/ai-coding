@@ -420,29 +420,13 @@ def test_skip_dependents_keeps_completed_and_is_idempotent():
     assert task.skip_dependents("1") == []
 
 
-def test_wave_note_and_plan_tokens_round_trip_only_when_set():
+def test_plan_tokens_round_trip_only_when_set():
     task = TaskState(goal="g")
-    assert "waveNote" not in task.to_dict()
     assert "planTokensUsed" not in task.to_dict()
 
-    task.wave_note = "接口 A 稳定；文件所有权：hotel/rooms.py"
     task.plan_tokens_used = 98_765
     data = task.to_dict()
-    assert data["waveNote"] == task.wave_note
     assert data["planTokensUsed"] == 98_765
-    restored = TaskState.from_dict(data)
-    assert restored.wave_note == task.wave_note
-    assert restored.plan_tokens_used == 98_765
-    assert "交接: 接口 A 稳定" in restored.render()
-
-
-def test_wave_note_render_is_capped():
-    from ai_coding.domain.task import WAVE_NOTE_MAX_CHARS
-
-    task = TaskState(goal="g")
-    task.wave_note = "x" * (WAVE_NOTE_MAX_CHARS + 50)
-    rendered = task.render()
-    line = next(line for line in rendered.splitlines() if line.startswith("交接:"))
-    assert len(line) <= WAVE_NOTE_MAX_CHARS + len("交接: ")
+    assert TaskState.from_dict(data).plan_tokens_used == 98_765
 
 

@@ -35,17 +35,11 @@ def test_load_returns_defaults_on_none(no_config):
     assert resolve_context_window(app) == 48_000
     assert app.ai.max_tool_iterations == 100
     # Stage 2: Plan-as-Goal (main-session rounds) is the default executor;
-    # wave and legacy stay one setting away.
+    # the legacy step runner stays one setting away.
     assert app.ai.plan_orchestrator == "session"
-    assert app.ai.plan_wave_size == 4
-    # A+C (measured): one real item spent 269k tokens, so a per-wave spend cap
-    # ended a real run after one wave.  Both segment caps are off by default;
-    # the episode ceiling and the no-progress brake are the operator's levers.
-    assert app.ai.plan_wave_token_budget == 0
-    assert app.ai.plan_wave_wall_seconds == 0.0
-    assert app.ai.plan_no_progress_waves == 3
+    # A spend cap mid-turn buys an interruption, not safety (context growth is
+    # bounded by compaction), so the episode ceiling is off by default.
     assert app.ai.plan_token_budget == 0
-    assert app.ai.plan_max_item_attempts == 2
 
 
 def test_load_from_yaml_file_overrides(tmp_path):

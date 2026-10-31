@@ -545,10 +545,6 @@ class PlanReport:
     turns_used: int = 0
     #: Summed model-step usage, or None when the loop reported none (R1-4).
     tokens_used: dict[str, int] | None = None
-    #: r24/C: waves this run opened (0 on the legacy path).
-    waves: int = 0
-    #: r24/C: wave rewrites this run performed (0 until C3).
-    replanned: int = 0
 
     def render(self) -> str:
         # R21 §4: the headline counts every completion and names how many of
@@ -564,8 +560,6 @@ class PlanReport:
         # A closing Chinese bracket already separates the clauses, so the
         # separator loses its leading space when the qualifier is present.
         head += f"{'' if qualifier else ' '}· 用了 {self.turns_used} 回合"
-        if self.waves:
-            head += f" · {self.waves} 波"
         if self.tokens_used:
             head += f" / {self.tokens_used.get('total_tokens', '?')} tokens"
         parts = [head]

@@ -390,6 +390,10 @@ class PresentPlanTool(BaseTool):
             ctx.task.rounds_run = 0
             ctx.task.resume_count = 0
             ctx.task.tokens_used = 0
+            # The plan's own spend counter rides the same reset.  It is a
+            # *separate* field (the executor adds to it while a plan runs), and
+            # leaving it behind made the next run start already "over budget".
+            ctx.task.plan_tokens_used = 0
             # M-C3: the resume gate counts within an episode too.  Without
             # these two, a plan the gate just disarmed would be disarmed again
             # on the very next boot -- the fingerprint it left behind matches

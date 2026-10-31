@@ -13,7 +13,7 @@ order and its own tests instead of being thirty inline lines inside an already
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -104,6 +104,7 @@ def tool_context(
     permissions: Sequence[Rule] = (),
     agent_rules: Sequence[Rule] = (),
     write_ahead: Any = None,
+    verify_item: Callable[[str, str, str], Awaitable[tuple[bool, str]]] | None = None,
 ) -> ToolContext:
     """The per-invocation context a tool receives (the dispatcher stamps call ids).
 
@@ -151,11 +152,11 @@ def tool_context(
         jobs=jobs,
         # M-C1: the turn's write-ahead log (see ``core/write_ahead.py``).
         write_ahead=write_ahead,
-        # C3: the ephemeral replan turn edits what is left; ``todo_write``
-        # refuses terminal items there.
-        replan=bool(getattr(session, "replan_mode", False)),
         # F: the item a plan step owns; ``todo_write`` uses it to freeze the
         # plan contract (verify/content) and to refuse adding items mid-run.
         step_item_id=str(getattr(session, "step_item_id", "") or ""),
         plan_executing=bool(getattr(session, "plan_executing", False)),
+        # Plan-as-Goal: the proof command runs at the item boundary, inside the
+        # same turn, so a failure comes back as this tool's own result.
+        verify_item=verify_item,
     )

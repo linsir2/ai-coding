@@ -56,10 +56,6 @@ export type Part =
       kind: "plan"
       goal: string
       items: PlanItem[]
-      /** C3: completed waves this plan run spent (wire ``roundsRun``). */
-      rounds?: number
-      /** C3: the wave running right now; absent between waves. */
-      wave?: { active: boolean; items: string[] }
     }
   | { kind: "notice"; tone: Tone; text: string; action?: "resume" }
   | { kind: "image"; name: string }
@@ -129,7 +125,7 @@ export interface BudgetFigures {
   tokens: number
   cost: number | null
   cachedPercent: number | null
-  /** Steps the summary accumulated (plan waves / sub-agents included). */
+  /** Steps the summary accumulated (plan runs / sub-agents included). */
   steps?: number
   /** False when cache hits were charged at the input price (no cached rate). */
   cachedPriceKnown?: boolean
@@ -930,21 +926,6 @@ export function applyPlanUpdate(
         }
       })
     : []
-  // C3: the wave block is transient -- present only while a wave runs, so the
-  // card's "第 N 波" disappears at the boundary and no replay carries it.
-  const rounds = num(data["roundsRun"])
-  const rawWave = data["wave"]
-  const wave =
-    rawWave && typeof rawWave === "object" && (rawWave as { active?: unknown }).active === true
-      ? {
-          active: true,
-          items: Array.isArray((rawWave as { items?: unknown }).items)
-            ? ((rawWave as { items: unknown[] }).items.filter(
-                (id): id is string => typeof id === "string",
-              ))
-            : [],
-        }
-      : null
   const next = updateAssistant(state, (parts) => {
     const index = parts.findIndex((part) => part.kind === "plan")
     if (!goal && items.length === 0) {
@@ -954,8 +935,6 @@ export function applyPlanUpdate(
       kind: "plan",
       goal,
       items,
-      ...(rounds > 0 ? { rounds } : {}),
-      ...(wave ? { wave } : {}),
     }
     if (index < 0) return [...parts, plan]
     const next = parts.slice()

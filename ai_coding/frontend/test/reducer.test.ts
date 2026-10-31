@@ -408,42 +408,21 @@ describe("plan and ledger", () => {
     ])
   })
 
-  test("plan.updated carries the live wave and drops it at the boundary (C3)", () => {
-    const live = feed(
+  test("plan.updated keeps the list and ignores orchestration counters", () => {
+    const state = feed(
       initialState(),
       delta("x"),
       wire("plan.updated", {
         goal: "g",
         items: [{ id: "1", content: "one", status: "in_progress" }],
         roundsRun: 1,
-        wave: { active: true, items: ["1"] },
       }),
     )
-    expect(lastAssistant(live).parts.filter((part) => part.kind === "plan")).toEqual([
+    expect(lastAssistant(state).parts.filter((part) => part.kind === "plan")).toEqual([
       {
         kind: "plan",
         goal: "g",
         items: [{ id: "1", content: "one", status: "in_progress", verify: "", dependsOn: [] }],
-        rounds: 1,
-        wave: { active: true, items: ["1"] },
-      },
-    ])
-
-    // A boundary emit has no wave block: the card keeps the count, drops 第 N 波.
-    const idle = feed(
-      live,
-      wire("plan.updated", {
-        goal: "g",
-        items: [{ id: "1", content: "one", status: "completed" }],
-        roundsRun: 2,
-      }),
-    )
-    expect(lastAssistant(idle).parts.filter((part) => part.kind === "plan")).toEqual([
-      {
-        kind: "plan",
-        goal: "g",
-        items: [{ id: "1", content: "one", status: "completed", verify: "", dependsOn: [] }],
-        rounds: 2,
       },
     ])
   })

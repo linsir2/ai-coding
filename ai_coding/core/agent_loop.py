@@ -106,7 +106,11 @@ from ai_coding.core.turn_policy import (
 from ai_coding.core.turn_report import TurnReporter
 from ai_coding.core.undo_store import UndoFileStore
 from ai_coding.core.write_ahead import WriteAheadLog
-from ai_coding.domain.acceptance import acceptance_states, pending_items
+from ai_coding.domain.acceptance import (
+    AcceptanceItem,
+    acceptance_states,
+    pending_items,
+)
 from ai_coding.domain.agents import AgentCatalog
 from ai_coding.domain.ledger import ledger_signature
 from ai_coding.domain.loop import (
@@ -243,17 +247,6 @@ def _armed_profile(session: Any) -> str:
     if task is None or not getattr(task, "armed", False):
         return ""
     return str(getattr(task, "armed_profile", "") or "")
-
-
-def _wave_active(session: Any) -> bool:
-    """Is a plan wave running right now (C3)?
-
-    ``wave_report`` is only meaningful at a wave boundary, so the surface reads
-    this transient fact -- the task is shared by every wave turn, and the
-    executor flips it on entry and off at the boundary.
-    """
-    task = getattr(session, "task", None)
-    return bool(task is not None and getattr(task, "wave_active", False))
 
 
 def _tools_by_origin(registry: ToolRegistry) -> dict[str, int]:
@@ -515,7 +508,6 @@ class AgentLoop:
                 tuple[Rule, ...],
                 tuple[Rule, ...],
                 str,
-                bool,
                 tuple[str, ...],
             ],
             list[dict[str, Any]],
@@ -552,6 +544,11 @@ class AgentLoop:
         #: I2/D4: the write-ahead digests a *resumed* turn may replay.  ``None``
         #: outside a resume, so a live turn can never answer from a record.
         self._replay_scope: frozenset[str] | None = None
+        #: Plan-as-Goal: verdicts the item boundary already produced this run
+        #: (item id -> (passed, output tail)).  ``todo_write`` runs the proof
+        #: when the model marks an item done; the executor reads this so its
+        #: post-turn reconciliation does not run the same command twice.
+        self._boundary_verdicts: dict[str, tuple[bool, str]] = {}
         # R5: the memory-facing half of a turn (block / harvest / status).
         self.turn_memory = TurnMemory(memory, emit=self._emit, save=self.closer.save)
         #: 2026-10-17: the fire-and-forget harvest chain.  The harvest no longer
@@ -1124,9 +1121,13 @@ class AgentLoop:
                     restart = False
                     if decision.reason == "continue the plan":
                         # Plan-as-Goal: count the idle-boundary continuation
-                        # and keep the turn open.  No budget reset -- the plan
-                        # turn's iteration ceiling still bounds the whole plan.
+                        # and keep the turn open.  There is no iteration budget
+                        # to reset (a plan turn runs with ``max_iterations=-1``,
+                        # the policy's "no ceiling"); the idle streak is the
+                        # brake that ends a run in which the model keeps stopping
+                        # without touching a tool.
                         session.continuations += 1
+                        books.note_idle_boundary()
                     elif decision.reason == "continue unfinished work":
                         # C3: count the continuation on the session (it survives
                         # across rounds) and re-arm the iteration budget below —
@@ -1667,6 +1668,12 @@ class AgentLoop:
         shared_deadline = getattr(session, "item_deadline", None)
         if shared_deadline is not None:
             deadline = shared_deadline
+        elif getattr(session, "plan_executing", False):
+            # Plan-as-Goal: the plan turn owns no wall clock.  What bounds it is
+            # the item list, the context window (compaction per iteration) and
+            # the idle brake -- a per-turn clock would cut a long plan mid-item,
+            # which is exactly the interruption this executor exists to remove.
+            deadline = None
         else:
             turn_timeout = float(getattr(self.settings, "turn_timeout_seconds", 0.0) or 0.0)
             deadline = Deadline.after(turn_timeout) if turn_timeout > 0 else None
@@ -2287,6 +2294,18 @@ class AgentLoop:
                 # M-C1: the turn's write-ahead log, so a regenerated
                 # side-effecting call is answered from the record.
                 write_ahead=write_ahead,
+                # Plan-as-Goal: the proof command runs when the model marks the
+                # item completed, inside this same batch/turn.  Outside a plan
+                # turn there is no callback and the tool keeps the old shape.
+                verify_item=(
+                    (
+                        lambda item_id, statement, command: self._verify_plan_item(
+                            session, item_id, statement, command
+                        )
+                    )
+                    if session.plan_executing
+                    else None
+                ),
             ),
             deadline=deadline,
             iteration=index,
@@ -2443,8 +2462,13 @@ class AgentLoop:
         correction issued on the last allowed iteration is written into the
         history and never read.
         """
-        ceiling = max(1, int(self.policy.config.max_iterations))
-        return index < ceiling
+        ceiling = int(self.policy.config.max_iterations)
+        if ceiling < 0:
+            # Plan-as-Goal: a plan turn has no iteration budget.  Context growth,
+            # not step count, is what bounds it -- every iteration compacts on
+            # its own gate, and an idle streak ends a run that stops working.
+            return True
+        return index < max(1, ceiling)
 
     def _read_for_quote(self, path: str) -> str | None:
         """The cited file's text, or ``None`` when it cannot be compared.
@@ -2560,6 +2584,56 @@ class AgentLoop:
         pending = pending_items(session.acceptance)
         if not pending:
             return
+        checked = await self._run_verifications(session, pending)
+        by_id = {item.id: item for item in checked}
+        for item in session.acceptance:
+            if item.id in by_id:
+                item.passed = by_id[item.id].passed
+                item.output = by_id[item.id].output
+        # Only verdicts (pass/fail) enter the books — items skipped by the
+        # total cap stay None and must not fabricate ledger entries.
+        if books is not None:
+            books.note_verify({
+                item.id: (item.passed, item.output)
+                for item in checked
+                if item.passed is not None
+            })
+
+    async def _verify_plan_item(
+        self, session: SessionData, item_id: str, statement: str, command: str
+    ) -> tuple[bool, str]:
+        """Run one plan item's proof command at its completion boundary.
+
+        Called by ``todo_write`` while the plan turn is still open, so a red
+        proof comes back as that call's own result and the model repairs it in
+        the same turn (the post-turn settlement stays as the reconciliation
+        pass for completions the model made without a verify).
+        """
+        if session.readonly or not str(command or "").strip():
+            return (False, "the proof command was not run")
+        checked = await self._run_verifications(
+            session,
+            [AcceptanceItem(id="plan-item", statement=statement, verify=command)],
+        )
+        verdict = checked[0]
+        result = (verdict.passed is True, verdict.output)
+        # Remember it: the executor's reconciliation reads this instead of
+        # running the same command a second time after the turn.
+        self._boundary_verdicts[item_id] = result
+        return result
+
+    def reset_boundary_verdicts(self) -> None:
+        """Forget the previous run's item verdicts (called by a plan executor)."""
+        self._boundary_verdicts.clear()
+
+    def boundary_verdict(self, item_id: str) -> tuple[bool, str] | None:
+        """The verdict this run's item boundary already produced, if any."""
+        return self._boundary_verdicts.get(item_id)
+
+    async def _run_verifications(
+        self, session: SessionData, items: list[AcceptanceItem]
+    ) -> list[AcceptanceItem]:
+        """The one shell boundary for proof commands (rules, roots, human)."""
         each = float(getattr(self.settings, "acceptance_verify_each_seconds", 120.0) or 0.0)
         total = float(getattr(self.settings, "acceptance_verify_total_seconds", 300.0) or 0.0)
         session_rules = self._effective_session_rules(session)
@@ -2568,8 +2642,8 @@ class AgentLoop:
             str(getattr(session, "mode", "normal") or "normal"),
             bool(getattr(session, "readonly", False)),
         )
-        checked = await verify_items(
-            pending,
+        return await verify_items(
+            items,
             self.workspace,
             timeout_each=each or 120.0,
             timeout_total=total or 300.0,
@@ -2592,19 +2666,6 @@ class AgentLoop:
             # the same roots the file tools and the workspace gate use.
             extra_roots=self.extra_workspace_roots,
         )
-        by_id = {item.id: item for item in checked}
-        for item in session.acceptance:
-            if item.id in by_id:
-                item.passed = by_id[item.id].passed
-                item.output = by_id[item.id].output
-        # Only verdicts (pass/fail) enter the books — items skipped by the
-        # total cap stay None and must not fabricate ledger entries.
-        if books is not None:
-            books.note_verify({
-                item.id: (item.passed, item.output)
-                for item in checked
-                if item.passed is not None
-            })
 
     async def _ask_for_closing(
         self,
@@ -3232,7 +3293,6 @@ class AgentLoop:
                 session_rules,
                 agent_rules,
                 _armed_profile(session),
-                _wave_active(session),
                 tuple(getattr(session, "loaded_tools", ()) or ()),
             ),
         )
@@ -3244,7 +3304,6 @@ class AgentLoop:
         session_rules: tuple[Rule, ...] = (),
         agent_rules: tuple[Rule, ...] = (),
         armed: str = "",
-        wave_active: bool = False,
         loaded: tuple[str, ...] = (),
     ) -> tuple[str, ...]:
         """The tool names the methods section should speak for.
@@ -3253,14 +3312,12 @@ class AgentLoop:
         shorter in plan mode rather than merely different -- and outside the
         planning posture the plan-only tools are gone, so the prompt cannot
         teach a tool the request does not carry.  A wholly denied action is
-        gone for the same reason: the request does not carry it.  The wave-only
-        tools follow the same rule (C3): the prompt mentions them only while
-        the request carries them.
+        gone for the same reason: the request does not carry it.
         """
         return tuple(
             tool.name
             for tool in self._surface_tools(
-                mode, readonly, session_rules, agent_rules, armed, wave_active, loaded
+                mode, readonly, session_rules, agent_rules, armed, loaded
             )
         )
 
@@ -3271,21 +3328,19 @@ class AgentLoop:
         session_rules: tuple[Rule, ...] = (),
         agent_rules: tuple[Rule, ...] = (),
         armed: str = "",
-        wave_active: bool = False,
         loaded: tuple[str, ...] = (),
         include_deferred: bool = False,
     ) -> list[BaseTool]:
         """The tools this request may call, in the registry's own order.
 
-        Five predicates, all about what the request may do: the read-only
+        Four predicates, all about what the request may do: the read-only
         posture drops the mutating tools (the dispatch gate refuses them
         structurally -- 只读探索批次, measured: 3-4 bash collisions per
         planning turn), outside the planning posture the plan-only tools are
         not advertised at all (N1), a wholly denied action is not offered
-        (M1a), a plan round does not advertise the goal pair: its task is
+        (M1a), and a plan round does not advertise the goal pair: its task is
         armed as ``plan``, so ``start_goal``/``update_goal`` could only answer
-        ``no_goal`` (R21 §3), and the wave-only tools (C3) are advertised only
-        inside a running plan wave.  A scoped denial keeps the tool and refuses
+        ``no_goal`` (R21 §3).  A scoped denial keeps the tool and refuses
         at dispatch, where the model can read which resource it hit.
         """
         tools = list(self.tools.all_tools)
@@ -3293,8 +3348,6 @@ class AgentLoop:
             tools = [tool for tool in tools if tool.name not in GOAL_TOOL_NAMES]
         if mode != "plan":
             tools = [tool for tool in tools if not tool.plan_only]
-        if not (armed == "plan" and wave_active):
-            tools = [tool for tool in tools if not tool.wave_only]
         # Deferred tools cost their schema on every step; they are advertised
         # only after ``tool_search`` reported them (``loaded``).  The posture
         # and permission filters below still apply, so loading a denied tool
@@ -3358,7 +3411,6 @@ class AgentLoop:
                 self._effective_session_rules(session),
                 self._agent_rules(session),
                 _armed_profile(session),
-                _wave_active(session),
                 include_deferred=True,
             )
             if tool.defer
@@ -3391,16 +3443,12 @@ class AgentLoop:
         # (a plan round has no running goal), so that fact joins the key --
         # otherwise the first request of a plan run would keep serving the
         # catalogue cached while the same session was just a plain chat.
-        # C3: ``wave_only`` tools appear mid-wave, so that fact joins the key --
-        # otherwise the first request of the wave would keep serving the
-        # catalogue cached from the planning turn.
         key = (
             mode,
             readonly,
             session_rules,
             agent_rules,
             _armed_profile(session),
-            _wave_active(session),
             # Deferred tools: which of them the session has loaded decides
             # which schemas this request carries.
             tuple(getattr(session, "loaded_tools", ()) or ()),
@@ -3413,7 +3461,6 @@ class AgentLoop:
                     readonly,
                     session_rules,
                     agent_rules,
-                    key[-3],
                     key[-2],
                     key[-1],
                 )

@@ -348,3 +348,60 @@ async def test_plan_executing_freezes_the_contract_but_not_status(tool, ctx):
     assert changed_verify.error == "frozen_verify"
     assert completed.success is True
     assert ctx.task.get("1").status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_plan_completion_runs_the_proof_and_passes(tool, ctx):
+    """Plan-as-Goal: the verdict arrives in this call, not after the turn."""
+    await tool.execute({"action": "add", "content": "a", "verify": "true"}, ctx)
+    calls: list[tuple[str, str, str]] = []
+
+    async def verify_item(item_id, statement, command):
+        calls.append((item_id, statement, command))
+        return True, "ok"
+
+    ctx.plan_executing = True
+    ctx.verify_item = verify_item
+
+    r = await tool.execute({"action": "update", "id": "1", "status": "completed"}, ctx)
+
+    assert calls == [("1", "a", "true")]
+    assert r.success is True
+    assert r.data["verify"] == "passed"
+    assert ctx.task.get("1").status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_plan_completion_reverts_the_item_when_the_proof_fails(tool, ctx):
+    """A red proof is this call's own result: the model repairs it in-turn."""
+    await tool.execute({"action": "add", "content": "a", "verify": "false"}, ctx)
+
+    async def verify_item(item_id, statement, command):
+        return False, "assert 245 == 200"
+
+    ctx.plan_executing = True
+    ctx.verify_item = verify_item
+
+    r = await tool.execute({"action": "update", "id": "1", "status": "completed"}, ctx)
+
+    assert r.success is False
+    assert r.error == "verify_failed"
+    assert "assert 245 == 200" in r.output
+    assert ctx.task.get("1").status == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_outside_a_plan_turn_the_proof_does_not_run(tool, ctx):
+    await tool.execute({"action": "add", "content": "a", "verify": "true"}, ctx)
+    called: list[bool] = []
+
+    async def verify_item(item_id, statement, command):
+        called.append(True)
+        return True, "ok"
+
+    ctx.verify_item = verify_item
+
+    r = await tool.execute({"action": "update", "id": "1", "status": "completed"}, ctx)
+
+    assert called == []
+    assert r.success is True

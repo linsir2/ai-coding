@@ -115,9 +115,14 @@ PRESSURE_RATIO = 0.2
 #: hook, Claude's /goal).
 PLAN_CONTINUE = "plan"
 PLAN_CONTINUE_LEAD = "[plan-continue]"
+#: How many consecutive idle boundaries a plan turn tolerates before it closes.
+#: Not a budget: a working turn resets the streak on every tool batch, so only a
+#: model that keeps stopping without reaching for a tool ever reaches it.
+PLAN_IDLE_LIMIT = 3
 PLAN_CONTINUE_TAIL = (
-    "继续在同一个回合内推进下一项；完成后用 todo_write 标 completed，"
-    "并在标记前自己先跑一遍该条目的 verify。不要询问用户是否继续。"
+    "继续在同一个回合内推进下一项；完成后用 todo_write 标 completed。"
+    "标记时系统会自动跑该条目的 verify，失败会把输出回给你，在本回合修复。"
+    "不要询问用户是否继续。"
 )
 
 
@@ -137,12 +142,11 @@ def _plan_continue_text(items: list[Any]) -> str:
 class TurnPolicyConfig:
     """The orchestration settings this unit needs, read once per loop."""
 
+    #: Iterations one round may start.  ``-1`` means "no ceiling" -- the plan
+    #: turn's spelling: what bounds it is the context window and the idle brake.
     max_iterations: int = 10
     stop_policy: str = "todo_aware"  # natural | todo_aware | strict | plan
     max_todo_nudges: int = 2
-    #: Plan-as-Goal: idle-boundary continuations one turn may inject before it
-    #: closes (the outer executor can open a fresh turn after that).
-    max_plan_continues: int = 30
     task_injection: str = "message"  # message | system
     # R4b: cumulative tokens one turn may spend (0 = no ceiling).  It counts the
     # re-sent context of every step, so it is a spend cap, not a window size.
@@ -175,9 +179,6 @@ class TurnPolicyConfig:
             max_iterations=max(1, int(getattr(settings, "max_tool_iterations", 10))),
             stop_policy=str(getattr(settings, "stop_policy", "todo_aware")),
             max_todo_nudges=int(getattr(settings, "max_todo_nudges", 2)),
-            max_plan_continues=max(
-                0, int(getattr(settings, "plan_max_continues", 30) or 0)
-            ),
             task_injection=str(getattr(settings, "task_injection", "message")),
             max_turn_tokens=int(getattr(settings, "turn_token_budget", 0) or 0),
             failed_streak_threshold=int(
@@ -236,6 +237,10 @@ class TurnSnapshot:
     # survives across the rounds — in-process only; the session's to_dict
     # whitelist does not persist it, and a new user turn resets it.
     continuations: int = 0
+    #: Plan-as-Goal: consecutive idle boundaries (the model stopped with open
+    #: items and touched no tool).  Without an iteration budget this is the
+    #: brake that ends a run which is no longer working on the list.
+    idle_streak: int = 0
     # R6b: how the tool calls have been going.  Fed in by the loop — the policy
     # never counts anything itself, so it stays pure and table-testable.
     failed_streak: int = 0  # consecutive iterations where every call failed
@@ -435,7 +440,7 @@ class TurnPolicy:
                 return TurnDecision(
                     TurnAction.NUDGE, "plan unsubmitted", inject=PLAN_NUDGE
                 )
-        if snapshot.iteration > self.config.max_iterations:
+        if self.config.max_iterations >= 0 and snapshot.iteration > self.config.max_iterations:
             # C3: the budget is gone but the work is not — open items mean the
             # model never finished, so inject a continuation prompt and start a
             # fresh round rather than handing the user a dead turn.  Fires
@@ -622,9 +627,14 @@ class TurnPolicy:
         actionable = [item for item in snapshot.open_items if item.status != "blocked"]
         if not actionable:
             return TurnDecision(TurnAction.FINISH, "plan complete")
-        if snapshot.continuations >= self.config.max_plan_continues:
+        if snapshot.idle_streak >= PLAN_IDLE_LIMIT:
+            # The model stopped PLAN_IDLE_LIMIT times in a row without reaching
+            # for a single tool: it is not working on the list, and another nudge
+            # would only buy the same silence.  This is the plan turn's brake --
+            # there is no iteration or token budget to run out of.
             return TurnDecision(
-                TurnAction.FINISH, "plan continuation budget exhausted"
+                TurnAction.FINISH,
+                f"plan stalled: {snapshot.idle_streak} idle boundaries with no tool call",
             )
         return TurnDecision(
             TurnAction.NUDGE,

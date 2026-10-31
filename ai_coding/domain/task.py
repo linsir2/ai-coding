@@ -38,10 +38,6 @@ _MARKERS: dict[str, str] = {
 }
 
 RENDER_MAX_ITEMS = 40
-#: Longest handoff digest the prompt carries.  A wave note is a contract, not a
-#: transcript: sixteen lines of decisions/interfaces fit; a summary of the work
-#: does not belong here (the receipts already carry it).
-WAVE_NOTE_MAX_CHARS = 900
 
 
 @dataclass
@@ -59,17 +55,15 @@ class TodoItem:
     #: The plan runner turns it into an acceptance contract for the step's turn;
     #: unwritten when empty, so old files read byte-identically.
     verify: str = ""
-    #: r24/C: the repository paths this item is expected to touch.  A *grouping
-    #: hint* only -- waves prefer to keep items sharing a path together -- never
-    #: a correctness constraint.  Unwritten when empty.
+    #: r24/C: the repository paths this item is expected to touch.  A *grouping*
+    #: hint only, never a correctness constraint.  Unwritten when empty.
     files: list[str] = field(default_factory=list)
     #: r24/C: ``write`` | ``research`` | ``verify``.  ``verify`` items are heavy
-    #: test/build commands and close a wave; ``research`` items may run in a
-    #: read-only sub-agent later.  Unwritten when default.
+    #: test/build commands; ``research`` items may run in a read-only sub-agent
+    #: later.  Unwritten when default.
     kind: str = "write"
-    #: r24/C: repair rounds this item already spent inside its wave.  Kept on the
-    #: item (not the wave) so a retry after a resume knows where it stopped.
-    #: Unwritten when zero.
+    #: r24/C: repair rounds this item already spent.  Kept on the item so a
+    #: retry after a resume knows where it stopped.  Unwritten when zero.
     attempts: int = 0
 
     def is_terminal(self) -> bool:
@@ -186,26 +180,10 @@ class TaskState:
     #: M-C3: consecutive resumes that made no progress.  Reset by any progress;
     #: at the limit the task is disarmed with a ``ResumeStalled`` report.
     no_progress_resumes: int = 0
-    #: r24/C: the previous wave's handoff digest.  It is re-rendered into every
-    #: request (the seed alone would be compacted away mid-wave), and written
-    #: only when non-empty.  This is a plan-scoped contract, not a log.
-    wave_note: str = ""
     #: r24/C: the plan episode's provider-reported tokens, kept separate from
     #: the goal episode's ``tokens_used`` so the two profiles cannot spend each
     #: other's budget.  Written only when non-zero.
     plan_tokens_used: int = 0
-    #: C3: the last wave's structured handoff (``domain/plan_wave.py``).  One
-    #: consumer -- the next wave's seed -- and only the newest wave is kept.
-    #: Written only when non-empty, like every other optional key.
-    wave_handoff: dict[str, Any] | None = None
-    #: C3 lifetime state, never persisted: a wave is running right now, and
-    #: which item ids it covers.  ``BaseTool.wave_only`` hides ``wave_report``
-    #: until this is True, and the wire's ``wave`` block reads it.
-    wave_active: bool = False
-    wave_items: tuple[str, ...] = ()
-    #: C3: the model's raw ``wave_report`` for the wave in progress.  The
-    #: executor merges it with its own facts at wave end; never persisted.
-    wave_report: dict[str, Any] | None = None
 
     # ---- mutations --------------------------------------------------------
 
@@ -345,7 +323,7 @@ class TaskState:
         """Ids this item waits on that were given up (r24/C).
 
         A skipped dependency is terminal, so ``unmet_dependencies`` no longer
-        sees it -- but it never produced the input this item needs.  The wave
+        sees it -- but it never produced the input this item needs.  The plan
         executor propagates ``skipped`` along this edge; the render says so, so
         the model does not mistake the item for ready work.
         """
@@ -477,11 +455,6 @@ class TaskState:
         lines: list[str] = []
         if self.goal:
             lines.append(f"目标: {self.goal}")
-        if self.wave_note:
-            note = self.wave_note.strip()
-            if len(note) > WAVE_NOTE_MAX_CHARS:
-                note = note[: WAVE_NOTE_MAX_CHARS - 1] + "…"
-            lines.append(f"交接: {note}")
         if not self.items:
             lines.append("(无任务项)")
             return lines
@@ -541,10 +514,6 @@ class TaskState:
             data["resumeFingerprint"] = [int(value) for value in self.resume_fingerprint]
         if self.no_progress_resumes:
             data["noProgressResumes"] = int(self.no_progress_resumes)
-        if self.wave_note:
-            data["waveNote"] = self.wave_note
-        if self.wave_handoff:
-            data["waveHandoff"] = dict(self.wave_handoff)
         if self.plan_tokens_used:
             data["planTokensUsed"] = int(self.plan_tokens_used)
         return data
@@ -574,12 +543,6 @@ class TaskState:
             goal_phase=str(data.get("goalPhase", "") or ""),
             resume_fingerprint=fingerprint,
             no_progress_resumes=int(data.get("noProgressResumes", 0) or 0),
-            wave_note=str(data.get("waveNote", "") or ""),
-            wave_handoff=(
-                dict(data["waveHandoff"])
-                if isinstance(data.get("waveHandoff"), dict)
-                else None
-            ),
             plan_tokens_used=int(data.get("planTokensUsed", 0) or 0),
         )
 
@@ -589,7 +552,6 @@ __all__ = [
     "VALID_STATUSES",
     "TERMINAL_STATUSES",
     "RENDER_MAX_ITEMS",
-    "WAVE_NOTE_MAX_CHARS",
     "Blockers",
     "TodoItem",
     "TaskState",

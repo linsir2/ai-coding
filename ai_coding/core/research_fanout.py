@@ -9,7 +9,7 @@ and the merge.  Children run in the *live* working tree, never a HEAD worktree:
 they are readonly, and research must see the code the user is editing.
 
 Why a separate module rather than code inside the tool: the plan executor's
-research wave (C3) needs exactly the same fan-out, and a pure function over
+research items need exactly the same fan-out, and a pure function over
 questions is testable without a dispatcher.
 """
 

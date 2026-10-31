@@ -274,11 +274,10 @@ class SessionData:
     # 2026-10-30: 21 iterations, 21 compactions.  0 means "no step has reported".
     live_context_tokens: int = 0
     # NOT persisted.  Which plan item the current turn is allowed to work on.
-    # A wave session is shared across the whole wave and the task it shares
-    # with the parent holds every open item, so an unbounded continuation would
-    # nudge one step to finish the *rest of the plan* (the reason the step
-    # policy used to set ``max_auto_continuations=0``).  Empty means "no scope":
-    # the ordinary loop sees the whole task.  Set by the wave/step runner.
+    # A step session shares the parent's task, which holds every open item, so
+    # an unbounded continuation would nudge one step to finish the *rest of the
+    # plan*.  Empty means "no scope": the ordinary loop sees the whole task.
+    # Set by the legacy step runner.
     step_item_id: str = ""
     # NOT persisted.  Plan-as-Goal: a turn is executing the approved plan on
     # the main session.  ``todo_write`` freezes add/verify/content for the
@@ -364,11 +363,6 @@ class SessionData:
     # whose TurnCloser would otherwise write one "plan step N" file per step
     # and flood the /resume picker.
     ephemeral: bool = False
-    #: C3: this ephemeral session is the wave-boundary replan turn.  The tool
-    #: context reads it so ``todo_write`` may only edit non-terminal items
-    #: (editing the history the receipts already attest is not a replan).  In
-    #: process only, like ``ephemeral``.
-    replan_mode: bool = False
     # The skill ids last listed in the system prompt. `skill_review` writes new
     # skills every few turns, so the catalog does change mid-session — three
     # places in our docs claim it cannot. Rather than repeat a claim the code

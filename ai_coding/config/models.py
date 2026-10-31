@@ -463,11 +463,13 @@ class AIConfig(BaseModel):
     # the same work), and the clock, acceptance gate, stall ladder and the
     # runner's one repair pass are still the guards.
     plan_step_max_iterations: int = 100
-    #: Wall clock one plan *item* may spend, shared by every turn the runner
-    #: spends on it (a repair pass used to get a fresh ``turn_timeout_seconds``
-    #: each time, so N attempts multiplied the ceiling).  0 = keep the per-turn
-    #: ceiling.  3600 is one hour for one item -- enough for a 27-iteration
-    #: hotel step measured at 26 minutes, and still a bound.
+    #: Wall clock one plan *item* may spend, shared by every turn the legacy
+    #: step runner spends on it (a repair pass used to get a fresh
+    #: ``turn_timeout_seconds`` each time, so N attempts multiplied the ceiling).
+    #: 0 = keep the per-turn ceiling.  The ``session`` executor ignores it: a
+    #: plan turn has no per-plan clock (context is bounded by compaction, and
+    #: the idle brake bounds a stuck model).  3600 is one hour for one item --
+    #: enough for a 27-iteration hotel step measured at 26 minutes.
     plan_item_wall_seconds: float = 3600.0
     # C3: when a normal turn's iteration budget dies with todo items still
     # open, the loop injects a continuation prompt and starts a fresh round
@@ -480,59 +482,17 @@ class AIConfig(BaseModel):
     # exhausted").  Each step is already bounded, and the run ends on
     # done/deadlock; an operator who wants a ceiling can still set one.
     plan_max_step_turns: int = 0
-    # ---- r24/C: wave execution ---------------------------------------
+    # ---- plan executor selection --------------------------------------
     #: Which plan executor `/plan run` uses.  ``session`` (default) is
-    #: Plan-as-Goal: every round runs on the parent session, so the plan's
-    #: transcript is the continuity (no step/wave session ever replaces it).
-    #: ``wave`` is the context-bounded scale path (fresh session per wave,
-    #: handoff between waves); ``legacy`` keeps the one-short-session-per-step
-    #: runner exactly as it was (the escape hatch).
-    plan_orchestrator: Literal["session", "wave", "legacy"] = "session"
-    #: Open items one wave may hold.  4 is a context budget, not a correctness
-    #: rule: a heavy proof command or a research/verify item always closes the
-    #: wave earlier (see core/wave_planner.py).
-    plan_wave_size: int = 4
-    #: Plan-as-Goal: idle-boundary continuations one plan turn may inject when
-    #: the model stops but items remain.  It never asks the human; after this
-    #: cap the turn closes and the executor may open a fresh one.  30 covers a
-    #: six-item plan many times over; 0 disables the continuation entirely.
-    plan_max_continues: int = 30
-    #: Provider-reported tokens one wave may spend; 0 disables (the default).
-    #:
-    #: Measured (2026-10-30, hotel-management task, 21 items): the FIRST item
-    #: alone spent 269k prompt tokens, so the old 300k default ended the run
-    #: after wave 1 -- "budget: wave token budget exhausted
-    #: (318489/300000); remaining items stay open" -- left 18 items open and
-    #: asked the operator to re-run ``/plan run``.  Carrying a plan to the end
-    #: is the executor's whole job, so a per-segment spend cap defeats it.
-    #: Context growth is bounded by compaction (``max_context_tokens``), which
-    #: is what Claude Code / opencode / Codex rely on; a *spend* cap belongs to
-    #: the episode (``plan_token_budget``), where an operator sets one on
-    #: purpose.  A stuck plan is caught by ``plan_no_progress_waves`` instead.
-    plan_wave_token_budget: int = 0
-    #: Wall-clock ceiling for one wave, checked between turns; 0 disables (the
-    #: default).  Same lesson: a four-item wave with tests and a build routinely
-    #: runs past 20 minutes, and stopping there is another mid-plan
-    #: interruption, not a safety net.
-    plan_wave_wall_seconds: float = 0.0
-    #: Consecutive waves that complete no item before the run is stopped as
-    #: "no progress".  0 disables.  This is the only automatic brake left on a
-    #: plan run: a wave that keeps exploring, re-reading and writing nothing
-    #: terminal is the failure mode worth stopping (a slow plan that completes
-    #: an item per wave is not).  The turn/ladder gates still bound each turn.
-    plan_no_progress_waves: int = 3
-    #: Turns one item may spend before it is marked blocked (includes the
-    #: acceptance repair turn).
-    plan_max_item_attempts: int = 2
-    #: Waves one run may open; 0 disables (the plan itself bounds the run).
-    plan_max_waves: int = 0
-    #: Episode-wide token ceiling for one plan run, counted across waves;
-    #: 0 disables.  Kept separate from ``goal_token_budget`` on purpose.
+    #: Plan-as-Goal: the whole plan runs in one turn on the parent session, so
+    #: the transcript is the continuity (no step session ever replaces it).
+    #: ``legacy`` keeps the one-short-session-per-step runner (escape hatch).
+    plan_orchestrator: Literal["session", "legacy"] = "session"
+    #: Episode-wide token ceiling for one plan run; 0 disables.  The ``session``
+    #: executor does not check it: a spend cap mid turn buys an interruption,
+    #: not safety (context is bounded by compaction).  Kept separate from
+    #: ``goal_token_budget`` on purpose.
     plan_token_budget: int = 0
-    #: Replan *attempts* one run may open (deadlock / needs_replan); 0 disables
-    #: replanning.  Counted per attempt, approved or not: a failed or refused
-    #: rewrite must not let the same cause retry forever (C3).
-    plan_max_replans: int = 2
     # D-4: episode-wide round ceiling for one armed goal; 0 disables.  Was a
     # phantom until 2026-10-17: the runner read it duck-typed while this class
     # had no such field, and `extra="ignore"` swallowed any yaml key for it.

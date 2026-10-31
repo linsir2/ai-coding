@@ -614,7 +614,7 @@ def budget_figures(
         "cost": cost,
         # The session card says "本次会话 N 轮" from session.turn_count, while
         # ``cost`` accumulates every ModelStepFinished the recorder saw --
-        # plan waves and sub-agents included (ephemeral step sessions keep the
+        # plan runs and sub-agents included (ephemeral step sessions keep the
         # parent's trace id).  ``steps`` is how the card can say so instead of
         # letting the two numbers look like a contradiction (trace 2026-10-31:
         # "4 轮 · 20 条消息" beside ¥75.64 from 117 steps).

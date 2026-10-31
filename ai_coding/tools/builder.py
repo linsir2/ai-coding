@@ -372,14 +372,6 @@ def _assemble_registry(
         registry.register(FinishResearchTool())
 
     if include_subagent:
-        # C3: the wave handoff.  Registered for the main stack only; visibility
-        # is the tool's own ``wave_only`` business (the registry is process-wide,
-        # so the posture cannot decide registration).
-        from ai_coding.tools.wave_report_tool import WaveReportTool
-
-        registry.register(WaveReportTool())
-
-    if include_subagent:
         # D-4: the model's own taskification (start_goal / update_goal).  Main
         # session only, like present_plan: the goal run is dispatched by the
         # server on the MAIN session, and a sub-agent arming its throwaway
@@ -444,7 +436,7 @@ def _assemble_registry(
     # Which ones is a composition decision -- a tool used once per session
     # should not pay its JSON on every step.  Core work tools (bash/read/write/
     # edit/glob/grep/todo_write), the plan exits (present_plan /
-    # finish_research / wave_report), history_search, subagent and tool_search
+    # finish_research), history_search, subagent and tool_search
     # itself stay advertised.
     mark_deferred_tools(registry)
 

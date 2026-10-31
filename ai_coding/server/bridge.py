@@ -184,13 +184,6 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
             "goalPhase": task.goal_phase,
             "items": [item.to_dict() for item in task.items],
         }
-        # C3: only a live wave adds the block; a task between waves (and every
-        # older client) sees exactly the payload it saw before.
-        if getattr(task, "wave_active", False):
-            task_data["wave"] = {
-                "active": True,
-                "items": list(getattr(task, "wave_items", ()) or ()),
-            }
         return {"type": "plan.updated", "data": task_data}
     if isinstance(event, LedgerUpdated):
         return {
