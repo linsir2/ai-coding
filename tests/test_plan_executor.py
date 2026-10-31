@@ -20,8 +20,6 @@ from ai_coding.core.plan_executor import PlanExecutor, plan_runner_for
 from ai_coding.core.plan_runner import PlanRunner
 from ai_coding.core.turn_policy import (
     PLAN_CONTINUE,
-    PLAN_CONTINUE_LEAD,
-    PLAN_IDLE_LIMIT,
     PLAN_STALL_ROUNDS,
     TurnPolicy,
     TurnPolicyConfig,
@@ -235,13 +233,17 @@ def _snapshot_with(*contents, statuses=(), continuations=0, idle_streak=0,
     )
 
 
-def test_plan_policy_continues_when_the_model_stops_with_open_items():
+def test_plan_policy_no_longer_owns_continuation():
+    """B: a stopped plan turn is the loop's decision, not the policy's.
+
+    The policy used to answer NUDGE + ``[plan-continue]``; continuation is now
+    structural (AgentLoop sees open items with no tool call and iterates), so
+    this pure unit must not invent a continuation of its own.
+    """
     decision = _plan_policy().decide_after_step(_snapshot_with("a", "b"))
 
-    assert decision.action.value == "nudge"
-    assert decision.reason == "continue the plan"
-    assert PLAN_CONTINUE_LEAD in decision.inject
-    assert "- 1. a" in decision.inject
+    assert decision.action.value == "finish"
+    assert decision.inject is None
 
 
 def test_plan_policy_finishes_when_nothing_is_left():
@@ -250,50 +252,29 @@ def test_plan_policy_finishes_when_nothing_is_left():
     )
 
     assert decision.action.value == "finish"
-    assert decision.reason == "plan complete"
-
-
-def test_plan_policy_stops_after_repeated_idle_boundaries():
-    """A plan turn has no iteration budget; the idle streak is its only brake.
-
-    ``idle_streak`` counts the boundaries before the one being decided, so the
-    third stop (streak 2) is the one that closes the turn.
-    """
-    decision = _plan_policy().decide_after_step(
-        _snapshot_with("a", idle_streak=PLAN_IDLE_LIMIT - 1)
-    )
-
-    assert decision.action.value == "finish"
-    assert "idle boundaries" in (decision.reason or "")
 
 
 def test_plan_policy_stops_after_rounds_without_progress():
-    """The idle streak cannot see a model that keeps calling bookkeeping tools.
+    """The stalling brake is read at the pre-iteration point.
 
-    ``todo_write(list)`` is a tool call, so the turn never looks idle; the
-    stall signature (no item change, no receipt, no non-bookkeeping success)
-    is what closes it.  Both decision points must honour it.
+    A model that keeps calling bookkeeping tools never looks idle (it always
+    calls something), so the stall signature is what closes it.
     """
-    policy = _plan_policy()
-    after_step = policy.decide_after_step(
-        _snapshot_with("a", stall_rounds=PLAN_STALL_ROUNDS)
-    )
-    before_step = policy.decide_next_iteration(
+    decision = _plan_policy().decide_next_iteration(
         _snapshot_with("a", stall_rounds=PLAN_STALL_ROUNDS)
     )
 
-    assert after_step.action.value == "finish"
-    assert before_step.action.value == "finish"
-    assert "without progress" in (before_step.reason or "")
+    assert decision.action.value == "finish"
+    assert "without progress" in (decision.reason or "")
 
 
 def test_plan_policy_ignores_blocked_items():
+    """A blocked item is open but not continuable, so the turn may end."""
     decision = _plan_policy().decide_after_step(
         _snapshot_with("a", statuses=("blocked",))
     )
 
     assert decision.action.value == "finish"
-    assert decision.reason == "plan complete"
 
 
 # ---- executor: one turn, main session --------------------------------

@@ -96,7 +96,9 @@ from ai_coding.core.turn_policy import (
     PLAN_APPROVAL_WITHDRAWN_NOTE,
     PLAN_DISMISSED_NOTE,
     PLAN_HELD_NOTE,
+    PLAN_IDLE_LIMIT,
     PLAN_RESEARCH_NOTE,
+    PLAN_STALL_ROUNDS,
     TurnAction,
     TurnDecision,
     TurnPolicy,
@@ -1333,6 +1335,45 @@ class AgentLoop:
                             "asked it once to correct the citation",
                         )
                         continue
+                    # Plan-as-Goal (B): the remaining list already rides every
+                    # request as the volatile <task-state> block, so a stopped
+                    # model with open items needs no new text -- only another
+                    # round.  This is the structural continuation (codex's
+                    # ``needs_follow_up``): no message is appended, so the
+                    # transcript stays clean and compaction cannot eat the
+                    # instruction.  The two brakes are the bound.
+                    if getattr(session, "plan_executing", False) and task is not None:
+                        actionable = [
+                            item for item in task.open_items()
+                            if item.status != "blocked"
+                        ]
+                        if actionable:
+                            boundaries = books.idle_boundaries + 1
+                            reason = ""
+                            if boundaries >= PLAN_IDLE_LIMIT:
+                                reason = (
+                                    f"plan stalled: {boundaries} idle boundaries "
+                                    "with no tool call"
+                                )
+                            elif books.stall_rounds >= PLAN_STALL_ROUNDS:
+                                reason = (
+                                    f"plan stalled: {books.stall_rounds} rounds "
+                                    "without progress"
+                                )
+                            if reason:
+                                outcome = TurnOutcome(
+                                    status=TurnStatus.COMPLETED,
+                                    text=step.text,
+                                    iterations=books.total_iterations,
+                                    reason=reason,
+                                )
+                                break
+                            books.note_idle_boundary()
+                            # No message was appended, but the model's step was:
+                            # persist it at the same boundary the text-injection
+                            # path used, so a crash between rounds replays it.
+                            self.closer.checkpoint(session, index)
+                            continue
                     snapshot = books.snapshot(
                         iteration=index,
                         tokens_spent=self.reporter.tokens_spent(),
@@ -1369,14 +1410,6 @@ class AgentLoop:
                         # stage 4 r2: the guard's one remedy, counted so the
                         # snapshot stops offering it next time.
                         books.note_plan_nudge()
-                    elif decision.reason == "continue the plan":
-                        # Plan-as-Goal: the model stopped with items left and
-                        # touched no tool.  Count the boundary -- three in a row
-                        # close the turn (there is no iteration or token budget
-                        # to run out of) -- and keep the turn open.
-                        session.continuations += 1
-                        books.note_idle_boundary()
-                        books.note_nudge()
                     else:
                         books.note_nudge()
                     session.add_message(

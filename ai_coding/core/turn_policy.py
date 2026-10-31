@@ -109,12 +109,13 @@ BUDGET_PRESSURE_LEAD = "[budget] 本轮预算快用完了"
 #: How much of a budget may remain before the warning appears.
 PRESSURE_RATIO = 0.2
 
-#: Plan-as-Goal (stage 2): a natural stop with open items is an idle boundary,
-#: not the end of the run.  This policy never asks the human -- the injected
-#: line sends the model on to the next item in the same turn (opencode's idle
-#: hook, Claude's /goal).
+#: Plan-as-Goal (stage 2): a marker, not a decision.  The plan turn used to
+#: let this policy inject ``[plan-continue]``; continuation is now structural
+#: (``AgentLoop._run_turn``: open items + no tool call -> another round, no
+#: text).  The string survives because two rules still read it as "this turn is
+#: executing an approved plan": the search ladder is silenced for it, and the
+#: stall brake runs at the pre-iteration point for tool-calling rounds.
 PLAN_CONTINUE = "plan"
-PLAN_CONTINUE_LEAD = "[plan-continue]"
 #: How many consecutive idle boundaries a plan turn tolerates before it closes.
 #: Not a budget: a working turn resets the streak on every tool batch, so only a
 #: model that keeps stopping without reaching for a tool ever reaches it.
@@ -124,23 +125,6 @@ PLAN_IDLE_LIMIT = 3
 #: brake the idle streak cannot provide: a model that keeps calling
 #: ``todo_write(list)`` is "active" but learning nothing.
 PLAN_STALL_ROUNDS = 6
-PLAN_CONTINUE_TAIL = (
-    "继续在同一个回合内推进下一项；完成后用 todo_write 标 completed。"
-    "标记时系统会自动跑该条目的 verify，失败会把输出回给你，在本回合修复。"
-    "不要询问用户是否继续。"
-)
-
-
-def _plan_continue_text(items: list[Any]) -> str:
-    """The idle-boundary message: which items are left, and the doctrine."""
-    lines = [f"{PLAN_CONTINUE_LEAD} 计划还有未完成项："]
-    for item in items[:10]:
-        line = f"- {item.id}. {item.content}"
-        if getattr(item, "verify", ""):
-            line += f"（verify: {item.verify}）"
-        lines.append(line)
-    lines.append(PLAN_CONTINUE_TAIL)
-    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -613,12 +597,12 @@ class TurnPolicy:
                     return verdict
             return TurnDecision(TurnAction.FINISH, "model finished")
         if self.config.stop_policy == PLAN_CONTINUE:
-            # Plan-as-Goal: a stopped model is an idle boundary, not the end of
-            # the run.  Like opencode's idle hook / Claude's /goal, the turn
-            # injects the remaining items and continues -- never asks the human
-            # (an autonomous plan that stops to ask is the defect this exists
-            # to remove).
-            return self._plan_after_step(snapshot)
+            # B: a plan turn's continuation is the loop's structural decision
+            # (open items + no tool call -> another round, no injected text).
+            # This unit must not nudge, and the acceptance/todo gates stay out
+            # of an autonomous plan run by design -- the executor clears
+            # ``session.acceptance`` and verifies at the item boundary.
+            return TurnDecision(TurnAction.FINISH, "plan turn: continuation is structural")
         if snapshot.acceptance:
             # R0-1: a turn with contracts does not end on the model's word.
             # Unchecked items fail closed (the loop verifies before asking, so
@@ -642,36 +626,6 @@ class TurnPolicy:
         if gate is not None:
             return self._as_turn_decision(gate)
         return TurnDecision(TurnAction.FINISH, "model finished")
-
-    def _plan_after_step(self, snapshot: TurnSnapshot) -> TurnDecision:
-        """Plan-as-Goal's idle boundary: continue with the remaining items."""
-        actionable = [item for item in snapshot.open_items if item.status != "blocked"]
-        if not actionable:
-            return TurnDecision(TurnAction.FINISH, "plan complete")
-        if snapshot.stall_rounds >= PLAN_STALL_ROUNDS:
-            # Rounds kept happening but nothing moved: no item changed, no
-            # receipt was written, and every successful call was bookkeeping.
-            return TurnDecision(
-                TurnAction.FINISH,
-                f"plan stalled: {snapshot.stall_rounds} rounds without progress",
-            )
-        # ``idle_streak`` counts the boundaries *before* this one, so the stop
-        # being decided right now is ``idle_streak + 1``.
-        boundaries = snapshot.idle_streak + 1
-        if boundaries >= PLAN_IDLE_LIMIT:
-            # The model stopped PLAN_IDLE_LIMIT times in a row without reaching
-            # for a single tool: it is not working on the list, and another nudge
-            # would only buy the same silence.  This is the plan turn's brake --
-            # there is no iteration or token budget to run out of.
-            return TurnDecision(
-                TurnAction.FINISH,
-                f"plan stalled: {boundaries} idle boundaries with no tool call",
-            )
-        return TurnDecision(
-            TurnAction.NUDGE,
-            "continue the plan",
-            inject=_plan_continue_text(actionable),
-        )
 
     @staticmethod
     def _as_turn_decision(gate: interventions.InterventionDecision) -> TurnDecision:
