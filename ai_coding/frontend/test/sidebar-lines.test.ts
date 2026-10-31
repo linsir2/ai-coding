@@ -57,14 +57,20 @@ describe("startedLine", () => {
 })
 
 describe("budgetLine", () => {
-  test("cost plus the cache share when the provider reported one", () => {
-    expect(budgetLine({ tokens: 2500, cost: 0.4242, cachedPercent: 76 })).toBe(
-      "¥0.42 · 缓存 76%",
-    )
+  test("cumulative cost plus the cache share when the provider reported one", () => {
+    expect(
+      budgetLine({ tokens: 2500, cost: 0.4242, cachedPercent: 76, cachedPriceKnown: true }),
+    ).toBe("累计 ¥0.42 · 缓存 76%")
+  })
+
+  test("says when cache hits were charged at the input price", () => {
+    expect(
+      budgetLine({ tokens: 2500, cost: 0.4242, cachedPercent: 76, cachedPriceKnown: false }),
+    ).toBe("累计 ¥0.42 · 缓存 76%（缓存按输入价）")
   })
 
   test("cost only when no cache figure exists, null when unpriced", () => {
-    expect(budgetLine({ tokens: 2500, cost: 2, cachedPercent: null })).toBe("¥2.00")
+    expect(budgetLine({ tokens: 2500, cost: 2, cachedPercent: null })).toBe("累计 ¥2.00")
     expect(budgetLine({ tokens: 2500, cost: null, cachedPercent: 76 })).toBeNull()
     expect(budgetLine(null)).toBeNull()
     expect(budgetLine(undefined)).toBeNull()

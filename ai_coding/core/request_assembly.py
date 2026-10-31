@@ -337,12 +337,31 @@ class RequestAssembler:
             # settings.auto off (OpenCode parity): the budget-driven path is
             # silenced here, the single proactive entry point.  /compact and
             # the overflow rescue call the compactor directly and still work.
-            history = session.messages
+            # A checkpoint the session already owns still shapes the request:
+            # "do not compact further" is not "send the raw history again".
+            # Probed: an injected compactor may predate the view.
+            view_fn = getattr(self._compactor, "view", None)
+            try:
+                view = (
+                    view_fn(session.messages, session=session, pinned=pinned)
+                    if callable(view_fn)
+                    else None
+                )
+            except Exception:  # noqa: BLE001 — a view is an optimisation
+                view = None
+            history = view if view is not None else session.messages
+            if hasattr(self._compactor, "last_was_view"):
+                self._compactor.last_was_view = view is not None
         # R6a: the ring only pays for itself when this request's history was
         # actually rewritten — otherwise the recent turns are still there
         # (docs/r6-analysis.md 2.1, D-R6-2).
         compacted = Compactor.did_compact(session.messages, history)
-        if compacted and not books.compaction_announced:
+        # A checkpoint view is also a new list (the model sees a different
+        # history), so it counts for the ring and the anchor — but it is not a
+        # *new* compaction, and announcing it as one would print a card on every
+        # iteration.
+        announce = compacted and not getattr(self._compactor, "last_was_view", False)
+        if announce and not books.compaction_announced:
             self._emit(
                 ContextCompacted(
                     before_messages=len(session.messages),

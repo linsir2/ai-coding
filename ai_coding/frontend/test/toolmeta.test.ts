@@ -147,6 +147,9 @@ describe("toolFailure", () => {
       // R21 §3: a plan-step turn has no running goal, so update_goal there is
       // misplaced rather than an unknown cause.
       ["no_goal", "无运行中的目标"],
+      // Trace 2026-10-31: a sub-agent's absolute main-repo paths hit the
+      // session workspace boundary; the old table showed 未知原因.
+      ["sandbox_violation", "路径越界（沙箱拒绝）"],
     ]
     for (const [code, label] of denied) {
       expect(toolFailure(code)).toEqual({ label, tone: "denied" })
@@ -161,6 +164,7 @@ describe("toolFailure", () => {
       ["mcp_error", "MCP 调用失败"],
       ["subagent_error", "子代理失败"],
       ["user_prompt_error", "评审通道异常"],
+      ["child_timeout", "子代理超时"],
     ]
     for (const [code, label] of failed) {
       expect(toolFailure(code)).toEqual({ label, tone: "failed" })

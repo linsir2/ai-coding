@@ -328,6 +328,10 @@ class PermissionGate:
             "read",
             "glob",
             "grep",  # r17/T2: read-only content search
+            # Plan mode's read-only shell subset (git log/find/wc).  The tool
+            # itself refuses anything outside that set; this entry only says the
+            # gate does not need a human for a read.
+            "shell_read",
             # r17/T3: read-only network tools.  webfetch keeps its own SSRF
             # guard (public http(s) only); neither writes anything locally.
             "webfetch",
@@ -436,7 +440,7 @@ class PermissionGate:
         #    red line, a config denial, and the skill policy.  The bash red
         #    line is checked first because it is the most specific, and
         #    because a red line a model can spell around is worse than none.
-        if name == "bash":
+        if name in ("bash", "shell_read"):
             reason = bash_denied(str(params.get("command", "")))
             if reason:
                 return Decision(

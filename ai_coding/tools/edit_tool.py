@@ -112,13 +112,13 @@ class EditTool(BaseTool):
                 f"cannot edit '{path_str}': you must read the file first "
                 "(stale-read protection)"
             )
-            return ToolResult(success=False, output=msg)
+            return ToolResult(success=False, output=msg, error="must_read_first")
         if state == FileState.STALE:
             msg = (
                 f"cannot edit '{path_str}': file has been modified externally; "
                 "re-read it first"
             )
-            return ToolResult(success=False, output=msg)
+            return ToolResult(success=False, output=msg, error="stale_read")
 
         try:
             text = target.read_text(encoding="utf-8")
@@ -188,6 +188,7 @@ class EditTool(BaseTool):
                         f"cannot edit '{path_str}': you must read the file first "
                         "(stale-read protection)"
                     ),
+                    error="must_read_first",
                 )
             if state == FileState.STALE:
                 return ToolResult(
@@ -196,6 +197,7 @@ class EditTool(BaseTool):
                         f"cannot edit '{path_str}': file has been modified externally; "
                         "re-read it first"
                     ),
+                    error="stale_read",
                 )
             os.lseek(opened.fd, 0, os.SEEK_SET)
             chunks: list[bytes] = []

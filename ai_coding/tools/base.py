@@ -175,6 +175,11 @@ class ToolContext:
     # may only touch non-terminal items -- a replan edits what is left, never
     # the history the receipts already attest.
     replan: bool = False
+    #: F: the plan item this step/wave turn owns (``""`` outside a step).  A
+    #: step may update its own item's status, but it must not rewrite the plan
+    #: contract (verify/content) or add items -- the runner would execute a
+    #: command the model authored mid-run, outside the review.
+    step_item_id: str = ""
 
 
 def resolve_ctx(ctx: ToolContext | None) -> ToolContext:

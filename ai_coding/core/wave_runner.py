@@ -458,6 +458,11 @@ class WaveRunner:
         self._say(console, f"[plan] 第 {report.waves} 波（{len(wave.items)} 项）")
         completed = False
         try:
+            # A previous turn (or the planning turn) may already have marked
+            # items completed; give them their proof/receipt before picking work.
+            await self._settle_extra_completions(
+                wave_session, parent, task, wave, report, observer,
+            )
             while True:
                 ready = self._next_ready(task, wave)
                 if ready is None:
@@ -500,6 +505,11 @@ class WaveRunner:
                 await self._settle_extra_completions(
                     wave_session, parent, task, wave, report, observer,
                 )
+            # The last turn may have completed an item in a later wave; settle
+            # it before the wave's handoff is written.
+            await self._settle_extra_completions(
+                wave_session, parent, task, wave, report, observer,
+            )
             completed = True
         finally:
             self._loop.policy = original_policy
@@ -777,12 +787,25 @@ class WaveRunner:
         report: PlanReport,
         observer: Any,
     ) -> None:
-        """Settle items the model finished while working on another one."""
-        for item in wave.items:
+        """Settle items the model finished while working on another one.
+
+        Scans the **whole task**, not only the current wave: a model that marks
+        a later wave's item completed gets no dedicated turn (``TaskDriver``
+        skips terminal items), so without this sweep that item has no proof and
+        no receipt -- the measured 3-item run reported 2/3 while the task said
+        3/3.  An item already carrying a completed receipt is never settled
+        twice (a resumed task has receipts from an earlier run).
+        """
+        receipted = {
+            entry.step_id
+            for entry in getattr(parent, "step_deliveries", ()) or ()
+            if entry.status == "completed"
+        }
+        for item in task.items:
             current = task.get(item.id)
             if current is None or current.status != "completed":
                 continue
-            if current.id in self._recorded_this_run:
+            if current.id in self._recorded_this_run or current.id in receipted:
                 continue
             if current.verify:
                 # The tracked item's contract was checked at the turn's stop;
@@ -809,14 +832,22 @@ class WaveRunner:
                     evidence=f"verify passed: {_tail(self._acceptance_output(wave_session))}",
                 )
                 self._emit_task(task)
-            delivery = self._delivery(
-                current, "completed", 1,
-                bool(self._acceptance_passed(wave_session, current)),
-                self._summary(current),
-                (0, int(getattr(wave_session, "turn_count", 0) or 0)),
-                self._last_usage(),
-                len(wave_session.messages),
-            )
+                delivery = self._delivery(
+                    current, "completed", 1,
+                    True,
+                    self._summary(current),
+                    (0, int(getattr(wave_session, "turn_count", 0) or 0)),
+                    self._last_usage(),
+                    len(wave_session.messages),
+                )
+            else:
+                # Fiat: the model claimed it, no command can prove it.  Mark it
+                # like the legacy backfill -- not attested by an回合, zero turns.
+                delivery = self._delivery(
+                    current, "completed", 0, False,
+                    self._summary(current), (0, 0), None,
+                    len(wave_session.messages), attested=False,
+                )
             self._record(report, parent, delivery, observer=observer)
 
     # ---- session / prompt / acceptance ------------------------------------
@@ -978,6 +1009,8 @@ class WaveRunner:
         turns: tuple[int, int],
         usage: dict[str, int] | None,
         seed_chars: int,
+        *,
+        attested: bool = True,
     ) -> StepDelivery:
         return StepDelivery(
             step_id=item.id,
@@ -988,7 +1021,7 @@ class WaveRunner:
             summary=summary,
             turns=turns,
             usage=usage,
-            attested=True,
+            attested=attested,
             seed_chars=seed_chars,
         )
 

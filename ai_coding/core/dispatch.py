@@ -319,6 +319,13 @@ class ToolDispatcher:
         elif not arguments_are_valid(ref.arguments):
             refusal = "invalid_arguments"
         tool = self.registry.get(call.name)
+        if tool is not None and tool.name != call.name:
+            # The registry resolves a case-insensitive alias, but the guards,
+            # the read ledger and the turn books match exact names
+            # (``bash``, ``present_plan``…).  Handing them the model's spelling
+            # would run a "Bash" call past the bash red-line guard -- an alias
+            # must normalize the call, not only find the tool.
+            call = ToolCall(id=call.id, name=tool.name, params=call.params)
         decision = None if refusal or tool is None else self._check(tool, call, ctx)
         return _Prepared(
             call=call,

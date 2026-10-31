@@ -44,13 +44,23 @@ export function startedLine(createdIso: string, now: Date): string {
   return rest > 0 ? `${clock} 起 · 已 ${hours} 小时 ${rest} 分` : `${clock} 起 · 已 ${hours} 小时`
 }
 
-/** ``¥0.42 · 缓存 76%``; ``null`` (the line hides) when no price is known. */
+/** ``累计 ¥0.42 · 缓存 76%``; ``null`` (the line hides) when no price is known.
+ *
+ * "累计" is not decoration: the figure sums every model step the recorder saw,
+ * plan waves and sub-agents included, while the line above counts this
+ * session's own turns.  Saying "累计" keeps the two from reading as a
+ * contradiction (measured trace 2026-10-31: 4 turns beside ¥75.64 from 117
+ * steps).  When no cached rate is configured the cost charges cache hits at
+ * the input price, so the line says that too instead of presenting an upper
+ * bound as the bill.
+ */
 export function budgetLine(budget: BudgetFigures | null | undefined): string | null {
   if (!budget || typeof budget.cost !== "number") return null
-  const money = `¥${budget.cost.toFixed(2)}`
-  return typeof budget.cachedPercent === "number"
-    ? `${money} · 缓存 ${budget.cachedPercent}%`
-    : money
+  const money = `累计 ¥${budget.cost.toFixed(2)}`
+  const cache =
+    typeof budget.cachedPercent === "number" ? ` · 缓存 ${budget.cachedPercent}%` : ""
+  const unknown = budget.cachedPriceKnown === false ? "（缓存按输入价）" : ""
+  return `${money}${cache}${unknown}`
 }
 
 export const JOBS_HEADING = "后台任务"
@@ -145,6 +155,14 @@ export function Sidebar(props: {
         </Show>
         <Show when={money()}>
           <text fg={theme.textMuted}>{money()}</text>
+        </Show>
+        {/* The cost above can cover plan waves and sub-agents; this line names
+          them only when the summary counted more steps than this session's
+          own turns (the measured 4-turn/117-step case). */}
+        <Show when={(props.budget?.steps ?? 0) > props.turns}>
+          <text fg={theme.textMuted}>
+            {`含计划步/子代理（累计 ${props.budget?.steps} 步）`}
+          </text>
         </Show>
       </box>
       <Show when={props.goal?.armed ? props.goal : undefined}>

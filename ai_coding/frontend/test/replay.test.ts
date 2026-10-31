@@ -108,18 +108,17 @@ describe("messagesToState", () => {
     ])
   })
 
-  // P3-2 refactor follow-up: the checkpoint note is stored as a user-role
-  // message (so the model reads it as history and replies pair correctly),
-  // but it is model-generated markdown.  Replayed as a plain user row the
-  // `##` sections show literally (screenshot: unrendered summary replacing
-  // the transcript after /compact).  It replays as assistant prose instead —
-  // the same part the live stream renders markdown through — with zero view
-  // changes.
-  test("a checkpoint note replays as assistant prose, not a plain user row", () => {
+  // The checkpoint is the model's working record, not conversation.  Replaying
+  // it as prose re-printed the whole summary after every reload (the same
+  // block the live compaction card used to draw).  One muted notice replaces it.
+  test("a checkpoint note replays as a muted notice, not assistant prose", () => {
     const body = "[以下为早期对话摘要]\n## 目标\n继续修压缩"
     const state = messagesToState([{ role: "user", content: body }])
     expect(state.messages).toEqual([
-      { role: "assistant", parts: [{ kind: "text", text: body, streaming: false }] },
+      {
+        role: "assistant",
+        parts: [{ kind: "notice", tone: "muted", text: "早期对话已压缩" }],
+      },
     ])
   })
 
@@ -141,7 +140,7 @@ describe("messagesToState", () => {
     ])
     expect(state.messages.map((m) => m.role)).toEqual(["assistant", "user", "assistant"])
     expect(state.messages[0]!.parts).toEqual([
-      { kind: "text", text: "[以下为早期对话摘要]\n## 目标\n做完", streaming: false },
+      { kind: "notice", tone: "muted", text: "早期对话已压缩" },
     ])
   })
 })

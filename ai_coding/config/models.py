@@ -851,6 +851,21 @@ def _number(raw: Mapping[str, Any], key: str, default: float) -> float:
     return default if value is None else float(value)
 
 
+def _price_per_1k(raw: Mapping[str, Any], name: str) -> float:
+    """A configured price, in per-1k units.
+
+    Providers publish per-1M prices ("¥2 / M tokens"); the historical key is
+    per-1k.  Accepting both spellings is cheaper than guessing from the
+    magnitude: a per-1M number pasted into the per-1k key charges 1000x, which
+    is exactly how a real session's ¥75.64 figure can appear.  ``_per_1m`` wins
+    when both are present.
+    """
+    per_m = float(raw.get(f"{name}_per_1m", 0.0) or 0.0)
+    if per_m > 0:
+        return per_m / 1000.0
+    return float(raw.get(f"{name}_per_1k", 0.0) or 0.0)
+
+
 def _coerce_model(
     raw: dict[str, Any], *, env: Mapping[str, str] | None = None
 ) -> ModelConfig:
@@ -909,9 +924,9 @@ def _coerce_model(
         # P0-1: a negative budget is nonsense, so clamp rather than trust the file.
         max_retries=max(0, int(raw.get("max_retries", 3) or 0)),
         retry_base_seconds=max(0.0, float(raw.get("retry_base_seconds", 2.0) or 0.0)),
-        price_input_per_1k=float(raw.get("price_input_per_1k", 0.0) or 0.0),
-        price_output_per_1k=float(raw.get("price_output_per_1k", 0.0) or 0.0),
-        price_cached_per_1k=float(raw.get("price_cached_per_1k", 0.0) or 0.0),
+        price_input_per_1k=_price_per_1k(raw, "price_input"),
+        price_output_per_1k=_price_per_1k(raw, "price_output"),
+        price_cached_per_1k=_price_per_1k(raw, "price_cached"),
         fallback_models=_coerce_fallbacks(raw.get("fallback_models")),
         context_window=max(0, int(raw.get("context_window", 0) or 0)),
     )

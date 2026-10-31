@@ -98,6 +98,36 @@ class TodoWriteTool(BaseTool):
         resolved = resolve_ctx(ctx)
         task = resolved.task
         action = str(params.get("action", "")).strip().lower()
+        if not action:
+            # Providers do not enforce ``required``.  The shape of the params
+            # says what was meant: content → add, id → update, nothing → list.
+            if "content" in params:
+                action = "add"
+            elif "id" in params:
+                action = "update"
+            else:
+                action = "list"
+        scope = str(getattr(resolved, "step_item_id", "") or "")
+
+        # F: a step/wave turn is inside the approved plan, not in front of the
+        # review.  Letting it rewrite verify/content (or add an item) would turn
+        # the runner into an executor for a command the model authored mid-run,
+        # outside the approval that armed the plan.  Status updates stay allowed
+        # (the extra ones are reconciled by the runner with their own receipt).
+        if scope:
+            if action == "add":
+                return ToolResult(
+                    success=False,
+                    output=(
+                        "error: 计划执行中不能新增条目——计划在批准后冻结；"
+                        "请只做当前条目，需要改计划时在波末请求重规划。"
+                    ),
+                    error="frozen_plan",
+                )
+            if action == "update":
+                frozen = self._frozen_change(params, task)
+                if frozen is not None:
+                    return frozen
 
         if action == "add":
             return self._add(params, task)
@@ -130,6 +160,30 @@ class TodoWriteTool(BaseTool):
         )
 
     # ---- actions ----------------------------------------------------------
+
+    def _frozen_change(self, params: dict[str, Any], task: TaskState) -> ToolResult | None:
+        """Refuse a plan-contract edit made by a step that is executing it."""
+        target = task.get(str(params.get("id", "")))
+        if target is None:
+            return None
+        if "verify" in params and str(params.get("verify") or "").strip() != target.verify.strip():
+            return ToolResult(
+                success=False,
+                output=(
+                    "error: 计划执行中不能修改条目的 verify（计划在批准后冻结）；"
+                    "只做当前条目。"
+                ),
+                error="frozen_verify",
+            )
+        if "content" in params and str(params.get("content") or "").strip() != (
+            target.content.strip()
+        ):
+            return ToolResult(
+                success=False,
+                output="error: 计划执行中不能改写条目内容（计划在批准后冻结）。",
+                error="frozen_item",
+            )
+        return None
 
     def _add(self, params: dict[str, Any], task: TaskState) -> ToolResult:
         content = str(params.get("content", "")).strip()

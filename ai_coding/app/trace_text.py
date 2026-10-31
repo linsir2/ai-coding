@@ -578,8 +578,10 @@ def budget_figures(
     prompt = int(summary.get("prompt_tokens", 0) or 0)
     completion = int(summary.get("completion_tokens", 0) or 0)
     cached = int(summary.get("cached_tokens", 0) or 0)
+    steps = int(summary.get("steps", 0) or 0)
 
     cost: float | None = None
+    cached_price_known = True
     by_model = summary.get("by_model")
     if isinstance(by_model, dict) and prices:
         total = 0.0
@@ -587,11 +589,15 @@ def budget_figures(
         for model_name, spend in by_model.items():
             if not isinstance(spend, dict):
                 continue
+            cached_t = int(spend.get("cached_tokens", 0) or 0)
+            model_price = prices.get(str(model_name))
+            if cached_t and not _cached_price_known(model_price):
+                cached_price_known = False
             money = _money_number(
                 int(spend.get("prompt_tokens", 0) or 0),
                 int(spend.get("completion_tokens", 0) or 0),
-                int(spend.get("cached_tokens", 0) or 0),
-                prices.get(str(model_name)),
+                cached_t,
+                model_price,
             )
             if money is not None:
                 total += money
@@ -600,14 +606,31 @@ def budget_figures(
             cost = total
     if cost is None:
         cost = _money_number(prompt, completion, cached, price)
+    if cached and cost is not None and not by_model:
+        cached_price_known = _cached_price_known(price)
 
     return {
         "tokens": prompt + completion,
         "cost": cost,
+        # The session card says "本次会话 N 轮" from session.turn_count, while
+        # ``cost`` accumulates every ModelStepFinished the recorder saw --
+        # plan waves and sub-agents included (ephemeral step sessions keep the
+        # parent's trace id).  ``steps`` is how the card can say so instead of
+        # letting the two numbers look like a contradiction (trace 2026-10-31:
+        # "4 轮 · 20 条消息" beside ¥75.64 from 117 steps).
+        "steps": steps,
         "cachedPercent": (
             int(round(cached / prompt * 100)) if cached and prompt > 0 else None
         ),
+        # ``cached_per_1k == 0`` means "no cache price known", and the cost then
+        # charges hits at the input price on purpose (never free).  The card
+        # says so rather than presenting that upper bound as the bill.
+        "cachedPriceKnown": cached_price_known,
     }
+
+
+def _cached_price_known(price: Any | None) -> bool:
+    return bool(price is not None and getattr(price, "cached_per_1k", 0.0) > 0)
 
 
 def render_overview(report: AggregateReport) -> str:

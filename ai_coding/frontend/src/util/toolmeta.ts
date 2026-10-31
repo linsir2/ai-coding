@@ -126,7 +126,26 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   // an environment failure, so it gets ✗ rather than the ⊘ a refusal wears --
   // "被拒绝" said a human had said no, which is not what happened.
   sandbox_unavailable: { label: "沙箱不可用（命令未执行）", tone: "failed" },
+  // The file tools' boundary: a path outside the session's workspace (trace
+  // 2026-10-31: a sub-agent in its worktree was handed absolute main-repo
+  // paths and four calls were refused).  It is an environment refusal, not
+  // breakage, and "未知原因（sandbox_violation）" said nothing.
+  sandbox_violation: { label: "路径越界（沙箱拒绝）", tone: "denied" },
+  // R0-3's machine code for a delegated run that used up its clock.
+  child_timeout: { label: "子代理超时", tone: "failed" },
   tool_timeout: { label: "工具调用超时", tone: "failed" },
+  // The stale-read protection's two refusals.  They reached the wire with
+  // ``error = None`` before, so the card showed a bare "write: ?" and the
+  // transcript never said why (measured 2026-10-31: one item looped 75
+  // iterations on this).
+  stale_read: { label: "文件已被外部修改，需重读", tone: "denied" },
+  must_read_first: { label: "需先读取文件", tone: "denied" },
+  // The plan is frozen after approval: a step cannot rewrite verify/content or
+  // add items, and shell_read refuses anything outside its read-only subset.
+  frozen_plan: { label: "计划执行中，不能改计划", tone: "denied" },
+  frozen_verify: { label: "计划执行中，不能改验收命令", tone: "denied" },
+  frozen_item: { label: "计划执行中，不能改条目内容", tone: "denied" },
+  read_only_shell_required: { label: "只允许只读命令", tone: "denied" },
   tool_error: { label: "工具异常", tone: "failed" },
   unknown_tool: { label: "未知工具", tone: "failed" },
   mcp_error: { label: "MCP 调用失败", tone: "failed" },

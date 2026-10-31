@@ -110,13 +110,13 @@ class WriteTool(BaseTool):
                     f"cannot write to '{path_str}': you must read the file first "
                     "(stale-read protection)"
                 )
-                return ToolResult(success=False, output=msg)
+                return ToolResult(success=False, output=msg, error="must_read_first")
             if state == FileState.STALE:
                 msg = (
                     f"cannot write to '{path_str}': file has been modified externally; "
                     "re-read it first"
                 )
-                return ToolResult(success=False, output=msg)
+                return ToolResult(success=False, output=msg, error="stale_read")
 
         try:
             target.parent.mkdir(parents=True, exist_ok=True)

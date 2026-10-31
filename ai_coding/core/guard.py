@@ -214,6 +214,34 @@ _UNVISIBLE_REREAD_FACTOR = 2
 _GONE_HEADS = ("[Previous: used", "<persisted-output")
 
 
+#: Calls whose execution may change a file the model has already read.  A read
+#: after one of these may be a *necessary* refresh, not a duplicate.
+_MUTATING_CALLS = frozenset({"bash", "write", "edit"})
+
+
+def _mutated_after_read(
+    history: Sequence[ChatMessage], read_ids: Sequence[str]
+) -> bool:
+    """Did a mutating call happen after the last result of ``read_ids``?
+
+    Pure over the assembled history: no IO, no session.  A failed mutation still
+    counts -- the file may have changed even when the tool refused (the stale
+    write that started the deadlock did).
+    """
+    read_index = -1
+    ids = set(read_ids)
+    for index, message in enumerate(history):
+        if message.role == "tool" and (message.tool_call_id or "") in ids:
+            read_index = index
+    if read_index < 0:
+        return False
+    for message in history[read_index + 1 :]:
+        for call in getattr(message, "tool_calls", ()) or ():
+            if str(getattr(call, "name", "")).lower() in _MUTATING_CALLS:
+                return True
+    return False
+
+
 def _visible_tool_ids(history: Sequence[ChatMessage]) -> frozenset[str]:
     """Call ids whose tool result is still fully in the request's history (O-1).
 
@@ -269,16 +297,31 @@ class DuplicateCallGuard:
         del view
         if self.threshold <= 0:
             return GuardDecision(GuardVerdict.ALLOW)
+        # ``list`` is a read and ``update`` is a state setter: repeating the
+        # same one changes nothing, and refusing it taught the model to retry
+        # (trace 2026-10-18: eight identical refusals in one turn).  ``add`` is
+        # not idempotent -- a repeat appends a second item -- so it stays here.
+        if call.name == "todo_write" and str(call.params.get("action", "")).lower() in (
+            "list",
+            "update",
+        ):
+            return GuardDecision(GuardVerdict.ALLOW)
         fingerprint = call_fingerprint(call)
         succeeded = self._successes.get(fingerprint, [])
         if call.name.lower() in _REREADABLE:
-            return self._check_reread(call, succeeded, _visible_tool_ids(ctx.messages))
+            return self._check_reread(
+                call, succeeded, _visible_tool_ids(ctx.messages), ctx.messages
+            )
         if len(succeeded) >= self.threshold:
             return self._refusal(call, succeeded[0], len(succeeded))
         return GuardDecision(GuardVerdict.ALLOW)
 
     def _check_reread(
-        self, call: ToolCall, succeeded: Sequence[str], visible: frozenset[str]
+        self,
+        call: ToolCall,
+        succeeded: Sequence[str],
+        visible: frozenset[str],
+        history: Sequence[ChatMessage],
     ) -> GuardDecision:
         """A read is only "duplicate" while its earlier output is still there.
 
@@ -287,7 +330,19 @@ class DuplicateCallGuard:
         the content -- and the refusal pointed at a result that no longer
         existed.  The total is still capped so one range cannot be re-read
         forever.
+
+        The second exception is a file that changed after the read.  Measured
+        live 2026-10-31: ``write`` refused with "file has been modified
+        externally; re-read it first", the model tried to re-read, and this
+        guard refused it as a duplicate because the *old* result was still
+        visible.  The two rules deadlocked one item for 75 iterations.  A
+        ``bash``/``write``/``edit`` call after the read means the earlier body
+        may no longer describe the file, so the re-read is allowed exactly once
+        (the next read's result is newer than the mutation, so a further repeat
+        is refused again).
         """
+        if _mutated_after_read(history, succeeded):
+            return GuardDecision(GuardVerdict.ALLOW)
         shown = [call_id for call_id in succeeded if call_id in visible]
         if len(shown) >= self.threshold:
             return self._refusal(call, shown[0], len(shown))
@@ -404,7 +459,7 @@ class BashPolicyGuard:
 
     def check(self, call: ToolCall, ctx: ToolContext, view: TurnView) -> GuardDecision:
         del ctx, view
-        if call.name != "bash":
+        if call.name not in ("bash", "shell_read"):
             return GuardDecision(GuardVerdict.ALLOW)
         command = str(call.params.get("command", ""))
         for pattern in self.deny:
@@ -489,7 +544,7 @@ class PathEscapeGuard:
 
     def check(self, call: ToolCall, ctx: ToolContext, view: TurnView) -> GuardDecision:
         del view
-        if call.name != "bash":
+        if call.name not in ("bash", "shell_read"):
             return GuardDecision(GuardVerdict.ALLOW)
         command = str(call.params.get("command", ""))
         escaped = _escaped_paths(command, str(ctx.workspace or ""))

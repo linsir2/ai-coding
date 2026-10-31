@@ -239,6 +239,7 @@ def _assemble_registry(
     from ai_coding.tools.grep_tool import GrepTool
     from ai_coding.tools.read_tool import ReadTool
     from ai_coding.tools.registry import ToolRegistry
+    from ai_coding.tools.shell_read_tool import ShellReadTool
     from ai_coding.tools.skill_tool import SkillTool
     from ai_coding.tools.todo_write_tool import TodoWriteTool
     from ai_coding.tools.webfetch_tool import WebfetchTool
@@ -278,6 +279,17 @@ def _assemble_registry(
         # a directory a bash command may write, and never one or the other.
         registry.register(
             BashTool(
+                timeout_seconds=tools_cfg.bash.timeout_seconds,
+                policy=sandbox_policy,
+                backend=sandbox_backend,
+                roots=sandbox.live_roots,
+            )
+        )
+        # Plan mode's read-only subset: same sandbox, one allow-listed argv
+        # command (git log / find / wc).  ``plan_only`` keeps it out of the
+        # build surface; ``read_only_shell`` refuses anything that writes.
+        registry.register(
+            ShellReadTool(
                 timeout_seconds=tools_cfg.bash.timeout_seconds,
                 policy=sandbox_policy,
                 backend=sandbox_backend,

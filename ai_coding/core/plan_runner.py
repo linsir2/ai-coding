@@ -99,26 +99,36 @@ PLAN_PROMPT = (
     "Create a detailed implementation plan for: {topic}. "
     "Break it down into specific, actionable steps. "
     "Submit the plan with present_plan: a concise markdown summary (a title "
-    "first) and, in its items array, every step — each item carries its proof "
-    "command in 'verify' (a shell command) when the outcome is "
-    "machine-checkable, so the plan can be executed and verified step by "
-    "step. "
+    "first) and, in its items array, the executable work items. One item is "
+    "one deliverable outcome, not one file read: merge reading and analysis "
+    "into the work that needs it, and keep an implementation plan to at most "
+    "six items. Put a shell command in 'verify' only when a real acceptance "
+    "command exists; never use a file the plan itself produces (for example "
+    "under the plan directory) as its own proof. "
     "Write the items as pending/open steps only — do not execute "
     "the work and do not mark items completed during planning. "
     "State each step's goal and its verifiable success criteria, "
     "and make the plan decision-complete: another engineer should be "
     "able to implement it without making further design decisions. "
-    "Write the full skeleton of items first (one line plus its verify for "
-    "each) and refine afterwards; use grep/glob to look at code selectively "
+    "Write the full skeleton of items first (one line each, plus its verify "
+    "only where there is a real command) and refine afterwards; use "
+    "grep/glob to look at code selectively "
     "— do not read whole large files just to write the plan. "
     f"Write only inside the plan directory ({PLAN_DIR}/); bash is "
-    "unavailable in plan mode. Explore with read/grep/glob; for 2-4 "
+    "unavailable in plan mode. Explore with read/grep/glob; for read-only shell "
+    "inspection (git log/status/diff, find, wc, ls) use shell_read -- one simple "
+    "command, no pipes or redirection. For 2-4 "
     "independent read-only questions use parallel_research, which runs them "
     "concurrently in read-only sub-agents and returns one merged report. "
+    "Do not hand subAgent absolute paths of this repository: it runs in an "
+    "isolated worktree and must be given paths relative to it. "
+    "Temp files, test data and output directories must live inside the workspace; "
+    "do not use /tmp. "
     "present_plan presents the plan for the user's review, and approval "
     "starts execution automatically — do not execute it yourself. "
     "A topic that needs no implementation closes with finish_research(summary) "
-    "instead of a plan. "
+    "instead of a plan; a research or analysis request produces one report, "
+    "not a plan whose items each write a separate document. "
     "Imperative language to implement ('go ahead', 'do it') means plan the "
     "implementation, not execute it. A conversational agreement approves "
     "nothing: only present_plan's approval starts execution. Ask the user "
@@ -267,6 +277,12 @@ def outside_workspace_paths(
         for candidate, from_grammar in candidates:
             if candidate in offenders:
                 continue
+            # Shell redirections name device files, not files a plan writes:
+            # `2>/dev/null` appeared four times in one measured plan and each
+            # time the gate refused the plan ("path /dev/null resolves outside
+            # workspace").  A device is a sink, not a target.
+            if _is_device_path(candidate):
+                continue
             # A shebang names the interpreter that runs a script, not a file
             # the tools would write.  The live plan carried
             # "#!/usr/bin/env python3" inside the script it wrote, and the
@@ -294,6 +310,26 @@ def outside_workspace_paths(
             except SandboxViolation:
                 offenders.append(candidate)
     return offenders
+
+
+#: Device paths a shell redirection may name.  They are sinks/sources the
+#: kernel owns, never a target the plan's file tools would write.
+_DEVICE_PATHS = frozenset(
+    {
+        "/dev/null",
+        "/dev/zero",
+        "/dev/stdout",
+        "/dev/stderr",
+        "/dev/stdin",
+        "/dev/tty",
+        "/dev/random",
+        "/dev/urandom",
+    }
+)
+
+
+def _is_device_path(candidate: str) -> bool:
+    return candidate in _DEVICE_PATHS or candidate.startswith("/dev/fd/")
 
 
 def _shebang_interpreters(body: str) -> set[str]:

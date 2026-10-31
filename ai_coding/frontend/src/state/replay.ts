@@ -165,6 +165,22 @@ export function messagesToState(
       // words the operator typed, so it falls through to the user branch.
       continue
     }
+    if (
+      message.role === "user" &&
+      (message.content ?? "").startsWith(CHECKPOINT_MARK)
+    ) {
+      // The checkpoint is the model's working record, not the conversation.
+      // Replaying it as prose re-printed the whole summary after every reload
+      // (the same block the live card used to draw); one muted notice says the
+      // same thing without replaying it.
+      let assistant = out[out.length - 1]
+      if (!assistant || assistant.role !== "assistant") {
+        assistant = { role: "assistant", parts: [] }
+        out.push(assistant)
+      }
+      assistant.parts.push({ kind: "notice", tone: "muted", text: "早期对话已压缩" })
+      continue
+    }
     if (message.role === "user" && !(message.content ?? "").startsWith(CHECKPOINT_MARK)) {
       // steering 前端化: "[steering] " is the harness marker the model reads;
       // the operator typed the rest, so a replay shows their own words.
@@ -178,21 +194,10 @@ export function messagesToState(
     }
     // Everything after a user message belongs to that turn's assistant
     // message, so replay matches the live stream's one-message-per-turn shape.
-    // A checkpoint note lands here too: it is stored user-role but is
-    // model-generated markdown, so it replays as assistant prose (markdown
-    // renders) rather than a plain user row (it would not).
     let assistant = out[out.length - 1]
     if (!assistant || assistant.role !== "assistant") {
       assistant = { role: "assistant", parts: [] }
       out.push(assistant)
-    }
-    if (message.role === "user") {
-      // Checkpoint note: the only user-role message that reaches here (the
-      // plain branch above took all others).  Its body is the summary.
-      if (message.content) {
-        assistant.parts.push({ kind: "text", text: message.content, streaming: false })
-      }
-      continue
     }
     if (message.role === "assistant") {      // Reasoning first, then the prose it produced — the same order the live
       // reducer rebuilds, so a reloaded transcript reads like the live one.

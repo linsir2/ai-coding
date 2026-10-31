@@ -107,6 +107,8 @@ export interface PlanItem {
   verify: string
   /** Item ids this step waits on (plan ids are "1".."n", as displayed). */
   dependsOn: string[]
+  /** Why a blocked item could not land (verify output / model note). */
+  evidence?: string
 }
 
 /** One background shell job, as the panel renders it (D-1b). */
@@ -127,6 +129,10 @@ export interface BudgetFigures {
   tokens: number
   cost: number | null
   cachedPercent: number | null
+  /** Steps the summary accumulated (plan waves / sub-agents included). */
+  steps?: number
+  /** False when cache hits were charged at the input price (no cached rate). */
+  cachedPriceKnown?: boolean
 }
 
 /** One queued line of operator input (D-2).  The id is the inbox row's
@@ -909,6 +915,7 @@ export function applyPlanUpdate(
         // here: the plan's own string ids). Malformed values are dropped,
         // never guessed -- mirrors planReviewItems in util/ask.
         const rawDeps = item["dependsOn"]
+        const evidence = str(item["evidence"])
         return {
           id: str(item["id"]),
           content: str(item["content"]),
@@ -917,6 +924,9 @@ export function applyPlanUpdate(
           dependsOn: Array.isArray(rawDeps)
             ? rawDeps.filter((d): d is string => typeof d === "string")
             : [],
+          // Only when present: the reducer's equality tests pin the shape of
+          // an item without evidence, and an empty key would be a false diff.
+          ...(evidence ? { evidence } : {}),
         }
       })
     : []

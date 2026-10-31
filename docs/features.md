@@ -242,6 +242,11 @@ plan-runner 的步内只给**一次**续跑（`max_auto_continuations=1`）：�
 
 所有阶段都在消息列表的浅拷贝上进行，绝不修改调用方历史。
 
+**checkpoint 视图每请求生效**：一旦会话已有 checkpoint，每个请求都先应用
+`[checkpoint note] + messages[compaction_consumed:]` 作为模型可见历史（纯装配，不调模型、
+不发压缩事件）；只有达到 ceiling 才更新摘要。否则闸门读到的是上一次压缩后的实测值，下一请求
+又发回完整原始历史，形成 20k↔200k 振荡（2026-10-31 trace t8：一个计划项 6 次）。
+
 **I2 的三条不丢消息的不变量**（`docs/plan-i2-context-integrity.md` §3.0）：每条消息要么原样在请求里，
 要么被 checkpoint 覆盖（下标 < `compaction_consumed`），**不会两边都没有**；摘要失败时不推进
 `compaction_consumed`、不装 note、也不丢 delta（分支 D）；`compaction_anchor` 是覆盖前缀的内容指纹

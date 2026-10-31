@@ -171,6 +171,54 @@ async def test_a_repair_turn_can_turn_a_failed_verify_green():
     assert "verify passed" in (session.task.get("1").evidence or "")
 
 
+class _CrossWaveLoop(_StubLoop):
+    """Marks an item from a *later* wave completed during the first turn."""
+
+    def __init__(self, actions, **kwargs):
+        super().__init__(actions, **kwargs)
+        self.settings.plan_wave_size = 2
+
+    async def process_input(self, session, text, **kwargs):
+        result = await super().process_input(session, text, **kwargs)
+        if len(self.calls) == 1:
+            session.task.get("3").status = "completed"
+        return result
+
+
+@pytest.mark.asyncio
+async def test_an_item_completed_in_a_later_wave_still_gets_its_receipt():
+    """Measured 2026-10-31: 3 items, task said 3/3, report said 2/3, because
+    item 3 was marked completed by another item's turn and a later wave never
+    ran it.  The sweep covers the whole task, not only the current wave."""
+    session = _session_with("a", "b", "c")
+    loop = _CrossWaveLoop(["complete", "complete"])
+
+    report = await WaveRunner(loop).run(session)
+
+    assert sorted(report.completed) == ["1", "2", "3"]
+    assert {d.step_id for d in session.step_deliveries} == {"1", "2", "3"}
+    item3 = next(d for d in session.step_deliveries if d.step_id == "3")
+    assert item3.attested is False, "a claim with no proof is fiat, not attested"
+    assert item3.attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_receipt_does_not_become_a_second_delivery():
+    from ai_coding.domain.plan_delivery import StepDelivery
+
+    session = _session_with("a")
+    session.task.get("1").status = "completed"
+    session.step_deliveries = [
+        StepDelivery(step_id="1", statement="a", status="completed", attempts=1)
+    ]
+    loop = _StubLoop(["complete"])
+
+    report = await WaveRunner(loop).run(session)
+
+    assert report.completed == []
+    assert [d.step_id for d in session.step_deliveries] == ["1"]
+
+
 @pytest.mark.asyncio
 async def test_extra_items_finished_in_one_turn_are_settled():
     session = _session_with("a", "b")

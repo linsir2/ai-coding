@@ -40,6 +40,12 @@ const LAYER_LABELS: Record<string, string> = {
   L4: "摘要",
 }
 
+/** First line of a multi-line detail, clipped to ``limit`` characters. */
+function oneLine(text: string, limit: number): string {
+  const first = (text || "").split("\n")[0] ?? ""
+  return first.length <= limit ? first : `${first.slice(0, limit)}…`
+}
+
 /** One layer's share of the compaction line (M-E3): counts + token delta.
 
  * Counts alone would mislead for L2/L3 — they rewrite a body and keep the
@@ -159,16 +165,21 @@ function PartView(props: { part: Part; alwaysOpen: boolean }) {
                     <text fg={tone(item.status)}>
                       {`${marker(item.status)} ${item.id}. ${item.content}`}
                     </text>
-                    {/* D5: the second line the review card draws -- what
-                      approval will run, and what it waits on. Always shown
-                      (an empty proof reads "无证明命令", never a missing
-                      line), so the two cards check against each other. */}
-                    <text fg={theme.textMuted}>
-                      {`   verify：${item.verify || "无证明命令"}` +
-                        (item.dependsOn.length > 0
-                          ? ` · 依赖 ${item.dependsOn.map((d) => `#${d}`).join(", ")}`
-                          : "")}
-                    </text>
+                    {/* The proof command is a review-time fact (the approval card
+                      draws it in full).  In the live card it is noise for every
+                      settled item, so it appears only for the one item running
+                      now, and truncated.  A blocked item shows why instead --
+                      that is the line a reader actually needs. */}
+                    <Show when={item.status === "in_progress" && item.verify}>
+                      <text fg={theme.textMuted}>
+                        {`   verify: ${oneLine(item.verify, 60)}`}
+                      </text>
+                    </Show>
+                    <Show when={item.status === "blocked" && item.evidence}>
+                      <text fg={theme.feedbackError}>
+                        {`   ↳ ${oneLine(item.evidence ?? "", 80)}`}
+                      </text>
+                    </Show>
                   </>
                 )}
               </For>
@@ -221,15 +232,10 @@ function PartView(props: { part: Part; alwaysOpen: boolean }) {
               ) : (
                 <text fg={theme.textMuted}>── 压缩 ──</text>
               )}
-              {row().text ? (
-                <markdown
-                  content={row().text}
-                  streaming={row().status === "running"}
-                  syntaxStyle={markdownSyntax}
-                  fg={theme.textBase}
-                  bg={theme.backgroundBase}
-                />
-              ) : null}
+              {/* The summary body is the model's own working record, not chat.
+                Rendering it inline made ten compactions look like ten
+                conversations (measured trace 2026-10-31, t8); the counts and
+                the per-layer line say what happened without replaying it. */}
               {row().status === "done" ? (
                 <text fg={theme.textMuted}>
                   · {row().beforeMessages}→{row().afterMessages} 条 · {row().inputTokens} in ·{" "}

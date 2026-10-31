@@ -207,6 +207,25 @@ async def test_wave_report_refuses_over_cap_input():
 
 
 @pytest.mark.asyncio
+async def test_wave_report_accepts_a_single_line_written_as_a_string():
+    """The measured run lost two calls to ``'interfaces' must be a list``:
+    a model writes one line as a string, and a one-line handoff is the same
+    report."""
+    task = TaskState(goal="g")
+    task.armed_profile = "plan"
+    task.wave_active = True
+
+    result = await WaveReportTool().execute(
+        {"interfaces": "Task(id, title) -> Task", "decisions": "store uses JSON"},
+        ToolContext(task=task),
+    )
+
+    assert result.success is True
+    assert task.wave_report["interfaces"] == ["Task(id, title) -> Task"]
+    assert task.wave_report["decisions"] == ["store uses JSON"]
+
+
+@pytest.mark.asyncio
 async def test_wave_report_is_only_callable_inside_a_wave():
     task = TaskState(goal="g")
     task.armed_profile = "plan"

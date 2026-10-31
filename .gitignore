@@ -44,3 +44,7 @@ ai_coding/frontend/.bun/
 
 # Runtime-added MCP servers (the wizard writes this; never commit secrets)
 mcp.local.yaml
+
+# Local run configs (contain real API keys; never commit them)
+config.compact.yaml
+config.record.yaml

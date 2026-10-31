@@ -63,6 +63,10 @@ class Compactor:
         # One compaction at a time (see ``compress``): both entries — the
         # turn's assembly and the user's command — pass through it.
         self._lock = asyncio.Lock()
+        #: The last ``compress`` applied an existing checkpoint view without
+        #: compacting (see ``_compress_once``).  The assembler reads it so a
+        #: view does not announce itself as a new compaction.  Reset per call.
+        self.last_was_view = False
 
     @property
     def context_window(self) -> int | None:
@@ -152,7 +156,12 @@ class Compactor:
         reason: CompactionReason = "auto",
     ) -> list[ChatMessage]:
         """One funnel pass; the caller holds the lock (see ``compress``)."""
+        self.last_was_view = False
         if not force and not self._should_run(history, observed_tokens):
+            view = self._checkpoint_view(history, session=session, pinned=pinned)
+            if view is not None:
+                self.last_was_view = True
+                return view
             return history
         self._emit(CompactionStarted(reason=reason))
 
@@ -235,6 +244,53 @@ class Compactor:
     def _summary_attempted(self) -> bool:
         """Did the delegate actually try to summarise?  (Skip vs failure.)"""
         return bool(getattr(self._context, "last_summary_attempted", False))
+
+    def view(
+        self,
+        history: list[ChatMessage],
+        *,
+        session: Any | None,
+        pinned: Sequence[ChatMessage] = (),
+    ) -> list[ChatMessage] | None:
+        """The checkpoint view only, without the compaction gate.
+
+        Used where the caller has already decided not to compact (an
+        ``auto_compact: false`` session still has to send the checkpoint it
+        already owns).
+        """
+        return self._checkpoint_view(history, session=session, pinned=pinned)
+
+    def _checkpoint_view(
+        self,
+        history: list[ChatMessage],
+        *,
+        session: Any | None,
+        pinned: Sequence[ChatMessage],
+    ) -> list[ChatMessage] | None:
+        """Ask the delegate for a checkpoint-shaped view, if it has one.
+
+        Additive and probed: an older injected context object has no such
+        method, and a view must never fail a turn -- ``None`` means "send the
+        history as it is".
+        """
+        view = getattr(self._context, "checkpoint_view", None)
+        if not callable(view):
+            return None
+        try:
+            params: Mapping[str, Any] = inspect.signature(view).parameters
+        except (TypeError, ValueError):
+            params = {}
+        try:
+            if pinned and "pinned" in params:
+                out = view(history, session=session, pinned=pinned)
+            else:
+                out = view(history, session=session)
+        except Exception:  # noqa: BLE001 — a view is an optimisation, not a turn
+            _log.debug("checkpoint view failed; sending the raw history", exc_info=True)
+            return None
+        if not out:
+            return None
+        return out if isinstance(out, list) else None
 
     def _should_run(self, history: list[ChatMessage], observed_tokens: int) -> bool:
         """True unless the delegate's own gate says this turn needs nothing.

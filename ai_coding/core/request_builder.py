@@ -154,4 +154,7 @@ def tool_context(
         # C3: the ephemeral replan turn edits what is left; ``todo_write``
         # refuses terminal items there.
         replan=bool(getattr(session, "replan_mode", False)),
+        # F: the item a plan step owns; ``todo_write`` uses it to freeze the
+        # plan contract (verify/content) and to refuse adding items mid-run.
+        step_item_id=str(getattr(session, "step_item_id", "") or ""),
     )

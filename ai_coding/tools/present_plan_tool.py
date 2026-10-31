@@ -105,9 +105,11 @@ class PresentPlanTool(BaseTool):
                 "items": {
                     "type": "array",
                     "description": (
-                        "The executable steps, in order. Approval writes these into "
-                        "the task list the runner executes; do not also write them "
-                        "with todo_write."
+                        "The executable work items, in order; one item per "
+                        "deliverable outcome (at most six for an implementation "
+                        "plan), not one per file or document. Approval writes "
+                        "these into the task list the runner executes; do not also "
+                        "write them with todo_write."
                     ),
                     "items": {
                         "type": "object",
@@ -119,8 +121,10 @@ class PresentPlanTool(BaseTool):
                             "verify": {
                                 "type": "string",
                                 "description": (
-                                    "Shell command proving this step; omit when the "
-                                    "outcome is not machine-checkable."
+                                    "Shell command proving user-visible behaviour; "
+                                    "omit when the outcome is not machine-checkable. "
+                                    "Never use a file this plan produces as its own "
+                                    "proof."
                                 ),
                             },
                             "depends_on": {

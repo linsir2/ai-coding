@@ -177,6 +177,19 @@ def _is_snip_placeholder(message: ChatMessage) -> bool:
 
 _SNIP_PLACEHOLDER_RE = re.compile(r"\[snipped \d+ messages\]")
 
+#: The harness's own lines, written as user-role synthetic messages so the model
+#: reads them as instructions.  A summary must not treat them as the operator
+#: speaking: the merge prompt lets only user messages rewrite 目标/约束, and
+#: these are the loop talking.  ``[plan]`` is deliberately absent -- a planning
+#: round's marker carries the topic the human asked to plan.
+_HARNESS_PREFIXES = (
+    "[continue]",
+    "[task-gate]",
+    "[steering]",
+    "[stream-interrupted]",
+    "[notice]",
+)
+
 
 def _is_background_notice(message: ChatMessage) -> bool:
     """True for harness operations, not conversation (D-1 gap 5, oc parity:
@@ -505,9 +518,21 @@ def _render_message(message: ChatMessage) -> str:
     estimate and wrong for a summary: it drops the tool name and arguments, so
     the model cannot tell "I ran the tests" from "I meant to".  That is exactly
     the material the ``## 已尝试且失败`` section is written from.
+
+    Harness nudges are ``[harness]``, not ``[user]``: the merge prompt lets only
+    a user message rewrite 目标/约束, and a ``[continue]``/``[task-gate]`` line
+    is the loop talking, not the operator.  The plan *seed* stays ``[user]`` --
+    it is synthetic too, but it is the step's task statement.
     """
     role = message.role or "user"
     body = (message.content or "").strip()
+    label: str = role
+    if (
+        role == "user"
+        and getattr(message, "synthetic", False)
+        and any(body.startswith(prefix) for prefix in _HARNESS_PREFIXES)
+    ):
+        label = "harness"
     calls = [
         f"{getattr(call, 'name', '?')}({_short_args(getattr(call, 'arguments', ''))})"
         for call in (getattr(message, "tool_calls", ()) or ())
@@ -516,9 +541,9 @@ def _render_message(message: ChatMessage) -> str:
         name = getattr(message, "tool_name", "") or "tool"
         head = f"[tool:{name}]"
     elif calls:
-        head = f"[{role}] → " + ", ".join(calls)
+        head = f"[{label}] → " + ", ".join(calls)
     else:
-        head = f"[{role}]"
+        head = f"[{label}]"
     if not body:
         return head
     if role == "tool":
@@ -578,6 +603,13 @@ def summary_chunks(messages: Sequence[ChatMessage], cap: int) -> list[str]:
     used = 0
     for message in messages:
         if _is_snip_placeholder(message) or _is_background_notice(message):
+            continue
+        # The todo table is a live control panel, not conversation.  Feeding it
+        # to the summariser made every checkpoint reproduce the plan
+        # ("1 波 14 项") and the next model re-read the list instead of
+        # continuing (trace 2026-10-31, t8).  The tool call's own arguments
+        # (what changed) are still in the transcript and still summarised.
+        if message.role == "tool" and (message.tool_name or "") == "todo_write":
             continue
         for piece in _split_text(_render_message(message), cap):
             if current and used + len(piece) + 1 > cap:
@@ -770,6 +802,11 @@ def install_checkpoint(
     session.compaction_checkpoint = summary
     session.compaction_consumed = int(consumed)
     session.compaction_anchor = str(anchor)
+    # The meter's last reading describes the request *before* this checkpoint;
+    # the next assembly sends the much smaller view.  Clearing it makes the next
+    # gate measure the view (``working_history_tokens``) instead of a number the
+    # checkpoint has already invalidated.
+    session.live_context_tokens = 0
 
 
 def _ensure_pinned(
@@ -1326,6 +1363,43 @@ class ContextManager:
             return int(observed_tokens) >= ceiling
         return _history_tokens(messages) >= ceiling
 
+    def checkpoint_view(
+        self,
+        messages: list[ChatMessage],
+        *,
+        session: Any | None = None,
+        pinned: Sequence[ChatMessage] = (),
+    ) -> list[ChatMessage] | None:
+        """The request's history with an existing checkpoint applied, or ``None``.
+
+        The budget path compacts a copy and never rewrites ``session.messages``
+        (append-only, so rewind and undo still work).  That is sound, but the
+        checkpoint therefore has to be re-applied on *every* request -- not only
+        on the one that pays for a summary.  Applying it only when the gate
+        opens produced a measured oscillation (trace 2026-10-31, t8):
+
+            i27 195,841 → i28 21,864 → i29 201,556 → i30 19,720 → …
+
+        The gate reads the last request's provider count; after a compacted
+        request that number is small, so the next gate stays shut and the
+        assembler sent the raw 200k history again.
+
+        Pure and silent: no model call, no event, no checkpoint mutation.  ``None``
+        means "nothing to apply" (no checkpoint, an anchor mismatch after an
+        undo/edit, or a view that is not smaller than the raw history).
+        """
+        if session is None or not messages:
+            return None
+        previous, used = read_checkpoint(session, messages)
+        if not previous or used <= 0 or used > len(messages):
+            return None
+        out = [_checkpoint_note(previous), *messages[used:]]
+        out = _ensure_pinned(out, pinned)
+        out = sanitize_pairs(out)
+        if _history_tokens(out) >= _history_tokens(list(messages)):
+            return None
+        return out
+
     async def compress_if_needed(
         self,
         messages: list[ChatMessage],
@@ -1344,7 +1418,8 @@ class ContextManager:
         append-only turns, 26% when the middle was rewritten every turn).
         """
         if not force and not self.should_compact(messages, observed_tokens):
-            return messages
+            view = self.checkpoint_view(messages, session=session, pinned=pinned)
+            return view if view is not None else messages
         out = await self.compress(
             messages,
             on_summary=on_summary,

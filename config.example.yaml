@@ -24,6 +24,15 @@
 #     api_key: ${DEEPSEEK_API_KEY}  # or omit it: the provider's env var is used
 #     max_tokens: 4096
 #     temperature: 0.7
+#     context_window: 128000         # 0/omitted = the conservative 48k default
+#     # Optional prices, used only to turn tokens into money.  Zero means
+#     # "unknown" (the cost line hides; it never shows a fake ¥0).  Per-1k is
+#     # the historical key; `price_*_per_1m` is accepted too and converted --
+#     # a provider's published "¥2 / M tokens" belongs there, not in the per-1k
+#     # key (putting it there charges 1000x).
+#     price_input_per_1k: 0.0005
+#     price_output_per_1k: 0.001
+#     price_cached_per_1k: 0.0001    # unset = cache hits at the input price
 #
 # default_model: deepseek-chat
 #

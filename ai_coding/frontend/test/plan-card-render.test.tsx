@@ -11,7 +11,14 @@ import type { ChatMessage } from "../src/state/session"
 
 const planMessage = (
   goal: string,
-  items: { id: string; content: string; status: string; verify?: string; dependsOn?: string[] }[],
+  items: {
+    id: string
+    content: string
+    status: string
+    verify?: string
+    dependsOn?: string[]
+    evidence?: string
+  }[],
 ): ChatMessage => ({
   role: "assistant",
   parts: [
@@ -115,22 +122,46 @@ describe("the plan card (20 §批次2)", () => {
     setup.renderer.destroy()
   })
 
-  test("items show their proof command and dependencies (D5)", async () => {
-    // D5: the live card shows what approval will run -- the same second
-    // line the review card draws, so the two cards can be checked against
-    // each other. An empty verify reads "无证明命令" (never a missing line).
+  test("the live card keeps the proof command out of settled rows (D5, revised)", async () => {
+    // D5's safety property lives in the review card (the approval screen
+    // draws every verify in full).  The live card is for scanning progress:
+    // settled rows are one line, and only the item running now shows a
+    // truncated proof.  Measured 2026-10-31: a 14-item plan with full
+    // `test -f && wc -l` lines filled the whole screen.
     const setup = await render(
       planMessage("上线", [
         { id: "1", content: "建目录", status: "completed", verify: "test -d out" },
-        { id: "2", content: "写文件", status: "in_progress", verify: "", dependsOn: ["1"] },
+        {
+          id: "2",
+          content: "跑全量测试",
+          status: "in_progress",
+          verify: "pytest tests/ -q 2>/dev/null",
+          dependsOn: ["1"],
+        },
         { id: "3", content: "想事情", status: "pending" },
       ]),
     )
     const frame = setup.captureCharFrame()
     const text = frame.split("\n").join(" ")
-    expect(text).toContain("verify：test -d out")
-    expect(text).toContain("verify：无证明命令 · 依赖 #1")
-    expect(text).toContain("verify：无证明命令")
+    expect(text).not.toContain("verify：test -d out")
+    expect(text).not.toContain("依赖 #1")
+    expect(text).toContain("verify: pytest tests/ -q 2>/dev/null")
+    setup.renderer.destroy()
+  })
+
+  test("a blocked item shows why it could not land", async () => {
+    const setup = await render(
+      planMessage("上线", [
+        {
+          id: "1",
+          content: "被依赖卡住",
+          status: "blocked",
+          evidence: "verify failed: assert 245 == 200",
+        },
+      ]),
+    )
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("↳ verify failed: assert 245 == 200")
     setup.renderer.destroy()
   })
 })

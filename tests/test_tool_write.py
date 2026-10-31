@@ -56,6 +56,7 @@ async def test_write_without_prior_read_denied(setup):
     # never read → stale check fails
     result = await tool.execute({"path": "f.txt", "content": "new"})
     assert result.success is False
+    assert result.error == "must_read_first"
     out = result.output.lower()
     assert "read" in out or "stale" in out or "never" in out
 
@@ -69,4 +70,5 @@ async def test_write_stale_after_external_modification(setup):
     p.write_text("v2 externally changed")  # external modification
     result = await tool.execute({"path": "f.txt", "content": "overwrite"})
     assert result.success is False
+    assert result.error == "stale_read", "the card must say why, not a bare '?'"
     assert "stale" in result.output.lower() or "modified" in result.output.lower()

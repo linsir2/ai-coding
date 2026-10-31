@@ -172,6 +172,9 @@ def rule_matches(
 #: "subAgent" would never fire against the tool it names.
 ACTION_ALIASES: Mapping[str, frozenset[str]] = {
     "edit": frozenset({"write", "edit"}),
+    # ``shell_read`` is deliberately NOT here: the plan agent's own
+    # ``deny shell *`` would otherwise hide the one read-only shell plan mode
+    # is meant to use.  Operators who want it gone name ``shell_read``.
     "shell": frozenset({"bash"}),
     "question": frozenset({"ask_user"}),
 }

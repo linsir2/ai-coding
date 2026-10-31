@@ -119,6 +119,10 @@ def _validated(params: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
         raw = params.get(name, [])
         if raw is None:
             raw = []
+        # Models write one line as a string often enough that refusing it cost
+        # two calls in the measured run.  A single line is the same report.
+        if isinstance(raw, str):
+            raw = [raw] if raw.strip() else []
         if not isinstance(raw, list):
             return {}, f"'{name}' must be a list of strings"
         if len(raw) > WAVE_HANDOFF_MAX_ITEMS:

@@ -183,11 +183,41 @@ def _build_loop(
         memory_store, extractor=extractor, config=app_cfg.memory,
         embeddings=embeddings,
     )
+    effective_window = resolve_context_window(app_cfg)
+    # A budget far below the model's own window is an operator choice, not a
+    # bug -- but it makes compaction fire at that budget, not near the model's
+    # window.  Say so once: "context 62% used" beside a 48k ceiling is exactly
+    # how a run looks broken when it is only configured small (trace 2026-10-31).
+    declared = 0
+    models = getattr(app_cfg, "models", None) or {}
+    if isinstance(models, dict):
+        model = models.get(str(getattr(app_cfg, "default_model", "") or ""))
+    else:  # pragma: no cover — a hand-built object, not the loaded config
+        model = getattr(models, str(getattr(app_cfg, "default_model", "") or ""), None)
+    if isinstance(model, dict):
+        raw_window = model.get("context_window", 0)
+    else:
+        raw_window = getattr(model, "context_window", 0)
+    try:
+        declared = max(0, int(raw_window or 0))
+    except (TypeError, ValueError):
+        declared = 0
+    configured = int(getattr(app_cfg.ai, "max_context_tokens", 0) or 0)
+    if configured > 0 and declared > 2 * configured:
+        _log.warning(
+            "ai.max_context_tokens=%d is far below model %r's declared window %d; "
+            "compaction will fire near %d, not the model window. Set it to 0 "
+            "(or the model window) to compact near the real limit.",
+            configured,
+            str(getattr(app_cfg, "default_model", "") or ""),
+            declared,
+            configured,
+        )
     context = ContextManager(
         app_cfg.ai,
         transcripts_root=ws,
         summarizer=summarizer,
-        context_window=resolve_context_window(app_cfg),
+        context_window=effective_window,
     )
 
     prompt = PromptAssembler(BASE_INSTRUCTIONS)

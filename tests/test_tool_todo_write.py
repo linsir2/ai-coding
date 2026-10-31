@@ -43,6 +43,18 @@ async def test_add_accepts_depends_on(tool, ctx):
 
 
 @pytest.mark.asyncio
+async def test_a_missing_action_is_inferred_from_the_params(tool, ctx):
+    """Providers do not enforce ``required``; the measured run omitted it once.
+    content → add, id → update, nothing → list."""
+    added = await tool.execute({"content": "do the thing"}, ctx)
+    listed = await tool.execute({}, ctx)
+
+    assert added.success is True
+    assert [item.content for item in ctx.task.items] == ["do the thing"]
+    assert listed.success is True
+
+
+@pytest.mark.asyncio
 async def test_update_sets_status_and_evidence(tool, ctx):
     await tool.execute({"action": "add", "content": "task a"}, ctx)
     r = await tool.execute(
@@ -55,6 +67,38 @@ async def test_update_sets_status_and_evidence(tool, ctx):
     assert item.status == "completed"
     assert item.evidence == "tests pass"
     assert "[x] 1. task a" in r.output
+
+
+@pytest.mark.asyncio
+async def test_a_step_cannot_rewrite_the_plan_contract(tool):
+    """A step executes the approved plan; it must not rewrite verify/content
+    (the runner would execute a command the model authored mid-run)."""
+    task = TaskState(goal="goal")
+    task.add("one", verify="pytest -q")
+    task.add("two", verify="pytest -q")
+    ctx = ToolContext(task=task, step_item_id="1")
+
+    verify_change = await tool.execute(
+        {"action": "update", "id": "2", "verify": "rm -rf /"}, ctx
+    )
+    addition = await tool.execute({"action": "add", "content": "three"}, ctx)
+
+    assert verify_change.success is False and verify_change.error == "frozen_verify"
+    assert addition.success is False and addition.error == "frozen_plan"
+
+
+@pytest.mark.asyncio
+async def test_a_step_may_still_update_status_and_evidence(tool):
+    task = TaskState(goal="goal")
+    task.add("one", verify="pytest -q")
+    ctx = ToolContext(task=task, step_item_id="1")
+
+    result = await tool.execute(
+        {"action": "update", "id": "1", "status": "completed", "evidence": "tests pass"},
+        ctx,
+    )
+
+    assert result.success is True
 
 
 @pytest.mark.asyncio

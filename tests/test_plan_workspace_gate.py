@@ -71,6 +71,21 @@ async def test_outside_plan_item_stops_before_execution(tmp_path):
     assert len(loop.calls) == 1  # planned once; the caller never runs it
 
 
+def test_shell_redirections_to_dev_null_are_not_targets(tmp_path):
+    """Measured trace 2026-10-31: four plan refusals named ``/dev/null``,
+    because ``2>/dev/null`` is a path shape and ``/dev`` is a real directory.
+    A device is a sink the kernel owns, not a file the plan writes."""
+    assert outside_workspace_paths(
+        ["pytest tests/ -q 2>/dev/null || true"], str(tmp_path), from_shell=True
+    ) == []
+
+
+def test_a_real_outside_target_next_to_a_dev_null_still_refuses(tmp_path):
+    assert outside_workspace_paths(
+        ["cp /home/x/y 2>/dev/null"], str(tmp_path), from_shell=True
+    ) == ["/home/x/y"]
+
+
 def test_a_configured_extra_root_is_not_reported_as_outside(tmp_path):
     """Regression (B, found while adding D5): the warning asked "can the file
     tools reach this?", and answered with a Sandbox built from the workspace

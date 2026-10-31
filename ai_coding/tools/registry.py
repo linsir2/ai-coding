@@ -25,8 +25,22 @@ class ToolRegistry:
         self._tools[tool.name] = tool
 
     def get(self, name: str) -> BaseTool | None:
-        """Look up a tool by name, or return None if absent."""
-        return self._tools.get(name)
+        """Look up a tool by name, or return None if absent.
+
+        An exact hit wins.  A case-insensitive fallback exists because models
+        write tool names as words: the measured trace called ``subagent`` five
+        times (the registry spells it ``subAgent``) and every call failed as
+        ``unknown_tool``.  Names never differ only by case here, so the
+        fallback cannot shadow another tool.
+        """
+        hit = self._tools.get(name)
+        if hit is not None:
+            return hit
+        lowered = name.lower()
+        for key, tool in self._tools.items():
+            if key.lower() == lowered:
+                return tool
+        return None
 
     def list_names(self) -> list[str]:
         """Return all registered tool names (sorted for determinism)."""

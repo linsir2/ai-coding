@@ -171,6 +171,13 @@ class SubAgentTool(BaseTool):
             "for a short label you make up. Isolated writes are committed to a "
             "branch and are NOT merged; the report names it. The sub-agent's own "
             "reasoning is not returned."
+            + (
+                " It runs in an ISOLATED worktree: use paths relative to that "
+                "worktree, never absolute paths of the parent repository. For "
+                "read-only exploration use parallel_research instead."
+                if self._isolate
+                else ""
+            )
         )
 
     @property
