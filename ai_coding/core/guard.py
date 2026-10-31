@@ -308,6 +308,16 @@ class DuplicateCallGuard:
             return GuardDecision(GuardVerdict.ALLOW)
         fingerprint = call_fingerprint(call)
         succeeded = self._successes.get(fingerprint, [])
+        if call.name.lower() == "bash":
+            # Re-running the suite after an edit is the repair loop; without a
+            # change the repeat is the duplicate this guard exists to stop.
+            # The read-only "output is gone" allowance does not apply: a trimmed
+            # bash output is not evidence its side effect did not happen.
+            if _mutated_after_read(ctx.messages, succeeded):
+                return GuardDecision(GuardVerdict.ALLOW)
+            if len(succeeded) >= self.threshold:
+                return self._refusal(call, succeeded[0], len(succeeded))
+            return GuardDecision(GuardVerdict.ALLOW)
         if call.name.lower() in _REREADABLE:
             return self._check_reread(
                 call, succeeded, _visible_tool_ids(ctx.messages), ctx.messages

@@ -157,12 +157,19 @@ class Compactor:
     ) -> list[ChatMessage]:
         """One funnel pass; the caller holds the lock (see ``compress``)."""
         self.last_was_view = False
-        if not force and not self._should_run(history, observed_tokens):
-            view = self._checkpoint_view(history, session=session, pinned=pinned)
-            if view is not None:
-                self.last_was_view = True
-                return view
-            return history
+        view = self._checkpoint_view(history, session=session, pinned=pinned)
+        if not force:
+            # Gate on the request the checkpoint will actually send.  The raw
+            # list keeps its 200k prefix after a checkpoint; judging it again
+            # reopened the gate every iteration (trace 2026-10-31 t8: six
+            # compactions in one turn, each 150→14/155→11/162→9 messages).
+            gate_history = view if view is not None else history
+            gate_observed = 0 if view is not None else observed_tokens
+            if not self._should_run(gate_history, gate_observed):
+                if view is not None:
+                    self.last_was_view = True
+                    return view
+                return history
         self._emit(CompactionStarted(reason=reason))
 
         def _delta(text: str) -> None:

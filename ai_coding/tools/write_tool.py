@@ -17,6 +17,12 @@ from ai_coding.security.sandbox import (
 from ai_coding.tools.base import BaseTool, ToolContext
 
 _DEFAULT_MAX_CHARS = 2_000_000  # 2M chars
+#: One call's content cap.  Measured (trace 2026-10-31, session f1d881ee):
+#: a model asked to write a 30k-char document sends the whole body in one tool
+#: call, the provider truncates the arguments, the JSON is invalid, and the
+#: model then repeats the same giant call.  A per-call cap plus an append mode
+#: makes writing a large file a sequence of small, parseable calls instead.
+MAX_CHUNK_CHARS = 8_000
 
 
 class WriteTool(BaseTool):
@@ -48,7 +54,10 @@ class WriteTool(BaseTool):
         return (
             "Write content to a file, overwriting if it exists. "
             "Parent directories are created automatically. "
-            "You MUST read the file first before overwriting it (stale-read protection)."
+            "You MUST read the file first before overwriting it (stale-read protection). "
+            f"For a file larger than {MAX_CHUNK_CHARS} characters, write the first "
+            "chunk with mode='overwrite' and append the remaining chunks with "
+            "mode='append'; never put a whole long document in one call."
         )
 
     @property
@@ -60,7 +69,22 @@ class WriteTool(BaseTool):
                     "type": "string",
                     "description": "Path to the file (relative to workspace).",
                 },
-                "content": {"type": "string", "description": "Content to write."},
+                "content": {
+                    "type": "string",
+                    "description": (
+                        f"Content to write (at most {MAX_CHUNK_CHARS} characters "
+                        "per call; use mode='append' for the rest)."
+                    ),
+                    "maxLength": MAX_CHUNK_CHARS,
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["overwrite", "append"],
+                    "description": (
+                        "overwrite (default) replaces the file; append adds to "
+                        "the end. Use append for files larger than one chunk."
+                    ),
+                },
             },
             "required": ["path", "content"],
         }
@@ -80,12 +104,24 @@ class WriteTool(BaseTool):
     ) -> ToolResult:
         path_str = str(params.get("path", ""))
         content = str(params.get("content", ""))
-
-        if len(content) > self._max_chars:
-            msg = (
-                f"content too large ({len(content)} chars > {self._max_chars} limit)"
+        mode = str(params.get("mode", "overwrite") or "overwrite").strip().lower()
+        if mode not in ("overwrite", "append"):
+            return ToolResult(
+                success=False,
+                output=(
+                    f"error: 'mode' must be 'overwrite' or 'append' (got {mode!r})"
+                ),
+                error="invalid_mode",
             )
-            return ToolResult(success=False, output=msg)
+
+        limit = min(self._max_chars, MAX_CHUNK_CHARS)
+        if len(content) > limit:
+            msg = (
+                f"error: 单次写入 {len(content)} 字符超过 {limit} 上限，文件未写入。"
+                "请把内容拆成多段：先 write(mode='overwrite') 写第一段，"
+                "再用 write(mode='append') 续写；不要重发同一大段内容。"
+            )
+            return ToolResult(success=False, output=msg, error="content_too_large")
 
         try:
             target = self._sandbox.resolve(path_str)
@@ -100,9 +136,12 @@ class WriteTool(BaseTool):
                     output="计划模式下只能写入计划目录。",
                     error="plan_directory_required",
                 )
-            return self._write_plan_file(path_str, relative, content, target)
+            return self._write_plan_file(
+                path_str, relative, content, target, append=mode == "append"
+            )
 
-        # Stale-read check for existing files
+        # Stale-read check for existing files (append included: adding to a
+        # file the model has not read is the same blind edit).
         if target.exists():
             state = self._tracker.check(target)
             if state == FileState.NEVER_READ:
@@ -120,14 +159,19 @@ class WriteTool(BaseTool):
 
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            if mode == "append":
+                with target.open("ab") as handle:
+                    handle.write(content.encode("utf-8"))
+            else:
+                target.write_text(content, encoding="utf-8")
         except OSError as exc:
             return ToolResult(success=False, output=f"write error: {exc}")
 
         self._tracker.record(target)
+        verb = "appended" if mode == "append" else "wrote"
         return ToolResult(
             success=True,
-            output=f"wrote {len(content)} chars to {path_str}",
+            output=f"{verb} {len(content)} chars to {path_str}",
             # r18/F4: the path we actually wrote, normalised to the workspace.
             # Undo needs the list of files a turn created, and this is the only
             # place that knows it -- git cannot tell "the model wrote this" from
@@ -155,6 +199,8 @@ class WriteTool(BaseTool):
         relative: Path,
         content: str,
         target: Path,
+        *,
+        append: bool = False,
     ) -> ToolResult:
         # target.exists() is only the NEVER_READ fast path for a brand-new
         # file and may misreport under a symlink race; the authoritative
@@ -195,7 +241,10 @@ class WriteTool(BaseTool):
                         ),
                     )
             data = content.encode("utf-8")
-            os.ftruncate(opened.fd, 0)
+            if append:
+                os.lseek(opened.fd, 0, os.SEEK_END)
+            else:
+                os.ftruncate(opened.fd, 0)
             while data:
                 written = os.write(opened.fd, data)
                 data = data[written:]
@@ -207,9 +256,10 @@ class WriteTool(BaseTool):
             os.close(opened.fd)
 
         self._tracker.record_stat(opened.path, mtime=post.st_mtime, size=post.st_size)
+        verb = "appended" if append else "wrote"
         return ToolResult(
             success=True,
-            output=f"wrote {len(content)} chars to {path_str}",
+            output=f"{verb} {len(content)} chars to {path_str}",
             artifacts=(
                 ToolArtifact(
                     path=opened.path.relative_to(self._sandbox.workspace).as_posix(),

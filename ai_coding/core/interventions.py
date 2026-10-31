@@ -394,7 +394,8 @@ def _due(
 
 
 def select(
-    snapshot: TurnSnapshot, *, phase: str, limits: LadderLimits
+    snapshot: TurnSnapshot, *, phase: str, limits: LadderLimits,
+    allow_search: bool = True,
 ) -> InterventionDecision | None:
     """Pick the one gate that fires at this decision point (priority order)."""
     ledger: Mapping[str, Any] = getattr(snapshot, "intervention_ledger", None) or {}
@@ -403,7 +404,11 @@ def select(
         # strategy ladder first ("stop repeating the failing call").  SEARCH is a
         # PRE-only gate on purpose: at the post-step seam the model has already
         # stopped looking by itself, so there is no rung left to climb.
-        gates: tuple[str, ...] = (STRATEGY, FATIGUE, SEARCH)
+        gates: tuple[str, ...] = (
+            (STRATEGY, FATIGUE, SEARCH)
+            if allow_search
+            else (STRATEGY, FATIGUE)
+        )
     else:
         # 13 §2.1（Q1 拍板）: the acceptance branch is exclusive when contracts
         # exist — the task gate never competes with it (plan-runner parity).

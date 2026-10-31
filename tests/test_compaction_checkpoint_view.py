@@ -123,6 +123,23 @@ async def test_compress_if_needed_applies_the_view_below_the_watermark():
 
 
 @pytest.mark.asyncio
+async def test_a_stale_raw_measurement_does_not_recompact_the_view():
+    """Trace f1d881ee t8 compacted six times in one turn: the gate kept reading
+    the raw 200k though every request sent the 14k view.  Once a checkpoint
+    exists, the view is what the gate must measure."""
+    manager, session, history = _with_checkpoint()
+    events = []
+    compactor = Compactor(manager, emit=events.append)
+
+    out = await compactor.compress(
+        history, deadline=None, observed_tokens=200_000, session=session
+    )
+
+    assert len(out) == 6 and (out[0].content or "").startswith(CHECKPOINT_MARK)
+    assert events == [], "the stale raw reading is not the request"
+
+
+@pytest.mark.asyncio
 async def test_the_compactor_returns_the_view_without_emitting_compaction_events():
     manager, session, history = _with_checkpoint()
     events = []

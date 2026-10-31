@@ -152,7 +152,6 @@ class _TwoPhaseLoop:
         for item in session.task.open_items():
             if not item.is_terminal():
                 item.status = "completed"
-                break
         return "step done"
 
 
@@ -195,7 +194,7 @@ async def test_plan_command_plans_and_plan_run_executes():
 
     await handle_input(loop, "/plan run", session, sessions, console)
 
-    assert sum("[plan-run]" in c for c in loop.calls) == 2             # both steps ran
+    assert sum("[plan-run]" in c for c in loop.calls) == 1             # one turn runs the plan
     assert session.task.done_count == 2
     assert (session.mode, session.readonly) == ("normal", False)
 

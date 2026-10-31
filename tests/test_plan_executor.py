@@ -45,6 +45,7 @@ class _Loop(_StubLoop):
         self.auto_caps: list[int] = []
         self.executing_seen: list[bool] = []
         self.policy_objects: list[object] = []
+        self.max_iterations: list[int] = []
 
     async def process_input(
         self, session, text, on_delta=None, observer=None, synthetic=False
@@ -54,6 +55,7 @@ class _Loop(_StubLoop):
         self.auto_caps.append(int(self.policy.config.max_auto_continuations))
         self.executing_seen.append(bool(getattr(session, "plan_executing", False)))
         self.policy_objects.append(self.policy)
+        self.max_iterations.append(int(self.policy.config.max_iterations))
         action = self._actions[0] if self._actions else "complete-all"
         if action != "complete-all":
             return await super().process_input(
@@ -207,54 +209,60 @@ async def test_plan_policy_is_active_and_acceptance_stays_out_of_the_turn():
     await PlanExecutor(loop).run(session)
 
     assert loop.stop_policies == [PLAN_CONTINUE]
+    assert loop.max_iterations == [60]
     assert loop.executing_seen == [True]
     assert loop.acceptance_seen == [[]]
     assert session.acceptance == []
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_model_gets_the_next_turn_automatically():
+async def test_stopping_early_leaves_leftovers_without_a_second_turn():
     session = _session_with("a", "b", "c")
-    loop = _Loop(["complete", "complete", "complete"])
-    _settings(loop, plan_max_item_attempts=3)
+    loop = _Loop(["complete"])
+    _settings(loop)
 
     report = await PlanExecutor(loop).run(session)
 
-    assert len(loop.calls) == 3
-    assert all(seen is session for seen in loop.sessions)
-    assert report.completed == ["1", "2", "3"]
+    assert len(loop.calls) == 1
+    assert report.completed == ["1"]
+    assert report.stalled == ["2", "3"]
+    assert "plan incomplete" in (report.stopped or "")
 
 
 @pytest.mark.asyncio
-async def test_failed_verify_gets_a_repair_turn():
+async def test_failed_verify_is_stalled_for_the_next_run():
     session = _session_with("a", "b", verifies=["true", "true"])
-    loop = _Loop(["complete-all", "complete-all"])
+    loop = _Loop(["complete-all"])
     _settings(loop)
-    loop._verify_results = [False, True, True]
+    loop._verify_results = [False, True]
 
     report = await PlanExecutor(loop).run(session)
 
-    assert len(loop.calls) == 2
-    assert set(report.completed) == {"1", "2"}
-    assert {entry.proof for entry in session.step_deliveries} == {"verified"}
-    # The repair prompt carries the proof output, not a silent retry.
-    assert "失败输出" in loop.calls[1]
+    # One turn, no repair turn: a failed proof stays retryable, not a dead end.
+    assert len(loop.calls) == 1
+    assert report.completed == ["2"]
+    assert report.stalled == ["1"]
+    assert session.task.get("1").status == "in_progress"
+    assert {entry.status for entry in session.step_deliveries} == {
+        "completed",
+        "stalled",
+    }
 
 
 @pytest.mark.asyncio
-async def test_two_failed_verifies_block_and_skip_dependents():
+async def test_a_failed_dependency_keeps_an_already_completed_item():
     session = _session_with("a", "b", verifies=["true", None], deps={"2": ["1"]})
-    loop = _Loop(["complete-all", "complete-all"])
+    loop = _Loop(["complete-all"])
     _settings(loop)
-    loop._verify_results = [False, False]
+    loop._verify_results = [False]
 
     report = await PlanExecutor(loop).run(session)
 
-    assert session.task.get("1").status == "blocked"
+    assert session.task.get("1").status == "in_progress"
     # The model completed the dependent in the same turn, before the proof ran;
     # a completed dependent keeps its receipt (the wave rule).
     assert session.task.get("2").status == "completed"
-    assert report.blocked == ["1"]
+    assert report.stalled == ["1"]
 
 
 # ---- no-verify items --------------------------------------------------
@@ -289,16 +297,15 @@ async def test_no_progress_stops_after_one_empty_turn():
 
 
 @pytest.mark.asyncio
-async def test_token_budget_uses_per_round_delta():
+async def test_token_budget_uses_the_turns_delta():
     session = _session_with("a", verifies=["true"])
-    loop = _Loop(["complete-all", "complete-all"], usage_per_turn=60)
+    loop = _Loop(["complete-all"], usage_per_turn=120)
     _settings(loop, plan_token_budget=100)
-    loop._verify_results = [False, True]
+    loop._verify_results = [True]
 
     report = await PlanExecutor(loop).run(session)
 
     assert "budget" in (report.stopped or "")
-    # 60 + 60, not 60 + 120.
     assert session.task.plan_tokens_used == 120
 
 
@@ -381,10 +388,10 @@ async def test_crash_leftover_with_verify_is_checked_not_fiat():
     session.task.get("1").status = "completed"
     loop = _Loop([])
     _settings(loop)
-    loop._verify_results = [False, False, False]
+    loop._verify_results = [False, False]
 
     report = await PlanExecutor(loop).run(session)
 
-    assert session.task.get("1").status == "blocked"
-    assert session.step_deliveries[0].status == "blocked"
-    assert report.blocked == ["1"]
+    assert session.task.get("1").status == "in_progress"
+    assert session.step_deliveries[0].status == "stalled"
+    assert report.stalled == ["1"]

@@ -478,6 +478,16 @@ def test_the_render_caps_the_file_count():
     assert "还有 9 个文件" in text
 
 
+def test_the_default_lists_every_file_a_real_session_read():
+    """Trace f1d881ee: after compaction the model saw eight ledger names and
+    restarted the research.  The default must name all twenty."""
+    marks = tuple(ReadMark(f"f{i}.py", 1, 10, 10) for i in range(20))
+    text = render(marks)
+
+    assert all(f"f{i}.py" in text for i in range(20))
+    assert "还有" not in text
+
+
 def test_a_char_budget_cuts_at_a_line_boundary_not_through_one():
     """A character cut leaves the model holding half of a file line, which it
     will then try to interpret.  Every surviving file line must be whole."""

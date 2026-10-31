@@ -1417,9 +1417,20 @@ class ContextManager:
         keeps the prompt-cache prefix stable (measured: 92-93% hit rate with
         append-only turns, 26% when the middle was rewritten every turn).
         """
-        if not force and not self.should_compact(messages, observed_tokens):
+        if not force:
+            # The gate must judge the history the request will actually send.
+            # An installed checkpoint already replaces the raw prefix with one
+            # note; asking the raw list again reopened the gate on every
+            # iteration and produced six compactions in one measured turn
+            # (trace 2026-10-31, t8: 151→14, 155→11, 162→9, ...).  The view is
+            # the request; the raw history is only its source.
             view = self.checkpoint_view(messages, session=session, pinned=pinned)
-            return view if view is not None else messages
+            effective = view if view is not None else messages
+            # A checkpoint means ``observed_tokens`` may describe the *previous*
+            # (raw) request; the view's own estimate is the honest reading.
+            gate_observed = 0 if view is not None else observed_tokens
+            if not self.should_compact(effective, gate_observed):
+                return effective
         out = await self.compress(
             messages,
             on_summary=on_summary,

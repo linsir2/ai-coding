@@ -470,12 +470,25 @@ class TurnPolicy:
             return self._finish_at(
                 snapshot, "token", "turn token budget exhausted"
             )
+        # Plan-as-Goal / plan research: an autonomous plan turn is not an
+        # execution-drift turn.  The *search* ladder would cut it mid-work
+        # (trace f1d881ee t12: "search unconverged" at round 20 in a planning
+        # turn), which is exactly the multi-turn behaviour the plan executor
+        # exists to remove.  Strategy/fatigue still fire: repeated tool
+        # failures are worth stopping for, even in a plan.  The iteration,
+        # token and wall-clock ceilings bound the rest.
+        allow_search = not (
+            snapshot.mode == "plan"
+            or snapshot.readonly
+            or self.config.stop_policy == PLAN_CONTINUE
+        )
         # R6b tiers 2-3 and F2 now live in the ladder (13 §2.1): one gate fires
         # per iteration, in trigger-priority order, with memory of what the last
         # injection achieved.  The death gates and C3 above stay exactly as they
         # were — they have no ladder to climb.
         gate = interventions.select(
-            snapshot, phase=interventions.PRE, limits=self._limits
+            snapshot, phase=interventions.PRE, limits=self._limits,
+            allow_search=allow_search,
         )
         if gate is not None:
             decision = self._as_turn_decision(gate)

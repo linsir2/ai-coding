@@ -265,12 +265,16 @@ def covers(marks: Sequence[ReadMark], path: str, start: int, end: int) -> bool:
 
 
 def render(
-    marks: Sequence[ReadMark], *, max_chars: int = 900, max_files: int = 8
+    marks: Sequence[ReadMark], *, max_chars: int = 2_400, max_files: int = 64
 ) -> str:
     """The ``<read-ledger>`` tail block, or ``""`` when there is nothing to say.
 
-    An empty block is not an empty block: it is a message the model would pay
-    for on every iteration (the same rule ``volatile_block`` already keeps).
+    ``max_files`` used to be 8.  After a compaction the model read the block,
+    saw eight names, and restarted the task ("8 个文件已完整读取") even though
+    the session had read twenty -- the "…还有 12 个文件" tail names none of
+    them.  The ledger exists to stop that re-read, so the default has to list
+    every file a real session touches (64 names cost ~2k chars, an order of
+    magnitude less than one re-read).
     """
     if not marks:
         return ""

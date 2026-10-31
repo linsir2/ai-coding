@@ -121,45 +121,28 @@ class PlanExecutor(PlanRunner):
                 )
             )
         failures: dict[str, str] = {}
-        max_turns = max(
-            2,
-            int(
-                getattr(settings, "plan_max_item_attempts", 2)
-                or 2
-            ),
-        )
         try:
             # A crash/approval can leave "completed but no receipt" entries;
-            # settle (and verify) them before deciding whether anything is open.
+            # settle (and verify) them before the turn.
             failures = await self._settle_completed(
                 session, task, report, observer
             )
-            turns = 0
-            while True:
-                pending = task.open_items()
-                actionable = [
-                    item for item in pending if item.status != "blocked"
-                ]
-                # A plan whose only leftovers are blocked is finished, not
-                # budget-exhausted: the blocked verdict is the report.
-                if not actionable:
-                    break
-                if turns >= max_turns:
-                    report.stopped = (
-                        f"plan turn budget exhausted: {len(actionable)} item(s) "
-                        "remain open"
-                    )
-                    break
+            pending = [
+                item for item in task.open_items() if item.status != "blocked"
+            ]
+            if pending:
+                # Exactly one turn.  The plan stop policy keeps it open across
+                # item boundaries (opencode's idle hook); a second
+                # ``process_input`` would be the multi-turn executor this
+                # replaced.
                 prompt = (
-                    self._kickoff_prompt(task, actionable)
-                    if turns == 0
-                    else self._continue_prompt(task, actionable, failures)
+                    self._continue_prompt(task, pending, failures)
+                    if failures
+                    else self._kickoff_prompt(task, pending)
                 )
                 verdicts_before = self._verdict_count(report)
                 tools_before = self._tool_calls(session)
-                states_before = {
-                    item.id: item.status for item in task.items
-                }
+                states_before = {item.id: item.status for item in task.items}
                 await self._loop.process_input(
                     session,
                     prompt,
@@ -167,7 +150,6 @@ class PlanExecutor(PlanRunner):
                     observer=observer,
                     synthetic=True,
                 )
-                turns += 1
                 report.turns_used += 1
                 usage = self._turn_usage()
                 if usage:
@@ -184,23 +166,16 @@ class PlanExecutor(PlanRunner):
                         f"budget: plan token budget exhausted "
                         f"({task.plan_tokens_used}/{budget})"
                     )
-                    break
                 progressed = (
                     self._verdict_count(report) > verdicts_before
                     or self._tool_calls(session) > tools_before
                     or self._states_changed(task, states_before)
                 )
-                if not progressed:
+                if not progressed and report.stopped is None:
                     report.stopped = (
                         "no progress: the turn made no tool call and settled "
                         "nothing; remaining items stay open"
                     )
-                    break
-                remaining = [
-                    item for item in task.open_items() if item.status != "blocked"
-                ]
-                if not remaining:
-                    break
         finally:
             if original_policy is not None:
                 self._loop.policy = original_policy
@@ -216,6 +191,14 @@ class PlanExecutor(PlanRunner):
             self._emit_task(observer, task)
 
         await self._settle_open_leftovers(session, task, report, failures, observer)
+        still_open = [
+            item for item in task.open_items() if item.status != "blocked"
+        ]
+        if still_open and report.stopped is None:
+            report.stopped = (
+                f"plan incomplete: {len(still_open)} item(s) remain open "
+                "(one-turn executor; run /plan run again to retry)"
+            )
         self._persist(session)
         self._emit_task(observer, task)
         self._say(console, report.render())
@@ -336,8 +319,30 @@ class PlanExecutor(PlanRunner):
                 continue
             if current.id in self._recorded_this_run or current.id in self._old_completed:
                 continue
-            if current.id in failures or current.status == "blocked":
+            if current.id in failures:
+                # One-turn executor: there is no repair turn.  A failed proof
+                # is a retryable stall, not a blocked dead end -- the next
+                # ``/plan run`` must pick it up again.
                 reason = failures.get(current.id, current.evidence)
+                task.update(
+                    current.id,
+                    status="in_progress",
+                    evidence=f"verify failed: {_tail(reason)}",
+                )
+                self._emit_task(observer, task)
+                delivery = StepDelivery(
+                    step_id=current.id,
+                    statement=current.content,
+                    status="stalled",
+                    attempts=max(1, int(getattr(current, "attempts", 0) or 0)),
+                    ac=[],
+                    summary=f"{current.content}：验收未通过（下次可重跑）",
+                    attested=False,
+                )
+                if current.id not in report.stalled:
+                    report.stalled.append(current.id)
+            elif current.status == "blocked":
+                reason = current.evidence
                 task.update(
                     current.id,
                     status="blocked",

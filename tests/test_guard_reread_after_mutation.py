@@ -17,6 +17,10 @@ def _read(call_id: str) -> ToolCall:
     return ToolCall(id=call_id, name="read", params={"path": "a.py"})
 
 
+def _bash(call_id: str) -> ToolCall:
+    return ToolCall(id=call_id, name="bash", params={"command": "pytest -q"})
+
+
 def _ctx(messages: list[ChatMessage]) -> ToolContext:
     return ToolContext(messages=tuple(messages))
 
@@ -59,6 +63,26 @@ def test_a_reread_after_a_mutation_is_allowed_once():
     history.append(_tool_result("r2"))
     after = guard.check(_read("r3"), _ctx(history), TurnView())
     assert after.verdict.value == "deny"
+
+
+def test_a_bash_command_may_repeat_after_a_mutation():
+    """Re-running the suite after an edit is the repair loop; without a change
+    the repeat is still the duplicate the guard exists to stop."""
+    guard = DuplicateCallGuard(threshold=1)
+    _success(guard, _bash("b1"))
+
+    history = [
+        _assistant_call("b1", "bash"),
+        _tool_result("b1"),
+        _assistant_call("w1", "write"),
+    ]
+    decision = guard.check(_bash("b2"), _ctx(history), TurnView())
+
+    assert decision.verdict.value == "allow", "the workspace changed; re-run"
+
+    no_mutation = [_assistant_call("b1", "bash"), _tool_result("b1")]
+    repeat = guard.check(_bash("b3"), _ctx(no_mutation), TurnView())
+    assert repeat.verdict.value == "deny"
 
 
 def test_a_reread_without_a_mutation_is_still_a_duplicate():
