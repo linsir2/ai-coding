@@ -394,6 +394,10 @@ class RequestAssembler:
         )
         injection = self._active_policy().inject_task(task, instructions)
         instructions = injection.instructions
+        # B3: the plan turn's "keep going" block.  Volatile like the task list
+        # (rebuilt per request, never persisted), so the structural continuation
+        # still gives the model a fresh reason to act.
+        plan_state = self._active_policy().plan_state_block(task, session)
         # Memory and task state are *volatile tail blocks*: the system prompt stays
         # byte-identical and the history stays append-only, so only this small
         # region diverges between turns (docs/r2 §1.13).
@@ -494,6 +498,7 @@ class RequestAssembler:
                 volatile_block("read_ledger", render_read_ledger(session.read_ledger)),
                 volatile_block("mcp_catalog", catalog),
                 volatile_block("task", content_of(injection.message)),
+                volatile_block("plan_state", content_of(plan_state)),
                 volatile_block("recommended_skills", recommended_skills_block),
                 volatile_block("referenced_files", file_block),
                 volatile_block("error_recovery", recovery_block),

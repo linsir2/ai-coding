@@ -1069,6 +1069,7 @@ class AgentLoop:
                     snapshot,
                     mode=session.mode,
                     readonly=session.readonly,
+                    plan_executing=bool(getattr(session, "plan_executing", False)),
                     intervention_ledger=self._settled_interventions(
                         session, task, snapshot
                     ),
@@ -1326,7 +1327,7 @@ class AgentLoop:
                     # model ever seeing it -- the turn closes with a handoff
                     # instead of the answer it had.  So the guard only fires
                     # while a further round exists.
-                    if self._has_a_round_left(index) and self._reject_unsupported_claims(
+                    if self._has_a_round_left(session, index) and self._reject_unsupported_claims(
                         session, step.text or "", index
                     ):
                         self.reporter.report_degraded(
@@ -1386,6 +1387,7 @@ class AgentLoop:
                         snapshot,
                         mode=session.mode,
                         readonly=session.readonly,
+                        plan_executing=bool(getattr(session, "plan_executing", False)),
                         intervention_ledger=self._settled_interventions(
                             session, task, snapshot
                         ),
@@ -2497,14 +2499,18 @@ class AgentLoop:
         except OSError:
             return 0
 
-    def _has_a_round_left(self, index: int) -> bool:
+    def _has_a_round_left(self, session: SessionData, index: int) -> bool:
         """Is there an iteration after this one for a correction to land in?
 
         The turn closes with a handoff report once the ceiling is reached, so a
         correction issued on the last allowed iteration is written into the
         history and never read.
         """
-        ceiling = int(self.policy.config.max_iterations)
+        ceiling = (
+            -1
+            if bool(getattr(session, "plan_executing", False))
+            else int(self.policy.config.max_iterations)
+        )
         if ceiling < 0:
             # Plan-as-Goal: a plan turn has no iteration budget.  Context growth,
             # not step count, is what bounds it -- every iteration compacts on

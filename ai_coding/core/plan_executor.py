@@ -23,7 +23,6 @@ arm/disarm lifecycle, receipts, delivery scoring, prompt markers and the report.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
 
 from ai_coding.core.events import PlanStepReceipt
@@ -33,7 +32,6 @@ from ai_coding.core.plan_runner import (
     _tail,
     outside_workspace_message,
 )
-from ai_coding.core.turn_policy import PLAN_CONTINUE, TurnPolicy
 from ai_coding.domain.acceptance import AcceptanceItem
 from ai_coding.domain.plan_delivery import StepDelivery
 from ai_coding.infra.time_utils import now_utc
@@ -121,26 +119,18 @@ class PlanExecutor(PlanRunner):
         if callable(reset):
             reset()
 
-        original_policy = getattr(self._loop, "policy", None)
         # Plan-as-Goal runs on the conversation's own clock and window: there is
         # no per-plan wall clock, no iteration ceiling and no token budget.  A
         # plan is bounded by its item list, by the context window (every
-        # iteration compacts on its own gate) and by the idle brake (three
-        # consecutive stops with no tool call).  ``max_iterations=-1`` is the
-        # policy's "no ceiling" spelling (0 would mean "no round at all").
+        # iteration compacts on its own gate) and by the two brakes (three
+        # consecutive stops with no tool call; six rounds without progress).
+        # The loop and the policy read ``plan_executing`` for all of it -- the
+        # executor does not touch ``loop.policy`` (a global; GoalRunner swaps it
+        # too, and two runners on one loop would overwrite each other).
         session.item_deadline = None
         session.step_item_id = ""
         session.acceptance = []
         session.plan_executing = True
-        if original_policy is not None:
-            self._loop.policy = TurnPolicy(
-                replace(
-                    original_policy.config,
-                    max_iterations=-1,
-                    stop_policy=PLAN_CONTINUE,
-                    max_auto_continuations=1,
-                )
-            )
         failures: dict[str, str] = {}
         try:
             # A crash/approval can leave "completed but no receipt" entries;
@@ -201,8 +191,6 @@ class PlanExecutor(PlanRunner):
                         "nothing; remaining items stay open"
                     )
         finally:
-            if original_policy is not None:
-                self._loop.policy = original_policy
             session.plan_executing = False
             session.item_deadline = None
             session.step_item_id = ""

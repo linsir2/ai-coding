@@ -109,13 +109,6 @@ BUDGET_PRESSURE_LEAD = "[budget] 本轮预算快用完了"
 #: How much of a budget may remain before the warning appears.
 PRESSURE_RATIO = 0.2
 
-#: Plan-as-Goal (stage 2): a marker, not a decision.  The plan turn used to
-#: let this policy inject ``[plan-continue]``; continuation is now structural
-#: (``AgentLoop._run_turn``: open items + no tool call -> another round, no
-#: text).  The string survives because two rules still read it as "this turn is
-#: executing an approved plan": the search ladder is silenced for it, and the
-#: stall brake runs at the pre-iteration point for tool-calling rounds.
-PLAN_CONTINUE = "plan"
 #: How many consecutive idle boundaries a plan turn tolerates before it closes.
 #: Not a budget: a working turn resets the streak on every tool batch, so only a
 #: model that keeps stopping without reaching for a tool ever reaches it.
@@ -134,7 +127,7 @@ class TurnPolicyConfig:
     #: Iterations one round may start.  ``-1`` means "no ceiling" -- the plan
     #: turn's spelling: what bounds it is the context window and the idle brake.
     max_iterations: int = 10
-    stop_policy: str = "todo_aware"  # natural | todo_aware | strict | plan
+    stop_policy: str = "todo_aware"  # natural | todo_aware | strict
     max_todo_nudges: int = 2
     task_injection: str = "message"  # message | system
     # R4b: cumulative tokens one turn may spend (0 = no ceiling).  It counts the
@@ -226,14 +219,15 @@ class TurnSnapshot:
     # survives across the rounds — in-process only; the session's to_dict
     # whitelist does not persist it, and a new user turn resets it.
     continuations: int = 0
-    #: Plan-as-Goal: consecutive idle boundaries (the model stopped with open
-    #: items and touched no tool).  Without an iteration budget this is the
-    #: brake that ends a run which is no longer working on the list.
-    idle_streak: int = 0
     #: Plan-as-Goal: consecutive rounds in which nothing moved (see
     #: ``PLAN_STALL_ROUNDS``).  Covers a model that keeps calling bookkeeping
     #: tools, which the idle streak by construction cannot see.
     stall_rounds: int = 0
+    #: This turn is executing an approved plan (``session.plan_executing``).
+    #: The policy reads it instead of a ``stop_policy`` value: a plan turn has
+    #: no iteration ceiling, is never nudged to use tools, and its continuation
+    #: belongs to the loop's structural rule.
+    plan_executing: bool = False
     # R6b: how the tool calls have been going.  Fed in by the loop — the policy
     # never counts anything itself, so it stays pure and table-testable.
     failed_streak: int = 0  # consecutive iterations where every call failed
@@ -412,10 +406,7 @@ class TurnPolicy:
         token_gate = bool(self.config.max_turn_tokens) and (
             snapshot.tokens_spent >= self.config.max_turn_tokens
         )
-        if (
-            self.config.stop_policy == PLAN_CONTINUE
-            and snapshot.stall_rounds >= PLAN_STALL_ROUNDS
-        ):
+        if snapshot.plan_executing and snapshot.stall_rounds >= PLAN_STALL_ROUNDS:
             # The plan turn's brake, read where a *tool-calling* round also
             # passes: `decide_after_step` only sees the rounds that ended with
             # no tool call, so a model spinning on `todo_write(list)` would
@@ -445,7 +436,10 @@ class TurnPolicy:
                 return TurnDecision(
                     TurnAction.NUDGE, "plan unsubmitted", inject=PLAN_NUDGE
                 )
-        if self.config.max_iterations >= 0 and snapshot.iteration > self.config.max_iterations:
+        # A plan turn has no iteration ceiling: what bounds it is the item list,
+        # the context window and the two brakes.  Normal turns keep theirs.
+        ceiling = -1 if snapshot.plan_executing else int(self.config.max_iterations)
+        if ceiling >= 0 and snapshot.iteration > ceiling:
             # C3: the budget is gone but the work is not — open items mean the
             # model never finished, so inject a continuation prompt and start a
             # fresh round rather than handing the user a dead turn.  Fires
@@ -490,7 +484,7 @@ class TurnPolicy:
         allow_search = not (
             snapshot.mode == "plan"
             or snapshot.readonly
-            or self.config.stop_policy == PLAN_CONTINUE
+            or snapshot.plan_executing
         )
         # R6b tiers 2-3 and F2 now live in the ladder (13 §2.1): one gate fires
         # per iteration, in trigger-priority order, with memory of what the last
@@ -596,7 +590,7 @@ class TurnPolicy:
                 if verdict is not None:
                     return verdict
             return TurnDecision(TurnAction.FINISH, "model finished")
-        if self.config.stop_policy == PLAN_CONTINUE:
+        if snapshot.plan_executing:
             # B: a plan turn's continuation is the loop's structural decision
             # (open items + no tool call -> another round, no injected text).
             # This unit must not nudge, and the acceptance/todo gates stay out
@@ -653,6 +647,30 @@ class TurnPolicy:
             role="user", content=f"{TASK_MESSAGE_LEAD}\n{render}", timestamp=""
         )
         return TaskInjection(instructions=instructions, message=block)
+
+    @staticmethod
+    def plan_state_block(task: TaskState, session: Any) -> ChatMessage | None:
+        """The plan turn's volatile "keep going" block (B3).
+
+        The structural continuation appends no message, so the next request
+        would otherwise be byte-identical to the previous one -- and a model
+        that just said "done" tends to say it again.  This block is rebuilt on
+        every request (never persisted), so it also cannot be compacted away.
+        """
+        if not bool(getattr(session, "plan_executing", False)):
+            return None
+        actionable = [item for item in task.open_items() if item.status != "blocked"]
+        if not actionable:
+            return None
+        return ChatMessage(
+            role="user",
+            content=(
+                f"<plan-state>计划执行中，还有 {len(actionable)} 项未完成。"
+                "继续在同一个回合内推进下一项；完成后用 todo_write 标 completed。"
+                "不要以纯文本收尾，也不要停下来询问用户。</plan-state>"
+            ),
+            timestamp="",
+        )
 
     def budget_pressure(self, *, iteration: int, tokens_spent: int) -> str | None:
         """A note to the model when the turn's budget is nearly gone (G8-1).

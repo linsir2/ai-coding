@@ -159,6 +159,24 @@ async def test_bookkeeping_spin_closes_after_six_rounds(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_the_plan_state_block_rides_requests_while_items_remain(tmp_path):
+    """B3: the volatile block is what differs between two otherwise equal requests."""
+    engine = _Scripted([_text("想想。"), _text("再想。"), _text("还想。")])
+    loop = _loop(engine, tmp_path)
+    session = _session(loop, [("only", "")])
+
+    await PlanExecutor(loop).run(session)
+
+    assert len(engine.seen) == 3
+    requests = [
+        " ".join(message.content or "" for message in seen) for seen in engine.seen
+    ]
+    # Present from the kickoff on: it is a tail block, not a boundary injection.
+    assert all("<plan-state>" in request for request in requests)
+    assert all("还有 1 项未完成" in request for request in requests)
+
+
+@pytest.mark.asyncio
 async def test_an_item_without_a_proof_completes_with_an_unattested_receipt(tmp_path):
     engine = _Scripted(
         [

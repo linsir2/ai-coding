@@ -668,7 +668,6 @@ class TurnBooks:
             acceptance=tuple(acceptance),
             acceptance_nudges=self.acceptance_nudges,
             continuations=continuations,
-            idle_streak=self.idle_boundaries,
             stall_rounds=self.stall_rounds,
             fatigue_index=self.fatigue_index,
             fatigue_nudges=self.fatigue_nudges,

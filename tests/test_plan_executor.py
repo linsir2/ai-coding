@@ -19,7 +19,6 @@ import pytest
 from ai_coding.core.plan_executor import PlanExecutor, plan_runner_for
 from ai_coding.core.plan_runner import PlanRunner
 from ai_coding.core.turn_policy import (
-    PLAN_CONTINUE,
     PLAN_STALL_ROUNDS,
     TurnPolicy,
     TurnPolicyConfig,
@@ -214,11 +213,11 @@ def _settings(loop: _Loop, **overrides) -> SimpleNamespace:
 
 
 def _plan_policy(**overrides) -> TurnPolicy:
-    return TurnPolicy(TurnPolicyConfig(stop_policy=PLAN_CONTINUE, **overrides))
+    return TurnPolicy(TurnPolicyConfig(**overrides))
 
 
-def _snapshot_with(*contents, statuses=(), continuations=0, idle_streak=0,
-                   stall_rounds=0) -> TurnSnapshot:
+def _snapshot_with(*contents, statuses=(), continuations=0, stall_rounds=0,
+                   plan_executing=True) -> TurnSnapshot:
     from ai_coding.domain.task import TaskState
 
     task = TaskState(goal="g")
@@ -228,8 +227,8 @@ def _snapshot_with(*contents, statuses=(), continuations=0, idle_streak=0,
         item.status = status
     return TurnSnapshot(
         iteration=1, open_items=tuple(task.open_items()),
-        continuations=continuations, idle_streak=idle_streak,
-        stall_rounds=stall_rounds,
+        continuations=continuations, stall_rounds=stall_rounds,
+        plan_executing=plan_executing,
     )
 
 
@@ -296,16 +295,22 @@ async def test_one_turn_runs_the_whole_plan_on_the_main_session():
 
 
 @pytest.mark.asyncio
-async def test_plan_policy_is_active_and_acceptance_stays_out_of_the_turn():
+async def test_plan_turn_marks_the_session_and_leaves_the_policy_alone():
+    """B: the executor no longer swaps ``loop.policy`` (a global other runners use).
+
+    The plan turn is identified by ``session.plan_executing``; the loop and the
+    policy read that fact, and acceptance contracts stay out of the turn because
+    verification moved to the item boundary.
+    """
     session = _session_with("a", verifies=["true"])
     loop = _Loop(["complete-all"])
     _settings(loop)
     loop._verify_results = [True]
+    before = loop.policy
 
     await PlanExecutor(loop).run(session)
 
-    assert loop.stop_policies == [PLAN_CONTINUE]
-    assert loop.max_iterations == [-1]
+    assert loop.policy is before
     assert loop.executing_seen == [True]
     assert loop.acceptance_seen == [[]]
     assert session.acceptance == []
