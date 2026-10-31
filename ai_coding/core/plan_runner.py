@@ -669,8 +669,6 @@ class PlanRunner:
                 # R06: whichever layer disarmed (the driver's normal exit or
                 # this finally), the final state reaches the wire.
                 self._emit_task(observer, task)
-                # R06: same wire, the other half of the lifecycle.
-                self._emit_task(observer, task)
 
     # ---- RoundProfile (11-plan §5.2): one hook per pre-T3 run-body piece --
 
@@ -1269,11 +1267,11 @@ class PlanRunner:
     def _delivery(self, item: Any, status: str, attempts: int,
                 ac: list[dict[str, Any]], summary: str,
                 turns: tuple[int, int], usage: dict[str, int] | None = None,
-                seed_chars: int = 0) -> StepDelivery:
+                seed_chars: int = 0, *, attested: bool = True) -> StepDelivery:
         return StepDelivery(
             step_id=item.id, statement=item.content, status=status,
             attempts=attempts, ac=ac, summary=summary, turns=turns,
-            usage=usage, seed_chars=seed_chars,
+            usage=usage, seed_chars=seed_chars, attested=attested,
         )
 
     def _step_prompt(self, item: Any) -> str:

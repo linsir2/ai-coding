@@ -34,8 +34,9 @@ def test_load_returns_defaults_on_none(no_config):
     # still resolve to the conservative default rather than an invented large one.
     assert resolve_context_window(app) == 48_000
     assert app.ai.max_tool_iterations == 100
-    # r24/C: waves are the default executor; legacy stays one setting away.
-    assert app.ai.plan_orchestrator == "wave"
+    # Stage 2: Plan-as-Goal (main-session rounds) is the default executor;
+    # wave and legacy stay one setting away.
+    assert app.ai.plan_orchestrator == "session"
     assert app.ai.plan_wave_size == 4
     # A+C (measured): one real item spent 269k tokens, so a per-wave spend cap
     # ended a real run after one wave.  Both segment caps are off by default;

@@ -60,23 +60,31 @@ __all__ = ["WaveRunner", "WaveItem", "WAVE_ITEM_HEAD", "plan_runner_for"]
 
 
 def plan_runner_for(loop: Any, user_prompt: Any = None) -> Any:
-    """The executor the configuration asks for (``wave`` unless told otherwise).
+    """The executor the configuration asks for (``session`` unless told otherwise).
 
-    One selection point for the command layer and the server: the legacy runner
-    stays reachable as ``plan_orchestrator: legacy`` and keeps every one of its
-    tests, while the default moves to waves.
+    One selection point for the command layer and the server:
+
+    * ``session`` (default) — Plan-as-Goal: every round runs on the parent
+      session, so the plan's transcript is the continuity (stage-2 default);
+    * ``wave`` — the context-bounded executor (fresh session per wave, handoff
+      between waves; the scale path for very large plans);
+    * ``legacy`` — the pre-wave runner, kept for its tests and rollback.
 
     ``user_prompt`` (C3) is the human channel a wave-boundary replan asks for
     approval through.  ``None`` means the run cannot get approval, so a replan
     is rolled back instead of applied -- the conservative direction.
     """
     settings = getattr(loop, "settings", None)
-    name = str(getattr(settings, "plan_orchestrator", "wave") or "wave")
+    name = str(getattr(settings, "plan_orchestrator", "session") or "session")
     if name == "legacy":
         from ai_coding.core.plan_runner import PlanRunner
 
         return PlanRunner(loop)
-    return WaveRunner(loop, user_prompt=user_prompt)
+    if name == "wave":
+        return WaveRunner(loop, user_prompt=user_prompt)
+    from ai_coding.core.plan_executor import PlanExecutor
+
+    return PlanExecutor(loop)
 
 
 #: The per-item prompt's leading marker.  Reuses the legacy step head on

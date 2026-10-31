@@ -481,10 +481,13 @@ class AIConfig(BaseModel):
     # done/deadlock; an operator who wants a ceiling can still set one.
     plan_max_step_turns: int = 0
     # ---- r24/C: wave execution ---------------------------------------
-    #: Which plan executor `/plan run` uses.  ``wave`` (default) runs items in
-    #: continuous waves; ``legacy`` keeps the one-short-session-per-step runner
-    #: exactly as it was (the escape hatch).
-    plan_orchestrator: Literal["wave", "legacy"] = "wave"
+    #: Which plan executor `/plan run` uses.  ``session`` (default) is
+    #: Plan-as-Goal: every round runs on the parent session, so the plan's
+    #: transcript is the continuity (no step/wave session ever replaces it).
+    #: ``wave`` is the context-bounded scale path (fresh session per wave,
+    #: handoff between waves); ``legacy`` keeps the one-short-session-per-step
+    #: runner exactly as it was (the escape hatch).
+    plan_orchestrator: Literal["session", "wave", "legacy"] = "session"
     #: Open items one wave may hold.  4 is a context budget, not a correctness
     #: rule: a heavy proof command or a research/verify item always closes the
     #: wave earlier (see core/wave_planner.py).
