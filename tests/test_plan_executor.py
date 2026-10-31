@@ -22,6 +22,7 @@ from ai_coding.core.turn_policy import (
     PLAN_CONTINUE,
     PLAN_CONTINUE_LEAD,
     PLAN_IDLE_LIMIT,
+    PLAN_STALL_ROUNDS,
     TurnPolicy,
     TurnPolicyConfig,
     TurnSnapshot,
@@ -218,7 +219,8 @@ def _plan_policy(**overrides) -> TurnPolicy:
     return TurnPolicy(TurnPolicyConfig(stop_policy=PLAN_CONTINUE, **overrides))
 
 
-def _snapshot_with(*contents, statuses=(), continuations=0, idle_streak=0) -> TurnSnapshot:
+def _snapshot_with(*contents, statuses=(), continuations=0, idle_streak=0,
+                   stall_rounds=0) -> TurnSnapshot:
     from ai_coding.domain.task import TaskState
 
     task = TaskState(goal="g")
@@ -229,6 +231,7 @@ def _snapshot_with(*contents, statuses=(), continuations=0, idle_streak=0) -> Tu
     return TurnSnapshot(
         iteration=1, open_items=tuple(task.open_items()),
         continuations=continuations, idle_streak=idle_streak,
+        stall_rounds=stall_rounds,
     )
 
 
@@ -251,13 +254,37 @@ def test_plan_policy_finishes_when_nothing_is_left():
 
 
 def test_plan_policy_stops_after_repeated_idle_boundaries():
-    """A plan turn has no iteration budget; the idle streak is its only brake."""
+    """A plan turn has no iteration budget; the idle streak is its only brake.
+
+    ``idle_streak`` counts the boundaries before the one being decided, so the
+    third stop (streak 2) is the one that closes the turn.
+    """
     decision = _plan_policy().decide_after_step(
-        _snapshot_with("a", idle_streak=PLAN_IDLE_LIMIT)
+        _snapshot_with("a", idle_streak=PLAN_IDLE_LIMIT - 1)
     )
 
     assert decision.action.value == "finish"
     assert "idle boundaries" in (decision.reason or "")
+
+
+def test_plan_policy_stops_after_rounds_without_progress():
+    """The idle streak cannot see a model that keeps calling bookkeeping tools.
+
+    ``todo_write(list)`` is a tool call, so the turn never looks idle; the
+    stall signature (no item change, no receipt, no non-bookkeeping success)
+    is what closes it.  Both decision points must honour it.
+    """
+    policy = _plan_policy()
+    after_step = policy.decide_after_step(
+        _snapshot_with("a", stall_rounds=PLAN_STALL_ROUNDS)
+    )
+    before_step = policy.decide_next_iteration(
+        _snapshot_with("a", stall_rounds=PLAN_STALL_ROUNDS)
+    )
+
+    assert after_step.action.value == "finish"
+    assert before_step.action.value == "finish"
+    assert "without progress" in (before_step.reason or "")
 
 
 def test_plan_policy_ignores_blocked_items():

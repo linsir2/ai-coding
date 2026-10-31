@@ -47,7 +47,9 @@ def test_parallel_safe_overrides_per_tool(tmp_path):
     sandbox = Sandbox(str(tmp_path))
     assert ReadTool(sandbox, FileStateTracker()).parallel_safe is True
     assert GlobTool(sandbox).parallel_safe is True
-    assert TodoWriteTool().parallel_safe is True
+    # Plan-as-Goal: completing an item runs its proof command and may revert the
+    # item, so the call mutates the shared task list twice -- never in parallel.
+    assert TodoWriteTool().parallel_safe is False
 
 
 # ---- R7e-1: the turn number travels with the context ------------------------

@@ -119,6 +119,11 @@ PLAN_CONTINUE_LEAD = "[plan-continue]"
 #: Not a budget: a working turn resets the streak on every tool batch, so only a
 #: model that keeps stopping without reaching for a tool ever reaches it.
 PLAN_IDLE_LIMIT = 3
+#: Consecutive rounds a plan turn tolerates with nothing moving -- no item
+#: status change, no receipt, no successful non-bookkeeping call.  This is the
+#: brake the idle streak cannot provide: a model that keeps calling
+#: ``todo_write(list)`` is "active" but learning nothing.
+PLAN_STALL_ROUNDS = 6
 PLAN_CONTINUE_TAIL = (
     "继续在同一个回合内推进下一项；完成后用 todo_write 标 completed。"
     "标记时系统会自动跑该条目的 verify，失败会把输出回给你，在本回合修复。"
@@ -241,6 +246,10 @@ class TurnSnapshot:
     #: items and touched no tool).  Without an iteration budget this is the
     #: brake that ends a run which is no longer working on the list.
     idle_streak: int = 0
+    #: Plan-as-Goal: consecutive rounds in which nothing moved (see
+    #: ``PLAN_STALL_ROUNDS``).  Covers a model that keeps calling bookkeeping
+    #: tools, which the idle streak by construction cannot see.
+    stall_rounds: int = 0
     # R6b: how the tool calls have been going.  Fed in by the loop — the policy
     # never counts anything itself, so it stays pure and table-testable.
     failed_streak: int = 0  # consecutive iterations where every call failed
@@ -419,6 +428,18 @@ class TurnPolicy:
         token_gate = bool(self.config.max_turn_tokens) and (
             snapshot.tokens_spent >= self.config.max_turn_tokens
         )
+        if (
+            self.config.stop_policy == PLAN_CONTINUE
+            and snapshot.stall_rounds >= PLAN_STALL_ROUNDS
+        ):
+            # The plan turn's brake, read where a *tool-calling* round also
+            # passes: `decide_after_step` only sees the rounds that ended with
+            # no tool call, so a model spinning on `todo_write(list)` would
+            # never reach it.
+            return TurnDecision(
+                TurnAction.FINISH,
+                f"plan stalled: {snapshot.stall_rounds} rounds without progress",
+            )
         if (
             snapshot.mode == "plan"
             and not snapshot.plan_nudged
@@ -627,14 +648,24 @@ class TurnPolicy:
         actionable = [item for item in snapshot.open_items if item.status != "blocked"]
         if not actionable:
             return TurnDecision(TurnAction.FINISH, "plan complete")
-        if snapshot.idle_streak >= PLAN_IDLE_LIMIT:
+        if snapshot.stall_rounds >= PLAN_STALL_ROUNDS:
+            # Rounds kept happening but nothing moved: no item changed, no
+            # receipt was written, and every successful call was bookkeeping.
+            return TurnDecision(
+                TurnAction.FINISH,
+                f"plan stalled: {snapshot.stall_rounds} rounds without progress",
+            )
+        # ``idle_streak`` counts the boundaries *before* this one, so the stop
+        # being decided right now is ``idle_streak + 1``.
+        boundaries = snapshot.idle_streak + 1
+        if boundaries >= PLAN_IDLE_LIMIT:
             # The model stopped PLAN_IDLE_LIMIT times in a row without reaching
             # for a single tool: it is not working on the list, and another nudge
             # would only buy the same silence.  This is the plan turn's brake --
             # there is no iteration or token budget to run out of.
             return TurnDecision(
                 TurnAction.FINISH,
-                f"plan stalled: {snapshot.idle_streak} idle boundaries with no tool call",
+                f"plan stalled: {boundaries} idle boundaries with no tool call",
             )
         return TurnDecision(
             TurnAction.NUDGE,

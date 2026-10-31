@@ -1036,6 +1036,16 @@ class AgentLoop:
             while True:
                 index += 1
                 budget_expired = frame.deadline is not None and frame.deadline.expired
+                # Plan-as-Goal: a plan turn has no iteration budget, so "did the
+                # last round move anything?" is the brake that replaces it.  The
+                # signature is read here (once per round, before the decision),
+                # so the previous round's effects are all in.
+                if getattr(session, "plan_executing", False) and task is not None:
+                    books.note_plan_progress((
+                        tuple((item.id, item.status) for item in task.items),
+                        books.progress_calls,
+                        len(getattr(session, "step_deliveries", ()) or ()),
+                    ))
                 # R0-2: derive the open unknowns from the books before deciding.
                 # One call site per round (here, not after every branch), so a
                 # flat round counts exactly once.
@@ -1119,16 +1129,7 @@ class AgentLoop:
                     # replaying the transcript without it would break its meaning
                     # (docs/r1a-4-analysis.md D1).
                     restart = False
-                    if decision.reason == "continue the plan":
-                        # Plan-as-Goal: count the idle-boundary continuation
-                        # and keep the turn open.  There is no iteration budget
-                        # to reset (a plan turn runs with ``max_iterations=-1``,
-                        # the policy's "no ceiling"); the idle streak is the
-                        # brake that ends a run in which the model keeps stopping
-                        # without touching a tool.
-                        session.continuations += 1
-                        books.note_idle_boundary()
-                    elif decision.reason == "continue unfinished work":
+                    if decision.reason == "continue unfinished work":
                         # C3: count the continuation on the session (it survives
                         # across rounds) and re-arm the iteration budget below —
                         # without the reset the counter keeps climbing, the new
@@ -1368,6 +1369,14 @@ class AgentLoop:
                         # stage 4 r2: the guard's one remedy, counted so the
                         # snapshot stops offering it next time.
                         books.note_plan_nudge()
+                    elif decision.reason == "continue the plan":
+                        # Plan-as-Goal: the model stopped with items left and
+                        # touched no tool.  Count the boundary -- three in a row
+                        # close the turn (there is no iteration or token budget
+                        # to run out of) -- and keep the turn open.
+                        session.continuations += 1
+                        books.note_idle_boundary()
+                        books.note_nudge()
                     else:
                         books.note_nudge()
                     session.add_message(

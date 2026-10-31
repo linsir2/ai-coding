@@ -541,3 +541,27 @@ def test_an_action_effort_clears_the_evidence():
     assert books.stale_streak == 1
     books.note_outcomes([_outcome("bash", success=False, error="nonzero_exit")])
     assert books.stale_streak == 1
+
+
+def test_plan_progress_signature_resets_on_any_movement():
+    """The plan turn's stall brake: an unchanged signature is a stalled round."""
+    books = TurnBooks()
+    signature = (("1", "pending"), 0, 0)
+
+    books.note_plan_progress(signature)   # first round: baseline
+    books.note_plan_progress(signature)
+    books.note_plan_progress(signature)
+    assert books.stall_rounds == 2
+
+    books.note_plan_progress((("1", "completed"), 0, 0))
+    assert books.stall_rounds == 0
+
+
+def test_bookkeeping_calls_do_not_count_as_progress():
+    """`todo_write list` succeeds, but it must not look like work."""
+    books = TurnBooks()
+    books.note_outcomes([_outcome("todo_write", output="[]")])
+    assert books.progress_calls == 0
+
+    books.note_outcomes([_outcome("read", output="x")])
+    assert books.progress_calls == 1

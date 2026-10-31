@@ -21,7 +21,11 @@ from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 class TodoWriteTool(BaseTool):
     """Maintain the session task list (add / update / list / clear)."""
 
-    parallel_safe = True
+    # Plan-as-Goal: marking an item completed runs its proof command, so this
+    # call can now take seconds and mutate the list twice (complete, then revert
+    # on a red verdict).  Two of them in one assistant message would race over
+    # the same ``TaskState``; serialising the batch is the cheap fix.
+    parallel_safe = False
     mutates_world = False
 
     def __init__(self, *, enforce_dependencies: bool = True) -> None:

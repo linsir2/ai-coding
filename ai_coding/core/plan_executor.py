@@ -186,7 +186,16 @@ class PlanExecutor(PlanRunner):
                     or self._tool_calls(session) > tools_before
                     or self._states_changed(task, states_before)
                 )
-                if not progressed and report.stopped is None:
+                # The loop knows *why* it closed.  Its stall brake is the
+                # authoritative verdict -- a turn that kept calling bookkeeping
+                # tools "progressed" by raw call count but moved nothing.
+                reason = str(
+                    getattr(getattr(self._loop, "last_outcome", None), "reason", "")
+                    or ""
+                )
+                if reason.startswith("plan stalled"):
+                    report.stopped = reason
+                elif not progressed and report.stopped is None:
                     report.stopped = (
                         "no progress: the turn made no tool call and settled "
                         "nothing; remaining items stay open"

@@ -88,6 +88,27 @@ RETRIEVAL_TOOLS = frozenset(
 #: streak climbing after real work.
 ACTION_TOOLS = frozenset({"write", "edit", "bash", "mcp_call", "subAgent"})
 
+#: Tools whose success says nothing about the world *or* the model's knowledge:
+#: they edit the plan, write a note, ask the human, or list state.  A plan turn
+#: with no iteration budget needs "did this round do anything at all?" as a
+#: structural fact, and these are the calls that must not answer yes -- a model
+#: that only re-lists its todo list is spinning, not working.
+BOOKKEEPING_TOOLS = frozenset(
+    {
+        "todo_write",
+        "checkpoint_write",
+        "tool_search",
+        "ask_user",
+        "start_goal",
+        "update_goal",
+        "present_plan",
+        "finish_research",
+        "job_list",
+        "job_output",
+        "subagent_list",
+    }
+)
+
 #: Errors that are verdicts rather than breakage (R8c D-11 cancel; 20 §批次3
 #: plan-validation refusals; P1's ``invalid_items``; R08's ``plan_keep`` --
 #: the user asking for a revision).  A round whose calls all carry these is
@@ -273,6 +294,18 @@ class TurnBooks:
     #: iteration budget, so this is its only brake: a model that keeps stopping
     #: without reaching for a tool is not working on the list.
     idle_boundaries: int = 0
+    #: Plan-as-Goal: consecutive rounds in which nothing moved -- no plan item
+    #: changed status, no receipt was written, and no call outside
+    #: ``BOOKKEEPING_TOOLS`` succeeded.  The idle brake only covers "stopped
+    #: without a tool call"; this one covers "kept calling, learned nothing".
+    stall_rounds: int = 0
+    #: Successful calls that could have changed the world or the model's
+    #: knowledge (see ``BOOKKEEPING_TOOLS``).  Part of the stall signature.
+    progress_calls: int = 0
+    #: The previous round's progress signature (never persisted).
+    _progress_signature: tuple[Any, ...] | None = field(
+        default=None, repr=False, compare=False
+    )
     #: Per-step model latency, newest last (R0-4) — the reporter already emits
     #: each step's latency as an event; the books keep the series so the turn
     #: can account its wall-clock the way it accounts its iterations.
@@ -362,6 +395,21 @@ class TurnBooks:
     def note_idle_boundary(self) -> None:
         """Plan-as-Goal: the model stopped with open items and no tool ran."""
         self.idle_boundaries += 1
+
+    def note_plan_progress(self, signature: tuple[Any, ...]) -> None:
+        """Plan-as-Goal: did the round that just finished move anything?
+
+        The caller passes a signature of the facts that mean "work happened":
+        the plan's item statuses, the receipts written, and the count of
+        successful non-bookkeeping calls.  An unchanged signature means the
+        round produced nothing but conversation -- one more such round and the
+        plan turn is closer to its stall limit.
+        """
+        if self._progress_signature is not None and signature == self._progress_signature:
+            self.stall_rounds += 1
+        else:
+            self.stall_rounds = 0
+        self._progress_signature = signature
 
     def note_fatigue_nudge(self) -> None:
         """The fatigue gate injected a reminder and will iterate again."""
@@ -512,6 +560,11 @@ class TurnBooks:
         self.evidence_calls += sum(
             1 for item in succeeded if item.call.name not in STATE_ONLY_TOOLS
         )
+        # Plan-as-Goal: the stall signature's third term.  A bookkeeping call
+        # (todo_write list, a checkpoint note) must not look like work.
+        self.progress_calls += sum(
+            1 for item in succeeded if item.call.name not in BOOKKEEPING_TOOLS
+        )
         # R8c D-11 + 20 §批次3: a call the *user* cancelled, or one whose
         # result is a plan-validation refusal, is not a failure to fix -- it
         # must not push the escalation ladder (two cancels would inject a
@@ -616,6 +669,7 @@ class TurnBooks:
             acceptance_nudges=self.acceptance_nudges,
             continuations=continuations,
             idle_streak=self.idle_boundaries,
+            stall_rounds=self.stall_rounds,
             fatigue_index=self.fatigue_index,
             fatigue_nudges=self.fatigue_nudges,
             ask_user_calls=self.ask_user_calls,
