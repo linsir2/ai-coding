@@ -1,10 +1,11 @@
 # 方案 B：把计划续跑改成结构信号（对齐 codex needs_follow_up）
 
-> 状态：B-1 已落地（commit `7c82f81`）；B-2 实施中（结构续跑、`<plan-state>` 尾块、
-> 不再替换 loop.policy）。每一步合并前跑真机脚本 + 全量测试。
+> 状态：B-1（`7c82f81`）与 B-2（`6e95ef3`）均已落地，全量测试 + 真机脚本通过。
+> 运行形态：一个 plan turn 内，工具调用轮次直接续跑；模型停下且仍有条目时
+> 也不写消息、只继续；收口只有两个结构刹车（idle 3 / stall 6）。
 > 前置：A 方案（单回合、无预算、验收下沉）已落地（commit `c6064cd`）。
 
-## 0. 现状（A 方案落地后）
+## 0. 现状（B 之前的基线，A 方案落地后）
 
 - `PlanExecutor` 进入时替换 `loop.policy`：`max_iterations=-1`、`stop_policy="plan"`。
 - 模型无工具调用停下时，`policy.decide_after_step()` → `_plan_after_step()` 返回 NUDGE，
@@ -165,5 +166,24 @@ while True:
    模型步数 = 工具批次数 + 1，transcript 中 **没有** `[plan-continue]`。
 2. 纯文本停下 + 有剩余项：请求里出现 `<plan-state>` 尾块，且 3 次后收口。
 3. `todo_write(list)` 空转：6 轮后收口。
-4. 非计划回合（普通 todo_aware）行为逐字节不变。
+4. 非计划回合（普通 todo_aware）行为逐字节不变（`plan_state_block` 返回 None 时
+   `volatile_block` 不产生消息）。
 5. `pytest` / `ruff` / `mypy` 全绿。
+
+## 9. 实施记录
+
+| 阶段 | commit | 内容 | 验证 |
+|---|---|---|---|
+| B-1 | `7c82f81` | loop 结构续跑（不写消息）、两个刹车、删除策略层注入 | 4 个真机测试 + 全量 pytest/ruff/mypy |
+| B-2 | `6e95ef3` | `TurnSnapshot.plan_executing`、不再替换 `loop.policy`、`<plan-state>` 尾块、删除 `idle_streak`/`PLAN_CONTINUE` 死代码 | 同上（新增 `<plan-state>` 断言） |
+
+真机测试在 `tests/test_plan_continuation.py`：真实 `AgentLoop` + 脚本化模型，
+覆盖"单回合完成并回合内修复""空闲刹车 3 次""记账工具空转 6 轮""无 verify 条目"。
+
+### 已知残余风险
+
+- 计划回合关闭搜索梯子（`allow_search=False`），一个"每轮读不同文件、从不标记完成"
+  的模型不会被 ladder 拦住；只能靠 context 窗口与用户 Esc。重复读同一个文件会被
+  `DuplicateCallGuard` 拒绝，因而会落进 `stall_rounds`。
+- 结构续跑不写消息时，连续两轮请求只差 assistant 内容与 `<plan-state>`；模型仍可能
+  重复"已完成"。这是 idle 上限 3 存在的原因。
