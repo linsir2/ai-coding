@@ -328,3 +328,23 @@ def test_skipped_is_not_advertised_in_the_schema(tool):
     enum = tool.params_json_schema["properties"]["status"]["enum"]
     assert "skipped" not in enum
     assert "pending" in enum and "blocked" in enum
+
+
+@pytest.mark.asyncio
+async def test_plan_executing_freezes_the_contract_but_not_status(tool, ctx):
+    """Plan-as-Goal has no per-item scope: the whole turn is the execution."""
+    await tool.execute({"action": "add", "content": "a"}, ctx)
+    ctx.plan_executing = True
+
+    added = await tool.execute({"action": "add", "content": "b"}, ctx)
+    changed_verify = await tool.execute(
+        {"action": "update", "id": "1", "verify": "true"}, ctx
+    )
+    completed = await tool.execute(
+        {"action": "update", "id": "1", "status": "completed", "evidence": "done"}, ctx
+    )
+
+    assert added.error == "frozen_plan"
+    assert changed_verify.error == "frozen_verify"
+    assert completed.success is True
+    assert ctx.task.get("1").status == "completed"

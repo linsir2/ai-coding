@@ -195,7 +195,7 @@ async def test_plan_command_plans_and_plan_run_executes():
 
     await handle_input(loop, "/plan run", session, sessions, console)
 
-    assert sum(STEP_HEAD in c for c in loop.calls) == 2             # both steps ran
+    assert sum("[plan-run]" in c for c in loop.calls) == 2             # both steps ran
     assert session.task.done_count == 2
     assert (session.mode, session.readonly) == ("normal", False)
 

@@ -1,15 +1,14 @@
-"""TDD (stage 2): Plan-as-Goal — every round runs on the main session.
+"""TDD (stage 2): Plan-as-Goal — one continuous turn on the main session.
 
-The executor keeps the plan's transcript where the human wrote it, verifies each
-item mechanically *after* the turn (never inside it, so the acceptance ladder
-cannot turn an autonomous run into an ``ask_user``), and lets the driver open
-the next item on its own.  These tests pin the four things that make that safe:
+The approved plan must not be chopped into a ``process_input`` per item.  The
+plan stop policy keeps the turn open when the model stops with items left
+(opencode's idle hook); the executor verifies completed items afterwards and
+opens at most a bounded repair turn.  These tests pin:
 
-1. session identity — no ephemeral step/wave sessions;
-2. verification timing — acceptance is empty during ``process_input`` and runs
-   afterwards, with the verdict written onto the receipt;
-3. bounded repair and blocked/skip propagation;
-4. crash leftovers and accounting (no fiat for a verify item, no double tokens).
+1. session identity and one-turn execution;
+2. the plan policy contract (``stop_policy="plan"``, no acceptance in-turn);
+3. bounded repair, blocked/skip propagation, crash leftovers;
+4. no double token accounting and no ``roundsRun`` wave label.
 """
 
 import asyncio
@@ -19,12 +18,24 @@ import pytest
 
 from ai_coding.core.plan_executor import PlanExecutor
 from ai_coding.core.plan_runner import PlanRunner
+from ai_coding.core.turn_policy import (
+    PLAN_CONTINUE,
+    PLAN_CONTINUE_LEAD,
+    TurnPolicy,
+    TurnPolicyConfig,
+    TurnSnapshot,
+)
 from ai_coding.core.wave_runner import WaveRunner, plan_runner_for
+from ai_coding.domain.loop import TurnStatus
 from tests.test_wave_runner import _session_with, _StubLoop
 
 
 class _Loop(_StubLoop):
-    """The wave stub plus the three observations this executor needs."""
+    """The wave stub plus the observations this executor needs.
+
+    ``complete-all`` is the ideal continuous step: one model call finishes
+    every open item, so the executor must not open a second turn.
+    """
 
     def __init__(self, actions, **kwargs):
         super().__init__(actions, **kwargs)
@@ -32,6 +43,7 @@ class _Loop(_StubLoop):
         self.acceptance_seen: list[list[object]] = []
         self.stop_policies: list[str] = []
         self.auto_caps: list[int] = []
+        self.executing_seen: list[bool] = []
         self.policy_objects: list[object] = []
 
     async def process_input(
@@ -40,10 +52,31 @@ class _Loop(_StubLoop):
         self.acceptance_seen.append(list(session.acceptance))
         self.stop_policies.append(str(self.policy.config.stop_policy))
         self.auto_caps.append(int(self.policy.config.max_auto_continuations))
+        self.executing_seen.append(bool(getattr(session, "plan_executing", False)))
         self.policy_objects.append(self.policy)
-        return await super().process_input(
-            session, text, on_delta=on_delta, observer=observer, synthetic=synthetic
+        action = self._actions[0] if self._actions else "complete-all"
+        if action != "complete-all":
+            return await super().process_input(
+                session, text, on_delta=on_delta, observer=observer, synthetic=synthetic
+            )
+        if self._actions:
+            self._actions.pop(0)
+        session.turn_count += 1
+        self.calls.append(text)
+        self.sessions.append(session)
+        self.policies.append(int(self.policy.config.max_turn_tokens))
+        self.continuation_caps.append(self.policy.config.max_auto_continuations)
+        for item in session.task.open_items():
+            item.status = "completed"
+        usage = (
+            {"total_tokens": self._usage, "input_tokens": self._usage}
+            if self._usage
+            else None
         )
+        self.last_outcome = SimpleNamespace(
+            status=TurnStatus.COMPLETED, text=action, usage=usage
+        )
+        return "ok"
 
     def commit_posture(
         self, session, *, agent=None, readonly=None, reason="", observer=None
@@ -56,12 +89,14 @@ class _Loop(_StubLoop):
 
     @staticmethod
     def _target(task, text):
-        """Match on the prompt's first line: failure output often contains the
-        letters of other items' short placeholder names."""
-        first = text.splitlines()[0]
-        for item in task.open_items():
-            if item.content in first:
-                return item
+        """Match an item line (``- id. content``); failure prose can contain the
+        letters of other short placeholder names."""
+        for line in text.splitlines():
+            if not line.startswith("- "):
+                continue
+            for item in task.open_items():
+                if f"{item.id}. {item.content}" in line:
+                    return item
         return None
 
 
@@ -80,75 +115,146 @@ def _settings(loop: _Loop, **overrides) -> SimpleNamespace:
         "plan_max_item_attempts": 2,
         "plan_token_budget": 0,
         "plan_item_wall_seconds": 0,
+        "plan_max_continues": 30,
         "plan_orchestrator": "session",
     }
     values.update(overrides)
     loop.settings = SimpleNamespace(**values)
-    loop.settings.__dict__.setdefault("plan_orchestrator", "session")
     return loop.settings
 
 
-# ---- session identity -------------------------------------------------
+# ---- the plan stop policy --------------------------------------------
+
+
+def _plan_policy(**overrides) -> TurnPolicy:
+    return TurnPolicy(TurnPolicyConfig(stop_policy=PLAN_CONTINUE, **overrides))
+
+
+def _snapshot_with(*contents, statuses=(), continuations=0) -> TurnSnapshot:
+    from ai_coding.domain.task import TaskState
+
+    task = TaskState(goal="g")
+    for content in contents:
+        task.add(content)
+    for item, status in zip(task.items, statuses, strict=False):
+        item.status = status
+    return TurnSnapshot(
+        iteration=1, open_items=tuple(task.open_items()), continuations=continuations
+    )
+
+
+def test_plan_policy_continues_when_the_model_stops_with_open_items():
+    decision = _plan_policy().decide_after_step(_snapshot_with("a", "b"))
+
+    assert decision.action.value == "nudge"
+    assert decision.reason == "continue the plan"
+    assert PLAN_CONTINUE_LEAD in decision.inject
+    assert "- 1. a" in decision.inject
+
+
+def test_plan_policy_finishes_when_nothing_is_left():
+    decision = _plan_policy().decide_after_step(
+        _snapshot_with("a", statuses=("completed",))
+    )
+
+    assert decision.action.value == "finish"
+    assert decision.reason == "plan complete"
+
+
+def test_plan_policy_stops_asking_after_its_budget():
+    decision = _plan_policy(max_plan_continues=2).decide_after_step(
+        _snapshot_with("a", continuations=2)
+    )
+
+    assert decision.action.value == "finish"
+    assert "continuation budget" in (decision.reason or "")
+
+
+def test_plan_policy_ignores_blocked_items():
+    decision = _plan_policy().decide_after_step(
+        _snapshot_with("a", statuses=("blocked",))
+    )
+
+    assert decision.action.value == "finish"
+    assert decision.reason == "plan complete"
+
+
+# ---- executor: one turn, main session --------------------------------
 
 
 @pytest.mark.asyncio
-async def test_each_item_runs_on_the_main_session():
-    session = _session_with("a", "b", "c")
-    loop = _Loop(["complete", "complete", "complete"])
+async def test_one_turn_runs_the_whole_plan_on_the_main_session():
+    session = _session_with("a", "b", "c", verifies=["true", "true", "true"])
+    loop = _Loop(["complete-all"])
+    _settings(loop)
+    loop._verify_results = [True, True, True]
 
     report = await PlanExecutor(loop).run(session)
 
-    assert report.completed == ["1", "2", "3"]
-    assert len(loop.sessions) == 3
-    # The point of Plan-as-Goal: no step/wave session is ever created.
+    assert len(loop.calls) == 1
     assert all(seen is session for seen in loop.sessions)
-    assert len(session.step_deliveries) == 3
-
-
-# ---- verification timing ---------------------------------------------
+    assert report.completed == ["1", "2", "3"]
+    assert {entry.proof for entry in session.step_deliveries} == {"verified"}
 
 
 @pytest.mark.asyncio
-async def test_verify_runs_after_the_turn_not_during_it():
+async def test_plan_policy_is_active_and_acceptance_stays_out_of_the_turn():
     session = _session_with("a", verifies=["true"])
-    loop = _Loop(["complete"])
+    loop = _Loop(["complete-all"])
+    _settings(loop)
     loop._verify_results = [True]
 
-    report = await PlanExecutor(loop).run(session)
+    await PlanExecutor(loop).run(session)
 
+    assert loop.stop_policies == [PLAN_CONTINUE]
+    assert loop.executing_seen == [True]
     assert loop.acceptance_seen == [[]]
-    assert report.completed == ["1"]
-    assert session.step_deliveries[0].ac[0]["passed"] is True
     assert session.acceptance == []
 
 
 @pytest.mark.asyncio
-async def test_failed_verify_gets_one_repair_turn():
-    session = _session_with("a", verifies=["true"])
-    loop = _Loop(["complete", "complete"])
-    loop._verify_results = [False, True]
+async def test_a_stopped_model_gets_the_next_turn_automatically():
+    session = _session_with("a", "b", "c")
+    loop = _Loop(["complete", "complete", "complete"])
+    _settings(loop, plan_max_item_attempts=3)
+
+    report = await PlanExecutor(loop).run(session)
+
+    assert len(loop.calls) == 3
+    assert all(seen is session for seen in loop.sessions)
+    assert report.completed == ["1", "2", "3"]
+
+
+@pytest.mark.asyncio
+async def test_failed_verify_gets_a_repair_turn():
+    session = _session_with("a", "b", verifies=["true", "true"])
+    loop = _Loop(["complete-all", "complete-all"])
+    _settings(loop)
+    loop._verify_results = [False, True, True]
 
     report = await PlanExecutor(loop).run(session)
 
     assert len(loop.calls) == 2
-    assert report.completed == ["1"]
-    assert session.step_deliveries[0].attempts == 2
-    # The repair turn does not inherit a live acceptance contract.
-    assert loop.acceptance_seen[0] == [] and loop.acceptance_seen[1] == []
+    assert set(report.completed) == {"1", "2"}
+    assert {entry.proof for entry in session.step_deliveries} == {"verified"}
+    # The repair prompt carries the proof output, not a silent retry.
+    assert "失败输出" in loop.calls[1]
 
 
 @pytest.mark.asyncio
 async def test_two_failed_verifies_block_and_skip_dependents():
     session = _session_with("a", "b", verifies=["true", None], deps={"2": ["1"]})
-    loop = _Loop(["complete", "complete"])
+    loop = _Loop(["complete-all", "complete-all"])
+    _settings(loop)
     loop._verify_results = [False, False]
 
     report = await PlanExecutor(loop).run(session)
 
     assert session.task.get("1").status == "blocked"
-    assert session.task.get("2").status == "skipped"
+    # The model completed the dependent in the same turn, before the proof ran;
+    # a completed dependent keeps its receipt (the wave rule).
+    assert session.task.get("2").status == "completed"
     assert report.blocked == ["1"]
-    assert report.skipped == ["2"]
 
 
 # ---- no-verify items --------------------------------------------------
@@ -157,66 +263,37 @@ async def test_two_failed_verifies_block_and_skip_dependents():
 @pytest.mark.asyncio
 async def test_no_verify_completion_is_on_claim():
     session = _session_with("a")
-    loop = _Loop(["complete"])
+    loop = _Loop(["complete-all"])
+    _settings(loop)
 
     await PlanExecutor(loop).run(session)
 
     delivery = session.step_deliveries[0]
     assert delivery.status == "completed"
-    assert delivery.proof == "on-claim"
-    assert delivery.attested is True
-
-
-@pytest.mark.asyncio
-async def test_no_verify_left_open_is_stalled():
-    session = _session_with("a")
-    loop = _Loop(["noop"])
-
-    report = await PlanExecutor(loop).run(session)
-
-    assert session.task.get("1").status != "completed"
-    assert session.step_deliveries[0].status == "stalled"
-    assert "stalled" in (report.stopped or "")
-
-
-# ---- one round did more than one item ---------------------------------
-
-
-@pytest.mark.asyncio
-async def test_a_round_completing_every_item_gets_receipts_for_all():
-    session = _session_with("a", "b", verifies=["true", "true"])
-    loop = _Loop(["complete-both"])
-    loop._verify_results = [True, True]
-
-    report = await PlanExecutor(loop).run(session)
-
-    assert report.completed == ["1", "2"]
-    assert len(session.step_deliveries) == 2
-    assert {entry.status for entry in session.step_deliveries} == {"completed"}
-    # An extra completion settled by its own proof is verified, not fiat.
-    assert {entry.proof for entry in session.step_deliveries} == {"verified"}
+    assert delivery.proof == "fiat"
 
 
 # ---- brakes and accounting -------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_no_progress_stops_after_two_empty_rounds():
+async def test_no_progress_stops_after_one_empty_turn():
     session = _session_with("a", "b")
-    loop = _Loop(["noop", "noop"])
+    loop = _Loop(["noop"])
+    _settings(loop)
 
     report = await PlanExecutor(loop).run(session)
 
     assert "no progress" in (report.stopped or "")
     assert session.task.get("1").status != "completed"
-    assert session.task.get("2").status != "completed"
 
 
 @pytest.mark.asyncio
 async def test_token_budget_uses_per_round_delta():
-    session = _session_with("a", "b")
-    loop = _Loop(["complete", "complete"], usage_per_turn=60)
+    session = _session_with("a", verifies=["true"])
+    loop = _Loop(["complete-all", "complete-all"], usage_per_turn=60)
     _settings(loop, plan_token_budget=100)
+    loop._verify_results = [False, True]
 
     report = await PlanExecutor(loop).run(session)
 
@@ -226,19 +303,10 @@ async def test_token_budget_uses_per_round_delta():
 
 
 @pytest.mark.asyncio
-async def test_deadlock_is_reported():
-    session = _session_with("a", "b", deps={"1": ["2"], "2": ["1"]})
-    loop = _Loop([])
-
-    report = await PlanExecutor(loop).run(session)
-
-    assert "deadlock" in (report.stopped or "")
-
-
-@pytest.mark.asyncio
 async def test_cancel_propagates_and_disarms():
     session = _session_with("a")
     loop = _CancelLoop([])
+    _settings(loop)
 
     with pytest.raises(asyncio.CancelledError):
         await PlanExecutor(loop).run(session)
@@ -249,7 +317,9 @@ async def test_cancel_propagates_and_disarms():
 @pytest.mark.asyncio
 async def test_rounds_run_is_not_incremented():
     session = _session_with("a", "b", "c")
-    loop = _Loop(["complete", "complete", "complete"])
+    loop = _Loop(["complete-all"])
+    _settings(loop)
+    loop._verify_results = [True, True, True]
 
     await PlanExecutor(loop).run(session)
 
@@ -263,12 +333,14 @@ async def test_rounds_run_is_not_incremented():
 @pytest.mark.asyncio
 async def test_session_is_cleaned_and_policy_restored():
     session = _session_with("a", verifies=["true"])
-    loop = _Loop(["complete"])
-    loop._verify_results = [True]
+    loop = _Loop(["complete-all"])
+    _settings(loop)
+    loop._verify_results = [False, True]
     original = loop.policy
 
     await PlanExecutor(loop).run(session)
 
+    assert session.plan_executing is False
     assert session.step_item_id == ""
     assert session.item_deadline is None
     assert session.acceptance == []
@@ -280,7 +352,8 @@ async def test_run_forces_build_posture():
     session = _session_with("a")
     session.agent = "plan"
     session.readonly = True
-    loop = _Loop(["complete"])
+    loop = _Loop(["complete-all"])
+    _settings(loop)
 
     await PlanExecutor(loop).run(session)
 
@@ -307,7 +380,8 @@ async def test_crash_leftover_with_verify_is_checked_not_fiat():
     session = _session_with("a", verifies=["true"])
     session.task.get("1").status = "completed"
     loop = _Loop([])
-    loop._verify_results = [False]
+    _settings(loop)
+    loop._verify_results = [False, False, False]
 
     report = await PlanExecutor(loop).run(session)
 

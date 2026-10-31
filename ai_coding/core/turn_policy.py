@@ -109,14 +109,40 @@ BUDGET_PRESSURE_LEAD = "[budget] 本轮预算快用完了"
 #: How much of a budget may remain before the warning appears.
 PRESSURE_RATIO = 0.2
 
+#: Plan-as-Goal (stage 2): a natural stop with open items is an idle boundary,
+#: not the end of the run.  This policy never asks the human -- the injected
+#: line sends the model on to the next item in the same turn (opencode's idle
+#: hook, Claude's /goal).
+PLAN_CONTINUE = "plan"
+PLAN_CONTINUE_LEAD = "[plan-continue]"
+PLAN_CONTINUE_TAIL = (
+    "继续在同一个回合内推进下一项；完成后用 todo_write 标 completed，"
+    "并在标记前自己先跑一遍该条目的 verify。不要询问用户是否继续。"
+)
+
+
+def _plan_continue_text(items: list[Any]) -> str:
+    """The idle-boundary message: which items are left, and the doctrine."""
+    lines = [f"{PLAN_CONTINUE_LEAD} 计划还有未完成项："]
+    for item in items[:10]:
+        line = f"- {item.id}. {item.content}"
+        if getattr(item, "verify", ""):
+            line += f"（verify: {item.verify}）"
+        lines.append(line)
+    lines.append(PLAN_CONTINUE_TAIL)
+    return "\n".join(lines)
+
 
 @dataclass(frozen=True)
 class TurnPolicyConfig:
     """The orchestration settings this unit needs, read once per loop."""
 
     max_iterations: int = 10
-    stop_policy: str = "todo_aware"  # natural | todo_aware | strict
+    stop_policy: str = "todo_aware"  # natural | todo_aware | strict | plan
     max_todo_nudges: int = 2
+    #: Plan-as-Goal: idle-boundary continuations one turn may inject before it
+    #: closes (the outer executor can open a fresh turn after that).
+    max_plan_continues: int = 30
     task_injection: str = "message"  # message | system
     # R4b: cumulative tokens one turn may spend (0 = no ceiling).  It counts the
     # re-sent context of every step, so it is a spend cap, not a window size.
@@ -149,6 +175,9 @@ class TurnPolicyConfig:
             max_iterations=max(1, int(getattr(settings, "max_tool_iterations", 10))),
             stop_policy=str(getattr(settings, "stop_policy", "todo_aware")),
             max_todo_nudges=int(getattr(settings, "max_todo_nudges", 2)),
+            max_plan_continues=max(
+                0, int(getattr(settings, "plan_max_continues", 30) or 0)
+            ),
             task_injection=str(getattr(settings, "task_injection", "message")),
             max_turn_tokens=int(getattr(settings, "turn_token_budget", 0) or 0),
             failed_streak_threshold=int(
@@ -544,6 +573,13 @@ class TurnPolicy:
                 if verdict is not None:
                     return verdict
             return TurnDecision(TurnAction.FINISH, "model finished")
+        if self.config.stop_policy == PLAN_CONTINUE:
+            # Plan-as-Goal: a stopped model is an idle boundary, not the end of
+            # the run.  Like opencode's idle hook / Claude's /goal, the turn
+            # injects the remaining items and continues -- never asks the human
+            # (an autonomous plan that stops to ask is the defect this exists
+            # to remove).
+            return self._plan_after_step(snapshot)
         if snapshot.acceptance:
             # R0-1: a turn with contracts does not end on the model's word.
             # Unchecked items fail closed (the loop verifies before asking, so
@@ -567,6 +603,21 @@ class TurnPolicy:
         if gate is not None:
             return self._as_turn_decision(gate)
         return TurnDecision(TurnAction.FINISH, "model finished")
+
+    def _plan_after_step(self, snapshot: TurnSnapshot) -> TurnDecision:
+        """Plan-as-Goal's idle boundary: continue with the remaining items."""
+        actionable = [item for item in snapshot.open_items if item.status != "blocked"]
+        if not actionable:
+            return TurnDecision(TurnAction.FINISH, "plan complete")
+        if snapshot.continuations >= self.config.max_plan_continues:
+            return TurnDecision(
+                TurnAction.FINISH, "plan continuation budget exhausted"
+            )
+        return TurnDecision(
+            TurnAction.NUDGE,
+            "continue the plan",
+            inject=_plan_continue_text(actionable),
+        )
 
     @staticmethod
     def _as_turn_decision(gate: interventions.InterventionDecision) -> TurnDecision:

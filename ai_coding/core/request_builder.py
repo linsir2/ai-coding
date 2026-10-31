@@ -157,4 +157,5 @@ def tool_context(
         # F: the item a plan step owns; ``todo_write`` uses it to freeze the
         # plan contract (verify/content) and to refuse adding items mid-run.
         step_item_id=str(getattr(session, "step_item_id", "") or ""),
+        plan_executing=bool(getattr(session, "plan_executing", False)),
     )

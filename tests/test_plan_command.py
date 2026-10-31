@@ -380,7 +380,7 @@ async def test_plan_run_executes_the_open_plan():
     """The explicit approval: /plan run disarms and executes, /plan plans only."""
     from types import SimpleNamespace
 
-    from ai_coding.core.plan_runner import STEP_HEAD
+    from ai_coding.core.plan_executor import PLAN_RUN_HEAD
     from ai_coding.domain.task import TaskState
 
     class _PlanLoop(_Loop):
@@ -412,13 +412,13 @@ async def test_plan_run_executes_the_open_plan():
 
     await handle_input(loop, "/plan 修 bug", session, sessions, dc)
 
-    assert sum(STEP_HEAD in call for call in loop.calls) == 0
+    assert sum(PLAN_RUN_HEAD in call for call in loop.calls) == 0
     assert session.task.done_count == 0
     assert (session.mode, session.readonly) == ("plan", True)
 
     await handle_input(loop, "/plan run", session, sessions, dc)
 
-    assert sum(STEP_HEAD in call for call in loop.calls) == 1
+    assert sum(PLAN_RUN_HEAD in call for call in loop.calls) == 1
     assert session.task.done_count == 1
     assert (session.mode, session.readonly) == ("normal", False)
     assert "已完成" in c.export_text()

@@ -180,6 +180,10 @@ class ToolContext:
     #: contract (verify/content) or add items -- the runner would execute a
     #: command the model authored mid-run, outside the review.
     step_item_id: str = ""
+    #: Plan-as-Goal: this turn is executing the approved plan on the main
+    #: session.  ``todo_write`` freezes the plan contract (add/verify/content)
+    #: for its duration; status/evidence updates stay allowed.
+    plan_executing: bool = False
 
 
 def resolve_ctx(ctx: ToolContext | None) -> ToolContext:

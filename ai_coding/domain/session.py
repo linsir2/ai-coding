@@ -280,6 +280,11 @@ class SessionData:
     # policy used to set ``max_auto_continuations=0``).  Empty means "no scope":
     # the ordinary loop sees the whole task.  Set by the wave/step runner.
     step_item_id: str = ""
+    # NOT persisted.  Plan-as-Goal: a turn is executing the approved plan on
+    # the main session.  ``todo_write`` freezes add/verify/content for the
+    # whole turn (the plan was approved as written); status/evidence updates
+    # stay allowed.
+    plan_executing: bool = False
     # NOT persisted.  The one deadline every ``process_input`` call of the same
     # plan item shares, so N attempts cannot each spend a fresh wall clock.
     # ``None`` means "each turn gets its own".

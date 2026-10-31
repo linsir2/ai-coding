@@ -1122,7 +1122,12 @@ class AgentLoop:
                     # replaying the transcript without it would break its meaning
                     # (docs/r1a-4-analysis.md D1).
                     restart = False
-                    if decision.reason == "continue unfinished work":
+                    if decision.reason == "continue the plan":
+                        # Plan-as-Goal: count the idle-boundary continuation
+                        # and keep the turn open.  No budget reset -- the plan
+                        # turn's iteration ceiling still bounds the whole plan.
+                        session.continuations += 1
+                    elif decision.reason == "continue unfinished work":
                         # C3: count the continuation on the session (it survives
                         # across rounds) and re-arm the iteration budget below —
                         # without the reset the counter keeps climbing, the new

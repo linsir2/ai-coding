@@ -21,6 +21,11 @@ from ai_coding.tools.base import BaseTool, ToolContext
 
 __all__ = ["PresentPlanTool"]
 
+#: A plan is a handful of deliverables, not one entry per file or document.
+#: The measured 8-item submission (2026-10-31) is refused here rather than
+#: becoming eight runner checkpoints.
+MAX_PLAN_ITEMS = 6
+
 # Room above the wait for the review to be rendered and answered, matching
 # ask_user (the dispatcher takes min(this, what is left of the turn)).
 _TIMEOUT_GRACE = 15.0
@@ -238,6 +243,20 @@ class PresentPlanTool(BaseTool):
         # iteration burn).  Validated before the human is asked -- a submission
         # that cannot execute must not become a review card.
         items, invalid = _parse_items(params.get("items"))
+        if invalid is None and len(items) > MAX_PLAN_ITEMS:
+            # Measured 2026-10-31: an 8-item plan was approved despite the
+            # "at most six" guidance.  A plan is a handful of deliverables, not
+            # one line per file; refusing here is what keeps the runner from
+            # turning a 6-deliverable task into 8 checkpoints.
+            return ToolResult(
+                success=False,
+                output=(
+                    f"error: 计划有 {len(items)} 个条目，超过上限 {MAX_PLAN_ITEMS}；"
+                    "请合并成 ≤6 个工作项（按交付物，不要按文件/文档拆条），"
+                    "然后再次调用 present_plan。"
+                ),
+                error="too_many_items",
+            )
         if invalid is None:
             # A proof the shell cannot run is not a proof: it would fail at
             # execution, after the operator had already approved the plan.

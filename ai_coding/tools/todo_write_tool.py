@@ -108,13 +108,17 @@ class TodoWriteTool(BaseTool):
             else:
                 action = "list"
         scope = str(getattr(resolved, "step_item_id", "") or "")
+        # Plan-as-Goal has no per-item scope: the whole plan turn is frozen.
+        executing_plan = bool(scope) or bool(
+            getattr(resolved, "plan_executing", False)
+        )
 
         # F: a step/wave turn is inside the approved plan, not in front of the
         # review.  Letting it rewrite verify/content (or add an item) would turn
         # the runner into an executor for a command the model authored mid-run,
         # outside the approval that armed the plan.  Status updates stay allowed
         # (the extra ones are reconciled by the runner with their own receipt).
-        if scope:
+        if executing_plan:
             if action == "add":
                 return ToolResult(
                     success=False,

@@ -492,6 +492,11 @@ class AIConfig(BaseModel):
     #: rule: a heavy proof command or a research/verify item always closes the
     #: wave earlier (see core/wave_planner.py).
     plan_wave_size: int = 4
+    #: Plan-as-Goal: idle-boundary continuations one plan turn may inject when
+    #: the model stops but items remain.  It never asks the human; after this
+    #: cap the turn closes and the executor may open a fresh one.  30 covers a
+    #: six-item plan many times over; 0 disables the continuation entirely.
+    plan_max_continues: int = 30
     #: Provider-reported tokens one wave may spend; 0 disables (the default).
     #:
     #: Measured (2026-10-30, hotel-management task, 21 items): the FIRST item

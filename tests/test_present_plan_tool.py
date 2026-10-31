@@ -64,6 +64,22 @@ async def test_an_empty_plan_is_refused():
 
 
 @pytest.mark.asyncio
+async def test_a_plan_over_the_item_cap_is_refused():
+    """A measured 8-item submission must merge, not become eight checkpoints."""
+    tool, prompt = _tool(UserAnswer(answered=True, text="开始执行"))
+    r = await tool.execute(
+        {
+            "plan": "# p",
+            "items": [{"content": f"step {index}"} for index in range(1, 8)],
+        },
+        _ctx(),
+    )
+
+    assert r.success is False and r.error == "too_many_items"
+    assert prompt.calls == []
+
+
+@pytest.mark.asyncio
 async def test_present_plan_refuses_outside_plan_mode():
     """R03: the tool is plan-only.  A normal/step/goal turn gets a structured
     refusal before anyone is asked; a missing context fails closed the same
