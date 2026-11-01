@@ -124,9 +124,10 @@ TypeError——实现时先全仓 grep 字段名再删；`turn_books.snapshot()`
 **验收**：codex 链路 `/plan`→`<proposed_plan>`→"Implement this plan?"→
 `Implement the plan.`→`update_plan` 仍通；plan 回合不再出现 present_plan 文案。
 
-#### P0b-2b：旧 live check 与残留白名单（已完成，提交待办）
+#### P0b-2b：旧 live check 与残留白名单（已提交 `d951b0a`）
 - 删除 `scripts/n1_live_check.py`、`t12_live_check.py`、`w2_live_check.py`、
-  `r19_acceptance.py`（同一套旧 plan 评审 live check，无其它消费者）。
+  `r19_acceptance.py`（同一套旧 plan 评审 live check，无其它消费者）；
+  `m2/m3_cases.py` 里按 `present_plan` 构造的用例同步删除或改写。
 - 删除 `security/permission_gate.py` 的 `present_plan` ALLOW 项、
   `core/export_html.py` 的图标、`core/turn_books.py` 的
   `BOOKKEEPING_TOOLS` 项、`core/agent_loop.py` 的 `TaskUpdated` 触发名单项；

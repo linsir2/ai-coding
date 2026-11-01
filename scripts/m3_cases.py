@@ -183,44 +183,6 @@ async def a_dotenv_read_asks_and_an_example_does_not(root: Path) -> tuple[bool, 
     return True, "secret asks, documentation and code do not"
 
 
-# ---- T11: the plan survives reload ---------------------------------------
-
-
-async def a_submitted_plan_can_be_read_back_after_reload(
-    root: Path,
-) -> tuple[bool, str]:
-    """A real session file, reloaded, still holds the plan it was given."""
-    world = await _world(root)
-    try:
-        session = world.sessions.create()
-        session.add_message(
-            _assistant_plan_call(
-                "# 计划\n正文",
-                [{"content": "建目录", "verify": "test -d hotel"}],
-            )
-        )
-        world.sessions.save(session)
-        reloaded = world.sessions.load(session.session_id)
-        if reloaded is None:
-            return False, "the session did not reload"
-        calls = [
-            call
-            for message in reloaded.messages
-            for call in (message.tool_calls or ())
-            if call.name == "present_plan"
-        ]
-        if len(calls) != 1:
-            return False, f"expected one plan call, found {len(calls)}"
-        arguments = json.loads(calls[0].arguments)
-        if arguments["plan"] != "# 计划\n正文":
-            return False, f"the plan changed: {arguments['plan']!r}"
-        if arguments["items"][0]["verify"] != "test -d hotel":
-            return False, "the proof changed"
-        return True, "the submitted plan survived reload"
-    finally:
-        await world.aclose()
-
-
 async def a_symlink_out_of_the_plan_directory_is_refused(
     root: Path,
 ) -> tuple[bool, str]:
@@ -270,23 +232,6 @@ async def a_proof_cannot_use_a_relative_escape(root: Path) -> tuple[bool, str]:
     return True, "relative escapes are refused"
 
 
-def _assistant_plan_call(plan: str, items: list[dict[str, Any]]) -> Any:
-    from ai_coding.domain.message import ChatMessage, ToolCallRef
-
-    return ChatMessage(
-        role="assistant",
-        content=None,
-        timestamp="t",
-        tool_calls=[
-            ToolCallRef(
-                id="call_plan",
-                name="present_plan",
-                arguments=json.dumps({"plan": plan, "items": items}),
-            )
-        ],
-    )
-
-
 CASES: dict[str, CaseFn] = {
     "the_plan_directory_is_the_only_writable_place": (
         the_plan_directory_is_the_only_writable_place
@@ -294,9 +239,6 @@ CASES: dict[str, CaseFn] = {
     "the_plan_request_carries_no_todo_tool": the_plan_request_carries_no_todo_tool,
     "a_dotenv_read_asks_and_an_example_does_not": (
         a_dotenv_read_asks_and_an_example_does_not
-    ),
-    "a_submitted_plan_can_be_read_back_after_reload": (
-        a_submitted_plan_can_be_read_back_after_reload
     ),
     "a_symlink_out_of_the_plan_directory_is_refused": (
         a_symlink_out_of_the_plan_directory_is_refused

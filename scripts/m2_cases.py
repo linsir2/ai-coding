@@ -255,7 +255,7 @@ async def the_plan_rule_produces_the_old_tool_surface(root: Path) -> tuple[bool,
 
     * write/edit stay: a scoped plan-directory allow means the tool is
       reachable there (opencode D06);
-    * todo_write goes: the planning list belongs to present_plan (T8).
+    * todo_write goes: the planning list belongs to the plan itself (T8).
     """
     from ai_coding.config.models import AIConfig, AppConfig
     from ai_coding.tools.builder import build_tool_registry
@@ -359,10 +359,9 @@ async def the_strict_tier_denies_more_but_keeps_the_exits(root: Path) -> tuple[b
     strict_denied = {r.action for r in strict if r.effect is Effect.DENY}
     if not strict_denied > soft_denied:
         return False, "the strict tier denies nothing more"
-    for exit_tool in ("present_plan", "finish_research"):
-        if exit_tool in strict_denied:
-            return False, f"the strict tier closed {exit_tool}"
-    return True, "more denied, both exits open"
+    if "finish_research" in strict_denied:
+        return False, "the strict tier closed the research exit"
+    return True, "more denied, the exit stays open"
 
 
 async def the_alias_table_covers_the_actions(root: Path) -> tuple[bool, str]:
