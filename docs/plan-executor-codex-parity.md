@@ -699,7 +699,7 @@ for index in ...:
 
 | 项 | 落点 | 状态 |
 |---|---|---|
-| C-0 配置档位 | `config/models.py`：`plan_orchestrator` 支持 `codex/session/legacy`；新增 `plan_verify_items=False`。**默认值仍为 `session`**（按"先建 codex 路径、验证后删旧"的约定，翻阅默认值放在批次 3）。 | 完成 |
+| C-0 配置档位 | `config/models.py`：`plan_orchestrator` 支持 `codex/session/legacy`；新增 `plan_verify_items=False`。默认值已在本批末尾翻转为 **`codex`**（builder 的 duck-typed 回退同步为 `codex`）。 | 完成 |
 | C-1 `update_plan` | `tools/update_plan_tool.py`：schema 与 Codex 逐键一致；固定回灌 `"Plan updated"`；Plan 模式返回 `plan_mode`；全量替换 1..N；`plan_verify_items=True` 时接受/执行 `verify`。 | 完成 |
 | 工具注册 | `tools/builder.py`：`codex` 注册 `update_plan`、不注册 `present_plan`；子代理两者都没有。 | 完成 |
 | C-2 计划模式 | `<plan-mode>` 易失尾块（仅 codex + `mode=="plan"`）；`<proposed_plan>` 解析与展示剥离；`run_human_turn` 增加 `user_prompt`，回合结束询问 `intent="plan_implement"`。 | 完成 |
@@ -716,7 +716,7 @@ for index in ...:
 
 已知与文档的差异（均为批次 1 的刻意取舍）：
 
-1. `plan_orchestrator` 默认值未翻转（见上）；
+1. 默认值已在批次 1 末尾翻转为 `codex`；`session`/`legacy` 仍保留为显式回退项（删除放在真实 provider 验证之后）。
 2. 前端用通用 `AskPanel` 渲染 `plan_implement`（而不是 Codex 的专用 TUI 弹窗），计划正文通过 `detail` 展示；
 3. 子代理工具面在批次 2 补齐（见下）。
 
@@ -736,5 +736,5 @@ C-5b 的 `send_message`/`interrupt_agent`/`resume_agent` 仍未注册（能力�
 ## 15. 本轮交付
 
 - 第 1–4 节：对照与差距；第 8–13 节：复核后的权威设计、数据流、推演、复用清单。
-- 第 14 节：批次 1、批次 2 的落地记录。
-- 下一步：批次 3（C-5b + 删除旧执行器 + 翻转 `plan_orchestrator` 默认值）。
+- 第 14 节：批次 1、批次 2 的落地记录；`plan_orchestrator` 默认值已翻转为 `codex`。
+- 下一步：C-5b（`send_message`/`interrupt_agent`/`resume_agent`）；旧执行器（`PlanExecutor`/`PlanRunner`/`TaskDriver` 计划分支）的删除放在**真实 provider 端到端验证之后**（scripted 模型不能替代一次真实 `/plan run`）。

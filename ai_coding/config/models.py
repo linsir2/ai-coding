@@ -483,13 +483,14 @@ class AIConfig(BaseModel):
     # done/deadlock; an operator who wants a ceiling can still set one.
     plan_max_step_turns: int = 0
     # ---- plan executor selection --------------------------------------
-    #: Which plan executor `/plan run` uses.  ``session`` (default for now; the
-    #: next batch flips it) is Plan-as-Goal: the whole plan runs in one turn on
-    #: the parent session, so the transcript is the continuity (no step session
-    #: ever replaces it).  ``legacy`` keeps the one-short-session-per-step runner
-    #: (escape hatch).  ``codex`` is the Codex-parity path (``update_plan`` and
-    #: no executor-side receipts/reports).
-    plan_orchestrator: Literal["codex", "session", "legacy"] = "session"
+    #: Which plan executor `/plan run` uses.  ``codex`` (default) is the
+    #: Codex-parity path: ``update_plan`` plus one ordinary turn whose prompt
+    #: is ``"Implement the plan."`` (no executor-side receipts/reports).
+    #: ``session`` is Plan-as-Goal: the whole plan runs in one turn on the
+    #: parent session, so the transcript is the continuity (no step session
+    #: ever replaces it).  ``legacy`` keeps the one-short-session-per-step
+    #: runner (escape hatch).
+    plan_orchestrator: Literal["codex", "session", "legacy"] = "codex"
     #: C-0: codex path only.  False keeps Codex's ``update_plan`` schema
     #: (``step``/``status``); True additionally accepts an optional per-step
     #: ``verify`` and runs the item-boundary acceptance inside ``update_plan``.

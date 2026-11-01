@@ -36,7 +36,7 @@ def test_load_returns_defaults_on_none(no_config):
     assert app.ai.max_tool_iterations == 100
     # Stage 2: Plan-as-Goal (main-session rounds) is the default executor;
     # the legacy step runner stays one setting away.
-    assert app.ai.plan_orchestrator == "session"
+    assert app.ai.plan_orchestrator == "codex"
     # A spend cap mid-turn buys an interruption, not safety (context growth is
     # bounded by compaction), so the episode ceiling is off by default.
     assert app.ai.plan_token_budget == 0

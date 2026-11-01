@@ -1516,7 +1516,19 @@ async def test_plan_mode_does_not_refresh_a_bare_goal(tmp_path):
         [_text("你好呀"), _text("好的"), _text("这是回答"), _text("收到")]
     )
     sessions = SessionService(tmp_path / "sessions")
-    loop = _loop(engine, sessions)
+    # C-2: the plan submission guard (and its remedy round) only exists where
+    # ``present_plan`` is on offer; this test pins that round's task block.
+    from ai_coding.security.user_prompt import UnavailableUserPromptCallback
+    from ai_coding.tools.present_plan_tool import PresentPlanTool
+
+    loop = _loop(
+        engine,
+        sessions,
+        _registry(PresentPlanTool(UnavailableUserPromptCallback())),
+        # This test pins the *session* path's task block; the codex path
+        # deliberately injects neither <task-state> nor <plan-mode>.
+        settings=_settings(plan_orchestrator="session"),
+    )
     session = sessions.create()
     session.agent = "plan"
 

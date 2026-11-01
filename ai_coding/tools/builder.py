@@ -354,10 +354,10 @@ def _assemble_registry(
     # C-0: the plan tool follows the executor selection.  ``codex`` gets
     # ``update_plan`` (Codex's own plan surface); ``session``/``legacy`` keep
     # ``present_plan`` and its review card.  Both are main-session tools:
-    # a sub-agent has no plan table.  Duck-typed configs without the field keep
-    # the current default (``session``).
+    # a sub-agent has no plan table.  Duck-typed configs without the field
+    # follow the shipped default (``codex``).
     orchestrator = str(
-        getattr(app_cfg, "plan_orchestrator", "session") or "session"
+        getattr(app_cfg, "plan_orchestrator", "codex") or "codex"
     )
     if include_subagent and orchestrator == "codex":
         from ai_coding.tools.update_plan_tool import UpdatePlanTool
