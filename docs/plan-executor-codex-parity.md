@@ -744,4 +744,7 @@ C-5b 的 `send_message`/`interrupt_agent`/`resume_agent` 仍未注册（能力�
 
 - 第 1–4 节：对照与差距；第 8–13 节：复核后的权威设计、数据流、推演、复用清单。
 - 第 14 节：批次 1、批次 2 的落地记录；`plan_orchestrator` 默认值已翻转为 `codex`。
-- 下一步：C-5b（`send_message`/`interrupt_agent`/`resume_agent`）；旧执行器（`PlanExecutor`/`PlanRunner`/`TaskDriver` 计划分支）的删除放在**真实 provider 端到端验证之后**（scripted 模型不能替代一次真实 `/plan run`）。
+- 下一步：C-5b（`send_message`/`interrupt_agent`/`resume_agent`）——方案与评审见
+  [subagent-c5b-design.md](subagent-c5b-design.md)（v2，已吸收两轮评审）；旧执行器
+  （`PlanExecutor`/`PlanRunner`/`TaskDriver` 计划分支）的删除放在**真实 provider
+  端到端验证之后**（scripted 模型不能替代一次真实 `/plan run`）。
