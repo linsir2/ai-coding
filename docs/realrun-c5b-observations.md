@@ -88,3 +88,53 @@ resume 对 running 的 no-op、pool full、歧义/未知 target、worktree 隔�
    或给子代理一个独立、更高的默认值。
 4. **测试**：把本次真机脚本沉淀为可选真机用例（key 缺失时 skip），覆盖第 6 节
    的未覆盖边界。
+
+## 8. 迭代上限：调研结论与修正
+
+**问题**：真机第一次跑子代理时，turn2 在 13 步撞上 `max_tool_iterations` 而没写完文件。
+追查发现子代理**继承了父的** `ai.max_tool_iterations`（示例配置里是 10），而计划回合
+本身是无限的（`-1`）。这与调研结论矛盾。
+
+**调研（本地源码 + 官方文档）**：
+
+| 实现 | 子代理迭代上限 | 终止/兜底 |
+|---|---|---|
+| Codex | **无**（`run_turn` 是裸 loop，`core/src/session/turn.rs:490`；子线程同） | `needs_follow_up=false`、token 上限+压缩、用户中断 |
+| opencode | **默认无**（`steps` 可选，内置 general/explore 未设；`packages/core/src/session/runner/llm.ts:249`） | 模型停止、overflow 压缩、abort |
+| dsh | **无**（`packages/core/agent-loop/src/agent.ts:341-422`） | maxTokens、maxDepth、并发槽 |
+| Claude Code | **默认无**，可显式 `maxTurns` | partial output + resume、stall window |
+| gemini-cli（反例） | **30 turns + 10min**（`agents/types.ts:51,56`） | 硬上限 |
+
+结论：**"子代理默认不设迭代上限"是主流**；兜底靠上下文/token 上限 + 自动压缩 +
+用户中断，而不是步数。
+
+**我们的修正**（最小改动）：
+
+- 新增 `ai.subagent_max_tool_iterations: int = 0`，`0` = 不设上限（默认），正数 = 显式上限。
+- `SubAgentRunner._subagent_settings()` 把子代理的 `max_tool_iterations` 设为
+  `-1`（0 时）或配置值；**不再继承父的 cap**。
+- `TurnPolicyConfig.from_ai_config()`：`<= 0` 映射为 `-1`（"无上限"哨兵），
+  不再 clamp 到 1（旧的 clamp 会把"无限"变成"一步"）。
+- `config.example.yaml` 的 `max_tool_iterations` 由 10 改为 100（产品默认），并新增
+  子代理字段说明。
+- 测试：`tests/test_subagent_limits.py`（默认无上限、显式上限生效、父 3 步不影响子）。
+
+## 9. 第二轮真机：7 个边界用例（全部通过）
+
+| 用例 | 结果 | 证据 |
+|---|---|---|
+| 运行中再次 interrupt（续跑 turn2 中） | 通过 | `previous=running → interrupted`，26ms，无 notice |
+| close 打断运行中 | 通过 | `closed=True`、行 `cancelled`、handle 已删、4ms、无 notice |
+| resume running no-op | 通过 | 返回 `status=running`，turn 未被重启 |
+| pool full | 通过 | 第 2 个 spawn `agents_exhausted`；对忙 agent 的 send 仍 `queued` |
+| 歧义 target | 通过 | 同名两个 agent → `ambiguous_target` + 两个候选 id |
+| worktree 隔离下续跑 | 通过 8/8 | worktree 创建、interrupt+resume 后保留、产物落在 worktree、close 提交并删除、分支保留、磁盘可再 resume |
+| 跨 OS 进程 resume | 通过 6/6 | 进程 A 结束后，新进程 B 无 handle、从 sidecar+session 恢复、续跑成功（`turn_count=2`） |
+
+脚本：`/tmp/realrun_agent_edges.py`、`/tmp/realrun_agent_worktree.py`、
+`/tmp/realrun_agent_crossproc.py`；日志 `/tmp/real-agent-{edges,worktree,crossproc}.log`；
+结果 `/tmp/real-agent-{edges,worktree,crossproc}-result.txt`。
+
+**过程中修的一个真实缺口**：同名 agent 之前一律回 `unknown_agent`，模型无法区分
+"拼错"和"重名"。新增 `SubAgentRunner.resolve_target()`（ok/unknown/ambiguous），
+四个工具统一返回 `ambiguous_target` 并列出候选。

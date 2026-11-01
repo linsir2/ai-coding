@@ -521,6 +521,33 @@ class SubAgentRunner:
 
     # ---- C-5b: send / interrupt / resume / close ---------------------------
 
+    def resolve_target(self, target: str) -> tuple[str, str, list[str]]:
+        """Classify an address: ``(kind, run_id, candidates)``.
+
+        ``kind`` is ``ok`` (one live handle), ``unknown`` (nothing matches or it
+        is closed) or ``ambiguous`` (a bare name matches several live children).
+        The tools need the third case: silently answering "unknown" for a name
+        the operator can see in ``list_agents`` is the least useful reply.
+        """
+        if not target:
+            return "unknown", "", []
+        resolved = self.resolve_run_id(target)
+        if resolved is not None:
+            handle = self._handles.get(resolved)
+            if handle is not None and handle.status != "closed":
+                return "ok", resolved, []
+            return "unknown", "", []
+        matches = [
+            handle
+            for handle in self._handles.values()
+            if handle.name == target and handle.status != "closed"
+        ]
+        if len(matches) == 1:
+            return "ok", matches[0].run_id, []
+        if len(matches) > 1:
+            return "ambiguous", "", [handle.run_id for handle in matches]
+        return "unknown", "", []
+
     def _handle_for(self, target: str) -> AgentHandle | None:
         """The live handle a target names -- id prefix first, then a unique name.
 
@@ -528,20 +555,8 @@ class SubAgentRunner:
         a closed handle is not addressable at all.  An ambiguous name resolves
         to ``None`` rather than guessing which child the operator meant.
         """
-        if not target:
-            return None
-        resolved = self.resolve_run_id(target)
-        if resolved is not None:
-            handle = self._handles.get(resolved)
-            if handle is not None and handle.status != "closed":
-                return handle
-            return None
-        matches = [
-            handle
-            for handle in self._handles.values()
-            if handle.name == target and handle.status != "closed"
-        ]
-        return matches[0] if len(matches) == 1 else None
+        kind, run_id, _candidates = self.resolve_target(target)
+        return self._handles.get(run_id) if kind == "ok" else None
 
     async def send_message(self, target: str, text: str) -> tuple[str, str]:
         """Deliver ``text`` to a child; return ``(status, run_id)``.
@@ -1538,11 +1553,20 @@ class SubAgentRunner:
         return data if isinstance(data, dict) else None
 
     def _subagent_settings(self) -> AIConfig:
-        """Settings for the sub-turn: its own wall-clock ceiling (R2a)."""
+        """Settings for the sub-turn: its own wall-clock ceiling (R2a).
+
+        ``subagent_max_tool_iterations`` decides the child's iteration cap:
+        ``0`` (default) means no cap, matching Codex/opencode/dsh/Claude Code.
+        The child used to inherit the parent's ``max_tool_iterations``, so a
+        parent configured at 10 cut a real child task mid-way (measured).
+        """
         configured = float(getattr(self._settings, "turn_timeout_seconds", 0.0) or 0.0)
         budget = self._timeout * _INNER_BUDGET_RATIO
         if configured > 0:
             budget = min(budget, configured)
+        child_iterations = int(
+            getattr(self._settings, "subagent_max_tool_iterations", 0) or 0
+        )
         # C3 off: the parent is blocked on this child, so a continuation buys
         # the parent nothing but latency — and it multiplies the child's
         # iterations by (1 + max_auto_continuations).  Measured with an open
@@ -1551,6 +1575,10 @@ class SubAgentRunner:
             update={
                 "turn_timeout_seconds": max(budget, 0.01),
                 "max_auto_continuations": 0,
+                # 0 -> -1: "no cap", the sentinel TurnPolicyConfig understands.
+                "max_tool_iterations": (
+                    child_iterations if child_iterations > 0 else -1
+                ),
             }
         )
 

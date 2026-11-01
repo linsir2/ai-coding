@@ -350,8 +350,16 @@ def test_from_ai_config_reads_the_orchestration_settings():
     )
 
 
-def test_from_ai_config_clamps_a_zero_iteration_budget():
-    assert TurnPolicyConfig.from_ai_config(AIConfig(max_tool_iterations=0)).max_iterations == 1
+def test_a_zero_iteration_budget_means_no_cap():
+    """C-5b: 0 is "unbounded" (-1), not "the strictest possible turn".
+
+    A child turn defaults to no iteration cap (Codex/opencode/dsh parity), so the
+    settings -> policy mapping has to carry that through instead of clamping 0
+    to 1 -- which used to turn "unlimited" into a one-step turn.
+    """
+    assert TurnPolicyConfig.from_ai_config(
+        AIConfig(max_tool_iterations=0)
+    ).max_iterations == -1
 
 
 # ---- G8-1: the model is told when the budget is nearly gone ----------------

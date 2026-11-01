@@ -43,7 +43,13 @@
 
 ai:
   auto_process_tool_results: true
-  max_tool_iterations: 10
+  max_tool_iterations: 100
+  # C-5b: the iteration cap a delegated child gets.  0 (default) means no cap --
+  # Codex/opencode/dsh/Claude Code all run sub-agents unbounded, bounded by
+  # `subagent_timeout_seconds` and compaction instead.  A positive value caps it
+  # explicitly (gemini-cli uses 30).  Before this field existed a child inherited
+  # the parent's `max_tool_iterations`, so a parent set to 10 cut real work.
+  subagent_max_tool_iterations: 0
   # B1/B2: consecutive look-only calls (read/grep/glob ... with no write/edit/bash
   # in between) before the `[search-gate]` ladder speaks.  0 disables it.
   search_streak_threshold: 4

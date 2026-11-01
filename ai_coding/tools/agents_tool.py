@@ -367,6 +367,9 @@ class CloseAgentTool(BaseTool):
                 error="missing_agent_id",
             )
         resolved = _resolve_agent_id(self._runner, agent_id)
+        ambiguous = _ambiguous_result(self._runner, agent_id)
+        if ambiguous is not None:
+            return ambiguous
         rows = {
             row.run_id: row for row in getattr(self._runner, "task_list", lambda: [])()
         }
@@ -454,6 +457,9 @@ class SendMessageTool(BaseTool):
                 error="invalid_message",
             )
         resolved = _resolve_agent_id(self._runner, target)
+        ambiguous = _ambiguous_result(self._runner, target)
+        if ambiguous is not None:
+            return ambiguous
         try:
             status, run_id = await self._runner.send_message(resolved, message)
         except SubAgentPoolFull as exc:
@@ -526,6 +532,9 @@ class InterruptAgentTool(BaseTool):
                 error="missing_target",
             )
         resolved = _resolve_agent_id(self._runner, target)
+        ambiguous = _ambiguous_result(self._runner, target)
+        if ambiguous is not None:
+            return ambiguous
         previous, status = await self._runner.interrupt(resolved)
         previous_display = previous or "none"
         return ToolResult(
@@ -590,6 +599,9 @@ class ResumeAgentTool(BaseTool):
                 error="missing_agent_id",
             )
         resolved = _resolve_agent_id(self._runner, agent_id)
+        ambiguous = _ambiguous_result(self._runner, agent_id)
+        if ambiguous is not None:
+            return ambiguous
         status, run_id = await self._runner.resume(resolved)
         name = run_id or resolved
         data = {"agent_id": name, "status": status}
@@ -599,6 +611,29 @@ class ResumeAgentTool(BaseTool):
                 error="not_found", data=data,
             )
         return ToolResult(success=True, output=f"agent {name}: {status}", data=data)
+
+
+def _ambiguous_result(runner: Any, target: str) -> ToolResult | None:
+    """A "which one did you mean?" refusal for a name that matches several.
+
+    ``unknown_agent`` for a name ``list_agents`` just printed is the least
+    useful answer: the model cannot tell a typo from a collision.
+    """
+    classify = getattr(runner, "resolve_target", None)
+    if not callable(classify):
+        return None
+    kind, _run_id, candidates = classify(target)
+    if kind != "ambiguous":
+        return None
+    return ToolResult(
+        success=False,
+        output=(
+            f"ambiguous target '{target}': matches {', '.join(candidates)}; "
+            "use one of those ids"
+        ),
+        error="ambiguous_target",
+        data={"target": target, "candidates": list(candidates)},
+    )
 
 
 def _resolve_agent_id(runner: Any, agent_id: str) -> str:

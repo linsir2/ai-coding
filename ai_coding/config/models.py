@@ -348,6 +348,14 @@ class AIConfig(BaseModel):
     #: 100 keeps a hard bound for a runaway loop while clearing any real task;
     #: the clock, token budget and ladder guards are still the safety net.
     max_tool_iterations: int = 100
+    #: C-5b: the iteration cap a *child* turn gets.  ``0`` (default) means no
+    #: cap -- the same semantics Codex, opencode, dsh and Claude Code give their
+    #: sub-agents; a child is bounded by ``subagent_timeout_seconds``, by
+    #: compaction, and by the model stopping.  A positive value bounds it
+    #: explicitly (gemini-cli's 30-turn policy).  Before this field existed a
+    #: child silently inherited the parent's cap, and the example config's 10
+    #: cut real work mid-task.
+    subagent_max_tool_iterations: int = 0
     #: B1/B2: consecutive look-only calls before the `[search-gate]` ladder speaks.
     #: 0 disables it.  Clamped at 0 because a negative value would make every
     #: iteration fire a nudge and leave the model no step to act in.

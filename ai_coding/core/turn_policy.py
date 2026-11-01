@@ -156,9 +156,18 @@ class TurnPolicyConfig:
 
     @classmethod
     def from_ai_config(cls, settings: Any) -> TurnPolicyConfig:
-        """Build from ``AIConfig`` (duck-typed: fakes in tests work too)."""
+        """Build from ``AIConfig`` (duck-typed: fakes in tests work too).
+
+        ``max_tool_iterations <= 0`` means "no cap" and becomes ``-1``, the
+        sentinel ``decide_next_iteration`` already understands (a plan turn uses
+        it too).  It used to clamp to 1, which turned an explicit "unlimited"
+        into the strictest possible turn.
+        """
+        raw_iterations = int(getattr(settings, "max_tool_iterations", 10))
         return cls(
-            max_iterations=max(1, int(getattr(settings, "max_tool_iterations", 10))),
+            max_iterations=(
+                -1 if raw_iterations <= 0 else max(1, raw_iterations)
+            ),
             stop_policy=str(getattr(settings, "stop_policy", "todo_aware")),
             max_todo_nudges=int(getattr(settings, "max_todo_nudges", 2)),
             task_injection=str(getattr(settings, "task_injection", "message")),

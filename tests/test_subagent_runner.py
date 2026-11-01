@@ -492,7 +492,11 @@ async def test_subagent_does_not_auto_continue_its_budget():
     ])
     runner = _runner(engine, registry=_registry(_Tool("noop")),
                      settings=AIConfig(stop_policy="natural",
-                                       max_tool_iterations=budget))
+                                       max_tool_iterations=budget,
+                                       # C-5b: a child is unbounded by default;
+                                       # this test needs a bound to observe, so
+                                       # it sets the child's own cap.
+                                       subagent_max_tool_iterations=budget))
 
     await runner.run("t", parent=_parent())
 
