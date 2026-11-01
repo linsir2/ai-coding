@@ -503,6 +503,27 @@ TypeError——实现时先全仓 grep 字段名再删；`turn_books.snapshot()`
 - 未做：真机 provider 跑通（本沙箱无模型凭据）；由用户在本机执行
   `/plan <topic>` → 批准 → `update_plan` 与 `/readonly`、build 主闭环。
 
+### P0b-fix-plan-budget（真机发现的回归，已修）
+
+真机（qwen3.7-flash）复现：把 `max_tool_iterations` 调成 4，规划回合第 3、4 步收到
+「[budget] 本轮预算快用完了…请用这一轮收尾」，第 5 步以 `MAX_ITERATIONS` 收尾，
+且没有 `<proposed_plan>`。根因：P0b-1 删旧 `plan_runner` 时把规划回合的独立预算
+（`PLANNING_MAX_ITERATIONS=32` + `continuations_disabled`）也删了，规划回合从此继承
+build 回合的步数上限与 G8-1 压力提示。
+
+修复（已拍板默认）：规划回合（`mode=="plan"`）不设步数上限、不注入预算压力提示；
+由回合时钟、token 预算、上下文压缩和「模型停手即 FINISH」兜底。`plan_implementing`
+执行轮维持原样。
+
+- `turn_policy.decide_next_iteration`：ceiling 增加 `snapshot.mode == "plan"`；
+  `budget_pressure(..., mode="plan")` 直接返回 `None`（普通/readonly 回合不变）。
+- `request_assembly` 传入 `session.mode`；`AgentLoop._step_ceiling` 统一
+  `IterationStarted` 与 `_has_a_round_left` 的口径（后者此前会让长规划回合
+  的引用纠错失效）。
+- 测试：`test_a_plan_turn_has_no_step_ceiling`、`test_plan_mode_gets_no_budget_pressure`、
+  `test_a_plan_turn_gets_no_pressure_block`、`test_a_plan_turn_always_has_a_round_left_for_a_correction`。
+- 真机复测（同一 4 步配置）：12 步、无 `[budget]`、`COMPLETED`、产出 `<proposed_plan>`。
+
 ---
 
 ## 自核

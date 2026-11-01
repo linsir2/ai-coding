@@ -108,6 +108,21 @@ def _loop(
     )
 
 
+def test_a_plan_turn_always_has_a_round_left_for_a_correction(tmp_path):
+    """P0b-fix-plan-budget: a plan turn has no step ceiling, so the citation
+    correction must not be switched off just because ``index`` passed the
+    build turn's cap."""
+    from ai_coding.domain.session import SessionData
+
+    loop = _loop(_ScriptedEngine([]), SessionService(tmp_path / "sessions"), max_tool_iterations=3)
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.agent = "plan"
+
+    assert loop._has_a_round_left(session, 50) is True
+    plain = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    assert loop._has_a_round_left(plain, 50) is False
+
+
 def _corrections(session) -> list[str]:
     return [
         m.content or ""

@@ -447,7 +447,9 @@ class RequestAssembler:
         # are the thing recency helps -- everything above it is state to read,
         # this is the one line asking for a change of behaviour.
         pressure = self._active_policy().budget_pressure(
-            iteration=index, tokens_spent=self._reporter.tokens_spent()
+            iteration=index,
+            tokens_spent=self._reporter.tokens_spent(),
+            mode=str(getattr(session, "mode", "normal") or "normal"),
         )
         # M2: recommend skills based on current context (after task, before hook).
         recommended_skills_block = ""

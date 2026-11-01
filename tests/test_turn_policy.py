@@ -57,19 +57,34 @@ def test_next_iteration_finishes_when_the_turn_budget_is_gone():
     assert decision.reason == "turn deadline exceeded"
 
 
-def test_a_plan_turn_decides_on_the_budget_alone():
-    """P0b-2a: the plan submission guard is gone, so a plan turn's
-    iteration decision is the budget and nothing else -- no present_plan
-    text is ever injected."""
+def test_a_plan_turn_has_no_step_ceiling():
+    """P0b-fix-plan-budget: a plan turn does not inherit the build turn's
+    ``max_iterations``.  It is bounded by the turn clock and the token budget,
+    and by the model stopping -- not by a step count."""
     policy = TurnPolicy(_config(max_iterations=3))
-    within = policy.decide_next_iteration(TurnSnapshot(iteration=3, mode="plan"))
+
+    within = policy.decide_next_iteration(TurnSnapshot(iteration=50, mode="plan"))
     assert within.action is TurnAction.ITERATE
     assert within.inject is None
 
-    spent = policy.decide_next_iteration(TurnSnapshot(iteration=4, mode="plan"))
-    assert spent.action is TurnAction.FINISH
-    assert spent.reason == "iteration budget exhausted"
-    assert spent.inject is None
+    expired = policy.decide_next_iteration(
+        TurnSnapshot(iteration=50, mode="plan"), budget_expired=True
+    )
+    assert expired.action is TurnAction.FINISH
+    assert expired.reason == "turn deadline exceeded"
+
+    # A configured token budget still stops a plan turn: only the *step*
+    # ceiling is removed.
+    tokens = policy.decide_next_iteration(
+        TurnSnapshot(iteration=50, mode="plan", tokens_spent=10_000),
+    )
+    assert tokens.action is TurnAction.ITERATE  # no token ceiling configured
+    capped = TurnPolicy(_config(max_iterations=3, max_turn_tokens=10_000))
+    exhausted = capped.decide_next_iteration(
+        TurnSnapshot(iteration=50, mode="plan", tokens_spent=10_000)
+    )
+    assert exhausted.action is TurnAction.FINISH
+    assert exhausted.reason == "turn token budget exhausted"
 
 
 # ---- after a model step ----------------------------------------------------
@@ -303,6 +318,18 @@ def test_an_unlimited_token_budget_says_nothing_about_tokens():
     policy = TurnPolicy(TurnPolicyConfig(max_iterations=100, max_turn_tokens=0))
 
     assert policy.budget_pressure(iteration=1, tokens_spent=10**9) is None
+
+
+def test_plan_mode_gets_no_budget_pressure():
+    """P0b-fix-plan-budget: a plan turn has no step ceiling, so warning it about
+    a nonexistent one would be a lie it acts on.  Ordinary turns keep it."""
+    policy = TurnPolicy(TurnPolicyConfig(max_iterations=10))
+
+    assert policy.budget_pressure(iteration=9, tokens_spent=0, mode="plan") is None
+
+    normal = policy.budget_pressure(iteration=9, tokens_spent=0, mode="normal")
+    assert normal is not None
+    assert "9/10" in normal
 
 
 def test_the_last_iteration_is_not_announced_as_available():

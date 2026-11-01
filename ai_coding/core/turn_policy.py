@@ -243,9 +243,13 @@ class TurnPolicy:
         )
         # C-3: a codex implementation turn has no ceiling -- Codex's turn
         # is bounded by its own structural continuation, not by a step count.
+        # P0b-fix-plan-budget: a plan turn (``mode == "plan"``) is a planning
+        # round and does not inherit the build turn's step cap either; it is
+        # bounded by the turn clock, the context window and the token budget,
+        # and it ends when the model stops.
         ceiling = (
             -1
-            if snapshot.plan_implementing
+            if snapshot.plan_implementing or snapshot.mode == "plan"
             else int(self.config.max_iterations)
         )
         if ceiling >= 0 and snapshot.iteration > ceiling:
@@ -380,7 +384,9 @@ class TurnPolicy:
         )
         return TaskInjection(instructions=instructions, message=block)
 
-    def budget_pressure(self, *, iteration: int, tokens_spent: int) -> str | None:
+    def budget_pressure(
+        self, *, iteration: int, tokens_spent: int, mode: str = "normal"
+    ) -> str | None:
         """A note to the model when the turn's budget is nearly gone (G8-1).
 
         Six separate budgets govern a turn and the model can see none of them --
@@ -392,10 +398,17 @@ class TurnPolicy:
         numbers the caller already has.  No tokens of its own, no extra call.
 
         Returns ``None`` when there is nothing true to say -- a healthy budget,
-        a turn that is already past its cap (the decision ladder owns that), or
-        an unlimited token budget, where warning about a ceiling that does not
-        exist would be a lie the model acts on.
+        a turn that is already past its cap (the decision ladder owns that), an
+        unlimited token budget, where warning about a ceiling that does not
+        exist would be a lie the model acts on, or a plan turn (``mode ==
+        "plan"``), which has no step ceiling at all.  A plan turn's configured
+        token budget still stops it; this only suppresses the step-share note.
         """
+        # P0b-fix-plan-budget: a plan turn has no step ceiling at all, so the
+        # step-share of this block would describe a cap that does not exist.
+        # Its real bounds are the turn clock and context compression.
+        if mode == "plan":
+            return None
         parts: list[str] = []
         if 0 < iteration <= self.config.max_iterations:
             remaining = self.config.max_iterations - iteration

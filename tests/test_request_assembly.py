@@ -296,6 +296,22 @@ async def test_a_nearly_exhausted_turn_gets_a_pressure_block():
 
 
 @pytest.mark.asyncio
+async def test_a_plan_turn_gets_no_pressure_block():
+    """P0b-fix-plan-budget: a plan turn has no step ceiling, so a step-share
+    warning would describe a cap it does not have."""
+    assembler, _parts = _assembler()
+    assembler._policy = TurnPolicy(  # noqa: SLF001 - the config under test
+        TurnPolicyConfig(max_iterations=10)
+    )
+    session = _session()
+    session.agent = "plan"
+
+    assembled = await _assemble(assembler, session=session, index=9)
+
+    assert not [m for m in assembled.request if (m.content or "").startswith("[budget]")]
+
+
+@pytest.mark.asyncio
 async def test_a_healthy_turn_gets_no_pressure_block():
     """Heavy-handed pressure on every request would teach the model to ignore
     it, and would spend tail tokens on every iteration to say nothing."""

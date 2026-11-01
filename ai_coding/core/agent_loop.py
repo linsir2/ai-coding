@@ -1118,9 +1118,13 @@ class AgentLoop:
                 self._take_steering(session, books, index)
                 self._take_notices(session, index)
                 self._take_agent_inbox(session, index)
+                ceiling = self._step_ceiling(session)
                 self._emit(
                     IterationStarted(
-                        index=index, max_iterations=self.policy.config.max_iterations
+                        index=index,
+                        # 0 = no step ceiling (a plan turn); the event consumers
+                        # already treat 0 as "not reported".
+                        max_iterations=0 if ceiling < 0 else ceiling,
                     )
                 )
                 assembled = await self.assembler.assemble(
@@ -2258,6 +2262,20 @@ class AgentLoop:
         except OSError:
             return 0
 
+    def _step_ceiling(self, session: SessionData) -> int:
+        """The step cap this turn's posture has, or ``-1`` when it has none.
+
+        A plan turn (planning) and the codex plan-implementation turn are
+        bounded by the turn clock, the context window and the model stopping,
+        not by a step count -- see ``TurnPolicy.decide_next_iteration``.
+        """
+        if (
+            bool(getattr(session, "plan_implementing", False))
+            or str(getattr(session, "mode", "normal") or "normal") == "plan"
+        ):
+            return -1
+        return int(self.policy.config.max_iterations)
+
     def _has_a_round_left(self, session: SessionData, index: int) -> bool:
         """Is there an iteration after this one for a correction to land in?
 
@@ -2265,15 +2283,8 @@ class AgentLoop:
         correction issued on the last allowed iteration is written into the
         history and never read.
         """
-        ceiling = (
-            -1
-            if bool(getattr(session, "plan_implementing", False))
-            else int(self.policy.config.max_iterations)
-        )
+        ceiling = self._step_ceiling(session)
         if ceiling < 0:
-            # C-3: the codex plan turn has no iteration budget.  Context growth,
-            # not step count, is what bounds it -- every iteration compacts on
-            # its own gate.
             return True
         return index < max(1, ceiling)
 
