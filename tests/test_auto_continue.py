@@ -15,7 +15,6 @@ from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.turn_policy import TurnAction, TurnPolicy, TurnPolicyConfig, TurnSnapshot
 from ai_coding.domain.loop import StepResult, TurnStatus
 from ai_coding.domain.message import ToolCallRef
-from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState, TodoItem
 from ai_coding.service.session_service import SessionService
 from ai_coding.tools.registry import ToolRegistry
@@ -219,24 +218,6 @@ async def test_continuations_reset_for_the_next_user_turn(tmp_path):
     # Both turns bought their rounds (3 + 3), and each ended on the iteration
     # budget, so each got one closing call (G8-2).
     assert len(engine.requests) == 8
-
-
-def test_open_items_for_narrows_to_the_steps_own_item():
-    """The scope ``_open_items_for`` applies: a plan step shares the plan's task,
-    so its continuation must not offer the rest of the plan."""
-    from ai_coding.core.agent_loop import _open_items_for
-
-    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
-    task = TaskState(goal="g")
-    task.add("one")
-    task.add("two")
-    session.task = task
-
-    session.step_item_id = "1"
-    assert [item.id for item in _open_items_for(session, task)] == ["1"]
-
-    session.step_item_id = ""
-    assert [item.id for item in _open_items_for(session, task)] == ["1", "2"]
 
 
 def test_token_budget_beats_continuation():

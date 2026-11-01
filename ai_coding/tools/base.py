@@ -160,27 +160,16 @@ class ToolContext:
     # be answered from the record instead of running twice.  `None` outside a
     # loop that owns a turn.  Typed `Any` like ``jobs`` for the same reason.
     write_ahead: Any = None
-    #: F: the plan item this step turn owns (``""`` outside a step).  A
-    #: step may update its own item's status, but it must not rewrite the plan
-    #: contract (verify/content) or add items -- the runner would execute a
-    #: command the model authored mid-run, outside the review.
-    step_item_id: str = ""
-    #: Plan-as-Goal: this turn is executing the approved plan on the main
-    #: session.  ``todo_write`` freezes the plan contract (add/verify/content)
-    #: for its duration; status/evidence updates stay allowed.
-    plan_executing: bool = False
     #: C-0/C-1: the codex path's item-boundary acceptance switch.  When True,
     #: ``update_plan`` accepts an optional per-step ``verify`` and runs it when
     #: the step is marked completed.  False keeps Codex's schema (step/status)
-    #: and skips acceptance; the ``session`` path verifies through
-    #: ``todo_write`` instead.
+    #: and skips acceptance.
     plan_verify_items: bool = False
-    #: Plan-as-Goal: run one item's proof command at the moment the model marks
-    #: it completed.  ``(item_id, statement, command) -> (passed, output tail)``.
-    #: Present only while a plan turn runs; ``None`` elsewhere, where the tool
-    #: trusts the model's word exactly as before.  Verifying at the boundary
-    #: (instead of after the turn) is what lets a failed proof be repaired in
-    #: the same turn.
+    #: Run one item's proof command at the moment the model marks it completed.
+    #: ``(item_id, statement, command) -> (passed, output tail)``.  Used by
+    #: ``update_plan`` when ``plan_verify_items`` is on; ``None`` elsewhere, where
+    #: the tool trusts the model's word.  Verifying at the boundary is what lets
+    #: a failed proof be repaired in the same turn.
     verify_item: Callable[[str, str, str], Awaitable[tuple[bool, str]]] | None = None
 
 

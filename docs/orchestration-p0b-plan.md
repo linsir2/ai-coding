@@ -140,6 +140,105 @@ TypeError——实现时先全仓 grep 字段名再删；`turn_books.snapshot()`
 - 验收：`grep -rn present_plan ai_coding --exclude-dir=frontend` 为空；全量
   测试 + ruff + mypy 绿。
 
+#### P0b-2d：删旧执行器字段与死统计
+
+**事实前提（已核，P0b-1/2b 之后恒成立）**
+- `plan_executing` / `step_item_id` 的唯一写入者是已删的 `plan_runner` / `plan_executor`；
+  现在全仓没有任何地方把它置 True，所有分支不可达。
+- `step_deliveries` 的唯一写入者已删；只剩序列化、`begin_plan` 重置、一个已删进度签名
+  分支里的读取，和两条测试。
+- `item_deadline` 的唯一写入者已删（旧执行器的共享时钟）；只剩 `_begin_turn` 读取和一条测试。
+- `plan_tokens_used` 只剩序列化；`TodoItem.attempts` 只剩序列化（写入者在已删的 `plan_executor`）。
+- `PlanReport.deliveries` 只剩 `render()` 里两处统计，没有写入者（`report.stopped` 是命令层唯一读的字段）。
+
+**删除清单（逐文件）**
+1. `domain/session.py`
+   - 删字段 `step_item_id`、`plan_executing`、`item_deadline`、`step_deliveries`；删
+     `StepDelivery` import。
+   - `begin_plan`：删 `self.step_deliveries = []` 与 docstring 里的收据句（goal/items/ladder
+     三项仍是它的职责）。
+   - `to_dict` 删 `stepDeliveries` 块；`from_dict` 删对应读取。旧键自然被忽略。
+   - **保留** `plan_implementing` / `plan_verify_items`（codex 实现轮与条目验收）。
+2. `domain/task.py`：删 `TodoItem.attempts`（字段 + to_dict/from_dict 分支）与
+   `TaskState.plan_tokens_used`（字段 + `planTokensUsed` 序列化）。旧 `attempts` /
+   `planTokensUsed` 键读入即忽略，不需要兼容代码。
+3. `domain/plan_delivery.py`：整文件删除（`StepDelivery` 生产者与消费者都已为零）。
+4. `core/plan_report.py`：删 `deliveries` 字段与 `render()` 里依赖它的
+   `unattested` / `on_claim` 两段；其余字段与 `render()` 保留。
+5. `core/agent_loop.py`
+   - 删 `_open_items_for`（唯一作用是按 `step_item_id` 收窄）；两处调用改
+     `task.open_items()`。
+   - 删 `plan_executing` 的进度签名块（`books.note_plan_progress`）、两处
+     `plan_executing=` 快照投影、结构续跑块（`PLAN_IDLE_LIMIT`/`PLAN_STALL_ROUNDS`）、
+     `verify_item` 的 `plan_executing` 或条件（保留 `plan_verify_items`）、
+     `_begin_turn` 的 `item_deadline` / `plan_executing` 分支（保留 `plan_implementing`
+     无时钟）、`_has_a_round_left` 的 `plan_executing` 或条件。
+   - 删 `PLAN_IDLE_LIMIT` / `PLAN_STALL_ROUNDS` import。
+6. `core/turn_policy.py`：删常量 `PLAN_IDLE_LIMIT` / `PLAN_STALL_ROUNDS`、
+   `TurnSnapshot.plan_executing` / `TurnSnapshot.stall_rounds`、`decide_next_iteration`
+   的 stall 块与 ceiling 里的 `plan_executing`、`allow_search` 里的 `plan_executing`、
+   `decide_after_step` 的 plan 分支。**保留** `plan_implementing` 两处（codex 轮无上限、
+   不续跑）。
+7. `core/turn_books.py`：删 `idle_boundaries` / `stall_rounds` / `progress_calls` /
+   `_progress_signature`、`note_idle_boundary` / `note_plan_progress`、`note_outcomes`
+   的两处写入、`snapshot()` 的 `stall_rounds=`，以及 `BOOKKEEPING_TOOLS`（唯一消费者是
+   `progress_calls`）。
+8. `tools/todo_write_tool.py`：删 `executing_plan` 判定与 add/update 冻结块、
+   `_frozen_change`、`_verify_on_completion`（update 分支改回直接返回 `_update`）。
+   `verify` 参数描述删掉「During a plan run …」一句（该执行点已不存在；`update_plan`
+   的 `plan_verify_items` 才是验收入口）。保留只读完成拒绝与 `parallel_safe=False`。
+9. `tools/base.py`：删 `ToolContext.step_item_id` / `plan_executing`；保留
+   `plan_verify_items` / `verify_item`。
+10. `core/request_builder.py`：删对应两行透传。
+
+**测试同步（删的是已删行为，不改仍然成立的断言）**
+- `test_tool_todo_write.py`：删 6 条（step 冻结两条、`plan_executing` 冻结、
+   两条完成即验收、`outside_a_plan_turn_the_proof_does_not_run`）。
+- `test_auto_continue.py`：删 `test_open_items_for_narrows_to_the_steps_own_item`。
+- `test_agent_loop_react.py`：删 `test_begin_turn_prefers_the_items_shared_deadline`。
+- `test_turn_books.py`：删 stall / bookkeeping 两条。
+- `test_domain_task.py`：`test_wave_fields_round_trip_only_when_set` 去掉 attempts 断言
+  （files/kind 保留）；`test_unknown_wave_fields_degrade` 去掉 attempts 断言；
+  删 `test_plan_tokens_round_trip_only_when_set`。
+- `test_domain_session.py`：`test_begin_plan_resets_goal_items_and_receipts` 去掉
+  `StepDelivery` 构造与重置断言，改名 `test_begin_plan_resets_goal_and_items`。
+- `test_plan_command.py`：`test_plan_topic_clears_the_receipt_book_behaviourally` 去掉
+  `StepDelivery` import / 构造与 `step_deliveries == []` 断言，保留其余（goal 重置、
+  mode/readonly、落盘），改名 `test_plan_topic_starts_a_fresh_book_and_saves`。
+
+**RIPR**
+- **R**：新增 `test_a_session_file_with_old_plan_fields_still_loads`
+  （`test_domain_session.py`）：`from_dict({"stepDeliveries": [...], "task":
+  {"planTokensUsed": 5, "items": [{"id": "1", "content": "x", "attempts": 3}]}})` 成功，
+  且 item 可读、无该字段、不抛异常。
+- **I**：codex plan 回合仍 `FINISH`（`test_plan_codex_path.py` 不动）。
+- **P**：全量 `pytest`；`ruff check ai_coding tests scripts`；`mypy ai_coding`；
+  以下 grep 为空：`plan_executing`、`step_item_id`、`item_deadline`、`step_deliveries`、
+  `StepDelivery`、`planTokensUsed`、`plan_tokens_used`、`from ai_coding.domain.plan_delivery`；
+  `grep -n attempts ai_coding/domain/task.py` 为空。
+  （`read_ledger` 的 docstring 仍以已删文件作路径规范化的历史实测样例，那是文本、不是
+  依赖，不随删。）
+- **R**：真机链路 `/plan` → `<proposed_plan>` → 批准 → `Implement the plan.` →
+  `update_plan` 不变（`tests/test_plan_codex_*` 全绿）。
+
+**实施记录（完成）**
+- 产品代码按上述清单逐文件删除；`domain/plan_delivery.py` 整文件删除；
+  `PlanReport` 本体保留（只去 `deliveries` 与 `render()` 的两段派生文本）。
+- 测试按「测试同步」删改；新增旧键兼容用例
+  `test_domain_session.py::test_a_session_file_with_old_plan_fields_still_loads`。
+- `read_ledger.py` / `test_read_ledger.py` 里的 `plan_delivery.py` 只是路径样例，
+  保持原样（早先尝试替换为 `task.py`，因属于无关改动已回退）。
+- 校验：`pytest 4664 passed / 29 skipped / 0 failed`；`ruff` 全绿；`mypy` 174 文件全绿。
+- **R**：真机链路 `/plan` → `<proposed_plan>` → 批准 → `Implement the plan.` →
+  `update_plan` 不变（`tests/test_plan_codex_*` 全绿）。
+
+**不删**：`acceptance`（P0b-2f 整体删契约）；`verify_items` / `_verify_plan_item`；
+`plan_implementing` / `plan_verify_items`；`PlanReport` 本体。
+
+**风险**
+- dataclass 删字段后任何 `replace(plan_executing=...)` 都会 TypeError —— 已 grep 零处。
+- `_open_items_for` 删除后 `task.open_items()` 返回新列表，调用点只读，无副作用。
+
 ### 范围
 - `domain/session.py`：删 `step_item_id`、`plan_executing`、`item_deadline`、
   `acceptance`、`step_deliveries`（含 `begin_plan` 重置 `:514`、序列化 `:741,809`、
@@ -161,8 +260,8 @@ TypeError——实现时先全仓 grep 字段名再删；`turn_books.snapshot()`
 - `core/events.py`：删 `PlanStepReceipt`；`server/bridge.py` 删 `plan.receipt`。
 - 前端：删 `component/plan-review.tsx`、`util/submission.ts` 的 plan review、
   `util/plan-agent.ts`、`status-bar.tsx` 的 plan 分支、`home.tsx` 的 plan 入口、
-  `ask.test.ts`/`reducer.test.ts`/`plan-review-render.test.tsx` 的旧用例；
-  `state/session.ts` 的 `stepDeliveries`。
+  `ask.test.ts`/`reducer.test.ts`/`plan-review-render.test.tsx` 的旧用例。
+  （`state/session.ts` 的 `stepDeliveries` 在 P0b-2d 核查时已不在前端，无需处理。）
 - `core/acceptance.py`：保留 `verify_items`（update_plan 用）；删
   `AcceptanceItem/acceptance_states/pending_items` 的消费点
   （`turn_policy:633`、`agent_loop:1102,1337`、`interventions:193,415,510`、

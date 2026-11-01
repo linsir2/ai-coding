@@ -93,9 +93,7 @@ from ai_coding.core.turn_close import (
 )
 from ai_coding.core.turn_hooks import TurnHooks
 from ai_coding.core.turn_policy import (
-    PLAN_IDLE_LIMIT,
     PLAN_RESEARCH_NOTE,
-    PLAN_STALL_ROUNDS,
     TurnAction,
     TurnDecision,
     TurnPolicy,
@@ -218,22 +216,6 @@ _LINE_COUNT_MAX_BYTES = 4 * 1024 * 1024
 #: schema rides every later request, so this bounds both the request size and
 #: what a model can grow by searching repeatedly.
 _LOADED_TOOLS_CAP = 12
-
-
-def _open_items_for(session: Any, task: Any) -> list[Any]:
-    """The open items this turn may be nudged about.
-
-    A plan step shares the plan's whole task with the parent, so the loop's
-    "unfinished work" set has to be narrowed to the item that step is on.  An
-    unscoped session (the ordinary loop) keeps the full list.  Without this, one
-    continuation offered to a step lists the rest of the plan (the measured
-    reason the step policy used to carry ``max_auto_continuations=0``).
-    """
-    items = list(task.open_items())
-    scope = str(getattr(session, "step_item_id", "") or "")
-    if not scope:
-        return items
-    return [item for item in items if item.id == scope]
 
 
 def _armed_profile(session: Any) -> str:
@@ -1029,16 +1011,6 @@ class AgentLoop:
             while True:
                 index += 1
                 budget_expired = frame.deadline is not None and frame.deadline.expired
-                # Plan-as-Goal: a plan turn has no iteration budget, so "did the
-                # last round move anything?" is the brake that replaces it.  The
-                # signature is read here (once per round, before the decision),
-                # so the previous round's effects are all in.
-                if getattr(session, "plan_executing", False) and task is not None:
-                    books.note_plan_progress((
-                        tuple((item.id, item.status) for item in task.items),
-                        books.progress_calls,
-                        len(getattr(session, "step_deliveries", ()) or ()),
-                    ))
                 # R0-2: derive the open unknowns from the books before deciding.
                 # One call site per round (here, not after every branch), so a
                 # flat round counts exactly once.
@@ -1048,7 +1020,7 @@ class AgentLoop:
                     # C3 reads the open set to decide whether the budget died
                     # with work unfinished.  The old ladder never needed it;
                     # without it the continuation never fires.
-                    open_items=_open_items_for(session, task),
+                    open_items=task.open_items(),
                     # settle evaluates every gate's window at both decision
                     # points; an acceptance window must see its real signature
                     # here too — with the default () it would compare empty vs
@@ -1060,7 +1032,6 @@ class AgentLoop:
                     snapshot,
                     mode=session.mode,
                     readonly=session.readonly,
-                    plan_executing=bool(getattr(session, "plan_executing", False)),
                     plan_implementing=bool(
                         getattr(session, "plan_implementing", False)
                     ),
@@ -1324,49 +1295,10 @@ class AgentLoop:
                             "asked it once to correct the citation",
                         )
                         continue
-                    # Plan-as-Goal (B): the remaining list already rides every
-                    # request as the volatile <task-state> block, so a stopped
-                    # model with open items needs no new text -- only another
-                    # round.  This is the structural continuation (codex's
-                    # ``needs_follow_up``): no message is appended, so the
-                    # transcript stays clean and compaction cannot eat the
-                    # instruction.  The two brakes are the bound.
-                    if getattr(session, "plan_executing", False) and task is not None:
-                        actionable = [
-                            item for item in task.open_items()
-                            if item.status != "blocked"
-                        ]
-                        if actionable:
-                            boundaries = books.idle_boundaries + 1
-                            reason = ""
-                            if boundaries >= PLAN_IDLE_LIMIT:
-                                reason = (
-                                    f"plan stalled: {boundaries} idle boundaries "
-                                    "with no tool call"
-                                )
-                            elif books.stall_rounds >= PLAN_STALL_ROUNDS:
-                                reason = (
-                                    f"plan stalled: {books.stall_rounds} rounds "
-                                    "without progress"
-                                )
-                            if reason:
-                                outcome = TurnOutcome(
-                                    status=TurnStatus.COMPLETED,
-                                    text=step.text,
-                                    iterations=books.total_iterations,
-                                    reason=reason,
-                                )
-                                break
-                            books.note_idle_boundary()
-                            # No message was appended, but the model's step was:
-                            # persist it at the same boundary the text-injection
-                            # path used, so a crash between rounds replays it.
-                            self.closer.checkpoint(session, index)
-                            continue
                     snapshot = books.snapshot(
                         iteration=index,
                         tokens_spent=self.reporter.tokens_spent(),
-                        open_items=_open_items_for(session, task),
+                        open_items=task.open_items(),
                         final_text=step.text,
                         acceptance=acceptance_states(session.acceptance),
                         continuations=session.continuations,
@@ -1375,7 +1307,6 @@ class AgentLoop:
                         snapshot,
                         mode=session.mode,
                         readonly=session.readonly,
-                        plan_executing=bool(getattr(session, "plan_executing", False)),
                         plan_implementing=bool(
                             getattr(session, "plan_implementing", False)
                         ),
@@ -1623,20 +1554,10 @@ class AgentLoop:
         # F (13 §2.4): one subprocess per turn; never raises (see infra.vcs).
         session.git_branch = git_branch(self.workspace)
         hook_context = await self.turn_hooks.context(session)
-        # A plan item may spend several turns (one per attempt); they share one
-        # deadline so N attempts cannot each buy a fresh wall clock.  An
-        # unscoped session keeps the plain per-turn ceiling.
-        shared_deadline = getattr(session, "item_deadline", None)
-        if shared_deadline is not None:
-            deadline = shared_deadline
-        elif (
-            getattr(session, "plan_executing", False)
-            or getattr(session, "plan_implementing", False)
-        ):
-            # Plan-as-Goal: the plan turn owns no wall clock.  What bounds it is
-            # the item list, the context window (compaction per iteration) and
-            # the idle brake -- a per-turn clock would cut a long plan mid-item,
-            # which is exactly the interruption this executor exists to remove.
+        # C-2/C-3 (codex path): the plan-implementation turn owns no wall clock.
+        if getattr(session, "plan_implementing", False):
+            # A per-turn clock would cut a long plan mid-item, which is exactly
+            # the interruption this executor exists to remove.
             deadline = None
         else:
             turn_timeout = float(getattr(self.settings, "turn_timeout_seconds", 0.0) or 0.0)
@@ -1965,7 +1886,7 @@ class AgentLoop:
             books.snapshot(
                 iteration=books.iterations,
                 tokens_spent=0,
-                open_items=_open_items_for(session, task),
+                open_items=task.open_items(),
             ),
             turn_end=True,
         )
@@ -2231,21 +2152,15 @@ class AgentLoop:
                 # M-C1: the turn's write-ahead log, so a regenerated
                 # side-effecting call is answered from the record.
                 write_ahead=write_ahead,
-                # Plan-as-Goal: the proof command runs when the model marks the
-                # item completed, inside this same batch/turn.  Outside a plan
-                # turn there is no callback and the tool keeps the old shape.
-                # C-0/C-1: the codex path opts into the same item-boundary check
-                # via ``plan_verify_items`` instead of ``plan_executing``.
+                # Plan-as-Goal: the proof command runs at the item boundary.
+                # C-0/C-1: the codex path opts into it via ``plan_verify_items``.
                 verify_item=(
                     (
                         lambda item_id, statement, command: self._verify_plan_item(
                             session, item_id, statement, command
                         )
                     )
-                    if (
-                        getattr(session, "plan_executing", False)
-                        or getattr(session, "plan_verify_items", False)
-                    )
+                    if getattr(session, "plan_verify_items", False)
                     else None
                 ),
                 plan_verify_items=bool(
@@ -2400,16 +2315,13 @@ class AgentLoop:
         """
         ceiling = (
             -1
-            if (
-                bool(getattr(session, "plan_executing", False))
-                or bool(getattr(session, "plan_implementing", False))
-            )
+            if bool(getattr(session, "plan_implementing", False))
             else int(self.policy.config.max_iterations)
         )
         if ceiling < 0:
-            # Plan-as-Goal: a plan turn has no iteration budget.  Context growth,
+            # C-3: the codex plan turn has no iteration budget.  Context growth,
             # not step count, is what bounds it -- every iteration compacts on
-            # its own gate, and an idle streak ends a run that stops working.
+            # its own gate.
             return True
         return index < max(1, ceiling)
 
@@ -2547,10 +2459,9 @@ class AgentLoop:
     ) -> tuple[bool, str]:
         """Run one plan item's proof command at its completion boundary.
 
-        Called by ``todo_write`` while the plan turn is still open, so a red
-        proof comes back as that call's own result and the model repairs it in
-        the same turn (the post-turn settlement stays as the reconciliation
-        pass for completions the model made without a verify).
+        Called by ``update_plan`` under ``plan_verify_items``, so a red proof
+        comes back as that call's own result and the model repairs it in the
+        same turn.
         """
         if session.readonly or not str(command or "").strip():
             return (False, "the proof command was not run")
@@ -2560,13 +2471,17 @@ class AgentLoop:
         )
         verdict = checked[0]
         result = (verdict.passed is True, verdict.output)
-        # Remember it: the executor's reconciliation reads this instead of
-        # running the same command a second time after the turn.
+        # Remember it for the run ledger.  P0b-2f: the acceptance contract (and
+        # with it ``boundary_verdict``/``reset_boundary_verdicts``) retires; this
+        # cache has no caller left once that happens.
         self._boundary_verdicts[item_id] = result
         return result
 
     def reset_boundary_verdicts(self) -> None:
-        """Forget the previous run's item verdicts (called by a plan executor)."""
+        """Forget the previous run's item verdicts.
+
+        P0b-2f: no caller remains once the acceptance contract retires.
+        """
         self._boundary_verdicts.clear()
 
     def boundary_verdict(self, item_id: str) -> tuple[bool, str] | None:

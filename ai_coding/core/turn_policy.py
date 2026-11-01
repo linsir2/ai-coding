@@ -53,23 +53,12 @@ BUDGET_PRESSURE_LEAD = "[budget] 本轮预算快用完了"
 #: How much of a budget may remain before the warning appears.
 PRESSURE_RATIO = 0.2
 
-#: How many consecutive idle boundaries a plan turn tolerates before it closes.
-#: Not a budget: a working turn resets the streak on every tool batch, so only a
-#: model that keeps stopping without reaching for a tool ever reaches it.
-PLAN_IDLE_LIMIT = 3
-#: Consecutive rounds a plan turn tolerates with nothing moving -- no item
-#: status change, no receipt, no successful non-bookkeeping call.  This is the
-#: brake the idle streak cannot provide: a model that keeps calling
-#: ``todo_write(list)`` is "active" but learning nothing.
-PLAN_STALL_ROUNDS = 6
-
 
 @dataclass(frozen=True)
 class TurnPolicyConfig:
     """The orchestration settings this unit needs, read once per loop."""
 
-    #: Iterations one round may start.  ``-1`` means "no ceiling" -- the plan
-    #: turn's spelling: what bounds it is the context window and the idle brake.
+    #: Iterations one round may start.  ``-1`` means "no ceiling".
     max_iterations: int = 10
     stop_policy: str = "todo_aware"  # natural | todo_aware | strict
     max_todo_nudges: int = 2
@@ -103,9 +92,9 @@ class TurnPolicyConfig:
         """Build from ``AIConfig`` (duck-typed: fakes in tests work too).
 
         ``max_tool_iterations <= 0`` means "no cap" and becomes ``-1``, the
-        sentinel ``decide_next_iteration`` already understands (a plan turn uses
-        it too).  It used to clamp to 1, which turned an explicit "unlimited"
-        into the strictest possible turn.
+        sentinel ``decide_next_iteration`` already understands.  It used to
+        clamp to 1, which turned an explicit "unlimited" into the strictest
+        possible turn.
         """
         raw_iterations = int(getattr(settings, "max_tool_iterations", 10))
         return cls(
@@ -171,15 +160,6 @@ class TurnSnapshot:
     # survives across the rounds — in-process only; the session's to_dict
     # whitelist does not persist it, and a new user turn resets it.
     continuations: int = 0
-    #: Plan-as-Goal: consecutive rounds in which nothing moved (see
-    #: ``PLAN_STALL_ROUNDS``).  Covers a model that keeps calling bookkeeping
-    #: tools, which the idle streak by construction cannot see.
-    stall_rounds: int = 0
-    #: This turn is executing an approved plan (``session.plan_executing``).
-    #: The policy reads it instead of a ``stop_policy`` value: a plan turn has
-    #: no iteration ceiling, is never nudged to use tools, and its continuation
-    #: belongs to the loop's structural rule.
-    plan_executing: bool = False
     #: C-2/C-3 (codex path): this turn is the codex plan-implementation turn
     #: (``session.plan_implementing``).  It has no iteration ceiling and is
     #: never nudged/continued: a stopped model ends the turn.
@@ -274,22 +254,11 @@ class TurnPolicy:
         token_gate = bool(self.config.max_turn_tokens) and (
             snapshot.tokens_spent >= self.config.max_turn_tokens
         )
-        if snapshot.plan_executing and snapshot.stall_rounds >= PLAN_STALL_ROUNDS:
-            # The plan turn's brake, read where a *tool-calling* round also
-            # passes: `decide_after_step` only sees the rounds that ended with
-            # no tool call, so a model spinning on `todo_write(list)` would
-            # never reach it.
-            return TurnDecision(
-                TurnAction.FINISH,
-                f"plan stalled: {snapshot.stall_rounds} rounds without progress",
-            )
-        # A plan turn has no iteration ceiling: what bounds it is the item list,
-        # the context window and the two brakes.  Normal turns keep theirs.
-        # C-3: a codex implementation turn has no ceiling either -- Codex's turn
+        # C-3: a codex implementation turn has no ceiling -- Codex's turn
         # is bounded by its own structural continuation, not by a step count.
         ceiling = (
             -1
-            if snapshot.plan_executing or snapshot.plan_implementing
+            if snapshot.plan_implementing
             else int(self.config.max_iterations)
         )
         if ceiling >= 0 and snapshot.iteration > ceiling:
@@ -323,17 +292,15 @@ class TurnPolicy:
             return self._finish_at("iteration budget exhausted")
         if token_gate:
             return self._finish_at("turn token budget exhausted")
-        # Plan-as-Goal / plan research: an autonomous plan turn is not an
+        # Plan / read-only: a planning or read-only turn is not an
         # execution-drift turn.  The *search* ladder would cut it mid-work
         # (trace f1d881ee t12: "search unconverged" at round 20 in a planning
-        # turn), which is exactly the multi-turn behaviour the plan executor
-        # exists to remove.  Strategy/fatigue still fire: repeated tool
-        # failures are worth stopping for, even in a plan.  The iteration,
-        # token and wall-clock ceilings bound the rest.
+        # turn).  Strategy/fatigue still fire: repeated tool failures are worth
+        # stopping for, even in a plan.  The iteration, token and wall-clock
+        # ceilings bound the rest.
         allow_search = not (
             snapshot.mode == "plan"
             or snapshot.readonly
-            or snapshot.plan_executing
         )
         # R6b tiers 2-3 and F2 now live in the ladder (13 §2.1): one gate fires
         # per iteration, in trigger-priority order, with memory of what the last
@@ -385,13 +352,6 @@ class TurnPolicy:
         # Strategy/fatigue live at the PRE point and are untouched.
         if snapshot.mode == "plan" or snapshot.readonly:
             return TurnDecision(TurnAction.FINISH, "model finished")
-        if snapshot.plan_executing:
-            # B: a plan turn's continuation is the loop's structural decision
-            # (open items + no tool call -> another round, no injected text).
-            # This unit must not nudge, and the acceptance/todo gates stay out
-            # of an autonomous plan run by design -- the executor clears
-            # ``session.acceptance`` and verifies at the item boundary.
-            return TurnDecision(TurnAction.FINISH, "plan turn: continuation is structural")
         if snapshot.plan_implementing:
             # C-3: Codex's implementation turn is an ordinary turn.  It has no
             # output of its own to continue -- the model's stop is the end, and

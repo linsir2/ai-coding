@@ -226,23 +226,6 @@ async def test_begin_turn_drops_the_previous_context_reading(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_begin_turn_prefers_the_items_shared_deadline(tmp_path):
-    """A plan item spends several turns; they share one wall clock, so the turn
-    must not mint a fresh one from ``turn_timeout_seconds``."""
-    from ai_coding.infra.deadline import Deadline
-
-    sessions = SessionService(tmp_path / "sessions")
-    loop = _loop(ScriptedEngine([]), sessions)
-    session = sessions.create()
-    shared = Deadline.after(60)
-    session.item_deadline = shared
-
-    frame = await loop._begin_turn(session, "hi", None)
-
-    assert frame.deadline is shared
-
-
-@pytest.mark.asyncio
 async def test_returns_final_text(tmp_path):
     engine = ScriptedEngine([_text("final")])
     sessions = SessionService(tmp_path / "sessions")

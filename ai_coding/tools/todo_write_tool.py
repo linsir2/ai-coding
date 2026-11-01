@@ -21,10 +21,8 @@ from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 class TodoWriteTool(BaseTool):
     """Maintain the session task list (add / update / list / clear)."""
 
-    # Plan-as-Goal: marking an item completed runs its proof command, so this
-    # call can now take seconds and mutate the list twice (complete, then revert
-    # on a red verdict).  Two of them in one assistant message would race over
-    # the same ``TaskState``; serialising the batch is the cheap fix.
+    # Two ``todo_write`` calls in one assistant message would race over the
+    # same ``TaskState``; serialising the batch is the cheap fix.
     parallel_safe = False
     mutates_world = False
 
@@ -84,12 +82,7 @@ class TodoWriteTool(BaseTool):
                 },
                 "verify": {
                     "type": "string",
-                    "description": (
-                        "Shell command proving this item (for 'add'/'update'). "
-                        "During a plan run the harness runs it the moment the item "
-                        "is marked completed and returns the verdict in this "
-                        "tool's result; empty means not machine-checkable."
-                    ),
+                    "description": "Shell command proving this item (for 'add'/'update').",
                 },
             },
             "required": ["action"],
@@ -112,31 +105,6 @@ class TodoWriteTool(BaseTool):
                 action = "update"
             else:
                 action = "list"
-        scope = str(getattr(resolved, "step_item_id", "") or "")
-        # Plan-as-Goal has no per-item scope: the whole plan turn is frozen.
-        executing_plan = bool(scope) or bool(
-            getattr(resolved, "plan_executing", False)
-        )
-
-        # F: a step turn is inside the approved plan, not in front of the
-        # review.  Letting it rewrite verify/content (or add an item) would turn
-        # the runner into an executor for a command the model authored mid-run,
-        # outside the approval that armed the plan.  Status updates stay allowed
-        # (the extra ones are reconciled by the runner with their own receipt).
-        if executing_plan:
-            if action == "add":
-                return ToolResult(
-                    success=False,
-                    output=(
-                        "error: 计划执行中不能新增条目——计划在批准后冻结；"
-                        "请只做当前条目，需要改计划时在波末请求重规划。"
-                    ),
-                    error="frozen_plan",
-                )
-            if action == "update":
-                frozen = self._frozen_change(params, task)
-                if frozen is not None:
-                    return frozen
 
         if action == "add":
             return self._add(params, task)
@@ -159,8 +127,7 @@ class TodoWriteTool(BaseTool):
                     error="readonly_completion",
                     data={"action": "update", "reason": "readonly_session"},
                 )
-            result = self._update(params, task)
-            return await self._verify_on_completion(params, task, resolved, result)
+            return self._update(params, task)
         if action == "list":
             return self._ok(task, "list")
         return ToolResult(
@@ -170,81 +137,6 @@ class TodoWriteTool(BaseTool):
         )
 
     # ---- actions ----------------------------------------------------------
-
-    async def _verify_on_completion(
-        self,
-        params: dict[str, Any],
-        task: TaskState,
-        ctx: ToolContext,
-        result: ToolResult,
-    ) -> ToolResult:
-        """Plan-as-Goal: run the item's proof the moment it is marked done.
-
-        The proof used to run after the whole turn closed, which meant a red
-        verdict could only be repaired by the next ``/plan run``.  Running it
-        here makes the failure part of this tool's own result: the model sees
-        it before its next step and fixes it while the context is still hot.
-        Outside a plan turn (or when the item has no verify command) this is a
-        pass-through, exactly the old shape.
-        """
-        if not result.success:
-            return result
-        if str(params.get("status", "")).strip().lower() != "completed":
-            return result
-        if not bool(getattr(ctx, "plan_executing", False)):
-            return result
-        verify_item = getattr(ctx, "verify_item", None)
-        if verify_item is None:
-            return result
-        item = task.get(str(params.get("id", "")).strip())
-        if item is None or not str(item.verify or "").strip():
-            return result
-        passed, output = await verify_item(item.id, item.content, item.verify)
-        tail = " ".join((output or "").split())[-500:]
-        if passed:
-            return ToolResult(
-                success=True,
-                output=(
-                    f"{result.output}\n[verify] 通过：{item.verify}\n"
-                    "验收通过，继续下一项。"
-                ),
-                data={**(result.data or {}), "verify": "passed"},
-            )
-        task.update(item.id, status="in_progress", evidence=f"verify failed: {tail}")
-        return ToolResult(
-            success=False,
-            output=(
-                f"{result.output}\n[verify] 未通过：{item.verify}\n{tail}\n"
-                "条目已退回 in_progress。现在修复失败点，修好后重新标记 completed；"
-                "不要跳过它。"
-            ),
-            error="verify_failed",
-            data={**(result.data or {}), "action": "update", "id": item.id},
-        )
-
-    def _frozen_change(self, params: dict[str, Any], task: TaskState) -> ToolResult | None:
-        """Refuse a plan-contract edit made by a step that is executing it."""
-        target = task.get(str(params.get("id", "")))
-        if target is None:
-            return None
-        if "verify" in params and str(params.get("verify") or "").strip() != target.verify.strip():
-            return ToolResult(
-                success=False,
-                output=(
-                    "error: 计划执行中不能修改条目的 verify（计划在批准后冻结）；"
-                    "只做当前条目。"
-                ),
-                error="frozen_verify",
-            )
-        if "content" in params and str(params.get("content") or "").strip() != (
-            target.content.strip()
-        ):
-            return ToolResult(
-                success=False,
-                output="error: 计划执行中不能改写条目内容（计划在批准后冻结）。",
-                error="frozen_item",
-            )
-        return None
 
     def _add(self, params: dict[str, Any], task: TaskState) -> ToolResult:
         content = str(params.get("content", "")).strip()
@@ -304,13 +196,13 @@ class TodoWriteTool(BaseTool):
         verify = params.get("verify")
         normalised = None if status is None else str(status).strip().lower()
         if normalised == "skipped":
-            # r24/C: only the plan executor gives an item up, and only when a
-            # dependency failed.  A model that can write ``skipped`` can end a
-            # plan by skipping its remaining work.
+            # r24/C: ``skipped`` is a harness verdict (a dependency failed), not
+            # something the model may choose.  A model that can write it can
+            # end a plan by skipping its remaining work.
             return ToolResult(
                 success=False,
                 output=(
-                    "error: skipped 由执行器在依赖失败时设置，模型不能直接写。"
+                    "error: skipped 是系统在依赖失败时设置的终态，模型不能直接写。"
                     "做不了本项时请标 blocked，并说明缺什么。"
                 ),
                 error="runner_only_status",

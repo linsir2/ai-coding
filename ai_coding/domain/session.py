@@ -9,7 +9,6 @@ from typing import Any
 from .acceptance import AcceptanceItem
 from .agents import is_plan_agent
 from .message import ChatMessage, ImageRef, ToolArtifact, ToolCallRef, tool_call_from_ref
-from .plan_delivery import StepDelivery
 from .read_ledger import ReadMark, merge_mark, normalize
 from .task import TaskState
 from .turn_digest import TurnDigest
@@ -273,17 +272,6 @@ class SessionData:
     # which measures the un-compacted history and never shrinks.  Measured live
     # 2026-10-30: 21 iterations, 21 compactions.  0 means "no step has reported".
     live_context_tokens: int = 0
-    # NOT persisted.  Which plan item the current turn is allowed to work on.
-    # A step session shares the parent's task, which holds every open item, so
-    # an unbounded continuation would nudge one step to finish the *rest of the
-    # plan*.  Empty means "no scope": the ordinary loop sees the whole task.
-    # Set by the legacy step runner.
-    step_item_id: str = ""
-    # NOT persisted.  Plan-as-Goal: a turn is executing the approved plan on
-    # the main session.  ``todo_write`` freezes add/verify/content for the
-    # whole turn (the plan was approved as written); status/evidence updates
-    # stay allowed.
-    plan_executing: bool = False
     # NOT persisted.  C-2/C-3 (codex path): this turn is the one Codex sends for
     # an approved plan (the literal "Implement the plan." prompt).  In-process
     # only -- ``to_dict`` is a whitelist, so a crash during it resumes as an
@@ -294,10 +282,6 @@ class SessionData:
     # switch, mirrored onto the session for the duration of one run.  Same
     # lifetime as ``plan_implementing``.
     plan_verify_items: bool = False
-    # NOT persisted.  The one deadline every ``process_input`` call of the same
-    # plan item shares, so N attempts cannot each spend a fresh wall clock.
-    # ``None`` means "each turn gets its own".
-    item_deadline: Any = None
     # Persisted.  Tools the model has asked for (``tool_search``): their schemas
     # are deferred, so this is what makes them appear on the *next* request.
     # Capped by the loop; a tool loaded once stays loaded for the session (the
@@ -389,10 +373,6 @@ class SessionData:
     #: durable copy is ``sessions/write-ahead/<id>.json``, so the session file
     #: and its save cadence do not change.
     write_ahead: list[Any] | None = None
-    # Step deliveries (R1-1): what each plan-runner step left behind.  The
-    # resume replay reads these to rebuild the step timeline; persisted only
-    # when non-empty, same rule as above.
-    step_deliveries: list[StepDelivery] = field(default_factory=list)
     # ---- P1 (补充式方案 06): the three facts recovery was missing ----------
     # Each is written only when set (same rule as ``task``), so an ordinary
     # session file gains no keys until one of these situations actually arises.
@@ -501,17 +481,12 @@ class SessionData:
         return "plan" if is_plan_agent(self.agent) else "normal"
 
     def begin_plan(self, goal: str) -> TaskState:
-        """Start a new plan: fresh goal, no items, no step receipts (R1-5b).
+        """Start a new plan: a fresh goal and no items (R1-5b).
 
-        The three belong together.  Receipts are keyed by step id and ids
-        restart at 1 for every new list, so carrying the old plan's receipts
-        over made the runner's backfill believe the new plan's steps were
-        already receipted (measured: a reset plan produced zero receipts).
-        One owner for the trio, so ``/plan`` cannot reset the goal and
-        forget the book again.
+        The goal and the item list are one book, so ``/plan`` cannot reset one
+        and forget the other.
         """
         self.task = TaskState(goal=goal)
-        self.step_deliveries = []
         # 13 §2.1 (Q2 拍板): a new plan starts on a clean ladder.
         self.intervention_state = None
         return self.task
@@ -737,9 +712,6 @@ class SessionData:
         # so every file written before R0-1 keeps reading byte-identically.
         if self.acceptance:
             data["acceptance"] = [item.to_dict() for item in self.acceptance]
-        # Same rule again: sessions never plan-run write no key.
-        if self.step_deliveries:
-            data["stepDeliveries"] = [entry.to_dict() for entry in self.step_deliveries]
         # P1: the three recovery facts, each only when set, same rule again.
         if self.open_turn is not None:
             data["openTurn"] = int(self.open_turn)
@@ -804,12 +776,6 @@ class SessionData:
             AcceptanceItem.from_dict(row) for row in acceptance_rows
             if isinstance(row, dict)
         ]
-        raw_deliveries = data.get("stepDeliveries")
-        delivery_rows = raw_deliveries if isinstance(raw_deliveries, list) else []
-        step_deliveries = [
-            StepDelivery.from_dict(row) for row in delivery_rows
-            if isinstance(row, dict)
-        ]
         raw_open_turn = data.get("openTurn")
         raw_undo = data.get("undoState")
         raw_intervention = data.get("interventionState")
@@ -868,7 +834,6 @@ class SessionData:
                 str(name) for name in (data.get("loadedTools") or ()) if name
             ),
             acceptance=acceptance,
-            step_deliveries=step_deliveries,
             open_turn=int(raw_open_turn)
             if isinstance(raw_open_turn, int) and not isinstance(raw_open_turn, bool)
             else None,

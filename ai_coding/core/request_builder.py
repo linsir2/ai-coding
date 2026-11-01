@@ -152,13 +152,9 @@ def tool_context(
         jobs=jobs,
         # M-C1: the turn's write-ahead log (see ``core/write_ahead.py``).
         write_ahead=write_ahead,
-        # F: the item a plan step owns; ``todo_write`` uses it to freeze the
-        # plan contract (verify/content) and to refuse adding items mid-run.
-        step_item_id=str(getattr(session, "step_item_id", "") or ""),
-        plan_executing=bool(getattr(session, "plan_executing", False)),
         # C-0/C-1: the codex path's item-boundary acceptance switch.
         plan_verify_items=bool(plan_verify_items),
-        # Plan-as-Goal: the proof command runs at the item boundary, inside the
-        # same turn, so a failure comes back as this tool's own result.
+        # C-0/C-1: the item-boundary proof command (codex path, via
+        # ``plan_verify_items``).
         verify_item=verify_item,
     )

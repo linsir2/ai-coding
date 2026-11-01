@@ -124,26 +124,42 @@ def test_turn_usage_from_dict_rejects_bad_rows():
     assert row is not None and row.prompt_tokens == 0
 
 
-def test_begin_plan_resets_goal_items_and_receipts():
-    """A new plan is a new book: goal, items and receipts move together (R1-5b).
-
-    Receipts are keyed by step id, and ids restart at 1 for every new list —
-    so keeping the old plan's receipts silently swallows the new plan's
-    completions (measured: backfill produced zero receipts).
-    """
-    from ai_coding.domain.plan_delivery import StepDelivery
-
+def test_begin_plan_resets_goal_and_items():
+    """A new plan is a new book: the goal and the item list move together."""
     s = SessionData("s1", "title", "c", "l")
     s.task = TaskState(goal="old goal")
     s.task.add("old one")
-    s.step_deliveries.append(
-        StepDelivery(step_id="1", statement="old one", status="completed"))
 
     task = s.begin_plan("new goal")
 
     assert task.goal == "new goal" and task.items == []
     assert s.task is task
-    assert s.step_deliveries == []
+
+
+def test_a_session_file_with_old_plan_fields_still_loads():
+    """Retired plan fields in an old file are ignored, not rejected."""
+    session = SessionData.from_dict({
+        "stepDeliveries": [
+            {"stepId": "1", "statement": "x", "status": "completed"}
+        ],
+        "task": {
+            "planTokensUsed": 5,
+            "items": [
+                {"id": "1", "content": "x", "status": "pending", "attempts": 3}
+            ],
+        },
+    })
+
+    assert session.task is not None
+    item = session.task.get("1")
+    assert item is not None and item.content == "x"
+    assert not hasattr(session, "step_deliveries")
+    assert not hasattr(item, "attempts")
+    assert not hasattr(session.task, "plan_tokens_used")
+    # The write side must not learn the old keys either.
+    assert "stepDeliveries" not in session.to_dict()
+    assert "planTokensUsed" not in session.task.to_dict()
+    assert "attempts" not in item.to_dict()
 
 
 def test_begin_plan_keeps_messages_and_acceptance():

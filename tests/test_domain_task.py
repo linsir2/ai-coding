@@ -365,24 +365,22 @@ def test_skipped_dependency_blocks_its_dependents():
 def test_wave_fields_round_trip_only_when_set():
     task = TaskState(goal="g")
     plain = task.add("plain")
-    assert plain.files == [] and plain.kind == "write" and plain.attempts == 0
+    assert plain.files == [] and plain.kind == "write"
     data = plain.to_dict()
-    assert "files" not in data and "kind" not in data and "attempts" not in data
+    assert "files" not in data and "kind" not in data
 
     item = task.add("grouped", files=["a.py", "b.py"], kind="research")
-    item.attempts = 2
     restored = TaskState.from_dict(task.to_dict()).get(item.id)
     assert restored.files == ["a.py", "b.py"]
     assert restored.kind == "research"
-    assert restored.attempts == 2
 
 
 def test_unknown_wave_fields_degrade():
     task = TaskState.from_dict(
-        {"items": [{"id": "1", "content": "x", "files": "nope", "attempts": "?"}]}
+        {"items": [{"id": "1", "content": "x", "files": "nope"}]}
     )
     item = task.get("1")
-    assert item.files == [] and item.attempts == 0 and item.kind == "write"
+    assert item.files == [] and item.kind == "write"
 
 
 def test_skip_dependents_closes_the_chain_transitively():
@@ -418,15 +416,5 @@ def test_skip_dependents_keeps_completed_and_is_idempotent():
     assert task.get("2").status == "skipped"
     assert task.get("4").status == "skipped"
     assert task.skip_dependents("1") == []
-
-
-def test_plan_tokens_round_trip_only_when_set():
-    task = TaskState(goal="g")
-    assert "planTokensUsed" not in task.to_dict()
-
-    task.plan_tokens_used = 98_765
-    data = task.to_dict()
-    assert data["planTokensUsed"] == 98_765
-    assert TaskState.from_dict(data).plan_tokens_used == 98_765
 
 

@@ -139,14 +139,9 @@ async def test_help_no_longer_lists_the_plan_family():
 
 
 @pytest.mark.asyncio
-async def test_plan_topic_clears_the_receipt_book_behaviourally():
-    """The collision bug, end to end: a new plan must not inherit receipts."""
-    from ai_coding.domain.plan_delivery import StepDelivery
-
+async def test_plan_topic_starts_a_fresh_book_and_saves():
+    """A new plan starts its own book (goal, items, posture) and is persisted."""
     session = _session()
-    session.step_deliveries = [
-        StepDelivery(step_id="1", statement="old one", status="completed")
-    ]
     loop = _Loop()
     sessions = _Sessions()
     dc, c = _console()
@@ -155,7 +150,6 @@ async def test_plan_topic_clears_the_receipt_book_behaviourally():
 
     assert action is REPLAction.CONTINUE
     assert session.task.goal == "新计划"
-    assert session.step_deliveries == []
     assert (session.mode, session.readonly) == ("plan", True)
     assert sessions.saved == [session]
     # 19 §3.5: readiness is announced by present_plan's review card now — a

@@ -62,9 +62,6 @@ class TodoItem:
     #: test/build commands; ``research`` items may run in a read-only sub-agent
     #: later.  Unwritten when default.
     kind: str = "write"
-    #: r24/C: repair rounds this item already spent.  Kept on the item so a
-    #: retry after a resume knows where it stopped.  Unwritten when zero.
-    attempts: int = 0
 
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATUSES
@@ -85,8 +82,6 @@ class TodoItem:
             data["files"] = list(self.files)
         if self.kind != "write":
             data["kind"] = self.kind
-        if self.attempts:
-            data["attempts"] = int(self.attempts)
         if self.created_at:
             data["createdAt"] = self.created_at
         if self.updated_at:
@@ -102,10 +97,6 @@ class TodoItem:
         raw_files = data.get("files") or []
         files = [str(f) for f in raw_files] if isinstance(raw_files, list) else []
         evidence = data.get("evidence")
-        try:
-            attempts = int(data.get("attempts", 0) or 0)
-        except (TypeError, ValueError):
-            attempts = 0
         return cls(
             id=str(data.get("id", "")),
             content=str(data.get("content", "")),
@@ -115,7 +106,6 @@ class TodoItem:
             verify=str(data.get("verify", "") or ""),
             files=files,
             kind=str(data.get("kind", "write") or "write"),
-            attempts=attempts,
             created_at=str(data.get("createdAt", data.get("created_at", ""))),
             updated_at=str(data.get("updatedAt", data.get("updated_at", ""))),
         )
@@ -180,10 +170,6 @@ class TaskState:
     #: M-C3: consecutive resumes that made no progress.  Reset by any progress;
     #: at the limit the task is disarmed with a ``ResumeStalled`` report.
     no_progress_resumes: int = 0
-    #: r24/C: the plan episode's provider-reported tokens, kept separate from
-    #: the goal episode's ``tokens_used`` so the two profiles cannot spend each
-    #: other's budget.  Written only when non-zero.
-    plan_tokens_used: int = 0
 
     # ---- mutations --------------------------------------------------------
 
@@ -514,8 +500,6 @@ class TaskState:
             data["resumeFingerprint"] = [int(value) for value in self.resume_fingerprint]
         if self.no_progress_resumes:
             data["noProgressResumes"] = int(self.no_progress_resumes)
-        if self.plan_tokens_used:
-            data["planTokensUsed"] = int(self.plan_tokens_used)
         return data
 
     @classmethod
@@ -549,7 +533,6 @@ class TaskState:
             goal_phase=str(data.get("goalPhase", "") or ""),
             resume_fingerprint=fingerprint,
             no_progress_resumes=int(data.get("noProgressResumes", 0) or 0),
-            plan_tokens_used=int(data.get("planTokensUsed", 0) or 0),
         )
 
 
