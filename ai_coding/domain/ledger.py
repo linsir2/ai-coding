@@ -1,10 +1,9 @@
 """Uncertainty ledger: what the turn does not know, derived (R0-2).
 
 No LLM declarations anywhere in this file: items are built mechanically
-from recorded observations (failed acceptance verifies, tool errors,
-failure streaks), and an H level only ever drops on recorded evidence —
-a later success, a passing verify.  The policy gates on the flat counter
-(rounds the open set did not change), never on prose.
+from recorded observations (tool errors, failure streaks), and an H level
+only ever drops on recorded evidence — a later success.  The policy gates on
+the flat counter (rounds the open set did not change), never on prose.
 
 Kinds follow the experiment report: ``epistemic`` (reducible by probing),
 ``aleatoric`` (noise — noted, not chased), ``preference`` (needs a human).
@@ -12,7 +11,7 @@ Kinds follow the experiment report: ``epistemic`` (reducible by probing),
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -32,8 +31,6 @@ class UncertaintyItem:
     kind: Kind = "epistemic"
     level: Level = "medium"
     evidence: tuple[str, ...] = ()
-    #: Acceptance ids this question blocks (empty = blocks nothing named).
-    resolves: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -42,7 +39,6 @@ class UncertaintyItem:
             "kind": self.kind,
             "level": self.level,
             "evidence": list(self.evidence),
-            "resolves": list(self.resolves),
         }
 
 
@@ -54,7 +50,6 @@ def _tail(text: str) -> str:
 def build_ledger(
     *,
     failures: Sequence[tuple[str, str, str]],
-    verify: Mapping[str, tuple[bool, str]],
     failed_streak: int,
     iteration: int,
     succeeded_tools: frozenset[str],
@@ -63,24 +58,12 @@ def build_ledger(
     """Derive the open set from this turn's recorded observations.
 
     ``failures`` are ``(tool, error, output excerpt)`` newest-last (the books
-    keep them); ``verify`` maps acceptance id -> (passed, output tail).
-    ``iteration`` is unused today — it anchors the signature when per-round
-    questions arrive (R1-1) — and is kept explicit so the call reads as the
-    turn's state, not a subset of it.
+    keep them).  ``iteration`` is unused today — it anchors the signature when
+    per-round questions arrive (R1-1) — and is kept explicit so the call reads
+    as the turn's state, not a subset of it.
     """
     del iteration  # reserved for per-round questions; see docstring.
     items: list[UncertaintyItem] = []
-    for ac_id, (passed, output) in verify.items():
-        if passed:
-            continue
-        items.append(UncertaintyItem(
-            id=f"U-ac-{ac_id}",
-            question=f"验收 {ac_id} 未通过：为什么？",
-            kind="epistemic",
-            level="high",
-            evidence=(_tail(output),) if output else (),
-            resolves=(ac_id,),
-        ))
     counts: dict[tuple[str, str], int] = {}
     tails: dict[tuple[str, str], str] = {}
     for tool, error, excerpt in failures:

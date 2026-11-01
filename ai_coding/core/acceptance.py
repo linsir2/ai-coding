@@ -1,11 +1,9 @@
-"""Acceptance verification runner (R0-1): run the proof commands, bounded.
+"""Proof command runner (R0-1): run the verification commands, bounded.
 
-This is the IO half of the contract — ``domain/acceptance.py`` is the data,
-``TurnPolicy`` is the decision, and this is the only place a shell runs.
-Each item's ``verify`` executes in the workspace with a per-item timeout and
-a total cap, so one hung suite cannot eat the turn it was meant to close.
-Already-passed items are skipped: re-running a green suite every iteration
-is exactly the wall-clock burn the experiments measured.
+``update_plan``'s ``plan_verify_items`` runs one proof command at the item's
+completion boundary, and this is the only place a shell runs for it.  Each
+command executes in the workspace with a per-command timeout and a total cap,
+so one hung suite cannot eat the turn it was meant to close.
 """
 
 from __future__ import annotations
@@ -13,19 +11,19 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from ai_coding.domain.acceptance import AcceptanceItem, pending_items
 from ai_coding.infra.subprocess_runner import run_process_async
 from ai_coding.security.approval import ApprovalCallback, ApprovalResult
 from ai_coding.security.permission_gate import bash_denied
-from ai_coding.shell_parse import command_views
 
 _DEFAULT_EACH_SECONDS = 120.0
 _DEFAULT_TOTAL_SECONDS = 300.0
 _OUTPUT_TAIL = 500
+#: The verdict of a command the total budget left no room for.  Fail-closed:
+#: "not checked" is never a pass.
+_BUDGET_EXHAUSTED = "not checked: time budget exhausted"
 
 #: A path-shaped literal inside an otherwise opaque argument.  This is for
 #: ``python -c "open('../x')"``: the shell correctly sees one argument, and
@@ -38,8 +36,8 @@ _STRING_PATH_RE = re.compile(
 _URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
 
 #: A narrow view of the rule layer: the reason this proof command is refused,
-#: or ``""``.  Acceptance does not import the gate, so its dependency face stays
-#: the same as before M1a.
+#: or ``""``.  This module does not import the gate, so its dependency face
+#: stays the same as before M1a.
 DenyReason = Callable[[str, dict[str, Any]], str]
 
 
@@ -90,7 +88,7 @@ def _needs_a_human(
         return (
             "目标路径在工作区外："
             + ", ".join(offenders)
-            + "。验收命令由 shell 执行，能访问工作区外的路径。"
+            + "。验证命令由 shell 执行，能访问工作区外的路径。"
         )
     return ""
 
@@ -177,7 +175,7 @@ def _path_fragments(text: str) -> list[str]:
 
 
 async def verify_items(
-    items: list[AcceptanceItem],
+    commands: Sequence[str],
     workspace: str,
     *,
     timeout_each: float = _DEFAULT_EACH_SECONDS,
@@ -185,12 +183,12 @@ async def verify_items(
     approval: ApprovalCallback | None = None,
     deny_reason: DenyReason | None = None,
     extra_roots: Sequence[str] = (),
-) -> list[AcceptanceItem]:
-    """Check every not-yet-passed item; return the items with verdicts filled.
+) -> list[tuple[bool, str]]:
+    """Run every command once; return ``(passed, output tail)`` per command.
 
-    The input list is never mutated — a fresh list comes back, and the caller
-    decides what to persist.  Items left unchecked by the total cap keep
-    ``passed=None`` (fail-closed downstream).
+    The commands run in order, each bounded by ``timeout_each`` and all of
+    them by ``timeout_total``.  A command the total cap leaves no room for
+    was not checked, which is never a pass.
 
     ``approval`` is the human in the loop for a proof command that reaches
     outside the workspace (W2).  Without it such a command is refused rather
@@ -199,62 +197,59 @@ async def verify_items(
 
     ``deny_reason`` is the rule layer (M1a): called as
     ``deny_reason("bash", {"command": cmd})`` before anything runs, and a
-    non-empty answer fails the item.  It is a callback rather than the gate so
-    this module keeps its small dependency face.  ``ask`` deliberately does
+    non-empty answer fails the command.  It is a callback rather than the gate
+    so this module keeps its small dependency face.  ``ask`` deliberately does
     not count here: an ordinary ``pytest`` must not become a prompt.
     """
-    checked: list[AcceptanceItem] = []
+    results: list[tuple[bool, str]] = []
     spent = 0.0
-    for item in pending_items(items):
+    for command in commands:
         if spent >= timeout_total:
-            checked.append(item)
+            results.append((False, _BUDGET_EXHAUSTED))
             continue
         if deny_reason is not None:
             try:
-                denied = deny_reason("bash", {"command": item.verify})
+                denied = deny_reason("bash", {"command": command})
             except Exception:  # noqa: BLE001 — a boundary that cannot read fails closed
                 denied = "the permission rules could not be read"
             if denied:
-                checked.append(
-                    replace(item, passed=False, output=_tail(f"refused: {denied}"))
-                )
+                results.append((False, _tail(f"refused: {denied}")))
                 continue
-        reason = _needs_a_human(item.verify, workspace, extra_roots=extra_roots)
-        if reason and not await _approved(item, reason, approval):
-            checked.append(replace(item, passed=False, output=_tail(f"refused: {reason}")))
+        reason = _needs_a_human(command, workspace, extra_roots=extra_roots)
+        if reason and not await _approved(command, reason, approval):
+            results.append((False, _tail(f"refused: {reason}")))
             continue
         started = time.monotonic()
         try:
             outcome = await run_process_async(
-                item.verify,
+                command,
                 shell=True,
                 cwd=workspace,
                 timeout=min(timeout_each, max(timeout_total - spent, 1.0)),
             )
         except Exception as exc:  # noqa: BLE001 — a check that cannot run fails
-            checked.append(replace(item, passed=False, output=_tail(f"error: {exc}")))
+            results.append((False, _tail(f"error: {exc}")))
             continue
         finally:
             spent += time.monotonic() - started
         if outcome.timed_out:
             tail = (outcome.stdout or outcome.stderr or "").strip()
-            checked.append(replace(
-                item, passed=False,
-                output=_tail(f"timeout after {timeout_each:g}s: {tail}"),
+            results.append((
+                False,
+                _tail(f"timeout after {timeout_each:g}s: {tail}"),
             ))
         elif outcome.error is not None:
-            checked.append(replace(item, passed=False, output=_tail(f"error: {outcome.error}")))
+            results.append((False, _tail(f"error: {outcome.error}")))
         elif outcome.returncode != 0:
             body = (outcome.stdout or "") + (("\n" + outcome.stderr) if outcome.stderr else "")
-            checked.append(replace(item, passed=False, output=_tail(body)))
+            results.append((False, _tail(body)))
         else:
-            checked.append(replace(item, passed=True, output=_tail(outcome.stdout)))
-    by_id = {item.id: item for item in checked}
-    return [by_id.get(item.id, item) for item in items]
+            results.append((True, _tail(outcome.stdout)))
+    return results
 
 
 async def _approved(
-    item: AcceptanceItem, reason: str, approval: ApprovalCallback | None
+    command: str, reason: str, approval: ApprovalCallback | None
 ) -> bool:
     """Did the human let this proof command run?
 
@@ -264,7 +259,7 @@ async def _approved(
     if approval is None:
         return False
     try:
-        answer = await approval.approve("bash", {"command": item.verify}, reason)
+        answer = await approval.approve("bash", {"command": command}, reason)
     except Exception:  # noqa: BLE001 — an approval is a boundary: fail closed
         return False
     return answer in (ApprovalResult.YES, ApprovalResult.ALWAYS)
@@ -272,56 +267,3 @@ async def _approved(
 
 __all__ = ["verify_items"]
 
-
-async def verify_command_problem(command: str) -> str:
-    """Why this proof command cannot run, or ``""`` when it can.
-
-    Two questions, in the order a reader asks them: can the shell read
-    it at all, and is every program in it something the shell can
-    actually run?  The second one is the one that catches a model
-    inventing a proof -- ``glob '**/*'`` is valid shell and names no
-    program, so the proof would fail at execution, after the operator
-    had already approved the plan.  The plan is where the model can
-    still fix it, so that is where the question belongs.
-
-    The oracle for "can the shell run it" is the shell itself
-    (``command -v``), because that is what will run the proof: it knows
-    the builtins and the PATH, so a check that disagreed with it would
-    refuse proofs that would have worked.
-    """
-    views = command_views(command)
-    if not views:
-        return "验收命令里没有可执行的命令"
-    broken = [view.program or "?" for view in views if view.broken]
-    if broken:
-        return "验收命令的语法读不完整：" + ", ".join(broken)
-    programs: list[str] = []
-    for view in views:
-        # A program that names a path is the model's own business: the
-        # check below looks the name up on PATH, and a relative path would
-        # be judged against the wrong directory.
-        if "/" in view.program or not view.program:
-            continue
-        if view.program not in programs:
-            programs.append(view.program)
-    missing = await _unresolvable_programs(programs)
-    if missing:
-        return "验收命令里的程序不存在：" + ", ".join(missing)
-    return ""
-
-
-async def _unresolvable_programs(programs: list[str]) -> list[str]:
-    """Which of these programs the shell would not be able to run."""
-    if not programs:
-        return []
-    script = 'for p do command -v "$p" >/dev/null || printf "%s\\n" "$p"; done'
-    outcome = await run_process_async(
-        ["/bin/sh", "-c", script, "sh", *programs],
-        shell=False,
-        timeout=10.0,
-    )
-    if getattr(outcome, "returncode", 0) != 0:
-        # The oracle itself failed: say nothing, so a working proof is not
-        # refused because the check could not run.
-        return []
-    return [line for line in (getattr(outcome, "stdout", "") or "").splitlines() if line.strip()]

@@ -152,13 +152,10 @@ def test_a_plain_turn_never_asks_for_a_plan():
 
 
 @pytest.mark.parametrize("posture", [{"mode": "plan"}, {"readonly": True}])
-def test_after_step_silences_the_acceptance_gate_under_a_posture(posture):
-    from ai_coding.domain.acceptance import AcceptanceState
-
-    failing = (AcceptanceState(id="AC-1", passed=False),)
+def test_after_step_silences_the_task_gate_under_a_posture(posture):
     decision = TurnPolicy(_config()).decide_after_step(
-        # 18 §10.5: the acceptance ladder stays silent under the posture.
-        TurnSnapshot(iteration=2, acceptance=failing, **posture)
+        # 18 §10.5: the task ladder stays silent under the posture.
+        TurnSnapshot(iteration=2, open_items=(_item("1"),), **posture)
     )
     assert (decision.action, decision.reason) == (TurnAction.FINISH, "model finished")
 

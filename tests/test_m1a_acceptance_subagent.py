@@ -14,7 +14,6 @@ from ai_coding.config.models import AIConfig
 from ai_coding.core.acceptance import verify_items
 from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.subagent import SubAgentRunner
-from ai_coding.domain.acceptance import AcceptanceItem
 from ai_coding.domain.loop import StepResult
 from ai_coding.domain.message import ToolCallRef, ToolResult
 from ai_coding.domain.session import SessionData
@@ -25,11 +24,6 @@ from ai_coding.tools.base import BaseTool, ToolContext
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.subagent_tool import SubAgentTool
 
-
-def _item(verify: str) -> AcceptanceItem:
-    return AcceptanceItem(id="AC-1", statement="it holds", verify=verify)
-
-
 # ---- R20: the proof shell asks the rules before it runs ----------------------
 
 
@@ -37,14 +31,14 @@ def _item(verify: str) -> AcceptanceItem:
 async def test_a_rule_denied_proof_command_does_not_run(tmp_path):
     marker = tmp_path / "ran.marker"
 
-    items = await verify_items(
-        [_item(f"touch {marker}")],
+    result = await verify_items(
+        [f"touch {marker}"],
         str(tmp_path),
         deny_reason=lambda action, params: "denied by rule: bash *",
     )
 
-    assert items[0].passed is False
-    assert "denied by rule: bash *" in items[0].output
+    assert result[0][0] is False
+    assert "denied by rule: bash *" in result[0][1]
     assert not marker.exists()
 
 
@@ -52,13 +46,13 @@ async def test_a_rule_denied_proof_command_does_not_run(tmp_path):
 async def test_a_proof_command_the_rules_allow_still_runs(tmp_path):
     marker = tmp_path / "ran.marker"
 
-    items = await verify_items(
-        [_item(f"touch {marker}")],
+    result = await verify_items(
+        [f"touch {marker}"],
         str(tmp_path),
         deny_reason=lambda action, params: "",
     )
 
-    assert items[0].passed is True
+    assert result[0][0] is True
     assert marker.exists()
 
 
@@ -88,13 +82,12 @@ async def test_the_loop_hands_its_session_rules_to_the_proof_shell(tmp_path):
         created_time="t",
         last_access_time="t",
         permissions=[{"action": "bash", "resource": "*", "effect": "deny"}],
-        acceptance=[_item(f"touch {marker}")],
     )
 
-    await loop.process_input(session, "go")
+    passed, output = await loop._verify_plan_item(session, "1", "it holds", f"touch {marker}")
 
-    assert session.acceptance[0].passed is False
-    assert "denied by rule" in session.acceptance[0].output
+    assert passed is False
+    assert "denied by rule" in output
     assert not marker.exists()
     await loop.aclose()
 

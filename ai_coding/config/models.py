@@ -470,7 +470,7 @@ class AIConfig(BaseModel):
     max_auto_continuations: int = 3
     #: C-0: codex path only.  False keeps Codex's ``update_plan`` schema
     #: (``step``/``status``); True additionally accepts an optional per-step
-    #: ``verify`` and runs the item-boundary acceptance inside ``update_plan``.
+    #: ``verify`` and runs the item-boundary proof inside ``update_plan``.
     plan_verify_items: bool = False
     # D-4: episode-wide round ceiling for one armed goal; 0 disables.  Was a
     # phantom until 2026-10-17: the runner read it duck-typed while this class

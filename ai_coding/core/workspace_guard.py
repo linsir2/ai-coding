@@ -1,9 +1,9 @@
-"""The workspace reachability gate shared by planning, acceptance, and the
+"""The workspace reachability gate shared by planning, proof commands, and the
 first-turn path hint.
 
 ``outside_workspace_paths`` answers one question — "can the file tools reach
-this path?" — and three callers ask it: the workspace gates, the acceptance
-command gate, and the first-turn hint in ``request_assembly``.  It is not
+this path?" — and three callers ask it: the workspace gates, the proof command
+gate, and the first-turn hint in ``request_assembly``.  It is not
 plan-specific, so it lives in its own module.
 """
 

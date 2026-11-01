@@ -52,8 +52,9 @@ class TodoItem:
     created_at: str = ""
     updated_at: str = ""
     #: R1-1: the shell command proving this item (empty = not machine-checkable).
-    #: The plan runner turns it into an acceptance contract for the step's turn;
-    #: unwritten when empty, so old files read byte-identically.
+    #: ``update_plan`` runs it at the item's completion boundary when
+    #: ``plan_verify_items`` is on; unwritten when empty, so old files read
+    #: byte-identically.
     verify: str = ""
     #: r24/C: the repository paths this item is expected to touch.  A *grouping*
     #: hint only, never a correctness constraint.  Unwritten when empty.

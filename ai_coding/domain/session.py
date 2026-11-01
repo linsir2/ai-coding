@@ -6,7 +6,6 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from .acceptance import AcceptanceItem
 from .agents import is_plan_agent
 from .message import ChatMessage, ImageRef, ToolArtifact, ToolCallRef, tool_call_from_ref
 from .read_ledger import ReadMark, merge_mark, normalize
@@ -278,7 +277,7 @@ class SessionData:
     # ordinary turn, which is what Codex does too (it has no cross-process
     # plan-turn recovery).
     plan_implementing: bool = False
-    # NOT persisted.  C-0/C-1: the codex path's item-boundary acceptance
+    # NOT persisted.  C-0/C-1: the codex path's item-boundary proof
     # switch, mirrored onto the session for the duration of one run.  Same
     # lifetime as ``plan_implementing``.
     plan_verify_items: bool = False
@@ -337,11 +336,6 @@ class SessionData:
     # of the on-disk format.  It is a normalized excerpt from the first user
     # message, used by the resume picker.
     first_preview: str = ""
-    # Acceptance contracts (R0-1): machine-checkable statements plus the shell
-    # command proving each one.  Populated programmatically for now (the plan
-    # runner will produce these); persisted only when non-empty, same rule as
-    # ``task`` — old files simply have no key.
-    acceptance: list[AcceptanceItem] = field(default_factory=list)
     # C3: continuation rounds this turn has already spent (the iteration budget
     # died with items open, the loop started a fresh round).  Kept on the
     # session because the books are per-turn and would lose it across rounds —
@@ -708,10 +702,6 @@ class SessionData:
         # Deferred tool schemas: only a session that loaded some writes the key.
         if self.loaded_tools:
             data["loadedTools"] = list(self.loaded_tools)
-        # Same rule again: sessions without acceptance contracts write no key,
-        # so every file written before R0-1 keeps reading byte-identically.
-        if self.acceptance:
-            data["acceptance"] = [item.to_dict() for item in self.acceptance]
         # P1: the three recovery facts, each only when set, same rule again.
         if self.open_turn is not None:
             data["openTurn"] = int(self.open_turn)
@@ -770,12 +760,6 @@ class SessionData:
             for item in (InboxItem.from_dict(row) for row in inbox_rows)
             if item is not None
         ]
-        raw_acceptance = data.get("acceptance")
-        acceptance_rows = raw_acceptance if isinstance(raw_acceptance, list) else []
-        acceptance = [
-            AcceptanceItem.from_dict(row) for row in acceptance_rows
-            if isinstance(row, dict)
-        ]
         raw_open_turn = data.get("openTurn")
         raw_undo = data.get("undoState")
         raw_intervention = data.get("interventionState")
@@ -833,7 +817,6 @@ class SessionData:
             loaded_tools=tuple(
                 str(name) for name in (data.get("loadedTools") or ()) if name
             ),
-            acceptance=acceptance,
             open_turn=int(raw_open_turn)
             if isinstance(raw_open_turn, int) and not isinstance(raw_open_turn, bool)
             else None,

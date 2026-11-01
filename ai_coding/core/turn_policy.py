@@ -25,7 +25,6 @@ from typing import Any
 
 from ai_coding.core import interventions
 from ai_coding.core.interventions import NUDGE_ITEM_LIMIT
-from ai_coding.domain.acceptance import AcceptanceState
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.task import TaskState, TodoItem
 
@@ -72,10 +71,6 @@ class TurnPolicyConfig:
     failed_streak_threshold: int = 2  # 0 disables the strategy nudge
     max_strategy_nudges: int = 1
     stall_iterations: int = 3  # 0 disables the early stop
-    # R0-1: the acceptance gate's own budget, separate from the todo and
-    # strategy ladders — a turn that keeps failing its proof commands stops
-    # asking instead of re-running the suite forever.
-    max_acceptance_nudges: int = 2
     max_auto_continuations: int = 3
     #: B1/B2: consecutive look-only calls before the search ladder speaks.
     #: ``0`` disables the gate -- reachable from ``AIConfig`` because this gate
@@ -110,7 +105,6 @@ class TurnPolicyConfig:
             ),
             max_strategy_nudges=int(getattr(settings, "max_strategy_nudges", 1) or 0),
             stall_iterations=int(getattr(settings, "stall_iterations", 3) or 0),
-            max_acceptance_nudges=int(getattr(settings, "max_acceptance_nudges", 2) or 0),
             max_auto_continuations=int(
                 getattr(settings, "max_auto_continuations", 3) or 0
             ),
@@ -171,12 +165,6 @@ class TurnSnapshot:
     attempted_calls: int = 0  # tool calls this turn (successful or not)
     successful_calls: int = 0  # successful tool calls this turn
     strategy_nudges: int = 0  # strategy nudges already injected this turn
-    # R0-1: acceptance verdicts, fed in by the loop after running the proof
-    # commands — the policy never runs anything itself.  Empty = no contracts,
-    # and every rule below is skipped, so turns without acceptance behave
-    # exactly as before.
-    acceptance: tuple[AcceptanceState, ...] = ()
-    acceptance_nudges: int = 0  # acceptance nudges already injected this turn
     # F2: Paris' Law fatigue index — accumulated error damage.
     fatigue_index: float = 0.0
     # F2: fatigue nudges already injected this turn.
@@ -186,7 +174,7 @@ class TurnSnapshot:
     #: gate has fired yet.
     intervention_ledger: Mapping[str, Any] = field(default_factory=dict)
     #: 13 §2.1: successful ``ask_user`` calls this turn — the helped signal of
-    #: the ask levels (L3 for strategy/fatigue, L2 for task/acceptance).
+    #: the ladder's ask levels (L3 for strategy/fatigue, L2 for task).
     ask_user_calls: int = 0
     #: B1/B2: consecutive successful *retrieval* calls with no successful
     #: non-retrieval call in between.  This is the measured shape of the T2 turn
@@ -235,7 +223,6 @@ class TurnPolicy:
                 if self.config.stop_policy == "strict"
                 else self.config.max_todo_nudges
             ),
-            acceptance_l1=self.config.max_acceptance_nudges,
             search_streak_threshold=self.config.search_streak_threshold,
             search_streak_l3=self.config.search_streak_l3,
         )
@@ -355,24 +342,8 @@ class TurnPolicy:
         if snapshot.plan_implementing:
             # C-3: Codex's implementation turn is an ordinary turn.  It has no
             # output of its own to continue -- the model's stop is the end, and
-            # the acceptance/task ladders must not speak (no contracts/receipts
-            # on this path).
+            # the task ladder must not speak (no receipts on this path).
             return TurnDecision(TurnAction.FINISH, "codex plan turn: no structural continuation")
-        if snapshot.acceptance:
-            # R0-1: a turn with contracts does not end on the model's word.
-            # Unchecked items fail closed (the loop verifies before asking, so
-            # ``None`` here means "could not be checked" — never "passed").
-            failed = [a for a in snapshot.acceptance if a.passed is not True]
-            if not failed:
-                return TurnDecision(TurnAction.FINISH, "acceptance verified")
-            # 13 §2.1（Q1 拍板）: the acceptance branch is exclusive — the task
-            # gate never competes while contracts exist (plan-runner parity).
-            gate = interventions.select(
-                snapshot, phase=interventions.POST, limits=self._limits
-            )
-            if gate is not None:
-                return self._as_turn_decision(gate)
-            return TurnDecision(TurnAction.FINISH, "acceptance ladder exhausted")
         if not snapshot.open_items or self.config.stop_policy == "natural":
             return TurnDecision(TurnAction.FINISH, "model finished")
         gate = interventions.select(

@@ -48,7 +48,7 @@ PLAN_ENTER_REMINDER = (
     "and do not implement the changes yourself. Do not create or update plan "
     "files unless the user explicitly asks you to; when they do, write them "
     f"only under {PLAN_DIR}/. A 'verify' command is optional: fill it only when "
-    "a real acceptance command exists, and never use a file the plan itself "
+    "a real verification command exists, and never use a file the plan itself "
     "produces as the proof. For read-only exploration use parallel_research and "
     "shell_read (one simple read-only command; no pipes or redirection); "
     "subAgent runs in an isolated worktree, so give it relative paths there, "

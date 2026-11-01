@@ -103,11 +103,6 @@ from ai_coding.core.turn_policy import (
 from ai_coding.core.turn_report import TurnReporter
 from ai_coding.core.undo_store import UndoFileStore
 from ai_coding.core.write_ahead import WriteAheadLog
-from ai_coding.domain.acceptance import (
-    AcceptanceItem,
-    acceptance_states,
-    pending_items,
-)
 from ai_coding.domain.agents import AgentCatalog
 from ai_coding.domain.ledger import ledger_signature
 from ai_coding.domain.loop import (
@@ -519,11 +514,6 @@ class AgentLoop:
         #: I2/D4: the write-ahead digests a *resumed* turn may replay.  ``None``
         #: outside a resume, so a live turn can never answer from a record.
         self._replay_scope: frozenset[str] | None = None
-        #: Plan-as-Goal: verdicts the item boundary already produced this run
-        #: (item id -> (passed, output tail)).  ``todo_write`` runs the proof
-        #: when the model marks an item done; the executor reads this so its
-        #: post-turn reconciliation does not run the same command twice.
-        self._boundary_verdicts: dict[str, tuple[bool, str]] = {}
         # R5: the memory-facing half of a turn (block / harvest / status).
         self.turn_memory = TurnMemory(memory, emit=self._emit, save=self.closer.save)
         #: 2026-10-17: the fire-and-forget harvest chain.  The harvest no longer
@@ -1021,11 +1011,6 @@ class AgentLoop:
                     # with work unfinished.  The old ladder never needed it;
                     # without it the continuation never fires.
                     open_items=task.open_items(),
-                    # settle evaluates every gate's window at both decision
-                    # points; an acceptance window must see its real signature
-                    # here too — with the default () it would compare empty vs
-                    # ref and be mis-marked "helped" at the very next iteration.
-                    acceptance=acceptance_states(session.acceptance),
                     continuations=session.continuations,
                 )
                 snapshot = replace(
@@ -1044,26 +1029,6 @@ class AgentLoop:
                 )
                 self._note_intervention(session, decision, snapshot)
                 if decision.action is TurnAction.FINISH:
-                    # R0-1 (H1-01): a budget stop is not proof the work is
-                    # undone.  When contracts exist and the clock still has
-                    # room for one bounded check, verify before translating
-                    # the stop into a verdict — a green suite turns MAX into
-                    # COMPLETED instead of lying about it.
-                    if (
-                        decision.reason != "turn deadline exceeded"
-                        and pending_items(session.acceptance)
-                    ):
-                        await self.verify_acceptance(session, books)
-                        if session.acceptance and all(
-                            item.passed is True for item in session.acceptance
-                        ):
-                            outcome = TurnOutcome(
-                                status=TurnStatus.COMPLETED,
-                                text=books.last_text,
-                                iterations=books.total_iterations,
-                                reason="acceptance verified (post-budget)",
-                            )
-                            break
                     outcome = terminal_outcome(
                         decision,
                         budget_expired=budget_expired,
@@ -1275,17 +1240,11 @@ class AgentLoop:
                     raise
 
                 if not step.tool_calls:
-                    # R0-1: a turn with contracts does not end on the model's
-                    # word — the proof commands run first, and the policy sees
-                    # only their verdicts (its purity is what keeps the stop
-                    # decision table-testable).
-                    await self.verify_acceptance(session, books)
-                    # R20/RC-7: after the proofs, before the policy decides.
-                    # Before the proofs would skip them; and a retry issued on
-                    # the *last* allowed iteration would be spent without the
-                    # model ever seeing it -- the turn closes with a handoff
-                    # instead of the answer it had.  So the guard only fires
-                    # while a further round exists.
+                    # R20/RC-7: the citation check runs before the policy
+                    # decides.  A retry issued on the *last* allowed iteration
+                    # would be spent without the model ever seeing it -- the
+                    # turn closes with a handoff instead of the answer it had.
+                    # So the guard only fires while a further round exists.
                     if self._has_a_round_left(session, index) and self._reject_unsupported_claims(
                         session, step.text or "", index
                     ):
@@ -1300,7 +1259,6 @@ class AgentLoop:
                         tokens_spent=self.reporter.tokens_spent(),
                         open_items=task.open_items(),
                         final_text=step.text,
-                        acceptance=acceptance_states(session.acceptance),
                         continuations=session.continuations,
                     )
                     snapshot = replace(
@@ -1327,10 +1285,7 @@ class AgentLoop:
                             note=decision.note,
                         )
                         break
-                    if decision.intervention == "acceptance":
-                        books.note_acceptance_nudge()
-                    else:
-                        books.note_nudge()
+                    books.note_nudge()
                     session.add_message(
                         user_message(decision.inject or "", now_utc(), synthetic=True)
                     )
@@ -1996,7 +1951,7 @@ class AgentLoop:
 
         The child's own session starts empty, so the second half is how a
         parent's rules reach delegated work (M1a ④).  One method because the
-        dispatch context, the catalogue, the prompt and acceptance must all
+        dispatch context, the catalogue, the prompt and proof commands must all
         read the same effective set.
         """
         return (*self._session_rules(session), *self._session_permissions)
@@ -2411,46 +2366,6 @@ class AgentLoop:
         self.closer.checkpoint(session, index)
         return True
 
-    async def verify_acceptance(
-        self, session: SessionData, books: TurnBooks | None = None
-    ) -> None:
-        """Run the proof commands for unchecked acceptance items (R0-1).
-
-        Only items that never passed are checked, so a green suite is not
-        re-run every iteration.  Verdicts land on the session items (persisted
-        by the normal save) and in the books (for the policy snapshot and the
-        uncertainty ledger) — the policy itself never touches a shell.
-
-        ``books`` is optional since r24/C: a plan executor verifies an item
-        *after* the turn has closed (the model may have completed several
-        items in one turn), and there is no live ``TurnBooks`` then.  The
-        ledger entry is observation, not the verdict; skipping it must not
-        skip the check.
-        """
-        # 18 §10.5: a read-only session promised not to run anything — the
-        # proof commands are shell and bypass the dispatch gate, so they stop
-        # here.  Items stay pending (fail-closed downstream) until a writable
-        # turn verifies them.
-        if session.readonly:
-            return
-        pending = pending_items(session.acceptance)
-        if not pending:
-            return
-        checked = await self._run_verifications(session, pending)
-        by_id = {item.id: item for item in checked}
-        for item in session.acceptance:
-            if item.id in by_id:
-                item.passed = by_id[item.id].passed
-                item.output = by_id[item.id].output
-        # Only verdicts (pass/fail) enter the books — items skipped by the
-        # total cap stay None and must not fabricate ledger entries.
-        if books is not None:
-            books.note_verify({
-                item.id: (item.passed, item.output)
-                for item in checked
-                if item.passed is not None
-            })
-
     async def _verify_plan_item(
         self, session: SessionData, item_id: str, statement: str, command: str
     ) -> tuple[bool, str]:
@@ -2458,37 +2373,14 @@ class AgentLoop:
 
         Called by ``update_plan`` under ``plan_verify_items``, so a red proof
         comes back as that call's own result and the model repairs it in the
-        same turn.
+        same turn.  ``item_id``/``statement`` are part of that call's contract;
+        the verdict is the command's alone.
         """
+        # 18 §10.5: a read-only session promised not to run anything — the
+        # proof command is shell and bypasses the dispatch gate, so it stops
+        # here (fail-closed).
         if session.readonly or not str(command or "").strip():
             return (False, "the proof command was not run")
-        checked = await self._run_verifications(
-            session,
-            [AcceptanceItem(id="plan-item", statement=statement, verify=command)],
-        )
-        verdict = checked[0]
-        result = (verdict.passed is True, verdict.output)
-        # Remember it for the run ledger.  P0b-2f: the acceptance contract (and
-        # with it ``boundary_verdict``/``reset_boundary_verdicts``) retires; this
-        # cache has no caller left once that happens.
-        self._boundary_verdicts[item_id] = result
-        return result
-
-    def reset_boundary_verdicts(self) -> None:
-        """Forget the previous run's item verdicts.
-
-        P0b-2f: no caller remains once the acceptance contract retires.
-        """
-        self._boundary_verdicts.clear()
-
-    def boundary_verdict(self, item_id: str) -> tuple[bool, str] | None:
-        """The verdict this run's item boundary already produced, if any."""
-        return self._boundary_verdicts.get(item_id)
-
-    async def _run_verifications(
-        self, session: SessionData, items: list[AcceptanceItem]
-    ) -> list[AcceptanceItem]:
-        """The one shell boundary for proof commands (rules, roots, human)."""
         each = float(getattr(self.settings, "acceptance_verify_each_seconds", 120.0) or 0.0)
         total = float(getattr(self.settings, "acceptance_verify_total_seconds", 300.0) or 0.0)
         session_rules = self._effective_session_rules(session)
@@ -2497,8 +2389,8 @@ class AgentLoop:
             str(getattr(session, "mode", "normal") or "normal"),
             bool(getattr(session, "readonly", False)),
         )
-        return await verify_items(
-            items,
+        results = await verify_items(
+            [command],
             self.workspace,
             timeout_each=each or 120.0,
             timeout_total=total or 300.0,
@@ -2521,6 +2413,7 @@ class AgentLoop:
             # the same roots the file tools and the workspace gate use.
             extra_roots=self.extra_workspace_roots,
         )
+        return results[0]
 
     async def _ask_for_closing(
         self,

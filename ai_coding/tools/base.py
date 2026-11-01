@@ -154,10 +154,10 @@ class ToolContext:
     # be answered from the record instead of running twice.  `None` outside a
     # loop that owns a turn.  Typed `Any` like ``jobs`` for the same reason.
     write_ahead: Any = None
-    #: C-0/C-1: the codex path's item-boundary acceptance switch.  When True,
+    #: C-0/C-1: the codex path's item-boundary proof switch.  When True,
     #: ``update_plan`` accepts an optional per-step ``verify`` and runs it when
     #: the step is marked completed.  False keeps Codex's schema (step/status)
-    #: and skips acceptance.
+    #: and skips the proof.
     plan_verify_items: bool = False
     #: Run one item's proof command at the moment the model marks it completed.
     #: ``(item_id, statement, command) -> (passed, output tail)``.  Used by

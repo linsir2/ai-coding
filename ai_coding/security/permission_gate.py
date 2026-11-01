@@ -118,7 +118,7 @@ def bash_denied(command: str) -> str:
     disagree about what is forbidden.
 
     This name stays because two callers import it (the dispatcher and the
-    acceptance runner), and it reads no clock and no file; the shell grammar
+    proof command runner), and it reads no clock and no file; the shell grammar
     is loaded once per process and kept.
     """
     return bash_red_line_with_fallback(command)
@@ -555,9 +555,10 @@ class PermissionGate:
     ) -> str:
         """Why the rule layer refuses this call, or ``""`` when it does not.
 
-        The narrow view acceptance uses (M1a ③): it must see a DENY, never a
-        WARN -- an ordinary proof command is ``bash`` and base says ask, so
-        treating WARN as a refusal would put a human in front of every proof.
+        The narrow view the proof runner uses (M1a ③): it must see a DENY,
+        never a WARN -- an ordinary proof command is ``bash`` and base says
+        ask, so treating WARN as a refusal would put a human in front of every
+        proof.
         """
         decision = self.check(
             tool_name,

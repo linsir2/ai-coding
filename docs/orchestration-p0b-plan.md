@@ -324,6 +324,109 @@ TypeError——实现时先全仓 grep 字段名再删；`turn_books.snapshot()`
 - 误删 `util/plan-agent.ts` 或 `planPrelude` 会打断 plan 姿态后缀与 `/plan` 前置；
   已核它们不是评审卡专属。
 
+#### P0b-2f：acceptance 契约退休（保留 proof 执行器）
+
+**事实前提（已核）**
+- `session.acceptance` 的生产者（旧 plan_runner/plan_executor 与它们之后的补全）已删；
+  生产代码里已无赋值点，它恒为空 —— `acceptance_states` / `pending_items` /
+  `verify_acceptance` / acceptance 门 / `note_verify` / `U-ac-*` 账本项全部不可达。
+- 唯一仍在工作的验收入口是 `update_plan`（`plan_verify_items`）→ `AgentLoop._verify_plan_item`
+  → `core/acceptance.verify_items`。它只需要「一条命令 → (passed, output tail)」。
+- `verify_command_problem` 无任何调用者（`present_plan` 已删）。
+- `books.verify` 的唯一用途是 `build_ledger(verify=...)`，而它只产出 `U-ac-*` 项；
+  `UncertaintyItem.resolves` 也只有 acceptance 会填，前端不读该字段。
+
+**删除清单**
+1. `domain/acceptance.py` 整文件删除。
+2. `core/acceptance.py`：`verify_items` 改为命令级签名
+   `verify_items(commands: Sequence[str], workspace, *, timeout_each, timeout_total,
+   approval, deny_reason, extra_roots) -> list[tuple[bool, str]]`（每条命令跑一次，
+   不再有「已通过跳过」）；删 `pending_items` import、`_approved(item…)`（改成
+   `_approved(command…)`）、`verify_command_problem` / `_unresolvable_programs`，以及
+   因此不再使用的 `dataclasses.replace` 与顶层 `shell_parse.command_views` import；
+   `_needs_a_human` / `_relative_targets_outside` 保留（仍有测试消费）。
+3. `domain/session.py`：删 `acceptance` 字段、`AcceptanceItem` import、`to_dict` 的
+   `acceptance` 块、`from_dict` 的读取（`begin_plan` docstring 本就没有 contracts 句，
+   无需改）。旧 `acceptance` 键读入时自然忽略（`from_dict` 只取已知键）。
+4. `core/agent_loop.py`
+   - 删 `AcceptanceItem` / `acceptance_states` / `pending_items` import（`verify_items` 保留）。
+   - 删 `verify_acceptance`、`_run_verifications`、`_boundary_verdicts` 及其初始化、
+     `reset_boundary_verdicts` / `boundary_verdict`。
+   - `_verify_plan_item` 直接调命令级 `verify_items([command], …)`（readonly / 空命令短路
+     保留；settings 的 `acceptance_verify_each/total_seconds`、session/agent 规则、
+     approval、extra_roots 照旧传）。
+   - 删两处 `acceptance=acceptance_states(...)`、预算 FINISH 的 `pending_items` + 补验收块、
+     `if not step.tool_calls` 开头的 `await self.verify_acceptance(...)`。
+   - acceptance nudge 分支改为无条件 `books.note_nudge()`。
+5. `core/turn_policy.py`：删 `TurnSnapshot.acceptance` / `acceptance_nudges`、
+   `TurnPolicyConfig.max_acceptance_nudges`、`LadderLimits(acceptance_l1=…)`、
+   `decide_after_step` 的 `if snapshot.acceptance:` 整块（模型停止后直接进入
+   task / stop_policy 判定）、`AcceptanceState` import。
+6. `core/interventions.py`：删 `ACCEPTANCE`、`ACCEPTANCE_GATE_LEAD`、
+   `LadderLimits.acceptance_l1`、`_triggered` 的 acceptance 尾分支、`_acc_sig`、
+   `_helped` 的 acceptance 尾分支、`_due` 里 `gate == TASK or gate == ACCEPTANCE` 的共用逻辑、
+   `select` POST 的 `gates = (TASK,)`、`_build` 的 acceptance finish/nudge 分支、
+   `_acceptance_text`；同步模块 docstring 与常量注释。
+7. `core/turn_books.py`：删 `verify` 字段、`note_verify`、`acceptance_nudges`、
+   `note_acceptance_nudge`、`build_ledger(verify=…)` 传参、`snapshot()` 的
+   `acceptance=` / `acceptance_nudges=`、`AcceptanceState` import。
+8. `domain/ledger.py`：删 `build_ledger` 的 `verify` 参数与 `U-ac-*` 块、
+   `UncertaintyItem.resolves` 字段与序列化键（无其它读者）。
+9. `core/plan_reminders.py`：模型可见文案 `a real acceptance command exists` →
+   `a real verification command exists`。
+10. `config`：确认 `max_acceptance_nudges` 只是 `TurnPolicyConfig` 的 duck-typed `getattr`
+    默认（随第 5 条消失，`AIConfig` 从未有该字段）；`acceptance_verify_each/total_seconds`
+    在 `AIConfig` 里也没有字段，全仓只在 `agent_loop` 用 `getattr` 默认 120/300 读取，
+    **保留**（proof 执行器的超时口径；改名属另一决策）。
+
+**测试同步**
+- `test_acceptance.py`：保留命令级执行/超时/只读/工作区门/审批用例，改调新签名；删契约
+  往返、`pending/failed` helper、already-passed skip、post-budget 验收用例。
+- `test_m1a_acceptance_subagent.py`：改为直接断言 `verify_items([...])` 的规则拒绝，
+  不再写 `session.acceptance`。
+- `test_acceptance.py` 同时承载原来写在 `test_domain_session` 的契约持久化用例，随契约删除。
+- `test_domain_session.py`：`test_begin_plan_keeps_messages_and_acceptance` 收缩为只断言
+  messages（改名），旧键兼容用例补上 `acceptance` 键。
+- `test_turn_policy.py` / `test_interventions.py` / `test_claim_check.py` / `test_ledger.py`：
+  删/改 acceptance 门与 `U-ac` 用例，保留 task/strategy 门覆盖（`test_claim_check` 只删
+  验收先于引用检查的排序用例，引用检查本身仍有覆盖）。
+- `test_m4_security.py`：只改 `verify_items` 的调用签名，无用例删除。
+- `test_turn_books.py` 无 acceptance 引用，本步不改。
+- 新增 `test_verify_items_runs_one_command_and_reports_its_verdict`（pass/fail 两条），
+  证明保留的能力仍可执行。
+
+**RIPR**
+- **R**：先加命令级用例（旧签名不兼容即红），再改实现到绿。
+- **I**：`update_plan` 的 `plan_verify_items` 仍能在条目完成时跑命令并回传失败。
+- **P**：全量 `pytest` + `ruff` + `mypy`；前端 `bun test` + `tsc`（ledger wire 少 `resolves`
+  字段，前端无读者）。
+- **R**：契约标识符 `AcceptanceItem|AcceptanceState|acceptance_states|pending_items|failed_items|
+  verify_acceptance|note_verify|acceptance_nudges|max_acceptance_nudges|U-ac-|boundary_verdict`
+  在 `ai_coding`（排除 `frontend/node_modules`）为零；允许保留 `core.acceptance` 模块路径与
+  `acceptance_verify_*` 两个 getattr 名。旧 session.json 含 `acceptance` 键仍能 load
+  （未识别键自然忽略）。
+
+**不删**：`verify_items`（命令级执行器）、`_verify_plan_item`、`plan_verify_items` 配置与
+`update_plan` 的 verify schema、`acceptance_verify_each/total_seconds`、`_needs_a_human`。
+
+**风险**
+- `update_plan` 的验收入口依赖 `_verify_plan_item`，不能随契约一起删。
+- `test_m3_boundaries.py` 仍 import `_needs_a_human`，该函数必须保留。
+
+**实施记录（完成）**
+- `domain/acceptance.py` 删除；`core/acceptance.verify_items` 收敛为命令级
+  `list[tuple[bool, str]]`，总预算耗尽 fail-closed（"not checked: time budget exhausted"）；
+  `verify_command_problem` 等无调用者函数一并删。
+- `session.acceptance` 与两处快照投影、回合末验收、acceptance 门/账本项
+  （`U-ac-*`、`resolves`）、`note_verify`、`max_acceptance_nudges` 全部删除；
+  `_verify_plan_item` 直接跑命令，`plan_verify_items`/`update_plan` 契约不变。
+- 测试：契约持久化/pending/helper/post-budget 用例删除；命令级 pass/fail 与
+  预算 fail-closed 用例新增；`test_m1a` 改为直接断言规则拒绝。改动只发生在
+  `test_acceptance/test_m1a_acceptance_subagent/test_domain_session/test_turn_policy/
+  test_interventions/test_claim_check/test_ledger/test_m4_security`。
+- 校验：后端全量 `pytest` 0 failed（4654 passed / 29 skipped）；`ruff`、`mypy`（173 文件）
+  全绿；前端 `bun test` 544 pass、`tsc` 0 错误。
+
 ### 范围
 - `domain/session.py`：删 `step_item_id`、`plan_executing`、`item_deadline`、
   `acceptance`、`step_deliveries`（含 `begin_plan` 重置 `:514`、序列化 `:741,809`、

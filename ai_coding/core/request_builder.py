@@ -152,7 +152,7 @@ def tool_context(
         jobs=jobs,
         # M-C1: the turn's write-ahead log (see ``core/write_ahead.py``).
         write_ahead=write_ahead,
-        # C-0/C-1: the codex path's item-boundary acceptance switch.
+        # C-0/C-1: the codex path's item-boundary proof switch.
         plan_verify_items=bool(plan_verify_items),
         # C-0/C-1: the item-boundary proof command (codex path, via
         # ``plan_verify_items``).

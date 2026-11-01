@@ -9,7 +9,6 @@ import pytest
 
 from ai_coding.core.acceptance import _needs_a_human, verify_items
 from ai_coding.core.dispatch import ToolDispatcher
-from ai_coding.domain.acceptance import AcceptanceItem
 from ai_coding.domain.message import ToolCallRef
 from ai_coding.infra.subprocess_runner import ProcessOutcome
 from ai_coding.security.approval import (
@@ -43,10 +42,6 @@ class _RecordingApproval:
         return self.answer
 
 
-def _item(command: str) -> AcceptanceItem:
-    return AcceptanceItem(id="AC-1", statement="proof", verify=command)
-
-
 # ---- L3: an obvious path written inside a string is still a path ----------
 
 
@@ -58,13 +53,13 @@ async def test_a_python_one_liner_cannot_read_outside(tmp_path):
     approval = _RecordingApproval(ApprovalResult.NO)
 
     result = await verify_items(
-        [_item('python -c "print(open(\'../m4-proof-secret.txt\').read())"')],
+        ['python -c "print(open(\'../m4-proof-secret.txt\').read())"'],
         str(tmp_path),
         approval=approval,
     )
 
     assert len(approval.asked) == 1
-    assert result[0].passed is False
+    assert result[0][0] is False
 
 
 @pytest.mark.asyncio
@@ -75,13 +70,13 @@ async def test_a_single_quoted_python_one_liner_is_seen(tmp_path):
     approval = _RecordingApproval(ApprovalResult.NO)
 
     result = await verify_items(
-        [_item("python -c 'print(open(\"../m4-proof-single-secret.txt\").read())'")],
+        ['python -c \'print(open("../m4-proof-single-secret.txt").read())\''],
         str(tmp_path),
         approval=approval,
     )
 
     assert len(approval.asked) == 1
-    assert result[0].passed is False
+    assert result[0][0] is False
 
 
 @pytest.mark.parametrize(

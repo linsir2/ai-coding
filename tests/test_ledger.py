@@ -1,9 +1,8 @@
 """Uncertainty ledger (R0-2, TDD): what the turn does not know, derived.
 
 No LLM declarations: items are built mechanically from recorded
-observations (failed verifies, tool errors, failure streaks), and an H level
-only ever drops on recorded evidence.  The policy gates on the flat counter,
-not on prose.
+observations (tool errors, failure streaks), and an H level only ever drops
+on recorded evidence.  The policy gates on the flat counter, not on prose.
 """
 
 
@@ -12,32 +11,21 @@ from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig, TurnSnapsho
 from ai_coding.domain.ledger import build_ledger, ledger_signature
 
 
-def test_failed_verify_becomes_a_high_item_pointing_at_its_ac():
-    items = build_ledger(
-        failures=(), verify={"AC-2": (False, "assert 245 == 200")},
-        failed_streak=0, iteration=3, succeeded_tools=frozenset(), stall_threshold=2,
-    )
-    assert len(items) == 1
-    item = items[0]
-    assert item.level == "high" and item.resolves == ("AC-2",)
-    assert "245" in item.evidence[0]
-
-
 def test_repeated_tool_error_escalates_and_later_success_closes_it():
     first = build_ledger(
-        failures=(("bash", "nonzero_exit", "x"),), verify={},
+        failures=(("bash", "nonzero_exit", "x"),),
         failed_streak=1, iteration=2, succeeded_tools=frozenset(), stall_threshold=2,
     )
     assert first[0].level == "medium"
     second = build_ledger(
         failures=(("bash", "nonzero_exit", "x"), ("bash", "nonzero_exit", "y")),
-        verify={}, failed_streak=2, iteration=3,
+        failed_streak=2, iteration=3,
         succeeded_tools=frozenset(), stall_threshold=2,
     )
     assert any(i.level == "high" for i in second)
     assert any(i.id.startswith("U-stall") for i in second)
     closed = build_ledger(
-        failures=(("bash", "nonzero_exit", "x"),), verify={},
+        failures=(("bash", "nonzero_exit", "x"),),
         failed_streak=0, iteration=4, succeeded_tools=frozenset({"bash"}),
         stall_threshold=2,
     )
@@ -51,7 +39,7 @@ def test_one_failure_is_not_called_a_repeat():
     medium question) must stay, because it is what raises the item at all.
     """
     first = build_ledger(
-        failures=(("bash", "nonzero_exit", "x"),), verify={},
+        failures=(("bash", "nonzero_exit", "x"),),
         failed_streak=0, iteration=2, succeeded_tools=frozenset(), stall_threshold=2,
     )
     assert first[0].question == "bash 调用失败（1 次）：直接原因是什么？"
@@ -59,7 +47,7 @@ def test_one_failure_is_not_called_a_repeat():
 
     twice = build_ledger(
         failures=(("bash", "nonzero_exit", "x"), ("bash", "nonzero_exit", "y")),
-        verify={}, failed_streak=0, iteration=3,
+        failed_streak=0, iteration=3,
         succeeded_tools=frozenset(), stall_threshold=2,
     )
     assert twice[0].question == "bash 反复失败（2 次）：直接原因是什么？"
@@ -68,11 +56,11 @@ def test_one_failure_is_not_called_a_repeat():
 
 def test_signature_is_order_stable():
     left = build_ledger(
-        failures=(("b", "e", "x"), ("a", "e", "y")), verify={},
+        failures=(("b", "e", "x"), ("a", "e", "y")),
         failed_streak=0, iteration=1, succeeded_tools=frozenset(), stall_threshold=2,
     )
     right = build_ledger(
-        failures=(("a", "e", "y"), ("b", "e", "x")), verify={},
+        failures=(("a", "e", "y"), ("b", "e", "x")),
         failed_streak=0, iteration=1, succeeded_tools=frozenset(), stall_threshold=2,
     )
     assert ledger_signature(left) == ledger_signature(right)
@@ -100,39 +88,6 @@ def test_policy_never_nudges_on_a_flat_ledger():
     assert decision.inject is None
 
 
-def test_policy_acceptance_gate_nudges_then_asks_then_finishes():
-    from ai_coding.domain.acceptance import AcceptanceState
-
-    policy = TurnPolicy(TurnPolicyConfig(max_acceptance_nudges=1))
-    failing = (AcceptanceState(id="AC-1", passed=False),)
-    first = policy.decide_after_step(TurnSnapshot(iteration=2, acceptance=failing))
-    assert first.action.name == "NUDGE"
-    assert "[acceptance-gate]" in (first.inject or "")
-    # 13 §2.1: a spent L1 budget escalates to the ask level, not to a stop.
-    spent = policy.decide_after_step(
-        TurnSnapshot(
-            iteration=3, acceptance=failing, acceptance_nudges=1,
-            intervention_ledger={"acceptance": {"level": 1, "at": [2, 4],
-                                 "outcome": "pending", "fires": 1, "ref": {}}},
-        )
-    )
-    assert spent.action.name == "NUDGE"
-    assert (spent.intervention, spent.level) == ("acceptance", 2)
-    # An ignored ask is where the ladder ends.
-    ignored = policy.decide_after_step(
-        TurnSnapshot(
-            iteration=5, acceptance=failing,
-            intervention_ledger={"acceptance": {"level": 2, "at": [3, 5],
-                                 "outcome": "pending", "fires": 1, "ref": {}}},
-        )
-    )
-    assert ignored.action.name == "FINISH"
-    assert ignored.reason == "acceptance ladder exhausted"
-    passing = (AcceptanceState(id="AC-1", passed=True),)
-    done = policy.decide_after_step(TurnSnapshot(iteration=2, acceptance=passing))
-    assert done.action.name == "FINISH" and "acceptance verified" in done.reason
-
-
 def test_failure_question_shows_the_count_not_the_machine_code():
     """A5 T9: the ledger line is human-facing (bridge.py:148 -> the transcript
     only; nothing injects it into the model's context), so the raw failure code
@@ -140,7 +95,7 @@ def test_failure_question_shows_the_count_not_the_machine_code():
     and the evidence line below already carries the real failure output."""
     items = build_ledger(
         failures=(("bash", "nonzero_exit", "fatal: not a git repository"),) * 2,
-        verify={}, failed_streak=2, iteration=2,
+        failed_streak=2, iteration=2,
         succeeded_tools=frozenset(), stall_threshold=2,
     )
     question = next(i for i in items if i.id.startswith("U-err")).question

@@ -7,7 +7,6 @@ here before it is one branch in ``ai_coding.core.interventions``.
 
 from ai_coding.core import interventions as iv
 from ai_coding.core.turn_policy import TurnAction, TurnDecision, TurnSnapshot
-from ai_coding.domain.acceptance import AcceptanceState
 from ai_coding.domain.task import TodoItem
 
 
@@ -136,7 +135,7 @@ def test_fatigue_l3_lapse_finishes():
     assert (d.level, d.kind, d.reason) == (3, "finish", "fatigue ladder exhausted")
 
 
-# ---- task / acceptance ladders ----
+# ---- task ladder ----
 
 
 def test_task_l1_refires_until_budget_then_asks():
@@ -166,13 +165,6 @@ def test_task_l2_helped_when_ask_user_appears():
         _fired("task", 2, ref={"asks": 0}), _snap(ask_user_calls=1)
     )
     assert ledger["task"]["outcome"] == "helped"
-
-
-def test_acceptance_ladder_owns_the_post_slot_when_contracts_exist():
-    failed = (AcceptanceState(id="a1", passed=False, output="boom"),)
-    snap = _snap(acceptance=failed, open_items=(_item("1"),))
-    d = iv.select(snap, phase=iv.POST, limits=LIMITS)
-    assert d.gate == "acceptance"          # task 不与其竞争（现状行为保持）
 
 
 # ---- bookkeeping ----

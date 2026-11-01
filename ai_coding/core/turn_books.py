@@ -35,7 +35,6 @@ from typing import Any
 
 from ai_coding.core.dispatch import DispatchOutcome
 from ai_coding.core.turn_policy import TurnSnapshot
-from ai_coding.domain.acceptance import AcceptanceState
 from ai_coding.domain.ledger import UncertaintyItem, build_ledger
 from ai_coding.domain.message import CANCELLED_BY_USER
 from ai_coding.domain.task import TaskState, TodoItem
@@ -245,13 +244,6 @@ class TurnBooks:
     #: the harvest reads, so "the turn used tools" cannot be faked by writing a
     #: checkpoint: that is the turn talking about itself.
     evidence_calls: int = 0
-    #: Acceptance verdicts this turn (R0-1): item id -> (passed, output tail).
-    #: Written by the loop after running the proof commands; the policy only
-    #: reads, so the stop decision stays table-testable.
-    verify: dict[str, tuple[bool, str]] = field(default_factory=dict)
-    #: Acceptance-gate nudges injected (``[acceptance-gate]``) — its own budget,
-    #: separate from the todo and strategy ladders.
-    acceptance_nudges: int = 0
     #: Per-step model latency, newest last (R0-4) — the reporter already emits
     #: each step's latency as an event; the books keep the series so the turn
     #: can account its wall-clock the way it accounts its iterations.
@@ -292,7 +284,7 @@ class TurnBooks:
     #: F2: fatigue nudges already injected this turn.
     fatigue_nudges: int = 0
     #: 13 §2.1: successful ``ask_user`` calls this turn — the helped signal of
-    #: the ladder's ask levels (L3 for strategy/fatigue, L2 for task/acceptance).
+    #: the ladder's ask levels (L3 for strategy/fatigue, L2 for task).
     ask_user_calls: int = 0
     #: 13 §2.5 (B): text deltas delivered this turn.  "The operator already saw
     #: part of the answer" is what earns a continuation instead of a failure.
@@ -318,10 +310,6 @@ class TurnBooks:
     def note_nudge(self) -> None:
         """The task gate injected a reminder and will iterate again."""
         self.nudges += 1
-
-    def note_acceptance_nudge(self) -> None:
-        """The acceptance gate injected a reminder and will iterate again."""
-        self.acceptance_nudges += 1
 
     def note_fatigue_nudge(self) -> None:
         """The fatigue gate injected a reminder and will iterate again."""
@@ -353,7 +341,6 @@ class TurnBooks:
         """
         return build_ledger(
             failures=self.failures,
-            verify=self.verify,
             failed_streak=self.failed_streak,
             iteration=self.iterations,
             succeeded_tools=frozenset(self.tool_success),
@@ -405,10 +392,6 @@ class TurnBooks:
         self.abandoned_steps += 1
         self.last_step_latency_ms = int(latency_ms)
         self.step_latencies_ms.append(int(latency_ms))
-
-    def note_verify(self, results: dict[str, tuple[bool, str]]) -> None:
-        """Record acceptance verdicts by item id (R0-1)."""
-        self.verify.update(results)
 
     def note_checkpoint(self, text: str, *, limit: int = DEFAULT_NOTE_CHARS) -> None:
         """Record the model's own line for this turn (R8a, D-1/D-12).
@@ -539,7 +522,6 @@ class TurnBooks:
         tokens_spent: int,
         open_items: Sequence[TodoItem] = (),
         final_text: str | None = None,
-        acceptance: Sequence[AcceptanceState] = (),
         continuations: int = 0,
     ) -> TurnSnapshot:
         """The one object :class:`TurnPolicy` decides from.
@@ -558,8 +540,6 @@ class TurnBooks:
             attempted_calls=self.attempted_calls,
             successful_calls=self.successful_calls,
             strategy_nudges=self.strategy_nudges,
-            acceptance=tuple(acceptance),
-            acceptance_nudges=self.acceptance_nudges,
             continuations=continuations,
             fatigue_index=self.fatigue_index,
             fatigue_nudges=self.fatigue_nudges,

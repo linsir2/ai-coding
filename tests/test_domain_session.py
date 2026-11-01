@@ -142,6 +142,7 @@ def test_a_session_file_with_old_plan_fields_still_loads():
         "stepDeliveries": [
             {"stepId": "1", "statement": "x", "status": "completed"}
         ],
+        "acceptance": [{"id": "AC-1", "statement": "x", "verify": "true"}],
         "task": {
             "planTokensUsed": 5,
             "items": [
@@ -154,27 +155,25 @@ def test_a_session_file_with_old_plan_fields_still_loads():
     item = session.task.get("1")
     assert item is not None and item.content == "x"
     assert not hasattr(session, "step_deliveries")
+    assert not hasattr(session, "acceptance")
     assert not hasattr(item, "attempts")
     assert not hasattr(session.task, "plan_tokens_used")
     # The write side must not learn the old keys either.
     assert "stepDeliveries" not in session.to_dict()
+    assert "acceptance" not in session.to_dict()
     assert "planTokensUsed" not in session.task.to_dict()
     assert "attempts" not in item.to_dict()
 
 
-def test_begin_plan_keeps_messages_and_acceptance():
-    """Only the plan moves; the conversation and its contracts stay."""
-    from ai_coding.domain.acceptance import AcceptanceItem
-
+def test_begin_plan_keeps_messages():
+    """Only the plan moves; the conversation stays."""
     s = SessionData("s1", "title", "c", "l")
     s.add_message(_user("hi"))
-    s.acceptance = [AcceptanceItem(id="AC-1", statement="x", verify="true")]
     s.task = TaskState(goal="old")
 
     s.begin_plan("new")
 
     assert len(s.messages) == 1
-    assert [a.id for a in s.acceptance] == ["AC-1"]
 
 
 # ---- P1/R1+R2: message id and the three durable recovery fields ---------------

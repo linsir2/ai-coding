@@ -407,50 +407,6 @@ async def test_seen_paths_survive_a_compaction(tmp_path):
     assert "x.py" in session.seen_paths
 
 
-@pytest.mark.asyncio
-async def test_the_correction_is_issued_after_the_acceptance_proofs(tmp_path):
-    """Decision 7: the check runs after ``verify_acceptance``.  Issuing it
-    before would skip the proofs, and T2's hallucination landed at the budget's
-    end where a later retry would never be seen."""
-    order: list[str] = []
-    engine = _ScriptedEngine([
-        _text("缺陷在 `a.py` 第 18-46 行。"),
-        _text("更正：`a.py` 第 81 行没有长度保护。"),
-    ])
-    sessions = SessionService(tmp_path / "sessions")
-    loop = _loop(engine, sessions)
-    session = sessions.create()
-    session.note_read("a.py", 61, 110, 117, workspace=".")
-    original = loop.verify_acceptance
-
-    async def _tracked(session, books):
-        order.append("acceptance")
-        await original(session, books)
-
-    loop.verify_acceptance = _tracked  # type: ignore[method-assign]
-    loop._reject_unsupported_claims = _tracking_reject(loop, order)  # type: ignore[method-assign]
-
-    await loop.process_input(session, "找缺陷")
-
-    # Both iterations run the pair; in each one the proofs go first.  (The second
-    # iteration's check returns False -- the correction chance is spent.)
-    assert order[:2] == ["acceptance", "claims"]
-    assert all(
-        order[i] == "acceptance" and order[i + 1] == "claims"
-        for i in range(0, len(order) - 1, 2)
-    )
-
-
-def _tracking_reject(loop, order):
-    original = loop._reject_unsupported_claims
-
-    def _wrapped(session, text, index):
-        order.append("claims")
-        return original(session, text, index)
-
-    return _wrapped
-
-
 # ---------------------------------------- R21 §6: position != content
 
 
