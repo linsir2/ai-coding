@@ -171,3 +171,49 @@ def test_an_injected_session_store_is_used_as_is(tmp_path):
     # Sidecars are siblings of the session root, never in it (a ``*.json``
     # there would be read as a phantom session).
     assert runner._meta_root == tmp_path / "custom" / "meta"
+
+
+@pytest.mark.asyncio
+async def test_resume_reuses_the_tool_registry_so_the_file_tracker_survives(tmp_path):
+    """C-5b real-run finding: a rebuilt registry forgets what was written."""
+    from ai_coding.domain.message import ToolResult
+    from ai_coding.tools.base import BaseTool
+
+    class _Marker(BaseTool):
+        parallel_safe = True
+        mutates_world = False
+
+        @property
+        def name(self) -> str:
+            return "marker"
+
+        @property
+        def description(self) -> str:
+            return "marker"
+
+        @property
+        def params_json_schema(self) -> dict:
+            return {"type": "object", "properties": {}}
+
+        async def execute(self, params, ctx=None):  # noqa: ANN001
+            return ToolResult(success=True, output="ok")
+
+    registry = ToolRegistry()
+    marker = _Marker()
+    registry.register(marker)
+    runner = _runner(tmp_path, build_tools=lambda _workdir: registry)
+    run_id = runner.spawn_background("x", name="probe", emit=lambda _e: None)
+    await _settle(runner, run_id)
+    handle = runner._handles[run_id]
+    first = handle.loop.tools.get("marker")
+
+    # Simulate the interrupt path: the loop is gone, the handle is not.
+    loop = handle.loop
+    handle.loop = None
+    await loop.aclose()
+
+    await runner.resume(run_id)
+
+    assert handle.loop is not None
+    assert handle.loop.tools.get("marker") is first
+    assert handle.registry is registry

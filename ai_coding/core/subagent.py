@@ -149,6 +149,10 @@ class AgentHandle:
     worktree_path: str | None = None
     worktree_branch: str | None = None
     worktree_manager: Any = None
+    #: C-5b: the child's tool registry.  Reused across a resume so the
+    #: ``FileStateTracker`` inside ``write``/``edit`` keeps what the model has
+    #: already read this session (a rebuilt registry answers "never read").
+    registry: Any = None
     #: Set when ``loop`` is attached; ``send_message`` waits for it.
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     status: str = "running"  # running | idle | interrupted | closed
@@ -716,6 +720,7 @@ class SubAgentRunner:
                 await self._attach_loop(
                     handle, handle.worktree_path or handle.workdir
                 )
+            self._clear_runtime_markers(handle.session)
             handle.status = "idle"
             if not handle.ephemeral:
                 self._session_store.save(handle.session)
@@ -731,15 +736,9 @@ class SubAgentRunner:
         session = self._session_store.load(str(meta.get("sessionId") or ""))
         if session is None:
             return "not_found", target
-        session.pending_approval = None
-        session.pending_posture = None
-        session.write_ahead = None
-        session.open_turn = None
-        session.pending_reminders = None
-        session.inbox = []
-        session.recovered_interrupted = False
+        self._clear_runtime_markers(session)
         rules, _errors = rules_from_dicts(list(meta.get("permissions") or []))
-        workdir = meta.get("workdir")
+        workdir = meta.get("workdir") or meta.get("workspace")
         if workdir and not Path(str(workdir)).exists():
             # A closed child's temporary/persistent worktree may have been
             # removed; resuming in a vanished directory would fail every tool.
@@ -1349,13 +1348,18 @@ class SubAgentRunner:
             self._write_meta(handle)
         return handle
 
-    def _build_loop_for(self, handle: AgentHandle, workdir: str | None) -> AgentLoop:
+    def _build_loop_for(
+        self, handle: AgentHandle, workdir: str | None, registry: Any | None = None
+    ) -> AgentLoop:
         """The child loop, built from the handle's own facts (C-5b).
 
         Extracted so a resumed turn or a worktree re-attach can rebuild the
-        engine without duplicating the construction rules.
+        engine without duplicating the construction rules.  ``registry`` is
+        supplied when the tools must survive a resume (the file-read tracker
+        inside ``write``/``edit`` lives there).
         """
-        registry = self._build_tools(workdir)
+        registry = registry if registry is not None else self._build_tools(workdir)
+        handle.registry = registry
         engine = self._engine_factory()
         prompt = (
             PromptAssembler(self._base_instructions)
@@ -1397,12 +1401,14 @@ class SubAgentRunner:
 
     async def _attach_loop(self, handle: AgentHandle, workdir: str | None) -> None:
         """(Re)build the child loop for ``workdir`` and mark the handle ready."""
+        same_workdir = handle.workdir == workdir
+        registry = handle.registry if same_workdir else None
         if handle.loop is not None:
             try:
                 await handle.loop.aclose()
             except Exception:  # noqa: BLE001 — a rebuild must not fail on close
                 _log.debug("child loop close failed", exc_info=True)
-        handle.loop = self._build_loop_for(handle, workdir)
+        handle.loop = self._build_loop_for(handle, workdir, registry)
         handle.workdir = workdir
         handle.ready.set()
         if not handle.ephemeral:
@@ -1467,6 +1473,17 @@ class SubAgentRunner:
             self._write_meta(handle)
         return result
 
+    @staticmethod
+    def _clear_runtime_markers(session: SessionData) -> None:
+        """Drop markers that belong to a dead turn, never to a resumed one."""
+        session.pending_approval = None
+        session.pending_posture = None
+        session.write_ahead = None
+        session.open_turn = None
+        session.pending_reminders = None
+        session.inbox = []
+        session.recovered_interrupted = False
+
     def _write_meta(self, handle: AgentHandle) -> None:
         """Write the handle's sidecar (section 7), best-effort and atomic."""
         if not handle.run_id:
@@ -1479,6 +1496,9 @@ class SubAgentRunner:
             "sessionId": handle.session.session_id,
             "parentSessionId": handle.origin_session,
             "workdir": handle.workdir,
+            # The workspace a cross-process resume falls back to when the
+            # worktree directory is gone.
+            "workspace": handle.workdir or self._workspace,
             "readonly": handle.readonly,
             "agent": handle.agent,
             "contextMode": handle.context_mode,

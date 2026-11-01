@@ -342,3 +342,10 @@ CloseAgentTool.execute
   真机计划模式 → `<proposed_plan>` → `plan_implement` 询问 → `"Implement the plan."`
   → 真实 read/write 修改 `calc.py`，8/10 检查通过。`update_plan` 未被调用（模型自有
   选择，Codex 同样不强制），因此 `task_items` 为空；这是可接受的模型行为，不是执行器失败。
+- 第二轮真机（子智能体编排，`/tmp/realrun_agents.py`）：spawn → send → interrupt →
+  resume → 续跑 → close → 磁盘 resume，**15/15** 通过；turn1 prompt 8.0k、turn2
+  累计 44.8k（最后一步 context 4.4k），send 投放 1.4s、interrupt 4ms、resume 54ms。
+  发现并修复：interrupt 后重建工具栈丢 `FileStateTracker`，导致 resume 后 append
+  误判 `must_read_first`——`AgentHandle.registry` 现在跨 resume 复用；内存 resume
+  统一清理运行时标记；sidecar 增加 workspace 兜底。详见
+  `docs/realrun-c5b-observations.md`。
