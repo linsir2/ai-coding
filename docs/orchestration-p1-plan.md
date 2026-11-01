@@ -168,6 +168,26 @@ plan 批准 → commit(agent=build, readonly=False) → build 主闭环（既有
   `readonly=false` → `readonly_denied`；plan 里 spawn → 既有 `denied`；三模式主链路
   不回归。
 
+#### P1c 实施记录（完成）
+
+单测矩阵落在既有用例里，不新增重复矩阵：`test_mode_gate.py` 已覆盖
+`{build, readonly, plan} × {spawn 可写, spawn 只读}`（含点名绕过表面、字符串
+`"readonly"`、缺省、rewrite 翻转）、`SubAgentTool` 与 `SpawnAgentTool` 两套；
+`/plan`、`/readonly` 的开关语义在 `test_plan_command.py` / `test_posture_result.py`。
+
+真机（qwen3.7-flash，DashScope 兼容模式）：
+
+| 场景 | 结果 |
+|---|---|
+| build 短任务（写一个文件） | COMPLETED，`write` 一次，文件存在 |
+| readonly 主链路 | COMPLETED，未写文件；表面出现 `spawn_agent` |
+| readonly 起只读子代理 | 成功，run `413f38aca292`；meta `readonly=true`、`workdir=null`（不隔离）；wait 3.3s completed |
+| readonly 起可写子代理 | `readonly_denied`（`decision=deny, reason=read-only session`）；模型重试 3 次仍被拒 |
+| plan 里起子代理 | 表面无 `spawn_agent`；`tool_search "spawn_agent"` 返回“no deferred tool matched”，只列出 `memory_search/parallel_research/subagent_list`；计划块产出 |
+| build 子代理改代码 | `spawn_agent(readonly=false)` 成功，子代理创建 `sub_written.py`，父会话读回 `print('sub-ok')` |
+| build 长任务（模块+测试+跑 pytest） | COMPLETED，4 步，`calc.py`/`test_calc.py` 存在，pytest 通过 |
+| plan 步数上限=12 | 8 步、无 `[budget]`、COMPLETED、`<proposed_plan>` 存在（预算修复未回归） |
+
 ## 4. 影响面清单
 
 | 文件 | 改动 |
