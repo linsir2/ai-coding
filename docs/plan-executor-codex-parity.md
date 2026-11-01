@@ -730,8 +730,15 @@ for index in ...:
 | 并发 | `AIConfig.max_concurrent_subagents=4`、builder/runner 默认 4 | 完成 |
 | 兼容 | 旧的 `subAgent`/`parallel_research`/`subagent_list` 仍注册但保持 deferred；默认表面只有 4 个 Codex 名字 | 完成 |
 
-验证：`tests/test_agents_tools.py` 17 例；全量 `pytest` 退出码 0；`ruff`/`mypy` 通过。
+验证：`tests/test_agents_tools.py` 19 例；全量 `pytest` 退出码 0；`ruff`/`mypy` 通过。
 C-5b 的 `send_message`/`interrupt_agent`/`resume_agent` 仍未注册（能力缺口，不造幽灵工具）。
+
+**C-5a 二轮评审修复**（`fix(agents)` 提交）：`fork_turns="none"` 保留父权限规则；
+`wait` 改用 `asyncio.wait`（子任务取消/异常不再砸父回合）；池满判定看 running 行且使用
+`SubAgentPoolFull` 区分"池满/启动失败"；`create_task` 失败时落 `error` 并关闭协程；
+`_finish`/`_reap` 先回灌模型再判 emit，崩溃不再伪装成 cancelled；工具面按
+`permission_name` 判断（`subagent deny` 能隐藏 `spawn_agent`/`close_agent`）；
+`wait_agent`/`list_agents` 进入自动放行表；旧 `subAgent` 标记 deferred。
 
 ## 15. 本轮交付
 

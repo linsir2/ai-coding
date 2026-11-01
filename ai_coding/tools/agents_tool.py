@@ -18,7 +18,7 @@ from typing import Any
 
 from ai_coding.core.observers import EmitObserver
 from ai_coding.domain.message import ToolResult
-from ai_coding.domain.subagent import ParentContext
+from ai_coding.domain.subagent import ParentContext, SubAgentPoolFull
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 __all__ = [
@@ -38,10 +38,11 @@ _DEFAULT_WAIT_MS = 30_000
 class SpawnAgentTool(BaseTool):
     """Start a background sub-agent and hand back its run id immediately."""
 
-    #: Spawning writes the background table, so it is not sibling-safe.
+    #: Spawning writes the background table and can start a writable child;
+    #: the readonly/plan gate must refuse it (the old ``SubAgentTool`` kept the
+    #: fail-closed ``mutates_world=True`` for the same reason).
     parallel_safe = False
-    #: The child does not touch the parent workspace directly.
-    mutates_world = False
+    mutates_world = True
 
     def __init__(
         self,
@@ -56,6 +57,11 @@ class SpawnAgentTool(BaseTool):
     @property
     def name(self) -> str:
         return "spawn_agent"
+
+    def permission_name(self, params: dict[str, Any] | None = None) -> str:
+        # The operator's "subagent" deny must cover starting a child, exactly
+        # as it covered ``subAgent``.  A new name is not a new permission.
+        return "subAgent"
 
     @property
     def description(self) -> str:
@@ -113,7 +119,13 @@ class SpawnAgentTool(BaseTool):
         name = str(params.get("name", "") or "").strip() or "sub-agent"
         fork = str(params.get("fork_turns", "") or "none").strip().lower()
         if fork not in ("none", "all"):
-            fork = "none"
+            # Codex rejects an unknown fork mode rather than silently choosing
+            # one: the two modes differ in what the child can see and be held to.
+            return ToolResult(
+                success=False,
+                output="error: 'fork_turns' must be one of none, all",
+                error="invalid_fork_turns",
+            )
 
         context = resolve_ctx(ctx)
         parent: ParentContext | None = None
@@ -126,6 +138,15 @@ class SpawnAgentTool(BaseTool):
                 permissions=tuple(context.permissions),
             )
             context_mode = "full"
+        elif context.permissions:
+            # C-5a review: the rule layer must travel even when the history
+            # does not.  ``fork_turns="none"`` means "no parent messages", not
+            # "ignore the operator's deny rules" -- dropping them would let a
+            # clean-context child write what the parent was denied.
+            parent = ParentContext(
+                messages=(),
+                permissions=tuple(context.permissions),
+            )
 
         try:
             run_id = self._runner.spawn_background(
@@ -140,11 +161,19 @@ class SpawnAgentTool(BaseTool):
                 origin_session=context.session_id,
                 context_mode=context_mode,
             )
-        except RuntimeError as exc:
+        except SubAgentPoolFull as exc:
             return ToolResult(
                 success=False,
                 output=f"agent not started: {exc}",
                 error="agents_exhausted",
+            )
+        except RuntimeError as exc:
+            # C-5a review: a failed start is not a saturated pool; the two need
+            # different retry guidance (and the exception type says which).
+            return ToolResult(
+                success=False,
+                output=f"agent not started: {exc}",
+                error="agent_start_failed",
             )
         return ToolResult(
             success=True,
@@ -211,9 +240,10 @@ class WaitAgentTool(BaseTool):
                 error="missing_agent_id",
             )
         timeout_ms = _clamp_timeout(params.get("timeout_ms"))
-        status, elapsed_ms = await self._runner.wait(agent_id, timeout_ms)
-        output = f"agent {agent_id}: {status} ({elapsed_ms} ms)"
-        data = {"agent_id": agent_id, "status": status, "elapsed_ms": elapsed_ms}
+        resolved = _resolve_agent_id(self._runner, agent_id)
+        status, elapsed_ms = await self._runner.wait(resolved, timeout_ms)
+        output = f"agent {resolved}: {status} ({elapsed_ms} ms)"
+        data = {"agent_id": resolved, "status": status, "elapsed_ms": elapsed_ms}
         if status == "unknown":
             return ToolResult(
                 success=False, output=output, error="unknown_agent", data=data
@@ -224,8 +254,8 @@ class WaitAgentTool(BaseTool):
 class ListAgentsTool(BaseTool):
     """The background table: what is running and what has settled."""
 
-    #: Spawn/close write the table; C-5a keeps the whole face non-sibling-safe.
-    parallel_safe = False
+    #: Reading the table has no side effects; sibling calls may all read it.
+    parallel_safe = True
     mutates_world = False
 
     def __init__(self, runner: Any) -> None:
@@ -276,8 +306,9 @@ class ListAgentsTool(BaseTool):
 class CloseAgentTool(BaseTool):
     """Cancel one background run."""
 
+    #: Cancelling a run changes the world (its work stops here).
     parallel_safe = False
-    mutates_world = False
+    mutates_world = True
 
     def __init__(self, runner: Any) -> None:
         self._runner = runner
@@ -285,6 +316,10 @@ class CloseAgentTool(BaseTool):
     @property
     def name(self) -> str:
         return "close_agent"
+
+    def permission_name(self, params: dict[str, Any] | None = None) -> str:
+        # Same permission as starting one: stopping a child is a subagent act.
+        return "subAgent"
 
     @property
     def description(self) -> str:
@@ -319,12 +354,31 @@ class CloseAgentTool(BaseTool):
                 output="error: 'agent_id' is required",
                 error="missing_agent_id",
             )
-        closed = bool(self._runner.cancel(agent_id))
+        resolved = _resolve_agent_id(self._runner, agent_id)
+        rows = {
+            row.run_id: row for row in getattr(self._runner, "task_list", lambda: [])()
+        }
+        if resolved not in rows:
+            return ToolResult(
+                success=False,
+                output=f"unknown agent: {agent_id}",
+                error="unknown_agent",
+                data={"agent_id": resolved, "closed": False},
+            )
+        closed = bool(self._runner.cancel(resolved))
         return ToolResult(
             success=True,
-            output=f"closed {agent_id}" if closed else f"not running: {agent_id}",
-            data={"agent_id": agent_id, "closed": closed},
+            output=f"closed {resolved}" if closed else f"not running: {resolved}",
+            data={"agent_id": resolved, "closed": closed},
         )
+
+
+def _resolve_agent_id(runner: Any, agent_id: str) -> str:
+    """A full run id for a short prefix, when the runner can resolve one."""
+    resolve = getattr(runner, "resolve_run_id", None)
+    if callable(resolve):
+        return resolve(agent_id) or agent_id
+    return agent_id
 
 
 def _clamp_timeout(raw: Any) -> int:

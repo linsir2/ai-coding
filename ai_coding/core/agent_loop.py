@@ -3469,7 +3469,11 @@ class AgentLoop:
                 or (
                     plan
                     and self.gate.partially_allowed(
-                        tool.name,
+                        # C-5a: the gate judges ``permission_name``, so the
+                        # surface must ask the same name -- otherwise a rule
+                        # either hides a tool the gate would allow, or advertises
+                        # one every call would refuse.
+                        tool.permission_name(),
                         session_rules=session_rules,
                         agent_rules=agent_rules,
                         posture="plan",
@@ -3481,7 +3485,7 @@ class AgentLoop:
             tool
             for tool in tools
             if not self.gate.hides(
-                tool.name,
+                tool.permission_name(),
                 session_rules=session_rules,
                 agent_rules=agent_rules,
                 posture=posture,

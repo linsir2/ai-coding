@@ -8,6 +8,7 @@ allows exactly one tool message per call).
 """
 
 import asyncio
+import time
 
 import pytest
 
@@ -67,13 +68,38 @@ async def test_spawn_returns_at_once_while_child_runs_on():
 @pytest.mark.asyncio
 async def test_saturated_pool_rejects_instead_of_queueing_silently():
     runner = _runner(_Engine(), max_concurrent=1)
-    await runner._semaphore.acquire()
-    try:
-        with pytest.raises(RuntimeError, match="concurrency exhausted"):
-            runner.spawn_background("x", emit=lambda e: None)
-    finally:
-        runner._semaphore.release()
-    assert runner.task_list() == []
+    # C-5a review: the pool's real bound is the running rows, not whether some
+    # task happens to hold the semaphore; occupy one slot the same way a live
+    # run does.
+    runner._background["live"] = BackgroundTask(
+        run_id="live", status="running", started=time.monotonic()
+    )
+    with pytest.raises(RuntimeError, match="concurrency exhausted"):
+        runner.spawn_background("x", emit=lambda e: None)
+    # The rejected spawn must not leave a row behind; the live one stays.
+    assert [row.run_id for row in runner.task_list()] == ["live"]
+
+
+@pytest.mark.asyncio
+async def test_spawn_that_cannot_create_a_task_settles_the_row(monkeypatch):
+    """C-5a review: a row written before ``create_task`` must not stay running."""
+    runner = _runner(_Engine())
+
+    class _BadLoop:
+        def create_task(self, *_args, **_kwargs):
+            raise RuntimeError("loop closed")
+
+    monkeypatch.setattr(
+        "ai_coding.core.subagent.asyncio.get_running_loop", lambda: _BadLoop()
+    )
+
+    with pytest.raises(RuntimeError, match="failed to start"):
+        runner.spawn_background("x", emit=lambda e: None)
+
+    rows = runner.task_list()
+    assert len(rows) == 1
+    assert rows[0].status == "error"
+    assert "loop closed" in (rows[0].error or "")
 
 
 @pytest.mark.asyncio

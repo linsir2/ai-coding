@@ -42,6 +42,7 @@ from ai_coding.domain.session import SessionData
 from ai_coding.domain.subagent import (
     BackgroundTask,
     ParentContext,
+    SubAgentPoolFull,
     SubagentResult,
     extract_json_facts,
 )
@@ -81,6 +82,9 @@ _SUMMARY_TAIL = 200
 #: without bound.  Running rows are never pruned; the oldest terminal rows go
 #: first.  Restarts lose the whole table anyway (documented, Hermes rule).
 _MAX_BACKGROUND_ROWS = 200
+
+#: C-5a: the hard ceiling ``wait`` applies (the tool clamps to the same value).
+_MAX_WAIT_SECONDS = 600.0
 
 
 class _NullSessions:
@@ -343,8 +347,14 @@ class SubAgentRunner:
         called from async context: the supervised task is created on the
         running loop.
         """
-        if self._semaphore.locked():
-            raise RuntimeError(
+        # C-5a review: ``semaphore.locked()`` only says "some task holds a
+        # slot", not "the pool is full", and rows may outlive their slot.
+        # Count what is actually running; the semaphore stays the hard bound.
+        running = sum(
+            1 for row in self._background.values() if row.status == "running"
+        )
+        if running >= self._max_concurrent():
+            raise SubAgentPoolFull(
                 "sub-agent concurrency exhausted: "
                 f"{self._max_concurrent()} background slots busy; "
                 "retry later or raise ai.max_concurrent_subagents"
@@ -356,16 +366,31 @@ class SubAgentRunner:
             started=time.monotonic(),
         )
         self._prune_background()
-        background_task = asyncio.get_running_loop().create_task(
-            self._supervised(
-                run_id, task=task, name=name, worktree_manager=worktree_manager,
-                isolate=isolate, parent=parent, parent_span=parent_span,
-                observer=active, emit=emit, origin_session=origin_session,
-                output_schema=output_schema, agent=agent,
-                context_mode=context_mode,
-            ),
-            name=f"subagent:{run_id}",
+        supervised = self._supervised(
+            run_id, task=task, name=name, worktree_manager=worktree_manager,
+            isolate=isolate, parent=parent, parent_span=parent_span,
+            observer=active, emit=emit, origin_session=origin_session,
+            output_schema=output_schema, agent=agent,
+            context_mode=context_mode,
         )
+        try:
+            background_task = asyncio.get_running_loop().create_task(
+                supervised, name=f"subagent:{run_id}"
+            )
+        except Exception as exc:  # noqa: BLE001 — a row must not stay "running"
+            # C-5a review: the row used to be written before the task existed.
+            # If the task could not be created, the row stayed ``running``
+            # forever -- un-cancellable, and ``wait`` never returned.  The
+            # coroutine must be closed explicitly or Python reports it as never
+            # awaited.
+            supervised.close()
+            self._background[run_id] = replace(
+                self._background[run_id],
+                status="error",
+                ended=time.monotonic(),
+                error=f"failed to start: {exc}",
+            )
+            raise RuntimeError(f"sub-agent failed to start: {exc}") from exc
         self._tasks[run_id] = background_task
         # A task cancelled before its first step never runs its body — the
         # supervised path below would never settle it.  The reaper closes
@@ -398,16 +423,25 @@ class SubAgentRunner:
         started = row.started
         background_task = self._tasks.get(run_id)
         if background_task is not None and not background_task.done():
+            # C-5a review: ``wait_for(shield(task))`` still re-raises the child's
+            # CancelledError in the waiter, which aborts the *parent* turn.
+            # ``asyncio.wait`` observes completion without forwarding the child's
+            # exception, and a timeout is only an observation -- the child keeps
+            # running either way.
+            timeout = max(0.0, min(_MAX_WAIT_SECONDS, int(timeout_ms) / 1000))
             try:
-                # Shield: ``wait_for`` cancels what it waits on when the clock
-                # runs out, and a timed-out observation must not end the child.
-                await asyncio.wait_for(
-                    asyncio.shield(background_task),
-                    timeout=max(0, int(timeout_ms)) / 1000,
-                )
-            except asyncio.TimeoutError:
-                pass
+                await asyncio.wait({background_task}, timeout=timeout)
+            except asyncio.CancelledError:
+                raise
         current = self._background.get(run_id) or row
+        if current.status == "running" and background_task is not None:
+            if background_task.done():
+                # The settlement callback may not have run yet; do not report a
+                # finished task as still running.
+                if background_task.cancelled():
+                    current = replace(current, status="cancelled")
+                elif background_task.exception() is not None:
+                    current = replace(current, status="error")
         elapsed_ms = int(((current.ended or time.monotonic()) - started) * 1000)
         return current.status, max(0, elapsed_ms)
 
@@ -501,8 +535,6 @@ class SubAgentRunner:
             # gone (the ledger file itself was written by ``_with_ledger``).
             ledger_path=result.ledger_path,
         )
-        if emit is None:
-            return
         summary = (result.conclusion or result.error or "").strip().replace("\n", " ")
         # r25/v2/F5: a background schema call used to lose its verdict here --
         # the model saw prose and a ledger pointer only.  One short marker is
@@ -512,10 +544,16 @@ class SubAgentRunner:
         # Append after the cut: a long conclusion must not eat the verdict.
         if result.schema_valid is False:
             summary = f"{summary}（结构校验未过）".strip()
+        # C-5a review: the model lane is not an observation.  Announcing it was
+        # gated behind ``emit is None``, so a runner without an operator stream
+        # (the bare CLI, a test double) silently dropped the settlement the
+        # parent turn was waiting for.  Announce first; the event stays optional.
         self._announce_to_model(
             run_id, row.name, result.status, summary, result.ledger_path,
             result.worktree_branch,
         )
+        if emit is None:
+            return
         try:
             emit(BackgroundTaskDone(
                 run_id=run_id, name=row.name, status=result.status,
@@ -566,22 +604,27 @@ class SubAgentRunner:
         announce = self._announce.pop(run_id, None)
         if row is None or row.status != "running":
             return
+        # C-5a review: every non-Exception death used to be reported as
+        # "cancelled before start", masking a real crash.  Read the task's own
+        # outcome: cancelled is cancelled; a swallowed exception is an error.
+        status, error = "cancelled", "cancelled before start"
+        if _task is not None and not _task.cancelled():
+            failure = _task.exception()
+            if failure is not None:
+                status, error = "error", f"crashed before settlement: {failure}"
         self._background[run_id] = replace(
-            row, status="cancelled", ended=time.monotonic(),
-            error="cancelled before start",
+            row, status=status, ended=time.monotonic(), error=error,
         )
         if announce is None:
             return
         emit, origin_session, name = announce
+        self._announce_to_model(run_id, name, status, error, None)
         if emit is None:
             return
-        self._announce_to_model(
-            run_id, name, "cancelled", "cancelled before start", None
-        )
         try:
             emit(BackgroundTaskDone(
-                run_id=run_id, name=name, status="cancelled",
-                summary="cancelled before start", truncated=True,
+                run_id=run_id, name=name, status=status,
+                summary=error, truncated=True,
                 origin_session=origin_session,
             ))
         except Exception:  # noqa: BLE001 — observation must not break settlement

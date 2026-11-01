@@ -12,7 +12,7 @@ import pytest
 
 from ai_coding.core.subagent import SubAgentRunner
 from ai_coding.domain.message import ChatMessage
-from ai_coding.domain.subagent import BackgroundTask
+from ai_coding.domain.subagent import BackgroundTask, SubAgentPoolFull
 from ai_coding.security.permissions import Effect, Rule
 from ai_coding.tools.agents_tool import (
     CloseAgentTool,
@@ -48,6 +48,10 @@ class _FakeRunner:
     def task_list(self):
         return list(self.rows)
 
+    def resolve_run_id(self, prefix: str) -> str | None:
+        matches = [row.run_id for row in self.rows if row.run_id.startswith(prefix)]
+        return matches[0] if len(matches) == 1 else None
+
     def cancel(self, run_id):
         self.cancels.append(run_id)
         return self.cancel_result
@@ -81,11 +85,11 @@ def test_four_tools_are_named_and_shaped():
         "close_agent",
     ]
     for tool in tools:
-        # C-5a: the child never edits the parent workspace directly, and the
-        # spawn/close pair writes the background table.
-        assert tool.mutates_world is False
-        assert tool.parallel_safe is False
         assert tool.defer is False
+    # C-5a review: spawn/close can change the world (writable child / stopped
+    # work), the two observers cannot; list reads the table concurrently.
+    assert [tool.mutates_world for tool in tools] == [True, False, False, True]
+    assert [tool.parallel_safe for tool in tools] == [False, False, True, False]
 
     spawn = tools[0].params_json_schema
     assert set(spawn["properties"]) == {"task", "name", "fork_turns"}
@@ -119,7 +123,12 @@ async def test_spawn_defaults_to_a_task_only_child():
     call = runner.spawns[0]
     assert call["task"] == "count files"
     assert call["name"] == "sub-agent"
-    assert call["parent"] is None
+    # C-5a review: "none" drops the parent *messages*, never the rule layer --
+    # a clean-context child must still inherit the operator's deny rules.
+    parent = call["parent"]
+    assert parent is not None
+    assert parent.messages == ()
+    assert parent.permissions == tuple(_ctx().permissions)
     assert call["context_mode"] == "task_only"
     assert call["worktree_manager"] == "wt/1"
     assert call["isolate"] is False
@@ -158,7 +167,9 @@ async def test_spawn_rejects_an_empty_task():
 @pytest.mark.asyncio
 async def test_spawn_reports_an_exhausted_pool_as_agents_exhausted():
     runner = _FakeRunner()
-    runner.spawn_error = RuntimeError("sub-agent concurrency exhausted: 4 busy")
+    runner.spawn_error = SubAgentPoolFull(
+        "sub-agent concurrency exhausted: 4 busy"
+    )
 
     result = await SpawnAgentTool(runner).execute({"task": "t"}, _ctx())
 
@@ -237,6 +248,12 @@ async def test_list_agents_renders_two_rows():
 async def test_close_agent_reports_whether_the_run_was_live():
     runner = _FakeRunner()
     tool = CloseAgentTool(runner)
+    now = time.monotonic()
+    runner.rows = [
+        BackgroundTask(run_id="run_a", status="running", started=now),
+        BackgroundTask(run_id="run_b", status="completed", started=now - 9,
+                       ended=now),
+    ]
 
     runner.cancel_result = True
     live = await tool.execute({"agent_id": "run_a"}, _ctx())
@@ -251,6 +268,75 @@ async def test_close_agent_reports_whether_the_run_was_live():
     assert settled.data == {"agent_id": "run_b", "closed": False}
 
     assert runner.cancels == ["run_a", "run_b"]
+
+
+@pytest.mark.asyncio
+async def test_close_agent_rejects_an_unknown_id():
+    result = await CloseAgentTool(_FakeRunner()).execute(
+        {"agent_id": "nope"}, _ctx()
+    )
+
+    assert result.success is False
+    assert result.error == "unknown_agent"
+
+
+@pytest.mark.asyncio
+async def test_spawn_rejects_an_unknown_fork_mode():
+    result = await SpawnAgentTool(_FakeRunner()).execute(
+        {"task": "t", "fork_turns": "some"}, _ctx()
+    )
+
+    assert result.success is False
+    assert result.error == "invalid_fork_turns"
+
+
+@pytest.mark.asyncio
+async def test_spawn_reports_a_failed_start_separately_from_exhaustion():
+    runner = _FakeRunner()
+    runner.spawn_error = RuntimeError("sub-agent failed to start: loop closed")
+
+    result = await SpawnAgentTool(runner).execute({"task": "t"}, _ctx())
+
+    assert result.success is False
+    assert result.error == "agent_start_failed"
+
+
+@pytest.mark.asyncio
+async def test_wait_and_close_accept_a_unique_prefix():
+    runner = _FakeRunner()
+    runner.rows = [
+        BackgroundTask(run_id="run_ab12cd34", status="running", started=0.0)
+    ]
+    runner.wait_result = ("completed", 900)
+
+    waited = await WaitAgentTool(runner).execute(
+        {"agent_id": "run_ab", "timeout_ms": 1000}, _ctx()
+    )
+    assert waited.data is not None
+    assert waited.data["agent_id"] == "run_ab12cd34"
+
+    closed = await CloseAgentTool(runner).execute({"agent_id": "run_ab"}, _ctx())
+    assert closed.success is True
+    assert runner.cancels == ["run_ab12cd34"]
+
+
+@pytest.mark.asyncio
+async def test_wait_agent_does_not_propagate_a_crashed_child():
+    runner = _runner()
+    runner._background["run_bad"] = BackgroundTask(
+        run_id="run_bad", status="running", started=time.monotonic()
+    )
+
+    async def boom():
+        raise ValueError("child exploded")
+
+    child = asyncio.create_task(boom())
+    runner._tasks["run_bad"] = child
+
+    status, _ = await runner.wait("run_bad", 5000)
+
+    assert status == "error"
+    await asyncio.gather(child, return_exceptions=True)
 
 
 def _runner() -> SubAgentRunner:

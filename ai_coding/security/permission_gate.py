@@ -344,6 +344,12 @@ class PermissionGate:
             "parallel_research",
             "skill",
             "subagent",
+            # C-5a: the two observers change nothing outside the process; a
+            # WARN tier would put an approval panel in front of reading the
+            # table the same turn already wrote.  The spawn/close pair judges
+            # as ``subagent`` through its ``permission_name``.
+            "wait_agent",
+            "list_agents",
             "memory_search",  # read-only recall (R3b)
             # C-1: reading this conversation's own transcript. It touches nothing
             # outside the process, and it is most needed in plan mode, where a

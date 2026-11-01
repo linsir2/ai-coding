@@ -167,6 +167,10 @@ def test_the_plan_agent_denies_the_world_changing_tools():
     assert "edit" in denied      # → write + edit
     assert "shell" in denied     # → bash
     assert "subagent" in denied  # → subAgent
+    # C-5a: the Codex-named pair is denied with the same posture as the old
+    # subagent tools (both can start/stop a writable child).
+    assert "spawn_agent" in denied
+    assert "close_agent" in denied
     assert "webfetch" in denied
     assert "websearch" in denied
 

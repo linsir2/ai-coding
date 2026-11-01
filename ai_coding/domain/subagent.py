@@ -413,6 +413,14 @@ __all__ = [
 BACKGROUND_FINAL = frozenset({"completed", "timeout", "error", "cancelled", "rejected"})
 
 
+class SubAgentPoolFull(RuntimeError):
+    """The background pool has no free slot (C-5a).
+
+    A distinct type so the tool layer can tell "come back later" from "the
+    child could not be started at all" without matching on message text.
+    """
+
+
 @dataclass(frozen=True)
 class BackgroundTask:
     """One delegated run tracked across turns (R1-2).

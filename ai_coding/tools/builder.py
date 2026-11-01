@@ -490,6 +490,7 @@ DEFERRED_TOOL_NAMES = frozenset(
     {
         "memory_search",
         "memory_write",
+        "subAgent",
         "parallel_research",
         "subagent_list",
         "job_list",

@@ -71,6 +71,11 @@ _PLAN_SOFT_DENY = (
     "edit",
     "shell",
     "subagent",
+    # C-5a: the Codex-named pair can start or stop a *writable* child, so the
+    # plan posture hides them exactly as the read-only overlay does.  The two
+    # observers (``wait_agent``/``list_agents``) stay, like the fan-out.
+    "spawn_agent",
+    "close_agent",
     "webfetch",
     "websearch",
     # M3 T8: the planning list is present_plan's, not todo_write's.  Cutting
