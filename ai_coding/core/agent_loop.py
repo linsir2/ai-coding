@@ -93,9 +93,6 @@ from ai_coding.core.turn_close import (
 )
 from ai_coding.core.turn_hooks import TurnHooks
 from ai_coding.core.turn_policy import (
-    PLAN_APPROVAL_WITHDRAWN_NOTE,
-    PLAN_DISMISSED_NOTE,
-    PLAN_HELD_NOTE,
     PLAN_IDLE_LIMIT,
     PLAN_RESEARCH_NOTE,
     PLAN_STALL_ROUNDS,
@@ -288,19 +285,6 @@ def resolve_model_key(models: Mapping[str, ModelConfig] | None, active: Any) -> 
             if str(getattr(cfg, "name", "") or "") == active_name:
                 return key
     return ""
-
-
-def _on_plan_approved(session: SessionData, books: TurnBooks) -> None:
-    """What a plan approval changes, in one place.
-
-    Two things, both about the same moment: the session's ladder windows
-    restart (R10 -- a new episode must not ride the old one's numbers), and
-    the books learn that this turn approved a plan (W2 -- the approval
-    belongs to this turn, so a turn that does not end cleanly takes it back
-    at its close).
-    """
-    session.intervention_state = None
-    books.note_plan_approved()
 
 
 @dataclass(frozen=True)
@@ -1080,9 +1064,6 @@ class AgentLoop:
                     plan_implementing=bool(
                         getattr(session, "plan_implementing", False)
                     ),
-                    plan_review_available=bool(
-                        "present_plan" in self.tools.list_names()
-                    ),
                     intervention_ledger=self._settled_interventions(
                         session, task, snapshot
                     ),
@@ -1189,13 +1170,6 @@ class AgentLoop:
                                         else block
                                     ),
                                 )
-                    elif decision.reason == "plan unsubmitted":
-                        # A4: the plan guard's remedy on a budget mouth has to
-                        # be counted here too, exactly like on the post-step
-                        # path.  A budget mouth stays true (the budget is
-                        # still spent), so an uncounted nudge would be offered
-                        # every round — an infinite spin instead of a turn.
-                        books.note_plan_nudge()
                     session.add_message(
                         user_message(decision.inject or "", now_utc(), synthetic=True)
                     )
@@ -1405,9 +1379,6 @@ class AgentLoop:
                         plan_implementing=bool(
                             getattr(session, "plan_implementing", False)
                         ),
-                        plan_review_available=bool(
-                            "present_plan" in self.tools.list_names()
-                        ),
                         intervention_ledger=self._settled_interventions(
                             session, task, snapshot
                         ),
@@ -1420,18 +1391,13 @@ class AgentLoop:
                             text=step.text,
                             iterations=books.total_iterations,
                             reason=decision.reason,
-                            # stage 4 r2: the plan guard's terminal line (A4:
-                            # the decision carries it, so every way a turn can
-                            # end shows the same note).
+                            # I1/R-7: a ladder FINISH's terminal line rides the
+                            # decision, so every way a turn can end shows it.
                             note=decision.note,
                         )
                         break
                     if decision.intervention == "acceptance":
                         books.note_acceptance_nudge()
-                    elif decision.reason == "plan unsubmitted":
-                        # stage 4 r2: the guard's one remedy, counted so the
-                        # snapshot stops offering it next time.
-                        books.note_plan_nudge()
                     else:
                         books.note_nudge()
                     session.add_message(
@@ -1493,75 +1459,6 @@ class AgentLoop:
                         iterations=books.total_iterations,
                         reason="research finished",
                         note=PLAN_RESEARCH_NOTE,
-                    )
-                    break
-                # N1: the plan exit closes the turn too.  An approval is the
-                # exit's success (占位 = 成功): the human said yes, the plan is
-                # armed, and the runner is about to execute it -- so the
-                # planning round has nothing left to say.
-                #
-                # This branch was missing, and the model kept exploring after
-                # the review card came back approved: the planning budget ran
-                # out, the turn ended *badly*, and a badly ended turn is the
-                # one thing that makes the close take the approval back (W2) --
-                # the operator had approved a plan and the system silently
-                # undid it (measured: scripts/plan_lifecycle_live_check.py,
-                # the [swap] scenario).
-                #
-                # It reads the turn's conclusion, not the batch's results: the
-                # holder is the one thing that says "this turn has an exit"
-                # (present_plan sets it on approval, present_plan_tool.py:324),
-                # and the two exits are mutually exclusive by construction --
-                # so a research conclusion and an approval cannot ride the
-                # same batch, and the order of the two branches is free.
-                #
-                # It comes after the halt above, because a batch the operator
-                # stopped did not end cleanly, and the withdrawal at the close
-                # is the right answer for that (W2).
-                if conclusion.exit == "present_plan":
-                    outcome = TurnOutcome(
-                        status=TurnStatus.COMPLETED,
-                        text=step.text,
-                        iterations=books.total_iterations,
-                        reason="plan approved",
-                    )
-                    break
-                # R08 (dsh): a dismissed review (esc / empty on the card) ends
-                # the turn right here -- the user said "not now", not "not
-                # this".  No nudge, no arm, no auto-run; the note tells the
-                # operator nothing is pending.  Reads this batch's outcomes
-                # directly: the state is local, nothing needs remembering.
-                dismissed = [
-                    item for item in outcomes
-                    if item.call.name == "present_plan"
-                    and isinstance(item.result.data, dict)
-                    and item.result.data.get("dismissed") is True
-                ]
-                if dismissed:
-                    # B (audit fix): the note below claims nothing ran, so
-                    # nothing may stay armed -- this is the only branch that can
-                    # meet a dismissal while a plan is armed (the tool refuses a
-                    # second submission otherwise).  Only the plan profile is
-                    # the review's to disarm; a goal task has its own lifecycle.
-                    if (
-                        getattr(task, "armed", False)
-                        and getattr(task, "armed_profile", "") == "plan"
-                    ):
-                        task.disarm()
-                    # C3: a plan that *was* reviewed must not be reported as
-                    # "never submitted" -- a held review says the card was
-                    # shown and not approved.
-                    reviewed = any(
-                        isinstance(item.result.data, dict)
-                        and item.result.data.get("reviewed") is True
-                        for item in dismissed
-                    )
-                    outcome = TurnOutcome(
-                        status=TurnStatus.COMPLETED,
-                        text=step.text,
-                        iterations=books.total_iterations,
-                        reason="plan dismissed",
-                        note=PLAN_HELD_NOTE if reviewed else PLAN_DISMISSED_NOTE,
                     )
                     break
         except asyncio.CancelledError:
@@ -2078,44 +1975,6 @@ class AgentLoop:
         # M2 T3: a reminder queued while this turn ran lands here too, so the
         # close's own save carries it (zero new save points).
         self._apply_pending_reminders(session)
-        # W2: an approval belongs to the turn that carried it.
-        #
-        # The plan was written against the state this turn ended in.  A turn
-        # that did not end cleanly (error / timeout / budget / max_iterations
-        # / stopped) left the session somewhere else, and the front end
-        # already refuses to start a run from it -- so the backend must not
-        # leave the plan armed on disk either, or the boot resume would run
-        # exactly what the front end declined to run.  The two answers have
-        # to agree.
-        #
-        # A turn that ended cleanly keeps the approval: that is what the
-        # approval was for, and the run it authorises still has to happen.
-        #
-        # A crash is a different thing: the close never runs, so the
-        # approval stays armed and the boot resume continues the work the
-        # human agreed to (D-02's crash point ①).  Only the plan profile is
-        # touched -- a goal's arm belongs to the goal runner, which keeps
-        # running across turns by design.
-        #
-        # Before the close, so the close's own save carries the withdrawal
-        # (zero new save points).
-        if (
-            books.plan_approved
-            and outcome.status is not TurnStatus.COMPLETED
-            and getattr(task, "armed", False)
-            and getattr(task, "armed_profile", "") == "plan"
-        ):
-            task.disarm()
-            # D2: the withdrawal has to leave a trace.  The human approved
-            # something and the system took it back; without a line about
-            # it the screen shows nothing at all, and the plan simply never
-            # runs -- the one thing the operator could not see is the one
-            # thing that was taken away.
-            #
-            # Mutually exclusive with the guard's note (the guard does not
-            # fire for a turn that submitted), so the two never need
-            # patching together.
-            outcome = replace(outcome, note=PLAN_APPROVAL_WITHDRAWN_NOTE)
         return self.closer.close(
             session,
             user_input=user_input,
@@ -2357,14 +2216,6 @@ class AgentLoop:
                 # here and clears it when answered; the loop mirrors it into a
                 # marker beside the session file, never into the session itself.
                 note_approval=lambda pending: self._note_approval(session, pending),
-                # R10: approval is a new plan episode -- the session's stale
-                # ladder windows must not ride into it (begin_plan's sibling).
-                # W2: and the books remember that this turn approved a plan,
-                # so the turn's close can withdraw the approval if the turn
-                # did not end cleanly (the front end already refuses to start
-                # a run from such a turn; the backend must not leave the plan
-                # armed on disk for the boot resume to pick it up).
-                note_plan_approved=lambda: _on_plan_approved(session, books),
                 # Deferred tools: the search tool reports what it matched, and
                 # the next request carries those schemas (still filtered by the
                 # posture and the permission rules at surface time).
@@ -2435,19 +2286,6 @@ class AgentLoop:
             for path in paths_in(item.result.output or "", self.workspace)
         )
         self.closer.write_back(session, outcomes)
-        # C3: the review asked for a revision and did not say what -- the
-        # model's job is to ask (ask_user), and this batch paid that debt.  The
-        # flag lives on the turn's conclusion holder, which is the only object
-        # every tool call of the turn shares.
-        if (
-            conclusion is not None
-            and getattr(conclusion, "plan_review_state", "") == "needs_feedback"
-            and any(
-                item.call.name == "ask_user" and item.result.success
-                for item in outcomes
-            )
-        ):
-            conclusion.plan_review_state = ""
         if any(
             # ``present_plan`` joined the list with P1: approval is what writes
             # the submitted items into the task, and the plan card is driven by

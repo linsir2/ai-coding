@@ -11,11 +11,9 @@ from ai_coding.config.models import AIConfig
 from ai_coding.core import interventions
 from ai_coding.core.interventions import TASK_GATE_LEAD
 from ai_coding.core.turn_policy import (
-    PLAN_HELD_NOTE,
     TASK_MESSAGE_LEAD,
     TaskInjection,
     TurnAction,
-    TurnDecision,
     TurnPolicy,
     TurnPolicyConfig,
     TurnSnapshot,
@@ -57,6 +55,21 @@ def test_next_iteration_finishes_when_the_turn_budget_is_gone():
     )
     assert decision.action is TurnAction.FINISH
     assert decision.reason == "turn deadline exceeded"
+
+
+def test_a_plan_turn_decides_on_the_budget_alone():
+    """P0b-2a: the plan submission guard is gone, so a plan turn's
+    iteration decision is the budget and nothing else -- no present_plan
+    text is ever injected."""
+    policy = TurnPolicy(_config(max_iterations=3))
+    within = policy.decide_next_iteration(TurnSnapshot(iteration=3, mode="plan"))
+    assert within.action is TurnAction.ITERATE
+    assert within.inject is None
+
+    spent = policy.decide_next_iteration(TurnSnapshot(iteration=4, mode="plan"))
+    assert spent.action is TurnAction.FINISH
+    assert spent.reason == "iteration budget exhausted"
+    assert spent.inject is None
 
 
 # ---- after a model step ----------------------------------------------------
@@ -108,15 +121,9 @@ def test_finish_reason_for_a_completed_step_is_stable():
 
 @pytest.mark.parametrize("posture", [{"mode": "plan"}, {"readonly": True}])
 def test_after_step_finishes_quietly_under_a_posture_once_the_plan_is_in(posture):
-    """18 §10.5 的"执行门静默"保持：计划已提交时 posture 下照旧安静收尾。
-
-    未提交的路径由 plan 提交守卫接管（下方三个用例）——守卫不是执行门：
-    它不进干预账本（intervention 为空），只为"裸文本收尾、零提交"补一次
-    补救与一行终局通知（7ad86804 / 1fd3be1e 两次实测）。"""
+    """18 §10.5 的"执行门静默"保持：posture 下照旧安静收尾。"""
     decision = TurnPolicy(_config()).decide_after_step(
-        TurnSnapshot(
-            iteration=1, open_items=(_item("1"),), plan_submitted=True, **posture
-        )
+        TurnSnapshot(iteration=1, open_items=(_item("1"),), **posture)
     )
     assert (
         decision.action,
@@ -126,73 +133,10 @@ def test_after_step_finishes_quietly_under_a_posture_once_the_plan_is_in(posture
     ) == (TurnAction.FINISH, "model finished", None, "")
 
 
-# ---- plan 提交守卫（stage 4 r2）: 裸文本收尾 → 一次补救 → 终局通知 ----------
-
-
-def test_after_step_asks_for_the_plan_it_never_got():
-    # R08: the guard speaks to the plan posture only; /readonly alone is not
-    # planning (its own case lives below).
-    decision = TurnPolicy(_config()).decide_after_step(
-        TurnSnapshot(iteration=1, open_items=(_item("1"),), mode="plan")
-    )
-    assert (decision.action, decision.reason) == (TurnAction.NUDGE, "plan unsubmitted")
-    assert decision.inject is not None and "present_plan" in decision.inject
-    assert decision.intervention == ""  # 不是 ladder 家族，不进干预账本
-
-
-def test_the_plan_gate_asks_even_with_an_empty_list():
-    """P2 verification: planning no longer writes todo items, so the guard
-    that asks for a submission must not depend on them.  It keys on
-    ``plan_submitted`` (the tool_success record), never on ``open_items`` —
-    this pins that, because the old workflow made the two look equivalent."""
-    decision = TurnPolicy(_config()).decide_after_step(
-        TurnSnapshot(iteration=1, mode="plan")  # no items, nothing submitted
-    )
-    assert (decision.action, decision.reason) == (TurnAction.NUDGE, "plan unsubmitted")
-
-    submitted = TurnPolicy(_config()).decide_after_step(
-        TurnSnapshot(iteration=1, mode="plan", plan_submitted=True)
-    )
-    assert (submitted.action, submitted.reason) == (TurnAction.FINISH, "model finished")
-
-
-def test_the_plan_nudge_sends_the_steps_through_present_plan():
-    """P1: the remedy text used to say "write the items with todo_write", which
-    is the workflow the redesign removed (trace ec89d5ee: 8 steps, 8
-    iterations, plus an add/clear loop).  The nudge now points at the items
-    array on the same call."""
-    decision = TurnPolicy(_config()).decide_after_step(
-        TurnSnapshot(iteration=1, mode="plan")
-    )
-    assert decision.inject is not None
-    assert "present_plan" in decision.inject
-    assert "items" in decision.inject
-    assert "todo_write" not in decision.inject
-
-
-def test_after_step_stops_asking_after_one_remedy():
-    decision = TurnPolicy(_config()).decide_after_step(
-        TurnSnapshot(iteration=1, open_items=(_item("1"),), plan_nudged=True, mode="plan")
-    )
-    assert (decision.action, decision.reason) == (TurnAction.FINISH, "plan unsubmitted")
-
-
-def test_a_kept_review_ends_the_turn_with_the_held_note():
-    """C3: the human saw the card and said "keep planning"; chasing another
-    submission is wrong, and the note must not claim nothing was submitted."""
-    decision = TurnPolicy(_config()).decide_after_step(
-        TurnSnapshot(iteration=1, mode="plan", plan_reviewed=True)
-    )
-
-    assert (decision.action, decision.reason) == (TurnAction.FINISH, "plan review held")
-    assert decision.note == PLAN_HELD_NOTE
-    assert decision.inject is None
-
-
 def test_readonly_alone_never_asks_for_a_plan():
-    """R08: the submission guard speaks to the plan posture only — /readonly
-    alone is not planning, so it must not be nagged to submit, and the
-    execution gates stay silent exactly as before."""
+    """18 §10.5: under either posture the execution gates are silent —
+    /readonly alone is not planning, and neither posture may be nagged to
+    run tools."""
     decision = TurnPolicy(_config()).decide_after_step(
         TurnSnapshot(iteration=1, open_items=(_item("1"),), readonly=True)
     )
@@ -204,53 +148,7 @@ def test_a_plain_turn_never_asks_for_a_plan():
     assert (decision.action, decision.reason) == (TurnAction.FINISH, "model finished")
 
 
-# ---- the stop seam (dsh turn-stopping): guards in order, first verdict wins ----
-
-
-class _ScriptedGuard:
-    """A stop guard scripted for the seam test; records that it was asked."""
-
-    def __init__(self, name: str, verdict: TurnDecision | None, asked: list[str]):
-        self._name = name
-        self._verdict = verdict
-        self._asked = asked
-
-    def on_stop(self, snapshot: TurnSnapshot) -> TurnDecision | None:
-        self._asked.append(self._name)
-        return self._verdict
-
-
-def test_stop_guards_run_in_order_and_short_circuit():
-    asked: list[str] = []
-    passing = _ScriptedGuard("first", None, asked)
-    speaking = _ScriptedGuard(
-        "second", TurnDecision(TurnAction.NUDGE, "second spoke", inject="补交"), asked
-    )
-    never = _ScriptedGuard("third", TurnDecision(TurnAction.FINISH, "third spoke"), asked)
-
-    decision = TurnPolicy(
-        _config(), stop_guards=(passing, speaking, never)
-    ).decide_after_step(TurnSnapshot(iteration=1, mode="plan"))
-
-    assert (decision.action, decision.reason, decision.inject) == (
-        TurnAction.NUDGE,
-        "second spoke",
-        "补交",
-    )
-    assert asked == ["first", "second"]  # the first verdict wins; the third never runs
-
-
-def test_custom_stop_guards_replace_the_plan_submission_rule():
-    asked: list[str] = []
-    guard = _ScriptedGuard(
-        "only", TurnDecision(TurnAction.FINISH, "custom verdict"), asked
-    )
-    decision = TurnPolicy(_config(), stop_guards=(guard,)).decide_after_step(
-        # plan_submitted stays False: the default rule would nudge here.
-        TurnSnapshot(iteration=1, mode="plan")
-    )
-    assert (decision.action, decision.reason) == (TurnAction.FINISH, "custom verdict")
-    assert asked == ["only"]
+# ---- the stop seam is gone: postures finish without any guard ----------------
 
 
 @pytest.mark.parametrize("posture", [{"mode": "plan"}, {"readonly": True}])
@@ -259,10 +157,8 @@ def test_after_step_silences_the_acceptance_gate_under_a_posture(posture):
 
     failing = (AcceptanceState(id="AC-1", passed=False),)
     decision = TurnPolicy(_config()).decide_after_step(
-        # stage 4 r2: with a plan already in, the acceptance ladder stays
-        # silent under the posture (the original intent); an unsubmitted
-        # plan is the guard's business, not the acceptance gate's.
-        TurnSnapshot(iteration=2, acceptance=failing, plan_submitted=True, **posture)
+        # 18 §10.5: the acceptance ladder stays silent under the posture.
+        TurnSnapshot(iteration=2, acceptance=failing, **posture)
     )
     assert (decision.action, decision.reason) == (TurnAction.FINISH, "model finished")
 
@@ -463,12 +359,3 @@ def test_after_step_finishes_when_the_ask_was_ignored():
     assert (decision.action, decision.reason) == (
         TurnAction.FINISH, "todo ladder exhausted"
     )
-
-
-def test_the_guard_lets_an_approved_plan_through():
-    """占位 = 成功: an approval is the plan exit's success, so the guard must
-    not ask for a submission the human already gave."""
-    decision = TurnPolicy(_config()).decide_after_step(
-        TurnSnapshot(iteration=1, mode="plan", plan_approved=True)
-    )
-    assert (decision.action, decision.reason) == (TurnAction.FINISH, "model finished")

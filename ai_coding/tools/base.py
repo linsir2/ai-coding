@@ -49,13 +49,6 @@ class TurnConclusion:
     #: The human dismissed the plan review.  The review is not asked twice in
     #: one turn, but the turn's other exit is still open.
     dismissed: bool = False
-    #: C3: where the plan review stands after a "keep planning" answer.
-    #: ``""`` nothing owed; ``"needs_feedback"`` the human asked for a revision
-    #: without saying what -- the model must ask (``ask_user``) before it may
-    #: submit again; ``"refused"`` it submitted anyway once and was told, so a
-    #: second attempt ends the turn instead of looping.  Cleared by a answered
-    #: ``ask_user`` (the loop pays the debt) or by a keep that carries feedback.
-    plan_review_state: str = ""
 
 
 @dataclass
@@ -135,10 +128,6 @@ class ToolContext:
     # does not lose the pending call -- the one place the snapshot was wrong.
     # ``None`` outside a loop that owns a session.
     note_approval: Callable[[dict[str, Any] | None], None] | None = None
-    # R10: how a tool tells the running turn that a new plan episode started
-    # (``present_plan`` approval).  The loop clears the session's ladder
-    # windows through it; ``None`` outside a loop that owns a session.
-    note_plan_approved: Callable[[], None] | None = None
     #: How ``tool_search`` makes a deferred tool visible: the loop stamps this
     #: once per request, the tool reports the names it matched, and the next
     #: request carries their schemas.  ``None`` outside a loop.

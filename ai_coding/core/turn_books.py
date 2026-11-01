@@ -242,20 +242,6 @@ class TurnBooks:
     neutral_streak: int = 0
     #: Strategy nudges injected (``[strategy-gate]``).
     strategy_nudges: int = 0
-    #: stage 4 r2: the plan submission guard spent its one remedy nudge.
-    #: ``plan_submitted`` itself needs no field -- ``tool_success`` already
-    #: remembers that present_plan succeeded.
-    plan_nudged: bool = False
-    #: C3/R08: the model showed a plan to the human but the answer was keep
-    #: (a tool *error*, so ``tool_success`` does not see it).  The guard reads
-    #: this: a plan that was reviewed must not be reported as "never submitted".
-    plan_reviewed: bool = False
-    #: W2: this turn approved a plan.  The approval belongs to *this* turn --
-    #: the plan was written against the state this turn ended in -- so a turn
-    #: that did not end cleanly takes the approval back (the loop withdraws
-    #: it at the turn's close).  A turn that ended cleanly keeps it, and the
-    #: run starts.
-    plan_approved: bool = False
     #: What failed, newest last — the handoff names the most recent one.
     failures: list[Failure] = field(default_factory=list)
     #: The latest thing the model said (``None`` when it said nothing at all).
@@ -372,21 +358,6 @@ class TurnBooks:
     def note_nudge(self) -> None:
         """The task gate injected a reminder and will iterate again."""
         self.nudges += 1
-
-    def note_plan_nudge(self) -> None:
-        """stage 4 r2: the plan submission guard spent its one remedy."""
-        self.nudges += 1
-        self.plan_nudged = True
-
-    def note_plan_approved(self) -> None:
-        """W2: the human approved a plan in this turn.
-
-        The approval belongs to this turn: the plan was written against the
-        state this turn ended in, and a turn that did not end cleanly leaves
-        a state nobody looked at.  The loop reads this at the turn's close
-        and takes the approval back when the turn did not end cleanly.
-        """
-        self.plan_approved = True
 
     def note_acceptance_nudge(self) -> None:
         """The acceptance gate injected a reminder and will iterate again."""
@@ -525,17 +496,6 @@ class TurnBooks:
         succeeded = [item for item in outcomes if item.result.success]
         self.successful_calls += len(succeeded)
         self.tool_success.update(item.call.name for item in succeeded)
-        # C3/R08: a plan that reached the review is "reviewed" even when the
-        # answer was keep.  Keep is a tool error on purpose (it must not count
-        # as a submission), so the success set alone cannot answer "did the
-        # human ever see a plan?" -- which is what the guard needs.
-        if any(
-            item.call.name == "present_plan"
-            and isinstance(item.result.data, dict)
-            and item.result.data.get("reviewed") is True
-            for item in outcomes
-        ):
-            self.plan_reviewed = True
         # B1/B2: a successful look extends the streak; a successful *action*
         # (see ``ACTION_TOOLS``) ends it.  Everything else -- failures, state-only
         # tools, the goal/ask tools -- moves neither number: a failed call is
@@ -677,10 +637,4 @@ class TurnBooks:
             stale_streak=self.stale_streak,
             repeated_nonempty=self.repeated_nonempty,
             novel_findings=self.novel_findings,
-            plan_submitted="present_plan" in self.tool_success,
-            plan_reviewed=self.plan_reviewed,
-            plan_nudged=self.plan_nudged,
-            # N1: the approval is the plan exit's success, and the guard reads
-            # it from here (the books are the only place that knows it).
-            plan_approved=self.plan_approved,
         )

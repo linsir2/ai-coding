@@ -1078,15 +1078,15 @@ class _NotedLoop(_FakeLoop):
         return answer
 
 
-#: The guard's own line (the real one is longer; the terminal wraps it).
-_NOTE = "[plan] 本回合未提交计划（未调用 present_plan / finish_research）；可继续对话让它提交。"
-_NOTE_HEAD = "本回合未提交计划"
+#: A terminal note, as an outcome carries one (the real lines are longer).
+_NOTE = "[plan] 研究已收尾：结论已给出（未提交计划、未执行任何工作）。"
+_NOTE_HEAD = "研究已收尾"
 
 
 async def test_the_plain_turn_note_reaches_the_terminal():
-    """E4: the guard's terminal line was visible in the front end and
+    """E4: the turn's terminal note was visible in the front end and
     nowhere else -- the command layer had no reader for it at all, so
-    every hint the guard leaves on a turn ended in silence here.
+    every hint an outcome leaves ended in silence here.
     """
     loop = _NotedLoop(note=_NOTE)
     sessions = _FakeSessions()

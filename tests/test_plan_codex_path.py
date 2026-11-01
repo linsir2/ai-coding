@@ -84,45 +84,13 @@ def test_a_plan_implementing_turn_finishes_and_ignores_the_task_gate():
     assert decision.inject is None
 
 
-def test_a_plan_turn_without_a_review_tool_finishes_instead_of_nudging():
+def test_a_plan_turn_finishes_instead_of_nudging():
     policy = TurnPolicy(TurnPolicyConfig())
     decision = policy.decide_after_step(
-        TurnSnapshot(iteration=1, mode="plan", plan_review_available=False)
+        TurnSnapshot(iteration=1, mode="plan")
     )
     assert decision.action is TurnAction.FINISH
     assert decision.reason == "model finished"
-    # The guard is still there on the paths that do have a review tool: this
-    # is the contrast that proves the flag, not the absence of the guard.
-    nudged = policy.decide_after_step(TurnSnapshot(iteration=1, mode="plan"))
-    assert nudged.action is TurnAction.NUDGE
-
-
-def test_a_plan_turn_without_a_review_tool_is_not_nudged_at_the_budget_edge():
-    """The guard has a second mouth: the budget edge asks for an exit while
-    another round is still possible.  A codex plan turn has no tool to submit
-    with, so the edge must not inject the submission text either."""
-    policy = TurnPolicy(TurnPolicyConfig(max_iterations=10))
-    decision = policy.decide_next_iteration(
-        TurnSnapshot(iteration=8, mode="plan", plan_review_available=False)
-    )
-    assert decision.action is TurnAction.ITERATE
-    assert decision.inject is None
-
-    # The contrast: with a review tool on offer the edge still asks.
-    edge = policy.decide_next_iteration(TurnSnapshot(iteration=8, mode="plan"))
-    assert edge.action is TurnAction.NUDGE
-
-
-def test_a_plan_turn_without_a_review_tool_is_silent_on_a_dead_budget_mouth():
-    """The clock/token mouths consult the guard for its final note; with no
-    review tool there is no unsubmitted plan to report."""
-    policy = TurnPolicy(TurnPolicyConfig())
-    decision = policy.decide_next_iteration(
-        TurnSnapshot(iteration=1, mode="plan", plan_review_available=False),
-        budget_expired=True,
-    )
-    assert decision.action is TurnAction.FINISH
-    assert decision.note == ""
     assert decision.inject is None
 
 

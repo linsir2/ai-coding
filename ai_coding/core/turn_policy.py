@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import enum
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
-from typing import Any, Protocol
+from dataclasses import dataclass, field
+from typing import Any
 
 from ai_coding.core import interventions
 from ai_coding.core.interventions import NUDGE_ITEM_LIMIT
@@ -32,8 +32,6 @@ from ai_coding.domain.task import TaskState, TodoItem
 __all__ = [
     "NUDGE_ITEM_LIMIT",
     "TASK_MESSAGE_LEAD",
-    "PlanSubmissionGuard",
-    "StopGuard",
     "TaskInjection",
     "TurnAction",
     "TurnDecision",
@@ -44,64 +42,10 @@ __all__ = [
 
 TASK_MESSAGE_LEAD = "以下是你自己的任务清单状态（系统注入，不是用户发言）："
 
-#: stage 4 r2: the plan submission guard's two texts, beside the rules they
-#: serve.  The nudge is the one remedy a plan-posture turn gets before it is
-#: allowed to end without a submission (dsh's turn-stopping idea); the note
-#: rides the outcome to the transcript when even the remedy is refused.
-#: Measured silent-completion twice: sessions 7ad86804 and 1fd3be1e.
-PLAN_NUDGE = (
-    "[plan] 本回合还没有出口：把全部可执行步骤放进 present_plan 的 items 数组"
-    "（每步一条，含 verify 命令）提交评审；若这个任务不需要实现，就用 "
-    "finish_research(summary) 直接给结论。不能以纯文本收尾。请立即给出一个出口。"
-)
-PLAN_UNSUBMITTED_NOTE = (
-    "[plan] 本回合未提交计划（未调用 present_plan / finish_research）；可继续对话让它提交。"
-)
-#: How many rounds of the exploration budget are kept for handing something
-#: over.  Three: the model is asked for an exit while it still has rounds to
-#: write the exit in, and it is asked while it is still exploring -- not
-#: after it has given up.
-#:
-#: Why it has to come early.  In the production session 135cc71c the model
-#: stopped on its own in round 19 and wrote its answer in prose; only then
-#: did the guard chase it for an exit.  The model had already changed its
-#: mind by then: the plan it wrote on the spot named paths outside the
-#: workspace, hit the workspace gate, and the turn went into a random retry
-#: loop.  Asked while it is still exploring, it has material to choose from
-#: and picks the exit that fits the request -- a plan or a conclusion.
-PLAN_WRAPUP_ROUNDS = 3
-#: The mouths a nudge cannot buy anything at: the clock is already over and
-#: the token ceiling is already reached, so the round a nudge asks for would
-#: run into the very same wall.  The plan guard reads this (A4) and finishes
-#: the turn with the note instead of nagging into the void.
-DEAD_BUDGET_PATHS = frozenset({"clock", "token"})
-#: R08: the terminal note a dismissed review leaves.  Dismiss (esc / empty on
-#: the card) now ends the turn at the batch -- the operator said "not now",
-#: and this line says what that meant: nothing submitted, nothing executed.
-PLAN_DISMISSED_NOTE = "[plan] 评审已搁置：本回合结束（计划未提交、未执行）。"
-#: C3: the note a turn leaves when a plan *was* shown but the human kept
-#: planning and the turn ended before another review (the model stopped after
-#: a revision, or a budget mouth arrived).  Saying "未提交" here was a lie:
-#: the review card had been on screen.
-PLAN_HELD_NOTE = (
-    "[plan] 评审未批准：本回合结束（计划未执行）；调整后可再次提交。"
-)
 #: N1: the terminal note a research conclusion leaves.  The other exit of a
 #: plan-mode turn: the conclusion is the answer, so the turn ends with it --
 #: no plan, nothing armed, nothing executed.
 PLAN_RESEARCH_NOTE = "[plan] 研究已收尾：结论已给出（未提交计划、未执行任何工作）。"
-#: D2: the note a *withdrawn approval* leaves.  The human approved a plan and
-#: the turn did not end cleanly, so the approval is taken back (the front end
-#: refuses to run a plan from a turn that ended badly) -- and until now that
-#: happened in silence: the screen showed nothing at all, and the plan simply
-#: never ran.  This is the only trace that the approval was taken away.
-#:
-#: Mutually exclusive with the guard's note above, so the two never need
-#: patching together: that one is for the turn that never submitted a plan,
-#: this one for the turn whose submission was taken back.
-PLAN_APPROVAL_WITHDRAWN_NOTE = (
-    "[plan] 已批准的计划在本回合未干净收尾，批准被撤回；重新规划后再次提交。"
-)
 #: G8-1: the marker for the one block that tells the model its budget is nearly
 #: gone.  Volatile (never persisted) like the memory and task blocks -- it
 #: describes a counter, not a fact about the work.
@@ -206,11 +150,10 @@ class TurnDecision:
     #: 13 §2.1: which ladder fired, and at what level — the loop records it.
     intervention: str = ""
     level: int = 0
-    #: The terminal line the operator must see (the plan guard's note).  It
-    #: rides the decision, not the reason: the reason says *why the turn
-    #: ended* ("iteration budget exhausted"), the note says what the turn
-    #: leaves undone ("no plan was submitted") — two different facts, and
-    #: the second one is the guard's alone.
+    #: The terminal line the operator must see.  It rides the decision, not
+    #: the reason: the reason says *why the turn ended* ("iteration budget
+    #: exhausted"), the note says what the turn leaves behind — two different
+    #: facts.
     note: str = ""
 
 
@@ -241,10 +184,6 @@ class TurnSnapshot:
     #: (``session.plan_implementing``).  It has no iteration ceiling and is
     #: never nudged/continued: a stopped model ends the turn.
     plan_implementing: bool = False
-    #: C-2: is the plan review tool on offer (``present_plan`` in the tool
-    #: surface)?  When it is not (the codex path), the plan submission guard
-    #: has nothing to ask for and is skipped -- it would nudge forever.
-    plan_review_available: bool = True
     # R6b: how the tool calls have been going.  Fed in by the loop — the policy
     # never counts anything itself, so it stays pure and table-testable.
     failed_streak: int = 0  # consecutive iterations where every call failed
@@ -289,27 +228,6 @@ class TurnSnapshot:
     #: pre-posture construction (and test) byte-identical.
     mode: str = "normal"
     readonly: bool = False
-    #: stage 4 r2: the plan submission guard's view -- a plan has been
-    #: submitted this turn (``present_plan`` succeeded), and the one remedy
-    #: nudge has been spent.  Defaults keep earlier constructions identical.
-    plan_submitted: bool = False
-    #: C3/R08: a plan reached the review (the human saw the card), even if the
-    #: answer was keep.  The guard must not nag "submit a plan" or report
-    #: "never submitted" after that -- and keep-with-feedback still means the
-    #: model may revise in-turn; this fact only stops the false chase.
-    plan_reviewed: bool = False
-    plan_nudged: bool = False
-    #: N1: the human approved a plan this turn.  The approval is the plan
-    #: exit's *success* (占位 = 成功), and it is the fact the guard needs: a
-    #: dismissed review is not a submission, and an approved one must not be
-    #: asked for again.
-    plan_approved: bool = False
-    #: A4: which mouth is ending the turn — "" (the model's own stop),
-    #: "clock", "token", "iteration" or "ladder".  The policy sets it on the
-    #: snapshot it hands to the stop guards, because the policy is the only
-    #: place that knows which mouth it hit; a guard needs to know it because
-    #: a nudge is only worth anything when another round is still possible.
-    budget_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -320,78 +238,11 @@ class TaskInjection:
     message: ChatMessage | None = None
 
 
-class StopGuard(Protocol):
-    """One rule consulted before a posture turn is allowed to end.
-
-    dsh's ``agent/turn-stopping`` at our post-step seam: the guards run in
-    order, the first verdict wins, and ``None`` passes to the next.  The
-    default list holds exactly one rule — the plan submission guard below —
-    because that is the only stop interceptor this harness has today; a
-    second one is the trigger to add another entry, not to widen this one.
-    """
-
-    def on_stop(self, snapshot: TurnSnapshot) -> TurnDecision | None: ...
-
-
-class PlanSubmissionGuard:
-    """stage 4 r2: one remedy before a plan-posture turn ends unsubmitted.
-
-    A posture turn that never submitted a plan gets one nudge; refusing it
-    too ends with the terminal note instead of a silent COMPLETED (7ad86804
-    / 1fd3be1e measured the silent case twice — a bare analysis, no card, no
-    execution).  The two texts live beside this rule, above.
-
-    N1: the guard reads the *approval*, not the call: a plan the human
-    approved is this turn's exit (占位 = 成功), and a review the human
-    dismissed is not a submission — so neither of them is asked for again.
-
-    C3: a plan the human *kept* did reach the review, even though the tool
-    returned an error (keep is not a submission).  The guard ends that turn
-    with the held note instead of chasing a second submission and, later,
-    claiming the plan was never submitted.
-
-    A4: the guard is asked on *every* mouth that ends a plan turn, not only
-    on the model's own stop.  The mouth decides whether a remedy is worth
-    anything: on the clock and the token ceiling the wall is right there
-    (a nudge would hit it again), so the turn finishes with the note; on the
-    iteration and ladder mouths one more round is still possible, so the
-    remedy is offered — once, and only once (the loop counts it, or the
-    mouth would offer it every round and the turn would never end).
-    """
-
-    def on_stop(self, snapshot: TurnSnapshot) -> TurnDecision | None:
-        if snapshot.plan_approved or snapshot.plan_submitted:
-            return None
-        # C3: a plan reached the review.  The human said "keep planning", so
-        # there is nothing to chase -- the turn ends with the held note (the
-        # model did what the guard exists to require).
-        if snapshot.plan_reviewed:
-            return TurnDecision(
-                TurnAction.FINISH, "plan review held", note=PLAN_HELD_NOTE
-            )
-        if snapshot.plan_nudged or snapshot.budget_path in DEAD_BUDGET_PATHS:
-            return TurnDecision(
-                TurnAction.FINISH, "plan unsubmitted", note=PLAN_UNSUBMITTED_NOTE
-            )
-        return TurnDecision(TurnAction.NUDGE, "plan unsubmitted", inject=PLAN_NUDGE)
-
-
 class TurnPolicy:
     """Pure decision unit: budgets in, action out."""
 
-    def __init__(
-        self,
-        config: TurnPolicyConfig | None = None,
-        *,
-        stop_guards: tuple[StopGuard, ...] | None = None,
-    ) -> None:
+    def __init__(self, config: TurnPolicyConfig | None = None) -> None:
         self.config = config or TurnPolicyConfig()
-        # The seam's rule list.  ``None`` means the default; an explicit tuple
-        # replaces it (tests, and any future second rule), so the plan guard
-        # is a voter, not the ballot box.
-        self._stop_guards = (
-            stop_guards if stop_guards is not None else (PlanSubmissionGuard(),)
-        )
         # 13 §2.1: the ladder reads these; strict = "never give up early", so
         # its task budget is unbounded (docs/r1-analysis.md D5 keeps meaning).
         self._limits = interventions.LadderLimits(
@@ -416,7 +267,7 @@ class TurnPolicy:
     ) -> TurnDecision:
         """May ``snapshot.iteration`` start?  The turn clock wins over the count."""
         if budget_expired:
-            return self._finish_at(snapshot, "clock", "turn deadline exceeded")
+            return self._finish_at("turn deadline exceeded")
         # M1 audit fix: token exhaustion must not burn a C3 continuation.  The
         # gate is computed once and guards the continuation below; the reason
         # precedence for the plain ladder (iteration first) is unchanged.
@@ -432,28 +283,6 @@ class TurnPolicy:
                 TurnAction.FINISH,
                 f"plan stalled: {snapshot.stall_rounds} rounds without progress",
             )
-        if (
-            snapshot.mode == "plan"
-            and snapshot.plan_review_available
-            and not snapshot.plan_nudged
-            and not snapshot.plan_reviewed
-        ):
-            # The budget's edge is the last chance to ask for an exit while
-            # the model still has something to hand over -- and it is asked
-            # before the iteration ceiling on purpose: the round that hits
-            # the ceiling goes to _finish_at(..., "iteration", ...) and the
-            # guard takes it from there, so an ask that came after the
-            # ceiling check would be one round too late.
-            remaining = self.config.max_iterations - snapshot.iteration
-            if 0 < remaining <= PLAN_WRAPUP_ROUNDS:
-                # The guard's own reason and its own text.  The loop's
-                # accounting branch matches on the reason, so this ask spends
-                # the same remedy the guard spends: one ask per turn, and the
-                # guard stays quiet afterwards (no second mouth, no second
-                # ledger).
-                return TurnDecision(
-                    TurnAction.NUDGE, "plan unsubmitted", inject=PLAN_NUDGE
-                )
         # A plan turn has no iteration ceiling: what bounds it is the item list,
         # the context window and the two brakes.  Normal turns keep theirs.
         # C-3: a codex implementation turn has no ceiling either -- Codex's turn
@@ -491,13 +320,9 @@ class TurnPolicy:
                     "continue unfinished work",
                     inject=self.continuation_message(actionable),
                 )
-            return self._finish_at(
-                snapshot, "iteration", "iteration budget exhausted"
-            )
+            return self._finish_at("iteration budget exhausted")
         if token_gate:
-            return self._finish_at(
-                snapshot, "token", "turn token budget exhausted"
-            )
+            return self._finish_at("turn token budget exhausted")
         # Plan-as-Goal / plan research: an autonomous plan turn is not an
         # execution-drift turn.  The *search* ladder would cut it mid-work
         # (trace f1d881ee t12: "search unconverged" at round 20 in a planning
@@ -522,8 +347,6 @@ class TurnPolicy:
             decision = self._as_turn_decision(gate)
             if decision.action is TurnAction.FINISH:
                 return self._finish_at(
-                    snapshot,
-                    "ladder",
                     decision.reason,
                     intervention=decision.intervention,
                     level=decision.level,
@@ -532,63 +355,21 @@ class TurnPolicy:
             return decision
         return TurnDecision(TurnAction.ITERATE, "within budget")
 
-    # ---- stopping ----------------------------------------------------------
-
-    def _ask_guards(self, snapshot: TurnSnapshot) -> TurnDecision | None:
-        """The seam: the guards run in order, the first verdict wins.
-
-        ``None`` means every guard passed the turn on.
-        """
-        for guard in self._stop_guards:
-            verdict = guard.on_stop(snapshot)
-            if verdict is not None:
-                return verdict
-        return None
-
     def _finish_at(
         self,
-        snapshot: TurnSnapshot,
-        path: str,
         reason: str,
         *,
         intervention: str = "",
         level: int = 0,
         note: str = "",
     ) -> TurnDecision:
-        """End the turn on a budget mouth — after the stop guards had their say.
-
-        A4: a planning turn that ends without a plan must say so on *every*
-        mouth, not only on the model's own stop — three of the four endings
-        used to be silent (the operator reads nothing but the note).  The
-        guard is asked with the mouth's name, because a remedy is only worth
-        anything when another round is still possible: on the clock and the
-        token ceiling the wall is right there.
-
-        The mouth's own reason survives.  The turn ended because the budget
-        ran out, not because a plan was missing; only the note is the
-        guard's to add.  A guard that wants another round (NUDGE) is
-        returned as it is — the loop counts the remedy and starts the round.
+        """End the turn on a budget mouth.
 
         I1/R-7: the ladder's metadata rides through.  Before this, a gate that
         chose FINISH lost ``intervention``/``level``/``note`` here, so
         ``_note_intervention`` saw no intervention (no ``SearchStalled``) and
         the terminal note never reached the outcome.
         """
-        # C-2: the codex path has no ``present_plan``, so the guard has neither
-        # an exit to ask for nor a missing submission to report -- same flag as
-        # the post-step seam, so the two mouths cannot drift.
-        if snapshot.mode == "plan" and snapshot.plan_review_available:
-            verdict = self._ask_guards(replace(snapshot, budget_path=path))
-            if verdict is not None:
-                if verdict.action is TurnAction.NUDGE:
-                    return verdict
-                return TurnDecision(
-                    TurnAction.FINISH,
-                    reason,
-                    intervention=intervention,
-                    level=level,
-                    note=verdict.note or note,
-                )
         return TurnDecision(
             TurnAction.FINISH,
             reason,
@@ -603,23 +384,6 @@ class TurnPolicy:
         # nagging a planning or read-only session to run tools is absurd.
         # Strategy/fatigue live at the PRE point and are untouched.
         if snapshot.mode == "plan" or snapshot.readonly:
-            # R08: the submission guard speaks to the plan posture only —
-            # /readonly alone is not planning, and the measured misfire (the
-            # guard demanding a plan from a read-only session) must not come
-            # back through this seam.
-            if snapshot.mode == "plan":
-                # C-2: the codex path has no ``present_plan``, so there is no
-                # submission to chase; running the guard would nudge forever.
-                if not snapshot.plan_review_available:
-                    return TurnDecision(TurnAction.FINISH, "model finished")
-                # dsh's turn-stopping at our post-step seam: the stop guards
-                # run in order, the first verdict owns the decision.  Today's
-                # list is the plan submission guard (its silent-COMPLETED
-                # measurements 7ad86804 / 1fd3be1e are recorded beside its
-                # texts).
-                verdict = self._ask_guards(snapshot)
-                if verdict is not None:
-                    return verdict
             return TurnDecision(TurnAction.FINISH, "model finished")
         if snapshot.plan_executing:
             # B: a plan turn's continuation is the loop's structural decision
@@ -684,30 +448,6 @@ class TurnPolicy:
             role="user", content=f"{TASK_MESSAGE_LEAD}\n{render}", timestamp=""
         )
         return TaskInjection(instructions=instructions, message=block)
-
-    @staticmethod
-    def plan_state_block(task: TaskState, session: Any) -> ChatMessage | None:
-        """The plan turn's volatile "keep going" block (B3).
-
-        The structural continuation appends no message, so the next request
-        would otherwise be byte-identical to the previous one -- and a model
-        that just said "done" tends to say it again.  This block is rebuilt on
-        every request (never persisted), so it also cannot be compacted away.
-        """
-        if not bool(getattr(session, "plan_executing", False)):
-            return None
-        actionable = [item for item in task.open_items() if item.status != "blocked"]
-        if not actionable:
-            return None
-        return ChatMessage(
-            role="user",
-            content=(
-                f"<plan-state>计划执行中，还有 {len(actionable)} 项未完成。"
-                "继续在同一个回合内推进下一项；完成后用 todo_write 标 completed。"
-                "不要以纯文本收尾，也不要停下来询问用户。</plan-state>"
-            ),
-            timestamp="",
-        )
 
     def budget_pressure(self, *, iteration: int, tokens_spent: int) -> str | None:
         """A note to the model when the turn's budget is nearly gone (G8-1).

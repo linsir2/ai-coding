@@ -93,7 +93,6 @@ def tool_context(
     # claims it read.
     note_read: Callable[[str, int, int, int], None] | None = None,
     note_approval: Callable[[dict[str, Any] | None], None] | None = None,
-    note_plan_approved: Callable[[], None] | None = None,
     note_tool_loaded: Callable[[tuple[str, ...]], None] | None = None,
     #: What ``tool_search`` may offer: the deferred part of this request's own
     #: surface.  ``()`` means nothing is on offer (no loop stamped it).
@@ -141,7 +140,6 @@ def tool_context(
         note_checkpoint=note_checkpoint,
         note_read=note_read,
         note_approval=note_approval,
-        note_plan_approved=note_plan_approved,
         note_tool_loaded=note_tool_loaded,
         loaded_tools=tuple(getattr(session, "loaded_tools", ()) or ()),
         searchable_names=tuple(searchable_names),

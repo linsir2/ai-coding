@@ -104,11 +104,12 @@ def _plan_session(sessions: SessionService):
     return session
 
 
-def _plan_reminders(session) -> list[str]:
+def _plan_nudges(session) -> list[str]:
+    """The harness's ``[plan]`` lines, if any were injected into the model."""
     return [
         m.content or ""
         for m in session.messages
-        if m.synthetic and "present_plan" in (m.content or "")
+        if m.synthetic and (m.content or "").startswith("[plan]")
     ]
 
 
@@ -126,7 +127,7 @@ async def test_a_conclusion_ends_the_turn_at_the_batch(tmp_path):
 
     await loop.process_input(session, "看看记忆层怎么设计的")
 
-    assert _plan_reminders(session) == []
+    assert _plan_nudges(session) == []
     outcome = loop.last_outcome
     assert outcome is not None and outcome.status is TurnStatus.COMPLETED
     assert outcome.reason == "research finished"

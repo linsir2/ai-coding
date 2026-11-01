@@ -67,10 +67,64 @@
 ## P0b-2：删旧状态字段、事件与前端
 
 ### 首批（P0b-1 评审遗留，按最小可验收先做）
-- `core/turn_policy.py`：删 `PlanSubmissionGuard`、`PLAN_NUDGE`、
-  `PLAN_UNSUBMITTED_NOTE`、`plan_review_available`、`plan_submitted/nudged/
-  approved/reviewed`、`plan_state_block`（连同 `test_plan_guard.py` 里只测
-  生产不可达分支的用例）。
+
+#### P0b-2a：退役 plan 提交守卫（present_plan 的最后残迹）
+
+**事实前提（已核，P0b-1 之后恒成立）**：`plan_review_available` 恒 `False`
+（`present_plan` 不再注册）；`session.plan_executing` 恒 `False`（旧执行器已删）；
+`armed_profile=="plan"` 不再被写入（`from_dict` 也已归一化）。因此下列分支/
+字段在生产路径全部不可达。
+
+**删除清单**
+- `core/turn_policy.py`
+  - `PlanSubmissionGuard`（`:336-376`）、`StopGuard` 协议（`:323`）与
+    `stop_guards`/`_ask_guards` 机制（`:386-393,537-548`）——守卫是唯一实现，
+    没有第二消费者，按"零抽象"一并删。
+  - 常量 `PLAN_NUDGE`/`PLAN_UNSUBMITTED_NOTE`（`:52-59`）、
+    `PLAN_DISMISSED_NOTE`/`PLAN_HELD_NOTE`（`:81-90`）、
+    `PLAN_WRAPUP_ROUNDS`/`DEAD_BUDGET_PATHS`（`:72-77`，只被守卫与预算边缘用）。
+  - `TurnSnapshot.plan_review_available/plan_submitted/plan_reviewed/
+    plan_nudged/plan_approved`（`:244-247,292-306`）与预算边缘 nudge 块
+    （`:435-455`）；`decide_after_step` 的 plan 分支简化为 `FINISH`；
+    `_finish_at` 的守卫询问块（`:576-587`）删除。
+  - `plan_state_block`（`:688-710`）及其在 `request_assembly:426` 的消费。
+- `core/turn_books.py`：`plan_nudged/plan_reviewed/plan_approved` 字段、
+  `note_plan_nudge`/`note_plan_approved`、`snapshot()` 的三项投影、`record`
+  里 `present_plan` 分支（`:104,246-258,376-390,533-538,680-685`）。
+- `core/agent_loop.py`：`PLAN_DISMISSED_NOTE/PLAN_HELD_NOTE` import、
+  `_on_plan_approved`（`:293-303`）、`plan_review_available=` 两处投影、
+  `conclusion.exit == "present_plan"` 分支（`:1521-1528`）、dismissed 分支
+  （`:1529-1566`）、`books.plan_approved` 撤回收尾（`:2102-2118`）、
+  `note_plan_approved=` 传参（`:2367`）、`plan_review_state` 的 ask_user 债务
+  （`:2441-2451`）。
+- `tools/base.py` 的 `TurnConclusion.plan_review_state`（`:58`）与
+  `ToolContext.note_plan_approved`（`:141`）；`core/request_builder.py:96,144`
+  的透传；`core/write_ahead.py:5` 注释。
+- 测试：删 `tests/test_plan_guard.py`（整文件只测该守卫）；`test_turn_policy.py`
+  的 StopGuard 两条用例（`:223-255`）与 plan 守卫用例；清理
+  `test_surface_tools_armed`/`test_plan_mode_turn`/`test_server_bridge` 中
+  `plan_reviewed/plan_approved/plan unsubmitted` 的构造。
+
+**保留**：`FinishResearchTool`、`<proposed_plan>` 路径、`plan_implementing`
+（codex 实现轮）、`plan_executing` 留到 P0b-2d。
+
+**RIPR**
+- R：保留 `test_plan_codex_path.py` 的"无 review 工具就 FINISH"用例，断言
+  `reason == "model finished"`；新增 `TurnSnapshot(mode="plan",
+  iteration=max_iterations)` 下预算只决定 ITERATE/FINISH、`inject is None`。
+- I：删掉守卫后，`/plan` 回合结束不再产出任何 present_plan 文案。
+- P：全量 `pytest`；`grep -rn "PlanSubmissionGuard|PLAN_NUDGE|plan_review_available|
+  plan_submitted|plan_nudged|plan_approved|plan_state_block" ai_coding tests` 为空。
+- R：`ruff`/`mypy`。
+
+**风险**：`TurnSnapshot` 是 dataclass，删字段后任何 `replace(...)` 传参处都会
+TypeError——实现时先全仓 grep 字段名再删；`turn_books.snapshot()` 与
+`request_assembly` 的调用顺序不变。
+
+**验收**：codex 链路 `/plan`→`<proposed_plan>`→"Implement this plan?"→
+`Implement the plan.`→`update_plan` 仍通；plan 回合不再出现 present_plan 文案。
+
+#### P0b-2b：旧 live check 与残留白名单
 - `scripts/n1_live_check.py:223`、`t12_live_check.py:246`、
   `w2_live_check.py:111`、`r19_acceptance.py:342`：按 `present_plan` 判成功的
   旧 live check 收编/删除。

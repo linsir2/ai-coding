@@ -300,15 +300,11 @@ def test_a_plain_text_stop_on_an_implementing_turn_finishes() -> None:
     assert decision.inject is None
 
 
-def test_a_plan_turn_without_the_review_tool_does_not_nudge() -> None:
+def test_a_plan_turn_finishes_without_nudging() -> None:
     policy = TurnPolicy(TurnPolicyConfig())
 
     decision = policy.decide_after_step(
-        TurnSnapshot(iteration=1, mode="plan", plan_review_available=False)
+        TurnSnapshot(iteration=1, mode="plan")
     )
     assert decision.action is TurnAction.FINISH
     assert decision.reason == "model finished"
-
-    # Contrast: with the review tool registered the old guard still nudges.
-    with_review = policy.decide_after_step(TurnSnapshot(iteration=1, mode="plan"))
-    assert with_review.action is TurnAction.NUDGE

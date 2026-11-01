@@ -1,8 +1,8 @@
 """M-C1: the session's write-ahead records, and the reuse decision.
 
 The loop owns one of these per turn and hands it to the dispatcher on the tool
-context -- the same shape as ``note_approval`` / ``note_checkpoint`` /
-``note_plan_approved``, which exist for the same reason: the dispatcher needs
+context -- the same shape as ``note_approval`` / ``note_checkpoint``,
+which exist for the same reason: the dispatcher needs
 session-scoped durable state it must not fetch itself.
 
 Both methods are **synchronous**: the dispatcher's ALLOW group runs a batch
