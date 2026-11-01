@@ -11,10 +11,10 @@ import type { AskRequest } from "../src/util/ask"
  * The panel therefore adds one free-text row to every option list; without
  * options it keeps the plain input.
  */
-const request = (options: string[]): AskRequest => ({
+const request = (options: string[], detail = ""): AskRequest => ({
   question: "这份计划哪里需要调整？",
   options,
-  detail: "",
+  detail,
   intent: "",
   data: {},
 })
@@ -53,5 +53,23 @@ describe("AskPanel (C3: options plus a free-text row)", () => {
 
     expect(frame).not.toContain(ASK_OTHER_OPTION)
     expect(frame).toContain("Type your answer")
+  })
+
+  // C-4: the codex path strips ``<proposed_plan>`` from the answer, so the
+  // card's ``detail`` is the only place the plan is visible.
+  test("shows a non-empty plan body below the question", async () => {
+    const frame = await render(request(["Yes, implement this plan"], "## Plan\n1. add x"), 24)
+
+    expect(frame).toContain("## Plan")
+    expect(frame).toContain("1. add x")
+  })
+
+  test("clips the plan body at 15 lines and ends with …", async () => {
+    const detail = Array.from({ length: 20 }, (_, index) => `step ${index + 1}`).join("\n")
+    const frame = await render(request([], detail), 40)
+
+    expect(frame).toContain("step 15")
+    expect(frame).not.toContain("step 16")
+    expect(frame).toContain("…")
   })
 })

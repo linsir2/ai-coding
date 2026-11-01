@@ -483,11 +483,18 @@ class AIConfig(BaseModel):
     # done/deadlock; an operator who wants a ceiling can still set one.
     plan_max_step_turns: int = 0
     # ---- plan executor selection --------------------------------------
-    #: Which plan executor `/plan run` uses.  ``session`` (default) is
-    #: Plan-as-Goal: the whole plan runs in one turn on the parent session, so
-    #: the transcript is the continuity (no step session ever replaces it).
-    #: ``legacy`` keeps the one-short-session-per-step runner (escape hatch).
-    plan_orchestrator: Literal["session", "legacy"] = "session"
+    #: Which plan executor `/plan run` uses.  ``session`` (default for now; the
+    #: next batch flips it) is Plan-as-Goal: the whole plan runs in one turn on
+    #: the parent session, so the transcript is the continuity (no step session
+    #: ever replaces it).  ``legacy`` keeps the one-short-session-per-step runner
+    #: (escape hatch).  ``codex`` is the Codex-parity path (``update_plan`` and
+    #: no executor-side receipts/reports).
+    plan_orchestrator: Literal["codex", "session", "legacy"] = "session"
+    #: C-0: codex path only.  False keeps Codex's ``update_plan`` schema
+    #: (``step``/``status``); True additionally accepts an optional per-step
+    #: ``verify`` and runs the item-boundary acceptance inside ``update_plan``.
+    #: The ``session`` path keeps its own ``verify`` handling either way.
+    plan_verify_items: bool = False
     #: Episode-wide token ceiling for one plan run; 0 disables.  The ``session``
     #: executor does not check it: a spend cap mid turn buys an interruption,
     #: not safety (context is bounded by compaction).  Kept separate from

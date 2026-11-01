@@ -180,6 +180,12 @@ class ToolContext:
     #: session.  ``todo_write`` freezes the plan contract (add/verify/content)
     #: for its duration; status/evidence updates stay allowed.
     plan_executing: bool = False
+    #: C-0/C-1: the codex path's item-boundary acceptance switch.  When True,
+    #: ``update_plan`` accepts an optional per-step ``verify`` and runs it when
+    #: the step is marked completed.  False keeps Codex's schema (step/status)
+    #: and skips acceptance; the ``session`` path verifies through
+    #: ``todo_write`` instead.
+    plan_verify_items: bool = False
     #: Plan-as-Goal: run one item's proof command at the moment the model marks
     #: it completed.  ``(item_id, statement, command) -> (passed, output tail)``.
     #: Present only while a plan turn runs; ``None`` elsewhere, where the tool

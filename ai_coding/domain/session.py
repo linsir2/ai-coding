@@ -284,6 +284,16 @@ class SessionData:
     # whole turn (the plan was approved as written); status/evidence updates
     # stay allowed.
     plan_executing: bool = False
+    # NOT persisted.  C-2/C-3 (codex path): this turn is the one Codex sends for
+    # an approved plan (the literal "Implement the plan." prompt).  In-process
+    # only -- ``to_dict`` is a whitelist, so a crash during it resumes as an
+    # ordinary turn, which is what Codex does too (it has no cross-process
+    # plan-turn recovery).
+    plan_implementing: bool = False
+    # NOT persisted.  C-0/C-1: the codex path's item-boundary acceptance
+    # switch, mirrored onto the session for the duration of one run.  Same
+    # lifetime as ``plan_implementing``.
+    plan_verify_items: bool = False
     # NOT persisted.  The one deadline every ``process_input`` call of the same
     # plan item shares, so N attempts cannot each spend a fresh wall clock.
     # ``None`` means "each turn gets its own".

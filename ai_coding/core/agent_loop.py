@@ -511,6 +511,7 @@ class AgentLoop:
                 tuple[Rule, ...],
                 str,
                 tuple[str, ...],
+                bool,
             ],
             list[dict[str, Any]],
         ] = {}
@@ -1070,6 +1071,12 @@ class AgentLoop:
                     mode=session.mode,
                     readonly=session.readonly,
                     plan_executing=bool(getattr(session, "plan_executing", False)),
+                    plan_implementing=bool(
+                        getattr(session, "plan_implementing", False)
+                    ),
+                    plan_review_available=bool(
+                        "present_plan" in self.tools.list_names()
+                    ),
                     intervention_ledger=self._settled_interventions(
                         session, task, snapshot
                     ),
@@ -1388,6 +1395,12 @@ class AgentLoop:
                         mode=session.mode,
                         readonly=session.readonly,
                         plan_executing=bool(getattr(session, "plan_executing", False)),
+                        plan_implementing=bool(
+                            getattr(session, "plan_implementing", False)
+                        ),
+                        plan_review_available=bool(
+                            "present_plan" in self.tools.list_names()
+                        ),
                         intervention_ledger=self._settled_interventions(
                             session, task, snapshot
                         ),
@@ -1712,7 +1725,10 @@ class AgentLoop:
         shared_deadline = getattr(session, "item_deadline", None)
         if shared_deadline is not None:
             deadline = shared_deadline
-        elif getattr(session, "plan_executing", False):
+        elif (
+            getattr(session, "plan_executing", False)
+            or getattr(session, "plan_implementing", False)
+        ):
             # Plan-as-Goal: the plan turn owns no wall clock.  What bounds it is
             # the item list, the context window (compaction per iteration) and
             # the idle brake -- a per-turn clock would cut a long plan mid-item,
@@ -2341,14 +2357,22 @@ class AgentLoop:
                 # Plan-as-Goal: the proof command runs when the model marks the
                 # item completed, inside this same batch/turn.  Outside a plan
                 # turn there is no callback and the tool keeps the old shape.
+                # C-0/C-1: the codex path opts into the same item-boundary check
+                # via ``plan_verify_items`` instead of ``plan_executing``.
                 verify_item=(
                     (
                         lambda item_id, statement, command: self._verify_plan_item(
                             session, item_id, statement, command
                         )
                     )
-                    if session.plan_executing
+                    if (
+                        getattr(session, "plan_executing", False)
+                        or getattr(session, "plan_verify_items", False)
+                    )
                     else None
+                ),
+                plan_verify_items=bool(
+                    getattr(session, "plan_verify_items", False)
                 ),
             ),
             deadline=deadline,
@@ -2404,7 +2428,14 @@ class AgentLoop:
             # this event -- a write the frontend never hears about is a plan it
             # never shows.  (During planning, todo_write is prompt-banned, so
             # nothing else would emit it either.)
-            item.call.name in ("todo_write", "start_goal", "update_goal", "present_plan")
+            item.call.name
+            in (
+                "todo_write",
+                "start_goal",
+                "update_goal",
+                "present_plan",
+                "update_plan",
+            )
             for item in outcomes
         ):
             self._emit(TaskUpdated(task=task))
@@ -2508,7 +2539,10 @@ class AgentLoop:
         """
         ceiling = (
             -1
-            if bool(getattr(session, "plan_executing", False))
+            if (
+                bool(getattr(session, "plan_executing", False))
+                or bool(getattr(session, "plan_implementing", False))
+            )
             else int(self.policy.config.max_iterations)
         )
         if ceiling < 0:
@@ -3342,6 +3376,9 @@ class AgentLoop:
                 agent_rules,
                 _armed_profile(session),
                 tuple(getattr(session, "loaded_tools", ()) or ()),
+                plan_implementing=bool(
+                    getattr(session, "plan_implementing", False)
+                ),
             ),
         )
 
@@ -3353,6 +3390,8 @@ class AgentLoop:
         agent_rules: tuple[Rule, ...] = (),
         armed: str = "",
         loaded: tuple[str, ...] = (),
+        *,
+        plan_implementing: bool = False,
     ) -> tuple[str, ...]:
         """The tool names the methods section should speak for.
 
@@ -3365,7 +3404,8 @@ class AgentLoop:
         return tuple(
             tool.name
             for tool in self._surface_tools(
-                mode, readonly, session_rules, agent_rules, armed, loaded
+                mode, readonly, session_rules, agent_rules, armed, loaded,
+                plan_implementing=plan_implementing,
             )
         )
 
@@ -3378,6 +3418,8 @@ class AgentLoop:
         armed: str = "",
         loaded: tuple[str, ...] = (),
         include_deferred: bool = False,
+        *,
+        plan_implementing: bool = False,
     ) -> list[BaseTool]:
         """The tools this request may call, in the registry's own order.
 
@@ -3392,6 +3434,11 @@ class AgentLoop:
         at dispatch, where the model can read which resource it hit.
         """
         tools = list(self.tools.all_tools)
+        # C-3: Codex has no ``todo_write``; during the implementation turn the
+        # plan lives in ``update_plan`` alone, so the legacy list tool is not
+        # advertised (two writers of one TaskState would split-brain it).
+        if plan_implementing:
+            tools = [tool for tool in tools if tool.name != "todo_write"]
         if armed == "plan":
             tools = [tool for tool in tools if tool.name not in GOAL_TOOL_NAMES]
         if mode != "plan":
@@ -3460,6 +3507,9 @@ class AgentLoop:
                 self._agent_rules(session),
                 _armed_profile(session),
                 include_deferred=True,
+                plan_implementing=bool(
+                    getattr(session, "plan_implementing", False)
+                ),
             )
             if tool.defer
         )
@@ -3500,6 +3550,10 @@ class AgentLoop:
             # Deferred tools: which of them the session has loaded decides
             # which schemas this request carries.
             tuple(getattr(session, "loaded_tools", ()) or ()),
+            # C-3: the implementation turn drops ``todo_write``, so that fact
+            # must join the key too -- otherwise the plan round's cached
+            # catalogue would be served during the run.
+            bool(getattr(session, "plan_implementing", False)),
         )
         schemas = self._surface_cache.get(key)
         if schemas is None:
@@ -3509,8 +3563,9 @@ class AgentLoop:
                     readonly,
                     session_rules,
                     agent_rules,
+                    key[-3],
                     key[-2],
-                    key[-1],
+                    plan_implementing=key[-1],
                 )
             )
             self._surface_cache[key] = schemas

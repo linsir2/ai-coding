@@ -816,6 +816,9 @@ def make_handlers(
                 # offered only when there is something to offer, so loop
                 # doubles that predate r17/T5 stay callable for text turns
                 images=tuple(images),
+                # C-2: the codex plan path asks "implement this plan?" on this
+                # same front door; the TUI's card channel is the human.
+                user_prompt=world.user_prompt,
             )
             # D-4: the model may have armed a goal in this turn (start_goal).
             _maybe_launch_goal_run(session)

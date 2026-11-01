@@ -14,6 +14,7 @@ from typing import Any
 
 from ai_coding.app.console import ConsoleSink
 from ai_coding.app.slash import parse_slash, suggest_command
+from ai_coding.core.plan_codex import extract_proposed_plan, strip_proposed_plan
 from ai_coding.domain.loop import TurnStatus
 from ai_coding.domain.stance import PostureResult
 from ai_coding.skills.catalog import build_catalog
@@ -134,7 +135,7 @@ async def handle_input(
         before = getattr(loop, "last_outcome", None)
         answer = await run_human_turn(
             loop, session, text, console=console,
-            on_delta=console.delta, observer=observer,
+            on_delta=console.delta, observer=observer, user_prompt=user_prompt,
         )
         # E4: the turn's own note -- the plan guard's "no plan was
         # submitted", the withdrawal's "the approval was taken back".  The
@@ -513,6 +514,7 @@ async def _handle_plan(
 
     rest = raw[len("/plan"):].strip()
     sub = rest.lower()
+    codex = _uses_codex(loop)
 
     if sub == "off":
         was_plan, was_readonly = session.mode == "plan", bool(session.readonly)
@@ -595,7 +597,17 @@ async def _handle_plan(
 
     if sub == "run":
         needs_exit = session.mode == "plan" or session.readonly
-        if needs_exit:
+        if codex:
+            # C-3/R11: codex executes as build work, and the posture must be
+            # written through *before* the run -- a queued flip would let the
+            # implementation turn start in plan/readonly.
+            loop.commit_posture(
+                session, agent="build", readonly=False, reason="/plan run",
+                observer=observer,
+            )
+            _save_session(sessions, session)
+            console.info("[plan] 开始执行计划。")
+        elif needs_exit:
             leaving = loop.request_posture(
                 session, agent="build", readonly=False, reason="/plan run", observer=observer
             )
@@ -637,7 +649,9 @@ async def _handle_plan(
             # approval promised the exit, and a concurrently running turn
             # (a rare user message in the same instant) reads postures only
             # at assembly/dispatch time anyway.
-            if needs_exit:
+            # C-3: the codex path already wrote the posture through above;
+            # only the session/legacy path relies on this boundary.
+            if needs_exit and not codex:
                 loop.commit_posture(
                     session,
                     agent="build",
@@ -669,10 +683,21 @@ async def _handle_plan(
             console.info("[plan] 已经是计划模式（只读）。")
             return REPLAction.CONTINUE, session
         _save_session(sessions, session)
-        console.info(
-            "[plan] 已进入计划模式（只读）。继续对话写计划；"
-            "模型完成规划后会弹出评审卡，批准即自动执行；shift+tab 返回 Build。"
-        )
+        if codex:
+            console.info(
+                "[plan] 已进入计划模式（只读）。描述主题；模型给出 <proposed_plan> "
+                "后会询问是否执行；shift+tab 返回 Build。"
+            )
+        else:
+            console.info(
+                "[plan] 已进入计划模式（只读）。继续对话写计划；"
+                "模型完成规划后会弹出评审卡，批准即自动执行；shift+tab 返回 Build。"
+            )
+        if codex:
+            # C-2: entering the mode starts a fresh plan book (once).  Re-entry
+            # (``already`` below) must not reset it -- it is one more planning
+            # round over the same aim.
+            session.begin_plan(rest)
     if not rest:
         if already:
             console.info(
@@ -681,6 +706,17 @@ async def _handle_plan(
         return REPLAction.CONTINUE, session
     if already and loop.turn_running:
         console.info("[plan] 已在计划模式；回合结束后直接描述主题即可。")
+        return REPLAction.CONTINUE, session
+
+    if codex:
+        # C-2: the codex path's planning round is the human's own words, run
+        # through the one front door (which also asks the implementation
+        # question).  No ``plan_only`` (no ``[plan]`` instruction, no old
+        # workspace gate), and no ``begin_plan`` on re-entry.
+        await run_human_turn(
+            loop, session, rest, console=console, on_delta=console.delta,
+            observer=observer, user_prompt=user_prompt,
+        )
         return REPLAction.CONTINUE, session
 
     before = getattr(loop, "last_outcome", None)
@@ -717,6 +753,7 @@ async def run_human_turn(
     on_delta: Any = None,
     observer: Any = None,
     images: tuple[Any, ...] = (),
+    user_prompt: Any = None,
 ) -> str:
     """Run one human utterance as the turn it deserves.
 
@@ -738,6 +775,30 @@ async def run_human_turn(
             **({"images": images} if images else {}),
         )
         return answer
+    if _uses_codex(loop):
+        # C-2: the codex path's planning round is the human's own words --
+        # no ``plan_only`` (that path injects a ``[plan] …`` synthetic
+        # instruction and passes the old workspace gate).  The plan comes back
+        # as a ``<proposed_plan>`` block in the assistant text.
+        answer = await loop.process_input(
+            session, text, on_delta=on_delta, observer=observer,
+            **({"images": images} if images else {}),
+        )
+        ran = await _maybe_offer_plan_implementation(
+            loop,
+            session,
+            answer,
+            console=console,
+            user_prompt=user_prompt,
+            observer=observer,
+            on_delta=on_delta,
+            images=images,
+        )
+        # Display only: the block itself is the ask card's detail.  The
+        # transcript keeps the original message.  When the approved plan ran,
+        # the plan text already streamed; printing it again would land after
+        # the execution output.
+        return "" if ran else strip_proposed_plan(answer)
     from ai_coding.core.plan_runner import plan_only
 
     report = await plan_only(
@@ -747,6 +808,60 @@ async def run_human_turn(
     if report.stopped:
         console.error(f"[plan] {report.stopped}")
     return ""
+
+
+def _uses_codex(loop: Any) -> bool:
+    """True when this loop's plan orchestrator is the Codex-parity path."""
+    settings = getattr(loop, "settings", None)
+    return (
+        str(getattr(settings, "plan_orchestrator", "session") or "session")
+        == "codex"
+    )
+
+
+async def _maybe_offer_plan_implementation(
+    loop: Any,
+    session: Any,
+    answer: Any,
+    *,
+    console: ConsoleSink,
+    user_prompt: Any,
+    observer: Any,
+    on_delta: Any = None,
+    images: tuple[Any, ...] = (),
+) -> bool:
+    """C-2: a finished plan turn asks once whether to implement it.
+
+    The question belongs here, not in ``_handle_plan``: this is the single
+    front door for both ``/plan <topic>`` and an ordinary utterance in plan
+    mode.  No plan block, or no human to ask, changes nothing.  Returns True
+    when the implementation turn ran.
+    """
+    plan = extract_proposed_plan(answer)
+    if not plan or user_prompt is None:
+        return False
+    ans = await user_prompt.ask(
+        "Implement this plan?",
+        ("Yes, implement this plan", "No, stay in Plan mode"),
+        detail=plan,
+        intent="plan_implement",
+        data={"plan": plan},
+    )
+    if not (ans.answered and str(ans.text).strip().lower().startswith("yes")):
+        return False
+    # C-3/R11: execution is build work -- write the posture through now, not
+    # in a ``finally`` after the run (a queued flip would let the turn start
+    # as plan/readonly).
+    loop.commit_posture(
+        session, agent="build", readonly=False, reason="plan implement",
+        observer=observer,
+    )
+    from ai_coding.core.plan_executor import plan_runner_for
+
+    await plan_runner_for(loop).run(
+        session, console, on_delta=on_delta, observer=observer
+    )
+    return True
 
 
 def _handle_readonly(

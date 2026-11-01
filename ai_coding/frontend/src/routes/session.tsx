@@ -39,7 +39,6 @@ import { useToast } from "../component/toast"
 import { theme } from "../theme/tokens"
 import { escStep } from "../util/esc"
 import { historyRewriteTitle, reloadTarget } from "../util/history"
-import { shouldDispatchPlanRun } from "../util/plan-run"
 import { loadSession, resumeSession } from "../state/replay"
 import type { AskRequest } from "../util/ask"
 import type { PermissionDecision, PermissionRequest } from "../util/permission"
@@ -124,10 +123,6 @@ export function Session(props: SessionProps) {
   const [suggesting, setSuggesting] = createSignal(false)
   let transcript: ScrollBoxRenderable | undefined
   let interruptTimer: ReturnType<typeof setTimeout> | undefined
-  // 19 §3.3: set when the review card answers approve; the run dispatches at
-  // the next terminal turn.finished (the review tool blocks until the answer,
-  // so that event is the first moment the runner can legally start).
-  let pendingPlanRun = false
 
   const disarmInterrupt = () => {
     if (interruptTimer !== undefined) {
@@ -668,33 +663,15 @@ export function Session(props: SessionProps) {
             void refreshPosture()
           }
         }
-        // 19 §3.3: an approved plan starts executing here — the mode disarm
-        // already landed with the turn's close, so the internal run command
-        // finds an idle loop.  The echo line mirrors the /review dispatch.
-        //
-        // W2/R11: the approval is a yes to *this* plan, and the turn that
-        // carried it is what the plan was written against.  A turn that did
-        // not end cleanly (aborted / error / timeout / budget /
-        // max_iterations / stopped) left the session somewhere else, so the
-        // run is not dispatched from it.  The approval itself is still
-        // consumed -- the pending flag is the approval's record, and the
-        // plan stays armed on the task for the boot resume to decide.
-        let ranPlanRun = false
-        const approved = pendingPlanRun
-        pendingPlanRun = false
-        if (shouldDispatchPlanRun(approved, event.data["status"])) {
-          ranPlanRun = true
-          // 内化批次: silent — the run's own receipts and the posture notice
-          // are the story; no "┃ /plan run" line dresses it as user input.
-          dispatch("/plan run", [], false)
-        }
-        // One queued line per finished turn (deferred when the plan run won
-        // this end-of-turn slot, or when the ending was not this turn's --
-        // the prelude's terminal lands while the prompt is still running).
-        // The server row goes with it, best-effort: a local-only row has
-        // nothing to delete and the server ignores ids it never saw, so both
-        // kinds dispatch exactly the same way.
-        const next = ranPlanRun || state.busy ? undefined : state.queued[0]
+        // C-4: the codex plan path no longer auto-dispatches ``/plan run``
+        // from the end of a turn -- implementation is offered by the
+        // ``plan_implement`` card and started by the backend.  One queued
+        // line per finished turn (deferred when the ending was not this
+        // turn's -- the prelude's terminal lands while the prompt is still
+        // running).  The server row goes with it, best-effort: a local-only
+        // row has nothing to delete and the server ignores ids it never saw,
+        // so both kinds dispatch exactly the same way.
+        const next = state.busy ? undefined : state.queued[0]
         if (next !== undefined) {
           apply({ kind: "queued-dispatched" })
           void props.client
@@ -869,14 +846,11 @@ export function Session(props: SessionProps) {
               >
                 <PlanReviewPanel
                   request={request()}
-                  onAnswer={(answer, intent) => {
-                    // C: the panel says what it meant; we no longer re-parse the
-                    // answer to find out.  A dismiss also CLEARS a pending run:
-                    // the turn may have been approved once already, and esc on a
-                    // second card must not leave the earlier approval to fire.
-                    pendingPlanRun = intent === "approve"
-                    props.onAskAnswer(answer)
-                  }}
+                  // C-4: the review card only serves the session path now;
+                  // codex implementation is offered by the generic
+                  // ``plan_implement`` card (ask.tsx renders its plan body),
+                  // so the answer needs no local run bookkeeping.
+                  onAnswer={(answer) => props.onAskAnswer(answer)}
                 />
               </Show>
             )}

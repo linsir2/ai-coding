@@ -1474,7 +1474,19 @@ async def test_plan_mode_finishes_without_nudging_open_items(tmp_path):
     the guarded reason; the task gate still never speaks."""
     engine = ScriptedEngine([_text("done"), _text("done again")])
     sessions = SessionService(tmp_path / "sessions")
-    loop = _loop(engine, sessions, settings=_settings(stop_policy="todo_aware"))
+    # C-2: the submission guard only exists where ``present_plan`` does (the
+    # loop derives ``plan_review_available`` from the surface).  This test is
+    # about the guard's remedy, so the tool must be on offer -- it is never
+    # called here.
+    from ai_coding.security.user_prompt import UnavailableUserPromptCallback
+    from ai_coding.tools.present_plan_tool import PresentPlanTool
+
+    loop = _loop(
+        engine,
+        sessions,
+        _registry(PresentPlanTool(UnavailableUserPromptCallback())),
+        settings=_settings(stop_policy="todo_aware"),
+    )
     session = sessions.create()
     session.agent = "plan"
     session.task = TaskState(goal="g")

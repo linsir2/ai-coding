@@ -73,6 +73,18 @@ _FILES_BLOCK_MIN_TOKENS = 150
 _FILE_TOKENS_CAP = 5_000
 _DIR_ENTRIES = 200
 
+#: C-2 (codex path): the one volatile instruction a plan turn carries.  It goes
+#: in the tail, before the task slot, so the model reads it as this request's
+#: instruction -- never in the history (compaction could eat it) and never on
+#: the ``session``/``legacy`` paths, which still use ``present_plan``.
+PLAN_MODE_BLOCK = (
+    "<plan-mode>Plan mode: read-only research. Do not edit files or run mutating "
+    "commands. Ask the user with ask_user when a decision is required. When the "
+    "spec is complete, output exactly one <proposed_plan> ... </proposed_plan> "
+    "block and stop. Do not execute the plan, and do not ask \"should I "
+    "proceed\".</plan-mode>"
+)
+
 
 def human_utterance(messages: Sequence[ChatMessage]) -> str:
     """The last thing a *human* wrote -- one criterion for every reader.
@@ -392,8 +404,26 @@ class RequestAssembler:
             if self._build_instructions is not None
             else None
         )
-        injection = self._active_policy().inject_task(task, instructions)
-        instructions = injection.instructions
+        # C-2/C-3 (codex path): the executor is selected per loop; the assembler
+        # reads the same setting.  ``session``/``legacy`` keep the old path
+        # byte-for-byte (task block injected; ``present_plan`` does the review).
+        orchestrator = str(
+            getattr(self._settings, "plan_orchestrator", "session") or "session"
+        )
+        codex = orchestrator == "codex"
+        suppress_task = codex and (
+            session.mode == "plan"
+            or bool(getattr(session, "plan_implementing", False))
+        )
+        # R3: codex has no ``<task-state>`` in a plan turn (the plan is text in
+        # the transcript; during implementation the model reads its own
+        # ``update_plan`` history).  An empty list would otherwise inject a
+        # "no items" block Codex never sends.
+        injection = None
+        if not suppress_task:
+            injection = self._active_policy().inject_task(task, instructions)
+            instructions = injection.instructions
+        task_message = injection.message if injection is not None else None
         # B3: the plan turn's "keep going" block.  Volatile like the task list
         # (rebuilt per request, never persisted), so the structural continuation
         # still gives the model a fresh reason to act.
@@ -497,7 +527,11 @@ class RequestAssembler:
                 # it -- the checkpoint stores conclusions, this stores evidence.
                 volatile_block("read_ledger", render_read_ledger(session.read_ledger)),
                 volatile_block("mcp_catalog", catalog),
-                volatile_block("task", content_of(injection.message)),
+                volatile_block(
+                    "plan_mode",
+                    PLAN_MODE_BLOCK if codex and session.mode == "plan" else "",
+                ),
+                volatile_block("task", content_of(task_message)),
                 volatile_block("plan_state", content_of(plan_state)),
                 volatile_block("recommended_skills", recommended_skills_block),
                 volatile_block("referenced_files", file_block),

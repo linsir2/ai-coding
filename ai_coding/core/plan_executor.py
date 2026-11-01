@@ -56,11 +56,17 @@ def plan_runner_for(loop: Any) -> Any:
 
     * ``session`` (default) — Plan-as-Goal: every round runs on the parent
       session, so the plan's transcript is the continuity;
+    * ``codex`` — Codex parity: one ordinary turn whose prompt is
+      ``"Implement the plan."`` (no receipts, no report);
     * ``legacy`` — the pre-existing runner that gives every item its own short
       session and turn (kept as the escape hatch).
     """
     settings = getattr(loop, "settings", None)
     name = str(getattr(settings, "plan_orchestrator", "session") or "session")
+    if name == "codex":
+        from ai_coding.core.plan_codex import CodexPlanRunner
+
+        return CodexPlanRunner(loop)
     if name == "legacy":
         from ai_coding.core.plan_runner import PlanRunner
 

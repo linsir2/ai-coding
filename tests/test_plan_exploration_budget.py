@@ -111,6 +111,12 @@ class _ScriptedEngine(ChatEngine):
 def _loop(engine: ChatEngine, sessions: SessionService, **kwargs: Any) -> AgentLoop:
     registry = ToolRegistry()
     registry.register(_Peek())
+    # C-2: the guard whose early ask these tests pin is only consulted where
+    # ``present_plan`` is on offer.  Registered, never called (no human).
+    from ai_coding.security.user_prompt import UnavailableUserPromptCallback
+    from ai_coding.tools.present_plan_tool import PresentPlanTool
+
+    registry.register(PresentPlanTool(UnavailableUserPromptCallback()))
     kwargs.setdefault("settings", AIConfig())
     return AgentLoop(
         engine,

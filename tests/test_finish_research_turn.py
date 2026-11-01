@@ -93,6 +93,14 @@ def _loop(
 ) -> AgentLoop:
     registry = ToolRegistry()
     registry.register(tool if tool is not None else _FinishResearch())
+    # C-2: the plan submission guard is only consulted where ``present_plan``
+    # is on offer (the loop derives ``plan_review_available`` from the
+    # surface).  These tests are about that guard, so it must be registered;
+    # it is never called -- the human channel is unavailable here.
+    from ai_coding.security.user_prompt import UnavailableUserPromptCallback
+    from ai_coding.tools.present_plan_tool import PresentPlanTool
+
+    registry.register(PresentPlanTool(UnavailableUserPromptCallback()))
     return AgentLoop(
         engine,
         sessions,

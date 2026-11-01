@@ -26,6 +26,16 @@ import { PROMPT_BORDER } from "./prompt"
 /** C3: the row that opens the free-text input (the model's options cannot be complete). */
 export const ASK_OTHER_OPTION = "其他（自己填写）"
 
+/** C-4: how much of a plan body the generic card shows above its options. */
+export const ASK_DETAIL_MAX_LINES = 15
+
+/** C-4: the plan body, clipped so a long plan cannot push the answers off-screen. */
+export function askDetail(detail: string): string {
+  const lines = detail.split("\n")
+  if (lines.length <= ASK_DETAIL_MAX_LINES) return detail
+  return [...lines.slice(0, ASK_DETAIL_MAX_LINES), "…"].join("\n")
+}
+
 export function AskPanel(props: {
   request: AskRequest
   onAnswer: (answer: string) => void
@@ -106,6 +116,11 @@ export function AskPanel(props: {
         ◆ Question
       </text>
       <text fg={theme.textBase}>{props.request.question}</text>
+      {/* C-4: the codex path strips ``<proposed_plan>`` from the answer, so
+          this card is the only place the plan itself is shown. */}
+      <Show when={props.request.detail}>
+        <text fg={theme.textMuted}>{askDetail(props.request.detail)}</text>
+      </Show>
       <Show when={options().length > 0} fallback={
         <box flexDirection="row" marginTop={1}>
           <text fg={theme.textMuted}>{"› "}</text>

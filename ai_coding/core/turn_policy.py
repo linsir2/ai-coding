@@ -228,6 +228,14 @@ class TurnSnapshot:
     #: no iteration ceiling, is never nudged to use tools, and its continuation
     #: belongs to the loop's structural rule.
     plan_executing: bool = False
+    #: C-2/C-3 (codex path): this turn is the codex plan-implementation turn
+    #: (``session.plan_implementing``).  It has no iteration ceiling and is
+    #: never nudged/continued: a stopped model ends the turn.
+    plan_implementing: bool = False
+    #: C-2: is the plan review tool on offer (``present_plan`` in the tool
+    #: surface)?  When it is not (the codex path), the plan submission guard
+    #: has nothing to ask for and is skipped -- it would nudge forever.
+    plan_review_available: bool = True
     # R6b: how the tool calls have been going.  Fed in by the loop — the policy
     # never counts anything itself, so it stays pure and table-testable.
     failed_streak: int = 0  # consecutive iterations where every call failed
@@ -438,7 +446,13 @@ class TurnPolicy:
                 )
         # A plan turn has no iteration ceiling: what bounds it is the item list,
         # the context window and the two brakes.  Normal turns keep theirs.
-        ceiling = -1 if snapshot.plan_executing else int(self.config.max_iterations)
+        # C-3: a codex implementation turn has no ceiling either -- Codex's turn
+        # is bounded by its own structural continuation, not by a step count.
+        ceiling = (
+            -1
+            if snapshot.plan_executing or snapshot.plan_implementing
+            else int(self.config.max_iterations)
+        )
         if ceiling >= 0 and snapshot.iteration > ceiling:
             # C3: the budget is gone but the work is not — open items mean the
             # model never finished, so inject a continuation prompt and start a
@@ -581,6 +595,10 @@ class TurnPolicy:
             # guard demanding a plan from a read-only session) must not come
             # back through this seam.
             if snapshot.mode == "plan":
+                # C-2: the codex path has no ``present_plan``, so there is no
+                # submission to chase; running the guard would nudge forever.
+                if not snapshot.plan_review_available:
+                    return TurnDecision(TurnAction.FINISH, "model finished")
                 # dsh's turn-stopping at our post-step seam: the stop guards
                 # run in order, the first verdict owns the decision.  Today's
                 # list is the plan submission guard (its silent-COMPLETED
@@ -597,6 +615,12 @@ class TurnPolicy:
             # of an autonomous plan run by design -- the executor clears
             # ``session.acceptance`` and verifies at the item boundary.
             return TurnDecision(TurnAction.FINISH, "plan turn: continuation is structural")
+        if snapshot.plan_implementing:
+            # C-3: Codex's implementation turn is an ordinary turn.  It has no
+            # output of its own to continue -- the model's stop is the end, and
+            # the acceptance/task ladders must not speak (no contracts/receipts
+            # on this path).
+            return TurnDecision(TurnAction.FINISH, "codex plan turn: no structural continuation")
         if snapshot.acceptance:
             # R0-1: a turn with contracts does not end on the model's word.
             # Unchecked items fail closed (the loop verifies before asking, so

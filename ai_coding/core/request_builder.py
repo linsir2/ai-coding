@@ -105,6 +105,7 @@ def tool_context(
     agent_rules: Sequence[Rule] = (),
     write_ahead: Any = None,
     verify_item: Callable[[str, str, str], Awaitable[tuple[bool, str]]] | None = None,
+    plan_verify_items: bool = False,
 ) -> ToolContext:
     """The per-invocation context a tool receives (the dispatcher stamps call ids).
 
@@ -156,6 +157,8 @@ def tool_context(
         # plan contract (verify/content) and to refuse adding items mid-run.
         step_item_id=str(getattr(session, "step_item_id", "") or ""),
         plan_executing=bool(getattr(session, "plan_executing", False)),
+        # C-0/C-1: the codex path's item-boundary acceptance switch.
+        plan_verify_items=bool(plan_verify_items),
         # Plan-as-Goal: the proof command runs at the item boundary, inside the
         # same turn, so a failure comes back as this tool's own result.
         verify_item=verify_item,
