@@ -351,15 +351,10 @@ def _assemble_registry(
             )
         )
 
-    # C-0: the plan tool follows the executor selection.  ``codex`` gets
-    # ``update_plan`` (Codex's own plan surface); ``session``/``legacy`` keep
-    # ``present_plan`` and its review card.  Both are main-session tools:
-    # a sub-agent has no plan table.  Duck-typed configs without the field
-    # follow the shipped default (``codex``).
-    orchestrator = str(
-        getattr(app_cfg, "plan_orchestrator", "codex") or "codex"
-    )
-    if include_subagent and orchestrator == "codex":
+    # C-0: codex is the only plan path.  ``update_plan`` is the model's plan
+    # surface; a sub-agent has no plan table, so the tool stays on the main
+    # session.  ``present_plan`` and its review card are retired.
+    if include_subagent:
         from ai_coding.tools.update_plan_tool import UpdatePlanTool
 
         registry.register(
@@ -367,13 +362,6 @@ def _assemble_registry(
                 verify_items=bool(getattr(app_cfg, "plan_verify_items", False))
             )
         )
-
-    # 19 §3.2: the plan review needs a human — same gate as ask_user minus the
-    # config switch: leaving plan mode is a core interaction, not a setting.
-    if include_subagent and user_prompt is not None and orchestrator != "codex":
-        from ai_coding.tools.present_plan_tool import PresentPlanTool
-
-        registry.register(PresentPlanTool(user_prompt))
 
     # N1: the research exit.  It needs no human (it asks nobody), so it is
     # registered wherever a plan posture can exist: the main session.  A

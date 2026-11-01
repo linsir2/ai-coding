@@ -107,7 +107,7 @@ def _loop(engine, tmp_path):
         SessionService(tmp_path / "sessions"),
         registry,
         approval=AutoApproveCallback(),
-        settings=AIConfig(plan_orchestrator="codex"),
+        settings=AIConfig(),
         workspace=str(tmp_path / "ws"),
     )
 

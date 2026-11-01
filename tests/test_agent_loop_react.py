@@ -23,7 +23,6 @@ from ai_coding.core.events import (
     ToolStarted,
     TurnFinished,
 )
-from ai_coding.core.plan_runner import continuations_disabled
 from ai_coding.core.turn_policy import TASK_MESSAGE_LEAD
 from ai_coding.domain.loop import StepResult, TurnStatus
 from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolResult
@@ -651,92 +650,6 @@ async def test_task_updated_event_emitted(tmp_path):
     updated = observer.of_type(TaskUpdated)
     assert len(updated) == 1
     assert [i.content for i in updated[0].task.items] == ["one"]
-
-
-@pytest.mark.asyncio
-async def test_present_plan_emits_task_updated_with_the_approved_items(tmp_path):
-    """P1/P2 (trace ec89d5ee): approval writes the submitted items into the
-    task, and the frontend's plan card is driven by TaskUpdated — a write the
-    card never hears about is a plan it never shows."""
-    from ai_coding.security.user_prompt import UserAnswer
-    from ai_coding.tools.present_plan_tool import PresentPlanTool
-
-    class _Approve:
-        async def ask(self, question, options=(), *, detail="", intent="", data=None):
-            return UserAnswer(answered=True, text='{"choice":"approve"}')
-
-    engine = ScriptedEngine(
-        [
-            _calls(
-                _ref(
-                    "c1",
-                    "present_plan",
-                    '{"plan":"# p","items":[{"content":"建目录","verify":"true"}]}',
-                )
-            ),
-            _text("done"),
-        ]
-    )
-    sessions = SessionService(tmp_path / "sessions")
-    observer = RecordingObserver()
-    loop = _loop(engine, sessions, _registry(PresentPlanTool(_Approve())), observer=observer)
-
-    session = sessions.create()
-    session.agent = "plan"
-    session.readonly = True
-    await loop.process_input(session, "go")
-
-    updated = observer.of_type(TaskUpdated)
-    assert len(updated) == 1
-    assert [item.content for item in updated[0].task.items] == ["建目录"]
-    assert updated[0].task.items[0].verify == "true"
-
-
-@pytest.mark.asyncio
-async def test_approval_starts_a_fresh_episode_ledger(tmp_path):
-    """R10: approval is a new plan episode end-to-end -- the stale counters
-    and the session's ladder windows clear through the loop's own wiring,
-    not just in the tool's unit test."""
-    from ai_coding.security.user_prompt import UserAnswer
-    from ai_coding.tools.present_plan_tool import PresentPlanTool
-
-    class _Approve:
-        async def ask(self, question, options=(), *, detail="", intent="", data=None):
-            return UserAnswer(answered=True, text='{"choice":"approve"}')
-
-    engine = ScriptedEngine(
-        [
-            _calls(
-                _ref(
-                    "c1",
-                    "present_plan",
-                    '{"plan":"# p","items":[{"content":"建目录"}]}',
-                )
-            ),
-            _text("done"),
-        ]
-    )
-    sessions = SessionService(tmp_path / "sessions")
-    loop = _loop(engine, sessions, _registry(PresentPlanTool(_Approve())))
-    session = sessions.create()
-    session.agent = "plan"
-    session.readonly = True
-    session.task = TaskState(goal="g")
-    session.task.rounds_run = 7
-    session.task.resume_count = 3
-    session.task.tokens_used = 1234
-    session.intervention_state = {"strategy": {"level": 1, "outcome": "pending"}}
-
-    await loop.process_input(session, "go")
-
-    assert session.task is not None
-    assert session.task.armed is True and session.task.armed_profile == "plan"
-    assert (
-        session.task.rounds_run,
-        session.task.resume_count,
-        session.task.tokens_used,
-    ) == (0, 0, 0)
-    assert session.intervention_state is None
 
 
 @pytest.mark.asyncio
@@ -1466,82 +1379,6 @@ async def test_a_goal_with_items_survives_a_follow_up_message(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_plan_mode_finishes_without_nudging_open_items(tmp_path):
-    """18 §10.5 (R4): the execution gates are silent under a posture — the
-    snapshot carries ``mode`` off the session, so this must hold end-to-end.
-    stage 4 r2: the plan SUBMISSION guard is not an execution gate — no plan
-    was ever submitted, so it spends its one remedy and then finishes with
-    the guarded reason; the task gate still never speaks."""
-    engine = ScriptedEngine([_text("done"), _text("done again")])
-    sessions = SessionService(tmp_path / "sessions")
-    # C-2: the submission guard only exists where ``present_plan`` does (the
-    # loop derives ``plan_review_available`` from the surface).  This test is
-    # about the guard's remedy, so the tool must be on offer -- it is never
-    # called here.
-    from ai_coding.security.user_prompt import UnavailableUserPromptCallback
-    from ai_coding.tools.present_plan_tool import PresentPlanTool
-
-    loop = _loop(
-        engine,
-        sessions,
-        _registry(PresentPlanTool(UnavailableUserPromptCallback())),
-        settings=_settings(stop_policy="todo_aware"),
-    )
-    session = sessions.create()
-    session.agent = "plan"
-    session.task = TaskState(goal="g")
-    session.task.add("still open")
-
-    await loop.process_input(session, "go")
-
-    assert len(engine.requests) == 2  # the remedy round
-    assert not [m for m in session.messages if "[task-gate]" in (m.content or "")]
-    reminders = [
-        m
-        for m in session.messages
-        if m.synthetic and "present_plan" in (m.content or "")
-    ]
-    assert len(reminders) == 1
-    assert loop.last_outcome is not None
-    assert loop.last_outcome.reason == "plan unsubmitted"
-
-
-@pytest.mark.asyncio
-async def test_plan_mode_does_not_refresh_a_bare_goal(tmp_path):
-    """18 §10.5 (R5): the goal topic belongs to the planning axis — a new turn
-    in plan mode must not steal it with its own instruction.  stage 4 r2:
-    each bare-text ending spends the guard's one remedy, so the script gets
-    a second step per turn (the remedy round)."""
-    engine = ScriptedEngine(
-        [_text("你好呀"), _text("好的"), _text("这是回答"), _text("收到")]
-    )
-    sessions = SessionService(tmp_path / "sessions")
-    # C-2: the plan submission guard (and its remedy round) only exists where
-    # ``present_plan`` is on offer; this test pins that round's task block.
-    from ai_coding.security.user_prompt import UnavailableUserPromptCallback
-    from ai_coding.tools.present_plan_tool import PresentPlanTool
-
-    loop = _loop(
-        engine,
-        sessions,
-        _registry(PresentPlanTool(UnavailableUserPromptCallback())),
-        # This test pins the *session* path's task block; the codex path
-        # deliberately injects neither <task-state> nor <plan-mode>.
-        settings=_settings(plan_orchestrator="session"),
-    )
-    session = sessions.create()
-    session.agent = "plan"
-
-    await loop.process_input(session, "你好")
-    await loop.process_input(session, "你的编排层怎么设计的")
-
-    last = _task_blocks(engine)
-    assert len(last) == 1
-    assert "目标: 你好" in last[0]
-    assert "你的编排层怎么设计的" not in last[0]
-
-
-@pytest.mark.asyncio
 async def test_readonly_hides_mutating_tools_from_the_request(tmp_path):
     """只读探索批次: the schema list mirrors the dispatch gate's own predicate
     (``mutates_world``) -- what the gate would refuse is never advertised, so
@@ -1616,20 +1453,3 @@ async def test_an_armed_goal_keeps_its_objective_through_a_turn(tmp_path):
     await loop.process_input(session, "[goal] 第 1/20 轮 · 目标：迁移 X")
 
     assert session.task.goal == "迁移 X"
-
-
-@pytest.mark.asyncio
-async def test_the_request_assembler_reads_the_swapped_loop_policy(tmp_path):
-    """R01: ``continuations_disabled`` swaps ``loop.policy`` for the planning
-    round; the assembler must read through to the live object or the budget
-    block and the task injection keep the old ceiling (F-51)."""
-    engine = ScriptedEngine([_text("ok")])
-    sessions = SessionService(tmp_path / "sessions")
-    loop = _loop(engine, sessions)
-
-    with continuations_disabled(loop, max_iterations=30):
-        assert loop.assembler._active_policy().config.max_iterations == 30  # noqa: SLF001
-    assert (
-        loop.assembler._active_policy().config.max_iterations  # noqa: SLF001
-        == loop.policy.config.max_iterations
-    )

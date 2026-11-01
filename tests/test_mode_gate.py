@@ -119,11 +119,11 @@ async def test_readonly_refuses_a_mutating_tool_before_approval():
     assert result.success is False
     assert result.error == "readonly_denied"
     assert "只读" in result.output
-    # 内化批次: the denial redirects the model to the real tools and the review
-    # channel -- it used to teach the /plan family (the old assertions here
-    # pinned "/plan run" etc; the surface decision reversed them).
+    # 内化批次: the denial redirects the model to the real tools and the plan
+    # exit -- it used to teach the /plan family (the old assertions here pinned
+    # "/plan run" etc; the surface decision reversed them).
     assert "read/grep/glob" in result.output
-    assert "present_plan" in result.output
+    assert "<proposed_plan>" in result.output
     assert "/plan" not in result.output
     assert "/readonly" not in result.output
     assert tool.calls == []       # never executed
@@ -290,4 +290,4 @@ async def test_the_readonly_error_code_and_text_do_not_move():
     output = outcomes[0].result.output
     assert "只读" in output
     assert "read/grep/glob" in output
-    assert "present_plan" in output
+    assert "<proposed_plan>" in output

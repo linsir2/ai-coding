@@ -136,37 +136,6 @@ async def the_plan_directory_is_the_only_writable_place(
     return True, "plan written, workspace refused"
 
 
-async def an_outside_verify_never_reaches_the_card(root: Path) -> tuple[bool, str]:
-    """A proof the shell will run elsewhere is refused before the human sees it."""
-    from ai_coding.security.user_prompt import UserAnswer
-    from ai_coding.tools.present_plan_tool import PresentPlanTool
-
-    class _Prompt:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def ask(self, *a: Any, **k: Any) -> UserAnswer:
-            self.calls += 1
-            return UserAnswer(answered=True, text='{"choice":"approve"}')
-
-    prompt = _Prompt()
-    ctx = _plan_ctx(root)
-    result = await PresentPlanTool(prompt).execute(
-        {
-            "plan": "# p",
-            "items": [{"content": "read a secret", "verify": "cat /etc/passwd"}],
-        },
-        ctx,
-    )
-    if result.success:
-        return False, "the plan was approved"
-    if prompt.calls:
-        return False, "the human was asked"
-    if ctx.task.armed:
-        return False, "the task was armed"
-    return True, "refused before review"
-
-
 # ---- T8: the surface ------------------------------------------------------
 
 
@@ -322,7 +291,6 @@ CASES: dict[str, CaseFn] = {
     "the_plan_directory_is_the_only_writable_place": (
         the_plan_directory_is_the_only_writable_place
     ),
-    "an_outside_verify_never_reaches_the_card": an_outside_verify_never_reaches_the_card,
     "the_plan_request_carries_no_todo_tool": the_plan_request_carries_no_todo_tool,
     "a_dotenv_read_asks_and_an_example_does_not": (
         a_dotenv_read_asks_and_an_example_does_not
@@ -370,20 +338,6 @@ def _mutate_plan_allow_away() -> None:
         return catalog
 
     registry.builtin_catalog = patched
-
-
-def _mutate_verify_gate_away() -> None:
-    """Drop the proof check: the outside-verify case must fail."""
-    from ai_coding.tools import present_plan_tool
-
-    original = present_plan_tool.outside_workspace_paths
-
-    def prose_only(texts, workspace, *, extra_roots=(), from_shell=False):
-        if from_shell:
-            return []
-        return original(texts, workspace, extra_roots=extra_roots, from_shell=False)
-
-    present_plan_tool.outside_workspace_paths = prose_only
 
 
 def _mutate_todo_rule_away() -> None:
@@ -438,7 +392,6 @@ def _mutate_plan_call_loss() -> None:
 MUTATIONS.update(
     {
         "plan_allow": _mutate_plan_allow_away,
-        "verify_gate": _mutate_verify_gate_away,
         "todo_rule": _mutate_todo_rule_away,
         "dotenv_rule": _mutate_dotenv_rule_away,
         "plan_call": _mutate_plan_call_loss,

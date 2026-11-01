@@ -2,10 +2,9 @@
 first-turn path hint.
 
 ``outside_workspace_paths`` answers one question — "can the file tools reach
-this path?" — and three callers ask it: the plan gates (topic + written items),
-the acceptance command gate, and the first-turn hint in ``request_assembly``.
-It lives here rather than in ``core.plan_runner`` because it is not
-plan-specific: the plan module is one consumer, not the owner.
+this path?" — and three callers ask it: the workspace gates, the acceptance
+command gate, and the first-turn hint in ``request_assembly``.  It is not
+plan-specific, so it lives in its own module.
 """
 
 from __future__ import annotations

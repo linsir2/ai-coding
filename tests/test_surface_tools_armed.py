@@ -1,6 +1,6 @@
 """R21 §3: a plan round must not advertise the goal pair.
 
-A plan run arms the task as ``plan`` (``plan_runner.py`` sets it before the
+A plan run arms the task as ``plan`` (the plan path sets it before the
 first step), so ``start_goal``/``update_goal`` can only answer ``no_goal``
 there -- and did, which the transcript then drew as 未知原因（no_goal）.  The
 fix is a surface predicate, not a prompt sentence: the request must not carry

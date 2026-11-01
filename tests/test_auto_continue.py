@@ -221,54 +221,6 @@ async def test_continuations_reset_for_the_next_user_turn(tmp_path):
     assert len(engine.requests) == 8
 
 
-@pytest.mark.asyncio
-async def test_plan_step_may_continue_once_and_only_for_its_own_item(tmp_path):
-    """A plan step gets exactly one continuation, and only because it is scoped.
-
-    The step session shares the plan's task, so the open set has to be narrowed
-    to the step's own item (``session.step_item_id``, set by the runner).  With
-    that scope one continuation is safe; without it, C3 would let one step spend
-    the whole plan's remaining list -- which is why the allowance used to be 0.
-    """
-    from ai_coding.core.plan_runner import PlanRunner
-
-    seen: list[tuple[int, str]] = []
-
-    class _StubLoop:
-        def __init__(self):
-            self.settings = AIConfig(
-                stop_policy="natural", max_tool_iterations=1,
-                max_auto_continuations=3, plan_step_max_iterations=1,
-            )
-            self.policy = TurnPolicy(TurnPolicyConfig.from_ai_config(self.settings))
-
-        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
-            seen.append(
-                (self.policy.config.max_auto_continuations, session.step_item_id)
-            )
-            for item in session.task.open_items():
-                if not item.is_terminal():
-                    item.status = "completed"
-                    break
-            return "done"
-
-    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
-    task = TaskState(goal="g")
-    task.add("one")
-    task.add("two")
-    session.task = task
-
-    await PlanRunner(_StubLoop()).run(session)
-
-    assert seen and all(value == 1 for value, _ in seen), (
-        "a step gets one continuation, not the global allowance"
-    )
-    assert all(scope for _, scope in seen), (
-        "the continuation must be scoped to the item; an unscoped step would "
-        "offer the rest of the plan"
-    )
-
-
 def test_open_items_for_narrows_to_the_steps_own_item():
     """The scope ``_open_items_for`` applies: a plan step shares the plan's task,
     so its continuation must not offer the rest of the plan."""

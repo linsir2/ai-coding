@@ -1,11 +1,10 @@
-"""P0a: the shared workspace gate is its own module, not a plan-only one.
+"""P0a/P0b: the shared workspace gate is its own module, not a plan-only one.
 
 ``outside_workspace_paths``/``outside_workspace_message`` were reached through
-``core.plan_runner`` only because that is where they were first written.  The
-plan/acceptance/first-turn paths all consume them, so they move to
-``core.workspace_guard`` and the old module re-exports them.  These six cases
-pin the new contract and the re-export equivalence; behaviour itself stays
-with ``test_plan_workspace_gate.py``.
+the old plan runner only because that is where they were first written.  The
+plan/acceptance/first-turn paths all consume them, so they live in
+``core.workspace_guard``.  Behaviour itself stays with
+``test_plan_workspace_gate.py``.
 """
 
 from ai_coding.core import workspace_guard
@@ -47,24 +46,3 @@ def test_device_and_shebang_are_exempt(tmp_path):
     assert workspace_guard.outside_workspace_paths(
         ["printf '#!/usr/bin/env python3\\nprint(1)\\n' > app.py"], tmp_path
     ) == []
-
-
-def test_plan_report_is_the_same_type_from_both_modules():
-    from ai_coding.core.plan_report import PlanReport as A
-    from ai_coding.core.plan_runner import PlanReport as B
-
-    assert A is B
-
-
-def test_the_guard_functions_are_the_same_objects_from_both_modules():
-    """The old path must not grow a second implementation during the migration."""
-    from ai_coding.core import plan_runner
-
-    assert (
-        plan_runner.outside_workspace_paths
-        is workspace_guard.outside_workspace_paths
-    )
-    assert (
-        plan_runner.outside_workspace_message
-        is workspace_guard.outside_workspace_message
-    )

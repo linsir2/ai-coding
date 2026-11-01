@@ -1742,7 +1742,7 @@ async def test_session_load_rebuilds_the_plan_card(ipc):
     item = task.add("修回读", verify="true")
     item.status = "completed"
     task.armed = True
-    task.armed_profile = "plan"
+    task.armed_profile = "goal"
     session.task = task
     world.sessions.save(session)
 
@@ -1802,7 +1802,7 @@ async def test_interrupt_disarms_an_armed_task(ipc):
     task = TaskState(goal="g")
     task.add("step")
     task.armed = True
-    task.armed_profile = "plan"
+    task.armed_profile = "goal"
     session.task = task
     world.sessions.save(session)
     client.request("session.load", {"id": session_id})  # live object = the armed one
@@ -1824,7 +1824,7 @@ async def test_initialize_consumes_an_armed_session_once(ipc):
     task = TaskState(goal="g")
     task.add("step")
     task.armed = True
-    task.armed_profile = "plan"
+    task.armed_profile = "goal"
     armed.task = task
     world.sessions.save(armed)
     world.pending_resume = world.sessions.load(armed.session_id)
@@ -1858,7 +1858,7 @@ async def test_initialize_resets_a_plan_posture_before_resuming(ipc):
     task = TaskState(goal="g")
     task.add("step")
     task.armed = True
-    task.armed_profile = "plan"
+    task.armed_profile = "goal"
     armed.task = task
     armed.agent = "plan"
     armed.readonly = True
@@ -1876,62 +1876,6 @@ async def test_initialize_resets_a_plan_posture_before_resuming(ipc):
 
 
 @pytest.mark.asyncio
-async def test_boot_resume_steps_are_steps_and_the_run_ends_once(ipc):
-    """P0-3: a resumed run owes the client the same shape a command run does.
-
-    ``command_run`` is what tells the bridge that the loop's ``TurnFinished`` is
-    an inner *step* rather than the end of the run; the boot path never set it,
-    so each plan step arrived as ``turn.finished`` -- which released ``busy``,
-    drew a red turn-end marker and dispatched one queued line per step.  It also
-    emitted no terminal event of its own (the shared ``_launch_turn`` wrapper
-    only reports unhandled exceptions), so nothing ever closed the run.
-    """
-    world, _service, client = ipc
-    from ai_coding.domain.task import TaskState
-
-    armed = world.sessions.create(title="armed")
-    task = TaskState(goal="g")
-    task.add("step")
-    task.armed = True
-    task.armed_profile = "plan"
-    armed.task = task
-    armed.open_turn = 1
-    world.sessions.save(armed)
-    world.pending_resume = world.sessions.load(armed.session_id)
-
-    # One script entry per turn: the fake replays the whole script on every
-    # call, and the resumed round plus the plan step are two turns.
-    world.loop.script = [
-        lambda obs, _delta: obs.on_event(
-            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="step done"))
-        )
-    ]
-    world.loop.closer = _SavingCloser(world.sessions)
-
-    hello = client.request("initialize")
-
-    assert hello["sessionId"] == armed.session_id
-    # The shell has to know a run is actually starting: the breaker branch also
-    # answers `resumed`, and it starts nothing (nothing would release `busy`).
-    assert hello.get("resuming") is True
-    assert await client.wait_for(client.turn_finished.is_set)
-
-    types = [event["type"] for event in client.events]
-    assert types.count("turn.step") == 2, types
-    assert types.count("turn.finished") == 1, types
-    # 2026-10-17: the wall the receipt used to die on.  The runner's observer
-    # here is the REAL bridge (on_event, no __call__); the runner tests passed
-    # a bare callable, so the two layers were each green while the wiring
-    # between them emitted nothing.  One real step == one receipt, counted
-    # here through the whole chain.
-    assert types.count("plan.receipt") == 1, types
-    assert types[-1] == "turn.finished"
-    assert client.events[-1]["data"]["status"] == "completed"
-    # The task disarmed itself when the run finished (PlanRunner's finally).
-    assert world.sessions.load(armed.session_id).task.armed is False
-
-
-@pytest.mark.asyncio
 async def test_a_breaker_resume_starts_no_run(ipc):
     """The other branch of the same field: past the cap the task is disarmed and
     **no** run begins, so the shell must not sit busy over a run that will never
@@ -1943,7 +1887,7 @@ async def test_a_breaker_resume_starts_no_run(ipc):
     task = TaskState(goal="g")
     task.add("step")
     task.armed = True
-    task.armed_profile = "plan"
+    task.armed_profile = "goal"
     task.resume_count = 5
     armed.task = task
     world.sessions.save(armed)
@@ -1980,7 +1924,7 @@ async def test_boot_resume_breaker_disarms_past_the_cap(ipc):
     task = TaskState(goal="g")
     task.add("step")
     task.armed = True
-    task.armed_profile = "plan"
+    task.armed_profile = "goal"
     task.resume_count = 5
     armed.task = task
     world.sessions.save(armed)

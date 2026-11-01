@@ -154,7 +154,7 @@ class TodoWriteTool(BaseTool):
                     success=False,
                     output=(
                         "error: 只读/规划阶段不能把条目标记为 completed——完成标记由执行阶段产生。"
-                        "请保持 pending，用 present_plan 提交计划；执行交给运行器。"
+                        "请保持 pending，用 <proposed_plan> 提交计划；执行交给系统。"
                     ),
                     error="readonly_completion",
                     data={"action": "update", "reason": "readonly_session"},

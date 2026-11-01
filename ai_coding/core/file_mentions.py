@@ -19,8 +19,8 @@ from pathlib import Path
 from ai_coding.skills.registry import iter_mentions
 
 #: The extensions that name a source or document.  This is the repository's
-#: own answer to "what looks like a file path" -- the plan gate
-#: (``core/plan_runner.py``) asks the same question about the paths a plan
+#: own answer to "what looks like a file path" -- the workspace gate
+#: asks the same question about the paths a plan
 #: names, and one answer serves both.  Kept as a regex fragment (not a list)
 #: because ``_BARE_PATH`` splices it into a pattern; a caller that wants a
 #: suffix test builds its own alternation from it.

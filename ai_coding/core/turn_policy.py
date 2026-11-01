@@ -434,6 +434,7 @@ class TurnPolicy:
             )
         if (
             snapshot.mode == "plan"
+            and snapshot.plan_review_available
             and not snapshot.plan_nudged
             and not snapshot.plan_reviewed
         ):
@@ -573,7 +574,10 @@ class TurnPolicy:
         ``_note_intervention`` saw no intervention (no ``SearchStalled``) and
         the terminal note never reached the outcome.
         """
-        if snapshot.mode == "plan":
+        # C-2: the codex path has no ``present_plan``, so the guard has neither
+        # an exit to ask for nor a missing submission to report -- same flag as
+        # the post-step seam, so the two mouths cannot drift.
+        if snapshot.mode == "plan" and snapshot.plan_review_available:
             verdict = self._ask_guards(replace(snapshot, budget_path=path))
             if verdict is not None:
                 if verdict.action is TurnAction.NUDGE:

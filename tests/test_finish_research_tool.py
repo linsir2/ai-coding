@@ -81,12 +81,12 @@ async def test_it_refuses_when_the_turn_already_concluded():
     """The exits are mutually exclusive: the first one to succeed owns the
     turn, so a research conclusion after a plan submission is refused."""
     tool = FinishResearchTool()
-    conclusion = TurnConclusion(exit="present_plan")
+    conclusion = TurnConclusion(exit="finish_research")
 
     r = await tool.execute({"summary": "结论"}, _ctx(conclusion=conclusion))
 
     assert r.success is False and r.error == "already_concluded"
-    assert "present_plan" in r.output
+    assert "finish_research" in r.output
 
 
 @pytest.mark.asyncio
@@ -137,15 +137,16 @@ async def test_a_successful_conclusion_marks_the_turn_concluded():
 @pytest.mark.asyncio
 async def test_it_refuses_a_request_that_asks_for_implementation():
     """The exit answers requests that need no implementation.  A request that
-    asks for work must go through present_plan -- otherwise the plan comes
-    back where a conclusion was wanted (the malformation this exit kills)."""
+    asks for work must go through the <proposed_plan> exit -- otherwise the
+    plan comes back where a conclusion was wanted (the malformation this exit
+    kills)."""
     tool = FinishResearchTool()
     ctx = _ctx(messages=(_user("给 src/mod1.py 加一个函数"),))
 
     r = await tool.execute({"summary": "结论"}, ctx)
 
     assert r.success is False and r.error == "implementation_request"
-    assert "present_plan" in r.output
+    assert "<proposed_plan>" in r.output
 
 
 @pytest.mark.asyncio
@@ -200,7 +201,7 @@ async def test_it_ignores_the_harness_planning_instruction():
 @pytest.mark.asyncio
 async def test_it_refuses_the_obvious_implementation_requests(utterance):
     """The blunt cases, in both languages: a request that asks for work must
-    go through present_plan."""
+    go through the <proposed_plan> exit."""
     tool = FinishResearchTool()
     ctx = _ctx(messages=(_user(utterance),))
 
@@ -231,35 +232,3 @@ async def test_it_accepts_the_research_requests(utterance):
     r = await tool.execute({"summary": "结论"}, ctx)
 
     assert r.success is True
-
-
-# ---- one criterion, three places (the model must not learn two rules) -------
-
-
-def _the_three_places_that_teach_the_exits() -> tuple[str, str, str]:
-    """(the plan-mode prompt segment, PLAN_PROMPT, the tool's description)."""
-    from ai_coding.ai.prompt import PromptAssembler
-    from ai_coding.core.plan_runner import PLAN_PROMPT
-
-    segment = PromptAssembler("you are a coding assistant.").build(mode="plan")
-    return segment, PLAN_PROMPT, FinishResearchTool().description
-
-
-def test_the_three_places_teach_the_same_criterion():
-    """The plan-mode prompt, the planning prompt and the tool's own
-    description must not each tell a different story: the same two exits,
-    the same split (implementation vs no implementation), and the same change
-    verbs that make a request an implementation request."""
-    segment, plan_prompt, description = _the_three_places_that_teach_the_exits()
-    for text in (segment, plan_prompt):
-        assert "present_plan" in text
-        assert "finish_research" in text
-    # the description names the *other* exit (its own name is in the schema)
-    assert "present_plan" in description
-    for text in (segment, plan_prompt, description):
-        # the research half: a request that needs no implementation
-        assert "no implementation" in text
-        # the implementation half: the same change verbs everywhere
-        lowered = text.lower()
-        for verb in ("implement", "modify", "add", "fix", "refactor"):
-            assert verb in lowered, f"{verb} missing from {text!r}"

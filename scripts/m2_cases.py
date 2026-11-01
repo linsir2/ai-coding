@@ -221,29 +221,6 @@ async def leaving_plan_says_so(root: Path) -> tuple[bool, str]:
     return True, "withdrawn"
 
 
-async def the_planning_instruction_is_synthetic(root: Path) -> tuple[bool, str]:
-    """The planning round's instruction is the harness's, so it is marked."""
-    from ai_coding.core.plan_runner import PLAN_MARK, plan_only
-
-    world = await _world(root)
-    try:
-        session = world.sessions.create()
-        world.sessions.save(session)
-        session.agent = "plan"
-        session.readonly = True
-        await plan_only(world.loop, session, topic="build a thing")
-        instructions = [
-            m for m in session.messages if (m.content or "").startswith(PLAN_MARK)
-        ]
-        if not instructions:
-            return False, "the planning instruction was not sent"
-        if not instructions[0].synthetic:
-            return False, "the planning instruction is not synthetic"
-        return True, "synthetic"
-    finally:
-        await world.aclose()
-
-
 async def the_humans_words_are_not_the_harnesss(root: Path) -> tuple[bool, str]:
     """One rule covers the reminder and the instruction."""
     from ai_coding.core.request_assembly import human_utterance
@@ -522,7 +499,6 @@ OFFLINE: dict[str, CaseFn] = {
     "the_reminder_survives_a_crash": the_reminder_survives_a_crash,
     "a_compacted_reminder_is_put_back": a_compacted_reminder_is_put_back,
     "leaving_plan_says_so": leaving_plan_says_so,
-    "the_planning_instruction_is_synthetic": the_planning_instruction_is_synthetic,
     "the_humans_words_are_not_the_harnesss": the_humans_words_are_not_the_harnesss,
     # T6
     "the_plan_rule_produces_the_old_tool_surface": (

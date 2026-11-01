@@ -97,6 +97,35 @@ def test_a_plan_turn_without_a_review_tool_finishes_instead_of_nudging():
     assert nudged.action is TurnAction.NUDGE
 
 
+def test_a_plan_turn_without_a_review_tool_is_not_nudged_at_the_budget_edge():
+    """The guard has a second mouth: the budget edge asks for an exit while
+    another round is still possible.  A codex plan turn has no tool to submit
+    with, so the edge must not inject the submission text either."""
+    policy = TurnPolicy(TurnPolicyConfig(max_iterations=10))
+    decision = policy.decide_next_iteration(
+        TurnSnapshot(iteration=8, mode="plan", plan_review_available=False)
+    )
+    assert decision.action is TurnAction.ITERATE
+    assert decision.inject is None
+
+    # The contrast: with a review tool on offer the edge still asks.
+    edge = policy.decide_next_iteration(TurnSnapshot(iteration=8, mode="plan"))
+    assert edge.action is TurnAction.NUDGE
+
+
+def test_a_plan_turn_without_a_review_tool_is_silent_on_a_dead_budget_mouth():
+    """The clock/token mouths consult the guard for its final note; with no
+    review tool there is no unsubmitted plan to report."""
+    policy = TurnPolicy(TurnPolicyConfig())
+    decision = policy.decide_next_iteration(
+        TurnSnapshot(iteration=1, mode="plan", plan_review_available=False),
+        budget_expired=True,
+    )
+    assert decision.action is TurnAction.FINISH
+    assert decision.note == ""
+    assert decision.inject is None
+
+
 # ------------------------------------------------------- 3. iteration budget
 
 
@@ -201,7 +230,7 @@ class _Reporter:
         return 0
 
 
-def _assembler(orchestrator: str) -> RequestAssembler:
+def _assembler() -> RequestAssembler:
     async def _instructions(deadline: Any, session: Any = None) -> str | None:
         return "system instructions"
 
@@ -214,7 +243,6 @@ def _assembler(orchestrator: str) -> RequestAssembler:
         settings=SimpleNamespace(
             auto_compact=True,
             working_memory_chars=1200,
-            plan_orchestrator=orchestrator,
         ),
         emit=lambda event: None,
     )
@@ -243,7 +271,7 @@ def _task() -> TaskState:
 async def test_codex_plan_turn_carries_plan_mode_and_no_task_block():
     session = SessionData(session_id="s1", title="", created_time="", last_access_time="")
     session.agent = "plan"
-    assembled = await _assemble(_assembler("codex"), session, _task())
+    assembled = await _assemble(_assembler(), session, _task())
     bodies = "\n".join(message.content or "" for message in assembled.request)
     assert "<plan-mode>" in bodies
     assert "Implement the plan." not in bodies
@@ -258,19 +286,9 @@ async def test_codex_implementing_turn_carries_no_task_block():
     session = SessionData(session_id="s1", title="", created_time="", last_access_time="")
     session.agent = "build"
     session.plan_implementing = True
-    assembled = await _assemble(_assembler("codex"), session, _task())
+    assembled = await _assemble(_assembler(), session, _task())
     bodies = "\n".join(message.content or "" for message in assembled.request)
     assert "<task-state>" not in bodies
-    assert "<plan-mode>" not in bodies
-
-
-@pytest.mark.asyncio
-async def test_session_path_still_injects_the_task_state():
-    session = SessionData(session_id="s1", title="", created_time="", last_access_time="")
-    session.agent = "plan"
-    assembled = await _assemble(_assembler("session"), session, _task())
-    bodies = "\n".join(message.content or "" for message in assembled.request)
-    assert "<task-state>" in bodies
     assert "<plan-mode>" not in bodies
 
 
@@ -299,9 +317,7 @@ class _FakeLoop:
     """A loop double that records the order of the posture write and the turn."""
 
     def __init__(self) -> None:
-        self.settings = SimpleNamespace(
-            plan_orchestrator="codex", plan_verify_items=False
-        )
+        self.settings = SimpleNamespace(plan_verify_items=False)
         self.events: list[tuple[str, Any]] = []
         self.turn_running = False
         self.last_outcome = None

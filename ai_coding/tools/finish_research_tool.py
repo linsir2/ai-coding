@@ -44,8 +44,8 @@ _MISSING_SUMMARY = (
 )
 _IMPLEMENTATION_REQUEST = (
     "本次请求要的是实现（{verb}），不是研究结论：研究出口只回答"
-    "「找出/评估/调研」这类不需要动手的请求。请改用 present_plan 交一份"
-    "可执行计划（每步一条，含 verify 命令），人批准后由系统执行。"
+    "「找出/评估/调研」这类不需要动手的请求。请改用 <proposed_plan> "
+    "交一份可执行计划，人批准后由系统执行。"
 )
 
 #: The implementation verbs (the anti-abuse backstop).  Small on purpose: the
@@ -162,11 +162,11 @@ class FinishResearchTool(BaseTool):
             "when the request needs no implementation — a survey, an analysis, a "
             "comparison — so that no plan is submitted and nothing is executed. A "
             "request that asks for changes (implement, modify, add, fix, refactor) "
-            "needs a plan, not a conclusion: submit it with present_plan instead. "
-            "Give 'summary' as the conclusion itself (what you found and what it "
-            "means); it is what the user reads. Mutually exclusive with "
-            "present_plan: whichever you call first wins. Only available in plan "
-            "mode."
+            "needs a plan, not a conclusion: submit it as a <proposed_plan> block "
+            "instead. Give 'summary' as the conclusion itself (what you found and "
+            "what it means); it is what the user reads. Mutually exclusive with "
+            "a <proposed_plan> submission: whichever comes first wins. Only "
+            "available in plan mode."
         )
 
     @property
@@ -219,9 +219,9 @@ class FinishResearchTool(BaseTool):
         if not summary:
             return ToolResult(success=False, output=_MISSING_SUMMARY, error="missing_summary")
         # The anti-abuse backstop: this exit answers requests that need no
-        # implementation.  A request that asks for work belongs to
-        # present_plan -- a plan the human never wanted is worse than no
-        # plan at all (15 号稿 D1/D2).
+        # implementation.  A request that asks for work belongs to the
+        # <proposed_plan> plan exit -- a plan the human never wanted is worse
+        # than no plan at all (15 号稿 D1/D2).
         verb = _implementation_verb(human_utterance(ctx.session_messages))
         if verb:
             return ToolResult(

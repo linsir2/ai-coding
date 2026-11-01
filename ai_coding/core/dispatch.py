@@ -167,7 +167,7 @@ def _plan_denial_reason(
     return (
         f"计划模式下只能修改计划目录内的文件：{plan_dir}/。"
         "工作区其他文件在计划模式下只读；请把计划正文或笔记写进该目录，"
-        "或用 present_plan 提交计划。"
+        "或用 <proposed_plan> 提交计划。"
     )
 
 
@@ -840,7 +840,7 @@ class ToolDispatcher:
             success=False,
             output=(
                 "error: 只读已开启——该工具会改变工作区或状态，已拒绝。"
-                "请改用 read/grep/glob 探索；计划完成后用 present_plan 提交评审。"
+                "请改用 read/grep/glob 探索；计划完成后用 <proposed_plan> 提交。"
             ),
             error="readonly_denied",
             data={

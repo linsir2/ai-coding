@@ -435,11 +435,11 @@ class AgentLoop:
         self._current_instruction: ChatMessage | None = None
         self.default_model = default_model
         self.workspace = workspace
-        # W2/R02: the operator's declared roots, kept here because three
+        # W2/R02: the operator's declared roots, kept here because several
         # consumers ask the same reachability question and must get the same
-        # answer -- the plan gates (``core/plan_runner.py``) and the tool
-        # context that carries them into ``present_plan``.  The assembler gets
-        # its own copy below; this one is the source both read.
+        # answer -- the plan gates and the tool context that carries them.
+        # The assembler gets its own copy below; this one is the source both
+        # read.
         self.extra_workspace_roots: tuple[str, ...] = tuple(extra_workspace_roots)
         self._session_permissions: tuple[Rule, ...] = tuple(session_permissions)
         self.agents = agents

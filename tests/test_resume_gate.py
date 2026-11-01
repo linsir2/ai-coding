@@ -97,7 +97,7 @@ def _armed(world):
     task = TaskState(goal="g")
     task.add("step")
     task.armed = True
-    task.armed_profile = "plan"
+    task.armed_profile = "goal"
     session.task = task
     world.sessions.save(session)
     return session

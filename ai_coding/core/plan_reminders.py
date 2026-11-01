@@ -53,11 +53,13 @@ PLAN_ENTER_REMINDER = (
     "shell_read (one simple read-only command; no pipes or redirection); "
     "subAgent runs in an isolated worktree, so give it relative paths there, "
     "never absolute paths of this repository. Temp files, test data and output "
-    "directories must live inside the workspace, not /tmp. To submit a plan, call "
-    "present_plan; if the request needs "
+    "directories must live inside the workspace, not /tmp. To submit a plan, "
+    "output exactly one <proposed_plan> ... </proposed_plan> block as your final "
+    "message; if the request needs "
     "no implementation, close it with finish_research instead. You remain in "
     "Plan mode until the user switches agents. "
-    "Only present_plan's approval starts execution; a conversational yes does not."
+    "Only the user's approval of that plan starts execution; a conversational "
+    "yes does not."
     "</system-reminder>"
 )
 

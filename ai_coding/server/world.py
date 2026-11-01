@@ -97,7 +97,7 @@ def find_armed_session(sessions: Any) -> Any | None:
         # resume.  A stale armed task with an unknown profile used to win the
         # scan (it was the newest) and then be dropped in initialize, which
         # swallowed the one recovery chance a newer valid session still had.
-        if task.get("armedProfile") not in ("plan", "goal"):
+        if task.get("armedProfile") != "goal":
             continue
         stamp = str(raw.get("lastAccessTime", "") or "")
         if best is None or stamp > best[0]:

@@ -21,8 +21,6 @@ from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.turn_policy import (
     PLAN_DISMISSED_NOTE,
     PLAN_HELD_NOTE,
-    TurnPolicy,
-    TurnPolicyConfig,
 )
 from ai_coding.domain.loop import StepResult, TurnStatus
 from ai_coding.domain.message import ToolCallRef, ToolResult
@@ -31,7 +29,6 @@ from ai_coding.security.approval import AutoApproveCallback
 from ai_coding.service.session_service import SessionService
 from ai_coding.tools.base import BaseTool
 from ai_coding.tools.registry import ToolRegistry
-from ai_coding.tools.todo_write_tool import TodoWriteTool
 
 
 class _PresentPlan(BaseTool):
@@ -504,116 +501,6 @@ async def test_the_guard_note_and_the_withdrawal_note_never_ride_together(tmp_pa
     assert "撤回" not in outcome.note
 
 
-@pytest.mark.asyncio
-async def test_a_plan_step_whose_turn_was_cut_off_does_not_withdraw_the_plan(
-    tmp_path,
-):
-    """W2: the dangerous neighbour of the withdrawal.
-
-    A plan step runs on the *shared* task and is often cut short by the
-    step budget -- and a step that ends on ``max_iterations`` is not a turn
-    that went wrong, it is a step that ran out of room.  If the withdrawal
-    reached those, the driver would see the plan unarmed between rounds and
-    stop after the first step (the driver re-checks ``task.armed`` between
-    rounds).
-
-    A step never approves a plan (``present_plan`` is plan-mode only and a
-    step session is not in plan mode), so the withdrawal must not touch it.
-    """
-    from ai_coding.core.plan_runner import PlanRunner
-
-    class _BudgetLoop:
-        """A loop whose step turns run out of iterations."""
-
-        def __init__(self) -> None:
-            self.settings = AIConfig()
-            self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=1))
-            self.calls = 0
-
-        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
-            self.calls += 1
-            for item in session.task.open_items():
-                if not item.is_terminal():
-                    item.status = "completed"
-                    break
-            return "step done"
-
-    loop = _BudgetLoop()
-    session = SessionService(tmp_path / "sessions").create()
-    session.task = TaskState(goal="plan")
-    session.task.add("第一步")
-    session.task.add("第二步")
-
-    report = await PlanRunner(loop).run(session)
-
-    assert report.stopped is None
-    assert [item.status for item in session.task.items] == ["completed", "completed"]
-    assert session.task.armed is False
-
-
-@pytest.mark.asyncio
-async def test_a_real_plan_step_cut_off_by_the_budget_keeps_the_plan_armed(
-    tmp_path,
-):
-    """W2: the same property, through the real loop.
-
-    The stub above cannot see the turn's close, which is where the
-    withdrawal lives.  Here a real ``AgentLoop`` runs a plan whose steps run
-    out of iterations -- the ordinary way a step ends -- and the plan must
-    still finish: the driver checks ``task.armed`` between rounds, so a
-    withdrawal that reached the steps would stop the plan after the first
-    one.
-    """
-    from ai_coding.core.plan_runner import PlanRunner
-
-    class _StepEngine(ChatEngine):
-        """Every model call wants a tool; the budget is what ends the turn."""
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def step(self, messages, *, tools, instructions=None, on_delta=None):
-            self.calls += 1
-            return StepResult(
-                text=None,
-                tool_calls=[
-                    ToolCallRef(
-                        id=f"c{self.calls}", name="todo_write",
-                        arguments='{"action":"list"}',
-                    )
-                ],
-                finish_reason="tool_calls",
-            )
-
-        async def aclose(self) -> None:
-            return None
-
-    registry = ToolRegistry()
-    registry.register(TodoWriteTool())
-    sessions = SessionService(tmp_path / "sessions")
-    loop = AgentLoop(
-        _StepEngine(),
-        sessions,
-        registry,
-        settings=AIConfig(
-            stop_policy="natural",
-            max_tool_iterations=1,
-            plan_step_max_iterations=1,
-        ),
-        workspace=".",
-    )
-    session = sessions.create()
-    session.task = TaskState(goal="plan")
-    session.task.add("第一步")
-    session.task.add("第二步")
-
-    report = await PlanRunner(loop).run(session)
-
-    # Both steps ran: the plan was not cut short by a withdrawn arm.
-    assert len(report.deliveries) == 2
-    assert session.task.armed is False
-
-
 # ---- the guard on every way a turn can end (A4) -----------------------------
 #
 # A planning turn can end four ways without ever submitting a plan: the
@@ -651,6 +538,9 @@ def _budget_loop(
 ) -> AgentLoop:
     registry = ToolRegistry()
     registry.register(_Noop())
+    # The guard is only applicable when a review tool is on offer (C-2); this
+    # loop tests the budget/ladder mouths, so it must carry one.
+    registry.register(_PresentPlan())
     return AgentLoop(
         engine,
         sessions,
@@ -828,6 +718,8 @@ async def test_the_ladder_mouth_also_ends_the_plan_turn_with_the_note(tmp_path):
     other mouths follow."""
     registry = ToolRegistry()
     registry.register(_Failing())
+    # Same precondition as ``_budget_loop``: the guard needs a review tool.
+    registry.register(_PresentPlan())
     engine = _ScriptedEngine([_call(f"c{i}", "fail") for i in range(1, 13)])
     sessions = SessionService(tmp_path / "sessions")
     loop = AgentLoop(

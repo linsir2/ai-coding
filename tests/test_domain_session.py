@@ -266,19 +266,33 @@ def test_task_lifecycle_fields_round_trip():
     task = TaskState(goal="g")
     task.add("step")
     task.armed = True
-    task.armed_profile = "plan"
+    task.armed_profile = "goal"
     task.rounds_run = 3
     task.resume_count = 1
 
     data = task.to_dict()
 
     assert data["armed"] is True
-    assert data["armedProfile"] == "plan"
+    assert data["armedProfile"] == "goal"
     assert data["roundsRun"] == 3
     assert data["resumeCount"] == 1
     back = TaskState.from_dict(data)
-    assert back.armed is True and back.armed_profile == "plan"
+    assert back.armed is True and back.armed_profile == "goal"
     assert back.rounds_run == 3 and back.resume_count == 1
+
+
+def test_an_armed_task_with_a_retired_profile_loads_unarmed():
+    """P0b: "plan" is no longer a profile a runner drives.  A session the
+    retired path armed must not come back armed -- nothing would ever finish
+    it, and ``start_goal`` would refuse every new goal in that session."""
+    from ai_coding.domain.task import TaskState
+
+    data = {"goal": "g", "items": [], "armed": True, "armedProfile": "plan"}
+
+    task = TaskState.from_dict(data)
+
+    assert task.armed is False
+    assert task.armed_profile == ""
 
 
 def test_task_lifecycle_defaults_write_no_keys():

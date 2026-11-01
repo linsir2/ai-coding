@@ -150,11 +150,11 @@ class TaskState:
     items: list[TodoItem] = field(default_factory=list)
 
     # ---- 11-spec §4: task lifecycle (armed tasks drive themselves) --------
-    #: True while TaskDriver drives this task (explicit `/plan` arm or a boot
-    #: resume).  Persisted so a crash between rounds leaves it resumable;
-    #: written only when True (same discipline as every optional key).
+    #: True while a runner drives this task (a `/goal` arm or a boot resume).
+    #: Persisted so a crash between rounds leaves it resumable; written only
+    #: when True (same discipline as every optional key).
     armed: bool = False
-    #: Driver profile name; "plan" is the only one today.
+    #: Driver profile name; "goal" is the only one today.
     armed_profile: str = ""
     #: Rounds the driver has opened (audit / future caps), across crashes.
     rounds_run: int = 0
@@ -532,11 +532,17 @@ class TaskState:
             if isinstance(raw_fingerprint, list)
             else None
         )
+        # P0b: "goal" is the only profile a runner drives.  A session the
+        # retired plan path armed still says "plan"; loading it as armed leaves
+        # a flag nothing can finish (boot skips it, ``start_goal`` refuses).
+        # Normalize at the boundary -- same invariant as ``disarm``.
+        profile = str(data.get("armedProfile", "") or "")
+        armed = bool(data.get("armed", False)) and profile == "goal"
         return cls(
             goal=str(data.get("goal", "")),
             items=items,
-            armed=bool(data.get("armed", False)),
-            armed_profile=str(data.get("armedProfile", "") or ""),
+            armed=armed,
+            armed_profile=profile if armed else "",
             rounds_run=int(data.get("roundsRun", 0) or 0),
             resume_count=int(data.get("resumeCount", 0) or 0),
             tokens_used=int(data.get("tokensUsed", 0) or 0),

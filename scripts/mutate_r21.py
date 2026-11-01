@@ -78,33 +78,11 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "tests/test_tool_call_arguments.py",
     ),
     (
-        "P1  the headline goes back to counting only attested steps",
-        "ai_coding/core/plan_runner.py",
-        '        head = f"[plan] 完成 {len(self.completed)} 步{qualifier}"',
-        '        done = sum(1 for entry in self.deliveries if entry.attested)\n'
-        '        head = f"[plan] 完成 {done} 步{qualifier}"',
-        "tests/test_plan_attestation.py",
-    ),
-    (
-        "P2  the provenance qualifier disappears",
-        "ai_coding/core/plan_runner.py",
-        '        qualifier = f"（其中 {unattested} 步未经分步验收）" if unattested else ""',
-        '        qualifier = ""',
-        "tests/test_plan_attestation.py",
-    ),
-    (
         "P3  a single failure calls itself a repeat again",
         "ai_coding/domain/ledger.py",
         '        what = "调用失败" if count == 1 else "反复失败"',
         '        what = "反复失败"',
         "tests/test_ledger.py",
-    ),
-    (
-        "P4  the plan seed says 目标 again",
-        "ai_coding/core/plan_runner.py",
-        'lines = [f"[计划标题] {task.goal or \'(未命名计划)\'}", "", "[计划步骤]"]',
-        'lines = [f"[计划目标] {task.goal or \'(未命名计划)\'}", "", "[计划步骤]"]',
-        "tests/test_plan_m1.py",
     ),
     (
         "S1  a plan round advertises the goal pair again",

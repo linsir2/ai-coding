@@ -10,7 +10,6 @@ import json
 import pytest
 from rich.console import Console
 
-from ai_coding.domain.stance import PostureResult
 from ai_coding.domain.task import TaskState
 from ai_coding.server.world import find_armed_session
 from ai_coding.service.session_service import SessionService
@@ -25,12 +24,12 @@ def _patch(service: SessionService, session, mutate):
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
-def _armed(service: SessionService, title: str, stamp: str):
+def _armed(service: SessionService, title: str, stamp: str, profile: str = "goal"):
     session = service.create(title=title)
     task = TaskState(goal=title)
     task.add("step")
     task.armed = True
-    task.armed_profile = "plan"
+    task.armed_profile = profile
     session.task = task
     service.save(session)
     _patch(service, session, lambda data: data.update({"lastAccessTime": stamp}))
@@ -69,47 +68,47 @@ def test_an_armed_session_with_an_unknown_profile_does_not_win(tmp_path):
     assert found is not None and found.session_id == real.session_id
 
 
-# ---- D1 (20 §批次 4a): a plan the user gave up must stay given up ------------
+def test_a_legacy_armed_plan_does_not_win_the_boot_resume(tmp_path):
+    """P0b: "plan" is no longer a profile any runner drives.
+
+    Sessions armed by the retired plan path still say ``armedProfile: plan``
+    on disk, and one of them used to be the newest row -- winning the scan and
+    then being dropped at boot, hiding the goal a newer boot could resume.
+    """
+    service = SessionService(root=tmp_path / "sessions")
+    goal = _armed(service, "goal", "2026-01-01T00:00:00Z")
+    stale = _armed(service, "stale-plan", "2026-01-02T00:00:00Z", profile="plan")
+
+    found = find_armed_session(service)
+
+    assert found is not None and found.session_id == goal.session_id
+    assert found.session_id != stale.session_id
+
+
+# ---- D1 (20 §批次 4a): a task the user gave up must stay given up -----------
 
 
 @pytest.mark.asyncio
-async def test_a_plan_given_up_is_not_picked_up_by_the_boot_resume(tmp_path):
+async def test_a_goal_given_up_is_not_picked_up_by_the_boot_resume(tmp_path):
     """Giving up has to survive the restart.
 
     The scan reads the pair (armed + a profile a runner can drive), so a
-    withdrawn approval -- the flag gone and the profile gone with it --
-    leaves the next boot nothing to pick up.  Half a withdrawal (the flag
-    alone) would leave a profile that owns nothing.
+    withdrawn goal -- the flag gone and the profile gone with it -- leaves the
+    next boot nothing to pick up.  Half a withdrawal (the flag alone) would
+    leave a profile that owns nothing.
     """
     from ai_coding.app.commands import handle_input
     from ai_coding.app.console import DialogueConsole
 
-    class _Loop:
-        """The posture half of the command layer's contract."""
-
-        def request_posture(
-            self, session, *, agent=None, readonly=None, reason="", observer=None
-        ):
-            self.commit_posture(
-                session, agent=agent, readonly=readonly, reason=reason
-            )
-            return PostureResult.COMMITTED
-
-        def commit_posture(
-            self, session, *, agent=None, readonly=None, reason="", observer=None
-        ):
-            session.agent = agent if agent is not None else session.agent
-            session.readonly = bool(readonly) if readonly is not None else session.readonly
-            session.pending_posture = None
-
     service = SessionService(root=tmp_path / "sessions")
-    session = _armed(service, "plan", "2026-01-01T00:00:00Z")
+    session = _armed(service, "goal", "2026-01-01T00:00:00Z")
     console = DialogueConsole(Console(record=True, width=80))
 
-    assert find_armed_session(service) is not None, "the armed plan is the resume's"
+    assert find_armed_session(service) is not None, "the armed goal is the resume's"
 
-    await handle_input(_Loop(), "/plan off", session, service, console)
+    # ``/goal off`` touches only the task and the session store; no loop call.
+    await handle_input(None, "/goal off", session, service, console)
 
     assert find_armed_session(service) is None, (
-        "a plan the user gave up must not come back on the next boot"
+        "a goal the user gave up must not come back on the next boot"
     )

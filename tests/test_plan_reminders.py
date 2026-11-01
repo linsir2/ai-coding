@@ -54,10 +54,10 @@ def test_the_reminders_are_marked_as_system_reminders():
 
 
 def test_the_enter_reminder_says_a_conversational_yes_is_not_approval():
-    """T12 (30 §3.4/M4b): the reminder's own copy — only present_plan's
-    approval starts execution. Substring policy: keys carry the verdict."""
+    """T12 (30 §3.4/M4b): the reminder's own copy — only the human's approval
+    of the plan starts execution. Substring policy: keys carry the verdict."""
     for key in (
-        "Only present_plan's approval starts execution",
+        "Only the user's approval of that plan starts execution",
         "conversational yes does not",
     ):
         assert key in PLAN_ENTER_REMINDER
@@ -234,31 +234,3 @@ def test_the_reminder_is_not_the_humans_utterance():
         ),
     ]
     assert human_utterance(history) == "the real question"
-
-
-# ---- the planning instruction is the harness's too (M2 T3, Q4) --------------
-
-
-@pytest.mark.asyncio
-async def test_the_planning_instruction_is_synthetic(tmp_path):
-    """The planning instruction is the harness's, so it is marked as one.
-
-    It used to be told apart by its ``[plan] `` prefix -- a convention every
-    reader had to learn.  Marking it is the same answer the reminder gets,
-    and it lets the readers drop the prefix convention entirely.
-    """
-    from ai_coding.core.plan_runner import PLAN_MARK, plan_only
-
-    loop, sessions = _loop(tmp_path)
-    session = sessions.create()
-    sessions.save(session)
-    session.agent = "plan"
-    session.readonly = True
-
-    await plan_only(loop, session, topic="做一个东西")
-
-    instructions = [
-        m for m in session.messages if (m.content or "").startswith(PLAN_MARK)
-    ]
-    assert instructions, "the planning instruction was not sent"
-    assert instructions[0].synthetic is True

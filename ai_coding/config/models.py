@@ -463,52 +463,15 @@ class AIConfig(BaseModel):
     # legitimately take longer than ten minutes, and the measured hotel session
     # was cut by this clock as well as by the iteration cap.
     turn_timeout_seconds: float = 1800.0
-    # R1-1: iteration ceiling for one plan-runner step.  Raised from 8 to 60 in
-    # r22: 8 was measured on "simple steps close in 5-7 iterations", but a step
-    # that writes several files (a models package, a router set) needs far more
-    # than 7, and the measured hotel session died at 8/8 with four files still
-    # unwritten ("本轮预算有限").  100 matches the ordinary turn (the step is
-    # the same work), and the clock, acceptance gate, stall ladder and the
-    # runner's one repair pass are still the guards.
-    plan_step_max_iterations: int = 100
-    #: Wall clock one plan *item* may spend, shared by every turn the legacy
-    #: step runner spends on it (a repair pass used to get a fresh
-    #: ``turn_timeout_seconds`` each time, so N attempts multiplied the ceiling).
-    #: 0 = keep the per-turn ceiling.  The ``session`` executor ignores it: a
-    #: plan turn has no per-plan clock (context is bounded by compaction, and
-    #: the idle brake bounds a stuck model).  3600 is one hour for one item --
-    #: enough for a 27-iteration hotel step measured at 26 minutes.
-    plan_item_wall_seconds: float = 3600.0
     # C3: when a normal turn's iteration budget dies with todo items still
     # open, the loop injects a continuation prompt and starts a fresh round
     # instead of stopping.  0 disables.  The cap keeps a model that never
     # closes its items from running forever.  Fires regardless of stop_policy.
     max_auto_continuations: int = 3
-    # R1-4: turn ceiling for one /plan-run.  0 (the r22 default) means "no run
-    # cap": the measured hotel plan had 23 steps and the old 20-turn ceiling
-    # stopped it with steps 21-23 untouched ("budget: plan turn budget
-    # exhausted").  Each step is already bounded, and the run ends on
-    # done/deadlock; an operator who wants a ceiling can still set one.
-    plan_max_step_turns: int = 0
-    # ---- plan executor selection --------------------------------------
-    #: Which plan executor `/plan run` uses.  ``codex`` (default) is the
-    #: Codex-parity path: ``update_plan`` plus one ordinary turn whose prompt
-    #: is ``"Implement the plan."`` (no executor-side receipts/reports).
-    #: ``session`` is Plan-as-Goal: the whole plan runs in one turn on the
-    #: parent session, so the transcript is the continuity (no step session
-    #: ever replaces it).  ``legacy`` keeps the one-short-session-per-step
-    #: runner (escape hatch).
-    plan_orchestrator: Literal["codex", "session", "legacy"] = "codex"
     #: C-0: codex path only.  False keeps Codex's ``update_plan`` schema
     #: (``step``/``status``); True additionally accepts an optional per-step
     #: ``verify`` and runs the item-boundary acceptance inside ``update_plan``.
-    #: The ``session`` path keeps its own ``verify`` handling either way.
     plan_verify_items: bool = False
-    #: Episode-wide token ceiling for one plan run; 0 disables.  The ``session``
-    #: executor does not check it: a spend cap mid turn buys an interruption,
-    #: not safety (context is bounded by compaction).  Kept separate from
-    #: ``goal_token_budget`` on purpose.
-    plan_token_budget: int = 0
     # D-4: episode-wide round ceiling for one armed goal; 0 disables.  Was a
     # phantom until 2026-10-17: the runner read it duck-typed while this class
     # had no such field, and `extra="ignore"` swallowed any yaml key for it.

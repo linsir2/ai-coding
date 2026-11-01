@@ -34,12 +34,6 @@ def test_load_returns_defaults_on_none(no_config):
     # still resolve to the conservative default rather than an invented large one.
     assert resolve_context_window(app) == 48_000
     assert app.ai.max_tool_iterations == 100
-    # Stage 2: Plan-as-Goal (main-session rounds) is the default executor;
-    # the legacy step runner stays one setting away.
-    assert app.ai.plan_orchestrator == "codex"
-    # A spend cap mid-turn buys an interruption, not safety (context growth is
-    # bounded by compaction), so the episode ceiling is off by default.
-    assert app.ai.plan_token_budget == 0
 
 
 def test_load_from_yaml_file_overrides(tmp_path):

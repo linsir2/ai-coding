@@ -677,74 +677,6 @@ async def test_absorbed_command_is_answered_instead_of_becoming_a_model_turn():
     assert "/plan run" not in out
 
 
-async def test_plan_run_without_open_items_says_so():
-    """No todos, no execution: the runner says so instead of calling the model."""
-    from ai_coding.domain.session import SessionData
-
-    loop = _FakeLoop()
-    sessions = _FakeSessions()
-    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
-    dc, c = _console_capture()
-
-    action, _ = await handle_input(loop, "/plan run", session, sessions, dc)
-
-    assert action is REPLAction.CONTINUE
-    assert loop.calls == []
-    out = _session_text(c)
-    assert "无任务项" in out or "完成 0 步" in out
-
-
-async def test_plan_then_plan_run_executes_open_todos():
-    """18 §10.1: /plan <topic> plans only; /plan run executes each open item."""
-    from types import SimpleNamespace
-
-    from ai_coding.core.turn_policy import TurnPolicy, TurnPolicyConfig
-    from ai_coding.domain.session import SessionData
-    from ai_coding.domain.task import TaskState
-
-    class _PlanLoop(_FakeLoop):
-        def __init__(self):
-            super().__init__()
-            self.settings = SimpleNamespace(
-                plan_step_max_iterations=8, plan_max_step_turns=20, stop_policy="natural"
-            )
-            self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
-
-        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
-            session.turn_count += 1
-            self.calls.append((text, on_delta))
-            if "implementation plan" in text:
-                session.task = TaskState(goal="g")
-                session.task.add("fix bug")
-                return "plan written"
-            for item in session.task.open_items():
-                if not item.is_terminal():
-                    item.status = "completed"
-                    break
-            return "step done"
-
-    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
-    sessions = _FakeSessions()
-    dc, c = _console_capture()
-    loop = _PlanLoop()
-
-    await handle_input(loop, "/plan 修 bug", session, sessions, dc)
-
-    assert sum("只做这一步" in call[0] for call in loop.calls) == 0
-    assert session.task.done_count == 0
-
-    action, _ = await handle_input(loop, "/plan run", session, sessions, dc)
-
-    assert action is REPLAction.CONTINUE
-    out = _session_text(c)
-    # H3 audit fix: the deleted /plan-run must not appear anywhere, and the
-    # runner reports under [plan].  The old assertion "plan-run in out" could
-    # not catch this: "[plan]" is a substring of "[plan-run]".
-    assert "[plan-run]" not in out
-    assert "[plan]" in out and "已完成" in out
-    assert session.task.items[0].status == "completed"
-
-
 async def test_handle_tasks_without_a_runner_degrades():
     """Loops without a sub-agent stack get words, not a traceback."""
     loop = _FakeLoop()
@@ -854,8 +786,6 @@ async def test_handle_plan_with_topic_uses_it_and_resets_task():
     assert "给记忆层加缓存" in loop.calls[0][0]
     assert session.task.goal == "给记忆层加缓存"
     assert session.task.items == []
-    # Planning writes the list; it must not execute it.
-    assert "pending" in loop.calls[0][0].lower() or "do not execute" in loop.calls[0][0].lower()
     # 18 §10.1: the planning path also raises the two switches.
     assert (session.mode, session.readonly) == ("plan", True)
 
@@ -941,33 +871,6 @@ async def test_handle_input_threads_the_observer_to_the_loop():
     loop.calls.clear()
     await handle_input(loop, "/review", sessions.items[0], sessions, dc, observer=marker)
     assert loop.calls[-1][2] is marker
-
-
-async def test_handle_input_threads_the_observer_into_the_planning_half(monkeypatch):
-    """18 §10.1: /plan <topic> threads topic/observer/on_delta into plan_only."""
-    from ai_coding.core import plan_runner as plan_runner_mod
-
-    seen: dict = {}
-
-    async def fake_plan_only(loop, session, *, topic, on_delta=None, observer=None):
-        seen.update(topic=topic, observer=observer, on_delta=on_delta)
-        return plan_runner_mod.PlanReport()
-
-    monkeypatch.setattr(plan_runner_mod, "plan_only", fake_plan_only)
-    loop = _FakeLoop()
-    sessions = _FakeSessions()
-    dc, _ = _console_capture()
-
-    class _Marker:
-        pass
-
-    marker = _Marker()
-    await handle_input(
-        loop, "/plan 加缓存", sessions.items[0], sessions, dc, observer=marker
-    )
-
-    assert seen["topic"] == "加缓存"
-    assert seen["observer"] is marker
 
 
 async def test_stats_reports_across_sessions(tmp_path):
@@ -1194,30 +1097,6 @@ async def test_the_plain_turn_note_reaches_the_terminal():
     await handle_input(loop, "帮我改个 bug", session, sessions, dc)
 
     assert _NOTE_HEAD in _session_text(c)
-
-
-async def test_the_planning_turn_note_reaches_the_terminal():
-    """The other place a turn runs: the "/plan <topic>" branch."""
-    loop = _NotedLoop(note=_NOTE)
-    sessions = _FakeSessions()
-    dc, c = _console_capture()
-
-    await handle_input(loop, "/plan 帮我改个 bug", sessions.items[0], sessions, dc)
-
-    assert _NOTE_HEAD in _session_text(c)
-
-
-async def test_a_turn_without_a_note_prints_nothing():
-    """No note, no line: the terminal is not a place for empty notices."""
-    loop = _NotedLoop(note="")
-    sessions = _FakeSessions()
-    dc, c = _console_capture()
-    session = sessions.items[0]
-    session.agent, session.readonly = "plan", True
-
-    await handle_input(loop, "帮我改个 bug", session, sessions, dc)
-
-    assert _session_text(c) == ""
 
 
 async def test_a_command_that_runs_no_turn_does_not_repeat_the_last_note():

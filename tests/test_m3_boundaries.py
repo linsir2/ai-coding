@@ -250,51 +250,11 @@ def _plan_ctx(workspace):
     )
 
 
-# ---- Prompt posture: what the model is told must match the surface -------
-
-
-def test_the_plan_prompt_names_the_plan_directory_as_the_writable_place():
-    """M3 T5: write/edit are reachable, so "unavailable" would be a lie."""
-    from ai_coding.core.plan_runner import PLAN_PROMPT
-
-    assert ".ai-coding/plan/" in PLAN_PROMPT
-    assert "bash/write/edit are unavailable" not in PLAN_PROMPT
-
-
-def test_the_plan_prompt_does_not_teach_a_hidden_tool():
-    """M3 T8: todo_write is cut from the surface; the prompt must not name it."""
-    from ai_coding.core.plan_runner import PLAN_PROMPT
-
-    assert "todo_write" not in PLAN_PROMPT
-
-
 def test_the_enter_reminder_carries_the_plan_directory():
     """The reminder is the per-switch statement; it must not under-state writes."""
     from ai_coding.core.plan_reminders import PLAN_ENTER_REMINDER
 
     assert ".ai-coding/plan/" in PLAN_ENTER_REMINDER
-
-
-def test_the_plan_directory_has_one_definition():
-    """Rule, two prompts and the refusal all name the same directory.
-
-    Four hand-written copies would drift: the rule could allow one path while
-    the model is told to write another.  They all read one constant, and this
-    pins that the wiring is live rather than agreeing today by coincidence.
-    """
-    from ai_coding.core import plan_reminders, plan_runner
-    from ai_coding.core.dispatch import _plan_denial_reason
-    from ai_coding.domain.agents import PLAN_DIR
-
-    assert PLAN_DIR == ".ai-coding/plan"
-    assert PLAN_DIR in plan_runner.PLAN_PROMPT
-    assert PLAN_DIR in plan_reminders.PLAN_ENTER_REMINDER
-    reason = _plan_denial_reason(
-        "write",
-        "denied",
-        ToolContext(workspace="/ws", mode="plan", readonly=True),
-    )
-    assert f"{PLAN_DIR}/" in reason
 
 
 # ---- Review findings: the boundary is a place, not a spelling -------------
@@ -529,101 +489,3 @@ def test_a_project_deny_still_beats_the_dotenv_ask():
         gate.check("read", {"path": ".env"}).decision
         is PermissionDecision.DENY
     )
-
-
-# ---- T5: a proof names a place too ---------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_an_outside_path_in_verify_is_refused_before_the_card(tmp_path):
-    """The human must not approve a proof the shell will run outside the tree."""
-    from ai_coding.security.user_prompt import UserAnswer
-    from ai_coding.tools.present_plan_tool import PresentPlanTool
-
-    class _Prompt:
-        def __init__(self):
-            self.calls = 0
-
-        async def ask(self, *a, **k):
-            self.calls += 1
-            return UserAnswer(answered=True, text='{"choice":"approve"}')
-
-    prompt = _Prompt()
-    tool = PresentPlanTool(prompt)
-    ctx = ToolContext(
-        task=TaskState(goal="g"),
-        workspace=str(tmp_path),
-        session_id="s",
-        mode="plan",
-    )
-    result = await tool.execute(
-        {
-            "plan": "# plan",
-            "items": [{"content": "check it", "verify": "cat /etc/passwd"}],
-        },
-        ctx,
-    )
-    assert result.success is False
-    assert result.error == "workspace_paths"
-    assert prompt.calls == 0, "the human was asked about an unrunnable plan"
-    assert not ctx.task.armed
-
-
-@pytest.mark.asyncio
-async def test_an_inside_verify_is_not_refused(tmp_path):
-    from ai_coding.security.user_prompt import UserAnswer
-    from ai_coding.tools.present_plan_tool import PresentPlanTool
-
-    class _Prompt:
-        async def ask(self, *a, **k):
-            return UserAnswer(answered=True, text='{"choice":"approve"}')
-
-    tool = PresentPlanTool(_Prompt())
-    ctx = ToolContext(
-        task=TaskState(goal="g"),
-        workspace=str(tmp_path),
-        session_id="s",
-        mode="plan",
-    )
-    result = await tool.execute(
-        {
-            "plan": "# plan",
-            "items": [{"content": "check it", "verify": "test -f README.md"}],
-        },
-        ctx,
-    )
-    assert result.success is True
-    assert ctx.task.armed
-
-
-@pytest.mark.asyncio
-async def test_a_declared_root_in_verify_is_not_refused(tmp_path):
-    """A proof in ``tools.extra_workspace_roots`` is reachable by design."""
-    from ai_coding.security.user_prompt import UserAnswer
-    from ai_coding.tools.present_plan_tool import PresentPlanTool
-
-    other = tmp_path / "other"
-    other.mkdir()
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-
-    class _Prompt:
-        async def ask(self, *a, **k):
-            return UserAnswer(answered=True, text='{"choice":"approve"}')
-
-    tool = PresentPlanTool(_Prompt())
-    ctx = ToolContext(
-        task=TaskState(goal="g"),
-        workspace=str(workspace),
-        session_id="s",
-        mode="plan",
-        extra_workspace_roots=(str(other),),
-    )
-    result = await tool.execute(
-        {
-            "plan": "# plan",
-            "items": [{"content": "check", "verify": f"test -f {other}/x"}],
-        },
-        ctx,
-    )
-    assert result.success is True, result.output

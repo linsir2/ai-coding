@@ -217,19 +217,8 @@ async def test_verify_is_not_run_when_the_switch_is_off() -> None:
 
 def test_codex_registers_update_plan_and_no_present_plan(tmp_path) -> None:
     cfg = _tool_cfg(str(tmp_path))
-    cfg.plan_orchestrator = "codex"
     registry = build_tool_registry(cfg, str(tmp_path), None, user_prompt=object())
 
     names = set(registry.list_names())
     assert "update_plan" in names
     assert "present_plan" not in names
-
-
-def test_session_keeps_present_plan_and_no_update_plan(tmp_path) -> None:
-    cfg = _tool_cfg(str(tmp_path))
-    cfg.plan_orchestrator = "session"
-    registry = build_tool_registry(cfg, str(tmp_path), None, user_prompt=object())
-
-    names = set(registry.list_names())
-    assert "present_plan" in names
-    assert "update_plan" not in names

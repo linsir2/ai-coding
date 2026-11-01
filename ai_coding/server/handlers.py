@@ -239,30 +239,23 @@ _MAX_BOOT_RESUMES = 5
 _NO_PROGRESS_RESUMES = 2
 
 
-def resume_fingerprint(task: Any, session: Any) -> tuple[int, int, int, int]:
+def resume_fingerprint(task: Any, session: Any) -> tuple[int, int, int]:
     """The boot-to-boot fingerprint of an armed task (M-C3).
 
-    Four facts, every one of which a *real* resume moves: the rounds the driver
-    opened, the tokens the episode spent, the real (non-synthetic) messages and
-    the steps the plan settled.  A synthetic ``[resume]`` note is deliberately
-    excluded -- ``resume_turn`` appends one whenever a pending approval is
-    re-decided, and counting it would read a genuine stall as progress.
+    Three facts, every one of which a *real* resume moves: the rounds the
+    driver opened, the tokens the episode spent, and the real (non-synthetic)
+    messages.  A synthetic ``[resume]`` note is deliberately excluded --
+    ``resume_turn`` appends one whenever a pending approval is re-decided, and
+    counting it would read a genuine stall as progress.
     """
     rounds = int(getattr(task, "rounds_run", 0) or 0)
-    # A plan episode spends through ``plan_tokens_used`` (the executor adds to
-    # it while the plan runs); the goal profile spends through ``tokens_used``.
-    # Reading only the latter made every plan resume look like it had spent
-    # nothing, so "did this resume move?" was answered by the wrong fact.
-    tokens = int(getattr(task, "tokens_used", 0) or 0) + int(
-        getattr(task, "plan_tokens_used", 0) or 0
-    )
+    tokens = int(getattr(task, "tokens_used", 0) or 0)
     messages = sum(
         1
         for message in getattr(session, "messages", ()) or ()
         if not bool(getattr(message, "synthetic", False))
     )
-    steps = len(getattr(session, "step_deliveries", ()) or ())
-    return (rounds, tokens, messages, steps)
+    return (rounds, tokens, messages)
 
 #: C-3: how a refusal carries the operator's own words ("no::改用 ls -la").
 #: The panel builds it (util/permission.ts), and it is lifted back off here --
@@ -373,7 +366,7 @@ def make_handlers(
             if (
                 candidate_task is not None
                 and getattr(candidate_task, "armed", False)
-                and getattr(candidate_task, "armed_profile", "") in ("plan", "goal")
+                and getattr(candidate_task, "armed_profile", "") == "goal"
             ):
                 boot_session = candidate
         if boot_session is not None:
@@ -381,10 +374,11 @@ def make_handlers(
             state.session = session
             state.session_id = session.session_id
             task = session.task
-            # D-4: the note names what was actually interrupted; "plan" and
-            # "goal" are different tasks to the person reading it.
-            profile = str(getattr(task, "armed_profile", "") or "plan")
-            label = "目标" if profile == "goal" else "计划"
+            # D-4: boot resume only knows the goal profile; a plan book is
+            # never resumed from disk (a plan run is the human's explicit
+            # ``/plan run``).
+            profile = "goal"
+            label = "目标"
             # M-C3: compare against the fingerprint the last resume left.  The
             # comparison runs before either breaker so a stall is counted even
             # when the older cap is what finally disarms.
@@ -402,8 +396,7 @@ def make_handlers(
                 resume_note = (
                     f"[{profile}] 自动续跑已达上限（{_MAX_BOOT_RESUMES} 次），"
                     f"{label}任务已暂停；检查后继续对话"
-                    + ("或重新立案（/goal 或让模型 start_goal）。" if profile == "goal"
-                       else "或重新进入 Plan 模式。")
+                    "或重新立案（/goal 或让模型 start_goal）。"
                 )
             elif int(getattr(task, "no_progress_resumes", 0) or 0) >= _NO_PROGRESS_RESUMES:
                 task.disarm()
@@ -430,8 +423,7 @@ def make_handlers(
                 resume_note = (
                     f"[{profile}] 连续 {_NO_PROGRESS_RESUMES} 次自动续跑均无进展，"
                     f"{label}任务已暂停；检查后继续对话"
-                    + ("或重新立案（/goal 或让模型 start_goal）。" if profile == "goal"
-                       else "或重新进入 Plan 模式。")
+                    "或重新立案（/goal 或让模型 start_goal）。"
                 )
             else:
                 # 可达+有痕批次: the note rides the initialize response, not a
@@ -684,10 +676,9 @@ def make_handlers(
         is the post-turn dispatch for a goal the model just started (a
         ``start_goal`` call arms mid-turn; its run starts after that turn).
 
-        The run goes through ``PlanRunner.run`` / ``GoalRunner.run``, not the
-        driver directly -- those entries carry the whole armed lifecycle (arm /
-        roundsRun / disarm persistence), which a bare driver call would
-        bypass.
+        The run goes through ``GoalRunner.run``, not the driver directly --
+        that entry carries the whole armed lifecycle (arm / roundsRun /
+        disarm persistence), which a bare driver call would bypass.
         """
 
         # Filled by ``_launch_turn`` below, before the task first runs: this
@@ -722,22 +713,13 @@ def make_handlers(
                         session, on_delta=bridge.on_delta, observer=bridge
                     )
                 if getattr(task, "armed", False):
-                    # D-4: the profile decides the runner.  "plan" is the
-                    # human-approved plan run; "goal" is the model's own
-                    # objective, one ordinary turn per round.
-                    profile = str(getattr(task, "armed_profile", "") or "plan")
-                    if profile == "goal":
-                        from ai_coding.core.goal_runner import GoalRunner
+                    # D-4: an armed goal is the model's own objective, one
+                    # ordinary turn per round.
+                    from ai_coding.core.goal_runner import GoalRunner
 
-                        await GoalRunner(world.loop).run(
-                            session, console, on_delta=bridge.on_delta, observer=bridge
-                        )
-                    else:
-                        from ai_coding.core.plan_executor import plan_runner_for
-
-                        await plan_runner_for(world.loop).run(
-                            session, console, on_delta=bridge.on_delta, observer=bridge
-                        )
+                    await GoalRunner(world.loop).run(
+                        session, console, on_delta=bridge.on_delta, observer=bridge
+                    )
             except asyncio.CancelledError:
                 status, reason = "aborted", "interrupted"
             except Exception as exc:  # noqa: BLE001 — a bug must not hang the UI

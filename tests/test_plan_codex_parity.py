@@ -18,8 +18,7 @@ import pytest
 
 from ai_coding.app.commands import handle_input
 from ai_coding.core.plan_codex import CodexPlanRunner
-from ai_coding.core.plan_executor import plan_runner_for
-from ai_coding.core.plan_runner import PlanReport
+from ai_coding.core.plan_report import PlanReport
 from ai_coding.core.turn_policy import (
     TurnAction,
     TurnPolicy,
@@ -128,9 +127,7 @@ class _FakeLoop:
     """Records posture writes and turns; behaves like an idle, codex loop."""
 
     def __init__(self) -> None:
-        self.settings = SimpleNamespace(
-            plan_orchestrator="codex", plan_verify_items=False
-        )
+        self.settings = SimpleNamespace(plan_verify_items=False)
         self.events: list[tuple[str, Any]] = []
         self.turn_running = False
         self.last_outcome = None
@@ -220,8 +217,7 @@ async def test_codex_runner_returns_a_report_without_an_early_stop() -> None:
     session = _session()
     session.task = TaskState(goal="plan")
     session.task.add("one")
-    runner = plan_runner_for(loop)
-    assert isinstance(runner, CodexPlanRunner)
+    runner = CodexPlanRunner(loop)
 
     report = await runner.run(session)
 

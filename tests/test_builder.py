@@ -71,8 +71,8 @@ def test_registry_builder_adds_skill_tool_only_for_a_real_directory(tmp_path):
 
 
 def test_history_search_is_a_main_session_tool_only(tmp_path):
-    """A sub-agent runs on a throwaway session (plan_runner / subagent both
-    build a fresh SessionData), so its own transcript is three messages long and
+    """A sub-agent runs on a throwaway session (the subagent runner builds a
+    fresh SessionData), so its own transcript is three messages long and
     a recall tool over it can only ever answer "you just said that". The schema
     is not free either -- this repo measures every wasted character per step.
     """

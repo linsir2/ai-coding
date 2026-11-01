@@ -1,11 +1,12 @@
 """Plan command routing (18 §10.1, TDD): the two-switch command matrix.
 
-``/plan`` enters read-only plan mode; ``/plan <topic>`` plans through
-``plan_only``; ``/plan off`` disarms both switches; ``/plan run`` executes via
-the runner; ``/readonly on|off`` owns the enforcement axis alone.  The old
-one-shot contract (bare ``/plan`` asks a topic, then plans AND executes) is
-gone: a conversational agreement approves nothing, and execution is an
-explicit command.
+``/plan`` enters read-only plan mode; ``/plan <topic>`` runs one ordinary
+planning turn whose answer is a ``<proposed_plan>`` block; ``/plan off``
+disarms both switches; ``/plan run`` executes via ``CodexPlanRunner``;
+``/readonly on|off`` owns the enforcement axis alone.  The old one-shot
+contract (bare ``/plan`` asks a topic, then plans AND executes) is gone: a
+conversational agreement approves nothing, and execution is an explicit
+command.
 """
 
 import pytest
@@ -121,30 +122,6 @@ async def test_bare_plan_while_already_on_is_a_notice_only():
 
 
 @pytest.mark.asyncio
-async def test_plan_notices_teach_the_mode_not_slash_commands():
-    """内化批次: the notices speak the mode's own verbs (review card,
-    shift+tab) -- the /plan family stays an internal interface and is not
-    advertised anywhere the user reads."""
-    loop = _Loop()
-    sessions = _Sessions()
-    session = _session()
-    dc, c = _console()
-
-    await handle_input(loop, "/plan", session, sessions, dc)
-    out = c.export_text()
-    assert "已进入计划模式（只读）" in out
-    assert "评审卡" in out and "shift+tab" in out
-    assert "/plan" not in out
-    assert "/readonly" not in out
-
-    dc2, c2 = _console()
-    await handle_input(loop, "/plan", session, sessions, dc2)
-    out2 = c2.export_text()
-    assert "已在计划模式" in out2 and "评审卡" in out2
-    assert "/plan" not in out2
-
-
-@pytest.mark.asyncio
 async def test_help_no_longer_lists_the_plan_family():
     """内化批次: /help dropped the four internal lines (plan x3, readonly);
     the frontend catalogue was cleaned in stage 3, the backend help was not."""
@@ -188,40 +165,17 @@ async def test_plan_topic_clears_the_receipt_book_behaviourally():
 
 
 @pytest.mark.asyncio
-async def test_repl_plan_turn_runs_with_auto_continuation_disabled():
-    """Review fix: the planning turn must not inherit C3."""
+async def test_a_plan_topic_runs_one_planning_turn_with_the_humans_words():
+    """C-2: the planning round is the human's own words, through the one front
+    door -- no synthetic instruction and no automatic second turn."""
     loop = _Loop()
-    armed = loop.policy
     session = _session()
     dc, _ = _console()
 
     await handle_input(loop, "/plan 新计划", session, _Sessions(), dc)
 
-    assert all(call.count("implementation plan") for call in loop.calls[:1]) or loop.calls
-    assert loop.policy is armed
-
-
-@pytest.mark.asyncio
-async def test_the_planning_turn_sees_c3_disabled(monkeypatch):
-    """The planning turn itself must run under max_auto_continuations=0."""
-    seen: list[int] = []
-
-    class _RecordingLoop(_Loop):
-        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
-            self.calls.append(text)
-            seen.append(self.policy.config.max_auto_continuations)
-            return "planned"
-
-    loop = _RecordingLoop()
-    dc, _ = _console()
-
-    await handle_input(loop, "/plan 新计划", _session(), _Sessions(), dc)
-
-    assert seen[0] == 0
-    assert loop.policy.config.max_auto_continuations == 3
-
-
-# ---- the exit horns: /plan off / /plan run -----------------------------------
+    assert loop.calls == ["新计划"]
+    assert (session.mode, session.readonly) == ("plan", True)
 
 
 @pytest.mark.asyncio
@@ -375,112 +329,6 @@ async def test_a_plan_given_up_can_be_replaced_by_a_new_one():
 
 
 
-@pytest.mark.asyncio
-async def test_plan_run_executes_the_open_plan():
-    """The explicit approval: /plan run disarms and executes, /plan plans only."""
-    from types import SimpleNamespace
-
-    from ai_coding.core.plan_executor import PLAN_RUN_HEAD
-    from ai_coding.domain.task import TaskState
-
-    class _PlanLoop(_Loop):
-        def __init__(self) -> None:
-            super().__init__()
-            self.settings = SimpleNamespace(
-                plan_step_max_iterations=8,
-                plan_max_step_turns=20,
-                stop_policy="natural",
-            )
-            self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
-
-        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
-            self.calls.append(text)
-            if "implementation plan" in text:
-                session.task = TaskState(goal="g")
-                session.task.add("fix bug")
-                return "plan written"
-            for item in session.task.open_items():
-                if not item.is_terminal():
-                    item.status = "completed"
-                    break
-            return "step done"
-
-    session = _session()
-    sessions = _Sessions()
-    loop = _PlanLoop()
-    dc, c = _console()
-
-    await handle_input(loop, "/plan 修 bug", session, sessions, dc)
-
-    assert sum(PLAN_RUN_HEAD in call for call in loop.calls) == 0
-    assert session.task.done_count == 0
-    assert (session.mode, session.readonly) == ("plan", True)
-
-    await handle_input(loop, "/plan run", session, sessions, dc)
-
-    assert sum(PLAN_RUN_HEAD in call for call in loop.calls) == 1
-    assert session.task.done_count == 1
-    assert (session.mode, session.readonly) == ("normal", False)
-    assert "已完成" in c.export_text()
-
-
-@pytest.mark.asyncio
-async def test_plan_run_without_a_plan_runs_and_reports_empty():
-    """No plan, no model turn: the runner says "无任务项" instead."""
-    class _RunnerLessLoop(_Loop):
-        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
-            self.calls.append(text)
-            return "step done"
-
-    loop = _RunnerLessLoop()
-    session = _session()
-    dc, c = _console()
-
-    await handle_input(loop, "/plan run", session, _Sessions(), dc)
-
-    assert loop.calls == []
-    out = c.export_text()
-    assert "无任务项" in out or "完成 0 步" in out
-
-
-@pytest.mark.asyncio
-async def test_run_surfaces_a_stopped_plan():
-    """W2/R02: the run branch used to drop the runner's report on the floor,
-    so a plan the runner refused produced no message at all -- the user saw
-    the command return as if it had run."""
-    from types import SimpleNamespace
-
-    from ai_coding.domain.task import TaskState
-
-    class _RefusedLoop(_Loop):
-        def __init__(self) -> None:
-            super().__init__()
-            self.settings = SimpleNamespace(
-                plan_step_max_iterations=8,
-                plan_max_step_turns=20,
-                stop_policy="natural",
-            )
-            self.policy = TurnPolicy(TurnPolicyConfig(max_iterations=100))
-            self.workspace = "/tmp/ws"
-
-        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
-            self.calls.append(text)
-            return "step done"
-
-    session = _session()
-    session.task = TaskState(goal="g")
-    session.task.add("写代码到 /data/x/app.py")
-    loop = _RefusedLoop()
-    dc, c = _console()
-
-    await handle_input(loop, "/plan run", session, _Sessions(), dc)
-
-    out = c.export_text()
-    assert "工作区外" in out, f"the refusal was not surfaced: {out!r}"
-    assert "/data/x/app.py" in out
-    assert loop.calls == [], "the refused plan still ran"
-
-
 # ---- the enforcement axis alone: /readonly -----------------------------------
 
 
@@ -554,151 +402,6 @@ async def test_a_mid_turn_plan_topic_queues_the_posture_only():
     }
     out = c.export_text()
     assert "直接描述计划主题" in out and "将在当前回合结束后生效" in out
-
-
-# ---- 19 §3.4-1: the planning round gets its own budget ------------------------
-
-
-@pytest.mark.asyncio
-async def test_the_planning_turn_runs_with_the_planning_budget():
-    """The planning round used to share max_tool_iterations (measured: dead at
-    15 while still reading files).  It now swaps in its own budget, restored
-    afterwards like the C3 swap (19 §3.4-1)."""
-    seen: list[tuple[int, int]] = []
-
-    class _RecordingLoop(_Loop):
-        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
-            self.calls.append(text)
-            seen.append(
-                (
-                    self.policy.config.max_iterations,
-                    self.policy.config.max_auto_continuations,
-                )
-            )
-            return "planned"
-
-    loop = _RecordingLoop()
-    original = loop.policy.config.max_iterations
-    dc, _ = _console()
-
-    await handle_input(loop, "/plan 新计划", _session(), _Sessions(), dc)
-
-    from ai_coding.core.plan_runner import PLANNING_MAX_ITERATIONS
-
-    assert seen == [(PLANNING_MAX_ITERATIONS, 0)]
-    assert loop.policy.config.max_iterations == original  # swap restored
-
-
-def test_the_plan_prompt_starts_with_a_skeleton_and_bans_whole_file_reads():
-    """19 §3.4-1: the budget is headroom; the guidance is the fix."""
-    from ai_coding.core.plan_runner import PLAN_PROMPT
-
-    lowered = PLAN_PROMPT.lower()
-    assert "skeleton" in lowered
-    assert "grep/glob" in lowered
-
-
-@pytest.mark.asyncio
-async def test_a_budget_dead_planning_round_says_so():
-    """19 §3.5: a planning turn cut by the iteration budget gets an honest
-    notice — it used to print "计划就绪：N 项" over a half-written plan."""
-    from types import SimpleNamespace
-
-    from ai_coding.domain.loop import TurnStatus
-
-    class _DeadLoop(_Loop):
-        @property
-        def last_outcome(self):
-            return SimpleNamespace(status=TurnStatus.MAX_ITERATIONS, usage=None)
-
-    dc, c = _console()
-
-    await handle_input(_DeadLoop(), "/plan 新计划", _session(), _Sessions(), dc)
-
-    out = c.export_text()
-    assert "规划未完成" in out
-    assert "计划就绪" not in out
-
-
-def test_the_plan_prompt_submits_through_present_plan():
-    """19 §3.2: the model must be told to hand the plan over — the review card
-    is the only readiness signal, and dsh's guidance says the same thing
-    (exit_plan_mode as the final call)."""
-    from ai_coding.core.plan_runner import PLAN_PROMPT
-
-    assert "present_plan" in PLAN_PROMPT
-
-
-def test_the_plan_prompt_sends_the_steps_through_present_plan():
-    """P1 (trace ec89d5ee): the prompt taught a todo_write workflow whose
-    measured cost was 8 iterations for 8 steps plus an add/clear loop.  The
-    steps ride present_plan's own call now, with verify on each item."""
-    from ai_coding.core.plan_runner import PLAN_PROMPT
-
-    lowered = PLAN_PROMPT.lower()
-    assert "present_plan" in lowered
-    assert "items" in lowered
-    assert "verify" in lowered
-    assert "todo items with todo_write" not in lowered  # the old teaching is gone
-    # M3 T8 removed todo_write from the plan surface; the prompt must not
-    # name a tool the request cannot carry.
-    assert "todo_write" not in lowered
-
-
-@pytest.mark.asyncio
-async def test_plan_run_exits_the_posture_even_when_the_flip_had_to_queue():
-    """竞态实锤（c41e461 的 tmux 运行）：/plan run 派发落在回合锁内 → 退出
-    被排队到主会话，而 run 只跑步会话（fresh，自带 normal）→ 队列没人消费，
-    主会话残留 plan/readonly=True（磁盘同残，重启复活）。收尾兜底把翻转
-    落在 run 之后：即时/排队两态归一，且入盘。"""
-
-    class _BusyThenFreeLoop(_Loop):
-        async def process_input(self, session, text, on_delta=None, observer=None, **kwargs):
-            self.calls.append(text)
-            self.busy = False  # the lock is long gone by the time the run ends
-            return "step done"
-
-    from ai_coding.domain.task import TaskState
-
-    loop = _BusyThenFreeLoop(busy=True)
-    sessions = _Sessions()
-    session = _session()
-    session.agent, session.readonly = "plan", True
-    session.task = TaskState(goal="g")
-    session.task.add("still open")  # a real step: the stub's process_input runs
-    dc, c = _console()
-
-    await handle_input(loop, "/plan run", session, sessions, dc)
-
-    assert (session.mode, session.readonly) == ("normal", False)
-    assert sessions.saved and sessions.saved[-1] is session
-    out = c.export_text()
-    assert "执行完成后退出计划模式" in out
-
-
-def test_the_plan_prompt_says_imperative_language_is_not_approval():
-    """T12 (30 §3.4/M4b): the planning prompt's own copy — "go ahead" means
-    plan, not execute; only present_plan's approval starts execution.
-    Substring policy: keys carry the verdict, rewording stays green."""
-    from ai_coding.core.plan_runner import PLAN_PROMPT
-
-    for key in (
-        "conversational agreement approves nothing",
-        "only present_plan's approval starts execution",
-        "cannot discover by inspection",
-    ):
-        assert key in PLAN_PROMPT
-
-
-def test_the_plan_prompt_says_the_mutating_tools_are_unavailable():
-    """只读探索批次: plan mode hides bash/write/edit (the same mutates_world
-    predicate the gate refuses with); the prompt says so, because a model that
-    never sees the tool will still call it from memory."""
-    from ai_coding.core.plan_runner import PLAN_PROMPT
-
-    lowered = PLAN_PROMPT.lower()
-    assert "unavailable" in lowered
-    assert "read/grep/glob" in lowered
 
 
 # ---- R03: an armed non-plan task keeps the whole /plan family out ------------

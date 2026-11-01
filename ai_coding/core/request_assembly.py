@@ -75,8 +75,7 @@ _DIR_ENTRIES = 200
 
 #: C-2 (codex path): the one volatile instruction a plan turn carries.  It goes
 #: in the tail, before the task slot, so the model reads it as this request's
-#: instruction -- never in the history (compaction could eat it) and never on
-#: the ``session``/``legacy`` paths, which still use ``present_plan``.
+#: instruction -- never in the history (compaction could eat it).
 PLAN_MODE_BLOCK = (
     "<plan-mode>Plan mode: read-only research. Do not edit files or run mutating "
     "commands. Ask the user with ask_user when a decision is required. When the "
@@ -405,19 +404,15 @@ class RequestAssembler:
             if self._build_instructions is not None
             else None
         )
-        # C-2/C-3 (codex path): the executor is selected per loop; the assembler
-        # reads the same setting.  ``session``/``legacy`` keep the old path
-        # byte-for-byte (task block injected; ``present_plan`` does the review).
-        orchestrator = str(
-            getattr(self._settings, "plan_orchestrator", "session") or "session"
-        )
-        codex = orchestrator == "codex"
-        suppress_task = codex and (
+        # C-2/C-3 (codex path): a plan turn carries the ``<plan-mode>`` tail
+        # block and suppresses the task block; implementation turns read the
+        # plan from the transcript and their own ``update_plan`` history.
+        suppress_task = (
             session.mode == "plan"
             or bool(getattr(session, "plan_implementing", False))
         )
-        # R3: codex has no ``<task-state>`` in a plan turn (the plan is text in
-        # the transcript; during implementation the model reads its own
+        # R3: no ``<task-state>`` in a plan turn (the plan is text in the
+        # transcript; during implementation the model reads its own
         # ``update_plan`` history).  An empty list would otherwise inject a
         # "no items" block Codex never sends.
         injection = None
@@ -530,7 +525,7 @@ class RequestAssembler:
                 volatile_block("mcp_catalog", catalog),
                 volatile_block(
                     "plan_mode",
-                    PLAN_MODE_BLOCK if codex and session.mode == "plan" else "",
+                    PLAN_MODE_BLOCK if session.mode == "plan" else "",
                 ),
                 volatile_block("task", content_of(task_message)),
                 volatile_block("plan_state", content_of(plan_state)),

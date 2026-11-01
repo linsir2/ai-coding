@@ -107,37 +107,18 @@ def test_the_plan_segment_says_which_exit_before_it_names_the_exits():
     """
     segment = _plan_segment()
 
-    assert "present_plan" in segment, "the plan exit"
+    plan_exit = "<proposed_plan>"
+    assert plan_exit in segment, "the plan exit"
     assert "finish_research" in segment, "the research exit"
     assert _CHANGES in segment, "the rule that asks for a plan"
     assert _NO_CHANGE in segment, "the rule that asks for a conclusion"
     assert "never with the finished work" in segment, (
         "the real contract: the answer is a plan or a conclusion, not the work"
     )
-    assert segment.index(_CHANGES) < segment.index("present_plan")
+    assert segment.index(_CHANGES) < segment.index(plan_exit)
     assert segment.index(_CHANGES) < segment.index("finish_research")
-    assert segment.index(_NO_CHANGE) < segment.index("present_plan")
+    assert segment.index(_NO_CHANGE) < segment.index(plan_exit)
     assert segment.index(_NO_CHANGE) < segment.index("finish_research")
-
-
-def test_the_planning_prompt_says_which_exit_before_it_names_the_exits():
-    """R9, the other half: the planning prompt carries the same rule.
-
-    The prompt is the last message of the round, so it is the nearest thing
-    to the model's next step -- and its first sentence used to command a
-    plan outright ("Create a detailed implementation plan for: ..."), which
-    is what turned a research request into a plan.
-    """
-    from ai_coding.core.plan_runner import PLAN_PROMPT
-
-    assert "present_plan" in PLAN_PROMPT, "the plan exit"
-    assert "finish_research" in PLAN_PROMPT, "the research exit"
-    assert _CHANGES in PLAN_PROMPT, "the rule that asks for a plan"
-    assert _NO_CHANGE in PLAN_PROMPT, "the rule that asks for a conclusion"
-    assert PLAN_PROMPT.index(_CHANGES) < PLAN_PROMPT.index("present_plan")
-    assert PLAN_PROMPT.index(_CHANGES) < PLAN_PROMPT.index("finish_research")
-    assert PLAN_PROMPT.index(_NO_CHANGE) < PLAN_PROMPT.index("present_plan")
-    assert PLAN_PROMPT.index(_NO_CHANGE) < PLAN_PROMPT.index("finish_research")
 
 
 def test_an_unknown_mode_reads_as_normal():
@@ -176,7 +157,7 @@ def test_the_plan_segment_still_says_what_to_do():
     """Narrowing the segment must not empty it."""
     segment = _plan_segment()
 
-    assert "present_plan" in segment
+    assert "<proposed_plan>" in segment
     assert "finish_research" in segment
 # ---- C-2: the methods section follows the tools the request actually carries ---
 
@@ -269,41 +250,33 @@ def test_a_subagent_surface_keeps_its_own_habits():
 
 
 def test_the_prompts_say_a_conversational_yes_is_not_approval():
-    """T12 (30 §3.4/M4b): imperative language is not approval; only
-    present_plan's approval starts execution; ask only what inspection
+    """T12 (30 §3.4/M4b): imperative language is not approval; only the
+    human's approval of the plan starts execution; ask only what inspection
     cannot answer. Substring policy (not exact-sentence): the keys below
     carry the verdict, so rewording keeps the test green while deleting
     or gutting the verdict turns it red."""
     from ai_coding.core.plan_reminders import PLAN_ENTER_REMINDER
-    from ai_coding.core.plan_runner import PLAN_PROMPT
 
-    plan_keys = (
-        "conversational agreement approves nothing",
-        "only present_plan's approval starts execution",
-        "cannot discover by inspection",
-    )
     segment_keys = (
         "Do not treat 'go ahead'",
         "as approval",
     )
     reminder_keys = (
-        "Only present_plan's approval starts execution",
+        "Only the user's approval of that plan starts execution",
         "conversational yes does not",
     )
 
-    for key in plan_keys:
-        assert key in PLAN_PROMPT
     for key in segment_keys:
         assert key in _plan_segment()
     for key in reminder_keys:
         assert key in PLAN_ENTER_REMINDER
 
 
-def test_plan_segment_sends_the_steps_through_present_plan():
+def test_plan_segment_sends_the_plan_through_the_proposed_plan_block():
     """P1 (trace ec89d5ee): the segment taught a ``todo_write`` workflow whose
     measured cost was one iteration per step plus an add/clear loop.  The
-    steps now ride ``present_plan``'s own call, and the planning phase is told
-    not to track itself with a todo list.
+    plan now rides the ``<proposed_plan>`` block, and the planning phase is
+    told not to track itself with a todo list.
 
     M3 T8 removed ``todo_write`` from the planning surface entirely, so the
     segment must not name it: a prompt that teaches "don't use this tool" for
@@ -312,8 +285,7 @@ def test_plan_segment_sends_the_steps_through_present_plan():
     is still pinned.
     """
     out = _assembler().build(mode="plan")
-    assert "present_plan" in out
-    assert "items" in out
+    assert "<proposed_plan>" in out
     assert "todo items with todo_write" not in out  # the old teaching is gone
     assert "todo_write" not in out
     assert "do not track the planning with a todo list" in out

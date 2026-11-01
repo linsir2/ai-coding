@@ -324,8 +324,8 @@ class GoalRunner:
         Arm, every round's numbers, and the disarm are real task changes; the
         sidebar's goal line rides them, and reusing the event keeps the wire
         type, the bridge mapping and the frontend case untouched.  Observation
-        only: a client that cannot take it must not cost the round (same
-        discipline as PlanRunner's receipt -- both go through the LoopObserver
+        only: a client that cannot take it must not cost the round (the same
+        discipline as every observation -- all go through the LoopObserver
         protocol, ``on_event``, which is what the real bridge implements).
         """
         if self._observer is None:
