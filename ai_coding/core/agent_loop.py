@@ -349,6 +349,11 @@ class AgentLoop:
         # P0-2: the harness lane -- a background run settles long after the turn
         # that started it, and its event reaches the operator but not the model.
         notices: Any | None = None,
+        #: C-5b: what *another agent* said to this one.  A separate lane from
+        #: ``notices`` because the two speakers differ (a peer's message is
+        #: addressed to this conversation, not a harness report) and because
+        #: sharing one queue let a child steal the parent's settlement notices.
+        agent_inbox: Callable[[], list[str]] | None = None,
         jobs: Any | None = None,
         cancel: asyncio.Event | None = None,
         snapshots: Any | None = None,
@@ -463,6 +468,7 @@ class AgentLoop:
         # P0-2: same queue shape, different speaker.  None = today's behaviour,
         # and the loop then never looks at it.
         self.notices = notices
+        self.agent_inbox = agent_inbox
         # D-1: background jobs.  Kept beside notices because the two travel
         # together -- a job that finishes writes into that same queue.
         self.jobs = jobs
@@ -1201,6 +1207,7 @@ class AgentLoop:
                 books.note_iteration(index)
                 self._take_steering(session, books, index)
                 self._take_notices(session, index)
+                self._take_agent_inbox(session, index)
                 self._emit(
                     IterationStarted(
                         index=index, max_iterations=self.policy.config.max_iterations
@@ -1765,6 +1772,25 @@ class AgentLoop:
             return
         for line in lines:
             session.add_message(user_message(f"[notice] {line}", now_utc(), synthetic=True))
+        self.closer.checkpoint(session, index)
+
+    def _take_agent_inbox(self, session: SessionData, index: int) -> None:
+        """Absorb what another agent sent to this one, at the same boundary.
+
+        Same delivery point as ``_take_notices`` and for the same reason: a
+        message that arrives while a turn is running must reach the model
+        before the next request, not after the turn.  The ``[agent-message]``
+        marker keeps it distinguishable from the operator's own words.
+        """
+        if self.agent_inbox is None:
+            return
+        lines = self.agent_inbox()
+        if not lines:
+            return
+        for line in lines:
+            session.add_message(
+                user_message(f"[agent-message] {line}", now_utc(), synthetic=True)
+            )
         self.closer.checkpoint(session, index)
 
     def _take_steering(self, session: SessionData, books: TurnBooks, index: int) -> None:

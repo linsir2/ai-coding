@@ -438,6 +438,9 @@ class BackgroundTask:
     ended: float | None = None
     error: str | None = None
     usage: dict[str, int] | None = None
+    #: C-5b-1: the child session behind this row, so a listing can point at the
+    #: addressable handle (empty for rows that never started).
+    session_id: str = ""
     #: C-3b: where the settled run's full packet was written, so a listing can
     #: hand the model a pointer the ``read`` tool can follow.  None while the
     #: run is live, and for rows that never wrote one (rejected at spawn).
@@ -453,6 +456,7 @@ class BackgroundTask:
             "ended": self.ended,
             "error": self.error,
             "usage": dict(self.usage) if self.usage is not None else None,
+            "sessionId": self.session_id,
             "ledgerPath": self.ledger_path,
         }
 
@@ -468,6 +472,7 @@ class BackgroundTask:
             ended=data.get("ended"),
             error=data.get("error"),
             usage=dict(usage) if isinstance(usage, dict) else None,
+            session_id=str(data.get("sessionId", "") or ""),
             ledger_path=(
                 str(data["ledgerPath"]) if data.get("ledgerPath") is not None else None
             ),

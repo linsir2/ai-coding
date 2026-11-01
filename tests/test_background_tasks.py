@@ -267,6 +267,14 @@ async def test_table_prunes_oldest_terminal_rows_first(monkeypatch):
     runner.spawn_background("three", name="four", emit=lambda e: None)
     await settle()
     rows = runner.task_list()
+    # C-5b-1 handles-first: a settled row whose handle is still addressable is
+    # protected from pruning (the id must keep resolving after the row goes).
+    assert len(rows) == 3
+    # Once the handles are dropped (close in a later phase), the old bound
+    # applies again: the oldest terminal rows go first.
+    runner._handles.clear()
+    runner._prune_background()
+    rows = runner.task_list()
     assert len(rows) == 2
     assert [r.name for r in rows] == ["three", "four"]
     assert all(r.status != "running" for r in rows)

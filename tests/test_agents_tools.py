@@ -30,9 +30,11 @@ class _FakeRunner:
         self.spawns: list[dict] = []
         self.waits: list[tuple[str, int]] = []
         self.cancels: list[str] = []
+        self.closes: list[str] = []
         self.rows: list[BackgroundTask] = []
         self.wait_result: tuple[str, int] = ("completed", 1200)
         self.cancel_result = True
+        self.close_result = True
         self.spawn_error: Exception | None = None
 
     def spawn_background(self, task, name="sub-agent", **kwargs):
@@ -55,6 +57,10 @@ class _FakeRunner:
     def cancel(self, run_id):
         self.cancels.append(run_id)
         return self.cancel_result
+
+    async def close(self, run_id):
+        self.closes.append(run_id)
+        return self.close_result
 
 
 def _ctx() -> ToolContext:
@@ -255,19 +261,19 @@ async def test_close_agent_reports_whether_the_run_was_live():
                        ended=now),
     ]
 
-    runner.cancel_result = True
+    runner.close_result = True
     live = await tool.execute({"agent_id": "run_a"}, _ctx())
     assert live.success is True
     assert live.output == "closed run_a"
     assert live.data == {"agent_id": "run_a", "closed": True}
 
-    runner.cancel_result = False
+    runner.close_result = False
     settled = await tool.execute({"agent_id": "run_b"}, _ctx())
     assert settled.success is True
     assert settled.output == "not running: run_b"
     assert settled.data == {"agent_id": "run_b", "closed": False}
 
-    assert runner.cancels == ["run_a", "run_b"]
+    assert runner.closes == ["run_a", "run_b"]
 
 
 @pytest.mark.asyncio
@@ -317,7 +323,7 @@ async def test_wait_and_close_accept_a_unique_prefix():
 
     closed = await CloseAgentTool(runner).execute({"agent_id": "run_ab"}, _ctx())
     assert closed.success is True
-    assert runner.cancels == ["run_ab12cd34"]
+    assert runner.closes == ["run_ab12cd34"]
 
 
 @pytest.mark.asyncio

@@ -447,12 +447,15 @@ def _assemble_registry(
         registry.register(ParallelResearchTool(runner=runner))
         # C-3b: the model's own view of the table /tasks reads.
         registry.register(SubAgentListTool(runner=runner))
-        # C-5a: the Codex-shaped tool face over the same runner.  The three
-        # names C-5b still owes (send_message / interrupt_agent / resume_agent)
-        # are deliberately not registered: no ghost tools.
+        # C-5a / C-5b: the Codex-shaped tool face over the same runner.  The
+        # C-5b trio is registered here too: all seven names share one runner,
+        # one semaphore and one permission (``subAgent``).
         from ai_coding.tools.agents_tool import (
             CloseAgentTool,
+            InterruptAgentTool,
             ListAgentsTool,
+            ResumeAgentTool,
+            SendMessageTool,
             SpawnAgentTool,
             WaitAgentTool,
         )
@@ -463,6 +466,9 @@ def _assemble_registry(
         registry.register(WaitAgentTool(runner))
         registry.register(ListAgentsTool(runner))
         registry.register(CloseAgentTool(runner))
+        registry.register(SendMessageTool(runner))
+        registry.register(InterruptAgentTool(runner))
+        registry.register(ResumeAgentTool(runner))
 
     # Deferred tools: the prompt names them (one line each in tool_search's
     # answer), and their schemas ride the request only after the model asks.

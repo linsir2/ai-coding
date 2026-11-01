@@ -249,8 +249,14 @@ def test_the_plan_rules_hide_exactly_what_the_readonly_overlay_hid():
 
     gate = PermissionGate()
     rules = _plan_rules()
+    # The gate judges ``permission_name``, so the question must be asked in the
+    # same name the dispatch path uses (C-5a).  The C-5b trio
+    # (send_message/interrupt_agent/resume_agent) has no rule row of its own:
+    # it is hidden through the ``subAgent`` permission, like the spawn/close pair.
     hidden_by_rules = {
-        t.name for t in registry.all_tools if gate.hides(t.name, agent_rules=rules)
+        t.name
+        for t in registry.all_tools
+        if gate.hides(t.permission_name(), agent_rules=rules)
     }
 
     # M3 T8 is the second deliberate difference: ``todo_write`` is not a

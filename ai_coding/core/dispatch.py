@@ -68,6 +68,15 @@ from ai_coding.security.permissions import posture_of
 from ai_coding.tools.base import BaseTool, ToolContext
 from ai_coding.tools.registry import ToolRegistry
 
+#: C-5b: control-plane tools are never replayed from the write-ahead log.
+#: A crash-resumed ``send_message``/``interrupt_agent``/``resume_agent`` must
+#: not answer with a stale record -- replaying it would deliver the message
+#: twice or cut a turn that is already gone.  ``settle`` without a record is
+#: a no-op, so skipping ``claim`` is the whole change.
+CONTROL_REPLAY_TOOLS = frozenset(
+    {"send_message", "interrupt_agent", "resume_agent", "close_agent"}
+)
+
 
 @dataclass(frozen=True)
 class DispatchOutcome:
@@ -618,7 +627,11 @@ class ToolDispatcher:
         # in a live turn the same call must really run again, or the model reads
         # a stale result and the guards never see the repeat.
         log = getattr(ctx, "write_ahead", None)
-        if tool.mutates_world and log is not None:
+        if (
+            tool.mutates_world
+            and log is not None
+            and call.name not in CONTROL_REPLAY_TOOLS
+        ):
             reused = log.claim(call, allow_replay=allow_replay)
             if reused is not None:
                 # The call *did* run -- before the crash.  Counting it now is

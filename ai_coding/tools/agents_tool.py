@@ -1,10 +1,14 @@
-"""Codex-shaped multi-agent tools (C-5a).
+"""Codex-shaped multi-agent tools (C-5a / C-5b).
 
-Four model-visible tools over the existing :class:`~ai_coding.core.subagent.SubAgentRunner`:
+The model-visible face of :class:`~ai_coding.core.subagent.SubAgentRunner`:
 ``spawn_agent`` starts a background child and returns its id at once, ``wait_agent``
-observes one run (it never cancels it), ``list_agents`` reads the background table
-and ``close_agent`` cancels one run.  The runner keeps owning the semaphore, the
-worktree, the timeout and the ledger; these tools only parse, map and render.
+observes one run (it never cancels it), ``list_agents`` reads the background table,
+``close_agent`` closes one run and the C-5b trio adds turn-level control:
+``send_message`` (delivered to a running turn or wakes an idle child),
+``interrupt_agent`` (cancels the current turn, keeps the handle) and
+``resume_agent`` (reopens the same conversation).  The runner keeps owning the
+semaphore, the worktree, the timeout and the ledger; these tools only parse,
+map and render.
 
 The completion lane is unchanged: a settled child announces itself through the
 runner's ``notices`` (user + synthetic), so ``wait_agent`` deliberately returns a
@@ -23,7 +27,10 @@ from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 __all__ = [
     "CloseAgentTool",
+    "InterruptAgentTool",
     "ListAgentsTool",
+    "ResumeAgentTool",
+    "SendMessageTool",
     "SpawnAgentTool",
     "WaitAgentTool",
 ]
@@ -33,6 +40,10 @@ __all__ = [
 _MIN_WAIT_MS = 1_000
 _MAX_WAIT_MS = 600_000
 _DEFAULT_WAIT_MS = 30_000
+
+#: ``send_message`` keeps one message to what a model step can actually read:
+#: anything longer belongs in ``task``/a file, not in a boundary injection.
+_MAX_MESSAGE_CHARS = 2_000
 
 
 class SpawnAgentTool(BaseTool):
@@ -304,7 +315,7 @@ class ListAgentsTool(BaseTool):
 
 
 class CloseAgentTool(BaseTool):
-    """Cancel one background run."""
+    """Close one child (cancel its turn, release its loop, drop the handle)."""
 
     #: Cancelling a run changes the world (its work stops here).
     parallel_safe = False
@@ -324,9 +335,10 @@ class CloseAgentTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Cancel a running background sub-agent by id. It reports whether the "
-            "run was still live; a settled or unknown id changes nothing. The "
-            "child's already-written commit/branch and ledger stay as they are."
+            "Close a sub-agent by id: cancel its current turn and release it. "
+            "The child's session, already-written commit/branch and ledger stay "
+            "as they are, so resume_agent can reopen it later. A settled or "
+            "unknown id changes nothing."
         )
 
     @property
@@ -358,19 +370,235 @@ class CloseAgentTool(BaseTool):
         rows = {
             row.run_id: row for row in getattr(self._runner, "task_list", lambda: [])()
         }
-        if resolved not in rows:
+        # C-5b-1 handles-first: a handle outlives its projection row, so an id
+        # with a handle is addressable even when the row was pruned.
+        handles = getattr(self._runner, "_handles", {})
+        if resolved not in rows and resolved not in handles:
             return ToolResult(
                 success=False,
                 output=f"unknown agent: {agent_id}",
                 error="unknown_agent",
                 data={"agent_id": resolved, "closed": False},
             )
-        closed = bool(self._runner.cancel(resolved))
+        closed = bool(await self._runner.close(resolved))
         return ToolResult(
             success=True,
             output=f"closed {resolved}" if closed else f"not running: {resolved}",
             data={"agent_id": resolved, "closed": closed},
         )
+
+
+class SendMessageTool(BaseTool):
+    """Deliver a message to one child (running turn, or a new one if idle)."""
+
+    #: Sending can start a writable child's turn; the plan/readonly gate hides it.
+    parallel_safe = False
+    mutates_world = True
+
+    def __init__(self, runner: Any) -> None:
+        self._runner = runner
+
+    @property
+    def name(self) -> str:
+        return "send_message"
+
+    def permission_name(self, params: dict[str, Any] | None = None) -> str:
+        # Same permission as spawning one: talking to a child is a subagent act.
+        return "subAgent"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Send a message to a sub-agent by id or name. A running agent reads "
+            "it at its next step; an idle (or interrupted) agent starts a new "
+            "turn with it. Keep it under 2000 characters and put long material "
+            "in a file the child can read. The reply comes back as a notice."
+        )
+
+    @property
+    def params_json_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "The agent id (or unique name) to message.",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "The message text (non-empty, max 2000 chars).",
+                },
+            },
+            "required": ["target", "message"],
+        }
+
+    async def execute(
+        self,
+        params: dict[str, Any],
+        ctx: ToolContext | None = None,
+    ) -> ToolResult:
+        target = str(params.get("target", "") or "").strip()
+        message = str(params.get("message", "") or "").strip()
+        if not target:
+            return ToolResult(
+                success=False, output="error: 'target' is required",
+                error="missing_target",
+            )
+        if not message or len(message) > _MAX_MESSAGE_CHARS:
+            return ToolResult(
+                success=False,
+                output=(
+                    "error: 'message' must be non-empty and at most "
+                    f"{_MAX_MESSAGE_CHARS} characters"
+                ),
+                error="invalid_message",
+            )
+        resolved = _resolve_agent_id(self._runner, target)
+        try:
+            status, run_id = await self._runner.send_message(resolved, message)
+        except SubAgentPoolFull as exc:
+            return ToolResult(
+                success=False, output=f"message not sent: {exc}",
+                error="agents_exhausted",
+            )
+        data = {"target": run_id or resolved, "status": status}
+        if status == "unknown":
+            return ToolResult(
+                success=False, output=f"unknown agent: {target}",
+                error="unknown_agent", data=data,
+            )
+        if status == "queued":
+            output = f"message queued to {run_id}"
+        else:
+            output = f"message started a turn on {run_id}"
+        return ToolResult(success=True, output=output, data=data)
+
+
+class InterruptAgentTool(BaseTool):
+    """Cancel a child's current turn and keep the child addressable."""
+
+    #: Cutting a running turn changes the world (its work stops here).
+    parallel_safe = False
+    mutates_world = True
+
+    def __init__(self, runner: Any) -> None:
+        self._runner = runner
+
+    @property
+    def name(self) -> str:
+        return "interrupt_agent"
+
+    def permission_name(self, params: dict[str, Any] | None = None) -> str:
+        return "subAgent"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Interrupt a sub-agent's current turn. The agent, its conversation "
+            "and its workspace survive, so you can send_message it again or "
+            "resume_agent it. An unknown or already-finished id still succeeds "
+            "and reports what it saw. No completion notice is sent for an "
+            "interrupt."
+        )
+
+    @property
+    def params_json_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "The agent id (or unique name) to interrupt.",
+                },
+            },
+            "required": ["target"],
+        }
+
+    async def execute(
+        self,
+        params: dict[str, Any],
+        ctx: ToolContext | None = None,
+    ) -> ToolResult:
+        target = str(params.get("target", "") or "").strip()
+        if not target:
+            return ToolResult(
+                success=False, output="error: 'target' is required",
+                error="missing_target",
+            )
+        resolved = _resolve_agent_id(self._runner, target)
+        previous, status = await self._runner.interrupt(resolved)
+        previous_display = previous or "none"
+        return ToolResult(
+            success=True,
+            output=f"agent {resolved}: {previous_display} -> {status}",
+            data={
+                "target": resolved,
+                "previous_status": previous,
+                "status": status,
+            },
+        )
+
+
+class ResumeAgentTool(BaseTool):
+    """Reopen a child that was interrupted or closed (or lost to a restart)."""
+
+    #: Resuming rebuilds a writable child's loop; the gate must be able to hide it.
+    parallel_safe = False
+    mutates_world = True
+
+    def __init__(self, runner: Any) -> None:
+        self._runner = runner
+
+    @property
+    def name(self) -> str:
+        return "resume_agent"
+
+    def permission_name(self, params: dict[str, Any] | None = None) -> str:
+        return "subAgent"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Reopen a sub-agent by id after an interrupt or a close, or after a "
+            "restart (its session and metadata are on disk). Resume does not "
+            "start a turn: send_message it to continue. An agent that is still "
+            "running is a no-op."
+        )
+
+    @property
+    def params_json_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "The id (or unique name) to resume.",
+                },
+            },
+            "required": ["agent_id"],
+        }
+
+    async def execute(
+        self,
+        params: dict[str, Any],
+        ctx: ToolContext | None = None,
+    ) -> ToolResult:
+        agent_id = str(params.get("agent_id", "") or "").strip()
+        if not agent_id:
+            return ToolResult(
+                success=False, output="error: 'agent_id' is required",
+                error="missing_agent_id",
+            )
+        resolved = _resolve_agent_id(self._runner, agent_id)
+        status, run_id = await self._runner.resume(resolved)
+        name = run_id or resolved
+        data = {"agent_id": name, "status": status}
+        if status == "not_found":
+            return ToolResult(
+                success=False, output=f"agent {name}: not found",
+                error="not_found", data=data,
+            )
+        return ToolResult(success=True, output=f"agent {name}: {status}", data=data)
 
 
 def _resolve_agent_id(runner: Any, agent_id: str) -> str:

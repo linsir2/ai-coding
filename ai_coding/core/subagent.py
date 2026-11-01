@@ -19,12 +19,14 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import os
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ai_coding.ai.engine import ChatEngine
 from ai_coding.ai.prompt import PromptAssembler
@@ -46,11 +48,15 @@ from ai_coding.domain.subagent import (
     SubagentResult,
     extract_json_facts,
 )
-from ai_coding.infra.deadline import DeadlineExpired, run_with_deadline
-from ai_coding.infra.json_utils import to_json_pretty
+from ai_coding.infra.json_utils import from_json_file, to_json_pretty
 from ai_coding.infra.time_utils import now_utc
+from ai_coding.security.permissions import rule_to_dict, rules_from_dicts
+from ai_coding.service.session_service import SessionService
 from ai_coding.skills.registry import SkillRegistry
 from ai_coding.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from ai_coding.security.permissions import Rule
 
 EngineFactory = Callable[[], ChatEngine]
 BuildTools = Callable[[str | None], ToolRegistry]
@@ -108,6 +114,54 @@ class _NullSessions:
         return None
 
 
+class _StartError(RuntimeError):
+    """The child could not be opened (bad target, or no run id to address it)."""
+
+
+@dataclass
+class AgentHandle:
+    """One addressable child (C-5b-1).
+
+    ``_handles`` is the source of truth for addressing; ``_background`` is only
+    a projection for ``/tasks``/``list_agents``.  A handle owns the child's
+    ``SessionData`` and its ``AgentLoop``, so later phases can send another turn
+    into the same conversation instead of rebuilding it.
+    """
+
+    run_id: str
+    name: str
+    task: str
+    session: SessionData
+    session_store: SessionService
+    loop: AgentLoop | None
+    workdir: str | None
+    readonly: bool
+    agent: str | None
+    context_mode: str
+    parent_permissions: tuple[Rule, ...]
+    parent_span: str
+    emit: Any
+    origin_session: str
+    output_schema: dict[str, Any] | None
+    #: C-5b: the raw observer, so a rebuilt loop can re-scope it to this child.
+    observer: Any = None
+    #: C-5b: the persistent worktree a resumed turn keeps using (None = main).
+    worktree_path: str | None = None
+    worktree_branch: str | None = None
+    worktree_manager: Any = None
+    #: Set when ``loop`` is attached; ``send_message`` waits for it.
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    status: str = "running"  # running | idle | interrupted | closed
+    last_status: str = "completed"  # completed | error | timeout | interrupted
+    mailbox: deque[str] = field(default_factory=deque)
+    turn_task: asyncio.Task[Any] | None = None
+    turn_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    announced: bool = False
+    #: A synchronous ``run()`` child: no session file, no sidecar, no registry
+    #: entry.  The flag is the routing switch ``_run_turn`` needs (5.3).
+    ephemeral: bool = False
+
+
 class SubAgentRunner:
     """Run one sub-agent task, optionally inside a git worktree sandbox."""
 
@@ -135,6 +189,10 @@ class SubAgentRunner:
         #: inherited).  ``None`` keeps tests and bare callers free of filesystem
         #: reads; production passes ``ProjectInstructionsLoader(workspace)``.
         project: Any | None = None,
+        #: C-5b-1: where addressable children persist.  ``None`` derives the
+        #: isolated ``<agents base>/sessions`` root below, so the main
+        #: ``/resume`` list can never pick a child session up.
+        session_store: SessionService | None = None,
     ) -> None:
         self._app_config = app_config
         self._skills = skills
@@ -178,6 +236,25 @@ class SubAgentRunner:
         self._background: dict[str, BackgroundTask] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._announce: dict[str, tuple[Any, str, str]] = {}
+        # C-5b-1: addressable children (the source of truth) and their on-disk
+        # state.  Children live under ``<agents base>/.ai-coding/agents/`` --
+        # never at ``ledger_root`` itself (that is the repository root).
+        agents_base = (
+            Path(session_store.root).parent
+            if session_store is not None
+            else (
+                Path(ledger_root) if ledger_root is not None else Path(workspace)
+            )
+            / ".ai-coding"
+            / "agents"
+        )
+        self._session_store = (
+            session_store
+            if session_store is not None
+            else SessionService(agents_base / "sessions")
+        )
+        self._meta_root = agents_base / "meta"
+        self._handles: dict[str, AgentHandle] = {}
 
     @property
     def timeout_seconds(self) -> float:
@@ -361,17 +438,41 @@ class SubAgentRunner:
             )
         run_id = uuid.uuid4().hex[:12]
         active = self._observer if observer is None else observer
+        mode = self._resolve_context_mode(self.context_mode, context_mode)
         self._background[run_id] = BackgroundTask(
             run_id=run_id, name=name, task=task, status="running",
             started=time.monotonic(),
         )
         self._prune_background()
+        # C-5b-1: the handle is opened *before* the task starts, so the row is
+        # addressable from the moment ``spawn_background`` returns.  A failure
+        # here never leaves a ``running`` row behind.
+        try:
+            handle = self._open_handle(
+                task, name, None, parent,
+                parent_span=parent_span, observer=active,
+                output_schema=output_schema, agent=agent,
+                context_mode=mode, readonly=False,
+                run_id=run_id, ephemeral=False, defer_loop=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — a row must not stay "running"
+            self._background[run_id] = replace(
+                self._background[run_id],
+                status="error",
+                ended=time.monotonic(),
+                error=f"failed to start: {exc}",
+            )
+            raise RuntimeError(f"sub-agent failed to start: {exc}") from exc
+        handle.emit = emit
+        handle.origin_session = origin_session
+        self._background[run_id] = replace(
+            self._background[run_id], session_id=handle.session.session_id
+        )
+        self._write_meta(handle)
         supervised = self._supervised(
-            run_id, task=task, name=name, worktree_manager=worktree_manager,
-            isolate=isolate, parent=parent, parent_span=parent_span,
-            observer=active, emit=emit, origin_session=origin_session,
-            output_schema=output_schema, agent=agent,
-            context_mode=context_mode,
+            handle, task,
+            worktree_manager=worktree_manager,
+            isolate=isolate,
         )
         try:
             background_task = asyncio.get_running_loop().create_task(
@@ -384,6 +485,8 @@ class SubAgentRunner:
             # coroutine must be closed explicitly or Python reports it as never
             # awaited.
             supervised.close()
+            handle.status = "closed"
+            self._handles.pop(run_id, None)
             self._background[run_id] = replace(
                 self._background[run_id],
                 status="error",
@@ -402,12 +505,339 @@ class SubAgentRunner:
 
     def cancel(self, run_id: str) -> bool:
         """Stop a running background task.  False when unknown or settled."""
-        row = self._background.get(run_id)
-        background_task = self._tasks.get(run_id)
+        # C-5b-1 handles-first: an id that still has a handle is addressable
+        # even when its projection row was pruned.
+        resolved = self.resolve_run_id(run_id) or run_id
+        row = self._background.get(resolved)
+        background_task = self._tasks.get(resolved)
         if row is None or background_task is None or row.status != "running":
             return False
         background_task.cancel()
         return True
+
+    # ---- C-5b: send / interrupt / resume / close ---------------------------
+
+    def _handle_for(self, target: str) -> AgentHandle | None:
+        """The live handle a target names -- id prefix first, then a unique name.
+
+        Addressing is handles-first (4.1): the projection row may be pruned and
+        a closed handle is not addressable at all.  An ambiguous name resolves
+        to ``None`` rather than guessing which child the operator meant.
+        """
+        if not target:
+            return None
+        resolved = self.resolve_run_id(target)
+        if resolved is not None:
+            handle = self._handles.get(resolved)
+            if handle is not None and handle.status != "closed":
+                return handle
+            return None
+        matches = [
+            handle
+            for handle in self._handles.values()
+            if handle.name == target and handle.status != "closed"
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    async def send_message(self, target: str, text: str) -> tuple[str, str]:
+        """Deliver ``text`` to a child; return ``(status, run_id)``.
+
+        A running turn takes the message into its mailbox and reads it at the
+        next iteration boundary; an idle/interrupted handle gets a new turn
+        instead (our one wake-up path, design §9).  Unknown twice over: no
+        handle, and never a run id to name it by.
+        """
+        handle = self._handle_for(target)
+        if handle is None:
+            return "unknown", ""
+        task = handle.turn_task
+        if (
+            (task is not None and not task.done())
+            or handle.status in {"running", "interrupting"}
+        ):
+            handle.mailbox.append(text)
+            return "queued", handle.run_id
+        self._schedule_turn(handle, text)
+        return "running", handle.run_id
+
+    def _schedule_turn(self, handle: AgentHandle, text: str) -> None:
+        """Start one turn on an idle handle, without an await before the slot.
+
+        The check "is a turn already assigned?" and the assignment are in the
+        same synchronous block on purpose (DF-2): a race here would overwrite
+        ``turn_task`` and run two turns against one session.
+        """
+        running = sum(
+            1 for row in self._background.values() if row.status == "running"
+        )
+        if running >= self._max_concurrent():
+            raise SubAgentPoolFull(
+                "sub-agent concurrency exhausted: "
+                f"{self._max_concurrent()} background slots busy; "
+                "retry later or raise ai.max_concurrent_subagents"
+            )
+        handle.status = "running"
+        handle.announced = False
+        row = self._background.get(handle.run_id)
+        if row is not None:
+            self._background[handle.run_id] = replace(
+                row, status="running", ended=None, error=None, usage=None,
+                ledger_path=None,
+            )
+        task = asyncio.get_running_loop().create_task(
+            self._run_followup(handle, text), name=f"subagent:{handle.run_id}"
+        )
+        handle.turn_task = task
+        self._tasks[handle.run_id] = task
+        task.add_done_callback(functools.partial(self._reap, handle.run_id))
+
+    async def _run_followup(self, handle: AgentHandle, text: str) -> None:
+        """One continuation turn: run it, settle it, then drain the mailbox.
+
+        Cancellation is a **status**, not an exit (DF-3): the inner turn is
+        awaited shut by ``_run_turn``, the session is saved, the handle stays
+        (so ``resume_agent`` can reopen it), and no completion notice is sent.
+        """
+        interrupted = False
+        try:
+            async with self._semaphore:
+                if handle.loop is None:
+                    await self._attach_loop(
+                        handle, handle.worktree_path or handle.workdir
+                    )
+                result = await self._run_turn(handle, text)
+        except asyncio.CancelledError:
+            interrupted = True
+            handle.status = "interrupted"
+            handle.last_status = "interrupted"
+            row = self._background.get(handle.run_id)
+            if row is not None:
+                self._background[handle.run_id] = replace(
+                    row, status="interrupted", ended=time.monotonic()
+                )
+            self._tasks.pop(handle.run_id, None)
+            self._announce.pop(handle.run_id, None)
+            loop = handle.loop
+            handle.loop = None
+            if not handle.ephemeral:
+                self._session_store.save(handle.session)
+                self._write_meta(handle)
+            if loop is not None:
+                # The cancelled turn is closed; the engine behind it is not
+                # reusable after a cut, so release it here and rebuild later.
+                try:
+                    await loop.aclose()
+                except Exception:  # noqa: BLE001 — release must not mask the cut
+                    _log.debug("child loop close after interrupt failed", exc_info=True)
+        else:
+            handle.status = "idle"
+            self._finish_background(
+                handle.run_id, result, handle.emit, handle.origin_session
+            )
+        finally:
+            current = asyncio.current_task()
+            if handle.turn_task is current:
+                handle.turn_task = None
+        if interrupted or handle.status == "closed":
+            return
+        # A message may land after the last iteration boundary; run it as one
+        # merged follow-up turn instead of leaving it parked in the mailbox.
+        remaining = list(handle.mailbox)
+        if remaining:
+            try:
+                self._schedule_turn(handle, "\n".join(remaining))
+            except SubAgentPoolFull:
+                # Keep them queued: a saturated pool is a retry, not a drop.
+                _log.debug(
+                    "follow-up turn for %s rejected: pool full", handle.run_id,
+                    exc_info=True,
+                )
+            else:
+                _drain_mailbox(handle.mailbox)
+
+    async def interrupt(self, target: str) -> tuple[str, str]:
+        """Cancel a child's current turn and keep everything else.
+
+        A handle with no live turn is a no-op that reports its status; an
+        unknown or closed one is ``not_found`` (the tool still succeeds -- Codex
+        treats "already dead" as a successful interrupt).  The returned
+        ``previous`` status is what the caller prints before the arrow.
+        """
+        handle = self._handle_for(target)
+        if handle is None:
+            return "not_found", target
+        task = handle.turn_task
+        if task is None or task.done():
+            # C-5b review: the first turn lives in ``_tasks`` until the
+            # supervised body returns; without this fallback a just-spawned
+            # agent could not be interrupted at all.
+            task = self._tasks.get(handle.run_id)
+        if task is None or task.done():
+            return handle.status, handle.status
+        previous = handle.status
+        handle.status = "interrupting"
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        handle.status = "interrupted"
+        handle.last_status = "interrupted"
+        loop = handle.loop
+        handle.loop = None
+        if loop is not None:
+            try:
+                await loop.aclose()
+            except Exception:  # noqa: BLE001 — release must not mask the cut
+                _log.debug("child loop close after interrupt failed", exc_info=True)
+        if not handle.ephemeral:
+            self._session_store.save(handle.session)
+            self._write_meta(handle)
+        row = self._background.get(handle.run_id)
+        if row is not None:
+            self._background[handle.run_id] = replace(
+                row, status="interrupted", ended=time.monotonic()
+            )
+        return previous, "interrupted"
+
+    async def resume(self, target: str) -> tuple[str, str]:
+        """Make a child usable again; never starts a turn (Codex semantics).
+
+        Two layers: an in-memory handle only needs its loop back, while a
+        closed one is reopened from its sidecar + session file.  A running
+        handle is a no-op.  Resumed state deliberately drops every runtime
+        marker the session file carried (stale approvals, write-ahead records,
+        an open turn, queued reminders), so nothing from before the cut leaks
+        into the new turn.
+        """
+        handle = self._handle_for(target)
+        if handle is not None:
+            task = handle.turn_task
+            if handle.status == "running" or (task is not None and not task.done()):
+                return "running", handle.run_id
+            if handle.loop is None:
+                await self._attach_loop(
+                    handle, handle.worktree_path or handle.workdir
+                )
+            handle.status = "idle"
+            if not handle.ephemeral:
+                self._session_store.save(handle.session)
+                self._write_meta(handle)
+            self._restore_row(handle)
+            return "idle", handle.run_id
+        # A cross-process target is a full id this process never saw, so the
+        # literal id is the fallback -- the sidecar file is the address then.
+        run_id = self.resolve_run_id(target) or target
+        meta = self._load_meta(run_id)
+        if meta is None:
+            return "not_found", target
+        session = self._session_store.load(str(meta.get("sessionId") or ""))
+        if session is None:
+            return "not_found", target
+        session.pending_approval = None
+        session.pending_posture = None
+        session.write_ahead = None
+        session.open_turn = None
+        session.pending_reminders = None
+        session.inbox = []
+        session.recovered_interrupted = False
+        rules, _errors = rules_from_dicts(list(meta.get("permissions") or []))
+        workdir = meta.get("workdir")
+        if workdir and not Path(str(workdir)).exists():
+            # A closed child's temporary/persistent worktree may have been
+            # removed; resuming in a vanished directory would fail every tool.
+            workdir = None
+        handle = AgentHandle(
+            run_id=run_id,
+            name=str(meta.get("name") or "sub-agent"),
+            task=str(meta.get("task") or ""),
+            session=session,
+            session_store=self._session_store,
+            loop=None,
+            workdir=workdir,
+            readonly=bool(meta.get("readonly")),
+            agent=meta.get("agent"),
+            context_mode=str(meta.get("contextMode") or "full"),
+            parent_permissions=tuple(rules),
+            parent_span="",
+            emit=None,
+            origin_session=str(meta.get("parentSessionId") or ""),
+            output_schema=None,
+            status="idle",
+            last_status=str(meta.get("lastStatus") or "completed"),
+        )
+        await self._attach_loop(handle, handle.worktree_path or handle.workdir)
+        self._handles[run_id] = handle
+        self._restore_row(handle)
+        self._write_meta(handle)
+        return "idle", run_id
+
+    async def close(self, target: str) -> bool:
+        """Close a child for good: cancel its turn, close its loop, drop it.
+
+        The disk state survives (session + sidecar), which is what makes
+        ``resume_agent`` able to reopen it.  A closed child never announces:
+        closing is the operator's own act, not a completion.
+        """
+        handle = self._handle_for(target)
+        if handle is None:
+            return False
+        task = handle.turn_task
+        if task is None or task.done():
+            # The spawning turn lives in ``_tasks`` (its slot is ``turn_task``
+            # only for continuation turns); closing must stop it all the same.
+            task = self._tasks.get(handle.run_id)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        # A turn that queued a follow-up while the first one was being cut.
+        followup = handle.turn_task
+        if followup is not None and not followup.done():
+            followup.cancel()
+            await asyncio.gather(followup, return_exceptions=True)
+        handle.status = "closed"
+        loop = handle.loop
+        handle.loop = None
+        if loop is not None:
+            try:
+                await loop.aclose()
+            except Exception:  # noqa: BLE001 — closing must not fail on a dead loop
+                _log.debug("child loop close failed", exc_info=True)
+        if handle.worktree_manager is not None and handle.worktree_path:
+            try:
+                await handle.worktree_manager.commit_if_dirty(
+                    handle.worktree_path, f"subagent: {handle.name}"
+                )
+                await handle.worktree_manager.remove(handle.worktree_path)
+            except Exception:  # noqa: BLE001 — the disk state is what matters
+                _log.debug("child worktree cleanup failed", exc_info=True)
+        self._handles.pop(handle.run_id, None)
+        self._tasks.pop(handle.run_id, None)
+        self._announce.pop(handle.run_id, None)
+        row = self._background.get(handle.run_id)
+        if row is not None:
+            self._background[handle.run_id] = replace(
+                row, status="cancelled", ended=time.monotonic()
+            )
+        if not handle.ephemeral:
+            self._session_store.save(handle.session)
+            self._write_meta(handle)
+        return True
+
+    def _restore_row(self, handle: AgentHandle) -> None:
+        """Keep ``/tasks`` in step with a resumed handle (row = projection)."""
+        row = self._background.get(handle.run_id)
+        if row is None:
+            self._background[handle.run_id] = BackgroundTask(
+                run_id=handle.run_id,
+                name=handle.name,
+                task=handle.task,
+                status=handle.status,
+                started=time.monotonic(),
+                session_id=handle.session.session_id,
+            )
+            self._prune_background()
+            return
+        self._background[handle.run_id] = replace(
+            row, status=handle.status, ended=None, error=None
+        )
 
     async def wait(self, run_id: str, timeout_ms: int = 30_000) -> tuple[str, int]:
         """Wait for one background run; never cancels it. Returns (status, elapsed_ms).
@@ -455,6 +885,16 @@ class SubAgentRunner:
         """
         if not prefix:
             return None
+        # C-5b-1 handles-first: the handle is the source of truth, so an id
+        # whose projection row was pruned still resolves.  An ambiguous
+        # handle prefix is an ambiguity, not a reason to fall through.
+        if prefix in self._handles:
+            return prefix
+        handle_matches = [key for key in self._handles if key.startswith(prefix)]
+        if len(handle_matches) > 1:
+            return None
+        if len(handle_matches) == 1:
+            return handle_matches[0]
         exact = self._background.get(prefix)
         if exact is not None:
             return prefix
@@ -469,9 +909,18 @@ class SubAgentRunner:
         return self._max_concurrent_n
 
     def _prune_background(self) -> None:
-        """Bound the table: oldest terminal rows go first, running never."""
+        """Bound the table: oldest terminal rows go first, running never.
+
+        C-5b-1: a row whose run id still has a handle is never pruned — the
+        handle stays addressable after it settles, and dropping its row would
+        make ``/tasks``/``list_agents`` forget a child that is still usable.
+        """
         terminal = sorted(
-            (row for row in self._background.values() if row.status != "running"),
+            (
+                row
+                for row in self._background.values()
+                if row.status != "running" and row.run_id not in self._handles
+            ),
             key=lambda row: row.started,
         )
         while len(self._background) > _MAX_BACKGROUND_ROWS and terminal:
@@ -479,50 +928,117 @@ class SubAgentRunner:
 
     async def _supervised(
         self,
-        run_id: str,
+        handle: AgentHandle,
+        text: str,
         *,
-        task: str,
-        name: str,
-        worktree_manager: Any | None,
-        isolate: bool,
-        parent: ParentContext | None,
-        parent_span: str,
-        observer: Any | None,
-        emit: Any,
-        origin_session: str,
-        output_schema: dict[str, Any] | None = None,
-        agent: str | None = None,
-        context_mode: str | None = None,
+        worktree_manager: Any | None = None,
+        isolate: bool = True,
     ) -> None:
-        """Run one background child to settlement, then announce it.
+        """Run one background child's first turn, then announce it.
 
         Never raises: an unretrieved task exception is noise at shutdown, so
         every failure mode below ends in a table row plus (best-effort) event.
+        The handle is kept (``status=idle``) and its loop is deliberately not
+        closed: C-5b-2+ continues the same conversation.
         """
         try:
             async with self._semaphore:
-                result = await self._run_isolated(
-                    task, name, parent, parent_span, observer,
-                    worktree_manager, isolate, output_schema, agent,
-                    self._resolve_context_mode(self.context_mode, context_mode),
-                    False,
-                )
+                await self._attach_for_run(handle, worktree_manager, isolate)
+                result = await self._run_turn(handle, text)
         except asyncio.CancelledError:
+            # C-5b: a cut may be the operator's `interrupt_agent` (the handle
+            # is already "interrupting") or a plain close; the two report
+            # differently and only the latter may announce.
+            interrupted = handle.status in ("interrupting", "interrupted")
             result = SubagentResult(
-                status="cancelled", error="cancelled by user",
-                truncated=True, exit_reason="cancelled",
+                status="interrupted" if interrupted else "cancelled",
+                error="interrupted by user" if interrupted else "cancelled by user",
+                truncated=True, exit_reason="interrupted" if interrupted else "cancelled",
             )
+            loop = handle.loop
+            handle.loop = None
+            if loop is not None:
+                try:
+                    await loop.aclose()
+                except Exception:  # noqa: BLE001 — release must not mask the cut
+                    _log.debug("child loop close after interrupt failed", exc_info=True)
         except Exception as exc:  # noqa: BLE001 — _run_in promises never-raise; belt.
             result = SubagentResult(
                 status="error", error=f"supervisor: {exc}",
                 truncated=True, exit_reason="supervisor_error",
             )
-        self._finish_background(run_id, result, emit, origin_session)
+        if handle.worktree_branch:
+            result = replace(result, worktree_branch=handle.worktree_branch)
+        if handle.status == "interrupting":
+            handle.status = "interrupted"
+        elif result.status != "interrupted":
+            handle.status = "idle"
+        self._write_meta(handle)
+        self._finish_background(
+            handle.run_id, result, handle.emit, handle.origin_session
+        )
+        # A message queued after the last iteration boundary must not sit in the
+        # mailbox forever -- run it as one merged follow-up turn (DF-2).
+        remaining = list(handle.mailbox)
+        if remaining:
+            try:
+                self._schedule_turn(handle, "\n".join(remaining))
+            except SubAgentPoolFull:
+                _log.debug(
+                    "follow-up turn for %s rejected: pool full", handle.run_id,
+                    exc_info=True,
+                )
+            else:
+                _drain_mailbox(handle.mailbox)
+
+    async def _attach_for_run(
+        self, handle: AgentHandle, worktree_manager: Any | None, isolate: bool
+    ) -> None:
+        """Attach the loop to a persistent worktree (or the main workspace).
+
+        C-5b-1 opened the handle with a deferred loop so the worktree can be
+        chosen *before* the engine/tools are built.  A temporary worktree would
+        be removed before the next turn, so addressable children use a
+        persistent one; ``close_agent`` commits and removes it.
+        """
+        if (
+            isolate
+            and worktree_manager is not None
+            and await worktree_manager.can_isolate()
+        ):
+            try:
+                wt = await worktree_manager.create(handle.name)
+            except WorktreeError:
+                report_degraded(
+                    self._scoped_observer(
+                        handle.name, handle.parent_span, handle.observer
+                    ),
+                    "worktree_isolate",
+                    "the worktree could not be created",
+                    "ran in the main workspace instead",
+                )
+            else:
+                handle.worktree_path = str(wt.path)
+                handle.worktree_branch = wt.branch
+                handle.worktree_manager = worktree_manager
+                await self._attach_loop(handle, str(wt.path))
+                return
+        await self._attach_loop(handle, None)
 
     def _finish_background(
-        self, run_id: str, result: SubagentResult, emit: Any, origin_session: str
+        self,
+        run_id: str,
+        result: SubagentResult,
+        emit: Any,
+        origin_session: str,
+        notify: bool = True,
     ) -> None:
-        """Settle the row, drop the task ref, announce best-effort."""
+        """Settle the row, drop the task ref, announce best-effort.
+
+        ``notify`` is False for endings that must stay silent (DF-6): an
+        interrupt or a close is the operator's own act, not a completion, and
+        a notice for it would read as "the child finished".
+        """
         row = self._background.get(run_id)
         self._tasks.pop(run_id, None)
         self._announce.pop(run_id, None)
@@ -544,6 +1060,11 @@ class SubAgentRunner:
         # Append after the cut: a long conclusion must not eat the verdict.
         if result.schema_valid is False:
             summary = f"{summary}（结构校验未过）".strip()
+        # DF-6: only a cut/close stays silent.  ``completed``/``error``/
+        # ``timeout``/``max_iterations`` are real settlements the parent must
+        # hear about (the narrower earlier set silently dropped max_iterations).
+        if not notify or result.status in {"cancelled", "interrupted", "closed"}:
+            return
         # C-5a review: the model lane is not an observation.  Announcing it was
         # gated behind ``emit is None``, so a runner without an operator stream
         # (the bare CLI, a test double) silently dropped the settlement the
@@ -598,7 +1119,15 @@ class SubAgentRunner:
         at all — without this, ``cancel()`` right after spawn would leave the
         row ``running`` forever.  Runs exactly once per task (done-callback);
         a no-op unless the row is still live.
+
+        C-5b: a continuation turn registers the same callback, and the *old*
+        task's callback can fire after the next turn already started.  The
+        registered-task identity check is what keeps the stale callback from
+        settling a live row.
         """
+        current = self._tasks.get(run_id)
+        if _task is not None and current is not None and current is not _task:
+            return
         row = self._background.get(run_id)
         self._tasks.pop(run_id, None)
         announce = self._announce.pop(run_id, None)
@@ -615,8 +1144,21 @@ class SubAgentRunner:
         self._background[run_id] = replace(
             row, status=status, ended=time.monotonic(), error=error,
         )
+        handle = self._handles.get(run_id)
+        if handle is not None:
+            if handle.status in ("interrupted", "interrupting", "closed"):
+                # C-5b: a cut or a close is not a settlement to report, and
+                # its status must not be overwritten by this fallback.
+                return
+            handle.status = "idle"
+            self._write_meta(handle)
         if announce is None:
-            return
+            # C-5b review: ``_announce`` is popped by the previous turn's
+            # ``_finish_background``; a crash in a later turn still has to
+            # reach the parent, and the handle carries where to send it.
+            if handle is None:
+                return
+            announce = (handle.emit, handle.origin_session, handle.name)
         emit, origin_session, name = announce
         self._announce_to_model(run_id, name, status, error, None)
         if emit is None:
@@ -707,25 +1249,60 @@ class SubAgentRunner:
         context_mode: str = "full",
         readonly: bool = False,
     ) -> SubagentResult:
+        """The one-shot path for ``run()`` / fan-out (5.3).
+
+        It is an **ephemeral** handle: one turn, then the loop is closed and
+        nothing is written to ``agents/`` — the existing ``subAgent`` /
+        ``parallel_research`` behaviour is unchanged.
+        """
+        try:
+            handle = self._open_handle(
+                task, name, workdir, parent,
+                parent_span=parent_span, observer=observer,
+                output_schema=output_schema, agent=agent,
+                context_mode=context_mode, readonly=readonly,
+                ephemeral=True,
+            )
+        except _StartError as exc:
+            return SubagentResult(status="error", error=str(exc))
+        try:
+            return await self._run_turn(handle, task)
+        finally:
+            loop = handle.loop
+            if loop is not None:
+                try:
+                    await loop.aclose()
+                except Exception:  # noqa: BLE001 — release must not mask result
+                    pass
+
+    def _open_handle(
+        self,
+        task: str,
+        name: str,
+        workdir: str | None,
+        parent: ParentContext | None,
+        *,
+        parent_span: str = "",
+        observer: Any | None = None,
+        output_schema: dict[str, Any] | None = None,
+        agent: str | None = None,
+        context_mode: str = "full",
+        readonly: bool = False,
+        run_id: str = "",
+        ephemeral: bool = False,
+        defer_loop: bool = False,
+    ) -> AgentHandle:
+        """Build the child's session + loop, and register it when addressable.
+
+        The logic below is the old ``_run_in`` body, unchanged; only its tail
+        differs: an addressable handle persists its session and sidecar and
+        lands in ``_handles``.
+        """
         target, problem = self._resolve_target(agent)
         if problem:
-            return SubagentResult(status="error", error=problem)
-        registry = self._build_tools(workdir)
-        engine = self._engine_factory()
+            raise _StartError(problem)
         ts = now_utc()
-        # R7e-4 + r25/v2: which window this child gets.  ``task_only`` is a clean
-        # context - the parent has to put every fact it needs into the task text.
-        # Both modes build the child's **own** system prompt: inheriting the
-        # parent's *assembled* prompt made the child append project/skills/methods
-        # a second time (measured 617 -> 1140 chars) and advertised tools the
-        # child does not have.  ``full`` differs only in the seeded history and
-        # the project section.
         mode = context_mode
-        prompt = (
-            PromptAssembler(self._base_instructions)
-            if self._base_instructions
-            else None
-        )
         if mode == "task_only":
             seeded: list[ChatMessage] = []
         else:
@@ -742,9 +1319,53 @@ class SubAgentRunner:
             # not a boundary (a project may override ``explore`` whole).
             readonly=readonly,
         )
-        loop = AgentLoop(
+        handle = AgentHandle(
+            run_id=run_id,
+            name=name,
+            task=task,
+            session=session,
+            session_store=self._session_store,
+            loop=None,
+            workdir=workdir,
+            readonly=readonly,
+            agent=target.id if target is not None else agent,
+            context_mode=mode,
+            parent_permissions=parent.permissions if parent is not None else (),
+            parent_span=parent_span,
+            emit=None,
+            origin_session="",
+            output_schema=output_schema,
+            observer=observer,
+            ephemeral=ephemeral,
+        )
+        if not defer_loop:
+            handle.loop = self._build_loop_for(handle, workdir)
+            handle.ready.set()
+        if not ephemeral:
+            if not run_id:
+                raise _StartError("an addressable sub-agent needs a run id")
+            self._session_store.save(session)
+            self._handles[run_id] = handle
+            self._write_meta(handle)
+        return handle
+
+    def _build_loop_for(self, handle: AgentHandle, workdir: str | None) -> AgentLoop:
+        """The child loop, built from the handle's own facts (C-5b).
+
+        Extracted so a resumed turn or a worktree re-attach can rebuild the
+        engine without duplicating the construction rules.
+        """
+        registry = self._build_tools(workdir)
+        engine = self._engine_factory()
+        prompt = (
+            PromptAssembler(self._base_instructions)
+            if self._base_instructions
+            else None
+        )
+        store: Any = _NullSessions() if handle.ephemeral else self._session_store
+        return AgentLoop(
             engine,
-            _NullSessions(),  # type: ignore[arg-type]
+            store,
             registry,
             approval=self._approval,
             gate=self._child_gate(),
@@ -757,51 +1378,144 @@ class SubAgentRunner:
             skills=self._skills,
             # r25/v2: the project section is the child's own; full mode only
             # (task_only keeps the R7e-4 clean window).
-            project=self._project if mode != "task_only" else None,
+            project=self._project if handle.context_mode != "task_only" else None,
             settings=self._subagent_settings(),
             guards=self._guards,
             workspace=workdir or self._workspace,
-            observer=self._scoped_observer(name, parent_span, observer),
+            observer=self._scoped_observer(
+                handle.name, handle.parent_span, handle.observer
+            ),
             # M1a ④: the parent's session layer, carried on the packet.  The
             # child's own session starts empty, so this is the only path by
             # which "deny edit *.env" reaches the work it delegates.
-            session_permissions=parent.permissions if parent is not None else (),
+            session_permissions=handle.parent_permissions,
             agents=self._agents,
+            # C-5b: the inbound lane for ``send_message``.  A bound method of the
+            # handle's own mailbox, so the loop never sees the deque itself.
+            agent_inbox=functools.partial(_drain_mailbox, handle.mailbox),
+        )
+
+    async def _attach_loop(self, handle: AgentHandle, workdir: str | None) -> None:
+        """(Re)build the child loop for ``workdir`` and mark the handle ready."""
+        if handle.loop is not None:
+            try:
+                await handle.loop.aclose()
+            except Exception:  # noqa: BLE001 — a rebuild must not fail on close
+                _log.debug("child loop close failed", exc_info=True)
+        handle.loop = self._build_loop_for(handle, workdir)
+        handle.workdir = workdir
+        handle.ready.set()
+        if not handle.ephemeral:
+            self._write_meta(handle)
+
+    async def _run_turn(
+        self, handle: AgentHandle, text: str
+    ) -> SubagentResult:
+        """Run exactly one turn on the handle's existing session.
+
+        Turn-level cancellation waits for the inner turn to finish closing
+        (``_close_turn`` must land its state before anything else touches the
+        loop) — the same rule DF-2/DF-3 spells out for the next phase.
+        """
+        loop = handle.loop
+        if loop is None:
+            # C-5b: a deferred (background/worktree) or interrupted handle may
+            # not have a loop yet; build one from the session before the turn.
+            await self._attach_loop(handle, handle.workdir)
+            loop = handle.loop
+        assert loop is not None
+        # R1-3: the format contract rides as a trailer on the task text —
+        # the task *is* the child's user message, so no loop/engine change is
+        # needed for the child to see it.
+        child_task = text
+        if handle.output_schema:
+            # One format instruction, never two.  The old prose "uncertainty
+            # protocol" is gone: nothing read its notes and the confidence it
+            # collected had no consumer.
+            child_task += _format_instruction(handle.output_schema)
+        inner = asyncio.create_task(
+            loop.process_input(handle.session, child_task)
         )
         try:
-            # The inner loop has its own (slightly tighter) turn deadline, so it
-            # normally finalises itself and reports a status.  This outer call is
-            # a backstop for a loop that is stuck inside something that ignores
-            # cancellation — ``asyncio.wait_for`` could not bound that.
-            # R1-3: the format contract rides as a trailer on the task text —
-            # the task *is* the child's user message, so no loop/engine change
-            # is needed for the child to see it.
-            child_task = task
-            if output_schema:
-                # One format instruction, never two.  The old prose
-                # "uncertainty protocol" is gone: nothing read its notes and
-                # the confidence it collected had no consumer.
-                child_task += _format_instruction(output_schema)
-            await run_with_deadline(
-                loop.process_input(session, child_task),
-                timeout=self._timeout,
-                label="subagent_turn",
+            done, _pending = await asyncio.wait(
+                {inner}, timeout=self._timeout
             )
-        except DeadlineExpired:
-            return SubagentResult(
+        except asyncio.CancelledError:
+            inner.cancel()
+            await asyncio.gather(inner, return_exceptions=True)
+            raise
+        if not done:
+            inner.cancel()
+            await asyncio.gather(inner, return_exceptions=True)
+            result = SubagentResult(
                 status="timeout",
                 error=f"exceeded {self._timeout:g}s",
-                workdir=workdir,
+                workdir=handle.workdir,
                 # R0-3: an outer cut is still a cut — unfinished, with a cause.
                 truncated=True,
                 exit_reason="outer_timeout",
             )
-        finally:
-            try:
-                await loop.aclose()
-            except Exception:  # noqa: BLE001 — releasing resources must not mask the result
-                pass
-        return self._packet(loop, session, workdir, mode, output_schema)
+        else:
+            inner.result()  # propagate a crash exactly as a direct await did
+            result = self._packet(
+                loop, handle.session, handle.workdir,
+                handle.context_mode, handle.output_schema,
+            )
+        handle.last_status = result.status
+        if not handle.ephemeral:
+            self._session_store.save(handle.session)
+            self._write_meta(handle)
+        return result
+
+    def _write_meta(self, handle: AgentHandle) -> None:
+        """Write the handle's sidecar (section 7), best-effort and atomic."""
+        if not handle.run_id:
+            return
+        payload: dict[str, Any] = {
+            "version": 1,
+            "runId": handle.run_id,
+            "name": handle.name,
+            "task": handle.task,
+            "sessionId": handle.session.session_id,
+            "parentSessionId": handle.origin_session,
+            "workdir": handle.workdir,
+            "readonly": handle.readonly,
+            "agent": handle.agent,
+            "contextMode": handle.context_mode,
+            "permissions": [
+                rule_to_dict(rule) for rule in handle.parent_permissions
+            ],
+            "status": handle.status,
+            "lastStatus": handle.last_status,
+            "createdAt": handle.session.created_time,
+            "updatedAt": now_utc(),
+        }
+        path = self._meta_root / f"{handle.run_id}.json"
+        try:
+            self._meta_root.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(to_json_pretty(payload), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            _log.debug("sub-agent meta write failed for %s", handle.run_id,
+                       exc_info=True)
+
+    def _load_meta(self, run_id: str) -> dict[str, Any] | None:
+        """Read a handle's sidecar (unused until the resume phase, C-5b-4)."""
+        if not run_id:
+            return None
+        # A sidecar path is a filesystem read keyed by the id: reject anything
+        # that is not the hex/alnum shape a run id has (no ``../`` traversal).
+        if not run_id.isascii() or not run_id.isalnum():
+            return None
+        path = self._meta_root / f"{run_id}.json"
+        if not path.is_file():
+            return None
+        try:
+            data = from_json_file(path)
+        except (ValueError, OSError):
+            return None
+        return data if isinstance(data, dict) else None
 
     def _subagent_settings(self) -> AIConfig:
         """Settings for the sub-turn: its own wall-clock ceiling (R2a)."""
@@ -872,6 +1586,18 @@ class SubAgentRunner:
             schema_errors=schema_errors,
         )
         return _with_ledger(result, self._ledger_root)
+
+
+def _drain_mailbox(mailbox: deque[str]) -> list[str]:
+    """Take every queued message for one child; the loop never sees the deque.
+
+    ``deque.popleft`` is the drain primitive; wrapping it keeps the mutable
+    queue out of the loop's hands (the loop gets a ``Callable[[], list[str]]``).
+    """
+    lines: list[str] = []
+    while mailbox:
+        lines.append(mailbox.popleft())
+    return lines
 
 
 def _truncate(text: str | None, limit: int) -> str | None:
