@@ -4,6 +4,10 @@
 > 目标：删除 `plan_orchestrator` 的 session/legacy、`PlanExecutor`、`PlanRunner`、
 > `present_plan`、旧状态字段/事件/前端评审卡，**不留死代码、不误删共享物**。
 >
+> **状态（2026-11）：P0b 全部完成。** 提交：P0a `c7832a7`、P0b-1 `703186e`、
+> P0b-2a `04a9396`、P0b-2b `d951b0a`、P0b-2d `b8ffab4`、P0b-2e `e1fa0cc`、
+> P0b-2f `0ffd1e4`。P0b-3 收尾核验见文末。
+>
 > 决策（已拍板，默认项）：acceptance 整体删（`_verify_plan_item` 保留）；
 > `/readonly off` 在 plan 下拒绝；plan 下只允许 `parallel_research`；
 > `subagent_worktree_isolation` 默认改为 false；池满=子代理数≥slots 拒绝；
@@ -478,6 +482,26 @@ TypeError——实现时先全仓 grep 字段名再删；`turn_books.snapshot()`
 - 全仓 `grep` 旧符号为零；`docs/` 里引用旧路径的文档加"已退休"标注（不改历史文档内容）。
 - 真机：`/plan` → 批准 → 实现 → `update_plan` → 完成；`/readonly`；build 主闭环。
 - 旧会话加载 + boot resume（只认 goal）。
+
+### 核验记录（2026-11）
+
+- `grep`（`ai_coding`，排除 `frontend/node_modules`）：
+  `plan_executor|plan_runner|present_plan|PlanStepReceipt|plan.receipt|plan_orchestrator|
+  PlanExecutor|PlanRunner|plan_executing|step_item_id|item_deadline|step_deliveries|
+  StepDelivery|plan_delivery|boundary_verdict|verify_acceptance|note_verify|
+  PlanSubmissionGuard|plan_state_block|PLAN_NUDGE|plan_submitted|plan_review|PlanReviewPanel`
+  → 只剩 `CodexPlanRunner`（保留）与 `read_ledger` 的路径样例文本；
+  `AcceptanceItem|AcceptanceState|acceptance_states|pending_items|failed_items|U-ac-`
+  → 零（`resolves` 只剩英文散文）。
+- 旧会话兼容：`SessionData.from_dict` 读入含 `acceptance`/`stepDeliveries` 与
+  `planTokensUsed`/`attempts` 的旧 JSON 成功；旧键不再写出；旧 `armed_profile=="plan"`
+  读入即归一化为未武装（boot 只认 goal）。
+- 链路：`tests/test_plan_codex_path|parity|plan_command|plan_workspace_gate` 全绿；
+  全量 `pytest` 0 failed；前端 `bun test` 544 pass + `tsc` 干净。
+- docs：README、`data-contracts.md`（R0 / R1-1 两节）、`architecture-v2.md` 已加"已退休"
+  标注；历史文档正文不改。
+- 未做：真机 provider 跑通（本沙箱无模型凭据）；由用户在本机执行
+  `/plan <topic>` → 批准 → `update_plan` 与 `/readonly`、build 主闭环。
 
 ---
 

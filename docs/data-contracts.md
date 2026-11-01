@@ -334,6 +334,11 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 
 ### R0 验收 / 台账 / 截断契约
 
+> **P0b 已退休（2026-11）**：`AcceptanceItem` / `AcceptanceState` / `SessionData.acceptance`
+> 与 acceptance 门、`U-ac-*` 账本项已删除。仍保留的是命令级 proof 执行器
+> `core/acceptance.py::verify_items`（供 `update_plan` 的 `plan_verify_items` 使用）；
+> 下表关于契约本体的行保留作历史记录，不再描述现存代码。
+
 | 类型 | 字段 | 说明 |
 |---|---|---|
 | `AcceptanceItem`（`domain/acceptance.py`） | `id`、`statement`、`verify`、`passed`（None=未检，fail-closed）、`output`（尾 500 字符） | 一条可机检的陈述 + 证明它的 shell 命令；`SessionData.acceptance`，仅非空落盘（键 `acceptance`，Java 兼容） |
@@ -355,6 +360,11 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 `TurnSnapshot` 扩展（全带默认值，老决策表不受影响）：`acceptance`、`acceptance_nudges`、`search_streak`、`search_calls`。`TurnPolicyConfig` 扩展：`max_acceptance_nudges=2`（均可经 `AIConfig` 同名键覆盖，无 schema 变更）。`TurnBooks` 扩展：`verify`、`tool_success`（名集合）、`ledger_signature`、`step_latencies_ms/abandoned_steps/last_step_latency_ms`、`search_streak/search_calls/static_check_ran`。`AIConfig` 新增 `static_check{commands,timeout_seconds,max_chars}`（B1）。
 
 ### R1-1 计划执行契约
+
+> **P0b 已退休（2026-11）**：`StepDelivery` / `domain/plan_delivery.py` /
+> `SessionData.step_deliveries` / `step_item_id` / `item_deadline` /
+> `plan_step_max_iterations` / `plan_item_wall_seconds` / `PlanStepReceipt` 已删除；
+> `PlanReport` 仍在 `core/plan_report.py`（只剩 Codex 路径的 `stopped`）。下表保留作历史记录。
 
 | 类型 | 字段 | 说明 |
 |---|---|---|

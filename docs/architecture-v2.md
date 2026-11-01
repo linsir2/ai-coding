@@ -25,8 +25,7 @@ ai_coding/
 │   ├── model_config.py     # ModelConfig (name/base_url/api_key/fallback)
 │   ├── usage.py            # Usage (prompt/completion/total/cached)
 │   ├── turn_digest.py      # TurnDigest (回合摘要环 + 收尾交接渲染)
-│   ├── run.py              # Run, RunStep, RunOutcome
-│   └── acceptance.py       # AcceptanceItem (verify陈述+shell证明)
+│   └── run.py              # Run, RunStep, RunOutcome
 ├── config/                 # 配置模型(Pydantic) + YAML加载(camel→snake)
 │   ├── models.py           # AppConfig, AIConfig, MemoryConfig, MCPConfig
 │   └── loader.py           # ConfigLoader (load_app/load_mcp)
