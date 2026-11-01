@@ -73,7 +73,7 @@ def _needs_a_human(
     Everything else -- the ordinary ``test -f`` and ``pytest`` -- runs
     without a click, because that is what a proof command is for.
     """
-    from ai_coding.core.plan_runner import outside_workspace_paths
+    from ai_coding.core.workspace_guard import outside_workspace_paths
 
     reason = bash_denied(command)
     if reason:

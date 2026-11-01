@@ -36,10 +36,10 @@ from ai_coding.core.context_compression import (
 from ai_coding.core.events import ContextCompacted, LoopEvent, MemoryInjected
 from ai_coding.core.file_mentions import resolve_bare_paths, resolve_file_mentions
 from ai_coding.core.plan_reminders import reconcile
-from ai_coding.core.plan_runner import outside_workspace_paths
 from ai_coding.core.request_builder import build_tail, content_of, volatile_block
 from ai_coding.core.sop_router import SOPRouter
 from ai_coding.core.turn_books import TurnBooks
+from ai_coding.core.workspace_guard import outside_workspace_paths
 from ai_coding.domain.message import CHECKPOINT_MARK, IMAGE_MIME_BY_SUFFIX, ChatMessage
 from ai_coding.domain.read_ledger import render as render_read_ledger
 from ai_coding.domain.session import SessionData
@@ -577,7 +577,7 @@ class RequestAssembler:
             lines.append(f"分支: {branch}")
         lines.append(f"时间: {now_local()}")
         # hotel-fix P0-1 Build补洞：用户首轮提到工作区外绝对路径时警告
-        # （只读提示，不拒绝；复用 plan_runner.outside_workspace_paths，
+        # （只读提示，不拒绝；复用 workspace_guard.outside_workspace_paths，
         # 不复制正则；synthetic 消息由 _extract_user_input 跳过）。
         if self._workspace:
             user_input = self._extract_user_input(session)

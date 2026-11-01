@@ -26,12 +26,9 @@ from __future__ import annotations
 from typing import Any
 
 from ai_coding.core.events import PlanStepReceipt
-from ai_coding.core.plan_runner import (
-    PlanReport,
-    PlanRunner,
-    _tail,
-    outside_workspace_message,
-)
+from ai_coding.core.plan_report import PlanReport
+from ai_coding.core.plan_runner import PlanRunner, _tail
+from ai_coding.core.workspace_guard import outside_workspace_message
 from ai_coding.domain.acceptance import AcceptanceItem
 from ai_coding.domain.plan_delivery import StepDelivery
 from ai_coding.infra.time_utils import now_utc

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ai_coding.core.plan_runner import PlanReport
+from ai_coding.core.plan_report import PlanReport
 
 __all__ = [
     "CodexPlanRunner",

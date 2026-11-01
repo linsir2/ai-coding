@@ -14,7 +14,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ai_coding.core.plan_runner import outside_workspace_message, outside_workspace_paths
+from ai_coding.core.workspace_guard import (
+    outside_workspace_message,
+    outside_workspace_paths,
+)
 from ai_coding.domain.message import ToolResult
 from ai_coding.security.user_prompt import UserPromptCallback
 from ai_coding.tools.base import BaseTool, ToolContext
