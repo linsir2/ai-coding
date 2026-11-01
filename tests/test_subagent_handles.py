@@ -174,6 +174,84 @@ def test_an_injected_session_store_is_used_as_is(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_readonly_spawn_marks_the_child_and_its_handle_readonly(tmp_path):
+    runner = _runner(tmp_path)
+    run_id = runner.spawn_background(
+        "scan the tree", name="probe", readonly=True, emit=lambda _event: None
+    )
+
+    handle = runner._handles[run_id]
+    assert handle.readonly is True
+    assert handle.session.readonly is True
+
+    await _settle(runner, run_id)
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_a_readonly_child_readonly(tmp_path):
+    runner = _runner(tmp_path)
+    run_id = runner.spawn_background(
+        "scan the tree", name="probe", readonly=True, emit=lambda _event: None
+    )
+    await _settle(runner, run_id)
+    await runner.close(run_id)
+
+    status, resumed = await runner.resume(run_id)
+
+    assert status == "idle"
+    assert resumed == run_id
+    handle = runner._handles[run_id]
+    assert handle.readonly is True
+    assert handle.session.readonly is True
+
+
+class _IsolatingWorktreeManager:
+    """A manager that can isolate and records every worktree it creates."""
+
+    def __init__(self, path) -> None:
+        self.path = path
+        self.created: list[str] = []
+
+    async def can_isolate(self) -> bool:
+        return True
+
+    async def create(self, name: str):
+        from types import SimpleNamespace
+
+        self.created.append(name)
+        return SimpleNamespace(path=self.path, branch="ai_sub_probe")
+
+
+@pytest.mark.asyncio
+async def test_a_readonly_background_run_never_creates_a_worktree(tmp_path):
+    """The isolation decision lives in the runner: ``isolate=True`` plus
+    ``readonly=True`` must still read the live workspace."""
+    manager = _IsolatingWorktreeManager(tmp_path / "wt")
+    runner = _runner(tmp_path)
+    run_id = runner.spawn_background(
+        "scan the tree", name="probe", worktree_manager=manager, isolate=True,
+        readonly=True, emit=lambda _event: None,
+    )
+    await _settle(runner, run_id)
+
+    handle = runner._handles[run_id]
+    assert manager.created == []
+    assert handle.worktree_path is None
+
+
+@pytest.mark.asyncio
+async def test_a_writable_spawn_keeps_the_default_readonly_false(tmp_path):
+    runner = _runner(tmp_path)
+    run_id = runner.spawn_background("edit the tree", emit=lambda _event: None)
+
+    handle = runner._handles[run_id]
+    assert handle.readonly is False
+    assert handle.session.readonly is False
+
+    await _settle(runner, run_id)
+
+
+@pytest.mark.asyncio
 async def test_resume_reuses_the_tool_registry_so_the_file_tracker_survives(tmp_path):
     """C-5b real-run finding: a rebuilt registry forgets what was written."""
     from ai_coding.domain.message import ToolResult

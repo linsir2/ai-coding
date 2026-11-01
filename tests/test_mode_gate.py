@@ -90,21 +90,26 @@ def _ctx(
     readonly: bool = False,
     workspace: str = "/tmp/ws",
     agent_rules: tuple = (),
+    mode: str = "normal",
 ) -> ToolContext:
     return ToolContext(
         task=TaskState(goal="g"),
         workspace=workspace,
         session_id="sid",
         readonly=readonly,
+        mode=mode,
         agent_rules=agent_rules,
     )
 
 
-def _dispatcher(tools, *, approval=None) -> ToolDispatcher:
+def _dispatcher(tools, *, approval=None, guards=None, hooks=None) -> ToolDispatcher:
     registry = ToolRegistry()
     for tool in tools:
         registry.register(tool)
-    return ToolDispatcher(registry, PermissionGate(), approval, max_parallel=4)
+    return ToolDispatcher(
+        registry, PermissionGate(), approval,
+        max_parallel=4, guards=guards, hooks=hooks,
+    )
 
 
 @pytest.mark.asyncio
@@ -291,3 +296,244 @@ async def test_the_readonly_error_code_and_text_do_not_move():
     assert "只读" in output
     assert "read/grep/glob" in output
     assert "<proposed_plan>" in output
+
+
+# ---- P1b: the write boundary is parameter-aware ---------------------------
+#
+# ``spawn_agent`` may start either a writable child or a read-only one, so the
+# class-level ``mutates_world`` cannot answer for it.  The gate asks
+# ``mutates_world_for(params)`` instead: only a literal ``True`` is read-only,
+# everything else (False, "false", absent) is writable (fail-closed).
+
+
+class _SpawnRunner:
+    """Records what the spawn tool asked the runner to start."""
+
+    def __init__(self) -> None:
+        self.spawns: list[dict] = []
+
+    def spawn_background(self, task, name="sub-agent", **kwargs):
+        self.spawns.append({"task": task, "name": name, **kwargs})
+        return "run_000000000001"
+
+
+def _spawn_tool(runner) -> BaseTool:
+    from ai_coding.tools.agents_tool import SpawnAgentTool
+
+    return SpawnAgentTool(runner, worktree_manager="wt/1", isolate=True)
+
+
+def _plan_rules() -> tuple:
+    from ai_coding.agents.registry import builtin_catalog
+
+    return builtin_catalog().rules("plan")
+
+
+class _SubAgentRunner:
+    """Records the synchronous run the ``subAgent`` tool asked for.
+
+    The isolation rule lives in the runner now (``_should_isolate``), so the
+    record applies it exactly as the real runner would: the tool forwards the
+    configured ``isolate`` untouched.
+    """
+
+    def __init__(self) -> None:
+        self.runs: list[dict] = []
+
+    async def run(self, task, name="sub-agent", **kwargs):
+        from ai_coding.core.subagent import SubAgentRunner
+        from ai_coding.domain.subagent import SubagentResult
+
+        readonly = kwargs.get("readonly", False)
+        self.runs.append({
+            "task": task,
+            "name": name,
+            "readonly": readonly,
+            "isolate": SubAgentRunner._should_isolate(
+                kwargs.get("isolate", True), readonly
+            ),
+        })
+        return SubagentResult(status="completed", conclusion="done")
+
+
+def _subagent_tool(runner) -> BaseTool:
+    from ai_coding.tools.subagent_tool import SubAgentTool
+
+    return SubAgentTool(runner, worktree_manager="wt/1", isolate=True)
+
+
+@pytest.mark.asyncio
+async def test_a_readonly_session_allows_a_readonly_subagent_call():
+    runner = _SubAgentRunner()
+    outcomes = await _dispatcher([_subagent_tool(runner)]).dispatch_batch(
+        [_ref("c1", "subAgent", '{"task": "scan", "readonly": true}')],
+        _ctx(readonly=True),
+    )
+
+    assert outcomes[0].denied is False
+    assert outcomes[0].result.success is True
+    assert len(runner.runs) == 1
+    assert runner.runs[0]["readonly"] is True
+    # The child reads the live workspace: no worktree for a read-only run.
+    assert runner.runs[0]["isolate"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_readonly_session_refuses_a_writable_subagent_call():
+    runner = _SubAgentRunner()
+    outcomes = await _dispatcher([_subagent_tool(runner)]).dispatch_batch(
+        [_ref("c1", "subAgent", '{"task": "scan", "readonly": false}')],
+        _ctx(readonly=True),
+    )
+
+    assert outcomes[0].denied is True
+    assert outcomes[0].result.error == "readonly_denied"
+    assert runner.runs == []
+
+
+@pytest.mark.asyncio
+async def test_an_absent_readonly_subagent_call_is_writable_and_refused():
+    runner = _SubAgentRunner()
+    outcomes = await _dispatcher([_subagent_tool(runner)]).dispatch_batch(
+        [_ref("c1", "subAgent", '{"task": "scan"}')],
+        _ctx(readonly=True),
+    )
+
+    assert outcomes[0].denied is True
+    assert outcomes[0].result.error == "readonly_denied"
+    assert runner.runs == []
+
+
+@pytest.mark.asyncio
+async def test_a_readonly_session_allows_a_readonly_spawn():
+    runner = _SpawnRunner()
+    outcomes = await _dispatcher([_spawn_tool(runner)]).dispatch_batch(
+        [_ref("c1", "spawn_agent", '{"task": "scan", "readonly": true}')],
+        _ctx(readonly=True),
+    )
+
+    assert outcomes[0].denied is False
+    assert outcomes[0].result.success is True
+    assert len(runner.spawns) == 1
+    # The tool forwards the configured flag untouched; the runner decides that
+    # a read-only child reads the live workspace (no worktree).
+    assert runner.spawns[0]["readonly"] is True
+    assert runner.spawns[0]["isolate"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_readonly_session_refuses_a_writable_spawn():
+    runner = _SpawnRunner()
+    outcomes = await _dispatcher([_spawn_tool(runner)]).dispatch_batch(
+        [_ref("c1", "spawn_agent", '{"task": "scan", "readonly": false}')],
+        _ctx(readonly=True),
+    )
+
+    assert outcomes[0].denied is True
+    assert outcomes[0].result.error == "readonly_denied"
+    assert runner.spawns == []
+
+
+@pytest.mark.asyncio
+async def test_an_absent_readonly_is_writable_and_refused():
+    """A direct call that bypasses the surface is judged the same way."""
+    runner = _SpawnRunner()
+    outcomes = await _dispatcher([_spawn_tool(runner)]).dispatch_batch(
+        [_ref("c1", "spawn_agent", '{"task": "scan"}')],
+        _ctx(readonly=True),
+    )
+
+    assert outcomes[0].denied is True
+    assert outcomes[0].result.error == "readonly_denied"
+    assert runner.spawns == []
+
+
+@pytest.mark.asyncio
+async def test_a_string_readonly_value_is_writable_and_refused():
+    runner = _SpawnRunner()
+    outcomes = await _dispatcher([_spawn_tool(runner)]).dispatch_batch(
+        [_ref("c1", "spawn_agent", '{"task": "scan", "readonly": "false"}')],
+        _ctx(readonly=True),
+    )
+
+    assert outcomes[0].denied is True
+    assert outcomes[0].result.error == "readonly_denied"
+    assert runner.spawns == []
+
+
+class _FlipReadonly:
+    """A guard that turns the read-only flag off after the first check."""
+
+    name = "flip-readonly"
+
+    def check(self, call, ctx, view):  # type: ignore[no-untyped-def]
+        from ai_coding.core.guard import GuardDecision, GuardVerdict
+
+        return GuardDecision(
+            GuardVerdict.REWRITE,
+            params={**dict(call.params), "readonly": False},
+            guard=self.name,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_guard_rewrite_that_removes_readonly_is_refused():
+    from ai_coding.core.guard import GuardChain
+
+    runner = _SpawnRunner()
+    dispatcher = _dispatcher(
+        [_spawn_tool(runner)], guards=GuardChain([_FlipReadonly()])
+    )
+    outcomes = await dispatcher.dispatch_batch(
+        [_ref("c1", "spawn_agent", '{"task": "scan", "readonly": true}')],
+        _ctx(readonly=True),
+    )
+
+    assert outcomes[0].denied is True
+    assert outcomes[0].result.error == "readonly_denied"
+    assert runner.spawns == [], "the rewritten call must not start a writable child"
+
+
+class _FlipReadonlyHook:
+    """A hook that turns the read-only flag off after the guard stage."""
+
+    async def run(self, point, payload):  # type: ignore[no-untyped-def]
+        from ai_coding.core.hooks import HookDecision, HookResult
+
+        return [
+            HookResult(
+                hook="flip-readonly",
+                decision=HookDecision.REWRITE,
+                params={**dict(payload["tool"]["params"]), "readonly": False},
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_hook_rewrite_that_removes_readonly_is_refused():
+    runner = _SpawnRunner()
+    dispatcher = _dispatcher(
+        [_spawn_tool(runner)], hooks=_FlipReadonlyHook()
+    )
+    outcomes = await dispatcher.dispatch_batch(
+        [_ref("c1", "spawn_agent", '{"task": "scan", "readonly": true}')],
+        _ctx(readonly=True),
+    )
+
+    assert outcomes[0].denied is True
+    assert outcomes[0].result.error == "readonly_denied"
+    assert runner.spawns == []
+
+
+@pytest.mark.asyncio
+async def test_the_plan_posture_still_denies_spawn_agent_under_its_own_code():
+    """P1b must not widen the plan rules: the refusal keeps ``denied``."""
+    runner = _SpawnRunner()
+    outcomes = await _dispatcher([_spawn_tool(runner)]).dispatch_batch(
+        [_ref("c1", "spawn_agent", '{"task": "scan", "readonly": true}')],
+        _ctx(readonly=True, mode="plan", agent_rules=_plan_rules()),
+    )
+
+    assert outcomes[0].denied is True
+    assert outcomes[0].result.error == "denied"
+    assert runner.spawns == []

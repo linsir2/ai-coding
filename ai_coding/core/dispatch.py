@@ -360,6 +360,31 @@ class ToolDispatcher:
             posture=posture_of(ctx.mode, ctx.readonly),
         )
 
+    def _readonly_refusal(
+        self,
+        tool: BaseTool,
+        call: ToolCall,
+        ctx: ToolContext,
+        specific: bool,
+    ) -> ToolResult | None:
+        """The structural read-only refusal for *this call's* parameters.
+
+        The class attribute cannot answer for a parameter-aware tool (a spawn
+        may start either a writable or a read-only child), so the question is
+        asked per call.  ``plan`` + a scoped allow keeps its M3 T5 meaning: the
+        plan directory is the one place the overlay must not veto.  A guard or
+        hook rewrite calls this again with the new params (fail-closed).
+        """
+        mutates = tool.mutates_world_for(call.params)
+        plan_exception = (
+            posture_of(ctx.mode, ctx.readonly) == "plan"
+            and specific
+            and mutates
+        )
+        if ctx.readonly and mutates and not plan_exception:
+            return self._readonly_denied(call)
+        return None
+
     def _concurrent_groups(self, prepared: list[_Prepared]) -> list[list[_Prepared]]:
         """Split the batch into concurrent runs and single-call barriers.
 
@@ -493,13 +518,10 @@ class ToolDispatcher:
         # exception, and the overlay must not veto it.  Everywhere else the
         # overlay keeps its absolute meaning: ``/readonly`` is the human's
         # switch, and a session rule must not widen it.
-        plan_exception = (
-            posture_of(ctx.mode, ctx.readonly) == "plan"
-            and item.specific
-            and item.tool.mutates_world
-        )
-        if ctx.readonly and item.tool.mutates_world and not plan_exception:
-            return self._readonly_denied(call), True, False
+        tool = item.tool
+        refused = self._readonly_refusal(tool, call, ctx, item.specific)
+        if refused is not None:
+            return refused, True, False
 
         # ---- A3/A5: guards, and a rewritten call must pass the gate again ----
         turn_view = view if view is not None else TurnView()
@@ -515,6 +537,15 @@ class ToolDispatcher:
             if _verdict(recheck) is PermissionDecision.DENY:
                 # A rewrite must never be a way around the static gate.
                 return self._denied(call, _reason(recheck), rewritten=True), True, False
+            # P1b: the write boundary is a fact about the *new* parameters.
+            # Skipping this would let a guard turn a read-only spawn into a
+            # writable one after the original check already passed.
+            refused = self._readonly_refusal(
+                tool, call, ctx,
+                bool(getattr(recheck, "specific", item.specific)),
+            )
+            if refused is not None:
+                return refused, True, False
             if self.approval is None and _verdict(recheck) is PermissionDecision.WARN:
                 # The rewritten form is *more* sensitive than the original; without
                 # anyone to ask, refuse rather than silently run it.
@@ -539,10 +570,14 @@ class ToolDispatcher:
             recheck = self._check(item.tool, call, ctx)
             if _verdict(recheck) is PermissionDecision.DENY:
                 return self._denied(call, _reason(recheck), rewritten=True), True, False
-
-        tool = item.tool
-        if tool is None:  # pragma: no cover - checked at the top of _decide
-            return self._unknown(call), True, False
+            # P1b: a hook rewrite is a parameter rewrite too; the read-only
+            # boundary must be re-asked with the parameters that will run.
+            refused = self._readonly_refusal(
+                tool, call, ctx,
+                bool(getattr(recheck, "specific", item.specific)),
+            )
+            if refused is not None:
+                return refused, True, False
 
         # B: an outside-workspace path is a *question*, so it must not be
         # refused before the operator is asked.  Every other precheck reason

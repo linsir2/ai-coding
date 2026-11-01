@@ -22,6 +22,7 @@ class _FakeRunner:
     async def run(
         self, task, name, *, worktree_manager=None, isolate=True, parent=None,
         parent_span="", observer=None, output_schema=None, agent=None,
+        readonly=False,
     ):
         self.calls.append(
             {
@@ -30,6 +31,7 @@ class _FakeRunner:
                 "worktree_manager": worktree_manager,
                 "isolate": isolate,
                 "parent": parent,
+                "readonly": readonly,
             }
         )
         return self.result
@@ -66,7 +68,11 @@ async def test_subagent_tool_passes_parent_context():
 class _SpawnRunner:
     """Only the background path: spawn returns an id; nothing else is touched."""
 
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
     def spawn_background(self, task, name, **kwargs):
+        self.calls.append({"task": task, "name": name, **kwargs})
         return "run_1234567890ab"
 
 
@@ -178,6 +184,7 @@ async def test_subagent_runner_error_is_tool_failure():
         async def run(
         self, task, name, *, worktree_manager=None, isolate=True, parent=None,
         parent_span="", observer=None, output_schema=None, agent=None,
+        readonly=False,
     ):
             raise RuntimeError("boom")
 
@@ -231,3 +238,63 @@ def test_the_description_warns_that_a_clean_window_cannot_see_the_conversation()
     text = SubAgentTool(runner=runner).description
     assert "cannot see" in text
     assert "task" in text
+
+
+# ---- P1b: the read-only spawn switch ---------------------------------------
+
+
+def test_the_schema_exposes_a_boolean_readonly_switch():
+    schema = SubAgentTool(runner=_FakeRunner()).params_json_schema
+    assert schema["properties"]["readonly"]["type"] == "boolean"
+
+
+@pytest.mark.asyncio
+async def test_readonly_is_forwarded_to_the_synchronous_runner():
+    runner = _FakeRunner()
+    tool = SubAgentTool(runner=runner, isolate=True)
+
+    await tool.execute({"task": "scan", "readonly": True}, _ctx())
+
+    call = runner.calls[0]
+    assert call["readonly"] is True
+    # The tool forwards the configured flag untouched; the runner decides that
+    # a read-only child reads the live workspace, not a worktree snapshot.
+    assert call["isolate"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_writable_run_keeps_the_configured_isolation():
+    runner = _FakeRunner()
+    tool = SubAgentTool(runner=runner, isolate=True)
+
+    await tool.execute({"task": "edit"}, _ctx())
+
+    call = runner.calls[0]
+    assert call["readonly"] is False
+    assert call["isolate"] is True
+
+
+@pytest.mark.asyncio
+async def test_readonly_is_forwarded_to_the_background_runner():
+    runner = _SpawnRunner()
+    tool = SubAgentTool(runner=runner, isolate=True)
+
+    await tool.execute({"task": "scan", "background": True, "readonly": True}, _ctx())
+
+    call = runner.calls[0]
+    assert call["readonly"] is True
+    # The runner, not the tool, turns this into "no worktree".
+    assert call["isolate"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["true", "false", 1, [], {}])
+async def test_a_non_boolean_readonly_is_refused_before_the_runner(value):
+    runner = _FakeRunner()
+    tool = SubAgentTool(runner=runner)
+
+    result = await tool.execute({"task": "t", "readonly": value}, _ctx())
+
+    assert result.success is False
+    assert result.error == "invalid_readonly"
+    assert runner.calls == []

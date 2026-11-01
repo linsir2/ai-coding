@@ -7,6 +7,8 @@ registry builder and the sub-agent runner wiring.
 
 from types import SimpleNamespace
 
+from ai_coding.core.agent_loop import AgentLoop
+from ai_coding.security.permission_gate import PermissionGate
 from ai_coding.tools.builder import build_subagent_runner, build_tool_registry
 
 
@@ -113,6 +115,56 @@ def test_r9_the_dependency_gate_is_on_by_default_and_configurable(tmp_path):
     off = _cfg(str(tmp_path))
     off.ai.enforce_dependencies = False
     assert build_tool_registry(off, str(tmp_path), None).get("todo_write")._enforce is False
+
+
+# ---- P1b: what a read-only / plan request may see --------------------------
+
+
+def _surface(
+    mode: str, readonly: bool, rules=(), loaded=(), *, include_deferred=False
+) -> set[str]:
+    loop = SimpleNamespace(
+        tools=build_tool_registry(_cfg("."), ".", None),
+        gate=PermissionGate(),
+    )
+    return {
+        tool.name
+        for tool in AgentLoop._surface_tools(
+            loop, mode, readonly, (), tuple(rules), "", loaded, include_deferred
+        )
+    }
+
+
+def test_a_readonly_request_sees_spawn_agent_but_must_load_subagent(tmp_path):
+    names = _surface("normal", True)
+
+    assert "spawn_agent" in names, "a read-only spawn is a legal call here"
+    assert "subAgent" not in names, "still deferred: tool_search has to load it"
+
+    loaded = _surface("normal", True, loaded=("subAgent",))
+    assert "subAgent" in loaded, "loading is a surface change, not a permission"
+
+
+def test_the_plan_request_shows_neither_spawn_name():
+    from ai_coding.agents.registry import builtin_catalog
+
+    rules = builtin_catalog().rules("plan")
+    names = _surface("plan", True, rules, loaded=("subAgent",))
+
+    assert "subAgent" not in names
+    assert "spawn_agent" not in names
+
+
+def test_the_tool_search_path_also_gets_neither_spawn_name_in_plan():
+    """``include_deferred`` lifts only the cost filter: ``tool_search`` must
+    not offer a tool whose every call the plan posture refuses."""
+    from ai_coding.agents.registry import builtin_catalog
+
+    rules = builtin_catalog().rules("plan")
+    names = _surface("plan", True, rules, include_deferred=True)
+
+    assert "subAgent" not in names
+    assert "spawn_agent" not in names
 
 
 def test_goal_tools_are_main_stack_only(tmp_path):

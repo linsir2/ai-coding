@@ -177,6 +177,25 @@ def resolve_ctx(ctx: ToolContext | None) -> ToolContext:
     return ctx if ctx is not None else ToolContext()
 
 
+def parse_readonly(params: dict[str, Any] | None) -> bool | None:
+    """The one strict parse of a call's ``readonly`` parameter (P1b).
+
+    Only a literal ``True`` is read-only.  An absent key or a literal ``False``
+    is writable.  ``None`` means the key was present under some other type: the
+    tool boundary refuses that as ``invalid_readonly``, while the gate treats it
+    as writable (fail-closed).  The gate and every tool share this function --
+    two copies would let them drift about the same call.
+    """
+    if not isinstance(params, dict) or "readonly" not in params:
+        return False
+    value = params["readonly"]
+    if value is True:
+        return True
+    if isinstance(value, bool):
+        return False
+    return None
+
+
 class BaseTool(ABC):
     """Abstract base for all tools (built-in and MCP)."""
 
@@ -188,6 +207,12 @@ class BaseTool(ABC):
     #: Fail-closed default like ``parallel_safe``'s False; the two are
     #: orthogonal — ``subAgent`` runs arbitrary work yet is parallel-safe.
     mutates_world: bool = True
+    #: P1b: can this tool carry a call that does *not* change the world even
+    #: though the class does?  A spawn that can start a read-only child is one.
+    #: The read-only surface keeps such a tool visible; the gate still decides
+    #: per call via :meth:`mutates_world_for`.  False is the fail-closed
+    #: default: a tool must opt in to being offered under ``/readonly``.
+    readonly_capable: bool = False
     #: N1: does this tool belong to the planning posture only?  A plan-only
     #: tool is not advertised outside it: the model must not see a tool whose
     #: every call could only be refused (the research exit is plan-only, and
@@ -220,6 +245,16 @@ class BaseTool(ABC):
         nothing about what will run.  Every ordinary tool is its own name.
         """
         return self.name
+
+    def mutates_world_for(self, params: dict[str, Any] | None) -> bool:
+        """Whether *this call* changes the world (P1b).
+
+        Default is the class-level fact.  A parameter-aware tool overrides it
+        when one parameter flips the footprint (a spawn with ``readonly=true``
+        starts a child that cannot write).  The gate asks this, never the class
+        attribute, so both kinds of call can share one tool.
+        """
+        return self.mutates_world
 
     @property
     def max_duration_seconds(self) -> float | None:
@@ -272,4 +307,4 @@ class BaseTool(ABC):
         return None
 
 
-__all__ = ["BaseTool", "ToolContext", "resolve_ctx"]
+__all__ = ["BaseTool", "ToolContext", "parse_readonly", "resolve_ctx"]

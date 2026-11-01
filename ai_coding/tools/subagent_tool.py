@@ -15,7 +15,12 @@ from typing import Any
 from ai_coding.core.observers import EmitObserver
 from ai_coding.domain.message import ToolResult
 from ai_coding.domain.subagent import SUCCESS_STATUSES, ParentContext, SubagentResult
-from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
+from ai_coding.tools.base import (
+    BaseTool,
+    ToolContext,
+    parse_readonly,
+    resolve_ctx,
+)
 
 #: Bound on a caller-supplied ``output_schema`` (R1-3): the schema is pasted
 #: into the child's prompt, so an unbounded one is a token bomb.  4000 chars
@@ -128,6 +133,14 @@ class SubAgentTool(BaseTool):
     # Delegated runs are isolated (own worktree when enabled); the runner's
     # semaphore bounds how many actually run at once.
     parallel_safe = True
+    # P1b: a ``readonly=true`` call starts a child that cannot write, so the
+    # read-only surface keeps this tool and the gate judges each call.
+    readonly_capable = True
+
+    def mutates_world_for(self, params: dict[str, Any] | None) -> bool:
+        # Strict: only a literal ``true`` is a read-only child; anything else
+        # (false, "false", absent) is a writable one (fail-closed).
+        return parse_readonly(params) is not True
 
     def __init__(
         self,
@@ -168,13 +181,16 @@ class SubAgentTool(BaseTool):
             "files, and (when isolated) the branch its commits landed on. Use "
             "'task' for what to do, 'agent' to choose which agent runs it (an id "
             "from the agent table; a primary agent cannot be spawned), and 'name' "
-            "for a short label you make up. Isolated writes are committed to a "
-            "branch and are NOT merged; the report names it. The sub-agent's own "
-            "reasoning is not returned."
+            "for a short label you make up. Set 'readonly' to true to start a "
+            "child that reads the live workspace and cannot write. Isolated "
+            "writes are committed to a branch and are NOT merged; the report "
+            "names it. The sub-agent's own reasoning is not returned."
             + (
-                " It runs in an ISOLATED worktree: use paths relative to that "
-                "worktree, never absolute paths of the parent repository. For "
-                "read-only exploration use parallel_research instead."
+                " A writable run uses an ISOLATED worktree: use paths relative "
+                "to that worktree, never absolute paths of the parent "
+                "repository. A read-only run reads the live workspace and is "
+                "not isolated. For read-only exploration use parallel_research "
+                "instead."
                 if self._isolate
                 else ""
             )
@@ -201,6 +217,13 @@ class SubAgentTool(BaseTool):
                     "description": (
                         "Optional subagent id from the agent table. Defaults to "
                         "general. Primary agents cannot be spawned."
+                    ),
+                },
+                "readonly": {
+                    "type": "boolean",
+                    "description": (
+                        "Run the child read-only: it reads the live workspace "
+                        "(no worktree) and cannot write. Defaults to false."
                     ),
                 },
                 "background": {
@@ -248,6 +271,14 @@ class SubAgentTool(BaseTool):
         agent = params.get("agent")
         agent = str(agent).strip() if isinstance(agent, str) and agent.strip() else None
 
+        readonly = parse_readonly(params)
+        if readonly is None:
+            return ToolResult(
+                success=False,
+                output="error: 'readonly' must be a boolean",
+                error="invalid_readonly",
+            )
+
         # R1-3: validate the shape contract before the runner ever sees it.
         schema = params.get("output_schema")
         if schema is not None:
@@ -280,7 +311,9 @@ class SubAgentTool(BaseTool):
             )
 
         if params.get("background"):
-            return self._spawn_background(task, name, context, parent, schema, agent)
+            return self._spawn_background(
+                task, name, context, parent, schema, agent, readonly
+            )
         try:
             result = await self._runner.run(
                 task,
@@ -299,6 +332,7 @@ class SubAgentTool(BaseTool):
                 # usual) so the call shape is one stable contract.
                 output_schema=schema,
                 agent=agent,
+                readonly=readonly,
             )
         except Exception as exc:  # noqa: BLE001 — tool boundary
             return ToolResult(
@@ -312,6 +346,7 @@ class SubAgentTool(BaseTool):
         self, task: str, name: str, context: ToolContext, parent: ParentContext | None,
         schema: dict[str, Any] | None = None,
         agent: str | None = None,
+        readonly: bool = False,
     ) -> ToolResult:
         """Hand a child to the background and return its handle at once.
 
@@ -337,6 +372,7 @@ class SubAgentTool(BaseTool):
                 # the completion event.
                 output_schema=schema,
                 agent=agent,
+                readonly=readonly,
             )
         except RuntimeError as exc:
             return ToolResult(

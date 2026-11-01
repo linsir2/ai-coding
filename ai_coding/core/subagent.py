@@ -333,6 +333,17 @@ class SubAgentRunner:
             mode = (configured or "full").strip().lower()
         return mode if mode in ("full", "task_only") else "full"
 
+    @staticmethod
+    def _should_isolate(isolate: bool, readonly: bool) -> bool:
+        """Whether this child gets a worktree.
+
+        A read-only child reads the live working tree and never gets a worktree:
+        a worktree is a HEAD snapshot, and isolation buys nothing for a child
+        that cannot write.  This is the only place the rule is decided — the
+        tools pass ``isolate`` and ``readonly`` through untouched.
+        """
+        return isolate and not readonly
+
     async def _run_isolated(
         self,
         task: str,
@@ -348,6 +359,7 @@ class SubAgentRunner:
         readonly: bool = False,
     ) -> SubagentResult:
         """Worktree branch shared by the synchronous and background paths."""
+        isolate = self._should_isolate(isolate, readonly)
         if (
             isolate
             and worktree_manager is not None
@@ -413,6 +425,7 @@ class SubAgentRunner:
         output_schema: dict[str, Any] | None = None,
         agent: str | None = None,
         context_mode: str | None = None,
+        readonly: bool = False,
     ) -> str:
         """Start a child without waiting; return its run id at once.
 
@@ -456,7 +469,7 @@ class SubAgentRunner:
                 task, name, None, parent,
                 parent_span=parent_span, observer=active,
                 output_schema=output_schema, agent=agent,
-                context_mode=mode, readonly=False,
+                context_mode=mode, readonly=readonly,
                 run_id=run_id, ephemeral=False, defer_loop=True,
             )
         except Exception as exc:  # noqa: BLE001 — a row must not stay "running"
@@ -955,6 +968,7 @@ class SubAgentRunner:
         The handle is kept (``status=idle``) and its loop is deliberately not
         closed: C-5b-2+ continues the same conversation.
         """
+        isolate = self._should_isolate(isolate, handle.readonly)
         try:
             async with self._semaphore:
                 await self._attach_for_run(handle, worktree_manager, isolate)

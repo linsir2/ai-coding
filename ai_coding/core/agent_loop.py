@@ -3160,11 +3160,18 @@ class AgentLoop:
             # other posture keeps the old rule exactly: ``/readonly`` is an
             # absolute switch the operator threw, and a session rule must not
             # widen it.
+            #
+            # P1b: a parameter-aware tool (spawn a read-only child) is legal
+            # under ``/readonly`` even though it can also be called writably;
+            # the gate decides per call.  It is deliberately *not* offered in
+            # plan: the plan rules refuse every spawn, and advertising a tool
+            # whose every call is refused is what N1 forbids.
             plan = mode == "plan"
             tools = [
                 tool
                 for tool in tools
                 if not tool.mutates_world
+                or (tool.readonly_capable and not plan)
                 or (
                     plan
                     and self.gate.partially_allowed(

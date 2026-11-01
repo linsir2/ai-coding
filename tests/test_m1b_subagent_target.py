@@ -113,6 +113,7 @@ class _RecordingRunner:
     async def run(
         self, task, name, *, worktree_manager=None, isolate=True, parent=None,
         parent_span="", observer=None, output_schema=None, agent=None,
+        readonly=False,
     ):
         from ai_coding.domain.subagent import SubagentResult
 

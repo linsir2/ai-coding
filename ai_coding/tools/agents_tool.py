@@ -23,7 +23,12 @@ from typing import Any
 from ai_coding.core.observers import EmitObserver
 from ai_coding.domain.message import ToolResult
 from ai_coding.domain.subagent import ParentContext, SubAgentPoolFull
-from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
+from ai_coding.tools.base import (
+    BaseTool,
+    ToolContext,
+    parse_readonly,
+    resolve_ctx,
+)
 
 __all__ = [
     "CloseAgentTool",
@@ -54,6 +59,14 @@ class SpawnAgentTool(BaseTool):
     #: fail-closed ``mutates_world=True`` for the same reason).
     parallel_safe = False
     mutates_world = True
+    #: P1b: ``readonly=true`` starts a child that cannot write, so the
+    #: read-only surface keeps the tool and the gate judges each call.
+    readonly_capable = True
+
+    def mutates_world_for(self, params: dict[str, Any] | None) -> bool:
+        # Strict: only a literal ``true`` is a read-only child; anything else
+        # (false, "false", absent) is a writable one (fail-closed).
+        return parse_readonly(params) is not True
 
     def __init__(
         self,
@@ -81,9 +94,11 @@ class SpawnAgentTool(BaseTool):
             "the parent turn keeps going. 'fork_turns' chooses what the child "
             "starts from: 'none' (default) gives it only the task text, 'all' "
             "gives it this conversation's messages and rules. Use 'name' for a "
-            "short label. The child's completion arrives on its own as a "
-            "notice; wait_agent observes one, list_agents shows the table and "
-            "close_agent cancels one."
+            "short label and 'agent' for a subagent id (a primary agent cannot "
+            "be spawned). Set 'readonly' to true to start a child that reads "
+            "the live workspace and cannot write (no worktree). The child's "
+            "completion arrives on its own as a notice; wait_agent observes "
+            "one, list_agents shows the table and close_agent cancels one."
         )
 
     @property
@@ -109,6 +124,20 @@ class SpawnAgentTool(BaseTool):
                         "'none' starts from a clean context: put every fact, "
                         "path and decision the child needs into 'task'. "
                         "'all' starts from this conversation's messages."
+                    ),
+                },
+                "readonly": {
+                    "type": "boolean",
+                    "description": (
+                        "Run the child read-only: it reads the live workspace "
+                        "(no worktree) and cannot write. Defaults to false."
+                    ),
+                },
+                "agent": {
+                    "type": "string",
+                    "description": (
+                        "Optional subagent id from the agent table. Defaults to "
+                        "general. Primary agents cannot be spawned."
                     ),
                 },
             },
@@ -137,6 +166,19 @@ class SpawnAgentTool(BaseTool):
                 output="error: 'fork_turns' must be one of none, all",
                 error="invalid_fork_turns",
             )
+        readonly = parse_readonly(params)
+        if readonly is None:
+            return ToolResult(
+                success=False,
+                output="error: 'readonly' must be a boolean",
+                error="invalid_readonly",
+            )
+        raw_agent = params.get("agent")
+        agent = (
+            str(raw_agent).strip()
+            if isinstance(raw_agent, str) and raw_agent.strip()
+            else None
+        )
 
         context = resolve_ctx(ctx)
         parent: ParentContext | None = None
@@ -171,6 +213,8 @@ class SpawnAgentTool(BaseTool):
                 emit=context.emit,
                 origin_session=context.session_id,
                 context_mode=context_mode,
+                agent=agent,
+                readonly=readonly,
             )
         except SubAgentPoolFull as exc:
             return ToolResult(

@@ -98,9 +98,17 @@ def test_four_tools_are_named_and_shaped():
     assert [tool.parallel_safe for tool in tools] == [False, False, True, False]
 
     spawn = tools[0].params_json_schema
-    assert set(spawn["properties"]) == {"task", "name", "fork_turns"}
+    assert set(spawn["properties"]) == {
+        "task",
+        "name",
+        "fork_turns",
+        "readonly",
+        "agent",
+    }
     assert spawn["required"] == ["task"]
     assert spawn["properties"]["fork_turns"]["enum"] == ["none", "all"]
+    assert spawn["properties"]["readonly"]["type"] == "boolean"
+    assert spawn["properties"]["agent"]["type"] == "string"
 
     wait = tools[1].params_json_schema
     assert set(wait["properties"]) == {"agent_id", "timeout_ms"}
@@ -305,6 +313,63 @@ async def test_spawn_reports_a_failed_start_separately_from_exhaustion():
 
     assert result.success is False
     assert result.error == "agent_start_failed"
+
+
+# ---- P1b: the read-only spawn switch ---------------------------------------
+
+
+def test_spawn_agent_is_readonly_capable_and_judges_by_the_parameter():
+    tool = SpawnAgentTool(_FakeRunner())
+
+    assert tool.readonly_capable is True
+    assert tool.mutates_world_for({"readonly": True}) is False
+    assert tool.mutates_world_for({"readonly": False}) is True
+    assert tool.mutates_world_for({}) is True
+    assert tool.mutates_world_for({"readonly": "false"}) is True
+
+
+@pytest.mark.asyncio
+async def test_spawn_forwards_readonly_and_agent_and_drops_isolation():
+    runner = _FakeRunner()
+    tool = SpawnAgentTool(runner, worktree_manager="wt/1", isolate=True)
+
+    result = await tool.execute(
+        {"task": "scan", "readonly": True, "agent": "explore"}, _ctx()
+    )
+
+    assert result.success is True
+    call = runner.spawns[0]
+    assert call["readonly"] is True
+    assert call["agent"] == "explore"
+    # The tool forwards the configured flag untouched; the runner decides that
+    # a read-only child reads the live workspace, not a worktree snapshot.
+    assert call["isolate"] is True
+
+
+@pytest.mark.asyncio
+async def test_spawn_without_readonly_keeps_the_child_writable_and_isolated():
+    runner = _FakeRunner()
+    tool = SpawnAgentTool(runner, worktree_manager="wt/1", isolate=True)
+
+    await tool.execute({"task": "edit"}, _ctx())
+
+    call = runner.spawns[0]
+    assert call["readonly"] is False
+    assert call["agent"] is None
+    assert call["isolate"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["true", "false", 0, [], {}])
+async def test_spawn_rejects_a_non_boolean_readonly(value):
+    runner = _FakeRunner()
+    tool = SpawnAgentTool(runner)
+
+    result = await tool.execute({"task": "t", "readonly": value}, _ctx())
+
+    assert result.success is False
+    assert result.error == "invalid_readonly"
+    assert runner.spawns == []
 
 
 @pytest.mark.asyncio

@@ -140,6 +140,26 @@ plan 批准 → commit(agent=build, readonly=False) → build 主闭环（既有
   - plan 规则不放宽：`tests/test_plan_codex_path.py` 或 `test_mode_gate.py`
     断言 plan 下 spawn 仍是 `denied`（不是新码）。
 
+#### P1b 实施记录（完成）
+
+- `tools/base.py`：`parse_readonly` 是全仓唯一的严格解析（`True` 只读、`False`/缺省可写、
+  present 非 bool 返回 `None`）；`readonly_capable` 与 `mutates_world_for` 就位。
+- `core/dispatch.py`：`_readonly_refusal` 用 `mutates_world_for(call.params)`，首次判定、
+  guard rewrite、hook rewrite 三处共用并在 rewrite 后用新参数重算；write-ahead 仍用
+  类属性（只读 spawn 仍记 claim）。
+- `agent_loop._surface_tools`：`not mutates_world or (readonly_capable and not plan)`；
+  plan 下不泄漏，readonly 下 `spawn_agent` 直接可见、`subAgent` 仍需 `tool_search`。
+- `tools/subagent_tool.py` / `tools/agents_tool.py`：`readonly` schema、严格校验
+  （`invalid_readonly`）、同步/后台透传；`spawn_agent` 另有 `agent` 透传。
+- `core/subagent.py`：“只读不隔离”收口到 `_should_isolate`，由 `_run_isolated`（同步）
+  与 `_supervised`（后台，读 `handle.readonly`）调用；工具层只传 `isolate`/`readonly`。
+  `spawn_background` 的 `readonly` 进 `_open_handle`（session 与 handle 同写）。
+- 评审结论：无 P0/P1 逻辑缺陷；P1 测试缺口（`SubAgentTool` gate 覆盖）已补，且验证
+  删除覆写时用例会红；P2 已修（隔离收口、死分支、`__all__`、plan+`include_deferred`、
+  只读后台不建 worktree 用例）。
+- 校验：全量 `pytest` exit 0（28 skipped 均为 bwrap 不可用）；`ruff`/`mypy` 全绿；
+  前端 `bun test` 544 pass、`tsc` 干净。
+
 ### P1c：矩阵与真机
 
 - 单测矩阵：`{build, readonly, plan} × {spawn 可写, spawn 只读}` + `/readonly on|off`、
