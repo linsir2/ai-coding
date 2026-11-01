@@ -28,9 +28,6 @@ const TOOL_VERBS: Record<string, string> = {
   memory_write: "记录记忆",
   checkpoint_write: "记录检查点",
   ask_user: "询问用户",
-  // M3 T11: a submitted plan is not an anonymous tool call -- the transcript
-  // says what happened, and the card can be opened for the plan itself.
-  present_plan: "提交计划",
   finish_research: "收尾研究",
   // B0: one call fans out several read-only questions; without a verb it
   // would draw as the generic 运行工具.
@@ -140,32 +137,20 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   // iterations on this).
   stale_read: { label: "文件已被外部修改，需重读", tone: "denied" },
   must_read_first: { label: "需先读取文件", tone: "denied" },
-  // The plan is frozen after approval: a step cannot rewrite verify/content or
-  // add items, and shell_read refuses anything outside its read-only subset.
-  frozen_plan: { label: "计划执行中，不能改计划", tone: "denied" },
-  frozen_verify: { label: "计划执行中，不能改验收命令", tone: "denied" },
-  frozen_item: { label: "计划执行中，不能改条目内容", tone: "denied" },
   read_only_shell_required: { label: "只允许只读命令", tone: "denied" },
   tool_error: { label: "工具异常", tone: "failed" },
   unknown_tool: { label: "未知工具", tone: "failed" },
   mcp_error: { label: "MCP 调用失败", tone: "failed" },
   subagent_error: { label: "子代理失败", tone: "failed" },
-  // 20 §批次2: present_plan's verdicts are refusals (the plan is not ready),
-  // not breakage; the old fallback drew them as 未知原因 in the middle of the
-  // planning flow.
-  no_plan_items: { label: "计划尚未写成条目", tone: "denied" },
-  missing_plan: { label: "计划内容为空", tone: "denied" },
-  no_user: { label: "无人评审", tone: "denied" },
-  user_prompt_error: { label: "评审通道异常", tone: "failed" },
+  no_user: { label: "无人回答", tone: "denied" },
+  user_prompt_error: { label: "提问通道异常", tone: "failed" },
   // 内化批次: the readonly gate's own code was the last live 未知原因
   // (7ad86804's transcript).
   readonly_denied: { label: "只读拒绝", tone: "denied" },
-  // R03: present_plan's posture gates -- a step or plain session calling it
-  // gets a verdict, not 未知原因.
+  // The research exit's posture gates -- a plain session calling it gets a
+  // verdict, not 未知原因.
   not_in_plan: { label: "非计划模式", tone: "denied" },
   task_busy: { label: "任务运行中", tone: "denied" },
-  // R08: keep planning is the user's revision request, not breakage.
-  plan_keep: { label: "评审要求继续规划", tone: "denied" },
   // N1: the research exit -- one turn, one exit, and a conclusion that was
   // never written down is a model mistake, not breakage.
   already_concluded: { label: "本回合已收尾", tone: "denied" },

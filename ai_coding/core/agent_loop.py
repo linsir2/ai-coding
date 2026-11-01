@@ -1372,14 +1372,11 @@ class AgentLoop:
                     break
                 # N1: the research exit closes the turn.  A conclusion is a
                 # terminal answer: nothing was planned, nothing is armed,
-                # nothing runs, and no review card was ever shown.  The turn
-                # ends at the batch, exactly like the dismissal below.
+                # nothing runs.  The turn ends at the batch.
                 #
                 # It comes first because the successful exit owns the turn's
-                # note: when the model gave its conclusion *and* the human
-                # dismissed the review in the same batch, the conclusion is
-                # what the user is waiting for (the dismissal is their own
-                # action, and nothing was planned or executed either way).
+                # note: a conclusion answered in the same batch as anything
+                # else is still what the user is waiting for.
                 if any(
                     item.call.name == "finish_research" and item.result.success
                     for item in outcomes

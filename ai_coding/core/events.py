@@ -424,20 +424,6 @@ class ScopedEvent:
 
 
 @dataclass(frozen=True)
-class PlanStepReceipt:
-    """One plan step's receipt, on the wire (E2 / D6).
-
-    The runner writes the step head (the replay marker, stamped synthetic) and
-    the one-line summary to the parent session.  The marker is bookkeeping: a
-    later ``/resume`` uses it to rebuild the step timeline, and replay skips it
-    so it cannot read as the operator's own words.  The summary is the one line
-    a human reads, so it is the only thing this event carries.
-    """
-
-    summary: str
-
-
-@dataclass(frozen=True)
 class ResearchConcluded:
     """A plan-mode turn closed with a research conclusion (23).
 
@@ -447,16 +433,15 @@ class ResearchConcluded:
     the card cannot even be opened.  Measured on a real session, a 4116-char
     conclusion reached the user as 120 chars.
 
-    So the conclusion gets its own channel, whole -- the shape
-    ``PlanStepReceipt`` has for a plan step's summary.  The tool output stays
+    So the conclusion gets its own channel, whole: the tool output stays
     what it is (the model's own history needs the conclusion there); this
     event is what the *human* reads.
 
     No turn id rides along: this is a content event, not a terminal one (the
     turn still ends with its own ``turn.finished``), and the bridge's turn id
     is only meaningful for the turns it launches -- a command's inner turn has
-    none.  ``PlanStepReceipt`` and ``AssistantMessage`` are the same shape of
-    event, and neither carries one.
+    none.  ``AssistantMessage`` is the same shape of event, and it does not
+    carry one either.
     """
 
     summary: str
@@ -646,7 +631,6 @@ LoopEvent = (
     | ScopedEvent
     | TaskUpdated
     | BackgroundTaskDone
-    | PlanStepReceipt
     | ResearchConcluded
     | JobChanged
     | LedgerUpdated
@@ -726,7 +710,6 @@ __all__ = [
     "InputSteered",
     "TaskUpdated",
     "BackgroundTaskDone",
-    "PlanStepReceipt",
     "ResearchConcluded",
     "JobChanged",
     "TurnFinished",

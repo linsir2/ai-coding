@@ -39,8 +39,8 @@ const textOf = (frame: string): string => frame.split("\n").join(" ")
 describe("PermissionPanel", () => {
   test("the note row is not there until a refusal is selected (C-3)", async () => {
     // The panel's quick keys are letters (y/a/n/s). A focused input does NOT
-    // swallow them -- measured live on the plan-review card, where pressing "1"
-    // with the input focused still ran plan-review.approve -- so a note row that
+    // swallow them -- measured live on the ask panel, where pressing "1" with
+    // the input focused still ran its answer command -- so a note row that
     // appeared unconditionally would turn "sleep" into "stop this turn". It
     // appears for the refusal option only, where those keys are unregistered.
     const frame = textOf(

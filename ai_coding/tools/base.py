@@ -38,17 +38,11 @@ class TurnConclusion:
     one already closed it.  It lives in the turn, not in the task: a
     conclusion is a fact about one turn, and the task outlives it.
 
-    ``exit`` is a *success*, nothing else: the plan counts when a human
-    approved it, and the research exit counts when the tool returned.  A
-    dismissed review is not a success (the human said "not now", so nothing
-    was submitted and nothing is armed) -- it only closes the review
-    itself, which is why it has its own field: the other exit stays open.
+    ``exit`` is a *success*, nothing else: the research exit counts when the
+    tool returned, so a second exit in the same turn is refused.
     """
 
     exit: str = ""
-    #: The human dismissed the plan review.  The review is not asked twice in
-    #: one turn, but the turn's other exit is still open.
-    dismissed: bool = False
 
 
 @dataclass

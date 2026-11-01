@@ -43,7 +43,6 @@ from ai_coding.core.events import (
     JobChanged,
     LedgerUpdated,
     LoopEvent,
-    PlanStepReceipt,
     ProviderFallback,
     ProviderRetried,
     ResearchConcluded,
@@ -241,11 +240,6 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
                 "threshold": event.threshold,
                 "origins": [list(pair) for pair in event.origins],
             },
-        }
-    if isinstance(event, PlanStepReceipt):
-        return {
-            "type": "plan.receipt",
-            "data": {"summary": event.summary},
         }
     if isinstance(event, ResearchConcluded):
         # 23: the conclusion is a deliverable, so it travels whole -- the tool

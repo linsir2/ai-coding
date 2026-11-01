@@ -329,8 +329,9 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
       resolveAsk?.("")
       return new Promise<string>((resolve) => {
         resolveAsk = resolve
-        // 19 §3.2: one parser for every ask — the plan review's detail/intent
-        // ride the same payload the generic panel ignores.
+        // 19 §3.2: one parser for every ask — detail/intent/data are the
+        // payload's generic fields (a plan-implement ask carries its body in
+        // ``detail``).
         setAsk(parseAskRequest(params))
       })
     })

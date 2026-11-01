@@ -166,8 +166,8 @@ def _install_providers(
                     # 19 §3.2: always explicit; plain readers ignore the keys.
                     "detail": detail,
                     "intent": intent,
-                    # R04: the review card's structured rows ride the same
-                    # "always explicit" rule ({} for a plain question).
+                    # R04: the structured payload rides the same "always
+                    # explicit" rule ({} for a plain question).
                     "data": dict(data or {}),
                 },
             )

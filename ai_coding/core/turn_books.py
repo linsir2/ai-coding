@@ -89,12 +89,12 @@ RETRIEVAL_TOOLS = frozenset(
 ACTION_TOOLS = frozenset({"write", "edit", "bash", "mcp_call", "subAgent"})
 
 #: Errors that are verdicts rather than breakage (R8c D-11 cancel; 20 §批次3
-#: plan-validation refusals; P1's ``invalid_items``; R08's ``plan_keep`` --
-#: the user asking for a revision).  A round whose calls all carry these is
-#: not evidence of failure: it neither records a failure nor keeps the burn --
-#: the strategy window's helped-signal is ``failed_streak == 0``, so an
-#: all-neutral round must reset (24d7109b: a parked ``no_plan_items`` refusal
-#: kept the L1 window "failed" and L2 spent its nudge on a duplicate report).
+#: plan-validation refusals -- ``update_plan``'s ``invalid_plan``).  A round
+#: whose calls all carry these is not evidence of failure: it neither records
+#: a failure nor keeps the burn -- the strategy window's helped-signal is
+#: ``failed_streak == 0``, so an all-neutral round must reset (24d7109b: a
+#: parked validation refusal kept the L1 window "failed" and L2 spent its
+#: nudge on a duplicate report).
 #:
 #: ``guard_denied`` is deliberately NOT here, though it looks like the same kind
 #: of thing.  Measured: exempting it makes the strategy ladder read a refusal as
@@ -105,9 +105,7 @@ ACTION_TOOLS = frozenset({"write", "edit", "bash", "mcp_call", "subAgent"})
 #: than the one it was meant to prevent.  The fix for an over-eager guard is to
 #: stop the guard firing on calls that produced nothing to reuse
 #: (``guard.DuplicateCallGuard``), not to discount the refusal afterwards.
-_NOT_EVIDENCE_ERRORS = frozenset(
-    {CANCELLED_BY_USER, "no_plan_items", "missing_plan", "invalid_items", "plan_keep"}
-)
+_NOT_EVIDENCE_ERRORS = frozenset({CANCELLED_BY_USER, "invalid_plan"})
 
 # F2: Paris' Law fatigue tracking — accumulated error damage.
 _FATIGUE_C = 1.0

@@ -8,36 +8,20 @@
  * (security/user_prompt.py:80), so the model decides for itself: failing
  * open to the model, never hanging the turn.
  *
- * 19 §3.2: the same request also carries the plan review — ``detail`` is the
- * plan markdown and ``intent`` picks the card.  ``planReviewAnswer`` is that
- * card's answer codec; ``planReviewItems`` reads the rows R04 put on the wire.
- *
- * There is deliberately no "is this an approval?" helper here.  One existed
- * (C removed it): the card's buttons now hand their intent to the caller with
- * the answer, so the client never re-judges what the backend's
- * ``present_plan`` already decided — the two disagreed on approve+feedback,
- * and the client was the one that would have armed a run the backend refused.
+ * ``detail`` / ``intent`` / ``data`` are the generic wire fields the request
+ * always carried; the panel renders ``detail`` as its body when a request
+ * has one and leaves the rest to the caller.
  */
-
-import stringWidth from "string-width"
-
-/** R04: one review row as the card renders it (dependsOn in display order). */
-export interface PlanItemData {
-  content: string
-  verify: string
-  dependsOn: number[]
-}
 
 export interface AskRequest {
   question: string
   options: string[]
-  /** 19 §3.2: the plan-review markdown body; empty for a plain question. */
+  /** The markdown body a request may carry; empty for a plain question. */
   detail: string
-  /** 19 §3.2: which card renders this request ("" = the generic ask panel). */
+  /** Which kind of request this is ("" = the plain question). */
   intent: string
   /**
-   * R04: the structured payload beside detail/intent (the plan review's item
-   * rows today; the generic panel ignores it).  Always an object — the wire
+   * The structured payload beside detail/intent.  Always an object — the wire
    * contract keeps it explicit, {} included.
    */
   data: Record<string, unknown>
@@ -63,244 +47,7 @@ export function parseAskRequest(params: Record<string, unknown>): AskRequest {
   return { question: question || "…", options, detail, intent, data }
 }
 
-/**
- * One reader for plan rows, used by the review card and the history card.
- *
- * A review payload carries ``dependsOn``, already display-shaped (1-based).
- * A tool call carries ``depends_on``, 0-based into that same submission, so a
- * replayed card shows step numbers and must shift it.  Rows without content
- * are dropped, never guessed at.
- */
-export function planItems(
-  raw: unknown,
-  { coerce = false }: { coerce?: boolean } = {},
-): PlanItemData[] {
-  if (!Array.isArray(raw)) return []
-  const items: PlanItemData[] = []
-  for (const entry of raw) {
-    if (!isRecord(entry)) continue
-    // The backend accepts any truthy `content` and normalizes it with
-    // ``str(...)`` (present_plan_tool._parse_items).  Dropping a numeric step
-    // here would renumber every later row and shift its dependencies.
-    const rawContent = entry["content"]
-    const content =
-      typeof rawContent === "string"
-        ? rawContent
-        : coerce && (typeof rawContent === "number" || typeof rawContent === "boolean")
-          ? String(rawContent)
-          : ""
-    if (!content.trim()) continue
-    const rawVerify = entry["verify"]
-    const verify =
-      typeof rawVerify === "string"
-        ? rawVerify
-        : typeof rawVerify === "number"
-          ? String(rawVerify)
-          : ""
-    // The two payloads mean different things: a review card's ``dependsOn`` is
-    // already 1-based display data, a tool call's ``depends_on`` is 0-based
-    // into the submission.  Read whichever the payload has; never merge them.
-    const fromTool = entry["depends_on"] !== undefined
-    const rawDeps = fromTool ? entry["depends_on"] : entry["dependsOn"]
-    const dependsOn = Array.isArray(rawDeps)
-      ? rawDeps.filter((n): n is number => typeof n === "number" && Number.isInteger(n))
-      : []
-    // One key wins, never a merge: the backend reads only ``depends_on``, so a
-    // payload carrying both must not display a union it did not execute.
-    const display = fromTool ? dependsOn.map((n) => n + 1) : dependsOn
-    items.push({ content, verify, dependsOn: display })
-  }
-  return items
-}
-
-/**
- * R04: the review card's rows, shape-checked -- what the card renders is what
- * approval will write.  Shapeless entries are dropped, never guessed at.
- */
-export function planReviewItems(request: AskRequest): PlanItemData[] {
-  return planItems(request.data["items"])
-}
-
 /** The text a selection answers with; out of range (or no options) answers nothing. */
 export function answerForSelection(options: string[], index: number): string {
   return options[index] ?? ASK_SKIP
-}
-
-/** 19 §3.3: the review card's answer, as the JSON ``present_plan`` parses. */
-export function planReviewAnswer(choice: "approve" | "keep", feedback = ""): string {
-  return feedback ? JSON.stringify({ choice, feedback }) : JSON.stringify({ choice })
-}
-
-/**
- * M3 T11: the plan a ``present_plan`` call submitted, read back from its
- * arguments.
- *
- * The durable home of a plan is the tool call, not `task.items` (which the
- * run rewrites).  Live and replayed tool parts both carry the same `params`,
- * so this one reader serves the transcript's historical card and keeps it in
- * step with the review card.
- *
- * The rows go through the same reader as the review card (`planItems`), so
- * a key rename in one payload cannot make the two cards disagree.
- */
-export function submittedPlan(
-  params: Record<string, unknown>,
-): { plan: string; items: PlanItemData[] } | null {
-  const plan = typeof params["plan"] === "string" ? params["plan"] : ""
-  if (!plan.trim()) return null
-  // A tool call is the model's own JSON: normalize it the way the backend's
-  // ``_parse_items`` does (``str(content)``), so a numeric step is not dropped.
-  return { plan, items: planItems(params["items"], { coerce: true }) }
-}
-
-/**
- * The plan as the card shows it when a nested markdown renderable has no
- * layout to grow in: drop the block-level markers the operator does not need
- * to read (``#``, ``-``, backticks, ``---`` rules), lay a pipe table out as a
- * fixed-width table, and keep every word.
- *
- * R21 §1: the plan is the model's own Markdown, so a table arrived as raw
- * ``|`` rows whose columns never lined up.  Aligning is a string transform,
- * not a second parser -- the raw plan stays in `submittedPlan`, and nothing
- * here decides what ran.
- */
-export function planText(plan: string): string {
-  const out: string[] = []
-  let fence = false
-  let table: string[] = []
-  const flush = () => {
-    if (table.length === 0) return
-    out.push(...renderTable(table))
-    table = []
-  }
-  for (const line of plan.split("\n")) {
-    if (FENCE.test(line)) {
-      flush()
-      fence = !fence
-      out.push(line)
-      continue
-    }
-    if (!fence && isTableLine(line)) {
-      table.push(line)
-      continue
-    }
-    flush()
-    if (!fence && RULE.test(line)) {
-      // A rule separated two blocks; without it the gap would be two blank
-      // lines, so the blank line before it goes too.
-      if (out.length > 0 && out[out.length - 1] === "") out.pop()
-      continue
-    }
-    out.push(inline(line))
-  }
-  flush()
-  return out.join("\n")
-}
-
-/**
- * What the review card still has to show: everything except a table that only
- * repeats the reviewed items.  The card lists those rows below the prose, with
- * the verify command and dependencies -- a second copy of the same rows is
- * exactly the "duplicated and cheap" reading R21 §1 removed.
- *
- * Matched by content, not by shape: a plan that keeps a table of risks or
- * trade-offs keeps that table.
- */
-export function planProse(
-  plan: string,
-  items: readonly { content: string }[],
-): string {
-  const wanted = new Set(items.map((item) => item.content.trim()).filter(Boolean))
-  if (wanted.size === 0) return plan
-  const out: string[] = []
-  let fence = false
-  let table: string[] = []
-  const flush = () => {
-    if (table.length === 0) return
-    if (!repeatsTheItems(table, wanted)) out.push(...table)
-    table = []
-  }
-  for (const line of plan.split("\n")) {
-    if (FENCE.test(line)) {
-      flush()
-      fence = !fence
-      out.push(line)
-      continue
-    }
-    if (!fence && isTableLine(line)) {
-      table.push(line)
-      continue
-    }
-    flush()
-    out.push(line)
-  }
-  flush()
-  return out.join("\n")
-}
-
-/** An open/close code fence: a table inside one is code, not a table. */
-const FENCE = /^\s*(?:```|~~~)/
-
-/** A horizontal rule on its own line — pure noise once headings are gone. */
-const RULE = /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/
-
-/** One pipe-table row split into trimmed cells; the outer pipes are optional. */
-function tableCells(line: string): string[] {
-  const cells = line.trim().split("|")
-  if (cells.length > 0 && cells[0].trim() === "") cells.shift()
-  if (cells.length > 0 && cells[cells.length - 1].trim() === "") cells.pop()
-  return cells.map((cell) => cell.trim())
-}
-
-const SEPARATOR_CELL = /^:?-{3,}:?$/
-
-function isSeparatorRow(cells: string[]): boolean {
-  return cells.length > 0 && cells.every((cell) => SEPARATOR_CELL.test(cell))
-}
-
-function isTableLine(line: string): boolean {
-  const trimmed = line.trim()
-  return trimmed.length > 1 && trimmed.startsWith("|") && trimmed.endsWith("|")
-}
-
-/** Pad to `width` columns as a terminal counts them (CJK is two wide). */
-function pad(cell: string, width: number): string {
-  return cell + " ".repeat(Math.max(0, width - stringWidth(cell)))
-}
-
-/** A pipe-table block as a fixed-width table; the ``---`` row is dropped. */
-function renderTable(rows: string[]): string[] {
-  const body = rows.map(tableCells).filter((cells) => !isSeparatorRow(cells))
-  if (body.length === 0) return []
-  const columns = Math.max(...body.map((cells) => cells.length))
-  const widths = Array.from({ length: columns }, (_, index) =>
-    Math.max(...body.map((cells) => stringWidth(cells[index] ?? ""))),
-  )
-  return body.map(
-    (cells) => `| ${widths.map((width, index) => pad(cells[index] ?? "", width)).join(" | ")} |`,
-  )
-}
-
-/** Does this block list the reviewed items (and nothing else worth reading)? */
-function repeatsTheItems(rows: string[], wanted: Set<string>): boolean {
-  let matched = 0
-  let other = 0
-  for (const cells of rows.map(tableCells)) {
-    if (isSeparatorRow(cells)) continue
-    if (cells.some((cell) => wanted.has(cell))) matched += 1
-    else other += 1
-  }
-  // One "other" row is the header (a table of steps names its columns);
-  // anything more is prose that merely shares the shape.
-  return matched === wanted.size && other <= 1
-}
-
-/** The inline markers the old flat-text card already dropped. */
-function inline(line: string): string {
-  return line
-    .replace(/^\s{0,3}#{1,6}\s+/, "")
-    .replace(/^\s{0,3}[-*+]\s+/, "· ")
-    .replace(/`/g, "")
-    .replace(/\*\*(.+?)\*\*/g, "$1")
-    .replace(/__(.+?)__/g, "$1")
 }

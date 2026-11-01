@@ -428,9 +428,9 @@ describe("plan and ledger", () => {
   })
 
   test("plan.updated drops malformed verify/dependsOn instead of guessing", () => {
-    // Mirrors planReviewItems ("shapeless entries are dropped, never guessed
-    // at"): a non-string verify is "", a non-array dependsOn is [], and
-    // non-string elements are dropped element-wise.
+    // Same discipline the ask payload's rows had ("shapeless entries are
+    // dropped, never guessed at"): a non-string verify is "", a non-array
+    // dependsOn is [], and non-string elements are dropped element-wise.
     const state = feed(
       initialState(),
       delta("x"),
@@ -1220,32 +1220,6 @@ describe("the plan guard's terminal note (stage 4 r2)", () => {
     )
     const notices = lastAssistant(state).parts.filter((part) => part.kind === "notice")
     expect(notices).toEqual([])
-  })
-})
-
-
-describe("plan.receipt (E2 / D6)", () => {
-  test("a receipt appends only the summary the operator reads", () => {
-    // The step head is the runner's replay marker, not something the
-    // operator said (D6): live draws one assistant line, and so does reload.
-    const after = feed(initialState(), {
-      kind: "wire",
-      event: {
-        type: "plan.receipt",
-        data: { summary: "步骤 1 完成" },
-      } as never,
-    })
-
-    expect(after.messages.map((m) => m.role)).toEqual(["assistant"])
-    expect(JSON.stringify(after.messages[0]?.parts)).toContain("步骤 1 完成")
-  })
-
-  test("an empty receipt draws nothing", () => {
-    const after = feed(initialState(), {
-      kind: "wire",
-      event: { type: "plan.receipt", data: { summary: "" } } as never,
-    })
-    expect(after.messages).toHaveLength(0)
   })
 })
 

@@ -1,7 +1,7 @@
 /**
  * r22: a card takes the composer's slot, not a second box above it.
  *
- * The permission / plan-review panel used to sit NEXT TO the composer: two
+ * The permission / ask panel used to sit NEXT TO the composer: two
  * stacked boxes, the card floating above an "Ask anything…" bar nobody could
  * use.  It now replaces the composer while it is up, and the route mirrors the
  * draft so closing the card gives the same text back.

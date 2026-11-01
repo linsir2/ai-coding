@@ -231,7 +231,7 @@ class FinishResearchTool(BaseTool):
             )
         # The conclusion is the deliverable: it is the tool's output, so it
         # lands in the transcript (the user reads it) and in the model's
-        # history.  Nothing else happens -- no items, no arm, no review card.
+        # history.  Nothing else happens -- no items and no arm.
         if conclusion is not None:
             conclusion.exit = "finish_research"
         # 23: the tool output is the model's history, but it is also the one

@@ -644,7 +644,7 @@ async def _handle_plan(
     if not rest:
         if already:
             console.info(
-                "[plan] 已在计划模式（只读）。继续对话写计划；评审卡批准后自动执行。"
+                "[plan] 已在计划模式（只读）。继续对话写计划；确认执行后自动实现。"
             )
         return REPLAction.CONTINUE, session
     if already and loop.turn_running:

@@ -44,7 +44,7 @@ export function PermissionPanel(props: {
   const grantable = () => props.request.grantable !== false
   // C-3: the note row belongs to the refusal option. It is not decoration on
   // top of the panel: a focused <input> does NOT swallow letter keys (measured
-  // live -- with plan-review's input focused, "1" still ran its approve
+  // live -- with the ask panel's input focused, "1" still ran its answer
   // command), so a row that appeared unconditionally would turn "sleep" into
   // "stop this turn" and "no thanks" into an immediate refusal.
   const [note, setNote] = createSignal("")
@@ -145,8 +145,8 @@ export function PermissionPanel(props: {
             : NO_GRANT_NOTE}
         </text>
       </Show>
-      {/* C-3: the note row. Same shape as plan-review's feedback input (the
-          repo's one precedent for a human typing into a card), reached by
+      {/* C-3: the note row. Same shape as the ask panel's typed-answer input
+          (the repo's one precedent for a human typing into a card), reached by
           selecting the refusal instead of pressing its quick key. */}
       <Show when={refusalSelected()}>
         <box flexDirection="row" marginTop={1}>

@@ -130,20 +130,14 @@ describe("toolFailure", () => {
       ["approval_timeout", "审批超时"],
       ["stopped", "已停止"],
       ["skipped", "已跳过"],
-      // 20 §批次2: present_plan's verdicts are refusals, not breakage --
-      // they must not surface as 未知原因 in the middle of the planning flow.
-      ["no_plan_items", "计划尚未写成条目"],
-      ["missing_plan", "计划内容为空"],
-      ["no_user", "无人评审"],
+      ["no_user", "无人回答"],
       // 内化批次: the readonly gate's own code was the last live 未知原因
       // (found in session 7ad86804's transcript).
       ["readonly_denied", "只读拒绝"],
-      // R03: present_plan's posture gates -- a step or plain session calling
-      // it gets a verdict, not 未知原因.
+      // The research exit's posture gates -- a plain session calling it gets
+      // a verdict, not 未知原因.
       ["not_in_plan", "非计划模式"],
       ["task_busy", "任务运行中"],
-      // R08: keep planning is the user's revision request, not breakage.
-      ["plan_keep", "评审要求继续规划"],
       // R21 §3: a plan-step turn has no running goal, so update_goal there is
       // misplaced rather than an unknown cause.
       ["no_goal", "无运行中的目标"],
@@ -163,7 +157,7 @@ describe("toolFailure", () => {
       ["unknown_tool", "未知工具"],
       ["mcp_error", "MCP 调用失败"],
       ["subagent_error", "子代理失败"],
-      ["user_prompt_error", "评审通道异常"],
+      ["user_prompt_error", "提问通道异常"],
       ["child_timeout", "子代理超时"],
     ]
     for (const [code, label] of failed) {

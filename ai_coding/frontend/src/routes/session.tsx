@@ -18,7 +18,6 @@ import { createStore } from "solid-js/store"
 import { MessageView } from "../component/message"
 import { DialogSkills } from "../component/dialog-skills"
 import { AskPanel } from "../component/ask"
-import { PlanReviewPanel } from "../component/plan-review"
 import { PermissionPanel } from "../component/permission"
 import { Prompt } from "../component/prompt"
 import { buildSubmission, commandName, planPrelude, type PendingPrompt } from "../util/submission"
@@ -840,19 +839,7 @@ export function Session(props: SessionProps) {
           </Show>
           <Show when={props.ask}>
             {(request) => (
-              <Show
-                when={request().intent === "plan_review"}
-                fallback={<AskPanel request={request()} onAnswer={props.onAskAnswer} />}
-              >
-                <PlanReviewPanel
-                  request={request()}
-                  // C-4: the review card only serves the session path now;
-                  // codex implementation is offered by the generic
-                  // ``plan_implement`` card (ask.tsx renders its plan body),
-                  // so the answer needs no local run bookkeeping.
-                  onAnswer={(answer) => props.onAskAnswer(answer)}
-                />
-              </Show>
+              <AskPanel request={request()} onAnswer={props.onAskAnswer} />
             )}
           </Show>
           <Show when={state.queued.length > 0}>

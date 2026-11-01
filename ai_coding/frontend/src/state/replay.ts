@@ -226,9 +226,6 @@ export function messagesToState(
           error: "",
           durationMs: 0,
           approvalMs: 0,
-          // M3 T11: only the plan card needs its arguments back; everything
-          // else would just duplicate the session file in the transcript.
-          ...(call.name === "present_plan" ? { params } : {}),
         })
       }
     } else if (message.role === "tool") {

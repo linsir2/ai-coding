@@ -73,10 +73,10 @@ class CLIUserPromptCallback:
     def __init__(self, input_fn: Callable[[str], str] | None = None) -> None:
         self._read: Callable[[str], str] = input_fn or (lambda prompt: input(prompt))
         # Five parameters since R04: question and options apart (the TUI
-        # renders options as a list), the plan-review ``detail`` (markdown
-        # body), its ``intent`` (which card to render) and its structured
-        # ``data`` (the item rows the card shows).  Same shape the approval
-        # channel already uses (``approval.py`` passes tool/params/reason).
+        # renders options as a list), the markdown ``detail`` body, the
+        # ``intent`` (which kind of request this is) and the structured
+        # ``data`` (an optional payload).  Same shape the approval channel
+        # already uses (``approval.py`` passes tool/params/reason).
         self._provider: Callable[..., Any] | None = None
 
     def set_provider(self, provider: Callable[..., Any]) -> None:
@@ -103,8 +103,8 @@ class CLIUserPromptCallback:
                 return UserAnswer(answered=True, text=text)
             except TypeError:
                 # E (audit fix): a provider signature mismatch is a bug, not an
-                # absent user.  Swallowing it here is what kept the plan review
-                # dark on real machines -- the review "just never answered".
+                # absent user.  Swallowing it here is what kept the ask channel
+                # dark on real machines -- the question "just never answered".
                 raise
             except Exception:  # noqa: BLE001 — the channel must never break a turn
                 return UserAnswer(answered=False, reason="no_user")

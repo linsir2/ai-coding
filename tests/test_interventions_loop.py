@@ -152,21 +152,21 @@ class _Ok(BaseTool):
 
 
 class _Refuser(BaseTool):
-    """present_plan's verdict class: refuse until the list is written."""
+    """A tool verdict: refuse a plan whose entries the harness rejects."""
 
-    name = "present_plan"
+    name = "update_plan"
     parallel_safe = False
 
     @property
     def description(self) -> str:
-        return "refuses to present an empty plan"
+        return "refuses an invalid plan"
 
     @property
     def params_json_schema(self) -> dict:
         return {"type": "object", "properties": {}}
 
     async def execute(self, params, ctx=None) -> ToolResult:
-        return ToolResult(success=False, output="计划尚未写成条目", error="no_plan_items")
+        return ToolResult(success=False, output="计划无效", error="invalid_plan")
 
 
 def _call_named(call_id: str, name: str) -> StepResult:
@@ -180,15 +180,15 @@ def _call_named(call_id: str, name: str) -> StepResult:
 @pytest.mark.asyncio
 async def test_a_validation_refusal_does_not_escalate_the_l1_window(tmp_path):
     """24d7109b replay: two real failures armed L1; the refusal round (a
-    no_plan_items verdict) used to keep the burn alive, so the closed window
-    read "failed" and L2 ordered a second nudge the model spent on a duplicate
-    report.  A refusal resets the streak (turn_books), the window closes
-    "helped", and the turn carries on."""
+    validation-refusal verdict) used to keep the burn alive, so the closed
+    window read "failed" and L2 ordered a second nudge the model spent on a
+    duplicate report.  A refusal resets the streak (turn_books), the window
+    closes "helped", and the turn carries on."""
     engine = _ScriptedEngine([
         _call_named("c1", "ok"),            # a success somewhere in the turn
         _call_named("c2", "flaky"),         # all-fail 1
         _call_named("c3", "flaky"),         # all-fail 2 -> L1 fires
-        _call_named("c4", "present_plan"),  # the validation refusal
+        _call_named("c4", "update_plan"),  # the validation refusal
         _text("继续修"),
     ])
     sessions = SessionService(tmp_path / "sessions")

@@ -306,16 +306,16 @@ def test_r8_a_cancelled_call_does_not_hide_a_real_failure():
 
 
 def test_a_plan_validation_refusal_is_not_a_failure():
-    """Measured in 24d7109b turn 4: a ``no_plan_items`` refusal kept the burn
-    alive past the L1 window, the window closed "failed", and the ladder's
-    answer (L2) was a nudge the model spent on a duplicate report.  A refusal
-    is an instruction, not a breakage -- and the window's helped-signal is
+    """Measured in 24d7109b turn 4: a validation refusal kept the burn alive
+    past the L1 window, the window closed "failed", and the ladder's answer
+    (L2) was a nudge the model spent on a duplicate report.  A refusal is an
+    instruction, not a breakage -- and the window's helped-signal is
     ``failed_streak == 0``, so an all-neutral round resets instead of parking.
     """
     books = TurnBooks()
     books.note_outcomes([_outcome("bash", success=False, error="timeout")])
     assert books.failed_streak == 1
-    books.note_outcomes([_outcome("present_plan", success=False, error="no_plan_items")])
+    books.note_outcomes([_outcome("update_plan", success=False, error="invalid_plan")])
     assert books.failed_streak == 0
     assert [tool for tool, _reason, _preview in books.failures] == ["bash"]
 
@@ -324,7 +324,7 @@ def test_a_refusal_does_not_hide_a_real_failure():
     books = TurnBooks()
     books.note_outcomes(
         [
-            _outcome("present_plan", success=False, error="no_plan_items"),
+            _outcome("update_plan", success=False, error="invalid_plan"),
             _outcome("bash", success=False, error="timeout"),
         ]
     )
@@ -343,26 +343,14 @@ def test_a_cancelled_only_round_stops_the_burn_too():
     assert books.failed_streak == 0
 
 
-def test_an_invalid_plan_submission_is_a_verdict_too():
-    """P1's ``invalid_items`` — a submission the tool refused because an entry
-    had no content — is the same class of verdict as ``no_plan_items``: the
-    harness telling the model to fix its call, not breakage of the world.  It
-    must not push the escalation ladder (two of these would arm L1)."""
+def test_a_refusal_round_starts_a_neutral_run():
+    """A verdict round neither fails nor burns; an ordinary outcome ends the
+    neutral run.  Without the exemption, repeated refusals would arm the
+    strategy ladder against a working flow."""
     books = TurnBooks()
     books.note_outcomes([_outcome("bash", success=False, error="timeout")])
     assert books.failed_streak == 1
-    books.note_outcomes([_outcome("present_plan", success=False, error="invalid_items")])
-    assert books.failed_streak == 0
-
-
-def test_a_keep_round_neither_fails_nor_burns():
-    """R08: keep is the user asking for a revision, not breakage — the same
-    verdict class as ``no_plan_items`` (24d7109b).  Without the exemption,
-    two keeps would arm the strategy ladder against a working flow."""
-    books = TurnBooks()
-    books.note_outcomes([_outcome("bash", success=False, error="timeout")])
-    assert books.failed_streak == 1
-    books.note_outcomes([_outcome("present_plan", success=False, error="plan_keep")])
+    books.note_outcomes([_outcome("update_plan", success=False, error="invalid_plan")])
     assert books.failed_streak == 0
     assert books.neutral_streak == 1
     assert [tool for tool, _reason, _preview in books.failures] == ["bash"]

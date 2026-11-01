@@ -62,9 +62,9 @@ def is_plan_agent(agent_id: str) -> bool:
 
     One definition, read by the session's derived ``mode``, by the posture
     ladder and by the command layer.  A custom agent is *not* a plan agent in
-    M1b: plan's semantics (the review card, the research exit, the plan
-    guard) are still tied to the built-in plan agent, and opening them to
-    every custom agent is T5/T6's decision, not this batch's.
+    M1b: plan's semantics (the research exit, the plan-mode tool surface) are
+    still tied to the built-in plan agent, and opening them to every custom
+    agent is T5/T6's decision, not this batch's.
     """
     return agent_id == PLAN_AGENT_ID
 

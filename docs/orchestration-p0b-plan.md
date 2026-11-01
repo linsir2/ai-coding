@@ -239,6 +239,91 @@ TypeError——实现时先全仓 grep 字段名再删；`turn_books.snapshot()`
 - dataclass 删字段后任何 `replace(plan_executing=...)` 都会 TypeError —— 已 grep 零处。
 - `_open_items_for` 删除后 `task.open_items()` 返回新列表，调用点只读，无副作用。
 
+#### P0b-2e：前端评审卡与 `plan.receipt` 退休
+
+**事实前提（已核）**
+- `present_plan` 后端已零注册（P0b-1），前端唯一的消费者是
+  `component/plan-review.tsx`：它只在 `session.tsx` 的 `intent === "plan_review"`
+  分支里出现，而后端现在只发 `intent="plan_implement"`（`app/commands.py:741-745`），
+  由通用 `AskPanel` 渲染计划正文。
+- `PlanStepReceipt` 在生产代码里**没有生产者**（`grep "PlanStepReceipt("` 为空），
+  只剩 `core/events.py` 定义、`server/bridge.py` 映射、前端 reducer 分支与两条测试。
+- `util/plan-agent.ts` **不是**评审卡专属：`isPlanAgentId` / `postureSuffix` 被
+  home/session/composer-meta/status-bar/agent 使用，**必须保留**（原文「删
+  util/plan-agent.ts」是错的）。
+- `util/submission.ts` 的 `planPrelude` 仍被 `session.tsx:748` 使用（`/plan <主题>`
+  前置），保留；`plan.updated` 的实时计划面板（`state/session.ts:704` +
+  `test/plan-card-render.test.tsx`）保留。
+
+**删除清单**
+1. 删文件 `src/component/plan-review.tsx`。
+2. `src/routes/session.tsx`：删 `PlanReviewPanel` import；ask 分支（约 `:841-857`）
+   改为恒 `<AskPanel request={request()} onAnswer={props.onAskAnswer} />`。
+3. `src/util/ask.ts`：删 `PlanItemData`、`planItems`、`planReviewItems`、
+   `planReviewAnswer`、`submittedPlan`、`planText`、`planProse` 及表格/行内辅助
+   （`FENCE`/`RULE`/`tableCells`/`SEPARATOR_CELL`/`isSeparatorRow`/`isTableLine`/
+   `pad`/`renderTable`/`repeatsTheItems`/`inline`）与 `stringWidth` import；
+   保留 `AskRequest`（`detail`/`intent`/`data` 仍是通用 ask wire 字段）、`ASK_SKIP`、
+   `parseAskRequest`、`answerForSelection`；重写模块 docstring（不再提 plan review）。
+4. `src/component/toolcard.tsx`：删 `submittedPlan`/`planText` import、`plan()`、
+   `canExpand` 的 plan 项、展开区的 plan/items 渲染块。
+5. `src/state/replay.ts`：删 `present_plan` 回填 `params` 的分支（约 `:227-233`）。
+6. `src/state/session.ts`：删 tool part 的 `params?` 字段与 `case "plan.receipt"`；
+   docstring 去掉 `present_plan`。
+7. `src/util/toolmeta.ts`：删 `present_plan: "提交计划"`；删死错误码
+   `frozen_plan`/`frozen_verify`/`frozen_item`（P0b-2d 已删产生者）与
+   `no_plan_items`/`missing_plan`/`plan_keep`；**保留** `no_user`/`user_prompt_error`/
+   `not_in_plan`/`task_busy`/`plan_already_approved`/`implementation_request`
+   （`ask_user`/`finish_research` 仍产生）。
+8. `src/component/permission.tsx`：两处以 plan-review 作参照的注释改为 AskPanel 说法
+   （纯注释，无行为）。
+9. `core/events.py`：删 `PlanStepReceipt` 类、`LoopEvent` 联合项、`__all__` 项；
+   `server/bridge.py` 删该 import 与 `plan.receipt` 映射。
+
+**测试同步**
+- 删 `test/plan-review-render.test.tsx`、`test/plan-replay.test.ts`（整文件只测已删的
+  卡片/`submittedPlan`）。
+- `test/ask.test.ts`：删 `planReviewAnswer`/`planReviewItems`/`planText`/`planProse`
+  的 import 与 describe；`parseAskRequest` 的 detail/intent 用例保留（标题不再提
+  评审卡）。
+- `test/toolcard-render.test.tsx`：删「a submitted plan opens into the plan that was
+  actually sent」（`present_plan` 参数卡）。
+- `test/replay.test.ts`：删两条 `part.params` 断言（`present_plan` 回填）。
+- `test/reducer.test.ts`：删 `describe("plan.receipt")`。
+- `test_server_bridge.py`：删 `PlanStepReceipt → plan.receipt` 用例。
+
+**RIPR**
+- **R**：`test/ask.test.ts` 保留 `parseAskRequest` 的 detail/intent 断言；
+  `test/plan-card-render.test.tsx` 证明 `plan.updated` 面板仍活。
+- **I**：`AskPanel` 对 `intent="plan_implement"` 仍渲染 `detail` 计划正文
+  （`component/ask.tsx:119-123` 不动）。
+- **P**：前端 `bun test` + `bunx tsc --noEmit`；后端全量 `pytest` + `ruff` + `mypy`
+  （事件类删除后）。
+- **R**：真机 `/plan` → `<proposed_plan>` → "Implement this plan?"（AskPanel）→ 是 →
+  实现轮。
+
+**验收**
+- 生产代码（`ai_coding` 排除 `frontend/node_modules` 与测试目录）grep
+  `plan_review|PlanReviewPanel|plan-review|present_plan|PlanStepReceipt|plan.receipt|submittedPlan|planReview|planText|planProse`
+  为空；测试夹具里仍有 `present_plan` / `intent="plan_review"` 字符串（历史断言用，
+  无生产者），属已知残留。
+- 前端 `bun test` 全绿、`tsc --noEmit` 干净；后端全量测试绿。
+
+**实施记录（完成）**
+- 前端：删 `plan-review.tsx`、`util/ask.ts` 的计划解析/渲染半边、`toolcard` 计划卡、
+  replay/session 的 `present_plan` 分支与 `params`、`toolmeta` 的 `present_plan`/死错误码；
+  `AskPanel` 成为唯一问答卡（`plan_implement` 的正文仍走 `detail`）。
+- 后端：删 `PlanStepReceipt` 事件与 `plan.receipt` 映射；删无生产者的
+  `TurnConclusion.dismissed`；`_NOT_EVIDENCE_ERRORS` 收敛为
+  `{CANCELLED_BY_USER, invalid_plan}`（`invalid_plan` 是 `update_plan` 现存的拒绝码）。
+- 文案：`/plan` 提示、ask 通道注释、工具错误标签（「无人回答 / 提问通道异常」）随删同步。
+- 校验：前端 `544 pass / 0 fail`、`tsc` 0 错误；后端全量 `pytest` 0 failed；ruff/mypy 绿。
+
+**风险**
+- `state/session.ts` 的 `params` 删除必须与 `replay.test.ts` 同步，否则类型与断言双红。
+- 误删 `util/plan-agent.ts` 或 `planPrelude` 会打断 plan 姿态后缀与 `/plan` 前置；
+  已核它们不是评审卡专属。
+
 ### 范围
 - `domain/session.py`：删 `step_item_id`、`plan_executing`、`item_deadline`、
   `acceptance`、`step_deliveries`（含 `begin_plan` 重置 `:514`、序列化 `:741,809`、
@@ -258,10 +343,12 @@ TypeError——实现时先全仓 grep 字段名再删；`turn_books.snapshot()`
 - `tools/base.py`/`request_builder.py`：删 `ToolContext.step_item_id/plan_executing/
   plan_verify_items` 中的旧两项（`plan_verify_items` 保留）。
 - `core/events.py`：删 `PlanStepReceipt`；`server/bridge.py` 删 `plan.receipt`。
-- 前端：删 `component/plan-review.tsx`、`util/submission.ts` 的 plan review、
-  `util/plan-agent.ts`、`status-bar.tsx` 的 plan 分支、`home.tsx` 的 plan 入口、
-  `ask.test.ts`/`reducer.test.ts`/`plan-review-render.test.tsx` 的旧用例。
-  （`state/session.ts` 的 `stepDeliveries` 在 P0b-2d 核查时已不在前端，无需处理。）
+- 前端：删 `component/plan-review.tsx` 与只服务它的 `util/ask.ts` 计划解析/渲染
+  函数、`toolcard` 的计划卡、`state/replay.ts` 的 `present_plan` 回填、
+  `state/session.ts` 的 `plan.receipt` 分支、`toolmeta` 的 `present_plan` 与死错误码，
+  以及 `ask.test.ts`/`reducer.test.ts`/`plan-review-render.test.tsx`/`plan-replay.test.ts`
+  的旧用例。**保留** `util/plan-agent.ts`（姿态后缀/agent id）、`planPrelude`、
+  `plan.updated` 计划面板。详见 P0b-2e。
 - `core/acceptance.py`：保留 `verify_items`（update_plan 用）；删
   `AcceptanceItem/acceptance_states/pending_items` 的消费点
   （`turn_policy:633`、`agent_loop:1102,1337`、`interventions:193,415,510`、

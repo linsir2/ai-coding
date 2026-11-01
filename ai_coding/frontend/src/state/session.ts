@@ -44,13 +44,6 @@ export type Part =
        * nobody was asked.
        */
       approvalMs: number
-      /**
-       * M3 T11: the arguments of a `present_plan` call, so the transcript can
-       * show the plan that was actually submitted.  Undefined for every other
-       * tool -- keeping every call's arguments would make the transcript a
-       * second copy of the session file.
-       */
-      params?: Record<string, unknown>
     }
   | {
       kind: "plan"
@@ -93,8 +86,8 @@ export interface ChatMessage {
 }
 
 /** One todo entry on the plan card (20 §批次2) — live off ``plan.updated``.
- * D5: the card shows what approval will run, so the proof command and the
- * dependencies ride along -- the same two keys the review card reads. */
+ * D5: the card shows what the run will do, so the proof command and the
+ * dependencies ride along. */
 export interface PlanItem {
   id: string
   content: string
@@ -573,7 +566,7 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
           callId,
           toolName,
           verb: toolVerb(toolName),
-          target: toolTarget(toolName, obj(data["params"])),
+          target: toolTarget(toolName, params),
           status: "running",
           lines: [],
           pending: "",
@@ -582,7 +575,6 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
           error: "",
           durationMs: 0,
           approvalMs: 0,
-          ...(toolName === "present_plan" ? { params } : {}),
         },
       ])
     }
@@ -680,26 +672,6 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
         ...parts,
         { kind: "text", text: summary, streaming: false },
       ])
-    }
-    case "plan.receipt": {
-      // E2 / D6: the runner's step head is its replay marker (synthetic, and
-      // skipped by the reload); the summary is the one line the operator
-      // reads.  Live draws exactly that one line, so the two paths agree.
-      const summary = str(data["summary"])
-      if (!summary) return state
-      return {
-        ...state,
-        messages: retireOldest(
-          [
-            ...state.messages,
-            {
-              role: "assistant" as const,
-              parts: [{ kind: "text" as const, text: summary, streaming: false }],
-            },
-          ],
-          false,
-        ),
-      }
     }
     case "plan.updated":
       return applyPlanUpdate(state, data)
@@ -907,9 +879,9 @@ export function applyPlanUpdate(
   const items: PlanItem[] = Array.isArray(data["items"])
     ? data["items"].map((raw) => {
         const item = obj(raw)
-        // D5: read the same two keys the review card reads (there: numbers,
-        // here: the plan's own string ids). Malformed values are dropped,
-        // never guessed -- mirrors planReviewItems in util/ask.
+        // D5: malformed values are dropped, never guessed -- dependsOn here
+        // carries the plan's own string ids, while the wire's ask payload
+        // numbered them.
         const rawDeps = item["dependsOn"]
         const evidence = str(item["evidence"])
         return {
