@@ -101,7 +101,6 @@ BOOKKEEPING_TOOLS = frozenset(
         "ask_user",
         "start_goal",
         "update_goal",
-        "present_plan",
         "finish_research",
         "job_list",
         "job_output",

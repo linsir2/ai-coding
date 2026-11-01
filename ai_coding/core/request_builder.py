@@ -126,7 +126,8 @@ def tool_context(
         instructions=instructions,
         # 18 §10.1: the switch rides the one shared factory.
         readonly=session.readonly,
-        # R03: ... and so does the posture fact (present_plan's gate).
+        # R03: ... and so does the posture fact (the mode-dependent tool
+        # surface reads it).
         mode=session.mode,
         # M1a: the session's own layer rides this request, so a rule added
         # between turns is in force on the next one -- and never in the

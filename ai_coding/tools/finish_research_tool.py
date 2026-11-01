@@ -7,10 +7,10 @@ verify commands were invented to match (15 号稿 D1/D2).  This tool is the
 other exit — the model states its conclusion, the turn ends, and nothing is
 armed, executed or reviewed.
 
-Mutually exclusive with ``present_plan``: the first exit to succeed owns the
-turn and the other one is refused (``already_concluded``).  The holder that
-carries that fact is the turn's, not the task's — a conclusion is a fact
-about one turn, and the task outlives it.
+Mutually exclusive with a ``<proposed_plan>`` submission: the first exit to
+succeed owns the turn and the other one is refused (``already_concluded``).
+The holder that carries that fact is the turn's, not the task's — a
+conclusion is a fact about one turn, and the task outlives it.
 """
 
 from __future__ import annotations

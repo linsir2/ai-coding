@@ -381,12 +381,6 @@ class PermissionGate:
             # R8a: writing one line into the turn's own book touches neither the
             # repo nor the durable memory (docs/r8-analysis.md 3.1, step 5).
             "checkpoint_write",
-            # 19 §3.2: presenting the plan only occupies the question channel,
-            # like ask_user above -- the plan becomes action through ``/plan
-            # run``, whose tools are gated on their own.  WARN made the review
-            # card arrive behind an "unknown tool 'present_plan' requires
-            # confirmation" prompt: two approvals for one plan (tmux, measured).
-            "present_plan",
             # N1: the research exit asks nobody and changes nothing -- the
             # conclusion is a message, and the plan it replaces is not an
             # action.  A WARN tier would put an approval panel in front of

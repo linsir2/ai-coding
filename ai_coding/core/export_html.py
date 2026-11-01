@@ -357,7 +357,6 @@ _TOOL_ICONS = {
     "memory_search": "🧠",
     "memory_write": "📌",
     "checkpoint_write": "🏁",
-    "present_plan": "📋",
     "todo_write": "☑",
     "subAgent": "🤖",
     "ask_user": "❓",

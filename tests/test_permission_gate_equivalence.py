@@ -79,7 +79,6 @@ CASES: list[tuple[str, str, str, dict[str, Any], str, str]] = [
     ("allow_memory_write", "default", "memory_write", {"content": "x"}, "allow", ""),
     ("allow_ask_user", "default", "ask_user", {"question": "?"}, "allow", ""),
     ("allow_checkpoint_write", "default", "checkpoint_write", {"text": "x"}, "allow", ""),
-    ("allow_present_plan", "default", "present_plan", {"plan": "x"}, "allow", ""),
     ("allow_finish_research", "default", "finish_research", {"summary": "x"}, "allow", ""),
     ("allow_start_goal", "default", "start_goal", {"goal": "x"}, "allow", ""),
     ("allow_update_goal", "default", "update_goal", {"goal": "x"}, "allow", ""),

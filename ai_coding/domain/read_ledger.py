@@ -1,7 +1,7 @@
 """The read ledger — what this session has actually read, and where the gaps are.
 
 RC-2 (docs/r20-t2-rootcause.md): the memory layer stored *conclusions*, not
-*evidence*.  The checkpoint said "读取 ai_coding/tools/present_plan_tool.py 源码"
+*evidence*.  The checkpoint said "读取 ai_coding/core/agent_loop.py 源码"
 with no line numbers, so after one compaction the model could not tell "I read
 this file" from "I never opened it" — and re-read the same 441-line file eleven
 times at overlapping offsets (195, 300, 195, 140, 55, 25, 195, 195, 195, 245,

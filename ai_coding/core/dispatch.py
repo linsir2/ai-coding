@@ -331,7 +331,7 @@ class ToolDispatcher:
         if tool is not None and tool.name != call.name:
             # The registry resolves a case-insensitive alias, but the guards,
             # the read ledger and the turn books match exact names
-            # (``bash``, ``present_plan``…).  Handing them the model's spelling
+            # (``bash``, ``finish_research``…).  Handing them the model's spelling
             # would run a "Bash" call past the bash red-line guard -- an alias
             # must normalize the call, not only find the tool.
             call = ToolCall(id=call.id, name=tool.name, params=call.params)

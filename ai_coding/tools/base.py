@@ -87,7 +87,7 @@ class ToolContext:
     #: ``readonly`` input -- this field is not an enforcement source.
     readonly: bool = False
     #: R03: the posture fact for the one tool whose semantics depend on it
-    #: (``present_plan`` is plan-only); ``tool_context`` reads it off the
+    #: (``finish_research`` is plan-only); ``tool_context`` reads it off the
     #: session.  Not the gate's input: enforcement still reads only
     #: ``readonly``.
     mode: str = "normal"

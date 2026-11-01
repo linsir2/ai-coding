@@ -353,7 +353,7 @@ def _assemble_registry(
 
     # C-0: codex is the only plan path.  ``update_plan`` is the model's plan
     # surface; a sub-agent has no plan table, so the tool stays on the main
-    # session.  ``present_plan`` and its review card are retired.
+    # session.  The old submission tool and its review card are retired.
     if include_subagent:
         from ai_coding.tools.update_plan_tool import UpdatePlanTool
 
@@ -378,9 +378,9 @@ def _assemble_registry(
 
     if include_subagent:
         # D-4: the model's own taskification (start_goal / update_goal).  Main
-        # session only, like present_plan: the goal run is dispatched by the
-        # server on the MAIN session, and a sub-agent arming its throwaway
-        # session's task would drive nothing.
+        # session only: the goal run is dispatched by the server on the MAIN
+        # session, and a sub-agent arming its throwaway session's task would
+        # drive nothing.
         from ai_coding.tools.goal_tools import StartGoalTool, UpdateGoalTool
 
         registry.register(StartGoalTool())
@@ -462,9 +462,8 @@ def _assemble_registry(
     # answer), and their schemas ride the request only after the model asks.
     # Which ones is a composition decision -- a tool used once per session
     # should not pay its JSON on every step.  Core work tools (bash/read/write/
-    # edit/glob/grep/todo_write), the plan exits (present_plan /
-    # finish_research), history_search, subagent and tool_search
-    # itself stay advertised.
+    # edit/glob/grep/todo_write), the plan exit (finish_research),
+    # history_search, subagent and tool_search itself stay advertised.
     mark_deferred_tools(registry)
 
     from ai_coding.tools.tool_search_tool import ToolSearchTool

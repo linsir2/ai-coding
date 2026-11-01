@@ -78,10 +78,10 @@ _PLAN_SOFT_DENY = (
     "close_agent",
     "webfetch",
     "websearch",
-    # M3 T8: the planning list is present_plan's, not todo_write's.  Cutting
-    # the tool is what stops two owners from writing ``task.items`` in the
-    # same turn; a prompt that only *asks* the model not to use it leaves the
-    # tool in front of it.
+    # M3 T8: the planning list belongs to the plan itself, not todo_write's.
+    # Cutting the tool is what stops two owners from writing ``task.items`` in
+    # the same turn; a prompt that only *asks* the model not to use it leaves
+    # the tool in front of it.
     "todo_write",
 )
 

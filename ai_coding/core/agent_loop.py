@@ -2198,9 +2198,9 @@ class AgentLoop:
                 permissions=session_rules,
                 agent_rules=agent_rules,
                 jobs=self.jobs,
-                # W2/R02: the operator's declared roots ride along, so a tool
-                # that judges reachability (present_plan's gate) answers with
-                # the same roots the workspace gate uses.
+                # W2/R02: the operator's declared roots ride along, so every
+                # tool that judges reachability answers with the same roots the
+                # workspace gate uses.
                 extra_workspace_roots=self.extra_workspace_roots,
                 # R8a: the only channel a tool has to leave something in the
                 # turn's book (checkpoint_write uses it).
@@ -2287,17 +2287,14 @@ class AgentLoop:
         )
         self.closer.write_back(session, outcomes)
         if any(
-            # ``present_plan`` joined the list with P1: approval is what writes
-            # the submitted items into the task, and the plan card is driven by
-            # this event -- a write the frontend never hears about is a plan it
-            # never shows.  (During planning, todo_write is prompt-banned, so
-            # nothing else would emit it either.)
+            # These are the calls that write the task; the front end's sidebar
+            # and step list read them, and a write it never hears about is a
+            # state it never shows.
             item.call.name
             in (
                 "todo_write",
                 "start_goal",
                 "update_goal",
-                "present_plan",
                 "update_plan",
             )
             for item in outcomes

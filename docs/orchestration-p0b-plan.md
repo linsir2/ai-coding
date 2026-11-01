@@ -124,13 +124,20 @@ TypeError——实现时先全仓 grep 字段名再删；`turn_books.snapshot()`
 **验收**：codex 链路 `/plan`→`<proposed_plan>`→"Implement this plan?"→
 `Implement the plan.`→`update_plan` 仍通；plan 回合不再出现 present_plan 文案。
 
-#### P0b-2b：旧 live check 与残留白名单
-- `scripts/n1_live_check.py:223`、`t12_live_check.py:246`、
-  `w2_live_check.py:111`、`r19_acceptance.py:342`：按 `present_plan` 判成功的
-  旧 live check 收编/删除。
-- `security/permission_gate.py:389`、`core/export_html.py:360`、
-  `core/dispatch.py:334`、`tools/base.py:58`、`agents/registry.py:81`、
-  `core/turn_books.py:104,533,680` 的 `present_plan` 白名单/注释清掉。
+#### P0b-2b：旧 live check 与残留白名单（已完成，提交待办）
+- 删除 `scripts/n1_live_check.py`、`t12_live_check.py`、`w2_live_check.py`、
+  `r19_acceptance.py`（同一套旧 plan 评审 live check，无其它消费者）。
+- 删除 `security/permission_gate.py` 的 `present_plan` ALLOW 项、
+  `core/export_html.py` 的图标、`core/turn_books.py` 的
+  `BOOKKEEPING_TOOLS` 项、`core/agent_loop.py` 的 `TaskUpdated` 触发名单项；
+  同步更新 `agents/registry.py`、`tools/base.py`、`tools/builder.py`、
+  `core/request_builder.py`、`core/dispatch.py`、`domain/read_ledger.py`
+  里指向该工具的注释。
+- 测试：删 `test_permission_gate.py::test_present_plan_allow` 与
+  `test_permission_gate_equivalence.py` 的 `allow_present_plan` 行（工具已
+  退休，未知工具 fail-closed 的 WARN 行为不改）。
+- 验收：`grep -rn present_plan ai_coding --exclude-dir=frontend` 为空；全量
+  测试 + ruff + mypy 绿。
 
 ### 范围
 - `domain/session.py`：删 `step_item_id`、`plan_executing`、`item_deadline`、
