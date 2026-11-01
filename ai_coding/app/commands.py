@@ -777,6 +777,20 @@ def _handle_readonly(
         (console.error if arg else console.info)(line)
         return REPLAction.CONTINUE, session
     value = arg == "on"
+    if arg == "off":
+        # P1a: plan pins the enforcement axis (mode is derived from the agent,
+        # so "plan" with a writable overlay is not a state to hold).  The queued
+        # target counts too -- routing this through ``request_posture`` would
+        # answer CANCELLED and silently withdraw a ``/plan`` the user asked for.
+        from ai_coding.domain.agents import is_plan_agent
+
+        queued_agent = (session.pending_posture or {}).get("agent")
+        if session.mode == "plan":
+            console.error("[readonly] 计划模式下已是只读；先 /plan off 再关闭只读。")
+            return REPLAction.CONTINUE, session
+        if queued_agent is not None and is_plan_agent(str(queued_agent)):
+            console.error("[readonly] 进入计划模式已排队；先 /plan off 再关闭只读。")
+            return REPLAction.CONTINUE, session
     result = loop.request_posture(
         session, readonly=value, reason=f"/readonly {arg}", observer=observer
     )

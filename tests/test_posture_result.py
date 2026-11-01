@@ -255,6 +255,83 @@ async def test_a_sidecar_failure_does_not_end_the_turn(tmp_path):
     await loop.aclose()
 
 
+# ---- P1a: plan ⇒ readonly is one invariant -----------------------------------
+
+
+def test_a_plan_target_forces_readonly(tmp_path):
+    """The pair (agent, readonly) cannot disagree: plan is read-only."""
+    loop, sessions = _loop(tmp_path)
+    session = _session(sessions)
+
+    assert (
+        loop.request_posture(session, agent="plan", readonly=False)
+        is PostureResult.COMMITTED
+    )
+    assert (session.agent, session.readonly) == ("plan", True)
+
+
+def test_requesting_plan_readonly_again_is_a_noop(tmp_path):
+    """Because the target is normalized, "plan, writable" *is* where we are."""
+    loop, sessions = _loop(tmp_path)
+    session = _session(sessions)
+    loop.request_posture(session, agent="plan", readonly=False)
+
+    assert (
+        loop.request_posture(session, agent="plan", readonly=False)
+        is PostureResult.NOOP
+    )
+    assert session.pending_posture is None
+
+
+def test_a_queued_plan_flip_is_normalized_too(tmp_path):
+    """The queue must hold the same target the immediate path would commit,
+    or a second request would enqueue a duplicate and the land would differ."""
+    loop, sessions = _loop(tmp_path, busy=True)
+    session = _session(sessions)
+
+    assert (
+        loop.request_posture(session, agent="plan", readonly=False)
+        is PostureResult.QUEUED
+    )
+    # The stored queue itself must already be the normalized pair: a sidecar
+    # holding (plan, False) would land writable for any other reader.
+    assert session.pending_posture["readonly"] is True
+    assert loop._pending_target(session, session.pending_posture) == ("plan", True)
+
+
+def test_an_old_queued_plan_flip_lands_readonly(tmp_path):
+    """A sidecar written before the invariant can hold (plan, False)."""
+    loop, sessions = _loop(tmp_path)
+    session = _session(sessions)
+    session.pending_posture = {"agent": "plan", "readonly": False, "reason": "old"}
+
+    loop._apply_pending_posture(session)
+
+    assert (session.agent, session.readonly) == ("plan", True)
+
+
+def test_a_queued_plan_flip_lands_readonly(tmp_path):
+    loop, sessions = _loop(tmp_path, busy=True)
+    session = _session(sessions)
+    loop.request_posture(session, agent="plan", readonly=False)
+
+    loop._apply_pending_posture(session)
+
+    assert (session.agent, session.readonly) == ("plan", True)
+    assert session.pending_posture is None
+
+
+def test_a_commit_that_bypasses_the_request_is_normalized(tmp_path):
+    """Boot, ``/plan run`` and the implement turn call ``commit_posture``
+    directly; the invariant has to hold on that path too."""
+    loop, sessions = _loop(tmp_path)
+    session = _session(sessions)
+
+    loop.commit_posture(session, agent="plan", readonly=False, reason="boot")
+
+    assert (session.agent, session.readonly) == ("plan", True)
+
+
 # ---- the reminder's durable queue (M2 T3) -----------------------------------
 
 

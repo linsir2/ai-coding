@@ -103,7 +103,7 @@ from ai_coding.core.turn_policy import (
 from ai_coding.core.turn_report import TurnReporter
 from ai_coding.core.undo_store import UndoFileStore
 from ai_coding.core.write_ahead import WriteAheadLog
-from ai_coding.domain.agents import AgentCatalog
+from ai_coding.domain.agents import AgentCatalog, is_plan_agent
 from ai_coding.domain.ledger import ledger_signature
 from ai_coding.domain.loop import (
     EmptyStepError,
@@ -659,6 +659,21 @@ class AgentLoop:
         """True while a turn (or a resume) holds the single-turn lock."""
         return self._turn_lock.locked()
 
+    @staticmethod
+    def _normalize_posture(agent: str, readonly: bool) -> tuple[str, bool]:
+        """P1a: plan ⇒ readonly, coerced wherever a posture is resolved.
+
+        The two axes describe one posture, so "plan, writable" is not a state
+        the loop may hold.  Coercing (rather than rejecting) means every
+        caller that can still send the mismatched pair -- a legacy file loaded
+        into a live loop, an external caller, ``/readonly off`` queued before
+        the guard landed -- lands on the read-only pair.  No ``PostureResult``
+        value is added: the four answers stay the four.
+        """
+        if is_plan_agent(agent):
+            return agent, True
+        return agent, readonly
+
     def request_posture(
         self,
         session: SessionData,
@@ -684,7 +699,7 @@ class AgentLoop:
         No ``await`` between the check and the write, so a turn cannot start
         inside the gap.
         """
-        target = (
+        target = self._normalize_posture(
             agent if agent is not None else session.agent,
             bool(readonly) if readonly is not None else session.readonly,
         )
@@ -732,8 +747,10 @@ class AgentLoop:
         reset — so the field write, the history row, the event and the
         sidecar removal cannot drift apart.
         """
-        target_agent = agent if agent is not None else session.agent
-        target_readonly = bool(readonly) if readonly is not None else session.readonly
+        target_agent, target_readonly = self._normalize_posture(
+            agent if agent is not None else session.agent,
+            bool(readonly) if readonly is not None else session.readonly,
+        )
         previous = session.agent
         previous_readonly = session.readonly
         agent_moved = target_agent != previous
@@ -815,14 +832,19 @@ class AgentLoop:
         session.pending_reminders = None
         self.sessions.mark_pending_reminder(session.session_id, None)
 
-    @staticmethod
     def _pending_target(
-        session: SessionData, pending: dict[str, Any]
+        self, session: SessionData, pending: dict[str, Any]
     ) -> tuple[str, bool]:
-        """Where a queued flip would land, with the unset axis resolved."""
+        """Where a queued flip would land, with the unset axis resolved.
+
+        Normalized like the immediate target: the queue has to speak the same
+        language as ``current``, or a plan flip queued as ``(plan, False)``
+        would never compare equal to the landed pair and would re-queue the
+        same flip forever.
+        """
         agent = pending.get("agent")
         readonly = pending.get("readonly")
-        return (
+        return self._normalize_posture(
             str(agent) if agent is not None else session.agent,
             bool(readonly) if readonly is not None else session.readonly,
         )

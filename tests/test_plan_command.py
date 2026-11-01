@@ -359,6 +359,97 @@ async def test_readonly_bare_shows_usage_without_saving():
 
 
 @pytest.mark.asyncio
+async def test_readonly_off_is_refused_in_plan_mode():
+    """P1a: plan fixes the enforcement axis.  ``/readonly off`` would leave
+    ``mode=plan`` writable, so it is refused without touching any field."""
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.agent, session.readonly = "plan", True
+    dc, c = _console()
+
+    action, _ = await handle_input(loop, "/readonly off", session, sessions, dc)
+
+    assert action is REPLAction.CONTINUE
+    assert (session.mode, session.readonly) == ("plan", True)
+    assert sessions.saved == []
+    assert "计划模式下已是只读" in c.export_text()
+
+
+@pytest.mark.asyncio
+async def test_readonly_off_does_not_withdraw_a_queued_plan():
+    """The queued plan is the other way plan pins the axis.  Routing the
+    refusal through ``request_posture`` would answer CANCELLED and silently
+    drop the ``/plan`` the user asked for."""
+    loop = _Loop(busy=True)
+    sessions = _Sessions()
+    session = _session()
+    dc, c = _console()
+
+    await handle_input(loop, "/plan", session, sessions, dc)
+    queued = dict(session.pending_posture)
+
+    await handle_input(loop, "/readonly off", session, sessions, dc)
+
+    assert session.pending_posture == queued
+    assert (session.mode, session.readonly) == ("normal", False)
+    out = c.export_text()
+    assert "进入计划模式已排队" in out
+    assert "已撤销排队中的切换" not in out
+
+
+@pytest.mark.asyncio
+async def test_readonly_off_still_works_in_build_mode():
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.readonly = True
+    dc, c = _console()
+
+    await handle_input(loop, "/readonly off", session, sessions, dc)
+
+    assert session.readonly is False
+    assert sessions.saved == [session]
+    assert "只读已关闭" in c.export_text()
+
+
+@pytest.mark.asyncio
+async def test_a_pending_entry_without_an_agent_is_not_a_queued_plan():
+    """Only an explicit plan target pins the axis: a pending flip on the
+    readonly axis alone must not be refused as if plan were queued."""
+    loop = _Loop(busy=True)
+    sessions = _Sessions()
+    session = _session()
+    session.pending_posture = {
+        "agent": None,
+        "readonly": True,
+        "reason": "/readonly on",
+    }
+    dc, c = _console()
+
+    await handle_input(loop, "/readonly off", session, sessions, dc)
+
+    out = c.export_text()
+    assert "计划模式下已是只读" not in out
+    assert session.pending_posture is None
+
+
+@pytest.mark.asyncio
+async def test_plan_off_restores_the_writable_overlay_after_a_refusal():
+    """The refusal points at ``/plan off``; that has to actually work."""
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.agent, session.readonly = "plan", True
+    dc, _c = _console()
+
+    await handle_input(loop, "/readonly off", session, sessions, dc)
+    await handle_input(loop, "/plan off", session, sessions, dc)
+
+    assert (session.mode, session.readonly) == ("normal", False)
+
+
+@pytest.mark.asyncio
 async def test_posture_commands_queue_while_a_turn_is_running():
     """18 §10.2: mid-turn posture flips queue with an explicit receipt."""
     loop = _Loop(busy=True)

@@ -20,6 +20,16 @@ def test_create_session_fields(tmp_path):
     assert s.messages == []
 
 
+def test_create_with_a_plan_default_is_read_only(tmp_path):
+    """P1a: the invariant holds at creation too -- a constructor default of
+    "plan" cannot mint a writable plan file."""
+    svc = SessionService(root=tmp_path / "sessions", default_agent="plan")
+
+    s = svc.create(title="p")
+
+    assert (s.agent, s.readonly) == ("plan", True)
+
+
 def test_save_load_roundtrip(tmp_path):
     svc = _svc(tmp_path / "sessions")
     s = svc.create(title="t")

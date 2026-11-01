@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ai_coding.domain.agents import is_plan_agent
 from ai_coding.domain.message import CHECKPOINT_MARK
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.write_ahead import WriteAheadIntent
@@ -314,7 +315,10 @@ class SessionService:
             created_time=ts,
             last_access_time=ts,
             agent=self._default_agent,
-            readonly=self._default_readonly,
+            # P1a: plan ⇒ readonly is an invariant at creation too, so a
+            # constructor default of "plan" cannot mint a writable plan file.
+            readonly=self._default_readonly
+            or is_plan_agent(str(self._default_agent or "")),
         )
 
     def save(self, session: SessionData) -> None:

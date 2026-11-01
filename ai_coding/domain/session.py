@@ -723,7 +723,10 @@ class SessionData:
         if history:
             data["agentHistory"] = history
         # Same rule again (18 §10.1): a writable session gains no key.
-        if self.readonly:
+        # P1a: plan is read-only by definition, so a session that holds the
+        # mismatched pair still lands on disk as the invariant (the read-side
+        # normalization is a heal, not the only guard).
+        if self.readonly or is_plan_agent(self.agent):
             data["readonly"] = True
         # M1a: same rule again -- a session with no rules of its own gains no
         # key, so every file written before this layer existed reads the same.
@@ -789,6 +792,12 @@ class SessionData:
         raw_agent = data.get("agent")
         if not isinstance(raw_agent, str) or not raw_agent:
             raw_agent = "plan" if str(data.get("mode") or "") == "plan" else "build"
+        # P1a: plan ⇒ readonly is an invariant, not a pair of facts a file may
+        # disagree about.  A file written before it can hold ``agent="plan"``
+        # with a writable overlay; reading it heals the pair, and ``to_dict``
+        # then carries only True.  Truthy garbage still coerces to the
+        # *restrictive* value: fail-closed.
+        raw_readonly = bool(data.get("readonly")) or is_plan_agent(raw_agent)
         raw_history = data.get("agentHistory")
         history_rows = raw_history if isinstance(raw_history, list) else []
         agent_history = [
@@ -826,8 +835,9 @@ class SessionData:
             ),
             agent=raw_agent,
             agent_history=agent_history,
-            # Truthy garbage coerces to the *restrictive* value: fail-closed.
-            readonly=bool(data.get("readonly")),
+            # Truthy garbage coerces to the *restrictive* value: fail-closed
+            # (and plan is read-only by definition -- see ``raw_readonly``).
+            readonly=raw_readonly,
             permissions=permissions,
         )
 

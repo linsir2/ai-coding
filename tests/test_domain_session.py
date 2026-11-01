@@ -176,6 +176,47 @@ def test_begin_plan_keeps_messages():
     assert len(s.messages) == 1
 
 
+# ---- P1a: plan ⇒ readonly heals on the reading side -------------------------
+
+
+def test_an_old_plan_session_reads_back_read_only():
+    """A file written before the invariant held ``agent=plan`` with a writable
+    overlay.  Reading it heals the pair, and the write side then carries the
+    healed fact (same principle as the retired plan profile)."""
+    session = SessionData.from_dict(
+        {"agent": "plan", "readonly": False, "messages": []}
+    )
+
+    assert session.readonly is True
+    assert session.to_dict()["readonly"] is True
+
+
+def test_a_build_session_keeps_its_writable_overlay():
+    session = SessionData.from_dict(
+        {"agent": "build", "readonly": False, "messages": []}
+    )
+
+    assert session.readonly is False
+    assert "readonly" not in session.to_dict()
+
+
+def test_a_legacy_mode_key_reads_back_plan_read_only():
+    """Before the agent table, a file said ``mode: plan``; that is still plan."""
+    session = SessionData.from_dict({"mode": "plan", "messages": []})
+
+    assert (session.agent, session.readonly) == ("plan", True)
+    assert session.to_dict()["readonly"] is True
+
+
+def test_a_build_session_with_readonly_reads_back_unchanged():
+    session = SessionData.from_dict(
+        {"agent": "build", "readonly": True, "messages": []}
+    )
+
+    assert session.readonly is True
+    assert session.to_dict()["readonly"] is True
+
+
 # ---- P1/R1+R2: message id and the three durable recovery fields ---------------
 
 
