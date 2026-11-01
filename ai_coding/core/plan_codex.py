@@ -30,28 +30,39 @@ IMPLEMENT_PROMPT = "Implement the plan."
 
 
 def _block_span(text: str) -> tuple[int, int, int, int] | None:
-    """Offsets of the first *complete* block: (open_start, body_start, body_end, close_end)."""
+    """Offsets of the first block: (open_start, body_start, body_end, close_end).
+
+    A missing closing tag still yields a block whose body runs to the end of
+    the message.  Real providers (measured: qwen-plus) sometimes omit the close
+    or leave it inside a code fence; treating that tail as "no plan" silently
+    dropped the "Implement this plan?" gate.  The open tag is rare enough that
+    the tail cannot be mistaken for prose, and a closed block still wins.
+    """
     start = text.find(PROPOSED_PLAN_OPEN)
     if start < 0:
         return None
     body_start = start + len(PROPOSED_PLAN_OPEN)
     end = text.find(PROPOSED_PLAN_CLOSE, body_start)
     if end < 0:
-        return None
+        return start, body_start, len(text), len(text)
     return start, body_start, end, end + len(PROPOSED_PLAN_CLOSE)
 
 
 def extract_proposed_plan(text: str) -> str | None:
-    """The first complete ``<proposed_plan>`` body, stripped; ``None`` otherwise.
+    """The first ``<proposed_plan>`` body, stripped; ``None`` otherwise.
 
-    Matches Codex's stream parser: the first block wins, an unclosed block is
-    not a plan, and nothing else in the message is inspected.
+    Matches Codex's stream parser for a closed block; an unclosed one is taken
+    to the end of the message (see ``_block_span``).  A trailing code fence --
+    models often put the plan inside ```json -- is removed from the body.
     """
     span = _block_span(text or "")
     if span is None:
         return None
     _, body_start, body_end, _ = span
-    return text[body_start:body_end].strip()
+    body = text[body_start:body_end].strip()
+    if body.endswith("```"):
+        body = body[:-3].rstrip()
+    return body
 
 
 def strip_proposed_plan(text: str) -> str:

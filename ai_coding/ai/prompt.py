@@ -65,6 +65,11 @@ TOOL_GUIDANCE: dict[str, tuple[str, ...]] = {
     "glob": ("Use glob — not shell find — to discover files by path pattern.",),
     "grep": ("Use grep — not shell grep or rg — to search file contents.",),
     "write": ("Write replaces a whole file; prefer edit for a targeted change.",),
+    "update_plan": (
+        "While implementing an approved plan, keep it accurate by resending the "
+        "whole list with each step's status (pending/in_progress/completed); "
+        "mark a step completed only after its work is actually done.",
+    ),
     "subAgent": (
         "While a background sub-agent runs, keep working on independent steps; "
         "do not sleep or poll for it — its result arrives on its own.",

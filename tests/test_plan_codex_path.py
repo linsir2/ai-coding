@@ -56,7 +56,9 @@ def test_extract_proposed_plan_takes_the_first_complete_block():
 
 def test_extract_proposed_plan_missing_or_unclosed_is_none():
     assert extract_proposed_plan("no block here") is None
-    assert extract_proposed_plan("<proposed_plan>unclosed") is None
+    # C-2: a real provider (qwen-plus, measured) omitted the close; the tail is
+    # still the plan, not "no plan".
+    assert extract_proposed_plan("<proposed_plan>unclosed") == "unclosed"
     assert extract_proposed_plan("<proposed_plan></proposed_plan>") == ""
 
 
@@ -64,7 +66,7 @@ def test_strip_proposed_plan_removes_only_the_block():
     text = "intro\n<proposed_plan>body</proposed_plan>\noutro"
     assert strip_proposed_plan(text) == "intro\n\noutro"
     assert strip_proposed_plan("plain text") == "plain text"
-    assert strip_proposed_plan("<proposed_plan>unclosed") == "<proposed_plan>unclosed"
+    assert strip_proposed_plan("<proposed_plan>unclosed") == ""
 
 
 # ------------------------------------------------------- 2. stop decisions

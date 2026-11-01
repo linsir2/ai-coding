@@ -230,8 +230,10 @@ def test_the_methods_section_stays_inside_its_budget():
     """Neither harness measures this (dsh has no counter at all; opencode has no
     cap), but this repo has already paid for a 556-character schema advertising
     a tool that was not connected. The section is ~2x today; the test is the
-    tripwire that stops it becoming an order of magnitude."""
-    assert len(METHODS_SECTION) <= 900, len(METHODS_SECTION)
+    tripwire that stops it becoming an order of magnitude.  C-5b added the
+    ``update_plan`` row (progress discipline for the Codex path), so the
+    budget moved from 900 to 1100 -- one row, not a new section."""
+    assert len(METHODS_SECTION) <= 1100, len(METHODS_SECTION)
 
 
 # ---- R20/RC-6: every claim needs an citation -------------------------------

@@ -81,8 +81,9 @@ PLAN_MODE_BLOCK = (
     "<plan-mode>Plan mode: read-only research. Do not edit files or run mutating "
     "commands. Ask the user with ask_user when a decision is required. When the "
     "spec is complete, output exactly one <proposed_plan> ... </proposed_plan> "
-    "block and stop. Do not execute the plan, and do not ask \"should I "
-    "proceed\".</plan-mode>"
+    "block and stop. The closing </proposed_plan> tag is mandatory, and the plan "
+    "inside it must be plain Markdown (do not wrap it in a code fence). Do not "
+    "execute the plan, and do not ask \"should I proceed\".</plan-mode>"
 )
 
 

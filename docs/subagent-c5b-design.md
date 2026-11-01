@@ -329,3 +329,16 @@ CloseAgentTool.execute
 | 同步路径泄漏 | `run()` 拆开后无人 aclose | 5.3 的 ephemeral handle：turn 后 aclose 并丢弃 |
 | 副作用文件被当会话 | sidecar 与 session 同目录 | `agents/meta` 与 `agents/sessions` 分开 |
 | mailbox 卡在末尾 | 最后一个 iteration 边界后入队 | turn 结束复检 mailbox，合并一次 follow-up |
+
+## 13. 实施记录
+
+- 句柄与落盘：`e4f9760`（C-5b-1..4 一并提交）。
+- 真机修复（本提交）：`<proposed_plan>` 容忍缺失闭合标签（真实 qwen-plus 不回
+  `</proposed_plan>`）；`<plan-mode>` 明确"闭合标签必须写、正文不要包代码围栏"；
+  `update_plan` 增加提示词指引；评审后的首轮 interrupt / 通知门 / resume workdir 修复。
+- 脚本化：`tests/test_agent_messages.py` 19 例、`test_subagent_handles.py` 等全绿；
+  全量 `pytest` 0 failed，`ruff`/`mypy` 通过。
+- DashScope 真机（qwen-plus，`/tmp/realrun_c5b_plan.py`，日志 `/tmp/realrun-c5b.log`）：
+  真机计划模式 → `<proposed_plan>` → `plan_implement` 询问 → `"Implement the plan."`
+  → 真实 read/write 修改 `calc.py`，8/10 检查通过。`update_plan` 未被调用（模型自有
+  选择，Codex 同样不强制），因此 `task_items` 为空；这是可接受的模型行为，不是执行器失败。
