@@ -363,7 +363,7 @@ class AIConfig(BaseModel):
     search_streak_l3: int = Field(default=0, ge=0)
     #: B1: what the harness runs itself when the turn stalls in look-only mode.
     static_check: StaticCheckConfig = Field(default_factory=StaticCheckConfig)
-    max_concurrent_subagents: int = 6
+    max_concurrent_subagents: int = 4
     subagent_worktree_isolation: bool = True
     max_context_tokens: int = 0
     # R3b: demoted from "trim every turn at 50 messages" to "fallback cap used

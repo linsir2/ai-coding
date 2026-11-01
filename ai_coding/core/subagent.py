@@ -114,7 +114,7 @@ class SubAgentRunner:
         build_tools: BuildTools,
         *,
         ledger_root: str | Path | None = None,
-        max_concurrent: int = 3,
+        max_concurrent: int = 4,
         timeout_seconds: float = 600.0,
         settings: AIConfig | None = None,
         approval: Any | None = None,
@@ -327,6 +327,7 @@ class SubAgentRunner:
         origin_session: str = "",
         output_schema: dict[str, Any] | None = None,
         agent: str | None = None,
+        context_mode: str | None = None,
     ) -> str:
         """Start a child without waiting; return its run id at once.
 
@@ -361,6 +362,7 @@ class SubAgentRunner:
                 isolate=isolate, parent=parent, parent_span=parent_span,
                 observer=active, emit=emit, origin_session=origin_session,
                 output_schema=output_schema, agent=agent,
+                context_mode=context_mode,
             ),
             name=f"subagent:{run_id}",
         )
@@ -381,6 +383,33 @@ class SubAgentRunner:
             return False
         background_task.cancel()
         return True
+
+    async def wait(self, run_id: str, timeout_ms: int = 30_000) -> tuple[str, int]:
+        """Wait for one background run; never cancels it. Returns (status, elapsed_ms).
+
+        ``status`` is the table row's status (``running`` when the wait timed
+        out, ``unknown`` when the id is not in the table).  The child keeps
+        running either way: the wait is an observation, not a kill switch —
+        cancelling it is ``close_agent``'s job.
+        """
+        row = self._background.get(run_id)
+        if row is None:
+            return "unknown", 0
+        started = row.started
+        background_task = self._tasks.get(run_id)
+        if background_task is not None and not background_task.done():
+            try:
+                # Shield: ``wait_for`` cancels what it waits on when the clock
+                # runs out, and a timed-out observation must not end the child.
+                await asyncio.wait_for(
+                    asyncio.shield(background_task),
+                    timeout=max(0, int(timeout_ms)) / 1000,
+                )
+            except asyncio.TimeoutError:
+                pass
+        current = self._background.get(run_id) or row
+        elapsed_ms = int(((current.ended or time.monotonic()) - started) * 1000)
+        return current.status, max(0, elapsed_ms)
 
     def resolve_run_id(self, prefix: str) -> str | None:
         """The full run id a printed prefix stands for, or None.
@@ -429,6 +458,7 @@ class SubAgentRunner:
         origin_session: str,
         output_schema: dict[str, Any] | None = None,
         agent: str | None = None,
+        context_mode: str | None = None,
     ) -> None:
         """Run one background child to settlement, then announce it.
 
@@ -440,7 +470,8 @@ class SubAgentRunner:
                 result = await self._run_isolated(
                     task, name, parent, parent_span, observer,
                     worktree_manager, isolate, output_schema, agent,
-                    self.context_mode, False,
+                    self._resolve_context_mode(self.context_mode, context_mode),
+                    False,
                 )
         except asyncio.CancelledError:
             result = SubagentResult(

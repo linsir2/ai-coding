@@ -136,7 +136,7 @@ def build_subagent_runner(
         build_tools=build_tools,
         skills=skills,
         ledger_root=main_ws,
-        max_concurrent=int(getattr(ai_cfg, "max_concurrent_subagents", 3)),
+        max_concurrent=int(getattr(ai_cfg, "max_concurrent_subagents", 4)),
         timeout_seconds=float(getattr(ai_cfg, "subagent_timeout_seconds", 600)),
         settings=ai_cfg if isinstance(ai_cfg, AIConfig) else AIConfig(),
         # No human is present inside an isolated sub-agent to confirm WARN tier;
@@ -447,6 +447,22 @@ def _assemble_registry(
         registry.register(ParallelResearchTool(runner=runner))
         # C-3b: the model's own view of the table /tasks reads.
         registry.register(SubAgentListTool(runner=runner))
+        # C-5a: the Codex-shaped tool face over the same runner.  The three
+        # names C-5b still owes (send_message / interrupt_agent / resume_agent)
+        # are deliberately not registered: no ghost tools.
+        from ai_coding.tools.agents_tool import (
+            CloseAgentTool,
+            ListAgentsTool,
+            SpawnAgentTool,
+            WaitAgentTool,
+        )
+
+        registry.register(
+            SpawnAgentTool(runner, worktree_manager=manager, isolate=isolate)
+        )
+        registry.register(WaitAgentTool(runner))
+        registry.register(ListAgentsTool(runner))
+        registry.register(CloseAgentTool(runner))
 
     # Deferred tools: the prompt names them (one line each in tool_search's
     # answer), and their schemas ride the request only after the model asks.

@@ -718,10 +718,23 @@ for index in ...:
 
 1. `plan_orchestrator` 默认值未翻转（见上）；
 2. 前端用通用 `AskPanel` 渲染 `plan_implement`（而不是 Codex 的专用 TUI 弹窗），计划正文通过 `detail` 展示；
-3. 子代理仍是本批之前的工具面（C-5 在批次 2）。
+3. 子代理工具面在批次 2 补齐（见下）。
+
+### 批次 2（已落地）
+
+| 项 | 落点 | 状态 |
+|---|---|---|
+| `spawn_agent` | `tools/agents_tool.py`：后台启动并立刻返回 `agent_id`；`fork_turns=none`（默认，`task_only`/无父上下文）或 `all`（`full`/父消息+规则） | 完成 |
+| `wait_agent` | `SubAgentRunner.wait(run_id, timeout_ms)`：`asyncio.shield` 等待，超时/结束都不取消子任务；只返回状态行 | 完成 |
+| `list_agents` / `close_agent` | `task_list()` / `cancel(run_id)` 的薄封装 | 完成 |
+| 并发 | `AIConfig.max_concurrent_subagents=4`、builder/runner 默认 4 | 完成 |
+| 兼容 | 旧的 `subAgent`/`parallel_research`/`subagent_list` 仍注册但保持 deferred；默认表面只有 4 个 Codex 名字 | 完成 |
+
+验证：`tests/test_agents_tools.py` 17 例；全量 `pytest` 退出码 0；`ruff`/`mypy` 通过。
+C-5b 的 `send_message`/`interrupt_agent`/`resume_agent` 仍未注册（能力缺口，不造幽灵工具）。
 
 ## 15. 本轮交付
 
 - 第 1–4 节：对照与差距；第 8–13 节：复核后的权威设计、数据流、推演、复用清单。
-- 第 14 节：批次 1 的落地记录。
-- 下一步：批次 2（C-5a：`spawn_agent`/`wait_agent`/`list_agents`/`close_agent`），然后批次 3（C-5b + 删除旧执行器 + 翻转默认值）。
+- 第 14 节：批次 1、批次 2 的落地记录。
+- 下一步：批次 3（C-5b + 删除旧执行器 + 翻转 `plan_orchestrator` 默认值）。
