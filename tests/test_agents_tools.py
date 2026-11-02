@@ -16,7 +16,10 @@ from ai_coding.domain.subagent import BackgroundTask, SubAgentPoolFull
 from ai_coding.security.permissions import Effect, Rule
 from ai_coding.tools.agents_tool import (
     CloseAgentTool,
+    InterruptAgentTool,
     ListAgentsTool,
+    ResumeAgentTool,
+    SendMessageTool,
     SpawnAgentTool,
     WaitAgentTool,
 )
@@ -553,3 +556,70 @@ async def test_runner_wait_returns_the_status_once_the_task_settles():
 
     assert status == "completed"
     assert elapsed_ms >= 0
+
+
+# ---- P2-C1: the Codex-shaped tools also speak to the Scheduler ------------
+
+
+class _SchedulerProbe:
+    def __init__(self, runner) -> None:
+        self.runner = runner
+        self.spawn_calls: list[dict] = []
+        self.sent: list[tuple[str, str]] = []
+
+    async def spawn(self, request, *, parent, observer, emit):
+        self.spawn_calls.append(
+            {"request": request, "parent": parent, "observer": observer, "emit": emit}
+        )
+        return request.id, "run_000000000002"
+
+    async def send(self, target, text):
+        self.sent.append((target, text))
+        return "queued", target
+
+    def resolve_target(self, target):
+        return "ok", target, []
+
+
+@pytest.mark.asyncio
+async def test_spawn_agent_builds_a_request_and_uses_the_scheduler():
+    scheduler = _SchedulerProbe(_FakeRunner())
+    tool = SpawnAgentTool(scheduler=scheduler, worktree_manager="wt/1", isolate=False)
+
+    result = await tool.execute({"task": "do it", "fork_turns": "all"}, _ctx())
+
+    assert result.success is True
+    request = scheduler.spawn_calls[0]["request"]
+    assert request.task.context_mode == "full"
+    assert request.parent_span == "call_1"
+    assert request.origin_session == "sid"
+    assert result.data == {
+        "agent_id": "run_000000000002",
+        "status": "running",
+        "fork_turns": "all",
+    }
+    assert tool.occupies_slot is False
+
+
+@pytest.mark.asyncio
+async def test_send_message_uses_the_scheduler_facade():
+    scheduler = _SchedulerProbe(_FakeRunner())
+    tool = SendMessageTool(scheduler=scheduler)
+
+    result = await tool.execute({"target": "run_1", "message": "hello"}, _ctx())
+
+    assert result.success is True
+    assert scheduler.sent == [("run_1", "hello")]
+    assert tool.occupies_slot is False
+
+
+def test_all_orchestration_and_control_tools_declare_no_slot():
+    runner = _FakeRunner()
+    tools = _tools(runner) + [
+        SendMessageTool(runner),
+        InterruptAgentTool(runner),
+        ResumeAgentTool(runner),
+    ]
+    for tool in tools:
+        assert tool.occupies_slot is False, tool.name
+

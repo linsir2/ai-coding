@@ -1085,14 +1085,6 @@ def _handle_resume(
     return REPLAction.NEW_SESSION, loaded
 
 
-def _runner_of(loop: Any) -> Any | None:
-    """The sub-agent runner behind this loop's tool stack, if any."""
-    dispatcher = getattr(loop, "dispatcher", None)
-    registry = getattr(dispatcher, "registry", None)
-    tool = registry.get("subAgent") if registry is not None else None
-    return getattr(tool, "runner", None)
-
-
 def _print_jobs(loop: Any, console: ConsoleSink) -> None:
     """The workspace's background shell jobs, in the same table shape.
 
@@ -1144,37 +1136,41 @@ def _handle_tasks(
                 f"{f' ({job.detail})' if job.detail else ''}"
             )
             return REPLAction.CONTINUE, session
-    runner = _runner_of(loop)
-    if runner is None:
+    scheduler = getattr(loop, "scheduler", None)
+    if scheduler is None:
         _print_jobs(loop, console)
         console.info("[tasks] no sub-agent runner in this session")
         return REPLAction.CONTINUE, session
     if len(parts) >= 3 and parts[1] == "stop":
         given = parts[2]
-        # The listing prints run_id[:12]; accept what was actually copyable.
-        resolved = runner.resolve_run_id(given)
+        # The listing prints the run id prefix; accept what was copyable.
+        resolved = scheduler.resolve_run_id(given)
         if resolved is None:
-            matches = [row for row in runner.task_list() if row.run_id.startswith(given)]
+            matches = [
+                view for view in scheduler.tasks().list()
+                if (view.run_id or view.id).startswith(given)
+            ]
             if len(matches) > 1:
-                listed = ", ".join(row.run_id[:12] for row in matches)
+                listed = ", ".join((view.run_id or view.id)[:12] for view in matches)
                 console.error(f"[tasks] '{given}' is ambiguous: {listed}")
             else:
                 console.info(f"[tasks] no background task '{given}'")
             return REPLAction.CONTINUE, session
-        if runner.cancel(resolved):
+        if scheduler.stop(resolved):
             console.info(f"[tasks] stopping {resolved[:12]}")
         else:
             console.info(f"[tasks] '{given}' is not running")
         return REPLAction.CONTINUE, session
-    rows = runner.task_list()
+    rows = scheduler.tasks().list()
     if not rows:
         console.info("[tasks] no background runs")
         _print_jobs(loop, console)
         return REPLAction.CONTINUE, session
     now = time.monotonic()
-    lines = ["[tasks] background sub-agents:"]
+    lines = ["[tasks] sub-agent runs (background and this process's children):"]
     for row in rows:
-        elapsed = (row.ended if row.ended is not None else now) - row.started
+        display_id = row.run_id or row.id
+        elapsed = row.elapsed(now)
         tokens = ""
         if row.usage:
             total = int(row.usage.get("total_tokens", 0) or 0)
@@ -1186,14 +1182,14 @@ def _handle_tasks(
         details = ""
         if row.changed_paths:
             details += f" · 改动 {len(row.changed_paths)} 个文件"
-        if row.worktree_branch:
-            details += f" · 分支 {row.worktree_branch}（未合并）"
+        if row.branch:
+            details += f" · 分支 {row.branch}（未合并）"
         if row.commit_error:
             details += f" · 提交失败: {row.commit_error}"
         if row.degraded:
             details += f" · 降级: {row.degraded}"
         lines.append(
-            f"  {row.run_id[:12]} {row.name} {row.status} {elapsed:.0f}s{tokens}{details}"
+            f"  {display_id[:12]} {row.name} {row.status} {elapsed:.0f}s{tokens}{details}"
         )
     console.info("\n".join(lines))
     _print_jobs(loop, console)

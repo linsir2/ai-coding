@@ -693,6 +693,7 @@ async def test_handle_tasks_lists_background_rows_and_stops_unknown():
     """The table shows status/elapsed/tokens; stopping a missing id says so."""
     from types import SimpleNamespace
 
+    from ai_coding.core.scheduler import Scheduler
     from ai_coding.domain.subagent import BackgroundTask
     from ai_coding.tools.registry import ToolRegistry
     from ai_coding.tools.subagent_tool import SubAgentTool
@@ -713,7 +714,7 @@ async def test_handle_tasks_lists_background_rows_and_stops_unknown():
 
     registry = ToolRegistry()
     registry.register(SubAgentTool(_TableRunner()))
-    loop = SimpleNamespace(dispatcher=SimpleNamespace(registry=registry))
+    loop = SimpleNamespace(scheduler=Scheduler(_TableRunner()))
     sessions = _FakeSessions()
     dc, c = _console_capture()
 
@@ -727,9 +728,8 @@ async def test_handle_tasks_lists_background_rows_and_stops_unknown():
 async def test_handle_tasks_stop_accepts_the_printed_prefix():
     """``/tasks`` prints 12 chars; stopping by exactly those must work (the
     operator has nothing else to copy)."""
-    from ai_coding.core.subagent import BackgroundTask
-    from ai_coding.tools.registry import ToolRegistry
-    from ai_coding.tools.subagent_tool import SubAgentTool
+    from ai_coding.core.scheduler import Scheduler
+    from ai_coding.domain.subagent import BackgroundTask
 
     class _TableRunner:
         cancelled = None
@@ -746,9 +746,7 @@ async def test_handle_tasks_stop_accepts_the_printed_prefix():
             return True
 
     runner = _TableRunner()
-    registry = ToolRegistry()
-    registry.register(SubAgentTool(runner))
-    loop = SimpleNamespace(dispatcher=SimpleNamespace(registry=registry))
+    loop = SimpleNamespace(scheduler=Scheduler(runner))
     sessions = _FakeSessions()
     dc, c = _console_capture()
 
@@ -756,7 +754,7 @@ async def test_handle_tasks_stop_accepts_the_printed_prefix():
         loop, "/tasks stop abc123", sessions.items[0], sessions, dc
     )
     assert action is REPLAction.CONTINUE
-    assert runner.cancelled == "abc123"  # the prefix itself resolves to the row
+    assert runner.cancelled == "abc123def4567890"
     assert "stopping abc123" in _session_text(c)
 
     action, _ = await handle_input(loop, "/tasks stop nope", sessions.items[0],

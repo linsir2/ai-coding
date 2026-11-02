@@ -135,6 +135,7 @@ def _runner(
     write_coordinator=None,
     notices=None,
     notice_store=None,
+    slots=None,
 ) -> SubAgentRunner:
     seen = seen_tools if seen_tools is not None else []
 
@@ -154,6 +155,7 @@ def _runner(
         write_coordinator=write_coordinator,
         notices=notices,
         notice_store=notice_store,
+        slots=slots,
     )
 
 
@@ -820,3 +822,128 @@ async def test_a_finished_run_records_overlap_in_the_packet_and_ledger(tmp_path)
     assert payload["conflicts"] == [
         {"key": "other-run", "origin_session": "s1", "paths": ["a.py"]}
     ]
+
+
+# ---- P2-C1: the runner is one consumer of the shared pool ------------------
+
+
+def _slot_runner(engine: _Engine, slots, *, registry: ToolRegistry | None = None):
+    """A runner whose child stack shares the same ``slots`` pool."""
+    base = registry or _registry()
+    base.execution_slots = slots
+    return _runner(engine, registry=base, slots=slots)
+
+
+@pytest.mark.asyncio
+async def test_slots_one_parent_and_child_do_not_deadlock(tmp_path):
+    """The parent's tool-group slot is the child's slot; the child stack must
+    see ``slot_held`` and run its own tools without asking again."""
+    from ai_coding.core.execution_slots import ExecutionSlotPool
+    from ai_coding.core.scheduler import Scheduler
+    from ai_coding.domain.orchestration import TaskRequest
+
+    slots = ExecutionSlotPool(1)
+    tool = _Tool("read", ToolResult(success=True, output="ok"))
+    engine = _Engine(
+        [
+            StepResult(
+                tool_calls=[ToolCallRef(id="c1", name="read", arguments="{}")],
+                finish_reason="tool_calls",
+            ),
+            StepResult(text="done", finish_reason="stop"),
+        ]
+    )
+    runner = _slot_runner(engine, slots, registry=_registry(tool))
+    scheduler = Scheduler(runner)
+    request = TaskRequest.for_child(SubagentTask.from_objective("t"))
+
+    result = await asyncio.wait_for(
+        scheduler.run(request, parent=None, observer=None, emit=lambda _e: None),
+        timeout=5,
+    )
+
+    assert result.status == "completed"
+    assert tool.calls == [{}]
+    assert slots.active == 0
+
+
+@pytest.mark.asyncio
+async def test_a_scheduler_run_releases_the_slot_on_a_cancelled_turn():
+    from ai_coding.core.execution_slots import ExecutionSlotPool
+    from ai_coding.core.scheduler import Scheduler
+    from ai_coding.domain.orchestration import TaskRequest
+
+    slots = ExecutionSlotPool(1)
+    runner = _runner(_Engine(hang=True), max_concurrent=1)
+    runner._slots = slots
+    scheduler = Scheduler(runner)
+    request = TaskRequest.for_child(SubagentTask.from_objective("t"))
+
+    task = asyncio.create_task(
+        scheduler.run(request, parent=None, observer=None, emit=None)
+    )
+    for _ in range(200):
+        if slots.active:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert slots.active == 0
+
+
+@pytest.mark.asyncio
+async def test_a_spawn_start_failure_does_not_leak_the_reserved_slot(monkeypatch):
+    from ai_coding.core.execution_slots import ExecutionSlotPool
+    from ai_coding.core.scheduler import Scheduler
+    from ai_coding.domain.orchestration import TaskRequest
+
+    slots = ExecutionSlotPool(1)
+    runner = _runner(_Engine(), max_concurrent=1)
+    runner._slots = slots
+    scheduler = Scheduler(runner)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("cannot open")
+
+    monkeypatch.setattr(runner, "_open_handle", _boom)
+    request = TaskRequest.for_child(SubagentTask.from_objective("t"))
+    with pytest.raises(RuntimeError, match="failed to start"):
+        await scheduler.spawn(request, parent=None, observer=None, emit=None)
+    assert slots.active == 0
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_interrupt_releases_the_slot():
+    from ai_coding.core.execution_slots import ExecutionSlotPool
+
+    slots = ExecutionSlotPool(1)
+    runner = _runner(_HangAfterFirst(), max_concurrent=1)
+    runner._slots = slots
+    run_id = runner.spawn_background("first", name="probe", emit=lambda _e: None)
+    for _ in range(200):
+        row = next((item for item in runner.task_list() if item.run_id == run_id), None)
+        if row is not None and row.status != "running":
+            break
+        await asyncio.sleep(0.02)
+
+    assert slots.active == 0
+    status, _ = await runner.send_message(run_id, "second")
+    assert status == "running"
+    assert slots.active == 1
+    await runner.interrupt(run_id)
+    assert slots.active == 0
+
+
+@pytest.mark.asyncio
+async def test_close_and_reap_release_the_same_slot():
+    from ai_coding.core.execution_slots import ExecutionSlotPool
+
+    slots = ExecutionSlotPool(1)
+    runner = _runner(_Engine(hang=True), max_concurrent=1)
+    runner._slots = slots
+    run_id = runner.spawn_background("one", name="probe", emit=lambda _e: None)
+    assert slots.active == 1
+    await runner.close(run_id)
+    assert slots.active == 0
+

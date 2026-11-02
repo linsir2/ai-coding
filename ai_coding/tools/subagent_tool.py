@@ -13,7 +13,9 @@ import time
 from typing import Any
 
 from ai_coding.core.observers import EmitObserver
+from ai_coding.core.scheduler import Scheduler
 from ai_coding.domain.message import ToolResult
+from ai_coding.domain.orchestration import TaskRequest
 from ai_coding.domain.subagent import (
     SUCCESS_STATUSES,
     ParentContext,
@@ -161,6 +163,9 @@ class SubAgentTool(BaseTool):
     # P1b: a ``readonly=true`` call starts a child that cannot write, so the
     # read-only surface keeps this tool and the gate judges each call.
     readonly_capable = True
+    #: P2-C1: delegation hands work to the scheduler; the child run owns its
+    #: slot, so this group must not hold one while it waits.
+    occupies_slot = False
 
     def mutates_world_for(self, params: dict[str, Any] | None) -> bool:
         # Strict: only a literal ``true`` is a read-only child; anything else
@@ -177,12 +182,23 @@ class SubAgentTool(BaseTool):
 
     def __init__(
         self,
-        runner: Any,
+        runner: Any = None,
         worktree_manager: Any = None,
         isolate: bool = True,
+        *,
+        scheduler: Scheduler | None = None,
     ) -> None:
-        self._runner = runner
-        self._worktree_manager = worktree_manager
+        # C1: the tool speaks to the facade.  The positional argument stays
+        # ``runner`` for pre-C1 callers, but a Scheduler passed there is
+        # recognized so both call shapes work.
+        if scheduler is None and isinstance(runner, Scheduler):
+            scheduler, runner = runner, None
+        self._scheduler = (
+            scheduler
+            if scheduler is not None
+            else (Scheduler(runner, worktree_manager=worktree_manager)
+                  if runner is not None else None)
+        )
         self._isolate = isolate
 
     @property
@@ -192,7 +208,7 @@ class SubAgentTool(BaseTool):
     @property
     def max_duration_seconds(self) -> float | None:
         """Per-call ceiling for the dispatcher (R2a)."""
-        timeout = getattr(self._runner, "timeout_seconds", None)
+        timeout = getattr(self.runner, "timeout_seconds", None)
         if timeout is None:
             return None
         return float(timeout) + _TIMEOUT_GRACE
@@ -201,7 +217,7 @@ class SubAgentTool(BaseTool):
     def description(self) -> str:
         # R7e-4: say which window the child gets.  In task_only mode the model is
         # the only one who can hand the facts over, so the description asks for it.
-        if getattr(self._runner, "context_mode", "full") == "task_only":
+        if getattr(self.runner, "context_mode", "full") == "task_only":
             window = (
                 "starts with a CLEAN context: it cannot see this conversation, so put "
                 "every fact, path and decision it needs into 'task'"
@@ -344,7 +360,7 @@ class SubAgentTool(BaseTool):
             )
 
         if params.get("background"):
-            return self._spawn_background(
+            return await self._spawn_background(
                 task, name, context, parent, schema, agent, readonly
             )
         # P2-A: the tool speaks one shape to the runner.  The packet is the
@@ -358,20 +374,28 @@ class SubAgentTool(BaseTool):
             isolate=self._isolate,
             output_schema=schema,
         )
+        request = TaskRequest.for_child(
+            packet,
+            name=name,
+            origin_session=context.session_id,
+            parent_span=context.call_id,
+        )
+        if self._scheduler is None:
+            return ToolResult(
+                success=False,
+                output="sub-agent failed: no scheduler configured",
+                error="subagent_error",
+            )
         try:
-            result = await self._runner.run(
-                packet,
-                name,
-                worktree_manager=self._worktree_manager,
+            result = await self._scheduler.run(
+                request,
                 parent=parent,
-                # R4a: the trace hangs the child's spans under this call.
-                parent_span=context.call_id,
                 # R0-3: fan the child's events into the parent stream through
                 # the context emit.  The runner wraps this in a ScopedObserver,
                 # so the parent trace finally sees child spans (previously the
                 # slot was never filled: zero scoped events over 23 runs).
                 observer=EmitObserver(context.emit),
-                origin_session=context.session_id,
+                emit=context.emit,
             )
         except Exception as exc:  # noqa: BLE001 — tool boundary
             return ToolResult(
@@ -381,7 +405,7 @@ class SubAgentTool(BaseTool):
             )
         return _to_tool_result(result, name)
 
-    def _spawn_background(
+    async def _spawn_background(
         self, task: str, name: str, context: ToolContext, parent: ParentContext | None,
         schema: dict[str, Any] | None = None,
         agent: str | None = None,
@@ -403,16 +427,24 @@ class SubAgentTool(BaseTool):
             isolate=self._isolate,
             output_schema=schema,
         )
+        request = TaskRequest.for_child(
+            packet,
+            name=name,
+            origin_session=context.session_id,
+            parent_span=context.call_id,
+        )
+        if self._scheduler is None:
+            return ToolResult(
+                success=False,
+                output="sub-agent not started: no scheduler configured",
+                error="subagent_error",
+            )
         try:
-            run_id = self._runner.spawn_background(
-                packet,
-                name,
-                worktree_manager=self._worktree_manager,
+            _request_id, run_id = await self._scheduler.spawn(
+                request,
                 parent=parent,
-                parent_span=context.call_id,
                 observer=EmitObserver(context.emit),
                 emit=context.emit,
-                origin_session=context.session_id,
             )
         except RuntimeError as exc:
             return ToolResult(
@@ -432,8 +464,8 @@ class SubAgentTool(BaseTool):
 
     @property
     def runner(self) -> Any:
-        """The runner behind this tool (``/tasks`` reads its table)."""
-        return self._runner
+        """The runner behind the scheduler (old readers only)."""
+        return getattr(self._scheduler, "runner", None)
 
 
 #: C-3b: how many settled rows a listing shows before it collapses the rest
@@ -448,9 +480,21 @@ class SubAgentListTool(BaseTool):
     #: Reading a status board changes nothing.
     parallel_safe = True
     mutates_world = False
+    occupies_slot = False
 
-    def __init__(self, runner: Any) -> None:
-        self._runner = runner
+    def __init__(
+        self,
+        runner: Any = None,
+        *,
+        scheduler: Scheduler | None = None,
+    ) -> None:
+        if scheduler is None and isinstance(runner, Scheduler):
+            scheduler, runner = runner, None
+        self._scheduler = (
+            scheduler
+            if scheduler is not None
+            else (Scheduler(runner) if runner is not None else None)
+        )
 
     @property
     def name(self) -> str:
@@ -475,7 +519,9 @@ class SubAgentListTool(BaseTool):
     async def execute(
         self, params: dict[str, Any], ctx: ToolContext | None = None
     ) -> ToolResult:
-        rows = self._runner.task_list()
+        rows = (
+            self._scheduler.tasks().list() if self._scheduler is not None else []
+        )
         if not rows:
             return ToolResult(success=True, output="no background sub-agent run")
 
@@ -489,8 +535,9 @@ class SubAgentListTool(BaseTool):
 
         lines: list[str] = []
         for row in shown:
-            elapsed = (row.ended if row.ended is not None else now) - row.started
-            line = f"{row.run_id[:12]} {row.name} {row.status} {elapsed:.0f}s"
+            display_id = row.run_id or row.id
+            elapsed = row.elapsed(now)
+            line = f"{display_id[:12]} {row.name} {row.status} {elapsed:.0f}s"
             if row.usage:
                 total = int(row.usage.get("total_tokens", 0) or 0)
                 if not total:
@@ -503,8 +550,8 @@ class SubAgentListTool(BaseTool):
                 line += f" · {row.error}"
             if row.changed_paths:
                 line += f" · 改动 {len(row.changed_paths)} 个文件"
-            if row.worktree_branch:
-                line += f" · 分支 {row.worktree_branch}（未合并）"
+            if row.branch:
+                line += f" · 分支 {row.branch}（未合并）"
             if row.commit_error:
                 line += f" · 提交失败: {row.commit_error}"
             if row.degraded:
@@ -521,7 +568,7 @@ class SubAgentListTool(BaseTool):
             data={
                 "runs": [
                     {
-                        "id": row.run_id,
+                        "id": row.run_id or row.id,
                         "name": row.name,
                         "status": row.status,
                         "ledger_path": row.ledger_path,

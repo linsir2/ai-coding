@@ -108,7 +108,8 @@ def test_subagent_runner_wires_ledger_root_and_limits(tmp_path):
     runner = build_subagent_runner(cfg, str(tmp_path), None)
     assert runner._ledger_root == tmp_path.resolve()
     assert runner._timeout == 45.0
-    assert runner._semaphore._value == 2  # asyncio.Semaphore exposes its count
+    assert runner.slots.max_slots == 2
+    assert runner.max_concurrent == 2
 
 
 def test_r9_the_dependency_gate_is_on_by_default_and_configurable(tmp_path):
@@ -174,7 +175,7 @@ def test_parent_and_child_registries_share_one_write_coordinator(tmp_path):
     """P2-B1: every writer — the parent and every child stack — must serialize
     against the same table, or two sub-agents could write the same file."""
     parent = build_tool_registry(_cfg(str(tmp_path)), str(tmp_path), None)
-    runner = parent.get("subAgent")._runner
+    runner = parent.scheduler.runner
     child = runner._build_tools(None)
 
     assert parent.write_coordinator is not None
@@ -188,7 +189,7 @@ def test_an_injected_write_coordinator_is_used_by_both_stacks(tmp_path):
     parent = build_tool_registry(
         _cfg(str(tmp_path)), str(tmp_path), None, write_coordinator=coordinator
     )
-    child = parent.get("subAgent")._runner._build_tools(None)
+    child = parent.scheduler.runner._build_tools(None)
 
     assert parent.write_coordinator is coordinator
     assert child.write_coordinator is coordinator
@@ -215,3 +216,49 @@ def test_goal_tools_are_main_stack_only(tmp_path):
     )
     sub_names = set(sub.list_names())
     assert "start_goal" not in sub_names and "update_goal" not in sub_names
+
+
+# ---- P2-C1: one pool and one scheduler shared by the whole stack -----------
+
+
+def test_parent_and_child_stacks_share_one_slot_pool_and_scheduler(tmp_path):
+    parent = build_tool_registry(_cfg(str(tmp_path)), str(tmp_path), None)
+    runner = parent.scheduler.runner
+    child = runner._build_tools(None)
+
+    assert parent.execution_slots is runner.slots
+    assert child.execution_slots is parent.execution_slots
+    assert child.scheduler is parent.scheduler
+    # The child keeps the same capacity but no orchestration tools.
+    assert child.scheduler.runner is runner
+    assert "subAgent" not in child.list_names()
+    assert "spawn_agent" not in child.list_names()
+
+
+def test_max_execution_slots_overrides_the_subagent_fallback(tmp_path):
+    cfg = SimpleNamespace(
+        tools=_cfg(str(tmp_path)).tools,
+        ai=SimpleNamespace(
+            subagent_worktree_isolation=True,
+            max_concurrent_subagents=3,
+            max_execution_slots=2,
+            subagent_timeout_seconds=45,
+        ),
+    )
+    parent = build_tool_registry(cfg, str(tmp_path), None)
+    assert parent.execution_slots.max_slots == 2
+    assert parent.scheduler.runner.max_concurrent == 2
+
+
+def test_an_unset_max_execution_slots_falls_back_to_the_subagent_limit(tmp_path):
+    cfg = SimpleNamespace(
+        tools=_cfg(str(tmp_path)).tools,
+        ai=SimpleNamespace(
+            subagent_worktree_isolation=True,
+            max_concurrent_subagents=3,
+            max_execution_slots=0,
+        ),
+    )
+    parent = build_tool_registry(cfg, str(tmp_path), None)
+    assert parent.execution_slots.max_slots == 3
+

@@ -21,7 +21,9 @@ import time
 from typing import Any
 
 from ai_coding.core.observers import EmitObserver
+from ai_coding.core.scheduler import Scheduler
 from ai_coding.domain.message import ToolResult
+from ai_coding.domain.orchestration import TaskRequest
 from ai_coding.domain.subagent import ParentContext, SubAgentPoolFull, SubagentTask
 from ai_coding.tools.base import (
     BaseTool,
@@ -62,6 +64,8 @@ class SpawnAgentTool(BaseTool):
     #: P1b: ``readonly=true`` starts a child that cannot write, so the
     #: read-only surface keeps the tool and the gate judges each call.
     readonly_capable = True
+    #: P2-C1: spawning hands work to the scheduler; the child owns its slot.
+    occupies_slot = False
 
     def mutates_world_for(self, params: dict[str, Any] | None) -> bool:
         # Strict: only a literal ``true`` is a read-only child; anything else
@@ -78,12 +82,20 @@ class SpawnAgentTool(BaseTool):
 
     def __init__(
         self,
-        runner: Any,
+        runner: Any = None,
         worktree_manager: Any = None,
         isolate: bool = True,
+        *,
+        scheduler: Scheduler | None = None,
     ) -> None:
-        self._runner = runner
-        self._worktree_manager = worktree_manager
+        if scheduler is None and isinstance(runner, Scheduler):
+            scheduler, runner = runner, None
+        self._scheduler = (
+            scheduler
+            if scheduler is not None
+            else (Scheduler(runner, worktree_manager=worktree_manager)
+                  if runner is not None else None)
+        )
         self._isolate = isolate
 
     @property
@@ -217,15 +229,19 @@ class SpawnAgentTool(BaseTool):
                 readonly=readonly,
                 isolate=self._isolate,
             )
-            run_id = self._runner.spawn_background(
+            if self._scheduler is None:
+                raise RuntimeError("no scheduler configured")
+            request = TaskRequest.for_child(
                 packet,
-                name,
-                worktree_manager=self._worktree_manager,
-                parent=parent,
+                name=name,
+                origin_session=context.session_id,
                 parent_span=context.call_id,
+            )
+            _request_id, run_id = await self._scheduler.spawn(
+                request,
+                parent=parent,
                 observer=EmitObserver(context.emit),
                 emit=context.emit,
-                origin_session=context.session_id,
             )
         except SubAgentPoolFull as exc:
             return ToolResult(
@@ -254,9 +270,21 @@ class WaitAgentTool(BaseTool):
     #: Observes a table row; the wait itself changes nothing.
     parallel_safe = False
     mutates_world = False
+    occupies_slot = False
 
-    def __init__(self, runner: Any) -> None:
-        self._runner = runner
+    def __init__(
+        self,
+        runner: Any = None,
+        *,
+        scheduler: Scheduler | None = None,
+    ) -> None:
+        if scheduler is None and isinstance(runner, Scheduler):
+            scheduler, runner = runner, None
+        self._scheduler = (
+            scheduler
+            if scheduler is not None
+            else (Scheduler(runner) if runner is not None else None)
+        )
 
     @property
     def name(self) -> str:
@@ -306,8 +334,13 @@ class WaitAgentTool(BaseTool):
                 error="missing_agent_id",
             )
         timeout_ms = _clamp_timeout(params.get("timeout_ms"))
-        resolved = _resolve_agent_id(self._runner, agent_id)
-        status, elapsed_ms = await self._runner.wait(resolved, timeout_ms)
+        if self._scheduler is None:
+            return ToolResult(
+                success=False, output="error: no scheduler configured",
+                error="unknown_agent", data={"agent_id": agent_id},
+            )
+        resolved = _resolve_agent_id(self._scheduler, agent_id)
+        status, elapsed_ms = await self._scheduler.wait(resolved, timeout_ms)
         output = f"agent {resolved}: {status} ({elapsed_ms} ms)"
         data = {"agent_id": resolved, "status": status, "elapsed_ms": elapsed_ms}
         if status == "unknown":
@@ -323,9 +356,21 @@ class ListAgentsTool(BaseTool):
     #: Reading the table has no side effects; sibling calls may all read it.
     parallel_safe = True
     mutates_world = False
+    occupies_slot = False
 
-    def __init__(self, runner: Any) -> None:
-        self._runner = runner
+    def __init__(
+        self,
+        runner: Any = None,
+        *,
+        scheduler: Scheduler | None = None,
+    ) -> None:
+        if scheduler is None and isinstance(runner, Scheduler):
+            scheduler, runner = runner, None
+        self._scheduler = (
+            scheduler
+            if scheduler is not None
+            else (Scheduler(runner) if runner is not None else None)
+        )
 
     @property
     def name(self) -> str:
@@ -349,7 +394,9 @@ class ListAgentsTool(BaseTool):
         params: dict[str, Any],
         ctx: ToolContext | None = None,
     ) -> ToolResult:
-        rows = self._runner.task_list()
+        rows = (
+            self._scheduler.tasks().list() if self._scheduler is not None else []
+        )
         if not rows:
             return ToolResult(
                 success=True,
@@ -359,12 +406,13 @@ class ListAgentsTool(BaseTool):
         now = time.monotonic()
         lines = []
         for row in rows:
-            elapsed = (row.ended if row.ended is not None else now) - row.started
-            line = f"- {row.run_id} {row.name} [{row.status}] {elapsed:.0f}s"
+            display_id = row.run_id or row.id
+            elapsed = row.elapsed(now)
+            line = f"- {display_id} {row.name} [{row.status}] {elapsed:.0f}s"
             if row.changed_paths:
                 line += f" · 改动 {len(row.changed_paths)} 个文件"
-            if row.worktree_branch:
-                line += f" · 分支 {row.worktree_branch}（未合并）"
+            if row.branch:
+                line += f" · 分支 {row.branch}（未合并）"
             if row.commit_error:
                 line += f" · 提交失败: {row.commit_error}"
             if row.degraded:
@@ -383,9 +431,21 @@ class CloseAgentTool(BaseTool):
     #: Cancelling a run changes the world (its work stops here).
     parallel_safe = False
     mutates_world = True
+    occupies_slot = False
 
-    def __init__(self, runner: Any) -> None:
-        self._runner = runner
+    def __init__(
+        self,
+        runner: Any = None,
+        *,
+        scheduler: Scheduler | None = None,
+    ) -> None:
+        if scheduler is None and isinstance(runner, Scheduler):
+            scheduler, runner = runner, None
+        self._scheduler = (
+            scheduler
+            if scheduler is not None
+            else (Scheduler(runner) if runner is not None else None)
+        )
 
     @property
     def name(self) -> str:
@@ -429,26 +489,27 @@ class CloseAgentTool(BaseTool):
                 output="error: 'agent_id' is required",
                 error="missing_agent_id",
             )
-        resolved = _resolve_agent_id(self._runner, agent_id)
-        ambiguous = _ambiguous_result(self._runner, agent_id)
+        if self._scheduler is None:
+            return ToolResult(
+                success=False, output="unknown agent: no scheduler configured",
+                error="unknown_agent", data={"agent_id": agent_id, "closed": False},
+            )
+        resolved = _resolve_agent_id(self._scheduler, agent_id)
+        ambiguous = _ambiguous_result(self._scheduler, agent_id)
         if ambiguous is not None:
             return ambiguous
-        rows = {
-            row.run_id: row for row in getattr(self._runner, "task_list", lambda: [])()
-        }
-        # C-5b-1 handles-first: a handle outlives its projection row, so an id
-        # with a handle is addressable even when the row was pruned.
-        handles = getattr(self._runner, "_handles", {})
-        if resolved not in rows and resolved not in handles:
+        # C1: the registry replaces the runner's private table/handle probe.
+        view = self._scheduler.tasks().get(agent_id)
+        kind = self._scheduler.resolve_target(agent_id)[0]
+        if view is None and resolved == agent_id and kind == "unknown":
             return ToolResult(
                 success=False,
                 output=f"unknown agent: {agent_id}",
                 error="unknown_agent",
                 data={"agent_id": resolved, "closed": False},
             )
-        closed = bool(await self._runner.close(resolved))
-        info_reader = getattr(self._runner, "close_info", None)
-        info = info_reader(resolved) if callable(info_reader) else {}
+        closed = bool(await self._scheduler.close(resolved))
+        info = self._scheduler.close_info(resolved)
         commit = info.get("commit")
         commit_error = info.get("commitError")
         output = f"closed {resolved}" if closed else f"not running: {resolved}"
@@ -468,9 +529,21 @@ class SendMessageTool(BaseTool):
     #: Sending can start a writable child's turn; the plan/readonly gate hides it.
     parallel_safe = False
     mutates_world = True
+    occupies_slot = False
 
-    def __init__(self, runner: Any) -> None:
-        self._runner = runner
+    def __init__(
+        self,
+        runner: Any = None,
+        *,
+        scheduler: Scheduler | None = None,
+    ) -> None:
+        if scheduler is None and isinstance(runner, Scheduler):
+            scheduler, runner = runner, None
+        self._scheduler = (
+            scheduler
+            if scheduler is not None
+            else (Scheduler(runner) if runner is not None else None)
+        )
 
     @property
     def name(self) -> str:
@@ -527,12 +600,17 @@ class SendMessageTool(BaseTool):
                 ),
                 error="invalid_message",
             )
-        resolved = _resolve_agent_id(self._runner, target)
-        ambiguous = _ambiguous_result(self._runner, target)
+        if self._scheduler is None:
+            return ToolResult(
+                success=False, output="message not sent: no scheduler configured",
+                error="unknown_agent", data={"target": target, "status": "unknown"},
+            )
+        resolved = _resolve_agent_id(self._scheduler, target)
+        ambiguous = _ambiguous_result(self._scheduler, target)
         if ambiguous is not None:
             return ambiguous
         try:
-            status, run_id = await self._runner.send_message(resolved, message)
+            status, run_id = await self._scheduler.send(resolved, message)
         except SubAgentPoolFull as exc:
             return ToolResult(
                 success=False, output=f"message not sent: {exc}",
@@ -557,9 +635,21 @@ class InterruptAgentTool(BaseTool):
     #: Cutting a running turn changes the world (its work stops here).
     parallel_safe = False
     mutates_world = True
+    occupies_slot = False
 
-    def __init__(self, runner: Any) -> None:
-        self._runner = runner
+    def __init__(
+        self,
+        runner: Any = None,
+        *,
+        scheduler: Scheduler | None = None,
+    ) -> None:
+        if scheduler is None and isinstance(runner, Scheduler):
+            scheduler, runner = runner, None
+        self._scheduler = (
+            scheduler
+            if scheduler is not None
+            else (Scheduler(runner) if runner is not None else None)
+        )
 
     @property
     def name(self) -> str:
@@ -602,11 +692,16 @@ class InterruptAgentTool(BaseTool):
                 success=False, output="error: 'target' is required",
                 error="missing_target",
             )
-        resolved = _resolve_agent_id(self._runner, target)
-        ambiguous = _ambiguous_result(self._runner, target)
+        if self._scheduler is None:
+            return ToolResult(
+                success=False, output="error: no scheduler configured",
+                error="unknown_agent", data={"target": target},
+            )
+        resolved = _resolve_agent_id(self._scheduler, target)
+        ambiguous = _ambiguous_result(self._scheduler, target)
         if ambiguous is not None:
             return ambiguous
-        previous, status = await self._runner.interrupt(resolved)
+        previous, status = await self._scheduler.interrupt(resolved)
         previous_display = previous or "none"
         return ToolResult(
             success=True,
@@ -625,9 +720,21 @@ class ResumeAgentTool(BaseTool):
     #: Resuming rebuilds a writable child's loop; the gate must be able to hide it.
     parallel_safe = False
     mutates_world = True
+    occupies_slot = False
 
-    def __init__(self, runner: Any) -> None:
-        self._runner = runner
+    def __init__(
+        self,
+        runner: Any = None,
+        *,
+        scheduler: Scheduler | None = None,
+    ) -> None:
+        if scheduler is None and isinstance(runner, Scheduler):
+            scheduler, runner = runner, None
+        self._scheduler = (
+            scheduler
+            if scheduler is not None
+            else (Scheduler(runner) if runner is not None else None)
+        )
 
     @property
     def name(self) -> str:
@@ -669,11 +776,16 @@ class ResumeAgentTool(BaseTool):
                 success=False, output="error: 'agent_id' is required",
                 error="missing_agent_id",
             )
-        resolved = _resolve_agent_id(self._runner, agent_id)
-        ambiguous = _ambiguous_result(self._runner, agent_id)
+        if self._scheduler is None:
+            return ToolResult(
+                success=False, output="agent not found: no scheduler configured",
+                error="not_found", data={"agent_id": agent_id, "status": "not_found"},
+            )
+        resolved = _resolve_agent_id(self._scheduler, agent_id)
+        ambiguous = _ambiguous_result(self._scheduler, agent_id)
         if ambiguous is not None:
             return ambiguous
-        status, run_id = await self._runner.resume(resolved)
+        status, run_id = await self._scheduler.resume(resolved)
         name = run_id or resolved
         data = {"agent_id": name, "status": status}
         if status == "not_found":

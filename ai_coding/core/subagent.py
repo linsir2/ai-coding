@@ -34,6 +34,12 @@ from ai_coding.ai.prompt import PromptAssembler
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.events import BackgroundTaskDone
+from ai_coding.core.execution_slots import (
+    ExecutionSlotPool,
+    Slot,
+    enter_child,
+    holding_slot,
+)
 from ai_coding.core.guard import build_guards
 from ai_coding.core.notice_store import NoticeStore, clip_notice
 from ai_coding.core.observers import ScopedObserver
@@ -219,6 +225,10 @@ class SubAgentRunner:
         #: workspace (``.ai-coding/notices``); a caller may pass a store rooted
         #: elsewhere (tests), never disable the lane.
         notice_store: NoticeStore | None = None,
+        #: P2-C1: the one execution pool shared by tool groups, sync runs,
+        #: background runs and follow-up turns.  ``None`` builds one sized by
+        #: ``max_concurrent`` so a bare/test runner keeps its old bound.
+        slots: ExecutionSlotPool | None = None,
     ) -> None:
         self._app_config = app_config
         self._skills = skills
@@ -260,13 +270,15 @@ class SubAgentRunner:
             if notice_store is not None
             else NoticeStore.for_workspace(workspace)
         )
-        self._max_concurrent_n = max(1, int(max_concurrent))
-        self._semaphore = asyncio.Semaphore(self._max_concurrent_n)
-        # P2-B2: one admission set for sync, background and follow-up runs.
-        # The semaphore remains the execution bound; this set makes "accepted <=
-        # max" true even while a run is between admission and its first step.
-        self._active: set[str] = set()
-        self._slot_freed = asyncio.Event()
+        self._slots = (
+            slots
+            if slots is not None
+            else ExecutionSlotPool(max(1, int(max_concurrent)))
+        )
+        self._slot_by_key: dict[str, Slot] = {}
+        #: The scheduler this runner belongs to (set by the builder).  Child
+        #: stacks attach it so their loops expose the same facade.
+        self.scheduler: Any = None
         # R1-2: background runs tracked across turns: run id -> row, plus the
         # live asyncio tasks (strong refs so they survive the spawning turn),
         # plus the announce context (emit/origin/name) keyed the same way.
@@ -306,7 +318,17 @@ class SubAgentRunner:
     @property
     def max_concurrent(self) -> int:
         """How many children may run at once (B0: a fan-out's wall clock needs it)."""
-        return self._max_concurrent_n
+        return self._slots.max_slots
+
+    @property
+    def slots(self) -> ExecutionSlotPool:
+        """The one pool this runner shares with tool groups and the scheduler."""
+        return self._slots
+
+    @property
+    def _active(self) -> set[str]:
+        """A read-only view of the keyed slots (kept for old diagnostics)."""
+        return self._slots.active_keys
 
     async def run(
         self,
@@ -370,19 +392,21 @@ class SubAgentRunner:
             output_schema=output_schema,
         )
         mode = self._resolve_context_mode(self.context_mode, requested_mode)
-        # P2-B2: a synchronous run queues for a slot (it is the caller's whole
-        # turn, so refusing it would be worse than waiting).
-        slot = f"sync:{uuid.uuid4().hex}"
-        await self._admit(slot)
+        # P2-C1: a top-level sync run queues for one pool slot.  A scheduler
+        # caller already owns a slot and sets ``slot_held``; asking again would
+        # deadlock at ``slots=1``, so the nested path only marks the child.
+        key = f"sync:{uuid.uuid4().hex}"
+        if not holding_slot():
+            await self._admit(key)
         try:
-            async with self._semaphore:
+            with enter_child():
                 return await self._run_isolated(
                     text, name, parent, parent_span, active,
                     worktree_manager, isolate, output_schema, agent, mode, readonly,
                     request=request, origin_session=origin_session,
                 )
         finally:
-            self._release_slot(slot)
+            self._release_slot(key)
 
     @staticmethod
     def _split_task(
@@ -538,6 +562,7 @@ class SubAgentRunner:
         agent: str | None = None,
         context_mode: str | None = None,
         readonly: bool = False,
+        slot: Slot | None = None,
     ) -> str:
         """Start a child without waiting; return its run id at once.
 
@@ -576,10 +601,15 @@ class SubAgentRunner:
             output_schema=output_schema,
         )
         run_id = uuid.uuid4().hex[:12]
-        if not self.try_admit(run_id):
+        if slot is not None:
+            # The scheduler already reserved the pool entry; this run owns it
+            # now, so every terminal path releases the same lease.
+            slot.bind(run_id)
+            self._slot_by_key[run_id] = slot
+        elif not self.try_admit(run_id):
             raise SubAgentPoolFull(
                 "sub-agent concurrency exhausted: "
-                f"{self._max_concurrent()} background slots busy; "
+                f"{self._slots.max_slots} background slots busy; "
                 "retry later or raise ai.max_concurrent_subagents"
             )
         active = self._observer if observer is None else observer
@@ -734,7 +764,7 @@ class SubAgentRunner:
         if not self.try_admit(handle.run_id):
             raise SubAgentPoolFull(
                 "sub-agent concurrency exhausted: "
-                f"{self._max_concurrent()} background slots busy; "
+                f"{self._slots.max_slots} background slots busy; "
                 "retry later or raise ai.max_concurrent_subagents"
             )
         handle.status = "running"
@@ -779,7 +809,8 @@ class SubAgentRunner:
         """
         interrupted = False
         try:
-            async with self._semaphore:
+            # P2-C1: ``_schedule_turn`` reserved this turn's slot.
+            with enter_child():
                 if handle.loop is None:
                     await self._attach_loop(
                         handle, handle.worktree_path or handle.workdir
@@ -1147,35 +1178,24 @@ class SubAgentRunner:
         """Background rows, oldest first (running and settled alike)."""
         return sorted(self._background.values(), key=lambda row: row.started)
 
-    def _max_concurrent(self) -> int:
-        return self._max_concurrent_n
-
     async def _admit(self, key: str) -> None:
         """Wait for one slot, then take ``key`` (sync runs queue, never refuse)."""
-        while True:
-            if len(self._active) < self._max_concurrent_n:
-                self._active.add(key)
-                return
-            self._slot_freed.clear()
-            # Re-check after clearing: a release between the check and the clear
-            # would otherwise be lost and the waiter would hang for good.
-            if len(self._active) < self._max_concurrent_n:
-                self._active.add(key)
-                return
-            await self._slot_freed.wait()
+        slot = await self._slots.acquire(key, key=key)
+        self._slot_by_key[key] = slot
 
     def try_admit(self, key: str) -> bool:
         """Take a slot without waiting; ``False`` means the pool is full."""
-        if len(self._active) >= self._max_concurrent_n:
+        slot = self._slots.try_reserve(key, key=key)
+        if slot is None:
             return False
-        self._active.add(key)
+        self._slot_by_key[key] = slot
         return True
 
     def _release_slot(self, key: str) -> None:
         """Surrender ``key``'s slot; idempotent across every terminal path."""
-        if key in self._active:
-            self._active.discard(key)
-            self._slot_freed.set()
+        slot = self._slot_by_key.pop(key, None)
+        if slot is not None:
+            slot.release()
 
     def _prune_background(self) -> None:
         """Bound the table: oldest terminal rows go first, running never.
@@ -1213,7 +1233,9 @@ class SubAgentRunner:
         isolate = self._should_isolate(isolate, handle.readonly)
         degraded: str | None = None
         try:
-            async with self._semaphore:
+            # P2-C1: the spawn reserved this run's pool slot; the child's own
+            # tool groups inherit ``slot_held`` and never ask for another.
+            with enter_child():
                 degraded = await self._attach_for_run(handle, worktree_manager, isolate)
                 result = await self._run_turn(handle, text)
         except asyncio.CancelledError:

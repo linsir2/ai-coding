@@ -220,6 +220,11 @@ class BaseTool(ABC):
     #: this -- a tool table pruned by a permission rule -- is M1a's job; this
     #: is the one hard case this batch needed.
     plan_only: bool = False
+    #: P2-C1: does this call's tool group consume one execution slot?  Ordinary
+    #: work tools do; orchestration/control tools (subAgent, spawn_agent,
+    #: parallel_research, send/interrupt/resume/close/wait/list) hand work to
+    #: the scheduler and must not hold a group slot while a child runs.
+    occupies_slot: bool = True
     #: Deferred tools are named in the prompt but their full schema is not
     #: carried until the model asks for it (``tool_search``).  The schema is
     #: paid on every step, so a tool used once per session should not cost its

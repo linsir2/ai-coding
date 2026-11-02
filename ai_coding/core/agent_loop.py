@@ -350,6 +350,9 @@ class AgentLoop:
         self.engine = engine
         self.sessions = sessions
         self.tools = tools
+        # P2-C1: the one scheduling facade the tool stack was built with.
+        # Commands read it (``/tasks``); a stack without one keeps ``None``.
+        self.scheduler = getattr(tools, "scheduler", None)
         self.prompt = prompt
         self.catalog_builder = catalog_builder
         self.context = context
@@ -516,6 +519,10 @@ class AgentLoop:
             # P2-B1: the builder hangs one coordinator on the registry so the
             # main stack and every sub-agent stack share one write table.
             write_coordinator=getattr(tools, "write_coordinator", None),
+            # P2-C1: one pool for tool groups, child runs and fan-out.  A
+            # stack built outside the builder (tests, simple callers) has
+            # none and keeps the pre-C1 semaphore path.
+            slots=getattr(tools, "execution_slots", None),
         )
         # R5: everything this turn says about itself (events, ledger, degradation)
         # lives in one unit, so the loop body only has to choreograph.

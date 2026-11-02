@@ -399,3 +399,57 @@ async def test_render_names_the_overlapping_run_and_paths():
     text = _render(result, "probe")
 
     assert "⚠ 与 run-abcdef12 改动重叠: a.py,b.py（未合并）" in text
+
+
+# ---- P2-C1: the tool speaks to a Scheduler, not the runner directly --------
+
+
+class _SchedulerProbe:
+    def __init__(self, runner) -> None:
+        self.runner = runner
+        self.run_calls: list[dict] = []
+        self.spawn_calls: list[dict] = []
+
+    async def run(self, request, *, parent, observer, emit):
+        self.run_calls.append(
+            {"request": request, "parent": parent, "observer": observer, "emit": emit}
+        )
+        return SubagentResult(status="completed", conclusion="done")
+
+    async def spawn(self, request, *, parent, observer, emit):
+        self.spawn_calls.append(
+            {"request": request, "parent": parent, "observer": observer, "emit": emit}
+        )
+        return request.id, "run_000000000001"
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_runs_through_the_scheduler():
+    runner = _FakeRunner()
+    scheduler = _SchedulerProbe(runner)
+    tool = SubAgentTool(scheduler=scheduler, worktree_manager="wt/1", isolate=False)
+
+    result = await tool.execute({"task": "analyze", "name": "probe"}, _ctx())
+
+    assert result.success is True
+    call = scheduler.run_calls[0]
+    assert call["request"].task.readonly is False
+    assert call["request"].name == "probe"
+    assert call["request"].parent_span == ""
+    assert call["parent"] is not None
+    assert call["observer"] is not None
+    assert tool.runner is runner
+    assert tool.occupies_slot is False
+
+
+@pytest.mark.asyncio
+async def test_subagent_tool_spawns_through_the_scheduler():
+    scheduler = _SchedulerProbe(_FakeRunner())
+    tool = SubAgentTool(scheduler=scheduler)
+
+    result = await tool.execute({"task": "do it", "background": True}, _ctx())
+
+    assert result.success is True
+    assert result.data["run_id"] == "run_000000000001"
+    assert scheduler.spawn_calls[0]["request"].name == "sub-agent"
+

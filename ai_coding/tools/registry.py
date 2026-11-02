@@ -21,6 +21,10 @@ class ToolRegistry:
         #: it here so the loop can find it without importing ``core`` and every
         #: sub-agent stack can reuse the parent's instance.
         self.write_coordinator: Any = None
+        #: P2-C1: one execution pool and one scheduling facade for the stack.
+        #: ``None`` keeps the pre-C1 dispatcher path (tests, ad-hoc stacks).
+        self.execution_slots: Any = None
+        self.scheduler: Any = None
 
     def register(self, tool: BaseTool) -> None:
         """Register a tool. Raises ``ValueError`` if the name is already taken."""

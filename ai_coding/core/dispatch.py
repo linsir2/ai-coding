@@ -39,6 +39,7 @@ from ai_coding.core.events import (
     ToolStarted,
     preview,
 )
+from ai_coding.core.execution_slots import ExecutionSlotPool, holding_slot
 from ai_coding.core.guard import GuardChain, GuardVerdict, TurnView
 from ai_coding.core.hooks import HookDecision, HookPoint
 from ai_coding.domain.agents import PLAN_DIR
@@ -211,6 +212,7 @@ class ToolDispatcher:
         approval_timeout: float | None = None,
         cancel: asyncio.Event | None = None,
         write_coordinator: Any | None = None,
+        slots: ExecutionSlotPool | None = None,
     ) -> None:
         self.registry = registry
         self.gate = gate
@@ -231,6 +233,10 @@ class ToolDispatcher:
         # P2-B1: the process-wide write table.  ``None`` keeps the pre-P2-B
         # behaviour (direct tool calls and stacks built outside the loop).
         self.write_coordinator = write_coordinator
+        # P2-C1: the one execution pool shared with child runs and fan-out.
+        # ``None`` keeps the old per-group ``asyncio.Semaphore`` path so
+        # simple callers and tests stay valid.
+        self.slots = slots
 
     # ---- public API -------------------------------------------------------
 
@@ -283,21 +289,15 @@ class ToolDispatcher:
                 )
                 continue
             if len(group) == 1:
-                outcome = await self._handle(
+                outcome = await self._run_single(
                     group[0], ctx, deadline, view, allow_replay=allow_replay
                 )
                 outcomes.append(outcome)
                 halted = outcome.halted
                 continue
-            semaphore = asyncio.Semaphore(self.max_parallel)
-
-            async def run(item: _Prepared, gate: asyncio.Semaphore) -> DispatchOutcome:
-                async with gate:
-                    return await self._handle(
-                        item, ctx, deadline, view, allow_replay=allow_replay
-                    )
-
-            ran = list(await asyncio.gather(*(run(item, semaphore) for item in group)))
+            ran = await self._run_group(
+                group, ctx, deadline, view, allow_replay=allow_replay
+            )
             outcomes.extend(ran)
             # A group is ALLOW-tier and parallel-safe by construction, and the
             # stop verdict only exists on the WARN approval path -- nothing in
@@ -305,6 +305,69 @@ class ToolDispatcher:
             # that ever changes: the group drains, then the rest is skipped.
             halted = any(outcome.halted for outcome in ran)
         return outcomes
+
+    async def _run_single(
+        self,
+        item: _Prepared,
+        ctx: ToolContext,
+        deadline: Deadline | None,
+        view: TurnView | None,
+        *,
+        allow_replay: bool,
+    ) -> DispatchOutcome:
+        """One call: still its own group, so a normal call takes one slot."""
+        if (
+            self.slots is None
+            or not self._occupies_slot(item)
+            or holding_slot()
+        ):
+            return await self._handle(
+                item, ctx, deadline, view, allow_replay=allow_replay
+            )
+        slot = await self.slots.acquire("tool-group")
+        try:
+            return await self._handle(
+                item, ctx, deadline, view, allow_replay=allow_replay
+            )
+        finally:
+            slot.release()
+
+    async def _run_group(
+        self,
+        group: list[_Prepared],
+        ctx: ToolContext,
+        deadline: Deadline | None,
+        view: TurnView | None,
+        *,
+        allow_replay: bool,
+    ) -> list[DispatchOutcome]:
+        """One concurrent group: a normal group takes one pool slot; an
+        orchestration group takes none (the scheduler owns each child's slot)."""
+        slot = None
+        if (
+            self.slots is not None
+            and self._occupies_slot(group[0])
+            and not holding_slot()
+        ):
+            slot = await self.slots.acquire("tool-group")
+        cap = self.slots.max_slots if self.slots is not None else self.max_parallel
+        gate = asyncio.Semaphore(cap)
+
+        async def run(item: _Prepared) -> DispatchOutcome:
+            async with gate:
+                return await self._handle(
+                    item, ctx, deadline, view, allow_replay=allow_replay
+                )
+
+        try:
+            return list(await asyncio.gather(*(run(item) for item in group)))
+        finally:
+            if slot is not None:
+                slot.release()
+
+    @staticmethod
+    def _occupies_slot(item: _Prepared) -> bool:
+        return bool(getattr(item.tool, "occupies_slot", True))
 
     # ---- preparation ------------------------------------------------------
 
@@ -401,17 +464,20 @@ class ToolDispatcher:
         """
         groups: list[list[_Prepared]] = []
         last_concurrent = False
+        last_occupies = True
         for item in prepared:
             concurrent = (
                 item.tool is not None
                 and item.tool.parallel_safe
                 and _verdict(item.decision) is PermissionDecision.ALLOW
             )
-            if concurrent and last_concurrent:
+            occupies = self._occupies_slot(item)
+            if concurrent and last_concurrent and occupies == last_occupies:
                 groups[-1].append(item)
             else:
                 groups.append([item])
             last_concurrent = concurrent
+            last_occupies = occupies
         return groups
 
     # ---- one call ---------------------------------------------------------

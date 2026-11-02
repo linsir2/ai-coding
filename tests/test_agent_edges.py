@@ -10,6 +10,7 @@ import pytest
 
 from ai_coding.ai.engine import ChatEngine
 from ai_coding.config.models import AIConfig
+from ai_coding.core.execution_slots import ExecutionSlotPool
 from ai_coding.core.subagent import SubAgentRunner
 from ai_coding.domain.loop import StepResult
 from ai_coding.domain.subagent import SubAgentPoolFull
@@ -100,8 +101,7 @@ async def test_resume_of_a_running_agent_is_a_noop(tmp_path):
 @pytest.mark.asyncio
 async def test_a_full_pool_rejects_a_second_child(tmp_path):
     runner = _runner(tmp_path)
-    runner._max_concurrent_n = 1
-    runner._semaphore = asyncio.Semaphore(1)
+    runner._slots = ExecutionSlotPool(1)
     first = runner.spawn_background("one", name="one", emit=lambda _e: None)
     for _ in range(100):
         if runner._handles.get(first):

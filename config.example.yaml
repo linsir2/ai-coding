@@ -77,6 +77,9 @@ ai:
     timeout_seconds: 20.0
     max_chars: 2000
   max_concurrent_subagents: 3
+  # P2-C1: one cap for concurrent tool groups, child runs and fan-out children.
+  # 0 means "not configured": it falls back to max_concurrent_subagents.
+  max_execution_slots: 0
   subagent_worktree_isolation: true
   max_context_tokens: 48000
   max_messages: 50

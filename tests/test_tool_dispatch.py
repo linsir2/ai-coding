@@ -39,9 +39,11 @@ class _FakeTool(BaseTool):
         result: ToolResult | None = None,
         raiser: Exception | None = None,
         on_execute=None,
+        occupies_slot: bool = True,
     ) -> None:
         self._name = name
         self.parallel_safe = parallel_safe
+        self.occupies_slot = occupies_slot
         self._result = result or ToolResult(success=True, output="ok")
         self._raiser = raiser
         self._on_execute = on_execute
@@ -129,7 +131,8 @@ def _ctx() -> ToolContext:
 
 
 def _dispatcher(
-    tools, *, approval=None, max_parallel=4, observer=None, write_coordinator=None
+    tools, *, approval=None, max_parallel=4, observer=None, write_coordinator=None,
+    slots=None,
 ):
     registry = ToolRegistry()
     for tool in tools:
@@ -141,6 +144,7 @@ def _dispatcher(
         max_parallel=max_parallel,
         observer=observer,
         write_coordinator=write_coordinator,
+        slots=slots,
     )
 
 
@@ -1148,3 +1152,150 @@ async def test_a_refusal_speaks_chinese_but_keeps_its_code():
         assert result.error == expected_code
         assert expected_text in result.output
         assert result.output.isascii() is False  # no English boilerplate left
+
+
+# ---- P2-C1: tool groups consume the one execution pool ---------------------
+
+
+class _SlotProbe:
+    """Records the pool's active count at each execution."""
+
+    def __init__(self, slots) -> None:
+        self.slots = slots
+        self.levels: list[int] = []
+
+    async def see(self) -> None:
+        self.levels.append(self.slots.active)
+
+
+@pytest.mark.asyncio
+async def test_a_normal_group_takes_one_slot_and_returns_it():
+    from ai_coding.core.execution_slots import ExecutionSlotPool
+
+    pool = ExecutionSlotPool(2)
+    probe = _SlotProbe(pool)
+    a = _FakeTool("read", parallel_safe=True, on_execute=lambda _p: probe.see())
+    b = _FakeTool("glob", parallel_safe=True, on_execute=lambda _p: probe.see())
+
+    outcomes = await _dispatcher([a, b], slots=pool).dispatch_batch(
+        [_ref("c1", "read"), _ref("c2", "glob")], _ctx()
+    )
+
+    assert [outcome.result.success for outcome in outcomes] == [True, True]
+    assert probe.levels == [1, 1], "one group holds exactly one slot"
+    assert pool.active == 0, "the group releases it when it drains"
+
+
+@pytest.mark.asyncio
+async def test_an_orchestration_group_does_not_take_a_slot():
+    from ai_coding.core.execution_slots import ExecutionSlotPool
+
+    pool = ExecutionSlotPool(2)
+    probe = _SlotProbe(pool)
+    a = _FakeTool(
+        "read", parallel_safe=True, occupies_slot=False,
+        on_execute=lambda _p: probe.see(),
+    )
+    b = _FakeTool(
+        "glob", parallel_safe=True, occupies_slot=False,
+        on_execute=lambda _p: probe.see(),
+    )
+
+    await _dispatcher([a, b], slots=pool).dispatch_batch(
+        [_ref("c1", "read"), _ref("c2", "glob")], _ctx()
+    )
+
+    assert probe.levels == [0, 0]
+    assert pool.active == 0
+
+
+@pytest.mark.asyncio
+async def test_groups_split_when_occupancy_differs_and_keep_result_order():
+    from ai_coding.core.execution_slots import ExecutionSlotPool
+
+    pool = ExecutionSlotPool(2)
+    probe = _SlotProbe(pool)
+    read = _FakeTool("read", parallel_safe=True, on_execute=lambda _p: probe.see())
+    orchestration = _FakeTool(
+        "list_agents", parallel_safe=True, occupies_slot=False,
+        on_execute=lambda _p: probe.see(),
+    )
+    glob = _FakeTool("glob", parallel_safe=True, on_execute=lambda _p: probe.see())
+
+    outcomes = await _dispatcher([read, orchestration, glob], slots=pool).dispatch_batch(
+        [_ref("c1", "read"), _ref("c2", "list_agents"), _ref("c3", "glob")], _ctx()
+    )
+
+    assert [outcome.call.id for outcome in outcomes] == ["c1", "c2", "c3"]
+    assert probe.levels == [1, 0, 1]
+
+
+@pytest.mark.asyncio
+async def test_a_child_that_already_holds_a_slot_does_not_ask_again():
+    from ai_coding.core.execution_slots import ExecutionSlotPool, enter_child
+
+    pool = ExecutionSlotPool(1)
+    probe = _SlotProbe(pool)
+    parent_slot = pool.try_reserve("child")
+    assert parent_slot is not None
+    a = _FakeTool("read", parallel_safe=True, on_execute=lambda _p: probe.see())
+    b = _FakeTool("glob", parallel_safe=True, on_execute=lambda _p: probe.see())
+
+    with enter_child():
+        await _dispatcher([a, b], slots=pool).dispatch_batch(
+            [_ref("c1", "read"), _ref("c2", "glob")], _ctx()
+        )
+
+    assert probe.levels == [1, 1]
+    assert pool.active == 1
+    parent_slot.release()
+
+
+@pytest.mark.asyncio
+async def test_single_orchestration_call_takes_no_slot():
+    from ai_coding.core.execution_slots import ExecutionSlotPool
+
+    pool = ExecutionSlotPool(1)
+    probe = _SlotProbe(pool)
+    tool = _FakeTool(
+        "subAgent", occupies_slot=False, on_execute=lambda _p: probe.see()
+    )
+
+    await _dispatcher([tool], slots=pool).dispatch_batch(
+        [_ref("c1", "subAgent")], _ctx()
+    )
+
+    assert probe.levels == [0]
+    assert pool.active == 0
+
+
+@pytest.mark.asyncio
+async def test_single_normal_call_takes_a_slot():
+    from ai_coding.core.execution_slots import ExecutionSlotPool
+
+    pool = ExecutionSlotPool(1)
+    probe = _SlotProbe(pool)
+    tool = _FakeTool("read", on_execute=lambda _p: probe.see())
+
+    await _dispatcher([tool], slots=pool).dispatch_batch([_ref("c1", "read")], _ctx())
+
+    assert probe.levels == [1]
+    assert pool.active == 0
+
+
+@pytest.mark.asyncio
+async def test_without_a_pool_the_old_semaphore_still_bounds_a_group():
+    """Callers that never received a pool keep the pre-P2-C1 behaviour."""
+    probe = _ConcurrencyProbe()
+    names = ["read", "glob", "grep"]
+    tools = [
+        _FakeTool(name, parallel_safe=True, on_execute=probe.enter)
+        for name in names
+    ]
+    outcomes = await _dispatcher(tools, max_parallel=1).dispatch_batch(
+        [_ref(f"c{i}", name) for i, name in enumerate(names)], _ctx()
+    )
+
+    assert probe.peak == 1
+    assert all(outcome.result.success for outcome in outcomes)
+

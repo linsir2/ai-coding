@@ -372,6 +372,11 @@ class AIConfig(BaseModel):
     #: B1: what the harness runs itself when the turn stalls in look-only mode.
     static_check: StaticCheckConfig = Field(default_factory=StaticCheckConfig)
     max_concurrent_subagents: int = 4
+    #: P2-C1: one cap for tool groups, child runs and fan-out children.  ``0``
+    #: means "not configured" and falls back to ``max_concurrent_subagents``;
+    #: a positive value is the authoritative limit.  The old per-axis caps stay
+    #: in place until C4 turns them into compatibility aliases.
+    max_execution_slots: int = 0
     subagent_worktree_isolation: bool = True
     max_context_tokens: int = 0
     # R3b: demoted from "trim every turn at 50 messages" to "fallback cap used
@@ -534,6 +539,13 @@ class AIConfig(BaseModel):
     #: turns, a background task reviews the conversation delta and optionally
     #: creates a new skill in the skills directory.
     skill_review_interval: int = 10
+
+    @property
+    def execution_slot_limit(self) -> int:
+        """The one execution cap: explicit ``max_execution_slots`` or fallback."""
+        if self.max_execution_slots > 0:
+            return self.max_execution_slots
+        return max(1, int(self.max_concurrent_subagents or 4))
 
 
 class TracingConfig(BaseModel):

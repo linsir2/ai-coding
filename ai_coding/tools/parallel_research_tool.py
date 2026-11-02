@@ -26,6 +26,7 @@ from ai_coding.core.research_fanout import (
     render_report,
     total_usage,
 )
+from ai_coding.core.scheduler import Scheduler
 from ai_coding.domain.message import ToolResult
 from ai_coding.domain.subagent import (
     CONTEXT_MAX,
@@ -50,10 +51,23 @@ class ParallelResearchTool(BaseTool):
     #: is the only concurrency bound (this tool adds none).
     parallel_safe = True
     mutates_world = False
+    #: P2-C1: each fan-out child owns a slot; this group owns none.
+    occupies_slot = False
 
-    def __init__(self, runner: Any) -> None:
-        self._runner = runner
-        self._fanout = ResearchFanOut(runner)
+    def __init__(
+        self, runner: Any = None, *, scheduler: Scheduler | None = None
+    ) -> None:
+        if scheduler is None and isinstance(runner, Scheduler):
+            scheduler, runner = runner, None
+        self._scheduler = (
+            scheduler
+            if scheduler is not None
+            else (
+                Scheduler(runner, fanout=ResearchFanOut(runner))
+                if runner is not None
+                else None
+            )
+        )
 
     @property
     def name(self) -> str:
@@ -69,10 +83,16 @@ class ParallelResearchTool(BaseTool):
         still inside its own budget, throwing away answers about to arrive; the
         children's own deadlines cannot help once the *tool* is cancelled.
         """
-        timeout = getattr(self._runner, "timeout_seconds", None)
+        timeout = getattr(
+            getattr(self._scheduler, "runner", None), "timeout_seconds", None
+        )
         if timeout is None:
             return None
-        slots = max(1, int(getattr(self._runner, "max_concurrent", 1) or 1))
+        slots = max(
+            1,
+            int(getattr(getattr(self._scheduler, "runner", None),
+                      "max_concurrent", 1) or 1),
+        )
         lanes = -(-_MAX_QUESTIONS // slots)
         return float(lanes) * (float(timeout) + CHILD_TIMEOUT_GRACE)
 
@@ -150,7 +170,14 @@ class ParallelResearchTool(BaseTool):
                 permissions=tuple(context.permissions),
             )
         shared = str(params.get("context", "") or "").strip()
-        packets = await self._fanout.run(
+        if self._scheduler is None:
+            return ToolResult(
+                success=False,
+                output="error: no scheduler configured",
+                error="all_children_failed",
+                data={"questions": 0},
+            )
+        packets = await self._scheduler.fanout(
             questions,
             shared_context=shared,
             parent=parent,

@@ -11,6 +11,8 @@ Two answers and one refusal:
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from rich.console import Console
 
@@ -163,3 +165,84 @@ async def test_switching_mid_turn_queues_and_says_so(tmp_path):
         "reason": "/agents plan",
     }
     assert "排队" in rich.export_text()
+
+
+# ---- P2-C1: /tasks reads the shared TaskRegistry ---------------------------
+
+
+class _TaskLoop:
+    """The loop slice /tasks needs: a scheduler and no jobs table."""
+
+    def __init__(self, scheduler) -> None:
+        self.scheduler = scheduler
+
+    @property
+    def turn_running(self) -> bool:
+        return False
+
+
+class _SchedulerStub:
+    def __init__(self, views, *, stop_result=True) -> None:
+        self.views = list(views)
+        self.stop_result = stop_result
+        self.stopped: list[str] = []
+
+    def tasks(self):
+        return self
+
+    def list(self):
+        return list(self.views)
+
+    def resolve_run_id(self, prefix):
+        matches = [
+            view.run_id or view.id
+            for view in self.views
+            if (view.run_id or view.id).startswith(prefix)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def stop(self, target):
+        self.stopped.append(target)
+        return self.stop_result
+
+
+@pytest.mark.asyncio
+async def test_tasks_lists_the_registry_rows(tmp_path):
+    from ai_coding.core.task_registry import TaskView
+
+    view = TaskView(
+        id="req-1",
+        run_id="run_000000000001",
+        name="probe",
+        kind="child",
+        status="completed",
+        started=time.monotonic() - 2,
+        ended=time.monotonic(),
+        usage={"total_tokens": 42},
+        changed_paths=("a.py",),
+        branch="ai_sub_probe",
+    )
+    loop, session = _TaskLoop(_SchedulerStub([view])), _session()
+    rich, console = _console()
+
+    await handle_input(loop, "/tasks", session, _sessions(tmp_path), console)
+
+    text = rich.export_text()
+    assert "run_00000000" in text
+    assert "probe" in text
+
+    await handle_input(
+        loop, "/tasks stop run_000000", session, _sessions(tmp_path), console
+    )
+    assert loop.scheduler.stopped == ["run_000000000001"]
+
+
+@pytest.mark.asyncio
+async def test_tasks_without_a_scheduler_says_so(tmp_path):
+    loop, session = _Loop(), _session()
+    rich, console = _console()
+
+    await handle_input(loop, "/tasks", session, _sessions(tmp_path), console)
+
+    assert "no sub-agent runner" in rich.export_text()
+

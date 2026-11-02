@@ -64,6 +64,18 @@ def expand_root_patterns(
     return tuple(roots)
 
 
+def _execution_slot_limit(app_cfg: Any) -> int:
+    """The one pool size: explicit ``max_execution_slots`` else subagent cap."""
+    ai_cfg = getattr(app_cfg, "ai", None)
+    limit = getattr(ai_cfg, "execution_slot_limit", None)
+    if isinstance(limit, int) and limit > 0:
+        return limit
+    explicit = int(getattr(ai_cfg, "max_execution_slots", 0) or 0)
+    if explicit > 0:
+        return explicit
+    return max(1, int(getattr(ai_cfg, "max_concurrent_subagents", 4) or 4))
+
+
 def build_subagent_runner(
     app_cfg: Any,
     workspace: str,
@@ -78,6 +90,7 @@ def build_subagent_runner(
     sandbox_roots: Any = (),
     current_key: list[str] | None = None,
     write_coordinator: Any = None,
+    slots: Any = None,
 ) -> Any:
     """Build a :class:`SubAgentRunner` bound to the given workspace.
 
@@ -110,12 +123,19 @@ def build_subagent_runner(
         from ai_coding.core.write_coordinator import WriteCoordinator
 
         write_coordinator = WriteCoordinator(main_ws)
+    # P2-C1: one pool for the parent, every child stack and the scheduler.  A
+    # caller that supplied one keeps it (the main builder does).
+    if slots is None:
+        from ai_coding.core.execution_slots import ExecutionSlotPool
+
+        slots = ExecutionSlotPool(_execution_slot_limit(app_cfg))
+    runner_ref: list[Any] = []
 
     def build_tools(workdir: str | None) -> Any:
         roots = tuple(sandbox_roots)
         if workdir:
             roots = (Path(workdir).expanduser().resolve(),)
-        return build_tool_registry(
+        registry = build_tool_registry(
             app_cfg,
             workdir or main_ws,
             skills,
@@ -125,6 +145,12 @@ def build_subagent_runner(
             sandbox_roots=roots,
             write_coordinator=write_coordinator,
         )
+        # The child's own loop must see the same capacity and facade without
+        # gaining any orchestration tool (include_subagent=False stays).
+        registry.execution_slots = slots
+        if runner_ref:
+            registry.scheduler = runner_ref[0].scheduler
+        return registry
 
     def engine_factory() -> Any:
         if current_key is None:
@@ -139,7 +165,7 @@ def build_subagent_runner(
     ai_cfg = getattr(app_cfg, "ai", None)
     from ai_coding.core.project_instructions import ProjectInstructionsLoader
 
-    return SubAgentRunner(
+    runner = SubAgentRunner(
         app_cfg,
         engine_factory=engine_factory,
         build_tools=build_tools,
@@ -165,7 +191,11 @@ def build_subagent_runner(
         # claim against, so a finished child's paths can be compared with the
         # runs the dispatcher already saw.
         write_coordinator=write_coordinator,
+        # P2-C1: one capacity for the whole stack; a child run occupies it.
+        slots=slots,
     )
+    runner_ref.append(runner)
+    return runner
 
 
 def build_tool_registry(
@@ -437,6 +467,12 @@ def _assemble_registry(
         # roots are deliberately NOT passed down: the runner binds them to the
         # child's worktree, so a delegated write cannot land in the parent's
         # tree (or outside the child's worktree).
+        from ai_coding.core.execution_slots import ExecutionSlotPool
+        from ai_coding.core.research_fanout import ResearchFanOut
+        from ai_coding.core.scheduler import Scheduler
+        from ai_coding.core.task_registry import TaskRegistry
+
+        slots = ExecutionSlotPool(_execution_slot_limit(app_cfg))
         runner = build_subagent_runner(
             app_cfg,
             workspace,
@@ -449,11 +485,28 @@ def _assemble_registry(
             current_key=current_key,
             # P2-B1: every child stack claims against the parent's table.
             write_coordinator=write_coordinator,
+            # P2-C1: one capacity for tool groups, children and fan-out.
+            slots=slots,
         )
         manager = WorktreeManager(workspace)
+        # P2-C1: build the executor and fan-out first, then the one facade
+        # over them.  The registry is read-only bookkeeping, not a table.
+        fanout = ResearchFanOut(runner)
+        task_registry = TaskRegistry(runner)
+        scheduler = Scheduler(
+            runner,
+            fanout=fanout,
+            worktree_manager=manager,
+            slots=slots,
+            registry=task_registry,
+        )
+        runner.scheduler = scheduler
+        registry.execution_slots = slots
+        registry.scheduler = scheduler
+
         isolate = bool(getattr(app_cfg.ai, "subagent_worktree_isolation", True))
         registry.register(
-            SubAgentTool(runner=runner, worktree_manager=manager, isolate=isolate)
+            SubAgentTool(scheduler=scheduler, worktree_manager=manager, isolate=isolate)
         )
         # B0: the main session's read-only fan-out shares the runner above.  A
         # sub-agent stack (``include_subagent=False``) never gets it, so fan-out
@@ -461,12 +514,12 @@ def _assemble_registry(
         # they must read the live working tree, not a HEAD snapshot.
         from ai_coding.tools.parallel_research_tool import ParallelResearchTool
 
-        registry.register(ParallelResearchTool(runner=runner))
+        registry.register(ParallelResearchTool(scheduler=scheduler))
         # C-3b: the model's own view of the table /tasks reads.
-        registry.register(SubAgentListTool(runner=runner))
+        registry.register(SubAgentListTool(scheduler=scheduler))
         # C-5a / C-5b: the Codex-shaped tool face over the same runner.  The
         # C-5b trio is registered here too: all seven names share one runner,
-        # one semaphore and one permission (``subAgent``).
+        # one pool and one permission (``subAgent``).
         from ai_coding.tools.agents_tool import (
             CloseAgentTool,
             InterruptAgentTool,
@@ -478,14 +531,14 @@ def _assemble_registry(
         )
 
         registry.register(
-            SpawnAgentTool(runner, worktree_manager=manager, isolate=isolate)
+            SpawnAgentTool(scheduler=scheduler, worktree_manager=manager, isolate=isolate)
         )
-        registry.register(WaitAgentTool(runner))
-        registry.register(ListAgentsTool(runner))
-        registry.register(CloseAgentTool(runner))
-        registry.register(SendMessageTool(runner))
-        registry.register(InterruptAgentTool(runner))
-        registry.register(ResumeAgentTool(runner))
+        registry.register(WaitAgentTool(scheduler=scheduler))
+        registry.register(ListAgentsTool(scheduler=scheduler))
+        registry.register(CloseAgentTool(scheduler=scheduler))
+        registry.register(SendMessageTool(scheduler=scheduler))
+        registry.register(InterruptAgentTool(scheduler=scheduler))
+        registry.register(ResumeAgentTool(scheduler=scheduler))
 
     # Deferred tools: the prompt names them (one line each in tool_search's
     # answer), and their schemas ride the request only after the model asks.
