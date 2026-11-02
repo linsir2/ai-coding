@@ -50,13 +50,25 @@ def test_completed_packet_is_not_truncated():
 
 def test_ledger_file_keeps_the_new_fields(tmp_path):
     import json
+    from dataclasses import replace
     from pathlib import Path
 
-    from ai_coding.core.subagent import _with_ledger  # noqa: SLF001
+    from ai_coding.core.subagent import _write_ledger  # noqa: SLF001
+    from ai_coding.domain.subagent import AgentPacket, PacketHeader
 
     result = _result(status="timeout", truncated=True, exit_reason="outer_timeout",
                      usage={"prompt_tokens": 1})
-    ledged = _with_ledger(result, Path(str(tmp_path)))
+    # The turn boundary owns the message id; this helper is the only writer.
+    path = _write_ledger(
+        AgentPacket(
+            header=PacketHeader(message_id="ledger-test"),
+            task=None,
+            result=result,
+        ),
+        Path(str(tmp_path)),
+    )
+    assert path is not None
+    ledged = replace(result, ledger_path=path)
     assert ledged.truncated is True
     assert ledged.exit_reason == "outer_timeout"
     assert ledged.usage == {"prompt_tokens": 1}

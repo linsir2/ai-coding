@@ -22,7 +22,7 @@ from typing import Any
 
 from ai_coding.core.observers import EmitObserver
 from ai_coding.domain.message import ToolResult
-from ai_coding.domain.subagent import ParentContext, SubAgentPoolFull
+from ai_coding.domain.subagent import ParentContext, SubAgentPoolFull, SubagentTask
 from ai_coding.tools.base import (
     BaseTool,
     ToolContext,
@@ -202,19 +202,22 @@ class SpawnAgentTool(BaseTool):
             )
 
         try:
-            run_id = self._runner.spawn_background(
+            packet = SubagentTask.from_objective(
                 task,
+                context_mode=context_mode,
+                agent=agent,
+                readonly=readonly,
+                isolate=self._isolate,
+            )
+            run_id = self._runner.spawn_background(
+                packet,
                 name,
                 worktree_manager=self._worktree_manager,
-                isolate=self._isolate,
                 parent=parent,
                 parent_span=context.call_id,
                 observer=EmitObserver(context.emit),
                 emit=context.emit,
                 origin_session=context.session_id,
-                context_mode=context_mode,
-                agent=agent,
-                readonly=readonly,
             )
         except SubAgentPoolFull as exc:
             return ToolResult(
@@ -346,11 +349,19 @@ class ListAgentsTool(BaseTool):
                 data={"agents": []},
             )
         now = time.monotonic()
-        lines = [
-            f"- {row.run_id} {row.name} [{row.status}] "
-            f"{(row.ended if row.ended is not None else now) - row.started:.0f}s"
-            for row in rows
-        ]
+        lines = []
+        for row in rows:
+            elapsed = (row.ended if row.ended is not None else now) - row.started
+            line = f"- {row.run_id} {row.name} [{row.status}] {elapsed:.0f}s"
+            if row.changed_paths:
+                line += f" · 改动 {len(row.changed_paths)} 个文件"
+            if row.worktree_branch:
+                line += f" · 分支 {row.worktree_branch}（未合并）"
+            if row.commit_error:
+                line += f" · 提交失败: {row.commit_error}"
+            if row.degraded:
+                line += f" · 降级: {row.degraded}"
+            lines.append(line)
         return ToolResult(
             success=True,
             output="\n".join(lines),
@@ -428,11 +439,19 @@ class CloseAgentTool(BaseTool):
                 data={"agent_id": resolved, "closed": False},
             )
         closed = bool(await self._runner.close(resolved))
-        return ToolResult(
-            success=True,
-            output=f"closed {resolved}" if closed else f"not running: {resolved}",
-            data={"agent_id": resolved, "closed": closed},
-        )
+        info_reader = getattr(self._runner, "close_info", None)
+        info = info_reader(resolved) if callable(info_reader) else {}
+        commit = info.get("commit")
+        commit_error = info.get("commitError")
+        output = f"closed {resolved}" if closed else f"not running: {resolved}"
+        data: dict[str, Any] = {"agent_id": resolved, "closed": closed}
+        if commit:
+            output += f" · 提交 {commit[:7]}"
+            data["commit"] = commit
+        elif commit_error:
+            output += f" · 提交失败: {commit_error}"
+            data["commit_error"] = commit_error
+        return ToolResult(success=True, output=output, data=data)
 
 
 class SendMessageTool(BaseTool):

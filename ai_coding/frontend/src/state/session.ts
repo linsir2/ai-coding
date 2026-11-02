@@ -432,6 +432,19 @@ const notices: Record<string, (data: Record<string, unknown>) => string> = {
     if (origin) line += ` · 会话 ${origin.slice(0, 12)}`
     const summary = str(data["summary"])
     if (summary) line += `：${shorten(summary, NESTED_CHARS)}`
+    // P2-A: the settlement now names where the work landed and what went wrong.
+    // Written only when the wire carries the key (a shell job's event does not),
+    // so the old line stays byte-identical.
+    const branch = str(data["worktreeBranch"])
+    if (branch) line += ` · 分支 ${branch}（未合并）`
+    const changed = Array.isArray(data["changedPaths"]) ? data["changedPaths"] : []
+    if (changed.length > 0) line += ` · 改动 ${changed.length} 个文件`
+    const commit = str(data["commit"])
+    if (commit) line += ` · 提交 ${commit.slice(0, 7)}`
+    const commitError = str(data["commitError"])
+    if (commitError) line += ` · 提交失败: ${shorten(commitError, NESTED_CHARS)}`
+    const degraded = str(data["degraded"])
+    if (degraded) line += ` · 降级: ${degraded}（已在主工作区执行）`
     const ledger = str(data["ledgerPath"])
     if (ledger) line += ` · 完整回包: ${ledger}`
     // The run id is how this notice ties back to `/tasks stop <id>`, which

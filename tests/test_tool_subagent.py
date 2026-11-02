@@ -20,18 +20,19 @@ class _FakeRunner:
         self.calls: list[dict] = []
 
     async def run(
-        self, task, name, *, worktree_manager=None, isolate=True, parent=None,
-        parent_span="", observer=None, output_schema=None, agent=None,
-        readonly=False,
+        self, task, name, *, worktree_manager=None, parent=None, parent_span="",
+        observer=None, origin_session="",
     ):
         self.calls.append(
             {
                 "task": task,
                 "name": name,
                 "worktree_manager": worktree_manager,
-                "isolate": isolate,
                 "parent": parent,
-                "readonly": readonly,
+                "isolate": task.isolate,
+                "readonly": task.readonly,
+                "agent": task.agent,
+                "output_schema": task.output_schema,
             }
         )
         return self.result
@@ -54,7 +55,7 @@ async def test_subagent_tool_passes_parent_context():
     await tool.execute({"task": "analyze this", "name": "analyst"}, _ctx())
 
     call = runner.calls[0]
-    assert call["task"] == "analyze this"
+    assert call["task"].render() == "analyze this"
     assert call["name"] == "analyst"
     assert call["worktree_manager"] == "wt/1"
     assert call["isolate"] is False
@@ -181,11 +182,7 @@ async def test_subagent_timeout_is_failure():
 @pytest.mark.asyncio
 async def test_subagent_runner_error_is_tool_failure():
     class _BoomRunner:
-        async def run(
-        self, task, name, *, worktree_manager=None, isolate=True, parent=None,
-        parent_span="", observer=None, output_schema=None, agent=None,
-        readonly=False,
-    ):
+        async def run(self, task, name, **kwargs):
             raise RuntimeError("boom")
 
     tool = SubAgentTool(runner=_BoomRunner())
@@ -282,9 +279,9 @@ async def test_readonly_is_forwarded_to_the_background_runner():
     await tool.execute({"task": "scan", "background": True, "readonly": True}, _ctx())
 
     call = runner.calls[0]
-    assert call["readonly"] is True
+    assert call["task"].readonly is True
     # The runner, not the tool, turns this into "no worktree".
-    assert call["isolate"] is True
+    assert call["task"].isolate is True
 
 
 @pytest.mark.asyncio
@@ -298,3 +295,54 @@ async def test_a_non_boolean_readonly_is_refused_before_the_runner(value):
     assert result.success is False
     assert result.error == "invalid_readonly"
     assert runner.calls == []
+
+
+# ---- P2-A: small write facts, no whole packet ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_data_carries_small_write_facts():
+    runner = _FakeRunner(
+        SubagentResult(
+            status="completed",
+            conclusion="done",
+            changed_paths=("a.py", "b.py"),
+            commit="abcdef123456",
+            commit_error="git commit: no identity",
+            degraded="worktree_unavailable",
+        )
+    )
+    tool = SubAgentTool(runner=runner)
+
+    result = await tool.execute({"task": "t"}, _ctx())
+
+    data = result.data
+    assert data is not None
+    assert data["changed_paths"] == ["a.py", "b.py"]
+    assert data["commit"] == "abcdef123456"
+    assert data["commit_error"] == "git commit: no identity"
+    assert data["degraded"] == "worktree_unavailable"
+    # The whole packet must not be duplicated inside <data>.
+    assert "packet" not in data
+    assert "task" not in data
+
+
+@pytest.mark.asyncio
+async def test_render_warns_on_commit_failure_and_degraded():
+    from ai_coding.tools.subagent_tool import _render
+
+    result = SubagentResult(
+        status="completed",
+        conclusion="done",
+        changed_paths=("a.py",),
+        worktree_branch="ai_sub_probe",
+        commit_error="git commit: no identity",
+        degraded="worktree_create_failed",
+    )
+
+    text = _render(result, "probe")
+
+    assert "提交失败" in text
+    assert "git commit: no identity" in text
+    assert "未隔离，已在主工作区执行" in text
+    assert "worktree_create_failed" in text

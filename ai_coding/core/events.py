@@ -490,6 +490,11 @@ class BackgroundTaskDone:
     #: later turn) retrieves the whole report.  ``None`` when no ledger root
     #: was configured or the write failed (best-effort).
     ledger_path: str | None = None
+    #: P2-A: a crop of the settlement (v/messageId/status/facts/changed paths/
+    #: branch/commit/commit_error/degraded/usage/ledger pointer), never the
+    #: conclusion or the task.  ``None`` for producers without a packet (e.g.
+    #: shell jobs), which keeps their wire shape byte-identical.
+    details: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

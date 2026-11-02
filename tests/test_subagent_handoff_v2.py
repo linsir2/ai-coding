@@ -22,7 +22,9 @@ from ai_coding.core.steering import SteeringQueue
 from ai_coding.core.subagent import SubAgentRunner, _notice_text
 from ai_coding.core.worktree import WorktreeManager
 from ai_coding.domain.loop import StepResult
+from ai_coding.domain.message import ToolArtifact, ToolCallRef, ToolResult
 from ai_coding.domain.subagent import BackgroundTask, SubagentResult
+from ai_coding.tools.base import BaseTool
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.subagent_tool import _render
 
@@ -71,8 +73,12 @@ def test_the_branch_and_commit_are_reported():
 
 def test_the_background_notice_names_the_branch():
     line = _notice_text(
-        "run-1", "fixer", "completed", "did it", "/tmp/ledger.json",
-        "ai_sub_fix_abc",
+        "run-1",
+        "fixer",
+        SubagentResult(
+            status="completed", conclusion="did it",
+            ledger_path="/tmp/ledger.json", worktree_branch="ai_sub_fix_abc",
+        ),
     )
     assert "分支 ai_sub_fix_abc（未合并）" in line
     assert "完整回包 /tmp/ledger.json" in line
@@ -122,9 +128,9 @@ class _CommittingManager:
 
         return _cm(name)
 
-    async def commit_if_dirty(self, path: str, message: str) -> str | None:
+    async def commit_if_dirty(self, path: str, message: str) -> tuple[str | None, str | None]:
         self.messages.append(message)
-        return "abcdef123456"
+        return "abcdef123456", None
 
 
 class _Engine(ChatEngine):
@@ -153,9 +159,99 @@ async def test_an_isolated_child_hands_back_its_branch(tmp_path):
     # "full packet" file has to name the branch too.
     assert result.ledger_path
     payload = json.loads(Path(result.ledger_path).read_text(encoding="utf-8"))
-    assert payload["v"] == 2
+    assert payload["v"] == 3
     assert payload["worktree_branch"] == "ai_sub_probe_1"
     assert payload["commit"] == "abcdef123456"
+    # ``_refresh_ledger`` merges the post-commit result into the file written by
+    # ``_run_turn``; the header and the task must survive that update.
+    assert payload["message_id"] == Path(result.ledger_path).stem
+    assert payload["task"] is not None
+
+
+@pytest.mark.asyncio
+async def test_commit_failure_with_changes_reaches_ledger_and_report(tmp_path):
+    """P2-A: there *were* changes but the commit failed — both are visible.
+
+    The old ``commit_if_dirty`` returned ``None`` for "nothing changed" and
+    "failed", so this packet looked like a clean no-op and the parent never
+    learned the work was about to die with the temporary worktree.
+    """
+
+    class _FailingManager(_CommittingManager):
+        async def commit_if_dirty(
+            self, path: str, message: str
+        ) -> tuple[str | None, str | None]:
+            self.messages.append(message)
+            return None, "git commit: nothing to commit, working tree clean"
+
+    class _Writer(BaseTool):
+        parallel_safe = True
+        mutates_world = True
+
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        @property
+        def name(self) -> str:
+            return "write"
+
+        @property
+        def description(self) -> str:
+            return "write"
+
+        @property
+        def params_json_schema(self) -> dict:
+            return {"type": "object", "properties": {"path": {"type": "string"}}}
+
+        async def execute(self, params, ctx=None):  # type: ignore[override]
+            self.calls.append(params)
+            return ToolResult(
+                success=True,
+                output="wrote",
+                artifacts=(ToolArtifact(path=str(params["path"])),),
+            )
+
+    writer = _Writer()
+
+    class _SteppedEngine(ChatEngine):
+        def __init__(self) -> None:
+            self._steps = [
+                StepResult(
+                    tool_calls=[
+                        ToolCallRef(id="c1", name="write", arguments='{"path":"a.py"}')
+                    ],
+                    finish_reason="tool_calls",
+                ),
+                StepResult(text="done", finish_reason="stop"),
+            ]
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None):
+            return self._steps.pop(0)
+
+    engine = _SteppedEngine()
+    registry = ToolRegistry()
+    registry.register(writer)
+    runner = SubAgentRunner(
+        object(),
+        engine_factory=lambda: engine,
+        build_tools=lambda workdir: registry,
+        settings=AIConfig(stop_policy="natural"),
+        workspace=".",
+        ledger_root=tmp_path,
+    )
+
+    result = await runner.run("edit it", "probe", worktree_manager=_FailingManager())
+
+    assert result.worktree_branch == "ai_sub_probe_1"
+    assert result.commit is None
+    assert result.commit_error == "git commit: nothing to commit, working tree clean"
+    assert result.changed_paths == ("a.py",)
+    payload = json.loads(Path(result.ledger_path).read_text(encoding="utf-8"))
+    assert payload["commit_error"] == result.commit_error
+    assert payload["changed_paths"] == ["a.py"]
+    text = _render(result, "probe")
+    assert "提交失败" in text
+    assert result.commit_error in text
 
 
 @pytest.mark.asyncio
@@ -177,8 +273,9 @@ async def test_commit_if_dirty_keeps_the_change_on_the_branch(tmp_path):
     (worktree.path / "a.txt").write_text("changed\n", encoding="utf-8")
     (worktree.path / "new.txt").write_text("new\n", encoding="utf-8")
 
-    sha = await manager.commit_if_dirty(str(worktree.path), "subagent: probe")
+    sha, error = await manager.commit_if_dirty(str(worktree.path), "subagent: probe")
     assert sha and len(sha) == 40
+    assert error is None
 
     await manager.remove(str(worktree.path))
 
@@ -209,6 +306,8 @@ async def test_commit_if_dirty_is_none_when_nothing_changed(tmp_path):
     manager = WorktreeManager(repo)
     worktree = await manager.create("probe")
     try:
-        assert await manager.commit_if_dirty(str(worktree.path), "subagent: probe") is None
+        assert await manager.commit_if_dirty(
+            str(worktree.path), "subagent: probe"
+        ) == (None, None)
     finally:
         await manager.remove(str(worktree.path))

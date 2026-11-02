@@ -239,7 +239,7 @@ async def test_tool_background_path_accepts_schema():
     )
 
     assert out.success is True
-    assert runner.spawn_calls[0]["output_schema"] == SCHEMA
+    assert runner.spawn_calls[0]["task"].output_schema == SCHEMA
 
 
 # ---- ledger + background pointer --------------------------------------------------
@@ -325,7 +325,7 @@ def test_undeclared_keys_stay_presence_only():
 def test_the_packet_wire_carries_its_version():
     payload = SubagentResult(status="completed").to_dict()
 
-    assert payload["v"] == 2
+    assert payload["v"] == 3
     # Every field the old shape had is still there: additive only.
     assert {
         "status", "conclusion", "todos", "artifacts", "iterations", "workdir",
@@ -333,6 +333,8 @@ def test_the_packet_wire_carries_its_version():
         "usage", "facts", "schema_valid", "schema_errors",
         "worktree_branch", "commit",
     } <= set(payload)
+    # P2-A additions: the write facts enter the same wire.
+    assert {"changed_paths", "commit_error", "degraded"} <= set(payload)
 
 
 @pytest.mark.asyncio

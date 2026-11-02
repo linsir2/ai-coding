@@ -1183,8 +1183,17 @@ def _handle_tasks(
                     row.usage.get("completion_tokens", 0) or 0
                 )
             tokens = f" · {total} tok"
+        details = ""
+        if row.changed_paths:
+            details += f" · 改动 {len(row.changed_paths)} 个文件"
+        if row.worktree_branch:
+            details += f" · 分支 {row.worktree_branch}（未合并）"
+        if row.commit_error:
+            details += f" · 提交失败: {row.commit_error}"
+        if row.degraded:
+            details += f" · 降级: {row.degraded}"
         lines.append(
-            f"  {row.run_id[:12]} {row.name} {row.status} {elapsed:.0f}s{tokens}"
+            f"  {row.run_id[:12]} {row.name} {row.status} {elapsed:.0f}s{tokens}{details}"
         )
     console.info("\n".join(lines))
     _print_jobs(loop, console)

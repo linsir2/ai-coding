@@ -10,6 +10,11 @@
 > **v2 提示**：§1–§2 是 v1 落地时的盘点（保留作历史依据）。v2 已删除 notes/confidence、
 > 删除 `ParentContext.instructions`、回包新增 branch/commit；变化与真机见 §13 与
 > `docs/subagent-dataflow-v2.md`。
+>
+> **v3 提示（P2-A，2026-11）**：父→子输入统一为 `SubagentTask`（brief + context_mode/
+> agent/readonly/isolate/output_schema），子→父信封为 `AgentPacket`（header + task +
+> result，扁平 `to_dict`）；packet v3 追加 `changed_paths`/`commit_error`/`degraded`。
+> 旧 v2 的 17 个结果键全部保留。
 
 ## 1. 现状盘点（逐字段，已核对代码）
 
@@ -134,25 +139,30 @@ class SubagentBrief:
    子代理用 composition root 的 base + 自己的 agent body + 自己工具面的 methods + skills
    重新装配，`full` 额外启用 project 段并播种父消息，`task_only` 两者都没有。
 
-## 5. 冻结契约 B：子 → 父（packet v2；v1 因 r25 删字段升版）
+## 5. 冻结契约 B：子 → 父（packet v3；v1/v2 为历史版本）
 
-### 5.1 线上形状（`SubagentResult.to_dict()`）
-
-新增唯一的版本键，其余字段不变：
+### 5.1 线上形状（`AgentPacket.to_dict()` / `SubagentResult.to_dict()`）
 
 ```json
-{ "v": 2, "status": "...", "conclusion": "...", "todos": [], "artifacts": [],
+{ "v": 3, "message_id": "...", "run_id": "", "origin_session": "",
+  "task": { "brief": {...}, "context_mode": null, "agent": null,
+            "readonly": false, "isolate": true, "output_schema": null },
+  "status": "...", "conclusion": "...", "todos": [], "artifacts": [],
   "iterations": 0, "workdir": null, "ledger_path": "...", "error": null,
   "context_mode": "full", "truncated": false, "exit_reason": null,
   "usage": null, "facts": null, "schema_valid": null, "schema_errors": [],
-  "worktree_branch": null, "commit": null }
+  "worktree_branch": null, "commit": null,
+  "changed_paths": [], "commit_error": null, "degraded": null }
 ```
 
-- `SUBAGENT_PACKET_VERSION = 1`，与 `to_dict()` 同处 `domain/subagent.py`。
+- `SUBAGENT_PACKET_VERSION = 3`，与 `to_dict()` 同处 `domain/subagent.py`。
 - **兼容规则（写进文档 + 测试）**：只允许**加可选字段**；加必填字段/删字段/改字段含义 =
   major +1。`v` 是消费方判断依据，不是给模型看的。
-- **不写 `from_dict`**：今天没有任何读 packet 的代码（ledger 只是给人/模型看的文件），
-  为它写反序列化就是死代码。等有消费者再加。
+- `SubagentResult.to_dict()` 保持 v2 的 17 个结果键并追加 3 个写回事实；
+  `AgentPacket.to_dict()` 再把 header（`v`/`message_id`/`run_id`/`origin_session`）与
+  `task` 扁平合并进来，是 ledger 的唯一线上形状。
+- `SubagentTask.from_dict` 有消费者（`resume` 从 meta 重建）；`AgentPacket` 不提供
+  `from_dict`（`_refresh_ledger` 直接读旧 JSON 合并 result 字段）。
 
 ### 5.2 结构化回包的校验（补类型）
 
@@ -199,6 +209,8 @@ class SubagentBrief:
 | 工具 schema | 4000 | `tools/subagent_tool.py`（沿用，移到模块常量注释里引用） |
 | research 每条 summary / files / findings | 600 / 8 / 5 | `core/research_fanout.py:46-49`（沿用） |
 | 合并报告 | 8000 | `core/research_fanout.py:49`（沿用） |
+
+> §6–§9 是 r25/v2 的历史实施记录；当前契约见 `docs/orchestration-p2a-plan.md`（v3）。
 
 ## 6. 不做的事（说清为什么）
 
@@ -251,7 +263,7 @@ class SubagentBrief:
 | C7 | schema 声明 `key_files: array<string>`，返回 `{"key_files": "a.py"}` → invalid | items.type |
 | C8 | schema 调用时子代理收到的文本**不含**「不确定协议」；无 schema 时**含** | 指令唯一 |
 | C9 | `facts={"confidence":"low","notes":"n"}` → packet.confidence/notes 取自 facts | 统一 |
-| C10 | `to_dict()["v"] == 2`，且原有 17 个键一个不少 | 线上形状 |
+| C10 | `to_dict()["v"] == 3`，且原有 17 个键一个不少 | 线上形状 |
 | C11 | 同一 packet 经 `subagent_tool` 与 `research_fanout`：status 原始值不变，错误码按各自规则映射 | 适配器分工 |
 
 ## 9. 成功后的样子
@@ -260,7 +272,7 @@ class SubagentBrief:
 - 子代理返回 `{"summary": 123}` 时，父级拿到 `schema_valid=False` 与 `key 'summary' must be
   string, got int`，而不是把一个整数当摘要拼进报告。
 - 带 schema 的子代理只收到一条格式指令；自由委派不发任何格式指令。
-- ledger 文件第一行有 `"v": 2`；之后只加可选字段时，旧文件仍可读。
+- ledger 文件第一行有 `"v": 3`；之后只加可选字段时，旧文件仍可读。
 - `subagent` 与 `parallel_research` 对同一个失败给出各自一致、可解释的错误码。
 
 ## 10. 自检（可能翻车的点）

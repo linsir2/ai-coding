@@ -290,6 +290,61 @@ def test_background_task_done() -> None:
     }
 
 
+def test_background_done_forwards_details() -> None:
+    """P2-A: a packet settlement names its branch/commit/degraded on the wire.
+
+    ``details`` is a projection, so only the small facts are forwarded — never
+    the conclusion (which already travels in ``summary``).
+    """
+    event = BackgroundTaskDone(
+        run_id="r1",
+        name="scout",
+        status="completed",
+        summary="found it",
+        origin_session="s1",
+        ledger_path="/tmp/x.json",
+        details={
+            "v": 3,
+            "messageId": "abc123",
+            "changed_paths": ["a.py"],
+            "worktree_branch": "ai_sub_scout",
+            "commit": "abcdef1",
+            "degraded": "worktree_unavailable",
+            "commit_error": None,
+            "conclusion": "must not travel",
+        },
+    )
+    wire = to_wire(event)
+
+    assert wire is not None
+    data = wire["data"]
+    assert data["messageId"] == "abc123"
+    assert data["changedPaths"] == ["a.py"]
+    assert data["worktreeBranch"] == "ai_sub_scout"
+    assert data["commit"] == "abcdef1"
+    assert data["degraded"] == "worktree_unavailable"
+    assert "commitError" not in data
+    assert "conclusion" not in data
+
+
+def test_background_done_without_details_keeps_the_bash_shape() -> None:
+    """A shell job's event has no packet; its wire shape must stay exact."""
+    event = BackgroundTaskDone(run_id="job_1", name="bash", status="completed")
+    wire = to_wire(event)
+    assert wire == {
+        "type": "background.done",
+        "data": {
+            "runId": "job_1",
+            "name": "bash",
+            "status": "completed",
+            "summary": "",
+            "truncated": False,
+            "originSession": "",
+            "ledgerPath": None,
+        },
+    }
+
+
 def test_context_compacted() -> None:
     wire = to_wire(ContextCompacted(before_messages=12, after_messages=4))
     assert wire == {

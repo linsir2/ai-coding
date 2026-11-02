@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
 import os
 import time
@@ -42,10 +43,14 @@ from ai_coding.domain.agents import AgentCatalog, AgentSpec
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.subagent import (
+    SUBAGENT_PACKET_VERSION,
+    AgentPacket,
     BackgroundTask,
+    PacketHeader,
     ParentContext,
     SubAgentPoolFull,
     SubagentResult,
+    SubagentTask,
     extract_json_facts,
 )
 from ai_coding.infra.json_utils import from_json_file, to_json_pretty
@@ -153,6 +158,15 @@ class AgentHandle:
     #: ``FileStateTracker`` inside ``write``/``edit`` keeps what the model has
     #: already read this session (a rebuilt registry answers "never read").
     registry: Any = None
+    #: P2-A: the parent → child packet that started this run.  Kept so the
+    #: ledger/meta can name the task and so a follow-up turn keeps the same
+    #: context window/agent/read-only switches.
+    request: SubagentTask | None = None
+    #: P2-A: the settlement's write facts (per turn, then close).  They are
+    #: projections of the latest result, not a second source of truth.
+    commit: str | None = None
+    commit_error: str | None = None
+    degraded: str | None = None
     #: Set when ``loop`` is attached; ``send_message`` waits for it.
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     status: str = "running"  # running | idle | interrupted | closed
@@ -277,7 +291,7 @@ class SubAgentRunner:
 
     async def run(
         self,
-        task: str,
+        task: str | SubagentTask,
         name: str = "sub-agent",
         *,
         worktree_manager: Any = None,
@@ -289,8 +303,14 @@ class SubAgentRunner:
         agent: str | None = None,
         context_mode: str | None = None,
         readonly: bool = False,
+        origin_session: str = "",
     ) -> SubagentResult:
         """Run ``task`` and return its packet.  Never raises for a sub-agent failure.
+
+        ``task`` is either a free-form string (the model-facing tool path and
+        old callers) or a :class:`SubagentTask` (the one internal input shape).
+        A packet is authoritative for every dispatch field; a string uses the
+        keyword arguments, so the pre-P2-A call shape is unchanged.
 
         ``observer`` is a per-call override for the constructor's observer:
         the tool layer fans the parent's emit through here, so child events
@@ -314,12 +334,57 @@ class SubAgentRunner:
         — a project file may override that id whole.
         """
         active = self._observer if observer is None else observer
-        mode = self._resolve_context_mode(self.context_mode, context_mode)
+        (
+            text,
+            request,
+            isolate,
+            readonly,
+            agent,
+            requested_mode,
+            output_schema,
+        ) = self._split_task(
+            task,
+            isolate=isolate,
+            readonly=readonly,
+            agent=agent,
+            context_mode=context_mode,
+            output_schema=output_schema,
+        )
+        mode = self._resolve_context_mode(self.context_mode, requested_mode)
         async with self._semaphore:
             return await self._run_isolated(
-                task, name, parent, parent_span, active,
+                text, name, parent, parent_span, active,
                 worktree_manager, isolate, output_schema, agent, mode, readonly,
+                request=request, origin_session=origin_session,
             )
+
+    @staticmethod
+    def _split_task(
+        task: str | SubagentTask,
+        *,
+        isolate: bool,
+        readonly: bool,
+        agent: str | None,
+        context_mode: str | None,
+        output_schema: dict[str, Any] | None,
+    ) -> tuple[str, SubagentTask | None, bool, bool, str | None, str | None,
+               dict[str, Any] | None]:
+        """``(text, request, isolate, readonly, agent, context_mode, schema)``.
+
+        A packet is the single authority for its dispatch fields; a string
+        keeps the keyword arguments (tests and pre-P2-A callers).
+        """
+        if isinstance(task, SubagentTask):
+            return (
+                task.render(),
+                task,
+                task.isolate,
+                task.readonly,
+                task.agent,
+                task.context_mode,
+                task.output_schema,
+            )
+        return (task, None, isolate, readonly, agent, context_mode, output_schema)
 
     @staticmethod
     def _resolve_context_mode(configured: str, requested: str | None) -> str:
@@ -357,62 +422,83 @@ class SubAgentRunner:
         agent: str | None = None,
         context_mode: str = "full",
         readonly: bool = False,
+        *,
+        request: SubagentTask | None = None,
+        origin_session: str = "",
     ) -> SubagentResult:
-        """Worktree branch shared by the synchronous and background paths."""
+        """Worktree branch shared by the synchronous and background paths.
+
+        Three degradation states, deliberately distinct (P2-A): ``not isolate``
+        (which includes every read-only child) and a ``None`` manager mean "no
+        worktree was asked for" → ``None``; a configured manager whose root is
+        not a git repo → ``worktree_unavailable``; a failed ``create()`` →
+        ``worktree_create_failed``.  The old code silently ran both fallbacks in
+        the main workspace, so a write delegation could believe it was isolated.
+        """
         isolate = self._should_isolate(isolate, readonly)
-        if (
-            isolate
-            and worktree_manager is not None
-            and await worktree_manager.can_isolate()
-        ):
-            try:
-                async with worktree_manager.temporary(name) as wt:
-                    result = await self._run_in(
-                        task, name, str(wt.path), parent,
-                        parent_span=parent_span, observer=observer,
-                        output_schema=output_schema, agent=agent,
-                        context_mode=context_mode, readonly=readonly,
-                    )
-                    # r25/v2: the worktree is force-removed on exit, so a write
-                    # that is not committed dies with it.  Commit first, then
-                    # hand the branch + sha to the parent; the directory goes,
-                    # the branch stays.  A failed commit is reported as "no
-                    # commit" (never swallowed into a fake success).
-                    commit = await worktree_manager.commit_if_dirty(
-                        str(wt.path), f"subagent: {name}"
-                    )
-                    if commit:
-                        enriched = replace(
-                            result, worktree_branch=wt.branch, commit=commit
-                        )
-                        # The ledger was written inside ``_packet`` before the
-                        # commit existed; refresh it so the "full packet" file
-                        # names the branch instead of a removed worktree.
-                        _refresh_ledger(enriched)
-                        return enriched
-                    return result
-            except WorktreeError:
-                # Scoped like the child's own events: this record says the child
-                # ran in the *main* workspace, and `report_degraded` carries no
-                # name, so without the wrapper nothing ties it to a child — and
-                # up to three run at once.
+        degraded: str | None = None
+        if isolate and worktree_manager is not None:
+            if not await worktree_manager.can_isolate():
+                degraded = "worktree_unavailable"
                 report_degraded(
                     self._scoped_observer(name, parent_span, observer),
                     "worktree_isolate",
-                    "the worktree could not be created",
+                    "the workspace cannot be isolated (not a git repository)",
                     "ran in the main workspace instead",
                 )
-        return await self._run_in(
+            else:
+                try:
+                    async with worktree_manager.temporary(name) as wt:
+                        result = await self._run_in(
+                            task, name, str(wt.path), parent,
+                            parent_span=parent_span, observer=observer,
+                            output_schema=output_schema, agent=agent,
+                            context_mode=context_mode, readonly=readonly,
+                            request=request, origin_session=origin_session,
+                        )
+                        # r25/v2 + P2-A: the worktree is force-removed on exit,
+                        # so a write that is not committed dies with it.  Commit
+                        # and carry the branch/commit (or the failure reason)
+                        # back to the parent; the directory goes, the branch
+                        # stays.
+                        result = await self._commit_turn(
+                            result, worktree_manager, str(wt.path), name
+                        )
+                        if result.commit or result.commit_error:
+                            result = replace(result, worktree_branch=wt.branch)
+                            _refresh_ledger(result)
+                        return result
+                except WorktreeError:
+                    # Scoped like the child's own events: this record says the
+                    # child ran in the *main* workspace, and `report_degraded`
+                    # carries no name, so without the wrapper nothing ties it to
+                    # a child — and up to three run at once.
+                    degraded = "worktree_create_failed"
+                    report_degraded(
+                        self._scoped_observer(name, parent_span, observer),
+                        "worktree_isolate",
+                        "the worktree could not be created",
+                        "ran in the main workspace instead",
+                    )
+        result = await self._run_in(
             task, name, None, parent, parent_span=parent_span, observer=observer,
             output_schema=output_schema, agent=agent,
             context_mode=context_mode, readonly=readonly,
+            request=request, origin_session=origin_session,
         )
+        if degraded:
+            result = replace(result, degraded=degraded)
+            # P2-A: ``_run_turn`` wrote the ledger before this degradation was
+            # known, and the non-git path has no branch to trigger the usual
+            # refresh -- merge it here or the file keeps ``degraded: null``.
+            _refresh_ledger(result)
+        return result
 
     # ---- background runs (R1-2) -------------------------------------------
 
     def spawn_background(
         self,
-        task: str,
+        task: str | SubagentTask,
         name: str = "sub-agent",
         *,
         worktree_manager: Any = None,
@@ -429,6 +515,9 @@ class SubAgentRunner:
     ) -> str:
         """Start a child without waiting; return its run id at once.
 
+        ``task`` accepts the same ``str | SubagentTask`` union as :meth:`run`;
+        a packet is authoritative for its dispatch fields.
+
         The spawning turn pays nothing past this call — the child runs on
         under the same semaphore, timeout and ledger discipline as a
         synchronous run, and its completion lands as a ``BackgroundTaskDone``
@@ -444,6 +533,22 @@ class SubAgentRunner:
         # C-5a review: ``semaphore.locked()`` only says "some task holds a
         # slot", not "the pool is full", and rows may outlive their slot.
         # Count what is actually running; the semaphore stays the hard bound.
+        (
+            text,
+            request,
+            isolate,
+            readonly,
+            agent,
+            requested_mode,
+            output_schema,
+        ) = self._split_task(
+            task,
+            isolate=isolate,
+            readonly=readonly,
+            agent=agent,
+            context_mode=context_mode,
+            output_schema=output_schema,
+        )
         running = sum(
             1 for row in self._background.values() if row.status == "running"
         )
@@ -455,9 +560,9 @@ class SubAgentRunner:
             )
         run_id = uuid.uuid4().hex[:12]
         active = self._observer if observer is None else observer
-        mode = self._resolve_context_mode(self.context_mode, context_mode)
+        mode = self._resolve_context_mode(self.context_mode, requested_mode)
         self._background[run_id] = BackgroundTask(
-            run_id=run_id, name=name, task=task, status="running",
+            run_id=run_id, name=name, task=text, status="running",
             started=time.monotonic(),
         )
         self._prune_background()
@@ -466,11 +571,12 @@ class SubAgentRunner:
         # here never leaves a ``running`` row behind.
         try:
             handle = self._open_handle(
-                task, name, None, parent,
+                text, name, None, parent,
                 parent_span=parent_span, observer=active,
                 output_schema=output_schema, agent=agent,
                 context_mode=mode, readonly=readonly,
                 run_id=run_id, ephemeral=False, defer_loop=True,
+                request=request, origin_session=origin_session,
             )
         except Exception as exc:  # noqa: BLE001 — a row must not stay "running"
             self._background[run_id] = replace(
@@ -481,13 +587,12 @@ class SubAgentRunner:
             )
             raise RuntimeError(f"sub-agent failed to start: {exc}") from exc
         handle.emit = emit
-        handle.origin_session = origin_session
         self._background[run_id] = replace(
             self._background[run_id], session_id=handle.session.session_id
         )
         self._write_meta(handle)
         supervised = self._supervised(
-            handle, task,
+            handle, text,
             worktree_manager=worktree_manager,
             isolate=isolate,
         )
@@ -663,6 +768,18 @@ class SubAgentRunner:
                     _log.debug("child loop close after interrupt failed", exc_info=True)
         else:
             handle.status = "idle"
+            result = await self._commit_turn(
+                result,
+                handle.worktree_manager,
+                handle.worktree_path,
+                handle.name,
+            )
+            result = self._with_handle_branch(handle, result)
+            # P2-A: refresh unconditionally -- a non-git child has no branch,
+            # but its degraded/commit/changed_paths must still reach the ledger.
+            _refresh_ledger(result)
+            self._record_handle_facts(handle, result)
+            self._write_meta(handle)
             self._finish_background(
                 handle.run_id, result, handle.emit, handle.origin_session
             )
@@ -771,6 +888,12 @@ class SubAgentRunner:
             # A closed child's temporary/persistent worktree may have been
             # removed; resuming in a vanished directory would fail every tool.
             workdir = None
+        raw_task = meta.get("taskPacket")
+        request = (
+            SubagentTask.from_dict(raw_task) if isinstance(raw_task, dict) else None
+        )
+        raw_schema = meta.get("outputSchema")
+        output_schema = dict(raw_schema) if isinstance(raw_schema, dict) else None
         handle = AgentHandle(
             run_id=run_id,
             name=str(meta.get("name") or "sub-agent"),
@@ -786,7 +909,22 @@ class SubAgentRunner:
             parent_span="",
             emit=None,
             origin_session=str(meta.get("parentSessionId") or ""),
-            output_schema=None,
+            output_schema=output_schema,
+            request=request,
+            worktree_branch=(
+                str(meta["worktreeBranch"])
+                if meta.get("worktreeBranch") is not None
+                else None
+            ),
+            commit=str(meta["commit"]) if meta.get("commit") is not None else None,
+            commit_error=(
+                str(meta["commitError"])
+                if meta.get("commitError") is not None
+                else None
+            ),
+            degraded=(
+                str(meta["degraded"]) if meta.get("degraded") is not None else None
+            ),
             status="idle",
             last_status=str(meta.get("lastStatus") or "completed"),
         )
@@ -827,12 +965,28 @@ class SubAgentRunner:
                 await loop.aclose()
             except Exception:  # noqa: BLE001 — closing must not fail on a dead loop
                 _log.debug("child loop close failed", exc_info=True)
-        if handle.worktree_manager is not None and handle.worktree_path:
+        # P2-A: the last commit is the operator's safety net, and its sha must
+        # reach the sidecar *before* the worktree is deleted.  A failure is
+        # recorded, never swallowed into "no commit".
+        worktree_path = handle.worktree_path
+        if handle.worktree_manager is not None and worktree_path:
             try:
-                await handle.worktree_manager.commit_if_dirty(
-                    handle.worktree_path, f"subagent: {handle.name}"
+                sha, error = await handle.worktree_manager.commit_if_dirty(
+                    worktree_path, f"subagent: {handle.name}"
                 )
-                await handle.worktree_manager.remove(handle.worktree_path)
+                if sha:
+                    handle.commit = sha
+                    handle.commit_error = None
+                elif error:
+                    handle.commit_error = error
+            except Exception:  # noqa: BLE001 — the disk state is what matters
+                _log.debug("child worktree commit failed", exc_info=True)
+        if not handle.ephemeral:
+            self._session_store.save(handle.session)
+            self._write_meta(handle)
+        if handle.worktree_manager is not None and worktree_path:
+            try:
+                await handle.worktree_manager.remove(worktree_path)
             except Exception:  # noqa: BLE001 — the disk state is what matters
                 _log.debug("child worktree cleanup failed", exc_info=True)
         self._handles.pop(handle.run_id, None)
@@ -843,10 +997,22 @@ class SubAgentRunner:
             self._background[handle.run_id] = replace(
                 row, status="cancelled", ended=time.monotonic()
             )
-        if not handle.ephemeral:
-            self._session_store.save(handle.session)
-            self._write_meta(handle)
         return True
+
+    def close_info(self, run_id: str) -> dict[str, Any]:
+        """The commit facts a closed child left in its sidecar (tools echo them).
+
+        Read from disk on purpose: ``close`` removes the worktree, and the
+        handle is gone from ``_handles``; the meta file is the durable record.
+        """
+        meta = self._load_meta(run_id)
+        if meta is None:
+            return {}
+        return {
+            "worktreeBranch": meta.get("worktreeBranch"),
+            "commit": meta.get("commit"),
+            "commitError": meta.get("commitError"),
+        }
 
     def _restore_row(self, handle: AgentHandle) -> None:
         """Keep ``/tasks`` in step with a resumed handle (row = projection)."""
@@ -969,9 +1135,10 @@ class SubAgentRunner:
         closed: C-5b-2+ continues the same conversation.
         """
         isolate = self._should_isolate(isolate, handle.readonly)
+        degraded: str | None = None
         try:
             async with self._semaphore:
-                await self._attach_for_run(handle, worktree_manager, isolate)
+                degraded = await self._attach_for_run(handle, worktree_manager, isolate)
                 result = await self._run_turn(handle, text)
         except asyncio.CancelledError:
             # C-5b: a cut may be the operator's `interrupt_agent` (the handle
@@ -995,8 +1162,19 @@ class SubAgentRunner:
                 status="error", error=f"supervisor: {exc}",
                 truncated=True, exit_reason="supervisor_error",
             )
-        if handle.worktree_branch:
-            result = replace(result, worktree_branch=handle.worktree_branch)
+        if degraded:
+            result = replace(result, degraded=degraded)
+        # P2-A: commit at the end of every background turn, not only at close.
+        # A settlement that precedes the commit told the parent "done" while the
+        # work still lived only in a directory ``close_agent`` would delete.
+        result = await self._commit_turn(
+            result, handle.worktree_manager, handle.worktree_path, handle.name
+        )
+        result = self._with_handle_branch(handle, result)
+        # P2-A: refresh unconditionally -- see ``_run_followup``; a degraded
+        # non-git turn has no branch, but its facts still belong in the file.
+        _refresh_ledger(result)
+        self._record_handle_facts(handle, result)
         if handle.status == "interrupting":
             handle.status = "interrupted"
         elif result.status != "interrupted":
@@ -1021,37 +1199,51 @@ class SubAgentRunner:
 
     async def _attach_for_run(
         self, handle: AgentHandle, worktree_manager: Any | None, isolate: bool
-    ) -> None:
+    ) -> str | None:
         """Attach the loop to a persistent worktree (or the main workspace).
+
+        Returns the degradation reason, or ``None``.  The three states match
+        the sync path's (P2-A): no isolation asked for / no manager configured
+        → ``None``; a manager that cannot isolate → ``worktree_unavailable``;
+        a failed ``create()`` → ``worktree_create_failed``.
 
         C-5b-1 opened the handle with a deferred loop so the worktree can be
         chosen *before* the engine/tools are built.  A temporary worktree would
         be removed before the next turn, so addressable children use a
         persistent one; ``close_agent`` commits and removes it.
         """
-        if (
-            isolate
-            and worktree_manager is not None
-            and await worktree_manager.can_isolate()
-        ):
-            try:
-                wt = await worktree_manager.create(handle.name)
-            except WorktreeError:
-                report_degraded(
-                    self._scoped_observer(
-                        handle.name, handle.parent_span, handle.observer
-                    ),
-                    "worktree_isolate",
-                    "the worktree could not be created",
-                    "ran in the main workspace instead",
-                )
-            else:
-                handle.worktree_path = str(wt.path)
-                handle.worktree_branch = wt.branch
-                handle.worktree_manager = worktree_manager
-                await self._attach_loop(handle, str(wt.path))
-                return
-        await self._attach_loop(handle, None)
+        if worktree_manager is None or not isolate:
+            await self._attach_loop(handle, None)
+            return None
+        if not await worktree_manager.can_isolate():
+            report_degraded(
+                self._scoped_observer(
+                    handle.name, handle.parent_span, handle.observer
+                ),
+                "worktree_isolate",
+                "the workspace cannot be isolated (not a git repository)",
+                "ran in the main workspace instead",
+            )
+            await self._attach_loop(handle, None)
+            return "worktree_unavailable"
+        try:
+            wt = await worktree_manager.create(handle.name)
+        except WorktreeError:
+            report_degraded(
+                self._scoped_observer(
+                    handle.name, handle.parent_span, handle.observer
+                ),
+                "worktree_isolate",
+                "the worktree could not be created",
+                "ran in the main workspace instead",
+            )
+            await self._attach_loop(handle, None)
+            return "worktree_create_failed"
+        handle.worktree_path = str(wt.path)
+        handle.worktree_branch = wt.branch
+        handle.worktree_manager = worktree_manager
+        await self._attach_loop(handle, str(wt.path))
+        return None
 
     def _finish_background(
         self,
@@ -1066,28 +1258,35 @@ class SubAgentRunner:
         ``notify`` is False for endings that must stay silent (DF-6): an
         interrupt or a close is the operator's own act, not a completion, and
         a notice for it would read as "the child finished".
+
+        P2-A: row, notice and event are one projection of ``result``; the
+        event's ``details`` is that projection, never the full conclusion.
         """
         row = self._background.get(run_id)
         self._tasks.pop(run_id, None)
         self._announce.pop(run_id, None)
         if row is None or row.status != "running":
             return
+        summary = _summary_of(result)
+        commit_error = (
+            result.commit_error
+            if result.commit_error
+            else (None if result.commit else row.commit_error)
+        )
         self._background[run_id] = replace(
             row, status=result.status, ended=time.monotonic(),
             error=result.error, usage=result.usage,
             # C-3b: the pointer subagent_list hands out once the notice may be
-            # gone (the ledger file itself was written by ``_with_ledger``).
+            # gone (the ledger file itself was written by ``_run_turn``).
             ledger_path=result.ledger_path,
+            # A later turn that commits nothing must not erase the facts an
+            # earlier turn earned: the row is the cross-turn memory here.
+            worktree_branch=result.worktree_branch or row.worktree_branch,
+            commit=result.commit or row.commit,
+            changed_paths=result.changed_paths,
+            commit_error=commit_error,
+            degraded=result.degraded or row.degraded,
         )
-        summary = (result.conclusion or result.error or "").strip().replace("\n", " ")
-        # r25/v2/F5: a background schema call used to lose its verdict here --
-        # the model saw prose and a ledger pointer only.  One short marker is
-        # enough; the facts stay in the ledger.
-        if len(summary) > _SUMMARY_TAIL:
-            summary = summary[:_SUMMARY_TAIL] + "…"
-        # Append after the cut: a long conclusion must not eat the verdict.
-        if result.schema_valid is False:
-            summary = f"{summary}（结构校验未过）".strip()
         # DF-6: only a cut/close stays silent.  ``completed``/``error``/
         # ``timeout``/``max_iterations`` are real settlements the parent must
         # hear about (the narrower earlier set silently dropped max_iterations).
@@ -1097,10 +1296,7 @@ class SubAgentRunner:
         # gated behind ``emit is None``, so a runner without an operator stream
         # (the bare CLI, a test double) silently dropped the settlement the
         # parent turn was waiting for.  Announce first; the event stays optional.
-        self._announce_to_model(
-            run_id, row.name, result.status, summary, result.ledger_path,
-            result.worktree_branch,
-        )
+        self._announce_to_model(run_id, row.name, result)
         if emit is None:
             return
         try:
@@ -1112,6 +1308,8 @@ class SubAgentRunner:
                 # full packet (facts included) lives in this file.  Without
                 # it a background+schema run's facts would be unreachable.
                 ledger_path=result.ledger_path,
+                # P2-A: a crop of the settlement, never conclusion/task.
+                details=_details_projection(result),
             ))
         except Exception:  # noqa: BLE001 — observation must not break settlement
             _log.debug("background announce failed for %s", run_id, exc_info=True)
@@ -1120,10 +1318,7 @@ class SubAgentRunner:
         self,
         run_id: str,
         name: str,
-        status: str,
-        summary: str,
-        ledger_path: str | None,
-        branch: str | None = None,
+        result: SubagentResult,
     ) -> None:
         """Hand the settlement to the parent's loop (P0-2).
 
@@ -1134,9 +1329,7 @@ class SubAgentRunner:
         if self._notices is None:
             return
         try:
-            self._notices.put(
-                _notice_text(run_id, name, status, summary, ledger_path, branch)
-            )
+            self._notices.put(_notice_text(run_id, name, result))
         except Exception:  # noqa: BLE001 — same reason as the event above
             _log.debug("background notice failed for %s", run_id, exc_info=True)
 
@@ -1169,6 +1362,9 @@ class SubAgentRunner:
             failure = _task.exception()
             if failure is not None:
                 status, error = "error", f"crashed before settlement: {failure}"
+        result = SubagentResult(
+            status=status, error=error, truncated=True, exit_reason=status,
+        )
         self._background[run_id] = replace(
             row, status=status, ended=time.monotonic(), error=error,
         )
@@ -1188,7 +1384,7 @@ class SubAgentRunner:
                 return
             announce = (handle.emit, handle.origin_session, handle.name)
         emit, origin_session, name = announce
-        self._announce_to_model(run_id, name, status, error, None)
+        self._announce_to_model(run_id, name, result)
         if emit is None:
             return
         try:
@@ -1196,6 +1392,12 @@ class SubAgentRunner:
                 run_id=run_id, name=name, status=status,
                 summary=error, truncated=True,
                 origin_session=origin_session,
+                details={
+                    "v": SUBAGENT_PACKET_VERSION,
+                    "messageId": None,
+                    "status": status,
+                    "error": error,
+                },
             ))
         except Exception:  # noqa: BLE001 — observation must not break settlement
             _log.debug("background reap announce failed for %s", run_id, exc_info=True)
@@ -1276,6 +1478,8 @@ class SubAgentRunner:
         agent: str | None = None,
         context_mode: str = "full",
         readonly: bool = False,
+        request: SubagentTask | None = None,
+        origin_session: str = "",
     ) -> SubagentResult:
         """The one-shot path for ``run()`` / fan-out (5.3).
 
@@ -1289,7 +1493,8 @@ class SubAgentRunner:
                 parent_span=parent_span, observer=observer,
                 output_schema=output_schema, agent=agent,
                 context_mode=context_mode, readonly=readonly,
-                ephemeral=True,
+                ephemeral=True, request=request,
+                origin_session=origin_session,
             )
         except _StartError as exc:
             return SubagentResult(status="error", error=str(exc))
@@ -1319,6 +1524,8 @@ class SubAgentRunner:
         run_id: str = "",
         ephemeral: bool = False,
         defer_loop: bool = False,
+        request: SubagentTask | None = None,
+        origin_session: str = "",
     ) -> AgentHandle:
         """Build the child's session + loop, and register it when addressable.
 
@@ -1361,10 +1568,11 @@ class SubAgentRunner:
             parent_permissions=parent.permissions if parent is not None else (),
             parent_span=parent_span,
             emit=None,
-            origin_session="",
+            origin_session=origin_session,
             output_schema=output_schema,
             observer=observer,
             ephemeral=ephemeral,
+            request=request,
         )
         if not defer_loop:
             handle.loop = self._build_loop_for(handle, workdir)
@@ -1444,13 +1652,18 @@ class SubAgentRunner:
             self._write_meta(handle)
 
     async def _run_turn(
-        self, handle: AgentHandle, text: str
+        self, handle: AgentHandle, text: str, request: SubagentTask | None = None
     ) -> SubagentResult:
         """Run exactly one turn on the handle's existing session.
 
         Turn-level cancellation waits for the inner turn to finish closing
         (``_close_turn`` must land its state before anything else touches the
         loop) — the same rule DF-2/DF-3 spells out for the next phase.
+
+        P2-A: this is the **only** place a ``message_id`` is generated, and the
+        only place the v3 ledger is written (the file name is that message id).
+        Both the normal and the timeout branch go through the same envelope, so
+        changed paths survive a cut.
         """
         loop = handle.loop
         if loop is None:
@@ -1459,6 +1672,7 @@ class SubAgentRunner:
             await self._attach_loop(handle, handle.workdir)
             loop = handle.loop
         assert loop is not None
+        task = request or handle.request or SubagentTask.from_objective(text)
         # R1-3: the format contract rides as a trailer on the task text —
         # the task *is* the child's user message, so no loop/engine change is
         # needed for the child to see it.
@@ -1489,6 +1703,11 @@ class SubAgentRunner:
                 # R0-3: an outer cut is still a cut — unfinished, with a cause.
                 truncated=True,
                 exit_reason="outer_timeout",
+                context_mode=handle.context_mode,
+                # A cut must not lose what the tools already declared; the
+                # ledger below carries them for the parent.
+                artifacts=tuple(loop.last_artifacts),
+                changed_paths=_changed_paths(loop.last_artifacts),
             )
         else:
             inner.result()  # propagate a crash exactly as a direct await did
@@ -1496,11 +1715,80 @@ class SubAgentRunner:
                 loop, handle.session, handle.workdir,
                 handle.context_mode, handle.output_schema,
             )
+        header = PacketHeader(
+            message_id=uuid.uuid4().hex[:12],
+            run_id=handle.run_id,
+            origin_session=handle.origin_session,
+        )
+        ledger_path = _write_ledger(
+            AgentPacket(header=header, task=task, result=result),
+            self._ledger_root,
+        )
+        if ledger_path:
+            result = replace(result, ledger_path=ledger_path)
         handle.last_status = result.status
         if not handle.ephemeral:
             self._session_store.save(handle.session)
             self._write_meta(handle)
         return result
+
+    async def _commit_turn(
+        self,
+        result: SubagentResult,
+        worktree_manager: Any | None,
+        worktree_path: str | None,
+        name: str,
+    ) -> SubagentResult:
+        """Commit a worktree turn and fold the outcome into ``result``.
+
+        Takes the three facts explicitly (not a handle) because the synchronous
+        path's manager is a local variable of ``_run_isolated``.  A failed
+        commit becomes ``commit_error`` — never a silently empty result — and
+        the ledger is refreshed so the full packet names the same facts.
+        """
+        if worktree_manager is None or not worktree_path:
+            return result
+        sha, error = await worktree_manager.commit_if_dirty(
+            worktree_path, f"subagent: {name}"
+        )
+        if sha:
+            result = replace(result, commit=sha)
+        elif error:
+            result = replace(result, commit_error=error)
+        if sha or error:
+            _refresh_ledger(result)
+        return result
+
+    @staticmethod
+    def _with_handle_branch(
+        handle: AgentHandle, result: SubagentResult
+    ) -> SubagentResult:
+        """Name the branch of a turn that actually committed (or failed to)."""
+        if (
+            handle.worktree_branch
+            and not result.worktree_branch
+            and (result.commit or result.commit_error)
+        ):
+            return replace(result, worktree_branch=handle.worktree_branch)
+        return result
+
+    @staticmethod
+    def _record_handle_facts(handle: AgentHandle, result: SubagentResult) -> None:
+        """Keep the handle's write facts in step with its latest result.
+
+        A later turn with nothing to commit reports no commit; overwriting the
+        handle's facts with that ``None`` would erase the sha the first turn
+        earned and the sidecar (the only durable record) would lose it too.
+        """
+        if result.commit:
+            handle.commit = result.commit
+            handle.commit_error = None
+        elif result.commit_error:
+            handle.commit_error = result.commit_error
+        if result.degraded:
+            handle.degraded = result.degraded
+        if result.worktree_branch:
+            handle.worktree_branch = result.worktree_branch
 
     @staticmethod
     def _clear_runtime_markers(session: SessionData) -> None:
@@ -1536,6 +1824,17 @@ class SubAgentRunner:
             ],
             "status": handle.status,
             "lastStatus": handle.last_status,
+            # P2-A: the input packet, the shape contract and the write facts.
+            # A resume rebuilds the task/schema from here; close writes them
+            # *before* removing the worktree so the sha is never lost.
+            "taskPacket": (
+                handle.request.to_dict() if handle.request is not None else None
+            ),
+            "outputSchema": handle.output_schema,
+            "worktreeBranch": handle.worktree_branch,
+            "commit": handle.commit,
+            "commitError": handle.commit_error,
+            "degraded": handle.degraded,
             "createdAt": handle.session.created_time,
             "updatedAt": now_utc(),
         }
@@ -1646,8 +1945,20 @@ class SubAgentRunner:
             facts=facts,
             schema_valid=schema_valid,
             schema_errors=schema_errors,
+            changed_paths=_changed_paths(loop.last_artifacts),
         )
-        return _with_ledger(result, self._ledger_root)
+        return result
+
+
+def _changed_paths(artifacts: list[Any]) -> tuple[str, ...]:
+    """Declared file changes: ``kind == "file"`` paths, deduped, order kept."""
+    changed: list[str] = []
+    for artifact in artifacts:
+        if artifact.kind != "file" or not artifact.path:
+            continue
+        if artifact.path not in changed:
+            changed.append(artifact.path)
+    return tuple(changed)
 
 
 def _drain_mailbox(mailbox: deque[str]) -> list[str]:
@@ -1670,54 +1981,43 @@ def _truncate(text: str | None, limit: int) -> str | None:
     return text[:limit] + "…"
 
 
-def _with_ledger(result: SubagentResult, root: Path | None) -> SubagentResult:
-    """Write the full packet (untruncated) and return it with the path attached."""
+def _write_ledger(packet: AgentPacket, root: Path | None) -> str | None:
+    """Write the full v3 packet; return its path (best-effort, ``None`` on fail).
+
+    This is the **only** ledger writer.  The file name is the packet's
+    ``message_id``, so every projection can derive it without a second field.
+    """
     if root is None:
-        return result
-    payload = result.to_dict()
+        return None
     try:
         target_dir = root / "transcripts" / "subagents"
         target_dir.mkdir(parents=True, exist_ok=True)
-        path = target_dir / f"{uuid.uuid4().hex[:12]}.json"
-        path.write_text(to_json_pretty(payload), encoding="utf-8")
+        path = target_dir / f"{packet.header.message_id}.json"
+        path.write_text(to_json_pretty(packet.to_dict()), encoding="utf-8")
     except OSError:
-        return result  # best-effort: no ledger, but the packet still flows
-    return SubagentResult(
-        status=result.status,
-        conclusion=result.conclusion,
-        todos=result.todos,
-        artifacts=result.artifacts,
-        iterations=result.iterations,
-        workdir=result.workdir,
-        ledger_path=str(path),
-        error=result.error,
-        context_mode=result.context_mode,
-        truncated=result.truncated,
-        exit_reason=result.exit_reason,
-        usage=result.usage,
-        facts=result.facts,
-        schema_valid=result.schema_valid,
-        schema_errors=result.schema_errors,
-        worktree_branch=result.worktree_branch,
-        commit=result.commit,
-    )
+        return None  # best-effort: no ledger, but the packet still flows
+    return str(path)
 
 
 def _refresh_ledger(result: SubagentResult) -> None:
-    """Rewrite the ledger after branch/commit enrichment (r25/v2).
+    """Merge the post-commit facts into the ledger written by ``_run_turn``.
 
-    The ledger is written inside ``_packet``, before the commit exists; without
-    this rewrite the "full packet" file would name a worktree that is about to
-    be deleted and carry no branch to find the work on.
+    The ledger is written inside ``_run_turn`` before the commit exists; this
+    read-update-write keeps the header and ``task`` and only overwrites the
+    result keys, so the "full packet" file names the branch instead of a
+    removed worktree (and carries ``commit_error`` when the commit failed).
     """
     if not result.ledger_path:
         return
+    path = Path(result.ledger_path)
     try:
-        Path(result.ledger_path).write_text(
-            to_json_pretty(result.to_dict()), encoding="utf-8"
-        )
-    except OSError:
-        pass  # best-effort: the packet itself already carries the branch
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.update(result.to_dict())
+        path.write_text(to_json_pretty(payload), encoding="utf-8")
+    except (OSError, ValueError):
+        pass  # best-effort: the packet itself already carries the facts
 
 
 def _format_instruction(schema: dict[str, Any]) -> str:
@@ -1778,14 +2078,46 @@ _NOTICE_STATUS = {
 }
 
 
-def _notice_text(
-    run_id: str,
-    name: str,
-    status: str,
-    summary: str,
-    ledger_path: str | None,
-    branch: str | None = None,
-) -> str:
+def _summary_of(result: SubagentResult) -> str:
+    """The capped one-line summary shared by the row, the notice and the event."""
+    summary = (result.conclusion or result.error or "").strip().replace("\n", " ")
+    # r25/v2/F5: a background schema call used to lose its verdict here --
+    # the model saw prose and a ledger pointer only.  One short marker is
+    # enough; the facts stay in the ledger.
+    if len(summary) > _SUMMARY_TAIL:
+        summary = summary[:_SUMMARY_TAIL] + "…"
+    # Append after the cut: a long conclusion must not eat the verdict.
+    if result.schema_valid is False:
+        summary = f"{summary}（结构校验未过）".strip()
+    return summary
+
+
+def _details_projection(result: SubagentResult) -> dict[str, Any]:
+    """The event's crop of one settlement (never conclusion/task).
+
+    ``messageId`` is derived from the ledger file name — the header field is
+    already on disk, so the event needs no new packet field.
+    """
+    message_id = Path(result.ledger_path).stem if result.ledger_path else None
+    return {
+        "v": SUBAGENT_PACKET_VERSION,
+        "messageId": message_id,
+        "status": result.status,
+        "truncated": result.truncated,
+        "exit_reason": result.exit_reason,
+        "facts": dict(result.facts) if result.facts is not None else None,
+        "schema_valid": result.schema_valid,
+        "changed_paths": list(result.changed_paths),
+        "worktree_branch": result.worktree_branch,
+        "commit": result.commit,
+        "commit_error": result.commit_error,
+        "degraded": result.degraded,
+        "usage": dict(result.usage) if result.usage is not None else None,
+        "ledger_path": result.ledger_path,
+    }
+
+
+def _notice_text(run_id: str, name: str, result: SubagentResult) -> str:
     """One harness line for a background run that settled.
 
     It is written for the model's next request, and it must survive
@@ -1794,16 +2126,35 @@ def _notice_text(
     the ledger pointer is what makes a 200-character summary enough -- the file
     is inside the workspace, so the model can read the whole packet.
 
-    ``branch`` names where an isolated child committed its changes; without it
-    a background write handoff has no address at all (the worktree is removed).
+    P2-A: the line is a projection of ``result`` — status, schema verdict,
+    facts summary, changed count, branch/commit, commit failure and isolation
+    degradation.  Without the last two a lost write or a silent fallback into
+    the main workspace looked like a clean completion.
     """
-    word = _NOTICE_STATUS.get(status, status)
+    word = _NOTICE_STATUS.get(result.status, result.status)
     line = f"[子任务{word}] {name}（{run_id[:12]}）"
-    body = " ".join(str(summary or "").split())
+    body = " ".join(str(_summary_of(result) or "").split())
     if body:
         line += f"：{body}"
-    if branch:
-        line += f" · 分支 {branch}（未合并）"
-    if ledger_path:
-        line += f" · 完整回包 {ledger_path}"
+    if result.facts:
+        parts = [
+            f"{key}={str(value)[:60]}"
+            for key, value in list(result.facts.items())[:3]
+        ]
+        if parts:
+            line += f" · facts: {', '.join(parts)}"
+    if result.changed_paths:
+        shown = ", ".join(result.changed_paths[:3])
+        more = f" 等 {len(result.changed_paths)} 个" if len(result.changed_paths) > 3 else ""
+        line += f" · 改动 {len(result.changed_paths)} 个文件: {shown}{more}"
+    if result.worktree_branch:
+        line += f" · 分支 {result.worktree_branch}（未合并）"
+    if result.commit:
+        line += f" · 提交 {result.commit[:7]}"
+    if result.commit_error:
+        line += f" · 提交失败：{result.commit_error}"
+    if result.degraded:
+        line += f" · 降级：未隔离（{result.degraded}），已在主工作区执行"
+    if result.ledger_path:
+        line += f" · 完整回包 {result.ledger_path}"
     return line

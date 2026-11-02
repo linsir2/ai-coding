@@ -253,18 +253,30 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
     if isinstance(event, JobChanged):
         return {"type": "job.changed", "data": {"jobs": [dict(row) for row in event.jobs]}}
     if isinstance(event, BackgroundTaskDone):
-        return {
-            "type": "background.done",
-            "data": {
-                "runId": event.run_id,
-                "name": event.name,
-                "status": event.status,
-                "summary": event.summary,
-                "truncated": event.truncated,
-                "originSession": event.origin_session,
-                "ledgerPath": event.ledger_path,
-            },
+        done_data: dict[str, Any] = {
+            "runId": event.run_id,
+            "name": event.name,
+            "status": event.status,
+            "summary": event.summary,
+            "truncated": event.truncated,
+            "originSession": event.origin_session,
+            "ledgerPath": event.ledger_path,
         }
+        # P2-A: a settlement with a packet also names its write facts.  Written
+        # only when ``details`` exists, so a bash job's event keeps the exact
+        # old shape (and older producers are byte-identical).
+        if event.details is not None:
+            for key, value in (
+                ("messageId", event.details.get("messageId")),
+                ("changedPaths", event.details.get("changed_paths")),
+                ("worktreeBranch", event.details.get("worktree_branch")),
+                ("commit", event.details.get("commit")),
+                ("commitError", event.details.get("commit_error")),
+                ("degraded", event.details.get("degraded")),
+            ):
+                if value is not None:
+                    done_data[key] = value
+        return {"type": "background.done", "data": done_data}
     if isinstance(event, ContextCompacted):
         return {
             "type": "context.compacted",

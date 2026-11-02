@@ -397,8 +397,8 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 
 | 类型 | 字段 | 说明 |
 |---|---|---|
-| `BackgroundTask`（`domain/subagent.py`） | `runId`、`name`、`task`、`status`（running/completed/timeout/error/cancelled/rejected）、`started/ended`（monotonic 秒）、`error`、`usage` | runner 内存表（`task_list()` 按 started 排序）；200 行封顶（只剪终态）；重启丢失 |
-| `BackgroundTaskDone`（事件） | `run_id`、`name`、`status`、`summary`（尾 200）、`truncated`、`origin_session`、`ledger_path`（无 ledger 时 None） | 捕获的 emit 投递（可能晚 spawning turn 数轮）；transcript dim 行（有指针时缀 `· 完整回包: 路径`），trace 泛型记录 |
+| `BackgroundTask`（`domain/subagent.py`） | `runId`、`name`、`task`、`status`（running/completed/timeout/error/cancelled/rejected）、`started/ended`（monotonic 秒）、`error`、`usage`；P2-A 追加 `summary`、`worktreeBranch`、`commit`、`changedPaths`、`commitError`、`degraded` | runner 内存表（`task_list()` 按 started 排序）；200 行封顶（只剪终态）；重启丢失。P2-A 起行是结算的投影：notice/event/`/tasks`/`list_agents`/`subagent_list` 读同一组事实 |
+| `BackgroundTaskDone`（事件） | `run_id`、`name`、`status`、`summary`（尾 200）、`truncated`、`origin_session`、`ledger_path`（无 ledger 时 None）；P2-A 追加 `details: dict \| None = None` | 捕获的 emit 投递（可能晚 spawning turn 数轮）；transcript dim 行（有指针时缀 `· 完整回包: 路径`），trace 泛型记录。`details` 只是投影（`v/messageId/status/truncated/exit_reason/facts/schema_valid/changed_paths/branch/commit/commit_error/degraded/usage/ledger_path`），**不含 conclusion/task**；bash job 的 `details=None`，线上形状与旧版逐字节相同 |
 | `subAgent(background)` | `bool = false` | 默认同步（老行为不变）；true 时秒返 handle（`data={run_id, background, status}`），孩子事件经 observer 进父 trace |
 | 错误码 | `subagent_busy` | 信号量满时 spawn 直接失败（不排队）；stop 未知 id 返回 False（`/tasks` 明示） |
 
@@ -410,6 +410,20 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `subAgent(output_schema)` | JSON object（`required` 键表是唯一被解释的关键字） | runner 把格式指令拼进孩子 task 串尾（task 即孩子 user 消息，无需动 loop/engine）；`_packet` 对截断后结论解析（facts 永不描述父没见过的文本） |
 | render/data | `facts: k=v, …` 紧凑行（valid 时）/`⚠ 结构校验未过 (…)`（invalid 时）；`data += facts/schema_valid/schema_errors` | invalid 时 success 照旧（按 status 定），原文照留 |
 | 错误码 | `schema_too_large`（序列化超 4000 字符）、`schema_invalid`（非对象） | 前置校验，runner 不碰 |
+
+### P2-A 统一父子信息包与写回可观测
+
+| 契约 | 位置 | 说明 |
+|---|---|---|
+| `SUBAGENT_PACKET_VERSION = 3` | `domain/subagent.py` | `v2` 的 17 个结果键一个不少，只追加 `changed_paths`/`commit_error`/`degraded` 与 `message_id`/`run_id`/`origin_session` 三个 header 键 |
+| `PacketHeader` | 同上 | `message_id`（uuid4 hex[:12]，**唯一生成点**在 `_run_turn`，同时是 ledger 文件名）、`run_id`（同步为空）、`origin_session`、`v` |
+| `SubagentTask` | 同上 | `brief`（`SubagentBrief`）+ `context_mode`/`agent`/`readonly`/`isolate`/`output_schema`。objective-only 的 `render()` **逐字返回 objective**，有额外段落才用 `[TASK]` 信封。`from_objective()` 是便捷构造；`to_dict/from_dict` 供 ledger 的 `task`、meta 的 `taskPacket` 与 resume |
+| `AgentPacket` | 同上 | `header + task + result`；`to_dict()` 扁平合并，是 ledger 的线上形状。只有 `to_dict()`（`_refresh_ledger` 直接读旧 JSON 合并） |
+| `SubagentResult` 追加 | 同上 | `changed_paths: tuple[str,...]`（`last_artifacts` 中 `kind=="file"` 去重保序，**bash 改动不在内**）、`commit_error`、`degraded`（`worktree_unavailable`/`worktree_create_failed`） |
+| `commit_if_dirty` | `core/worktree.py` | 返回 `tuple[sha\|None, error\|None]`：成功 `(sha,None)`、无改动 `(None,None)`、失败 `(None,"<命令>: <原因>")`；失败不再与无改动混同 |
+| 隔离三态 | `core/subagent.py` | `not isolate`（含只读子）或 manager 为 `None` → `degraded=None`；`can_isolate()==False` → `worktree_unavailable`；`WorktreeError` → `worktree_create_failed`；后台 `_attach_for_run` 同三态 |
+| 后台逐轮提交 | 同上 | `_supervised`/`_run_followup` 在 `_run_turn` 后调 `_commit_turn`（显式 manager/path/name 三件套），再 `_finish_background`；`close()` 兜底提交后**先写 meta 再 remove**；`close_info(run_id)` 读 meta 回显 branch/commit/commitError |
+| 通道投影 | `_run_turn`/`_finish_background`/工具 | ledger（`<ws>/transcripts/subagents/<message_id>.json`，v3 扁平包）、meta（`taskPacket`/`outputSchema`/`worktreeBranch`/`commit`/`commitError`/`degraded`）、notice、event `details`、工具 `data`（只加小字段）、列表行均由同一 `SubagentResult` 投影 |
 
 ### 合同变更（仅两处）
 

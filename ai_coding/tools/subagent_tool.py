@@ -14,7 +14,12 @@ from typing import Any
 
 from ai_coding.core.observers import EmitObserver
 from ai_coding.domain.message import ToolResult
-from ai_coding.domain.subagent import SUCCESS_STATUSES, ParentContext, SubagentResult
+from ai_coding.domain.subagent import (
+    SUCCESS_STATUSES,
+    ParentContext,
+    SubagentResult,
+    SubagentTask,
+)
 from ai_coding.tools.base import (
     BaseTool,
     ToolContext,
@@ -84,6 +89,11 @@ def _render(result: SubagentResult, name: str) -> str:
     if result.worktree_branch:
         suffix = f"，{result.commit[:7]}" if result.commit else ""
         lines.append(f"工作区分支: {result.worktree_branch}（未合并{suffix}）")
+    # P2-A: a lost write must not read like a clean finish.
+    if result.commit_error:
+        lines.append(f"⚠ 提交失败: {result.commit_error}")
+    if result.degraded:
+        lines.append(f"⚠ 未隔离，已在主工作区执行（{result.degraded}）")
     if result.ledger_path and (result.truncated or result.schema_valid is False):
         lines.append(f"完整回包: {result.ledger_path}")
     return "\n".join(lines)
@@ -122,6 +132,11 @@ def _to_tool_result(result: SubagentResult, name: str) -> ToolResult:
             "schema_errors": list(result.schema_errors),
             "worktree_branch": result.worktree_branch,
             "commit": result.commit,
+            # P2-A: small write facts only — never the whole packet (that would
+            # duplicate the rendered text inside every ``<data>`` block).
+            "changed_paths": list(result.changed_paths),
+            "commit_error": result.commit_error,
+            "degraded": result.degraded,
         },
         artifacts=result.artifacts,
     )
@@ -314,12 +329,22 @@ class SubAgentTool(BaseTool):
             return self._spawn_background(
                 task, name, context, parent, schema, agent, readonly
             )
+        # P2-A: the tool speaks one shape to the runner.  The packet is the
+        # authority for context_mode/agent/readonly/isolate/schema; the model's
+        # free-form text lives inside its brief (objective-only renders as-is).
+        packet = SubagentTask.from_objective(
+            task,
+            context_mode=None,
+            agent=agent,
+            readonly=readonly,
+            isolate=self._isolate,
+            output_schema=schema,
+        )
         try:
             result = await self._runner.run(
-                task,
+                packet,
                 name,
                 worktree_manager=self._worktree_manager,
-                isolate=self._isolate,
                 parent=parent,
                 # R4a: the trace hangs the child's spans under this call.
                 parent_span=context.call_id,
@@ -328,11 +353,7 @@ class SubAgentTool(BaseTool):
                 # so the parent trace finally sees child spans (previously the
                 # slot was never filled: zero scoped events over 23 runs).
                 observer=EmitObserver(context.emit),
-                # R1-3: the shape contract, always passed (None = prose as
-                # usual) so the call shape is one stable contract.
-                output_schema=schema,
-                agent=agent,
-                readonly=readonly,
+                origin_session=context.session_id,
             )
         except Exception as exc:  # noqa: BLE001 — tool boundary
             return ToolResult(
@@ -356,23 +377,24 @@ class SubAgentTool(BaseTool):
         table row, never as a second tool message (strict pairing allows
         exactly one tool message per call).
         """
+        packet = SubagentTask.from_objective(
+            task,
+            context_mode=None,
+            agent=agent,
+            readonly=readonly,
+            isolate=self._isolate,
+            output_schema=schema,
+        )
         try:
             run_id = self._runner.spawn_background(
-                task,
+                packet,
                 name,
                 worktree_manager=self._worktree_manager,
-                isolate=self._isolate,
                 parent=parent,
                 parent_span=context.call_id,
                 observer=EmitObserver(context.emit),
                 emit=context.emit,
                 origin_session=context.session_id,
-                # R1-3: the shape contract rides with the supervised run —
-                # facts land in the packet and its ledger file, pointed at by
-                # the completion event.
-                output_schema=schema,
-                agent=agent,
-                readonly=readonly,
             )
         except RuntimeError as exc:
             return ToolResult(
@@ -461,6 +483,14 @@ class SubAgentListTool(BaseTool):
                     line += f" · {total} tok"
             if row.error:
                 line += f" · {row.error}"
+            if row.changed_paths:
+                line += f" · 改动 {len(row.changed_paths)} 个文件"
+            if row.worktree_branch:
+                line += f" · 分支 {row.worktree_branch}（未合并）"
+            if row.commit_error:
+                line += f" · 提交失败: {row.commit_error}"
+            if row.degraded:
+                line += f" · 降级: {row.degraded}"
             if row.ledger_path:
                 line += f" · 完整回包 {row.ledger_path}"
             lines.append(line)

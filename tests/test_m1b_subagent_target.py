@@ -110,14 +110,10 @@ class _RecordingRunner:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def run(
-        self, task, name, *, worktree_manager=None, isolate=True, parent=None,
-        parent_span="", observer=None, output_schema=None, agent=None,
-        readonly=False,
-    ):
+    async def run(self, task, name, **kwargs):
         from ai_coding.domain.subagent import SubagentResult
 
-        self.calls.append({"task": task, "name": name, "agent": agent})
+        self.calls.append({"task": task, "name": name, "agent": task.agent})
         return SubagentResult(status="completed", conclusion="ok")
 
 

@@ -8,15 +8,18 @@ allows exactly one tool message per call).
 """
 
 import asyncio
+import json
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from ai_coding.ai.engine import ChatEngine
 from ai_coding.core.events import BackgroundTaskDone
-from ai_coding.core.subagent import SubAgentRunner
+from ai_coding.core.subagent import SubAgentRunner, _notice_text
 from ai_coding.domain.loop import StepResult
-from ai_coding.domain.subagent import BackgroundTask
+from ai_coding.domain.subagent import BackgroundTask, SubagentResult
 from ai_coding.tools.base import ToolContext
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.subagent_tool import SubAgentTool
@@ -278,3 +281,225 @@ async def test_table_prunes_oldest_terminal_rows_first(monkeypatch):
     assert len(rows) == 2
     assert [r.name for r in rows] == ["three", "four"]
     assert all(r.status != "running" for r in rows)
+
+
+# ---- P2-A: row / notice / event are one projection ------------------------
+
+
+def test_notice_carries_facts_changes_branch_and_degraded():
+    result = SubagentResult(
+        status="completed",
+        conclusion="did it",
+        facts={"summary": "ok", "key_files": ["a.py"]},
+        changed_paths=("a.py", "b.py"),
+        worktree_branch="ai_sub_probe",
+        commit="abcdef123456",
+        commit_error="git commit: no identity",
+        degraded="worktree_unavailable",
+        ledger_path="/tmp/x.json",
+    )
+
+    line = _notice_text("run-1", "probe", result)
+
+    assert "facts:" in line
+    assert "改动 2 个文件" in line
+    assert "分支 ai_sub_probe（未合并）" in line
+    assert "提交失败" in line
+    assert "降级：未隔离" in line
+    assert "完整回包 /tmp/x.json" in line
+
+
+@pytest.mark.asyncio
+async def test_completion_event_carries_a_details_projection():
+    seen: list = []
+    runner = _runner(_Engine(text="done"))
+    runner._background["run-1"] = BackgroundTask(  # noqa: SLF001
+        run_id="run-1", name="probe", status="running", started=time.monotonic()
+    )
+    runner._announce["run-1"] = (seen.append, "origin", "probe")  # noqa: SLF001
+    result = SubagentResult(
+        status="completed",
+        conclusion="the whole prose stays in the ledger",
+        changed_paths=("a.py",),
+        worktree_branch="ai_sub_probe",
+        commit="abcdef123456",
+        degraded="worktree_unavailable",
+        ledger_path="/tmp/ledgers/abc123def456.json",
+    )
+
+    runner._finish_background("run-1", result, seen.append, "origin")  # noqa: SLF001
+
+    assert len(seen) == 1 and isinstance(seen[0], BackgroundTaskDone)
+    details = seen[0].details
+    assert details is not None
+    assert details["v"] == 3
+    assert details["messageId"] == "abc123def456"
+    assert details["changed_paths"] == ["a.py"]
+    assert details["worktree_branch"] == "ai_sub_probe"
+    assert details["commit"] == "abcdef123456"
+    assert details["degraded"] == "worktree_unavailable"
+    # A projection, not the packet: the conclusion and the task stay out.
+    assert "conclusion" not in details
+    assert "task" not in details
+
+
+@pytest.mark.asyncio
+async def test_row_projects_the_packet():
+    runner = _runner(_Engine(text="done"))
+    runner._background["run-1"] = BackgroundTask(  # noqa: SLF001
+        run_id="run-1", name="probe", status="running", started=time.monotonic()
+    )
+    result = SubagentResult(
+        status="completed",
+        conclusion="did it",
+        changed_paths=("a.py", "b.py"),
+        worktree_branch="ai_sub_probe",
+        commit="abcdef123456",
+        commit_error="git commit: no identity",
+        degraded="worktree_unavailable",
+        ledger_path="/tmp/x.json",
+    )
+
+    runner._finish_background(  # noqa: SLF001
+        "run-1", result, lambda _event: None, "origin"
+    )
+
+    row = runner.task_list()[0]
+    assert row.changed_paths == ("a.py", "b.py")
+    assert row.worktree_branch == "ai_sub_probe"
+    assert row.commit == "abcdef123456"
+    assert row.commit_error == "git commit: no identity"
+    assert row.degraded == "worktree_unavailable"
+
+
+class _Committer:
+    """A persistent worktree manager that always commits one sha."""
+
+    async def can_isolate(self) -> bool:
+        return True
+
+    async def create(self, name: str):
+        return SimpleNamespace(path="/tmp/child", branch="ai_sub_probe")
+
+    async def commit_if_dirty(
+        self, path: str, message: str
+    ) -> tuple[str | None, str | None]:
+        return "abcdef123456", None
+
+    async def remove(self, path: str) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_background_turn_commits_before_it_settles():
+    """P2-A: the settlement must not precede the commit.
+
+    A background run used to commit only at ``close``: the event said "done"
+    while the work lived solely in a directory the next close would delete.
+    """
+    seen: list = []
+    runner = _runner(_Engine(text="done"))
+    runner.spawn_background(
+        "do it", name="probe", emit=seen.append, worktree_manager=_Committer()
+    )
+    for _ in range(200):
+        if runner.task_list() and runner.task_list()[0].status != "running":
+            break
+        await asyncio.sleep(0.02)
+
+    row = runner.task_list()[0]
+    assert row.status == "completed"
+    assert row.commit == "abcdef123456"
+    assert row.worktree_branch == "ai_sub_probe"
+    assert len(seen) == 1
+    details = seen[0].details
+    assert details is not None
+    assert details["commit"] == "abcdef123456"
+    assert details["worktree_branch"] == "ai_sub_probe"
+
+
+class _NoGit:
+    """A configured manager whose root is not a git repository."""
+
+    async def can_isolate(self) -> bool:
+        return False
+
+    async def create(self, name: str):
+        raise AssertionError("create() must not be called")
+
+
+@pytest.mark.asyncio
+async def test_non_git_background_turn_degrades_the_ledger_too(tmp_path):
+    """P2-A: a non-git child has no branch, so the old branch-gated refresh
+    never ran and the ledger kept ``degraded: null`` while the row said
+    ``worktree_unavailable``.  Both projections must agree now.
+    """
+    runner = _runner(
+        _Engine(text="done"), workspace=str(tmp_path), ledger_root=tmp_path
+    )
+    run_id = runner.spawn_background(
+        "do it", name="probe", emit=lambda _e: None, worktree_manager=_NoGit()
+    )
+    row = await _wait_settled(runner, run_id)
+
+    assert row.degraded == "worktree_unavailable"
+    assert row.ledger_path is not None
+    payload = json.loads(Path(row.ledger_path).read_text(encoding="utf-8"))
+    assert payload["degraded"] == row.degraded
+    # The refresh merges result keys; the header and task survive.
+    assert payload["message_id"] == Path(row.ledger_path).stem
+    assert payload["task"]["brief"]["objective"] == "do it"
+    assert payload["run_id"] == run_id
+
+
+class _TwiceCommitter(_Committer):
+    """Commits on the first turn, finds nothing to commit on the second."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def commit_if_dirty(
+        self, path: str, message: str
+    ) -> tuple[str | None, str | None]:
+        self.calls += 1
+        if self.calls == 1:
+            return "abcdef123456", None
+        return None, None
+
+
+async def _wait_settled(runner, run_id: str) -> BackgroundTask:
+    for _ in range(200):
+        for row in runner.task_list():
+            if row.run_id == run_id and row.status != "running":
+                return row
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"run {run_id} never settled")
+
+
+@pytest.mark.asyncio
+async def test_a_second_turn_without_changes_keeps_the_first_turns_facts(tmp_path):
+    """P2-A review: turn 2 reports ``(None, None)``; that must not erase turn 1's
+    sha from the handle, the row, the sidecar or ``close_info``."""
+    runner = _runner(
+        _Engine(text="done"), workspace=str(tmp_path), ledger_root=tmp_path
+    )
+    manager = _TwiceCommitter()
+    run_id = runner.spawn_background(
+        "do it", name="probe", emit=lambda _e: None, worktree_manager=manager
+    )
+    row = await _wait_settled(runner, run_id)
+    assert row.commit == "abcdef123456"
+    meta_path = tmp_path / ".ai-coding" / "agents" / "meta" / f"{run_id}.json"
+    assert json.loads(meta_path.read_text(encoding="utf-8"))["commit"] == "abcdef123456"
+
+    status, _ = await runner.send_message(run_id, "again")
+    assert status == "running"
+    row = await _wait_settled(runner, run_id)
+
+    handle = runner._handles[run_id]  # noqa: SLF001
+    assert handle.commit == "abcdef123456"
+    assert handle.worktree_branch == "ai_sub_probe"
+    assert row.commit == "abcdef123456"
+    assert row.worktree_branch == "ai_sub_probe"
+    assert json.loads(meta_path.read_text(encoding="utf-8"))["commit"] == "abcdef123456"
+    assert runner.close_info(run_id)["commit"] == "abcdef123456"

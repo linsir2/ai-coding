@@ -24,6 +24,7 @@ from ai_coding.domain.subagent import (
     ParentContext,
     SubagentBrief,
     SubagentResult,
+    SubagentTask,
 )
 
 __all__ = [
@@ -150,23 +151,26 @@ class ResearchFanOut:
                 status="error",
                 error="invalid_brief: " + "; ".join(problems),
             )
+        task = SubagentTask(
+            brief=brief,
+            # A read-only child has nothing to isolate *from*: `readonly`
+            # already removes every mutating tool, and a worktree would hand
+            # it the HEAD snapshot instead of the working tree -- so research
+            # about code the user has not committed yet would answer "this
+            # file does not exist" (observed on a real run).
+            isolate=False,
+            agent="explore",
+            context_mode="task_only",
+            readonly=True,
+            output_schema=RESEARCH_SCHEMA,
+        )
         try:
             result = await self._runner.run(
-                brief.render(),
+                task,
                 f"research:{question.id}",
-                # A read-only child has nothing to isolate *from*: `readonly`
-                # already removes every mutating tool, and a worktree would
-                # hand it the HEAD snapshot instead of the working tree -- so
-                # research about code the user has not committed yet would
-                # answer "this file does not exist" (observed on a real run).
-                isolate=False,
                 parent=parent,
                 parent_span=parent_span,
                 observer=observer,
-                output_schema=RESEARCH_SCHEMA,
-                agent="explore",
-                context_mode="task_only",
-                readonly=True,
             )
         except Exception as exc:  # noqa: BLE001 — one child must not sink the fan-out
             return ResearchPacket(

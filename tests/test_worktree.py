@@ -158,3 +158,33 @@ async def test_git_spawn_failure_is_mapped(
     assert await mgr.can_isolate() is False
     with pytest.raises(WorktreeError, match="could not run git"):
         await mgr.create("x")
+
+
+# ---- P2-A: a failed commit is not "nothing changed" ------------------------
+
+
+async def test_commit_reports_failure_separately_from_no_change(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    mgr = WorktreeManager(git_repo)
+    wt = await mgr.create("probe")
+    try:
+        (wt.path / "f.txt").write_text("changed\n", encoding="utf-8")
+        sha, error = await mgr.commit_if_dirty(str(wt.path), "subagent: probe")
+        assert sha is not None and len(sha) == 40
+        assert error is None
+
+        # Nothing left to commit: an empty worktree must not look like a failure.
+        sha, error = await mgr.commit_if_dirty(str(wt.path), "subagent: probe")
+        assert sha is None and error is None
+
+        # A path that is not a git work tree: changed or not, the command
+        # itself failed, and the caller must be able to say so.
+        bad = tmp_path / "not-a-repo"
+        bad.mkdir()
+        (bad / "x.txt").write_text("work\n", encoding="utf-8")
+        sha, error = await mgr.commit_if_dirty(str(bad), "subagent: probe")
+        assert sha is None
+        assert error and "git status" in error
+    finally:
+        await mgr.remove(str(wt.path))

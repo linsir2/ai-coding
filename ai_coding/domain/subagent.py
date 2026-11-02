@@ -23,13 +23,15 @@ if TYPE_CHECKING:
 #: the plan executor cannot drift apart.
 SUCCESS_STATUSES: frozenset[str] = frozenset({"completed", "max_iterations"})
 
-#: Wire version of ``SubagentResult.to_dict()`` (the packet, and the ledger file
-#: written from it).  Compatibility rule: **additive optional fields only**;
-#: adding a required field, removing one, or changing a field's meaning bumps
-#: this number.  v2 (r25) removed ``notes``/``confidence`` and added
-#: ``worktree_branch``/``commit``.  Consumers read ``v`` before trusting the
-#: shape.
-SUBAGENT_PACKET_VERSION = 2
+#: Wire version of the parent↔child envelope (``AgentPacket.to_dict()``) and of
+#: the packet, and the ledger file written from it.  Compatibility rule:
+#: **additive optional fields only**; adding a required field, removing one, or
+#: changing a field's meaning bumps this number.  v2 (r25) removed
+#: ``notes``/``confidence`` and added ``worktree_branch``/``commit``.  v3 (P2-A)
+#: added ``changed_paths``/``commit_error``/``degraded`` and the
+#: ``message_id``/``run_id``/``origin_session`` header.  Consumers read ``v``
+#: before trusting the shape.
+SUBAGENT_PACKET_VERSION = 3
 
 #: Caps for the structured brief.  One source for every internal caller: the
 #: fan-out and any future plan-side research build the same object, and the
@@ -134,6 +136,116 @@ class SubagentBrief:
             ]
         return "\n".join(lines)
 
+    def to_dict(self) -> dict[str, Any]:
+        """The serialized brief (the ledger's ``task.brief`` and meta)."""
+        return {
+            "objective": self.objective,
+            "scope": list(self.scope),
+            "context": self.context,
+            "constraints": list(self.constraints),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SubagentBrief:
+        scope = data.get("scope")
+        constraints = data.get("constraints")
+        return cls(
+            objective=str(data.get("objective", "") or ""),
+            scope=tuple(str(item) for item in scope) if isinstance(scope, list) else (),
+            context=str(data.get("context", "") or ""),
+            constraints=(
+                tuple(str(item) for item in constraints)
+                if isinstance(constraints, list)
+                else ()
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class PacketHeader:
+    """Envelope identity shared by every projection of one settlement.
+
+    ``message_id`` is generated only by the runner's turn boundary; it names
+    the ledger file too (``transcripts/subagents/<message_id>.json``).  The
+    sync/one-shot path leaves ``run_id`` empty; a background run carries it so
+    notice/event/list can address the child.  ``origin_session`` names the
+    spawning session for event/meta/bridge provenance.
+    """
+
+    message_id: str = ""
+    run_id: str = ""
+    origin_session: str = ""
+    v: int = SUBAGENT_PACKET_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "v": self.v,
+            "message_id": self.message_id,
+            "run_id": self.run_id,
+            "origin_session": self.origin_session,
+        }
+
+
+@dataclass(frozen=True)
+class SubagentTask:
+    """The parent → child input, one shape for every internal caller.
+
+    ``render()`` keeps the free-form path byte-identical: a brief with only an
+    objective returns that objective verbatim (no ``[TASK]`` envelope).  Any
+    extra section uses the frozen ``SubagentBrief.render()`` envelope that the
+    fan-out already pins.
+    """
+
+    brief: SubagentBrief
+    #: ``None`` = use the runner's configured window; "full"/"task_only" override.
+    context_mode: str | None = None
+    agent: str | None = None
+    readonly: bool = False
+    isolate: bool = True
+    output_schema: dict[str, Any] | None = None
+
+    def render(self) -> str:
+        if not (self.brief.context.strip() or self.brief.scope or self.brief.constraints):
+            return self.brief.objective
+        return self.brief.render()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "brief": self.brief.to_dict(),
+            "context_mode": self.context_mode,
+            "agent": self.agent,
+            "readonly": self.readonly,
+            "isolate": self.isolate,
+            "output_schema": (
+                dict(self.output_schema) if self.output_schema is not None else None
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SubagentTask:
+        raw_brief = data.get("brief")
+        brief = (
+            SubagentBrief.from_dict(raw_brief)
+            if isinstance(raw_brief, dict)
+            else SubagentBrief(objective="")
+        )
+        schema = data.get("output_schema")
+        mode = data.get("context_mode")
+        agent = data.get("agent")
+        return cls(
+            brief=brief,
+            context_mode=str(mode) if isinstance(mode, str) else None,
+            agent=str(agent) if isinstance(agent, str) else None,
+            readonly=bool(data.get("readonly", False)),
+            isolate=bool(data.get("isolate", True)),
+            output_schema=dict(schema) if isinstance(schema, dict) else None,
+        )
+
+    @classmethod
+    def from_objective(cls, text: str, **dispatch: Any) -> SubagentTask:
+        """Convenience constructor: wrap a free-form objective in the brief."""
+        return cls(brief=SubagentBrief(objective=text), **dispatch)
+
 
 def _list_problems(
     name: str, values: tuple[str, ...], max_items: int, max_chars: int
@@ -198,6 +310,19 @@ class SubagentResult:
     #: delegation looked successful while the work was gone.
     worktree_branch: str | None = None
     commit: str | None = None
+    #: P2-A/v3: what the child's tools *declared* as changed files —
+    #: ``loop.last_artifacts`` entries with ``kind == "file"``, deduped and in
+    #: order.  Bash edits are not included (a git diff is P2-B).  Consumers:
+    #: notice/list/event projection/tool data/front end.
+    changed_paths: tuple[str, ...] = ()
+    #: P2-A/v3: there were declared changes but the commit failed, with the
+    #: command and its reason.  ``None`` means no failure (or nothing to
+    #: commit).  Consumers: ``_render``/notice/list/event/front end.
+    commit_error: str | None = None
+    #: P2-A/v3: why isolation was skipped although the child asked for it
+    #: (``worktree_unavailable`` / ``worktree_create_failed``).  Consumers: the
+    #: same four surfaces, rendered as "未隔离，已在主工作区执行".
+    degraded: str | None = None
 
     @property
     def text(self) -> str | None:
@@ -224,6 +349,31 @@ class SubagentResult:
             "schema_errors": list(self.schema_errors),
             "worktree_branch": self.worktree_branch,
             "commit": self.commit,
+            "changed_paths": list(self.changed_paths),
+            "commit_error": self.commit_error,
+            "degraded": self.degraded,
+        }
+
+
+@dataclass(frozen=True)
+class AgentPacket:
+    """The one parent↔child envelope: header + task + result.
+
+    ``to_dict()`` is the flat wire shape (the ledger file too): header keys,
+    ``task`` and every result key.  Only ``to_dict`` is provided — the ledger's
+    sole internal reader (``_refresh_ledger``) merges result fields into the
+    raw JSON and never needs a typed parse.
+    """
+
+    header: PacketHeader
+    task: SubagentTask | None
+    result: SubagentResult
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.header.to_dict(),
+            "task": self.task.to_dict() if self.task is not None else None,
+            **self.result.to_dict(),
         }
 
 
@@ -400,10 +550,14 @@ def _object_blocks(text: str) -> list[str]:
 
 
 __all__ = [
+    "AgentPacket",
     "BackgroundTask",
+    "PacketHeader",
     "SubagentTurn",
     "ParentContext",
+    "SubagentBrief",
     "SubagentResult",
+    "SubagentTask",
     "extract_json_facts",
 ]
 
@@ -445,6 +599,14 @@ class BackgroundTask:
     #: hand the model a pointer the ``read`` tool can follow.  None while the
     #: run is live, and for rows that never wrote one (rejected at spawn).
     ledger_path: str | None = None
+    #: P2-A: the settlement projection — the row and the notice/event are the
+    #: same facts, only cropped.  The write facts are what the parent needs to
+    #: decide about the child's work (the notice text itself rides the event).
+    worktree_branch: str | None = None
+    commit: str | None = None
+    changed_paths: tuple[str, ...] = ()
+    commit_error: str | None = None
+    degraded: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -458,11 +620,17 @@ class BackgroundTask:
             "usage": dict(self.usage) if self.usage is not None else None,
             "sessionId": self.session_id,
             "ledgerPath": self.ledger_path,
+            "worktreeBranch": self.worktree_branch,
+            "commit": self.commit,
+            "changedPaths": list(self.changed_paths),
+            "commitError": self.commit_error,
+            "degraded": self.degraded,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BackgroundTask:
         usage = data.get("usage")
+        changed = data.get("changedPaths")
         return cls(
             run_id=str(data.get("runId", "")),
             name=str(data.get("name", "sub-agent")),
@@ -475,5 +643,24 @@ class BackgroundTask:
             session_id=str(data.get("sessionId", "") or ""),
             ledger_path=(
                 str(data["ledgerPath"]) if data.get("ledgerPath") is not None else None
+            ),
+            worktree_branch=(
+                str(data["worktreeBranch"])
+                if data.get("worktreeBranch") is not None
+                else None
+            ),
+            commit=str(data["commit"]) if data.get("commit") is not None else None,
+            changed_paths=(
+                tuple(str(item) for item in changed)
+                if isinstance(changed, list)
+                else ()
+            ),
+            commit_error=(
+                str(data["commitError"])
+                if data.get("commitError") is not None
+                else None
+            ),
+            degraded=(
+                str(data["degraded"]) if data.get("degraded") is not None else None
             ),
         )

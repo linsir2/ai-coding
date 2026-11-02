@@ -125,8 +125,10 @@ class WorktreeManager:
         if leftover.exists():
             shutil.rmtree(leftover, ignore_errors=True)
 
-    async def commit_if_dirty(self, path: str | Path, message: str) -> str | None:
-        """Commit a child's worktree changes; return the sha, or ``None``.
+    async def commit_if_dirty(
+        self, path: str | Path, message: str
+    ) -> tuple[str | None, str | None]:
+        """Commit a child's worktree changes; return ``(sha, error)``.
 
         ``temporary()`` force-removes the directory, so an uncommitted edit dies
         with it -- a write delegation used to look successful while the work was
@@ -134,9 +136,14 @@ class WorktreeManager:
         still removed).  Identity is passed per call so a machine with no
         configured git user still produces a commit.
 
-        Never raises: any failure (git missing, timeout, no identity) is
-        reported as ``None``, which the packet renders as "no commit" instead of
-        turning a finished child into an error.
+        Three outcomes, deliberately distinct (P2-A): ``(sha, None)`` committed;
+        ``(None, None)`` nothing changed; ``(None, "<command>: <reason>")`` there
+        were changes but the commit failed.  The old signature returned ``None``
+        for both of the latter two, so a lost write was indistinguishable from
+        an empty one.
+
+        Never raises: git missing/timeout is reported as a commit failure and
+        the packet carries it instead of turning a finished child into an error.
         """
         target = str(Path(path).expanduser().resolve())
         try:
@@ -146,12 +153,14 @@ class WorktreeManager:
                 target, "status", "--porcelain", timeout=self._timeout,
                 merge_stderr=False,
             )
-            if code != 0 or not text.strip():
-                return None
-            code, _ = await git(target, "add", "-A", timeout=self._timeout)
             if code != 0:
-                return None
-            code, _ = await git(
+                return None, f"git status: {text.strip() or 'failed'}"
+            if not text.strip():
+                return None, None
+            code, text = await git(target, "add", "-A", timeout=self._timeout)
+            if code != 0:
+                return None, f"git add: {text.strip() or 'failed'}"
+            code, text = await git(
                 target,
                 "-c", "user.name=ai-coding",
                 "-c", "user.email=subagent@local",
@@ -159,11 +168,13 @@ class WorktreeManager:
                 timeout=self._timeout,
             )
             if code != 0:
-                return None
+                return None, f"git commit: {text.strip() or 'failed'}"
             code, sha = await git(target, "rev-parse", "HEAD", timeout=self._timeout)
-        except (OSError, TimeoutError):
-            return None
-        return sha.strip() if code == 0 and sha.strip() else None
+        except (OSError, TimeoutError) as exc:
+            return None, f"git: {exc}"
+        if code != 0 or not sha.strip():
+            return None, f"git rev-parse HEAD: {sha.strip() or 'failed'}"
+        return sha.strip(), None
 
     @asynccontextmanager
     async def temporary(self, name: str = "sub") -> AsyncIterator[Worktree]:

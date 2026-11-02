@@ -35,6 +35,7 @@ class _FakeRunner:
         self.wait_result: tuple[str, int] = ("completed", 1200)
         self.cancel_result = True
         self.close_result = True
+        self.close_info_result: dict = {}
         self.spawn_error: Exception | None = None
 
     def spawn_background(self, task, name="sub-agent", **kwargs):
@@ -61,6 +62,9 @@ class _FakeRunner:
     async def close(self, run_id):
         self.closes.append(run_id)
         return self.close_result
+
+    def close_info(self, run_id):
+        return dict(self.close_info_result)
 
 
 def _ctx() -> ToolContext:
@@ -135,7 +139,8 @@ async def test_spawn_defaults_to_a_task_only_child():
         "fork_turns": "none",
     }
     call = runner.spawns[0]
-    assert call["task"] == "count files"
+    packet = call["task"]
+    assert packet.render() == "count files"
     assert call["name"] == "sub-agent"
     # C-5a review: "none" drops the parent *messages*, never the rule layer --
     # a clean-context child must still inherit the operator's deny rules.
@@ -143,9 +148,11 @@ async def test_spawn_defaults_to_a_task_only_child():
     assert parent is not None
     assert parent.messages == ()
     assert parent.permissions == tuple(_ctx().permissions)
-    assert call["context_mode"] == "task_only"
+    assert packet.context_mode == "task_only"
+    assert packet.readonly is False
+    assert packet.agent is None
+    assert packet.isolate is False
     assert call["worktree_manager"] == "wt/1"
-    assert call["isolate"] is False
     assert call["parent_span"] == "call_1"
     assert call["origin_session"] == "sid"
 
@@ -162,7 +169,7 @@ async def test_spawn_with_fork_turns_all_forwards_the_parent_view():
 
     call = runner.spawns[0]
     assert call["name"] == "helper"
-    assert call["context_mode"] == "full"
+    assert call["task"].context_mode == "full"
     assert call["parent"] is not None
     assert call["parent"].messages == tuple(ctx.messages)
     assert call["parent"].permissions == tuple(ctx.permissions)
@@ -339,11 +346,11 @@ async def test_spawn_forwards_readonly_and_agent_and_drops_isolation():
 
     assert result.success is True
     call = runner.spawns[0]
-    assert call["readonly"] is True
-    assert call["agent"] == "explore"
+    assert call["task"].readonly is True
+    assert call["task"].agent == "explore"
     # The tool forwards the configured flag untouched; the runner decides that
     # a read-only child reads the live workspace, not a worktree snapshot.
-    assert call["isolate"] is True
+    assert call["task"].isolate is True
 
 
 @pytest.mark.asyncio
@@ -354,9 +361,9 @@ async def test_spawn_without_readonly_keeps_the_child_writable_and_isolated():
     await tool.execute({"task": "edit"}, _ctx())
 
     call = runner.spawns[0]
-    assert call["readonly"] is False
-    assert call["agent"] is None
-    assert call["isolate"] is True
+    assert call["task"].readonly is False
+    assert call["task"].agent is None
+    assert call["task"].isolate is True
 
 
 @pytest.mark.asyncio
@@ -389,6 +396,65 @@ async def test_wait_and_close_accept_a_unique_prefix():
     closed = await CloseAgentTool(runner).execute({"agent_id": "run_ab"}, _ctx())
     assert closed.success is True
     assert runner.closes == ["run_ab12cd34"]
+
+
+# ---- P2-A: spawn builds a packet; close echoes the commit ------------------
+
+
+@pytest.mark.asyncio
+async def test_spawn_builds_a_task_packet_from_fork():
+    runner = _FakeRunner()
+    tool = SpawnAgentTool(runner, worktree_manager="wt/1", isolate=True)
+
+    await tool.execute(
+        {"task": "scan", "readonly": True, "agent": "explore"}, _ctx()
+    )
+
+    packet = runner.spawns[0]["task"]
+    assert packet.context_mode == "task_only"
+    assert packet.readonly is True
+    assert packet.agent == "explore"
+    assert packet.isolate is True
+
+    runner.spawns.clear()
+    await tool.execute({"task": "do it", "fork_turns": "all"}, _ctx())
+
+    full = runner.spawns[0]["task"]
+    assert full.context_mode == "full"
+    assert full.readonly is False
+    assert full.isolate is True
+
+
+@pytest.mark.asyncio
+async def test_close_reports_the_commit():
+    runner = _FakeRunner()
+    runner.rows = [
+        BackgroundTask(run_id="run_a", status="running", started=0.0)
+    ]
+    runner.close_info_result = {"commit": "abcdef123456", "commitError": None}
+
+    result = await CloseAgentTool(runner).execute({"agent_id": "run_a"}, _ctx())
+
+    assert result.success is True
+    assert result.output == "closed run_a · 提交 abcdef1"
+    assert result.data is not None and result.data["commit"] == "abcdef123456"
+
+
+@pytest.mark.asyncio
+async def test_close_reports_a_commit_failure():
+    runner = _FakeRunner()
+    runner.rows = [
+        BackgroundTask(run_id="run_a", status="running", started=0.0)
+    ]
+    runner.close_info_result = {"commit": None, "commitError": "git commit: no identity"}
+
+    result = await CloseAgentTool(runner).execute({"agent_id": "run_a"}, _ctx())
+
+    assert result.success is True
+    assert "提交失败" in result.output
+    assert "git commit: no identity" in result.output
+    assert result.data is not None
+    assert result.data["commit_error"] == "git commit: no identity"
 
 
 @pytest.mark.asyncio

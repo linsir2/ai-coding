@@ -313,7 +313,15 @@ class _SpawnRunner:
         self.spawns: list[dict] = []
 
     def spawn_background(self, task, name="sub-agent", **kwargs):
-        self.spawns.append({"task": task, "name": name, **kwargs})
+        from ai_coding.domain.subagent import SubagentTask
+
+        packet = task if isinstance(task, SubagentTask) else None
+        extra = (
+            {"readonly": packet.readonly, "isolate": packet.isolate}
+            if packet is not None
+            else {}
+        )
+        self.spawns.append({"task": task, "name": name, **extra, **kwargs})
         return "run_000000000001"
 
 
@@ -342,15 +350,22 @@ class _SubAgentRunner:
 
     async def run(self, task, name="sub-agent", **kwargs):
         from ai_coding.core.subagent import SubAgentRunner
-        from ai_coding.domain.subagent import SubagentResult
+        from ai_coding.domain.subagent import SubagentResult, SubagentTask
 
-        readonly = kwargs.get("readonly", False)
+        readonly = (
+            task.readonly if isinstance(task, SubagentTask)
+            else kwargs.get("readonly", False)
+        )
+        requested_isolation = (
+            task.isolate if isinstance(task, SubagentTask)
+            else kwargs.get("isolate", True)
+        )
         self.runs.append({
             "task": task,
             "name": name,
             "readonly": readonly,
             "isolate": SubAgentRunner._should_isolate(
-                kwargs.get("isolate", True), readonly
+                requested_isolation, readonly
             ),
         })
         return SubagentResult(status="completed", conclusion="done")

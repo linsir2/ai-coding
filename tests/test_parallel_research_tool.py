@@ -3,7 +3,7 @@
 import pytest
 
 from ai_coding.domain.message import ChatMessage
-from ai_coding.domain.subagent import SubagentResult
+from ai_coding.domain.subagent import SubagentResult, SubagentTask
 from ai_coding.tools.base import ToolContext
 from ai_coding.tools.parallel_research_tool import ParallelResearchTool
 
@@ -16,7 +16,15 @@ class _Runner:
         self.max_concurrent = max_concurrent
 
     async def run(self, task, name="sub-agent", **kwargs):
-        self.calls.append({"task": task, "name": name, **kwargs})
+        packet = task if isinstance(task, SubagentTask) else None
+        self.calls.append(
+            {
+                "task": packet.render() if packet is not None else task,
+                "packet": packet,
+                "name": name,
+                **kwargs,
+            }
+        )
         if self._results:
             return self._results.pop(0)
         return SubagentResult(
@@ -54,10 +62,10 @@ async def test_two_questions_run_and_merge():
     assert "## q1 · completed" in result.output
     assert "## q2 · completed" in result.output
     assert len(runner.calls) == 2
-    assert runner.calls[0]["agent"] == "explore"
-    assert runner.calls[0]["readonly"] is True
-    assert runner.calls[0]["context_mode"] == "task_only"
-    assert runner.calls[0]["isolate"] is False
+    assert runner.calls[0]["packet"].agent == "explore"
+    assert runner.calls[0]["packet"].readonly is True
+    assert runner.calls[0]["packet"].context_mode == "task_only"
+    assert runner.calls[0]["packet"].isolate is False
     assert result.data is not None
     assert result.data["questions"] == 2 and result.data["completed"] == 2
     assert result.data["usage"] == {"prompt_tokens": 20, "completion_tokens": 10}

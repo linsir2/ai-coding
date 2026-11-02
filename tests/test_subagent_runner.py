@@ -21,7 +21,7 @@ from ai_coding.core.subagent import SubAgentRunner
 from ai_coding.core.worktree import WorktreeError
 from ai_coding.domain.loop import StepResult
 from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolResult
-from ai_coding.domain.subagent import ParentContext
+from ai_coding.domain.subagent import ParentContext, SubagentTask
 from ai_coding.tools.base import BaseTool
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.todo_write_tool import TodoWriteTool
@@ -109,7 +109,7 @@ class _Worktree:
         return _cm(name)
 
     async def commit_if_dirty(self, path, message):
-        return None
+        return None, None
 
 
 def _registry(*extra: BaseTool) -> ToolRegistry:
@@ -538,6 +538,147 @@ async def test_worktree_failure_names_the_subagent_that_escaped_isolation(tmp_pa
     assert scoped[0].event.component == "worktree_isolate"
     assert scoped[0].scope == "subagent:escaper:call_1"
     assert scoped[0].parent == "call_1"
+
+
+@pytest.mark.asyncio
+async def test_no_manager_means_no_degraded(tmp_path):
+    """P2-A: "isolation was never asked for/configured" is not a degradation."""
+    result = await _runner(_Engine()).run("t")
+    assert result.degraded is None
+
+
+@pytest.mark.asyncio
+async def test_non_git_workspace_is_not_silently_shared(tmp_path):
+    """P2-A: a configured manager that cannot isolate must say so.
+
+    Running in the main workspace is still the behaviour (the child must not
+    fail), but the result now carries ``worktree_unavailable`` and the scoped
+    degraded event, so a write delegation cannot believe it was isolated.
+    """
+
+    class _NoGit:
+        async def can_isolate(self) -> bool:
+            return False
+
+        def temporary(self, name: str):
+            raise AssertionError("temporary() must not be entered")
+
+    observer = RecordingObserver()
+    seen: list = []
+    result = await _runner(_Engine(), observer=observer, seen_tools=seen).run(
+        "t", name="escaper", worktree_manager=_NoGit(), isolate=True,
+        parent_span="call_1",
+    )
+
+    assert result.status == "completed"
+    assert result.degraded == "worktree_unavailable"
+    assert seen == [None]
+    scoped = [
+        event
+        for event in observer.events
+        if isinstance(event, ScopedEvent) and isinstance(event.event, Degraded)
+    ]
+    assert len(scoped) == 1
+    assert scoped[0].event.component == "worktree_isolate"
+    assert scoped[0].scope == "subagent:escaper:call_1"
+
+
+@pytest.mark.asyncio
+async def test_non_git_workspace_degrades_the_ledger_too(tmp_path):
+    """P2-A: the ledger is written inside ``_run_turn``, before the non-git
+    fallback is known and before any branch exists; the degradation must still
+    be merged into the file (and the header/task that were already there kept).
+    """
+
+    class _NoGit:
+        async def can_isolate(self) -> bool:
+            return False
+
+        def temporary(self, name: str):
+            raise AssertionError("temporary() must not be entered")
+
+    runner = _runner(_Engine(), ledger_root=tmp_path)
+    packet = SubagentTask.from_objective("write a file")
+    result = await runner.run(
+        packet, name="escaper", worktree_manager=_NoGit(), isolate=True
+    )
+
+    assert result.degraded == "worktree_unavailable"
+    assert result.ledger_path is not None
+    payload = json.loads(Path(result.ledger_path).read_text(encoding="utf-8"))
+    assert payload["degraded"] == "worktree_unavailable"
+    # The refresh merges result keys; the header and task survive.
+    assert payload["message_id"] == Path(result.ledger_path).stem
+    assert payload["task"]["brief"]["objective"] == "write a file"
+
+
+@pytest.mark.asyncio
+async def test_request_is_persisted_in_ledger_and_meta(tmp_path):
+    """The packet is the task the ledger names and the sidecar can rebuild."""
+    runner = _runner(_Engine(), ledger_root=tmp_path)
+    packet = SubagentTask.from_objective("do the thing", context_mode="task_only")
+    run_id = runner.spawn_background(packet, name="probe", emit=lambda _e: None)
+    row = None
+    for _ in range(200):
+        rows = [item for item in runner.task_list() if item.run_id == run_id]
+        if rows and rows[0].status != "running":
+            row = rows[0]
+            break
+        await asyncio.sleep(0.02)
+    assert row is not None and row.ledger_path
+    payload = json.loads(Path(row.ledger_path).read_text(encoding="utf-8"))
+    assert payload["task"]["brief"]["objective"] == "do the thing"
+    assert payload["run_id"] == run_id
+
+    meta = json.loads(
+        (tmp_path / ".ai-coding" / "agents" / "meta" / f"{run_id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert meta["taskPacket"]["brief"]["objective"] == "do the thing"
+
+
+@pytest.mark.asyncio
+async def test_timeout_still_writes_the_ledger_with_changes(tmp_path):
+    """A cut keeps what the tools already declared (changed_paths + ledger)."""
+    from ai_coding.domain.message import ToolArtifact
+
+    class _HangSecond(_Engine):
+        def __init__(self) -> None:
+            super().__init__(
+                [
+                    StepResult(
+                        tool_calls=[
+                            ToolCallRef(id="c1", name="write", arguments='{"path":"a.py"}')
+                        ],
+                        finish_reason="tool_calls",
+                    )
+                ]
+            )
+
+        async def step(self, messages, *, tools, instructions=None, on_delta=None):
+            if self.requests:
+                await asyncio.sleep(30)
+            return await super().step(
+                messages, tools=tools, instructions=instructions, on_delta=on_delta
+            )
+
+    writer = _Tool(
+        "write",
+        ToolResult(
+            success=True, output="wrote", artifacts=(ToolArtifact(path="a.py"),)
+        ),
+    )
+    result = await _runner(
+        _HangSecond(), registry=_registry(writer), timeout=0.05, ledger_root=tmp_path
+    ).run("t")
+
+    assert result.status == "timeout"
+    assert result.ledger_path is not None
+    assert result.changed_paths == ("a.py",)
+    payload = json.loads(Path(result.ledger_path).read_text(encoding="utf-8"))
+    assert payload["changed_paths"] == ["a.py"]
+    assert payload["status"] == "timeout"
 
 
 @pytest.mark.asyncio

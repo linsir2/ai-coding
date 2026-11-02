@@ -584,6 +584,36 @@ describe("notices", () => {
     expect((notice as { text: string }).text).toContain("任务 abcdef012345")
   })
 
+  test("background.done names the branch, changed files and degradation", () => {
+    const state = feed(
+      initialState(),
+      { kind: "submitted", text: "hi" },
+      delta("done"),
+      wire("background.done", {
+        runId: "r1",
+        name: "scout",
+        status: "completed",
+        summary: "did it",
+        truncated: false,
+        originSession: "",
+        ledgerPath: "/tmp/x.json",
+        worktreeBranch: "ai_sub_scout",
+        changedPaths: ["a.py", "b.py"],
+        commit: "abcdef123456",
+        commitError: "git commit: no identity",
+        degraded: "worktree_unavailable",
+      }),
+    )
+    const notice = lastAssistant(state).parts.at(-1)
+    expect(notice).toMatchObject({ kind: "notice" })
+    const text = (notice as { text: string }).text
+    expect(text).toContain("分支 ai_sub_scout（未合并）")
+    expect(text).toContain("改动 2 个文件")
+    expect(text).toContain("提交 abcdef1")
+    expect(text).toContain("提交失败")
+    expect(text).toContain("降级")
+  })
+
 describe("turn lifecycle", () => {
   test("completed turns are silent and free the prompt", () => {
     const state = feed(

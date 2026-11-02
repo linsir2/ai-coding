@@ -9,19 +9,29 @@ from ai_coding.core.research_fanout import (
     render_report,
     total_usage,
 )
-from ai_coding.domain.subagent import ParentContext, SubagentResult
+from ai_coding.domain.subagent import ParentContext, SubagentResult, SubagentTask
 
 
 class _Runner:
     def __init__(self, results):
         self._results = list(results)
         self.calls: list[dict] = []
+        self.results_seen: list[SubagentResult] = []
 
     async def run(self, task, name="sub-agent", **kwargs):
-        self.calls.append({"task": task, "name": name, **kwargs})
+        packet = task if isinstance(task, SubagentTask) else None
+        self.calls.append(
+            {
+                "task": packet.render() if packet is not None else task,
+                "packet": packet,
+                "name": name,
+                **kwargs,
+            }
+        )
         result = self._results.pop(0)
         if isinstance(result, Exception):
             raise result
+        self.results_seen.append(result)
         return result
 
 
@@ -52,13 +62,13 @@ async def test_three_questions_run_as_read_only_task_only_children():
     )
 
     assert [packet.id for packet in packets] == ["q1", "q2", "q3"]
-    assert all(call["agent"] == "explore" for call in runner.calls)
-    assert all(call["context_mode"] == "task_only" for call in runner.calls)
-    assert all(call["readonly"] is True for call in runner.calls)
+    assert all(call["packet"].agent == "explore" for call in runner.calls)
+    assert all(call["packet"].context_mode == "task_only" for call in runner.calls)
+    assert all(call["packet"].readonly is True for call in runner.calls)
     # No worktree: a readonly child must read the live working tree (a HEAD
     # snapshot hid the untracked file a real run was asked about).
-    assert all(call["isolate"] is False for call in runner.calls)
-    assert all(call["output_schema"] == RESEARCH_SCHEMA for call in runner.calls)
+    assert all(call["packet"].isolate is False for call in runner.calls)
+    assert all(call["packet"].output_schema == RESEARCH_SCHEMA for call in runner.calls)
     assert all(call["parent_span"] == "call-1" for call in runner.calls)
     assert "目标：给房间加价格" in runner.calls[0]["task"]
     assert "路由在哪注册？" in runner.calls[0]["task"]
@@ -168,6 +178,17 @@ async def test_the_child_receives_the_frozen_brief_envelope():
     assert "[CONSTRAINTS]\n- 只读" in task
     # The format instruction belongs to the runner's schema trailer, not the brief.
     assert "[response format" not in task
+
+
+@pytest.mark.asyncio
+async def test_fanout_returns_a_settled_packet():
+    runner = _Runner([_result()])
+
+    packets = await ResearchFanOut(runner).run(
+        [ResearchQuestion("q1", "路由在哪注册？", ("app/",))]
+    )
+
+    assert packets[0].status == "completed"
 
 
 @pytest.mark.asyncio
