@@ -21,7 +21,7 @@ class _FakeRunner:
 
     async def run(
         self, task, name, *, worktree_manager=None, parent=None, parent_span="",
-        observer=None, origin_session="",
+        observer=None, origin_session="", task_id="", fence=0,
     ):
         self.calls.append(
             {

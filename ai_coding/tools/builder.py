@@ -470,6 +470,7 @@ def _assemble_registry(
         from ai_coding.core.execution_slots import ExecutionSlotPool
         from ai_coding.core.research_fanout import ResearchFanOut
         from ai_coding.core.scheduler import Scheduler
+        from ai_coding.core.task_journal import TaskJournal
         from ai_coding.core.task_registry import TaskRegistry
 
         slots = ExecutionSlotPool(_execution_slot_limit(app_cfg))
@@ -499,8 +500,10 @@ def _assemble_registry(
             worktree_manager=manager,
             slots=slots,
             registry=task_registry,
+            journal=TaskJournal(workspace),
         )
         runner.scheduler = scheduler
+        scheduler.recover()
         registry.execution_slots = slots
         registry.scheduler = scheduler
 

@@ -14,13 +14,30 @@ Deliberately absent (C1 has no consumer for them):
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from ai_coding.domain.subagent import SubagentTask
 
-__all__ = ["TaskRequest"]
+__all__ = ["TaskRequest", "digest_task", "digest_text"]
+
+
+def _digest(*parts: Any) -> str:
+    text = json.dumps([str(part) for part in parts], ensure_ascii=False,
+                      sort_keys=True)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def digest_task(task: SubagentTask) -> str:
+    """Canonical digest of a payload, excluding the random request id."""
+    return _digest(json.dumps(task.to_dict(), ensure_ascii=False, sort_keys=True))
+
+
+def digest_text(text: str) -> str:
+    return _digest(text)
 
 
 @dataclass(frozen=True)
@@ -33,6 +50,11 @@ class TaskRequest:
     kind: str = "child"
     origin_session: str = ""
     parent_span: str = ""
+    #: P2-C2: the task that delegated this one (empty for a top-level turn).
+    parent_id: str = ""
+    #: P2-C2: caller-supplied dedupe key and canonical payload digest.
+    idempotency_key: str = ""
+    payload_digest: str = ""
 
     def __post_init__(self) -> None:
         if not self.id.strip():
@@ -55,6 +77,9 @@ class TaskRequest:
             "name": self.name,
             "origin_session": self.origin_session,
             "parent_span": self.parent_span,
+            "parent_id": self.parent_id,
+            "idempotency_key": self.idempotency_key,
+            "payload_digest": self.payload_digest,
             "task": self.task.to_dict(),
         }
 
@@ -66,6 +91,9 @@ class TaskRequest:
         name: str = "sub-agent",
         origin_session: str = "",
         parent_span: str = "",
+        parent_id: str = "",
+        idempotency_key: str = "",
+        payload_digest: str = "",
         id: str | None = None,
     ) -> TaskRequest:
         """Build a child request; ``id`` is generated when the caller omits it."""
@@ -76,4 +104,7 @@ class TaskRequest:
             kind="child",
             origin_session=origin_session,
             parent_span=parent_span,
+            parent_id=parent_id,
+            idempotency_key=idempotency_key,
+            payload_digest=payload_digest,
         )

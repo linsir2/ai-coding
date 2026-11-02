@@ -66,6 +66,22 @@ def _meta_path(tmp_path, run_id: str):
 
 
 @pytest.mark.asyncio
+async def test_stop_run_is_terminal_and_clears_the_mailbox(tmp_path):
+    runner = _runner(tmp_path)
+    run_id = runner.spawn_background("inspect", name="probe")
+    runner._handles[run_id].mailbox.append("later")
+
+    assert await runner.stop_run(run_id) is True
+    handle = runner._handles[run_id]
+    assert handle.stopped is True
+    assert list(handle.mailbox) == []
+    assert await runner.send_message(run_id, "again") == ("stopped", run_id)
+    assert await runner.resume(run_id) == ("stopped", run_id)
+    row = next(row for row in runner.task_list() if row.run_id == run_id)
+    assert row.status == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_spawn_registers_a_handle_and_persists_session_and_sidecar(tmp_path):
     runner = _runner(tmp_path)
     run_id = runner.spawn_background(

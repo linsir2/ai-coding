@@ -70,12 +70,12 @@ class _FakeRunner:
         return dict(self.close_info_result)
 
 
-def _ctx() -> ToolContext:
+def _ctx(call_id: str = "call_1") -> ToolContext:
     return ToolContext(
         messages=(ChatMessage(role="user", content="parent view", timestamp="t"),),
         permissions=(Rule(action="edit", resource="*.env", effect=Effect.DENY),),
         session_id="sid",
-        call_id="call_1",
+        call_id=call_id,
     )
 
 
@@ -420,7 +420,7 @@ async def test_spawn_builds_a_task_packet_from_fork():
     assert packet.isolate is True
 
     runner.spawns.clear()
-    await tool.execute({"task": "do it", "fork_turns": "all"}, _ctx())
+    await tool.execute({"task": "do it", "fork_turns": "all"}, _ctx("call_2"))
 
     full = runner.spawns[0]["task"]
     assert full.context_mode == "full"
@@ -573,7 +573,7 @@ class _SchedulerProbe:
         )
         return request.id, "run_000000000002"
 
-    async def send(self, target, text):
+    async def send(self, target, text, key=""):
         self.sent.append((target, text))
         return "queued", target
 

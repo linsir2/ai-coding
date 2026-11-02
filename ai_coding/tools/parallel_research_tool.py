@@ -183,6 +183,8 @@ class ParallelResearchTool(BaseTool):
             parent=parent,
             observer=EmitObserver(context.emit),
             parent_span=context.call_id,
+            origin_session=context.session_id,
+            idempotency_key=context.call_id,
         )
         completed = sum(1 for packet in packets if packet.status in SUCCESS_STATUSES)
         success = completed > 0

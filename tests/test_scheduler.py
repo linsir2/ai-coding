@@ -11,7 +11,8 @@ from ai_coding.core.execution_slots import (
     holding_slot,
 )
 from ai_coding.core.research_fanout import ResearchPacket, ResearchQuestion
-from ai_coding.core.scheduler import Scheduler
+from ai_coding.core.scheduler import IdempotencyConflict, Scheduler
+from ai_coding.core.task_journal import TaskJournal
 from ai_coding.core.task_registry import TaskRegistry
 from ai_coding.domain.orchestration import TaskRequest
 from ai_coding.domain.subagent import (
@@ -324,3 +325,98 @@ async def test_run_is_queued_not_refused_when_the_pool_is_full():
     await releaser
     assert result.status == "completed"
     assert scheduler.slots.active == 0
+
+
+# ---- P2-C2: journal, fence, stop, recovery, idempotency --------------------
+
+
+def _journaled(tmp_path):
+    runner = _Runner()
+    return Scheduler(
+        runner,
+        fanout=_FanOut(),
+        slots=ExecutionSlotPool(4),
+        registry=TaskRegistry(runner),
+        journal=TaskJournal(tmp_path),
+    ), runner
+
+
+@pytest.mark.asyncio
+async def test_recover_marks_open_tasks_and_never_reruns_them(tmp_path):
+    scheduler, runner = _journaled(tmp_path)
+    journal = scheduler.journal
+    journal.append("s1", "queued", task_id="open-1")
+    journal.append("s1", "settled", task_id="done-1")
+
+    views = scheduler.recover()
+
+    assert [view.id for view in views] == ["open-1"]
+    assert views[0].needs_reconciliation is True
+    assert runner.run_calls == []
+    assert scheduler.tasks().get("open-1") is not None
+
+
+@pytest.mark.asyncio
+async def test_a_late_settlement_is_rejected_after_stop(tmp_path):
+    scheduler, runner = _journaled(tmp_path)
+    request = TaskRequest.for_child(_task(), name="probe")
+    request_id, run_id = await scheduler.spawn(
+        request, parent=None, observer=None, emit=None
+    )
+    scheduler.stop(request_id)
+
+    assert scheduler.accepts(request_id, 1) is False
+    assert scheduler.tasks().get(request_id) is None
+    assert runner.cancelled or runner.spawn_calls
+
+
+@pytest.mark.asyncio
+async def test_duplicate_spawn_with_the_same_key_and_payload_returns_the_same_run(
+    tmp_path,
+):
+    scheduler, runner = _journaled(tmp_path)
+    first = TaskRequest.for_child(
+        _task(), name="probe", idempotency_key="call-1", payload_digest="d1",
+    )
+    second = TaskRequest.for_child(
+        _task(), name="probe", idempotency_key="call-1", payload_digest="d1",
+    )
+
+    rid1, run1 = await scheduler.spawn(first, parent=None, observer=None, emit=None)
+    rid2, run2 = await scheduler.spawn(second, parent=None, observer=None, emit=None)
+
+    assert (rid2, run2) == (rid1, run1)
+    third = TaskRequest.for_child(
+        _task(), name="probe", idempotency_key="call-1", payload_digest="other",
+    )
+    with pytest.raises(IdempotencyConflict):
+        await scheduler.spawn(third, parent=None, observer=None, emit=None)
+
+
+@pytest.mark.asyncio
+async def test_an_empty_key_is_not_deduplicated(tmp_path):
+    scheduler, runner = _journaled(tmp_path)
+    first = TaskRequest.for_child(_task(), name="a")
+    second = TaskRequest.for_child(_task(), name="b")
+
+    _rid1, run1 = await scheduler.spawn(first, parent=None, observer=None, emit=None)
+    _rid2, run2 = await scheduler.spawn(second, parent=None, observer=None, emit=None)
+
+    assert run1 != run2 or len(runner.spawn_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_cancel_tree_stops_children(tmp_path):
+    scheduler, runner = _journaled(tmp_path)
+    parent = TaskRequest.for_child(_task(), name="parent")
+    parent_id, _ = await scheduler.spawn(
+        parent, parent=None, observer=None, emit=None
+    )
+    child = TaskRequest.for_child(
+        _task(), name="child", parent_id=parent_id,
+    )
+    await scheduler.spawn(child, parent=None, observer=None, emit=None)
+
+    stopped = await scheduler.cancel_tree(parent_id)
+    assert stopped >= 1
+    assert scheduler._records[parent_id].state in {"stopped", "cancelled"}

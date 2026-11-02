@@ -174,6 +174,12 @@ class AgentHandle:
     commit: str | None = None
     commit_error: str | None = None
     degraded: str | None = None
+    #: P2-C2: the scheduler task this handle belongs to, its current fence, and
+    #: the terminal latch ``stop_run`` sets.  A stopped handle never starts
+    #: another turn, sends, or resumes.
+    task_id: str = ""
+    fence: int = 0
+    stopped: bool = False
     #: Set when ``loop`` is attached; ``send_message`` waits for it.
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     status: str = "running"  # running | idle | interrupted | closed
@@ -321,6 +327,11 @@ class SubAgentRunner:
         return self._slots.max_slots
 
     @property
+    def workspace(self) -> str:
+        """The main workspace this runner was built for (journal default)."""
+        return self._workspace
+
+    @property
     def slots(self) -> ExecutionSlotPool:
         """The one pool this runner shares with tool groups and the scheduler."""
         return self._slots
@@ -345,6 +356,8 @@ class SubAgentRunner:
         context_mode: str | None = None,
         readonly: bool = False,
         origin_session: str = "",
+        task_id: str = "",
+        fence: int = 0,
     ) -> SubagentResult:
         """Run ``task`` and return its packet.  Never raises for a sub-agent failure.
 
@@ -404,6 +417,7 @@ class SubAgentRunner:
                     text, name, parent, parent_span, active,
                     worktree_manager, isolate, output_schema, agent, mode, readonly,
                     request=request, origin_session=origin_session,
+                    task_id=task_id, fence=fence,
                 )
         finally:
             self._release_slot(key)
@@ -475,6 +489,8 @@ class SubAgentRunner:
         *,
         request: SubagentTask | None = None,
         origin_session: str = "",
+        task_id: str = "",
+        fence: int = 0,
     ) -> SubagentResult:
         """Worktree branch shared by the synchronous and background paths.
 
@@ -505,6 +521,7 @@ class SubAgentRunner:
                             output_schema=output_schema, agent=agent,
                             context_mode=context_mode, readonly=readonly,
                             request=request, origin_session=origin_session,
+                            task_id=task_id, fence=fence,
                         )
                         # r25/v2 + P2-A: the worktree is force-removed on exit,
                         # so a write that is not committed dies with it.  Commit
@@ -535,6 +552,7 @@ class SubAgentRunner:
             output_schema=output_schema, agent=agent,
             context_mode=context_mode, readonly=readonly,
             request=request, origin_session=origin_session,
+            task_id=task_id, fence=fence,
         )
         if degraded:
             result = replace(result, degraded=degraded)
@@ -563,6 +581,8 @@ class SubAgentRunner:
         context_mode: str | None = None,
         readonly: bool = False,
         slot: Slot | None = None,
+        task_id: str = "",
+        fence: int = 0,
     ) -> str:
         """Start a child without waiting; return its run id at once.
 
@@ -630,6 +650,7 @@ class SubAgentRunner:
                 context_mode=mode, readonly=readonly,
                 run_id=run_id, ephemeral=False, defer_loop=True,
                 request=request, origin_session=origin_session,
+                task_id=task_id, fence=fence,
             )
         except Exception as exc:  # noqa: BLE001 — a row must not stay "running"
             # P2-B2: a start that never produced a run must give the slot back.
@@ -694,6 +715,45 @@ class SubAgentRunner:
         background_task.cancel()
         return True
 
+    async def stop_run(self, run_id: str) -> bool:
+        """Kill a run for good: cancel, clear mailbox, latch ``stopped``.
+
+        Unlike :meth:`cancel`/``interrupt``, a stopped child never starts
+        another turn: queued messages are dropped, ``send_message`` answers
+        ``stopped`` and ``resume`` refuses until the operator reopens it
+        explicitly (C2).
+        """
+        resolved = self.resolve_run_id(run_id) or run_id
+        handle = self._handles.get(resolved)
+        if handle is None:
+            return self.cancel(resolved)
+        handle.stopped = True
+        handle.mailbox.clear()
+        task = handle.turn_task or self._tasks.get(resolved)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        loop = handle.loop
+        handle.loop = None
+        if loop is not None:
+            try:
+                await loop.aclose()
+            except Exception:  # noqa: BLE001 — the terminal state is what matters
+                _log.debug("child loop close after stop failed", exc_info=True)
+        handle.status = "stopped"
+        row = self._background.get(resolved)
+        if row is not None:
+            self._background[resolved] = replace(
+                row, status="cancelled", ended=time.monotonic()
+            )
+        self._release_slot(resolved)
+        self._tasks.pop(resolved, None)
+        self._announce.pop(resolved, None)
+        if not handle.ephemeral:
+            self._session_store.save(handle.session)
+            self._write_meta(handle)
+        return True
+
     # ---- C-5b: send / interrupt / resume / close ---------------------------
 
     def resolve_target(self, target: str) -> tuple[str, str, list[str]]:
@@ -744,6 +804,8 @@ class SubAgentRunner:
         handle = self._handle_for(target)
         if handle is None:
             return "unknown", ""
+        if handle.stopped:
+            return "stopped", handle.run_id
         task = handle.turn_task
         if (
             (task is not None and not task.done())
@@ -761,6 +823,8 @@ class SubAgentRunner:
         same synchronous block on purpose (DF-2): a race here would overwrite
         ``turn_task`` and run two turns against one session.
         """
+        if handle.stopped:
+            raise SubAgentPoolFull("child was stopped")
         if not self.try_admit(handle.run_id):
             raise SubAgentPoolFull(
                 "sub-agent concurrency exhausted: "
@@ -862,7 +926,7 @@ class SubAgentRunner:
             current = asyncio.current_task()
             if handle.turn_task is current:
                 handle.turn_task = None
-        if interrupted or handle.status == "closed":
+        if interrupted or handle.stopped or handle.status == "closed":
             return
         # A message may land after the last iteration boundary; run it as one
         # merged follow-up turn instead of leaving it parked in the mailbox.
@@ -936,6 +1000,8 @@ class SubAgentRunner:
         """
         handle = self._handle_for(target)
         if handle is not None:
+            if handle.stopped:
+                return "stopped", handle.run_id
             task = handle.turn_task
             if handle.status == "running" or (task is not None and not task.done()):
                 return "running", handle.run_id
@@ -1281,6 +1347,8 @@ class SubAgentRunner:
         self._finish_background(
             handle.run_id, result, handle.emit, handle.origin_session
         )
+        if handle.stopped:
+            return  # a stopped child never restarts from a queued mailbox
         # A message queued after the last iteration boundary must not sit in the
         # mailbox forever -- run it as one merged follow-up turn (DF-2).
         remaining = list(handle.mailbox)
@@ -1367,6 +1435,11 @@ class SubAgentRunner:
         row = self._background.get(run_id)
         self._tasks.pop(run_id, None)
         self._announce.pop(run_id, None)
+        handle = self._handles.get(run_id)
+        if handle is not None and not self._scheduler_accepts(handle):
+            # A stopped/cancelled task's late result must not rewrite the row
+            # or emit a completion notice.
+            return
         if row is None or row.status != "running":
             return
         summary = _summary_of(result)
@@ -1392,6 +1465,9 @@ class SubAgentRunner:
         # DF-6: only a cut/close stays silent.  ``completed``/``error``/
         # ``timeout``/``max_iterations`` are real settlements the parent must
         # hear about (the narrower earlier set silently dropped max_iterations).
+        self._scheduler_event(
+            handle, result, pending=bool(handle.mailbox) if handle is not None else False
+        )
         if not notify or result.status in {"cancelled", "interrupted", "closed"}:
             return
         # C-5a review: the model lane is not an observation.  Announcing it was
@@ -1473,6 +1549,9 @@ class SubAgentRunner:
         row = self._background.get(run_id)
         self._tasks.pop(run_id, None)
         announce = self._announce.pop(run_id, None)
+        handle = self._handles.get(run_id)
+        if handle is not None and not self._scheduler_accepts(handle):
+            return
         if row is None or row.status != "running":
             return
         # C-5a review: every non-Exception death used to be reported as
@@ -1505,6 +1584,8 @@ class SubAgentRunner:
                 return
             announce = (handle.emit, handle.origin_session, handle.name)
         emit, origin_session, name = announce
+        if handle is not None:
+            self._scheduler_event(handle, result)
         self._announce_to_model(run_id, name, result, origin_session)
         if emit is None:
             return
@@ -1524,6 +1605,25 @@ class SubAgentRunner:
             _log.debug("background reap announce failed for %s", run_id, exc_info=True)
 
     # ---- internals --------------------------------------------------------
+
+    def _scheduler_accepts(self, handle: AgentHandle | None) -> bool:
+        """Whether a late settlement still owns this task (fence gate)."""
+        scheduler = self.scheduler
+        if scheduler is None or handle is None or not handle.task_id:
+            return True
+        accepts = getattr(scheduler, "accepts", None)
+        return bool(accepts(handle.task_id, handle.fence)) if callable(accepts) else True
+
+    def _scheduler_event(
+        self, handle: AgentHandle | None, result: SubagentResult, *, pending: bool = False
+    ) -> None:
+        scheduler = self.scheduler
+        if scheduler is None or handle is None or not handle.task_id:
+            return
+        event = getattr(scheduler, "on_runner_event", None)
+        if callable(event):
+            event(handle.task_id, handle.run_id, result.status, handle.fence,
+                  pending=pending)
 
     def _scoped_observer(self, name: str, parent_span: str, inner: Any) -> Any:
         """Wrap an observer so the child's events carry their parentage."""
@@ -1601,6 +1701,8 @@ class SubAgentRunner:
         readonly: bool = False,
         request: SubagentTask | None = None,
         origin_session: str = "",
+        task_id: str = "",
+        fence: int = 0,
     ) -> SubagentResult:
         """The one-shot path for ``run()`` / fan-out (5.3).
 
@@ -1616,6 +1718,7 @@ class SubAgentRunner:
                 context_mode=context_mode, readonly=readonly,
                 ephemeral=True, request=request,
                 origin_session=origin_session,
+                task_id=task_id, fence=fence,
             )
         except _StartError as exc:
             return SubagentResult(status="error", error=str(exc))
@@ -1647,6 +1750,8 @@ class SubAgentRunner:
         defer_loop: bool = False,
         request: SubagentTask | None = None,
         origin_session: str = "",
+        task_id: str = "",
+        fence: int = 0,
     ) -> AgentHandle:
         """Build the child's session + loop, and register it when addressable.
 
@@ -1694,6 +1799,8 @@ class SubAgentRunner:
             observer=observer,
             ephemeral=ephemeral,
             request=request,
+            task_id=task_id,
+            fence=fence,
         )
         if not defer_loop:
             handle.loop = self._build_loop_for(handle, workdir)
@@ -1796,6 +1903,22 @@ class SubAgentRunner:
             await self._attach_loop(handle, handle.workdir)
             loop = handle.loop
         assert loop is not None
+        if handle.stopped:
+            return SubagentResult(
+                status="cancelled", error="stopped", truncated=True,
+                exit_reason="stopped",
+            )
+        scheduler = self.scheduler
+        if scheduler is not None and handle.task_id:
+            turn = int(getattr(handle.session, "turn_count", 0) or 0) + 1
+            started = getattr(scheduler, "on_turn_start", None)
+            if callable(started) and not started(
+                handle.task_id, handle.fence, turn
+            ):
+                return SubagentResult(
+                    status="cancelled", error="stale task", truncated=True,
+                    exit_reason="rejected_stale",
+                )
         task = request or handle.request or SubagentTask.from_objective(text)
         # R1-3: the format contract rides as a trailer on the task text —
         # the task *is* the child's user message, so no loop/engine change is

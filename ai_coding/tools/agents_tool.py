@@ -23,7 +23,7 @@ from typing import Any
 from ai_coding.core.observers import EmitObserver
 from ai_coding.core.scheduler import Scheduler
 from ai_coding.domain.message import ToolResult
-from ai_coding.domain.orchestration import TaskRequest
+from ai_coding.domain.orchestration import TaskRequest, digest_task
 from ai_coding.domain.subagent import ParentContext, SubAgentPoolFull, SubagentTask
 from ai_coding.tools.base import (
     BaseTool,
@@ -236,6 +236,8 @@ class SpawnAgentTool(BaseTool):
                 name=name,
                 origin_session=context.session_id,
                 parent_span=context.call_id,
+                idempotency_key=context.call_id,
+                payload_digest=digest_task(packet),
             )
             _request_id, run_id = await self._scheduler.spawn(
                 request,
@@ -397,7 +399,8 @@ class ListAgentsTool(BaseTool):
         rows = (
             [
                 view for view in self._scheduler.tasks().list()
-                if view.kind == "background" and view.run_id
+                if view.kind in ("background", "recovered")
+                and (view.run_id or view.needs_reconciliation)
             ]
             if self._scheduler is not None
             else []
@@ -513,7 +516,7 @@ class CloseAgentTool(BaseTool):
                 error="unknown_agent",
                 data={"agent_id": resolved, "closed": False},
             )
-        closed = bool(await self._scheduler.close(resolved))
+        closed = bool(await self._scheduler.close_tree(resolved))
         info = self._scheduler.close_info(resolved)
         commit = info.get("commit")
         commit_error = info.get("commitError")
@@ -615,7 +618,9 @@ class SendMessageTool(BaseTool):
         if ambiguous is not None:
             return ambiguous
         try:
-            status, run_id = await self._scheduler.send(resolved, message)
+            status, run_id = await self._scheduler.send(
+                resolved, message, key=(ctx.call_id if ctx is not None else "")
+            )
         except SubAgentPoolFull as exc:
             return ToolResult(
                 success=False, output=f"message not sent: {exc}",

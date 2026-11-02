@@ -15,7 +15,7 @@ from typing import Any
 from ai_coding.core.observers import EmitObserver
 from ai_coding.core.scheduler import Scheduler
 from ai_coding.domain.message import ToolResult
-from ai_coding.domain.orchestration import TaskRequest
+from ai_coding.domain.orchestration import TaskRequest, digest_task
 from ai_coding.domain.subagent import (
     SUCCESS_STATUSES,
     ParentContext,
@@ -379,6 +379,8 @@ class SubAgentTool(BaseTool):
             name=name,
             origin_session=context.session_id,
             parent_span=context.call_id,
+            idempotency_key=context.call_id,
+            payload_digest=digest_task(packet),
         )
         if self._scheduler is None:
             return ToolResult(
@@ -432,6 +434,8 @@ class SubAgentTool(BaseTool):
             name=name,
             origin_session=context.session_id,
             parent_span=context.call_id,
+            idempotency_key=context.call_id,
+            payload_digest=digest_task(packet),
         )
         if self._scheduler is None:
             return ToolResult(
@@ -522,7 +526,8 @@ class SubAgentListTool(BaseTool):
         rows = (
             [
                 view for view in self._scheduler.tasks().list()
-                if view.kind == "background" and view.run_id
+                if view.kind in ("background", "recovered")
+                and (view.run_id or view.needs_reconciliation)
             ]
             if self._scheduler is not None
             else []

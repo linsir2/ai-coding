@@ -22,6 +22,9 @@ def test_only_the_contract_fields_exist():
         "kind",
         "origin_session",
         "parent_span",
+        "parent_id",
+        "idempotency_key",
+        "payload_digest",
     }
 
 

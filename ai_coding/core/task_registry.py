@@ -44,10 +44,17 @@ class TaskView:
     error: str | None = None
     truncated: bool = False
     origin_session: str = ""
+    #: P2-C2: a journal-open task recovered after a restart.  Shown to the
+    #: operator, never auto-run again, and never pruned as an old success.
+    needs_reconciliation: bool = False
 
     @property
     def is_running(self) -> bool:
         return self.status == "running"
+
+    @property
+    def is_settled(self) -> bool:
+        return not self.is_running and not self.needs_reconciliation
 
     def elapsed(self, now: float | None = None) -> float:
         end = self.ended if self.ended is not None else (now or time.monotonic())
@@ -77,6 +84,7 @@ class TaskView:
             "error": self.error,
             "truncated": self.truncated,
             "originSession": self.origin_session,
+            "needsReconciliation": self.needs_reconciliation,
         }
 
     @classmethod
@@ -117,6 +125,7 @@ def _merge(view: TaskView, row: TaskView) -> TaskView:
         kind=view.kind,
         origin_session=view.origin_session or row.origin_session,
         conflicts=view.conflicts or row.conflicts,
+        needs_reconciliation=view.needs_reconciliation or row.needs_reconciliation,
     )
 
 
@@ -150,7 +159,7 @@ class TaskRegistry:
 
     def _prune(self) -> None:
         settled = sorted(
-            (view for view in self._views.values() if not view.is_running),
+            (view for view in self._views.values() if view.is_settled),
             key=lambda view: view.ended if view.ended is not None else view.started,
         )
         overflow = len(settled) - MAX_SETTLED_VIEWS
