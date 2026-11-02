@@ -350,7 +350,11 @@ class ToolDispatcher:
             and not holding_slot()
         ):
             slot = await self.slots.acquire("tool-group")
-        cap = self.slots.max_slots if self.slots is not None else self.max_parallel
+        cap = (
+            min(self.max_parallel, self.slots.max_slots)
+            if self.slots is not None
+            else self.max_parallel
+        )
         gate = asyncio.Semaphore(cap)
 
         async def run(item: _Prepared) -> DispatchOutcome:

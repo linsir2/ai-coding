@@ -5,7 +5,11 @@ import time
 
 import pytest
 
-from ai_coding.core.execution_slots import ExecutionSlotPool, holding_slot
+from ai_coding.core.execution_slots import (
+    ExecutionSlotPool,
+    enter_child,
+    holding_slot,
+)
 from ai_coding.core.research_fanout import ResearchPacket, ResearchQuestion
 from ai_coding.core.scheduler import Scheduler
 from ai_coding.core.task_registry import TaskRegistry
@@ -173,9 +177,40 @@ async def test_spawn_reserves_a_slot_and_returns_both_ids():
     assert scheduler.slots.active == 1
     assert runner.spawn_calls[0]["name"] == "probe"
     assert runner.spawn_calls[0]["emit"] is not None
-    view = scheduler.tasks().get(request.id)
-    assert view is not None and view.run_id == run_id
-    assert view.kind == "child"
+    # The background row is the live projection; spawn must not leave a
+    # second, permanent "running" view behind.
+    assert scheduler.tasks().get(request.id) is None
+    assert scheduler.tasks().list() == []
+
+
+@pytest.mark.asyncio
+async def test_a_nested_run_inside_an_owned_slot_does_not_deadlock():
+    scheduler, runner = _scheduler(slots=ExecutionSlotPool(1))
+    outer = scheduler.slots.try_reserve("outer")
+    assert outer is not None
+    with enter_child():
+        result = await scheduler.run(
+            TaskRequest.for_child(_task()), parent=None, observer=object(), emit=None
+        )
+    assert result is runner.run_result
+    assert scheduler.slots.active == 1  # only the outer reservation
+    outer.release()
+    assert scheduler.slots.active == 0
+
+
+@pytest.mark.asyncio
+async def test_two_fanouts_with_the_same_question_ids_do_not_collide():
+    scheduler, _runner = _scheduler()
+    questions = [ResearchQuestion("q1", "a"), ResearchQuestion("q2", "b")]
+
+    await scheduler.fanout(questions, "shared", parent_span="call-1")
+    await scheduler.fanout(questions, "shared", parent_span="call-2")
+
+    views = [view for view in scheduler.tasks().list() if view.kind == "fanout"]
+    assert {view.id for view in views} == {
+        "fanout:call-1:q1", "fanout:call-1:q2",
+        "fanout:call-2:q1", "fanout:call-2:q2",
+    }
 
 
 @pytest.mark.asyncio
@@ -221,8 +256,8 @@ async def test_fanout_registers_one_view_per_question_without_copying_content():
 
     assert [packet.id for packet in packets] == ["q1", "q2"]
     views = [view for view in scheduler.tasks().list() if view.kind == "fanout"]
-    assert {view.id for view in views} == {"q1", "q2"}
-    q1 = next(view for view in views if view.id == "q1")
+    assert {view.id for view in views} == {"fanout:call-1:q1", "fanout:call-1:q2"}
+    q1 = next(view for view in views if view.id == "fanout:call-1:q1")
     assert q1.status == "completed"
     assert q1.usage == {"total_tokens": 3}
     assert q1.truncated is True

@@ -13,9 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from typing import Any, cast
 
-from ai_coding.core.execution_slots import ExecutionSlotPool, enter_child
+from ai_coding.core.execution_slots import (
+    ExecutionSlotPool,
+    enter_child,
+    holding_slot,
+)
 from ai_coding.core.observers import EmitObserver
 from ai_coding.core.research_fanout import ResearchQuestion
 from ai_coding.core.task_registry import TaskRegistry, TaskView
@@ -46,11 +51,17 @@ class Scheduler:
         )
         self._worktree_manager = worktree_manager
         if slots is None:
-            slots = ExecutionSlotPool(
+            # Prefer the runner's own pool: a facade built around an existing
+            # runner must not give it a second, independent capacity table.
+            slots = getattr(runner, "slots", None) or ExecutionSlotPool(
                 max(1, int(getattr(runner, "max_concurrent", 4) or 4))
             )
         self.slots = slots
         self._registry = registry if registry is not None else TaskRegistry(runner)
+        #: request id -> run id.  The background row is the projection, but its
+        #: id is the run id; this map is how a caller's request id resolves back
+        #: to the handle without storing a second permanent task view.
+        self._request_runs: dict[str, str] = {}
 
     # ---- properties -------------------------------------------------------
 
@@ -69,7 +80,8 @@ class Scheduler:
         emit: Any = None,
     ) -> SubagentResult:
         """Queue for one slot, run the child under it, then record the view."""
-        slot = await self.slots.acquire(request.id)
+        nested = holding_slot()
+        slot = None if nested else await self.slots.acquire(request.id)
         started = time.monotonic()
         if observer is None and callable(emit):
             observer = EmitObserver(emit)
@@ -97,7 +109,8 @@ class Scheduler:
             self._register_result(request, started, result)
             return result
         finally:
-            slot.release()
+            if slot is not None:
+                slot.release()
 
     async def spawn(
         self,
@@ -130,17 +143,13 @@ class Scheduler:
         except BaseException:
             slot.release()
             raise
-        self._registry.register(
-            TaskView(
-                id=request.id,
-                run_id=run_id,
-                name=request.name,
-                kind=request.kind,
-                status="running",
-                started=time.monotonic(),
-                origin_session=request.origin_session,
-            )
-        )
+        # No separate creation view: the runner's background row is the live
+        # projection and the only source readers need.  A second view would
+        # outlive a pruned/closed row and read as a phantom "running" task.
+        # The id pair still has to resolve for wait/stop, so remember it here.
+        self._request_runs[request.id] = run_id
+        if len(self._request_runs) > 200:
+            self._request_runs.pop(next(iter(self._request_runs)))
         return request.id, run_id
 
     async def fanout(
@@ -154,10 +163,15 @@ class Scheduler:
     ) -> list[Any]:
         """Run the existing fan-out and project one view per question."""
         started = time.monotonic()
+        # Question ids are only unique within one call.  Prefix with the
+        # invocation so two concurrent fan-outs cannot overwrite each other's
+        # rows in the process-wide registry.
+        token = parent_span or uuid.uuid4().hex[:12]
+        view_ids = {question.id: f"fanout:{token}:{question.id}" for question in questions}
         for question in questions:
             self._registry.register(
                 TaskView(
-                    id=question.id,
+                    id=view_ids[question.id],
                     name=f"research:{question.id}",
                     kind="fanout",
                     status="running",
@@ -175,20 +189,23 @@ class Scheduler:
         except asyncio.CancelledError:
             for question in questions:
                 self._registry.update(
-                    question.id, status="cancelled", ended=time.monotonic()
+                    view_ids[question.id], status="cancelled",
+                    ended=time.monotonic(),
                 )
             raise
         except Exception as exc:  # noqa: BLE001 — the views must not stay running
             ended = time.monotonic()
             for question in questions:
                 self._registry.update(
-                    question.id, status="error", error=str(exc), ended=ended
+                    view_ids[question.id], status="error", error=str(exc),
+                    ended=ended,
                 )
             raise
         ended = time.monotonic()
         for packet in packets:
+            view_id = view_ids.get(packet.id) or f"fanout:{token}:{packet.id}"
             view = TaskView(
-                id=packet.id,
+                id=view_id,
                 name=f"research:{packet.id}",
                 kind="fanout",
                 status=packet.status,
@@ -198,7 +215,7 @@ class Scheduler:
                 error=packet.error or None,
                 truncated=packet.truncated,
             )
-            existing = self._registry.get(packet.id)
+            existing = self._registry.get(view_id)
             if existing is not None and existing.kind == "fanout":
                 view.started = existing.started
             self._registry.register(view)
@@ -242,6 +259,12 @@ class Scheduler:
 
     def resolve_target(self, target: str) -> tuple[str, str, list[str]]:
         """Address a child by request id, run-id prefix, or unique name."""
+        mapped = self._request_runs.get(target)
+        if mapped:
+            classify = getattr(self._runner, "resolve_target", None)
+            if callable(classify):
+                return cast(tuple[str, str, list[str]], classify(mapped))
+            return "ok", mapped, []
         view = self._registry.get(target)
         if view is not None and view.run_id:
             run_id = self._resolved_run_id(view.run_id)
@@ -260,6 +283,9 @@ class Scheduler:
         """Resolve a request id or a printed run-id prefix to the full run id."""
         if not prefix:
             return None
+        mapped = self._request_runs.get(prefix)
+        if mapped:
+            return self._resolved_run_id(mapped)
         view = self._registry.get(prefix)
         if view is not None and view.run_id:
             return self._resolved_run_id(view.run_id)

@@ -143,8 +143,11 @@ class ExecutionSlotPool:
         if self._active <= 0:  # pragma: no cover - defensive
             return
         self._active -= 1
-        while self._waiters:
-            future = self._waiters.popleft()
+        # Wake every waiter, not just the head: the head may have been
+        # cancelled between its resume and this wake, which used to leave a
+        # free slot with nobody owning it.  Each waiter re-checks the count.
+        waiters = list(self._waiters)
+        self._waiters.clear()
+        for future in waiters:
             if not future.done():
                 future.set_result(None)
-                return

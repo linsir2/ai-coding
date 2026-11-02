@@ -55,6 +55,29 @@ async def test_a_waiter_gets_the_slot_the_release_hands_back():
 
 
 @pytest.mark.asyncio
+async def test_a_cancelled_head_waiter_does_not_swallow_the_next_wake():
+    pool = ExecutionSlotPool(1)
+    first = await pool.acquire("first")
+    order: list[str] = []
+
+    async def waiter(label: str) -> None:
+        slot = await pool.acquire(label)
+        order.append(label)
+        slot.release()
+
+    head = asyncio.create_task(waiter("head"))
+    tail = asyncio.create_task(waiter("tail"))
+    await asyncio.sleep(0)
+    head.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await head
+    first.release()
+    await asyncio.wait_for(tail, timeout=5)
+    assert order == ["tail"]
+    assert pool.active == 0
+
+
+@pytest.mark.asyncio
 async def test_a_cancelled_waiter_does_not_leak_a_slot():
     pool = ExecutionSlotPool(1)
     first = await pool.acquire("first")

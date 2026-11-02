@@ -395,7 +395,12 @@ class ListAgentsTool(BaseTool):
         ctx: ToolContext | None = None,
     ) -> ToolResult:
         rows = (
-            self._scheduler.tasks().list() if self._scheduler is not None else []
+            [
+                view for view in self._scheduler.tasks().list()
+                if view.kind == "background" and view.run_id
+            ]
+            if self._scheduler is not None
+            else []
         )
         if not rows:
             return ToolResult(
