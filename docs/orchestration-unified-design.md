@@ -251,6 +251,19 @@ parallel_research → fanout(mode=readonly, isolate=false)
 | P4 | Scheduler + TaskRequest 接管 inline/child/fanout；TaskRegistry 同源 | build/plan/readonly 真机链路；三读口一致 |
 | P5 | 清理重复读口（subagent_list/parallel_research 是否保留为兼容别名） | 文档与工具面收口 |
 
+### 8.1 实施现状（2026-11-02）
+
+- P0a/P0b/P1 已完成（`c7832a7..23b8b32`）。
+- **写协调与容量已落地（P2-B，`docs/orchestration-p2b-plan.md`）**：
+  - 实际契约是 `BaseTool.write_paths_for` + `(root, 相对路径)` claim（`*` 表示工作区
+    级），不是本文 §5 设想的单一 `writes_shared_workspace` 布尔与全局 `asyncio.Lock`；
+    bash（含后台 job 生命周期 hold）与 mcp 一律按 `*`。
+  - 容量用 `SubAgentRunner._active` 集合统一约束同步/后台/follow-up（`max_concurrent_subagents`），
+    `ExecutionSlotPool` 未单独实现；depth 结构性恒为 1（子 registry 无编排工具）。
+  - 持久通知 `NoticeStore` + `wake=True` 已落地。
+- **仍未实现**：Scheduler / TaskRequest 接管 / TaskRegistry（P4）、合并队列 / 自动
+  merge、跨进程租约与恢复；这些是 P2-UNIFIED / P2-C 待办。
+
 ## 9. 风险与待拍板（v2）
 
 1. **acceptance 整体删**：`_verify_plan_item` 不依赖 acceptance，保留；其余阶梯随旧路径删。

@@ -97,13 +97,13 @@ def test_the_background_notice_marks_a_schema_failure():
     runner._background["run-1"] = BackgroundTask(  # noqa: SLF001
         run_id="run-1", name="probe", status="running"
     )
-    runner._announce["run-1"] = (lambda event: None, "origin", "probe")  # noqa: SLF001
+    runner._announce["run-1"] = (lambda event: None, "", "probe")  # noqa: SLF001
 
     runner._finish_background(  # noqa: SLF001
         "run-1",
         SubagentResult(status="completed", conclusion="ok", schema_valid=False),
         lambda event: None,
-        "origin",
+        "",
     )
 
     line = notices.drain()[0]

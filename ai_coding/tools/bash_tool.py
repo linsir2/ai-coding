@@ -125,6 +125,7 @@ class BashTool(BaseTool):
         policy: ProcessSandboxPolicy | None = None,
         backend: SandboxBackend | None = None,
         roots: Sequence[Path] | Sandbox | Callable[[], Sequence[Path]] = (),
+        write_coordinator: Any | None = None,
     ) -> None:
         self._max_timeout = max(1, int(max_timeout_seconds))
         # The default can never exceed the ceiling: two yardsticks for one
@@ -145,6 +146,9 @@ class BashTool(BaseTool):
         # assertions and debugging (tests read it directly).
         self._roots_source = roots
         self._roots = self._snapshot_roots()
+        #: P2-B1: the write table a background/job command holds until the
+        #: command settles.  ``None`` keeps direct/test stacks uncoordinated.
+        self._write_coordinator = write_coordinator
 
     def _snapshot_roots(self) -> tuple[Path, ...]:
         """The writable roots as they are **now**, from the live source."""
@@ -215,6 +219,41 @@ class BashTool(BaseTool):
             "required": ["command"],
         }
 
+    def write_paths_for(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> tuple[str, ...] | None:
+        """A shell command's writes are opaque: claim the whole workspace.
+
+        ``ShellReadTool`` overrides this to ``None`` (a read-only inspection
+        takes no claim), so the wider return type matches the base contract.
+        """
+        return ()
+
+    def _take_hold(self, ctx: ToolContext) -> tuple[Any | None, str | None]:
+        """Take the job-lifetime hold; return ``(coordinator, token)``."""
+        coordinator = self._write_coordinator
+        if coordinator is None:
+            return None, None
+        return coordinator, coordinator.acquire_hold(ctx.session_id, ctx.workspace or ".")
+
+    @staticmethod
+    def _release_hold(coordinator: Any | None, token: str | None) -> None:
+        if coordinator is not None and token is not None:
+            coordinator.release_hold(token)
+
+    @staticmethod
+    def _hold_conflict(ctx: ToolContext) -> ToolResult:
+        """The synchronous hold could not be taken: nothing was started."""
+        return ToolResult(
+            success=False,
+            output=(
+                "error: 写冲突——工作区正被另一个写者占用，后台命令未启动。"
+                "请等它完成或改用前台/其他工作区后重试。"
+            ),
+            error="write_conflict",
+            data={"paths": ["*"], "owner": ctx.session_id, "wait_ms": 0},
+        )
+
     def _start_background(
         self, command: str, params: dict[str, Any], ctx: ToolContext | None
     ) -> ToolResult:
@@ -238,17 +277,38 @@ class BashTool(BaseTool):
             )
         from ai_coding.core.jobs import JobLimitReached
 
+        # P2-B1: the dispatcher's claim ends when ``execute`` returns, but this
+        # command keeps writing.  The job takes a synchronous hold on the same
+        # owner (re-entrant with the dispatcher's claim) and releases it when
+        # the job settles.
+        coordinator, hold = self._take_hold(context)
+        if coordinator is not None and hold is None:
+            return self._hold_conflict(context)
         try:
             job = registry.start(
                 command,
                 cwd=context.workspace or ".",
                 session_id=context.session_id,
                 emit=context.emit,
+                on_settle=(
+                    (lambda: coordinator.release_hold(hold))
+                    if coordinator is not None and hold is not None
+                    else None
+                ),
             )
         except JobLimitReached as exc:
+            self._release_hold(coordinator, hold)
             return ToolResult(success=False, output=f"error: {exc}", error="job_limit")
+        except Exception:
+            # No job exists to call on_settle; the refusal must not leave the
+            # workspace locked.
+            self._release_hold(coordinator, hold)
+            raise
         denied = getattr(job, "denied_reason", "")
         if denied:
+            # The job never spawned and ``start`` settled it directly (no
+            # ``_settle`` call, so no ``on_settle``).
+            self._release_hold(coordinator, hold)
             return ToolResult(
                 success=False,
                 output=f"error: {denied}",
@@ -289,18 +349,40 @@ class BashTool(BaseTool):
           None").
         """
         context = resolve_ctx(ctx)
-        job = registry.start(
-            command,
-            cwd=self._workspace_dir(ctx) or ".",
-            session_id=context.session_id,
-            emit=context.emit,
-            # Silent while the caller is still waiting: the ToolResult carries
-            # the outcome.  Promotion turns it on, because from that moment the
-            # result has nobody but a notice to reach the model through.
-            announce=False,
-        )
+        # P2-B1: same hold as the background path.  Here it matters most: a
+        # command that outlives its wait is promoted, the dispatcher's claim is
+        # already released, and only this job callback keeps the workspace
+        # locked until the command really ends.
+        coordinator, hold = self._take_hold(context)
+        if coordinator is not None and hold is None:
+            return self._hold_conflict(context)
+        from ai_coding.core.jobs import JobLimitReached
+
+        try:
+            job = registry.start(
+                command,
+                cwd=self._workspace_dir(ctx) or ".",
+                session_id=context.session_id,
+                emit=context.emit,
+                # Silent while the caller is still waiting: the ToolResult carries
+                # the outcome.  Promotion turns it on, because from that moment the
+                # result has nobody but a notice to reach the model through.
+                announce=False,
+                on_settle=(
+                    (lambda: coordinator.release_hold(hold))
+                    if coordinator is not None and hold is not None
+                    else None
+                ),
+            )
+        except JobLimitReached:
+            self._release_hold(coordinator, hold)
+            raise
+        except Exception:
+            self._release_hold(coordinator, hold)
+            raise
         denied = getattr(job, "denied_reason", "")
         if denied:
+            self._release_hold(coordinator, hold)
             return ToolResult(
                 success=False,
                 output=f"error: {denied}",

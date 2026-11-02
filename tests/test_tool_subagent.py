@@ -346,3 +346,56 @@ async def test_render_warns_on_commit_failure_and_degraded():
     assert "git commit: no identity" in text
     assert "未隔离，已在主工作区执行" in text
     assert "worktree_create_failed" in text
+
+
+# ---- P2-B2: a write overlap the parent can see ---------------------------
+
+
+_OVERLAP = (
+    {
+        "key": "run-abcdef123456",
+        "origin_session": "sess-1",
+        "paths": ("a.py", "b.py"),
+    },
+)
+
+
+@pytest.mark.asyncio
+async def test_data_carries_the_write_overlap():
+    runner = _FakeRunner(
+        SubagentResult(
+            status="completed",
+            conclusion="done",
+            changed_paths=("a.py", "b.py"),
+            conflicts=_OVERLAP,
+        )
+    )
+    tool = SubAgentTool(runner=runner)
+
+    result = await tool.execute({"task": "t"}, _ctx())
+
+    data = result.data
+    assert data is not None
+    assert data["conflicts"] == [
+        {
+            "key": "run-abcdef123456",
+            "origin_session": "sess-1",
+            "paths": ["a.py", "b.py"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_render_names_the_overlapping_run_and_paths():
+    from ai_coding.tools.subagent_tool import _render
+
+    result = SubagentResult(
+        status="completed",
+        conclusion="done",
+        changed_paths=("a.py", "b.py"),
+        conflicts=_OVERLAP,
+    )
+
+    text = _render(result, "probe")
+
+    assert "⚠ 与 run-abcdef12 改动重叠: a.py,b.py（未合并）" in text

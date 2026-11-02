@@ -201,6 +201,59 @@ def test_the_operator_sees_the_same_settlement_as_an_event(tmp_path):
     assert done and done[0].name == "bash" and done[0].run_id == job.id
 
 
+def test_on_settle_fires_exactly_once_on_a_normal_ending(tmp_path):
+    """P2-B1: the callback releases a workspace-wide write hold.  Firing it
+    twice would release somebody else's claim; never firing it would leave the
+    workspace locked for the rest of the process."""
+    calls: list[int] = []
+    registry = _registry(tmp_path)
+    job = registry.start(
+        "exit 0",
+        cwd=str(tmp_path),
+        session_id="s1",
+        emit=lambda e: None,
+        on_settle=lambda: calls.append(1),
+    )
+    _wait_until(lambda: job.done.is_set(), what="settlement")
+
+    registry._settle(job, emit=lambda e: None)  # a late watcher/kill callback
+    registry._settle(job, emit=lambda e: None)
+
+    assert calls == [1]
+
+
+def test_on_settle_fires_exactly_once_on_a_kill(tmp_path):
+    calls: list[int] = []
+    registry = _registry(tmp_path)
+    job = registry.start(
+        "sleep 30",
+        cwd=str(tmp_path),
+        session_id="s1",
+        emit=lambda e: None,
+        on_settle=lambda: calls.append(1),
+    )
+
+    registry.kill(job.id, reason="test over")
+
+    assert calls == [1]
+
+
+def test_a_raising_on_settle_callback_does_not_break_settlement(tmp_path):
+    notices = _Clock()
+    registry = _registry(tmp_path, notices)
+    job = registry.start(
+        "exit 0",
+        cwd=str(tmp_path),
+        session_id="s1",
+        emit=lambda e: None,
+        on_settle=lambda: (_ for _ in ()).throw(RuntimeError("release exploded")),
+    )
+    _wait_until(lambda: job.done.is_set(), what="settlement")
+
+    assert job.status == "completed"
+    _wait_until(lambda: notices.pending() == 1, what="the notice")
+
+
 def test_settlement_is_idempotent(tmp_path):
     """Two settlers would mean two notices and two toasts for one command."""
     notices = _Clock()
@@ -346,6 +399,119 @@ def test_a_corrupt_ledger_row_does_not_stop_the_next_run(tmp_path):
     registry = _registry(tmp_path)
 
     assert registry.list() == []
+
+
+# ---- P2-B1: a bash job holds the workspace until it settles -----------------
+
+
+@pytest.mark.asyncio
+async def test_a_background_bash_job_holds_the_workspace_until_it_settles(tmp_path):
+    """The dispatcher's own claim ends when ``execute`` returns, but a
+    background command keeps writing after that.  The job takes a synchronous
+    hold on the same owner and settles it through ``on_settle``."""
+    from ai_coding.core.write_coordinator import WriteCoordinator
+    from ai_coding.tools.base import ToolContext
+    from ai_coding.tools.bash_tool import BashTool
+
+    coordinator = WriteCoordinator(tmp_path)
+    registry = _registry(tmp_path)
+    tool = BashTool(write_coordinator=coordinator)
+    ctx = ToolContext(workspace=str(tmp_path), session_id="s1", jobs=registry)
+
+    result = await tool.execute(
+        {"command": "sleep 1; echo done", "run_in_background": True}, ctx
+    )
+
+    assert result.success is True and result.data is not None
+    assert await coordinator.claim("other", str(tmp_path), (), timeout=0.1) is None, (
+        "the running job still owns the workspace"
+    )
+    job = registry.get(result.data["job_id"])
+    assert job is not None
+    _wait_until(lambda: job.done.is_set(), what="the job to settle")
+    released = await coordinator.claim("other", str(tmp_path), (), timeout=1.0)
+    assert released is not None
+    released.release()
+
+
+@pytest.mark.asyncio
+async def test_a_promoted_foreground_job_keeps_its_hold_until_it_settles(tmp_path):
+    """The documented hole: a foreground command that outlives its wait is
+    promoted, and the dispatcher's ``finally`` has already run.  The job's
+    hold has to survive promotion."""
+    from ai_coding.core.write_coordinator import WriteCoordinator
+    from ai_coding.tools.base import ToolContext
+    from ai_coding.tools.bash_tool import BashTool
+
+    coordinator = WriteCoordinator(tmp_path)
+    registry = _registry(tmp_path)
+    tool = BashTool(timeout_seconds=1, write_coordinator=coordinator)
+    ctx = ToolContext(workspace=str(tmp_path), session_id="s1", jobs=registry)
+
+    result = await tool.execute(
+        {"command": "sleep 2; echo done", "timeout_seconds": 1}, ctx
+    )
+
+    assert result.data is not None and result.data.get("promoted") is True
+    assert await coordinator.claim("other", str(tmp_path), (), timeout=0.3) is None
+    job = registry.get(result.data["job_id"])
+    assert job is not None
+    _wait_until(lambda: job.done.is_set(), what="the promoted job to settle")
+    released = await coordinator.claim("other", str(tmp_path), (), timeout=1.0)
+    assert released is not None
+    released.release()
+
+
+@pytest.mark.asyncio
+async def test_a_job_that_was_never_started_releases_the_hold(tmp_path):
+    """A refused start must not leave the workspace locked."""
+    from ai_coding.core.write_coordinator import WriteCoordinator
+    from ai_coding.tools.base import ToolContext
+    from ai_coding.tools.bash_tool import BashTool
+
+    class _FullRegistry:
+        def start(self, *args, **kwargs):
+            raise JobLimitReached("background job limit reached")
+
+    coordinator = WriteCoordinator(tmp_path)
+    tool = BashTool(write_coordinator=coordinator)
+    ctx = ToolContext(
+        workspace=str(tmp_path), session_id="s1", jobs=_FullRegistry()
+    )
+
+    result = await tool.execute(
+        {"command": "sleep 1", "run_in_background": True}, ctx
+    )
+
+    assert result.success is False
+    assert result.error == "job_limit"
+    claimed = await coordinator.claim("other", str(tmp_path), (), timeout=0.5)
+    assert claimed is not None
+    claimed.release()
+
+
+@pytest.mark.asyncio
+async def test_a_background_start_that_raises_releases_the_hold(tmp_path):
+    from ai_coding.core.write_coordinator import WriteCoordinator
+    from ai_coding.tools.base import ToolContext
+    from ai_coding.tools.bash_tool import BashTool
+
+    class _BrokenRegistry:
+        def start(self, *args, **kwargs):
+            raise OSError("cannot spawn")
+
+    coordinator = WriteCoordinator(tmp_path)
+    tool = BashTool(write_coordinator=coordinator)
+    ctx = ToolContext(
+        workspace=str(tmp_path), session_id="s1", jobs=_BrokenRegistry()
+    )
+
+    with pytest.raises(OSError):
+        await tool.execute({"command": "sleep 1", "run_in_background": True}, ctx)
+
+    claimed = await coordinator.claim("other", str(tmp_path), (), timeout=0.5)
+    assert claimed is not None
+    claimed.release()
 
 
 # ---- helpers ---------------------------------------------------------------

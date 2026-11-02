@@ -574,6 +574,56 @@ async def test_close_of_an_unknown_target_is_false(tmp_path):
     assert await runner.close("nope") is False
 
 
+# ---- P2-B3: the settlement is written down and the idle loop is woken -----
+
+
+class _RecordingQueue:
+    """A ``SteeringQueue`` stand-in that records the wake flag."""
+
+    def __init__(self) -> None:
+        self.puts: list[tuple[str, bool]] = []
+
+    def put(self, text: str, *, wake: bool = False) -> bool:
+        self.puts.append((text, wake))
+        return True
+
+    def drain(self) -> list[str]:
+        return []
+
+
+@pytest.mark.asyncio
+async def test_a_settlement_is_persisted_and_queued_with_wake(tmp_path):
+    from ai_coding.core.notice_store import NoticeStore
+
+    queue = _RecordingQueue()
+    store = NoticeStore.for_workspace(tmp_path)
+    runner = _runner(tmp_path, _Engines(), notices=queue, notice_store=store)
+    run_id = runner.spawn_background(
+        "do it", name="probe", emit=lambda _e: None, origin_session="sess-1"
+    )
+    await _settle(runner, run_id)
+
+    assert queue.puts, "the running loop's lane must still be used"
+    line, wake = queue.puts[0]
+    assert wake is True, "an idle loop may start a turn for a settlement"
+    assert [row["text"] for row in store.pending("sess-1")] == [line]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_origin_session_writes_no_disk_notice(tmp_path):
+    """A child without a spawning session has no mailbox to leave a line in."""
+    from ai_coding.core.notice_store import NoticeStore
+
+    store = NoticeStore.for_workspace(tmp_path)
+    queue = _RecordingQueue()
+    runner = _runner(tmp_path, _Engines(), notices=queue, notice_store=store)
+    run_id = runner.spawn_background("do it", name="probe", emit=lambda _e: None)
+    await _settle(runner, run_id)
+
+    assert queue.puts  # the in-memory lane still speaks
+    assert list((tmp_path / ".ai-coding" / "notices").glob("*.jsonl")) == []
+
+
 @pytest.mark.asyncio
 async def test_a_disk_resume_keeps_the_parent_rule_layer(tmp_path):
     """The sidecar's rule layer is what a resumed child is held to."""

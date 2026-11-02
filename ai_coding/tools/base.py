@@ -296,6 +296,19 @@ class BaseTool(ABC):
         should always pass one.
         """
 
+    def write_paths_for(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> tuple[str, ...] | None:
+        """What this *call* may write, for the dispatcher's write claim (P2-B1).
+
+        Returns absolute target paths for a path-scoped tool, ``()`` when the
+        footprint is opaque (the whole workspace is the only safe scope), and
+        ``None`` when the call needs no claim at all.  The default is ``None``
+        so a tool that has not thought about its write scope cannot serialize
+        unrelated work by accident.
+        """
+        return None
+
     def precheck(self, params: dict[str, Any]) -> ToolResult | None:
         """Cheap refusal for calls that cannot execute — checked before approval.
 

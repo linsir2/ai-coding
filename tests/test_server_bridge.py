@@ -311,6 +311,9 @@ def test_background_done_forwards_details() -> None:
             "commit": "abcdef1",
             "degraded": "worktree_unavailable",
             "commit_error": None,
+            "conflicts": [
+                {"key": "run-other", "origin_session": "s1", "paths": ["a.py"]}
+            ],
             "conclusion": "must not travel",
         },
     )
@@ -323,6 +326,9 @@ def test_background_done_forwards_details() -> None:
     assert data["worktreeBranch"] == "ai_sub_scout"
     assert data["commit"] == "abcdef1"
     assert data["degraded"] == "worktree_unavailable"
+    assert data["conflicts"] == [
+        {"key": "run-other", "origin_session": "s1", "paths": ["a.py"]}
+    ]
     assert "commitError" not in data
     assert "conclusion" not in data
 

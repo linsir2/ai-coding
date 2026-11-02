@@ -445,6 +445,19 @@ const notices: Record<string, (data: Record<string, unknown>) => string> = {
     if (commitError) line += ` · 提交失败: ${shorten(commitError, NESTED_CHARS)}`
     const degraded = str(data["degraded"])
     if (degraded) line += ` · 降级: ${degraded}（已在主工作区执行）`
+    // P2-B2: another recent run changed one of the same paths; nothing merged.
+    const conflicts = Array.isArray(data["conflicts"]) ? data["conflicts"] : []
+    const conflictKeys = conflicts
+      .map((entry) =>
+        entry && typeof entry === "object"
+          ? str((entry as Record<string, unknown>)["key"]).slice(0, 12)
+          : "",
+      )
+      .filter(Boolean)
+    if (conflicts.length > 0) {
+      const names = conflictKeys.length ? `: ${conflictKeys.join(", ")}` : ""
+      line += ` · 改动重叠${names}（未合并）`
+    }
     const ledger = str(data["ledgerPath"])
     if (ledger) line += ` · 完整回包: ${ledger}`
     // The run id is how this notice ties back to `/tasks stop <id>`, which

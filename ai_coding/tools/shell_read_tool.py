@@ -59,6 +59,18 @@ class ShellReadTool(BashTool):
             "required": ["command"],
         }
 
+    def write_paths_for(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> tuple[str, ...] | None:
+        """P2-B: read-only shell takes no write claim.
+
+        Explicit because ``ShellReadTool`` inherits ``BashTool``'s opaque
+        ``()``; even without the dispatcher's ``mutates_world_for`` guard that
+        would have serialised every plan-mode inspection behind the whole
+        workspace.
+        """
+        return None
+
     def precheck(self, params: dict[str, Any]) -> ToolResult | None:
         problem = read_only_problem(str(params.get("command") or ""))
         if problem:

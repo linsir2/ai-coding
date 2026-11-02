@@ -128,7 +128,9 @@ def _ctx() -> ToolContext:
     return ToolContext(task=TaskState(goal="g"), workspace="/tmp/ws", session_id="sid")
 
 
-def _dispatcher(tools, *, approval=None, max_parallel=4, observer=None):
+def _dispatcher(
+    tools, *, approval=None, max_parallel=4, observer=None, write_coordinator=None
+):
     registry = ToolRegistry()
     for tool in tools:
         registry.register(tool)
@@ -138,6 +140,7 @@ def _dispatcher(tools, *, approval=None, max_parallel=4, observer=None):
         approval,
         max_parallel=max_parallel,
         observer=observer,
+        write_coordinator=write_coordinator,
     )
 
 
@@ -833,6 +836,296 @@ async def test_precheck_refusal_skips_approval_and_execution():
 
     assert outcomes[0].result.error == "tool_error"
     assert outcomes[0].denied is True
+    assert tool.executed is False
+
+
+# ---- P2-B1: write coordination before execution ---------------------------
+#
+# The claim sits after the write-ahead replay and before ``_execute``: the
+# params are final (guard/hook rewrites have already landed) and nothing has
+# been touched yet.  A claim that cannot be taken is a structured
+# ``write_conflict``, and the replay branch keeps its meaning (a replayed call
+# did run before the crash, so it takes no claim now).
+
+
+class _Claim:
+    def __init__(self, coordinator) -> None:
+        self._coordinator = coordinator
+        self.released = 0
+
+    def release(self) -> None:
+        self.released += 1
+        self._coordinator.releases.append(self)
+
+
+class _Coordinator:
+    """Records what the dispatcher asked for; grants or refuses on demand."""
+
+    def __init__(self, *, grant: bool = True) -> None:
+        self.grant = grant
+        self.claims: list[dict] = []
+        self.releases: list[_Claim] = []
+
+    async def claim(self, owner, root, paths, timeout):
+        self.claims.append(
+            {"owner": owner, "root": root, "paths": tuple(paths), "timeout": timeout}
+        )
+        return _Claim(self) if self.grant else None
+
+    def acquire_hold(self, owner, root):
+        return f"hold-{owner}"
+
+    def release_hold(self, token):
+        return None
+
+    def register_run(self, key, paths, origin_session):
+        return None
+
+    def overlap(self, key, paths):
+        return ()
+
+
+class _WriteAheadStub:
+    def __init__(self, replay=None) -> None:
+        self._replay = replay
+        self.abandons: list = []
+
+    def claim(self, call, *, allow_replay=False):
+        return self._replay
+
+    def settle(self, call, result):
+        return None
+
+    def abandon(self, call):
+        self.abandons.append(call)
+
+
+class _PathTool(_FakeTool):
+    """A fake whose declared write scope the dispatcher must claim."""
+
+    def __init__(self, name: str, paths, **kwargs) -> None:
+        super().__init__(name, **kwargs)
+        self._paths = paths
+
+    def write_paths_for(self, params, ctx):
+        return self._paths
+
+
+@pytest.mark.asyncio
+async def test_a_write_claim_uses_the_declared_paths_and_owner():
+    tool = _PathTool("read", ("/tmp/ws/a.py",))
+    coordinator = _Coordinator()
+    await _dispatcher([tool], write_coordinator=coordinator).dispatch_batch(
+        [_ref("c1", "read")], _ctx()
+    )
+
+    assert len(coordinator.claims) == 1
+    claim = coordinator.claims[0]
+    assert claim["owner"] == "sid"
+    assert claim["root"] == "/tmp/ws"
+    assert claim["paths"] == ("/tmp/ws/a.py",)
+    # No turn deadline here, so the bounded wait is the 30s default.
+    assert claim["timeout"] == pytest.approx(30.0)
+
+
+@pytest.mark.asyncio
+async def test_a_write_claim_is_released_after_the_call():
+    tool = _PathTool("read", ("/tmp/ws/a.py",))
+    coordinator = _Coordinator()
+    await _dispatcher([tool], write_coordinator=coordinator).dispatch_batch(
+        [_ref("c1", "read")], _ctx()
+    )
+
+    assert tool.executed is True
+    assert len(coordinator.releases) == 1
+    assert coordinator.releases[0].released == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_write_scope_claims_the_whole_workspace():
+    tool = _PathTool("bash", ())
+    coordinator = _Coordinator()
+    await _dispatcher(
+        [tool], approval=_Approval(ApprovalResult.YES), write_coordinator=coordinator
+    ).dispatch_batch([_ref("c1", "bash", '{"command":"echo hi"}')], _ctx())
+
+    assert coordinator.claims[0]["paths"] == ()
+
+
+def test_shell_read_declares_no_write_scope():
+    """P2-B1 fix: ``ShellReadTool`` inherits ``BashTool``'s opaque ``()``; a
+    plan-mode inspection must not take the whole-workspace claim."""
+    from ai_coding.tools.shell_read_tool import ShellReadTool
+
+    assert ShellReadTool().write_paths_for({"command": "git status"}, None) is None
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_tool_never_claims_even_with_an_opaque_scope():
+    tool = _PathTool("shell_read", ())
+    tool.mutates_world = False  # what ShellReadTool declares
+    coordinator = _Coordinator()
+    outcomes = await _dispatcher([tool], write_coordinator=coordinator).dispatch_batch(
+        [_ref("c1", "shell_read", '{"command":"git status"}')], _ctx()
+    )
+
+    assert outcomes[0].result.success is True
+    assert coordinator.claims == [], "read-only inspection takes no write claim"
+
+
+@pytest.mark.asyncio
+async def test_write_and_bash_still_claim_the_scope_they_declare():
+    for tool, ref in (
+        (_PathTool("write", ("/tmp/ws/a.py",)), _ref("c1", "write", '{"path":"a.py"}')),
+        (_PathTool("bash", ()), _ref("c2", "bash", '{"command":"echo hi"}')),
+    ):
+        coordinator = _Coordinator()
+        await _dispatcher(
+            [tool], approval=_Approval(ApprovalResult.YES), write_coordinator=coordinator
+        ).dispatch_batch([ref], _ctx())
+        assert len(coordinator.claims) == 1, tool.name
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_claim_wait_leaves_the_scope_claimable(tmp_path):
+    """P2-B: cancelling the task waiting for a claim must not leak the wait."""
+    from ai_coding.core.write_coordinator import WriteCoordinator
+
+    coordinator = WriteCoordinator(tmp_path)
+    workspace = str(tmp_path)
+    target = str(tmp_path / "a.py")
+    held = await coordinator.claim("other", workspace, (target,), timeout=1.0)
+    assert held is not None
+
+    tool = _PathTool("write", (target,))
+    dispatcher = _dispatcher(
+        [tool],
+        approval=_Approval(ApprovalResult.YES),
+        write_coordinator=coordinator,
+    )
+    waiter = asyncio.create_task(
+        dispatcher.dispatch_batch(
+            [_ref("c1", "write", '{"path":"a.py"}')],
+            dataclasses.replace(_ctx(), workspace=workspace),
+        )
+    )
+    await asyncio.sleep(0.1)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    assert tool.executed is False
+    held.release()
+    second = await coordinator.claim("sid", workspace, (target,), timeout=0.5)
+    assert second is not None, "a cancelled waiter must not hold the scope"
+    second.release()
+
+
+def test_mcp_call_declares_a_workspace_wide_write_scope():
+    from types import SimpleNamespace
+
+    from ai_coding.tools.mcp_call import MCPCallTool
+
+    tool = MCPCallTool(SimpleNamespace())
+    assert tool.write_paths_for({}, None) == ()
+
+
+def test_a_write_tool_resolves_its_path_for_the_claim():
+    """The declared scope is the *resolved* target, not the model's spelling."""
+    from pathlib import Path
+
+    from ai_coding.security.file_state_tracker import FileStateTracker
+    from ai_coding.security.sandbox import Sandbox
+    from ai_coding.tools.write_tool import WriteTool
+
+    workspace = Path("/tmp/ws")
+    tool = WriteTool(Sandbox(str(workspace)), FileStateTracker())
+    assert tool.write_paths_for({"path": "sub/a.py"}, None) == (
+        str(workspace.resolve() / "sub" / "a.py"),
+    )
+    # A path the sandbox refuses cannot run anyway (precheck refuses it), so it
+    # declares no scope and never takes a claim.
+    assert tool.write_paths_for({"path": "/etc/passwd"}, None) is None
+
+
+def test_subagent_tools_declare_no_write_scope():
+    from ai_coding.tools.agents_tool import SpawnAgentTool
+    from ai_coding.tools.subagent_tool import SubAgentTool
+
+    assert SubAgentTool(None).write_paths_for({"task": "x"}, None) is None
+    assert SpawnAgentTool(None).write_paths_for({"task": "x"}, None) is None
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_call_never_claims_the_workspace():
+    from ai_coding.domain.subagent import SubagentResult
+    from ai_coding.tools.subagent_tool import SubAgentTool
+
+    class _Runner:
+        async def run(self, task, name="sub-agent", **kwargs):
+            return SubagentResult(status="completed", conclusion="done")
+
+    coordinator = _Coordinator()
+    outcomes = await _dispatcher(
+        [SubAgentTool(_Runner())],
+        approval=_Approval(ApprovalResult.YES),
+        write_coordinator=coordinator,
+    ).dispatch_batch([_ref("c1", "subAgent", '{"task":"scan"}')], _ctx())
+
+    assert outcomes[0].result.success is True
+    assert coordinator.claims == [], "a child manages its own writes"
+
+
+@pytest.mark.asyncio
+async def test_a_write_conflict_is_structured_and_abandons_the_intent():
+    tool = _PathTool("read", ("/tmp/ws/a.py",))
+    coordinator = _Coordinator(grant=False)
+    log = _WriteAheadStub()
+    ctx = dataclasses.replace(_ctx(), write_ahead=log)
+    outcomes = await _dispatcher([tool], write_coordinator=coordinator).dispatch_batch(
+        [_ref("c1", "read")], ctx
+    )
+
+    result = outcomes[0].result
+    assert tool.executed is False
+    assert outcomes[0].denied is True
+    assert result.success is False
+    assert result.error == "write_conflict"
+    assert result.data is not None
+    assert result.data["paths"] == ["/tmp/ws/a.py"]
+    assert result.data["owner"] == "sid"
+    assert isinstance(result.data["wait_ms"], int)
+    # The call never ran, so the running intent it wrote must not survive.
+    assert [call.id for call in log.abandons] == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_a_claim_is_released_when_the_tool_raises():
+    tool = _PathTool("read", ("/tmp/ws/a.py",), raiser=RuntimeError("boom"))
+    coordinator = _Coordinator()
+    outcomes = await _dispatcher([tool], write_coordinator=coordinator).dispatch_batch(
+        [_ref("c1", "read")], _ctx()
+    )
+
+    assert outcomes[0].result.error == "tool_error"
+    assert len(coordinator.releases) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_call_takes_no_claim():
+    tool = _PathTool("write", ("/tmp/ws/a.py",))
+    coordinator = _Coordinator()
+    log = _WriteAheadStub(replay=ToolResult(success=True, output="cached result"))
+    outcomes = await _dispatcher(
+        [tool], approval=_Approval(ApprovalResult.YES), write_coordinator=coordinator
+    ).dispatch_batch(
+        [_ref("c1", "write", '{"path":"a.py"}')],
+        dataclasses.replace(_ctx(), write_ahead=log),
+        allow_replay=True,
+    )
+
+    assert outcomes[0].result.output == "cached result"
+    assert coordinator.claims == [], "the call ran before the crash; it needs no claim"
     assert tool.executed is False
 
 

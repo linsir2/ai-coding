@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from ai_coding.tools.base import BaseTool
 
 
@@ -15,6 +17,10 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool] = {}
+        #: P2-B1: the write table this stack claims against.  The builder hangs
+        #: it here so the loop can find it without importing ``core`` and every
+        #: sub-agent stack can reuse the parent's instance.
+        self.write_coordinator: Any = None
 
     def register(self, tool: BaseTool) -> None:
         """Register a tool. Raises ``ValueError`` if the name is already taken."""

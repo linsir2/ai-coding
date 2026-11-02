@@ -273,6 +273,8 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
                 ("commit", event.details.get("commit")),
                 ("commitError", event.details.get("commit_error")),
                 ("degraded", event.details.get("degraded")),
+                # P2-B2: the overlap warning rides the same settlement event.
+                ("conflicts", event.details.get("conflicts")),
             ):
                 if value is not None:
                     done_data[key] = value

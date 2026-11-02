@@ -77,6 +77,7 @@ def build_subagent_runner(
     sandbox_backend: Any = None,
     sandbox_roots: Any = (),
     current_key: list[str] | None = None,
+    write_coordinator: Any = None,
 ) -> Any:
     """Build a :class:`SubAgentRunner` bound to the given workspace.
 
@@ -102,6 +103,13 @@ def build_subagent_runner(
     from ai_coding.security.approval import AutoApproveCallback
 
     main_ws = str(Path(workspace).expanduser().resolve())
+    # P2-B1: one table for the parent and every child stack.  Built here when a
+    # caller (a test, or a stack assembled outside the main builder) did not
+    # supply one, so repeated ``_build_tools`` calls still share it.
+    if write_coordinator is None:
+        from ai_coding.core.write_coordinator import WriteCoordinator
+
+        write_coordinator = WriteCoordinator(main_ws)
 
     def build_tools(workdir: str | None) -> Any:
         roots = tuple(sandbox_roots)
@@ -115,6 +123,7 @@ def build_subagent_runner(
             sandbox_policy=sandbox_policy,
             sandbox_backend=sandbox_backend,
             sandbox_roots=roots,
+            write_coordinator=write_coordinator,
         )
 
     def engine_factory() -> Any:
@@ -152,6 +161,10 @@ def build_subagent_runner(
         notices=notices,
         # M1b: the table a ``subAgent`` target is resolved against.
         agents=agents,
+        # P2-B2: the same occupancy table the parent and every child stack
+        # claim against, so a finished child's paths can be compared with the
+        # runs the dispatcher already saw.
+        write_coordinator=write_coordinator,
     )
 
 
@@ -172,6 +185,7 @@ def build_tool_registry(
     gate: Any = None,
     sandbox: Any = None,
     current_key: list[str] | None = None,
+    write_coordinator: Any = None,
 ) -> Any:
     """Build the *domain* tool registry used by the self-owned loop (R1a-4).
 
@@ -206,6 +220,7 @@ def build_tool_registry(
         gate=gate,
         sandbox=sandbox,
         current_key=current_key,
+        write_coordinator=write_coordinator,
     )
     return registry
 
@@ -226,6 +241,7 @@ def _assemble_registry(
     gate: Any = None,
     sandbox: Any = None,
     current_key: list[str] | None = None,
+    write_coordinator: Any = None,
 ) -> tuple[Any, Any]:
     """Create the sandbox/gate/registry triple shared by both builders."""
 
@@ -273,16 +289,27 @@ def _assemble_registry(
     plan_root = sandbox.workspace / PLAN_DIR
     registry = ToolRegistry()
 
+    # P2-B1: one write table per assembled stack unless the caller supplied
+    # one.  Hanging it on the registry is what lets ``AgentLoop`` hand it to
+    # the dispatcher without the tools package importing ``core``.
+    if write_coordinator is None:
+        from ai_coding.core.write_coordinator import WriteCoordinator
+
+        write_coordinator = WriteCoordinator(workspace)
+    registry.write_coordinator = write_coordinator
+
     if tools_cfg.bash.enabled:
         # E.1/E.2: the process layer's writable face is the path layer's, read
         # **live** -- the same roots, so a directory the file tools may write is
         # a directory a bash command may write, and never one or the other.
+        # P2-B1: a background/job command holds the workspace until it settles.
         registry.register(
             BashTool(
                 timeout_seconds=tools_cfg.bash.timeout_seconds,
                 policy=sandbox_policy,
                 backend=sandbox_backend,
                 roots=sandbox.live_roots,
+                write_coordinator=write_coordinator,
             )
         )
         # Plan mode's read-only subset: same sandbox, one allow-listed argv
@@ -420,6 +447,8 @@ def _assemble_registry(
             sandbox_policy=sandbox_policy,
             sandbox_backend=sandbox_backend,
             current_key=current_key,
+            # P2-B1: every child stack claims against the parent's table.
+            write_coordinator=write_coordinator,
         )
         manager = WorktreeManager(workspace)
         isolate = bool(getattr(app_cfg.ai, "subagent_worktree_isolation", True))

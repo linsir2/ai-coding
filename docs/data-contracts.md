@@ -425,6 +425,19 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | 后台逐轮提交 | 同上 | `_supervised`/`_run_followup` 在 `_run_turn` 后调 `_commit_turn`（显式 manager/path/name 三件套），再 `_finish_background`；`close()` 兜底提交后**先写 meta 再 remove**；`close_info(run_id)` 读 meta 回显 branch/commit/commitError |
 | 通道投影 | `_run_turn`/`_finish_background`/工具 | ledger（`<ws>/transcripts/subagents/<message_id>.json`，v3 扁平包）、meta（`taskPacket`/`outputSchema`/`worktreeBranch`/`commit`/`commitError`/`degraded`）、notice、event `details`、工具 `data`（只加小字段）、列表行均由同一 `SubagentResult` 投影 |
 
+### P2-B 写协调、容量与持久通知
+
+| 契约 | 位置 | 说明 |
+|---|---|---|
+| `SubagentResult.conflicts` | `domain/subagent.py` | `tuple[dict[str, Any], ...] = ()`；每项 `{key, origin_session, paths}`。**v3 加法**：P2-A 的 17+3 键不变，旧包无此键即 `()`；`to_dict` 输出 list（`paths` 也转 list）。消费面只到 **ledger / notice / details**（工具 `data`/前端行是 details 的投影），**不写 meta**——meta 的 resume 字段不重建 conflicts |
+| 重叠来源 | `core/subagent.py::_run_turn` | 结果生成后、写 ledger 前：`key = handle.run_id or handle.session.session_id`；`WriteCoordinator.register_run(key, changed_paths, origin_session)` → `overlap(key, changed_paths)` → `replace(result, conflicts=...)`。只有**后完成者**能看到重叠（不回溯通知） |
+| 容量准入 | `core/subagent.py` | `_active: set[str]` 是唯一准入集合，上限 `max_concurrent_subagents`；`_admit(key)` 供 `run()` 排队，`try_admit(key)` 供 `spawn_background`/`_schedule_turn`（满 → `SubAgentPoolFull`）；`_release_slot(key)` 幂等，覆盖 run/spawn 两处启动失败、follow-up 中断、`interrupt`/`close`、`_reap`（stale-task 检查之后、row 状态检查之前）与 `_finish_background` 最顶部；`resume` 不占槽。信号量仍为执行硬上限 |
+| 冲突投影 | `tools/subagent_tool.py` / `_details_projection` / `bridge.py` / 前端 | render/notice 追加 `⚠ 与 <key[:12]> 改动重叠: p1,p2（未合并）`；工具 `data.conflicts`、event `details.conflicts`、`background.done.data.conflicts` 只带小字段；前端行提示“改动重叠（未合并）” |
+| `NoticeStore` | `core/notice_store.py` | `<ws>/.ai-coding/notices/<session_id>.jsonl`，一行 `{id,session,text,created_at}`，`O_APPEND`；`clip_notice` 与 `SteeringQueue` 同一 2000 字预算（超出加 `…`）；`pending(session_id)` 读未投递行；`deliver(session_id, ids)` 只删这些 id（read-filter-tmp-replace），未投递行保留 |
+| 结算写盘与唤醒 | `core/subagent.py::_announce_to_model` | `origin_session` 非空时先 `append`（失败只记日志），再 `notices.put(line, wake=True)`；`_finish_background`/`_reap` 传入 `origin_session`。语义 **at-least-once**：投递后、deliver 前崩溃只会重复一条 |
+| loop 合并投递 | `core/agent_loop.py::_take_notices` | 内存 `drain()` + `store.pending(session_id)`，按**文本**去重、取前 5 条写 `[notice]` 消息；`closer.checkpoint` 之后 `store.deliver(session_id, ids)`，删除已投递文本的**全部**同文本 id。`notice_store=None` 保持旧行为（只 drain 内存）；子 loop 恒传 `None` |
+| 注入点 | `cli.py::_build_loop` | 主 loop 构造 `NoticeStore.for_workspace(ws)`；`SubAgentRunner` 未显式传 `notice_store` 时也按 workspace 派生（测试可注入临时目录） |
+
 ### 合同变更（仅两处）
 
 | 变更 | 影响面 |

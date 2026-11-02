@@ -63,6 +63,12 @@ class MCPCallTool(BaseTool):
     def params_json_schema(self) -> dict[str, Any]:
         return dict(_PARAMS_SCHEMA)
 
+    def write_paths_for(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> tuple[str, ...]:
+        """The remote side's writes are opaque: claim the whole workspace."""
+        return ()
+
     def permission_name(self, params: dict[str, Any] | None = None) -> str:
         """What the gate judges: the real remote call, not the vessel.
 

@@ -94,6 +94,12 @@ def _render(result: SubagentResult, name: str) -> str:
         lines.append(f"⚠ 提交失败: {result.commit_error}")
     if result.degraded:
         lines.append(f"⚠ 未隔离，已在主工作区执行（{result.degraded}）")
+    # P2-B2: two children (or a child and a parent write) touched the same
+    # paths; neither is merged, so the parent must decide what to do.
+    for conflict in result.conflicts:
+        key = str(conflict.get("key") or "")[:12]
+        paths = ",".join(str(path) for path in conflict.get("paths") or ())
+        lines.append(f"⚠ 与 {key} 改动重叠: {paths}（未合并）")
     if result.ledger_path and (result.truncated or result.schema_valid is False):
         lines.append(f"完整回包: {result.ledger_path}")
     return "\n".join(lines)
@@ -137,6 +143,10 @@ def _to_tool_result(result: SubagentResult, name: str) -> ToolResult:
             "changed_paths": list(result.changed_paths),
             "commit_error": result.commit_error,
             "degraded": result.degraded,
+            "conflicts": [
+                {**entry, "paths": list(entry.get("paths") or ())}
+                for entry in result.conflicts
+            ],
         },
         artifacts=result.artifacts,
     )
@@ -156,6 +166,14 @@ class SubAgentTool(BaseTool):
         # Strict: only a literal ``true`` is a read-only child; anything else
         # (false, "false", absent) is a writable one (fail-closed).
         return parse_readonly(params) is not True
+
+    def write_paths_for(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> tuple[str, ...] | None:
+        # P2-B1: a child manages its own writes (and an isolated one writes in
+        # its own worktree).  Spelled out so a future default change cannot
+        # make this claim the parent's whole workspace.
+        return None
 
     def __init__(
         self,

@@ -614,6 +614,33 @@ describe("notices", () => {
     expect(text).toContain("降级")
   })
 
+  test("background.done warns about an overlapping write", () => {
+    const state = feed(
+      initialState(),
+      { kind: "submitted", text: "hi" },
+      delta("done"),
+      wire("background.done", {
+        runId: "r1",
+        name: "scout",
+        status: "completed",
+        summary: "did it",
+        truncated: false,
+        originSession: "",
+        ledgerPath: "/tmp/x.json",
+        changedPaths: ["a.py"],
+        conflicts: [
+          { key: "run-other-123456", originSession: "s1", paths: ["a.py"] },
+        ],
+      }),
+    )
+    const notice = lastAssistant(state).parts.at(-1)
+    expect(notice).toMatchObject({ kind: "notice" })
+    const text = (notice as { text: string }).text
+    expect(text).toContain("改动重叠")
+    expect(text).toContain("run-other-12")
+    expect(text).toContain("未合并")
+  })
+
 describe("turn lifecycle", () => {
   test("completed turns are silent and free the prompt", () => {
     const state = feed(

@@ -147,6 +147,9 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   // 内化批次: the readonly gate's own code was the last live 未知原因
   // (7ad86804's transcript).
   readonly_denied: { label: "只读拒绝", tone: "denied" },
+  // P2-B1: a writer waited for another writer's claim and gave up; the call
+  // never ran, so it reads as a refusal, not breakage.
+  write_conflict: { label: "等待其它写者超时", tone: "denied" },
   // The research exit's posture gates -- a plain session calling it gets a
   // verdict, not 未知原因.
   not_in_plan: { label: "非计划模式", tone: "denied" },

@@ -481,6 +481,90 @@ def test_a_resumed_turn_only_replays_what_the_crash_left_behind(tmp_path):
     )
 
 
+def test_abandon_removes_a_running_intent_and_does_not_settle_it(tmp_path):
+    """P2-B1: a call refused for a write conflict never ran, so its ``running``
+    intent must not survive -- the next turn would re-run it in the dark, and
+    the conflict would leave a record of a call that never happened."""
+    service = SessionService(root=tmp_path / "sessions")
+    session = service.create(title="s")
+    log = WriteAheadLog(session, service)
+    call = ToolCall(id="c1", name="write", params={"path": "a.py"})
+
+    assert log.claim(call) is None  # records the running intent
+    assert _records(service, session.session_id) is not None
+
+    log.abandon(call)
+
+    assert _records(service, session.session_id) is None, (
+        "the abandoned call still has a record on disk"
+    )
+    log.settle(call, ToolResult(success=True, output="STALE"))
+    assert _records(service, session.session_id) is None, (
+        "settling an abandoned call must not recreate it"
+    )
+
+
+def test_abandon_keeps_the_other_records(tmp_path):
+    service = SessionService(root=tmp_path / "sessions")
+    session = service.create(title="s")
+    log = WriteAheadLog(session, service)
+    first = ToolCall(id="c1", name="write", params={"path": "a.py"})
+    second = ToolCall(id="c2", name="write", params={"path": "b.py"})
+
+    log.claim(first)
+    log.claim(second)
+    log.abandon(first)
+
+    records = _records(service, session.session_id)
+    assert records is not None
+    assert [record.call_id for record in records] == ["c2"]
+
+
+def test_abandon_keeps_a_settled_record(tmp_path):
+    """Only ``running`` means "never ran"; a settled outcome is real history."""
+    service = SessionService(root=tmp_path / "sessions")
+    session = service.create(title="s")
+    log = WriteAheadLog(session, service)
+    call = ToolCall(id="c1", name="write", params={"path": "a.py"})
+
+    log.claim(call)
+    log.settle(call, ToolResult(success=True, output="DONE"))
+
+    log.abandon(call)
+
+    records = _records(service, session.session_id)
+    assert records is not None
+    assert [record.status for record in records] == ["ok"]
+
+
+def test_abandon_swallows_a_persist_failure(tmp_path, monkeypatch):
+    """The refusal path must stay a refusal even when the sidecar is unwritable."""
+    service = SessionService(root=tmp_path / "sessions")
+    session = service.create(title="s")
+    log = WriteAheadLog(session, service)
+    call = ToolCall(id="c1", name="write", params={"path": "a.py"})
+    log.claim(call)
+
+    def _boom(_self) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(WriteAheadLog, "_persist", _boom)
+
+    log.abandon(call)  # must not raise
+
+    assert call_fingerprint(call) not in log._records  # noqa: SLF001
+
+
+def test_abandon_is_a_noop_when_disabled(tmp_path):
+    service = SessionService(root=tmp_path / "sessions")
+    session = service.create(title="s")
+    log = WriteAheadLog(session, service, enabled=False)
+
+    log.abandon(ToolCall(id="c1", name="write", params={"path": "a.py"}))
+
+    assert _records(service, session.session_id) is None
+
+
 def test_a_running_record_settled_by_the_resume_is_not_replayable(tmp_path):
     """A crash mid-call leaves ``running``; the resumed turn re-runs and settles it.
 

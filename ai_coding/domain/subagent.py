@@ -323,6 +323,10 @@ class SubagentResult:
     #: (``worktree_unavailable`` / ``worktree_create_failed``).  Consumers: the
     #: same four surfaces, rendered as "未隔离，已在主工作区执行".
     degraded: str | None = None
+    #: P2-B/v3: recent runs that changed at least one of the same paths (the
+    #: value of ``WriteCoordinator.overlap``).  Additive: an older packet has no
+    #: key, and ``()`` means "no overlap was observed".
+    conflicts: tuple[dict[str, Any], ...] = ()
 
     @property
     def text(self) -> str | None:
@@ -352,6 +356,10 @@ class SubagentResult:
             "changed_paths": list(self.changed_paths),
             "commit_error": self.commit_error,
             "degraded": self.degraded,
+            "conflicts": [
+                {**entry, "paths": list(entry.get("paths") or ())}
+                for entry in self.conflicts
+            ],
         }
 
 

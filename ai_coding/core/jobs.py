@@ -182,6 +182,10 @@ class Job:
     #: turn that started it, and the panel has to hear about it settling after
     #: that turn is over -- the same reason sub-agents keep their parent's emit.
     emit: Callable[[Any], None] | None = None
+    #: P2-B1: called exactly once at settlement.  ``bash`` uses it to release
+    #: the workspace-wide write hold it took before starting this job, so a
+    #: promoted command keeps the workspace until it really ends.
+    on_settle: Callable[[], None] | None = None
 
     def view(self) -> dict[str, Any]:
         """What the ledger and the tools both read: the process handle stays out."""
@@ -273,6 +277,7 @@ class JobRegistry:
         session_id: str,
         emit: Callable[[Any], None] | None = None,
         announce: bool = True,
+        on_settle: Callable[[], None] | None = None,
     ) -> Job:
         """Spawn ``command`` and return immediately; the caller does not wait.
 
@@ -321,6 +326,7 @@ class JobRegistry:
                 settled=True,
                 announce=False,
                 emit=emit,
+                on_settle=on_settle,
             )
             job.done.set()
             return job
@@ -354,6 +360,7 @@ class JobRegistry:
             proc=proc,
             announce=announce,
             emit=emit,
+            on_settle=on_settle,
         )
         with self._lock:
             self._jobs[job_id] = job
@@ -406,6 +413,16 @@ class JobRegistry:
         if job.settled:
             return
         job.settled = True
+        # P2-B1: exactly once, for the same reason every other effect here is
+        # idempotent.  A watcher thread and a kill can both reach settlement;
+        # the callback releases a write hold and a second release would be a
+        # claim belonging to nobody.  A broken callback must not cost the
+        # notice, the ledger row, or the waiter's wake-up.
+        if job.on_settle is not None:
+            try:
+                job.on_settle()
+            except Exception:  # noqa: BLE001 - settlement must outlive a bad callback
+                _log.debug("on_settle failed for %s", job.id, exc_info=True)
         code = job.proc.returncode if job.proc is not None else None
         if code is not None:
             job.exit_code = code

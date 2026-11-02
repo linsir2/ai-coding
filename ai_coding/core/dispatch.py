@@ -210,6 +210,7 @@ class ToolDispatcher:
         hooks: Any | None = None,
         approval_timeout: float | None = None,
         cancel: asyncio.Event | None = None,
+        write_coordinator: Any | None = None,
     ) -> None:
         self.registry = registry
         self.gate = gate
@@ -227,6 +228,9 @@ class ToolDispatcher:
         self.approval_timeout = approval_timeout
         # R8c: the user's "drop this batch" switch (Esc).  ``None`` = no such key.
         self.cancel = cancel
+        # P2-B1: the process-wide write table.  ``None`` keeps the pre-P2-B
+        # behaviour (direct tool calls and stacks built outside the loop).
+        self.write_coordinator = write_coordinator
 
     # ---- public API -------------------------------------------------------
 
@@ -682,16 +686,55 @@ class ToolDispatcher:
                 )
                 return result, False, False
 
-        result = await self._execute(tool, call, ctx, deadline)
-        if rewritten_from is not None:
-            result = self._annotate_rewrite(
-                result, rewritten_from, guard_decision.guard or f"hook:{hook_rewriter}"
+        # P2-B1: claim the write scope before anything runs.  The replay branch
+        # above must keep its meaning -- a replayed call already ran before the
+        # crash and takes no claim now.  ``paths is None`` means the tool needs
+        # no claim; ``()`` is the opaque case and claims the whole workspace.
+        claim = None
+        if (
+            self.write_coordinator is not None
+            and tool.mutates_world_for(call.params)
+        ):
+            paths = tool.write_paths_for(call.params, ctx)
+            if paths is not None:
+                wait = 30.0
+                if deadline is not None:
+                    wait = min(30.0, deadline.remaining())
+                started_wait = time.monotonic()
+                claim = await self.write_coordinator.claim(
+                    ctx.session_id, ctx.workspace, paths, wait
+                )
+                if claim is None:
+                    wait_ms = int((time.monotonic() - started_wait) * 1000)
+                    if log is not None:
+                        # The call never runs, so its ``running`` intent must
+                        # not survive into the next turn.
+                        log.abandon(call)
+                    return (
+                        self._write_conflict(call, paths, wait_ms, ctx.session_id),
+                        True,
+                        False,
+                    )
+        try:
+            result = await self._execute(tool, call, ctx, deadline)
+            if rewritten_from is not None:
+                result = self._annotate_rewrite(
+                    result,
+                    rewritten_from,
+                    guard_decision.guard or f"hook:{hook_rewriter}",
+                )
+            result = self.guards.after(call, result, ctx, turn_view)
+            await self._run_hooks(
+                HookPoint.TOOL_AFTER, call, ctx, turn_view, result=result
             )
-        result = self.guards.after(call, result, ctx, turn_view)
-        await self._run_hooks(HookPoint.TOOL_AFTER, call, ctx, turn_view, result=result)
-        if tool.mutates_world and log is not None:
-            log.settle(call, result)
-        return result, result.error == "credential_approval_required", False
+            if tool.mutates_world and log is not None:
+                log.settle(call, result)
+            return result, result.error == "credential_approval_required", False
+        finally:
+            # Every exit -- success, tool error, cancellation, a raising guard
+            # or hook -- releases.  A background bash job keeps its own hold.
+            if claim is not None:
+                claim.release()
 
     async def _run_hooks(
         self,
@@ -1000,6 +1043,34 @@ class ToolDispatcher:
             output="error: 已跳过（本回合被用户停止）",
             error="skipped",
             data={"skipped": True, "tool": call.name},
+        )
+
+    @staticmethod
+    def _write_conflict(
+        call: ToolCall,
+        paths: tuple[str, ...],
+        wait_ms: int,
+        owner: str,
+    ) -> ToolResult:
+        """Another writer held the same scope for the whole bounded wait.
+
+        The call did not run, so the model must see a distinct code it can act
+        on: wait, pick another file, or ask for less concurrency -- not "the
+        tool failed".
+        """
+        return ToolResult(
+            success=False,
+            output=(
+                f"error: 写冲突——另一个写者正在修改同一范围，等待 {wait_ms}ms "
+                "后仍未释放；本次调用未执行。请等它完成或换一条路径后重试，"
+                "不要并发写同一个文件。"
+            ),
+            error="write_conflict",
+            data={
+                "paths": list(paths) if paths else ["*"],
+                "owner": owner,
+                "wait_ms": wait_ms,
+            },
         )
 
     @staticmethod

@@ -21,7 +21,7 @@ from ai_coding.core.subagent import SubAgentRunner
 from ai_coding.core.worktree import WorktreeError
 from ai_coding.domain.loop import StepResult
 from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolResult
-from ai_coding.domain.subagent import ParentContext, SubagentTask
+from ai_coding.domain.subagent import ParentContext, SubAgentPoolFull, SubagentTask
 from ai_coding.tools.base import BaseTool
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.todo_write_tool import TodoWriteTool
@@ -132,6 +132,9 @@ def _runner(
     timeout: float = 600,
     settings: AIConfig | None = None,
     observer=None,
+    write_coordinator=None,
+    notices=None,
+    notice_store=None,
 ) -> SubAgentRunner:
     seen = seen_tools if seen_tools is not None else []
 
@@ -148,6 +151,9 @@ def _runner(
         timeout_seconds=timeout,
         settings=settings or AIConfig(stop_policy="natural"),
         observer=observer,
+        write_coordinator=write_coordinator,
+        notices=notices,
+        notice_store=notice_store,
     )
 
 
@@ -700,3 +706,117 @@ async def test_resolve_run_id_matches_a_unique_prefix():
     assert runner.resolve_run_id(run_id) == run_id
     assert runner.resolve_run_id(run_id[:12]) == run_id
     assert runner.resolve_run_id("zzz") is None
+
+
+# ---- P2-B2: one admission set for sync, spawn and follow-up ---------------
+
+
+@pytest.mark.asyncio
+async def test_a_synchronous_run_occupies_one_of_the_slots(tmp_path):
+    runner = _runner(_Engine(hang=True), max_concurrent=1)
+    running = asyncio.create_task(runner.run("one"))
+    for _ in range(200):
+        if runner._active:  # noqa: SLF001
+            break
+        await asyncio.sleep(0.01)
+
+    assert runner._active, "a sync run must be admitted like any other"  # noqa: SLF001
+    with pytest.raises(SubAgentPoolFull):
+        runner.spawn_background("two", emit=lambda _e: None)
+
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    for _ in range(200):
+        if not runner._active:  # noqa: SLF001
+            break
+        await asyncio.sleep(0.01)
+    assert runner._active == set(), "finally must give the slot back"  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_a_start_failure_returns_the_slot(monkeypatch):
+    runner = _runner(_Engine(), max_concurrent=1)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("cannot open")
+
+    monkeypatch.setattr(runner, "_open_handle", _boom)
+    with pytest.raises(RuntimeError, match="failed to start"):
+        runner.spawn_background("two", emit=lambda _e: None)
+
+    assert runner._active == set()  # noqa: SLF001
+
+
+class _HangAfterFirst(_Engine):
+    """The first turn settles; every later turn hangs until cancelled."""
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        if self.requests:
+            await asyncio.sleep(30)
+        return await super().step(
+            messages, tools=tools, instructions=instructions, on_delta=on_delta
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_turn_occupies_and_surrenders_a_slot(tmp_path):
+    runner = _runner(_HangAfterFirst(), max_concurrent=1)
+    run_id = runner.spawn_background("first", name="probe", emit=lambda _e: None)
+    for _ in range(200):
+        for row in runner.task_list():
+            if row.run_id == run_id and row.status != "running":
+                break
+        else:
+            await asyncio.sleep(0.02)
+            continue
+        break
+
+    status, _ = await runner.send_message(run_id, "second")
+    assert status == "running"
+    assert run_id in runner._active  # noqa: SLF001
+
+    await runner.interrupt(run_id)
+    assert runner._active == set()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_a_finished_run_records_overlap_in_the_packet_and_ledger(tmp_path):
+    """P2-B2: two runs that touched the same relative path are named, and the
+    fact survives into the ledger (the parent's durable copy)."""
+    from ai_coding.core.write_coordinator import WriteCoordinator
+    from ai_coding.domain.message import ToolArtifact
+
+    coordinator = WriteCoordinator(tmp_path)
+    coordinator.register_run("other-run", (str(tmp_path / "a.py"),), "s1")
+    writer = _Tool(
+        "write",
+        ToolResult(success=True, output="wrote", artifacts=(ToolArtifact(path="a.py"),)),
+    )
+    engine = _Engine(
+        [
+            StepResult(
+                tool_calls=[
+                    ToolCallRef(id="c1", name="write", arguments='{"path":"a.py"}')
+                ],
+                finish_reason="tool_calls",
+            ),
+            StepResult(text="done", finish_reason="stop"),
+        ]
+    )
+    runner = _runner(
+        engine, registry=_registry(writer), ledger_root=tmp_path,
+        write_coordinator=coordinator,
+    )
+
+    result = await runner.run("t")
+
+    assert result.changed_paths == ("a.py",)
+    assert result.conflicts == (
+        {"key": "other-run", "origin_session": "s1", "paths": ("a.py",)},
+    )
+    assert result.ledger_path is not None
+    payload = json.loads(Path(result.ledger_path).read_text(encoding="utf-8"))
+    assert payload["conflicts"] == [
+        {"key": "other-run", "origin_session": "s1", "paths": ["a.py"]}
+    ]

@@ -59,6 +59,20 @@ class EditTool(BaseTool):
             "required": ["path", "old_string", "new_string"],
         }
 
+    def write_paths_for(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> tuple[str, ...] | None:
+        path_str = str(params.get("path", ""))
+        if not path_str:
+            return None
+        try:
+            target = self._sandbox.resolve(path_str)
+        except SandboxViolation:
+            # ``precheck`` refuses this call before it can run, so there is
+            # nothing to serialize.
+            return None
+        return (str(target),)
+
     def precheck(self, params: dict[str, Any]) -> ToolResult | None:
         path_str = str(params.get("path", ""))
         if not path_str:

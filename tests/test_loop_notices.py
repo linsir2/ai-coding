@@ -92,6 +92,7 @@ def _loop(
     engine: ChatEngine,
     *,
     observer: RecordingObserver | None = None,
+    notice_store: Any | None = None,
 ) -> AgentLoop:
     registry = ToolRegistry()
     registry.register(_Poke())
@@ -103,6 +104,7 @@ def _loop(
         settings=AIConfig(max_tool_iterations=3, stop_policy="natural"),
         observer=observer,
         notices=notices,
+        notice_store=notice_store,
     )
 
 
@@ -213,3 +215,115 @@ async def test_no_source_means_no_behaviour_change(monkeypatch):
     await _loop(SteeringQueue(), queued).process_input(_session(), "派个后台任务")
 
     assert [m.content for m in plain.requests[1]] == [m.content for m in queued.requests[1]]
+
+
+# ---- P2-B3: the disk lane ------------------------------------------------
+
+
+def _notice_messages(session: SessionData) -> list[str]:
+    return [
+        m.content or ""
+        for m in session.messages
+        if (m.content or "").startswith("[notice] ")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_memory_and_disk_lines_with_the_same_text_become_one_message(tmp_path):
+    """The runner writes the same line to both lanes (memory for the running
+    turn, disk for a restart); the model must read it once."""
+    from ai_coding.core.notice_store import NoticeStore
+
+    text = "[子任务完成] probe（abc123）：跑完了"
+    store = NoticeStore.for_workspace(tmp_path)
+    store.append("s", text)
+    notices = SteeringQueue()
+    notices.put(text)
+    session = _session()
+
+    await _loop(notices, _PlainEngine(), notice_store=store).process_input(
+        session, "派个后台任务"
+    )
+
+    messages = _notice_messages(session)
+    assert len(messages) == 1
+    assert text in messages[0]
+    # ... and the disk copy of that delivered text is cleared, not redelivered.
+    assert store.pending("s") == []
+
+
+@pytest.mark.asyncio
+async def test_an_undelivered_disk_line_waits_for_the_next_turn(tmp_path):
+    """Only what the model actually saw is deleted: a sixth line stays queued."""
+    from ai_coding.core.notice_store import NoticeStore
+
+    store = NoticeStore.for_workspace(tmp_path)
+    for index in range(7):
+        store.append("s", f"line {index}")
+    session = _session()
+
+    await _loop(SteeringQueue(), _PlainEngine(), notice_store=store).process_input(
+        session, "派个后台任务"
+    )
+
+    assert len(_notice_messages(session)) == 5
+    assert [row["text"] for row in store.pending("s")] == ["line 5", "line 6"]
+
+
+@pytest.mark.asyncio
+async def test_delivery_is_at_least_once_across_a_new_loop(tmp_path):
+    """A fresh loop (a restart) still reads what the old one never delivered."""
+    from ai_coding.core.notice_store import NoticeStore
+
+    store = NoticeStore.for_workspace(tmp_path)
+    store.append("s", "survived the restart")
+    session = _session()
+
+    await _loop(None, _PlainEngine(), notice_store=store).process_input(
+        session, "接着跑"
+    )
+
+    assert _notice_messages(session) == ["[notice] survived the restart"]
+    assert store.pending("s") == []
+
+
+@pytest.mark.asyncio
+async def test_whitespace_and_overlong_copies_still_dedupe(tmp_path):
+    """The queue strips and the store strips+clips; both must land on one
+    identical text or the model reads the same settlement twice."""
+    from ai_coding.core.notice_store import NoticeStore
+
+    text = "  " + "x" * 2100 + "  "
+    store = NoticeStore.for_workspace(tmp_path)
+    store.append("s", text)
+    notices = SteeringQueue()
+    notices.put(text)
+    session = _session()
+
+    await _loop(notices, _PlainEngine(), notice_store=store).process_input(
+        session, "派个后台任务"
+    )
+
+    messages = _notice_messages(session)
+    assert len(messages) == 1
+    assert len(messages[0]) == len("[notice] ") + 2001
+    assert store.pending("s") == []
+
+
+@pytest.mark.asyncio
+async def test_no_store_keeps_the_memory_only_behaviour(tmp_path):
+    """``notice_store=None`` is the old loop: ``SteeringQueue`` only."""
+    from ai_coding.core.notice_store import NoticeStore
+
+    store = NoticeStore.for_workspace(tmp_path)
+    store.append("s", "disk only")
+    notices = SteeringQueue()
+    notices.put("memory only")
+    session = _session()
+
+    await _loop(notices, _PlainEngine(), notice_store=None).process_input(
+        session, "派个后台任务"
+    )
+
+    assert _notice_messages(session) == ["[notice] memory only"]
+    assert [row["text"] for row in store.pending("s")] == ["disk only"]

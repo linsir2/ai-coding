@@ -131,6 +131,30 @@ class WriteAheadLog:
         record.artifacts = clip_artifacts(result.artifacts)
         self._persist()
 
+    def abandon(self, call: ToolCall) -> None:
+        """Drop a ``running`` intent for a call that never ran (P2-B1).
+
+        A write-conflict refusal happens *after* ``claim`` recorded the intent,
+        so without this the sidecar would carry a record of a call whose effect
+        never happened.  Settling it later would also be a lie.
+        """
+        if not self._enabled:
+            return
+        digest = call_fingerprint(call)
+        record = self._records.get(digest)
+        # Only a ``running`` intent means "claimed but never ran".  An ``ok``/
+        # ``failed`` record is history the replay scope may still need; dropping
+        # it here would lose a real outcome on the conflict path.
+        if record is None or record.status != "running":
+            return
+        self._records.pop(digest, None)
+        try:
+            # The refusal path must stay a refusal even when the sidecar is
+            # unwritable (disk full, permissions); persistence is best-effort.
+            self._persist()
+        except OSError:
+            pass
+
     def clear(self) -> None:
         """Drop the turn's records -- the reuse domain ends here (M-C1)."""
         if not self._enabled:

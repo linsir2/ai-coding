@@ -89,7 +89,10 @@ def test_subagent_runner_inner_stack_has_no_nested_subagent(tmp_path):
     runner = build_subagent_runner(_cfg(str(tmp_path)), str(tmp_path), None)
     inner = runner._build_tools(None)  # the sub-agent's own tools (main workdir)
     names = set(inner.list_names())
+    # P2-B2: depth is structurally one -- neither the old name nor the new
+    # Codex-shaped tools may appear in a child's stack.
     assert "subAgent" not in names  # no recursion
+    assert "spawn_agent" not in names
     assert "read" in names
 
 
@@ -165,6 +168,38 @@ def test_the_tool_search_path_also_gets_neither_spawn_name_in_plan():
 
     assert "subAgent" not in names
     assert "spawn_agent" not in names
+
+
+def test_parent_and_child_registries_share_one_write_coordinator(tmp_path):
+    """P2-B1: every writer — the parent and every child stack — must serialize
+    against the same table, or two sub-agents could write the same file."""
+    parent = build_tool_registry(_cfg(str(tmp_path)), str(tmp_path), None)
+    runner = parent.get("subAgent")._runner
+    child = runner._build_tools(None)
+
+    assert parent.write_coordinator is not None
+    assert child.write_coordinator is parent.write_coordinator
+
+
+def test_an_injected_write_coordinator_is_used_by_both_stacks(tmp_path):
+    from ai_coding.core.write_coordinator import WriteCoordinator
+
+    coordinator = WriteCoordinator(tmp_path)
+    parent = build_tool_registry(
+        _cfg(str(tmp_path)), str(tmp_path), None, write_coordinator=coordinator
+    )
+    child = parent.get("subAgent")._runner._build_tools(None)
+
+    assert parent.write_coordinator is coordinator
+    assert child.write_coordinator is coordinator
+
+
+def test_bash_tool_gets_the_same_coordinator(tmp_path):
+    coordinator_holder = {}
+
+    parent = build_tool_registry(_cfg(str(tmp_path)), str(tmp_path), None)
+    coordinator_holder["c"] = parent.write_coordinator
+    assert parent.get("bash")._write_coordinator is coordinator_holder["c"]
 
 
 def test_goal_tools_are_main_stack_only(tmp_path):

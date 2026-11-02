@@ -35,6 +35,7 @@ from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
 from ai_coding.core.events import BackgroundTaskDone
 from ai_coding.core.guard import build_guards
+from ai_coding.core.notice_store import NoticeStore, clip_notice
 from ai_coding.core.observers import ScopedObserver
 from ai_coding.core.steering import SteeringQueue
 from ai_coding.core.turn_report import report_degraded
@@ -211,6 +212,13 @@ class SubAgentRunner:
         #: isolated ``<agents base>/sessions`` root below, so the main
         #: ``/resume`` list can never pick a child session up.
         session_store: SessionService | None = None,
+        #: P2-B2: the process-wide write table the dispatcher also claims
+        #: against.  ``None`` keeps the pre-B2 behaviour: no overlap detection.
+        write_coordinator: Any | None = None,
+        #: P2-B3: the durable settlement lane.  ``None`` derives one under the
+        #: workspace (``.ai-coding/notices``); a caller may pass a store rooted
+        #: elsewhere (tests), never disable the lane.
+        notice_store: NoticeStore | None = None,
     ) -> None:
         self._app_config = app_config
         self._skills = skills
@@ -246,8 +254,19 @@ class SubAgentRunner:
         # one-way door for the model that started it.
         self._notices = notices
         self._agents = agents
+        self._write_coordinator = write_coordinator
+        self._notice_store = (
+            notice_store
+            if notice_store is not None
+            else NoticeStore.for_workspace(workspace)
+        )
         self._max_concurrent_n = max(1, int(max_concurrent))
         self._semaphore = asyncio.Semaphore(self._max_concurrent_n)
+        # P2-B2: one admission set for sync, background and follow-up runs.
+        # The semaphore remains the execution bound; this set makes "accepted <=
+        # max" true even while a run is between admission and its first step.
+        self._active: set[str] = set()
+        self._slot_freed = asyncio.Event()
         # R1-2: background runs tracked across turns: run id -> row, plus the
         # live asyncio tasks (strong refs so they survive the spawning turn),
         # plus the announce context (emit/origin/name) keyed the same way.
@@ -351,12 +370,19 @@ class SubAgentRunner:
             output_schema=output_schema,
         )
         mode = self._resolve_context_mode(self.context_mode, requested_mode)
-        async with self._semaphore:
-            return await self._run_isolated(
-                text, name, parent, parent_span, active,
-                worktree_manager, isolate, output_schema, agent, mode, readonly,
-                request=request, origin_session=origin_session,
-            )
+        # P2-B2: a synchronous run queues for a slot (it is the caller's whole
+        # turn, so refusing it would be worse than waiting).
+        slot = f"sync:{uuid.uuid4().hex}"
+        await self._admit(slot)
+        try:
+            async with self._semaphore:
+                return await self._run_isolated(
+                    text, name, parent, parent_span, active,
+                    worktree_manager, isolate, output_schema, agent, mode, readonly,
+                    request=request, origin_session=origin_session,
+                )
+        finally:
+            self._release_slot(slot)
 
     @staticmethod
     def _split_task(
@@ -530,9 +556,9 @@ class SubAgentRunner:
         called from async context: the supervised task is created on the
         running loop.
         """
-        # C-5a review: ``semaphore.locked()`` only says "some task holds a
-        # slot", not "the pool is full", and rows may outlive their slot.
-        # Count what is actually running; the semaphore stays the hard bound.
+        # P2-B2: admission is one set, not a count of rows -- a row may outlive
+        # its slot, and a continuation turn occupies a slot without a new row.
+        # The semaphore stays the hard execution bound.
         (
             text,
             request,
@@ -549,16 +575,13 @@ class SubAgentRunner:
             context_mode=context_mode,
             output_schema=output_schema,
         )
-        running = sum(
-            1 for row in self._background.values() if row.status == "running"
-        )
-        if running >= self._max_concurrent():
+        run_id = uuid.uuid4().hex[:12]
+        if not self.try_admit(run_id):
             raise SubAgentPoolFull(
                 "sub-agent concurrency exhausted: "
                 f"{self._max_concurrent()} background slots busy; "
                 "retry later or raise ai.max_concurrent_subagents"
             )
-        run_id = uuid.uuid4().hex[:12]
         active = self._observer if observer is None else observer
         mode = self._resolve_context_mode(self.context_mode, requested_mode)
         self._background[run_id] = BackgroundTask(
@@ -579,6 +602,8 @@ class SubAgentRunner:
                 request=request, origin_session=origin_session,
             )
         except Exception as exc:  # noqa: BLE001 — a row must not stay "running"
+            # P2-B2: a start that never produced a run must give the slot back.
+            self._release_slot(run_id)
             self._background[run_id] = replace(
                 self._background[run_id],
                 status="error",
@@ -607,6 +632,8 @@ class SubAgentRunner:
             # coroutine must be closed explicitly or Python reports it as never
             # awaited.
             supervised.close()
+            # P2-B2: same reason as the handle failure above.
+            self._release_slot(run_id)
             handle.status = "closed"
             self._handles.pop(run_id, None)
             self._background[run_id] = replace(
@@ -704,10 +731,7 @@ class SubAgentRunner:
         same synchronous block on purpose (DF-2): a race here would overwrite
         ``turn_task`` and run two turns against one session.
         """
-        running = sum(
-            1 for row in self._background.values() if row.status == "running"
-        )
-        if running >= self._max_concurrent():
+        if not self.try_admit(handle.run_id):
             raise SubAgentPoolFull(
                 "sub-agent concurrency exhausted: "
                 f"{self._max_concurrent()} background slots busy; "
@@ -721,9 +745,27 @@ class SubAgentRunner:
                 row, status="running", ended=None, error=None, usage=None,
                 ledger_path=None,
             )
-        task = asyncio.get_running_loop().create_task(
-            self._run_followup(handle, text), name=f"subagent:{handle.run_id}"
-        )
+        followup = self._run_followup(handle, text)
+        try:
+            task = asyncio.get_running_loop().create_task(
+                followup, name=f"subagent:{handle.run_id}"
+            )
+        except Exception as exc:
+            # P2-B2: a turn that never became a task must not hold its slot, and
+            # its row must not stay ``running`` -- nothing would ever settle it.
+            followup.close()
+            self._release_slot(handle.run_id)
+            handle.status = "idle"
+            handle.turn_task = None
+            row = self._background.get(handle.run_id)
+            if row is not None:
+                self._background[handle.run_id] = replace(
+                    row,
+                    status="error",
+                    ended=time.monotonic(),
+                    error=f"failed to start: {exc}",
+                )
+            raise
         handle.turn_task = task
         self._tasks[handle.run_id] = task
         task.add_done_callback(functools.partial(self._reap, handle.run_id))
@@ -745,6 +787,8 @@ class SubAgentRunner:
                 result = await self._run_turn(handle, text)
         except asyncio.CancelledError:
             interrupted = True
+            # P2-B2: the interrupted turn had a slot from ``_schedule_turn``.
+            self._release_slot(handle.run_id)
             handle.status = "interrupted"
             handle.last_status = "interrupted"
             row = self._background.get(handle.run_id)
@@ -815,6 +859,9 @@ class SubAgentRunner:
         handle = self._handle_for(target)
         if handle is None:
             return "not_found", target
+        # P2-B2: an interrupt ends the turn's admission; idempotent with the
+        # follow-up's own release and the reaper's callback.
+        self._release_slot(handle.run_id)
         task = handle.turn_task
         if task is None or task.done():
             # C-5b review: the first turn lives in ``_tasks`` until the
@@ -944,6 +991,8 @@ class SubAgentRunner:
         handle = self._handle_for(target)
         if handle is None:
             return False
+        # P2-B2: closing cancels the turn, so its admission ends here too.
+        self._release_slot(handle.run_id)
         task = handle.turn_task
         if task is None or task.done():
             # The spawning turn lives in ``_tasks`` (its slot is ``turn_task``
@@ -1100,6 +1149,33 @@ class SubAgentRunner:
 
     def _max_concurrent(self) -> int:
         return self._max_concurrent_n
+
+    async def _admit(self, key: str) -> None:
+        """Wait for one slot, then take ``key`` (sync runs queue, never refuse)."""
+        while True:
+            if len(self._active) < self._max_concurrent_n:
+                self._active.add(key)
+                return
+            self._slot_freed.clear()
+            # Re-check after clearing: a release between the check and the clear
+            # would otherwise be lost and the waiter would hang for good.
+            if len(self._active) < self._max_concurrent_n:
+                self._active.add(key)
+                return
+            await self._slot_freed.wait()
+
+    def try_admit(self, key: str) -> bool:
+        """Take a slot without waiting; ``False`` means the pool is full."""
+        if len(self._active) >= self._max_concurrent_n:
+            return False
+        self._active.add(key)
+        return True
+
+    def _release_slot(self, key: str) -> None:
+        """Surrender ``key``'s slot; idempotent across every terminal path."""
+        if key in self._active:
+            self._active.discard(key)
+            self._slot_freed.set()
 
     def _prune_background(self) -> None:
         """Bound the table: oldest terminal rows go first, running never.
@@ -1262,6 +1338,10 @@ class SubAgentRunner:
         P2-A: row, notice and event are one projection of ``result``; the
         event's ``details`` is that projection, never the full conclusion.
         """
+        # P2-B2: release at the very top, before any row-state check -- a
+        # settlement that arrives twice (finish + reap) must free exactly one
+        # slot, and a row already settled elsewhere must not leak one.
+        self._release_slot(run_id)
         row = self._background.get(run_id)
         self._tasks.pop(run_id, None)
         self._announce.pop(run_id, None)
@@ -1296,7 +1376,7 @@ class SubAgentRunner:
         # gated behind ``emit is None``, so a runner without an operator stream
         # (the bare CLI, a test double) silently dropped the settlement the
         # parent turn was waiting for.  Announce first; the event stays optional.
-        self._announce_to_model(run_id, row.name, result)
+        self._announce_to_model(run_id, row.name, result, origin_session)
         if emit is None:
             return
         try:
@@ -1319,17 +1399,32 @@ class SubAgentRunner:
         run_id: str,
         name: str,
         result: SubagentResult,
+        origin_session: str = "",
     ) -> None:
-        """Hand the settlement to the parent's loop (P0-2).
+        """Hand the settlement to the parent's loop (P0-2 / P2-B3).
 
         Separate from the event on purpose: the event is an observation the
-        operator may miss, and a failed ``put`` must never disturb a settlement
-        that has already been recorded on the row.
+        operator may miss, and a failed write or ``put`` must never disturb a
+        settlement that has already been recorded on the row.
+
+        The same line goes to disk (keyed by the spawning session) and to the
+        in-memory lane.  Disk is the restart-safe half; the queue is the
+        running-turn half.  ``wake=True`` lets an idle server session start a
+        turn for a settlement; a bare CLI has no ``on_put`` and simply waits
+        for the next human input.
         """
+        line = clip_notice(_notice_text(run_id, name, result))
+        if self._notice_store is not None and origin_session:
+            try:
+                self._notice_store.append(origin_session, line)
+            except Exception:  # noqa: BLE001 — the in-memory lane still speaks
+                _log.debug(
+                    "background notice persist failed for %s", run_id, exc_info=True
+                )
         if self._notices is None:
             return
         try:
-            self._notices.put(_notice_text(run_id, name, result))
+            self._notices.put(line, wake=True)
         except Exception:  # noqa: BLE001 — same reason as the event above
             _log.debug("background notice failed for %s", run_id, exc_info=True)
 
@@ -1349,6 +1444,10 @@ class SubAgentRunner:
         current = self._tasks.get(run_id)
         if _task is not None and current is not None and current is not _task:
             return
+        # P2-B2: after the stale-task guard and before the row guard -- an old
+        # callback must never free the slot a newer follow-up turn holds, and a
+        # task cancelled before its first step has no other release path.
+        self._release_slot(run_id)
         row = self._background.get(run_id)
         self._tasks.pop(run_id, None)
         announce = self._announce.pop(run_id, None)
@@ -1384,7 +1483,7 @@ class SubAgentRunner:
                 return
             announce = (handle.emit, handle.origin_session, handle.name)
         emit, origin_session, name = announce
-        self._announce_to_model(run_id, name, result)
+        self._announce_to_model(run_id, name, result, origin_session)
         if emit is None:
             return
         try:
@@ -1634,6 +1733,9 @@ class SubAgentRunner:
             # C-5b: the inbound lane for ``send_message``.  A bound method of the
             # handle's own mailbox, so the loop never sees the deque itself.
             agent_inbox=functools.partial(_drain_mailbox, handle.mailbox),
+            # P2-B3: the durable notice lane belongs to the main session only;
+            # a child has no human turn boundary to deliver it.
+            notice_store=None,
         )
 
     async def _attach_loop(self, handle: AgentHandle, workdir: str | None) -> None:
@@ -1715,6 +1817,18 @@ class SubAgentRunner:
                 loop, handle.session, handle.workdir,
                 handle.context_mode, handle.output_schema,
             )
+        # P2-B2: compare this run's declared changes with the recent runs before
+        # the ledger is written, so the packet the parent reads and the durable
+        # copy name the same warning.  A sync run has no run id; its child
+        # session id is the unique key (one session = one run).
+        coordinator = self._write_coordinator
+        if coordinator is not None:
+            key = handle.run_id or handle.session.session_id
+            coordinator.register_run(
+                key, result.changed_paths, handle.origin_session
+            )
+            conflicts = coordinator.overlap(key, result.changed_paths)
+            result = replace(result, conflicts=conflicts)
         header = PacketHeader(
             message_id=uuid.uuid4().hex[:12],
             run_id=handle.run_id,
@@ -2112,6 +2226,10 @@ def _details_projection(result: SubagentResult) -> dict[str, Any]:
         "commit": result.commit,
         "commit_error": result.commit_error,
         "degraded": result.degraded,
+        "conflicts": [
+            {**entry, "paths": list(entry.get("paths") or ())}
+            for entry in result.conflicts
+        ],
         "usage": dict(result.usage) if result.usage is not None else None,
         "ledger_path": result.ledger_path,
     }
@@ -2155,6 +2273,10 @@ def _notice_text(run_id: str, name: str, result: SubagentResult) -> str:
         line += f" · 提交失败：{result.commit_error}"
     if result.degraded:
         line += f" · 降级：未隔离（{result.degraded}），已在主工作区执行"
+    for conflict in result.conflicts:
+        key = str(conflict.get("key") or "")[:12]
+        paths = ",".join(str(path) for path in conflict.get("paths") or ())
+        line += f" · ⚠ 与 {key} 改动重叠: {paths}（未合并）"
     if result.ledger_path:
         line += f" · 完整回包 {result.ledger_path}"
     return line

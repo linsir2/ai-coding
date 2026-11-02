@@ -68,6 +68,14 @@ class SpawnAgentTool(BaseTool):
         # (false, "false", absent) is a writable one (fail-closed).
         return parse_readonly(params) is not True
 
+    def write_paths_for(
+        self, params: dict[str, Any], ctx: ToolContext | None = None
+    ) -> tuple[str, ...] | None:
+        # P2-B1: a child manages its own writes (and an isolated one writes in
+        # its own worktree).  Spelled out so a future default change cannot
+        # make this claim the parent's whole workspace.
+        return None
+
     def __init__(
         self,
         runner: Any,

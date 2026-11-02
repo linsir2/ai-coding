@@ -172,6 +172,12 @@ def _build_loop(
     ws = Path(workspace).expanduser().resolve()
     paths = paths or Paths(workspace=ws)
 
+    # P2-B3: settlements survive the process; the loop drains them at its next
+    # boundary and deletes only what it delivered.
+    from ai_coding.core.notice_store import NoticeStore
+
+    notice_store = NoticeStore.for_workspace(ws)
+
     project = ProjectInstructionsLoader(ws)
     summarizer, extractor = _llm_helpers_for(engine)
     # Two tiers (M10): the project's own file, and the one that follows the
@@ -271,6 +277,7 @@ def _build_loop(
         guards=guards if guards is not None else build_guards(app_cfg),
         hooks=hooks,
         notices=notices,
+        notice_store=notice_store,
         jobs=jobs,
         cancel=cancel,
         extra_workspace_roots=_extra_roots(app_cfg, str(ws)),

@@ -17,9 +17,9 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable
 
-__all__ = ["SteeringQueue"]
+from ai_coding.core.notice_store import clip_notice
 
-_TRUNCATION = "…"
+__all__ = ["SteeringQueue"]
 
 
 class SteeringQueue:
@@ -72,7 +72,5 @@ class SteeringQueue:
         taken: list[str] = []
         while self._lines and len(taken) < self._max_messages:
             body = self._lines.popleft()
-            if len(body) > self._max_chars:
-                body = body[: self._max_chars] + _TRUNCATION
-            taken.append(body)
+            taken.append(clip_notice(body, self._max_chars))
         return taken

@@ -70,17 +70,15 @@ async def test_spawn_returns_at_once_while_child_runs_on():
 
 @pytest.mark.asyncio
 async def test_saturated_pool_rejects_instead_of_queueing_silently():
-    runner = _runner(_Engine(), max_concurrent=1)
-    # C-5a review: the pool's real bound is the running rows, not whether some
-    # task happens to hold the semaphore; occupy one slot the same way a live
-    # run does.
-    runner._background["live"] = BackgroundTask(
-        run_id="live", status="running", started=time.monotonic()
-    )
+    runner = _runner(_Engine(hang=True), max_concurrent=1)
+    # P2-B2: the pool's bound is the one admission set, and a live run holds a
+    # slot from the moment it is spawned (not when its first row appears).
+    live = runner.spawn_background("live", emit=lambda e: None)
     with pytest.raises(RuntimeError, match="concurrency exhausted"):
         runner.spawn_background("x", emit=lambda e: None)
     # The rejected spawn must not leave a row behind; the live one stays.
-    assert [row.run_id for row in runner.task_list()] == ["live"]
+    assert [row.run_id for row in runner.task_list()] == [live]
+    runner.cancel(live)
 
 
 @pytest.mark.asyncio
@@ -103,6 +101,8 @@ async def test_spawn_that_cannot_create_a_task_settles_the_row(monkeypatch):
     assert len(rows) == 1
     assert rows[0].status == "error"
     assert "loop closed" in (rows[0].error or "")
+    # P2-B2: a start that never became a task must give the slot back.
+    assert runner._active == set()  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -327,7 +327,7 @@ async def test_completion_event_carries_a_details_projection():
         ledger_path="/tmp/ledgers/abc123def456.json",
     )
 
-    runner._finish_background("run-1", result, seen.append, "origin")  # noqa: SLF001
+    runner._finish_background("run-1", result, seen.append, "")  # noqa: SLF001
 
     assert len(seen) == 1 and isinstance(seen[0], BackgroundTaskDone)
     details = seen[0].details
@@ -361,7 +361,7 @@ async def test_row_projects_the_packet():
     )
 
     runner._finish_background(  # noqa: SLF001
-        "run-1", result, lambda _event: None, "origin"
+        "run-1", result, lambda _event: None, ""
     )
 
     row = runner.task_list()[0]
@@ -503,3 +503,177 @@ async def test_a_second_turn_without_changes_keeps_the_first_turns_facts(tmp_pat
     assert row.worktree_branch == "ai_sub_probe"
     assert json.loads(meta_path.read_text(encoding="utf-8"))["commit"] == "abcdef123456"
     assert runner.close_info(run_id)["commit"] == "abcdef123456"
+
+
+# ---- P2-B2: overlap in the settlement projections -------------------------
+
+
+_OVERLAP = (
+    {
+        "key": "run-abcdef123456",
+        "origin_session": "s1",
+        "paths": ("a.py", "b.py"),
+    },
+)
+
+
+def test_notice_warns_about_an_overlap():
+    result = SubagentResult(
+        status="completed",
+        conclusion="did it",
+        changed_paths=("a.py", "b.py"),
+        conflicts=_OVERLAP,
+    )
+
+    line = _notice_text("run-2", "probe", result)
+
+    assert "⚠ 与 run-abcdef12 改动重叠" in line
+    assert "a.py,b.py（未合并）" in line
+
+
+@pytest.mark.asyncio
+async def test_details_projection_carries_conflicts():
+    seen: list = []
+    runner = _runner(_Engine(text="done"))
+    runner._background["run-1"] = BackgroundTask(  # noqa: SLF001
+        run_id="run-1", name="probe", status="running", started=time.monotonic()
+    )
+    result = SubagentResult(
+        status="completed",
+        conclusion="done",
+        changed_paths=("a.py",),
+        conflicts=_OVERLAP,
+    )
+
+    runner._finish_background("run-1", result, seen.append, "")  # noqa: SLF001
+
+    details = seen[0].details
+    assert details is not None
+    assert details["conflicts"] == [
+        {
+            "key": "run-abcdef123456",
+            "origin_session": "s1",
+            "paths": ["a.py", "b.py"],
+        }
+    ]
+
+
+# ---- P2-B2: the one admission set, and every way a slot is freed ----------
+
+
+@pytest.mark.asyncio
+async def test_a_spawned_run_holds_one_slot_until_it_settles():
+    runner = _runner(_Engine(hang=True), max_concurrent=1)
+
+    run_id = runner.spawn_background("sleep", name="sleeper", emit=lambda _e: None)
+    assert run_id in runner._active
+
+    with pytest.raises(RuntimeError, match="concurrency exhausted"):
+        runner.spawn_background("second", emit=lambda _e: None)
+
+    assert runner.cancel(run_id) is True
+    for _ in range(200):
+        if not runner._active:
+            break
+        await asyncio.sleep(0.02)
+    assert runner._active == set()
+
+
+@pytest.mark.asyncio
+async def test_an_interrupt_frees_the_slot_exactly_once():
+    runner = _runner(_Engine(hang=True), max_concurrent=1)
+    run_id = runner.spawn_background("sleep", name="sleeper", emit=lambda _e: None)
+    assert run_id in runner._active
+
+    await runner.interrupt(run_id)
+
+    assert runner._active == set()
+
+
+@pytest.mark.asyncio
+async def test_a_close_frees_the_slot_exactly_once():
+    runner = _runner(_Engine(hang=True), max_concurrent=1)
+    run_id = runner.spawn_background("sleep", name="sleeper", emit=lambda _e: None)
+    assert run_id in runner._active
+
+    assert await runner.close(run_id) is True
+
+    assert runner._active == set()
+
+
+@pytest.mark.asyncio
+async def test_a_reaped_run_frees_the_slot_exactly_once():
+    """A task cancelled before its first step never runs the supervised body;
+    ``_reap`` is the only path that can free that slot."""
+    runner = _runner(_Engine(hang=True), max_concurrent=1)
+    run_id = runner.spawn_background("sleep", name="sleeper", emit=lambda _e: None)
+    assert run_id in runner._active
+
+    assert runner.cancel(run_id) is True
+    for _ in range(200):
+        if runner.task_list() and runner.task_list()[0].status != "running":
+            break
+        await asyncio.sleep(0.02)
+
+    assert runner.task_list()[0].status == "cancelled"
+    assert runner._active == set()
+
+
+class _HangAfterFirst(_Engine):
+    """The first turn settles; every later turn hangs until cancelled."""
+
+    def __init__(self, text: str = "first") -> None:
+        super().__init__(text=text)
+        self.calls = 0
+
+    async def step(self, messages, *, tools, instructions=None, on_delta=None):
+        self.calls += 1
+        if self.calls > 1:
+            await asyncio.sleep(30)
+        return await super().step(
+            messages, tools=tools, instructions=instructions, on_delta=on_delta
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_stale_reap_callback_does_not_free_a_new_followup_slot():
+    """P2-B2: the first task's done-callback can fire after a follow-up turn has
+    already taken the same run id's slot; it must return at the identity guard."""
+    runner = _runner(_HangAfterFirst(), max_concurrent=1)
+    run_id = runner.spawn_background("first", name="probe", emit=lambda _e: None)
+    old_task = runner._tasks[run_id]  # noqa: SLF001
+    await _wait_settled(runner, run_id)
+
+    status, _ = await runner.send_message(run_id, "second")
+    assert status == "running"
+    assert run_id in runner._active  # noqa: SLF001
+
+    runner._reap(run_id, old_task)  # noqa: SLF001
+
+    assert run_id in runner._active, (  # noqa: SLF001
+        "a stale callback must not free the new turn's slot"
+    )
+    await runner.interrupt(run_id)
+    assert runner._active == set()  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_a_followup_that_cannot_create_a_task_rolls_back(monkeypatch):
+    runner = _runner(_Engine(text="done"), max_concurrent=1)
+    run_id = runner.spawn_background("first", name="probe", emit=lambda _e: None)
+    await _wait_settled(runner, run_id)
+
+    class _BadLoop:
+        def create_task(self, *_args, **_kwargs):
+            raise RuntimeError("loop closed")
+
+    monkeypatch.setattr(
+        "ai_coding.core.subagent.asyncio.get_running_loop", lambda: _BadLoop()
+    )
+    with pytest.raises(RuntimeError, match="loop closed"):
+        await runner.send_message(run_id, "second")
+
+    assert runner._active == set()  # noqa: SLF001
+    row = next(item for item in runner.task_list() if item.run_id == run_id)
+    assert row.status == "error"
+    assert "loop closed" in (row.error or "")

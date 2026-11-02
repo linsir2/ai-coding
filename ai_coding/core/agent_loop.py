@@ -212,6 +212,10 @@ _LINE_COUNT_MAX_BYTES = 4 * 1024 * 1024
 #: what a model can grow by searching repeatedly.
 _LOADED_TOOLS_CAP = 12
 
+#: P2-B3: how many settlement notices one iteration boundary may inject.  The
+#: same budget ``SteeringQueue`` defaults to; anything beyond stays on disk.
+_NOTICE_TURN_MAX = 5
+
 
 def _armed_profile(session: Any) -> str:
     """What the session's task is armed as (``""`` when nothing is armed).
@@ -310,6 +314,9 @@ class AgentLoop:
         # P0-2: the harness lane -- a background run settles long after the turn
         # that started it, and its event reaches the operator but not the model.
         notices: Any | None = None,
+        # P2-B3: the durable half of that lane.  ``None`` keeps the old
+        # memory-only behaviour; the main loop gets one, a child loop never does.
+        notice_store: Any | None = None,
         #: C-5b: what *another agent* said to this one.  A separate lane from
         #: ``notices`` because the two speakers differ (a peer's message is
         #: addressed to this conversation, not a harness report) and because
@@ -429,6 +436,7 @@ class AgentLoop:
         # P0-2: same queue shape, different speaker.  None = today's behaviour,
         # and the loop then never looks at it.
         self.notices = notices
+        self.notice_store = notice_store
         self.agent_inbox = agent_inbox
         # D-1: background jobs.  Kept beside notices because the two travel
         # together -- a job that finishes writes into that same queue.
@@ -505,6 +513,9 @@ class AgentLoop:
             )
             or None,
             cancel=cancel,
+            # P2-B1: the builder hangs one coordinator on the registry so the
+            # main stack and every sub-agent stack share one write table.
+            write_coordinator=getattr(tools, "write_coordinator", None),
         )
         # R5: everything this turn says about itself (events, ledger, degradation)
         # lives in one unit, so the loop body only has to choreograph.
@@ -1560,15 +1571,48 @@ class AgentLoop:
         The lines are persisted like every other harness message, so a notice
         that lands while no turn is running waits for the next turn rather than
         being lost.
+
+        P2-B3: the memory lane is not durable, so the same fact also lives on
+        disk until it is delivered.  Merge both, dedupe by **text** (the runner
+        writes the identical clipped line to both), take five, then -- after the
+        checkpoint -- delete exactly the disk rows whose text was delivered.
+        That ordering is at-least-once: a crash in between repeats one notice,
+        it never drops one.  Undelivered disk rows stay for the next turn.
         """
-        if self.notices is None:
+        if self.notices is None and self.notice_store is None:
             return
-        lines = self.notices.drain()
-        if not lines:
+        memory = self.notices.drain() if self.notices is not None else []
+        disk = (
+            self.notice_store.pending(session.session_id)
+            if self.notice_store is not None
+            else []
+        )
+        texts: list[str] = []
+        seen: set[str] = set()
+        for line in memory:
+            if line and line not in seen:
+                seen.add(line)
+                texts.append(line)
+        for row in disk:
+            text = str(row.get("text") or "")
+            if text and text not in seen:
+                seen.add(text)
+                texts.append(text)
+        texts = texts[: _NOTICE_TURN_MAX]
+        if not texts:
             return
-        for line in lines:
+        for line in texts:
             session.add_message(user_message(f"[notice] {line}", now_utc(), synthetic=True))
         self.closer.checkpoint(session, index)
+        if self.notice_store is not None and disk:
+            delivered = set(texts)
+            ids = [
+                str(row.get("id"))
+                for row in disk
+                if str(row.get("text") or "") in delivered
+            ]
+            if ids:
+                self.notice_store.deliver(session.session_id, ids)
 
     def _take_agent_inbox(self, session: SessionData, index: int) -> None:
         """Absorb what another agent sent to this one, at the same boundary.
