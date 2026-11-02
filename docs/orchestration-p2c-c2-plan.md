@@ -237,6 +237,10 @@ runner 回调（_finish_background/_reap/interrupt/close）
   claim 在提交后同步完成，没有排队未领取窗口；C3 合并队列会自带队列。
 - **新增测试**：`tests/test_task_journal.py`、`tests/test_scheduler.py`（C2 段）、
   `tests/test_subagent_handles.py`（stop_run 终态/清 mailbox/拒绝 send/resume）。
+- **tmux 真机（新进程恢复）**：先用 `TaskJournal` 写入 queued/claimed/running +
+  一条 settled，再用真实 `_build_loop` 启动新进程；builder 的 `recover()` 输出
+  `[('crashed-1','recovered','needs_reconciliation',True)]`，已 settled 的 done-1
+  不再出现；没有重跑任何任务。
 - **未做（按 C2 范围）**：合并队列（C3）、跨进程租约、WAL/收据链。
 - **已知边界**：fanout 只支持整次取消（ResearchFanOut 不暴露子 task）；`interrupted`
   保持可续，不自动恢复；journal 的 `pending` 仅由 runner 在结算后写入。
