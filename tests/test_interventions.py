@@ -579,3 +579,15 @@ def test_a_repeat_nudge_names_the_open_plan_item_and_forbids_another_check():
     assert d is not None
     assert "6. do 6" in d.text
     assert "不要再运行 bash 检查" in d.text
+
+
+def test_search_ledger_is_reset_for_a_new_turn_but_other_ladders_survive():
+    ledger = {
+        "search": {"level": 1, "ref": {"repeat": 5}},
+        "strategy": {"level": 2},
+        "task": {"level": 1},
+    }
+    assert iv.reset_turn_scoped(ledger) == {
+        "strategy": {"level": 2},
+        "task": {"level": 1},
+    }

@@ -49,6 +49,7 @@ __all__ = [
     "WINDOW",
     "armed",
     "record",
+    "reset_turn_scoped",
     "select",
     "settle",
 ]
@@ -252,6 +253,21 @@ def _ref_for(gate: str, snap: TurnSnapshot) -> dict[str, Any]:
     if gate == TASK:
         return {"asks": int(snap.ask_user_calls), "items": _items_sig(snap)}
     return {"asks": int(snap.ask_user_calls)}
+
+
+def reset_turn_scoped(ledger: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop the SEARCH ledger at a new user turn.
+
+    SEARCH is derived from per-turn counters (``search_streak`` and the new
+    ``repeat_streak``); carrying its ``ref`` into the next turn suppressed the
+    first legitimate nudge until the repeat count caught up with the previous
+    turn's number (measured: a stale ``ref.repeat=5`` let the next turn reach
+    six identical checks without one nudge).  STRATEGY / FATIGUE / TASK are
+    intentionally cross-turn and stay.
+    """
+    if not ledger:
+        return {}
+    return {gate: entry for gate, entry in ledger.items() if gate != SEARCH}
 
 
 # ---- the three entry points -------------------------------------------------

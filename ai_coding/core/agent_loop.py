@@ -1521,6 +1521,13 @@ class AgentLoop:
         # C3: the continuation allowance is per user turn — a new message
         # starts with a fresh budget, not the previous turn's leftovers.
         session.continuations = 0
+        # SEARCH is derived from per-turn counters; its old ledger ref would
+        # suppress this turn's first nudge.  The other ladders are deliberately
+        # cross-turn and remain.
+        if append_user:
+            session.intervention_state = (
+                interventions.reset_turn_scoped(session.intervention_state or {}) or None
+            )
         # The in-turn context reading belongs to the turn that took it.  A new
         # turn must not inherit the last turn's number: the gate would then
         # judge a request it has not seen yet by a size it no longer has.
