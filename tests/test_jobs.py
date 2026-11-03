@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
+import sys
 import time
 from pathlib import Path
 
@@ -688,3 +690,34 @@ def test_the_settlement_is_complete_before_a_waiter_can_wake(tmp_path, monkeypat
         "a ledger write ran after the waiter was already wakeable: "
         f"{observed}"
     )
+
+
+def test_a_capped_log_must_not_cap_the_commands_own_files(tmp_path, monkeypatch):
+    """The log bound is about stdout, not every file the command writes.
+
+    A 64 KB log cap used to be implemented with ``ulimit -f`` -- a process-wide
+    RLIMIT_FSIZE.  ``npm install`` then died with ``EFBIG`` while writing its
+    package cache, which read as a network failure.  The cap belongs to the log
+    pipe only.
+    """
+    from ai_coding.core import jobs as jobs_module
+
+    monkeypatch.setattr(jobs_module, "MAX_JOB_LOG_BYTES", 64 * 1024)
+    notices = _Clock()
+    registry = _registry(tmp_path, notices)
+    payload = tmp_path / "payload.bin"
+    code = (
+        "from pathlib import Path; "
+        f"Path({str(payload)!r}).write_bytes(b'x' * (100 * 1024))"
+    )
+
+    job = registry.start(
+        f"{sys.executable} -c {shlex.quote(code)}",
+        cwd=str(tmp_path),
+        session_id="s1",
+        emit=lambda e: None,
+    )
+    _wait_until(lambda: job.done.is_set(), timeout=20.0, what="the command")
+
+    assert job.status == "completed"
+    assert payload.stat().st_size == 100 * 1024

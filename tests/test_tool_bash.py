@@ -813,3 +813,20 @@ async def test_settled_job_uses_per_call_network_for_the_note(tmp_path: Path):
     assert "不是主机 DNS 故障" not in result.output
     assert result.data is not None
     assert "sandbox_network" not in result.data
+
+
+def test_an_erofs_npm_cache_failure_says_it_is_filesystem_not_network():
+    tool = BashTool()
+    note = tool._sandbox_filesystem_note(  # noqa: SLF001 - the pure note under test
+        "npm error code EROFS\n"
+        "npm error path /home/u/.npm/_cacache/tmp/x\n"
+        "npm error rofs Invalid response body while trying to fetch https://registry.npmjs.org"
+    )
+    assert note is not None
+    assert "不是网络" in note
+    assert "NPM_CONFIG_CACHE" in note
+
+
+def test_an_erofs_on_an_unrelated_file_does_not_masquerade_as_a_package_cache_note():
+    tool = BashTool()
+    assert tool._sandbox_filesystem_note("cp: EROFS: /etc/config") is None  # noqa: SLF001

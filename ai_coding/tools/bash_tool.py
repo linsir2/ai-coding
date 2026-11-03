@@ -274,6 +274,29 @@ class BashTool(BaseTool):
             "请让用户批准网络，或由用户在沙箱外的终端执行安装。"
         )
 
+    def _sandbox_filesystem_note(self, output: str) -> str | None:
+        """Explain cache writes that the sandbox's read-only root refused.
+
+        These used to be retried as if they were network failures: npm opened
+        ``~/.npm/_cacache`` and got ``EROFS`` before its first request.  The
+        network wall is a different layer; saying which one it is saves a turn
+        of mirror roulette.  The workspace is the durable writable place -- ``/tmp``
+        is a fresh tmpfs per bash call, so a cache there cannot survive.
+        """
+        if not re.search(r"EROFS|EFBIG", output or ""):
+            return None
+        if not any(name in output for name in (".npm", "npm", "yarn", "pnpm", "bun")):
+            return None
+        return (
+            "[sandbox] 这不是网络/DNS 故障：命令撞到的是沙箱的文件系统边界 "
+            "(EROFS/EFBIG)，不是 registry。请把包缓存放回工作区，例如：\n"
+            "  mkdir -p .ai-coding/cache/npm .ai-coding/tmp\n"
+            "  export NPM_CONFIG_CACHE=$PWD/.ai-coding/cache/npm "
+            "TMPDIR=$PWD/.ai-coding/tmp\n"
+            "不要用 /tmp 存跨命令缓存（每次 bash 调用的 /tmp 都是新的）；"
+            "也不要把 /tmp 当作可复用的 HOME。"
+        )
+
     @property
     def params_json_schema(self) -> dict[str, Any]:
         return {
@@ -624,6 +647,10 @@ class BashTool(BaseTool):
             output = f"{output}\n\n{network_note}" if output else network_note
             data["sandbox_network"] = mode
             data["network_blocked"] = True
+        filesystem_note = self._sandbox_filesystem_note(output)
+        if filesystem_note is not None:
+            output = f"{output}\n\n{filesystem_note}" if output else filesystem_note
+            data["sandbox_filesystem"] = True
         if job.stop_reason:
             cancelled = "cancelled" in job.stop_reason or "停止" in job.stop_reason
             return ToolResult(
@@ -763,6 +790,9 @@ class BashTool(BaseTool):
         network_note = self._sandbox_network_note(output, mode)
         if network_note is not None:
             output = f"{output}\n\n{network_note}" if output else network_note
+        filesystem_note = self._sandbox_filesystem_note(output)
+        if filesystem_note is not None:
+            output = f"{output}\n\n{filesystem_note}" if output else filesystem_note
         data: dict[str, Any] = {
             "exit_code": outcome.returncode,
             "timed_out": outcome.timed_out,
@@ -775,6 +805,8 @@ class BashTool(BaseTool):
         if network_note is not None:
             data["sandbox_network"] = mode
             data["network_blocked"] = True
+        if filesystem_note is not None:
+            data["sandbox_filesystem"] = True
 
         if outcome.timed_out:
             # Partial output is kept: it often says where the command got stuck.

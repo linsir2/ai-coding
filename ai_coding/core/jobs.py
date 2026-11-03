@@ -98,6 +98,8 @@ MAX_JOB_LOG_BYTES = 20_000_000
 _ULIMIT_BLOCK = 1024 if Path(SHELL_ARGV0).name == "bash" else 512
 #: Signal 25 / a shell reporting 128+25: "this process wrote past its file limit".
 _SIG_FILE_TOO_BIG = 25
+#: SIGPIPE (140/141): ``head -c`` closed the log pipe once the cap was reached.
+_SIG_PIPE = 13
 
 #: Lines of log carried in the completion notice.  Without them the model has to
 #: read a file whose size it cannot know, and ``read`` trims nothing (it refuses
@@ -435,11 +437,19 @@ class JobRegistry:
         if code is not None:
             job.exit_code = code
         if job.status == STATUS_RUNNING:
-            if job.exit_code is not None and abs(job.exit_code) in (
-                _SIG_FILE_TOO_BIG,
-                128 + _SIG_FILE_TOO_BIG,
+            capped = False
+            try:
+                capped = Path(job.log_path).stat().st_size >= MAX_JOB_LOG_BYTES
+            except OSError:
+                pass
+            if job.exit_code is not None and (
+                abs(job.exit_code) in (_SIG_FILE_TOO_BIG, 128 + _SIG_FILE_TOO_BIG)
+                or (
+                    capped
+                    and abs(job.exit_code) in (_SIG_PIPE, 128 + _SIG_PIPE)
+                )
             ):
-                # The kernel stopped the write, not the command giving up.
+                # The kernel/pipe stopped the write, not the command giving up.
                 job.stop_reason = f"日志超过 {MAX_JOB_LOG_BYTES} 字节上限被中止"
                 job.detail = job.stop_reason
             if job.stop_reason:
@@ -813,13 +823,27 @@ class JobRegistry:
 
 
 def _bounded(command: str) -> str:
-    """``command`` with a kernel-enforced ceiling on the log it may write.
+    """``command`` whose **stdout/stderr pipe** stops at the log cap.
 
-    No ``exec``: it only takes a simple command, and ``for`` loops / ``&&``
-    chains are exactly what a long-running job looks like.  So the tracked pid
-    is the shell that sets the limit, and a group kill still reaches the command
-    underneath it.  The exit status the shell reports is the command's.
+    ``ulimit -f`` was the obvious implementation and the wrong one: RLIMIT_FSIZE
+    is process-wide, so the same 20 MB ceiling that bounded the log also killed
+    ``npm install`` while it wrote its package cache (measured ``EFBIG`` on
+    ``~/.npm/_cacache``; the model read it as a network failure).  A pipe-side
+    ``head -c`` caps only what the job writes to the log; files the command
+    writes itself are untouched.
+
+    ``pipefail`` preserves the command's status.  A command that writes past
+    the cap receives SIGPIPE from ``head``; ``_settle`` recognises the
+    141 + full-log pair as a capped job rather than a command failure.  The
+    non-bash fallback keeps the old file-size bound (the log can still be
+    bounded; it just also bounds the command's other files).
     """
+    if Path(SHELL_ARGV0).name == "bash":
+        return (
+            "set -o pipefail; "
+            f"{{ {command}; }} 2>&1 | stdbuf -o0 head -c {MAX_JOB_LOG_BYTES}; "
+            "exit ${PIPESTATUS[0]}"
+        )
     blocks = max(1, MAX_JOB_LOG_BYTES // _ULIMIT_BLOCK)
     return f"ulimit -f {blocks}; {command}"
 
