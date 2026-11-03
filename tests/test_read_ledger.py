@@ -12,6 +12,8 @@ exists, so the module import fails and every row is red.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from ai_coding.core.request_assembly import RequestAssembler
@@ -442,41 +444,47 @@ def test_a_file_of_unknown_length_reports_no_gaps():
 # --------------------------------------------------------------------- render
 
 
+def _render_current(marks, **kwargs):
+    marks = tuple(replace(mark, version=mark.version or "v1") for mark in marks)
+    return render(
+        marks,
+        current_versions={mark.path: mark.version for mark in marks},
+        **kwargs,
+    )
+
+
 def test_an_empty_ledger_renders_nothing():
-    assert render(()) == ""
+    assert render((), current_versions={}) == ""
 
 
 def test_the_render_names_the_gaps():
     marks = (ReadMark("a.py", 1, 60, 441), ReadMark("a.py", 300, 434, 441))
-    text = render(marks)
+    text = _render_current(marks)
     assert "缺 61-299" in text
     assert "共 441 行" in text
 
 
-def test_a_fully_read_file_says_complete():
-    """The per-file line must say 完整 and ask for no gap.  (The block's own
-    instruction line legitimately contains 缺, so the assertion is on the file
-    line, not on the whole block.)"""
-    text = render((ReadMark("a.py", 1, 441, 441),))
-    file_line = next(line for line in text.splitlines() if line.startswith("- "))
-    assert "完整" in file_line
-    assert "缺" not in file_line
+def test_a_fully_read_current_file_is_marked_current_and_not_for_reread():
+    text = _render_current((ReadMark("a.py", 1, 441, 441),))
+    assert "a.py" in text
+    assert "不要重读" in text
+    assert "缺 " not in text
 
 
 def test_the_render_wraps_itself_in_the_block_tags():
-    text = render((ReadMark("a.py", 1, 10, 10),))
+    text = _render_current((ReadMark("a.py", 1, 10, 10),))
     assert text.startswith("<read-ledger>")
     assert text.rstrip().endswith("</read-ledger>")
 
 
 def test_the_render_tells_the_model_to_read_only_the_gaps():
-    text = render((ReadMark("a.py", 1, 10, 441),))
+    text = _render_current((ReadMark("a.py", 1, 10, 441),))
     assert "按缺口重读" in text
 
 
 def test_the_render_caps_the_file_count():
     marks = tuple(ReadMark(f"f{i}.py", 1, 10, 10) for i in range(12))
-    text = render(marks, max_files=3)
+    text = _render_current(marks, max_files=3)
     assert "还有 9 个文件" in text
 
 
@@ -484,7 +492,7 @@ def test_the_default_lists_every_file_a_real_session_read():
     """Trace f1d881ee: after compaction the model saw eight ledger names and
     restarted the research.  The default must name all twenty."""
     marks = tuple(ReadMark(f"f{i}.py", 1, 10, 10) for i in range(20))
-    text = render(marks)
+    text = _render_current(marks)
 
     assert all(f"f{i}.py" in text for i in range(20))
     assert "还有" not in text
@@ -494,7 +502,7 @@ def test_a_char_budget_cuts_at_a_line_boundary_not_through_one():
     """A character cut leaves the model holding half of a file line, which it
     will then try to interpret.  Every surviving file line must be whole."""
     marks = tuple(ReadMark(f"dir{i}/long_file_name.py", 1, 10, 10) for i in range(40))
-    text = render(marks, max_chars=120)
+    text = render(marks, current_versions={}, max_chars=120)
     file_lines = [line for line in text.splitlines() if line.startswith("- ")]
     assert len(file_lines) < 40, "the budget must have cut something"
     assert all(line.endswith("）") for line in file_lines), file_lines
@@ -504,7 +512,7 @@ def test_the_file_count_survives_the_char_budget():
     """A truncation that dropped the count would leave the model believing eight
     files is all there is."""
     marks = tuple(ReadMark(f"dir{i}/long_file_name.py", 1, 10, 10) for i in range(40))
-    text = render(marks, max_chars=120, max_files=3)
+    text = render(marks, current_versions={}, max_chars=120, max_files=3)
     assert "还有 37 个文件" in text
 
 
@@ -739,7 +747,7 @@ def test_an_answer_naming_two_files_is_skipped_entirely():
 def test_a_changed_file_is_stale_even_before_another_read():
     marks = (ReadMark("a.py", 1, 150, 150, version="v1"),)
     text = render(marks, current_versions={"a.py": "v2"})
-    assert "完整" not in text
+    assert "（完整）" not in text
     assert "已过期" in text
 
 
@@ -747,14 +755,14 @@ def test_a_fresh_file_is_still_named_so_it_is_not_reread():
     marks = (ReadMark("a.py", 1, 150, 150, version="v1"),)
     text = render(marks, current_versions={"a.py": "v1"})
     assert "a.py" in text
-    assert "不要重读" in text or "完整" in text
+    assert "不要重读" in text
     assert "已过期" not in text
 
 
 def test_an_old_mark_without_a_version_is_not_claimed_complete():
     marks = (ReadMark("a.py", 1, 150, 150),)
     text = render(marks, current_versions={"a.py": "v1"})
-    assert "完整" not in text
+    assert "（完整）" not in text
     assert "未知版本" in text or "已过期" in text
 
 
@@ -763,7 +771,7 @@ def test_session_invalidate_reads_marks_the_evidence_stale():
     session.note_read("a.py", 1, 10, 10, version="v1")
     session.invalidate_reads(["a.py"])
     text = render(session.read_ledger, current_versions={"a.py": "v1"})
-    assert "完整" not in text
+    assert "（完整）" not in text
     assert "已过期" in text or "未知版本" in text
 
 
@@ -791,7 +799,7 @@ async def test_the_request_assembly_compares_read_versions_with_the_filesystem(t
     ledger = next(body for body in bodies if "<read-ledger>" in body)
     assert "a.py" in ledger
     assert "已过期" in ledger
-    assert "完整" not in ledger
+    assert "（完整）" not in ledger
 
 
 def test_a_read_version_survives_session_serialization():
@@ -813,3 +821,47 @@ def test_a_new_file_version_replaces_the_old_read_ranges():
     marks = merge_mark((), ReadMark("a.py", 1, 10, 10, version="v1"))
     marks = merge_mark(marks, ReadMark("a.py", 11, 20, 20, version="v2"))
     assert marks == (ReadMark("a.py", 11, 20, 20, version="v2"),)
+
+
+def test_a_fresh_partial_read_still_names_its_missing_ranges():
+    marks = (
+        ReadMark("a.py", 1, 60, 441, version="v1"),
+        ReadMark("a.py", 300, 434, 441, version="v1"),
+    )
+    text = render(marks, current_versions={"a.py": "v1"})
+    assert "缺 61-299" in text
+    assert "435-441" in text
+    assert "只读缺口" in text
+
+
+def test_a_missing_file_is_not_described_as_merely_changed():
+    marks = (ReadMark("gone.py", 1, 10, 10, version="v1"),)
+    text = render(marks, current_versions={"gone.py": ""})
+    assert "文件不可读或不存在" in text
+    assert "文件已变化" not in text
+
+
+def test_a_fresh_mark_with_unknown_total_is_not_claimed_complete():
+    marks = (ReadMark("a.py", 1, 10, 0, version="v1"),)
+    text = render(marks, current_versions={"a.py": "v1"})
+    assert "（完整）" not in text
+    assert "总行数未知" in text
+    assert "不要声称完整" in text
+
+
+def test_a_stale_line_still_names_the_old_gap():
+    marks = (ReadMark("a.py", 1, 60, 441, version="v1"),)
+    text = render(marks, current_versions={"a.py": "v2"})
+    assert "缺 61-441" in text
+    assert "已过期" in text
+
+
+def test_one_malformed_ledger_row_does_not_abort_the_session():
+    session = SessionData.from_dict({
+        "sessionId": "s", "title": "", "createdTime": "t", "lastAccessTime": "t",
+        "readLedger": [
+            {"path": "ok.py", "start": 1, "end": 10, "total": 10, "future": 1},
+            {"path": "bad.py", "start": None, "end": 2},
+        ],
+    })
+    assert [mark.path for mark in session.read_ledger] == ["ok.py"]

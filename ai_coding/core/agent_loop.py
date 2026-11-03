@@ -121,6 +121,7 @@ from ai_coding.domain.message import (
 from ai_coding.domain.model_config import ModelConfig
 from ai_coding.domain.read_ledger import (
     extract_claims,
+    normalize,
     paths_in,
     unsupported_claims,
     unsupported_quotes,
@@ -2254,11 +2255,29 @@ class AgentLoop:
         # Round 1 evidence freshness: write/edit know the exact files they
         # changed.  bash/merge path discovery is deliberately deferred; the
         # request-time version comparison still catches appends by any tool.
+        last_read: dict[str, int] = {}
+        last_mutation: dict[str, int] = {}
+        for offset, item in enumerate(outcomes):
+            if not item.result.success:
+                continue
+            if item.call.name == "read":
+                key = normalize(
+                    str(item.call.params.get("path") or ""), self.workspace
+                )
+                if key:
+                    last_read[key] = offset
+            elif item.call.name in ("write", "edit"):
+                for artifact in item.result.artifacts or ():
+                    key = normalize(artifact.path, self.workspace)
+                    if key:
+                        last_mutation[key] = offset
         session.invalidate_reads(
-            artifact.path
-            for item in outcomes
-            if item.result.success and item.call.name in ("write", "edit")
-            for artifact in (item.result.artifacts or ())
+            (
+                path
+                for path, offset in last_mutation.items()
+                if last_read.get(path, -1) <= offset
+            ),
+            workspace=self.workspace,
         )
         self.closer.write_back(session, outcomes)
         if any(

@@ -42,16 +42,12 @@ from ai_coding.core.turn_books import TurnBooks
 from ai_coding.core.workspace_guard import outside_workspace_paths
 from ai_coding.domain.agents import PLAN_TEXT_RULE
 from ai_coding.domain.message import CHECKPOINT_MARK, IMAGE_MIME_BY_SUFFIX, ChatMessage
-from ai_coding.domain.read_ledger import (
-    render as render_read_ledger,
-)
-from ai_coding.domain.read_ledger import (
-    versions_for,
-)
+from ai_coding.domain.read_ledger import render as render_read_ledger
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
 from ai_coding.domain.turn_digest import render_working_memory
 from ai_coding.infra.deadline import Deadline
+from ai_coding.infra.file_utils import file_version
 from ai_coding.infra.time_utils import now_local
 from ai_coding.skills.policy import denied_skill_ids
 from ai_coding.skills.registry import SkillRegistry, iter_mentions, resolve_mentions
@@ -532,9 +528,7 @@ class RequestAssembler:
                     "read_ledger",
                     render_read_ledger(
                         session.read_ledger,
-                        current_versions=versions_for(
-                            session.read_ledger, self._workspace
-                        ),
+                        current_versions=self._read_versions(session),
                     ),
                 ),
                 volatile_block("mcp_catalog", catalog),
@@ -574,6 +568,18 @@ class RequestAssembler:
 
     # ---- helpers (M2) -------------------------------------------------------
 
+    def _read_versions(self, session: SessionData) -> dict[str, str]:
+        """Current file identities for the ledger; one stat per known path."""
+        out: dict[str, str] = {}
+        for mark in session.read_ledger:
+            if not mark.version or mark.path in out:
+                continue
+            path = Path(mark.path)
+            if not path.is_absolute():
+                path = Path(self._workspace or ".") / path
+            out[mark.path] = file_version(path)
+        return out
+
     @staticmethod
     def _plan_record_block(
         session: SessionData,
@@ -591,11 +597,7 @@ class RequestAssembler:
         plan = str(getattr(session, "approved_plan", "") or "").strip()
         if not plan or session.mode == "plan":
             return ""
-        if any(
-            message.role == "assistant"
-            and plan in (message.content or "")
-            for message in history
-        ):
+        if any(plan in (message.content or "") for message in history):
             return ""
         first = next(
             (line.strip() for line in plan.splitlines() if line.strip()), ""

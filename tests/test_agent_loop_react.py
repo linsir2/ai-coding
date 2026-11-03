@@ -1438,6 +1438,88 @@ async def test_an_armed_goal_keeps_its_objective_through_a_turn(tmp_path):
     assert session.task.goal == "迁移 X"
 
 
+class _ReadingTool(_Tool):
+    """A read double that records evidence through the same context callback."""
+
+    async def execute(self, params, ctx=None):  # type: ignore[override]
+        result = await super().execute(params, ctx)
+        if ctx is not None and ctx.note_read is not None:
+            ctx.note_read(str(params["path"]), 1, 10, 10, "v1")
+        return result
+
+
+@pytest.mark.asyncio
+async def test_a_read_after_a_write_in_the_same_batch_stays_fresh(tmp_path):
+    reader = _ReadingTool(
+        "read", result=ToolResult(success=True, output="a.py"), mutates_world=False
+    )
+    writer = _Tool(
+        "write",
+        result=ToolResult(
+            success=True,
+            output="wrote",
+            artifacts=(ToolArtifact(path="a.py"),),
+        ),
+    )
+    engine = ScriptedEngine(
+        [
+            _calls(
+                _ref("c1", "write", '{"path":"a.py"}'),
+                _ref("c2", "read", '{"path":"./a.py"}'),
+            ),
+            _text("done"),
+        ]
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        engine,
+        sessions,
+        _registry(reader, writer),
+        approval=AutoApproveCallback(),
+    )
+    session = sessions.create()
+
+    await loop.process_input(session, "go")
+
+    assert session.read_ledger[0].version == "v1"
+
+
+@pytest.mark.asyncio
+async def test_a_read_before_a_write_in_the_same_batch_is_invalidated(tmp_path):
+    reader = _ReadingTool(
+        "read", result=ToolResult(success=True, output="a.py"), mutates_world=False
+    )
+    writer = _Tool(
+        "write",
+        result=ToolResult(
+            success=True,
+            output="wrote",
+            artifacts=(ToolArtifact(path="a.py"),),
+        ),
+    )
+    engine = ScriptedEngine(
+        [
+            _calls(
+                _ref("c1", "read", '{"path":"./a.py"}'),
+                _ref("c2", "write", '{"path":"a.py"}'),
+            ),
+            _text("done"),
+        ]
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        engine,
+        sessions,
+        _registry(reader, writer),
+        approval=AutoApproveCallback(),
+    )
+    session = sessions.create()
+
+    await loop.process_input(session, "go")
+
+    assert session.read_ledger[0].version == ""
+
+
 @pytest.mark.asyncio
 async def test_a_successful_write_invalidates_read_evidence(tmp_path):
     writer = _Tool(
@@ -1445,7 +1527,7 @@ async def test_a_successful_write_invalidates_read_evidence(tmp_path):
         result=ToolResult(
             success=True,
             output="wrote",
-            artifacts=(ToolArtifact(path="a.py"),),
+            artifacts=(ToolArtifact(path=str(tmp_path / "a.py")),),
         ),
     )
     engine = ScriptedEngine([_calls(_ref("c1", "write")), _text("done")])
@@ -1457,7 +1539,7 @@ async def test_a_successful_write_invalidates_read_evidence(tmp_path):
         approval=AutoApproveCallback(),
     )
     session = sessions.create()
-    session.note_read("a.py", 1, 10, 10, version="v1")
+    session.note_read("a.py", 1, 10, 10, version="v1", workspace=str(tmp_path))
 
     await loop.process_input(session, "go")
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ai_coding.domain.message import ToolResult
-from ai_coding.domain.read_ledger import file_version
+from ai_coding.infra.file_utils import file_version
 from ai_coding.security.credentials import is_credential_path
 from ai_coding.security.file_state_tracker import FileStateTracker
 from ai_coding.security.sandbox import Sandbox, SandboxViolation

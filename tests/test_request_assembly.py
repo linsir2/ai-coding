@@ -519,6 +519,19 @@ async def test_a_plan_already_in_history_is_not_repeated_in_the_tail():
     assert plan not in tail_text
 
 
+async def test_a_plan_found_in_any_history_role_is_not_repeated():
+    assembler, parts = _assembler()
+    session = _session([_digest()])
+    plan = "## Plan\n1. build frontend"
+    session.approved_plan = plan
+    session.messages.append(ChatMessage(role="user", content=plan, timestamp="t"))
+
+    await _assemble(assembler, session=session)
+
+    tail_names = [name for name, _size in parts["reporter"].calls[-1]["tail_blocks"]]
+    assert "plan_record" not in tail_names
+
+
 async def test_a_missing_plan_body_gets_only_a_compact_plan_record():
     assembler, parts = _assembler()
     session = _session([_digest()])

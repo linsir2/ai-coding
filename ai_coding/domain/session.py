@@ -18,6 +18,21 @@ from .turn_digest import TurnDigest
 _SEEN_PATHS_CAP = 200
 
 
+def _read_mark_from_dict(row: Mapping[str, Any]) -> ReadMark | None:
+    """One persisted ledger row; a malformed row is skipped, never fatal."""
+    try:
+        path = str(row["path"])
+        start = int(row["start"])
+        end = int(row["end"])
+        total = int(row.get("total", 0) or 0)
+        version = str(row.get("version", "") or "")
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not path:
+        return None
+    return ReadMark(path, start, end, total, version)
+
+
 def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
     """Rebuild a ChatMessage from a persisted JSON dict (Java-compatible shape)."""
     tool_calls = None
@@ -843,10 +858,10 @@ class SessionData:
         raw_ledger = data.get("readLedger")
         ledger_rows = raw_ledger if isinstance(raw_ledger, list) else []
         read_ledger = tuple(
-            ReadMark(**row)
+            mark
             for row in ledger_rows
             if isinstance(row, Mapping)
-            and {"path", "start", "end"} <= set(row)
+            and (mark := _read_mark_from_dict(row)) is not None
         )
         raw_seen = data.get("seenPaths")
         seen_rows = raw_seen if isinstance(raw_seen, list) else []

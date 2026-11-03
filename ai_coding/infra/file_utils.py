@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -60,6 +61,15 @@ def copy(src: str | Path, dst: str | Path) -> None:
 
 def get_file_size(path: str | Path) -> int:
     return Path(path).stat().st_size
+
+
+def file_version(path: str | Path) -> str:
+    """A cheap file identity: ``mtime_ns:size:inode``; ``""`` when stat fails."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return ""
+    return f"{stat.st_mtime_ns}:{stat.st_size}:{stat.st_ino}"
 
 
 def get_file_extension(name: str) -> str:

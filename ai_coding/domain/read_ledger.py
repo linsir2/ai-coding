@@ -23,7 +23,6 @@ import unicodedata
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
-from pathlib import Path
 
 #: The file suffixes a citation can plausibly name.  Opened up to any token and
 #: ordinary prose ("foo.bar") would read as a file the model never touched.
@@ -94,7 +93,10 @@ class ReadMark:
     version: str = ""
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        data = asdict(self)
+        if not self.version:
+            data.pop("version", None)
+        return data
 
 
 # ------------------------------------------------------------------ normalise
@@ -167,35 +169,6 @@ def paths_in(text: str, workspace: str = "") -> tuple[str, ...]:
 
 
 # ---------------------------------------------------------------------- marks
-
-
-def file_version(path: str | os.PathLike[str]) -> str:
-    """A cheap file identity for read-evidence freshness.
-
-    ``mtime_ns + size + inode`` catches appends, rewrites and replacements
-    without hashing the file.  ``""`` means the stat failed (deleted, outside
-    the workspace, race); callers must treat that as unknown, not fresh.
-    """
-    try:
-        stat = os.stat(path)
-    except OSError:
-        return ""
-    return f"{stat.st_mtime_ns}:{stat.st_size}:{stat.st_ino}"
-
-
-def versions_for(
-    marks: Sequence[ReadMark], workspace: str = ""
-) -> dict[str, str]:
-    """Current versions of the files named by ``marks`` (one stat per path)."""
-    out: dict[str, str] = {}
-    for mark in marks:
-        if mark.path in out:
-            continue
-        path = Path(mark.path)
-        if not path.is_absolute():
-            path = Path(workspace or ".") / path
-        out[mark.path] = file_version(path)
-    return out
 
 
 def merge_mark(
@@ -311,7 +284,7 @@ def render(
     *,
     max_chars: int = 2_400,
     max_files: int = 64,
-    current_versions: Mapping[str, str] | None = None,
+    current_versions: Mapping[str, str],
 ) -> str:
     """The ``<read-ledger>`` tail block, or ``""`` when there is nothing to say.
 
@@ -331,69 +304,54 @@ def render(
             groups[mark.path] = []
             order.append(mark.path)
         groups[mark.path].append(mark)
-    if current_versions is None:
-        return _render_legacy(
-            order, groups, max_chars=max_chars, max_files=max_files
-        )
-    fresh: list[str] = []
     stale: list[str] = []
+    fresh_partial: list[str] = []
+    fresh_complete: list[str] = []
     for path in order[:max_files]:
-        rows = groups[path]
-        spans = sorted((m.start, m.end) for m in rows)
-        shown = ",".join(f"{s}-{e}" for s, e in spans)
-        version = rows[-1].version
-        now = current_versions.get(path, "")
-        if not version:
-            stale.append(f"- {path}：已读 {shown}（未知版本；无法确认是否有效，需要时重读）")
-        elif not now or now != version:
-            stale.append(f"- {path}：已读 {shown}（已过期；文件已变化，需要时重读）")
-        else:
-            fresh.append(f"{path}（{shown}）")
-    lines: list[str] = []
-    if stale:
-        lines.extend(stale)
-    if fresh:
-        lines.append("已读且当前（不要重读）：" + "；".join(fresh))
-    body = _clip_lines("\n".join(lines), max_chars)
-    if len(order) > max_files:
-        body = f"{body}\n…还有 {len(order) - max_files} 个文件"
-    return (
-        "<read-ledger>\n"
-        "本会话已读（只列过期/待读；当前有效的文件不要重读）：\n"
-        f"{body}\n"
-        "</read-ledger>"
-    )
-
-
-def _render_legacy(
-    order: Sequence[str],
-    groups: dict[str, list[ReadMark]],
-    *,
-    max_chars: int,
-    max_files: int,
-) -> str:
-    """The pre-version renderer, kept for callers that have no file stats."""
-    lines: list[str] = []
-    for path in order[:max_files]:
-        rows = groups[path]
+        rows = groups[path]  # newest first
         total = max(m.total for m in rows)
         spans = sorted((m.start, m.end) for m in rows)
         shown = ",".join(f"{s}-{e}" for s, e in spans)
-        if total:
-            gaps = _gaps(spans, total)
-            missing = ",".join(f"{a}-{b}" for a, b in gaps)
-            tail = "（完整）" if not gaps else f"（缺 {missing}）"
-            lines.append(f"- {path} 共 {total} 行：{shown}{tail}")
+        gaps = _gaps(spans, total) if total else []
+        missing = ",".join(f"{a}-{b}" for a, b in gaps)
+        version = rows[0].version
+        now = current_versions.get(path, "")
+        gap_note = f"；缺 {missing}" if gaps else ""
+        if not version:
+            suffix = "未知版本；无法确认是否有效，需要时重读"
+            stale.append(
+                f"- {path}{f' 共 {total} 行' if total else ''}：{shown}{gap_note}（{suffix}）"
+            )
+        elif not now:
+            suffix = "文件不可读或不存在；需要时重读"
+            stale.append(
+                f"- {path}{f' 共 {total} 行' if total else ''}：{shown}{gap_note}（{suffix}）"
+            )
+        elif now != version:
+            suffix = "已过期；文件已变化，需要时重读"
+            stale.append(
+                f"- {path}{f' 共 {total} 行' if total else ''}：{shown}{gap_note}（{suffix}）"
+            )
+        elif not total:
+            fresh_partial.append(
+                f"- {path}：{shown}{gap_note}（当前版本，但总行数未知；不要声称完整）"
+            )
+        elif gaps:
+            fresh_partial.append(
+                f"- {path} 共 {total} 行：{shown}（缺 {missing}；当前版本，只读缺口）"
+            )
         else:
-            lines.append(f"- {path}：{shown}")
+            fresh_complete.append(f"{path}（{shown}）")
+    lines = [*stale, *fresh_partial]
+    if fresh_complete:
+        lines.append("已读且当前（不要重读）：" + "；".join(fresh_complete))
     body = _clip_lines("\n".join(lines), max_chars)
     if len(order) > max_files:
         body = f"{body}\n…还有 {len(order) - max_files} 个文件"
     return (
         "<read-ledger>\n"
-        "本会话已读（行号；内容不在上下文里，需要时按缺口重读）：\n"
+        "本会话已读（过期/待读的按缺口重读；当前完整文件不要重读，当前部分文件只读缺口）：\n"
         f"{body}\n"
-        "未读完的只读缺的段；已完整的不要重读。\n"
         "</read-ledger>"
     )
 
