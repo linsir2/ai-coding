@@ -190,8 +190,42 @@ class BashTool(BaseTool):
             "mode deny/proxy, DNS and connection failures are the sandbox "
             "wall, not the host network -- do not retry other mirrors. "
             "Ask the user to configure process_sandbox.network or run the "
-            "install outside the sandbox."
+            "install outside the sandbox. "
+            "A server started with & or nohup is reaped when this foreground "
+            "command returns; use run_in_background=true and job_list/job_kill."
         )
+
+    def _foreground_child_note(self, command: str) -> str | None:
+        """Explain why a ``&``/``nohup`` child disappears with the command.
+
+        The bash command runs inside the process sandbox's PID namespace;
+        once the command returns, the namespace (and every child in it) is
+        gone.  The model otherwise starts a server, sees one successful health
+        check, then starts it again forever because the next check says
+        "Server not running".  ``run_in_background`` is the one path that
+        keeps the namespace alive.
+        """
+        backgrounded = bool(re.search(r"(?:^|[\s;])&(?=[\s;]|$)", command)) or (
+            "nohup " in command
+        )
+        if not backgrounded:
+            return None
+        lines = [
+            "[lifecycle] 这条前台命令用了 &/nohup。sandbox 的 PID/net namespace ",
+            "在命令返回时结束，后台子进程会被一起回收；下一次 health 检查",
+            "会看到 Server not running。每个 bash 调用还有独立 netns，",
+            "所以即使把服务放进 run_in_background，下一次 curl 也看不到",
+            "这个 loopback 端口。",
+            "验证服务请把“启动 + sleep + curl”放在同一条命令里；",
+            "需要跨命令常驻服务，只能把 process_sandbox.network.mode 设为 ",
+            "\"off\"，或由用户在沙箱外启动。",
+        ]
+        if "pkill -f" in command:
+            lines.append(
+                "pkill -f 的模式也会匹配当前 shell 的命令行，可能杀掉自己"
+                "（exit 143）；停任务用 job_kill。"
+            )
+        return "\n".join(lines)
 
     def _sandbox_network_note(self, output: str) -> str | None:
         """Explain a DNS/connection failure when the sandbox owns the wall."""
@@ -237,11 +271,17 @@ class BashTool(BaseTool):
                         "Run the command in the background and return "
                         "immediately -- for builds, test suites and dev servers "
                         "that outlive a turn. You do not need to end the command "
-                        "with '&'. You will be notified when it finishes; do not "
-                        "poll and do not sleep waiting for it, and do not start a "
-                        "second copy of a job that is already running. "
-                        "timeout_seconds does not apply to a background command; "
-                        "job_list shows what is running and job_kill stops it."
+                        "with '&'; a '&' or nohup child in a foreground call is "
+                        "reaped when that call returns, so it cannot keep a "
+                        "server alive. A background job also has its own sandbox "
+                        "netns, so later bash calls cannot reach its loopback "
+                        "port unless network.mode is off; for one verification "
+                        "run server+sleep+curl in one foreground command. You "
+                        "will be notified when it finishes; do not poll and do "
+                        "not sleep waiting for it, and do not start a second "
+                        "copy of a job that is already running. timeout_seconds "
+                        "does not apply to a background command; job_list shows "
+                        "what is running and job_kill stops it."
                     ),
                 },
                 "timeout_seconds": {
@@ -355,16 +395,23 @@ class BashTool(BaseTool):
                 error=SANDBOX_UNAVAILABLE,
                 data={"reason": denied},
             )
-        return ToolResult(
-            success=True,
-            output=(
-                f"job {job.id} started in the background (pid {job.pid}). "
-                f"You will be notified when it finishes -- do not poll and do "
-                f"not sleep waiting for it; keep working on independent steps. "
-                f"Its output streams to: {job.log_path}"
-            ),
-            data={"job_id": job.id, "pid": job.pid, "log": job.log_path},
+        network_mode = str(getattr(self._backend, "network_mode", "off") or "off")
+        output = (
+            f"job {job.id} started in the background (pid {job.pid}). "
+            f"You will be notified when it finishes -- do not poll and do "
+            f"not sleep waiting for it; keep working on independent steps. "
+            f"Its output streams to: {job.log_path}"
         )
+        data: dict[str, Any] = {"job_id": job.id, "pid": job.pid, "log": job.log_path}
+        if network_mode != "off":
+            output += (
+                "\n\n[sandbox] 这个 job 仍在自己的 netns；其他 bash/job 调用"
+                "看不到它的 loopback 端口。要让后续调用访问这个服务，需要把 "
+                "process_sandbox.network.mode 设为 \"off\"，或在沙箱外启动。"
+            )
+            data["sandbox_network"] = network_mode
+            data["job_network_isolated"] = True
+        return ToolResult(success=True, output=output, data=data)
 
     async def _run_as_job(
         self,
@@ -450,7 +497,7 @@ class BashTool(BaseTool):
             # The result is in hand and the model's answer is about to be built;
             # a record of a command that already answered would be litter.
             registry.discard(job.id)
-            return self._settled_result(job, text, size, effective, duration)
+            return self._settled_result(job, text, size, effective, duration, command)
         # Promotion: the pump keeps reading, because the model may still be
         # watching this command in the UI when it finally ends.
         registry.announce(job.id, emit=context.emit)
@@ -480,6 +527,7 @@ class BashTool(BaseTool):
         size: int,
         effective: int,
         duration: float,
+        command: str = "",
     ) -> ToolResult:
         """Project a finished job into the ToolResult the model has always seen."""
         output = text
@@ -491,6 +539,10 @@ class BashTool(BaseTool):
             "duration_seconds": round(duration, 3),
             "timeout_seconds": effective,
         }
+        lifecycle = self._foreground_child_note(command)
+        if lifecycle is not None:
+            output = f"{output}\n\n{lifecycle}" if output else lifecycle
+            data["foreground_child_reaped"] = True
         if job.stop_reason:
             cancelled = "cancelled" in job.stop_reason or "停止" in job.stop_reason
             return ToolResult(
@@ -680,6 +732,10 @@ class BashTool(BaseTool):
                 output, self._max_output, note=f"命令共输出 {len(output)} 字符"
             )
 
+        lifecycle = self._foreground_child_note(command)
+        if lifecycle is not None:
+            output = f"{output}\n\n{lifecycle}" if output else lifecycle
+            data["foreground_child_reaped"] = True
         if outcome.returncode == 0:
             return ToolResult(success=True, output=output, data=data)
         return ToolResult(

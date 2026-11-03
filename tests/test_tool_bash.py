@@ -578,3 +578,56 @@ async def test_bash_explains_a_sandbox_network_wall(tmp_path: Path):
     assert result.data is not None
     assert result.data["sandbox_network"] == "deny"
     assert result.data["network_blocked"] is True
+
+
+@pytest.mark.asyncio
+async def test_bash_explains_that_a_foreground_ampersand_child_is_reaped(
+    tmp_path: Path,
+):
+    """The sandbox's PID namespace ends with the foreground command.
+
+    A dev server started with ``&`` looks healthy for one check, then the next
+    command sees "Server not running".  The model repeated that loop for dozens
+    of iterations; the tool result must name the lifecycle and point at
+    ``run_in_background`` instead of letting the model infer a dead server.
+    """
+    from ai_coding.core.jobs import JobRegistry
+
+    tool = BashTool()
+    registry = JobRegistry(tmp_path / "jobs")
+    result = await tool.execute(
+        {"command": "sleep 0.1 & echo ok"},
+        ToolContext(workspace=str(tmp_path), jobs=registry),
+    )
+
+    assert result.success is True
+    assert "run_in_background" in result.output
+    assert "PID/net namespace" in result.output
+    assert result.data is not None
+    assert result.data["foreground_child_reaped"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_background_job_warns_that_its_netns_is_isolated(tmp_path: Path):
+    """A background job is not a sandbox bypass.
+
+    Under ``network.mode=deny/proxy`` its service port lives in the job's own
+    netns; a later bash call gets a different loopback.  The result must say so
+    before the model starts a server and then tries to curl it from elsewhere.
+    """
+    from types import SimpleNamespace
+
+    from ai_coding.core.jobs import JobRegistry
+
+    tool = BashTool(backend=SimpleNamespace(network_mode="deny"))
+    registry = JobRegistry(tmp_path / "jobs")
+    result = await tool.execute(
+        {"command": "sleep 1; echo done", "run_in_background": True},
+        ToolContext(workspace=str(tmp_path), jobs=registry),
+    )
+
+    assert result.success is True
+    assert "自己的 netns" in result.output
+    assert result.data is not None
+    assert result.data["sandbox_network"] == "deny"
+    assert result.data["job_network_isolated"] is True
