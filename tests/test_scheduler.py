@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -113,7 +114,43 @@ class _FanOut:
         ]
 
 
-def _scheduler(runner=None, fanout=None, slots=None):
+class _MergeQueue:
+    def __init__(self, *, fail_with=None) -> None:
+        self.tickets = []
+        self.fail_with = fail_with
+        self.closed = False
+
+    def enqueue(self, ticket):
+        if self.fail_with is not None:
+            raise self.fail_with("nope")
+        self.tickets.append(ticket)
+        ticket.status = "queued"
+        if ticket.on_update is not None:
+            ticket.on_update(ticket)
+
+    async def wait(self, ticket):
+        await asyncio.sleep(0)
+        ticket.status = "merged"
+        ticket.ended = time.monotonic()
+        ticket.outcome = {
+            "status": "merged",
+            "branch": ticket.branch,
+            "base_commit": ticket.base_commit,
+            "commit": "c" * 40,
+            "main_head": "d" * 40,
+            "verified": False,
+            "attempts": 1,
+        }
+        if ticket.on_update is not None:
+            ticket.on_update(ticket)
+        ticket.done.set()
+        return ticket.outcome
+
+    async def aclose(self):
+        self.closed = True
+
+
+def _scheduler(runner=None, fanout=None, slots=None, merge_queue=None):
     runner = runner or _Runner()
     registry = TaskRegistry(runner)
     return Scheduler(
@@ -121,7 +158,113 @@ def _scheduler(runner=None, fanout=None, slots=None):
         fanout=fanout or _FanOut(),
         slots=slots or ExecutionSlotPool(1),
         registry=registry,
+        merge_queue=merge_queue,
     ), runner
+
+
+@pytest.mark.asyncio
+async def test_merge_uses_queue_and_registers_a_merge_view():
+    runner = _Runner()
+    runner.rows = [
+        BackgroundTask(
+            run_id="run_a", name="probe", status="completed", started=1.0,
+            ended=2.0, worktree_branch="ai_sub_x",
+            base_commit="a" * 40, commit="b" * 40,
+        )
+    ]
+    merge_queue = _MergeQueue()
+    scheduler, _ = _scheduler(runner, merge_queue=merge_queue)
+
+    out = await scheduler.merge("run_a")
+
+    assert out["status"] == "merged"
+    assert len(merge_queue.tickets) == 1
+    view = scheduler.tasks().get("merge:ai_sub_x")
+    assert view is not None and view.kind == "merge"
+    assert view.branch == "ai_sub_x"
+    assert view.commit == "c" * 40
+    assert scheduler.merge_status("ai_sub_x")["status"] == "merged"
+    assert scheduler.merge_status("missing") == {"status": "not_found"}
+
+
+@pytest.mark.asyncio
+async def test_merge_refuses_unsettled_and_commit_error_sources():
+    runner = _Runner()
+    runner.rows = [
+        BackgroundTask(run_id="run_live", name="live", status="running",
+                       worktree_branch="ai_sub_live"),
+    ]
+    scheduler, _ = _scheduler(runner, merge_queue=_MergeQueue())
+    assert (await scheduler.merge("run_live"))["status"] == "not_settled"
+
+    runner.rows = [
+        BackgroundTask(
+            run_id="run_bad", name="bad", status="completed",
+            worktree_branch="ai_sub_bad", commit_error="commit failed",
+        )
+    ]
+    scheduler, _ = _scheduler(runner, merge_queue=_MergeQueue())
+    assert (await scheduler.merge("run_bad"))["status"] == "commit_failed"
+
+
+@pytest.mark.asyncio
+async def test_merge_enqueue_failure_does_not_hang_or_leave_running_view():
+    from ai_coding.core.merge_queue import MergeQueueFull
+
+    runner = _Runner()
+    runner.rows = [
+        BackgroundTask(run_id="run_a", name="probe", status="completed",
+                       worktree_branch="ai_sub_x"),
+    ]
+    scheduler, _ = _scheduler(
+        runner, merge_queue=_MergeQueue(fail_with=MergeQueueFull)
+    )
+
+    out = await asyncio.wait_for(scheduler.merge("run_a"), timeout=1.0)
+
+    assert out["status"] == "busy"
+    view = scheduler.tasks().get("merge:ai_sub_x")
+    assert view is not None
+    assert view.status == "busy"
+    assert view.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_merge_without_a_queue_is_unavailable():
+    scheduler, _ = _scheduler()
+    assert (await scheduler.merge("anything"))["status"] == "unavailable"
+
+
+def test_recover_keeps_child_recovered_and_merge_merge(tmp_path):
+    journal = TaskJournal(tmp_path)
+    journal.append("s1", "running", task_id="child-1", kind="child",
+                   name="child")
+    journal.append("s1", "merge_queued", task_id="merge:ai_sub_x",
+                   kind="merge", branch="ai_sub_x", name="merge:ai_sub_x",
+                   base_commit="a" * 40)
+    scheduler, _ = _scheduler()
+    scheduler._journal = journal
+
+    scheduler.recover()
+
+    views = {view.id: view for view in scheduler.tasks().list()}
+    assert views["child-1"].kind == "recovered"
+    assert views["merge:ai_sub_x"].kind == "merge"
+    assert views["merge:ai_sub_x"].status == "needs_reconciliation"
+
+
+@pytest.mark.asyncio
+async def test_run_registers_the_result_base_commit():
+    scheduler, runner = _scheduler()
+    runner.run_result = replace(runner.run_result, base_commit="c" * 40)
+    request = TaskRequest.for_child(_task(), name="probe")
+
+    await scheduler.run(request)
+
+    view = scheduler.tasks().get(request.id)
+    assert view is not None
+    assert view.base_commit == "c" * 40
+    assert view.to_dict()["baseCommit"] == "c" * 40
 
 
 @pytest.mark.asyncio
@@ -420,3 +563,60 @@ async def test_cancel_tree_stops_children(tmp_path):
     stopped = await scheduler.cancel_tree(parent_id)
     assert stopped >= 1
     assert scheduler._records[parent_id].state in {"stopped", "cancelled"}
+
+
+def test_runner_event_writes_base_and_commit_error_to_the_journal(tmp_path):
+    journal = TaskJournal(tmp_path)
+    scheduler, _ = _scheduler()
+    scheduler._journal = journal
+    request = TaskRequest.for_child(_task(), name="probe")
+    record = scheduler._begin(request, kind="child")
+
+    scheduler.on_runner_event(
+        record.task_id, record.run_id, "completed", record.fence,
+        branch="ai_sub_x", commit="b" * 40, base_commit="a" * 40,
+        commit_error="commit failed",
+    )
+
+    state = journal.records("")[0]
+    assert state.branch == "ai_sub_x"
+    assert state.commit == "b" * 40
+    assert state.base_commit == "a" * 40
+    assert state.commit_error == "commit failed"
+    assert state.last_event == "settled"
+    assert state.is_terminal is True
+
+
+@pytest.mark.asyncio
+async def test_merge_source_uses_the_journal_after_restart(tmp_path):
+    journal = TaskJournal(tmp_path)
+    journal.append(
+        "s1", "settled", task_id="child-1", kind="child", name="probe",
+        branch="ai_sub_x", commit="b" * 40, base_commit="a" * 40,
+    )
+    scheduler, _ = _scheduler(merge_queue=_MergeQueue())
+    scheduler._journal = journal
+
+    out = await scheduler.merge("child-1")
+
+    assert out["status"] == "merged"
+    ticket = scheduler._merge_queue.tickets[0]
+    assert ticket.branch == "ai_sub_x"
+    assert ticket.base_commit == "a" * 40
+
+
+@pytest.mark.asyncio
+async def test_merge_source_falls_back_to_meta_when_the_journal_lacks_branch(tmp_path):
+    journal = TaskJournal(tmp_path)
+    journal.append("s1", "settled", task_id="child-1", kind="child",
+                   name="probe", run_id="run_a")
+    scheduler, runner = _scheduler(merge_queue=_MergeQueue())
+    scheduler._journal = journal
+    runner.close_info_result = {
+        "worktreeBranch": "ai_sub_meta", "baseCommit": "a" * 40,
+    }
+
+    out = await scheduler.merge("child-1")
+
+    assert out["status"] == "merged"
+    assert scheduler._merge_queue.tickets[0].branch == "ai_sub_meta"

@@ -468,6 +468,7 @@ def _assemble_registry(
         # child's worktree, so a delegated write cannot land in the parent's
         # tree (or outside the child's worktree).
         from ai_coding.core.execution_slots import ExecutionSlotPool
+        from ai_coding.core.merge_queue import MergeQueue
         from ai_coding.core.research_fanout import ResearchFanOut
         from ai_coding.core.scheduler import Scheduler
         from ai_coding.core.task_journal import TaskJournal
@@ -494,13 +495,25 @@ def _assemble_registry(
         # over them.  The registry is read-only bookkeeping, not a table.
         fanout = ResearchFanOut(runner)
         task_registry = TaskRegistry(runner)
+        # P2-C3: one journal shared by the scheduler and the merge queue; two
+        # instances would hold two thread locks over the same file.
+        journal = TaskJournal(workspace)
+        merge_queue = MergeQueue(
+            workspace,
+            worktree_manager=manager,
+            journal=journal,
+            write_coordinator=write_coordinator,
+            policy=sandbox_policy,
+            backend=sandbox_backend,
+        )
         scheduler = Scheduler(
             runner,
             fanout=fanout,
             worktree_manager=manager,
             slots=slots,
             registry=task_registry,
-            journal=TaskJournal(workspace),
+            journal=journal,
+            merge_queue=merge_queue,
         )
         runner.scheduler = scheduler
         scheduler.recover()
@@ -542,6 +555,10 @@ def _assemble_registry(
         registry.register(SendMessageTool(scheduler=scheduler))
         registry.register(InterruptAgentTool(scheduler=scheduler))
         registry.register(ResumeAgentTool(scheduler=scheduler))
+
+        from ai_coding.tools.merge_agent_tool import MergeAgentTool
+
+        registry.register(MergeAgentTool(scheduler=scheduler))
 
     # Deferred tools: the prompt names them (one line each in tool_search's
     # answer), and their schemas ride the request only after the model asks.

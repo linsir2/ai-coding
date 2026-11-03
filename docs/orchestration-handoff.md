@@ -1,7 +1,14 @@
 # 编排层交接文档（P0 → P2-C3 前）
 
 > 目的：把当前仓库"做到哪了、还剩什么、怎么在本机接着干"一次说清。
-> 截至 2026-11-02，基线 `ec98912`（已推送）。C3 只出了方案，**没有代码**。
+> 截至 2026-11-03，基线 `ec98912`（已推送）。C3 已实现并通过全量测试；
+> 详见 `docs/orchestration-p2c-c3-plan.md` §12。
+>
+> **C3 v4（2026-11-03）**：`docs/orchestration-p2c-c3-plan.md` 已按两轮独立评审修订。
+> merge 结果进入 `/tasks`（`TaskRegistry` 的 `kind=merge` 视图），`merge_status`
+> 从该视图读；C3 不新增 notice/event 或 bridge 的 base 字段。`merge_agent` 默认
+> 未知工具 → WARN，`verify_cmd` 在 gate 里按 bash 组合判定。只由 `world.aclose`
+> 关闭主 Scheduler，`AgentLoop.aclose` 不关（子 loop 共享同一实例）。以 v4 为准。
 
 ## 1. 一分钟结论
 
@@ -53,29 +60,33 @@
 
 ## 4. 未完成（全部）
 
-### 4.1 P2-C3 合并队列（下一步的主任务）
+### 4.1 P2-C3 合并队列（已实现）
 
-方案：`docs/orchestration-p2c-c3-plan.md`（已写完，待评审/实现）。要点：
+方案与实施记录：`docs/orchestration-p2c-c3-plan.md`。要点：
 
-- `merge_agent(target, verify_cmd?)` 显式工具，授权名 `subAgent`；`target` 支持
-  request_id / run_id 前缀 / name / branch。
+- `merge_agent(target, verify_cmd?)` 显式工具，`permission_name` 默认 →
+  未知工具 WARN；`verify_cmd` 在 gate 里按 bash 组合判定（DENY/WARN）。
+  `target` 支持 request_id / run_id / 前缀 / name / branch。
 - `MergeQueue` 单写者 FIFO，worker 独立于父 turn；`merge_queued → merging →
-  merged | merge_failed` 写 journal（**独立 `task_id="merge:<key>"`**，否则会把
-  已结算的子任务重新变成未结算）。
-- 流程：解析 branch/base → `git diff base..branch` 判空 → 主区 tracked 干净 +
-  untracked 碰撞 → 整库写 claim → `merge-tree` 预检 → 临时 worktree 候选
-  `merge --no-ff` → 释放 claim → **仅临时区**跑 `verify_cmd`（沙箱，默认 120s）→
-  重取 claim + HEAD 守卫 → 主区 `merge --ff-only <候选 sha>` → `merged`。
+  merged | merge_skipped | merge_failed` 写 journal（**独立
+  `task_id="merge:<branch>"`**，否则会把已结算的子任务重新变成未结算）。
+- 流程：is-ancestor/空 diff → tracked + untracked/ignored 碰撞 → 整库写 claim →
+  `merge-tree` 预检 → 临时 worktree 候选 `merge --no-ff` → 释放 claim →
+  **仅临时区**跑 `verify_cmd`（enforce，默认 120s，不可用 fail-closed）→
+  重取 claim + HEAD/tip 守卫 → 主区 `merge --ff-only <候选 sha>` → `merged`。
 - 新增：`Worktree.base_commit` + `checkout()`（detach）；`SubagentResult`/
   `BackgroundTask`/`TaskView`/meta/journal 增加 `base_commit`；后台结算把
-  branch/commit/base 透传给 `Scheduler._settle`；`CONTROL_REPLAY_TOOLS` 加
-  `merge_agent`；builder 装配 `MergeQueue`；`world.aclose` 关 scheduler。
+  branch/commit/base/commit_error 透传给 `Scheduler._settle`；
+  `CONTROL_REPLAY_TOOLS` 加 `merge_agent`；builder 装配单 journal + MergeQueue；
+  `world.aclose` 关主 scheduler（不关子 loop）。
+- merge 进入 `/tasks`：`TaskRegistry` 注册 `kind=merge` 视图；
+  `merge_status` 过滤 `kind=merge` 后读同一视图。
 - 工具必须 `write_paths_for → None`，否则 dispatcher 的 30s 整库 claim 会和队列
   自己的 claim 互锁。
 
-尚未写的文件（实现时新建）：`ai_coding/core/merge_queue.py`、
-`ai_coding/tools/merge_agent_tool.py`、`tests/test_merge_queue.py`、
-`tests/test_merge_agent_tool.py`。
+已落地：`ai_coding/core/merge_queue.py`、`ai_coding/tools/merge_agent_tool.py`、
+`tests/test_merge_queue.py`、`tests/test_merge_agent_tool.py`；全量 pytest/ruff/mypy
+通过。
 
 ### 4.2 P2-C4 收口（C3 之后）
 
@@ -170,13 +181,15 @@ git push
 请先读：docs/orchestration-p2c-c3-plan.md、docs/orchestration-p2c-c2-plan.md、
 core/scheduler.py、core/worktree.py、core/write_coordinator.py、tools/builder.py。
 
-任务：按 C3 方案先做独立评审（找 P0/P1，别改风格），修订方案后再 TDD 实现：
-1) Worktree.base_commit + checkout；元数据 base_commit 全链路；
-2) core/merge_queue.py + 失败矩阵测试（冲突/verify/dirty/untracked/HEAD 前进/claim 忙/串行）；
-3) Scheduler.merge/merge_status + tools/merge_agent_tool.py；
-4) builder/world/bridge 装配；全量 pytest + ruff + mypy；tmux 真机两可写子显式合并。
+任务：C3 v4 已评审收口，按 TDD/RIPR 实现：
+1) Worktree.base_commit + checkout；元数据 base_commit 最小链路；
+2) core/merge_queue.py + 失败矩阵测试（is-ancestor/冲突/verify/dirty/ignored/
+   HEAD/tip 前进/claim 忙/串行/enqueue 失败）；
+3) Scheduler.merge/merge_status + TaskRegistry(kind=merge) + /tasks + tools/merge_agent_tool.py；
+4) builder/world 装配；全量 pytest + ruff + mypy；tmux 真机两可写子显式合并。
 约束：不改 P1 wire/P2-A packet 语义/P2-B claim 键/C2 fence-stop-recover；
-merge 用独立 task_id；工具 write_paths_for=None；不自动合并；不删源分支。
+merge 用独立 task_id；工具 write_paths_for=None；merge_agent WARN；
+verify_cmd 按 bash 组合判定；不自动合并；不删源分支；子 loop 不关全局 Scheduler。
 每完成一步跑全量校验并汇报，不要一次做完再报。
 ```
 
@@ -185,19 +198,21 @@ merge 用独立 task_id；工具 write_paths_for=None；不自动合并；不删
 | 步骤 | 动作 | 完成标准 |
 |---|---|---|
 | 1 | 提交 C3 方案文档 | `git status` 干净；C3 方案在 main |
-| 2 | 独立评审 C3 方案（1–2 轮）+ 修订 | 无 P0；P1 全部落入方案（含 §10 两个待拍板项） |
+| 2 | 独立评审 C3 方案（两轮）+ 修订 | v3 无 P0；P1 全部落入方案 |
 | 3 | 元数据 + `Worktree.base_commit/checkout` | 新用例绿；全量不回归 |
-| 4 | `MergeQueue`（纯 git，不接工具） | 冲突/verify/dirty/untracked/HEAD 前进/claim/串行/清理失败全绿 |
-| 5 | `Scheduler.merge` + `merge_agent` 工具 | target 四形态、只读子、取消后 `merge_status` 全绿 |
-| 6 | builder/world/bridge 装配 | 全量 pytest/ruff/mypy 绿 |
+| 4 | `MergeQueue`（纯 git，不接工具） | is-ancestor/冲突/verify/dirty/ignored/HEAD/tip/claim/串行/cleanup 全绿 |
+| 5 | `Scheduler.merge` + `merge_agent` 工具 + `/tasks` | target 五形态、只读子、取消后 `/tasks`/`merge_status` 全绿 |
+| 6 | builder/world 装配 | 全量 pytest/ruff/mypy 绿 |
 | 7 | tmux 真机 | 两可写子显式合并成功；冲突失败；verify 失败回退；主区不变 |
 | 8 | 提交 C3；再做 C4 | 提交信息按 `feat(orchestration): P2-C3 …` |
 
-### 两个待拍板项（做步骤 2 时确认）
+### 已决策（v4）
 
-1. 落地方式：临时区生成 merge commit 后主区 `merge --ff-only`（方案默认，主区无
-   `MERGE_HEAD` 窗口）vs 主区直接 `merge --no-ff`。
-2. `verify_cmd` 不传时是否允许直接合并（方案默认：允许；传了就必须通过）。
+1. 落地方式：临时区生成 merge commit 后主区 `merge --ff-only`。
+2. `verify_cmd` 不传时允许合并，但结果/journal/`/tasks` 必须显示“未验证”；
+   传了就必须在 enforce 沙箱里通过，否则 fail-closed。
+3. `merge_agent` 全部 WARN；`verify_cmd` 在 gate 里按 bash 组合判定。
+4. merge 结果进入 `/tasks`；`merge_status` 过滤 `kind=merge` 后读同一视图。
 
 ## 8. 不要做的事
 

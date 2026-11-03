@@ -173,6 +173,9 @@ class AgentHandle:
     #: projections of the latest result, not a second source of truth.
     commit: str | None = None
     commit_error: str | None = None
+    #: P2-C3: the commit the worktree was created from.  Additive; old meta
+    #: reads back as ``None`` and the merge queue falls back to merge-base.
+    base_commit: str | None = None
     degraded: str | None = None
     #: P2-C2: the scheduler task this handle belongs to, its current fence, and
     #: the terminal latch ``stop_run`` sets.  A stopped handle never starts
@@ -531,9 +534,13 @@ class SubAgentRunner:
                         result = await self._commit_turn(
                             result, worktree_manager, str(wt.path), name
                         )
+                        result = replace(
+                            result,
+                            base_commit=getattr(wt, "base_commit", None),
+                        )
                         if result.commit or result.commit_error:
                             result = replace(result, worktree_branch=wt.branch)
-                            _refresh_ledger(result)
+                        _refresh_ledger(result)
                         return result
                 except WorktreeError:
                     # Scoped like the child's own events: this record says the
@@ -1061,6 +1068,11 @@ class SubAgentRunner:
                 else None
             ),
             commit=str(meta["commit"]) if meta.get("commit") is not None else None,
+            base_commit=(
+                str(meta["baseCommit"])
+                if meta.get("baseCommit") is not None
+                else None
+            ),
             commit_error=(
                 str(meta["commitError"])
                 if meta.get("commitError") is not None
@@ -1158,6 +1170,7 @@ class SubAgentRunner:
             "worktreeBranch": meta.get("worktreeBranch"),
             "commit": meta.get("commit"),
             "commitError": meta.get("commitError"),
+            "baseCommit": meta.get("baseCommit"),
         }
 
     def _restore_row(self, handle: AgentHandle) -> None:
@@ -1171,11 +1184,24 @@ class SubAgentRunner:
                 status=handle.status,
                 started=time.monotonic(),
                 session_id=handle.session.session_id,
+                worktree_branch=handle.worktree_branch,
+                commit=handle.commit,
+                base_commit=handle.base_commit,
+                commit_error=handle.commit_error,
+                degraded=handle.degraded,
             )
             self._prune_background()
             return
         self._background[handle.run_id] = replace(
-            row, status=handle.status, ended=None, error=None
+            row,
+            status=handle.status,
+            ended=None,
+            error=None,
+            worktree_branch=row.worktree_branch or handle.worktree_branch,
+            commit=row.commit or handle.commit,
+            base_commit=row.base_commit or handle.base_commit,
+            commit_error=handle.commit_error or row.commit_error,
+            degraded=handle.degraded or row.degraded,
         )
 
     async def wait(self, run_id: str, timeout_ms: int = 30_000) -> tuple[str, int]:
@@ -1407,6 +1433,7 @@ class SubAgentRunner:
             return "worktree_create_failed"
         handle.worktree_path = str(wt.path)
         handle.worktree_branch = wt.branch
+        handle.base_commit = getattr(wt, "base_commit", None)
         handle.worktree_manager = worktree_manager
         await self._attach_loop(handle, str(wt.path))
         return None
@@ -1458,6 +1485,7 @@ class SubAgentRunner:
             # earlier turn earned: the row is the cross-turn memory here.
             worktree_branch=result.worktree_branch or row.worktree_branch,
             commit=result.commit or row.commit,
+            base_commit=result.base_commit or row.base_commit,
             changed_paths=result.changed_paths,
             commit_error=commit_error,
             degraded=result.degraded or row.degraded,
@@ -1622,8 +1650,17 @@ class SubAgentRunner:
             return
         event = getattr(scheduler, "on_runner_event", None)
         if callable(event):
-            event(handle.task_id, handle.run_id, result.status, handle.fence,
-                  pending=pending)
+            event(
+                handle.task_id,
+                handle.run_id,
+                result.status,
+                handle.fence,
+                pending=pending,
+                branch=result.worktree_branch or handle.worktree_branch,
+                commit=result.commit or handle.commit,
+                base_commit=result.base_commit or handle.base_commit,
+                commit_error=result.commit_error or handle.commit_error,
+            )
 
     def _scoped_observer(self, name: str, parent_span: str, inner: Any) -> Any:
         """Wrap an observer so the child's events carry their parentage."""
@@ -2048,6 +2085,8 @@ class SubAgentRunner:
             handle.degraded = result.degraded
         if result.worktree_branch:
             handle.worktree_branch = result.worktree_branch
+        if result.base_commit:
+            handle.base_commit = result.base_commit
 
     @staticmethod
     def _clear_runtime_markers(session: SessionData) -> None:
@@ -2092,6 +2131,7 @@ class SubAgentRunner:
             "outputSchema": handle.output_schema,
             "worktreeBranch": handle.worktree_branch,
             "commit": handle.commit,
+            "baseCommit": handle.base_commit,
             "commitError": handle.commit_error,
             "degraded": handle.degraded,
             "createdAt": handle.session.created_time,

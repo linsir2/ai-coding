@@ -71,6 +71,8 @@ _PLAN_SOFT_DENY = (
     "edit",
     "shell",
     "subagent",
+    # C3: merging mutates the main tree, so the plan posture hides it too.
+    "merge_agent",
     # C-5a: the Codex-named pair can start or stop a *writable* child, so the
     # plan posture hides them exactly as the read-only overlay does.  The two
     # observers (``wait_agent``/``list_agents``) stay, like the fan-out.

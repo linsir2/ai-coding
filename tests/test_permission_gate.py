@@ -472,3 +472,27 @@ def test_a_permanent_grant_has_no_deadline():
     gate.grant("edit", {"path": "src/a.py"})
 
     assert gate.grant_records() == [("edit:src/a.py", None)]
+
+
+# ---- P2-C3: merge_agent's verify command is judged as bash ----------------
+
+
+def test_merge_agent_is_unknown_and_asks():
+    gate = _gate()
+    assert gate.check("merge_agent", {"target": "run-1"}) == PermissionDecision.WARN
+
+
+def test_merge_agent_verify_reuses_bash_red_line():
+    gate = _gate()
+    d = gate.check(
+        "merge_agent", {"target": "run-1", "verify_cmd": "rm -rf /"}
+    )
+    assert d == PermissionDecision.DENY
+
+
+def test_merge_agent_verify_reuses_bash_warn():
+    gate = _gate()
+    d = gate.check(
+        "merge_agent", {"target": "run-1", "verify_cmd": "pytest -q"}
+    )
+    assert d == PermissionDecision.WARN

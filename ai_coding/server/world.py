@@ -54,6 +54,16 @@ class AppWorld:
     sandbox_backend: Any = None
 
     async def aclose(self) -> None:
+        # P2-C3: close the main scheduler (and its merge worker) before the
+        # loop that owns the engine/tools.  Child loops share this instance,
+        # so this must stay here rather than in ``AgentLoop.aclose``.
+        scheduler = getattr(getattr(self, "registry", None), "scheduler", None)
+        close_scheduler = getattr(scheduler, "aclose", None)
+        if callable(close_scheduler):
+            try:
+                await close_scheduler()
+            except Exception:  # noqa: BLE001 — shutdown is best-effort
+                _log.debug("scheduler close failed", exc_info=True)
         for closer in (
             getattr(self.loop, "aclose", None),
             getattr(self.mcp, "aclose", None),

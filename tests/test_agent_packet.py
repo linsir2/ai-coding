@@ -98,6 +98,19 @@ def test_packet_is_flat_and_versioned():
     assert {"changed_paths", "commit_error", "degraded"} <= set(payload)
 
 
+def test_base_commit_is_additive_in_packet_and_row():
+    header = PacketHeader(message_id="abc123def456")
+    result = SubagentResult(status="completed", base_commit="a" * 40)
+    payload = AgentPacket(header=header, task=None, result=result).to_dict()
+    assert payload["base_commit"] == "a" * 40
+
+    row = BackgroundTask(
+        run_id="r1", status="completed", base_commit="b" * 40
+    )
+    assert row.to_dict()["baseCommit"] == "b" * 40
+    assert BackgroundTask.from_dict(row.to_dict()) == row
+
+
 def test_background_row_round_trips_write_facts():
     row = BackgroundTask(
         run_id="r1",

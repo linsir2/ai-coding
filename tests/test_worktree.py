@@ -188,3 +188,29 @@ async def test_commit_reports_failure_separately_from_no_change(
         assert error and "git status" in error
     finally:
         await mgr.remove(str(wt.path))
+
+
+# ---- P2-C3: explicit base + detached checkout -----------------------------
+
+
+async def test_create_records_head_as_base(git_repo: Path) -> None:
+    head = _sh(["git", "rev-parse", "HEAD"], git_repo).strip()
+    mgr = WorktreeManager(git_repo)
+    wt = await mgr.create("baseprobe")
+    try:
+        assert wt.base_commit == head
+    finally:
+        await mgr.remove(str(wt.path))
+
+
+async def test_checkout_detaches_without_branch(git_repo: Path) -> None:
+    head = _sh(["git", "rev-parse", "HEAD"], git_repo).strip()
+    mgr = WorktreeManager(git_repo)
+    wt = await mgr.checkout("mergeprobe", head)
+    try:
+        assert wt.branch == ""
+        assert wt.base_commit == head
+        assert wt.path.exists()
+        assert str(wt.path) in await mgr.list()
+    finally:
+        await mgr.remove(str(wt.path))

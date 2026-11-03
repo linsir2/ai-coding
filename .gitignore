@@ -42,6 +42,11 @@ docs/tui-*.svg
 ai_coding/frontend/node_modules/
 ai_coding/frontend/.bun/
 
+# Stray top-level frontend build dir (generated)
+frontend/node_modules/
+frontend/.bun/
+frontend/.mypy_cache/
+
 # Runtime-added MCP servers (the wizard writes this; never commit secrets)
 mcp.local.yaml
 

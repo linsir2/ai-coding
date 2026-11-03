@@ -436,6 +436,24 @@ class PermissionGate:
         """
         name = tool_name.lower()
 
+        # P2-C3: ``merge_agent`` carries an arbitrary shell command in
+        # ``verify_cmd``.  Judge it with the *bash* call before the merge tool
+        # itself: a red line or an agent/session deny must win, and a bash WARN
+        # is not discarded just because the merge tool is separately allowed.
+        if name == "merge_agent":
+            verify_cmd = str(params.get("verify_cmd") or "").strip()
+            if verify_cmd:
+                bash_decision = self.check(
+                    "bash", {"command": verify_cmd},
+                    session_rules=session_rules,
+                    agent_rules=agent_rules,
+                    posture=posture,
+                )
+                if bash_decision.decision in (
+                    PermissionDecision.DENY, PermissionDecision.WARN
+                ):
+                    return bash_decision
+
         # 1. The hard tier.  Three refusals that stand above the rules: a
         #    red line, a config denial, and the skill policy.  The bash red
         #    line is checked first because it is the most specific, and

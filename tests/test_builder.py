@@ -262,3 +262,17 @@ def test_an_unset_max_execution_slots_falls_back_to_the_subagent_limit(tmp_path)
     parent = build_tool_registry(cfg, str(tmp_path), None)
     assert parent.execution_slots.max_slots == 3
 
+
+
+# ---- P2-C3: the merge queue is assembled once and stays on the main stack --
+
+
+def test_main_stack_has_one_merge_queue_and_tool(tmp_path):
+    parent = build_tool_registry(_cfg(str(tmp_path)), str(tmp_path), None)
+    runner = parent.scheduler.runner
+    child = runner._build_tools(None)
+
+    assert parent.scheduler._merge_queue is not None
+    assert parent.get("merge_agent") is not None
+    assert "merge_agent" not in child.list_names()
+    assert child.scheduler is parent.scheduler

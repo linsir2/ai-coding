@@ -1157,3 +1157,72 @@ M-D2 在 M-D1 的写边界之上补了**读边界**与 **AF_UNIX** 两层（`doc
 ### 信任边界（`EXECUTION_KEYS`）
 
 `read_deny_paths` / `af_unix_deny_paths` / `block_af_unix` **放在 `process_sandbox` 之下**（评审 P2-3）：整块已被 `EXECUTION_KEYS` 覆盖，项目层不能放宽读 denylist 或关掉 AF_UNIX 遮蔽。**不加**新的顶层 `EXECUTION_KEYS` 键（嵌套则加了也是空操作）。
+
+---
+
+## P2-C3 契约（显式 `merge_agent` / 单写者合并队列）
+
+### 元数据加法
+
+| 位置 | 字段 | 说明 |
+|---|---|---|
+| `domain/worktree.py::Worktree` | `base_commit: str \| None` | `create()` 显式读取 HEAD 并校验 40/64 hex；`checkout()` 的 detach 候选区同样记录 |
+| `domain/subagent.py::SubagentResult` | `base_commit`（wire `base_commit`） | packet v3 可选加法；旧包读回 `None` |
+| `domain/subagent.py::BackgroundTask` | `base_commit`（wire `baseCommit`） | `/tasks` 行与 `TaskView.from_background` |
+| `domain/task_registry.py::TaskView` | `base_commit`、`verified`（wire `baseCommit`/`verified`） | merge 源解析与 `/tasks` |
+| `core/subagent.py::AgentHandle` / meta | `base_commit` / `"baseCommit"` | resume/重启后 merge 定位 |
+| `core/task_journal.py::TaskRecordState` | `base_commit`、`name`、`commit_error` | journal fold；`tip` 留在行内供审计 |
+
+`TaskView.is_running` 把 `queued`/`merging` 视为活跃，避免 `/tasks` 的 `_prune`
+把在途 merge 行当 settled 清掉。
+
+### `MergeTicket` / `MergeQueue`（`core/merge_queue.py`）
+
+- `MergeTicket.key = branch`；`task_id=merge:<branch>`；`parent_id=source_task_id`；
+  `kind="merge"`；`tip` 在 worker 开始时钉住。
+- `MergeQueue` 是单 worker FIFO；`enqueue` 在 closed/满/journal 写失败时分别抛
+  `MergeQueueClosed` / `MergeQueueFull` / `MergeJournalError`，由
+  `Scheduler._fail_ticket` 结算，绝不留下未 set 的 `done`。
+- 失败/成功状态：`merged | merge_skipped | conflict | verify_failed |
+  verify_unavailable | dirty | not_settled | commit_failed | not_found |
+  ambiguous | busy | branch_moved | head_moved | journal_failed | unavailable |
+  unrecoverable | cancelled`。
+- 主区只在 `merge --ff-only <candidate>` 时改变；候选在临时 worktree 中生成并
+  可选 verify。verify 要求 `policy.mode == "enforce"`、非 `bypass`、backend
+  可用且实际 wrap；否则 `verify_unavailable`。
+- `verified`：有 `verify_cmd` 且通过 `True`；省略 `False`；失败路径 `False` 或
+  `None`。`/tasks` 显示“已验证/未验证”。
+
+### journal 事件
+
+| 事件 | 终态 | 说明 |
+|---|---|---|
+| `merge_queued` | 否 | 入队成功；写失败不入队 |
+| `merging` | 否 | 主区任何写之前；写失败不落地 |
+| `merged` | 是 | `commit` + `main_head` + `verified` |
+| `merge_skipped` | 是 | `nothing_to_merge` |
+| `merge_failed` | 是 | `error=status`、冲突路径/临时区路径 |
+| `cancelled` | 是 | `aclose` 排空的 queued 票 |
+
+`TERMINAL_EVENTS` 增加 `merged/merge_skipped/merge_failed`；`merge_queued` 与
+`merging` 都非终态，`recover()` 把它们标 `needs_reconciliation`，不自动重跑。
+`TaskJournal.append` 返回 `bool`；普通调用方仍忽略，merge 在 `merge_queued`/
+`merging` 检查返回值。`Scheduler.on_runner_event` 把 completed/error/timeout/
+max_iterations 记为 `settled`；只有 `interrupted` 保持非终态（C3 之前它被误记为
+`interrupted`，重启后会让已完成的后台子无法 merge）。
+
+### Scheduler / 工具 / 权限
+
+- `Scheduler.merge(target, verify_cmd=None, *, session_id="")`：target 支持
+  request_id / run_id / 前缀 / name / branch；同 branch 进行中去重，结束后新
+  ticket；不做成功缓存。`merge_status(target)` 过滤 `kind="merge"` 后读
+  `TaskRegistry`。
+- `MergeAgentTool`：`permission_name` 默认（未知工具 WARN）；
+  `mutates_world=True`、`parallel_safe=False`、`occupies_slot=False`、
+  `write_paths_for → None`、`max_duration_seconds=300`。
+- `PermissionGate.check` 对 `merge_agent` 的 `verify_cmd` 先调用
+  `check("bash", {"command": verify_cmd})`；DENY/WARN 直接返回，复用红线、
+  agent veto、规则层与 grant。
+- `CONTROL_REPLAY_TOOLS` 包含 `merge_agent`：崩溃恢复不重放旧合并结果。
+- `world.aclose` 关闭主 `Scheduler`（含 MergeQueue）；`AgentLoop.aclose` 不关，
+  因为子 loop 与主 loop 共享同一实例。

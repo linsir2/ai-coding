@@ -28,6 +28,7 @@ from ai_coding.core.gitcmd import git
 _BRANCH_PREFIX = "ai_sub_"
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
 _DEFAULT_GIT_TIMEOUT = 60.0
+_SHA_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 
 
 class WorktreeError(Exception):
@@ -36,11 +37,14 @@ class WorktreeError(Exception):
 
 @dataclass(frozen=True)
 class Worktree:
-    """A single checked-out worktree (path, branch)."""
+    """A single checked-out worktree (path, branch, base)."""
 
     name: str
     branch: str
     path: Path
+    #: P2-C3: the commit the worktree was created from.  ``None`` for a
+    #: checkout that predates this field or a fake used by tests.
+    base_commit: str | None = None
 
 
 def _sanitize(name: str) -> str:
@@ -66,16 +70,22 @@ class WorktreeManager:
         )
         self._timeout = float(timeout)
 
-    async def _git(self, *args: str) -> tuple[int, str]:
+    async def _git(
+        self, *args: str, merge_stderr: bool = True
+    ) -> tuple[int, str]:
         """Run one bounded git command; failures and timeouts raise WorktreeError.
 
         The invocation itself lives in ``gitcmd`` (shared with the r17 snapshot
         store); this wrapper only translates its two hard failures into this
-        module's own contract.
+        module's own contract.  ``merge_stderr=False`` is for callers that parse
+        the output as a value (``rev-parse``): a git warning must not become the
+        value.
         """
         verb = args[0] if args else "git"
         try:
-            return await git(self._root, *args, timeout=self._timeout)
+            return await git(
+                self._root, *args, timeout=self._timeout, merge_stderr=merge_stderr
+            )
         except OSError as exc:
             raise WorktreeError(f"could not run git {verb}: {exc}") from exc
         except TimeoutError as exc:
@@ -104,16 +114,51 @@ class WorktreeManager:
         return paths
 
     async def create(self, name: str = "sub") -> Worktree:
-        """Check out a new branch+worktree. Raises ``WorktreeError`` on failure."""
+        """Check out a new branch+worktree. Raises ``WorktreeError`` on failure.
+
+        P2-C3: the base commit is read explicitly and passed to ``worktree add``
+        instead of relying on the implicit HEAD read inside git.  A warning on
+        stderr must not be parsed as a sha, so the probe keeps streams apart and
+        validates the shape before use.
+        """
+        code, base = await self._git(
+            "rev-parse", "--verify", "HEAD", merge_stderr=False
+        )
+        base = base.strip()
+        if code != 0 or not _SHA_RE.match(base):
+            raise WorktreeError(
+                f"git rev-parse HEAD failed: {base or 'no commit'}"
+            )
         safe = _sanitize(name)
         token = uuid.uuid4().hex[:8]
         branch = f"{_BRANCH_PREFIX}{safe}_{token}"
         path = self._base / f"{safe}_{token}"
         path.parent.mkdir(parents=True, exist_ok=True)
-        code, text = await self._git("worktree", "add", "-b", branch, str(path))
+        code, text = await self._git(
+            "worktree", "add", "-b", branch, str(path), base
+        )
         if code != 0:
             raise WorktreeError(f"git worktree add failed: {text}")
-        return Worktree(name=safe, branch=branch, path=path)
+        return Worktree(name=safe, branch=branch, path=path, base_commit=base)
+
+    async def checkout(self, name: str, commit: str) -> Worktree:
+        """Create a detached worktree at ``commit`` (P2-C3 merge candidate).
+
+        The caller is responsible for validating ``commit``; the merge queue
+        only passes a sha it already resolved.  No branch is created, so a
+        temporary candidate cannot leak a ref into the main repository.
+        """
+        safe = _sanitize(name)
+        token = uuid.uuid4().hex[:8]
+        path = self._base / f"{safe}_{token}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        code, text = await self._git(
+            "-c", "core.hooksPath=/dev/null",
+            "worktree", "add", "--detach", str(path), commit,
+        )
+        if code != 0:
+            raise WorktreeError(f"git worktree checkout failed: {text}")
+        return Worktree(name=safe, branch="", path=path, base_commit=commit)
 
     async def remove(self, path: str | Path) -> None:
         """Remove a worktree (forced). Raises ``WorktreeError`` on failure."""

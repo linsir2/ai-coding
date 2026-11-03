@@ -16,7 +16,7 @@
    并加 `ai.max_execution_slots`。
 2. **C2 任务日志与恢复**：`TaskJournal`、claim/lease/fence、单一驱动器、取消级联、
    重启 `needs_reconciliation`。
-3. **C3 合并队列**：显式 `merge_agent(run_id, verify_cmd?)`；单写者；git 3-way +
+3. **C3 合并队列**：显式 `merge_agent(target, verify_cmd?)`；单写者；git 3-way +
    校验；失败回滚；merge worker 独立于父 turn 取消。
 4. **C4 收口**：三读口统一、旧配置别名、文档、tmux 真机矩阵。
 
@@ -208,50 +208,63 @@ Scheduler
 - `spawn`：`idempotency_key = parent_call_id`（一次工具调用一个后台子）。
 - `fanout`：每个子 `parent_call_id + ":" + question_id`，避免 N 子被并成 1。
 - `send_message`：`parent_call_id`（每次发送是一次调用）。
-- `merge_agent`：只对**成功**去重；失败允许用 `attempt` 递增的新键重试。
+- `merge_agent`：**同分支进行中**去重；结束后总是新 ticket，不做成功缓存。
+  后续 turn 可能在同一分支追加提交，缓存会吞掉新工作；已合并分支由
+  `git merge-base --is-ancestor` 判为 `nothing_to_merge`，语义仍幂等。
+  此条以 `docs/orchestration-p2c-c3-plan.md` v4 为准。
 - 同键同内容 → 返回已有记录；同键异内容 → `conflict`；不静默覆盖。
 
 ## 4. C3 合并队列（显式触发）
 
 ### 4.1 `merge_agent(target, verify_cmd=None)`
 
-- 新工具 `MergeAgentTool`，授权名 `subAgent`；`occupies_slot=False`、barrier。
-- 输入 `target`（**request_id / run_id / branch 任一**，由 TaskRegistry 解析）+
-  `verify_cmd?`；同步子没有 run_id，但 Registry 有 request_id/branch。
-- 显式调用才入队；等待结果：`merged|conflict|verify_failed|dirty|not_found|
-  nothing_to_merge|unrecoverable`。
+- 新工具 `MergeAgentTool`，`permission_name` 默认（未知工具 → WARN）；
+  `occupies_slot=False`、barrier。`verify_cmd` 在 gate 里按 bash 组合判定
+  （DENY/WARN 都返回），不能借 `subAgent` 的 ALLOW 绕过。
+- 输入 `target`（**request_id / run_id / 前缀 / name / branch**，由
+  `Scheduler._merge_source` 解析）+ `verify_cmd?`；同步子没有 run_id，但
+  Registry/journal 有 request_id/name/branch。
+- 显式调用才入队；等待结果：`merged|merge_skipped|conflict|verify_failed|
+  verify_unavailable|dirty|not_found|not_settled|commit_failed|branch_moved|
+  head_moved|busy|journal_failed|unrecoverable`。
 - 只读子/无分支：`nothing_to_merge`；**不以 `changed_paths=[]` 判定**——用
-  `git diff --name-only <base>..<branch>`（bash 写入也可见）。
-- 工具 data + notice + event details；失败保留分支可重试。
+  `git diff --name-only <base>..<tip>`（bash 写入也可见）。
+- 工具 data + `TaskRegistry(kind=merge)`；失败保留分支可重试。
+  C3 v4 不新增 notice/event（没有真实消费者）；`/tasks` 与 journal 是读口。
 - 等待者被父 turn 取消时，ticket 结果仍写 Registry/journal，可 `merge_status(target)`
   再查；不把结果留在已取消的 Future 里。
 
 ### 4.2 `MergeQueue`（`core/merge_queue.py`）
 
-- 单写者 `asyncio.Queue` + 一个 worker；ticket `queued→merging→merged|failed`。
+- 单写者 `asyncio.Queue` + 一个 worker；ticket `queued→merging→merged|skipped|failed`。
 - **独立任务**：worker task 不挂在父 turn 的取消链上；父 turn 取消不中断 ticket。
 - 步骤：
   1. 读 meta/journal：`branch, commit, base_commit`；旧 run 无 base 用
-     `git merge-base HEAD <branch>` 回退；`branch` 缺失 → `nothing_to_merge`；
-     `git diff --name-only <base>..<branch>` 为空且非祖先 → 也 `nothing_to_merge`
-     （不以 `changed_paths` 判定）。
-  2. 拿主工作区**全局写 claim**（`owner="merge:<run_id>"`, `paths=()`, timeout=30）；
-     固定 owner，避免与 P2-B 重入语义打架。
-  3. 主工作区必须**无 tracked 改动**：`git status --porcelain --untracked-files=no`
-     为空；untracked 不阻断，但先求交 branch 新增/修改路径与 untracked 文件，
-     命中 → `dirty`。
-  4. 若 `<branch>` 已是 HEAD 祖先（`git merge-base --is-ancestor`）→
-     `nothing_to_merge`。
-  5. `git merge-tree --write-tree HEAD <branch>` 预检（用当前 HEAD，不用旧 base）；
-     退出码 1 + `--name-only -z` 解析冲突路径（不解析本地化文本）→ `conflict`。
-  6. **候选合并在临时 worktree**：`git worktree add --detach <tmp> HEAD`，在
-     `<tmp>` 内 `git merge --no-ff <branch>`；冲突 → 删临时 worktree → `conflict`。
-  7. 在 `<tmp>` 用 **sandbox/process 层**（`infra` 的 `spawn_argv/run_process_async`，
-     注入 policy/backend/roots）跑 `verify_cmd`（限时 120s）；非 0 → 删临时 worktree
-     → `verify_failed` + 输出尾部。verify 改文件只影响临时区，主区无残留。
-  8. verify 通过 → 回主区确认 HEAD 未前进（变了 → `head_moved`，重新入队）；把候选
-     合并结果落到主区（`git merge --ff-only <候选 sha>` 或按同一 base 重新
-     `merge --no-ff` 并立即 commit）；成功 → journal `merged`，返回 merge sha。
+     `merge-base head0 tip0` 回退；`branch` 缺失 → `nothing_to_merge`；
+     校验 branch/ref/sha 后才进入 git argv。
+  2. 若 `tip0` 已是 HEAD 祖先（`git merge-base --is-ancestor`）→
+     `merge_skipped(nothing_to_merge)`；否则 `git diff --name-only -z
+     <base>..<tip0> --` 为空 → `merge_skipped`。
+  3. 主工作区必须**无 tracked 改动**（`git diff-index --quiet HEAD --`）；
+     untracked/ignored 与 branch 新增/修改路径求交，命中 → `dirty`。
+     `status` 必须 `--untracked-files=all --no-renames -z`；ignored 用
+     `ls-files -o -i --exclude-standard -z`。
+  4. 拿主工作区**全局写 claim**（`owner="merge:<branch>"`, `paths=()`,
+     timeout=30）；固定 owner，避免与 P2-B 重入语义打架。
+  5. `head0 = rev-parse HEAD`；`git merge-tree --write-tree --name-only -z
+     --no-messages head0 tip0` 预检；退出码 1 → 冲突路径；>1 → 跳过预检。
+  6. **候选合并在临时 worktree**：`worktree checkout(head0)`，在 `<tmp>` 内
+     `git -c core.hooksPath=/dev/null -c commit.gpgsign=false
+     -c user.name=ai-coding -c user.email=merge@local
+     merge --no-ff --no-verify tip0`；冲突 → 删临时 worktree → `conflict`。
+  7. 释放 claim；在 `<tmp>` 用 **sandbox/process 层**跑 `verify_cmd`（限时 120s）。
+     `policy` 必须 `enforce` 且 `not bypass`，backend 可用，`spawn_argv` 必须
+     真的 wrap；否则 `verify_unavailable`。非 0/超时 → `verify_failed` + 输出尾部。
+     `verify_cmd` 省略 → `verified=false`，不执行。verify 改文件只影响临时区。
+  8. 重取 claim；HEAD == head0？tip == tip0？主区仍干净（含新 untracked/ignored）？
+     tip 变化 → `branch_moved`（不重试）；HEAD 变化 → 丢弃候选、重建并重跑
+     verify（最多 2 次）；仍变化 → `head_moved`。然后
+     `git merge --ff-only <候选 sha>`；成功 → journal `merged`，返回 merge sha。
 - **写 claim 必须 try/finally 释放**：conflict/verify_failed/dirty/unrecoverable 都
   不能永久占住全局 claim。
 - 主区只在 verify 通过后进入合并；失败不留下半合并。临时 worktree 清理失败 →
@@ -294,11 +307,12 @@ Esc → 只取消当前 turn；close_agent → Scheduler.cancel_tree → journal
 | C2 | `core/scheduler.py` | claim/lease/renew/fence、driver、cancel_tree、recover、幂等 |
 | C2 | `core/subagent.py` | 结算走 journal+锁；fence 校验；cancel/stop 落点 |
 | C2 | `server/handlers.py` | 显式 cancel_tree 入口（如需）；Esc 不变 |
-| C3 | `core/merge_queue.py`（新） | 单写者、独立 task、git 3-way、verify、abort |
-| C3 | `tools/merge_agent_tool.py`（新） | 显式工具；等待结果；data/notice |
-| C3 | `core/worktree.py` | `Worktree.base_commit`（创建时 HEAD） |
-| C3 | `core/subagent.py`、`domain/subagent.py` | meta/result 加 `base_commit`（加法） |
-| C3 | `server/bridge.py`、前端 | merge 状态/通知；`needs_reconciliation` wire 字段（`/tasks`/前端） |
+| C3 | `core/merge_queue.py`（新） | 单写者、独立 task、git 3-way、verify、失败矩阵 |
+| C3 | `tools/merge_agent_tool.py`（新） | 显式工具；等待结果；data；WARN |
+| C3 | `core/worktree.py` | `Worktree.base_commit`（创建时 HEAD）+ `checkout` |
+| C3 | `core/subagent.py`、`domain/subagent.py` | meta/result/row 加 `base_commit`（加法） |
+| C3 | `core/task_registry.py`、`app/commands.py` | `TaskView(kind=merge)`；`/tasks` 行；`merge_status` |
+| C3 | `server/world.py` | `aclose` 关主 Scheduler（不关子 loop 共享实例） |
 | C4 | config/文档/测试 | 旧配置别名、三读口收口、docs、真机 |
 
 **不改**：P1 wire、P2-A packet 字段语义、P2-B claim 键/`_active` 幂等语义（只迁移
@@ -318,14 +332,14 @@ Esc → 只取消当前 turn；close_agent → Scheduler.cancel_tree → journal
 | C2 | `tests/test_cancel_cascade.py`（新） | 父 cancel 子、**queued 未 claim 也能取消**、幂等、终态不倒退、Esc 不级联、stop≠interrupt |
 | C2 | `tests/test_idempotency.py`（新） | spawn/send/fanout/merge 键；同键异内容 conflict；merge 失败可重试 |
 | C2 | `tests/test_task_journal.py` | 等待者取消不杀 driver；单个 ticket 异常 driver 继续 |
-| C3 | `tests/test_merge_queue.py`（新） | 干净合并；HEAD 前进仍正确；冲突；verify 失败 abort；dirty 拒绝；**untracked 碰撞**；**无 MERGE_HEAD 不 abort**；**claim 在失败后释放**；串行；abort 失败报 unrecoverable 且 worker 继续 |
-| C3 | `tests/test_merge_agent_tool.py`（新） | 显式、target=request_id/run_id/branch、只读子拒绝、nothing_to_merge（bash 写入也识别）、data/notice、等待者取消后 `merge_status` |
+| C3 | `tests/test_merge_queue.py`（新） | 干净合并；已祖先/空 diff；HEAD/tip 前进；冲突；verify 失败/不可用；dirty；**untracked/ignored 碰撞**；claim 释放；串行；cleanup 失败；journal 写失败 |
+| C3 | `tests/test_merge_agent_tool.py`（新） | 显式、target=request_id/run_id/前缀/name/branch、只读子、nothing_to_merge（bash 写入也识别）、commit_error、WARN/verify 红线、取消后 `/tasks`/`merge_status` |
 | C4 | 既有 | 全量 + 前端 + tmux 真机 |
 
 **同步修改**：`test_subagent_runner`（槽池）、`test_background_tasks`（池满/cancel/
 recover）、`test_builder`（Scheduler 组装）、`test_subagent_handles`（stop/close）、
 `test_subagent_limits`（槽）、`test_tool_subagent_list`/`test_agents_command`（读口）、
-`test_boot_resume`（recover）、`test_server_bridge`（merge）。
+`test_boot_resume`（recover）、`test_repl`（`/tasks` merge 行）。
 
 ## 8. 风险与边界
 
@@ -333,13 +347,15 @@ recover）、`test_builder`（Scheduler 组装）、`test_subagent_handles`（st
    不占槽且拆组。测试必须覆盖 `slots=1`。
 2. **两本账**：任务 journal 只记任务；文件写归 `write_ahead`。
 3. **fence**：contextvars，不写回共享 record；只防取消后晚到。
-4. **合并**：独立 task、HEAD 预检、**verify 在临时 worktree**、tracked-only 干净
-   检查、失败删临时区；主区不进入半合并；清理失败报 unrecoverable，不 reset。
+4. **合并**：独立 task、is-ancestor/HEAD/tip 预检、**verify 在临时 worktree**、
+   tracked + untracked/ignored 干净检查、失败删临时区；主区不进入半合并；
+   清理失败报 unrecoverable，不 reset。
 5. **恢复**：只标 `needs_reconciliation`；与 meta 的**所有终态**交叉；merge
-   `merging` 遇 `MERGE_HEAD` 标需核对；不重跑。
+   `merge_queued/merging` 都标需核对；不重跑。
 6. **配置**：C1 加 `max_execution_slots`；C4 处理别名与旧配置。
 7. **Registry**：只读；sync/fanout 进程内保留；三读口数据同源、格式兼容。
-8. **幂等键**：fanout 按 question、merge 成功才去重、失败用 attempt 重试。
+8. **幂等键**：fanout 按 question；merge 同分支进行中去重，结束后新 ticket，
+   重复合并由 `is-ancestor` 变 no-op；不做成功缓存。
 
 ## 9. 验收
 
@@ -349,8 +365,9 @@ recover）、`test_builder`（Scheduler 组装）、`test_subagent_handles`（st
 - 日志/恢复：journal 半行容错；未结算重启标需核对且不重跑；meta 已完成不误标；
   fence 丢弃晚到；后台超时不被改写。
 - 取消：父 cancel 子、幂等、Esc 不级联、stop 与 interrupt 分开。
-- 合并：HEAD 预检；bash 写入也能识别；冲突/verify/dirty 回退；verify 在临时
-  worktree，改文件不影响主区；合并独立于父 turn 取消；dirty 只查 tracked。
+- 合并：已祖先/空 diff；HEAD/tip 预检；bash 写入也能识别；冲突/verify/dirty/
+  branch_moved/head_moved 回退；verify 在临时 worktree，改文件不影响主区；
+  合并独立于父 turn 取消；dirty 查 tracked + untracked/ignored 碰撞。
 - **tmux 真机**：`slots=1` 长任务；两可写子 + 显式 merge；冲突 merge 失败；
   verify 失败回退；重启后 `/tasks` 显示需核对。
 

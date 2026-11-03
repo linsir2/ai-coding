@@ -25,6 +25,12 @@ from ai_coding.core.execution_slots import (
     enter_child,
     holding_slot,
 )
+from ai_coding.core.merge_queue import (
+    MergeJournalError,
+    MergeQueueClosed,
+    MergeQueueFull,
+    MergeTicket,
+)
 from ai_coding.core.observers import EmitObserver
 from ai_coding.core.research_fanout import ResearchQuestion
 from ai_coding.core.task_journal import TERMINAL_EVENTS, TaskJournal
@@ -52,11 +58,27 @@ class IdempotencyConflict(RuntimeError):
 
 
 @dataclass
+class _MergeSource:
+    """What ``Scheduler.merge`` resolved; ``error`` short-circuits the queue."""
+
+    branch: str = ""
+    base_commit: str | None = None
+    task_id: str = ""
+    run_id: str = ""
+    name: str = ""
+    session_id: str = ""
+    commit: str | None = None
+    commit_error: str | None = None
+    error: str = ""
+
+
+@dataclass
 class _Record:
     task_id: str
     parent_id: str
     kind: str
     state: str = "queued"
+    name: str = ""
     fence: int = 0
     lease_until: float = 0.0
     turn: int = 0
@@ -64,6 +86,8 @@ class _Record:
     run_id: str = ""
     key: str = ""
     digest: str = ""
+    base_commit: str | None = None
+    commit_error: str | None = None
     request: TaskRequest | None = None
     task: asyncio.Task[Any] | None = None
     started: float = field(default_factory=time.monotonic)
@@ -80,6 +104,7 @@ class Scheduler:
         slots: ExecutionSlotPool | None = None,
         registry: TaskRegistry | None = None,
         journal: TaskJournal | None = None,
+        merge_queue: Any = None,
     ) -> None:
         self._runner = runner
         self._fanout = fanout if fanout is not None else self._default_fanout(runner)
@@ -98,6 +123,9 @@ class Scheduler:
         self._idem: dict[str, dict[str, Any]] = {}
         self._reaper: asyncio.Task[None] | None = None
         self._closed = False
+        #: P2-C3: the one merge queue (None in tests/stacks without C3).
+        self._merge_queue = merge_queue
+        self._merge_inflight: dict[str, MergeTicket] = {}
         #: The runner calls back through this attribute (set by the builder).
         self.runner = runner
 
@@ -342,6 +370,233 @@ class Scheduler:
         self._store_fanout(keys, digests, packets, token)
         return cast(list[Any], packets)
 
+    # ---- explicit merge ---------------------------------------------------
+
+    async def merge(
+        self, target: str, verify_cmd: str | None = None, *, session_id: str = ""
+    ) -> dict[str, Any]:
+        """Queue one explicit merge and wait for its terminal outcome."""
+        if self._closed:
+            return {"status": "unavailable"}
+        if self._merge_queue is None:
+            return {"status": "unavailable"}
+        source = self._merge_source(target, session_id)
+        if source.error:
+            return {"status": source.error}
+        branch = source.branch
+        existing = self._merge_inflight.get(branch)
+        if existing is not None:
+            await existing.done.wait()
+            return existing.outcome or {"status": existing.status}
+
+        ticket = MergeTicket(
+            key=branch,
+            source_task_id=source.task_id,
+            source_run_id=source.run_id,
+            source_name=source.name,
+            branch=branch,
+            base_commit=source.base_commit,
+            verify_cmd=(verify_cmd or "").strip() or None,
+            session_id=source.session_id or session_id,
+        )
+        ticket.on_update = self._sync_merge_view
+        self._merge_inflight[branch] = ticket
+        self._sync_merge_view(ticket)
+        try:
+            self._merge_queue.enqueue(ticket)
+        except MergeQueueClosed:
+            self._fail_ticket(ticket, "unavailable", "closed")
+            return ticket.outcome or {"status": "unavailable"}
+        except MergeQueueFull:
+            self._fail_ticket(ticket, "busy", "busy")
+            return ticket.outcome or {"status": "busy"}
+        except MergeJournalError:
+            self._fail_ticket(ticket, "journal_failed", "journal_failed")
+            return ticket.outcome or {"status": "journal_failed"}
+        except Exception as exc:  # noqa: BLE001 — a bad queue must not hang the caller
+            self._fail_ticket(ticket, "merge_failed", f"enqueue: {exc}")
+            return ticket.outcome or {"status": "merge_failed"}
+
+        return cast(dict[str, Any], await self._merge_queue.wait(ticket))
+
+    def merge_status(self, target: str) -> dict[str, Any]:
+        """The read-only status of one merge ticket (``/tasks stop`` uses it)."""
+        target = (target or "").strip()
+        views = [
+            view for view in self._registry.list() if view.kind == "merge"
+        ]
+        exact = [
+            view for view in views
+            if view.id == target or view.name == target or view.branch == target
+        ]
+        matches = exact or [
+            view for view in views
+            if view.run_id and view.run_id.startswith(target)
+        ]
+        if len(matches) == 1:
+            return matches[0].to_dict()
+        if len(matches) > 1:
+            return {"status": "ambiguous"}
+        return {"status": "not_found"}
+
+    def _merge_source(self, target: str, session_id: str) -> _MergeSource:
+        """Resolve a child task to its branch/base; never guesses across sessions."""
+        target = (target or "").strip()
+        if not target:
+            return _MergeSource(error="not_found")
+
+        views = [
+            view for view in self._registry.list() if view.kind != "merge"
+        ]
+        if session_id:
+            views = [
+                view for view in views
+                if not view.origin_session or view.origin_session == session_id
+            ]
+        exact = [
+            view for view in views
+            if view.id == target or view.run_id == target or view.name == target
+            or view.branch == target
+        ]
+        matches = exact or [
+            view for view in views if view.run_id and view.run_id.startswith(target)
+        ]
+        view = matches[0] if len(matches) == 1 else None
+        if len(matches) > 1:
+            return _MergeSource(error="ambiguous")
+
+        records = [
+            record for record in self._journal.records()
+            if record.kind == "child"
+        ]
+        if session_id:
+            records = [
+                record for record in records
+                if not record.session_id or record.session_id == session_id
+            ]
+        record_matches = [
+            record for record in records
+            if record.task_id == target or record.run_id == target
+            or record.name == target or record.branch == target
+        ]
+        if not exact and not record_matches:
+            record_matches = [
+                record for record in records
+                if record.run_id and record.run_id.startswith(target)
+            ]
+        record = (
+            record_matches[0] if len(record_matches) == 1 else None
+        )
+        if len(record_matches) > 1:
+            return _MergeSource(error="ambiguous")
+        if view is None and record is None:
+            return _MergeSource(error="not_found")
+
+        run_id = (view.run_id if view is not None else "") or (
+            record.run_id if record is not None else ""
+        )
+        close_info: dict[str, Any] = {}
+        if run_id:
+            info = getattr(self._runner, "close_info", None)
+            if callable(info):
+                try:
+                    close_info = dict(info(run_id) or {})
+                except Exception:  # noqa: BLE001 — meta is best-effort
+                    close_info = {}
+
+        if record is not None and not record.is_terminal:
+            return _MergeSource(error="not_settled")
+        if (
+            record is None and view is not None
+            and (view.is_running or view.needs_reconciliation)
+        ):
+            return _MergeSource(error="not_settled")
+
+        commit_error = (
+            (view.commit_error if view is not None else None)
+            or (record.commit_error if record is not None else None)
+            or close_info.get("commitError")
+        )
+        if commit_error:
+            return _MergeSource(error="commit_failed")
+
+        branch = (
+            (view.branch if view is not None else None)
+            or (record.branch if record is not None else None)
+            or close_info.get("worktreeBranch")
+        )
+        if not branch:
+            return _MergeSource(error="nothing_to_merge")
+        base_commit = (
+            (view.base_commit if view is not None else None)
+            or (record.base_commit if record is not None else None)
+            or close_info.get("baseCommit")
+        )
+        return _MergeSource(
+            branch=str(branch),
+            base_commit=base_commit,
+            task_id=(
+                (record.task_id if record is not None else "")
+                or (view.id if view is not None else "")
+            ),
+            run_id=run_id,
+            name=(
+                (view.name if view is not None else "")
+                or (record.name if record is not None else "")
+            ),
+            session_id=(
+                (view.origin_session if view is not None else "")
+                or (record.session_id if record is not None else "")
+                or session_id
+            ),
+            commit=(
+                (view.commit if view is not None else None)
+                or (record.commit if record is not None else None)
+                or close_info.get("commit")
+            ),
+        )
+
+    def _sync_merge_view(self, ticket: MergeTicket) -> None:
+        outcome = ticket.outcome or {}
+        view = TaskView(
+            id=f"merge:{ticket.branch}",
+            run_id="",
+            name=f"merge:{ticket.branch}",
+            kind="merge",
+            status=ticket.status,
+            started=ticket.started,
+            ended=ticket.ended,
+            branch=ticket.branch,
+            base_commit=ticket.base_commit,
+            commit=outcome.get("commit"),
+            verified=outcome.get("verified"),
+            error=outcome.get("error"),
+            origin_session=ticket.session_id,
+        )
+        self._registry.register(view)
+        if ticket.status not in ("queued", "merging"):
+            self._merge_inflight.pop(ticket.branch, None)
+
+    def _fail_ticket(
+        self, ticket: MergeTicket, status: str, error: str
+    ) -> None:
+        if ticket.done.is_set():
+            return
+        ticket.status = status
+        ticket.ended = time.monotonic()
+        ticket.outcome = {"status": status, "error": error,
+                          "attempts": ticket.attempts}
+        self._journal.append(
+            ticket.session_id, "merge_failed",
+            task_id=f"merge:{ticket.branch}",
+            parent_id=ticket.source_task_id,
+            kind="merge", name=f"merge:{ticket.branch}",
+            branch=ticket.branch, base_commit=ticket.base_commit,
+            run_id=ticket.source_run_id, key=ticket.key, error=error,
+        )
+        self._sync_merge_view(ticket)
+        ticket.done.set()
+
     # ---- control API (delegated to the runner) -----------------------------
 
     async def send(self, target: str, text: str, key: str = "") -> tuple[str, str]:
@@ -484,20 +739,37 @@ class Scheduler:
         fence: int = 0,
         *,
         pending: bool = False,
+        branch: str | None = None,
+        commit: str | None = None,
+        base_commit: str | None = None,
+        commit_error: str | None = None,
     ) -> bool:
         """Record a runner settlement; False means the fence went stale."""
         record = self._record_for(task_id or run_id)
         if record is not None and not self.accepts(record.task_id, fence):
             return False
-        event = status if status in TERMINAL_EVENTS else "interrupted"
+        # A completed/error/timeout/max_iterations result is a *settlement*;
+        # only an interrupted turn is the recoverable non-terminal case.
+        # Mapping every non-terminal status to ``interrupted`` made a finished
+        # background child look unfinished after a restart (C3 needs journal to
+        # be the merge index, so that had to be fixed at the root).
+        event = (
+            status if status in TERMINAL_EVENTS
+            else "interrupted" if status == "interrupted"
+            else "settled"
+        )
         if record is not None:
             record.run_id = run_id or record.run_id
-            self._settle(record, status=event)
+            self._settle(
+                record, status=event, branch=branch, commit=commit,
+                base_commit=base_commit, commit_error=commit_error,
+            )
             if pending:
                 self._journal.append(
                     record.session_id, "pending", task_id=record.task_id,
-                    parent_id=record.parent_id, kind=record.kind, fence=record.fence,
-                    run_id=record.run_id, key=record.key, digest=record.digest,
+                    parent_id=record.parent_id, kind=record.kind,
+                    name=record.name, fence=record.fence, run_id=record.run_id,
+                    key=record.key, digest=record.digest,
                 )
         return True
 
@@ -509,15 +781,23 @@ class Scheduler:
         for state in self._journal.pending():
             if not state.task_id or state.task_id in self._records:
                 continue
+            is_merge = state.kind == "merge"
             view = TaskView(
                 id=state.task_id,
                 run_id=state.run_id,
-                name=state.task_id[:12],
-                kind="recovered",
+                # A recovered child stays "recovered" so the sub-agent readers
+                # still see it; only a merge ticket is a merge row.
+                name=state.name or (
+                    state.task_id if is_merge else state.task_id[:12]
+                ),
+                kind="merge" if is_merge else "recovered",
                 status="needs_reconciliation",
                 started=0.0,
                 ended=time.monotonic(),
                 origin_session=state.session_id,
+                branch=state.branch,
+                commit=state.commit,
+                base_commit=state.base_commit,
                 needs_reconciliation=True,
                 error="recovered after restart; inspect before retrying",
             )
@@ -532,6 +812,7 @@ class Scheduler:
             task_id=request.id,
             parent_id=request.parent_id or current_task_id.get(),
             kind=kind,
+            name=request.name,
             session_id=request.origin_session,
             key=request.idempotency_key,
             digest=request.payload_digest,
@@ -549,6 +830,7 @@ class Scheduler:
             task_id=token,
             parent_id=current_task_id.get(),
             kind="fanout",
+            name="fanout",
             session_id=origin_session,
             key=key,
             digest=key,
@@ -565,13 +847,15 @@ class Scheduler:
         record.lease_until = time.monotonic() + ttl
         self._journal.append(
             record.session_id, "queued", task_id=record.task_id,
-            parent_id=record.parent_id, kind=record.kind, fence=record.fence,
-            run_id=record.run_id, key=record.key, digest=record.digest,
+            parent_id=record.parent_id, kind=record.kind, name=record.name,
+            fence=record.fence, run_id=record.run_id, key=record.key,
+            digest=record.digest,
         )
         self._journal.append(
             record.session_id, "claimed", task_id=record.task_id,
-            parent_id=record.parent_id, kind=record.kind, fence=record.fence,
-            run_id=record.run_id, key=record.key, digest=record.digest,
+            parent_id=record.parent_id, kind=record.kind, name=record.name,
+            fence=record.fence, run_id=record.run_id, key=record.key,
+            digest=record.digest,
             claim={"owner": "scheduler", "lease_until": record.lease_until,
                    "fence": record.fence},
         )
@@ -589,19 +873,34 @@ class Scheduler:
         error: str | None = None,
         usage: dict[str, int] | None = None,
         truncated: bool = False,
+        branch: str | None = None,
+        commit: str | None = None,
+        base_commit: str | None = None,
+        commit_error: str | None = None,
     ) -> None:
         if record.state in TERMINAL_EVENTS:
             return  # a stop/close already closed this task; never re-open it
         status = status or (result.status if result is not None else "settled")
         event = status if status in TERMINAL_EVENTS else "settled"
         record.state = event
+        if base_commit is not None:
+            record.base_commit = base_commit
+        if commit_error is not None:
+            record.commit_error = commit_error
         self._journal.append(
             record.session_id, event, task_id=record.task_id,
-            parent_id=record.parent_id, kind=record.kind, fence=record.fence,
-            run_id=record.run_id, key=record.key, digest=record.digest,
+            parent_id=record.parent_id, kind=record.kind, name=record.name,
+            fence=record.fence, run_id=record.run_id, key=record.key,
+            digest=record.digest,
             error=error or (result.error if result is not None else None),
-            branch=result.worktree_branch if result is not None else None,
-            commit=result.commit if result is not None else None,
+            branch=branch or (result.worktree_branch if result is not None else None),
+            commit=commit or (result.commit if result is not None else None),
+            base_commit=base_commit or (
+                result.base_commit if result is not None else None
+            ),
+            commit_error=commit_error or (
+                result.commit_error if result is not None else None
+            ),
         )
         if record.request is not None and result is not None:
             self._idem_put(
@@ -625,6 +924,7 @@ class Scheduler:
                 ledger_path=result.ledger_path,
                 branch=result.worktree_branch,
                 commit=result.commit,
+                base_commit=result.base_commit,
                 changed_paths=tuple(result.changed_paths),
                 conflicts=tuple(result.conflicts),
                 commit_error=result.commit_error,
@@ -843,6 +1143,11 @@ class Scheduler:
             self._reaper.cancel()
             await asyncio.gather(self._reaper, return_exceptions=True)
             self._reaper = None
+        if self._merge_queue is not None:
+            try:
+                await self._merge_queue.aclose()
+            except Exception:  # noqa: BLE001 — shutdown is best-effort
+                pass
 
     @staticmethod
     def _default_fanout(runner: Any) -> Any:

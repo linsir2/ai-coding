@@ -37,6 +37,11 @@ class TaskView:
     ledger_path: str | None = None
     branch: str | None = None
     commit: str | None = None
+    #: P2-C3: the commit the source worktree was created from, and whether a
+    #: merge ticket was verified.  Both are additive; child views leave them
+    #: at their defaults.
+    base_commit: str | None = None
+    verified: bool | None = None
     changed_paths: tuple[str, ...] = ()
     conflicts: tuple[dict[str, Any], ...] = ()
     commit_error: str | None = None
@@ -50,7 +55,9 @@ class TaskView:
 
     @property
     def is_running(self) -> bool:
-        return self.status == "running"
+        # A merge ticket is live while queued or merging.  Treating those as
+        # settled would let ``_prune`` remove the row a waiter is still reading.
+        return self.status in ("running", "queued", "merging")
 
     @property
     def is_settled(self) -> bool:
@@ -74,6 +81,8 @@ class TaskView:
             "ledgerPath": self.ledger_path,
             "branch": self.branch,
             "commit": self.commit,
+            "baseCommit": self.base_commit,
+            "verified": self.verified,
             "changedPaths": list(self.changed_paths),
             "conflicts": [
                 {**entry, "paths": list(entry.get("paths") or ())}
@@ -103,6 +112,7 @@ class TaskView:
             ledger_path=row.ledger_path,
             branch=row.worktree_branch,
             commit=row.commit,
+            base_commit=row.base_commit,
             changed_paths=tuple(row.changed_paths),
             commit_error=row.commit_error,
             degraded=row.degraded,
@@ -124,6 +134,8 @@ def _merge(view: TaskView, row: TaskView) -> TaskView:
         name=view.name or row.name,
         kind=view.kind,
         origin_session=view.origin_session or row.origin_session,
+        base_commit=row.base_commit or view.base_commit,
+        verified=row.verified if row.verified is not None else view.verified,
         conflicts=view.conflicts or row.conflicts,
         needs_reconciliation=view.needs_reconciliation or row.needs_reconciliation,
     )

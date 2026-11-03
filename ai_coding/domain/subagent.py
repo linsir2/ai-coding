@@ -310,6 +310,9 @@ class SubagentResult:
     #: delegation looked successful while the work was gone.
     worktree_branch: str | None = None
     commit: str | None = None
+    #: P2-C3: the commit the child's worktree was created from.  Optional and
+    #: additive; an older packet has no key and reads as ``None``.
+    base_commit: str | None = None
     #: P2-A/v3: what the child's tools *declared* as changed files —
     #: ``loop.last_artifacts`` entries with ``kind == "file"``, deduped and in
     #: order.  Bash edits are not included (a git diff is P2-B).  Consumers:
@@ -353,6 +356,7 @@ class SubagentResult:
             "schema_errors": list(self.schema_errors),
             "worktree_branch": self.worktree_branch,
             "commit": self.commit,
+            "base_commit": self.base_commit,
             "changed_paths": list(self.changed_paths),
             "commit_error": self.commit_error,
             "degraded": self.degraded,
@@ -612,6 +616,7 @@ class BackgroundTask:
     #: decide about the child's work (the notice text itself rides the event).
     worktree_branch: str | None = None
     commit: str | None = None
+    base_commit: str | None = None
     changed_paths: tuple[str, ...] = ()
     commit_error: str | None = None
     degraded: str | None = None
@@ -630,6 +635,7 @@ class BackgroundTask:
             "ledgerPath": self.ledger_path,
             "worktreeBranch": self.worktree_branch,
             "commit": self.commit,
+            "baseCommit": self.base_commit,
             "changedPaths": list(self.changed_paths),
             "commitError": self.commit_error,
             "degraded": self.degraded,
@@ -658,6 +664,11 @@ class BackgroundTask:
                 else None
             ),
             commit=str(data["commit"]) if data.get("commit") is not None else None,
+            base_commit=(
+                str(data["baseCommit"])
+                if data.get("baseCommit") is not None
+                else None
+            ),
             changed_paths=(
                 tuple(str(item) for item in changed)
                 if isinstance(changed, list)

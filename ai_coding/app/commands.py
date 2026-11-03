@@ -1143,6 +1143,20 @@ def _handle_tasks(
         return REPLAction.CONTINUE, session
     if len(parts) >= 3 and parts[1] == "stop":
         given = parts[2]
+        # P2-C3: merge tickets are not stoppable; answer with their status
+        # instead of pretending they are a run id that can be cancelled.
+        merge_status = getattr(scheduler, "merge_status", None)
+        if callable(merge_status):
+            merge = merge_status(given)
+            if merge.get("status") not in (None, "not_found"):
+                if merge.get("status") == "ambiguous":
+                    console.error(f"[tasks] '{given}' is an ambiguous merge target")
+                else:
+                    console.info(
+                        f"[tasks] merge {given} is {merge.get('status')}; "
+                        "merge tickets cannot be stopped"
+                    )
+                return REPLAction.CONTINUE, session
         # The listing prints the run id prefix; accept what was copyable.
         resolved = scheduler.resolve_run_id(given)
         if resolved is None:
@@ -1171,6 +1185,23 @@ def _handle_tasks(
     for row in rows:
         display_id = row.run_id or row.id
         elapsed = row.elapsed(now)
+        if row.kind == "merge":
+            verified = (
+                "已验证" if row.verified is True
+                else "未验证" if row.verified is False
+                else ""
+            )
+            details = f" · 分支 {row.branch}" if row.branch else ""
+            if verified:
+                details += f" · {verified}"
+            if row.commit:
+                details += f" · commit {row.commit[:12]}"
+            if row.error:
+                details += f" · {row.error}"
+            lines.append(
+                f"  {display_id[:12]} {row.status} {elapsed:.0f}s{details}"
+            )
+            continue
         tokens = ""
         if row.usage:
             total = int(row.usage.get("total_tokens", 0) or 0)

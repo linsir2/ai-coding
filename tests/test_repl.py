@@ -1114,3 +1114,48 @@ async def test_a_command_that_runs_no_turn_does_not_repeat_the_last_note():
 
     assert _NOTE not in _session_text(c2)
 
+
+
+# ---- P2-C3: /tasks shows merge rows and refuses to "stop" them --------------
+
+
+async def test_tasks_lists_merge_rows_and_does_not_stop_them():
+    from types import SimpleNamespace
+
+    from ai_coding.core.task_registry import TaskView
+
+    class _Tasks:
+        def list(self):
+            return [
+                TaskView(
+                    id="merge:ai_sub_x", name="merge:ai_sub_x", kind="merge",
+                    status="merged", started=10.0, ended=20.0,
+                    branch="ai_sub_x", commit="c" * 40, verified=True,
+                )
+            ]
+
+    class _Scheduler:
+        def tasks(self):
+            return _Tasks()
+
+        def merge_status(self, target):
+            return {"status": "merged"}
+
+        def resolve_run_id(self, target):
+            return None
+
+    loop = SimpleNamespace(scheduler=_Scheduler())
+    sessions = _FakeSessions()
+    dc, c = _console_capture()
+
+    action, _ = await handle_input(loop, "/tasks", sessions.items[0], sessions, dc)
+    out = _session_text(c)
+    assert action is REPLAction.CONTINUE
+    assert "merged" in out and "已验证" in out and "ai_sub_x" in out
+
+    action, _ = await handle_input(
+        loop, "/tasks stop merge:ai_sub_x", sessions.items[0], sessions, dc
+    )
+    out = _session_text(c)
+    assert action is REPLAction.CONTINUE
+    assert "cannot be stopped" in out

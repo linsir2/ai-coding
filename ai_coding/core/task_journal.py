@@ -25,7 +25,19 @@ from typing import Any
 __all__ = ["TaskJournal", "TaskRecordState", "TERMINAL_EVENTS"]
 
 #: Events that close a task for recovery purposes.
-TERMINAL_EVENTS = frozenset({"settled", "cancelled", "stopped", "closed"})
+TERMINAL_EVENTS = frozenset(
+    {
+        "settled",
+        "cancelled",
+        "stopped",
+        "closed",
+        # P2-C3: merge tickets are tasks too.  ``merge_queued``/``merging`` are
+        # open; these three close the ticket.
+        "merged",
+        "merge_skipped",
+        "merge_failed",
+    }
+)
 
 
 @dataclass
@@ -39,8 +51,11 @@ class TaskRecordState:
     turn: int = 0
     session_id: str = ""
     run_id: str = ""
+    name: str = ""
     branch: str | None = None
     commit: str | None = None
+    base_commit: str | None = None
+    commit_error: str | None = None
     error: str | None = None
     key: str = ""
     digest: str = ""
@@ -61,8 +76,14 @@ class TaskJournal:
 
     # ---- writes -----------------------------------------------------------
 
-    def append(self, session_id: str, event: str, **fields: Any) -> None:
-        """Append one event; best-effort (a journal must not break a turn)."""
+    def append(self, session_id: str, event: str, **fields: Any) -> bool:
+        """Append one event; best-effort (a journal must not break a turn).
+
+        Returns whether the row reached disk.  Ordinary callers ignore this
+        (observability must not break a turn); the merge queue checks it at the
+        ``merge_queued``/``merging`` boundary, where a missing row is the
+        difference between "recoverable" and "silently unknown".
+        """
         row = {"v": 1, "event": event, "session_id": session_id, **fields}
         target = self._path(session_id)
         with self._lock:
@@ -77,8 +98,11 @@ class TaskJournal:
                     if needs_newline:
                         handle.write("\n")
                     handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                return True
             except OSError:
-                return  # journal is observability, never a turn breaker
+                # journal is observability, never a turn breaker; merge is the
+                # one caller that reads this flag.
+                return False
 
     # ---- reads ------------------------------------------------------------
 
@@ -143,8 +167,12 @@ class TaskJournal:
             record.kind = str(row.get("kind") or record.kind)
             record.session_id = str(row.get("session_id") or record.session_id)
             record.run_id = str(row.get("run_id") or record.run_id)
+            record.name = str(row.get("name") or record.name)
             record.branch = row.get("branch") or record.branch
             record.commit = row.get("commit") or record.commit
+            record.base_commit = row.get("base_commit") or record.base_commit
+            if "commit_error" in row:
+                record.commit_error = row.get("commit_error")
             record.error = row.get("error") or record.error
             record.key = str(row.get("key") or record.key)
             record.digest = str(row.get("digest") or record.digest)

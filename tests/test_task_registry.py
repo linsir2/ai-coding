@@ -15,7 +15,10 @@ class _Runner:
         return list(self.rows)
 
 
-def _row(run_id="run_a", *, status="running", name="bg", started=100.0, ended=None):
+def _row(
+    run_id="run_a", *, status="running", name="bg", started=100.0, ended=None,
+    base_commit=None,
+):
     return BackgroundTask(
         run_id=run_id,
         name=name,
@@ -26,6 +29,7 @@ def _row(run_id="run_a", *, status="running", name="bg", started=100.0, ended=No
         ledger_path="/ws/x.json" if status != "running" else None,
         worktree_branch="ai_sub_x" if status != "running" else None,
         commit="abcdef" if status != "running" else None,
+        base_commit=base_commit,
         changed_paths=("a.py",),
         commit_error="nope" if status != "running" else None,
         degraded="worktree_unavailable" if status != "running" else None,
@@ -46,6 +50,23 @@ def test_a_background_row_is_a_view_with_camel_case():
     assert data["changedPaths"] == ["a.py"]
     assert data["commitError"] == "nope"
     assert data["degraded"] == "worktree_unavailable"
+    assert data["baseCommit"] is None
+    assert data["verified"] is None
+
+
+def test_background_base_commit_is_projected():
+    registry = TaskRegistry(_Runner([_row(status="completed", base_commit="b" * 40)]))
+    view = registry.list()[0]
+    assert view.base_commit == "b" * 40
+    assert view.to_dict()["baseCommit"] == "b" * 40
+
+
+def test_merge_view_is_live_while_queued_or_merging():
+    for status in ("queued", "merging"):
+        view = TaskView(id="merge:ai_sub_x", name="merge:ai_sub_x",
+                        kind="merge", status=status, started=1.0)
+        assert view.is_running is True
+        assert view.is_settled is False
 
 
 def test_child_and_fanout_views_are_listed_from_memory():

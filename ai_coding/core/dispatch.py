@@ -75,7 +75,13 @@ from ai_coding.tools.registry import ToolRegistry
 #: twice or cut a turn that is already gone.  ``settle`` without a record is
 #: a no-op, so skipping ``claim`` is the whole change.
 CONTROL_REPLAY_TOOLS = frozenset(
-    {"send_message", "interrupt_agent", "resume_agent", "close_agent"}
+    {
+        "send_message", "interrupt_agent", "resume_agent", "close_agent",
+        # P2-C3: a merge is a one-shot mutation of the main tree.  Replaying a
+        # recorded result after a crash would claim a merge that may not have
+        # landed; let the call resolve the journal/branch again.
+        "merge_agent",
+    }
 )
 
 
