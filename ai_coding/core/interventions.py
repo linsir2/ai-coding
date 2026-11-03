@@ -538,12 +538,23 @@ def _search_text(level: int, snap: TurnSnapshot) -> str:
     """
     if snap.repeat_streak >= 1:
         count = snap.repeat_streak + 1
-        return "\n".join([
+        lines = [
             f"{SEARCH_GATE_LEAD} 最近 {count} 次成功工具调用的输出完全相同，"
             "工作区状态没有变化。",
-            "不要继续重复检查。请从已批准计划或当前用户请求推断下一步；",
-            "如果目标不明确，用 ask_user 提问，而不是再跑一次相同的检查。",
+        ]
+        open_items = [
+            item for item in snap.open_items if item.status not in ("completed", "dropped")
+        ]
+        if open_items:
+            lines.append("当前未完成项：")
+            lines.extend(
+                f"- {item.id}. {item.content}" for item in open_items[:NUDGE_ITEM_LIMIT]
+            )
+        lines.extend([
+            "下一步**不要再运行 bash 检查**；直接用 write/edit 推进上述未完成项，",
+            "或用 ask_user 提问。若只是再次查看状态，本回合会继续消耗而没有进展。",
         ])
+        return "\n".join(lines)
     streak = max(1, snap.search_streak)
     calls = max(streak, snap.search_calls)
     # Which rung fired decides what the text may claim.  The count rung fires on

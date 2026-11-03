@@ -568,3 +568,14 @@ def test_one_repeated_successful_output_is_enough_to_ask_for_a_new_step():
     d = iv.select(_snap(repeat_streak=1), phase=iv.PRE, limits=LIMITS)
     assert (d.gate, d.level, d.kind) == ("search", 1, "nudge")
     assert "输出完全相同" in d.text
+
+
+def test_a_repeat_nudge_names_the_open_plan_item_and_forbids_another_check():
+    d = iv.select(
+        _snap(repeat_streak=1, open_items=(_item("6", "in_progress"),)),
+        phase=iv.PRE,
+        limits=LIMITS,
+    )
+    assert d is not None
+    assert "6. do 6" in d.text
+    assert "不要再运行 bash 检查" in d.text
