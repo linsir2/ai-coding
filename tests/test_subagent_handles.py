@@ -239,7 +239,9 @@ class _IsolatingWorktreeManager:
         from types import SimpleNamespace
 
         self.created.append(name)
-        return SimpleNamespace(path=self.path, branch="ai_sub_probe")
+        return SimpleNamespace(
+            path=self.path, branch="ai_sub_probe", base_commit="a" * 40
+        )
 
     async def commit_if_dirty(
         self, path: str, message: str
@@ -258,6 +260,21 @@ class _NonIsolatingWorktreeManager(_IsolatingWorktreeManager):
 class _FailingCreateWorktreeManager(_IsolatingWorktreeManager):
     async def create(self, name: str):
         raise WorktreeError("cannot create a worktree here")
+
+
+@pytest.mark.asyncio
+async def test_background_row_and_meta_carry_base_commit(tmp_path):
+    manager = _IsolatingWorktreeManager(tmp_path / "wt")
+    runner = _runner(tmp_path)
+    run_id = runner.spawn_background(
+        "edit the tree", name="probe", worktree_manager=manager,
+        emit=lambda _e: None,
+    )
+    row = await _settle(runner, run_id)
+
+    assert row.base_commit == "a" * 40
+    meta = json.loads(_meta_path(tmp_path, run_id).read_text(encoding="utf-8"))
+    assert meta["baseCommit"] == "a" * 40
 
 
 @pytest.mark.asyncio

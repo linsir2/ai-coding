@@ -2060,13 +2060,23 @@ class SubAgentRunner:
         handle: AgentHandle, result: SubagentResult
     ) -> SubagentResult:
         """Name the branch of a turn that actually committed (or failed to)."""
-        if (
+        branch = (
             handle.worktree_branch
-            and not result.worktree_branch
-            and (result.commit or result.commit_error)
-        ):
-            return replace(result, worktree_branch=handle.worktree_branch)
-        return result
+            if (
+                handle.worktree_branch
+                and not result.worktree_branch
+                and (result.commit or result.commit_error)
+            )
+            else None
+        )
+        base = result.base_commit or handle.base_commit
+        if branch is None and base is None:
+            return result
+        return replace(
+            result,
+            worktree_branch=branch or result.worktree_branch,
+            base_commit=base,
+        )
 
     @staticmethod
     def _record_handle_facts(handle: AgentHandle, result: SubagentResult) -> None:

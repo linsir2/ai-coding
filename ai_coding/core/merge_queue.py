@@ -619,6 +619,12 @@ class MergeQueue:
             return
         ticket.status = status
         ticket.outcome = dict(outcome)
+        # The tool card and /tasks need the identity even on a failure; a
+        # verify_failed row used to render the branch as "?".
+        ticket.outcome.setdefault("branch", ticket.branch)
+        ticket.outcome.setdefault("base_commit", ticket.base_commit)
+        ticket.outcome.setdefault("verified", False)
+        ticket.outcome.setdefault("attempts", ticket.attempts)
         ticket.ended = time.monotonic()
         event = (
             "merged" if status == "merged"
