@@ -96,7 +96,10 @@ class AskUserTool(BaseTool):
         if not question:
             return ToolResult(
                 success=False,
-                output="error: 'question' is required",
+                output=(
+                    "error: 'question' is required; expected params: "
+                    "question (string, required) and optional options (string[])."
+                ),
                 error="missing_question",
             )
         raw_options = params.get("options")

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from ai_coding.domain.agents import PLAN_DIR, is_plan_agent
+from ai_coding.domain.agents import PLAN_DIR, PLAN_TEXT_RULE, is_plan_agent
 from ai_coding.domain.message import ChatMessage
 
 __all__ = [
@@ -39,9 +39,10 @@ __all__ = [
 ]
 
 #: What the model is told when the session enters plan mode.  It names the
-#: posture and the two exits, and it names **no tools** — the tool surface
-#: says which tools are there, and a text that lists tools is a text that
-#: can contradict the surface.
+#: posture and the two exits, and it names **no real tools** — the tool
+#: surface says which tools are there, and a text that lists tools is a text
+#: that can contradict the surface.  The only names it carries are the invented
+#: ``propose_plan`` family, and it carries them to say they do not exist.
 PLAN_ENTER_REMINDER = (
     "<system-reminder>You are in Plan mode. Discuss the plan with the user "
     "directly in the conversation; explore only as much as you need to plan, "
@@ -53,8 +54,10 @@ PLAN_ENTER_REMINDER = (
     "shell_read (one simple read-only command; no pipes or redirection); "
     "subAgent runs in an isolated worktree, so give it relative paths there, "
     "never absolute paths of this repository. Temp files, test data and output "
-    "directories must live inside the workspace, not /tmp. To submit a plan, "
-    "output exactly one <proposed_plan> ... </proposed_plan> block as your final "
+    "directories must live inside the workspace, not /tmp. "
+    f"{PLAN_TEXT_RULE} "
+    "To submit a plan, output exactly one <proposed_plan> ... </proposed_plan> "
+    "block as your final "
     "message; if the request needs "
     "no implementation, close it with finish_research instead. You remain in "
     "Plan mode until the user switches agents. "

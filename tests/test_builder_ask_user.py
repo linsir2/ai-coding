@@ -45,3 +45,12 @@ def test_subagent_stacks_never_get_ask_user():
         user_prompt=UnavailableUserPromptCallback(),
     )
     assert registry.get("ask_user") is None
+
+
+def test_ask_user_is_not_deferred_so_the_plan_tail_can_name_its_schema():
+    """The plan request tail names ask_user; a deferred tool has no schema on
+    the request, so the model guessed ``query`` and failed five turns."""
+    registry = build_tool_registry(
+        _cfg(), ".", None, user_prompt=UnavailableUserPromptCallback()
+    )
+    assert registry.get("ask_user").defer is False

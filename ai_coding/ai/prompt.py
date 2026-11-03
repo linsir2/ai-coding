@@ -10,6 +10,8 @@ memory block is not a section here: it rides the volatile tail
 
 from __future__ import annotations
 
+from ai_coding.domain.agents import PLAN_TEXT_RULE
+
 #: The composition root's default system prompt.  A sub-agent in ``task_only`` mode
 #: gets exactly this instead of its parent's assembled prompt (R7e-4), so the text
 #: has one home instead of being hardcoded in cli.py and the runner.
@@ -157,7 +159,9 @@ class PromptAssembler:
                 "modify, add, fix, refactor) needs a plan, and a request that "
                 "needs no implementation (a survey, an analysis, a comparison) "
                 "needs a conclusion. The answer is one of those two, never "
-                "with the finished work. To submit the plan: explore only "
+                "with the finished work. "
+                f"{PLAN_TEXT_RULE} "
+                "To submit the plan: explore only "
                 "enough to plan, then output exactly one <proposed_plan> ... "
                 "</proposed_plan> block and stop — a concise markdown plan; "
                 "the closing tag is mandatory and the plan must not be wrapped "

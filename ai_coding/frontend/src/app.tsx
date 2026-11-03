@@ -42,6 +42,7 @@ import type { PermissionDecision, PermissionRequest } from "./util/permission"
 import { permissionAnswer, permissionRequest } from "./util/permission"
 import type { PromptImage } from "./util/attachment"
 import type { PendingPrompt } from "./util/submission"
+import { copyOrExit } from "./util/selection"
 
 export interface Hello {
   version: string
@@ -526,6 +527,13 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
         run: () => openPermissions(),
       },
       {
+        name: "app.copy-or-exit",
+        title: "Copy or exit",
+        group: "System",
+        desc: "Copy the current selection, or exit when nothing is selected",
+        run: () => void copyOrExit(props.renderer, requestExit),
+      },
+      {
         name: "app.exit",
         title: "Exit",
         group: "System",
@@ -538,7 +546,8 @@ function Shell(props: { client: IpcClient; hello: Hello; renderer: CliRenderer }
       // ctrl+p is VS Code's quick open and it wins inside its terminal, so the
       // palette lives on the leader like every other dialog: <leader>p.
       { key: "<leader>p", cmd: "command.palette.show" },
-      { key: "ctrl+c", cmd: "app.exit" },
+      // ctrl+c copies a live selection; with nothing selected it still exits.
+      { key: "ctrl+c", cmd: "app.copy-or-exit" },
       // OpenCode's leader bindings (config/keybind.ts:48,109,110,102,150,164).
       { key: "<leader>m", cmd: "dialog.models.show" },
       { key: "<leader>l", cmd: "dialog.sessions.show" },

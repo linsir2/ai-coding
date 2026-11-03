@@ -581,6 +581,11 @@ def _assemble_registry(
 #: memory service), so marking them only here would leave their ~3.6k
 #: characters of schema on every step and make ``tool_search`` unable to find
 #: them at all.
+#:
+#: ``ask_user`` is deliberately **not** here: its schema is tiny, and the plan
+#: posture names it in the request tail.  Deferring it made the model invent
+#: ``query`` for a schema it could not see, which failed as ``missing_question``
+#: five turns in a row (measured).  A named tool must carry its schema.
 DEFERRED_TOOL_NAMES = frozenset(
     {
         "memory_search",
@@ -591,7 +596,6 @@ DEFERRED_TOOL_NAMES = frozenset(
         "job_list",
         "job_output",
         "job_kill",
-        "ask_user",
         "skill",
         "webfetch",
         "websearch",

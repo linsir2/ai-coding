@@ -193,6 +193,11 @@ def _ask_budget(deadline: Deadline | None, approval_timeout: float | None) -> fl
     return min(float(approval_timeout), remaining)
 
 
+#: Names a model has invented by turning the ``<proposed_plan>`` text block
+#: into a tool call.  They are not tools; the refusal has to say what is.
+_PLAN_TEXT_NAMES = frozenset({"propose_plan", "proposed_plan", "present_plan"})
+
+
 class ApprovalVerdict(enum.Enum):
     """What came back from asking a human (R7c)."""
 
@@ -977,9 +982,18 @@ class ToolDispatcher:
 
     @staticmethod
     def _unknown(call: ToolCall) -> ToolResult:
+        if call.name in _PLAN_TEXT_NAMES:
+            output = (
+                f"error: unknown tool '{call.name}'. "
+                "<proposed_plan> 是最终 assistant 文本块，不是工具；"
+                "propose_plan/proposed_plan/present_plan 这些工具不存在。"
+                "请直接输出 <proposed_plan> ... </proposed_plan> 文本块作为最终消息。"
+            )
+        else:
+            output = f"error: unknown tool '{call.name}'"
         return ToolResult(
             success=False,
-            output=f"error: unknown tool '{call.name}'",
+            output=output,
             error="unknown_tool",
             data={"tool": call.name},
         )

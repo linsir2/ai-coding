@@ -41,6 +41,10 @@ describe("toolVerb", () => {
   test("B0: the read-only research fan-out has a verb", () => {
     expect(toolVerb("parallel_research")).toBe("并行调研")
   })
+
+  test("P2-C3: the explicit merge has a verb", () => {
+    expect(toolVerb("merge_agent")).toBe("合并分支")
+  })
 })
 
 describe("toolTarget", () => {
@@ -80,6 +84,10 @@ describe("toolTarget", () => {
 
   test("unknown tools identify themselves by name", () => {
     expect(toolTarget("mcp__search__web", { query: "x" })).toBe("mcp__search__web")
+  })
+
+  test("the merge card names the branch or id it merged", () => {
+    expect(toolTarget("merge_agent", { target: "child-a" })).toBe("child-a")
   })
 
   test("known targetless tools stay bare", () => {
@@ -292,5 +300,37 @@ describe("the open line's budget", () => {
     const folded = foldToolChunk([{ text: "ok", stream: "stdout" }], "", "ty", "stderr")
     expect(folded.pending).toBe("ty")
     expect(folded.dropped).toBe(false)
+  })
+})
+
+
+describe("toolFailure: plan and merge codes", () => {
+  test("a missing question is a named failure, not 未知原因", () => {
+    expect(toolFailure("missing_question")).toEqual({
+      label: "缺少问题",
+      tone: "denied",
+    })
+  })
+
+  test("every merge-queue status has a Chinese label", () => {
+    const labels: Array<[string, string]> = [
+      ["verify_failed", "验证失败"],
+      ["verify_unavailable", "验证不可用"],
+      ["not_settled", "子代理未收敛"],
+      ["commit_failed", "提交失败"],
+      ["branch_moved", "分支已变化"],
+      ["head_moved", "主分支已前移"],
+      ["dirty", "主工作区有未提交改动"],
+      ["conflict", "合并冲突"],
+      ["busy", "合并队列忙"],
+      ["journal_failed", "合并日志写入失败"],
+      ["unavailable", "合并不可用"],
+      ["merge_skipped", "无需合并"],
+      ["nothing_to_merge", "无内容可合并"],
+      ["invalid_ref", "无效的引用或分支"],
+    ]
+    for (const [code, label] of labels) {
+      expect(toolFailure(code).label).toBe(label)
+    }
   })
 })

@@ -40,6 +40,7 @@ from ai_coding.core.request_builder import build_tail, content_of, volatile_bloc
 from ai_coding.core.sop_router import SOPRouter
 from ai_coding.core.turn_books import TurnBooks
 from ai_coding.core.workspace_guard import outside_workspace_paths
+from ai_coding.domain.agents import PLAN_TEXT_RULE
 from ai_coding.domain.message import CHECKPOINT_MARK, IMAGE_MIME_BY_SUFFIX, ChatMessage
 from ai_coding.domain.read_ledger import render as render_read_ledger
 from ai_coding.domain.session import SessionData
@@ -78,8 +79,9 @@ _DIR_ENTRIES = 200
 #: instruction -- never in the history (compaction could eat it).
 PLAN_MODE_BLOCK = (
     "<plan-mode>Plan mode: read-only research. Do not edit files or run mutating "
-    "commands. Ask the user with ask_user when a decision is required. When the "
-    "spec is complete, output exactly one <proposed_plan> ... </proposed_plan> "
+    "commands. Ask the user with ask_user when a decision is required. "
+    f"{PLAN_TEXT_RULE} "
+    "When the spec is complete, output exactly one <proposed_plan> ... </proposed_plan> "
     "block and stop. The closing </proposed_plan> tag is mandatory, and the plan "
     "inside it must be plain Markdown (do not wrap it in a code fence). Do not "
     "execute the plan, and do not ask \"should I proceed\".</plan-mode>"

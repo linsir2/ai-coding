@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 __all__ = [
     "PLAN_DIR",
     "PLAN_AGENT_ID",
+    "PLAN_TEXT_RULE",
     "AgentCatalog",
     "AgentSpec",
     "is_plan_agent",
@@ -46,6 +47,19 @@ PLAN_AGENT_ID = "plan"
 #: A relative path (not ``Paths``) on purpose: rule resources are portable
 #: text, and the absolute form is only ever needed for a human-facing message.
 PLAN_DIR = ".ai-coding/plan"
+
+#: The one sentence every plan-mode text must carry.  A measured failure put a
+#: model in a five-turn retry loop: it called ``propose_plan`` (and then
+#: ``present_plan``) because the prompts said "submit a plan", and the
+#: ``<proposed_plan>`` block *looks* like a tool call.  It is assistant text,
+#: and the tools do not exist.  Shared here so the prompt, both reminders and
+#: the research exit cannot drift apart on that fact.
+PLAN_TEXT_RULE = (
+    "`<proposed_plan>` is the final assistant text block, not a tool. "
+    "Do not call propose_plan, proposed_plan or present_plan: those tools "
+    "do not exist. Output the <proposed_plan> ... </proposed_plan> text "
+    "block as your final message."
+)
 
 #: The two kinds an agent may be.  A primary agent is a session's own agent;
 #: a subagent is a target a parent may delegate to (``subAgent``).

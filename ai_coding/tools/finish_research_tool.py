@@ -20,6 +20,7 @@ from typing import Any
 
 from ai_coding.core.events import ResearchConcluded
 from ai_coding.core.request_assembly import human_utterance
+from ai_coding.domain.agents import PLAN_TEXT_RULE
 from ai_coding.domain.message import ToolResult
 from ai_coding.tools.base import BaseTool, ToolContext
 
@@ -44,7 +45,8 @@ _MISSING_SUMMARY = (
 )
 _IMPLEMENTATION_REQUEST = (
     "本次请求要的是实现（{verb}），不是研究结论：研究出口只回答"
-    "「找出/评估/调研」这类不需要动手的请求。请改用 <proposed_plan> "
+    "「找出/评估/调研」这类不需要动手的请求。"
+    f"{PLAN_TEXT_RULE} "
     "交一份可执行计划，人批准后由系统执行。"
 )
 
@@ -163,7 +165,8 @@ class FinishResearchTool(BaseTool):
             "comparison — so that no plan is submitted and nothing is executed. A "
             "request that asks for changes (implement, modify, add, fix, refactor) "
             "needs a plan, not a conclusion: submit it as a <proposed_plan> block "
-            "instead. Give 'summary' as the conclusion itself (what you found and "
+            f"instead. {PLAN_TEXT_RULE} "
+            "Give 'summary' as the conclusion itself (what you found and "
             "what it means); it is what the user reads. Mutually exclusive with "
             "a <proposed_plan> submission: whichever comes first wins. Only "
             "available in plan mode."

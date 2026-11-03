@@ -232,3 +232,24 @@ async def test_it_accepts_the_research_requests(utterance):
     r = await tool.execute({"summary": "结论"}, ctx)
 
     assert r.success is True
+
+
+def test_the_description_says_the_block_is_text_not_a_tool():
+    """The research exit points at the plan exit; it must not send the model
+    looking for a propose_plan/proposed_plan tool."""
+    from ai_coding.domain.agents import PLAN_TEXT_RULE
+
+    assert PLAN_TEXT_RULE in FinishResearchTool().description
+
+
+@pytest.mark.asyncio
+async def test_the_implementation_request_names_the_text_block_not_a_tool():
+    from ai_coding.domain.agents import PLAN_TEXT_RULE
+
+    r = await FinishResearchTool().execute(
+        {"summary": "结论"}, _ctx(messages=(_user("实现一个登录接口"),))
+    )
+
+    assert r.error == "implementation_request"
+    assert PLAN_TEXT_RULE in r.output
+    assert "not a tool" in r.output

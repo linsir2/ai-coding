@@ -299,6 +299,22 @@ async def test_unknown_tool_returns_error_result():
 
 
 @pytest.mark.asyncio
+async def test_an_invented_plan_tool_says_the_block_is_text():
+    """The model turned ``<proposed_plan>`` into a tool call; the refusal must
+    name the real shape instead of repeating "unknown tool"."""
+    for name in ("propose_plan", "proposed_plan", "present_plan"):
+        outcomes = await _dispatcher([_FakeTool("read")]).dispatch_batch(
+            [_ref("c1", name)], _ctx()
+        )
+        result = outcomes[0].result
+        assert result.success is False
+        assert result.error == "unknown_tool"
+        assert "<proposed_plan>" in result.output
+        assert "文本块" in result.output
+        assert "不存在" in result.output
+
+
+@pytest.mark.asyncio
 async def test_unknown_tool_does_not_ask_approval():
     approval = _NeverAsked()
     outcomes = await _dispatcher([_FakeTool("read")], approval=approval).dispatch_batch(

@@ -82,7 +82,20 @@ async def test_missing_question_is_rejected():
     result = await _tool(prompt).execute({"question": "   "})
     assert result.success is False
     assert result.error == "missing_question"
+    assert "question" in result.output
+    assert "options" in result.output
     assert prompt.seen == []  # 没问就不该打扰人
+
+
+def test_the_schema_names_the_required_param_the_model_kept_guessing():
+    """Measured: a deferred schema let the model send ``query`` instead of
+    ``question``; the refusal now names the expected params, and the tool is
+    not deferred (see DEFERRED_TOOL_NAMES)."""
+    tool = _tool(UnavailableUserPromptCallback())
+    schema = tool.params_json_schema
+    assert schema["required"] == ["question"]
+    assert set(schema["properties"]) == {"question", "options"}
+    assert tool.defer is False
 
 
 def test_the_tool_is_not_parallel_safe():

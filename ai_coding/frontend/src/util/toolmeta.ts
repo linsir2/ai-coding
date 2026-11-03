@@ -32,6 +32,8 @@ const TOOL_VERBS: Record<string, string> = {
   // B0: one call fans out several read-only questions; without a verb it
   // would draw as the generic 运行工具.
   parallel_research: "并行调研",
+  // P2-C3: the explicit merge call had no verb, so a merge drew as 运行工具.
+  merge_agent: "合并分支",
 }
 
 /** The past-tense verb for a tool card; unknown tools (MCP) run under 运行工具. */
@@ -59,6 +61,8 @@ export function toolTarget(toolName: string, params: Record<string, unknown>): s
       return String(params["path"] ?? "")
     case "bash":
       return shorten(String(params["command"] ?? ""), TARGET_COMMAND_LIMIT)
+    case "merge_agent":
+      return String(params["target"] ?? "")
     case "mcp_call":
       // The dispatcher reports the vessel; the call it carried is in params.
       // Naming the vessel alone made every remote tool read as "运行工具 ·
@@ -150,6 +154,9 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   // P2-B1: a writer waited for another writer's claim and gave up; the call
   // never ran, so it reads as a refusal, not breakage.
   write_conflict: { label: "等待其它写者超时", tone: "denied" },
+  // The question tool: a call without its required param was a model guess,
+  // and the old fallback read 未知原因（missing_question）.
+  missing_question: { label: "缺少问题", tone: "denied" },
   // The research exit's posture gates -- a plain session calling it gets a
   // verdict, not 未知原因.
   not_in_plan: { label: "非计划模式", tone: "denied" },
@@ -165,6 +172,23 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   // so ``update_goal`` there is a misplaced call, not breakage.  The fallback
   // drew it as 未知原因（no_goal） in the middle of execution.
   no_goal: { label: "无运行中的目标", tone: "denied" },
+  // P2-C3: every status the merge queue can hand back as ``error``.  Without
+  // these the merge card said 未知原因（verify_failed） and the operator had to
+  // read the code to learn what happened.
+  verify_failed: { label: "验证失败", tone: "failed" },
+  verify_unavailable: { label: "验证不可用", tone: "failed" },
+  not_settled: { label: "子代理未收敛", tone: "denied" },
+  commit_failed: { label: "提交失败", tone: "failed" },
+  branch_moved: { label: "分支已变化", tone: "denied" },
+  head_moved: { label: "主分支已前移", tone: "denied" },
+  dirty: { label: "主工作区有未提交改动", tone: "denied" },
+  conflict: { label: "合并冲突", tone: "failed" },
+  busy: { label: "合并队列忙", tone: "denied" },
+  journal_failed: { label: "合并日志写入失败", tone: "failed" },
+  unavailable: { label: "合并不可用", tone: "failed" },
+  merge_skipped: { label: "无需合并", tone: "failed" },
+  nothing_to_merge: { label: "无内容可合并", tone: "failed" },
+  invalid_ref: { label: "无效的引用或分支", tone: "denied" },
 }
 
 export function toolFailure(error: string): { label: string; tone: FailureTone } {

@@ -234,3 +234,10 @@ def test_the_reminder_is_not_the_humans_utterance():
         ),
     ]
     assert human_utterance(history) == "the real question"
+
+
+def test_the_enter_reminder_says_the_block_is_text_not_a_tool():
+    """The reminder repeats the shared rule so a compaction cannot lose it."""
+    from ai_coding.domain.agents import PLAN_TEXT_RULE
+
+    assert PLAN_TEXT_RULE in PLAN_ENTER_REMINDER

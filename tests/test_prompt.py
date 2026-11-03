@@ -289,3 +289,19 @@ def test_plan_segment_sends_the_plan_through_the_proposed_plan_block():
     assert "todo items with todo_write" not in out  # the old teaching is gone
     assert "todo_write" not in out
     assert "do not track the planning with a todo list" in out
+
+
+def test_the_plan_segment_says_the_block_is_text_not_a_tool():
+    """Measured failure: ``propose_plan``/``present_plan`` were called as tools.
+
+    The block is assistant text, and the prompt has to say so in the same
+    words the reminder and the research exit use.
+    """
+    from ai_coding.domain.agents import PLAN_TEXT_RULE
+
+    segment = _plan_segment()
+
+    assert PLAN_TEXT_RULE in segment
+    assert "not a tool" in PLAN_TEXT_RULE
+    for name in ("propose_plan", "proposed_plan", "present_plan"):
+        assert name in PLAN_TEXT_RULE
