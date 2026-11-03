@@ -6,10 +6,12 @@ context object only implements ``compress``) and the rule that a *failed*
 compaction never rewrites the caller's history (docs/r5-analysis.md 3.3).
 """
 
+import asyncio
+
 import pytest
 
 from ai_coding.core.compaction import Compactor
-from ai_coding.core.events import Degraded, LayerStat, RecordingObserver
+from ai_coding.core.events import CompactionFailed, Degraded, LayerStat, RecordingObserver
 from ai_coding.domain.message import ChatMessage
 from ai_coding.infra.deadline import DeadlineExpired
 
@@ -243,3 +245,35 @@ async def test_hard_trim_shrink_counts_even_when_layers_report_no_change():
     await compactor.compress(session.messages, deadline=None, session=session)
 
     assert session.last_compacted_turn == 1
+
+
+class _CancelledContext:
+    async def compress_if_needed(self, history, *, force=False, on_summary=None):  # type: ignore[no-untyped-def]
+        raise asyncio.CancelledError()
+
+
+@pytest.mark.asyncio
+async def test_compact_now_emits_a_terminal_event_when_cancelled():
+    compactor, observer = _compactor(_CancelledContext())
+    session = _Session(_history() * 3)
+
+    with pytest.raises(asyncio.CancelledError):
+        await compactor.compact_now(session, timeout=5.0)
+
+    failed = observer.of_type(CompactionFailed)
+    assert len(failed) == 1
+    assert failed[0].error == "cancelled"
+    assert session.messages == _history() * 3
+
+
+@pytest.mark.asyncio
+async def test_compact_now_does_not_wait_forever_for_the_lock():
+    compactor, _ = _compactor(_ModernContext())
+    session = _Session(_history() * 3)
+    await compactor._lock.acquire()  # type: ignore[attr-defined]
+    try:
+        report = await compactor.compact_now(session, timeout=0.01)
+    finally:
+        compactor._lock.release()  # type: ignore[attr-defined]
+
+    assert report == {"messages": 3, "after": 3, "removed": 0}

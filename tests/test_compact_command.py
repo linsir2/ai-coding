@@ -14,7 +14,7 @@ from ai_coding.ai.engine import ChatEngine
 from ai_coding.app.commands import handle_input
 from ai_coding.app.slash import parse_slash
 from ai_coding.config.models import AIConfig
-from ai_coding.core.agent_loop import AgentLoop
+from ai_coding.core.agent_loop import _REACTIVE_COMPACT_SECONDS, AgentLoop
 from ai_coding.core.context_compression import ContextManager
 from ai_coding.domain.loop import StepResult
 from ai_coding.service.session_service import SessionService
@@ -178,3 +178,23 @@ async def test_r11c_repl_memory_lists_scenes_when_there_are_any(tmp_path):
     line = next(line for line in console.lines if "memory]" in line)
     # Sorted like every other counter in this line (by code point).
     assert "scenes: 发布=1, 构建=1" in line
+
+
+@pytest.mark.asyncio
+async def test_compact_session_uses_the_short_manual_budget(tmp_path):
+    settings = _settings()
+    loop = _loop(tmp_path, settings)
+    session = loop.sessions.create()
+
+    class _Capture:
+        timeout = -1.0
+
+        async def compact_now(self, session, *, timeout, reason="manual"):
+            self.timeout = timeout
+            return {"messages": 0, "after": 0, "removed": 0}
+
+    capture = _Capture()
+    loop.compactor = capture  # type: ignore[assignment]
+    await loop.compact_session(session)
+
+    assert capture.timeout == _REACTIVE_COMPACT_SECONDS

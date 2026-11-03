@@ -879,6 +879,14 @@ function reduceWire(state: SessionState, event: EventMessage): SessionState {
         let next = mapParts(parts, (part) =>
           part.kind === "text" && part.streaming ? { ...part, streaming: false } : part,
         )
+        // A compaction is owned by the command turn.  If the turn ends without
+        // a compaction terminal event (cancel/process teardown), leaving the
+        // card "running" makes the next reload look permanently stuck.
+        next = mapParts(next, (part) =>
+          part.kind === "compaction" && part.status === "running"
+            ? { ...part, status: "failed" as const, error: part.error || "compaction interrupted" }
+            : part,
+        )
         if (handoff) next = [...next, { kind: "text", text: handoff, streaming: false }]
         if (note) next = appendNotice(next, note)
         if (marker) next = [...next, { kind: "turn-end", tone: "error", text: marker }]

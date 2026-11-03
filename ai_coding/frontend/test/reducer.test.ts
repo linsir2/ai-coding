@@ -879,6 +879,26 @@ describe("slash commands over IPC (session.command)", () => {
 })
 
 describe("compaction lifecycle (P3-2)", () => {
+  test("turn.finished settles a running compaction left by a cancellation", () => {
+    const state = feed(
+      initialState(),
+      wire("compaction.started", { reason: "manual" }),
+      wire("turn.finished", {
+        status: "aborted",
+        reason: "cancelled",
+        iterations: 1,
+        truncatedByLength: false,
+        handoff: "",
+      }),
+    )
+    const card = lastAssistant(state).parts.find((part) => part.kind === "compaction")
+    expect(card).toMatchObject({
+      kind: "compaction",
+      status: "failed",
+      error: "compaction interrupted",
+    })
+  })
+
   test("started opens a running compaction row, busy stays true", () => {
     const state = feed(initialState(), wire("compaction.started", { reason: "manual" }))
     expect(lastAssistant(state).parts).toEqual([

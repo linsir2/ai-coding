@@ -124,3 +124,23 @@ def test_a_repeated_todo_update_is_allowed_but_add_is_not():
     _success(guard, add)
     repeated_add = guard.check(add, _ctx([]), TurnView())
     assert repeated_add.verdict.value == "deny"
+
+
+def test_a_repeated_bash_is_not_excused_by_its_own_current_call():
+    """The current assistant message is already in ``ctx.messages``.
+
+    Counting that message's own ``bash`` call as a mutation-after-read made
+    every repeated bash look like the repair loop, so the duplicate guard never
+    fired in the real trace (14 identical ``find`` calls).
+    """
+    guard = DuplicateCallGuard(threshold=1)
+    _success(guard, _bash("b1"))
+
+    history = [
+        _assistant_call("b1", "bash"),
+        _tool_result("b1"),
+        _assistant_call("b2", "bash"),  # the call being checked
+    ]
+    decision = guard.check(_bash("b2"), _ctx(history), TurnView())
+
+    assert decision.verdict.value == "deny"

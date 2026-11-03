@@ -2719,7 +2719,10 @@ class AgentLoop:
         history — L3 persisted outputs, the session file and memory remain as the
         safety nets (docs/r5-analysis.md 3.3).
         """
-        budget = float(getattr(self.settings, "turn_timeout_seconds", 0.0) or 60.0)
+        # ``/compact`` is a manual operation, not a turn: the 1800s turn clock
+        # would let a slow L4 summarizer leave a running card for half an hour.
+        # Use the same short floor the compactor already applies.
+        budget = _REACTIVE_COMPACT_SECONDS
         report = await self.compactor.compact_now(session, timeout=budget)
         if report["after"] != report["messages"]:
             self.closer.save(session)

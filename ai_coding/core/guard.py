@@ -220,7 +220,10 @@ _MUTATING_CALLS = frozenset({"bash", "write", "edit"})
 
 
 def _mutated_after_read(
-    history: Sequence[ChatMessage], read_ids: Sequence[str]
+    history: Sequence[ChatMessage],
+    read_ids: Sequence[str],
+    *,
+    ignore_call_id: str | None = None,
 ) -> bool:
     """Did a mutating call happen after the last result of ``read_ids``?
 
@@ -237,6 +240,11 @@ def _mutated_after_read(
         return False
     for message in history[read_index + 1 :]:
         for call in getattr(message, "tool_calls", ()) or ():
+            # The assistant message for the call being checked is already in
+            # ctx.messages.  Its own bash call is not evidence that the
+            # workspace changed after the earlier success.
+            if ignore_call_id is not None and str(getattr(call, "id", "")) == ignore_call_id:
+                continue
             if str(getattr(call, "name", "")).lower() in _MUTATING_CALLS:
                 return True
     return False
@@ -313,7 +321,9 @@ class DuplicateCallGuard:
             # change the repeat is the duplicate this guard exists to stop.
             # The read-only "output is gone" allowance does not apply: a trimmed
             # bash output is not evidence its side effect did not happen.
-            if _mutated_after_read(ctx.messages, succeeded):
+            if _mutated_after_read(
+                ctx.messages, succeeded, ignore_call_id=call.id
+            ):
                 return GuardDecision(GuardVerdict.ALLOW)
             if len(succeeded) >= self.threshold:
                 return self._refusal(call, succeeded[0], len(succeeded))
@@ -351,7 +361,7 @@ class DuplicateCallGuard:
         (the next read's result is newer than the mutation, so a further repeat
         is refused again).
         """
-        if _mutated_after_read(history, succeeded):
+        if _mutated_after_read(history, succeeded, ignore_call_id=call.id):
             return GuardDecision(GuardVerdict.ALLOW)
         shown = [call_id for call_id in succeeded if call_id in visible]
         if len(shown) >= self.threshold:

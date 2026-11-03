@@ -399,6 +399,18 @@ class Compactor:
                 timeout=budget,
                 label="context_compress",
             )
+        except asyncio.CancelledError:
+            usage = self._summary_usage()
+            self._emit(
+                CompactionFailed(
+                    reason=reason,
+                    error="cancelled",
+                    prompt_tokens=usage.get("prompt_tokens", 0),
+                    completion_tokens=usage.get("completion_tokens", 0),
+                    total_tokens=usage.get("total_tokens", 0),
+                )
+            )
+            raise
         except Exception as exc:  # noqa: BLE001 — never break a turn
             _log.debug("context compression failed (%s); using the raw history", exc)
             self._degraded(
@@ -434,16 +446,25 @@ class Compactor:
         """
         if self._context is None:
             return {"messages": len(session.messages), "after": len(session.messages), "removed": 0}
-        async with self._lock:
-            before = len(session.messages)
-            report = {"messages": before, "after": before, "removed": 0}
-            if before == 0:
-                return report
-            budget = timeout if timeout > 0 else 60.0
+        before = len(session.messages)
+        report = {"messages": before, "after": before, "removed": 0}
+        if before == 0:
+            return report
+        # The budget covers **waiting for the lock too**.  It used to start
+        # after `async with self._lock`, so a second /compact could wait
+        # forever for the first one and never reach the deadline.
+        budget = timeout if timeout > 0 else 60.0
+        deadline = Deadline.after(budget)
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout=budget)
+        except (asyncio.TimeoutError, TimeoutError):
+            _log.info("manual compaction skipped: another compaction still holds the lock")
+            return report
+        try:
             try:
                 result = await self._compress_once(
                     list(session.messages),
-                    deadline=Deadline.after(budget),
+                    deadline=deadline,
                     force=True,
                     session=session,
                     reason=reason,
@@ -463,8 +484,10 @@ class Compactor:
             if callable(archive):
                 archive(list(session.messages))
             session.messages = list(result)
-            after = len(session.messages)
-            return {"messages": before, "after": after, "removed": before - after}
+        finally:
+            self._lock.release()
+        after = len(session.messages)
+        return {"messages": before, "after": after, "removed": before - after}
 
     # ---- internals ---------------------------------------------------------
 
