@@ -277,6 +277,9 @@ class PermissionGate:
         #: M-D3: the clock the expiry check reads.  Injected so a test (and the
         #: store) can move time; the default is the wall clock.
         clock: Callable[[], float] = time.time,
+        #: The workspace network default.  A per-call bash request for
+        #: ``inherit`` is an escalation only when this is deny/proxy.
+        network_mode: str = "deny",
     ) -> None:
         #: Calls the operator answered "Always" for, as ``grant_key`` strings.
         #: Seeded from the store at startup and extended by ``grant``.
@@ -290,6 +293,7 @@ class PermissionGate:
         }
         self._grant_ttl = grant_ttl
         self._clock = clock
+        self._network_mode = str(network_mode or "deny")
         #: One-off "yes" answers (B).  Session-scoped and never persisted: they
         #: exist so the sandbox can honour the answer for the call it was given
         #: to, and they are not standing permissions.
@@ -521,6 +525,24 @@ class PermissionGate:
                 PermissionDecision.DENY,
                 denial.reason or f"denied by rule: {denial.action} {denial.resource}",
             )
+
+        # 3b. A bash call may ask for host networking for this one call.  It
+        # is an escalation only when the configured default is deny/proxy:
+        # `off` and `inherit` already provide host networking.  This sits
+        # before saved grants so an "Always" for bash can never bypass it.
+        if (
+            name == "bash"
+            and params.get("network_permissions") == "inherit"
+            and self._network_mode in ("deny", "proxy")
+        ):
+            justification = str(params.get("justification") or "").strip()
+            reason = (
+                "bash requests host network for this call "
+                "(network_permissions=inherit)"
+            )
+            if justification:
+                reason += f": {justification}"
+            return Decision(PermissionDecision.WARN, reason)
 
         # 4. A resource the operator already approved.  After the rules'
         #    refusals, so a standing grant can never reopen something that is
@@ -1115,6 +1137,14 @@ class PermissionGate:
             # a gate depend on the machine it runs on.  Production always
             # passes a workspace; a gate without one is session-only.
             rules=load_file_rules(workspace) if workspace is not None else NO_FILE_RULES,
+            network_mode=str(
+                getattr(
+                    getattr(getattr(app_cfg, "process_sandbox", None), "network", None),
+                    "mode",
+                    "deny",
+                )
+                or "deny"
+            ),
         )
 
 

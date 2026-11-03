@@ -247,3 +247,57 @@ async def test_the_gate_and_the_prompt_see_the_real_call_not_the_vessel():
 
     assert approval.asked == [("fs__write_file", {"server": "fs", "tool": "write_file"})]
     assert gate.grants == ()
+
+
+@pytest.mark.asyncio
+async def test_bash_network_escalation_goes_through_approval(tmp_path):
+    """The real dispatcher must ask, then run the call with the override."""
+    from ai_coding.security.process_sandbox import ProcessSandboxPolicy
+    from ai_coding.tools.bash_tool import BashTool
+
+    class _Backend:
+        name = "capture"
+        tier = "full"
+        network_mode = "deny"
+        networks: list[str | None] = []
+
+        def available(self) -> bool:
+            return True
+
+        def gap(self) -> str:
+            return ""
+
+        def wrap(self, argv, roots, *, network=None):  # noqa: ANN001
+            self.networks.append(network)
+            return list(argv)
+
+    backend = _Backend()
+    registry = ToolRegistry()
+    registry.register(
+        BashTool(
+            policy=ProcessSandboxPolicy(mode="enforce"),
+            backend=backend,
+            roots=[tmp_path],
+        )
+    )
+    gate = PermissionGate(network_mode="deny")
+    approval = _Recorder(ApprovalResult.YES)
+    dispatcher = ToolDispatcher(registry, gate, approval)
+
+    result, denied, halted = await _decide(
+        dispatcher,
+        _ref(
+            "c-net",
+            "bash",
+            command="printf ok",
+            network_permissions="inherit",
+            justification="local dev server",
+        ),
+    )
+
+    assert result.success is True
+    assert denied is False and halted is False
+    assert backend.networks == ["inherit"]
+    assert approval.asked
+    assert approval.asked[0][0] == "bash"
+    assert approval.asked[0][1]["network_permissions"] == "inherit"

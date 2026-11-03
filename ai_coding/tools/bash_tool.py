@@ -195,15 +195,25 @@ class BashTool(BaseTool):
             "command returns; use run_in_background=true and job_list/job_kill."
         )
 
-    def _foreground_child_note(self, command: str) -> str | None:
+    @staticmethod
+    def _requested_network(params: dict[str, Any]) -> str | None:
+        """The only per-call network request this tool accepts."""
+        value = params.get("network_permissions")
+        return "inherit" if value == "inherit" else None
+
+    def _effective_network(self, network: str | None = None) -> str:
+        return str(network or getattr(self._backend, "network_mode", "off") or "off")
+
+    def _foreground_child_note(
+        self, command: str, network_mode: str = "deny"
+    ) -> str | None:
         """Explain why a ``&``/``nohup`` child disappears with the command.
 
-        The bash command runs inside the process sandbox's PID namespace;
-        once the command returns, the namespace (and every child in it) is
-        gone.  The model otherwise starts a server, sees one successful health
-        check, then starts it again forever because the next check says
-        "Server not running".  ``run_in_background`` is the one path that
-        keeps the namespace alive.
+        The command runs inside the process sandbox's PID namespace; once the
+        command returns, that namespace and every child in it are gone.  Under
+        ``deny``/``proxy`` the network namespace is separate too, so a later
+        bash call cannot reach the port; under ``inherit`` the host network is
+        shared, but the PID namespace still ends.
         """
         backgrounded = bool(re.search(r"(?:^|[\s;])&(?=[\s;]|$)", command)) or (
             "nohup " in command
@@ -211,15 +221,27 @@ class BashTool(BaseTool):
         if not backgrounded:
             return None
         lines = [
-            "[lifecycle] 这条前台命令用了 &/nohup。sandbox 的 PID/net namespace ",
+            "[lifecycle] 这条前台命令用了 &/nohup。sandbox 的 PID namespace ",
             "在命令返回时结束，后台子进程会被一起回收；下一次 health 检查",
-            "会看到 Server not running。每个 bash 调用还有独立 netns，",
-            "所以即使把服务放进 run_in_background，下一次 curl 也看不到",
-            "这个 loopback 端口。",
-            "验证服务请把“启动 + sleep + curl”放在同一条命令里；",
-            "需要跨命令常驻服务，只能把 process_sandbox.network.mode 设为 ",
-            "\"off\"，或由用户在沙箱外启动。",
+            "会看到 Server not running。",
         ]
+        if network_mode in ("deny", "proxy"):
+            lines.extend(
+                [
+                    "每个 bash 调用还有独立 netns，所以即使把服务放进 ",
+                    "run_in_background，下一次 curl 也看不到这个 loopback 端口。",
+                    "验证服务请把“启动 + sleep + curl”放在同一条命令里；",
+                    "需要跨命令常驻服务，请让本次调用使用 network_permissions=",
+                    "\"inherit\"（需审批），或由用户在沙箱外启动。",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "需要跨命令常驻服务请用 run_in_background=true；",
+                    "inherit 模式下它共享宿主网络，后续 curl 和宿主浏览器可访问。",
+                ]
+            )
         if "pkill -f" in command:
             lines.append(
                 "pkill -f 的模式也会匹配当前 shell 的命令行，可能杀掉自己"
@@ -227,12 +249,15 @@ class BashTool(BaseTool):
             )
         return "\n".join(lines)
 
-    def _sandbox_network_note(self, output: str) -> str | None:
+    def _sandbox_network_note(
+        self, output: str, network_mode: str = "deny"
+    ) -> str | None:
         """Explain a DNS/connection failure when the sandbox owns the wall."""
-        mode = str(getattr(self._backend, "network_mode", "off") or "off")
-        if mode == "off" or not _NETWORK_FAILURE_RE.search(output):
+        if network_mode in ("inherit", "off"):
             return None
-        if mode == "proxy":
+        if not _NETWORK_FAILURE_RE.search(output):
+            return None
+        if network_mode == "proxy":
             detail = (
                 "network.mode=proxy 只放行 process_sandbox.network.allow "
                 "里的域名；先确认 pypi.org 和 files.pythonhosted.org 在 allow 中"
@@ -240,14 +265,13 @@ class BashTool(BaseTool):
         else:
             detail = (
                 "network.mode=deny 用 --unshare-net 切断了 DNS/TCP；"
-                "需要联网请把 process_sandbox.network.mode 设为 proxy "
-                "并在 allow 中加入 pypi.org、files.pythonhosted.org，"
-                "或设为 off"
+                "需要联网请让本次调用使用 network_permissions=\"inherit\""
+                "（需审批），或把 process_sandbox.network.mode 设为 proxy"
             )
         return (
             f"[sandbox] 这不是主机 DNS 故障：命令运行在 ai-coding 的 "
             f"process_sandbox 中（{detail}）。不要反复更换 PyPI 镜像重试；"
-            "请让用户在配置中放行网络，或由用户在沙箱外的终端执行安装。"
+            "请让用户批准网络，或由用户在沙箱外的终端执行安装。"
         )
 
     @property
@@ -275,13 +299,30 @@ class BashTool(BaseTool):
                         "reaped when that call returns, so it cannot keep a "
                         "server alive. A background job also has its own sandbox "
                         "netns, so later bash calls cannot reach its loopback "
-                        "port unless network.mode is off; for one verification "
+                        "port unless network.mode is inherit; for one verification "
                         "run server+sleep+curl in one foreground command. You "
                         "will be notified when it finishes; do not poll and do "
                         "not sleep waiting for it, and do not start a second "
                         "copy of a job that is already running. timeout_seconds "
                         "does not apply to a background command; job_list shows "
                         "what is running and job_kill stops it."
+                    ),
+                },
+                "network_permissions": {
+                    "type": "string",
+                    "enum": ["inherit"],
+                    "description": (
+                        "Request host network for this call only. Requires "
+                        "justification and approval when the session default "
+                        "is deny/proxy. It bypasses the network allowlist; it "
+                        "never widens file access."
+                    ),
+                },
+                "justification": {
+                    "type": "string",
+                    "description": (
+                        "One sentence explaining why this call needs host "
+                        "network. Required with network_permissions=inherit."
                     ),
                 },
                 "timeout_seconds": {
@@ -308,6 +349,33 @@ class BashTool(BaseTool):
         takes no claim), so the wider return type matches the base contract.
         """
         return ()
+
+    def precheck(self, params: dict[str, Any]) -> ToolResult | None:
+        """Validate the per-call network request before approval is spent."""
+        if "network_permissions" not in params:
+            return None
+        value = params.get("network_permissions")
+        if value != "inherit":
+            return ToolResult(
+                success=False,
+                output=(
+                    f"error: invalid network_permissions={value!r}; "
+                    "only \"inherit\" may be requested for one call"
+                ),
+                error="invalid_params",
+                data={"network_permissions": value},
+            )
+        if not str(params.get("justification") or "").strip():
+            return ToolResult(
+                success=False,
+                output=(
+                    "error: network_permissions=\"inherit\" requires a "
+                    "non-empty justification"
+                ),
+                error="invalid_params",
+                data={"network_permissions": value},
+            )
+        return None
 
     def _take_hold(self, ctx: ToolContext) -> tuple[Any | None, str | None]:
         """Take the job-lifetime hold; return ``(coordinator, token)``."""
@@ -364,12 +432,14 @@ class BashTool(BaseTool):
         coordinator, hold = self._take_hold(context)
         if coordinator is not None and hold is None:
             return self._hold_conflict(context)
+        network = self._requested_network(params)
         try:
             job = registry.start(
                 command,
                 cwd=context.workspace or ".",
                 session_id=context.session_id,
                 emit=context.emit,
+                network=network,
                 on_settle=(
                     (lambda: coordinator.release_hold(hold))
                     if coordinator is not None and hold is not None
@@ -395,7 +465,7 @@ class BashTool(BaseTool):
                 error=SANDBOX_UNAVAILABLE,
                 data={"reason": denied},
             )
-        network_mode = str(getattr(self._backend, "network_mode", "off") or "off")
+        network_mode = self._effective_network(network)
         output = (
             f"job {job.id} started in the background (pid {job.pid}). "
             f"You will be notified when it finishes -- do not poll and do "
@@ -403,14 +473,16 @@ class BashTool(BaseTool):
             f"Its output streams to: {job.log_path}"
         )
         data: dict[str, Any] = {"job_id": job.id, "pid": job.pid, "log": job.log_path}
-        if network_mode != "off":
+        if network_mode in ("deny", "proxy"):
             output += (
                 "\n\n[sandbox] 这个 job 仍在自己的 netns；其他 bash/job 调用"
-                "看不到它的 loopback 端口。要让后续调用访问这个服务，需要把 "
-                "process_sandbox.network.mode 设为 \"off\"，或在沙箱外启动。"
+                "看不到它的 loopback 端口。要让后续调用访问这个服务，请为这次 "
+                "调用使用 network_permissions=\"inherit\"（需审批），或由用户"
+                "在沙箱外启动。"
             )
-            data["sandbox_network"] = network_mode
             data["job_network_isolated"] = True
+        if network_mode not in ("off",):
+            data["sandbox_network"] = network_mode
         return ToolResult(success=True, output=output, data=data)
 
     async def _run_as_job(
@@ -419,6 +491,7 @@ class BashTool(BaseTool):
         effective: int,
         ctx: ToolContext | None,
         registry: Any,
+        network: str | None = None,
     ) -> ToolResult:
         """One command as one job, waited on for ``effective`` seconds.
 
@@ -451,6 +524,7 @@ class BashTool(BaseTool):
                 cwd=self._workspace_dir(ctx) or ".",
                 session_id=context.session_id,
                 emit=context.emit,
+                network=network,
                 # Silent while the caller is still waiting: the ToolResult carries
                 # the outcome.  Promotion turns it on, because from that moment the
                 # result has nobody but a notice to reach the model through.
@@ -497,7 +571,7 @@ class BashTool(BaseTool):
             # The result is in hand and the model's answer is about to be built;
             # a record of a command that already answered would be litter.
             registry.discard(job.id)
-            return self._settled_result(job, text, size, effective, duration, command)
+            return self._settled_result(job, text, size, effective, duration, command, network)
         # Promotion: the pump keeps reading, because the model may still be
         # watching this command in the UI when it finally ends.
         registry.announce(job.id, emit=context.emit)
@@ -528,6 +602,7 @@ class BashTool(BaseTool):
         effective: int,
         duration: float,
         command: str = "",
+        network: str | None = None,
     ) -> ToolResult:
         """Project a finished job into the ToolResult the model has always seen."""
         output = text
@@ -539,16 +614,15 @@ class BashTool(BaseTool):
             "duration_seconds": round(duration, 3),
             "timeout_seconds": effective,
         }
-        lifecycle = self._foreground_child_note(command)
+        mode = self._effective_network(network)
+        lifecycle = self._foreground_child_note(command, mode)
         if lifecycle is not None:
             output = f"{output}\n\n{lifecycle}" if output else lifecycle
             data["foreground_child_reaped"] = True
-        network_note = self._sandbox_network_note(output)
+        network_note = self._sandbox_network_note(output, mode)
         if network_note is not None:
             output = f"{output}\n\n{network_note}" if output else network_note
-            data["sandbox_network"] = str(
-                getattr(self._backend, "network_mode", "off") or "off"
-            )
+            data["sandbox_network"] = mode
             data["network_blocked"] = True
         if job.stop_reason:
             cancelled = "cancelled" in job.stop_reason or "停止" in job.stop_reason
@@ -582,6 +656,7 @@ class BashTool(BaseTool):
         if not command.strip():
             return ToolResult(success=False, output="error: empty command")
 
+        network = self._requested_network(params)
         # D-1: the same command without the waiting. Everything below this branch
         # is the foreground path, untouched.
         if params.get("run_in_background") is True:
@@ -618,7 +693,7 @@ class BashTool(BaseTool):
         # registry the tool is foreground-only").
         registry = getattr(resolve_ctx(ctx), "jobs", None)
         if registry is not None:
-            return await self._run_as_job(command, effective, ctx, registry)
+            return await self._run_as_job(command, effective, ctx, registry, network)
 
         # R8c: stream what the command says while it says it.  Chunks are
         # observation only - the ToolResult below is what the model ever sees.
@@ -648,6 +723,7 @@ class BashTool(BaseTool):
                 self._backend,
                 self._snapshot_roots(),
                 emit=lambda reason: emit_degraded(live.emit, "process_sandbox", reason),
+                network=network,
             )
         except SandboxGap as exc:
             return ToolResult(
@@ -683,7 +759,8 @@ class BashTool(BaseTool):
             )
 
         output = (outcome.stdout + outcome.stderr) if outcome.stderr else outcome.stdout
-        network_note = self._sandbox_network_note(output)
+        mode = self._effective_network(network)
+        network_note = self._sandbox_network_note(output, mode)
         if network_note is not None:
             output = f"{output}\n\n{network_note}" if output else network_note
         data: dict[str, Any] = {
@@ -696,9 +773,7 @@ class BashTool(BaseTool):
             "timeout_seconds": effective,
         }
         if network_note is not None:
-            data["sandbox_network"] = str(
-                getattr(self._backend, "network_mode", "off") or "off"
-            )
+            data["sandbox_network"] = mode
             data["network_blocked"] = True
 
         if outcome.timed_out:
@@ -739,7 +814,7 @@ class BashTool(BaseTool):
                 output, self._max_output, note=f"命令共输出 {len(output)} 字符"
             )
 
-        lifecycle = self._foreground_child_note(command)
+        lifecycle = self._foreground_child_note(command, mode)
         if lifecycle is not None:
             output = f"{output}\n\n{lifecycle}" if output else lifecycle
             data["foreground_child_reaped"] = True

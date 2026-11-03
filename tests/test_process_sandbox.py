@@ -1600,3 +1600,58 @@ def test_no_secret_names_means_no_extra_unsetenv():
 
     pairs = list(zip(argv, argv[1:], strict=False))
     assert ("--unsetenv", "DEEPSEEK_API_KEY") not in pairs
+
+
+def test_network_config_accepts_inherit_and_false_off_alias():
+    """``inherit`` is a new host-network mode; YAML's ``off`` -> False stays ``off``."""
+    from ai_coding.config.models import NetworkConfig
+
+    assert NetworkConfig(mode="inherit").mode == "inherit"
+    assert NetworkConfig(mode=False).mode == "off"
+    with pytest.raises(ValueError):
+        NetworkConfig(mode=True)
+
+
+def test_inherit_omits_unshare_net_proxy_and_env_cleanup(tmp_path):
+    """inherit means the host network: no netns, no proxy bridge, no proxy env scrub."""
+    backend = BwrapBackend(writable_paths=(), network=NetworkConfig(mode="inherit"))
+    argv = backend._build(["/bin/true"], [tmp_path], "full", "inherit")
+    assert "--unshare-net" not in argv
+    assert "sandbox_bridge" not in " ".join(argv)
+    assert not set(_PROXY_ENV_NAMES).issubset(_unset_names(argv))
+
+
+def test_off_keeps_the_old_proxy_env_cleanup(tmp_path):
+    """The old ``off`` mode is not silently redefined as inherit."""
+    backend = BwrapBackend(writable_paths=(), network=NetworkConfig(mode="off"))
+    argv = backend._build(["/bin/true"], [tmp_path], "full", "off")
+    assert "--unshare-net" not in argv
+    assert set(_PROXY_ENV_NAMES).issubset(_unset_names(argv))
+
+
+def test_spawn_argv_per_call_inherit_overrides_deny(tmp_path):
+    backend = BwrapBackend(writable_paths=(), network=NetworkConfig(mode="deny"))
+    policy = ProcessSandboxPolicy(mode="enforce")
+    argv = spawn_argv("true", policy, backend, [tmp_path], network="inherit")
+    assert "--unshare-net" not in argv
+
+
+def test_spawn_argv_legacy_two_arg_backend_still_works(tmp_path):
+    """No per-call network means the old protocol call; old test doubles stay valid."""
+    class _Legacy:
+        name = "legacy"
+        tier = "full"
+
+        def available(self) -> bool:
+            return True
+
+        def gap(self) -> str:
+            return ""
+
+        def wrap(self, argv, roots):  # noqa: ANN001
+            return list(argv)
+
+    argv = spawn_argv(
+        "true", ProcessSandboxPolicy(mode="enforce"), _Legacy(), [tmp_path]
+    )
+    assert argv[-3:] == ["-c", "true"] or argv[-2:] == ["-c", "true"]

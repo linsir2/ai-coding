@@ -238,7 +238,10 @@ process_sandbox:
   # M-D2 §C: the network wall.  A write/read wall without a network wall leaks:
   # what the sandbox reads can be sent straight out.
   #
-  #   off   = the host network (the pre-M-D2 behaviour)
+  #   inherit = the host network and the inherited proxy environment.  File/PID
+  #             isolation still applies; use this for local coding and dev servers.
+  #   off   = the historical host-network mode (also scrubs proxy env; deprecated
+  #           in favour of inherit)
   #   deny  = --unshare-net, loopback only.  **The default.**
   #   proxy = --unshare-net + one bound Unix socket + an in-sandbox bridge;
   #           the only TCP/UDP way out is the whitelisted HTTP/CONNECT proxy
@@ -246,8 +249,9 @@ process_sandbox:
   #           af_unix_deny_paths above).
   #
   # Cost: `deny` breaks `pip install`, `npm install`, `git clone` and
-  # `go mod download` -- much bigger than the write boundary's cost.  `proxy`
-  # is the exit: list the domains a build needs.  Empty `allow` denies
+  # `go mod download` -- much bigger than the write boundary's cost.  For a
+  # trusted local workspace, set `mode: inherit`; for package installs without
+  # opening the whole host network, `proxy` is the exit: list the domains a build needs.  Empty `allow` denies
   # everything, and "*" is rejected at load time (a wildcard is not a wall).
   # A bare domain allows only ports 80/443; use `domain:port` (or
   # `domain:80,443`) to allow another port, e.g. `github.com:22` for SSH.

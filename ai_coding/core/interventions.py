@@ -499,9 +499,10 @@ def _strategy_text(level: int, snap: TurnSnapshot) -> str:
             f"{STRATEGY_GATE_LEAD} 最近 {count} 轮的工具调用全部失败。不要重复同样的做法：",
             "1) 先读错误输出，说清直接原因，不要猜；",
             "2) 换手段或把目标切小（换工具、换路径、先写最小复现）；",
-            "3) 如果服务在命令返回后消失：前台命令里的 &/nohup 会被 sandbox 回收，"
-            "且每个 bash 调用有独立 netns（run_in_background 也不能跨调用访问 loopback）；"
-            "把启动+sleep+curl 放在同一条命令，或配置 network.mode=off；"
+            "3) 如果服务在命令返回后消失：前台命令里的 &/nohup 会被 sandbox 回收；"
+            "network.mode=deny/proxy 时每个 bash 还有独立 netns（run_in_background "
+            "也不能跨调用访问 loopback）；把启动+sleep+curl 放在同一条命令，或为本次调用请求 "
+            "network_permissions=inherit；"
             "pkill -f 可能杀掉当前 shell，改用 job_kill；",
             "4) 若确实缺信息或需要人拍板，用 ask_user 提问；没有人回答时就给出结论与假设后收尾。",
         ])

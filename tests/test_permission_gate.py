@@ -496,3 +496,96 @@ def test_merge_agent_verify_reuses_bash_warn():
         "merge_agent", {"target": "run-1", "verify_cmd": "pytest -q"}
     )
     assert d == PermissionDecision.WARN
+
+
+def test_bash_inherit_network_warns_when_default_is_deny():
+    gate = PermissionGate(network_mode="deny")
+    d = gate.check(
+        "bash",
+        {
+            "command": "npm install",
+            "network_permissions": "inherit",
+            "justification": "需要访问 npm registry",
+        },
+    )
+    assert d == PermissionDecision.WARN
+    assert "host network" in d.reason
+    assert "npm registry" in d.reason
+
+
+def test_bash_inherit_network_does_not_warn_when_default_is_inherit():
+    gate = PermissionGate(network_mode="inherit")
+    d = gate.check(
+        "bash",
+        {
+            "command": "npm install",
+            "network_permissions": "inherit",
+            "justification": "需要访问 npm registry",
+        },
+    )
+    assert d == PermissionDecision.WARN  # bash itself is still WARN
+    assert "host network" not in d.reason
+
+
+def test_bash_inherit_network_does_not_warn_when_default_is_off():
+    gate = PermissionGate(network_mode="off")
+    d = gate.check(
+        "bash",
+        {
+            "command": "npm install",
+            "network_permissions": "inherit",
+            "justification": "host network already available",
+        },
+    )
+    assert "host network" not in d.reason
+
+
+def test_a_denied_bash_still_wins_over_a_network_request():
+    gate = PermissionGate(network_mode="deny", denied_tools={"bash"})
+    d = gate.check(
+        "bash",
+        {
+            "command": "npm install",
+            "network_permissions": "inherit",
+            "justification": "需要访问 npm registry",
+        },
+    )
+    assert d == PermissionDecision.DENY
+    assert "denied by configuration" in d.reason
+
+
+def test_network_request_is_not_remembered_by_always():
+    gate = PermissionGate(network_mode="deny")
+    params = {
+        "command": "npm install",
+        "network_permissions": "inherit",
+        "justification": "需要访问 npm registry",
+    }
+    assert gate.grant_key("bash", params) is None
+
+
+def test_from_config_reads_the_workspace_network_default():
+    from ai_coding.config.models import (
+        AppConfig,
+        NetworkConfig,
+        ProcessSandboxConfig,
+    )
+
+    inherit = PermissionGate.from_config(
+        AppConfig(
+            process_sandbox=ProcessSandboxConfig(network=NetworkConfig(mode="inherit"))
+        )
+    )
+    deny = PermissionGate.from_config(
+        AppConfig(
+            process_sandbox=ProcessSandboxConfig(network=NetworkConfig(mode="deny"))
+        )
+    )
+
+    params = {
+        "command": "npm install",
+        "network_permissions": "inherit",
+        "justification": "需要访问 npm registry",
+    }
+    assert "host network" not in inherit.check("bash", params).reason
+    assert "host network" in deny.check("bash", params).reason

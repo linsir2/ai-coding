@@ -278,6 +278,7 @@ class JobRegistry:
         emit: Callable[[Any], None] | None = None,
         announce: bool = True,
         on_settle: Callable[[], None] | None = None,
+        network: str | None = None,
     ) -> Job:
         """Spawn ``command`` and return immediately; the caller does not wait.
 
@@ -305,8 +306,15 @@ class JobRegistry:
         )
         try:
             roots = self._roots() if callable(self._roots) else self._roots
+            # ``network`` is the approved per-call override ("inherit" only).
+            # None keeps the backend's configured default.
             argv = spawn_argv(
-                _bounded(command), self._policy, self._backend, roots, emit=degraded
+                _bounded(command),
+                self._policy,
+                self._backend,
+                roots,
+                emit=degraded,
+                **({"network": network} if network is not None else {}),
             )
         except SandboxGap as exc:
             job = Job(

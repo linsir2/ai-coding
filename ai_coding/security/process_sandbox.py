@@ -34,8 +34,10 @@ the **AF_UNIX** layer (``docs/plan-m-d2.md`` §B/§D):
   without the seccomp tier the "allow-list" is every pathname socket on the
   host minus the few masked ones -- path-level control is close to none.
 
-The network wall (M-D2 §C) lives here too: ``off`` / ``deny`` / ``proxy``.
-``deny`` is the default -- a read/write wall without a network wall leaks, since
+The network wall (M-D2 §C) lives on the backend: ``inherit`` / ``off`` /
+``deny`` / ``proxy``.  The policy no longer carries a second copy; a per-call
+``inherit`` override is the only exception.  ``deny`` is the default -- a
+read/write wall without a network wall leaks, since
 what the sandbox reads can be sent straight out.  ``proxy`` binds one Unix
 socket into the sandbox and puts a small bridge at ``argv[0]``; the bridge
 turns the socket into a loopback ``http://`` proxy URL, because no HTTP client
@@ -86,7 +88,6 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -267,10 +268,6 @@ class ProcessSandboxPolicy:
     #: Install a seccomp filter refusing ``socket(AF_UNIX)`` (all namespaces,
     #: including abstract).  Off by default: it breaks legitimate IPC.
     block_af_unix: bool = False
-    #: The network wall (M-D2 §C): ``off`` / ``deny`` / ``proxy``, default
-    #: ``deny``.  The mechanism reads the same object; the policy carries it so
-    #: the two layers describe one decision.
-    network: NetworkConfig = dataclass_field(default_factory=NetworkConfig)
 
 
 @dataclass(frozen=True)
@@ -318,8 +315,20 @@ class SandboxBackend(Protocol):
         """The **single** source of the reason code when ``available`` is false."""
         ...
 
-    def wrap(self, argv: Sequence[str], roots: Sequence[Path]) -> list[str] | None:
-        """The wrapped command; ``None`` means "nothing to wrap"."""
+    def wrap(
+        self,
+        argv: Sequence[str],
+        roots: Sequence[Path],
+        *,
+        network: str | None = None,
+    ) -> list[str] | None:
+        """The wrapped command; ``None`` means "nothing to wrap".
+
+        ``network`` is a per-call override.  ``None`` keeps the backend's
+        configured network; ``"inherit"`` drops only the network namespace and
+        its proxy plumbing.  The backend remains the one source for proxy
+        fields.
+        """
         ...
 
 
@@ -393,6 +402,7 @@ def spawn_argv(
     roots: Iterable[Path],
     *,
     emit: Callable[[str], None] | None = None,
+    network: str | None = None,
 ) -> list[str]:
     """A shell command as a directly spawnable argv (normalised + wrapped).
 
@@ -432,13 +442,21 @@ def spawn_argv(
     report = _tier_report(backend)
     if report is not None and emit is not None:
         emit(report)
-    network_report = _network_report(backend)
-    if network_report is not None and emit is not None:
-        emit(network_report)
+    effective_network = network or getattr(backend, "network_mode", "off")
+    if effective_network != "inherit":
+        network_report = _network_report(backend)
+        if network_report is not None and emit is not None:
+            emit(network_report)
     # Materialise the iterable once: the live roots source may be a generator
     # (``Sandbox.live_roots`` returns a tuple, but the contract is an iterable),
     # and ``wrap`` reads it exactly once.
-    wrapped = backend.wrap(argv, list(roots))
+    # Preserve the old protocol for legacy test doubles and stacks without a
+    # per-call override.  Only an explicit override needs the new keyword.
+    wrapped = (
+        backend.wrap(argv, list(roots))
+        if network is None
+        else backend.wrap(argv, list(roots), network=network)
+    )
     if wrapped is None:
         if policy.mode == "enforce":
             raise SandboxGap(SANDBOX_WRAP_GAP)
@@ -905,7 +923,13 @@ class BwrapBackend:
 
     # ---- construction ------------------------------------------------------
 
-    def wrap(self, argv: Sequence[str], roots: Sequence[Path]) -> list[str] | None:
+    def wrap(
+        self,
+        argv: Sequence[str],
+        roots: Sequence[Path],
+        *,
+        network: str | None = None,
+    ) -> list[str] | None:
         if self._cache is None:
             self._probe()
         if self._tier == "none":
@@ -913,9 +937,15 @@ class BwrapBackend:
             # "full" here is a fail-open: a caller that bypassed ``available()``
             # would get an argv that looks isolated but cannot run.
             return None
-        return self._build(argv, roots, self._tier)
+        return self._build(argv, roots, self._tier, network)
 
-    def _build(self, argv: Sequence[str], roots: Sequence[Path], tier: str) -> list[str]:
+    def _build(
+        self,
+        argv: Sequence[str],
+        roots: Sequence[Path],
+        tier: str,
+        network: str | None = None,
+    ) -> list[str]:
         flags = _TIER_FLAGS.get(tier)
         if flags is None:
             raise ValueError(f"unknown construction tier: {tier!r}")
@@ -935,7 +965,7 @@ class BwrapBackend:
             # EINVAL.  Rewind before every construction.
             os.lseek(self._seccomp_fd, 0, os.SEEK_SET)
             prefix += ["--seccomp", str(self._seccomp_fd)]
-        mode = self.network_mode
+        mode = network or self.network_mode
         if mode in ("deny", "proxy"):
             prefix += ["--unshare-net"]
         # Clean the inherited proxy environment in **every** mode (review P2-5):
@@ -943,8 +973,9 @@ class BwrapBackend:
         # use to bypass the bridge, and the ``deny`` tier used to inherit it
         # untouched.  Only ``proxy`` re-sets the correct values, and it does so
         # through the in-sandbox bridge's environment.
-        for name in _PROXY_ENV_NAMES:
-            prefix += ["--unsetenv", name]
+        if mode != "inherit":
+            for name in _PROXY_ENV_NAMES:
+                prefix += ["--unsetenv", name]
         # M-H2: the same mechanism, for the keys this run read out of the
         # environment.  Appended after the proxy names so the two lists cannot
         # shadow each other; a duplicate ``--unsetenv`` is harmless anyway.
@@ -1031,7 +1062,6 @@ def build_process_sandbox(
         read_deny_paths=read_deny,
         af_unix_deny_paths=af_unix_deny,
         block_af_unix=bool(cfg.block_af_unix),
-        network=network,
     )
     backend = BwrapBackend(
         writable_paths=writable,

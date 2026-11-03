@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from ai_coding.security.process_sandbox import ProcessSandboxPolicy
 from ai_coding.tools.base import ToolContext
 from ai_coding.tools.bash_tool import BashTool
 
@@ -602,7 +603,7 @@ async def test_bash_explains_that_a_foreground_ampersand_child_is_reaped(
 
     assert result.success is True
     assert "run_in_background" in result.output
-    assert "PID/net namespace" in result.output
+    assert "PID namespace" in result.output
     assert result.data is not None
     assert result.data["foreground_child_reaped"] is True
 
@@ -663,3 +664,152 @@ async def test_a_job_result_surfaces_the_sandbox_network_wall(tmp_path: Path):
     assert result.data is not None
     assert result.data["sandbox_network"] == "deny"
     assert result.data["network_blocked"] is True
+
+
+def test_bash_schema_exposes_the_network_escalation_pair():
+    schema = BashTool().params_json_schema
+    assert schema["properties"]["network_permissions"]["enum"] == ["inherit"]
+    assert "justification" in schema["properties"]
+
+
+def test_bash_precheck_rejects_bad_network_permissions(tmp_path: Path):
+    tool = BashTool()
+    result = tool.precheck(
+        {
+            "command": "true",
+            "network_permissions": "proxy",
+            "justification": "x",
+        }
+    )
+    assert result is not None
+    assert result.success is False
+    assert result.error == "invalid_params"
+
+
+def test_bash_precheck_requires_network_justification(tmp_path: Path):
+    tool = BashTool()
+    result = tool.precheck(
+        {"command": "true", "network_permissions": "inherit"}
+    )
+    assert result is not None
+    assert result.success is False
+    assert result.error == "invalid_params"
+    assert "justification" in result.output
+
+
+class _CapturingBackend:
+    name = "capture"
+    tier = "full"
+
+    def __init__(self, network_mode: str = "deny") -> None:
+        self.network_mode = network_mode
+        self.networks: list[str | None] = []
+
+    def available(self) -> bool:
+        return True
+
+    def gap(self) -> str:
+        return ""
+
+    def wrap(self, argv, roots, *, network=None):  # noqa: ANN001
+        self.networks.append(network)
+        return list(argv)
+
+
+@pytest.mark.asyncio
+async def test_bash_per_call_inherit_reaches_spawn_argv(tmp_path: Path):
+    backend = _CapturingBackend("deny")
+    tool = BashTool(
+        policy=ProcessSandboxPolicy(mode="enforce"),
+        backend=backend,
+        roots=[tmp_path],
+    )
+    result = await tool.execute(
+        {
+            "command": "printf ok",
+            "network_permissions": "inherit",
+            "justification": "local dev server",
+        },
+        ToolContext(workspace=str(tmp_path)),
+    )
+    assert result.success is True
+    assert backend.networks == ["inherit"]
+
+
+@pytest.mark.asyncio
+async def test_bash_inherit_does_not_claim_a_sandbox_network_failure(tmp_path: Path):
+    backend = _CapturingBackend("deny")
+    tool = BashTool(
+        policy=ProcessSandboxPolicy(mode="enforce"),
+        backend=backend,
+        roots=[tmp_path],
+    )
+    result = await tool.execute(
+        {
+            "command": "printf 'Failed to resolve pypi.org\\n'",
+            "network_permissions": "inherit",
+            "justification": "local install",
+        },
+        ToolContext(workspace=str(tmp_path)),
+    )
+    assert "不是主机 DNS 故障" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_background_job_inherit_does_not_claim_own_netns(tmp_path: Path):
+    from ai_coding.core.jobs import JobRegistry
+
+    backend = _CapturingBackend("deny")
+    policy = ProcessSandboxPolicy(mode="enforce")
+    tool = BashTool(policy=policy, backend=backend)
+    registry = JobRegistry(tmp_path / "jobs", policy=policy, backend=backend)
+    result = await tool.execute(
+        {
+            "command": "sleep 0.1",
+            "run_in_background": True,
+            "network_permissions": "inherit",
+            "justification": "local dev server",
+        },
+        ToolContext(workspace=str(tmp_path), jobs=registry),
+    )
+    assert result.success is True
+    assert "自己的 netns" not in result.output
+    assert backend.networks == ["inherit"]
+    assert result.data is not None
+    assert result.data["sandbox_network"] == "inherit"
+
+
+@pytest.mark.asyncio
+async def test_background_job_deny_still_reports_its_own_netns(tmp_path: Path):
+    from ai_coding.core.jobs import JobRegistry
+
+    backend = _CapturingBackend("deny")
+    tool = BashTool(policy=ProcessSandboxPolicy(mode="enforce"), backend=backend)
+    registry = JobRegistry(tmp_path / "jobs")
+    result = await tool.execute(
+        {"command": "sleep 0.1", "run_in_background": True},
+        ToolContext(workspace=str(tmp_path), jobs=registry),
+    )
+    assert result.success is True
+    assert "自己的 netns" in result.output
+
+
+@pytest.mark.asyncio
+async def test_settled_job_uses_per_call_network_for_the_note(tmp_path: Path):
+    from ai_coding.core.jobs import JobRegistry
+
+    backend = _CapturingBackend("deny")
+    tool = BashTool(policy=ProcessSandboxPolicy(mode="enforce"), backend=backend)
+    registry = JobRegistry(tmp_path / "jobs")
+    result = await tool.execute(
+        {
+            "command": "printf 'EAI_AGAIN registry.npmjs.org\\n'",
+            "network_permissions": "inherit",
+            "justification": "local install",
+        },
+        ToolContext(workspace=str(tmp_path), jobs=registry),
+    )
+    assert result.success is True
+    assert "不是主机 DNS 故障" not in result.output
+    assert result.data is not None
+    assert "sandbox_network" not in result.data

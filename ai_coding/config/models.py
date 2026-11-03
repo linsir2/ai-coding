@@ -164,7 +164,10 @@ class NetworkConfig(BaseModel):
 
     Three modes, deliberately not a boolean:
 
-    * ``off``   -- the host network, unchanged (the pre-M-D2 behaviour).
+    * ``inherit`` -- the host network, with the proxy environment left intact.
+      This is the local-development mode; file/PID isolation still applies.
+    * ``off``   -- the historical host-network mode; it also scrubs the proxy
+      environment, so it is not the same contract as ``inherit``.
     * ``deny``  -- ``--unshare-net``: a netns with only loopback.  **The default**:
       a write/read wall without a network wall leaks, because what the sandbox
       reads can be sent straight out.
@@ -195,10 +198,23 @@ class NetworkConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    mode: Literal["off", "deny", "proxy"] = "deny"
+    mode: Literal["inherit", "off", "deny", "proxy"] = "deny"
     proxy_socket: Path | None = None
     allow: list[str] = Field(default_factory=list)
     bridge_port: int = 0
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _normalize_yaml_off(cls, value: Any) -> Any:
+        """YAML 1.1 parses bare ``off`` as ``False``; keep the old mode name.
+
+        ``inherit`` is a separate mode on purpose: ``off`` still performs the
+        historical proxy-environment scrub, while ``inherit`` is a true host
+        network.  ``True`` is not guessed into a mode.
+        """
+        if value is False:
+            return "off"
+        return value
 
     @field_validator("allow")
     @classmethod
@@ -248,8 +264,8 @@ class ProcessSandboxConfig(BaseModel):
     ``socket(AF_UNIX)`` outright -- including the abstract namespace, which has
     no path to mask.
 
-    ``network`` is the network wall (M-D2 §C): ``off`` / ``deny`` / ``proxy``,
-    default ``deny``.  It lives here, under ``process_sandbox``, so the existing
+    ``network`` is the network wall (M-D2 §C): ``inherit`` / ``off`` / ``deny`` /
+    ``proxy``, default ``deny``.  It lives here, under ``process_sandbox``, so the existing
     ``EXECUTION_KEYS`` coverage also stops a project layer from opening it.
 
     The default is ``enforce``: roadmap's acceptance criterion is "a process
