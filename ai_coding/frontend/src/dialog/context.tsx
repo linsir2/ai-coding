@@ -9,7 +9,8 @@
  * The overlay is an absolute full-screen box with a translucent backdrop; the
  * frame picks a width preset and the raised surface.  Esc/ctrl+c are bound to
  * the host layer, enabled only while a dialog is open, so the base layer's
- * esc (interrupt) and ctrl+c (exit) stay quiet under a dialog.
+ * esc (interrupt) and ctrl+c (exit) stay quiet under a dialog.  Ctrl+C first
+ * copies a live selection; with none it closes the dialog, matching the app shell.
  */
 
 import { type CliRenderer, type Renderable } from "@opentui/core"
@@ -17,6 +18,7 @@ import { useBindings } from "@opentui/keymap/solid"
 import { useTerminalDimensions } from "@opentui/solid"
 import { Show, createContext, createSignal, useContext, type JSX } from "solid-js"
 import { theme } from "../theme/tokens"
+import { copyOrExit } from "../util/selection"
 
 export type DialogSize = "medium" | "large" | "xlarge"
 
@@ -73,10 +75,17 @@ export function DialogProvider(props: { renderer: CliRenderer; children: JSX.Ele
 
   useBindings(() => ({
     enabled: api.isOpen(),
-    commands: [{ name: "dialog.close", desc: "Close dialog", run: () => api.close() }],
+    commands: [
+      { name: "dialog.close", desc: "Close dialog", run: () => api.close() },
+      {
+        name: "dialog.copy-or-close",
+        desc: "Copy the current selection, or close the dialog",
+        run: () => void copyOrExit(props.renderer, api.close),
+      },
+    ],
     bindings: [
       { key: "escape", cmd: "dialog.close" },
-      { key: "ctrl+c", cmd: "dialog.close" },
+      { key: "ctrl+c", cmd: "dialog.copy-or-close" },
     ],
   }))
 

@@ -6,6 +6,7 @@ stays import-light and offline; the OpenTUI frontend drives it over IPC.
 
 from __future__ import annotations
 
+import json
 import shlex
 import time
 from enum import Enum
@@ -14,6 +15,7 @@ from typing import Any
 
 from ai_coding.app.console import ConsoleSink
 from ai_coding.app.slash import parse_slash, suggest_command
+from ai_coding.core.dispatch import _PLAN_TEXT_NAMES
 from ai_coding.core.plan_codex import extract_proposed_plan, strip_proposed_plan
 from ai_coding.domain.stance import PostureResult
 from ai_coding.skills.catalog import build_catalog
@@ -538,6 +540,7 @@ async def _handle_plan(
         # arm that is running is not touched either -- a command that lands
         # while a turn is busy is queued (the posture flip above), and by the
         # time it lands the runner has already disarmed on its way out.
+        session.approved_plan = ""
         task = getattr(session, "task", None)
         gave_up = False
         if (
@@ -699,6 +702,13 @@ async def run_human_turn(
         session, text, on_delta=on_delta, observer=observer,
         **({"images": images} if images else {}),
     )
+    # The measured loop: a model can turn the plan text into a tool call.  When
+    # that tool call carries the plan body, the body is already the plan the
+    # human wants to see; asking the model to "write it as text" a third time
+    # is not progress.
+    plan_tool = _plan_from_unknown_tool(session)
+    if plan_tool and not extract_proposed_plan(answer):
+        answer = plan_tool
     ran = await _maybe_offer_plan_implementation(
         loop,
         session,
@@ -714,6 +724,54 @@ async def run_human_turn(
     # the plan text already streamed; printing it again would land after
     # the execution output.
     return "" if ran else strip_proposed_plan(answer)
+
+
+def plan_for_review(answer: Any) -> str:
+    """The plan body to show, tolerating an empty-but-present plan block.
+
+    A measured qwen turn put the whole plan in the assistant prose and emitted
+    ``<proposed_plan></proposed_plan>`` as an empty tag.  Treating that as
+    "there was no plan" closed the turn silently: no review card, no question,
+    nothing for the human to do.  When the block is empty, the prose around it
+    is the only plan the model actually produced, so review that instead.
+    """
+    text = str(answer or "")
+    plan = extract_proposed_plan(text)
+    if plan:
+        return plan
+    if "<proposed_plan>" in text:
+        return strip_proposed_plan(text)
+    return ""
+
+
+def _plan_from_unknown_tool(session: Any) -> str:
+    """The plan body a nonexistent plan-text tool was given, if any.
+
+    It is *the same body the human wanted to see*: the dispatcher's refusal
+    named the real shape (``<proposed_plan>`` text), so after that refusal
+    the body can be shown once instead of being re-derived from tool calls.
+    Only the last such call in the turn matters: a retry is the correction.
+    """
+    if str(getattr(session, "mode", "normal") or "normal") != "plan":
+        return ""
+    for message in reversed(getattr(session, "messages", ()) or ()):
+        # Only this turn may be salvaged: an old failed plan-tool call must not
+        # be resurrected by a later "continue" with no plan of its own.
+        if message.role == "user" and not getattr(message, "synthetic", False):
+            break
+        if message.role != "assistant":
+            continue
+        for call in reversed(getattr(message, "tool_calls", None) or ()):
+            if str(getattr(call, "name", "")) not in _PLAN_TEXT_NAMES:
+                continue
+            try:
+                args = json.loads(call.arguments or "{}")
+            except (json.JSONDecodeError, TypeError, ValueError):
+                args = {}
+            plan = str(args.get("plan", "") or "").strip()
+            if plan:
+                return plan
+    return ""
 
 
 async def _maybe_offer_plan_implementation(
@@ -734,7 +792,7 @@ async def _maybe_offer_plan_implementation(
     mode.  No plan block, or no human to ask, changes nothing.  Returns True
     when the implementation turn ran.
     """
-    plan = extract_proposed_plan(answer)
+    plan = plan_for_review(answer)
     if not plan or user_prompt is None:
         return False
     ans = await user_prompt.ask(
@@ -746,6 +804,9 @@ async def _maybe_offer_plan_implementation(
     )
     if not (ans.answered and str(ans.text).strip().lower().startswith("yes")):
         return False
+    # Keep the approved plan as recent context; it is not the goal and does not
+    # decide whether a later user message continues it.
+    session.approved_plan = plan
     # C-3/R11: execution is build work -- write the posture through now, not
     # in a ``finally`` after the run (a queued flip would let the turn start
     # as plan/readonly).

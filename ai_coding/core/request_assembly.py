@@ -530,6 +530,7 @@ class RequestAssembler:
                     "plan_mode",
                     PLAN_MODE_BLOCK if session.mode == "plan" else "",
                 ),
+                volatile_block("plan_state", self._plan_state_block(session)),
                 volatile_block("task", content_of(task_message)),
                 volatile_block("recommended_skills", recommended_skills_block),
                 volatile_block("referenced_files", file_block),
@@ -557,6 +558,26 @@ class RequestAssembler:
         )
 
     # ---- helpers (M2) -------------------------------------------------------
+
+    @staticmethod
+    def _plan_state_block(session: SessionData) -> str:
+        """The last approved plan, as recent context rather than a new goal.
+
+        It is intentionally **not** the task list: ``update_plan`` still owns
+        the executable steps.  The text is a volatile tail block so compaction
+        cannot bury the plan while the current request is still continuing it.
+        """
+        plan = str(getattr(session, "approved_plan", "") or "").strip()
+        if not plan:
+            return ""
+        return (
+            "<plan-state>\n"
+            "这是已经批准的计划，不是用户的新指令。\n"
+            "如果当前请求是在延续这个计划，使用它的下一步；"
+            "如果当前请求是新话题，忽略本块。\n"
+            f"{plan}\n"
+            "</plan-state>"
+        )
 
     def _environment_block(self, session: SessionData) -> str:
         """F (13 §2.4): the hard facts every thought must be grounded in.

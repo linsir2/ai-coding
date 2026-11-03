@@ -463,3 +463,44 @@ def test_a_token_account_alone_keeps_the_task_in_the_file():
 
     session.task.tokens_used = 0
     assert "task" not in session.to_dict()  # still noise without any state
+
+
+def test_approved_plan_round_trips_and_begin_plan_clears_it():
+    s = SessionData("s1", "t", "c", "l")
+    s.approved_plan = "<plan body>"
+    restored = SessionData.from_dict(s.to_dict())
+    assert restored.approved_plan == "<plan body>"
+
+    s.begin_plan("new")
+    assert s.approved_plan == ""
+    assert s.to_dict()["approvedPlan"] == ""
+
+
+def test_approved_plan_is_backfilled_from_the_plan_that_ran():
+    s = SessionData.from_dict({
+        "sessionId": "s",
+        "title": "",
+        "createdTime": "t",
+        "lastAccessTime": "t",
+        "messages": [
+            {"role": "assistant", "content": "<proposed_plan>first body</proposed_plan>"},
+            {"role": "assistant", "content": "<proposed_plan>latest body</proposed_plan>"},
+            {"role": "user", "content": "Implement the plan."},
+        ],
+    })
+    assert s.approved_plan == "latest body"
+
+
+def test_approved_plan_backfill_ignores_a_plan_that_never_ran():
+    s = SessionData.from_dict({
+        "sessionId": "s",
+        "title": "",
+        "createdTime": "t",
+        "lastAccessTime": "t",
+        "messages": [
+            {"role": "user", "content": "make a plan"},
+            {"role": "assistant", "content": "<proposed_plan>never ran</proposed_plan>"},
+            {"role": "user", "content": "No, do something else"},
+        ],
+    })
+    assert s.approved_plan == ""

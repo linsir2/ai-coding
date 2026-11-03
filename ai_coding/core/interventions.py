@@ -157,6 +157,10 @@ def _triggered(gate: str, snap: TurnSnapshot, limits: LadderLimits) -> bool:
     if gate == STRATEGY:
         return _strategy_triggered(snap, limits)
     if gate == SEARCH:
+        # A repeated successful result is no-progress regardless of whether the
+        # tool was classified as retrieval or action.
+        if snap.repeat_streak >= 1:
+            return True
         # A planning or read-only posture is *supposed* to be look-only: nagging it
         # to "stop looking" would be wrong every single time, so the gate is off
         # there.  Measured: plan/readonly turns reached L1 and L2 within 8 reads.
@@ -241,6 +245,7 @@ def _ref_for(gate: str, snap: TurnSnapshot) -> dict[str, Any]:
             "stale": int(snap.stale_streak),
             "novel": int(snap.novel_findings),
             "repeated": int(snap.repeated_nonempty),
+            "repeat": int(snap.repeat_streak),
         }
     if gate == FATIGUE:
         return {"asks": int(snap.ask_user_calls), "fatigue": float(snap.fatigue_index)}
@@ -315,6 +320,12 @@ def _search_due(
         and snap.repeated_nonempty >= 2
     ):
         return (L3, "finish")
+    if snap.repeat_streak >= 1:
+        if entry is None:
+            return (L1, "nudge")
+        ref: Mapping[str, Any] = entry.get("ref") or {}
+        if snap.repeat_streak >= int(ref.get("repeat", 0) or 0) + 2:
+            return (L1, "nudge")
     threshold = limits.search_streak_threshold
     if not threshold:
         return None
@@ -337,7 +348,7 @@ def _search_due(
         return (level, "nudge")
     if level > int(entry.get("level", 0) or 0):
         return (level, "nudge")
-    ref: Mapping[str, Any] = entry.get("ref") or {}
+    ref = entry.get("ref") or {}
     if snap.search_streak >= int(ref.get("streak", 0) or 0) + threshold:
         return (level, "nudge")
     # The stale stream grows independently of the streak (different params, same
@@ -525,6 +536,14 @@ def _search_text(level: int, snap: TurnSnapshot) -> str:
     apart -- a legitimate survey and a model guessing the same wrong symbol --
     because a nudge that only fits one of them is noise half the time.
     """
+    if snap.repeat_streak >= 1:
+        count = snap.repeat_streak + 1
+        return "\n".join([
+            f"{SEARCH_GATE_LEAD} 最近 {count} 次成功工具调用的输出完全相同，"
+            "工作区状态没有变化。",
+            "不要继续重复检查。请从已批准计划或当前用户请求推断下一步；",
+            "如果目标不明确，用 ask_user 提问，而不是再跑一次相同的检查。",
+        ])
     streak = max(1, snap.search_streak)
     calls = max(streak, snap.search_calls)
     # Which rung fired decides what the text may claim.  The count rung fires on

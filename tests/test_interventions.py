@@ -525,3 +525,46 @@ def test_the_hard_stop_is_independent_of_the_count_switch():
         limits=limits,
     )
     assert (d.gate, d.level, d.kind) == ("search", 3, "finish")
+
+
+# ---- C-3 follow-up: repeated successful output is a no-progress signal -------
+
+
+def test_repeat_streak_fires_search_l1_without_a_retrieval_streak():
+    d = iv.select(
+        _snap(repeat_streak=2), phase=iv.PRE, limits=LIMITS
+    )
+    assert (d.gate, d.level, d.kind) == ("search", 1, "nudge")
+    assert "输出完全相同" in d.text
+
+
+def test_repeat_streak_nudge_is_not_a_finish():
+    decision = iv.select(_snap(repeat_streak=5), phase=iv.PRE, limits=LIMITS)
+    assert decision is not None
+    assert decision.kind == "nudge"
+
+
+def test_repeat_streak_refires_only_after_two_more_identical_results():
+    first = iv.select(_snap(repeat_streak=2), phase=iv.PRE, limits=LIMITS)
+    assert first is not None
+    ledger = _fired("search", 1, ref={"repeat": 2})
+
+    quiet = iv.select(
+        _snap(repeat_streak=3, intervention_ledger=ledger),
+        phase=iv.PRE,
+        limits=LIMITS,
+    )
+    assert quiet is None
+
+    again = iv.select(
+        _snap(repeat_streak=4, intervention_ledger=ledger),
+        phase=iv.PRE,
+        limits=LIMITS,
+    )
+    assert (again.gate, again.level, again.kind) == ("search", 1, "nudge")
+
+
+def test_one_repeated_successful_output_is_enough_to_ask_for_a_new_step():
+    d = iv.select(_snap(repeat_streak=1), phase=iv.PRE, limits=LIMITS)
+    assert (d.gate, d.level, d.kind) == ("search", 1, "nudge")
+    assert "输出完全相同" in d.text

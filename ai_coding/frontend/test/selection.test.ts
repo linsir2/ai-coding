@@ -136,3 +136,15 @@ describe("app key bindings", () => {
     expect(source).toContain('{ key: "<leader>q", cmd: "app.exit" }')
   })
 })
+
+describe("dialog key bindings", () => {
+  const source = readFileSync(
+    fileURLToPath(new URL("../src/dialog/context.tsx", import.meta.url)),
+    "utf8",
+  )
+
+  test("ctrl+c copies a dialog selection before closing", () => {
+    expect(source).toContain('{ key: "ctrl+c", cmd: "dialog.copy-or-close" }')
+    expect(source).toContain("copyOrExit(props.renderer, api.close)")
+  })
+})

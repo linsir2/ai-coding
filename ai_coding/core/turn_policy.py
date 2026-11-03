@@ -191,6 +191,10 @@ class TurnSnapshot:
     stale_streak: int = 0
     repeated_nonempty: int = 0
     novel_findings: int = 0
+    #: Successful workspace calls whose output was already seen this turn after
+    #: line normalisation.  The repeats need not be adjacent; this is the
+    #: tool-agnostic no-progress signal.
+    repeat_streak: int = 0
     #: 18 §10.5: the two posture axes, read off the session by the loop.  They
     #: ride the snapshot so the decision stays pure; the defaults keep every
     #: pre-posture construction (and test) byte-identical.

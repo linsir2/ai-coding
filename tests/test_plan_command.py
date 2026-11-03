@@ -9,6 +9,8 @@ conversational agreement approves nothing, and execution is an explicit
 command.
 """
 
+import json
+
 import pytest
 from rich.console import Console
 
@@ -549,3 +551,87 @@ async def test_plan_off_stays_available_while_a_goal_is_armed():
     assert sessions.saved == [session]
     assert session.task.armed is True and session.task.armed_profile == "goal"
     assert "本就不在计划模式" in c.export_text()
+
+
+@pytest.mark.asyncio
+async def test_plan_off_drops_the_approved_plan_context():
+    loop = _Loop()
+    sessions = _Sessions()
+    session = _session()
+    session.agent, session.readonly = "plan", True
+    session.approved_plan = "## approved"
+
+    await handle_input(loop, "/plan off", session, sessions, _console()[0])
+
+    assert session.approved_plan == ""
+
+
+def _with_plan_tool(session: SessionData, plan: str) -> SessionData:
+    """An assistant that supplied its plan through a nonexistent tool call."""
+    from ai_coding.domain.message import ChatMessage, ToolCallRef
+
+    session.messages = [
+        ChatMessage(
+            role="assistant",
+            content="",
+            timestamp="t",
+            tool_calls=[
+                ToolCallRef(
+                    id="c1",
+                    name="proposed_plan",
+                    arguments=json.dumps({"plan": plan}),
+                ),
+            ],
+        ),
+    ]
+    return session
+
+
+def test_an_unknown_plan_tool_is_salvaged_as_plan_body():
+    """Once the body has landed in a tool call, show it once and stop."""
+    from ai_coding.app.commands import _plan_from_unknown_tool
+
+    session = _session()
+    session.agent, session.readonly = "plan", True
+    _with_plan_tool(session, "## Plan\\n1. build frontend")
+    assert _plan_from_unknown_tool(session) == "## Plan\\n1. build frontend"
+
+
+def test_an_unknown_plan_tool_outside_plan_mode_is_not_salvaged():
+    from ai_coding.app.commands import _plan_from_unknown_tool
+
+    session = _session()
+    _with_plan_tool(session, "## Plan")
+    assert _plan_from_unknown_tool(session) == ""
+
+
+def test_a_previous_turns_unknown_plan_tool_is_not_resurrected():
+    from ai_coding.app.commands import _plan_from_unknown_tool
+    from ai_coding.domain.message import ChatMessage, ToolCallRef
+
+    session = _session()
+    session.agent, session.readonly = "plan", True
+    session.messages = [
+        ChatMessage(role="user", content="old topic", timestamp="t"),
+        ChatMessage(
+            role="assistant",
+            content="",
+            timestamp="t",
+            tool_calls=[
+                ToolCallRef(
+                    id="old",
+                    name="proposed_plan",
+                    arguments=json.dumps({"plan": "## old plan"}),
+                ),
+            ],
+        ),
+        ChatMessage(role="user", content="new topic", timestamp="t"),
+    ]
+    assert _plan_from_unknown_tool(session) == ""
+
+
+def test_an_empty_plan_block_still_has_a_plan_to_review():
+    from ai_coding.app.commands import plan_for_review
+
+    answer = "## 前端实施计划\n\n1. 初始化 Vite\n\n<proposed_plan></proposed_plan>"
+    assert plan_for_review(answer) == "## 前端实施计划\n\n1. 初始化 Vite"

@@ -230,6 +230,45 @@ class StagedUndo:
     digests: tuple[TurnDigest, ...] = ()
 
 
+def _plan_body(text: str) -> str | None:
+    """The first ``<proposed_plan>`` body in one historical message."""
+    start = (text or "").find("<proposed_plan>")
+    if start < 0:
+        return None
+    body_start = start + len("<proposed_plan>")
+    end = text.find("</proposed_plan>", body_start)
+    body = text[body_start:None if end < 0 else end].strip()
+    if body.endswith("```"):
+        body = body[:-3].rstrip()
+    return body
+
+
+def _approved_plan_from_history(messages: Sequence[ChatMessage]) -> str:
+    """Recover the plan that an old session already approved.
+
+    Sessions written before ``approvedPlan`` existed still carry the two
+    reliable facts: the ``<proposed_plan>`` block and the synthetic
+    ``Implement the plan.`` turn that followed it.  Pair the latter with the
+    latest plan proposed before it; later unapproved plans must not overwrite
+    an executed one.
+    """
+    candidate = ""
+    executed = ""
+    for message in messages:
+        content = message.content or ""
+        if message.role == "assistant":
+            plan = _plan_body(content)
+            if plan:
+                candidate = plan
+        elif (
+            message.role == "user"
+            and (content or "").strip().startswith("Implement the plan.")
+            and candidate
+        ):
+            executed = candidate
+    return executed
+
+
 @dataclass
 class SessionData:
     """A persisted conversation session."""
@@ -240,6 +279,11 @@ class SessionData:
     last_access_time: str
     messages: list[ChatMessage] = field(default_factory=list)
     task: TaskState | None = None  # todo owner is the owning agent session; no is_subagent field.
+    #: C-3 follow-up: the last plan the human approved.  This is context, not a
+    #: goal and not a second task list: ``update_plan`` still owns the task
+    #: items.  Persisted so a reload/compaction cannot bury the plan that the
+    #: current request may be continuing.
+    approved_plan: str = ""
     # R3b: how many messages have already been harvested into memory.  The cursor
     # lives in the session (not in the loop) because the CLI builds a fresh loop
     # for every turn, while the session is reloaded each time.
@@ -481,6 +525,8 @@ class SessionData:
         and forget the other.
         """
         self.task = TaskState(goal=goal)
+        # A new plan must not inherit the previous approved plan.
+        self.approved_plan = ""
         # 13 §2.1 (Q2 拍板): a new plan starts on a clean ladder.
         self.intervention_state = None
         return self.task
@@ -668,6 +714,10 @@ class SessionData:
             or self.task.tokens_used
         ):
             data["task"] = self.task.to_dict()
+        # Always carry the key so a later version or human /plan off can express
+        # "explicitly cleared" as distinct from a legacy file with no field at
+        # all (``from_dict`` only backfills the latter).
+        data["approvedPlan"] = self.approved_plan
         if self.harvested_messages:
             data["harvestedMessages"] = self.harvested_messages
         # Same rule as `task`: an empty ring is not worth a key in every file.
@@ -812,6 +862,9 @@ class SessionData:
             last_access_time=data.get("lastAccessTime", ""),
             messages=messages,
             task=TaskState.from_dict(raw_task) if isinstance(raw_task, dict) else None,
+            approved_plan=_approved_plan_from_history(messages)
+            if data.get("approvedPlan") is None
+            else str(data.get("approvedPlan") or ""),
             harvested_messages=int(data.get("harvestedMessages", 0) or 0),
             turn_count=int(data.get("turnCount", 0) or 0),
             turn_digests=digests,

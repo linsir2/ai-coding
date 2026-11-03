@@ -137,6 +137,16 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 
+def _output_digest(output: str) -> str:
+    """A content fingerprint that ignores line order.
+
+    ``find | sort`` and a plain ``find`` can describe the same tree; comparing
+    raw bytes would call the second one "new evidence" and miss the loop.
+    """
+    lines = sorted(line for line in (output or "").splitlines())
+    return _digest("\n".join(lines))
+
+
 def _target(params: Mapping[str, Any]) -> str:
     """The root a search was aimed at -- so two empty results are different keys."""
     return str(params.get("path") or params.get("pattern") or "")
@@ -263,6 +273,16 @@ class TurnBooks:
     #: learning anything" (docs/plan-m-b.md section 3).
     search_streak: int = 0
     search_calls: int = 0
+    #: The last successful tool output's fingerprint and the number of
+    #: consecutive successful calls that repeated it.  Unlike ``search_streak``
+    #: this is not a retrieval-only measure: a successful ``find`` through bash
+    #: is still a call that produced no new information.
+    last_success_digest: str | None = None
+    repeat_streak: int = 0
+    #: Output digests already seen from successful workspace calls.  Keeping
+    #: the set (not only the last one) is what catches a loop that alternates
+    #: between several checks instead of issuing the same exact call.
+    seen_success_outputs: set[str] = field(default_factory=set)
     #: I1/R-7: normalised evidence fingerprints already seen this turn (finding
     #: keys, not raw outputs -- see ``_finding_key``), and the accounting built
     #: on it: consecutive retrievals whose evidence was already seen, the
@@ -371,6 +391,9 @@ class TurnBooks:
         """
         self.steering_messages += max(0, int(count))
         self.failed_streak = 0
+        self.last_success_digest = None
+        self.repeat_streak = 0
+        self.seen_success_outputs.clear()
         # I1/R-7: the user changed the task, so what we saw may be irrelevant.
         self._clear_findings()
 
@@ -433,6 +456,27 @@ class TurnBooks:
                 # The world may have moved: what we saw before is not evidence
                 # about it any more.  A *failed* action changes nothing.
                 self._clear_findings()
+        # A successful workspace call whose output has already been seen this
+        # turn yielded no new information.  The repeats need not be adjacent:
+        # the measured loop alternates ``find``/``ls``/``wc`` variants, and a
+        # strict "same as the previous call" rule never sees the loop.
+        # Retrieval already has its own evidence counters (``search_streak`` /
+        # ``stale_streak``); this tool-agnostic signal is for action tools,
+        # where a command (``find`` through bash) can succeed without changing
+        # anything.  Keeping reads out avoids double-arming SEARCH for the
+        # ordinary "read two files with identical bodies" turn.
+        action_calls = [
+            item for item in succeeded if item.call.name in ACTION_TOOLS
+        ]
+        if action_calls:
+            last = action_calls[-1]
+            digest = _output_digest(last.result.output or "")
+            if digest in self.seen_success_outputs:
+                self.repeat_streak += 1
+            else:
+                self.seen_success_outputs.add(digest)
+                self.repeat_streak = 0
+                self.last_success_digest = digest
         # 13 §2.1: the ladder's ask helped-signal counts only what actually
         # reached the user (a denied call never did).
         self.ask_user_calls += sum(
@@ -549,4 +593,5 @@ class TurnBooks:
             stale_streak=self.stale_streak,
             repeated_nonempty=self.repeated_nonempty,
             novel_findings=self.novel_findings,
+            repeat_streak=self.repeat_streak,
         )

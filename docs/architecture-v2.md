@@ -167,7 +167,7 @@ domain ← config/infra ← security/tools/ai ← core ← service/memory/skills
         ├─ assembler.assemble(压缩+instructions+volatile tail)
         │   ├─ compactor.compress(4层: L1 snip/L2 elide/L3 persist/L4 summarize)
         │   ├─ instructions(项目指令+skill目录)
-        │   └─ volatile tail(memory→mcp_catalog→task→skills→hook→digest→budget)
+        │   └─ volatile tail(memory→mcp_catalog→plan_state→task→skills→hook→digest→budget)
         ├─ _model_step(engine.step) → assistant落history
         │   ├─ 无工具 → decide_after_step → FINISH or nudge+checkpoint
         │   └─ 有工具 → _run_tools(dispatch_batch→gate→审批→执行)

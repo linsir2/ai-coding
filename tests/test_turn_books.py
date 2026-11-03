@@ -482,3 +482,74 @@ def test_an_action_effort_clears_the_evidence():
     assert books.stale_streak == 1
 
 
+
+
+# ---- C-3 follow-up: repeated successful output is no progress -----------------
+
+
+def test_identical_successful_outputs_build_a_repeat_streak():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", output="a.txt\nb.txt")])
+    assert books.repeat_streak == 0
+    books.note_outcomes([_outcome("bash", output="b.txt\na.txt")])
+    assert books.repeat_streak == 1
+    books.note_outcomes([_outcome("bash", output="a.txt\nb.txt")])
+    assert books.repeat_streak == 2
+
+
+def test_a_different_successful_output_resets_the_repeat_streak():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", output="same")])
+    books.note_outcomes([_outcome("bash", output="same")])
+    books.note_outcomes([_outcome("bash", output="new")])
+    assert books.repeat_streak == 0
+    assert books.last_success_digest is not None
+
+
+def test_failed_calls_do_not_change_the_repeat_streak():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", output="same")])
+    books.note_outcomes([_outcome("bash", output="same")])
+    books.note_outcomes([_outcome("bash", success=False, output="boom")])
+    assert books.repeat_streak == 1
+
+
+def test_steering_resets_the_repeat_streak():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", output="same")])
+    books.note_outcomes([_outcome("bash", output="same")])
+    books.note_steering()
+    assert books.repeat_streak == 0
+    assert books.last_success_digest is None
+
+
+def test_snapshot_carries_the_repeat_streak():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", output="same")])
+    books.note_outcomes([_outcome("bash", output="same")])
+    assert books.snapshot(iteration=1, tokens_spent=0).repeat_streak == 1
+
+
+def test_state_only_tools_do_not_build_the_repeat_streak():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("todo_write", output="same")])
+    books.note_outcomes([_outcome("todo_write", output="same")])
+    assert books.repeat_streak == 0
+
+
+def test_a_repeated_earlier_output_counts_again_after_an_intermediate_new_output():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", output="find output")])
+    books.note_outcomes([_outcome("bash", output="ls output")])
+    books.note_outcomes([_outcome("bash", output="ls output")])
+    books.note_outcomes([_outcome("bash", output="find output")])
+    assert books.repeat_streak == 2
+
+
+def test_steering_forgets_success_outputs_seen_before_the_new_task():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", output="old same")])
+    books.note_outcomes([_outcome("bash", output="old same")])
+    books.note_steering()
+    books.note_outcomes([_outcome("bash", output="old same")])
+    assert books.repeat_streak == 0

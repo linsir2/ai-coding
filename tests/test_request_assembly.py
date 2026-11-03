@@ -457,3 +457,32 @@ async def test_the_budget_block_reads_the_provider_not_the_construction_snapshot
     budget = [m for m in assembled.request if (m.content or "").startswith("[budget]")]
     assert len(budget) == 1
     assert "9/10" in budget[0].content
+
+
+async def test_an_approved_plan_rides_the_tail_as_plan_state():
+    assembler, parts = _assembler()
+    session = _session([_digest()])
+    session.approved_plan = "## Plan\n1. build frontend"
+
+    assembled = await _assemble(assembler, session=session)
+
+    bodies = "\n".join(message.content or "" for message in assembled.request)
+    assert "<plan-state>" in bodies
+    assert "## Plan\n1. build frontend" in bodies
+    names = [name for name, _size in parts["reporter"].calls[-1]["tail_blocks"]]
+    assert "plan_state" in names
+
+
+async def test_plan_state_appears_during_plan_implementing_without_task_state():
+    assembler, _parts = _assembler()
+    session = _session([_digest()])
+    session.agent = "build"
+    session.plan_implementing = True
+    session.approved_plan = "## Plan\n1. build frontend"
+
+    assembled = await _assemble(assembler, session=session)
+
+    bodies = "\n".join(message.content or "" for message in assembled.request)
+    assert "<plan-state>" in bodies
+    assert "## Plan\n1. build frontend" in bodies
+    assert "<task-state>" not in bodies

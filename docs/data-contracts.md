@@ -190,6 +190,7 @@ R1 新增/变更的契约集中在四处。
 | 字段 | 说明 |
 |---|---|
 | `task: TaskState \| None` | **有 todo 项时才写入 JSON**（只有 goal 是可从首条 user 消息还原的噪声） |
+| `approved_plan: str = ""` | 人类最近一次批准的 `<proposed_plan>` 正文；会话 JSON 始终落盘键 `approvedPlan`（空串表示显式清空）。它是**上下文**，不是 goal，也不是第二份 todo 清单；`/plan off` 与 `begin_plan` 清空；旧会话落盘前没有 `approvedPlan` 时，`from_dict` 会从历史里恢复"最后一块 `<proposed_plan>` + 后续 `Implement the plan.`"配对到的计划（先落盘的显式 `approvedPlan` 优先）。`RequestAssembler` 每请求把它重建为 `<plan-state>` 易失尾块（在 `<plan-mode>` 之后、`<task-state>` 之前），并明确要求模型只在当前请求延续该计划时使用，新话题则忽略 |
 
 ### 工具结果（`domain/message.py`）
 
@@ -357,7 +358,7 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `SubagentResult` 扩展 | `truncated`、`exit_reason`、`usage` | 未完成必须明说；ledger 文件（`to_dict`）保留新字段 |
 | `ToolResult.error`（子跑） | `child_timeout` / `child_max_iterations` / `child_error` | 非完成态恒为机器码；max_iterations 仍算成功（streak 照 reset），细节在 `error_detail` 与输出文本 |
 
-`TurnSnapshot` 扩展（全带默认值，老决策表不受影响）：`acceptance`、`acceptance_nudges`、`search_streak`、`search_calls`。`TurnPolicyConfig` 扩展：`max_acceptance_nudges=2`（均可经 `AIConfig` 同名键覆盖，无 schema 变更）。`TurnBooks` 扩展：`verify`、`tool_success`（名集合）、`ledger_signature`、`step_latencies_ms/abandoned_steps/last_step_latency_ms`、`search_streak/search_calls/static_check_ran`。`AIConfig` 新增 `static_check{commands,timeout_seconds,max_chars}`（B1）。
+`TurnSnapshot` 扩展（全带默认值，老决策表不受影响）：`acceptance`、`acceptance_nudges`、`search_streak`、`search_calls`、`repeat_streak`。`TurnPolicyConfig` 扩展：`max_acceptance_nudges=2`（均可经 `AIConfig` 同名键覆盖，无 schema 变更）。`TurnBooks` 扩展：`verify`、`tool_success`（名集合）、`ledger_signature`、`step_latencies_ms/abandoned_steps/last_step_latency_ms`、`search_streak/search_calls/static_check_ran`、`last_success_digest/repeat_streak`。`repeat_streak` 只统计动作工具（`ACTION_TOOLS`，含 `bash`）的输出在本回合**已见过**的重复（忽略行序，不要求相邻；用户 steering 清空全部已见输出）；检索工具已有 `search_streak`/`stale_streak`，状态工具与失败调用不计。SEARCH 在 `repeat_streak >= 1` 时只发建议 nudge，不强制收尾。SEARCH 在 `repeat_streak >= 2` 时只发建议 nudge，不强制收尾。`AIConfig` 新增 `static_check{commands,timeout_seconds,max_chars}`（B1）。
 
 ### R1-1 计划执行契约
 

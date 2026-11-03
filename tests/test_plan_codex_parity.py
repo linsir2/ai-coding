@@ -308,3 +308,18 @@ def test_a_plan_turn_finishes_without_nudging() -> None:
     )
     assert decision.action is TurnAction.FINISH
     assert decision.reason == "model finished"
+
+
+@pytest.mark.asyncio
+async def test_a_yes_keeps_the_approved_plan_as_recent_context() -> None:
+    loop = _FakeLoop()
+    loop.plan_reply = PROPOSED_PLAN_TEXT
+    session = _session()
+    prompt = _FakePrompt(UserAnswer(answered=True, text="Yes, implement this plan"))
+
+    await handle_input(
+        loop, "/plan 加健康检查", session, _sessions(), _Console(), user_prompt=prompt
+    )
+
+    assert session.approved_plan.startswith("## Plan")
+    assert "加健康检查" in session.task.goal

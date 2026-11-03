@@ -71,8 +71,8 @@ Codex **没有"计划执行器"**。它的 plan 是：
 | 单回合 | `process_input(synthetic=True)` 一次；无迭代上限/无 token 预算/无墙钟 | `plan_executor.py:122-133,157-163` |
 | 续跑 | 计划回合 no-tool 停步 → **结构性 continue**（不写消息） | `agent_loop.py:1339-1377` |
 | 刹车 | `PLAN_IDLE_LIMIT=3`、`PLAN_STALL_ROUNDS=6` | `turn_books.py`、`turn_policy.py:409-417` |
-| 计划状态注入 | 每请求重建 `<plan-state>`（易失尾块，紧跟 `<task-state>`） | `turn_policy.py:652-673`、`request_assembly.py:397-400,491-509` |
-| 压缩 | 计划回合无专属分支，与普通回合同一闸门；`<plan-state>` 不落盘所以不会被压缩吃掉 | `request_assembly.py:323-335`、`context_compression.py:183-191` |
+| 计划状态注入 | C-3 follow-up：批准的 `<proposed_plan>` 正文保存在 `SessionData.approved_plan`（落盘 `approvedPlan`），每请求重建为 `<plan-state>` 易失尾块（在 `<plan-mode>` 后、`<task-state>` 前） | `domain/session.py`、`app/commands.py`、`request_assembly.py` |
+| 压缩 | 计划回合无专属分支，与普通回合同一闸门；`approved_plan` 是会话字段，`<plan-state>` 按尾块重建，不会被压缩吃掉 | `request_assembly.py`、`context_compression.py` |
 | 验收 | `todo_write` 标 completed 时跑 `verify`；失败回退 `in_progress` | `todo_write_tool.py:190-223` |
 | 对账/回执 | `_settle_completed`、`_settle_open_leftovers`、`StepDelivery`、`PlanStepReceipt`、`PlanReport` | `plan_executor.py:265-317,319-393,476-483`、`plan_runner.py:549-579` |
 | 子智能体 | 模型侧 `subAgent` / `parallel_research` / `subagent_list`；结果走 tool result / `[notice]` | `tools/subagent_tool.py:144,183-230`、`subagent.py:501-521` |
@@ -411,8 +411,13 @@ plan_verify_items: bool = False
 - `run_human_turn` 新增可选 `user_prompt` 参数：
   - `handle_input` 已有该参数（`app/commands.py:111`），直接透传（`:135`）；
   - `server/handlers.py:809` 传 `world.user_prompt`。
-- 计划文本不落新字段：`pending plan` 是纯函数扫描"最后一条 assistant 消息里的 `<proposed_plan>`"，
-  重启后不需要恢复提示（Codex 亦然）。
+- 计划文本的来源仍是"最后一条 assistant 消息里的 `<proposed_plan>`"；批准后追加保存到
+  `SessionData.approved_plan`（落盘 `approvedPlan`），供后续普通回合重建 `<plan-state>`。
+  这是对 Codex 的**有意偏差**：Codex 靠历史，本仓明确不把它解析成 `TaskState`，也不改 goal。
+  提示词要求模型只在当前请求延续该计划时使用；新话题忽略本块。`/plan off` 与 `begin_plan` 清空。
+  对弱模型还有两层兜底：若 plan 模式里模型把计划正文塞进了不存在的 `proposed_plan` 工具调用，
+  `run_human_turn` 会在本轮内取出该 `plan` 参数，按正常计划评审路径展示一次，而不是反复报 unknown_tool；
+  若模型输出了空的 `<proposed_plan></proposed_plan>` 但正文里有计划内容，则评审正文，而不是静默结束。
 - 解析规则（与 `utils/stream-parser/src/proposed_plan.rs` 对齐）：取**第一个**完整块
   `<proposed_plan> … </proposed_plan>`，内容 `strip()`；未闭合 → `None`。
   展示给用户的文本用 `strip_proposed_plan(text)` 去掉该块（Codex `stream_events_utils.rs:30-54`），
