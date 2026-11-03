@@ -543,6 +543,13 @@ class BashTool(BaseTool):
         if lifecycle is not None:
             output = f"{output}\n\n{lifecycle}" if output else lifecycle
             data["foreground_child_reaped"] = True
+        network_note = self._sandbox_network_note(output)
+        if network_note is not None:
+            output = f"{output}\n\n{network_note}" if output else network_note
+            data["sandbox_network"] = str(
+                getattr(self._backend, "network_mode", "off") or "off"
+            )
+            data["network_blocked"] = True
         if job.stop_reason:
             cancelled = "cancelled" in job.stop_reason or "停止" in job.stop_reason
             return ToolResult(

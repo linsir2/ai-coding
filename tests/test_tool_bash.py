@@ -631,3 +631,35 @@ async def test_a_background_job_warns_that_its_netns_is_isolated(tmp_path: Path)
     assert result.data is not None
     assert result.data["sandbox_network"] == "deny"
     assert result.data["job_network_isolated"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_job_result_surfaces_the_sandbox_network_wall(tmp_path: Path):
+    """Npm/pip run through the job path when a registry is attached.
+
+    The foreground-only note missed this path: turn 14's ``npm create vite``
+    returned raw ``EAI_AGAIN registry.npmjs.org`` and the model diagnosed host
+    DNS again.  ``_settled_result`` must carry the same wall explanation.
+    """
+    from types import SimpleNamespace
+
+    from ai_coding.core.jobs import JobRegistry
+
+    tool = BashTool(backend=SimpleNamespace(network_mode="deny"))
+    registry = JobRegistry(tmp_path / "jobs")
+    result = await tool.execute(
+        {
+            "command": (
+                "printf 'npm error code EAI_AGAIN\\n"
+                "npm error request to https://registry.npmjs.org/create-vite "
+                "failed, reason: getaddrinfo EAI_AGAIN registry.npmjs.org\\n'"
+            )
+        },
+        ToolContext(workspace=str(tmp_path), jobs=registry),
+    )
+
+    assert result.success is True
+    assert "不是主机 DNS 故障" in result.output
+    assert result.data is not None
+    assert result.data["sandbox_network"] == "deny"
+    assert result.data["network_blocked"] is True
