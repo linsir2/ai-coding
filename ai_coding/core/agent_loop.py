@@ -2139,6 +2139,23 @@ class AgentLoop:
             replay_scope=self._replay_scope,
         )
         self.closer.write_ahead = write_ahead
+
+        def _note_read(
+            path: str,
+            start: int,
+            end: int,
+            total: int,
+            version: str = "",
+        ) -> None:
+            session.note_read(
+                path,
+                start,
+                end,
+                total,
+                version=version,
+                workspace=self.workspace,
+            )
+
         outcomes = await self.dispatcher.dispatch_batch(
             step.tool_calls,
             tool_context(
@@ -2166,9 +2183,7 @@ class AgentLoop:
                 # workspace rides along because the same file arrives as an
                 # absolute and a relative path in one session, and two keys for
                 # one file would make every citation look uncovered.
-                note_read=lambda path, start, end, total: session.note_read(
-                    path, start, end, total, workspace=self.workspace
-                ),
+                note_read=_note_read,
                 # P3 (补充式方案 06): the dispatcher announces a pending approval
                 # here and clears it when answered; the loop mirrors it into a
                 # marker beside the session file, never into the session itself.
@@ -2235,6 +2250,15 @@ class AgentLoop:
             for item in outcomes
             if item.result.success and item.call.name != "read"
             for path in paths_in(item.result.output or "", self.workspace)
+        )
+        # Round 1 evidence freshness: write/edit know the exact files they
+        # changed.  bash/merge path discovery is deliberately deferred; the
+        # request-time version comparison still catches appends by any tool.
+        session.invalidate_reads(
+            artifact.path
+            for item in outcomes
+            if item.result.success and item.call.name in ("write", "edit")
+            for artifact in (item.result.artifacts or ())
         )
         self.closer.write_back(session, outcomes)
         if any(

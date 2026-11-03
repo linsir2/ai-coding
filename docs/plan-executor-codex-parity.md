@@ -16,7 +16,7 @@ Codex **没有"计划执行器"**。它的 plan 是：
 
 我们目前是一套**专用执行器**：`PlanExecutor` 单回合 + `PlanRunner` legacy + `TaskDriver`、
 `armed_profile`、workspace 门、条目标记完成时验收、receipt/`StepDelivery`、`PlanReport`、
-`<plan-state>` 易失尾块、idle/stall 双刹车、`/plan run` 自动派发。
+> **2026-11-03 C-3 follow-up**：批准的完整计划正文若已在 history，不再重复注入 `<plan-state>`；只有正文缺失（如压缩后）才注入 compact `<plan-record>`。`plan_implementing` 回合保留 `<task-state>`，让当前 step 可见（对 Codex parity 的有意偏差）。下文部分表格保留历史对照，以本段和 74–75 行为当前事实。
 
 按 24 个行为维度逐项打分（SAME=1、PARTIAL=0.5、DIFF=0，见第 3 节）：
 
@@ -71,8 +71,8 @@ Codex **没有"计划执行器"**。它的 plan 是：
 | 单回合 | `process_input(synthetic=True)` 一次；无迭代上限/无 token 预算/无墙钟 | `plan_executor.py:122-133,157-163` |
 | 续跑 | 计划回合 no-tool 停步 → **结构性 continue**（不写消息） | `agent_loop.py:1339-1377` |
 | 刹车 | `PLAN_IDLE_LIMIT=3`、`PLAN_STALL_ROUNDS=6` | `turn_books.py`、`turn_policy.py:409-417` |
-| 计划状态注入 | C-3 follow-up：批准的 `<proposed_plan>` 正文保存在 `SessionData.approved_plan`（落盘 `approvedPlan`），每请求重建为 `<plan-state>` 易失尾块（在 `<plan-mode>` 后、`<task-state>` 前） | `domain/session.py`、`app/commands.py`、`request_assembly.py` |
-| 压缩 | 计划回合无专属分支，与普通回合同一闸门；`approved_plan` 是会话字段，`<plan-state>` 按尾块重建，不会被压缩吃掉 | `request_assembly.py`、`context_compression.py` |
+| 计划状态注入 | C-3 follow-up：批准的 `<proposed_plan>` 正文保存在 `SessionData.approved_plan`（落盘 `approvedPlan`）；history 已有正文时 tail 不重复，缺失时才注入 compact `<plan-record>`；当前 step 由 `<task-state>` 提供 | `domain/session.py`、`app/commands.py`、`request_assembly.py` |
+| 压缩 | 计划回合无专属分支，与普通回合同一闸门；完整正文可能在 history 中被摘要，此时 compact `<plan-record>` 只提供标题/进度/`history_search` 指针 | `request_assembly.py`、`context_compression.py` |
 | 验收 | `todo_write` 标 completed 时跑 `verify`；失败回退 `in_progress` | `todo_write_tool.py:190-223` |
 | 对账/回执 | `_settle_completed`、`_settle_open_leftovers`、`StepDelivery`、`PlanStepReceipt`、`PlanReport` | `plan_executor.py:265-317,319-393,476-483`、`plan_runner.py:549-579` |
 | 子智能体 | 模型侧 `subAgent` / `parallel_research` / `subagent_list`；结果走 tool result / `[notice]` | `tools/subagent_tool.py:144,183-230`、`subagent.py:501-521` |
@@ -86,7 +86,7 @@ Codex **没有"计划执行器"**。它的 plan 是：
 | 1 | 计划工具名与参数 | `update_plan`（explanation + step/status） | `present_plan`（plan + content/verify/deps） | DIFF |
 | 2 | 条目字段 | step + status | 11 字段含 verify/deps/attempts | DIFF |
 | 3 | 工具回灌 | 固定 `"Plan updated"` | `task.render()` | DIFF |
-| 4 | 计划状态载体 | transcript（FunctionCall/Output） | `TaskState` 落盘 + `<plan-state>` 尾块 | DIFF |
+| 4 | 计划状态载体 | transcript（FunctionCall/Output） | `TaskState` 落盘 + 条件 `<plan-record>` | DIFF |
 | 5 | 进入计划模式 | `/plan` 切 collaboration_mode | `/plan <topic>` 切 plan agent + readonly | DIFF |
 | 6 | 模式对工具/沙箱 | 不改（纯提示约束） | plan 回合强制 readonly、关搜索梯子 | PARTIAL |
 | 7 | 批准/退出 | "Implement this plan?" → 切 Default + `"Implement the plan."` | 工具内阻塞弹窗 + `armed` + 前端自动 `/plan run` | DIFF |
@@ -95,7 +95,7 @@ Codex **没有"计划执行器"**。它的 plan 是：
 | 10 | 续跑信号 | `needs_follow_up`（工具调用/pending/end_turn） | 工具调用 ∨ (`plan_executing` ∧ 有未完成项) | PARTIAL |
 | 11 | 回合内预算 | 无迭代上限、无 token 预算 | 同左 | SAME |
 | 12 | 刹车 | 无（只有流超时） | idle 3 / stall 6 | DIFF |
-| 13 | 每轮计划注入 | 无（靠历史） | `<plan-state>` 易失尾块 | DIFF |
+| 13 | 每轮计划注入 | 无（靠历史） | history 有正文则不重复；缺失时 compact `<plan-record>` | DIFF |
 | 14 | 压缩后计划状态 | 丢失 | 尾块每轮重建，不丢 | DIFF |
 | 15 | 条目验收 | 无 | completed 时跑 verify，失败回退 | DIFF |
 | 16 | 回执/交付 | 无 | `StepDelivery` + `PlanStepReceipt` | DIFF |
@@ -334,7 +334,7 @@ class CodexPlanRunner:
 |---|---|---|---|
 | R1 | `update_plan` 在 Plan 模式下**报错**，所以计划不可能由它产生；Codex 的计划是 assistant 消息里的 `<proposed_plan>` 文本块 | `core/src/tools/handlers/plan.rs:87-90`；模板 `collaboration-mode-templates/templates/plan.md:96-126`；解析 `core/src/session/turn.rs:2542-2550`、`utils/stream-parser/src/proposed_plan.rs:7` | 计划阶段**不建 TaskState**；计划以 `<proposed_plan>` 存在于 transcript；执行阶段才由 `update_plan` 建表 |
 | R2 | 计划回合停步会进"计划提交守卫"，在 `present_plan` 未注册时无限 nudge | `core/turn_policy.py:578-592` | 新增 `TurnSnapshot.plan_review_available`；为 `False` 时 `_ask_guards` 直接跳过 |
-| R3 | 空列表也会注入 `<task-state>（无任务项）`，Codex 没有 | `core/turn_policy.py:640-649`；`domain/task.py:458-460` | codex 路径在 `mode=="plan"` 或 `plan_implementing` 时不注入 task 块 |
+| R3 | 空列表也会注入 `<task-state>（无任务项）`，Codex 没有 | `core/turn_policy.py:640-649`；`domain/task.py:458-460` | codex 路径只在 `mode=="plan"` 时不注入 task 块；`plan_implementing` 保留 task 块（C-3 follow-up） |
 | R4 | 执行回合纯文本停步会落进 task gate，产生 nudge | `core/turn_policy.py:615-622` | 新增 `session.plan_implementing`；该标志下 `decide_after_step` 直接 FINISH |
 | R5 | `verify_item` 只在 `plan_executing` 时接线，`plan_verify_items` 开关会变成死开关 | `core/agent_loop.py:2344-2352` | `verify_item` 的注入条件改为 `plan_executing or plan_verify_items`；验收逻辑写进 `update_plan` |
 | R6 | 调用方读 `report.stopped`，薄执行器不能返回 `None` | `app/commands.py:625-626` | `CodexPlanRunner.run` 仍返回 `PlanReport`（只填 `stopped`，不填 receipt/report） |
@@ -412,7 +412,8 @@ plan_verify_items: bool = False
   - `handle_input` 已有该参数（`app/commands.py:111`），直接透传（`:135`）；
   - `server/handlers.py:809` 传 `world.user_prompt`。
 - 计划文本的来源仍是"最后一条 assistant 消息里的 `<proposed_plan>`"；批准后追加保存到
-  `SessionData.approved_plan`（落盘 `approvedPlan`），供后续普通回合重建 `<plan-state>`。
+  `SessionData.approved_plan`（落盘 `approvedPlan`）。完整正文已在 history 时不重复注入；
+  仅当缺失时由 compact `<plan-record>` 提供摘要和 `history_search` 指针。
   这是对 Codex 的**有意偏差**：Codex 靠历史，本仓明确不把它解析成 `TaskState`，也不改 goal。
   提示词要求模型只在当前请求延续该计划时使用；新话题忽略本块。`/plan off` 与 `begin_plan` 清空。
   对弱模型还有两层兜底：若 plan 模式里模型把计划正文塞进了不存在的 `proposed_plan` 工具调用，
@@ -515,7 +516,7 @@ C-5b 未完成前这三个名字**不注册**，避免模型调用幽灵工具�
 | 2 | `_handle_plan`（`:500-708`） | `commit_posture(agent="plan", readonly=True)`；**仅进入模式时** `session.begin_plan(topic)`；`/plan <topic>` 把 topic 交给 `run_human_turn`（不自己起 turn） |
 | 3 | `run_human_turn`（`:711-749`） | `session.mode=="plan"` → `process_input(session, text)`（**人的原话**，`synthetic=False`） |
 | 4 | `AgentLoop.process_input`（`agent_loop.py:888-913`） | 取 turn 锁；`_run_turn` → `_begin_turn`：turn_count+1、append user、task=session.task、deadline=普通回合 |
-| 5 | `RequestAssembler.assemble` | 压缩 → instructions → tail：`plan_mode` 有、`task` 无、`plan_state` 无 |
+| 5 | `RequestAssembler.assemble` | 压缩 → instructions → tail：`plan_mode` 有、`task` 无；history 有正文时无 plan block，缺失时 compact `plan_record` |
 | 6 | `_model_step` → `say` | 模型只读探索；最终消息含且仅含一个 `<proposed_plan>` |
 | 7 | `decide_after_step`（`turn_policy.py:573-622`） | `mode=="plan"` + `plan_review_available=False` → `FINISH "model finished"`（不 nudge） |
 | 8 | `TurnCloser.close` | handoff/digest/persist，与普通回合同一路径 |
@@ -530,7 +531,7 @@ C-5b 未完成前这三个名字**不注册**，避免模型调用幽灵工具�
 | 3 | `process_input("Implement the plan.")` | turn_count+1；append user（synthetic）；task 仍为空 |
 | 4 | 工具面 | `update_plan` 在；`todo_write` 不在（`plan_implementing`）；`present_plan` 不在 |
 | 5 | 第 1 次 `update_plan` | `TaskState.items` 1..N；回灌 `"Plan updated"`；`TaskUpdated` 事件 |
-| 6 | 下一轮 assemble | **仍不注入** `<task-state>`（Codex 靠历史）；其余尾块照旧 |
+| 6 | 下一轮 assemble | implementation turn 注入 `<task-state>` 作为当前 step；history 有正文时不重复 plan block |
 | 7 | 工具调用持续 | `books.note_outcomes` → `continue`（既有结构性续跑） |
 | 8 | 无工具停步 | `decide_after_step`：`plan_implementing` → FINISH（无 task gate） |
 | 9 | 结束 | `plan_implementing=False`；`[plan] done/total`；保存 |
@@ -561,7 +562,7 @@ for index in ...:
 | 每次 `assemble` 前的 `Compactor.compress`（`request_assembly.py:328-335`） | 阈值/检查点原样 | 同一语义（阈值不同是我们已有配置） |
 | 压缩后 | `<proposed_plan>` 与早期 `update_plan` 调用可能被丢弃 | Codex 也丢 |
 | `TaskState` | 仍持久化在 session，前端面板可见 | Codex 的 plan 卡片来自事件，同样不受压缩影响 |
-| 请求中的计划状态 | 无（codex 路径不注入 task/plan_state） | 与 Codex 一致 |
+| 请求中的计划状态 | 无（implementation 有 task-state；完整计划不重复） | 有意偏差，见 C-3 follow-up |
 
 ### DF-5 子智能体（C-5a）
 
@@ -626,7 +627,7 @@ for index in ...:
 | 步 | 事件 | 期望 |
 |---|---|---|
 | 1 | 第 6 次 assemble 触发压缩 | 历史被 summary 替换 |
-| 2 | 下一次请求 | 无 `<task-state>`/`<plan-state>`；`<proposed_plan>` 可能已不在历史里（与 Codex 一致） |
+| 2 | 下一次请求 | 有 `<task-state>`；无重复 plan block；`<proposed_plan>` 可能已不在历史里 |
 | 3 | 前端 | 计划面板仍显示 3 项（来自 `TaskState`/`TaskUpdated`） |
 
 断言：C-6-5；并断言压缩没有删掉 `TaskState`（session 持久化）。

@@ -91,7 +91,7 @@ def tool_context(
     # R20/RC-2: the read tool reports the range it returned, so the ledger is
     # built from what the harness actually sent rather than from what the model
     # claims it read.
-    note_read: Callable[[str, int, int, int], None] | None = None,
+    note_read: Callable[[str, int, int, int, str], None] | None = None,
     note_approval: Callable[[dict[str, Any] | None], None] | None = None,
     note_tool_loaded: Callable[[tuple[str, ...]], None] | None = None,
     #: What ``tool_search`` may offer: the deferred part of this request's own

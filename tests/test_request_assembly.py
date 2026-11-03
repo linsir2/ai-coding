@@ -459,7 +459,7 @@ async def test_the_budget_block_reads_the_provider_not_the_construction_snapshot
     assert "9/10" in budget[0].content
 
 
-async def test_an_approved_plan_rides_the_tail_as_plan_state():
+async def test_an_approved_plan_missing_from_history_gets_a_compact_plan_record():
     assembler, parts = _assembler()
     session = _session([_digest()])
     session.approved_plan = "## Plan\n1. build frontend"
@@ -467,22 +467,93 @@ async def test_an_approved_plan_rides_the_tail_as_plan_state():
     assembled = await _assemble(assembler, session=session)
 
     bodies = "\n".join(message.content or "" for message in assembled.request)
-    assert "<plan-state>" in bodies
-    assert "## Plan\n1. build frontend" in bodies
+    assert "<plan-record>" in bodies
+    assert "<plan-state>" not in bodies
+    assert "## Plan\n1. build frontend" not in bodies
     names = [name for name, _size in parts["reporter"].calls[-1]["tail_blocks"]]
-    assert "plan_state" in names
+    assert "plan_record" in names
+    assert "plan_state" not in names
 
 
-async def test_plan_state_appears_during_plan_implementing_without_task_state():
+async def test_plan_implementing_keeps_the_task_state_and_drops_the_plan_state():
     assembler, _parts = _assembler()
     session = _session([_digest()])
     session.agent = "build"
     session.plan_implementing = True
     session.approved_plan = "## Plan\n1. build frontend"
+    task = TaskState(goal="Implement the plan.")
+    task.add("Step 6: RoomPage")
+
+    assembled = await _assemble(assembler, session=session, task=task)
+
+    bodies = "\n".join(message.content or "" for message in assembled.request)
+    assert "<plan-state>" not in bodies
+    assert "<task-state>" in bodies
+    assert "Step 6: RoomPage" in bodies
+
+
+async def test_a_plan_already_in_history_is_not_repeated_in_the_tail():
+    """The approved plan is already an assistant message; the tail must not
+    carry a second full copy every iteration."""
+    assembler, parts = _assembler()
+    session = _session([_digest()])
+    plan = "## Plan\n1. build frontend\n\n" + ("detail " * 300)
+    session.approved_plan = plan
+    session.messages.append(
+        ChatMessage(
+            role="assistant",
+            content=f"here is it\n<proposed_plan>{plan}</proposed_plan>",
+            timestamp="t",
+        )
+    )
 
     assembled = await _assemble(assembler, session=session)
 
-    bodies = "\n".join(message.content or "" for message in assembled.request)
-    assert "<plan-state>" in bodies
-    assert "## Plan\n1. build frontend" in bodies
-    assert "<task-state>" not in bodies
+    tail_names = [name for name, _size in parts["reporter"].calls[-1]["tail_blocks"]]
+    tail_text = "\n".join(
+        message.content or "" for message in assembled.request[-len(tail_names):]
+    )
+    assert "plan_state" not in tail_names
+    assert "<plan-state>" not in tail_text
+    assert "<plan-record>" not in tail_text
+    assert plan not in tail_text
+
+
+async def test_a_missing_plan_body_gets_only_a_compact_plan_record():
+    assembler, parts = _assembler()
+    session = _session([_digest()])
+    plan = "## Frontend plan\n1. build frontend\n\n" + ("detail " * 300)
+    session.approved_plan = plan
+
+    assembled = await _assemble(assembler, session=session)
+
+    tail_names = [name for name, _size in parts["reporter"].calls[-1]["tail_blocks"]]
+    tail_text = "\n".join(
+        message.content or "" for message in assembled.request[-len(tail_names):]
+    )
+    assert "plan_record" in tail_names
+    assert "<plan-record>" in tail_text
+    assert "Frontend plan" in tail_text
+    assert plan not in tail_text
+    assert "history_search" in tail_text
+
+
+async def test_plan_implementing_shows_the_task_and_not_a_full_plan_tail():
+    assembler, parts = _assembler()
+    session = _session([_digest()])
+    session.agent = "build"
+    session.plan_implementing = True
+    plan = "## Plan\n1. build frontend"
+    session.approved_plan = plan
+    task = TaskState(goal="Implement the plan.")
+    task.add("Step 6: RoomPage")
+
+    assembled = await _assemble(assembler, session=session, task=task)
+
+    tail_names = [name for name, _size in parts["reporter"].calls[-1]["tail_blocks"]]
+    tail_text = "\n".join(
+        message.content or "" for message in assembled.request[-len(tail_names):]
+    )
+    assert "task" in tail_names
+    assert "Step 6: RoomPage" in tail_text
+    assert "<plan-state>" not in tail_text

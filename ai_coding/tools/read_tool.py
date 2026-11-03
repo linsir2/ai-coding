@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ai_coding.domain.message import ToolResult
+from ai_coding.domain.read_ledger import file_version
 from ai_coding.security.credentials import is_credential_path
 from ai_coding.security.file_state_tracker import FileStateTracker
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
@@ -176,7 +177,13 @@ class ReadTool(BaseTool):
         note_read = resolve_ctx(ctx).note_read
         credential = is_credential_path(path_str, workspace=workspace) or is_credential_path(target)
         if note_read is not None and not credential:
-            note_read(path_str, offset + 1, page_end, len(lines))
+            note_read(
+                path_str,
+                offset + 1,
+                page_end,
+                len(lines),
+                file_version(target),
+            )
 
         return ToolResult(success=True, output=output)
 

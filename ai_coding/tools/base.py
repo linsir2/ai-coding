@@ -115,7 +115,7 @@ class ToolContext:
     # the harness can render the ``<read-ledger>`` block from session state
     # instead of trusting a narrative.  Same shape as ``note_checkpoint``: the
     # loop gives it, the tool uses it, ``None`` outside a loop that owns a turn.
-    note_read: Callable[[str, int, int, int], None] | None = None
+    note_read: Callable[[str, int, int, int, str], None] | None = None
     # P3 (补充式方案 06): how the dispatcher tells the running turn that an
     # approval question is about to be asked (or has been answered).  The loop
     # writes a small marker beside the session file so a crash during the wait

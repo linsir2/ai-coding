@@ -42,7 +42,12 @@ from ai_coding.core.turn_books import TurnBooks
 from ai_coding.core.workspace_guard import outside_workspace_paths
 from ai_coding.domain.agents import PLAN_TEXT_RULE
 from ai_coding.domain.message import CHECKPOINT_MARK, IMAGE_MIME_BY_SUFFIX, ChatMessage
-from ai_coding.domain.read_ledger import render as render_read_ledger
+from ai_coding.domain.read_ledger import (
+    render as render_read_ledger,
+)
+from ai_coding.domain.read_ledger import (
+    versions_for,
+)
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
 from ai_coding.domain.turn_digest import render_working_memory
@@ -406,13 +411,12 @@ class RequestAssembler:
             if self._build_instructions is not None
             else None
         )
-        # C-2/C-3 (codex path): a plan turn carries the ``<plan-mode>`` tail
-        # block and suppresses the task block; implementation turns read the
-        # plan from the transcript and their own ``update_plan`` history.
-        suppress_task = (
-            session.mode == "plan"
-            or bool(getattr(session, "plan_implementing", False))
-        )
+        # C-2/C-3 (codex path): a plan *turn* carries ``<plan-mode>`` and
+        # suppresses the task block.  Implementation turns deliberately keep
+        # the task block: the approved plan may be 6k chars back in history and
+        # the model still needs its current step.  This is one context block,
+        # not a second state owner.
+        suppress_task = session.mode == "plan"
         # R3: no ``<task-state>`` in a plan turn (the plan is text in the
         # transcript; during implementation the model reads its own
         # ``update_plan`` history).  An empty list would otherwise inject a
@@ -524,13 +528,24 @@ class RequestAssembler:
                 # R20/RC-2: the read ledger.  A volatile block, so it is rebuilt
                 # from session state every iteration and compaction cannot reach
                 # it -- the checkpoint stores conclusions, this stores evidence.
-                volatile_block("read_ledger", render_read_ledger(session.read_ledger)),
+                volatile_block(
+                    "read_ledger",
+                    render_read_ledger(
+                        session.read_ledger,
+                        current_versions=versions_for(
+                            session.read_ledger, self._workspace
+                        ),
+                    ),
+                ),
                 volatile_block("mcp_catalog", catalog),
                 volatile_block(
                     "plan_mode",
                     PLAN_MODE_BLOCK if session.mode == "plan" else "",
                 ),
-                volatile_block("plan_state", self._plan_state_block(session)),
+                volatile_block(
+                    "plan_record",
+                    self._plan_record_block(session, history, task),
+                ),
                 volatile_block("task", content_of(task_message)),
                 volatile_block("recommended_skills", recommended_skills_block),
                 volatile_block("referenced_files", file_block),
@@ -560,23 +575,42 @@ class RequestAssembler:
     # ---- helpers (M2) -------------------------------------------------------
 
     @staticmethod
-    def _plan_state_block(session: SessionData) -> str:
-        """The last approved plan, as recent context rather than a new goal.
+    def _plan_record_block(
+        session: SessionData,
+        history: Sequence[ChatMessage],
+        task: TaskState,
+    ) -> str:
+        """A compact plan pointer, never a second copy of the plan body.
 
-        It is intentionally **not** the task list: ``update_plan`` still owns
-        the executable steps.  The text is a volatile tail block so compaction
-        cannot bury the plan while the current request is still continuing it.
+        The approved plan is already the assistant's ``<proposed_plan>`` message
+        in history.  Re-emitting its 6k body in the volatile tail added a second
+        copy that could never be prefix-cached and could contradict the live
+        task status.  Only when compaction has removed the body do we need a
+        short record; the executable step still comes from ``<task-state>``.
         """
         plan = str(getattr(session, "approved_plan", "") or "").strip()
-        if not plan:
+        if not plan or session.mode == "plan":
             return ""
+        if any(
+            message.role == "assistant"
+            and plan in (message.content or "")
+            for message in history
+        ):
+            return ""
+        first = next(
+            (line.strip() for line in plan.splitlines() if line.strip()), ""
+        )
+        if first.startswith("#"):
+            first = first.lstrip("#").strip()
+        progress = (
+            f"进度: {task.done_count}/{task.total}\n" if task.total else ""
+        )
         return (
-            "<plan-state>\n"
-            "这是已经批准的计划，不是用户的新指令。\n"
-            "如果当前请求是在延续这个计划，使用它的下一步；"
-            "如果当前请求是新话题，忽略本块。\n"
-            f"{plan}\n"
-            "</plan-state>"
+            "<plan-record>\n"
+            f"计划: {first[:200] or '(未命名计划)'}\n"
+            f"{progress}"
+            "完整正文已不在当前上下文；需要时用 history_search 取回。\n"
+            "</plan-record>"
         )
 
     def _environment_block(self, session: SessionData) -> str:

@@ -256,13 +256,13 @@ async def test_codex_plan_turn_carries_plan_mode_and_no_task_block():
 
 
 @pytest.mark.asyncio
-async def test_codex_implementing_turn_carries_no_task_block():
+async def test_codex_implementing_turn_carries_the_current_task_block():
     session = SessionData(session_id="s1", title="", created_time="", last_access_time="")
     session.agent = "build"
     session.plan_implementing = True
     assembled = await _assemble(_assembler(), session, _task())
     bodies = "\n".join(message.content or "" for message in assembled.request)
-    assert "<task-state>" not in bodies
+    assert "<task-state>" in bodies
     assert "<plan-mode>" not in bodies
 
 

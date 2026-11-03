@@ -25,10 +25,10 @@ from ai_coding.core.events import (
 )
 from ai_coding.core.turn_policy import TASK_MESSAGE_LEAD
 from ai_coding.domain.loop import StepResult, TurnStatus
-from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolResult
+from ai_coding.domain.message import ChatMessage, ToolArtifact, ToolCallRef, ToolResult
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
-from ai_coding.security.approval import ApprovalResult
+from ai_coding.security.approval import ApprovalResult, AutoApproveCallback
 from ai_coding.service.session_service import SessionService
 from ai_coding.tools.base import BaseTool
 from ai_coding.tools.registry import ToolRegistry
@@ -1436,3 +1436,29 @@ async def test_an_armed_goal_keeps_its_objective_through_a_turn(tmp_path):
     await loop.process_input(session, "[goal] 第 1/20 轮 · 目标：迁移 X")
 
     assert session.task.goal == "迁移 X"
+
+
+@pytest.mark.asyncio
+async def test_a_successful_write_invalidates_read_evidence(tmp_path):
+    writer = _Tool(
+        "write",
+        result=ToolResult(
+            success=True,
+            output="wrote",
+            artifacts=(ToolArtifact(path="a.py"),),
+        ),
+    )
+    engine = ScriptedEngine([_calls(_ref("c1", "write")), _text("done")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        engine,
+        sessions,
+        _registry(writer),
+        approval=AutoApproveCallback(),
+    )
+    session = sessions.create()
+    session.note_read("a.py", 1, 10, 10, version="v1")
+
+    await loop.process_input(session, "go")
+
+    assert session.read_ledger[0].version == ""

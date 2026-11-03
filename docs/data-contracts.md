@@ -190,7 +190,8 @@ R1 新增/变更的契约集中在四处。
 | 字段 | 说明 |
 |---|---|
 | `task: TaskState \| None` | **有 todo 项时才写入 JSON**（只有 goal 是可从首条 user 消息还原的噪声） |
-| `approved_plan: str = ""` | 人类最近一次批准的 `<proposed_plan>` 正文；会话 JSON 始终落盘键 `approvedPlan`（空串表示显式清空）。它是**上下文**，不是 goal，也不是第二份 todo 清单；`/plan off` 与 `begin_plan` 清空；旧会话落盘前没有 `approvedPlan` 时，`from_dict` 会从历史里恢复"最后一块 `<proposed_plan>` + 后续 `Implement the plan.`"配对到的计划（先落盘的显式 `approvedPlan` 优先）。`RequestAssembler` 每请求把它重建为 `<plan-state>` 易失尾块（在 `<plan-mode>` 之后、`<task-state>` 之前），并明确要求模型只在当前请求延续该计划时使用，新话题则忽略 |
+| `approved_plan: str = ""` | 人类最近一次批准的 `<proposed_plan>` 正文；会话 JSON 始终落盘键 `approvedPlan`（空串表示显式清空）。它是**上下文**，不是 goal，也不是第二份 todo 清单；`/plan off` 与 `begin_plan` 清空；旧会话落盘前没有 `approvedPlan` 时，`from_dict` 会从历史里恢复"最后一块 `<proposed_plan>` + 后续 `Implement the plan.`"配对到的计划（先落盘的显式 `approvedPlan` 优先）。完整正文已在 history 时 tail **不再重复**；仅当 history 缺失正文（如压缩后）时注入 compact `<plan-record>`；当前 step 始终由 `<task-state>` 提供 |
+| `ReadMark.version: str = ""` | 读取时的轻量文件版本（`mtime_ns:size:inode`）；`request_assembly` 在每次组装时用当前 stat 对比，版本不同/缺失时标记过期，不再声称“完整”。`write`/`edit` 成功 artifacts 会显式失效对应路径。旧 session 没有 version 的行按 unknown 处理，不双写 |
 
 ### 工具结果（`domain/message.py`）
 

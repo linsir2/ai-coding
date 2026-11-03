@@ -73,7 +73,9 @@ class _Settings:
     auto_compact = True
 
 
-def _assembler(*, rewrite: bool = True) -> tuple[RequestAssembler, _Reporter, _Compactor]:
+def _assembler(
+    *, rewrite: bool = True, workspace: str = ""
+) -> tuple[RequestAssembler, _Reporter, _Compactor]:
     reporter = _Reporter()
     compactor = _Compactor(rewrite)
 
@@ -89,7 +91,7 @@ def _assembler(*, rewrite: bool = True) -> tuple[RequestAssembler, _Reporter, _C
             build_instructions=_instructions,
             settings=_Settings(),
             emit=lambda event: None,
-            workspace="",
+            workspace=workspace,
         ),
         reporter,
         compactor,
@@ -732,3 +734,82 @@ def test_an_answer_naming_two_files_is_skipped_entirely():
     text = "def build():\n    return 1\n"
     answer = '`a.py:1-2` 与 `b.py:1` 里写的是 "def deploy(): return 99"。'
     assert unsupported_quotes(answer, (), lambda path: text) == []
+
+
+def test_a_changed_file_is_stale_even_before_another_read():
+    marks = (ReadMark("a.py", 1, 150, 150, version="v1"),)
+    text = render(marks, current_versions={"a.py": "v2"})
+    assert "完整" not in text
+    assert "已过期" in text
+
+
+def test_a_fresh_file_is_still_named_so_it_is_not_reread():
+    marks = (ReadMark("a.py", 1, 150, 150, version="v1"),)
+    text = render(marks, current_versions={"a.py": "v1"})
+    assert "a.py" in text
+    assert "不要重读" in text or "完整" in text
+    assert "已过期" not in text
+
+
+def test_an_old_mark_without_a_version_is_not_claimed_complete():
+    marks = (ReadMark("a.py", 1, 150, 150),)
+    text = render(marks, current_versions={"a.py": "v1"})
+    assert "完整" not in text
+    assert "未知版本" in text or "已过期" in text
+
+
+def test_session_invalidate_reads_marks_the_evidence_stale():
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.note_read("a.py", 1, 10, 10, version="v1")
+    session.invalidate_reads(["a.py"])
+    text = render(session.read_ledger, current_versions={"a.py": "v1"})
+    assert "完整" not in text
+    assert "已过期" in text or "未知版本" in text
+
+
+@pytest.mark.asyncio
+async def test_the_request_assembly_compares_read_versions_with_the_filesystem(tmp_path):
+    target = tmp_path / "a.py"
+    target.write_text("one\n", encoding="utf-8")
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.messages.append(ChatMessage(role="user", content="start", timestamp="t"))
+    session.note_read("a.py", 1, 1, 1, version="old", workspace=str(tmp_path))
+    target.write_text("one\ntwo\n", encoding="utf-8")
+
+    assembler, reporter, _compactor = _assembler(workspace=str(tmp_path))
+    await assembler.assemble(
+        session=session,
+        task=TaskState(goal="long"),
+        books=TurnBooks(),
+        turn_number=1,
+        hook_context="",
+        deadline=None,
+        index=1,
+        previous_request=None,
+    )
+    bodies = [m.content or "" for m in reporter.calls[-1]["request"]]
+    ledger = next(body for body in bodies if "<read-ledger>" in body)
+    assert "a.py" in ledger
+    assert "已过期" in ledger
+    assert "完整" not in ledger
+
+
+def test_a_read_version_survives_session_serialization():
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.note_read("a.py", 1, 10, 10, version="v1")
+    restored = SessionData.from_dict(session.to_dict())
+    assert restored.read_ledger[0].version == "v1"
+
+
+def test_an_old_read_row_without_a_version_loads_as_unknown():
+    session = SessionData.from_dict({
+        "sessionId": "s", "title": "", "createdTime": "t", "lastAccessTime": "t",
+        "readLedger": [{"path": "a.py", "start": 1, "end": 10, "total": 10}],
+    })
+    assert session.read_ledger[0].version == ""
+
+
+def test_a_new_file_version_replaces_the_old_read_ranges():
+    marks = merge_mark((), ReadMark("a.py", 1, 10, 10, version="v1"))
+    marks = merge_mark(marks, ReadMark("a.py", 11, 20, 20, version="v2"))
+    assert marks == (ReadMark("a.py", 11, 20, 20, version="v2"),)

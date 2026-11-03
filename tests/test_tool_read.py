@@ -125,7 +125,7 @@ async def test_offset_plus_limit_past_the_end_does_not_record_a_bad_range(setup)
     _long_file(tmp_path, 117)
     result = await tool.execute(
         {"path": "long.py", "offset": 100, "limit": 50},
-        _Context(note_read=lambda *row: seen.append(row)),
+        _Context(note_read=lambda *row, **kwargs: seen.append(row[:4])),
     )
     assert result.success is True
     assert "# line 101" in result.output
@@ -172,7 +172,7 @@ async def test_a_read_reports_the_range_it_returned(setup):
     _long_file(tmp_path, 3081)
     await tool.execute(
         {"path": "long.py"},
-        _Context(note_read=lambda *row: seen.append(row)),
+        _Context(note_read=lambda *row, **kwargs: seen.append(row[:4])),
     )
     assert seen == [("long.py", 1, 500, 3081)]
 
@@ -183,7 +183,7 @@ async def test_a_failed_read_records_nothing(setup):
     seen: list[tuple[str, int, int, int]] = []
     result = await tool.execute(
         {"path": "nope.py"},
-        _Context(note_read=lambda *row: seen.append(row)),
+        _Context(note_read=lambda *row, **kwargs: seen.append(row[:4])),
     )
     assert result.success is False
     assert seen == []
@@ -207,7 +207,7 @@ async def test_every_failed_read_records_nothing(setup, params):
     (tmp_path / "big.bin").write_bytes(b"x" * (11 * 1024 * 1024))
     seen: list[tuple[str, int, int, int]] = []
     result = await tool.execute(
-        params, _Context(note_read=lambda *row: seen.append(row))
+        params, _Context(note_read=lambda *row, **kwargs: seen.append(row[:4]))
     )
     assert result.success is False
     assert seen == []
@@ -224,7 +224,7 @@ async def test_a_credential_read_leaves_no_ledger_trace(setup):
     result = await tool.execute(
         {"path": ".env"},
         _Context(
-            note_read=lambda *row: seen.append(row),
+            note_read=lambda *row, **kwargs: seen.append(row[:4]),
             credential_approved=True,
         ),
     )
@@ -248,3 +248,16 @@ class _Context:
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
+
+
+@pytest.mark.asyncio
+async def test_a_read_records_the_file_version(setup):
+    tmp_path, _sb, _fst, tool = setup
+    (tmp_path / "f.txt").write_text("hello\n")
+    seen: list[tuple] = []
+    await tool.execute(
+        {"path": "f.txt"},
+        _Context(note_read=lambda *row, **kwargs: seen.append(row)),
+    )
+    assert len(seen[0]) == 5
+    assert seen[0][4]

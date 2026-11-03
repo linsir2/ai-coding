@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .agents import is_plan_agent
@@ -543,6 +543,7 @@ class SessionData:
         end: int,
         total: int = 0,
         *,
+        version: str = "",
         workspace: str = "",
     ) -> None:
         """Record that lines ``start..end`` of ``path`` reached the context.
@@ -556,7 +557,23 @@ class SessionData:
         if not key or end < start:
             return
         self.read_ledger = merge_mark(
-            self.read_ledger, ReadMark(key, start, end, total)
+            self.read_ledger, ReadMark(key, start, end, total, version)
+        )
+
+    def invalidate_reads(self, paths: Iterable[str], *, workspace: str = "") -> None:
+        """Mark known file evidence stale after a write/edit/merge.
+
+        Emptying ``version`` is deliberate: ``render`` treats an empty version
+        as unknown/must-recheck, never as a complete read.  Paths that were
+        never read are ignored.
+        """
+        keys = {normalize(path, workspace) for path in paths}
+        keys.discard("")
+        if not keys:
+            return
+        self.read_ledger = tuple(
+            replace(mark, version="") if mark.path in keys else mark
+            for mark in self.read_ledger
         )
 
     def note_seen(self, paths: Iterable[str]) -> None:

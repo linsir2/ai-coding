@@ -181,13 +181,14 @@ async def test_propose_then_implement_in_two_turns(tmp_path):
     assert "[plan-continue]" not in transcript
 
     # The planning request carries <plan-mode> and no <task-state>; the
-    # implementation requests carry neither.
+    # implementation requests deliberately carry <task-state> so the model can
+    # see its current step (this is the C-3 follow-up deviation from Codex).
     planning_request = _contents(engine.seen[:1])
     assert "<plan-mode>" in planning_request
     assert "<task-state>" not in planning_request
     for request in engine.seen[1:]:
         text = _contents([request])
-        assert "<task-state>" not in text
+        assert "<task-state>" in text
         assert "<plan-mode>" not in text
 
 
