@@ -238,8 +238,14 @@ class TurnPolicy:
         # M1 audit fix: token exhaustion must not burn a C3 continuation.  The
         # gate is computed once and guards the continuation below; the reason
         # precedence for the plain ladder (iteration first) is unchanged.
-        token_gate = bool(self.config.max_turn_tokens) and (
-            snapshot.tokens_spent >= self.config.max_turn_tokens
+        # C-3: plan execution (``plan_implementing``) has no token budget
+        # either -- it is bounded by the turn clock and its own structural
+        # continuation, not by a hidden spend cap.  Plan mode keeps its
+        # existing token gate.
+        token_gate = (
+            bool(self.config.max_turn_tokens)
+            and snapshot.tokens_spent >= self.config.max_turn_tokens
+            and not snapshot.plan_implementing
         )
         # C-3: a codex implementation turn has no ceiling -- Codex's turn
         # is bounded by its own structural continuation, not by a step count.
@@ -385,7 +391,12 @@ class TurnPolicy:
         return TaskInjection(instructions=instructions, message=block)
 
     def budget_pressure(
-        self, *, iteration: int, tokens_spent: int, mode: str = "normal"
+        self,
+        *,
+        iteration: int,
+        tokens_spent: int,
+        mode: str = "normal",
+        plan_implementing: bool = False,
     ) -> str | None:
         """A note to the model when the turn's budget is nearly gone (G8-1).
 
@@ -400,14 +411,19 @@ class TurnPolicy:
         Returns ``None`` when there is nothing true to say -- a healthy budget,
         a turn that is already past its cap (the decision ladder owns that), an
         unlimited token budget, where warning about a ceiling that does not
-        exist would be a lie the model acts on, or a plan turn (``mode ==
-        "plan"``), which has no step ceiling at all.  A plan turn's configured
-        token budget still stops it; this only suppresses the step-share note.
+        exist would be a lie the model acts on, or a plan turn / plan execution
+        (``mode == "plan"`` or ``plan_implementing``), which have no step or
+        token budget at all.  A planning turn's configured token budget still
+        stops it; plan execution has neither ceiling, so any note here would
+        describe a cap that does not exist.
         """
         # P0b-fix-plan-budget: a plan turn has no step ceiling at all, so the
         # step-share of this block would describe a cap that does not exist.
         # Its real bounds are the turn clock and context compression.
-        if mode == "plan":
+        # C-3: the codex plan *execution* turn (``plan_implementing``) has no
+        # step or token budget either; warning it would make the model stop
+        # early on a global max_iterations it does not actually inherit.
+        if plan_implementing or mode == "plan":
             return None
         parts: list[str] = []
         if 0 < iteration <= self.config.max_iterations:

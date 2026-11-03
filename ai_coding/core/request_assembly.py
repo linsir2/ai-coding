@@ -452,6 +452,9 @@ class RequestAssembler:
             iteration=index,
             tokens_spent=self._reporter.tokens_spent(),
             mode=str(getattr(session, "mode", "normal") or "normal"),
+            # C-3: plan execution has no step/token budget, so the note would
+            # describe a cap the turn does not inherit.
+            plan_implementing=bool(getattr(session, "plan_implementing", False)),
         )
         # M2: recommend skills based on current context (after task, before hook).
         recommended_skills_block = ""

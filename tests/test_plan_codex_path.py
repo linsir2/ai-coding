@@ -216,7 +216,13 @@ def _assembler() -> RequestAssembler:
     )
 
 
-async def _assemble(assembler: RequestAssembler, session: SessionData, task: TaskState):
+async def _assemble(
+    assembler: RequestAssembler,
+    session: SessionData,
+    task: TaskState,
+    *,
+    index: int = 1,
+):
     return await assembler.assemble(
         session=session,
         task=task,
@@ -224,7 +230,7 @@ async def _assemble(assembler: RequestAssembler, session: SessionData, task: Tas
         turn_number=1,
         hook_context="",
         deadline=None,
-        index=1,
+        index=index,
         previous_request=None,
     )
 
@@ -258,6 +264,26 @@ async def test_codex_implementing_turn_carries_no_task_block():
     bodies = "\n".join(message.content or "" for message in assembled.request)
     assert "<task-state>" not in bodies
     assert "<plan-mode>" not in bodies
+
+
+@pytest.mark.asyncio
+async def test_codex_implementing_turn_gets_no_budget_pressure_at_step_twelve():
+    """C-3: the implementation turn runs with ``mode == "normal"``; without the
+    ``plan_implementing`` signal the assembler injected "步数 12/15" and the
+    model wrapped up early on a cap this turn does not inherit."""
+    session = SessionData(session_id="s1", title="", created_time="", last_access_time="")
+    session.agent = "build"
+    session.plan_implementing = True
+    assembler = _assembler()
+    assembler._policy = TurnPolicy(  # noqa: SLF001 - the config under test
+        TurnPolicyConfig(max_iterations=15)
+    )
+
+    assembled = await _assemble(assembler, session, _task(), index=12)
+
+    bodies = "\n".join(message.content or "" for message in assembled.request)
+    assert "[budget]" not in bodies
+    assert "12/15" not in bodies
 
 
 # ------------------------------------------------------- 6. /plan run posture

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import re
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -48,6 +49,17 @@ _MAX_TIMEOUT_SECONDS = 600
 # The dispatcher's per-call ceiling sits above the command timeout so the runner
 # (not the budget watchdog) is what normally stops a runaway command.
 _TIMEOUT_GRACE = 15.0
+
+#: M-D2: DNS/connection failures inside the process sandbox are the network
+#: wall, not the host's DNS.  The model otherwise reads pip's raw
+#: ``NameResolutionError``, retries every mirror, and burns a turn on a
+#: problem it cannot fix from inside the netns.
+_NETWORK_FAILURE_RE = re.compile(
+    r"(Failed to resolve|NameResolutionError|Temporary failure in name resolution|"
+    r"getaddrinfo|Could not resolve|dns error|ENOTFOUND|EAI_AGAIN|"
+    r"Network is unreachable|Name or service not known)",
+    re.IGNORECASE,
+)
 
 
 class _LogTail:
@@ -173,7 +185,35 @@ class BashTool(BaseTool):
             f"Output is truncated after {self._max_output} characters. "
             "A command that outlives the turn should go to the background "
             "(run_in_background), where you are notified when it finishes -- "
-            "do not poll it and do not sleep waiting for it."
+            "do not poll it and do not sleep waiting for it. "
+            "Commands run in the process sandbox; when it reports network "
+            "mode deny/proxy, DNS and connection failures are the sandbox "
+            "wall, not the host network -- do not retry other mirrors. "
+            "Ask the user to configure process_sandbox.network or run the "
+            "install outside the sandbox."
+        )
+
+    def _sandbox_network_note(self, output: str) -> str | None:
+        """Explain a DNS/connection failure when the sandbox owns the wall."""
+        mode = str(getattr(self._backend, "network_mode", "off") or "off")
+        if mode == "off" or not _NETWORK_FAILURE_RE.search(output):
+            return None
+        if mode == "proxy":
+            detail = (
+                "network.mode=proxy 只放行 process_sandbox.network.allow "
+                "里的域名；先确认 pypi.org 和 files.pythonhosted.org 在 allow 中"
+            )
+        else:
+            detail = (
+                "network.mode=deny 用 --unshare-net 切断了 DNS/TCP；"
+                "需要联网请把 process_sandbox.network.mode 设为 proxy "
+                "并在 allow 中加入 pypi.org、files.pythonhosted.org，"
+                "或设为 off"
+            )
+        return (
+            f"[sandbox] 这不是主机 DNS 故障：命令运行在 ai-coding 的 "
+            f"process_sandbox 中（{detail}）。不要反复更换 PyPI 镜像重试；"
+            "请让用户在配置中放行网络，或由用户在沙箱外的终端执行安装。"
         )
 
     @property
@@ -584,6 +624,9 @@ class BashTool(BaseTool):
             )
 
         output = (outcome.stdout + outcome.stderr) if outcome.stderr else outcome.stdout
+        network_note = self._sandbox_network_note(output)
+        if network_note is not None:
+            output = f"{output}\n\n{network_note}" if output else network_note
         data: dict[str, Any] = {
             "exit_code": outcome.returncode,
             "timed_out": outcome.timed_out,
@@ -593,6 +636,11 @@ class BashTool(BaseTool):
             # and every other key are untouched.
             "timeout_seconds": effective,
         }
+        if network_note is not None:
+            data["sandbox_network"] = str(
+                getattr(self._backend, "network_mode", "off") or "off"
+            )
+            data["network_blocked"] = True
 
         if outcome.timed_out:
             # Partial output is kept: it often says where the command got stuck.

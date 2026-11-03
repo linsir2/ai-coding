@@ -94,6 +94,9 @@ interface Stats {
   turnCount?: number
   createdTime?: string
   budget?: BudgetFigures | null
+  /** P0: the live turn fact; absent key = old backend -> no sync. */
+  running?: boolean
+  turnId?: number
 }
 
 export function Session(props: SessionProps) {
@@ -155,6 +158,15 @@ export function Session(props: SessionProps) {
         // has a truth to read rather than a stale poll.
         ...(typeof readonly === "boolean" ? { readonly } : {}),
       })
+      const running = (fetchedStats as { running?: unknown } | null)?.running
+      const turnId = (fetchedStats as { turnId?: unknown } | null)?.turnId
+      if (running === true) {
+        apply({
+          kind: "busy-synced",
+          running: true,
+          ...(typeof turnId === "number" && turnId > 0 ? { turnId } : {}),
+        })
+      }
     } catch {
       /* the sidebar keeps the last known numbers; the next turn retries */
     }
@@ -188,6 +200,10 @@ export function Session(props: SessionProps) {
     void props.client
       .request(method, payload)
       .then((ack: unknown) => {
+        // A mid-turn prompt is a steer: the line already joined the run and
+        // ``submitted`` drew its echo, so turnId 0 must not register a local
+        // turn (it names no turn) and no queue is started here.
+        if ((ack as { steered?: unknown } | null)?.steered === true) return
         // D7: the ack names the turn this request started; its terminal event
         // will name it too.  Registering the id here is what lets the reducer
         // tell this ending from an older turn's.

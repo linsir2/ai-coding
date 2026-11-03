@@ -53,7 +53,10 @@ class WriteTool(BaseTool):
     def description(self) -> str:
         return (
             "Write content to a file, overwriting if it exists. "
-            "Parent directories are created automatically. "
+            "Each call writes exactly one file. Multiple write calls in one "
+            "message are executed sequentially, never in parallel, and each may "
+            "require separate approval. Parent directories are created "
+            "automatically. "
             "You MUST read the file first before overwriting it (stale-read protection). "
             f"For a file larger than {MAX_CHUNK_CHARS} characters, write the first "
             "chunk with mode='overwrite' and append the remaining chunks with "

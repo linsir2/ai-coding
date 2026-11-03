@@ -160,6 +160,24 @@ class _SlowLoop(_FakeLoop):
         return ""
 
 
+class _GateLoop(_FakeLoop):
+    """A turn that stays live until the test releases it, then completes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def process_input(self, session, user_input, on_delta=None, observer=None, **kwargs):
+        self.calls.append(
+            {"session": session, "text": user_input, "on_delta": on_delta, "observer": observer}
+        )
+        await self.release.wait()
+        observer.on_event(
+            TurnFinished(outcome=TurnOutcome(status=TurnStatus.COMPLETED, text="done"))
+        )
+        return "done"
+
+
 class _BrokenLoop(_FakeLoop):
     """A turn that dies outside the loop's own error handling."""
 
@@ -1009,6 +1027,129 @@ async def test_session_prompt_requires_initialize(ipc):
 
 
 @pytest.mark.asyncio
+async def test_a_prompt_while_running_steers_text_instead_of_opening_a_turn(ipc):
+    """A plain line typed during a live turn is a next-step row, not a second
+    turn: the workspace is already running, and the loop drains the row at its
+    next iteration boundary."""
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop = _GateLoop()
+    first = client.request("session.prompt", {"text": "slow"})
+    assert first["turnId"] == 1
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+
+    second = client.request("session.prompt", {"text": "先看测试"})
+
+    assert second == {
+        "turnId": 0,
+        "sessionId": first["sessionId"],
+        "steered": True,
+        "pending": 1,
+        "rejected": [],
+    }
+    rows = _inbox_rows(client)
+    assert len(rows) == 1 and rows[0]["target"] == "next-step"
+    assert rows[0]["text"] == "先看测试"
+    assert [call["text"] for call in world.loop.calls] == ["slow"]
+
+    world.loop.release.set()
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert await client.wait_for(
+        lambda: client.request("session.stats")["running"] is False
+    )
+    assert [event["type"] for event in client.events].count("turn.finished") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_with_an_image_while_running_is_rejected_not_saved(ipc, tmp_path):
+    """Images have no mid-turn path: accepting one would either drop it or open
+    a second turn, so the ack names the picture and says to wait."""
+    import base64
+
+    from tests.integration.test_r17_dataflow import PNG_1PX
+
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop = _GateLoop()
+    client.request("session.prompt", {"text": "slow"})
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+    png = base64.b64encode(PNG_1PX).decode()
+
+    ack = client.request(
+        "session.prompt",
+        {
+            "text": "看这个",
+            "images": [{"name": "shot.png", "data_url": f"data:image/png;base64,{png}"}],
+        },
+    )
+
+    assert ack["turnId"] == 0
+    assert ack["steered"] is False
+    assert ack["pending"] == 0
+    assert len(ack["rejected"]) == 1
+    assert ack["rejected"][0]["name"] == "shot.png"
+    assert "运行" in ack["rejected"][0]["reason"]
+    assert list(tmp_path.rglob("shot.png")) == []
+    assert [call["text"] for call in world.loop.calls] == ["slow"]
+
+    world.loop.release.set()
+    assert await client.wait_for(client.turn_finished.is_set)
+
+
+@pytest.mark.asyncio
+async def test_a_command_while_running_is_rejected_not_queued(ipc):
+    """Commands keep their own path and are never silently steered as text."""
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop = _GateLoop()
+    client.request("session.prompt", {"text": "slow"})
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+
+    ack = client.request("session.prompt", {"text": "/help"})
+
+    assert ack["turnId"] == 0
+    assert ack["steered"] is False
+    assert ack["pending"] == 0
+    assert len(ack["rejected"]) == 1
+    assert ack["rejected"][0]["name"] == "输入"
+    assert "命令" in ack["rejected"][0]["reason"]
+    assert _inbox_rows(client) == []
+    assert [call["text"] for call in world.loop.calls] == ["slow"]
+
+    world.loop.release.set()
+    assert await client.wait_for(client.turn_finished.is_set)
+
+
+@pytest.mark.asyncio
+async def test_load_and_stats_report_the_live_turn(ipc):
+    """``running`` is the live fact; ``openTurn`` is only the crash marker."""
+    world, _service, client = ipc
+    client.request("initialize")
+    session_id = client.request("session.create", {"title": "live"})["id"]
+    client.request("session.load", {"id": session_id})
+    world.loop = _GateLoop()
+    ack = client.request("session.prompt", {"text": "slow", "id": session_id})
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+
+    loaded = client.request("session.load", {"id": session_id})
+    stats = client.request("session.stats")
+
+    assert loaded["running"] is True
+    assert loaded["turnId"] == ack["turnId"]
+    assert stats["running"] is True
+    assert stats["turnId"] == ack["turnId"]
+
+    world.loop.release.set()
+    assert await client.wait_for(client.turn_finished.is_set)
+    assert await client.wait_for(
+        lambda: client.request("session.stats")["running"] is False
+    )
+
+    assert client.request("session.stats")["running"] is False
+    assert client.request("session.stats")["turnId"] == 0
+
+
+@pytest.mark.asyncio
 async def test_interrupt_cancels_running_turn(ipc):
     world, _service, client = ipc
     client.request("initialize")
@@ -1293,6 +1434,8 @@ async def test_session_stats_without_usage(ipc):
         "agent": "build",
         "turnCount": 0,
         "budget": None,  # no recorder in this world: tracing is off
+        "running": False,
+        "turnId": 0,
     }
 
 
@@ -1318,6 +1461,8 @@ async def test_session_stats_reports_last_turn_prompt_tokens(ipc):
         "agent": "build",
         "turnCount": 0,
         "budget": None,
+        "running": False,
+        "turnId": 0,
     }
 
 
@@ -1394,6 +1539,8 @@ async def test_session_stats_reports_the_posture(ipc):
         "agent": "plan",
         "turnCount": 0,
         "budget": None,
+        "running": False,
+        "turnId": 0,
     }
 
 

@@ -725,6 +725,20 @@ describe("turn lifecycle", () => {
     })
   })
 
+  test("stats running true fills in a busy the client missed", () => {
+    const synced = feed(initialState(), { kind: "busy-synced", running: true, turnId: 3 })
+    expect(synced.busy).toBe(true)
+    expect(synced.turnId).toBe(3)
+  })
+
+  test("stats running false never clears a local turn's busy", () => {
+    const local = feed(initialState(), { kind: "submitted", text: "hi" }, { kind: "turn-started", turnId: 5 })
+    const synced = feed(local, { kind: "busy-synced", running: false })
+    expect(synced).toBe(local)
+    expect(synced.busy).toBe(true)
+    expect(synced.turnId).toBe(5)
+  })
+
   test("a notice arriving with no messages yet opens an assistant message", () => {
     const state = feed(initialState(), wire("provider.retried", { kind: "x", attempt: 1, delaySeconds: 2, reason: "" }))
     expect(state.messages).toHaveLength(1)

@@ -87,6 +87,26 @@ def test_a_plan_turn_has_no_step_ceiling():
     assert exhausted.reason == "turn token budget exhausted"
 
 
+def test_plan_implementing_ignores_the_turn_token_budget():
+    """C-3: plan execution has no token ceiling either.  The global
+    ``max_turn_tokens`` must not silently hard-stop it; ordinary turns keep
+    the gate unchanged."""
+    policy = TurnPolicy(_config(max_iterations=15, max_turn_tokens=10_000))
+
+    implementing = policy.decide_next_iteration(
+        TurnSnapshot(
+            iteration=50, plan_implementing=True, tokens_spent=10_000
+        )
+    )
+    assert implementing.action is TurnAction.ITERATE
+
+    normal = policy.decide_next_iteration(
+        TurnSnapshot(iteration=1, tokens_spent=10_000)
+    )
+    assert normal.action is TurnAction.FINISH
+    assert normal.reason == "turn token budget exhausted"
+
+
 # ---- after a model step ----------------------------------------------------
 
 
@@ -330,6 +350,24 @@ def test_plan_mode_gets_no_budget_pressure():
     normal = policy.budget_pressure(iteration=9, tokens_spent=0, mode="normal")
     assert normal is not None
     assert "9/10" in normal
+
+
+def test_plan_implementing_gets_no_budget_pressure():
+    """C-3: the codex plan execution turn has no step or token ceiling, so a
+    step-share note would describe a cap it does not inherit.  Ordinary turns
+    at the same iteration still receive it."""
+    policy = TurnPolicy(TurnPolicyConfig(max_iterations=15))
+
+    assert (
+        policy.budget_pressure(
+            iteration=12, tokens_spent=0, plan_implementing=True
+        )
+        is None
+    )
+
+    normal = policy.budget_pressure(iteration=12, tokens_spent=0, mode="normal")
+    assert normal is not None
+    assert "12/15" in normal
 
 
 def test_the_last_iteration_is_not_announced_as_available():

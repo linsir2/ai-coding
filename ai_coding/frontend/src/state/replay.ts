@@ -284,6 +284,10 @@ export function messagesToState(
 export interface RecoveryFacts {
   recoveredInterrupted?: boolean
   openTurn?: number
+  /** The live fact: a turn is executing right now (not the crash marker). */
+  running?: boolean
+  /** The live turn's id; 0/absent means nothing is running. */
+  turnId?: number
   pendingApproval?: { toolName?: string; params?: Record<string, unknown> } | null
 }
 
@@ -347,6 +351,13 @@ export async function loadSession(client: IpcClient, id: string): Promise<Sessio
   if (note) state.messages.unshift({ role: "assistant", parts: [note] })
   if (data.task && Array.isArray(data.task["items"]) && data.task["items"].length > 0) {
     state = applyPlanUpdate(state, data.task)
+  }
+  // ``openTurn`` is a crash marker on disk; only ``running`` proves a turn is
+  // live.  A replay that ignored it showed a free composer over a working
+  // session, so the next submission opened a second turn.
+  if (data.running === true) {
+    const turnId = typeof data.turnId === "number" && data.turnId > 0 ? data.turnId : undefined
+    state = { ...state, busy: true, ...(turnId !== undefined ? { turnId } : {}) }
   }
   return state
 }

@@ -256,6 +256,24 @@ describe("loadSession", () => {
     expect(state.messages).toHaveLength(1)
     expect(state.messages[0]!.parts[0]!.kind).toBe("text")
   })
+
+  test("a live turn makes the replay busy and keeps its turn id", async () => {
+    const state = await loadSession(
+      client({ messages: [{ role: "user", content: "hi" }], running: true, turnId: 3 }),
+      "s1",
+    )
+    expect(state.busy).toBe(true)
+    expect(state.turnId).toBe(3)
+  })
+
+  test("no live turn leaves the replay idle", async () => {
+    const state = await loadSession(
+      client({ messages: [{ role: "user", content: "hi" }], running: false, turnId: 3 }),
+      "s1",
+    )
+    expect(state.busy).toBe(false)
+    expect(state.turnId).toBeUndefined()
+  })
 })
 
 describe("resume", () => {

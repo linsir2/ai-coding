@@ -326,6 +326,19 @@ def make_handlers(
     """Build the request table bound to one world + one service."""
     state = _WorldState()
     bridge = EventBridge(lambda method, params: service.notify(method, params))
+
+    def _turn_in_flight() -> bool:
+        """Whether a turn is actually running, not merely still in the set.
+
+        A finished future can sit in ``turn_futures`` until its done callback
+        runs; treating the set as a boolean would call that session busy.
+        """
+        return any(not future.done() for future in list(state.turn_futures))
+
+    def _live_turn_id() -> int:
+        """The live turn id, or 0 when nothing is running."""
+        return state.turn_id if _turn_in_flight() else 0
+
     _install_providers(world, service, get_session=lambda: state.session)
     # M3: MCP state changes are wire events too, so the dialog does not have to
     # poll a manager that reconnects on its own.  Attached here because this is
@@ -529,6 +542,10 @@ def make_handlers(
             "messages": [_message_to_dict(m) for m in session.messages],
             "recoveredInterrupted": bool(session.recovered_interrupted),
             "openTurn": int(session.open_turn or 0),
+            # The live fact, not the crash marker: a session can have an open
+            # turn on disk while nothing is executing (and vice versa).
+            "running": _turn_in_flight(),
+            "turnId": _live_turn_id(),
             "pendingApproval": dict(session.pending_approval or {}),
             # P5 (18 §10.5): same two posture keys as session.stats, always.
             "mode": str(getattr(session, "mode", "normal") or "normal"),
@@ -753,11 +770,58 @@ def make_handlers(
             # Loading other sessions is the sessions dialog's job (M3); running
             # the *current* session under a foreign id would be silent data loss.
             raise ValueError(f"session not loaded: {session_id}")
+        images_param = params.get("images", []) or []
+        # A working session already has a turn reading and writing this object;
+        # opening a second one interleaves both.  Text is a steer (the loop
+        # drains it at its next boundary), while images and commands have no
+        # mid-turn path and are refused with the reason rather than queued
+        # silently.
+        if _turn_in_flight():
+            if images_param:
+                name = "图片"
+                for item in images_param:
+                    if isinstance(item, dict) and str(item.get("name", "") or ""):
+                        name = str(item["name"])
+                        break
+                return {
+                    "turnId": 0,
+                    "sessionId": session_id,
+                    "steered": False,
+                    "pending": _next_step_count(session),
+                    "rejected": [
+                        {
+                            "name": name,
+                            "reason": "工作区正在运行，不能中途发送图片；请等本轮结束后再发送",
+                        }
+                    ],
+                }
+            stripped = text.strip()
+            if stripped and not stripped.startswith("/"):
+                _queue_next_step(session, stripped)
+                return {
+                    "turnId": 0,
+                    "sessionId": session_id,
+                    "steered": True,
+                    "pending": _next_step_count(session),
+                    "rejected": [],
+                }
+            return {
+                "turnId": 0,
+                "sessionId": session_id,
+                "steered": False,
+                "pending": _next_step_count(session),
+                "rejected": [
+                    {
+                        "name": "输入",
+                        "reason": "工作区正在运行，命令或空输入未提交；请等本轮结束后再输入",
+                    }
+                ],
+            }
         # r17/T5: clipboard images arrive as data URLs; they are written under
         # the workspace once and the message references the file.
         images: list[Any] = []
         rejected: list[dict[str, str]] = []
-        for item in params.get("images", []) or []:
+        for item in images_param:
             if not isinstance(item, dict):
                 continue
             saved = save_data_url(
@@ -869,6 +933,24 @@ def make_handlers(
         length meant to the composer."""
         return sum(1 for item in session.inbox if item.target == "next-step")
 
+    def _queue_next_step(session: Any, text: str) -> bool:
+        """Write one next-step row; False for the two inputs steering refuses.
+
+        Shared by ``session.steer`` and the mid-turn branch of
+        ``session.prompt`` so the text rules cannot drift apart.
+        """
+        text = text.strip()
+        if not text or text.startswith("/"):
+            return False
+        session.inbox.append(
+            InboxItem(
+                id=uuid.uuid4().hex[:8], text=text, target="next-step",
+                created_at=now_utc(),
+            )
+        )
+        _persist_session(world, session)
+        return True
+
     def session_steer(params: dict[str, Any]) -> dict[str, Any]:
         """steering 前端化: a line typed mid-turn goes to the run, not the queue.
 
@@ -882,17 +964,8 @@ def make_handlers(
         session = state.session
         if session is None:
             raise ValueError("no session initialized")
-        text = str(params.get("text", "") or "").strip()
-        if not text or text.startswith("/"):
-            return {"accepted": False, "pending": _next_step_count(session)}
-        session.inbox.append(
-            InboxItem(
-                id=uuid.uuid4().hex[:8], text=text, target="next-step",
-                created_at=now_utc(),
-            )
-        )
-        _persist_session(world, session)
-        return {"accepted": True, "pending": _next_step_count(session)}
+        accepted = _queue_next_step(session, str(params.get("text", "") or ""))
+        return {"accepted": accepted, "pending": _next_step_count(session)}
 
     def session_command(params: dict[str, Any]) -> dict[str, Any]:
         """Run a slash command through the REPL dispatcher (A1).
@@ -1540,6 +1613,9 @@ def make_handlers(
             "turnCount": int(getattr(session, "turn_count", 0) or 0),
             "createdTime": str(getattr(session, "created_time", "") or ""),
             "budget": _session_budget(session),
+            # Same live facts as session.load, from the same helper.
+            "running": _turn_in_flight(),
+            "turnId": _live_turn_id(),
         }
 
     def session_agents(params: dict[str, Any]) -> dict[str, Any]:

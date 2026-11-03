@@ -2,9 +2,10 @@
  * Selection-aware ctrl+c: copy what is selected, otherwise quit.
  *
  * The renderer owns the selection (mouse-drag or an editor's own range), so
- * this is the one place that reads it.  Copy failures are never fatal: a
- * terminal without a host clipboard still gets the OSC52 fallback, and even
- * that failing leaves the app running.
+ * this is the one place that reads it.  The terminal's OSC52 path runs first
+ * because the native clipboard can hang (measured: a 2s timeout under a VS
+ * Code terminal); the host clipboard is the fallback.  Copy failures are never
+ * fatal: even both paths failing leaves the app running.
  */
 
 import {
@@ -64,8 +65,14 @@ async function writeBestAvailable(renderer: SelectionRenderer, text: string): Pr
 /**
  * Copy when there is a selection; otherwise exit.
  *
- * ``write`` is injectable for tests.  A ``false`` result or a rejected write
- * falls back to OSC52 and then gives up — it never calls ``exit``.
+ * ``write`` is injectable for tests.  The real path tries OSC52 first: the
+ * host clipboard backend can hang (measured: 2s timeout under a VS Code
+ * terminal), and a user who pastes immediately would get the old clipboard.
+ * OSC52 is a single terminal escape sequence and is the fast path in a TUI;
+ * the host backend is the fallback for terminals that do not support it.
+ *
+ * A ``false`` result or a rejected write falls back to the other clipboard
+ * path and then gives up — it never calls ``exit``.
  */
 export async function copyOrExit(
   renderer: SelectionRenderer,
@@ -76,6 +83,16 @@ export async function copyOrExit(
   if (text.length === 0) {
     exit()
     return
+  }
+
+  // A test-injected writer keeps the old ordering (so tests can exercise the
+  // fallback deterministically).  Production goes terminal-first.
+  if (write === undefined) {
+    try {
+      if (renderer.copyToClipboardOSC52?.(text)) return
+    } catch {
+      /* fall through to the host clipboard */
+    }
   }
 
   let copied = false

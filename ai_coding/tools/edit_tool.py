@@ -39,7 +39,8 @@ class EditTool(BaseTool):
     def description(self) -> str:
         return (
             "Replace an exact string in a file. The old_string must appear exactly once "
-            "unless replace_all is True. You MUST read the file first (stale-read protection)."
+            "unless replace_all is True. You MUST read the file first (stale-read protection). "
+            "Edit calls run one at a time and may each require separate approval."
         )
 
     @property

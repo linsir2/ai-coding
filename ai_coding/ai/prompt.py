@@ -48,7 +48,9 @@ BASE_INSTRUCTIONS = (
 #: Habits that belong to no single tool: they survive any surface.
 GENERAL_METHODS: tuple[str, ...] = (
     "Read before write: never edit a file you have not read this turn.",
-    "Declare parallel-safe tool calls truthfully; independent reads may batch.",
+    "Declare parallel-safe tool calls truthfully: independent read-only calls "
+    "may batch, but write/edit calls run one at a time and may each need "
+    "approval; never claim to create files in parallel.",
     "When blocked after two attempts, ask the user instead of repeating the same call.",
     "Verify the change (run the relevant test/command) before reporting it done.",
 )
@@ -66,7 +68,12 @@ TOOL_GUIDANCE: dict[str, tuple[str, ...]] = {
     ),
     "glob": ("Use glob — not shell find — to discover files by path pattern.",),
     "grep": ("Use grep — not shell grep or rg — to search file contents.",),
-    "write": ("Write replaces a whole file; prefer edit for a targeted change.",),
+    "write": (
+        "One write call writes one file; multiple write calls in one message "
+        "run sequentially, may each need approval, and are never parallel. "
+        "Prefer edit for a targeted change.",
+    ),
+    "edit": ("Edit calls also run one at a time and may each need approval.",),
     "update_plan": (
         "While implementing an approved plan, keep it accurate by resending the "
         "whole list with each step's status (pending/in_progress/completed); "

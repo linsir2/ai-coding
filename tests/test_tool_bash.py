@@ -549,3 +549,32 @@ async def test_a_promoted_command_does_send_its_notice(tmp_path):
 
     assert notices.pending() == 1, "a promoted command must announce its ending"
     assert job_id in notices.lines[0]
+
+
+@pytest.mark.asyncio
+async def test_bash_explains_a_sandbox_network_wall(tmp_path: Path):
+    """M-D2: DNS errors inside the sandbox are not host DNS failures.
+
+    The model used to see pip's raw ``Failed to resolve`` line, retry every
+    mirror, and burn the turn on a wall it cannot change from inside the
+    netns.  The tool now names the wall and the config knob.
+    """
+    from types import SimpleNamespace
+
+    tool = BashTool(backend=SimpleNamespace(network_mode="deny"))
+    result = await tool.execute(
+        {
+            "command": (
+                "printf \"WARNING: Failed to resolve 'pypi.org' ([Errno -3] "
+                'Temporary failure in name resolution)\\n"; exit 1'
+            )
+        },
+        ToolContext(workspace=str(tmp_path)),
+    )
+
+    assert result.success is False
+    assert "不是主机 DNS 故障" in result.output
+    assert "process_sandbox" in result.output
+    assert result.data is not None
+    assert result.data["sandbox_network"] == "deny"
+    assert result.data["network_blocked"] is True

@@ -15,6 +15,15 @@ def setup(tmp_path):
     return tmp_path, sb, fst, tool
 
 
+def test_write_description_states_one_file_per_call_and_serial_approval(setup):
+    _, _, _, tool = setup
+    description = tool.description
+    assert "Each call writes exactly one file" in description
+    assert "executed sequentially" in description
+    assert "never in parallel" in description
+    assert "separate approval" in description
+
+
 @pytest.mark.asyncio
 async def test_write_creates_file(setup):
     tmp_path, sb, fst, tool = setup

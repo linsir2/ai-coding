@@ -312,6 +312,43 @@ async def test_a_plan_turn_gets_no_pressure_block():
 
 
 @pytest.mark.asyncio
+async def test_a_plan_implementing_turn_gets_no_pressure_block_late_in_the_turn():
+    """C-3: execution runs with ``mode == "normal"`` on the codex path, so the
+    global step cap used to inject "步数 12/15" at step 12 and make the model
+    wrap up early.  Plan execution has no step/token budget."""
+    assembler, parts = _assembler()
+    assembler._policy = TurnPolicy(  # noqa: SLF001 - the config under test
+        TurnPolicyConfig(max_iterations=15)
+    )
+    session = _session()
+    session.plan_implementing = True
+
+    assembled = await _assemble(assembler, session=session, index=12)
+
+    budget = [m for m in assembled.request if (m.content or "").startswith("[budget]")]
+    assert not budget
+    names = [name for name, _size in parts["reporter"].calls[-1]["tail_blocks"]]
+    assert "budget" not in names
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_turn_still_gets_pressure_at_the_same_step():
+    """The plan-execution exemption must not leak into ordinary turns."""
+    assembler, parts = _assembler()
+    assembler._policy = TurnPolicy(  # noqa: SLF001 - the config under test
+        TurnPolicyConfig(max_iterations=15)
+    )
+
+    assembled = await _assemble(assembler, index=12)
+
+    budget = [m for m in assembled.request if (m.content or "").startswith("[budget]")]
+    assert len(budget) == 1
+    assert "12/15" in budget[0].content
+    names = [name for name, _size in parts["reporter"].calls[-1]["tail_blocks"]]
+    assert "budget" in names
+
+
+@pytest.mark.asyncio
 async def test_a_healthy_turn_gets_no_pressure_block():
     """Heavy-handed pressure on every request would teach the model to ignore
     it, and would spend tail tokens on every iteration to say nothing."""

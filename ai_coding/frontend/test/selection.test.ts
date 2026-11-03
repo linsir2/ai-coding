@@ -52,6 +52,16 @@ describe("copyOrExit", () => {
     expect(exits).toBe(0)
   })
 
+  test("tries OSC52 before the host clipboard", async () => {
+    const target = renderer("selected")
+    let exits = 0
+
+    await copyOrExit(target, () => void (exits += 1))
+
+    expect(target.osc52).toEqual(["selected"])
+    expect(exits).toBe(0)
+  })
+
   test("an empty selection still exits", async () => {
     let exits = 0
     let writes = 0

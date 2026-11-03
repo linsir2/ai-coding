@@ -198,6 +198,9 @@ export type Action =
   // command's own terminal "turn.finished" is what frees the composer
   // again -- the same contract a typed command has always had.
   | { kind: "command-started" }
+  // The stats poll learned a turn is live (an ack/event may have been missed).
+  // Only ever fills in `busy`; false is not authoritative for a local turn.
+  | { kind: "busy-synced"; running: boolean; turnId?: number }
   /** D7: the backend named the turn this request just started (the ack). */
   | { kind: "turn-started"; turnId: number }
   | { kind: "queued"; id: string; text: string }
@@ -990,6 +993,17 @@ export function reduce(state: SessionState, action: Action): SessionState {
       return { ...state, busy: true }
     case "command-started":
       return { ...state, busy: true }
+    case "busy-synced":
+      // A local turn already owns busy: a stale poll must not clear it or
+      // rename its turn.  Only the "I found a live turn" direction lands.
+      if (!action.running || state.busy) return state
+      return {
+        ...state,
+        busy: true,
+        ...(action.turnId !== undefined && action.turnId > 0
+          ? { turnId: action.turnId }
+          : {}),
+      }
     case "turn-started":
       if (action.turnId === state.orphanTurnId) {
         // U-1: it already ended; the ack is merely late.

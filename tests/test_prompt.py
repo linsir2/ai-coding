@@ -1,6 +1,11 @@
 """TDD (M3-3): PromptAssembler — section ordering and conditional joins."""
 
-from ai_coding.ai.prompt import BASE_INSTRUCTIONS, METHODS_SECTION, PromptAssembler
+from ai_coding.ai.prompt import (
+    BASE_INSTRUCTIONS,
+    METHODS_SECTION,
+    TOOL_GUIDANCE,
+    PromptAssembler,
+)
 
 
 def _assembler() -> PromptAssembler:
@@ -173,7 +178,8 @@ def test_a_read_only_surface_drops_what_it_cannot_do():
 
     assert "not shell commands like cat" in out
     assert "exit status" not in out
-    assert "Write replaces a whole file" not in out
+    assert "One write call writes one file" not in out
+    assert "Edit calls also run one at a time" not in out
 
 
 def test_the_unpruned_text_still_carries_every_tool_row():
@@ -207,14 +213,36 @@ def test_tool_guidance_never_repeats_a_tool_description():
     assert "oldString" not in METHODS_SECTION
 
 
+def test_the_methods_section_separates_batchable_reads_from_serial_writes():
+    """P1 (build trace): the model narrated "parallel/batched" writes while every
+    step sent one write. The methods must say which calls may batch and which
+    are serial and separately approved."""
+    assert "independent read-only calls may batch" in METHODS_SECTION
+    assert "write/edit calls run one at a time" in METHODS_SECTION
+    assert "may each need approval" in METHODS_SECTION
+    assert "never claim to create files in parallel" in METHODS_SECTION
+
+    assert "independent reads may batch" not in METHODS_SECTION
+    assert "Declare parallel-safe tool calls truthfully; " not in METHODS_SECTION
+
+
+def test_the_write_guidance_says_calls_are_serial_and_approved_one_by_one():
+    write_rows = "\n".join(TOOL_GUIDANCE["write"])
+    assert "One write call writes one file" in write_rows
+    assert "run sequentially" in write_rows
+    assert "may each need approval" in write_rows
+    assert "never parallel" in write_rows
+
+
 def test_the_methods_section_stays_inside_its_budget():
     """Neither harness measures this (dsh has no counter at all; opencode has no
     cap), but this repo has already paid for a 556-character schema advertising
     a tool that was not connected. The section is ~2x today; the test is the
     tripwire that stops it becoming an order of magnitude.  C-5b added the
-    ``update_plan`` row (progress discipline for the Codex path), so the
-    budget moved from 900 to 1100 -- one row, not a new section."""
-    assert len(METHODS_SECTION) <= 1100, len(METHODS_SECTION)
+    ``update_plan`` row (progress discipline for the Codex path); P1 expanded
+    the parallel/write row and split write/edit guidance, so the budget moved
+    from 1100 to 1350 -- wording, not a new section."""
+    assert len(METHODS_SECTION) <= 1350, len(METHODS_SECTION)
 
 
 # ---- R20/RC-6: every claim needs an citation -------------------------------
