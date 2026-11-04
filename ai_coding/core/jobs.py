@@ -281,6 +281,7 @@ class JobRegistry:
         announce: bool = True,
         on_settle: Callable[[], None] | None = None,
         network: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> Job:
         """Spawn ``command`` and return immediately; the caller does not wait.
 
@@ -353,7 +354,7 @@ class JobRegistry:
                 stdout=handle,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
-                env={**os.environ, "AI_CODING_JOB": job_id},
+                env={**os.environ, **(env or {}), "AI_CODING_JOB": job_id},
                 # M-D2 §D.3: the seccomp filter is an inherited descriptor.
                 pass_fds=tuple(getattr(self._backend, "seccomp_fds", ())),
             )

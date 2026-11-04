@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import os
 import re
 import threading
 import time
@@ -331,6 +332,36 @@ class BashTool(BaseTool):
     def _effective_network(self, network: str | None = None) -> str:
         return str(network or getattr(self._backend, "network_mode", "off") or "off")
 
+    def _package_cache_env(self, ctx: ToolContext | None) -> dict[str, str]:
+        """Keep package-manager caches inside the writable workspace.
+
+        The process sandbox binds the host root read-only except the workspace
+        and ``process_sandbox.writable_paths`` (default ``~/.cache``).  pnpm's
+        store and npm's cache live under the home directory, so an install died
+        on ``mkdir ...: read-only file system`` before it ever reached the
+        registry.  Redirect the common managers at the process layer; this
+        fixes downloads without widening the sandbox's home write face.
+        """
+        workspace = Path(self._workspace_dir(ctx) or ".")
+        cache = workspace / ".ai-coding" / "cache"
+        tmp = workspace / ".ai-coding" / "tmp"
+        for directory in (cache, tmp):
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+        return {
+            "NPM_CONFIG_CACHE": str(cache / "npm"),
+            "npm_config_cache": str(cache / "npm"),
+            "pnpm_config_store_dir": str(cache / "pnpm-store"),
+            "PNPM_HOME": str(cache / "pnpm"),
+            "YARN_CACHE_FOLDER": str(cache / "yarn"),
+            "BUN_INSTALL_CACHE_DIR": str(cache / "bun"),
+            "PIP_CACHE_DIR": str(cache / "pip"),
+            "UV_CACHE_DIR": str(cache / "uv"),
+            "TMPDIR": str(tmp),
+        }
+
     def _foreground_child_note(
         self, command: str, network_mode: str = "deny"
     ) -> str | None:
@@ -410,16 +441,21 @@ class BashTool(BaseTool):
         of mirror roulette.  The workspace is the durable writable place -- ``/tmp``
         is a fresh tmpfs per bash call, so a cache there cannot survive.
         """
-        if not re.search(r"EROFS|EFBIG", output or ""):
+        if not re.search(
+            r"EROFS|EFBIG|只读文件系统|Read-only file system", output or ""
+        ):
             return None
         if not any(name in output for name in (".npm", "npm", "yarn", "pnpm", "bun")):
             return None
         return (
             "[sandbox] 这不是网络/DNS 故障：命令撞到的是沙箱的文件系统边界 "
-            "(EROFS/EFBIG)，不是 registry。请把包缓存放回工作区，例如：\n"
-            "  mkdir -p .ai-coding/cache/npm .ai-coding/tmp\n"
+            "(EROFS/EFBIG/只读文件系统)，不是 registry。请把包缓存放回工作区，例如：\n"
+            "  mkdir -p .ai-coding/cache/npm .ai-coding/cache/pnpm-store .ai-coding/tmp\n"
             "  export NPM_CONFIG_CACHE=$PWD/.ai-coding/cache/npm "
-            "TMPDIR=$PWD/.ai-coding/tmp\n"
+            "pnpm_config_store_dir=$PWD/.ai-coding/cache/pnpm-store "
+            "PNPM_HOME=$PWD/.ai-coding/cache/pnpm TMPDIR=$PWD/.ai-coding/tmp\n"
+            "pnpm 也可以显式传 --store-dir $PWD/.ai-coding/cache/pnpm-store；"
+            "PNPM_STORE_DIR 不是 pnpm 认的环境变量。\n"
             "不要用 /tmp 存跨命令缓存（每次 bash 调用的 /tmp 都是新的）；"
             "也不要把 /tmp 当作可复用的 HOME。"
         )
@@ -600,6 +636,7 @@ class BashTool(BaseTool):
                 session_id=context.session_id,
                 emit=context.emit,
                 network=network,
+                env={**os.environ, **self._package_cache_env(context)},
                 on_settle=_on_settle,
             )
         except JobLimitReached as exc:
@@ -694,6 +731,7 @@ class BashTool(BaseTool):
                 session_id=context.session_id,
                 emit=context.emit,
                 network=network,
+                env={**os.environ, **self._package_cache_env(context)},
                 # Silent while the caller is still waiting: the ToolResult carries
                 # the outcome.  Promotion turns it on, because from that moment the
                 # result has nobody but a notice to reach the model through.
@@ -988,6 +1026,7 @@ class BashTool(BaseTool):
             argv,
             shell=False,
             cwd=self._workspace_dir(ctx),
+            env={**os.environ, **self._package_cache_env(ctx)},
             timeout=effective,
             max_output_chars=self._max_output,
             on_chunk=_chunk,

@@ -830,3 +830,36 @@ def test_an_erofs_npm_cache_failure_says_it_is_filesystem_not_network():
 def test_an_erofs_on_an_unrelated_file_does_not_masquerade_as_a_package_cache_note():
     tool = BashTool()
     assert tool._sandbox_filesystem_note("cp: EROFS: /etc/config") is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_package_manager_caches_point_into_the_writable_workspace(tmp_path: Path):
+    """The sandbox root is read-only; pnpm/npm stores under $HOME would die
+    before the first network request.  Keep them inside the workspace."""
+    tool = BashTool()
+    result = await tool.execute(
+        {
+            "command": (
+                "printf '%s\\n' \"$NPM_CONFIG_CACHE\" \"$pnpm_config_store_dir\" "
+                "\"$PNPM_HOME\" \"$YARN_CACHE_FOLDER\" \"$BUN_INSTALL_CACHE_DIR\" "
+                "\"$PIP_CACHE_DIR\" \"$UV_CACHE_DIR\" \"$TMPDIR\""
+            )
+        },
+        ToolContext(workspace=str(tmp_path)),
+    )
+
+    assert result.success is True
+    paths = [line for line in result.output.splitlines() if line.startswith(str(tmp_path))]
+    assert len(paths) == 8
+    assert all("/.ai-coding/" in path for path in paths)
+
+
+def test_a_chinese_read_only_package_store_failure_is_diagnosed():
+    tool = BashTool()
+    note = tool._sandbox_filesystem_note(  # noqa: SLF001
+        "mkdir: 无法创建目录 '/home/u/.local/share/pnpm/store/v11': 只读文件系统\n"
+        "pnpm: ENOENT: no such file or directory, mkdir '.../store/v11'"
+    )
+    assert note is not None
+    assert "pnpm_config_store_dir" in note
+    assert "PNPM_STORE_DIR 不是" in note
